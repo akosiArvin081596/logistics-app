@@ -76,7 +76,7 @@
               </TableCell>
               <TableCell class="font-semibold text-[13px] text-gray-900 uppercase">{{ inv.driver }}</TableCell>
               <TableCell class="text-[12px] text-gray-600 whitespace-nowrap">{{ formatWeek(inv.week_start, inv.week_end) }}</TableCell>
-              <TableCell class="text-[13px] text-gray-600 text-right">{{ inv.loads_count }}</TableCell>
+              <TableCell class="text-[13px] text-gray-600 text-right">{{ invoiceLoadsCell(inv) }}</TableCell>
               <TableCell class="text-[13px] font-semibold text-emerald-700 text-right">
                 {{ dueText(inv.total_due) }}
                 <span v-if="hasAdjustment(inv)" :class="adjBadgeClass(inv)" :title="adjTooltip(inv)">
@@ -137,10 +137,12 @@
               <div class="meta-row"><span class="meta-label">Status</span><Badge :class="statusBadge(selectedInvoice.status)">{{ selectedInvoice.status }}</Badge></div>
               <div v-if="selectedInvoice.is_manual" class="meta-row">
                 <span class="meta-label">Type</span>
-                <span class="text-[12px]"><span class="manual-chip" style="margin-left:0;">Manual</span>{{ selectedInvoice.created_by ? ' by ' + selectedInvoice.created_by : '' }}</span>
+                <span class="text-[12px]"><span class="manual-chip" style="margin-left:0;">Manual</span>{{ selectedInvoice.created_by ? ' by ' + actorLabel(selectedInvoice.created_by) : '' }}</span>
               </div>
-              <div class="meta-row"><span class="meta-label">{{ selectedInvoice.is_manual ? 'Line items' : 'Loads' }}</span><span>{{ selectedInvoice.loads_count }}</span></div>
-              <div v-if="!selectedInvoice.is_manual" class="meta-row"><span class="meta-label">Rate / load</span><span>${{ fmtMoney(selectedInvoice.rate_per_load) }}</span></div>
+              <!-- What loads_count and rate_per_load hold, by the invoice's pay basis
+                   (lib/invoiceCounts.js): Days paid / Daily rate / Loads, Loads / Pay %,
+                   or Line items. -->
+              <div v-for="row in invoiceCountRows(selectedInvoice)" :key="row.label" class="meta-row"><span class="meta-label">{{ row.label }}</span><span>{{ row.value }}</span></div>
               <div class="meta-row"><span class="meta-label">{{ hasAdjustment(selectedInvoice) ? 'Computed' : 'Total earnings' }}</span><span class="font-semibold text-emerald-700">${{ fmtMoney(selectedInvoice.total_earnings) }}</span></div>
               <template v-if="hasAdjustment(selectedInvoice)">
                 <div class="meta-row">
@@ -373,8 +375,10 @@ import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { appToday, fmtAppDate, fmtAppInstant } from '../utils/datetime'
+import { actorLabel } from '../utils/sharedLogin'
 import { usePagination } from '../composables/usePagination'
 import { invoiceActionToast } from '../lib/invoiceActionToast'
+import { invoiceCountRows, invoiceLoadsCell } from '../lib/invoiceCounts'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'

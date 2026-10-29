@@ -28,6 +28,9 @@
  *      futureAwarePeriodExpr()
  *   §8 the AI insights cache key, the close fingerprint and the fuel KPIs'
  *      definitionVersion all change with Personal lines
+ *   §9 pin, PERSONAL_RECEIPT_WEEK_ENABLED on: carrying a line moves no book
+ *      figure (the same mark waiting for its week or carried off its approved
+ *      week; re-keying its week, its carry marker or its invoice)
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-books.js    # exits 1 on failure
@@ -209,6 +212,28 @@ const fuelCard = (w, month) => {
 		check("the fuel KPIs' definitionVersion moved to 2 (their source changed)", [v("fuel_mpg"), v("fuel_savings"), v("co2_tonnes")], [2, 2, 2]);
 		// paid_mile_share is at 2 for its own reason (R10's paid miles, #517).
 		check("…and no other metric's did", catalog.METRICS.filter((m) => !["fuel_mpg", "fuel_savings", "co2_tonnes", "paid_mile_share"].includes(m.key)).every((m) => m.definitionVersion === 1), true);
+		w.cleanup();
+	}
+
+	section("§9 pin: carrying a line moves no book figure (PERSONAL_RECEIPT_WEEK_ENABLED on)");
+	{
+		const WEEK_ON = { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
+		const waiting = world(WEEK_ON);
+		await mark(waiting, 1);
+		const expected = await figures(waiting);
+		waiting.cleanup();
+		const w = world(WEEK_ON);
+		const g = await w.generate("Test Driver A");
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = 't', approved_by = 'super_admin' WHERE id = ?").run(g.body.invoice.id);
+		await mark(w, 1);
+		const carried = await figures(w);
+		for (const k of Object.keys(expected)) check(`R1 carried off its approved W41 counts as R1 waiting for W41: ${k}`, carried[k], expected[k]);
+		// Where a line waits or which invoice repays it is no book fact.
+		w.db.prepare("UPDATE expense_personal SET week_start = '2026-10-03', needs_correction_since = '2026-10-17T10:30:00.000Z', invoice_id = NULL WHERE expense_id = 1").run();
+		const rekeyed = await figures(w);
+		w.db.prepare("UPDATE expense_personal SET needs_correction_since = '', invoice_id = ? WHERE expense_id = 1").run(g.body.invoice.id);
+		const onInvoice = await figures(w);
+		check("…re-keying its week, its carry marker or its invoice moves no figure", [rekeyed, onInvoice], [expected, expected]);
 		w.cleanup();
 	}
 

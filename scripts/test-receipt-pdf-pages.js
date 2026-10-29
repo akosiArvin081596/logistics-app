@@ -15,6 +15,9 @@
  *   R2      the exact pdf-lib pin (R2-L2), metadata never copied (MD0-MD5, R2-L3),
  *           the image pixel cap (R2-L4), the page-size refusal (R2-L6)
  *   plus the cache (hit, damaged file, never under uploads)
+ *   PR2     every stream declaring a size is capped (SM); the page tree is walked
+ *           under a bound (L1); a receipt over 6 pages keeps being refused (L5);
+ *           the merge (T1 placement and labels, T17 caps, T38 the final re-check)
  *
  * Pure apart from child processes and a temp folder; no server, no network.
  * Run: node scripts/test-receipt-pdf-pages.js    # exits 1 on failure
@@ -52,7 +55,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "receipt-pdf-pages-"));
 const RECEIPTS = path.join(TMP, "data", "uploads", "expense-receipts");
 const CACHE = path.join(TMP, "data", "storage", "receipt-pdfs");
 fs.mkdirSync(RECEIPTS, { recursive: true });
-const PROBE_ENV = path.join(TMP, "probe", ".env");
+const PROBE_ENV = path.join(TMP, "probe", "env-probe.txt");
 const PROBE_DB = path.join(TMP, "probe", "app.db");
 fs.mkdirSync(path.dirname(PROBE_ENV), { recursive: true });
 fs.writeFileSync(PROBE_ENV, "MADE_UP=1\n");
@@ -529,7 +532,7 @@ const jpegClean = (buf) => {
 		const noProbes = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE });
 		const np = await noProbes.selfTest();
 		const wrongLogs = [];
-		const wrongProbes = rp.createReceiptPdfService({ ...BASE, probes: { env: path.join(TMP, "probe", "absent.env"), db: PROBE_DB }, log: (l) => wrongLogs.push(l) });
+		const wrongProbes = rp.createReceiptPdfService({ ...BASE, probes: { env: path.join(TMP, "probe", "absent-probe.txt"), db: PROBE_DB }, log: (l) => wrongLogs.push(l) });
 		const wp = await wrongProbes.selfTest();
 		check("L1 the self-test fails with no probe paths, or with a probe path that does not exist (probe_missing)",
 			[np.passed, np.problems, wp.passed, wp.problems, /env_readable=missing db_readable=no/.test(wrongLogs[0] || "")], [false, ["probe_missing"], false, ["probe_missing"], true]);
@@ -891,6 +894,151 @@ const jpegClean = (buf) => {
 		const failSvc = rp.createReceiptPdfService({ ...BASE, platform: "linux", writeOomScoreAdj: () => { throw new Error("EACCES"); } });
 		const rf = await failSvc.prepare(put(onePage()));
 		check("T40 a failed write sends nothing: the self-test fails and the receipt keeps the note", [failSvc.state(), rf.status, rf.reason], ["failed", "on_file", "disabled"]);
+	}
+
+	// ---- PR2: size caps, the page tree, the merge ------------------------------
+	console.log("PR2 every stream declaring a size is capped");
+	{
+		const masked = (maskDict) => prep(onePage({
+			content: DRAW_IM0,
+			resources: "/XObject << /Im0 5 0 R >>",
+			extra: [
+				streamObject(`${IMAGE_DICT} /SMask 6 0 R /Filter /DCTDecode`, fixtureJpeg()),
+				streamObject(`${maskDict} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode`, zlib.deflateSync(Buffer.alloc(64))),
+			],
+		}));
+		const noSubtypeOver = await masked("/Width 10000 /Height 10000");
+		const noSubtypeHeightOnly = await masked("/Height 50000");
+		const noSubtypeSmall = await masked("/Width 8 /Height 8");
+		check("SM a soft mask with no /Subtype declaring 10000 x 10000, or a /Height alone: refused (image_size); 8 x 8 copies",
+			[noSubtypeOver.status, noSubtypeOver.reason, noSubtypeHeightOnly.reason, noSubtypeSmall.status], ["on_file", "image_size", "image_size", "pages"]);
+	}
+
+	console.log("PR2 the page tree is walked under a bound (L1) and a receipt over 6 pages keeps the note (L5)");
+	{
+		const cycle = await prep(rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 2 >>",
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>",
+			streamObject("", "0 0 1 rg 10 10 50 50 re f"),
+		]));
+		// 22 levels, each node listing the next one twice: 4,194,304 pages to a
+		// walk that does not remember where it has been, from 25 objects.
+		const LEVELS = 22;
+		const levels = Array.from({ length: LEVELS }, (_, i) => {
+			const next = i === LEVELS - 1 ? LEVELS + 2 : i + 3;
+			return `<< /Type /Pages /Kids [${next} 0 R ${next} 0 R] /Count 1 >>`;
+		});
+		const started = Date.now();
+		const shared = await prep(rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			...levels,
+			`<< /Type /Page /Parent ${LEVELS + 1} 0 R /MediaBox [0 0 300 400] /Contents ${LEVELS + 3} 0 R >>`,
+			streamObject("", "0 0 1 rg 10 10 50 50 re f"),
+		]));
+		const sharedMs = Date.now() - started;
+		const nested = await prep(rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+			"<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 >>",
+			"<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 >>",
+			"<< /Type /Page /Parent 3 0 R /MediaBox [0 0 300 400] /Contents 7 0 R >>",
+			"<< /Type /Page /Parent 4 0 R /MediaBox [0 0 300 400] /Contents 7 0 R >>",
+			streamObject("", "0 0 1 rg 10 10 50 50 re f"),
+		]));
+		check("L1 a page tree that lists itself, or a node shared down 22 levels: refused (page_tree), the second within 3 s; an ordinary nested tree copies",
+			[cycle.reason, shared.reason, sharedMs < 3000, nested.status, nested.pages], ["page_tree", "page_tree", true, "pages", 2]);
+		const seven = await prep(manyPages(7));
+		check("L5 a receipt of 7 pages is refused whole (too_many_pages): no page of it is copied, the line keeps \"PDF receipt on file\"",
+			[seven.status, seven.reason, "pdf" in seven], ["on_file", "too_many_pages", false]);
+	}
+
+	console.log("PR2 the merge");
+	{
+		const { PDFString, StandardFonts } = pdfLib;
+		// A made-up "rendered invoice": one text marker per page, and the receipt
+		// anchors as named destinations (a /Dests dictionary or a name tree), as
+		// Chrome writes them for a linked id.
+		async function invoicePdf(markers, { dests = {}, nameTree = false, edit = null } = {}) {
+			const doc = await PDFDocument.create({ updateMetadata: false });
+			const font = await doc.embedFont(StandardFonts.Helvetica);
+			const pages = markers.map((m) => {
+				const p = doc.addPage([612, 792]);
+				p.drawText(m, { x: 50, y: 700, size: 12, font });
+				return p;
+			});
+			const entries = Object.entries(dests).map(([name, at]) => [name, doc.context.obj([pages[at].ref, "XYZ", 0, 792, 0])]);
+			if (entries.length && !nameTree) doc.catalog.set(PDFName.of("Dests"), doc.context.obj(Object.fromEntries(entries)));
+			if (entries.length && nameTree) {
+				const pairs = [];
+				for (const [name, d] of entries) pairs.push(PDFString.of(name), d);
+				doc.catalog.set(PDFName.of("Names"), doc.context.obj({ Dests: doc.context.obj({ Names: doc.context.obj(pairs) }) }));
+			}
+			if (edit) edit(doc);
+			return Buffer.from(await doc.save({ useObjectStreams: false }));
+		}
+		// Each page's drawn text (pdf-lib writes it as hex) and whether it has /Annots.
+		async function pagesOf(pdf) {
+			const doc = await PDFDocument.load(pdf, { updateMetadata: false });
+			return doc.getPages().map((p) => {
+				const c = p.node.Contents();
+				const streams = c instanceof PDFArray ? c.asArray().map((r) => doc.context.lookup(r)) : [c];
+				const text = streams.map((s) => (s instanceof PDFRawStream
+					? Buffer.from(s.dict.lookup(PDFName.of("Filter")) ? decodePDFRawStream(s).decode() : s.contents).toString("latin1") : "")).join("\n");
+				const words = [...text.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)].map((m) => Buffer.from(m[1], "hex").toString("latin1"));
+				return { text: words.join("|"), annots: p.node.has(PDFName.of("Annots")) };
+			});
+		}
+		const one = await svc.prepare(put(onePage()));
+		const two = await svc.prepare(put(manyPages(2)));
+		const ins = (index, total, r) => ({ anchor: `receipt-${index}`, index, total, pdf: r.pdf, pages: r.pages });
+
+		const inv1 = await invoicePdf(["INVOICE", "SHEET 1"], { dests: { "receipt-1": 1 } });
+		const m1 = await svc.merge(inv1, [ins(1, 1, two)]);
+		const p1 = m1.pdf ? await pagesOf(m1.pdf) : [];
+		check("T1 a 2-page receipt goes right after its sheet (found by its named destination), each page labelled; no copied page has /Annots",
+			[m1.status, m1.placement, p1.map((p) => p.text), p1.slice(2).map((p) => p.annots)],
+			["merged", "named", ["INVOICE", "SHEET 1", "Receipt 1 of 1 - page 1 of 2", "Receipt 1 of 1 - page 2 of 2"], [false, false]]);
+		const treeMerged = await svc.merge(await invoicePdf(["INVOICE", "SHEET 1"], { dests: { "receipt-1": 1 }, nameTree: true }), [ins(1, 1, one)]);
+		check("T1 a destination in the /Names /Dests name tree is found too", [treeMerged.status, treeMerged.placement, treeMerged.pages], ["merged", "named", 3]);
+
+		const want3 = ["INVOICE", "SHEET 1", "Receipt 1 of 3 - page 1 of 1", "SHEET 2", "SHEET 3", "Receipt 3 of 3 - page 1 of 2", "Receipt 3 of 3 - page 2 of 2"];
+		const sheets3 = ["INVOICE", "SHEET 1", "SHEET 2", "SHEET 3"];
+		const named3 = await svc.merge(await invoicePdf(sheets3, { dests: { "receipt-1": 1, "receipt-2": 2, "receipt-3": 3 } }), [ins(1, 3, one), ins(3, 3, two)]);
+		const last3 = await svc.merge(await invoicePdf(sheets3), [ins(1, 3, one), ins(3, 3, two)]);
+		const end3 = await svc.merge(await invoicePdf(["INVOICE", "INVOICE 2"]), [ins(1, 3, one), ins(3, 3, two)]);
+		check("T1 receipts 1 and 3 of 3 (2 an image): after their own sheets by name; with no destinations the sheets are the last 3 pages; with too few pages, at the end in order",
+			[named3.placement, named3.pdf && (await pagesOf(named3.pdf)).map((p) => p.text), last3.placement, last3.pdf && (await pagesOf(last3.pdf)).map((p) => p.text),
+				end3.placement, end3.pdf && (await pagesOf(end3.pdf)).map((p) => p.text)],
+			["named", want3, "last", want3, "end", ["INVOICE", "INVOICE 2", "Receipt 1 of 3 - page 1 of 1", "Receipt 3 of 3 - page 1 of 2", "Receipt 3 of 3 - page 2 of 2"]]);
+
+		const six = await svc.prepare(put(manyPages(6)));
+		const overPages = await svc.merge(inv1, [ins(1, 3, six), ins(2, 3, six), ins(3, 3, six)]);
+		const smallInsert = rp.createReceiptPdfService({ ...BASE, limits: { insertMax: 500 } });
+		const overBytes = await smallInsert.merge(inv1, [ins(1, 1, one)]);
+		const smallOut = rp.createReceiptPdfService({ ...BASE, limits: { mergeOutputMax: inv1.length + 200 } });
+		const overOut = await smallOut.merge(inv1, [ins(1, 1, one)]);
+		const garbled = await svc.merge(Buffer.from("%PDF-1.7\nnot a pdf at all\n%%EOF\n", "latin1"), [ins(1, 1, one)]);
+		check("T17 18 copied pages (over 15), receipts over the byte cap, a result over its cap, an unreadable invoice: the merge fails with its reason",
+			[overPages.status, overPages.reason, overBytes.reason, overOut.reason, garbled.reason, [rp.RECEIPT_PDF_INVOICE_MAX_PAGES, rp.RECEIPT_PDF_INSERT_MAX_BYTES, rp.RECEIPT_PDF_INVOICE_MAX_BYTES]],
+			["failed", "merge_page_cap", "merge_size_cap", "merge_too_large", "merge_unparseable", [15, 5 * 1024 * 1024, 20 * 1024 * 1024]]);
+
+		const openAction = await svc.merge(await invoicePdf(["INVOICE", "SHEET 1"], {
+			dests: { "receipt-1": 1 },
+			edit: (doc) => doc.catalog.set(PDFName.of("OpenAction"), doc.context.obj({ S: "JavaScript", JS: PDFString.of("void 0") })),
+		}), [ins(1, 1, one)]);
+		const namesJs = await svc.merge(await invoicePdf(["INVOICE", "SHEET 1"], {
+			edit: (doc) => doc.catalog.set(PDFName.of("Names"), doc.context.obj({ JavaScript: doc.context.obj({ Names: doc.context.obj([]) }) })),
+		}), [ins(1, 1, one)]);
+		const planted = await PDFDocument.load(one.pdf, { updateMetadata: false });
+		planted.getPage(0).node.set(PDFName.of("Annots"), planted.context.obj([planted.context.obj({ Type: "Annot", Subtype: "Link", Rect: [0, 0, 10, 10] })]));
+		const withAnnots = await svc.merge(inv1, [{ ...ins(1, 1, one), pdf: Buffer.from(await planted.save({ useObjectStreams: false })) }]);
+		check("T38 the final re-check: an /OpenAction or a /Names JavaScript in the invoice's catalog, or /Annots on a copied page: the merge fails (merge_recheck)",
+			[openAction.reason, namesJs.reason, withAnnots.reason], ["merge_recheck", "merge_recheck", "merge_recheck"]);
+
+		const off = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE });
+		const offMerge = await off.merge(inv1, [ins(1, 1, one)]);
+		check("a service whose self-test failed merges nothing (disabled)", [off.state(), offMerge.status, offMerge.reason], ["failed", "failed", "disabled"]);
 	}
 
 	fs.rmSync(TMP, { recursive: true, force: true });

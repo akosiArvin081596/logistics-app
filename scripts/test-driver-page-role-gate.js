@@ -66,7 +66,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let passed = 0;
 let failed = 0;
@@ -127,7 +127,12 @@ const helpers = new Function("require", [
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),
 	liftFn("invoiceTotalDue"),
-	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue };",
+	// The per-load document counts (their own subject is
+	// scripts/test-driver-docs-current-holder.js §4).
+	liftConstLine("RATECON_DOCUMENT_SQL"),
+	liftConstLine("LOAD_PANEL_DOCUMENT_FILTER"),
+	liftFn("documentFiledUnder"),
+	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue, LOAD_PANEL_DOCUMENT_FILTER, documentFiledUnder };",
 ].join("\n"))((p) => require(/^\.\/lib\//.test(p) ? path.join(ROOT, p) : p));
 // The route finds the driver's directory row through findDirectoryRowForDriver(),
 // which reads `db`, so it is built over whichever db a route runs on.
@@ -143,6 +148,10 @@ const truckLookup = (db, src = TRUCK_LOOKUP_SRC) =>
 const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
 const heldByOtherLookup = (db) =>
 	new Function("db", `"use strict";\n${HELD_BY_OTHER_SRC}\nreturn driverNameHeldByOtherAccount;`)(db);
+// ...and each invoice card's pay_basis through invoicePayBasesOf(), which reads `db`.
+const PAY_BASES_SRC = [liftFn("invoicePayBasis"), liftFn("invoicePayBasesOf")].join("\n");
+const payBasesLookup = (db) =>
+	new Function("db", `"use strict";\n${PAY_BASES_SRC}\nreturn invoicePayBasesOf;`)(db);
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -210,8 +219,10 @@ function makeDeps() {
 		requireRole, requireAuth, ...helpers, db,
 		findDirectoryRowForDriver: directoryLookup(db),
 		findTruckForDriver: truckLookup(db),
+		invoicePayBasesOf: payBasesLookup(db),
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
+		voiceNotes: require("../lib/voice-notes"),
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),

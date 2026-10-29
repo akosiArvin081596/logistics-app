@@ -25,6 +25,11 @@
  *      in it carries Personal lines
  *   §7 the Friday batch re-encodes and caches the week's receipt images before
  *      it renders any invoice (a cold cache never leaves "not available")
+ *   §8 W12 with PERSONAL_RECEIPT_WEEK_ENABLED on: the week's warm-up also
+ *      prepares the receipt of a line carried from an earlier week, which that
+ *      week's generation takes
+ *   §9 W15 with the flag on, GET /api/expenses/personal/waiting-corrections
+ *      lists the carried lines only, one row each, in the server's words
  *
  * Pure apart from the re-encode's child process: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-receipts.js    # exits 1 on failure
@@ -260,6 +265,42 @@ const rowFor = (list, id) => (list || []).find((r) => r.id === id) || {};
 		check("…a share alone counts too", w.api.paymentReportColumns([{ personal_total: 0, personal_share_total: 25 }]).some((c) => c.key === "personal"), true);
 		const pdfRoute = SRC.slice(SRC.indexOf('app.get("/api/invoices/report/pdf"'), SRC.indexOf('app.get("/api/invoices/report/pdf"') + 6000);
 		check("the PDF route takes its columns from paymentReportColumns()", /paymentReportColumns\(report\.invoices\)/.test(pdfRoute), true);
+		w.cleanup();
+	}
+
+	section("§8 W12 the Friday warm-up prepares a carried line's receipt too");
+	{
+		const w = world({ ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" });
+		w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description, photo_data)
+			VALUES (20, '2026-10-07T15:00:00.000Z', ?, 'Food', 45.5, '2026-10-07', 'Approved', 'EXAMPLE DINER #3', 'T-1', 7, '2026-10-07 15:00:00', '', ?)`)
+			.run(DRIVER_A, `/uploads/expense-receipts/${1760000000000 + 20}-abcdefabcdef.jpg`);
+		await putImage(w, 20);
+		// A W40 line its own week's invoice could not take (carried), written
+		// directly so nothing has started its image: W41's invoice may take it.
+		w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, needs_correction_since, created_at, created_by, created_by_id, created_role)
+			VALUES (20, 'deduct', 4550, 4550, 'EXAMPLE DINER #3', '2026-10-07', '2026-10', 1, '2026-10-07', '2026-10-03', '2026-10-10T10:30:00.000Z', 't', 'super_admin', 1, 'Super Admin')`).run();
+		const cacheDir = path.join(w.dataDir, "storage", "receipt-images");
+		const cached = () => (fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : []).filter((f) => /^v1-20-/.test(f)).length;
+		const out = await w.api.warmPersonalReceiptsForWeek("2026-10-10");
+		check("warmPersonalReceiptsForWeek(W41) re-encodes and caches the carried W40 line's receipt", [out.receipts, out.prepared, cached()], [1, 1, 1]);
+		const g = await w.generate(DRIVER_A);
+		const line = w.lines("expense_id = 20")[0] || {};
+		check("…and W41's render, which takes the line, prints its page",
+			[g.status, line.invoice_id === (g.body.invoice && g.body.invoice.id), (lastRender(w).data.receiptPages || []).length], [200, true, 1]);
+		w.cleanup();
+	}
+
+	section("§9 W15 the waiting list shows the carried lines only");
+	{
+		const w = world({ ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" });
+		const g = await w.generate(DRIVER_A);
+		approve(w, g.body.invoice.id);
+		await mark(w, 1);
+		await mark(w, 11);
+		const r = await w.call("GET", "/api/expenses/personal/waiting-corrections", { as: "admin" });
+		check("one row per carried line, in the server's words; B's line, still waiting for its own week, is not listed",
+			[r.status, ((r.body && r.body.carried) || []).map((x) => [x.expense_id, x.driver, x.amount_text, x.since_label, x.reason]), ((r.body && r.body.groups) || []).length],
+			[200, [[1, DRIVER_A, "-$200.00", "Oct 15, 2026", "the Oct 10-16, 2026 invoice is approved"]], 0]);
 		w.cleanup();
 	}
 

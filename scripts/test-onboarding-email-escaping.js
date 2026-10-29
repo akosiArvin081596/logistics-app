@@ -44,7 +44,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const piiMask = require(path.join(__dirname, "..", "lib", "pii-mask"));
 
 let pass = 0;

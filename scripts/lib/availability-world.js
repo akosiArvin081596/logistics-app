@@ -42,7 +42,7 @@ const { closure } = require("./server-lift");
 const { schemaDb, Database } = require("./work-days-world");
 
 const ROOT = path.join(__dirname, "..", "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./server-source").serverSource();
 const LINES = SRC.split("\n");
 
 const ROUTES = {
@@ -74,7 +74,7 @@ function routeHead(method, p) {
 }
 
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange", "getJobTrackingCached", "getSheets",
-	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions"];
+	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"];
 const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "normalizeDriverName"];
 // Lifted by name: server-lift's closure walk misses a statement that starts the
@@ -319,6 +319,8 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		notifyChange: (d) => world.changes.push(d),
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
+		// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
 		getJobTrackingCached: async () => {
 			jt.reads++;
 			if (typeof jt.during === "function") {

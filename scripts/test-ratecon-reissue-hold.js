@@ -97,7 +97,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // server.js's own require, so a lifted `require("./lib/...")` finds this checkout's lib/.
 const rootRequire = createRequire(path.join(ROOT, "server.js"));
 let Database;
@@ -123,7 +123,11 @@ function eqCheck(name, actual, expected) {
 }
 
 const SECRET = "test-secret";
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+// RATECON_PERSON_EDIT_HOLD_ENABLED from this runner's own environment reaches the lifted
+// route's stand-in env, so every case here also runs with the person-edit hold on
+// (scripts/test-reissue-runners-person-hold-on.js does that run); a case's own env wins.
+const PERSON_HOLD_ENV = process.env.RATECON_PERSON_EDIT_HOLD_ENABLED === undefined ? {} : { RATECON_PERSON_EDIT_HOLD_ENABLED: process.env.RATECON_PERSON_EDIT_HOLD_ENABLED };
+const ISO_RE =/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const DRAFTS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS load_invoice_drafts \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
 const LOCKS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS period_locks \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
 if (!DRAFTS_DDL || !LOCKS_DDL) { console.error("FAILED: load_invoice_drafts's or period_locks's CREATE TABLE was not found in server.js"); process.exit(1); }
@@ -200,7 +204,7 @@ function liftRoute({ db, env = {}, sheet = SHEET }) {
 	const logs = [];
 	const quiet = { ...console, log: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")) };
 	new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", `"use strict";\n${lifted.text}`)(
-		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET, ...env } }, app, rootRequire,
+		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET, ...PERSON_HOLD_ENV, ...env } }, app, rootRequire,
 		new Proxy({}, { get: (_t, k) => { const d = db(); return typeof d[k] === "function" ? d[k].bind(d) : d[k]; } }),
 		(a) => { alerts.push(a); return Promise.resolve({ alerted: true }); },
 	);

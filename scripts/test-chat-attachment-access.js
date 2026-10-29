@@ -8,8 +8,10 @@
  * and without location data (the rule receipts follow since 2026-10-15: EXIF
  * stripped from new uploads and from every served copy).
  *
- *   §1 chatAttachmentAccess() (lib/chat-files.js): Super Admin and Dispatcher
- *      read every thread; a Driver the messages from or to his driver name; an
+ *   §1 chatAttachmentAccess() (lib/chat-files.js): Super Admin reads every
+ *      thread; a Dispatcher every thread but an investor conversation's (the
+ *      row marked by server.js INVESTOR_CHAT_SQL; a row without the mark is
+ *      refused); a Driver the messages from or to his driver name; an
  *      Investor those from or to his username; the first message naming a file
  *      decides; nobody else, and no file no message names
  *   §2 chatUploadBytes(): a new photo is stored without metadata, orientation
@@ -97,9 +99,14 @@ function makeDb() {
 		.run(DRIVER_B, `/uploads/CHAT/${F.CASED}`);  // 8: the same file, another spelling, Driver B's thread
 	add(DRIVER_A, "Dispatch", F.CASED);          // 9: later, Driver A names it as stored
 	if (chatFiles && chatFiles.CHAT_UPLOADS_SCHEMA_SQL) db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
+	// The accounts: who is an Investor marks a row as an investor conversation's.
+	db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, driver_name TEXT DEFAULT '')");
+	const user = db.prepare("INSERT OR IGNORE INTO users (id, username, role, driver_name) VALUES (?, ?, ?, ?)");
+	for (const u of Object.values(U)) user.run(u.id, u.username, u.role, u.driverName || "");
 	return db;
 }
-const rowsFor = (db, file) => db.prepare('SELECT id, "from", "to" FROM messages WHERE attachment_url = ?').all(C(file));
+// Each row as the guard reads it: marked investor_chat by server.js's rule.
+const rowsFor = (db, file) => db.prepare(`SELECT id, "from", "to", ${INVESTOR_CHAT_SQL_TEXT || "NULL"} AS investor_chat FROM messages WHERE attachment_url = ?`).all(C(file));
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "chat-attachment-access-"));
 const UP = path.join(TMP, "uploads");
@@ -167,7 +174,7 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 // ---------------------------------------------------------------------------
 // Lifting server.js (same scanner as test-receipt-image-access.js)
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 function skipString(i) {
 	const q = SRC[i];
 	for (i++; i < SRC.length && SRC[i] !== q; i++) if (SRC[i] === "\\") i++;
@@ -220,7 +227,7 @@ function liftStatements(needle) {
 }
 
 const L = {
-	consts: ["INLINE_SAFE_UPLOAD_EXTS", "UPLOAD_MISS_WINDOW_MS", "UPLOAD_MISS_MAX", "UPLOAD_MISS_BURST_MAX", "UPLOAD_MISS_KEYS_MAX", "uploadMissCounts"].map((n) => liftConst(n)),
+	consts: ["INLINE_SAFE_UPLOAD_EXTS", "UPLOAD_MISS_WINDOW_MS", "UPLOAD_MISS_MAX", "UPLOAD_MISS_BURST_MAX", "UPLOAD_MISS_KEYS_MAX", "uploadMissCounts", "INVESTOR_CHAT_SQL"].map((n) => liftConst(n)),
 	// The chat guard's wiring, when server.js has it.
 	chatGuardConst: liftConst("chatAttachmentGuard", { optional: true }),
 	chatGuardFn: liftFn("guardChatAttachment", { optional: true }),
@@ -228,6 +235,9 @@ const L = {
 	fns: ["normalizedUploadPath", "uploadMissLimiter", "uploadsPathGuard"].map((n) => liftFn(n)),
 	mounts: liftStatements('\napp.use("/uploads'),
 };
+// The investor-conversation rule the guard is built with (INVESTOR CONVERSATIONS
+// ARE SUPER ADMIN ONLY), as server.js declares it.
+const INVESTOR_CHAT_SQL_TEXT = new Function(`${L.consts[L.consts.length - 1]}\nreturn INVESTOR_CHAT_SQL;`)();
 ok(`lifted every /uploads mount from server.js (${L.mounts.length})`, L.mounts.length === 4);
 ok("server.js wires a chat guard (chatAttachmentGuard + guardChatAttachment)", !!L.chatGuardConst && !!L.chatGuardFn);
 ok("GUARDED_UPLOAD_DIRS routes /chat/ to it", /\{\s*dir:\s*"\/chat\/",\s*guard:\s*guardChatAttachment\s*\}/.test(L.guardedDirs));
@@ -288,7 +298,10 @@ async function buildUpload(dataDir, db) {
 	if (chatFiles) {
 		const A = chatFiles.chatAttachmentAccess;
 		const a = rowsFor(db, F.A_JPG);
-		ok("§1 Super Admin and Dispatcher open any thread's file", A(U.sa, a) === true && A(U.disp, rowsFor(db, F.INV_JPG)) === true);
+		ok("§1 Super Admin opens any thread's file", A(U.sa, a) === true && A(U.sa, rowsFor(db, F.INV_JPG)) === true);
+		ok("§1 a Dispatcher opens a driver thread's file", A(U.disp, a) === true && A(U.disp, rowsFor(db, F.B_JPG)) === true);
+		ok("§1 a Dispatcher is refused an investor conversation's file", A(U.disp, rowsFor(db, F.INV_JPG)) === false);
+		ok("§1 a Dispatcher is refused a row the guard did not mark", A(U.disp, a.map(({ investor_chat: _i, ...r }) => r)) === false);
 		ok("§1 the driver the message was sent to opens it", A(U.drvA, a) === true);
 		ok("§1 ...under a case / edge-space variant of his name", A(U.drvAcase, a) === true);
 		ok("§1 the driver who sent one opens it", A(U.drvA, rowsFor(db, F.A_PNG)) === true);
@@ -315,7 +328,7 @@ async function buildUpload(dataDir, db) {
 	// §3 the guard, mounted the way GUARDED_UPLOAD_DIRS calls it
 	if (chatFiles) {
 		const logs = [];
-		const guard = chatFiles.createChatAttachmentGuard({ db, chatDir: CHAT_DIR, logError: (m) => logs.push(m) });
+		const guard = chatFiles.createChatAttachmentGuard({ db, chatDir: CHAT_DIR, investorChatSql: INVESTOR_CHAT_SQL_TEXT, logError: (m) => logs.push(m) });
 		const app = sessionApp();
 		// The test route sits behind a rate limiter like every route in server.js;
 		// its ceiling is far above any burst below, so it never answers here.
@@ -334,7 +347,9 @@ async function buildUpload(dataDir, db) {
 		ok("§3 the driver in the thread opens it, stripped", isImage(own) && clean(own));
 		const sent = await get(C(F.A_PNG), U.drvA);
 		ok("§3 the driver's own photo (a PNG) opens, stripped", isImage(sent) && clean(sent) && sent.headers["content-type"] === "image/png");
-		ok("§3 Dispatcher opens an investor thread's photo, stripped", (await get(C(F.INV_JPG), U.disp)).status === 200);
+		ok("§3 a Dispatcher is refused an investor thread's photo (404, empty)", refused(await get(C(F.INV_JPG), U.disp)));
+		const disp = await get(C(F.B_JPG), U.disp);
+		ok("§3 a Dispatcher opens a driver thread's photo, stripped", isImage(disp) && clean(disp));
 		ok("§3 another driver is refused (404, empty)", refused(await get(C(F.A_JPG), U.drvB)));
 		ok("§3 an investor outside the thread is refused", refused(await get(C(F.A_JPG), U.inv)));
 		ok("§3 the investor in the thread opens it", isImage(await get(C(F.INV_JPG), U.inv)));
@@ -351,6 +366,15 @@ async function buildUpload(dataDir, db) {
 		ok("§3 the earliest message naming a file decides, whatever its spelling: Driver A is refused", refused(await get(C(F.CASED), U.drvA)));
 		ok("§3 ...and the driver of that earliest message opens it", isImage(await get(C(F.CASED), U.drvB)));
 		ok("§3 a PDF goes out never cached by a shared cache (private, no-store)", (await get(C(F.A_PDF), U.drvA)).headers["cache-control"] === "private, no-store");
+
+		// A guard built without the rule marks no row: a Dispatcher opens nothing.
+		const bare = chatFiles.createChatAttachmentGuard({ db, chatDir: CHAT_DIR });
+		const app2 = sessionApp();
+		app2.use("/uploads/chat", testRouteLimiter, requireAuth, (req, res, next) => bare(req, res, next, `/uploads/chat${req.path}`, req.path.slice(1)));
+		app2.use("/uploads", requireAuth, (req, res) => res.status(404).end());
+		const get2 = await listen(app2);
+		ok("§3 a guard built without the rule refuses a Dispatcher a driver thread's photo", refused(await get2(C(F.B_JPG), U.disp)));
+		ok("§3 ...and still serves a Super Admin", isImage(await get2(C(F.B_JPG), U.sa)));
 	}
 
 	// §2b which file a message may carry
@@ -384,6 +408,8 @@ async function buildUpload(dataDir, db) {
 		ok("§4 /uploads/chat/: the driver in the thread gets it without its GPS block", isImage(own) && clean(own));
 		ok("§4 /uploads/chat/: another driver is refused", refused(await S.get(C(F.A_JPG), U.drvB)));
 		ok("§4 /uploads/chat/: an investor outside the thread is refused", refused(await S.get(C(F.A_JPG), U.inv)));
+		ok("§4 /uploads/chat/: a Dispatcher is refused an investor conversation's photo", refused(await S.get(C(F.INV_JPG), U.disp)));
+		ok("§4 /uploads/chat/: a Dispatcher gets a driver thread's photo", isImage(await S.get(C(F.B_JPG), U.disp)));
 		for (const spelling of [`/uploads/Chat/${F.A_JPG}`, `/uploads/CHAT/${F.A_JPG}`, `/uploads//chat/${F.A_JPG}`, `/uploads/./chat/${F.A_JPG}`, `/uploads/%63hat/${F.A_JPG}`, `/uploads/x/../chat/${F.A_JPG}`]) {
 			const r = await S.get(spelling, U.drvB);
 			ok(`§4 ${spelling}: another driver is refused`, r.status === 404 && !isImage(r));

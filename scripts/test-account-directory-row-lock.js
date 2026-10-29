@@ -42,15 +42,30 @@
  *      Users-page save of other fields on a driver whose carrier was held back,
  *      or whose row alone names an investor, saves with the carrier and the
  *      ledger untouched; a conflicting company name is still a 409.
+ *   §7 POST /api/users with NAMED_LOGINS_ENABLED: a weak password is 400
+ *      PASSWORD_WEAK for every role, before anything is read; a new Super Admin
+ *      or Dispatcher must change the password at first sign-in, a Driver or
+ *      Investor not; the acting admin's own password is 400 PASSWORD_IS_YOURS;
+ *      create_user adds the new id and the forced change; the new staff
+ *      account's first request is refused PASSWORD_CHANGE_REQUIRED. Flag off:
+ *      all as before.
+ *   §8 POST /api/users with NAMED_LOGINS_ENABLED spends PUT /api/users/:id's
+ *      password budget (userPasswordResetLimiter, 5 per 15 minutes per acting
+ *      admin): five guesses that write nothing, then the sixth, the admin's own
+ *      password, is 429, never PASSWORD_IS_YOURS; resets and creates share one
+ *      budget. Flag off: creates are not limited, as before.
  *
- * Pure: no server, no app.db, no network.
+ * No app.db, no network: §8 runs Express on 127.0.0.1:0, the rest calls the
+ * lifted handlers directly.
  *   node scripts/test-account-directory-row-lock.js
  *   SERVER_JS=/tmp/base.js node scripts/test-account-directory-row-lock.js   # a base commit: fails
  */
 "use strict";
 
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
+const { once } = require("events");
 
 const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -63,9 +78,10 @@ function check(label, cond) {
 	console.log(`  FAIL  ${label}`);
 }
 
-let Database;
+let Database, bcryptjs;
 try {
 	Database = require("better-sqlite3");
+	bcryptjs = require("bcryptjs");
 } catch (e) {
 	die(`a server dependency did not load (${e.message}); run it under the .nvmrc Node`);
 }
@@ -91,7 +107,11 @@ function liftRoute(head, what) {
 	const a = findOnce(`\n${head}`, `registration of ${what}`);
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
 }
-const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
+// POST /api/users mounts the password budget it shares with PUT after its role
+// check (§8); a server.js before that mounts none.
+const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {';
+const USERS_HEAD_BEFORE = 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {';
+const USERS_ROUTE = liftRoute(SRC.includes(`\n${USERS_HEAD}`) ? USERS_HEAD : USERS_HEAD_BEFORE, "POST /api/users");
 const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {', "PUT /api/users/:id");
 
 const MODULE_SRC = [
@@ -162,7 +182,8 @@ const DDL = [
 		trucks TEXT DEFAULT '', hazmat TEXT DEFAULT '', rating TEXT DEFAULT '', status TEXT DEFAULT 'active',
 		pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0)`,
 	`CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT, role TEXT,
-		driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT DEFAULT '', company_name TEXT DEFAULT '')`,
+		driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT DEFAULT '', company_name TEXT DEFAULT '',
+		must_change_password INTEGER DEFAULT 0)`,
 	"CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, assigned_driver TEXT DEFAULT '', driver_pay_daily REAL DEFAULT 0, owner_id INTEGER DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '')",
 	"CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')",
 	"CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT)",
@@ -178,7 +199,10 @@ const DDL = [
 const S = { floors: {}, jtReads: 0, refusals: [], recorded: [] };
 const JT = { headers: ["Load ID", "Driver", "Assigned Date"], data: [] };
 
-function makeApp() {
+// `server`: §8 mounts POST /api/users on a real Express app, whose requireRole
+// stub signs the request in as SUPER, with `createLimit` as its password budget.
+// Every other section calls the handler directly.
+function makeApp({ server = null, createLimit = null } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) db.exec(sql);
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
@@ -195,10 +219,17 @@ function makeApp() {
 		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test");
 	let handler = null;
 	const env = {
-		app: { post: (p, guard, h) => { handler = h; } },
-		requireRole: () => (req, res, next) => next(),
+		app: server || { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
+		requireRole: server ? () => (req, res, next) => { req.session = { user: SUPER }; next(); } : () => (req, res, next) => next(),
+		// The password budget mounted before the handler (§8); a pass-through elsewhere.
+		userCreatePasswordLimit: createLimit || ((req, res, next) => next()),
 		db, ...m,
-		bcrypt: { hash: async () => "hash" },
+		// The hash is not this runner's subject; the own-password check (§7) is
+		// the real comparison against a real hash.
+		bcrypt: { hash: async () => "hash", compare: (pw, h) => bcryptjs.compare(pw, h) },
+		// The named-login rules on POST /api/users, per case (§7).
+		NAMED_LOGINS_ENABLED: S.namedLogins,
+		passwordRules: require("../lib/password-rules"),
 		getJobTrackingCached: async () => { S.jtReads++; return JT; },
 		driverHistoryFloorMonth: (name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		periodLocksReadable: () => true,
@@ -215,7 +246,7 @@ function makeApp() {
 	};
 	const names = Object.keys(env);
 	new Function(...names, USERS_ROUTE)(...names.map((k) => env[k]));
-	if (typeof handler !== "function") die("the lifted route did not register a handler");
+	if (!server && typeof handler !== "function") die("the lifted route did not register a handler");
 	// PUT /api/users/:id with the same month-end lock and directory sync. Its
 	// rename machinery (the sheet count, the cascade, the merge scan) and its own
 	// lock guard are stubbed to "nothing blocks": §5 edits no driver name.
@@ -265,9 +296,9 @@ function makeApp() {
 	return { db, m, createUser, updateUser, onboarding, complete };
 }
 
-function reset() {
-	Object.assign(S, { floors: { "cara carrier": { floor: "2026-06", unbounded: false } }, jtReads: 0, jtFails: false, refusals: [], recorded: [] });
-	return makeApp();
+function reset(over = {}, appOpts = {}) {
+	Object.assign(S, { floors: { "cara carrier": { floor: "2026-06", unbounded: false } }, jtReads: 0, jtFails: false, refusals: [], recorded: [], namedLogins: false }, over);
+	return makeApp(appOpts);
 }
 const dirRow = (db, name) => db.prepare("SELECT * FROM drivers_directory WHERE driver_name = ?").get(name);
 const user = (db, name) => db.prepare("SELECT * FROM users WHERE driver_name = ?").get(name);
@@ -539,6 +570,163 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 			const r = await updateUser(63, usersPageSave("New Hire", { companyName: "Acme Leasing" }));
 			check(`§6 a driver with no finalized-month history, company → an investor's company: 200, the account and the row carry it (${got(r)}, row ${JSON.stringify(dirRow(db, "New Hire").carrier_name)})`,
 				r.status === 200 && account(db, 63).company_name === "Acme Leasing" && dirRow(db, "New Hire").carrier_name === "Acme Leasing");
+		}
+	}
+
+	console.log("§7 POST /api/users with NAMED_LOGINS_ENABLED");
+	{
+		// Made-up passwords: STRONG meets lib/password-rules.js, WEAK does not.
+		const STRONG = "Made-Up-Pass-7!";
+		const WEAK = "weakpass";
+		const ADMIN_OWN = "Admin-Own-Pass-1!";
+		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
+		const bodyFor = (role, i, password = STRONG) => ({
+			username: `new_${i}`, password, role, ...(role === "Driver" ? { driverName: "New Hire" } : {}),
+		});
+		const got = (r) => `got ${r.status} ${(r.body || {}).code || ""}`.trim();
+		const created = (db, username) => db.prepare("SELECT id, must_change_password FROM users WHERE username = ?").get(username);
+		const createAudit = (db) => db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = 'create_user' ORDER BY id").all();
+		// The acting admin (SUPER, id 1) as a stored account with a password of its own.
+		const withAdmin = (db) => db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')")
+			.run(bcryptjs.hashSync(ADMIN_OWN, 4));
+
+		for (const [i, role] of ROLES.entries()) {
+			const { db, createUser } = reset({ namedLogins: true });
+			const r = await createUser(bodyFor(role, i, WEAK));
+			check(`§7 ${role}: a weak password is 400 PASSWORD_WEAK, naming the rules it fails (${got(r)})`,
+				r.status === 400 && r.body.code === "PASSWORD_WEAK" && Array.isArray(r.body.failed) && r.body.failed.length > 0);
+			check(`§7 ${role}: …no account, no directory row, nothing read`, !created(db, `new_${i}`) && !dirRow(db, "New Hire") && S.jtReads === 0);
+		}
+		for (const [i, role] of ROLES.entries()) {
+			const { db, createUser } = reset({ namedLogins: true });
+			const r = await createUser(bodyFor(role, i));
+			const row = created(db, `new_${i}`);
+			const staff = role === "Super Admin" || role === "Dispatcher";
+			check(`§7 ${role}: created with must_change_password ${staff ? 1 : 0} (${got(r)}, ${row ? row.must_change_password : "no account"})`,
+				r.status === 200 && !!row && row.must_change_password === (staff ? 1 : 0));
+			const audit = createAudit(db)[0] || {};
+			check(`§7 ${role}: …create_user keeps the username as entity_id and adds the new id${staff ? " and the forced change" : ""}: ${JSON.stringify(audit.details)}`,
+				!!row && audit.entity_id === `new_${i}` && String(audit.details).includes(`account id ${row.id}`) &&
+				String(audit.details).includes("must change password at first sign-in") === staff);
+		}
+		{
+			const { db, createUser } = reset({ namedLogins: true });
+			withAdmin(db);
+			const r = await createUser({ username: "owner_named", password: ADMIN_OWN, role: "Super Admin" });
+			check(`§7 the acting admin's own password is 400 PASSWORD_IS_YOURS (${got(r)})`, r.status === 400 && r.body.code === "PASSWORD_IS_YOURS");
+			check("§7 …and no account", !created(db, "owner_named") && createAudit(db).length === 0);
+			const ok = await createUser({ username: "owner_named", password: STRONG, role: "Super Admin" });
+			check(`§7 …while a password of its own creates it (${got(ok)})`, ok.status === 200 && !!created(db, "owner_named"));
+		}
+		{
+			// The new account's first request, through the shipped guard: the
+			// session's copy of the flag is refreshed from the row (as on every
+			// request), so a stale `false` there changes nothing.
+			const { db, createUser } = reset({ namedLogins: true });
+			await createUser({ username: "arvin_named", password: STRONG, role: "Super Admin" });
+			await createUser({ username: "new_driver", password: STRONG, role: "Driver", driverName: "New Hire" });
+			const quiet = { error() {}, log() {}, warn() {} };
+			const guard = new Function("db", "console",
+				`${liftFunction("currentMustChangePassword")}\n${liftFunction("refreshPasswordChangeFlag")}\n${liftFunction("requireAuth")}\nreturn { refreshPasswordChangeFlag, requireAuth };`)(db, quiet);
+			const firstRequest = (username) => {
+				const row = db.prepare("SELECT id, username, role FROM users WHERE username = ?").get(username);
+				const req = { method: "GET", originalUrl: "/api/loads", headers: {}, session: { user: { id: row.id, username: row.username, role: row.role, mustChangePassword: false } } };
+				const out = { status: 200, body: null, passed: false };
+				const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+				guard.refreshPasswordChangeFlag(req, res, () => guard.requireAuth(req, res, () => { out.passed = true; }));
+				return out;
+			};
+			const sa = firstRequest("arvin_named");
+			check(`§7 the new Super Admin's first request is 403 PASSWORD_CHANGE_REQUIRED (got ${sa.status} ${(sa.body || {}).code || ""})`,
+				!sa.passed && sa.status === 403 && sa.body.code === "PASSWORD_CHANGE_REQUIRED");
+			const dr = firstRequest("new_driver");
+			check("§7 …a new Driver's goes through", dr.passed);
+		}
+		{
+			// Flag off: as before.
+			const { db, createUser } = reset();
+			withAdmin(db);
+			const weak = await createUser({ username: "weak_disp", password: WEAK, role: "Dispatcher" });
+			const own = await createUser({ username: "own_disp", password: ADMIN_OWN, role: "Dispatcher" });
+			check(`§7 flag off: a weak password and the admin's own are accepted, as before (${got(weak)}, ${got(own)})`, weak.status === 200 && own.status === 200);
+			check("§7 …a new Dispatcher need not change it", created(db, "weak_disp").must_change_password === 0 && created(db, "own_disp").must_change_password === 0);
+			check("§7 …and create_user reads as before", (createAudit(db)[0] || {}).details === 'Created user "weak_disp" with role Dispatcher');
+		}
+	}
+
+	console.log("§8 POST /api/users with NAMED_LOGINS_ENABLED: PUT /api/users/:id's password budget");
+	{
+		const express = require("express");
+		const rateLimitLib = require("express-rate-limit");
+		const ADMIN_OWN = "Admin-Own-Pass-1!";
+		// The limiter PUT /api/users/:id mounts, and the function POST /api/users
+		// spends it through (absent before that change).
+		const LIMITER_SRC = liftConst("const userPasswordResetLimiter = rateLimit({", "\n});");
+		const CREATE_LIMIT_SRC = liftNew("userCreatePasswordLimit");
+		check("§8 POST /api/users mounts userCreatePasswordLimit after its role check", USERS_ROUTE.startsWith(USERS_HEAD));
+		check("§8 …and PUT /api/users/:id mounts userPasswordResetLimiter after its role check",
+			USER_PUT_ROUTE.startsWith('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, '));
+		// One app: the lifted POST /api/users, and a PUT through the same limiter
+		// instance (the reset handler is not this case's subject).
+		const world = async (named) => {
+			const server = express();
+			server.use(express.json());
+			const resetLimiter = new Function("rateLimit", "ipKeyGenerator", `${LIMITER_SRC}\nreturn userPasswordResetLimiter;`)(rateLimitLib, rateLimitLib.ipKeyGenerator);
+			const createLimit = CREATE_LIMIT_SRC
+				? new Function("NAMED_LOGINS_ENABLED", "userPasswordResetLimiter", `${CREATE_LIMIT_SRC}\nreturn userCreatePasswordLimit;`)(named, resetLimiter)
+				: null;
+			const { db } = reset({ namedLogins: named }, { server, createLimit });
+			db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')").run(bcryptjs.hashSync(ADMIN_OWN, 4));
+			server.put("/api/users/:id", (req, res, next) => { req.session = { user: SUPER }; next(); }, resetLimiter, (req, res) => res.json({ success: true }));
+			const listener = server.listen(0, "127.0.0.1");
+			await once(listener, "listening");
+			const send = (method, urlPath, body) => new Promise((resolve, reject) => {
+				const data = JSON.stringify(body);
+				const r = http.request({ host: "127.0.0.1", port: listener.address().port, method, path: urlPath, agent: false,
+					headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+					let buf = "";
+					res.setEncoding("utf8");
+					res.on("data", (c) => { buf += c; });
+					res.on("end", () => { let json = null; try { json = JSON.parse(buf); } catch { json = null; } resolve({ status: res.statusCode, json }); });
+				});
+				r.on("error", reject);
+				r.end(data);
+			});
+			const close = () => new Promise((resolve) => { if (listener.closeAllConnections) listener.closeAllConnections(); listener.close(resolve); });
+			return { db, send, close };
+		};
+		// A guess that writes nothing either way: a reserved username is refused
+		// after the own-password check, so only that check's answer differs.
+		const guess = (send, password) => send("POST", "/api/users", { username: "dispatch", password, role: "Dispatcher" });
+		const got = (r) => `${r.status} ${(r.json || {}).code || ""}`.trim();
+		{
+			const w = await world(true);
+			const answers = [];
+			for (let i = 1; i <= 5; i++) answers.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 five wrong guesses each write nothing (${answers.map(got).join(", ")})`,
+				answers.every((r) => r.status === 409 && r.json.code === "USERNAME_RESERVED"));
+			const sixth = await guess(w.send, ADMIN_OWN);
+			check(`§8 …and the sixth, the admin's own password, is 429, not PASSWORD_IS_YOURS (got ${got(sixth)})`, sixth.status === 429);
+			check("§8 …with nothing created", w.db.prepare("SELECT COUNT(*) AS n FROM users WHERE username = 'dispatch'").get().n === 0);
+			await w.close();
+		}
+		{
+			const w = await world(true);
+			const resets = [];
+			for (let i = 1; i <= 3; i++) resets.push(await w.send("PUT", "/api/users/7", { password: `Reset-Guess-${i}!` }));
+			const creates = [];
+			for (let i = 1; i <= 3; i++) creates.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 resets and creates share one budget: three resets, then the third create is 429 (resets ${resets.map(got).join(", ")}; creates ${creates.map(got).join(", ")})`,
+				resets.every((r) => r.status === 200) && creates[0].status === 409 && creates[1].status === 409 && creates[2].status === 429);
+			await w.close();
+		}
+		{
+			const w = await world(false);
+			const answers = [];
+			for (let i = 1; i <= 6; i++) answers.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 flag off: six creates in a row are not limited, as before (${answers.map(got).join(", ")})`,
+				answers.every((r) => r.status === 409 && r.json.code === "USERNAME_RESERVED"));
+			await w.close();
 		}
 	}
 

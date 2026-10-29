@@ -92,7 +92,6 @@ const { execFileSync, spawnSync } = require("child_process");
 const crypto = require("crypto");
 
 const SCRIPT = path.join(__dirname, "refresh-env.js");
-const SERVER = path.join(__dirname, "..", "server.js");
 const KEEP = process.argv.includes("--keep");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-sanitize-test."));
 
@@ -295,6 +294,8 @@ const MUST_NOT_SURVIVE = [
 	// Signing evidence — personal data about the SIGNER, and invisible to the
 	// free-text sweep because none of it is email- or SSN-shaped.
 	"203.0.113.77", "AppleWebKit/605.1.15", "I, Sam Driver, agree to the terms",
+	// A staff sign-in's IP and browser (sign_in_network): the table is emptied.
+	"203.0.113.88", "NamedLoginsTest/1.0",
 	// ⚠️ The 2026-08-13 HIGH finding: licence and medical-card PHOTOGRAPHS, and
 	// the home locality left behind beside an already-"REDACTED" address. All of
 	// it invisible to stage 3h, so the column list is the only thing that reaches
@@ -374,6 +375,7 @@ function seedDatabase(dbPath) {
 		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
 		CREATE TABLE investor_onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signature_image TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY, driver_name TEXT, latitude REAL, longitude REAL, recorded_at TEXT);
+		CREATE TABLE sign_in_network (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, user_id INTEGER NOT NULL, at TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', ip_source TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '');
 		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, dropped_reason TEXT DEFAULT '', geocoded_location TEXT, fetched_at TEXT);
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, sender TEXT, body TEXT, created_at TEXT);
 		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY, action TEXT, details TEXT, created_at TEXT);
@@ -462,6 +464,11 @@ function seedDatabase(dbPath) {
 		.run(1, "Pat Investor", "data:image/png;base64,BBBB", ...EVIDENCE);
 	db.prepare("INSERT INTO driver_locations (id,driver_name,latitude,longitude,recorded_at) VALUES (?,?,?,?,?)")
 		.run(1, "Sam Driver", 29.76, -95.36, "2026-05-01 10:00:00");
+	// A Super Admin's sign-in IP and browser (lib/sign-in.js), kept on production
+	// for 90 days and never on a copy. Neither is email- or SSN-shaped, so only the
+	// table wipe reaches them.
+	db.prepare("INSERT INTO sign_in_network (audit_id,user_id,at,ip,ip_source,user_agent) VALUES (?,?,?,?,?,?)")
+		.run(1, 1, "2026-10-28T12:00:00.000Z", "203.0.113.88", "proxy", "NamedLoginsTest/1.0 (made-up staff browser)");
 
 	// Telemetry, so the trim has something to do and the artifact is realistic.
 	const tel = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id,latitude,longitude,speed,dropped_reason,geocoded_location,fetched_at) VALUES (?,?,?,?,'',?,?)");
@@ -1002,6 +1009,12 @@ function extractFn(src, name) {
 		check("the old bearer token is gone", !raw.includes("live-bearer-token-must-be-regenerated"));
 		check("the invitation link's stored hash is replaced", !raw.includes(INVITE_TOKEN_HASH));
 		check("production password hashes are gone", !raw.includes("productionhashthatmustnotsurvive"));
+		{
+			const db = openDb(artifactDb);
+			let left = -1;
+			try { left = db.prepare("SELECT COUNT(*) c FROM sign_in_network").get().c; } finally { db.close(); }
+			check("the staff sign-in IP and browser records are emptied (sign_in_network)", left === 0, `${left} row(s) left`);
+		}
 
 		// ⚠️ THE OTHER DIRECTION, and it is not padding. A sanitizer graded only on
 		// what it removes passes perfectly by emptying the database, so what it must
@@ -1104,7 +1117,7 @@ function extractFn(src, name) {
 			// quiet twenty thousand lines away.
 			let parser = null, parseErr = "";
 			try {
-				const src = fs.readFileSync(SERVER, "utf8");
+				const src = require("./lib/server-source").serverSource();
 				parser = new Function(`${extractFn(src, "parsePeriodRefusalDetail")}\nreturn parsePeriodRefusalDetail;`)();
 			} catch (e) { parseErr = e.message; }
 			check("server.js's own parsePeriodRefusalDetail() was extracted", !!parser, parseErr);
@@ -1744,6 +1757,12 @@ function extractFn(src, name) {
 			`{ address: "REDACTED", city: "", state: "", zip: "" }`,
 			`{ address: "REDACTED" }`,
 			/driver home (city|state|ZIP)\(s\) survived in drivers_directory\./);
+		// A staff sign-in's IP and browser: only the sign_in_network wipe reaches
+		// them, and only its MUST_BE_EMPTY_TABLES entry proves the wipe still runs.
+		scrubMutant("M9b", "the sign_in_network wipe is dropped",
+			`const n = db.prepare("DELETE FROM sign_in_network").run().changes;`,
+			"const n = 0;",
+			/staff sign-in IP and browser record\(s\) survived/);
 		// ⚠️ M10 proves the NUL fixture is load-bearing rather than merely
 		// present. Removing the prefilter's blob-length clause makes SQLite's
 		// LIKE/GLOB stop at the embedded NUL, so the scrub can no longer SEE that

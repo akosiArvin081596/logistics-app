@@ -60,7 +60,7 @@ const die = (msg) => { console.error(`FAIL  ${msg}`); process.exit(1); };
 // ---------------------------------------------------------------------------
 // Lifting (same scanner as test-uploads-root-guard.js)
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 function skipString(i) {
 	const q = SRC[i];
 	for (i++; i < SRC.length && SRC[i] !== q; i++) if (SRC[i] === "\\") i++;
@@ -347,10 +347,11 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 			ok(`§1 Driver A is refused B's receipt through ${label}`, (await T.get(p, U.drvA)).status === 404);
 		}
 
-		const pdfOwn = await T.get(R(F.A_PDF), U.drvA);
-		ok("§1 a PDF receipt opens for its driver as application/pdf, unchanged", pdfOwn.status === 200 && /application\/pdf/.test(pdfOwn.headers["content-type"]) && pdfOwn.body.equals(IMG.pdf));
-		ok("§1 ... and for a Dispatcher", (await T.get(R(F.A_PDF), U.disp)).status === 200);
-		ok("§1 ... and is refused to another driver and an Investor", refused(await T.get(R(F.A_PDF), U.drvB)) && refused(await T.get(R(F.A_PDF), U.invNone)));
+		// PDF receipts are staff only since 2026-10-22 (scripts/test-receipt-pdf-access.js).
+		const pdfDisp = await T.get(R(F.A_PDF), U.disp);
+		ok("§1 a PDF receipt opens for a Dispatcher as application/pdf, unchanged", pdfDisp.status === 200 && /application\/pdf/.test(pdfDisp.headers["content-type"]) && pdfDisp.body.equals(IMG.pdf));
+		ok("§1 ... and is refused to its own driver, another driver and an Investor",
+			refused(await T.get(R(F.A_PDF), U.drvA)) && refused(await T.get(R(F.A_PDF), U.drvB)) && refused(await T.get(R(F.A_PDF), U.invNone)));
 
 		ok("§1 a file no row names is refused, Super Admin included", refused(await T.get(R(F.ORPHAN), U.sa)) && refused(await T.get(R(F.ORPHAN), U.disp)));
 		ok("§1 an image cut inside its metadata is refused, never sent as stored", refused(await T.get(R(F.A_BROKEN), U.sa)));
@@ -411,7 +412,7 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 	{
 		const CASES = [
 			["their own truck's photo receipt", U.inv, F.A_JPG, 200, 404],
-			["their own truck's PDF receipt", U.inv, F.A_PDF, 200, 404],
+			["their own truck's PDF receipt (staff only since 2026-10-22)", U.inv, F.A_PDF, 404, 404],
 			["their own truck's receipt with a Personal part", U.inv, F.A_PERSONAL, 404, 404],
 			["another investor's truck's receipt", U.inv, F.B_JPG, 404, 404],
 			["the other investor's own receipt", U.invOther, F.B_JPG, 200, 404],
@@ -438,7 +439,7 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 			const admin = parse(await T6.get("/api/investor/expenses", U.sa));
 			ok(`§6 option ${tag}: the investor's list holds their five receipts`, inv.length === 5);
 			if (option === "own-trucks") {
-				ok("§6 option A: the list links the photos the investor may open", shown(inv, 1) === R(F.A_JPG) && shown(inv, 3) === R(F.A_PDF));
+				ok("§6 option A: the list links the photos the investor may open, and no PDF receipt", shown(inv, 1) === R(F.A_JPG) && shown(inv, 3) === "");
 				ok("§6 option A: the list sends no photo for the receipt with a Personal part", inv.length === 5 && shown(inv, 7) === "");
 			} else {
 				ok("§6 option B: the list sends no receipt photo at all", inv.length === 5 && inv.every((e) => e.photo_data === ""));

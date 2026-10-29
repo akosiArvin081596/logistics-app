@@ -7,8 +7,9 @@
  *   POST /api/documents/upload     the same gate, mounted before the limiter; a
  *                                  Dispatcher or a Driver uploads only POD, BOL,
  *                                  Receipt or Other (400 DOC_TYPE_NOT_ALLOWED).
- *   PUT  /api/messages/read        Super Admin and Dispatcher mark any message;
- *                                  every other caller only messages addressed to them.
+ *   PUT  /api/messages/read        Super Admin marks any message, a Dispatcher any
+ *                                  but one in an investor conversation; every
+ *                                  other caller only messages addressed to them.
  *   PUT  /api/notifications/read   Super Admin marks any notification; every
  *                                  other caller only notifications addressed to them.
  *   GET  /api/driver/:driverName   builds its `diagnostic` block for Super Admin only.
@@ -42,7 +43,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let passed = 0;
 let failed = 0;
@@ -93,6 +94,13 @@ const sentIfLoadOwnershipUnverified = new Function(`${liftFn("sentIfLoadOwnershi
 const resolveDriverActor = new Function("normalizeDriverName",
 	`${liftFn("resolveDriverActor")}\nreturn resolveDriverActor;`)(normalizeDriverName);
 const readFlagOwnName = new Function(`${liftFn("readFlagOwnName")}\nreturn readFlagOwnName;`)();
+// Investor conversations are Super Admin only: the rule and who reads them.
+const readsInvestorChats = new Function(`${liftFn("readsInvestorChats")}\nreturn readsInvestorChats;`)();
+const INVESTOR_CHAT_SQL = (() => {
+	const m = SRC.match(/\nconst INVESTOR_CHAT_SQL = (`[^`]*`);/);
+	if (!m) fatal("could not locate INVESTOR_CHAT_SQL in server.js");
+	return new Function(`return ${m[1]};`)();
+})();
 // The Documents-panel filter the list route shares with the /uploads root guard,
 // and the rate-con fragment it is built from, evaluated from server.js so the
 // lifted route runs with the shipped value.
@@ -105,6 +113,10 @@ const LOAD_PANEL_DOCUMENT_FILTER = (() => {
 	return new Function(`${line("RATECON_DOCUMENT_SQL")}${line("LOAD_PANEL_DOCUMENT_FILTER")}return LOAD_PANEL_DOCUMENT_FILTER;`)();
 })();
 const isRateConDocType = new Function(`${liftFn("isRateConDocType")}\nreturn isRateConDocType;`)();
+// Which rows a Driver's panel keeps: those filed under him (its own runner is
+// scripts/test-driver-docs-current-holder.js).
+const documentFiledUnder = new Function("normalizeDriverName",
+	`${liftFn("documentFiledUnder")}\nreturn documentFiledUnder;`)(normalizeDriverName);
 const UPLOAD_TYPE_SRC = liftFn("uploadDocTypeFor");
 const buildUploadDocTypeFor = (src) => new Function(`${src}\nreturn uploadDocTypeFor;`)();
 
@@ -122,9 +134,12 @@ const JT = {
 
 // Every Job Tracking read and every statement prepared is counted, so "refused
 // before any read" is asserted rather than assumed.
-const counters = { sheetReads: 0, prepared: [], limiter: 0, files: [], emits: 0, emitted: [] };
+// `indexReads`: the list route's own Job Tracking read for a Dispatcher, which
+// names the load as shown (WITHHELD LOAD KEYS); no ownership read.
+const counters = { sheetReads: 0, indexReads: 0, prepared: [], limiter: 0, files: [], emits: 0, emitted: [] };
 function resetCounters() {
 	counters.sheetReads = 0;
+	counters.indexReads = 0;
 	counters.prepared.length = 0;
 	counters.limiter = 0;
 	counters.files.length = 0;
@@ -143,14 +158,20 @@ const DOC_IO = {
 		except: (other) => ({ emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, except: other, event, payload }); } }),
 	}),
 };
-const DISPATCH_EMIT_NAMES = ["emitDispatchByRole", "loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadId", "staffDispatchNotice", "emitDispatchNotice", "emitLoadEventToDispatch"];
+// The WITHHELD LOAD KEYS helpers both routes read the load ID through (and the
+// per-role send names a key by), as shipped: flag off, no key named, so the ID
+// as sent and no key served.
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+const DISPATCH_EMIT_NAMES = ["emitDispatchByRole", "loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadIdIndex", "routeShownLoadIdIndex",
+	"shownLoadId", "staffDispatchNotice", "emitDispatchNotice", "emitLoadEventToDispatch"];
 const DISPATCH_EMITS = (() => {
 	const re = SRC.match(/\nconst BROKER_WITHHELD_RE = (\/[^\n]*\/i);\n/);
 	if (!re) fatal("BROKER_WITHHELD_RE not found in server.js");
-	return new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+	return new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "loadKeyFor",
 		`const BROKER_WITHHELD_RE = ${re[1]};\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n` +
+		"const SHOWN_LOAD_ID_INDEX = Symbol(\"shownLoadIdIndex\");\nconst SHOWN_LOAD_ID_INDEXES = new WeakMap();\n" +
 		`${DISPATCH_EMIT_NAMES.map((n) => liftFn(n)).join("\n")}\nreturn { ${DISPATCH_EMIT_NAMES.join(", ")} };`,
-	)(DOC_IO, require("../lib/broker-contact"), true);
+	)(DOC_IO, require("../lib/broker-contact"), true, KEY_HELPERS.loadKeyFor);
 })();
 
 // The real ownership check, over the canned sheet and an empty deleted_loads.
@@ -174,7 +195,8 @@ docDb.exec(`
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL,
 		drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '',
-		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL
+		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL,
+		uploaded_by_user_id INTEGER DEFAULT NULL, uploaded_by_role TEXT DEFAULT NULL
 	);
 	INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES
 		('L-100', 'Desoren King', 'POD', 'L-100_POD_1.pdf', '/uploads/L-100_POD_1.pdf'),
@@ -192,8 +214,11 @@ const limiter = (req, res, next) => { counters.limiter++; next(); };
 
 function documentDeps(overrides = {}) {
 	return {
+		...KEY_HELPERS,
+		getJobTrackingCached: async () => { counters.indexReads++; return JT; },
 		requireRole, requireAuth, driverWriteLimiter: limiter,
 		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER, isRateConDocType,
+		documentFiledUnder,
 		uploadDocTypeFor: buildUploadDocTypeFor(UPLOAD_TYPE_SRC),
 		db: docDbRecorded,
 		// Upload plumbing. The image branch is never taken (every upload below is a
@@ -409,8 +434,10 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 			(3, 'investor1', 'message', 'n3'),
 			(4, 'dispatch1', 'message', 'n4'),
 			(5, '', 'message', 'n5');
+		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL);
+		INSERT INTO users (id, username, role) VALUES (5, 'investor1', 'Investor'), (6, 'investor2', 'Investor');
 	`);
-	const flagDeps = { requireAuth, driverWriteLimiter: limiter, db: flagDb, readFlagOwnName, console: quiet };
+	const flagDeps = { requireAuth, driverWriteLimiter: limiter, db: flagDb, readFlagOwnName, readsInvestorChats, INVESTOR_CHAT_SQL, console: quiet };
 	const msgRead = buildRoute("put", "/api/messages/read", flagDeps);
 	const notifRead = buildRoute("put", "/api/notifications/read", flagDeps);
 	const ALL = [1, 2, 3, 4, 5, 6];
@@ -435,6 +462,9 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await mark(msgRead, "messages", DISPATCH, [1, 3]);
 	ok("messages: Dispatcher keeps the inbox-wide form (the Dispatch desk's rows and others)",
 		r.status === 200 && r.marked === "1,3", JSON.stringify(r));
+	r = await mark(msgRead, "messages", DISPATCH, ALL);
+	ok("messages: Dispatcher marks none of an investor conversation's (Super Admin only)",
+		r.status === 200 && r.marked === "1,2,3,6", JSON.stringify(r));
 	r = await mark(msgRead, "messages", SUPER, [5, 6]);
 	ok("messages: Super Admin keeps the inbox-wide form", r.status === 200 && r.marked === "5,6", JSON.stringify(r));
 
@@ -455,14 +485,19 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	console.log("\n§4  GET /api/driver/:driverName — the diagnostic block");
 	// =========================================================================
 	// A sheet with loads, none of them Nolan's: the "no_loads_for_driver" case.
+	const emptyDb = { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) };
 	const driverDeps = {
 		requireRole, requireAuth, normalizeDriverName, findCol,
 		sanitizeBrokerColumns: (headers, rows) => rows,
 		findDirectoryRowForDriver: () => null,
 		findTruckForDriver: () => null,
-		db: { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) },
+		db: emptyDb,
+		// Each invoice card's pay_basis: the shipped invoicePayBasesOf() over that db.
+		invoicePayBasesOf: new Function("db",
+			`${liftFn("invoicePayBasis")}\n${liftFn("invoicePayBasesOf")}\nreturn invoicePayBasesOf;`)(emptyDb),
 		getJobTrackingCached: async () => JT,
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),
+		voiceNotes: require("../lib/voice-notes"),
 		getCarrierDBFromSQLite: () => ({ headers: ["Driver"], data: [] }),
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((x) => ({ ...x })),
@@ -478,6 +513,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 		// So are the load-instructions codes (scripts/test-driver-page-role-gate.js §8).
 		driverInstructions: { annotateDriverLoads() {} },
+		// The per-load document counts (scripts/test-driver-docs-current-holder.js §4).
+		LOAD_PANEL_DOCUMENT_FILTER, documentFiledUnder,
 		console: quiet,
 	};
 	const driverRoute = buildRoute("get", "/api/driver/:driverName", driverDeps);

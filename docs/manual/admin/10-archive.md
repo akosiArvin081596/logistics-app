@@ -54,7 +54,7 @@ Each tab has a search bar. Type a Load ID, driver name, broker, city — results
 
 ## Archive's relationship to production
 
-The current production sheet (`1ey1n0AAG0k8k...`) is where current operations live. The archive (`1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`) is the historical reference.
+The current production sheet (`SPREADSHEET_ID`) is where current operations live. The archive (`ARCHIVE_SPREADSHEET_ID`) is the historical reference.
 
 Operationally:
 
@@ -63,9 +63,11 @@ Operationally:
 
 The system uses the production sheet ID for all live operations. The archive viewer reads from the archive sheet ID. They're separate logical stores.
 
+Production's own server reads production's archive even when `ARCHIVE_SPREADSHEET_ID` is unset. Any other copy (a local run, the replica, staging) has no archive until that setting names one: its Archive page stays empty.
+
 ## Archive memory
 
-A user memory in your `MEMORY.md` reminds you that the production sheet ID is `1ey1n0AAG0k8k...`, NOT `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI` (which is the archive). When troubleshooting or running scripts that need the sheet ID, use the production one. Mixing them up causes confusion.
+A user memory in your `MEMORY.md` reminds you that the production sheet is the one `SPREADSHEET_ID` names, NOT the one `ARCHIVE_SPREADSHEET_ID` names (which is the archive). When troubleshooting or running scripts that need the sheet ID, use the production one. Mixing them up causes confusion.
 
 ## Growing the archive
 

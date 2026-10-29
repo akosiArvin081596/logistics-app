@@ -38,7 +38,7 @@ import { fileURLToPath, pathToFileURL } from 'url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const require = createRequire(import.meta.url)
-const SRC = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
+const SRC = require('./lib/server-source.js').serverSource()
 const RATECON_ROUTE_SRC = fs.readFileSync(path.join(ROOT, 'lib', 'ratecon-pdf-route.js'), 'utf8')
 const VIEW_SRC = fs.readFileSync(path.join(ROOT, 'client', 'src', 'views', 'NewJobView.vue'), 'utf8')
 

@@ -217,6 +217,8 @@ onBeforeUnmount(() => {
   max-width: 440px;
   width: 90%;
   max-height: 90vh;
+  /* The visible height on a phone with its toolbars showing (90vh is the fallback). */
+  max-height: 90dvh;
   overflow-y: auto;
   text-align: center;
 }

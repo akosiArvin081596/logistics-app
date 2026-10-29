@@ -37,7 +37,7 @@ const { createRequire } = require("module");
 const { closure } = require("./server-lift");
 
 const ROOT = path.join(__dirname, "..", "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./server-source").serverSource();
 const appRequire = createRequire(path.join(ROOT, "server.js"));
 const Database = appRequire("better-sqlite3");
 
@@ -83,7 +83,11 @@ const ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
-	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter"];
+	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter",
+	// The PDF receipt child's self-test probes: made-up files a runner names
+	// (opts.receiptPdfProbes); without them the self-test fails and every PDF
+	// receipt keeps its note, as on a server whose probes are missing.
+	"receiptPdfProbePaths"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE"];
 
 const lifted = new Map();
@@ -268,6 +272,7 @@ function buildPersonalWorld(opts = {}) {
 		personalReceiptLimiter: (req, res, next) => next(),
 		personalRouteLimiter: (req, res, next) => next(),
 		personalListLimiter: (req, res, next) => next(),
+		receiptPdfProbePaths: () => ({ ...(opts.receiptPdfProbes || { env: "", db: "" }) }),
 	};
 	const { roots, code } = liftedCode(!!opts.receipts);
 	const body = [

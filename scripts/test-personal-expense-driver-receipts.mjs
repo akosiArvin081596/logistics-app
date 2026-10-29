@@ -30,6 +30,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -171,7 +172,7 @@ section('§3 the Invoices tab lists them')
 
 section('§4 the payload\'s receipts are the driver\'s own, with or without a load')
 {
-  const src = read('server.js')
+  const src = serverSource()
   const m = src.match(/const driverExpenses = db\s*\.prepare\(\s*`([\s\S]*?)`,?\s*\)\s*\.all\(nameLower\);/)
   check('the driver route\'s expenses query is found', !!m, true)
   if (m) {

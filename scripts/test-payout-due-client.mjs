@@ -23,6 +23,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -93,7 +94,7 @@ check('1y paying month: unchanged, no reason', nothingDueReason(partlyAbsorbed),
 check('1z $0 month adjusted up: unchanged, no reason', nothingDueReason(adjustedUp), '')
 
 // ---------------------------------------------------------------- 2. the server's rule
-const server = read('server.js')
+const server = serverSource()
 check('2a status route computes the payable as round(amount + adjustment)',
   server.includes('const settleable = Math.round((payout.amount || 0) + Number(payout.adjustment || 0));'), true)
 check('2b status route refuses a forward move on a $0 payable (reopen exempt)',

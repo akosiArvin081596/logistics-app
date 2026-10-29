@@ -64,6 +64,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { useAuthStore } from '../stores/auth'
 import { normDriver } from '../lib/driverName'
+import { loadIdShown, loadKeyStale } from '../lib/loadRef'
 import { sortDriversForAssign } from '../lib/availabilityText'
 import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
@@ -155,6 +156,13 @@ const lastUpdated = computed(() => {
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }
 async function refresh() { try { await store.refresh() } catch { toast('Failed to load dashboard', 'error') } }
+// A refused action says why. A stale load key (404 LOAD_KEY_UNKNOWN: the server
+// restarted since the rows were read) also reads the dashboard again, once, so
+// the next try names the load by its new key.
+function actionFailed(err, fallback) {
+  toast((err && err.message) || fallback, 'error')
+  if (loadKeyStale(err)) refresh()
+}
 // A driver recorded off on the load's days: the server answers 409
 // DRIVER_OFF_DUTY and the person chooses "Assign anyway" or keeps things as they
 // were (useOffDutyConfirm()).
@@ -163,9 +171,10 @@ async function handleAssign({ rowIndex, driver, job }) {
     const r = await withOffDutyConfirm((confirmOffDuty) => store.assignDriver(rowIndex, driver, job, store.headers, { confirmOffDuty }))
     if (r && r.offDutyDeclined) return
     const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
-    toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success')
+    // The load as the screen shows it ("[contact withheld]" for an ID served blank).
+    toast(`${driver} assigned to ${(lc && loadIdShown(job, lc)) || 'load'}`, 'success')
     refresh()
-  } catch (err) { toast((err && err.message) || 'Failed to assign', 'error') }
+  } catch (err) { actionFailed(err, 'Failed to assign') }
 }
 async function handleReassign({ rowIndex, newDriver, job }) {
   try {
@@ -173,11 +182,11 @@ async function handleReassign({ rowIndex, newDriver, job }) {
     if (r && r.offDutyDeclined) { refresh(); return }
     toast(`Reassigned to ${newDriver}`, 'success')
     refresh()
-  } catch (err) { toast((err && err.message) || 'Failed to reassign', 'error') }
+  } catch (err) { actionFailed(err, 'Failed to reassign') }
 }
-async function handleCancel({ rowIndex, job, reason }) { try { await store.cancelLoad(rowIndex, job, store.headers, reason); toast('Assignment cancelled', 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to cancel', 'error') } }
+async function handleCancel({ rowIndex, job, reason }) { try { await store.cancelLoad(rowIndex, job, store.headers, reason); toast('Assignment cancelled', 'success'); refresh() } catch (err) { actionFailed(err, 'Failed to cancel') } }
 function handleDeleted({ loadId }) { toast(`Load ${loadId} deleted`, 'success'); refresh() }
-async function handleStatusUpdate({ rowIndex, newStatus, job, _override }) { if (_override) { toast(`Status overridden: ${newStatus}`, 'success'); refresh(); return } try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to update', 'error') } }
+async function handleStatusUpdate({ rowIndex, newStatus, job, _override }) { if (_override) { toast(`Status overridden: ${newStatus}`, 'success'); refresh(); return } try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch (err) { actionFailed(err, 'Failed to update') } }
 function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); refresh() }
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
 function onNewLoad() { toast('New load received', 'info'); refresh() }

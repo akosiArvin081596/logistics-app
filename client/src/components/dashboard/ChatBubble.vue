@@ -1,7 +1,12 @@
 <template>
   <div :class="['msg-bubble', isSent ? 'sent' : 'received']">
     <div v-if="msg.loadId" class="msg-load-tag">{{ msg.loadId }}</div>
-    <div v-if="msg.attachment_url" class="msg-attachment">
+    <!-- A voice note the server measured plays from its own route; any other
+         row (one this reader may not play, a removed file) shows its text. -->
+    <div v-if="voice" class="msg-attachment">
+      <VoiceNotePlayer :src="voiceNoteSrc(msg)" :duration-ms="Number(msg.voice_duration_ms)" :sent="isSent" />
+    </div>
+    <div v-else-if="msg.attachment_url" class="msg-attachment">
       <!-- A photo opens full size (MessagingPanel's viewer); focus comes back
            to this button when the viewer closes. -->
       <button
@@ -16,7 +21,7 @@
       <a v-else-if="ownFile" :href="msg.attachment_url" target="_blank" class="msg-attach-file">{{ msg.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
       <span v-else class="msg-attach-file">File unavailable</span>
     </div>
-    <div v-if="msg.message">{{ msg.message }}</div>
+    <div v-if="msg.message && !voice">{{ msg.message }}</div>
     <div class="msg-meta">
       {{ time }}
       <span v-if="isSent" class="read-tick" :class="{ read: msg.read }">{{ msg.read ? '&#10003;&#10003;' : '&#10003;' }}</span>
@@ -28,20 +33,24 @@
 import { computed } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoAlt, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
+import { isServerVoiceNote, voiceNoteSrc } from '../../lib/voiceNotes'
+import { isStaffMessage } from '../../utils/sharedLogin'
+import VoiceNotePlayer from '../shared/VoiceNotePlayer.vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
+  // The thread's other side (a driver name or an investor username): a message
+  // not from it was sent by staff, under whatever name.
+  party: { type: String, default: '' },
 })
 const emit = defineEmits(['open-photo'])
 
+const voice = computed(() => isServerVoiceNote(props.msg))
 const photo = computed(() => isChatPhoto(props.msg))
 const ownFile = computed(() => isOwnUploadUrl(props.msg.attachment_url))
 const photoAlt = computed(() => chatPhotoAlt(props.msg))
 
-const isSent = computed(() => {
-  const from = (props.msg.from || '').toLowerCase()
-  return from === 'dispatch' || from === 'admin' || from === 'super_admin'
-})
+const isSent = computed(() => isStaffMessage(props.msg.from, props.party))
 
 // Message times render in the app zone (APP_TIMEZONE, US Eastern) with a
 // visible zone label, never the viewer's zone. `msg.timestamp` is a true instant

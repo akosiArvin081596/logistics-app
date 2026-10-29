@@ -232,7 +232,7 @@ function cli(args, env = {}) {
 		try { world = fix.buildWorld({ db: f.db, dataDir: f.dir, render: stubRender }); } catch (e) { err = e; }
 		check("§2 every root lifts and compiles", world && fix.ROOTS.every((r) => world.liftedNames.includes(r)), err && err.message);
 		check("§2 no denied name is lifted", world && !world.liftedNames.some((n) => fix.DENIED.includes(n)));
-		const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+		const SRC = require("./lib/server-source").serverSource();
 		check("§2 the INSERT is the manual route's own", SRC.includes(fix.INSERT_INVOICE.split("\n")[0]) && SRC.includes(fix.INSERT_INVOICE.split("\n")[1].trim()));
 		f.db.close();
 	}
@@ -416,7 +416,7 @@ function cli(args, env = {}) {
 		const scriptSide = fixture();
 		const { out, err } = await attempt(scriptSide, {});
 		const routeSide = fixture();
-		const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+		const SRC = require("./lib/server-source").serverSource();
 		const HEAD = 'app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {';
 		const provided = ["db", "require", "console", "process", "__dirname", "DATA_DIR", "fetch", "app", "requireRole", "notifyChange", "renderPolicy"];
 		let routeOut = null;

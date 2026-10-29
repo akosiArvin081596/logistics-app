@@ -53,7 +53,7 @@ const Database = require("better-sqlite3");
 const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const CLIENT_FILES = {
 	view: "client/src/views/InvoicesView.vue",
 	store: "client/src/stores/invoices.js",
@@ -105,7 +105,10 @@ function harness(src) {
 		liftFn(src, "buildPaymentReport"), liftFn(src, "sanitizeManualInvoiceRows"),
 		liftFn(src, "invoiceListSummary", true) || "const invoiceListSummary = undefined;",
 		liftFn(src, "manualInvoiceTotals", true) || "const manualInvoiceTotals = undefined;",
-		"return { normalizeDriverName, driverOwnsInvoice, invoiceTotalDue, buildPaymentReport, sanitizeManualInvoiceRows, invoiceListSummary, manualInvoiceTotals };",
+		// The list's pay_basis and load_count (B23; scripts/test-invoice-day-rows.js).
+		liftFn(src, "invoicePayBasis", true) || "const invoicePayBasis = undefined;",
+		liftFn(src, "invoiceLoadCount", true) || "const invoiceLoadCount = undefined;",
+		"return { normalizeDriverName, driverOwnsInvoice, invoiceTotalDue, buildPaymentReport, sanitizeManualInvoiceRows, invoiceListSummary, manualInvoiceTotals, invoicePayBasis, invoiceLoadCount };",
 	].join("\n"))(db);
 	const routes = {};
 	const app = {};
@@ -120,6 +123,9 @@ function harness(src) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
+		// The closed-month invoice guard is off here (scripts/test-invoice-period-guard.js
+		// §7 runs it on).
+		INVOICE_CLOSED_MONTH_GUARD_ENABLED: false,
 		reservedDriverNameRefusal: () => null,
 		findInvoicePayee: () => null,
 		generateInvoiceNumber: (payee, start) => `INV-M-TEST-${start}-${rendered.length + 1}`,
@@ -434,8 +440,8 @@ const SERVER_BATTERIES = [
 // Each mutant rewrites the fix back to a narrower rule and must flip at least
 // one assertion. A test that passes on both has not tested anything.
 const SERVER_MUTANTS = [
-	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));",
-		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings, personal_lines: personalLines.get(r.id) || [] }));"],
+	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [],",
+		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings, personal_lines: personalLines.get(r.id) || [],"],
 	["the cards count deleted rows", "rows.filter((r) => !r.deleted_at && r.status === status)", "rows.filter((r) => r.status === status)"],
 	["the cards sum total_earnings", "live.reduce((s, r) => s + invoiceTotalDue(r), 0)", "live.reduce((s, r) => s + (r.total_earnings || 0), 0)"],
 	["the manual totals ignore the deductions", "totalDue: round2(subtotal - deductionsTotal)", "totalDue: round2(subtotal)"],

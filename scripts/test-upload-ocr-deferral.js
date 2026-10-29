@@ -34,7 +34,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let failed = 0;
 function ok(name, cond) {
@@ -112,8 +112,10 @@ ok("the enqueue only happens for a stored row with bytes to read",
 ok("OCR bytes are taken ONLY for an image Receipt (POD / BOL / Other never ran OCR)",
 	/let ocrSource = null;\s*if \(docType === "Receipt" && fileType !== 'document'\) \{[^}]*ocrSource = Buffer\.from\(/.test(ROUTE) &&
 	(stripComments(ROUTE).match(/\bocrSource = /g) || []).length === 2);
+// After ocr_text come the uploader's id and role (2026-10-22), so the pin asks
+// for the empty ocr_text right after driveUrl, then the call's end.
 ok("the INSERT stores an empty ocr_text and keeps the new row's id (lastInsertRowid)",
-	/documentId = db\.prepare\([\s\S]*?INSERT INTO documents[\s\S]*?\.run\([\s\S]*?driveUrl,\s*"",\s*\)\.lastInsertRowid;/.test(ROUTE));
+	/documentId = db\.prepare\([\s\S]*?INSERT INTO documents[\s\S]*?\.run\([\s\S]*?driveUrl,\s*"",[^;]*\)\.lastInsertRowid;/.test(ROUTE));
 ok("the success response is exactly { success, driveUrl }", /res\.json\(\{ success: true, driveUrl \}\);/.test(ROUTE));
 ok("the ownership check still runs before anything touches disk",
 	ROUTE.indexOf("loadBelongsToDriver(") > -1 && ROUTE.indexOf("loadBelongsToDriver(") < ROUTE.indexOf("fs.writeFileSync("));

@@ -3,11 +3,20 @@
 #
 #   scripts/e2e/boot-server.sh <worktree> <port> <db>
 #
-# Starts `node server.js` from <worktree> (dotenv reads .env from the cwd, and the
-# Google key is ./service-account-key.json; prep-worktree.sh links both) against
-# <db>, a copy setup-db.cjs made inside the work dir, in the background, bound to
-# 127.0.0.1. The log is <work dir>/server-<port>.log, and the PID is recorded in
-# <work dir>/server-<port>.pid. stop-server.sh <port> kills exactly that process.
+# Starts `node server.js` from <worktree> against <db>, a copy setup-db.cjs made
+# inside the work dir, in the background, bound to 127.0.0.1. The log is
+# <work dir>/server-<port>.log, and the PID is recorded in <work dir>/server-<port>.pid.
+# stop-server.sh <port> kills exactly that process.
+#
+# No real key and no .env: the server's settings are the made-up values and the
+# overrides below, all on its command line (no settings file is read). It preloads
+# scripts/e2e/fake-google.cjs, so require("googleapis") answers a stand-in: Sheets
+# come from <db>.sheets.json, a copy of the made-up fixture scripts/e2e/fixtures/
+# e2e-sheets.json made at the first boot on <db> (setup-db.cjs removes it with the
+# database, and a restart on the same <db> keeps what the run wrote), Drive refuses
+# every call, and dotenv loads nothing. The boot is refused when <worktree> holds a
+# .env or a service-account-key.json, and the server is stopped when its log does
+# not show the stand-in in place.
 #
 # Env:
 #   NODE_BIN      the node to run (default: `node` on PATH). Expected: .nvmrc's
@@ -23,8 +32,9 @@
 #                 and refuses SMTP, so nothing reaches Gmail. Refused when
 #                 fake-gmail.cjs is missing. Anything else, or unset: Gmail blanked.
 #   INVESTOR_LEASE_PAYOUTS_ENABLED  the lease payout flag, passed to the server as
-#                 given; unset or empty boots it OFF, whatever .env says (the E2E's
-#                 lease section and payout-parity.mjs set it explicitly).
+#                 given; unset or empty boots it OFF (the E2E's lease section and
+#                 payout-parity.mjs set it explicitly).
+#   E2E_BOOT_WAIT_S  seconds to wait for the server to answer (default 90).
 #   E2E_NO_CLIENT=1  boot without client/dist: for an API-only run
 #                 (payout-parity.mjs), which never requests a page.
 #   E2E_DRIVER_INSTRUCTIONS_DENY=<made-up value>  boot with the rate-con driver
@@ -32,8 +42,8 @@
 #                 value as the only CARRIER_ACCOUNT_NUMBERS_DENY_SECRET entry, for the
 #                 E2E's instructions section. Use an invented value (e.g. T8273641),
 #                 never a real one; it is set in this server's environment only and
-#                 never printed. Unset or empty: both off and blank, whatever .env
-#                 says. The driver screen flag and the Drive uploader stay off.
+#                 never printed. Unset or empty: both off and blank. The driver
+#                 screen flag and the Drive uploader stay off.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -72,30 +82,53 @@ else
   [ -d "$WT/client/dist" ] || refuse "no client/dist in $WT (run prep-worktree.sh, which builds it)"
 fi
 [ -e "$WT/node_modules" ] || refuse "no node_modules in $WT (run prep-worktree.sh, which links it)"
-[ -e "$WT/service-account-key.json" ] || refuse "no service-account-key.json in $WT (run prep-worktree.sh, which links it)"
-[ -e "$WT/.env" ] || refuse "no .env in $WT (run prep-worktree.sh, which links it)"
+# A real .env or Google key in the worktree is never used: the server's dotenv would
+# read the .env from its cwd if the stand-in were ever missing. Nothing here opens
+# either file; their presence alone refuses the boot.
+for f in .env service-account-key.json; do
+  if [ -e "$WT/$f" ] || [ -L "$WT/$f" ]; then
+    refuse "$WT holds $f; the e2e server runs on the made-up settings below and the Google stand-in only. Remove that link or file from the worktree (prep-worktree.sh no longer makes it)"
+  fi
+done
 
-# The sheet the server will really use. dotenv never overrides a variable that is
-# already set, so an exported SPREADSHEET_ID (even an empty one) beats .env; and
-# server.js falls back to PRODUCTION's sheet when the value is empty. The value
-# checked here is passed to the server explicitly below, so what was checked is
-# what runs. It is never printed.
-PROD_SHEET=1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo
-if [ "${SPREADSHEET_ID+set}" = set ]; then
-  SHEET="$SPREADSHEET_ID"; SHEET_FROM="the environment"
-else
-  SHEET="$("$NODE_BIN" -e '
-    const path = require("path"), fs = require("fs"), { createRequire } = require("module")
-    const wt = process.argv[1]
-    const dotenv = createRequire(path.join(wt, "package.json"))("dotenv")
-    process.stdout.write(dotenv.parse(fs.readFileSync(path.join(wt, ".env"))).SPREADSHEET_ID ?? "")
-  ' "$WT")" || refuse "could not read $WT/.env with the app's dotenv"
-  SHEET_FROM="$WT/.env"
+# The settings a .env used to give the server, made-up values only (no real key,
+# sheet, folder, inbox or account; scripts/test-e2e-no-real-keys.js checks them).
+# They go on the server's command line below with the other overrides, so whatever
+# the caller exported is never used for them.
+#   SHEET          the made-up fixture's book (fixtures/e2e-sheets.json), which the
+#                  stand-in answers. Never empty: server.js refuses to start without
+#                  one (lib/sheet-id.js); only old exported builds (REF_A in
+#                  payout-parity.mjs) fell back to PRODUCTION's sheet on an empty value
+#   ARCHIVE_SHEET  a made-up archive book (the stand-in answers 404), so production's
+#                  archive id (server.js's default) is never named
+#   DRIVE_FOLDER   blank: no Drive folder
+#   SESSION_VALUE  a made-up session signing value
+#   ZONE           the business time zone
+SHEET=e2e-made-up-sheet
+ARCHIVE_SHEET=e2e-made-up-archive
+DRIVE_FOLDER=
+SESSION_VALUE=e2e-made-up-session
+ZONE=America/New_York
+echo "settings: made-up, on the command line (SPREADSHEET_ID=$SHEET, ARCHIVE_SPREADSHEET_ID=$ARCHIVE_SHEET); no settings file is read"
+if [ "${SPREADSHEET_ID+set}" = set ] && [ "$SPREADSHEET_ID" != "$SHEET" ]; then
+  echo "sheet: the exported SPREADSHEET_ID is ignored (not printed); the server gets the fixture's book"
 fi
-SHEET_TRIMMED="$(printf '%s' "$SHEET" | tr -d '[:space:]')"
-[ -n "$SHEET_TRIMMED" ] || refuse "SPREADSHEET_ID is unset or empty in $SHEET_FROM; server.js would fall back to PRODUCTION's sheet"
-[ "$SHEET_TRIMMED" != "$PROD_SHEET" ] || refuse "SPREADSHEET_ID in $SHEET_FROM is PRODUCTION's sheet"
-echo "sheet: SPREADSHEET_ID from $SHEET_FROM is set and is not production's"
+
+# The Google stand-in and its Sheets copy, beside the database in the work dir.
+FAKE_GOOGLE="$HERE/fake-google.cjs"
+FIXTURE="$HERE/fixtures/e2e-sheets.json"
+[ -f "$FAKE_GOOGLE" ] || refuse "$FAKE_GOOGLE is missing"
+[ -f "$FIXTURE" ] && [ ! -L "$FIXTURE" ] || refuse "$FIXTURE is missing or a symlink"
+SHEETS_COPY="$DB.sheets.json"
+if [ -L "$SHEETS_COPY" ]; then refuse "$SHEETS_COPY is a symlink"; fi
+if [ ! -e "$SHEETS_COPY" ]; then
+  cp "$FIXTURE" "$SHEETS_COPY"
+  chmod 600 "$SHEETS_COPY"
+  echo "sheet: a fresh copy of the made-up fixture at $SHEETS_COPY"
+else
+  echo "sheet: the run's copy of the made-up fixture at $SHEETS_COPY (setup-db.cjs on a new database starts it again)"
+fi
+echo "google: a stand-in (fake-google.cjs): Sheets read and write that copy, Drive refuses, no key is read and nothing goes to Google"
 
 # The maintenance notice: off unless asked for. It shows a popup and a banner to
 # investors and sends nothing anywhere; the audience is pinned so M1 has one.
@@ -116,7 +149,7 @@ echo "driver instructions: $([ "$DI_ENABLED" = true ] && echo 'ON (with the call
 
 # The mail recipients. server.js and lib/broker-invoice.js have no default for
 # them, so the run names example.test inboxes (a reserved name nothing delivers
-# to), whatever .env says: the admin notifications have a recipient, and an
+# to), whatever the caller exported: the admin notifications have a recipient, and an
 # invoice draft (captured by the fake Gmail, or answered as a preview without
 # it) is addressed as it would be in production, never to a real inbox.
 ADMIN_TO=admin@example.test
@@ -150,14 +183,24 @@ else
   echo "gmail: blanked (no mail target: an approve answers preview only)"
 fi
 
+# How long to wait for the server to answer: E2E_BOOT_WAIT_S seconds (default 90;
+# the harness's tests use a short one). Checked before anything is launched.
+WAIT_S="${E2E_BOOT_WAIT_S:-90}"
+case "$WAIT_S" in ''|*[!0-9]*) refuse "E2E_BOOT_WAIT_S must be a number of seconds, got '$WAIT_S'";; esac
+
 cd "$WT"
-# The fake is preloaded into the server alone: nothing below this line but the
-# server runs node.
-if [ -n "$FAKE_MOD" ]; then export NODE_OPTIONS="--require \"$FAKE_MOD\""; fi
-# dotenv never overrides a variable that is already set, so every value below,
-# including the empty ones, wins over .env.
+# The fakes are preloaded into the server alone: nothing below this line but the
+# server runs node. fake-google.cjs always; fake-gmail.cjs with E2E_FAKE_GMAIL=1.
+case "$FAKE_GOOGLE" in *'"'*|*'\'*) refuse "the path $FAKE_GOOGLE cannot be passed in NODE_OPTIONS";; esac
+PRELOAD="--require \"$FAKE_GOOGLE\""
+if [ -n "$FAKE_MOD" ]; then PRELOAD="$PRELOAD --require \"$FAKE_MOD\""; fi
+export NODE_OPTIONS="$PRELOAD"
+# Every value below wins over the caller's environment, the empty ones included. The
+# server's dotenv loads nothing (fake-google.cjs).
 env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
-  SPREADSHEET_ID="$SHEET" \
+  SPREADSHEET_ID="$SHEET" ARCHIVE_SPREADSHEET_ID="$ARCHIVE_SHEET" GOOGLE_DRIVE_FOLDER_ID="$DRIVE_FOLDER" \
+  SESSION_SECRET="$SESSION_VALUE" APP_TIMEZONE="$ZONE" GOOGLE_APPLICATION_CREDENTIALS= \
+  E2E_FAKE_SHEETS_FILE="$SHEETS_COPY" \
   GMAIL_USER="$G_USER" GMAIL_APP_PASSWORD="$G_PASS" E2E_FAKE_GMAIL_DIR="$FAKE_DIR" \
   ADMIN_NOTIFY_EMAIL="$ADMIN_TO" BISON_INVOICE_EMAIL="$BISON_TO" DEFAULT_INVOICE_EMAIL="$DEFAULT_TO" \
   N8N_INVOICE_WEBHOOK_URL= GEMINI_API_KEY= \
@@ -179,11 +222,19 @@ PID=$!
 printf '%s\n%s\n' "$PID" "$WT" >"$PIDFILE"
 echo "started pid $PID on 127.0.0.1:$PORT from $WT (log: $LOG)"
 
-# Wait until it answers (the boot reads the sheet first, and exits if it cannot).
-for i in $(seq 1 90); do
+# Wait until it answers (the boot reads the sheet copy first, and exits if it cannot),
+# up to WAIT_S seconds (checked before the launch, above).
+for i in $(seq 1 "$WAIT_S"); do
   if ! kill -0 "$PID" 2>/dev/null; then echo "server exited; see $LOG" >&2; tail -20 "$LOG" >&2; exit 1; fi
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/auth/session" || true)"
   if [ "$code" = "200" ]; then
+    # The Google stand-in must be in place; otherwise the server would have looked
+    # for a key. It is stopped instead.
+    if ! grep -qF 'fake-google: googleapis is a stand-in' "$LOG"; then
+      kill "$PID"; rm -f "$PIDFILE"
+      refuse "the server answers, but its log does not show fake-google.cjs in place; it was stopped (see $LOG)"
+    fi
+    grep -F 'fake-google: googleapis is a stand-in' "$LOG" | head -1
     # With the fake credentials, the server must also show the fake's hooks in
     # place; otherwise an approve would try the real Gmail. It is stopped instead.
     if [ -n "$FAKE_MOD" ] && ! grep -qF 'fake-gmail: imap.gmail.com goes to a fake IMAP server' "$LOG"; then
@@ -195,5 +246,5 @@ for i in $(seq 1 90); do
   fi
   sleep 1
 done
-echo "not ready after 90s; see $LOG. It is still running: stop it with stop-server.sh $PORT" >&2
+echo "not ready after ${WAIT_S}s; see $LOG. It is still running: stop it with stop-server.sh $PORT" >&2
 exit 1

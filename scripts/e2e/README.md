@@ -4,9 +4,10 @@ Playwright (`playwright-core`) drives the real LogisX UI in Chrome for Testing. 
 the screens, captions every step on the page, screenshots it, and writes one verdict per step to a results table. In this
 repo, "test" means this: a real browser run through the UI, headed so a person can watch, on a local server **and** on staging.
 
-It is **not part of `npm run ci`**, and it never runs in CI or on deploy. It is its own npm package (`package.json` here):
-the root install, CI and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
-`scripts/test-*` / `check-*` files.
+It is **not part of `npm run ci`** or of `ci.yml`, and it never runs on deploy. It is its own npm package (`package.json`
+here): the root install, `ci.yml` and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
+`scripts/test-*` / `check-*` files. Its own workflow, `.github/workflows/e2e.yml`, runs the sections the made-up seed
+supports on every PR into `main` and every push to `main`, on made-up data only (see "CI").
 
 What it covers today, by section (`ONLY` picks them):
 
@@ -34,7 +35,9 @@ What it covers today, by section (`ONLY` picks them):
   space doubled is deducted from their pay on the Financials page (E2). The startup expense backfill stamps the truck
   onto an expense filed under a driver's own account spelling when the truck assignment covering it stores that name
   with a different spacing (B1, planted before boot). A rate-con import onto a load whose Payments Table row already exists writes only the cells that change, so
-  text cells stay text (RC1). E1, N1, N1b, E2 and B1 are planted and local only; F1 and RC1 are local only.
+  text cells stay text (RC1). E1, N1, N1b, E2 and B1 are planted and local only. F1 and RC1 are SKIPPED in every run
+  for now: they read a row's formulas and cell formats with the Google API, which the harness no longer reaches (see
+  "Safety rails"). The names section (K1–K3) is SKIPPED for the same reason.
 - **ELD link (L1–L3).** A truck added today, with no load in any finalized month, links to an ELD device and unlinks
   from the Trucks page even while months are finalized (L1, L2; local and staging). A linked truck whose own Job
   Tracking loads reach a finalized month is still refused (409 `PERIOD_FINALIZED`), over finalized months only: every
@@ -132,21 +135,42 @@ expected to FAIL exactly the fix rows.
 - **Never production.** `e2e.mjs` refuses `app.logisx.com`. Staging, `staging-app.logisx.com`, is allowed.
   `boot-server.sh` refuses ports 3000 (production on the VPS) and 5173 (Vite), and any port already in use. It binds the
   server to 127.0.0.1.
-- **The local data is real.** A local run uses a private copy of the main checkout's `app.db`: unsanitized production
-  data, PII included. The copies, the logins, the screenshots, the results and the server logs all live in the
+- **The local data is made up by default.** `setup-db.cjs` with no `SOURCE_DB` builds the database from the app's own
+  schema with invented records only (see `setup-db.cjs` below). Real data is used only on purpose: `SOURCE_DB` naming a
+  database under `~/LogisX-replica/` (refused inside any checkout or worktree) gives a private copy of it, unsanitized,
+  PII included. Either way the database, the logins, the screenshots, the results and the server logs all live in the
   **work dir**, which is created `0700` outside every checkout. The scripts refuse a database outside the work dir or a
-  symlinked one. They also refuse a work dir that is inside a checkout, contains one, or is open to other users. The source
-  database is only ever opened read-only, and it is copied with SQLite's backup API, never `cp`.
-- **What leaves the machine, and what does not.** `boot-server.sh` blanks every outbound credential and forces every
-  integration and default-ON alert off on the command line (dotenv never overrides a variable that is already set). It
-  refuses a `SPREADSHEET_ID` that is unset, empty or production's, and it hands the server the exact value it checked.
-  - **Goes out: reads, and Maps calls that Google refuses.** The server signs in to Google with the service-account key
-    and reads that non-production Sheet (at boot, and whenever a page needs its rows). Its Google Maps calls go out
-    with the blanked key, and Google refuses them: the server log shows `Routes API HTTP error … 403`
-    (`PERMISSION_DENIED`). A page that draws a map also asks Google for the Maps script, with the blank browser key.
+  symlinked one. They also refuse a work dir that is inside a checkout, contains one, or is open to other users. A
+  `SOURCE_DB` is only ever opened read-only, and it is copied with SQLite's backup API, never `cp`.
+- **Verified on made-up data:** part 1 of the recipe below (`ONLY=trucks,dispatcher`: steps 1–12, R1–R16, D1–D3), all
+  PASS on 2026-10-23. The other sections have not been run on the made-up database yet; until they are, a step that
+  needs records the seed does not hold may FAIL or SKIP there.
+- **No real settings file and no Google key, ever.** `prep-worktree.sh` links only the two `node_modules` folders.
+  `boot-server.sh` refuses a worktree that holds a `.env` or a `service-account-key.json` (a file or a link), and it
+  never reads either. There is no settings file: `boot-server.sh` puts every setting on the server's command line,
+  made-up values only (no real key, sheet, folder, inbox or account; the fixture's book as `SPREADSHEET_ID`, a made-up
+  archive book and session value, no Drive folder, no Google credentials path), and blanks every outbound credential
+  and forces every integration and default-ON alert off. The server preloads `fake-google.cjs`: `require("googleapis")`
+  answers a stand-in, dotenv loads nothing, and any read of a settings file or a Google key is refused and logged.
+  `scripts/test-e2e-no-real-keys.js` (in `npm run check`) holds all of this.
+- **What leaves the machine, and what does not.**
+  - **Google Sheets and Drive: nothing.** The stand-in serves Sheets from `<db>.sheets.json`, a copy of the made-up
+    fixture `fixtures/e2e-sheets.json` made beside the database at its first boot (lib/replica-sheets.js, the local
+    replica's Sheets stub, does the reading and writing). `setup-db.cjs` removes the copy with the database, so a new
+    database starts from a fresh one; a restart on the same database keeps what the run wrote. Every Drive call is
+    refused (403). The key file is never opened and no token is ever requested. The server is given the fixture's book
+    (`SPREADSHEET_ID=e2e-made-up-sheet`, whatever the caller exported) and a made-up archive book, so neither
+    production's sheet nor its archive is ever named.
+  - **Goes out: Maps calls that Google refuses.** Its Google Maps calls go out with the blanked key, and Google refuses
+    them: the server log shows `Routes API HTTP error … 403` (`PERMISSION_DENIED`). A page that draws a map also asks
+    Google for the Maps script, with the blank browser key.
   - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
-    Linxup and ScanKit are blanked or off). Production's read-only archive sheet (the `ARCHIVE_SPREADSHEET_ID` default)
-    is read only by the `/archive` page and the rate-con reconcile; the run opens neither, and the reconcile is off.
+    Linxup and ScanKit are blanked or off).
+  - **The data.** By default both halves are made up: the database is `setup-db.cjs`'s made-up seed, whose driver
+    (`QA E2E Driver One`) and truck (`QA-E2E-T1`) are the fixture's, and the loads come from the made-up fixture. With
+    `SOURCE_DB` the database is a copy of real data while the loads are still the fixture's. Steps that look for a real
+    load on the sheet (a delivered load with a POD, a Bison load, a load per driver) find the fixture's three `QA-E2E-`
+    loads instead, and say so or SKIP.
   - **The rate-con Drive folder is never reached.** `server.js` has no default for `RATECON_DRIVE_FOLDER_ID`, and
     `boot-server.sh` blanks it like a key: the rate-con Drive features are off, no Drive call is made, and the server
     log carries one `[ratecon-drive]` warning at start saying so. `POST /api/loads/from-ratecon` (RC1) archives a
@@ -168,18 +192,15 @@ expected to FAIL exactly the fix rows.
     `smtp.gmail.com`, and nothing in the invoice section sends mail. The boot is refused when `fake-gmail.cjs` is
     missing, and the server is stopped when its log does not show the fake in place, because those credentials would
     otherwise be tried against the real Gmail.
-- **Steps that write the Google Sheet: F1, RC1, the names section (K1–K3) and the lease section's LD (one `QA-LEASE-`
-  row, through the app's own `POST /api/data`, which LX deletes by its load id), and only the local non-production one.** Every other step that
-  writes changes the SQLite copy only (trucks, drivers, expenses, sessions, audit rows). Both run only against a server
-  on this machine, and both resolve the sheet the way `boot-server.sh` does and refuse production's, with the
-  service-account key of the main checkout.
-  - F1 checks that the row it reads matches the server's copy of that load. It edits one row through the app, then
-    writes back every cell of that row that differs from its first read. It plants a formula there first when the row
-    has none, and clears it again (see the money-path section).
-  - RC1 snapshots the rows it and the import will write (values and formats): the next free row of the Payments
-    Table, of Job Tracking and of Job Details. It plants a Payments Table row for a synthetic load (`QA-RC1-<timestamp>`)
-    and checks that the server lists it. After the import it puts each of those rows back from its snapshot, when the
-    row holds that load, and re-reads it (see the money-path section).
+- **Sheet writes land in the run's fixture copy only.** The lease section's LD adds one `QA-LEASE-` row through the
+  app's own `POST /api/data` (LX deletes it by its load id), and any step that saves a load through the app writes
+  `<db>.sheets.json`. The harness itself never opens a sheet: the lease section checks the server's log shows
+  `fake-google.cjs` in place before LD writes.
+- **SKIPPED: F1, RC1 and the names section (K1–K3).** Each read and restored a sheet row's formulas, its cells'
+  entered types and their formats with the Google API and the main checkout's key. The harness no longer has a key,
+  and the stand-in keeps a formula as its text and has no formats, so on it these steps would pass on any build.
+  They record SKIP with that reason; porting them needs a stand-in that models formulas and formats. Their earlier
+  code is in git history (before this change).
 - **Passwords are never printed or written to a file.** They live in the macOS Keychain (service `logisx-e2e-local`,
   one account per login; `keychain.cjs`) and are read into memory when a run starts. The logins file (`0600`) holds
   names and ids only. The scripts print ids and booleans only.
@@ -207,17 +228,28 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 |---|---|
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
 | `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
-| `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
+| `setup-db.cjs` | Makes the run's database in the work dir with five logins: made-up by default (`seed-made-up.cjs`); a copy of a real database only when `SOURCE_DB` names one under `~/LogisX-replica/`. |
+| `source-db.cjs` | The one rule for a real `SOURCE_DB` (`setup-db.cjs`, `payout-parity.mjs`): only under `~/LogisX-replica/`, never inside a checkout or worktree (symlinks resolved, any folder holding `.git`). |
+| `seed-made-up.cjs` | The made-up database: the app's own schema (server.js booted once on an empty file), the five logins and the driver's truck, application and onboarding, all invented. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
+| `app-day.cjs` | The business day (`APP_TIMEZONE`, via `lib/app-time.js`) the made-up seed's assignment and B1's expense both take their day from, and that day's first instant. |
 | `verify-creds.cjs` | Confirms the logins file matches a copy. Prints booleans and ids only. |
-| `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's installs, `.env` and key, then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
+| `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's `node_modules` and `client/node_modules` (nothing else), then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
+| `fake-google.cjs` | The Google stand-in `boot-server.sh` preloads into every server it boots: `googleapis` answers Sheets from the run's copy of `fixtures/e2e-sheets.json` and refuses Drive; dotenv loads nothing; a read of a `.env` or a Google key is refused and logged. |
+| `fixtures/e2e-sheets.json` | The made-up Sheets book (Job Tracking with production's 26 headers, Payments Table, Job Details, Carrier Database; `QA-E2E-` loads only). Never written: each database gets its own copy. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
 | `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
+| `ci-run.sh` | The whole CI run on the made-up seed, the same command locally and in `e2e.yml` (see "CI"). |
+| `ci-gate.cjs` | The verdict on one part's `results-<tag>.md` for CI: fails on a FAIL row, a SKIP not on the part's allow list, no PASS, or a run never stamped finished. |
+| `ci-keychain.cjs` | A stand-in for macOS's `security` for a run with no Keychain: service `logisx-e2e-ci` only, the run's generated passwords in a `0600` file inside the work dir. |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 | `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
+| `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
+| `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
+| `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -226,23 +258,27 @@ directory outside every checkout.
 
 | In the work dir | What it is |
 |---|---|
-| `*.db` (+ `-wal`, `-shm`) | **Private copies of an unsanitized production database, PII included.** Never copy them elsewhere. |
+| `*.db` (+ `-wal`, `-shm`) | The run's databases: made up by default. A database made with `SOURCE_DB` is **a private copy of real data, PII included**: never copy it elsewhere. |
 | `logins.json` (`0600`) | The five logins' names and ids: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. No passwords: those are in the Keychain. |
-| `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
+| `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. On a `SOURCE_DB` copy, the screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
 | `fake-gmail/` (`0700`) | The drafts the fake Gmail captured (`E2E_FAKE_GMAIL=1`): each holds a real recipient, and the real invoice and POD PDFs of the load under test. |
 | `plant-journal.json` | Exists only while a planted value, a row the money path created, F1's planted sheet cell or RC1's sheet rows are live (see "Planting"). |
 
 ## Local run
 
-Run every command from the checkout under test (a worktree, or the main checkout):
+Run every command from the checkout under test (a worktree, or the main checkout), except `setup-db.cjs`, which needs a
+worktree:
 
 ```bash
 fnm exec --using=22.23.2 npm --prefix scripts/e2e ci                        # once
+# Once per worktree: link the main checkout's two node_modules folders as fix-bug.md step 3 says (running prep-worktree.sh is
+# still blocked by the secrets guard, whose rule predates this script linking only the installs). Never link .env or the key:
+# boot-server.sh refuses a worktree holding either.
+# setup-db.cjs boots this checkout's server.js once (boot-server.sh), so run it from a worktree, not the main checkout.
 W="$(node scripts/e2e/paths.cjs work-dir)"                                   # the work dir (created 0700)
-fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # add --force to replace a copy
+fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # made-up data (no SOURCE_DB); add --force to replace it
 fnm exec --using=22.23.2 node scripts/e2e/verify-creds.cjs "$W/qa.db"        # expect "password matches=true must_change_password=0" x5
-fnm exec --using=22.23.2 scripts/e2e/prep-worktree.sh                        # once per worktree
 # Part 1: trucks + Dispatcher data (5 sign-ins)
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"   # waits until it answers
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-trucks ONLY=trucks,dispatcher DB_PATH="$W/qa.db" \
@@ -266,8 +302,8 @@ BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-moneypath ONLY=moneypat
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 # Part 5: the invoice editor (1 sign-in). The draft route reads a load's POD from the checkout's uploads/ on disk,
-# so link the main checkout's POD files first (once per worktree; the main checkout has its own).
-E2E_LINK_PODS=1 fnm exec --using=22.23.2 scripts/e2e/prep-worktree.sh
+# so link the main checkout's POD files first (once per worktree; the main checkout has its own), by hand as
+# fix-bug.md step 3 says: prep-worktree.sh (E2E_LINK_PODS=1) is blocked by the secrets guard.
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice ONLY=invoice DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
@@ -321,8 +357,7 @@ REF_A=main REF_B=HEAD FLAG=off fnm exec --using=22.23.2 node scripts/e2e/payout-
 REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
 ```
 
-- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes
-  (up to 80 s more when F1 has to plant its formula and wait for the server's cached copy of the sheet), part 5 about
+- Headless: part 1 takes about 1.5 minutes, part 2 about 2.5 minutes, part 3 about 30 s, part 4 about 2.5 minutes, part 5 about
   1.5 minutes (headed about 3.5 minutes), part 5b well under a minute, part 6 about 1.5 minutes (T0) and 2–3 minutes
   (T1–T11), part 7 about 1.5 minutes (headed about 2.5 minutes), part 8 about 10 s (headed about 30 s), part 9 about
   1.5 minutes (up to 90 s more while the server's cached copy of the sheet catches up with the load LD adds). The
@@ -357,9 +392,35 @@ planted cases SKIP. They are never silently mis-tested.
 
 ### `setup-db.cjs <db> [--force]`
 
-- The source is `SOURCE_DB`, by default the main checkout's `app.db`. It is opened **read-only**
-  (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API. The copy must be inside the work dir.
-- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also clears the copy's sessions.
+**Made-up data by default.** With no `SOURCE_DB` (unset or empty), no existing database is opened. `seed-made-up.cjs`
+makes `<db>` (inside the work dir) an empty file and boots this checkout's `server.js` on it once with `boot-server.sh`
+(made-up settings, the Google stand-in, `E2E_NO_CLIENT=1`, a free port), so the schema is the one the app creates on a
+new install. It then makes the records through the app's own routes and stops that server by its PID with
+`stop-server.sh`:
+
+| Record | How | Made-up value |
+|---|---|---|
+| Super Admin | `POST /api/auth/setup` | `qa-e2e-admin` |
+| Dispatcher, two Investors | `POST /api/users` | `qa-e2e-dispatcher`, `qa-e2e-investor1`, `qa-e2e-investor2` |
+| Driver | `POST /api/users` | `qa-e2e-driver`, driver name `QA E2E Driver One` (the fixture's driver of `QA-E2E-1001` and `-1003`) |
+| Truck | `POST /api/trucks` | `QA-E2E-T1` (the fixture's truck), assigned to that driver, with a JPEG photo drawn at run time (the app's jimp) |
+| Application | SQL, server stopped | the driver's accepted application, a PNG `cdl_front` drawn at run time, `example.test` mail, no SSN or licence number |
+| Onboarding | SQL, server stopped | the driver `fully_onboarded` on that application 60 days ago (the Kit tab renders; the driver app's welcome card, shown for 14 days after onboarding, does not cover the run's taps) |
+| Assignment start | SQL, server stopped | the truck's assignment starts at the first instant of the business day (`APP_TIMEZONE`, `app-day.cjs`) the route made it on. The route stores its UTC instant, which from 8 PM Eastern names tomorrow, and B1's plant would find no assignment covering today |
+
+Every login gets `must_change_password = 0` and no session is left. The seed server's log, pid file and Sheets copy are
+removed, so the run's first boot starts a fresh copy of the fixture. The truck is not `QA-TEST-`: the run deletes
+those as its own leftovers, and R2a needs a truck that is not one of its own.
+
+**Real data only on purpose, from `~/LogisX-replica/`.** `SOURCE_DB=<path>` copies that database instead. It is
+accepted only under `~/LogisX-replica/` (symlinks resolved first), and refused inside any checkout or worktree (this
+one, the main checkout, or any folder holding `.git`), with a message saying to unset it. The copy is real data: keep
+its screenshots and results out of the repo.
+
+- The source is opened **read-only** (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API.
+  The copy must be inside the work dir.
+- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also ends `super_admin`'s sessions on the copy
+  (no other account's) and writes its system audit row there.
 - Driver: a Driver whose `driver_name` matches (case-insensitively) the `assigned_driver` of exactly one truck with an
   image photo. The Driver must be `fully_onboarded` (or have no onboarding status), so the Kit tab renders, and their
   application's `cdl_front` must be an image. The logins file's existing driver is kept while they still qualify;
@@ -371,8 +432,12 @@ planted cases SKIP. They are never silently mis-tested.
   and D1–D3 SKIP.
 - The Driver, both Investors and the Dispatcher each get a random password (a bcryptjs hash,
   `must_change_password = 0`) on the copy only.
-- The Keychain's passwords are reused, so one set of logins works for every copy. The script prints the ids it
-  picked, never a password.
+
+Either way, the passwords go to the Keychain and the names and ids to `logins.json`, whose `seed` says `made-up` or
+`copy`. The Keychain's passwords are reused (for the made-up logins, while the logins file names the same made-up
+user), so one set of logins works for every database. The script prints ids, never a password. Switching between a
+made-up database and a copy in the same work dir (with the default Keychain service) replaces those passwords, so the
+other kind's databases need `setup-db.cjs` again (or give each kind its own `E2E_WORK_DIR` and `E2E_KEYCHAIN_SERVICE`).
 
 ### `plant-before-boot.cjs <db> [--force | --remove]`
 
@@ -384,7 +449,8 @@ account spelling, while the truck assignment covering its date stores the name w
   Driver account that qualifies. No other account's name reads as the same driver, and no account, directory row or
   assignment holds the name with its space doubled. The account has a truck assignment stored under exactly its own
   spelling that covers today.
-- **The row:** the expense is filed under the account's own spelling, dated today (US Central), in a month that is not
+- **The row:** the expense is filed under the account's own spelling, dated today in `APP_TIMEZONE` (US Eastern unless
+  set; `app-day.cjs`, the day the made-up seed's assignment starts on too), in a month that is not
   finalized. The truck is blank and the owner 0; type Other, $0.01. `load_id` is `QA-TEST-B1` and the description
   `QA-TEST-B1-<timestamp>`, and `timestamp` records when it was planted.
 - **The assignment:** re-spelled in the copy with its space doubled. `b1-plant.json` (`0600`, in the work dir) records
@@ -408,10 +474,11 @@ restores the assignment.
 
 ### `prep-worktree.sh [<worktree>]`
 
-It defaults to the checkout it is in. It symlinks `node_modules`, `client/node_modules`, `.env` and
-`service-account-key.json` from the main checkout (the parent of `git rev-parse --git-common-dir`; `MAIN_CHECKOUT`
-overrides). All four are gitignored, so the worktree stays clean. It then runs `npm run build:client`. It never runs
-`npm install` or `npm ci`, which would rewrite `client/package-lock.json`.
+It defaults to the checkout it is in. It symlinks `node_modules` and `client/node_modules` from the main checkout
+(the parent of `git rev-parse --git-common-dir`; `MAIN_CHECKOUT` overrides), and nothing else, in any mode: never the
+main checkout's settings file or Google key (`boot-server.sh` refuses a worktree holding either). Both are gitignored,
+so the worktree stays clean. It then runs `npm run build:client`. It never runs `npm install` or `npm ci`, which would
+rewrite `client/package-lock.json`.
 
 ⚠️ If it prints `WARNING: package.json differs`, the branch changed its dependencies and the linked `node_modules` may
 lack a package. Resolve that before reading a boot failure as a code bug.
@@ -430,21 +497,28 @@ The boot script refuses:
 
 - ports 3000 and 5173, and any port already in use;
 - a DB outside the work dir, or a symlink;
-- a worktree without `client/dist`, `node_modules`, the key or `.env`;
-- a `SPREADSHEET_ID` that is unset, empty or production's. It checks the value the server will really use: the
-  environment's, else the worktree's `.env` read with the app's own dotenv. It then passes that value explicitly;
+- a worktree without `client/dist` or `node_modules`;
+- a worktree that holds a `.env` or a `service-account-key.json`, as a file or a link (it never opens either);
+- a missing `fake-google.cjs`, or a fixture that is missing or a symlink, or a `<db>.sheets.json` that is a symlink;
+- a server whose log does not show `fake-google.cjs` in place (`fake-google: googleapis is a stand-in …`; it is stopped);
 - with `E2E_FAKE_GMAIL=1`: a missing `fake-gmail.cjs`, a capture directory that is a symlink, or a server whose log
   does not show the fake in place (it is stopped).
 
-It binds to 127.0.0.1, runs `NODE_ENV=development`, and logs to `<work dir>/server-<port>.log`. It forces these on the
-command line (dotenv never overrides a set variable):
+It binds to 127.0.0.1, runs `NODE_ENV=development`, and logs to `<work dir>/server-<port>.log`. It preloads
+`fake-google.cjs` into the server (`NODE_OPTIONS`, for the server alone) and copies `fixtures/e2e-sheets.json` to
+`<db>.sheets.json` at the first boot on `<db>`. It reads no settings file: it forces these on the command line, over
+whatever the caller exported:
 
+- **Made-up settings:** `SPREADSHEET_ID=e2e-made-up-sheet` (the fixture's book), `ARCHIVE_SPREADSHEET_ID=e2e-made-up-archive`,
+  `GOOGLE_DRIVE_FOLDER_ID=` (empty), `SESSION_SECRET=e2e-made-up-session`, `APP_TIMEZONE=America/New_York`, and
+  `GOOGLE_APPLICATION_CREDENTIALS=` (empty). `scripts/test-e2e-no-real-keys.js` checks every literal value in the script
+  for secret shapes and every key, secret, token or password setting for blank or made-up.
 - **Credentials and keys blanked:** Gmail (unless `E2E_FAKE_GMAIL=1`, below), n8n invoice webhook, Gemini, Google Maps
   (server and browser), Routemate, ScanKit and Linxup.
 - **The rate-con Drive folder blanked:** `RATECON_DRIVE_FOLDER_ID=` (empty). `server.js` has no default, so the rate-con
   Drive features are off (see "What leaves the machine").
 - **Mail recipients named, at example.test:** `ADMIN_NOTIFY_EMAIL=admin@example.test`,
-  `BISON_INVOICE_EMAIL=bison-ap@example.test` and `DEFAULT_INVOICE_EMAIL=ap@example.test`, whatever `.env` says. None
+  `BISON_INVOICE_EMAIL=bison-ap@example.test` and `DEFAULT_INVOICE_EMAIL=ap@example.test`. None
   has a default in code, so these keep the admin notifications and the invoice drafts addressed as in production, to
   a reserved name nothing delivers to (and with Gmail blanked or faked, nothing is sent anyway).
 - **Feature flags off:** `ROUTEMATE/LINXUP/SCANKIT/INVOICE_AUTOGEN/PERIOD_FINALIZE/FUEL_GALLONS_RECOVERY/RATECON_RECONCILE/RATECON_INDEX_APPLY/FUEL_EVENTS/CHAT_ORPHAN_SWEEP_ENABLED=false`.
@@ -461,8 +535,9 @@ command line (dotenv never overrides a set variable):
   with the boot output); otherwise it stops the server. Every other rail above still holds: the n8n invoice webhook
   stays blanked, so the fake is the only mail target.
 - **The lease payout flag:** `INVESTOR_LEASE_PAYOUTS_ENABLED` is passed as the caller set it, and is `false` when unset
-  or empty, whatever `.env` says. The lease section and `payout-parity.mjs` set it explicitly. The lease settings
-  (`INVESTOR_LEASE_DOWNTIME`, `_PRORATE`, `_RETIREMENT`) pass through from the caller's environment, else `.env`.
+  or empty. The lease section and `payout-parity.mjs` set it explicitly. The lease settings
+  (`INVESTOR_LEASE_DOWNTIME`, `_PRORATE`, `_RETIREMENT`) pass through from the caller's environment, else the server's
+  defaults.
 - **The rate-con driver instructions:** off (`RATECON_DRIVER_INSTRUCTIONS_ENABLED=false`, `CARRIER_ACCOUNT_NUMBERS_DENY_SECRET=`
   empty) unless the script is run with `E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value>`, which turns them on with that
   value as the only deny-list entry (never printed; never a real value). The driver screen flag stays off and the Drive
@@ -473,6 +548,58 @@ command line (dotenv never overrides a set variable):
 `stop-server.sh <port>` reads `<work dir>/server-<port>.pid`. It sends SIGTERM only if that PID is still a `server.js`
 whose working directory is the worktree it was booted from. Otherwise it kills nothing.
 
+## CI
+
+`.github/workflows/e2e.yml` runs `ci-run.sh` on every PR into `main`, every push to `main`, and by hand. It is its own
+workflow, not a job in `ci.yml`: `ci.yml`'s `verify` job is production's gate and must need every job in that file
+(`scripts/test-release-gate.js` §4), and `deploy.yml`'s CI wait is sized to `ci.yml`. So the browser run never slows the
+unit check or a deploy, and it is not a required check.
+
+- **Made-up data only.** `ci-run.sh` refuses `SOURCE_DB`, builds the made-up database with `setup-db.cjs`, and boots every
+  server with `boot-server.sh` (the Google stand-in, made-up settings, every outbound effect off). No secret, settings
+  file, key or Keychain: the logins' passwords are generated for the run and kept by `ci-keychain.cjs` (service
+  `logisx-e2e-ci`) in a `0600` file inside the `0700` work dir.
+- **The workflow** has `permissions: contents: read`, no `pull_request_target`, no secret and no environment, checks out
+  without keeping a token, and uses only the two actions `ci.yml` uses, at the same pinned SHAs. It installs the app
+  (`npm ci`), the harness (`npm --prefix scripts/e2e ci`), Playwright's Chromium with its system libraries, builds the
+  client, and runs `ci-run.sh` with `E2E_WORK_DIR` under `runner.temp` and `E2E_BROWSER=playwright`. Nothing is uploaded:
+  the verdicts go to the log and the job summary, and the screenshots go away with the runner.
+- **How a part fails.** `e2e.mjs` exits 0 with FAIL rows (see "Verdicts and exit code"), so `ci-gate.cjs` reads each
+  part's results table: a FAIL row (an aborted block is one), a SKIP not on that part's allow list, no PASS at all, or a
+  run never stamped finished fails the part. `e2e.mjs` exiting non-zero fails it too. Every part runs even after one
+  failed; `ci-run.sh` then exits 1 and the job fails. An allowed SKIP that starts passing is noted, so it can come off
+  the list.
+
+Each part boots a fresh server process on the run's database (the sign-in and preview limiters are per process):
+
+| Part | Sections and steps | Allowed SKIPs | Server |
+|---|---|---|---|
+| `trucks-dispatcher` | `trucks` (1–12, R1–R16), `dispatcher` (D1–D3) | none | as booted |
+| `signout` | `signout` (S1–S7) | none | as booted |
+| `maintenance` | `maintenance` (M1) | none | `E2E_MAINTENANCE_NOTICE=1` |
+| `moneypath` | `moneypath` with `STEPS=P1,E1,N1,B1` (N1b included); B1's expense planted before the boot | none | as booted |
+| `terms-t0` | `terms`, `STEPS=T0` | none | as booted |
+| `terms` | `terms`, `STEPS=T1`–`T11` | none | as booted |
+| `investorfixes` | `investorfixes` (F1–F14) | none | as booted |
+| `lease` | `lease` (LA–LH, LP, LS, LV, LW, LX, LY) | LV, LY (no finalized month on the seed), LG (no second investor with ledger rows) | the section restarts it to switch the flag |
+| `instructions` | `instructions` (DI0–DI6) | none | `E2E_DRIVER_INSTRUCTIONS_DENY=T8273641` (invented) |
+
+Not run in CI: `names`, and the money path's F1 and RC1 (they SKIP in every run: they read sheet formulas and cell
+formats with the Google API, which the stand-in does not model); `eldlink` (the seed has no ELD device and no finalized
+month); `invoice` (it needs a delivered load's POD files on disk and a Bison load); `report` (the seed has no Investor
+who owns a truck); and the money path's E2, which waits for the Financials month table that the current Fleet P&L
+replaced, so it fails on any data until it is rewritten for that page. They still run locally as "Local run" says.
+
+A whole run takes about 11 minutes headless on a Mac, and about 10 minutes for the job in CI (9 for the parts; the job's
+timeout is 25). To rehearse it exactly, on a new work dir and a port nothing else
+uses (run it outside the Claude Code sandbox, which blocks `lsof`, `ps` and the browser):
+
+```bash
+(cd scripts/e2e && fnm exec --using=22.23.2 ./node_modules/.bin/playwright-core install chromium)          # once
+E2E_WORK_DIR=~/LogisX-replica/screens/<task>/run1 E2E_PORT=3191 E2E_BROWSER=playwright \
+  fnm exec --using=22.23.2 bash scripts/e2e/ci-run.sh                         # E2E_CI_PARTS=moneypath,lease picks parts
+```
+
 ## Staging
 
 ```bash
@@ -482,7 +609,7 @@ BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHA
 
 - **No `DB_PATH`:** nothing can be planted in a remote database. Steps 10a–e, 11b–f, R3a–b, R15 and R16 SKIP, and so
   does R8 when the logins file has no `investor` entry. M1 SKIPs too (local only: the notice is off on staging), and so
-  do E1, N1, N1b, F1, E2, B1 and RC1 (RC1 and F1 because they write the sheet, which only a local run may). P1 runs on
+  do E1, N1, N1b, E2 and B1 (F1 and RC1 always SKIP, see "Safety rails"). P1 runs on
   a real driver (see the money-path section). I8 SKIPs (it plants the saved note), and I7 fills the form but SKIPs
   its Approve unless `E2E_INVOICE_APPROVE=1`: an approve creates a real Gmail draft wherever the server has a mail
   target. I10–I12 and I13–I13e run there (the editor, and dryRun and preview page fetches, which create nothing). IB
@@ -534,10 +661,13 @@ BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHA
 | `LOGINS_FILE` | The logins' names and ids (no passwords). Default: `<work dir>/logins.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
 | `E2E_KEYCHAIN_SERVICE` | The Keychain service `setup-db.cjs` stores the local logins' passwords under, and `e2e.mjs` reads them from. Default: `logisx-e2e-local`. An entry's own `keychain` item wins. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
-| `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
+| `SOURCE_DB` | A database under `~/LogisX-replica/` to copy, opened read-only (refused inside any checkout). Unset: the made-up database (`setup-db.cjs`); `payout-parity.mjs` requires it. |
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
 | `MAIN_CHECKOUT` | The main checkout. Default: the parent of `git rev-parse --git-common-dir`. |
 | `CHROME_PATH` | Another Chrome binary. Default: the app's puppeteer Chrome for Testing. |
+| `E2E_BROWSER=playwright` | Drive the Chromium build `playwright-core` is released with (`./node_modules/.bin/playwright-core install chromium` in `scripts/e2e`), as CI does. `CHROME_PATH` still wins; any other value is refused. |
+| `E2E_SECURITY_BIN` | The `security` binary `keychain.cjs` runs. Default: `/usr/bin/security`. `ci-run.sh` sets `ci-keychain.cjs`. |
+| `E2E_CI_PARTS`, `E2E_PORT` | For `ci-run.sh`: the parts to run (default: all) and the servers' port (default 3181). |
 | `NODE_BIN` | The `node` binary the shell scripts run. Default: `node` on `PATH`. |
 | `MASK_PII=0` | Stops masking the driver's identity documents in saved screenshots. Masking only affects the saved PNGs; the live page is not masked. |
 | `EXTRA=1` | Adds X1, an INFO probe of the Edit-modal-vs-refresh bug. R1 now scores the same behaviour, so X1 is redundant. |
@@ -601,11 +731,17 @@ expected to fail). It is 1 when a block aborted, and 2 when the run refused to s
 section that runs.
 
 **R16's throwaway drivers.** Assigning a driver writes a `truck_assignments` row and a `drivers_directory` row, and a
-truck with an assignment row cannot be deleted (409 `TRUCK_REFERENCED`). So R16 deletes both rows through `DB_PATH`
-by exact name, then its two trucks. Only names that start `QA-TEST-DRV-` are ever deleted, and a run starts by
-deleting any that an aborted run left behind. No real driver's assignment is touched. When one save is refused but
-answered long before the other, the two did not overlap in the server, and the row is `PASS (vacuous)`. A save that
-failed (500) is INFO.
+truck with an assignment row cannot be deleted (409 `TRUCK_REFERENCED`). So R16 clears its two trucks' drivers,
+deletes both rows through `DB_PATH` by exact name, then its two trucks. Only names that start `QA-TEST-DRV-` are ever
+deleted, and a run starts by deleting any that an aborted run left behind. No real driver's assignment is touched.
+When one save is refused but answered long before the other, the two did not overlap in the server, and the row is
+`PASS (vacuous)`. A save that failed (500) is INFO.
+
+**Deleting test trucks.** A truck whose costs, reserve, purchase price, driver or ELD link feed an open month cannot
+be deleted (409 `OPEN_MONTH_TRUCK_FIGURES`). Every truck delete in the run goes through `qaDeleteTruck()`: it re-reads
+the truck, touches only a unit number that starts `QA-TEST-`, sets those values back to 0 or blank through the
+Trucks API (audited, as a person's edits are), unlinks the ELD device, then deletes the truck. Any other truck is left
+alone.
 
 **Trucks it creates:**
 
@@ -620,9 +756,8 @@ failed (500) is INFO.
 `pay_type` and `pay_percentage`. The originals are kept in memory only, and they are restored after each block and on
 Ctrl-C. The money path also creates rows (a directory row, an account, expenses, an assignment, an invoice) and
 deletes them again by id. While a plant or a created row is live, `plant-journal.json` records tables and ids only,
-never values; while F1's planted formula or RC1's rows are in the sheet, it records their addresses. If a run dies
-mid-plant, that file blocks the next run: recreate the copy (`setup-db.cjs … --force`), clear the recorded sheet cells
-or rows if there are any, then delete the journal.
+never values. If a run dies mid-plant, that file blocks the next run: recreate the copy (`setup-db.cjs … --force`,
+which also starts the fixture copy again), then delete the journal.
 
 R3 turns the driver tab's HTTP cache off over CDP. The Kit URL has no cache-buster, so on a build that lets the browser
 cache it, step 11a's real CDL could otherwise answer for the planted value.
@@ -774,10 +909,10 @@ E1, N1, N1b, F1, E2 and RC1.
 | E1 | **Planted, local only.** The driver's truck stores a spacing variant of their name (the space doubled). The driver files an expense for one of their own loads whose receipt window is open, from their own page as the app does, with no receipt. The stored expense is read from `DB_PATH`. | The expense carries that truck's unit and owner |
 | N1 | **Planted, local only.** A throwaway Driver account (`qa-test-n1-<timestamp> driver`) beside a directory row spelled `QA-TEST-N1-<timestamp> Driver`, with an expense, a truck assignment and a Draft invoice stored under the account's name with its space doubled. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling, Save. | Every planted row carries the new name: the expense and the assignment as spelled, the invoice lowercase (that column's own convention) |
 | N1b | **Planted, local only.** A throwaway Driver account (`QA-TEST-N1B-<timestamp> Driver`) beside its own directory row, planted as the same name with its space doubled (the app adds no second directory row for it), with one expense under each spelling. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling (offered as stored), Save. | Saved, not 409 `DRIVER_RENAME_IS_MERGE`: the account and both expenses carry the directory spelling, and that directory row is still the only one for the name, unchanged |
-| F1 | **Local only.** A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
+| F1 | **SKIPPED for now (see "Safety rails"); what it checked:** Local only. A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
 | E2 | **Planted, local only.** A percentage-paid driver who earns revenue in the month (see below). **UI:** Financials, the month's row in Monthly Performance (the current month, MTD; see below), the drill-down's Driver Pay table: the driver's Pay is read. A Fuel expense ($250, or half the driver's month net when that is smaller) is planted under their name with its space doubled, dated in that month, and the month is opened again. The response behind each opening is read too. | The driver's Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars). The month's Fuel Spend rises by the planted amount on every build: the control that the receipt counts in the month |
 | B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's own account spelling, dated today inside a truck assignment re-spelled with the space doubled. **UI:** Expenses, All, its description typed into the search box: the row's Truck column. The stored row is read too. | The startup backfill stamped it: the Truck column shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
-| RC1 | **Local only.** A Payments Table row planted for a synthetic load `QA-RC1-<timestamp>`: the text `00123` (Invoice Number), the text `=QA` (Payment Status) and a formula (Amount Due To Carrier, `=<Payment Amount>-<Tender Fee>`), both texts written RAW; Payment Amount blank. The page then sends `POST /api/loads/from-ratecon` as the review modal does: the load number, a rate of $1,234.00 and a Details note, with no PDF. The row is read back: each cell's entered type (grid data) and the `FORMULA` render. **UI:** the Data Manager, Payments Table, searched for the load, before and after. | Only the blank Payment Amount changed (filled with the rate). The text `00123` and the text `=QA` are still text, the formula is still the same formula, and every other cell is as planted |
+| RC1 | **SKIPPED for now (see "Safety rails"); what it checked:** Local only. A Payments Table row planted for a synthetic load `QA-RC1-<timestamp>`: the text `00123` (Invoice Number), the text `=QA` (Payment Status) and a formula (Amount Due To Carrier, `=<Payment Amount>-<Tender Fee>`), both texts written RAW; Payment Amount blank. The page then sends `POST /api/loads/from-ratecon` as the review modal does: the load number, a rate of $1,234.00 and a Details note, with no PDF. The row is read back: each cell's entered type (grid data) and the `FORMULA` render. **UI:** the Data Manager, Payments Table, searched for the load, before and after. | Only the blank Payment Amount changed (filled with the rate). The text `00123` and the text `=QA` are still text, the formula is still the same formula, and every other cell is as planted |
 
 **Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
 directory edit that moves a finalized month's pay. The rate is first set to what the driver is already paid (their own
@@ -828,7 +963,7 @@ only matched rows, or that no boot has processed it yet. The run compares the ro
 file to tell those apart: a server that booted before the plant scores INFO.
 The backfill leaves finalized months alone, so the row is dated today, in an open month.
 
-**RC1's rows.** The rows RC1 and the import write are the first free rows below each tab's data. Each is snapshotted
+**RC1's rows** (while it ran; it is SKIPPED for now). The rows RC1 and the import write are the first free rows below each tab's data. Each is snapshotted
 first and must be empty. The import appends one Job Tracking row, updates the planted Payments Table row, and appends
 one Job Details row, which carries no load id (the tab's key column is unnamed), so it is recognized by position and
 by the Payment it holds. At the end each row that differs from its snapshot is put back from it (values and formats,
@@ -840,10 +975,10 @@ sheet rows are live, `plant-journal.json` records their addresses.
 
 ## The names section (K1–K3)
 
-`ONLY=names`, local only (a staging run SKIPs it with a reason). It writes the local non-production sheet the way F1
-and RC1 do: it resolves the sheet as `boot-server.sh` does, refuses production's, snapshots every row it touches first
-(values and formats) and restores and re-reads each one. `Kc` reports every restore. The name under test is test data;
-real driver names are never printed.
+`ONLY=names`. **SKIPPED in every run for now** (see "Safety rails"): the steps planted rows in Job Tracking and put
+each back from a snapshot of its entered values and formats read with the Google API and the main checkout's key,
+which the harness no longer has; the Sheets stand-in does not model formats or formulas. The table below is what the
+steps checked, for when a stand-in that models both brings them back.
 
 | Step | How it is shown | Expected (AFTER) |
 |---|---|---|
@@ -1340,7 +1475,7 @@ from the profit month on, and FAILs when the account already has ledger rows (it
 
 | Step | How it is shown | Expected |
 |---|---|---|
-| LA | Checks: the sheet the server reads is not production's (the environment's `SPREADSHEET_ID`, else the server worktree's `.env`); the three months are open in the copy. **UI:** `/investors` → invites panel → a lease invite, 2000, Create | The form shows `This changes the contract only. Payouts are still calculated from the Split % column.` while lease payouts are off (hidden when the server was booted with them on); 201 and the link dialog |
+| LA | Checks: the server reads the made-up fixture copy (its log shows `fake-google.cjs` in place); the three months are open in the copy. **UI:** `/investors` → invites panel → a lease invite, 2000, Create | The form shows `This changes the contract only. Payouts are still calculated from the Split % column.` while lease payouts are off (hidden when the server was booted with them on); 201 and the link dialog |
 | LB | **Anonymous**, the invite link: step 1 (QA-LEASE data), one vehicle, the master agreement, the lease and the W-9 signed on the canvas, fake banking, Confirm & Complete Onboarding | `POST /api/public/investor-apply` 200 with an application id |
 | LC | **UI:** `/investor-applications`, "Accepted" picked in the row's status select, the confirmation accepted (the temporary password is masked in the shot). With the feature: `GET /api/investors/:id/payout-basis` | 200 `accountCreated`, a truck made; the response's `payoutBasis` `{ recorded: true, type: "lease", leaseAmount: 2000 }`; the basis `current` a lease of 2000 from `signed_terms`, `signedTerms` the same |
 | LD | The truck in service from 2025-02-01 (**UI:** Trucks → Edit; the form refuses a date inside a finalized month, as it does for any truck, with 409 `PERIOD_FINALIZED`, so the copy takes it directly and the row says so). With the feature, `PUT /api/investors/:id/payout-basis` a lease of 2000 from 2025-02: it refuses a start before a closed month (409 `BASIS_MONTH_CLOSED`, and the copy's months from 2025-05 are closed), so the copy then takes the row directly, written as the PUT writes it, and the row says so. A delivered $5,000 load `QA-LEASE-<digits>-P` on 2025-02-14 with the account's Owner ID, through `POST /api/data` (the columns found by the app's own header patterns). A $3,000 maintenance service payment on the truck on 2025-04-10 (`POST /api/maintenance-fund`) | Each saved; the basis schedule is one lease row from 2025-02; the portal reads the load (the server caches the sheet for 60 s, so this polls up to 90 s) |
@@ -1358,7 +1493,7 @@ from the profit month on, and FAILs when the account already has ledger rows (it
 | LX | **Always runs.** The server restarted as booted (flag off); the sheet row deleted through `DELETE /api/data/<row>` after finding it by its load id and re-reading that row right before the delete (row numbers shift under other writes); the application soft-deleted by the API; then, from the copy by exact id: the account's ledger, history, basis and config rows, the maintenance entry, the truck, the investor record, the application with its documents, onboarding and banking rows (and the signed PDFs the server wrote, each only when its hash matches), the invite, the account | Each removed; no plant journal left |
 
 **What leaves the machine.** Nothing beyond the other sections: mail is blanked, so the application's and the
-acceptance's emails go nowhere, and the one sheet write is to the local sheet. While the section's rows exist,
+acceptance's emails go nowhere, and the one sheet write is to the run's copy of the made-up fixture. While the section's rows exist,
 `plant-journal.json` lists them (ids, and the sheet row's load id); Ctrl-C deletes the copy's rows, and a sheet row left
 by a run that died is deleted by hand by that load id.
 
@@ -1389,15 +1524,19 @@ REF_A=main REF_B=main PATCH_B=/path/to/change.patch fnm exec --using=22.23.2 nod
 1. Each side is exported into `<work dir>/parity-<stamp>-flag-<off|on>/`: `git archive` of `REF_A` / `REF_B` (committed
    content only), or, with `DIR_A` / `DIR_B`, that checkout's tracked and untracked, non-ignored files as they stand
    (symlinks skipped). `PATCH_A` / `PATCH_B` apply to that export only. Each export links the main checkout's
-   `node_modules`, `client/node_modules`, `.env` and key; nothing is installed and no client is built (`E2E_NO_CLIENT=1`).
+   `node_modules` and `client/node_modules`, and nothing else; nothing is installed and no client is built
+   (`E2E_NO_CLIENT=1`).
    It warns when a side's package manifests differ from the main checkout's.
-2. **One** read-only `.backup()` of `SOURCE_DB` (default: the main checkout's `app.db`) becomes side A's copy; the
+2. **One** read-only `.backup()` of `SOURCE_DB` (required, no default: a database under `~/LogisX-replica/`, refused
+   inside any checkout or worktree, by the same rule as `setup-db.cjs`) becomes side A's copy; the
    repo's `reset-super-admin-password.js` sets a random password on it (from this process's memory, through
    `NEW_PASSWORD`, never printed) and clears `must_change_password`; that copy is then backed up once more for side B.
    The two databases start byte-for-byte equal.
-3. It refuses to go on unless `SPREADSHEET_ID` (the environment's, else the main checkout's `.env`, which both exports
-   link) is set and is not production's. Both servers boot through `boot-server.sh`, so every integration, mail, alert,
-   autogen, period-close and ELD job is off exactly as for the browser run. Ports are random and free (never 3000, 3003
+3. Both servers boot through this checkout's `boot-server.sh`, so every integration, mail, alert, autogen,
+   period-close and ELD job is off exactly as for the browser run, and each reads its Sheets from its own copy of the
+   made-up fixture through `fake-google.cjs` (no key, no settings file). The loads are therefore the fixture's three
+   `QA-E2E-` loads on both sides; every other figure comes from the database copies, so load-driven payout figures
+   are compared on those loads only. Ports are random and free (never 3000, 3003
    or 5173; `PORT_A` / `PORT_B` pick them). `FLAG=on` boots B with `INVESTOR_LEASE_PAYOUTS_ENABLED=true`; A always runs
    with it off. The lease settings pass through to both.
 4. The Super Admin signs in on each. The investors are every `ownerId` of `GET /api/payouts` and every account with role
@@ -1543,6 +1682,36 @@ ProcessSingleton"): run it outside that sandbox.
 Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
 (`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
 build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL.
+
+## The voice notes check (`voice-notes.mjs`)
+
+The client of voice notes (MESSAGE_VOICE_NOTES_ENABLED, plan 2026-10-22 PR 2) in Chrome, on made-up data only, like
+`phone-layout.mjs`: no `server.js`, database, `.env`, key or sign-in. The built `client/dist` is served on
+`127.0.0.1:$E2E_PORT` (default 3611); every `/api` request is answered in the browser (a made-up Super Admin, the driver
+"Pat Example" on load `QA-VOICE-1`, the investor `qa-voice-investor`, a session with `features.voiceNotes: true`), except
+`GET /api/messages/<id>/voice`, which the static server answers with `scripts/fixtures/voice-note-chrome-fake-mic.m4a` (a
+synthetic tone, no voice) and Range support. Chrome for Testing has no AAC encoder, so `getUserMedia` and
+`MediaRecorder` are stubbed in the page: the recorder hands back that fixture, typed `audio/mp4`. Uploads to
+`/api/messages/voice` are captured (URL, headers, body) and answered as the server would.
+
+```bash
+npm run build:client
+SHOT_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/voice-notes.mjs   # HEADED=1 to watch
+```
+
+Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
+
+| Step | What it does | Expected |
+|---|---|---|
+| V1 | Dashboard `/messages`, 1280x800: the list line of the first conversation, then Play on the driver's note. | "Voice note (0:42)"; a 206 for `/api/messages/9101/voice` |
+| V2 | Mic, about 1.3 s, Stop, review, Send. | One POST to `/api/messages/voice` with no query; `audio/mp4` body equal to the recording; `X-Message-To`, `X-Message-Load-Id` and `X-Message-From: Dispatch` percent-encoded; an `Idempotency-Key`; the sent note shows as a player |
+| V3 | Driver app, 390x844 touch, a fresh ELD fix at 55 mph; the Messages tab. | The mic is natively disabled and described by `#vn-drive-note` ("Voice notes are off while the truck is moving. Park first, then record."); Dispatch's note plays (206) |
+| V4 | The same, parked 10 minutes; record and send. | The mic works, the note reads "Record only when parked."; one POST to Dispatch with no `X-Message-From` |
+| V5 | Investor portal, 1280x800: Play, then record and send. | A 206; one POST to `admin` |
+
+Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `voice-notes`), and the screenshots in `SHOT_DIR`
+(default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Other writes, unanswered endpoints and
+page errors are listed, not scored. Exit 0 only when every row PASSes.
 
 ## Teardown (once the whole QA cycle is done)
 

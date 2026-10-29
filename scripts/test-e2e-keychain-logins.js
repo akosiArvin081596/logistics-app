@@ -80,15 +80,20 @@ process.exit(run(process.argv.slice(2)));
 // A file of some other tool's, outside the work dir, that a stray CREDS_FILE names.
 const OTHER = path.join(SANDBOX, "other-tool-credentials.json");
 fs.writeFileSync(OTHER, JSON.stringify({ hostinger: { token: "not-the-harness" } }));
+// setup-db.cjs copies a real database only from under ~/LogisX-replica/: HOME points
+// into the sandbox, where the synthetic source stands in for one.
+const HOME = path.join(SANDBOX, "home");
+fs.mkdirSync(path.join(HOME, "LogisX-replica"), { recursive: true });
 const ENV = {
 	...process.env,
+	HOME,
 	E2E_SECURITY_BIN: path.join(BIN, "security"),
 	FAKE_KEYCHAIN: STORE,
 	FAKE_KEYCHAIN_LOG: ARGV_LOG,
 	E2E_WORK_DIR: WORK,
 	APP_DIR: ROOT,
 	MAIN_CHECKOUT: ROOT,
-	SOURCE_DB: path.join(SANDBOX, "source.db"),
+	SOURCE_DB: path.join(HOME, "LogisX-replica", "source.db"),
 	CREDS_FILE: OTHER,
 };
 for (const k of ["LOGINS_FILE", "E2E_KEYCHAIN_SERVICE"]) delete ENV[k];
@@ -103,6 +108,9 @@ const bcrypt = require("bcryptjs");
 		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT, driver_name TEXT DEFAULT '',
 			email TEXT DEFAULT '', must_change_password INTEGER DEFAULT 0);
 		CREATE TABLE sessions (sid TEXT PRIMARY KEY, sess TEXT, expire INTEGER);
+		-- reset-super-admin-password.js leaves its audit row here, or resets nothing.
+		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER NOT NULL, username TEXT NOT NULL,
+			role TEXT NOT NULL, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, assigned_driver TEXT, photo TEXT);
 		CREATE TABLE driver_onboarding (user_id INTEGER, application_id INTEGER, status TEXT);
 		CREATE TABLE job_applications (id INTEGER PRIMARY KEY, cdl_front TEXT);

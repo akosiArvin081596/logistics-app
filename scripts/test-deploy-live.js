@@ -301,7 +301,7 @@ const LIVE_CASES = {
 // staging and production jobs, the drift heal). Its steps are read from the
 // real file; the deploy step and the edge check are run for real against stubs.
 const ACTION = fs.readFileSync(path.join(__dirname, "..", ".github/actions/vps-deploy/action.yml"), "utf8");
-const SERVER = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SERVER = require("./lib/server-source").serverSource();
 // The composite action's steps in order, as { name, text }.
 function actionSteps(yaml) {
 	const steps = [];

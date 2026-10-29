@@ -35,6 +35,7 @@
 import { ref, computed } from 'vue'
 import { useApi } from './useApi'
 import { normDriver } from '../lib/driverName'
+import { eldMotion } from '../lib/voiceNoteGate'
 
 // A fix older than this is not good enough to steer by. 15 s at 65 mph is
 // ~440 m — already past most city maneuvers, so anything staler must fall back
@@ -56,6 +57,10 @@ const phoneStatus = ref('') // '' | 'requesting' | 'active' | 'denied' | 'error'
 const phoneGpsLoadId = ref('')
 const eldFix = ref(null)
 const eldFixAt = ref(0)
+// The truck's motion for the voice-note record gate (lib/voiceNoteGate.js
+// eldMotion(): { fix, stoppedSince } in this phone's clock, or null). ELD fixes
+// only, set beside eldFix; phone GPS never feeds it.
+const eldMotionState = ref(null)
 const clock = ref(Date.now())
 
 let watcherId = null
@@ -209,6 +214,7 @@ function applyEldFix(payload) {
   eldFix.value = fix
   eldFixAt.value = Date.now()
   clock.value = eldFixAt.value
+  eldMotionState.value = eldMotion(payload, eldMotionState.value, eldFixAt.value)
 }
 
 /**
@@ -263,8 +269,10 @@ async function refreshEld() {
           eldFix.value = fix
           eldFixAt.value = Date.now()
           clock.value = eldFixAt.value
+          eldMotionState.value = eldMotion(data.position || data, eldMotionState.value, eldFixAt.value)
         } else {
           eldFix.value = null
+          eldMotionState.value = null
         }
         return
       }
@@ -289,8 +297,10 @@ async function refreshEld() {
       eldFix.value = fix
       eldFixAt.value = Date.now()
       clock.value = eldFixAt.value
+      eldMotionState.value = eldMotion(l, eldMotionState.value, eldFixAt.value)
     } else {
       eldFix.value = null
+      eldMotionState.value = null
     }
   } catch {
     // Silent — every consumer renders a no-pin state on its own.
@@ -328,6 +338,10 @@ export function useDriverPosition() {
     bannerStatus,
     phoneGpsLoadId,
     phoneIsFresh,
+    // Voice notes' record gate: the ELD motion and the ticking clock it is
+    // judged against (a fix ages into "unknown" without a new poll).
+    eldMotion: eldMotionState,
+    clock,
     startPhoneGps,
     stopPhoneGps,
     applyEldFix,

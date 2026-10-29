@@ -40,7 +40,7 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./server-source").serverSource();
 const { closure } = require(path.join(ROOT, "scripts", "lib", "server-lift"));
 
 function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }
@@ -202,15 +202,16 @@ const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "a
 	"notifyChange", "logAudit", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs",
 	"DATA_DIR", "fetch", "io", "sendEmail"];
 // One lift per set of extra routes (startWorld's `routes`, [[method, path]]): the
-// month-lock runner adds the routes its guards sit on.
+// month-lock runner adds the routes its guards sit on. `extraRoots` (startWorld's
+// `expose`) are more top-level names to lift and hand back on world.api.
 const LIFTS = new Map();
-function lifted(extraRoutes = []) {
-	const key = extraRoutes.map(([m, p]) => `${m} ${p}`).join("|");
+function lifted(extraRoutes = [], extraRoots = []) {
+	const key = [...extraRoutes.map(([m, p]) => `${m} ${p}`), ...extraRoots].join("|");
 	if (LIFTS.has(key)) return LIFTS.get(key);
 	const dry = routeHead(...DRY_RUN_ROUTE, true);
 	const heads = [...[...ROUTES, ...extraRoutes].map(([m, p]) => routeHead(m, p)), ...(dry ? [dry] : [])];
 	const roots = ["generateInvoiceHandler", "computeInvestorMonthlyEarnings", "getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet",
-		"deduplicateLoads", "findCol", "normalizeDriverName", ...NAMED_ROOTS, ...BOOT_CHECKS];
+		"deduplicateLoads", "findCol", "normalizeDriverName", ...NAMED_ROOTS, ...BOOT_CHECKS, ...extraRoots];
 	const lift = closure(SRC, { roots, routes: heads, provided: PROVIDED, denied: ["server", "transporter", "getDrive", "KEY_FILE"] });
 	lift.hasDryRunRoute = !!dry;
 	LIFTS.set(key, lift);
@@ -290,9 +291,10 @@ process.on("exit", cleanup);
 //   payRates   [{ subject, key, rate, from }] pay_rate_history rows
 //   now        epoch ms (world.clock.ms moves it)
 //   routes     extra routes to lift and register, [[method, path]]
+//   expose     more top-level server.js names to lift and return on world.api
 function startWorld(opts = {}) {
-	const { env = {}, rows = [], drivers = [], trucks = null, status = [], pings = {}, coords = {}, overrides = [], locks = [], payRates = [], now = DEFAULT_NOW, routes = [] } = opts;
-	const L = lifted(routes);
+	const { env = {}, rows = [], drivers = [], trucks = null, status = [], pings = {}, coords = {}, overrides = [], locks = [], payRates = [], now = DEFAULT_NOW, routes = [], expose = [] } = opts;
+	const L = lifted(routes, expose);
 	const db = schemaDb();
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "");
@@ -393,7 +395,7 @@ function startWorld(opts = {}) {
 		L.text,
 		"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet() }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
 		...BOOT_CHECKS.map((f) => `${f}();`),
-		"return { generateInvoiceHandler, computeInvestorMonthlyEarnings, getCarrierDBFromSQLite, getInvestorDriverSet, findCol, normalizeDriverName };",
+		`return { generateInvoiceHandler, computeInvestorMonthlyEarnings, getCarrierDBFromSQLite, getInvestorDriverSet, findCol, normalizeDriverName${expose.map((n) => `, ${n}`).join("")} };`,
 	].join("\n");
 	world.api = new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), () => sheetValues(world.rows));
 	return world;

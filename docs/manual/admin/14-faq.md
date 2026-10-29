@@ -17,7 +17,7 @@ LogisX doesn't currently require 2FA. If your company adopts it, it would be add
 ## User management
 
 **Q. What happens when I delete a user?**
-They can no longer sign in. Their historical activity (messages, status updates, etc.) remains. To restore, recreate the user with the same username; history reconnects.
+LogisX refuses the delete, changing nothing, while the account has receipts, load documents (such as PODs), paid or closed-month invoices, or settled payouts; the reason is shown on screen. Otherwise they can no longer sign in, and their messages, notifications and location history are removed. Their invoices and old loads keep their name. Recreating the user with the same username does not bring back removed messages.
 
 **Q. Can I change a username?**
 Edit the user record. Note: this can break historical connections if the old username is referenced elsewhere. Usually safer to delete and recreate with the new username.
@@ -155,7 +155,7 @@ The response from `/api/locations/latest` includes `source: 'routemate' | 'phone
 SQLite file at `/var/www/logistics-app/app.db` on the production VPS (76.13.22.110).
 
 **Q. Where is the production Google Sheet?**
-Spreadsheet ID `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` (NOT the archive at `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`).
+The sheet `SPREADSHEET_ID` names; production's own process falls back to the production sheet in `lib/sheet-id.js` (NOT the archive, which `ARCHIVE_SPREADSHEET_ID` names).
 
 **Q. Can I run scripts against production?**
 Direct SSH to the VPS lets you run scripts. Be careful. The scripts directory includes utilities for password resets, geocode backfill, etc. Document any production script runs.

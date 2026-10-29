@@ -39,7 +39,6 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SERVER_PATH = path.join(__dirname, "..", "server.js");
 const EXPECTED_UMASK = 0o027;
 const EXPECTED_FILE_MODE = 0o640;
 const EXPECTED_DIR_MODE = 0o750;
@@ -123,7 +122,7 @@ function structuralFailures(src) {
 	return bad;
 }
 
-const src = fs.readFileSync(SERVER_PATH, "utf8");
+const src = require("./lib/server-source").serverSource();
 check("server.js: umask precedes every file-creating call", structuralFailures(src), []);
 
 // ---------------------------------------------------------------------------

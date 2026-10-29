@@ -29,7 +29,7 @@ process.env.APP_TIMEZONE = "America/New_York";
 const fs = require("fs");
 const path = require("path");
 
-const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let fail = 0;

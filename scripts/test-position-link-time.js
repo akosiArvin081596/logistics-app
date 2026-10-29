@@ -53,8 +53,8 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
-const SERVER_JS = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER_JS, "utf8");
+const SERVER_JS = require("./lib/server-source").resolveServerFile();
+const SRC = require("./lib/server-source").serverSource();
 const { closure } = require("./lib/server-lift");
 // The lifted code's own require()s ("./lib/…") resolve from the server.js under test.
 const appRequire = require("module").createRequire(SERVER_JS);
@@ -351,6 +351,18 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		ok("§3 a seed row: shown as before", r.body && r.body.position && r.body.position.latitude === AWAY.lat, r.body);
 		const r2 = await world({ fixes: [{ ago: 13 * DAY, at: AWAY }] }).driver();
 		ok("§3 no link row: shown as before", r2.body && r2.body.position && r2.body.position.latitude === AWAY.lat, r2.body);
+	}
+	{
+		// Voice notes' driver-safety gate reads stoppedSinceMs (lib/voice-note-gate.js).
+		const w = world({ fixes: [{ ago: 20 * MIN, at: NEAR, speed: 20 }, { ago: 10 * MIN, at: NEAR }, { ago: 1 * MIN, at: NEAR }] });
+		const p = ((await w.driver()).body || {}).position || {};
+		ok("§3 stoppedSinceMs: the last moving fix's time", p.stoppedSinceMs === w.fixMs[0], p.stoppedSinceMs);
+		const m = world({ fixes: [{ ago: 5 * MIN, at: NEAR }, { ago: 1 * MIN, at: NEAR, speed: 20 }] });
+		const pm = ((await m.driver()).body || {}).position || {};
+		ok("§3 stoppedSinceMs: null while the latest fix is moving", pm.stoppedSinceMs === null, pm.stoppedSinceMs);
+		const l = world({ fixes: [{ ago: 60 * MIN, at: NEAR, speed: 20 }, { ago: 5 * MIN, at: NEAR }], link: { ago: 10 * MIN, by: "admin_test" } });
+		const pl = ((await l.driver()).body || {}).position || {};
+		ok("§3 stoppedSinceMs: a moving fix from before the link is not counted", pl.stoppedSinceMs === l.fixMs[1], pl.stoppedSinceMs);
 	}
 
 	// ══ §4 GET /api/public/track/:loadId ═════════════════════════════════════

@@ -47,14 +47,29 @@
  *      removed, step 2 run over the finalized months, and a binding declared
  *      below the call read from the call graph. Each must flip at least one
  *      assertion above; a test that passes on both has not tested anything.
+ *   §8 evening assignments (EXPENSE_BACKFILL_APP_DAY_ENABLED). An assignment's
+ *      start and end are UTC instants and an expense's date is a business day
+ *      (APP_TIMEZONE, US Eastern), so from 8 PM EDT (7 PM EST) to midnight a
+ *      stamp's first 10 characters are already the next day. With the flag on,
+ *      each bound of the window is the business day its stamp falls on: an
+ *      evening start covers its own day, an evening end not the next, an
+ *      evening handover day goes to the newest start, in steps 1 and 2, near
+ *      midnight and across both daylight-time switches, never in a finalized
+ *      month. Off, the window is the stamp's UTC day, as before. §1-§5 hold
+ *      with the flag on; §8 holds under four server zones (TZ); and two
+ *      mutants (the day read on the server's clock, the UTC day back with the
+ *      flag on) are caught.
  *
- * Pure: no server, no app.db, no network, no Sheets.
+ * Pure: no server, no app.db, no network, no Sheets. §8 starts this file again
+ * in child processes, one per server zone.
  * Run: node scripts/test-boot-expense-backfill-spacing.js     # exits 1 on failure
  */
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 
 let Database;
 try {
@@ -64,7 +79,7 @@ try {
 	process.exit(1);
 }
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const LINES = SRC.split("\n");
 
 // ───────────────────────────────────────────────────────────────── lifting
@@ -102,6 +117,8 @@ const GRAPH = [
 	// The name rule.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes",
 	"logAudit",
+	// The business day of an assignment's stamp (EXPENSE_BACKFILL_APP_DAY_ENABLED).
+	"appDay",
 ];
 const GRAPH_SRC = Object.fromEntries(GRAPH.map((n) => [n, liftFn(n)]));
 
@@ -175,13 +192,20 @@ const LATE_DECL = [
 ].join("\n");
 
 const QUIET = { log() {}, warn() {}, error() {} };
+// The business clock appDay() reads (lib/app-time.js's default zone); §8's
+// expected days are written in it.
+const APP_TIMEZONE = "America/New_York";
+// §8's flag, declared above the call in server.js and handed in here, so one run
+// boots with it both on and off. Off unless a boot asks, or flagDefault says so.
+const FLAG = "EXPENSE_BACKFILL_APP_DAY_ENABLED";
+let flagDefault = false;
 // Runs the boot statements over `db`: the call graph (hoisted declarations), the
 // health object, the call, then the late bindings. Sloppy, like server.js, which
 // has no "use strict"; a `new Function` body does not inherit this file's.
-function boot(db, { over = {}, cons = QUIET } = {}) {
+function boot(db, { over = {}, cons = QUIET, appDayWindow = flagDefault } = {}) {
 	const graph = GRAPH.map((n) => (n in over ? over[n] : GRAPH_SRC[n])).join("\n");
 	const body = [graph, HEALTH_DECL, CALL_STMT, LATE_DECL, "return legacyExpenseBackfillHealth;"].join("\n");
-	return new Function("db", "console", body)(db, cons);
+	return new Function("db", "console", "APP_TIMEZONE", FLAG, body)(db, cons, APP_TIMEZONE, appDayWindow);
 }
 
 // ───────────────────────────────────────────────────────────────── fixtures
@@ -223,8 +247,8 @@ const snapshot = (db) => db.prepare(
 	"SELECT id, truck_unit, typeof(truck_unit) AS tu, owner_id, typeof(owner_id) AS oi FROM expenses ORDER BY id").all();
 
 // Boots `world` once. `before` is the expenses table just before the boot;
-// again() boots the same database a second time.
-function runWorld(world, over, prepare) {
+// again() boots the same database a second time. `appDayWindow` is §8's flag.
+function runWorld(world, over, prepare, appDayWindow) {
 	const db = makeDb(world);
 	if (prepare) prepare(db);
 	const before = snapshot(db);
@@ -234,12 +258,12 @@ function runWorld(world, over, prepare) {
 		warn: (...a) => logs.push(`warn ${a.join(" ")}`),
 		error: (...a) => logs.push(`error ${a.join(" ")}`),
 	};
-	const health = boot(db, { over, cons });
+	const health = boot(db, { over, cons, appDayWindow });
 	return {
 		db, before, health, logs,
 		row: (id) => { const r = db.prepare("SELECT truck_unit, owner_id FROM expenses WHERE id = ?").get(id); return [r.truck_unit, r.owner_id]; },
 		audits: () => db.prepare("SELECT action, details FROM audit_trail ORDER BY id").all().map((r) => `${r.action}: ${r.details}`),
-		again: () => { logs.length = 0; return boot(db, { over, cons }); },
+		again: () => { logs.length = 0; return boot(db, { over, cons, appDayWindow }); },
 	};
 }
 
@@ -521,6 +545,152 @@ function bootOrderSection() {
 	return results;
 }
 
+// ───────────────────────────────────────────────────────────────── §8 evening assignments
+// 8:30 PM EDT on Sep 1, already Sep 2 in UTC.
+const EVENING_START = "2026-09-02T00:30:00.000Z";
+// 10 PM EDT on Sep 10: one assignment's end and the next one's start.
+const EVENING_HANDOVER = "2026-09-11T02:00:00.000Z";
+// [stamp, the business day it falls on, why]. Only the instant the app writes
+// (toISOString()) is read on the business clock; anything else keeps its first
+// 10 characters, the reading the window always had.
+const STAMP_DAYS = [
+	["2026-09-01T23:59:59.000Z", "2026-09-01", "7:59:59 PM EDT"],
+	["2026-09-02T00:00:00.000Z", "2026-09-01", "8 PM EDT, already Sep 2 in UTC"],
+	["2026-09-02T03:59:59.999Z", "2026-09-01", "11:59:59.999 PM EDT"],
+	["2026-09-02T04:00:00.000Z", "2026-09-02", "midnight EDT"],
+	["2026-09-02T00:30:00Z", "2026-09-01", "8:30 PM EDT, written without milliseconds"],
+	["2026-11-01T03:30:00.000Z", "2026-10-31", "11:30 PM EDT on Oct 31, the night before daylight time ends"],
+	["2026-11-02T04:30:00.000Z", "2026-11-01", "11:30 PM EST on Nov 1, the day daylight time ends"],
+	["2026-11-02T05:00:00.000Z", "2026-11-02", "midnight EST"],
+	["2026-11-10T00:30:00.000Z", "2026-11-09", "7:30 PM EST"],
+	["2026-03-08T04:30:00.000Z", "2026-03-07", "11:30 PM EST on Mar 7, the night before daylight time starts"],
+	["2026-03-09T03:30:00.000Z", "2026-03-08", "11:30 PM EDT on Mar 8, the day daylight time starts"],
+	["2026-03-09T04:30:00.000Z", "2026-03-09", "12:30 AM EDT on Mar 9"],
+	["2026-09-01", "2026-09-01", "a bare day"],
+	["2026-09-02 00:30:00", "2026-09-02", "zone-less text: its first 10 characters, never the server's clock"],
+	["2026-09-31T10:00:00.000Z", "2026-09-31", "a day that does not exist: not rolled into October"],
+	["", "", "blank"],
+	[null, null, "NULL stays NULL"],
+];
+function eveningSection(over) {
+	const { results, t } = collector();
+	// One world booted with the flag on and with it off; each list is the rows'
+	// [truck_unit, owner_id] in `ids` order.
+	const both = (label, world, ids, flagOn, flagOff) => {
+		const on = runWorld(world, over, null, true);
+		const off = runWorld(world, over, null, false);
+		t(`§8 ${label}: flag on`, ids.map((id) => on.row(id)), flagOn);
+		t(`§8 ${label}: flag off, the UTC day as before`, ids.map((id) => off.row(id)), flagOff);
+		return { on, off };
+	};
+	both("an assignment starting 8:30 PM EDT Sep 1; receipts of Sep 1, Aug 31, Sep 2",
+		{ trucks: [T101], assignments: [[1, SK, EVENING_START]],
+			expenses: [{ id: 1, driver: SK, date: "2026-09-01" }, { id: 2, driver: SK, date: "2026-08-31" }, { id: 3, driver: SK, date: "2026-09-02" }] },
+		[1, 2, 3], [["101", 5], ["", 0], ["101", 5]], [["", 0], ["", 0], ["101", 5]]);
+	both("an assignment ending 9:10 PM EDT Sep 5, nothing after it; receipts of Sep 5, Sep 6",
+		{ trucks: [T205], assignments: [[2, "Desoren King", AUG1, "2026-09-06T01:10:00.000Z"]],
+			expenses: [{ id: 1, driver: "Desoren King", date: "2026-09-05" }, { id: 2, driver: "Desoren King", date: "2026-09-06" }] },
+		[1, 2], [["205", 7], ["", 0]], [["205", 7], ["205", 7]]);
+	// Both assignments cover the handover day and the newest start wins it, as it
+	// already does for a handover before 8 PM (the control below).
+	both("a handover 10 PM EDT Sep 10 from truck 101 to 300; receipts of Sep 9, Sep 10, Sep 11",
+		{ trucks: [T101, T300], assignments: [[1, SK, AUG1, EVENING_HANDOVER], [3, SK, EVENING_HANDOVER]],
+			expenses: [{ id: 1, driver: SK, date: "2026-09-09" }, { id: 2, driver: SK, date: "2026-09-10" }, { id: 3, driver: SK, date: "2026-09-11" }] },
+		[1, 2, 3], [["101", 5], ["300", 9], ["300", 9]], [["101", 5], ["101", 5], ["300", 9]]);
+	both("control: a handover 2 PM EDT Sep 10; the receipt of Sep 10",
+		{ trucks: [T101, T300], assignments: [[1, SK, AUG1, "2026-09-10T18:00:00.000Z"], [3, SK, "2026-09-10T18:00:00.000Z"]],
+			expenses: [{ id: 1, driver: SK, date: "2026-09-10" }] },
+		[1], [["300", 9]], [["300", 9]]);
+	{
+		const { on, off } = both("step 2: a spacing variant of the name, the assignment starting 8:30 PM EDT Sep 1; the receipt of Sep 1",
+			{ trucks: [T101], assignments: [[1, SK, EVENING_START]], expenses: [{ id: 1, driver: "Soren  King", date: "2026-09-01" }] },
+			[1], [["101", 5]], [["", 0]]);
+		t("§8 ...written by step 2 with the flag on, nothing with it off",
+			[on.health.pass1, on.health.pass1Spacing, on.health.error, off.health.pass1, off.health.error], [1, 1, null, 0, null]);
+	}
+	both("assignments starting 11:30 PM EDT Oct 31 (Nov 1 in UTC) and 11:30 PM EST Nov 1 (Nov 2 in UTC); receipts of Oct 31, Oct 30, Nov 1, Oct 31",
+		{ trucks: [T205, T410], assignments: [[4, "Pat Newhire", "2026-11-01T03:30:00.000Z"], [2, "Desoren King", "2026-11-02T04:30:00.000Z"]],
+			expenses: [
+				{ id: 1, driver: "Pat Newhire", date: "2026-10-31" },
+				{ id: 2, driver: "Pat Newhire", date: "2026-10-30" },
+				{ id: 3, driver: "Desoren King", date: "2026-11-01" },
+				{ id: 4, driver: "Desoren King", date: "2026-10-31" },
+			] },
+		[1, 2, 3, 4], [["410", 11], ["", 0], ["205", 7], ["", 0]], [["", 0], ["", 0], ["", 0], ["", 0]]);
+	// 04:30Z on Mar 9 is 12:30 AM EDT: a fixed five-hour offset would read it as Mar 8.
+	both("assignments starting 11:30 PM EDT Mar 8 (Mar 9 in UTC) and 12:30 AM EDT Mar 9; receipts of Mar 8, Mar 8, Mar 9",
+		{ trucks: [T101, T300], assignments: [[3, "Pat Newhire", "2026-03-09T03:30:00.000Z"], [1, SK, "2026-03-09T04:30:00.000Z"]],
+			expenses: [
+				{ id: 1, driver: "Pat Newhire", date: "2026-03-08" },
+				{ id: 2, driver: SK, date: "2026-03-08" },
+				{ id: 3, driver: SK, date: "2026-03-09" },
+			] },
+		[1, 2, 3], [["300", 9], ["", 0], ["101", 5]], [["", 0], ["", 0], ["101", 5]]);
+	{
+		// The lock partition runs before the window: a finalized month is never written.
+		const w = runWorld({ trucks: [T410], assignments: [[4, "Pat Newhire", "2026-11-01T03:30:00.000Z"]], locks: [["2026-10"]],
+			expenses: [{ id: 1, driver: "Pat Newhire", date: "2026-10-31" }, { id: 2, driver: "Pat Newhire", date: "2026-11-01" }] }, over, null, true);
+		t("§8 flag on, October finalized: the Oct 31 receipt untouched, Nov 1's stamped", [w.row(1), w.row(2)], [["", 0], ["410", 11]]);
+		t("§8 ...the October row counted as skipped, not written",
+			[w.health.skippedLockedPeriod, w.health.skippedPeriods, w.health.pass1, w.health.error], [1, ["2026-10"], 1, null]);
+	}
+	{
+		const w = runWorld({ trucks: [T101, T300], assignments: [[1, SK, AUG1, EVENING_HANDOVER], [3, SK, EVENING_HANDOVER]],
+			expenses: [
+				{ id: 1, driver: SK, date: "2026-09-10" },
+				{ id: 2, driver: "Soren  King", date: "2026-09-10" },
+				{ id: 3, driver: "Pat Newhire", date: "2026-09-10" },
+			] }, over, null, true);
+		t("§8 flag on, the evening handover day through steps 1 and 2: the new truck; a driver with no assignment untouched",
+			[w.row(1), w.row(2), w.row(3), w.health.pass1, w.health.pass1Spacing], [["300", 9], ["300", 9], ["", 0], 2, 1]);
+		const afterFirst = snapshot(w.db);
+		const second = w.again();
+		t("§8 ...a second boot over the same data changes nothing", [second.pass1, second.pass2, second.error, snapshot(w.db)], [0, 0, null, afterFirst]);
+	}
+	{
+		// The day reader itself, through the SQL function the window calls.
+		const world = { trucks: [T101], assignments: [[1, SK, EVENING_START]] };
+		const dayOf = (db, v) => { try { return db.prepare("SELECT assignment_stamp_day(?) AS d").get(v).d; } catch (e) { return `threw: ${e.message}`; } };
+		const on = runWorld(world, over, null, true);
+		for (const [stamp, day, why] of STAMP_DAYS) t(`§8 the business day of ${JSON.stringify(stamp)} (${why})`, dayOf(on.db, stamp), day);
+		const off = runWorld(world, over, null, false);
+		t("§8 flag off: no SQL function is registered", /^threw: no such function/.test(dayOf(off.db, EVENING_START)), true);
+	}
+	return results;
+}
+// M5: the stamp's day read on the server's clock instead of the business clock.
+function serverClockMutant() {
+	return mutate(GRAPH_SRC.backfillLegacyExpenseTrucks, "appDay(new Date(ms))",
+		'((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(ms))');
+}
+// M6: the flag-on window back on the stamps' first 10 characters, the UTC day.
+function utcWindowMutant() {
+	const fn = mutate(GRAPH_SRC.backfillLegacyExpenseTrucks, "assignment_stamp_day(ta.start_date)", "substr(ta.start_date, 1, 10)");
+	return mutate(fn, "assignment_stamp_day(ta.end_date)", "substr(ta.end_date, 1, 10)");
+}
+// §8 in a child process of this file under server zone `zone` (M5's mutant when
+// asked): { failed: [check names], digest of every actual value }.
+function inZone(zone, mutant = "") {
+	try {
+		return JSON.parse(execFileSync(process.execPath, [__filename, "--zone-child", mutant],
+			{ env: { TZ: zone }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+	} catch (e) {
+		const why = String(e.stderr || "").split("\n").find((l) => /^[A-Za-z]*Error:/.test(l)) || String(e.message).split("\n")[0];
+		return { failed: [`the child under TZ=${zone} did not finish: ${why}`], digest: "" };
+	}
+}
+// A child's verdict in one line: "all pass", or how many failed and the first.
+const verdictOf = (v) => (v.failed.length ? `${v.failed.length} failed, first: ${v.failed[0]}` : "all pass");
+// The child's side: §8 alone, one line of JSON, nothing else.
+if (process.argv[2] === "--zone-child") {
+	const results = eveningSection(process.argv[3] === "server-clock" ? { backfillLegacyExpenseTrucks: serverClockMutant() } : {});
+	process.stdout.write(JSON.stringify({
+		failed: results.filter((r) => !r.ok).map((r) => r.name),
+		digest: crypto.createHash("sha256").update(results.map((r) => `${r.name}=${r.a}`).join("\n")).digest("hex"),
+	}));
+	process.exit(0);
+}
+
 // ───────────────────────────────────────────────────────────────── run
 section("§1 step 2 — a spacing variant of the assigned driver's name");
 record(stepTwoSection());
@@ -574,6 +744,50 @@ for (const [label, run] of MUTANTS) {
 	t("§7 control: the same read of a binding declared above the call (db) passes every §1 check",
 		early.filter((r) => !r.ok).map((r) => r.name), []);
 	record(results);
+}
+
+// ───────────────────────────────────────────────────────────────── §8 run
+section("§8 evening assignments on the business clock (EXPENSE_BACKFILL_APP_DAY_ENABLED)");
+record(eveningSection());
+{
+	const { results, t } = collector();
+	const decl = [...SRC.matchAll(new RegExp(`^const ${FLAG} = [\\w.]+\\.${FLAG} === "true";$`, "gm"))];
+	t(`§8 server.js declares ${FLAG} once, on only when exactly "true"`, decl.length, 1);
+	t("§8 ...at column 0 above the call, so the boot reads it initialised",
+		decl.length === 1 && decl[0].index < SRC.indexOf(`\n${CALL_STMT}\n`), true);
+	record(results);
+}
+section("§8 §1-§5 again with the flag on (their stamps are all daytime, so nothing may differ)");
+flagDefault = true;
+record([...stepTwoSection(), ...lockSection(), ...guardSection(), ...unchangedSection(), ...idempotenceSection()]
+	.map((r) => ({ ...r, name: `${r.name} [flag on]` })));
+flagDefault = false;
+section("§8 under four server zones (child processes)");
+{
+	const { results, t } = collector();
+	const verdicts = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"].map((zone) => [zone, inZone(zone)]);
+	for (const [zone, v] of verdicts) t(`§8 TZ=${zone}: every check passes`, verdictOf(v), "all pass");
+	t("§8 ...and every zone found the same values", new Set(verdicts.map(([, v]) => v.digest)).size, 1);
+	record(results);
+}
+section("§8 mutants");
+{
+	const { results, t } = collector();
+	// M5 agrees with the business clock under New York, so only another zone can
+	// catch it: UTC, the production server's.
+	const utc = inZone("UTC", "server-clock");
+	const ny = inZone("America/New_York", "server-clock");
+	t("§8 M5 the day read on the server's clock: caught under TZ=UTC", utc.digest !== "" && utc.failed.length > 0, true);
+	t("§8 M5 ...and not under TZ=America/New_York, so the zones are what catch it", verdictOf(ny), "all pass");
+	let m6;
+	try {
+		m6 = eveningSection({ backfillLegacyExpenseTrucks: utcWindowMutant() }).filter((r) => !r.ok).length;
+	} catch (e) {
+		m6 = `threw: ${e.message}`;
+	}
+	t("§8 M6 the flag-on window back on the UTC day (the bug): caught", typeof m6 === "number" && m6 > 0, true);
+	record(results);
+	if (results.every((r) => r.ok)) console.log(`  caught  M5 under TZ=UTC by ${utc.failed.length} check(s); M6 by ${m6} check(s)`);
 }
 
 function section(title) { console.log(`\n${title}`); }

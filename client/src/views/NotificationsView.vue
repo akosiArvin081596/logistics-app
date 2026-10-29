@@ -52,6 +52,7 @@ import { useDispatchNotificationsStore } from '../stores/dispatchNotifications'
 import { useSocket } from '../composables/useSocket'
 import { useViewport } from '../composables/useViewport'
 import { appDayOf, appToday, shiftYmd } from '../utils/datetime'
+import { loadIdRef } from '../lib/loadRef'
 
 const store = useDispatchNotificationsStore()
 const socket = useSocket()
@@ -119,10 +120,12 @@ function handleTap(n) {
   // Every server emitter today puts loadId in metadata — see server.js
   // dispatch notification insertions. DashboardView opens the matching
   // load's detail modal automatically.
+  // A load whose Load ID this user is served withheld comes with its key
+  // (metadata.loadKey, the Dispatcher Load ID plan): the dashboard opens it by that.
   let loadId = ''
   try {
     const meta = typeof n.metadata === 'string' ? JSON.parse(n.metadata || '{}') : (n.metadata || {})
-    loadId = meta.loadId || meta.load_id || ''
+    loadId = loadIdRef(meta)
   } catch { /* ignore unparseable metadata */ }
   if (loadId) {
     router.push({ path: '/dashboard', query: { load: loadId } })

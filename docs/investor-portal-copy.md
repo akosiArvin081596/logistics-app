@@ -258,6 +258,7 @@ Nothing below renders on an ordinary month. A month with no carry looks exactly 
 |---|---|---|
 | 🔴 | `Raw expense entries against your trucks. The Cash Flow total above reflects bottom-line P&L (completed-load expenses + maintenance + compliance) and may differ.` | Footer total |
 | ⚪ | `No expenses found for the selected filters.` | Empty |
+| ⚪ | `PDF receipt (office copy)` | Receipt column, on a receipt filed as a PDF (a toll statement, an emailed order). **New 2026-10-22 (Arvin's decision):** a PDF receipt's file is kept by the office (Super Admin and Dispatcher open it); the investor sees this text instead of a "PDF" link. Photo receipts are unchanged. |
 
 > ⚠️ This one **admits two totals disagree** and asks the investor to accept it. Same family as the $9,707 problem. Worth a decision.
 

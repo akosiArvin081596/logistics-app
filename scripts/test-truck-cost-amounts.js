@@ -122,7 +122,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -1405,7 +1405,8 @@ async function unitNumberSection() {
 	// Source: every truck audit writer and truck refusal subject in server.js
 	// names the unit number through auditText() or the route's unitLabel.
 	const truckWrites = [...SRC.matchAll(/logAudit\(req, ["'][a-z_]+["'], ["']truck["'][\s\S]*?\);\n/g)].map((x) => x[0]);
-	ok(truckWrites.length === 14, `§7 source: the fourteen truck audit writers are found (got ${truckWrites.length})`);
+	// Fifteen since TD8-13 (2026-10-23) added update_truck_driver.
+	ok(truckWrites.length === 15, `§7 source: the fifteen truck audit writers are found (got ${truckWrites.length})`);
 	const raw = truckWrites.filter((w) => /\$\{(truck\.unit_number|unitNumber|unit)\b(?!Label)/.test(w));
 	ok(raw.length === 0, `§7 source: none names the unit number raw (got ${JSON.stringify(raw.map((w) => w.slice(0, 80)))})`);
 	const subjects = [...SRC.matchAll(/entity: "truck",[^\n]*\n?[^\n]*subject: `[^\n]*/g)].map((x) => x[0]);

@@ -26,8 +26,8 @@ defineEmits(['toggle']);
 <style scoped>
 .wizard-fab {
   position: fixed;
-  left: 314px;
-  bottom: 24px;
+  left: calc(314px + env(safe-area-inset-left, 0px));
+  bottom: max(24px, env(safe-area-inset-bottom, 0px));
   width: 64px;
   height: 64px;
   border-radius: 50%;

@@ -96,7 +96,8 @@ onUnmounted(() => clearTimeout(dismissTimer))
   z-index: 200;
   background: var(--blue, #3b82f6);
   color: #fff;
-  padding: calc(env(safe-area-inset-top, 0px) + 1rem) 1rem 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 1rem) max(1rem, env(safe-area-inset-right, 0px)) 0
+    max(1rem, env(safe-area-inset-left, 0px));
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
 }
 

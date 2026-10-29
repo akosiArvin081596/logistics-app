@@ -27,10 +27,11 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8')
+const SRC = serverSource()
 const { AMOUNT_MAX, AMOUNT_FIELDS } = await import(pathToFileURL(path.join(__dirname, '..', 'client', 'src', 'lib', 'truckAmounts.js')).href)
 
 let pass = 0
