@@ -47,7 +47,7 @@ GET /api/admin/scan-stale-locations · requireRole("Super Admin")=anon@12b84c4b0
 GET /api/admin/sign-ins · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a5a2fd445d84
 GET /api/admin/work-days/dry-run · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d22af87e67b2
 GET /api/analytics/mileage · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@2397256707c5
-GET /api/analytics/mileage/detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@d225cc03cbc1
+GET /api/analytics/mileage/detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@3b27ab51a561
 GET /api/applications · requireRole("Super Admin")=anon@12b84c4b0134 · inline@89f459da7ae7
 DELETE /api/applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@9957031eead5
 GET /api/applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@28f3d7389bc5
@@ -67,8 +67,8 @@ POST /api/chat/attachment · requireAuth@2f5c61384511 · chatAttachmentLimiter=l
 GET /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3eda45f93d95
 POST /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e2cebafb9608
 PUT /api/compliance/fees/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4bef62e2466c
-GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@d8cb6a568af2
-GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4e7fca560195
+GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@93ae17e0f553
+GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@42d95dbb10fa
 GET /api/config/maintenance · inline@52e452699466
 GET /api/config/maps-key · mapsKeyLimiter=limiter · inline@65cbbd301ebe
 GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@eff328dde760

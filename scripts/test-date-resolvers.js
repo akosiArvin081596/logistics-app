@@ -48,6 +48,10 @@
  * Section 14 is a guest: POST /api/admin/excluded-days, whose period gate this
  * file runs, refusing a driver name that reads as a built-in property name.
  *
+ * Section 15: GET /api/compliance/ifta, its state detail and
+ * /api/analytics/mileage/detail read instants as business days (APP_TIMEZONE),
+ * never the UTC day, under several process zones.
+ *
  * Run: node scripts/test-date-resolvers.js
  */
 const fs = require("fs");
@@ -1323,6 +1327,183 @@ routeCase("excluded-days, a name containing a built-in property name (\"Tostring
 		() => runExcludedDay(EXCLUDED_BODY.replace(REFUSAL, ""), { driverName: "__proto__", date: "2026-09-10", action: "remove", reason: "test" }),
 		(r, label) => ok(r.status === 200 && r.calls.inserted.length === 1,
 			`${label} — is caught: it inserts the name the checks above refuse (got ${r.status}, ${r.calls.inserted.length} inserted)`));
+}
+
+// ------------------------------ 15. IFTA and mileage detail on the business clock
+// The VPS clock is UTC, where from 8 PM Eastern (7 PM in winter) the day, and on
+// a month's last day the month, is already the next one. The handlers run as
+// written, with "now" pinned, under production's UTC and two other process zones.
+if (!process.env.TZ_CHILD) {
+	console.log("\n15. IFTA and mileage detail — days and the default range on the business clock");
+	const appTimeLib = require(path.join(__dirname, "..", "lib", "app-time"));
+	const eldMilesLib = require(path.join(__dirname, "..", "lib", "eld-miles"));
+	const Database = require("better-sqlite3");
+	const ZONES = ["UTC", "America/Chicago", "Asia/Manila"];
+
+	function extractHandler(head) {
+		const needle = `\n${head}`;
+		const hits = SRC.split(needle).length - 1;
+		if (hits !== 1) throw new Error(`expected exactly 1 registration ${head}, found ${hits}`);
+		const arrow = SRC.indexOf("(req, res) => {", SRC.indexOf(needle));
+		if (arrow < 0) throw new Error(`no handler body for ${head}`);
+		const brace = SRC.indexOf("{", arrow);
+		return braceMatch(brace, brace);
+	}
+	// A helper only the fixed handlers call: the pre-fix source has none, and its
+	// handlers must still run (and fail the checks below) rather than not compile.
+	function optionalFn(name) {
+		return SRC.split(`\nfunction ${name}(`).length - 1 === 0 ? "" : extractFn(name);
+	}
+	function createTableSql(table) {
+		const needle = `CREATE TABLE IF NOT EXISTS ${table} (`;
+		if (SRC.split(needle).length - 1 !== 1) throw new Error(`expected exactly 1 CREATE TABLE ${table}`);
+		const at = SRC.indexOf(needle);
+		let depth = 0;
+		for (let j = at + needle.length - 1; j < SRC.length; j++) {
+			if (SRC[j] === "(") depth++;
+			else if (SRC[j] === ")" && --depth === 0) return SRC.slice(at, j + 1);
+		}
+		throw new Error(`unbalanced CREATE TABLE ${table}`);
+	}
+	const IFTA_BODY = extractHandler('app.get("/api/compliance/ifta",');
+	const IFTA_DETAIL_BODY = extractHandler('app.get("/api/compliance/ifta/state-detail",');
+	const MILEAGE_DETAIL_BODY = extractHandler('app.get("/api/analytics/mileage/detail",');
+	const HELPERS = [extractFn("appDay"), extractFn("shiftDayKey"), extractFn("kpiInstantDay"),
+		extractFn("coverageNoteFor"), optionalFn("iftaDefaultStartIso")].join("\n");
+
+	// "now" pinned; every other form is the real constructor, so `new Date(y, m, d)`
+	// still reads the process zone, as it does on the server.
+	function pinnedDate(nowIso) {
+		const nowMs = Date.parse(nowIso);
+		return class extends Date {
+			constructor(...a) { if (a.length) super(...a); else super(nowMs); }
+			static now() { return nowMs; }
+		};
+	}
+	function inZone(tz, fn) {
+		const saved = process.env.TZ;
+		process.env.TZ = tz;
+		try { return fn(); } finally { if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved; }
+	}
+	// One run of a handler body. No case below reaches an await, so the answer is
+	// complete when this returns, while the process zone is still the case's.
+	function runHandler(body, ctx) {
+		const out = { status: 200, body: null, errors: [] };
+		const scope = {
+			APP_TIMEZONE: "America/New_York", appTime: appTimeLib, Date,
+			console: { error: (...a) => out.errors.push(a.join(" ")), log() {}, warn() {} },
+			res: { status(c) { out.status = c; return this; }, json(o) { out.body = o; return this; } },
+			...ctx,
+		};
+		new Function("scope", `const { ${Object.keys(scope).join(", ")} } = scope;\n${HELPERS}\nreturn (async () => ${body})();`)(scope);
+		return out;
+	}
+
+	// The IFTA reads: one truck, its pings and no assignments, so the state detail
+	// never awaits the sheet. Each telemetry read's [from, to] bounds are kept.
+	function iftaDb(pings) {
+		const bounds = [];
+		return {
+			bounds,
+			prepare(sql) {
+				return {
+					get: () => (/FROM trucks/.test(sql) ? { id: 7, unit_number: "T-07", routemate_vehicle_id: "rm-test-7" } : undefined),
+					all: (...a) => {
+						if (!/FROM routemate_telemetry/.test(sql)) return [];
+						bounds.push(a.slice(-2));
+						return pings;
+					},
+				};
+			},
+		};
+	}
+	const iftaCtx = (query, now, pings = []) => ({
+		req: { query, session: { user: { role: "Super Admin" } } },
+		db: iftaDb(pings), Date: pinnedDate(now),
+		geolib: { getDistance: () => 8046.72 }, // 5 miles a hop
+		getStateFromCoords: () => "OH",
+	});
+
+	// No From or To: midnight Eastern on the 1st, two business months back.
+	for (const [now, from, when] of [
+		["2026-11-01T01:00:00.000Z", "2026-08-01T04:00:00.000Z", "Oct 31, 9 PM EDT"],
+		["2026-12-01T03:30:00.000Z", "2026-09-01T04:00:00.000Z", "Nov 30, 10:30 PM EST"],
+		["2027-01-15T15:00:00.000Z", "2026-11-01T04:00:00.000Z", "mid-January (the year wraps)"],
+		["2027-02-02T12:00:00.000Z", "2026-12-01T05:00:00.000Z", "early February (an EST midnight)"],
+	]) {
+		for (const tz of ZONES) {
+			for (const [route, body, query] of [["ifta", IFTA_BODY, {}], ["ifta/state-detail", IFTA_DETAIL_BODY, { truck_id: "7", state: "OH" }]]) {
+				const ctx = iftaCtx(query, now);
+				const out = inZone(tz, () => runHandler(body, ctx));
+				eq([out.status, out.errors, out.body && out.body.startDate, out.body && out.body.endDate, ctx.db.bounds],
+					[200, [], from, now, [[Date.parse(from), Date.parse(now)]]],
+					`${route}, no range, ${when}, process zone ${tz}: From is the business month's midnight`);
+			}
+		}
+	}
+	{
+		const start = "2026-07-01T04:00:00.000Z", end = "2026-10-01T03:59:59.999Z";
+		const ctx = iftaCtx({ start, end }, "2026-11-01T01:00:00.000Z");
+		const out = inZone("UTC", () => runHandler(IFTA_BODY, ctx));
+		eq([out.body && out.body.startDate, out.body && out.body.endDate, ctx.db.bounds], [start, end, [[Date.parse(start), Date.parse(end)]]],
+			"ifta, a From and To sent (the screen's business-day bounds): used as sent");
+	}
+
+	// The state detail's days: each ping under its business day. Pings more than
+	// 30 minutes apart start a new stretch, so each pair below is one 5-mile hop.
+	const ping = (iso) => ({ latitude: 40.0, longitude: -82.9, location_date_ms: Date.parse(iso), truck_id: 7, unit_number: "T-07" });
+	for (const [when, isos, want] of [
+		["a month's last day at 10:30 PM EDT, then the next morning",
+			["2026-07-01T02:25:00Z", "2026-07-01T02:30:00Z", "2026-07-01T04:25:00Z", "2026-07-01T04:30:00Z"],
+			[["2026-06-30", 5], ["2026-07-01", 5]]],
+		["a month's last day at 10:30 PM EST",
+			["2026-12-01T03:25:00Z", "2026-12-01T03:30:00Z"],
+			[["2026-11-30", 5]]],
+		["the night the clocks go back (11:30 PM EDT, then 1:30 AM EST)",
+			["2026-11-01T03:25:00Z", "2026-11-01T03:30:00Z", "2026-11-01T06:25:00Z", "2026-11-01T06:30:00Z"],
+			[["2026-10-31", 5], ["2026-11-01", 5]]],
+	]) {
+		for (const tz of ZONES) {
+			const ctx = iftaCtx({ truck_id: "7", state: "OH", start: "2026-06-01T04:00:00.000Z", end: "2027-01-01T04:59:59.999Z" },
+				"2027-01-02T12:00:00.000Z", isos.map(ping));
+			const out = inZone(tz, () => runHandler(IFTA_DETAIL_BODY, ctx));
+			eq([out.status, out.errors, ((out.body || {}).days || []).map((d) => [d.date, d.miles])], [200, [], want],
+				`ifta/state-detail, ${when}, process zone ${tz}: each ping under its business day`);
+		}
+	}
+
+	// The mileage detail's loads, from load_status_history in a real SQLite (the
+	// shipped schema), so the route's own WHERE runs. changed_at is UTC.
+	const mdb = new Database(":memory:");
+	for (const t of ["eld_miles_daily", "trucks", "load_coordinates", "load_status_history"]) mdb.exec(createTableSql(t));
+	const dayRow = mdb.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, miles, samples) VALUES ('rm-test-7', ?, 'test driver', 'Test Driver', 120, 50)");
+	for (const d of ["2026-09-28", "2026-09-29"]) dayRow.run(d);
+	const change = mdb.prepare("INSERT INTO load_status_history (load_id, new_status, actor, changed_at) VALUES (?, ?, 'Test Driver', ?)");
+	for (const [id, status, at] of [
+		["QA-1003", "At Shipper", "2026-09-28 03:59:59"], // 11:59:59 PM EDT Sep 27, before the range
+		["QA-1006", "At Shipper", "2026-09-28 04:00:00"], // midnight EDT Sep 28
+		["QA-1001", "Delivered", "2026-09-29 01:30:00"], // 9:30 PM EDT Sep 28
+		["QA-1005", "Delivered", "2026-09-29T03:45:00.000Z"], // 11:45 PM EDT Sep 28, an ISO stamp
+		["QA-1002", "In Transit", "2026-09-29 14:00:00"], // 10 AM EDT Sep 29
+		["QA-1004", "Delivered", "2026-09-30 03:00:00"], // 11 PM EDT Sep 29
+		["QA-1007", "In Transit", "2026-09-30 04:00:00"], // midnight EDT Sep 30, after the range
+	]) change.run(id, status, at);
+	const mileageCtx = {
+		req: { query: { from: "2026-09-28", to: "2026-09-29", driver: "test driver" }, session: { user: { role: "Super Admin" } } },
+		db: mdb,
+		buildEldDeviceResolver: () => ({ truckForVehicleOnDay: () => null }),
+		loadIdWithheldFor: () => false, currentShownLoadIdIndex: () => null, shownLoadId: (_req, raw) => raw,
+		expenseFrom: () => "expenses",
+		BROKER_CONTACT_VALUE_REDACTION_ENABLED: true, brokerContact: { redactContactText: (s) => ({ text: s }) },
+		eldMiles: eldMilesLib,
+	};
+	for (const tz of ZONES) {
+		const out = inZone(tz, () => runHandler(MILEAGE_DETAIL_BODY, mileageCtx));
+		eq([out.status, out.errors, ((out.body || {}).days || []).map((d) => [d.localDay, d.loads.map((l) => l.loadId).sort()])],
+			[200, [], [["2026-09-28", ["QA-1001", "QA-1005", "QA-1006"]], ["2026-09-29", ["QA-1002", "QA-1004"]]]],
+			`mileage detail, process zone ${tz}: each status change under its business day, and only days in the range`);
+	}
+	mdb.close();
 }
 
 // ⚠️ The section-12 route assertions are ASYNC (the finalize handler is an async
