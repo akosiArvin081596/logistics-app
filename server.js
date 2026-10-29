@@ -70297,21 +70297,26 @@ app.get("/api/analytics/mileage/detail",
 		};
 		if (drivers.length) {
 			const ph = drivers.map(() => "LOWER(?)").join(",");
+			// changed_at is a UTC stamp: read a day either side, then list each change
+			// under its business day. A truck west of Eastern can still see a late
+			// evening change one day after its own local day.
 			for (const h of db.prepare(
-				`SELECT substr(h.changed_at,1,10) AS day, h.load_id, h.new_status, h.changed_at, h.actor,
+				`SELECT h.load_id, h.new_status, h.changed_at, h.actor,
 				        c.pickup_address, c.dropoff_address
 				 FROM load_status_history h
 				 LEFT JOIN load_coordinates c ON c.load_id = h.load_id
 				 WHERE substr(h.changed_at,1,10) >= ? AND substr(h.changed_at,1,10) <= ?
 				   AND LOWER(h.actor) IN (${ph})
 				 ORDER BY h.changed_at ASC`
-			).all(from, to, ...drivers)) {
-				const list = loadsByDay.get(h.day) || [];
+			).all(shiftDayKey(from, -1), shiftDayKey(to, 1), ...drivers)) {
+				const day = kpiInstantDay(h.changed_at, APP_TIMEZONE);
+				if (!day || day < from || day > to) continue;
+				const list = loadsByDay.get(day) || [];
 				list.push({
 					loadId: h.load_id, status: h.new_status, at: h.changed_at, actor: h.actor,
 					pickup: shownAddress(h.pickup_address), dropoff: shownAddress(h.dropoff_address),
 				});
-				loadsByDay.set(h.day, list);
+				loadsByDay.set(day, list);
 			}
 		}
 
@@ -70401,10 +70406,19 @@ function coverageNoteFor(r) {
 	return parts.join("; ");
 }
 
+// The IFTA routes' default From: midnight on the business clock (APP_TIMEZONE) on
+// the 1st, two business months back. The server's own month and midnight are UTC's,
+// a month ahead from 8 PM Eastern on a month's last day.
+function iftaDefaultStartIso(now = new Date()) {
+	const [y, m] = appDay(now).split("-").map(Number);
+	const first = new Date(Date.UTC(y, m - 3, 1));
+	return new Date(appTime.wallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
+}
+
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
-		const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = start || iftaDefaultStartIso();
 		const endDate = end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70547,7 +70561,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
 		}
 
-		const startDate = req.query.start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = req.query.start || iftaDefaultStartIso();
 		const endDate = req.query.end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70581,7 +70595,9 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			const midLng = (prev.longitude + curr.longitude) / 2;
 			if (getStateFromCoords(midLat, midLng) !== state) continue;
 
-			const day = new Date(curr.location_date_ms).toISOString().slice(0, 10);
+			// The business day, as the screen's From/To bounds and the load dates
+			// matched below are; the UTC day is already tomorrow from 8 PM Eastern.
+			const day = appTime.dayInZone(new Date(curr.location_date_ms), APP_TIMEZONE);
 			if (!days[day]) {
 				days[day] = { miles: 0, firstPing: curr.location_date_ms, lastPing: curr.location_date_ms };
 			}
