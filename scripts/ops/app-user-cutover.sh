@@ -402,7 +402,7 @@ T[cmd]();
 row() { printf '%-6s %s\n' "$1" "$2"; }
 okay() { row ok "$*"; }
 note() { row "" "$*"; }
-act() { if [ "$LIVE" = 1 ]; then row do "$*"; else row would "$*"; fi; }
+act() { if [ "$LIVE" = 1 ]; then row "do" "$*"; else row would "$*"; fi; }
 FAILS=0
 # A failed check: listed by a dry run, and a refusal before any change otherwise.
 need() {
@@ -666,9 +666,10 @@ apply_checks() {
 		else
 			okay "$ACCT's pm2 daemon isn't running yet (the start below starts it)"
 		fi
-		as_acct test -x "$NODE22" && okay "$ACCT can execute $NODE22_BOX" || need "$ACCT can't execute $NODE22_BOX"
-		as_acct test -x "$PM2_BIN" && okay "$ACCT can execute pm2 ($PM2_BIN)" || need "$ACCT can't execute pm2 ($PM2_BIN)"
-		[ -n "$PM2_NODE" ] && as_acct test -x "$PM2_NODE" && okay "$ACCT can execute the node that runs pm2 ($PM2_NODE)" || need "$ACCT can't execute the node that runs pm2 (${PM2_NODE:-none on PATH})"
+		if as_acct test -x "$NODE22"; then okay "$ACCT can execute $NODE22_BOX"; else need "$ACCT can't execute $NODE22_BOX"; fi
+		if as_acct test -x "$PM2_BIN"; then okay "$ACCT can execute pm2 ($PM2_BIN)"; else need "$ACCT can't execute pm2 ($PM2_BIN)"; fi
+		if [ -n "$PM2_NODE" ] && as_acct test -x "$PM2_NODE"; then okay "$ACCT can execute the node that runs pm2 ($PM2_NODE)"
+		else need "$ACCT can't execute the node that runs pm2 (${PM2_NODE:-none on PATH})"; fi
 	fi
 	if acl_ok; then okay "$RENDER can traverse $APP_BOX through its ACL"; else need "$RENDER's traverse ACL isn't on $APP_BOX (4A's sitting adds it): no mode changes without it"; fi
 
@@ -717,7 +718,7 @@ apply_checks() {
 			note "$((P_settingscopy + P_bsettings)) old copies of the settings file: made 0600 and re-owned with the rest"
 		fi
 		if [ "$P_trees" = dir ]; then
-			[ "$P_treesbad" = 0 ] && okay "backups/trees: its folders are 0700 ($P_treesfiles files)" || need "backups/trees: $P_treesbad of its folders aren't 0700"
+			if [ "$P_treesbad" = 0 ]; then okay "backups/trees: its folders are 0700 ($P_treesfiles files)"; else need "backups/trees: $P_treesbad of its folders aren't 0700"; fi
 		fi
 		[ "$P_bodd" = 0 ] || note "$P_bodd entries in backups/ are neither files nor folders: re-owned, modes left as they are"
 		if [ -e "$ACCT_CACHE" ]; then note "$ACCT_CACHE_BOX exists already: the copy refreshes it"; fi
@@ -760,7 +761,7 @@ apply_checks() {
 			if [ "$n" = 1 ]; then
 				okay "root's crontab: the backup line is line $lines of $total ($(cron_vars "$TMPD/root.cron") variable lines stay with root)"
 			else
-				need "root's crontab must hold exactly one backup line for $APP_BOX (it holds $n$( [ -z "$lines" ] || printf ', lines %s' "$(echo $lines)"))"
+				need "root's crontab must hold exactly one backup line for $APP_BOX (it holds $n${lines:+, lines ${lines//$'\n'/ }})"
 			fi
 		else
 			need "root's crontab can't be read"
@@ -777,7 +778,8 @@ apply_checks() {
 	if in_backup_window; then need "it is within an hour of 02:00 (box time or UTC), when the nightly backup runs: run it outside that hour"
 	else okay "clear of the nightly backup's hour"; fi
 	if [ -e "$ROOT_LOCK_DIR" ] || [ -L "$ROOT_LOCK_DIR" ]; then
-		lock_dir_ok "$ROOT_LOCK_DIR" "$ROOT_UID" && okay "root's deploy lock folder $ROOT_LOCK_DIR_BOX is root's, 0700" || need "root's deploy lock folder $ROOT_LOCK_DIR_BOX must be a folder root owns, mode exactly 0700"
+		if lock_dir_ok "$ROOT_LOCK_DIR" "$ROOT_UID"; then okay "root's deploy lock folder $ROOT_LOCK_DIR_BOX is root's, 0700"
+		else need "root's deploy lock folder $ROOT_LOCK_DIR_BOX must be a folder root owns, mode exactly 0700"; fi
 	else
 		okay "root's deploy lock folder $ROOT_LOCK_DIR_BOX is made 0700 when the lock is taken"
 	fi
