@@ -43,7 +43,12 @@
  *   T17 (rule D) an invoice drawn before any of its receipt's pages was released
  *       still gets a render record; once released, "Update invoice PDF" adds the
  *       pages at the end, the invoice pages read as before; an "office only"
- *       mark then takes one out again
+ *       mark then takes one out again, and its answer says which invoice
+ *   T18 an "office only" mark whose withdrawal is refused answers the refusal
+ *       (invoice and code) under its own key, beside the page view's list, and
+ *       again when the same refusal comes back with its audit row and alert not
+ *       repeated; once the rebuild works, the page leaves and the notice in its
+ *       place names a receipt
  *   races: a page that stops being released while the pages-only path runs (a
  *       roster change during the rebuild) is never written, by "Update invoice
  *       PDF" or by the sweep
@@ -130,12 +135,12 @@ async function has(pdf, needle) {
 }
 // The stored invoice's pages split: copied receipt pages carry the label
 // "Receipt N of M - page x of y" in their own content (a notice page "Receipt N
-// of M - K pages of this statement ..."), or, added at the end of an invoice
+// of M - K pages of this receipt ..."), or, added at the end of an invoice
 // drawn before any of them was released, "PDF receipt on file: <its line> -
 // page x of y"; every other page, the sheets included, is an invoice page.
 async function splitPages(pdf) {
 	const texts = await pageTexts(pdf);
-	const label = /(^|\|)(Receipt \d+ of \d+ - (page \d+ of \d+|\d+ pages? of this statement)|PDF receipt on file: [^|]{1,120} - page \d+ of \d+)/;
+	const label = /(^|\|)(Receipt \d+ of \d+ - (page \d+ of \d+|\d+ pages? of this receipt)|PDF receipt on file: [^|]{1,120} - page \d+ of \d+)/;
 	const receipt = texts.map((t, i) => (label.test(t) ? i : -1)).filter((i) => i >= 0);
 	return { texts, receipt, invoice: texts.filter((_, i) => !receipt.includes(i)) };
 }
@@ -536,6 +541,54 @@ async function statementInvoice(w, opts = {}) {
 		const split2 = await splitPages(fileOff);
 		check("T17 page 2 marked \"office only\": it leaves the end at once, page 1 stays, the invoice pages as before",
 			[off.status, await has(fileOff, "MARKER-D2-6e1b"), await has(fileOff, "MARKER-D1-3a9c"), JSON.stringify(split2.invoice) === JSON.stringify(split0.texts)], [200, false, true, true]);
+		check("T17 the mark's answer names the invoice the page left, and none refused",
+			off.body && off.body.withdrawal, { withdrawn: [id], refused: [] });
+		w.cleanup();
+	}
+
+	section("T18 an \"office only\" withdrawal that is refused is answered as refused, every time");
+	{
+		const w = world();
+		putPdf(w, 1, singlePage());
+		await markPersonal(w, 1);
+		const d = await detail(w, 1);
+		const g = await w.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		const number = id ? w.invoice(id).invoice_number || "" : "";
+		const fileBefore = id ? stored(w, id) : Buffer.alloc(0);
+		const split0 = await splitPages(fileBefore);
+		check("T18 first: the one-page receipt AUTO_RELEASED, copied into the stored invoice, which has a number",
+			[pageCodes(d), await has(fileBefore, "MARKER-S1-55aa"), number !== "", split0.receipt.length], [["AUTO_RELEASED"], true, true, 1]);
+		const svc = w.mine.receiptPdfService();
+		const real = svc.invoiceTexts;
+		// The invoice text read refuses (the form cap), as it can on a real Chrome invoice.
+		svc.invoiceTexts = async () => ({ status: "failed", reason: "form_depth" });
+		const alerts = () => w.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'receipt-pages'").get().n;
+		const refusedRows = () => audits(w, "invoice_receipt_pages_refused").filter((r) => Number(r.entity_id) === id).length;
+		const office = () => markPage(w, 1, 1, { mark: "office", reason: "checked_receipt" });
+		const listed = (r) => ((r.body && r.body.invoices) || []).map((i) => [i.id, i.pages_in_pdf]);
+		const refusal = { withdrawn: [], refused: [{ id, invoice_number: number, code: "TEXT_UNREADABLE" }] };
+		const first = await office();
+		check("T18 the mark answers 200 and names the refused invoice and its code under `withdrawal`",
+			[first.status, first.body && first.body.withdrawal], [200, refusal]);
+		check("T18 `invoices` is still the page view's list: the invoice, page 1 still in its PDF",
+			listed(first), [[id, [1]]]);
+		check("T18 the stored file as it was; one refusal audit row and one alert",
+			[stored(w, id).equals(fileBefore), refusedRows(), alerts()], [true, 1, 1]);
+		const second = await office();
+		check("T18 the same refusal again (same file, same code): answered as refused all the same, its audit row and alert not repeated",
+			[second.status, second.body && second.body.withdrawal, listed(second), refusedRows(), alerts(), stored(w, id).equals(fileBefore)],
+			[200, refusal, [[id, [1]]], 1, 1, true]);
+		svc.invoiceTexts = real;
+		const third = await office();
+		const fileAfter = stored(w, id);
+		const split1 = await splitPages(fileAfter);
+		check("T18 with the read working, the next mark takes the page out and says so",
+			[third.status, third.body && third.body.withdrawal, listed(third)], [200, { withdrawn: [id], refused: [] }, [[id, []]]]);
+		check("T18 the page left the stored invoice, the invoice pages read as before, and the notice in its place names a receipt",
+			[await has(fileAfter, "MARKER-S1-55aa"), JSON.stringify(split1.invoice) === JSON.stringify(split0.invoice), split1.receipt.length,
+				await has(fileAfter, "1 page of this receipt is kept by the office"), await has(fileAfter, "of this statement")],
+			[false, true, 1, true, false]);
 		w.cleanup();
 	}
 

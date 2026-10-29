@@ -6,12 +6,14 @@
 //   1. lib/receiptPages.js names the server's codes and counts ("4 of 6 pages
 //      kept by the office"), a page's line (released, kept, released anyway, a
 //      lapsed release), the "Release anyway" question with the codes, and an
-//      invoice's line; the mark reasons are the server's codes.
+//      invoice's line; the mark reasons are the server's codes; a mark whose
+//      withdrawal an invoice PDF refused is an error naming that invoice.
 //   2. The panel is wired: ExpensesTab shows it under a PDF receipt; it reads
 //      GET /api/expenses/:id/receipt-pages, marks one page per call, answers a
 //      409 RECEIPT_PAGE_RELEASE_ANYWAY with a second "Release anyway" step that
 //      sends the codes, and offers "Update invoice PDF" per invoice; it is shown
-//      to a Super Admin only and hides on FEATURE_OFF.
+//      to a Super Admin only and hides on FEATURE_OFF; a mark's toast comes from
+//      the server's withdrawal outcome, not the page view's invoice list.
 //   3. Nothing is computed in the browser: no arithmetic on a server figure.
 //
 // No network, no DOM, no database.
@@ -57,6 +59,16 @@ section('1. the words for the server\'s codes and counts')
   check('an invoice holding pages', call('receiptPagesInvoiceLine', { id: 4, invoice_number: 'INV-TEST-1', status: 'Approved', pages_in_pdf: [1, 3] }), 'INV-TEST-1 (Approved): pages 1, 3 in its PDF')
   check('the mark reasons are the server\'s codes', (lib.RECEIPT_PAGE_MARK_REASONS || []).map((r) => r.code),
     ['only_his_lines', 'checked_receipt', 'other_driver', 'other_truck', 'other_card', 'not_readable', 'other'])
+  const view = { invoices: [{ id: 4, invoice_number: 'INV-TEST-1', status: 'Approved', pages_in_pdf: [1], can_update: true }] }
+  check('an "office only" mark an invoice PDF refused: an error naming the invoice and its code',
+    call('receiptPageMarkToast', { ...view, withdrawal: { withdrawn: [], refused: [{ id: 4, invoice_number: 'INV-TEST-1', code: 'TEXT_UNREADABLE' }] } }),
+    { text: 'Marked, but the PDF of INV-TEST-1 could not be updated (TEXT_UNREADABLE)', kind: 'error' })
+  check('two refused, one with no number: both named, each code once',
+    call('receiptPageMarkToast', { invoices: [], withdrawal: { withdrawn: [], refused: [{ id: 4, invoice_number: 'INV-TEST-1', code: 'PAGE_COUNT' }, { id: 7, invoice_number: '', code: 'PAGE_COUNT' }] } }),
+    { text: 'Marked, but the PDFs of INV-TEST-1, Invoice #7 could not be updated (PAGE_COUNT)', kind: 'error' })
+  check('nothing refused (the page left an invoice, or none held it): "Page marked"',
+    [call('receiptPageMarkToast', { ...view, withdrawal: { withdrawn: [4], refused: [] } }), call('receiptPageMarkToast', { invoices: [], withdrawal: { withdrawn: [], refused: [] } })],
+    [{ text: 'Page marked', kind: 'success' }, { text: 'Page marked', kind: 'success' }])
 }
 
 section('2. the panel is wired')
@@ -74,6 +86,8 @@ section('2. the panel is wired')
     [/err\.code === 'RECEIPT_PAGE_RELEASE_ANYWAY'/.test(panel), /submitMark\(anywayCodes\)/.test(panel), /body\.releaseAnyway = releaseAnyway/.test(panel)], [true, true, true])
   check('Super Admin only; hidden when the server has the pages switched off',
     [/auth\.isSuperAdmin/.test(panel), /'FEATURE_OFF'/.test(panel)], [true, true])
+  check('a mark\'s toast comes from the server\'s withdrawal outcome, never from the page view\'s invoice list',
+    [/receiptPageMarkToast\(res\)/.test(panel), /res\.invoices\.refused/.test(panel)], [true, false])
 }
 
 section('3. nothing computed in the browser')
