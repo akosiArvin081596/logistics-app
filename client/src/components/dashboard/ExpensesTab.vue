@@ -633,6 +633,7 @@
                       <a class="exp-receipt-pdf" :href="selectedExpense.photo_data" target="_blank" rel="noopener">Open PDF receipt</a>
                       <div class="exp-receipt-hint">Opens in a new tab</div>
                     </div>
+                    <ReceiptPagesPanel :expense="selectedExpense" />
                   </template>
                   <template v-else>
                     <div class="exp-receipt-imgwrap">
@@ -1656,6 +1657,7 @@ import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import PersonalReceiptActions from './expenses/PersonalReceiptActions.vue'
 import PersonalCorrectionsPanel from './expenses/PersonalCorrectionsPanel.vue'
+import ReceiptPagesPanel from './expenses/ReceiptPagesPanel.vue'
 import { personalBlocksStatus } from '../../lib/personalReceipt'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
