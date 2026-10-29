@@ -68,6 +68,9 @@
  *      DIAG_PASS) and docs/capture-screenshots.js (--base=<url>) exit 2 with a
  *      line naming what is missing and their usage, before any command,
  *      connection or write; with it, they go on against what was named.
+ *      statement-cache-report.js (--db, --statements-dir and both hashes)
+ *      exits 2 the same way before opening anything; named, it reads the
+ *      named database.
  *   §9 the archive sheet: server.js's ARCHIVE_SPREADSHEET_ID, evaluated in
  *      each environment, is production's archive only for production's own
  *      process (lib/sheet-id.js) and nothing anywhere else (a local run, a
@@ -1265,6 +1268,38 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§8 capture-screenshots.js, --base=<a server>: not refused for it (${redact(c.stderr.split("\n")[0] || "").slice(0, 120)})`, !/--base=<url> is required/.test(c.out));
 			check(`§8 …every call goes to the named server (${cf.join("; ") || "none"})`,
 				cf.length >= 1 && cf.every((u) => u.startsWith(`${CAPTURE_URL}/api/`)) && c.calls.length === cf.length);
+
+			// statement-cache-report.js (the R-report): the database and the
+			// statements folder are always named; without them it exits 2 before
+			// opening anything, and prints no count.
+			const report = path.join("scripts", "statement-cache-report.js");
+			const HASH = "0123456789ab";
+			const scratch = fs.mkdtempSync(path.join(tmp, "report-"));
+			const scratchDb = path.join(scratch, "made-up.db");
+			for (const [label, args, names] of [
+				["no arguments", [], ["--db", "--statements-dir", "--now-hash", "--after-hash"]],
+				["no --db", ["--statements-dir", scratch, "--now-hash", HASH, "--after-hash", HASH], ["--db"]],
+				["a blank --db", ["--db", "  ", "--statements-dir", scratch, "--now-hash", HASH, "--after-hash", HASH], ["--db"]],
+				["no --statements-dir", ["--db", scratchDb, "--now-hash", HASH, "--after-hash", HASH], ["--statements-dir"]],
+			]) {
+				const r = runScript(report, args, {});
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 statement-cache-report.js, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 statement-cache-report.js, ${label}: names ${names.join(", ")}, then its usage (${lines.join(" | ").slice(0, 160)})`,
+					lines.length === 2 && names.every((n) => lines[0].includes(n)) && /^usage: /.test(lines[1]));
+				check(`§8 statement-cache-report.js, ${label}: before opening anything, and no count printed`, !r.stdout.trim() && !fs.existsSync(scratchDb));
+			}
+			const reportText = readSource(report);
+			check("§8 statement-cache-report.js: no database file name in its code (no default target)", !!reportText && !/\.db["'`]/.test(reportText) && !/app\.db/.test(reportText));
+			{
+				const Database = require("better-sqlite3");
+				const made = new Database(scratchDb);
+				made.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, company_name TEXT); CREATE TABLE investors (user_id INTEGER, full_name TEXT, carrier_name TEXT); CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY, owner_id INTEGER, period TEXT, status TEXT, amount REAL, statement_pdf_file_name TEXT DEFAULT '')");
+				made.close();
+			}
+			const reportRun = runScript(report, ["--db", scratchDb, "--statements-dir", scratch, "--now-hash", HASH, "--after-hash", HASH], {});
+			check(`§8 statement-cache-report.js, every target named: it reads the named database and reports (exit ${reportRun.code})`,
+				reportRun.code === 0 && /stored statements:\s+0/.test(reportRun.stdout));
 		});
 
 		await section("§9 the archive sheet", async () => {
