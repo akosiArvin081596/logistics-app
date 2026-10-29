@@ -207,6 +207,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 	for (const sql of DDL) db.exec(sql);
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (7, 'acme', 'Investor', 'Acme Leasing')").run();
+	// The acting admin's own row: PUT /api/users/:id re-reads it after its awaits.
+	db.prepare("INSERT INTO users (id, username, role) VALUES (1, 'super_admin', 'Super Admin')").run();
 	const m = new Function("db", "appTodayKey", "periodLocksReadable", "bcrypt", "sendEmail", "insertNotification", "notifyChange",
 		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
@@ -584,8 +586,8 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 		const got = (r) => `got ${r.status} ${(r.body || {}).code || ""}`.trim();
 		const created = (db, username) => db.prepare("SELECT id, must_change_password FROM users WHERE username = ?").get(username);
 		const createAudit = (db) => db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = 'create_user' ORDER BY id").all();
-		// The acting admin (SUPER, id 1) as a stored account with a password of its own.
-		const withAdmin = (db) => db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')")
+		// The acting admin (SUPER, id 1, stored in every app) given a password of its own.
+		const withAdmin = (db) => db.prepare("UPDATE users SET password_hash = ? WHERE id = 1 AND username = 'super_admin'")
 			.run(bcryptjs.hashSync(ADMIN_OWN, 4));
 
 		for (const [i, role] of ROLES.entries()) {
@@ -674,7 +676,7 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 				? new Function("NAMED_LOGINS_ENABLED", "userPasswordResetLimiter", `${CREATE_LIMIT_SRC}\nreturn userCreatePasswordLimit;`)(named, resetLimiter)
 				: null;
 			const { db } = reset({ namedLogins: named }, { server, createLimit });
-			db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')").run(bcryptjs.hashSync(ADMIN_OWN, 4));
+			db.prepare("UPDATE users SET password_hash = ? WHERE id = 1 AND username = 'super_admin'").run(bcryptjs.hashSync(ADMIN_OWN, 4));
 			server.put("/api/users/:id", (req, res, next) => { req.session = { user: SUPER }; next(); }, resetLimiter, (req, res) => res.json({ success: true }));
 			const listener = server.listen(0, "127.0.0.1");
 			await once(listener, "listening");

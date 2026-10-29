@@ -1151,6 +1151,13 @@ try {
 	console.error("last_login_at seed skipped:", e.message);
 }
 
+// Account disable (lib/account-disable.js): NULL disabled_at is an enabled account, otherwise an
+// ISO-8601 Z instant. disabled_by has no foreign key: the acting account may be deleted later.
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_at TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_by INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT NULL"); } catch {}
+const accountDisable = require("./lib/account-disable");
+
 // Per-load driver ratings (1-5 stars, one rating per load)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS load_ratings (
@@ -4949,6 +4956,11 @@ function eldDeviceLinkedSinceMs(truckId, vid) {
 	return eldPosition.linkedSinceMs(row);
 }
 
+// ELD_APP_DAY_ENABLED, off unless exactly "true": on, the day-to-truck lookup the miles rollups and
+// mileage routes read counts a device link's bounds on their business day (appDay()), not their UTC
+// day (already tomorrow from 8 PM EDT, 7 PM EST), so an evening re-point day goes to the newer truck.
+const ELD_APP_DAY_ENABLED = process.env.ELD_APP_DAY_ENABLED === "true";
+
 function buildEldDeviceResolver() {
 	const rows = db.prepare(
 		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments`
@@ -4956,7 +4968,11 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
+	return eldMiles.buildDeviceTruckResolver(rows, {
+		startMs: eldDeviceHistoryStartMs(), currentLinks,
+		// Off: each bound's UTC day, as before.
+		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+	});
 }
 
 // After every table exists (server_state is created further down this file).
@@ -5721,6 +5737,10 @@ function payoutRules(overrides = null) {
 // INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
+// A truck with a blank in-service date starts its fixed costs and its lease days on the business
+// day its row was created, not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED, exactly "true",
+// with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
+const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), (msg) => console.warn(`[truck-charge] ${msg}`));
 
 // Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
 // one warning per month per process, not one per page load.
@@ -5767,6 +5787,8 @@ function payoutBasisContext(ownerId) {
 			? finalized.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
 			: [],
 		settledLeaseMonths,
+		// A truck's first lease day reads created_at as truckChargeFromMonth() does.
+		createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 	};
 }
 
@@ -7245,6 +7267,10 @@ io.engine.use(sessionMiddleware);
 // would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
 // guards; scripts/test-password-change-enforced.js pins this position.
 app.use(refreshPasswordChangeFlag);
+// A disabled, removed or re-roled account's session is signed out before any route reads it, and
+// so is a live-update handshake's (signOutEndedAccount()).
+app.use(signOutEndedAccount);
+io.engine.use(signOutEndedAccount);
 // A Dispatcher's opaque load key, read before routing (WITHHELD LOAD KEYS, beside
 // shownLoadId()): inert unless WITHHELD_LOAD_REFS_ENABLED is on.
 app.use(withheldLoadKeyGate);
@@ -11439,6 +11465,36 @@ function refreshPasswordChangeFlag(req, res, next) {
 	if (user) {
 		const current = currentMustChangePassword(user);
 		if (user.mustChangePassword !== current) user.mustChangePassword = current;
+	}
+	next();
+}
+
+// The backstop for a disable whose session purge failed: a session whose account is disabled or
+// gone, whose id is not a positive whole number, or whose cached role the row no longer holds loses
+// its user. Same rules as refreshPasswordChangeFlag(): a declaration, no module-scope state, only `db`.
+function signOutEndedAccount(req, res, next) {
+	const user = req.session && req.session.user;
+	if (user) {
+		const id = Number.isSafeInteger(user.id) && user.id > 0 ? user.id : null;
+		let reason = id === null ? "no account id" : null;
+		if (id !== null) {
+			try {
+				const row = db.prepare("SELECT role, disabled_at FROM users WHERE id = ?").get(id);
+				if (!row) reason = "account not found";
+				else if (String(row.disabled_at ?? "") !== "") reason = "disabled";
+				else if (row.role !== user.role) reason = "role changed";
+			} catch (err) {
+				// An unreadable users table keeps the session, logged at most once a minute.
+				if (!globalThis.__accountCheckErrLoggedAt || Date.now() - globalThis.__accountCheckErrLoggedAt > 60000) {
+					globalThis.__accountCheckErrLoggedAt = Date.now();
+					console.error("account check failed; the session is kept:", err.message);
+				}
+			}
+		}
+		if (reason) {
+			delete req.session.user;
+			console.warn(`[account] a session was signed out: ${reason}${id === null ? "" : ` (account #${id})`}`);
+		}
 	}
 	next();
 }
@@ -18895,6 +18951,19 @@ function loadPayRateIndex() {
 	};
 }
 
+// The business day (APP_TIMEZONE) a receipt was submitted on, as SQL: SQLite reads the instant (created_at when
+// timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT (7 PM EST).
+// app_day_of_epoch() is registered on first use, so a script's own handle has it too.
+function receiptSubmittedDaySql() {
+	if (!receiptSubmittedDaySql.registered) {
+		db.function("app_day_of_epoch", { deterministic: true }, (seconds) => (/^-?\d{1,12}$/.test(String(seconds))
+			? appTime.dayInZone(new Date(Number(seconds) * 1000), APP_TIMEZONE)
+			: null));
+		receiptSubmittedDaySql.registered = true;
+	}
+	return "app_day_of_epoch(strftime('%s', COALESCE(NULLIF(timestamp, ''), created_at)))";
+}
+
 // The month a receipt counts in under the futureReceipts rule: posted_period
 // when set; a receipt dated after the day it was submitted counts in the month
 // it was submitted while that month is open and its date's month is not closed;
@@ -18905,7 +18974,7 @@ function loadPayRateIndex() {
 // settled it there: either way the receipt stays where it settled, and a
 // reopened submission month never pulls it back.
 function futureAwarePeriodExpr() {
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const closed = "(SELECT period FROM period_locks WHERE period_locks.status = 'locked')";
 	return `(CASE WHEN COALESCE(posted_period, '') != '' THEN posted_period
 		WHEN strftime('%Y-%m-%d', date) > ${submitted}
@@ -18921,7 +18990,7 @@ function futureAwarePeriodExpr() {
 // receipts booked, { id, period }.
 function stampFutureReceipts(periods) {
 	if (!periods.length) return [];
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const ph = periods.map(() => "?").join(",");
 	// The receipts the rule's own expression counts in a closing month for
 	// being dated after their submission day (not those booked by date).
@@ -29938,6 +30007,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", user, "WRONG_PASSWORD", `Sign-in refused: wrong password (by ${found.by})`);
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
+		// A disabled account is told so only after the right password, and before the session the
+		// request arrived with is rotated, so that session is left as it was.
+		if (String(user.disabled_at ?? "") !== "") {
+			return res.status(403).json(disabledSignInRefusal(req, user));
+		}
 
 		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
 		// POST /api/auth/change-password already do. regenerate() destroys the
@@ -29971,6 +30045,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", current || user, "CHANGED_MEANWHILE",
 				`Sign-in refused: the account was changed or removed while its password was checked (by ${found.by})`);
 			return refuse(401, "Invalid credentials");
+		}
+		// A disable that landed while this sign-in yielded: the half-built session goes, as in refuse().
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(403).json(disabledSignInRefusal(req, current));
 		}
 
 		req.session.user = {
@@ -30025,6 +30104,28 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		refuse(500, "Could not sign in. Please try again.");
 	}
 });
+
+// The right password on a disabled account: one audit row a minute per account (logAuditRefusal's
+// window, keyed on the account) and at most one admin email an hour per account. Returns the 403 body.
+function disabledSignInRefusal(req, account) {
+	auditDisabledSignIn(req, account);
+	noticeDisabledSignIn(account);
+	return { code: "ACCOUNT_DISABLED", error: accountDisable.DISABLED_MESSAGE };
+}
+// The row names the account signed in to, never the text that was typed. It is written whatever
+// SIGN_IN_AUDIT_ENABLED says; with it on, through the sign-in writer, which keeps a staff IP and browser.
+function auditDisabledSignIn(req, account) {
+	const details = "Sign-in refused: the account is disabled";
+	if (signIn.auditEnabled) return signIn.refuse(req, "login_refused_disabled", account, "ACCOUNT_DISABLED", details);
+	logAuditRefusal({ session: { user: { id: account.id, username: account.username, role: account.role } } },
+		"login_refused_disabled", "user", String(account.id), `${details} [ACCOUNT_DISABLED]`, "ACCOUNT_DISABLED");
+}
+const disabledSignInNotices = accountDisable.noticeWindow(60 * 60 * 1000);
+function noticeDisabledSignIn(account) {
+	if (!disabledSignInNotices.allow(account.id)) return;
+	const notice = accountDisable.disabledSignInNotice({ account, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
 
 // Logout
 app.post("/api/auth/logout", (req, res) => {
@@ -30141,6 +30242,11 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		}
 		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		if (!current) return res.status(404).json({ error: "User not found" });
+		// A disable that landed in the bcrypt window ends this session like a revocation.
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 		if (current.password_hash !== row.password_hash) {
 			return res.status(409).json({
 				code: "PASSWORD_CHANGED_MEANWHILE",
@@ -30434,8 +30540,10 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
 			u.last_login_at, u.must_change_password,
 			EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND COALESCE(u.email, '') <> '' AND LOWER(o.email) = LOWER(u.email)) AS email_shared,
+			u.disabled_at, u.disabled_by, u.disabled_reason, dby.username AS disabled_by_username,
 			do2.status AS onboarding_status
 			FROM users u
+			LEFT JOIN users dby ON dby.id = u.disabled_by
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
 		.all()
 		.map((u) => ({
@@ -30458,6 +30566,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			MustChangePassword: !!u.must_change_password,
 			EmailShared: !!u.email_shared,
 			SharedLogin: signInLib.isSharedLoginName(u.username),
+			// Who turned the account off, when and why; all empty while it is enabled.
+			Disabled: String(u.disabled_at ?? "") !== "",
+			DisabledAt: String(u.disabled_at ?? "") || null,
+			DisabledBy: u.disabled_by ? { id: u.disabled_by, username: u.disabled_by_username || null } : null,
+			DisabledReason: u.disabled_reason || null,
 		}));
 	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
 });
@@ -30608,7 +30721,8 @@ function refreshOwnSession(req) {
 	}
 	// The old ID's sockets end first, while req.sessionID still names it.
 	disconnectSessionSockets(oldSid);
-	if (!row) {
+	// A disabled account's session is ended, never rebuilt.
+	if (!row || String(row.disabled_at ?? "") !== "") {
 		req.session.destroy((err) => {
 			if (err) console.error("session refresh: ending the session failed:", err.message);
 		});
@@ -31055,6 +31169,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				code: "CONCURRENT_MODIFICATION",
 			});
 		}
+		// The acting account as it is now: one disabled, removed or demoted during the awaits above
+		// writes nothing. Its row only; a purged session is caught by the store on its next request.
+		const actorNow = db.prepare("SELECT * FROM users WHERE id = ?").get(Number(req.session?.user?.id));
+		if (!actorNow || String(actorNow.disabled_at ?? "") !== "" || actorNow.role !== "Super Admin") {
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 
 		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
 		// An unrecognised role used to fall through the `if (role && …)` below and
@@ -31128,8 +31248,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		// Two write paths, two guards — so "zero Super Admins" is unreachable
 		// through the API. Re-run those two greps before adding a third path.
 		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
-			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-			if (others === 0) {
+			// Enabled accounts only: accountDisable.OTHER_ENABLED_SUPER_ADMINS_SQL, word for word (pinned by
+			// scripts/test-account-disable-rules.js). Demoting a disabled one takes no access away.
+			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ? AND COALESCE(disabled_at, '') = ''").get(id).cnt;
+			if (others === 0 && String(user.disabled_at ?? "") === "") {
 				// Not a period cause, so it COALESCES (LAST_SUPER_ADMIN is absent from
 				// UNCOALESCED_REFUSAL_CODES) — which is right for a refusal a scripted
 				// client can repeat. `update_user_blocked` is off PURGEABLE_REFUSAL_ACTIONS,
@@ -31141,6 +31263,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 					code: "LAST_SUPER_ADMIN",
 				});
 			}
+		}
+
+		// (a1) A disabled account's role is locked until it is enabled. Other edits, a password reset
+		// included, go through and leave it disabled.
+		if (nextRole && nextRole !== user.role && String(user.disabled_at ?? "") !== "") {
+			recordPeriodRefusal({ req, ...userEditAudit, tail: "nothing was written — the account is disabled" }, "ACCOUNT_DISABLED", []);
+			return res.status(409).json({
+				error: `${user.username} is disabled. Enable the account to change its role. Nothing was changed.`,
+				code: "ACCOUNT_DISABLED",
+			});
 		}
 
 		// (b) Two accounts cannot share a driver_name. The cascade below matches on
@@ -32504,8 +32636,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// DEMOTE the last one — without that twin this check is one PUT away from
 	// irrelevant (`PUT {"role":"Driver"}` then DELETE).
 	if (user.role === "Super Admin") {
-		const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-		if (others === 0) {
+		// Enabled accounts only; deleting a disabled one takes no access away.
+		const others = accountDisable.otherEnabledSuperAdmins(db, id);
+		if (others === 0 && String(user.disabled_at ?? "") === "") {
 			// The twin of PUT /api/users/:id's LAST_SUPER_ADMIN row, under this route's
 			// own action — so one query over `audit_trail` returns every attempt to
 			// remove the last administrator, by either door.
@@ -32888,6 +33021,119 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
+});
+
+// ============================================================
+// ACCOUNT DISABLE — POST /api/users/:id/disable and /enable (lib/account-disable.js)
+// ============================================================
+// ACCOUNT_DISABLE_ENABLED (default off): on only when the server's environment sets it to exactly
+// "true". It gates the disable alone; enabling always works, so an account disabled while it was on
+// can be enabled after it goes off. A disabled account is refused at sign-in whatever it says.
+const ACCOUNT_DISABLE_ENABLED = accountDisable.accountDisableEnabled();
+// The protected-account list the switch is judged against. This build reads none (RATECON_PDF_VIEWER_IDS
+// is not read for it): disabling a Super Admin is refused, saying so, and enabling one is allowed.
+const ACCOUNT_DISABLE_LIST = accountDisable.UNREAD_LIST;
+
+// What a switch decides on, read in one synchronous step with its write.
+function accountSwitchFacts(req, id) {
+	const actor = req.session.user;
+	const actorId = Number(actor && actor.id);
+	const live = liveSessionIds([req.sessionID]);
+	return {
+		actor,
+		actorLive: !!live && live.has(req.sessionID),
+		actorRow: Number.isSafeInteger(actorId) ? db.prepare("SELECT * FROM users WHERE id = ?").get(actorId) || null : null,
+		target: db.prepare("SELECT * FROM users WHERE id = ?").get(id) || null,
+	};
+}
+
+// The admin email for a disable or an enable, never awaited; nothing goes to the account itself.
+function notifyAccountSwitch(kind, { target, actor, reason }) {
+	const notice = accountDisable.switchNotice({ kind, target, actor, reason, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
+
+// Every refusal writes nothing and is audited; an account already in the asked state answers
+// { unchanged: true } and writes nothing. Disable ends the account's sessions and sockets at once.
+app.post("/api/users/:id/disable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	const read = accountDisable.readReason(req.body && req.body.reason);
+	if (read.refusal) return res.status(read.refusal.status).json({ code: read.refusal.code, error: read.refusal.error });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.disableDecision({
+				flagOn: ACCOUNT_DISABLE_ENABLED, ...facts, otherEnabled: accountDisable.otherEnabledSuperAdmins(db, id), listed: ACCOUNT_DISABLE_LIST,
+			});
+			if (decision.ok) {
+				db.prepare("UPDATE users SET disabled_at = ?, disabled_by = ?, disabled_reason = ? WHERE id = ?")
+					.run(new Date().toISOString(), Number(facts.actor.id), read.reason, id);
+			}
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account disable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be disabled. Nothing was changed.", code: "DISABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "disable_user_blocked", entity: "user", entityId: String(id),
+			subject: `disable ${outcome.target.username} (role ${outcome.target.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "disable_user", "user", id,
+		`Disabled ${outcome.target.role} ${auditText(outcome.target.username, 120)}` +
+		`${read.reason ? `; reason: ${auditText(read.reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("disable", { target: outcome.target, actor: req.session.user, reason: read.reason });
+	notifyChange("users");
+	res.json({ success: true, sessionsEnded });
+});
+
+app.post("/api/users/:id/enable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.enableDecision({ ...facts, listed: ACCOUNT_DISABLE_LIST });
+			if (decision.ok) db.prepare("UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ?").run(id);
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account enable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be enabled. Nothing was changed.", code: "ENABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision, target: was } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "enable_user_blocked", entity: "user", entityId: String(id),
+			subject: `enable ${was.username} (role ${was.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	// A session the disable missed (a failed purge, a disable made outside this route) would sign in
+	// again with the account, so its stored sessions end here too. Normally there are none.
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "enable_user", "user", id,
+		`Enabled ${was.role} ${auditText(was.username, 120)}; it was disabled at ${auditText(was.disabled_at, 40)} by account #${Number(was.disabled_by) || "unknown"}` +
+		`${was.disabled_reason ? `; its reason was: ${auditText(was.disabled_reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("enable", { target: was, actor: req.session.user, reason: null });
+	notifyChange("users");
+	res.json({ success: true });
 });
 
 // List investor users (for owner dropdown). `username` is the investor's full
@@ -34966,6 +35212,7 @@ function truckDeleteOpenMonthHolds(truck) {
 		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
 		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
 			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+			createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 		}).coveredDays > 0;
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
@@ -45032,6 +45279,14 @@ function warnBlankWindowFallbackFromClosedMonth() {
 	}
 }
 warnBlankWindowFallbackFromClosedMonth();
+// One notice at boot when TRUCK_CHARGE_APP_DAY_FROM is at or before the latest closed month,
+// built like the ones above. The rule keeps running either way.
+function warnTruckChargeFromClosedMonth() {
+	if (!TRUCK_CHARGE_APP_DAY_RULE) return;
+	const msg = investorPayoutBasis.createdDayFromClosedWarning(TRUCK_CHARGE_APP_DAY_RULE, financialsCalc.ledgerDayOnce.latestClosedMonth(db));
+	if (msg) console.warn(`[truck-charge] ${msg}`);
+}
+warnTruckChargeFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -61027,14 +61282,15 @@ function truckMonthlyFixed(t) {
 // the same regex until 2026-09-30; the report now charges fixed costs through
 // truckChargedInMonth() like every other site, so there is no second reader of it.)
 //
-// The created_at branch deliberately keeps new Date(): created_at is
-// 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
-// reproduced byte-for-byte from the gate it replaces so nothing can regress for
-// the ~all rows that have no in_service_date yet.
+// created_at is SQLite's CURRENT_TIMESTAMP, a UTC wall clock, so local getters give the UTC
+// month: the next one from 8 PM EDT (7 PM EST) on a month's last day. Under TRUCK_CHARGE_APP_DAY_RULE
+// it is read on its business day (investorPayoutBasis.truckCreatedDay(), shared with the lease).
 function truckChargeFromMonth(t) {
 	const inService = String(t.in_service_date || "").trim();
 	if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService.slice(0, 7);
 	if (t.created_at) {
+		const createdDay = TRUCK_CHARGE_APP_DAY_RULE ? investorPayoutBasis.truckCreatedDay(t.created_at, TRUCK_CHARGE_APP_DAY_RULE) : null;
+		if (createdDay) return createdDay.slice(0, 7);
 		const td = new Date(t.created_at);
 		return `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 	}
@@ -70106,21 +70362,26 @@ app.get("/api/analytics/mileage/detail",
 		};
 		if (drivers.length) {
 			const ph = drivers.map(() => "LOWER(?)").join(",");
+			// changed_at is a UTC stamp: read a day either side, then list each change
+			// under its business day. A truck west of Eastern can still see a late
+			// evening change one day after its own local day.
 			for (const h of db.prepare(
-				`SELECT substr(h.changed_at,1,10) AS day, h.load_id, h.new_status, h.changed_at, h.actor,
+				`SELECT h.load_id, h.new_status, h.changed_at, h.actor,
 				        c.pickup_address, c.dropoff_address
 				 FROM load_status_history h
 				 LEFT JOIN load_coordinates c ON c.load_id = h.load_id
 				 WHERE substr(h.changed_at,1,10) >= ? AND substr(h.changed_at,1,10) <= ?
 				   AND LOWER(h.actor) IN (${ph})
 				 ORDER BY h.changed_at ASC`
-			).all(from, to, ...drivers)) {
-				const list = loadsByDay.get(h.day) || [];
+			).all(shiftDayKey(from, -1), shiftDayKey(to, 1), ...drivers)) {
+				const day = kpiInstantDay(h.changed_at, APP_TIMEZONE);
+				if (!day || day < from || day > to) continue;
+				const list = loadsByDay.get(day) || [];
 				list.push({
 					loadId: h.load_id, status: h.new_status, at: h.changed_at, actor: h.actor,
 					pickup: shownAddress(h.pickup_address), dropoff: shownAddress(h.dropoff_address),
 				});
-				loadsByDay.set(h.day, list);
+				loadsByDay.set(day, list);
 			}
 		}
 
@@ -70210,10 +70471,19 @@ function coverageNoteFor(r) {
 	return parts.join("; ");
 }
 
+// The IFTA routes' default From: midnight on the business clock (APP_TIMEZONE) on
+// the 1st, two business months back. The server's own month and midnight are UTC's,
+// a month ahead from 8 PM Eastern on a month's last day.
+function iftaDefaultStartIso(now = new Date()) {
+	const [y, m] = appDay(now).split("-").map(Number);
+	const first = new Date(Date.UTC(y, m - 3, 1));
+	return new Date(appTime.wallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
+}
+
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
-		const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = start || iftaDefaultStartIso();
 		const endDate = end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70356,7 +70626,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
 		}
 
-		const startDate = req.query.start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = req.query.start || iftaDefaultStartIso();
 		const endDate = req.query.end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70390,7 +70660,9 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			const midLng = (prev.longitude + curr.longitude) / 2;
 			if (getStateFromCoords(midLat, midLng) !== state) continue;
 
-			const day = new Date(curr.location_date_ms).toISOString().slice(0, 10);
+			// The business day, as the screen's From/To bounds and the load dates
+			// matched below are; the UTC day is already tomorrow from 8 PM Eastern.
+			const day = appTime.dayInZone(new Date(curr.location_date_ms), APP_TIMEZONE);
 			if (!days[day]) {
 				days[day] = { miles: 0, firstPing: curr.location_date_ms, lastPing: curr.location_date_ms };
 			}
@@ -71829,10 +72101,14 @@ function disconnectUserSockets(userId, { exceptSid = null } = {}) {
 // what an HTTP request on the same cookie is. One statement for any number of
 // IDs (json_each, so no bound-variable limit). null when the store cannot be
 // read: each caller picks its own direction for that.
+// A session also needs its account row, enabled, under the id it names (a whole number), so a
+// disabled or removed account's sockets are refused and swept even when its purge failed.
 function liveSessionIds(sids) {
 	try {
 		const rows = db.prepare(
-			"SELECT sid FROM sessions WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire)"
+			"SELECT sid FROM sessions JOIN users ON users.id = (CASE WHEN json_valid(sess) THEN" +
+			" (CASE WHEN json_type(sess, '$.user.id') = 'integer' THEN json_extract(sess, '$.user.id') END) END)" +
+			" WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire) AND COALESCE(users.disabled_at, '') = ''"
 		).all(JSON.stringify(sids));
 		return new Set(rows.map((r) => r.sid));
 	} catch (err) {
@@ -71957,6 +72233,9 @@ io.on("connection", (socket) => {
 		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
 		const requested = identityRoomKey(clientName);
+		// An account disabled or removed since the handshake joins no room.
+		const stillLive = liveSessionIds([sid]);
+		if (!stillLive || !stillLive.has(sid)) return;
 		// The client passes a name (their driver name, their username,
 		// "dispatch", "investor"). Rooms are derived from the session instead:
 		// the role's room, and this identity's own rooms, through driverRoom() /

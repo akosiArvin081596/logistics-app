@@ -176,6 +176,9 @@ const CONSTS = [
 	liftConst("const REFUSAL_AUDIT_WINDOW_MS = "),
 	liftConst("const refusalAuditWindows = "),
 	liftConst("const UNCOALESCED_REFUSAL_CODES = new Set([", "\n]);"),
+	// The truck charge rule (TRUCK_CHARGE_APP_DAY_*) is off in this runner;
+	// scripts/test-financials-books.js runs it on.
+	"const TRUCK_CHARGE_APP_DAY_RULE = null;",
 ].join("\n");
 const ROUTE_POST = liftRoute('app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {');
 // The photo check the route runs for a Super Admin or a Dispatcher, verbatim

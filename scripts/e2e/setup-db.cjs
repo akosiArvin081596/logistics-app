@@ -178,6 +178,15 @@ async function copySource() {
 		db.prepare("UPDATE users SET must_change_password = 0 WHERE id = ?").run(sa.id);
 		console.log(`super_admin (id ${sa.id}): must_change_password was 1 -> set 0 on the copy`);
 	}
+	// A disabled account can't sign in. super_admin is enabled on the copy only, as its password is
+	// reset there; the other logins below are picked from enabled accounts.
+	const hasDisabled = !!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'disabled_at'").get();
+	const enabledU = hasDisabled ? " AND COALESCE(u.disabled_at, '') = ''" : "";
+	const enabled = hasDisabled ? " AND COALESCE(disabled_at, '') = ''" : "";
+	if (sa && hasDisabled && db.prepare(`SELECT 1 FROM users WHERE id = ? AND NOT (COALESCE(disabled_at, '') = '')`).get(sa.id)) {
+		db.prepare("UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ?").run(sa.id);
+		console.log(`super_admin (id ${sa.id}): disabled in the source -> enabled on the copy`);
+	}
 
 	// ---- 3. choose the driver ----
 	const candidates = db.prepare(`
@@ -190,7 +199,7 @@ async function copySource() {
 		JOIN trucks t ON LOWER(t.assigned_driver) = LOWER(u.driver_name) AND COALESCE(t.photo, '') != ''
 		JOIN driver_onboarding d ON d.user_id = u.id AND COALESCE(d.application_id, 0) != 0
 		JOIN job_applications ja ON ja.id = d.application_id AND COALESCE(ja.cdl_front, '') != ''
-		WHERE u.role = 'Driver' AND COALESCE(u.driver_name, '') != ''
+		WHERE u.role = 'Driver' AND COALESCE(u.driver_name, '') != ''${enabledU}
 		ORDER BY u.id
 	`).all();
 	const good = candidates.filter((c) =>
@@ -221,7 +230,7 @@ async function copySource() {
 	// must_change_password = 0, on the copy only. No Investor at all →
 	// logins.investor is omitted and the E2E's R8 SKIPs; fewer than two →
 	// logins.investor2 is omitted and M1 SKIPs.
-	const invRows = db.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY id LIMIT 2").all();
+	const invRows = db.prepare(`SELECT id, username FROM users WHERE role = 'Investor'${enabled} ORDER BY id LIMIT 2`).all();
 	const investorLogin = (row, key) => {
 		const pw = reuse(key, row.id) || randomPassword();
 		const h = bcrypt.hashSync(pw, 10);
@@ -245,7 +254,7 @@ async function copySource() {
 	// bcryptjs hash of a random password and must_change_password = 0, on the copy
 	// only. No Dispatcher → logins.dispatcher is omitted and the sign-out section's
 	// Dispatcher steps (S2a, S3, S5b, S7, D1-D3) SKIP.
-	const disp = db.prepare("SELECT id, username FROM users WHERE role = 'Dispatcher' ORDER BY id LIMIT 1").get();
+	const disp = db.prepare(`SELECT id, username FROM users WHERE role = 'Dispatcher'${enabled} ORDER BY id LIMIT 1`).get();
 	let dispatcher = null;
 	if (!disp) {
 		console.log("dispatcher: no user with role 'Dispatcher' — logins.dispatcher omitted (S2a, S3, S5b, S7 and D1-D3 will SKIP)");
