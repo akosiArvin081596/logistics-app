@@ -686,6 +686,20 @@ m.getBrowser().then(() => { console.log("LAUNCHED"); process.exit(3); }, (err) =
 		}
 	}
 
+	// ─────────────────────────────────────────────── §10 on a local replica
+	console.log("§10 on a local replica (lib/replica-rules.js)");
+	{
+		const rules = require("../lib/replica-rules");
+		for (const n of ["CHROMIUM_UNPRIVILEGED_ENABLED", "CHROMIUM_REQUEST_ALLOWLIST_ENABLED", "CHROMIUM_SANDBOX_ENABLED"]) {
+			eq(`§10 replica:start --enable takes ${n}: it only narrows the task's own Chromium`, rules.enableRefusal(n), null);
+		}
+		// replica-mode.js refuses a settings file holding any name the export skips.
+		for (const [n, rule] of [["CHROMIUM_RUN_AS", "production only: names a production target"], ["CHROMIUM_LAUNCH_ALERT_SEND", "production only: switches on an alert that sends"]]) {
+			const v = rules.classifySetting(n, "made-up", { readByApp: new Set([n]) });
+			eq(`§10 ${n} is never copied to a replica, nor taken from its settings file`, [v.copy, v.rule], [false, rule]);
+		}
+	}
+
 	// Repeated here: a case checked while the module's console was captured
 	// printed its FAIL line into the capture.
 	for (const f of failures) console.log(`  FAILED  ${f}`);
