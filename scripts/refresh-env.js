@@ -1486,7 +1486,7 @@ function grantOperatorAccess(db) {
 	}
 	// Exact match: `username` is UNIQUE and case-sensitive, so this names at most
 	// one row. A received artifact is not trusted to honour that, hence the count.
-	const rows = db.prepare("SELECT rowid AS rid, username, role FROM users WHERE username = ?").all(OPERATOR_USER);
+	const rows = db.prepare(`SELECT rowid AS rid, username, role${cols.has("disabled_at") ? ", disabled_at" : ""} FROM users WHERE username = ?`).all(OPERATOR_USER);
 	if (rows.length === 0) {
 		// ⚠️ The name is NOT repeated here. Swap the two variables by mistake and
 		// REFRESH_OPERATOR_USER holds the password — this line would print it.
@@ -1501,6 +1501,12 @@ function grantOperatorAccess(db) {
 		fail(
 			`REFRESH_OPERATOR_USER '${who.username}' is a ${who.role}, not a Super Admin — nothing was installed.`,
 			"Operator access is for exactly one Super Admin."
+		);
+	}
+	if (String(who.disabled_at ?? "") !== "") {
+		fail(
+			`REFRESH_OPERATOR_USER '${who.username}' is disabled in this database — nothing was installed.`,
+			"A disabled account can't sign in: name an enabled Super Admin."
 		);
 	}
 	const hash = bcrypt.hashSync(OPERATOR_PASSWORD, HUMAN_PASSWORD_COST);

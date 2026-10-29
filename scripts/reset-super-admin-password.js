@@ -78,6 +78,15 @@ function sessionCount(db, userId) {
 	return db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE json_extract(sess, '$.user.id') = ?").get(userId).n;
 }
 
+// A reset changes the password only: a disabled account stays disabled. A database without the
+// column has no disabled account.
+function isDisabled(db, userId) {
+	if (!db.prepare("PRAGMA table_info(users)").all().some((c) => c.name === "disabled_at")) return false;
+	const row = db.prepare("SELECT disabled_at FROM users WHERE id = ?").get(userId);
+	return !!row && String(row.disabled_at ?? "") !== "";
+}
+const DISABLED_NOTE = "  NOTE: this account is disabled, and a password reset does not enable it. A Super Admin enables it on the Users page (scripts/enable-account.js when none is enabled).";
+
 function fail(msg) {
 	console.error(`ERROR: ${msg}`);
 	process.exit(1);
@@ -99,6 +108,7 @@ function main() {
 			console.log(`  user id=${target.account.id}, role=${target.account.role}`);
 			console.log(`  sessions a reset would end: ${sessionCount(db, target.account.id)}`);
 			if (!hasTable(db, "audit_trail")) console.log("  no audit_trail table: a reset would be refused");
+			if (isDisabled(db, target.account.id)) console.log(DISABLED_NOTE);
 		} finally {
 			db.close();
 		}
@@ -140,6 +150,7 @@ function main() {
 		console.log(`  user id=${id}, role=${role}`);
 		console.log(`  hash length=${hash.length}, bcrypt rounds=10`);
 		console.log(`  audit row: ${ACTION} (${ACTOR})`);
+		if (isDisabled(db, id)) console.log(DISABLED_NOTE);
 	} catch (err) {
 		fail(err.message);
 	} finally {
