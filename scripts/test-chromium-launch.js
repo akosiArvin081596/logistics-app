@@ -755,6 +755,38 @@ m.getBrowser().then(() => { console.log("LAUNCHED"); process.exit(3); }, (err) =
 			ok(`§11 under the drop, ${label}: the app never removes it itself`, made.length === 1 && fs.existsSync(dir));
 			fs.rmSync(tmpdir, { recursive: true, force: true });
 		}
+		// The wrapper can't be started (the process fails to start): on the exit
+		// path nothing is left to reject unhandled, and the folder stays.
+		{
+			const tmpdir = privateTmp();
+			const throwing = { ...require("child_process"), execFile: () => { throw Object.assign(new Error("made-up start failure"), { code: "ENOMEM" }); } };
+			const fake = fakePuppeteer({ binary: process.execPath });
+			fake.puppeteer.launch = (orig => async (opts) => {
+				const b = await orig(opts);
+				const proc = new (require("events"))();
+				proc.pid = 424251;
+				proc.spawnargs = [WRAPPER];
+				b.process = () => proc;
+				fake.proc = proc;
+				return b;
+			})(fake.puppeteer.launch);
+			const unhandled = [];
+			const onUnhandled = (reason) => unhandled.push(String((reason && reason.message) || reason));
+			process.on("unhandledRejection", onUnhandled);
+			try {
+				await withModule({ fake, uid: 0, platform: "darwin", env: dropEnv(tmpdir), childProcess: throwing }, async (m) => {
+					stubChannels(m);
+					await launched(m);
+					fake.proc.emit("exit", 0, null);
+					await delay(50);
+				});
+			} finally {
+				process.off("unhandledRejection", onUnhandled);
+			}
+			eq("§11 under the drop, the browser exits and the wrapper can't be started: no unhandled rejection", unhandled, []);
+			eq("§11 ...and the folder stays (the app never removes it itself)", profilesIn(tmpdir).length, 1);
+			fs.rmSync(tmpdir, { recursive: true, force: true });
+		}
 		// Without the drop the folder is the app's own: a failed launch removes it.
 		{
 			const tmpdir = privateTmp();
