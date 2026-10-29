@@ -58,10 +58,20 @@
  *      last await, both driver checks sized off the history, one cost object
  *      feeding the guard and the INSERT, check (1) on any non-zero amount, the
  *      legacy branch of driverPayLockedMonths() intact.
- * The mutants for this guard were run by hand before shipping and are not
- * committed (see the PR).
+ *   §6 a truck assignment's start month under APP_DAY_STAMPS_ENABLED — both
+ *      floors (driverPayLockedMonths() with no history, driverHistoryFloorMonth()'s
+ *      truck_assignments source) with the flag off (the UTC month, unchanged) and
+ *      on (the earlier of that and the business month): evening, midnight, both
+ *      DST switches and the year end, the shapes that keep their reading, never
+ *      narrower, APP_TIMEZONE east of UTC, the create guard end to end;
+ *      appStampDay() itself (the toISOString() shape only, and null for a day
+ *      that does not exist); again under four process zones; both floors still
+ *      lift through closure() with `app` denied, as scripts/data-fix-driver-rates.js
+ *      lifts them; five mutants and a closure mutant, committed.
+ * The mutants for §1-§5 were run by hand before shipping and are not committed
+ * (see the PR).
  *
- * Pure: no server, no app.db, no network.
+ * Pure: no server, no app.db, no network (§6 forks this file once per zone).
  *
  * Run: node scripts/test-truck-create-new-driver.js    # exits 1 on failure
  */
@@ -69,8 +79,11 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 
 const SRC = require("./lib/server-source").serverSource();
+const { closure } = require("./lib/server-lift");
 
 let pass = 0;
 const failures = [];
@@ -141,6 +154,10 @@ const FUNCTIONS = [
 	"recordPeriodRefusal", "periodRefusalDetail", "logAudit", "logAuditRefusal", "scrubPurgeMarker", "auditText",
 ];
 const FN_SRC = Object.fromEntries(FUNCTIONS.map((n) => [n, liftFunction(n)]));
+// The start-month reader §6 tests and what it calls. Lifted when present, so a
+// server.js from before the reader still runs §6 and shows the UTC month.
+const STAMP_FNS = ["appDay", "appStampDay", "assignmentFloorMonth"].filter((n) => SRC.split(`\nfunction ${n}(`).length === 2);
+for (const n of STAMP_FNS) FN_SRC[n] = liftFunction(n);
 const CONSTS = [
 	// The daily-rate rule (DRIVER_RATE_ONLY_FROM) is off in this runner;
 	// scripts/test-driver-rate-only-guards.js runs the guards with it on.
@@ -171,10 +188,13 @@ const PHOTO_CHECK = new Function("imageLimits",
 )(require("../lib/image-size"));
 
 const TODAY = "2026-09-25";
-function buildModule(db) {
-	return new Function("db", "appTodayKey", "periodLocksReadable", "investorPayoutBasis",
-		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
-	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"));
+// `flag` and `zone` are APP_DAY_STAMPS_ENABLED and APP_TIMEZONE (off and US
+// Eastern unless §6 says otherwise); `over` swaps in a mutant's source.
+function buildModule(db, { flag = false, zone = "America/New_York", over = {} } = {}) {
+	const fns = [...FUNCTIONS, ...STAMP_FNS].map((n) => (n in over ? over[n] : FN_SRC[n]));
+	return new Function("db", "appTodayKey", "periodLocksReadable", "investorPayoutBasis", "APP_DAY_STAMPS_ENABLED", "APP_TIMEZONE",
+		`"use strict";\n${CONSTS}\n${fns.join("\n")}\nreturn { ${[...FUNCTIONS, ...STAMP_FNS].join(", ")}, TRUCK_AMOUNT_FIELDS };`
+	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"), flag, zone);
 }
 
 // ── fixtures: production's shape ────────────────────────────────────────────
@@ -884,12 +904,218 @@ function sourcePins() {
 		"§5 ...reading the pay math's Driver column and every date-like cell through moneySheetDate()");
 }
 
+// ═══════════════════════════════════════════════════════════════ §6
+// A made-up driver whose only record is one truck assignment, closed in
+// December, so her floor is that assignment's start month and nothing else.
+const WREN = "Wren Evening";
+const L6_ASC = Array.from({ length: 12 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`);
+const L6 = [...L6_ASC].reverse(); // lockedPeriodsDesc()'s order
+const from6 = (m) => L6_ASC.filter((p) => p >= m);
+// [start_date, its UTC month (flag off), its business month in US Eastern (flag on), what it is]
+const EVENING = [
+	["2026-08-01T00:30:00.000Z", "2026-08", "2026-07", "8:30 PM EDT Jul 31 (month end)"],
+	["2026-08-01T03:59:59.999Z", "2026-08", "2026-07", "11:59:59.999 PM EDT Jul 31"],
+	["2026-08-01T00:30:00Z", "2026-08", "2026-07", "8:30 PM EDT Jul 31 written without milliseconds"],
+	["2026-07-31T23:59:59.000Z", "2026-07", "2026-07", "7:59:59 PM EDT Jul 31 (control)"],
+	["2026-08-01T04:00:00.000Z", "2026-08", "2026-08", "midnight EDT Aug 1 (control)"],
+	["2026-11-01T03:30:00.000Z", "2026-11", "2026-10", "11:30 PM EDT Oct 31, the night before daylight time ends"],
+	["2026-12-01T00:00:00.000Z", "2026-12", "2026-11", "7 PM EST Nov 30, the winter boundary (also a date-derived UTC midnight)"],
+	["2026-12-01T00:30:00.000Z", "2026-12", "2026-11", "7:30 PM EST Nov 30"],
+	["2026-11-30T23:59:59.000Z", "2026-11", "2026-11", "6:59:59 PM EST Nov 30 (control)"],
+	["2026-03-01T00:30:00.000Z", "2026-03", "2026-02", "7:30 PM EST Feb 28, before the spring switch"],
+	["2026-03-31T23:30:00.000Z", "2026-03", "2026-03", "7:30 PM EDT Mar 31, after it (the same hour is no longer evening)"],
+	["2026-04-01T00:30:00.000Z", "2026-04", "2026-03", "8:30 PM EDT Mar 31"],
+];
+// Shapes the flag leaves on their old reading (the first seven characters): [start_date, month, what it is].
+const KEPT = [
+	["2026-08-01", "2026-08", "a bare day"],
+	["2026-08-01 00:30:00", "2026-08", "zone-less text (SQLite's CURRENT_TIMESTAMP shape)"],
+	["2026-08-01T00:30:00+00:00", "2026-08", "an offset form"],
+	["2026-09-31T01:00:00.000Z", "2026-09", "an impossible day (not rolled into October)"],
+];
+function stampWorld(startDate, opts, endDate = "2026-12-20T15:00:00.000Z") {
+	const db = makeDb();
+	db.prepare("INSERT INTO drivers_directory (driver_name, status, pay_type, pay_percentage, pay_daily) VALUES (?, 'active', 'fixed', 0, 0)").run(WREN);
+	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (12, ?, ?, ?)").run(WREN, startDate, endDate);
+	return buildModule(db, opts);
+}
+// §6 as a list of { name, ok, a, e }, so a child process can report it whole.
+function stampSection(over = {}) {
+	const results = [];
+	const t = (name, a, e) => results.push({ name, a: JSON.stringify(a), e: JSON.stringify(e), ok: JSON.stringify(a) === JSON.stringify(e) });
+	const off = (s) => stampWorld(s, { over });
+	const on = (s, zone) => stampWorld(s, { flag: true, zone, over });
+	const floor = (m) => ({ floor: m, unbounded: false });
+	for (const [s, utc, app, why] of EVENING) {
+		t(`§6 ${why}: flag off, driverPayLockedMonths() from the UTC month ${utc} (unchanged)`, off(s).driverPayLockedMonths(WREN, L6), from6(utc));
+		t(`§6 ${why}: flag on, from ${app}`, on(s).driverPayLockedMonths(WREN, L6), from6(app));
+		t(`§6 ${why}: driverHistoryFloorMonth() ${utc} off, ${app} on`,
+			[off(s).driverHistoryFloorMonth(WREN, makeJt()), on(s).driverHistoryFloorMonth(WREN, makeJt())], [floor(utc), floor(app)]);
+	}
+	for (const [s, m, why] of KEPT) {
+		t(`§6 ${why}: ${m}, flag off and on`,
+			[off(s).driverPayLockedMonths(WREN, L6), on(s).driverPayLockedMonths(WREN, L6), off(s).driverHistoryFloorMonth(WREN, makeJt()), on(s).driverHistoryFloorMonth(WREN, makeJt())],
+			[from6(m), from6(m), floor(m), floor(m)]);
+	}
+	t("§6 a blank start_date cannot bound anything, flag off and on",
+		[off("").driverPayLockedMonths(WREN, L6), on("").driverPayLockedMonths(WREN, L6), off("").driverHistoryFloorMonth(WREN, makeJt()), on("").driverHistoryFloorMonth(WREN, makeJt())],
+		[L6, L6, { floor: "", unbounded: true }, { floor: "", unbounded: true }]);
+	const narrowed = [...EVENING, ...KEPT].map(([s]) => s).filter((s) => {
+		const wide = on(s).driverPayLockedMonths(WREN, L6);
+		return off(s).driverPayLockedMonths(WREN, L6).some((p) => !wide.includes(p));
+	});
+	t("§6 the flag never narrows the guard: every month refused with it off is refused with it on", narrowed, []);
+	t("§6 APP_TIMEZONE east of UTC (Asia/Manila): the business month (Aug) is later than the UTC month (Jul), and the floor keeps Jul",
+		[on("2026-07-31T17:00:00.000Z", "Asia/Manila").driverPayLockedMonths(WREN, L6), on("2026-07-31T17:00:00.000Z", "Asia/Manila").driverHistoryFloorMonth(WREN, makeJt())],
+		[from6("2026-07"), floor("2026-07")]);
+	{
+		// The year end: 9 PM EST Dec 31 is already January of the next year in UTC, over closed months that span both years.
+		const yearEnd = "2027-01-01T02:00:00.000Z";
+		const LY_ASC = ["2026-10", "2026-11", "2026-12", "2027-01", "2027-02"];
+		const LY = [...LY_ASC].reverse();
+		const fromY = (m) => LY_ASC.filter((p) => p >= m);
+		const offY = stampWorld(yearEnd, { over }, "2027-02-20T15:00:00.000Z");
+		const onY = stampWorld(yearEnd, { flag: true, over }, "2027-02-20T15:00:00.000Z");
+		t("§6 9 PM EST Dec 31, the year end: driverPayLockedMonths() from 2027-01 off, from 2026-12 on",
+			[offY.driverPayLockedMonths(WREN, LY), onY.driverPayLockedMonths(WREN, LY)], [fromY("2027-01"), fromY("2026-12")]);
+		t("§6 ...and driverHistoryFloorMonth() 2027-01 off, 2026-12 on",
+			[offY.driverHistoryFloorMonth(WREN, makeJt()), onY.driverHistoryFloorMonth(WREN, makeJt())], [floor("2027-01"), floor("2026-12")]);
+	}
+	// appStampDay() itself: the business day of the exact toISOString() shape, else null. Its round trip
+	// refuses a day that does not exist, which Date.parse rolls into the next month.
+	const stampDayOf = (s) => {
+		const m = buildModule(makeDb(), { flag: true, over });
+		return typeof m.appStampDay === "function" ? m.appStampDay(s) : "appStampDay() is missing";
+	};
+	t("§6 appStampDay(): the business day of the toISOString() shape (an EDT evening, the year end, a real leap day)",
+		["2026-08-01T00:30:00.000Z", "2027-01-01T02:00:00.000Z", "2028-02-29T12:00:00.000Z"].map((s) => stampDayOf(s)),
+		["2026-07-31", "2026-12-31", "2028-02-29"]);
+	t("§6 appStampDay(): null for a day that does not exist (Sep 31; Feb 29 in 2026 and 2027), not the day Date.parse rolls it to",
+		["2026-09-31T01:00:00.000Z", "2026-02-29T12:00:00.000Z", "2027-02-29T03:00:00.000Z"].map((s) => stampDayOf(s)),
+		[null, null, null]);
+	t("§6 appStampDay(): null for every other shape (a bare day, zone-less text, an offset, four fraction digits, blank, null)",
+		["2026-08-01", "2026-08-01 00:30:00", "2026-08-01T00:30:00+00:00", "2026-08-01T00:30:00.0000Z", "", null].map((s) => stampDayOf(s)),
+		[null, null, null, null, null, null]);
+	// The create guard end to end, on the sixteen-month fixture (2025-05..2026-08 finalized).
+	const guard = (opts) => {
+		const m = stampWorld("2026-08-01T00:30:00.000Z", opts);
+		const res = m.truckCreateLockBlockers(createTruck({ unit_number: "LogisX-#27", assigned_driver: WREN }), m.driverHistoryFloorMonth(WREN, makeJt()));
+		return summary(res);
+	};
+	const both = (m) => [
+		{ field: "driver_pay_daily", effect: null, periods: lockedFrom(m) },
+		{ field: "owner_id", effect: "driver_set", periods: lockedFrom(m) },
+	];
+	t("§6 the create guard for a driver first assigned 8:30 PM EDT Jul 31: refused for 2026-08 alone with the flag off (unchanged)", guard({ over }), both("2026-08"));
+	t("§6 ...and from 2026-07, her first business month, with it on", guard({ flag: true, over }), both("2026-07"));
+	return results;
+}
+const asRecorded = (results) => {
+	for (const r of results) {
+		if (r.ok) pass++;
+		else failures.push(`${r.name}\n      expected ${r.e}\n      actual   ${r.a}`);
+	}
+};
+const mutate = (src, from, to) => (src && src.includes(from) ? src.split(from).join(to) : null);
+const MUTANTS = {
+	// M1 the stamp's day read on the server's clock instead of APP_TIMEZONE.
+	"server-clock": () => ({ appStampDay: mutate(FN_SRC.appStampDay, "appDay(new Date(ms))",
+		"((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, \"0\")}-${String(d.getDate()).padStart(2, \"0\")}`)(new Date(ms))") }),
+	// M2 the flag ignored: the UTC month always (the bug).
+	"flag-ignored": () => ({ assignmentFloorMonth: mutate(FN_SRC.assignmentFloorMonth, "if (!APP_DAY_STAMPS_ENABLED) return utc;", "return utc;") }),
+	// M3 the business month alone, without the earlier-of rule.
+	"no-min": () => ({ assignmentFloorMonth: mutate(FN_SRC.assignmentFloorMonth, "return biz && biz < utc ? biz : utc;", "return biz || utc;") }),
+	// M4 appStampDay() without its round trip: a day that does not exist is rolled forward, not refused.
+	"no-round-trip": () => ({ appStampDay: mutate(FN_SRC.appStampDay,
+		"if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return null;", "if (!Number.isFinite(ms)) return null;") }),
+	// M5 the two months compared on their month digits alone, which only the year end tells apart.
+	"month-digits": () => ({ assignmentFloorMonth: mutate(FN_SRC.assignmentFloorMonth,
+		"return biz && biz < utc ? biz : utc;", "return biz && biz.slice(5) < utc.slice(5) ? biz : utc;") }),
+};
+// The names closure() lifts for both floors, as a script lifts them (scripts/data-fix-driver-rates.js:
+// db, require, console, process, __dirname and fetch provided; the HTTP app and the server denied).
+const SCRIPT_DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "jtCacheInvalidate", "sendEmail", "transporter", "getDrive", "app"];
+function floorLift(src) {
+	try {
+		return closure(src, {
+			roots: ["driverPayLockedMonths", "driverHistoryFloorMonth"],
+			provided: ["db", "require", "console", "process", "__dirname", "fetch"], denied: SCRIPT_DENIED,
+		}).names.filter((n) => n === "APP_DAY_STAMPS_ENABLED" || ["appDay", "appStampDay", "assignmentFloorMonth"].includes(n)).sort();
+	} catch (e) {
+		return `refused: ${e.message}`;
+	}
+}
+// §6 in a child of this file under process zone `zone` (a mutant when asked):
+// { failed: [names], digest of every actual value }.
+function inZone(zone, mutant = "") {
+	try {
+		return JSON.parse(execFileSync(process.execPath, [__filename, "--stamp-zone-child", mutant],
+			{ env: { ...process.env, TZ: zone }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+	} catch (e) {
+		const why = String(e.stderr || "").split("\n").find((l) => /^[A-Za-z]*Error:|^FAILED/.test(l)) || String(e.message).split("\n")[0];
+		return { failed: [`the child under TZ=${zone} did not finish: ${why}`], digest: "" };
+	}
+}
+const verdictOf = (v) => (v.failed.length ? `${v.failed.length} failed, first: ${v.failed[0]}` : "all pass");
+function stampChecks() {
+	section("§6 a truck assignment's start month (APP_DAY_STAMPS_ENABLED)");
+	asRecorded(stampSection());
+	const code = (s) => String(s || "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	eq([...SRC.matchAll(/^const APP_DAY_STAMPS_ENABLED = process\.env\.APP_DAY_STAMPS_ENABLED === "true";$/gm)].length, 1,
+		"§6 server.js declares APP_DAY_STAMPS_ENABLED once, at column 0, on only when exactly \"true\"");
+	ok(["driverPayLockedMonths", "driverHistoryFloorMonth"].every((n) => code(FN_SRC[n]).includes("assignmentFloorMonth(r.start_date)") && !/start_date \|\| ""\)\.slice\(0, 7\)/.test(code(FN_SRC[n]))),
+		"§6 both floors read start_date through assignmentFloorMonth(), with no slice of their own left");
+
+	section("§6 the floors lift into a script");
+	eq(floorLift(SRC), ["APP_DAY_STAMPS_ENABLED", "appDay", "appStampDay", "assignmentFloorMonth"],
+		"§6 both floors lift through closure() with the HTTP app and the server denied, bringing the flag, appStampDay() and appDay()");
+	// closure() reads any name as a top-level one, so a local `app` would pull in the HTTP app.
+	const localApp = FN_SRC.assignmentFloorMonth
+		? SRC.replace(FN_SRC.assignmentFloorMonth, () => FN_SRC.assignmentFloorMonth.replace(/\bbiz\b/g, "app")) : "";
+	ok(localApp !== "" && /^refused: the closure reaches app\b/.test(String(floorLift(localApp))),
+		`§6 ...and the same helper with a local named app is refused there, so the check has teeth (${localApp ? floorLift(localApp) : "no helper to mutate"})`);
+
+	section("§6 under four process zones (child processes)");
+	const verdicts = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"].map((zone) => [zone, inZone(zone)]);
+	for (const [zone, v] of verdicts) eq(verdictOf(v), "all pass", `§6 TZ=${zone}: every check passes`);
+	eq(new Set(verdicts.map(([, v]) => v.digest)).size, 1, "§6 ...and every zone found the same values");
+
+	section("§6 mutants");
+	const utc = inZone("UTC", "server-clock");
+	const ny = inZone("America/New_York", "server-clock");
+	ok(utc.digest !== "" && utc.failed.length > 0, `§6 M1 the day read on the server's clock: caught under TZ=UTC (${verdictOf(utc)})`);
+	eq(verdictOf(ny), "all pass", "§6 M1 ...and not under TZ=America/New_York, so the zones are what catch it");
+	for (const [name, label] of [
+		["flag-ignored", "M2 the flag ignored (the UTC month)"],
+		["no-min", "M3 the business month without the earlier-of rule"],
+		["no-round-trip", "M4 appStampDay() without its round trip"],
+		["month-digits", "M5 the months compared on their month digits alone"],
+	]) {
+		const over = MUTANTS[name]();
+		const applied = Object.values(over).every(Boolean);
+		const caught = applied ? stampSection(over).filter((r) => !r.ok).length : 0;
+		ok(applied && caught > 0, `§6 ${label}: caught (${applied ? `${caught} check(s)` : "its target text is missing"})`);
+	}
+}
+
+// The child's side: §6 alone, one line of JSON.
+if (process.argv[2] === "--stamp-zone-child") {
+	const over = process.argv[3] ? MUTANTS[process.argv[3]]() : {};
+	const results = stampSection(over);
+	process.stdout.write(JSON.stringify({
+		failed: results.filter((r) => !r.ok).map((r) => r.name),
+		digest: crypto.createHash("sha256").update(results.map((r) => `${r.name}=${r.a}`).join("\n")).digest("hex"),
+	}));
+	process.exit(0);
+}
+
 (async () => {
 	historySection();
 	lockedMonthsSection();
 	guardSection();
 	await routeSection();
 	sourcePins();
+	stampChecks();
 
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {
