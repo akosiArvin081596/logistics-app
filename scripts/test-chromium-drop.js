@@ -412,7 +412,7 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 			const r = removeRun(profile, { LOGISX_CHROMIUM_ACCOUNT: "nobody" });
 			ok("§5 never handed over and not empty: exit 1, left in place, never removed recursively",
 				r.status === 1 && /never handed over and is not empty/.test(r.stderr) && fs.existsSync(path.join(profile, "made-up")) && nothingRan(), r.stderr);
-			fs.rmSync(path.join(profile, "made-up"));
+			fs.rmSync(path.join(profile, "made-up"), { force: true });
 			clearRecords();
 			const r2 = removeRun(profile, { LOGISX_CHROMIUM_ACCOUNT: "nobody" });
 			ok("§5 ...and once empty, removed, with no setpriv", r2.status === 0 && !fs.existsSync(profile) && nothingRan(), r2.stderr);
