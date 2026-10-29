@@ -141,12 +141,27 @@ function mountLines(lines, rel = SERVER_FILE) {
 	return mounts;
 }
 
-// { text, file, modules, where(line) }: `where` takes a 1-based line of `text`
-// and answers { file, line } in the real files ("server.js" or
-// "routes/<name>.js", relative to the server.js folder).
+// { text, file, modules, where(line), toVirtual(file, line) }: `where` takes a
+// 1-based line of `text` and answers { file, line } in the real files
+// ("server.js" or "routes/<name>.js", relative to the server.js folder);
+// `toVirtual` goes the other way (null for a mount line, which the splice replaces).
 function virtualServer(opts) {
 	const file = resolveServerFile(opts);
 	const raw = fs.readFileSync(file, "utf8");
+	const readModule = (rel, mountLine) => {
+		try {
+			return fs.readFileSync(path.join(path.dirname(file), rel), "utf8");
+		} catch (err) {
+			throw new Error(`server-source: ${SERVER_FILE}:${mountLine} mounts ${rel}, which can't be read beside ${file} (${err.code || err.message}); a base with routes/ needs SERVER_ROOT, not SERVER_JS`);
+		}
+	};
+	return { ...spliceModules(raw, readModule), file };
+}
+
+// The splice on text alone: `readModule(rel, mountLine)` hands back a mounted
+// module's text or throws. It reads nothing itself, so the pre-push picker
+// (scripts/lib/test-selection.js) splices through the reader it is given.
+function spliceModules(raw, readModule) {
 	const lines = raw.split("\n");
 	const mounts = mountLines(lines);
 	const segments = [];
@@ -159,14 +174,7 @@ function virtualServer(opts) {
 	};
 	for (const m of mounts) {
 		const rel = `routes/${m.name}.js`;
-		const full = path.join(path.dirname(file), rel);
-		let text;
-		try {
-			text = fs.readFileSync(full, "utf8");
-		} catch (err) {
-			throw new Error(`server-source: ${SERVER_FILE}:${m.index + 1} mounts ${rel}, which can't be read beside ${file} (${err.code || err.message}); a base with routes/ needs SERVER_ROOT, not SERVER_JS`);
-		}
-		const mod = checkModule(text, rel);
+		const mod = checkModule(readModule(rel, m.index + 1), rel);
 		push(SERVER_FILE, at + 1, lines.slice(at, m.index));
 		push(rel, mod.bodyFrom, mod.body);
 		modules.push({ name: m.name, file: rel, mountLine: m.index + 1, names: mod.names });
@@ -174,10 +182,10 @@ function virtualServer(opts) {
 	}
 	if (!mounts.length) {
 		segments.push({ rel: SERVER_FILE, from: 1, virtualFrom: 1, count: lines.length });
-		return { text: raw, file, modules, where: whereIn(segments) };
+		return { text: raw, modules, where: whereIn(segments), toVirtual: toVirtualIn(segments) };
 	}
 	push(SERVER_FILE, at + 1, lines.slice(at));
-	return { text: out.join("\n"), file, modules, where: whereIn(segments) };
+	return { text: out.join("\n"), modules, where: whereIn(segments), toVirtual: toVirtualIn(segments) };
 }
 
 function whereIn(segments) {
@@ -185,6 +193,13 @@ function whereIn(segments) {
 		const s = segments.find((g) => line >= g.virtualFrom && line < g.virtualFrom + g.count);
 		if (!s) throw new Error(`server-source: line ${line} is outside the source (1-${segments.reduce((n, g) => n + g.count, 0)})`);
 		return { file: s.rel, line: s.from + (line - s.virtualFrom) };
+	};
+}
+
+function toVirtualIn(segments) {
+	return (file, line) => {
+		const s = segments.find((g) => g.rel === file && line >= g.from && line < g.from + g.count);
+		return s ? s.virtualFrom + (line - s.from) : null;
 	};
 }
 
@@ -215,4 +230,4 @@ function routeContextLines(text) {
 	return { first: head + 1, last: end + 1 };
 }
 
-module.exports = { serverSource, virtualServer, checkModule, mountLines, resolveServerFile, serverOverride, routeContextLines, MOUNT_RE };
+module.exports = { serverSource, virtualServer, spliceModules, checkModule, mountLines, resolveServerFile, serverOverride, routeContextLines, MOUNT_RE };
