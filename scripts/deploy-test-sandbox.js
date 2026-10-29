@@ -46,6 +46,9 @@ const D = {
 	home: path.join(T, "home"),
 };
 for (const d of [D.bin, D.lock, D.logs, D.home]) fs.mkdirSync(d, { recursive: true });
+// The scripts refuse a lock folder that group or others can write, so the
+// sandbox's is 0700 whatever the umask, as the box's is.
+fs.chmodSync(D.lock, 0o700);
 const EMPTY_GITCONFIG = path.join(T, "empty.gitconfig");
 fs.writeFileSync(EMPTY_GITCONFIG, "");
 // What a build leaves in client/dist/index.html, carrying the SPA's mount point
