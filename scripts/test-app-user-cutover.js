@@ -339,18 +339,20 @@ function makeCase(envName, o = {}) {
 	mkdir(path.join(S, "crontabs"));
 	mkdir(path.join(dir, "tmp"));
 	const app = mkdir(F + E.app, 0o755);
-	for (const [rel, body, mode] of [
-		["server.js", "// the app\n", 0o644],
-		["ecosystem.config.js", PROD_DEF, 0o644],
-		["ecosystem.staging.config.js", STAGING_DEF, 0o644],
-		["backup.sh", "#!/bin/bash\necho backup\n", 0o755],
-		["lib/a.js", "module.exports = 1;\n", 0o644],
-		["lib/chromium-drop.sh", "#!/bin/sh\nexit 0\n", 0o755],
-		["scripts/deploy/remote-deploy.sh", "#!/bin/bash\nexit 0\n", 0o755],
-		["package.json", "{}\n", 0o644],
-		["client/index.html", "<div id=\"app\"></div>\n", 0o644],
-		[`${SETTINGS}.example`, "RENDER_CHILD_TRANSPORT=fork\n", 0o644],
-	]) put(app, rel, body, mode);
+	// The made-up checkout's tracked files, [content, mode] by name. The app's own files are never read here.
+	const tracked = {
+		"server.js": ["// the app\n", 0o644],
+		"ecosystem.config.js": [PROD_DEF, 0o644],
+		"ecosystem.staging.config.js": [STAGING_DEF, 0o644],
+		"backup.sh": ["#!/bin/bash\necho backup\n", 0o755],
+		"lib/a.js": ["module.exports = 1;\n", 0o644],
+		"lib/chromium-drop.sh": ["#!/bin/sh\nexit 0\n", 0o755],
+		"scripts/deploy/remote-deploy.sh": ["#!/bin/bash\nexit 0\n", 0o755],
+		"package.json": ["{}\n", 0o644],
+		"client/index.html": ["<div id=\"app\"></div>\n", 0o644],
+		[`${SETTINGS}.example`]: ["RENDER_CHILD_TRANSPORT=fork\n", 0o644],
+	};
+	for (const [rel, [body, mode]] of Object.entries(tracked)) put(app, rel, body, mode);
 	git(app, dir, "init", "-q");
 	git(app, dir, "add", ".");
 	git(app, dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "fixture");
