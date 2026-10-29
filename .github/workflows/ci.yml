@@ -144,8 +144,8 @@ jobs:
       # server.js is ~60k lines in ONE file. A syntax error anywhere in it does
       # not degrade a feature, it stops the entire application from booting —
       # so this is the cheapest, highest-value gate in the pipeline and it runs
-      # first. `npm run lint` is `node --check` over server.js, every
-      # .js/.mjs/.cjs file in lib/ and scripts/, and routes/*.js, about a second. (`npm run
+      # first. `npm run lint` is `node --check` over server.js and every
+      # .js/.mjs/.cjs file in lib/ and scripts/, about a second. (`npm run
       # check` is lint plus the unit runners, the local pre-push check; CI runs
       # the two in separate jobs so the unit runners run once.)
       - name: Syntax check (server.js, lib, scripts)
