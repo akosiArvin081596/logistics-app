@@ -16,7 +16,7 @@
 // - Refuses when stdin is a terminal or empty (a password is piped, never typed).
 // - The account exists (any case or spacing of the name): changes nothing — not
 //   its password, not its role — and says so; a role other than Super Admin is
-//   reported and refused.
+//   reported and refused, and so is a disabled account (it never enables one).
 // - Otherwise creates it as a Super Admin with no forced password change, hashed
 //   as POST /api/users hashes, and writes an audit row naming this script as the
 //   actor. Prints the account's id, name and role; never the password.
@@ -78,11 +78,14 @@ async function main() {
 	const Database = appRequire("better-sqlite3");
 	const db = new Database(dbFile, { fileMustExist: true });
 	db.pragma("busy_timeout = 10000");
-	const find = () => db.prepare("SELECT id, username, role FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username);
+	const find = () => db.prepare("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER(?)").get(username);
 	const existing = find();
 	if (existing) {
 		db.close();
 		if (existing.role !== "Super Admin") refuse(`${existing.username} (user ${existing.id}) exists with role ${existing.role}; nothing changed`);
+		if (String(existing.disabled_at ?? "") !== "") {
+			refuse(`${existing.username} (user ${existing.id}) is disabled; nothing changed (enable it on the Users page: this script never enables an account)`);
+		}
 		console.log(JSON.stringify({ id: existing.id, username: existing.username, role: existing.role, created: false, note: "exists; password and role left as they are" }));
 		return;
 	}

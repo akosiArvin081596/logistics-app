@@ -1147,6 +1147,13 @@ try {
 	console.error("last_login_at seed skipped:", e.message);
 }
 
+// Account disable (lib/account-disable.js): NULL disabled_at is an enabled account, otherwise an
+// ISO-8601 Z instant. disabled_by has no foreign key: the acting account may be deleted later.
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_at TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_by INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT NULL"); } catch {}
+const accountDisable = require("./lib/account-disable");
+
 // Per-load driver ratings (1-5 stars, one rating per load)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS load_ratings (
@@ -7241,6 +7248,10 @@ io.engine.use(sessionMiddleware);
 // would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
 // guards; scripts/test-password-change-enforced.js pins this position.
 app.use(refreshPasswordChangeFlag);
+// A disabled, removed or re-roled account's session is signed out before any route reads it, and
+// so is a live-update handshake's (signOutEndedAccount()).
+app.use(signOutEndedAccount);
+io.engine.use(signOutEndedAccount);
 // A Dispatcher's opaque load key, read before routing (WITHHELD LOAD KEYS, beside
 // shownLoadId()): inert unless WITHHELD_LOAD_REFS_ENABLED is on.
 app.use(withheldLoadKeyGate);
@@ -11435,6 +11446,36 @@ function refreshPasswordChangeFlag(req, res, next) {
 	if (user) {
 		const current = currentMustChangePassword(user);
 		if (user.mustChangePassword !== current) user.mustChangePassword = current;
+	}
+	next();
+}
+
+// The backstop for a disable whose session purge failed: a session whose account is disabled or
+// gone, whose id is not a positive whole number, or whose cached role the row no longer holds loses
+// its user. Same rules as refreshPasswordChangeFlag(): a declaration, no module-scope state, only `db`.
+function signOutEndedAccount(req, res, next) {
+	const user = req.session && req.session.user;
+	if (user) {
+		const id = Number.isSafeInteger(user.id) && user.id > 0 ? user.id : null;
+		let reason = id === null ? "no account id" : null;
+		if (id !== null) {
+			try {
+				const row = db.prepare("SELECT role, disabled_at FROM users WHERE id = ?").get(id);
+				if (!row) reason = "account not found";
+				else if (String(row.disabled_at ?? "") !== "") reason = "disabled";
+				else if (row.role !== user.role) reason = "role changed";
+			} catch (err) {
+				// An unreadable users table keeps the session, logged at most once a minute.
+				if (!globalThis.__accountCheckErrLoggedAt || Date.now() - globalThis.__accountCheckErrLoggedAt > 60000) {
+					globalThis.__accountCheckErrLoggedAt = Date.now();
+					console.error("account check failed; the session is kept:", err.message);
+				}
+			}
+		}
+		if (reason) {
+			delete req.session.user;
+			console.warn(`[account] a session was signed out: ${reason}${id === null ? "" : ` (account #${id})`}`);
+		}
 	}
 	next();
 }
@@ -29923,6 +29964,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", user, "WRONG_PASSWORD", `Sign-in refused: wrong password (by ${found.by})`);
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
+		// A disabled account is told so only after the right password, and before the session the
+		// request arrived with is rotated, so that session is left as it was.
+		if (String(user.disabled_at ?? "") !== "") {
+			return res.status(403).json(disabledSignInRefusal(req, user));
+		}
 
 		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
 		// POST /api/auth/change-password already do. regenerate() destroys the
@@ -29956,6 +30002,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", current || user, "CHANGED_MEANWHILE",
 				`Sign-in refused: the account was changed or removed while its password was checked (by ${found.by})`);
 			return refuse(401, "Invalid credentials");
+		}
+		// A disable that landed while this sign-in yielded: the half-built session goes, as in refuse().
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(403).json(disabledSignInRefusal(req, current));
 		}
 
 		req.session.user = {
@@ -30010,6 +30061,28 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		refuse(500, "Could not sign in. Please try again.");
 	}
 });
+
+// The right password on a disabled account: one audit row a minute per account (logAuditRefusal's
+// window, keyed on the account) and at most one admin email an hour per account. Returns the 403 body.
+function disabledSignInRefusal(req, account) {
+	auditDisabledSignIn(req, account);
+	noticeDisabledSignIn(account);
+	return { code: "ACCOUNT_DISABLED", error: accountDisable.DISABLED_MESSAGE };
+}
+// The row names the account signed in to, never the text that was typed. It is written whatever
+// SIGN_IN_AUDIT_ENABLED says; with it on, through the sign-in writer, which keeps a staff IP and browser.
+function auditDisabledSignIn(req, account) {
+	const details = "Sign-in refused: the account is disabled";
+	if (signIn.auditEnabled) return signIn.refuse(req, "login_refused_disabled", account, "ACCOUNT_DISABLED", details);
+	logAuditRefusal({ session: { user: { id: account.id, username: account.username, role: account.role } } },
+		"login_refused_disabled", "user", String(account.id), `${details} [ACCOUNT_DISABLED]`, "ACCOUNT_DISABLED");
+}
+const disabledSignInNotices = accountDisable.noticeWindow(60 * 60 * 1000);
+function noticeDisabledSignIn(account) {
+	if (!disabledSignInNotices.allow(account.id)) return;
+	const notice = accountDisable.disabledSignInNotice({ account, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
 
 // Logout
 app.post("/api/auth/logout", (req, res) => {
@@ -30126,6 +30199,11 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		}
 		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		if (!current) return res.status(404).json({ error: "User not found" });
+		// A disable that landed in the bcrypt window ends this session like a revocation.
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 		if (current.password_hash !== row.password_hash) {
 			return res.status(409).json({
 				code: "PASSWORD_CHANGED_MEANWHILE",
@@ -30419,8 +30497,10 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
 			u.last_login_at, u.must_change_password,
 			EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND COALESCE(u.email, '') <> '' AND LOWER(o.email) = LOWER(u.email)) AS email_shared,
+			u.disabled_at, u.disabled_by, u.disabled_reason, dby.username AS disabled_by_username,
 			do2.status AS onboarding_status
 			FROM users u
+			LEFT JOIN users dby ON dby.id = u.disabled_by
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
 		.all()
 		.map((u) => ({
@@ -30443,6 +30523,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			MustChangePassword: !!u.must_change_password,
 			EmailShared: !!u.email_shared,
 			SharedLogin: signInLib.isSharedLoginName(u.username),
+			// Who turned the account off, when and why; all empty while it is enabled.
+			Disabled: String(u.disabled_at ?? "") !== "",
+			DisabledAt: String(u.disabled_at ?? "") || null,
+			DisabledBy: u.disabled_by ? { id: u.disabled_by, username: u.disabled_by_username || null } : null,
+			DisabledReason: u.disabled_reason || null,
 		}));
 	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
 });
@@ -30593,7 +30678,8 @@ function refreshOwnSession(req) {
 	}
 	// The old ID's sockets end first, while req.sessionID still names it.
 	disconnectSessionSockets(oldSid);
-	if (!row) {
+	// A disabled account's session is ended, never rebuilt.
+	if (!row || String(row.disabled_at ?? "") !== "") {
 		req.session.destroy((err) => {
 			if (err) console.error("session refresh: ending the session failed:", err.message);
 		});
@@ -31040,6 +31126,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				code: "CONCURRENT_MODIFICATION",
 			});
 		}
+		// The acting account as it is now: one disabled, removed or demoted during the awaits above
+		// writes nothing. Its row only; a purged session is caught by the store on its next request.
+		const actorNow = db.prepare("SELECT * FROM users WHERE id = ?").get(Number(req.session?.user?.id));
+		if (!actorNow || String(actorNow.disabled_at ?? "") !== "" || actorNow.role !== "Super Admin") {
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 
 		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
 		// An unrecognised role used to fall through the `if (role && …)` below and
@@ -31113,8 +31205,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		// Two write paths, two guards — so "zero Super Admins" is unreachable
 		// through the API. Re-run those two greps before adding a third path.
 		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
-			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-			if (others === 0) {
+			// Enabled accounts only: accountDisable.OTHER_ENABLED_SUPER_ADMINS_SQL, word for word (pinned by
+			// scripts/test-account-disable-rules.js). Demoting a disabled one takes no access away.
+			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ? AND COALESCE(disabled_at, '') = ''").get(id).cnt;
+			if (others === 0 && String(user.disabled_at ?? "") === "") {
 				// Not a period cause, so it COALESCES (LAST_SUPER_ADMIN is absent from
 				// UNCOALESCED_REFUSAL_CODES) — which is right for a refusal a scripted
 				// client can repeat. `update_user_blocked` is off PURGEABLE_REFUSAL_ACTIONS,
@@ -31126,6 +31220,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 					code: "LAST_SUPER_ADMIN",
 				});
 			}
+		}
+
+		// (a1) A disabled account's role is locked until it is enabled. Other edits, a password reset
+		// included, go through and leave it disabled.
+		if (nextRole && nextRole !== user.role && String(user.disabled_at ?? "") !== "") {
+			recordPeriodRefusal({ req, ...userEditAudit, tail: "nothing was written — the account is disabled" }, "ACCOUNT_DISABLED", []);
+			return res.status(409).json({
+				error: `${user.username} is disabled. Enable the account to change its role. Nothing was changed.`,
+				code: "ACCOUNT_DISABLED",
+			});
 		}
 
 		// (b) Two accounts cannot share a driver_name. The cascade below matches on
@@ -32489,8 +32593,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// DEMOTE the last one — without that twin this check is one PUT away from
 	// irrelevant (`PUT {"role":"Driver"}` then DELETE).
 	if (user.role === "Super Admin") {
-		const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-		if (others === 0) {
+		// Enabled accounts only; deleting a disabled one takes no access away.
+		const others = accountDisable.otherEnabledSuperAdmins(db, id);
+		if (others === 0 && String(user.disabled_at ?? "") === "") {
 			// The twin of PUT /api/users/:id's LAST_SUPER_ADMIN row, under this route's
 			// own action — so one query over `audit_trail` returns every attempt to
 			// remove the last administrator, by either door.
@@ -32873,6 +32978,119 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
+});
+
+// ============================================================
+// ACCOUNT DISABLE — POST /api/users/:id/disable and /enable (lib/account-disable.js)
+// ============================================================
+// ACCOUNT_DISABLE_ENABLED (default off): on only when the server's environment sets it to exactly
+// "true". It gates the disable alone; enabling always works, so an account disabled while it was on
+// can be enabled after it goes off. A disabled account is refused at sign-in whatever it says.
+const ACCOUNT_DISABLE_ENABLED = accountDisable.accountDisableEnabled();
+// The protected-account list the switch is judged against. This build reads none (RATECON_PDF_VIEWER_IDS
+// is not read for it): disabling a Super Admin is refused, saying so, and enabling one is allowed.
+const ACCOUNT_DISABLE_LIST = accountDisable.UNREAD_LIST;
+
+// What a switch decides on, read in one synchronous step with its write.
+function accountSwitchFacts(req, id) {
+	const actor = req.session.user;
+	const actorId = Number(actor && actor.id);
+	const live = liveSessionIds([req.sessionID]);
+	return {
+		actor,
+		actorLive: !!live && live.has(req.sessionID),
+		actorRow: Number.isSafeInteger(actorId) ? db.prepare("SELECT * FROM users WHERE id = ?").get(actorId) || null : null,
+		target: db.prepare("SELECT * FROM users WHERE id = ?").get(id) || null,
+	};
+}
+
+// The admin email for a disable or an enable, never awaited; nothing goes to the account itself.
+function notifyAccountSwitch(kind, { target, actor, reason }) {
+	const notice = accountDisable.switchNotice({ kind, target, actor, reason, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
+
+// Every refusal writes nothing and is audited; an account already in the asked state answers
+// { unchanged: true } and writes nothing. Disable ends the account's sessions and sockets at once.
+app.post("/api/users/:id/disable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	const read = accountDisable.readReason(req.body && req.body.reason);
+	if (read.refusal) return res.status(read.refusal.status).json({ code: read.refusal.code, error: read.refusal.error });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.disableDecision({
+				flagOn: ACCOUNT_DISABLE_ENABLED, ...facts, otherEnabled: accountDisable.otherEnabledSuperAdmins(db, id), listed: ACCOUNT_DISABLE_LIST,
+			});
+			if (decision.ok) {
+				db.prepare("UPDATE users SET disabled_at = ?, disabled_by = ?, disabled_reason = ? WHERE id = ?")
+					.run(new Date().toISOString(), Number(facts.actor.id), read.reason, id);
+			}
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account disable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be disabled. Nothing was changed.", code: "DISABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "disable_user_blocked", entity: "user", entityId: String(id),
+			subject: `disable ${outcome.target.username} (role ${outcome.target.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "disable_user", "user", id,
+		`Disabled ${outcome.target.role} ${auditText(outcome.target.username, 120)}` +
+		`${read.reason ? `; reason: ${auditText(read.reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("disable", { target: outcome.target, actor: req.session.user, reason: read.reason });
+	notifyChange("users");
+	res.json({ success: true, sessionsEnded });
+});
+
+app.post("/api/users/:id/enable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.enableDecision({ ...facts, listed: ACCOUNT_DISABLE_LIST });
+			if (decision.ok) db.prepare("UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ?").run(id);
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account enable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be enabled. Nothing was changed.", code: "ENABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision, target: was } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "enable_user_blocked", entity: "user", entityId: String(id),
+			subject: `enable ${was.username} (role ${was.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	// A session the disable missed (a failed purge, a disable made outside this route) would sign in
+	// again with the account, so its stored sessions end here too. Normally there are none.
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "enable_user", "user", id,
+		`Enabled ${was.role} ${auditText(was.username, 120)}; it was disabled at ${auditText(was.disabled_at, 40)} by account #${Number(was.disabled_by) || "unknown"}` +
+		`${was.disabled_reason ? `; its reason was: ${auditText(was.disabled_reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("enable", { target: was, actor: req.session.user, reason: null });
+	notifyChange("users");
+	res.json({ success: true });
 });
 
 // List investor users (for owner dropdown). `username` is the investor's full
@@ -71802,10 +72020,14 @@ function disconnectUserSockets(userId, { exceptSid = null } = {}) {
 // what an HTTP request on the same cookie is. One statement for any number of
 // IDs (json_each, so no bound-variable limit). null when the store cannot be
 // read: each caller picks its own direction for that.
+// A session also needs its account row, enabled, under the id it names (a whole number), so a
+// disabled or removed account's sockets are refused and swept even when its purge failed.
 function liveSessionIds(sids) {
 	try {
 		const rows = db.prepare(
-			"SELECT sid FROM sessions WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire)"
+			"SELECT sid FROM sessions JOIN users ON users.id = (CASE WHEN json_valid(sess) THEN" +
+			" (CASE WHEN json_type(sess, '$.user.id') = 'integer' THEN json_extract(sess, '$.user.id') END) END)" +
+			" WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire) AND COALESCE(users.disabled_at, '') = ''"
 		).all(JSON.stringify(sids));
 		return new Set(rows.map((r) => r.sid));
 	} catch (err) {
@@ -71930,6 +72152,9 @@ io.on("connection", (socket) => {
 		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
 		const requested = identityRoomKey(clientName);
+		// An account disabled or removed since the handshake joins no room.
+		const stillLive = liveSessionIds([sid]);
+		if (!stillLive || !stillLive.has(sid)) return;
 		// The client passes a name (their driver name, their username,
 		// "dispatch", "investor"). Rooms are derived from the session instead:
 		// the role's room, and this identity's own rooms, through driverRoom() /
