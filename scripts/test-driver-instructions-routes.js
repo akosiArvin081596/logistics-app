@@ -63,8 +63,7 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const RUNTIME = process.env.DI_RUNTIME_LIB || path.join(ROOT, "lib", "driver-instructions-runtime.js");
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 const express = require(path.join(ROOT, "node_modules", "express"));

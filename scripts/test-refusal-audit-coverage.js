@@ -32,11 +32,9 @@
 
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
 const Database = require("better-sqlite3");
 
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];

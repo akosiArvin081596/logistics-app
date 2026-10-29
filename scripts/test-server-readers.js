@@ -71,8 +71,6 @@ const ADMIN = "admin or operator script run on production data: moves to the hel
 	["scripts/personal-expenses-dry-run.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-driver-name-matching.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-week-selection.js", owned("fix/personal-receipt-week")],
-	["scripts/test-driver-instructions-routes.js", owned("feat/db-download-listed-only")],
-	["scripts/test-refusal-audit-coverage.js", owned("feat/db-download-listed-only")],
 	["scripts/test-broker-column-redaction.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-csrf-guard.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-deleted-loads-route.js", owned("feat/restore-deleted-loads")],
@@ -115,7 +113,6 @@ const LABELS = new Map([
 // each with what it waits for. §5 fails while any is left once a module is mounted.
 const BEFORE_FIRST_MOVE = new Map([
 	["scripts/replica/remote/settings.js", "replica tool that scans a deployed app's server.js and lib/: covers routes/ with the admin scripts' change"],
-	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
 	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
 	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
 ]);

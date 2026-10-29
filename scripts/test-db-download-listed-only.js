@@ -67,7 +67,7 @@ const NOTICE_TYPE = "db-download-refused";
 const TEST_IP = "203.0.113.9";
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let passed = 0;
 let failed = 0;
