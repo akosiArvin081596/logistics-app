@@ -9918,6 +9918,47 @@ const rcIndexShared = require("./lib/ratecon-drive-index.js");
 // POST /api/documents/upload offers a Driver or Dispatcher (uploadDocTypeFor())
 // must never include one of these — scripts/test-invoice-draft-bol.js pins it.
 const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
+// RATECON_PDF_VIEWER_IDS: the account ids that may open rate-con files inside
+// the app (lib/listed-accounts.js reads it strictly). Server environment only,
+// so no Super Admin can change it from the app. Once set, every other Super
+// Admin is refused by rateconViewGate (viewerGate() in lib/ratecon-pdf-route.js)
+// on GET /api/loads/:loadId/ratecon.pdf, the files under /uploads/rate-cons/,
+// a rate con stored in the uploads root (guardRootLoadDocument) and the invoice
+// preview's rate-con files; and a listed account's password, role, email and
+// driver name change, or its removal, only by itself or another listed account
+// (PUT and DELETE /api/users/:id, 403 PROTECTED_ACCOUNT). Invoice drafting
+// still attaches the rate con for every Super Admin.
+// Unset: the behaviour before the list existed, and one warning per start.
+// Set but invalid: nobody opens a rate con in the app, no Super Admin's
+// password, role, email or driver name changes and none is removed, and one
+// error per start.
+const RATECON_PDF_VIEWERS = require("./lib/listed-accounts.js").fromSetting(
+	"RATECON_PDF_VIEWER_IDS", process.env.RATECON_PDF_VIEWER_IDS, console, {
+		unsetMeans: "every Super Admin opens rate-con files and no account is protected; set it to the owner's account id(s)",
+		invalidMeans: "nobody opens a rate-con file in the app, and no Super Admin's password, role, email or driver name changes, until it lists account ids only (for example 1,7)",
+	},
+);
+const rateconViewGate = require("./lib/ratecon-pdf-route.js").viewerGate(RATECON_PDF_VIEWERS);
+// Account ids are given out in order, so an id listed before its account exists
+// goes to whichever account is created next. At start, one error per listed id
+// that is not a Super Admin account here, naming the id only. Returns those ids.
+function reportListedViewersWithoutAccount(list, logger) {
+	if (!list || list.state !== "valid" || !list.ids.length) return [];
+	let rows;
+	try {
+		rows = db.prepare(`SELECT id FROM users WHERE role = 'Super Admin' AND id IN (${list.ids.map(() => "?").join(", ")})`).all(...list.ids);
+	} catch (e) {
+		logger.error(`[RATECON_PDF_VIEWER_IDS] the listed account ids could not be checked against the users table: ${e && e.message}`);
+		return [];
+	}
+	const found = new Set(rows.map((r) => Number(r.id)));
+	const missing = list.ids.filter((n) => !found.has(n));
+	for (const n of missing) {
+		logger.error(`[RATECON_PDF_VIEWER_IDS] lists account id ${n}, which is not a Super Admin account here. Ids are given out in order, so a listed id with no account goes to the next account created: create the account first, then list its id.`);
+	}
+	return missing;
+}
+reportListedViewersWithoutAccount(RATECON_PDF_VIEWERS, console);
 // Bounds on getRateConBytes() step 4, the by-CONTENT fallback that runs when the
 // file name does not carry our load id. Both are cost controls on Drive
 // downloads, not correctness knobs — widening them scans more PDFs per miss, it
@@ -12468,7 +12509,9 @@ function guardDrugTestFile(req, res, next, url) {
 // ROW decides who may read the file: a reader is someone whose own listing
 // hands them that link.
 //
-//   Super Admin — pass, with no lookup.
+//   Super Admin — pass, with no lookup, while RATECON_PDF_VIEWER_IDS is unset.
+//     Once it is set, a rate con (the Dispatcher rule's lookup) opens only for
+//     an account rateconViewGate allows; anything else passes.
 //   Dispatcher — pass, unless a row with this name is a rate con
 //     (RATECON_DOCUMENT_SQL, live or deleted): rate cons are Super Admin only
 //     (owner, 2026-09-26), wherever the file is stored. Anything else needs no
@@ -12582,14 +12625,29 @@ function investorDocumentScope(userId) {
 async function guardRootLoadDocument(req, res, next, file) {
 	try {
 		const user = req.session.user;
-		if (user.role === "Super Admin") return next();
+		// Is this file a rate con? Any row, live or deleted: a deleted row does not
+		// stop the file being a rate con. COLLATE NOCASE — see MEMBERSHIP TEST
+		// above. One lookup for the Super Admin and Dispatcher rules below.
+		const rateConRows = () => db.prepare(
+			`SELECT id FROM documents WHERE file_name = ? COLLATE NOCASE AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
+		).all(file);
+
+		if (user.role === "Super Admin") {
+			// With RATECON_PDF_VIEWER_IDS unset, every Super Admin passes with no
+			// lookup, as before the list existed. Once it is set, a rate con stored
+			// here is held to the list like the rate-cons/ directory: a Super Admin
+			// it does not list gets the Dispatcher's answer (404), and a listed one
+			// gets the file with Cache-Control private, no-store. Every other file
+			// passes.
+			if (rateconViewGate.state === "unset") return next();
+			if (!rateConRows().length) return next();
+			if (rateconViewGate.refusal(user)) return res.status(404).end();
+			res.setHeader("Cache-Control", "private, no-store");
+			return next();
+		}
 
 		if (user.role === "Dispatcher") {
-			// Any row, live or deleted: a deleted row does not stop the file being
-			// a rate con. COLLATE NOCASE — see MEMBERSHIP TEST above.
-			const rateCon = db.prepare(
-				`SELECT id FROM documents WHERE file_name = ? COLLATE NOCASE AND ${RATECON_DOCUMENT_SQL} LIMIT 1`
-			).all(file);
+			const rateCon = rateConRows();
 			if (rateCon.length) return res.status(404).end();
 			return next();
 		}
@@ -12835,8 +12893,16 @@ function uploadsPathGuard(req, res, next) {
 	// implied by the load id, so there is nothing to conceal, unlike a person's
 	// W-9. A rate con stored in the uploads ROOT is refused by
 	// guardRootLoadDocument instead.
+	// Then the viewer list (rateconViewGate, RATECON_PDF_VIEWER_IDS): once it is
+	// set, a Super Admin it does not list gets the PDF route's 403
+	// RATECON_VIEW_RESTRICTED. A rate con that is served is never kept by the
+	// browser or a shared cache: Cache-Control private, no-store, which
+	// express.static leaves in place (it only fills a missing Cache-Control).
 	if (probe.startsWith("/rate-cons/")) {
 		if (req.session.user.role !== "Super Admin") return res.status(403).json({ error: "Forbidden" });
+		const refusal = rateconViewGate.refusal(req.session.user);
+		if (refusal) return res.status(refusal.status).set("Cache-Control", "no-store").json({ code: refusal.code, error: refusal.error });
+		res.setHeader("Cache-Control", "private, no-store");
 		return next();
 	}
 
@@ -32858,6 +32924,41 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				(req.body && req.body.password ? ", password reset requested" : ""),
 		};
 
+		// (a0) PROTECTED ACCOUNTS (RATECON_PDF_VIEWER_IDS). A listed account's
+		// password, role, email and driver name change only when the acting account
+		// is that account or another listed one; anyone else gets 403
+		// PROTECTED_ACCOUNT, nothing is written, and the attempt is audited. The
+		// driver name counts because changing it ends every session of the account
+		// (driverNameChanged below, the same test): without it an unlisted Super
+		// Admin could sign a listed account out again and again. A set but invalid
+		// list protects every Super Admin that way, from everyone. Unset: nobody is
+		// protected. Judged on the account as re-read above, after the last await,
+		// so it runs in the same synchronous step as the write. Only real changes
+		// count: the Users page sends role, email and driver name with every edit,
+		// so unchanged ones, or a full-name edit, go through as before.
+		{
+			const changes = [];
+			if (passwordHash) changes.push("password");
+			if (nextRole && nextRole !== user.role) changes.push("role");
+			if (email !== undefined && String(email ?? "") !== String(user.email ?? "")) changes.push("email");
+			// driverNameChanged's test (below) with the sides swapped, so the
+			// mutants in scripts/test-session-sockets.js still reach that line.
+			if (driverName !== undefined && (user.driver_name || "") !== driverName.trim()) changes.push("driver name");
+			const why = changes.length
+				? RATECON_PDF_VIEWERS.protectedChangeRefusal({ actor: req.session?.user, targetId: id, targetRole: user.role })
+				: null;
+			if (why) {
+				recordPeriodRefusal({ req, ...userEditAudit, tail: `nothing was written — a protected account (${changes.join(", ")})` },
+					"PROTECTED_ACCOUNT", []);
+				return res.status(403).json({
+					error: why === "invalid"
+						? "Password, role, email and driver-name changes to Super Admin accounts are paused: the server's protected-account list is misconfigured. Nothing was changed."
+						: `${user.username} is a protected account: only that account, or another protected account, can change its password, role, email or driver name. Nothing was changed.`,
+					code: "PROTECTED_ACCOUNT",
+				});
+			}
+		}
+
 		// (a) Demoting the last Super Admin locks everyone out of the system, and
 		// it is the same hole as deleting them — DELETE /api/users/:id refuses that
 		// (below), so without this the refusal is one PUT away from irrelevant:
@@ -34254,6 +34355,22 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(409).json({
 			error: "You cannot delete your own account. Ask another Super Admin to do it, so the system is never left without an administrator by a single click.",
 			code: "CANNOT_DELETE_SELF",
+		});
+	}
+
+	// (a2) A protected account (RATECON_PDF_VIEWER_IDS) is removed only by another
+	// protected account: the twin of PUT /api/users/:id's (a0). A set but invalid
+	// list refuses removing any Super Admin. 403 PROTECTED_ACCOUNT, nothing
+	// written, audited. Unset: nobody is protected.
+	const protectedWhy = RATECON_PDF_VIEWERS.protectedChangeRefusal({ actor, targetId: id, targetRole: user.role });
+	if (protectedWhy) {
+		recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — a protected account" },
+			"PROTECTED_ACCOUNT", []);
+		return res.status(403).json({
+			error: protectedWhy === "invalid"
+				? "Removing a Super Admin account is paused: the server's protected-account list is misconfigured. Nothing was changed."
+				: `${user.username} is a protected account: only another protected account can remove it. Nothing was changed.`,
+			code: "PROTECTED_ACCOUNT",
 		});
 	}
 
@@ -55426,6 +55543,19 @@ app.post(
 			// the resolved routing so a reviewer can verify recipient/subject/
 			// total without opening the PDF.
 			if (dryRun) {
+				// The review screen's rate-con tabs carry the files' bytes, so they
+				// follow the viewer list (rateconViewGate, RATECON_PDF_VIEWER_IDS): a
+				// Super Admin it does not list gets no rate-con bytes, only
+				// rateconRestricted and how many files the draft will attach. The
+				// draft itself still attaches the rate con, whoever approves it.
+				const rateconCount = (rateconCandidates && rateconCandidates.length) || (rateconBuffer && rateconBuffer.length ? 1 : 0);
+				const rateconFiles = rateconViewGate.refusal(req.session && req.session.user)
+					? { rateconRestricted: true, rateconCount }
+					: {
+						rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
+						// EVERY rate-con file for this load so the reviewer can see all of them, not just the primary
+						ratecons: (rateconCandidates || []).map((c) => ({ base64: Buffer.from(c.buffer).toString("base64"), label: c.label || "Rate-con", source: c.source || "" })),
+					};
 				return res.json({
 					success: true,
 					preview: true,
@@ -55514,7 +55644,8 @@ app.post(
 					documentsEmail: invoiceTo.email,
 					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
-					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
+					// rateconPdfBase64 + ratecons, or rateconRestricted + rateconCount (above).
+					...rateconFiles,
 					// The whole email the approve would write, the edited message when
 					// one was sent. The editor does not render it — it shows the two
 					// parts below instead — and it stays for the runners and the e2e
@@ -55525,7 +55656,6 @@ app.post(
 					// unedited), and the fixed signature it shows read-only beneath.
 					emailBodyDefault,
 					emailSignatureHtml: brokerInvoice.buildInvoiceEmailSignatureHtml(),
-					ratecons: (rateconCandidates || []).map((c) => ({ base64: Buffer.from(c.buffer).toString("base64"), label: c.label || "Rate-con", source: c.source || "" })), // EVERY rate-con file for this load so the reviewer can see all of them, not just the primary
 					// B20, only with the flag on: the load's advance lines, which print,
 					// the server's figures (or the refusal) and the same-amount receipt
 					// warnings. Absent with the flag off, so this answer is as before.
@@ -56458,9 +56588,13 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		let docs;
 		if (isSuperAdmin) {
+			// No rate cons here, for a Super Admin either: this portal is not where
+			// rate cons are viewed, and it would list files that a Super Admin
+			// outside RATECON_PDF_VIEWER_IDS cannot open. LOAD_PANEL_DOCUMENT_FILTER
+			// is live and not a rate con.
 			docs = db.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
-				 FROM documents WHERE deleted_at IS NULL ORDER BY uploaded_at DESC LIMIT 500`
+				 FROM documents WHERE ${LOAD_PANEL_DOCUMENT_FILTER} ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
 			// investorDocumentScope() is shared with the /uploads root-file guard,
@@ -66583,22 +66717,10 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // direction: the fix looks deployed and every investor keeps the old document
 // forever.
 //
-// So the bytes of the template decide. STATEMENT_TEMPLATE_FILES is the closure
-// of everything that can change the printed page:
-//   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
-//   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
-//     formatDate / SELLER, so a change to the seller block or to how money is
-//     formatted changes the printed page WITHOUT touching payout-statement.js.
-//     This is the edge a future engineer would never suspect, which is exactly
-//     why it must be enforced rather than documented.
-//   • lib/pdf-browser.js — renderHtmlToPdf's page format, margins,
-//     preferCSSPageSize, the fonts.ready wait, and the Chromium launch args
-//     (--font-render-hinting, and the darwin --disable-gpu branch). Every one
-//     of those changes the rendered bytes, so rendering counts as template.
-//   • lib/lease-payout-text.js — the lease sentences a lease month's statement
-//     prints, which payout-statement.js takes from there.
-//   • lib/driver-pay-text.js — the Driver Pay basis of a driver paid at more
-//     than one daily rate, which payout-statement.js takes from there.
+// So the bytes of the template decide: lib/statement-template-hash.js hashes the
+// five files that can change the printed page (STATEMENT_TEMPLATE_FILES there),
+// and a reviewed PINS entry there keeps the stored statements across an edit
+// proven to render the same.
 //
 // ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
 // still for: anything outside these five files. A Puppeteer/Chromium upgrade
@@ -66608,27 +66730,9 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // it churns on every unrelated dependency bump (busting every statement for
 // nothing) and, per the deploy notes, npm 10.8.2 leaves it permanently modified
 // on the VPS, so it is not even stable across machines.
-const STATEMENT_TEMPLATE_FILES = [
-	"./lib/payout-statement.js",
-	"./lib/broker-invoice.js",
-	"./lib/pdf-browser.js",
-	"./lib/lease-payout-text.js",
-	"./lib/driver-pay-text.js",
-];
-
-// Computed ONCE, here, at module load — never per request. require.resolve so a
-// moved file is a loud MODULE_NOT_FOUND rather than a silently-skipped input,
-// and the specifier list is sorted so the value is deterministic across
-// machines. Each file contributes its specifier and byte length as well as its
-// bytes, so swapping two files' contents cannot produce the same digest.
-function computeStatementTemplateHash() {
-	const h = crypto.createHash("sha256");
-	for (const spec of [...STATEMENT_TEMPLATE_FILES].sort()) {
-		const buf = fs.readFileSync(require.resolve(spec));
-		h.update(spec).update("\0").update(String(buf.length)).update("\0").update(buf).update("\0");
-	}
-	return h.digest("hex").slice(0, 12);
-}
+//
+// The hash is computed ONCE, below, at module load — never per request.
+const statementTemplate = require("./lib/statement-template-hash");
 
 // ⚠️ FAIL LOUD, AND FAIL TOWARDS SLOW-BUT-CORRECT — never towards the old
 // hand-maintained behaviour, which is the bug being removed here.
@@ -66646,12 +66750,12 @@ function computeStatementTemplateHash() {
 // periodLocksReadable() — degrade in the direction that cannot be wrong.
 let statementTemplateHash = null;
 try {
-	statementTemplateHash = computeStatementTemplateHash();
+	statementTemplateHash = statementTemplate.effectiveStatementTemplateHash();
 } catch (err) {
 	console.error(
 		"⚠️  PAYOUT STATEMENT CACHE DISABLED — could not hash the statement template:",
 		err.message,
-		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES.",
+		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES (lib/statement-template-hash.js).",
 	);
 }
 const STATEMENT_TEMPLATE_HASH = statementTemplateHash;
@@ -66726,9 +66830,10 @@ const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 function statementFingerprint(row, who) {
 	return crypto.createHash("sha256").update(JSON.stringify([
 		STATEMENT_TEMPLATE_VERSION,
-		// The template's own bytes — see computeStatementTemplateHash(). This is
-		// what makes a template edit self-invalidating instead of relying on
-		// someone remembering to bump the integer above it.
+		// The template's own bytes, or the hash a reviewed PINS entry maps them to
+		// (lib/statement-template-hash.js). This is what makes a template edit
+		// self-invalidating instead of relying on someone remembering to bump the
+		// integer above it.
 		STATEMENT_TEMPLATE_HASH,
 		row.owner_id, row.period, row.status,
 		row.paid_at || "", row.paid_by || "",
@@ -72426,7 +72531,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 });
 
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
-require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES });
+require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES, viewerGate: rateconViewGate });
 
 // ============================================================
 // KPI BOT — nightly KPI snapshots, the admin KPI API and the weekly digest

@@ -32,6 +32,12 @@
  *      text, and keeps the text out of overrides_json; the n8n fallback, whose
  *      draft carries the generated message, warns and audits an edit as not
  *      applied; each 400 answers before any spend.
+ *   §5b THE RATE-CON FILES IN THE PREVIEW follow RATECON_PDF_VIEWER_IDS: a
+ *      Super Admin it does not list (or a session without an id) gets
+ *      rateconRestricted + rateconCount and no rate-con bytes; a listed one gets
+ *      rateconPdfBase64 and every file in ratecons[]; a set but invalid list
+ *      withholds them from everyone; unset is as before; the approve still
+ *      attaches the rate con.
  *   §6 MUTANTS. Each guard above is broken in turn, and an assertion must flip.
  *
  * WHY server.js IS READ AS TEXT: it opens SQLite, reads a service-account key
@@ -53,7 +59,7 @@ const ROOT = path.join(__dirname, "..");
 // The draft route's steps live in lib/broker-invoice-draft.js: read with
 // server.js as one text (liftRoutes() splits them again).
 const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
-const SRC = draftLift.withEngine(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), ROOT);
+const SRC = draftLift.withEngine(require("./lib/server-source").serverSource(), ROOT);
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 // The broker AP inboxes have no default in code; resolveInvoiceTo() reads them
@@ -447,7 +453,7 @@ function liftRoutes(src) {
 // validator, the sheet parsing, the draft record and the email builders are
 // the shipped code. `imapFails` makes the Gmail APPEND throw, so a configured
 // n8n fallback takes over.
-function harness(L, env = {}, { imapFails = false } = {}) {
+function harness(L, env = {}, { imapFails = false, rateconFiles = [], viewers, user } = {}) {
 	const db = new Database(":memory:");
 	db.exec(L.createSql);
 	for (const a of L.alters) db.exec(a);
@@ -473,7 +479,13 @@ function harness(L, env = {}, { imapFails = false } = {}) {
 		db,
 		fetchDocumentBytes: async () => Buffer.from("%PDF-1.4 pod"),
 		buildRateConLoadCtx: () => ({}),
-		getRateConBytes: async () => ({ buffer: null, candidates: [] }),
+		getRateConBytes: async () => (rateconFiles.length
+			? { buffer: rateconFiles[0], candidates: rateconFiles.map((b, i) => ({ buffer: b, label: `Rate-con ${i + 1}`, source: "documents" })) }
+			: { buffer: null, candidates: [] }),
+		// The gate server.js builds from RATECON_PDF_VIEWER_IDS (shipped lib code);
+		// `viewers` undefined is the setting left unset.
+		rateconViewGate: require(path.join(ROOT, "lib", "ratecon-pdf-route.js")).viewerGate(
+			require(path.join(ROOT, "lib", "listed-accounts.js")).parseListedAccountIds(viewers)),
 		GEMINI_API_KEY: "",
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => INVOICE_ID,
@@ -510,7 +522,7 @@ function harness(L, env = {}, { imapFails = false } = {}) {
 	};
 	const call = async (handler, { loadId, query = {}, body = {} }) => {
 		let out = null;
-		const req = { params: { loadId }, query, body, session: { user: { id: 1, username: "super_admin", role: "Super Admin" } }, ip: "127.0.0.1" };
+		const req = { params: { loadId }, query, body, session: { user: user || { id: 1, username: "super_admin", role: "Super Admin" } }, ip: "127.0.0.1" };
 		const res = {
 			statusCode: 200,
 			status(c) { this.statusCode = c; return this; },
@@ -632,6 +644,48 @@ async function routesSection() {
 		const rr = await refused.approve({ loadId: "30080873" });
 		eq([rr.status, (rr.body || {}).code, refused.seen.drafts.length], [422, "INVOICE_REFS_REQUIRED", 0],
 			"§5 …and the approve still refuses until the refs are typed (unchanged)");
+	}
+
+	// ── §5b the preview's rate-con files follow the viewer list ──────────────
+	// RATECON_PDF_VIEWER_IDS: a Super Admin it does not list gets no rate-con
+	// bytes in the ?dryRun=1 echo, only rateconRestricted and the file count; the
+	// approve still attaches the rate con, whoever approves. Made-up PDFs and ids.
+	{
+		const RC1 = Buffer.from("%PDF-1.4 made-up rate con one");
+		const RC2 = Buffer.from("%PDF-1.4 made-up rate con two");
+		const OWNER = { id: 1, username: "owner_admin", role: "Super Admin" };
+		const STAFF = { id: 5, username: "staff_admin", role: "Super Admin" };
+		const NO_ID = { username: "owner_admin", role: "Super Admin" };
+		const b64 = (b) => b.toString("base64");
+		const holdsBytes = (body) => JSON.stringify(body || {}).includes(b64(RC1)) || JSON.stringify(body || {}).includes(b64(RC2));
+		const files = [RC1, RC2];
+
+		const listed = await harness(L, GMAIL_ENV, { rateconFiles: files, viewers: "1,7", user: OWNER }).dryRun({ loadId: "563367203" });
+		const lb = listed.body || {};
+		eq([listed.status, lb.rateconPdfBase64, (lb.ratecons || []).map((r) => r.base64), lb.rateconRestricted], [200, b64(RC1), [b64(RC1), b64(RC2)], undefined],
+			withErrors("§5b listed account 1: the dryRun carries rateconPdfBase64 and every file in ratecons[], no rateconRestricted", listed));
+
+		for (const [label, user] of [["Super Admin 5, not listed", STAFF], ["a Super Admin session without an id", NO_ID]]) {
+			const r = await harness(L, GMAIL_ENV, { rateconFiles: files, viewers: "1,7", user }).dryRun({ loadId: "563367203" });
+			const b = r.body || {};
+			eq([r.status, b.rateconRestricted, b.rateconCount], [200, true, 2], withErrors(`§5b ${label}: 200 with rateconRestricted and rateconCount 2`, r));
+			ok(!("rateconPdfBase64" in b) && !("ratecons" in b) && !holdsBytes(b), `§5b ${label}: no rateconPdfBase64, no ratecons[], and no rate-con bytes anywhere in the answer`);
+			eq([b.rateconSource, typeof b.invoicePdfBase64, b.dryRun], ["documents", "string", true], `§5b ${label}: the rest of the preview is unchanged (source named, invoice PDF sent)`);
+		}
+		const none = await harness(L, GMAIL_ENV, { rateconFiles: [], viewers: "1,7", user: STAFF }).dryRun({ loadId: "563367203" });
+		eq([(none.body || {}).rateconRestricted, (none.body || {}).rateconCount], [true, 0], "§5b no rate con on file: rateconCount 0 (the modal's \"No rate confirmation attached\" warning stays true)");
+		const invalid = await harness(L, GMAIL_ENV, { rateconFiles: files, viewers: "owner_admin", user: OWNER }).dryRun({ loadId: "563367203" });
+		ok((invalid.body || {}).rateconRestricted === true && !holdsBytes(invalid.body), "§5b a set but invalid list withholds the bytes from account 1 too");
+		const unset = await harness(L, GMAIL_ENV, { rateconFiles: files, viewers: undefined, user: STAFF }).dryRun({ loadId: "563367203" });
+		eq([(unset.body || {}).rateconPdfBase64, ((unset.body || {}).ratecons || []).length, (unset.body || {}).rateconRestricted], [b64(RC1), 2, undefined],
+			"§5b unset: every Super Admin gets the files, as before the list existed");
+
+		const approving = harness(L, GMAIL_ENV, { rateconFiles: files, viewers: "1,7", user: STAFF });
+		const ar = await approving.approve({ loadId: "563367203" });
+		const atts = ((approving.seen.drafts[0] || {}).attachments) || [];
+		ok(ar.status === 200 && atts.some((a) => Buffer.isBuffer(a.content) && a.content.equals(RC1)),
+			withErrors(`§5b the approve by Super Admin 5 (not listed) still attaches the rate con to the draft (${ar.status}, ${atts.length} attachment(s))`, ar));
+		ok(!holdsBytes(ar.body), "§5b ...and its answer carries no rate-con bytes");
 	}
 
 	// ── the approve, IMAP ────────────────────────────────────────────────────
