@@ -43,7 +43,8 @@
  *       Z shape, the shapes that keep their reading, the FROM gate; the lease's
  *       first day and a month-end evening through truckServiceBounds(),
  *       leaseCoverage() and settleInvestorMonths(); no rule = the old reading;
- *       again in child processes under four process zones; four mutants
+ *       the boot notice for a FROM at or before the latest closed month; again
+ *       in child processes under four process zones; four mutants
  *
  * Pure: the module has no requires; nothing here touches a database or a network.
  * Run: node scripts/test-investor-payout-basis.js     # exits 1 on failure
@@ -558,9 +559,8 @@ function createdDaySection(M) {
 		[1785546900000, "a number"],
 	]) t(`§11 ${what} keeps the caller's reading (null)`, created(value, RULE), null);
 	t("§11 no rule (the flag off): null", created("2026-08-01 01:15:00", null), null);
-	t("§11 a rule with a month that is not YYYY-MM, with no day reader, or whose reader answers no day: null",
-		[created("2026-08-01 01:15:00", { from: "2026-13", dayOf: EASTERN }), created("2026-08-01 01:15:00", { from: "2026-01" }),
-			created("2026-08-01 01:15:00", { from: "2026-01", dayOf: () => "07/31/2026" })], [null, null, null]);
+	t("§11 a rule with a month that is not YYYY-MM, or with no day reader: null",
+		[created("2026-08-01 01:15:00", { from: "2026-13", dayOf: EASTERN }), created("2026-08-01 01:15:00", { from: "2026-01" })], [null, null]);
 	t("§11 FROM 2026-08: a truck added 9:15 PM EDT Jul 31 (a July business day) keeps its reading", created("2026-08-01 01:15:00", from("2026-08")), null);
 	t("§11 ...one added 9:15 PM EDT Aug 31 is read on its business day", created("2026-09-01 01:15:00", from("2026-08")), "2026-08-31");
 	t("§11 ...FROM 2026-07 covers Jul 31", created("2026-08-01 01:15:00", from("2026-07")), "2026-07-31");
@@ -643,6 +643,17 @@ const verdictOf = (v) => (v.failed.length ? `${v.failed.length} failed, first: $
 
 section("§11 a truck with no in-service date starts on the business day it was created (TRUCK_CHARGE_APP_DAY)");
 for (const r of createdDaySection(B)) ok(r.ok, r.ok ? r.name : `${r.name} — expected ${r.e}, got ${r.a}`);
+// Outside the zone runs, as M4 below skips the day reader by design.
+eq(typeof B.truckCreatedDay === "function" ? B.truckCreatedDay("2026-08-01 01:15:00", { from: "2026-01", dayOf: () => "07/31/2026" }) : "(not exported)", null,
+	"§11 a rule whose day reader answers no day: null");
+{
+	const notice = (rule, latest) => (typeof B.createdDayFromClosedWarning === "function" ? B.createdDayFromClosedWarning(rule, latest) : "(not exported)");
+	const rule = { from: "2026-10", dayOf: () => "2026-10-01" };
+	eq([notice(rule, "2026-09"), notice(null, "2026-10"), notice(rule, ""), notice(rule, "nope")], [null, null, null, null],
+		"§11 the boot notice: none while FROM is after the latest closed month, the rule is off, or no month has closed");
+	ok(["2026-10", "2026-11"].every((latest) => /TRUCK_CHARGE_APP_DAY_FROM is at or before/.test(String(notice(rule, latest))) && String(notice(rule, latest)).includes(latest)),
+		"§11 the boot notice once FROM is at or before the latest closed month, naming that month");
+}
 
 section("§11 under four process zones (child processes)");
 {

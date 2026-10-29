@@ -5717,6 +5717,10 @@ function payoutRules(overrides = null) {
 // INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
+// A truck with a blank in-service date starts its fixed costs and its lease days on the business
+// day its row was created, not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED, exactly "true",
+// with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
+const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), (msg) => console.warn(`[truck-charge] ${msg}`));
 
 // Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
 // one warning per month per process, not one per page load.
@@ -5763,6 +5767,8 @@ function payoutBasisContext(ownerId) {
 			? finalized.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
 			: [],
 		settledLeaseMonths,
+		// A truck's first lease day reads created_at as truckChargeFromMonth() does.
+		createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 	};
 }
 
@@ -34939,6 +34945,7 @@ function truckDeleteOpenMonthHolds(truck) {
 		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
 		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
 			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+			createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 		}).coveredDays > 0;
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
@@ -45005,6 +45012,14 @@ function warnBlankWindowFallbackFromClosedMonth() {
 	}
 }
 warnBlankWindowFallbackFromClosedMonth();
+// One notice at boot when TRUCK_CHARGE_APP_DAY_FROM is at or before the latest closed month,
+// built like the ones above. The rule keeps running either way.
+function warnTruckChargeFromClosedMonth() {
+	if (!TRUCK_CHARGE_APP_DAY_RULE) return;
+	const msg = investorPayoutBasis.createdDayFromClosedWarning(TRUCK_CHARGE_APP_DAY_RULE, financialsCalc.ledgerDayOnce.latestClosedMonth(db));
+	if (msg) console.warn(`[truck-charge] ${msg}`);
+}
+warnTruckChargeFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -61000,14 +61015,15 @@ function truckMonthlyFixed(t) {
 // the same regex until 2026-09-30; the report now charges fixed costs through
 // truckChargedInMonth() like every other site, so there is no second reader of it.)
 //
-// The created_at branch deliberately keeps new Date(): created_at is
-// 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
-// reproduced byte-for-byte from the gate it replaces so nothing can regress for
-// the ~all rows that have no in_service_date yet.
+// created_at is SQLite's CURRENT_TIMESTAMP, a UTC wall clock, so local getters give the UTC
+// month: the next one from 8 PM EDT (7 PM EST) on a month's last day. Under TRUCK_CHARGE_APP_DAY_RULE
+// it is read on its business day (investorPayoutBasis.truckCreatedDay(), shared with the lease).
 function truckChargeFromMonth(t) {
 	const inService = String(t.in_service_date || "").trim();
 	if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService.slice(0, 7);
 	if (t.created_at) {
+		const createdDay = TRUCK_CHARGE_APP_DAY_RULE ? investorPayoutBasis.truckCreatedDay(t.created_at, TRUCK_CHARGE_APP_DAY_RULE) : null;
+		if (createdDay) return createdDay.slice(0, 7);
 		const td = new Date(t.created_at);
 		return `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 	}

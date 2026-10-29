@@ -36,7 +36,7 @@
  *     with it on and FROM 2026-07, July carries them, a July receipt joins
  *     through the driver's month window, a lease month covers Jul 31, and the
  *     Financials scope is the ledger to the cent; FROM 2026-08 leaves July as it
- *     was.
+ *     was; the boot notice for a FROM at or before the latest closed month.
  *
  * The shipped code runs, lifted out of server.js, on an in-memory SQLite built
  * from server.js's own DDL. Stubbed: the clock, the Job Tracking sheet read and
@@ -113,6 +113,7 @@ const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
 // below show the UTC month there.
 const TRUCK_RULE_HEAD = "\nconst TRUCK_CHARGE_APP_DAY_RULE = ";
 const TRUCK_RULE_DECL = count(TRUCK_RULE_HEAD) === 1 ? liftDecl("const", "TRUCK_CHARGE_APP_DAY_RULE") : "const TRUCK_CHARGE_APP_DAY_RULE = null;";
+const TRUCK_NOTICE_FN = count("\nfunction warnTruckChargeFromClosedMonth(") === 1 ? liftFn("warnTruckChargeFromClosedMonth") : "function warnTruckChargeFromClosedMonth() {}";
 const FNS = [
 	// Under test.
 	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "getInvestorDriverSet", "assignDriverToTruck",
@@ -141,12 +142,13 @@ const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
 	...LETS.map((c) => liftDecl("let", c)),
 	TRUCK_RULE_DECL,
+	TRUCK_NOTICE_FN,
 	...FNS.map(liftFn),
 	liftRoute(REOPEN_HEAD),
 	liftRoute(ADJUST_HEAD),
 	liftRoute(FREEZE_HEAD),
 	liftRoute(FINANCIALS_HEAD),
-	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger };",
+	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger, warnTruckChargeFromClosedMonth };",
 ].join("\n");
 
 const DDL = [
@@ -311,6 +313,16 @@ async function eveningTruckChecks() {
 		"…flag on: it covers Jul 31, 1 of 31 days", JSON.stringify(basis(leaseOn)));
 	const errs = [off, on, fromAug, leaseOff, leaseOn].flatMap((w) => w.W.errors);
 	check(errs.length === 0, "…the lifted code logged no error in these worlds", errs.join(" | "));
+	// The boot notice: one while FROM is at or before the latest closed month.
+	const notices = (env, closed) => {
+		const w = buildWorld({ env });
+		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', '2026-08-08T05:00:00.000Z', 'test')").run(closed);
+		w.api.warnTruckChargeFromClosedMonth();
+		return w.warnings.filter((m) => m.startsWith("[truck-charge]")).length;
+	};
+	const noticeCounts = [notices(ON, "2026-07"), notices(ON, "2026-06"), notices({}, "2026-07")];
+	check(JSON.stringify(noticeCounts) === JSON.stringify([1, 0, 0]),
+		"boot: one notice when FROM (2026-07) is at or before the latest closed month; none when it is later, or with the flag off", JSON.stringify(noticeCounts));
 	check(count(`${TRUCK_RULE_HEAD}investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), `) === 1,
 		"server.js declares TRUCK_CHARGE_APP_DAY_RULE once, at column 0, from the environment with appDay() as its day reader", "");
 	SHEET.pop();
