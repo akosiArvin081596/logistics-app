@@ -18880,6 +18880,19 @@ function loadPayRateIndex() {
 	};
 }
 
+// The business day (APP_TIMEZONE) a receipt was submitted on, as SQL: SQLite reads the instant (created_at when
+// timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT (7 PM EST).
+// app_day_of_epoch() is registered on first use, so a script's own handle has it too.
+function receiptSubmittedDaySql() {
+	if (!receiptSubmittedDaySql.registered) {
+		db.function("app_day_of_epoch", { deterministic: true }, (seconds) => (/^-?\d{1,12}$/.test(String(seconds))
+			? appTime.dayInZone(new Date(Number(seconds) * 1000), APP_TIMEZONE)
+			: null));
+		receiptSubmittedDaySql.registered = true;
+	}
+	return "app_day_of_epoch(strftime('%s', COALESCE(NULLIF(timestamp, ''), created_at)))";
+}
+
 // The month a receipt counts in under the futureReceipts rule: posted_period
 // when set; a receipt dated after the day it was submitted counts in the month
 // it was submitted while that month is open and its date's month is not closed;
@@ -18890,7 +18903,7 @@ function loadPayRateIndex() {
 // settled it there: either way the receipt stays where it settled, and a
 // reopened submission month never pulls it back.
 function futureAwarePeriodExpr() {
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const closed = "(SELECT period FROM period_locks WHERE period_locks.status = 'locked')";
 	return `(CASE WHEN COALESCE(posted_period, '') != '' THEN posted_period
 		WHEN strftime('%Y-%m-%d', date) > ${submitted}
@@ -18906,7 +18919,7 @@ function futureAwarePeriodExpr() {
 // receipts booked, { id, period }.
 function stampFutureReceipts(periods) {
 	if (!periods.length) return [];
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const ph = periods.map(() => "?").join(",");
 	// The receipts the rule's own expression counts in a closing month for
 	// being dated after their submission day (not those booked by date).
