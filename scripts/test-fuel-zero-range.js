@@ -262,6 +262,93 @@ check("healthy truck canMakeIt", healthy.canMakeIt === true);
 check("healthy truck has zero shortfall", healthy.shortfallMiles === 0);
 
 // ---------------------------------------------------------------------------
+section("§7 driver gallons: no wrong number (planDriverFuel, DRIVER_FUEL_GALLONS_ENABLED)");
+// Every state the driver app cannot work a number out for says so in plain
+// words instead. Made-up truck; the replay at the end reuses §5's incident.
+// Each call is caught, so a base without planDriverFuel fails case by case.
+const attempt = (fn) => { try { return fn(); } catch (e) { return { error: e.message, legs: [] }; } };
+const R15 = { minMiles: 15, fraction: 0 };
+const BURN5 = { usable: true, p10: 5.0, p50: 7.4, p90: 10.2, milesPerPoint: 7.4 };
+const tripFor = (pct, burn, tank) => fm.planTripFuel({
+	routeMiles: 420, fuelPct: pct, burn, mpg: 6.0, reserve: R15,
+	rangeMiles: fm.computeRange({ fuelPct: pct, tankGallons: tank, mpg: 6.0 }).rangeMiles,
+});
+const DF = ({ reading, burn = BURN5, tankSource = "truck", tank = 150, hasTruck = true, fromLivePosition = true } = {}) =>
+	attempt(() => fm.planDriverFuel({
+		plan: tripFor(reading ? reading.fuelPct : null, burn, tank), leg: "to_delivery", fromLivePosition, positionAgeMinutes: 5,
+		reading, hasTruck, hasDevice: hasTruck, tankSource, tankGallons: tank, mpg: 6.0, burn, reserve: R15,
+	}));
+const NO_READING = { fuelPct: null, fuelSource: "none", anchorPct: null, ageMinutes: null };
+const STALE = { fuelPct: null, fuelSource: "stale", anchorPct: 27, ageMinutes: 18 * 60 };
+const allCheckGauge = (df) => Array.isArray(df.legs) && df.legs.length > 0
+	&& df.legs.every((l) => l.status === "check_gauge" && l.needInTankGallons > 0 && l.addGallons === null);
+
+const none = DF({ reading: NO_READING });
+check("no ELD fuel reading: fuelState 'none', no miles, not refuel-now", none.fuelState === "none" && none.milesLeft === null && none.refuelNow === false,
+	JSON.stringify(none));
+check("...its rows say what the tank needs to finish and to check the gauge", allCheckGauge(none), JSON.stringify(none.legs));
+check("...420 mi + 15 reserve at 6 MPG, +10%: 80 gal in the tank", none.legs[0] && none.legs[0].needInTankGallons === 80, JSON.stringify(none.legs));
+const stale = DF({ reading: STALE });
+check("ELD silent past 12 h: fuelState 'stale', no miles, the reading's own age (18 h)",
+	stale.fuelState === "stale" && stale.milesLeft === null && stale.fuelReadAgeMinutes === 1080, JSON.stringify(stale));
+check("...its rows check the gauge", allCheckGauge(stale));
+const carriedDF = DF({ reading: { fuelPct: 33.6, fuelSource: "carried", anchorPct: 40, ageMinutes: 60 } });
+check("sensor dropout (carried): numbers, marked 'estimated'",
+	carriedDF.fuelState === "estimated" && Number.isFinite(carriedDF.milesLeft) && carriedDF.milesLeft > 0
+		&& carriedDF.legs.every((l) => l.status !== "check_gauge"), JSON.stringify(carriedDF));
+const LIVE40 = { fuelPct: 40, fuelSource: "live", anchorPct: 40, ageMinutes: 5 };
+const noTank = DF({ reading: LIVE40, burn: NO_BURN, tankSource: "default", tank: 200 });
+check("estimated basis + no tank size: 'no_tank_size', no miles, rows check the gauge",
+	noTank.fuelState === "no_tank_size" && noTank.milesLeft === null && allCheckGauge(noTank), JSON.stringify(noTank));
+const estTruckTank = DF({ reading: LIVE40, burn: NO_BURN, tankSource: "truck", tank: 150 });
+check("...paired: estimated basis + the truck's own tank size shows a number",
+	estTruckTank.fuelState === "live" && Number.isFinite(estTruckTank.milesLeft), JSON.stringify(estTruckTank));
+const measuredNoTank = DF({ reading: LIVE40, burn: BURN5, tankSource: "default", tank: 200 });
+check("...paired: measured basis + no tank size shows a number (miles per gauge point needs no tank)",
+	measuredNoTank.fuelState === "live" && measuredNoTank.milesLeft === 185, JSON.stringify(measuredNoTank));
+const EMPTY = { fuelPct: 0, fuelSource: "live", anchorPct: 0, ageMinutes: 5 };
+for (const [label, opts] of [["measured", { burn: BURN5 }], ["estimated + truck tank", { burn: NO_BURN }],
+	["estimated + no tank size", { burn: NO_BURN, tankSource: "default", tank: 200 }]]) {
+	const empty = DF({ reading: EMPTY, ...opts });
+	check(`0% is milesLeft 0 and refuel-now, never null (${label})`, empty.milesLeft === 0 && empty.refuelNow === true, JSON.stringify(empty));
+}
+check("...with no tank size the rows still only check the gauge (how far a full tank goes is unknown)",
+	allCheckGauge(DF({ reading: EMPTY, burn: NO_BURN, tankSource: "default", tank: 200 })));
+const noTruck = DF({ reading: NO_READING, hasTruck: false, fromLivePosition: false });
+check("no truck linked: 'no_truck', no miles, no reading age, one whole-load row to check the gauge",
+	noTruck.fuelState === "no_truck" && noTruck.milesLeft === null && noTruck.fuelReadAgeMinutes === null
+		&& noTruck.legs.length === 1 && noTruck.legs[0].key === "whole_load" && allCheckGauge(noTruck), JSON.stringify(noTruck));
+const rangeNone = attempt(() => fm.planDriverFuel({ reading: NO_READING, hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150, mpg: 6.0 }));
+check("the range block (no plan) with no reading: 'none', milesLeft null, no legs",
+	rangeNone.fuelState === "none" && rangeNone.milesLeft === null && Array.isArray(rangeNone.legs) && rangeNone.legs.length === 0, JSON.stringify(rangeNone));
+// §5's real incident through the driver block: the carried reading floors at 0.
+const incidentDF = attempt(() => fm.planDriverFuel({
+	reading: incident, hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: TANK, mpg: MPG, burn: NO_BURN, reserve: R15,
+}));
+check("incident replay: the driver sees 0 miles and Refuel now, marked estimated — never a blank",
+	incidentDF.milesLeft === 0 && incidentDF.refuelNow === true && incidentDF.fuelState === "estimated", JSON.stringify(incidentDF));
+
+const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));
+for (const t of ["3 stops: Riverton, Midway, Lakeside", "Multi-stop load", "multistop", "Stop 2 Midway", "stop #3", "2 pickups", "2nd stop Midway", "extra stop", "stop-offs"]) {
+	check(`extra stops caught in Details: ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
+}
+for (const t of ["Dairy Pure Whole Milk, 43,764 lbs, 1,575 cases, 21 pallets, reefer 34F", "Riverton, ST - Lakeside, ST", "nonstop", "Non-stop team",
+	"truck stop 24/7", "1 stop", "", null, 42]) {
+	check(`no extra stops read into ${JSON.stringify(t)}`, mentions(t) === false, JSON.stringify(mentions(t)));
+}
+const t0 = process.hrtime.bigint();
+const ws = mentions(`stop${" ".repeat(10000)}2 stops`);
+const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+check("a 10k-whitespace Details stays under 50 ms (bounded, capped at 300 characters)", ms < 50 && ws === false, `${ms.toFixed(2)} ms, ${JSON.stringify(ws)}`);
+const stopList = (p) => attempt(() => fm.stopListShowsExtraStops(p));
+check("stop list: two pickups or two deliveries are extra stops",
+	stopList(JSON.stringify({ stops: [{ kind: "pickup" }, { kind: "pickup" }, { kind: "delivery" }] })) === true
+		&& stopList({ stops: [{ kind: "pickup" }, { kind: "delivery" }, { kind: "delivery" }] }) === true);
+check("stop list: one pickup and one delivery, none, or unreadable text are not",
+	[stopList({ stops: [{ kind: "pickup" }, { kind: "delivery" }] }), stopList(null), stopList("{not json"), stopList({ stops: "x" })]
+		.every((v) => v === false));
+
+// ---------------------------------------------------------------------------
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed`);
 if (fail) { console.log("\nFailures:"); failures.forEach((f) => console.log("  - " + f)); }
 process.exit(fail === 0 ? 0 : 1);
