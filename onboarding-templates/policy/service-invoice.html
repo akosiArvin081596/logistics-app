@@ -507,6 +507,18 @@
       `;
       tbody.appendChild(personalRow);
 
+      // CORRECTION rows — cloned once per correction line to an approved
+      // invoice that this invoice carries, then removed; none, nothing prints.
+      const correctionRow = document.createElement('tr');
+      correctionRow.className = 'personal-row';
+      correctionRow.setAttribute('data-correction-line-template', '');
+      correctionRow.style.display = 'none';
+      correctionRow.innerHTML = `
+        <td colspan="4"><span data-cell="label"></span></td>
+        <td class="total-cell"><span data-cell="amount"></span></td>
+      `;
+      tbody.appendChild(correctionRow);
+
       // ADJUSTMENT row — populated by the renderer when invoices.adjustment != 0.
       // Hidden when amount is empty (see policy-renderer.js). Sits between the
       // day rows and TOTAL DUE so the admin's bonus/deduction is visible just
