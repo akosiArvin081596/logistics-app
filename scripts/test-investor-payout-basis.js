@@ -36,6 +36,15 @@
  *       it froze whatever the flag, the settings, the trucks or the rows say now,
  *       carries nothing either way, and stays in the month range with the flag
  *       off. MUTANT: the settled lease months ignored
+ *   §11 a truck with no in-service date under server.js's TRUCK_CHARGE_APP_DAY
+ *       rule: the rule from the environment (on only when exactly "true" and
+ *       with a FROM month; one warning without one); truckCreatedDay() at 7:59
+ *       PM, 8 PM, 11:59 PM and midnight ET, EDT and EST, both DST switches, the
+ *       Z shape, the shapes that keep their reading, the FROM gate; the lease's
+ *       first day and a month-end evening through truckServiceBounds(),
+ *       leaseCoverage() and settleInvestorMonths(); no rule = the old reading;
+ *       the boot notice for a FROM at or before the latest closed month; again
+ *       in child processes under four process zones; four mutants
  *
  * Pure: the module has no requires; nothing here touches a database or a network.
  * Run: node scripts/test-investor-payout-basis.js     # exits 1 on failure
@@ -81,6 +90,19 @@ const TRUCK_ALL_YEAR = { in_service_date: "2026-01-01", created_at: "2025-12-01 
 const basisOf = (rows, trucks = [TRUCK_ALL_YEAR], settings = SETTINGS, enabled = true) => ({ enabled, rows, trucks, settings });
 const month = (m, netProfit, zeroActivity = false) => ({ month: m, netProfit, zeroActivity });
 const pick = (r, keys = ["investorEarnings", "companyEarnings", "raw", "payable", "carriedIn", "deferred"]) => Object.fromEntries(keys.map((k) => [k, r[k]]));
+
+// §11 in a child of this file under the process zone the parent set (a mutant when
+// asked): one line of JSON, { applied, failed: [names], digest of every actual value }.
+if (process.argv[2] === "--created-day-child") {
+	const M = process.argv[3] ? createdDayMutant(process.argv[3]) : B;
+	const results = M ? createdDaySection(M) : [];
+	process.stdout.write(JSON.stringify({
+		applied: !!M,
+		failed: M ? results.filter((r) => !r.ok).map((r) => r.name) : ["the mutant's target text is missing"],
+		digest: require("crypto").createHash("sha256").update(results.map((r) => `${r.name}=${r.a}`).join("\n")).digest("hex"),
+	}));
+	process.exit(0);
+}
 
 // ============================================================ §1 settings
 section("§1 settings: the default quietly, a valid value, or the default with one warning");
@@ -461,6 +483,200 @@ section("§10 a month settled as a lease keeps what it settled at");
 	const paidNow = now({ settings: { ...SETTINGS, downtime: "paid" } });
 	ok(JSON.stringify(viewWith(B, paidNow)) === JSON.stringify(viewWith(B, now({}))), "§10 control: switching downtime moves no settled month");
 	ok(JSON.stringify(viewWith(noFrozen, paidNow)) !== JSON.stringify(viewWith(noFrozen, now({}))), "§10 MUTANT the settled lease months ignored: switching downtime re-explains June (caught)");
+}
+
+// ============================================================ §11 a truck's creation day
+// server.js's TRUCK_CHARGE_APP_DAY rule. created_at is SQLite's CURRENT_TIMESTAMP, a
+// UTC wall clock, so from 8 PM EDT (7 PM EST) its own digits are already the next day.
+// Every made-up stamp below is named by its Eastern time.
+function createdDaySection(M) {
+	const appTime = require(path.join(__dirname, "..", "lib", "app-time.js"));
+	const EASTERN = (ms) => appTime.dayInZone(new Date(ms), "America/New_York");
+	const RULE = Object.freeze({ from: "2026-01", dayOf: EASTERN });
+	const from = (m) => Object.freeze({ from: m, dayOf: EASTERN });
+	// A copy that is not there (the module before the rule) answers a text that fails every check.
+	const fn = (name) => (typeof M[name] === "function" ? M[name] : () => `(${name} is not exported)`);
+	const created = fn("truckCreatedDay");
+	const fromEnv = fn("createdDayRuleFromEnv");
+	const results = [];
+	const t = (name, actual, expected) => {
+		const a = JSON.stringify(actual), e = JSON.stringify(expected);
+		results.push({ name, ok: a === e, a, e });
+	};
+
+	// The rule from the environment.
+	const warned = [];
+	const warn = (m) => warned.push(m);
+	const on = (month) => ({ TRUCK_CHARGE_APP_DAY_ENABLED: "true", TRUCK_CHARGE_APP_DAY_FROM: month });
+	const shape = (r) => (r && typeof r === "object" ? { from: r.from, dayOf: r.dayOf === EASTERN, frozen: Object.isFrozen(r) } : r);
+	t("§11 unset: off, no warning", [fromEnv({}, EASTERN, warn), warned.length], [null, 0]);
+	t("§11 on with a month: { from, dayOf }, frozen", shape(fromEnv(on("2026-10"), EASTERN, warn)), { from: "2026-10", dayOf: true, frozen: true });
+	t("§11 a padded month is read trimmed", shape(fromEnv(on(" 2026-10 "), EASTERN, warn)), { from: "2026-10", dayOf: true, frozen: true });
+	t("§11 on only when exactly \"true\"", ["TRUE", "1", "yes", "on", " true", "false", ""].map((v) => fromEnv({ TRUCK_CHARGE_APP_DAY_ENABLED: v, TRUCK_CHARGE_APP_DAY_FROM: "2026-10" }, EASTERN, warn)),
+		[null, null, null, null, null, null, null]);
+	t("§11 ...and none of those warns", warned.length, 0);
+	t("§11 on without a month, or with one that is not YYYY-MM: off, one warning each",
+		[fromEnv({ TRUCK_CHARGE_APP_DAY_ENABLED: "true" }, EASTERN, warn), fromEnv(on("2026-13"), EASTERN, warn), warned.length], [null, null, 2]);
+	t("§11 the warning names the setting, never its value", warned.map((m) => /TRUCK_CHARGE_APP_DAY_FROM/.test(m) && !/2026-13/.test(m)), [true, true]);
+	t("§11 no day reader, or no environment: off", [fromEnv(on("2026-10"), null), fromEnv(undefined, EASTERN)], [null, null]);
+
+	// truckCreatedDay(): the business day (US Eastern) of SQLite's UTC stamp and of toISOString's.
+	for (const [stamp, day, when] of [
+		["2026-07-31 23:59:59", "2026-07-31", "7:59:59 PM EDT Jul 31"],
+		["2026-08-01 00:00:00", "2026-07-31", "8:00 PM EDT Jul 31"],
+		["2026-08-01 01:15:00", "2026-07-31", "9:15 PM EDT Jul 31"],
+		["2026-08-01 03:59:59", "2026-07-31", "11:59:59 PM EDT Jul 31"],
+		["2026-08-01 04:00:00", "2026-08-01", "midnight EDT Aug 1"],
+		["2026-12-01 00:30:00", "2026-11-30", "7:30 PM EST Nov 30"],
+		["2026-12-01 04:59:59", "2026-11-30", "11:59:59 PM EST Nov 30"],
+		["2026-12-01 05:00:00", "2026-12-01", "midnight EST Dec 1"],
+		["2027-01-01 03:00:00", "2026-12-31", "10 PM EST Dec 31, a year end"],
+		["2026-11-01 03:30:00", "2026-10-31", "11:30 PM EDT Oct 31, the night daylight time ends"],
+		["2026-11-01 05:30:00", "2026-11-01", "1:30 AM EDT Nov 1, the first 1:30"],
+		["2026-11-01 06:30:00", "2026-11-01", "1:30 AM EST Nov 1, the second 1:30"],
+		["2026-11-02 04:30:00", "2026-11-01", "11:30 PM EST Nov 1"],
+		["2026-03-08 04:30:00", "2026-03-07", "11:30 PM EST Mar 7, the night daylight time starts"],
+		["2026-03-08 07:30:00", "2026-03-08", "3:30 AM EDT Mar 8, just after the switch"],
+		["2026-03-09 03:30:00", "2026-03-08", "11:30 PM EDT Mar 8"],
+		["2026-03-09 04:00:00", "2026-03-09", "midnight EDT Mar 9"],
+		["2026-08-01T01:15:00.000Z", "2026-07-31", "toISOString's shape, 9:15 PM EDT Jul 31"],
+		["2026-08-01T01:15:00Z", "2026-07-31", "the same with no milliseconds"],
+		["2026-08-01T04:00:00.000Z", "2026-08-01", "toISOString's shape, midnight EDT Aug 1"],
+	]) t(`§11 ${stamp} (${when}) is ${day}`, created(stamp, RULE), day);
+	for (const [value, what] of [
+		["2026-08-01", "a bare day"],
+		["2026-08-01T01:15:00", "a stamp with no zone (JavaScript reads it as local time)"],
+		["2026-08-01T01:15:00+00:00", "an offset"],
+		["2026-08-01 01:15:00.123", "fractions (not what SQLite writes)"],
+		["2026-08-01 01:15", "no seconds"],
+		[" 2026-08-01 01:15:00", "a padded stamp"],
+		["2026-02-30 10:00:00", "an impossible day"],
+		["2026-08-01 24:00:00", "an impossible hour"],
+		["not-a-date", "text"],
+		["", "blank"],
+		[null, "null"],
+		[undefined, "undefined"],
+		[1785546900000, "a number"],
+	]) t(`§11 ${what} keeps the caller's reading (null)`, created(value, RULE), null);
+	t("§11 no rule (the flag off): null", created("2026-08-01 01:15:00", null), null);
+	t("§11 a rule with a month that is not YYYY-MM, or with no day reader: null",
+		[created("2026-08-01 01:15:00", { from: "2026-13", dayOf: EASTERN }), created("2026-08-01 01:15:00", { from: "2026-01" })], [null, null]);
+	t("§11 FROM 2026-08: a truck added 9:15 PM EDT Jul 31 (a July business day) keeps its reading", created("2026-08-01 01:15:00", from("2026-08")), null);
+	t("§11 ...one added 9:15 PM EDT Aug 31 is read on its business day", created("2026-09-01 01:15:00", from("2026-08")), "2026-08-31");
+	t("§11 ...FROM 2026-07 covers Jul 31", created("2026-08-01 01:15:00", from("2026-07")), "2026-07-31");
+	t("§11 ...FROM is judged on the business month: midnight EDT Aug 1 under FROM 2026-08", created("2026-08-01 04:00:00", from("2026-08")), "2026-08-01");
+
+	// truckServiceBounds(): a truck added 9:15 PM EDT Sep 10.
+	const EVENING = { in_service_date: "", created_at: "2026-09-11 01:15:00", retired_at: "" };
+	const bounds = (tr, rule) => M.truckServiceBounds(tr, "stop", rule);
+	t("§11 truckServiceBounds() with no rule: created_at's UTC day (today's answer)", bounds(EVENING), { from: "2026-09-11", until: "" });
+	t("§11 ...under the rule: the business day", bounds(EVENING, RULE), { from: "2026-09-10", until: "" });
+	t("§11 ...a creation month before FROM keeps its day", bounds(EVENING, from("2026-10")), { from: "2026-09-11", until: "" });
+	t("§11 ...an in-service date still wins", bounds({ ...EVENING, in_service_date: "2026-09-20" }, RULE), { from: "2026-09-20", until: "" });
+	t("§11 ...a malformed one still falls back to created_at", bounds({ ...EVENING, in_service_date: "2026-9-20" }, RULE), { from: "2026-09-10", until: "" });
+	t("§11 ...an unreadable created_at is still unbounded", bounds({ created_at: "garbage" }, RULE), { from: "", until: "" });
+	t("§11 ...the retirement bound is untouched", bounds({ ...EVENING, retired_at: "2026-12-05" }, RULE), { from: "2026-09-10", until: "2026-12-05" });
+
+	// With no rule, the reading that shipped before it (copied here): created_at
+	// parsed by new Date() and read with local getters. Compared as booleans, as a
+	// Z stamp reads differently in each process zone, then and now.
+	const oldFrom = (tr) => {
+		const inService = String((tr && tr.in_service_date) || "").trim();
+		if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService;
+		if (!tr || !tr.created_at) return "";
+		const d = new Date(tr.created_at);
+		return isNaN(d) ? "" : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+	};
+	const SHAPES = [EVENING, { created_at: "2026-10-01 02:00:00" }, { created_at: "2026-09-11 14:00:00" }, { created_at: "2026-08-01T01:15:00.000Z" },
+		{ in_service_date: "2026-09-05", created_at: "2026-10-01 02:00:00" }, { in_service_date: "2026-9-5", created_at: "2026-10-01 02:00:00" }, {}, { created_at: "garbage" }];
+	t("§11 no rule (null or absent): every shape reads as it did before the rule",
+		SHAPES.map((tr) => M.truckServiceBounds(tr, "stop", null).from === oldFrom(tr) && M.truckServiceBounds(tr, "stop").from === oldFrom(tr)), SHAPES.map(() => true));
+	t("§11 ...and under the rule a daytime stamp reads the same day", bounds({ created_at: "2026-09-11 14:00:00" }, RULE), { from: "2026-09-11", until: "" });
+
+	// The lease: leaseCoverage() and settleInvestorMonths().
+	const cover = (mk, trucks, rule) => M.leaseCoverage({ monthKey: mk, effectiveMonth: "2026-09", trucks, retirement: "stop", createdDayRule: rule }).coveredDays;
+	t("§11 the lease's first day for a truck added 9:15 PM EDT Sep 10: Sep 11 with no rule (20 days), Sep 10 under it (21)",
+		[cover("2026-09", [EVENING]), cover("2026-09", [EVENING], RULE)], [20, 21]);
+	const MONTH_END = { in_service_date: "", created_at: "2026-10-01 02:00:00", retired_at: "" };
+	t("§11 a truck added 10 PM EDT Sep 30: September covers no day with no rule and Sep 30 under it; October is whole either way",
+		[cover("2026-09", [MONTH_END]), cover("2026-09", [MONTH_END], RULE), cover("2026-10", [MONTH_END]), cover("2026-10", [MONTH_END], RULE)], [0, 1, 31, 31]);
+	const settleSep = (createdDayRule, over = {}) => M.settleInvestorMonths([month("2026-09", 2500)], {
+		splitFraction: 0.5, basis: { ...basisOf([lease("2026-09", 3000)], [MONTH_END]), createdDayRule, ...over },
+	})["2026-09"].payoutBasis;
+	t("§11 settleInvestorMonths(): that September with no rule pays nothing (not_in_service)", settleSep(null),
+		{ type: "lease", leaseAmount: 3000, paidAmount: 0, coveredDays: 0, daysInMonth: 30, reason: "not_in_service" });
+	t("§11 ...under the rule the basis carries, 1 of 30 days", settleSep(RULE),
+		{ type: "lease", leaseAmount: 3000, paidAmount: 100, coveredDays: 1, daysInMonth: 30, reason: "prorated" });
+	t("§11 ...under FROM 2026-10, September stays not_in_service", settleSep(from("2026-10")).reason, "not_in_service");
+	t("§11 ...with the lease flag off it is the split, rule or not", [settleSep(RULE, { enabled: false }), settleSep(null, { enabled: false })], [null, null]);
+	t("§11 ...a September settled as a lease keeps what it froze",
+		settleSep(RULE, { settledLeaseMonths: { "2026-09": { type: "lease", leaseAmount: 3000, paidAmount: 0, coveredDays: 0, daysInMonth: 30, reason: "not_in_service" } } }).paidAmount, 0);
+	return results;
+}
+
+// The module with one change for §11's mutants, or null when its target text is missing.
+function createdDayMutant(name) {
+	const swaps = {
+		// M1 the rule ignored by truckServiceBounds(): the lease keeps the UTC day.
+		"rule-ignored": ["const createdDay = truckCreatedDay(t.created_at, createdDayRule);", "const createdDay = null;"],
+		// M2 the FROM gate removed.
+		"no-from-gate": ["day.slice(0, 7) >= rule.from", "true"],
+		// M3 the stamp's own UTC day (the bug).
+		"utc-day": ["const day = rule.dayOf(ms);", "const day = new Date(ms).toISOString().slice(0, 10);"],
+		// M4 the day taken on the process clock instead of the business zone.
+		"process-clock": ["const day = rule.dayOf(ms);",
+			"const day = ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, \"0\")}-${String(d.getDate()).padStart(2, \"0\")}`)(new Date(ms));"],
+	};
+	const [from, to] = swaps[name] || [];
+	if (!from || MODULE_SRC.split(from).length !== 2) return null;
+	return loadModule(MODULE_SRC.replace(from, to));
+}
+function createdDayInZone(zone, mutant = "") {
+	try {
+		return JSON.parse(require("child_process").execFileSync(process.execPath, [__filename, "--created-day-child", mutant],
+			{ env: { ...process.env, TZ: zone }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+	} catch (e) {
+		return { applied: false, failed: [`the child under TZ=${zone} did not finish: ${String(e.message).split("\n")[0]}`], digest: "" };
+	}
+}
+const verdictOf = (v) => (v.failed.length ? `${v.failed.length} failed, first: ${v.failed[0]}` : "all pass");
+
+section("§11 a truck with no in-service date starts on the business day it was created (TRUCK_CHARGE_APP_DAY)");
+for (const r of createdDaySection(B)) ok(r.ok, r.ok ? r.name : `${r.name} — expected ${r.e}, got ${r.a}`);
+// Outside the zone runs, as M4 below skips the day reader by design.
+eq(typeof B.truckCreatedDay === "function" ? B.truckCreatedDay("2026-08-01 01:15:00", { from: "2026-01", dayOf: () => "07/31/2026" }) : "(not exported)", null,
+	"§11 a rule whose day reader answers no day: null");
+{
+	const notice = (rule, latest) => (typeof B.createdDayFromClosedWarning === "function" ? B.createdDayFromClosedWarning(rule, latest) : "(not exported)");
+	const rule = { from: "2026-10", dayOf: () => "2026-10-01" };
+	eq([notice(rule, "2026-09"), notice(null, "2026-10"), notice(rule, ""), notice(rule, "nope")], [null, null, null, null],
+		"§11 the boot notice: none while FROM is after the latest closed month, the rule is off, or no month has closed");
+	ok(["2026-10", "2026-11"].every((latest) => /TRUCK_CHARGE_APP_DAY_FROM is at or before/.test(String(notice(rule, latest))) && String(notice(rule, latest)).includes(latest)),
+		"§11 the boot notice once FROM is at or before the latest closed month, naming that month");
+}
+
+section("§11 under four process zones (child processes)");
+{
+	const verdicts = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"].map((zone) => [zone, createdDayInZone(zone)]);
+	for (const [zone, v] of verdicts) eq(verdictOf(v), "all pass", `§11 TZ=${zone}: every check passes`);
+	eq(new Set(verdicts.map(([, v]) => v.digest)).size, 1, "§11 ...and every zone found the same values");
+}
+
+section("§11 mutants — each must be caught");
+{
+	for (const [name, label] of [
+		["rule-ignored", "M1 the rule ignored by truckServiceBounds() (the lease keeps the UTC day)"],
+		["no-from-gate", "M2 the FROM gate removed"],
+		["utc-day", "M3 the stamp's own UTC day (the bug)"],
+	]) {
+		const mod = createdDayMutant(name);
+		const caught = mod ? createdDaySection(mod).filter((r) => !r.ok).length : 0;
+		ok(mod !== null && caught > 0, `§11 ${label}: caught (${mod ? `${caught} check(s)` : "its target text is missing"})`);
+	}
+	const utc = createdDayInZone("UTC", "process-clock");
+	const ny = createdDayInZone("America/New_York", "process-clock");
+	ok(utc.applied && utc.failed.length > 0, `§11 M4 the day taken on the process clock: caught under TZ=UTC (${verdictOf(utc)})`);
+	ok(ny.applied && ny.failed.length === 0, `§11 M4 ...and not under TZ=America/New_York, so the zones are what catch it (${verdictOf(ny)})`);
 }
 
 console.log(`\n${failures.length ? "FAIL" : "PASS"} — ${pass} assertions passed, ${failures.length} failed`);

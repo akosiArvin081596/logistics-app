@@ -94,6 +94,9 @@ const REAL = [
 	// truckBilledMonthCount()'s end month is the business month (appMonthStart()).
 	"appMonthStart", "appDay",
 ];
+// The truck charge rule (TRUCK_CHARGE_APP_DAY_*) is off in this runner;
+// scripts/test-financials-books.js runs it on.
+const RULE_OFF = "const TRUCK_CHARGE_APP_DAY_RULE = null;";
 
 // The only stubs: the clock (so the horizon cap is deterministic), the
 // constant it reads and the business time zone. Stubbing the month math would
@@ -108,7 +111,7 @@ const IN_SERVICE_MAX_MONTHS_AHEAD = (() => {
 
 const M = new Function(
 	"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD", "APP_TIMEZONE",
-	`${REAL.map(extract).join("\n")}\nreturn { ${REAL.join(", ")} };`
+	`${RULE_OFF}\n${REAL.map(extract).join("\n")}\nreturn { ${REAL.join(", ")} };`
 )(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD, "America/New_York");
 
 const {
@@ -558,7 +561,7 @@ function buildGuard(guardSrc = GUARD_SRC, basis = PAYOUT_BASIS) {
 	return new Function(
 		"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
 		"truckFeeLockedRows", "driverPayLockedMonths", "investorPayoutBasis",
-		`${AMOUNT_FIELDS_SRC}\n${REAL.map(extract).join("\n")}\n${guardSrc}\nreturn truckEditLockBlockers;`
+		`${AMOUNT_FIELDS_SRC}\n${RULE_OFF}\n${REAL.map(extract).join("\n")}\n${guardSrc}\nreturn truckEditLockBlockers;`
 	)(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(), () => FEES, () => [], basis);
 }
 

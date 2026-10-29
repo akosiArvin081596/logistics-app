@@ -315,6 +315,8 @@ function makeDb({ seed = true } = {}) {
 	const db = new Database(":memory:");
 	db.exec(USERS_CREATE);
 	for (const alter of USERS_ALTERS) db.exec(alter);
+	// The account-disable columns, as server.js migrates them: liveSessionIds() reads disabled_at.
+	for (const m of SRC.matchAll(/ALTER TABLE users ADD COLUMN disabled_(?:at|by|reason) [^"]*/g)) db.exec(m[0]);
 	db.exec(AUDIT_CREATE);
 	if (seed) {
 		const ins = db.prepare(
@@ -743,11 +745,15 @@ const SCENARIOS = {
 		const w = await startWorld({ sources, seed: false });
 		try {
 			// A session left behind with an identity, the kind a truncated users
-			// table leaves: its socket is accepted, and setup replaces it.
+			// table leaves: its socket was accepted while its account existed (a
+			// session with no account row is refused), the table is then emptied,
+			// and setup replaces the session.
 			const leftover = "t3-leftover-session";
+			w.db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (90, 'leftover', 'x', 'Dispatcher')").run();
 			await storeSet(w.store, leftover, { cookie: cookieShape(), user: { id: 90, username: "leftover", role: "Dispatcher" } });
 			const t = await connectTab(w, cookieFor(leftover));
 			const joined = await joins(w, t, "dispatch", "dispatch");
+			w.db.prepare("DELETE FROM users").run();
 			const r = await request(w.port, "POST", "/api/auth/setup", {
 				cookie: cookieFor(leftover), body: { username: "first_admin", password: "First-Admin-1!", email: "fa@example.test" },
 			});
