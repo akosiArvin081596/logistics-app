@@ -224,87 +224,120 @@ case "$1" in
 	*) exit 2 ;;
 esac
 `,
-	// pm2: one daemon per HOME (root's, or the account's), its list in HOME/.pm2/stub-live.json.
-	pm2: `#!/usr/bin/env node
-"use strict";
-const fs = require("fs"), path = require("path");
-const home = process.env.HOME || "";
-let st = process.env.STUB_STATE || "";
-for (let d = home; !st && d && d !== path.dirname(d); d = path.dirname(d)) if (fs.existsSync(path.join(d, "stub-state"))) st = path.join(d, "stub-state");
-const user = path.basename(home);
-const args = process.argv.slice(2);
-const cmd = args[0];
-const named = args.slice(1).find((x) => !x.startsWith("-"));
-fs.appendFileSync(path.join(st, "calls.log"), ["pm2", user, ...args].join("\\x1f") + "\\n");
-fs.appendFileSync(path.join(st, "pm2-env.log"), [user, cmd, Object.keys(process.env).sort().join(",")].join("\\x1f") + "\\n");
-const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { return d; } };
-const scen = readJson(path.join(st, "pm2.json"), {});
-const u = (scen.users && scen.users[user]) || {};
-const dir = path.join(home, ".pm2");
-const liveFile = path.join(dir, "stub-live.json");
-const live = readJson(liveFile, { next: 0, list: [] });
-const save = () => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(liveFile, JSON.stringify(live)); };
-const entry = (name, status) => { const id = live.next++; return { pm_id: id, name, status, pid: 4000 + id, pm_uptime: 1 }; };
-const envOf = () => ({ SECRET_SENTINEL: scen.envSentinel || "" });
-const toJ = (e) => ({ pid: e.pid, name: e.name, pm_id: e.pm_id, pm2_env: { status: e.status, pm_uptime: e.pm_uptime, restart_time: 0, exec_interpreter: "/opt/node22/bin/node", env: envOf() }, monit: { memory: 1, cpu: 0 } });
-const toDump = (e) => ({ name: e.name, pm_id: e.pm_id, status: e.status, exec_interpreter: "/opt/node22/bin/node", env: envOf() });
-const bump = (k) => { const f = path.join(st, "count-" + user + "-" + k); const n = Number(readJson(f, 0)) + 1; fs.writeFileSync(f, String(n)); return n; };
-const answer = (name) => { const port = (scen.ports || {})[name]; if (port && u.answerAfterStart !== undefined) fs.writeFileSync(path.join(st, "curl-" + port), String(u.answerAfterStart)); };
-function mutate(m, started) {
-	if (m.add) live.list.push(entry(m.add, "online"));
-	if (m.addOurs && started) live.list.push(entry(started, "online"));
-	if (m.removeStarted && started) live.list = live.list.filter((e) => e.name !== started);
-	if (m.removeId !== undefined) live.list = live.list.filter((e) => e.pm_id !== m.removeId);
-	if (m.renameId !== undefined) for (const e of live.list) if (e.pm_id === m.renameId) e.name = m.to;
-	if (m.reId !== undefined) for (const e of live.list) if (e.pm_id === m.reId) e.pm_id = live.next++;
-	if (m.drift) for (const e of live.list) if (e.name !== started) { e.status = e.status === "online" ? "errored" : "online"; e.pid += 7; e.pm_uptime += 100; }
+	// pm2, one daemon per HOME (root's, or the account's), in bash so that a run starts no extra node: its
+	// list is HOME/.pm2/stub-live.tsv (pm2 id, name, status, pid, start time), its next pm2 id
+	// HOME/.pm2/stub-next, and its scenarios are files in stub-state/pm2/ (see setScenario).
+	pm2: `#!/bin/bash
+h=\${HOME:-}
+st=\${STUB_STATE:-}
+if [ -z "$st" ]; then d=$h; while [ -n "$d" ] && [ ! -d "$d/stub-state" ]; do d=\${d%/*}; done; st=$d/stub-state; fi
+user=\${h##*/}
+pm=$h/.pm2
+live=$pm/stub-live.tsv
+sc=$st/pm2/$user
+old=$IFS; IFS=$'\\x1f'; line="pm2$IFS$user$IFS$*"; IFS=$old
+printf '%s\\n' "$line" >> "$st/calls.log"
+names=""
+for v in $(compgen -e); do case "$v" in _|SHLVL|PWD|OLDPWD|__CF_*) ;; *) names="$names\${names:+,}$v" ;; esac; done
+printf '%s\\x1f%s\\x1f%s\\n' "$user" "\${1:-}" "$names" >> "$st/pm2-env.log"
+sentinel=""
+[ ! -f "$st/pm2/sentinel" ] || IFS= read -r sentinel < "$st/pm2/sentinel"
+[ -d "$pm" ] || mkdir -p "$pm"
+[ -f "$live" ] || : > "$live"
+L_ID=(); L_NAME=(); L_ST=(); L_PID=(); L_UP=()
+while IFS=$'\\t' read -r a b c d e; do
+	[ -n "$a" ] || continue
+	L_ID+=("$a"); L_NAME+=("$b"); L_ST+=("$c"); L_PID+=("$d"); L_UP+=("$e")
+done < "$live"
+store() {
+	local i out=""
+	for i in "\${!L_ID[@]}"; do
+		[ -n "\${L_ID[$i]}" ] || continue
+		out="$out\${L_ID[$i]}"$'\\t'"\${L_NAME[$i]}"$'\\t'"\${L_ST[$i]}"$'\\t'"\${L_PID[$i]}"$'\\t'"\${L_UP[$i]}"$'\\n'
+	done
+	printf '%s' "$out" > "$live"
 }
-switch (cmd) {
-	case "jlist": {
-		const n = bump("jlist");
-		if (u.unreadable) { process.stdout.write("[PM2] this is not a list\\n"); break; }
-		if (scen.notice) process.stdout.write(">>>> In-memory PM2 is out-of-date, do:\\n>>>> $ pm2 update\\nIn memory PM2 version: 5.3.0\\nLocal PM2 version: 6.0.8\\n");
-		process.stdout.write(JSON.stringify(live.list.map(toJ)) + "\\n");
-		if (u.strayAfterJlist === n) { live.list.push(entry("stray-app", "online")); save(); }
-		break;
-	}
-	case "start": {
-		if (u.startNoop) break;
-		const file = named;
-		delete require.cache[require.resolve(file)];
-		const apps = (require(file).apps) || [];
-		let started = "";
-		for (const app of apps) {
-			started = app.name;
-			const e = live.list.find((x) => x.name === app.name);
-			if (e) { e.status = "online"; e.pm_uptime++; } else live.list.push(entry(app.name, "online"));
-			answer(app.name);
-		}
-		for (const m of u.afterStart || []) mutate(m, started);
-		save();
-		if (scen.alivePid) { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, "pm2.pid"), String(scen.alivePid)); }
-		break;
-	}
-	case "stop": case "restart": case "delete": {
-		const hits = live.list.filter((x) => x.name === named);
-		if (!hits.length) { process.stderr.write("[PM2][ERROR] Process or Namespace " + named + " not found\\n"); process.exit(1); }
-		if (cmd === "delete") live.list = live.list.filter((x) => x.name !== named);
-		else for (const h of hits) { h.status = cmd === "stop" ? "stopped" : "online"; h.pm_uptime++; if (cmd === "restart") answer(named); }
-		save();
-		break;
-	}
-	case "save": {
-		if (u.saveFails) process.exit(1);
-		fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(path.join(dir, "dump.pm2"), JSON.stringify(live.list.map(toDump), null, 2));
-		break;
-	}
-	case "startup": {
-		fs.writeFileSync(path.join(st, "units", "pm2-" + args[args.indexOf("-u") + 1] + ".enabled"), "");
-		break;
-	}
-	default: process.exit(2);
+next_id() { local n=0; [ ! -f "$pm/stub-next" ] || read -r n < "$pm/stub-next"; echo $((n + 1)) > "$pm/stub-next"; NEXT=$n; }
+add() { next_id; L_ID+=("$NEXT"); L_NAME+=("$1"); L_ST+=(online); L_PID+=($((4000 + NEXT))); L_UP+=(1); }
+answer() {
+	local code="" n port
+	[ -f "$sc/answer-after-start" ] || return 0
+	read -r code < "$sc/answer-after-start"
+	while read -r n port; do [ "$n" != "$1" ] || echo "$code" > "$st/curl-$port"; done < "$st/pm2/ports"
 }
+case "\${1:-}" in
+	jlist)
+		if [ -e "$sc/unreadable" ]; then echo "[PM2] this is not a list"; exit 0; fi
+		[ ! -e "$st/pm2/notice" ] || printf '%s\\n' '>>>> In-memory PM2 is out-of-date, do:' '>>>> $ pm2 update' 'In memory PM2 version: 5.3.0' 'Local PM2 version: 6.0.8'
+		out=""
+		for i in "\${!L_ID[@]}"; do
+			out="$out\${out:+,}{\\"pid\\":\${L_PID[$i]},\\"name\\":\\"\${L_NAME[$i]}\\",\\"pm_id\\":\${L_ID[$i]},\\"pm2_env\\":{\\"status\\":\\"\${L_ST[$i]}\\",\\"pm_uptime\\":\${L_UP[$i]},\\"restart_time\\":0,\\"exec_interpreter\\":\\"/opt/node22/bin/node\\",\\"env\\":{\\"SECRET_SENTINEL\\":\\"$sentinel\\"}},\\"monit\\":{\\"memory\\":1,\\"cpu\\":0}}"
+		done
+		printf '[%s]\\n' "$out"
+		if [ -f "$sc/stray-after-jlist" ]; then
+			k=0; [ ! -f "$sc/jlist-count" ] || read -r k < "$sc/jlist-count"; k=$((k + 1)); echo "$k" > "$sc/jlist-count"
+			read -r want < "$sc/stray-after-jlist"
+			if [ "$k" = "$want" ]; then add stray-app; store; fi
+		fi ;;
+	start)
+		[ ! -e "$sc/start-noop" ] || exit 0
+		cm='^[[:space:]]*(//|[*]|/[*])'
+		re="name:[[:space:]]*[\\"']([^\\"']+)[\\"']"
+		started=""
+		while IFS= read -r l; do
+			[[ $l =~ $cm ]] && continue
+			[[ $l =~ $re ]] || continue
+			started=\${BASH_REMATCH[1]}
+			hit=0
+			for i in "\${!L_ID[@]}"; do
+				if [ "\${L_NAME[$i]}" = "$started" ]; then L_ST[$i]=online; L_UP[$i]=$((L_UP[$i] + 1)); hit=1; fi
+			done
+			[ "$hit" = 1 ] || add "$started"
+			answer "$started"
+		done < "$2"
+		if [ -f "$sc/after-start" ]; then
+			while read -r op x y; do
+				case "$op" in
+					add) add "$x" ;;
+					addOurs) [ -z "$started" ] || add "$started" ;;
+					removeStarted) for i in "\${!L_ID[@]}"; do [ "\${L_NAME[$i]}" != "$started" ] || L_ID[$i]=""; done ;;
+					removeId) for i in "\${!L_ID[@]}"; do [ "\${L_ID[$i]}" != "$x" ] || L_ID[$i]=""; done ;;
+					renameId) for i in "\${!L_ID[@]}"; do [ "\${L_ID[$i]}" != "$x" ] || L_NAME[$i]=$y; done ;;
+					reId) for i in "\${!L_ID[@]}"; do if [ "\${L_ID[$i]}" = "$x" ]; then next_id; L_ID[$i]=$NEXT; fi; done ;;
+					drift)
+						for i in "\${!L_ID[@]}"; do
+							[ -n "\${L_ID[$i]}" ] && [ "\${L_NAME[$i]}" != "$started" ] || continue
+							if [ "\${L_ST[$i]}" = online ]; then L_ST[$i]=errored; else L_ST[$i]=online; fi
+							L_PID[$i]=$((L_PID[$i] + 7)); L_UP[$i]=$((L_UP[$i] + 100))
+						done ;;
+				esac
+			done < "$sc/after-start"
+		fi
+		store
+		if [ -f "$st/pm2/alive" ]; then read -r a < "$st/pm2/alive"; echo "$a" > "$pm/pm2.pid"; fi ;;
+	stop|restart|delete)
+		hit=0
+		for i in "\${!L_ID[@]}"; do
+			[ "\${L_NAME[$i]}" = "$2" ] || continue
+			hit=1
+			case "$1" in
+				delete) L_ID[$i]="" ;;
+				stop) L_ST[$i]=stopped; L_UP[$i]=$((L_UP[$i] + 1)) ;;
+				restart) L_ST[$i]=online; L_UP[$i]=$((L_UP[$i] + 1)) ;;
+			esac
+		done
+		if [ "$hit" != 1 ]; then echo "[PM2][ERROR] Process or Namespace $2 not found" >&2; exit 1; fi
+		store
+		[ "$1" != restart ] || answer "$2" ;;
+	save)
+		out=""
+		for i in "\${!L_ID[@]}"; do
+			out="$out\${out:+,}{\\"name\\":\\"\${L_NAME[$i]}\\",\\"pm_id\\":\${L_ID[$i]},\\"status\\":\\"\${L_ST[$i]}\\",\\"exec_interpreter\\":\\"/opt/node22/bin/node\\",\\"env\\":{\\"SECRET_SENTINEL\\":\\"$sentinel\\"}}"
+		done
+		printf '[%s]\\n' "$out" > "$pm/dump.pm2" ;;
+	startup) : > "$st/units/pm2-$4.enabled" ;;
+	*) exit 2 ;;
+esac
 `,
 };
 for (const [name, body] of Object.entries(stubs)) fs.writeFileSync(path.join(BIN, name), body, { mode: 0o755 });
@@ -315,7 +348,12 @@ const STAGING_DEF_REPO = path.join(ROOT, "ecosystem.staging.config.js");
 const STAGING_DEF = fs.existsSync(STAGING_DEF_REPO) ? fs.readFileSync(STAGING_DEF_REPO, "utf8")
 	: "module.exports = { apps: [{ name: \"logisx-staging\", script: \"server.js\", cwd: \"/var/www/logisx-staging\", interpreter: \"/opt/node22/bin/node\" }] };\n";
 
-const GIT_ENV = (home) => ({ PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", LANG: "C" });
+// No maintenance after a fixture's commit: git starts it detached, and a late run touches .git while a case
+// compares the tree before and after a script run.
+const GIT_ENV = (home) => ({
+	PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", LANG: "C",
+	GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false", GIT_CONFIG_KEY_1: "gc.auto", GIT_CONFIG_VALUE_1: "0",
+});
 function git(cwd, home, ...args) {
 	const r = spawnSync("git", args, { cwd, env: GIT_ENV(home), encoding: "utf8" });
 	if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
@@ -421,13 +459,36 @@ function makeCase(envName, o = {}) {
 		{ pm_id: 3, name: E.name, status: "online", pid: 104, pm_uptime: 1 },
 		{ pm_id: 4, name: TENANTS[2], status: otherStatus, pid: 105, pm_uptime: 1 },
 	];
-	fs.writeFileSync(F + "/root/.pm2/stub-live.json", JSON.stringify({ next: 5, list }));
+	writeLive(F + "/root", list, 5);
 	fs.writeFileSync(F + "/root/.pm2/dump.pm2", JSON.stringify(list.map((e) => ({ name: e.name, pm_id: e.pm_id, status: e.status, env: { SECRET_SENTINEL: PM2_ENV_SENTINEL } })), null, 2));
 	fs.writeFileSync(F + "/root/.pm2/pm2.pid", String(process.pid));
-	fs.writeFileSync(path.join(S, "pm2.json"), JSON.stringify({
-		envSentinel: PM2_ENV_SENTINEL, alivePid: process.pid, ports: { "logistics-app": 3000, "logisx-staging": 3003 }, ...(o.pm2 || {}),
-	}));
-	return paths({ env: envName, E, dir, uid, gid });
+	const P = mkdir(path.join(S, "pm2"));
+	fs.writeFileSync(path.join(P, "sentinel"), `${PM2_ENV_SENTINEL}\n`);
+	fs.writeFileSync(path.join(P, "alive"), `${process.pid}\n`);
+	fs.writeFileSync(path.join(P, "ports"), "logistics-app 3000\nlogisx-staging 3003\n");
+	const c = paths({ env: envName, E, dir, uid, gid });
+	setScenario(c, o.pm2Users || {});
+	return c;
+}
+// A pm2 daemon's list, as the stub keeps it: pm2 id, name, status, pid and start time, a tab between each.
+function writeLive(home, list, next) {
+	mkdir(path.join(home, ".pm2"));
+	fs.writeFileSync(path.join(home, ".pm2", "stub-live.tsv"), list.map((e) => `${[e.pm_id, e.name, e.status, e.pid, e.pm_uptime].join("\t")}\n`).join(""));
+	if (next !== undefined) fs.writeFileSync(path.join(home, ".pm2", "stub-next"), `${next}\n`);
+}
+// The stub's scenarios, per pm2 user: afterStart is [op, ...args] lines (add, addOurs, removeStarted, removeId,
+// renameId, reId, drift); notice puts pm2's out-of-date notice ahead of every list.
+function setScenario(c, users = {}, { notice = false } = {}) {
+	const P = mkdir(path.join(c.S, "pm2"));
+	if (notice) fs.writeFileSync(path.join(P, "notice"), "");
+	for (const [user, s] of Object.entries(users)) {
+		const u = mkdir(path.join(P, user));
+		if (s.startNoop) fs.writeFileSync(path.join(u, "start-noop"), "");
+		if (s.unreadable) fs.writeFileSync(path.join(u, "unreadable"), "");
+		if (s.strayAfterJlist !== undefined) fs.writeFileSync(path.join(u, "stray-after-jlist"), `${s.strayAfterJlist}\n`);
+		if (s.answerAfterStart !== undefined) fs.writeFileSync(path.join(u, "answer-after-start"), `${s.answerAfterStart}\n`);
+		if (s.afterStart) fs.writeFileSync(path.join(u, "after-start"), s.afterStart.map((m) => `${m.join(" ")}\n`).join(""));
+	}
 }
 function paths(c) {
 	c.F = path.join(c.dir, "fs");
@@ -535,7 +596,21 @@ function diffSnaps(a, b, { modesOnly = false } = {}) {
 }
 const modeAt = (p) => { try { return (fs.lstatSync(p).mode & 0o7777).toString(8); } catch (e) { return "missing"; } };
 const readOr = (p, d = null) => { try { return fs.readFileSync(p, "utf8"); } catch (e) { return d; } };
-const liveOf = (home) => (JSON.parse(readOr(path.join(home, ".pm2/stub-live.json"), "{\"list\":[]}")).list || []);
+// The JavaScript the script runs in its own node (its HELPER_JS), read from the script under test.
+function helperOf(script) {
+	const m = (readOr(script, "") || "").match(/\nHELPER_JS='\n([\s\S]*?)\n'\n/);
+	return m ? m[1] : "";
+}
+// The environment each pm2 call had, by name, sorted. The stub leaves out what bash adds itself (_, SHLVL,
+// PWD, OLDPWD) and what macOS adds to every process (__CF_USER_TEXT_ENCODING).
+const pm2Env = (c) => (readOr(path.join(c.S, "pm2-env.log"), "") || "").split("\n").filter(Boolean).map((l) => {
+	const [user, verb, names] = l.split("\x1f");
+	return { user, verb, names: names.split(",").filter(Boolean).sort().join(",") };
+});
+const liveOf = (home) => (readOr(path.join(home, ".pm2/stub-live.tsv"), "") || "").split("\n").filter(Boolean).map((l) => {
+	const [id, name, status, pid, up] = l.split("\t");
+	return { pm_id: Number(id), name, status, pid: Number(pid), pm_uptime: Number(up) };
+});
 const dumpOf = (home) => { try { return JSON.parse(fs.readFileSync(path.join(home, ".pm2/dump.pm2"), "utf8")); } catch (e) { return null; } };
 const named = (l, n) => l.filter((e) => e.name === n);
 const MUTATING = (call) => {
@@ -601,7 +676,11 @@ kase("§2 the dry run changes nothing", async (t, script) => {
 		t.ok(`§2 ${envName}: no saved state and no lock folder`, !fs.existsSync(c.state) && fs.readdirSync(c.F + "/run").length === 0);
 		t.ok(`§2 ${envName}: pm2 runs only as root, only to read`, r.calls.filter((x) => x[0] === "pm2").every((x) => x[1] === "root" && x[2] === "jlist"), r.calls.filter((x) => x[0] === "pm2").join("\n"));
 		noLeak(t, `§2 ${envName}`, r);
-		if (envName === "staging") t.ok("§2 staging: no crontab is read", !r.calls.some((x) => x[0] === "crontab"));
+		t.ok(`§8 ${envName}: the dry run counts the stopgap's files, its folders 0700`, /backups\/trees: its folders are 0700 \(1 files\)/.test(r.out), r.out);
+		if (envName === "staging") {
+			t.ok("§2 staging: no crontab is read", !r.calls.some((x) => x[0] === "crontab"));
+			t.ok("§8 staging with an old settings copy: a note, and it passes", /1 old copies of the settings file: made 0600/.test(r.out), r.out);
+		}
 	}
 });
 
@@ -639,12 +718,11 @@ kase("§3 §4 production: --apply, then --rollback", async (t, script) => {
 	t.eq("§3 the account's pm2: exactly logistics-app, online", acctLive.map((e) => `${e.name} ${e.status}`), ["logistics-app online"]);
 	t.eq("§3 …saved", (dumpOf(c.acctHome) || []).map((e) => e.name), ["logistics-app"]);
 	t.ok("§3 …and its boot unit enabled", fs.existsSync(path.join(c.S, "units/pm2-logisx-prd.enabled")));
-	// macOS adds __CF_USER_TEXT_ENCODING to every process it starts; nothing else may appear.
-	const envLog = readOr(path.join(c.S, "pm2-env.log"), "").split("\n").filter(Boolean).map((l) => l.split("\x1f"))
-		.map(([u, verb, names]) => [u, verb, names.split(",").filter((n) => !n.startsWith("__CF_")).join(",")]);
-	const acctStart = envLog.find((x) => x[0] === "logisx-prd" && x[1] === "start");
-	t.eq("§3 the account's pm2 starts with only HOME, LANG and PATH", acctStart && acctStart[2], "HOME,LANG,PATH");
-	t.ok("§3 …so the caller's environment never reaches it", envLog.every((x) => !x[2].includes("CALLER_SENTINEL") && !x[2].includes("CUTOVER_TEST")), envLog.join("\n"));
+	const envLog = pm2Env(c);
+	const acctStart = envLog.find((x) => x.user === "logisx-prd" && x.verb === "start");
+	t.eq("§3 the account's pm2 starts with only HOME, LANG and PATH", acctStart && acctStart.names, "HOME,LANG,PATH");
+	t.ok("§3 …and root's with only HOME, LANG and PATH too: the caller's environment never reaches pm2",
+		envLog.length > 0 && envLog.every((x) => x.names === "HOME,LANG,PATH"), envLog.map((x) => `${x.user} ${x.verb}: ${x.names}`).join("\n"));
 	const rootLive = liveOf(c.F + "/root");
 	t.eq("§3 root's pm2 no longer lists logistics-app, and the others are as they were",
 		rootLive.map((e) => `${e.pm_id} ${e.name} ${e.status}`), [`0 ${TENANTS[0]} online`, `1 ${TENANTS[1]} online`, "2 logisx-staging online", `4 ${TENANTS[2]} errored`]);
@@ -707,11 +785,6 @@ kase("§3 §4 staging: --apply, then --rollback beside production's app", async 
 	noLeak(t, "§5 staging --rollback", r2);
 });
 
-const setScenario = (c, users, extra = {}) => {
-	const s = JSON.parse(readOr(path.join(c.S, "pm2.json")));
-	fs.writeFileSync(path.join(c.S, "pm2.json"), JSON.stringify({ ...s, ...extra, users: { ...(s.users || {}), ...users } }));
-};
-
 kase("§5 the rollback passes with pm2's out-of-date notice ahead of its list", async (t, script) => {
 	const c = await cutOver("production");
 	setScenario(c, {}, { notice: true });
@@ -722,7 +795,7 @@ kase("§5 the rollback passes with pm2's out-of-date notice ahead of its list", 
 
 kase("§5 statuses, pids and uptimes changing between the reads don't count", async (t, script) => {
 	const c = await cutOver("production");
-	setScenario(c, { root: { afterStart: [{ drift: true }] } });
+	setScenario(c, { root: { afterStart: [["drift"]] } });
 	const r2 = await rollback(c, { script });
 	t.ok("§5 the start's compare passes and root's list is saved", /ok +logistics-app runs under root again, answers on :3000, and root's list is saved/.test(r2.out), r2.all);
 	t.eq("§7 the saved-list compare then stops and asks (exit 3)", r2.code, 3);
@@ -731,11 +804,11 @@ kase("§5 statuses, pids and uptimes changing between the reads don't count", as
 
 const REFUSALS = [
 	["our app missing after the start", { startNoop: true }],
-	["our app listed twice", { afterStart: [{ addOurs: true }] }],
-	["another app added", { afterStart: [{ add: "intruder-sentinel" }] }],
-	["an entry from before the start gone", { afterStart: [{ removeId: 0 }] }],
-	["an entry from before the start under another id", { afterStart: [{ reId: 1 }] }],
-	["another name under an id from before the start", { afterStart: [{ renameId: 1, to: "renamed-sentinel" }] }],
+	["our app listed twice", { afterStart: [["addOurs"]] }],
+	["another app added", { afterStart: [["add", "intruder-sentinel"]] }],
+	["an entry from before the start gone", { afterStart: [["removeId", 0]] }],
+	["an entry from before the start under another id", { afterStart: [["reId", 1]] }],
+	["another name under an id from before the start", { afterStart: [["renameId", 1, "renamed-sentinel"]] }],
 ];
 for (const [label, scen] of REFUSALS) {
 	kase(`§5 the rollback refuses ${label}`, async (t, script) => {
@@ -754,9 +827,7 @@ for (const [label, scen] of REFUSALS) {
 
 kase("§5 our app already in root's list before the rollback", async (t, script) => {
 	const c = await cutOver("production");
-	const live = JSON.parse(readOr(c.F + "/root/.pm2/stub-live.json"));
-	live.list.push({ pm_id: 9, name: "logistics-app", status: "online", pid: 900, pm_uptime: 1 });
-	fs.writeFileSync(c.F + "/root/.pm2/stub-live.json", JSON.stringify(live));
+	writeLive(c.F + "/root", [...liveOf(c.F + "/root"), { pm_id: 9, name: "logistics-app", status: "online", pid: 900, pm_uptime: 1 }]);
 	const before = snap(c.F);
 	const r2 = await rollback(c, { script });
 	t.eq("§5 already listed: refused (exit 1)", r2.code, 1);
@@ -768,7 +839,7 @@ kase("§5 our app already in root's list before the rollback", async (t, script)
 for (const [label, scen] of [["lists nothing", { list: [] }], ["can't be read", { unreadable: true }]]) {
 	kase(`§5 root's list ${label} before the rollback`, async (t, script) => {
 		const c = await cutOver("production");
-		if (scen.list) fs.writeFileSync(c.F + "/root/.pm2/stub-live.json", JSON.stringify({ next: 9, list: [] }));
+		if (scen.list) writeLive(c.F + "/root", []);
 		else setScenario(c, { root: { unreadable: true } });
 		const r2 = await rollback(c, { script });
 		t.eq(`§5 root's list ${label}: refused (exit 1)`, r2.code, 1);
@@ -778,9 +849,7 @@ for (const [label, scen] of [["lists nothing", { list: [] }], ["can't be read", 
 
 kase("§7 a changed tenant entry in root's saved list: the rollback still finishes, then stops and asks", async (t, script) => {
 	const c = await cutOver("production");
-	const live = JSON.parse(readOr(c.F + "/root/.pm2/stub-live.json"));
-	for (const e of live.list) if (e.name === TENANTS[2]) e.status = "online";
-	fs.writeFileSync(c.F + "/root/.pm2/stub-live.json", JSON.stringify(live));
+	writeLive(c.F + "/root", liveOf(c.F + "/root").map((e) => (e.name === TENANTS[2] ? { ...e, status: "online" } : e)));
 	const r2 = await rollback(c, { script });
 	t.eq("§7 stops to ask (exit 3)", r2.code, 3);
 	t.ok("§7 …after the backup line moved back", readOr(path.join(c.S, "crontabs/root")) === ROOT_CRON);
@@ -792,9 +861,7 @@ kase("§7 a changed tenant entry in root's saved list: the rollback still finish
 kase("§7 --apply: a changed tenant entry in root's saved list stops and asks; the copy is never put back", async (t, script) => {
 	const c = makeCase("production", { tenantCharlie: "online" });
 	const dump = JSON.parse(readOr(c.F + "/root/.pm2/dump.pm2"));
-	const live = JSON.parse(readOr(c.F + "/root/.pm2/stub-live.json"));
-	for (const e of live.list) if (e.name === TENANTS[2]) e.status = "errored";
-	fs.writeFileSync(c.F + "/root/.pm2/stub-live.json", JSON.stringify(live));
+	writeLive(c.F + "/root", liveOf(c.F + "/root").map((e) => (e.name === TENANTS[2] ? { ...e, status: "errored" } : e)));
 	const r = await apply(c, { script });
 	t.eq("§7 stops to ask (exit 3)", r.code, 3);
 	t.ok("§7 …after the cutover and the backup line's move", readOr(path.join(c.S, "crontabs/logisx-prd")) === `${OUR_CRON}\n` && /apply\.done/.test(readOr(c.state + "/progress", "")));
@@ -806,18 +873,17 @@ kase("§7 --apply: a changed tenant entry in root's saved list stops and asks; t
 
 for (const [label, scen, extra = {}] of [
 	["no app after the start", { startNoop: true }, { rollback: true }],
-	["two apps after the start", { afterStart: [{ add: "second-app" }] }],
-	["one app, under another name", { afterStart: [{ removeStarted: true }, { add: "other-name" }] }],
-	["a second app listed before the start", { strayAfterJlist: 1 }, { daemonUp: true, rollback: true }],
-	["no answer on its port", { answerAfterStart: "000" }, { rootAnswers: true, rollback: true, env: true }],
+	["two apps after the start", { afterStart: [["add", "second-app"]] }, { env: true }],
+	["one app, under another name", { afterStart: [["removeStarted"], ["add", "other-name"]] }],
+	["a second app listed before the start", { strayAfterJlist: 1 }, { daemonUp: true }],
+	["no answer on its port", { answerAfterStart: "000" }, { rootAnswers: true, rollback: true }],
 ]) {
 	kase(`§6 step 8 refuses ${label}`, async (t, script) => {
 		const users = { "logisx-prd": scen, ...(extra.rootAnswers ? { root: { answerAfterStart: "200" } } : {}) };
-		const c = makeCase("production", { pm2: { users } });
+		const c = makeCase("production", { pm2Users: users });
 		if (extra.daemonUp) {
-			mkdir(c.acctHome + "/.pm2");
+			writeLive(c.acctHome, [], 0);
 			fs.writeFileSync(c.acctHome + "/.pm2/pm2.pid", String(process.pid));
-			fs.writeFileSync(c.acctHome + "/.pm2/stub-live.json", JSON.stringify({ next: 0, list: [] }));
 		}
 		const r = await apply(c, { script });
 		t.eq(`§6 ${label}: stops to ask (exit 3)`, r.code, 3);
@@ -826,9 +892,7 @@ for (const [label, scen, extra = {}] of [
 		t.ok(`§6 ${label}: no backup line moved`, readOr(path.join(c.S, "crontabs/root")) === ROOT_CRON);
 		noLeak(t, `§6 ${label}`, r);
 		if (extra.env) {
-			// macOS adds __CF_USER_TEXT_ENCODING to every process it starts; nothing else may appear.
-			const starts = readOr(path.join(c.S, "pm2-env.log"), "").split("\n").filter(Boolean).map((l) => l.split("\x1f"))
-				.filter((x) => x[0] === "logisx-prd" && x[1] === "start").map((x) => x[2].split(",").filter((n) => !n.startsWith("__CF_")).join(","));
+			const starts = pm2Env(c).filter((x) => x.user === "logisx-prd" && x.verb === "start").map((x) => x.names);
 			t.eq("§3 the account's pm2 starts with only HOME, LANG and PATH: nothing of the caller's shell", starts, ["HOME,LANG,PATH"]);
 		}
 		if (!extra.rollback) return;
@@ -852,23 +916,41 @@ kase("§8 sockets at 6 days: the rule-F go-live date decides", async (t, script)
 	t.ok("§8 6 days, and a rule-F date 8 days ago: that check passes", /ok +the sockets went live on .* by the rule-F report, 8 days ago/.test(old.out) && old.code === 1, old.out);
 });
 
-for (const [label, line] of [["fork", "RENDER_CHILD_TRANSPORT=fork"], ["missing (fork is the default)", "# no transport line"], ["socket, then fork later in the file", "RENDER_CHILD_TRANSPORT=socket\nRENDER_CHILD_TRANSPORT=fork"]]) {
-	kase(`§8 the transport ${label} is refused`, async (t, script) => {
-		const c = makeCase("production", { transportLine: line });
-		const d = await dry(c, { script });
-		t.ok(`§8 transport ${label}: the dry run fails it (exit 1)`, d.code === 1 && /FAIL +the render transport setting isn't socket/.test(d.out), d.out);
-		noLeak(t, `§8 transport ${label}`, d);
-		if (!label.startsWith("fork")) return;
-		const r = await apply(c, { script });
-		t.eq(`§8 transport ${label}: --apply refuses (exit 1)`, r.code, 1);
-		t.ok(`§8 …before any change`, !fs.existsSync(c.state) && r.calls.filter(MUTATING).length === 0);
-	});
-}
-kase("§8 quoted and exported socket lines read as socket", async (t, script) => {
-	for (const line of ["export RENDER_CHILD_TRANSPORT=\"socket\"", "RENDER_CHILD_TRANSPORT = 'socket'  # the render services"]) {
-		const c = makeCase("staging", { transportLine: line });
-		const d = await dry(c, { script });
-		t.ok(`§8 ${line}: socket`, /ok +the render transport setting is socket/.test(d.out), d.out);
+kase("§8 the transport fork is refused", async (t, script) => {
+	const c = makeCase("production", { transportLine: "RENDER_CHILD_TRANSPORT=fork" });
+	const d = await dry(c, { script });
+	t.ok("§8 transport fork: the dry run fails it (exit 1)", d.code === 1 && /FAIL +the render transport setting isn't socket/.test(d.out), d.out);
+	noLeak(t, "§8 transport fork", d);
+	const r = await apply(c, { script });
+	t.eq("§8 transport fork: --apply refuses (exit 1)", r.code, 1);
+	t.ok("§8 …before any change", !fs.existsSync(c.state) && r.calls.filter(MUTATING).length === 0);
+});
+// The script's own settings reader, run as the script runs it: only one named line counts, and it prints no value.
+kase("§8 the transport setting's reader", async (t, script) => {
+	const helper = helperOf(script);
+	t.ok("§8 the script's helper is there to run", helper.length > 0);
+	const dir = fs.mkdtempSync(path.join(TMP, "transport-"));
+	for (const [label, text, want] of [
+		["socket", "RENDER_CHILD_TRANSPORT=socket\n", "socket"],
+		["fork", "RENDER_CHILD_TRANSPORT=fork\n", "not-socket"],
+		["no line (fork is the default)", "# no transport line\nOTHER=socket\n", "not-socket"],
+		["socket, then fork later in the file (the last line wins)", "RENDER_CHILD_TRANSPORT=socket\nRENDER_CHILD_TRANSPORT=fork\n", "not-socket"],
+		["fork, then socket later in the file", "RENDER_CHILD_TRANSPORT=fork\nRENDER_CHILD_TRANSPORT=socket\n", "socket"],
+		["exported and double-quoted", "export RENDER_CHILD_TRANSPORT=\"socket\"\n", "socket"],
+		["single-quoted, with spaces and a comment", "RENDER_CHILD_TRANSPORT = 'socket'  # the render services\n", "socket"],
+		["commented out", "# RENDER_CHILD_TRANSPORT=socket\n", "not-socket"],
+		["a longer name", "MY_RENDER_CHILD_TRANSPORT=socket\n", "not-socket"],
+	]) {
+		const f = path.join(dir, `${label.replace(/[^a-z]+/g, "-")}.conf`);
+		fs.writeFileSync(f, `SESSION_SECRET=${SETTINGS_SENTINEL}\n${text}`);
+		const r = spawnSync(process.execPath, ["-e", helper, "--", "transport", f], { encoding: "utf8" });
+		t.eq(`§8 the transport line, ${label}: ${want}`, (r.stdout || "").trim(), want);
+		t.ok(`§8 …and no value printed (${label})`, !`${r.stdout}${r.stderr}`.includes(SETTINGS_SENTINEL));
+	}
+	fs.symlinkSync(path.join(dir, "socket.conf"), path.join(dir, "linked.conf"));
+	for (const [label, f] of [["a link to a settings file", "linked.conf"], ["no file", "missing.conf"]]) {
+		const r = spawnSync(process.execPath, ["-e", helper, "--", "transport", path.join(dir, f)], { encoding: "utf8" });
+		t.eq(`§8 the transport line, ${label}: unreadable (no link followed)`, (r.stdout || "").trim(), "unreadable");
 	}
 });
 
@@ -906,13 +988,10 @@ kase("§8 a missing ACL is refused before any chmod", async (t, script) => {
 	t.eq("§8 …the tree is untouched", diffSnaps(before, snap(c.F)), []);
 });
 
-kase("§8 old settings copies stop production, not staging", async (t, script) => {
+kase("§8 old settings copies stop production (staging's: §2)", async (t, script) => {
 	const c = makeCase("production", { settingsCopy: true });
 	const d = await dry(c, { script });
 	t.ok("§8 production with an old settings copy: the dry run fails it", d.code === 1 && /FAIL +old copies of the settings file remain \(1 at the top level, 0 in backups\/\)/.test(d.out), d.out);
-	const s = makeCase("staging");
-	const ds = await dry(s, { script });
-	t.ok("§8 staging with one: a note, and the dry run passes", ds.code === 0 && /1 old copies of the settings file: made 0600/.test(ds.out), ds.out);
 	noLeak(t, "§8 settings copies", d);
 });
 
@@ -936,12 +1015,9 @@ kase("§8 the backup hour, the crontab and the stopgap's trees", async (t, scrip
 	const trees = makeCase("production", { treesNightMode: 0o755 });
 	const z = await dry(trees, { script });
 	t.ok("§8 a stopgap night folder that isn't 0700: the dry run fails it", z.code === 1 && /backups\/trees: 1 of its folders aren't 0700/.test(z.out), z.out);
-	const ok = makeCase("production");
-	const w = await dry(ok, { script });
-	t.ok("§8 the dry run counts the stopgap's files", /backups\/trees: its folders are 0700 \(1 files\)/.test(w.out), w.out);
 });
 
-kase("§9 locks: held elsewhere, and the folders' modes", async (t, script) => {
+kase("§9 root's lock: held by a deploy, or its folder not exactly 0700", async (t, script) => {
 	const c = makeCase("production");
 	fs.writeFileSync(path.join(c.S, "held-fd"), "");
 	const r = await apply(c, { script });
@@ -951,11 +1027,17 @@ kase("§9 locks: held elsewhere, and the folders' modes", async (t, script) => {
 	mkdir(wide.F + `/run/logisx-deploy-${wide.uid}`, 0o755);
 	const r2 = await apply(wide, { script });
 	t.ok("§9 root's lock folder at 0755: refused (exit 1), exactly 0700 wanted", r2.code === 1 && /mode exactly 0700/.test(r2.out) && !fs.existsSync(wide.state), r2.out);
+});
+
+kase("§9 the account's lock folder is read back exactly 0700 after systemd-tmpfiles", async (t, script) => {
 	const tf = makeCase("production");
 	fs.writeFileSync(path.join(tf.S, "tmpfiles-mode"), "0755");
 	const r3 = await apply(tf, { script });
 	t.eq("§9 the account's lock folder read back 0755 after systemd-tmpfiles: stops to ask (exit 3)", r3.code, 3);
 	t.ok("§9 …saying the redeploy would refuse it, and before the account's pm2 starts", /isn't a folder logisx-prd owns, mode exactly 0700/.test(r3.out) && pm2Calls(r3, "logisx-prd", "start").length === 0, r3.out);
+});
+
+kase("§9 the account's lock held by a deploy as the account: --rollback refuses", async (t, script) => {
 	const rb = await cutOver("production");
 	fs.writeFileSync(path.join(rb.S, "held-file"), "");
 	const before = snap(rb.app);
@@ -1058,12 +1140,12 @@ const MUTANTS = [
 		'v=$(js root-diff "$TMPD/acct.before" "$TMPD/acct.after" "$NAME"); [ "${v%%$\'\\n\'*}" = ok ] || acct_ok=0'],
 	["§14 the backup line moved back after root's pm2 starts", "§5 the rollback refuses our app missing after the start",
 		"\trb3_cron\n\trb4_tmpfiles\n\trb5_root\n", "\trb5_root\n\trb3_cron\n\trb4_tmpfiles\n"],
-	["§14 the account's pm2 inherits the caller's environment", "§6 step 8 refuses no answer on its port",
+	["§14 the account's pm2 inherits the caller's environment", "§6 step 8 refuses two apps after the start",
 		'pm2_acct() { x runuser -u "$ACCT" -- env -i HOME="$ACCT_HOME" PATH="$PATH" LANG=C.UTF-8 "$PM2_BIN" "$@"; }',
 		'pm2_acct() { x runuser -u "$ACCT" -- env HOME="$ACCT_HOME" PATH="$PATH" LANG=C.UTF-8 "$PM2_BIN" "$@"; }'],
 	["§14 no ACL check", "§8 a missing ACL is refused before any chmod",
 		"\tif acl_ok; then okay \"$RENDER can traverse", "\tif true; then okay \"$RENDER can traverse"],
-	["§14 a lock folder that is 0755 accepted", "§9 locks: held elsewhere, and the folders' modes",
+	["§14 a lock folder that is 0755 accepted", "§9 the account's lock folder is read back exactly 0700 after systemd-tmpfiles",
 		'lock_dir_ok() { real_dir "$1" && [ "$(uid_of "$1")" = "$2" ] && [ "$(mode_of "$1")" = 700 ]; }',
 		'lock_dir_ok() { real_dir "$1" && [ "$(uid_of "$1")" = "$2" ]; }'],
 	["§14 an empty root list accepted before the rollback's start", "§5 root's list lists nothing before the rollback",
