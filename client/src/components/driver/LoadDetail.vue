@@ -80,6 +80,7 @@
           :alternatives="routeData.routes"
           :recommended-idx="routeData.recommendedIdx"
           :selected-idx="selectedAltIdx"
+          :show-fuel="routeOptionsShowFuel"
           @select="selectedAltIdx = $event"
         />
       </van-collapse-item>
@@ -277,6 +278,7 @@ import { computed, ref, watchEffect, onMounted, onBeforeUnmount } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
+import { driverFuelOf, driverFuelBadge } from '../../lib/driverFuelView.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusTimeline from '../shared/StatusTimeline.vue'
 import StatusStepper from './StatusStepper.vue'
@@ -349,6 +351,10 @@ const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 const fuelPlan = ref(null)
 const fuelBadge = computed(() => {
   const p = fuelPlan.value
+  // With the driver gallons flag on, the badge reads the same block as the
+  // section ("Add 40 gal", "Fuel unknown"); where the block doesn't decide, as before.
+  const gallons = driverFuelBadge(p)
+  if (gallons) return gallons
   const v = p && p.verdict
   if (v === 'insufficient') return { tone: 'bad', text: 'Fuel stop needed' }
   if (v === 'tight') return { tone: 'warn', text: 'Fuel is tight' }
@@ -363,6 +369,9 @@ const fuelBadge = computed(() => {
   }
   return null
 })
+// Route Options' gallons are Google's estimate for a car. With the driver gallons
+// block on screen they are hidden, so the driver sees one gallons figure.
+const routeOptionsShowFuel = computed(() => !driverFuelOf(fuelPlan.value))
 
 // Banner text + styling.
 //
