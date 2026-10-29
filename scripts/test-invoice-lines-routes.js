@@ -38,11 +38,10 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
 // The draft route's steps live in lib/broker-invoice-draft.js: read with
 // server.js as one text (lifted() splits them again).
 const draftLift = require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js"));
-const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), ROOT);
+const SRC = draftLift.withEngine(require("./lib/server-source").serverSource(), ROOT);
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LINES_PATH = path.join(ROOT, "lib", "broker-invoice-lines.js");
 const Database = require("better-sqlite3");
@@ -212,6 +211,8 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 		fetchDocumentBytes: async () => Buffer.from("%PDF-1.4 pod"),
 		buildRateConLoadCtx: () => ({}),
 		getRateConBytes: async () => ({ buffer: null, candidates: [] }),
+		// The rate-con viewer gate with RATECON_PDF_VIEWER_IDS unset (shipped lib code).
+		rateconViewGate: require("../lib/ratecon-pdf-route.js").viewerGate(require("../lib/listed-accounts.js").parseListedAccountIds(undefined)),
 		GEMINI_API_KEY: "",
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => MINTED,

@@ -32,7 +32,13 @@
  * §8 the request never supplies a path: malformed IDs are 400 and a poisoned
  *    documents row is skipped, never read.
  * §9 route order: mounted from server.js by one line above app.get("*"), and
- *    the route opens with requireRole("Super Admin").
+ *    the route opens with requireRole("Super Admin"), then the viewer list.
+ * §11 the viewer list (RATECON_PDF_VIEWER_IDS, lib/listed-accounts.js): set,
+ *    only a listed account id opens a rate con; another Super Admin is 403
+ *    RATECON_VIEW_RESTRICTED with no lookup, no Drive call and no file read,
+ *    whatever its username; a session without an id is told to sign in again;
+ *    a set but invalid list refuses everyone; unset is §1 (as before the list
+ *    existed). Refused callers spend none of the rate-limit budget.
  *
  * Hermetic: :memory: SQLite, one mkdtemp folder (removed at the end), port 0.
  *
@@ -46,7 +52,7 @@ const os = require("os");
 const path = require("path");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined);
 
 let Database, express;
 try {
@@ -92,6 +98,16 @@ try {
 	routeModule = require(path.join(ROOT, "lib", "ratecon-pdf-route.js"));
 } catch (e) {
 	t(false, `lib/ratecon-pdf-route.js loads (${e.code || e.message})`);
+}
+let listedAccounts = null;
+try { listedAccounts = require(path.join(ROOT, "lib", "listed-accounts.js")); } catch (e) {
+	t(false, `lib/listed-accounts.js loads (${e.code || e.message})`);
+}
+// The gate server.js builds from RATECON_PDF_VIEWER_IDS: `raw` undefined is the
+// variable left unset.
+function gateFor(raw) {
+	if (!routeModule || typeof routeModule.viewerGate !== "function" || !listedAccounts) return undefined;
+	return routeModule.viewerGate(listedAccounts.parseListedAccountIds(raw));
 }
 let rcIndex = null;
 try { rcIndex = require(path.join(ROOT, "lib", "ratecon-drive-index.js")); } catch { rcIndex = null; }
@@ -170,7 +186,7 @@ fs.promises.stat = function (p, ...rest) {
 	return safe ? origStat.call(this, safe, ...rest) : outsideFixtures(p);
 };
 
-async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = false } = {}) {
+async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = false, viewers } = {}) {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ratecon-pdf-route-"));
 	fixtureRoot = path.resolve(tmp);
 	const uploadsDir = path.join(tmp, "uploads");
@@ -224,6 +240,7 @@ async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = fa
 		folderId,
 		uploadsDir,
 		docTypes: RATECON_DOC_TYPES,
+		viewerGate: gateFor(viewers),
 		logger: { log: (...a) => log.logs.push(a.join(" ")), warn: (...a) => log.logs.push(a.join(" ")), error: (...a) => log.logs.push(a.join(" ")) },
 	};
 	if (routeModule && typeof routeModule.mount === "function") routeModule.mount(app, deps);
@@ -514,8 +531,13 @@ async function main() {
 		t(!!layer && layer.route.methods.get === true, "§9 the route is a GET");
 		t(!!first && Array.isArray(first.__roles) && first.__roles.length === 1 && first.__roles[0] === "Super Admin", "§9 ...whose first handler is requireRole(\"Super Admin\")");
 		const second = layer && layer.route.stack[1] && layer.route.stack[1].handle;
-		t(!!layer && layer.route.stack.length === 3 && !!second && !second.__roles, `§9 ...then the rate limiter, then the handler (${layer ? layer.route.stack.length : 0} handlers)`);
+		const third = layer && layer.route.stack[2] && layer.route.stack[2].handle;
+		t(!!second && second.name === "listedViewerOnly", `§9 ...then the viewer list (${second && second.name})`);
+		t(!!layer && layer.route.stack.length === 4 && !!third && !third.__roles && third.name !== "listedViewerOnly", `§9 ...then the rate limiter, then the handler (${layer ? layer.route.stack.length : 0} handlers)`);
 		await w.close();
+		let threw = false;
+		try { routeModule.mount(express(), { requireRole, db: new Database(":memory:"), getDrive: async () => ({}), folderId: "", uploadsDir: os.tmpdir(), docTypes: RATECON_DOC_TYPES }); } catch { threw = true; }
+		t(threw, "§9 mounting without the viewer list throws, so no copy of the route can open every rate con to every Super Admin");
 	}
 
 	// ── §10 the rate limiter: after the role gate ────────────────────────────
@@ -532,6 +554,70 @@ async function main() {
 		t(served === (limit || 60), `§10 ...and spent none of the budget: a Super Admin still gets ${limit} answers (${served})`);
 		const over = await w.call(url("7709999"));
 		t(over.status === 429 && over.json && over.json.code === "RATECON_RATE_LIMITED", `§10 the next request is 429 RATECON_RATE_LIMITED (${over.status})`);
+		await w.close();
+	}
+
+	// ── §11 the viewer list (RATECON_PDF_VIEWER_IDS) ─────────────────────────
+	{
+		// Made-up accounts: 1 and 7 listed; 5 a Super Admin outside the list,
+		// once under the listed account's username (the id decides, never the name).
+		const OWNER = { id: 1, username: "owner_admin", role: "Super Admin" };
+		const SECOND = { id: 7, username: "second_admin", role: "Super Admin" };
+		const STAFF = { id: 5, username: "staff_admin", role: "Super Admin" };
+		const STAFF_AS_OWNER_NAME = { id: 5, username: "owner_admin", role: "Super Admin" };
+		const NO_ID = { username: "owner_admin", role: "Super Admin" };
+		const w = await startWorld({ viewers: "1, 7" });
+		fs.writeFileSync(path.join(w.rateconDir, "7700500.pdf"), BYTES.local);
+		w.addDoc("7700500", "/uploads/rate-cons/7700500.pdf", "", "2026-09-15 12:00:00");
+		const owner = await w.call(url("7700500"), { user: OWNER });
+		t(owner.status === 200 && owner.body.equals(BYTES.local), `§11 list "1, 7": listed account 1 gets 200 and the file (${owner.status})`);
+		const second = await w.call(url("7700500"), { user: SECOND });
+		t(second.status === 200 && isPdfBody(second), `§11 ...listed account 7 gets 200 (${second.status})`);
+		for (const [label, user] of [["Super Admin 5, not listed", STAFF], ["Super Admin 5 under the listed account's username", STAFF_AS_OWNER_NAME]]) {
+			reads.length = 0;
+			const before = w.log.lists + w.log.gets.length;
+			const r = await w.call(url("7700500"), { user });
+			t(r.status === 403 && r.json && r.json.code === "RATECON_VIEW_RESTRICTED", `§11 ${label}: 403 RATECON_VIEW_RESTRICTED (${r.status} ${r.json && r.json.code})`);
+			t(r.json && r.json.error === "Viewing rate cons is limited to the owner.", `§11 ${label}: says viewing is limited to the owner (${r.json && r.json.error})`);
+			t(!isPdfBody(r) && w.log.lists + w.log.gets.length === before && !reads.some((p) => p.startsWith(w.tmp)), `§11 ${label}: no bytes, no Drive call, no file read`);
+			t(/\bno-store\b/.test(r.headers["cache-control"] || ""), `§11 ${label}: the refusal is not cached (${r.headers["cache-control"]})`);
+		}
+		const noId = await w.call(url("7700500"), { user: NO_ID });
+		t(noId.status === 403 && noId.json && noId.json.code === "RATECON_VIEW_RESTRICTED" && /sign in again/i.test(noId.json.error || "") && !isPdfBody(noId),
+			`§11 a Super Admin session without an id: 403 RATECON_VIEW_RESTRICTED, "sign in again" (${noId.status} ${noId.json && noId.json.error})`);
+		for (const odd of [{ ...OWNER, id: "1" }, { ...OWNER, id: "1.0" }, { ...OWNER, id: 0 }, { ...OWNER, id: true }, { ...OWNER, id: [1] }, { ...OWNER, id: "01" }]) {
+			const r = await w.call(url("7700500"), { user: odd });
+			t(r.status === 403 && !isPdfBody(r), `§11 a session id that is not a plain account id (${JSON.stringify(odd.id)}) is refused (${r.status})`);
+		}
+		const disp = await w.call(url("7700500"), { user: { ...USERS.Dispatcher, id: 7 } });
+		t(disp.status === 403 && !(disp.json && disp.json.code === "RATECON_VIEW_RESTRICTED"), `§11 a listed id on a Dispatcher session is still refused by the role gate first (${disp.status} ${disp.json && disp.json.code})`);
+		// Refused by the list: none of the budget spent.
+		let refused = 0;
+		for (let i = 0; i < 70; i++) if ((await w.call(url("7709999"), { user: STAFF })).status === 403) refused++;
+		t(refused === 70, `§11 unlisted callers stay refused (${refused}/70)`);
+		let served = 0;
+		for (let i = 0; i < 58; i++) if ((await w.call(url("7709999"), { user: OWNER })).status === 404) served++;
+		t(served === 58, `§11 ...and spent none of the rate-limit budget (${served}/58 answers for the listed account)`);
+		await w.close();
+	}
+	for (const raw of ["", "   ", "owner_admin", "1,owner_admin", "1,,7", "1,", "01", "+1", "1.0", "1;7", "-1"]) {
+		const w = await startWorld({ viewers: raw });
+		fs.writeFileSync(path.join(w.rateconDir, "7700500.pdf"), BYTES.local);
+		w.addDoc("7700500", "/uploads/rate-cons/7700500.pdf", "", "2026-09-15 12:00:00");
+		const r = await w.call(url("7700500"), { user: { id: 1, username: "owner_admin", role: "Super Admin" } });
+		t(r.status === 403 && r.json && r.json.code === "RATECON_VIEW_RESTRICTED" && !isPdfBody(r), `§11 a set but invalid list (${JSON.stringify(raw)}) refuses everyone, account 1 included (${r.status})`);
+		await w.close();
+	}
+	{
+		const w = await startWorld({ viewers: undefined });
+		fs.writeFileSync(path.join(w.rateconDir, "7700500.pdf"), BYTES.local);
+		w.addDoc("7700500", "/uploads/rate-cons/7700500.pdf", "", "2026-09-15 12:00:00");
+		let opened = 0;
+		for (const user of [{ id: 5, username: "staff_admin", role: "Super Admin" }, { username: "old_session", role: "Super Admin" }]) {
+			const r = await w.call(url("7700500"), { user });
+			if (r.status === 200 && r.body.equals(BYTES.local)) opened++;
+		}
+		t(opened === 2, `§11 unset: every Super Admin opens the rate con, as before the list existed (${opened}/2)`);
 		await w.close();
 	}
 }

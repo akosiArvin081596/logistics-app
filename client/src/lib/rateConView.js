@@ -7,17 +7,27 @@
 
 export const RATECON_NOT_ON_FILE = 'No rate con on file'
 export const RATECON_UNAVAILABLE = "Rate con can't be loaded right now"
+// The server's viewer list (RATECON_PDF_VIEWER_IDS) withholds rate-con files
+// from a Super Admin it does not list: the tile shows the server's 403 sentence,
+// this when there is none, and the invoice review screen says this instead of
+// "No rate confirmation attached" (the draft still attaches the rate con).
+export const RATECON_RESTRICTED_TEXT = 'Rate con attached; viewing is limited to the owner'
+export const RATECON_VIEW_RESTRICTED = 'Viewing rate cons is limited to the owner.'
 
 export function rateConPdfUrl(loadId) {
   return `/api/loads/${encodeURIComponent(String(loadId == null ? '' : loadId).trim())}/ratecon.pdf`
 }
 
 // 404: nothing on file. 503: Drive (or the archive) can't be asked right now.
-// 413 / 422 carry the server's own plain sentence (too large, not a PDF).
-// Anything else, a dropped connection included, reads as "can't be loaded".
-export function rateConFailureText(status, serverMessage) {
+// 403 RATECON_VIEW_RESTRICTED: the viewer list refused this account, in its own
+// sentence (limited to the owner, or sign in again); any other 403 never shows
+// the server's wording. 413 / 422 carry the server's own plain sentence (too
+// large, not a PDF). Anything else, a dropped connection included, reads as
+// "can't be loaded".
+export function rateConFailureText(status, serverMessage, code) {
   if (status === 404) return RATECON_NOT_ON_FILE
   if (status === 503) return RATECON_UNAVAILABLE
+  if (status === 403 && code === 'RATECON_VIEW_RESTRICTED') return serverMessage ? String(serverMessage) : RATECON_VIEW_RESTRICTED
   if ((status === 413 || status === 422) && serverMessage) return String(serverMessage)
   return RATECON_UNAVAILABLE
 }
