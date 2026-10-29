@@ -68,6 +68,8 @@
  *      DIAG_PASS) and docs/capture-screenshots.js (--base=<url>) exit 2 with a
  *      line naming what is missing and their usage, before any command,
  *      connection or write; with it, they go on against what was named.
+ *      ops/app-user-cutover.sh, new with no default, exits 2 the same way
+ *      without its environment (staging or production) and mode.
  *   §9 the archive sheet: server.js's ARCHIVE_SPREADSHEET_ID, evaluated in
  *      each environment, is production's archive only for production's own
  *      process (lib/sheet-id.js) and nothing anywhere else (a local run, a
@@ -1265,6 +1267,30 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§8 capture-screenshots.js, --base=<a server>: not refused for it (${redact(c.stderr.split("\n")[0] || "").slice(0, 120)})`, !/--base=<url> is required/.test(c.out));
 			check(`§8 …every call goes to the named server (${cf.join("; ") || "none"})`,
 				cf.length >= 1 && cf.every((u) => u.startsWith(`${CAPTURE_URL}/api/`)) && c.calls.length === cf.length);
+
+			// scripts/ops/app-user-cutover.sh: the environment it acts on is its first argument, with no
+			// default. Without it, or with any other word, exit 2 before any command.
+			const cutover = path.join("scripts", "ops", "app-user-cutover.sh");
+			for (const [label, args] of [
+				["no arguments", []],
+				["only a mode", ["--apply"]],
+				["only the environment", ["production"]],
+				["an environment that is neither", ["prod", "--apply"]],
+				["the mode first", ["--rollback", "staging"]],
+			]) {
+				const r = runShell(cutover, args, {}, { isolated: true });
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 app-user-cutover.sh, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 app-user-cutover.sh, ${label}: one line naming staging and production, then its usage (${redact(lines.join(" | ")).slice(0, 160)})`,
+					lines.length === 2 && /staging or production/.test(lines[0]) && /^usage: /.test(lines[1]));
+				check(`§8 app-user-cutover.sh, ${label}: before any command (${redact(r.calls.join("; ")).slice(0, 160) || "none"})`,
+					r.calls.length === 0 && !/not found/.test(r.out) && !r.stdout.trim());
+			}
+			if (process.getuid && process.getuid() !== 0) {
+				const r = runShell(cutover, ["production", "--dry-run"], {}, { isolated: true });
+				check(`§8 app-user-cutover.sh, named but not run as root: exit 2, before any command (got ${r.code}; ${redact(r.calls.join("; ")).slice(0, 120) || "none"})`,
+					r.code === 2 && /run it as root/.test(r.stderr) && r.calls.length === 0);
+			}
 		});
 
 		await section("§9 the archive sheet", async () => {
