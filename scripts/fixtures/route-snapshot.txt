@@ -125,7 +125,7 @@ DELETE /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b013
 POST /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@d152eed5d3e3
 POST /api/expenses/:id/personal/reverse · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@6eb1fe73329a
 GET /api/expenses/:id/receipt-pages · requireRole("Super Admin")=anon@12b84c4b0134 · receiptPagesLimiter=limiter · inline@a0e4cfda1ab8
-POST /api/expenses/:id/receipt-pages/:page · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · receiptPagesLimiter=limiter · inline@f57e9c8a2bb2
+POST /api/expenses/:id/receipt-pages/:page · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · receiptPagesLimiter=limiter · inline@c0c52349f763
 GET /api/expenses/:id/receipt-thumbnail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@35a780e954fc
 PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3230683f4e26
 PATCH /api/expenses/:id/vendor · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f6b7ed0bc20

@@ -28391,13 +28391,14 @@ async function receiptPagesRewritePass(invoiceId, { mode = "update", actor = REC
 }
 
 // Every stored invoice holding pages of this receipt, rebuilt now without the
-// pages no longer released (an "office only" mark).
+// pages no longer released (an "office only" mark). Every refusal is named for
+// the mark's answer, also one whose audit row and alert are not repeated.
 async function withdrawReceiptFromInvoices(expenseId, actor) {
 	const out = { withdrawn: [], refused: [] };
 	for (const inv of invoicesHoldingReceipt(expenseId)) {
 		const r = await rewriteInvoiceReceiptPages(inv.id, { mode: "withhold", actor });
 		if (r.changed) out.withdrawn.push(inv.id);
-		else if (r.refused) out.refused.push({ id: inv.id, code: r.refused });
+		else if (r.refused) out.refused.push({ id: inv.id, invoice_number: inv.invoice_number || "", code: r.refused });
 	}
 	return out;
 }
@@ -30173,8 +30174,10 @@ app.get("/api/expenses/:id/receipt-pages", requireRole("Super Admin"), receiptPa
 // release-all). Releasing a page with an OTHER_* code answers 409
 // RECEIPT_PAGE_RELEASE_ANYWAY with its codes until releaseAnyway names every one
 // of them. Audited (page, file, mark, reason code; the note stays in the table).
-// "office" takes the page out of every stored invoice holding it at once; a
-// release reaches a stored invoice only through "Update invoice PDF".
+// "office" takes the page out of every stored invoice holding it at once, and
+// the answer's `withdrawal` { withdrawn: [id], refused: [{ id, invoice_number,
+// code }] } says which; a release reaches a stored invoice only through
+// "Update invoice PDF".
 app.post("/api/expenses/:id/receipt-pages/:page", requireRole("Super Admin"), refuseCrossOrigin, receiptPagesLimiter, async (req, res) => {
 	try {
 		if (!receiptPdfPagesOn()) return receiptPagesOff(res);
@@ -30216,10 +30219,11 @@ app.post("/api/expenses/:id/receipt-pages/:page", requireRole("Super Admin"), re
 			WHERE id = ?`).run(body.mark, acknowledged.join(","), body.reason, note, user.username || "", Number(user.id) || 0, new Date().toISOString(), row.id);
 		logAudit(req, "receipt_page_mark", "expense", expense.id,
 			`page ${page} of ${row.page_count} (file ${row.file_sha256.slice(0, 12)}): ${body.mark}; reason ${body.reason}${acknowledged.length ? `; released anyway over ${acknowledged.join(", ")}` : ""}`);
-		const invoices = body.mark === "office" ? await withdrawReceiptFromInvoices(expense.id, req) : { withdrawn: [], refused: [] };
+		const withdrawal = body.mark === "office" ? await withdrawReceiptFromInvoices(expense.id, req) : { withdrawn: [], refused: [] };
 		notifyChange("expenses");
-		if (invoices.withdrawn.length) notifyChange("invoices");
-		res.json({ success: true, invoices, ...receiptPagesView(expense, await receiptPageVerdictsFor(expense)) });
+		if (withdrawal.withdrawn.length) notifyChange("invoices");
+		// Its own key, after the view: the view has an `invoices` list of its own.
+		res.json({ success: true, ...receiptPagesView(expense, await receiptPageVerdictsFor(expense)), withdrawal });
 	} catch (err) {
 		console.error("Receipt page mark error:", err.message);
 		res.status(500).json({ error: "Failed to mark the page" });

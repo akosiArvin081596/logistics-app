@@ -6,7 +6,8 @@
 // The view: { readable, reason, file: { pages }, pages: [{ page, code, reasons,
 // mark, mark_reason, lapsed, released_anyway, released }], counts: { pages,
 // released, office }, released_anyway: [page], invoices: [{ id, invoice_number,
-// status, pages_in_pdf, can_update }] }.
+// status, pages_in_pdf, can_update }] }. A mark answers the view and
+// withdrawal: { withdrawn: [id], refused: [{ id, invoice_number, code }] }.
 
 export const RECEIPT_PAGE_CODE_TEXT = Object.freeze({
   OTHER_PERSON: 'names another person',
@@ -70,4 +71,16 @@ export function receiptPagesInvoiceLine(inv) {
     ? `page${inv.pages_in_pdf.length === 1 ? '' : 's'} ${inv.pages_in_pdf.join(', ')} in its PDF`
     : 'none of its pages in its PDF'
   return `${inv.invoice_number || `Invoice #${inv.id}`} (${inv.status || 'unknown'}): ${held}`
+}
+
+// The toast after a mark, from the server's withdrawal outcome (never the
+// view's `invoices`): an invoice PDF that refused to drop the page is named
+// with its code, so a failed "office only" never reads as done.
+export function receiptPageMarkToast(res) {
+  const refused = res && res.withdrawal && Array.isArray(res.withdrawal.refused) ? res.withdrawal.refused.filter(Boolean) : []
+  if (!refused.length) return { text: 'Page marked', kind: 'success' }
+  const names = refused.map((r) => r.invoice_number || `Invoice #${r.id}`)
+  const codes = [...new Set(refused.map((r) => r.code).filter(Boolean))]
+  const pdfs = names.length === 1 ? 'PDF' : 'PDFs'
+  return { text: `Marked, but the ${pdfs} of ${names.join(', ')} could not be updated${codes.length ? ` (${codes.join(', ')})` : ''}`, kind: 'error' }
 }

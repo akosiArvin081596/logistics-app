@@ -75,6 +75,7 @@ import {
   receiptPageLine,
   releaseAnywayText,
   receiptPagesInvoiceLine,
+  receiptPageMarkToast,
 } from '../../../lib/receiptPages'
 
 const props = defineProps({
@@ -143,8 +144,8 @@ async function submitMark(releaseAnyway) {
     const res = await api.post(`/api/expenses/${props.expense.id}/receipt-pages/${target.value.page}`, body, { timeout: WRITE_TIMEOUT_MS })
     view.value = res
     dialog.value = ''
-    const refused = res.invoices && res.invoices.refused && res.invoices.refused.length
-    toast(refused ? 'Marked; an invoice PDF could not be updated (see the alerts)' : 'Page marked', refused ? 'error' : 'success')
+    const said = receiptPageMarkToast(res)
+    toast(said.text, said.kind)
   } catch (err) {
     if (err && err.code === 'RECEIPT_PAGE_RELEASE_ANYWAY') {
       anywayCodes.value = (err.data && err.data.codes) || []
