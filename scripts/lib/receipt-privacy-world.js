@@ -65,11 +65,39 @@ class Res {
 const SAME_ORIGIN = { "x-requested-with": "XMLHttpRequest", "sec-fetch-site": "same-origin", host: "app.test" };
 const CROSS_SITE = { "x-requested-with": "XMLHttpRequest", "sec-fetch-site": "cross-site", origin: "https://elsewhere.example", host: "app.test" };
 
+// One real receipt PDF service per set of options, so a runner whose worlds share one data folder (one at a time)
+// self-tests it once, not twice per world. Each call still gets its own copy of the methods: a runner's stand-in
+// for one reaches only the lift that made that call, as with a service apiece.
+function receiptPdfPool(dataDir) {
+	const services = new Map();
+	let log = () => {};
+	const lib = {
+		...rp,
+		createReceiptPdfService(options = {}) {
+			const { log: own, ...rest } = options;
+			const key = JSON.stringify(rest);
+			if (typeof own === "function") log = own;
+			if (!services.has(key)) services.set(key, rp.createReceiptPdfService({ ...options, log: (m) => log(m) }));
+			return { ...services.get(key) };
+		},
+	};
+	const target = appRequire.resolve("./lib/receipt-pdf");
+	const isLib = (id) => { try { return appRequire.resolve(id) === target; } catch { return false; } };
+	const req = Object.assign((id) => (isLib(id) ? lib : appRequire(id)), { resolve: appRequire.resolve, cache: appRequire.cache, main: appRequire.main });
+	// A job still queued or running from the last world would land in the next one's folder.
+	const idle = () => [...services.values()].every((s) => { const st = s.stats(); return st.running === 0 && st.waiting === 0; });
+	return { dataDir, require: req, idle };
+}
+
 // opts: { env, render(templateName, data, record), io (a socket server stand-in
-// for PR B's half; none by default) }
+// for PR B's half; none by default), pool (receiptPdfPool(); none by default) }
 function buildPrivacyWorld(opts = {}) {
 	const env = opts.env || {};
-	const base = pw.buildPersonalWorld({ env, receipts: true, receiptPdfProbes: opts.receiptPdfProbes });
+	const pool = opts.pool || null;
+	if (pool && !pool.idle()) throw new Error("receipt pdf pool: the last world left a child job running");
+	const base = pw.buildPersonalWorld({
+		env, receipts: true, receiptPdfProbes: opts.receiptPdfProbes, ...(pool ? { require: pool.require, dataDir: pool.dataDir } : {}),
+	});
 	if (opts.render) base.hooks.render = opts.render;
 	try { base.db.exec(appRequire("./lib/receipt-page-privacy").SCHEMA_SQL); } catch { /* a server.js without PR B */ }
 
@@ -87,7 +115,7 @@ function buildPrivacyWorld(opts = {}) {
 		: Promise.resolve(Buffer.from(`%PDF-stub ${templateName}`)));
 	const deps = {
 		db: base.db,
-		require: appRequire,
+		require: pool ? pool.require : appRequire,
 		console: quiet,
 		process: { env: { CSRF_HEADER_REQUIRED: "", ...env }, argv: [], cwd: () => ROOT, pid: process.pid },
 		__dirname: ROOT,
@@ -274,4 +302,4 @@ async function pageTexts(pdf) {
 	});
 }
 
-module.exports = { buildPrivacyWorld, receiptPdf, fakeChrome, streamTexts, pageTexts, glyphHex, SAME_ORIGIN, CROSS_SITE, PAGE_ROUTE_HEADS, PAGE_ROOTS };
+module.exports = { buildPrivacyWorld, receiptPdfPool, receiptPdf, fakeChrome, streamTexts, pageTexts, glyphHex, SAME_ORIGIN, CROSS_SITE, PAGE_ROUTE_HEADS, PAGE_ROOTS };

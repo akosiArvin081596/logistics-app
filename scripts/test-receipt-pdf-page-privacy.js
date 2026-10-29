@@ -74,7 +74,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { makeChecker, DRIVER_A } = require("./lib/personal-world");
-const { buildPrivacyWorld, receiptPdf, fakeChrome, streamTexts, pageTexts, glyphHex, CROSS_SITE } = require("./lib/receipt-privacy-world");
+const { buildPrivacyWorld, receiptPdfPool, receiptPdf, fakeChrome, streamTexts, pageTexts, glyphHex, CROSS_SITE } = require("./lib/receipt-privacy-world");
 const rp = require(path.join(__dirname, "..", "lib", "receipt-pdf.js"));
 const { check, section, finish } = makeChecker();
 
@@ -86,11 +86,15 @@ fs.writeFileSync(PROBES.db, "made up\n");
 const ON = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true", RECEIPT_PDF_PAGES_ENABLED: "true" };
 const OFF = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
 const NOTE_PDF = "PDF receipt on file";
+// Every world in one data folder, one at a time (each is cleaned up before the
+// next), so they share one receipt PDF service, self-tested once in the run.
+const POOL = receiptPdfPool(path.join(TMP, "world"));
 
 function world(env = ON, extra = {}) {
 	return buildPrivacyWorld({
 		env,
 		receiptPdfProbes: PROBES,
+		pool: POOL,
 		render: async (templateName, data, record) => { await record(templateName, data); return fakeChrome(templateName, data); },
 		...extra,
 	});
