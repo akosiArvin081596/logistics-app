@@ -749,8 +749,22 @@ report(viewChecks(shipped))
     const hit = src.match(/\btoFixed\(|\btoLocaleString\(|\bMath\.|\bparseFloat\(|\bNumber\(|\* ?100\b/)
     check(`${rel} works out no figure`, !hit, `found "${hit?.[0]}"`)
   }
+  // Each page file compiles (script and template) with no error or warning.
+  const { parse, compileScript } = createRequire(path.join(ROOT, 'client', 'package.json'))('vue/compiler-sfc')
+  for (const rel of pageFiles.filter((f) => f.endsWith('.vue'))) {
+    let problem = ''
+    try {
+      const { descriptor, errors } = parse(read(rel), { filename: path.basename(rel) })
+      if (errors.length) problem = String(errors[0].message || errors[0])
+      else compileScript(descriptor, { id: path.basename(rel), inlineTemplate: true })
+    } catch (err) {
+      problem = String(err?.message || err).split('\n')[0]
+    }
+    check(`${rel} compiles`, !problem, problem)
+  }
   const card = read('components/kpis/KpiMetricCard.vue')
   check('the source link opens safely', /target="_blank" rel="noopener noreferrer"/.test(card))
+  check('the card shows the weekly block only when the answer carries one', /<KpiWeeklyBlock v-if="metric\.weekly"/.test(card))
   const router = read('router/index.js')
   const route = /\{\s*path: '\/admin\/kpis',\s*name: 'kpis',\s*component: \(\) => import\('\.\.\/views\/KpisView\.vue'\),\s*meta: \{ roles: \['Super Admin'\] \},\s*\}/.test(router)
   check('route /admin/kpis is Super Admin only', route)
