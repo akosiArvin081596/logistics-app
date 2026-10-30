@@ -48,6 +48,19 @@
 //   §4 MUTANTS: back to a whole-row write (it must fail checks in §1 and in
 //      §2); the baseline ignored (it must fail checks in §1b); the identity
 //      check removed (it must fail checks in §1b).
+//   §5 THE CANCEL REFUSAL (ROW_EDITOR_CANCEL_GUARD_ENABLED). On: both saves
+//      refuse a status changed TO cancelled (excludeDroppedLoads()'s own test,
+//      any case, trimmed, on the value as the sheet will store it), 400
+//      CANCEL_NOT_A_ROW_EDIT naming POST /api/dispatch/cancel, nothing
+//      written, the refusal audited; a row already cancelled, a change away
+//      from cancelled, a cell sent back as read and every other status edit
+//      save, and POST /api/dispatch/cancel, lifted onto the same fake sheet,
+//      still cancels. Off: each save as today. Then the wiring, from source,
+//      and rowEditCancelRefusal()'s column rule on its own.
+//   §6 MUTANTS of §5: either save without the refusal, the cell judged
+//      untrimmed, a row already cancelled refused, the flag ignored, the value
+//      judged as sent rather than as stored, a cell sent back as read judged.
+//      Each must fail §5's behaviour checks.
 //
 // No network, no database, no sheet.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -136,6 +149,8 @@ const CONSTS = [
 	extractConst("const SHOWN_LOAD_ID_INDEXES = "),
 	extractConst("const SHOWN_LOAD_ID_STATE = "),
 	'const SPREADSHEET_ID = "sheet-under-test";',
+	// The money filter's cancelled test, which the cancel refusal judges with.
+	extractConst("const CANCELED_STATUS_RE = "),
 ].join("\n");
 const HELPERS = [
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
@@ -144,8 +159,13 @@ const HELPERS = [
 	"baselineApplies", "rowMovedRefusal",
 	"shownLoadIdIndex", "currentShownLoadIdIndex", "loadIdWithheldFor", "shownLoadId", "staffRowMovedRefusal",
 	"guardedColumnReason", "changedGuardedCells", "scrubPurgeMarker", "capAuditField", "buildSheetUpdateAudit",
+	"findCol",
 ];
-const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
+// The cancel refusal's helper, lifted only when server.js has it, so a base
+// copy without it still runs every section (and fails §5, as it must).
+const GUARD_HELPERS = SRC.includes("\nfunction rowEditCancelRefusal(") ? ["rowEditCancelRefusal"] : [];
+const ALL_HELPERS = [...HELPERS, ...GUARD_HELPERS];
+const HELPER_SRC = Object.fromEntries(ALL_HELPERS.map((n) => [n, extract(n)]));
 // The load-id comparison key server.js imports, the shipped module.
 const { normalizeLoadId } = require("../lib/ratecon-load");
 // The WITHHELD LOAD KEYS helpers PUT /api/load/:loadId reads its load ID
@@ -162,8 +182,8 @@ const libRequire = (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, ".
 function buildHelpers(overrides = {}) {
 	const s = { ...HELPER_SRC, ...overrides };
 	return new Function("normalizeLoadId", "require",
-		`"use strict";\n${CONSTS}\n${BROKER_CONTACT_SRC}\n${HELPERS.map((n) => s[n]).join("\n")}\n` +
-		`return { ${HELPERS.join(", ")}, BROKER_WITHHELD_RE, brokerContact, BROKER_CONTACT_VALUE_REDACTION_ENABLED };`)(normalizeLoadId, libRequire);
+		`"use strict";\n${CONSTS}\n${BROKER_CONTACT_SRC}\n${ALL_HELPERS.map((n) => s[n]).join("\n")}\n` +
+		`return { ${ALL_HELPERS.join(", ")}, BROKER_WITHHELD_RE, brokerContact, BROKER_CONTACT_VALUE_REDACTION_ENABLED };`)(normalizeLoadId, libRequire);
 }
 const H = buildHelpers();
 
@@ -244,7 +264,7 @@ function shown(row) {
 	return out;
 }
 const DISPLAYED = () => HEADERS.map((h, i) => display(storedRow()[i]));
-function fakeSheet(stored, { batchGetFails = false } = {}) {
+function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) {
 	const rows = stored.map((r) => r.slice());
 	const calls = [];
 	const rowNo = (range) => { const m = /!(\d+):\1$/.exec(range); return m ? Number(m[1]) : null; };
@@ -285,13 +305,29 @@ function fakeSheet(stored, { batchGetFails = false } = {}) {
 			}
 			return { data: { totalUpdatedCells: cells } };
 		},
+		// One cell, as POST /api/dispatch/cancel writes; only a sheet made for it
+		// takes one, so a row save reaching for it still fails.
+		update: async ({ range, valueInputOption, requestBody }) => {
+			if (!allowUpdate) throw new Error("fake sheet: values.update is not expected here");
+			const m = /!([A-Z]+)(\d+)$/.exec(range);
+			if (!m) throw new Error(`fake sheet: unreadable range ${range}`);
+			calls.push({ verb: "update", valueInputOption, ranges: [range], values: [requestBody.values] });
+			const r = rows[Number(m[2]) - 1] || (rows[Number(m[2]) - 1] = []);
+			const i = colIndex(m[1]);
+			while (r.length <= i) r.push("");
+			const v = requestBody.values[0][0];
+			r[i] = v == null ? "" : String(v);
+			return { data: { updatedCells: 1 } };
+		},
 	};
 	return { getSheets: async () => ({ spreadsheets: { values } }), rows, calls };
 }
 
-// One lifted route over one fake sheet.
-function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false } = {}) {
-	const sheet = fakeSheet(stored, { batchGetFails });
+// One lifted route over one fake sheet (`sheet`: one already made, shared by
+// several routes). `cancelGuard` is ROW_EDITOR_CANCEL_GUARD_ENABLED, off as on
+// a server that does not set it.
+function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false, cancelGuard = false, sheet: shared = null } = {}) {
+	const sheet = shared || fakeSheet(stored, { batchGetFails });
 	const audits = [];
 	// What the stubbed Owner ID check and period guard were asked to judge: the
 	// Owner ID cell, and the changed guarded cells as [column, from, to].
@@ -309,6 +345,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
+		ROW_EDITOR_CANCEL_GUARD_ENABLED: cancelGuard,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		SHEET_ROW_MAX_CELLS: 20000,
@@ -326,7 +363,8 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		},
 		sheetAuditWithCode: (d, code) => `${d} [${code}]`,
 		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
-		logAuditRefusal: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
+		// `code` is what logAuditRefusal() coalesces a refusal under.
+		logAuditRefusal: (req, action, entity, entityId, details, code) => { audits.push({ action, entityId, details, code }); },
 		jtCacheInvalidate: () => { invalidations++; },
 		recordPersonCellEdits: (req, sheetName, hs, before, after) => {
 			personCalls.push({ role: req.session.user.role, sheetName, pickup: [before[IDX["Pickup Appointment"]] || "", after[IDX["Pickup Appointment"]] || ""], headers: hs.length });
@@ -889,6 +927,399 @@ function helperSection(helpers) {
 }
 
 // ---------------------------------------------------------------------------
+// §5 THE CANCEL REFUSAL (ROW_EDITOR_CANCEL_GUARD_ENABLED). Load 111 on row 2,
+// load 222 on row 3; every case builds its save from the row as displayed.
+// ---------------------------------------------------------------------------
+const OTHER_ROW = () => storedRow({ "Load ID": "222", Details: "Dry van", "Location Link": "" });
+const STORE_AT = (status, over = {}) => [HEADERS.slice(), storedRow({ "Job Status": status, ...over }), OTHER_ROW()];
+// A stored row as the sheet displays it, every column (what the editors send).
+const shownRow = (row) => HEADERS.map((h, i) => display(row[i]));
+// The same, as served to a Dispatcher: the withheld contact columns blank.
+const asStaff = (row) => row.map((v, i) => (WITHHELD.includes(HEADERS[i]) ? "" : v));
+// Every value the sheet will store as a status the money filter reads as
+// cancelled: any case, surrounding whitespace (a no-break space included:
+// String#trim() strips it), and entered as text (the sheet keeps what follows
+// one leading apostrophe).
+const CANCEL_SPELLINGS = ["Cancelled", "cancelled", "CANCELLED", "Canceled", "canceled", "CANCELED", "Cancel", "cancel", "CANCEL",
+	"cAnCeLlEd", " Cancelled ", "\tcanceled\n", " Cancel ", "'Cancelled", "' canceled ", "'CANCEL"];
+// Values the sheet will store as a status the money filter does not read as
+// cancelled, so neither may the refusal ("''Cancelled" is stored as
+// "'Cancelled"; " 'Cancelled" keeps its apostrophe).
+const NOT_CANCELLED = ["Delivered", "", "Cancellation requested", "Not cancelled", "Cancelled - rebooked", "Cancelledd", "Can celled", "Canceled?", "Cancel led",
+	"''Cancelled", " 'Cancelled"];
+// The money filter as shipped: does excludeDroppedLoads() drop load 111 once
+// `sent` is written to its status cell? It reads the row as the sheet displays
+// it, so it is handed what the sheet stores, not the text sent.
+const MONEY = new Function("normalizeLoadId",
+	`"use strict";\n${extractConst("const CANCELED_STATUS_RE = ")}\n${extract("findCol")}\n${extract("loadKeySet")}\n${extract("excludeDroppedLoads")}\n` +
+	"return { excludeDroppedLoads };")(normalizeLoadId);
+function moneyDrops(sent) {
+	const row = shownRow(storedRow({ "Job Status": sent }));
+	return MONEY.excludeDroppedLoads([Object.fromEntries(HEADERS.map((h, i) => [h, row[i]]))], HEADERS, new Set()).length === 0;
+}
+
+// POST /api/dispatch/cancel lifted whole, with the helpers it reads (the row
+// read, the row-number check, the load binding, the completed-load check and
+// the binding refusal) as shipped; what it writes beyond the sheet is recorded.
+const CANCEL_SRC = extractRoute('app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) => {');
+const CANCEL_HELPERS_SRC = [extractConst("const normLoadKey = "),
+	...["colLetter", "identityRoomKey", "driverRoom", "scrubPurgeMarker", "resolveSheetDataRow", "readJobTrackingSnapshot",
+		"resolveLoadBinding", "completedLoadCancelRefusal", "sendLoadBindRefusal"].map(extract)].join("\n");
+function mountCancel(sheet, { cancelGuard = true } = {}) {
+	const audits = [], history = [], driverNotices = [];
+	let handler = null;
+	const env = {
+		app: { post: (p, gate, h) => { handler = h; } },
+		requireRole: () => null,
+		getSheets: sheet.getSheets,
+		SPREADSHEET_ID: "sheet-under-test",
+		ROW_EDITOR_CANCEL_GUARD_ENABLED: cancelGuard,
+		recordStatusChange: (rec) => { history.push(rec); },
+		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
+		logAuditRefusal: (req, action, entity, entityId, details, code) => { audits.push({ action, entityId, details, code }); },
+		insertNotification: { run: (driver) => { driverNotices.push(driver); return { lastInsertRowid: 1 }; } },
+		io: { to: () => ({ emit() {} }) },
+		insertDispatchNotification: { run: () => ({}) },
+		emitDispatchNotice: () => {},
+		notifyChange: () => {},
+		jtCacheInvalidate: () => {},
+		console: { error() {}, log() {}, warn() {} },
+	};
+	const names = Object.keys(env);
+	new Function(...names, `${CANCEL_HELPERS_SRC}\n${CANCEL_SRC}`)(...names.map((k) => env[k]));
+	if (typeof handler !== "function") throw new Error("the lifted cancel route did not register a handler");
+	const run = async (body) => {
+		const out = { code: 200, body: null };
+		const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
+		await handler({ body, session: { user: { id: 1, role: "Super Admin", username: "super_admin" } } }, res);
+		return out;
+	};
+	return { run, audits, history, driverNotices };
+}
+
+// The behaviour. `dataSrc` / `loadSrc` / `helpers` take a mutant (§6).
+async function cancelSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_PUT_SRC } = {}) {
+	const { results, t } = collector();
+	const P = { rowIndex: "2" };
+	const L = { loadId: "111" };
+	const on = { cancelGuard: true };
+	const CODE = "CANCEL_NOT_A_ROW_EDIT";
+	const ranges = (app) => app.calls.map((c) => c.ranges);
+	// A refusal: 400, the code, the column, a message naming the cancel route, and no write.
+	const refused = (r, app) => {
+		const b = r.body || {};
+		return [r.code, b.code || null, b.field || null, /POST \/api\/dispatch\/cancel/.test(String(b.error || "")), app.calls.length];
+	};
+	const REFUSED = [400, CODE, "Job Status", true, 0];
+	// What the refusal leaves on the audit trail: one update_sheet_row_blocked row
+	// on the row, coalesced under the code.
+	const trail = (app) => app.audits.map((a) => [a.action, a.entityId, a.code || null, a.details.endsWith(` [${CODE}]`)]);
+	const TRAIL = [["update_sheet_row_blocked", "Job Tracking!2", CODE, true]];
+	// That row's details: the JSON before the stubbed " [CODE]" suffix.
+	const trailJson = (app) => {
+		const a = app.audits.find((x) => x.action === "update_sheet_row_blocked");
+		const m = a && /^([\s\S]*) \[[A-Z_]+\]$/.exec(a.details);
+		try { return m ? JSON.parse(m[1]) : null; } catch { return null; }
+	};
+	// A save of the row as displayed with Job Status set to `status`: a Super
+	// Admin's Data Manager save (every column, no baseline), or a Dispatcher's
+	// save in the Active Loads editor's shape (withheld columns blank, with a
+	// baseline).
+	const statusSave = (store, status, { staff = false } = {}) => {
+		const opened = staff ? asStaff(shownRow(store[1])) : shownRow(store[1]);
+		const values = opened.slice();
+		values[IDX["Job Status"]] = status;
+		return staff ? { values, baseline: opened.slice() } : { values };
+	};
+
+	// PUT /api/data/:rowIndex, flag on.
+	{
+		const store = STORE_AT("Dispatched");
+		const app = mount(dataSrc, helpers, store, on);
+		const r = await app.run("Super Admin", P, statusSave(store, "Cancelled"));
+		t("§5 PUT /api/data, flag on: a Super Admin setting Job Status to Cancelled gets 400 CANCEL_NOT_A_ROW_EDIT naming the column and POST /api/dispatch/cancel; nothing written",
+			refused(r, app), REFUSED);
+		t("§5 ...the row is exactly as stored, the cache kept, no person record", [app.rows[1], app.invalidations(), app.personCalls.length], [store[1], 0, 0]);
+		t("§5 ...one audit row: update_sheet_row_blocked on Job Tracking!2, coalesced under CANCEL_NOT_A_ROW_EDIT", trail(app), TRAIL);
+		const d = trailJson(app);
+		t("§5 ...naming the cell asked for, as read and as sent", d && [d.outcome, d.code, d.changed.map((c) => [c.column, c.from, c.to])],
+			["blocked", CODE, [["Job Status", "Dispatched", "Cancelled"]]]);
+		t("§5 ...refused before the period guard judged the row", app.guardCalls, []);
+	}
+	{
+		const store = STORE_AT("Dispatched");
+		const app = mount(dataSrc, helpers, store, on);
+		const r = await app.run("Dispatcher", P, statusSave(store, "Cancelled", { staff: true }));
+		t("§5 PUT /api/data, flag on: a Dispatcher's save with a baseline setting Job Status to Cancelled is refused the same way", refused(r, app), REFUSED);
+		t("§5 ...and audited the same way", trail(app), TRAIL);
+	}
+	{
+		const store = STORE_AT("Dispatched");
+		const app = mount(dataSrc, helpers, store, on);
+		const save = statusSave(store, "Cancelled");
+		save.values[IDX["Details"]] = "Broker called it off";
+		const r = await app.run("Super Admin", P, save);
+		t("§5 PUT /api/data, flag on: a save that also edits Details is refused whole: Details not written either",
+			[...refused(r, app), app.rows[1][IDX["Details"]]], [...REFUSED, "Frozen"]);
+	}
+
+	// PUT /api/load/:loadId, flag on.
+	{
+		const store = STORE_AT("Dispatched");
+		const app = mount(loadSrc, helpers, store, on);
+		const r = await app.run("Super Admin", L, { "Job Status": "Cancelled" });
+		t("§5 PUT /api/load, flag on: a Super Admin setting Job Status to Cancelled gets 400 CANCEL_NOT_A_ROW_EDIT naming the column and POST /api/dispatch/cancel; nothing written",
+			refused(r, app), REFUSED);
+		t("§5 ...the row is exactly as stored, the cache kept", [app.rows[1], app.invalidations()], [store[1], 0]);
+		t("§5 ...one audit row: update_sheet_row_blocked on Job Tracking!2, coalesced under CANCEL_NOT_A_ROW_EDIT", trail(app), TRAIL);
+		const d = trailJson(app);
+		t("§5 ...naming the load, the door and the cell asked for", d && [d.outcome, d.code, d.loadId, d.via, d.changed.map((c) => [c.column, c.from, c.to])],
+			["blocked", CODE, "111", "PUT /api/load/:loadId", [["Job Status", "Dispatched", "Cancelled"]]]);
+		t("§5 ...refused before the period guard judged the row", app.guardCalls, []);
+	}
+	{
+		const store = STORE_AT("Dispatched");
+		const app = mount(loadSrc, helpers, store, on);
+		const r = await app.run("Dispatcher", L, { Details: "Frozen - 2 pallets rolled", "Job Status": "canceled" });
+		t("§5 PUT /api/load, flag on: a Dispatcher's body with Details and a cancelled status is refused whole: Details not written either",
+			[...refused(r, app), app.rows[1][IDX["Details"]]], [...REFUSED, "Frozen"]);
+	}
+
+	// Every spelling, on both saves; and nothing the money filter keeps live.
+	{
+		const verdicts = [];
+		for (const s of [...CANCEL_SPELLINGS, ...NOT_CANCELLED]) {
+			const store = STORE_AT("Dispatched");
+			const a = mount(dataSrc, helpers, store, on);
+			const ra = await a.run("Super Admin", P, statusSave(store, s));
+			const b = mount(loadSrc, helpers, store, on);
+			const rb = await b.run("Dispatcher", L, { "Job Status": s });
+			const isRefusal = (r, app) => r.code === 400 && (r.body || {}).code === CODE && app.calls.length === 0;
+			const isSave = (r, app) => r.code === 200 && JSON.stringify(ranges(app)) === JSON.stringify([[R("L2")]]) && app.rows[1][IDX["Job Status"]] === s;
+			verdicts.push({ s, drops: moneyDrops(s), dataRefused: isRefusal(ra, a), loadRefused: isRefusal(rb, b), dataSaved: isSave(ra, a), loadSaved: isSave(rb, b) });
+		}
+		const show = (list) => list.map((v) => v.s);
+		t("§5 flag on: every cancelled spelling (any case, surrounding whitespace) is refused by PUT /api/data, nothing written",
+			show(verdicts.filter((v) => CANCEL_SPELLINGS.includes(v.s) && !v.dataRefused)), []);
+		t("§5 flag on: ...and by PUT /api/load", show(verdicts.filter((v) => CANCEL_SPELLINGS.includes(v.s) && !v.loadRefused)), []);
+		t("§5 flag on: a status the money filter keeps live saves on PUT /api/data (L2 written as sent)",
+			show(verdicts.filter((v) => NOT_CANCELLED.includes(v.s) && !v.dataSaved)), []);
+		t("§5 flag on: ...and on PUT /api/load", show(verdicts.filter((v) => NOT_CANCELLED.includes(v.s) && !v.loadSaved)), []);
+		t("§5 flag on: both saves refuse a status exactly when excludeDroppedLoads() would drop the load for it",
+			show(verdicts.filter((v) => v.dataRefused !== v.drops || v.loadRefused !== v.drops)), []);
+		t("§5 (fixture) the money filter drops every spelling listed as cancelled, and none of the others",
+			[CANCEL_SPELLINGS.filter((s) => !moneyDrops(s)), NOT_CANCELLED.filter(moneyDrops)], [[], []]);
+	}
+
+	// Judged as the sheet will store it, and only when the save writes the cell.
+	{
+		// Entered as text: the sheet holds "Cancelled".
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Super Admin", P, statusSave(store, "'Cancelled"));
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "'Cancelled" });
+		t("§5 flag on, judged as the sheet will store it: a cancelled status entered as text is refused by both saves, nothing written",
+			[...refused(ra, a), ...refused(rb, b)], [...REFUSED, ...REFUSED]);
+		t("§5 ...and audited on both", [...trail(a), ...trail(b)], [...TRAIL, ...TRAIL]);
+	}
+	{
+		// Entered as text twice over: the sheet holds "'Cancelled", which the money filter keeps live.
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Super Admin", P, statusSave(store, "''Cancelled"));
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "''Cancelled" });
+		t("§5 flag on: a status the sheet will store as \"'Cancelled\" saves on both routes, and the money filter keeps the load live",
+			[ra.code, ranges(a), display(a.rows[1][IDX["Job Status"]]), rb.code, ranges(b), display(b.rows[1][IDX["Job Status"]]), moneyDrops("''Cancelled")],
+			[200, [[R("L2")]], "'Cancelled", 200, [[R("L2")]], "'Cancelled", false]);
+	}
+	{
+		// A status cell that reads "'Cancelled", sent back exactly as read beside
+		// a Details edit: the save does not write it, so it is not judged.
+		const store = STORE_AT("''Cancelled");
+		const a = mount(dataSrc, helpers, store, on);
+		const values = shownRow(store[1]);
+		values[IDX["Details"]] = "Called the broker";
+		const ra = await a.run("Super Admin", P, { values });
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "'Cancelled", Details: "Called the broker" });
+		t("§5 flag on: a status cell sent back exactly as read is not judged: a Details edit beside it saves on both routes (C2 alone written)",
+			[ra.code, ranges(a), rb.code, ranges(b)], [200, [[R("C2")]], 200, [[R("C2")]]]);
+	}
+
+	// Flag off: today's saves.
+	{
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store);
+		const ra = await a.run("Super Admin", P, statusSave(store, "Cancelled"));
+		t("§5 PUT /api/data, flag off: setting Job Status to Cancelled saves as today: 200 { success, updatedCells: 1 }, L2 written, audited update_sheet_row",
+			[ra.code, ra.body, a.calls.map((c) => [c.ranges, c.values]), a.audits.map((x) => [x.action, x.code || null]), auditedColumns(a)],
+			[200, { success: true, updatedCells: 1 }, [[[R("L2")], [[["Cancelled"]]]]], [["update_sheet_row", null]], ["Job Status"]]);
+		const l = mount(loadSrc, helpers, store);
+		const rl = await l.run("Super Admin", L, { "Job Status": " canceled " });
+		t("§5 PUT /api/load, flag off: saves as today: 200, L2 written, the answer carries it",
+			[rl.code, ranges(l), ((rl.body || {}).load || {})["Job Status"], l.audits.map((x) => x.action)], [200, [[R("L2")]], " canceled ", ["update_sheet_row"]]);
+	}
+
+	// Other status edits, flag on.
+	for (const [from, to] of [["Dispatched", "In Transit"], ["In Transit", "Delivered"], ["Delivered", "Completed"], ["Dispatched", "Unassigned"]]) {
+		const store = STORE_AT(from);
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Super Admin", P, statusSave(store, to));
+		const d = mount(dataSrc, helpers, store, on);
+		const rd = await d.run("Dispatcher", P, statusSave(store, to, { staff: true }));
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": to });
+		t(`§5 flag on: ${from} → ${to} saves on PUT /api/data (both editors) and PUT /api/load, L2 written`,
+			[ra.code, ranges(a), rd.code, ranges(d), rb.code, ranges(b)], [200, [[R("L2")]], 200, [[R("L2")]], 200, [[R("L2")]]]);
+	}
+
+	// A row already cancelled, flag on.
+	{
+		const store = STORE_AT("Cancelled", { Driver: "" });
+		const opened = asStaff(shownRow(store[1]));
+		const values = opened.slice();
+		values[IDX["Details"]] = "Broker re-sent the BOL";
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Dispatcher", P, { values, baseline: opened.slice() });
+		t("§5 flag on, a row already cancelled: a Dispatcher's Details edit saves, its status sent back as shown (C2 alone written)",
+			[ra.code, ranges(a)], [200, [[R("C2")]]]);
+		const b = mount(dataSrc, helpers, store, on);
+		const rb = await b.run("Super Admin", P, statusSave(store, "canceled"));
+		t("§5 ...respelling Cancelled as \"canceled\" saves: the row was cancelled already", [rb.code, ranges(b)], [200, [[R("L2")]]]);
+		const c = mount(dataSrc, helpers, store, on);
+		const rc = await c.run("Super Admin", P, statusSave(store, "Dispatched"));
+		t("§5 ...Cancelled → Dispatched saves: a change away from cancelled is not judged", [rc.code, ranges(c)], [200, [[R("L2")]]]);
+		const e = mount(loadSrc, helpers, store, on);
+		const re = await e.run("Dispatcher", L, { "Job Status": "Unassigned", Details: "Back on the board" });
+		t("§5 ...and through PUT /api/load: Cancelled → Unassigned with Details saves", [re.code, ranges(e)], [200, [[R("C2"), R("L2")]]]);
+		const odd = STORE_AT("  CANCEL ");
+		const f = mount(loadSrc, helpers, odd, on);
+		const rf = await f.run("Super Admin", L, { "Job Status": "Cancelled" });
+		t("§5 ...a row stored as \"  CANCEL \" is cancelled already to the money filter: setting it to Cancelled saves", [rf.code, ranges(f)], [200, [[R("L2")]]]);
+	}
+
+	// What the refusal does not judge, flag on.
+	{
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store, { ...on, guarded: false, title: "Carrier History" });
+		const ra = await a.run("Super Admin", P, statusSave(store, "Cancelled"));
+		t("§5 flag on, a tab the guards do not cover: its status column set to Cancelled saves", [ra.code, ranges(a)], [200, [["'Carrier History'!L2"]]]);
+		const b = mount(dataSrc, helpers, store, on);
+		const values = shownRow(store[1]);
+		values[IDX["Status Update Date"]] = "Cancelled";
+		const rb = await b.run("Super Admin", P, { values });
+		t("§5 flag on: \"Cancelled\" typed into Status Update Date is not a status change (S2 written)", [rb.code, ranges(b)], [200, [[R("S2")]]]);
+	}
+
+	// POST /api/dispatch/cancel still cancels, flag on, on the same fake sheet.
+	{
+		const sheet = fakeSheet(STORE_AT("Dispatched"), { allowUpdate: true });
+		const cancel = mountCancel(sheet);
+		const r = await cancel.run({ rowIndex: 2, loadId: "111", reason: "Broker called it off" });
+		t("§5 POST /api/dispatch/cancel, flag on: 200 { success: true }, row 2's Job Status Cancelled and Driver blank, row 3 untouched",
+			[r.code, r.body, sheet.rows[1][IDX["Job Status"]], sheet.rows[1][IDX["Driver"]], sheet.rows[2]], [200, { success: true }, "Cancelled", "", OTHER_ROW()]);
+		t("§5 ...with its record: the history row (account and reason), the cancel_load audit row, the driver told",
+			[cancel.history, cancel.audits.map((a) => [a.action, a.entityId, / — reason: Broker called it off$/.test(a.details)]), cancel.driverNotices],
+			[[{ loadId: "111", newStatus: "Cancelled", source: "cancel", actor: "super_admin", reason: "Broker called it off" }], [["cancel_load", "111", true]], ["soren king"]]);
+	}
+	// One load end to end, flag on: the row edit is refused, the cancel route
+	// cancels, a later edit of the cancelled row saves, and a row edit revives it.
+	{
+		const store = STORE_AT("Dispatched");
+		const sheet = fakeSheet(store, { allowUpdate: true });
+		const r1 = await mount(dataSrc, helpers, null, { ...on, sheet }).run("Dispatcher", P, statusSave(store, "Cancelled", { staff: true }));
+		const r2 = await mountCancel(sheet).run({ rowIndex: 2, loadId: "111", reason: "Shipper closed for the day" });
+		const reopened = asStaff(shownRow(sheet.rows[1]));
+		const edit = reopened.slice();
+		edit[IDX["Details"]] = "Rebook next week";
+		const r3 = await mount(dataSrc, helpers, null, { ...on, sheet }).run("Dispatcher", P, { values: edit, baseline: reopened.slice() });
+		const revive = shownRow(sheet.rows[1]);
+		revive[IDX["Job Status"]] = "Dispatched";
+		const r4 = await mount(dataSrc, helpers, null, { ...on, sheet }).run("Super Admin", P, { values: revive });
+		t("§5 flag on, one load end to end: the Dispatcher's row edit to Cancelled 400, the cancel route 200, a Details edit of the cancelled row 200, a Super Admin's revive 200",
+			[r1.code, (r1.body || {}).code || null, r2.code, r3.code, r4.code, sheet.rows[1][IDX["Details"]], sheet.rows[1][IDX["Job Status"]]],
+			[400, CODE, 200, 200, 200, "Rebook next week", "Dispatched"]);
+	}
+	return results;
+}
+
+// The wiring, from source, and the helper's column rule on its own.
+function cancelWiringSection(helpers) {
+	const { results, t } = collector();
+	const CODE = "CANCEL_NOT_A_ROW_EDIT";
+	const flagLines = SRC.split("\n").filter((l) => /^const ROW_EDITOR_CANCEL_GUARD_ENABLED\b/.test(l));
+	t("§5 wiring: the flag is defined once, at column 0, read once from the environment",
+		flagLines, ['const ROW_EDITOR_CANCEL_GUARD_ENABLED = process.env.ROW_EDITOR_CANCEL_GUARD_ENABLED === "true";']);
+	const flagOn = (v) => {
+		try {
+			return new Function("process", `${flagLines[0] || ""}\nreturn typeof ROW_EDITOR_CANCEL_GUARD_ENABLED === "undefined" ? null : ROW_EDITOR_CANCEL_GUARD_ENABLED;`)(
+				{ env: v === undefined ? {} : { ROW_EDITOR_CANCEL_GUARD_ENABLED: v } });
+		} catch { return null; }
+	};
+	t("§5 wiring: on only for exactly \"true\": unset, \"\", \"false\", \"TRUE\", \"1\", \"yes\" and \" true\" leave it off",
+		[undefined, "", "false", "TRUE", "1", "yes", " true", "true"].map(flagOn), [false, false, false, false, false, false, false, true]);
+
+	// Each save asks once, inside the flag, on the row as it will be written:
+	// after the restores and refusals that shape it, before the Load ID check,
+	// the period guard and the write.
+	const CALL = "const cancel = rowEditCancelRefusal(headers, before, after);";
+	const ordered = (c, marks) => marks.every((m, i) => c.indexOf(m) > -1 && (i === 0 || c.indexOf(marks[i - 1]) < c.indexOf(m)));
+	for (const [label, src, marks] of [
+		["PUT /api/data/:rowIndex", DATA_PUT_SRC, ["restoreUntouchedCells(before, values, baseline);", "formulaCellRefusal(headers, before, values);",
+			"driverCellRefusal(headers, before, values);", "const after = sheetRowAfterUpdate(before, values);", "const auditDetails = ", CALL,
+			"const lidChange = ", "sheetRowUpdateBlocker(", ".values.batchUpdate("]],
+		["PUT /api/load/:loadId", LOAD_PUT_SRC, ["formulaCellRefusal(headers, before, updatedRow);", "driverCellRefusal(headers, before, updatedRow);",
+			"const after = sheetRowAfterUpdate(before, updatedRow);", "validateOwnerIdCell(sheetName, headers, updatedRow);", "const auditDetails = ", CALL,
+			"const lidChange = ", "sheetRowUpdateBlocker(", ".values.batchUpdate("]],
+	]) {
+		const c = decomment(src);
+		t(`§5 wiring, ${label}: asks rowEditCancelRefusal(headers, before, after) once, inside \`if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded)\``,
+			[c.split("rowEditCancelRefusal(").length - 1, /if \(ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded\) \{\s*const cancel = rowEditCancelRefusal\(headers, before, after\);/.test(c)], [1, true]);
+		t(`§5 wiring, ${label}: on the row as it will be written, before the Load ID check, the period guard and the write`, ordered(c, marks), true);
+		t(`§5 wiring, ${label}: a refusal is audited update_sheet_row_blocked under its own code (coalesced), then answered 400`,
+			/if \(cancel\) \{\s*logAuditRefusal\(req, "update_sheet_row_blocked", "sheet_row", `\$\{sheetName\}!\$\{rowIndex\}`, sheetAuditWithCode\(auditDetails\("blocked", \{ code: cancel\.code \}\), cancel\.code\), cancel\.code\);\s*return res\.status\(400\)\.json\(cancel\);/.test(c),
+			true);
+	}
+	const code = decomment(SRC);
+	t("§5 wiring: rowEditCancelRefusal() is defined once and asked by the two row saves only", code.split("rowEditCancelRefusal(").length - 1, 3);
+	t("§5 wiring: POST /api/dispatch/cancel neither reads the flag nor asks the refusal (it is the way to cancel)",
+		/ROW_EDITOR_CANCEL_GUARD_ENABLED|rowEditCancelRefusal|CANCEL_NOT_A_ROW_EDIT/.test(decomment(CANCEL_SRC)), false);
+	const helperSrc = decomment(HELPER_SRC.rowEditCancelRefusal || "");
+	// Its code with the string and template literals emptied: any regex literal
+	// left that names a cancel spelling would be a second copy of the pattern.
+	const helperCode = helperSrc.replace(/`[^`]*`/g, "``").replace(/"[^"]*"/g, '""');
+	t("§5 wiring: the helper judges with the money filter's own CANCELED_STATUS_RE on trimmed cells, with no copy of the spellings",
+		[/CANCELED_STATUS_RE\.test\(/.test(helperSrc), /\.trim\(\)/.test(helperSrc), /\/[^/\n]*cancel[^/\n]*\/[a-z]*/i.test(helperCode)],
+		[true, true, false]);
+	t("§5 wiring: CANCELED_STATUS_RE is still the one pattern the money filter reads",
+		SRC.split("\n").filter((l) => /^const CANCELED_STATUS_RE\b/.test(l)), ["const CANCELED_STATUS_RE = /^(cancel|canceled|cancelled)$/i;"]);
+
+	if (typeof helpers.rowEditCancelRefusal !== "function") {
+		t("§5 rowEditCancelRefusal() exists in server.js", false, true);
+		return results;
+	}
+	const G = (hs, before, after) => { const r = helpers.rowEditCancelRefusal(hs, before, after); return r && [r.code, r.field]; };
+	t("§5 helper: production's layout judges Job Status, and Status Update Date is not a status",
+		[G(HEADERS, storedRow(), storedRow({ "Job Status": "Cancelled" })), G(HEADERS, storedRow(), storedRow({ "Status Update Date": "Cancelled" }))],
+		[[CODE, "Job Status"], null]);
+	const SPLIT = ["Load ID", "Status Notes", "Job Status"];
+	t("§5 helper: when they differ, the first /status/i column (the one the cancel writes) and excludeDroppedLoads()'s column are both judged",
+		[G(SPLIT, ["1", "", "Dispatched"], ["1", "Cancelled", "Dispatched"]), G(SPLIT, ["1", "", "Dispatched"], ["1", "", "Cancelled"])],
+		[[CODE, "Status Notes"], [CODE, "Job Status"]]);
+	t("§5 helper: with the status header twice, the second copy (the one a parsed row keeps) is judged too",
+		G(["Load ID", "Job Status", "Details", "Job Status"], ["1", "Dispatched", "", "Dispatched"], ["1", "Dispatched", "", "cancel"]), [CODE, "Job Status"]);
+	t("§5 helper: a padded header is judged, and named as the sheet holds it",
+		G(["Load ID", "  Job Status  "], ["1", "Dispatched"], ["1", "Cancelled"]), [CODE, "  Job Status  "]);
+	t("§5 helper: no status column, nothing judged", G(["Load ID", "Details"], ["1", "x"], ["1", "Cancelled"]), null);
+	t("§5 helper: a status cell past the end of the stored row is judged from \"\"", G(["Load ID", "Job Status"], ["1"], ["1", "Cancelled"]), [CODE, "Job Status"]);
+	t("§5 helper: numbers, null and rows that are not arrays answer null without throwing",
+		[G(HEADERS, null, null), G(null, ["1"], ["Cancelled"]), G(HEADERS, storedRow({ "Job Status": 5 }), storedRow({ "Job Status": null }))], [null, null, null]);
+	return results;
+}
+
+// ---------------------------------------------------------------------------
 // §4 MUTANT — back to a whole-row write: sheetRowCellWrites() answering the
 // whole row as it will be written, from column A, whatever changed (the write
 // both routes made before). Built outside the probe's try, so a mutation
@@ -922,6 +1353,10 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 	record(await loadSection(H));
 	console.log("§3 sheetRowCellWrites(), restoreUntouchedCells() and the wiring");
 	record(helperSection(H));
+	console.log("§5 the cancel refusal (ROW_EDITOR_CANCEL_GUARD_ENABLED)");
+	record(await cancelSection(H));
+	console.log("§5 the cancel refusal: wiring and column rule");
+	record(cancelWiringSection(H));
 
 	console.log("§4 mutants");
 	{
@@ -963,6 +1398,41 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 		else { fail++; failures.push(`mutant not caught: the identity check removed (§1b failed ${failed.length})${detail}`); }
 		console.log(`  ${caught ? "caught " : "MISSED "} M3 the identity check removed — §1b failed ${failed.length} check(s)` +
 			`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+	}
+
+	console.log("§6 mutants of the cancel refusal");
+	{
+		// Built inside the run: on a base copy, which has no refusal, a missing
+		// target fails the run as "not caught" instead of stopping it.
+		const CALL = "const cancel = rowEditCancelRefusal(headers, before, after);";
+		const FLAG = "if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {";
+		const helperMutant = (...pairs) => ({
+			helpers: buildHelpers({ rowEditCancelRefusal: pairs.reduce((src, [from, to]) => mutate(src, from, to), HELPER_SRC.rowEditCancelRefusal || "") }),
+		});
+		const mutants = [
+			["M4 PUT /api/data without the refusal", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, "const cancel = null;") })],
+			["M5 PUT /api/load without the refusal", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, "const cancel = null;") })],
+			["M6 the status cell judged untrimmed", () => helperMutant(
+				["CANCELED_STATUS_RE.test(stored.trim())", "CANCELED_STATUS_RE.test(stored)"], ["CANCELED_STATUS_RE.test(was.trim())", "CANCELED_STATUS_RE.test(was)"])],
+			["M7 a row already cancelled refused too", () => helperMutant([" || CANCELED_STATUS_RE.test(was.trim())", ""])],
+			["M8 the flag ignored by both saves", () => ({ dataSrc: mutate(DATA_PUT_SRC, FLAG, "if (guarded) {"), loadSrc: mutate(LOAD_PUT_SRC, FLAG, "if (guarded) {") })],
+			["M9 the value judged as sent, not as the sheet will store it", () => helperMutant([`const stored = sent.startsWith("'") ? sent.slice(1) : sent;`, "const stored = sent;"])],
+			["M10 a cell sent back as read judged too", () => helperMutant(["if (sent === was) continue;", ""])],
+		];
+		for (const [label, build] of mutants) {
+			let failed = [], detail = "";
+			try {
+				const m = build();
+				failed = (await cancelSection(m.helpers || H, m)).filter((r) => !r.ok);
+			} catch (e) {
+				detail = ` — ${e && e.message ? e.message : e}`;
+			}
+			const caught = !detail && failed.length > 0;
+			if (caught) pass++;
+			else { fail++; failures.push(`mutant not caught: ${label} (§5 failed ${failed.length})${detail}`); }
+			console.log(`  ${caught ? "caught " : "MISSED "} ${label} — §5 failed ${failed.length} check(s)` +
+				`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+		}
 	}
 
 	console.log(`\n${pass} passed, ${fail} failed`);

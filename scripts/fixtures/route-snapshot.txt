@@ -75,7 +75,7 @@ GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134
 GET /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7ba9d8e49ad5
 POST /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bd7b03307cdd
 DELETE /api/data/:rowIndex · requireRole("Super Admin")=anon@12b84c4b0134 · inline@162c6fef6371
-PUT /api/data/:rowIndex · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@100c3c1b3a78
+PUT /api/data/:rowIndex · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@a56cc60b1ed0
 ALL /api/db/download · inline@90c4873c481e
 POST /api/db/download · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOriginStrict=crossSiteGuardMiddleware@aa37960cca47 · dbAdminLimiter=limiter · inline@c65b3ee2d19a | after: ALL /api/db/download
 GET /api/db/query/:table · requireRole("Super Admin")=anon@12b84c4b0134 · dbAdminLimiter=limiter · inline@ecaed820209a
@@ -142,6 +142,8 @@ POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter 
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
+GET /api/financials/overview · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7c94116b08cc
+GET /api/financials/overview.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3bc178b2c5a0
 GET /api/financials/report · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a7dd6284b3d1
 GET /api/financials/report.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2a429f32c848
 GET /api/financials/settings · requireRole("Super Admin")=anon@12b84c4b0134 · inline@256b07247a52
@@ -215,7 +217,7 @@ GET /api/load-ratings/:loadId · requireRole("Super Admin", "Dispatcher")=anon@1
 PUT /api/load-ratings/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@861f1c41096d
 GET /api/load-ratings/averages · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@0ac489d76517
 GET /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e0784ab4343c
-PUT /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@b6ea8fdcdd26
+PUT /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@17619f1ba883
 DELETE /api/loads/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@210395ff3283
 GET /api/loads/:loadId/driver-instructions · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 PUT /api/loads/:loadId/driver-instructions · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)

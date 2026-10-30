@@ -109,6 +109,7 @@ const financialsCalc = require("./lib/financials-calc");
 const loadPayDays = require("./lib/load-pay-days");
 const tripWorkDays = require("./lib/trip-work-days");
 const financialsReport = require("./lib/financials-report");
+const financialsOverview = require("./lib/financials-overview");
 const invoiceMonthSplit = require("./lib/invoice-month-split");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
@@ -43190,6 +43191,16 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			...extra,
 		});
 
+		// A status changed to cancelled is refused (rowEditCancelRefusal()), before the Load ID
+		// and period checks: the cancel goes through POST /api/dispatch/cancel.
+		if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {
+			const cancel = rowEditCancelRefusal(headers, before, after);
+			if (cancel) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: cancel.code }), cancel.code), cancel.code);
+				return res.status(400).json(cancel);
+			}
+		}
+
 		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT.
 		// sheetRowUpdateBlocker judges the months of the EDITED row only, but
 		// deduplicateLoads() runs inside getJobTrackingCached() — which every
@@ -46409,6 +46420,42 @@ function driverCellRefusal(headers, before, values) {
 		if (to === from) continue;
 		const refusal = reservedDriverNameRefusal(to, header);
 		if (refusal) return refusal;
+	}
+	return null;
+}
+
+// Off unless exactly "true". On, the two row saves refuse a status changed to
+// cancelled (rowEditCancelRefusal() below).
+const ROW_EDITOR_CANCEL_GUARD_ENABLED = process.env.ROW_EDITOR_CANCEL_GUARD_ENABLED === "true";
+
+// A row save may not change a status TO cancelled (CANCELED_STATUS_RE on the trimmed cell,
+// the money filter's own test): POST /api/dispatch/cancel records who, when and why. The
+// status cells are the column the cancel writes and every copy of the one
+// excludeDroppedLoads() reads. Returns the 400 body, or null.
+function rowEditCancelRefusal(headers, before, after) {
+	const hs = Array.isArray(headers) ? headers : [];
+	const cols = new Set();
+	const first = hs.findIndex((h) => /status/i.test(h));
+	if (first !== -1) cols.add(first);
+	const filterCol = findCol(hs, /^(job[\s._-]?)?status$/i) || findCol(hs, /status/i);
+	if (filterCol !== null) hs.forEach((h, i) => { if (h === filterCol) cols.add(i); });
+	// A cell as text, null and absent as "": the comparison sheetRowCellWrites() writes by.
+	const text = (row, i) => (Array.isArray(row) && row[i] != null ? String(row[i]) : "");
+	for (const i of [...cols].sort((a, b) => a - b)) {
+		const sent = text(after, i);
+		const was = text(before, i);
+		// Judged only when the save writes the cell, and as the sheet will store it
+		// (USER_ENTERED keeps the text after one leading apostrophe); `before` is as read.
+		if (sent === was) continue;
+		const stored = sent.startsWith("'") ? sent.slice(1) : sent;
+		if (!CANCELED_STATUS_RE.test(stored.trim()) || CANCELED_STATUS_RE.test(was.trim())) continue;
+		const header = String(hs[i] == null ? "" : hs[i]);
+		const name = header.trim() || `Column ${i + 1}`;
+		return {
+			error: `Cancelling a load is not a row edit, so "${name}" can't be changed to a cancelled status here. Use POST /api/dispatch/cancel (the Cancel button on Active Loads, Super Admin): it records who cancelled the load, when and why, and notifies the driver. Nothing was saved.`,
+			code: "CANCEL_NOT_A_ROW_EDIT",
+			field: header.trim() ? header : "(unnamed)",
+		};
 	}
 	return null;
 }
@@ -59387,6 +59434,16 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			...extra,
 		});
 
+		// A status changed to cancelled is refused (rowEditCancelRefusal()), as
+		// PUT /api/data/:rowIndex refuses it: the cancel goes through POST /api/dispatch/cancel.
+		if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {
+			const cancel = rowEditCancelRefusal(headers, before, after);
+			if (cancel) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: cancel.code }), cancel.code), cancel.code);
+				return res.status(400).json(cancel);
+			}
+		}
+
 		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT — the hole #218
 		// closed on PUT /api/data/:rowIndex, and free here because the whole sheet is
 		// already in memory. deduplicateLoads() keeps the LAST row for a colliding id,
@@ -64003,7 +64060,9 @@ function financialsReportQuery(q) {
 // settings), and none of Financials' own (reserve, depreciation, overhead,
 // investor payouts), whatever the cost settings say: GET /api/financials reads
 // the report this way, so every figure it returns is on the books' one basis.
-async function buildFinancialsReport({ from, to, granularity, groupBy, books: given = null, ledgerOnly = false }) {
+// `keepItems`: also return the items it read and its driver key, for the
+// overview's checks (never for a route's response).
+async function buildFinancialsReport({ from, to, granularity, groupBy, books: given = null, ledgerOnly = false, keepItems = false }) {
 	const books = given || await buildFinancialsLedger();
 	const settings = financialsSettings();
 	const closedSettings = closedMonthSettings();
@@ -64066,20 +64125,21 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 		}
 	}
 	const milesIndex = getLoadMilesIndex();
+	const ctx = {
+		truckOf,
+		truckLabel,
+		loadKey: (id) => loadMilesLib.loadMilesKey(id),
+		loadOf: (lk) => loads.get(lk) || null,
+		// A name that reads as a built-in property name is no driver's
+		// (driverNameForTotals()), as everywhere money is totalled by driver.
+		driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),
+		driverLabel: (k) => displayNames.get(k) || k,
+		ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
+	};
 	const report = financialsReport.buildReport({
 		items, from, to, granularity, groupBy, settingsFor,
 		milesOf: (lk) => milesIndex.get(lk) || null,
-		ctx: {
-			truckOf,
-			truckLabel,
-			loadKey: (id) => loadMilesLib.loadMilesKey(id),
-			loadOf: (lk) => loads.get(lk) || null,
-			// A name that reads as a built-in property name is no driver's
-			// (driverNameForTotals()), as everywhere money is totalled by driver.
-			driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),
-			driverLabel: (k) => displayNames.get(k) || k,
-			ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
-		},
+		ctx,
 	});
 
 	// Receipts still Pending review that count in this range: in its months, on
@@ -64111,7 +64171,47 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 		},
 		overlaps: books.overlaps.length,
 		generatedAt: new Date().toISOString(),
+		...(keepItems ? { items, driverKey: ctx.driverKey } : {}),
 	};
+}
+
+// The Financials overview (lib/financials-overview.js). Money shown for outside
+// use, so dormant: on only when exactly "true"; off, its routes answer 404
+// before reading anything.
+const FINANCIALS_OVERVIEW_ENABLED = process.env.FINANCIALS_OVERVIEW_ENABLED === "true";
+
+// The overview's period: a preset on the business day, or from–to checked as
+// the report checks them.
+function financialsOverviewQuery(query) {
+	return financialsOverview.periodQuery(query, { today: appDay(new Date()), checkRange: (from, to) => financialsReportQuery({ from, to }) });
+}
+
+// One reading of the books, then the report Fleet P&L shows (cost settings
+// applied) by fleet, truck, driver and load, monthly so the checks see each
+// month. The overview adds no money math of its own.
+async function buildFinancialsOverview({ preset, from, to }) {
+	const books = await buildFinancialsLedger();
+	const report = (groupBy, keepItems = false) => buildFinancialsReport({ from, to, granularity: "month", groupBy, books, ledgerOnly: false, keepItems });
+	const fleet = await report("fleet", true);
+	const trucks = await report("truck");
+	const drivers = await report("driver");
+	const loads = await report("load");
+	const frozenSummaries = new Map();
+	for (const r of db.prepare("SELECT period, summary FROM financials_ledger_freezes WHERE released_at = '' ORDER BY frozen_at").all()) {
+		let summary = null;
+		try { summary = JSON.parse(r.summary || "null"); } catch { summary = null; }
+		frozenSummaries.set(r.period, summary && typeof summary === "object" ? summary : null);
+	}
+	const jobTracking = await getJobTrackingCached();
+	const sheetRows = ledgerLoadRows(jobTracking, { investorDriverSet: null, investorOwnerId: null }).rows;
+	return financialsOverview.buildOverview({
+		preset, from, to,
+		fleetReport: fleet, truckReport: trucks, driverReport: drivers, loadReport: loads,
+		items: fleet.items, driverKey: fleet.driverKey,
+		lockedPeriods: books.lockedPeriods, frozenSummaries,
+		bookedNotDelivered: financialsOverview.bookedNotDelivered(sheetRows, from, to, financialsCalc.fmtDate),
+		generatedAt: new Date().toISOString(),
+	});
 }
 
 function computeLossCarryForward(monthlyEarnings) {
@@ -69382,6 +69482,38 @@ app.get("/api/financials/report.csv", requireRole("Super Admin"), async (req, re
 	} catch (err) {
 		console.error("GET /api/financials/report.csv error:", err.message);
 		res.status(500).json({ error: "Failed to build the financials export" });
+	}
+});
+
+// GET /api/financials/overview?preset=<key> or ?from=&to= — the Financials
+// overview: the fleet, every truck and every driver for one period, the figures
+// Fleet P&L shows, with the checks that they agree to the cent.
+app.get("/api/financials/overview", requireRole("Super Admin"), async (req, res) => {
+	if (!FINANCIALS_OVERVIEW_ENABLED) return res.status(404).json({ error: "The Financials overview is not switched on.", code: "FEATURE_OFF" });
+	try {
+		const q = financialsOverviewQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		res.json(await buildFinancialsOverview(q));
+	} catch (err) {
+		console.error("GET /api/financials/overview error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials overview" });
+	}
+});
+
+// GET /api/financials/overview.csv — the same overview: the truck and driver
+// tables with their fleet totals, the checks, and the lines outside the figures.
+app.get("/api/financials/overview.csv", requireRole("Super Admin"), async (req, res) => {
+	if (!FINANCIALS_OVERVIEW_ENABLED) return res.status(404).json({ error: "The Financials overview is not switched on.", code: "FEATURE_OFF" });
+	try {
+		const q = financialsOverviewQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		const overview = await buildFinancialsOverview(q);
+		res.setHeader("Content-Type", "text/csv");
+		res.setHeader("Content-Disposition", `attachment; filename="financials-overview-${q.from}-to-${q.to}.csv"`);
+		res.send(csvRows(financialsOverview.overviewRows(overview)));
+	} catch (err) {
+		console.error("GET /api/financials/overview.csv error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials overview export" });
 	}
 });
 
