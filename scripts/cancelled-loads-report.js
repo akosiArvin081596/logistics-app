@@ -104,11 +104,18 @@ async function readValues(args) {
 		return valuesOf(await sheetFor({ "sheet-id": args["sheet-id"], key: args.key }, ROOT), "--sheet-id");
 	}
 	const file = String(args["values-json"] !== undefined ? args["values-json"] : args["sheets-json"]);
+	// A refusal names the file and the reason only: a parse error would quote the file's text.
+	let raw;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch (e) {
+		throw refused(`cannot read ${path.basename(file)}: ${e && e.code ? e.code : "it could not be read"}`);
+	}
 	let doc;
 	try {
-		doc = JSON.parse(fs.readFileSync(file, "utf8"));
-	} catch (e) {
-		throw refused(`cannot read ${path.basename(file)}: ${String(e.message).slice(0, 120)}`);
+		doc = JSON.parse(raw);
+	} catch {
+		throw refused(`cannot read ${path.basename(file)}: it is not valid JSON`);
 	}
 	if (args["values-json"] !== undefined) return valuesOf(doc, "--values-json");
 	if (!doc || doc.format !== 1 || !doc.spreadsheets || typeof doc.spreadsheets !== "object") {

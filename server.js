@@ -44643,6 +44643,7 @@ app.get("/api/admin/cancelled-loads", requireRole("Super Admin"), async (req, re
 		const originCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
 		const destCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		const index = routeShownLoadIdIndex(jobTracking);
+		// Reason, driver and pickup text go out as stored: only a Super Admin reaches this route.
 		const loads = cancelledLoadsView.cancelledLoadRows({
 			...sheetView,
 			rows: jobTracking.data,

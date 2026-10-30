@@ -105,7 +105,7 @@ function makeDb() {
 	a.run("2026-10-05T15:00:00.400Z", "super_admin", "Super Admin", "cancel_load", "load", "#LD-RPT-0008", "Cancelled load #LD-RPT-0008 — reason: Made-up reason 0008");
 	a.run("2026-08-23T15:00:00.000Z", "made-up-admin-a", "Super Admin", "cancel_load", "load", "LD-RPT-0098", "Cancelled load LD-RPT-0098 — reason: Made-up reason 0098");
 	a.run("2026-10-06T15:00:00.000Z", "made-up-admin-a", "Super Admin", "login", "user", "7", "Made-up sign-in");
-	const otherAudit = (entityId, details) => a.run("2026-09-01T10:00:00.000Z", "made-up-dispatcher-b", "Dispatcher", "update_sheet_row", "sheet_row", entityId, typeof details === "string" ? details : JSON.stringify(details));
+	const otherAudit = (entityId, details) => a.run("2026-09-01T10:00:00.000Z", "made-up-admin-a", "Super Admin", "update_sheet_row", "sheet_row", entityId, typeof details === "string" ? details : JSON.stringify(details));
 	otherAudit("Job Tracking!8", { outcome: "updated", sheet: "Job Tracking", rowIndex: 8, changed: [{ column: "Job Status", col: 1, from: "Dispatched", to: "Cancelled", why: "made-up" }], loadId: "LD-RPT-0007" });
 	otherAudit("Job Tracking!14", { outcome: "updated", sheet: "Job Tracking", rowIndex: 14, changed: [{ column: "Job Status", col: 1, from: "Assigned", to: "cancelled" }] });
 	otherAudit("Job Tracking!6", { outcome: "updated", sheet: "Job Tracking", rowIndex: 6, changed: [{ column: "Driver", col: 2, from: "Made-up Driver R5", to: "Made-up Driver R6" }], loadId: "LD-RPT-0005" });
@@ -142,6 +142,9 @@ const TWO_MAINS = path.join(TMP, "two-mains.json");
 fs.writeFileSync(TWO_MAINS, JSON.stringify(sheetsDoc({ a: book("main", VALUES), b: book("main", VALUES) })));
 const NO_STATUS = path.join(TMP, "no-status.json");
 fs.writeFileSync(NO_STATUS, JSON.stringify({ values: [["Load ID", "Driver"], ["LD-RPT-0001", "Made-up Driver R1"]] }));
+// Not JSON; a refusal may name the file and the reason, never quote what it holds.
+const NOT_JSON = path.join(TMP, "not-json.json");
+fs.writeFileSync(NOT_JSON, "canary-0042 is not JSON");
 const BARE_DB = path.join(TMP, "bare.db");
 {
 	const bare = new Database(BARE_DB);
@@ -251,6 +254,11 @@ section("§4  the command line", () => {
 	for (const [args, want] of refusals) {
 		const r = cli(...args);
 		ok(r.status === 2 && r.stderr.includes(want), `§4 ${JSON.stringify(args.map((x) => x.split(TMP).join("<tmp>")))} is refused with exit 2 (${want})${r.status === 2 ? "" : `: exit ${r.status} ${r.stderr.slice(0, 120)}`}`);
+	}
+	for (const flag of ["--values-json", "--sheets-json"]) {
+		const r = cli(`--db=${DB_FILE}`, `${flag}=${NOT_JSON}`);
+		ok(r.status === 2 && r.stderr.includes("not-json.json") && r.stderr.includes("not valid JSON") && !r.stderr.includes("canary"),
+			`§4 ${flag} on a file that isn't JSON is refused naming the file and the reason, quoting none of its text${r.status === 2 ? "" : `: exit ${r.status}`}`);
 	}
 	ok(!fs.existsSync(missing), "§4 a missing database is never created");
 	eq(listing(), BEFORE, "§4 the folder is unchanged after every command-line run");
