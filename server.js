@@ -6078,6 +6078,30 @@ db.exec(`
 	)
 `);
 
+// A driver's emergency contacts, keyed by the Driver account, in their own table so no
+// whole-row read of users or drivers_directory carries them. ON DELETE CASCADE backs up
+// DELETE /api/users/:id's explicit DELETE (so a rebuild of users needs foreign_keys OFF).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_emergency_contacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		position INTEGER NOT NULL,
+		contact_name TEXT NOT NULL,
+		relationship TEXT NOT NULL,
+		contact_phone TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		created_by INTEGER NOT NULL DEFAULT 0,
+		updated_by INTEGER NOT NULL DEFAULT 0,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_emergency_contacts_user ON driver_emergency_contacts(user_id)"); } catch {}
+// EMERGENCY CONTACTS, default OFF: on only when exactly "true". Off, the four
+// emergency-contact routes answer 404 FEATURE_OFF before any role check and the
+// driver payload has no emergencyContacts key. The table above exists either way.
+const EMERGENCY_CONTACTS_ENABLED = process.env.EMERGENCY_CONTACTS_ENABLED === "true";
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS invoices (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -10798,6 +10822,130 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 	}
 });
 
+// ============================================================
+// DRIVER EMERGENCY CONTACTS (EMERGENCY_CONTACTS_ENABLED; rules in lib/emergency-contacts.js)
+// ============================================================
+// Only these helpers, the four routes, the driver payload's count and the account
+// delete touch driver_emergency_contacts (pinned by scripts/test-emergency-contacts-routes.js).
+const emergencyContactRules = require("./lib/emergency-contacts");
+
+// Off, every emergency-contact route answers 404 FEATURE_OFF, before any role check.
+function emergencyContactsFlagGate(req, res, next) {
+	if (!EMERGENCY_CONTACTS_ENABLED) return res.status(404).json({ error: "Not found", code: "FEATURE_OFF" });
+	return next();
+}
+
+// Keyed per account, as onboardingSignLimiter is: each write can add audit rows.
+const emergencyContactsWriteLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many emergency contact changes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// A Driver account's contacts in list order: the one read of the contact values.
+function emergencyContactRows(userId) {
+	return db.prepare(
+		"SELECT id, position, contact_name, relationship, contact_phone FROM driver_emergency_contacts WHERE user_id = ? ORDER BY position, id"
+	).all(userId);
+}
+
+function emergencyContactsCount(userId) {
+	return db.prepare("SELECT COUNT(*) AS n FROM driver_emergency_contacts WHERE user_id = ?").get(userId).n;
+}
+
+// The body of every 200 the routes send.
+function emergencyContactsBody(userId) {
+	const contacts = emergencyContactRows(userId).map(emergencyContactRules.contactView);
+	return {
+		contacts,
+		minimum: emergencyContactRules.MIN_CONTACTS,
+		maximum: emergencyContactRules.MAX_CONTACTS,
+		complete: contacts.length >= emergencyContactRules.MIN_CONTACTS,
+	};
+}
+
+// The signed-in driver's account, read again rather than trusted from the session:
+// null when the session has no integer id, or the account is gone or not a Driver.
+function emergencyContactsOwnAccount(req) {
+	const id = req.session && req.session.user ? req.session.user.id : undefined;
+	if (!Number.isSafeInteger(id) || id <= 0) return null;
+	const account = db.prepare("SELECT id, username, role, driver_name FROM users WHERE id = ?").get(id);
+	return account && account.role === "Driver" ? account : null;
+}
+
+// The Driver account a Drivers page row names, through normalizeDriverName():
+// { account } for exactly one, else { reason: "no_driver_account" | "ambiguous" }.
+function driverAccountForDirectoryRow(row) {
+	const key = normalizeDriverName(row && typeof row.driver_name === "string" ? row.driver_name : "");
+	if (!key) return { reason: "no_driver_account" };
+	const hits = db.prepare("SELECT id, username, driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') <> '' ORDER BY id").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
+	if (hits.length === 1) return { account: hits[0] };
+	return { reason: hits.length ? "ambiguous" : "no_driver_account" };
+}
+
+// The staff routes' Drivers page row and its account, or { refusal: { status, body } }
+// (400 INVALID_DRIVER_ID, 404 DRIVER_NOT_FOUND).
+function emergencyContactsDirectoryTarget(rawId) {
+	const text = typeof rawId === "string" ? rawId : "";
+	if (!/^[1-9][0-9]{0,9}$/.test(text)) return { refusal: { status: 400, body: { error: "Invalid driver id", code: "INVALID_DRIVER_ID" } } };
+	const row = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(Number(text));
+	if (!row) return { refusal: { status: 404, body: { error: "Driver not found", code: "DRIVER_NOT_FOUND" } } };
+	return { row, link: driverAccountForDirectoryRow(row) };
+}
+
+// Stores `body`'s list for Driver account `userId`; answers { status, body }. One
+// transaction with no await, over his rows read again: an id that is not his is refused
+// with nothing written (409 CONTACT_NOT_FOUND). Each add, change and delete gets one audit
+// row naming a number's last 4 digits only; a list that changes nothing writes nothing.
+function saveEmergencyContacts(req, userId, driverLabel, body) {
+	const v = emergencyContactRules.validateContactList(body);
+	if (!v.ok) return { status: v.status, body: { error: v.error, code: v.code, ...(v.index === undefined ? {} : { index: v.index }) } };
+	const actorId = Number.isSafeInteger(req.session.user.id) ? req.session.user.id : 0;
+	const now = new Date().toISOString();
+	const audit = (action, kind, facts) => logAudit(req, action, "driver_emergency_contacts", userId,
+		emergencyContactRules.auditDetail(kind, { driver: driverLabel, userId, ...facts }));
+	const outcome = db.transaction(() => {
+		const current = emergencyContactRows(userId);
+		const owned = new Set(current.map((r) => r.id));
+		const stray = v.list.find((c) => c.id !== null && !owned.has(c.id));
+		if (stray) return { strayId: stray.id };
+		const diff = emergencyContactRules.diffContacts(current, v.list);
+		const remove = db.prepare("DELETE FROM driver_emergency_contacts WHERE id = ? AND user_id = ?");
+		for (const d of diff.deletes) {
+			remove.run(d.id, userId);
+			audit("emergency_contact_delete", "delete", { contactId: d.id, position: d.position, phone: d.phone });
+		}
+		const update = db.prepare(`UPDATE driver_emergency_contacts SET position = ?, contact_name = ?, relationship = ?,
+			contact_phone = ?, updated_at = ?, updated_by = ? WHERE id = ? AND user_id = ?`);
+		for (const ch of diff.changes) {
+			update.run(ch.after.position, ch.after.name, ch.after.relationship, ch.after.phone, now, actorId, ch.id, userId);
+			audit("emergency_contact_change", "change", { contactId: ch.id, fields: ch.fields,
+				before: { position: ch.before.position, phone: ch.before.phone }, after: { position: ch.after.position, phone: ch.after.phone } });
+		}
+		const insert = db.prepare(`INSERT INTO driver_emergency_contacts
+			(user_id, position, contact_name, relationship, contact_phone, created_at, updated_at, created_by, updated_by)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+		for (const a of diff.adds) {
+			const contactId = Number(insert.run(userId, a.position, a.name, a.relationship, a.phone, now, now, actorId, actorId).lastInsertRowid);
+			audit("emergency_contact_add", "add", { contactId, position: a.position, phone: a.phone });
+		}
+		return { changed: diff.deletes.length + diff.changes.length + diff.adds.length };
+	})();
+	if (outcome.strayId !== undefined) {
+		logAuditRefusal(req, "emergency_contacts_write_blocked", "driver_emergency_contacts", userId,
+			`Driver ${driverLabel} (user ${userId}): contact ${outcome.strayId} is not on this driver's list [CONTACT_NOT_FOUND]`, "CONTACT_NOT_FOUND");
+		return { status: 409, body: { error: "This list was changed somewhere else. Open it again, then save your changes.", code: "CONTACT_NOT_FOUND" } };
+	}
+	if (outcome.changed) notifyChange("drivers");
+	return { status: 200, body: emergencyContactsBody(userId) };
+}
+
 // GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test + SSN for a driver
 app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -10861,6 +11009,44 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/drivers-directory/:id/emergency-contacts — the contacts of the Driver account
+// a Drivers page row names. A row with no Driver account, or two, answers 200
+// { linked: false, reason }, as /documents answers linked: false.
+app.get("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const target = emergencyContactsDirectoryTarget(req.params.id);
+		if (target.refusal) return res.status(target.refusal.status).json(target.refusal.body);
+		if (!target.link.account) return res.json({ linked: false, reason: target.link.reason });
+		res.json({ linked: true, userId: target.link.account.id, ...emergencyContactsBody(target.link.account.id) });
+	} catch (err) {
+		console.error("[emergency-contacts] staff read failed:", err.code || "ERROR");
+		res.status(500).json({ error: "The emergency contacts could not be read.", code: "READ_FAILED" });
+	}
+});
+
+// PUT /api/drivers-directory/:id/emergency-contacts — replace that driver's list, as
+// PUT /api/driver/me/emergency-contacts does; 409 NO_DRIVER_ACCOUNT or
+// DRIVER_ACCOUNT_AMBIGUOUS when the row names no Driver account or two.
+app.put("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), emergencyContactsWriteLimiter, (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const target = emergencyContactsDirectoryTarget(req.params.id);
+		if (target.refusal) return res.status(target.refusal.status).json(target.refusal.body);
+		const account = target.link.account;
+		if (!account) {
+			return res.status(409).json(target.link.reason === "ambiguous"
+				? { error: "Two driver accounts match this name. Fix the names first.", code: "DRIVER_ACCOUNT_AMBIGUOUS" }
+				: { error: "No driver account is linked to this directory row. Contacts are kept on the driver's sign-in account.", code: "NO_DRIVER_ACCOUNT" });
+		}
+		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name, 120), req.body);
+		res.status(out.status).json(out.status === 200 ? { linked: true, userId: account.id, ...out.body } : out.body);
+	} catch (err) {
+		console.error("[emergency-contacts] staff save failed:", err.code || "ERROR");
+		res.status(500).json({ error: "The emergency contacts could not be saved.", code: "SAVE_FAILED" });
 	}
 });
 
@@ -34207,9 +34393,11 @@ function userDeleteLockBlockers(user, cascadeName) {
 // DELETING AN ONBOARDED DRIVER — the FK-bearing children
 // ============================================================
 // `db.pragma("foreign_keys = ON")` plus three FKs on users(id) —
-// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` (the
-// ONLY three; verified by grepping REFERENCES users) — meant `DELETE FROM users`
-// raised `FOREIGN KEY constraint failed` for anyone who had ever been onboarded.
+// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` — meant
+// `DELETE FROM users` raised `FOREIGN KEY constraint failed` for anyone who had
+// ever been onboarded. There are FOUR FKs on users(id) (grep REFERENCES users):
+// `driver_emergency_contacts` is ON DELETE CASCADE and is still deleted
+// explicitly below, so the audit line counts it.
 // The whole cascade rolled back and the route answered a 500 `DELETE_ROLLED_BACK`
 // naming no cause, so the observable bug was not orphaning: ONBOARDED DRIVERS
 // WERE SIMPLY UNDELETABLE, with no message saying why.
@@ -34638,6 +34826,8 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			removed.onboarding_documents = db.prepare("DELETE FROM onboarding_documents WHERE user_id = ?").run(id).changes;
 			removed.driver_onboarding = db.prepare("DELETE FROM driver_onboarding WHERE user_id = ?").run(id).changes;
 			removed.driver_payment_info = db.prepare("DELETE FROM driver_payment_info WHERE user_id = ?").run(id).changes;
+			// Third parties' names and numbers leave with the account; counted in the audit line.
+			removed.driver_emergency_contacts = db.prepare("DELETE FROM driver_emergency_contacts WHERE user_id = ?").run(id).changes;
 			if (user.role === "Investor") {
 				removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
 				removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
@@ -48381,6 +48571,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			// never the URL's; a Super Admin's by the URL's. The only availability
 			// read in this route (scripts/test-driver-availability-guards.js).
 			...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName) } : {}),
+			// How many emergency contacts the driver has on file (never the contacts), by his
+			// session's account id, only while the flag is on; a Super Admin's payload has none.
+			...(EMERGENCY_CONTACTS_ENABLED && req.session.user.role !== "Super Admin" ? { emergencyContacts: { required: emergencyContactRules.MIN_CONTACTS, maximum: emergencyContactRules.MAX_CONTACTS, onFile: emergencyContactsCount(req.session.user.id) } } : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
@@ -48474,6 +48667,37 @@ function truckPhotoForStorage(value) {
 	if (!verdict.ok) return refusal(verdict);
 	return { value: `data:${file.contentType};base64,${file.body.toString("base64")}` };
 }
+
+// GET /api/driver/me/emergency-contacts — the signed-in driver's own contacts. Two
+// path segments under /api/driver/, so /api/driver/:driverName never captures it.
+app.get("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const account = emergencyContactsOwnAccount(req);
+		if (!account) return res.status(403).json({ error: "Only a driver's own account has emergency contacts here.", code: "DRIVER_ACCOUNT_REQUIRED" });
+		res.json(emergencyContactsBody(account.id));
+	} catch (err) {
+		console.error("[emergency-contacts] read failed:", err.code || "ERROR");
+		res.status(500).json({ error: "Your emergency contacts could not be read.", code: "READ_FAILED" });
+	}
+});
+
+// PUT /api/driver/me/emergency-contacts — replace the signed-in driver's list. Body
+// { contacts: [{ id?, name, relationship, phone }] }, 2 to 5. 400 INVALID_BODY; 422
+// EMERGENCY_CONTACTS_MIN / _MAX, CONTACT_*_INVALID or CONTACT_PHONE_DUPLICATE with the
+// entry's index; 409 CONTACT_NOT_FOUND for an id not on his list.
+app.put("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), emergencyContactsWriteLimiter, (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const account = emergencyContactsOwnAccount(req);
+		if (!account) return res.status(403).json({ error: "Only a driver's own account has emergency contacts here.", code: "DRIVER_ACCOUNT_REQUIRED" });
+		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name || account.username, 120), req.body);
+		res.status(out.status).json(out.body);
+	} catch (err) {
+		console.error("[emergency-contacts] save failed:", err.code || "ERROR");
+		res.status(500).json({ error: "Your emergency contacts could not be saved.", code: "SAVE_FAILED" });
+	}
+});
 
 // GET /api/driver/me/identity-file/:fileType — Stream the requesting driver's
 // own CDL Front / CDL Back / Medical Card. Companion to the application_*_type

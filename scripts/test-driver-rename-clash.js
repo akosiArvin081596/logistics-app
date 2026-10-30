@@ -1235,6 +1235,7 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 	db.exec("ALTER TABLE driver_onboarding ADD COLUMN user_id INTEGER");
 	db.exec("CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
 	db.exec("CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
+	db.exec("CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
 	const call = mountRoute(ROUTES.usersDelete, {
 		db,
 		recordPeriodRefusal: () => {},

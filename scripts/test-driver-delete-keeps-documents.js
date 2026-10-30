@@ -163,6 +163,9 @@ function scratch() {
 		CREATE TABLE driver_payment_info (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, FOREIGN KEY (user_id) REFERENCES users(id)
 		);
+		CREATE TABLE driver_emergency_contacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
 		CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, amount REAL DEFAULT 0, date TEXT DEFAULT '',
 			posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '', status TEXT DEFAULT 'Pending');
 		CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "from" TEXT, "to" TEXT);

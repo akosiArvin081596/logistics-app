@@ -241,6 +241,10 @@ function makeDeps() {
 		// The driver's own time off (§7): off here, so its reader must never run.
 		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 		driverOwnTimeOff: () => { throw new Error("driverOwnTimeOff() ran with DRIVER_TIME_OFF_SCREEN_ENABLED off"); },
+		// Emergency contacts: off here, so the count must never run (its subject is
+		// scripts/test-emergency-contacts-routes.js §7).
+		EMERGENCY_CONTACTS_ENABLED: false,
+		emergencyContactsCount: () => { throw new Error("emergencyContactsCount() ran with EMERGENCY_CONTACTS_ENABLED off"); },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
 	};
