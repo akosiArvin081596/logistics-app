@@ -44610,6 +44610,75 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// GET /api/admin/cancelled-loads: the loads whose status is cancelled, for the
+// Super Admin "Cancelled loads" page, with when, who and why from the app's own
+// records (lib/cancelled-loads-view.js). A list only; it writes nothing.
+// Off, it answers 404 FEATURE_OFF after the role gate and before any read.
+const CANCELLED_LOADS_PAGE_ENABLED = process.env.CANCELLED_LOADS_PAGE_ENABLED === "true";
+const cancelledLoadsView = require("./lib/cancelled-loads-view");
+app.get("/api/admin/cancelled-loads", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!CANCELLED_LOADS_PAGE_ENABLED) {
+			return res.status(404).json({ error: "The cancelled loads list is switched off on this server.", code: "FEATURE_OFF" });
+		}
+		let jobTracking;
+		try {
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Cancelled loads — Job Tracking unreadable:", e.message);
+			return res.status(503).json({
+				error: "Job Tracking could not be read, so the cancelled loads can't be listed. Try again in a moment.",
+				code: "SHEET_UNREADABLE",
+			});
+		}
+		const sheetView = { headers: jobTracking.headers, cancelledStatusRe: CANCELED_STATUS_RE, normalizeLoadId };
+		const queries = cancelledLoadsView.recordQueries(cancelledLoadsView.cancelledKeys({ ...sheetView, rows: jobTracking.data }));
+		// A record table that can't be read answers 503: a page of "Not recorded"
+		// would read as fact.
+		let history;
+		let audits;
+		let deleted;
+		try {
+			const read = (stmts) => stmts.flatMap((s) => db.prepare(s.sql).all(...s.params));
+			history = read(queries.history);
+			audits = read(queries.audit);
+			deleted = read([queries.deleted]);
+		} catch (e) {
+			console.error("Cancelled loads — records unreadable:", e.message);
+			return res.status(503).json({
+				error: "The app's cancel records could not be read, so the cancelled loads can't be listed. Try again in a moment.",
+				code: "RECORDS_UNREADABLE",
+			});
+		}
+		const cols = jobTrackingMonthCols(jobTracking.headers);
+		const originCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
+		const destCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
+		const index = routeShownLoadIdIndex(jobTracking);
+		// Reason, driver and pickup text go out as stored: only a Super Admin reaches this route.
+		const loads = cancelledLoadsView.cancelledLoadRows({
+			...sheetView,
+			rows: jobTracking.data,
+			history,
+			audits,
+			deleted,
+			cols,
+			laneOf: (row) => ({
+				pickup: resolveCityState(row, "pickup", row[cols.loadIdCol], originCol ? row[originCol] : ""),
+				dropoff: resolveCityState(row, "drop", row[cols.loadIdCol], destCol ? row[destCol] : ""),
+			}),
+			shownLoadId: (raw, row) => shownLoadId(req, raw, { row, index }),
+			timeZone: APP_TIMEZONE,
+		});
+		// The rate-con file routes' own gate, so the page offers View to exactly the
+		// accounts those routes serve.
+		const refusal = rateconViewGate.refusal(req.session.user);
+		res.json({ loads, count: loads.length, rateCon: { canView: !refusal, note: refusal ? refusal.error : "" } });
+	} catch (error) {
+		console.error("Error listing cancelled loads:", error.message);
+		res.status(500).json({ error: "The cancelled loads could not be listed." });
+	}
+});
+
 // Shared 409 for the two guards below. Kept in one place so a load delete and a
 // driver-day override refuse in the same shape (`code` + `periods`), which is
 // what lets one client-side handler render both.
@@ -62049,6 +62118,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 				tankGallons: tank, mpg, burn, routeSource, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
 				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
 				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId), pickupUnmapped: !pickedUp && !pickup,
+				approachUncounted: !pickedUp && !fixFresh,
 			}) } : {}),
 		});
 	} catch (err) {

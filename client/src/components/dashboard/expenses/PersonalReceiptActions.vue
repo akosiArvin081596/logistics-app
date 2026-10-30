@@ -2,8 +2,8 @@
   <!-- A receipt's Personal line (R3 v1): the pill, and for a Super Admin the
        Personal / Undo / Reverse buttons. Everything shown comes from the server
        (lib/personalReceipt.js); the browser computes no money. -->
-  <span class="personal-actions" @click.stop @keydown.stop>
-    <span v-if="pill" :class="['personal-pill', `personal-${expense.personal.state}`]" :title="pill">{{ pill }}</span>
+  <span :class="['personal-actions', { 'personal-compact': compact }]" @click.stop @keydown.stop>
+    <span v-if="pill" :class="['personal-pill', `personal-${expense.personal.state}`]" :title="pill">{{ compact ? shortPill : pill }}</span>
     <button v-if="showMark" type="button" class="btn-personal" :disabled="busy" @click="openDialog('mark')">Personal</button>
     <button v-if="showUndo" type="button" class="btn-personal-undo" :disabled="busy" @click="openDialog('undo')">Undo Personal</button>
     <button v-if="showReverse" type="button" class="btn-personal-undo" :disabled="busy" @click="openDialog('reverse')">Reverse Personal</button>
@@ -61,6 +61,7 @@ import {
   personalMarkDialogText,
   personalPillText,
   personalReverseDialogText,
+  personalShortText,
 } from '../../../lib/personalReceipt'
 
 const props = defineProps({
@@ -69,6 +70,8 @@ const props = defineProps({
   enabled: { type: Boolean, default: false },
   // GET /api/expenses/all's personalReceiptWeek: a line takes its receipt's week.
   receiptWeek: { type: Boolean, default: false },
+  // The Expenses table: the short tag (full sentence on hover) and table-sized buttons.
+  compact: { type: Boolean, default: false },
 })
 // changed(personal | null): the server's summary after the write; the list
 // reloads on expenses:changed as well.
@@ -88,6 +91,7 @@ const showMark = computed(() => canMarkPersonal(props.expense, who.value))
 const showUndo = computed(() => canUndoPersonal(props.expense, who.value))
 const showReverse = computed(() => canReversePersonal(props.expense, who.value))
 const pill = computed(() => personalPillText(props.expense.personal))
+const shortPill = computed(() => personalShortText(props.expense.personal))
 const markDialogText = computed(() => personalMarkDialogText(props.receiptWeek))
 const reverseDialogText = computed(() => personalReverseDialogText(props.receiptWeek))
 
@@ -176,6 +180,11 @@ async function submit() {
 .btn-personal-undo { border-color: #9ca3af; background: #fff; color: #374151; }
 .btn-personal:disabled,
 .btn-personal-undo:disabled { opacity: 0.5; cursor: default; }
+/* The table's size, matching the row's Approve / Reject buttons. */
+.personal-compact { gap: 0.25rem; }
+.personal-compact .personal-pill { font-size: 0.68rem; }
+.personal-compact .btn-personal,
+.personal-compact .btn-personal-undo { padding: 0.22rem 0.55rem; font-size: 0.68rem; border-radius: 5px; }
 .personal-field {
   display: flex;
   flex-direction: column;

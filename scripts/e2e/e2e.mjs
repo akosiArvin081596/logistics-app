@@ -4449,8 +4449,8 @@ function restoreB1Assignment() {
   return note
 }
 async function bootBackfillSpacingCase(page) {
-  const title = 'Expenses → All → search the expense planted before boot (the driver\'s own account spelling, dated today, truck blank; the truck assignment covering that day stores the name with its space doubled): its Truck column after the startup backfill'
-  const expected = 'Stamped at boot: the Truck column shows the assignment\'s truck (#unit), and the row stores that truck\'s unit and owner'
+  const title = 'Expenses → All → search the expense planted before boot (the driver\'s own account spelling, dated today, truck blank; the truck assignment covering that day stores the name with its space doubled): its truck line (under the driver, in the Driver column) after the startup backfill'
+  const expected = 'Stamped at boot: the Driver column\'s truck line shows the assignment\'s truck (#unit), and the row stores that truck\'s unit and owner'
   if (!db) return record({ step: 'B1', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
   const planted = db.prepare('SELECT id, driver, truck_unit, owner_id, date, description, timestamp FROM expenses WHERE load_id = ? AND description LIKE ? ORDER BY id DESC').all(B1_LOAD, `${B1_LOAD}-%`)
   if (!planted.length) {
@@ -4491,10 +4491,16 @@ async function bootBackfillSpacingCase(page) {
     try { listed = ((await resp.json())?.expenses || []).find((e) => Number(e.id) === Number(row.id)) || null } catch { /* not json */ }
     const tr = page.locator('tr.expense-row', { hasText: row.description }).first()
     await tr.waitFor({ state: 'visible', timeout: 20000 })
+    // The truck is the second line of the row's Driver cell ("#unit", data-field="truck"):
+    // the Driver column found by its header, and exactly one truck line inside it.
     // textContent, not innerText: the headers are upper-cased by CSS.
     const heads = await tr.locator('xpath=ancestor::table[1]').locator('thead th').evaluateAll((ths) => ths.map((th) => th.textContent.trim().toLowerCase()))
-    const ti = heads.indexOf('truck')
-    const cellText = ti >= 0 ? (await tr.locator('td').nth(ti).evaluate((td) => td.textContent)).trim() : '(no Truck column)'
+    const di = heads.indexOf('driver')
+    const truckLine = di >= 0 ? tr.locator('td').nth(di).locator('[data-field="truck"]') : null
+    const truckLines = truckLine ? await truckLine.count() : 0
+    const cellText = di < 0 ? '(no Driver column)'
+      : truckLines === 1 ? (await truckLine.evaluate((el) => el.textContent)).trim()
+        : truckLines === 0 ? '(no truck line in the Driver cell)' : `(${truckLines} truck lines in the Driver cell)`
     await tr.scrollIntoViewIfNeeded().catch(() => {})
     const stamped = row.truck_unit === a.unit_number && Number(row.owner_id) === Number(a.owner_id)
     v = plantedLate || bootedAt == null ? 'INFO' : verdict(stamped && cellText === `#${a.unit_number}`)
@@ -4502,7 +4508,7 @@ async function bootBackfillSpacingCase(page) {
       `the assignment covering that date: #${a.id} → truck #${a.truck_id} (unit ${a.unit_number}, owner #${a.owner_id}); ` +
       `stored after the boot: truck_unit ${JSON.stringify(row.truck_unit)}, owner_id ${JSON.stringify(row.owner_id)}` +
       `${row.truck_unit === '' ? (plantedLate || bootedAt == null ? ' — no boot has processed it (plant, then boot)' : ' — the backfill left it blank: NO truck found') : row.truck_unit == null ? ' — the backfill found NO truck' : ''}; ` +
-      `the Expenses page's Truck cell: "${cellText}" (the list's truck_unit ${JSON.stringify(listed ? listed.truck_unit : '(row not listed)')})`
+      `the Expenses page's truck line: "${cellText}" (the list's truck_unit ${JSON.stringify(listed ? listed.truck_unit : '(row not listed)')})`
     await caption(page, `Step B1 — ${v}: ${observed}`)
     s = await shot(page, 'b1-expenses-truck')
   } catch (e) {

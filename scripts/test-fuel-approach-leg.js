@@ -217,7 +217,7 @@ check("the smallest add is 5 gal (0.5 mi short)", () => {
 	const f = legOf(driverFuel({ plan, leg: "to_delivery" }), "finish");
 	assert.deepStrictEqual([plan.verdict === "clears", f.status, f.addGallons], [false, "add", 5]);
 });
-const TOP_KEYS = ["afterAnotherLoad", "extraStops", "fuelReadAgeMinutes", "fuelState", "legs", "loadDone", "milesLeft",
+const TOP_KEYS = ["afterAnotherLoad", "approachUncounted", "extraStops", "fuelReadAgeMinutes", "fuelState", "legs", "loadDone", "milesLeft",
 	"pickupUnmapped", "position", "positionAgeMinutes", "refuelNow", "routeEstimated", "v"];
 const LEG_KEYS = ["addGallons", "key", "miles", "needInTankGallons", "status", "usesGallons"];
 const NO_IDENTITY_RE = /vehicle|latitude|longitude|"lat|"lng|unit|driver|price|cost|\$/i;
@@ -356,6 +356,17 @@ for (const [label, o] of INCOMPLETE) {
 check("...the control with none of them: both rows carry their miles and gallons", () => {
 	assert.ok(beforePickup().legs.every((l) => Number.isFinite(l.miles) && Number.isFinite(l.usesGallons)), JSON.stringify(beforePickup().legs));
 });
+check("no gallons and no miles on the whole-load row before pickup with no truck position (approachUncounted): no reading, no truck, or a fresh reading", () => {
+	const none = { fuelPct: null, fuelSource: "none", anchorPct: null, ageMinutes: null, milesSinceReading: null };
+	const at = (o, pct = null) => driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct }), leg: "to_delivery", fromLivePosition: false,
+		positionAgeMinutes: null, approachUncounted: true, ...o });
+	for (const df of [at({ reading: none }), at({ reading: none, hasTruck: false }), at({ reading: LIVE(80) }, 80)]) {
+		assert.ok(df.approachUncounted === true && df.legs.length === 1 && df.legs[0].key === "whole_load" && numberless(df.legs[0]), JSON.stringify(df));
+	}
+	const after = driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 80 }), reading: LIVE(80), pct: 80, leg: "to_delivery", fromLivePosition: false, positionAgeMinutes: null });
+	assert.deepStrictEqual([after.approachUncounted, after.legs.map((l) => [l.key, l.miles, l.status])], [false, [["whole_load", 280, "enough"]]],
+		"the control: after pickup the whole load over-counts, so it keeps its figures");
+});
 check("the block says when the pickup isn't on the map (pickupUnmapped), so the screen can give the reason", () => {
 	const plan = tripPlanFor({ routeMiles: 300 });
 	assert.deepStrictEqual([
@@ -436,7 +447,7 @@ const DISPATCH = { id: 2, role: "Dispatcher", username: "dispatch_qa" };
 function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const opt = { status: "Assigned", fuel: 48, fixAgoMin: 12, coords: true, pickupMapped: true, truck: true, tank: 150, avgMpg: 6.0,
 		burn: BURN5, receipt: { mpg: 6.0 }, rollupMpg: null, details: "Dry van, 43,764 lbs", otherLoad: null, stopPayload: null,
-		anchor: null, routesDown: false, ...o };
+		anchor: null, routesDown: false, device: true, linkedAgoMin: null, ...o };
 	const db = new Database(":memory:");
 	db.exec(`
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, routemate_vehicle_id TEXT DEFAULT '', assigned_driver TEXT DEFAULT '',
@@ -460,11 +471,16 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const VID = "DEV-QA-901";
 	if (opt.truck) {
 		db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id, assigned_driver, fuel_tank_gallons, avg_mpg) VALUES (1, 'Unit 901', ?, 'Driver QA', ?, ?)")
-			.run(VID, opt.tank, opt.avgMpg);
+			.run(opt.device ? VID : "", opt.tank, opt.avgMpg);
 		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1, 'Driver QA', '2026-10-01', '')").run();
 		const tel = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
-		if (opt.anchor) tel.run(VID, FIX.lat, FIX.lng, opt.anchor.odo, opt.anchor.fuel, NOW - opt.anchor.agoMin * 60000);
-		tel.run(VID, FIX.lat, FIX.lng, 100000, opt.fuel, NOW - opt.fixAgoMin * 60000);
+		if (opt.device && opt.anchor) tel.run(VID, FIX.lat, FIX.lng, opt.anchor.odo, opt.anchor.fuel, NOW - opt.anchor.agoMin * 60000);
+		if (opt.device) tel.run(VID, FIX.lat, FIX.lng, 100000, opt.fuel, NOW - opt.fixAgoMin * 60000);
+		// A device linked to the truck after its newest fix (B11): that fix belongs to another vehicle.
+		if (opt.linkedAgoMin != null) {
+			db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (1, ?, ?, '', 'admin_qa')")
+				.run(VID, new Date(NOW - opt.linkedAgoMin * 60000).toISOString());
+		}
 		if (opt.rollupMpg) for (const d of ["2026-10-27", "2026-10-28", "2026-10-29"]) {
 			db.prepare("INSERT INTO routemate_fuel_daily VALUES (?, ?, ?, 300, '')").run(VID, d, opt.rollupMpg);
 		}
@@ -535,8 +551,15 @@ const WORLDS = [
 	// Added in the last round; the flag-off digest below still covers the 20 worlds above.
 	["pre-pickup, pickup not geocoded, 70%", { pickupMapped: false, fuel: 70 }],
 	["in transit after a 4 h dropout from 100% (300 mi since)", { status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 240, odo: 99700 } }],
+	// Added for Arvin's option (a): before pickup with no truck position (the digests pin the 20 and 22 worlds above).
+	["before pickup, no ELD device on the truck", { device: false }],
+	["before pickup, no fuel level, ELD silent 8 h", { fuel: null, fixAgoMin: 8 * 60 }],
+	["before pickup, device re-linked 5 min ago (its newest fix is from before)", { linkedAgoMin: 5 }],
+	["6 h edge: an 80% reading 6 h 18 s old, before pickup", { fuel: 80, fixAgoMin: 360.3 }],
+	["after pickup, no ELD device on the truck", { status: "In Transit", device: false }],
 ];
 const DIGEST_WORLDS = 20;
+const DIGEST_WORLDS_2 = 22;
 const CALLS = [
 	["trip-plan, Driver", (w) => w.plan()],
 	["trip-plan, Dispatcher", (w) => w.plan(DISPATCH)],
@@ -578,6 +601,8 @@ async function routeSections() {
 	const digestOf = (list) => crypto.createHash("sha256").update(JSON.stringify(list.map((x) => [x.name, x.r.status, x.r.body]))).digest("hex");
 	const pinned = off.slice(0, DIGEST_WORLDS * CALLS.length);
 	console.log(`      flag-off answers: ${pinned.length}, sha256 ${digestOf(pinned)}`);
+	const pinned2 = off.slice(0, DIGEST_WORLDS_2 * CALLS.length);
+	console.log(`      flag-off answers, the first ${DIGEST_WORLDS_2} worlds: ${pinned2.length}, sha256 ${digestOf(pinned2)}`);
 	console.log(`      flag-off answers, all ${WORLDS.length} worlds: ${off.length}, sha256 ${digestOf(off)}`);
 	const at = (list, name) => list.find((x) => x.name === name).r;
 
@@ -653,9 +678,9 @@ async function routeSections() {
 		assert.deepStrictEqual([b.verdict, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft, b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.addGallons])],
 			["clears", "carried", "estimated", 185, [["finish", "check_gauge", null, null]]]);
 	});
-	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 42 Driver answers that succeed)", () => {
+	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 52 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
-		assert.strictEqual(driverAnswers.length, 42);
+		assert.strictEqual(driverAnswers.length, 52);
 		for (const x of driverAnswers) {
 			assert.ok(x.r.body.driverFuel, `${x.name}: no driverFuel`);
 			assert.ok(!("vehicleId" in x.r.body), x.name);
@@ -695,10 +720,30 @@ async function routeSections() {
 		const df = at(on, "no tank size, no fill history / trip-plan, Driver").body.driverFuel;
 		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.legs.every((l) => l.status === "check_gauge" && l.needInTankGallons > 0)], ["no_tank_size", null, true]);
 	});
-	check("no truck linked: 'no_truck', one whole-load row", () => {
+	check("no truck linked: 'no_truck', one whole-load row with no number (the run to the pickup can't be counted)", () => {
 		const df = at(on, "no truck linked / trip-plan, Driver").body.driverFuel;
-		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.legs.map((l) => [l.key, l.status])], ["no_truck", null, [["whole_load", "check_gauge"]]]);
+		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.approachUncounted, df.legs.map((l) => [l.key, l.status, l.miles, l.needInTankGallons])],
+			["no_truck", null, true, [["whole_load", "check_gauge", null, null]]]);
 		assert.strictEqual(at(on, "no truck linked / range, Driver").body.driverFuel.fuelState, "no_truck");
+	});
+	// Arvin's option (a): before pickup with no truck position the run to the pickup
+	// can't be counted, so the whole-load row has no number and the block says why.
+	for (const [w, state] of [
+		["before pickup, no ELD device on the truck", "none"],
+		["before pickup, no fuel level, ELD silent 8 h", "none"],
+		["before pickup, device re-linked 5 min ago (its newest fix is from before)", "none"],
+		["6 h edge: an 80% reading 6 h 18 s old, before pickup", "live"],
+	]) {
+		check(`${w}: approachUncounted, one whole-load row with no number`, () => {
+			const b = at(on, `${w} / trip-plan, Driver`).body;
+			assert.deepStrictEqual([b.fromLivePosition, b.driverFuel.fuelState, b.driverFuel.approachUncounted,
+				b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.usesGallons, l.needInTankGallons])],
+			[false, state, true, [["whole_load", "check_gauge", null, null, null]]]);
+		});
+	}
+	check("…the control: after pickup with no position the whole load over-counts, so it keeps its figures (no approachUncounted)", () => {
+		const df = at(on, "after pickup, no ELD device on the truck / trip-plan, Driver").body.driverFuel;
+		assert.deepStrictEqual([df.approachUncounted, df.legs.map((l) => [l.key, l.miles, l.needInTankGallons > 0])], [false, [["whole_load", 280, true]]]);
 	});
 	check("Routes down: the distance is marked estimated", () => {
 		assert.strictEqual(at(on, "Routes down (straight line) / trip-plan, Driver").body.driverFuel.routeEstimated, true);
