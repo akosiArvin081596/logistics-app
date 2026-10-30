@@ -1764,7 +1764,7 @@ The driver app's "Training videos" card (DRIVER_TRAINING_VIDEOS_ENABLED, driver 
 `driver-welcome.mjs`: no `server.js`, database, `.env`, key or sign-in. The built `client/dist` is served on
 `127.0.0.1:$E2E_PORT` (default 3188); every `/api` request is answered in the browser (a made-up Driver, "Casey
 Example", user id 90104), with the payload's `trainingVideos` as each step sets it (no key is the flag off). Every
-request to another host is aborted, the YouTube frame included, and Chromium resolves no host name, so nothing leaves
+request to another host is aborted, the YouTube frame included, and Chromium resolves nothing but 127.0.0.1, so nothing leaves
 the machine.
 
 ```bash

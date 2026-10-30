@@ -38,7 +38,7 @@
 // client/dist from its own static server on 127.0.0.1 (E2E_PORT, default 3188)
 // and answers every /api request in the browser with made-up fixtures. Every
 // request to another host is aborted (the YouTube frame included) and Chromium
-// resolves no host name, so nothing leaves the machine.
+// resolves nothing but 127.0.0.1, so nothing leaves the machine.
 //
 //   npm --prefix scripts/e2e ci     (once; playwright-core)
 //   npm run build:client            (the build under test)
@@ -508,8 +508,10 @@ async function main() {
   const server = http.createServer(serveDist)
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(PORT, HOST, resolve) })
   console.log(`driver-videos: serving ${DIST} on ${BASE} (made-up data; no server.js)`)
-  // No host name resolves: a request that ever got past the abort below reaches nothing.
-  const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED, args: ['--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost'] })
+  // Nothing resolves but the static server's own address (the rules match an IP
+  // literal too, as scripts/replica/login.mjs found): a request that ever got past
+  // the abort in openDriver() reaches nothing.
+  const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED, args: [`--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE ${HOST}`] })
   try {
     for (const size of SIZES) {
       await noCardAnywhere(browser, size)
