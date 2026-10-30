@@ -30,6 +30,9 @@
  *    contract-month label or the two exact-date rows) and the month-to-date
  *    note, after the comparisons; an equal-window entry prints none; no
  *    coverage line or count.
+ * §13 R16: with a weekly block on every metric and the answer's weekly rule
+ *    (KPI_WEEKLY_ENABLED on), the subject, the HTML and the text are byte for
+ *    byte the ones without; no weekly label, comparison or rule is printed.
  *
  * Pure: no server, no database, no network.
  *
@@ -255,6 +258,38 @@ function record(results) {
 
 console.log("\n§1–§8 buildDigest()");
 record(checks(loadFrom(SRC)));
+
+// §13 R16: the digest reads no weekly field. With weekly blocks on every metric
+// and the answer's weekly rule (KPI_WEEKLY_ENABLED on), the subject, the HTML and
+// the text are byte for byte the ones without.
+function weeklyChecks(d) {
+	const plainResponse = fixture();
+	const weeklyResponse = fixture();
+	weeklyResponse.weekly = { weekRule: "Weeks run Saturday to Friday, as driver invoices do.", approvalNote: "This approval also covers its weekly figures." };
+	const row = (weekStart, weekEnd, to, label, partial) => ({ weekStart, weekEnd, to, label, value: 14, display: "14 Quinn Sentinel", coverage: 1, partial });
+	for (const m of weeklyResponse.metrics) {
+		m.weekly = m.key === "fuel_savings"
+			? { mode: "monthly_only", weekRule: "r", reason: "Monthly only: fuel receipts don't line up with weeks." }
+			: {
+				mode: "weekly", weekRule: "r",
+				series: [row("2026-09-26", "2026-10-02", "2026-10-02", "Sep 26-Oct 2, 2026", false), row("2026-10-03", "2026-10-09", "2026-10-09", "Oct 3-9, 2026 (to date)", true)],
+				current: row("2026-09-26", "2026-10-02", "2026-10-02", "Sep 26-Oct 2, 2026", false),
+				toDate: row("2026-10-03", "2026-10-09", "2026-10-09", "Oct 3-9, 2026 (to date)", true),
+				comparison: { kind: "wow", label: "vs Sep 19-25", display: "+16.7%", status: "ok", note: "" },
+			};
+	}
+	const out = [];
+	for (const preview of [false, true]) {
+		const a = d.buildDigest({ response: plainResponse, preview, asOfDay: "2026-10-14" });
+		const b = d.buildDigest({ response: weeklyResponse, preview, asOfDay: "2026-10-14" });
+		const which = preview ? "the preview" : "the weekly digest";
+		out.push({ ok: a.subject === b.subject && a.html === b.html && a.text === b.text, name: `§13 ${which}: subject, HTML and text unchanged with weekly blocks present` });
+		out.push({ ok: !/Sep 26-Oct 2|vs Sep 19-25|Saturday to Friday|weekly figures/.test(`${b.subject}${b.html}${b.text}`), name: `§13 ${which}: no weekly label, comparison or rule printed` });
+	}
+	return out;
+}
+console.log("\n§13 R16 weekly blocks present");
+record(weeklyChecks(loadFrom(SRC)));
 
 console.log("\n§9 purity");
 {

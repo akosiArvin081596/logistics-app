@@ -73068,8 +73068,9 @@ require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folde
 // live in lib/kpi-metrics.js; this block only gathers, stores and serves.
 //
 // WHAT IT WRITES: its own kpi_* tables, app_settings 'kpi.settings' (the page's
-// settings) and server_state 'kpi.derived' (the AI dispatch start the last run
-// derived). Nothing else, and never a money record.
+// settings), server_state 'kpi.derived' (the AI dispatch start the last run
+// derived) and, with KPI_WEEKLY_ENABLED, server_state 'kpi.weekly_since'.
+// Nothing else, and never a money record.
 //
 // AGGREGATES ONLY. What leaves this block (the API, the stored payloads, the
 // email, the logs) is counts, totals and rates. No driver, broker, shipper or
@@ -73149,6 +73150,29 @@ db.exec(`
 		PRIMARY KEY (metric_key, period)
 	)
 `);
+// The weekly series (KPI_WEEKLY_ENABLED; lib/kpi-metrics.js): per weekly metric,
+// the 13 complete Saturday-to-Friday weeks before the run's week and that week to
+// date (partial 1); each complete week holds its comparison with the week before
+// (vs_*), worked out by the run. Replaced by every run with the flag on, never
+// read or written with it off. Created whatever the flag.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_series_weekly (
+		metric_key TEXT NOT NULL,
+		week_start TEXT NOT NULL,
+		week_end TEXT NOT NULL,
+		to_day TEXT NOT NULL,
+		partial INTEGER NOT NULL DEFAULT 0,
+		label TEXT NOT NULL DEFAULT '',
+		value REAL,
+		display TEXT NOT NULL DEFAULT '',
+		coverage REAL,
+		vs_label TEXT,
+		vs_display TEXT,
+		vs_status TEXT,
+		computed_at TEXT NOT NULL,
+		PRIMARY KEY (metric_key, week_start)
+	)
+`);
 // A Super Admin's "approved for public use" per metric. It counts only while
 // definition_version and settings_hash still match the catalog and the settings
 // the metric reads (kpiCatalog.approvalIsValid()); no row means not approved.
@@ -73213,6 +73237,22 @@ const KPI_DIGEST_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_DI
 // The nightly deadhead route calls (paid Google Routes calls, about $0 inside the
 // free tier): default OFF, on only for true/1/yes/on (kpiDeadheadRoutes.routesEnabled()).
 const KPI_DEADHEAD_ROUTES_ENABLED = kpiDeadheadRoutes.routesEnabled(process.env.KPI_DEADHEAD_ROUTES_ENABLED);
+// Weekly figures beside the monthly ones (R16): default OFF, on only for exactly
+// "true". Off, nothing weekly is computed, stored or served, and every KPI
+// answer is as it was before weekly figures existed.
+const KPI_WEEKLY_ENABLED = process.env.KPI_WEEKLY_ENABLED === "true";
+const KPI_WEEKLY_SINCE_KEY = "kpi.weekly_since";
+const KPI_WEEKLY_VS_STATUSES = ["ok", "missing", "withheld"];
+console.log(`[kpi] weekly figures ${KPI_WEEKLY_ENABLED ? "on" : "off"} (KPI_WEEKLY_ENABLED)`);
+// The first start with weekly figures on records when they began, once, so an
+// approval given before weekly figures existed can be told from one given after.
+if (KPI_WEEKLY_ENABLED) {
+	try {
+		db.prepare("INSERT OR IGNORE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(KPI_WEEKLY_SINCE_KEY, new Date().toISOString());
+	} catch {
+		console.error("[kpi] could not record when weekly figures began");
+	}
+}
 
 // The run's time box, and the Drive phase's and the deadhead route phase's
 // shares of it.
@@ -73589,6 +73629,8 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 		deadheadRoutes: dbIn.milesData.routes,
 		truckAt: buildHaulTruckResolver(),
 		timeZone: APP_TIMEZONE,
+		// R16: weekly rows only with the flag on; off, the inputs are as before.
+		...(KPI_WEEKLY_ENABLED ? { weekly: true } : {}),
 	};
 }
 
@@ -73763,15 +73805,37 @@ function kpiPayload(m, note) {
 	return "{}";
 }
 
+// One metric's weekly rows as kpi_series_weekly stores them (R16), each field
+// checked and cut to size; a row that is not a real week is dropped. Only a
+// weekly metric (lib/kpi-catalog.js weeklyModeOf()) has rows.
+function kpiWeeklyRowsOf(m) {
+	const w = m && m.weekly && typeof m.weekly === "object" && m.weekly.mode === "weekly" && Array.isArray(m.weekly.rows) ? m.weekly.rows : [];
+	const text = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+	const out = [];
+	for (const r of w) {
+		if (!r || !kpiIsDay(r.weekStart) || !kpiIsDay(r.weekEnd) || !kpiIsDay(r.to)) continue;
+		const vs = r.vs && typeof r.vs === "object" ? r.vs : null;
+		out.push([
+			r.weekStart, r.weekEnd, r.to, r.partial === true ? 1 : 0, text(r.label, 60),
+			Number.isFinite(r.value) ? r.value : null, text(r.display, 60), Number.isFinite(r.coverage) ? r.coverage : null,
+			vs ? text(vs.label, 60) : null, vs ? text(vs.display, 60) : null,
+			vs ? (KPI_WEEKLY_VS_STATUSES.includes(vs.status) ? vs.status : "missing") : null,
+		]);
+	}
+	return out;
+}
+
 // Store one run's results for business day `day`, in ONE transaction: that
-// day's snapshot rows (upserted), the whole series (replaced) and the derived
-// AI dispatch start. Returns the number of metrics stored.
+// day's snapshot rows (upserted), the whole series (replaced), with
+// KPI_WEEKLY_ENABLED the whole weekly series (replaced), and the derived AI
+// dispatch start. Returns the number of metrics stored.
 function kpiStoreResult(day, result, note) {
 	const computedAt = new Date().toISOString();
 	const latest = db.prepare("SELECT MAX(day) AS day FROM kpi_snapshots").get();
 	if (latest && latest.day && latest.day > day) throw kpiStop("CLOCK_BEHIND");
 	const snapRows = [];
 	const seriesRows = [];
+	const weeklyRows = [];
 	for (const m of (result && Array.isArray(result.metrics) ? result.metrics : [])) {
 		const meta = m && kpiCatalog.METRIC_KEYS.includes(m.key) ? kpiCatalog.metricByKey(m.key) : null;
 		if (!meta) {
@@ -73798,6 +73862,7 @@ function kpiStoreResult(day, result, note) {
 				computedAt,
 			]);
 		}
+		if (KPI_WEEKLY_ENABLED) for (const w of kpiWeeklyRowsOf(m)) weeklyRows.push([m.key, ...w, computedAt]);
 	}
 	const a = result && result.derived && result.derived.aiDispatchStart ? result.derived.aiDispatchStart : {};
 	const derived = { aiDispatchStart: { value: kpiIsDay(a.value) ? a.value : null, evidence: typeof a.evidence === "string" ? a.evidence.slice(0, 300) : "" } };
@@ -73809,10 +73874,18 @@ function kpiStoreResult(day, result, note) {
 			definition_version = excluded.definition_version, payload = excluded.payload, computed_at = excluded.computed_at
 	`);
 	const series = db.prepare("INSERT INTO kpi_series (metric_key, period, value, display, coverage, computed_at) VALUES (?, ?, ?, ?, ?, ?)");
+	const weeklyInsert = KPI_WEEKLY_ENABLED ? db.prepare(
+		`INSERT INTO kpi_series_weekly (metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status, computed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) : null;
 	db.transaction(() => {
 		for (const r of snapRows) snap.run(...r);
 		db.prepare("DELETE FROM kpi_series").run();
 		for (const r of seriesRows) series.run(...r);
+		if (weeklyInsert) {
+			db.prepare("DELETE FROM kpi_series_weekly").run();
+			for (const r of weeklyRows) weeklyInsert.run(...r);
+		}
 		db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(KPI_DERIVED_KEY, JSON.stringify(derived));
 	})();
 	return snapRows.length;
@@ -74011,6 +74084,11 @@ function kpiResponse(nowMs) {
 		: [];
 	const series = db.prepare("SELECT metric_key, period, value, display, coverage, computed_at FROM kpi_series ORDER BY metric_key, period").all();
 	const approvals = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals").all();
+	// R16: the stored weekly rows, only with the flag on; off, the builder gets
+	// exactly the arguments it got before weekly figures existed.
+	const weeklyArgs = KPI_WEEKLY_ENABLED
+		? { weekly: true, weeklyRows: db.prepare("SELECT metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status FROM kpi_series_weekly ORDER BY metric_key, week_start").all() }
+		: {};
 	const response = kpiMetrics.buildKpiResponse({
 		asOfDay: latestDay || appTime.dayInZone(new Date(nowMs), APP_TIMEZONE),
 		timeZone: APP_TIMEZONE,
@@ -74025,6 +74103,7 @@ function kpiResponse(nowMs) {
 		snapshots,
 		series,
 		approvals,
+		...weeklyArgs,
 	});
 	return kpiEnforceApprovals(response, approvals, kpiApprovalSettings(settings));
 }

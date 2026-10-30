@@ -62,6 +62,7 @@
             :metric="metric"
             :saving="!!store.approvalSaving[metric.key]"
             :open-period="openPeriod"
+            :weekly-note="weeklyNote"
             @set-approval="(e) => store.setApproval(e.key, e.approved, e.definitionVersion)"
           />
         </div>
@@ -95,6 +96,8 @@ store.refresh()
 const groups = computed(() => groupMetrics(store.metrics))
 // The as-of day's month is still in progress; its sparkline step is drawn dashed.
 const openPeriod = computed(() => String(store.report?.asOfDay || '').slice(0, 7))
+// The server's approve-dialog sentence, present only while weekly figures are on.
+const weeklyNote = computed(() => String(store.report?.weekly?.approvalNote || ''))
 const running = computed(() => store.job?.lastRun?.status === 'running')
 
 // While a run is going, read the page again every 10 s until it finishes, in

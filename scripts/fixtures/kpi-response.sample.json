@@ -190,7 +190,30 @@
       "confidence": "high",
       "breakdown": null,
       "computedDay": "2026-10-09",
-      "approval": { "approved": true, "by": "fixture-admin", "at": "2026-10-09T14:05:40.000Z", "stale": false }
+      "approval": { "approved": true, "by": "fixture-admin", "at": "2026-10-09T14:05:40.000Z", "stale": false },
+      "weekly": {
+        "mode": "weekly",
+        "weekRule": "Weeks run Saturday to Friday, as driver invoices do. Load dates use the US Eastern calendar; ELD miles use each truck's local day, as invoices count them. A week can cross a month, so weeks don't add up to the month.",
+        "series": [
+          { "weekStart": "2026-07-04", "weekEnd": "2026-07-10", "to": "2026-07-10", "label": "Jul 4-10, 2026", "value": 9, "display": "9", "coverage": null, "partial": false },
+          { "weekStart": "2026-07-11", "weekEnd": "2026-07-17", "to": "2026-07-17", "label": "Jul 11-17, 2026", "value": 11, "display": "11", "coverage": null, "partial": false },
+          { "weekStart": "2026-07-18", "weekEnd": "2026-07-24", "to": "2026-07-24", "label": "Jul 18-24, 2026", "value": null, "display": "No records", "coverage": null, "partial": false },
+          { "weekStart": "2026-07-25", "weekEnd": "2026-07-31", "to": "2026-07-31", "label": "Jul 25-31, 2026", "value": 10, "display": "10", "coverage": null, "partial": false },
+          { "weekStart": "2026-08-01", "weekEnd": "2026-08-07", "to": "2026-08-07", "label": "Aug 1-7, 2026", "value": 12, "display": "12", "coverage": null, "partial": false },
+          { "weekStart": "2026-08-08", "weekEnd": "2026-08-14", "to": "2026-08-14", "label": "Aug 8-14, 2026", "value": 13, "display": "13", "coverage": null, "partial": false },
+          { "weekStart": "2026-08-15", "weekEnd": "2026-08-21", "to": "2026-08-21", "label": "Aug 15-21, 2026", "value": 8, "display": "8", "coverage": null, "partial": false },
+          { "weekStart": "2026-08-22", "weekEnd": "2026-08-28", "to": "2026-08-28", "label": "Aug 22-28, 2026", "value": 11, "display": "11", "coverage": null, "partial": false },
+          { "weekStart": "2026-08-29", "weekEnd": "2026-09-04", "to": "2026-09-04", "label": "Aug 29-Sep 4, 2026", "value": 12, "display": "12", "coverage": null, "partial": false },
+          { "weekStart": "2026-09-05", "weekEnd": "2026-09-11", "to": "2026-09-11", "label": "Sep 5-11, 2026", "value": 10, "display": "10", "coverage": null, "partial": false },
+          { "weekStart": "2026-09-12", "weekEnd": "2026-09-18", "to": "2026-09-18", "label": "Sep 12-18, 2026", "value": 9, "display": "9", "coverage": null, "partial": false },
+          { "weekStart": "2026-09-19", "weekEnd": "2026-09-25", "to": "2026-09-25", "label": "Sep 19-25, 2026", "value": 12, "display": "12", "coverage": null, "partial": false },
+          { "weekStart": "2026-09-26", "weekEnd": "2026-10-02", "to": "2026-10-02", "label": "Sep 26-Oct 2, 2026", "value": 14, "display": "14", "coverage": null, "partial": false },
+          { "weekStart": "2026-10-03", "weekEnd": "2026-10-09", "to": "2026-10-09", "label": "Oct 3-9, 2026 (to date)", "value": 3, "display": "3", "coverage": null, "partial": true }
+        ],
+        "current": { "weekStart": "2026-09-26", "weekEnd": "2026-10-02", "to": "2026-10-02", "label": "Sep 26-Oct 2, 2026", "value": 14, "display": "14", "coverage": null, "partial": false },
+        "toDate": { "weekStart": "2026-10-03", "weekEnd": "2026-10-09", "to": "2026-10-09", "label": "Oct 3-9, 2026 (to date)", "value": 3, "display": "3", "coverage": null, "partial": true },
+        "comparison": { "kind": "wow", "label": "vs Sep 19-25", "display": "+16.7%", "status": "ok", "note": "" }
+      }
     },
     {
       "key": "revenue",
@@ -243,7 +266,19 @@
       "confidence": "high",
       "breakdown": null,
       "computedDay": "2026-10-09",
-      "approval": { "approved": false, "by": null, "at": null, "stale": false }
+      "approval": { "approved": false, "by": null, "at": null, "stale": false },
+      "weekly": {
+        "mode": "weekly",
+        "weekRule": "Weeks run Saturday to Friday, as driver invoices do. Load dates use the US Eastern calendar; ELD miles use each truck's local day, as invoices count them. A week can cross a month, so weeks don't add up to the month.",
+        "series": [
+          { "weekStart": "2026-09-19", "weekEnd": "2026-09-25", "to": "2026-09-25", "label": "Sep 19-25, 2026", "value": 31500, "display": "$31,500", "coverage": 1, "partial": false },
+          { "weekStart": "2026-09-26", "weekEnd": "2026-10-02", "to": "2026-10-02", "label": "Sep 26-Oct 2, 2026", "value": 27250, "display": "$27,250", "coverage": 0.8571, "partial": false },
+          { "weekStart": "2026-10-03", "weekEnd": "2026-10-09", "to": "2026-10-09", "label": "Oct 3-9, 2026 (to date)", "value": 6000, "display": "$6,000", "coverage": 1, "partial": true }
+        ],
+        "current": { "weekStart": "2026-09-26", "weekEnd": "2026-10-02", "to": "2026-10-02", "label": "Sep 26-Oct 2, 2026", "value": 27250, "display": "$27,250", "coverage": 0.8571, "partial": false },
+        "toDate": { "weekStart": "2026-10-03", "weekEnd": "2026-10-09", "to": "2026-10-09", "label": "Oct 3-9, 2026 (to date)", "value": 6000, "display": "$6,000", "coverage": 1, "partial": true },
+        "comparison": { "kind": "wow", "label": "vs Sep 19-25", "display": "Not available", "status": "withheld", "note": "A weekly comparison is shown only where at least 90% of each week's loads have the figure; this week or the week before falls short, so it is not shown." }
+      }
     },
     {
       "key": "miles_driven",
@@ -500,7 +535,12 @@
       "confidence": "high",
       "breakdown": null,
       "computedDay": "2026-10-09",
-      "approval": { "approved": false, "by": null, "at": null, "stale": false }
+      "approval": { "approved": false, "by": null, "at": null, "stale": false },
+      "weekly": {
+        "mode": "monthly_only",
+        "weekRule": "Weeks run Saturday to Friday, as driver invoices do. Load dates use the US Eastern calendar; ELD miles use each truck's local day, as invoices count them. A week can cross a month, so weeks don't add up to the month.",
+        "reason": "Monthly only: fuel receipts don't line up with weeks."
+      }
     },
     {
       "key": "fuel_savings",
@@ -736,7 +776,12 @@
       "confidence": "none",
       "breakdown": null,
       "computedDay": null,
-      "approval": { "approved": false, "by": null, "at": null, "stale": false }
+      "approval": { "approved": false, "by": null, "at": null, "stale": false },
+      "weekly": {
+        "mode": "not_tracked",
+        "weekRule": "Weeks run Saturday to Friday, as driver invoices do. Load dates use the US Eastern calendar; ELD miles use each truck's local day, as invoices count them. A week can cross a month, so weeks don't add up to the month.",
+        "reason": "Not tracked, so there are no weekly figures."
+      }
     },
     {
       "key": "truck_utilization",
@@ -1072,5 +1117,9 @@
       "computedDay": "2026-10-09",
       "approval": { "approved": false, "by": null, "at": null, "stale": false }
     }
-  ]
+  ],
+  "weekly": {
+    "weekRule": "Weeks run Saturday to Friday, as driver invoices do. Load dates use the US Eastern calendar; ELD miles use each truck's local day, as invoices count them. A week can cross a month, so weeks don't add up to the month.",
+    "approvalNote": "This approval also covers its weekly figures."
+  }
 }

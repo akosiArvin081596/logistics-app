@@ -309,13 +309,20 @@ export function approvalView(approval) {
   }
 }
 
-/** What the confirm dialog says before an approval is set or withdrawn. */
-export function approvalConfirmText(label, approve) {
+const APPROVE_BODY = 'Social posts and the investor data room may use this figure. The approval resets by itself when the definition or the settings it uses change.'
+
+/**
+ * What the confirm dialog says before an approval is set or withdrawn. `weeklyNote`
+ * is the server's sentence while weekly figures are on ("This approval also
+ * covers its weekly figures."), added to the approve text as sent.
+ */
+export function approvalConfirmText(label, approve, weeklyNote = '') {
   const name = String(label ?? '').trim() || 'this metric'
+  const note = String(weeklyNote ?? '').trim()
   return approve
     ? {
         title: `Approve “${name}” for public use?`,
-        body: 'Social posts and the investor data room may use this figure. The approval resets by itself when the definition or the settings it uses change.',
+        body: `${APPROVE_BODY}${note ? ` ${note}` : ''}`,
         action: 'Approve for public use',
       }
     : {
@@ -323,6 +330,49 @@ export function approvalConfirmText(label, approve) {
         body: 'Social posts and the investor data room may no longer use this figure.',
         action: 'Withdraw approval',
       }
+}
+
+// ── Weekly (R16) ───────────────────────────────────────────────────────────────
+// A metric's weekly block as the server sent it: last week, its comparison with
+// the week before, this week so far and the weeks for the sparkline, every label
+// and figure a server string; or the reason a metric has no weekly figures. Each
+// week is plotted under its own label; a week with no figure is a gap, and the
+// week to date (the last one) is drawn dashed, as the open month is.
+
+export const WEEKLY_TITLE = 'Weekly (Sat-Fri)'
+
+/** The card's weekly block, or null when the answer carries none (weekly figures off). */
+export function weeklyView(weekly) {
+  if (!weekly || typeof weekly !== 'object') return null
+  const mode = String(weekly.mode ?? '')
+  const rule = String(weekly.weekRule ?? '')
+  if (mode !== 'weekly') return { mode, rule, reason: String(weekly.reason ?? ''), lastWeek: null, comparison: null, toDate: null, points: [], openPeriod: '' }
+  const row = (r) => (r && typeof r === 'object'
+    ? { label: String(r.label ?? ''), display: String(r.display ?? ''), muted: !isPlotted(r.value) }
+    : null)
+  const c = weekly.comparison && typeof weekly.comparison === 'object' ? weekly.comparison : null
+  const toDate = row(weekly.toDate)
+  return {
+    mode,
+    rule,
+    reason: '',
+    lastWeek: row(weekly.current),
+    comparison: c
+      ? {
+          label: String(c.label ?? ''),
+          display: String(c.display ?? ''),
+          muted: c.status !== 'ok',
+          note: String(c.note ?? ''),
+        }
+      : null,
+    toDate,
+    points: (Array.isArray(weekly.series) ? weekly.series : []).map((r) => ({
+      period: String(r?.label ?? ''),
+      value: r?.value,
+      display: String(r?.display ?? ''),
+    })),
+    openPeriod: toDate ? toDate.label : '',
+  }
 }
 
 /** A run's length: "38 s", "2 min 5 s", "<1 s". Job timing only, never a KPI. */
