@@ -9,7 +9,9 @@
 //   DF8a  position 3 hrs old            DF8b no position (one whole-load row)
 //   DF9   extra stops                   DF10 a run longer than a full tank
 //   DF11  Route Options without Google's gallons
-//   DF12  the flag off: today's panel, unchanged, and Route Options with their gallons
+//   DF12  the flag off: today's panel and rows, unchanged, and Route Options with their gallons
+//   DF13  pickup not on the map: the row says only "Check your gauge", the reason, the stops lead
+//   DF14  sensor dropout, 300 mi since: the block's 185 mi everywhere, never the verdict's 319
 //   DF1d, DF6d, DF12d  the same at 1280 x 800 (the block one column, at most about 520 px wide)
 //   DFx   no page errors, no console errors, no writes
 // At 390 x 844 every step also checks: no sideways scroll, row text at least 14 px, Refresh at least 44 px.
@@ -77,12 +79,13 @@ function world(o = {}) {
   const s = {
     flag: true, pct: 48, fuelSource: 'live', readAge: 12, burn: BURN5, tank: 150, tankSource: 'truck', mpg: 6.0,
     routeMiles: 420, leg: 'to_pickup', approach: 140, hasTruck: true, hasDevice: true, fromLivePosition: true,
-    positionAgeMinutes: 12, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api', ...o,
+    positionAgeMinutes: 12, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api',
+    pickupUnmapped: false, anchor: null, milesSince: 0, ...o,
   }
   const sensor = s.hasTruck && s.hasDevice
   const reading = !sensor ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
     : s.fuelSource === 'stale' ? { fuelPct: null, fuelSource: 'stale', anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: null }
-      : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: 0 }
+      : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.anchor == null ? s.pct : s.anchor, ageMinutes: s.readAge, milesSinceReading: s.milesSince }
   const pct = reading.fuelPct
   const rangeMiles = pct == null ? null : fuel.computeRange({ fuelPct: pct, tankGallons: s.tank, mpg: s.mpg }).rangeMiles
   const trip = fuel.planTripFuel({ routeMiles: s.routeMiles, fuelPct: pct, burn: s.burn, rangeMiles, mpg: s.mpg, reserve: R15 })
@@ -91,7 +94,7 @@ function world(o = {}) {
   const planBlock = fuel.planDriverFuel({
     ...common, plan: trip, leg: s.leg, approachMiles: approach,
     fromLivePosition: s.fromLivePosition, positionAgeMinutes: s.fromLivePosition ? s.positionAgeMinutes : null,
-    routeSource: s.routeSource, extraStops: s.extraStops, afterAnotherLoad: s.afterAnotherLoad,
+    routeSource: s.routeSource, extraStops: s.extraStops, afterAnotherLoad: s.afterAnotherLoad, pickupUnmapped: s.pickupUnmapped,
   })
   const iv = fuel.rangeInterval({ fuelPct: pct, burn: s.burn, rangeMiles })
   const updatedAt = new Date(Date.now() - 12 * MIN).toISOString()
@@ -309,13 +312,16 @@ const SCENES = [
   { step: 'DF2', title: 'In transit, enough', world: { leg: 'to_delivery', routeMiles: 180 }, expect: ['225', 'Uses about 35 gal. You have enough.'] },
   { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'], absent: ['Uses about 35 gal'] },
   { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery', 'You need about 100 gal in the tank for the whole load. Check your gauge.'] },
-  { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'You need about 145 gal in the tank to finish. Check your gauge.'] },
+  { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'To finish this load Check your gauge.'], absent: ['gal', '420 mi'], badge: 'Fuel unknown' },
   { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel ?' },
   { step: 'DF7', title: 'Load not mapped', world: {}, planError: 'NO_ROUTE', expect: ['225', "This load isn't on the map yet, so we can't work out the fuel for it."] },
   { step: 'DF8a', title: 'Position 3 hrs old', world: { positionAgeMinutes: 180, leg: 'to_delivery' }, expect: ['Worked out from where your truck was 3 hrs ago.'] },
   { step: 'DF8b', title: 'No position', world: { fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Whole load, pickup to delivery', "Your truck hasn't sent its location recently."] },
-  { step: 'DF9', title: 'Extra stops', world: { extraStops: true }, expect: ['To reach first pickup', 'You need about 55 gal in the tank to reach pickup. Check your gauge.', "This load has extra stops that aren't counted. You may need more fuel."], absent: ['You have enough'] },
+  { step: 'DF9', title: 'Extra stops', world: { extraStops: true }, expect: ['To reach first pickup Check your gauge.', 'To finish this load Check your gauge.', "This load has extra stops that aren't counted. You may need more fuel."], absent: ['You have enough', 'gal', '140 mi', '420 mi'], badge: 'Check gauge' },
   { step: 'DF10', title: 'Longer than a full tank', world: { leg: 'to_delivery', routeMiles: 1040 }, expect: ['1,040 mi', 'Uses about 195 gal. Fill up full, and plan another fuel stop on the way.'] },
+  // One source: rows the block can't count have no number, and the stops lead is the block's miles left.
+  { step: 'DF13', title: 'Pickup not on the map', world: { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }, expect: ['335', 'To finish this load Check your gauge.', "The pickup isn't on the map, so the run to it isn't counted."], absent: ['gal', '300 mi'], badge: 'Check gauge', panelExpect: ['Where to fuel up', 'Fuel up within 335 mi.'] },
+  { step: 'DF14', title: 'Sensor dropout, 300 mi since', world: { fuelSource: 'carried', pct: 66.7, anchor: 100, milesSince: 300, leg: 'to_delivery', routeMiles: 450 }, expect: ['185', "Your fuel sensor isn't reporting. This is an estimate.", 'To finish this load Check your gauge.'], absent: ['gal', '450 mi'], badge: 'Check gauge', panelExpect: ['Fuel up within 185 mi.'], panelAbsent: ['319'] },
 ]
 
 async function phoneScene(browser, sc) {
@@ -329,6 +335,8 @@ async function phoneScene(browser, sc) {
     const checks = {
       sentences: sc.expect.every((e) => text.includes(e)),
       ...(sc.absent ? { absent: sc.absent.every((e) => !text.includes(e)) } : {}),
+      ...(sc.panelExpect ? { panelSentences: sc.panelExpect.every((e) => panel.includes(e)) } : {}),
+      ...(sc.panelAbsent ? { panelAbsent: sc.panelAbsent.every((e) => !panel.includes(e)) } : {}),
       noWorking: !WORKING_RE.test(panel),
       stopsAndRefresh: panel.includes('QA Truck Plaza Riverton') && /Refresh fuel, stops and check/.test(panel),
       ...(sc.badge ? { badge: badge === sc.badge } : {}),
@@ -362,6 +370,9 @@ async function routeOptions(browser) {
         ? { routeOptions: hasOptions, noGallons: !altText.includes('⛽') && !/\bgal\b/.test(altText), tollStays: altText.includes('$12.50') }
         : {
             todayPanel: panel.includes('How we know') && panel.includes('kept back as a reserve'),
+            // Today's rows, unchanged: the verdict card, the hero and the stops lead on the verdict's figure.
+            todayRows: panel.includes('Not enough fuel — you need to stop') && panel.includes('225 miles before you need to refuel')
+              && panel.includes('Fuel up within 225 mi.') && !panel.includes('miles until you run out') && !panel.includes('Check gauge'),
             noBlock: (await page.locator('[data-testid="driver-fuel"]').count()) === 0,
             todayBadge: badge === 'Fuel stop needed',
             routeOptionsGallons: hasOptions && altText.includes('⛽'),

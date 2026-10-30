@@ -148,37 +148,80 @@ export function driverFuelView(b, { planProblem = null } = {}) {
     if (b.afterAnotherLoad === true) {
       footers.push('You have another load before this one. These numbers start from where your truck is now.');
     }
+    if (b.pickupUnmapped === true) footers.push("The pickup isn't on the map, so the run to it isn't counted.");
   }
   return { top, rows, rowsNote: rows.length ? '' : planProblemText(planProblem), footers };
 }
 
+// The header's thresholds, on the block's miles left: one figure decides the colour.
+function milesTone(miles) {
+  return miles < 50 ? 'bad' : miles < 150 ? 'warn' : 'ok';
+}
+
+function liveLegs(b) {
+  return b && Array.isArray(b.legs) && b.loadDone !== true ? b.legs.filter(Boolean) : [];
+}
+
 /**
- * The header chip: "225 mi", "Refuel now" or "Fuel ?", and its tooltip. `kind`
- * as in fuelTop(); the header picks the colour.
+ * The colour of the section's top, from the block alone: 'bad' (refuel now, or a
+ * row says add or refill), 'warn' (a row it can't count), 'ok', or 'unknown'.
+ */
+export function driverFuelTone(b) {
+  const top = fuelTop(b);
+  if (top.kind === 'now') return 'bad';
+  if (top.kind !== 'miles') return 'unknown';
+  const legs = liveLegs(b);
+  if (legs.some((l) => l.status === 'add' || l.status === 'refill_on_way')) return 'bad';
+  if (legs.some((l) => l.status === 'check_gauge')) return 'warn';
+  return legs.length ? 'ok' : milesTone(toNum(b.milesLeft));
+}
+
+/**
+ * The stops section's urgency and lead, from the block alone: a stop is needed
+ * when it says refuel now, add or refill, or can't count a row while it knows the
+ * miles left; the lead is that figure, the one the section headlines.
+ */
+export function driverFuelStops(b) {
+  const top = fuelTop(b);
+  const miles = toNum(b && b.milesLeft);
+  const legs = liveLegs(b);
+  const required = top.kind === 'now'
+    || legs.some((l) => l.status === 'add' || l.status === 'refill_on_way')
+    || (miles !== null && legs.some((l) => l.status === 'check_gauge'));
+  if (!required) return { required: false, lead: '' };
+  if (top.kind === 'now') return { required: true, lead: 'Fuel up now — before you start this run.' };
+  return { required: true, lead: miles !== null ? `Fuel up within ${milesText(miles)} mi.` : 'Fuel up before you finish this run.' };
+}
+
+/**
+ * The header chip: "225 mi", "Refuel now" or "Fuel ?", its tooltip, and its
+ * colour, all from the block. `kind` as in fuelTop().
  */
 export function driverFuelChip(b) {
   const top = fuelTop(b);
   const sensor = top.notes.length ? ` ${top.notes.join(' ')}` : '';
-  if (top.kind === 'now') return { kind: 'now', text: 'Refuel now', title: `Refuel now. ${top.sub}${sensor}` };
-  if (top.kind === 'miles') return { kind: 'miles', text: `${top.headline} mi`, title: `About ${top.headline} miles before you run out.${sensor}` };
-  return { kind: 'unknown', text: 'Fuel ?', title: `${top.headline}. ${top.sub}` };
+  if (top.kind === 'now') return { kind: 'now', tone: 'bad', text: 'Refuel now', title: `Refuel now. ${top.sub}${sensor}` };
+  if (top.kind === 'miles') {
+    return { kind: 'miles', tone: milesTone(toNum(b.milesLeft)), text: `${top.headline} mi`, title: `About ${top.headline} miles before you run out.${sensor}` };
+  }
+  return { kind: 'unknown', tone: 'warn', text: 'Fuel ?', title: `${top.headline}. ${top.sub}` };
 }
 
 /**
- * The badge on the load's collapsed Fuel header, from the trip-plan answer.
- * Null when the block doesn't decide it: the caller keeps its own rule.
+ * The badge on the load's collapsed Fuel header, from the block alone. Null with
+ * no block (the caller keeps today's rule) or a load that is over (no badge).
  */
 export function driverFuelBadge(plan) {
   const b = driverFuelOf(plan);
   if (!b || b.loadDone === true) return null;
-  const legs = Array.isArray(b.legs) ? b.legs : [];
-  const finish = legs.filter((l) => l && (l.key === 'finish' || l.key === 'whole_load')).pop();
+  const finish = liveLegs(b).filter((l) => l.key === 'finish' || l.key === 'whole_load').pop();
   const add = finish && finish.status === 'add' ? toNum(finish.addGallons) : null;
   if (add !== null && add > 0) return { tone: 'bad', text: `Add ${milesText(add)} gal` };
   const top = fuelTop(b);
   if (top.kind === 'now') return { tone: 'bad', text: 'Refuel now' };
+  if (finish && finish.status === 'refill_on_way') return { tone: 'bad', text: 'Fuel stop needed' };
   if (WITHHELD.has(b.fuelState) || top.kind === 'unknown') return { tone: 'warn', text: 'Fuel unknown' };
+  if (finish && finish.status === 'check_gauge') return { tone: 'warn', text: 'Check gauge' };
   // The same figure the section headlines, so the badge and the section agree.
-  if (plan.verdict === 'clears') return { tone: 'plain', text: `${top.headline} mi range` };
-  return null;
+  return { tone: 'plain', text: `${top.headline} mi range` };
 }

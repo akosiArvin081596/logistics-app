@@ -252,7 +252,7 @@
       <div class="dfp-section-title" :class="{ urgent: stopsRequired }">
         {{ stopsRequired ? 'Where to fuel up' : 'Diesel stops on your route' }}
       </div>
-      <p v-if="stopsRequired && actionText" class="dfp-stops-lead">{{ actionText }}</p>
+      <p v-if="stopsRequired && stopsLead" class="dfp-stops-lead">{{ stopsLead }}</p>
 
       <div v-if="stopsLoading" class="dfp-loading">Finding diesel stops along your route…</div>
 
@@ -401,7 +401,7 @@ import {
   milesText,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
-import { driverFuelOf, driverFuelView, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
+import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
 
 const api = useApi()
 
@@ -486,15 +486,17 @@ const fuelView = computed(() =>
     ? driverFuelView(fuelBlock.value, { planProblem: planBlock.value ? null : planProblem.value })
     : null,
 )
-// A figure takes the verdict's colour, as the hero below does; no figure is grey.
-const topTone = computed(() => {
-  const kind = fuelView.value && fuelView.value.top.kind
-  if (kind === 'now') return 'bad'
-  return kind === 'miles' ? heroTone.value : 'unknown'
-})
+// The colour comes from the block, like every figure on this screen: the verdict
+// is worked out on other figures and can disagree with them.
+const topTone = computed(() => (fuelBlock.value ? driverFuelTone(fuelBlock.value) : 'unknown'))
+// With a block on screen the stops section's urgency and lead are the block's too.
+const blockStops = computed(() => (fuelBlock.value ? driverFuelStops(fuelBlock.value) : null))
 
 const routeText = computed(() => milesText(plan.value && plan.value.routeMiles))
-const stopsRequired = computed(() => !!(plan.value && plan.value.fuelStopsRecommended))
+const stopsRequired = computed(() =>
+  blockStops.value ? blockStops.value.required : !!(plan.value && plan.value.fuelStopsRecommended),
+)
+const stopsLead = computed(() => (blockStops.value ? blockStops.value.lead : actionText.value))
 
 // The instruction. `refuelWithinMiles` is floored at 0 by the server, and 0 is
 // not "no limit" — it means the margin is already gone, so it has to read as

@@ -351,10 +351,9 @@ const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 const fuelPlan = ref(null)
 const fuelBadge = computed(() => {
   const p = fuelPlan.value
-  // With the driver gallons flag on, the badge reads the same block as the
-  // section ("Add 40 gal", "Fuel unknown"); where the block doesn't decide, as before.
-  const gallons = driverFuelBadge(p)
-  if (gallons) return gallons
+  // With the driver gallons flag on, the badge reads only the block the section
+  // reads ("Add 65 gal", "Check gauge"), never the verdict below.
+  if (driverFuelOf(p)) return driverFuelBadge(p)
   const v = p && p.verdict
   if (v === 'insufficient') return { tone: 'bad', text: 'Fuel stop needed' }
   if (v === 'tight') return { tone: 'warn', text: 'Fuel is tight' }

@@ -171,7 +171,13 @@ if (Header) {
     const live = await chip(answer(MEASURED, block()))
     ok('§4 225 mi left: the chip says "225 mi", its tooltip the figure in words with no working',
       !!live && live.text === '225 mi' && live.title === 'About 225 miles before you run out.')
-    ok('§4 …and keeps the colour rule on distance-to-dry, as before (240: grey)', !!live && live.tone === 'ok')
+    ok('§4 …and takes its colour from the block\'s miles left (225: grey)', !!live && live.tone === 'ok')
+    // One source: a dropout carried at the planning rate leaves 75 mi on the block,
+    // while the range answer's own distance-to-dry still reads 240 (green before).
+    const dropout = await chip(answer({ ...MEASURED, fuelSource: 'carried' },
+      block({ reading: { fuelPct: 48, fuelSource: 'carried', anchorPct: 48, ageMinutes: 60, milesSinceReading: 150 } })))
+    ok('§4 the colour is the block\'s: a dropout with 75 mi left is amber, though the range answer says 240',
+      !!dropout && dropout.text === '75 mi' && dropout.tone === 'warn')
 
     // The estimated basis: the block uses the receipts' 6.0 MPG, the range's own
     // figures the rollup's 7.2, so the two differ and the chip must quote the block.

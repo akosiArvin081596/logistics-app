@@ -222,12 +222,15 @@ function world(o = {}) {
   const s = {
     flag: true, pct: 48, fuelSource: 'live', readAge: 12, burn: BURN5, tank: 150, tankSource: 'truck', mpg: 6.0,
     routeMiles: 420, leg: 'to_pickup', approach: 140, hasTruck: true, hasDevice: true, fromLivePosition: true,
-    positionAgeMinutes: 12, loadDone: false, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api', ...o,
+    positionAgeMinutes: 12, loadDone: false, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api',
+    pickupUnmapped: false, anchor: null, milesSince: 0, ...o,
   }
   const sensor = s.hasTruck && s.hasDevice
+  // A carried reading: `pct` is the level decayed at the MPG on file, as the server
+  // sends it; `anchor` and `milesSince` let the block decay it at the planning rate.
   const reading = !sensor ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
     : s.fuelSource === 'stale' ? { fuelPct: null, fuelSource: 'stale', anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: null }
-      : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: 0 }
+      : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.anchor == null ? s.pct : s.anchor, ageMinutes: s.readAge, milesSinceReading: s.milesSince }
   const pct = reading.fuelPct
   const rangeMiles = pct == null ? null : fuel.computeRange({ fuelPct: pct, tankGallons: s.tank, mpg: s.mpg }).rangeMiles
   const trip = fuel.planTripFuel({ routeMiles: s.routeMiles, fuelPct: pct, burn: s.burn, rangeMiles, mpg: s.mpg, reserve: R15 })
@@ -237,6 +240,7 @@ function world(o = {}) {
     ...common, plan: trip, leg: s.leg, approachMiles: approach,
     fromLivePosition: s.fromLivePosition, positionAgeMinutes: s.fromLivePosition ? s.positionAgeMinutes : null,
     routeSource: s.routeSource, extraStops: s.extraStops, afterAnotherLoad: s.afterAnotherLoad, loadDone: s.loadDone,
+    pickupUnmapped: s.pickupUnmapped,
   })
   const rangeBlock = fuel.planDriverFuel(common)
   const iv = fuel.rangeInterval({ fuelPct: pct, burn: s.burn, rangeMiles })
@@ -306,7 +310,7 @@ if (v) {
   // An add row says only what to pump. "Uses about 80 gal" beside it invited a driver
   // with ~105 gal on his gauge to skip the top-up (the re-check's Low 5).
   {
-    const addLines = [{}, { pct: 3, routeMiles: 180, leg: 'to_delivery' }, { pct: 20, leg: 'to_delivery', routeMiles: 300 }, { fuelSource: 'carried' }]
+    const addLines = [{}, { pct: 3, routeMiles: 180, leg: 'to_delivery' }, { pct: 20, leg: 'to_delivery', routeMiles: 300 }, { pct: 30, leg: 'to_delivery', routeMiles: 250 }]
       .flatMap((o) => view(o).rows).filter((r) => r.tone === 'bad' && /^Add about|Uses about .*Add about/.test(r.line)).map((r) => r.line)
     check('§7 an add row says only "Add about N gal.": no "Uses about" beside it',
       [addLines.length >= 4, addLines.filter((l) => /Uses about/.test(l)), addLines.every((l) => /^Add about [\d,]+ gal\.$/.test(l))], [true, [], true])
@@ -335,22 +339,51 @@ if (v) {
       "This load has extra stops that aren't counted. You may need more fuel.",
       'You have another load before this one. These numbers start from where your truck is now.',
     ])
-  // A row the plan can't fully count never says "You have enough": it checks the
-  // gauge, and its footer says why, together. Each caveat alone, then the control.
-  const CAVEATS = [
-    [{ extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
-    [{ afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
-    [{ routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+  // (b) A row the block can't count shows only "Check your gauge.", no gallons and no
+  // miles, and its reason is on the same screen (a footer, or the top's own line).
+  const INCOMPLETE = [
+    ['unmapped pickup', { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }, "The pickup isn't on the map, so the run to it isn't counted."],
+    ['sensor dropout (carried)', { fuelSource: 'carried', pct: 46, anchor: 50, milesSince: 20 }, "Your fuel sensor isn't reporting. This is an estimate."],
+    ['another load first', { afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
+    ['extra stops', { extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
+    ['stale reading', { fuelSource: 'stale', readAge: 18 * 60 }, 'No fuel reading for 18 hrs. Check your gauge.'],
+    ['estimated distance', { routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
   ]
-  for (const [o, footer] of CAVEATS) {
+  for (const [label, o, reason] of INCOMPLETE) {
     const vw = view(o)
-    const pickup = vw.rows[0]
-    check(`§7 status and footer together (${Object.keys(o)[0]}): the pickup row checks the gauge, no row says "enough", and the footer is there`,
-      [pickup.tone, pickup.line, vw.rows.some((r) => /You have enough/.test(r.line)), vw.footers.includes(footer)],
-      ['unknown', 'You need about 55 gal in the tank to reach pickup. Check your gauge.', false, true])
+    const lines = [vw.top.sub, ...vw.top.notes, ...vw.footers]
+    check(`§7 (b) ${label}: every row is only "Check your gauge." (no gallons, no miles), and its reason is on screen`,
+      [vw.rows.length > 0, vw.rows.every((r) => r.line === 'Check your gauge.' && r.miles === '' && r.tone === 'unknown'),
+        vw.rows.some((r) => /\d/.test(`${r.line} ${r.miles}`)), lines.includes(reason)],
+      [true, true, false, true])
   }
-  check('§7 …the control, with no caveat: the pickup row says "enough" and there is no footer',
-    [view({}).rows[0].line, view({}).footers], ['Uses about 30 gal. You have enough.', []])
+  check('§7 (b) …the control, with no reason: rows carry their miles and gallons, and there is no footer',
+    [view({}).rows.map((r) => [r.miles, r.line]), view({}).footers],
+    [[['140 mi', 'Uses about 30 gal. You have enough.'], ['420 mi', 'Add about 65 gal.']], []])
+
+  // (a) One source: every distance and colour the flag-on screen shows is the block's.
+  {
+    const W1 = { fuelSource: 'carried', pct: 66.7, anchor: 100, milesSince: 300, leg: 'to_delivery', routeMiles: 450 }
+    const W8 = { burn: NO_BURN, mpg: 16, pct: 50, leg: 'to_delivery', routeMiles: 700 }
+    const stopsOf = (o) => v.driverFuelStops && v.driverFuelStops(world(o).planBlock)
+    check('§7 (a) the stops lead quotes the block: W1 dropout "Fuel up within 185 mi." (the verdict alone said 319)',
+      [stopsOf(W1), world(W1).plan.refuelWithinMiles], [{ required: true, lead: 'Fuel up within 185 mi.' }, 319])
+    check('§7 (a) …W8, an MPG of 16 on file read as 11: "Fuel up within 443 mi." (the verdict alone said 652)',
+      [stopsOf(W8), world(W8).plan.refuelWithinMiles], [{ required: true, lead: 'Fuel up within 443 mi.' }, 652])
+    check('§7 (a) …add to finish: within the miles left; refuel now: now; enough: no lead',
+      [stopsOf({}), stopsOf({ pct: 3, routeMiles: 180, leg: 'to_delivery' }), stopsOf({ leg: 'to_delivery', routeMiles: 180 })],
+      [{ required: true, lead: 'Fuel up within 225 mi.' }, { required: true, lead: 'Fuel up now — before you start this run.' }, { required: false, lead: '' }])
+    const toneOf = (o) => v.driverFuelTone && v.driverFuelTone(world(o).planBlock)
+    check('§7 (a) the top colour is the block\'s: add red, enough green, a row it can\'t count amber, refuel now red, no figure grey',
+      [toneOf({}), toneOf({ leg: 'to_delivery', routeMiles: 180 }), toneOf({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }),
+        toneOf({ pct: 3, routeMiles: 180, leg: 'to_delivery' }), toneOf({ fuelSource: 'stale', readAge: 18 * 60 })],
+      ['bad', 'ok', 'warn', 'bad', 'unknown'])
+    check('§7 (a) …the unmapped pickup is amber though its verdict clears (the verdict alone would paint it green)',
+      world({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }).plan.verdict, 'clears')
+    const chipOf = (o) => v.driverFuelChip(world(o).rangeBlock)
+    check('§7 (a) the chip\'s colour is the block\'s miles left (under 50 red, under 150 amber), with its figure',
+      [chipOf({}), chipOf({ pct: 30 }), chipOf({ pct: 12 })].map((c) => [c.text, c.tone]), [['225 mi', 'ok'], ['135 mi', 'warn'], ['45 mi', 'bad']])
+  }
 
   const noteOf = (problem) => v.driverFuelView(world().rangeBlock, { planProblem: problem }).rowsNote
   check('§7 why there are no rows, per trip-plan failure',
@@ -403,8 +436,13 @@ if (v) {
   check('§7 …enough to finish: the section\'s own figure', badge({ leg: 'to_delivery', routeMiles: 180 }), { tone: 'plain', text: '225 mi range' })
   check('§7 …no figure: "Fuel unknown"', [badge({ fuelSource: 'stale', readAge: 18 * 60 }), badge({ burn: NO_BURN, tankSource: 'default', tank: 200 })],
     [{ tone: 'warn', text: 'Fuel unknown' }, { tone: 'warn', text: 'Fuel unknown' }])
-  check('§7 …refill on the way, a load that is over, or no block: the badge\'s own rule decides (null)',
-    [badge({ leg: 'to_delivery', routeMiles: 1040 }), badge({ loadDone: true }), badge({ flag: false }), v.driverFuelBadge(null)], [null, null, null, null])
+  check('§7 …refill on the way: "Fuel stop needed" from the block\'s refill row (not from the verdict)',
+    badge({ leg: 'to_delivery', routeMiles: 1040 }), { tone: 'bad', text: 'Fuel stop needed' })
+  check('§7 …a row the block can\'t count: "Check gauge", amber (the unmapped pickup\'s verdict clears; the dropout\'s is tight)',
+    [badge({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }), badge({ fuelSource: 'carried', pct: 66.7, anchor: 100, milesSince: 300, leg: 'to_delivery', routeMiles: 450 })],
+    [{ tone: 'warn', text: 'Check gauge' }, { tone: 'warn', text: 'Check gauge' }])
+  check('§7 …a load that is over: no badge; no block (flag off): null, so LoadDetail keeps today\'s rule',
+    [badge({ loadDone: true }), badge({ flag: false }), v.driverFuelBadge(null)], [null, null, null])
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +609,7 @@ if (panelFactory) {
   check('§8b refill on the way', blockText(await on({ leg: 'to_delivery', routeMiles: 1040 })),
     '225 miles until you run out Fuel level read 12 min ago To finish this load 1,040 mi Uses about 195 gal. Fill up full, and plan another fuel stop on the way.')
   check('§8b check gauge (ELD silent 18 hrs)', blockText(await on({ fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' })),
-    'Fuel level unknown No fuel reading for 18 hrs. Check your gauge. To finish this load 420 mi You need about 145 gal in the tank to finish. Check your gauge.')
+    'Fuel level unknown No fuel reading for 18 hrs. Check your gauge. To finish this load Check your gauge.')
   check('§8b check gauge (no ELD reading, no position)', blockText(await on({ hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 })),
     "Fuel level unknown Your truck isn't sending a fuel level. Check your gauge. Whole load, pickup to delivery 280 mi You need about 100 gal in the tank for the whole load. Check your gauge. Your truck hasn't sent its location recently.")
   check('§8b no tank size', blockText(await on({ burn: NO_BURN, tankSource: 'default', tank: 200 })),
@@ -585,22 +623,68 @@ if (panelFactory) {
     check('§8b load done (the plan says so): the top only', blockText(await on({ loadDone: true })), '225 miles until you run out Fuel level read 12 min ago')
   }
   check('§8b sensor dropout', blockText(await on({ fuelSource: 'carried', leg: 'to_delivery', routeMiles: 180 })),
-    "225 miles until you run out Your fuel sensor isn't reporting. This is an estimate. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. You have enough.")
+    "225 miles until you run out Your fuel sensor isn't reporting. This is an estimate. Fuel level read 12 min ago To finish this load Check your gauge.")
   check('§8b refuel now', blockText(await on({ pct: 3, leg: 'to_delivery', routeMiles: 180 })),
     'Refuel now Stop for fuel as soon as you can. Fuel level read 12 min ago To finish this load 180 mi Add about 60 gal.')
-  // Status and footer on one screen: the pickup row checks the gauge, and the
-  // footers under it say why; neither shows without the other.
-  check('§8b the reasons under the top, with the rows they explain (no "enough" beside an uncounted-miles footer)',
+  // Status and reason on one screen: the rows check the gauge with no number, and
+  // the lines under them say why; neither shows without the other.
+  check('§8b the reasons under the top, with the rows they explain (no number beside an uncounted-miles footer)',
     blockText(await on({ positionAgeMinutes: 180, extraStops: true, afterAnotherLoad: true, routeSource: 'straight_line_estimate' })),
-    "225 miles until you run out Fuel level read 12 min ago To reach first pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi Add about 65 gal. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
-  for (const [o, footer] of [
-    [{ extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
-    [{ afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
-    [{ routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+    "225 miles until you run out Fuel level read 12 min ago To reach first pickup Check your gauge. To finish this load Check your gauge. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
+  // (b) on screen, for each reason: every row is its label and "Check your gauge."
+  // only (no miles cell, no gallons), and the reason line is on the same screen.
+  const rowTexts = (html) => html.split('data-testid="driver-fuel-row"').slice(1).map((seg) => textOf(`<x ${seg.slice(0, seg.indexOf('</div>'))}`))
+  const ROW_ONLY_GAUGE = /^(To reach (first )?pickup|To finish this load|Whole load, pickup to delivery) Check your gauge\.$/
+  for (const [label, o, reason] of [
+    ['unmapped pickup', { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }, "The pickup isn't on the map, so the run to it isn't counted."],
+    ['sensor dropout (carried)', { fuelSource: 'carried', pct: 46, anchor: 50, milesSince: 20 }, "Your fuel sensor isn't reporting. This is an estimate."],
+    ['another load first', { afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
+    ['extra stops', { extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
+    ['stale reading', { fuelSource: 'stale', readAge: 18 * 60 }, 'No fuel reading for 18 hrs. Check your gauge.'],
+    ['estimated distance', { routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
   ]) {
-    const t = blockText(await on(o))
-    check(`§8b status and footer together on screen (${Object.keys(o)[0]}): "Check your gauge" on the pickup row, the footer, no "You have enough"`,
-      [t.includes('to reach pickup. Check your gauge.'), t.includes(footer), t.includes('You have enough')], [true, true, false])
+    const html = await on(o)
+    const rows = rowTexts(html)
+    check(`§8b (b) ${label} on screen: each row is its label and "Check your gauge." only, no miles cell, and the reason line`,
+      [rows.length > 0, rows.every((r) => ROW_ONLY_GAUGE.test(r)), html.includes('class="dff-row-miles"'), textOf(html).includes(reason)],
+      [true, true, false, true])
+  }
+
+  // (a) One source: collect every distance on the flag-on screen (the whole panel,
+  // the stops section included; a stop's own "mi off route" is the stops answer's,
+  // not a fuel figure) and require each to be one the block sent.
+  {
+    const W1 = { fuelSource: 'carried', pct: 66.7, anchor: 100, milesSince: 300, leg: 'to_delivery', routeMiles: 450 }
+    const W8 = { burn: NO_BURN, mpg: 16, pct: 50, leg: 'to_delivery', routeMiles: 700 }
+    const WORLDS = {
+      'before pickup (add)': {}, 'in transit, enough': { leg: 'to_delivery', routeMiles: 180 }, 'refill on the way': { leg: 'to_delivery', routeMiles: 1040 },
+      'refuel now': { pct: 3, leg: 'to_delivery', routeMiles: 180 }, 'W1 4 h dropout, 450 mi': W1, 'W8 MPG 16 read as 11, 700 mi': W8,
+      'unmapped pickup': { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }, 'extra stops': { extraStops: true },
+      'fix 3 hrs old': { positionAgeMinutes: 180 },
+    }
+    const strays = []
+    let shownCount = 0
+    for (const [name, o] of Object.entries(WORLDS)) {
+      const w = world(o)
+      serve(w)
+      const t = textOf(await openSection(panelFactory())).replace(/~?[\d.]+ mi off route/g, '')
+      const b = w.planBlock
+      const sent = new Set([b.milesLeft, ...b.legs.map((l) => l.miles)].filter((x) => x != null).map(String))
+      const shown = [...t.matchAll(/(\d[\d,]*)\s*(?:mi|miles)\b/g)].map((m) => m[1].replace(/,/g, ''))
+      shownCount += shown.length
+      const bad = shown.filter((n) => !sent.has(n))
+      if (bad.length) strays.push(`${name}: shows ${bad.join(', ')} mi; the block sent ${[...sent].join(', ')}`)
+    }
+    check('§8b (a) every distance on the flag-on screen is one the block sent (top, rows, footers and the stops lead)', [shownCount > 9, strays], [true, []])
+    serve(world(W1))
+    const w1Text = textOf(await openSection(panelFactory()))
+    check('§8b (a) …the W1 dropout: "185 miles until you run out" and "Fuel up within 185 mi.", never the verdict\'s 319',
+      [w1Text.includes('185 miles until you run out'), w1Text.includes('Fuel up within 185 mi.'), w1Text.includes('319')], [true, true, false])
+    const topClass = async (o) => { serve(world(o)); const m = /class="dff-top tone-(\w+)"/.exec(await openSection(panelFactory())); return m ? m[1] : null }
+    check('§8b (a) the top colour is the block\'s: amber on an unmapped pickup or a dropout whose verdicts clear, red on add, green on enough',
+      [await topClass({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }), await topClass({ fuelSource: 'carried', pct: 70, anchor: 72, milesSince: 10, leg: 'to_delivery', routeMiles: 200 }),
+        await topClass({}), await topClass({ leg: 'to_delivery', routeMiles: 180 })],
+      ['warn', 'warn', 'bad', 'ok'])
   }
   check('§8b load not mapped (400 NO_ROUTE): the top from the range answer, and why there are no rows',
     blockText(await on({}, { '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })),
@@ -705,6 +789,9 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
     badgeFor(world({ burn: NO_BURN, tankSource: 'default', tank: 200 }).plan).badge, { tone: 'warn', text: 'Fuel unknown' })
   check('§9 flag on, refill on the way: as before ("Fuel stop needed")',
     badgeFor(world({ leg: 'to_delivery', routeMiles: 1040 }).plan).badge, { tone: 'bad', text: 'Fuel stop needed' })
+  check('§9 flag on, the badge never falls back to the verdict: a delivered load shows none (its verdict would say "Fuel stop needed"), an unmapped pickup "Check gauge" (not a range on its clearing verdict)',
+    [badgeFor(world({ loadDone: true }).plan).badge, badgeFor(world({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }).plan).badge],
+    [null, { tone: 'warn', text: 'Check gauge' }])
   {
     const off = badgeFor(world({ flag: false }).plan)
     const offClears = badgeFor(world({ flag: false, leg: 'to_delivery', routeMiles: 180 }).plan)
