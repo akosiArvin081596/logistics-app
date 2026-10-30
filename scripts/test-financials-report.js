@@ -8,7 +8,11 @@
  * Assigned month stay in that month; every grouping (truck, driver, load,
  * pickup state, delivery state, owner) adds up to the fleet; a cost line that is
  * switched off is reported but not counted; a Settlement adjustment is folded
- * into the line it corrects and reported beside the margin.
+ * into the line it corrects and reported beside the margin. Each figure also
+ * carries each line's counted amount (adding up to total costs), whether the
+ * line is on, off or partly on over the months it covers (a closed month keeps
+ * the settings it closed with), and driver pay as a % of revenue (null when
+ * there is no revenue); every older field stays as it was, pinned by hash.
  *
  * Part 2, the routes on the books fixture of test-financials-books.js (two
  * investors and a company truck, April and May closed the old way and frozen):
@@ -313,6 +317,159 @@ const R = financialsReport;
 	const rows = R.reportRows(rep("truck"), { groupLabel: "Truck" });
 	check(rows[0][0] === "Period" && rows[0][1] === "Truck" && rows[rows.length - 1][1] === "All" && rows[rows.length - 1][3] === 7900, "the CSV rows: header, each group, the fleet total", JSON.stringify(rows[rows.length - 1]));
 
+	// ── counted lines: countedCosts, lineState, driverPayPct ────────────────────
+	// May closed (settled) with the default settings, June open (live): one range
+	// can count a line in one month and not the other.
+	const twoMonths = [
+		{ kind: "revenue", month: "2026-05", day: "2026-05-12", cents: 400000, loadId: "L3", driver: "ann", truck: "T1", ownerId: 5, basis: "settled" },
+		{ kind: "driver_pay", month: "2026-05", day: "2026-05-13", cents: 25000, loadId: "L3", driver: "ann", truck: "T1", ownerId: 5, basis: "settled" },
+		{ kind: "trip", month: "2026-05", day: "2026-05-13", cents: 15000, expenseType: "Fuel", loadId: "L3", driver: "ann", truck: "T1", ownerId: 5, basis: "settled" },
+		{ kind: "fixed", month: "2026-05", day: null, cents: 300000, truck: "T1", ownerId: 5, basis: "settled" },
+		{ kind: "investor_payout", month: "2026-05", day: null, cents: 50000, ownerId: 5, basis: "settled" },
+		{ kind: "revenue", month: "2026-06", day: "2026-06-03", cents: 500000, loadId: "L1", driver: "ann", truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "revenue", month: "2026-06", day: "2026-06-20", cents: 300000, loadId: "L2", driver: "bob", truck: "T2", ownerId: 0, basis: "live" },
+		{ kind: "driver_pay", month: "2026-06", day: "2026-06-04", cents: 30000, loadId: "L1", driver: "ann", truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "driver_pay", month: "2026-06", day: "2026-06-21", cents: 20000, loadId: "L2", driver: "bob", truck: "T2", ownerId: 0, basis: "live" },
+		{ kind: "driver_pay", month: "2026-06", day: "2026-06-10", cents: 25000, loadId: "", driver: "cal", truck: "T2", ownerId: 0, basis: "live" },
+		{ kind: "trip", month: "2026-06", day: "2026-06-04", cents: 12000, expenseType: "Fuel", loadId: "L1", driver: "ann", truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "trip", month: "2026-06", day: "2026-06-21", cents: 8000, expenseType: "Fuel", loadId: "L2", driver: "bob", truck: "T2", ownerId: 0, basis: "live" },
+		{ kind: "trip", month: "2026-06", day: "2026-06-21", cents: 4000, expenseType: "Toll", loadId: "", driver: "bob", truck: "T2", ownerId: 0, basis: "live" },
+		{ kind: "fixed", month: "2026-06", day: null, cents: 300000, truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "maint_reserve", month: "2026-06", day: null, cents: 90000, truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "depreciation", month: "2026-06", day: null, cents: 200000, truck: "T1", ownerId: 5, basis: "live" },
+		{ kind: "overhead", month: "2026-06", day: null, cents: 100000, ownerId: 0, basis: "live" },
+		{ kind: "investor_payout", month: "2026-06", day: null, cents: 60000, ownerId: 5, basis: "live" },
+	];
+	const closedMay = R.normalizeSettings(null);
+	const two = (june, { groupBy = "fleet", granularity = "month", may = closedMay, from = "2026-05-01", to = "2026-06-30" } = {}) => R.buildReport({
+		items: twoMonths, from, to, granularity, groupBy, settingsFor: (mk) => (mk === "2026-05" ? may : june), milesOf: () => null, ctx });
+	// Read safely, so a figure without the fields fails its check instead of crashing the runner.
+	const cc = (f, k) => (f && f.countedCosts ? f.countedCosts[k] : undefined);
+	const ls = (f, k) => (f && f.lineState ? f.lineState[k] : undefined);
+	const grp = (r, key) => r.groups.find((g) => g.key === key) || { total: {} };
+	const defaultsTwo = two(closedMay).total;
+
+	const fuelOff = R.normalizeSettings({ costs: { fuel: false } });
+	const f1 = two(fuelOff);
+	check(f1.total.costs.fuel === 350 && cc(f1.total, "fuel") === 150 && ls(f1.total, "fuel") === "partial"
+		&& Math.round(f1.total.totalCosts * 100) === Math.round(defaultsTwo.totalCosts * 100) - 20000
+		&& ls(f1.total, "tolls") === "on" && ls(f1.total, "maintenanceReserve") === "off",
+		"fuel off in open June only: fuel is partial over May–June; counted = closed May's $150 of $350; total costs drop by June's $200; tolls on, reserve off",
+		JSON.stringify({ fuel: f1.total.costs.fuel, counted: cc(f1.total, "fuel"), state: ls(f1.total, "fuel"), totalCosts: f1.total.totalCosts, tolls: ls(f1.total, "tolls") }));
+	const f1May = f1.totalByPeriod["2026-05"];
+	const f1Jun = f1.totalByPeriod["2026-06"];
+	check(ls(f1May, "fuel") === "on" && cc(f1May, "fuel") === 150 && ls(f1Jun, "fuel") === "off" && cc(f1Jun, "fuel") === 0 && f1Jun.costs.fuel === 200,
+		"…by month: May counts its fuel ($150, on); June reports $200 and counts none (off)",
+		JSON.stringify({ may: [ls(f1May, "fuel"), cc(f1May, "fuel")], jun: [ls(f1Jun, "fuel"), cc(f1Jun, "fuel"), f1Jun.costs.fuel] }));
+	const f1Truck = two(fuelOff, { groupBy: "truck" });
+	const t1 = grp(f1Truck, "truck:t1").total;
+	const t2 = grp(f1Truck, "truck:t2").total;
+	check(t1.costs.fuel === 270 && cc(t1, "fuel") === 150 && ls(t1, "fuel") === "partial" && t2.costs.fuel === 80 && cc(t2, "fuel") === 0 && ls(t2, "fuel") === "off",
+		"…by truck: T1 (May and June) is partial, counting its May $150 of $270; T2 (June only) is off, counting none of its $80",
+		JSON.stringify({ t1: [t1.costs.fuel, cc(t1, "fuel"), ls(t1, "fuel")], t2: [t2.costs.fuel, cc(t2, "fuel"), ls(t2, "fuel")] }));
+
+	const resDep = R.normalizeSettings({ costs: { maintenanceReserve: true, depreciation: true } });
+	const f2 = two(resDep);
+	const f2Jun = f2.totalByPeriod["2026-06"];
+	const f2T1 = grp(two(resDep, { groupBy: "truck" }), "truck:t1").total;
+	const f2NoDriver = grp(two(resDep, { groupBy: "driver" }), "driver:").total;
+	check(ls(f2Jun, "maintenanceReserve") === "on" && cc(f2Jun, "maintenanceReserve") === 900 && ls(f2Jun, "depreciation") === "on" && cc(f2Jun, "depreciation") === 2000
+		&& ls(f2.total, "maintenanceReserve") === "partial" && cc(f2.total, "maintenanceReserve") === 900 && ls(f2.total, "depreciation") === "partial" && cc(f2.total, "depreciation") === 2000
+		&& Math.round(f2.total.totalCosts * 100) === Math.round(defaultsTwo.totalCosts * 100) + 290000
+		&& cc(f2T1, "maintenanceReserve") === 900 && cc(f2T1, "depreciation") === 2000
+		&& cc(f2NoDriver, "maintenanceReserve") === 900 && cc(f2NoDriver, "depreciation") === 2000,
+		"reserve and depreciation on in June: on and counted in June ($900, $2,000); partial over May–June (May closed with them off); on T1's row and in 'Not tied to a driver'",
+		JSON.stringify({ jun: [ls(f2Jun, "maintenanceReserve"), cc(f2Jun, "maintenanceReserve"), ls(f2Jun, "depreciation"), cc(f2Jun, "depreciation")], total: [ls(f2.total, "maintenanceReserve"), f2.total.totalCosts], t1: cc(f2T1, "depreciation"), noDriver: cc(f2NoDriver, "depreciation") }));
+
+	const ohOn = R.normalizeSettings({ costs: { overhead: true } });
+	const f3 = two(ohOn);
+	const f3Company = grp(two(ohOn, { groupBy: "truck" }), "overhead").total;
+	const f3NoDriver = grp(two(ohOn, { groupBy: "driver" }), "driver:").total;
+	check(ls(f3.totalByPeriod["2026-06"], "overhead") === "on" && cc(f3.total, "overhead") === 1000 && f3.total.costs.overhead === 1000 && ls(f3.total, "overhead") === "partial"
+		&& cc(f3Company, "overhead") === 1000 && ls(f3Company, "overhead") === "on" && cc(f3NoDriver, "overhead") === 1000,
+		"overhead on in June: counted $1,000 in 'Company overhead' (on: June only) and in 'Not tied to a driver'; over May–June the line is partial (May closed with it off)",
+		JSON.stringify({ total: [cc(f3.total, "overhead"), ls(f3.total, "overhead")], company: [cc(f3Company, "overhead"), ls(f3Company, "overhead")], noDriver: cc(f3NoDriver, "overhead") }));
+
+	const payOn = R.normalizeSettings({ costs: { investorPayouts: true } });
+	const f4 = two(payOn);
+	const f4Row = grp(two(payOn, { groupBy: "truck" }), "investor_payouts").total;
+	const f4Both = two(payOn, { may: payOn }).total;
+	check(f4.total.costs.investorPayouts === 1100 && cc(f4.total, "investorPayouts") === 600 && ls(f4.total, "investorPayouts") === "partial"
+		&& f4Row.costs.investorPayouts === 1100 && cc(f4Row, "investorPayouts") === 600 && ls(f4Row, "investorPayouts") === "partial"
+		&& cc(f4Both, "investorPayouts") === 1100 && ls(f4Both, "investorPayouts") === "on",
+		"investor payouts on in June: $1,100 reported, June's $600 counted, partial (May closed with them off), on the 'Investor payouts' row too; a May closed with them on counts both (on)",
+		JSON.stringify({ total: [f4.total.costs.investorPayouts, cc(f4.total, "investorPayouts"), ls(f4.total, "investorPayouts")], row: [cc(f4Row, "investorPayouts"), ls(f4Row, "investorPayouts")], both: [cc(f4Both, "investorPayouts"), ls(f4Both, "investorPayouts")] }));
+
+	const byDrv = two(closedMay, { groupBy: "driver" });
+	const pct = (key) => grp(byDrv, key).total.driverPayPct;
+	const drvOff = two(R.normalizeSettings({ costs: { driverPay: false } })).total;
+	check(pct("driver:ann") === 6.1 && pct("driver:bob") === 6.7 && pct("driver:cal") === null && pct("driver:") === null
+		&& defaultsTwo.driverPayPct === 8.3 && drvOff.driverPayPct === 8.3,
+		"driver pay % of revenue: ann $550 of $9,000 is 6.1, bob 6.7, the fleet 8.3; cal (pay, no revenue) and 'Not tied to a driver' are null, not 0; the line's value counts, switched on or not",
+		JSON.stringify({ ann: pct("driver:ann"), bob: pct("driver:bob"), cal: pct("driver:cal"), none: pct("driver:"), fleet: defaultsTwo.driverPayPct, off: drvOff.driverPayPct }));
+
+	const empty = two(closedMay, { from: "2026-08-01", to: "2026-08-31" }).total;
+	check(empty.basis === "none" && R.COST_KEYS.every((k) => ls(empty, k) === "none" && cc(empty, k) === 0) && empty.driverPayPct === null,
+		"a figure that covers no month: every line 'none' (as its basis), nothing counted, pay % null",
+		JSON.stringify({ basis: empty.basis, lineState: empty.lineState, driverPayPct: empty.driverPayPct }));
+
+	// Every figure of every grouping and granularity: the counted lines add up to
+	// total costs, and the margin is revenue less them, to the cent.
+	const figuresOf = (r) => [r.total, ...Object.values(r.totalByPeriod), ...r.groups.flatMap((g) => [g.total, ...Object.values(g.byPeriod)])];
+	const GROUPINGS = ["fleet", "truck", "driver", "load", "pickupState", "deliveryState", "owner"];
+	const GRANULARITIES = ["day", "week", "month", "quarter", "year"];
+	const sumBad = [];
+	for (const june of [closedMay, fuelOff, resDep, ohOn, payOn]) {
+		for (const groupBy of GROUPINGS) {
+			for (const granularity of GRANULARITIES) {
+				for (const f of figuresOf(two(june, { groupBy, granularity, from: "2026-05-10", to: "2026-06-20" }))) {
+					const counted = R.COST_KEYS.reduce((a, k) => a + Math.round((cc(f, k) ?? NaN) * 100), 0);
+					if (counted !== Math.round(f.totalCosts * 100) || Math.round(f.revenue * 100) - counted !== Math.round(f.margin * 100)) sumBad.push(`${groupBy}/${granularity}`);
+				}
+			}
+		}
+	}
+	check(sumBad.length === 0, "every figure: the counted lines add up to total costs, and margin = revenue − counted, to the cent", [...new Set(sumBad)].slice(0, 6).join(", "));
+
+	// The older fields are as they were: each grouping's reports, with the three
+	// new fields taken out, hash to what this builder returned before they existed.
+	const NEW_FIELDS = ["countedCosts", "lineState", "driverPayPct"];
+	const OLD_FIELDS = ["revenue", "costs", "totalCosts", "margin", "marginPct", "settlementAdjustment", "loads", "loadsWithMiles", "miles", "revenuePerMile", "costPerMile", "basis"];
+	const WANT_FIELDS = JSON.stringify([...OLD_FIELDS, ...NEW_FIELDS].sort());
+	// Taken from the builder before the three fields existed; a change here means an older figure moved.
+	const GOLDEN = {
+		fleet: "51840e22432378ddd4468172cb0860b0af773f1d262cf0e24cd0a77c0a50f2a5",
+		truck: "768e4a70050c48660eb6b4ec4cf3c807d6b7d9be441172c120918dbb1ef8be70",
+		driver: "17824063b112b6ec48ded1effd3a8b4ea16f7e69e708be4e19519d6e6d6df746",
+		load: "43fc03675f7d4807b9dcc7d5342d7cf08b8215d3b2c415af35a3558e72d25a3d",
+		pickupState: "f7f1d3769ea2eb18839a88f55bfc1efa7b13cb7d8f8cd92d4b561815549f7fbe",
+		deliveryState: "267f41e5d57dcacf47cc1a64e1de2728d99aef907862bfe93994e36eee12498d",
+		owner: "06fb3c6497fad5c7d8c09b81ae9f42f92979b4785295ea32f63b34f913a37143",
+	};
+	const milesTwo = (lk) => ({ L1: { miles: 400, source: "eld" }, L2: { miles: 300, source: "ratecon" } }[lk] || null);
+	const allOnJune = R.normalizeSettings({ costs: Object.fromEntries(R.COST_KEYS.map((k) => [k, true])) });
+	for (const groupBy of GROUPINGS) {
+		const reports = [];
+		let keysOk = true;
+		for (const set of [items, twoMonths]) {
+			for (const [from, to] of [["2026-05-01", "2026-06-30"], ["2026-05-10", "2026-06-20"]]) {
+				for (const granularity of GRANULARITIES) {
+					for (const june of [closedMay, fuelOff, allOnJune]) {
+						const r = JSON.parse(JSON.stringify(R.buildReport({ items: set, from, to, granularity, groupBy, settingsFor: (mk) => (mk === "2026-05" ? closedMay : june), milesOf: milesTwo, ctx })));
+						for (const f of figuresOf(r)) {
+							if (JSON.stringify(Object.keys(f).sort()) !== WANT_FIELDS) keysOk = false;
+							for (const k of NEW_FIELDS) delete f[k];
+						}
+						reports.push(r);
+					}
+				}
+			}
+		}
+		const hash = require("crypto").createHash("sha256").update(JSON.stringify(reports)).digest("hex");
+		check(hash === GOLDEN[groupBy] && keysOk, `by ${groupBy}: every older field is as it was (hash), and each figure adds exactly countedCosts, lineState and driverPayPct`,
+			`hash ${hash === GOLDEN[groupBy] ? "unchanged" : `changed (got ${hash})`}, fields ${keysOk ? "as expected" : "not old + the three new"}`);
+	}
+
 	// ═══════════════════════════════ Part 2: the routes ═════════════════════════
 	const W = buildWorld();
 	const { db, api, call } = W;
@@ -392,6 +549,12 @@ const R = financialsReport;
 		&& Math.round(after.totalByPeriod["2026-06"].totalCosts * 100) === Math.round(fleetR.body.totalByPeriod["2026-06"].totalCosts * 100) + 100000
 		&& Math.round(after.totalByPeriod["2026-04"].totalCosts * 100) === Math.round(fleetR.body.totalByPeriod["2026-04"].totalCosts * 100),
 		"settings: overhead switched on counts in open June; closed April and May keep the settings they closed with", JSON.stringify({ status: put.status, jun: oh("2026-06"), apr: oh("2026-04") }));
+	const afterFigs = [after.total, ...Object.values(after.totalByPeriod)];
+	check(ls(after.total, "overhead") === "partial" && cc(after.total, "overhead") === 1000
+		&& ls(after.totalByPeriod["2026-04"], "overhead") === "off" && ls(after.totalByPeriod["2026-06"], "overhead") === "on"
+		&& afterFigs.every((f) => R.COST_KEYS.reduce((a, k) => a + Math.round((cc(f, k) ?? NaN) * 100), 0) === Math.round(f.totalCosts * 100)),
+		"settings: the report marks overhead off in closed April, on in open June and partial over the range, counting June's $1,000; each period's counted lines add up to its total costs",
+		JSON.stringify({ total: [ls(after.total, "overhead"), cc(after.total, "overhead")], apr: ls(after.totalByPeriod["2026-04"], "overhead"), jun: ls(after.totalByPeriod["2026-06"], "overhead") }));
 	const audit = db.prepare("SELECT details FROM audit_trail WHERE action = 'update_financials_settings'").all();
 	check(audit.length === 1 && /overhead: off → on/.test(audit[0].details), "settings: the change is audited", JSON.stringify(audit));
 	const before = (await report({ from: "2025-01-01", to: "2026-06-30", granularity: "year" })).body;
