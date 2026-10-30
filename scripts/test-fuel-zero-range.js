@@ -282,6 +282,10 @@ const NO_READING = { fuelPct: null, fuelSource: "none", anchorPct: null, ageMinu
 const STALE = { fuelPct: null, fuelSource: "stale", anchorPct: 27, ageMinutes: 18 * 60 };
 const allCheckGauge = (df) => Array.isArray(df.legs) && df.legs.length > 0
 	&& df.legs.every((l) => l.status === "check_gauge" && l.needInTankGallons > 0 && l.addGallons === null);
+// A row the block can't count (a stale or carried reading among others) has no number at all.
+const allNumberless = (df) => Array.isArray(df.legs) && df.legs.length > 0
+	&& df.legs.every((l) => l.status === "check_gauge" && l.miles === null && l.usesGallons === null
+		&& l.addGallons === null && l.needInTankGallons === null);
 
 const none = DF({ reading: NO_READING });
 check("no ELD fuel reading: fuelState 'none', no miles, not refuel-now", none.fuelState === "none" && none.milesLeft === null && none.refuelNow === false,
@@ -292,11 +296,11 @@ check("...420 + 15 mi at the planning rate (150 gal / 100 pts / 5.0 mi a pt = 0.
 const stale = DF({ reading: STALE });
 check("ELD silent past 12 h: fuelState 'stale', no miles, the reading's own age (18 h)",
 	stale.fuelState === "stale" && stale.milesLeft === null && stale.fuelReadAgeMinutes === 1080, JSON.stringify(stale));
-check("...its rows check the gauge", allCheckGauge(stale));
+check("...its rows check the gauge, with no gallons and no miles", allNumberless(stale), JSON.stringify(stale.legs));
 const carriedDF = DF({ reading: { fuelPct: 33.6, fuelSource: "carried", anchorPct: 40, ageMinutes: 60, milesSinceReading: 100 } });
-check("sensor dropout (carried): numbers, marked 'estimated'",
+check("sensor dropout (carried): the top keeps its figure, marked 'estimated'; the rows have no number",
 	carriedDF.fuelState === "estimated" && Number.isFinite(carriedDF.milesLeft) && carriedDF.milesLeft > 0
-		&& carriedDF.legs.every((l) => l.status !== "check_gauge"), JSON.stringify(carriedDF));
+		&& allNumberless(carriedDF), JSON.stringify(carriedDF));
 const LIVE40 = { fuelPct: 40, fuelSource: "live", anchorPct: 40, ageMinutes: 5 };
 const noTank = DF({ reading: LIVE40, burn: NO_BURN, tankSource: "default", tank: 200 });
 check("estimated basis + no tank size: 'no_tank_size', no miles, rows check the gauge",
@@ -334,7 +338,7 @@ check("incident replay: the driver sees 0 miles and Refuel now, marked estimated
 const LIVE90 = (ageMinutes) => ({ fuelPct: 90, fuelSource: "live", anchorPct: 90, ageMinutes, milesSinceReading: 0 });
 const oldLive = DF({ reading: LIVE90(9 * 60) });
 check("a live reading 9 h old: 'stale', no miles, no 'enough' (90% at 5.0 mi a point would have cleared 420 mi)",
-	oldLive.fuelState === "stale" && oldLive.milesLeft === null && oldLive.fuelReadAgeMinutes === 540 && allCheckGauge(oldLive), JSON.stringify(oldLive));
+	oldLive.fuelState === "stale" && oldLive.milesLeft === null && oldLive.fuelReadAgeMinutes === 540 && allNumberless(oldLive), JSON.stringify(oldLive));
 const at6h = DF({ reading: LIVE90(360) });
 const past6h = DF({ reading: LIVE90(361) });
 check("...the line is the trip plan's 6 h: 360 min is live and clears, 361 min is stale",
@@ -343,11 +347,11 @@ const carriedOld = DF({ reading: { fuelPct: 30, fuelSource: "carried", anchorPct
 check("a carried reading 7 h old: 'stale', no miles", carriedOld.fuelState === "stale" && carriedOld.milesLeft === null, JSON.stringify(carriedOld));
 const carriedBlind = DF({ reading: { fuelPct: 90, fuelSource: "carried", anchorPct: 90, ageMinutes: 30, milesSinceReading: null } });
 check("a carried reading with no odometer to decay it (carried unchanged): 'stale', no 'enough'",
-	carriedBlind.fuelState === "stale" && carriedBlind.milesLeft === null && allCheckGauge(carriedBlind), JSON.stringify(carriedBlind));
+	carriedBlind.fuelState === "stale" && carriedBlind.milesLeft === null && allNumberless(carriedBlind), JSON.stringify(carriedBlind));
 const carriedGuess = DF({ reading: { fuelPct: 27, fuelSource: "carried", anchorPct: 50, ageMinutes: 90, milesSinceReading: 300 },
 	burn: BURN5, tankSource: "default", tank: 200 });
 check("no tank size + a carried reading over a dropout (decayed against the 200-gal guess): 'no_tank_size', check the gauge",
-	carriedGuess.fuelState === "no_tank_size" && carriedGuess.milesLeft === null && allCheckGauge(carriedGuess), JSON.stringify(carriedGuess));
+	carriedGuess.fuelState === "no_tank_size" && carriedGuess.milesLeft === null && allNumberless(carriedGuess), JSON.stringify(carriedGuess));
 const carriedStill = DF({ reading: { fuelPct: 50, fuelSource: "carried", anchorPct: 50, ageMinutes: 20, milesSinceReading: 0 },
 	burn: BURN5, tankSource: "default", tank: 200 });
 check("...paired: the same truck parked through the dropout (0 mi, nothing decayed) keeps its number",
@@ -365,9 +369,8 @@ const longDropout = attempt(() => {
 		hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150, mpg: 6.0, burn: BURN5, reserve: R15 });
 	return { verdict: plan.verdict, ...df };
 });
-check("after a 4 h dropout from 100% (300 mi since): carried at the planning rate, 185 mi left and add 40, not 'enough' (the verdict alone says clears)",
-	longDropout.verdict === "clears" && longDropout.fuelState === "estimated" && longDropout.milesLeft === 185
-		&& longDropout.legs && longDropout.legs[0] && longDropout.legs[0].status === "add" && longDropout.legs[0].addGallons === 40,
+check("after a 4 h dropout from 100% (300 mi since): carried at the planning rate, 185 mi left; the row has no number, never 'enough' (the verdict alone says clears)",
+	longDropout.verdict === "clears" && longDropout.fuelState === "estimated" && longDropout.milesLeft === 185 && allNumberless(longDropout),
 	JSON.stringify(longDropout));
 
 const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));

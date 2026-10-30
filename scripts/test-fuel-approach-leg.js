@@ -218,7 +218,7 @@ check("the smallest add is 5 gal (0.5 mi short)", () => {
 	assert.deepStrictEqual([plan.verdict === "clears", f.status, f.addGallons], [false, "add", 5]);
 });
 const TOP_KEYS = ["afterAnotherLoad", "extraStops", "fuelReadAgeMinutes", "fuelState", "legs", "loadDone", "milesLeft",
-	"position", "positionAgeMinutes", "refuelNow", "routeEstimated", "v"];
+	"pickupUnmapped", "position", "positionAgeMinutes", "refuelNow", "routeEstimated", "v"];
 const LEG_KEYS = ["addGallons", "key", "miles", "needInTankGallons", "status", "usesGallons"];
 const NO_IDENTITY_RE = /vehicle|latitude|longitude|"lat|"lng|unit|driver|price|cost|\$/i;
 check("the block carries only its listed keys: no vehicle id, no coordinates, no names, no money", () => {
@@ -292,7 +292,7 @@ check("miles the plan can't count never earn a plain 'enough': extra stops, a lo
 	const statuses = (o) => driverFuel({ plan, leg: "to_pickup", approachMiles: 140, ...o }).legs.map((l) => [l.key, l.status]);
 	assert.deepStrictEqual(statuses({}), [["pickup", "enough"], ["finish", "add"]], "control: no caveat");
 	for (const o of [{ extraStops: true }, { afterAnotherLoad: true }, { routeSource: "straight_line_estimate" }]) {
-		assert.deepStrictEqual(statuses(o), [["pickup", "check_gauge"], ["finish", "add"]], JSON.stringify(o));
+		assert.deepStrictEqual(statuses(o), [["pickup", "check_gauge"], ["finish", "check_gauge"]], JSON.stringify(o));
 	}
 	const enoughEverywhere = driverFuel({ plan: tripPlanFor({ routeMiles: 100 }), leg: "to_delivery", extraStops: true });
 	assert.deepStrictEqual(enoughEverywhere.legs.map((l) => [l.status, l.addGallons]), [["check_gauge", null]]);
@@ -331,6 +331,38 @@ check("a carried reading is judged at the planning rate: after a long dropout, '
 	}
 	assert.ok(runs >= 140);
 	assert.deepStrictEqual(bad.slice(0, 5), []);
+});
+
+// === §7d one source: no number for a run the block can't count ===============
+// Arvin's design choice after the last re-check: a row whose run or fuel level the
+// block can't count shows only "check your gauge" and its reason, no gallons, no miles.
+console.log("\n§7d driver gallons: no number on a row the block can't count");
+const numberless = (l) => l.status === "check_gauge" && l.miles === null && l.usesGallons === null
+	&& l.addGallons === null && l.needInTankGallons === null;
+const INCOMPLETE = [
+	["a pickup with no coordinates", { pickupUnmapped: true }],
+	["a sensor dropout (carried reading)", { reading: { fuelPct: 48, fuelSource: "carried", anchorPct: 50, ageMinutes: 60, milesSinceReading: 20 } }],
+	["another load first (queued or started)", { afterAnotherLoad: true }],
+	["extra stops", { extraStops: true }],
+	["a stale reading", { reading: { fuelPct: null, fuelSource: "stale", anchorPct: 48, ageMinutes: 18 * 60, milesSinceReading: null } }],
+	["a straight-line (estimated) distance", { routeSource: "straight_line_estimate" }],
+];
+for (const [label, o] of INCOMPLETE) {
+	check(`no gallons and no miles on a row the block can't count: ${label}`, () => {
+		const df = driverFuel({ plan: tripPlanFor({ routeMiles: 420 }), leg: "to_pickup", approachMiles: 140, ...o });
+		assert.ok(df.legs.length === 2 && df.legs.every(numberless), JSON.stringify(df.legs));
+	});
+}
+check("...the control with none of them: both rows carry their miles and gallons", () => {
+	assert.ok(beforePickup().legs.every((l) => Number.isFinite(l.miles) && Number.isFinite(l.usesGallons)), JSON.stringify(beforePickup().legs));
+});
+check("the block says when the pickup isn't on the map (pickupUnmapped), so the screen can give the reason", () => {
+	const plan = tripPlanFor({ routeMiles: 300 });
+	assert.deepStrictEqual([
+		driverFuel({ plan, leg: "to_delivery", pickupUnmapped: true }).pickupUnmapped,
+		driverFuel({ plan, leg: "to_delivery" }).pickupUnmapped,
+		driverFuel({ pickupUnmapped: true }).pickupUnmapped,
+	], [true, false, false]);
 });
 
 // === §8 the flag in server.js ================================================
@@ -611,15 +643,15 @@ async function routeSections() {
 		const df = at(on, "'two stops' in Details / trip-plan, Driver").body.driverFuel;
 		assert.ok(df.extraStops === true && df.legs.every((l) => l.status !== "enough"), JSON.stringify(df));
 	});
-	check("pre-pickup with the pickup not geocoded: the route plans truck to delivery (verdict clears), the block never says 'enough'", () => {
+	check("pre-pickup with the pickup not geocoded: the route plans truck to delivery (verdict clears); the block says so and its row has no number", () => {
 		const b = at(on, "pre-pickup, pickup not geocoded, 70% / trip-plan, Driver").body;
-		assert.deepStrictEqual([b.verdict, b.leg, b.laneMiles, b.driverFuel.legs.map((l) => [l.key, l.status])],
-			["clears", "to_delivery", 300, [["finish", "check_gauge"]]]);
+		assert.deepStrictEqual([b.verdict, b.leg, b.laneMiles, b.driverFuel.pickupUnmapped, b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.needInTankGallons])],
+			["clears", "to_delivery", 300, true, [["finish", "check_gauge", null, null]]]);
 	});
-	check("in transit after a 4 h dropout from 100%: the level is carried at the planning rate (40%, 185 left), finish 300 mi is add 40, not 'enough'", () => {
+	check("in transit after a 4 h dropout from 100%: the top carries the level at the planning rate (40%, 185 left); the row has no number", () => {
 		const b = at(on, "in transit after a 4 h dropout from 100% (300 mi since) / trip-plan, Driver").body;
-		assert.deepStrictEqual([b.verdict, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft, b.driverFuel.legs.map((l) => [l.key, l.status, l.addGallons])],
-			["clears", "carried", "estimated", 185, [["finish", "add", 40]]]);
+		assert.deepStrictEqual([b.verdict, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft, b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.addGallons])],
+			["clears", "carried", "estimated", 185, [["finish", "check_gauge", null, null]]]);
 	});
 	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 42 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
@@ -653,11 +685,11 @@ async function routeSections() {
 	check("no fix for 13 h: fuel 'stale' with its age, one whole-load row to check the gauge", () => {
 		const df = at(on, "no fix for 13 h (fuel stale too) / trip-plan, Driver").body.driverFuel;
 		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.fuelReadAgeMinutes, df.position, df.legs.map((l) => [l.key, l.miles, l.status])],
-			["stale", null, 780, "none", [["whole_load", 280, "check_gauge"]]]);
+			["stale", null, 780, "none", [["whole_load", null, "check_gauge"]]]);
 	});
-	check("sensor dropout: the carried reading gives numbers, marked 'estimated'", () => {
+	check("sensor dropout: the top keeps its figure, marked 'estimated'; the rows have no number", () => {
 		const df = at(on, "sensor dropout (carried) / trip-plan, Driver").body.driverFuel;
-		assert.ok(df.fuelState === "estimated" && Number.isFinite(df.milesLeft), JSON.stringify(df));
+		assert.ok(df.fuelState === "estimated" && Number.isFinite(df.milesLeft) && df.legs.length > 0 && df.legs.every(numberless), JSON.stringify(df));
 	});
 	check("no tank size and no fill history: no miles, 'no_tank_size', rows say what the tank needs", () => {
 		const df = at(on, "no tank size, no fill history / trip-plan, Driver").body.driverFuel;
