@@ -236,7 +236,7 @@ GET /api/loads/:loadId/status-history · requireAuth@2f5c61384511 · inline@541b
 PUT /api/loads/:loadId/status-override · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@8aa8b9504d07
 GET /api/loads/completed/export · requireRole("Super Admin")=anon@12b84c4b0134 · exportLimiter=limiter · inline@54fc0de8329d
 POST /api/loads/from-ratecon · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · rateConLimiter=limiter · inline@212ee416fa7c
-POST /api/loads/pickup-confirmed · pickupConfirmedGate@3c832d526593 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f0b9a3e154b2
+POST /api/loads/pickup-confirmed · pickupConfirmedGate@3c832d526593 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@c8586f14de89
 POST /api/loads/ratecon/extract · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · rateConLimiter=limiter · inline@e5fd59f72057
 POST /api/location · requireAuth@2f5c61384511 · locationLimiter=limiter · inline@448bada7c004
 GET /api/locations/latest · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@d72fb5301396
