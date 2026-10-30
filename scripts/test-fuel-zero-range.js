@@ -287,12 +287,13 @@ const none = DF({ reading: NO_READING });
 check("no ELD fuel reading: fuelState 'none', no miles, not refuel-now", none.fuelState === "none" && none.milesLeft === null && none.refuelNow === false,
 	JSON.stringify(none));
 check("...its rows say what the tank needs to finish and to check the gauge", allCheckGauge(none), JSON.stringify(none.legs));
-check("...420 mi + 15 reserve at 6 MPG, +10%: 80 gal in the tank", none.legs[0] && none.legs[0].needInTankGallons === 80, JSON.stringify(none.legs));
+check("...420 + 15 mi at the planning rate (150 gal / 100 pts / 5.0 mi a pt = 0.3 gal a mile), +10%: 145 gal in the tank",
+	none.legs[0] && none.legs[0].needInTankGallons === 145, JSON.stringify(none.legs));
 const stale = DF({ reading: STALE });
 check("ELD silent past 12 h: fuelState 'stale', no miles, the reading's own age (18 h)",
 	stale.fuelState === "stale" && stale.milesLeft === null && stale.fuelReadAgeMinutes === 1080, JSON.stringify(stale));
 check("...its rows check the gauge", allCheckGauge(stale));
-const carriedDF = DF({ reading: { fuelPct: 33.6, fuelSource: "carried", anchorPct: 40, ageMinutes: 60 } });
+const carriedDF = DF({ reading: { fuelPct: 33.6, fuelSource: "carried", anchorPct: 40, ageMinutes: 60, milesSinceReading: 100 } });
 check("sensor dropout (carried): numbers, marked 'estimated'",
 	carriedDF.fuelState === "estimated" && Number.isFinite(carriedDF.milesLeft) && carriedDF.milesLeft > 0
 		&& carriedDF.legs.every((l) => l.status !== "check_gauge"), JSON.stringify(carriedDF));
@@ -327,6 +328,30 @@ const incidentDF = attempt(() => fm.planDriverFuel({
 }));
 check("incident replay: the driver sees 0 miles and Refuel now, marked estimated — never a blank",
 	incidentDF.milesLeft === 0 && incidentDF.refuelNow === true && incidentDF.fuelState === "estimated", JSON.stringify(incidentDF));
+
+// A reading the truck may have driven far past, or one decayed against a guessed
+// tank, is never a number to plan on (fix round on the planDriverFuel read).
+const LIVE90 = (ageMinutes) => ({ fuelPct: 90, fuelSource: "live", anchorPct: 90, ageMinutes, milesSinceReading: 0 });
+const oldLive = DF({ reading: LIVE90(9 * 60) });
+check("a live reading 9 h old: 'stale', no miles, no 'enough' (90% at 5.0 mi a point would have cleared 420 mi)",
+	oldLive.fuelState === "stale" && oldLive.milesLeft === null && oldLive.fuelReadAgeMinutes === 540 && allCheckGauge(oldLive), JSON.stringify(oldLive));
+const at6h = DF({ reading: LIVE90(360) });
+const past6h = DF({ reading: LIVE90(361) });
+check("...the line is the trip plan's 6 h: 360 min is live and clears, 361 min is stale",
+	at6h.fuelState === "live" && at6h.legs[0] && at6h.legs[0].status === "enough" && past6h.fuelState === "stale", `${at6h.fuelState} ${past6h.fuelState}`);
+const carriedOld = DF({ reading: { fuelPct: 30, fuelSource: "carried", anchorPct: 30, ageMinutes: 7 * 60, milesSinceReading: 50 } });
+check("a carried reading 7 h old: 'stale', no miles", carriedOld.fuelState === "stale" && carriedOld.milesLeft === null, JSON.stringify(carriedOld));
+const carriedBlind = DF({ reading: { fuelPct: 90, fuelSource: "carried", anchorPct: 90, ageMinutes: 30, milesSinceReading: null } });
+check("a carried reading with no odometer to decay it (carried unchanged): 'stale', no 'enough'",
+	carriedBlind.fuelState === "stale" && carriedBlind.milesLeft === null && allCheckGauge(carriedBlind), JSON.stringify(carriedBlind));
+const carriedGuess = DF({ reading: { fuelPct: 27, fuelSource: "carried", anchorPct: 50, ageMinutes: 90, milesSinceReading: 300 },
+	burn: BURN5, tankSource: "default", tank: 200 });
+check("no tank size + a carried reading over a dropout (decayed against the 200-gal guess): 'no_tank_size', check the gauge",
+	carriedGuess.fuelState === "no_tank_size" && carriedGuess.milesLeft === null && allCheckGauge(carriedGuess), JSON.stringify(carriedGuess));
+const carriedStill = DF({ reading: { fuelPct: 50, fuelSource: "carried", anchorPct: 50, ageMinutes: 20, milesSinceReading: 0 },
+	burn: BURN5, tankSource: "default", tank: 200 });
+check("...paired: the same truck parked through the dropout (0 mi, nothing decayed) keeps its number",
+	carriedStill.fuelState === "estimated" && carriedStill.milesLeft === 235, JSON.stringify(carriedStill));
 
 const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));
 for (const t of ["3 stops: Riverton, Midway, Lakeside", "Multi-stop load", "multistop", "Stop 2 Midway", "stop #3", "2 pickups", "2nd stop Midway", "extra stop", "stop-offs"]) {

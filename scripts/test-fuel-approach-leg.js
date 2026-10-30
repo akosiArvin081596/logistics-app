@@ -128,13 +128,15 @@ check("worked example: 240 mi to empty less the 15-mi reserve is 225 left, not r
 	const df = beforePickup();
 	assert.deepStrictEqual([df.milesLeft, df.refuelNow, df.fuelState, df.v], [225, false, "live", 1]);
 });
+// Gallons to add or hold go at the planning rate: 150 gal / 100 points / 5.0 mi a
+// point = 0.3 gal a mile (3.33 mi a gallon, not the 6.0 on file), then +10%.
 check("worked example: to reach pickup, 140 mi uses about 30 gal and there is enough", () => {
 	assert.deepStrictEqual(legOf(beforePickup(), "pickup"),
-		{ key: "pickup", miles: 140, usesGallons: 30, status: "enough", addGallons: null, needInTankGallons: 30 });
+		{ key: "pickup", miles: 140, usesGallons: 30, status: "enough", addGallons: null, needInTankGallons: 55 });
 });
-check("worked example: to finish, 420 mi uses about 80 gal, add about 40", () => {
+check("worked example: to finish, 420 mi uses about 80 gal, add about 65 (195 mi short x 0.3 x 1.1), tank needs 145", () => {
 	assert.deepStrictEqual(legOf(beforePickup(), "finish"),
-		{ key: "finish", miles: 420, usesGallons: 80, status: "add", addGallons: 40, needInTankGallons: 80 });
+		{ key: "finish", miles: 420, usesGallons: 80, status: "add", addGallons: 65, needInTankGallons: 145 });
 });
 check("a 1,040 mi run needs more than a full tank: refill_on_way, uses about 195, no add figure", () => {
 	const f = legOf(driverFuel({ plan: tripPlanFor({ routeMiles: 1040 }), leg: "to_delivery" }), "finish");
@@ -142,7 +144,7 @@ check("a 1,040 mi run needs more than a full tank: refill_on_way, uses about 195
 });
 check("exactly a full tank (485 + 15 = 500 mi at p10 5.0) is add, not refill_on_way", () => {
 	const f = legOf(driverFuel({ plan: tripPlanFor({ routeMiles: 485 }), leg: "to_delivery" }), "finish");
-	assert.deepStrictEqual([f.status, f.addGallons], ["add", 50]);
+	assert.deepStrictEqual([f.status, f.addGallons], ["add", 90]);
 });
 check("sweep: finish says 'enough' exactly when the verdict is 'clears' (50-1,500 mi, 5 levels, both bases, both reserves)", () => {
 	let runs = 0;
@@ -189,9 +191,11 @@ check("a fix 3 h old is 'old' with its age; 12 min is 'current'", () => {
 	const cur = driverFuel({ plan, leg: "to_delivery", positionAgeMinutes: 12 });
 	assert.deepStrictEqual([old.position, old.positionAgeMinutes, cur.position, cur.positionAgeMinutes], ["old", 180, "current", 12]);
 });
-check("margin 0: miles / MPG exactly, rounded up to 5 (70, not 75; add 35)", () => {
-	const f = legOf(driverFuel({ plan: tripPlanFor({ routeMiles: 420 }), leg: "to_delivery", marginPct: 0 }), "finish");
-	assert.deepStrictEqual([f.usesGallons, f.addGallons], [70, 35]);
+check("the margin never goes below 10: 0 and 5 give what 10 gives (uses 80, add 65)", () => {
+	for (const marginPct of [0, 5, 9.9]) {
+		const f = legOf(driverFuel({ plan: tripPlanFor({ routeMiles: 420 }), leg: "to_delivery", marginPct }), "finish");
+		assert.deepStrictEqual([f.usesGallons, f.addGallons], [80, 65], `margin ${marginPct}`);
+	}
 });
 check("margin 20 is honoured (420 mi -> 84 -> 85 gal)", () => {
 	assert.strictEqual(legOf(driverFuel({ plan: tripPlanFor({ routeMiles: 420 }), leg: "to_delivery", marginPct: 20 }), "finish").usesGallons, 85);
@@ -204,9 +208,9 @@ check("a negative, NaN, text or missing margin falls back to 10, never shrinking
 	assert.strictEqual(fuel.DRIVER_FUEL_MARGIN_PCT, 10);
 	assert.strictEqual(fuel.DRIVER_FUEL_ROUND_GALLONS, 5);
 });
-check("gallons round UP to the next 5: 150 mi at 6 MPG is 25, 151 mi is 30", () => {
-	const uses = (routeMiles) => legOf(driverFuel({ plan: tripPlanFor({ routeMiles }), leg: "to_delivery", marginPct: 0 }), "finish").usesGallons;
-	assert.deepStrictEqual([uses(150), uses(151)], [25, 30]);
+check("gallons round UP to the next 5: 125 mi at 5.5 MPG +10% is 25 exactly, 126 mi is 30", () => {
+	const uses = (routeMiles) => legOf(driverFuel({ plan: tripPlanFor({ routeMiles, mpg: 5.5 }), mpg: 5.5, leg: "to_delivery" }), "finish").usesGallons;
+	assert.deepStrictEqual([uses(125), uses(126)], [25, 30]);
 });
 check("the smallest add is 5 gal (0.5 mi short)", () => {
 	const plan = tripPlanFor({ routeMiles: 225.5 });
@@ -245,6 +249,62 @@ check("a load that is over: Delivered, POD Received, Completed, Cancelled, Invoi
 	assert.deepStrictEqual(["In Transit", "Assigned", "Unpaid", "", null].map(fuel.isLoadFinished), [false, false, false, false, false]);
 });
 
+// === §7b fix round: pumping the shown gallons clears the trip ================
+// A driver must never be told "enough" or a too-small "add N" while the truck
+// could run dry by the model's own planning figure.
+console.log("\n§7b driver gallons: adding the shown gallons clears the trip");
+// Top the tank up by `gallons` (never past full) and ask the verdict again.
+function afterAdding({ routeMiles, pct, burn, mpg, tank, gallons }) {
+	const topped = Math.min(100, pct + (gallons / tank) * 100);
+	return tripPlanFor({ routeMiles, pct: topped, burn, mpg, tank });
+}
+for (const [label, burn, mpg] of [["measured basis (p10 5.0, tank 150)", BURN5, 6.0], ["estimated basis (tank 150 on file, 6.5 MPG, 1.8 derate)", NO_BURN, 6.5]]) {
+	check(`${label}: after adding addGallons the verdict clears, on every 'add' row of a sweep`, () => {
+		let adds = 0;
+		const bad = [];
+		for (const pct of [2, 10, 25, 40, 48, 60, 75, 90]) for (let routeMiles = 50; routeMiles <= 1500; routeMiles += 13) {
+			const plan = tripPlanFor({ routeMiles, pct, burn, mpg });
+			const f = legOf(driverFuel({ plan, pct, burn, mpg, leg: "to_delivery" }), "finish");
+			if (f.status !== "add") continue;
+			adds++;
+			const after = afterAdding({ routeMiles, pct, burn, mpg, tank: 150, gallons: f.addGallons });
+			if (after.verdict !== "clears") bad.push([pct, routeMiles, f.addGallons, after.verdict, after.decidedOn, after.requiredMiles]);
+		}
+		assert.ok(adds > 100, `only ${adds} add rows`);
+		assert.deepStrictEqual(bad.slice(0, 5), []);
+	});
+}
+check("estimated basis, the read's example: 40% of 150 gal at 6.0 MPG, 300 mi: add 40, and 40 clears", () => {
+	const plan = tripPlanFor({ routeMiles: 300, pct: 40, burn: NO_BURN, mpg: 6.0 });
+	const f = legOf(driverFuel({ plan, pct: 40, burn: NO_BURN, mpg: 6.0, leg: "to_delivery" }), "finish");
+	assert.deepStrictEqual([f.status, f.addGallons], ["add", 40]);
+	assert.strictEqual(afterAdding({ routeMiles: 300, pct: 40, burn: NO_BURN, mpg: 6.0, tank: 150, gallons: 40 }).verdict, "clears");
+});
+check("needInTankGallons is at the planning rate too: 420 + 15 mi needs 145 gal (measured), 135 at 6.5 MPG / 1.8 (no tank size)", () => {
+	const plan = tripPlanFor({ routeMiles: 420, pct: null });
+	const none = { fuelPct: null, fuelSource: "none", ageMinutes: null };
+	const measured = legOf(driverFuel({ plan, reading: none, leg: "to_delivery" }), "finish");
+	const noTank = legOf(driverFuel({ plan, reading: none, leg: "to_delivery", mpg: 6.5, tankSource: "default", tank: 200 }), "finish");
+	assert.deepStrictEqual([measured.status, measured.needInTankGallons, noTank.needInTankGallons], ["check_gauge", 145, 135]);
+});
+check("miles the plan can't count never earn a plain 'enough': extra stops, a load first, a straight-line distance", () => {
+	const plan = tripPlanFor({ routeMiles: 420 });
+	const statuses = (o) => driverFuel({ plan, leg: "to_pickup", approachMiles: 140, ...o }).legs.map((l) => [l.key, l.status]);
+	assert.deepStrictEqual(statuses({}), [["pickup", "enough"], ["finish", "add"]], "control: no caveat");
+	for (const o of [{ extraStops: true }, { afterAnotherLoad: true }, { routeSource: "straight_line_estimate" }]) {
+		assert.deepStrictEqual(statuses(o), [["pickup", "check_gauge"], ["finish", "add"]], JSON.stringify(o));
+	}
+	const enoughEverywhere = driverFuel({ plan: tripPlanFor({ routeMiles: 100 }), leg: "to_delivery", extraStops: true });
+	assert.deepStrictEqual(enoughEverywhere.legs.map((l) => [l.status, l.addGallons]), [["check_gauge", null]]);
+});
+check("a mistyped MPG is capped at 11 for the driver figures (16 on file reads as 11)", () => {
+	const at = (mpg) => driverFuel({ plan: tripPlanFor({ routeMiles: 420, burn: NO_BURN, mpg }), burn: NO_BURN, mpg, leg: "to_delivery" });
+	const capped = at(16);
+	const eleven = at(11);
+	assert.deepStrictEqual([capped.milesLeft, legOf(capped, "finish")], [eleven.milesLeft, legOf(eleven, "finish")]);
+	assert.strictEqual(fuel.DRIVER_FUEL_MAX_MPG, 11);
+});
+
 // === §8 the flag in server.js ================================================
 console.log("\n§8 driver gallons: the flag in server.js");
 const { serverSource, resolveServerFile } = require("./lib/server-source");
@@ -265,12 +325,12 @@ check("the flag is an enable switch: only true/1/yes/on turn it on", () => {
 	assert.deepStrictEqual(["true", "1", "yes", "on", "TRUE", " on "].map(on), [true, true, true, true, true, true]);
 	assert.deepStrictEqual([undefined, "", "false", "0", "no", "off", "enabled", "truee"].map(on), [false, false, false, false, false, false, false, false]);
 });
-check("the margin knob: a number of 0 or more is taken, anything else is the lib's 10", () => {
+check("the margin knob: 10 or more is taken; anything below 10 or unreadable is 10", () => {
 	const text = declText("DRIVER_FUEL_GALLONS_MARGIN_PCT");
 	const at = (v) => new Function("process", "fuelModel", `${text}\nreturn DRIVER_FUEL_GALLONS_MARGIN_PCT;`)(
 		{ env: v === undefined ? {} : { DRIVER_FUEL_GALLONS_MARGIN_PCT: v } }, fuel);
-	assert.deepStrictEqual(["10", "0", "12.5", "25"].map(at), [10, 0, 12.5, 25]);
-	assert.deepStrictEqual([undefined, "", "-5", "abc", "NaN"].map(at), [10, 10, 10, 10, 10]);
+	assert.deepStrictEqual(["10", "12.5", "25"].map(at), [10, 12.5, 25]);
+	assert.deepStrictEqual([undefined, "", "-5", "abc", "NaN", "0", "0.1", "9.9"].map(at), [10, 10, 10, 10, 10, 10, 10, 10]);
 });
 check("driverFuel is spread into each fuel answer only under the flag, once per route", () => {
 	const guarded = "...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({";
@@ -398,6 +458,8 @@ const WORLDS = [
 	["stop list with two pickups", { stopPayload: { stops: [{ kind: "pickup" }, { kind: "pickup" }, { kind: "delivery" }] } }],
 	["load not mapped", { coords: false }],
 	["no truck and no pickup mapped", { truck: false, pickupMapped: false }],
+	["80% read 9 h ago, ELD silent since", { fuel: 80, fixAgoMin: 9 * 60 }],
+	["sensor dropout, no tank size, measured basis", { fuel: 0, anchor: { fuel: 40, agoMin: 60, odo: 99900 }, tank: 0 }],
 ];
 const CALLS = [
 	["trip-plan, Driver", (w) => w.plan()],
@@ -465,17 +527,33 @@ async function routeSections() {
 			[400, { ok: false, error: "load has no geocoded destination", code: "NO_ROUTE" }, 400, { ok: false, error: "no position to plan from", code: "NO_POSITION" }]);
 		assert.deepStrictEqual([r0.body, p0.body], [{ ok: false, error: "load has no geocoded destination" }, { ok: false, error: "no position to plan from" }]);
 	});
-	check("the worked example through the route: 225 left; pickup 140 mi uses 30, enough; finish 420 mi uses 80, add 40", () => {
+	check("the worked example through the route: 225 left; pickup 140 mi uses 30, enough; finish 420 mi uses 80, add 65", () => {
 		const df = at(on, "before pickup, live fix / trip-plan, Driver").body.driverFuel;
 		assert.deepStrictEqual([df.milesLeft, df.fuelState, df.position, df.positionAgeMinutes, df.fuelReadAgeMinutes], [225, "live", "current", 12, 12]);
 		assert.deepStrictEqual(df.legs, [
-			{ key: "pickup", miles: 140, usesGallons: 30, status: "enough", addGallons: null, needInTankGallons: 30 },
-			{ key: "finish", miles: 420, usesGallons: 80, status: "add", addGallons: 40, needInTankGallons: 80 },
+			{ key: "pickup", miles: 140, usesGallons: 30, status: "enough", addGallons: null, needInTankGallons: 55 },
+			{ key: "finish", miles: 420, usesGallons: 80, status: "add", addGallons: 65, needInTankGallons: 145 },
 		]);
 	});
-	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 26 Driver answers that succeed)", () => {
+	check("a reading 9 h old with the ELD silent since is not 'live' and says no 'enough' (80% would have)", () => {
+		const df = at(on, "80% read 9 h ago, ELD silent since / trip-plan, Driver").body.driverFuel;
+		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.fuelReadAgeMinutes, df.legs.map((l) => [l.key, l.status])],
+			["stale", null, 540, [["whole_load", "check_gauge"]]]);
+		assert.strictEqual(at(on, "80% read 9 h ago, ELD silent since / range, Driver").body.driverFuel.fuelState, "stale");
+	});
+	check("a dropout carried against the 200-gal guess (no tank size) gives no miles, only 'check your gauge'", () => {
+		const df = at(on, "sensor dropout, no tank size, measured basis / trip-plan, Driver").body.driverFuel;
+		assert.deepStrictEqual([df.fuelState, df.milesLeft, df.legs.every((l) => l.status === "check_gauge")], ["no_tank_size", null, true]);
+	});
+	check("extra stops, a load first, or a straight-line distance: no row says 'enough'", () => {
+		for (const w of ["another load in transit, 3 stops", "stop list with two pickups", "Routes down (straight line)"]) {
+			const df = at(on, `${w} / trip-plan, Driver`).body.driverFuel;
+			assert.ok(df.legs.length > 0 && df.legs.every((l) => l.status !== "enough"), `${w}: ${JSON.stringify(df.legs)}`);
+		}
+	});
+	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 30 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
-		assert.strictEqual(driverAnswers.length, 26);
+		assert.strictEqual(driverAnswers.length, 30);
 		for (const x of driverAnswers) {
 			assert.ok(x.r.body.driverFuel, `${x.name}: no driverFuel`);
 			assert.ok(!("vehicleId" in x.r.body), x.name);
