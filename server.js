@@ -61185,8 +61185,8 @@ function loadHasExtraStops(loadId, jtRow, headers) {
 		return fuelModel.stopListShowsExtraStops(row ? row.payload : null);
 	} catch { return false; }
 }
-// Another of the load's driver's loads is picked up and not delivered, so the run
-// to this pickup starts at that delivery, not where the truck is now.
+// Another of the load's driver's loads comes first (started, or ahead in the
+// driver's queue), so the run to this pickup starts at that delivery, not here.
 function driverHasLoadUnderway(jt, jtRow, loadId) {
 	const headers = jt.headers || [];
 	const idCol = findCol(headers, /load.?id|job.?id/i);
@@ -61194,8 +61194,13 @@ function driverHasLoadUnderway(jt, jtRow, loadId) {
 	const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
 	const driver = jtRow && driverCol ? normalizeDriverName(String(jtRow[driverCol] || "")) : "";
 	if (!driver || !idCol || !statusCol) return false;
-	return excludeDroppedLoads(jt.data || [], headers).some((r) => normalizeLoadId(r[idCol]) !== normalizeLoadId(loadId)
-		&& normalizeDriverName(String(r[driverCol] || "")) === driver && fuelModel.isPickedUp(r[statusCol]));
+	const self = normalizeLoadId(loadId);
+	const rows = excludeDroppedLoads(jt.data || [], headers);
+	if (rows.some((r) => normalizeLoadId(r[idCol]) !== self && normalizeDriverName(String(r[driverCol] || "")) === driver
+		&& (fuelModel.isPickedUp(r[statusCol]) || /^heading to shipper$/i.test(String(r[statusCol] || "").trim())))) return true;
+	const queue = computeDriverQueues(rows, headers)[driver] || [];
+	const mine = queue.find((q) => normalizeLoadId(q.load_id) === self);
+	return !!mine && queue.some((q) => q.queue_position < mine.queue_position);
 }
 
 // How far back we may reach for the last CREDIBLE fuel reading when the live one
