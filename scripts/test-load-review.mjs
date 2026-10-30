@@ -238,6 +238,8 @@ const freshReview = fn('freshReview')
 const pickupConfirmLabel = fn('pickupConfirmLabel')
 const pickupChanged = fn('pickupChanged')
 const freshPane = fn('freshPane')
+const pickupConfirmPrompt = fn('pickupConfirmPrompt')
+const runPickupConfirm = fn('runPickupConfirm')
 const NC = "The rate con marks the pickup date 'Needs Confirmation'."
 const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
 {
@@ -381,6 +383,56 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
       'The pickup date could not be marked confirmed. Try again.',
     ])
 
+  // The confirm step: only when the screen shows evidence against the date (the driver's
+  // tap on another day, or a later rate con over a person's date), naming both days.
+  // Otherwise one click sends at once; cancelling sends nothing.
+  const KEEP = 'Keep Oct 6 as the real pickup date?'
+  const tapOther = withReview([{ code: OPEN, stored: '2026-10-06', arrived: '2026-10-12' }])
+  const replacedWithDay = withReview([{ code: OPEN, stored: '2026-10-06', replaced: true, replacedDay: '2026-10-09' }])
+  check('the confirm step appears only for a tap on another day or a replaced date, naming both days',
+    [
+      pickupConfirmPrompt(open),
+      pickupConfirmPrompt(tapOther),
+      pickupConfirmPrompt(replacedWithDay),
+      pickupConfirmPrompt(withReview([{ code: OPEN, stored: '2026-10-06', replaced: true }])),
+      pickupConfirmPrompt(withReview([{ code: OPEN, stored: '2026-10-06', arrived: '2026-10-12', replaced: true, replacedDay: '2026-10-09' }])),
+    ],
+    [
+      null,
+      { title: 'Keep this pickup date?', message: `The driver reached the shipper on Oct 12; the Pickup Appointment says Oct 6. ${KEEP}`, confirmText: 'Keep Oct 6' },
+      { title: 'Keep this pickup date?', message: `A later rate con replaced the pickup date you confirmed, Oct 9, with Oct 6. ${KEEP}`, confirmText: 'Keep Oct 6' },
+      { title: 'Keep this pickup date?', message: `A later rate con replaced the pickup date you confirmed; the Pickup Appointment now says Oct 6. ${KEEP}`, confirmText: 'Keep Oct 6' },
+      { title: 'Keep this pickup date?', message: `A later rate con replaced the pickup date you confirmed, Oct 9, with Oct 6. The driver reached the shipper on Oct 12; the Pickup Appointment says Oct 6. ${KEEP}`, confirmText: 'Keep Oct 6' },
+    ])
+  check('no confirm step for a tap on the stored day, the closed code, no day shown, or a plain row; the tap case still asks',
+    [
+      pickupConfirmPrompt(withReview([{ code: OPEN, stored: '2026-10-06', arrived: '2026-10-06' }])),
+      pickupConfirmPrompt(withReview([{ code: CLOSED, stored: '2026-09-29', arrived: '2026-10-17', closedMonth: '2026-09' }])),
+      pickupConfirmPrompt(withReview([{ code: OPEN, arrived: '2026-10-12', replaced: true }])),
+      pickupConfirmPrompt(ok),
+      (pickupConfirmPrompt(tapOther) || {}).confirmText,
+    ],
+    [null, null, null, null, 'Keep Oct 6'])
+  const flow = async (job, answer) => {
+    const asked = []
+    const posted = []
+    const out = await runPickupConfirm(job, 'Load ID', {
+      ask: async (prompt) => { asked.push(prompt.message); return answer },
+      post: async (url, body) => { posted.push({ url, body }); return { ok: true, stored: body.stored } },
+    })
+    return { out, asked, posted }
+  }
+  const SENT = { url: '/api/loads/pickup-confirmed', body: { rowIndex: 7, loadId: '900000123', stored: '2026-10-06' } }
+  check('a plain row sends at once, asking nothing', await flow(open, false),
+    { out: { sent: true, res: { ok: true, stored: '2026-10-06' } }, asked: [], posted: [SENT] })
+  check('a tap on another day asks first, naming both days; cancelling sends nothing', await flow(tapOther, false),
+    { out: { sent: false }, asked: [`The driver reached the shipper on Oct 12; the Pickup Appointment says Oct 6. ${KEEP}`], posted: [] })
+  check('confirming sends the same request with the shown day', await flow(tapOther, true),
+    { out: { sent: true, res: { ok: true, stored: '2026-10-06' } }, asked: [`The driver reached the shipper on Oct 12; the Pickup Appointment says Oct 6. ${KEEP}`], posted: [SENT] })
+  check('a replaced date asks first; cancelling sends nothing', await flow(replacedWithDay, false),
+    { out: { sent: false }, asked: [`A later rate con replaced the pickup date you confirmed, Oct 9, with Oct 6. ${KEEP}`], posted: [] })
+  check('no call to make (the closed code): nothing asked or sent', await flow(closed, true), { out: { sent: false }, asked: [], posted: [] })
+
   // 409 PICKUP_CHANGED: the new day in words, and the pane takes the refreshed row.
   const changedErr = (stored) => ({ status: 409, code: 'PICKUP_CHANGED', data: { error: 'The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.', code: 'PICKUP_CHANGED', stored } })
   check('PICKUP_CHANGED names the day the cell reads now, else the server\'s words',
@@ -423,8 +475,17 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
     const pane = (src.match(new RegExp(PANE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?</div>\\n[^\\n]*\\n')) || [''])[0]
     check(`${file}: the load detail has the pickup-date block, its words, its button and the refusal line after it`,
       [pane.includes('{{ pickupReviewText(selectedJob) }}'), pane.includes(BUTTON), pane.includes(ERROR_LINE)], [true, true, true])
-    check(`${file}: the button posts the lib's call`,
-      src.includes('const call = pickupConfirmedRequest(job, loadIdCol.value)') && src.includes('await api.post(call.url, call.body)'), true)
+    check(`${file}: the button runs the lib's flow (ask when it says so, then post)`,
+      [src.includes('const run = await runPickupConfirm(job, loadIdCol.value, {'), src.includes('ask: askPickup,'), src.includes('post: (url, body) => { pickupMarking.value = true; return api.post(url, body) },'), src.includes('if (!run.sent) return')],
+      [true, true, true, true])
+    check(`${file}: the confirm step is a ConfirmModal answered by its buttons, and a load change cancels it`,
+      [
+        src.includes('<ConfirmModal\n      :open="!!pickupPrompt"'),
+        src.includes('@confirm="answerPickupPrompt(true)"') && src.includes('@cancel="answerPickupPrompt(false)"'),
+        src.includes("watch(() => selectedJob.value && selectedJob.value._rowIndex, () => { pickupMarkError.value = ''; answerPickupPrompt(false) })"),
+        /import ConfirmModal from '\.\.\/shared\/ConfirmModal\.vue'/.test(src),
+      ],
+      [true, true, true, true])
     check(`${file}: a 409 PICKUP_CHANGED reads the lists again and gives the pane its refreshed row`,
       [src.includes('changed = pickupChanged(err)'), src.includes('if (!changed) return'), src.includes('const row = freshPane(selectedJob.value, props.jobs)')], [true, true, true])
     check(`${file}: a Super Admin or Dispatcher gets the button`,
@@ -433,7 +494,7 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
     check(`${file}: the filter toggle's title names no single cause`,
       [src.includes('couldn’t fully extract the rate-con'), src.includes(":title=\"needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE\"")], [false, true])
     check(`${file}: imports the pickup-date helpers`,
-      ['REVIEW_FILTER_TITLE', 'pickupReview', 'pickupReviewText', 'canMarkPickupConfirmed', 'pickupConfirmTitle', 'pickupConfirmLabel', 'pickupConfirmedRequest', 'pickupConfirmedToast', 'pickupConfirmErrorText', 'pickupChanged', 'withoutPickupReview', 'freshReview', 'freshPane']
+      ['REVIEW_FILTER_TITLE', 'pickupReview', 'pickupReviewText', 'canMarkPickupConfirmed', 'pickupConfirmTitle', 'pickupConfirmLabel', 'runPickupConfirm', 'pickupConfirmedToast', 'pickupConfirmErrorText', 'pickupChanged', 'withoutPickupReview', 'freshReview', 'freshPane']
         .every((n) => reviewImports(src).includes(n)), true)
   }
 }

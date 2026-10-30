@@ -64,7 +64,8 @@ function instructionCodes(job) {
 }
 
 // "Needs Confirmation" pickup dates (lib/load-review-flags.js on the server): a
-// `_review` entry { code, stored?, arrived?, closedMonth?, replaced? }. The open
+// `_review` entry { code, stored?, arrived?, closedMonth?, replaced?, replacedDay? }
+// (replacedDay: the person's date a later rate con replaced). The open
 // code has a "Mark confirmed" button; the closed-month one can't be edited, so
 // it has none. Days come as server-computed 'YYYY-MM-DD' / 'YYYY-MM' strings and
 // are read by splitting: a Date built from one shows the day before in US zones.
@@ -103,7 +104,10 @@ export function pickupReview(job) {
   const list = job && Array.isArray(job._review) ? job._review : [];
   const e = list.find((x) => x && typeof x === 'object' && PICKUP_CODES.includes(x.code));
   if (!e) return null;
-  return { code: e.code, stored: dayKey(e.stored), arrived: dayKey(e.arrived), closedMonth: monthKey(e.closedMonth), replaced: e.replaced === true };
+  return {
+    code: e.code, stored: dayKey(e.stored), arrived: dayKey(e.arrived), closedMonth: monthKey(e.closedMonth),
+    replaced: e.replaced === true, replacedDay: dayKey(e.replacedDay),
+  };
 }
 
 // The pickup-date reason in words ('' when the row has none).
@@ -149,6 +153,40 @@ export function pickupConfirmedRequest(job, loadIdCol = '') {
 
 export function canMarkPickupConfirmed(job, loadIdCol = '') {
   return pickupConfirmedRequest(job, loadIdCol) !== null;
+}
+
+// The confirm step before "Mark confirmed", only when the screen shows evidence
+// against the date: the driver's first tap on another day, or a later rate con
+// over a person's date. It names both days. null means one click sends at once.
+export function pickupConfirmPrompt(job) {
+  const e = pickupReview(job);
+  if (!e || e.code !== PICKUP_UNCONFIRMED) return null;
+  const stored = shortDay(e.stored);
+  if (!stored) return null;
+  const arrived = e.arrived && e.arrived !== e.stored ? shortDay(e.arrived) : '';
+  if (!arrived && !e.replaced) return null;
+  const parts = [];
+  if (e.replaced) {
+    const before = e.replacedDay && e.replacedDay !== e.stored ? shortDay(e.replacedDay) : '';
+    parts.push(before
+      ? `A later rate con replaced the pickup date you confirmed, ${before}, with ${stored}.`
+      : `A later rate con replaced the pickup date you confirmed; the Pickup Appointment now says ${stored}.`);
+  }
+  if (arrived) parts.push(`The driver reached the shipper on ${arrived}; the Pickup Appointment says ${stored}.`);
+  parts.push(`Keep ${stored} as the real pickup date?`);
+  return { title: 'Keep this pickup date?', message: parts.join(' '), confirmText: `Keep ${stored}` };
+}
+
+// "Mark confirmed" for one load: asks first when pickupConfirmPrompt() says so
+// (ask(prompt) resolves true to go on), then posts the call (post(url, body)).
+// Resolves { sent: false } when cancelled or there is nothing to send, else
+// { sent: true, res }; a refused post rejects as it would on its own.
+export async function runPickupConfirm(job, loadIdCol, { ask, post }) {
+  const call = pickupConfirmedRequest(job, loadIdCol);
+  if (!call) return { sent: false };
+  const prompt = pickupConfirmPrompt(job);
+  if (prompt && !(await ask(prompt))) return { sent: false };
+  return { sent: true, res: await post(call.url, call.body) };
 }
 
 // The button's label names the day it keeps: a hover title never shows on a phone.

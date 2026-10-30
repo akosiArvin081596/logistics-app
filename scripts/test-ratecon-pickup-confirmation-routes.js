@@ -388,7 +388,8 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 		w.sheet[3][IDX["Pickup Appointment"]] = "10/6/2026 7:00:00";
 		const replaced = w.rows();
 		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", replaced);
-		eq("§4 the code is back with `replaced`, read from load_cell_writes alone", replaced[2]._review, [{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true }]);
+		eq("§4 the code is back with `replaced` and the replaced person's day, read from load_cell_writes alone",
+			replaced[2]._review, [{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true, replacedDay: "2026-10-09" }]);
 
 		// #588's rule: a person puts their date back in the sheet after the email replaced it. Only
 		// the app's own writes clear a value, so it is a person's date again: no code, and "Mark

@@ -189,6 +189,17 @@
       </DialogContent>
     </Dialog>
 
+    <!-- "Mark confirmed" asks first only when the pane shows evidence against the
+         date: the driver's tap on another day, or a later rate con over a person's date. -->
+    <ConfirmModal
+      :open="!!pickupPrompt"
+      :title="pickupPrompt ? pickupPrompt.title : ''"
+      :message="pickupPrompt ? pickupPrompt.message : ''"
+      :confirm-text="pickupPrompt ? pickupPrompt.confirmText : 'Confirm'"
+      @confirm="answerPickupPrompt(true)"
+      @cancel="answerPickupPrompt(false)"
+    />
+
     <!-- Soft delete confirm — same pattern as ActiveLoadsTab. -->
     <ConfirmModal
       :open="showDeleteConfirm"
@@ -275,7 +286,7 @@ import DriverInstructionsSection from './DriverInstructionsSection.vue'
 import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
-import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, pickupConfirmedRequest, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { offDutySuffix } from '../../lib/availabilityText'
@@ -309,26 +320,41 @@ const needsReviewOnly = ref(false)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
 // "Mark confirmed" (POST /api/loads/pickup-confirmed): keeps the open load's
-// Pickup Appointment as the day the pane shows. On success the badge clears at
-// once, then the lists are read again; a refusal stays on screen in the
-// server's words. When the cell's day changed since (409 PICKUP_CHANGED) the
-// lists are read again too and the pane takes its refreshed row.
+// Pickup Appointment as the day the pane shows. It asks first only when the
+// pane shows evidence against that day (runPickupConfirm()); cancelling sends
+// nothing. On success the badge clears at once, then the lists are read again;
+// a refusal stays on screen in the server's words. When the cell's day changed
+// since (409 PICKUP_CHANGED) the lists are read again too and the pane takes
+// its refreshed row.
 const canConfirmPickup = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
 const pickupMarking = ref(false)
 const pickupMarkError = ref('')
-watch(() => selectedJob.value && selectedJob.value._rowIndex, () => { pickupMarkError.value = '' })
+const pickupPrompt = ref(null)
+let pickupPromptAnswer = null
+function askPickup(prompt) {
+  return new Promise((resolve) => { pickupPromptAnswer = resolve; pickupPrompt.value = prompt })
+}
+function answerPickupPrompt(yes) {
+  const answer = pickupPromptAnswer
+  pickupPromptAnswer = null
+  pickupPrompt.value = null
+  if (answer) answer(yes)
+}
+watch(() => selectedJob.value && selectedJob.value._rowIndex, () => { pickupMarkError.value = ''; answerPickupPrompt(false) })
 async function markPickupConfirmed() {
   const job = selectedJob.value
-  const call = pickupConfirmedRequest(job, loadIdCol.value)
-  if (!call || pickupMarking.value) return
-  pickupMarking.value = true
+  if (!job || pickupMarking.value || pickupPrompt.value) return
   pickupMarkError.value = ''
   const same = () => selectedJob.value && selectedJob.value._rowIndex === job._rowIndex
   let changed = false
   try {
-    const res = await api.post(call.url, call.body)
+    const run = await runPickupConfirm(job, loadIdCol.value, {
+      ask: askPickup,
+      post: (url, body) => { pickupMarking.value = true; return api.post(url, body) },
+    })
+    if (!run.sent) return
     if (same()) selectedJob.value = withoutPickupReview(selectedJob.value)
-    toast(pickupConfirmedToast(res), 'success')
+    toast(pickupConfirmedToast(run.res), 'success')
   } catch (err) {
     changed = pickupChanged(err)
     if (same()) pickupMarkError.value = pickupConfirmErrorText(err)
