@@ -28,12 +28,17 @@ export const GROUPINGS = Object.freeze([
   { key: 'owner', label: 'Owners', noun: 'owners', title: 'By owner' },
 ])
 
+// The server resolves the same keys (lib/financials-presets.js); the runner pins
+// keys, labels and dates equal. "ytd" keeps its key so saved links still open.
 export const RANGE_PRESETS = Object.freeze([
+  { key: 'today', label: 'Today' },
+  { key: 'lastWeek', label: 'Last week' },
   { key: 'thisMonth', label: 'This month' },
   { key: 'lastMonth', label: 'Last month' },
   { key: 'thisQuarter', label: 'This quarter' },
   { key: 'lastQuarter', label: 'Last quarter' },
-  { key: 'ytd', label: 'Year to date' },
+  { key: 'ytd', label: 'This year' },
+  { key: 'lastYear', label: 'Last year' },
   { key: 'last12', label: 'Last 12 months' },
   { key: 'custom', label: 'Custom' },
 ])
@@ -75,10 +80,17 @@ function shiftMonth(y, m, delta) {
 }
 const firstOf = (y, m) => `${y}-${pad2(m)}-01`
 const lastOf = (y, m) => `${y}-${pad2(m)}-${pad2(lastDayOfMonth(y, m))}`
+const addDays = (d, n) => new Date(dayMs(d) + n * 86400000).toISOString().slice(0, 10)
+// The Saturday that starts the house week a day belongs to (the server's weekStart()).
+function weekStart(d) {
+  const dow = new Date(dayMs(d)).getUTCDay() // 0 Sunday .. 6 Saturday
+  return addDays(d, -((dow + 1) % 7))
+}
 
 /**
  * The dates a quick pick covers, ending today where the period is still running.
  * `today` is the carrier's day ('YYYY-MM-DD' in the app zone: appToday()).
+ * "Last week" is the last complete house week (Saturday to Friday).
  * "Last 12 months" is the server's own default: the 1st of the month eleven
  * months back through today. Returns null for 'custom' or an unknown key.
  */
@@ -88,6 +100,12 @@ export function presetRange(preset, today) {
   const m = Number(today.slice(5, 7))
   const q0 = Math.floor((m - 1) / 3) * 3 + 1 // first month of this quarter
   switch (preset) {
+    case 'today':
+      return { from: today, to: today }
+    case 'lastWeek': {
+      const start = addDays(weekStart(today), -7)
+      return { from: start, to: addDays(start, 6) }
+    }
     case 'thisMonth':
       return { from: firstOf(y, m), to: today }
     case 'lastMonth': {
@@ -103,6 +121,8 @@ export function presetRange(preset, today) {
     }
     case 'ytd':
       return { from: `${y}-01-01`, to: today }
+    case 'lastYear':
+      return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` }
     case 'last12': {
       const [sy, sm] = shiftMonth(y, m, -11)
       return { from: firstOf(sy, sm), to: today }
@@ -171,6 +191,26 @@ export function selectionError(sel) {
     return `A daily report can cover at most ${DAILY_MAX_DAYS} days. Pick a shorter range, or view it by week or month.`
   }
   return ''
+}
+
+// A range of at most this many days, or day and week columns, reads as a short
+// period: one undelivered load or one month's spread costs can swing it.
+export const SHORT_PERIOD_DAYS = 14
+
+/**
+ * The note shown above a short period's figures, or '' for a longer one. It
+ * explains the server's placement (lib/financials-report.js) so a quiet day or
+ * week isn't read as a missing one.
+ */
+export function shortPeriodNote(sel) {
+  if (!sel || !isCalendarDay(sel.from) || !isCalendarDay(sel.to)) return ''
+  const span = daySpan(sel.from, sel.to)
+  if (span < 0) return ''
+  const short = span + 1 <= SHORT_PERIOD_DAYS || sel.granularity === 'day' || sel.granularity === 'week'
+  if (!short) return ''
+  return 'Short periods: a load’s revenue counts on its Assigned Date, and only once the load is delivered, '
+    + 'so loads still on the road aren’t in it yet. Monthly costs, such as truck fixed costs, are spread evenly '
+    + 'over each month’s days.'
 }
 
 /** The report's query string, shared by the JSON request and the CSV link. */
