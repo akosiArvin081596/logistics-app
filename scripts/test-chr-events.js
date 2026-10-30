@@ -107,6 +107,8 @@ eq(E.chrLoadTest(proj({ loadId: "LD12345678", loadKey: "ld12345678" })), { verdi
 eq(E.chrLoadTest(proj({ loadId: "9876543210", loadKey: "9876543210" })), { verdict: "skip", reason: "load_id_not_9_digits" }, "§2 10 digits: not 9 digits");
 const R0 = E.createRedactor({ denyList: "123456789" });
 eq(E.chrLoadTest(proj({}), { redactor: R0 }), { verdict: "withheld" }, "§2 a Load ID holding a protected value: withheld (nothing stored)");
+eq(E.chrLoadTest(proj({ loadId: "LD123456789", loadKey: "ld123456789" }), { redactor: R0 }), { verdict: "withheld" }, "§2 ...tested before the 9-digit test: a Load ID that is not 9 digits but holds one is withheld, never recorded");
+eq(E.chrLoadTest(proj({ brokerDomain: "" }), { redactor: R0 }), { verdict: "withheld" }, "§2 ...and before the Email test: a blank Email cell does not record it either");
 eq(E.chrLoadTest(proj({}), { redactor: E.createRedactor({ denyList: "55555" }) }), { verdict: "chr" }, "§2 a protected value elsewhere changes nothing");
 eq(E.isChrDomain("CHROBINSON.COM"), false, "§2 the test takes a lower-case domain (domainOf() lower-cases)");
 eq(E.domainOf("Made-Up.Ops@CHRobinson.com"), "chrobinson.com", "§2 domainOf lower-cases");

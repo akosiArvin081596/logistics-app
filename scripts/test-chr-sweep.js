@@ -21,6 +21,9 @@
 //       history, the sheet and the settings reach no row, state, audit or log
 //   §12 the source: lib/chr-*.js has no Sheets write, Drive, mail or n8n; its
 //       SQL names neither actor nor reason; no SELECT *
+//   §13 a protected number inside a load key is withheld on all four paths (a
+//       9-digit Load ID, one that is not, a blank or unreadable Email, a load
+//       missing from Job Tracking): no table, audit, log or result holds it
 //
 // Made-up data only. In-memory SQLite; every network call is refused and counted.
 //   node scripts/test-chr-sweep.js      # exits 1 on any failure
@@ -491,6 +494,64 @@ async function main() {
 		ok(!/\bprocess\b/.test(src), `§12 ${f}: no environment read (the flags arrive as booleans through chrConfig())`);
 		eq(sqlOf(src).filter((s) => /\bactor\b|(?<![a-z_])reason\b/.test(s)), [], `§12 ${f}: its SQL names neither actor nor reason`);
 		ok(!/SELECT \*/i.test(src), `§12 ${f}: no SELECT *`);
+	}
+
+	// ---------------------------------------------------------------- §13
+	section("§13 a protected number inside a load key");
+	{
+		// Made-up deny values: a 9-digit one, which a 9-digit Load ID can hold, and
+		// the 14-digit stand-in, which none can.
+		const KEY_CANARY = "900000001";
+		const DENY = [KEY_CANARY, CANARY.carrier];
+		const w = world({
+			config: { updatesEnabled: true, denyList: DENY.join(", ") },
+			settings: { arrivedPickup: true },
+			sheetRows: [
+				sheetRow(KEY_CANARY), // (1) a 9-digit chrobinson.com Load ID
+				sheetRow(`LD${KEY_CANARY}`), sheetRow(CANARY.carrier), // (2) chrobinson.com, not 9 digits
+				sheetRow(`${KEY_CANARY}-2`, { Email: "" }), sheetRow(`${KEY_CANARY}-3`, { Email: "Made Up <made-up.agent@chrobinson.com>" }), // (3) Email blank, unreadable
+				sheetRow("123456789"), sheetRow("42345678"), sheetRow("523456789", { Email: "" }), // the same paths with clean keys
+			],
+			points: { 123456789: { origin: PICKUP, dest: DROP } },
+		});
+		const results = [await w.tick()];
+		w.advance(1);
+		w.history(KEY_CANARY, "At Shipper");
+		w.history(KEY_CANARY, "In Transit");
+		// (4) KEY_CANARY-4 and 623456789 are in the history only: missing from Job Tracking.
+		for (const id of [`LD${KEY_CANARY}`, CANARY.carrier, `${KEY_CANARY}-2`, `${KEY_CANARY}-3`, `${KEY_CANARY}-4`, "123456789", "42345678", "523456789", "623456789"]) w.history(id, "At Shipper");
+		w.ping(1, AT_PICKUP);
+		w.advance(1);
+		results.push(await w.tick());
+		w.advance(6);
+		results.push(await w.tick());
+		eq(brief(w), ["123456789:arrived_pickup:dry_run", "42345678:arrived_pickup:skipped_not_chr:load_id_not_9_digits", "523456789:arrived_pickup:skipped_not_chr:email_blank", "623456789:arrived_pickup:skipped_not_chr:load_missing"],
+			"§13 only the clean keys are recorded, each on its path as before (the pipeline ran)");
+		eq(w.state().withheldRows, 7, "§13 withheldRows counts the 7 history rows under the protected keys, from all four paths");
+		const INPUTS = ["load_status_history", "routemate_telemetry"];
+		const dumpOf = (names) => names.flatMap((t) => w.db.prepare(`SELECT * FROM "${t}"`).all().map((r) => JSON.stringify(r))).join("\n").toLowerCase();
+		const stored = w.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name).filter((t) => !INPUTS.includes(t));
+		ok(["app_settings", "chr_events", "chr_loads", "server_state"].every((t) => stored.includes(t)), "§13 (check) every table but the runner's two inputs is read, the chr_ tables and both state tables included");
+		const dump = [dumpOf(stored), ...w.audits.map((a) => JSON.stringify(a)), ...w.logs, ...results.map((r) => JSON.stringify(r)), JSON.stringify(w.integration.config())].join("\n").toLowerCase();
+		eq(DENY.filter((v) => dump.includes(v)), [], "§13 neither protected number is in any stored column of any table, an audit row, a log line, a tick's result or the config view");
+		eq(DENY.filter((v) => dumpOf(["load_status_history"]).includes(v)), DENY, "§13 (check) the same read finds both in the runner's own history table, so the check above would catch them");
+		// A row recorded before its number was protected (planted here) is decided
+		// as withheld, never built into a payload.
+		const w2 = world({ config: { updatesEnabled: true, denyList: KEY_CANARY }, settings: { arrivedPickup: true } });
+		await w2.tick();
+		const at = new Date(w2.clock).toISOString();
+		S.applyRecording(w2.db, {
+			inserts: [{
+				load_id: `${KEY_CANARY}-5`, kind: "milestone", event: "arrived_pickup", stop_kind: "pickup", stop_index: 1, source: "manual", history_row_id: 1,
+				event_at: at, verify: "waiting", idem_key: `ms|${KEY_CANARY}-5|arrived_pickup|p1|h1`, mode: "dry_run", status: "pending", next_attempt_at: at,
+			}],
+			state: w2.state(), nowIso: at,
+		});
+		w2.advance(1);
+		await w2.tick();
+		eq(w2.db.prepare("SELECT status, skip_reason, payload_json FROM chr_events").all(), [{ status: "skipped_not_chr", skip_reason: "withheld", payload_json: "" }],
+			"§13 a due row whose key holds a protected number is decided as withheld (with no sheet row, not load_missing), with no payload");
+		eq(networkCalls, 0, "§13 nothing reached the network");
 	}
 }
 
