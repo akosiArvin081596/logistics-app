@@ -309,9 +309,13 @@ const driverDeps = (over = {}) => ({
 	personalSummaryByExpense: () => Object.create(null),
 	personalSummaryForRole: () => null,
 	personalLinesForInvoices: () => new Map(),
+	// No invoice here carries a correction line (scripts/test-approved-invoice-lock.js).
+	correctionLinesForInvoices: () => new Map(),
 	invoicePayBasesOf,
 	ONBOARDING_DOCS: [],
 	DRIVER_TIME_OFF_SCREEN_ENABLED: false,
+	// Emergency contacts are off here (scripts/test-emergency-contacts-routes.js §7).
+	EMERGENCY_CONTACTS_ENABLED: false,
 	driverInstructions: { annotateDriverLoads() {} },
 	LOAD_PANEL_DOCUMENT_FILTER,
 	documentFiledUnder,

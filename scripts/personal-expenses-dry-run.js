@@ -40,6 +40,7 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
@@ -58,7 +59,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // table, "derived" the sources lib/personal-expense.js builds (over the TEMP
 // expense_personal of this connection).
 function buildDryRunWorld({ db, sheetData, env = {}, DateImpl = Date }) {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const personalExpense = appRequire("./lib/personal-expense");
 	const lifted = closure(SRC, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
@@ -243,9 +244,9 @@ async function personalDryRun(w, { marks = [], names = false, dataDir = ROOT } =
 		w.mode.source = "derived";
 		const derived = await figures(w);
 		const differences = diff(plain, derived);
-		// Before the server adds the two columns, every invoice reads them as 0.
+		// Before the server adds the columns, every invoice reads them as 0.
 		const invoices = db.prepare("SELECT * FROM invoices WHERE deleted_at = '' AND status != 'Paid'").all()
-			.map((r) => ({ personal_total: 0, personal_share_total: 0, ...r }));
+			.map((r) => ({ personal_total: 0, personal_share_total: 0, correction_lines_total: 0, ...r }));
 		const dueDiffs = invoices.filter((r) => w.api.invoiceTotalDue(r) !== round2((r.total_earnings || 0) + (r.adjustment || 0)))
 			.map((r) => ({ invoice: r.invoice_number, before: round2((r.total_earnings || 0) + (r.adjustment || 0)), after: w.api.invoiceTotalDue(r) }));
 		result.partA = { figuresCompared: Object.keys(plain).length, unpaidInvoicesCompared: invoices.length, differences, totalDueDifferences: dueDiffs,

@@ -638,6 +638,14 @@ check("...while the reviewed eight really are still purgeable",
 	["create_sheet_row_blocked", "update_sheet_row_blocked", "status_update_blocked"]
 		.filter((a) => !PURGE.includes(a)), []);
 
+// The account switch's refusals and a refused sign-in to a disabled account are
+// security evidence: kept forever, like db_export_blocked.
+const ACCOUNT_SWITCH_REFUSALS = ["disable_user_blocked", "enable_user_blocked", "login_refused_disabled"];
+check("the account switch's refusal actions exist in server.js",
+	ACCOUNT_SWITCH_REFUSALS.filter((a) => !SRC.includes(`"${a}"`)), []);
+check("...and none of them is purgeable",
+	ACCOUNT_SWITCH_REFUSALS.filter((a) => PURGE.includes(a)), []);
+
 db.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) {

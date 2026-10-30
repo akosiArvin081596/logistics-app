@@ -36,9 +36,10 @@ LOCK_WAITS_FOR=any
 # would be two pulls, two npm installs and two builds into one client/dist,
 # then two restarts.
 #
-# ⚠️ The lock file lives OUTSIDE the repo tree on purpose (default /var/lock,
-# i.e. /run/lock: tmpfs, root-writable, cleared at boot). A file inside $DIR
-# could be clobbered by a checkout, and would mean nothing to a second clone.
+# ⚠️ The lock file lives OUTSIDE the repo tree on purpose, in a folder only the
+# deploying account can write (the lock-folder block below; on /run, a tmpfs
+# cleared at boot). A file inside $DIR could be clobbered by a checkout, and
+# would mean nothing to a second clone.
 #
 # ⚠️ flock -n: a held lock FAILS FAST with exit 75 when another deploy, rollback
 # or record step holds it. It never queues behind one: that would start this
@@ -58,8 +59,41 @@ LOCK_WAITS_FOR=any
 # exited. That is why every command that may spawn a daemon (pm2 starts its God
 # daemon when none is running; git may start a credential-cache daemon) runs
 # with `9>&-`.
-LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}
+# >>> lock-folder — keep byte-identical in remote-deploy.sh, remote-rollback.sh,
+# remote-record-verified.sh and remote-drift-check.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# The deploy lock lives in a folder only the deploying account can write: one
+# folder per account, named by its uid. It must be a folder, not a link, that
+# this account owns and that neither its group nor other accounts can write.
+# Anything else is refused, and the lock is never taken in another folder. A
+# missing one is made 0700 where its parent allows it (root can, under /run); an
+# account that cannot make it there gets it from a systemd-tmpfiles entry.
+LOCK_UID=$(id -u)
+LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/logisx-deploy-$LOCK_UID}
+LOCK_DIR_BAD=""
+if ! [[ "$LOCK_UID" =~ ^[0-9]+$ ]]; then
+	LOCK_DIR_BAD="this account's uid could not be read"
+elif [[ "$LOCK_DIR" != /* || "$LOCK_DIR" == */ ]]; then
+	LOCK_DIR_BAD="it must be an absolute path with no trailing slash"
+else
+	[ -e "$LOCK_DIR" ] || [ -L "$LOCK_DIR" ] || mkdir -m 0700 "$LOCK_DIR" 2>/dev/null
+	if [ -L "$LOCK_DIR" ] || { [ -e "$LOCK_DIR" ] && [ ! -d "$LOCK_DIR" ]; }; then
+		LOCK_DIR_BAD="it is not a folder"
+	elif [ ! -d "$LOCK_DIR" ]; then
+		LOCK_DIR_BAD="it is missing, and this account cannot create it there"
+	elif [ -z "$(find "$LOCK_DIR" -maxdepth 0 -user "$LOCK_UID" 2>/dev/null)" ]; then
+		LOCK_DIR_BAD="another account owns it"
+	elif [ -z "$(find "$LOCK_DIR" -maxdepth 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+		LOCK_DIR_BAD="its group or other accounts can write it"
+	fi
+fi
+if [ -n "$LOCK_DIR_BAD" ]; then
+	echo "::error::refusing the deploy lock folder $LOCK_DIR: $LOCK_DIR_BAD. It must be a folder this account (uid $LOCK_UID) owns and no other account can write. Nothing was changed."
+	exit 1
+fi
 LOCK_FILE="$LOCK_DIR/logisx-deploy$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '_').lock"
+# <<< lock-folder
 LOCK_WAIT_S=${DEPLOY_LOCK_WAIT_S:-20}
 if ! command -v flock >/dev/null 2>&1; then
 	echo "::error::flock(1) is not installed on this host — refusing to run without the box-level deploy lock"

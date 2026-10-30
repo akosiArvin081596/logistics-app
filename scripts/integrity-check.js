@@ -33,6 +33,7 @@ const path = require("path");
 const { createRequire } = require("module");
 const { parseArgs, sheetFor, envFor, buildLedgerWorld } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const integrityCheck = require("../lib/integrity-check");
 const brokerContact = require("../lib/broker-contact");
 const ledgerDayOnce = require("../lib/ledger-day-once");
@@ -53,7 +54,7 @@ function refuse(message) {
 // script's read-only database handle: the one lifted function given the
 // database, which it only reads; nothing else lifted here can reach it.
 function liftFromServer(appRequire, db) {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
 	const getDeletedLoadIds = new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db);
 	const lifted = closure(SRC, {

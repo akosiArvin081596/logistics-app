@@ -1744,8 +1744,9 @@ test("§13 37 M1 the lock alert is a saved Super Admin-only dispatch notice: a S
 	eq("a Dispatcher's mark-read (by id, or all) leaves it unread for the Super Admins", [w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, (await r.get(SA)).body.unreadCount], [0, 1]);
 	await r.read(SA, { ids: [lockId] });
 	eq("a Super Admin marks it read", w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, 1);
-	// The list also holds the refused-database-download notice (scripts/test-db-download-listed-only.js §10).
-	ok("server.js serves the runtime's type to Super Admins only", /const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\["driver-instructions-lock"(, "[a-z-]+")*\]\);/.test(SRC) && rt.LOCK_NOTICE_TYPE === "driver-instructions-lock");
+	// The list also holds other Super-Admin-only notices, such as the refused
+	// database download (scripts/test-db-download-listed-only.js §10).
+	ok("server.js serves the runtime's type to Super Admins only", /const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\[[^\]\n]*"driver-instructions-lock"[^\]\n]*\]\);/.test(SRC) && rt.LOCK_NOTICE_TYPE === "driver-instructions-lock");
 });
 
 test("§13 37 the alert's load reference is withheld when the Load ID's own digits overlap a deny value", async ({ eq }) => {

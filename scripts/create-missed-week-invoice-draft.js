@@ -124,8 +124,10 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor, openDb } = require("./lib/ledger-world");
 const correction = require("./create-correction-invoice-draft");
+const { correctionDayLines } = require("./lib/correction-day-lines");
 const driverRateOnly = require("../lib/driver-rate-only");
 
 const { namesDay, monthsBetween, gridBills, isCalendarDay, weekdayOf, longDay, monthLabel, cents, usd, usdShort, parseJson, INSERT_INVOICE, INSERT_AUDIT } = correction;
@@ -215,7 +217,7 @@ function readOptions(argv) {
 // `render` replaces renderPolicy() (tests pass a stub; the default is the
 // server's own).
 function buildWorld({ root = ROOT, db, env = {}, dataDir, render = null, log = console }) {
-	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const SRC = serverSource({ root });
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const lifted = closure(SRC, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const liftedRequire = (m) => {
@@ -479,7 +481,11 @@ function plan(db, api, values, opts, { today = null } = {}) {
 			if (hit) throw new Refusal(hit);
 		}
 	}
-	checks.push("no live invoice of the driver pays these days (paid-days records, weekly day grids, adjustment notes on any invoice, manual lines, days and notes)");
+	// A live correction day line, waiting or on an invoice, pays its day.
+	for (const l of correctionDayLines(db, nameNorm, api.normalizeDriverName)) {
+		if (days.includes(l.day)) throw new Refusal(`${l.day} is already paid by ${l.name}`);
+	}
+	checks.push("no live invoice of the driver pays these days (paid-days records, weekly day grids, adjustment notes on any invoice, manual lines, days and notes, correction day lines)");
 	// A Rejected invoice pays nothing and does not block, but PUT /revert can
 	// bring one back: each one naming a day is listed for a person.
 	const rejectedNaming = [];

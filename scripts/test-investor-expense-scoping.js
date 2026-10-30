@@ -131,13 +131,18 @@ const FNS = [
 	"personalLedgerPresent",
 ];
 
+// The truck charge rule (TRUCK_CHARGE_APP_DAY_*) is off in this runner;
+// scripts/test-financials-books.js runs it on.
+const TRUCK_RULE_OFF = "const TRUCK_CHARGE_APP_DAY_RULE = null;";
+
 // `db` is injected so getInvestorDriverMonthWindows runs against a real fixture
 // database rather than a stub that could agree with a broken query.
 function loadShipped(db, mutate = (s) => s) {
 	const body = FNS.map(extract).join("\n\n");
 	const consts = `const APP_TIMEZONE = ${JSON.stringify(require("../lib/app-time").appTimeZone())};\n` +
 		`const EXPENSE_PNL_FILTER = ${extractConst("EXPENSE_PNL_FILTER")};\n` +
-		`const EXPENSE_PERIOD_EXPR = ${extractConst("EXPENSE_PERIOD_EXPR")};\n`;
+		`const EXPENSE_PERIOD_EXPR = ${extractConst("EXPENSE_PERIOD_EXPR")};\n` +
+		`${TRUCK_RULE_OFF}\n`;
 	const src = mutate(`${consts}${body}\nreturn { ${FNS.join(", ")}, EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR };`);
 	return new Function("db", src)(db);
 }
@@ -477,6 +482,7 @@ function monthlyTripExp(ownerId, lib = S) {
 		throw new Error(`unbalanced braces extracting ${name}()`);
 	}
 	const F = new Function("fixedTrucks", `
+		${TRUCK_RULE_OFF}
 		${extract("truckMonthlyFixed")}
 		${extract("truckChargeFromMonth")}
 		${extract("truckChargeUntilMonth")}
@@ -519,6 +525,7 @@ function monthlyTripExp(ownerId, lib = S) {
 	// present-tense fleet rate the modal used to print. Must reproduce the exact
 	// $6,150-vs-$3,043 mismatch, or this section is not testing what it claims.
 	const ungated = new Function("fixedTrucks", `
+		${TRUCK_RULE_OFF}
 		${extract("truckMonthlyFixed")}
 		${extract("truckChargeFromMonth")}
 		${extract("truckChargeUntilMonth")}

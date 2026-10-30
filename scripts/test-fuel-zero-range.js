@@ -262,6 +262,142 @@ check("healthy truck canMakeIt", healthy.canMakeIt === true);
 check("healthy truck has zero shortfall", healthy.shortfallMiles === 0);
 
 // ---------------------------------------------------------------------------
+section("§7 driver gallons: no wrong number (planDriverFuel, DRIVER_FUEL_GALLONS_ENABLED)");
+// Every state the driver app cannot work a number out for says so in plain
+// words instead. Made-up truck; the replay at the end reuses §5's incident.
+// Each call is caught, so a base without planDriverFuel fails case by case.
+const attempt = (fn) => { try { return fn(); } catch (e) { return { error: e.message, legs: [] }; } };
+const R15 = { minMiles: 15, fraction: 0 };
+const BURN5 = { usable: true, p10: 5.0, p50: 7.4, p90: 10.2, milesPerPoint: 7.4 };
+const tripFor = (pct, burn, tank) => fm.planTripFuel({
+	routeMiles: 420, fuelPct: pct, burn, mpg: 6.0, reserve: R15,
+	rangeMiles: fm.computeRange({ fuelPct: pct, tankGallons: tank, mpg: 6.0 }).rangeMiles,
+});
+const DF = ({ reading, burn = BURN5, tankSource = "truck", tank = 150, hasTruck = true, fromLivePosition = true } = {}) =>
+	attempt(() => fm.planDriverFuel({
+		plan: tripFor(reading ? reading.fuelPct : null, burn, tank), leg: "to_delivery", fromLivePosition, positionAgeMinutes: 5,
+		reading, hasTruck, hasDevice: hasTruck, tankSource, tankGallons: tank, mpg: 6.0, burn, reserve: R15,
+	}));
+const NO_READING = { fuelPct: null, fuelSource: "none", anchorPct: null, ageMinutes: null };
+const STALE = { fuelPct: null, fuelSource: "stale", anchorPct: 27, ageMinutes: 18 * 60 };
+const allCheckGauge = (df) => Array.isArray(df.legs) && df.legs.length > 0
+	&& df.legs.every((l) => l.status === "check_gauge" && l.needInTankGallons > 0 && l.addGallons === null);
+// A row the block can't count (a stale or carried reading among others) has no number at all.
+const allNumberless = (df) => Array.isArray(df.legs) && df.legs.length > 0
+	&& df.legs.every((l) => l.status === "check_gauge" && l.miles === null && l.usesGallons === null
+		&& l.addGallons === null && l.needInTankGallons === null);
+
+const none = DF({ reading: NO_READING });
+check("no ELD fuel reading: fuelState 'none', no miles, not refuel-now", none.fuelState === "none" && none.milesLeft === null && none.refuelNow === false,
+	JSON.stringify(none));
+check("...its rows say what the tank needs to finish and to check the gauge", allCheckGauge(none), JSON.stringify(none.legs));
+check("...420 + 15 mi at the planning rate (150 gal / 100 pts / 5.0 mi a pt = 0.3 gal a mile), +10%: 145 gal in the tank",
+	none.legs[0] && none.legs[0].needInTankGallons === 145, JSON.stringify(none.legs));
+const stale = DF({ reading: STALE });
+check("ELD silent past 12 h: fuelState 'stale', no miles, the reading's own age (18 h)",
+	stale.fuelState === "stale" && stale.milesLeft === null && stale.fuelReadAgeMinutes === 1080, JSON.stringify(stale));
+check("...its rows check the gauge, with no gallons and no miles", allNumberless(stale), JSON.stringify(stale.legs));
+const carriedDF = DF({ reading: { fuelPct: 33.6, fuelSource: "carried", anchorPct: 40, ageMinutes: 60, milesSinceReading: 100 } });
+check("sensor dropout (carried): the top keeps its figure, marked 'estimated'; the rows have no number",
+	carriedDF.fuelState === "estimated" && Number.isFinite(carriedDF.milesLeft) && carriedDF.milesLeft > 0
+		&& allNumberless(carriedDF), JSON.stringify(carriedDF));
+const LIVE40 = { fuelPct: 40, fuelSource: "live", anchorPct: 40, ageMinutes: 5 };
+const noTank = DF({ reading: LIVE40, burn: NO_BURN, tankSource: "default", tank: 200 });
+check("estimated basis + no tank size: 'no_tank_size', no miles, rows check the gauge",
+	noTank.fuelState === "no_tank_size" && noTank.milesLeft === null && allCheckGauge(noTank), JSON.stringify(noTank));
+const estTruckTank = DF({ reading: LIVE40, burn: NO_BURN, tankSource: "truck", tank: 150 });
+check("...paired: estimated basis + the truck's own tank size shows a number",
+	estTruckTank.fuelState === "live" && Number.isFinite(estTruckTank.milesLeft), JSON.stringify(estTruckTank));
+const measuredNoTank = DF({ reading: LIVE40, burn: BURN5, tankSource: "default", tank: 200 });
+check("...paired: measured basis + no tank size shows a number (miles per gauge point needs no tank)",
+	measuredNoTank.fuelState === "live" && measuredNoTank.milesLeft === 185, JSON.stringify(measuredNoTank));
+const EMPTY = { fuelPct: 0, fuelSource: "live", anchorPct: 0, ageMinutes: 5 };
+for (const [label, opts] of [["measured", { burn: BURN5 }], ["estimated + truck tank", { burn: NO_BURN }],
+	["estimated + no tank size", { burn: NO_BURN, tankSource: "default", tank: 200 }]]) {
+	const empty = DF({ reading: EMPTY, ...opts });
+	check(`0% is milesLeft 0 and refuel-now, never null (${label})`, empty.milesLeft === 0 && empty.refuelNow === true, JSON.stringify(empty));
+}
+check("...with no tank size the rows still only check the gauge (how far a full tank goes is unknown)",
+	allCheckGauge(DF({ reading: EMPTY, burn: NO_BURN, tankSource: "default", tank: 200 })));
+const noTruck = DF({ reading: NO_READING, hasTruck: false, fromLivePosition: false });
+check("no truck linked: 'no_truck', no miles, no reading age, one whole-load row to check the gauge",
+	noTruck.fuelState === "no_truck" && noTruck.milesLeft === null && noTruck.fuelReadAgeMinutes === null
+		&& noTruck.legs.length === 1 && noTruck.legs[0].key === "whole_load" && allCheckGauge(noTruck), JSON.stringify(noTruck));
+const rangeNone = attempt(() => fm.planDriverFuel({ reading: NO_READING, hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150, mpg: 6.0 }));
+check("the range block (no plan) with no reading: 'none', milesLeft null, no legs",
+	rangeNone.fuelState === "none" && rangeNone.milesLeft === null && Array.isArray(rangeNone.legs) && rangeNone.legs.length === 0, JSON.stringify(rangeNone));
+// §5's real incident through the driver block: the carried reading floors at 0.
+const incidentDF = attempt(() => fm.planDriverFuel({
+	reading: incident, hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: TANK, mpg: MPG, burn: NO_BURN, reserve: R15,
+}));
+check("incident replay: the driver sees 0 miles and Refuel now, marked estimated — never a blank",
+	incidentDF.milesLeft === 0 && incidentDF.refuelNow === true && incidentDF.fuelState === "estimated", JSON.stringify(incidentDF));
+
+// A reading the truck may have driven far past, or one decayed against a guessed
+// tank, is never a number to plan on (fix round on the planDriverFuel read).
+const LIVE90 = (ageMinutes) => ({ fuelPct: 90, fuelSource: "live", anchorPct: 90, ageMinutes, milesSinceReading: 0 });
+const oldLive = DF({ reading: LIVE90(9 * 60) });
+check("a live reading 9 h old: 'stale', no miles, no 'enough' (90% at 5.0 mi a point would have cleared 420 mi)",
+	oldLive.fuelState === "stale" && oldLive.milesLeft === null && oldLive.fuelReadAgeMinutes === 540 && allNumberless(oldLive), JSON.stringify(oldLive));
+const at6h = DF({ reading: LIVE90(360) });
+const past6h = DF({ reading: LIVE90(361) });
+check("...the line is the trip plan's 6 h: 360 min is live and clears, 361 min is stale",
+	at6h.fuelState === "live" && at6h.legs[0] && at6h.legs[0].status === "enough" && past6h.fuelState === "stale", `${at6h.fuelState} ${past6h.fuelState}`);
+const carriedOld = DF({ reading: { fuelPct: 30, fuelSource: "carried", anchorPct: 30, ageMinutes: 7 * 60, milesSinceReading: 50 } });
+check("a carried reading 7 h old: 'stale', no miles", carriedOld.fuelState === "stale" && carriedOld.milesLeft === null, JSON.stringify(carriedOld));
+const carriedBlind = DF({ reading: { fuelPct: 90, fuelSource: "carried", anchorPct: 90, ageMinutes: 30, milesSinceReading: null } });
+check("a carried reading with no odometer to decay it (carried unchanged): 'stale', no 'enough'",
+	carriedBlind.fuelState === "stale" && carriedBlind.milesLeft === null && allNumberless(carriedBlind), JSON.stringify(carriedBlind));
+const carriedGuess = DF({ reading: { fuelPct: 27, fuelSource: "carried", anchorPct: 50, ageMinutes: 90, milesSinceReading: 300 },
+	burn: BURN5, tankSource: "default", tank: 200 });
+check("no tank size + a carried reading over a dropout (decayed against the 200-gal guess): 'no_tank_size', check the gauge",
+	carriedGuess.fuelState === "no_tank_size" && carriedGuess.milesLeft === null && allNumberless(carriedGuess), JSON.stringify(carriedGuess));
+const carriedStill = DF({ reading: { fuelPct: 50, fuelSource: "carried", anchorPct: 50, ageMinutes: 20, milesSinceReading: 0 },
+	burn: BURN5, tankSource: "default", tank: 200 });
+check("...paired: the same truck parked through the dropout (0 mi, nothing decayed) keeps its number",
+	carriedStill.fuelState === "estimated" && carriedStill.milesLeft === 235, JSON.stringify(carriedStill));
+
+// A carried level is worked out again at the planning rate the rows are judged at:
+// 100% four hours ago, 300 mi since, 150 gal, 6.0 MPG, p10 5.0 a point. At the MPG
+// on file that is 66.7% and "enough" for 300 mi; at the planning rate 300 / 5.0 = 60
+// points, so 40%, 200 planning miles against 315 needed.
+const longDropout = attempt(() => {
+	const reading = { fuelPct: 66.7, fuelSource: "carried", anchorPct: 100, ageMinutes: 240, milesSinceReading: 300 };
+	const plan = fm.planTripFuel({ routeMiles: 300, fuelPct: 66.7, burn: BURN5, mpg: 6.0, reserve: R15,
+		rangeMiles: fm.computeRange({ fuelPct: 66.7, tankGallons: 150, mpg: 6.0 }).rangeMiles });
+	const df = fm.planDriverFuel({ plan, leg: "to_delivery", fromLivePosition: true, positionAgeMinutes: 5, reading,
+		hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150, mpg: 6.0, burn: BURN5, reserve: R15 });
+	return { verdict: plan.verdict, ...df };
+});
+check("after a 4 h dropout from 100% (300 mi since): carried at the planning rate, 185 mi left; the row has no number, never 'enough' (the verdict alone says clears)",
+	longDropout.verdict === "clears" && longDropout.fuelState === "estimated" && longDropout.milesLeft === 185 && allNumberless(longDropout),
+	JSON.stringify(longDropout));
+
+const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));
+for (const t of ["3 stops: Riverton, Midway, Lakeside", "Multi-stop load", "multistop", "Stop 2 Midway", "stop #3", "2 pickups", "2nd stop Midway", "extra stop", "stop-offs"]) {
+	check(`extra stops caught in Details: ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
+}
+// The read's L1 wording gaps: with no footer a missed one would leave "enough" showing.
+for (const t of ["two stops: Riverton, Lakeside", "Multiple stops", "additional stop in Midway", "2 picks, 1 drop", "2-stop load", "Three deliveries"]) {
+	check(`extra stops caught in Details (fix round): ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
+}
+for (const t of ["Dairy Pure Whole Milk, 43,764 lbs, 1,575 cases, 21 pallets, reefer 34F", "Riverton, ST - Lakeside, ST", "nonstop", "Non-stop team",
+	"truck stop 24/7", "1 stop", "one stop", "Two pallets, additional charges apply", "", null, 42]) {
+	check(`no extra stops read into ${JSON.stringify(t)}`, mentions(t) === false, JSON.stringify(mentions(t)));
+}
+const t0 = process.hrtime.bigint();
+const ws = mentions(`stop${" ".repeat(10000)}2 stops`);
+const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+check("a 10k-whitespace Details stays under 50 ms (bounded, capped at 300 characters)", ms < 50 && ws === false, `${ms.toFixed(2)} ms, ${JSON.stringify(ws)}`);
+const stopList = (p) => attempt(() => fm.stopListShowsExtraStops(p));
+check("stop list: two pickups or two deliveries are extra stops",
+	stopList(JSON.stringify({ stops: [{ kind: "pickup" }, { kind: "pickup" }, { kind: "delivery" }] })) === true
+		&& stopList({ stops: [{ kind: "pickup" }, { kind: "delivery" }, { kind: "delivery" }] }) === true);
+check("stop list: one pickup and one delivery, none, or unreadable text are not",
+	[stopList({ stops: [{ kind: "pickup" }, { kind: "delivery" }] }), stopList(null), stopList("{not json"), stopList({ stops: "x" })]
+		.every((v) => v === false));
+
+// ---------------------------------------------------------------------------
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed`);
 if (fail) { console.log("\nFailures:"); failures.forEach((f) => console.log("  - " + f)); }
 process.exit(fail === 0 ? 0 : 1);

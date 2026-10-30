@@ -34,7 +34,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { createRequire } = require("module");
-const { closure } = require("./server-lift");
+const { closure, indexDeclarations } = require("./server-lift");
 
 const ROOT = path.join(__dirname, "..", "..");
 const SRC = require("./server-source").serverSource();
@@ -91,12 +91,21 @@ const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "a
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE"];
 
 const lifted = new Map();
-function liftedCode(receipts) {
-	const key = receipts ? "receipts" : "base";
+// extra: { routes: { name: head }, roots: [name], src } from a runner that lifts
+// more (the correction lines' runner). A route or root its source lacks is left
+// out, so the runner reports each missing feature as a failed case, not a crash.
+function liftedCode(receipts, extra = null) {
+	const src = (extra && extra.src) || SRC;
+	const key = JSON.stringify([receipts ? "receipts" : "base", extra ? [Object.keys(extra.routes || {}), extra.roots || [], extra.tag || ""] : null]);
+	if (extra && extra.src) lifted.delete(key);
 	if (!lifted.has(key)) {
-		const roots = receipts ? [...ROOTS, ...RECEIPT_ROOTS] : ROOTS;
-		const routes = Object.values(receipts ? { ...ROUTE_HEADS, ...RECEIPT_ROUTE_HEADS } : ROUTE_HEADS);
-		lifted.set(key, { roots, code: closure(SRC, { roots, routes, provided: PROVIDED, denied: DENIED }) });
+		const { decls } = indexDeclarations(src);
+		const extraRoots = ((extra && extra.roots) || []).filter((r) => decls.has(r));
+		const extraRoutes = Object.values((extra && extra.routes) || {}).filter((h) => src.includes(`\n${h}`));
+		const roots = [...(receipts ? [...ROOTS, ...RECEIPT_ROOTS] : ROOTS), ...extraRoots];
+		const routes = [...Object.values(receipts ? { ...ROUTE_HEADS, ...RECEIPT_ROUTE_HEADS } : ROUTE_HEADS), ...extraRoutes];
+		const provided = [...PROVIDED, ...((extra && extra.provided) || [])];
+		lifted.set(key, { roots, code: closure(src, { roots, routes, provided, denied: DENIED }) });
 	}
 	return lifted.get(key);
 }
@@ -176,6 +185,11 @@ function buildDb(personalSchemaSql) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) throw new Error(`DDL failed: ${e.message}\n${sql.slice(0, 160)}`); }
 	}
 	db.exec(personalSchemaSql);
+	// The correction lines' table and indexes, as server.js creates them, when it does.
+	if (SRC.includes("CREATE TABLE IF NOT EXISTS invoice_correction_lines")) {
+		db.exec(tableDdl("invoice_correction_lines"));
+		for (const sql of SRC.match(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_correction_lines_[^"]*/g) || []) db.exec(sql);
+	}
 	// The KPI tables whose DDL lives in their modules, created as server.js does.
 	appRequire("./lib/kpi-ratecon-pass").ensureTables(db);
 	appRequire("./lib/kpi-deadhead-routes").ensureTables(db);
@@ -225,11 +239,14 @@ class Res {
 	end(b) { if (b !== undefined) this.body = b; this._done(); return this; }
 }
 
-// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer>, receipts }.
+// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer>, receipts,
+// require (what the lifted code requires with; appRequire by default), dataDir (a
+// folder that must not exist yet, used instead of a fresh temp one) }.
 function buildPersonalWorld(opts = {}) {
 	const personalExpense = appRequire("./lib/personal-expense");
 	const db = buildDb(personalExpense.SCHEMA_SQL);
-	const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "personal-world-"));
+	// mkdirSync without recursive throws on a folder left by a world not cleaned up.
+	const dataDir = opts.dataDir ? (fs.mkdirSync(opts.dataDir), opts.dataDir) : fs.mkdtempSync(path.join(os.tmpdir(), "personal-world-"));
 	const clock = { now: opts.nowMs || NOW_MS };
 	class FixedDate extends Date {
 		constructor(...args) { super(...(args.length ? args : [clock.now])); }
@@ -250,7 +267,7 @@ function buildPersonalWorld(opts = {}) {
 	const quiet = { log() {}, info() {}, warn() {}, error: (...a) => { if (process.env.PERSONAL_WORLD_DEBUG) console.error(...a); } };
 	const deps = {
 		db,
-		require: appRequire,
+		require: opts.require || appRequire,
 		console: quiet,
 		process: { env: { CSRF_HEADER_REQUIRED: "", ...(opts.env || {}) }, argv: [], cwd: () => ROOT, pid: process.pid },
 		__dirname: ROOT,
@@ -273,8 +290,9 @@ function buildPersonalWorld(opts = {}) {
 		personalRouteLimiter: (req, res, next) => next(),
 		personalListLimiter: (req, res, next) => next(),
 		receiptPdfProbePaths: () => ({ ...(opts.receiptPdfProbes || { env: "", db: "" }) }),
+		...(opts.extraDeps || {}),
 	};
-	const { roots, code } = liftedCode(!!opts.receipts);
+	const { roots, code } = liftedCode(!!opts.receipts, opts.extra || null);
 	const body = [
 		'"use strict";',
 		code.text,

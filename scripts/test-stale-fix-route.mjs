@@ -25,6 +25,7 @@
 //      fresh push still refreshes the route; and when the open load's fix turns
 //      2 hours old on the map's own clock, the load is redrawn without it
 //   §6 the fuel card dates a stale reading with the same helper as "Last seen"
+//   §7 the fuel card's trip line says what the route uses, never "Add"
 //
 // An old fix asks no /api/route at all (the B11 replica check, 2026-10-19). Its
 // planned lane comes from GET /api/loads/:id/haul, the load detail's endpoint
@@ -717,6 +718,35 @@ console.log('§6 the fuel card, a stale reading')
     const sameAge = `${duration.formatAgeMs(ageMin * 60 * 1000)} ago`
     ok(`§6 a reading 3.73 days old reads "${sameAge}", as the position's "Last seen" does (${t.slice(0, 160)})`,
       t.includes(`Last known 40%, ${sameAge}`) && !t.includes('4 d ago'))
+  }
+}
+
+// ══ §7 the fuel card's trip line ═════════════════════════════════════════════
+// gallonsNeeded is what the rest of the route burns, not what to pump, and the
+// line shows even when the truck clears, so it must never read "Add".
+console.log('§7 the fuel card, the trip line')
+{
+  const fuelDeps = {
+    '../../composables/useApi': {
+      useApi: () => ({
+        get: async (url) => {
+          if (String(url).startsWith('/api/fuel/trip-plan')) {
+            return { ok: true, verdict: 'clears', gallonsNeeded: 74.3, routeMiles: 1204.4 }
+          }
+          return { ok: false }
+        },
+      }),
+    },
+  }
+  let Fuel = null
+  try { Fuel = await compileComponent('client/src/components/dashboard/FuelFinderPanel.vue', fuelDeps) } catch (err) { ok(`§7 FuelFinderPanel compiles in this harness (${err.message})`, false) }
+  if (Fuel) {
+    const m = mountInMemory(Fuel, { driver: 'Driver A', loadId: 'TEST-LOAD-1' })
+    await drain()
+    const t = m.text()
+    m.unmount()
+    ok(`§7 a truck that clears reads "Uses at least 75 gal to finish 1,204 mi." and no "Add" (${t.slice(0, 200)})`,
+      t.includes('Uses at least 75 gal to finish 1,204 mi.') && !t.includes('Add at least'))
   }
 }
 

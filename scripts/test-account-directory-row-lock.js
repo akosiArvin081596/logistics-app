@@ -146,6 +146,7 @@ const MODULE_SRC = [
 	liftNew("accountDirectoryRowLock"),
 	liftNew("accountDirectoryCarrier"),
 	liftNew("onboardingAddsJudgedRow"),
+	liftNew("onboardingSigningStepState"),
 	liftNew("accountCompanyChange"),
 	liftNew("accountDirectorySync"),
 	liftNew("accountDirectorySyncLock"),
@@ -206,8 +207,12 @@ function makeApp({ server = null, createLimit = null } = {}) {
 	for (const sql of DDL) db.exec(sql);
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (7, 'acme', 'Investor', 'Acme Leasing')").run();
+	// The acting admin's own row: PUT /api/users/:id re-reads it after its awaits.
+	db.prepare("INSERT INTO users (id, username, role) VALUES (1, 'super_admin', 'Super Admin')").run();
 	const m = new Function("db", "appTodayKey", "periodLocksReadable", "bcrypt", "sendEmail", "insertNotification", "notifyChange",
 		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
+		// The signing step's contacts rule, off here (its subject is test-emergency-contacts-routes.js §10).
+		"EMERGENCY_CONTACTS_ENABLED", "emergencyContactsCount", "emergencyContactRules",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04", () => true,
 		{ hash: async () => "hash" }, () => {}, { run() {} }, () => {},
@@ -215,7 +220,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 		// As driverHistoryFloorMonth() answers: with no sheet in hand nothing can be dated.
 		(name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		(audit, code, periods, subject) => { S.recorded.push({ audit, code, periods, subject }); },
-		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test");
+		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test",
+		false, () => 0, require("../lib/emergency-contacts"));
 	let handler = null;
 	const env = {
 		app: server || { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
@@ -585,8 +591,8 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 		const got = (r) => `got ${r.status} ${(r.body || {}).code || ""}`.trim();
 		const created = (db, username) => db.prepare("SELECT id, must_change_password FROM users WHERE username = ?").get(username);
 		const createAudit = (db) => db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = 'create_user' ORDER BY id").all();
-		// The acting admin (SUPER, id 1) as a stored account with a password of its own.
-		const withAdmin = (db) => db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')")
+		// The acting admin (SUPER, id 1, stored in every app) given a password of its own.
+		const withAdmin = (db) => db.prepare("UPDATE users SET password_hash = ? WHERE id = 1 AND username = 'super_admin'")
 			.run(bcryptjs.hashSync(ADMIN_OWN, 4));
 
 		for (const [i, role] of ROLES.entries()) {
@@ -675,7 +681,7 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 				? new Function("NAMED_LOGINS_ENABLED", "userPasswordResetLimiter", `${CREATE_LIMIT_SRC}\nreturn userCreatePasswordLimit;`)(named, resetLimiter)
 				: null;
 			const { db } = reset({ namedLogins: named }, { server, createLimit });
-			db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')").run(bcryptjs.hashSync(ADMIN_OWN, 4));
+			db.prepare("UPDATE users SET password_hash = ? WHERE id = 1 AND username = 'super_admin'").run(bcryptjs.hashSync(ADMIN_OWN, 4));
 			server.put("/api/users/:id", (req, res, next) => { req.session = { user: SUPER }; next(); }, resetLimiter, (req, res) => res.json({ success: true }));
 			const listener = server.listen(0, "127.0.0.1");
 			await once(listener, "listening");

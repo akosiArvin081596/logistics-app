@@ -329,12 +329,12 @@ const basisBadgeClass = computed(() => {
   return b.rank === 2 ? 'src-best' : b.rank === 1 ? 'src-est' : 'src-muted'
 })
 /**
- * The single thing to do about this load, in one sentence.
+ * The rest of this load's fuel use, in one sentence.
  *
  * Replaces the Route left / Needs / Short by / Add / Gauge grid. gallonsNeeded
- * inherits mpgSource and is a LOWER bound, hence "at least"; it is rounded UP to
- * a whole gallon because nobody buys 74.3 of anything — drivers fill to a round
- * number or a dollar limit.
+ * is what the remaining route burns, not what to pump, so the line says "Uses",
+ * never "Add" (it shows even when the truck clears). It inherits mpgSource and is
+ * a LOWER bound, hence "at least"; it is rounded UP to a whole gallon.
  */
 const recommendation = computed(() => {
   const p = plan.value
@@ -343,7 +343,7 @@ const recommendation = computed(() => {
   if (Number.isFinite(gal) && gal > 0) {
     const route = Number(p.routeMiles)
     const tail = Number.isFinite(route) && route > 0 ? ` to finish ${milesText(Math.round(route))} mi` : ''
-    return `Add at least ${Math.ceil(gal)} gal${tail}.`
+    return `Uses at least ${Math.ceil(gal)} gal${tail}.`
   }
   if (p.verdict === 'clears') return 'No fuel stop needed on this run.'
   return ''

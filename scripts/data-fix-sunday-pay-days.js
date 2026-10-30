@@ -79,6 +79,7 @@ const fs = require("fs");
 const path = require("path");
 const { dbScope } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const financialsCalc = require("../lib/financials-calc");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
 
@@ -856,7 +857,7 @@ function writePlan(db, plan, approval, nowIso) {
 // this checkout's server.js and installed on this connection: a floor under the
 // checks above, never a substitute for them.
 function installClosedMonthTriggers(db) {
-	const src = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const src = serverSource({ root: ROOT });
 	const lifted = closure(src, { roots: ["installPeriodLockTriggers"], provided: [], denied: ["db"] });
 	const install = new Function(`"use strict";\n${lifted.text}\nreturn installPeriodLockTriggers;`)();
 	install(db);

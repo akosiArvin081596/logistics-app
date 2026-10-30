@@ -743,10 +743,10 @@ function checkLocal() {
 	const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts;
 	ok(pkg.check === "npm run lint && npm run test:unit", `§4 npm run check is the syntax check plus every unit runner (got ${pkg.check})`);
 	ok(pkg.ci === "npm run check && npm run build:client", `§4 npm run ci is the full CI gate: check plus the client build (got ${pkg.ci})`);
-	const LINT_PATHS = ["server.js", "ecosystem.config.js", "test-suite.js", "'lib/*.js'", "'lib/*.mjs'", "'lib/*.cjs'", "'scripts/*.js'", "'scripts/*.mjs'", "'scripts/*.cjs'"];
+	const LINT_PATHS = ["server.js", "ecosystem.config.js", "test-suite.js", "'lib/*.js'", "'lib/*.mjs'", "'lib/*.cjs'", "'routes/*.js'", "'scripts/*.js'", "'scripts/*.mjs'", "'scripts/*.cjs'"];
 	const lint = /^(git ls-files -z -c -o --exclude-standard -- (.+)) \| xargs -0 -r -n 1 -P \d+ node --check --$/.exec(pkg.lint || "");
 	ok(lint && lint[2].split(" ").sort().join(" ") === [...LINT_PATHS].sort().join(" "),
-		`§4 npm run lint is node --check over server.js, ecosystem.config.js, test-suite.js and every .js/.mjs/.cjs in lib/ and scripts/ (got ${pkg.lint})`);
+		`§4 npm run lint is node --check over server.js, ecosystem.config.js, test-suite.js, every .js/.mjs/.cjs in lib/ and scripts/, and the route modules in routes/ (got ${pkg.lint})`);
 	// git's pathspec * crosses "/", so the subfolders are in; ignored files (node_modules) are not.
 	const listed = lint ? spawnSync("sh", ["-c", lint[1]], { cwd: ROOT, encoding: "utf8" }).stdout.split("\0").filter(Boolean) : [];
 	ok(listed.includes("server.js") && listed.some((f) => /^scripts\/[^/]+\.mjs$/.test(f)) && listed.some((f) => /^scripts\/[^/]+\/.+\.js$/.test(f))

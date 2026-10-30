@@ -182,9 +182,9 @@ const TABLES = {
 		{ id: 3, driver: "", amount: 55 },
 	],
 	invoices: [
-		{ id: 1, driver: "desoren king", total_earnings: 1800, personal_total: 0, personal_share_total: 0 },
-		{ id: 2, driver: "soren king", total_earnings: 1500, personal_total: 0, personal_share_total: 0 },
-		{ id: 3, driver: "", total_earnings: 999, personal_total: 0, personal_share_total: 0 },
+		{ id: 1, driver: "desoren king", total_earnings: 1800, personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
+		{ id: 2, driver: "soren king", total_earnings: 1500, personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
+		{ id: 3, driver: "", total_earnings: 999, personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
 	],
 	trucks: [{ id: 7, unit_number: "33", assigned_driver: "Desoren King" }],
 	drivers_directory: [{ id: 11, driver_name: "Desoren King" }, { id: 12, driver_name: "Soren King" }],
@@ -232,6 +232,7 @@ function makeDeps() {
 		personalSummaryForRole: () => null,
 		// Nor does an invoice (scripts/test-personal-expense-receipts.js).
 		personalLinesForInvoices: () => new Map(),
+		correctionLinesForInvoices: () => new Map(),
 		stripSigningEvidence: (rows) => rows,
 		// Which stored files exist, from their bytes (its own subject is
 		// scripts/test-stored-file-serving.js).
@@ -240,6 +241,10 @@ function makeDeps() {
 		// The driver's own time off (§7): off here, so its reader must never run.
 		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 		driverOwnTimeOff: () => { throw new Error("driverOwnTimeOff() ran with DRIVER_TIME_OFF_SCREEN_ENABLED off"); },
+		// Emergency contacts: off here, so the count must never run (its subject is
+		// scripts/test-emergency-contacts-routes.js §7).
+		EMERGENCY_CONTACTS_ENABLED: false,
+		emergencyContactsCount: () => { throw new Error("emergencyContactsCount() ran with EMERGENCY_CONTACTS_ENABLED off"); },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
 	};

@@ -247,8 +247,10 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
+| `driver-fuel-screen.mjs` | The driver app's Fuel section with the driver gallons flag (DRIVER_FUEL_GALLONS_ENABLED) at 390 x 844 and 1280 x 800, on made-up data with the same static server (see "The driver fuel check"). |
 | `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
 | `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
+| `driver-emergency-contacts.mjs` | The emergency contacts item on the driver's onboarding lock screen (`EMERGENCY_CONTACTS_ENABLED`) at 375 x 667 and 390 x 664, on made-up data with the same static server: the item and the progress it counts in, one contact refused before anything is sent, the second contact saving and moving the signing step on, Edit reading the list again, and a refusal only the server gives shown in words. The contacts PUT is judged in-process by `lib/emergency-contacts.js`, the server's own rules. |
 | `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
@@ -911,7 +913,7 @@ E1, N1, N1b, F1, E2 and RC1.
 | N1b | **Planted, local only.** A throwaway Driver account (`QA-TEST-N1B-<timestamp> Driver`) beside its own directory row, planted as the same name with its space doubled (the app adds no second directory row for it), with one expense under each spelling. The run first confirms Job Tracking has no row for it. **UI:** Users page, Edit, Linked Driver set to the directory spelling (offered as stored), Save. | Saved, not 409 `DRIVER_RENAME_IS_MERGE`: the account and both expenses carry the directory spelling, and that directory row is still the only one for the name, unchanged |
 | F1 | **SKIPPED for now (see "Safety rails"); what it checked:** Local only. A load from the Super Admin's Active Loads, its sheet row read with the service account (formulas as formulas). **UI:** the load opened from the dashboard, Edit, Details changed (a `QA-F1-<timestamp>` suffix), Save changes. The row is read again. | Only the Details cell changed; every formula cell of the row is still a formula |
 | E2 | **Planted, local only.** A percentage-paid driver who earns revenue in the month (see below). **UI:** Financials, the month's row in Monthly Performance (the current month, MTD; see below), the drill-down's Driver Pay table: the driver's Pay is read. A Fuel expense ($250, or half the driver's month net when that is smaller) is planted under their name with its space doubled, dated in that month, and the month is opened again. The response behind each opening is read too. | The driver's Pay drops by the planted amount × their percentage (±$1: the page shows whole dollars). The month's Fuel Spend rises by the planted amount on every build: the control that the receipt counts in the month |
-| B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's own account spelling, dated today inside a truck assignment re-spelled with the space doubled. **UI:** Expenses, All, its description typed into the search box: the row's Truck column. The stored row is read too. | The startup backfill stamped it: the Truck column shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
+| B1 | **Planted before boot, local only** (`plant-before-boot.cjs`). An expense with a blank truck, under a driver's own account spelling, dated today inside a truck assignment re-spelled with the space doubled. **UI:** Expenses, All, its description typed into the search box: the row's truck line (`data-field="truck"`, under the driver in the Driver column). The stored row is read too. | The startup backfill stamped it: the Driver column's truck line shows the assignment's truck (`#<unit>`), and the row stores that truck's unit and owner |
 | RC1 | **SKIPPED for now (see "Safety rails"); what it checked:** Local only. A Payments Table row planted for a synthetic load `QA-RC1-<timestamp>`: the text `00123` (Invoice Number), the text `=QA` (Payment Status) and a formula (Amount Due To Carrier, `=<Payment Amount>-<Tender Fee>`), both texts written RAW; Payment Amount blank. The page then sends `POST /api/loads/from-ratecon` as the review modal does: the load number, a rate of $1,234.00 and a Details note, with no PDF. The row is read back: each cell's entered type (grid data) and the `FORMULA` render. **UI:** the Data Manager, Payments Table, searched for the load, before and after. | Only the blank Payment Amount changed (filled with the rate). The text `00123` and the text `=QA` are still text, the formula is still the same formula, and every other cell is as planted |
 
 **Why P1 sets the rate first.** Every month but the current one may be finalized, and the month-end lock refuses a
@@ -1647,6 +1649,7 @@ socket event isn't sent here (the socket is aborted); `scripts/test-driver-instr
 
 Two phone-width layout bugs (2026-10-19): on a 390 px screen the load detail's header actions ran off the dialog, so
 Edit and Delete could not be reached, and on Tracking the Active Loads panel covered the Fuel & Route card's header.
+W3 adds the Expenses list, which scrolled sideways once the Personal pill and buttons joined its rows.
 This check is the one in this folder that touches **no real data**: it boots no `server.js`, opens no database, reads no
 `.env` or key and signs nobody in. It serves the checkout's built `client/dist` from its own static server on
 `127.0.0.1:$E2E_PORT` (default 3181; 3000, 5173 and a port in use are refused) and answers every `/api` request in the
@@ -1677,11 +1680,21 @@ ProcessSingleton"): run it outside that sandbox.
 | W2-\*t | A tap on the header's screen point. | The card collapses (`aria-expanded="false"`) |
 | W1m-\*, W2m-\*, W1d-\*, W2d-\* | The same steps with a mouse at 768x1024 (`m`, the first width the load detail's header is one row again) and at 1280x800 (`d`). W1m/W1d-\*r: the title and every action on one row, the last action at the row's right edge. W2m/W2d-\*r: the card 270 px wide and the Active Loads panel's `max-height` `calc(100% - 20px)`. | As on the phone, plus the wider layout as before |
 | Wg | With `DESKTOP_BASELINE`: every box measured at 768 and 1280 px (the dialog, its title and actions; the map, the panel, the card and its header), both roles, against the baseline file. | Identical |
+| W3\*-&lt;width&gt;-SA, -DSP | `/expenses`, All Expenses, 25 made-up receipts (five with a Personal line: waiting, carried, on an approved invoice, reversed and still waiting, and one Reverse can take; one in a finalized month; long vendor, place and description texts). Eleven sizes: 375, 390, 768, 899, 900, 1024, 1100 with the sidebar folded (`f`), 1245, 1246, 1280 and 1440 px. The suffix is `m` from 640 px and `d` from 1024. | The cards on a phone and while the list panel is narrower than 900 px (every size up to 1024 with the sidebar open; 1245 and 1246 by the measured width), else the 9-column table (1100 folded, 1280, 1440) |
+| W3\*s | `scrollWidth` against `clientWidth` of the list panel (`.sub-panel`), and of the page against `innerWidth`. | No sideways scroll in either |
+| W3\*p | Each `.personal-pill`'s box against its card's or cell's content box, and its text. | Five pills, each inside; in the table the short tag ("Personal -$45.00 · waiting") with the full sentence as its `title`, in a card the full sentence |
+| W3\*c | Table sizes only: `scrollWidth` against `clientWidth` of every header and cell (cells clip), and each action button's box against its cell. | Nothing cut (the one-line texts that end in an ellipsis cut only themselves) and every button inside its cell |
+| W3\*b | Super Admin: each Personal, Undo Personal and Reverse Personal button scrolled into view and hit-tested at its centre. Dispatcher: the count of those buttons. | Every button takes a tap (Undo Personal twice, Reverse Personal once); a Dispatcher has none |
+| W3-\*t | Phone sizes: every sub-tab's box against the viewport. | All six (Super Admin) or four (Dispatcher) inside |
 | Wx | Writes the page sent. | None |
 
 Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
 (`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
-build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL.
+build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL, and on a build before the Expenses table fit (PR
+`fix/expense-table-fits`) W3 FAILs at 1280 and 1440 (no `exp-table`, the panel scrolls sideways) and at 768 to 1024 (the
+13-column table instead of the cards). The Expenses answers (`/api/expenses/all`, trucks, the drivers directory, the
+waiting corrections, a 1x1 PNG for each receipt thumbnail) are given only on the W3 pages, so W1 and W2 see what they
+saw before and the desktop geometry file holds no Expenses boxes.
 
 ## The voice notes check (`voice-notes.mjs`)
 
@@ -1712,6 +1725,33 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `voice-notes`), and the screenshots in `SHOT_DIR`
 (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Other writes, unanswered endpoints and
 page errors are listed, not scored. Exit 0 only when every row PASSes.
+
+## The driver fuel check (`driver-fuel-screen.mjs`)
+
+The driver app's Fuel section with the driver gallons flag (plan R14 PR 2), like `phone-layout.mjs`: no `server.js`,
+database, `.env`, key or sign-in. The built `client/dist` is served on `127.0.0.1:$E2E_PORT` (default 3186); every
+`/api` request is answered in the browser (a made-up Driver, "Driver QA", on load `QA-FUEL-1`, truck "Unit 901",
+Riverton to Lakeside). The two fuel answers carry blocks built by the server's own `planDriverFuel()` on made-up
+figures; the flag-off steps leave the block out.
+
+```bash
+npm run build:client
+SHOTS_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/driver-fuel-screen.mjs   # HEADED=1 to watch
+```
+
+Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
+
+| Step | What it does | Expected |
+|---|---|---|
+| DF1-DF10 | 390x844 touch: the load opened, the Fuel section opened, one world each (before pickup, in transit, refuel now, no reading, stale, no tank size, load not mapped, position old and none, extra stops, a run longer than a full tank). | Each world's plain sentences; no working (minus, reserve, MPG, %); the stops and Refresh; DF1's collapsed badge "Add 40 gal"; DF6's header chip "Fuel ?"; no sideways scroll; row text at least 14 px; Refresh at least 44 px |
+| DF11 | Route Options opened with the flag on. | No Google gallons; the toll stays |
+| DF12 | The flag off. | Today's panel ("How we know", the reserve line), no block, the badge "Fuel stop needed", Route Options with their gallons |
+| DF1d, DF6d, DF12d | 1280x800. | The block one column, at most 520 px wide; today's panel with the flag off; no sideways scroll |
+| DFx | Page errors, console errors and writes over the run. | None, but the browser's line for DF7's 400 |
+
+Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in
+`SHOTS_DIR` (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Exit 0 only when every row
+PASSes.
 
 ## Teardown (once the whole QA cycle is done)
 
