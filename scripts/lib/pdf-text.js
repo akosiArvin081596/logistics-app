@@ -14,8 +14,14 @@
 // weight; the digest (the embedded font file, or a Type3 font's glyph
 // procedures) tells two fonts of one name apart.
 //
+// compareRenders() compares fonts by what they draw, not by their bytes: the
+// same names and types, the same embedded font files byte for byte, the same
+// glyphs under each name, and each Type3 glyph drawn with the same operators,
+// its lengths within GLYPH_TOLERANCE_EM. Chromium writes a variable web font's
+// in-between weights with sub-visible coordinate noise from render to render.
+//
 //   const { pdfReport, compareRenders } = require("./lib/pdf-text");
-//   const a = await pdfReport(bytes);   // { pages: [text], fonts: ["Type3 Open Sans 700 #…"], drawing }
+//   const a = await pdfReport(bytes);   // { pages: [text], fonts: ["Type3 Open Sans 700 #…"], glyphs, files, drawing }
 //   compareRenders(a, b);               // { pages, text, fonts, drawing }: null where it holds
 //
 // Pure apart from parsing the bytes it is given (pdf-lib, already a
@@ -61,7 +67,8 @@ function parseCMap(text) {
 }
 
 // The tokens of a content stream: strings (as raw bytes), hex strings,
-// arrays, names, numbers and operators. Dictionaries are skipped whole.
+// arrays, names, numbers and operators. Dictionaries are kept whole, as
+// written, so two glyph programs that differ inside one still read apart.
 function tokenize(src) {
 	const tokens = [];
 	const stack = [tokens];
@@ -103,13 +110,14 @@ function tokenize(src) {
 			continue;
 		}
 		if (c === "<" && src[i + 1] === "<") {
+			const start = i;
 			let depth = 0;
 			while (i < src.length) {
 				if (src[i] === "<" && src[i + 1] === "<") { depth++; i += 2; continue; }
 				if (src[i] === ">" && src[i + 1] === ">") { depth--; i += 2; if (depth === 0) break; continue; }
 				i++;
 			}
-			push({ dict: true });
+			push({ dict: src.slice(start, i) });
 			continue;
 		}
 		if (c === "<") {
@@ -157,8 +165,10 @@ function textOfValue(v) {
 	return typeof v.decodeText === "function" ? v.decodeText() : String(v);
 }
 
-// "<Subtype> <name> #<digest>" for one font dictionary.
-function fontIdentity(context, font) {
+// What one font dictionary embeds: its subtype and name, its font files
+// ([key, bytes]), its Type3 glyph procedures ([glyph name, bytes], sorted by
+// name) and its FontMatrix (six numbers, else null).
+function fontFacts(context, font) {
 	const subtype = textOfValue(font.lookupMaybe(PDFName.of("Subtype"), PDFName)) || "(no subtype)";
 	// A Type0 font's descriptor sits on its descendant font.
 	let described = font;
@@ -173,19 +183,29 @@ function fontIdentity(context, font) {
 		name = [fromDescriptor("FontFamily"), fromDescriptor("FontWeight"), angle ? "italic" : ""].filter(Boolean).join(" ");
 	}
 	if (!name) name = textOfValue(font.lookupMaybe(PDFName.of("Name"), PDFName)) || "(unnamed)";
-	const program = [];
+	const files = [];
 	for (const key of ["FontFile", "FontFile2", "FontFile3"]) {
 		const file = descriptor && descriptor.get(PDFName.of(key));
-		if (file) program.push(key, Buffer.from(streamBytes(context, file)));
+		if (file) files.push([key, Buffer.from(streamBytes(context, file))]);
 	}
-	const procs = font.lookupMaybe(PDFName.of("CharProcs"), PDFDict);
-	if (procs) {
-		for (const [glyph, ref] of [...procs.entries()].sort(([a], [b]) => (a.decodeText() < b.decodeText() ? -1 : 1))) {
-			program.push(glyph.decodeText(), Buffer.from(streamBytes(context, ref)));
+	const procs = [];
+	const charProcs = font.lookupMaybe(PDFName.of("CharProcs"), PDFDict);
+	if (charProcs) {
+		for (const [glyph, ref] of [...charProcs.entries()].sort(([a], [b]) => (a.decodeText() < b.decodeText() ? -1 : 1))) {
+			procs.push([glyph.decodeText(), Buffer.from(streamBytes(context, ref))]);
 		}
 	}
-	return `${subtype} ${name} #${program.length ? digest(program) : "no-program"}`;
+	const m = font.lookupMaybe(PDFName.of("FontMatrix"), PDFArray);
+	const matrix = m && m.size() === 6 && m.asArray().every((x) => x instanceof PDFNumber) ? m.asArray().map((x) => x.asNumber()) : null;
+	return { subtype, name, files, procs, matrix };
 }
+
+const identityOf = (facts) => {
+	const program = [...facts.files.flat(), ...facts.procs.flat()];
+	return `${facts.subtype} ${facts.name} #${program.length ? digest(program) : "no-program"}`;
+};
+// "<Subtype> <name> #<digest>" for one font dictionary.
+const fontIdentity = (context, font) => identityOf(fontFacts(context, font));
 
 function fontsOf(context, resources) {
 	const out = new Map();
@@ -195,8 +215,11 @@ function fontsOf(context, resources) {
 		const font = context.lookup(ref, PDFDict);
 		const subtype = font.lookupMaybe(PDFName.of("Subtype"), PDFName);
 		const toUnicode = font.get(PDFName.of("ToUnicode"));
+		const facts = fontFacts(context, font);
 		out.set(name.decodeText(), {
-			id: fontIdentity(context, font),
+			font,
+			facts,
+			id: identityOf(facts),
 			twoByte: subtype ? subtype.decodeText() === "Type0" : false,
 			map: toUnicode ? parseCMap(latin1(streamBytes(context, toUnicode))) : new Map(),
 		});
@@ -216,11 +239,12 @@ function decodeString(font, raw) {
 	return out;
 }
 
-// `seen` collects every font met, and `drawing` hashes every content stream
-// drawn, form XObjects included. A form XObject can use its parent's fonts.
+// `seen` collects every font met, by font dictionary, and `drawing` hashes
+// every content stream drawn, form XObjects included. A form XObject can use
+// its parent's fonts.
 function textOf(context, contentBytes, resources, seen, drawing, depth, inherited = new Map()) {
 	const ownFonts = new Map([...inherited, ...fontsOf(context, resources)]);
-	for (const v of ownFonts.values()) seen.add(v.id);
+	for (const v of ownFonts.values()) seen.set(v.font, v);
 	drawing.update(Buffer.from(contentBytes)).update("\0");
 	const tokens = tokenize(latin1(contentBytes));
 	let current = null;
@@ -256,11 +280,52 @@ function textOf(context, contentBytes, resources, seen, drawing, depth, inherite
 	return out;
 }
 
+// A Type3 glyph program as compared: its font's FontMatrix, its bytes, and
+// its operators, each with the operands written before it.
+function glyphProgram(bytes, matrix) {
+	const raw = latin1(bytes);
+	const ops = [];
+	let operands = [];
+	for (const t of tokenize(raw)) {
+		if (t.op === undefined) { operands.push(t); continue; }
+		ops.push({ op: t.op, operands });
+		operands = [];
+	}
+	if (operands.length) ops.push({ op: null, operands });
+	return { matrix, raw, ops, inlineImage: ops.some((o) => o.op === "ID") };
+}
+
+// The fonts met, by "<Subtype> <name>": `glyphs` maps each Type3 name to its
+// glyph names, each to its distinct programs across every object of that
+// name; `files` maps each name with an embedded font file to the sorted
+// distinct digests of its files.
+function fontsByName(seen) {
+	const glyphs = new Map();
+	const files = new Map();
+	for (const { facts } of seen.values()) {
+		const name = `${facts.subtype} ${facts.name}`;
+		if (facts.files.length) {
+			const list = files.get(name) || [];
+			const d = digest(facts.files.flat());
+			if (!list.includes(d)) files.set(name, [...list, d].sort());
+		}
+		for (const [glyph, bytes] of facts.procs) {
+			if (!glyphs.has(name)) glyphs.set(name, new Map());
+			const byGlyph = glyphs.get(name);
+			const program = glyphProgram(bytes, facts.matrix);
+			const list = byGlyph.get(glyph) || [];
+			const same = (p) => p.raw === program.raw && JSON.stringify(p.matrix) === JSON.stringify(program.matrix);
+			if (!list.some(same)) byGlyph.set(glyph, [...list, program]);
+		}
+	}
+	return { glyphs, files };
+}
+
 async function pdfReport(bytes) {
 	const doc = await PDFDocument.load(bytes, { updateMetadata: false });
 	const context = doc.context;
 	const pages = [];
-	const seen = new Set();
+	const seen = new Map();
 	const drawing = crypto.createHash("sha256");
 	for (const page of doc.getPages()) {
 		const node = page.node;
@@ -274,14 +339,100 @@ async function pdfReport(bytes) {
 		drawing.update("\f");
 		pages.push(text.replace(/\s+/g, ""));
 	}
-	return { pages, fonts: [...seen].sort(), drawing: drawing.digest("hex").slice(0, 16) };
+	const fonts = [...new Set([...seen.values()].map((v) => v.id))].sort();
+	return { pages, fonts, ...fontsByName(seen), drawing: drawing.digest("hex").slice(0, 16) };
+}
+
+// Glyph-space lengths a Type3 glyph program draws with: its metrics (d0,
+// d1), its path (m, l, c, v, y, re) and its line width (w). Only these get
+// the tolerance; every other operand must match exactly.
+const LENGTH_OPS = new Set(["d0", "d1", "m", "l", "c", "v", "y", "re", "w"]);
+// How far a glyph's length may move between two renders, in em: 0.01 pt at a
+// 10 pt size. Chromium's noise has been about 0.00013 em; a weight swap
+// moves glyphs by 0.028 em or more.
+const GLYPH_TOLERANCE_EM = 0.001;
+
+// The size of one glyph unit in em, from a FontMatrix; null when it can't be
+// read, and then lengths must match exactly.
+function matrixScale(matrix) {
+	if (!matrix) return null;
+	const s = Math.max(...matrix.slice(0, 4).map(Math.abs));
+	return Number.isFinite(s) && s > 0 ? s : null;
+}
+
+// How far apart two glyph programs are: { em } when they have the same
+// FontMatrix and operators and differ only in lengths, else { why }.
+function programDelta(p, q) {
+	if (JSON.stringify(p.matrix) !== JSON.stringify(q.matrix)) return { why: "differs in its FontMatrix" };
+	if (p.raw === q.raw) return { em: 0 };
+	// An inline image's data isn't made of tokens: it must match byte for byte.
+	if (p.inlineImage || q.inlineImage) return { why: "draws an inline image that differs" };
+	if (p.ops.length !== q.ops.length) return { why: "differs in its drawing operators" };
+	const scale = matrixScale(p.matrix);
+	let em = 0;
+	for (let i = 0; i < p.ops.length; i++) {
+		const x = p.ops[i];
+		const y = q.ops[i];
+		if (x.op !== y.op || x.operands.length !== y.operands.length) return { why: "differs in its drawing operators" };
+		for (let j = 0; j < x.operands.length; j++) {
+			const u = x.operands[j];
+			const v = y.operands[j];
+			if (scale && LENGTH_OPS.has(x.op) && u.num !== undefined && v.num !== undefined) em = Math.max(em, Math.abs(u.num - v.num) * scale);
+			else if (JSON.stringify(u) !== JSON.stringify(v)) return { why: `differs in an operand of ${x.op || "(no operator)"}` };
+		}
+	}
+	return { em };
+}
+
+// Null when every program in `ps` has a partner in `qs` within the
+// tolerance, else why its nearest one isn't.
+function unmatchedProgram(ps, qs) {
+	for (const p of ps) {
+		const tries = qs.map((q) => programDelta(p, q));
+		if (tries.some((t) => t.em !== undefined && t.em <= GLYPH_TOLERANCE_EM)) continue;
+		const near = tries.filter((t) => t.em !== undefined).sort((x, y) => x.em - y.em)[0];
+		return near ? `differs by ${Number(near.em.toPrecision(2))} em (tolerance ${GLYPH_TOLERANCE_EM} em)` : tries[0].why;
+	}
+	return null;
+}
+
+// Null when two reports' fonts draw the same, else the first difference.
+function fontsDiffer(a, b) {
+	const names = (r) => [...new Set(r.fonts.map((id) => id.replace(/ #[^ ]*$/, "")))].sort();
+	const na = names(a);
+	const nb = names(b);
+	if (JSON.stringify(na) !== JSON.stringify(nb)) {
+		const only = (x, y) => x.filter((n) => !y.includes(n)).join(", ") || "none";
+		return `font names differ: ${only(na, nb)} against ${only(nb, na)}`;
+	}
+	for (const [side, r] of [["first", a], ["second", b]]) {
+		const bare = r.fonts.find((id) => / #no-program$/.test(id));
+		if (bare) return `${bare.replace(/ #no-program$/, "")}: a font with no glyph program or embedded font file in the ${side} render: the glyph reader missed it`;
+	}
+	for (const name of na) {
+		const gA = (a.glyphs && a.glyphs.get(name)) || new Map();
+		const gB = (b.glyphs && b.glyphs.get(name)) || new Map();
+		const fA = (a.files && a.files.get(name)) || [];
+		const fB = (b.files && b.files.get(name)) || [];
+		for (const [side, g, f] of [["first", gA, fA], ["second", gB, fB]]) {
+			if (!g.size && !f.length) return `${name}: no glyph program or embedded font file read from the ${side} render: the glyph reader missed it`;
+		}
+		if (JSON.stringify(fA) !== JSON.stringify(fB)) return `${name}: its embedded font file differs`;
+		for (const glyph of [...new Set([...gA.keys(), ...gB.keys()])].sort()) {
+			if (!gA.has(glyph) || !gB.has(glyph)) return `${name}|${glyph} is drawn only in the ${gA.has(glyph) ? "first" : "second"} render`;
+			const why = unmatchedProgram(gA.get(glyph), gB.get(glyph)) || unmatchedProgram(gB.get(glyph), gA.get(glyph));
+			if (why) return `${name}|${glyph} ${why}`;
+		}
+	}
+	return null;
 }
 
 // Whether two renders of one document read the same. Each field is null when
 // it holds, or says why not. Nothing holds by being empty: no page fails, text
-// read with no font read fails (the reader missed one), and fonts with no text
-// read fail (the text reader missed it). Only a document with neither text nor
-// fonts is compared by what its pages draw instead.
+// read with no font read fails (the reader missed one), fonts with no text
+// read fail (the text reader missed it), and a font with neither a glyph
+// program nor an embedded font file fails (the glyph reader missed it). Only
+// a document with neither text nor fonts is compared by what its pages draw.
 function compareRenders(a, b) {
 	const out = { pages: null, text: null, fonts: null, drawing: null };
 	if (!a.pages.length || a.pages.length !== b.pages.length) out.pages = `${a.pages.length} page(s) against ${b.pages.length}`;
@@ -290,10 +441,10 @@ function compareRenders(a, b) {
 	const differs = a.pages.findIndex((t, i) => t !== b.pages[i]);
 	if (differs >= 0) out.text = `page ${differs + 1} differs`;
 	else if (!anyText && anyFont) out.text = "fonts were read but no text: the text reader missed it";
-	if (JSON.stringify(a.fonts) !== JSON.stringify(b.fonts)) out.fonts = `${a.fonts.join(", ") || "none"} against ${b.fonts.join(", ") || "none"}`;
-	else if (anyText && !anyFont) out.fonts = "text was read but no font: the font reader missed one";
+	out.fonts = fontsDiffer(a, b);
+	if (!out.fonts && anyText && !anyFont) out.fonts = "text was read but no font: the font reader missed one";
 	if (!anyText && !anyFont && a.drawing !== b.drawing) out.drawing = "neither text nor fonts, and the pages draw differently";
 	return out;
 }
 
-module.exports = { pdfReport, compareRenders, fontIdentity, parseCMap, tokenize };
+module.exports = { pdfReport, compareRenders, fontIdentity, parseCMap, tokenize, GLYPH_TOLERANCE_EM };

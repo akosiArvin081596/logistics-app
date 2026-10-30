@@ -27,7 +27,10 @@
 //       host name only, and never reach their server.
 //   §4  the render comparison: one statement and one invoice, rendered with
 //       the controls off and on, have the same pages, the same text on each
-//       page and the same embedded fonts. Chromium's own sandbox is left off
+//       page, the same fonts by name and type, the same embedded font files,
+//       and the same glyphs drawn within 0.001 em (Chromium moves a variable
+//       web font's glyphs by less from render to render, controls off or on;
+//       scripts/lib/pdf-text.js). Chromium's own sandbox is left off
 //       here: it changes isolation, not layout, and its render is proven where
 //       its account and profile exist.
 //
@@ -345,7 +348,7 @@ function renderIn(mode, outDir, childFile, controlPort, extraEnv) {
 }
 
 async function controlsSections() {
-	const { pdfReport, compareRenders } = require("./lib/pdf-text");
+	const { pdfReport, compareRenders, GLYPH_TOLERANCE_EM } = require("./lib/pdf-text");
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-pdf-controls-"));
 	const childFile = path.join(tmp, "render-child.js");
 	fs.writeFileSync(childFile, CHILD_SRC);
@@ -396,7 +399,7 @@ async function controlsSections() {
 			const diff = compareRenders(a, b);
 			ok(diff.pages === null, `${name}: the same number of pages`, diff.pages || `${a.pages.length} page(s)`);
 			ok(diff.text === null, `${name}: the same text on every page`, diff.text || `${a.pages.reduce((n, t) => n + t.length, 0)} glyphs`);
-			ok(diff.fonts === null, `${name}: the same embedded fonts, by name and glyph program`, diff.fonts || `${a.fonts.length}: ${a.fonts.map((f) => f.replace(/ #[0-9a-f]{12}$/, "")).join(", ")}`);
+			ok(diff.fonts === null, `${name}: the same embedded fonts, by name and type, and the same glyphs within ${GLYPH_TOLERANCE_EM} em`, diff.fonts || `${a.fonts.length}: ${a.fonts.map((f) => f.replace(/ #[0-9a-f]{12}$/, "")).join(", ")}`);
 			ok(diff.drawing === null, `${name}: neither text nor fonts would mean comparing what the pages draw`, diff.drawing || "not needed");
 		}
 	} finally {
