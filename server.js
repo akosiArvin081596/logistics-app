@@ -6078,6 +6078,30 @@ db.exec(`
 	)
 `);
 
+// A driver's emergency contacts, keyed by the Driver account, in their own table so no
+// whole-row read of users or drivers_directory carries them. ON DELETE CASCADE backs up
+// DELETE /api/users/:id's explicit DELETE (so a rebuild of users needs foreign_keys OFF).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_emergency_contacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		position INTEGER NOT NULL,
+		contact_name TEXT NOT NULL,
+		relationship TEXT NOT NULL,
+		contact_phone TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		created_by INTEGER NOT NULL DEFAULT 0,
+		updated_by INTEGER NOT NULL DEFAULT 0,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_emergency_contacts_user ON driver_emergency_contacts(user_id)"); } catch {}
+// EMERGENCY CONTACTS, default OFF: on only when exactly "true". Off, the four
+// emergency-contact routes answer 404 FEATURE_OFF before any role check and the
+// driver payload has no emergencyContacts key. The table above exists either way.
+const EMERGENCY_CONTACTS_ENABLED = process.env.EMERGENCY_CONTACTS_ENABLED === "true";
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS invoices (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -10798,6 +10822,143 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 	}
 });
 
+// ============================================================
+// DRIVER EMERGENCY CONTACTS (EMERGENCY_CONTACTS_ENABLED; rules in lib/emergency-contacts.js)
+// ============================================================
+// Only these helpers, the four routes, the driver payload's count, the onboarding signing
+// step's count (onboardingSigningStepState()) and the account delete touch
+// driver_emergency_contacts (pinned by scripts/test-emergency-contacts-routes.js).
+const emergencyContactRules = require("./lib/emergency-contacts");
+
+// Off, every emergency-contact route answers 404 FEATURE_OFF, before any role check.
+function emergencyContactsFlagGate(req, res, next) {
+	if (!EMERGENCY_CONTACTS_ENABLED) return res.status(404).json({ error: "Not found", code: "FEATURE_OFF" });
+	return next();
+}
+
+// Keyed per account, as onboardingSignLimiter is: each write can add audit rows.
+const emergencyContactsWriteLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many emergency contact changes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// A Driver account's contacts in list order: the one read of the contact values.
+function emergencyContactRows(userId) {
+	return db.prepare(
+		"SELECT id, position, contact_name, relationship, contact_phone FROM driver_emergency_contacts WHERE user_id = ? ORDER BY position, id"
+	).all(userId);
+}
+
+function emergencyContactsCount(userId) {
+	return db.prepare("SELECT COUNT(*) AS n FROM driver_emergency_contacts WHERE user_id = ?").get(userId).n;
+}
+
+// The body of every 200 the routes send.
+function emergencyContactsBody(userId) {
+	const contacts = emergencyContactRows(userId).map(emergencyContactRules.contactView);
+	return {
+		contacts,
+		minimum: emergencyContactRules.MIN_CONTACTS,
+		maximum: emergencyContactRules.MAX_CONTACTS,
+		complete: contacts.length >= emergencyContactRules.MIN_CONTACTS,
+	};
+}
+
+// The signed-in driver's account, read again rather than trusted from the session:
+// null when the session has no integer id, or the account is gone or not a Driver.
+function emergencyContactsOwnAccount(req) {
+	const id = req.session && req.session.user ? req.session.user.id : undefined;
+	if (!Number.isSafeInteger(id) || id <= 0) return null;
+	const account = db.prepare("SELECT id, username, role, driver_name FROM users WHERE id = ?").get(id);
+	return account && account.role === "Driver" ? account : null;
+}
+
+// The Driver account a Drivers page row names, through normalizeDriverName():
+// { account } for exactly one, else { reason: "no_driver_account" | "ambiguous" }.
+function driverAccountForDirectoryRow(row) {
+	const key = normalizeDriverName(row && typeof row.driver_name === "string" ? row.driver_name : "");
+	if (!key) return { reason: "no_driver_account" };
+	const hits = db.prepare("SELECT id, username, driver_name FROM users WHERE role = 'Driver' AND COALESCE(driver_name, '') <> '' ORDER BY id").all()
+		.filter((u) => normalizeDriverName(u.driver_name) === key);
+	if (hits.length === 1) return { account: hits[0] };
+	return { reason: hits.length ? "ambiguous" : "no_driver_account" };
+}
+
+// The staff routes' Drivers page row and its account, or { refusal: { status, body } }
+// (400 INVALID_DRIVER_ID, 404 DRIVER_NOT_FOUND).
+function emergencyContactsDirectoryTarget(rawId) {
+	const text = typeof rawId === "string" ? rawId : "";
+	if (!/^[1-9][0-9]{0,9}$/.test(text)) return { refusal: { status: 400, body: { error: "Invalid driver id", code: "INVALID_DRIVER_ID" } } };
+	const row = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(Number(text));
+	if (!row) return { refusal: { status: 404, body: { error: "Driver not found", code: "DRIVER_NOT_FOUND" } } };
+	return { row, link: driverAccountForDirectoryRow(row) };
+}
+
+// Stores `body`'s list for Driver account `userId`; answers { status, body }. One
+// transaction with no await, over his rows read again: an id that is not his is refused
+// with nothing written (409 CONTACT_NOT_FOUND). Each add, change and delete gets one audit
+// row naming a number's last 4 digits only; a list that changes nothing writes nothing.
+function saveEmergencyContacts(req, userId, driverLabel, body) {
+	const v = emergencyContactRules.validateContactList(body);
+	if (!v.ok) return { status: v.status, body: { error: v.error, code: v.code, ...(v.index === undefined ? {} : { index: v.index }) } };
+	const actorId = Number.isSafeInteger(req.session.user.id) ? req.session.user.id : 0;
+	const now = new Date().toISOString();
+	const audit = (action, kind, facts) => logAudit(req, action, "driver_emergency_contacts", userId,
+		emergencyContactRules.auditDetail(kind, { driver: driverLabel, userId, ...facts }));
+	const outcome = db.transaction(() => {
+		const current = emergencyContactRows(userId);
+		const owned = new Set(current.map((r) => r.id));
+		const stray = v.list.find((c) => c.id !== null && !owned.has(c.id));
+		if (stray) return { strayId: stray.id };
+		const diff = emergencyContactRules.diffContacts(current, v.list);
+		const remove = db.prepare("DELETE FROM driver_emergency_contacts WHERE id = ? AND user_id = ?");
+		for (const d of diff.deletes) {
+			remove.run(d.id, userId);
+			audit("emergency_contact_delete", "delete", { contactId: d.id, position: d.position, phone: d.phone });
+		}
+		const update = db.prepare(`UPDATE driver_emergency_contacts SET position = ?, contact_name = ?, relationship = ?,
+			contact_phone = ?, updated_at = ?, updated_by = ? WHERE id = ? AND user_id = ?`);
+		for (const ch of diff.changes) {
+			update.run(ch.after.position, ch.after.name, ch.after.relationship, ch.after.phone, now, actorId, ch.id, userId);
+			audit("emergency_contact_change", "change", { contactId: ch.id, fields: ch.fields,
+				before: { position: ch.before.position, phone: ch.before.phone }, after: { position: ch.after.position, phone: ch.after.phone } });
+		}
+		const insert = db.prepare(`INSERT INTO driver_emergency_contacts
+			(user_id, position, contact_name, relationship, contact_phone, created_at, updated_at, created_by, updated_by)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+		for (const a of diff.adds) {
+			const contactId = Number(insert.run(userId, a.position, a.name, a.relationship, a.phone, now, now, actorId, actorId).lastInsertRowid);
+			audit("emergency_contact_add", "add", { contactId, position: a.position, phone: a.phone });
+		}
+		return { changed: diff.deletes.length + diff.changes.length + diff.adds.length };
+	})();
+	if (outcome.strayId !== undefined) {
+		logAuditRefusal(req, "emergency_contacts_write_blocked", "driver_emergency_contacts", userId,
+			`Driver ${driverLabel} (user ${userId}): contact ${outcome.strayId} is not on this driver's list [CONTACT_NOT_FOUND]`, "CONTACT_NOT_FOUND");
+		return { status: 409, body: { error: "This list was changed somewhere else. Open it again, then save your changes.", code: "CONTACT_NOT_FOUND" } };
+	}
+	if (outcome.changed) notifyChange("drivers");
+	return { status: 200, body: emergencyContactsBody(userId) };
+}
+
+// After a save, a driver still at the onboarding signing step may have finished it, so the
+// step is judged again as a signature judges it. Its failure is logged and never fails the
+// save, which is stored: the next save or drug-test upload judges the step again.
+async function emergencyContactsAfterSave(req, userId) {
+	try {
+		const ob = db.prepare("SELECT status FROM driver_onboarding WHERE user_id = ?").get(userId);
+		if (ob && ob.status === "documents_pending") await checkAndCompleteOnboarding(userId, req);
+	} catch (err) {
+		console.error("[emergency-contacts] onboarding step check failed:", err.code || "ERROR");
+	}
+}
+
 // GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test + SSN for a driver
 app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -10861,6 +11022,46 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/drivers-directory/:id/emergency-contacts — the contacts of the Driver account
+// a Drivers page row names. A row with no Driver account, or two, answers 200
+// { linked: false, reason }, as /documents answers linked: false.
+app.get("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const target = emergencyContactsDirectoryTarget(req.params.id);
+		if (target.refusal) return res.status(target.refusal.status).json(target.refusal.body);
+		if (!target.link.account) return res.json({ linked: false, reason: target.link.reason });
+		res.json({ linked: true, userId: target.link.account.id, ...emergencyContactsBody(target.link.account.id) });
+	} catch (err) {
+		console.error("[emergency-contacts] staff read failed:", err.code || "ERROR");
+		res.status(500).json({ error: "The emergency contacts could not be read.", code: "READ_FAILED" });
+	}
+});
+
+// PUT /api/drivers-directory/:id/emergency-contacts — replace that driver's list, as
+// PUT /api/driver/me/emergency-contacts does (a save can finish his onboarding signing
+// step); 409 NO_DRIVER_ACCOUNT or DRIVER_ACCOUNT_AMBIGUOUS when the row names no Driver
+// account or two.
+app.put("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), emergencyContactsWriteLimiter, async (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const target = emergencyContactsDirectoryTarget(req.params.id);
+		if (target.refusal) return res.status(target.refusal.status).json(target.refusal.body);
+		const account = target.link.account;
+		if (!account) {
+			return res.status(409).json(target.link.reason === "ambiguous"
+				? { error: "Two driver accounts match this name. Fix the names first.", code: "DRIVER_ACCOUNT_AMBIGUOUS" }
+				: { error: "No driver account is linked to this directory row. Contacts are kept on the driver's sign-in account.", code: "NO_DRIVER_ACCOUNT" });
+		}
+		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name, 120), req.body);
+		if (out.status === 200) await emergencyContactsAfterSave(req, account.id);
+		res.status(out.status).json(out.status === 200 ? { linked: true, userId: account.id, ...out.body } : out.body);
+	} catch (err) {
+		console.error("[emergency-contacts] staff save failed:", err.code || "ERROR");
+		res.status(500).json({ error: "The emergency contacts could not be saved.", code: "SAVE_FAILED" });
 	}
 });
 
@@ -17847,6 +18048,16 @@ app.get("/api/investor-outreach/log", requireRole("Super Admin"), (req, res) => 
 
 // === DRIVER ONBOARDING ENDPOINTS ===
 
+// The signing step (documents_pending -> documents_signed), one rule for checkAndCompleteOnboarding() and
+// onboardingAddsJudgedRow(): every ONBOARDING_DOCS document signed (no other document counts) and, with
+// EMERGENCY_CONTACTS_ENABLED, two contacts on file, which hold back only a driver still at the step.
+function onboardingSigningStepState(userId, ob) {
+	const signed = new Set(db.prepare("SELECT doc_key FROM onboarding_documents WHERE user_id = ? AND signed = 1").all(userId).map((r) => r.doc_key));
+	const requiredSigned = ONBOARDING_DOCS.every((d) => signed.has(d.key));
+	const contactsOk = !EMERGENCY_CONTACTS_ENABLED || emergencyContactsCount(userId) >= emergencyContactRules.MIN_CONTACTS;
+	return { requiredSigned, contactsOk, stepDone: requiredSigned && (contactsOk || ob.status !== "documents_pending") };
+}
+
 // Helper: check if onboarding is complete and finalize. `req` is the request
 // that got here (the driver signing, or the admin recording a drug test), the
 // actor on a withheld-carrier audit row.
@@ -17866,12 +18077,9 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 	}
 	const ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
 	if (!ob || ob.status === "fully_onboarded") return ob;
-	const signedCount = db.prepare(
-		"SELECT COUNT(*) AS cnt FROM onboarding_documents WHERE user_id = ? AND signed = 1"
-	).get(userId).cnt;
-	const allSigned = signedCount === ONBOARDING_DOCS.length;
-	// Update to documents_signed if all docs signed
-	if (allSigned && ob.status === "documents_pending") {
+	const step = onboardingSigningStepState(userId, ob);
+	// Update to documents_signed once the signing step is done
+	if (step.stepDone && ob.status === "documents_pending") {
 		db.prepare("UPDATE driver_onboarding SET status = 'documents_signed' WHERE user_id = ?").run(userId);
 		// Push a socket refresh to admin Applications views so the new signed
 		// state shows up without a manual reload. Without this, admins saw the
@@ -18015,8 +18223,8 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 		</div>`;
 		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
 	}
-	// Fully onboarded if all signed AND drug test passed
-	if (allSigned && ob.drug_test_result === "pass") {
+	// Fully onboarded once the signing step is done AND the drug test passed
+	if (step.stepDone && ob.drug_test_result === "pass") {
 		const now = new Date().toISOString();
 		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
 		notifyChange("applications");
@@ -34207,9 +34415,11 @@ function userDeleteLockBlockers(user, cascadeName) {
 // DELETING AN ONBOARDED DRIVER — the FK-bearing children
 // ============================================================
 // `db.pragma("foreign_keys = ON")` plus three FKs on users(id) —
-// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` (the
-// ONLY three; verified by grepping REFERENCES users) — meant `DELETE FROM users`
-// raised `FOREIGN KEY constraint failed` for anyone who had ever been onboarded.
+// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` — meant
+// `DELETE FROM users` raised `FOREIGN KEY constraint failed` for anyone who had
+// ever been onboarded. There are FOUR FKs on users(id) (grep REFERENCES users):
+// `driver_emergency_contacts` is ON DELETE CASCADE and is still deleted
+// explicitly below, so the audit line counts it.
 // The whole cascade rolled back and the route answered a 500 `DELETE_ROLLED_BACK`
 // naming no cause, so the observable bug was not orphaning: ONBOARDED DRIVERS
 // WERE SIMPLY UNDELETABLE, with no message saying why.
@@ -34638,6 +34848,8 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			removed.onboarding_documents = db.prepare("DELETE FROM onboarding_documents WHERE user_id = ?").run(id).changes;
 			removed.driver_onboarding = db.prepare("DELETE FROM driver_onboarding WHERE user_id = ?").run(id).changes;
 			removed.driver_payment_info = db.prepare("DELETE FROM driver_payment_info WHERE user_id = ?").run(id).changes;
+			// Third parties' names and numbers leave with the account; counted in the audit line.
+			removed.driver_emergency_contacts = db.prepare("DELETE FROM driver_emergency_contacts WHERE user_id = ?").run(id).changes;
 			if (user.role === "Investor") {
 				removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
 				removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
@@ -37632,16 +37844,15 @@ function accountDirectorySyncLock(sync, jt) {
 	return directoryEditLockBlockers(sync.row, { carrier_name: sync.carrier }, { history: driverHistoryFloorMonth(sync.row.driver_name, jt) });
 }
 
-// Whether this checkAndCompleteOnboarding() call will add a judged row: every
-// document signed, and either the documents_pending → documents_signed step or a
-// passed drug test, for an account accountDirectoryRowJudged() judges. The same
-// reads the function makes, so it can read Job Tracking first and then run
-// without another await.
+// Whether this checkAndCompleteOnboarding() call will add a judged row: the
+// signing step done (onboardingSigningStepState()), and either the
+// documents_pending → documents_signed step or a passed drug test, for an account
+// accountDirectoryRowJudged() judges. The same reads the function makes, so it can
+// read Job Tracking first and then run without another await.
 function onboardingAddsJudgedRow(userId) {
 	const ob = db.prepare("SELECT status, drug_test_result FROM driver_onboarding WHERE user_id = ?").get(userId);
 	if (!ob || ob.status === "fully_onboarded") return false;
-	const signed = db.prepare("SELECT COUNT(*) AS cnt FROM onboarding_documents WHERE user_id = ? AND signed = 1").get(userId).cnt;
-	if (signed !== ONBOARDING_DOCS.length) return false;
+	if (!onboardingSigningStepState(userId, ob).stepDone) return false;
 	if (ob.status !== "documents_pending" && ob.drug_test_result !== "pass") return false;
 	const user = db.prepare("SELECT driver_name, company_name FROM users WHERE id = ?").get(userId);
 	return !!user && accountDirectoryRowJudged(user.driver_name, user.company_name);
@@ -48381,6 +48592,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			// never the URL's; a Super Admin's by the URL's. The only availability
 			// read in this route (scripts/test-driver-availability-guards.js).
 			...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName) } : {}),
+			// How many emergency contacts the driver has on file (never the contacts), by his
+			// session's account id, only while the flag is on; a Super Admin's payload has none.
+			...(EMERGENCY_CONTACTS_ENABLED && req.session.user.role !== "Super Admin" ? { emergencyContacts: { required: emergencyContactRules.MIN_CONTACTS, maximum: emergencyContactRules.MAX_CONTACTS, onFile: emergencyContactsCount(req.session.user.id) } } : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
@@ -48474,6 +48688,39 @@ function truckPhotoForStorage(value) {
 	if (!verdict.ok) return refusal(verdict);
 	return { value: `data:${file.contentType};base64,${file.body.toString("base64")}` };
 }
+
+// GET /api/driver/me/emergency-contacts — the signed-in driver's own contacts. Two
+// path segments under /api/driver/, so /api/driver/:driverName never captures it.
+app.get("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const account = emergencyContactsOwnAccount(req);
+		if (!account) return res.status(403).json({ error: "Only a driver's own account has emergency contacts here.", code: "DRIVER_ACCOUNT_REQUIRED" });
+		res.json(emergencyContactsBody(account.id));
+	} catch (err) {
+		console.error("[emergency-contacts] read failed:", err.code || "ERROR");
+		res.status(500).json({ error: "Your emergency contacts could not be read.", code: "READ_FAILED" });
+	}
+});
+
+// PUT /api/driver/me/emergency-contacts — replace the signed-in driver's list. Body
+// { contacts: [{ id?, name, relationship, phone }] }, 2 to 5. 400 INVALID_BODY; 422
+// EMERGENCY_CONTACTS_MIN / _MAX, CONTACT_*_INVALID or CONTACT_PHONE_DUPLICATE with the
+// entry's index; 409 CONTACT_NOT_FOUND for an id not on his list. A save can finish his
+// onboarding signing step (emergencyContactsAfterSave()).
+app.put("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), emergencyContactsWriteLimiter, async (req, res) => {
+	res.set("Cache-Control", "private, no-store");
+	try {
+		const account = emergencyContactsOwnAccount(req);
+		if (!account) return res.status(403).json({ error: "Only a driver's own account has emergency contacts here.", code: "DRIVER_ACCOUNT_REQUIRED" });
+		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name || account.username, 120), req.body);
+		if (out.status === 200) await emergencyContactsAfterSave(req, account.id);
+		res.status(out.status).json(out.body);
+	} catch (err) {
+		console.error("[emergency-contacts] save failed:", err.code || "ERROR");
+		res.status(500).json({ error: "Your emergency contacts could not be saved.", code: "SAVE_FAILED" });
+	}
+});
 
 // GET /api/driver/me/identity-file/:fileType — Stream the requesting driver's
 // own CDL Front / CDL Back / Medical Card. Companion to the application_*_type
@@ -54270,6 +54517,10 @@ if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 //   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
 //   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
 //   only when no other row reads the same).
+// - The caller names the day its screen showed (`stored`, YYYY-MM-DD; 400
+//   PICKUP_DAY_REQUIRED without one), so a click never confirms a date nobody saw: a cell
+//   whose day now differs is 409 PICKUP_CHANGED with the day it reads now, nothing recorded,
+//   and the Job Tracking cache dropped so the screen's next dashboard read is current.
 // - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
 //   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
 //   months are never edited; that variant shows no button).
@@ -54314,6 +54565,10 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
 	}
 	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	const shownDay = typeof body.stored === "string" ? body.stored : "";
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(shownDay) || pickupConfirmation.cellDay(shownDay) !== shownDay) {
+		return res.status(400).json({ error: "The pickup day shown on screen is required. Reload the dashboard and open the load again.", code: "PICKUP_DAY_REQUIRED" });
+	}
 	let all;
 	try {
 		const sheets = await getSheets();
@@ -54352,6 +54607,15 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		}
 		const column = loadCellColumnName(headers, headers[pickupCol]);
 		const day = pickupConfirmation.cellDay(stored) || null;
+		// Before "already confirmed": a person's edit since the screen read it is a change too.
+		if (day !== shownDay) {
+			jtCacheInvalidate();
+			return res.status(409).json({
+				error: "The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.",
+				code: "PICKUP_CHANGED",
+				stored: day,
+			});
+		}
 		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
 		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
 		// to record.
@@ -61293,6 +61557,42 @@ const FUEL_RESERVE_FRACTION = (() => {
 })();
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
 
+// The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
+// An enable switch, off unless true/1/yes/on: off, both answers are as before.
+const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
+// The lib's 10 is a floor: a bad value or one below it gives 10, so it can only add fuel.
+const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
+	const n = parseFloat(process.env.DRIVER_FUEL_GALLONS_MARGIN_PCT);
+	return Number.isFinite(n) ? Math.max(n, fuelModel.DRIVER_FUEL_MARGIN_PCT) : fuelModel.DRIVER_FUEL_MARGIN_PCT;
+})();
+// Fuel counts only the first pickup and the final delivery, so say when a load
+// has more: the rate-con stop list, else its Details. Only a yes/no leaves here.
+function loadHasExtraStops(loadId, jtRow, headers) {
+	const detailsCol = findCol(headers, /^details$/i);
+	if (jtRow && detailsCol && fuelModel.detailsMentionExtraStops(jtRow[detailsCol])) return true;
+	try {
+		const row = db.prepare("SELECT payload FROM load_driver_instructions WHERE load_key = ?").get(normalizeLoadId(loadId));
+		return fuelModel.stopListShowsExtraStops(row ? row.payload : null);
+	} catch { return false; }
+}
+// Another of the load's driver's loads comes first (started, or ahead in the
+// driver's queue), so the run to this pickup starts at that delivery, not here.
+function driverHasLoadUnderway(jt, jtRow, loadId) {
+	const headers = jt.headers || [];
+	const idCol = findCol(headers, /load.?id|job.?id/i);
+	const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+	const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+	const driver = jtRow && driverCol ? normalizeDriverName(String(jtRow[driverCol] || "")) : "";
+	if (!driver || !idCol || !statusCol) return false;
+	const self = normalizeLoadId(loadId);
+	const rows = excludeDroppedLoads(jt.data || [], headers);
+	if (rows.some((r) => normalizeLoadId(r[idCol]) !== self && normalizeDriverName(String(r[driverCol] || "")) === driver
+		&& (fuelModel.isPickedUp(r[statusCol]) || /^heading to shipper$/i.test(String(r[statusCol] || "").trim())))) return true;
+	const queue = computeDriverQueues(rows, headers)[driver] || [];
+	const mine = queue.find((q) => normalizeLoadId(q.load_id) === self);
+	return !!mine && queue.some((q) => q.queue_position < mine.queue_position);
+}
+
 // How far back we may reach for the last CREDIBLE fuel reading when the live one
 // is a dropout. Bounding it in SQL (rather than by age in the model) keeps the
 // staleness limit next to the query that can actually use the index.
@@ -61700,7 +62000,14 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangeEvidence: burn && burn.usable
 				? { legs: burn.n, miles: burn.miles, milesPerPointP10: burn.p10, milesPerPointP90: burn.p90 }
 				: null,
-			updatedAt });
+			updatedAt,
+			// Trip-plan's MPG chain, never the rollup, so the header chip and the load's
+			// Fuel section quote one figure.
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				reading: receiptMpg ? resolveCredibleFuelReading(vehicleId, rows, receiptMpg.mpg, preTank) : reading,
+				hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: estimate.tankSource, tankGallons: preTank,
+				mpg: receiptMpg ? receiptMpg.mpg : preMpg, burn, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+			}) } : {}) });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
 		res.status(500).json({ ok: false, error: "fuel range failed" });
@@ -61941,7 +62248,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
 			.get(loadId.toLowerCase().replace(/^#/, ""));
 		if (!lc || ![lc.dest_lat, lc.dest_lng].every(Number.isFinite)) {
-			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
+			return res.status(400).json({ ok: false, error: "load has no geocoded destination", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_ROUTE" } : {}) });
 		}
 
 		// Live fuel + position. A newest row the device took before it was linked
@@ -61959,7 +62266,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			? { latitude: latest.latitude, longitude: latest.longitude }
 			: (Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
 				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
-		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
+		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_POSITION" } : {}) });
 
 		// ⚠️⚠️ THE RUN TO THE SHIPPER IS PART OF THE TRIP, AND IT USED TO BE FREE.
 		//
@@ -62068,6 +62375,15 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
 			updatedAt: latest && latest.location_date_ms
 				? new Date(latest.location_date_ms).toISOString() : null,
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				plan, leg: planApproach ? "to_pickup" : "to_delivery", approachMiles,
+				fromLivePosition: !!fixFresh, positionAgeMinutes: fixFresh ? Math.max(0, Math.round((Date.now() - latest.location_date_ms) / 60000)) : null,
+				reading, hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: truck && truck.fuel_tank_gallons > 0 ? "truck" : "default",
+				tankGallons: tank, mpg, burn, routeSource, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
+				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId), pickupUnmapped: !pickedUp && !pickup,
+				approachUncounted: !pickedUp && !fixFresh,
+			}) } : {}),
 		});
 	} catch (err) {
 		console.error("[fuel/trip-plan]", err.message);

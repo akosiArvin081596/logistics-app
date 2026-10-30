@@ -11,7 +11,7 @@
     </div>
 
     <!-- ALL EXPENSES -->
-    <div v-show="activeSubTab === 'all'" class="sub-panel">
+    <div v-show="activeSubTab === 'all'" ref="allPanelEl" class="sub-panel">
       <!-- Personal lines waiting for a correction invoice (Super Admin only;
            hidden when none waits). -->
       <PersonalCorrectionsPanel v-if="auth.isSuperAdmin" />
@@ -301,10 +301,9 @@
         <PaginationBar :page="page" :page-size="pageSize" :total="allExpenses.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
-        <!-- Mobile: card list. Tap the card → detail modal (shipped
-             2026-04-20, already mobile-friendly). Approve / Reject full
-             width in the card footer. -->
-        <div v-else-if="isMobile" class="mobile-exp-list">
+        <!-- A phone, or a panel too narrow for the table: card list. Tap the
+             card → detail modal. Approve / Reject full width in the card footer. -->
+        <div v-else-if="showCards" class="mobile-exp-list">
           <div v-for="e in paginatedItems" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
             <div class="mobile-exp-top">
               <label class="mobile-exp-select" @click.stop>
@@ -351,8 +350,20 @@
             </div>
           </div>
         </div>
-        <!-- Desktop: existing table with new Truck column -->
-        <table v-else class="data-table">
+        <!-- Wide panel: the table. Nine fixed-width columns (Vendor takes the
+             rest), so it never grows past its panel and never scrolls sideways. -->
+        <table v-else class="data-table exp-table">
+          <colgroup>
+            <col class="col-select" />
+            <col class="col-date" />
+            <col class="col-driver" />
+            <col />
+            <col class="col-type" />
+            <col class="col-amount" />
+            <col class="col-receipt" />
+            <col class="col-status" />
+            <col class="col-actions" />
+          </colgroup>
           <thead>
             <tr>
               <th class="select-cell">
@@ -380,15 +391,11 @@
               </th>
               <!-- "Date" alone was read as the upload date, which is what led to
                    "how could it be uploaded a day before the purchase". Naming it
-                   and showing the upload time beside it removes the ambiguity. -->
+                   and showing the upload time under it removes the ambiguity. -->
               <th>Receipt Date</th>
-              <th>Uploaded</th>
               <th>Driver</th>
-              <th>Truck</th>
-              <th>City / State</th>
               <th>Vendor</th>
               <th>Type</th>
-              <th>Description</th>
               <th>Amount</th>
               <th>Receipt</th>
               <th>Status</th>
@@ -417,19 +424,24 @@
                   @change="toggleSelect(e.id)"
                 />
               </td>
-              <td class="mono-sm">
-                {{ fmtDate(e.date) }}
-                <span v-if="receiptDateSuspect(e)" class="date-warn" :title="receiptDateSuspect(e)">⚠</span>
+              <td>
+                <div class="mono-sm">
+                  {{ fmtDate(e.date) }}
+                  <span v-if="receiptDateSuspect(e)" class="date-warn" :title="receiptDateSuspect(e)">⚠</span>
+                </div>
+                <!-- e.timestamp, NOT e.created_at: the latter is UTC with no zone
+                     marker and would render ~8h early. -->
+                <div class="cell-sub">Uploaded {{ fmtUploaded(e.timestamp) }}</div>
               </td>
-              <!-- e.timestamp, NOT e.created_at: the latter is UTC with no zone
-                   marker and would render ~8h early. -->
-              <td class="mono-sm upload-cell">{{ fmtUploaded(e.timestamp) }}</td>
-              <td>{{ e.driver }}</td>
-              <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
-              <td class="mono-sm">{{ fmtLocation(e) }}</td>
-              <td class="desc-cell" :title="e.vendor_normalized || ''">{{ e.vendor || '—' }}</td>
-              <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
-              <td class="desc-cell">{{ e.description || '\u2014' }}</td>
+              <td>
+                <div>{{ e.driver }}</div>
+                <div v-if="e.truck_unit" class="cell-sub cell-line cell-mono" data-field="truck" :title="'#' + e.truck_unit">#{{ e.truck_unit }}</div>
+              </td>
+              <td>
+                <div class="cell-line cell-strong" :title="e.vendor_normalized || e.vendor || ''">{{ e.vendor || '—' }}</div>
+                <div class="cell-sub cell-line" :title="placeLine(e)">{{ placeLine(e) }}</div>
+              </td>
+              <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]" :title="e.type">{{ e.type }}</span></td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
               <td @click.stop>
                 <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
@@ -440,15 +452,15 @@
                 <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
               </td>
               <td class="action-cell" @click.stop>
-                <template v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)">
+                <div v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)" class="action-status">
                   <template v-if="(e.status || 'Pending') === 'Pending'">
                     <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
                     <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
                   </template>
                   <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
-                </template>
+                </div>
                 <div class="action-personal">
-                  <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(e.id, p)" />
+                  <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" compact @changed="(p) => onPersonalChanged(e.id, p)" />
                 </div>
               </td>
             </tr>
@@ -1650,6 +1662,7 @@ import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
+import { useElementWidth } from '../../composables/useElementWidth'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import FileDropZone from '../shared/FileDropZone.vue'
@@ -1705,6 +1718,15 @@ const { show: toast } = useToast()
 const { scanDocument } = useDocumentScan()
 const auth = useAuthStore()
 const { isMobile } = useViewport()
+
+// The All Expenses list shows the table only when its panel has room for it:
+// the table's fixed columns take 47.5rem (760 px), and below 900 px of panel
+// width the Vendor column would be too thin to read, so the cards show instead.
+// The panel's own width, not the window's: the sidebar may be open or folded.
+const TABLE_MIN_WIDTH = 900
+const allPanelEl = ref(null)
+const { width: allPanelWidth } = useElementWidth(allPanelEl)
+const showCards = computed(() => isMobile.value || (allPanelWidth.value > 0 && allPanelWidth.value < TABLE_MIN_WIDTH))
 
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
@@ -3129,6 +3151,13 @@ function fmtLocation(e) {
   const state = (e?.location_state || '').trim()
   if (city && state) return `${city}, ${state}`
   return city || state || '\u2014'
+}
+
+// The table's second Vendor line: where, then what ("Memphis, TN \u00b7 Diesel fill").
+function placeLine(e) {
+  const where = fmtLocation(e)
+  const parts = [where === '\u2014' ? '' : where, (e?.description || '').trim()].filter(Boolean)
+  return parts.length ? parts.join(' \u00b7 ') : '\u2014'
 }
 
 // photo_data is either a legacy base64 image data URI, an image URL under
@@ -4799,11 +4828,50 @@ tr:hover td { background: var(--surface-hover); }
   outline-offset: 1px;
 }
 
-.action-cell { white-space: nowrap; }
-/* Personal sits on its own line under Approve / Reject and wraps, so the last
-   column stays narrow instead of pushing the table past the panel. */
-.action-personal { white-space: normal; max-width: 14rem; }
-.action-personal :deep(.personal-actions:has(> *)) { margin-top: 0.3rem; }
+/* The All Expenses table fits its panel: fixed column widths (47.5rem; the
+   Vendor column takes the rest), and long text wraps or is cut inside its own
+   cell, so nothing can push the panel into a sideways scroll. TABLE_MIN_WIDTH in
+   the script is this sum plus room for Vendor; change them together. */
+.exp-table { table-layout: fixed; width: 100%; }
+.exp-table th,
+.exp-table td {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+  vertical-align: top;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+.exp-table col.col-select { width: 2rem; }
+.exp-table col.col-date { width: 6.75rem; }
+.exp-table col.col-driver { width: 6.5rem; }
+.exp-table col.col-type { width: 7rem; }
+.exp-table col.col-amount { width: 6.25rem; }
+.exp-table col.col-receipt { width: 4.75rem; }
+.exp-table col.col-status { width: 6rem; }
+.exp-table col.col-actions { width: 8.25rem; }
+/* Upload time, truck, place: quieter than the line above them. */
+.exp-table .cell-sub { font-size: 0.68rem; color: #64748b; margin-top: 0.15rem; }
+.exp-table .cell-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.exp-table .cell-strong { font-weight: 600; }
+.exp-table .cell-mono { font-family: 'JetBrains Mono', monospace; }
+.exp-table .type-pill {
+  display: inline-block;
+  max-width: 100%;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.exp-table .status-pill { max-width: 100%; }
+.exp-table .st-finalized { min-width: 0; }
+.exp-table .receipt-thumb { width: 48px; height: 36px; }
+/* Approve / Reject share a line when they fit; the Personal block (the short
+   tag, then its button) goes under them. */
+.action-status { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.action-status .btn-approve { margin-right: 0; }
+.action-status + .action-personal :deep(.personal-actions:has(> *)) { margin-top: 0.3rem; }
 .btn-approve,.btn-reject, .btn-undo {
   padding: 0.22rem 0.55rem; font-size: 0.68rem; font-weight: 600;
   border-radius: 5px; border: none; cursor: pointer; font-family: inherit;
@@ -4859,8 +4927,6 @@ tr:hover td { background: var(--surface-hover); }
 .exp-amount { font-size: 1.75rem; font-weight: 800; color: #0f172a; }
 .exp-sub { font-size: 0.78rem; color: #64748b; margin-top: 0.25rem; }
 .exp-sub-dim { color: #94a3b8; margin-top: 0.1rem; }
-/* Upload time is secondary to the receipt date it sits beside. */
-.upload-cell { color: #64748b; white-space: nowrap; }
 /* Amber, not red: the row saved fine and the date may be legitimate — this asks
    for a look, it doesn't assert an error. */
 .date-warn { color: var(--amber, #f59e0b); cursor: help; margin-left: 0.25rem; }
@@ -5296,8 +5362,9 @@ tr:hover td { background: var(--surface-hover); }
 }
 
 /* ---- Mobile (≤ 767 px) ------------------------------------------------
- * Expense row gets a card layout. Download-ZIP + Log-Expense forms stack
- * vertically so inputs don't squish. Sub-tab strip becomes scrollable.
+ * Download-ZIP + Log-Expense forms stack vertically so inputs don't squish.
+ * Sub-tabs wrap. The expense cards' styles are below, outside this block:
+ * they also show on a wider screen whose panel is too narrow for the table.
  * Detail modal (selectedExpense) already fits via the Teleport we shipped
  * earlier — no change needed there.                                       */
 @media (max-width: 767px) {
@@ -5344,125 +5411,132 @@ tr:hover td { background: var(--surface-hover); }
   .filter-select { flex: 1; min-width: 120px; }
   .filter-count { width: 100%; }
 
-  /* Mobile expense cards */
-  .mobile-exp-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    padding: 0.25rem 0;
-  }
-  .mobile-exp-card {
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 0.85rem 0.95rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-  .mobile-exp-card:active { border-color: #0f3460; }
-  .mobile-exp-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 0.5rem;
-  }
-  .mobile-exp-select {
-    display: flex; align-items: center;
-    padding: 0.15rem 0.35rem 0.15rem 0; /* widen the tap target */
-    flex-shrink: 0;
-  }
-  .mobile-exp-select .select-checkbox { width: 18px; height: 18px; }
-  .mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
-  .mobile-exp-date {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 0.75rem;
-    color: #64748b;
-  }
-  /* Deliberately quieter than the receipt date: the purchase date is the figure
-     that matters, the upload time is there to answer "when did this arrive". */
-  .mobile-exp-uploaded {
-    font-size: 0.68rem;
-    color: #94a3b8;
-    margin-top: 0.1rem;
-  }
-  .mobile-exp-driver {
-    font-size: 0.92rem;
-    font-weight: 600;
-    color: #0f172a;
-  }
-  .mobile-exp-location {
-    font-size: 0.78rem;
-    color: #64748b;
-  }
-  .mobile-exp-vendor {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #475569;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .mobile-exp-truck {
-    font-weight: 500;
-    color: #64748b;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.82rem;
-  }
-  .mobile-exp-desc {
-    font-size: 0.82rem;
-    color: #475569;
-    line-height: 1.35;
-    padding-top: 0.35rem;
-    border-top: 1px solid #f1f5f9;
-  }
-  .mobile-exp-bottom {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5rem;
-    padding-top: 0.4rem;
-    border-top: 1px solid #f1f5f9;
-  }
-  .mobile-exp-bottom-right {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-shrink: 1;
-    min-width: 0;
-  }
-  /* "Included: September 2026 finalized" wraps inside the card instead of
-     running past its edge. */
-  .mobile-exp-bottom-right .st-finalized {
-    min-width: 0;
-    text-align: right;
-  }
-  .mobile-exp-amount {
-    font-size: 1.15rem;
-    font-weight: 700;
-    color: #0f172a;
-  }
-  .mobile-exp-thumb {
-    width: 48px;
-    height: 36px;
-    object-fit: cover;
-    border-radius: 4px;
-    border: 1px solid #e2e8f0;
-    cursor: pointer;
-  }
-  .mobile-exp-actions {
-    display: flex;
-    gap: 0.5rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid #f1f5f9;
-  }
-  .mobile-exp-btn {
-    flex: 1;
-    padding: 0.6rem 0.75rem !important;
-    font-size: 0.82rem !important;
-    font-weight: 600;
-  }
+  /* A card scrolled into view (a link, keyboard focus) stops below the floating
+     menu button (44 px at the top left), which would cover its checkbox. */
+  .mobile-exp-card { scroll-margin-top: 4rem; }
+}
+
+/* Expense cards: on a phone, and on a wider screen whose panel is too narrow
+   for the table (showCards). One column on a phone; side by side when the panel
+   has room for two or more, so a card is never stretched across a tablet. */
+.mobile-exp-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: 0.65rem;
+  padding: 0.25rem 0;
+}
+.mobile-exp-card {
+  min-width: 0;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.85rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.mobile-exp-card:active { border-color: #0f3460; }
+.mobile-exp-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.mobile-exp-select {
+  display: flex; align-items: center;
+  padding: 0.15rem 0.35rem 0.15rem 0; /* widen the tap target */
+  flex-shrink: 0;
+}
+.mobile-exp-select .select-checkbox { width: 18px; height: 18px; }
+.mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
+.mobile-exp-date {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: #64748b;
+}
+/* Deliberately quieter than the receipt date: the purchase date is the figure
+   that matters, the upload time is there to answer "when did this arrive". */
+.mobile-exp-uploaded {
+  font-size: 0.68rem;
+  color: #94a3b8;
+  margin-top: 0.1rem;
+}
+.mobile-exp-driver {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+.mobile-exp-location {
+  font-size: 0.78rem;
+  color: #64748b;
+}
+.mobile-exp-vendor {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mobile-exp-truck {
+  font-weight: 500;
+  color: #64748b;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+}
+.mobile-exp-desc {
+  font-size: 0.82rem;
+  color: #475569;
+  line-height: 1.35;
+  padding-top: 0.35rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-exp-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-exp-bottom-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 1;
+  min-width: 0;
+}
+/* "Included: September 2026 finalized" wraps inside the card instead of
+   running past its edge. */
+.mobile-exp-bottom-right .st-finalized {
+  min-width: 0;
+  text-align: right;
+}
+.mobile-exp-amount {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.mobile-exp-thumb {
+  width: 48px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  cursor: pointer;
+}
+.mobile-exp-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-exp-btn {
+  flex: 1;
+  padding: 0.6rem 0.75rem !important;
+  font-size: 0.82rem !important;
+  font-weight: 600;
 }
 </style>
