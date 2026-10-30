@@ -46436,11 +46436,18 @@ function rowEditCancelRefusal(headers, before, after) {
 	const cols = new Set();
 	const first = hs.findIndex((h) => /status/i.test(h));
 	if (first !== -1) cols.add(first);
-	const read = findCol(hs, /^(job[\s._-]?)?status$/i) || findCol(hs, /status/i);
-	if (read !== null) hs.forEach((h, i) => { if (h === read) cols.add(i); });
-	const cell = (row, i) => String(Array.isArray(row) && row[i] != null ? row[i] : "").trim();
+	const filterCol = findCol(hs, /^(job[\s._-]?)?status$/i) || findCol(hs, /status/i);
+	if (filterCol !== null) hs.forEach((h, i) => { if (h === filterCol) cols.add(i); });
+	// A cell as text, null and absent as "": the comparison sheetRowCellWrites() writes by.
+	const text = (row, i) => (Array.isArray(row) && row[i] != null ? String(row[i]) : "");
 	for (const i of [...cols].sort((a, b) => a - b)) {
-		if (!CANCELED_STATUS_RE.test(cell(after, i)) || CANCELED_STATUS_RE.test(cell(before, i))) continue;
+		const sent = text(after, i);
+		const was = text(before, i);
+		// Judged only when the save writes the cell, and as the sheet will store it
+		// (USER_ENTERED keeps the text after one leading apostrophe); `before` is as read.
+		if (sent === was) continue;
+		const stored = sent.startsWith("'") ? sent.slice(1) : sent;
+		if (!CANCELED_STATUS_RE.test(stored.trim()) || CANCELED_STATUS_RE.test(was.trim())) continue;
 		const header = String(hs[i] == null ? "" : hs[i]);
 		const name = header.trim() || `Column ${i + 1}`;
 		return {
