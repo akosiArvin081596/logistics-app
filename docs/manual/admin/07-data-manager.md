@@ -78,7 +78,7 @@ The most-edited sheet. Columns of interest:
 | **Status** | The current status. Edits here update the load. |
 | **Pickup Appointment** | Pickup date/time. Affects driver pay (active days). |
 | **Drop-off Appointment** | Delivery date/time. Same. |
-| **Payment** | Load revenue. Drives investor earnings and owner-op pay. |
+| **Payment** | Load revenue. Drives investor earnings and percentage-driver pay. |
 | **Owner ID** | Investor record ID owning the truck. Drives investor attribution. |
 | **Truck #** | Truck unit number. |
 

@@ -152,7 +152,7 @@ Edits to the archive are not supported through the UI; it's view-only.
 
 **"I approved an application but the new user can't sign in."** Check that the welcome email arrived — sometimes it lands in spam. If the user has the credentials but still can't sign in, reset their password from Users.
 
-**"An invoice has the wrong driver pay total."** Check the load dates the invoice covers and the driver's pay_type. Owner-operator pay is a percentage of revenue; standard driver pay is daily. If the math looks off, it usually means a load was attributed wrong — fix the load's driver assignment in Data Manager and re-generate the invoice.
+**"An invoice has the wrong driver pay total."** Check the load dates the invoice covers and the driver's pay_type. Percentage-driver pay is a percentage of revenue; standard driver pay is daily. If the math looks off, it usually means a load was attributed wrong — fix the load's driver assignment in Data Manager and re-generate the invoice.
 
 **"Financials don't match what I expect."** Verify the `excludeDroppedLoads` filter — cancelled and soft-deleted loads are excluded. If a load was cancelled in error, restore its status and the numbers update.
 

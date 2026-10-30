@@ -37416,7 +37416,7 @@ function refusePayEdit(req, res, { entity, entityId, subject, changes }) {
 	logAuditRefusal(req, "pay_edit_blocked", entity, auditText(entityId, 100),
 		`${auditText(subject, 300) || "pay settings"}: ${auditText(attempted, 300)} WITHHELD [${PAY_EDIT_ADMIN_ONLY}] — nothing was written`,
 		PAY_EDIT_ADMIN_ONLY);
-	const LABEL = { pay_type: "pay type", pay_percentage: "owner-operator share", pay_daily: "daily rate", driver_pay_daily: "truck's driver pay" };
+	const LABEL = { pay_type: "pay type", pay_percentage: "percentage driver share", pay_daily: "daily rate", driver_pay_daily: "truck's driver pay" };
 	const show = (field, v) => {
 		if (field === "pay_type") return String(v);
 		if (field === "pay_percentage") return `${v}%`;

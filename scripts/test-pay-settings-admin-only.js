@@ -19,7 +19,8 @@
  * socket notification are stubbed.
  *   §1 PUT /api/drivers-directory/:id — a Dispatcher changing pay_type,
  *      pay_percentage (active or not) or pay_daily, or clearing it: 403, the
- *      fields named, nothing written, one refusal row. The edit form's
+ *      fields named, nothing written, one refusal row (a pay_percentage change
+ *      is worded as the "percentage driver share"). The edit form's
  *      whole-row resend of the stored terms (in any spelling the handler
  *      accepts, a legacy "Fixed" included), the new client's blank pay fields,
  *      or no pay columns at all: saved, with the non-pay edit written and the
@@ -287,7 +288,7 @@ function makeDb() {
 	const dir = db.prepare(`INSERT INTO drivers_directory (id, driver_name, city, state, phone, email, status, pay_type, pay_percentage, pay_daily)
 		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`);
 	dir.run(1, "Soren King", "Houston", "TX", "555-0100", "soren@example.com", "fixed", 0, 300); // a day rate of his own
-	dir.run(2, "Roland Brown", "Dallas", "TX", "555-0200", "roland@example.com", "percentage", 20, 0); // an owner-operator share
+	dir.run(2, "Roland Brown", "Dallas", "TX", "555-0200", "roland@example.com", "percentage", 20, 0); // a percentage driver's share
 	dir.run(3, "Legacy Lee", "Austin", "TX", "555-0300", "", "Fixed", 0, 280); // pay_type stored before the handler lowercased it
 	dir.run(4, "New Hire", "Waco", "TX", "555-0400", "", "fixed", 0, 0); // on the default terms: the truck's rate applies
 	dir.run(5, "Null Nell", "Tyler", "TX", "555-0500", "", null, null, null); // pay columns never written
@@ -452,6 +453,11 @@ async function battery(opts = {}) {
 		const before = snapshot(db);
 		const r = await app.dirPut(DISPATCHER, id, dirFormBody(row(db, id), over));
 		refused(`§1 Dispatcher PUT directory, ${label}`, r, fields);
+		if (label.startsWith("pay_percentage 20 → 25")) {
+			const said = String((r.body || {}).error || "");
+			t(`§1 Dispatcher PUT directory, ${label}: the refusal names the percentage driver share (got ${JSON.stringify(said)})`,
+				said.includes("change the percentage driver share from 20% to 25%") && !/owner[\s-]?op/i.test(said));
+		}
 		t(`§1 Dispatcher PUT directory, ${label}: nothing written`, snapshot(db) === before);
 		const rows = audits(db, "pay_edit_blocked");
 		t(`§1 Dispatcher PUT directory, ${label}: one pay_edit_blocked row, no success line (got ${rows.length})`,
@@ -677,7 +683,7 @@ async function battery(opts = {}) {
 	}
 	for (const [label, over, fields] of [
 		["a $300 daily rate", { PayType: "fixed", PayDaily: 300 }, ["pay_daily"]],
-		["a 20% owner-operator share", { PayType: "percentage", PayPercentage: 20 }, ["pay_type", "pay_percentage"]],
+		["a 20% percentage driver share", { PayType: "percentage", PayPercentage: 20 }, ["pay_type", "pay_percentage"]],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db, opts);

@@ -305,7 +305,7 @@
               </label>
               <label class="pay-radio">
                 <input type="radio" v-model="editForm.payType" value="percentage" />
-                <span>Percentage of Net Load Revenue (owner-operator)</span>
+                <span>Percentage of Net Load Revenue (percentage driver)</span>
               </label>
             </div>
             <div v-if="editForm.payType === 'fixed'" class="edit-field" style="margin-top:0.5rem;">
@@ -314,7 +314,7 @@
               <p class="status-help">{{ dailyRateHelpText(dailyRateRule) }}</p>
             </div>
             <div v-if="editForm.payType === 'percentage'" class="edit-field" style="margin-top:0.5rem;">
-              <label>Owner-Operator Share (%)</label>
+              <label>Percentage Driver Share (%)</label>
               <input v-model.number="editForm.payPercentage" type="number" min="0" max="100" step="0.1" placeholder="e.g. 30" />
               <p class="status-help">Driver gets {{ Number(editForm.payPercentage) || 0 }}% of (weekly load revenue &minus; fuel &amp; maintenance expenses). LogisX keeps the rest.</p>
             </div>
