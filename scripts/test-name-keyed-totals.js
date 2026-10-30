@@ -151,7 +151,7 @@ const FNS = [
 	"gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows",
 	// Financials' books (GET /api/financials reads them).
 	"buildFinancialsLedger", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "ledgerItemFromRow",
-	"buildFinancialsReport", "financialsReportQuery", "financialsInvoiceShares", "invoicePaidDaysOf", "financialsSettings", "closedMonthSettings", "financialsExtraItems",
+	"buildFinancialsReport", "financialsReportQuery", "financialsInvoiceShares", "invoicePaidDaysOf", "financialsSettings", "closedMonthSettings", "financialsExtraItems", "correctionLinesTablePresent",
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",

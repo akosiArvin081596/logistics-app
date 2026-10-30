@@ -1,0 +1,473 @@
+{
+ "note": "Captured on the base's own server.js by scripts/test-approved-invoice-lock.js --capture; made-up data.",
+ "result": [
+  [
+   "generate",
+   200,
+   {
+    "success": true,
+    "invoice": {
+     "id": 1,
+     "invoice_number": "INV-TDA-2026W41-01",
+     "driver": "test driver a",
+     "week_start": "2026-10-10",
+     "week_end": "2026-10-16",
+     "loads_count": 3,
+     "rate_per_load": 300,
+     "total_earnings": 900,
+     "expenses_total": 545.5,
+     "status": "Draft",
+     "rejection_note": "",
+     "pdf_file_name": "INV-TDA-2026W41-01.pdf",
+     "load_ids": "[\"L1\"]",
+     "expense_ids": "[5,1,2]",
+     "submitted_at": "",
+     "approved_at": "",
+     "approved_by": "",
+     "processed_at": "",
+     "processed_by": "",
+     "paid_at": "",
+     "paid_by": "",
+     "adjustment": 0,
+     "adjustment_note": "",
+     "adjusted_by": "",
+     "adjusted_at": "",
+     "render_data": "{\"driverName\":\"Test Driver A\",\"businessName\":\"Test Driver A\",\"providerAddress\":\"\",\"providerPhone\":\"\",\"invoiceNumberSuffix\":\"TDA-2026W41-01\",\"submissionDate\":\"Oct 15, 2026\",\"signatureDate\":\"Oct 15, 2026\",\"billingPeriodStart\":\"October 10, 2026\",\"billingPeriodEnd\":\"October 16, 2026\",\"totalDue\":900,\"bankOnFile\":\"\",\"accountType\":\"\",\"days\":{\"Saturday\":{\"date\":\"2026-10-10\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Sunday\":{\"date\":\"2026-10-11\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Monday\":{\"date\":\"2026-10-12\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Tuesday\":{\"date\":\"2026-10-13\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Wednesday\":{\"date\":\"2026-10-14\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Thursday\":{\"date\":\"2026-10-15\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Friday\":{\"date\":\"2026-10-16\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]}},\"hasEldData\":true,\"hasBol\":true,\"hasDvir\":true,\"hasFuelReceipts\":true,\"adjustment\":0,\"adjustmentNote\":\"\",\"__templateName\":\"service_invoice\"}",
+     "deleted_at": "",
+     "deleted_by": "",
+     "delete_reason": "",
+     "is_manual": 0,
+     "created_by": "",
+     "personal_total": 0,
+     "personal_share_total": 0,
+     "correction_of": null,
+     "is_correction": 0
+    },
+    "isLate": false,
+    "warnings": [],
+    "undatedInWeek": []
+   }
+  ],
+  [
+   "adjust",
+   200,
+   {
+    "success": true,
+    "invoice": {
+     "id": 1,
+     "invoice_number": "INV-TDA-2026W41-01",
+     "driver": "test driver a",
+     "week_start": "2026-10-10",
+     "week_end": "2026-10-16",
+     "loads_count": 3,
+     "rate_per_load": 300,
+     "total_earnings": 900,
+     "expenses_total": 545.5,
+     "status": "Draft",
+     "rejection_note": "",
+     "pdf_file_name": "INV-TDA-2026W41-01.pdf",
+     "load_ids": "[\"L1\"]",
+     "expense_ids": "[5,1,2]",
+     "submitted_at": "",
+     "approved_at": "",
+     "approved_by": "",
+     "processed_at": "",
+     "processed_by": "",
+     "paid_at": "",
+     "paid_by": "",
+     "adjustment": 75,
+     "adjustment_note": "bonus",
+     "adjusted_by": "super_admin",
+     "adjusted_at": "2026-10-15T16:00:00.000Z",
+     "render_data": "{\"driverName\":\"Test Driver A\",\"businessName\":\"Test Driver A\",\"providerAddress\":\"\",\"providerPhone\":\"\",\"invoiceNumberSuffix\":\"TDA-2026W41-01\",\"submissionDate\":\"Oct 15, 2026\",\"signatureDate\":\"Oct 15, 2026\",\"billingPeriodStart\":\"October 10, 2026\",\"billingPeriodEnd\":\"October 16, 2026\",\"totalDue\":900,\"bankOnFile\":\"\",\"accountType\":\"\",\"days\":{\"Saturday\":{\"date\":\"2026-10-10\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Sunday\":{\"date\":\"2026-10-11\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Monday\":{\"date\":\"2026-10-12\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Tuesday\":{\"date\":\"2026-10-13\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Wednesday\":{\"date\":\"2026-10-14\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Thursday\":{\"date\":\"2026-10-15\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Friday\":{\"date\":\"2026-10-16\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]}},\"hasEldData\":true,\"hasBol\":true,\"hasDvir\":true,\"hasFuelReceipts\":true,\"adjustment\":0,\"adjustmentNote\":\"\",\"__templateName\":\"service_invoice\"}",
+     "deleted_at": "",
+     "deleted_by": "",
+     "delete_reason": "",
+     "is_manual": 0,
+     "created_by": "",
+     "personal_total": 0,
+     "personal_share_total": 0,
+     "correction_of": null,
+     "is_correction": 0,
+     "total_due": 975
+    },
+    "pdfMode": "rerender"
+   }
+  ],
+  [
+   "delete",
+   200,
+   {
+    "success": true
+   }
+  ],
+  [
+   "restore",
+   200,
+   {
+    "success": true,
+    "invoice": {
+     "id": 1,
+     "invoice_number": "INV-TDA-2026W41-01",
+     "driver": "test driver a",
+     "week_start": "2026-10-10",
+     "week_end": "2026-10-16",
+     "loads_count": 3,
+     "rate_per_load": 300,
+     "total_earnings": 900,
+     "expenses_total": 545.5,
+     "status": "Draft",
+     "rejection_note": "",
+     "pdf_file_name": "INV-TDA-2026W41-01.pdf",
+     "load_ids": "[\"L1\"]",
+     "expense_ids": "[5,1,2]",
+     "submitted_at": "",
+     "approved_at": "",
+     "approved_by": "",
+     "processed_at": "",
+     "processed_by": "",
+     "paid_at": "",
+     "paid_by": "",
+     "adjustment": 75,
+     "adjustment_note": "bonus",
+     "adjusted_by": "super_admin",
+     "adjusted_at": "2026-10-15T16:00:00.000Z",
+     "render_data": "{\"driverName\":\"Test Driver A\",\"businessName\":\"Test Driver A\",\"providerAddress\":\"\",\"providerPhone\":\"\",\"invoiceNumberSuffix\":\"TDA-2026W41-01\",\"submissionDate\":\"Oct 15, 2026\",\"signatureDate\":\"Oct 15, 2026\",\"billingPeriodStart\":\"October 10, 2026\",\"billingPeriodEnd\":\"October 16, 2026\",\"totalDue\":900,\"bankOnFile\":\"\",\"accountType\":\"\",\"days\":{\"Saturday\":{\"date\":\"2026-10-10\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Sunday\":{\"date\":\"2026-10-11\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Monday\":{\"date\":\"2026-10-12\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Tuesday\":{\"date\":\"2026-10-13\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Wednesday\":{\"date\":\"2026-10-14\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Thursday\":{\"date\":\"2026-10-15\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Friday\":{\"date\":\"2026-10-16\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]}},\"hasEldData\":true,\"hasBol\":true,\"hasDvir\":true,\"hasFuelReceipts\":true,\"adjustment\":0,\"adjustmentNote\":\"\",\"__templateName\":\"service_invoice\"}",
+     "deleted_at": "",
+     "deleted_by": "",
+     "delete_reason": "",
+     "is_manual": 0,
+     "created_by": "",
+     "personal_total": 0,
+     "personal_share_total": 0,
+     "correction_of": null,
+     "is_correction": 0,
+     "total_due": 975
+    }
+   }
+  ],
+  [
+   "list",
+   200,
+   {
+    "invoices": [
+     {
+      "id": 1,
+      "invoice_number": "INV-TDA-2026W41-01",
+      "driver": "test driver a",
+      "week_start": "2026-10-10",
+      "week_end": "2026-10-16",
+      "loads_count": 3,
+      "rate_per_load": 300,
+      "total_earnings": 900,
+      "expenses_total": 545.5,
+      "status": "Draft",
+      "rejection_note": "",
+      "pdf_file_name": "INV-TDA-2026W41-01.pdf",
+      "load_ids": "[\"L1\"]",
+      "expense_ids": "[5,1,2]",
+      "submitted_at": "",
+      "approved_at": "",
+      "approved_by": "",
+      "processed_at": "",
+      "processed_by": "",
+      "paid_at": "",
+      "paid_by": "",
+      "adjustment": 75,
+      "adjustment_note": "bonus",
+      "adjusted_by": "super_admin",
+      "adjusted_at": "2026-10-15T16:00:00.000Z",
+      "render_data": "{\"driverName\":\"Test Driver A\",\"businessName\":\"Test Driver A\",\"providerAddress\":\"\",\"providerPhone\":\"\",\"invoiceNumberSuffix\":\"TDA-2026W41-01\",\"submissionDate\":\"Oct 15, 2026\",\"signatureDate\":\"Oct 15, 2026\",\"billingPeriodStart\":\"October 10, 2026\",\"billingPeriodEnd\":\"October 16, 2026\",\"totalDue\":900,\"bankOnFile\":\"\",\"accountType\":\"\",\"days\":{\"Saturday\":{\"date\":\"2026-10-10\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Sunday\":{\"date\":\"2026-10-11\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Monday\":{\"date\":\"2026-10-12\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Tuesday\":{\"date\":\"2026-10-13\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Wednesday\":{\"date\":\"2026-10-14\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Thursday\":{\"date\":\"2026-10-15\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Friday\":{\"date\":\"2026-10-16\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]}},\"hasEldData\":true,\"hasBol\":true,\"hasDvir\":true,\"hasFuelReceipts\":true,\"adjustment\":0,\"adjustmentNote\":\"\",\"__templateName\":\"service_invoice\"}",
+      "deleted_at": "",
+      "deleted_by": "",
+      "delete_reason": "",
+      "is_manual": 0,
+      "created_by": "",
+      "personal_total": 0,
+      "personal_share_total": 0,
+      "correction_of": null,
+      "is_correction": 0,
+      "total_due": 975,
+      "personal_lines": [],
+      "pay_basis": "daily",
+      "load_count": 1,
+      "expenses_ref_total": 545.5
+     }
+    ],
+    "summary": {
+     "Draft": {
+      "count": 1,
+      "total_due": 975
+     },
+     "Submitted": {
+      "count": 0,
+      "total_due": 0
+     },
+     "Approved": {
+      "count": 0,
+      "total_due": 0
+     },
+     "Processing": {
+      "count": 0,
+      "total_due": 0
+     },
+     "Paid": {
+      "count": 0,
+      "total_due": 0
+     },
+     "Rejected": {
+      "count": 0,
+      "total_due": 0
+     }
+    }
+   }
+  ],
+  [
+   "rows",
+   [
+    {
+     "id": 1,
+     "invoice_number": "INV-TDA-2026W41-01",
+     "driver": "test driver a",
+     "week_start": "2026-10-10",
+     "week_end": "2026-10-16",
+     "loads_count": 3,
+     "rate_per_load": 300,
+     "total_earnings": 900,
+     "expenses_total": 545.5,
+     "status": "Draft",
+     "rejection_note": "",
+     "pdf_file_name": "INV-TDA-2026W41-01.pdf",
+     "load_ids": "[\"L1\"]",
+     "expense_ids": "[5,1,2]",
+     "submitted_at": "",
+     "approved_at": "",
+     "approved_by": "",
+     "processed_at": "",
+     "processed_by": "",
+     "paid_at": "",
+     "paid_by": "",
+     "adjustment": 75,
+     "adjustment_note": "bonus",
+     "adjusted_by": "super_admin",
+     "adjusted_at": "2026-10-15T16:00:00.000Z",
+     "render_data": "{\"driverName\":\"Test Driver A\",\"businessName\":\"Test Driver A\",\"providerAddress\":\"\",\"providerPhone\":\"\",\"invoiceNumberSuffix\":\"TDA-2026W41-01\",\"submissionDate\":\"Oct 15, 2026\",\"signatureDate\":\"Oct 15, 2026\",\"billingPeriodStart\":\"October 10, 2026\",\"billingPeriodEnd\":\"October 16, 2026\",\"totalDue\":900,\"bankOnFile\":\"\",\"accountType\":\"\",\"days\":{\"Saturday\":{\"date\":\"2026-10-10\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Sunday\":{\"date\":\"2026-10-11\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Monday\":{\"date\":\"2026-10-12\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Tuesday\":{\"date\":\"2026-10-13\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Wednesday\":{\"date\":\"2026-10-14\",\"loadBol\":\"L1\",\"total\":300,\"completed\":true,\"listed\":[\"L1\"],\"scheduled\":[],\"rate\":300},\"Thursday\":{\"date\":\"2026-10-15\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]},\"Friday\":{\"date\":\"2026-10-16\",\"loadBol\":\"\",\"total\":0,\"completed\":false,\"listed\":[],\"scheduled\":[]}},\"hasEldData\":true,\"hasBol\":true,\"hasDvir\":true,\"hasFuelReceipts\":true,\"adjustment\":0,\"adjustmentNote\":\"\",\"__templateName\":\"service_invoice\"}",
+     "deleted_at": "",
+     "deleted_by": "",
+     "delete_reason": "",
+     "is_manual": 0,
+     "created_by": "",
+     "personal_total": 0,
+     "personal_share_total": 0,
+     "correction_of": null,
+     "is_correction": 0
+    }
+   ]
+  ],
+  [
+   "audit",
+   [
+    {
+     "action": "adjust_invoice",
+     "entity_id": "1",
+     "details": "INV-TDA-2026W41-01: adjustment 0.00 → 75.00 (bonus)"
+    },
+    {
+     "action": "delete_invoice",
+     "entity_id": "1",
+     "details": "INV-TDA-2026W41-01 (payee test driver a, 2026-10-10 – 2026-10-16, status Draft, total $975.00) soft-deleted"
+    },
+    {
+     "action": "restore_invoice",
+     "entity_id": "1",
+     "details": "INV-TDA-2026W41-01 restored (was deleted by super_admin at 2026-10-15T16:00:00.000Z)"
+    }
+   ]
+  ],
+  [
+   "renders",
+   [
+    [
+     "service_invoice",
+     {
+      "driverName": "Test Driver A",
+      "businessName": "Test Driver A",
+      "providerAddress": "",
+      "providerPhone": "",
+      "invoiceNumberSuffix": "TDA-2026W41-01",
+      "submissionDate": "Oct 15, 2026",
+      "signatureDate": "Oct 15, 2026",
+      "billingPeriodStart": "October 10, 2026",
+      "billingPeriodEnd": "October 16, 2026",
+      "totalDue": 900,
+      "bankOnFile": "",
+      "accountType": "",
+      "days": {
+       "Saturday": {
+        "date": "2026-10-10",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Sunday": {
+        "date": "2026-10-11",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Monday": {
+        "date": "2026-10-12",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Tuesday": {
+        "date": "2026-10-13",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Wednesday": {
+        "date": "2026-10-14",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Thursday": {
+        "date": "2026-10-15",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Friday": {
+        "date": "2026-10-16",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       }
+      },
+      "hasEldData": true,
+      "hasBol": true,
+      "hasDvir": true,
+      "hasFuelReceipts": true,
+      "adjustment": 0,
+      "adjustmentNote": ""
+     }
+    ],
+    [
+     "service_invoice",
+     {
+      "driverName": "Test Driver A",
+      "businessName": "Test Driver A",
+      "providerAddress": "",
+      "providerPhone": "",
+      "invoiceNumberSuffix": "TDA-2026W41-01",
+      "submissionDate": "Oct 15, 2026",
+      "signatureDate": "Oct 15, 2026",
+      "billingPeriodStart": "October 10, 2026",
+      "billingPeriodEnd": "October 16, 2026",
+      "totalDue": 900,
+      "bankOnFile": "",
+      "accountType": "",
+      "days": {
+       "Saturday": {
+        "date": "2026-10-10",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Sunday": {
+        "date": "2026-10-11",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Monday": {
+        "date": "2026-10-12",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Tuesday": {
+        "date": "2026-10-13",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Wednesday": {
+        "date": "2026-10-14",
+        "loadBol": "L1",
+        "total": 300,
+        "completed": true,
+        "listed": [
+         "L1"
+        ],
+        "scheduled": [],
+        "rate": 300
+       },
+       "Thursday": {
+        "date": "2026-10-15",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       },
+       "Friday": {
+        "date": "2026-10-16",
+        "loadBol": "",
+        "total": 0,
+        "completed": false,
+        "listed": [],
+        "scheduled": []
+       }
+      },
+      "hasEldData": true,
+      "hasBol": true,
+      "hasDvir": true,
+      "hasFuelReceipts": true,
+      "adjustment": 75,
+      "adjustmentNote": "bonus"
+     }
+    ]
+   ]
+  ]
+ ]
+}
