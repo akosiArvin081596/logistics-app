@@ -689,6 +689,7 @@ function mountPut(routeSrc, M, rows) {
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
+		ROW_EDITOR_CANCEL_GUARD_ENABLED: false,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		SHEET_ROW_MAX_CELLS: 20000,
