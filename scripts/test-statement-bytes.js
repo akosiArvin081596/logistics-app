@@ -283,7 +283,7 @@ console.log("§4 the R-report");
 const report = (args) => {
 	const r = spawnSync(process.execPath, [REPORT, ...args], { encoding: "utf8", timeout: 20000, env: { PATH: process.env.PATH || "/usr/bin:/bin" } });
 	const count = (label) => {
-		const m = (r.stdout || "").match(new RegExp(`^  ${label.replace(/[()]/g, "\\$&")}:\\s+(\\d+)$`, "m"));
+		const m = (r.stdout || "").match(new RegExp(`^  ${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+(\\d+)$`, "m"));
 		return m ? Number(m[1]) : null;
 	};
 	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}`, count };
