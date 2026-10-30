@@ -75,6 +75,26 @@ export function personalPillText(personal) {
   }
 }
 
+// The Expenses table's short tag: the amount and one state word, so the row
+// stays narrow. The full sentence (personalPillText) stays in its hover text,
+// on the phone card and in the detail window. Server fields only.
+export function personalShortText(personal) {
+  if (!personal) return ''
+  const amount = personal.amount_text ? `Personal -${personal.amount_text}` : 'Personal'
+  const number = personal.invoice_number || ''
+  let word = ''
+  switch (personal.state) {
+    case 'pending': word = 'waiting'; break
+    case 'carried': word = 'carried'; break
+    case 'invoiced': word = personal.final === true ? 'final' : number ? `on ${number}` : 'invoiced'; break
+    case 'correction': word = number ? `on ${number}` : 'correction'; break
+    case 'needs_correction': word = 'needs correction'; break
+    case 'reversed': word = personal.wait_text ? 'reversed, waiting' : 'reversed'; break
+    default: return ''
+  }
+  return `${amount} · ${word}`
+}
+
 // The driver's receipt card: the week of the invoice that carries the line when
 // the server names it (a line carried to a later week's invoice).
 export function personalDriverText(personal) {
