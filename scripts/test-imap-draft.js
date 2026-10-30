@@ -15,8 +15,10 @@
  *      quoted credentials; the APPEND targets "[Gmail]/Drafts" with BOTH \Draft
  *      and \Seen (and not \Flagged, Gmail's star); the literal's announced size
  *      is exactly the bytes sent before its CRLF; the session ends with LOGOUT.
- *   §2 THE MESSAGE. The literal is the composed email: To, Subject, the HTML
- *      body byte for byte, and the PDF attachment (name, type, bytes).
+ *   §2 THE MESSAGE. The literal is the composed email: From (the button's
+ *      "LogisX Inc. <user>"), To, Subject, the HTML body byte for byte, the PDF
+ *      attachment (name, type, bytes), and a name in the invoice's own shape
+ *      ("<Broker> Invoice Order #<n>.pdf") beside the hyphen-only one.
  *   §3 FAILURES. A NO to the APPEND rejects "IMAP APPEND failed"; a NO to the
  *      LOGIN rejects "IMAP LOGIN failed" and sends no APPEND; no credentials
  *      rejects before any connection.
@@ -87,6 +89,7 @@ const HTML = [
 	"</body></html>",
 ].join("\n");
 const PDF_NAME = "Invoice-09302026-1.pdf";
+const INVOICE_NAME = "Acme Freight Invoice Order #1234567.pdf"; // lib/broker-invoice-draft.js's shape
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n", "latin1");
 
 // ---------------------------------------------------------------- fake IMAP
@@ -300,6 +303,24 @@ async function main() {
 		eq(/^attachment;/i.test(disposition), true, "§2 the PDF is an attachment");
 		eq((/filename="?([^";]{1,200})"?/i.exec(disposition) || [])[1], PDF_NAME, "§2 the attachment's file name");
 		eq(pdf ? decodedBody(pdf).equals(PDF) : false, true, "§2 the attachment's bytes are the PDF given");
+		// Read back as a name and an address, so a change in how the header is
+		// written still passes while a change in what it says fails.
+		const from = /^"?([^"<]*?)"?\s*<([^<>\s]+)>$/.exec(top.headers.from || "");
+		eq(from && [from[1], from[2]], ["LogisX Inc.", USER], "§2 From: the button's LogisX Inc. <user> reads back as that name and address");
+		const named = await draft({
+			attachments: [
+				{ filename: PDF_NAME, content: PDF, contentType: "application/pdf" },
+				{ filename: INVOICE_NAME, content: PDF, contentType: "application/pdf" },
+			],
+		});
+		const namedSession = sessions[sessions.length - 1];
+		await within(namedSession.closed, 3000);
+		const namedRaw = namedSession.append ? namedSession.append.literal.toString("latin1") : "";
+		const names = leafParts(namedRaw)
+			.filter((p) => /^application\/pdf/i.test(p.headers["content-type"] || ""))
+			.map((p) => (/filename="?([^";]{1,200})"?/i.exec(p.headers["content-disposition"] || "") || [])[1]);
+		eq([named.error ? named.error.message : null, names], [null, [PDF_NAME, INVOICE_NAME]],
+			"§2 two attachments keep their names: the hyphen-only one and \"<Broker> Invoice Order #<n>.pdf\" (spaces and #)");
 
 		section("§3  failures");
 		answer.append = "NO";
