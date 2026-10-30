@@ -1220,9 +1220,10 @@ async function cancelSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_P
 		const r = await cancel.run({ rowIndex: 2, loadId: "111", reason: "Broker called it off" });
 		t("§5 POST /api/dispatch/cancel, flag on: 200 { success: true }, row 2's Job Status Cancelled and Driver blank, row 3 untouched",
 			[r.code, r.body, sheet.rows[1][IDX["Job Status"]], sheet.rows[1][IDX["Driver"]], sheet.rows[2]], [200, { success: true }, "Cancelled", "", OTHER_ROW()]);
-		t("§5 ...with its record: the history row (account and reason), the cancel_load audit row, the driver told",
+		// actorRole is the session's role, which the arrival recorder stores with its flag on.
+		t("§5 ...with its record: the history row (account, reason and session role), the cancel_load audit row, the driver told",
 			[cancel.history, cancel.audits.map((a) => [a.action, a.entityId, / — reason: Broker called it off$/.test(a.details)]), cancel.driverNotices],
-			[[{ loadId: "111", newStatus: "Cancelled", source: "cancel", actor: "super_admin", reason: "Broker called it off" }], [["cancel_load", "111", true]], ["soren king"]]);
+			[[{ loadId: "111", newStatus: "Cancelled", source: "cancel", actor: "super_admin", reason: "Broker called it off", actorRole: "Super Admin" }], [["cancel_load", "111", true]], ["soren king"]]);
 	}
 	// One load end to end, flag on: the row edit is refused, the cancel route
 	// cancels, a later edit of the cancelled row saves, and a row edit revives it.
