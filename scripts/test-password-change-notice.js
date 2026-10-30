@@ -29,7 +29,9 @@
  *   §5 server.js's real sendEmail() behind the notice: a replica sends nothing
  *      (no transport is created), nor does a mailbox missing GMAIL_USER or
  *      GMAIL_APP_PASSWORD; with both set, the branded email reaches the
- *      account with no password in it
+ *      account with no password in it; and the message the real nodemailer
+ *      composes for sendEmail() (a stream transport: built, never sent) reads
+ *      back with its From, To, Reply-To, Subject and a `path` attachment's name
  *   §6 SOURCE pins (comment-stripped): each route calls the notice once, after
  *      its write, without awaiting it, and hands it no password; both check a
  *      new password through lib/password-rules.js; the reset compares with the
@@ -56,7 +58,8 @@
  * an in-memory database built from server.js's own CREATE statements.
  * PUT /api/users/:id's period, sheet and rename machinery is stubbed to
  * "nothing blocks" (scripts/test-session-sockets.js does the same). nodemailer
- * is replaced by a recorder: nothing here can send a real email. Loopback on
+ * is replaced by a recorder, or (§5's composed message) by the real package on
+ * a stream transport: nothing here can send a real email. Loopback on
  * 127.0.0.1:0.
  *
  *   node scripts/test-password-change-notice.js
@@ -66,6 +69,7 @@
 
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
 const path = require("path");
 const { once } = require("events");
 
@@ -658,8 +662,50 @@ async function sectionRealMailer() {
 		} finally {
 			await w.close();
 		}
+		setEnv("mailer@example.test", "not-a-real-app-password");
+		await composedMessage();
 	} finally {
 		setEnv(saved.user, saved.pass);
+	}
+}
+
+// sendEmail() as nodemailer composes it: the real package behind a stream
+// transport, so the message is built and nothing is sent. Headers are read
+// back as values, not bytes, so only a change in what they say fails.
+async function composedMessage() {
+	const realNodemailer = require("nodemailer");
+	const built = [];
+	const streaming = {
+		createTransport: () => {
+			const t = realNodemailer.createTransport({ streamTransport: true, buffer: true });
+			return { sendMail: async (mail) => { built.push((await t.sendMail(mail)).message); } };
+		},
+	};
+	const sendEmail = new Function("REPLICA", "nodemailer", `${SRCS.sendEmail}\nreturn sendEmail;`)(null, streaming);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "password-notice-mime-"));
+	const pdfPath = path.join(dir, "made-up.pdf");
+	const pdfBytes = Buffer.from("%PDF-1.4\n% made-up\n%%EOF\n", "latin1");
+	fs.writeFileSync(pdfPath, pdfBytes);
+	try {
+		const sent = await sendEmail("bob@example.test", "New Invoice: INV-2026-0042 - QA Driver", "<p>A made-up notice.</p>",
+			[{ filename: "INV-2026-0042_QA Driver.pdf", path: pdfPath }], { replyTo: "jane.investor@example.test" });
+		const raw = built[0] ? built[0].toString("latin1").replace(/\r\n(?=[ \t])/g, "") : "";
+		const head = raw.slice(0, Math.max(0, raw.indexOf("\r\n\r\n")));
+		const header = (name) => (new RegExp(`(?:^|\\r\\n)${name}:[ \\t]*([^\\r\\n]*)`, "i").exec(head) || [])[1] || null;
+		const from = /^"?([^"<]*?)"?\s*<([^<>\s]+)>$/.exec(header("From") || "");
+		ok(sent === true && built.length === 1, `§5 composed: sendEmail() answers true and one message is built (${sent}/${built.length})`);
+		ok(!!from && from[1] === "LogisX Inc." && from[2] === "mailer@example.test",
+			`§5 composed: From reads back as "LogisX Inc." and GMAIL_USER (${header("From")})`);
+		ok(header("To") === "bob@example.test", `§5 composed: To (${header("To")})`);
+		ok(header("Reply-To") === "jane.investor@example.test", `§5 composed: Reply-To, as the investor RFI passes it (${header("Reply-To")})`);
+		ok(header("Subject") === "New Invoice: INV-2026-0042 - QA Driver", `§5 composed: Subject (${header("Subject")})`);
+		const part = raw.split(/\r\n--[^\r\n]+\r\n/).find((p) => /^Content-Disposition:[ \t]*attachment/im.test(p)) || "";
+		const name = (/^Content-Disposition:[ \t]*attachment;[ \t]*filename="?([^";\r\n]*)"?/im.exec(part) || [])[1] || null;
+		ok(name === "INV-2026-0042_QA Driver.pdf", `§5 composed: the path attachment keeps its file name (${name})`);
+		const body = part.slice(part.indexOf("\r\n\r\n") + 4).replace(/\r\n--[\s\S]*$/, "");
+		ok(Buffer.from(body.replace(/\r\n/g, ""), "base64").equals(pdfBytes), "§5 composed: the attachment carries the file's bytes");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
 	}
 }
 
