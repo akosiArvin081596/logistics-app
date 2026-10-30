@@ -76,6 +76,7 @@
 			"POST /api/dispatch/cancel",
 			"DELETE /api/loads/:loadId",
 			"GET /api/admin/deleted-loads",
+			"GET /api/admin/cancelled-loads",
 			"POST /api/driver/respond",
 			"GET /api/dashboard",
 			"PUT /api/loads/:loadId/status-override",
