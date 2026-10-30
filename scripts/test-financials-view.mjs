@@ -17,17 +17,30 @@
 //      both directions, catch-all groups (Settlement adjustment, investor
 //      payouts, unallocated) sit apart from named rows, and the row limit cuts
 //      only the named rows.
+//   6. The presets Today, Last week (the last complete Saturday-Friday week),
+//      This year and Last year, on the Eastern business day: 11:30 PM ET on a
+//      Friday is still Friday; January, leap February and quarter edges; the
+//      short-period note.
+//   7. The server's copy (lib/financials-presets.js) equals the client's: the
+//      same keys and labels, and the same dates for every preset on every day
+//      of 2024-2027, by day and by instant.
 //
 // No network, no sheet, no database, no Vue — pure input/output, safe anywhere.
 //
 //   node scripts/test-financials-view.mjs      # exits 1 on any failure
 
 import path from 'path'
+import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
+
+// Both sides read the business day in the default zone, whatever the shell sets.
+process.env.APP_TIMEZONE = 'America/New_York'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MODULE_PATH = path.join(__dirname, '..', 'client', 'src', 'lib', 'financialsView.js')
 const v = await import(pathToFileURL(MODULE_PATH).href)
+const dt = await import(pathToFileURL(path.join(__dirname, '..', 'client', 'src', 'utils', 'datetime.js')).href)
+const lib = createRequire(import.meta.url)(path.join(__dirname, '..', 'lib', 'financials-presets.js'))
 
 let pass = 0
 let fail = 0
@@ -170,6 +183,128 @@ check('limit cuts named rows only', [cut.visible.length, cut.other.length, cut.n
 check('limit keeps the top by revenue', [cut.visible[0].key, cut.visible[99].key], ['load:249', 'load:150'])
 const all = v.groupRows(many, { showAll: true })
 check('show all', [all.visible.length, all.hidden], [250, 0])
+
+// ── 6. presets: Today, Last week, This year, Last year ─────────────────────
+// Each case runs on both copies; §7 then pins them equal on every day.
+const both = (label, preset, today, expected) => {
+  check(`client ${label}`, v.presetRange(preset, today), expected)
+  check(`lib ${label}`, lib.presetRange(preset, today), expected)
+}
+check('preset keys in page order', v.RANGE_PRESETS.map((p) => p.key),
+  ['today', 'lastWeek', 'thisMonth', 'lastMonth', 'thisQuarter', 'lastQuarter', 'ytd', 'lastYear', 'last12', 'custom'])
+check('ytd keeps its key, shown as This year', v.RANGE_PRESETS.find((p) => p.key === 'ytd').label, 'This year')
+
+both('today', 'today', '2026-10-30', { from: '2026-10-30', to: '2026-10-30' })
+both('this year', 'ytd', '2026-10-30', { from: '2026-01-01', to: '2026-10-30' })
+both('last year', 'lastYear', '2026-10-30', { from: '2025-01-01', to: '2025-12-31' })
+both('last year on Jan 1', 'lastYear', '2027-01-01', { from: '2026-01-01', to: '2026-12-31' })
+both('this year on Jan 1', 'ytd', '2027-01-01', { from: '2027-01-01', to: '2027-01-01' })
+
+// Last week is the last COMPLETE Saturday-Friday week: on a Saturday it is the
+// week that ended yesterday; on a Friday the current week is not over yet.
+both('last week on a Friday', 'lastWeek', '2026-10-30', { from: '2026-10-17', to: '2026-10-23' })
+both('last week on a Saturday', 'lastWeek', '2026-10-31', { from: '2026-10-24', to: '2026-10-30' })
+both('last week on a Sunday', 'lastWeek', '2026-11-01', { from: '2026-10-24', to: '2026-10-30' })
+both('last week across the year', 'lastWeek', '2027-01-08', { from: '2026-12-26', to: '2027-01-01' })
+both('last week over leap day', 'lastWeek', '2028-03-04', { from: '2028-02-26', to: '2028-03-03' })
+both('last week before leap Feb ends', 'lastWeek', '2024-03-01', { from: '2024-02-17', to: '2024-02-23' })
+
+// January and leap February.
+both('last month in January', 'lastMonth', '2026-01-15', { from: '2025-12-01', to: '2025-12-31' })
+both('last month leap Feb', 'lastMonth', '2028-03-01', { from: '2028-02-01', to: '2028-02-29' })
+both('last month leap Feb 2024', 'lastMonth', '2024-03-31', { from: '2024-02-01', to: '2024-02-29' })
+both('this month on leap day', 'thisMonth', '2028-02-29', { from: '2028-02-01', to: '2028-02-29' })
+both('last 12 on leap day', 'last12', '2028-02-29', { from: '2027-03-01', to: '2028-02-29' })
+
+// Quarter edges.
+both('this quarter on its last day', 'thisQuarter', '2026-03-31', { from: '2026-01-01', to: '2026-03-31' })
+both('this quarter on its first day', 'thisQuarter', '2026-04-01', { from: '2026-04-01', to: '2026-04-01' })
+both('last quarter on a quarter first day', 'lastQuarter', '2026-04-01', { from: '2026-01-01', to: '2026-03-31' })
+both('last quarter on Dec 31', 'lastQuarter', '2026-12-31', { from: '2026-07-01', to: '2026-09-30' })
+both('last quarter on Jan 1', 'lastQuarter', '2027-01-01', { from: '2026-10-01', to: '2026-12-31' })
+both('custom', 'custom', '2026-10-30', null)
+both('unknown', 'nextWeek', '2026-10-30', null)
+both('unreadable today', 'today', '2026-02-30', null)
+
+// Eastern days: the business day, not the UTC date, picks the period.
+const at = (iso) => new Date(iso)
+const FRI_2330_EDT = '2026-10-31T03:30:00Z' // Fri Oct 30, 11:30 PM EDT; already Saturday in UTC
+check('11:30 PM ET Friday is Friday (lib)', lib.presetRangeAt('today', at(FRI_2330_EDT)), { from: '2026-10-30', to: '2026-10-30' })
+check('11:30 PM ET Friday is Friday (client)', dt.appToday(Date.parse(FRI_2330_EDT)), '2026-10-30')
+check('11:30 PM ET Friday: last week ended a week ago', lib.presetRangeAt('lastWeek', at(FRI_2330_EDT)), { from: '2026-10-17', to: '2026-10-23' })
+check('...not the UTC Saturday answer', JSON.stringify(lib.presetRangeAt('lastWeek', at(FRI_2330_EDT))) === JSON.stringify(lib.presetRange('lastWeek', '2026-10-31')), false)
+const FRI_2330_EST = '2027-01-09T04:30:00Z' // Fri Jan 8 2027, 11:30 PM EST
+check('11:30 PM EST Friday: last week (lib)', lib.presetRangeAt('lastWeek', at(FRI_2330_EST)), { from: '2026-12-26', to: '2027-01-01' })
+check('11:30 PM EST Friday (client)', v.presetRange('lastWeek', dt.appToday(Date.parse(FRI_2330_EST))), { from: '2026-12-26', to: '2027-01-01' })
+check('last second of Oct ET is October', lib.presetRangeAt('lastMonth', at('2026-11-01T03:59:59Z')), { from: '2026-09-01', to: '2026-09-30' })
+check('first second of Nov ET is November', lib.presetRangeAt('lastMonth', at('2026-11-01T04:00:00Z')), { from: '2026-10-01', to: '2026-10-31' })
+check('New Year’s Eve 11:59 PM EST is still last year', lib.presetRangeAt('lastYear', at('2027-01-01T04:59:59Z')), { from: '2025-01-01', to: '2025-12-31' })
+check('New Year 12:00 AM EST', lib.presetRangeAt('lastYear', at('2027-01-01T05:00:00Z')), { from: '2026-01-01', to: '2026-12-31' })
+
+// URL: the new keys round-trip, and the quick links on /admin/financials read as named.
+check('last week from the URL', v.readSelection({ range: 'lastWeek', granularity: 'day', groupBy: 'truck' }, '2026-10-31'),
+  { range: 'lastWeek', from: '2026-10-24', to: '2026-10-30', granularity: 'day', groupBy: 'truck' })
+check('quick link lastMonth by truck', v.readSelection({ range: 'lastMonth', groupBy: 'truck' }, T),
+  { range: 'lastMonth', from: '2026-09-01', to: '2026-09-30', granularity: 'month', groupBy: 'truck' })
+check('quick link lastMonth by driver', v.readSelection({ range: 'lastMonth', groupBy: 'driver' }, T).groupBy, 'driver')
+const ly = v.readSelection({ range: 'lastYear' }, T)
+check('last year round trip', v.readSelection(v.selectionQuery(ly), T), ly)
+check('last year by day fits the daily limit', v.selectionError({ ...ly, granularity: 'day' }), '')
+
+// The short-period note.
+const s = (preset, today, granularity = 'month') => ({ ...v.presetRange(preset, today), range: preset, granularity, groupBy: 'fleet' })
+const noted = (sel) => v.shortPeriodNote(sel) !== ''
+check('note: today', noted(s('today', '2026-10-30')), true)
+check('note: last week', noted(s('lastWeek', '2026-10-30')), true)
+check('note: this month on day 14', noted(s('thisMonth', '2026-10-14')), true)
+check('note: this month on day 15', noted(s('thisMonth', '2026-10-15')), false)
+check('note: last month by month', noted(s('lastMonth', '2026-10-30')), false)
+check('note: last 12 by week', noted(s('last12', '2026-10-30', 'week')), true)
+check('note: last quarter by day', noted(s('lastQuarter', '2026-10-30', 'day')), true)
+check('note: unreadable dates', v.shortPeriodNote({ from: '', to: '', granularity: 'day' }), '')
+check('note: reversed range', v.shortPeriodNote({ from: '2026-10-30', to: '2026-10-01', granularity: 'day' }), '')
+check('note names the delivery rule', v.shortPeriodNote(s('today', '2026-10-30')).includes('only once the load is delivered'), true)
+
+// ── 7. client and server presets agree, 2024-2027 ──────────────────────────
+check('lib keys and labels = client', lib.RANGE_PRESETS.map((p) => [p.key, p.label]), v.RANGE_PRESETS.map((p) => [p.key, p.label]))
+check('lib key list', [...lib.PRESET_KEYS], v.RANGE_PRESETS.map((p) => p.key))
+check('lib label', [lib.presetLabel('lastWeek'), lib.presetLabel('nope')], ['Last week', ''])
+
+const DAY = 86400000
+const days = []
+for (let ms = Date.parse('2024-01-01T12:00:00Z'); ms <= Date.parse('2027-12-31T12:00:00Z'); ms += DAY) {
+  days.push(new Date(ms).toISOString().slice(0, 10))
+}
+check('2024-2027 has 1461 days', days.length, 1461)
+for (const { key } of v.RANGE_PRESETS) {
+  const byDay = []
+  const byInstant = []
+  for (const d of days) {
+    const c = v.presetRange(key, d)
+    const l = lib.presetRange(key, d)
+    if (JSON.stringify(c) !== JSON.stringify(l)) byDay.push(`${d}: client ${JSON.stringify(c)} lib ${JSON.stringify(l)}`)
+    // 11:30 PM Eastern on day d (03:30 or 04:30 UTC the next day): both read day d.
+    for (const iso of [`${d}T23:30:00-04:00`, `${d}T23:30:00-05:00`]) {
+      const instant = new Date(iso)
+      const ci = v.presetRange(key, dt.appToday(instant.getTime()))
+      const li = lib.presetRangeAt(key, instant)
+      if (JSON.stringify(ci) !== JSON.stringify(li)) byInstant.push(`${iso}: client ${JSON.stringify(ci)} lib ${JSON.stringify(li)}`)
+    }
+  }
+  check(`parity by day: ${key}`, byDay.slice(0, 3), [])
+  check(`parity by instant: ${key}`, byInstant.slice(0, 3), [])
+}
+
+// Last week, on every day: a whole Saturday-Friday week that ended 1 to 7 days ago.
+const weekBad = []
+for (const d of days) {
+  const r = lib.presetRange('lastWeek', d)
+  const ok = new Date(Date.parse(`${r.from}T12:00:00Z`)).getUTCDay() === 6
+    && v.daySpan(r.from, r.to) === 6
+    && v.daySpan(r.to, d) >= 1 && v.daySpan(r.to, d) <= 7
+  if (!ok) weekBad.push(`${d}: ${JSON.stringify(r)}`)
+}
+check('last week is the last complete Sat-Fri week on every day', weekBad.slice(0, 3), [])
 
 console.log(`${fail ? 'FAIL' : 'PASS'} test-financials-view: ${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
