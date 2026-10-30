@@ -7,7 +7,8 @@
 //
 //   §0 the comment stripper blanks comments only: a "/*" in a string, template
 //      or regex literal hides no code, and every route head in server.js
-//      outside a comment survives it
+//      outside a comment survives it; once routes move, the ROUTE_CONTEXT list
+//      is no mention, while a read in a moved route still is
 //   §1 behaviour: a month with the driver recorded off all month gives the same
 //      weekly invoice, investor view and payout ledger (fixed costs included)
 //      as the same month with no row, with DRIVER_AVAILABILITY_ENABLED on
@@ -41,7 +42,7 @@
 const fs = require("fs");
 const path = require("path");
 const WD = require("./lib/work-days-world");
-const { serverSource } = require("./lib/server-source");
+const { serverSource, spliceModules, routeContextLines } = require("./lib/server-source");
 
 const ROOT = path.join(__dirname, "..");
 // server.js with any route module spliced in at its mount line, so a moved
@@ -69,10 +70,9 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // action, is not the table).
 const TRACKED_RE = new RegExp(`(?<![\\w$-])(?:${TRACKED.map(escapeRe).join("|")})(?![\\w$])`);
 
-// Comments blanked, everything else and the line structure kept, so a comment
-// saying "never reads driver_availability" is not a mention. It walks the
-// source as tokens: a "/*" or "//" inside a string, template literal, regex
-// literal or line comment opens no comment, so no code is blanked with it.
+// Comments blanked, all else and the line structure kept, so a comment naming
+// driver_availability is not a mention. Strings, templates and regex literals are
+// walked as tokens, so a "/*" or "//" inside one opens no comment.
 const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
 const isWordChar = (c) => c.charCodeAt(0) > 127 || /[\w$]/.test(c);
 function blankComments(src) {
@@ -140,6 +140,7 @@ function blankComments(src) {
 		if (c === "/") {
 			// A regex may start where a value can't end; one that doesn't close on
 			// its line was a division after all.
+			// Known limit: a regex right after an if/while head reads as a division.
 			const end = prev === "value" || prev === ")" || prev === "]" ? -1 : regexEnd(i);
 			if (end > 0) { out.push(src.slice(i, end)); i = end; prev = "value"; continue; }
 			out.push(c);
@@ -159,16 +160,84 @@ function blankComments(src) {
 			let j = i + 1;
 			while (j < n && isWordChar(src[j])) j++;
 			const w = src.slice(i, j);
-			prev = REGEX_AFTER_WORD.has(w) ? "word" : "value";
+			prev = prev !== "." && REGEX_AFTER_WORD.has(w) ? "word" : "value";
 			out.push(w);
 			i = j;
 			continue;
 		}
+		// A postfix ++ or -- ends a value: a "/" after it divides.
+		if ((c === "+" || c === "-") && src[i + 1] === c && (prev === "value" || prev === ")" || prev === "]")) { out.push(c, c); i += 2; continue; }
 		out.push(c);
 		i++;
 		if (!/\s/.test(c)) prev = c;
 	}
 	return out.join("");
+}
+
+// The code lines §3 and §4 judge. ROUTE_CONTEXT only lists the names route
+// modules receive, so its lines are blanked, as the sibling runners skip them.
+function codeLines(src) {
+	const code = blankComments(src).split("\n");
+	const rc = routeContextLines(src);
+	if (rc) for (let n = rc.first; n <= rc.last; n++) code[n - 1] = "";
+	return code;
+}
+
+// ── §3's allowlist and scan ─────────────────────────────────────────────────────
+const ALLOW_HEADS = [
+	'const driverAvailability = require("./lib/driver-availability");',
+	"const DRIVER_AVAILABILITY_ENABLED =",
+	"function availabilityFlagGate(",
+	...SERVER_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
+	"function eldFeedSnapshot(",
+	'app.get("/api/drivers-directory/:id/availability",',
+	'app.post("/api/drivers-directory/:id/availability",',
+	'app.put("/api/driver-availability/:id",',
+	'app.post("/api/driver-availability/:id/cancel",',
+	'app.get("/api/driver/me/availability",',
+	'app.get("/api/driver-availability",',
+	'app.get("/api/drivers-directory",',
+	'app.delete("/api/drivers-directory/:id",',
+	'app.post("/api/dispatch",',
+	'app.post("/api/dispatch/reassign",',
+	'app.put("/api/data/:rowIndex",',
+	'app.put("/api/load/:loadId",',
+	'app.post("/api/data",',
+	'app.get("/api/dashboard",',
+	'app.get("/api/trucks",',
+];
+// The driver app's payload: one exempt line, the `timeOff` spread, as a
+// property of the route's res.json({ ... }).
+const PAYLOAD_HEAD = 'app.get("/api/driver/:driverName",';
+const TIME_OFF_SPREAD_RE = /^\.\.\.\(DRIVER_TIME_OFF_SCREEN_ENABLED \? \{ timeOff: driverOwnTimeOff\([^()]*\) \} : \{\}\),$/;
+// { stray, spreads, mentions } over codeLines() output.
+function scanMentions(code) {
+	const isHead = (l) => /^[^\s}\])`/]/.test(l);
+	const headOf = (i) => { for (let j = i; j >= 0; j--) if (isHead(code[j])) return j; return -1; };
+	const statementText = (j) => { let k = j + 1; while (k < code.length && !isHead(code[k])) k++; return code.slice(j, k).join("\n"); };
+	const inReply = (j, i) => {
+		for (let k = i - 1; k > j; k--) {
+			const t = code[k].trim();
+			if (t === "res.json({") return true;
+			if (t === "});" || /^(if|for|while|const|let|return|try|await)\b|^\} catch\b/.test(t)) return false;
+		}
+		return false;
+	};
+	const stray = [];
+	const spreads = [];
+	let mentions = 0;
+	code.forEach((l, i) => {
+		if (!TRACKED_RE.test(l)) return;
+		mentions++;
+		const j = headOf(i);
+		const head = j < 0 ? "" : code[j];
+		const allowed = ALLOW_HEADS.some((h) => head.startsWith(h))
+			|| (head.startsWith("db.exec(") && statementText(j).includes("CREATE TABLE IF NOT EXISTS driver_availability"));
+		if (allowed) return;
+		if (head.startsWith(PAYLOAD_HEAD) && TIME_OFF_SPREAD_RE.test(l.trim()) && inReply(j, i)) { spreads.push(i + 1); return; }
+		stray.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 90)}`);
+	});
+	return { stray, spreads, mentions };
 }
 
 // ── §1 behaviour: the money paths with and without a month off ──────────────────
@@ -223,9 +292,9 @@ async function moneyViews(withRow) {
 	{
 		// Made-up sources: line 2 of each names a tracked name in code, and a
 		// "/*" before it sits in a string, regex, template or line comment.
-		const seenOnLine2 = (name, lines) => {
+		const seenOnLine2 = (name, lines, at = 1) => {
 			const out = blankComments(lines.join("\n")).split("\n");
-			ok(name, out.length === lines.length && TRACKED_RE.test(out[1]), `stripped line 2: ${JSON.stringify(out[1])}`);
+			ok(name, out.length === lines.length && TRACKED_RE.test(out[at]), `stripped line ${at + 1}: ${JSON.stringify(out[at])}`);
 		};
 		seenOnLine2("§0.1 a \"/*\" in a string hides no code", [
 			'const banner = "see /* the notes";',
@@ -277,6 +346,53 @@ async function moneyViews(withRow) {
 		const lost = heads.filter(([i, h]) => !(stripped[i] || "").startsWith(h)).map(([i, h]) => `line ${i + 1}: ${h.slice(0, 70)}`);
 		ok(`§0.7 every route head outside a comment (${heads.length}) survives stripping`, heads.length > 100 && lost.length === 0,
 			`${lost.length} lost: ${lost.slice(0, 8).join(" | ")}`);
+
+		// A "/" read as a regex opener runs to the next "/" on its line; a backtick
+		// in that span flips the template state and a later "/*" then hides code.
+		seenOnLine2("§0.8 a division after a keyword-named property is a division", [
+			"const share = counts.delete / 2; const sep = `/`;",
+			"const pattern = `/* sample`;",
+			"const off = driverAvailabilityByName(name);",
+		], 2);
+		seenOnLine2("§0.9 ...and so is one after a postfix ++", [
+			"let n = 1; const half = n++ / 2; const sep = `/`;",
+			"const pattern = `/* sample`;",
+			"const off = driverAvailabilityByName(name);",
+		], 2);
+
+		// A made-up split: server.js lists the helpers in ROUTE_CONTEXT and mounts
+		// a module whose money route reads one. The list is no mention; the read is.
+		const splitServer = [
+			'const driverAvailability = require("./lib/driver-availability");',
+			"function truckDriverAvailability(unit) {",
+			"\treturn driverAvailability.forUnit(unit);",
+			"}",
+			"const ROUTE_CONTEXT = {",
+			"\tdriverAvailability,",
+			"\ttruckDriverAvailability,",
+			"\tDRIVER_TIME_OFF_SCREEN_ENABLED,",
+			"};",
+			'require("./routes/sample-money")(ROUTE_CONTEXT);',
+			'app.get("*", (req, res) => res.end());',
+			"",
+		].join("\n");
+		const sampleModule = [
+			"// Made-up sample module.",
+			"module.exports = function mount({ truckDriverAvailability }) {",
+			'app.get("/api/financials", (req, res) => {',
+			'\tconst off = truckDriverAvailability("T1");',
+			"\tres.json({ off });",
+			"});",
+			"};",
+			"",
+		].join("\n");
+		const spliced = spliceModules(splitServer, () => sampleModule).text;
+		const splitCode = codeLines(spliced);
+		const splitScan = scanMentions(splitCode);
+		eq("§0.10 in a split server.js the ROUTE_CONTEXT list is no mention, and a read in a moved money route is one",
+			[splitScan.stray.length, splitScan.stray.every((s) => s.includes('app.get("/api/financials",') && s.includes("truckDriverAvailability(")),
+				splitCode.some((l) => /\bDRIVER_TIME_OFF_SCREEN_ENABLED\b/.test(l))],
+			[1, true, false]);
 	}
 
 	console.log("\n── §1 the money paths with and without a month off");
@@ -307,60 +423,10 @@ async function moneyViews(withRow) {
 
 	console.log("\n── §3 server.js: every mention sits in an allowlisted place");
 	{
-		const code = blankComments(SRC).split("\n");
+		const code = codeLines(SRC);
 		const missing = SERVER_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`)));
 		eq("§3.0 every tracked helper is defined in server.js", missing, []);
-		const ALLOW_HEADS = [
-			'const driverAvailability = require("./lib/driver-availability");',
-			"const DRIVER_AVAILABILITY_ENABLED =",
-			"function availabilityFlagGate(",
-			...SERVER_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
-			"function eldFeedSnapshot(",
-			'app.get("/api/drivers-directory/:id/availability",',
-			'app.post("/api/drivers-directory/:id/availability",',
-			'app.put("/api/driver-availability/:id",',
-			'app.post("/api/driver-availability/:id/cancel",',
-			'app.get("/api/driver/me/availability",',
-			'app.get("/api/driver-availability",',
-			'app.get("/api/drivers-directory",',
-			'app.delete("/api/drivers-directory/:id",',
-			'app.post("/api/dispatch",',
-			'app.post("/api/dispatch/reassign",',
-			'app.put("/api/data/:rowIndex",',
-			'app.put("/api/load/:loadId",',
-			'app.post("/api/data",',
-			'app.get("/api/dashboard",',
-			'app.get("/api/trucks",',
-		];
-		const isHead = (l) => /^[^\s}\])`/]/.test(l);
-		const headOf = (i) => { for (let j = i; j >= 0; j--) if (isHead(code[j])) return j; return -1; };
-		const statementText = (j) => { let k = j + 1; while (k < code.length && !isHead(code[k])) k++; return code.slice(j, k).join("\n"); };
-		// The driver app's payload: one exempt line, the `timeOff` spread, as a
-		// property of the route's res.json({ ... }).
-		const PAYLOAD_HEAD = 'app.get("/api/driver/:driverName",';
-		const TIME_OFF_SPREAD_RE = /^\.\.\.\(DRIVER_TIME_OFF_SCREEN_ENABLED \? \{ timeOff: driverOwnTimeOff\([^()]*\) \} : \{\}\),$/;
-		const inReply = (j, i) => {
-			for (let k = i - 1; k > j; k--) {
-				const t = code[k].trim();
-				if (t === "res.json({") return true;
-				if (t === "});" || /^(if|for|while|const|let|return|try|await)\b|^\} catch\b/.test(t)) return false;
-			}
-			return false;
-		};
-		const stray = [];
-		const spreads = [];
-		let mentions = 0;
-		code.forEach((l, i) => {
-			if (!TRACKED_RE.test(l)) return;
-			mentions++;
-			const j = headOf(i);
-			const head = j < 0 ? "" : code[j];
-			const allowed = ALLOW_HEADS.some((h) => head.startsWith(h))
-				|| (head.startsWith("db.exec(") && statementText(j).includes("CREATE TABLE IF NOT EXISTS driver_availability"));
-			if (allowed) return;
-			if (head.startsWith(PAYLOAD_HEAD) && TIME_OFF_SPREAD_RE.test(l.trim()) && inReply(j, i)) { spreads.push(i + 1); return; }
-			stray.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 90)}`);
-		});
+		const { stray, spreads, mentions } = scanMentions(code);
 		eq("§3.1 no tracked name outside the allowlist", stray, []);
 		console.log(`  (${mentions} mention(s) checked)`);
 		ok("§3.1b the driver app's payload route is not on the allowlist", !ALLOW_HEADS.some((h) => PAYLOAD_HEAD.startsWith(h) || h.startsWith(PAYLOAD_HEAD)));
@@ -393,7 +459,7 @@ async function moneyViews(withRow) {
 		eq(`§4.1 every call (${calls.length}) is inside if (DRIVER_AVAILABILITY_ENABLED)`, unguarded, []);
 		// The screen sub-flag works only while the main flag is on, and gates the
 		// driver app's timeOff spread and nothing else.
-		const code = blankComments(SRC).split("\n");
+		const code = codeLines(SRC);
 		const defs = code.filter((l) => l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED ="));
 		ok("§4.2 DRIVER_TIME_OFF_SCREEN_ENABLED, where defined, is defined once and folds in DRIVER_AVAILABILITY_ENABLED first",
 			defs.length <= 1 && defs.every((l) => l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(")), defs.join(" | "));
