@@ -60,6 +60,7 @@ const { closure } = require("./lib/server-lift");
 const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, DatabaseRefusal } = require("./lib/app-database");
+const { correctionDayLines } = require("./lib/correction-day-lines");
 
 const ROOT = path.join(__dirname, "..");
 const OPTIONS = ["db", "driver-id", "from", "json"];
@@ -253,9 +254,13 @@ function buildReport(db, api, { driverId, from, today = null }) {
 		row.differs = row.difference !== 0;
 		row.route = row.differs ? routeFor(api, { ...invoices.find((i) => i.id === row.invoiceId), kind: row.kind }, row) : null;
 	}
+	// A live correction day line (waiting or on an invoice) pays its day too.
+	const dayLines = new Map();
+	for (const l of correctionDayLines(db, key, api.normalizeDriverName)) if (!dayLines.has(l.day)) dayLines.set(l.day, l.name);
 	for (const row of deleted) {
 		row.differs = row.difference !== 0;
 		row.paidByLive = (paidLive.get(row.day) || []).slice().sort((a, b) => a - b);
+		row.paidByCorrectionLine = dayLines.get(row.day) || "";
 	}
 
 	// The rate in effect per day, --from to the later of today and the last line, as runs.
@@ -288,7 +293,7 @@ function buildReport(db, api, { driverId, from, today = null }) {
 			liveDifference: differing.reduce((c, r) => c + r.difference, 0),
 			deletedLines: deleted.length,
 			deletedLinesDiffering: deleted.filter((r) => r.differs).length,
-			deletedLinesOnNoLiveInvoice: deleted.filter((r) => !r.paidByLive.length).length,
+			deletedLinesOnNoLiveInvoice: deleted.filter((r) => !r.paidByLive.length && !r.paidByCorrectionLine).length,
 			notJudged: notJudged.length,
 		},
 		live, deleted, notJudged,
@@ -324,7 +329,7 @@ function printText(r, { dbLabel }) {
 	out.push("Deleted invoices' lines (invoice, kind, status when deleted, deleted on, day, days, used -> correct, difference, paid by a live invoice):");
 	if (!r.deleted.length) out.push("  none");
 	for (const l of r.deleted) {
-		out.push(`  invoice ${l.invoiceId}  ${l.kind}  ${l.status}  deleted ${l.deletedOn}  ${l.day}  ${l.days} day  ${usd(l.used)} -> ${usd(l.correct)}  ${signed(l.difference)}  ${l.paidByLive.length ? `yes (invoice ${l.paidByLive.join(", ")})` : "no live invoice pays this day"}`);
+		out.push(`  invoice ${l.invoiceId}  ${l.kind}  ${l.status}  deleted ${l.deletedOn}  ${l.day}  ${l.days} day  ${usd(l.used)} -> ${usd(l.correct)}  ${signed(l.difference)}  ${l.paidByLive.length ? `yes (invoice ${l.paidByLive.join(", ")})` : l.paidByCorrectionLine ? `yes (${l.paidByCorrectionLine})` : "no live invoice pays this day"}`);
 	}
 	out.push("");
 	out.push("Not judged (invoice, status, day, amount, why):");

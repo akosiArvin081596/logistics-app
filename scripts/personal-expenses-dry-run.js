@@ -244,9 +244,9 @@ async function personalDryRun(w, { marks = [], names = false, dataDir = ROOT } =
 		w.mode.source = "derived";
 		const derived = await figures(w);
 		const differences = diff(plain, derived);
-		// Before the server adds the two columns, every invoice reads them as 0.
+		// Before the server adds the columns, every invoice reads them as 0.
 		const invoices = db.prepare("SELECT * FROM invoices WHERE deleted_at = '' AND status != 'Paid'").all()
-			.map((r) => ({ personal_total: 0, personal_share_total: 0, ...r }));
+			.map((r) => ({ personal_total: 0, personal_share_total: 0, correction_lines_total: 0, ...r }));
 		const dueDiffs = invoices.filter((r) => w.api.invoiceTotalDue(r) !== round2((r.total_earnings || 0) + (r.adjustment || 0)))
 			.map((r) => ({ invoice: r.invoice_number, before: round2((r.total_earnings || 0) + (r.adjustment || 0)), after: w.api.invoiceTotalDue(r) }));
 		result.partA = { figuresCompared: Object.keys(plain).length, unpaidInvoicesCompared: invoices.length, differences, totalDueDifferences: dueDiffs,

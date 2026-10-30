@@ -71,7 +71,7 @@ function harness(src) {
 		status TEXT NOT NULL DEFAULT 'Draft', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP, paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
 		adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0,
-		personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0)`);
+		personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_lines_total REAL NOT NULL DEFAULT 0)`);
 	// §1 asserts invoiceTotalDue() exists; the other batteries run without it,
 	// so a tree that lacks it still shows what its driver list serves.
 	const hasTotalDue = src.includes("\nfunction invoiceTotalDue(");
@@ -107,7 +107,7 @@ function batteryDefinition(src) {
 	t("§1 server.js defines invoiceTotalDue() once", typeof invoiceTotalDue, "function");
 	if (typeof invoiceTotalDue !== "function") return out;
 	// Every row carries the two Personal columns, as every stored invoice does.
-	const P = { personal_total: 0, personal_share_total: 0 };
+	const P = { personal_total: 0, personal_share_total: 0, correction_lines_total: 0 };
 	t("§1 total_earnings plus a negative adjustment", invoiceTotalDue({ ...P, total_earnings: 1500, adjustment: -300 }), 1200);
 	t("§1 …plus a positive adjustment", invoiceTotalDue({ ...P, total_earnings: 600, adjustment: 75.5 }), 675.5);
 	t("§1 …no adjustment adds nothing (0, null, missing)",
@@ -117,7 +117,7 @@ function batteryDefinition(src) {
 	t("§1 …an adjustment larger than the earnings gives a negative total", invoiceTotalDue({ ...P, total_earnings: 200, adjustment: -300 }), -100);
 	t("§1 …a row with only the Personal columns is $0", invoiceTotalDue({ ...P }), 0);
 	t("§1 …less what the driver repays on Personal lines, plus a share returned ($800 + $25 - $100)",
-		invoiceTotalDue({ total_earnings: 800, adjustment: 0, personal_total: 100, personal_share_total: 25 }), 725);
+		invoiceTotalDue({ total_earnings: 800, adjustment: 0, personal_total: 100, personal_share_total: 25, correction_lines_total: 0 }), 725);
 	const throws = (row) => { try { invoiceTotalDue(row); return false; } catch (e) { return /personal_(share_)?total/.test(e.message); } };
 	t("§1 …a row read without personal_total or personal_share_total throws, never reads as $0",
 		[throws({ total_earnings: 900, personal_share_total: 0 }), throws({ total_earnings: 900, personal_total: 0 }), throws({})], [true, true, true]);
@@ -132,7 +132,7 @@ const W41 = { start: "2026-10-10", end: "2026-10-16" };
 // (adjustment_note, adjusted_by, ...) reaches the driver, so it fails here
 // until this list names it.
 const DRIVER_ROW_FIELDS = [
-	"adjustment", "created_at", "expenses_total", "id", "invoice_number", "loads_count",
+	"adjustment", "correction_lines_total", "created_at", "expenses_total", "id", "invoice_number", "loads_count",
 	"personal_share_total", "personal_total",
 	"status", "submitted_at", "total_due", "total_earnings", "week_end", "week_start",
 ];
@@ -230,11 +230,11 @@ const MUTANTS = [
 	["the driver app's list drops the adjustment",
 		"total_due: invoiceTotalDue(rest)", "total_due: rest.total_earnings"],
 	["the driver app's list also sends the adjustment's note and author",
-		"total_earnings, adjustment, personal_total, personal_share_total, expenses_total",
-		"total_earnings, adjustment, adjustment_note, adjusted_by, personal_total, personal_share_total, expenses_total"],
+		"total_earnings, adjustment, personal_total, personal_share_total, correction_lines_total, expenses_total",
+		"total_earnings, adjustment, adjustment_note, adjusted_by, personal_total, personal_share_total, correction_lines_total, expenses_total"],
 	["invoiceTotalDue() ignores the adjustment",
-		"return Math.round(((row.total_earnings || 0) + (row.adjustment || 0) + (row.personal_share_total || 0) - (row.personal_total || 0)) * 100) / 100;",
-		"return Math.round(((row.total_earnings || 0) + (row.personal_share_total || 0) - (row.personal_total || 0)) * 100) / 100;"],
+		"return Math.round(((row.total_earnings || 0) + (row.adjustment || 0) + (row.personal_share_total || 0) - (row.personal_total || 0) + (row.correction_lines_total || 0)) * 100) / 100;",
+		"return Math.round(((row.total_earnings || 0) + (row.personal_share_total || 0) - (row.personal_total || 0) + (row.correction_lines_total || 0)) * 100) / 100;"],
 ];
 
 // ───────────────────────────────────────────────────────────────── runner

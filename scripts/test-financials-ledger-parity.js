@@ -118,7 +118,7 @@ const FNS = [
 	"appMonthKey", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
 	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
-	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex",
+	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex", "correctionLinesTablePresent",
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
