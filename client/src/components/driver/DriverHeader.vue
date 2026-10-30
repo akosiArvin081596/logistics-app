@@ -36,6 +36,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import ChangePasswordModal from './ChangePasswordModal.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
+import { driverFuelOf, driverFuelChip } from '../../lib/driverFuelView'
 
 defineProps({
   driverName: { type: String, default: '' },
@@ -78,6 +79,13 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 const fuelChip = computed(() => {
   const r = range.value
   if (!r) return null
+  // Driver gallons flag on: the chip's text, tooltip and colour all come from the
+  // block the load's Fuel section reads, so the two can't disagree.
+  const block = driverFuelOf(r)
+  if (block) {
+    const c = driverFuelChip(block)
+    return { tone: c.tone, text: c.text, title: c.title }
+  }
   // No usable reading — say so rather than showing a comforting blank. 'stale'
   // means the ELD stopped reporting entirely; we deliberately publish no number
   // for it (a dead device's last reading is not a range).

@@ -163,6 +163,9 @@ function scratch() {
 		CREATE TABLE driver_payment_info (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, FOREIGN KEY (user_id) REFERENCES users(id)
 		);
+		CREATE TABLE driver_emergency_contacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
 		CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, amount REAL DEFAULT 0, date TEXT DEFAULT '',
 			posted_period TEXT DEFAULT '', created_at TEXT DEFAULT '', status TEXT DEFAULT 'Pending');
 		CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "from" TEXT, "to" TEXT);
@@ -264,6 +267,9 @@ function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
 		userVoiceNoteFiles: () => [],
 		removeUserVoiceNotes: () => 0,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected
+		// (scripts/test-protected-accounts.js covers a set list).
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
 		DATA_DIR: w.root,
 		fs, path, console: quiet,
 	};

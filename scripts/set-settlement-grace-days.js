@@ -41,10 +41,10 @@
 
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, DatabaseRefusal } = require("./lib/app-database");
 
@@ -95,7 +95,7 @@ function readOptions(argv) {
 // The route and the helpers it and the close dates need, lifted from `root`'s
 // server.js, on `db`. Returns { api, call(req) }.
 function buildWorld({ root = ROOT, db }) {
-	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const SRC = serverSource({ root });
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const lifted = closure(SRC, { roots: ROOTS, routes: [ROUTE_HEAD], provided: PROVIDED, denied: DENIED });
 	const routes = {};

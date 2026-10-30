@@ -74,8 +74,12 @@ async function main() {
 	try {
 		const locks = db.prepare("SELECT period, finalized_at FROM period_locks WHERE status = 'locked' ORDER BY period").all();
 		const periods = locks.map((l) => l.period);
+		// correction_lines_total is read with the row (invoiceTotalDue() refuses a row
+		// without it); a database from before the column has no correction line.
+		const hasCorrections = db.prepare("PRAGMA table_info(invoices)").all().some((c) => c.name === "correction_lines_total");
 		const invoices = db.prepare(
 			`SELECT id, invoice_number, driver, week_start, week_end, status, total_earnings, adjustment, personal_total, personal_share_total,
+			        ${hasCorrections ? "correction_lines_total" : "0 AS correction_lines_total"},
 			        COALESCE(paid_at, '') AS paid_at
 			   FROM invoices WHERE COALESCE(deleted_at, '') = '' ORDER BY week_start, id`
 		).all();

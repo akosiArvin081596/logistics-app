@@ -20,7 +20,8 @@
 //      what it writes reads back exactly through dotenv; on this checkout's own
 //      server.js and lib/, every flag, first month and lease setting the app
 //      reads (process.env.NAME, env.NAME in a lib/ helper, or a name table) is
-//      copied, and the bank settings, secrets and production targets are not
+//      copied, and the bank settings, secrets and production targets are not;
+//      a name only a route module (routes/) reads counts as read
 //   §4 the stamp (unique per run) and task rules; the pull scripts keep the
 //      production host out of the repository, fail when the server's folder
 //      cannot be confirmed gone, sweep stale folders (over an hour old), and
@@ -266,11 +267,11 @@ console.log("§3 the settings export copies business settings only");
 	eq("...writing the file 0600", (fs.statSync(path.join(out, "settings.env")).mode & 0o777).toString(8), "600");
 }
 {
-	// This checkout's own server.js and lib/, read the way settings.js reads the
-	// app on the server. Made-up values only.
+	// This checkout's own server.js, routes/ and lib/, read the way settings.js
+	// reads the app on the server. Made-up values only.
 	const app = tmp("replica-settings-real-");
 	const out = tmp("replica-settings-real-out-");
-	for (const f of ["node_modules", "server.js", "lib"]) fs.symlinkSync(path.join(ROOT, f), path.join(app, f));
+	for (const f of ["node_modules", "server.js", "lib", "routes"]) if (fs.existsSync(path.join(ROOT, f))) fs.symlinkSync(path.join(ROOT, f), path.join(app, f));
 	const wanted = {
 		// read as env.NAME on the env a lib/ helper is handed
 		LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2030-01", BROKER_INVOICE_LINES_ENABLED: "true",
@@ -326,6 +327,23 @@ console.log("§3 the settings export copies business settings only");
 	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
 	ok("a name only lib/replica-rules.js lists or mentions in a comment is not read by the app", r.status === 0 && cli.copied.includes("ROUTEMATE_ENABLED")
 		&& rule("ONLY_IN_RULES_ENABLED") === "not read by the app" && rule("RULES_COMMENT_FROM") === "not read by the app", { status: r.status, copied: cli.copied });
+}
+{
+	// Route modules hold server.js's routes once they move: a name only a
+	// module reads is read by the app. Made-up names and values.
+	const app = tmp("replica-settings-routes-");
+	const out = tmp("replica-settings-routes-out-");
+	fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(app, "node_modules"));
+	fs.writeFileSync(path.join(app, "server.js"), 'const r = process.env.ROUTEMATE_ENABLED;\nrequire("./routes/alpha")(ROUTE_CONTEXT);\n');
+	fs.mkdirSync(path.join(app, "routes"));
+	fs.writeFileSync(path.join(app, "routes", "alpha.js"), 'module.exports = function mount({ app }) {\napp.get("/api/alpha", (req, res) => res.json({ on: process.env.ALPHA_REPORT_ENABLED === "true" }));\n};\n');
+	fs.mkdirSync(path.join(app, "lib"));
+	fs.writeFileSync(path.join(app, ".env"), 'ROUTEMATE_ENABLED="true"\nALPHA_REPORT_ENABLED="true"\nNOT_READ_SETTING="on"\n');
+	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
+	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
+	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
+	ok("a name only a route module reads is copied; one nothing reads is still skipped", r.status === 0 && cli.copied.includes("ALPHA_REPORT_ENABLED")
+		&& cli.copied.includes("ROUTEMATE_ENABLED") && rule("NOT_READ_SETTING") === "not read by the app", { status: r.status, copied: cli.copied, stderr: r.stderr });
 }
 
 // ---- §4 rules and the pull scripts ------------------------------------------------------------

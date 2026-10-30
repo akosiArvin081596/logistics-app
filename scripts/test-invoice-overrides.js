@@ -50,11 +50,10 @@
 const fs = require("fs");
 const path = require("path");
 
-const SERVER = path.join(__dirname, "..", "server.js");
 // The draft route's steps live in lib/broker-invoice-draft.js: read with
 // server.js as one text, and inlined into the route's (extractRouteByLines()).
 const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
-const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), path.join(__dirname, ".."));
+const SRC = draftLift.withEngine(require("./lib/server-source").serverSource(), path.join(__dirname, ".."));
 const brokerInvoice = require(path.join(__dirname, "..", "lib", "broker-invoice.js"));
 
 // ---------------------------------------------------------------- extraction

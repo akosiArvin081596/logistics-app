@@ -61,6 +61,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { serverSource } = require("./lib/server-source");
 
 // LOGISX_ROOT lets the script run from outside the checkout it is auditing —
 // needed because the Gemini key is IP-restricted to the VPS, so the repair's
@@ -77,8 +78,8 @@ const LOCAL_COPY_SHEET_ID = "156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0";
 const SHEET_TAB = "Job Tracking";
 
 // ── extraction from server.js (see header) ───────────────────────────────────
-const SERVER_PATH = path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER_PATH, "utf8");
+// ROOT's server.js with its route modules spliced in (scripts/lib/server-source.js).
+const SRC = serverSource({ root: ROOT });
 
 function extractFunction(name) {
 	const needle = `\nfunction ${name}(`;

@@ -70,7 +70,7 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 const eldMiles = require("../lib/eld-miles");
 const appTime = require("../lib/app-time");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ───────────────────────────────────────────────────────────────── lifting
 // Each lift is anchored on a newline and counted, so a mention in a comment is
@@ -113,6 +113,8 @@ const SHARED_CONSTS = [
 	"DAY_PAY_DRAFT_LINE_RE", "INVOICE_GRID_DAYS",
 	// The Personal lines' receipt-week rule (off in these fixtures).
 	"PERSONAL_RECEIPT_WEEK_ENABLED",
+	// The correction lines' reads, their open statuses and their system actor.
+	"CORRECTION_ROW_SELECT", "CORRECTION_WAITING_SQL", "CORRECTION_OPEN_STATUSES", "CORRECTION_SYSTEM_ACTOR",
 ];
 const SHARED_FNS = [
 	"appDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
@@ -137,6 +139,13 @@ const SHARED_FNS = [
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
 	"personalSnapshotOf", "personalLinesForInvoices", "invoiceExpensesRefTotals", "personalUnfitTail", "personalFit",
+	// The correction lines an invoice carries, through the list, restore, adjust
+	// and generation, and the days live day lines hold (none in these fixtures:
+	// their database has no invoice_correction_lines; scripts/test-approved-invoice-lock.js runs them).
+	"correctionLinesTablePresent", "correctionLinesOnInvoice", "correctionLinesForInvoices", "correctionPublicLine",
+	"correctionRestoreBlocker", "correctionRelinkOnRestore", "correctionDetachUnfit", "undoCorrectionDetach",
+	"correctionDayLineHolds", "correctionGenerationPlan", "correctionFitForGeneration", "correctionCommitGeneration",
+	"correctionGenerationAudit", "correctionWaitingLines", "correctionDayPaidBy", "correctionSourceRow",
 	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
 	// the paid-days release a regenerated Draft runs.
 	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
@@ -210,7 +219,7 @@ const toValues = (rows) => [HEADERS, ...rows.map((r) => HEADERS.map((h) => r[h] 
 
 const DDL = `
 	CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '');
-	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '', personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0);
+	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '', personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0, correction_lines_total REAL NOT NULL DEFAULT 0);
 	CREATE UNIQUE INDEX idx_invoices_driver_week ON ${INDEX_COLS};
 	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', truck_unit TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
@@ -330,6 +339,8 @@ function buildWorld(opts = {}) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The invoice's Address line from the directory row (lib/invoice-header.js).
 		providerAddressLine: require("../lib/invoice-header").providerAddressLine,
+		// The correction lines' rules (lib/invoice-corrections.js): the print fields.
+		invoiceCorrections: require("../lib/invoice-corrections"),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
 		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;

@@ -574,7 +574,7 @@ const printed = (w) => ((lastRender(w) || { data: {} }).data.personalLines || []
 		threw = "";
 		try { w.api.invoiceTotalDue({ total_earnings: 900, adjustment: 0, personal_total: 0 }); } catch (e) { threw = e.message; }
 		check("…or without personal_share_total", /personal_share_total/.test(threw), true);
-		check("total_earnings + adjustment + share returned - repayments", w.api.invoiceTotalDue({ total_earnings: 800, adjustment: -10, personal_total: 100, personal_share_total: 25 }), 715);
+		check("total_earnings + adjustment + share returned - repayments", w.api.invoiceTotalDue({ total_earnings: 800, adjustment: -10, personal_total: 100, personal_share_total: 25, correction_lines_total: 0 }), 715);
 		await mark(w, 1);
 		const g = await w.generate(DRIVER_A);
 		submit(w, g.body.invoice.id);

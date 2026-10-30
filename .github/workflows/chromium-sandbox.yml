@@ -1,0 +1,129 @@
+name: Chromium sandbox
+
+# Proves the AppArmor profile that lets the PDF renderer's Chrome start its own sandbox
+# (scripts/deploy/apparmor/logisx-chromium) on a runner set up as the box will be. What each
+# run checks: scripts/test-chromium-apparmor.js.
+#
+# ⚠️ Its own workflow, not a job in ci.yml: ci.yml's `verify` needs every job there and gates
+# production (test-release-gate.js §4). Not a required check; its pass is named in "merge?".
+#
+# ⚠️ It runs sudo, so it holds no secret, environment, cache or kept token, runs no install
+# scripts, and never runs a fork's code (no pull_request_target or workflow_run; fork PRs skip).
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - lib/pdf-browser.js
+      - lib/chromium-drop.sh
+      - scripts/deploy/apparmor/**
+      - scripts/test-chromium-apparmor.js
+      - scripts/test-chromium-drop.js
+      - .github/workflows/chromium-sandbox.yml
+      # A Puppeteer bump brings a Chrome build the profile must still cover.
+      - package-lock.json
+  push:
+    branches: [main]
+    paths:
+      - lib/pdf-browser.js
+      - lib/chromium-drop.sh
+      - scripts/deploy/apparmor/**
+      - scripts/test-chromium-apparmor.js
+      - scripts/test-chromium-drop.js
+      - .github/workflows/chromium-sandbox.yml
+      - package-lock.json
+  workflow_dispatch:
+
+# As ci.yml: a PR's new push supersedes its previous run; a push or manual run never cancels
+# anything. Safe to cancel: the run changes nothing but the runner.
+concurrency:
+  group: chromium-sandbox-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  apparmor:
+    name: chromium sandbox · AppArmor
+    # A pull request from a fork never reaches the sudo steps.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # The same Node as ci.yml. No npm cache: nothing a root step here can touch is restored
+      # by another workflow.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+
+      # The packages' code only: no install script runs in a job that uses sudo.
+      - name: Install dependencies, without install scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      # The box's read-only pre-checks, for comparison with its answers.
+      - name: What this runner has
+        run: |
+          grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+          uname -m
+          apparmor_parser --version
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces || true
+          echo "loaded profiles: $(sudo grep -c . /sys/kernel/security/apparmor/profiles)"
+
+      - name: The user-namespace restriction on, as on the box
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          test "$(cat /sys/module/apparmor/parameters/enabled)" = Y
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+
+      # As on the box after the cache move: root's Puppeteer cache is a link into the attached
+      # folder, which Puppeteer's own installer fills as root. Each app account's cache gets a
+      # copy, as the cutover makes one.
+      - name: Chrome where the profile attaches
+        run: |
+          sudo test ! -e /root/.cache/puppeteer
+          sudo install -d -m 0755 /var/cache/logisx-puppeteer
+          sudo install -d -m 0700 /root/.cache
+          sudo ln -s /var/cache/logisx-puppeteer /root/.cache/puppeteer
+          sudo env "PATH=$PATH" HOME=/root node_modules/.bin/puppeteer browsers install chrome
+          for home in /home/logisx-prd /home/logisx-stg; do
+            sudo install -d -m 0755 "$home" "$home/.cache" "$home/.cache/puppeteer" "$home/.cache/puppeteer/chrome"
+            sudo cp -a /var/cache/logisx-puppeteer/chrome/linux-* "$home/.cache/puppeteer/chrome/"
+          done
+
+      - name: An unprivileged account for Chrome
+        run: sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin logisx-ci-chrome
+
+      # As it goes onto the box: the file into /etc/apparmor.d/ with its hash checked, this one
+      # profile loaded with -r (never a reload of every profile), then the after-check: listed
+      # in unconfined mode, and one more profile than before.
+      - name: Load the profile
+        run: |
+          before=$(sudo grep -c . /sys/kernel/security/apparmor/profiles)
+          sudo install -m 0644 -o root -g root scripts/deploy/apparmor/logisx-chromium /etc/apparmor.d/logisx-chromium
+          test "$(sha256sum < scripts/deploy/apparmor/logisx-chromium)" = "$(sha256sum < /etc/apparmor.d/logisx-chromium)"
+          sudo apparmor_parser -r /etc/apparmor.d/logisx-chromium
+          sudo grep -qx 'logisx-chromium (unconfined)' /sys/kernel/security/apparmor/profiles
+          test "$(sudo grep -c . /sys/kernel/security/apparmor/profiles)" -eq "$((before + 1))"
+
+      - name: With the profile, Chrome's sandbox starts
+        run: sudo env "PATH=$PATH" HOME=/root RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" node scripts/test-chromium-apparmor.js --privileged loaded --account logisx-ci-chrome
+
+      # The box's rollback: unload this one profile, remove its file, and check it is gone.
+      - name: Unload the profile
+        run: |
+          before=$(sudo grep -c . /sys/kernel/security/apparmor/profiles)
+          sudo apparmor_parser -R /etc/apparmor.d/logisx-chromium
+          sudo rm /etc/apparmor.d/logisx-chromium
+          if sudo grep -q '^logisx-chromium ' /sys/kernel/security/apparmor/profiles; then
+            echo "::error::logisx-chromium is still loaded after its unload"
+            exit 1
+          fi
+          test "$(sudo grep -c . /sys/kernel/security/apparmor/profiles)" -eq "$((before - 1))"
+
+      - name: Without the profile, the sandbox can't start
+        run: sudo env "PATH=$PATH" HOME=/root RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" node scripts/test-chromium-apparmor.js --privileged unloaded --account logisx-ci-chrome

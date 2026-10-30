@@ -38,6 +38,10 @@
         </label>
       </div>
     </div>
+    <p v-if="shortNote" class="short-note" role="note">
+      <Info class="note-icon" aria-hidden="true" />
+      <span>{{ shortNote }}</span>
+    </p>
 
     <div class="toolbar-row">
       <div class="control-group">
@@ -82,10 +86,10 @@
 </template>
 
 <script setup>
-import { useId } from 'vue'
-import { Download, SlidersHorizontal } from 'lucide-vue-next'
+import { computed, useId } from 'vue'
+import { Download, Info, SlidersHorizontal } from 'lucide-vue-next'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { GRANULARITIES, GROUPINGS, RANGE_PRESETS } from '../../lib/financialsView'
+import { GRANULARITIES, GROUPINGS, RANGE_PRESETS, shortPeriodNote } from '../../lib/financialsView'
 
 // The report's controls. The page owns the selection (it lives in the URL);
 // this only says what changed.
@@ -99,6 +103,8 @@ const emit = defineEmits(['update', 'open-settings'])
 
 const uid = useId()
 const ids = { range: `fin-range-${uid}`, granularity: `fin-gran-${uid}` }
+
+const shortNote = computed(() => shortPeriodNote(props.selection))
 
 function pickRange(key) {
   if (key === props.selection.range) return
@@ -172,6 +178,16 @@ function onDate(which, value) {
   outline-offset: 2px;
 }
 .seg-hint { font-weight: 500; opacity: 0.8; }
+.short-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.note-icon { flex: none; width: 14px; height: 14px; margin-top: 0.12rem; }
 .date-field {
   display: flex;
   flex-direction: column;

@@ -30,6 +30,14 @@
  * DISCRIMINATION: §3 re-admits Dispatcher on each registration in turn, and
  * breaks each client gate in turn, and requires the matching assertion to flip.
  *
+ * The automatic drafts too (§4, §5): the routes lib/auto-invoice-job.js mounts
+ * (GET/PUT /api/auto-invoice/settings, GET …/status, POST …/loads/:loadKey/checked
+ * and …/retry), mounted by server.js's <auto-invoice-wiring> block with its own
+ * requireRole, admit Super Admin alone, at their first middleware, before the
+ * cross-site check; and CompletedLoadsTab.vue shows their chip, toggle, dialog
+ * line and settings dialog, and calls them, for a Super Admin only. Each gate is
+ * broken in turn and must be caught.
+ *
  * Pure: no server, no port, no app.db, no network.
  * Run: node scripts/test-invoice-draft-admin-only.js
  */
@@ -301,6 +309,154 @@ for (const [name, from, to] of [
 ]) {
 	if (TAB.split(from).length - 1 !== 1) { ok(`client mutant anchor found once: ${name}`, false); continue; }
 	ok(`MUTANT ${name}: caught`, clientViolations(TAB.replace(from, to)).length > 0);
+}
+
+// ===========================================================================
+console.log("\n§4  the automatic drafts' routes admit Super Admin alone");
+// ===========================================================================
+// lib/auto-invoice-job.js mount(), from the module's text (a mutant below is
+// that text changed), registered on a capturing app with the real requireRole.
+const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+const JOB_SRC = fs.readFileSync(JOB_FILE, "utf8");
+const jobRequire = require("module").createRequire(JOB_FILE);
+function autoRoutes(jobSrc) {
+	const mod = { exports: {} };
+	new Function("module", "exports", "require", jobSrc)(mod, mod.exports, jobRequire);
+	const regs = [];
+	const app = {};
+	for (const verb of ["get", "put", "post", "patch", "delete", "all", "use"]) app[verb] = (p, ...chain) => { regs.push({ verb, paths: [p], chain }); };
+	// Off: no table and no handler runs; mount() registers the same routes in every mode.
+	mod.exports.create({ env: {} }).mount(app, { requireRole, refuseCrossSite: passThrough });
+	return regs;
+}
+function autoGateViolations(jobSrc) {
+	const v = [];
+	for (const route of autoRoutes(jobSrc)) {
+		const label = `${route.verb.toUpperCase()} ${route.paths[0]}`;
+		if (!call(route, route.verb, USERS["Super Admin"]).reached) v.push(`${label}: Super Admin does not reach the handler`);
+		for (const role of ["Dispatcher", "Driver", "Investor"]) {
+			const r = call(route, route.verb, USERS[role]);
+			if (r.reached || r.status !== 403) v.push(`${label}: ${role} gets ${r.reached ? "the handler" : r.status}`);
+			else if (r.stubCalls) v.push(`${label}: ${role}'s refusal ran ${r.stubCalls} middleware after the gate`);
+		}
+		const anon = call(route, route.verb, null);
+		if (anon.reached || anon.status !== 401) v.push(`${label}: no session gets ${anon.reached ? "the handler" : anon.status}`);
+		const first = route.chain[0] && route.chain[0].toString();
+		if (!first || !/roles\.includes/.test(first)) v.push(`${label}: the role gate is not the first middleware`);
+	}
+	return v;
+}
+{
+	const routes = autoRoutes(JOB_SRC);
+	const autoPaths = routes.map((r) => `${r.verb.toUpperCase()} ${r.paths[0]}`).sort();
+	ok(`the automatic drafts' routes are exactly the known five (${autoPaths.join(", ")})`, autoPaths.join() === [
+		"GET /api/auto-invoice/settings",
+		"GET /api/auto-invoice/status",
+		"POST /api/auto-invoice/loads/:loadKey/checked",
+		"POST /api/auto-invoice/loads/:loadKey/retry",
+		"PUT /api/auto-invoice/settings",
+	].join());
+	for (const route of routes) {
+		const label = `${route.verb.toUpperCase()} ${route.paths[0]}`;
+		ok(`${label}: Super Admin reaches the handler`, call(route, route.verb, USERS["Super Admin"]).reached);
+		for (const role of ["Dispatcher", "Driver", "Investor"]) {
+			const r = call(route, route.verb, USERS[role]);
+			ok(`${label}: ${role} is refused 403 at the gate, before the cross-site check`, !r.reached && r.status === 403 && r.stubCalls === 0,
+				`reached ${r.reached}, status ${r.status}, after-gate calls ${r.stubCalls}`);
+		}
+		ok(`${label}: no session is refused 401`, !call(route, route.verb, null).reached);
+	}
+	const writes = routes.filter((r) => r.verb !== "get");
+	ok("every write runs the cross-site guard right after the role gate", writes.length === 3 && writes.every((r) => r.chain.length === 3 && r.chain[1] === passThrough));
+	ok("no gate violation among them (the list the mutant checks against)", autoGateViolations(JOB_SRC).length === 0, autoGateViolations(JOB_SRC).join("; "));
+
+	const start = SRC.indexOf("// <auto-invoice-wiring>");
+	const end = SRC.indexOf("// </auto-invoice-wiring>");
+	const block = start >= 0 && end > start ? SRC.slice(start, end) : "";
+	ok("server.js mounts them from its <auto-invoice-wiring> block, with its own requireRole and refuseCrossSite",
+		block.split("autoInvoice.mount(").length === 2 && /autoInvoice\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(block) &&
+		!/\b(requireRole|refuseCrossSite)\s*=|function\s+(requireRole|refuseCrossSite)\b/.test(block) &&
+		/^const refuseCrossSite = /m.test(SRC) && /^function requireRole\(/m.test(SRC));
+	ok("...and nowhere else", SRC.split("autoInvoice.mount(").length === 2 && !/["']\/api\/auto-invoice\//.test(SRC));
+
+	const from = 'const guard = [requireRole("Super Admin")];';
+	if (JOB_SRC.split(from).length - 1 !== 1) ok("lib mutant anchor found once", false);
+	else {
+		const v = autoGateViolations(JOB_SRC.replace(from, 'const guard = [requireRole("Super Admin", "Dispatcher")];'));
+		ok(`MUTANT Dispatcher re-admitted to the automatic drafts' routes: caught (${v.length} violation(s))`,
+			v.filter((s) => s.includes("Dispatcher gets the handler")).length === 5);
+	}
+}
+
+// ===========================================================================
+console.log("\n§5  the dashboard offers the automatic drafts to Super Admin alone");
+// ===========================================================================
+function autoClientViolations(src) {
+	const v = [];
+	const once = (needle, what) => {
+		const n = src.split(needle).length - 1;
+		if (n !== 1) { v.push(`${what}: expected one ${needle}, found ${n}`); return -1; }
+		return src.indexOf(needle);
+	};
+	// The tag carries v-if="auth.isSuperAdmin…" itself, before the needle.
+	const ownGate = (at) => /\bv-if="auth\.isSuperAdmin(?:"|\s*&&)/.test(src.slice(src.lastIndexOf("<", at), at));
+	for (const [needle, what] of [
+		['@click="autoAttentionOnly = !autoAttentionOnly"', "the Needs attention toggle"],
+		['@click="openAutoSettings"', "the settings button"],
+		['class="auto-chip"', "the row chip"],
+		[':open="autoSettingsOpen"', "the settings dialog"],
+	]) {
+		const at = once(needle, what);
+		if (at >= 0 && !ownGate(at)) v.push(`${what} is not Super Admin only`);
+	}
+	for (const [needle, what] of [
+		['class="auto-line"', "the dialog's status line"],
+		["@click=\"autoInvoiceAction('checked')\"", "Mark checked"],
+		["@click=\"autoInvoiceAction('retry')\"", "Try again"],
+		['class="auto-result"', "the action's answer"],
+	]) {
+		const at = once(needle, what);
+		if (at >= 0 && !gatedAt(src, at)) v.push(`${what} is not inside a Super Admin-only block`);
+	}
+	const script = src.slice(src.indexOf("<script setup>"));
+	if (!/const autoChip = \(job\) => \(auth\.isSuperAdmin && /.test(script)) v.push("autoChip() does not refuse a non-Super-Admin first");
+	if (!/const autoAttentionCount = computed\(\(\) => \(auth\.isSuperAdmin \? /.test(script)) v.push("the Needs attention count is not Super Admin only");
+	if (!/const m = auth\.isSuperAdmin && dashboard\.data/.test(script)) v.push("the automatic drafts' mode is not read for a Super Admin only");
+	for (const fn of ["autoInvoiceAction", "openAutoSettings", "saveAutoSettings"]) {
+		if (!new RegExp(`async function ${fn}\\([^)]*\\) \\{\\n\\s*if \\(!auth\\.isSuperAdmin\\b`).test(script)) v.push(`${fn}() does not refuse a non-Super-Admin first`);
+	}
+	const calls = [];
+	for (let i = script.indexOf("/api/auto-invoice/"); i >= 0; i = script.indexOf("/api/auto-invoice/", i + 1)) calls.push(i);
+	if (calls.length !== 3) v.push(`expected three /api/auto-invoice/ call sites, found ${calls.length}`);
+	for (const i of calls) {
+		const fnStart = script.lastIndexOf("\nasync function ", i);
+		const name = (/^\nasync function (\w+)/.exec(script.slice(fnStart)) || [])[1];
+		if (!["autoInvoiceAction", "openAutoSettings", "saveAutoSettings"].includes(name)) v.push(`an /api/auto-invoice/ call at offset ${i} is outside the gated functions`);
+	}
+	return v;
+}
+{
+	const av = autoClientViolations(TAB);
+	ok("CompletedLoadsTab.vue: the chip, the Needs attention toggle, the dialog line with Mark checked and Try again, and the settings dialog are Super Admin only, and so are their calls",
+		av.length === 0, av.join("; "));
+	const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+		const p = path.join(dir, e.name);
+		if (e.isDirectory()) return e.name === "node_modules" || e.name === "dist" ? [] : walk(p);
+		return /\.(vue|js|ts|html)$/.test(e.name) ? [p] : [];
+	});
+	const callers = walk(path.join(ROOT, "client", "src")).filter((f) => /\/api\/auto-invoice\//.test(fs.readFileSync(f, "utf8")))
+		.map((f) => path.relative(ROOT, f).split(path.sep).join("/"));
+	ok(`the automatic drafts' routes are called only by CompletedLoadsTab.vue (${callers.join(", ")})`, callers.join() === "client/src/components/dashboard/CompletedLoadsTab.vue");
+	for (const [name, from, to] of [
+		["the row chip shows to every role", '<span v-if="auth.isSuperAdmin && autoChip(job)" class="auto-chip"', '<span v-if="autoChip(job)" class="auto-chip"'],
+		["the Needs attention toggle shows to every role", 'v-if="auth.isSuperAdmin && autoAttentionCount > 0"', 'v-if="autoAttentionCount > 0"'],
+		["the settings dialog mounts for every role", '<Dialog v-if="auth.isSuperAdmin" :open="autoSettingsOpen"', '<Dialog :open="autoSettingsOpen"'],
+		["Try again runs for every role", "async function autoInvoiceAction(kind) {\n  if (!auth.isSuperAdmin || ", "async function autoInvoiceAction(kind) {\n  if ("],
+		["autoChip() words every role's rows", "const autoChip = (job) => (auth.isSuperAdmin && job ? ", "const autoChip = (job) => (job ? "],
+	]) {
+		if (TAB.split(from).length - 1 !== 1) { ok(`client mutant anchor found once: ${name}`, false); continue; }
+		ok(`MUTANT ${name}: caught`, autoClientViolations(TAB.replace(from, to)).length > 0);
+	}
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -18,7 +18,11 @@
  * RATE CONS ARE SUPER ADMIN ONLY (owner, 2026-09-26), wherever they sit: the
  * rate-cons/ directory by uploadsPathGuard's role branch (403, every spelling of
  * the path), and a rate con in the root by guardRootLoadDocument (404), with
- * neither listing (the Documents panel, the investor portal) showing one.
+ * neither listing (the Documents panel, the investor portal, its Super Admin
+ * view included) showing one. Once RATECON_PDF_VIEWER_IDS is set (§3b), a
+ * Super Admin outside it gets the same answers (403 RATECON_VIEW_RESTRICTED
+ * under rate-cons/, 404 in the root), and a listed one gets the file with
+ * Cache-Control private, no-store (always so under rate-cons/).
  *
  * WHAT IS REAL HERE. Every piece of decision code is LIFTED from server.js and
  * run as shipped: normalizedUploadPath, uploadsPathGuard, GUARDED_UPLOAD_DIRS,
@@ -63,7 +67,7 @@ const die = (msg) => { console.error(`FAIL  ${msg}`); process.exit(1); };
 // Lifting — a small scanner that skips strings, template literals and comments
 // while matching brackets, so a `{` or `;` inside either cannot end a lift early.
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 function skipString(i) {
 	const q = SRC[i];
@@ -264,7 +268,15 @@ function compose(L) {
 const agent = new http.Agent({ keepAlive: false, maxSockets: Infinity });
 const servers = [];
 
-async function build(L = LIFTED, { db = makeDb() } = {}) {
+// The rate-con viewer gate server.js builds from RATECON_PDF_VIEWER_IDS (the
+// shipped lib code); `raw` undefined is the setting left unset, today's rule.
+function viewerGateFor(raw) {
+	const listed = require(path.join(__dirname, "..", "lib", "listed-accounts.js"));
+	const route = require(path.join(__dirname, "..", "lib", "ratecon-pdf-route.js"));
+	return route.viewerGate(listed.parseListedAccountIds(raw));
+}
+
+async function build(L = LIFTED, { db = makeDb(), viewers } = {}) {
 	const app = express();
 	app.use((req, res, next) => {
 		const raw = req.headers["x-test-user"];
@@ -287,11 +299,11 @@ async function build(L = LIFTED, { db = makeDb() } = {}) {
 	const mod = new Function(
 		"app", "express", "path", "__dirname", "DATA_DIR", "db", "requireAuth", "requireRole", "loadBelongsToDriver",
 		"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "guardExpenseReceipt", "guardChatAttachment", "console", "Date",
-		"loadIdFor",
+		"rateconViewGate", "loadIdFor",
 		compose(L),
 	)(app, express, path, TMP, TMP, db, requireAuth, requireRole, loadBelongsToDriver,
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"), stub("guardExpenseReceipt"),
-		stub("guardChatAttachment"), fakeConsole, FakeDate, KEY_HELPERS.loadIdFor);
+		stub("guardChatAttachment"), fakeConsole, FakeDate, viewerGateFor(viewers), KEY_HELPERS.loadIdFor);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -519,6 +531,73 @@ async function guardCall(M, user, file) {
 		served(await T.get("/uploads/onboarding-templates/blank-form.pdf", U.drvA), "onboarding-templates/blank-form.pdf"));
 	ok("a directory name without its slash is a single segment → root rule → 404 to a Driver",
 		(await T.get("/uploads/invoices", U.drvA)).status === 404);
+	{
+		const r = await T.get(`/uploads/${RC}`, U.sa);
+		const cc = r.headers["cache-control"] || "";
+		ok(`a rate con under rate-cons/ is sent Cache-Control private, no-store (${cc})`, served(r, RC) && /\bprivate\b/.test(cc) && /\bno-store\b/.test(cc) && !/\bpublic\b/.test(cc));
+		const pod = await T.get(url(F.A), U.sa);
+		ok(`...while a POD keeps express.static's default (${pod.headers["cache-control"]})`, served(pod, F.A) && !/no-store/.test(pod.headers["cache-control"] || ""));
+	}
+
+	// =========================================================================
+	console.log("\n§3b the rate-con viewer list (RATECON_PDF_VIEWER_IDS)");
+	// =========================================================================
+	{
+		// Made-up accounts: 1 and 7 listed, 5 a Super Admin outside the list.
+		const OWNER = { id: 1, role: "Super Admin", username: "owner_admin" };
+		const SECOND = { id: 7, role: "Super Admin", username: "second_admin" };
+		const STAFF = { id: 5, role: "Super Admin", username: "staff_admin" };
+		const STAFF_AS_OWNER_NAME = { id: 5, role: "Super Admin", username: "owner_admin" };
+		const NO_ID = { role: "Super Admin", username: "owner_admin" };
+		const V = await build(LIFTED, { viewers: "1,7" });
+		const noStore = (r) => /\bprivate\b/.test(r.headers["cache-control"] || "") && /\bno-store\b/.test(r.headers["cache-control"] || "");
+		for (const [who, u] of [["listed account 1", OWNER], ["listed account 7", SECOND]]) {
+			const a = await V.get(`/uploads/${RC}`, u);
+			ok(`${who}: /uploads/rate-cons/<id>.pdf opens, private, no-store`, served(a, RC) && noStore(a));
+			const b = await V.get(url(F.A_RATECON), u);
+			ok(`${who}: a rate con stored in the root opens, private, no-store`, served(b, F.A_RATECON) && noStore(b));
+		}
+		for (const [who, u] of [["Super Admin 5 (not listed)", STAFF], ["Super Admin 5 under the listed account's username", STAFF_AS_OWNER_NAME]]) {
+			const a = await V.get(`/uploads/${RC}`, u);
+			let code = null;
+			try { code = JSON.parse(a.body).code; } catch { code = null; }
+			ok(`${who}: /uploads/rate-cons/<id>.pdf is 403 RATECON_VIEW_RESTRICTED, no bytes (${a.status} ${code})`, a.status === 403 && code === "RATECON_VIEW_RESTRICTED" && !a.body.includes(body(RC)));
+			let spellings = 0;
+			for (const p of ["/uploads//rate-cons/L100.pdf", "/uploads/rate-cons%2FL100.pdf", "/uploads/%72ate-cons/L100.pdf", "/uploads/RATE-CONS/L100.pdf"]) {
+				const r = await V.get(p, u);
+				if (r.status === 403 && !r.body.includes(body(RC))) spellings++;
+			}
+			ok(`${who}: ...in every spelling express.static would resolve (${spellings}/4)`, spellings === 4);
+			for (const name of [F.A_RATECON, F.A_RATECON_DASH, F.A_RATECON_GONE]) {
+				ok(`${who}: a root rate con (${name}) is 404, no bytes`, refused(await V.get(url(name), u), name));
+			}
+			const pod = await V.get(url(F.A), u);
+			ok(`${who}: a POD in the root is unaffected (opens, default caching)`, served(pod, F.A) && !noStore(pod));
+			ok(`${who}: a BOL in the root is unaffected`, served(await V.get(url(F.SHARED), u), F.SHARED));
+			ok(`${who}: a file with no row is unaffected`, served(await V.get(url(F.ORPHAN), u), F.ORPHAN));
+		}
+		const upper = await guardCall(V, STAFF, F.A_RATECON.toUpperCase());
+		ok("a root rate con asked for in another letter case is refused too (the Dispatcher rule's NOCASE lookup)", upper.status === 404 && !upper.nexted);
+		const noIdA = await V.get(`/uploads/${RC}`, NO_ID);
+		let noIdMsg = "";
+		try { noIdMsg = JSON.parse(noIdA.body).error || ""; } catch { noIdMsg = ""; }
+		ok(`a Super Admin session without an id: rate-cons/ is 403 and says sign in again (${noIdA.status})`, noIdA.status === 403 && /sign in again/i.test(noIdMsg) && !noIdA.body.includes(body(RC)));
+		ok("...a root rate con is 404, and a POD still opens", refused(await V.get(url(F.A_RATECON), NO_ID), F.A_RATECON) && served(await V.get(url(F.A), NO_ID), F.A));
+		const dispRc = await V.get(`/uploads/${RC}`, { ...U.disp, id: 7 });
+		ok("a Dispatcher is refused as before, a listed id on the session changing nothing",
+			dispRc.status === 403 && !dispRc.body.includes(body(RC)) && refused(await V.get(url(F.A_RATECON), { ...U.disp, id: 7 }), F.A_RATECON));
+		const sa = JSON.parse((await V.get("/api/investor/documents", OWNER)).body).documents || [];
+		ok("the investor portal's Super Admin view lists no rate con, for a listed account either", sa.length > 0 && sa.every((d) => !T.isRateConDocType(d.type)));
+
+		const I = await build(LIFTED, { viewers: "owner_admin" });
+		const ia = await I.get(`/uploads/${RC}`, OWNER);
+		ok("a set but invalid list: account 1 is refused rate-cons/ (403)", ia.status === 403 && !ia.body.includes(body(RC)));
+		ok("...and a root rate con (404), while a POD still opens", refused(await I.get(url(F.A_RATECON), OWNER), F.A_RATECON) && served(await I.get(url(F.A), OWNER), F.A));
+
+		ok("unset (the default build): Super Admin 5 and a session without an id open both, as before the list existed",
+			served(await T.get(`/uploads/${RC}`, STAFF), RC) && served(await T.get(url(F.A_RATECON), STAFF), F.A_RATECON) &&
+			served(await T.get(`/uploads/${RC}`, NO_ID), RC) && served(await T.get(url(F.A_RATECON), NO_ID), F.A_RATECON));
+	}
 
 	// =========================================================================
 	console.log("\n§4  every file the portals list still opens — and only those");
@@ -544,9 +623,16 @@ async function guardCall(M, user, file) {
 		ok("the investor portal lists no rate con, live or deleted (Super Admin only)",
 			all.length > 0 && all.every((d) => !T.isRateConDocType(d.type)) &&
 			!all.some((d) => d.file_name === F.A_RATECON || d.file_name === F.A_RATECON_GONE));
-		const sa = JSON.parse((await T.get("/api/investor/documents", U.sa)).body).documents || [];
-		ok("...while Super Admin's own view of the portal still lists the live one",
-			sa.some((d) => d.file_name === F.A_RATECON));
+		// The portal is not where rate cons are viewed: its Super Admin view lists
+		// none either, so it never hands a Super Admin outside the viewer list a
+		// link it cannot open (RATECON_PDF_VIEWER_IDS).
+		const saRes = await T.get("/api/investor/documents", U.sa);
+		const sa = JSON.parse(saRes.body).documents || [];
+		ok("...and neither does Super Admin's own view of the portal, live or deleted",
+			saRes.status === 200 && sa.length > 0 && sa.every((d) => !T.isRateConDocType(d.type)) &&
+			!sa.some((d) => d.file_name === F.A_RATECON || d.file_name === F.A_RATECON_DASH || d.file_name === F.A_RATECON_GONE));
+		ok("...while it still lists the other live documents (a POD, a BOL)",
+			sa.some((d) => d.file_name === F.A) && sa.some((d) => d.file_name === F.SHARED));
 	}
 	for (const [who, drv, load] of [["Driver A", U.drvA, "L100"], ["Driver B", U.drvB, "L200"]]) {
 		const r = await T.get(`/api/documents/${load}`, drv);
@@ -755,6 +841,16 @@ async function guardCall(M, user, file) {
 		const M = await build(mutate("guardRootLoadDocument", "if (rateCon.length) return res.status(404).end();", ""));
 		ok("MUTANT no Dispatcher rate-con rule: a Dispatcher reads a root rate con — so §1's refusal is load-bearing",
 			served(await M.get(url(F.A_RATECON), U.disp), F.A_RATECON));
+	}
+	{
+		const STAFF = { id: 5, role: "Super Admin", username: "staff_admin" };
+		const M = await build(mutate("uploadsPathGuard",
+			'if (refusal) return res.status(refusal.status).set("Cache-Control", "no-store").json({ code: refusal.code, error: refusal.error });', ""), { viewers: "1,7" });
+		ok("MUTANT no viewer-list refusal in the rate-cons branch: an unlisted Super Admin reads rate-cons/ — so §3b's 403 is load-bearing",
+			served(await M.get("/uploads/rate-cons/L100.pdf", STAFF), "rate-cons/L100.pdf"));
+		const N = await build(mutate("guardRootLoadDocument", "if (rateconViewGate.refusal(user)) return res.status(404).end();", ""), { viewers: "1,7" });
+		ok("MUTANT no viewer-list refusal in the root rule: an unlisted Super Admin reads a root rate con — so §3b's 404 is load-bearing",
+			served(await N.get(url(F.A_RATECON), STAFF), F.A_RATECON));
 	}
 	{
 		const M = await build(mutate("guardRootLoadDocument", "file_name = ? COLLATE NOCASE AND", "file_name = ? AND"));

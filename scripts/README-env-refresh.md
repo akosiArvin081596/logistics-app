@@ -352,6 +352,7 @@ because it produces a file everyone believes is clean):
 | Phone / cell | `555-0100` | NANP reserved fictional range. |
 | Bank routing + account numbers, account/check names (`investor_payment_info`, `driver_payment_info`) | emptied / `REDACTED` | Nothing computes from them; they are only displayed or printed. No test value, unlimited downside. |
 | `ein_ssn`, `ssn`, `dob`, `drivers_license`, personal `address` | emptied / `REDACTED` | Same. |
+| Driver emergency contacts — `driver_emergency_contacts.contact_name`, `contact_phone` | `REDACTED` / `555-0100` | Third parties' names and numbers. `relationship` is kept: it identifies no one alone and keeps the copy testable. |
 | `signature_text`, `signature_image` | `REDACTED` / emptied | A legal artefact, and as base64 the bulk of the onboarding tables. |
 | Signing evidence — `signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text` (both onboarding-document tables) | emptied | Personal data *about the signer*: an IP address and a browser fingerprint, plus free text off the wire. `evidence_version` and `artifact_sha256` are deliberately **kept** — the version is what marks a row as captured under the evidence regime, and a digest of a file this script never copies discloses nothing. |
 | `investor_applications.access_token` | regenerated | No route accepts these tokens since the token-gated public onboarding routes were removed (2026-09-30); they are regenerated anyway, so a copy carries none of production's. |

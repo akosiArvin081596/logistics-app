@@ -2,17 +2,17 @@
 /**
  * A local run never reaches production by default: no production inbox,
  * broker AP inbox, n8n instance or workflow, or sheet is a default in
- * server.js, lib/ or scripts/. Each is a setting with no default, and a run
- * without it does less, says so, and reaches nothing.
+ * server.js, routes/, lib/ or scripts/. Each is a setting with no default, and
+ * a run without it does less, says so, and reaches nothing.
  *
  *   §1 source: production's values (found by their SHA-256, so this file
- *      carries none of them) appear in server.js and lib/ only as email
+ *      carries none of them) appear in server.js, routes/ and lib/ only as email
  *      content (mailto links, contact text, the seller block printed on an
  *      invoice) and as lib/sheet-id.js's production-process sheet; nowhere
  *      as a fallback (`|| "…"`, `?? "…"`), a constant holding a recipient,
  *      instance or workflow, a sendEmail() recipient, a default parameter or
  *      an argument default. No script carries the n8n instance or workflow in
- *      code, and none defaults --sheet-id. The six admin notifications send
+ *      code, and none defaults --sheet-id. The eight admin notifications send
  *      to ADMIN_NOTIFY_EMAIL, each one guarded (if (ADMIN_NOTIFY_EMAIL), the
  *      re-issue alert's keeping its promise in a variable); the setting reads the
  *      environment only, trimmed.
@@ -27,7 +27,7 @@
  *      [invoice-bank] warning naming each missing one and never a value. With
  *      the settings, no warning, and the admin email and the RFI go to the
  *      named inbox.
- *   §3 each of the six admin sends, run on its own: skipped without the
+ *   §3 each of the eight admin sends, run on its own: skipped without the
  *      setting, one email to it with it.
  *   §4 invoice drafts: resolveInvoiceTo() answers "" for a missing setting,
  *      the rate-con's documents email still wins for a non-Bison broker, and a
@@ -100,8 +100,11 @@ const { spawn, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const SERVER = path.join(ROOT, "server.js");
-const readSource = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; } };
-const SRC = readSource("server.js");
+const SRC = require("./lib/server-source").serverSource();
+const readSource = (rel) => {
+	if (rel === "server.js") return SRC;
+	try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; }
+};
 
 const ADMIN = "admin@example.test";
 const BISON_TO = "bison-ap@example.test";
@@ -306,7 +309,9 @@ function walk(dir, out) {
 	return out;
 }
 const JS_RE = /\.(?:js|mjs|cjs)$/;
-const APP_FILES = ["server.js", ...walk(path.join(ROOT, "lib"), []).filter((f) => JS_RE.test(f))];
+// routes/ holds the route modules moved out of server.js (absent until the first move).
+const APP_FILES = ["server.js", ...walk(path.join(ROOT, "lib"), []).filter((f) => JS_RE.test(f)),
+	...walk(path.join(ROOT, "routes"), []).filter((f) => JS_RE.test(f))];
 const SCRIPT_FILES = walk(path.join(ROOT, "scripts"), []);
 const SCRIPT_JS = SCRIPT_FILES.filter((f) => JS_RE.test(f));
 const SCRIPT_SH = SCRIPT_FILES.filter((f) => /\.sh$/.test(f));
@@ -510,6 +515,8 @@ function draftHarness(L) {
 		fetchDocumentBytes: async () => Buffer.from("%PDF-1.4 pod"),
 		buildRateConLoadCtx: () => ({}),
 		getRateConBytes: async () => ({ buffer: null, candidates: [] }),
+		// The rate-con viewer gate with RATECON_PDF_VIEWER_IDS unset (shipped lib code).
+		rateconViewGate: require("../lib/ratecon-pdf-route.js").viewerGate(require("../lib/listed-accounts.js").parseListedAccountIds(undefined)),
 		GEMINI_API_KEY: "",
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => "10092026-1",
@@ -755,14 +762,14 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§1 no script defaults --sheet-id (${argDefault.join(", ") || "none"})`, argDefault.length === 0);
 			check(`§1 nothing falls back to the production sheet constant (${prodFallback.join(", ") || "none"})`, prodFallback.length === 0);
 
-			// The six admin notifications, each guarded on the setting. The re-issue
+			// The eight admin notifications, each guarded on the setting. The re-issue
 			// alert keeps its send's promise (`if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(…)`)
 			// to learn whether it went out; the guard is the same.
 			const calls = sendEmailCalls(SRC);
 			const literalTo = calls.filter((c) => /^["'`]/.test(c.first));
 			check(`§1 no sendEmail() in server.js has a literal recipient (${literalTo.map((c) => `server.js:${lineOf(SRC, c.at)}`).join(", ") || "none"})`, literalTo.length === 0);
 			const admin = calls.filter((c) => c.first === "ADMIN_NOTIFY_EMAIL");
-			check(`§1 six admin notifications send to ADMIN_NOTIFY_EMAIL (found ${admin.length})`, admin.length === 6);
+			check(`§1 eight admin notifications send to ADMIN_NOTIFY_EMAIL (found ${admin.length})`, admin.length === 8);
 			const unguarded = admin.filter((c) => !/^if \(ADMIN_NOTIFY_EMAIL\)(?: [A-Za-z_$][\w$]* =)?$/.test(c.lead));
 			check(`§1 …each one guarded by if (ADMIN_NOTIFY_EMAIL) (${admin.length ? unguarded.map((c) => `server.js:${lineOf(SRC, c.at)}`).join(", ") || "all are" : "none found"})`,
 				admin.length > 0 && unguarded.length === 0);
@@ -855,9 +862,9 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 		});
 
-		await section("§3 the six admin sends, each run on its own", () => {
+		await section("§3 the eight admin sends, each run on its own", () => {
 			const admin = sendEmailCalls(SRC).filter((c) => c.first === "ADMIN_NOTIFY_EMAIL");
-			check(`§3 the six sends are found (got ${admin.length})`, admin.length === 6);
+			check(`§3 the eight sends are found (got ${admin.length})`, admin.length === 8);
 			for (const c of admin) {
 				const label = (c.statement.match(/`([^`$]*)/) || [, `server.js:${lineOf(SRC, c.at)}`])[1].trim() || `server.js:${lineOf(SRC, c.at)}`;
 				const skipped = runStatement(c.statement, { ADMIN_NOTIFY_EMAIL: "" });

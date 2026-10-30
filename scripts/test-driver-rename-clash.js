@@ -98,10 +98,7 @@
  */
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -315,7 +312,12 @@ const snapshot = (db) => JSON.stringify({
 function mountRoute(routeSrc, env) {
 	let handler = null;
 	const grab = (p, ...rest) => { handler = rest[rest.length - 1]; };
-	const all = { app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), userPasswordResetLimiter: (req, res, next) => next(), ...env };
+	const all = {
+		app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), userPasswordResetLimiter: (req, res, next) => next(),
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
+		...env,
+	};
 	const names = Object.keys(all);
 	new Function(...names, routeSrc)(...names.map((k) => all[k]));
 	if (typeof handler !== "function") die("a lifted route did not register a handler");
@@ -1233,6 +1235,7 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 	db.exec("ALTER TABLE driver_onboarding ADD COLUMN user_id INTEGER");
 	db.exec("CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
 	db.exec("CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
+	db.exec("CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER)");
 	const call = mountRoute(ROUTES.usersDelete, {
 		db,
 		recordPeriodRefusal: () => {},

@@ -16,6 +16,14 @@
 //   Active Loads panel uncapped. The geometry of both wider views is written to the
 //   work dir; DESKTOP_BASELINE=<that file from a run on main> fails the run on any
 //   difference, so "768 px and up unchanged" is measured, not assumed.
+//   W3  Expenses → All Expenses, 25 made-up receipts (five with a Personal line, one
+//       in a finalized month) at eleven sizes from 375 to 1440 px, the sidebar open
+//       and once folded: the list shows the cards on a phone or when its panel is
+//       narrower than 900 px, else the 9-column table; nothing scrolls sideways (the
+//       panel or the page); every Personal pill lies inside its card or cell (the
+//       table's short tag carries the full sentence as its hover text); no table
+//       cell cuts its content; a Super Admin's Personal buttons take a tap, a
+//       Dispatcher has none; on a phone every sub-tab is inside the viewport.
 //
 // Unlike e2e.mjs this boots no server.js, opens no database, reads no .env or key
 // and signs nobody in. It serves the checkout's built client/dist from its own
@@ -164,9 +172,64 @@ function fuelStops() {
   return { stops, livePriceCount: 0 }
 }
 
+// The Expenses list (W3): made-up receipts with long vendor, place and description
+// texts, image and PDF receipts, a large amount, a receipt in a finalized month, and
+// five Personal lines in the server's summary shape (a Dispatcher's carries no
+// invoice number). The Personal states cover the widest pill texts and buttons.
+const EXP_DRIVERS = ['Pat Example', 'Sam Sample', 'Alexandra Placeholder-Madeupname', 'Jo Testcase']
+const EXP_TYPES = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
+const EXP_COUNT = 25 // one page at the default page size
+const PERSONAL_LINES = {
+  0: { state: 'pending', amount_text: '$45.00', week_label: 'Oct 24-30, 2026', wait_text: '', invoice_number: '', final: false, can_undo: true, can_reverse: false },
+  1: { state: 'carried', amount_text: '$60.00', week_label: 'Oct 10-16, 2026', wait_text: 'the week of Oct 10-16, 2026 has no weekly invoice; it goes on the next weekly invoice', invoice_number: '', final: false, can_undo: true, can_reverse: false },
+  2: { state: 'invoiced', amount_text: '$38.20', week_label: 'Oct 17-23, 2026', wait_text: '', invoice_number: 'INV-QA-2026W43-01', final: true, can_undo: false, can_reverse: false },
+  3: { state: 'reversed', amount_text: '$1,234.50', week_label: 'Oct 17-23, 2026', wait_text: 'the line still goes on the next weekly invoice, and its credit with it', invoice_number: '', final: false, can_undo: false, can_reverse: false },
+  4: { state: 'invoiced', amount_text: '$99.99', week_label: 'Oct 17-23, 2026', wait_text: '', invoice_number: 'INV-QA-2026W43-02', final: false, can_undo: false, can_reverse: true },
+}
+const PERSONAL_COUNT = Object.keys(PERSONAL_LINES).length
+const FINALIZED_ROW = 5
+// A 1x1 PNG for every receipt thumbnail.
+const THUMB_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+
+function expenses(role) {
+  const rows = Array.from({ length: EXP_COUNT }, (_, i) => {
+    const day = String(28 - (i % 20)).padStart(2, '0')
+    return {
+      id: 7000 + i,
+      date: `2026-10-${day}`,
+      timestamp: `2026-10-${day}T19:41:00Z`,
+      driver: EXP_DRIVERS[i % EXP_DRIVERS.length],
+      truck_unit: `QA-T${(i % 4) + 1}`,
+      location_city: i % 5 === 0 ? 'Exampleville Junction' : 'Memphis',
+      location_state: 'TN',
+      vendor: i % 3 === 0 ? 'Example Travel Center and Truck Stop #1234' : 'Sample Fuel Stop',
+      vendor_normalized: i % 3 === 0 ? 'Example Travel Center' : 'Sample Fuel',
+      type: EXP_TYPES[i % EXP_TYPES.length],
+      description: i % 2 ? 'Made-up receipt for the layout check, with a description long enough to be cut' : '',
+      amount: i === 3 ? 12345.67 : 40 + i * 13.5,
+      photo_data: i % 6 === 5 ? '/uploads/expense-receipts/qa-made-up.pdf' : i % 7 === 6 ? '' : `/uploads/expense-receipts/qa-made-up-${i}.jpg`,
+      status: i in PERSONAL_LINES ? 'Approved' : i % 4 === 1 ? 'Pending' : i % 9 === 8 ? 'Rejected' : 'Approved',
+      finalized_period: '',
+      personal: null,
+    }
+  })
+  for (const [i, p] of Object.entries(PERSONAL_LINES)) {
+    rows[Number(i)].personal = { line_id: 500 + Number(i), ...p, ...(role === 'Dispatcher' ? { invoice_number: '' } : {}) }
+  }
+  Object.assign(rows[FINALIZED_ROW], { date: '2026-09-29', timestamp: '2026-09-30T13:05:00Z', status: 'Pending', finalized_period: '2026-09' })
+  return { expenses: rows, personalEnabled: true, personalReceiptWeek: true }
+}
+
 // GET answers by path. Anything not listed gets {} (logged), which every caller on
-// these two screens reads as "nothing here".
-function answerGet(pathname, role) {
+// these screens reads as "nothing here". The Expenses answers are given only on
+// the Expenses scene, so W1 and W2 see exactly what they saw before.
+function answerGet(pathname, role, scene) {
+  if (scene === 'expenses') {
+    if (pathname === '/api/expenses/all') return expenses(role)
+    if (pathname === '/api/trucks') return { data: ['QA-T1', 'QA-T2', 'QA-T3', 'QA-T4'].map((UnitNumber) => ({ UnitNumber })) }
+    if (pathname === '/api/drivers-directory') return { data: EXP_DRIVERS.map((Driver) => ({ Driver })) }
+    if (pathname === '/api/expenses/personal/waiting-corrections') return { groups: [], carried: [] }
+  }
   if (pathname === '/api/auth/session') return { authenticated: true, user: user(role), appTimeZone: 'America/New_York' }
   if (pathname === '/api/dashboard') return dashboard()
   if (pathname === '/api/locations/latest') return locations()
@@ -240,10 +303,10 @@ function record(step, title, expected, observed, ok, shot = '') {
 }
 
 // ---------------------------------------------------------------- page helpers
-async function openPage(browser, role, size) {
+async function openPage(browser, role, size, scene = '') {
   const phone = size.width < 640
   const ctx = await browser.newContext({
-    viewport: size,
+    viewport: { width: size.width, height: size.height },
     deviceScaleFactor: phone ? 3 : 1,
     isMobile: phone,
     hasTouch: phone,
@@ -269,7 +332,10 @@ async function openPage(browser, role, size) {
       writes.push(`${role} ${req.method()} ${url.pathname}`)
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     }
-    const body = answerGet(url.pathname, role)
+    if (scene === 'expenses' && /^\/api\/expenses\/\d+\/receipt-thumbnail$/.test(url.pathname)) {
+      return route.fulfill({ status: 200, contentType: 'image/png', body: THUMB_PNG })
+    }
+    const body = answerGet(url.pathname, role, scene)
     if (body === null) unanswered.add(url.pathname)
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body || {}) })
   })
@@ -497,6 +563,153 @@ async function tracking(browser, role, size, geometry) {
   }
 }
 
+// ---------------------------------------------------------------- W3: the Expenses list
+// TABLE_MIN_WIDTH in ExpensesTab.vue: below 900 px of list panel the cards show.
+// With the 240 px sidebar open that is a window of about 1246 px, so 1245 and 1246
+// sit on either side of it; 1100 with the sidebar folded (64 px) shows the table.
+// `expect` pins the layout a size must get; without one, the measured panel width
+// decides.
+const TABLE_MIN_WIDTH = 900
+const EXPENSE_SIZES = [
+  { width: 375, height: 812, expect: 'cards' },
+  { width: 390, height: 844, expect: 'cards' },
+  { width: 768, height: 1024, expect: 'cards' },
+  { width: 899, height: 1000, expect: 'cards' },
+  { width: 900, height: 1000, expect: 'cards' },
+  { width: 1024, height: 768, expect: 'cards' },
+  { width: 1100, height: 800, folded: true, expect: 'table' },
+  { width: 1245, height: 800 },
+  { width: 1246, height: 800 },
+  { width: 1280, height: 800, expect: 'table' },
+  { width: 1440, height: 900, expect: 'table' },
+]
+const SHORT_TAG_RE = /^Personal(?: -\$[\d,]+\.\d{2})? · (?:waiting|carried|final|invoiced|correction|needs correction|reversed|reversed, waiting|on \S+)$/
+const LIST_ROWS = '.sub-panel .mobile-exp-card, .sub-panel table.exp-table tbody tr'
+
+async function expensesList(browser, role, size) {
+  const phone = size.width < 640
+  const sizeText = `${size.width}x${size.height}${size.folded ? ', sidebar folded' : ''}`
+  const step = `W3${phone ? '' : size.width < 1024 ? 'm' : 'd'}-${size.width}${size.folded ? 'f' : ''}-${role === 'Dispatcher' ? 'DSP' : 'SA'}`
+  const { ctx, page } = await openPage(browser, role, size, 'expenses')
+  try {
+    if (size.folded) await ctx.addInitScript(() => { try { localStorage.setItem('sidebar-collapsed', '1') } catch { /* the sidebar stays open */ } })
+    await page.goto(`${BASE}/expenses`)
+    await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n, [LIST_ROWS, EXP_COUNT], { timeout: 20000 })
+    // Two frames for the panel's ResizeObserver, which may still switch the layout.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n, [LIST_ROWS, EXP_COUNT], { timeout: 5000 })
+
+    const facts = await page.evaluate(() => {
+      const num = (v) => parseFloat(v) || 0
+      const contentBox = (el) => {
+        const r = el.getBoundingClientRect()
+        const s = getComputedStyle(el)
+        return { left: r.left + num(s.borderLeftWidth) + num(s.paddingLeft), right: r.right - num(s.borderRightWidth) - num(s.paddingRight) }
+      }
+      const panel = document.querySelector('.sub-panel')
+      const ps = getComputedStyle(panel)
+      const table = panel.querySelector('table.exp-table')
+      const doc = document.scrollingElement || document.documentElement
+      const pills = [...panel.querySelectorAll('.personal-pill')].map((p) => {
+        const box = contentBox(p.closest('.mobile-exp-card') || p.closest('td'))
+        const r = p.getBoundingClientRect()
+        return {
+          text: p.textContent.replace(/\s+/g, ' ').trim(),
+          title: p.getAttribute('title') || '',
+          inside: r.width > 0 && r.left >= box.left - 0.5 && r.right <= box.right + 0.5,
+          left: Math.round(r.left), right: Math.round(r.right), boxRight: Math.round(box.right),
+        }
+      })
+      const cut = table
+        ? [...table.querySelectorAll('th, td')].filter((c) => c.scrollWidth > c.clientWidth + 1)
+          .map((c) => `${c.tagName.toLowerCase()} row ${c.parentElement.rowIndex} col ${c.cellIndex + 1} ${c.scrollWidth}/${c.clientWidth}`)
+        : []
+      const buttonsOut = table
+        ? [...table.querySelectorAll('td.action-cell button')].filter((b) => {
+          const box = contentBox(b.closest('td'))
+          const r = b.getBoundingClientRect()
+          return r.left < box.left - 0.5 || r.right > box.right + 0.5
+        }).map((b) => `${b.textContent.trim()} (row ${b.closest('tr').rowIndex})`)
+        : []
+      return {
+        layout: table ? 'table' : panel.querySelector('.mobile-exp-list') ? 'cards' : 'none',
+        panelWidth: Math.round((panel.clientWidth - num(ps.paddingLeft) - num(ps.paddingRight)) * 10) / 10,
+        panelScroll: { sw: panel.scrollWidth, cw: panel.clientWidth },
+        pageScroll: { sw: Math.max(doc.scrollWidth, document.body.scrollWidth), iw: window.innerWidth },
+        columns: table ? table.querySelectorAll('thead th').length : 0,
+        pills,
+        cut,
+        buttonsOut,
+        personalButtons: panel.querySelectorAll('.btn-personal, .btn-personal-undo').length,
+        tabs: [...document.querySelectorAll('.sub-tab')].map((t) => {
+          const r = t.getBoundingClientRect()
+          return { name: t.textContent.trim(), inside: r.width > 0 && r.left >= 0 && r.right <= window.innerWidth }
+        }),
+      }
+    })
+
+    await page.evaluate((sel) => document.querySelector(sel)?.scrollIntoView({ block: 'start', behavior: 'instant' }), '.sub-panel .mobile-exp-list, .sub-panel table.exp-table')
+    const file = await shot(page, `${step}-expenses`)
+
+    const expected = size.expect || (size.width < 768 || facts.panelWidth < TABLE_MIN_WIDTH ? 'cards' : 'table')
+    record(step, `Expenses list layout at ${sizeText} (${role})`,
+      `${expected}${size.expect ? '' : ` (by the list panel's width: cards below ${TABLE_MIN_WIDTH} px)`}${expected === 'table' ? ', 9 columns' : ''}`,
+      `${facts.layout}; list panel ${facts.panelWidth} px${facts.layout === 'table' ? `, ${facts.columns} columns` : ''}`,
+      facts.layout === expected && (expected !== 'table' || facts.columns === 9), file)
+
+    const scrollOk = facts.panelScroll.sw <= facts.panelScroll.cw && facts.pageScroll.sw <= facts.pageScroll.iw && (!phone || facts.pageScroll.iw === size.width)
+    record(`${step}s`, `No sideways scroll in the Expenses list at ${sizeText} (${role})`,
+      `the list panel's scrollWidth <= clientWidth and the page's scrollWidth <= innerWidth${phone ? ` (${size.width})` : ''}`,
+      `list panel ${facts.panelScroll.sw}/${facts.panelScroll.cw}; page ${facts.pageScroll.sw}/${facts.pageScroll.iw}`, scrollOk, file)
+
+    const table = facts.layout === 'table'
+    const badPill = (p) => !p.inside || (table ? !SHORT_TAG_RE.test(p.text) || !p.title || p.title === p.text : p.text !== p.title)
+    record(`${step}p`, `Personal pills at ${sizeText} (${role})`,
+      `${PERSONAL_COUNT} pills, each inside its ${table ? 'cell: the short tag, the full sentence as its hover text' : 'card: the full sentence'}`,
+      facts.pills.map((p) => `"${p.text}" ${p.inside ? 'inside' : `OUTSIDE (${p.left}-${p.right}, box right ${p.boxRight})`}`).join('; ') || 'no pills',
+      facts.pills.length === PERSONAL_COUNT && !facts.pills.some(badPill), file)
+
+    if (table) {
+      record(`${step}c`, `Table cells at ${sizeText} (${role})`,
+        'no header or cell cuts its content (scrollWidth <= clientWidth; the one-line texts that end in an ellipsis cut only themselves), and every action button lies inside its cell',
+        `${facts.cut.length ? `cut: ${facts.cut.join('; ')}` : 'nothing cut'}; ${facts.buttonsOut.length ? `outside their cell: ${facts.buttonsOut.join('; ')}` : 'every action button inside its cell'}`,
+        facts.cut.length === 0 && facts.buttonsOut.length === 0, file)
+    }
+
+    if (role === 'Super Admin') {
+      const hits = await page.evaluate(() => [...document.querySelector('.sub-panel').querySelectorAll('.btn-personal, .btn-personal-undo')].map((b) => {
+        b.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
+        const r = b.getBoundingClientRect()
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return {
+          name: b.textContent.trim(),
+          ok: !!hit && (hit === b || b.contains(hit)) && r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+        }
+      }))
+      const count = (n) => hits.filter((h) => h.name === n).length
+      const missed = hits.filter((h) => !h.ok).map((h) => h.name)
+      record(`${step}b`, `Personal buttons take a ${phone ? 'tap' : 'click'} at ${sizeText} (${role})`,
+        'each Personal / Undo Personal / Reverse Personal button, scrolled into view, lies inside the viewport and is the element at its centre; Undo Personal twice, Reverse Personal once, Personal at least once',
+        `${hits.length} buttons: Personal ${count('Personal')}, Undo Personal ${count('Undo Personal')}, Reverse Personal ${count('Reverse Personal')}; ${missed.length ? `missed: ${missed.join(', ')}` : 'every one hit'}`,
+        missed.length === 0 && count('Undo Personal') === 2 && count('Reverse Personal') === 1 && count('Personal') >= 1, file)
+    } else {
+      record(`${step}b`, `No Personal buttons for a Dispatcher at ${sizeText}`, 'none (the pills only)',
+        `${facts.personalButtons} button(s)`, facts.personalButtons === 0, file)
+    }
+
+    if (phone) {
+      const out = facts.tabs.filter((t) => !t.inside).map((t) => t.name)
+      const want = role === 'Super Admin' ? 6 : 4
+      record(`${step}t`, `Expenses sub-tabs at ${sizeText} (${role})`, `all ${want} tabs inside the viewport`,
+        `${facts.tabs.length} tabs; ${out.length ? `outside: ${out.join(', ')}` : 'all inside'}`, facts.tabs.length === want && out.length === 0, file)
+    }
+  } catch (e) {
+    record(step, `Expenses list at ${sizeText} (${role})`, 'the list shows its made-up receipts', `aborted: ${String(e.message || e).split('\n')[0]}`, false, await shot(page, `${step}-aborted`).catch(() => ''))
+  } finally {
+    await ctx.close()
+  }
+}
+
 // ---------------------------------------------------------------- the run
 function compareGeometry(base, now) {
   const diffs = []
@@ -523,6 +736,7 @@ async function main() {
         await loadDetail(browser, role, size, geometry)
         await tracking(browser, role, size, geometry)
       }
+      for (const size of EXPENSE_SIZES) await expensesList(browser, role, size)
     }
   } finally {
     await browser.close()

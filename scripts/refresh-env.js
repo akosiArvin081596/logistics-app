@@ -784,6 +784,9 @@ async function main() {
 		city: "", state: "", zip: "",
 	});
 	secrets += setCols("drivers_directory", { address: "REDACTED", city: "", state: "", zip: "" });
+	// A driver's emergency contacts are third parties' names and numbers. The
+	// relationship stays: it identifies no one alone and keeps the copy testable.
+	secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });
 	summary.push(`bank / tax / identity fields: ${secrets} row-update(s) redacted`);
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
@@ -1175,6 +1178,10 @@ const REDACTED_LITERAL = [
 	["job_applications", "phone", PLACEHOLDER_PHONE, "applicant phone"],
 	["job_applications", "cell", PLACEHOLDER_PHONE, "applicant mobile"],
 	["sheet_job_tracking", "phone_number", PLACEHOLDER_PHONE, "sheet contact phone"],
+	// Stage 3e's emergency contacts: neither value is email- or SSN-shaped, so
+	// these two rows are all that notices a scrub that stopped matching.
+	["driver_emergency_contacts", "contact_name", "REDACTED", "emergency contact name"],
+	["driver_emergency_contacts", "contact_phone", PLACEHOLDER_PHONE, "emergency contact phone number"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
@@ -1486,7 +1493,7 @@ function grantOperatorAccess(db) {
 	}
 	// Exact match: `username` is UNIQUE and case-sensitive, so this names at most
 	// one row. A received artifact is not trusted to honour that, hence the count.
-	const rows = db.prepare("SELECT rowid AS rid, username, role FROM users WHERE username = ?").all(OPERATOR_USER);
+	const rows = db.prepare(`SELECT rowid AS rid, username, role${cols.has("disabled_at") ? ", disabled_at" : ""} FROM users WHERE username = ?`).all(OPERATOR_USER);
 	if (rows.length === 0) {
 		// ⚠️ The name is NOT repeated here. Swap the two variables by mistake and
 		// REFRESH_OPERATOR_USER holds the password — this line would print it.
@@ -1501,6 +1508,12 @@ function grantOperatorAccess(db) {
 		fail(
 			`REFRESH_OPERATOR_USER '${who.username}' is a ${who.role}, not a Super Admin — nothing was installed.`,
 			"Operator access is for exactly one Super Admin."
+		);
+	}
+	if (String(who.disabled_at ?? "") !== "") {
+		fail(
+			`REFRESH_OPERATOR_USER '${who.username}' is disabled in this database — nothing was installed.`,
+			"A disabled account can't sign in: name an enabled Super Admin."
 		);
 	}
 	const hash = bcrypt.hashSync(OPERATOR_PASSWORD, HUMAN_PASSWORD_COST);

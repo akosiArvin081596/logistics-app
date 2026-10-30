@@ -191,6 +191,8 @@ async function investorView(rows = ROWS, opts = {}) {
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth: require("../lib/eld-feed-health"),
 		payoutBasisContext: () => null,
+		// The truck charge rule off: a truck with no in-service date starts on created_at's UTC month.
+		TRUCK_CHARGE_APP_DAY_RULE: null,
 		console: { log() {}, warn() {}, error() {} },
 	};
 	new Function(...Object.keys(deps), MODULE)(...Object.values(deps));

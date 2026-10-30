@@ -1,7 +1,7 @@
 // The payout ledger and the Financials freeze, run in a script exactly as the
-// server runs them: their code is lifted from this checkout's server.js at run
-// time (lib/server-lift.js), so a script always computes what the deployed
-// endpoint would. Used by scripts/payout-rules-dry-run.js,
+// server runs them: their code is lifted from this checkout's server.js, its
+// route modules spliced in (server-source.js), at run time (server-lift.js),
+// so a script always computes what the deployed endpoint would. Used by scripts/payout-rules-dry-run.js,
 // scripts/ledger-day-once-dry-run.js and scripts/freeze-closed-months.js, which
 // run on the server over ssh, with no login.
 //
@@ -30,6 +30,7 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./server-lift");
+const { serverSource } = require("./server-source");
 
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
 const ROOTS = ["payoutRulesDryRun", "closedMonthFreezePlan", "buildFinancialsLedger", "installPeriodLockTriggers", "parseSheet", "deduplicateLoads",
@@ -135,7 +136,7 @@ function openDb({ root, dbFile, readonly }) {
 // `memoryCopy`: `db` is a read-only in-memory copy the script made of
 // `dbPath`'s snapshot (the October report's simulated rates), not the file.
 function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null, db: given = null, memoryCopy = false }) {
-	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const SRC = serverSource({ root });
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
 	if (memoryCopy && !(given && given.memory && given.readonly)) throw new Error("refusing: a memory copy must be a read-only in-memory SQLite handle");

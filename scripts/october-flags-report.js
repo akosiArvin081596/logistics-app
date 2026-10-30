@@ -116,6 +116,7 @@ const { spawnSync } = require("child_process");
 const { createRequire } = require("module");
 const { buildLedgerWorld, openDb, parseArgs, sheetFor, envFor } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const rateReport = require("./driver-rate-only-report");
 const tripWorkDays = require("../lib/trip-work-days");
 const driverRateOnly = require("../lib/driver-rate-only");
@@ -301,7 +302,7 @@ function planRateOn(rates, day) {
 let NORMALIZE = null;
 function liftedNormalizeDriverName() {
 	if (!NORMALIZE) {
-		const lifted = closure(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), { roots: ["normalizeDriverName"] });
+		const lifted = closure(serverSource({ root: ROOT }), { roots: ["normalizeDriverName"] });
 		NORMALIZE = new Function(`"use strict";\n${lifted.text}\nreturn normalizeDriverName;`)();
 	}
 	return NORMALIZE;

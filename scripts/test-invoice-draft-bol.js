@@ -38,12 +38,11 @@ const path = require("path");
 const zlib = require("zlib");
 const Database = require("better-sqlite3");
 
-const SERVER = path.join(__dirname, "..", "server.js");
 const LIB = path.join(__dirname, "..", "lib", "broker-invoice.js");
 // The draft route's steps live in lib/broker-invoice-draft.js: read with
 // server.js as one text, and inlined into the route's (extractRoute()).
 const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
-const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), path.join(__dirname, ".."));
+const SRC = draftLift.withEngine(require("./lib/server-source").serverSource(), path.join(__dirname, ".."));
 const DRAFT_ROUTE_NEEDLE = '["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],';
 const LIB_SRC = fs.readFileSync(LIB, "utf8");
 // The default AP inbox has no default in code (DEFAULT_INVOICE_EMAIL); the runner

@@ -151,7 +151,7 @@ const FNS = [
 	"gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows",
 	// Financials' books (GET /api/financials reads them).
 	"buildFinancialsLedger", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "ledgerItemFromRow",
-	"buildFinancialsReport", "financialsReportQuery", "financialsInvoiceShares", "invoicePaidDaysOf", "financialsSettings", "closedMonthSettings", "financialsExtraItems",
+	"buildFinancialsReport", "financialsReportQuery", "financialsInvoiceShares", "invoicePaidDaysOf", "financialsSettings", "closedMonthSettings", "financialsExtraItems", "correctionLinesTablePresent",
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
@@ -485,8 +485,12 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth,
 		payoutBasisContext: () => null,
+		// The truck charge rule off: a truck with no in-service date starts on created_at's UTC month.
+		TRUCK_CHARGE_APP_DAY_RULE: null,
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
 		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
 		// as with their flag off.
 		annotateDashboardPickupReview: () => 0,

@@ -46,10 +46,7 @@
  */
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -255,6 +252,8 @@ function makeApp() {
 		applyDriverRenameSqlite: () => ({ counts: {} }),
 		purgeUserSessions: () => 0,
 		refreshOwnSession: () => true,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
 	};
 	const register = (method, src) => {
 		let handler = null;

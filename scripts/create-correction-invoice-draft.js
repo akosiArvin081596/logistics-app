@@ -51,7 +51,9 @@
 //     original invoice and that day (written as 2026-01-05, 1/5, 1/5/2026,
 //     January 5 or Jan 5), or name the original with no date the script can
 //     read. Or the script can't tell: a weekly invoice covering the day with no
-//     day grid, or a manual one covering the day with an undated line;
+//     day grid, or a manual one covering the day with an undated line. A live
+//     correction day line (waiting or on an invoice) pays its day too; rate
+//     and amount correction lines pay none;
 //   - a correction for the original names some of the days but not exactly
 //     these (partly drafted);
 //   - --date is not a calendar day, is after today (APP_TIMEZONE), is before the
@@ -92,9 +94,11 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, insideRoot, DatabaseRefusal } = require("./lib/app-database");
 const driverRateOnly = require("../lib/driver-rate-only");
+const { correctionDayLines } = require("./lib/correction-day-lines");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "system: correction-invoice script";
@@ -207,7 +211,7 @@ function resolveTarget({ db, dataDir }, root, { env = process.env } = {}) {
 // `render` replaces renderPolicy() (tests pass a stub; the default is the
 // server's own).
 function buildWorld({ root = ROOT, db, dataDir, render = null }) {
-	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const SRC = serverSource({ root });
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const lifted = closure(SRC, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const liftedRequire = (m) => {
@@ -376,6 +380,11 @@ function plan(db, api, opts, { today = null } = {}) {
 				throw new Refusal(`${r.invoice_number} (${r.status}) names ${invoiceNumber} with no date the script can read, so it can't tell whether it already pays these days`);
 			}
 		}
+	}
+
+	// A live correction day line, waiting or on an invoice, pays its day.
+	for (const l of correctionDayLines(db, key, api.normalizeDriverName)) {
+		if (days.includes(l.day)) throw new Refusal(`${weekdayOf(l.day)} ${l.day} is already paid by ${l.name}`);
 	}
 
 	const lineItems = days.map((d) => ({ date: d, description: `${prefix} ${weekdayOf(d)}, ${longDay(d)}, ${usdShort(rate)}`, amount: rate }));
