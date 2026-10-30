@@ -473,7 +473,17 @@ const Vue = clientRequire('vue')
 const { parse, compileScript } = clientRequire('vue/compiler-sfc')
 const { renderToString } = clientRequire('vue/server-renderer')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)) }
-const clean = (html) => html.replace(/<!--[\s\S]*?-->/g, '')
+// Repeat until nothing changes: one pass can leave a comment opener behind (`<!<!---->--x-->`).
+const clean = (html) => {
+  let out = String(html)
+  let prev
+  do {
+    prev = out
+    out = out.replace(/<!--[\s\S]*?-->/g, '')
+  } while (out !== prev)
+  return out
+}
+check('the test helper strips a comment opener that one pass leaves behind', clean('a<!<!---->--x-->b'), 'ab')
 const textOf = (html) => clean(html).replace(/<[^>]+>/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
 
 function stub(name) {
