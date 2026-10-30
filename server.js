@@ -64017,22 +64017,22 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 			});
 		}
 	}
-	// A name that reads as a built-in property name is no driver's
-	// (driverNameForTotals()), as everywhere money is totalled by driver.
-	const driverKey = (name) => normalizeDriverName(driverNameForTotals(name));
 	const milesIndex = getLoadMilesIndex();
+	const ctx = {
+		truckOf,
+		truckLabel,
+		loadKey: (id) => loadMilesLib.loadMilesKey(id),
+		loadOf: (lk) => loads.get(lk) || null,
+		// A name that reads as a built-in property name is no driver's
+		// (driverNameForTotals()), as everywhere money is totalled by driver.
+		driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),
+		driverLabel: (k) => displayNames.get(k) || k,
+		ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
+	};
 	const report = financialsReport.buildReport({
 		items, from, to, granularity, groupBy, settingsFor,
 		milesOf: (lk) => milesIndex.get(lk) || null,
-		ctx: {
-			truckOf,
-			truckLabel,
-			loadKey: (id) => loadMilesLib.loadMilesKey(id),
-			loadOf: (lk) => loads.get(lk) || null,
-			driverKey,
-			driverLabel: (k) => displayNames.get(k) || k,
-			ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
-		},
+		ctx,
 	});
 
 	// Receipts still Pending review that count in this range: in its months, on
@@ -64064,7 +64064,7 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 		},
 		overlaps: books.overlaps.length,
 		generatedAt: new Date().toISOString(),
-		...(keepItems ? { items, driverKey } : {}),
+		...(keepItems ? { items, driverKey: ctx.driverKey } : {}),
 	};
 }
 
@@ -64095,7 +64095,8 @@ async function buildFinancialsOverview({ preset, from, to }) {
 		try { summary = JSON.parse(r.summary || "null"); } catch { summary = null; }
 		frozenSummaries.set(r.period, summary && typeof summary === "object" ? summary : null);
 	}
-	const sheetRows = ledgerLoadRows(await getJobTrackingCached(), { investorDriverSet: null, investorOwnerId: null }).rows;
+	const jobTracking = await getJobTrackingCached();
+	const sheetRows = ledgerLoadRows(jobTracking, { investorDriverSet: null, investorOwnerId: null }).rows;
 	return financialsOverview.buildOverview({
 		preset, from, to,
 		fleetReport: fleet, truckReport: trucks, driverReport: drivers, loadReport: loads,

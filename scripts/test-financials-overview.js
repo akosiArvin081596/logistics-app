@@ -29,6 +29,10 @@
  *   §10 PAYOUT_RULES_V2, TRUCK_CHARGE_APP_DAY and LEDGER_DAY_ONCE each on (each
  *       moving a figure): the overview still equals Fleet P&L and its own rows
  *   §11 the CSV; the booked-not-delivered line; the pending line's known limit
+ *   §12 each check can fail (pure, doctored inputs): a dropped truck or driver
+ *       row fails (a) or (b), an unplaced item fails (c) and (d), an open month's
+ *       summary difference fails (d) with ok false, a closed month's is a note;
+ *       the CSV prints the mismatch
  *
  * The shipped code runs, lifted out of server.js (through
  * scripts/lib/server-source.js), on an in-memory SQLite built from server.js's
@@ -680,6 +684,77 @@ const RANGES = {
 		const dOn = await same(await dayOnceWorld({ LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2026-06" }), juneWhole, "LEDGER_DAY_ONCE on (FROM 2026-06)");
 		check(dOff && dOn && c(dOn.fleet.costs.driverPay) < c(dOff.fleet.costs.driverPay),
 			"…the rule moves a figure: on, June pays less driver pay (the day closed May already paid)", JSON.stringify(dOff && dOn && [dOff.fleet.costs.driverPay, dOn.fleet.costs.driverPay]));
+	});
+
+	// ═════════════════════════ §12 each check can fail ══════════════════════════
+	// Pure: lib/financials-overview.js on tiny made-up reports, doctored so each
+	// check meets a mismatch it must report.
+	section("12 each check reports a mismatch (pure, doctored inputs)");
+	await safely("§12", async () => {
+		if (!financialsOverview) { check(false, "lib/financials-overview.js loads", "not found"); return; }
+		const items = [
+			{ kind: "revenue", month: "2026-05", day: "2026-05-10", cents: 100000, loadId: "9000", driver: "pat sample", truck: "X1", basis: "settled" },
+			{ kind: "revenue", month: "2026-06", day: "2026-06-04", cents: 250000, loadId: "9001", driver: "pat sample", truck: "X1", basis: "live" },
+			{ kind: "revenue", month: "2026-06", day: "2026-06-12", cents: 120000, loadId: "9002", driver: "lee example", truck: "X2", basis: "live" },
+			{ kind: "trip", expenseType: "Fuel", month: "2026-06", day: "2026-06-05", cents: 8000, driver: "pat sample", truck: "X1", basis: "live" },
+			{ kind: "fixed", month: "2026-06", day: null, cents: 90000, truck: "X1", basis: "live" },
+		];
+		const ctx = {
+			truckOf: (i) => i.truck || "", truckLabel: (t) => t, loadKey: (id) => String(id), loadOf: () => null,
+			driverKey: (n) => String(n).trim().toLowerCase(), driverLabel: (k) => k, ownerLabel: () => "Company",
+		};
+		const rep = (groupBy) => financialsReport.buildReport({ items, from: "2026-05-01", to: "2026-06-30", granularity: "month", groupBy,
+			settingsFor: () => financialsReport.DEFAULT_SETTINGS, milesOf: () => null, ctx });
+		const input = (change = {}) => ({
+			preset: "custom", from: "2026-05-01", to: "2026-06-30",
+			fleetReport: { ...rep("fleet"), closedMonths: ["2026-05"], pendingReceipts: { count: 0, amount: 0, oldestDays: null }, overlaps: 0 },
+			truckReport: rep("truck"), driverReport: rep("driver"), loadReport: rep("load"),
+			items, driverKey: ctx.driverKey, lockedPeriods: new Set(["2026-05"]), frozenSummaries: new Map(),
+			bookedNotDelivered: { count: 0, amount: 0 }, generatedAt: "2026-07-10T17:00:00.000Z",
+			...change,
+		});
+		const run = (change) => financialsOverview.buildOverview(input(change));
+		const find = (ov, chk, scope, part) => ov.reconciliation.checks.find((x) => x.check === chk && x.scope === scope && (part === undefined || x.part === part)) || null;
+		const diffOf = (x, line) => (x ? x.differences.find((d) => d.line === line) || null : null);
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+		const clean = run();
+		check(clean.reconciliation.ok === true && clean.reconciliation.checks.every((x) => x.status === "ok" || x.status === "skipped"),
+			"the undoctored inputs agree (ok)", briefChecks(clean));
+
+		const base = input();
+		const noX2 = run({ truckReport: { ...base.truckReport, groups: base.truckReport.groups.filter((g) => g.key !== "truck:x2") } });
+		const a = find(noX2, "a", "trucks");
+		check(noX2.reconciliation.ok === false && a && a.status === "failed" && same(diffOf(a, "revenue"), { line: "revenue", expectedCents: 470000, actualCents: 350000, diffCents: -120000 }),
+			"(a) a truck row dropped (X2's $1,200): failed, revenue expected 470000 actual 350000 (−120000 cents), ok false", JSON.stringify(a));
+		const noLee = run({ driverReport: { ...base.driverReport, groups: base.driverReport.groups.filter((g) => g.key !== "driver:lee example") } });
+		const b = find(noLee, "b", "drivers");
+		check(noLee.reconciliation.ok === false && b && b.status === "failed" && same(diffOf(b, "revenue"), { line: "revenue", expectedCents: 470000, actualCents: 350000, diffCents: -120000 }),
+			"(b) a driver row dropped: failed with the exact difference, ok false", JSON.stringify(b));
+
+		const extra = run({ items: [...items, { kind: "trip", expenseType: "Toll", month: "2026-06", day: "2026-06-06", cents: 1500, truck: "X1", basis: "live" }] });
+		const cJune = find(extra, "c", "2026-06");
+		const dJune = find(extra, "d", "2026-06", "ledger figures");
+		check(extra.reconciliation.ok === false && cJune && cJune.status === "failed" && same(cJune.differences, [{ line: "tolls", expectedCents: 1500, actualCents: 0, diffCents: -1500 }]),
+			"(c) a June item the report never placed ($15 of tolls): failed, tolls −1500 cents", JSON.stringify(cJune));
+		check(dJune && dJune.status === "failed" && same(dJune.differences, [{ line: "tripExpenses", expectedCents: 9500, actualCents: 8000, diffCents: -1500 }]),
+			"(d) open June's lines against the ledger's figures: failed (not a note), tripExpenses −1500 cents", JSON.stringify(dJune));
+
+		const summary = (revenue, fixed, trip) => ({ revenue, driverPay: 0, fixedCosts: fixed, tripExpenses: trip, maintFundCost: 0, complianceCost: 0 });
+		const openOff = run({ frozenSummaries: new Map([["2026-06", summary(3800, 900, 80)]]) });
+		const dOpen = find(openOff, "d", "2026-06", "recorded summary");
+		check(openOff.reconciliation.ok === false && dOpen && dOpen.status === "failed" && !dOpen.note
+			&& same(dOpen.differences, [{ line: "revenue", expectedCents: 380000, actualCents: 370000, diffCents: -10000 }]),
+			"(d) an open month whose recorded summary is $100 off: failed, ok false", JSON.stringify(dOpen));
+		const closedOff = run({ frozenSummaries: new Map([["2026-05", summary(1100, 0, 0)]]) });
+		const dClosed = find(closedOff, "d", "2026-05", "recorded summary");
+		check(closedOff.reconciliation.ok === true && dClosed && dClosed.status === "note" && dClosed.note === "as settled"
+			&& same(dClosed.differences, [{ line: "revenue", expectedCents: 110000, actualCents: 100000, diffCents: -10000 }]),
+			"(d) the same difference in closed May: an \"as settled\" note, ok true", JSON.stringify(dClosed));
+
+		const rows = financialsOverview.overviewRows(noX2);
+		check(rows.some((r) => r[0] === "Reconciliation" && /^Mismatch/.test(r[1])) && rows.some((r) => r[0] === "(a) trucks" && r[1] === "revenue" && r[2] === 4700 && r[3] === 3500 && r[4] === -1200),
+			"CSV: a mismatch prints \"Mismatch\" and each failed row with both amounts and the difference", JSON.stringify(rows.filter((r) => /Reconciliation|^\(a\)/.test(String(r[0])))));
 	});
 
 	console.log(`\n${pass} passed, ${fail} failed`);
