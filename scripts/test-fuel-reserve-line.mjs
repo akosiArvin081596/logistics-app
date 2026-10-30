@@ -223,12 +223,12 @@ function world(o = {}) {
     flag: true, pct: 48, fuelSource: 'live', readAge: 12, burn: BURN5, tank: 150, tankSource: 'truck', mpg: 6.0,
     routeMiles: 420, leg: 'to_pickup', approach: 140, hasTruck: true, hasDevice: true, fromLivePosition: true,
     positionAgeMinutes: 12, loadDone: false, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api',
-    pickupUnmapped: false, anchor: null, milesSince: 0, ...o,
+    pickupUnmapped: false, anchor: null, milesSince: 0, pickedUp: false, ...o,
   }
   const sensor = s.hasTruck && s.hasDevice
   // A carried reading: `pct` is the level decayed at the MPG on file, as the server
   // sends it; `anchor` and `milesSince` let the block decay it at the planning rate.
-  const reading = !sensor ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
+  const reading = !sensor || s.fuelSource === 'none' ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
     : s.fuelSource === 'stale' ? { fuelPct: null, fuelSource: 'stale', anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: null }
       : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.anchor == null ? s.pct : s.anchor, ageMinutes: s.readAge, milesSinceReading: s.milesSince }
   const pct = reading.fuelPct
@@ -241,6 +241,8 @@ function world(o = {}) {
     fromLivePosition: s.fromLivePosition, positionAgeMinutes: s.fromLivePosition ? s.positionAgeMinutes : null,
     routeSource: s.routeSource, extraStops: s.extraStops, afterAnotherLoad: s.afterAnotherLoad, loadDone: s.loadDone,
     pickupUnmapped: s.pickupUnmapped,
+    // As the server sends it: not picked up, and no fresh truck position.
+    approachUncounted: !s.pickedUp && !s.fromLivePosition,
   })
   const rangeBlock = fuel.planDriverFuel(common)
   const iv = fuel.rangeInterval({ fuelPct: pct, burn: s.burn, rangeMiles })
@@ -323,16 +325,23 @@ if (v) {
       ['To reach pickup', '140 mi', 'unknown', 'You need about 55 gal in the tank to reach pickup. Check your gauge.'],
       ['To finish this load', '420 mi', 'unknown', 'You need about 145 gal in the tank to finish. Check your gauge.'],
     ])
-  check('§7 no truck: one whole-load row',
+  check('§7 no truck: one whole-load row, no number (the run to the pickup can\'t be counted)',
     rowsOf({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280, tank: 200, tankSource: 'default', mpg: 6.5 }),
-    [['Whole load, pickup to delivery', '280 mi', 'unknown', 'You need about 90 gal in the tank for the whole load. Check your gauge.']])
+    [['Whole load, pickup to delivery', '', 'unknown', 'Check your gauge.']])
+  check('§7 …after pickup with no position the whole load over-counts, so the row keeps its need figure',
+    rowsOf({ hasDevice: false, fromLivePosition: false, pickedUp: true, leg: 'to_delivery', routeMiles: 280 }),
+    [['Whole load, pickup to delivery', '280 mi', 'unknown', 'You need about 100 gal in the tank for the whole load. Check your gauge.']])
   check('§7 a load that is over: the top only', [view({ loadDone: true }).rows, view({ loadDone: true }).footers], [[], []])
   check('§7 extra stops: the pickup row is the first pickup', rowsOf({ extraStops: true })[0][0], 'To reach first pickup')
 
   const footOf = (o) => view(o).footers
   check('§7 position 3 hrs old', footOf({ positionAgeMinutes: 180 }), ['Worked out from where your truck was 3 hrs ago.'])
-  check('§7 no position: one row, and why', footOf({ fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }), ["Your truck hasn't sent its location recently."])
-  check('§7 …but not for a driver with no truck (the top says why)', footOf({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }), [])
+  check('§7 no position before pickup: one row, and why (the run to the pickup can\'t be counted)',
+    footOf({ fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }), ["The truck's location isn't known, so the run to the pickup can't be counted."])
+  check('§7 …a driver with no truck gets the reason too', footOf({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }),
+    ["The truck's location isn't known, so the run to the pickup can't be counted."])
+  check('§7 …after pickup with no position: the old line', footOf({ fromLivePosition: false, pickedUp: true, leg: 'to_delivery', routeMiles: 280 }),
+    ["Your truck hasn't sent its location recently."])
   check('§7 estimated distance, extra stops, another load first',
     footOf({ routeSource: 'straight_line_estimate', extraStops: true, afterAnotherLoad: true }), [
       'Distance is estimated.',
@@ -341,6 +350,7 @@ if (v) {
     ])
   // (b) A row the block can't count shows only "Check your gauge.", no gallons and no
   // miles, and its reason is on the same screen (a footer, or the top's own line).
+  const NO_POSITION_LINE = "The truck's location isn't known, so the run to the pickup can't be counted."
   const INCOMPLETE = [
     ['unmapped pickup', { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }, "The pickup isn't on the map, so the run to it isn't counted."],
     ['sensor dropout (carried)', { fuelSource: 'carried', pct: 46, anchor: 50, milesSince: 20 }, "Your fuel sensor isn't reporting. This is an estimate."],
@@ -348,6 +358,13 @@ if (v) {
     ['extra stops', { extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
     ['stale reading', { fuelSource: 'stale', readAge: 18 * 60 }, 'No fuel reading for 18 hrs. Check your gauge.'],
     ['estimated distance', { routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+    // Before pickup with no truck position (Arvin's option (a)); the re-linked device
+    // reaches the block in the same shape as the silent one (no reading, no fix).
+    ['no position before pickup: no ELD device', { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, NO_POSITION_LINE],
+    ['no position before pickup: no fuel level, ELD silent', { fuelSource: 'none', fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, NO_POSITION_LINE],
+    ['no position before pickup: a re-linked device', { fuelSource: 'none', fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, NO_POSITION_LINE],
+    ['no position before pickup: no truck linked', { hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, NO_POSITION_LINE],
+    ['no position before pickup: the 6 h edge (a fresh 80% reading)', { pct: 80, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, NO_POSITION_LINE],
   ]
   for (const [label, o, reason] of INCOMPLETE) {
     const vw = view(o)
@@ -611,11 +628,11 @@ if (panelFactory) {
   check('§8b check gauge (ELD silent 18 hrs)', blockText(await on({ fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' })),
     'Fuel level unknown No fuel reading for 18 hrs. Check your gauge. To finish this load Check your gauge.')
   check('§8b check gauge (no ELD reading, no position)', blockText(await on({ hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 })),
-    "Fuel level unknown Your truck isn't sending a fuel level. Check your gauge. Whole load, pickup to delivery 280 mi You need about 100 gal in the tank for the whole load. Check your gauge. Your truck hasn't sent its location recently.")
+    "Fuel level unknown Your truck isn't sending a fuel level. Check your gauge. Whole load, pickup to delivery Check your gauge. The truck's location isn't known, so the run to the pickup can't be counted.")
   check('§8b no tank size', blockText(await on({ burn: NO_BURN, tankSource: 'default', tank: 200 })),
     "Miles left unknown This truck's tank size isn't on file. Check your gauge and ask dispatch to add it. To reach pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi You need about 145 gal in the tank to finish. Check your gauge.")
   check('§8b no truck', blockText(await on({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280, tank: 200, tankSource: 'default', mpg: 6.5 })),
-    'Fuel level unknown No truck is linked to your account. Ask dispatch. Whole load, pickup to delivery 280 mi You need about 90 gal in the tank for the whole load. Check your gauge.')
+    "Fuel level unknown No truck is linked to your account. Ask dispatch. Whole load, pickup to delivery Check your gauge. The truck's location isn't known, so the run to the pickup can't be counted.")
   {
     const delivered = await on({}, {}, { runnable: false })
     check('§8b load done (delivered, so no trip plan is asked): the top only',
@@ -642,6 +659,11 @@ if (panelFactory) {
     ['extra stops', { extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
     ['stale reading', { fuelSource: 'stale', readAge: 18 * 60 }, 'No fuel reading for 18 hrs. Check your gauge.'],
     ['estimated distance', { routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+    ['no position before pickup: no ELD device', { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, "The truck's location isn't known, so the run to the pickup can't be counted."],
+    ['no position before pickup: no fuel level, ELD silent', { fuelSource: 'none', fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, "The truck's location isn't known, so the run to the pickup can't be counted."],
+    ['no position before pickup: a re-linked device', { fuelSource: 'none', fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, "The truck's location isn't known, so the run to the pickup can't be counted."],
+    ['no position before pickup: no truck linked', { hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, "The truck's location isn't known, so the run to the pickup can't be counted."],
+    ['no position before pickup: the 6 h edge (a fresh 80% reading)', { pct: 80, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, "The truck's location isn't known, so the run to the pickup can't be counted."],
   ]) {
     const html = await on(o)
     const rows = rowTexts(html)

@@ -142,7 +142,10 @@ export function driverFuelView(b, { planProblem = null } = {}) {
       const age = ageWords(b.positionAgeMinutes);
       if (age) footers.push(`Worked out from where your truck was ${age} ago.`);
     }
-    if (b.position === 'none' && b.fuelState !== 'no_truck') footers.push("Your truck hasn't sent its location recently.");
+    // Before pickup with no position the row has no number, so it needs its reason,
+    // with no truck linked too; after pickup the old line is enough.
+    if (b.approachUncounted === true) footers.push("The truck's location isn't known, so the run to the pickup can't be counted.");
+    else if (b.position === 'none' && b.fuelState !== 'no_truck') footers.push("Your truck hasn't sent its location recently.");
     if (b.routeEstimated === true) footers.push('Distance is estimated.');
     if (b.extraStops === true) footers.push("This load has extra stops that aren't counted. You may need more fuel.");
     if (b.afterAnotherLoad === true) {

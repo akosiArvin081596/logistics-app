@@ -80,10 +80,10 @@ function world(o = {}) {
     flag: true, pct: 48, fuelSource: 'live', readAge: 12, burn: BURN5, tank: 150, tankSource: 'truck', mpg: 6.0,
     routeMiles: 420, leg: 'to_pickup', approach: 140, hasTruck: true, hasDevice: true, fromLivePosition: true,
     positionAgeMinutes: 12, extraStops: false, afterAnotherLoad: false, routeSource: 'routes_api',
-    pickupUnmapped: false, anchor: null, milesSince: 0, ...o,
+    pickupUnmapped: false, anchor: null, milesSince: 0, pickedUp: false, ...o,
   }
   const sensor = s.hasTruck && s.hasDevice
-  const reading = !sensor ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
+  const reading = !sensor || s.fuelSource === 'none' ? { fuelPct: null, fuelSource: 'none', anchorPct: null, ageMinutes: null, milesSinceReading: null }
     : s.fuelSource === 'stale' ? { fuelPct: null, fuelSource: 'stale', anchorPct: s.pct, ageMinutes: s.readAge, milesSinceReading: null }
       : { fuelPct: s.pct, fuelSource: s.fuelSource, anchorPct: s.anchor == null ? s.pct : s.anchor, ageMinutes: s.readAge, milesSinceReading: s.milesSince }
   const pct = reading.fuelPct
@@ -95,6 +95,7 @@ function world(o = {}) {
     ...common, plan: trip, leg: s.leg, approachMiles: approach,
     fromLivePosition: s.fromLivePosition, positionAgeMinutes: s.fromLivePosition ? s.positionAgeMinutes : null,
     routeSource: s.routeSource, extraStops: s.extraStops, afterAnotherLoad: s.afterAnotherLoad, pickupUnmapped: s.pickupUnmapped,
+    approachUncounted: !s.pickedUp && !s.fromLivePosition,
   })
   const iv = fuel.rangeInterval({ fuelPct: pct, burn: s.burn, rangeMiles })
   const updatedAt = new Date(Date.now() - 12 * MIN).toISOString()
@@ -311,12 +312,12 @@ const SCENES = [
   { step: 'DF1', title: 'Before pickup', world: {}, expect: ['225', 'miles until you run out', 'To reach pickup', '140 mi', 'Uses about 30 gal. You have enough.', 'To finish this load', '420 mi', 'Add about 65 gal.'], absent: ['Uses about 80 gal'], badge: 'Add 65 gal' },
   { step: 'DF2', title: 'In transit, enough', world: { leg: 'to_delivery', routeMiles: 180 }, expect: ['225', 'Uses about 35 gal. You have enough.'] },
   { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'], absent: ['Uses about 35 gal'] },
-  { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery', 'You need about 100 gal in the tank for the whole load. Check your gauge.'] },
+  { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery Check your gauge.', "The truck's location isn't known, so the run to the pickup can't be counted."], absent: ['gal', '280 mi'] },
   { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'To finish this load Check your gauge.'], absent: ['gal', '420 mi'], badge: 'Fuel unknown' },
   { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel ?' },
   { step: 'DF7', title: 'Load not mapped', world: {}, planError: 'NO_ROUTE', expect: ['225', "This load isn't on the map yet, so we can't work out the fuel for it."] },
   { step: 'DF8a', title: 'Position 3 hrs old', world: { positionAgeMinutes: 180, leg: 'to_delivery' }, expect: ['Worked out from where your truck was 3 hrs ago.'] },
-  { step: 'DF8b', title: 'No position', world: { fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Whole load, pickup to delivery', "Your truck hasn't sent its location recently."] },
+  { step: 'DF8b', title: 'No position before pickup', world: { fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Whole load, pickup to delivery Check your gauge.', "The truck's location isn't known, so the run to the pickup can't be counted."], absent: ['gal', '280 mi', 'You have enough'] },
   { step: 'DF9', title: 'Extra stops', world: { extraStops: true }, expect: ['To reach first pickup Check your gauge.', 'To finish this load Check your gauge.', "This load has extra stops that aren't counted. You may need more fuel."], absent: ['You have enough', 'gal', '140 mi', '420 mi'], badge: 'Check gauge' },
   { step: 'DF10', title: 'Longer than a full tank', world: { leg: 'to_delivery', routeMiles: 1040 }, expect: ['1,040 mi', 'Uses about 195 gal. Fill up full, and plan another fuel stop on the way.'] },
   // One source: rows the block can't count have no number, and the stops lead is the block's miles left.
