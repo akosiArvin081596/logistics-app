@@ -26,6 +26,11 @@
 //      The Mark dialog's text follows the list's personalReceiptWeek (W18); a
 //      reversed line still on its way to an invoice says so, and the Reverse
 //      dialog says when a reversal follows its line (W27).
+//   6. The Expenses table fits its panel (no sideways scroll): its row shows the
+//      short tag (amount and one state word, from server fields only) with the
+//      full sentence on hover; the phone card and the detail window keep the full
+//      sentence; the pill wraps; the table has fixed columns and gives way to the
+//      cards when its panel is narrower than TABLE_MIN_WIDTH.
 //
 // No network, no DOM, no database.
 //   node scripts/test-personal-expense-client.mjs      # exits 1 on any failure
@@ -241,6 +246,73 @@ section('§8 W27 a reversed line still on its way to an invoice, and the Reverse
   check('the Reverse dialog with personalReceiptWeek on: a line no invoice took stays off with its credit, unless the pay was raised for it',
     typeof fn === 'function' ? fn(true) : null,
     "This line can no longer be undone. A reversing line credits the amount back in the open month. A line no invoice has taken stays off every invoice with its credit, unless the driver's percentage pay was already raised for it: then the line still goes on his next weekly invoice, and its credit follows it there.")
+}
+
+section('§9 the Expenses table fits its panel: the short tag, compact actions, cards when narrow')
+{
+  const fn = personalReceiptLib.personalShortText
+  const tag = (p) => (typeof fn === 'function' ? fn(p) : null)
+  check('short tag: waiting', tag(line('pending')), 'Personal -$45.00 · waiting')
+  check('short tag: carried (the server\'s wait_text stays in the full sentence)',
+    tag(line('carried', { wait_text: 'the Oct 17-23, 2026 invoice is approved; it goes on the next weekly invoice' })), 'Personal -$45.00 · carried')
+  check('short tag: on the weekly invoice, by its number', tag(line('invoiced', { invoice_number: 'INV-2026-0123' })), 'Personal -$45.00 · on INV-2026-0123')
+  check('short tag: on an approved invoice, final', tag(line('invoiced', { invoice_number: 'INV-XX-2026W44-01', final: true, can_undo: false })), 'Personal -$45.00 · final')
+  check('short tag: invoiced for a Dispatcher (no invoice number in the summary)', tag(line('invoiced')), 'Personal -$45.00 · invoiced')
+  check('short tag: on a correction, by its number; without one', [tag(line('correction', { invoice_number: 'INV-M-2026-0007' })), tag(line('correction'))],
+    ['Personal -$45.00 · on INV-M-2026-0007', 'Personal -$45.00 · correction'])
+  check('short tag: needs a correction', tag(line('needs_correction')), 'Personal -$45.00 · needs correction')
+  check('short tag: reversed; reversed and still on its way to an invoice (not a bare "reversed")',
+    [tag(line('reversed')), tag(line('reversed', { wait_text: 'the line still goes on the next weekly invoice, and its credit with it' }))],
+    ['Personal -$45.00 · reversed', 'Personal -$45.00 · reversed, waiting'])
+  check('short tag: no amount_text, no figure of its own', tag(line('pending', { amount_text: '' })), 'Personal · waiting')
+  check('short tag: nothing, or an unknown state', [tag(null), tag(line('odd'))], ['', ''])
+  check('short tag: the amount is the server\'s text as sent, never reformatted',
+    tag(line('invoiced', { amount_text: '$1,234.50', invoice_number: 'INV-2026-0124' })), 'Personal -$1,234.50 · on INV-2026-0124')
+
+  const actions = read('client/src/components/dashboard/expenses/PersonalReceiptActions.vue')
+  check('the actions component: a compact prop, the short tag only when compact, the full sentence always its hover text',
+    [/compact: \{ type: Boolean, default: false \}/.test(actions), actions.includes('personalShortText(props.expense.personal)'),
+      actions.includes('{{ compact ? shortPill : pill }}'), /class="personal-pill[^"]*"[^>]*:title="pill"|:class="\['personal-pill'[^>]*:title="pill"/.test(actions)],
+    [true, true, true, true])
+  const actionsCss = (actions.split('<style')[1] || '')
+  const pillRule = (actionsCss.match(/\.personal-pill \{[^}]*\}/) || [''])[0]
+  check('the pill wraps and is never wider than its card or cell (no nowrap, no fixed width)',
+    [/white-space: normal/.test(pillRule), /max-width: 100%/.test(pillRule), /white-space: nowrap|(?:^|[^-])width: \d|max-width: \d+(?:\.\d+)?(?:rem|px)/.test(pillRule)], [true, true, false])
+
+  const tab = read('client/src/components/dashboard/ExpensesTab.vue')
+  const places = tab.match(/<PersonalReceiptActions :expense="(e|selectedExpense)" :enabled="personalEnabled"[^>]*>/g) || []
+  check('three places, as before: only the table row is compact (the phone card and the detail window keep the full sentence)',
+    places.map((p) => /\scompact[\s/>]/.test(p)), [false, true, false])
+  check('the cards show on a phone or when the list panel is narrower than the table needs',
+    [/v-else-if="showCards" class="mobile-exp-list"/.test(tab), /const showCards = computed\(\(\) => isMobile\.value \|\| \(allPanelWidth\.value > 0 && allPanelWidth\.value < TABLE_MIN_WIDTH\)\)/.test(tab),
+      /ref="allPanelEl" class="sub-panel"/.test(tab), /useElementWidth\(allPanelEl\)/.test(tab), /v-else-if="isMobile" class="mobile-exp-list"/.test(tab)],
+    [true, true, true, true, false])
+  const tableHtml = (tab.match(/<table v-else class="data-table exp-table">[\s\S]*?<\/table>/) || [''])[0]
+  check('the table: nine columns in its header and its row', [(tableHtml.match(/<col\b/g) || []).length, (tableHtml.match(/<th\b/g) || []).length], [9, 9])
+  const style = tab.split('<style')[1] || ''
+  const remOf = (cls) => { const m = style.match(new RegExp(`\\.exp-table col\\.${cls} \\{ width: ([\\d.]+)rem; \\}`)); return m ? Number(m[1]) : NaN }
+  const fixedRem = ['col-select', 'col-date', 'col-driver', 'col-type', 'col-amount', 'col-receipt', 'col-status', 'col-actions'].map(remOf)
+  const fixedPx = fixedRem.reduce((s, r) => s + r * 16, 0)
+  const min = Number((tab.match(/const TABLE_MIN_WIDTH = (\d+)/) || [])[1])
+  check('the table has a fixed layout at its panel\'s width, and its cells cut or wrap their own text',
+    [/\.exp-table \{ table-layout: fixed; width: 100%; \}/.test(style), /\.exp-table td \{[^}]*overflow: hidden;/.test(style)], [true, true])
+  check('eight fixed columns, each set; with room for Vendor they fit under TABLE_MIN_WIDTH (at least 120 px left)',
+    [fixedRem.every((r) => Number.isFinite(r) && r > 0), Number.isFinite(min) && fixedPx + 120 <= min], [true, true])
+  // Each phone-only block's body, up to its own closing brace.
+  const phoneBlocks = []
+  for (let at = style.indexOf('@media (max-width: 767px) {'); at !== -1; at = style.indexOf('@media (max-width: 767px) {', at + 1)) {
+    let depth = 0
+    let i = style.indexOf('{', at)
+    const start = i
+    for (; i < style.length; i++) {
+      if (style[i] === '{') depth++
+      else if (style[i] === '}' && --depth === 0) break
+    }
+    phoneBlocks.push(style.slice(start, i + 1))
+  }
+  check('the cards\' styles are not phone-only (they show at any width the table gives way)',
+    [phoneBlocks.length > 0, phoneBlocks.some((b) => /\.mobile-exp-(list|top|bottom|actions|btn) \{/.test(b)), /(^|\n)\.mobile-exp-list \{/.test(style)],
+    [true, false, true])
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
