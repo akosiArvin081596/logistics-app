@@ -60201,10 +60201,10 @@ const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE
 // The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
 // An enable switch, off unless true/1/yes/on: off, both answers are as before.
 const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
-// A bad or negative value falls back to the lib's 10, so it can only add fuel.
+// The lib's 10 is a floor: a bad value or one below it gives 10, so it can only add fuel.
 const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
 	const n = parseFloat(process.env.DRIVER_FUEL_GALLONS_MARGIN_PCT);
-	return Number.isFinite(n) && n >= 0 ? n : fuelModel.DRIVER_FUEL_MARGIN_PCT;
+	return Number.isFinite(n) ? Math.max(n, fuelModel.DRIVER_FUEL_MARGIN_PCT) : fuelModel.DRIVER_FUEL_MARGIN_PCT;
 })();
 // Fuel counts only the first pickup and the final delivery, so say when a load
 // has more: the rate-con stop list, else its Details. Only a yes/no leaves here.
