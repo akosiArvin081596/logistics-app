@@ -43190,6 +43190,16 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			...extra,
 		});
 
+		// A status changed to cancelled is refused (rowEditCancelRefusal()), before the Load ID
+		// and period checks: the cancel goes through POST /api/dispatch/cancel.
+		if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {
+			const cancel = rowEditCancelRefusal(headers, before, after);
+			if (cancel) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: cancel.code }), cancel.code), cancel.code);
+				return res.status(400).json(cancel);
+			}
+		}
+
 		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT.
 		// sheetRowUpdateBlocker judges the months of the EDITED row only, but
 		// deduplicateLoads() runs inside getJobTrackingCached() — which every
@@ -46409,6 +46419,42 @@ function driverCellRefusal(headers, before, values) {
 		if (to === from) continue;
 		const refusal = reservedDriverNameRefusal(to, header);
 		if (refusal) return refusal;
+	}
+	return null;
+}
+
+// Off unless exactly "true". On, the two row saves refuse a status changed to
+// cancelled (rowEditCancelRefusal() below).
+const ROW_EDITOR_CANCEL_GUARD_ENABLED = process.env.ROW_EDITOR_CANCEL_GUARD_ENABLED === "true";
+
+// A row save may not change a status TO cancelled (CANCELED_STATUS_RE on the trimmed cell,
+// the money filter's own test): POST /api/dispatch/cancel records who, when and why. The
+// status cells are the column the cancel writes and every copy of the one
+// excludeDroppedLoads() reads. Returns the 400 body, or null.
+function rowEditCancelRefusal(headers, before, after) {
+	const hs = Array.isArray(headers) ? headers : [];
+	const cols = new Set();
+	const first = hs.findIndex((h) => /status/i.test(h));
+	if (first !== -1) cols.add(first);
+	const filterCol = findCol(hs, /^(job[\s._-]?)?status$/i) || findCol(hs, /status/i);
+	if (filterCol !== null) hs.forEach((h, i) => { if (h === filterCol) cols.add(i); });
+	// A cell as text, null and absent as "": the comparison sheetRowCellWrites() writes by.
+	const text = (row, i) => (Array.isArray(row) && row[i] != null ? String(row[i]) : "");
+	for (const i of [...cols].sort((a, b) => a - b)) {
+		const sent = text(after, i);
+		const was = text(before, i);
+		// Judged only when the save writes the cell, and as the sheet will store it
+		// (USER_ENTERED keeps the text after one leading apostrophe); `before` is as read.
+		if (sent === was) continue;
+		const stored = sent.startsWith("'") ? sent.slice(1) : sent;
+		if (!CANCELED_STATUS_RE.test(stored.trim()) || CANCELED_STATUS_RE.test(was.trim())) continue;
+		const header = String(hs[i] == null ? "" : hs[i]);
+		const name = header.trim() || `Column ${i + 1}`;
+		return {
+			error: `Cancelling a load is not a row edit, so "${name}" can't be changed to a cancelled status here. Use POST /api/dispatch/cancel (the Cancel button on Active Loads, Super Admin): it records who cancelled the load, when and why, and notifies the driver. Nothing was saved.`,
+			code: "CANCEL_NOT_A_ROW_EDIT",
+			field: header.trim() ? header : "(unnamed)",
+		};
 	}
 	return null;
 }
@@ -59386,6 +59432,16 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			guardedChanged: changes,
 			...extra,
 		});
+
+		// A status changed to cancelled is refused (rowEditCancelRefusal()), as
+		// PUT /api/data/:rowIndex refuses it: the cancel goes through POST /api/dispatch/cancel.
+		if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {
+			const cancel = rowEditCancelRefusal(headers, before, after);
+			if (cancel) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: cancel.code }), cancel.code), cancel.code);
+				return res.status(400).json(cancel);
+			}
+		}
 
 		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT — the hole #218
 		// closed on PUT /api/data/:rowIndex, and free here because the whole sheet is
