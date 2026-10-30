@@ -14,18 +14,18 @@
         <div class="card ob-progress-card">
           <div class="ob-progress-header">
             <span class="ob-progress-label">Onboarding Progress</span>
-            <span class="ob-progress-pct">{{ onboardingPct }}%</span>
+            <span class="ob-progress-pct">{{ signingStep.pct }}%</span>
           </div>
-          <div class="ob-bar-track"><div class="ob-bar-fill" :style="{ width: onboardingPct + '%' }"></div></div>
+          <div class="ob-bar-track"><div class="ob-bar-fill" :style="{ width: signingStep.pct + '%' }"></div></div>
         </div>
 
-        <!-- Step 1: Sign documents -->
+        <!-- Step 1: Sign documents (and, with the payload's counts, add emergency contacts) -->
         <div class="card ob-step">
           <div class="ob-step-header">
-            <div :class="['ob-step-num', allDocsSigned ? 'ob-done' : 'ob-active']">1</div>
+            <div :class="['ob-step-num', signingStep.stepDone ? 'ob-done' : 'ob-active']">1</div>
             <div class="ob-step-info">
               <div class="ob-step-title">Sign Onboarding Documents</div>
-              <div class="ob-step-sub">{{ signedCount }}/{{ totalDocs }} completed</div>
+              <div class="ob-step-sub">{{ signingStep.done }}/{{ signingStep.of }} completed</div>
             </div>
           </div>
           <div class="ob-doc-list">
@@ -34,11 +34,21 @@
               <div class="ob-doc-name">{{ doc.doc_name }}</div>
               <div class="ob-doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
             </div>
+            <!-- Emergency contacts: only when the payload carries the counts (the server's flag) -->
+            <div v-if="signingStep.item" class="ob-doc-item ob-contacts" data-testid="ob-contacts">
+              <div class="ob-doc-icon" v-html="signingStep.item.done ? '&#9989;' : '&#9723;'"></div>
+              <div class="ob-doc-name">
+                Emergency contacts
+                <div class="ob-contacts-sub">At least {{ signingStep.item.required }} people we can call if something happens on the road</div>
+                <div class="ob-contacts-count" data-testid="ob-contacts-count">{{ signingStep.item.label }}</div>
+              </div>
+              <button v-if="canEditContacts" type="button" class="ob-doc-action ob-contacts-btn" data-testid="ob-contacts-btn" @click="showContactsForm = true">{{ signingStep.item.action }}</button>
+            </div>
           </div>
         </div>
 
-        <!-- Next-steps alert when all docs are signed -->
-        <div v-if="allDocsSigned" class="card ob-step">
+        <!-- Next steps once the server has accepted the signing step -->
+        <div v-if="stepAccepted" class="card ob-step">
           <div class="ob-next-steps">
             <div class="ob-next-title">Onboarding Status: Documents Received!</div>
             <p>Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
@@ -73,6 +83,7 @@
         @close="showSignModal = false"
         @signed="onDocSigned"
       />
+      <EmergencyContactsForm v-if="canEditContacts" :show="showContactsForm" @close="showContactsForm = false" />
     </template>
 
     <!-- ACCOUNT-LOAD FAILURE — defensive guard so a transient loadData error
@@ -377,6 +388,7 @@ import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
 import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
+import { signingStepView } from '../lib/emergencyContacts'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -390,6 +402,7 @@ import DocumentList from '../components/driver/DocumentList.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
 import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
+import EmergencyContactsForm from '../components/driver/EmergencyContactsForm.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
@@ -425,12 +438,20 @@ const isOnboarding = computed(() => {
 const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
 const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
 const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
-const allDocsSigned = computed(() => signedCount.value === totalDocs.value)
 // Drug test progress is intentionally NOT shown to drivers (legal requirement).
-// Progress reflects document signing only; admin handles the final activation.
-const onboardingPct = computed(() =>
-  Math.round((signedCount.value / totalDocs.value) * 100)
-)
+// Progress reflects the signing step only (the documents, and the emergency
+// contacts while the step is open); admin handles the final activation.
+const signingStep = computed(() => signingStepView({
+  status: driverStore.onboarding?.status,
+  signed: signedCount.value,
+  total: totalDocs.value,
+  counts: driverStore.emergencyContacts,
+}))
+// The server's word that the step is done, not the client's count of signatures.
+const stepAccepted = computed(() => driverStore.onboarding?.status === 'documents_signed')
+// The contacts item's button and form: a Driver only, as the routes behind them.
+const canEditContacts = computed(() => auth.user?.role === 'Driver' && !!driverStore.emergencyContacts)
+const showContactsForm = ref(false)
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
@@ -1304,6 +1325,15 @@ onUnmounted(() => {
 .ob-doc-action {
   font-size: 0.72rem; font-weight: 700; color: var(--accent);
   padding: 0.2rem 0.6rem; border-radius: 99px; background: var(--accent-dim);
+}
+/* The contacts row is not one tap target like a document's: its button is. */
+.ob-contacts { cursor: default; align-items: flex-start; }
+.ob-contacts:active { background: none; }
+.ob-contacts-sub { font-size: 0.72rem; font-weight: 400; color: var(--text-dim); margin-top: 0.1rem; line-height: 1.35; }
+.ob-contacts-count { font-size: 0.72rem; font-weight: 600; margin-top: 0.15rem; }
+.ob-contacts-btn {
+  border: none; font-family: inherit; cursor: pointer; flex-shrink: 0;
+  min-height: 36px; padding: 0.35rem 0.95rem; font-size: 0.78rem;
 }
 .ob-next-steps {
   margin-top: 1rem; padding: 1rem; background: #f0fdf4; border-radius: 10px;
