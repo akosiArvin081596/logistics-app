@@ -172,17 +172,26 @@ const CHR_LINE = "20261006 0700: Scheduled Pick-up Date, Needs Confirmation";
 		pc.reviewCode({ ...base, stored: "10/8/2026 7:00:00", cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "10/08/2026 07:00")] }), { code: "pickup_unconfirmed", stored: "2026-10-08" });
 	eq("§4 (person hold off) a later email over a person's correction: the code again, replaced",
 		pc.reviewCode({ ...base, cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "10/9/2026 7:00:00", "person"), rc(3, "10/06/2026 07:00")] }),
-		{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true });
-	eq("§4 (person hold off) a later email over a confirmed date: replaced",
+		{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true, replacedDay: "2026-10-09" });
+	eq("§4 (person hold off) a later email over a confirmed date: replaced, naming the confirmed day",
 		pc.reviewCode({ ...base, stored: "10/8/2026 7:00:00", cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "10/6/2026 7:00:00", "person"), rc(3, "10/08/2026 07:00")] }),
-		{ code: "pickup_unconfirmed", stored: "2026-10-08", replaced: true });
+		{ code: "pickup_unconfirmed", stored: "2026-10-08", replaced: true, replacedDay: "2026-10-06" });
+	eq("§4 replaced: the person's day when it reads as one, left out when it doesn't",
+		[
+			pc.reviewCode({ ...base, cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "10/11/2026 7:00:00", "person"), rc(3, "10/06/2026 07:00")] }),
+			pc.reviewCode({ ...base, cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "ASAP", "person"), rc(3, "10/06/2026 07:00")] }),
+		],
+		[
+			{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true, replacedDay: "2026-10-11" },
+			{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true },
+		]);
 	// #588's rule: only the app's own writes clear a stored date, so a person's date put back in
 	// the sheet after an email replaced it is a person's date again (no code, no `replaced`).
 	const restoredRows = [rc(1, "10/6/2026 08:00"), rc(2, "10/12/2026 14:00", "person"), rc(3, "10/6/2026 08:00")];
 	eq("§4 (#588 rule) a person's date restored in the sheet after an email replaced it: no code",
 		[pc.reviewCode({ ...base, stored: "10/12/2026 14:00:00", cellRows: restoredRows }), pc.reviewCode({ ...base, stored: "10/12/2026 14:00", cellRows: restoredRows })], [null, null]);
 	eq("§4 (#588 rule) the email's date left in place still gets the code, replaced",
-		pc.reviewCode({ ...base, stored: "10/6/2026 8:00:00", cellRows: restoredRows }), { code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true });
+		pc.reviewCode({ ...base, stored: "10/6/2026 8:00:00", cellRows: restoredRows }), { code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true, replacedDay: "2026-10-12" });
 	eq("§4 the same date re-sent after a confirmation (no new rate-con row): stays confirmed",
 		pc.reviewCode({ ...base, cellRows: [rc(1, "10/06/2026 07:00"), rc(2, "10/6/2026 7:00:00", "person")] }), null);
 	eq("§4 cellDay reads a time window and refuses a yearless date", [pc.cellDay("10/7/2026 08:00-14:00 (FCFS)"), pc.cellDay("10/07"), pc.cellDay("2026-10-06")], ["2026-10-07", "", "2026-10-06"]);

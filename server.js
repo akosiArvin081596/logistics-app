@@ -54270,6 +54270,10 @@ if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 //   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
 //   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
 //   only when no other row reads the same).
+// - The caller names the day its screen showed (`stored`, YYYY-MM-DD; 400
+//   PICKUP_DAY_REQUIRED without one), so a click never confirms a date nobody saw: a cell
+//   whose day now differs is 409 PICKUP_CHANGED with the day it reads now, nothing recorded,
+//   and the Job Tracking cache dropped so the screen's next dashboard read is current.
 // - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
 //   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
 //   months are never edited; that variant shows no button).
@@ -54314,6 +54318,10 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
 	}
 	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	const shownDay = typeof body.stored === "string" ? body.stored : "";
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(shownDay) || pickupConfirmation.cellDay(shownDay) !== shownDay) {
+		return res.status(400).json({ error: "The pickup day shown on screen is required. Reload the dashboard and open the load again.", code: "PICKUP_DAY_REQUIRED" });
+	}
 	let all;
 	try {
 		const sheets = await getSheets();
@@ -54352,6 +54360,15 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		}
 		const column = loadCellColumnName(headers, headers[pickupCol]);
 		const day = pickupConfirmation.cellDay(stored) || null;
+		// Before "already confirmed": a person's edit since the screen read it is a change too.
+		if (day !== shownDay) {
+			jtCacheInvalidate();
+			return res.status(409).json({
+				error: "The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.",
+				code: "PICKUP_CHANGED",
+				stored: day,
+			});
+		}
 		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
 		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
 		// to record.
@@ -61293,6 +61310,42 @@ const FUEL_RESERVE_FRACTION = (() => {
 })();
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
 
+// The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
+// An enable switch, off unless true/1/yes/on: off, both answers are as before.
+const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
+// The lib's 10 is a floor: a bad value or one below it gives 10, so it can only add fuel.
+const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
+	const n = parseFloat(process.env.DRIVER_FUEL_GALLONS_MARGIN_PCT);
+	return Number.isFinite(n) ? Math.max(n, fuelModel.DRIVER_FUEL_MARGIN_PCT) : fuelModel.DRIVER_FUEL_MARGIN_PCT;
+})();
+// Fuel counts only the first pickup and the final delivery, so say when a load
+// has more: the rate-con stop list, else its Details. Only a yes/no leaves here.
+function loadHasExtraStops(loadId, jtRow, headers) {
+	const detailsCol = findCol(headers, /^details$/i);
+	if (jtRow && detailsCol && fuelModel.detailsMentionExtraStops(jtRow[detailsCol])) return true;
+	try {
+		const row = db.prepare("SELECT payload FROM load_driver_instructions WHERE load_key = ?").get(normalizeLoadId(loadId));
+		return fuelModel.stopListShowsExtraStops(row ? row.payload : null);
+	} catch { return false; }
+}
+// Another of the load's driver's loads comes first (started, or ahead in the
+// driver's queue), so the run to this pickup starts at that delivery, not here.
+function driverHasLoadUnderway(jt, jtRow, loadId) {
+	const headers = jt.headers || [];
+	const idCol = findCol(headers, /load.?id|job.?id/i);
+	const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+	const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+	const driver = jtRow && driverCol ? normalizeDriverName(String(jtRow[driverCol] || "")) : "";
+	if (!driver || !idCol || !statusCol) return false;
+	const self = normalizeLoadId(loadId);
+	const rows = excludeDroppedLoads(jt.data || [], headers);
+	if (rows.some((r) => normalizeLoadId(r[idCol]) !== self && normalizeDriverName(String(r[driverCol] || "")) === driver
+		&& (fuelModel.isPickedUp(r[statusCol]) || /^heading to shipper$/i.test(String(r[statusCol] || "").trim())))) return true;
+	const queue = computeDriverQueues(rows, headers)[driver] || [];
+	const mine = queue.find((q) => normalizeLoadId(q.load_id) === self);
+	return !!mine && queue.some((q) => q.queue_position < mine.queue_position);
+}
+
 // How far back we may reach for the last CREDIBLE fuel reading when the live one
 // is a dropout. Bounding it in SQL (rather than by age in the model) keeps the
 // staleness limit next to the query that can actually use the index.
@@ -61700,7 +61753,14 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangeEvidence: burn && burn.usable
 				? { legs: burn.n, miles: burn.miles, milesPerPointP10: burn.p10, milesPerPointP90: burn.p90 }
 				: null,
-			updatedAt });
+			updatedAt,
+			// Trip-plan's MPG chain, never the rollup, so the header chip and the load's
+			// Fuel section quote one figure.
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				reading: receiptMpg ? resolveCredibleFuelReading(vehicleId, rows, receiptMpg.mpg, preTank) : reading,
+				hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: estimate.tankSource, tankGallons: preTank,
+				mpg: receiptMpg ? receiptMpg.mpg : preMpg, burn, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+			}) } : {}) });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
 		res.status(500).json({ ok: false, error: "fuel range failed" });
@@ -61941,7 +62001,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
 			.get(loadId.toLowerCase().replace(/^#/, ""));
 		if (!lc || ![lc.dest_lat, lc.dest_lng].every(Number.isFinite)) {
-			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
+			return res.status(400).json({ ok: false, error: "load has no geocoded destination", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_ROUTE" } : {}) });
 		}
 
 		// Live fuel + position. A newest row the device took before it was linked
@@ -61959,7 +62019,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			? { latitude: latest.latitude, longitude: latest.longitude }
 			: (Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
 				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
-		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
+		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_POSITION" } : {}) });
 
 		// ⚠️⚠️ THE RUN TO THE SHIPPER IS PART OF THE TRIP, AND IT USED TO BE FREE.
 		//
@@ -62068,6 +62128,15 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
 			updatedAt: latest && latest.location_date_ms
 				? new Date(latest.location_date_ms).toISOString() : null,
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				plan, leg: planApproach ? "to_pickup" : "to_delivery", approachMiles,
+				fromLivePosition: !!fixFresh, positionAgeMinutes: fixFresh ? Math.max(0, Math.round((Date.now() - latest.location_date_ms) / 60000)) : null,
+				reading, hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: truck && truck.fuel_tank_gallons > 0 ? "truck" : "default",
+				tankGallons: tank, mpg, burn, routeSource, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
+				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId), pickupUnmapped: !pickedUp && !pickup,
+				approachUncounted: !pickedUp && !fixFresh,
+			}) } : {}),
 		});
 	} catch (err) {
 		console.error("[fuel/trip-plan]", err.message);
