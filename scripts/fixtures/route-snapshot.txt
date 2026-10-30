@@ -104,7 +104,7 @@ GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4
 GET /api/driver/loads/:loadId/instructions · driverGate@7e9b5dcc294e · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@ad583e999b5f
 GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · inline@c6cac740a042
-PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@31e92499b96d
+PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
 GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc0
 POST /api/driver/respond · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@2cd2c4c38a59
@@ -119,7 +119,7 @@ GET /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5
 POST /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@60336818ad3e
 GET /api/drivers-directory/:id/documents · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2203d52be3b9
 GET /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@b14128480511
-PUT /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@29e5bb694868
+PUT /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@f58eed4c2843
 POST /api/drivers-directory/:id/profile-picture · requireAuth@2f5c61384511 · inline@b6b0cff59df2
 GET /api/eld/linxup/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@8ea0ac5be492
 POST /api/eld/linxup/webhook · inline@82555ec16ec3

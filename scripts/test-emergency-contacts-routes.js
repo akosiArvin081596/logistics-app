@@ -35,15 +35,30 @@
  *   §9 mutants, each required to flip its section: the gate removed; Investor
  *      added to a role list; the membership test removed; the audit unmasked; a
  *      tracked name planted in GET /api/investor; the payload counted by the
- *      URL's name
+ *      URL's name; and for §10: either branch of checkAndCompleteOnboarding()
+ *      ignoring the contacts; onboardingAddsJudgedRow() ignoring them; the flag
+ *      ignored; a driver already past the step held back; every signed document
+ *      counted; the PUTs' step check removed
+ *  §10 the onboarding signing step (onboardingSigningStepState()): with the flag
+ *      on, a driver with every document signed stays documents_pending (no
+ *      directory row, no "Documents Received" emails) until two contacts are on
+ *      file, and a passed drug test cannot skip the step; a driver already
+ *      documents_signed still finishes on a pass; the flag off decides as
+ *      before; a signed document outside ONBOARDING_DOCS never counts;
+ *      onboardingAddsJudgedRow() agrees with what checkAndCompleteOnboarding()
+ *      does in every case. Through the routes: the driver's PUT and the staff
+ *      PUT complete a pending driver's step once (emails once), never touch a
+ *      driver past it, and a failing step check never fails the save
  *
  * Runs the shipped code: the four registrations, the helpers and the guards
  * (requireRole, logAudit, logAuditRefusal, auditText, the limiter) are lifted
  * from server.js through serverSource() and scripts/lib/server-lift.js and run
  * on express (127.0.0.1, port 0) over an in-memory SQLite whose
- * driver_emergency_contacts and audit_trail tables are built from server.js's
- * own CREATE text. notifyChange is a recorder. Made-up people and 555-01xx
- * numbers only.
+ * driver_emergency_contacts, audit_trail, driver_onboarding and
+ * onboarding_documents tables are built from server.js's own CREATE text.
+ * checkAndCompleteOnboarding() and onboardingAddsJudgedRow() run as shipped;
+ * mail, the Job Tracking read, the directory sync and its month-end judge are
+ * recorders, as is notifyChange. Made-up people and 555-01xx numbers only.
  *
  * Run: node scripts/test-emergency-contacts-routes.js   # exits 1 on failure
  */
@@ -54,7 +69,7 @@ const http = require("http");
 const path = require("path");
 const express = require("express");
 const Database = require("better-sqlite3");
-const { closure } = require("./lib/server-lift");
+const { closure, indexDeclarations } = require("./lib/server-lift");
 const { serverSource } = require("./lib/server-source");
 
 const ROOT = path.join(__dirname, "..");
@@ -95,6 +110,8 @@ const PEOPLE = [
 	{ id: 90108, username: "former.driver", role: "Dispatcher", driver_name: "Former Driver" },
 	// A staff account with a directory row's name: not a Driver, so never linked.
 	{ id: 90109, username: "taylor.nobody", role: "Dispatcher", driver_name: "Taylor Nobody" },
+	// §10's driver at the onboarding signing step (no directory row yet).
+	{ id: 90121, username: "avery.onboard", role: "Driver", driver_name: "Avery Onboard" },
 ];
 // Sessions as the server holds them. "demoted" still says Driver though the
 // account is a Dispatcher now; "gone" names a deleted account; "badid" carries
@@ -137,7 +154,19 @@ const staffUrl = (id) => `/api/drivers-directory/${id}/emergency-contacts`;
 // ── lifting ───────────────────────────────────────────────────────────────────
 const SERVER_HELPERS = ["emergencyContactsFlagGate", "emergencyContactsWriteLimiter", "emergencyContactRows", "emergencyContactsCount",
 	"emergencyContactsBody", "emergencyContactsOwnAccount", "emergencyContactsDirectoryTarget", "driverAccountForDirectoryRow",
-	"saveEmergencyContacts"];
+	"saveEmergencyContacts", "emergencyContactsAfterSave"];
+const ASYNC_HELPERS = new Set(["emergencyContactsAfterSave"]);
+const helperHead = (n) => `${ASYNC_HELPERS.has(n) ? "async " : ""}function ${n}(`;
+// The onboarding step (§10): the shared rule and the two functions that apply it.
+const STEP_HELPER = "onboardingSigningStepState";
+const STEP_FUNCTIONS = ["checkAndCompleteOnboarding", "onboardingAddsJudgedRow"];
+// Supplied by the world. Mail, the Job Tracking read, the directory sync and its
+// month-end judge are the onboarding step's leaves: recorders here, so a
+// completion is seen and nothing leaves the process.
+const PROVIDED = ["db", "app", "notifyChange", "EMERGENCY_CONTACTS_ENABLED", "require", "console",
+	"sendEmail", "getJobTrackingCached", "syncDriverToCarrierSheet", "accountDirectoryCarrier", "accountDirectoryRowJudged",
+	"insertNotification", "ADMIN_NOTIFY_EMAIL", "DATA_DIR", "path", "fs"];
+const DENIED = ["io", "server", "sheets", "getSheets", "getDrive", "transporter", "jtCacheInvalidate"];
 const ROUTE_PREFIXES = [
 	`app.get("${ME}",`,
 	`app.put("${ME}",`,
@@ -159,12 +188,16 @@ function execBlock(src, marker) {
 	if (open < 0 || close < 0) throw new Error(`could not cut the db.exec holding ${marker}`);
 	return src.slice(open + "db.exec(`".length, close);
 }
+// A root the source does not declare is left out (an older server.js has no
+// emergencyContactsAfterSave()), so the sections still run there and the pin
+// reports what is missing.
 function liftRoutes(src) {
+	const { decls } = indexDeclarations(src);
 	return closure(src, {
-		roots: [...SERVER_HELPERS, "requireRole"],
+		roots: [...SERVER_HELPERS, "requireRole", ...STEP_FUNCTIONS].filter((n) => decls.has(n)),
 		routes: ROUTE_PREFIXES.map((p) => lineStarting(src, p)),
-		provided: ["db", "app", "notifyChange", "EMERGENCY_CONTACTS_ENABLED", "require", "console"],
-		denied: ["io", "server", "sheets", "sendEmail", "getSheets", "getDrive", "getJobTrackingCached", "transporter", "jtCacheInvalidate"],
+		provided: PROVIDED,
+		denied: DENIED,
 	});
 }
 // Replace exactly one occurrence, or throw: a mutant whose target is gone
@@ -179,10 +212,23 @@ function mutate(src, from, to) {
 const USERS_DDL = `CREATE TABLE users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL DEFAULT '',
 	role TEXT NOT NULL, driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT NOT NULL DEFAULT '',
-	disabled_at TEXT DEFAULT NULL)`;
+	company_name TEXT NOT NULL DEFAULT '', disabled_at TEXT DEFAULT NULL)`;
 const DIRECTORY_DDL = `CREATE TABLE drivers_directory (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE, status TEXT DEFAULT 'active',
-	email TEXT DEFAULT '')`;
+	email TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', address TEXT DEFAULT '', city TEXT DEFAULT '',
+	state TEXT DEFAULT '', zip TEXT DEFAULT '', dot TEXT DEFAULT '', mc TEXT DEFAULT '', hazmat TEXT DEFAULT '')`;
+// The application the onboarding step reads back: the driver's email and the
+// fields its directory backfill copies.
+const APPLICATIONS_DDL = `CREATE TABLE job_applications (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '',
+	cell TEXT DEFAULT '', address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '',
+	dot TEXT DEFAULT '', mc TEXT DEFAULT '', hazmat TEXT DEFAULT '', position TEXT DEFAULT '')`;
+const ADMIN_MAIL = "admin@example.test";
+// Five made-up contacts a §10 driver may hold.
+const STEP_CONTACTS = [
+	["Quinn Example", "Spouse", "+12025550143"], ["Harper Example", "Parent", "+13125550178"],
+	["Riley Fixture", "Relative", "+15125550149"], ["Sky Testcase", "Other", "+15125550150"], ["Drew Sampleton", "Child", "+15125550151"],
+];
 const SEEN_200 = [];
 
 function seed(db) {
@@ -196,16 +242,47 @@ function seed(db) {
 	for (const r of ROBIN_ROWS) c.run(90103, r.position, r.contact_name, r.relationship, r.contact_phone, "2026-10-30T00:00:00.000Z", "2026-10-30T00:00:00.000Z", 90103, 90103);
 }
 
-async function world({ src = SRC, flag = true, lib = realLib, record = false } = {}) {
+// `onboarding`: { [userId]: { status, signed, extra, drug, contacts, email } }. Each
+// gets an application, an onboarding row and the documents: the first `signed` of
+// ONBOARDING_DOCS signed (all by default), the rest not, `extra` signed under keys
+// outside it; and the first `contacts` of STEP_CONTACTS.
+function seedOnboarding(db, docs, onboarding) {
+	const doc = db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed) VALUES (?, ?, ?, ?)");
+	const contact = db.prepare(`INSERT INTO driver_emergency_contacts
+		(user_id, position, contact_name, relationship, contact_phone, created_at, updated_at, created_by, updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+	for (const [key, o] of Object.entries(onboarding)) {
+		const id = Number(key);
+		const name = db.prepare("SELECT driver_name FROM users WHERE id = ?").get(id).driver_name;
+		const appId = Number(db.prepare("INSERT INTO job_applications (full_name, email, phone) VALUES (?, ?, ?)").run(name, o.email || "", "(202) 555-0100").lastInsertRowid);
+		db.prepare("INSERT INTO driver_onboarding (user_id, application_id, driver_name, status, drug_test_result) VALUES (?, ?, ?, ?, ?)")
+			.run(id, appId, name, o.status || "documents_pending", o.drug || "");
+		const signed = o.signed === undefined ? docs.length : o.signed;
+		docs.forEach((d, i) => doc.run(id, d.key, d.name, i < signed ? 1 : 0));
+		for (const extra of o.extra || []) doc.run(id, extra, extra, 1);
+		STEP_CONTACTS.slice(0, o.contacts || 0).forEach(([n, r, p], i) => contact.run(id, i + 1, n, r, p, "2026-10-30T00:00:00.000Z", "2026-10-30T00:00:00.000Z", id, id));
+	}
+}
+
+async function world({ src = SRC, flag = true, lib = realLib, record = false, onboarding = {}, failSync = false } = {}) {
 	const db = new Database(":memory:");
 	db.pragma("foreign_keys = ON");
 	db.exec(USERS_DDL);
 	db.exec(DIRECTORY_DDL);
+	db.exec(APPLICATIONS_DDL);
 	db.exec(execBlock(src, "CREATE TABLE IF NOT EXISTS audit_trail ("));
 	db.exec(execBlock(src, "CREATE TABLE IF NOT EXISTS driver_emergency_contacts ("));
+	db.exec(execBlock(src, "CREATE TABLE IF NOT EXISTS driver_onboarding ("));
+	db.exec(execBlock(src, "CREATE TABLE IF NOT EXISTS onboarding_documents ("));
+	// A migration in server.js; the step reads it back.
+	db.exec("ALTER TABLE onboarding_documents ADD COLUMN signed_pdf_url TEXT DEFAULT ''");
 	seed(db);
 	const lifted = liftRoutes(src);
 	const notified = [];
+	const mail = [];
+	const synced = [];
+	const notes = [];
+	const jt = { reads: 0 };
 	const app = express();
 	app.use(express.json());
 	app.use((req, res, next) => {
@@ -220,8 +297,23 @@ async function world({ src = SRC, flag = true, lib = realLib, record = false } =
 		EMERGENCY_CONTACTS_ENABLED: flag,
 		require: (m) => (m === "./lib/emergency-contacts" ? lib : require(m.startsWith("./lib/") ? path.join(ROOT, m) : m)),
 		console: QUIET,
+		sendEmail: (to, subject, html) => { mail.push({ to, subject, html: String(html) }); return Promise.resolve(true); },
+		getJobTrackingCached: async () => { jt.reads++; return { headers: [], data: [] }; },
+		syncDriverToCarrierSheet: (name, opts = {}) => {
+			if (failSync) throw Object.assign(new Error("made-up sync failure"), { code: "SYNC_FAILED" });
+			synced.push({ name, action: opts.action });
+		},
+		accountDirectoryCarrier: (name, company) => company,
+		// Every row judged, so onboardingAddsJudgedRow() answers the step alone.
+		accountDirectoryRowJudged: () => true,
+		insertNotification: { run: (...args) => notes.push(args[1]) },
+		ADMIN_NOTIFY_EMAIL: ADMIN_MAIL,
+		DATA_DIR: "/nonexistent",
+		path,
+		fs: { existsSync: () => false },
 	};
-	const fns = new Function(...Object.keys(scope), `${lifted.text}\nreturn { emergencyContactsCount, emergencyContactRules };`)(...Object.values(scope));
+	const fns = new Function(...Object.keys(scope), `${lifted.text}\nreturn { emergencyContactsCount, emergencyContactRules, checkAndCompleteOnboarding, onboardingAddsJudgedRow, ONBOARDING_DOCS };`)(...Object.values(scope));
+	seedOnboarding(db, fns.ONBOARDING_DOCS, onboarding);
 	const server = http.createServer(app);
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const call = (method, url, { user, body, csrf = true } = {}) => new Promise((resolve, reject) => {
@@ -246,7 +338,7 @@ async function world({ src = SRC, flag = true, lib = realLib, record = false } =
 		req.end();
 	});
 	const close = () => new Promise((resolve) => { server.close(() => { db.close(); resolve(); }); });
-	return { db, notified, call, close, fns };
+	return { db, notified, call, close, fns, mail, synced, notes, jt };
 }
 
 const rowsOf = (db, userId) => db.prepare("SELECT id, user_id, position, contact_name, relationship, contact_phone, created_by, updated_by FROM driver_emergency_contacts WHERE user_id = ? ORDER BY position, id").all(userId);
@@ -525,11 +617,100 @@ async function payloadSection(c, src = SRC) {
 	});
 }
 
+// ── §10 the onboarding signing step ───────────────────────────────────────────
+const AVERY = 90121;
+const AVERY_MAIL = "avery.onboard@example.com";
+const CASEY_MAIL = "casey.example@example.com";
+const STEP_VALUES = STEP_CONTACTS.flatMap(([name, , phone]) => [name, phone.slice(2)]);
+// [what, flag, the driver's state (seedOnboarding()), then: status, emails, directory
+// adds, notifications]. Five signed unless `signed` says otherwise.
+const STEP_CASES = [
+	["flag on, five signed, no contacts: stays at the step", true, { contacts: 0 }, "documents_pending", 0, 0, []],
+	["flag on, five signed, one contact: stays at the step", true, { contacts: 1 }, "documents_pending", 0, 0, []],
+	["flag on, five signed, two contacts: the step is done", true, { contacts: 2 }, "documents_signed", 2, 1, ["documents_signed"]],
+	["flag on, four signed, two contacts: stays at the step", true, { signed: 4, contacts: 2 }, "documents_pending", 0, 0, []],
+	["flag on, five signed, a passed drug test, no contacts: the pass cannot skip the step", true, { drug: "pass", contacts: 0 }, "documents_pending", 0, 0, []],
+	["flag on, five signed, a passed drug test, two contacts: the step, then onboarded", true, { drug: "pass", contacts: 2 }, "fully_onboarded", 2, 2, ["documents_signed", "onboarding_complete"]],
+	["flag on, documents_signed before the switch-on, a passed drug test, no contacts: onboarded", true, { status: "documents_signed", drug: "pass", contacts: 0 }, "fully_onboarded", 0, 1, ["onboarding_complete"]],
+	["flag on, documents_signed, no drug test yet, no contacts: unchanged", true, { status: "documents_signed", contacts: 0 }, "documents_signed", 0, 0, []],
+	["flag on, fully onboarded, no contacts: unchanged", true, { status: "fully_onboarded", drug: "pass", contacts: 0 }, "fully_onboarded", 0, 0, []],
+	["flag on, four of the five and another document signed, two contacts: stays at the step", true, { signed: 4, extra: ["passenger_authorization"], contacts: 2 }, "documents_pending", 0, 0, []],
+	["flag on, the five and another document signed, two contacts: the step is done", true, { extra: ["passenger_authorization"], contacts: 2 }, "documents_signed", 2, 1, ["documents_signed"]],
+	["flag off, five signed, no contacts: the step is done, as before", false, { contacts: 0 }, "documents_signed", 2, 1, ["documents_signed"]],
+	["flag off, four signed: stays, as before", false, { signed: 4, contacts: 0 }, "documents_pending", 0, 0, []],
+	["flag off, five signed, a passed drug test: the step, then onboarded, as before", false, { drug: "pass", contacts: 0 }, "fully_onboarded", 2, 2, ["documents_signed", "onboarding_complete"]],
+	["flag off, four of the five and another document signed: stays at the step", false, { signed: 4, extra: ["service_invoice"], contacts: 0 }, "documents_pending", 0, 0, []],
+];
+const statusOf = (db, userId) => db.prepare("SELECT status FROM driver_onboarding WHERE user_id = ?").get(userId).status;
+const addsOf = (w) => w.synced.filter((s) => s.action === "add").length;
+
+// checkAndCompleteOnboarding() and onboardingAddsJudgedRow() called as the sign and
+// drug-test routes call them.
+async function stepSection(c, src = SRC) {
+	for (const [label, flag, state, status, mails, adds, notes] of STEP_CASES) {
+		await inWorld(c, `§10 ${label}`, { src, flag, onboarding: { [AVERY]: { email: AVERY_MAIL, ...state } } }, async (w) => {
+			const judged = w.fns.onboardingAddsJudgedRow(AVERY);
+			const actor = { session: { user: { ...SESSIONS.sa } } };
+			await w.fns.checkAndCompleteOnboarding(AVERY, actor);
+			c.eq(`§10 ${label}: status, emails, directory adds, notifications`,
+				[statusOf(w.db, AVERY), w.mail.length, addsOf(w), w.notes], [status, mails, adds, notes]);
+			c.eq(`§10 ${label}: onboardingAddsJudgedRow() agrees, and Job Tracking is read only then`,
+				[judged, w.jt.reads], [adds > 0, adds > 0 ? 1 : 0]);
+			if (mails) {
+				c.eq(`§10 ${label}: "Documents Received" goes to the driver and the admin inbox, holding no contact`,
+					[w.mail.map((m) => m.to), leaks(JSON.stringify(w.mail), STEP_VALUES)], [[AVERY_MAIL, ADMIN_MAIL], []]);
+			}
+			await w.fns.checkAndCompleteOnboarding(AVERY, actor);
+			c.eq(`§10 ${label}: a second check changes nothing`, [statusOf(w.db, AVERY), w.mail.length, addsOf(w)], [status, mails, adds]);
+		});
+	}
+}
+
+// The same step reached through the two PUTs.
+async function stepRoutesSection(c, src = SRC) {
+	const pending = { 90102: { email: CASEY_MAIL } };
+	await inWorld(c, "§10 the driver's PUT", { src, onboarding: pending, record: true }, async (w) => {
+		const one = await w.call("PUT", ME, { user: "casey", body: { contacts: [CASEY_LIST[0]] } });
+		c.eq("§10 a driver at the step (five signed) saves one contact: 422 EMERGENCY_CONTACTS_MIN, still at the step, no email",
+			[...answer(one), statusOf(w.db, 90102), w.mail.length], [422, "EMERGENCY_CONTACTS_MIN", "documents_pending", 0]);
+		const two = await w.call("PUT", ME, { user: "casey", body: { contacts: CASEY_LIST } });
+		c.eq("§10 ...saves two: 200 with the list, documents_signed, the two emails, one directory add",
+			[two.status, ((two.body && two.body.contacts) || []).length, statusOf(w.db, 90102), w.mail.map((m) => m.to), addsOf(w)],
+			[200, 2, "documents_signed", [CASEY_MAIL, ADMIN_MAIL], 1]);
+		c.ok("§10 ...and the Applications views are told (applications:changed)", w.notified.includes("applications"), JSON.stringify(w.notified));
+		const ids = ((two.body && two.body.contacts) || []).map((x) => x.id);
+		const again = await w.call("PUT", ME, { user: "casey", body: { contacts: CASEY_LIST.map((x, i) => ({ ...x, id: ids[i] })) } });
+		c.eq("§10 ...the same list again: 200, no second email, no second add", [again.status, statusOf(w.db, 90102), w.mail.length, addsOf(w)], [200, "documents_signed", 2, 1]);
+	});
+	await inWorld(c, "§10 the staff PUT", { src, onboarding: pending, record: true }, async (w) => {
+		const r = await w.call("PUT", staffUrl(501), { user: "dispatcher", body: { contacts: CASEY_LIST } });
+		c.eq("§10 a Dispatcher saves two contacts for a driver at the step: 200, documents_signed, the two emails",
+			[r.status, statusOf(w.db, 90102), w.mail.map((m) => m.to)], [200, "documents_signed", [CASEY_MAIL, ADMIN_MAIL]]);
+	});
+	await inWorld(c, "§10 drivers past the step", { src, onboarding: { 90102: { status: "fully_onboarded", drug: "pass" }, 90103: { status: "documents_signed" } } }, async (w) => {
+		const a = await w.call("PUT", ME, { user: "casey", body: { contacts: CASEY_LIST } });
+		const b = await w.call("PUT", ME, { user: "robin", body: { contacts: [EXTRA[1], EXTRA[2]] } });
+		c.eq("§10 a fully onboarded and a documents_signed driver save: 200, unchanged, no email, no add, no applications event",
+			[a.status, b.status, statusOf(w.db, 90102), statusOf(w.db, 90103), w.mail.length, w.synced.length, w.notified.includes("applications")],
+			[200, 200, "fully_onboarded", "documents_signed", 0, 0, false]);
+	});
+	await inWorld(c, "§10 a failing step check", { src, onboarding: pending, failSync: true }, async (w) => {
+		const before = quietErrors.length;
+		const r = await w.call("PUT", ME, { user: "casey", body: { contacts: CASEY_LIST } });
+		const logged = quietErrors.slice(before);
+		c.eq("§10 the step check fails after the save: 200 with the list, both rows stored",
+			[r.status, ((r.body && r.body.contacts) || []).length, rowsOf(w.db, 90102).length], [200, 2, 2]);
+		c.ok("§10 ...one log line naming the failure's code, holding no contact value",
+			logged.length === 1 && logged[0].includes("[emergency-contacts]") && logged[0].includes("SYNC_FAILED") && leaks(logged[0], CONTACT_VALUES).length === 0,
+			JSON.stringify(logged));
+	});
+}
+
 // ── §8 the pin ────────────────────────────────────────────────────────────────
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const LIB_EXPORTS = realLib ? Object.keys(realLib) : [];
 const TRACKED = ["driver_emergency_contacts", "emergency-contacts", "emergencyContactRules", "EMERGENCY_CONTACTS_ENABLED",
-	"idx_emergency_contacts_user", ...SERVER_HELPERS, ...LIB_EXPORTS];
+	"idx_emergency_contacts_user", ...SERVER_HELPERS, STEP_HELPER, ...LIB_EXPORTS];
 const TRACKED_RE = new RegExp(`(?<![\\w$-])(?:${TRACKED.map(escapeRe).join("|")})(?![\\w$])`);
 const DELETE_RE = /^removed\.driver_emergency_contacts = db\.prepare\("DELETE FROM driver_emergency_contacts WHERE user_id = \?"\)\.run\(id\)\.changes;$/;
 const FLAG_LINE = 'const EMERGENCY_CONTACTS_ENABLED = process.env.EMERGENCY_CONTACTS_ENABLED === "true";';
@@ -538,9 +719,17 @@ const ALLOW_HEADS = [
 	'try { db.exec("CREATE INDEX IF NOT EXISTS idx_emergency_contacts_user ',
 	'const emergencyContactRules = require("./lib/emergency-contacts");',
 	"const emergencyContactsWriteLimiter = rateLimit(",
-	...SERVER_HELPERS.filter((n) => n !== "emergencyContactsWriteLimiter").map((n) => `function ${n}(`),
+	...SERVER_HELPERS.filter((n) => n !== "emergencyContactsWriteLimiter").map(helperHead),
+	`function ${STEP_HELPER}(`,
 	...ROUTE_PREFIXES,
 ];
+// The onboarding step's two callers name the shared rule on exactly these lines and
+// name no other tracked name, so the emails checkAndCompleteOnboarding() sends can
+// never carry a contact.
+const STEP_CALLS = {
+	"async function checkAndCompleteOnboarding(": `const step = ${STEP_HELPER}(userId, ob);`,
+	"function onboardingAddsJudgedRow(": `if (!${STEP_HELPER}(userId, ob).stepDone) return false;`,
+};
 // Comments blanked, newlines kept, so a comment naming the table is not a
 // mention. A scanner that knows strings, template and regex literals (the state
 // machine of scripts/split/route-context.js scanSource()): a "/*" inside a line
@@ -631,7 +820,7 @@ function pinFindings(src) {
 		return false;
 	};
 	const strays = [];
-	const exempt = { spread: [], del: [] };
+	const exempt = { spread: [], del: [], step: Object.fromEntries(Object.keys(STEP_CALLS).map((h) => [h, []])) };
 	let mentions = 0;
 	code.forEach((l, i) => {
 		if (!TRACKED_RE.test(l)) return;
@@ -642,6 +831,8 @@ function pinFindings(src) {
 		if (head.startsWith("db.exec(") && statementText(j).includes("CREATE TABLE IF NOT EXISTS driver_emergency_contacts (")) return;
 		if (head.startsWith(PAYLOAD_HEAD) && SPREAD_RE.test(l.trim()) && inReply(j, i)) { exempt.spread.push(i + 1); return; }
 		if (head.startsWith('app.delete("/api/users/:id",') && DELETE_RE.test(l.trim())) { exempt.del.push(i + 1); return; }
+		const stepHead = Object.keys(STEP_CALLS).find((h) => head.startsWith(h));
+		if (stepHead && l.trim() === STEP_CALLS[stepHead]) { exempt.step[stepHead].push(i + 1); return; }
 		strays.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 100)}`);
 	});
 	const missing = [];
@@ -652,18 +843,25 @@ function pinFindings(src) {
 	if (count((l) => l === 'const emergencyContactRules = require("./lib/emergency-contacts");') !== 1) missing.push("the require");
 	if (count((l) => l.startsWith("const emergencyContactsWriteLimiter = rateLimit(")) !== 1) missing.push("the write limiter");
 	for (const n of SERVER_HELPERS.filter((x) => x !== "emergencyContactsWriteLimiter")) {
-		if (count((l) => l.startsWith(`function ${n}(`)) !== 1) missing.push(`function ${n}()`);
+		if (count((l) => l.startsWith(helperHead(n))) !== 1) missing.push(`${helperHead(n)})`);
 	}
+	if (count((l) => l.startsWith(`function ${STEP_HELPER}(`)) !== 1) missing.push(`function ${STEP_HELPER}()`);
 	for (const p of ROUTE_PREFIXES) if (count((l) => l.startsWith(p)) !== 1) missing.push(p);
 	if (exempt.spread.length !== 1) missing.push(`the payload spread (${exempt.spread.length} found)`);
 	if (exempt.del.length !== 1) missing.push(`the user-delete DELETE (${exempt.del.length} found)`);
+	for (const [h, lines] of Object.entries(exempt.step)) {
+		if (lines.length !== 1) missing.push(`"${STEP_CALLS[h]}" in ${h}) (${lines.length} found)`);
+	}
 	return { strays, missing, exempt, mentions };
 }
 async function pinSection(c, src = SRC) {
 	const f = pinFindings(src);
 	c.eq("§8 no tracked name outside the allowlist", f.strays, []);
 	c.eq("§8 every allowlisted place exists", f.missing, []);
-	if (c === MAIN) console.log(`  (${f.mentions} mention(s) checked; payload spread at line ${f.exempt.spread.join(", ") || "-"}, user-delete line at ${f.exempt.del.join(", ") || "-"})`);
+	if (c === MAIN) {
+		const step = Object.values(f.exempt.step).map((lines) => lines.join(", ") || "-").join(" and ");
+		console.log(`  (${f.mentions} mention(s) checked; payload spread at line ${f.exempt.spread.join(", ") || "-"}, user-delete line at ${f.exempt.del.join(", ") || "-"}, the step's two calls at ${step})`);
+	}
 }
 function pinExtras(c) {
 	// No other lib/ file names a tracked name, but for the flag's one entry in the
@@ -687,7 +885,7 @@ function pinExtras(c) {
 	try { lifted = liftRoutes(SRC).text; } catch (err) { c.ok("§8 the routes and helpers lift", false, err.message); }
 	if (lifted) {
 		const code = blankComments(lifted);
-		const ownText = [...SERVER_HELPERS.map((n) => {
+		const ownText = [...[...SERVER_HELPERS, STEP_HELPER].map((n) => {
 			const at = code.indexOf(`function ${n}(`);
 			return at < 0 ? "" : code.slice(at, code.indexOf("\n}\n", at));
 		}), ...ROUTE_PREFIXES.map((p) => { const at = code.indexOf(p); return at < 0 ? "" : code.slice(at, code.indexOf("\n});", at)); })].join("\n");
@@ -749,6 +947,10 @@ async function mutant(id, label, build, run) {
 	await staffSection(MAIN, SRC, true);
 	console.log("\n§7 the driver payload's spread");
 	await payloadSection(MAIN);
+	// Before §8, so the private, no-store check covers its 200s too.
+	console.log("\n§10 the onboarding signing step");
+	await stepSection(MAIN);
+	await stepRoutesSection(MAIN);
 	console.log("\n§8 the pin");
 	await pinSection(MAIN);
 	pinExtras(MAIN);
@@ -774,6 +976,33 @@ async function mutant(id, label, build, run) {
 		"onFile: emergencyContactsCount(req.session.user.id) } } : {}),",
 		"onFile: emergencyContactsCount(req.params.driverName) } } : {}),"),
 		(c, src) => payloadSection(c, src));
+	await mutant("M7", "the documents_signed step ignoring the contacts", () => mutate(SRC,
+		'if (step.stepDone && ob.status === "documents_pending") {',
+		'if (step.requiredSigned && ob.status === "documents_pending") {'),
+		(c, src) => stepSection(c, src));
+	await mutant("M8", "the fully_onboarded step ignoring the contacts", () => mutate(SRC,
+		'if (step.stepDone && ob.drug_test_result === "pass") {',
+		'if (step.requiredSigned && ob.drug_test_result === "pass") {'),
+		(c, src) => stepSection(c, src));
+	await mutant("M9", "onboardingAddsJudgedRow() ignoring the contacts", () => mutate(SRC,
+		`if (!${STEP_HELPER}(userId, ob).stepDone) return false;`,
+		`if (!${STEP_HELPER}(userId, ob).requiredSigned) return false;`),
+		(c, src) => stepSection(c, src));
+	await mutant("M10", "the step ignoring the flag", () => mutate(SRC,
+		"const contactsOk = !EMERGENCY_CONTACTS_ENABLED || emergencyContactsCount(userId) >= emergencyContactRules.MIN_CONTACTS;",
+		"const contactsOk = true;"),
+		(c, src) => stepSection(c, src));
+	await mutant("M11", "a driver already past the step held back too", () => mutate(SRC,
+		'stepDone: requiredSigned && (contactsOk || ob.status !== "documents_pending")',
+		"stepDone: requiredSigned && contactsOk"),
+		(c, src) => stepSection(c, src));
+	await mutant("M12", "every signed document counted, one outside ONBOARDING_DOCS too", () => mutate(SRC,
+		"const requiredSigned = ONBOARDING_DOCS.every((d) => signed.has(d.key));",
+		"const requiredSigned = signed.size === ONBOARDING_DOCS.length;"),
+		(c, src) => stepSection(c, src));
+	await mutant("M13", "the PUTs' step check removed", () => mutate(SRC,
+		'\t\tif (ob && ob.status === "documents_pending") await checkAndCompleteOnboarding(userId, req);\n', ""),
+		(c, src) => stepRoutesSection(c, src));
 
 	console.log(`\ntest-emergency-contacts-routes: ${passed} passed, ${failures.length} failed`);
 	if (failures.length) {

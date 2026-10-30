@@ -10825,8 +10825,9 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 // ============================================================
 // DRIVER EMERGENCY CONTACTS (EMERGENCY_CONTACTS_ENABLED; rules in lib/emergency-contacts.js)
 // ============================================================
-// Only these helpers, the four routes, the driver payload's count and the account
-// delete touch driver_emergency_contacts (pinned by scripts/test-emergency-contacts-routes.js).
+// Only these helpers, the four routes, the driver payload's count, the onboarding signing
+// step's count (onboardingSigningStepState()) and the account delete touch
+// driver_emergency_contacts (pinned by scripts/test-emergency-contacts-routes.js).
 const emergencyContactRules = require("./lib/emergency-contacts");
 
 // Off, every emergency-contact route answers 404 FEATURE_OFF, before any role check.
@@ -10946,6 +10947,18 @@ function saveEmergencyContacts(req, userId, driverLabel, body) {
 	return { status: 200, body: emergencyContactsBody(userId) };
 }
 
+// After a save, a driver still at the onboarding signing step may have finished it, so the
+// step is judged again as a signature judges it. Its failure is logged and never fails the
+// save, which is stored: the next save or drug-test upload judges the step again.
+async function emergencyContactsAfterSave(req, userId) {
+	try {
+		const ob = db.prepare("SELECT status FROM driver_onboarding WHERE user_id = ?").get(userId);
+		if (ob && ob.status === "documents_pending") await checkAndCompleteOnboarding(userId, req);
+	} catch (err) {
+		console.error("[emergency-contacts] onboarding step check failed:", err.code || "ERROR");
+	}
+}
+
 // GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test + SSN for a driver
 app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -11029,9 +11042,10 @@ app.get("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGa
 });
 
 // PUT /api/drivers-directory/:id/emergency-contacts — replace that driver's list, as
-// PUT /api/driver/me/emergency-contacts does; 409 NO_DRIVER_ACCOUNT or
-// DRIVER_ACCOUNT_AMBIGUOUS when the row names no Driver account or two.
-app.put("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), emergencyContactsWriteLimiter, (req, res) => {
+// PUT /api/driver/me/emergency-contacts does (a save can finish his onboarding signing
+// step); 409 NO_DRIVER_ACCOUNT or DRIVER_ACCOUNT_AMBIGUOUS when the row names no Driver
+// account or two.
+app.put("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGate, requireRole("Super Admin", "Dispatcher"), emergencyContactsWriteLimiter, async (req, res) => {
 	res.set("Cache-Control", "private, no-store");
 	try {
 		const target = emergencyContactsDirectoryTarget(req.params.id);
@@ -11043,6 +11057,7 @@ app.put("/api/drivers-directory/:id/emergency-contacts", emergencyContactsFlagGa
 				: { error: "No driver account is linked to this directory row. Contacts are kept on the driver's sign-in account.", code: "NO_DRIVER_ACCOUNT" });
 		}
 		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name, 120), req.body);
+		if (out.status === 200) await emergencyContactsAfterSave(req, account.id);
 		res.status(out.status).json(out.status === 200 ? { linked: true, userId: account.id, ...out.body } : out.body);
 	} catch (err) {
 		console.error("[emergency-contacts] staff save failed:", err.code || "ERROR");
@@ -18033,6 +18048,16 @@ app.get("/api/investor-outreach/log", requireRole("Super Admin"), (req, res) => 
 
 // === DRIVER ONBOARDING ENDPOINTS ===
 
+// The signing step (documents_pending -> documents_signed), one rule for checkAndCompleteOnboarding() and
+// onboardingAddsJudgedRow(): every ONBOARDING_DOCS document signed (no other document counts) and, with
+// EMERGENCY_CONTACTS_ENABLED, two contacts on file, which hold back only a driver still at the step.
+function onboardingSigningStepState(userId, ob) {
+	const signed = new Set(db.prepare("SELECT doc_key FROM onboarding_documents WHERE user_id = ? AND signed = 1").all(userId).map((r) => r.doc_key));
+	const requiredSigned = ONBOARDING_DOCS.every((d) => signed.has(d.key));
+	const contactsOk = !EMERGENCY_CONTACTS_ENABLED || emergencyContactsCount(userId) >= emergencyContactRules.MIN_CONTACTS;
+	return { requiredSigned, contactsOk, stepDone: requiredSigned && (contactsOk || ob.status !== "documents_pending") };
+}
+
 // Helper: check if onboarding is complete and finalize. `req` is the request
 // that got here (the driver signing, or the admin recording a drug test), the
 // actor on a withheld-carrier audit row.
@@ -18052,12 +18077,9 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 	}
 	const ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
 	if (!ob || ob.status === "fully_onboarded") return ob;
-	const signedCount = db.prepare(
-		"SELECT COUNT(*) AS cnt FROM onboarding_documents WHERE user_id = ? AND signed = 1"
-	).get(userId).cnt;
-	const allSigned = signedCount === ONBOARDING_DOCS.length;
-	// Update to documents_signed if all docs signed
-	if (allSigned && ob.status === "documents_pending") {
+	const step = onboardingSigningStepState(userId, ob);
+	// Update to documents_signed once the signing step is done
+	if (step.stepDone && ob.status === "documents_pending") {
 		db.prepare("UPDATE driver_onboarding SET status = 'documents_signed' WHERE user_id = ?").run(userId);
 		// Push a socket refresh to admin Applications views so the new signed
 		// state shows up without a manual reload. Without this, admins saw the
@@ -18201,8 +18223,8 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 		</div>`;
 		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
 	}
-	// Fully onboarded if all signed AND drug test passed
-	if (allSigned && ob.drug_test_result === "pass") {
+	// Fully onboarded once the signing step is done AND the drug test passed
+	if (step.stepDone && ob.drug_test_result === "pass") {
 		const now = new Date().toISOString();
 		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
 		notifyChange("applications");
@@ -37822,16 +37844,15 @@ function accountDirectorySyncLock(sync, jt) {
 	return directoryEditLockBlockers(sync.row, { carrier_name: sync.carrier }, { history: driverHistoryFloorMonth(sync.row.driver_name, jt) });
 }
 
-// Whether this checkAndCompleteOnboarding() call will add a judged row: every
-// document signed, and either the documents_pending → documents_signed step or a
-// passed drug test, for an account accountDirectoryRowJudged() judges. The same
-// reads the function makes, so it can read Job Tracking first and then run
-// without another await.
+// Whether this checkAndCompleteOnboarding() call will add a judged row: the
+// signing step done (onboardingSigningStepState()), and either the
+// documents_pending → documents_signed step or a passed drug test, for an account
+// accountDirectoryRowJudged() judges. The same reads the function makes, so it can
+// read Job Tracking first and then run without another await.
 function onboardingAddsJudgedRow(userId) {
 	const ob = db.prepare("SELECT status, drug_test_result FROM driver_onboarding WHERE user_id = ?").get(userId);
 	if (!ob || ob.status === "fully_onboarded") return false;
-	const signed = db.prepare("SELECT COUNT(*) AS cnt FROM onboarding_documents WHERE user_id = ? AND signed = 1").get(userId).cnt;
-	if (signed !== ONBOARDING_DOCS.length) return false;
+	if (!onboardingSigningStepState(userId, ob).stepDone) return false;
 	if (ob.status !== "documents_pending" && ob.drug_test_result !== "pass") return false;
 	const user = db.prepare("SELECT driver_name, company_name FROM users WHERE id = ?").get(userId);
 	return !!user && accountDirectoryRowJudged(user.driver_name, user.company_name);
@@ -48685,13 +48706,15 @@ app.get("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireR
 // PUT /api/driver/me/emergency-contacts — replace the signed-in driver's list. Body
 // { contacts: [{ id?, name, relationship, phone }] }, 2 to 5. 400 INVALID_BODY; 422
 // EMERGENCY_CONTACTS_MIN / _MAX, CONTACT_*_INVALID or CONTACT_PHONE_DUPLICATE with the
-// entry's index; 409 CONTACT_NOT_FOUND for an id not on his list.
-app.put("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), emergencyContactsWriteLimiter, (req, res) => {
+// entry's index; 409 CONTACT_NOT_FOUND for an id not on his list. A save can finish his
+// onboarding signing step (emergencyContactsAfterSave()).
+app.put("/api/driver/me/emergency-contacts", emergencyContactsFlagGate, requireRole("Driver"), emergencyContactsWriteLimiter, async (req, res) => {
 	res.set("Cache-Control", "private, no-store");
 	try {
 		const account = emergencyContactsOwnAccount(req);
 		if (!account) return res.status(403).json({ error: "Only a driver's own account has emergency contacts here.", code: "DRIVER_ACCOUNT_REQUIRED" });
 		const out = saveEmergencyContacts(req, account.id, auditText(account.driver_name || account.username, 120), req.body);
+		if (out.status === 200) await emergencyContactsAfterSave(req, account.id);
 		res.status(out.status).json(out.body);
 	} catch (err) {
 		console.error("[emergency-contacts] save failed:", err.code || "ERROR");
