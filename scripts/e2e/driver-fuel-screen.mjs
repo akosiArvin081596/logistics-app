@@ -305,9 +305,9 @@ const WORKING_RE = /minus|reserve|mpg|miles per gallon|%|until the tank is empty
 
 // ---------------------------------------------------------------- the steps
 const SCENES = [
-  { step: 'DF1', title: 'Before pickup', world: {}, expect: ['225', 'miles until you run out', 'To reach pickup', '140 mi', 'Uses about 30 gal. You have enough.', 'To finish this load', '420 mi', 'Uses about 80 gal. Add about 65 gal.'], badge: 'Add 65 gal' },
+  { step: 'DF1', title: 'Before pickup', world: {}, expect: ['225', 'miles until you run out', 'To reach pickup', '140 mi', 'Uses about 30 gal. You have enough.', 'To finish this load', '420 mi', 'Add about 65 gal.'], absent: ['Uses about 80 gal'], badge: 'Add 65 gal' },
   { step: 'DF2', title: 'In transit, enough', world: { leg: 'to_delivery', routeMiles: 180 }, expect: ['225', 'Uses about 35 gal. You have enough.'] },
-  { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'] },
+  { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'], absent: ['Uses about 35 gal'] },
   { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery', 'You need about 100 gal in the tank for the whole load. Check your gauge.'] },
   { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'You need about 145 gal in the tank to finish. Check your gauge.'] },
   { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel ?' },

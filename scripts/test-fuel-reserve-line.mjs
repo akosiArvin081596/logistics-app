@@ -301,8 +301,16 @@ if (v) {
   check('§7 before pickup: enough to reach the pickup, add to finish',
     rowsOf({}), [
       ['To reach pickup', '140 mi', 'ok', 'Uses about 30 gal. You have enough.'],
-      ['To finish this load', '420 mi', 'bad', 'Uses about 80 gal. Add about 65 gal.'],
+      ['To finish this load', '420 mi', 'bad', 'Add about 65 gal.'],
     ])
+  // An add row says only what to pump. "Uses about 80 gal" beside it invited a driver
+  // with ~105 gal on his gauge to skip the top-up (the re-check's Low 5).
+  {
+    const addLines = [{}, { pct: 3, routeMiles: 180, leg: 'to_delivery' }, { pct: 20, leg: 'to_delivery', routeMiles: 300 }, { fuelSource: 'carried' }]
+      .flatMap((o) => view(o).rows).filter((r) => r.tone === 'bad' && /^Add about|Uses about .*Add about/.test(r.line)).map((r) => r.line)
+    check('§7 an add row says only "Add about N gal.": no "Uses about" beside it',
+      [addLines.length >= 4, addLines.filter((l) => /Uses about/.test(l)), addLines.every((l) => /^Add about [\d,]+ gal\.$/.test(l))], [true, [], true])
+  }
   check('§7 in transit, enough', rowsOf({ leg: 'to_delivery', routeMiles: 180 }), [['To finish this load', '180 mi', 'ok', 'Uses about 35 gal. You have enough.']])
   check('§7 more than a full tank: refill on the way',
     rowsOf({ leg: 'to_delivery', routeMiles: 1040 }), [['To finish this load', '1,040 mi', 'bad', 'Uses about 195 gal. Fill up full, and plan another fuel stop on the way.']])
@@ -549,7 +557,7 @@ if (panelFactory) {
   const BEFORE = await on({})
   check('§8b before pickup: enough to reach the pickup, add to finish',
     blockText(BEFORE),
-    '225 miles until you run out Fuel level read 12 min ago To reach pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Uses about 80 gal. Add about 65 gal.')
+    '225 miles until you run out Fuel level read 12 min ago To reach pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Add about 65 gal.')
   {
     const t = textOf(BEFORE)
     check('§8b …and none of today\'s panel: no verdict card, hero, working line, "How we know", cells or notes',
@@ -579,12 +587,12 @@ if (panelFactory) {
   check('§8b sensor dropout', blockText(await on({ fuelSource: 'carried', leg: 'to_delivery', routeMiles: 180 })),
     "225 miles until you run out Your fuel sensor isn't reporting. This is an estimate. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. You have enough.")
   check('§8b refuel now', blockText(await on({ pct: 3, leg: 'to_delivery', routeMiles: 180 })),
-    'Refuel now Stop for fuel as soon as you can. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. Add about 60 gal.')
+    'Refuel now Stop for fuel as soon as you can. Fuel level read 12 min ago To finish this load 180 mi Add about 60 gal.')
   // Status and footer on one screen: the pickup row checks the gauge, and the
   // footers under it say why; neither shows without the other.
   check('§8b the reasons under the top, with the rows they explain (no "enough" beside an uncounted-miles footer)',
     blockText(await on({ positionAgeMinutes: 180, extraStops: true, afterAnotherLoad: true, routeSource: 'straight_line_estimate' })),
-    "225 miles until you run out Fuel level read 12 min ago To reach first pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi Uses about 80 gal. Add about 65 gal. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
+    "225 miles until you run out Fuel level read 12 min ago To reach first pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi Add about 65 gal. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
   for (const [o, footer] of [
     [{ extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
     [{ afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],

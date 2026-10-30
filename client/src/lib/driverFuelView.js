@@ -96,7 +96,9 @@ function rowOf(leg, b) {
   const need = toNum(leg.needInTankGallons);
   const row = (tone, line) => ({ key, label, miles: miles === null ? '' : `${milesText(miles)} mi`, tone, line });
   if (leg.status === 'enough' && uses !== null) return row('ok', `Uses about ${gal(uses)}. You have enough.`);
-  if (leg.status === 'add' && uses !== null && add !== null) return row('bad', `Uses about ${gal(uses)}. Add about ${gal(add)}.`);
+  // Only what to pump: a "uses about" figure beside it reads against the gauge and
+  // can talk a driver out of the top-up the planning rate says he needs.
+  if (leg.status === 'add' && add !== null) return row('bad', `Add about ${gal(add)}.`);
   if (leg.status === 'refill_on_way' && uses !== null) {
     return row('bad', `Uses about ${gal(uses)}. Fill up full, and plan another fuel stop on the way.`);
   }
