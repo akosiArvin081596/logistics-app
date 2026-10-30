@@ -289,6 +289,8 @@ section('§9 the Expenses table fits its panel: the short tag, compact actions, 
     [true, true, true, true, false])
   const tableHtml = (tab.match(/<table v-else class="data-table exp-table">[\s\S]*?<\/table>/) || [''])[0]
   check('the table: nine columns in its header and its row', [(tableHtml.match(/<col\b/g) || []).length, (tableHtml.match(/<th\b/g) || []).length], [9, 9])
+  check('the truck line under the driver carries data-field="truck" (the e2e money path B1 reads it there)',
+    (tableHtml.match(/<div v-if="e\.truck_unit" [^>]*data-field="truck"[^>]*>#\{\{ e\.truck_unit \}\}<\/div>/g) || []).length, 1)
   const style = tab.split('<style')[1] || ''
   const remOf = (cls) => { const m = style.match(new RegExp(`\\.exp-table col\\.${cls} \\{ width: ([\\d.]+)rem; \\}`)); return m ? Number(m[1]) : NaN }
   const fixedRem = ['col-select', 'col-date', 'col-driver', 'col-type', 'col-amount', 'col-receipt', 'col-status', 'col-actions'].map(remOf)

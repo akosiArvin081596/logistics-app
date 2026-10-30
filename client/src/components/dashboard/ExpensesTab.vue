@@ -435,7 +435,7 @@
               </td>
               <td>
                 <div>{{ e.driver }}</div>
-                <div v-if="e.truck_unit" class="cell-sub cell-line cell-mono" :title="'#' + e.truck_unit">#{{ e.truck_unit }}</div>
+                <div v-if="e.truck_unit" class="cell-sub cell-line cell-mono" data-field="truck" :title="'#' + e.truck_unit">#{{ e.truck_unit }}</div>
               </td>
               <td>
                 <div class="cell-line cell-strong" :title="e.vendor_normalized || e.vendor || ''">{{ e.vendor || '—' }}</div>
