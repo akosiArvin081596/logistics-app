@@ -82,6 +82,8 @@ const PNG_DRIVER = img("png", "made-up driver signature");
 const PNG_COMPANY = img("png", "made-up company signature");
 const PNG_OTHER = img("png", "made-up other signature");
 const JPEG_ANY = img("jpeg", "made-up jpeg signature");
+// A value the image check refuses; the runner checks it never reaches a log or the page.
+const REFUSED_URL = "https://example.com/made-up.png";
 
 const MINOR = {
 	reference: "PA-0000ABCD",
@@ -158,7 +160,7 @@ function bodyText(html) {
 	return body
 		.replace(/<!--[\s\S]*?-->/g, " ")
 		.replace(/<[^>]+>/g, " ")
-		.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#39;/g, "'")
+		.replace(/&nbsp;/g, " ").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&")
 		.replace(/\s+/g, " ")
 		.trim();
 }
@@ -416,7 +418,7 @@ function section3Cases(R) {
 			const realWarn = console.warn;
 			console.warn = (...a) => seen.push(a.map(String).join(" "));
 			try {
-				R.safeSignatureImages({ "Company signature": "https://example.com/made-up.png", "Witness signature": PNG_OTHER, ["L".repeat(500)]: PNG_OTHER },
+				R.safeSignatureImages({ "Company signature": REFUSED_URL, "Witness signature": PNG_OTHER, ["L".repeat(500)]: PNG_OTHER },
 					TEXT, "passenger_authorization");
 			} finally {
 				console.warn = realWarn;
@@ -424,7 +426,7 @@ function section3Cases(R) {
 			const all = seen.join("\n");
 			return seen.length === 3 && all.includes("\"Company signature\"") && all.includes("\"Witness signature\"") &&
 				all.includes(`"${"L".repeat(80)}"`) && !all.includes("L".repeat(81)) &&
-				!all.includes("example.com") && !all.includes(PNG_OTHER.slice(22));
+				!all.includes(REFUSED_URL) && !all.includes(PNG_OTHER.slice(22));
 		}],
 	];
 }
@@ -658,14 +660,14 @@ const holds = (fn) => { try { return fn() === true; } catch { return false; } };
 	await part("§4(c) a refused company image never reaches the page", async () => {
 		const rec = recorder();
 		const { error, warns } = await rendering(loadRenderer(RENDERER_SRC, rec), "passenger_authorization",
-			{ ...FINAL_MINOR, companySignatureImage: "https://example.com/made-up.png" });
+			{ ...FINAL_MINOR, companySignatureImage: REFUSED_URL });
 		if (error) throw error;
 		const doc = rec.docs[0];
 		eq(imagesIn(doc).length, 2, "§4(c) only the two checked images are placed");
 		ok(slotsOf(doc, IMAGE_LABELS.company).length === 1 && shown(slotsOf(doc, IMAGE_LABELS.company)[0]) === "Sam Example",
 			"§4(c) the company's slot keeps its text (the typed name)");
-		ok(!JSON.stringify(rec.args[0]).includes("example.com"), "§4(c) the refused value is not in what the page receives");
-		ok(warns.some((w) => w.includes("\"Company signature\"")) && warns.every((w) => !w.includes("example.com")), "§4(c) the log names the label, not the value");
+		ok(!JSON.stringify(rec.args[0]).includes(REFUSED_URL), "§4(c) the refused value is not in what the page receives");
+		ok(warns.some((w) => w.includes("\"Company signature\"")) && warns.every((w) => !w.includes(REFUSED_URL)), "§4(c) the log names the label, not the value");
 	});
 	await part("§4(d) a label named by both image rules gets one image per slot", async () => {
 		const real = POLICY_FIELD_MAPS.passenger_authorization;
@@ -740,11 +742,11 @@ const holds = (fn) => { try { return fn() === true; } catch { return false; } };
 			Object.keys(rec.args[0].signatureImagesByLabel || {}).length === 0, "§4(h) the page gets the single image and no per-label image");
 
 		const rec2 = recorder();
-		const refused = await rendering(loadRenderer(RENDERER_SRC, rec2), "equipment_policy", { ...data, signatureImage: "https://example.com/made-up.png" });
+		const refused = await rendering(loadRenderer(RENDERER_SRC, rec2), "equipment_policy", { ...data, signatureImage: REFUSED_URL });
 		if (refused.error) throw refused.error;
 		eq(imagesIn(rec2.docs[0]).length, 0, "§4(h) a non-data: image is refused, as before");
 		ok(slotsOf(rec2.docs[0], "Provider signature")[0].value === "Casey Example", "§4(h) ...and the typed signature fills the slot");
-		ok(refused.warns.length === 1 && refused.warns[0].includes("equipment_policy") && !refused.warns[0].includes("example.com"), "§4(h) ...with the one warning, as before");
+		ok(refused.warns.length === 1 && refused.warns[0].includes("equipment_policy") && !refused.warns[0].includes(REFUSED_URL), "§4(h) ...with the one warning, as before");
 	});
 	await part("§4(i) mobile_policy: the drawn signature never reaches the company's line", async () => {
 		const data = { fullName: "Casey Example", signatureText: "Casey Example", effectiveDate: "October 30, 2026", signatureImage: PNG_DRIVER };
