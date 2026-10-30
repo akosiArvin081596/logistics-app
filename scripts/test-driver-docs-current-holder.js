@@ -314,6 +314,8 @@ const driverDeps = (over = {}) => ({
 	invoicePayBasesOf,
 	ONBOARDING_DOCS: [],
 	DRIVER_TIME_OFF_SCREEN_ENABLED: false,
+	// Emergency contacts are off here (scripts/test-emergency-contacts-routes.js §7).
+	EMERGENCY_CONTACTS_ENABLED: false,
 	driverInstructions: { annotateDriverLoads() {} },
 	LOAD_PANEL_DOCUMENT_FILTER,
 	documentFiledUnder,

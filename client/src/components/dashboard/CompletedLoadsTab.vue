@@ -7,7 +7,7 @@
           v-if="needsReviewCount > 0"
           type="button"
           :style="reviewToggleStyle"
-          :title="needsReviewOnly ? 'Showing only loads that need review' : 'Show only loads where the dispatch workflow couldn’t fully extract the rate-con'"
+          :title="needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE"
           @click="needsReviewOnly = !needsReviewOnly"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -146,12 +146,20 @@
           <!-- Why the load is flagged, and where it can be fixed: a completed load
                isn't listed in Active Loads, so the fix is its Job Tracking row in
                Data Manager (Super Admin only; that page refuses a Payment change in
-               a closed month). -->
-          <p v-if="selectedJob && needsReview(selectedJob)" class="review-note" role="note">
-            {{ reviewReasonText(selectedJob) }}
+               a closed month). An unconfirmed pickup date has its own block below:
+               its closed-month variant can't be fixed anywhere. -->
+          <p v-if="reviewNoteText" class="review-note" role="note">
+            {{ reviewNoteText }}
             <template v-if="auth.isSuperAdmin">Fix it on the load's Job Tracking row in <RouterLink to="/data" class="review-note-link">Data Manager</RouterLink>. A closed month's Payment can't be changed.</template>
             <template v-else>A Super Admin can fix it in Data Manager. A closed month's Payment can't be changed.</template>
           </p>
+          <!-- An unconfirmed rate-con pickup date: why, and in an open month the
+               button that keeps the date as it is (the closed-month code has none). -->
+          <div v-if="selectedJob && pickupReview(selectedJob)" class="pickup-review" role="note">
+            <span>{{ pickupReviewText(selectedJob) }}</span>
+            <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
+          </div>
+          <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -272,6 +280,16 @@
         </div>
       </DialogContent>
     </Dialog>
+    <!-- "Mark confirmed" asks first only when the pane shows evidence against the
+         date: the driver's tap on another day, or a later rate con over a person's date. -->
+    <ConfirmModal
+      :open="!!pickupPrompt"
+      :title="pickupPrompt ? pickupPrompt.title : ''"
+      :message="pickupPrompt ? pickupPrompt.message : ''"
+      :confirm-text="pickupPrompt ? pickupPrompt.confirmText : 'Confirm'"
+      @confirm="answerPickupPrompt(true)"
+      @cancel="answerPickupPrompt(false)"
+    />
     <InvoiceDraftPreviewModal
       v-if="previewData"
       :open="previewOpen"
@@ -309,7 +327,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -328,7 +346,8 @@ import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
-import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
+import ConfirmModal from '../shared/ConfirmModal.vue'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
@@ -560,6 +579,62 @@ function downloadExport() {
 // filter bar became its own surface — the disabled state is :disabled now, so
 // the computed style object it needed is gone with it.
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
+// The review note's reasons, all but the pickup date (its block says it).
+const reviewNoteText = computed(() => (selectedJob.value ? reviewReasonText(selectedJob.value, { pickup: false }) : ''))
+// "Mark confirmed" (POST /api/loads/pickup-confirmed): keeps the open load's
+// Pickup Appointment as the day the pane shows. It asks first only when the
+// pane shows evidence against that day (runPickupConfirm()); cancelling sends
+// nothing. On success the badge clears at once, then the lists are read again;
+// a refusal stays on screen in the server's words. When the cell's day changed
+// since (409 PICKUP_CHANGED) the lists are read again too and the pane takes
+// its refreshed row.
+const canConfirmPickup = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+const pickupMarking = ref(false)
+const pickupMarkError = ref('')
+const pickupPrompt = ref(null)
+let pickupPromptAnswer = null
+function askPickup(prompt) {
+  return new Promise((resolve) => { pickupPromptAnswer = resolve; pickupPrompt.value = prompt })
+}
+function answerPickupPrompt(yes) {
+  const answer = pickupPromptAnswer
+  pickupPromptAnswer = null
+  pickupPrompt.value = null
+  if (answer) answer(yes)
+}
+watch(() => selectedJob.value && selectedJob.value._rowIndex, () => { pickupMarkError.value = ''; answerPickupPrompt(false) })
+async function markPickupConfirmed() {
+  const job = selectedJob.value
+  if (!job || pickupMarking.value || pickupPrompt.value) return
+  pickupMarkError.value = ''
+  const same = () => selectedJob.value && selectedJob.value._rowIndex === job._rowIndex
+  let changed = false
+  try {
+    const run = await runPickupConfirm(job, loadIdCol.value, {
+      ask: askPickup,
+      post: (url, body) => { pickupMarking.value = true; return api.post(url, body) },
+    })
+    if (!run.sent) return
+    if (same()) selectedJob.value = withoutPickupReview(selectedJob.value)
+    toast(pickupConfirmedToast(run.res), 'success')
+  } catch (err) {
+    changed = pickupChanged(err)
+    if (same()) pickupMarkError.value = pickupConfirmErrorText(err)
+    if (!changed) return
+  } finally {
+    pickupMarking.value = false
+  }
+  try { await dashboard.refresh() } catch { /* the socket refresh will catch up */ }
+  await nextTick()
+  if (!same()) return
+  if (changed) {
+    const row = freshPane(selectedJob.value, props.jobs)
+    if (row) selectedJob.value = row
+    return
+  }
+  const fresh = freshReview(selectedJob.value, props.jobs)
+  if (fresh) selectedJob.value = { ...selectedJob.value, _review: fresh }
+}
 // The server's note when it lists a withheld load's documents by type and time only.
 const docsWithheldNote = ref('')
 // --- Document management (Super Admin + Dispatcher) -------------------------
@@ -1038,6 +1113,23 @@ const detailSections = computed(() => {
 }
 .review-note-link { color: #92400e; font-weight: 600; text-decoration: underline; }
 .review-note-link:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; border-radius: 2px; }
+/* An unconfirmed rate-con pickup date, amber like the review note; the button
+   wraps under the text on a phone. */
+.pickup-review {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem;
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb;
+  color: #92400e; font-size: 0.8125rem; line-height: 1.4;
+}
+.pickup-review > span { flex: 1 1 16rem; min-width: 0; }
+.pickup-review-btn {
+  padding: 0.35rem 0.7rem; font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border: 1px solid #f59e0b; border-radius: 6px; background: #ffffff; color: #92400e;
+  cursor: pointer; white-space: nowrap;
+}
+.pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
+.pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */
 .doc-del {

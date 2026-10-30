@@ -513,6 +513,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		// The driver's own time-off screen is off here (its subject is
 		// scripts/test-driver-page-role-gate.js §7).
 		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
+		// So are emergency contacts (scripts/test-emergency-contacts-routes.js §7).
+		EMERGENCY_CONTACTS_ENABLED: false,
 		// So are the load-instructions codes (scripts/test-driver-page-role-gate.js §8).
 		driverInstructions: { annotateDriverLoads() {} },
 		// The per-load document counts (scripts/test-driver-docs-current-holder.js §4).

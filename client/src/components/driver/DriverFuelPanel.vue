@@ -14,6 +14,32 @@
     <div v-if="idle" class="dfp-idle">Open this section to load fuel details.</div>
 
     <template v-else>
+      <!-- The driver gallons flag on: the answers carry `driverFuel`, and this part
+           shows only its plain figures (lib/driverFuelView.js), with no working.
+           Without the block, the v-else below is the panel exactly as before. -->
+      <template v-if="newScreen">
+        <section v-if="fuelView" class="dff" data-testid="driver-fuel" role="status" aria-live="polite">
+          <div class="dff-top" :class="'tone-' + topTone">
+            <p class="dff-head" :class="{ 'dff-head-words': fuelView.top.kind !== 'miles' }">{{ fuelView.top.headline }}</p>
+            <p class="dff-sub">{{ fuelView.top.sub }}</p>
+            <p v-for="n in fuelView.top.notes" :key="n" class="dff-note">{{ n }}</p>
+            <p v-if="fuelView.top.readAgo" class="dff-stamp">{{ fuelView.top.readAgo }}</p>
+          </div>
+          <div v-for="row in fuelView.rows" :key="row.key" class="dff-row" :class="'row-' + row.tone" data-testid="driver-fuel-row">
+            <p class="dff-row-head">
+              <span class="dff-row-label">{{ row.label }}</span>
+              <span v-if="row.miles" class="dff-row-miles">{{ row.miles }}</span>
+            </p>
+            <p class="dff-row-line">{{ row.line }}</p>
+          </div>
+          <p v-if="fuelView.rowsNote" class="dff-rows-note">{{ fuelView.rowsNote }}</p>
+          <p v-for="f in fuelView.footers" :key="f" class="dff-foot">{{ f }}</p>
+        </section>
+        <div v-else-if="rangeLoading || planLoading" class="dfp-loading">Reading your fuel level…</div>
+        <div v-else class="dfp-error">{{ FUEL_REQUEST_FAILED }}</div>
+      </template>
+
+      <template v-else>
       <!-- ── 1. Does this run fit in the tank? ────────────────────────────
            First, biggest and colour-coded, because it is the only question the
            driver actually has. Everything below it is the evidence for it.
@@ -216,6 +242,7 @@
       <div v-else-if="rangeError" class="dfp-error">{{ rangeError }}</div>
 
       <van-empty v-else :description="noFuelText" image="search" :image-size="60" />
+      </template>
 
       <!-- ── 3. Where to stop ──────────────────────────────────────────────
            When the run doesn't fit, this stops being a price list and becomes
@@ -225,7 +252,7 @@
       <div class="dfp-section-title" :class="{ urgent: stopsRequired }">
         {{ stopsRequired ? 'Where to fuel up' : 'Diesel stops on your route' }}
       </div>
-      <p v-if="stopsRequired && actionText" class="dfp-stops-lead">{{ actionText }}</p>
+      <p v-if="stopsRequired && stopsLead" class="dfp-stops-lead">{{ stopsLead }}</p>
 
       <div v-if="stopsLoading" class="dfp-loading">Finding diesel stops along your route…</div>
 
@@ -319,7 +346,8 @@
 // same load must not re-bill the Google Places lookup.
 //
 // Cached per loadId, no TTL: a reopen is guaranteed free. Fresh numbers come
-// from the panel's explicit Refresh button. (This is the one behaviour
+// from the panel's explicit Refresh button; with the driver gallons flag on, also
+// from an open after 15 minutes (NUMBERS_MAX_AGE_MS below). (This is the one behaviour
 // deliberately NOT ported from FuelFinderPanel, whose reloadAll() refetches on
 // every prop change.)
 const CACHE_MAX = 8
@@ -373,6 +401,7 @@ import {
   milesText,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
+import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
 
 const api = useApi()
 
@@ -399,6 +428,8 @@ const rangeError = ref('')
 const rangeLoading = ref(false)
 const plan = ref(null)
 const planError = ref('')
+// The failed trip-plan request ({ status, code }), for the gallons rows' reason.
+const planProblem = ref(null)
 const planLoading = ref(false)
 const stops = ref([])
 const stopsError = ref('')
@@ -444,8 +475,28 @@ const heroTone = computed(() => {
   return fuelLow.value ? 'bad' : 'ok'
 })
 
+/* ── the driver gallons block (flag on) ────────────────────────────────────
+   The trip plan's block when there is one (it carries the rows), else the range
+   answer's (the top only). No block and no flag-on 400 code: the flag is off. */
+const planBlock = computed(() => driverFuelOf(plan.value))
+const fuelBlock = computed(() => planBlock.value || driverFuelOf(range.value))
+const newScreen = computed(() => !!fuelBlock.value || flagOnProblem(planProblem.value))
+const fuelView = computed(() =>
+  fuelBlock.value
+    ? driverFuelView(fuelBlock.value, { planProblem: planBlock.value ? null : planProblem.value })
+    : null,
+)
+// The colour comes from the block, like every figure on this screen: the verdict
+// is worked out on other figures and can disagree with them.
+const topTone = computed(() => (fuelBlock.value ? driverFuelTone(fuelBlock.value) : 'unknown'))
+// With a block on screen the stops section's urgency and lead are the block's too.
+const blockStops = computed(() => (fuelBlock.value ? driverFuelStops(fuelBlock.value) : null))
+
 const routeText = computed(() => milesText(plan.value && plan.value.routeMiles))
-const stopsRequired = computed(() => !!(plan.value && plan.value.fuelStopsRecommended))
+const stopsRequired = computed(() =>
+  blockStops.value ? blockStops.value.required : !!(plan.value && plan.value.fuelStopsRecommended),
+)
+const stopsLead = computed(() => (blockStops.value ? blockStops.value.lead : actionText.value))
 
 // The instruction. `refuelWithinMiles` is floored at 0 by the server, and 0 is
 // not "no limit" — it means the margin is already gone, so it has to read as
@@ -753,11 +804,14 @@ async function fetchStops(key) {
 // an error banner: a driver who sees nothing where a verdict should be will read
 // it as "fine". The 400s are the routine ones — a load nobody has geocoded, or a
 // truck with no recent fix — and they are the caller's normal state, not a fault.
-async function fetchPlan(key, { force = false } = {}) {
+//
+// `fresh`: the section is opening, so a flag-on plan past NUMBERS_MAX_AGE_MS is
+// asked for again rather than reused (the collapsed badge's prefetch reuses it).
+async function fetchPlan(key, { force = false, fresh = false } = {}) {
   if (!key || !props.runnable) return { plan: null, error: '' }
   if (!force) {
     const hit = planCache.get(key)
-    if (hit) return hit
+    if (hit && !(fresh && numbersExpired(hit))) return hit
     const pending = planInflight.get(key)
     if (pending) return pending
   }
@@ -771,25 +825,41 @@ async function fetchPlan(key, { force = false } = {}) {
 }
 
 async function requestPlan(key) {
+  const at = Date.now()
   try {
     const d = await api.get(`/api/fuel/trip-plan?loadId=${encodeURIComponent(key)}`)
-    if (d && d.ok !== false) return { plan: d, error: '' }
-    return { plan: null, error: '' }
+    if (d && d.ok !== false) return { plan: d, error: '', at }
+    return { plan: null, error: '', at }
   } catch (e) {
     const status = e?.status
+    // Kept for the gallons rows (flag on), which word each failure themselves.
+    const problem = { status: status ?? 0, code: e?.code || '' }
     if (status === 400) {
       return {
         plan: null,
         error:
           "We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position.",
+        problem,
+        at,
       }
     }
     if (status === 429) {
-      return { plan: null, error: 'Checked too many times just now — try again in a few minutes.' }
+      return { plan: null, error: 'Checked too many times just now — try again in a few minutes.', problem, at }
     }
-    if (status === 404) return { plan: null, error: '' }
-    return { plan: null, error: "Couldn't check whether this run fits your fuel." }
+    if (status === 404) return { plan: null, error: '', problem, at }
+    return { plan: null, error: "Couldn't check whether this run fits your fuel.", problem, at }
   }
+}
+
+// Flag on only: numbers older than this are asked for again when the section
+// opens, so a phone left open since morning doesn't show the morning's figures at
+// noon. Flag off, nothing here expires and the cache is as it always was.
+const NUMBERS_MAX_AGE_MS = 15 * 60 * 1000
+function numbersExpired(entry) {
+  if (!entry) return false
+  const flagOn = !!(driverFuelOf(entry.plan) || driverFuelOf(entry.range)
+    || flagOnProblem(entry.problem) || flagOnProblem(entry.planProblem))
+  return flagOn && Date.now() - (Number(entry.at) || 0) > NUMBERS_MAX_AGE_MS
 }
 
 function apply(entry) {
@@ -797,6 +867,7 @@ function apply(entry) {
   rangeError.value = entry.rangeError
   plan.value = entry.plan
   planError.value = entry.planError
+  planProblem.value = entry.planProblem || null
   stops.value = entry.stops
   livePriceCount.value = entry.livePriceCount
   stopsError.value = entry.stopsError
@@ -807,40 +878,54 @@ function apply(entry) {
   emit('plan', entry.plan || null)
 }
 
-async function fetchAll(key, { force = false } = {}) {
-  const [r, s, pl] = await Promise.all([fetchRange(), fetchStops(key), fetchPlan(key, { force })])
+// `keep`: an expired flag-on entry whose stops are reused, because a Places
+// lookup is billed and the stops along a route don't go stale in 15 minutes.
+async function fetchAll(key, { force = false, keep = null } = {}) {
+  const [r, s, pl] = await Promise.all([
+    fetchRange(),
+    keep ? { stops: keep.stops, livePriceCount: keep.livePriceCount, error: keep.stopsError } : fetchStops(key),
+    fetchPlan(key, { force: force || !!keep, fresh: true }),
+  ])
   return {
     range: r.range,
     rangeError: r.error,
     plan: pl.plan,
     planError: pl.error,
+    planProblem: pl.problem || null,
     stops: s.stops,
     livePriceCount: s.livePriceCount,
     stopsError: s.error,
+    at: pl.at || Date.now(),
   }
 }
 
 async function load({ force = false } = {}) {
   const key = props.loadId || ''
+  let keep = null
   if (!force) {
     const hit = cacheGet(key)
     // Synchronous — nothing before this line awaits, so a reopen paints the
     // cached state immediately and issues no request at all.
-    if (hit) return apply(hit)
+    if (hit && !numbersExpired(hit)) return apply(hit)
+    // Flag on and older than 15 minutes: paint it, then ask for the numbers again.
+    if (hit) {
+      apply(hit)
+      keep = hit
+    }
   }
   rangeLoading.value = true
-  stopsLoading.value = true
+  stopsLoading.value = !keep
   // Only spinner-over the verdict when there isn't one yet: the prefetch below
   // usually means there is, and replacing a standing "you will not make it" with
   // a spinner every time the section is opened is the one flicker that matters.
   planLoading.value = !plan.value
   rangeError.value = ''
-  stopsError.value = ''
+  if (!keep) stopsError.value = ''
   planError.value = ''
 
   let p = force ? null : inflight.get(key)
   if (!p) {
-    p = fetchAll(key, { force }).then((entry) => {
+    p = fetchAll(key, { force, keep }).then((entry) => {
       cacheSet(key, entry)
       return entry
     })
@@ -864,6 +949,7 @@ async function load({ force = false } = {}) {
       rangeError: 'Could not load fuel details.',
       plan: null,
       planError: '',
+      planProblem: null,
       stops: [],
       livePriceCount: 0,
       stopsError: '',
@@ -905,6 +991,7 @@ watch(
     if (!key || !props.runnable) {
       plan.value = null
       planError.value = ''
+      planProblem.value = null
       emit('plan', null)
       return
     }
@@ -915,6 +1002,7 @@ watch(
     if (plan.value && !entry.plan) return
     plan.value = entry.plan
     planError.value = entry.error
+    planProblem.value = entry.problem || null
     planLoading.value = false
     emit('plan', entry.plan || null)
   },
@@ -1025,6 +1113,113 @@ watch(
   background: var(--bg, #f5f6fa);
   border: 1px solid var(--border, #e2e4ea);
   border-radius: 9px;
+}
+
+/* ---- driver gallons (flag on) ----
+   One column, phone first, capped on a wide screen so lines stay short. Each
+   row's colour repeats its wording and never replaces it. */
+.dff {
+  max-width: 520px;
+  margin: 0.25rem 0.5rem 0.5rem;
+}
+.dff-top {
+  padding: 0.35rem 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--border, #e2e4ea);
+}
+.dff-head {
+  margin: 0;
+  font-size: 2.35rem;
+  font-weight: 800;
+  line-height: 1.05;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+}
+.dff-head.dff-head-words {
+  font-size: 1.5rem;
+  font-variant-numeric: normal;
+}
+.dff-top.tone-warn .dff-head {
+  color: #b45309;
+}
+.dff-top.tone-bad .dff-head {
+  color: #b91c1c;
+}
+.dff-top.tone-unknown .dff-head {
+  color: var(--text, #1f2937);
+}
+.dff-sub {
+  margin: 0.3rem 0 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text, #1f2937);
+}
+.dff-note {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+}
+.dff-stamp {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-dim, #6b7085);
+}
+.dff-row {
+  padding: 0.75rem 0.25rem;
+  border-bottom: 1px solid var(--border, #e2e4ea);
+}
+.dff-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text, #1f2937);
+}
+.dff-row-miles {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dff-row-line {
+  margin: 0.3rem 0 0;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  color: var(--text, #1f2937);
+}
+.dff-row.row-ok .dff-row-line {
+  color: #166534;
+}
+.dff-row.row-bad .dff-row-line {
+  color: #b91c1c;
+  font-weight: 700;
+}
+.dff-row.row-unknown .dff-row-line {
+  color: #92400e;
+}
+.dff-rows-note {
+  margin: 0.65rem 0 0;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text, #1f2937);
+  background: var(--bg, #f5f6fa);
+  border: 1px solid var(--border, #e2e4ea);
+  border-radius: 9px;
+}
+.dff-foot {
+  margin: 0.55rem 0.25rem 0;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: var(--text-dim, #6b7085);
 }
 
 /* ---- range hero ---- */

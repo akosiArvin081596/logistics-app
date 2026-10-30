@@ -784,6 +784,9 @@ async function main() {
 		city: "", state: "", zip: "",
 	});
 	secrets += setCols("drivers_directory", { address: "REDACTED", city: "", state: "", zip: "" });
+	// A driver's emergency contacts are third parties' names and numbers. The
+	// relationship stays: it identifies no one alone and keeps the copy testable.
+	secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });
 	summary.push(`bank / tax / identity fields: ${secrets} row-update(s) redacted`);
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
@@ -1175,6 +1178,10 @@ const REDACTED_LITERAL = [
 	["job_applications", "phone", PLACEHOLDER_PHONE, "applicant phone"],
 	["job_applications", "cell", PLACEHOLDER_PHONE, "applicant mobile"],
 	["sheet_job_tracking", "phone_number", PLACEHOLDER_PHONE, "sheet contact phone"],
+	// Stage 3e's emergency contacts: neither value is email- or SSN-shaped, so
+	// these two rows are all that notices a scrub that stopped matching.
+	["driver_emergency_contacts", "contact_name", "REDACTED", "emergency contact name"],
+	["driver_emergency_contacts", "contact_phone", PLACEHOLDER_PHONE, "emergency contact phone number"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],

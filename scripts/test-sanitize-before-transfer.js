@@ -46,6 +46,13 @@
 //   exactly one account, a Super Admin, from the environment only. The C-series
 //   mutants in section 15 write a known password and break each guard.
 //
+// WHY IT GREW AN EMERGENCY-CONTACTS HALF
+//
+//   A driver's emergency contacts (driver_emergency_contacts) are third
+//   parties' names and numbers, neither email- nor SSN-shaped. Section 16
+//   grades the column scrub on the artifact, --verify on a planted survivor,
+//   and the mutants M11 (the scrub dropped) and E1 (its assertion dropped).
+//
 // ⚠️ WHAT MAKES THIS TEST NON-VACUOUS, and what would quietly make it vacuous.
 //
 //   • collectLeaks() guards EVERY entry with has_(table, column). A column the
@@ -160,6 +167,12 @@ const FAKE = {
 	cdlFront: "data:image/jpeg;base64,Q0RMRlJPTlRQSVhFTFNfTVVTVF9OT1RfU1VSVklWRQ==",
 	cdlBack: "data:image/jpeg;base64,Q0RMQkFDS1BJWEVMU19NVVNUX05PVF9TVVJWSVZF",
 	medCard: "data:image/jpeg;base64,TUVEQ0FSRFBJWEVMU19NVVNUX05PVF9TVVJWSVZF",
+	// A driver's emergency contacts: third parties' names and numbers, stored as
+	// E.164. Neither email- nor SSN-shaped, so only the column list reaches them.
+	contactNameA: "Robin Contactsample",
+	contactNameB: "Morgan Contactsample",
+	contactPhoneA: "+15125550161",
+	contactPhoneB: "+15125550162",
 };
 // The sha256 an invitation link is stored as (investor_invites.token_sha256).
 const INVITE_TOKEN_HASH = "1a2b3c4d".repeat(8);
@@ -302,6 +315,8 @@ const MUST_NOT_SURVIVE = [
 	// it and MUST_NOT_SURVIVE is the only thing that proves the list still works.
 	FAKE.cdlFront, FAKE.cdlBack, FAKE.medCard,
 	FAKE.city, FAKE.zip,
+	// Emergency contacts (section 16).
+	FAKE.contactNameA, FAKE.contactNameB, FAKE.contactPhoneA, FAKE.contactPhoneB,
 ];
 
 // The two evidence columns refresh-env.js deliberately KEEPS. Asserted so that
@@ -380,6 +395,7 @@ function seedDatabase(dbPath) {
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, sender TEXT, body TEXT, created_at TEXT);
 		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY, action TEXT, details TEXT, created_at TEXT);
 		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, recipient TEXT, subject TEXT, created_at TEXT);
+		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL, contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by INTEGER NOT NULL DEFAULT 0, updated_by INTEGER NOT NULL DEFAULT 0);
 	`);
 
 	// super_admin starts with a forced password change pending: operator access
@@ -505,6 +521,11 @@ function seedDatabase(dbPath) {
 	const dr = db.prepare("INSERT INTO load_invoice_drafts (id,load_id,recipient,subject,created_at) VALUES (?,?,?,?,?)");
 	dr.run(1, "562620213", FREE.agent, "Invoice INV-SK-2026W19-01", "2026-08-02");
 	dr.run(2, "562620214", FREE.billing, "Invoice INV-SK-2026W19-02", "2026-08-02");
+
+	// sam.driver's two emergency contacts (section 16).
+	const ec = db.prepare("INSERT INTO driver_emergency_contacts (user_id,position,contact_name,relationship,contact_phone,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?,?)");
+	ec.run(3, 1, FAKE.contactNameA, "Spouse", FAKE.contactPhoneA, "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", 3, 3);
+	ec.run(3, 2, FAKE.contactNameB, "Sibling", FAKE.contactPhoneB, "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", 3, 3);
 
 	db.close();
 }
@@ -1773,6 +1794,12 @@ function extractFn(src, name) {
 			` OR length(CAST("${"$"}{c}" AS BLOB)) <> length("${"$"}{c}")`,
 			``,
 			/audit_trail\.details: \d+ value\(s\) matching/);
+		// A driver's emergency contacts: third parties' names and numbers, which
+		// the free-text sweep cannot see, so only REDACTED_LITERAL can refuse.
+		scrubMutant("M11", "the driver_emergency_contacts scrub is dropped",
+			`secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });`,
+			"",
+			/emergency contact (name|phone number)\(s\) survived un-replaced in driver_emergency_contacts\.contact_(name|phone)/);
 
 		// ===================================================================
 		// C-SERIES — the password half (sections 13 and 14).
@@ -1915,6 +1942,67 @@ function extractFn(src, name) {
 				const who = accountsAccepting(gunzipToFile(r.artifact, path.join(dir, "mutant.db")), OPERATOR_PW);
 				return { caught: who.length > 0, detail: who.length ? `the artifact accepts it for ${who[0].username} — section 14 fails` : "SURVIVED" };
 			});
+	}
+
+	// =======================================================================
+	section("16. Driver emergency contacts — names and numbers never leave");
+	{
+		const Database = require("better-sqlite3");
+		let rows = [];
+		{
+			const db = openDb(artifactDb);
+			try { rows = db.prepare("SELECT contact_name, relationship, contact_phone FROM driver_emergency_contacts ORDER BY position").all(); }
+			catch { rows = []; }
+			finally { db.close(); }
+		}
+		check("both contact rows are still in the artifact", rows.length === 2, `${rows.length} row(s)`);
+		check("each contact name reads REDACTED", rows.length === 2 && rows.every((r) => r.contact_name === "REDACTED"),
+			JSON.stringify(rows.map((r) => r.contact_name)));
+		check("each contact number reads 555-0100", rows.length === 2 && rows.every((r) => r.contact_phone === "555-0100"),
+			JSON.stringify(rows.map((r) => r.contact_phone)));
+		check("the relationship is kept (it identifies no one alone)",
+			JSON.stringify(rows.map((r) => r.relationship)) === JSON.stringify(["Spouse", "Sibling"]), JSON.stringify(rows.map((r) => r.relationship)));
+
+		// A planted survivor: the clean artifact with one made-up name and one
+		// number put back, as a scrub that stopped matching would leave them.
+		const planted = path.join(readDir, "planted-contacts.db");
+		fs.copyFileSync(artifactDb, planted);
+		{
+			const db = new Database(planted);
+			try {
+				db.prepare("UPDATE driver_emergency_contacts SET contact_name = ? WHERE position = 1").run("Casey Plantedname");
+				db.prepare("UPDATE driver_emergency_contacts SET contact_phone = ? WHERE position = 2").run("+15125550163");
+			} catch { /* no table: the checks below fail by name */ }
+			finally { db.close(); }
+		}
+		const NAME_RE = /1 emergency contact name\(s\) survived un-replaced in driver_emergency_contacts\.contact_name/;
+		const PHONE_RE = /1 emergency contact phone number\(s\) survived un-replaced in driver_emergency_contacts\.contact_phone/;
+		const namesBoth = (out) => NAME_RE.test(out) && PHONE_RE.test(out);
+		const v = run(["--verify", planted]);
+		check("--verify refuses a planted contact name and number, naming each column", v.code === 1 && namesBoth(v.out),
+			v.code === 1 ? (namesBoth(v.out) ? "" : "refused, but did not name both columns") : `exit ${v.code}`);
+		const clean = run(["--verify", artifactDb]);
+		check("...and passes the clean artifact", clean.code === 0, `exit ${clean.code}`);
+
+		// MUTANT E1: the two REDACTED_LITERAL rows dropped. The scrub still runs,
+		// so the artifact is clean; only --verify on a planted survivor can tell.
+		const dir = path.join(ROOT, "mutants", "E1");
+		fs.mkdirSync(dir, { recursive: true });
+		const src = fs.readFileSync(SCRIPT, "utf8");
+		const mutated = src.replace(/\n\t\["driver_emergency_contacts", "contact_name", [^\n]*\n\t\["driver_emergency_contacts", "contact_phone", [^\n]*\n/, "\n");
+		const applied = mutated !== src;
+		check("E1: the REDACTED_LITERAL rows dropped — actually mutated the shipped source", applied, applied ? "" : "anchor not found");
+		if (applied) {
+			const script = path.join(dir, "refresh-env.js");
+			fs.writeFileSync(script, mutated);
+			try { fs.symlinkSync(NODE_MODULES, path.join(dir, "node_modules"), "dir"); } catch {}
+			const parsed = spawnSync(process.execPath, ["--check", script], { encoding: "utf8" });
+			check("E1: the mutant still parses", parsed.status === 0, parsed.status === 0 ? "" : "the mutation broke the syntax");
+			const m = runScript(script, ["--verify", planted], dir);
+			check("E1: is caught — the mutant's --verify no longer names the planted survivors", parsed.status === 0 && !(m.code === 1 && namesBoth(m.out)), `exit ${m.code}`);
+		} else {
+			check("E1: is caught", false, "not evaluated");
+		}
 	}
 
 	// =======================================================================

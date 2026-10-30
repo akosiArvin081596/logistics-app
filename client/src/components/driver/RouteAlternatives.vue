@@ -11,10 +11,10 @@
         <div class="alt-eta">{{ formatEta(alt.etaMinutes) }}</div>
         <div class="alt-dist">{{ alt.distanceMiles }} mi</div>
         <div class="alt-meta">
-          <span v-if="alt.fuelLiters != null" class="alt-meta-item">
+          <span v-if="showFuel && alt.fuelLiters != null" class="alt-meta-item">
             <span class="alt-meta-icon">⛽</span>{{ formatGallons(alt.fuelLiters) }} gal
           </span>
-          <span v-else class="alt-meta-item alt-meta-dim">⛽ —</span>
+          <span v-else-if="showFuel" class="alt-meta-item alt-meta-dim">⛽ —</span>
           <span v-if="alt.tollPriceUsd != null && alt.tollPriceUsd > 0" class="alt-meta-item alt-toll">
             <span class="alt-meta-icon">💰</span>${{ alt.tollPriceUsd.toFixed(2) }}
           </span>
@@ -31,6 +31,8 @@ defineProps({
   alternatives: { type: Array, required: true },
   recommendedIdx: { type: Number, default: 0 },
   selectedIdx: { type: Number, default: 0 },
+  // False while the Fuel section shows the server's gallons (driver gallons flag on).
+  showFuel: { type: Boolean, default: true },
 })
 defineEmits(['select'])
 
