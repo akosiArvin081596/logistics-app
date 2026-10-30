@@ -142,6 +142,8 @@ POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter 
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
+GET /api/financials/overview · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7c94116b08cc
+GET /api/financials/overview.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3bc178b2c5a0
 GET /api/financials/report · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a7dd6284b3d1
 GET /api/financials/report.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2a429f32c848
 GET /api/financials/settings · requireRole("Super Admin")=anon@12b84c4b0134 · inline@256b07247a52

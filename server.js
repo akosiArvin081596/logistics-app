@@ -109,6 +109,7 @@ const financialsCalc = require("./lib/financials-calc");
 const loadPayDays = require("./lib/load-pay-days");
 const tripWorkDays = require("./lib/trip-work-days");
 const financialsReport = require("./lib/financials-report");
+const financialsOverview = require("./lib/financials-overview");
 const invoiceMonthSplit = require("./lib/invoice-month-split");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
@@ -63952,7 +63953,9 @@ function financialsReportQuery(q) {
 // settings), and none of Financials' own (reserve, depreciation, overhead,
 // investor payouts), whatever the cost settings say: GET /api/financials reads
 // the report this way, so every figure it returns is on the books' one basis.
-async function buildFinancialsReport({ from, to, granularity, groupBy, books: given = null, ledgerOnly = false }) {
+// `keepItems`: also return the items it read and its driver key, for the
+// overview's checks (never for a route's response).
+async function buildFinancialsReport({ from, to, granularity, groupBy, books: given = null, ledgerOnly = false, keepItems = false }) {
 	const books = given || await buildFinancialsLedger();
 	const settings = financialsSettings();
 	const closedSettings = closedMonthSettings();
@@ -64014,6 +64017,9 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 			});
 		}
 	}
+	// A name that reads as a built-in property name is no driver's
+	// (driverNameForTotals()), as everywhere money is totalled by driver.
+	const driverKey = (name) => normalizeDriverName(driverNameForTotals(name));
 	const milesIndex = getLoadMilesIndex();
 	const report = financialsReport.buildReport({
 		items, from, to, granularity, groupBy, settingsFor,
@@ -64023,9 +64029,7 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 			truckLabel,
 			loadKey: (id) => loadMilesLib.loadMilesKey(id),
 			loadOf: (lk) => loads.get(lk) || null,
-			// A name that reads as a built-in property name is no driver's
-			// (driverNameForTotals()), as everywhere money is totalled by driver.
-			driverKey: (name) => normalizeDriverName(driverNameForTotals(name)),
+			driverKey,
 			driverLabel: (k) => displayNames.get(k) || k,
 			ownerLabel: (id) => (id ? (ownerNames.get(id) || `Owner #${id}`) : "Company"),
 		},
@@ -64060,7 +64064,46 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 		},
 		overlaps: books.overlaps.length,
 		generatedAt: new Date().toISOString(),
+		...(keepItems ? { items, driverKey } : {}),
 	};
+}
+
+// The Financials overview (lib/financials-overview.js). Money shown for outside
+// use, so dormant: on only when exactly "true"; off, its routes answer 404
+// before reading anything.
+const FINANCIALS_OVERVIEW_ENABLED = process.env.FINANCIALS_OVERVIEW_ENABLED === "true";
+
+// The overview's period: a preset on the business day, or from–to checked as
+// the report checks them.
+function financialsOverviewQuery(query) {
+	return financialsOverview.periodQuery(query, { today: appDay(new Date()), checkRange: (from, to) => financialsReportQuery({ from, to }) });
+}
+
+// One reading of the books, then the report Fleet P&L shows (cost settings
+// applied) by fleet, truck, driver and load, monthly so the checks see each
+// month. The overview adds no money math of its own.
+async function buildFinancialsOverview({ preset, from, to }) {
+	const books = await buildFinancialsLedger();
+	const report = (groupBy, keepItems = false) => buildFinancialsReport({ from, to, granularity: "month", groupBy, books, ledgerOnly: false, keepItems });
+	const fleet = await report("fleet", true);
+	const trucks = await report("truck");
+	const drivers = await report("driver");
+	const loads = await report("load");
+	const frozenSummaries = new Map();
+	for (const r of db.prepare("SELECT period, summary FROM financials_ledger_freezes WHERE released_at = '' ORDER BY frozen_at").all()) {
+		let summary = null;
+		try { summary = JSON.parse(r.summary || "null"); } catch { summary = null; }
+		frozenSummaries.set(r.period, summary && typeof summary === "object" ? summary : null);
+	}
+	const sheetRows = ledgerLoadRows(await getJobTrackingCached(), { investorDriverSet: null, investorOwnerId: null }).rows;
+	return financialsOverview.buildOverview({
+		preset, from, to,
+		fleetReport: fleet, truckReport: trucks, driverReport: drivers, loadReport: loads,
+		items: fleet.items, driverKey: fleet.driverKey,
+		lockedPeriods: books.lockedPeriods, frozenSummaries,
+		bookedNotDelivered: financialsOverview.bookedNotDelivered(sheetRows, from, to, financialsCalc.fmtDate),
+		generatedAt: new Date().toISOString(),
+	});
 }
 
 function computeLossCarryForward(monthlyEarnings) {
@@ -69331,6 +69374,38 @@ app.get("/api/financials/report.csv", requireRole("Super Admin"), async (req, re
 	} catch (err) {
 		console.error("GET /api/financials/report.csv error:", err.message);
 		res.status(500).json({ error: "Failed to build the financials export" });
+	}
+});
+
+// GET /api/financials/overview?preset=<key> or ?from=&to= — the Financials
+// overview: the fleet, every truck and every driver for one period, the figures
+// Fleet P&L shows, with the checks that they agree to the cent.
+app.get("/api/financials/overview", requireRole("Super Admin"), async (req, res) => {
+	if (!FINANCIALS_OVERVIEW_ENABLED) return res.status(404).json({ error: "The Financials overview is not switched on.", code: "FEATURE_OFF" });
+	try {
+		const q = financialsOverviewQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		res.json(await buildFinancialsOverview(q));
+	} catch (err) {
+		console.error("GET /api/financials/overview error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials overview" });
+	}
+});
+
+// GET /api/financials/overview.csv — the same overview: the truck and driver
+// tables with their fleet totals, the checks, and the lines outside the figures.
+app.get("/api/financials/overview.csv", requireRole("Super Admin"), async (req, res) => {
+	if (!FINANCIALS_OVERVIEW_ENABLED) return res.status(404).json({ error: "The Financials overview is not switched on.", code: "FEATURE_OFF" });
+	try {
+		const q = financialsOverviewQuery(req.query || {});
+		if (q.error) return res.status(400).json({ error: q.error, code: "INVALID_REPORT_QUERY" });
+		const overview = await buildFinancialsOverview(q);
+		res.setHeader("Content-Type", "text/csv");
+		res.setHeader("Content-Disposition", `attachment; filename="financials-overview-${q.from}-to-${q.to}.csv"`);
+		res.send(csvRows(financialsOverview.overviewRows(overview)));
+	} catch (err) {
+		console.error("GET /api/financials/overview.csv error:", err.message);
+		res.status(500).json({ error: "Failed to build the financials overview export" });
 	}
 });
 
