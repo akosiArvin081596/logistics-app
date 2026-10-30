@@ -24,7 +24,8 @@
 //       7-day window, the steps out of d
 //   §6  long dark spells: a 21-day vacation waits, then confirms with the first
 //       fix after 1.5 km away while moving; one that moved; a 40-day-old fix
-//   §7  his own app activity, the account check skipped, a late-evening tap
+//   §7  his own app activity, the account check skipped, a late-evening tap, which
+//       account is his (one Driver account; none for an ambiguous name)
 //   §8  the Not-confirmed explanation
 //   §9  the freeze and the 06:00 schedule
 //   §10 notices (one, plus at most one follow-up) and what counts as a change
@@ -355,6 +356,13 @@ section("§7 check 1: his own app activity");
 	const late = at("2026-10-05", 22, 30, PT);
 	const rw = judge(["2026-10-05", "2026-10-06"], { fixes: west, taps: [late] });
 	eq("§7.4 a tap at 10:30 PM on the truck's clock counts on that truck-local day (Oct 5), not Oct 6", [sr(rw, "2026-10-05"), sr(rw, "2026-10-06")], [["not_confirmed", "app_activity"], ["confirmed", "parked"]]);
+	// His account, from the accounts his name matches (server.js driverAccountsNamed()).
+	const acct = (id, role) => ({ id, username: `user${id}`, role, driver_name: "Hollis Renner" });
+	eq("§7.5 his account: the one Driver account among those his name matches, other roles ignored",
+		T.timeOffDriverAccount([acct(1, "Super Admin"), acct(10, "Driver"), acct(31, "Investor")]), { account: acct(10, "Driver") });
+	eq("§7.6 none for an ambiguous name (two Driver accounts), nor with no Driver account",
+		[T.timeOffDriverAccount([acct(10, "Driver"), acct(30, "Driver")]), T.timeOffDriverAccount([acct(31, "Investor")]), T.timeOffDriverAccount([]), T.timeOffDriverAccount(null)],
+		[{ reason: "ambiguous" }, { reason: "no_driver_account" }, { reason: "no_driver_account" }, { reason: "no_driver_account" }]);
 }
 
 section("§8 the Not-confirmed explanation");

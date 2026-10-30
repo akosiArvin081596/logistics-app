@@ -3532,7 +3532,7 @@ function timeOffDayEvidence({ driverName, fromDay, toDay, nowMs }) {
 	}
 	// His own account only: staff acting for him write the same action under their
 	// own role and id. With no such account, or two, the check is skipped and noted
-	const owner = driverAccountForDirectoryRow({ driver_name: driverName });
+	const owner = timeOffEldCheck.timeOffDriverAccount(driverAccountsNamed(driverName));
 	const taps = owner.account
 		? db.prepare("SELECT timestamp FROM audit_trail WHERE action = 'update_status' AND role = 'Driver' AND user_id = ? AND timestamp >= ? AND timestamp < ?")
 			.all(owner.account.id, new Date(fetchFromMs).toISOString(), new Date(fetchToMs).toISOString())

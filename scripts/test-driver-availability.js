@@ -85,7 +85,8 @@
 //       shows "Not checked (month closed)", whatever settlement_grace_days says
 //       (L4); a waiting day its month closes on shows the same
 //   §20 his own app activity counts, staff acting for him does not; with two
-//       Driver accounts or none the check is skipped and noted
+//       Driver accounts or none the check is skipped and noted; another role's
+//       account under his name changes nothing
 //   §21 "Confirmed (no ELD data)": no truck held, no device linked (the owner's
 //       correction of 2026-10-31)
 //   §22 the 06:00 tick and its marker; a failed run leaves the marker
@@ -1098,6 +1099,14 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const id3 = rowId(await create(tam, DIR.tamsin, vacation("2026-10-05", "2026-10-05")));
 		await runCheck(tam);
 		eq("§20.3 no Driver account (Tamsin): skipped and noted", dayRows(tam, id3).map((d) => d.activity_note), ["no_driver_account"]);
+		const mixed = await eldWorld();
+		parkedT1(mixed);
+		mixed.db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (31, 'inv_hollis', 'x', 'Investor', 'Hollis Renner')").run();
+		const id4 = rowId(await create(mixed, DIR.hollis, vacation("2026-10-06", "2026-10-06")));
+		tap(mixed, USERS.driver.id, USERS.driver.username, "Driver", own);
+		await runCheck(mixed);
+		eq("§20.4 an Investor account under his name changes nothing: his Driver account is found and its update counts",
+			dayRows(mixed, id4).map((d) => [d.state, d.reason, d.activity_note]), [["not_confirmed", "app_activity", ""]]);
 	});
 
 	section("§21 \"Confirmed (no ELD data)\"");
