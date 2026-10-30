@@ -1647,6 +1647,7 @@ socket event isn't sent here (the socket is aborted); `scripts/test-driver-instr
 
 Two phone-width layout bugs (2026-10-19): on a 390 px screen the load detail's header actions ran off the dialog, so
 Edit and Delete could not be reached, and on Tracking the Active Loads panel covered the Fuel & Route card's header.
+W3 adds the Expenses list, which scrolled sideways once the Personal pill and buttons joined its rows.
 This check is the one in this folder that touches **no real data**: it boots no `server.js`, opens no database, reads no
 `.env` or key and signs nobody in. It serves the checkout's built `client/dist` from its own static server on
 `127.0.0.1:$E2E_PORT` (default 3181; 3000, 5173 and a port in use are refused) and answers every `/api` request in the
@@ -1677,11 +1678,21 @@ ProcessSingleton"): run it outside that sandbox.
 | W2-\*t | A tap on the header's screen point. | The card collapses (`aria-expanded="false"`) |
 | W1m-\*, W2m-\*, W1d-\*, W2d-\* | The same steps with a mouse at 768x1024 (`m`, the first width the load detail's header is one row again) and at 1280x800 (`d`). W1m/W1d-\*r: the title and every action on one row, the last action at the row's right edge. W2m/W2d-\*r: the card 270 px wide and the Active Loads panel's `max-height` `calc(100% - 20px)`. | As on the phone, plus the wider layout as before |
 | Wg | With `DESKTOP_BASELINE`: every box measured at 768 and 1280 px (the dialog, its title and actions; the map, the panel, the card and its header), both roles, against the baseline file. | Identical |
+| W3\*-&lt;width&gt;-SA, -DSP | `/expenses`, All Expenses, 25 made-up receipts (five with a Personal line: waiting, carried, on an approved invoice, reversed and still waiting, and one Reverse can take; one in a finalized month; long vendor, place and description texts). Eleven sizes: 375, 390, 768, 899, 900, 1024, 1100 with the sidebar folded (`f`), 1245, 1246, 1280 and 1440 px. The suffix is `m` from 640 px and `d` from 1024. | The cards on a phone and while the list panel is narrower than 900 px (every size up to 1024 with the sidebar open; 1245 and 1246 by the measured width), else the 9-column table (1100 folded, 1280, 1440) |
+| W3\*s | `scrollWidth` against `clientWidth` of the list panel (`.sub-panel`), and of the page against `innerWidth`. | No sideways scroll in either |
+| W3\*p | Each `.personal-pill`'s box against its card's or cell's content box, and its text. | Five pills, each inside; in the table the short tag ("Personal -$45.00 · waiting") with the full sentence as its `title`, in a card the full sentence |
+| W3\*c | Table sizes only: `scrollWidth` against `clientWidth` of every header and cell (cells clip), and each action button's box against its cell. | Nothing cut (the one-line texts that end in an ellipsis cut only themselves) and every button inside its cell |
+| W3\*b | Super Admin: each Personal, Undo Personal and Reverse Personal button scrolled into view and hit-tested at its centre. Dispatcher: the count of those buttons. | Every button takes a tap (Undo Personal twice, Reverse Personal once); a Dispatcher has none |
+| W3-\*t | Phone sizes: every sub-tab's box against the viewport. | All six (Super Admin) or four (Dispatcher) inside |
 | Wx | Writes the page sent. | None |
 
 Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
 (`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
-build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL.
+build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL, and on a build before the Expenses table fit (PR
+`fix/expense-table-fits`) W3 FAILs at 1280 and 1440 (no `exp-table`, the panel scrolls sideways) and at 768 to 1024 (the
+13-column table instead of the cards). The Expenses answers (`/api/expenses/all`, trucks, the drivers directory, the
+waiting corrections, a 1x1 PNG for each receipt thumbnail) are given only on the W3 pages, so W1 and W2 see what they
+saw before and the desktop geometry file holds no Expenses boxes.
 
 ## The voice notes check (`voice-notes.mjs`)
 
