@@ -307,8 +307,8 @@ function emitDispatchByRole(event, full, redacted) {
 	io.to("super-admin").emit(event, full);
 	io.to("dispatch").except("super-admin").emit(event, redacted);
 }
-// THE STAFF DESKS (decision 30, 2026-10-21: drivers and investors message
-// staff only, never each other). Each role's app names one desk: the driver
+// THE STAFF DESKS: drivers and investors message staff only, never each
+// other. Each role's app names one desk: the driver
 // app "Dispatch", the investor portal "admin" (resolveChatParties()). A desk is
 // never a person: no account may take its name (findDriverNameClashes()'s
 // reserved names, POST /api/users, POST /api/auth/setup), chatRooms() gives it
@@ -321,7 +321,7 @@ function chatDeskKey(name) {
 	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
 	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
 }
-// INVESTOR CONVERSATIONS ARE SUPER ADMIN ONLY (P1, Arvin 2026-10-22). An
+// INVESTOR CONVERSATIONS ARE SUPER ADMIN ONLY. An
 // investor conversation is every message with the investor desk ("admin") or
 // an Investor account's username on either side, trimmed and in any letter case
 // (how every thread reads its names); a desk's name is never an investor's,
@@ -369,8 +369,7 @@ app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limit
 //   (a) verifyInlineServedBytes() has a magic-byte branch for PDFs and images
 //       ONLY. It returns null — i.e. NO CHECK AT ALL — for .doc/.docx/.xls/.xlsx/
 //       .csv/.txt, and the extension it switches on comes from the CLIENT-SUPPLIED
-//       fileName. So today `{"fileName":"x.txt","fileData":"data:text/html;..."}`
-//       genuinely writes arbitrary bytes into uploads/.
+//       fileName, so a file under those extensions may hold any bytes.
 //   (b) That is harmless right now for exactly one reason: the /uploads mount
 //       forces `Content-Disposition: attachment` for every extension outside
 //       INLINE_SAFE_UPLOAD_EXTS (the image+PDF set) and sets X-Content-Type-Options:
@@ -445,24 +444,13 @@ function verifyInlineServedBytes(buf, ext) {
 // Cross-origin support for the driver-mobile-view client (separate Next.js
 // app at a different origin). Only the env-allowlisted origins get permissive
 // CORS headers; everything else falls through with no Access-Control-* headers
-// and the browser blocks the response — same as before this middleware existed.
+// and the browser blocks the response.
 //
-// ⚠️ THE DEFAULT IS NOW EMPTY, i.e. no cross-origin browser client unless one is
-// configured. It used to default to "https://localhost:3002,https://192.168.8.106:3002",
-// which shipped to PRODUCTION because DRIVER_MOBILE_ORIGINS is set nowhere —
-// re-verified 2026-08-09 read-only on the VPS against the running process
-// environment of both pm2 apps and every other process on the box, not just the
-// .env files. That default was worse than dead weight for two reasons:
-//   1. Production advertised `Access-Control-Allow-Credentials: true` to
-//      https://localhost:3002 — an origin ANY developer's own machine can serve,
-//      on a box no developer's machine is otherwise related to.
-//   2. This list is also the FIRST leg of crossSiteGuard: an allowlisted Origin
-//      is waved straight past refuseCrossOrigin, so those two dev addresses were
-//      a standing bypass of the guards PR #253 put on the four money routes.
-// Emptying the default closes both. The client it existed for has never been in
-// this repo (git log --all --diff-filter=A finds no such file; commit 4f19807
-// touched server.js only), and the sibling marketing site drivers.logisx.com
-// makes zero API calls — it only links here.
+// ⚠️ THE DEFAULT IS EMPTY, i.e. no cross-origin browser client unless one is
+// configured: a default ships to production, where DRIVER_MOBILE_ORIGINS is set
+// nowhere. Every listed origin gets `Access-Control-Allow-Credentials: true`,
+// and this list is also the FIRST leg of crossSiteGuard: an allowlisted Origin
+// is waved straight past refuseCrossOrigin.
 //
 // To resurrect a genuine cross-origin client: set DRIVER_MOBILE_ORIGINS *and*
 // SESSION_COOKIE_SAMESITE=none. Both are needed and neither alone is enough,
@@ -711,7 +699,7 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(
 // ---------------------------------------------------------------------------
 // MIGRATION: idx_expenses_receipt_hash → UNIQUE, PARTIAL
 //
-// Client ask (Desoren): "make sure that the receipt doesn't have any duplicate."
+// One receipt, one expense.
 // POST /api/expenses already SELECTs on receipt_hash and 409s on a hit — but a
 // SELECT-then-INSERT is check-then-act, and the bulk receipt uploader saves three
 // rows CONCURRENTLY. Two copies of one receipt in one batch can both pass the
@@ -720,7 +708,7 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(
 //
 //  1. PARTIAL — scoped to `receipt_hash <> ''`, and this is load-bearing, not
 //     tidiness. '' is the value for every legacy row and every expense filed
-//     with no photo (3 live rows today, and every future receipt-less expense).
+//     with no photo.
 //     A plain UNIQUE index makes those collide WITH EACH OTHER: the first
 //     no-photo expense would take the '' slot and every subsequent one would be
 //     refused. SQLite treats NULLs as distinct so a NULL row would be exempt
@@ -738,8 +726,6 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(
 //       the real expense is a business question, and both rows are money already
 //       booked into a P&L and possibly into a settled payout.
 //       Scoped to `receipt_hash <> ''`, exactly the index's own predicate.
-//       Verified read-only on production 2026-08-12: 169 rows, 166 hashed,
-//       ZERO collisions — so this applies cleanly today.
 //   (b) CREATE THE REPLACEMENT UNDER A TEMPORARY NAME FIRST, verify, and only
 //       then drop the old one and re-create under the canonical name. SQLite
 //       cannot rename an index, so create-then-drop is the ONLY ordering under
@@ -938,8 +924,7 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); 
 // FRESH database it throws `no such table`, the bare catch swallows it, and the
 // column never appears. It is kept anyway because it is the ONLY thing that
 // carries an EXISTING database — there the table was already present when this
-// line first shipped, which is exactly why the fault was invisible for so long:
-// every database anyone had ever looked at already had the column.
+// line first shipped.
 //
 // The fresh-install half is now covered by `pay_daily REAL DEFAULT 0` in the
 // CREATE TABLE below. DO NOT "tidy up" the apparent duplication — the two serve
@@ -977,13 +962,9 @@ catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly RE
 try { db.exec("ALTER TABLE trucks ADD COLUMN truck_payment_monthly REAL DEFAULT 0"); } catch {}
 
 // Migration: the month a truck actually enters service, i.e. the first month it
-// should be charged monthly fixed costs. Every fixed-cost gate used to key on
-// created_at, which is only when the row was TYPED INTO the Trucks UI — those
-// are not the same date and the gap costs real money: Logisx-#91 was entered
-// 2026-05-21 but did not go into service until 2026-08-04, so its $3,105.83/mo
-// was billed against May, June and July, understating that investor's July
-// payout by ~$1,553. (May/June were already frozen via finalized_breakdown, so
-// only the live-recomputing month showed it.)
+// should be charged monthly fixed costs. created_at is only when the row was
+// TYPED INTO the Trucks UI — those are not the same date, and billing fixed
+// costs from created_at charges an investor for months the truck did not run.
 //
 // Bare 'YYYY-MM-DD', deliberately NOT backfilled: empty means "fall back to
 // created_at", so every existing row behaves exactly as it does today and this
@@ -1102,11 +1083,9 @@ try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"); } catch {}
 
 // Migration: record the last successful sign-in, so the Users screen can show
-// which accounts are still in use. Nothing in this app has ever recorded one —
-// the login route wrote nothing at all, audit_trail has no login action, and
-// `sessions` rows are swept hourly — so there is NO history to backfill and
-// every row starts at '' ("never signed in since this shipped"). That is the
-// expected day-one state, not a defect.
+// which accounts are still in use. There is no earlier record to backfill
+// (audit_trail has no login action and `sessions` rows are swept hourly), so a
+// row starts at '' ("never signed in since this shipped"), which is not a defect.
 //
 // ⚠️ TEXT holding an explicit ISO-8601 **Z** string, never a bare
 // CURRENT_TIMESTAMP. SQLite serialises that zone-less ("2026-08-14 12:26:41"),
@@ -1214,14 +1193,10 @@ function logAudit(req, action, entity, entityId, details) {
 // the guards and then threw, i.e. possibly a partial write, which is the most
 // important row in the table and is never purged or coalesced.
 //
-// The problem this solves, reported by PR #248: refusals are trivially generated
-// and every one INSERTs. A Driver holding one legitimate load can drive
-// `driver_respond_blocked` at driverWriteLimiter's 60/min, and the load-binding
-// refusals added by #248 and by this PR are reachable on demand by design — a
-// wrong `rowIndex` is a 409 every time. The whole audit_trail is 1,314 rows over
-// its first four months (measured on the production copy, ~11.5 rows/day, ALL of
-// them evidence of a write or a read); a single scripted client would out-write
-// that entire history in about two minutes and bury the signal the refusal row
+// The problem this solves: refusals are cheap to produce and every one INSERTs.
+// The load-binding refusals are reachable on demand by design (a wrong
+// `rowIndex` is a 409 every time), and the table otherwise grows by a handful of
+// rows a day, so a burst of refusals would bury the signal the refusal row
 // exists to preserve.
 const REFUSAL_AUDIT_WINDOW_MS = 60 * 1000;
 // ⚠️ THE COALESCE KEY DELIBERATELY EXCLUDES entity_id. Keying on the load id
@@ -1248,8 +1223,8 @@ const refusalAuditWindows = new Map();
 // ⚠️ EVERY MEMBER MUST BE NAMED `PERIOD_…`, and that is a hard coupling, not a
 // stylistic one. purgeOldAuditRefusals() exempts a row from deletion by matching
 // `[PERIOD_` in its DETAILS, while this set exempts it from coalescing by CODE —
-// two mechanisms keyed on two different things, documented as a pair and, until
-// assertUncoalescedRefusalContract() below, enforced by nothing. A member named
+// two mechanisms keyed on two different things, documented as a pair and
+// enforced by assertUncoalescedRefusalContract() below. A member named
 // otherwise would be written in full and then silently purged at 90 days, which
 // is the worse half of both behaviours. Asserted at boot.
 const UNCOALESCED_REFUSAL_CODES = new Set([
@@ -1352,8 +1327,8 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //     `create_compliance_fee_blocked`, `pay_compliance_fee_blocked`,
 //     `adjust_invoice_blocked`, `pay_invoice_blocked`,
 //     `update_payout_basis_blocked` and the
-//     catch-all `period_refusal_blocked` are all absent, deliberately, for the
-//     three reasons the four settlement refusals fixed before them were:
+//     catch-all `period_refusal_blocked` are all absent, deliberately, for
+//     three reasons:
 //       (i) THEY CANNOT FLOOD. Every one needs a locked month (or an unreadable
 //           lock table) AND a material write, on a Super Admin — or at widest
 //           Dispatcher — route. That is the opposite of `status_update_blocked`,
@@ -1382,7 +1357,7 @@ const PURGEABLE_REFUSAL_ACTIONS = [
 	"status_override_blocked",
 	"create_sheet_row_blocked",
 	"update_sheet_row_blocked",
-	// POST /api/messages refusing a recipient or sender (decision 30): cheap, on
+	// POST /api/messages refusing a recipient or sender: cheap, on
 	// demand, a Driver can repeat it, and it returns before any write.
 	"message_blocked",
 ];
@@ -1478,9 +1453,8 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_lsh_load ON load_status_history(load_id, changed_at)`); } catch {}
 // Why a transition happened. Only cancellations require one today (see
-// POST /api/dispatch/cancel); every other source leaves it ''. Added after a
-// live load was cancelled by mistake and the log could say who and when but
-// never why. Additive, so existing rows keep their blank reason.
+// POST /api/dispatch/cancel); every other source leaves it ''. Additive, so
+// existing rows keep their blank reason.
 try { db.exec("ALTER TABLE load_status_history ADD COLUMN reason TEXT DEFAULT ''"); } catch { /* column already exists */ }
 
 const insertStatusHistory = db.prepare(
@@ -1580,8 +1554,8 @@ function recordPayoutChange({ payoutId, ownerId, period, kind, oldAmount, newAmo
 
 // Escape applicant-controlled text before interpolating into HTML email bodies.
 // Submission and acceptance emails embed full_name, address, phone, etc.; without
-// this, a name like `<img src=x onerror=...>` would render in the admin's mail
-// client. Used by the /api/public/apply and /api/applications/:id/status flows.
+// this, markup in those fields would render in the admin's mail client. Used by
+// the /api/public/apply and /api/applications/:id/status flows.
 function escapeHtml(s) {
 	return String(s ?? "")
 		.replace(/&/g, "&amp;")
@@ -1666,8 +1640,8 @@ try { db.exec("ALTER TABLE load_coordinates ADD COLUMN distance_miles REAL"); } 
 // ⚠️ NEVER `INSERT OR REPLACE` HERE. REPLACE deletes the row and inserts a new
 // one, so every column the statement does not name (distance_miles, created_at)
 // falls back to its default. The boot sync rewrites every sheet load on every
-// pm2 restart, which is how distance_miles came to be empty on all 385
-// production rows (2026-10-02). The upsert keeps distance_miles while the lane is
+// pm2 restart, so REPLACE would empty distance_miles on every row. The upsert
+// keeps distance_miles while the lane is
 // unchanged and clears it when either end moves, because it measured the old
 // lane. Pinned by scripts/test-load-coordinates-keep-distance.js.
 const upsertLoadCoordsStmt = db.prepare(
@@ -1732,8 +1706,8 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN profile_picture_url TEXT
 try { db.exec("ALTER TABLE investors ADD COLUMN profile_picture_url TEXT DEFAULT ''"); } catch {}
 
 // Migration: add pay_type + pay_percentage for owner-operator driver pay model.
-// Existing rows stay 'fixed' (current $250/day behavior preserved); admins can flip individual
-// drivers (e.g. Roland Brown) to 'percentage' and set their cut from the Drivers Directory UI.
+// Existing rows stay 'fixed' ($250/day); admins can flip individual drivers to
+// 'percentage' and set their cut from the Drivers Directory UI.
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'"); } catch {}
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFAULT 0"); } catch {}
 
@@ -1742,11 +1716,10 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // ============================================================
 // ⚠️ THIS COLUMN IS A MONEY JOIN KEY WITH A CASE-BLIND READER AND A
 // CASE-SENSITIVE CONSTRAINT, WHICH IS THE WORST OF BOTH.
-// getDriverPayStructures() indexed on LOWER(driver_name) (it now keys on
-// normalizeDriverName()) and builds a plain
+// getDriverPayStructures() keys on normalizeDriverName() and builds a plain
 // object, so two spellings collapse to ONE key — while `TEXT NOT NULL UNIQUE`
 // carries SQLite's default BINARY collation, so nothing stops the second
-// spelling being created. Insert "SOREN KING" beside "Soren King" and you get a
+// spelling being created. Insert "JANE DOE" beside "Jane Doe" and you get a
 // second row whose pay_daily is the column DEFAULT of 0; it wins the key, and
 // resolveDailyRate() silently falls back to the truck's rate. The original row
 // still reads 300 in the UI. Nothing errors, nothing is logged, and the driver
@@ -1762,11 +1735,9 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // Fixing it in the queries instead was considered and rejected: every reader
 // ALREADY folds case (that is the bug), so there is no query to fix. The
 // constraint is the thing that disagrees with them, so the constraint is what
-// moves. COLLATE NOCASE is ASCII-only, which matches SQLite's LOWER() exactly,
-// so the constraint and getDriverPayStructures() agreed by construction when
-// this landed. (That key is now normalizeDriverName() — see the note there. A
-// name differing only in spacing is kept out by the naming check,
-// findDriverNameClash(), not by this constraint.)
+// moves. COLLATE NOCASE is ASCII-only, which matches SQLite's LOWER() exactly.
+// A name differing only in spacing is kept out by the naming check,
+// findDriverNameClash(), not by this constraint.
 //
 // SQLite cannot ALTER a collation, so this is the repo's rename-recreate
 // pattern. Two deliberate departures from the two existing examples:
@@ -1791,9 +1762,8 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // INSERT ... SELECT throws; caught, that reads as "migration failed, carry on"
 // and the collation quietly never lands, and an `INSERT OR IGNORE` would DROP a
 // row instead. Which of two spellings is the real driver is a business question
-// (see the Desoren/Soren trap beside PUT /api/admin/fix-driver-name — two
-// people, one a substring of the other), so it is left to a human. Production
-// carried zero duplicates when this was written, verified read-only.
+// (two people's names can be one a substring of the other; see
+// PUT /api/admin/fix-driver-name), so it is left to a human.
 try {
 	const ddSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='drivers_directory'").get() || {}).sql || "";
 	// Idempotency: keyed on the constraint actually present, not on a version
@@ -1913,13 +1883,11 @@ if (driverCount === 0 && startsJob("driver directory seed from the Carrier Datab
 // carrier does not count, and it is left open. Leg 3 does not collapse internal
 // spaces, so with only the variant open, the investor's loads under the
 // driver's own spelling with a blank Owner ID stop matching once the driver
-// moves on; the case-only copies this helper replaced opened that row. The
-// variant is not closed: it is the same carrier, so the pairing still holds,
-// and closing it would end the months getInvestorDriverMonthWindows() leg C
+// moves on. The variant is not closed: it is the same carrier, so the pairing
+// still holds, and closing it would end the months getInvestorDriverMonthWindows() leg C
 // gives that spelling. An investor keeps every spelling it already covers and
 // gains the driver's own. When the driver moves to another carrier, both rows
-// close together, under the same guard. A single case-aside open row is
-// handled exactly as before.
+// close together, under the same guard.
 // `releaseSpacingVariants` is the guard's answer from a caller that has already
 // acted on it (assignDriverToTruck()'s release), so one assignment asks once;
 // left undefined, the helper asks.
@@ -2064,10 +2032,9 @@ function assignmentMonthKey(ts) {
 //
 // ⚠️ "" MEANS UNBOUNDED ON BOTH ENDS, exactly as it does in truckChargedInMonth():
 // "" as `from` is "since forever", "" as `until` is "still current". Reading either
-// the other way waves through precisely the case with the most exposure — the same
-// inversion corrected in PR #205 and again in PR #216. Written as max()/min() over
-// the NON-EMPTY operands so "" can only ever defer to the other bound and can never
-// silently win an intersection. An empty result (from > until) is returned as null,
+// the other way waves through precisely the case with the most exposure.
+// Written as max()/min() over the NON-EMPTY operands so "" can only ever defer
+// to the other bound and can never silently win an intersection. An empty result (from > until) is returned as null,
 // i.e. the driver was never this investor's in any month — not as "every month".
 function intersectMonthWindow(a, b) {
 	const from = !a.from ? b.from : (!b.from ? a.from : (a.from > b.from ? a.from : b.from));
@@ -2083,24 +2050,21 @@ function intersectMonthWindow(a, b) {
 // is its time-aware companion, and the two are deliberately kept side by side: the
 // set decides WHO, this decides WHEN.
 //
-// ⚠️ WHY IT EXISTS. Trip expenses were scoped `owner_id = ? OR LOWER(driver) IN
-// (<the live set>)`. That OR leg has no clock, so the moment a driver was reassigned
-// onto an investor's truck, EVERY receipt he had ever filed — on a different truck,
-// stamped owner_id = 0 at insert — became a deduction in that investor's already
-// finalized months. Measured on production 2026-08-13, moving one driver on
-// 2026-08-12 restated three closed months at once: 2026-05 −$2,235, 2026-06 −$3,683,
-// 2026-07 −$2,321 of investor share (the portal showed $6,786 against a frozen
-// ledger figure of $9,107). It was ONE-SIDED — revenue and driver pay scope off the
-// sheet's Owner ID column and truckChargedInMonth(), so nothing was added back. Only
-// costs moved, and only downward.
+// ⚠️ WHY IT EXISTS. An expense scope `owner_id = ? OR LOWER(driver) IN
+// (<the live set>)` has no clock in its OR leg, so the moment a driver is
+// reassigned onto an investor's truck, EVERY receipt he ever filed — on a
+// different truck, stamped owner_id = 0 at insert — would become a deduction in
+// that investor's already finalized months. It is
+// ONE-SIDED — revenue and driver pay scope off the sheet's Owner ID column and
+// truckChargedInMonth(), so nothing is added back. Only costs move, and only
+// downward.
 //
 // Every window is the INTERSECTION of two real intervals, because both bind:
 //   • when the driver was on the truck — truck_assignments.start_date .. end_date
 //   • when the truck was this investor's cost at all — truckChargeFromMonth() ..
 //     truckChargeUntilMonth(), the SAME predicate the fixed-cost math uses, not a
 //     second copy of it. A driver sitting in a truck that is not yet in service is
-//     not yet an expense (that is exactly Logisx-#91: in service 2026-08-04, driver
-//     attached 2026-08-12).
+//     not yet an expense.
 //
 // Legs, unioned — deliberately a SUBSET of getInvestorDriverSet's four:
 //   A. truck_assignments × this investor's trucks (the real pairing history).
@@ -2115,8 +2079,7 @@ function intersectMonthWindow(a, b) {
 // ⚠️ The set's leg 2 (a live drivers_directory carrier match) is DELIBERATELY absent.
 // It is a present-tense assertion with no clock of any kind, so honouring it here
 // would re-create the bug this function exists to close. Nothing is lost in practice:
-// leg C records the same pairing WITH dates (verified on production — every
-// directory-matched driver has a carrier_driver_history row covering them), and a
+// leg C records the same pairing WITH dates, and a
 // driver reachable by no other leg has no defensible month window, which is the
 // honest answer rather than "all of them".
 //
@@ -2132,12 +2095,10 @@ function getInvestorDriverMonthWindows(userId) {
 	};
 	// Every window becomes an OR clause with up to two bound comparisons, so the
 	// SQL grows with the length of the assignment history — which only ever grows,
-	// and grows fastest for the trucks that change hands most. Production already
-	// carries one driver with five windows, four of them identical, and another
-	// whose short first stint is wholly inside his current open one. Neither adds
-	// a row; both add predicate. A ⊆ B is dropped, with "" read as unbounded on
-	// both ends exactly as everywhere else here — so a bounded window is never
-	// mistaken for a superset of an unbounded one.
+	// and grows fastest for the trucks that change hands most. Duplicate and
+	// nested windows add no row, only predicate. A ⊆ B is dropped, with "" read
+	// as unbounded on both ends exactly as everywhere else here — so a bounded
+	// window is never mistaken for a superset of an unbounded one.
 	const dedupeWindows = (list) => {
 		const contains = (b, a) =>
 			(!b.from || (a.from && a.from >= b.from)) &&
@@ -2153,8 +2114,8 @@ function getInvestorDriverMonthWindows(userId) {
 	};
 
 	// truckChargeFromMonth/UntilMonth need these columns; created_at is the
-	// documented fallback when in_service_date was never set, which is still every
-	// truck but one, so omitting it would make the lower bound silently unbounded.
+	// documented fallback when in_service_date was never set, so omitting it would
+	// make the lower bound silently unbounded.
 	const ownedTrucks = db.prepare(
 		"SELECT id, assigned_driver, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ?"
 	).all(userId);
@@ -2195,11 +2156,9 @@ function getInvestorDriverMonthWindows(userId) {
 	// because dedupeWindows drops a window CONTAINED in another, the correct narrow
 	// truck-bounded window is then discarded in favour of the wider carrier one,
 	// handing the driver exactly the over-long reach this function exists to remove.
-	// (Verified with a fixture: a driver in the carrier history from 2026-06 whose
-	// only truck enters service 2026-10 comes back as 2026-06 without this rule.)
 	//
-	// Clamping leg C to the FLEET's billing life does NOT fix that and was tried
-	// first: the fleet is the UNION of every owned truck, so one long-serving truck
+	// Clamping leg C to the FLEET's billing life does NOT fix that: the fleet is
+	// the UNION of every owned truck, so one long-serving truck
 	// makes the clamp vacuous for every other driver.
 	//
 	// So: when legs A/B answered, they are the answer — a known truck pairing is
@@ -2228,19 +2187,16 @@ function getInvestorDriverMonthWindows(userId) {
 // ONE definition, NINE callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
 // /api/investor/tax-csv, GET /api/investor/report's itemized P&L,
-// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15, and
-// truckDeleteOpenMonthHolds(), the truck delete's open-month check, since 2026-10-23). That is the
-// DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
-// hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
+// investorMaySeeReceipt(), the receipt-photo check, and
+// truckDeleteOpenMonthHolds(), the truck delete's open-month check). That is the
+// DRIVER_RENAME_TARGETS lesson applied here: never hand-copy this SQL at a call
+// site, because a fix to one copy is a fix to none. Add a leg here and every
 // investor expense surface gets it.
 //
-// ⚠️ THE SEVENTH WAS ADDED LATE, AND ITS ABSENCE IS THE PROOF THAT COUNTING MATTERS.
-// GET /api/investor/report was fixed ~500 lines away from the other six and kept the
-// pre-fix ` AND LOWER(driver) IN (<live set>)` for a further round — so the portal and
-// the downloadable P&L disagreed by $21,207.31 on one production investor while every
-// screen the fix was measured on read correctly. §11 of
-// scripts/test-investor-expense-scoping.js pins the report specifically, because §1's
-// caller COUNT is satisfied by six correct sites plus one wrong one being invisible.
+// ⚠️ §11 of scripts/test-investor-expense-scoping.js pins GET /api/investor/report
+// specifically, because §1's caller COUNT would still be satisfied with one wrong
+// copy left far from the others, and the portal and the downloadable P&L would
+// then disagree.
 //
 // `owner_id = ?` stays the primary and stays UNBOUNDED — it is stamped at insert
 // from the driver's truck (see expOwnerId at the POST /api/expenses INSERT) and
@@ -2258,9 +2214,7 @@ function getInvestorDriverMonthWindows(userId) {
 //     `truck_unit` is what separates them: a row naming a truck was attributed and
 //     its owner_id is authoritative; a blank one never was. Concretely, a driver who
 //     moves trucks MID-MONTH shares that month with both owners, so a month-only
-//     bound re-admits the receipts he filed on the old truck days before the move
-//     (measured: Soren King's 2026-08-04 receipts, $1,118, on the fleet truck he did
-//     not leave until 2026-08-12).
+//     bound re-admits the receipts he filed on the old truck days before the move.
 //   • the month window — an unattributed row is only this investor's in the months
 //     the driver was actually theirs.
 //
@@ -2296,8 +2250,8 @@ function investorExpenseScopeSql(ownerId, driverWindows, periodExpr) {
 
 // The investor's share of net profit, as a PERCENT (0..100).
 //
-// ⚠️ `parseFloat(x) || 50` — the shape at all seven read sites until 2026-08-14 —
-// turns a deliberately configured **0** into **50**, because 0 is falsy. That is
+// ⚠️ Never `parseFloat(x) || 50`: it turns a deliberately configured **0** into
+// **50**, because 0 is falsy. That is
 // the one direction that moves money: a carrier who set an investor to 0% would
 // have paid them half of net profit instead, on every screen AND in the payout
 // ledger, with every figure agreeing perfectly — so nothing would look wrong.
@@ -2308,10 +2262,10 @@ function investorExpenseScopeSql(ownerId, driverWindows, periodExpr) {
 // fat-fingered `500` would otherwise pay five times net profit, and a negative
 // would invert the split and bill the investor.
 //
-// ONE definition, seven callers, for the same reason investorExpenseScopeSql is:
-// the previous shape was one expression hand-copied across the portal, the
-// statement, the ledger reconcile and the PDF report, so a fix to one is a fix to
-// none. Takes the MERGED config object (per-investor rows over globals).
+// ONE definition, seven callers (the portal, the statement, the ledger reconcile
+// and the PDF report), for the same reason as investorExpenseScopeSql: a fix to
+// one hand-copied expression is a fix to none. Takes the MERGED config object
+// (per-investor rows over globals).
 function resolveInvestorSplitPct(config) {
 	const raw = parseFloat(config && config.investor_split_pct);
 	if (!Number.isFinite(raw)) return 50;
@@ -2329,7 +2283,7 @@ function resolveInvestorSplitPct(config) {
 //     Every route that honours as_user_id answers that with 404
 //     INVESTOR_NOT_FOUND rather than running its unscoped, fleet-wide branch.
 //   - Any other caller (no as_user_id, or a role other than Super Admin, whose
-//     as_user_id is ignored) gets the session user, exactly as before.
+//     as_user_id is ignored) gets the session user.
 //   - Endpoints downstream should compute isAdminGlobal = sessionUser.role === 'Super Admin' && !isPreview
 //     and use effectiveUserId / effectiveUsername in place of user.id / user.username.
 // Distinct from the ?investor_id= param used by /api/investor/onboarding-documents
@@ -2389,8 +2343,7 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_truck_visible ON legal_
 
 // Soft-deleted loads. Row stays in the Google Sheet for audit / external
 // integrations, but admin views and every KPI filter by this table. Reversible
-// in SQL if a delete was a mistake. Added 2026-04-20 per client request for a
-// real "Delete load" that stays out of numbers/financials.
+// in SQL if a delete was a mistake.
 db.exec(`
 	CREATE TABLE IF NOT EXISTS deleted_loads (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2402,9 +2355,8 @@ db.exec(`
 `);
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_deleted_loads_load_id ON deleted_loads(load_id)"); } catch {}
 
-// Manual Super-Admin overrides on a driver's "active day" count. With the
-// ELD-intersection logic (see getEldTravelDaysByVehicle), miscounts are rarer
-// than the old pickup→dropoff expansion, but the ELD feed can still get a day
+// Manual Super-Admin overrides on a driver's "active day" count. The
+// ELD-intersection logic (see getEldTravelDaysByVehicle) can still get a day
 // wrong: a parked-but-creeping truck registering >5 mph, a ping bucketed across
 // a midnight timezone boundary, or a load window expanded over a holiday the
 // driver wasn't actually paid for. This table lets an admin drop a specific
@@ -2489,7 +2441,7 @@ try {
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
-// Who uploaded a row (2026-10-22): the uploader's user id and role, written by
+// Who uploaded a row: the uploader's user id and role, written by
 // POST /api/documents/upload. documents.driver is the FILED driver (whose load
 // document it is, documentFiledUnder()), not the uploader: an office upload is
 // filed under the load's driver. NULL = not recorded (rows written before this,
@@ -2594,9 +2546,9 @@ const insertInvoiceSeqStmt = db.prepare(`
 `);
 // MMDDYYYY key. The business day (APP_TIMEZONE), not server-local: this string is
 // the visible invoice number on the broker PDF, the email subject, and the
-// filename, and the VPS runs UTC — so an invoice raised 9:30 PM Eastern on Jul 31
-// went out as 08012026-1, the wrong day AND the wrong month for broker aging
-// terms. It also rolled the per-day counter at 8 PM Eastern instead of midnight.
+// filename, and the VPS runs UTC — so a server-local key dates an evening
+// invoice the next day (on a month's last day, the wrong month for broker aging
+// terms) and rolls the per-day counter at 8 PM Eastern instead of midnight.
 function invoiceSeqDayKey(date = new Date()) {
 	const d = date instanceof Date ? date : new Date(date);
 	const [y, m, day] = appDay(d).split("-");
@@ -2652,11 +2604,11 @@ if (startsJob("driver location purge (at boot, then weekly)")) {
 	setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
 }
 
-// --- Routemate ELD/telematics tables (Phase 1 — additive) ---
+// --- Routemate ELD/telematics tables (additive) ---
 // All six tables follow the existing IF NOT EXISTS migration style.
 // driver_locations is intentionally untouched; Routemate gets its own table
-// so phone-GPS and ELD streams can coexist (hybrid source priority added in
-// Phase 2 inside GET /api/locations/latest).
+// so phone-GPS and ELD streams can coexist (the hybrid source priority is in
+// GET /api/locations/latest).
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_vehicles (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2696,20 +2648,18 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`); } catch {}
-// Additive 2026-05-15 (GPS accuracy plan, Tier 1). Telemetry rows that fail
+// Additive. Telemetry rows that fail
 // quality gates (impossible-speed jumps, NULL/zero coords) are still
 // INSERTed so we keep a full audit trail, but tagged here so every read
 // path can filter them out. Empty string = clean; values like
 // 'speed_outlier' / 'invalid_coords' = forensics.
 try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''`); } catch {}
-// Additive 2026-09-19. Which provider wrote the row. Before this column,
-// provenance survived only as a FINGERPRINT ACCIDENT — Linxup rows happen to
-// carry engine_hours=0 (hardcoded in normalizePosition, the Position message
-// has no engine hours), an empty geocoded_location and a numeric bearing, while
-// Routemate rows carry real values for all three. That worked, but it is a
-// coincidence, not a contract, and CLAUDE.md already described a `source`
-// column that did not exist. Empty string = written before this column; the
-// 2,343 historical Linxup rows are still identifiable by the fingerprint.
+// Additive. Which provider wrote the row. Empty string = written before this
+// column; those rows' provider survives only as a FINGERPRINT ACCIDENT — Linxup
+// rows happen to carry engine_hours=0 (hardcoded in normalizePosition, the
+// Position message has no engine hours), an empty geocoded_location and a
+// numeric bearing, while Routemate rows carry real values for all three. That
+// is a coincidence, not a contract.
 // ⚠️ routemate_vehicles is a SHARED mirror — Linxup device ids reach it through
 // the Routemate vehicle-sync fallback, which seeds a row for every vehicle id in
 // routemate_telemetry (the Linxup webhook itself never writes it) — so "is this
@@ -2764,7 +2714,7 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`); } catch {}
 
-// --- Miles driven per truck-local day, per driver (2026-08-27) --------------
+// --- Miles driven per truck-local day, per driver ---------------------------
 // The basis for the /analytics mileage page.
 //
 // ⚠️ WHY THIS IS NOT routemate_fuel_daily, WHICH ALREADY HAS A `miles` COLUMN.
@@ -2820,14 +2770,14 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_day ON eld_miles_daily(l
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_driver_day ON eld_miles_daily(driver_key, local_day)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_miles_vid_day ON eld_miles_daily(routemate_vehicle_id, local_day)`); } catch {}
 
-// --- Miles per STATE per truck per day (2026-10-02) -------------------------
+// --- Miles per STATE per truck per day --------------------------------------
 // The same odometer walk as eld_miles_daily, bucketed by the state each mile
 // was driven in (lib/us-states.js, the real state borders). Written by
 // rollupEldStateMilesRange(). Feeds miles-by-state reporting and, later, IFTA.
 //
 // ⚠️ WHY THIS IS PERSISTED. /api/compliance/ifta computes state miles on demand
 // from routemate_telemetry, which purges at 90 days, so a state's miles for
-// anything older were simply gone. The derivation outlives the pings, for the
+// anything older are gone. The derivation outlives the pings, for the
 // same reason eld_miles_daily and load_eld_miles exist.
 //
 // ⚠️ local_day IS THE TRUCK-LOCAL DAY and each delta lands in its later ping's
@@ -2855,7 +2805,7 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_state_miles_day ON eld_state_miles_daily(local_day)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_state_miles_truck_day ON eld_state_miles_daily(truck_id, local_day)`); } catch {}
 
-// --- Per-LOAD driven miles (2026-08-29) -------------------------------------
+// --- Per-LOAD driven miles --------------------------------------------------
 // One row per load: how far the truck actually drove for it, split into the
 // loaded leg (shipper -> receiver) and the deadhead run in to the shipper.
 // Derived by lib/load-haul.js, which replays the geofence against stored
@@ -2901,12 +2851,11 @@ db.exec(`
 	)
 `);
 // ⚠️ load_id IS STORED NORMALISED — lowercased, leading '#' stripped. The sheet
-// carries both "513987502" and "#513987502" for the same load and
-// load_coordinates already bears the scar of not having picked one. normLoadKey()
+// carries both "123456789" and "#123456789" for the same load. normLoadKey()
 // is the single rule; use it on every read and write of this table.
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_load_eld_miles_vid ON load_eld_miles(routemate_vehicle_id)`); } catch {}
 
-// --- Rate-con road miles, per load (2026-10-02) -----------------------------
+// --- Rate-con road miles, per load ------------------------------------------
 // The road miles rate-con ingestion computed for a load, read back from where
 // both ingestion paths store them: the Job Details tab's Distance cell ("486
 // Miles"). Written only by syncLoadRateconMiles(); read by getLoadMilesIndex(),
@@ -2925,7 +2874,7 @@ db.exec(`
 	)
 `);
 
-// --- Which ELD device is on which truck, dated (2026-10-02) -----------------
+// --- Which ELD device is on which truck, dated ------------------------------
 // One row per link: device V was on truck X from assigned_from until
 // assigned_until ('' = still in force, the truck_assignments convention).
 // Seeded once at boot with the links in force then (no backdating); written by
@@ -2964,7 +2913,7 @@ try {
 		WHERE dropped_reason = ''`);
 } catch {}
 
-// --- Refuel episodes (2026-08-07) -------------------------------------------
+// --- Refuel episodes --------------------------------------------------------
 // One row per detected FILL: when the tank went up, by how much, at what
 // odometer, and which uploaded fuel receipt it turned out to be.
 //
@@ -2986,7 +2935,7 @@ try {
 // interchangeable: getEldTravelDaysByVehicle buckets by usTzForLongitude(lng)
 // because a driver's worked day belongs where the driver was, while everything
 // business-facing — month close, invoice dating, settlement periods — is on the
-// business clock. (Rows detected before the client's 2026-10-08 decision carry
+// business clock. (Rows detected before the switch to the business clock carry
 // Houston's day, as written.) A refuel episode is matched against expenses.date and reported to
 // dispatch, so it is business-facing. Bucketing a fill in Arizona to
 // America/Phoenix would put it on a different day from the receipt that paid
@@ -3034,7 +2983,7 @@ try { db.exec(`ALTER TABLE expenses ADD COLUMN odometer_source TEXT DEFAULT ''`)
 // exactly the same reason: a volume this server RECOVERED from the receipt image
 // must stay distinguishable from one a human read off the paper and typed.
 //
-// '' = entered by a person (every row that exists today, and every future manual
+// '' = entered by a person (every row older than this column, and every manual
 // entry — the INSERT at POST /api/expenses does not set this column).
 // 'ocr' = written by the gallons-recovery route from a Gemini reading that
 //         reproduced the row's own stored total.
@@ -3076,7 +3025,6 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON routemate_hos_daily(driver_id)`); } catch {}
 
 // trucks gets a single additive column for the Routemate vehicle linkage.
-// Pattern matches the existing ALTER TABLE migration style at server.js:257.
 try { db.prepare("SELECT routemate_vehicle_id FROM trucks LIMIT 1").get(); }
 catch { db.exec(`ALTER TABLE trucks ADD COLUMN routemate_vehicle_id TEXT DEFAULT ''`); }
 
@@ -3099,14 +3047,9 @@ if (startsJob("ELD telemetry trim (at boot, then weekly)")) {
 // ═══════════════════════════════════════════════════════════════════════════
 // ELD FEED SILENCE — detection, ledger and alerting
 //
-// Nothing in this app noticed when an ELD feed stopped. Measured on production
-// 2026-09-19, three separate shapes of silence were live at once, none of which
-// had ever produced a signal:
-//
-//   LogisX-#2372  x78f4qtVukzwiF6ur7D04A   last fix 2026-08-11  (39 days)
-//   LogisX-#302   18000505841 (Linxup)     last fix 2026-07-27  (54 days)
-//   (orphan)      18000507597 (Linxup)     linked to NO truck, degraded to
-//                                          exactly 1 ping/day from 2026-09-06
+// Nothing else notices when an ELD feed stops, in any of its three shapes: a
+// linked device gone dark, a feed degraded to a trickle, or a device writing
+// telemetry under no truck.
 //
 // ⚠️ THIS IS A MONEY DEFECT, NOT A DASHBOARD GAP. getEldTravelDaysByVehicle()
 // is coverage-aware: a load window with NO pings falls back to the FULL
@@ -3115,9 +3058,9 @@ if (startsJob("ELD telemetry trim (at boot, then weekly)")) {
 // the `estimated` basis, which pays MORE driver days than were worked and
 // therefore LESS investor profit, and logs nothing anywhere saying so.
 //
-// WHY THE IN-MEMORY COUNTERS COULD NOT HAVE CAUGHT THIS. linxupHealth /
+// WHY THE IN-MEMORY COUNTERS CANNOT CATCH THIS. linxupHealth /
 // routemateHealth reset on every process restart, and the documented deploy flow
-// pm2-restarts this process on every merge to main. A 54-day silence spans
+// pm2-restarts this process on every merge to main. A weeks-long silence spans
 // dozens of restarts, so the in-memory view is permanently "we just started,
 // nothing to report". Everything below is derived from the DATABASE for that
 // reason, including the `feeds` array the two health endpoints serve.
@@ -3162,8 +3105,8 @@ const ELD_UNLINKED_LOOKBACK_HOURS =
 const ELD_STALE_ALERT_MAX_PER_DAY =
 	Math.max(1, parseInt(process.env.ELD_STALE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
 // ⚠️ RE-OPEN COOLDOWN. A RESOLVED feed may alert again only once its previous
-// alert is this old. A feed hovering at the trickle floor otherwise resolved and
-// re-opened every other sweep, and each re-open was a fresh email. While it waits
+// alert is this old. A feed hovering at the trickle floor otherwise resolves and
+// re-opens every other sweep, and each re-open is a fresh email. While it waits
 // the row stays resolved and keeps its alerted_at, which is the cooldown's clock.
 const ELD_STALE_REOPEN_COOLDOWN_MS = eldFeedHealth.DEFAULT_REOPEN_COOLDOWN_HOURS * eldFeedHealth.HOUR_MS;
 // The send log's server_state row. Prepared lazily: that table is created much
@@ -3239,8 +3182,7 @@ alertChannels.prepareLedger(db, "eld_feed_alerts", [], console);
 // exactly why the difference is easy to miss. They diverge on an out-of-order
 // webhook delivery, a re-ingest or a backfill — and then MAX(id) points at an
 // OLDER timestamp than the device's newest, so a silence detector built on it
-// reports a truck as dark while it is reporting fine. Measured on a 5-row
-// fixture, the two disagreed by 4 hours. The sweep therefore reads last_fix_ms;
+// reports a truck as dark while it is reporting fine. The sweep therefore reads last_fix_ms;
 // fleet-health keeps reading location_date_ms, whose meaning is unchanged.
 //
 // Both come out of the SAME query, so this is still one query and the callers
@@ -3255,10 +3197,8 @@ alertChannels.prepareLedger(db, "eld_feed_alerts", [], console);
 // ⚠️ TWO SCALAR MAXes PER ID, NOT ONE GROUP BY. Each MAX is a single seek on an
 // index that leads with the vehicle id and is filtered to clean rows — MAX(id)
 // on idx_rm_tel_clean, MAX(location_date_ms) on the partial idx_rm_tel_odo_walk.
-// The grouped form this replaced read the same answer by walking every clean
-// row of every vehicle asked for: measured on a ~970k-row copy, 42 ms per call
-// against 0.16 ms, identical rows. That mattered once GET /api/trucks called it
-// on every page load.
+// A grouped form reads the same answer by walking every clean row of every
+// vehicle asked for, and GET /api/trucks calls this on every page load.
 //
 // Empty input returns {} without touching the database — every caller must keep
 // working on a fleet with nothing linked.
@@ -3483,18 +3423,18 @@ function truckDriverAvailability() {
 // ⚠️ THE ORPHAN CANDIDATE SET COMES FROM TELEMETRY. routemate_vehicles CANNOT
 // be the source of truth here, and the reason is specific: it is written by the
 // two ROUTEMATE paths only — routemateUpsertVehicleStmt (the vehicles-list sync)
-// and routemateUpsertVehicleMinimalStmt (the telemetry poller). Verified in this
-// file 2026-09-19: ingestLinxupPosition() writes routemate_telemetry and nothing
+// and routemateUpsertVehicleMinimalStmt (the telemetry poller).
+// ingestLinxupPosition() writes routemate_telemetry and nothing
 // else, so a Linxup device that has only ever pushed to the webhook has NO row
 // there at all — and a Linxup device is exactly the orphan this condition was
-// written for (18000507597). Asking routemate_vehicles would miss it entirely.
+// written for. Asking routemate_vehicles would miss it entirely.
 // The rows are the only thing that can answer "is this device writing telemetry
 // we are filing under no truck", so the rows are what we ask.
 //
 // routemate_vehicles is unioned in anyway, purely as an extra candidate source:
 // a Routemate vehicle that is registered but silent then still gets SURFACED on
 // the health endpoints (it judges `orphan_idle` and does not alert) instead of
-// being absent, which is how INV-24-A-class gaps stay invisible.
+// being absent, which would keep the gap invisible.
 function eldFeedSnapshot(nowMs) {
 	const now = Number(nowMs) || Date.now();
 	const trucks = db.prepare(`
@@ -3585,19 +3525,15 @@ function eldFeedVerdicts(nowMs) {
 	// last wrote for this id.
 	//
 	// ⚠️ THE COLUMN IS routemate_telemetry.source — there is NO `source` on
-	// routemate_vehicles, whatever CLAUDE.md's Linxup paragraph implies (verified
-	// against production 2026-09-19; the PR #351 ALTER landed on the telemetry
-	// table, server.js:2275). Querying it on the mirror throws `no such column`.
+	// routemate_vehicles. Querying it on the mirror throws `no such column`.
 	//
 	// ⚠️ '' IS THE COMMON CASE, NOT AN EDGE CASE, so never read it as "unknown
-	// provider, probably nothing". Production is 1,032,272 rows at '' (everything
-	// written before the column shipped) against 3,266 at 'routemate', and
-	// **zero** at 'linxup' — the webhook has not written since the column landed.
-	// So a silent Linxup feed necessarily reports source '', which is exactly the
-	// feed this whole sweep exists to surface. Provenance is reported, never
-	// branched on. (Historical Linxup rows remain identifiable by fingerprint —
-	// engine_hours = 0 AND geocoded_location = '' — if anyone needs to partition
-	// them; devices 18000505841 and 18000507597.)
+	// provider, probably nothing": every row written before the column shipped
+	// is '', so a Linxup feed silent since then reports source '', which is
+	// exactly the feed this whole sweep exists to surface. Provenance is
+	// reported, never branched on. (Historical Linxup rows remain identifiable
+	// by fingerprint — engine_hours = 0 AND geocoded_location = '' — if anyone
+	// needs to partition them.)
 	const bySource = new Map();
 	for (const r of [...snap.trucks, ...snap.orphans]) bySource.set(r.vehicleId, r.source || "");
 	for (const f of judged.feeds) f.source = bySource.get(f.vehicleId) || "";
@@ -3608,14 +3544,14 @@ function eldFeedVerdicts(nowMs) {
 //
 // ⚠️ DB-DERIVED IS THE POINT, not an implementation detail. The in-memory
 // linxupHealth counters zero on every restart, so "nothing received" and "we
-// restarted 20 minutes ago" are the same reading — which is precisely how a
-// 54-day outage stayed invisible. Everything here survives a restart because
+// restarted 20 minutes ago" are the same reading, and a long outage stays
+// invisible. Everything here survives a restart because
 // none of it is held in this process.
 //
 // ⚠️ BOTH ENDPOINTS GET THE FULL FLEET, NOT A PER-PROVIDER SLICE. Filtering the
 // Linxup endpoint to source='linxup' would hide exactly the feeds it exists to
 // show: a silent device writes no rows, so its provenance is whatever its LAST
-// row said — and every Linxup row written before 2026-09-19 carries source=''.
+// row said — and every row written before the source column carries source=''.
 // The `source` field is reported per feed instead, so neither endpoint lies by
 // omission. Nothing here touches a token.
 function eldFeedHealthReport(nowMs) {
@@ -3685,7 +3621,7 @@ function eldFeedHealthReport(nowMs) {
 // The send log behind ELD_STALE_ALERT_MAX_PER_DAY: one ISO stamp per DELIVERED
 // alert, in server_state, pruned to the window whenever it is written. Compared
 // as epoch ms (eldFeedHealth.sendsInWindow) — never as text against SQLite's
-// "… …" form, which stretched "the last 24 h" to the whole cutoff date. A read
+// "… …" form, which would stretch "the last 24 h" to the whole cutoff date. A read
 // that fails counts as no sends: the per-feed dedupe and the cooldown still hold,
 // and silencing the alert on a broken row would be the worse failure.
 function eldAlertSendsInWindow(nowMs) {
@@ -3704,9 +3640,9 @@ function recordEldAlertSend(nowMs) {
 }
 
 // Which device a feed alert is about, and the other half of a likely mis-link.
-// The bare id named nothing a reader could act on ("_PxLRDo4…" is vehicle 356),
-// and the two alerts a wrong link raises — the truck's device is stale, the
-// truck's real device is an orphan — never pointed at each other:
+// A bare device id names nothing a reader can act on, and the two alerts a
+// wrong link raises — the truck's device is stale, the truck's real device is
+// an orphan — would never point at each other:
 //
 //   orphan       `unitMatch` — the ONE non-retired truck whose unit number
 //                matches the device's vehicle number (unitNumberToken()), with
@@ -4032,8 +3968,7 @@ if (ELD_STALE_ALERT_ENABLED && startsJob("ELD feed-silence sweep")) {
 	// call as the expense-duplicates tick: maybeSweepEldFeedSilence() owns its own
 	// try/catch/finally and should never reject, so anything arriving here is a
 	// defect in that guard itself, which is exactly why it must be noisy. An
-	// empty handler is how a throwing sweep stayed invisible through two QA ticks
-	// once already in this file.
+	// empty handler would keep a throwing sweep invisible.
 	const eldFeedTick = () => {
 		maybeSweepEldFeedSilence().catch((e) => {
 			console.error("[eld-feed] sweep threw outside its own guard:", (e && e.message) || e);
@@ -4084,7 +4019,7 @@ const routemateInsertTelemetryStmt = db.prepare(`
 
 // Last accepted (non-dropped, valid coords) fix for a vehicle. Used by the
 // ingest path to compute implied speed vs. the new ping, and by the geofence
-// dwell check (Tier 1 of the GPS-accuracy plan).
+// dwell check.
 const routemateLastCleanFixStmt = db.prepare(`
 	SELECT latitude, longitude, location_date_ms
 	FROM routemate_telemetry
@@ -4123,7 +4058,7 @@ const routemateUpsertVehicleMinimalStmt = db.prepare(`
 
 // IDs that Routemate's per-vehicle endpoint has rejected with a 400 or 404, i.e.
 // "this is not one of our vehicles". routemate_vehicles is a SHARED mirror: Linxup
-// device IDs (numeric, e.g. 18000505841) reach the same table through the
+// device IDs (numeric) reach the same table through the
 // vehicle-sync fallback, which seeds every id in routemate_telemetry, and
 // Routemate answers those with 400 "The given id must not be null". Without this set every sync would re-probe every foreign ID forever.
 // Process-lifetime only, deliberately: a restart re-checks, which is the cheap
@@ -4137,10 +4072,8 @@ const routemateNonInventoryIds = new Set();
 // Why this exists: routemate_vehicles.vin is written by exactly one statement
 // (routemateUpsertVehicleStmt), fed by exactly one source (the list endpoint),
 // which 500s. The catch below then falls back to the MINIMAL upsert, which
-// writes IDs only. Net effect before this function: every mirror row had
-// vin='', so the /trucks "Auto-match by VIN" could never match ANY truck and
-// always returned "No Routemate vehicle matches VIN X" — a message asserting a
-// mismatch when the real state was "we hold no VIN at all".
+// writes IDs only. Without this function every mirror row has vin='', so the
+// /trucks "Auto-match by VIN" can never match ANY truck.
 //
 // Best-effort by construction: it never throws, and a per-vehicle failure only
 // costs that vehicle its detail. Only rows still missing a VIN are fetched, so
@@ -4238,9 +4171,9 @@ function routemateSeedVehicleIdsFromTelemetry() {
 // ⚠️ THE VEHICLE LIST'S HTTP 500 IS THE KNOWN OUTAGE, NOT A FAILED SYNC.
 // GET /api/v0/assets/vehicles has answered HTTP 500 for this account since at
 // least 2026-05-06 (see listVehicles() in lib/routemate-client.js), while the
-// per-vehicle endpoint works. Reporting that as a failure made every boot log a
-// sync error, bumped errorsLast24h daily, and turned the admin "Sync now" button
-// into a 502 with no audit row — although the fallback below had just done the
+// per-vehicle endpoint works. Reporting that as a failure would log a sync
+// error on every boot, bump errorsLast24h daily, and turn the admin "Sync now"
+// button into a 502 with no audit row — although the fallback below does the
 // job. So the KNOWN SHAPE — HTTP 500 from this one call, while the company
 // endpoint still answers — sets `listUnavailable`: ids come from telemetry, the
 // per-vehicle refresh runs ONCE, lastSync is stamped, and no error is counted.
@@ -4417,7 +4350,7 @@ async function routemateSyncTelemetry() {
 		const txn = db.transaction((items) => {
 			for (const t of items) {
 				if (!t.routemate_vehicle_id) continue;
-				// Quality gates (Tier 1, 2026-05-15). Both gates still INSERT the
+				// Quality gates. Both gates still INSERT the
 				// row — we never silently lose data — but tag dropped_reason so
 				// every read path filters them out and the audit trail survives.
 				let droppedReason = '';
@@ -4498,8 +4431,8 @@ async function routemateSyncTelemetry() {
 		// First-match-wins is not merely "1 of 2 tracked": rows arrive in
 		// rate-con order, so the OLDEST load holds the slot until it is
 		// completed — starving every later load that driver takes. A load left
-		// sitting in Dispatched (exactly what happened to 561151778) would
-		// silently block automation on the load actually being driven.
+		// sitting in Dispatched would silently block automation on the load
+		// actually being driven.
 		const activeLoadsByDriver = Object.create(null);
 		// The same rows, for a ping whose driver has no active load under today's
 		// key: geofenceCandidatesAcrossSpacing() looks for them across spacing.
@@ -4594,9 +4527,9 @@ async function routemateSyncTelemetry() {
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
 			if (t.latitude === 0 && t.longitude === 0) continue;
 			// Low-fuel warning. Deliberately OUTSIDE the active-load loop and not
-			// gated on having a load at all: the client's ask was that fuel be
-			// watched "even when they park even when they're idling", and a truck
-			// between loads is exactly the one nobody is looking at.
+			// gated on having a load at all: fuel is watched while a truck is
+			// parked or idling too, and a truck between loads is exactly the one
+			// nobody is looking at.
 			// Self-throttling (15 min per vehicle) and never throws.
 			maybeAlertLowFuel(t.routemate_vehicle_id, driverName);
 			// Evaluate EVERY active load for this driver, most-progressed first.
@@ -4645,16 +4578,14 @@ async function routemateSyncTelemetry() {
 // Reset 24h error counter daily at boot-aligned hour.
 if (startsJob("Routemate 24 h error-counter reset")) setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 
-// --- Phase 4: telemetry-derived MPG rollup ---
+// --- Telemetry-derived MPG rollup ---
 // Routemate's IFTA endpoint returns mileage only (no gallons), and live
 // locations don't carry fuel-event records. So MPG is derived from each
 // vehicle's telemetry: miles = odometer delta over the day; gallons =
 // (sum of positive fuel_pct drops) × tank_size / 100. Refuels (fuel_pct
-// going UP) are intentionally ignored. Tank size is a fixed assumption —
-// Class 8 sleeper tractors typically carry ~200 gallons across two saddle
-// tanks. If a fleet drifts from that, MPG values stay useful as TRENDS
-// even if the absolute number is off; absolute precision would require
-// a per-truck override which Phase 4 doesn't include.
+// going UP) are intentionally ignored. Tank size is the truck's own
+// (routemateTankByVehicleStmt below), else this default: Class 8 sleeper
+// tractors typically carry ~200 gallons across two saddle tanks.
 const ROUTEMATE_DEFAULT_TANK_GALLONS = 200;
 
 // Provenance for the MILES column specifically.
@@ -4721,18 +4652,14 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 
 	// Miles = SUM OF POSITIVE CONSECUTIVE ODOMETER DELTAS.
 	//
-	// ⚠️ THIS WAS `Math.max(...odoVals) - Math.min(...odoVals)`, on the comment
-	// "odometer is monotonically increasing per vehicle". IT IS NOT. On
-	// 2026-08-11 LogisX-#2372's ELD reset and its odometer fell 219,818 miles
-	// in 0.17 h; the span billed that reset as DISTANCE and wrote a
-	// 219,818-mile day. That row is what makes that truck's all-time total read
-	// 244,562 instead of ~24,744 on Fleet Health and on the investor MyTrucks
-	// panel. Delta-sum recovers the real 3,369 for the same window.
+	// ⚠️ NEVER `Math.max(...odoVals) - Math.min(...odoVals)`: the odometer is NOT
+	// monotonically increasing per vehicle. An ELD reset can drop it by hundreds
+	// of thousands of miles in minutes, and a span bills that reset as DISTANCE.
 	//
-	// Measured across the fleet, this is a no-op wherever the sensor behaved
-	// (#33 3,904 = 3,904; #91 252 = 252) and differs only where it did not — so
-	// it is strictly better information, not a different opinion. The guard
-	// ladder, and why there is deliberately no per-day cap, are in lib/eld-miles.js.
+	// Delta-sum equals the span wherever the sensor behaved and differs only
+	// where it did not — so it is strictly better information, not a different
+	// opinion. The guard ladder, and why there is deliberately no per-day cap,
+	// are in lib/eld-miles.js.
 	const odoWalk = eldMiles.sumOdoDeltas(
 		rows.map(r => ({ ms: r.location_date_ms, odo: r.odometer }))
 	);
@@ -4838,7 +4765,7 @@ if (startsJob("ELD fuel daily rollup")) {
 	setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
 }
 
-// --- ELD device history: seed, writer, resolver (2026-10-02) ----------------
+// --- ELD device history: seed, writer, resolver -----------------------------
 // See the eld_device_assignments table comment. Three pieces:
 //   ensureEldDeviceHistorySeeded()  records the links in force when recording
 //                                   began, once (assigned_from = then; no
@@ -5004,9 +4931,9 @@ if (startsJob("ELD device-history reconcile (at boot)")) setImmediate(() => {
 // were. The driver is the one on THAT truck at the ping's instant. A day the
 // device spent on no truck is not written.
 //
-// CATCH-UP (2026-10-02). It used to re-derive a fixed 3 days, so a server down
-// for longer left a hole nothing ever filled. Now it re-derives every day since
-// the last successful run (ELD_MILES_DAILY_LAST_RUN_KEY), at least 3 — the
+// CATCH-UP. It re-derives every day since the last successful run
+// (ELD_MILES_DAILY_LAST_RUN_KEY), so a server down for days leaves no hole, and
+// at least 3 — the
 // still-forming current day plus enough overlap that a late Linxup push (the
 // webhook ACKs fast and ingests async) lands in a day that gets recomputed. With
 // no marker yet it starts from the newest row it ever wrote, and with no rows at
@@ -5315,7 +5242,7 @@ if (startsJob("ELD state miles rollup")) {
 	setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
 }
 
-// --- Phase 5: fault codes (DTC) + DVIR sync ---
+// --- Fault codes (DTC) + DVIR sync ---
 // Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
 // We diff against routemate_fault_codes: existing rows get last_seen
 // bumped; brand-new codes raise a dispatch_notifications entry so
@@ -5533,9 +5460,8 @@ if (configCount === 0) {
 // INSERT OR IGNORE out here.
 //
 // settlement_grace_days: how long after a work month ends the books stay open for
-// straggler receipts before the period is finalized and frozen. Client (Desoren)
-// asked for 7 — receipts routinely land in the first days of the following month,
-// and re-settling by hand every time was the thing to kill. Global only
+// straggler receipts before the period is finalized and frozen. Default 7:
+// receipts routinely land in the first days of the following month. Global only
 // (owner_id = 0): one carrier, one month-end. A per-investor grace makes the
 // fleet-wide lock incoherent — see the finalize sweep.
 try {
@@ -5588,28 +5514,23 @@ try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopened_at TEXT DEFAULT 
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopened_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopen_reason TEXT DEFAULT ''"); } catch {}
 
-// Month-end finalization stamp. Until this feature, the ONLY thing that froze a
-// month's figure was an admin clicking "Mark Processing/Paid" — so a month was
-// payable (and freezable) from the instant the clock rolled over, and every
-// receipt that landed afterwards meant a hand-written adjustment. These columns
-// record the settlement being closed on a schedule instead of by a click:
+// Month-end finalization stamp. These columns record the settlement being
+// closed on a schedule instead of by an admin clicking "Mark Processing/Paid":
 //   finalized_at        — when this period was closed for this investor
 //   finalized_amount    — the figure at close (what the statement is issued for)
 //   finalized_breakdown — JSON snapshot of the composition, so the statement
 //                         prints what was true at close rather than a live
 //                         recompute that keeps drifting underneath it
-// NULL/'' = never finalized (every legacy row), which falls through to exactly
-// today's behaviour. Note the lock itself lives in `period_locks`, fleet-wide —
+// NULL/'' = never finalized (every legacy row), which reads as an unfinalized
+// period. Note the lock itself lives in `period_locks`, fleet-wide —
 // these are the per-investor consequences of it.
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_at TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_amount REAL"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN finalized_breakdown TEXT DEFAULT ''"); } catch {}
 
-// Rendered-statement cache. Client's words: "every time you click view statement
-// it's preparing the statement — why can't we just prepare the statement once".
-// He is describing the design accurately: GET …/statement had no cache at any
-// layer, so every click ran a Sheets read + two full month recomputes + a fresh
-// Puppeteer render (~3-5 s) to produce bytes identical to the previous click's.
+// Rendered-statement cache. Without it every click on GET …/statement runs a
+// Sheets read + two full month recomputes + a fresh Puppeteer render (~3-5 s) to
+// produce bytes identical to the previous click's.
 //
 // ONE column is enough because the FINGERPRINT LIVES IN THE FILENAME
 // (payout-<ownerId>-<period>-<hash10>.pdf, see statementFileName). A cached file
@@ -5689,9 +5610,8 @@ const PRE_DISPATCH_PAY_DAY_RULE_ENABLED = /^(true|1|yes|on)$/i.test(String(proce
 // warning at boot.
 const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PAY_DAY_RULE_ENABLED, process.env.PRE_DISPATCH_PAY_DAY_RULE_FROM,
 	(msg) => console.warn(`[pre-dispatch] ${msg}`));
-// Mark Paid in a closed month records the payment only (the user's decision of
-// 2026-10-14): on, a driver invoice whose week touches a closed month can be
-// marked Paid (status, paid_at, paid_by and an audit row; no closed month's
+// Mark Paid in a closed month records the payment only: on, a driver invoice
+// whose week touches a closed month can be marked Paid (status, paid_at, paid_by and an audit row; no closed month's
 // revenue, P&L, payout or investor figure reads invoices), and a revert may
 // clear a paid stamp set after every closed month in the week was locked
 // (paidStampAfterLocks()). Off, both refuse in a closed month as before.
@@ -5715,7 +5635,7 @@ const APPROVED_INVOICE_LOCK_ENABLED = process.env.APPROVED_INVOICE_LOCK_ENABLED 
 // warning. null = off. tripDayResolver() is the one place the three pay paths
 // get it from; months before FROM, closed months and frozen items never change.
 const TRIP_WORK_DAYS_FROM = tripWorkDays.ruleFromEnv(process.env, (msg) => console.warn(`[trip-work-days] ${msg}`));
-// The owner's daily-rate rule (2026-10-16, lib/driver-rate-only.js): a daily
+// The owner's daily-rate rule (lib/driver-rate-only.js): a daily
 // rate belongs to the driver, not the truck; $250 only when the driver has none.
 // Dormant until the user approves its report (scripts/driver-rate-only-report.js):
 // DRIVER_RATE_ONLY_ENABLED (true/1/yes/on; off by default) and
@@ -5725,8 +5645,8 @@ const TRIP_WORK_DAYS_FROM = tripWorkDays.ruleFromEnv(process.env, (msg) => conso
 // resolveDailyRate(own, truck, month); months before FROM, a month closed
 // outside the rule, and frozen items never change.
 const DRIVER_RATE_ONLY_FROM = financialsCalc.driverRateOnly.ruleFromEnv(process.env, (msg) => console.warn(`[driver-rate-only] ${msg}`));
-// A blank (or non-date, "TBD") appointment cell (money plan D, 2026-10-15;
-// lib/load-pay-days.js payWindow()). Two flags, so driver pay and payouts are
+// A blank (or non-date, "TBD") appointment cell (lib/load-pay-days.js
+// payWindow()). Two flags, so driver pay and payouts are
 // approved separately, each with the first settle month it covers, read once
 // here (true/1/yes/on; off by default; on without a month leaves it off, with
 // one warning). null = off. Months before FROM, closed months, frozen items and
@@ -5912,7 +5832,7 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_pay_rate_history_subject ON pay_ra
 // Small key/value settings an admin sets in the app. `financials.settings` is
 // the Financials cost lines that count in margin, the monthly overhead and the
 // depreciation years (lib/financials-report.js normalizeSettings()); Financials
-// only, never payouts (owner decision D7).
+// only, never payouts.
 db.exec(`
 	CREATE TABLE IF NOT EXISTS app_settings (
 		key TEXT PRIMARY KEY,
@@ -6049,12 +5969,10 @@ db.exec(`
 `);
 // Migration: add signed_pdf_url column
 try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signed_pdf_url TEXT DEFAULT ''"); } catch { /* exists */ }
-// Migration: why a render failure is now RECORDED rather than swallowed.
+// Migration: a render failure is RECORDED, never swallowed.
 // `signed = 1` is a legal assertion — "this person signed this contract, and we
-// hold the document". Until 2026-08-08 the sign routes set it unconditionally,
-// so a missing template or a Puppeteer crash produced a row asserting a signed
-// W-9 with no W-9 behind it. Nothing surfaced that until an audit or a dispute
-// went looking for the file, which is the worst possible time to find out.
+// hold the document" — so a missing template or a Puppeteer crash must not
+// leave a row asserting a signed W-9 with no W-9 behind it.
 // These two columns hold the other half of the truth: we captured the signature
 // but could not produce the artifact, and here is why. See writeSignedArtifact().
 try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signing_error TEXT DEFAULT ''"); } catch { /* exists */ }
@@ -6198,15 +6116,15 @@ try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON inv
 	console.error("invoices driver/week bootstrap index skipped:", err.message);
 }
 
-// Invoice management suite (owner requests 2026-06-11) — all additive ALTERs,
+// Invoice management suite — all additive ALTERs,
 // idempotent via try-catch, backward compatible.
-// Soft delete: deleted invoices stay in the table for audit ("track who deleted
-// it, how it got deleted") but are filtered from every list/report.
+// Soft delete: deleted invoices stay in the table for audit (who deleted it,
+// and how) but are filtered from every list/report.
 try { db.exec("ALTER TABLE invoices ADD COLUMN deleted_at TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
-// is_manual=1 → admin-created from-scratch invoice (free-text payee — "other
-// employees other than drivers" — line items + deductions live in render_data).
+// is_manual=1 → admin-created from-scratch invoice (free-text payee, such as an
+// employee who is not a driver; line items + deductions live in render_data).
 // Bypasses the active-day pay math entirely; flows through the same
 // list/submit/approve/PDF pipeline as generated weekly invoices.
 try { db.exec("ALTER TABLE invoices ADD COLUMN is_manual INTEGER DEFAULT 0"); } catch {}
@@ -6297,12 +6215,10 @@ db.exec(receiptPagePrivacy.SCHEMA_SQL);
 //
 //  2. NOCASE — `invoices.driver` is a money join key and every reader folds case
 //     (`driverOwnsInvoice()`, `normalizeDriverName()`, `LOWER(driver) = ?`).
-//     The index did not. That is the worst combination: the readers merge the
-//     spellings while the constraint permits them, so `"Soren King"` and
-//     `"soren king"` are two index entries and a SECOND live weekly invoice for
-//     one driver-week is structurally insertable. Production carries exactly one
-//     mixed-case row (invoice #40, PAID, inside two locked periods) beside 13
-//     lowercase rows for the same driver.
+//     A case-sensitive index is the worst combination: the readers merge the
+//     spellings while the constraint permits them, so `"Jane Doe"` and
+//     `"jane doe"` are two index entries and a SECOND live weekly invoice for
+//     one driver-week is structurally insertable.
 //
 // ⚠️ THIS IS NOT A SUBSTITUTE FOR THE READER FIX, and adding it does not change
 // any query's semantics. In SQLite the collation used by `driver = ?` comes from
@@ -6311,11 +6227,11 @@ db.exec(receiptPagePrivacy.SCHEMA_SQL);
 // still have to fold case themselves (they do, via `driverOwnsInvoice()`); this
 // is purely the WRITE-side constraint that stops the second row existing.
 //
-// ⚠️ THE MIGRATION SHAPE IS THE POINT. The previous version did
-// `DROP INDEX` then `CREATE UNIQUE INDEX` as two statements, not in a
-// transaction, inside a catch that only console.error'd and let boot continue —
-// so a failure landing between them left the table with NO UNIQUE INDEX AT ALL,
-// silently, which is strictly weaker than never migrating. Three rules follow:
+// ⚠️ THE MIGRATION SHAPE IS THE POINT. `DROP INDEX` then `CREATE UNIQUE INDEX`
+// as two statements, not in a transaction, inside a catch that only logs and
+// lets boot continue, leaves the table with NO UNIQUE INDEX AT ALL when a
+// failure lands between them, silently, which is strictly weaker than never
+// migrating. Three rules follow:
 //
 //   (a) COLLISION PRE-FLIGHT FIRST. Fold-to-one-name duplicates already in the
 //       table would make the CREATE throw. Detect them, abort LOUDLY, and leave
@@ -6331,10 +6247,9 @@ db.exec(receiptPagePrivacy.SCHEMA_SQL);
 //       canonical name does not exist. It is dropped last, and if any step
 //       fails it is deliberately LEFT IN PLACE — a duplicate constraint is
 //       harmless, an absent one is the bug.
-//   (c) THE REBUILD PREDICATE MUST TEST BOTH PROPERTIES. It used to test only
-//       `/\bWHERE\b/`, which is true forever once the partial index exists —
-//       so this migration would have been dead on arrival, never firing on any
-//       database that had already been upgraded (i.e. all of them).
+//   (c) THE REBUILD PREDICATE MUST TEST BOTH PROPERTIES. Testing only
+//       `/\bWHERE\b/` is true forever once the partial index exists, so the
+//       migration would never fire on a database already upgraded.
 // ---------------------------------------------------------------------------
 const INVOICE_WEEK_IDX = "idx_invoices_driver_week";
 const INVOICE_WEEK_IDX_TMP = "idx_invoices_driver_week_migrating";
@@ -6563,18 +6478,16 @@ try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_fail
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN payment_terms_json TEXT DEFAULT NULL"); } catch { /* exists */ }
 
 // --- Signing evidence (both onboarding document tables) ---
-// #202 proved an artifact EXISTS; #234 proved it says something. Neither
-// recorded WHO asserted consent, FROM WHERE, or THAT THE FILE ON DISK IS THE
-// FILE THAT WAS SIGNED. A signed contractor agreement, W-9 or vehicle lease
-// therefore held a signature PNG and a server clock reading and nothing else —
-// no counterparty evidence at all, on documents carrying tax ids and bank
-// account numbers.
+// Records WHO asserted consent, FROM WHERE, and THAT THE FILE ON DISK IS THE
+// FILE THAT WAS SIGNED. Without it a signed contractor agreement, W-9 or
+// vehicle lease holds a signature PNG and a server clock reading and nothing
+// else, on documents carrying tax ids and bank account numbers.
 //
-// The "I have read and agree" checkbox existed the whole time and NEVER LEFT
-// THE BROWSER: DocumentSignModal.vue and InvestorSignModal.vue both gate the
-// signature pad on `agreed`, and neither ever put it in the request. A control
-// the server cannot see is not a control; it is a UI affordance. The server now
-// requires it to be transmitted and refuses a signature without it.
+// The "I have read and agree" checkbox (DocumentSignModal.vue and
+// InvestorSignModal.vue gate the signature pad on `agreed`) must reach the
+// server: a control the server cannot see is not a control; it is a UI
+// affordance. The server requires it to be transmitted and refuses a signature
+// without it.
 //
 // ⚠️ GRANDFATHERING. `evidence_version` is the discriminator, and it is a
 // POSITIVE assertion rather than an inference from empty columns. Existing rows
@@ -6605,9 +6518,8 @@ for (const t of ["onboarding_documents", "investor_onboarding_documents"]) {
 
 // A failed signing is only useful if somebody hears about it. Alerts are
 // once-per-(scope, owner, doc), the same shape as fuel_event_alerts and
-// ratecon_reconcile_alerts: the repo's own cautionary tale is the 13 ignored
-// "needs a manual check" rate-con emails, and a legal-document gap repeated on
-// every retry would earn the same fate. resolved_at is stamped when the document
+// ratecon_reconcile_alerts: an alert repeated on every retry is one people
+// learn to ignore. resolved_at is stamped when the document
 // is finally produced, so a signer who simply retried closes their own alert.
 db.exec(`
 	CREATE TABLE IF NOT EXISTS onboarding_doc_alerts (
@@ -6703,8 +6615,8 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // DRIVER AVAILABILITY (R11), default OFF (the shape reads off: only
 // true/1/yes/on turns it on), off in production until the owner approves it.
 // A driver's recorded time off, kept apart from every truck status: setting a
-// truck Inactive for a vacation took its fixed costs out of every month, and OOS
-// silenced its ELD alert with no end date. Availability touches no truck, no pay
+// truck Inactive for a vacation takes its fixed costs out of every month, and OOS
+// silences its ELD alert with no end date. Availability touches no truck, no pay
 // day and no money: it only pauses the ELD silence alert while the truck's driver
 // is away (and for one stale window after he returns) and warns a dispatcher who
 // assigns him a load inside his off days (409 DRIVER_OFF_DUTY, "Assign anyway").
@@ -6739,7 +6651,7 @@ const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED &&
 // on the business clock, both included. Rows are cancelled, never deleted.
 // driver_availability_confirmations: one row per "Assign anyway" whose sheet
 // write succeeded, with the load's window. A confirmed load covering today lets
-// the driver's truck alert as normal (the owner's rule, 2026-10-15).
+// the driver's truck alert as normal.
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_availability (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6774,12 +6686,10 @@ db.exec(`
 `);
 
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
-// ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
-// always read and written this table, but NOTHING in the repo created it — it
-// existed in production only because someone made it out-of-band, so a fresh
-// install (new staging box, rebuilt VPS, disaster recovery) 500s the webhook on
-// "no such table". This CREATE closes that gap and nothing else: `IF NOT EXISTS`
-// means production, where the table is already present, is untouched.
+// ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint reads
+// and writes this table; without this CREATE a fresh install (new staging box,
+// rebuilt VPS, disaster recovery) 500s the webhook on "no such table".
+// `IF NOT EXISTS` leaves a database that already has the table untouched.
 //
 // ⚠️ MEASURED 2026-09-19: this table holds 0 rows in production and n8n has
 // not called POST /api/n8n/job once in the 14-day nginx retention window —
@@ -6790,9 +6700,8 @@ db.exec(`
 //
 // ⚠️ This WAS part of the live n8n ingestion contract, so the shape is not
 // inferred from the endpoint's queries — it is a transcription of production's
-// actual `sqlite_master.sql`, read over the VPS on 2026-08-07. Getting a name or
-// type wrong here would be worse than the current state: today a fresh install
-// fails loudly, whereas a mismatched column would fail silently and wrong.
+// actual `sqlite_master.sql`. Getting a name or type wrong here would fail
+// silently and wrong, which is worse than a fresh install failing loudly.
 // The 25 data columns mirror the sheet's 26 columns in order; `_payment_` is the
 // sheet's "  Payment  " header (the surrounding spaces are real) flattened, and
 // the six the endpoint never writes (phase_of_progress, carrier_stage,
@@ -6849,31 +6758,30 @@ const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_EN
 //      whitespace run.
 // An expense carries the spelling it was filed under (a driver's own session
 // files under the account's spelling), an assignment the spelling its truck was
-// assigned under. So an account stored as "Soren  King" never met its
-// assignment to "Soren King", and its receipts stayed unattributed, off the
-// investor's P&L. Both steps take the assignment covering the expense's day
-// with the latest start_date, through ONE window (coversExpenseDay() below),
+// assigned under. So an account stored as "Jane  Doe" never meets its
+// assignment to "Jane Doe" in step 1, and its receipts would stay
+// unattributed, off the investor's P&L. Both steps take the assignment
+// covering the expense's day with the latest start_date, through ONE window (coversExpenseDay() below),
 // so step 2 differs from step 1 only in how it compares the name. Step 2
 // counts a match only while no other account holds
 // the name under another spelling (driverNameHeldByOtherSpelling()), the rule
 // findTruckForDriverStamp() applies to the same stamp at insert: a legacy
-// account "Soren  King" beside the real "Soren King" must not have its receipts
+// account "Jane  Doe" beside the real "Jane Doe" must not have its receipts
 // stamped with the real driver's truck and owner. Running second, step 2 only
 // ever fills a row that would otherwise stay unattributed; it never outranks a
 // case-aside assignment.
 //
 // ONLY A ROW THAT MATCHED IS WRITTEN, which is what makes a second boot over
-// the same data change nothing. Pass 1 used to write every candidate, and
-// `SET (a, b) = (SELECT ... LIMIT 1)` assigns NULL to both columns when the
-// subquery finds no row, so an expense no assignment covers went from ('', 0),
-// the column defaults and what POST /api/expenses writes when it finds no
-// truck, to (NULL, NULL). That was not a normalisation. No reader tells NULL
-// from '' or 0 (truck_unit is COALESCEd or compared with a real unit, owner_id
-// with a real investor's id), and NULL still passes the candidate filter, so
-// the same rows were rewritten, counted as applied and logged on every boot. It
-// would also have cleared an owner_id on a row with a blank truck_unit. Rows it
-// already rewrote keep their NULLs, which read exactly as '' and 0; writing
-// them back would touch finance rows to change no figure.
+// the same data change nothing. `SET (a, b) = (SELECT ... LIMIT 1)` assigns NULL
+// to both columns when the subquery finds no row, turning an expense no
+// assignment covers from ('', 0), the column defaults and what POST
+// /api/expenses writes when it finds no truck, into (NULL, NULL). NULL still
+// passes the candidate filter, so writing every candidate would rewrite the
+// same rows, count them as applied and log them on every boot, and clear an
+// owner_id on a row with a blank truck_unit. Some older rows hold those NULLs;
+// no reader tells NULL from '' or 0 (truck_unit is COALESCEd or compared with a
+// real unit, owner_id with a real investor's id), and writing them back would
+// touch finance rows to change no figure.
 //
 // ⚠️ GATED ON THE PERIOD LOCK, per the same rule as the fuel odometer backfill:
 // a row in a finalized month is never written. This one matters MORE than the
@@ -6882,7 +6790,7 @@ const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_EN
 // restates an investor's finalized P&L. Both steps of pass 1 read the one
 // lock-partitioned list, so step 2 never sees a row in a finalized month.
 //
-// The tension is real and was escalated rather than decided here: gating means a
+// The tension is real: gating means a
 // legacy row in a closed month never gets attributed, freezing a known error.
 // The answer is that freezing it is not the end state — POST /api/periods/:period/reopen
 // is the sanctioned path, it demands a reason and records who used it. So the
@@ -6925,19 +6833,18 @@ function backfillLegacyExpenseTrucks(health) {
 		// stays in ONE primitive (expenseRowPeriodLocked) instead of being restated as
 		// a second, drifting SQL expression. posted_period + created_at are selected
 		// because that predicate fails closed without them.
-		// POSITIVE CONTROL, and it is here because this gate already failed silently
-		// once: isLocked() swallows every error and answers "not locked", so a broken
-		// lock lookup is indistinguishable from an open month and the migration would
-		// cheerfully write the whole backlog into finalized periods. Prove the table
+		// POSITIVE CONTROL: isLocked() swallows every error and answers "not
+		// locked", so a broken lock lookup is indistinguishable from an open month
+		// and the migration would cheerfully write the whole backlog into finalized periods. Prove the table
 		// is readable first; if it is not, treat EVERY row as locked rather than
 		// trusting an answer that cannot be wrong in the safe direction.
 		//
 		// ONE implementation, shared with the fuel-odometer backfill: a second
-		// hand-rolled copy of this try/catch is how the two callers of the same
-		// fail-open predicate came to be defended differently. periodLocksReadable is
+		// hand-rolled copy of this try/catch lets two callers of the same
+		// fail-open predicate be defended differently. periodLocksReadable is
 		// a function DECLARATION, so it is hoisted and initialised and reachable from
 		// this early-boot migration — a `const` beside it would still be in the
-		// temporal dead zone here, which is the bug this whole probe descends from.
+		// temporal dead zone here.
 		const lockReadable = periodLocksReadable();
 
 		const lockPartition = (rows) => {
@@ -6954,7 +6861,7 @@ function backfillLegacyExpenseTrucks(health) {
 		};
 		// better-sqlite3 caps bound parameters, so the id list is chunked rather than
 		// expanded into one enormous IN (). A restored backup could make these sets
-		// large; today both are empty.
+		// large.
 		const runChunked = (sql, rows) => {
 			let changes = 0;
 			const stmt = (n) => db.prepare(sql.replace("__IDS__", Array(n).fill("?").join(",")));
@@ -6976,15 +6883,14 @@ function backfillLegacyExpenseTrucks(health) {
 		//     new Date().toISOString())
 		//   expenses.date                         -> bare day, '2026-08-06'
 		// Lexicographically the longer string sorts higher at position 10, so
-		// the raw comparison was ASYMMETRIC:
-		//   start <= date  ->  FALSE  (opening bound excluded its own day)
-		//   end   >= date  ->  TRUE   (closing bound included it)
-		// Net effect: a driver's FIRST-DAY expenses never resolved to a truck,
-		// so truck_unit stayed blank and owner_id stayed 0 — which drops those
+		// a raw comparison is ASYMMETRIC:
+		//   start <= date  ->  FALSE  (opening bound excludes its own day)
+		//   end   >= date  ->  TRUE   (closing bound includes it)
+		// Net effect: a driver's FIRST-DAY expenses would never resolve to a
+		// truck, so truck_unit stays blank and owner_id 0 — which drops those
 		// receipts out of the investor's P&L entirely and over-states their
-		// profit by every first-day receipt in their fleet's history. And
-		// 22:30Z is 18:30 Eastern, so this fired on ordinary afternoon
-		// assignments, not only on evening ones.
+		// profit. And 22:30Z is 18:30 Eastern, so it hits ordinary afternoon
+		// assignments, not only evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
 		// The first 10 characters are the UTC day, already the next one from 8 PM EDT
@@ -7113,7 +7019,7 @@ function backfillLegacyExpenseTrucks(health) {
 		// Loud on purpose, and on EVERY boot while it is non-zero. These rows are
 		// receipts that cannot be attributed to an investor until someone reopens the
 		// month — a one-time log would scroll away and the condition would persist
-		// unseen, which is the failure mode this whole branch keeps finding.
+		// unseen.
 		if (!lockReadable) {
 			health.error = "period_locks unreadable — every candidate row was withheld";
 			console.warn("Expense backfill: period_locks could not be read; withheld ALL candidate rows rather than risk writing into a finalized month.");
@@ -7200,13 +7106,11 @@ function assignDriverToTruck(truckId, driverName) {
 // investor_onboarding_documents (that table has no such column) — this list is
 // the declaration, and isConfidentialOnboardingDoc() is the single reader.
 //
-// ⚠️ Decided from the FIELD MAPS, not from the document's name. Before this,
-// only `w9` was treated as confidential, on the reasoning that it is "the one
-// carrying a tax id". That was wrong on the evidence: lib/policy-field-maps.js
-// puts `data.einSsn` on BOTH other documents, and master_agreement additionally
-// prints `Routing number` and `Account number`. So the single most sensitive
-// investor document in the system — tax id AND full bank details on one page —
-// was the one document whose reads were never recorded.
+// ⚠️ Decided from the FIELD MAPS, not from the document's name:
+// lib/policy-field-maps.js puts `data.einSsn` on the master agreement and the
+// vehicle lease as well as the W-9, and master_agreement additionally prints
+// `Routing number` and `Account number` — tax id AND full bank details on one
+// page.
 const INVESTOR_ONBOARDING_DOCS = [
 	// "Tax ID SSN" + "Routing number" + "Account number"  (policy-field-maps.js master_agreement)
 	{ key: "master_agreement", name: "Master Participation & Management Agreement", confidential: 1 },
@@ -7231,15 +7135,11 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "dev-only-fallback-do-not-u
 // ⚠️ In production this is also the ONLY thing standing in front of the node
 // port. server.js binds *:3000 (all interfaces, not loopback) while nginx
 // proxies app.logisx.com to 127.0.0.1:3000 — so the app answers on BOTH
-// https://app.logisx.com and plain http://<vps-ip>:3000, and the second one is
-// reachable from the internet (verified 2026-08-09: 200). A browser will
+// https://app.logisx.com and plain http://<vps-ip>:3000. A browser will
 // neither store nor send a Secure cookie over that plain-HTTP path, so no
 // session can ride it — which is why tightening SameSite below changes nothing
-// there. What it does NOT cover: `app.set("trust proxy", 1)` believes the
-// X-Forwarded-Proto of whatever connects, and on the direct path that is the
-// caller, so a scripted client can present `X-Forwarded-Proto: https` and be
-// treated as secure. Harmless for CSRF (a script has no victim cookie to
-// borrow), but the reason trust-proxy is only sound if nothing but nginx can
+// there. `app.set("trust proxy", 1)` believes the X-Forwarded-Proto of
+// whatever connects, so trust-proxy is only sound if nothing but nginx can
 // reach :3000. Binding to 127.0.0.1 is an infrastructure fix, not a code one.
 const SESSION_COOKIE_SECURE = process.env.NODE_ENV === "production";
 
@@ -7284,24 +7184,11 @@ const sessionMiddleware = session({
 		secure: SESSION_COOKIE_SECURE,
 		// SameSite decides whether a browser attaches this cookie to a request
 		// some OTHER site made. It is therefore the whole CSRF question, and it
-		// closes the class at the cookie instead of route by route.
-		//
-		// Production ran "none" from 2026-05-17 (commit 4f19807), which is what
-		// made every finding in PR #253 reachable: None tells the browser to
-		// attach connect.sid to a POST from any site on the internet, and there
-		// is no CSRF token anywhere in this app. Tightened to "lax" 2026-08-09
-		// after re-verifying the premise three independent ways:
-		//   - DRIVER_MOBILE_ORIGINS is not in .env.example, not in the developer
-		//     .env, and NOT SET IN PRODUCTION — checked read-only on the VPS
-		//     against the RUNNING PROCESS environment (/proc/<pid>/environ) of
-		//     both the logistics-app and logisx-staging pm2 processes, and
-		//     against every other process on the box. Nothing on the machine
-		//     sets it. (Checking the .env file alone would have missed a pm2
-		//     ecosystem injection, which is why the process was checked too.)
-		//   - The driver-mobile-view Next.js prototype it was added for does not
-		//     exist in this repo, so its two default origins — https://localhost:3002
-		//     and the LAN address https://192.168.8.106:3002 — are addresses no
-		//     production browser is ever on.
+		// closes the class at the cookie instead of route by route: "none" tells
+		// the browser to attach connect.sid to a POST from any site on the
+		// internet, and there is no CSRF token in this app. "lax" holds because:
+		//   - DRIVER_MOBILE_ORIGINS is set nowhere, so no cross-origin client
+		//     needs the cookie;
 		//   - The SPA, the driver app and all three public surfaces (/apply,
 		//     /invest, /track/:loadId) are served BY THIS SERVER AT THIS ORIGIN
 		//     and call relative /api/... URLs, so none of them is a cross-site
@@ -7321,7 +7208,7 @@ const sessionMiddleware = session({
 		//       logisx.com subdomain is same-site, so the cookie still rides.
 		//   (b) a top-level GET navigation to a route that WRITES. Lax carries
 		//       the cookie there by design. That is why GET /api/admin/ratecon-
-		//       reconcile no longer alerts or sends mail on a GET (see it), and
+		//       reconcile does not alert or send mail on a GET (see it), and
 		//       why the crossSiteGuard mounts stay. Only a per-session token
 		//       closes (a).
 		//
@@ -7370,8 +7257,7 @@ const N8N_JOB_COLUMNS = [
 // Load #", re-sends, order updates), and a later one often leaves fields out.
 // So a blank (missing, null, or only spaces) never replaces a stored value, and
 // Assigned Date, which decides the month a load's revenue and pay count in, is
-// written once, when the load is first assigned, and never re-stamped (client,
-// 2026-10-09).
+// written once, when the load is first assigned, and never re-stamped.
 function n8nJobUpdates(stored, body) {
 	const out = [];
 	for (const [col, field] of N8N_JOB_COLUMNS) {
@@ -7579,9 +7465,9 @@ async function runRateConGemini(base64) {
 	// ⚠️ This function is the LOAD-INGESTION path (POST /api/loads/ratecon/extract
 	// and the n8n Extract via LogisX node), so its failure shape is load-bearing:
 	// the n8n HTTP node runs onError:continueErrorOutput → LlamaParse Upload, and
-	// that fallback is what stops a Gemini outage losing a load. It still THROWS on
-	// failure, with the same `Gemini <status>: <body>` message; the error merely
-	// carries .status/.kind/.reason now, and arrives sooner. Do not make this
+	// that fallback is what stops a Gemini outage losing a load. It THROWS on
+	// failure, with a `Gemini <status>: <body>` message; the error also carries
+	// .status/.kind/.reason. Do not make this
 	// resolve instead of throw — that silently disconnects the n8n error branch.
 	let lastErr = null;
 	for (let attempt = 0; attempt <= 2; attempt++) {
@@ -7595,8 +7481,8 @@ async function runRateConGemini(base64) {
 				signal: controller.signal,
 			});
 			if (!resp.ok) {
-				// Same message as before; now carries .status/.kind/.reason so the
-				// loop below and every caller can branch without re-parsing.
+				// The `Gemini <status>: <body>` message, with .status/.kind/.reason so
+				// the loop below and every caller can branch without re-parsing.
 				throw geminiFailure(resp.status, await resp.text().catch(() => ""));
 			}
 			const data = await resp.json();
@@ -7615,15 +7501,14 @@ async function runRateConGemini(base64) {
 			lastErr = err;
 			// Stop on anything a second attempt cannot change: a rejected key or an
 			// exhausted quota ('unavailable') and a request we built badly
-			// ('defect') both fail identically every time. This loop had NO
-			// fast-fail, which made it the app's worst amplifier — three 30s-budget
-			// calls plus 3s of backoff per pass, and the extract route runs a second
-			// pass, so one dropped rate-con could cost six calls against a key that
-			// was never going to answer. On a 429 that actively deepens the hole.
-			// It also crowded the n8n node's own 120s timeout, which would have
-			// turned a clean error-branch fallback into a node timeout.
-			// Errors with no .kind (empty body, unparseable JSON, an aborted fetch)
-			// still retry exactly as they did.
+			// ('defect') both fail identically every time. Without this fast-fail
+			// the loop is the app's worst amplifier — three 30s-budget calls plus 3s
+			// of backoff per pass, and the extract route runs a second pass, so one
+			// dropped rate-con could cost six calls against a key that will never
+			// answer. On a 429 that actively deepens the hole, and it crowds the n8n
+			// node's own 120s timeout, turning a clean error-branch fallback into a
+			// node timeout. Errors with no .kind (empty body, unparseable JSON, an
+			// aborted fetch) still retry.
 			if (err && err.kind === "unavailable") rateConGeminiUnavailableAt = Date.now();
 			if (err && err.kind && err.kind !== "transient") break;
 			if (attempt < 2) {
@@ -7646,7 +7531,7 @@ async function runRateConGemini(base64) {
 //   * in-flight    — bounds peak memory: a retry means two ~14 MB base64 bodies
 //     plus their JSON copies alive at once, for up to ~93 s.
 // Both are advisory: exceeding either skips the upgrade attempt and ships the
-// first-pass fields, which is the pre-2026-08-09 behaviour. Never an error.
+// first-pass fields. Never an error.
 const RATECON_RETRY_WINDOW_MS = 15 * 60 * 1000;
 const RATECON_RETRY_MAX_PER_WINDOW = Math.max(0, parseInt(process.env.RATECON_RETRY_MAX_PER_WINDOW ?? "20", 10) || 0);
 const RATECON_RETRY_MAX_IN_FLIGHT = 2;
@@ -7684,7 +7569,7 @@ function rateConNormalizeOptions(base64) {
 	return { now: Date.now(), documentDates };
 }
 
-// DVIR LINES FOR THE RE-ISSUE ALERT (2026-10-14). The re-issue hold alert
+// DVIR LINES FOR THE RE-ISSUE ALERT. The re-issue hold alert
 // (alertRateConReissueHold()) says what C.H. Robinson deducted for DVIR, read from
 // the rate con itself (lib/ratecon-dvir.js). The route below is where the app sees a
 // rate-con email's PDF, just before n8n asks POST /api/n8n/keep-stored-values about
@@ -7742,8 +7627,7 @@ function rateConPdfTextOf(base64) {
 	return { text, size };
 }
 
-// "NEEDS CONFIRMATION" PICKUPS (Arvin, 2026-10-21; plan ~/LogisX-replica/reports/
-// 2026-10-21-needs-confirmation-pickup-plan.md, Revision 3, decisions N1-N12): when a rate
+// "NEEDS CONFIRMATION" PICKUPS: when a rate
 // con marks the pickup date "Needs Confirmation" (lib/ratecon-pickup-confirmation.js), the
 // load gets a Needs Review reason on the dashboard instead of the date being treated as
 // firm. Display only: nothing that pays reads it, and the app never rewrites the date.
@@ -7823,9 +7707,9 @@ function rateConPickupReadingOfPdf(pdfBase64, notes) {
 }
 
 // One row per load (created on first use): what the rate con said about the pickup.
-// needs_confirmation 1 once a rate con carried the phrase (never cleared by a later one,
-// decision 12 (a)); detected_by text | notes | text+notes; source email | dropzone. No
-// rate-con text is stored. B4 adds its drop/ready/outcome columns (plan section 6). At most
+// needs_confirmation 1 once a rate con carried the phrase (never cleared by a later one);
+// detected_by text | notes | text+notes; source email | dropzone. No
+// rate-con text is stored. B4 adds its drop/ready/outcome columns. At most
 // RATECON_PICKUP_READINGS_MAX_ROWS rows, the least recently seen dropped first.
 function rateConPickupReadingsTable() {
 	if (rateConPickupReadingsTable.ready) return;
