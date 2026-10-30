@@ -247,6 +247,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
+| `driver-fuel-screen.mjs` | The driver app's Fuel section with the driver gallons flag (DRIVER_FUEL_GALLONS_ENABLED) at 390 x 844 and 1280 x 800, on made-up data with the same static server (see "The driver fuel check"). |
 | `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
 | `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
 | `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
@@ -1723,6 +1724,33 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `voice-notes`), and the screenshots in `SHOT_DIR`
 (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Other writes, unanswered endpoints and
 page errors are listed, not scored. Exit 0 only when every row PASSes.
+
+## The driver fuel check (`driver-fuel-screen.mjs`)
+
+The driver app's Fuel section with the driver gallons flag (plan R14 PR 2), like `phone-layout.mjs`: no `server.js`,
+database, `.env`, key or sign-in. The built `client/dist` is served on `127.0.0.1:$E2E_PORT` (default 3186); every
+`/api` request is answered in the browser (a made-up Driver, "Driver QA", on load `QA-FUEL-1`, truck "Unit 901",
+Riverton to Lakeside). The two fuel answers carry blocks built by the server's own `planDriverFuel()` on made-up
+figures; the flag-off steps leave the block out.
+
+```bash
+npm run build:client
+SHOTS_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/driver-fuel-screen.mjs   # HEADED=1 to watch
+```
+
+Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
+
+| Step | What it does | Expected |
+|---|---|---|
+| DF1-DF10 | 390x844 touch: the load opened, the Fuel section opened, one world each (before pickup, in transit, refuel now, no reading, stale, no tank size, load not mapped, position old and none, extra stops, a run longer than a full tank). | Each world's plain sentences; no working (minus, reserve, MPG, %); the stops and Refresh; DF1's collapsed badge "Add 40 gal"; DF6's header chip "Fuel ?"; no sideways scroll; row text at least 14 px; Refresh at least 44 px |
+| DF11 | Route Options opened with the flag on. | No Google gallons; the toll stays |
+| DF12 | The flag off. | Today's panel ("How we know", the reserve line), no block, the badge "Fuel stop needed", Route Options with their gallons |
+| DF1d, DF6d, DF12d | 1280x800. | The block one column, at most 520 px wide; today's panel with the flag off; no sideways scroll |
+| DFx | Page errors, console errors and writes over the run. | None, but the browser's line for DF7's 400 |
+
+Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in
+`SHOTS_DIR` (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Exit 0 only when every row
+PASSes.
 
 ## Teardown (once the whole QA cycle is done)
 
