@@ -50,15 +50,17 @@
 //      check removed (it must fail checks in §1b).
 //   §5 THE CANCEL REFUSAL (ROW_EDITOR_CANCEL_GUARD_ENABLED). On: both saves
 //      refuse a status changed TO cancelled (excludeDroppedLoads()'s own test,
-//      any case, trimmed), 400 CANCEL_NOT_A_ROW_EDIT naming POST
-//      /api/dispatch/cancel, nothing written, the refusal audited; a row
-//      already cancelled, a change away from cancelled and every other status
-//      edit save, and POST /api/dispatch/cancel, lifted onto the same fake
-//      sheet, still cancels. Off: each save as today. Then the wiring, from
-//      source, and rowEditCancelRefusal()'s column rule on its own.
+//      any case, trimmed, on the value as the sheet will store it), 400
+//      CANCEL_NOT_A_ROW_EDIT naming POST /api/dispatch/cancel, nothing
+//      written, the refusal audited; a row already cancelled, a change away
+//      from cancelled, a cell sent back as read and every other status edit
+//      save, and POST /api/dispatch/cancel, lifted onto the same fake sheet,
+//      still cancels. Off: each save as today. Then the wiring, from source,
+//      and rowEditCancelRefusal()'s column rule on its own.
 //   §6 MUTANTS of §5: either save without the refusal, the cell judged
-//      untrimmed, a row already cancelled refused, the flag ignored. Each must
-//      fail §5's behaviour checks.
+//      untrimmed, a row already cancelled refused, the flag ignored, the value
+//      judged as sent rather than as stored, a cell sent back as read judged.
+//      Each must fail §5's behaviour checks.
 //
 // No network, no database, no sheet.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -934,18 +936,25 @@ const STORE_AT = (status, over = {}) => [HEADERS.slice(), storedRow({ "Job Statu
 const shownRow = (row) => HEADERS.map((h, i) => display(row[i]));
 // The same, as served to a Dispatcher: the withheld contact columns blank.
 const asStaff = (row) => row.map((v, i) => (WITHHELD.includes(HEADERS[i]) ? "" : v));
-// Every spelling the money filter reads as cancelled, in any case and with
-// surrounding whitespace (a no-break space included: String#trim() strips it).
+// Every value the sheet will store as a status the money filter reads as
+// cancelled: any case, surrounding whitespace (a no-break space included:
+// String#trim() strips it), and entered as text (the sheet keeps what follows
+// one leading apostrophe).
 const CANCEL_SPELLINGS = ["Cancelled", "cancelled", "CANCELLED", "Canceled", "canceled", "CANCELED", "Cancel", "cancel", "CANCEL",
-	"cAnCeLlEd", " Cancelled ", "\tcanceled\n", " Cancel "];
-// Statuses the money filter does not read as cancelled, so neither may the refusal.
-const NOT_CANCELLED = ["Delivered", "", "Cancellation requested", "Not cancelled", "Cancelled - rebooked", "Cancelledd", "Can celled", "Canceled?", "Cancel led"];
-// The money filter as shipped: does excludeDroppedLoads() drop load 111 with `status`?
+	"cAnCeLlEd", " Cancelled ", "\tcanceled\n", " Cancel ", "'Cancelled", "' canceled ", "'CANCEL"];
+// Values the sheet will store as a status the money filter does not read as
+// cancelled, so neither may the refusal ("''Cancelled" is stored as
+// "'Cancelled"; " 'Cancelled" keeps its apostrophe).
+const NOT_CANCELLED = ["Delivered", "", "Cancellation requested", "Not cancelled", "Cancelled - rebooked", "Cancelledd", "Can celled", "Canceled?", "Cancel led",
+	"''Cancelled", " 'Cancelled"];
+// The money filter as shipped: does excludeDroppedLoads() drop load 111 once
+// `sent` is written to its status cell? It reads the row as the sheet displays
+// it, so it is handed what the sheet stores, not the text sent.
 const MONEY = new Function("normalizeLoadId",
 	`"use strict";\n${extractConst("const CANCELED_STATUS_RE = ")}\n${extract("findCol")}\n${extract("loadKeySet")}\n${extract("excludeDroppedLoads")}\n` +
 	"return { excludeDroppedLoads };")(normalizeLoadId);
-function moneyDrops(status) {
-	const row = storedRow({ "Job Status": status });
+function moneyDrops(sent) {
+	const row = shownRow(storedRow({ "Job Status": sent }));
 	return MONEY.excludeDroppedLoads([Object.fromEntries(HEADERS.map((h, i) => [h, row[i]]))], HEADERS, new Set()).length === 0;
 }
 
@@ -1100,6 +1109,43 @@ async function cancelSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_P
 			show(verdicts.filter((v) => v.dataRefused !== v.drops || v.loadRefused !== v.drops)), []);
 		t("§5 (fixture) the money filter drops every spelling listed as cancelled, and none of the others",
 			[CANCEL_SPELLINGS.filter((s) => !moneyDrops(s)), NOT_CANCELLED.filter(moneyDrops)], [[], []]);
+	}
+
+	// Judged as the sheet will store it, and only when the save writes the cell.
+	{
+		// Entered as text: the sheet holds "Cancelled".
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Super Admin", P, statusSave(store, "'Cancelled"));
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "'Cancelled" });
+		t("§5 flag on, judged as the sheet will store it: a cancelled status entered as text is refused by both saves, nothing written",
+			[...refused(ra, a), ...refused(rb, b)], [...REFUSED, ...REFUSED]);
+		t("§5 ...and audited on both", [...trail(a), ...trail(b)], [...TRAIL, ...TRAIL]);
+	}
+	{
+		// Entered as text twice over: the sheet holds "'Cancelled", which the money filter keeps live.
+		const store = STORE_AT("Dispatched");
+		const a = mount(dataSrc, helpers, store, on);
+		const ra = await a.run("Super Admin", P, statusSave(store, "''Cancelled"));
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "''Cancelled" });
+		t("§5 flag on: a status the sheet will store as \"'Cancelled\" saves on both routes, and the money filter keeps the load live",
+			[ra.code, ranges(a), display(a.rows[1][IDX["Job Status"]]), rb.code, ranges(b), display(b.rows[1][IDX["Job Status"]]), moneyDrops("''Cancelled")],
+			[200, [[R("L2")]], "'Cancelled", 200, [[R("L2")]], "'Cancelled", false]);
+	}
+	{
+		// A status cell that reads "'Cancelled", sent back exactly as read beside
+		// a Details edit: the save does not write it, so it is not judged.
+		const store = STORE_AT("''Cancelled");
+		const a = mount(dataSrc, helpers, store, on);
+		const values = shownRow(store[1]);
+		values[IDX["Details"]] = "Called the broker";
+		const ra = await a.run("Super Admin", P, { values });
+		const b = mount(loadSrc, helpers, store, on);
+		const rb = await b.run("Dispatcher", L, { "Job Status": "'Cancelled", Details: "Called the broker" });
+		t("§5 flag on: a status cell sent back exactly as read is not judged: a Details edit beside it saves on both routes (C2 alone written)",
+			[ra.code, ranges(a), rb.code, ranges(b)], [200, [[R("C2")]], 200, [[R("C2")]]]);
 	}
 
 	// Flag off: today's saves.
@@ -1360,13 +1406,18 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 		// target fails the run as "not caught" instead of stopping it.
 		const CALL = "const cancel = rowEditCancelRefusal(headers, before, after);";
 		const FLAG = "if (ROW_EDITOR_CANCEL_GUARD_ENABLED && guarded) {";
-		const helperMutant = (from, to) => ({ helpers: buildHelpers({ rowEditCancelRefusal: mutate(HELPER_SRC.rowEditCancelRefusal || "", from, to) }) });
+		const helperMutant = (...pairs) => ({
+			helpers: buildHelpers({ rowEditCancelRefusal: pairs.reduce((src, [from, to]) => mutate(src, from, to), HELPER_SRC.rowEditCancelRefusal || "") }),
+		});
 		const mutants = [
 			["M4 PUT /api/data without the refusal", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, "const cancel = null;") })],
 			["M5 PUT /api/load without the refusal", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, "const cancel = null;") })],
-			["M6 the status cell judged untrimmed", () => helperMutant(': "").trim();', ': "");')],
-			["M7 a row already cancelled refused too", () => helperMutant(" || CANCELED_STATUS_RE.test(cell(before, i))", "")],
+			["M6 the status cell judged untrimmed", () => helperMutant(
+				["CANCELED_STATUS_RE.test(stored.trim())", "CANCELED_STATUS_RE.test(stored)"], ["CANCELED_STATUS_RE.test(was.trim())", "CANCELED_STATUS_RE.test(was)"])],
+			["M7 a row already cancelled refused too", () => helperMutant([" || CANCELED_STATUS_RE.test(was.trim())", ""])],
 			["M8 the flag ignored by both saves", () => ({ dataSrc: mutate(DATA_PUT_SRC, FLAG, "if (guarded) {"), loadSrc: mutate(LOAD_PUT_SRC, FLAG, "if (guarded) {") })],
+			["M9 the value judged as sent, not as the sheet will store it", () => helperMutant([`const stored = sent.startsWith("'") ? sent.slice(1) : sent;`, "const stored = sent;"])],
+			["M10 a cell sent back as read judged too", () => helperMutant(["if (sent === was) continue;", ""])],
 		];
 		for (const [label, build] of mutants) {
 			let failed = [], detail = "";
