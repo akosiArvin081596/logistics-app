@@ -578,9 +578,9 @@ const holds = (fn) => { try { return fn() === true; } catch { return false; } };
 			ok(partial.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(partial, COMPANY_LINES).every((v) => v === "") &&
 				!(IMAGE_LABELS.company in partial.signatureImagesByLabel), `§2 without ${key} nothing of the company's prints and it stays NOT VALID`);
 		}
-		// 49 CFR 392.60's items (and a minor's relationship line): one blank and the
-		// form cannot read AUTHORIZED.
-		for (const key of ["passengerName", "tripStart", "tripEnd", "validFrom", "expiresOn", "guardianRelationship"]) {
+		// 49 CFR 392.60's items, a minor's relationship line and the truck the form
+		// names: one blank and the form cannot read AUTHORIZED.
+		for (const key of ["passengerName", "tripStart", "tripEnd", "validFrom", "expiresOn", "guardianRelationship", "truckUnit"]) {
 			const blankItem = map({ ...FINAL_MINOR, [key]: "" });
 			ok(blankItem.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(blankItem, COMPANY_LINES).every((v) => v === "") &&
 				!(IMAGE_LABELS.company in blankItem.signatureImagesByLabel), `§2 with ${key} blank it stays NOT VALID and nothing of the company's prints`);
