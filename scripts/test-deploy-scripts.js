@@ -35,7 +35,8 @@
  *      exactly, and drift-gate.js must read it back as "never reached the
  *      VPS" (deploy-drift.yml re-runs such a staging job once). ssh-setup.sh
  *      refuses an empty pinned host key (a file-size test cannot see one).
- *   §7 source pins: the three lock copies are byte-identical, the lock is
+ *   §7 source pins: the three lock copies are byte-identical, the four scripts
+ *      that take the lock compute the same lock file, the lock is
  *      taken before anything is touched (and SHA/PREV validated before it),
  *      every pm2 call and every git fetch/pull/merge closes the lock FD, and
  *      each of the box's two refs has only its named writers.
@@ -100,6 +101,15 @@
  *      delete cut short leaves nothing a rollback would put back. The
  *      build line, run with the real npm, hands Vite exactly --outDir
  *      dist.next, and client/'s build script is exactly vite build.
+ *   §19 THE LOCK FOLDER IS THE DEPLOYING ACCOUNT'S OWN. The deploy, the
+ *      rollback, the record step and the drift check share one lock-folder
+ *      block (byte-identical, pinned): by default /run/logisx-deploy-<uid>,
+ *      never /var/lock or /run/lock. Each, run for real, refuses a folder
+ *      that is a link, that another account owns, that its group or others
+ *      can write, or that is named by a relative path, with exit 1 and
+ *      nothing touched, and never takes the lock anywhere else. A missing
+ *      folder is made 0700 (even under umask 000) where its parent allows
+ *      it, and refused where it does not.
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -925,14 +935,16 @@ function gitFdPins(S, tag = "") {
 // released once the refs and the marker are read and before the HTTP probe.
 // It never fetches. Who waits for a held lock is set per script.
 function checkLockPins(S, tag = "") {
-	const lockLines = (text) => text.split("\n").filter((l) => /^LOCK_(DIR|FILE)=/.test(l)).join("\n");
+	const lockLines = (text) => text.split("\n").filter((l) => /^LOCK_(UID|DIR|FILE)=/.test(l)).join("\n");
 	const code = (text) => text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 	const c = code(S.check);
 	const flockAt = c.indexOf("if ! flock -n 9; then");
 	const releaseAt = c.indexOf("exec 9>&-");
+	const others = { "remote-rollback.sh": S.rollback, "remote-record-verified.sh": S.record, "remote-drift-check.sh": S.check };
+	const differ = Object.keys(others).filter((n) => lockLines(others[n]) !== lockLines(S.deploy));
 	return [
-		[lockLines(S.deploy) !== "" && lockLines(S.check) === lockLines(S.deploy),
-			`${tag}§7 remote-drift-check.sh computes the deploy lock file exactly as remote-deploy.sh does (got ${JSON.stringify(lockLines(S.check))})`],
+		[/^LOCK_UID=/m.test(lockLines(S.deploy)) && differ.length === 0,
+			`${tag}§7 the rollback, the record step and the drift check compute the account, the lock folder and the lock file exactly as remote-deploy.sh does (differ: ${differ.join(", ") || "none"})`],
 		[flockAt > c.indexOf("git ls-remote origin refs/heads/main") && flockAt < c.indexOf("HEAD_SHA=$(git rev-parse HEAD)"),
 			`${tag}§7 remote-drift-check.sh takes the lock (flock -n) after ls-remote and before it reads HEAD`],
 		[releaseAt > c.indexOf('LAST=$(cat "$MARKER"') && releaseAt < c.indexOf("CODE=$(curl") && releaseAt < c.indexOf('echo "DRIFT_LOCAL='),
@@ -1116,6 +1128,18 @@ function mutants() {
 		// §15: the restart is proven.
 		mutant("the deploy ignores whether the start time moved", () => RESTART_CASES.deployRestartNoop({ ...REAL, deploy: swap(REAL.deploy,
 			'elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then', "elif false; then") }, M)),
+
+		// §19: the lock folder.
+		mutant("the deploy takes a lock folder its group or others can write", () => LOCK_FOLDER_CASES.writableByOthers({ ...REAL, deploy: swap(REAL.deploy, LOCK_MODE_CHECK, "\telif false; then") }, M), 1),
+		mutant("the drift check takes a lock folder its group or others can write", () => LOCK_FOLDER_CASES.writableByOthers({ ...REAL, check: swap(REAL.check, LOCK_MODE_CHECK, "\telif false; then") }, M), 1),
+		mutant("the deploy takes a lock folder another account owns", () => LOCK_FOLDER_CASES.otherOwner({ ...REAL, deploy: swap(REAL.deploy, LOCK_OWNER_CHECK, "\telif false; then") }, M)),
+		mutant("the deploy follows a link to its lock folder", () => LOCK_FOLDER_CASES.link({ ...REAL, deploy: swap(REAL.deploy, LOCK_LINK_CHECK, "\tif false; then") }, M)),
+		mutant("the deploy makes a missing lock folder with the umask's mode", () => LOCK_FOLDER_CASES.created({ ...REAL, deploy: swap(REAL.deploy, 'mkdir -m 0700 "$LOCK_DIR"', 'mkdir "$LOCK_DIR"') }, M), 1),
+		mutant("the deploy's default lock folder is /var/lock again", () => LOCK_FOLDER_CASES.defaultFolder({ ...REAL, deploy: swap(REAL.deploy,
+			"LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/logisx-deploy-$LOCK_UID}", "LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}") }, M)),
+		// A refusal that falls back to another folder (here the box's parent).
+		mutant("the deploy falls back to another folder past a refused one", () => LOCK_FOLDER_CASES.writableByOthers({ ...REAL, deploy: swap(REAL.deploy,
+			LOCK_REFUSAL_EXIT, "\tLOCK_DIR=${DIR%/*}\nfi\nLOCK_FILE=") }, M), 1),
 	];
 }
 
@@ -1578,6 +1602,209 @@ async function buildLinePins() {
 		`§18 the build line, run with the real npm, runs client/'s build script in client/ with exactly --outDir dist.next (code ${code}, got ${JSON.stringify(got)})`);
 }
 
+// ─────────────────────── §19 the lock folder: only the deploying account writes it
+// The four scripts that take the box lock (the deploy, the rollback, the record
+// step and the drift check) keep it in a folder only the deploying account can
+// write. Each is run for real, its lock folder named by DEPLOY_LOCK_DIR, or
+// unset for the default.
+const LOCK_SCRIPTS = { deploy: "remote-deploy.sh", rollback: "remote-rollback.sh", record: "remote-record-verified.sh", check: "remote-drift-check.sh" };
+const LOCK_FOLDER_REFUSAL = /^::error::refusing the deploy lock folder /m;
+// The block's checks and its refusal, as §8's mutants find them.
+const LOCK_LINK_CHECK = '\tif [ -L "$LOCK_DIR" ] || { [ -e "$LOCK_DIR" ] && [ ! -d "$LOCK_DIR" ]; }; then';
+const LOCK_OWNER_CHECK = '\telif [ -z "$(find "$LOCK_DIR" -maxdepth 0 -user "$LOCK_UID" 2>/dev/null)" ]; then';
+const LOCK_MODE_CHECK = '\telif [ -z "$(find "$LOCK_DIR" -maxdepth 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then';
+const LOCK_REFUSAL_EXIT = "\texit 1\nfi\nLOCK_FILE=";
+const NOT_ROOT = typeof process.getuid === "function" && process.getuid() !== 0;
+// Every case starts from a box on C2 with C1 verified and started. From there a
+// deploy of C2 that runs installs, builds and restarts; a rollback to C1 moves
+// HEAD and writes the marker; the record step records C2; and the drift check
+// prints a state. `env` goes on top of the script's own (a key set to null is
+// removed, so the script sees it unset), `pathFirst` goes first on its PATH,
+// and `prefix` runs ahead of its text.
+const lockBoxStart = () => resetBox(C2, { verified: C1, started: C1 });
+function runLockScript(S, which, { env = {}, pathFirst = "", prefix = "" } = {}) {
+	const own = {
+		deploy: deployEnv({ SHA: C2 }),
+		rollback: { DIR: D.box, PM2: "logistics-app", PREV: C1, RECORD_STATE: "ok", PATH: `${fastBinDir()}:${ENV.PATH}` },
+		record: { DIR: D.box, SHA: C2 },
+		check: { DIR: D.box, PM2: "logistics-app" },
+	}[which];
+	const full = { ...ENV, ...own, ...env };
+	if (pathFirst) full.PATH = `${pathFirst}:${full.PATH}`;
+	for (const k of Object.keys(full)) if (full[k] === null) delete full[k];
+	const r = spawnSync("bash", ["-s"], { cwd: T, input: `${prefix}${S[which]}`, env: full, encoding: "utf8", timeout: 60000 });
+	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
+}
+// Nothing installed, built, restarted, checked out, marked, recorded or read.
+const untouched = (x) => head() === C2 && verified() === C1 && started() === C1 && marker() === ""
+	&& log("npm") === "" && log("pm2") === "" && !/^DRIFT_STATE=/m.test(x.out);
+// What each script prints when it ran to the end.
+const LOCK_RAN = {
+	deploy: (x) => x.code === 0 && /^DEPLOY_RESULT=deployed$/m.test(x.out),
+	rollback: (x) => x.code === 0 && /ROLLBACK OK/.test(x.out) && head() === C1,
+	record: (x) => x.code === 0 && verified() === C2,
+	check: (x) => x.code === 0 && /^DRIFT_STATE=[a-z-]+$/m.test(x.out),
+};
+const listing = (dir) => { try { return fs.readdirSync(dir).sort().join(","); } catch { return null; } };
+// One script refuses `dir` with exit 1 and the reason `why`, touching nothing
+// and leaving no lock file in it.
+function refusedPins(S, which, dir, why, what, tag, opts = {}) {
+	lockBoxStart();
+	const before = listing(dir);
+	const x = runLockScript(S, which, { ...opts, env: { DEPLOY_LOCK_DIR: dir, ...(opts.env || {}) } });
+	const reason = (/^::error::refusing the deploy lock folder [^\n]*/m.exec(x.out) || [""])[0];
+	return [
+		[x.code === 1 && LOCK_FOLDER_REFUSAL.test(x.out) && reason.includes(dir) && why.test(reason),
+			`${tag}§19 ${LOCK_SCRIPTS[which]} refuses a lock folder ${what} with exit 1 and the reason (exit ${x.code}, ${JSON.stringify(reason || x.out.split("\n").filter(Boolean).pop())})`],
+		[untouched(x) && listing(dir) === before,
+			`${tag}§19 …and touches nothing: no install, build, restart, checkout, marker, record or read, and no lock file left there (HEAD ${short(head())}, record ${short(verified())}, marker '${marker().slice(0, 7)}')`],
+	];
+}
+// A PATH folder whose `id -u` reads 4242: the script sees itself as an account
+// that owns none of the sandbox's folders.
+let idStub = null;
+function idStubDir() {
+	if (idStub) return idStub;
+	idStub = path.join(T, "id-stub-bin");
+	fs.mkdirSync(idStub);
+	writeExec(path.join(idStub, "id"), '#!/bin/bash\nif [ "$1" = -u ]; then echo 4242; exit 0; fi\nexec /usr/bin/id "$@"\n');
+	return idStub;
+}
+// …and one whose mkdir records what it is asked and creates nothing, so a
+// default folder under /run is named but never made.
+let mkdirStub = null;
+function mkdirStubDir() {
+	if (mkdirStub) return mkdirStub;
+	mkdirStub = path.join(T, "mkdir-stub-bin");
+	fs.mkdirSync(mkdirStub);
+	writeExec(path.join(mkdirStub, "mkdir"), '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "$STUB_LOG_DIR/mkdir.log"\nexit 1\n');
+	return mkdirStub;
+}
+const LOCK_FOLDER_CASES = {
+	writableByOthers(S, tag) {
+		// Sticky and open to all, open to the group, open to others.
+		const r = [];
+		for (const mode of [0o1777, 0o775, 0o757]) {
+			const dir = fs.mkdtempSync(path.join(T, "lock-open-"));
+			fs.chmodSync(dir, mode);
+			for (const which of Object.keys(LOCK_SCRIPTS)) {
+				r.push(...refusedPins(S, which, dir, /: its group or other accounts can write it\./, `with mode ${mode.toString(8)}`, tag));
+			}
+		}
+		return r;
+	},
+	otherOwner(S, tag) {
+		const r = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			// The sandbox's own lock folder (0700, this process's) while the script
+			// reads its account as uid 4242.
+			r.push(...refusedPins(S, which, D.lock, /: another account owns it\./, "that another account owns (the account read as uid 4242)", tag, { pathFirst: idStubDir() }));
+			// And without a stub: /usr belongs to root (as root this one is skipped).
+			if (NOT_ROOT) r.push(...refusedPins(S, which, "/usr", /: another account owns it\./, "that root owns (/usr)", tag));
+		}
+		return r;
+	},
+	link(S, tag) {
+		// A link to a 0700 folder this account owns: the lock goes in the folder
+		// named, or nowhere.
+		const target = fs.mkdtempSync(path.join(T, "lock-target-"));
+		fs.chmodSync(target, 0o700);
+		const link = path.join(T, `lock-link-${Math.random().toString(36).slice(2)}`);
+		fs.symlinkSync(target, link);
+		const r = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			r.push(...refusedPins(S, which, link, /: it is not a folder\./, "that is a link to a 0700 folder this account owns", tag));
+			r.push([listing(target) === "", `${tag}§19 …and none in the folder the link points to (got ${JSON.stringify(listing(target))})`]);
+		}
+		return r;
+	},
+	notAbsolute(S, tag) {
+		const r = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			// The scripts run with the sandbox as their working folder.
+			r.push(...refusedPins(S, which, "lock-here", /: it must be an absolute path with no trailing slash\./, "named by a relative path", tag));
+			r.push([!fs.existsSync(path.join(T, "lock-here")), `${tag}§19 …and makes no folder by that relative name`]);
+			r.push(...refusedPins(S, which, `${D.lock}/`, /: it must be an absolute path with no trailing slash\./, "named with a trailing slash", tag));
+		}
+		return r;
+	},
+	created(S, tag) {
+		// Under umask 000, so only mkdir's own mode can make it 0700. Each script
+		// leaves the one lock file, the same name in all four.
+		const r = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			lockBoxStart();
+			const dir = path.join(fs.mkdtempSync(path.join(T, "lock-parent-")), "lock");
+			const x = runLockScript(S, which, { env: { DEPLOY_LOCK_DIR: dir }, prefix: "umask 0000\n" });
+			const st = fs.existsSync(dir) ? fs.lstatSync(dir) : null;
+			const mode = st ? (st.mode & 0o7777).toString(8) : "none";
+			r.push([!!st && st.isDirectory() && mode === "700" && st.uid === process.getuid() && listing(dir) === path.basename(LOCK_FILE) && LOCK_RAN[which](x),
+				`${tag}§19 ${LOCK_SCRIPTS[which]} creates a missing lock folder 0700 (under umask 000) where the parent allows it, takes the lock there and runs to the end (exit ${x.code}, mode ${mode}, files ${JSON.stringify(listing(dir))})`]);
+		}
+		return r;
+	},
+	notCreatable(S, tag) {
+		const r = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			// Its parent is not there: only the last folder is ever made.
+			const gone = path.join(T, `lock-gone-${Math.random().toString(36).slice(2)}`);
+			r.push(...refusedPins(S, which, path.join(gone, "lock"), /: it is missing, and this account cannot create it there\./, "that is missing under a parent that is not there", tag));
+			r.push([!fs.existsSync(gone), `${tag}§19 …and creates no parent`]);
+			// Its parent is one this account cannot write (root could: skipped as root).
+			if (NOT_ROOT) {
+				const parent = fs.mkdtempSync(path.join(T, "lock-shut-"));
+				fs.chmodSync(parent, 0o555);
+				r.push(...refusedPins(S, which, path.join(parent, "lock"), /: it is missing, and this account cannot create it there\./, "that is missing under a parent this account cannot write", tag));
+				fs.chmodSync(parent, 0o700);
+			}
+		}
+		return r;
+	},
+	defaultFolder(S, tag) {
+		// DEPLOY_LOCK_DIR unset: the account's own folder, /run/logisx-deploy-<uid>.
+		// The stub id reads the account as uid 4242; the stub mkdir records what
+		// it is asked and creates nothing, so nothing is made under /run.
+		const r = [];
+		const named = [];
+		for (const which of Object.keys(LOCK_SCRIPTS)) {
+			lockBoxStart();
+			const x = runLockScript(S, which, { env: { DEPLOY_LOCK_DIR: null }, pathFirst: `${idStubDir()}:${mkdirStubDir()}` });
+			const m = /^::error::refusing the deploy lock folder (\S+): /m.exec(x.out);
+			named.push(m ? m[1] : `(none: ${JSON.stringify(x.out.split("\n").filter(Boolean).pop())})`);
+			r.push([x.code === 1 && !!m && m[1] === "/run/logisx-deploy-4242" && log("mkdir") === "-m 0700 /run/logisx-deploy-4242\n" && untouched(x),
+				`${tag}§19 ${LOCK_SCRIPTS[which]}'s default lock folder is the account's own, /run/logisx-deploy-<uid>, and a missing one is made 0700 (named ${named[named.length - 1]}, mkdir asked ${JSON.stringify(log("mkdir"))})`]);
+		}
+		r.push([named.every((d) => d === named[0]) && !named.some((d) => /^\/(var\/lock|run\/lock)(\/|$)/.test(d)),
+			`${tag}§19 all four name the same default lock folder, and it is neither /var/lock nor /run/lock nor under them (got ${JSON.stringify(named)})`]);
+		return r;
+	},
+};
+function lockFolderBlock(text) {
+	const a = text.indexOf("# >>> lock-folder");
+	const b = text.indexOf("# <<< lock-folder");
+	return a >= 0 && b > a ? text.slice(a, b) : null;
+}
+function lockFolderPins(S, tag = "") {
+	const r = [];
+	const blocks = Object.keys(LOCK_SCRIPTS).map((k) => lockFolderBlock(S[k]));
+	r.push([blocks.every((b) => b && b === blocks[0]),
+		`${tag}§19 the lock-folder block is byte-identical in ${Object.values(LOCK_SCRIPTS).join(", ")}`]);
+	const code = (t) => t.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+	for (const [k, name] of Object.entries(LOCK_SCRIPTS)) {
+		const t = S[k];
+		const end = t.indexOf("# <<< lock-folder");
+		const open = t.indexOf('exec 9<>"$LOCK_FILE"');
+		const inLock = k === "check" || (t.indexOf("# >>> deploy-lock") < t.indexOf("# >>> lock-folder") && end < t.indexOf("# <<< deploy-lock"));
+		r.push([end > 0 && open > end && inLock,
+			`${tag}§19 ${name} checks the lock folder before it opens the lock file${k === "check" ? "" : ", inside its deploy-lock block"}`]);
+		const c = code(t);
+		r.push([(c.match(/^\s*LOCK_DIR=/gm) || []).length === 1 && (c.match(/^\s*LOCK_FILE=/gm) || []).length === 1,
+			`${tag}§19 ${name} names its lock folder and file once each: no second folder to fall back to`]);
+		r.push([!/\/var\/lock|\/run\/lock/.test(c), `${tag}§19 ${name}'s code names neither /var/lock nor /run/lock`]);
+	}
+	return r;
+}
+
 // ─────────────────────── §11 no remote script takes exit 255 itself
 // ssh returns the remote command's status unchanged, and ssh-retry.sh reads 255
 // as ssh's own transport failure: it retries, then prints the give-up line that
@@ -1700,6 +1927,8 @@ const ALL_JOBS = [
 	job("§18 the build stamp is never served", stampNeverServedPins),
 	job("§11 exit scanner", exitScannerSelfCheck),
 	job("§11 exit pins", () => record(exitPins(REMOTE_SCRIPTS))),
+	...caseJobs("§19", LOCK_FOLDER_CASES, { writableByOthers: 1, created: 1 }),
+	job("§19 lock-folder pins", () => record(lockFolderPins(REAL))),
 	...mutants(),
 ];
 const JOBS = [...ALL_JOBS].sort((a, b) => b.secs - a.secs);

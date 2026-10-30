@@ -7,7 +7,9 @@
 # the marker it reads, nor the verified-deploy record, nor anything in the
 # clone. It writes two files: its holder note in the deploy lock file, while it
 # holds the lock (below), and a temporary file (mktemp) holding the page it
-# reads, removed as soon as it is read (the app-page block).
+# reads, removed as soon as it is read (the app-page block). It makes the
+# deploy lock's folder when it is missing, as every script that takes the lock
+# does (the lock-folder block).
 #
 # ⚠️ `behind-healable` is the box's view only, NOT permission to heal: the box
 # cannot see whether main's commit passed staging.
@@ -42,8 +44,8 @@ fi
 # (deploy-drift.yml, invariant 1), so it can run while a deploy of this
 # directory is mid-flight, with HEAD and the records half-changed. So it reads
 # them under the box lock every deploy, rollback and record step takes: the
-# same LOCK_FILE as remote-deploy.sh's deploy-lock block
-# (scripts/test-deploy-scripts.js pins the two lines identical), with flock -n.
+# same LOCK_FILE, in the same folder, from the same lock-folder block
+# (scripts/test-deploy-scripts.js pins the copies identical), with flock -n.
 # If a deploy holds it, the check reads nothing more and reports
 # `deploy-in-progress` (a notice), or `deploy-lock-stuck` (an alarm) once the
 # holder's note is over 30 minutes old: no deploy takes that long.
@@ -51,8 +53,41 @@ fi
 # (milliseconds), never across ls-remote or the HTTP probe. Whatever meets it
 # there waits for it (remote-deploy.sh's deploy-lock block): a deploy because
 # the note names this script, a rollback or record step for any holder.
-LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}
+# >>> lock-folder — keep byte-identical in remote-deploy.sh, remote-rollback.sh,
+# remote-record-verified.sh and remote-drift-check.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# The deploy lock lives in a folder only the deploying account can write: one
+# folder per account, named by its uid. It must be a folder, not a link, that
+# this account owns and that neither its group nor other accounts can write.
+# Anything else is refused, and the lock is never taken in another folder. A
+# missing one is made 0700 where its parent allows it (root can, under /run); an
+# account that cannot make it there gets it from a systemd-tmpfiles entry.
+LOCK_UID=$(id -u)
+LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/logisx-deploy-$LOCK_UID}
+LOCK_DIR_BAD=""
+if ! [[ "$LOCK_UID" =~ ^[0-9]+$ ]]; then
+	LOCK_DIR_BAD="this account's uid could not be read"
+elif [[ "$LOCK_DIR" != /* || "$LOCK_DIR" == */ ]]; then
+	LOCK_DIR_BAD="it must be an absolute path with no trailing slash"
+else
+	[ -e "$LOCK_DIR" ] || [ -L "$LOCK_DIR" ] || mkdir -m 0700 "$LOCK_DIR" 2>/dev/null
+	if [ -L "$LOCK_DIR" ] || { [ -e "$LOCK_DIR" ] && [ ! -d "$LOCK_DIR" ]; }; then
+		LOCK_DIR_BAD="it is not a folder"
+	elif [ ! -d "$LOCK_DIR" ]; then
+		LOCK_DIR_BAD="it is missing, and this account cannot create it there"
+	elif [ -z "$(find "$LOCK_DIR" -maxdepth 0 -user "$LOCK_UID" 2>/dev/null)" ]; then
+		LOCK_DIR_BAD="another account owns it"
+	elif [ -z "$(find "$LOCK_DIR" -maxdepth 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+		LOCK_DIR_BAD="its group or other accounts can write it"
+	fi
+fi
+if [ -n "$LOCK_DIR_BAD" ]; then
+	echo "::error::refusing the deploy lock folder $LOCK_DIR: $LOCK_DIR_BAD. It must be a folder this account (uid $LOCK_UID) owns and no other account can write. Nothing was changed."
+	exit 1
+fi
 LOCK_FILE="$LOCK_DIR/logisx-deploy$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '_').lock"
+# <<< lock-folder
 if ! command -v flock >/dev/null 2>&1; then
 	echo "::error::flock(1) is not installed on this host — refusing to read the box without the deploy lock"
 	exit 1
