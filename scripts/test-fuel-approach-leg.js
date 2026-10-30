@@ -305,6 +305,34 @@ check("a mistyped MPG is capped at 11 for the driver figures (16 on file reads a
 	assert.strictEqual(fuel.DRIVER_FUEL_MAX_MPG, 11);
 });
 
+// === §7c last round: two more paths to a false "enough" =====================
+console.log("\n§7c driver gallons: an unmapped pickup, and a long sensor dropout");
+check("a pre-pickup load whose pickup has no coordinates (planned truck to delivery) never says 'enough'", () => {
+	// 70% at p10 5.0 = 350 planning miles; the shortcut past the shipper is 300 mi.
+	const plan = tripPlanFor({ routeMiles: 300, pct: 70 });
+	const at = (o) => legOf(driverFuel({ plan, pct: 70, leg: "to_delivery", ...o }), "finish");
+	assert.strictEqual(plan.verdict, "clears", "the verdict counts only the shortcut");
+	assert.deepStrictEqual([at({}).status, at({ pickupUnmapped: true }).status, at({ pickupUnmapped: true }).addGallons],
+		["enough", "check_gauge", null]);
+});
+check("a carried reading is judged at the planning rate: after a long dropout, 'enough' only if the planning-rate level clears (sweep)", () => {
+	const bad = [];
+	let runs = 0;
+	for (const anchor of [60, 70, 80, 90, 100]) for (const milesSince of [50, 100, 150, 200, 250, 300, 350]) {
+		for (const routeMiles of [100, 200, 300, 400]) {
+			const mpgPct = Math.max(0, anchor - (milesSince / 6.0 / 150) * 100);   // the decay resolveFuelReading() applies
+			const reading = { fuelPct: Math.round(mpgPct * 10) / 10, fuelSource: "carried", anchorPct: anchor, ageMinutes: 120, milesSinceReading: milesSince };
+			const plan = tripPlanFor({ routeMiles, pct: reading.fuelPct });
+			const f = legOf(driverFuel({ plan, reading, leg: "to_delivery" }), "finish");
+			const planningPct = Math.max(0, anchor - milesSince / 5.0);              // points burned at p10 5.0 mi a point
+			runs++;
+			if (f.status === "enough" && planningPct * 5.0 < routeMiles + 15) bad.push([anchor, milesSince, routeMiles, planningPct]);
+		}
+	}
+	assert.ok(runs >= 140);
+	assert.deepStrictEqual(bad.slice(0, 5), []);
+});
+
 // === §8 the flag in server.js ================================================
 console.log("\n§8 driver gallons: the flag in server.js");
 const { serverSource, resolveServerFile } = require("./lib/server-source");
@@ -472,7 +500,11 @@ const WORLDS = [
 	["this load accepted first, the other queued behind", { otherLoad: "Assigned",
 		accepts: [["QA-FUEL-1", "2026-10-29T10:00:00.000Z"], ["QA-FUEL-0", "2026-10-29T12:00:00.000Z"]] }],
 	["'two stops' in Details", { details: "two stops: Riverton, Midway, then Lakeside" }],
+	// Added in the last round; the flag-off digest below still covers the 20 worlds above.
+	["pre-pickup, pickup not geocoded, 70%", { pickupMapped: false, fuel: 70 }],
+	["in transit after a 4 h dropout from 100% (300 mi since)", { status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 240, odo: 99700 } }],
 ];
+const DIGEST_WORLDS = 20;
 const CALLS = [
 	["trip-plan, Driver", (w) => w.plan()],
 	["trip-plan, Dispatcher", (w) => w.plan(DISPATCH)],
@@ -511,8 +543,10 @@ async function routeSections() {
 	}
 	// Byte-for-byte evidence across versions: run this file on a base checkout and
 	// on the branch; equal digests mean every flag-off answer above is unchanged.
-	const digest = crypto.createHash("sha256").update(JSON.stringify(off.map((x) => [x.name, x.r.status, x.r.body]))).digest("hex");
-	console.log(`      flag-off answers: ${off.length}, sha256 ${digest}`);
+	const digestOf = (list) => crypto.createHash("sha256").update(JSON.stringify(list.map((x) => [x.name, x.r.status, x.r.body]))).digest("hex");
+	const pinned = off.slice(0, DIGEST_WORLDS * CALLS.length);
+	console.log(`      flag-off answers: ${pinned.length}, sha256 ${digestOf(pinned)}`);
+	console.log(`      flag-off answers, all ${WORLDS.length} worlds: ${off.length}, sha256 ${digestOf(off)}`);
 	const at = (list, name) => list.find((x) => x.name === name).r;
 
 	check("flag off: no answer carries driverFuel or a 400 code, and none failed (500)", () => {
@@ -577,9 +611,19 @@ async function routeSections() {
 		const df = at(on, "'two stops' in Details / trip-plan, Driver").body.driverFuel;
 		assert.ok(df.extraStops === true && df.legs.every((l) => l.status !== "enough"), JSON.stringify(df));
 	});
-	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 38 Driver answers that succeed)", () => {
+	check("pre-pickup with the pickup not geocoded: the route plans truck to delivery (verdict clears), the block never says 'enough'", () => {
+		const b = at(on, "pre-pickup, pickup not geocoded, 70% / trip-plan, Driver").body;
+		assert.deepStrictEqual([b.verdict, b.leg, b.laneMiles, b.driverFuel.legs.map((l) => [l.key, l.status])],
+			["clears", "to_delivery", 300, [["finish", "check_gauge"]]]);
+	});
+	check("in transit after a 4 h dropout from 100%: the level is carried at the planning rate (40%, 185 left), finish 300 mi is add 40, not 'enough'", () => {
+		const b = at(on, "in transit after a 4 h dropout from 100% (300 mi since) / trip-plan, Driver").body;
+		assert.deepStrictEqual([b.verdict, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft, b.driverFuel.legs.map((l) => [l.key, l.status, l.addGallons])],
+			["clears", "carried", "estimated", 185, [["finish", "add", 40]]]);
+	});
+	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 42 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
-		assert.strictEqual(driverAnswers.length, 38);
+		assert.strictEqual(driverAnswers.length, 42);
 		for (const x of driverAnswers) {
 			assert.ok(x.r.body.driverFuel, `${x.name}: no driverFuel`);
 			assert.ok(!("vehicleId" in x.r.body), x.name);

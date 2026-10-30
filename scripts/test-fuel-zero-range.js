@@ -353,6 +353,23 @@ const carriedStill = DF({ reading: { fuelPct: 50, fuelSource: "carried", anchorP
 check("...paired: the same truck parked through the dropout (0 mi, nothing decayed) keeps its number",
 	carriedStill.fuelState === "estimated" && carriedStill.milesLeft === 235, JSON.stringify(carriedStill));
 
+// A carried level is worked out again at the planning rate the rows are judged at:
+// 100% four hours ago, 300 mi since, 150 gal, 6.0 MPG, p10 5.0 a point. At the MPG
+// on file that is 66.7% and "enough" for 300 mi; at the planning rate 300 / 5.0 = 60
+// points, so 40%, 200 planning miles against 315 needed.
+const longDropout = attempt(() => {
+	const reading = { fuelPct: 66.7, fuelSource: "carried", anchorPct: 100, ageMinutes: 240, milesSinceReading: 300 };
+	const plan = fm.planTripFuel({ routeMiles: 300, fuelPct: 66.7, burn: BURN5, mpg: 6.0, reserve: R15,
+		rangeMiles: fm.computeRange({ fuelPct: 66.7, tankGallons: 150, mpg: 6.0 }).rangeMiles });
+	const df = fm.planDriverFuel({ plan, leg: "to_delivery", fromLivePosition: true, positionAgeMinutes: 5, reading,
+		hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150, mpg: 6.0, burn: BURN5, reserve: R15 });
+	return { verdict: plan.verdict, ...df };
+});
+check("after a 4 h dropout from 100% (300 mi since): carried at the planning rate, 185 mi left and add 40, not 'enough' (the verdict alone says clears)",
+	longDropout.verdict === "clears" && longDropout.fuelState === "estimated" && longDropout.milesLeft === 185
+		&& longDropout.legs && longDropout.legs[0] && longDropout.legs[0].status === "add" && longDropout.legs[0].addGallons === 40,
+	JSON.stringify(longDropout));
+
 const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));
 for (const t of ["3 stops: Riverton, Midway, Lakeside", "Multi-stop load", "multistop", "Stop 2 Midway", "stop #3", "2 pickups", "2nd stop Midway", "extra stop", "stop-offs"]) {
 	check(`extra stops caught in Details: ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
