@@ -447,7 +447,9 @@
                   </template>
                   <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
                 </template>
-                <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(e.id, p)" />
+                <div class="action-personal">
+                  <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(e.id, p)" />
+                </div>
               </td>
             </tr>
           </tbody>
@@ -4798,7 +4800,11 @@ tr:hover td { background: var(--surface-hover); }
 }
 
 .action-cell { white-space: nowrap; }
-.btn-approve, .btn-reject, .btn-undo {
+/* Personal sits on its own line under Approve / Reject and wraps, so the last
+   column stays narrow instead of pushing the table past the panel. */
+.action-personal { white-space: normal; max-width: 14rem; }
+.action-personal :deep(.personal-actions:has(> *)) { margin-top: 0.3rem; }
+.btn-approve,.btn-reject, .btn-undo {
   padding: 0.22rem 0.55rem; font-size: 0.68rem; font-weight: 600;
   border-radius: 5px; border: none; cursor: pointer; font-family: inherit;
   transition: opacity 0.15s;
@@ -5307,14 +5313,9 @@ tr:hover td { background: var(--surface-hover); }
   .fuel-review-bar { flex-direction: column; align-items: stretch; }
   .fuel-review-bar button { justify-content: center; }
 
-  /* Scrollable sub-tabs (All / Fuel / Maintenance / IFTA) */
-  .sub-tabs {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-  .sub-tabs::-webkit-scrollbar { display: none; }
+  /* Sub-tabs wrap onto a second row: a hidden sideways swipe left most tabs
+     out of sight on a phone. */
+  .sub-tabs { flex-wrap: wrap; }
   .sub-tab { flex-shrink: 0; }
 
   /* Download Receipts form — stack inputs */
