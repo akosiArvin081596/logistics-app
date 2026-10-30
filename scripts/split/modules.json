@@ -183,6 +183,8 @@
 		"routes": [
 			"GET /api/financials/report",
 			"GET /api/financials/report.csv",
+			"GET /api/financials/overview",
+			"GET /api/financials/overview.csv",
 			"GET /api/financials/state-miles",
 			"GET /api/financials/settings",
 			"PUT /api/financials/settings",
