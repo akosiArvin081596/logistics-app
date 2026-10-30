@@ -399,7 +399,7 @@ const RANGES = {
 			"server.js registers both routes at column 0 with requireRole(\"Super Admin\") as the first handler", "");
 		const snapshot = fs.readFileSync(path.join(__dirname, "fixtures", "route-snapshot.txt"), "utf8");
 		const gateOf = (route) => {
-			const m = snapshot.match(new RegExp(`^GET ${route.replace(/[.]/g, "\\.")} · (requireRole\\("Super Admin"\\)=anon@[0-9a-f]{12}) · inline@[0-9a-f]{12}$`, "m"));
+			const m = snapshot.match(new RegExp(`^GET ${route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · (requireRole\\("Super Admin"\\)=anon@[0-9a-f]{12}) · inline@[0-9a-f]{12}$`, "m"));
 			return m ? m[1] : null;
 		};
 		const reportGate = gateOf("/api/financials/report");
