@@ -29,11 +29,13 @@
 // The time-off ELD check (B) is tracked the same way: its results table, its
 // module and binding, every name the module exports and its server.js helpers.
 // §1 also gives the month off Confirmed and Not-confirmed day results; §3 allows
-// its migration, helpers, job and purge; and
+// its binding, helpers, job and purge, and its table in the same migration; and
 //   §4.8 DRIVER_TIME_OFF_ELD_CHECK_ENABLED folds in DRIVER_AVAILABILITY_ENABLED
 //      first and gates only the job's registration (with its start-up line), the
 //      job's own guard, the staff list's spread and the driver's eldChecked line
 //   §5 GET /api/trucks and every investor route name none of the check's names
+//   §6 its helpers are defined and survive comment stripping, and its table is
+//      created in the time-off migration
 //
 // Tracked names: the table, the module path, the module's binding in server.js,
 // every name lib/driver-availability.js exports (read from the module, so a new
@@ -65,11 +67,19 @@ const SERVER_HELPERS = ["driverAvailabilityByName", "truckDriverAvailability", "
 	"availabilityRowView", "driverOwnTimeOff", "driverLoadsForTimeOff", "recordTimeOffLoadConfirmations"];
 let libExports = [];
 try { libExports = Object.keys(require("../lib/driver-availability")); } catch { libExports = []; }
-// The time-off ELD check: its server.js helpers and its module's exports.
+// The time-off ELD check: its results table (created in the same migration),
+// module and binding, server.js helpers and the module's exports; §3 also allows
+// its binding, helpers and two job registrations (ELD_ALLOW_HEADS).
 const ELD_CHECK_HELPERS = ["timeOffDayEvidence", "timeOffEldRowFields", "timeOffEldRunPlan", "applyTimeOffEldPlan", "runTimeOffEldCheck", "timeOffEldCheckTick", "purgeTimeOffEldResults"];
 let eldCheckExports = [];
 try { eldCheckExports = Object.keys(require("../lib/time-off-eld-check")); } catch { eldCheckExports = []; }
 const ELD_CHECK_NAMES = ["driver_time_off_days", "time-off-eld-check", "timeOffEldCheck", ...ELD_CHECK_HELPERS, ...eldCheckExports];
+const ELD_ALLOW_HEADS = [
+	'const timeOffEldCheck = require("./lib/time-off-eld-check");',
+	...ELD_CHECK_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
+	'if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {',
+	'if (startsJob("time-off ELD results purge (at boot, then weekly)")) {',
+];
 const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports, ...ELD_CHECK_NAMES];
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A tracked name as a whole word ("driver_availability_create", an audit
@@ -177,21 +187,13 @@ async function moneyViews(withRow) {
 		const code = blankComments(SRC).split("\n");
 		const missing = SERVER_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`)));
 		eq("§3.0 every tracked helper is defined in server.js", missing, []);
-		eq("§3.0b ...the ELD check's too, each seen after comments are stripped",
-			ELD_CHECK_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`))), []);
 		const ALLOW_HEADS = [
 			'const driverAvailability = require("./lib/driver-availability");',
 			"const DRIVER_AVAILABILITY_ENABLED =",
 			"function availabilityFlagGate(",
 			...SERVER_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
 			"function eldFeedSnapshot(",
-			// The time-off ELD check: its binding, helpers (the reader, the staff
-			// list's fields, the run's plan and write, the tick, the purge) and the
-			// two registrations.
-			'const timeOffEldCheck = require("./lib/time-off-eld-check");',
-			...ELD_CHECK_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
-			'if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {',
-			'if (startsJob("time-off ELD results purge (at boot, then weekly)")) {',
+			...ELD_ALLOW_HEADS,
 			'app.get("/api/drivers-directory/:id/availability",',
 			'app.post("/api/drivers-directory/:id/availability",',
 			'app.put("/api/driver-availability/:id",',
@@ -232,7 +234,7 @@ async function moneyViews(withRow) {
 			const j = headOf(i);
 			const head = j < 0 ? "" : code[j];
 			const allowed = ALLOW_HEADS.some((h) => head.startsWith(h))
-				|| (head.startsWith("db.exec(") && /CREATE TABLE IF NOT EXISTS (driver_availability|driver_time_off_days) \(/.test(statementText(j)));
+				|| (head.startsWith("db.exec(") && statementText(j).includes("CREATE TABLE IF NOT EXISTS driver_availability"));
 			if (allowed) return;
 			if (head.startsWith(PAYLOAD_HEAD) && TIME_OFF_SPREAD_RE.test(l.trim()) && inReply(j, i)) { spreads.push(i + 1); return; }
 			stray.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 90)}`);
@@ -336,6 +338,15 @@ async function moneyViews(withRow) {
 		ok(`§5.1 GET /api/trucks and the investor routes are found (${routes.length})`, routes.some(([l]) => l.startsWith('app.get("/api/trucks",')) && routes.length > 30);
 		eq("§5.2 none of them names the check's table, module, helpers, exports, flag or keys",
 			routes.filter(([, i]) => NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`), []);
+	}
+
+	console.log("\n── §6 the ELD check's helpers are where §3 can see them");
+	{
+		const code = blankComments(SRC).split("\n");
+		eq("§6.1 each is defined in server.js and survives comment stripping, so §3 judges its mentions",
+			ELD_CHECK_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`))), []);
+		ok("§6.2 its results table is created in the time-off migration, so §3 allows it there",
+			/db\.exec\(`\s*CREATE TABLE IF NOT EXISTS driver_availability \([^`]*CREATE TABLE IF NOT EXISTS driver_time_off_days \(/.test(SRC));
 	}
 
 	WD.cleanup();

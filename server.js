@@ -6840,10 +6840,8 @@ db.exec(`
 		confirmed_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_conf_dir ON driver_availability_confirmations(directory_id, load_to);
-`);
-// One row per judged day of a time-off row (the ELD check). Miles and times only, never a position; a final row
-// is never rewritten, and 90 days after final its miles and times are removed (the verdict stays).
-db.exec(`
+	-- One row per judged day of a time-off row (the ELD check): miles and times only, never a position. A final
+	-- row is never rewritten; 90 days after final its miles and times are removed and its verdict stays.
 	CREATE TABLE IF NOT EXISTS driver_time_off_days (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		availability_id INTEGER NOT NULL,
