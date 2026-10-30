@@ -189,9 +189,9 @@
                button that keeps the date as it is (the closed-month code has none). -->
           <div v-if="selectedJob && pickupReview(selectedJob)" class="pickup-review" role="note">
             <span>{{ pickupReviewText(selectedJob) }}</span>
-            <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : 'Mark confirmed' }}</button>
-            <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+            <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
           </div>
+          <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -537,7 +537,7 @@ import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DeletedLoadsLink from './DeletedLoadsLink.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
-import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmedRequest, pickupConfirmedToast, pickupConfirmErrorText, withoutPickupReview, freshReview } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, pickupConfirmedRequest, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
@@ -617,8 +617,10 @@ const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pick
 const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 // "Mark confirmed" (POST /api/loads/pickup-confirmed): keeps the open load's
-// Pickup Appointment as it is. On success the badge clears at once, then the
-// lists are read again; a refusal stays on screen in the server's words.
+// Pickup Appointment as the day the pane shows. On success the badge clears at
+// once, then the lists are read again; a refusal stays on screen in the
+// server's words. When the cell's day changed since (409 PICKUP_CHANGED) the
+// lists are read again too and the pane takes its refreshed row.
 const canConfirmPickup = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
 const pickupMarking = ref(false)
 const pickupMarkError = ref('')
@@ -630,19 +632,27 @@ async function markPickupConfirmed() {
   pickupMarking.value = true
   pickupMarkError.value = ''
   const same = () => selectedJob.value && selectedJob.value._rowIndex === job._rowIndex
+  let changed = false
   try {
     const res = await api.post(call.url, call.body)
     if (same()) selectedJob.value = withoutPickupReview(selectedJob.value)
     toast(pickupConfirmedToast(res), 'success')
   } catch (err) {
+    changed = pickupChanged(err)
     if (same()) pickupMarkError.value = pickupConfirmErrorText(err)
-    return
+    if (!changed) return
   } finally {
     pickupMarking.value = false
   }
   try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
   await nextTick()
-  const fresh = same() ? freshReview(selectedJob.value, props.jobs) : null
+  if (!same()) return
+  if (changed) {
+    const row = freshPane(selectedJob.value, props.jobs)
+    if (row) selectedJob.value = row
+    return
+  }
+  const fresh = freshReview(selectedJob.value, props.jobs)
   if (fresh) selectedJob.value = { ...selectedJob.value, _review: fresh }
 }
 const showDeleteConfirm = ref(false)
@@ -1213,7 +1223,7 @@ const detailSections = computed(() => {
 }
 .pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
-.pickup-review-error { flex-basis: 100%; margin: 0; color: #b91c1c; }
+.pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
 .mobile-load-list {
   display: flex;
   flex-direction: column;

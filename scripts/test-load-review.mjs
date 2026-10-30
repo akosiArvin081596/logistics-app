@@ -235,6 +235,9 @@ const pickupConfirmedToast = fn('pickupConfirmedToast')
 const pickupConfirmErrorText = fn('pickupConfirmErrorText')
 const withoutPickupReview = fn('withoutPickupReview')
 const freshReview = fn('freshReview')
+const pickupConfirmLabel = fn('pickupConfirmLabel')
+const pickupChanged = fn('pickupChanged')
+const freshPane = fn('freshPane')
 const NC = "The rate con marks the pickup date 'Needs Confirmation'."
 const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
 {
@@ -330,16 +333,27 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
     [false, false, false, false, false, true])
   check('the pickup entry is found among others', reviewReasons(withReview([{ code: 'some_future_code' }, { code: CLOSED, closedMonth: '2026-09' }])), [CLOSED])
 
-  // The "Mark confirmed" call.
-  check('the open code\'s call: POST /api/loads/pickup-confirmed by row index and Load ID',
-    pickupConfirmedRequest(open, 'Load ID'), { url: '/api/loads/pickup-confirmed', body: { rowIndex: 7, loadId: '900000123' } })
+  // The "Mark confirmed" call: it names the day the pane showed, so the server can refuse a
+  // cell that changed since (409 PICKUP_CHANGED).
+  check('the open code\'s call: POST /api/loads/pickup-confirmed by row index, Load ID and the day shown',
+    pickupConfirmedRequest(open, 'Load ID'), { url: '/api/loads/pickup-confirmed', body: { rowIndex: 7, loadId: '900000123', stored: '2026-10-06' } })
   check('a Load ID withheld from this user goes by its key',
     pickupConfirmedRequest(withReview([{ code: OPEN, stored: '2026-10-06' }], { 'Load ID': '', _loadKey: 'k-made-up-1' }), 'Load ID'),
-    { url: '/api/loads/pickup-confirmed', body: { rowIndex: 7, loadId: 'k-made-up-1' } })
-  check('no button for the closed code, an unaddressable row or no code',
-    [closed, withReview([{ code: OPEN }], { _rowIndex: undefined }), withReview([{ code: OPEN }], { _rowIndex: 1 }), withReview([{ code: OPEN }], { 'Load ID': '' }), ok].map((j) => canMarkPickupConfirmed(j, 'Load ID')),
-    [false, false, false, false, false])
+    { url: '/api/loads/pickup-confirmed', body: { rowIndex: 7, loadId: 'k-made-up-1', stored: '2026-10-06' } })
+  check('no button for the closed code, an unaddressable row, no code, or no day shown',
+    [
+      closed,
+      withReview([{ code: OPEN, stored: '2026-10-06' }], { _rowIndex: undefined }),
+      withReview([{ code: OPEN, stored: '2026-10-06' }], { _rowIndex: 1 }),
+      withReview([{ code: OPEN, stored: '2026-10-06' }], { 'Load ID': '' }),
+      ok,
+      withReview([{ code: OPEN }]),
+      withReview([{ code: OPEN, stored: '2026-02-30' }]),
+    ].map((j) => canMarkPickupConfirmed(j, 'Load ID')),
+    [false, false, false, false, false, false, false])
   check('a button for the open code', canMarkPickupConfirmed(open, 'Load ID'), true)
+  check('the button names the day it keeps (no hover title on a phone)',
+    [pickupConfirmLabel(open), pickupConfirmLabel(withReview([{ code: OPEN, stored: '2026-10-21' }]))], ['Mark Oct 6 confirmed', 'Mark Oct 21 confirmed'])
   check('the closed words never offer the button', wordsOf(closed) !== '' && !wordsOf(closed).includes('mark it confirmed'), true)
   check('the button\'s title names the kept day',
     [pickupConfirmTitle(open), pickupConfirmTitle(withReview([{ code: OPEN }]))],
@@ -367,6 +381,27 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
       'The pickup date could not be marked confirmed. Try again.',
     ])
 
+  // 409 PICKUP_CHANGED: the new day in words, and the pane takes the refreshed row.
+  const changedErr = (stored) => ({ status: 409, code: 'PICKUP_CHANGED', data: { error: 'The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.', code: 'PICKUP_CHANGED', stored } })
+  check('PICKUP_CHANGED names the day the cell reads now, else the server\'s words',
+    [pickupConfirmErrorText(changedErr('2026-10-09')), pickupConfirmErrorText(changedErr(null))],
+    [
+      'The Pickup Appointment now says Oct 9, so nothing was recorded. Check the new date before confirming it.',
+      'The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.',
+    ])
+  check('pickupChanged: only a 409 PICKUP_CHANGED',
+    [pickupChanged(changedErr('2026-10-09')), pickupChanged(said(409, 'ROW_MOVED', 'x')), pickupChanged({ status: 400, code: 'PICKUP_CHANGED' }), pickupChanged(undefined)],
+    [true, false, false, false])
+  {
+    const pane = { ...withReview([{ code: OPEN, stored: '2026-10-06' }]), 'Pickup Appointment': '10/6/2026 7:00', 'Origin Lat': 41.1 }
+    const fresh = freshPane(pane, [{ _rowIndex: 7, 'Load ID': '900000123', 'Pickup Appointment': '10/9/2026 7:00', _review: [{ code: OPEN, stored: '2026-10-09' }] }])
+    check('freshPane: the refreshed row\'s cells and codes, the pane\'s own extras kept',
+      fresh && [fresh['Pickup Appointment'], fresh._review, fresh['Origin Lat'], pickupConfirmLabel(fresh)], ['10/9/2026 7:00', [{ code: OPEN, stored: '2026-10-09' }], 41.1, 'Mark Oct 9 confirmed'])
+    const gone = freshPane(pane, [{ _rowIndex: 7, 'Load ID': '900000123', 'Pickup Appointment': '10/9/2026 7:00' }])
+    check('freshPane: a refreshed row with no codes clears the pane\'s; a row that is gone gives null',
+      [gone && gone._review, freshPane(pane, [{ _rowIndex: 8 }])], [[], null])
+  }
+
   // After the call: the badge clears at once, then follows the refreshed row.
   const two = withReview([{ code: OPEN, stored: '2026-10-06' }, { code: 'some_future_code' }])
   const cleared = withoutPickupReview(two)
@@ -380,21 +415,25 @@ const CORRECT = 'Correct the Pickup Appointment or mark it confirmed.'
 {
   // The three load-detail panes and the filter toggles.
   const PANE = '<div v-if="selectedJob && pickupReview(selectedJob)" class="pickup-review" role="note">'
-  const BUTTON = '<button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? \'Marking…\' : \'Mark confirmed\' }}</button>'
+  const BUTTON = '<button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? \'Marking…\' : pickupConfirmLabel(selectedJob) }}</button>'
+  // The refusal sits after the block, so it stays when the refreshed row has no code.
+  const ERROR_LINE = '</div>\n          <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>'
   for (const file of ['JobBoardTab.vue', 'ActiveLoadsTab.vue', 'CompletedLoadsTab.vue']) {
     const src = read(file)
-    const pane = (src.match(new RegExp(PANE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?</div>')) || [''])[0]
-    check(`${file}: the load detail has the pickup-date block, its words and its button`,
-      [pane.includes('{{ pickupReviewText(selectedJob) }}'), pane.includes(BUTTON), pane.includes('<p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>')], [true, true, true])
+    const pane = (src.match(new RegExp(PANE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?</div>\\n[^\\n]*\\n')) || [''])[0]
+    check(`${file}: the load detail has the pickup-date block, its words, its button and the refusal line after it`,
+      [pane.includes('{{ pickupReviewText(selectedJob) }}'), pane.includes(BUTTON), pane.includes(ERROR_LINE)], [true, true, true])
     check(`${file}: the button posts the lib's call`,
       src.includes('const call = pickupConfirmedRequest(job, loadIdCol.value)') && src.includes('await api.post(call.url, call.body)'), true)
+    check(`${file}: a 409 PICKUP_CHANGED reads the lists again and gives the pane its refreshed row`,
+      [src.includes('changed = pickupChanged(err)'), src.includes('if (!changed) return'), src.includes('const row = freshPane(selectedJob.value, props.jobs)')], [true, true, true])
     check(`${file}: a Super Admin or Dispatcher gets the button`,
       src.includes("const canConfirmPickup = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"), true)
     check(`${file}: the block has its style`, /\.pickup-review \{/.test(src) && /\.pickup-review-btn \{/.test(src), true)
     check(`${file}: the filter toggle's title names no single cause`,
       [src.includes('couldn’t fully extract the rate-con'), src.includes(":title=\"needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE\"")], [false, true])
     check(`${file}: imports the pickup-date helpers`,
-      ['REVIEW_FILTER_TITLE', 'pickupReview', 'pickupReviewText', 'canMarkPickupConfirmed', 'pickupConfirmTitle', 'pickupConfirmedRequest', 'pickupConfirmedToast', 'pickupConfirmErrorText', 'withoutPickupReview', 'freshReview']
+      ['REVIEW_FILTER_TITLE', 'pickupReview', 'pickupReviewText', 'canMarkPickupConfirmed', 'pickupConfirmTitle', 'pickupConfirmLabel', 'pickupConfirmedRequest', 'pickupConfirmedToast', 'pickupConfirmErrorText', 'pickupChanged', 'withoutPickupReview', 'freshReview', 'freshPane']
         .every((n) => reviewImports(src).includes(n)), true)
   }
 }

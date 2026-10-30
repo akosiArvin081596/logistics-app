@@ -135,19 +135,27 @@ export function pickupReviewText(job) {
 }
 
 // The "Mark confirmed" call, addressed like PUT /api/data/:rowIndex: the row
-// index and the key or Load ID as served (loadRef()). null when the row has no
-// open pickup code or can't be addressed.
+// index, the key or Load ID as served (loadRef()), and the day the pane shows,
+// so the server refuses a cell that changed since (409 PICKUP_CHANGED). null
+// when the row has no open pickup code, shows no day, or can't be addressed.
 export function pickupConfirmedRequest(job, loadIdCol = '') {
   const e = pickupReview(job);
-  if (!e || e.code !== PICKUP_UNCONFIRMED) return null;
+  if (!e || e.code !== PICKUP_UNCONFIRMED || !e.stored) return null;
   const rowIndex = job._rowIndex;
   const loadId = loadRef(job, loadIdCol).trim();
   if (!Number.isInteger(rowIndex) || rowIndex < 2 || !loadId) return null;
-  return { url: PICKUP_CONFIRMED_URL, body: { rowIndex, loadId } };
+  return { url: PICKUP_CONFIRMED_URL, body: { rowIndex, loadId, stored: e.stored } };
 }
 
 export function canMarkPickupConfirmed(job, loadIdCol = '') {
   return pickupConfirmedRequest(job, loadIdCol) !== null;
+}
+
+// The button's label names the day it keeps: a hover title never shows on a phone.
+export function pickupConfirmLabel(job) {
+  const e = pickupReview(job);
+  const stored = e ? shortDay(e.stored) : '';
+  return stored ? `Mark ${stored} confirmed` : 'Mark confirmed';
 }
 
 // The button's title: what the click keeps.
@@ -162,9 +170,18 @@ export function pickupConfirmedToast(res) {
   return res && res.alreadyConfirmed ? 'This pickup date was already confirmed.' : 'Pickup date marked confirmed.';
 }
 
+// The server refused because the cell's day changed since the pane read it.
+export function pickupChanged(err) {
+  return !!err && err.status === 409 && err.code === 'PICKUP_CHANGED';
+}
+
 // A refused or failed call in words: the server's own sentence where it sent one.
 export function pickupConfirmErrorText(err) {
   const e = err || {};
+  if (pickupChanged(e)) {
+    const now = shortDay(e.data && e.data.stored);
+    if (now) return `The Pickup Appointment now says ${now}, so nothing was recorded. Check the new date before confirming it.`;
+  }
   // 404 with no code: the feature is off (a stale key's 404 has its own sentence).
   if (e.status === 404 && e.code !== 'LOAD_KEY_UNKNOWN') return "Marking a pickup date confirmed isn't available right now. Reload the dashboard.";
   if (e.status === 403) return 'Only a Super Admin or a Dispatcher can mark a pickup date confirmed.';
@@ -188,6 +205,16 @@ export function freshReview(selected, rows) {
   const row = rows.find((r) => r && r._rowIndex === selected._rowIndex);
   if (!row) return null;
   return Array.isArray(row._review) ? row._review : [];
+}
+
+// After a 409 PICKUP_CHANGED and a refresh: the open load with its refreshed
+// row's cells and codes (the pane's own extras, such as map points, kept), or
+// null when the row is gone.
+export function freshPane(selected, rows) {
+  if (!selected || !Array.isArray(rows)) return null;
+  const row = rows.find((r) => r && r._rowIndex === selected._rowIndex);
+  if (!row) return null;
+  return { ...selected, ...row, _review: Array.isArray(row._review) ? row._review : [] };
 }
 
 // The Needs Review toggle's title. Each badge says why its load is flagged, so

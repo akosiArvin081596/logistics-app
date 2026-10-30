@@ -19,7 +19,11 @@
  *      for a Super Admin and for a Dispatcher naming a withheld Load ID as served, with one person
  *      row in load_cell_writes (asserted) and one audit row (the value only), after which the code
  *      is gone; 409 ROW_MOVED, PICKUP_NOT_FLAGGED, and (R2 H1) PERIOD_FINALIZED on a straddling row
- *      and a wholly closed one; 400 for a bad row index.
+ *      and a wholly closed one; 400 for a bad row index. The caller names the day its screen
+ *      showed (`stored`, YYYY-MM-DD): a missing or malformed day is 400 PICKUP_DAY_REQUIRED; a
+ *      cell whose day now differs is 409 PICKUP_CHANGED with the day it reads now, nothing
+ *      recorded or audited and the Job Tracking cache dropped (so the screen's next read is
+ *      current), checked before "already confirmed"; the same day is confirmed.
  *   §4 the dashboard (R2 L2): the codes are computed on the raw rows before sanitizing, so a
  *      Dispatcher's row whose Load ID is withheld still carries `_review`; the straddling row gets
  *      the closed variant; with the person hold off, a later email over a person's date brings the
@@ -76,7 +80,7 @@ const ROOTS = ["rateConPickupReading", "rateConDvirReading", "annotateDashboardP
 	"recordRateConCreatePickupReading", "recordLoadCellWrite", "loadCellWritesTable", "sanitizeBrokerColumns", "rateConPickupStash", "rateConPickupReadings"];
 const PROVIDED = ["app", "db", "process", "console", "require", "getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "pdfOcrLimiter", "rateConLimiter",
 	"GEMINI_API_KEY", "runRateConGemini", "alertUnusableRateConExtraction", "alertRateConReissueHold", "requireRole", "logAudit", "notifyChange",
-	"shownLoadId", "loadIdWithheldFor", "io", "sendEmail", "insertDispatchNotification"];
+	"shownLoadId", "loadIdWithheldFor", "io", "sendEmail", "insertDispatchNotification", "jtCacheInvalidate"];
 const has = (head) => SRC.includes(`\n${head}`);
 const HAS_ALL = has(MHEAD) && ROOTS.every((r) => new RegExp(`\\n(async )?(function|const) ${r}\\b`).test(SRC));
 check("server.js has the Mark confirmed route and the Needs Confirmation helpers", HAS_ALL);
@@ -132,6 +136,7 @@ function makeWorld({ env = {} } = {}) {
 	const capture = (...a) => logs.push(util.format(...a));
 	const quiet = { ...console, log: capture, warn: capture, error: capture, info: capture };
 	const audits = [];
+	const jtDrops = { n: 0 };
 	const routes = {};
 	const app = { post: (p, ...h) => { routes[p] = h; }, get: (p, ...h) => { routes[`GET ${p}`] = h; } };
 	const sheets = { spreadsheets: { values: { get: async () => ({ data: { values: sheet.map((r) => r.slice()) } }) } } };
@@ -164,6 +169,7 @@ function makeWorld({ env = {} } = {}) {
 		io: { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) },
 		sendEmail: async () => true,
 		insertDispatchNotification: { run: () => ({}) },
+		jtCacheInvalidate: () => { jtDrops.n++; },
 	};
 	const api = new Function(...PROVIDED, `"use strict";\n${LIFTED}\nreturn { ${ROOTS.join(", ")} };`)(...PROVIDED.map((k) => deps[k]));
 	const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r)); };
@@ -179,7 +185,7 @@ function makeWorld({ env = {} } = {}) {
 	};
 	const user = (r, id) => ({ session: { user: { role: r, id, username: `u${id}` } }, headers: { "x-requested-with": "XMLHttpRequest" } });
 	return {
-		db, sheet, logs, audits, gemini, api, settle, pdfReads,
+		db, sheet, logs, audits, gemini, api, settle, pdfReads, jtDrops,
 		extractEmail: (pdf, fields) => { gemini.next = fields; return call("/api/n8n/extract-pdf-via-gemini", { headers: { "x-webhook-secret": SECRET }, body: { pdf_base64: b64(pdf) } }); },
 		keep: (loadId, values) => call("/api/n8n/keep-stored-values", { headers: { "x-webhook-secret": SECRET }, body: { loadId, values }, ip: "" }),
 		mark: (r, id, body) => call("/api/loads/pickup-confirmed", { ...user(r, id), body }),
@@ -299,28 +305,49 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 		for (const row of board) w.sheet.push(row);
 		eq("§3 four flagged records", w.recordCount(), 4);
 		eq("§3 Driver and Investor: 403", [(await w.mark("Driver", 7, { rowIndex: 2, loadId: "900000301" })).status, (await w.mark("Investor", 8, { rowIndex: 2, loadId: "900000301" })).status], [403, 403]);
-		eq("§3 a bad row index: 400", [(await w.mark("Super Admin", 1, { rowIndex: 1, loadId: "900000301" })).status, (await w.mark("Super Admin", 1, { rowIndex: "2x", loadId: "900000301" })).status], [400, 400]);
-		eq("§3 a row that holds another load: 409 ROW_MOVED", (await w.mark("Super Admin", 1, { rowIndex: 6, loadId: "900000301" })).body.code, "ROW_MOVED");
-		eq("§3 no Needs Confirmation record: 409 PICKUP_NOT_FLAGGED", (await w.mark("Super Admin", 1, { rowIndex: 6, loadId: "900000305" })).body.code, "PICKUP_NOT_FLAGGED");
-		eq("§3 (R2 H1) a row straddling a closed month: 409 PERIOD_FINALIZED", (await w.mark("Dispatcher", 2, { rowIndex: 4, loadId: "900000303" })).body.code, "PERIOD_FINALIZED");
-		eq("§3 (R2 H1) a wholly closed row: 409 PERIOD_FINALIZED", (await w.mark("Dispatcher", 2, { rowIndex: 5, loadId: "900000304" })).body.code, "PERIOD_FINALIZED");
+		eq("§3 a bad row index: 400", [(await w.mark("Super Admin", 1, { rowIndex: 1, loadId: "900000301", stored: "2026-10-06" })).status, (await w.mark("Super Admin", 1, { rowIndex: "2x", loadId: "900000301", stored: "2026-10-06" })).status], [400, 400]);
+		eq("§3 a row that holds another load: 409 ROW_MOVED", (await w.mark("Super Admin", 1, { rowIndex: 6, loadId: "900000301", stored: "2026-10-06" })).body.code, "ROW_MOVED");
+		eq("§3 no Needs Confirmation record: 409 PICKUP_NOT_FLAGGED", (await w.mark("Super Admin", 1, { rowIndex: 6, loadId: "900000305", stored: "2026-10-06" })).body.code, "PICKUP_NOT_FLAGGED");
+		eq("§3 (R2 H1) a row straddling a closed month: 409 PERIOD_FINALIZED", (await w.mark("Dispatcher", 2, { rowIndex: 4, loadId: "900000303", stored: "2026-09-29" })).body.code, "PERIOD_FINALIZED");
+		eq("§3 (R2 H1) a wholly closed row: 409 PERIOD_FINALIZED", (await w.mark("Dispatcher", 2, { rowIndex: 5, loadId: "900000304", stored: "2026-09-20" })).body.code, "PERIOD_FINALIZED");
 		eq("§3 nothing recorded or audited by a refusal", [w.audits.length, w.cellRows("900000303").filter((r) => r.source === "person").length], [0, 0]);
+
+		// The day the caller's screen showed (M1): required, and it must still be the cell's day.
+		const noDay = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301" });
+		const badDay = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301", stored: "10/6/2026" });
+		const notADay = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301", stored: "2026-02-30" });
+		eq("§3 no day, or not a real YYYY-MM-DD day: 400 PICKUP_DAY_REQUIRED",
+			[noDay.status, noDay.body.code, badDay.status, badDay.body.code, notADay.status, notADay.body.code], [400, "PICKUP_DAY_REQUIRED", 400, "PICKUP_DAY_REQUIRED", 400, "PICKUP_DAY_REQUIRED"]);
+		const dropsBefore = w.jtDrops.n;
+		const otherDay = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301", stored: "2026-10-05" });
+		eq("§3 a day other than the cell's: 409 PICKUP_CHANGED with the day the cell reads now",
+			[otherDay.status, otherDay.body.code, otherDay.body.stored], [409, "PICKUP_CHANGED", "2026-10-06"]);
+		w.sheet[1][IDX["Pickup Appointment"]] = "10/9/2026 7:00:00";
+		const changed = await w.mark("Dispatcher", 2, { rowIndex: 2, loadId: "900000301", stored: "2026-10-06" });
+		eq("§3 the cell changed after the screen read it: 409 PICKUP_CHANGED naming the new day",
+			[changed.status, changed.body.code, changed.body.stored], [409, "PICKUP_CHANGED", "2026-10-09"]);
+		eq("§3 PICKUP_CHANGED records and audits nothing, and drops the Job Tracking cache each time",
+			[w.audits.length, w.cellRows("900000301").filter((r) => r.source === "person").length, w.jtDrops.n - dropsBefore], [0, 0, 2]);
+		w.sheet[1][IDX["Pickup Appointment"]] = "10/6/2026 7:00:00";
 
 		const beforeCodes = w.rows();
 		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", beforeCodes);
 		eq("§3 before: the open row carries pickup_unconfirmed", (beforeCodes[0]._review || []).map((c) => c.code), ["pickup_unconfirmed"]);
 
-		const sa = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301" });
-		eq("§3 a Super Admin: 200", [sa.status, sa.body.ok, sa.body.stored], [200, true, "2026-10-06"]);
+		const sa = await w.mark("Super Admin", 1, { rowIndex: 2, loadId: "900000301", stored: "2026-10-06" });
+		eq("§3 a Super Admin naming the cell's day: 200", [sa.status, sa.body.ok, sa.body.stored], [200, true, "2026-10-06"]);
 		eq("§3 one person row of the current value, role and user id", w.cellRows("900000301").filter((r) => r.source === "person"), [{ source: "person", value: "10/6/2026 7:00:00", actor: "Super Admin#1" }]);
 		eq("§3 one audit row: load / pickup_confirmed, the value only", w.audits, [{ role: "Super Admin", action: "pickup_confirmed", entity: "load", entityId: "900000301", details: JSON.stringify({ value: "10/6/2026 7:00:00" }) }]);
-		const again = await w.mark("Dispatcher", 2, { rowIndex: 2, loadId: "900000301" });
+		const again = await w.mark("Dispatcher", 2, { rowIndex: 2, loadId: "900000301", stored: "2026-10-06" });
 		eq("§3 confirming again: 200, already confirmed, no second person row or audit row",
 			[again.status, again.body.alreadyConfirmed, w.cellRows("900000301").filter((r) => r.source === "person").length, w.audits.length], [200, true, 1, 1]);
-		const disp = await w.mark("Dispatcher", 2, { rowIndex: 3, loadId: "900000555-[contact withheld]" });
+		const staleAgain = await w.mark("Dispatcher", 2, { rowIndex: 2, loadId: "900000301", stored: "2026-10-04" });
+		eq("§3 a person's date and another day: PICKUP_CHANGED comes before already confirmed",
+			[staleAgain.status, staleAgain.body.code, w.audits.length], [409, "PICKUP_CHANGED", 1]);
+		const disp = await w.mark("Dispatcher", 2, { rowIndex: 3, loadId: "900000555-[contact withheld]", stored: "2026-10-06" });
 		eq("§3 a Dispatcher naming a withheld Load ID as served: 200 and one audit row", [disp.status, w.audits.length, w.audits[1] && w.audits[1].role], [200, 2, "Dispatcher"]);
 		eq("§3 the Dispatcher's person row", w.cellRows("900000555-ops@example.test").filter((r) => r.source === "person").map((r) => r.actor), ["Dispatcher#2"]);
-		eq("§3 a Dispatcher naming the raw text of a withheld Load ID: 409 ROW_MOVED", (await w.mark("Dispatcher", 2, { rowIndex: 3, loadId: "900000555-ops@example.test" })).body.code, "ROW_MOVED");
+		eq("§3 a Dispatcher naming the raw text of a withheld Load ID: 409 ROW_MOVED", (await w.mark("Dispatcher", 2, { rowIndex: 3, loadId: "900000555-ops@example.test", stored: "2026-10-06" })).body.code, "ROW_MOVED");
 		const afterCodes = w.rows();
 		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", afterCodes);
 		eq("§3 after: both confirmed rows lose their code; the straddling row keeps the closed variant; the closed and unrecorded rows have none",
@@ -371,7 +398,7 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", restored);
 		eq("§4 (#588 rule) a person's date restored in the sheet after the email: no code", restored[2]._review, undefined);
 		const auditsBefore = w.audits.length;
-		const reMark = await w.mark("Dispatcher", 2, { rowIndex: 4, loadId: "900000403" });
+		const reMark = await w.mark("Dispatcher", 2, { rowIndex: 4, loadId: "900000403", stored: "2026-10-09" });
 		eq("§4 (#588 rule) \"Mark pickup confirmed\" on the restored date: 200, already confirmed, nothing new recorded or audited",
 			[reMark.status, reMark.body.alreadyConfirmed, w.cellRows("900000403").filter((r) => r.source === "person").length, w.audits.length - auditsBefore], [200, true, 1, 0]);
 
