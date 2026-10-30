@@ -301,19 +301,19 @@ if (v) {
   check('§7 before pickup: enough to reach the pickup, add to finish',
     rowsOf({}), [
       ['To reach pickup', '140 mi', 'ok', 'Uses about 30 gal. You have enough.'],
-      ['To finish this load', '420 mi', 'bad', 'Uses about 80 gal. Add about 40 gal.'],
+      ['To finish this load', '420 mi', 'bad', 'Uses about 80 gal. Add about 65 gal.'],
     ])
   check('§7 in transit, enough', rowsOf({ leg: 'to_delivery', routeMiles: 180 }), [['To finish this load', '180 mi', 'ok', 'Uses about 35 gal. You have enough.']])
   check('§7 more than a full tank: refill on the way',
     rowsOf({ leg: 'to_delivery', routeMiles: 1040 }), [['To finish this load', '1,040 mi', 'bad', 'Uses about 195 gal. Fill up full, and plan another fuel stop on the way.']])
   check('§7 check your gauge: what the tank needs, per row',
     rowsOf({ burn: NO_BURN, tankSource: 'default', tank: 200 }), [
-      ['To reach pickup', '140 mi', 'unknown', 'You need about 30 gal in the tank to reach pickup. Check your gauge.'],
-      ['To finish this load', '420 mi', 'unknown', 'You need about 80 gal in the tank to finish. Check your gauge.'],
+      ['To reach pickup', '140 mi', 'unknown', 'You need about 55 gal in the tank to reach pickup. Check your gauge.'],
+      ['To finish this load', '420 mi', 'unknown', 'You need about 145 gal in the tank to finish. Check your gauge.'],
     ])
   check('§7 no truck: one whole-load row',
     rowsOf({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280, tank: 200, tankSource: 'default', mpg: 6.5 }),
-    [['Whole load, pickup to delivery', '280 mi', 'unknown', 'You need about 50 gal in the tank for the whole load. Check your gauge.']])
+    [['Whole load, pickup to delivery', '280 mi', 'unknown', 'You need about 90 gal in the tank for the whole load. Check your gauge.']])
   check('§7 a load that is over: the top only', [view({ loadDone: true }).rows, view({ loadDone: true }).footers], [[], []])
   check('§7 extra stops: the pickup row is the first pickup', rowsOf({ extraStops: true })[0][0], 'To reach first pickup')
 
@@ -327,6 +327,22 @@ if (v) {
       "This load has extra stops that aren't counted. You may need more fuel.",
       'You have another load before this one. These numbers start from where your truck is now.',
     ])
+  // A row the plan can't fully count never says "You have enough": it checks the
+  // gauge, and its footer says why, together. Each caveat alone, then the control.
+  const CAVEATS = [
+    [{ extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
+    [{ afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
+    [{ routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+  ]
+  for (const [o, footer] of CAVEATS) {
+    const vw = view(o)
+    const pickup = vw.rows[0]
+    check(`§7 status and footer together (${Object.keys(o)[0]}): the pickup row checks the gauge, no row says "enough", and the footer is there`,
+      [pickup.tone, pickup.line, vw.rows.some((r) => /You have enough/.test(r.line)), vw.footers.includes(footer)],
+      ['unknown', 'You need about 55 gal in the tank to reach pickup. Check your gauge.', false, true])
+  }
+  check('§7 …the control, with no caveat: the pickup row says "enough" and there is no footer',
+    [view({}).rows[0].line, view({}).footers], ['Uses about 30 gal. You have enough.', []])
 
   const noteOf = (problem) => v.driverFuelView(world().rangeBlock, { planProblem: problem }).rowsNote
   check('§7 why there are no rows, per trip-plan failure',
@@ -375,7 +391,7 @@ if (v) {
     ['225 mi', 'Refuel now', 'Fuel ?'])
 
   const badge = (o) => v.driverFuelBadge(world(o).plan)
-  check('§7 the load badge: add to finish -> "Add 40 gal", red', badge({}), { tone: 'bad', text: 'Add 40 gal' })
+  check('§7 the load badge: add to finish -> "Add 65 gal", red', badge({}), { tone: 'bad', text: 'Add 65 gal' })
   check('§7 …enough to finish: the section\'s own figure', badge({ leg: 'to_delivery', routeMiles: 180 }), { tone: 'plain', text: '225 mi range' })
   check('§7 …no figure: "Fuel unknown"', [badge({ fuelSource: 'stale', readAge: 18 * 60 }), badge({ burn: NO_BURN, tankSource: 'default', tank: 200 })],
     [{ tone: 'warn', text: 'Fuel unknown' }, { tone: 'warn', text: 'Fuel unknown' }])
@@ -533,7 +549,7 @@ if (panelFactory) {
   const BEFORE = await on({})
   check('§8b before pickup: enough to reach the pickup, add to finish',
     blockText(BEFORE),
-    '225 miles until you run out Fuel level read 12 min ago To reach pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Uses about 80 gal. Add about 40 gal.')
+    '225 miles until you run out Fuel level read 12 min ago To reach pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Uses about 80 gal. Add about 65 gal.')
   {
     const t = textOf(BEFORE)
     check('§8b …and none of today\'s panel: no verdict card, hero, working line, "How we know", cells or notes',
@@ -547,13 +563,13 @@ if (panelFactory) {
   check('§8b refill on the way', blockText(await on({ leg: 'to_delivery', routeMiles: 1040 })),
     '225 miles until you run out Fuel level read 12 min ago To finish this load 1,040 mi Uses about 195 gal. Fill up full, and plan another fuel stop on the way.')
   check('§8b check gauge (ELD silent 18 hrs)', blockText(await on({ fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' })),
-    'Fuel level unknown No fuel reading for 18 hrs. Check your gauge. To finish this load 420 mi You need about 80 gal in the tank to finish. Check your gauge.')
+    'Fuel level unknown No fuel reading for 18 hrs. Check your gauge. To finish this load 420 mi You need about 145 gal in the tank to finish. Check your gauge.')
   check('§8b check gauge (no ELD reading, no position)', blockText(await on({ hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 })),
-    "Fuel level unknown Your truck isn't sending a fuel level. Check your gauge. Whole load, pickup to delivery 280 mi You need about 55 gal in the tank for the whole load. Check your gauge. Your truck hasn't sent its location recently.")
+    "Fuel level unknown Your truck isn't sending a fuel level. Check your gauge. Whole load, pickup to delivery 280 mi You need about 100 gal in the tank for the whole load. Check your gauge. Your truck hasn't sent its location recently.")
   check('§8b no tank size', blockText(await on({ burn: NO_BURN, tankSource: 'default', tank: 200 })),
-    "Miles left unknown This truck's tank size isn't on file. Check your gauge and ask dispatch to add it. To reach pickup 140 mi You need about 30 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi You need about 80 gal in the tank to finish. Check your gauge.")
+    "Miles left unknown This truck's tank size isn't on file. Check your gauge and ask dispatch to add it. To reach pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi You need about 145 gal in the tank to finish. Check your gauge.")
   check('§8b no truck', blockText(await on({ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280, tank: 200, tankSource: 'default', mpg: 6.5 })),
-    'Fuel level unknown No truck is linked to your account. Ask dispatch. Whole load, pickup to delivery 280 mi You need about 50 gal in the tank for the whole load. Check your gauge.')
+    'Fuel level unknown No truck is linked to your account. Ask dispatch. Whole load, pickup to delivery 280 mi You need about 90 gal in the tank for the whole load. Check your gauge.')
   {
     const delivered = await on({}, {}, { runnable: false })
     check('§8b load done (delivered, so no trip plan is asked): the top only',
@@ -563,9 +579,21 @@ if (panelFactory) {
   check('§8b sensor dropout', blockText(await on({ fuelSource: 'carried', leg: 'to_delivery', routeMiles: 180 })),
     "225 miles until you run out Your fuel sensor isn't reporting. This is an estimate. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. You have enough.")
   check('§8b refuel now', blockText(await on({ pct: 3, leg: 'to_delivery', routeMiles: 180 })),
-    'Refuel now Stop for fuel as soon as you can. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. Add about 35 gal.')
-  check('§8b the reasons under the top', blockText(await on({ positionAgeMinutes: 180, extraStops: true, afterAnotherLoad: true, routeSource: 'straight_line_estimate' })),
-    "225 miles until you run out Fuel level read 12 min ago To reach first pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Uses about 80 gal. Add about 40 gal. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
+    'Refuel now Stop for fuel as soon as you can. Fuel level read 12 min ago To finish this load 180 mi Uses about 35 gal. Add about 60 gal.')
+  // Status and footer on one screen: the pickup row checks the gauge, and the
+  // footers under it say why; neither shows without the other.
+  check('§8b the reasons under the top, with the rows they explain (no "enough" beside an uncounted-miles footer)',
+    blockText(await on({ positionAgeMinutes: 180, extraStops: true, afterAnotherLoad: true, routeSource: 'straight_line_estimate' })),
+    "225 miles until you run out Fuel level read 12 min ago To reach first pickup 140 mi You need about 55 gal in the tank to reach pickup. Check your gauge. To finish this load 420 mi Uses about 80 gal. Add about 65 gal. Worked out from where your truck was 3 hrs ago. Distance is estimated. This load has extra stops that aren't counted. You may need more fuel. You have another load before this one. These numbers start from where your truck is now.")
+  for (const [o, footer] of [
+    [{ extraStops: true }, "This load has extra stops that aren't counted. You may need more fuel."],
+    [{ afterAnotherLoad: true }, 'You have another load before this one. These numbers start from where your truck is now.'],
+    [{ routeSource: 'straight_line_estimate' }, 'Distance is estimated.'],
+  ]) {
+    const t = blockText(await on(o))
+    check(`§8b status and footer together on screen (${Object.keys(o)[0]}): "Check your gauge" on the pickup row, the footer, no "You have enough"`,
+      [t.includes('to reach pickup. Check your gauge.'), t.includes(footer), t.includes('You have enough')], [true, true, false])
+  }
   check('§8b load not mapped (400 NO_ROUTE): the top from the range answer, and why there are no rows',
     blockText(await on({}, { '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })),
     "225 miles until you run out Fuel level read 12 min ago This load isn't on the map yet, so we can't work out the fuel for it.")
@@ -661,8 +689,8 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
     stop()
     return out
   }
-  check('§9 flag on, add to finish: the badge says "Add 40 gal" in red; Route Options drop their gallons',
-    badgeFor(world().plan), { badge: { tone: 'bad', text: 'Add 40 gal' }, showFuel: false })
+  check('§9 flag on, add to finish: the badge says "Add 65 gal" in red; Route Options drop their gallons',
+    badgeFor(world().plan), { badge: { tone: 'bad', text: 'Add 65 gal' }, showFuel: false })
   check('§9 flag on, enough: the section\'s own figure (225), not the distance-to-dry (240)',
     badgeFor(world({ leg: 'to_delivery', routeMiles: 180 }).plan).badge, { tone: 'plain', text: '225 mi range' })
   check('§9 flag on, no tank size: "Fuel unknown", not a stop verdict on an assumed tank',
