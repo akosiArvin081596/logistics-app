@@ -787,6 +787,15 @@ async function main() {
 	// A driver's emergency contacts are third parties' names and numbers. The
 	// relationship stays: it identifies no one alone and keeps the copy testable.
 	secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });
+	// An owner-operator's truck is his own, so its VIN and plate go, unlike a company
+	// truck's; so do his names, staff free text about him, and a toll notice's plate,
+	// number and the OCR lines kept with it (they can carry the registered owner).
+	secrets += setCols("owner_operator_applications", { truck_vin: "", truck_plate: "" });
+	secrets += setCols("owner_operator_toll_notices", { plate_or_transponder: "", notice_number: "" });
+	for (const [t, c] of OWNER_OPERATOR_TEXT) secrets += setCols(t, { [c]: "REDACTED" }, `COALESCE("${c}",'') <> ''`);
+	for (const [t, c, ref, where] of OWNER_OPERATOR_LINKED) {
+		if (tableExists(ref)) secrets += setCols(t, { [c]: "" }, where);
+	}
 	summary.push(`bank / tax / identity fields: ${secrets} row-update(s) redacted`);
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
@@ -959,7 +968,8 @@ async function main() {
 	//     scrubbing them disables the feature you would be trying to test.
 	//   trucks.license_plate, trailers.license_plate, routemate_vehicles.license_num —
 	//     company asset identifiers, and the ELD linkage keys off adjacent
-	//     columns. No personal exposure.
+	//     columns. No personal exposure. (An owner-operator's own truck is the
+	//     exception, scrubbed in 3e.)
 	//   messages / notifications BODIES — operational content, and the chat
 	//     surfaces are worth exercising with realistic volume. Note the scope:
 	//     the body text is kept in full, and stage 3h neutralizes only an email
@@ -1138,6 +1148,11 @@ const REDACTED_EMPTY = [
 	["investor_onboarding_documents", "signed_ip_source", "signer IP provenance"],
 	["investor_onboarding_documents", "consent_text", "signer consent text"],
 	["investor_onboarding_documents", "signature_image", "signature image"],
+	// An owner-operator's own truck on his application, and a toll notice's plate and number.
+	["owner_operator_applications", "truck_vin", "owner-operator truck VIN (application)"],
+	["owner_operator_applications", "truck_plate", "owner-operator truck plate (application)"],
+	["owner_operator_toll_notices", "plate_or_transponder", "toll notice plate or transponder"],
+	["owner_operator_toll_notices", "notice_number", "toll notice number"],
 ];
 
 // The other half of stage 3e/3f: columns replaced with a PLACEHOLDER rather
@@ -1182,6 +1197,29 @@ const REDACTED_LITERAL = [
 	// these two rows are all that notices a scrub that stopped matching.
 	["driver_emergency_contacts", "contact_name", "REDACTED", "emergency contact name"],
 	["driver_emergency_contacts", "contact_phone", PLACEHOLDER_PHONE, "emergency contact phone number"],
+	// Owner-operator names and staff free text (OWNER_OPERATOR_TEXT): none is email- or
+	// SSN-shaped, so only these rows notice a scrub that stopped matching.
+	["owner_operator_applications", "registered_owner", "REDACTED", "registered owner name"],
+	["owner_operator_applications", "business_name", "REDACTED", "owner-operator business name (application)"],
+	["owner_operators", "business_name", "REDACTED", "owner-operator business name"],
+	["owner_operator_trucks", "reason", "REDACTED", "truck link reason"],
+	["owner_operator_charges", "label", "REDACTED", "owner-operator charge label"],
+	["owner_operator_charges", "reason", "REDACTED", "owner-operator charge reason"],
+	["owner_operator_charges", "void_reason", "REDACTED", "owner-operator charge void reason"],
+	["owner_operator_settlement_lines", "label", "REDACTED", "settlement line label"],
+	["owner_operator_escrow_uses", "record_note", "REDACTED", "escrow use record note"],
+	["owner_operator_escrow_uses", "reason", "REDACTED", "escrow use reason"],
+	["owner_operator_escrow_uses", "void_reason", "REDACTED", "escrow use void reason"],
+	["owner_operator_ledger_exits", "reason", "REDACTED", "ledger exit reason"],
+];
+// Stage 3e's owner-operator free text, replaced with "REDACTED" where it is not empty.
+const OWNER_OPERATOR_TEXT = REDACTED_LITERAL.filter(([t]) => t.startsWith("owner_operator")).map(([t, c]) => [t, c]);
+// Columns emptied on an owner-operator's rows only: his own truck's VIN and plate, and
+// a toll notice receipt's OCR lines. [table, column, the table marking the row, where, label]
+const OWNER_OPERATOR_LINKED = [
+	["trucks", "vin", "owner_operator_trucks", "id IN (SELECT truck_id FROM owner_operator_trucks)", "owner-operator truck VIN"],
+	["trucks", "license_plate", "owner_operator_trucks", "id IN (SELECT truck_id FROM owner_operator_trucks)", "owner-operator truck plate"],
+	["expenses", "receipt_details", "owner_operator_toll_notices", "id IN (SELECT expense_id FROM owner_operator_toll_notices)", "toll notice OCR text"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
@@ -1232,6 +1270,15 @@ function collectLeaks(dbPath, { scan = true, priorHashes = null } = {}) {
 		for (const [t, why] of MUST_BE_EMPTY_TABLES) {
 			const n = count(`SELECT COUNT(*) c FROM "${t}"`);
 			if (n) leaks.push(`${n} ${why}`);
+		}
+		// An owner-operator's rows only. A query that fails here refuses, so a renamed
+		// table can't wave his truck's VIN through.
+		for (const [t, c, ref, where, label] of OWNER_OPERATOR_LINKED) {
+			if (!has_(t, c) || !cols(ref).size) continue;
+			let n = 0;
+			try { n = check.prepare(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> '' AND ${where}`).get().c; }
+			catch (e) { leaks.push(`${label}: could not be checked (${e.message})`); continue; }
+			if (n) leaks.push(`${n} ${label}(s) survived in ${t}.${c} on an owner-operator's row`);
 		}
 
 		// CREDENTIALS — asserted, not assumed, like every column above. Three
