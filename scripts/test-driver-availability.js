@@ -67,6 +67,29 @@
 //       covers today; an unchecked confirmation whose load was since
 //       reassigned no longer counts
 //
+// The time-off ELD check (B), with DRIVER_TIME_OFF_ELD_CHECK_ENABLED on, on
+// made-up trucks T1 and T2 (scripts/lib/availability-world.js eldFixtures()):
+//   §15 a run: one row per finished day, final at d + 3, one system audit row per
+//       time-off row (no reason text); a second run writes no second audit row
+//       (L10) and never touches a final row
+//   §16 notices: one for a newly Not-confirmed day, none for a load staff
+//       confirmed, one follow-up when a told day changes, never a third; late
+//       pings change only days not yet final; the explanation's loads
+//   §17 the 90-day purge (D18): miles and times removed, the verdict kept in the
+//       row and its audit row, the day shown "ELD results are kept 90 days"
+//   §18 who sees what: eldDays and eldSummary for Super Admin and Dispatcher;
+//       403 for a Driver and an Investor on the staff route; the driver's own
+//       answers carry `eldChecked` only
+//   §19 closed months: a month closing between the plan and its write is never
+//       written (N-L1); a backdated row in a closed month writes nothing and
+//       shows "Not checked (month closed)", whatever settlement_grace_days says
+//       (L4); a waiting day its month closes on shows the same
+//   §20 his own app activity counts, staff acting for him does not; with two
+//       Driver accounts or none the check is skipped and noted
+//   §21 "Confirmed (no ELD data)": no truck held, no device linked (the owner's
+//       correction of 2026-10-31)
+//   §22 the 06:00 tick and its marker; a failed run leaves the marker
+//
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // and sweep lifted out of server.js on an in-memory SQLite, over HTTP.
 // Run: node scripts/test-driver-availability.js
@@ -869,6 +892,246 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§14.7 Dispatcher and Investor: 403; signed out: 401",
 			[(await page(on, "Hollis Renner", USERS.disp)).status, (await page(on, "Hollis Renner", USERS.inv)).status, (await page(on, "Hollis Renner", null)).status], [403, 403, 401]);
 		eq("§14.8 a Super Admin on a driver's page: that driver's rows", shape(await page(on, "Soren King", USERS.sa)), [["2026-10-16", "2026-10-18", "other", "upcoming"]]);
+	});
+
+	// ── The time-off ELD check ───────────────────────────────────────────────────
+	const appTime = require("../lib/app-time");
+	const EW = W.ELD;
+	const MIN = 60 * 1000;
+	const at = (day, hh = 0, mm = 0, zone = "America/Chicago") => {
+		const [y, m, d] = day.split("-").map(Number);
+		return appTime.wallClockToMs(zone, y, m, d, hh, mm, 0);
+	};
+	const pings = (fromMs, toMs, stepMin, shape = () => ({})) => {
+		const out = [];
+		for (let ms = fromMs, i = 0; ms <= toMs; ms += stepMin * MIN, i++) out.push({ ms, ...shape(ms, i) });
+		return out;
+	};
+	const eldWorld = async ({ env = {}, rows } = {}) => {
+		const w = await W.startWorld({ env: { DRIVER_TIME_OFF_ELD_CHECK_ENABLED: "true", ...env }, ...(rows ? { rows } : {}) });
+		W.eldFixtures(w.db);
+		return w;
+	};
+	const dayRows = (w, id) => w.db.prepare("SELECT * FROM driver_time_off_days WHERE availability_id = ? ORDER BY day").all(id);
+	const runCheck = (w) => w.api.runTimeOffEldCheck({ nowMs: w.clock.ms });
+	const eldNotices = (w) => w.db.prepare("SELECT * FROM dispatch_notifications WHERE type = 'time-off-eld' ORDER BY id").all();
+	const parkedT1 = (w) => W.addFixes(w.db, EW.vid1, pings(at("2026-10-01"), w.clock.ms - 30 * MIN, 30));
+	const tap = (w, userId, username, role, isoAt) => w.db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, 'update_status', 'load', '7001', 'Status changed')")
+		.run(isoAt, userId, username, role);
+
+	section("§15 the time-off ELD check: a run, its rows and its audit");
+	await R.guard("§15", async () => {
+		eq("§15.0 server.js has the check's run, plan, apply, tick and purge", W.ELD_CHECK_ROOTS, ["runTimeOffEldCheck", "timeOffEldRunPlan", "applyTimeOffEldPlan", "timeOffEldCheckTick", "purgeTimeOffEldResults"]);
+		const w = await eldWorld();
+		parkedT1(w);
+		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-09")));
+		const res = await runCheck(w);
+		eq("§15.1 one row per finished day, each Confirmed (parked), final, rule version 1, on T1",
+			dayRows(w, id).map((d) => [d.day, d.state, d.reason, !!d.final_at, d.rule_version, d.truck_ids]),
+			["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"].map((d) => [d, "confirmed", "parked", true, 1, "[21]"]));
+		eq("§15.2 the run's counts", [res.days, res.confirmed, res.notConfirmed, res.requested, res.checking, res.notices], [5, 5, 0, 0, 0, 0]);
+		const audits = w.audits("driver_time_off_eld_check");
+		eq("§15.3 one audit row, as the system, on the driver", audits.map((a) => [a.user_id, a.username, a.role, a.entity, a.entity_id]), [[0, "system", "system", "driver", String(DIR.hollis)]]);
+		ok("§15.4 ...naming each day's verdict, never the time off's reason", audits.length === 1 && audits[0].details.startsWith("off 2026-10-05..2026-10-09: 2026-10-05 confirmed (parked), final;")
+			&& audits[0].details.includes("2026-10-09 confirmed (parked), final") && !/Family/.test(audits[0].details), audits[0] && audits[0].details);
+		await runCheck(w);
+		eq("§15.5 a second run: no row rewritten (all final), no second audit row", [dayRows(w, id).map((d) => d.evaluations), w.audits("driver_time_off_eld_check").length], [[1, 1, 1, 1, 1], 1]);
+		// A row whose last days are not final yet (today Oct 15: final from d + 3).
+		const id2 = rowId(await create(w, DIR.hollis, vacation("2026-10-12", "2026-10-14")));
+		await runCheck(w);
+		await runCheck(w);
+		eq("§15.6 Oct 12 final, Oct 13 and 14 not yet; run twice they are evaluated twice", dayRows(w, id2).map((d) => [d.day, !!d.final_at, d.evaluations]),
+			[["2026-10-12", true, 1], ["2026-10-13", false, 2], ["2026-10-14", false, 2]]);
+		eq("§15.7 L10: the unchanged second run writes no second audit row for it", w.audits("driver_time_off_eld_check").filter((a) => a.details.startsWith("off 2026-10-12")).length, 1);
+		ok("§15.8 no position stored: the table has no latitude or longitude column",
+			!w.db.prepare("PRAGMA table_info(driver_time_off_days)").all().some((c) => /lat|lng|lon/i.test(c.name)));
+	});
+
+	section("§16 notices, follow-ups and late pings");
+	await R.guard("§16", async () => {
+		const rows = [...W.defaultRows(),
+			W.jtRow({ id: "7102", driver: "Hollis Renner", pickup: "10/13/2026 08:00", dropoff: "10/13/2026 17:00", status: "Dispatched", truck: "T1", owner: "5" }),
+			W.jtRow({ id: "7101", driver: "Soren King", pickup: "10/12/2026 08:00", dropoff: "10/13/2026 17:00", status: "Dispatched", truck: "T2", owner: "5" })];
+		const w = await eldWorld({ rows });
+		// T1 parked except a 30 mi drive on Oct 13, 09:00-10:40 Central.
+		const drive = (ms) => 3 * Math.max(0, Math.min(10, (ms - at("2026-10-13", 9)) / (10 * MIN)));
+		W.addFixes(w.db, EW.vid1, pings(at("2026-10-01"), w.clock.ms - 30 * MIN, 10, (ms) => ({ odo: 100000 + drive(ms), speed: ms > at("2026-10-13", 9) && ms <= at("2026-10-13", 10, 40) ? 20 : 0 })));
+		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-11", "2026-10-14")));
+		await runCheck(w);
+		const d13 = () => dayRows(w, id).find((d) => d.day === "2026-10-13");
+		eq("§16.1 Oct 13: Not confirmed (truck_moved, 30 mi), explained by his own load, not final", [d13().state, d13().reason, d13().miles, d13().explanation, d13().load_ids, !!d13().final_at],
+			["not_confirmed", "truck_moved", 30, "own_load", "[\"7102\"]", false]);
+		let n = eldNotices(w);
+		eq("§16.2 one notice for the row, its title and line, no load ID", [n.length, n[0] && n[0].title, n[0] && /Oct 13: T1 moved 30\.0 mi/.test(n[0].body), n[0] && /7102/.test(`${n[0].body}${n[0].metadata}`)],
+			[1, "Time off not confirmed: Hollis Renner (Oct 11 – Oct 14)", true, false]);
+		await runCheck(w);
+		eq("§16.3 run again: no second notice", eldNotices(w).length, 1);
+		// Late readings: an engine-hours jump on Oct 13 at noon (the device may be in another vehicle).
+		W.addFixes(w.db, EW.vid1, pings(at("2026-10-13", 12, 5), at("2026-10-13", 12, 25), 10, () => ({ odo: 100030, eh: 20000 })));
+		// ...and movement on Oct 12, which is already final.
+		W.addFixes(w.db, EW.vid1, [{ ms: at("2026-10-12", 12, 5), odo: 100000, lat: 30.9 }]);
+		const before12 = dayRows(w, id).find((d) => d.day === "2026-10-12");
+		await runCheck(w);
+		n = eldNotices(w);
+		eq("§16.4 the late break: Oct 13 now Requested (device_changed_vehicle); one follow-up in one notice, with Oct 14 newly told",
+			[d13().state, d13().reason, n.length, n[1] && n[1].title, n[1] && n[1].body.includes("Update: Oct 13 now reads Requested"), n[1] && n[1].body.includes("Oct 14: the ELD on T1 may be in another vehicle")],
+			["no_data", "device_changed_vehicle", 2, "Time off not confirmed: Hollis Renner (Oct 11 – Oct 14)".replace("not confirmed", "can't be checked"), true, true]);
+		const after12 = dayRows(w, id).find((d) => d.day === "2026-10-12");
+		eq("§16.5 the final Oct 12 is untouched by its late readings", [after12.state, after12.evaluated_at, after12.evaluations], [before12.state, before12.evaluated_at, before12.evaluations]);
+		// The break readings go away (a test-only edit): Oct 13 moves back, but it is never told a third time.
+		w.db.prepare("DELETE FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND engine_hours = 20000").run(EW.vid1);
+		await runCheck(w);
+		n = eldNotices(w);
+		const linesFor13 = n.map((x) => (x.body.match(/(^|\. )(Update: Oct 13 now|Oct 13: )/g) || []).length).reduce((a, b) => a + b, 0);
+		eq("§16.6 Oct 13 back to Not confirmed: no third notice line for it (one first, one follow-up)", [d13().state, linesFor13], ["not_confirmed", 2]);
+		// Soren drives T2 on Oct 12 under a load staff confirmed with "Assign anyway".
+		W.addFixes(w.db, EW.vid2, pings(at("2026-10-01"), w.clock.ms - 30 * MIN, 10, (ms) => ({ odo: 100000 + 3 * Math.max(0, Math.min(10, (ms - at("2026-10-12", 9)) / (10 * MIN))) })));
+		const sid = rowId(await create(w, DIR.soren, vacation("2026-10-12", "2026-10-12")));
+		w.db.prepare("INSERT INTO driver_availability_confirmations (availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by, confirmed_at) VALUES (?, ?, '7101', '2026-10-12', '2026-10-13', 'dispatch', 'super_admin', '2026-10-11T12:00:00Z')")
+			.run(sid, DIR.soren);
+		const before = eldNotices(w).length;
+		await runCheck(w);
+		const s12 = dayRows(w, sid)[0];
+		eq("§16.7 a day under a load staff confirmed: Not confirmed (confirmed_load), and no notice", [s12.state, s12.explanation, s12.load_ids, eldNotices(w).length - before], ["not_confirmed", "confirmed_load", "[\"7101\"]", 0]);
+	});
+
+	section("§17 the 90-day purge (D18)");
+	await R.guard("§17", async () => {
+		const w = await eldWorld();
+		parkedT1(w);
+		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-07")));
+		await runCheck(w);
+		const DAYMS = 24 * 60 * 60 * 1000;
+		w.db.prepare("UPDATE driver_time_off_days SET final_at = ?, miles = 3.2, moving_pings = 4, first_move_ms = 1, last_move_ms = 2, activity_first_ms = 3, activity_last_ms = 4, change_ms = 5 WHERE availability_id = ? AND day = '2026-10-05'")
+			.run(new Date(w.clock.ms - 91 * DAYMS).toISOString(), id);
+		w.db.prepare("UPDATE driver_time_off_days SET final_at = ? WHERE availability_id = ? AND day = '2026-10-06'").run(new Date(w.clock.ms - 89 * DAYMS).toISOString(), id);
+		const auditBefore = w.audits("driver_time_off_eld_check").map((a) => a.details);
+		eq("§17.1 the purge removes one day's results (final 91 days ago), not the one final 89 days ago", w.api.purgeTimeOffEldResults(w.clock.ms), 1);
+		const [d5, d6] = dayRows(w, id);
+		eq("§17.2 its miles and times are gone, its verdict stays", [d5.miles, d5.moving_pings, d5.samples, d5.first_move_ms, d5.last_move_ms, d5.activity_first_ms, d5.activity_last_ms, d5.change_ms, d5.day_zone, !!d5.purged_at, d5.state, d5.reason],
+			[0, 0, 0, null, null, null, null, null, "", true, "confirmed", "parked"]);
+		eq("§17.3 the day final 89 days ago keeps everything", [d6.samples > 0, d6.purged_at], [true, null]);
+		eq("§17.4 the audit rows keep each day's verdict: none edited or deleted, the purge logged once", [w.audits("driver_time_off_eld_check").map((a) => a.details), w.audits("driver_time_off_eld_purge").length],
+			[auditBefore, 1]);
+		ok("§17.4b ...the check's row still names Oct 5's verdict", auditBefore.some((d) => d.includes("2026-10-05 confirmed (parked)")));
+		const g = await list(w, DIR.hollis);
+		const shown = g.body && g.body.rows && g.body.rows[0].eldDays.find((d) => d.day === "2026-10-05");
+		eq("§17.5 staff see that day as \"ELD results are kept 90 days\", not \"Not checked\", with nothing else", shown, { day: "2026-10-05", state: "purged", label: "ELD results are kept 90 days" });
+		eq("§17.6 a second purge removes nothing", w.api.purgeTimeOffEldResults(w.clock.ms), 0);
+	});
+
+	section("§18 who sees the results");
+	await R.guard("§18", async () => {
+		const w = await eldWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+		parkedT1(w);
+		await create(w, DIR.hollis, vacation("2026-10-13", "2026-10-17"));
+		await runCheck(w);
+		const sa = await list(w, DIR.hollis);
+		const disp = await list(w, DIR.hollis, USERS.disp);
+		const days = (r) => r.body.rows[0].eldDays.map((d) => [d.day, d.state, d.label]);
+		const expected = [["2026-10-13", "confirmed", "Confirmed"], ["2026-10-14", "confirmed", "Confirmed"], ["2026-10-15", "upcoming", "Requested"], ["2026-10-16", "upcoming", "Requested"], ["2026-10-17", "upcoming", "Requested"]];
+		eq("§18.1 Super Admin and Dispatcher get eldDays per row", [sa.status, days(sa), disp.status, days(disp)], [200, expected, 200, expected]);
+		eq("§18.2 ...and eldSummary", sa.body.rows[0].eldSummary.text, "ELD: 2 of 5 days confirmed");
+		eq("§18.3 a Driver and an Investor get 403 on the staff route; signed out 401",
+			[(await list(w, DIR.hollis, USERS.driver)).status, (await list(w, DIR.hollis, USERS.inv)).status, (await w.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: null })).status], [403, 403, 401]);
+		const mine = await w.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		eq("§18.4 the driver's own route: eldChecked only", [mine.status, Object.keys(mine.body).sort(), mine.body.eldChecked], [200, ["eldChecked", "rows", "today"], true]);
+		const pageAnswer = await w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
+		eq("§18.5 the driver app's payload: the same timeOff", pageAnswer.body && pageAnswer.body.timeOff, mine.body);
+		ok("§18.6 no result reaches the driver: no ELD days, state, reason or miles", !/eldDays|eldSummary|"state"|"reason"|"miles"|not_confirmed|parked/.test(`${mine.text}${JSON.stringify(pageAnswer.body && pageAnswer.body.timeOff)}`));
+	});
+
+	section("§19 closed months (N-L1, L4)");
+	await R.guard("§19", async () => {
+		const w = await eldWorld();
+		parkedT1(w);
+		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-07")));
+		const plan = w.api.timeOffEldRunPlan({ nowMs: w.clock.ms, loadIndex: null });
+		eq("§19.1 the plan holds its three days", plan.rows.map((r) => r.days.length), [3]);
+		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-10', 'locked', ?)").run(new Date(w.clock.ms).toISOString());
+		const res = w.api.applyTimeOffEldPlan(plan, { nowMs: w.clock.ms });
+		eq("§19.2 N-L1: October closed between the plan and its write: nothing written, nothing audited, nothing told",
+			[res.days, res.skippedClosed, dayRows(w, id).length, w.audits("driver_time_off_eld_check").length, eldNotices(w).length], [0, 3, 0, 0, 0]);
+		for (const grace of ["0", "7", "14"]) {
+			const g = await eldWorld();
+			parkedT1(g);
+			W.addFixes(g.db, EW.vid1, pings(at("2026-09-15"), at("2026-09-30"), 30));
+			g.db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'settlement_grace_days', ?)").run(grace);
+			g.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-09', 'locked', '2026-10-08T05:00:00.000Z')").run();
+			const back = rowId(await create(g, DIR.hollis, vacation("2026-09-20", "2026-09-22")));
+			const r = await runCheck(g);
+			const shown = (await list(g, DIR.hollis)).body.rows.find((x) => x.id === back).eldDays.map((d) => d.label);
+			eq(`§19.3 L4 (settlement_grace_days ${grace}): a backdated row in a closed month writes nothing and shows "Not checked (month closed)"`,
+				[r.days, dayRows(g, back).length, shown], [0, 0, ["Not checked (month closed)", "Not checked (month closed)", "Not checked (month closed)"]]);
+		}
+		// A waiting day: T1 dark since Oct 3 evening; then October closes.
+		const d = await eldWorld();
+		W.addFixes(d.db, EW.vid1, pings(at("2026-10-01"), at("2026-10-03", 18), 30));
+		const wid = rowId(await create(d, DIR.hollis, vacation("2026-10-05", "2026-10-06")));
+		await runCheck(d);
+		eq("§19.4 dark since Oct 3: both days Checking (dark_waiting), not final", dayRows(d, wid).map((x) => [x.state, x.reason, !!x.final_at]), [["pending", "dark_waiting", false], ["pending", "dark_waiting", false]]);
+		d.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-10', 'locked', ?)").run(new Date(d.clock.ms).toISOString());
+		await runCheck(d);
+		eq("§19.5 its month closed: shown \"Not checked (month closed)\", and no run writes it again", [(await list(d, DIR.hollis)).body.rows[0].eldDays.map((x) => x.label), dayRows(d, wid).map((x) => x.evaluations)],
+			[["Not checked (month closed)", "Not checked (month closed)"], [1, 1]]);
+	});
+
+	section("§20 his own app activity (check 1)");
+	await R.guard("§20", async () => {
+		const w = await eldWorld();
+		parkedT1(w);
+		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-07")));
+		const own = new Date(at("2026-10-06", 15, 12, "America/New_York")).toISOString();
+		tap(w, USERS.driver.id, USERS.driver.username, "Driver", own);
+		tap(w, USERS.disp.id, USERS.disp.username, "Dispatcher", new Date(at("2026-10-07", 15, 0, "America/New_York")).toISOString());
+		await runCheck(w);
+		eq("§20.1 his own status update on Oct 6: Not confirmed (app_activity) at its time; a Dispatcher's update for him on Oct 7 does not count",
+			dayRows(w, id).map((d) => [d.day, d.state, d.reason, d.activity_first_ms]), [["2026-10-05", "confirmed", "parked", null], ["2026-10-06", "not_confirmed", "app_activity", Date.parse(own)], ["2026-10-07", "confirmed", "parked", null]]);
+		const two = await eldWorld();
+		parkedT1(two);
+		two.db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (30, 'drv_hollis2', 'x', 'Driver', 'hollis  renner')").run();
+		const id2 = rowId(await create(two, DIR.hollis, vacation("2026-10-05", "2026-10-06")));
+		tap(two, USERS.driver.id, USERS.driver.username, "Driver", own);
+		await runCheck(two);
+		eq("§20.2 two Driver accounts for him: the check is skipped and noted, the ELD decides", dayRows(two, id2).map((d) => [d.state, d.activity_note]), [["confirmed", "ambiguous"], ["confirmed", "ambiguous"]]);
+		const tam = await eldWorld();
+		const id3 = rowId(await create(tam, DIR.tamsin, vacation("2026-10-05", "2026-10-05")));
+		await runCheck(tam);
+		eq("§20.3 no Driver account (Tamsin): skipped and noted", dayRows(tam, id3).map((d) => d.activity_note), ["no_driver_account"]);
+	});
+
+	section("§21 \"Confirmed (no ELD data)\"");
+	await R.guard("§21", async () => {
+		const w = await eldWorld();
+		W.addFixes(w.db, EW.vid2, pings(at("2026-10-01"), w.clock.ms - 30 * MIN, 30));
+		w.db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ?").run(EW.t2);
+		const tid = rowId(await create(w, DIR.tamsin, vacation("2026-10-05", "2026-10-06")));
+		const sid = rowId(await create(w, DIR.soren, vacation("2026-10-05", "2026-10-06")));
+		const res = await runCheck(w);
+		eq("§21.1 no truck held (Tamsin) and no device linked (Soren's T2): Confirmed, each with its own reason",
+			[dayRows(w, tid).map((d) => [d.state, d.reason]), dayRows(w, sid).map((d) => [d.state, d.reason])],
+			[[["confirmed", "no_truck"], ["confirmed", "no_truck"]], [["confirmed", "no_device"], ["confirmed", "no_device"]]]);
+		eq("§21.2 counted as confirmed, with no notice", [res.confirmed, res.requested, res.notices], [4, 0, 0]);
+		const shown = (await list(w, DIR.soren)).body.rows[0];
+		eq("§21.3 staff see \"Confirmed (no ELD data)\", counted apart in the summary", [shown.eldDays.map((d) => [d.label, d.noEldData]), shown.eldSummary.text],
+			[[["Confirmed (no ELD data)", true], ["Confirmed (no ELD data)", true]], "ELD: 2 of 2 days confirmed (2 with no ELD data)"]);
+	});
+
+	section("§22 the 06:00 tick");
+	await R.guard("§22", async () => {
+		const w = await eldWorld();
+		const mark = () => { const r = w.db.prepare("SELECT value FROM server_state WHERE key = 'time_off_eld_check_last_run'").get(); return r ? JSON.parse(r.value).day : null; };
+		w.clock.ms = at("2026-10-15", 5, 59, "America/New_York");
+		eq("§22.1 05:59 on the business clock: not due, no marker", [await w.api.timeOffEldCheckTick(), mark()], [null, null]);
+		w.clock.ms = at("2026-10-15", 6, 0, "America/New_York");
+		const first = await w.api.timeOffEldCheckTick();
+		eq("§22.2 06:00: a run, and the day's marker", [!!first && typeof first.days === "number", mark()], [true, "2026-10-15"]);
+		w.clock.ms = at("2026-10-15", 13, 0, "America/New_York");
+		eq("§22.3 later that day: not again", await w.api.timeOffEldCheckTick(), null);
+		w.clock.ms = at("2026-10-18", 9, 0, "America/New_York");
+		w.db.exec("DROP TABLE driver_time_off_days");
+		eq("§22.4 a failed run leaves the marker, so the next tick tries again", [await w.api.timeOffEldCheckTick(), mark()], [null, "2026-10-15"]);
+		ok("§22.5 ...and says so once in the log", w.logs.some((l) => /\[time-off-eld\] run failed/.test(l)), w.logs.join(" | ").slice(0, 200));
 	});
 
 	await R.finish();

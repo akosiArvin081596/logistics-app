@@ -119,6 +119,7 @@ const linxupPush = require("./lib/linxup-push");
 const eldFeedHealth = require("./lib/eld-feed-health");
 const eldPosition = require("./lib/eld-position");
 const driverAvailability = require("./lib/driver-availability");
+const timeOffEldCheck = require("./lib/time-off-eld-check");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
@@ -3368,24 +3369,30 @@ function driverAvailabilityByName(sinceDay) {
 // read, and then each confirmation counts as recorded (an extra alert rather than
 // a missed one).
 let availabilityLoadIndex = null;
+// One Job Tracking read as that index, each entry with its Load ID as stored; the
+// time-off ELD check reads it too. It never changes the cached rows.
+function availabilityLoadIndexOf(jt) {
+	const cols = jobTrackingMonthCols(jt.headers);
+	const truckCol = findCol(jt.headers, /^truck$/i);
+	const index = new Map();
+	for (const r of excludeDroppedLoads(jt.data, jt.headers)) {
+		const loadId = String((cols.loadIdCol ? r[cols.loadIdCol] : "") || "").trim();
+		const key = normLoadKey(loadId);
+		if (!key) continue;
+		index.set(key, {
+			loadId,
+			driver: cols.driverCol ? r[cols.driverCol] || "" : "",
+			truck: truckCol ? r[truckCol] || "" : "",
+			pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
+			dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
+			cancelled: false,
+		});
+	}
+	return index;
+}
 async function refreshAvailabilityLoadIndex() {
 	try {
-		const jt = await getJobTrackingCached();
-		const cols = jobTrackingMonthCols(jt.headers);
-		const truckCol = findCol(jt.headers, /^truck$/i);
-		const index = new Map();
-		for (const r of excludeDroppedLoads(jt.data, jt.headers)) {
-			const key = normLoadKey(cols.loadIdCol ? r[cols.loadIdCol] : "");
-			if (!key) continue;
-			index.set(key, {
-				driver: cols.driverCol ? r[cols.driverCol] || "" : "",
-				truck: truckCol ? r[truckCol] || "" : "",
-				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
-				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
-				cancelled: false,
-			});
-		}
-		availabilityLoadIndex = index;
+		availabilityLoadIndex = availabilityLoadIndexOf(await getJobTrackingCached());
 	} catch (e) {
 		availabilityLoadIndex = null;
 		console.error("[eld-feed] Job Tracking unreadable; \"Assign anyway\" confirmations count as recorded:", e.message);
@@ -3476,6 +3483,65 @@ function truckDriverAvailability() {
 		}));
 	}
 	return out;
+}
+
+// What the time-off ELD check judges one driver's days fromDay..toDay on
+// (lib/time-off-eld-check.js judgeTimeOffDays()), read only: the dated truck
+// and device history, his trucks' devices' clean fixes, and his own status updates.
+function timeOffDayEvidence({ driverName, fromDay, toDay, nowMs }) {
+	const DAY = 24 * 60 * 60 * 1000;
+	const rule = timeOffEldCheck.TIME_OFF_ELD_RULE;
+	const driverKey = normalizeDriverName(driverName);
+	const lookFromMs = nowMs - rule.lookbackDays * DAY;
+	// From 7 days before the row (its continuity window), with a UTC day of margin
+	// each side so every US zone's days are whole.
+	const fetchFromMs = Date.parse(`${driverAvailability.shiftAvailabilityDay(fromDay, -rule.continuityDays)}T00:00:00Z`) - DAY;
+	const fetchToMs = Date.parse(`${driverAvailability.shiftAvailabilityDay(toDay, 1)}T00:00:00Z`) + DAY;
+	const every = db.prepare("SELECT truck_id, driver_name, start_date, end_date FROM truck_assignments").all();
+	const his = new Set(every.filter((a) => normalizeDriverName(a.driver_name) === driverKey).map((a) => a.truck_id));
+	const assignments = every.filter((a) => his.has(a.truck_id));
+	const deviceRows = db.prepare("SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments").all();
+	const currentLinks = db.prepare("SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id").all();
+	const deviceStartMs = eldDeviceHistoryStartMs();
+	const units = {};
+	for (const t of db.prepare("SELECT id, unit_number FROM trucks").all()) units[t.id] = t.unit_number || "";
+	const { contexts } = timeOffEldCheck.timeOffDriverContexts({ driverKey, normalize: normalizeDriverName, assignments, deviceRows, deviceStartMs, currentLinks, fromMs: lookFromMs });
+	const vids = [...new Set(contexts.filter((c) => c.vid && c.toMs > fetchFromMs && c.fromMs < fetchToMs).map((c) => c.vid))].sort();
+	const inRange = db.prepare(`
+		SELECT location_date_ms AS ms, MAX(odometer) AS odo, MAX(engine_hours) AS eh, MAX(latitude) AS lat, MAX(longitude) AS lng,
+			MAX(speed) AS speed, MAX(source) AS source
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND location_date_ms >= ? AND location_date_ms < ?
+		GROUP BY location_date_ms ORDER BY location_date_ms ASC
+	`);
+	const lastBefore = db.prepare(`
+		SELECT location_date_ms AS ms, odometer AS odo, engine_hours AS eh, latitude AS lat, longitude AS lng, speed, source
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND location_date_ms < ?
+		ORDER BY location_date_ms DESC LIMIT 1
+	`);
+	const firstAfter = db.prepare(`
+		SELECT location_date_ms AS ms, odometer AS odo, engine_hours AS eh, latitude AS lat, longitude AS lng, speed, source
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND location_date_ms >= ?
+		ORDER BY location_date_ms ASC LIMIT 1
+	`);
+	const series = {};
+	for (const vid of vids) {
+		series[vid] = { before: lastBefore.get(vid, fetchFromMs) || null, fixes: inRange.all(vid, fetchFromMs, fetchToMs), after: firstAfter.get(vid, fetchToMs) || null };
+	}
+	// His own account only: staff acting for him write the same action under their
+	// own role and id. With no such account, or two, the check is skipped and noted
+	const owner = driverAccountForDirectoryRow({ driver_name: driverName });
+	const taps = owner.account
+		? db.prepare("SELECT timestamp FROM audit_trail WHERE action = 'update_status' AND role = 'Driver' AND user_id = ? AND timestamp >= ? AND timestamp < ?")
+			.all(owner.account.id, new Date(fetchFromMs).toISOString(), new Date(fetchToMs).toISOString())
+			.map((a) => Date.parse(a.timestamp)).filter(Number.isFinite)
+		: null;
+	return {
+		driverKey, assignments, deviceRows, deviceStartMs, currentLinks, units, series, taps,
+		activityNote: owner.account ? "" : owner.reason, lookFromMs, fetchFromMs, fetchToMs,
+	};
 }
 
 // Everything the judge needs, read in four bounded queries.
@@ -6733,6 +6799,9 @@ const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|
 // read Job Tracking, ignore `confirmLoads` and answer as before. It changes no
 // load and pays nothing.
 const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ?? "").trim());
+// The time-off ELD check (lib/time-off-eld-check.js), default OFF, and only while DRIVER_AVAILABILITY_ENABLED is
+// on. Off, no job runs, nothing but the 90-day purge touches its results, and no answer carries an ELD key.
+const DRIVER_TIME_OFF_ELD_CHECK_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_ELD_CHECK_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
@@ -6771,6 +6840,44 @@ db.exec(`
 		confirmed_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_conf_dir ON driver_availability_confirmations(directory_id, load_to);
+`);
+// One row per judged day of a time-off row (the ELD check). Miles and times only, never a position; a final row
+// is never rewritten, and 90 days after final its miles and times are removed (the verdict stays).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_time_off_days (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		availability_id INTEGER NOT NULL,
+		directory_id INTEGER NOT NULL,
+		day TEXT NOT NULL,
+		day_zone TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL CHECK(state IN ('pending', 'confirmed', 'not_confirmed', 'no_data')),
+		reason TEXT NOT NULL DEFAULT '',
+		explanation TEXT NOT NULL DEFAULT '',
+		activity_note TEXT NOT NULL DEFAULT '',
+		truck_ids TEXT NOT NULL DEFAULT '[]',
+		vehicle_ids TEXT NOT NULL DEFAULT '[]',
+		load_ids TEXT NOT NULL DEFAULT '[]',
+		miles REAL NOT NULL DEFAULT 0,
+		moving_pings INTEGER NOT NULL DEFAULT 0,
+		samples INTEGER NOT NULL DEFAULT 0,
+		first_move_ms INTEGER,
+		last_move_ms INTEGER,
+		activity_first_ms INTEGER,
+		activity_last_ms INTEGER,
+		change_ms INTEGER,
+		rule_version INTEGER NOT NULL,
+		first_evaluated_at TEXT NOT NULL,
+		evaluated_at TEXT NOT NULL,
+		evaluations INTEGER NOT NULL DEFAULT 1,
+		final_at TEXT,
+		notified_at TEXT,
+		notified_state TEXT,
+		followup_at TEXT,
+		purged_at TEXT,
+		UNIQUE(availability_id, day)
+	);
+	CREATE INDEX IF NOT EXISTS idx_tod_dir_day ON driver_time_off_days(directory_id, day);
+	CREATE INDEX IF NOT EXISTS idx_tod_final ON driver_time_off_days(final_at);
 `);
 
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
@@ -11223,6 +11330,30 @@ function availabilityRowView(r, todayKey, viewer) {
 	};
 }
 
+// A time-off row's ELD check results as staff see them: `eldDays` and
+// `eldSummary` (lib/time-off-eld-check.js timeOffEldDaysView()), each month's
+// lock read once, load IDs as the viewer may see them. Unreadable, the row
+// carries no ELD keys, so the time-off list still answers.
+function timeOffEldRowFields(r, { today, req }) {
+	try {
+		const stored = new Map(db.prepare("SELECT * FROM driver_time_off_days WHERE availability_id = ?").all(r.id).map((s) => [s.day, s]));
+		const locked = new Map();
+		const monthClosed = (day) => {
+			const month = day.slice(0, 7);
+			if (!locked.has(month)) locked.set(month, periodWriteLocked(month));
+			return locked.get(month);
+		};
+		const units = new Map(db.prepare("SELECT id, unit_number FROM trucks").all().map((t) => [t.id, t.unit_number || ""]));
+		return timeOffEldCheck.timeOffEldDaysView({
+			from: r.from_date, to: r.to_date, cancelled: !!r.cancelled_at, todayKey: today, stored, monthClosed, units,
+			showLoadId: (id) => shownLoadId(req, id),
+		});
+	} catch (err) {
+		console.error("[time-off-eld] results unreadable for a time-off row:", err.message);
+		return {};
+	}
+}
+
 // Cancels a deleted directory row's live time off (the system's cancel,
 // audited per row). Runs inside the delete's transaction.
 function cancelDirectoryAvailability(req, directoryId, driverName) {
@@ -11311,7 +11442,7 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 		res.json({
 			directoryId: dir.id, driver: dir.driver_name, today,
 			createLimits: driverAvailability.availabilityCreateLimits({ todayKey: today, isSuperAdmin: user.role === "Super Admin" }),
-			rows: rows.map((r) => availabilityRowView(r, today, user)),
+			rows: rows.map((r) => ({ ...availabilityRowView(r, today, user), ...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? timeOffEldRowFields(r, { today, req }) : {}) })),
 		});
 	} catch (err) {
 		console.error("[availability] list failed:", err.message);
@@ -11513,6 +11644,8 @@ function driverOwnTimeOff(name, todayKey) {
 		return {
 			today,
 			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
+			// Only that the check is on, for his card's one line: never a result.
+			...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? { eldChecked: true } : {}),
 		};
 	} catch (err) {
 		console.error("[availability] driver's own time off could not be read:", err.message);
@@ -11527,7 +11660,7 @@ function driverOwnTimeOff(name, todayKey) {
 app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
 	const own = driverOwnTimeOff(req.session.user.driverName);
 	if (own.error) return res.status(500).json({ error: "Your time off could not be read." });
-	res.json({ today: own.today, rows: own.rows });
+	res.json({ today: own.today, rows: own.rows, ...(own.eldChecked ? { eldChecked: true } : {}) });
 });
 
 // GET /api/driver-availability — every driver's current and upcoming time off
@@ -11549,6 +11682,241 @@ app.get("/api/driver-availability", availabilityFlagGate, requireRole("Super Adm
 		res.status(500).json({ error: "Time off could not be read." });
 	}
 });
+
+// ── The time-off ELD check: a daily run and a retention purge ─────────────────
+// Each run judges every finished, open-month, not-final day of every live
+// time-off row from the ELD (lib/time-off-eld-check.js) with no one approving
+// it. It writes only its own day rows, system audit rows and in-app notices:
+// never the time-off row, pay, a sheet, n8n, Drive or an email.
+const TIME_OFF_ELD_LAST_RUN_KEY = "time_off_eld_check_last_run";
+const TIME_OFF_ELD_TICK_MS = 30 * 60 * 1000;
+const TIME_OFF_ELD_BOOT_DELAY_MS = 10 * 60 * 1000;
+let timeOffEldRunning = false;
+
+// What a run at nowMs would write, read only (scripts/time-off-eld-check-report.js
+// prints it): per live row, each day to judge with its verdict, explanation,
+// finality and notice. `loadIndex` is availabilityLoadIndexOf() of a Job Tracking
+// read, null when it could not be read.
+function timeOffEldRunPlan({ nowMs, loadIndex }) {
+	const today = appDay(new Date(nowMs));
+	const yesterday = driverAvailability.shiftAvailabilityDay(today, -1);
+	const locked = new Map();
+	const monthClosed = (day) => {
+		const month = day.slice(0, 7);
+		if (!locked.has(month)) locked.set(month, periodWriteLocked(month));
+		return locked.get(month);
+	};
+	const confirmations = db.prepare(`
+		SELECT c.id, c.load_id, c.load_from, c.load_to, d.driver_name AS directory_name
+		FROM driver_availability_confirmations c JOIN drivers_directory d ON d.id = c.directory_id
+	`).all();
+	const rows = db.prepare(`
+		SELECT a.id, a.directory_id, a.from_date, a.to_date, d.driver_name AS directory_name
+		FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id
+		WHERE a.cancelled_at IS NULL AND a.from_date <= ?
+		ORDER BY a.from_date ASC, a.id ASC
+	`).all(yesterday);
+	const storedOf = db.prepare("SELECT * FROM driver_time_off_days WHERE availability_id = ?");
+	const out = [];
+	let errors = 0;
+	for (const r of rows) {
+		const driverKey = normalizeDriverName(r.directory_name);
+		if (!driverKey) continue;
+		// One row that can't be read waits for the next run; the others go on.
+		try {
+			const stored = new Map(storedOf.all(r.id).map((s) => [s.day, s]));
+			const last = r.to_date < yesterday ? r.to_date : yesterday;
+			const days = [];
+			for (let d = r.from_date; d && d <= last; d = driverAvailability.shiftAvailabilityDay(d, 1)) {
+				const s = stored.get(d);
+				if (!monthClosed(d) && !(s && s.final_at)) days.push(d);
+			}
+			if (!days.length) continue;
+			const evidence = timeOffDayEvidence({ driverName: r.directory_name, fromDay: r.from_date, toDay: last, nowMs });
+			const verdicts = timeOffEldCheck.judgeTimeOffDays({ days, anchorOf: () => r.from_date, driverKey, normalize: normalizeDriverName, evidence, nowMs });
+			out.push({
+				availabilityId: r.id, directoryId: r.directory_id, driverName: r.directory_name, from: r.from_date, to: r.to_date, units: evidence.units,
+				days: days.map((day) => {
+					const v = verdicts.get(day);
+					const why = v.state === "not_confirmed"
+						? timeOffEldCheck.timeOffExplanation({ day, driverKey, normalize: normalizeDriverName, loadKey: normLoadKey, confirmations, loads: loadIndex })
+						: { explanation: "", loadIds: [] };
+					const next = { ...v, ...why, final: timeOffEldCheck.isFinalTimeOffDay({ day, state: v.state, todayKey: today }) };
+					const old = stored.get(day) || null;
+					return { day, old, next, notice: timeOffEldCheck.timeOffNoticeDecision({ old, next }) };
+				}),
+			});
+		} catch (err) {
+			errors += 1;
+			console.error(`[time-off-eld] time-off row ${r.id} not judged this run:`, err.message);
+		}
+	}
+	return { today, rows: out, errors };
+}
+
+// Writes a plan, one transaction per time-off row. Each day's month lock is read
+// again inside it, so a month that closed since the plan is never written; a
+// final day is never rewritten. Changes get one system audit row, notices one row.
+function applyTimeOffEldPlan(plan, { nowMs }) {
+	const at = new Date(nowMs).toISOString();
+	const upsert = db.prepare(`
+		INSERT INTO driver_time_off_days (availability_id, directory_id, day, day_zone, state, reason, explanation, activity_note,
+			truck_ids, vehicle_ids, load_ids, miles, moving_pings, samples, first_move_ms, last_move_ms, activity_first_ms, activity_last_ms,
+			change_ms, rule_version, first_evaluated_at, evaluated_at, evaluations, final_at, notified_at, notified_state, followup_at)
+		VALUES (@availability_id, @directory_id, @day, @day_zone, @state, @reason, @explanation, @activity_note,
+			@truck_ids, @vehicle_ids, @load_ids, @miles, @moving_pings, @samples, @first_move_ms, @last_move_ms, @activity_first_ms, @activity_last_ms,
+			@change_ms, @rule_version, @at, @at, 1, @final_at, @notified_at, @notified_state, @followup_at)
+		ON CONFLICT(availability_id, day) DO UPDATE SET
+			directory_id = excluded.directory_id, day_zone = excluded.day_zone, state = excluded.state, reason = excluded.reason,
+			explanation = excluded.explanation, activity_note = excluded.activity_note, truck_ids = excluded.truck_ids,
+			vehicle_ids = excluded.vehicle_ids, load_ids = excluded.load_ids, miles = excluded.miles, moving_pings = excluded.moving_pings,
+			samples = excluded.samples, first_move_ms = excluded.first_move_ms, last_move_ms = excluded.last_move_ms,
+			activity_first_ms = excluded.activity_first_ms, activity_last_ms = excluded.activity_last_ms, change_ms = excluded.change_ms,
+			rule_version = excluded.rule_version, evaluated_at = excluded.evaluated_at, evaluations = driver_time_off_days.evaluations + 1,
+			final_at = excluded.final_at, notified_at = excluded.notified_at, notified_state = excluded.notified_state, followup_at = excluded.followup_at
+		WHERE driver_time_off_days.final_at IS NULL
+	`);
+	const STATE_KEY = { confirmed: "confirmed", not_confirmed: "notConfirmed", no_data: "requested", pending: "checking" };
+	const result = { days: 0, confirmed: 0, notConfirmed: 0, requested: 0, checking: 0, notices: 0, skippedClosed: 0, rowErrors: plan.errors || 0 };
+	const live = [];
+	for (const row of plan.rows) {
+		const unitsOf = (ids) => (ids || []).map((id) => (row.units || {})[id]).filter(Boolean);
+		const notice = db.transaction(() => {
+			const changed = [];
+			const lines = [];
+			for (const p of row.days) {
+				if (periodWriteLocked(p.day.slice(0, 7))) {
+					result.skippedClosed += 1;
+					continue;
+				}
+				const v = p.next;
+				const { first, followup } = p.notice;
+				const old = p.old || {};
+				const values = {
+					availability_id: row.availabilityId, directory_id: row.directoryId, day: p.day, day_zone: v.dayZone || "",
+					state: v.state, reason: v.reason, explanation: v.explanation || "", activity_note: v.activityNote || "",
+					truck_ids: JSON.stringify(v.truckIds || []), vehicle_ids: JSON.stringify(v.vehicleIds || []), load_ids: JSON.stringify(v.loadIds || []),
+					miles: v.miles || 0, moving_pings: v.movingPings || 0, samples: v.samples || 0,
+					first_move_ms: v.firstMoveMs ?? null, last_move_ms: v.lastMoveMs ?? null,
+					activity_first_ms: v.activityFirstMs ?? null, activity_last_ms: v.activityLastMs ?? null, change_ms: v.changeMs ?? null,
+					rule_version: v.ruleVersion, at, final_at: v.final ? at : null,
+					notified_at: first ? at : old.notified_at || null,
+					notified_state: first ? v.state : old.notified_state || null,
+					followup_at: followup ? at : old.followup_at || null,
+				};
+				if (!upsert.run(values).changes) continue;
+				result.days += 1;
+				result[STATE_KEY[v.state]] += 1;
+				if (timeOffEldCheck.timeOffDayChanged(p.old, values)) {
+					changed.push({ day: p.day, state: v.state, reason: v.reason, explanation: values.explanation, activityNote: values.activity_note, final: !!values.final_at, notified: first, followup });
+				}
+				if (first || followup) {
+					lines.push({ kind: first ? "first" : "followup", state: v.state, text: timeOffEldCheck.timeOffNoticeLine({ verdict: v, followup, units: unitsOf(v.truckIds), timeZone: APP_TIMEZONE }) });
+				}
+			}
+			if (changed.length) {
+				logAudit({}, "driver_time_off_eld_check", "driver", String(row.directoryId), timeOffEldCheck.timeOffAuditText({ from: row.from, to: row.to, days: changed }));
+			}
+			if (!lines.length) return null;
+			const text = timeOffEldCheck.timeOffNoticeText({ driverName: row.driverName, from: row.from, to: row.to, lines });
+			// No load ID: the panel shows those under each viewer's own rule.
+			const metadata = { availabilityId: row.availabilityId, directoryId: row.directoryId, days: lines.length };
+			insertDispatchNotification.run("time-off-eld", text.title, text.body, JSON.stringify(metadata));
+			return { type: "time-off-eld", title: text.title, body: text.body, metadata };
+		})();
+		if (notice) live.push(notice);
+	}
+	result.notices = live.length;
+	for (const n of live) emitDispatchNotice(n);
+	if (result.days) notifyChange("drivers");
+	return result;
+}
+
+// One run at nowMs; with the check off it does nothing. Job Tracking is read once,
+// cached and read only, for the loads that explain a Not-confirmed day.
+async function runTimeOffEldCheck({ nowMs = Date.now() } = {}) {
+	if (!DRIVER_TIME_OFF_ELD_CHECK_ENABLED) return { skipped: "off" };
+	let loadIndex = null;
+	try {
+		loadIndex = availabilityLoadIndexOf(await getJobTrackingCached());
+	} catch (e) {
+		console.error("[time-off-eld] Job Tracking unreadable; Not-confirmed days carry no load explanation this run:", e.message);
+	}
+	return applyTimeOffEldPlan(timeOffEldRunPlan({ nowMs, loadIndex }), { nowMs });
+}
+
+// The 30-minute tick: one run per business day at or after 06:00, a missed day
+// caught up at the next tick. A failed run leaves the marker, so the next tick
+// tries again.
+async function timeOffEldCheckTick() {
+	if (timeOffEldRunning) return null;
+	timeOffEldRunning = true;
+	try {
+		const nowMs = Date.now();
+		const mark = db.prepare("SELECT value FROM server_state WHERE key = ?").get(TIME_OFF_ELD_LAST_RUN_KEY);
+		let last = null;
+		try { last = mark ? JSON.parse(mark.value) : null; } catch { last = null; }
+		const due = timeOffEldCheck.timeOffCheckDue({ nowMs, timeZone: APP_TIMEZONE, lastDay: last && last.day });
+		if (!due.due) return null;
+		const r = await runTimeOffEldCheck({ nowMs });
+		db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+			.run(TIME_OFF_ELD_LAST_RUN_KEY, JSON.stringify({ day: due.day, at: new Date(nowMs).toISOString(), ...r }));
+		console.log(`[time-off-eld] ${due.day}: ${r.days || 0} days (${r.confirmed || 0} confirmed, ${r.notConfirmed || 0} not confirmed, ${r.requested || 0} requested, ${r.checking || 0} checking), ${r.notices || 0} notices${r.rowErrors ? `; ${r.rowErrors} row(s) not judged` : ""}`);
+		return r;
+	} catch (err) {
+		console.error("[time-off-eld] run failed; the next tick tries again:", err.message);
+		return null;
+	} finally {
+		timeOffEldRunning = false;
+	}
+}
+
+// Retention: 90 days after a day's result is final its ELD miles and times (and
+// the zone they read in) are removed; its verdict stays in the row and in its
+// audit rows. The one write to a closed month's results; it runs with the check
+// on or off, whenever the table has rows.
+function purgeTimeOffEldResults(nowMs = Date.now()) {
+	try {
+		if (!db.prepare("SELECT 1 FROM driver_time_off_days LIMIT 1").get()) return 0;
+		const cutoff = new Date(nowMs - timeOffEldCheck.TIME_OFF_ELD_RULE.resultKeepDays * 24 * 60 * 60 * 1000).toISOString();
+		const removed = db.transaction(() => {
+			const r = db.prepare(`
+				UPDATE driver_time_off_days
+				SET miles = 0, moving_pings = 0, samples = 0, first_move_ms = NULL, last_move_ms = NULL, activity_first_ms = NULL,
+					activity_last_ms = NULL, change_ms = NULL, day_zone = '', purged_at = ?
+				WHERE purged_at IS NULL AND final_at IS NOT NULL AND final_at < ?
+			`).run(new Date(nowMs).toISOString(), cutoff);
+			if (r.changes) {
+				logAudit({}, "driver_time_off_eld_purge", "driver_time_off_days", "",
+					`removed ELD miles and times from ${r.changes} day result(s) final before ${cutoff.slice(0, 10)}; each day's verdict stays`);
+			}
+			return r.changes;
+		})();
+		if (removed) console.log(`[time-off-eld] removed ELD miles and times from ${removed} day result(s) final over 90 days ago`);
+		return removed;
+	} catch (err) {
+		console.error("[time-off-eld] results purge failed:", err.message);
+		return 0;
+	}
+}
+
+if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {
+	// The tick owns its failures, so one arriving here is a defect in that guard.
+	const tick = () => {
+		timeOffEldCheckTick().catch((e) => console.error(`[time-off-eld] tick threw outside its own guard (${(e && e.name) || "error"})`));
+	};
+	setTimeout(() => {
+		tick();
+		setInterval(tick, TIME_OFF_ELD_TICK_MS);
+	}, TIME_OFF_ELD_BOOT_DELAY_MS);
+	console.log(`[time-off-eld] ELD check ON: finished days off are judged daily from ${timeOffEldCheck.TIME_OFF_ELD_RULE.runHour}:00 ${APP_TIMEZONE}`);
+} else if (!DRIVER_TIME_OFF_ELD_CHECK_ENABLED) {
+	console.log("[time-off-eld] ELD check OFF (DRIVER_TIME_OFF_ELD_CHECK_ENABLED)");
+}
+if (startsJob("time-off ELD results purge (at boot, then weekly)")) {
+	setTimeout(() => purgeTimeOffEldResults(), 2 * 60 * 1000);
+	setInterval(() => purgeTimeOffEldResults(), 7 * 24 * 60 * 60 * 1000);
+}
 
 // ============================================================
 // PROFILE PICTURES — shared helper + per-entity upload endpoints

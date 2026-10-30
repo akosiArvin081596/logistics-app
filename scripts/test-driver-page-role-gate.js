@@ -707,9 +707,10 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			if (broken) adb.exec("DROP TABLE driver_availability");
 			return adb;
 		}
-		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", [
+		// The time-off ELD check is off here (its own runners cover it), so no eldChecked.
+		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", [
 			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, "return { driverAvailabilityByName, driverOwnTimeOff };",
-		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet);
+		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false);
 		const counted = (fn) => { const f = (...a) => { f.calls++; return fn(...a); }; f.calls = 0; return f; };
 		// The payload with the time-off reader wired to `adb`, the sub-flag as given.
 		const pageRoute = (screen, adb, src = ROUTE_SRC) => {
