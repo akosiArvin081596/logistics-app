@@ -54270,6 +54270,10 @@ if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 //   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
 //   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
 //   only when no other row reads the same).
+// - The caller names the day its screen showed (`stored`, YYYY-MM-DD; 400
+//   PICKUP_DAY_REQUIRED without one), so a click never confirms a date nobody saw: a cell
+//   whose day now differs is 409 PICKUP_CHANGED with the day it reads now, nothing recorded,
+//   and the Job Tracking cache dropped so the screen's next dashboard read is current.
 // - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
 //   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
 //   months are never edited; that variant shows no button).
@@ -54314,6 +54318,10 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
 	}
 	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	const shownDay = typeof body.stored === "string" ? body.stored : "";
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(shownDay) || pickupConfirmation.cellDay(shownDay) !== shownDay) {
+		return res.status(400).json({ error: "The pickup day shown on screen is required. Reload the dashboard and open the load again.", code: "PICKUP_DAY_REQUIRED" });
+	}
 	let all;
 	try {
 		const sheets = await getSheets();
@@ -54352,6 +54360,15 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		}
 		const column = loadCellColumnName(headers, headers[pickupCol]);
 		const day = pickupConfirmation.cellDay(stored) || null;
+		// Before "already confirmed": a person's edit since the screen read it is a change too.
+		if (day !== shownDay) {
+			jtCacheInvalidate();
+			return res.status(409).json({
+				error: "The Pickup Appointment changed after this load was opened, so nothing was recorded. Check the new date before confirming it.",
+				code: "PICKUP_CHANGED",
+				stored: day,
+			});
+		}
 		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
 		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
 		// to record.
