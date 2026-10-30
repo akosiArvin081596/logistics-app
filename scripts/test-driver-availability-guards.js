@@ -5,6 +5,9 @@
 // Financials figure or invoice reads it. These guards pass before and after the
 // feature: they pin that it stays out of the money paths.
 //
+//   §0 the comment stripper blanks comments only: a "/*" in a string, template
+//      or regex literal hides no code, and every route head in server.js
+//      outside a comment survives it
 //   §1 behaviour: a month with the driver recorded off all month gives the same
 //      weekly invoice, investor view and payout ledger (fixed costs included)
 //      as the same month with no row, with DRIVER_AVAILABILITY_ENABLED on
@@ -38,9 +41,12 @@
 const fs = require("fs");
 const path = require("path");
 const WD = require("./lib/work-days-world");
+const { serverSource } = require("./lib/server-source");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+// server.js with any route module spliced in at its mount line, so a moved
+// route stays pinned.
+const SRC = serverSource();
 
 let passed = 0;
 const failures = [];
@@ -63,12 +69,106 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // action, is not the table).
 const TRACKED_RE = new RegExp(`(?<![\\w$-])(?:${TRACKED.map(escapeRe).join("|")})(?![\\w$])`);
 
-// Comments blanked, line structure kept, so a comment saying "never reads
-// driver_availability" is not a mention.
+// Comments blanked, everything else and the line structure kept, so a comment
+// saying "never reads driver_availability" is not a mention. It walks the
+// source as tokens: a "/*" or "//" inside a string, template literal, regex
+// literal or line comment opens no comment, so no code is blanked with it.
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+const isWordChar = (c) => c.charCodeAt(0) > 127 || /[\w$]/.test(c);
 function blankComments(src) {
-	return src
-		.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-		.replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+	const n = src.length;
+	const out = [];
+	// "{" for a block or object literal, "${" for a template substitution.
+	const braces = [];
+	// The last significant token: "" (none), "word" (a keyword a regex may
+	// follow), "value", or the punctuator itself.
+	let prev = "";
+	let i = 0;
+	const regexEnd = (from) => {
+		let inClass = false;
+		for (let j = from + 1; j < n; j++) {
+			const c = src[j];
+			if (c === "\n") return -1;
+			if (c === "\\") { j++; continue; }
+			if (c === "[") inClass = true;
+			else if (c === "]") inClass = false;
+			else if (c === "/" && !inClass) {
+				j++;
+				while (j < n && isWordChar(src[j])) j++;
+				return j;
+			}
+		}
+		return -1;
+	};
+	// A template literal's text from i up to its closing backtick or next "${".
+	const templateText = () => {
+		while (i < n) {
+			const c = src[i];
+			if (c === "\\") { out.push(src.slice(i, i + 2)); i += 2; continue; }
+			if (c === "`") { out.push(c); i++; prev = "value"; return; }
+			if (c === "$" && src[i + 1] === "{") { out.push("${"); i += 2; braces.push("${"); prev = "("; return; }
+			out.push(c);
+			i++;
+		}
+	};
+	while (i < n) {
+		const c = src[i];
+		const d = src[i + 1];
+		if (c === "/" && d === "/") {
+			const j = src.indexOf("\n", i);
+			i = j < 0 ? n : j;
+			continue;
+		}
+		if (c === "/" && d === "*") {
+			const j = src.indexOf("*/", i + 2);
+			const end = j < 0 ? n : j + 2;
+			out.push(src.slice(i, end).replace(/[^\n]/g, " "));
+			i = end;
+			continue;
+		}
+		if (c === '"' || c === "'") {
+			let j = i + 1;
+			while (j < n && src[j] !== c && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+			if (src[j] === c) j++;
+			j = Math.min(j, n);
+			out.push(src.slice(i, j));
+			i = j;
+			prev = "value";
+			continue;
+		}
+		if (c === "`") { out.push(c); i++; templateText(); continue; }
+		if (c === "/") {
+			// A regex may start where a value can't end; one that doesn't close on
+			// its line was a division after all.
+			const end = prev === "value" || prev === ")" || prev === "]" ? -1 : regexEnd(i);
+			if (end > 0) { out.push(src.slice(i, end)); i = end; prev = "value"; continue; }
+			out.push(c);
+			i++;
+			prev = "/";
+			continue;
+		}
+		if (c === "{") { braces.push("{"); out.push(c); i++; prev = "{"; continue; }
+		if (c === "}") {
+			out.push(c);
+			i++;
+			if (braces.pop() === "${") templateText();
+			else prev = "}";
+			continue;
+		}
+		if (isWordChar(c)) {
+			let j = i + 1;
+			while (j < n && isWordChar(src[j])) j++;
+			const w = src.slice(i, j);
+			prev = REGEX_AFTER_WORD.has(w) ? "word" : "value";
+			out.push(w);
+			i = j;
+			continue;
+		}
+		out.push(c);
+		i++;
+		if (!/\s/.test(c)) prev = c;
+	}
+	return out.join("");
 }
 
 // ── §1 behaviour: the money paths with and without a month off ──────────────────
@@ -119,6 +219,66 @@ async function moneyViews(withRow) {
 }
 
 (async () => {
+	console.log("\n── §0 the comment stripper blanks comments and nothing else");
+	{
+		// Made-up sources: line 2 of each names a tracked name in code, and a
+		// "/*" before it sits in a string, regex, template or line comment.
+		const seenOnLine2 = (name, lines) => {
+			const out = blankComments(lines.join("\n")).split("\n");
+			ok(name, out.length === lines.length && TRACKED_RE.test(out[1]), `stripped line 2: ${JSON.stringify(out[1])}`);
+		};
+		seenOnLine2("§0.1 a \"/*\" in a string hides no code", [
+			'const banner = "see /* the notes";',
+			'function weekTotal() { return db.prepare("SELECT COUNT(*) AS n FROM driver_availability").get().n; }',
+			'const footer = "end of notes */";',
+		]);
+		seenOnLine2("§0.2 ...nor one in a regex literal", [
+			"const slashStar = /a\\/*b/;",
+			"const rows = truckDriverAvailability(\"T1\");",
+			"const starSlash = /c*/;",
+		]);
+		seenOnLine2("§0.3 ...nor one in a template literal", [
+			"const glob = `/api/sample/${unit}/*`;",
+			"const off = driverAvailabilityByName(name);",
+			"const done = `*/`;",
+		]);
+		seenOnLine2("§0.4 ...nor one in a line comment", [
+			"// the sample /api/demo/* routes",
+			"const off = driverAvailabilityByName(name);",
+			"/* a real comment */",
+		]);
+		const commented = blankComments([
+			"const a = 1; // reads driver_availability",
+			"/* driver_availability",
+			"   truckDriverAvailability() */ const b = \"http://example.test/x\";",
+			"const c = '//' + \"/*\" + `*/`;",
+		].join("\n")).split("\n");
+		eq("§0.5 real comments are blanked, strings kept, line count kept",
+			[commented.length, commented.some((l) => TRACKED_RE.test(l)), commented[2].trim(), commented[3]],
+			[4, false, 'const b = "http://example.test/x";', "const c = '//' + \"/*\" + `*/`;"]);
+
+		// Every route head in server.js (column 0) outside a comment is still
+		// there after stripping. A comment is judged here by lines alone: a
+		// head between a line opening with "/*" and the line closing it.
+		const raw = SRC.split("\n");
+		const stripped = blankComments(SRC).split("\n");
+		eq("§0.6 stripping server.js keeps its line count", stripped.length, raw.length);
+		const ROUTE_HEAD_RE = /^app\.(?:get|post|put|patch|delete|all|use)\([^,)]*/;
+		let inBlock = false;
+		const heads = [];
+		raw.forEach((l, i) => {
+			const t = l.trim();
+			if (!inBlock && t.startsWith("/*")) inBlock = !t.includes("*/", 2);
+			else if (inBlock && t.includes("*/")) { inBlock = false; return; }
+			if (inBlock) return;
+			const m = ROUTE_HEAD_RE.exec(l);
+			if (m) heads.push([i, m[0]]);
+		});
+		const lost = heads.filter(([i, h]) => !(stripped[i] || "").startsWith(h)).map(([i, h]) => `line ${i + 1}: ${h.slice(0, 70)}`);
+		ok(`§0.7 every route head outside a comment (${heads.length}) survives stripping`, heads.length > 100 && lost.length === 0,
+			`${lost.length} lost: ${lost.slice(0, 8).join(" | ")}`);
+	}
+
 	console.log("\n── §1 the money paths with and without a month off");
 	try {
 		const base = await moneyViews(false);
