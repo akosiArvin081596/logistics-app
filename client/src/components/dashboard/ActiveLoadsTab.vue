@@ -7,7 +7,7 @@
           v-if="needsReviewCount > 0"
           type="button"
           :style="reviewToggleStyle"
-          :title="needsReviewOnly ? 'Showing only loads that need review' : 'Show only loads where the dispatch workflow couldn’t fully extract the rate-con'"
+          :title="needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE"
           @click="needsReviewOnly = !needsReviewOnly"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -185,6 +185,13 @@
           <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <!-- An unconfirmed rate-con pickup date: why, and in an open month the
+               button that keeps the date as it is (the closed-month code has none). -->
+          <div v-if="selectedJob && pickupReview(selectedJob)" class="pickup-review" role="note">
+            <span>{{ pickupReviewText(selectedJob) }}</span>
+            <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : 'Mark confirmed' }}</button>
+            <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+          </div>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -530,7 +537,7 @@ import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DeletedLoadsLink from './DeletedLoadsLink.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
-import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmedRequest, pickupConfirmedToast, pickupConfirmErrorText, withoutPickupReview, freshReview } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
@@ -609,6 +616,35 @@ const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pick
 // "Email" in the first place.
 const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
+// "Mark confirmed" (POST /api/loads/pickup-confirmed): keeps the open load's
+// Pickup Appointment as it is. On success the badge clears at once, then the
+// lists are read again; a refusal stays on screen in the server's words.
+const canConfirmPickup = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+const pickupMarking = ref(false)
+const pickupMarkError = ref('')
+watch(() => selectedJob.value && selectedJob.value._rowIndex, () => { pickupMarkError.value = '' })
+async function markPickupConfirmed() {
+  const job = selectedJob.value
+  const call = pickupConfirmedRequest(job, loadIdCol.value)
+  if (!call || pickupMarking.value) return
+  pickupMarking.value = true
+  pickupMarkError.value = ''
+  const same = () => selectedJob.value && selectedJob.value._rowIndex === job._rowIndex
+  try {
+    const res = await api.post(call.url, call.body)
+    if (same()) selectedJob.value = withoutPickupReview(selectedJob.value)
+    toast(pickupConfirmedToast(res), 'success')
+  } catch (err) {
+    if (same()) pickupMarkError.value = pickupConfirmErrorText(err)
+    return
+  } finally {
+    pickupMarking.value = false
+  }
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+  await nextTick()
+  const fresh = same() ? freshReview(selectedJob.value, props.jobs) : null
+  if (fresh) selectedJob.value = { ...selectedJob.value, _review: fresh }
+}
 const showDeleteConfirm = ref(false)
 const deleteError = ref('')
 const deleting = ref(false)
@@ -1161,6 +1197,23 @@ const detailSections = computed(() => {
   line-height: 1.35;
   white-space: pre-line;
 }
+/* An unconfirmed rate-con pickup date, amber like the Needs Review badge; the
+   button wraps under the text on a phone. */
+.pickup-review {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem;
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb;
+  color: #92400e; font-size: 0.8125rem; line-height: 1.4;
+}
+.pickup-review > span { flex: 1 1 16rem; min-width: 0; }
+.pickup-review-btn {
+  padding: 0.35rem 0.7rem; font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border: 1px solid #f59e0b; border-radius: 6px; background: #ffffff; color: #92400e;
+  cursor: pointer; white-space: nowrap;
+}
+.pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
+.pickup-review-error { flex-basis: 100%; margin: 0; color: #b91c1c; }
 .mobile-load-list {
   display: flex;
   flex-direction: column;
