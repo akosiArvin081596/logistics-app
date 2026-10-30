@@ -62118,6 +62118,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 				tankGallons: tank, mpg, burn, routeSource, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
 				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
 				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId), pickupUnmapped: !pickedUp && !pickup,
+				approachUncounted: !pickedUp && !fixFresh,
 			}) } : {}),
 		});
 	} catch (err) {
