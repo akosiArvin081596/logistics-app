@@ -134,22 +134,28 @@ async function submit() {
 </script>
 
 <style scoped>
+/* Never wider than its card or cell: a one-line pill pushed the Expenses list
+   past the screen edge and made it scroll sideways. */
 .personal-actions {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
 }
+/* break-word, not anywhere: it keeps whole words as the table column's minimum,
+   so the cell isn't squeezed to a letter-wide strip. */
 .personal-pill {
   display: inline-block;
-  max-width: 22rem;
+  max-width: 100%;
   padding: 0.1rem 0.5rem;
-  border-radius: 999px;
+  border-radius: 0.6rem;
   font-size: 0.72rem;
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: break-word;
   background: #fef3c7;
   color: #92400e;
 }
