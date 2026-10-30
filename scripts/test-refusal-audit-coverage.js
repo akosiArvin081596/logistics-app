@@ -623,9 +623,9 @@ const MUST_NOT_BE_PURGEABLE = [
 	// finalized months on its ledger: the create-side twin of update_user_blocked,
 	// from POST /api/users and from an investor application's acceptance.
 	"create_user_blocked", "accept_investor_blocked",
-	// The database admin routes refused to an account not on RATECON_PDF_VIEWER_IDS
-	// (2026-10-22): an attempt to take the database, kept forever like
-	// db_export_blocked, never purged.
+	// The database admin routes refused to an account not on RATECON_PDF_VIEWER_IDS:
+	// an attempt to take the database, kept forever like db_export_blocked, never
+	// purged.
 	"db_download_blocked", "db_tables_blocked", "db_query_blocked",
 ];
 check("every new period-refusal action exists in server.js",

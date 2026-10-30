@@ -122,7 +122,7 @@ The Google Sheet is implicitly backed up by Google; you don't need to snapshot i
 
 `GET /api/db/tables` lists every table. `GET /api/db/query/:table` returns rows from a single table, with optional `?limit=` (at most 500) and `?offset=`; sensitive columns are masked. `POST /api/db/download` returns the entire `app.db` file.
 
-**All three are limited to the accounts listed in `RATECON_PDF_VIEWER_IDS`** (account ids, set only in the server's `.env`). Every other account gets 403 `DB_DOWNLOAD_RESTRICTED`, before the rate limit, and the attempt is audited (`db_download_blocked`, `db_tables_blocked`, `db_query_blocked`; reason and IP, never data). A refused download also raises a notice that only Super Admins see, at most once a day per account. A listed account is checked against the `users` table on every call, so one that has lost Super Admin is told to sign in again. With the list unset or invalid, nobody can use them in the app; `scp` from the VPS still works.
+**All three are limited to the accounts listed in `RATECON_PDF_VIEWER_IDS`** (account ids, set only in the server's `.env`). Every other Super Admin gets 403 `DB_DOWNLOAD_RESTRICTED`, before the rate limit, and the attempt is audited, one row a minute per account (`db_download_blocked`, `db_tables_blocked`, `db_query_blocked`; reason and IP, never data). Other roles get the usual 403 and signed-out callers 401, with no audit row. A refused download also raises a notice that only Super Admins see, at most once a day per account. A listed account is checked against the `users` table on every call, so one that has lost Super Admin is told to sign in again. With the list unset or invalid, nobody can use them in the app; `scp` from the VPS still works.
 
 **The export is a POST on purpose, and a GET to it returns 405.** It hands over every SSN, EIN and bank routing/account number in the system, unencrypted. `SameSite=Lax` — the session cookie's setting — withholds the cookie from every cross-site POST, but *not* from a top-level cross-site GET navigation, so while it was a GET one link a logged-in Super Admin followed from a chat message, an email or a bookmark ran a full ~313 MB backup and dropped a complete copy into their Downloads folder. Making it a POST removes that class outright, because a link cannot issue a POST. A listed account can use the *Download database backup* button in Admin Tools; from a terminal, use `curl`, which must send `X-Requested-With` like every write:
 
@@ -140,7 +140,7 @@ curl -sS -b /tmp/logisx.jar -X POST https://<host>/api/db/download \
 rm -f /tmp/logisx.jar
 ```
 
-The exported file is a full unencrypted copy of the PII inventory — treat it like the database itself, and delete it when you are done. Rate-limited to 10 requests / 15 min, and every export, **every refused cross-site attempt and every refused account** writes an `audit_trail` row.
+The exported file is a full unencrypted copy of the PII inventory — treat it like the database itself, and delete it when you are done. Rate-limited to 10 requests / 15 min, and every export and **every refused cross-site attempt** writes an `audit_trail` row; **a refused Super Admin** writes one row a minute per refused account.
 
 For ad-hoc SQL beyond what `/api/db/query` exposes, `scp` the database off the VPS and open it in DB Browser for SQLite or `sqlite3` CLI locally — never write SQL directly against the production file.
 

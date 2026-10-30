@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
  * scripts/test-db-export-refusal.mjs — what the Admin Tools "Download database
- * backup" button says when the server refuses the export (decision D9,
- * 2026-10-22).
+ * backup" button says when the server refuses the export.
  *
  * The server limits the export to the accounts in RATECON_PDF_VIEWER_IDS and
  * answers everyone else 403 DB_DOWNLOAD_RESTRICTED with its own sentence. The

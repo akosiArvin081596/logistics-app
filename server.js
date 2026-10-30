@@ -9955,7 +9955,7 @@ const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
 // still attaches the rate con for every Super Admin. The same list is the only
 // way into the database admin routes (POST /api/db/download, GET /api/db/tables,
 // GET /api/db/query/:table; dbAccessListedOnly), 403 DB_DOWNLOAD_RESTRICTED for
-// everyone else.
+// every other Super Admin.
 // Unset: the behaviour before the list existed for rate cons and accounts, but
 // nobody uses the database admin routes; one warning per start.
 // Set but invalid: nobody opens a rate con in the app, no Super Admin's
@@ -33749,9 +33749,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 // tombstone above): its only gate was the HTTP method, so every Super-Admin GET
 // — GET /api/db/download included — was reachable by anyone who read the repo.
 //
-// Since 2026-10-22 all three are limited to the accounts on
-// RATECON_PDF_VIEWER_IDS, and every refusal is audited (dbAccessListedOnly,
-// below).
+// All three are also limited to the accounts on RATECON_PDF_VIEWER_IDS, and
+// every refusal is audited (dbAccessListedOnly, below).
 // ---------------------------------------------------------------------------
 const dbAdminLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -33816,37 +33815,9 @@ function purgeOrphanedDbExports() {
 purgeOrphanedDbExports();
 
 // ---------------------------------------------------------------------------
-// THE DATABASE ADMIN ROUTES ARE FOR THE LISTED ACCOUNTS ONLY (2026-10-22).
-// POST /api/db/download hands over the whole database, GET /api/db/query/:table
-// any table page by page, GET /api/db/tables every table's row count. Only the
-// accounts on RATECON_PDF_VIEWER_IDS (RATECON_PDF_VIEWERS above) may use them.
-// dbAccessRefusalReason() decides, for a caller requireRole already admitted
-// as a Super Admin:
-//   listed         — allowed once the account, re-read by id, is still a Super
-//                    Admin. The session's role is a copy taken at sign-in, so a
-//                    demoted or removed account whose session still says Super
-//                    Admin is told to sign in again;
-//   unlisted       — refused;
-//   no account id  — refused, "sign in again";
-//   list unset     — refused (decision D3). Unlike the rate-con gates, which
-//                    keep the behaviour from before the list, nobody takes the
-//                    database through the app until the list is set;
-//   list invalid   — refused (fail closed).
-// A refusal is 403 DB_DOWNLOAD_RESTRICTED, no-store, code and error only (never
-// the setting's text), audited through logAuditRefusal (one row a minute per
-// account and route, a burst's count carried on the next row) as
-// db_download_blocked, db_tables_blocked or db_query_blocked. None of them is on
-// PURGEABLE_REFUSAL_ACTIONS: kept forever, like db_export_blocked. The GETs have
-// no cross-site guard, so their rows also record Sec-Fetch-Site.
-// A refused download also raises a Super Admin-only dispatch notice
-// (SUPER_ADMIN_ONLY_NOTICE_TYPES), at most once a day per account; the window is
-// in memory, so a restart may repeat one. The GETs raise none, so a link can't
-// flood Super Admins with notices. A notice that fails is logged and the 403
-// still goes out.
-// Mounted after requireRole("Super Admin"), so every other role keeps its
-// 401/403 with no audit row, and before dbAdminLimiter, so a refusal spends none
-// of the listed accounts' budget. scripts/test-db-download-listed-only.js lifts
-// everything from here to the end of GET /api/db/query/:table.
+// These routes hand over every table, SSNs and bank numbers included, so only the
+// accounts on RATECON_PDF_VIEWER_IDS may use them. Unlike the rate-con gates, an
+// unset or invalid list refuses everyone: nothing is handed out until it is set.
 // ---------------------------------------------------------------------------
 const { sessionAccountId: dbAccessAccountId } = require("./lib/listed-accounts.js");
 const DB_ACCESS_CODE = "DB_DOWNLOAD_RESTRICTED";
@@ -33861,6 +33832,8 @@ const DB_ACCESS_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
 const dbAccessNoticeSentAt = new Map();
 
 // null when `user` may use the database routes, otherwise the reason it may not.
+// The session's role is a copy taken at sign-in, so a listed account is re-read
+// by id: a demoted or removed one is told to sign in again.
 function dbAccessRefusalReason(user) {
 	const verdict = RATECON_PDF_VIEWERS.verdict(user);
 	if (verdict === "unset") return "list unset";
@@ -33879,7 +33852,9 @@ function dbAccessRefusalReason(user) {
 	return null;
 }
 
-// The Super Admin notice for a refused download, once a day per account.
+// The Super Admin notice for a refused download, once a day per account (the
+// window is in memory, so a restart may repeat one). Only the POST raises it, so
+// a link can't flood Super Admins; a failed notice never stops the 403.
 function noticeDbDownloadRefused(req, user) {
 	try {
 		const id = dbAccessAccountId(user);
@@ -33905,6 +33880,9 @@ function noticeDbDownloadRefused(req, user) {
 	}
 }
 
+// Mounted after requireRole("Super Admin"), so other roles keep their unaudited
+// 401/403, and before dbAdminLimiter, so a refusal spends none of the listed
+// accounts' budget. Its refusal actions are kept forever, like db_export_blocked.
 function dbAccessListedOnly(action, { entityId = () => "app.db", recordFetchSite = false, notice = false } = {}) {
 	return (req, res, next) => {
 		const user = req.session && req.session.user;
@@ -33921,6 +33899,7 @@ function dbAccessListedOnly(action, { entityId = () => "app.db", recordFetchSite
 	};
 }
 const dbDownloadListedOnly = dbAccessListedOnly("db_download_blocked", { notice: true });
+// The GETs have no cross-site guard, so their refusal rows record Sec-Fetch-Site.
 const dbTablesListedOnly = dbAccessListedOnly("db_tables_blocked", { recordFetchSite: true });
 // The table the caller named is its own text: clipped and reduced to printable ASCII.
 const dbQueryListedOnly = dbAccessListedOnly("db_query_blocked", {

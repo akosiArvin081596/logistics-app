@@ -4,8 +4,7 @@
  * (POST /api/db/download, GET /api/db/tables, GET /api/db/query/:table) are
  * limited to the accounts listed in RATECON_PDF_VIEWER_IDS.
  *
- * The rule (Arvin, 2026-10-22, decisions D1-D11; plan in the replica reports
- * folder, 2026-10-22-db-download-listed-only-plan.md, Revision 2):
+ * The rule:
  *   - a listed account that is still a Super Admin in the users table uses the
  *     routes as today; a download is audited (db_download, as today);
  *   - every other Super Admin gets 403 DB_DOWNLOAD_RESTRICTED (body: code and
@@ -22,14 +21,14 @@
  *   - Dispatcher, Driver, Investor and signed-out callers are refused exactly as
  *     today (requireRole's 403 "Forbidden" / 401), with no audit row, even
  *     when a Dispatcher's id is on the list;
- *   - the list set but invalid, or unset (D3 = B): every Super Admin refused;
+ *   - the list set but invalid, or unset: every Super Admin refused;
  *   - a refused POST raises one Super Admin-only dispatch notice per account per
  *     day (never "Account #0"; the 403 goes out even if the notice fails); a
  *     refused GET raises none.
  *
  * §1 POST, list "1,7"   §2 other roles   §3 unset   §4 invalid   §5 GET is 405
- * §6 start-up messages   §7 the GET routes (D8)   §8 the refusal notice (D6)
- * §9 a listed account whose role changed (L8)   §10 who sees the notice (L5)
+ * §6 start-up messages   §7 the GET routes   §8 the refusal notice
+ * §9 a listed account whose role changed   §10 who sees the notice
  *
  * WHAT IS REAL. Everything from just after the boot-time orphan sweep's call
  * (`purgeOrphanedDbExports();`) to the end of the GET /api/db/query/:table
@@ -57,8 +56,8 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-// Decision D3: what an UNSET RATECON_PDF_VIEWER_IDS means for the database
-// routes. true = nobody uses them in the app (Arvin's choice, 2026-10-22).
+// What an UNSET RATECON_PDF_VIEWER_IDS means for the database routes:
+// true = nobody uses them in the app.
 const UNSET_REFUSES_EVERYONE = true;
 
 const RESTRICTED_MESSAGE = "Downloading the database is limited to the owner.";
@@ -313,7 +312,7 @@ async function expectAllowed(label, viewers, user, kind = "download") {
 	w.close();
 }
 
-// `reason` is the D5 wording the refusal row carries: "unlisted",
+// `reason` is the wording the refusal row carries: "unlisted",
 // "no account id", "list unset", "list invalid", "role changed" or
 // "account not found". `secretish` is raw setting text that must never be
 // echoed back or written to the audit log.
@@ -366,10 +365,11 @@ async function main() {
 	// ── §1 POST, list "1,7" ───────────────────────────────────────────────────
 	console.log("\n§1 POST /api/db/download, RATECON_PDF_VIEWER_IDS=1,7");
 	await expectAllowed("listed account 1 (Super Admin)", "1,7", OWNER);
-	await expectAllowed("listed account 7 (id held as plain-digit text)", "1,7", SECOND_AS_TEXT);
+	await expectAllowed("listed account 7 (Super Admin)", "1,7", SECOND);
 	await expectRestricted("unlisted Super Admin 5", "1,7", STAFF, RESTRICTED_MESSAGE, "unlisted");
 	await expectRestricted("Super Admin 5 under account 1's username", "1,7", STAFF_AS_OWNER_NAME, RESTRICTED_MESSAGE, "unlisted");
 	await expectRestricted("a Super Admin session without an account id", "1,7", NO_ID, SIGN_IN_AGAIN_MESSAGE, "no account id");
+	await expectRestricted("listed account 7 with its id held as text: no account id", "1,7", SECOND_AS_TEXT, SIGN_IN_AGAIN_MESSAGE, "no account id");
 	{
 		// Refusals coalesce like every other refusal: one row a minute per account.
 		const w = world("1,7");
@@ -441,7 +441,7 @@ async function main() {
 		ok("...and that unset means nobody downloads the database in the app (D10)", /(nobody|no one)[^.]*database/i.test(block));
 	}
 
-	// ── §7 the GET routes (D8) ────────────────────────────────────────────────
+	// ── §7 the GET routes ─────────────────────────────────────────────────────
 	for (const kind of ["tables", "query"]) {
 		console.log(`\n§7 GET ${ROUTE_PATHS[kind]} (D8)`);
 		await expectAllowed(`listed account 1, ${kind}`, "1,7", OWNER, kind);
@@ -462,7 +462,7 @@ async function main() {
 		w.close();
 	}
 
-	// ── §8 the refusal notice on the POST (D6) ────────────────────────────────
+	// ── §8 the refusal notice on the POST ─────────────────────────────────────
 	console.log("\n§8 the refusal notice (POST only)");
 	{
 		const w = world("1,7");
@@ -493,7 +493,7 @@ async function main() {
 		w.close();
 	}
 
-	// ── §9 a listed account whose role changed or that was removed (L8) ───────
+	// ── §9 a listed account whose role changed or that was removed ────────────
 	console.log("\n§9 the listed account is re-read by id");
 	const demoted = USERS.map((u) => (u[0] === 7 ? [7, "second_admin", "Dispatcher"] : u));
 	const removed = USERS.filter((u) => u[0] !== 7);
@@ -502,7 +502,7 @@ async function main() {
 	await expectRestricted("listed 7, account now a Dispatcher, tables", "1,7", SECOND, SIGN_IN_AGAIN_MESSAGE, "role changed", [], "tables", { users: demoted });
 	await expectRestricted("listed 1, the account can't be re-read: fail closed", "1,7", OWNER, RESTRICTED_MESSAGE, "account unreadable", [], "download", { noUsersTable: true });
 
-	// ── §10 who sees the notice (L5) ──────────────────────────────────────────
+	// ── §10 who sees the notice ───────────────────────────────────────────────
 	console.log("\n§10 the notice is Super Admin-only");
 	{
 		let scope = null;

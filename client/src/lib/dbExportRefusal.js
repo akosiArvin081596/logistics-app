@@ -1,5 +1,5 @@
 // What the Admin Tools "Download database backup" button says when the server
-// answers 403 (decision D9, 2026-10-22).
+// answers 403.
 //
 // The server limits the database routes to the accounts in
 // RATECON_PDF_VIEWER_IDS and answers everyone else 403 DB_DOWNLOAD_RESTRICTED
