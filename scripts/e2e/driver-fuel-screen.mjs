@@ -2,7 +2,7 @@
 // LogisX — the driver app's Fuel section with the driver gallons flag (DRIVER_FUEL_GALLONS_ENABLED,
 // plan R14 PR 2), on made-up data only: 390 x 844 first, then 1280 x 800.
 //
-//   DF1   before pickup: enough to reach the pickup, add to finish; the collapsed badge "Add 40 gal"
+//   DF1   before pickup: enough to reach the pickup, add to finish; the collapsed badge "Add 65 gal"
 //   DF2   in transit, enough            DF3  refuel now             DF4  no ELD fuel reading
 //   DF5   ELD silent 18 hrs             DF6  no tank size, and the header chip "Fuel ?"
 //   DF7   load not mapped (400 NO_ROUTE)
@@ -305,16 +305,16 @@ const WORKING_RE = /minus|reserve|mpg|miles per gallon|%|until the tank is empty
 
 // ---------------------------------------------------------------- the steps
 const SCENES = [
-  { step: 'DF1', title: 'Before pickup', world: {}, expect: ['225', 'miles until you run out', 'To reach pickup', '140 mi', 'Uses about 30 gal. You have enough.', 'To finish this load', '420 mi', 'Uses about 80 gal. Add about 40 gal.'], badge: 'Add 40 gal' },
+  { step: 'DF1', title: 'Before pickup', world: {}, expect: ['225', 'miles until you run out', 'To reach pickup', '140 mi', 'Uses about 30 gal. You have enough.', 'To finish this load', '420 mi', 'Uses about 80 gal. Add about 65 gal.'], badge: 'Add 65 gal' },
   { step: 'DF2', title: 'In transit, enough', world: { leg: 'to_delivery', routeMiles: 180 }, expect: ['225', 'Uses about 35 gal. You have enough.'] },
-  { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 35 gal.'] },
-  { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery', 'You need about 55 gal in the tank for the whole load. Check your gauge.'] },
-  { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'You need about 80 gal in the tank to finish. Check your gauge.'] },
+  { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'] },
+  { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery', 'You need about 100 gal in the tank for the whole load. Check your gauge.'] },
+  { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'You need about 145 gal in the tank to finish. Check your gauge.'] },
   { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel ?' },
   { step: 'DF7', title: 'Load not mapped', world: {}, planError: 'NO_ROUTE', expect: ['225', "This load isn't on the map yet, so we can't work out the fuel for it."] },
   { step: 'DF8a', title: 'Position 3 hrs old', world: { positionAgeMinutes: 180, leg: 'to_delivery' }, expect: ['Worked out from where your truck was 3 hrs ago.'] },
   { step: 'DF8b', title: 'No position', world: { fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Whole load, pickup to delivery', "Your truck hasn't sent its location recently."] },
-  { step: 'DF9', title: 'Extra stops', world: { extraStops: true }, expect: ['To reach first pickup', "This load has extra stops that aren't counted. You may need more fuel."] },
+  { step: 'DF9', title: 'Extra stops', world: { extraStops: true }, expect: ['To reach first pickup', 'You need about 55 gal in the tank to reach pickup. Check your gauge.', "This load has extra stops that aren't counted. You may need more fuel."], absent: ['You have enough'] },
   { step: 'DF10', title: 'Longer than a full tank', world: { leg: 'to_delivery', routeMiles: 1040 }, expect: ['1,040 mi', 'Uses about 195 gal. Fill up full, and plan another fuel stop on the way.'] },
 ]
 
@@ -328,6 +328,7 @@ async function phoneScene(browser, sc) {
     const s = await shot(page, `${sc.step.toLowerCase()}-${sc.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-390x844`)
     const checks = {
       sentences: sc.expect.every((e) => text.includes(e)),
+      ...(sc.absent ? { absent: sc.absent.every((e) => !text.includes(e)) } : {}),
       noWorking: !WORKING_RE.test(panel),
       stopsAndRefresh: panel.includes('QA Truck Plaza Riverton') && /Refresh fuel, stops and check/.test(panel),
       ...(sc.badge ? { badge: badge === sc.badge } : {}),
