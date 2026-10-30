@@ -357,8 +357,12 @@ const mentions = (t) => attempt(() => fm.detailsMentionExtraStops(t));
 for (const t of ["3 stops: Riverton, Midway, Lakeside", "Multi-stop load", "multistop", "Stop 2 Midway", "stop #3", "2 pickups", "2nd stop Midway", "extra stop", "stop-offs"]) {
 	check(`extra stops caught in Details: ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
 }
+// The read's L1 wording gaps: with no footer a missed one would leave "enough" showing.
+for (const t of ["two stops: Riverton, Lakeside", "Multiple stops", "additional stop in Midway", "2 picks, 1 drop", "2-stop load", "Three deliveries"]) {
+	check(`extra stops caught in Details (fix round): ${JSON.stringify(t)}`, mentions(t) === true, JSON.stringify(mentions(t)));
+}
 for (const t of ["Dairy Pure Whole Milk, 43,764 lbs, 1,575 cases, 21 pallets, reefer 34F", "Riverton, ST - Lakeside, ST", "nonstop", "Non-stop team",
-	"truck stop 24/7", "1 stop", "", null, 42]) {
+	"truck stop 24/7", "1 stop", "one stop", "Two pallets, additional charges apply", "", null, 42]) {
 	check(`no extra stops read into ${JSON.stringify(t)}`, mentions(t) === false, JSON.stringify(mentions(t)));
 }
 const t0 = process.hrtime.bigint();

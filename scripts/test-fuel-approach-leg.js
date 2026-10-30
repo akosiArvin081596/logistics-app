@@ -390,7 +390,13 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 			assigned_from TEXT, assigned_until TEXT DEFAULT '', assigned_by TEXT DEFAULT '');
 		CREATE TABLE deleted_loads (load_id TEXT PRIMARY KEY);
 		CREATE TABLE load_driver_instructions (load_key TEXT PRIMARY KEY, payload TEXT NOT NULL);
+		CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
+		CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	`);
+	// The driver's accept times, which order his queue (computeDriverQueues()).
+	for (const [loadId, at] of opt.accepts || []) {
+		db.prepare("INSERT INTO load_responses (load_id, driver_name, response, responded_at) VALUES (?, 'Driver QA', 'accepted', ?)").run(loadId, at);
+	}
 	const VID = "DEV-QA-901";
 	if (opt.truck) {
 		db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id, assigned_driver, fuel_tank_gallons, avg_mpg) VALUES (1, 'Unit 901', ?, 'Driver QA', ?, ?)")
@@ -460,6 +466,12 @@ const WORLDS = [
 	["no truck and no pickup mapped", { truck: false, pickupMapped: false }],
 	["80% read 9 h ago, ELD silent since", { fuel: 80, fixAgoMin: 9 * 60 }],
 	["sensor dropout, no tank size, measured basis", { fuel: 0, anchor: { fuel: 40, agoMin: 60, odo: 99900 }, tank: 0 }],
+	["another load heading to its shipper", { otherLoad: "Heading to Shipper" }],
+	["another load accepted first, queued ahead", { otherLoad: "Assigned",
+		accepts: [["QA-FUEL-0", "2026-10-29T10:00:00.000Z"], ["QA-FUEL-1", "2026-10-29T12:00:00.000Z"]] }],
+	["this load accepted first, the other queued behind", { otherLoad: "Assigned",
+		accepts: [["QA-FUEL-1", "2026-10-29T10:00:00.000Z"], ["QA-FUEL-0", "2026-10-29T12:00:00.000Z"]] }],
+	["'two stops' in Details", { details: "two stops: Riverton, Midway, then Lakeside" }],
 ];
 const CALLS = [
 	["trip-plan, Driver", (w) => w.plan()],
@@ -551,9 +563,23 @@ async function routeSections() {
 			assert.ok(df.legs.length > 0 && df.legs.every((l) => l.status !== "enough"), `${w}: ${JSON.stringify(df.legs)}`);
 		}
 	});
-	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 30 Driver answers that succeed)", () => {
+	check("a load queued behind another counts as 'another load first' (one heading to its shipper, or accepted first); no row says 'enough'", () => {
+		for (const w of ["another load heading to its shipper", "another load accepted first, queued ahead"]) {
+			const df = at(on, `${w} / trip-plan, Driver`).body.driverFuel;
+			assert.ok(df.afterAnotherLoad === true && df.legs.every((l) => l.status !== "enough"), `${w}: ${JSON.stringify(df)}`);
+		}
+	});
+	check("...and the load first in the queue does not: its pickup row still says 'enough'", () => {
+		const df = at(on, "this load accepted first, the other queued behind / trip-plan, Driver").body.driverFuel;
+		assert.deepStrictEqual([df.afterAnotherLoad, df.legs.map((l) => [l.key, l.status])], [false, [["pickup", "enough"], ["finish", "add"]]]);
+	});
+	check("'two stops' in Details marks extra stops and keeps 'enough' off the rows", () => {
+		const df = at(on, "'two stops' in Details / trip-plan, Driver").body.driverFuel;
+		assert.ok(df.extraStops === true && df.legs.every((l) => l.status !== "enough"), JSON.stringify(df));
+	});
+	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 38 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
-		assert.strictEqual(driverAnswers.length, 30);
+		assert.strictEqual(driverAnswers.length, 38);
 		for (const x of driverAnswers) {
 			assert.ok(x.r.body.driverFuel, `${x.name}: no driverFuel`);
 			assert.ok(!("vehicleId" in x.r.body), x.name);
