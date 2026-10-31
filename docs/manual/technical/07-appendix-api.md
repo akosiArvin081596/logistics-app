@@ -182,9 +182,9 @@ A flat list of every REST endpoint in `server.js`, grouped by domain. Each row s
 
 | Verb | Path | Role | Purpose |
 |---|---|---|---|
-| POST | `/api/db/download` | Super Admin | Export the SQLite file. **POST, not GET** — a GET returns 405. See Operations → Database admin tools for the `curl` recipe and why the verb is the control. |
-| GET | `/api/db/tables` | Super Admin | List tables. |
-| GET | `/api/db/query/:table` | Super Admin | Query a table. |
+| POST | `/api/db/download` | Super Admin listed in `RATECON_PDF_VIEWER_IDS` | Export the SQLite file. **POST, not GET** — a GET returns 405. Any other Super Admin: 403 `DB_DOWNLOAD_RESTRICTED`, audited. See Operations → Database admin tools for the `curl` recipe and why the verb is the control. |
+| GET | `/api/db/tables` | Super Admin listed in `RATECON_PDF_VIEWER_IDS` | List tables. Any other Super Admin: 403 `DB_DOWNLOAD_RESTRICTED`, audited. |
+| GET | `/api/db/query/:table` | Super Admin listed in `RATECON_PDF_VIEWER_IDS` | Query a table (`?limit=`, `?offset=`; sensitive columns masked). Any other Super Admin: 403 `DB_DOWNLOAD_RESTRICTED`, audited. |
 
 ## Routemate (telematics)
 

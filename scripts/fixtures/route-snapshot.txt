@@ -78,9 +78,9 @@ POST /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bd7b033
 DELETE /api/data/:rowIndex · requireRole("Super Admin")=anon@12b84c4b0134 · inline@162c6fef6371
 PUT /api/data/:rowIndex · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@a56cc60b1ed0
 ALL /api/db/download · inline@90c4873c481e
-POST /api/db/download · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOriginStrict=crossSiteGuardMiddleware@aa37960cca47 · dbAdminLimiter=limiter · inline@c65b3ee2d19a | after: ALL /api/db/download
-GET /api/db/query/:table · requireRole("Super Admin")=anon@12b84c4b0134 · dbAdminLimiter=limiter · inline@ecaed820209a
-GET /api/db/tables · requireRole("Super Admin")=anon@12b84c4b0134 · dbAdminLimiter=limiter · inline@c694d3635fba
+POST /api/db/download · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOriginStrict=crossSiteGuardMiddleware@aa37960cca47 · dbDownloadListedOnly=anon@98584178bea2 · dbAdminLimiter=limiter · inline@c65b3ee2d19a | after: ALL /api/db/download
+GET /api/db/query/:table · requireRole("Super Admin")=anon@12b84c4b0134 · dbQueryListedOnly=anon@98584178bea2 · dbAdminLimiter=limiter · inline@ecaed820209a
+GET /api/db/tables · requireRole("Super Admin")=anon@12b84c4b0134 · dbTablesListedOnly=anon@98584178bea2 · dbAdminLimiter=limiter · inline@c694d3635fba
 GET /api/debug/driver-empty/:driverName · requireRole("Super Admin")=anon@12b84c4b0134 · inline@335451d01020
 GET /api/debug/driver-loads/:driverName · requireRole("Super Admin")=anon@12b84c4b0134 · inline@8d24e67b7dae
 GET /api/debug/driver-view/:driverName · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4fa50641a797

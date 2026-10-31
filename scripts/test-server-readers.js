@@ -52,8 +52,6 @@ const ROOT = path.join(__dirname, "..");
 const owned = (branch) => `changed by open work on ${branch}: its owner moves it to the helper when that lands`;
 const ALLOW = new Map([
 	["scripts/test-route-snapshot.js", "imports server.js in a child and maps its stack frames to the real file, which the virtual source can't stand in for; the first move gives it routes/"],
-	["scripts/test-driver-instructions-routes.js", owned("feat/db-download-listed-only")],
-	["scripts/test-refusal-audit-coverage.js", owned("feat/db-download-listed-only")],
 	["scripts/test-broker-column-redaction.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-csrf-guard.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-deleted-loads-route.js", owned("feat/restore-deleted-loads")],
@@ -98,7 +96,6 @@ const LABELS = new Map([
 // Folder scanners that would miss routes/ and that this change may not edit,
 // each with what it waits for. §5 fails while any is left once a module is mounted.
 const BEFORE_FIRST_MOVE = new Map([
-	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
 	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
 ]);
 

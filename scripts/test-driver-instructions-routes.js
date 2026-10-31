@@ -63,8 +63,7 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const RUNTIME = process.env.DI_RUNTIME_LIB || path.join(ROOT, "lib", "driver-instructions-runtime.js");
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 const express = require(path.join(ROOT, "node_modules", "express"));
@@ -1745,6 +1744,8 @@ test("§13 37 M1 the lock alert is a saved Super Admin-only dispatch notice: a S
 	eq("a Dispatcher's mark-read (by id, or all) leaves it unread for the Super Admins", [w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, (await r.get(SA)).body.unreadCount], [0, 1]);
 	await r.read(SA, { ids: [lockId] });
 	eq("a Super Admin marks it read", w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, 1);
+	// The list also holds other Super-Admin-only notices, such as the refused
+	// database download (scripts/test-db-download-listed-only.js §10).
 	ok("server.js serves the runtime's type to Super Admins only", /const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\[[^\]\n]*"driver-instructions-lock"[^\]\n]*\]\);/.test(SRC) && rt.LOCK_NOTICE_TYPE === "driver-instructions-lock");
 });
 
