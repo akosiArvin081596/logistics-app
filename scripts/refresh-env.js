@@ -639,6 +639,41 @@ async function main() {
 		if (n) summary.push(`driver_locations: emptied (${n} rows) — retired 2026-05-13, no reader`);
 	}
 
+	// The C.H. Robinson outbox, so a refreshed copy can never send production's
+	// backlog: lib/chr-store.js resetForRefresh(), restated because this script ships
+	// alone (scripts/test-chr-wiring.js proves the two agree). Nothing without the tables.
+	if (tableExists("chr_events") && tableExists("chr_loads")) {
+		const nowIso = new Date().toISOString();
+		const stored = (table, key) => {
+			try {
+				const v = JSON.parse((db.prepare(`SELECT value FROM "${table}" WHERE key = ?`).get(key) || {}).value);
+				return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+			} catch { return {}; }
+		};
+		let skipped = 0;
+		let cleared = 0;
+		try {
+			db.transaction(() => {
+				skipped = db.prepare(`UPDATE chr_events SET status = 'skipped_refresh', skip_reason = 'refresh', updated_at = ?
+					WHERE status NOT IN ('sent', 'dry_run', 'superseded') AND status NOT LIKE 'skipped_%'`).run(nowIso).changes;
+				cleared = db.prepare("UPDATE chr_events SET payload_json = '' WHERE payload_json <> ''").run().changes;
+				db.prepare("UPDATE chr_loads SET hold = 0, hold_reason = '', hold_by = '', hold_at = '', updated_at = ?").run(nowIso);
+				db.prepare(`INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES ('chr.settings', ?, ?, 'refresh')
+					ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+					.run(JSON.stringify({ ...stored("app_settings", "chr.settings"), milestones: "off", location: "off" }), nowIso);
+				db.prepare(`INSERT INTO server_state (key, value, updated_at) VALUES ('chr.state', ?, ?)
+					ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+					.run(JSON.stringify({ ...stored("server_state", "chr.state"), cursor: 0, baselineId: 0, lastMode: "", lastTickAt: "" }), nowIso);
+			})();
+		} catch (e) {
+			// The work file is still unsanitized here: it goes before the refusal.
+			try { db.close(); } catch {}
+			rmWork();
+			refuse(`the C.H. Robinson outbox could not be reset (${e.message}) — nothing was replaced.`);
+		}
+		summary.push(`chr_events: ${skipped} unsent row(s) skipped, ${cleared} payload(s) cleared; C.H. Robinson recording set Off`);
+	}
+
 	// -- 3. sanitize ---------------------------------------------------------
 
 	// 3a. Sessions. A session row caches the user record, so one surviving

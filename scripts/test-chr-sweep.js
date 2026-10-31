@@ -18,9 +18,11 @@
 //       row ends dry_run, held or skipped, and nothing reaches the network
 //   §10 reverts: pending rows become skipped_backwards; a dry-run row is flagged
 //   §11 the canary: made-up person data and a protected number planted in the
-//       history, the sheet and the settings reach no row, state, audit or log
+//       history, the sheet and the settings, and a driver's emergency contact,
+//       reach no row, state, audit or log
 //   §12 the source: lib/chr-*.js has no Sheets write, Drive, mail or n8n; its
-//       SQL names neither actor nor reason; no SELECT *
+//       SQL names neither actor nor reason; no SELECT *; it never names
+//       driver_emergency_contacts
 //   §13 a protected number inside a load key is withheld on all four paths (a
 //       9-digit Load ID, one that is not, a blank or unreadable Email, a load
 //       missing from Job Tracking): no table, audit, log or result holds it
@@ -65,7 +67,7 @@ const MIN = 60 * 1000;
 const CANARY = Object.freeze({
 	name: "Canary Testdriver", phone: "(555) 555-0147", email: "canary.agent@example.test", ssn: "000-12-3456",
 	cdl: "CDL D0000001", dob: "01/02/1970", street: "742 Evergreen Terrace", money: "$1,234.56", carrier: "77700011122233",
-	note: "canary internal note",
+	note: "canary internal note", emergencyName: "Canary Emergencycontact", emergencyPhone: "(555) 555-0199",
 });
 const PICKUP = { latitude: 42.0347, longitude: -93.62 };
 const DROP = { latitude: 41.525, longitude: -88.0817 };
@@ -93,6 +95,8 @@ function world({ config = { updatesEnabled: true }, settings = null, sheetRows =
 			speed REAL DEFAULT 0, bearing TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, fuel_pct INTEGER,
 			geocoded_location TEXT DEFAULT '', location_date_ms INTEGER DEFAULT 0, fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			dropped_reason TEXT DEFAULT '', source TEXT DEFAULT '');
+		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL,
+			contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 	`);
 	if (settings) S.writeSettings(db, { ...S.DEFAULT_SETTINGS, ...settings }, { by: "admin.one", nowIso: "2026-11-02T14:00:00.000Z" });
 	const w = {
@@ -449,12 +453,16 @@ async function main() {
 			config: { updatesEnabled: true, locationEnabled: true, denyList: CANARY.carrier },
 			settings: { arrivedPickup: true, positionsInMilestones: true },
 			sheetRows: [sheetRow("123456789", {
-				"Trailer Number": `53001 call ${CANARY.name} ${CANARY.phone}`, "Pickup Address": `Attn ${CANARY.name} ${CANARY.phone}, ${CANARY.street}, Ames, IA 50010`,
+				"Trailer Number": `53001 call ${CANARY.name} ${CANARY.phone}`,
+				"Pickup Address": `Attn ${CANARY.name} ${CANARY.phone} or ${CANARY.emergencyName} ${CANARY.emergencyPhone}, ${CANARY.street}, Ames, IA 50010`,
 				"Drop-off Address": `${CANARY.email} ${CANARY.ssn}, ${CANARY.cdl} ${CANARY.dob}, ${CANARY.name}, IL 60431`, Email: "made-up.agent@chrobinson.com",
 				"Broker Contact Name": `${CANARY.name} ${CANARY.carrier}`,
 			}), sheetRow("223456789", { "Trailer Number": CANARY.carrier.slice(0, 12), Email: "" })],
 			points: { 123456789: P2, 223456789: P2 },
 		});
+		// A driver's emergency contact (addendum C9): a table lib/chr-*.js never reads.
+		w.db.prepare("INSERT INTO driver_emergency_contacts (user_id, position, contact_name, relationship, contact_phone, created_at, updated_at) VALUES (1, 1, ?, 'Sibling', ?, ?, ?)")
+			.run(CANARY.emergencyName, CANARY.emergencyPhone, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z");
 		await w.tick();
 		w.advance(1);
 		for (const s of ["At Shipper", "In Transit", "At Receiver", "Delivered"]) { w.history("123456789", s); w.ping(1, AT_PICKUP); }
@@ -475,6 +483,8 @@ async function main() {
 			JSON.stringify(w.integration.config()),
 		].join("\n").toLowerCase();
 		eq(Object.entries(CANARY).filter(([, v]) => dump.includes(v.toLowerCase())).map(([k]) => k), [], "§11 no canary in any chr_ row, the state, the settings, an audit row, a log line or the config view");
+		ok(w.db.prepare("SELECT COUNT(*) AS n FROM driver_emergency_contacts WHERE contact_name = ? AND contact_phone = ?").get(CANARY.emergencyName, CANARY.emergencyPhone).n === 1,
+			"§11 (check) the emergency contact sat in its table the whole time");
 		ok(w.db.prepare("SELECT COUNT(*) AS n FROM chr_events WHERE status = 'dry_run'").get().n >= 1, "§11 ...while the pipeline ran (dry-run rows exist)");
 		ok(w.db.prepare("SELECT SUM(fields_dropped) AS n FROM chr_events").get().n >= 1, "§11 ...and dropped the planted fields, counted");
 		eq(networkCalls, 0, "§11 nothing reached the network");
@@ -494,6 +504,8 @@ async function main() {
 		ok(!/\bprocess\b/.test(src), `§12 ${f}: no environment read (the flags arrive as booleans through chrConfig())`);
 		eq(sqlOf(src).filter((s) => /\bactor\b|(?<![a-z_])reason\b/.test(s)), [], `§12 ${f}: its SQL names neither actor nor reason`);
 		ok(!/SELECT \*/i.test(src), `§12 ${f}: no SELECT *`);
+		// Addendum C9: a driver's emergency contacts are no CHR input, in SQL or anywhere else.
+		ok(!/driver_emergency_contacts/i.test(src), `§12 ${f}: never names driver_emergency_contacts`);
 	}
 
 	// ---------------------------------------------------------------- §13
