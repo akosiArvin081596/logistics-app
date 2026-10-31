@@ -29,7 +29,13 @@
  *      RENDERER_BUSY, its one name (no attempt used, nothing in Gmail); ingestion's
  *      Gemini latch holds a non-Bison load back (GEMINI_DOWN) with no engine call
  *   §7 the timer (every 5 minutes behind startsJob(), one tick at a time, a failed
- *      tick logged by its code), a replica's start, and server.js around the block
+ *      tick logged by its code), a replica's start, server.js around the block, and
+ *      the settings template's entries for the job's four settings
+ *   §8 three paths no case reached before: the claim keeps the row record() wrote
+ *      even when an older automatic row has its number; a Bison load drafted through
+ *      the block to BISON_INVOICE_EMAIL (a block reading a misnamed setting is
+ *      caught); a draft in Gmail whose row wasn't written, recovered through the real
+ *      engine's render and recorded only because it matches what went to Gmail
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -138,7 +144,7 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(r)));
 
 // ------------------------------------------------------------------ a world
 const openWorlds = [];
-async function world({ env = {}, startsJobAnswer = true } = {}) {
+async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK } = {}) {
 	const w = {
 		env: { ...env },
 		sheet: [HEADERS.slice()],
@@ -205,6 +211,11 @@ async function world({ env = {}, startsJobAnswer = true } = {}) {
 	engine.render = (ctx, opts) => { w.calls.render++; return render(ctx, opts); };
 	engine.record = (ctx, rendered, opts) => {
 		w.calls.record++;
+		if (w.recordThrowsOnce) {
+			w.recordThrowsOnce = false;
+			throw Object.assign(new Error("made-up: the draft row could not be written"), { code: "SQLITE_BUSY" });
+		}
+		if (w.recordHook) w.recordHook(ctx, opts);
 		const answer = record(ctx, rendered, opts);
 		w.recordAnswers.push(answer);
 		return answer;
@@ -269,7 +280,7 @@ async function world({ env = {}, startsJobAnswer = true } = {}) {
 	};
 	w.schemaBefore = schema(db);
 	const names = Object.keys(scope);
-	const block = BLOCK.replace(/\brateConGeminiUnavailableAt\b/g, "__geminiAt()");
+	const block = blockText.replace(/\brateConGeminiUnavailableAt\b/g, "__geminiAt()");
 	w.job = new Function(...names, "__geminiAt", `${block}\nreturn autoInvoice;`)(...names.map((n) => scope[n]), () => w.geminiAt);
 
 	w.server = await new Promise((resolve) => { const s = realApp.listen(0, "127.0.0.1", () => resolve(s)); });
@@ -570,6 +581,97 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		"§7 the engine is server.js's own, created below the block and read at each call");
 		eq([w.H.noticeTypeScope(SA).sql, w.H.noticeTypeScope(DISP).params.includes("auto-invoice")], ["1 = 1", true],
 			"§7 noticeTypeScope(): the auto-invoice notices are left out for everyone but Super Admins");
+
+		// The settings template carries the four settings, each unset, with what turns it on.
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		const at = TEMPLATE.indexOf("# --- Automatic broker invoice drafts");
+		const section = at >= 0 ? TEMPLATE.slice(at, TEMPLATE.indexOf("\n# ---", at + 1)) : "";
+		ok(section, "§7 the settings template has an \"Automatic broker invoice drafts\" section");
+		for (const name of ["AUTO_INVOICE_DRAFTS_ENABLED", "AUTO_INVOICE_DRAFTS_SHADOW", "AUTO_INVOICE_MAX_PER_HOUR", "AUTO_INVOICE_MAX_PER_DAY"]) {
+			ok(new RegExp(`^# ${name}=$`, "m").test(section), `§7 ...${name}, commented out (unset)`);
+		}
+		// Its words as one line, wherever the comment wraps.
+		const words = section.replace(/\n#\s?/g, " ");
+		ok(/ENABLED: on only when exactly "true"/.test(words) && /SHADOW exactly "false"/.test(words), "§7 ...on only with ENABLED exactly \"true\"; real drafts only with SHADOW exactly \"false\"");
+		const caps = rules.readCaps({});
+		ok(words.includes(`default ${caps.maxPerHour}`) && words.includes(`default ${caps.maxPerDay}`), `§7 ...the caps' defaults (${caps.maxPerHour} an hour, ${caps.maxPerDay} a day) as the rules read them`);
+		ok(/Shadow makes no Gmail drafts: it only records what it would draft/.test(words) && /in-app Super Admin notice/.test(words), "§7 ...shadow makes no Gmail drafts; its one other write is the settings notice");
+		ok(/a GET under \/api\/auto-invoice\/ reaches the app page/.test(words), "§7 ...off: a GET under /api/auto-invoice/ reaches the app page (no route is mounted)");
+	}
+
+	// ===================================================================== §8
+	section("§8  #628 review L4: paths no case reached");
+	{
+		// L4a: an older automatic row with the claim's number exists when record() writes
+		// its own. The claim keeps the row record() answered, not the first one found.
+		const w = await world({ env: ON_ENV });
+		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§8 L4a the broker domain confirmed");
+		await w.job.tick();
+		w.deliver("LD-TEST-0011", rateCon());
+		let twinId = 0;
+		w.recordHook = (ctx, opts) => {
+			twinId = Number(w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'auto-imap', 'made-up-twin')")
+				.run(ctx.loadId, opts.invoiceId, BILLING).lastInsertRowid);
+		};
+		await w.job.tick();
+		w.recordHook = null;
+		const c = w.claim("LD-TEST-0011");
+		const answered = w.recordAnswers[w.recordAnswers.length - 1] || {};
+		eq([c.state, answered.recorded], ["drafted", true], "§8 L4a drafted, and record() answered the row it wrote");
+		ok(twinId > 0 && answered.draftRowId > twinId, "§8 L4a ...an older automatic row on the same number was there first");
+		eq(c.draft_row_id, answered.draftRowId, "§8 L4a the claim keeps the row record() wrote, not the older one a lookup by number finds first");
+	}
+	{
+		// L4b: a Bison load through the block, to the inbox the block reads. The engine
+		// reads the setting from the process's own environment (lib/broker-invoice.js),
+		// as production does, so the case sets it there as well as in the block's.
+		const BISON_AP = "ap@example-bison-ap.test";
+		const BISON_ENV = { ...ON_ENV, BISON_INVOICE_EMAIL: BISON_AP };
+		const had = Object.prototype.hasOwnProperty.call(process.env, "BISON_INVOICE_EMAIL");
+		const was = process.env.BISON_INVOICE_EMAIL;
+		process.env.BISON_INVOICE_EMAIL = BISON_AP;
+		try {
+			const w = await world({ env: BISON_ENV });
+			await w.job.tick();
+			w.deliver("LD-TEST-0012", rateCon(), { Email: "ops-test@bisontransport.com" });
+			await w.job.tick();
+			eq(w.state("LD-TEST-0012"), ["drafted", ""], "§8 L4b a Bison load is drafted through the block (no confirmed domain needed)");
+			eq(w.gmail.map((g) => g.to), [BISON_AP], "§8 L4b ...to BISON_INVOICE_EMAIL as the block hands it over, never the rate con's address");
+			eq(w.drafts().map((r) => [r.load_id, r.recipient, r.via]), [["LD-TEST-0012", BISON_AP, "auto-imap"]], "§8 L4b ...one draft row, to Bison's inbox");
+			const READ = "process.env.BISON_INVOICE_EMAIL";
+			ok(BLOCK.split(READ).length === 2, "§8 L4b the block reads BISON_INVOICE_EMAIL once (the mutant's anchor)");
+			const m = await world({ env: BISON_ENV, blockText: BLOCK.replace(READ, "process.env.BISON_INVOICE_MAIL") });
+			await m.job.tick();
+			m.deliver("LD-TEST-0012", rateCon(), { Email: "ops-test@bisontransport.com" });
+			await m.job.tick();
+			eq([m.state("LD-TEST-0012"), m.calls.prepare, m.gmail.length], [["needs_attention", "RECIPIENT_UNCONFIGURED"], 0, 0],
+				"§8 L4b MUTANT: a block reading a misnamed setting is caught (every Bison load would go to a person)");
+		} finally {
+			if (had) process.env.BISON_INVOICE_EMAIL = was;
+			else delete process.env.BISON_INVOICE_EMAIL;
+		}
+	}
+	{
+		// L4c: the draft reached Gmail but its row wasn't written; Try again recovers it
+		// through the real engine, which must rebuild what went to Gmail.
+		const w = await world({ env: ON_ENV });
+		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§8 L4c the broker domain confirmed");
+		await w.job.tick();
+		w.deliver("LD-TEST-0013", rateCon());
+		w.recordThrowsOnce = true;
+		await w.job.tick();
+		const stuck = w.claim("LD-TEST-0013");
+		eq([stuck.state, stuck.reason_code, stuck.stage, w.gmail.length, w.drafts().length], ["needs_attention", "IN_GMAIL_UNRECORDED", "appended", 1, 0],
+			"§8 L4c the draft is in Gmail and its row wasn't written: a person, at stage appended");
+		eq(JSON.parse(stuck.sent_json), { to: BILLING, subject: "Example Broker Order #LD-TEST-0013", total: "$1,500.00" }, "§8 L4c ...what went to Gmail is kept on the claim");
+		const before = { prepare: w.calls.prepare, render: w.calls.render, renderer: w.calls.renderer, append: w.calls.append };
+		eq((await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0013/retry", SA, {})).status, 200, "§8 L4c Try again");
+		await w.job.tick();
+		const c = w.claim("LD-TEST-0013");
+		eq([c.state, c.stage, c.reason_code], ["drafted", "recorded", ""], "§8 L4c the recovery rebuilt the draft with the real engine, matched the recipient, subject and total, and recorded it");
+		eq([w.calls.prepare - before.prepare, w.calls.render - before.render, w.calls.renderer - before.renderer, w.calls.append - before.append, w.gmail.length],
+			[1, 1, 1, 0, 1], "§8 L4c ...one prepare and one render more, never a second append");
+		eq(w.drafts().map((r) => [r.invoice_id, r.recipient, r.total, r.via]), [[stuck.invoice_id, BILLING, "$1,500.00", "auto-imap"]], "§8 L4c ...one draft row, with the claim's number and the billed total");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

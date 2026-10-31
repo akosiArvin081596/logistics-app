@@ -5,7 +5,7 @@ before moving anything in here.
 
 | Directory | Contents | Read by |
 |---|---|---|
-| `policy/` | HTML templates rendered to PDF (equipment, mobile, substance, contractor agreement, master agreement, vehicle lease, service invoices) | `lib/policy-renderer.js` → `TEMPLATE_DIR` |
+| `policy/` | HTML templates rendered to PDF (equipment, mobile, substance, contractor agreement, master agreement, vehicle lease, service invoices, passenger authorization) | `lib/policy-renderer.js` → `TEMPLATE_DIR` |
 | `pdf/` | Original / fillable PDFs. `fw9.pdf` is the live IRS form whose AcroForm fields `fillW9Form()` fills; the other five are the signed-original source documents the `policy/` HTML was authored from. | `server.js` → `fillW9Form()` (`fw9.pdf` only) |
 
 ## Why `pdf/` is here and not in `uploads/`

@@ -251,6 +251,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
 | `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
 | `driver-emergency-contacts.mjs` | The emergency contacts item on the driver's onboarding lock screen (`EMERGENCY_CONTACTS_ENABLED`) at 375 x 667 and 390 x 664, on made-up data with the same static server: the item and the progress it counts in, one contact refused before anything is sent, the second contact saving and moving the signing step on, Edit reading the list again, and a refusal only the server gives shown in words. The contacts PUT is judged in-process by `lib/emergency-contacts.js`, the server's own rules. |
+| `driver-videos.mjs` | The driver's "Training videos" card (`DRIVER_TRAINING_VIDEOS_ENABLED`) at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: where the card shows for each placement the payload names, the tap-to-load YouTube frame and its attributes, the YouTube link, the 16:9 frame (see "The driver training videos check"). |
 | `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
@@ -544,6 +545,9 @@ whatever the caller exported:
   empty) unless the script is run with `E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value>`, which turns them on with that
   value as the only deny-list entry (never printed; never a real value). The driver screen flag stays off and the Drive
   uploader blank either way, so no sweep runs.
+- **The driver training videos:** off (`DRIVER_TRAINING_VIDEOS_ENABLED=false`) unless the script is run with
+  `E2E_DRIVER_VIDEOS=1`, which turns them on for a browser check of the Training videos card. The server only names
+  where the card shows; the page contacts YouTube only when a tester taps the player.
 
 `E2E_NO_CLIENT=1` boots without `client/dist`, for an API-only run (`payout-parity.mjs`, which never asks for a page).
 
@@ -677,6 +681,7 @@ BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHA
 | `DRIVER_VIEWPORT` | The driver window. Default: `430x900`. |
 | `S3_LATENCY_MS`, `S3_KBPS` | The CDP throttle of S3, S6 and S7. Default: +2500 ms per request, 24 KB/s each way. |
 | `E2E_MAINTENANCE_NOTICE=1` | For `boot-server.sh`, not `e2e.mjs`: boot with the maintenance notice on, for M1. |
+| `E2E_DRIVER_VIDEOS=1` | For `boot-server.sh`, not `e2e.mjs`: boot with the driver training videos on, for a browser check of the Training videos card. |
 
 ## Verdicts and exit code
 
@@ -1752,6 +1757,42 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in
 `SHOTS_DIR` (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Exit 0 only when every row
 PASSes.
+
+## The driver training videos check (`driver-videos.mjs`)
+
+The driver app's "Training videos" card (DRIVER_TRAINING_VIDEOS_ENABLED, driver videos plan PR 1), like
+`driver-welcome.mjs`: no `server.js`, database, `.env`, key or sign-in. The built `client/dist` is served on
+`127.0.0.1:$E2E_PORT` (default 3188); every `/api` request is answered in the browser (a made-up Driver, "Casey
+Example", user id 90104), with the payload's `trainingVideos` as each step sets it (no key is the flag off). Every
+request to another host is aborted, the YouTube frame included, and Chromium resolves nothing but 127.0.0.1, so nothing leaves
+the machine.
+
+```bash
+npm run build:client
+SHOT_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/driver-videos.mjs   # HEADED=1 to watch
+```
+
+Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
+
+| Step | What it does | Expected |
+|---|---|---|
+| V0 | No `trainingVideos` key: the lock screen (documents_signed) and the Kit tab (fully_onboarded). | No card, no "Training videos" text |
+| V1 | documents_pending, the key null. | No card |
+| V2 | documents_signed, `"onboarding"`. | The card inside the lock screen, after "Documents Received!" and before "Start Driving" |
+| V3 | Before any tap. | No iframe; no request to a YouTube host; one button named "Play the ELD video (loads YouTube)", at least 44 x 44 |
+| V4 | A tap on that button. | One iframe: src `https://www.youtube-nocookie.com/embed/GV9ztmoomgw?rel=0&playsinline=1&cc_load_policy=1&cc_lang_pref=en&hl=en`, the plan's title, allow, allowfullscreen, referrerpolicy and sandbox; focus on it; the only requests the tap adds go to `www.youtube-nocookie.com` (aborted) |
+| V5 | The YouTube link, before and after the tap. | href `https://www.youtube.com/watch?v=GV9ztmoomgw`, `target="_blank"`, `rel="noopener noreferrer"`, at least 44 px tall |
+| V6 | The frame, before and after the tap. | 16:9 within 1 px, inside the window; no sideways scroll |
+| V7 | The walkthrough video, once its files exist (SKIP until then). | controls, `preload="none"`, no autoplay, a poster, an English captions track on by default, an MP4 source, no media request before play |
+| V8 | fully_onboarded, `"kit"`. | No lock screen; the card on the Kit tab, "Rewatch any time." |
+| V9 | At 390 x 664 with the 125% font, before the tap. | No two parts of the card overlap; the button and link inside the window, at least 44 px |
+
+Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-videos`), and the screenshots in
+`SHOT_DIR` (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Exit 0 only when no row
+FAILs (a SKIP is not a failure).
+
+For the same card on the e2e server (the made-up seed's `qa-e2e-driver`, fully onboarded, so the Kit card), boot it
+with `E2E_DRIVER_VIDEOS=1 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3191 "$W/qa.db"`.
 
 ## Teardown (once the whole QA cycle is done)
 
