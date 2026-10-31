@@ -17,7 +17,8 @@
  *        scripts/test-invoice-lines-admin-only.js)
  * and the dashboard offers them to nobody else: CompletedLoadsTab.vue shows the
  * Draft Invoice button, the approved-draft line and its Review link to Super
- * Admin only, and asks GET …/invoice-draft for nobody else.
+ * Admin only, and asks GET …/invoice-draft for nobody else (when the load dialog
+ * opens, after an approve, and in the Approve re-check while automatic drafts are on).
  *
  * WHAT IS REAL. Each registration is lifted from server.js whole and executed
  * against a capturing `app`, with the real requireRole (self-contained by
@@ -219,7 +220,7 @@ function clientViolations(src) {
 	if (!line.length) v.push("the approved-draft line was not found");
 	line.forEach((i) => { if (!gatedAt(src, i)) v.push("the approved-draft line (recipient) is not Super Admin only"); });
 	const gets = all("/invoice-draft`");
-	if (gets.length !== 2) v.push(`expected two GET …/invoice-draft call sites, found ${gets.length}`);
+	if (gets.length !== 3) v.push(`expected three GET …/invoice-draft call sites (the dialog's open, after an approve, the Approve re-check), found ${gets.length}`);
 	for (const i of gets) {
 		const fnStart = Math.max(src.lastIndexOf("\nasync function ", i), src.lastIndexOf("\nfunction ", i));
 		if (!src.slice(fnStart, i).includes("auth.isSuperAdmin")) v.push(`the GET …/invoice-draft at offset ${i} is not skipped for other roles`);
@@ -306,6 +307,7 @@ for (const [name, from, to] of [
 	["the Draft Invoice button shows to every role", '<button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle"', '<button type="button" :disabled="drafting" :style="draftBtnStyle"'],
 	["the approved-draft line and Review link show to every role", '<template v-if="auth.isSuperAdmin">\n            <div v-if="draftResult"', '<template v-if="true">\n            <div v-if="draftResult"'],
 	["openDetail asks every role for GET …/invoice-draft", "if (lid && auth.isSuperAdmin) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`)", "if (lid) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`)"],
+	["the Approve re-check reads every role's drafts", "async function beforeApproveDraft() {\n  if (!auth.isSuperAdmin || ", "async function beforeApproveDraft() {\n  if ("],
 ]) {
 	if (TAB.split(from).length - 1 !== 1) { ok(`client mutant anchor found once: ${name}`, false); continue; }
 	ok(`MUTANT ${name}: caught`, clientViolations(TAB.replace(from, to)).length > 0);
