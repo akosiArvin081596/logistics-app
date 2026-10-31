@@ -38,6 +38,12 @@
  *      or SELECT and SEARCH HEADER Message-ID, an unknown one is not, SEARCH
  *      before a mailbox or of another kind is BAD, and readCapturedDrafts()
  *      reports each draft's Message-ID.
+ *   §6 THE TRIAL REPORT'S READ (fetchMessages()): Sent Mail opened with EXAMINE,
+ *      searched by date and a subject word, each message fetched whole with
+ *      BODY.PEEK[] (its literal taken by length, binary and a tagged-answer line
+ *      inside included); nothing else is ever sent (no SELECT, STORE, APPEND,
+ *      COPY, MOVE or EXPUNGE, also in its source); too many found, a NO, or a
+ *      bad argument fails before or instead of a partial answer.
  *
  * HOW: tls.connect is replaced for the duration of the run by a stub that
  * returns a plain socket to a fake IMAP server on 127.0.0.1:0, which speaks
@@ -111,6 +117,8 @@ const LOGIN_ARGS = new RegExp(`^(${QUOTED}) (${QUOTED})$`);
 const APPEND_ARGS = new RegExp(`^(${QUOTED}) \\(([^)]*)\\) \\{(\\d+)\\}$`);
 const EXAMINE_ARGS = new RegExp(`^(${QUOTED})$`);
 const SEARCH_ARGS = new RegExp(`^HEADER Message-ID (${QUOTED})$`, "i");
+const CRITERIA_ARGS = new RegExp(`^SINCE (\\d{1,2}-[A-Za-z]{3}-\\d{4}) BEFORE (\\d{1,2}-[A-Za-z]{3}-\\d{4})(?: SUBJECT (${QUOTED}))?$`);
+const FETCH_ARGS = /^(\d{1,6}(?:,\d{1,6}){0,200}) \(INTERNALDATE BODY\.PEEK\[\]\)$/;
 // The top-level Message-ID header of a composed message.
 function messageIdOf(literal) {
 	const raw = literal.toString("latin1");
@@ -121,9 +129,10 @@ function messageIdOf(literal) {
 
 function fakeImap() {
 	const sessions = [];
-	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK", examineNo: "" };
+	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK", examineNo: "", fetch: "OK" };
 	const stored = []; // Message-IDs of the drafts appended, in order
 	const sent = []; // Message-IDs in Sent Mail
+	const sentRaw = []; // Sent Mail's messages for SEARCH by date and subject, and FETCH: { subject, raw }
 	const held = { "[Gmail]/Drafts": stored, "[Gmail]/Sent Mail": sent };
 	const server = net.createServer((sock) => {
 		const s = { commands: [], login: null, append: null, examine: null, examines: [], search: null, received: [], appendLineEnd: null };
@@ -182,12 +191,35 @@ function fakeImap() {
 					reply(`${tag} OK [READ-ONLY] EXAMINE completed`);
 				} else if (/^SEARCH$/i.test(verb)) {
 					const m = SEARCH_ARGS.exec(args);
+					const crit = m ? null : CRITERIA_ARGS.exec(args);
+					if (crit) {
+						s.criteria = args;
+						if (answer.search !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
+						const word = crit[3] ? unquote(crit[3]) : "";
+						const hits = s.examine === "[Gmail]/Sent Mail" ? sentRaw.map((x, i) => (!word || x.subject.includes(word) ? i + 1 : 0)).filter(Boolean) : [];
+						reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
+						reply(`${tag} OK SEARCH completed`);
+						continue;
+					}
 					s.search = m ? unquote(m[1]) : { unparsed: args };
 					if (!m) { reply(`${tag} BAD malformed SEARCH`); continue; }
 					if (answer.search !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
 					const hits = (held[s.examine] || []).map((id, i) => (id === s.search ? i + 1 : 0)).filter(Boolean);
 					reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
 					reply(`${tag} OK SEARCH completed`);
+				} else if (/^FETCH$/i.test(verb)) {
+					s.fetch = args;
+					const m = FETCH_ARGS.exec(args);
+					if (!m) { reply(`${tag} BAD malformed FETCH`); continue; }
+					if (answer.fetch !== "OK") { reply(`${tag} NO [UNAVAILABLE] fetch failed`); continue; }
+					for (const n of m[1].split(",").map(Number)) {
+						const x = sentRaw[n - 1];
+						if (!x) continue;
+						sock.write(`* ${n} FETCH (INTERNALDATE "20-Oct-2026 14:00:00 +0000" BODY[] {${x.raw.length}}\r\n`);
+						sock.write(x.raw);
+						sock.write(")\r\n");
+					}
+					reply(`${tag} OK FETCH completed`);
 				} else if (/^LOGOUT$/i.test(verb)) {
 					reply("* BYE logging out");
 					reply(`${tag} OK LOGOUT completed`);
@@ -199,7 +231,7 @@ function fakeImap() {
 			}
 		});
 	});
-	return { server, sessions, answer, stored, sent };
+	return { server, sessions, answer, stored, sent, sentRaw };
 }
 
 // The bytes the client sent for the APPEND literal, counted from the raw stream
@@ -256,7 +288,7 @@ function decodedBody(part) {
 
 // ------------------------------------------------------------------- the run
 async function main() {
-	const { server, sessions, answer, sent } = fakeImap();
+	const { server, sessions, answer, sent, sentRaw } = fakeImap();
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = server.address().port;
 
@@ -431,6 +463,53 @@ async function main() {
 		const findNoPass = await find({ pass: "" });
 		eq([findBad.error && findBad.error.stage, findNoPass.error && findNoPass.error.stage, dials.length], ["credentials", "credentials", dialsBeforeFind],
 			"§4 a malformed Message-ID or no credentials is refused before any connection");
+
+		section("§6  fetchMessages(): Sent Mail read with EXAMINE and BODY.PEEK only");
+		const { fetchMessages } = require(path.join(__dirname, "..", "lib", "imap-draft.js"));
+		ok(typeof fetchMessages === "function", "§6 FAILS ON THE OLD CODE: lib/imap-draft.js exports fetchMessages()");
+		if (typeof fetchMessages === "function") {
+			// The second message's body holds a line shaped like the command's own
+			// tagged answer, and every byte value: a literal is taken by its length.
+			const msgA = Buffer.from("Subject: Example Broker Order #123456789\r\nTo: billing@example-broker.test\r\n\r\nmade-up body A\r\n", "latin1");
+			const msgB = Buffer.concat([Buffer.from("Subject: Re: Example Broker Order #123456789\r\n\r\nline\r\na5 OK FETCH completed\r\n", "latin1"),
+				Buffer.from(Array.from({ length: 256 }, (_, i) => i)), Buffer.from("\r\nend\r\n", "latin1")]);
+			sentRaw.push({ subject: "Example Broker Order #123456789", raw: msgA }, { subject: "Example Broker Order #999", raw: Buffer.from("Subject: other\r\n\r\nx\r\n") },
+				{ subject: "Re: Example Broker Order #123456789", raw: msgB });
+			const since = new Date("2026-10-20T00:00:00Z");
+			const before = new Date("2026-11-03T00:00:00Z");
+			const fetch = (over = {}) => settle(fetchMessages({ user: USER, pass: PASS, since, before, subject: "123456789", timeoutMs: 3000, ...over }));
+			const got = await fetch();
+			const fs6 = sessions[sessions.length - 1];
+			await within(fs6.closed, 3000);
+			eq(got.error ? got.error.message : null, null, "§6 it resolves");
+			eq(got.value && got.value.messages.map((m) => [m.seq, m.internalDate]), [[1, "20-Oct-2026 14:00:00 +0000"], [3, "20-Oct-2026 14:00:00 +0000"]], "§6 the two messages the search found, with their INTERNALDATE");
+			ok(got.value && got.value.messages[0].raw.equals(msgA) && got.value.messages[1].raw.equals(msgB), "§6 each message's bytes exactly, a tagged-answer line and every byte value inside included");
+			eq(fs6.commands, ["LOGIN", "EXAMINE", "SEARCH", "FETCH", "LOGOUT"], "§6 the session is LOGIN, EXAMINE, SEARCH, FETCH, LOGOUT and nothing else");
+			eq(fs6.examines, ["[Gmail]/Sent Mail"], "§6 Sent Mail opened read-only (EXAMINE)");
+			eq(fs6.criteria, "SINCE 20-Oct-2026 BEFORE 3-Nov-2026 SUBJECT \"123456789\"", "§6 searched by date and the subject word");
+			ok(/BODY\.PEEK\[\]/.test(fs6.fetch || "") && !/BODY\[/.test(String(fs6.fetch || "").replace(/BODY\.PEEK\[/g, "")), "§6 fetched with BODY.PEEK[] (never marks a message read), never BODY[]");
+			ok(!fs6.commands.some((c) => /^(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE|UID)$/.test(c)), "§6 never SELECT, STORE, APPEND, COPY, MOVE, EXPUNGE or UID");
+			const none = await fetch({ subject: "777" });
+			const fsNone = sessions[sessions.length - 1];
+			await within(fsNone.closed, 3000);
+			eq([none.value, fsNone.commands], [{ messages: [], count: 0 }, ["LOGIN", "EXAMINE", "SEARCH", "LOGOUT"]], "§6 nothing found: no FETCH");
+			const many = await fetch({ maxMessages: 1 });
+			eq(many.error && many.error.stage, "search", "§6 more found than maxMessages: a failure (stage search), never a partial answer");
+			answer.fetch = "NO";
+			const fetchNo = await fetch();
+			eq(fetchNo.error && [fetchNo.error.stage, fetchNo.error.answered], ["fetch", true], "§6 a NO to the FETCH: stage fetch");
+			answer.fetch = "OK";
+			const dialsBefore6 = dials.length;
+			const refused = await Promise.all([{ since: null }, { before: since }, { subject: "two words" }, { subject: "x\"y" }, { mailbox: "[Gmail]/Sent Mail\r\na9 SELECT x" }, { pass: "" }].map((o) => fetch(o)));
+			eq([refused.map((r) => r.error && r.error.stage), dials.length], [["credentials", "credentials", "credentials", "credentials", "credentials", "credentials"], dialsBefore6],
+				"§6 no dates, dates out of order, a subject that isn't one plain word, a mailbox with a line break or no password: refused before any connection");
+			// Its IMAP command strings, read from the source: the read-only four only.
+			const SRC = fs.readFileSync(path.join(__dirname, "..", "lib", "imap-draft.js"), "utf8");
+			const at = SRC.indexOf("const FETCH_STAGES");
+			const fetchSrc = at < 0 ? "" : SRC.slice(at, SRC.indexOf("module.exports", at));
+			ok(/"EXAMINE "/.test(fetchSrc) && /BODY\.PEEK\[\]/.test(fetchSrc), "§6 its source sends EXAMINE and BODY.PEEK[]");
+			eq((fetchSrc.match(/\b(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE)\b/g) || []), [], "§6 ...and names no SELECT, STORE, APPEND, COPY, MOVE or EXPUNGE");
+		}
 	} finally {
 		tls.connect = realConnect;
 		server.close();

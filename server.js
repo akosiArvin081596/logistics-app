@@ -54903,6 +54903,10 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 //     Gemini or Gmail call, so ENABLED=true alone can never make a draft.
 //   AUTO_INVOICE_MAX_PER_HOUR (12, at most 1000) and AUTO_INVOICE_MAX_PER_DAY (60, at
 //     most 10000): a burst of deliveries drains over hours, not into Gmail at once.
+//   AUTO_INVOICE_SHADOW_RENDERS_ENABLED  on only when exactly "true", read only in
+//     shadow mode, never in a replica: the shadow also builds each ready load's email
+//     and invoice in memory (the engine, Drive, Gemini and the PDF renderer, as a
+//     real draft does) and keeps only their digest; still no number and no Gmail.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -54935,6 +54939,7 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		io.to("super-admin").emit("dispatch-notification", notice);
 	},
 	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
 	log: console,
 });
 if (autoInvoice.mode !== "off") autoInvoice.mount(app, { requireRole, refuseCrossSite });
