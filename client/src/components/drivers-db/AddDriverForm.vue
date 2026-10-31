@@ -94,7 +94,7 @@
         </label>
         <label class="pay-radio">
           <input type="radio" v-model="form.payType" value="percentage" />
-          <span>Percentage of Net Load Revenue (owner-operator)</span>
+          <span>Percentage of Net Load Revenue (percentage driver)</span>
         </label>
       </div>
       <div v-if="form.payType === 'fixed'" class="form-group" style="margin-top:0.5rem;max-width:220px;">
@@ -102,7 +102,7 @@
         <input v-model.number="form.payDaily" class="form-input" type="number" min="0" step="1" placeholder="e.g. 250" />
       </div>
       <div v-if="form.payType === 'percentage'" class="form-group" style="margin-top:0.5rem;max-width:220px;">
-        <label class="form-label">Owner-Operator Share (%)</label>
+        <label class="form-label">Percentage Driver Share (%)</label>
         <input v-model.number="form.payPercentage" class="form-input" type="number" min="0" max="100" step="0.1" placeholder="e.g. 30" />
       </div>
     </fieldset>

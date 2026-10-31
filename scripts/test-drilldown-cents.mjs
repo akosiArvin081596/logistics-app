@@ -6,7 +6,8 @@
 //   §1 formatCurrencyCents(): two decimals, the sign before the $, thousands
 //      separators, and a value that rounds to zero shows no minus.
 //   §2 MonthDetailModal.vue formats the four headline figures and the driver
-//      rows' pay, revenue, margin, invoiced and adjustments with it.
+//      rows' pay, revenue, margin, invoiced and adjustments with it; its
+//      Invoiced footnote names a percentage-pay invoice a percentage driver's.
 //
 // Pure: imports client/src/utils/format.js and reads the component's source.
 // Run: node scripts/test-drilldown-cents.mjs    # exits 1 on failure
@@ -36,6 +37,9 @@ for (const f of ['pay', 'revenue', 'margin', 'invoicedTotal']) {
   check(src.includes(`fmtCents(d.${f})`) && !src.includes(`fmt(d.${f})`), `the driver rows' ${f} is shown to the cent`)
 }
 check(src.includes('signedCents(d.adjustments)'), "the driver rows' invoice adjustments are shown to the cent")
+// "Owner-operator" now names another driver category; the percentage-pay one is a percentage driver.
+check(src.replace(/\s+/g, ' ').includes("A percentage driver's invoice follows its loads") && !/owner[\s-]?op/i.test(src),
+  "the Invoiced footnote calls a percentage-pay invoice a percentage driver's, and never owner-operator")
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

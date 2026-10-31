@@ -42,7 +42,7 @@ The corresponding field map in `lib/policy-field-maps.js` declares which `aria-l
 
 **Multi-vehicle Exhibit A.** The Master Participation Agreement template has a single Exhibit A row. When an investor owns multiple trucks, the renderer clones that row N times before rendering. This is one of the things string-replace templating cannot do, and is the reason `policy-renderer.js` exists.
 
-**Owner-operator weekly invoice.** Same pattern — the template has placeholder rows for loads and expenses; the renderer clones them based on the actual week's data.
+**Percentage-driver weekly invoice** (`service-invoice-owner-op.html`; the file keeps its old name). Same pattern — the template has placeholder rows for loads and expenses; the renderer clones them based on the actual week's data.
 
 ## The policy field map
 
@@ -56,8 +56,8 @@ The corresponding field map in `lib/policy-field-maps.js` declares which `aria-l
   signatureImage: '<base64 PNG>',
   signatureLabelForImage: 'Driver signature',
   vehicles: [ /* array, drives Exhibit A cloning */ ],
-  loadsRows: [ /* for owner-op invoice */ ],
-  expensesRows: [ /* for owner-op invoice */ ],
+  loadsRows: [ /* for the percentage-driver invoice */ ],
+  expensesRows: [ /* for the percentage-driver invoice */ ],
   dayCompletedByIndex: { /* day index → "completed" | "n-a" */ },
 }
 ```
@@ -73,7 +73,7 @@ The renderer treats every key as optional. Add a new field to a template by addi
 | `substance-policy.html` | Same pattern | Driver onboarding. |
 | `contractor-agreement.html` | Same pattern | Driver onboarding (heaviest — ~25 fields + banking info + payment method checkboxes). |
 | `service-invoice.html` | `POST /api/invoices/generate` | Weekly driver invoice (fixed-rate driver pay). |
-| `service-invoice-owner-op.html` | Same endpoint, different `pay_type` | Weekly invoice for owner-operators (percentage of revenue, with cloneable loads/expenses tables). |
+| `service-invoice-owner-op.html` | Same endpoint, different `pay_type` | Weekly invoice for percentage drivers (percentage of revenue, with cloneable loads/expenses tables). |
 | `master-agreement.html` | `POST /api/public/investor-preview-pdf/master_agreement` (preview); signed through `POST /api/public/investor-apply` | Investor onboarding (~25 fields, equipment checkboxes, multi-vehicle Exhibit A). |
 | `vehicle-lease.html` | Same pattern | Investor onboarding (lessee/lessor split, 10-item inspection checklist). |
 

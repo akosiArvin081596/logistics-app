@@ -36,9 +36,9 @@ Your action is moving Submitted → Approved.
 Click into an invoice. You'll see:
 
 - **Header** — driver name, week start and end dates.
-- **Pay type** — Daily Rate or Owner-Operator percentage.
+- **Pay type** — Daily Rate or Percentage (a percentage driver).
 - **Loads list** — each load worked during the period, with dates and Load IDs.
-- **Active days** (Daily Rate) or **revenue & percentage** (Owner-Op) — the math for the base pay.
+- **Active days** (Daily Rate) or **revenue & percentage** (Percentage driver) — the math for the base pay.
 - **Base pay total.**
 - **Adjustments** — bonuses, deductions, layover pay, detention pay.
 - **Total.**
@@ -55,7 +55,7 @@ Fri 04/18  — Loads LD-3501, LD-3502, LD-3503     1 day (multiple loads same da
 Total active days: 5 × $250 = $1,250
 ```
 
-For Owner-Op, the system shows each load's revenue and the percentage:
+For a percentage driver, the system shows each load's revenue and the percentage:
 
 ```
 LD-3492 (Atlanta → Chicago, 04/14-04/16)   Rev $2,400 × 70% = $1,680
@@ -70,11 +70,11 @@ A few things worth verifying:
 
 **All loads delivered.** The invoice should include loads that completed during the period, not loads still in progress.
 
-**Pay type matches contract.** Make sure the system is using the right pay structure for this driver. If their contractor agreement says daily rate but the invoice computed as owner-op, that's a problem.
+**Pay type matches contract.** Make sure the system is using the right pay structure for this driver. If their contractor agreement says daily rate but the invoice computed as a percentage driver's, that's a problem.
 
 **Dates make sense.** For daily rate, the active days should match the actual pickup-to-delivery span. A load that spans Monday-Wednesday should be 3 days, not 1.
 
-**Revenue numbers right.** For owner-op, the rates should match the original rate confirmations.
+**Revenue numbers right.** For a percentage driver, the rates should match the original rate confirmations.
 
 **No duplicates.** Sometimes the same load appears twice (corrected entry, duplicate row). The system deduplicates by Load ID but verify.
 
@@ -91,7 +91,7 @@ Click **Reject**. The status reverts to Pending and the driver/dispatcher can co
 When you reject, **add a clear reason**. The driver will see it. Examples:
 
 - "Active days count is wrong — load LD-3492 was 3 days, not 2."
-- "Owner-op rate for LD-3498 should be $1,800, not $1,500. Verify against rate con."
+- "Percentage-driver rate for LD-3498 should be $1,800, not $1,500. Verify against rate con."
 - "Missing load LD-3501 from Friday."
 
 Specific feedback gets fixed faster than vague feedback.
@@ -125,7 +125,7 @@ The system expands pickup-to-delivery dates into a list of unique calendar days,
 
 To fix: edit the load dates in Data Manager, then regenerate the invoice (or wait for the auto-recalc).
 
-**"The owner-op rate is wrong."**
+**"The percentage driver's rate is wrong."**
 Look at the load's Payment field in Data Manager. That's the source of the rate. If it's wrong there, fix it. Then regenerate.
 
 **"A load that should be on the invoice is missing."**

@@ -244,7 +244,7 @@
               <div class="footnote">
                 Invoiced = this month's part of each driver invoice: a paid day counts in the month the pay
                 beside it counts that day (a closed month as it was frozen), so a week spanning two months is
-                split between them <span class="dim">(split)</span>, never counted twice. An owner-operator
+                split between them <span class="dim">(split)</span>, never counted twice. A percentage driver's
                 invoice follows its loads; one with neither days nor loads is split by calendar days. Admin
                 adjustments (deductions/bonuses) count once, in the month
                 the week ends. Variance compares invoiced vs the active-day pay estimate &mdash;
