@@ -74751,6 +74751,21 @@ function sentIfRendererBusy(res, err) {
 	return true;
 }
 
+// Chromium's controls (lib/pdf-browser.js): a start line when any is on, and the
+// alert for its first launch failure in this process by the admin alert's two
+// channels, which pdf-browser.js sends only with CHROMIUM_LAUNCH_ALERT_SEND on.
+const chromiumControlsLine = require("./lib/pdf-browser").describeChromiumControls();
+if (chromiumControlsLine) console.log(chromiumControlsLine);
+require("./lib/pdf-browser").setLaunchFailureAlert(require("./lib/chromium-launch-alert").create({
+	sendEmail,
+	to: ADMIN_NOTIFY_EMAIL,
+	emailHtml: invoiceEmailHtml,
+	notify: (notice) => {
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));
+		emitDispatchNotice(notice);
+	},
+}));
+
 const { shutdownBrowser } = require("./lib/pdf-browser");
 async function gracefulShutdown(signal) {
 	console.log(`${signal} received — shutting down Puppeteer browser`);
