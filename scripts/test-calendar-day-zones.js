@@ -21,6 +21,8 @@
  *      2026 is a Monday everywhere (load 569820951), a late-evening Eastern
  *      instant that is already tomorrow in Manila, a month end, and the switch
  *      from daylight time on Sunday 1 November 2026.
+ *   4. The KPI week (lib/kpi-metrics.js weekStartOf()) names getWeekRange()'s
+ *      Saturday for every day of 2025-2027.
  *
  * WHY IT LIFTS FUNCTIONS OUT OF server.js SOURCE: server.js opens SQLite and
  * starts listening on require, so it cannot be loaded by a test (same approach
@@ -185,6 +187,20 @@ const periodStrSrc = /const periodStr = filterStart \|\| filterEnd\n[^\n]+\n[^\n
 const periodOf = (from, until) => new Function("dateRange", `${periodLine[0]}\n${periodStrSrc[0]}\nreturn periodStr;`)({ from, until });
 eq(periodOf("2026-08-01", "2026-09-30"), "Period: 8/1/2026 – 9/30/2026", "investor report period 2026-08-01..2026-09-30");
 eq(periodOf("2026-11-01", "2026-11-30"), "Period: 11/1/2026 – 11/30/2026", "investor report period across the DST switch");
+
+// 8. The KPI week (lib/kpi-metrics.js weekStartOf(), R16) is the invoice week:
+// for every day of 2025-2027, DST days included, it names getWeekRange()'s Saturday.
+{
+	const kpiMetrics = require(path.join(__dirname, "..", "lib", "kpi-metrics.js"));
+	const differ = [];
+	let days = 0;
+	for (let d = "2025-01-01"; d <= "2027-12-31"; d = shiftDayKey(d, 1)) {
+		days++;
+		const got = typeof kpiMetrics.weekStartOf === "function" ? kpiMetrics.weekStartOf(d) : null;
+		if (got !== getWeekRange(d).weekStart) differ.push(d);
+	}
+	eq({ days, differ: differ.slice(0, 3) }, { days: 1095, differ: [] }, "KPI weekStartOf() equals getWeekRange()'s week start for every day of 2025-2027");
+}
 
 const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 if (CHILD) {

@@ -27,6 +27,16 @@
  *     fixtures is a sentinel, and neither output contains one.
  * §14 MUTANTS: each plausible regression, applied to the shipped source, must
  *     fail the section that guards it.
+ * §15 weekly figures (R16, computeKpis({ weekly: true })): Saturday-Friday weeks
+ *     (DST Sundays, a year end, a month-straddling week), 13 complete weeks plus
+ *     the week to date (never compared), each week the sum of its days, ELD rows
+ *     in the week of their stored day, parity with the monthly series over whole
+ *     weeks, "No data" / "No records" / a straddling week, comparisons withheld
+ *     under 90% coverage, the Friday fleet count, the four monthly-only metrics
+ *     and their reasons; weekly only for exactly true, nothing monthly changed,
+ *     the weekly-off output pinned to the base's bytes; buildKpiResponse()'s
+ *     weekly block from stored rows only. Set KPI_BASE_LIB=<a base checkout's
+ *     lib/> to also compare against that base directly.
  *
  * Fixtures are fake ("Zed Sentinel" names, sentinel ids). Pure: no server, no
  * database, no files written.
@@ -35,9 +45,16 @@
  */
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const Module = require("module");
+
+// §15: sha256 of the weekly-off output on these fixtures (computeKpis() as of
+// 2026-10-09 and 2026-11-09, with no inputs, and §12's buildKpiResponse()),
+// taken from the base before weekly figures existed. Re-pin only for a change
+// to the monthly figures that is meant, and say why in its PR.
+const BASE_DIGEST = "c5643af762a1ea4748a4e1485fd66daf61ccb7fd4739a3e201d21748a3950dce";
 
 const ROOT = path.join(__dirname, "..");
 const LIB = path.join(ROOT, "lib");
@@ -612,6 +629,166 @@ function battery(mods) {
 		t(!leaks(out) && !leaks(out2), "§13 computeKpis output holds no load id, driver key or truck id");
 		t(!leaks(response), "§13 the response holds none either (an extra payload key is never read)");
 	}
+
+	// §15 weekly figures (R16)
+	{
+		const W = (o) => ({ ...world(o), weekly: true });
+		let wk;
+		let wk31;
+		let thinOut;
+		try {
+			wk = M.computeKpis(W());
+			wk31 = M.computeKpis(W({ asOfDay: "2026-10-31" }));
+			thinOut = M.computeKpis(W({ unpaid: "2026-09-29" }));
+		} catch (e) {
+			t(false, "§15 computeKpis runs with weekly: true", e && e.message);
+			return r;
+		}
+		const wOf = (o, key) => (get(o, key) || {}).weekly || {};
+		const rowsOf = (o, key) => (Array.isArray(wOf(o, key).rows) ? wOf(o, key).rows : []);
+		const ws = typeof M.weekStartOf === "function" ? M.weekStartOf : () => null;
+		const wl = typeof M.weekLabel === "function" ? M.weekLabel : () => null;
+		t(typeof M.weekStartOf === "function" && typeof M.weekLabel === "function", "§15 weekStartOf() and weekLabel() are exported");
+		t(ws("2026-10-03") === "2026-10-03" && ws("2026-10-09") === "2026-10-03" && ws("2026-10-04") === "2026-10-03" && ws("2026-10-10") === "2026-10-10",
+			"§15 a Saturday starts a week and a Friday ends it");
+		t(ws("2026-03-08") === "2026-03-07" && ws("2026-11-01") === "2026-10-31", "§15 the DST Sundays stay in their Saturday's week");
+		t(ws("2027-01-01") === "2026-12-26" && ws("2026-12-31") === "2026-12-26" && ws("2027-01-02") === "2027-01-02", "§15 a week across the year end is one week");
+		t(wl("2026-10-17", "2026-10-23") === "Oct 17-23, 2026" && wl("2026-10-31", "2026-11-06") === "Oct 31-Nov 6, 2026"
+			&& wl("2026-12-26", "2027-01-01") === "Dec 26, 2026-Jan 1, 2027" && wl("2026-10-31", "2026-10-31") === "Oct 31, 2026",
+		"§15 week labels", JSON.stringify([wl("2026-10-17", "2026-10-23"), wl("2026-10-31", "2026-11-06"), wl("2026-12-26", "2027-01-01")]));
+
+		// The series: 13 complete weeks, oldest first, then the week to date.
+		const ld = rowsOf(wk, "loads_delivered");
+		const starts = [];
+		for (let i = 13; i >= 0; i--) starts.push(dayAdd("2026-10-03", -7 * i));
+		t(wOf(wk, "loads_delivered").mode === "weekly" && ld.length === 14 && JSON.stringify(ld.map((x) => x.weekStart)) === JSON.stringify(starts),
+			"§15 13 complete weeks plus the week to date, oldest first", JSON.stringify(ld.map((x) => x.weekStart)));
+		t(ld.length === 14 && ld.slice(0, 13).every((x) => x.partial === false && x.weekEnd === dayAdd(x.weekStart, 6) && x.to === x.weekEnd && weekday(x.weekStart) === 6 && x.vs),
+			"§15 each complete week runs Saturday to Friday and carries its comparison");
+		const open = ld[13] || {};
+		t(open.partial === true && open.to === AS_OF && open.weekStart === "2026-10-03" && open.label === "Oct 3-9, 2026 (to date)" && open.vs === null,
+			"§15 the week to date runs to the as-of day, says so, and is never compared", JSON.stringify(open));
+		t(ld[12] && ld[12].label === "Sep 26-Oct 2, 2026", "§15 a week crossing a month end is one week", ld[12] && ld[12].label);
+
+		// Each week is the sum of its days, from the fixture directly.
+		const fx = world();
+		const isDel = (l) => /^(delivered|completed|pod received)$/i.test(String(l.status).trim());
+		const live = fx.loads.filter((l) => !/^(cancel|canceled|cancelled)$/i.test(String(l.status).trim()) && l.day);
+		const expLd = (w) => { const rows = live.filter((l) => l.day >= w.weekStart && l.day <= w.to); return rows.length ? rows.filter(isDel).length : null; };
+		t(ld.length === 14 && ld.every((x) => x.value === expLd(x)), "§15 loads delivered: each week counts its days' deliveries (cancelled rows out)",
+			JSON.stringify(ld.map((x) => [x.weekStart, x.value, expLd(x)])));
+		const rv = rowsOf(wk, "revenue");
+		const expRv = (w) => {
+			const d = live.filter((l) => isDel(l) && l.day >= w.weekStart && l.day <= w.to && l.revenue > 0);
+			return d.length ? Math.round(d.reduce((s, l) => s + l.revenue, 0) * 100) / 100 : null;
+		};
+		t(rv.length === 14 && rv.every((x) => (x.value === null ? expRv(x) === null : close(x.value, expRv(x), 0.001))),
+			"§15 revenue: each week adds its delivered loads' Payment (cancelled and dropped rows out)", JSON.stringify(rv.map((x) => [x.weekStart, x.value, expRv(x)])));
+		const md = rowsOf(wk, "miles_driven");
+		t(md.length === 14 && md.every((x) => close(x.value, Math.round(eldMilesIn(x.weekStart, x.to) * 10) / 10, 0.001)),
+			"§15 miles driven: each week adds its ELD days", JSON.stringify(md.map((x) => [x.weekStart, x.value])));
+
+		// M1: an ELD row counts in the week of its stored (truck-local) day.
+		const eldX = W();
+		eldX.eldDaily = eldX.eldDaily.concat([{ day: "2026-10-03", truckId: TRUCK(1), miles: 777 }]);
+		const mdX = rowsOf(M.computeKpis(eldX), "miles_driven");
+		t(mdX.length === 14 && md.length === 14 && close(mdX[13].value, md[13].value + 777, 0.001) && mdX[12].value === md[12].value,
+			"§15 an ELD row on a Saturday stays in that Saturday's week: its stored day, never converted", JSON.stringify([mdX[12], mdX[13]]));
+
+		// Parity: with the as-of day 2026-10-31, the 14 weeks are exactly August to October.
+		const r31 = rowsOf(wk31, "loads_delivered");
+		t(r31.length === 14 && r31[0].weekStart === "2026-08-01" && r31[13].to === "2026-10-31", "§15 as of 2026-10-31 the 14 weeks cover August 1 to October 31");
+		const TOL = { count: 0, usd: 0.2, lb_tons: 1, t_co2: 1, miles: 1 };
+		for (const key of ["loads_delivered", "revenue", "miles_driven", "freight_tons_stated", "freight_tons_estimated", "co2_tonnes", "ai_tasks", "automated_tasks"]) {
+			const weeks = rowsOf(wk31, key).reduce((s, x) => s + (x.value || 0), 0);
+			const months = ["2026-08", "2026-09", "2026-10"].reduce((s, p) => s + ((ser(get(wk31, key), p) || {}).value || 0), 0);
+			t(rowsOf(wk31, key).length === 14 && Math.abs(weeks - months) <= TOL[C.metricByKey(key).unit] + 1e-9,
+				`§15 parity: ${key}'s weeks add up to its August-October months`, `${weeks} vs ${months}`);
+		}
+
+		// Before the records, gaps, and a week that straddles the first record.
+		const em = rowsOf(M.computeKpis(W({ asOfDay: "2026-07-10" })), "miles_driven");
+		const straddle = em.find((x) => x.weekStart === "2026-05-23");
+		t(em.length === 14 && em.filter((x) => x.to < "2026-05-28").every((x) => x.value === null && x.display === "No data") && straddle && straddle.value === 800,
+			"§15 weeks before the ELD records read No data; the week holding the first record is measured from it", JSON.stringify(straddle));
+		const gl = rowsOf(M.computeKpis(W({ asOfDay: "2026-01-09" })), "loads_delivered");
+		const dec = gl.find((x) => x.weekStart === "2025-12-06");
+		const oct = gl.find((x) => x.weekStart === "2025-10-11");
+		t(dec && dec.value === null && dec.display === "No records" && oct && oct.value === 0 && oct.display === "0",
+			"§15 a week with no rows reads No records; a week with rows but no delivery reads 0", JSON.stringify([dec, oct]));
+
+		// Comparisons: last week against the week before, under the monthly coverage rule.
+		const cur = rv[12] || {};
+		t(cur.vs && cur.vs.kind === "wow" && cur.vs.status === "ok" && cur.vs.label === "vs Sep 19-25" && close(cur.vs.value, rv[12].value) && close(cur.vs.baseValue, rv[11].value),
+			"§15 revenue: last week compared with the week before", JSON.stringify(cur.vs));
+		const thin = rowsOf(thinOut, "revenue");
+		t(thin[12] && thin[12].coverage === 0.5 && thin[12].vs && thin[12].vs.status === "withheld" && thin[12].vs.deltaPct === null,
+			"§15 a comparison is withheld when a week's revenue coverage is under 90%", JSON.stringify(thin[12]));
+		const ldThin = rowsOf(thinOut, "loads_delivered");
+		t(ldThin[12] && ldThin[12].vs && ldThin[12].vs.status === "ok", "§15 ...while a metric without the coverage rule still compares");
+
+		// Trucks in fleet: each week's Friday count; this week's is today's.
+		const ft = rowsOf(wk, "fleet_trucks");
+		t(ft.length === 14 && ft[12].value === 4 && ft[13].value === 3 && ft[13].partial === true && ft[12].vs && ft[12].vs.label === "vs Sep 19-25",
+			"§15 trucks in fleet: the Friday count, and today's for this week", JSON.stringify(ft.slice(11)));
+
+		// Which metrics are weekly.
+		for (const key of ["fuel_mpg", "fuel_savings", "paid_mile_share", "unloaded_miles"]) {
+			const b = wOf(wk, key);
+			t(b.mode === "monthly_only" && typeof b.reason === "string" && /^Monthly only: /.test(b.reason) && !("rows" in b),
+				`§15 ${key} is monthly only, with its reason and no weekly rows`, JSON.stringify(b));
+		}
+		t(wOf(wk, "dispatch_calls").mode === "not_tracked" && !("rows" in wOf(wk, "dispatch_calls")), "§15 dispatch calls: not tracked, no weekly rows");
+		const weeklyKeys = C.METRIC_KEYS.filter((k) => wOf(wk, k).mode === "weekly");
+		t(weeklyKeys.length === 15, "§15 15 of the 20 metrics are weekly", weeklyKeys.join());
+		t(rowsOf(wk, "paid_miles").length === 14 && rowsOf(wk, "paid_miles").every((x) => x.value === null),
+			"§15 a weekly metric with no figure this run still has its 14 weeks, none a number");
+
+		// Off is today: weekly only for exactly true, nothing monthly changed.
+		const off = M.computeKpis(world());
+		const strict = [false, "true", 1, "yes"].map((v) => M.computeKpis({ ...world(), weekly: v }));
+		t(strict.every((o) => JSON.stringify(o) === JSON.stringify(off)) && !/"weekly"/.test(JSON.stringify(off)),
+			"§15 weekly only for exactly true: false, \"true\", 1 and \"yes\" leave the output with no weekly field");
+		const strip = (o) => ({ ...o, metrics: o.metrics.map((m) => { const { weekly: _w, ...rest } = m; return rest; }) });
+		t(JSON.stringify(strip(wk)) === JSON.stringify(off), "§15 weekly figures change nothing monthly: the rest of the output equals the weekly-off run");
+		t(!/sentinel/i.test(JSON.stringify(wk)) && !/sentinel/i.test(JSON.stringify(wk31)), "§15 nothing identifying in the weekly rows");
+		const digest = crypto.createHash("sha256").update(JSON.stringify([off, out2, M.computeKpis({ asOfDay: AS_OF }), response])).digest("hex");
+		t(digest === BASE_DIGEST, "§15 with weekly off, computeKpis() and buildKpiResponse() are byte for byte the base's (pinned)", digest);
+
+		// buildKpiResponse(): the weekly block from stored rows, only with weekly: true.
+		const stored = (o) => o.metrics.flatMap((m) => (m.weekly && m.weekly.mode === "weekly" ? m.weekly.rows : []).map((x) => ({
+			metric_key: m.key, week_start: x.weekStart, week_end: x.weekEnd, to_day: x.to, partial: x.partial ? 1 : 0, label: x.label, value: x.value,
+			display: x.display, coverage: x.coverage, vs_label: x.vs ? x.vs.label : null, vs_display: x.vs ? x.vs.display : null,
+			vs_status: x.vs ? x.vs.status : null, computed_at: "2026-10-09T08:00:00.000Z", extra: "LOAD-SENTINEL-77",
+		}))).reverse();
+		const baseArgs = { asOfDay: AS_OF, timeZone: "America/New_York", settings: { recipients: [] }, derived: out.derived, snapshots: [], series: [], approvals: [], generatedAt: "2026-10-09T13:00:00Z" };
+		const plain = M.buildKpiResponse(baseArgs);
+		t(JSON.stringify(M.buildKpiResponse({ ...baseArgs, weekly: "true", weeklyRows: stored(wk) })) === JSON.stringify(plain) && !("weekly" in plain),
+			"§15 buildKpiResponse(): without weekly: true, stored weekly rows are never read");
+		const unknownRow = { metric_key: "zed_unknown", week_start: "2026-10-03", week_end: "2026-10-09", to_day: "2026-10-09", partial: 1, label: "x", value: 1, display: "1", coverage: null, vs_label: null, vs_display: null, vs_status: null };
+		const resp = M.buildKpiResponse({ ...baseArgs, weekly: true, weeklyRows: stored(thinOut).concat([unknownRow]) });
+		const rw = (key) => ((resp.metrics || []).find((m) => m.key === key) || {}).weekly || {};
+		t(resp.weekly && resp.weekly.weekRule === C.WEEK_RULE && resp.weekly.approvalNote === "This approval also covers its weekly figures."
+			&& /Saturday to Friday/.test(C.WEEK_RULE) && /each truck's local day/.test(C.WEEK_RULE), "§15 the answer names the week rule and the approve dialog's sentence", JSON.stringify(resp.weekly));
+		const lw = rw("loads_delivered");
+		t(lw.mode === "weekly" && lw.weekRule === C.WEEK_RULE && Array.isArray(lw.series) && lw.series.length === 14 && lw.series[0].weekStart === "2026-07-04"
+			&& lw.current && lw.current.weekStart === "2026-09-26" && lw.toDate && lw.toDate.partial === true && lw.toDate.to === AS_OF,
+		"§15 the weekly block from stored rows, oldest first: last week and this week so far", JSON.stringify({ c: lw.current, d: lw.toDate }));
+		t(lw.series && lw.series[0] && JSON.stringify(Object.keys(lw.series[0])) === JSON.stringify(["weekStart", "weekEnd", "to", "label", "value", "display", "coverage", "partial"]),
+			"§15 a week row carries exactly its fields");
+		t(lw.comparison && lw.comparison.kind === "wow" && lw.comparison.label === "vs Sep 19-25" && lw.comparison.status === "ok" && lw.comparison.note === "",
+			"§15 the comparison is last week's stored one", JSON.stringify(lw.comparison));
+		const rvw = rw("revenue");
+		t(rvw.comparison && rvw.comparison.status === "withheld" && rvw.comparison.display === "Not available" && /90%/.test(rvw.comparison.note),
+			"§15 a withheld comparison carries its note", JSON.stringify(rvw.comparison));
+		t(rw("fuel_mpg").mode === "monthly_only" && /^Monthly only/.test(rw("fuel_mpg").reason) && !("series" in rw("fuel_mpg")) && rw("dispatch_calls").mode === "not_tracked",
+			"§15 a monthly-only or not-tracked metric's block is its reason");
+		t(!/sentinel/i.test(JSON.stringify(resp)) && !(resp.metrics || []).some((m) => m.key === "zed_unknown"), "§15 only the named columns of known metrics are read from a stored row");
+		const none = M.buildKpiResponse({ ...baseArgs, weekly: true, weeklyRows: [] });
+		const nw = ((none.metrics || []).find((m) => m.key === "loads_delivered") || {}).weekly || {};
+		t(nw.mode === "weekly" && Array.isArray(nw.series) && nw.series.length === 0 && nw.current === null && nw.toDate === null && nw.comparison === null,
+			"§15 before the first weekly run: an empty block, nothing computed", JSON.stringify(nw));
+	}
 	return r;
 }
 
@@ -634,7 +811,23 @@ for (const x of real) {
 	if (x.ok) e.ok++;
 }
 for (const [s, e] of bySection) console.log(`${s}: ${e.ok}/${e.n} checks`);
+// Listed here as well as at the end, so they show even when a stale mutant
+// anchor stops the run below.
+for (const x of real) if (!x.ok) console.log(`  ✗ ${x.name}`);
 record(real);
+
+// §15 against a base checkout's lib/ itself, when one is named: the weekly-off
+// output of both, byte for byte, on the same fixtures.
+if (process.env.KPI_BASE_LIB) {
+	const baseDir = path.resolve(process.env.KPI_BASE_LIB);
+	const read = (f) => fs.readFileSync(path.join(baseDir, f), "utf8");
+	const baseCat = compileLib("kpi-catalog.js", read("kpi-catalog.js"));
+	const base = compileLib("kpi-metrics.js", read("kpi-metrics.js"), { "./kpi-catalog": baseCat });
+	const both = [world(), world({ asOfDay: "2026-11-09" }), { asOfDay: AS_OF }, { ...world(), weekly: false }];
+	const same = both.every((inputs) => JSON.stringify(base.computeKpis(inputs)) === JSON.stringify(REAL.metrics.computeKpis(inputs)));
+	console.log(`§15 against ${baseDir}: weekly-off output ${same ? "identical" : "DIFFERS"}`);
+	record([{ ok: same, name: "§15 the weekly-off output equals the named base's, byte for byte" }]);
+}
 
 // §14 MUTANTS: each must fail a check in the section that guards it.
 console.log("\n§14 mutants");
@@ -659,6 +852,17 @@ const MUTANTS = [
 	["the rate con's weight before the details'", "§3", { metrics: [["return fromDetails || fromRatecon;", "return fromRatecon || fromDetails;"]] }],
 	["a load id leaks into the breakdown", "§13", { metrics: [["display: formatDisplay(\"count\", undatedDelivered.length) }", "display: undatedDelivered.map((l) => l.loadId).join(\", \") }"]] }],
 	["a driver key leaks into the breakdown", "§13", { metrics: [["display: formatDisplay(\"units\", drivers.size) }", "display: [...drivers].join(\", \") }"]] }],
+	// R16: the weekly figures.
+	["a Monday-based week", "§15", { metrics: [["return addDays(day, -((new Date(noon(day)).getUTCDay() + 1) % 7));", "return addDays(day, -((new Date(noon(day)).getUTCDay() + 6) % 7));"]] }],
+	["ELD days converted to Eastern", "§15", { metrics: [[".map((r) => ({ truckId: trimmed(r.truckId), day: r.day, miles: r.miles }));", ".map((r) => ({ truckId: trimmed(r.truckId), day: new Date(r.day).toLocaleDateString(\"en-CA\", { timeZone }), miles: r.miles }));"]] }],
+	["Friday left out of its week", "§15", { metrics: [["const weekEnd = addDays(weekStart, 6);", "const weekEnd = addDays(weekStart, 5);"]] }],
+	["the week to date compared", "§15", { metrics: [["const vs = w.partial ? null : ", "const vs = "]] }],
+	["the weekly coverage rule skipped", "§15", { metrics: [["if (isNum(min) && !(isNum(c.coverage) && c.coverage >= min)) {", "if (false) {"]] }],
+	["a monthly-only metric given a series", "§15", { catalog: [["\tfuel_mpg: FUEL_MONTHLY,\n", ""]] }],
+	["the flag read as any truthy value", "§15", { metrics: [["const weekly = input.weekly === true;", "const weekly = !!input.weekly;"]] }],
+	["weekly figures folded into the monthly series", "§15", { metrics: [["\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") res.weekly = weeklyBlock(unit, ctx, cell, spec);\n",
+		"\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") { res.weekly = weeklyBlock(unit, ctx, cell, spec); res.series = res.series.concat(res.weekly.rows.map((w) => ({ period: w.weekStart, value: w.value, display: w.display, coverage: w.coverage }))); }\n"]] }],
+	["a stored weekly row read whole", "§15", { metrics: [["\t\t\trow: { weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,", "\t\t\trow: { ...r, weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,"]] }],
 ];
 for (const [name, section, edits] of MUTANTS) {
 	let catalogSrc = SOURCES.catalog;

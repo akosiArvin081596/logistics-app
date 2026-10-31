@@ -62,6 +62,14 @@
  *    a manual run, the flag off, a replica or no key), cached by their points.
  *    The weight phase's loop now lives in lib/kpi-ratecon-pass.js; its mutants
  *    edit that module and run the shipped block over it.
+ * §13 R16 weekly figures (KPI_WEEKLY_ENABLED, exactly "true"): kpi_series_weekly's
+ *    columns and key, created whatever the flag; off, computeKpis() gets no
+ *    weekly input, the table is untouched, no start is recorded and the response
+ *    builder gets the base arguments; on, the start recorded once, the table
+ *    replaced (DELETE, then INSERT) in the run's one transaction (a failed insert
+ *    leaves the old rows, series and snapshots), rows only for weekly metrics
+ *    and real weeks, the snapshot rows and monthly series exactly the flag-off
+ *    run's, and the response builder gets the rows' named columns.
  * §11 MUTANTS: claim-before-send dropped; the preview latch set although the
  *    send failed; the preview sent to the page's recipients; no first-start
  *    digest marker; a 41st Drive load; the not-found cache ignored; the time
@@ -261,6 +269,15 @@ function fakeLibs(log) {
 			log.inputs.push(inputs);
 			if (log.computeThrows) throw new Error(`compute failed for ${BROKER}`);
 			const n = log.inputs.length;
+			// R16: weekly rows only when the run asks for them (one row that is not a
+			// real week, which the store drops); fuel_mpg is monthly only.
+			const weekly = inputs && inputs.weekly === true;
+			const weekRows = () => [
+				{ weekStart: "2026-09-26", weekEnd: "2026-10-02", to: "2026-10-02", label: "Sep 26-Oct 2, 2026", value: n, display: String(n), coverage: 1, partial: false,
+					vs: { kind: "wow", label: "vs Sep 19-25", basePeriod: "2026-09-19", value: n, baseValue: 1, deltaPct: 0, display: "+0.0%", status: "ok" } },
+				{ weekStart: "2026-10-03", weekEnd: "2026-10-09", to: "2026-10-09", label: "Oct 3-9, 2026 (to date)", value: n, display: String(n), coverage: null, partial: true, vs: null },
+				{ weekStart: "2026-13-01", weekEnd: "2026-13-07", to: "2026-13-07", label: "not a week", value: n, display: String(n), coverage: null, partial: false, vs: null },
+			];
 			return {
 				metrics: METRIC_KEYS.map((key) => ({
 					key, status: key === "dispatch_calls" ? "not_tracked" : "ok", missingReason: null, value: n, display: String(n),
@@ -268,6 +285,7 @@ function fakeLibs(log) {
 					totals: [], series: [{ period: "2026-08", value: n, display: String(n), coverage: 1 }, { period: "2026-09", value: n, display: String(n), coverage: 0.5 }],
 					comparisons: [], beforeAfter: [], coverage: { num: 1, den: 1, ratio: 1, what: "loads", from: null, to: null },
 					confidence: "high", warnings: [], assumptions: [], breakdown: key === "ai_tasks" && log.bigBreakdown ? [{ label: "x".repeat(5000), value: 1, display: "1" }] : [{ label: "AI rate-cons", value: n, display: String(n) }],
+					...(weekly ? { weekly: key === "fuel_mpg" ? { mode: "monthly_only", reason: "Monthly only: fuel receipts don't line up with weeks." } : { mode: "weekly", rows: weekRows() } } : {}),
 				})),
 				derived: { aiDispatchStart: { value: "2026-04-09", evidence: "First delivered load through the AI email path; 5 such loads in the 14 days from 2026-04-09." } },
 				errors: log.computeErrors || [],
@@ -445,7 +463,7 @@ const storageSection = section(async (t, block = BLOCK) => {
 	const closed = one(w, "SELECT status, errors FROM kpi_runs WHERE day = '2026-10-08'");
 	t(closed.status === "failed" && JSON.parse(closed.errors)[0].code === "INTERRUPTED", "§1 a run left 'running' by a stopped process is closed as INTERRUPTED");
 	const again = world({ block, db: w.db });
-	t(again.k && all(w, "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'kpi_%'").length === 8, "§1 the DDL runs again on an existing database (a restart; 8 tables since R10)");
+	t(again.k && all(w, "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'kpi_%'").length === 9, "§1 the DDL runs again on an existing database (a restart; 9 tables since R16)");
 	const shape = (name) => new RegExp(`^const ${name} = !/\\^\\(false\\|0\\|no\\|off\\)\\$/i\\.test\\(String\\(process\\.env\\.${name} \\?\\? ""\\)\\.trim\\(\\)\\);$`, "m").test(block);
 	t(shape("KPI_SNAPSHOT_ENABLED") && shape("KPI_DIGEST_ENABLED"), "§1 both switches have the kill-switch shape");
 	for (const [v, on] of [[undefined, true], ["", true], ["true", true], ["yes", true], ["false", false], ["0", false], ["no", false], [" OFF ", false]]) {
@@ -585,6 +603,81 @@ const runSection = section(async (t, block = BLOCK) => {
 	w.log.computeThrows = true;
 	const cf = await w.k.runKpiSnapshot("manual");
 	t(one(w, "SELECT status, errors FROM kpi_runs WHERE id = ?", cf.runId).errors === JSON.stringify([{ metric: null, code: "COMPUTE_FAILED" }]), "§5 a compute failure: COMPUTE_FAILED, nothing else");
+});
+
+// ─────────────────────────────────────────── §13 R16 weekly figures
+const WEEKLY_COLUMNS = "metric_key,week_start,week_end,to_day,partial,label,value,display,coverage,vs_label,vs_display,vs_status";
+const weeklySection = section(async (t, block = BLOCK) => {
+	const ON = { KPI_WEEKLY_ENABLED: "true" };
+	const cols = (w, tbl) => all(w, `PRAGMA table_info(${tbl})`).map((c) => c.name).join(",");
+	const pk = (w, tbl) => all(w, `PRAGMA table_info(${tbl})`).filter((c) => c.pk).sort((a, b) => a.pk - b.pk).map((c) => c.name).join(",");
+	const since = (w) => one(w, "SELECT value FROM server_state WHERE key = 'kpi.weekly_since'");
+	const stale = (w) => w.db.prepare("INSERT INTO kpi_series_weekly (metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, computed_at) VALUES ('revenue', '2026-01-03', '2026-01-09', '2026-01-09', 0, 'Jan 3-9, 2026', 1, '$1', 1, 'x')").run();
+	const stored = (w) => ({
+		snaps: all(w, "SELECT day, metric_key, value, display, status, confidence, definition_version, payload FROM kpi_snapshots ORDER BY day, metric_key"),
+		series: all(w, "SELECT metric_key, period, value, display, coverage FROM kpi_series ORDER BY metric_key, period"),
+	});
+
+	// Off, the default.
+	const off = world({ block });
+	t(cols(off, "kpi_series_weekly") === `${WEEKLY_COLUMNS},computed_at` && pk(off, "kpi_series_weekly") === "metric_key,week_start",
+		"§13 kpi_series_weekly: its columns and (metric_key, week_start) key, created with the flag off too");
+	t(off.log.logs.includes("[kpi] weekly figures off (KPI_WEEKLY_ENABLED)"), "§13 flag off: the start-up line says so");
+	stale(off);
+	await off.k.runKpiSnapshot("nightly");
+	t(off.log.inputs.length === 1 && !("weekly" in off.log.inputs[0]), "§13 flag off: computeKpis() gets no weekly input");
+	t(all(off, "SELECT week_start FROM kpi_series_weekly").map((r) => r.week_start).join() === "2026-01-03", "§13 flag off: the run leaves kpi_series_weekly untouched");
+	t(!since(off), "§13 flag off: no weekly start is recorded");
+	off.k.kpiResponse(Date.now());
+	const offArgs = off.log.builds[off.log.builds.length - 1] || {};
+	t(Object.keys(offArgs).join() === "asOfDay,timeZone,generatedAt,job,settings,approvalSettings,defaultRecipientConfigured,derived,snapshots,series,approvals",
+		"§13 flag off: the response builder gets exactly the base arguments, and no weekly row", Object.keys(offArgs).join());
+
+	// On.
+	const on = world({ block, env: ON });
+	t(on.log.logs.includes("[kpi] weekly figures on (KPI_WEEKLY_ENABLED)"), "§13 flag on: the start-up line says so");
+	t(since(on) && since(on).value === "2026-10-09T08:30:00.000Z", "§13 the first start with the flag on records when weekly figures began");
+	stale(on);
+	await on.k.runKpiSnapshot("nightly");
+	t(on.log.inputs.length === 1 && on.log.inputs[0].weekly === true, "§13 flag on: computeKpis() gets weekly: true");
+	const rows = all(on, "SELECT * FROM kpi_series_weekly ORDER BY metric_key, week_start");
+	t(!rows.some((r) => r.week_start === "2026-01-03"), "§13 the run replaces the table: an older run's row is gone");
+	t(rows.length === 30 && !rows.some((r) => r.metric_key === "fuel_mpg") && !rows.some((r) => r.week_start === "2026-13-01"),
+		"§13 two weeks for each weekly metric; none for a monthly-only one, none that is not a real week", `${rows.length} rows`);
+	const done = rows.find((r) => r.metric_key === "revenue" && r.week_start === "2026-09-26") || {};
+	const open = rows.find((r) => r.metric_key === "revenue" && r.week_start === "2026-10-03") || {};
+	t(done.week_end === "2026-10-02" && done.to_day === "2026-10-02" && done.partial === 0 && done.label === "Sep 26-Oct 2, 2026" && done.value === 1 && done.coverage === 1
+		&& done.vs_label === "vs Sep 19-25" && done.vs_display === "+0.0%" && done.vs_status === "ok" && /Z$/.test(done.computed_at),
+	"§13 a complete week's row, with its comparison", JSON.stringify(done));
+	t(open.partial === 1 && open.to_day === "2026-10-09" && open.vs_label === null && open.vs_status === null && open.coverage === null,
+		"§13 the week to date: partial, no comparison", JSON.stringify(open));
+	const offStored = stored(off);
+	const onStored = stored(on);
+	t(JSON.stringify(onStored.snaps) === JSON.stringify(offStored.snaps), "§13 flag on: the snapshot rows and their payloads are the flag-off run's");
+	t(JSON.stringify(onStored.series) === JSON.stringify(offStored.series), "§13 flag on: the monthly series is the flag-off run's");
+	on.k.kpiResponse(Date.now());
+	const onArgs = on.log.builds[on.log.builds.length - 1] || {};
+	t(onArgs.weekly === true && Array.isArray(onArgs.weeklyRows) && onArgs.weeklyRows.length === 30 && Object.keys(onArgs.weeklyRows[0] || {}).join() === WEEKLY_COLUMNS,
+		"§13 flag on: the response builder gets weekly: true and the stored rows' named columns");
+
+	// A failed weekly write rolls the whole store back.
+	on.db.exec("CREATE TRIGGER zed_refuse_weekly BEFORE INSERT ON kpi_series_weekly BEGIN SELECT RAISE(ABORT, 'refused'); END");
+	const before = { ...stored(on), weekly: all(on, "SELECT * FROM kpi_series_weekly ORDER BY metric_key, week_start") };
+	on.clock.ms += 3600000;
+	const failed = await on.k.runKpiSnapshot("manual");
+	const fr = one(on, "SELECT status, errors FROM kpi_runs WHERE id = ?", failed.runId) || {};
+	const after = { ...stored(on), weekly: all(on, "SELECT * FROM kpi_series_weekly ORDER BY metric_key, week_start") };
+	t(fr.status === "failed" && /WRITE_FAILED/.test(fr.errors) && JSON.stringify(after) === JSON.stringify(before),
+		"§13 a failed weekly insert fails the run and leaves the old weekly rows, series and snapshots", fr.errors);
+	on.db.exec("DROP TRIGGER zed_refuse_weekly");
+
+	// A restart keeps the first start; only exactly "true" turns it on.
+	const again = world({ block, env: ON, db: on.db, now: "2026-10-12T08:30:00Z" });
+	t(since(again) && since(again).value === "2026-10-09T08:30:00.000Z", "§13 a restart keeps the first weekly start");
+	for (const v of ["1", "yes", "on", "TRUE", " true"]) {
+		const x = world({ block, env: { KPI_WEEKLY_ENABLED: v } });
+		t(x.log.logs.includes("[kpi] weekly figures off (KPI_WEEKLY_ENABLED)") && !since(x), `§13 KPI_WEEKLY_ENABLED=${JSON.stringify(v)} is off: only exactly "true" turns it on`);
+	}
 });
 
 // ─────────────────────────────────────────── §6 the weight phase
@@ -1017,6 +1110,7 @@ const failed = (results) => results.some((x) => !x.ok);
 		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection], ["§6b the weight phase's limits", weightLimitsSection], ["§6c an earlier text rule's no_text", textRuleSection],
 		["§7 the time box", timeSection], ["§8 emails", emailSection], ["§8 the first-start digest marker", seedSection],
 		["§9 the scheduler", schedulerSection], ["§10 aggregates only", aggregateSection], ["§12 R10 wiring", milesWiringSection],
+		["§13 R16 weekly figures", weeklySection],
 	];
 	for (const [title, fn] of sections) {
 		console.log(`\n${title}`);
@@ -1076,6 +1170,12 @@ const failed = (results) => results.some((x) => !x.ok);
 		["route pairs chosen without the ELD truck-days", milesWiringSection, swap(BLOCK, "milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone", "milesLoads: inputs.milesLoads, timeZone")],
 		["a month refused for the contract start", milesWiringSection, swap(BLOCK, "dedicatedStart: kpiSettingMonthOrDay(r.dedicatedStart) ? r.dedicatedStart : null,", "dedicatedStart: kpiSettingDay(r.dedicatedStart) ? r.dedicatedStart : null,")],
 		["SELECT * on expenses", gatherSection, swap(BLOCK, "`SELECT date, amount, gallons, status FROM ${expenseFrom(\"world\")} WHERE LOWER(type) = 'fuel'`", "`SELECT * FROM ${expenseFrom(\"world\")} WHERE LOWER(type) = 'fuel'`")],
+		// R16: the weekly figures' wiring.
+		["weekly figures on for any truthy value", weeklySection, swap(BLOCK, "const KPI_WEEKLY_ENABLED = process.env.KPI_WEEKLY_ENABLED === \"true\";", "const KPI_WEEKLY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.KPI_WEEKLY_ENABLED ?? \"\").trim());")],
+		["the weekly table written with the flag off", weeklySection, swap(BLOCK, "const weeklyInsert = KPI_WEEKLY_ENABLED ? db.prepare(", "const weeklyInsert = true ? db.prepare(")],
+		["the weekly table not cleared before the run's rows", weeklySection, swap(BLOCK, "\t\t\tdb.prepare(\"DELETE FROM kpi_series_weekly\").run();\n", "")],
+		["the weekly start rewritten by every start", weeklySection, swap(BLOCK, "INSERT OR IGNORE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)\").run(KPI_WEEKLY_SINCE_KEY", "INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)\").run(KPI_WEEKLY_SINCE_KEY")],
+		["the stored weekly rows passed with the flag off", weeklySection, swap(BLOCK, "const weeklyArgs = KPI_WEEKLY_ENABLED\n", "const weeklyArgs = true\n")],
 	];
 	const results = [];
 	for (const [name, fn, src, passSrc] of mutants) {

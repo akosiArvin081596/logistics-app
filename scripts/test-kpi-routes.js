@@ -44,6 +44,11 @@
  *    recompute not single-flight; the block moved below app.get("*"); a metric
  *    with no approval row shown approved.
  *
+ * §9 R16 weekly figures: with KPI_WEEKLY_ENABLED off, rows stored in
+ *    kpi_series_weekly change nothing in GET's answer and the builder gets the
+ *    base arguments; on, GET carries the stored rows, computes nothing, reads no
+ *    sheet and stays Super Admin only.
+ *
  * Hermetic: :memory: SQLite, 127.0.0.1 port 0, no network beyond it, nothing
  * written to disk.
  *
@@ -184,7 +189,11 @@ function fakeLibs(log) {
 					dedicatedStart: { value: args.settings.dedicatedStart, source: args.settings.dedicatedStart ? "admin" : null },
 					baselineMpg: args.settings.baselineMpg, recipients: args.settings.recipients, defaultRecipientConfigured: args.defaultRecipientConfigured,
 				},
-				metrics: METRICS.map((m) => ({ key: m.key, label: m.label, kind: m.kind, status: "ok", display: "1", approval: { approved: true, by: null, at: null, stale: false } })),
+				metrics: METRICS.map((m) => ({
+					key: m.key, label: m.label, kind: m.kind, status: "ok", display: "1", approval: { approved: true, by: null, at: null, stale: false },
+					// R16: the stored weekly rows' displays, only when the server says weekly is on.
+					...(args.weekly === true ? { weekly: (args.weeklyRows || []).filter((r) => r.metric_key === m.key).map((r) => r.display) } : {}),
+				})),
 			};
 		},
 	};
@@ -212,7 +221,7 @@ const JT = {
 function deferred() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
 
 // A fresh world: in-memory DB, the block executed on a real Express app.
-async function startWorld(block = BLOCK) {
+async function startWorld(block = BLOCK, env = {}) {
 	const log = { computes: 0, builds: 0, sheetReads: 0, driveCalls: 0, events: [], logs: [] };
 	const libs = fakeLibs(log);
 	const db = new Database(":memory:");
@@ -238,7 +247,7 @@ async function startWorld(block = BLOCK) {
 			if (!(p in map)) throw new Error(`the KPI block required an unexpected module: ${p}`);
 			return map[p];
 		},
-		process: { env: {} },
+		process: { env },
 		buildHaulTruckResolver: () => ({ forDriverAt: () => null }),
 		REPLICA: null,
 		GOOGLE_MAPS_API_KEY: "",
@@ -557,6 +566,48 @@ function record(results) {
 	for (const x of results) { if (x.ok) pass++; else failures.push(x.name); }
 	console.log(`  ${results.filter((x) => x.ok).length}/${results.length} checks`);
 }
+// ─────────────────────────────────────────── §9 R16 weekly figures on GET
+// With KPI_WEEKLY_ENABLED off, GET reads no weekly row and the builder gets the
+// base arguments, so the answer is the base block's; on, it carries the stored
+// weekly rows and still computes nothing.
+async function weeklyGetSection(block) {
+	const r = [];
+	const t = (cond, name) => r.push({ ok: !!cond, name });
+	const seed = (w) => {
+		const ins = w.db.prepare("INSERT INTO kpi_series_weekly (metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+		ins.run("loads_delivered", "2026-09-26", "2026-10-02", "2026-10-02", 0, "Sep 26-Oct 2, 2026", 14, "14", null, "vs Sep 19-25", "+16.7%", "ok", "2026-10-09T08:00:00.000Z");
+		ins.run("loads_delivered", "2026-10-03", "2026-10-09", "2026-10-09", 1, "Oct 3-9, 2026 (to date)", 3, "3", null, null, null, null, "2026-10-09T08:00:00.000Z");
+	};
+	const strip = (body) => JSON.stringify({ ...body, generatedAt: null });
+	const off = await startWorld(block);
+	try {
+		const before = await off.call("GET", "/api/admin/kpis");
+		seed(off);
+		const after = await off.call("GET", "/api/admin/kpis");
+		t(before.status === 200 && strip(after.body) === strip(before.body) && !/"weekly"/.test(JSON.stringify(after.body)),
+			"§9 flag off: stored weekly rows change nothing in the answer, which has no weekly field");
+		t(Object.keys(off.log.lastBuild || {}).join() === "asOfDay,timeZone,generatedAt,job,settings,approvalSettings,defaultRecipientConfigured,derived,snapshots,series,approvals",
+			`§9 flag off: the builder gets exactly the base arguments (${Object.keys(off.log.lastBuild || {}).join()})`);
+	} catch (e) {
+		t(false, `§9 section threw: ${e && e.message}`);
+	} finally { await off.close(); }
+	const on = await startWorld(block, { KPI_WEEKLY_ENABLED: "true" });
+	try {
+		seed(on);
+		const g = await on.call("GET", "/api/admin/kpis");
+		const ld = g.body && Array.isArray(g.body.metrics) ? g.body.metrics.find((m) => m.key === "loads_delivered") : null;
+		t(g.status === 200 && ld && JSON.stringify(ld.weekly) === JSON.stringify(["14", "3"]) && on.log.lastBuild.weekly === true,
+			`§9 flag on: GET carries the stored weekly rows (${JSON.stringify(ld && ld.weekly)})`);
+		t(on.log.computes === 0 && on.log.sheetReads === 0, "§9 flag on: GET computed nothing and read no sheet");
+		t(g.body.metrics.every((m) => m.approval.approved === false), "§9 flag on: no metric shown approved without a valid row");
+		const d = await on.call("GET", "/api/admin/kpis", { user: USERS.Dispatcher });
+		t(d.status === 403, "§9 flag on: still Super Admin only (a Dispatcher gets 403)");
+	} catch (e) {
+		t(false, `§9 section threw: ${e && e.message}`);
+	} finally { await on.close(); }
+	return r;
+}
+
 const failed = (results) => results.some((x) => !x.ok);
 
 (async () => {
@@ -574,6 +625,8 @@ const failed = (results) => results.some((x) => !x.ok);
 	record(await recomputeSection(BLOCK));
 	console.log("\n§7 the names the block uses");
 	record(namesSection());
+	console.log("\n§9 R16 weekly figures on GET");
+	record(await weeklyGetSection(BLOCK));
 
 	console.log("\n§8 MUTANTS");
 	const swap = (src, from, to) => { if (!src.includes(from)) die(`mutant anchor not found: ${from}`); return src.replace(from, to); };
@@ -605,6 +658,8 @@ const failed = (results) => results.some((x) => !x.ok);
 		() => settingsSection(swap(BLOCK, "auditText(changed.map(said).join(\"; \"), 2000));", "auditText(changed.map((k) => `${k}: ${shown(k, before[k])} → ${shown(k, next[k])}`).join(\"; \"), 2000));"))]);
 	mutants.push(["a metric with no approval row shown approved",
 		() => getSection(swap(BLOCK, "const valid = Boolean(row) && kpiCatalog.approvalIsValid(row, m.key, settings);", "const valid = !row || kpiCatalog.approvalIsValid(row, m.key, settings);"))]);
+	mutants.push(["the stored weekly rows read with KPI_WEEKLY_ENABLED off",
+		() => weeklyGetSection(swap(BLOCK, "const weeklyArgs = KPI_WEEKLY_ENABLED\n", "const weeklyArgs = true\n"))]);
 	mutants.push(["the KPI block moved below app.get(\"*\")", async () => {
 		const catchAll = SRC.indexOf('\napp.get("*"');
 		const catchAllEnd = SRC.indexOf("\n});\n", catchAll) + "\n});\n".length;
