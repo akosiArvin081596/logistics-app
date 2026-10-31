@@ -7,6 +7,7 @@ import { driverInstructionsUrl, entryAfter, entryLoading, instructionsKey } from
 import { voiceNoteLabel } from '../lib/voiceNoteText'
 import { uploadVoiceNote } from '../lib/voiceNoteUpload'
 import { contactCounts } from '../lib/emergencyContacts'
+import { normalizePlacement } from '../lib/driverVideos'
 
 const api = useApi()
 
@@ -56,6 +57,10 @@ export const useDriverStore = defineStore('driver', {
     // never the contacts (EmergencyContactsForm.vue reads those itself). null when
     // the payload has no `emergencyContacts` key (EMERGENCY_CONTACTS_ENABLED off).
     emergencyContacts: null,
+    // Where the training videos show: "onboarding" (the lock screen) or "kit", as
+    // the server decided from his onboarding status. null when the payload has no
+    // `trainingVideos` key (DRIVER_TRAINING_VIDEOS_ENABLED off) or names neither.
+    trainingVideos: null,
     // Rate-con load instructions per load key (lib/loadInstructions.js entries):
     // GET /api/driver/loads/:loadId/instructions's last answer, read when a load
     // opens and again on `driver-instructions-changed`.
@@ -366,6 +371,7 @@ export const useDriverStore = defineStore('driver', {
         this.driverDirectoryId = data.driverDirectoryId || 0
         this.timeOff = data.timeOff && typeof data.timeOff === 'object' && !Array.isArray(data.timeOff) ? data.timeOff : null
         this.emergencyContacts = contactCounts(data.emergencyContacts)
+        this.trainingVideos = normalizePlacement(data.trainingVideos)
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {
