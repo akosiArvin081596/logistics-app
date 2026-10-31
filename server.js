@@ -7509,7 +7509,9 @@ app.use(withheldLoadKeyGate);
 // that is set, ahead of the build's copy in the static mount below. It sees every
 // path, so it sits above every route (lib/policy-template-folders.js).
 const policyTemplateFolders = require("./lib/policy-template-folders");
-app.use(policyTemplateFolders.substancePolicyPdf());
+// Its limiter runs first in the same mount and counts only the requests the route
+// answers itself, so while the setting is unset nothing is counted.
+app.use(rateLimit(policyTemplateFolders.substancePolicyPdfLimits()), policyTemplateFolders.substancePolicyPdf());
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================

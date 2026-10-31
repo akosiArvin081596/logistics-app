@@ -28,17 +28,23 @@
  *      other path or method is answered as without the route, a failed
  *      precondition (412) or a range past the end (416) is answered exactly
  *      as the static mount alone answers it, with no log line, and a PDF that
- *      can't be served is a 503 that never carries the build's copy
+ *      can't be served is a 503 that never carries the build's copy. Then
+ *      with the route's limiter in front, mounted as server.js mounts it:
+ *      unset or blank, the same answers as the static mount alone and nothing
+ *      counted; set, what the route passes on is neither counted nor given a
+ *      RateLimit header, the route's own answers are counted per client, and
+ *      the request after the limit gets the limiter's 429
  *   §7 the start log: nothing while unset; where each document is read from
  *      and what can't be read, never a folder
- *   §8 server.js mounts the route once, after the load-key gate and above
- *      every route (so ahead of the static mount), and names no folder
- *      setting itself
+ *   §8 server.js mounts the route once, with its limiter first in the same
+ *      mount, after the load-key gate and above every route (so ahead of the
+ *      static mount), and names no folder setting itself
  *   §9 renders with a stand-in page (no browser; the fill code runs on a stub
  *      document): each document read from a folder of copies of the repo's
  *      templates fills its required labels, the folder's text is what reaches
  *      the page, and a copy that lost a required label is refused
- *   §10 mutants: each guard removed or loosened flips a case above
+ *   §10 mutants: each guard removed or loosened flips a case above, the
+ *      limiter's included (in the module, and in server.js's mount)
  *
  * Made-up data only; folders and files under a fresh mkdtemp folder; the
  * made-up apps listen on port 0 of the loopback. No browser, database or
@@ -54,6 +60,7 @@ const path = require("path");
 const http = require("http");
 const Module = require("module");
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { serverSource } = require("./lib/server-source");
 
 const ROOT = path.join(__dirname, "..");
@@ -688,6 +695,126 @@ async function g6Route({ F, check, skipCase }) {
 	}
 }
 
+// Made-up client addresses (documentation ranges), read from X-Forwarded-For under
+// `trust proxy` 1, as server.js sets it.
+const CLIENT_A = "192.0.2.10";
+const CLIENT_B = "198.51.100.7";
+const FROM_A = { "X-Forwarded-For": CLIENT_A };
+// An answer's view without the limiter's own headers.
+const isRateHeader = (k) => /^(x-)?ratelimit-/.test(k) || k === "retry-after";
+const viewWithoutRate = (r) => view({ ...r, headers: Object.fromEntries(Object.entries(r.headers).filter(([k]) => !isRateHeader(k))) });
+// The static mount's answers alone don't depend on the code under test: the first run keeps them.
+const staticViews = new Map();
+
+async function g6Limiter({ F, check }) {
+	if (!F || typeof F.substancePolicyPdfLimits !== "function") { check("§6 the route's limiter options exist (substancePolicyPdfLimits)", false); return; }
+	const servers = [];
+	const passOn = (req, res) => res.status(404).type("text").send("passed on");
+	const start = (app) => new Promise((resolve) => {
+		const s = app.listen(0, "127.0.0.1", () => resolve(s.address().port));
+		servers.push(s);
+	});
+	const ahead = (...handlers) => { const app = express(); app.set("trust proxy", 1); if (handlers.length) app.use(...handlers); app.use(express.static(FX.dist)); app.use(passOn); return app; };
+	// As server.js mounts them: the limiter, then the route, in one mount ahead of the static mount.
+	const limited = async (env) => {
+		const limiter = rateLimit(F.substancePolicyPdfLimits({ env }));
+		return { port: await start(ahead(limiter, F.substancePolicyPdf({ env }))), limiter };
+	};
+	const limits = F.substancePolicyPdfLimits({});
+	const FOLDER = fs.readFileSync(path.join(FX.route, PDF));
+	try {
+		const alone = await start(ahead());
+		const routeAlone = await start(ahead(F.substancePolicyPdf({ env: { [SUB]: FX.route } })));
+		const unset = await limited({});
+		const blank = await limited({ [SUB]: "   " });
+		const set = await limited({ [SUB]: FX.route });
+		takeLogs();
+		const staticView = async (method, p) => {
+			const key = `${method} ${p}`;
+			if (!staticViews.has(key)) staticViews.set(key, view(await request(alone, method, p)));
+			return staticViews.get(key);
+		};
+
+		check("§6 limiter: per client, 300 requests a minute, with the standard RateLimit headers only",
+			limits.windowMs === 60 * 1000 && limits.max === 300 && limits.standardHeaders === true && limits.legacyHeaders === false,
+			{ windowMs: limits.windowMs, max: limits.max });
+
+		// Unset or blank: the same answers as the static mount alone, and nothing counted.
+		const asked = [...[...SPELLINGS.map(([p]) => p), ...OTHERS].flatMap((p) => [["GET", p], ["HEAD", p]]),
+			...["POST", "PUT", "DELETE", "OPTIONS"].map((m) => [m, LINK])];
+		let same = 0;
+		const differ = [];
+		for (const [method, p] of asked) {
+			const want = await staticView(method, p);
+			for (const [label, app] of [["unset", unset], ["blank", blank]]) {
+				if (view(await request(app.port, method, p)) === want) same++;
+				else differ.push(`${label} ${method} ${p}`);
+			}
+		}
+		check(`§6 limiter in front, unset or blank: all ${same + differ.length} answers equal the static mount's alone (status, body, headers)`,
+			differ.length === 0, differ.slice(0, 5));
+		check("§6 limiter in front, unset or blank: no request is counted",
+			(await unset.limiter.getKey("127.0.0.1")) === undefined && (await blank.limiter.getKey("127.0.0.1")) === undefined);
+
+		// Set: what the route passes on is answered as without it, neither counted nor given a header.
+		const passedOn = [...[...OTHERS, ...SPELLINGS.filter(([, serves]) => !serves).map(([p]) => p)].flatMap((p) => [["GET", p], ["HEAD", p]]),
+			...["POST", "PUT", "DELETE", "OPTIONS"].map((m) => [m, LINK])];
+		const passedOnDiffer = async () => {
+			const found = [];
+			for (const [method, p] of passedOn) {
+				if (view(await request(set.port, method, p, FROM_A)) !== await staticView(method, p)) found.push(`${method} ${p}`);
+			}
+			return found;
+		};
+		let wrong = await passedOnDiffer();
+		check(`§6 limiter, set: the ${passedOn.length} requests the route passes on are answered as without it, with no RateLimit header`,
+			wrong.length === 0, wrong.slice(0, 5));
+		check("§6 limiter, set: ...and none of them is counted", (await set.limiter.getKey(CLIENT_A)) === undefined);
+
+		// Set: the route's own answers are counted, and otherwise unchanged.
+		const first = await request(set.port, "GET", LINK, FROM_A);
+		const plain = await request(routeAlone, "GET", LINK);
+		check("§6 limiter, set: the link gets the folder's PDF, counted (RateLimit-Policy 300;w=60, 299 remaining)",
+			first.status === 200 && first.body.equals(FOLDER) && first.headers["ratelimit-policy"] === "300;w=60" &&
+			first.headers["ratelimit-limit"] === "300" && first.headers["ratelimit-remaining"] === "299",
+			[first.status, first.headers["ratelimit-policy"], first.headers["ratelimit-remaining"]]);
+		check("§6 limiter, set: ...otherwise the route's own answer, and no legacy X-RateLimit header",
+			viewWithoutRate(first) === viewWithoutRate(plain) && !Object.keys(first.headers).some((k) => k.startsWith("x-ratelimit")));
+
+		// Every spelling of the link counts, and so does HEAD; the request after the limit gets the limiter's 429.
+		const shapes = [...SPELLINGS.filter(([, serves]) => serves).map(([p]) => ["GET", p]), ["HEAD", LINK]];
+		const off = [];
+		for (let n = 2; n <= limits.max; n++) {
+			const [method, p] = shapes[n % shapes.length];
+			const r = await request(set.port, method, p, FROM_A);
+			if (r.status !== 200 || r.headers["ratelimit-remaining"] !== String(limits.max - n)) off.push(`${n}: ${method} ${p} ${r.status} ${r.headers["ratelimit-remaining"]}`);
+		}
+		check(`§6 limiter, set: the first ${limits.max} requests for the link (its spellings, and HEAD) are served, counting down to 0`,
+			off.length === 0, off.slice(0, 3));
+		const over = await request(set.port, "GET", LINK, FROM_A);
+		const retry = Number(over.headers["retry-after"]);
+		check("§6 limiter, set: the request after the limit gets the limiter's 429, with Retry-After and no file",
+			over.status === 429 && over.body.toString() === limits.message && retry > 0 && retry <= 60 &&
+			over.headers["ratelimit-remaining"] === "0" && !over.body.equals(FOLDER),
+			[over.status, over.headers["retry-after"], over.body.toString().slice(0, 60)]);
+		const overHead = await request(set.port, "HEAD", "/POLICIES/LOGISX-SUBSTANCE-POLICY.PDF", FROM_A);
+		check("§6 limiter, set: ...as does any other spelling, and HEAD", overHead.status === 429 && overHead.body.length === 0, overHead.status);
+		wrong = await passedOnDiffer();
+		check("§6 limiter, set, that client over the limit: what the route passes on is still answered as without it", wrong.length === 0, wrong.slice(0, 5));
+		const other = await request(set.port, "GET", LINK, { "X-Forwarded-For": CLIENT_B });
+		check("§6 limiter, set: the limit is per client: another address still gets the folder's PDF (299 remaining)",
+			other.status === 200 && other.body.equals(FOLDER) && other.headers["ratelimit-remaining"] === "299",
+			[other.status, other.headers["ratelimit-remaining"]]);
+		const direct = await request(set.port, "GET", LINK);
+		const directHits = await set.limiter.getKey("127.0.0.1");
+		check("§6 limiter, set: a request with no forwarded address counts under the loopback's, the key the unset check reads",
+			direct.status === 200 && Boolean(directHits) && directHits.totalHits === 1, directHits);
+		check("§6 limiter: no log line while the apps answer", takeLogs().length === 0);
+	} finally {
+		for (const s of servers) s.close();
+	}
+}
+
 // --- §7 the start log -----------------------------------------------------------------
 function g7StartLog({ F, check }) {
 	if (!F) { check("§7 the start log exists", false); return; }
@@ -714,21 +841,26 @@ function g7StartLog({ F, check }) {
 }
 
 // --- §8 server.js -----------------------------------------------------------------------
-function g8Server() {
-	const src = serverSource();
+const SERVER_REQUIRE = "const policyTemplateFolders = require(\"./lib/policy-template-folders\");";
+const SERVER_MOUNT = "app.use(rateLimit(policyTemplateFolders.substancePolicyPdfLimits()), policyTemplateFolders.substancePolicyPdf());";
+function g8Server({ check = ok, src = serverSource() } = {}) {
 	const lines = src.split("\n");
+	const commentsOnly = (from, to) => lines.slice(from + 1, to).every((l) => /^\s*\/\//.test(l));
 	const gate = lines.indexOf("app.use(withheldLoadKeyGate);");
-	const required = lines.indexOf("const policyTemplateFolders = require(\"./lib/policy-template-folders\");");
-	const mount = lines.indexOf("app.use(policyTemplateFolders.substancePolicyPdf());");
+	const required = lines.indexOf(SERVER_REQUIRE);
+	const mount = lines.indexOf(SERVER_MOUNT);
 	const staticMount = lines.indexOf("app.use(express.static(clientDistPath));");
 	const firstRoute = lines.findIndex((l) => /^app\.(get|post|put|patch|delete|all)\(/.test(l));
-	ok("§8 server.js mounts the route below the last middleware every request passes (the load-key gate)",
-		gate >= 0 && required > gate && mount === required + 1 && lines.slice(gate + 1, required).every((l) => /^\s*\/\//.test(l)), { gate, required, mount });
-	ok("§8 ...above every route, as middleware that sees every path must be (test-route-snapshot.js §3)",
+	check("§8 server.js mounts the route below the last middleware every request passes (the load-key gate)",
+		gate >= 0 && required > gate && commentsOnly(gate, required) && mount > required && commentsOnly(required, mount), { gate, required, mount });
+	check("§8 ...with its limiter first in the same mount, built by express-rate-limit from the module's options",
+		mount >= 0 && lines.includes("const rateLimit = require(\"express-rate-limit\");"), { mount });
+	check("§8 ...above every route, as middleware that sees every path must be (test-route-snapshot.js §3)",
 		mount >= 0 && firstRoute > mount, { mount, firstRoute });
-	ok("§8 ...and ahead of the static mount that serves the build's copy", mount >= 0 && staticMount > mount, { mount, staticMount });
-	ok("§8 the route is built once", src.split("substancePolicyPdf(").length - 1 === 1);
-	ok("§8 server.js names none of the folder settings (the module reads them)", !/POLICY_TEMPLATE_DIR_/.test(src));
+	check("§8 ...and ahead of the static mount that serves the build's copy", mount >= 0 && staticMount > mount, { mount, staticMount });
+	check("§8 the route and its limiter are each built once",
+		src.split("substancePolicyPdf(").length - 1 === 1 && src.split("substancePolicyPdfLimits(").length - 1 === 1);
+	check("§8 server.js names none of the folder settings (the module reads them)", !/POLICY_TEMPLATE_DIR_/.test(src));
 }
 
 // --- §9 renders with a stand-in page ----------------------------------------------------
@@ -791,13 +923,19 @@ const MUTANTS = [
 	{ name: "a refusal names the folder", edits: [["if (found.reason) return refuse(doc.env, doc.file, found.reason);", "if (found.reason) return refuse(doc.env, folder, found.reason);"]] },
 	{ name: "a blank setting counts as set", edits: [["return value === \"\" ? null : value;", "return raw == null ? null : value;"]] },
 	{ name: "documents outside the table read a folder too", edits: [["if (!Object.prototype.hasOwnProperty.call(FOLDER_DOCUMENTS, docKey)) return null;", ""]] },
-	{ name: "the route acts while unset", edits: [["if (folder === null) return next();", ""]] },
-	{ name: "the route takes any method", edits: [["(req.method !== \"GET\" && req.method !== \"HEAD\") || ", ""]] },
-	{ name: "the route answers every path", edits: [["|| !isSubstancePolicyPdfPath(req.path)) return next();", ") return next();"]] },
+	{ name: "the route acts while unset", edits: [["if (folderSetting(env, FOLDER_DOCUMENTS.substance_policy.env) === null) return false;", ""]] },
+	{ name: "the route takes any method", edits: [["(req.method === \"GET\" || req.method === \"HEAD\") && ", ""]] },
+	{ name: "the route answers every path", edits: [[" && isSubstancePolicyPdfPath(req.path);", ";"]] },
 	{ name: "the route serves the file the request names", edits: [
-		["|| !isSubstancePolicyPdfPath(req.path)) return next();", "|| !/^\\/policies\\//i.test(req.path)) return next();"],
-		["const found = locateFolderFile(folder, SUBSTANCE_POLICY_PDF);", "const found = locateFolderFile(folder, path.basename(req.path));"],
+		[" && isSubstancePolicyPdfPath(req.path);", " && /^\\/policies\\//i.test(req.path);"],
+		["const found = locateFolderFile(folderSetting(env, setting), SUBSTANCE_POLICY_PDF);", "const found = locateFolderFile(folderSetting(env, setting), path.basename(req.path));"],
 	] },
+	{ name: "the limiter skips every request (bypassed)", edits: [["skip: (req) => !servesSubstancePolicyPdf(req, env),", "skip: () => true,"]] },
+	{ name: "the limiter skips no request", edits: [["skip: (req) => !servesSubstancePolicyPdf(req, env),", "skip: () => false,"]] },
+	{ name: "the limiter counts the link while unset", edits: [["skip: (req) => !servesSubstancePolicyPdf(req, env),",
+		"skip: (req) => !((req.method === \"GET\" || req.method === \"HEAD\") && isSubstancePolicyPdfPath(req.path)),"]] },
+	{ name: "the limiter counts every request while set", edits: [["skip: (req) => !servesSubstancePolicyPdf(req, env),",
+		"skip: () => folderSetting(env, FOLDER_DOCUMENTS.substance_policy.env) === null,"]] },
 	{ name: "the route passes a refusal on to the build's copy", edits: [["if (found.reason) return substancePdfUnavailable(res, setting, found.reason);", "if (found.reason) return next();"]] },
 	{ name: "the route passes a failed send on to the build's copy", edits: [["substancePdfUnavailable(res, setting, err.code === \"ENOENT\" ? \"the file is missing\" : \"the file can't be read\");", "next();"]], needsNonRoot: true },
 	{ name: "a failed precondition or a range past the end answered with the 503", edits: [["if (err.status === 412 || err.status === 416) return answerUnsatisfiable(res, err);", ""]] },
@@ -811,6 +949,16 @@ const MUTANTS = [
 	{ name: "the start log while nothing is set", edits: [["if (!report.some((r) => r.set)) return report;", ""]] },
 	{ name: "the renderer ignores the folder", renderer: true, edits: [["let html = readFolderTemplate(docKey);", "let html = null;"]] },
 ];
+// server.js's mount, each edited: §8 must catch it.
+const SERVER_MUTANTS = [
+	{ name: "server.js: the limiter left out of the mount", edits: [[SERVER_MOUNT, "app.use(policyTemplateFolders.substancePolicyPdf());"]] },
+	{ name: "server.js: the limiter mounted after the route", edits: [[SERVER_MOUNT,
+		"app.use(policyTemplateFolders.substancePolicyPdf(), rateLimit(policyTemplateFolders.substancePolicyPdfLimits()));"]] },
+	{ name: "server.js: the limiter built from options of its own", edits: [[SERVER_MOUNT,
+		"app.use(rateLimit({ windowMs: 60 * 1000, max: 300 }), policyTemplateFolders.substancePolicyPdf());"]] },
+	{ name: "server.js: the limiter on a mount of its own, after the route's", edits: [[SERVER_MOUNT,
+		"app.use(policyTemplateFolders.substancePolicyPdf());\napp.use(rateLimit(policyTemplateFolders.substancePolicyPdfLimits()));"]] },
+];
 
 async function runGroups(ctx) {
 	g1Settings(ctx);
@@ -819,6 +967,7 @@ async function runGroups(ctx) {
 	g4Refusals(ctx);
 	g5Escape(ctx);
 	await g6Route(ctx);
+	await g6Limiter(ctx);
 	g7StartLog(ctx);
 	await g9Renders(ctx);
 }
@@ -843,6 +992,16 @@ async function g10Mutants() {
 		takeLogs();
 		ok(`§10 ${m.name}: caught (${flipped.length} case${flipped.length === 1 ? "" : "s"} flip${flipped.length === 1 ? "s" : ""}${flipped.length ? `, first: ${flipped[0]}` : ""})`, flipped.length > 0);
 	}
+	const serverSrc = serverSource();
+	for (const m of SERVER_MUTANTS) {
+		let src = serverSrc;
+		const counts = m.edits.map(([find]) => src.split(find).length - 1);
+		if (counts.some((n) => n !== 1)) { ok(`§10 ${m.name}: each edit applies once`, false, counts); continue; }
+		for (const [find, replace] of m.edits) src = src.replace(find, () => replace);
+		const flipped = [];
+		g8Server({ check: (name, cond) => { if (!cond) flipped.push(name); }, src });
+		ok(`§10 ${m.name}: caught (${flipped.length} case${flipped.length === 1 ? "" : "s"} flip${flipped.length === 1 ? "s" : ""}${flipped.length ? `, first: ${flipped[0]}` : ""})`, flipped.length > 0);
+	}
 }
 
 // --- run ---------------------------------------------------------------------------------
@@ -855,7 +1014,7 @@ async function g10Mutants() {
 		section("3. set: each document's own folder"); g3Set(real);
 		section("4. refusals"); g4Refusals(real);
 		section("5. escape"); g5Escape(real);
-		section("6. the apply page's substance policy PDF"); await g6Route(real);
+		section("6. the apply page's substance policy PDF"); await g6Route(real); await g6Limiter(real);
 		section("7. the start log"); g7StartLog(real);
 		section("8. server.js"); g8Server();
 		section("9. renders with a stand-in page"); await g9Renders(real);
