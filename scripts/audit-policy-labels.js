@@ -41,6 +41,12 @@ const DOC_FILES = {
 	vehicle_lease: "vehicle-lease.html",
 	passenger_authorization: "passenger-authorization.html",
 };
+// Mirrors FLAGGED_DOC_FILES there (served only while their flag is on; audited whatever the flags).
+const FLAGGED_DOC_FILES = {
+	owner_operator_agreement: "owner-operator-agreement.html",
+	owner_operator_settlement: "owner-operator-settlement.html",
+};
+const AUDITED_DOC_FILES = { ...DOC_FILES, ...FLAGGED_DOC_FILES };
 
 // Every mapper field is exercised with a non-empty, OBVIOUSLY FAKE value, so a
 // label is reported whether or not real data happens to populate it. Never put a
@@ -58,6 +64,11 @@ const PROBE = new Proxy(
 		paymentMethod: "ach",
 		// A minor's passenger authorization fills every label, the guardian's included.
 		passengerAdult: false,
+		// The owner-operator maps refuse a term or week that isn't valid, so theirs are
+		// valid made-up values; a signed agreement fills every label.
+		feeBps: 1800, escrowWeeklyCents: 50000, escrowTargetCents: 250000, weeklyInsuranceCents: 31000,
+		weeklyEldCents: 1500, installmentCents: 100000, onboardingCosts: [{ label: "PROBE", cents: 100 }],
+		onboardingTotalCents: 100, truckOwnership: "own", weekStart: "2026-11-07", weekEnd: "2026-11-13",
 	},
 	{
 		// Any key the mappers read that is not pinned above resolves to a non-empty
@@ -136,7 +147,7 @@ let problems = 0;
 let cbDuplicates = 0; // counted into `problems` — see the duplicated-label block
 let repeatNotes = 0; // informational only, never counted into `problems`
 
-for (const [docKey, file] of Object.entries(DOC_FILES)) {
+for (const [docKey, file] of Object.entries(AUDITED_DOC_FILES)) {
 	const filePath = path.join(TPL_DIR, file);
 	if (!fs.existsSync(filePath)) {
 		console.error(`MISSING TEMPLATE  ${docKey} -> ${file}`);
@@ -259,6 +270,6 @@ console.log(
 	`\n${problems ? "FAILED" : "PASSED"} — ${problems} problem(s)` +
 		` (of which ${cbDuplicates} duplicated checkbox label(s)),` +
 		` ${repeatNotes} repeated text label(s) [informational, not a defect]` +
-		` across ${Object.keys(DOC_FILES).length} documents.`,
+		` across ${Object.keys(AUDITED_DOC_FILES).length} documents.`,
 );
 process.exit(problems ? 1 : 0);

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DRAFT — Owner-Operator Equipment Lease and Independent Contractor Agreement</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    /* The draft mark and the form's number on every printed page, in a rule of
+       their own so a browser without page margin boxes drops only this. */
+    @page {
+      @top-center {
+        content: "DRAFT FOR LEGAL REVIEW: NOT FOR SIGNATURE";
+        font-family: 'Open Sans', Arial, sans-serif;
+        font-size: 9pt;
+        font-weight: 700;
+        color: #000;
+      }
+      @bottom-center {
+        content: "Form OO-1 DRAFT (October 2026), page " counter(page) " of " counter(pages);
+        font-family: 'Open Sans', Arial, sans-serif;
+        font-size: 9pt;
+        color: #444;
+      }
+    }
+
+    :root {
+      --ink: #000;
+      --rule: #c4c4c4;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 72px 80px 88px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    .draft-banner {
+      margin: 0 0 16px;
+      padding: 8px 12px;
+      border: 3px solid var(--ink);
+      font-weight: 700;
+      font-size: 15px;
+      text-align: center;
+      letter-spacing: 0.6px;
+    }
+
+    .form-meta {
+      font-size: 12px;
+      margin: 0 0 14px;
+    }
+
+    .company {
+      font-size: 15px;
+      font-weight: 700;
+      text-align: center;
+      letter-spacing: 1px;
+      margin: 0 0 4px;
+    }
+
+    h1 {
+      font-size: 19px;
+      font-weight: 700;
+      text-align: center;
+      margin: 0 0 18px;
+      line-height: 1.3;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 22px 0 10px;
+      break-after: avoid;
+      page-break-after: avoid;
+    }
+
+    h3 {
+      font-size: 13px;
+      font-weight: 700;
+      margin: 0 0 8px;
+    }
+
+    p { margin: 0 0 10px; }
+    p.sub { margin-left: 18px; }
+
+    ol.categories {
+      margin: 0 0 10px 18px;
+      padding-left: 22px;
+    }
+    ol.categories li { margin-bottom: 4px; }
+
+    strong { font-weight: 700; }
+
+    /* A filled-in value: an underline under a box that grows with its text and
+       wraps, so a long name or address prints whole instead of being cut. */
+    .fill {
+      display: inline-block;
+      max-width: 100%;
+      min-height: 1.4em;
+      min-width: 120px;
+      padding: 0 4px;
+      border-bottom: 1px solid var(--ink);
+      vertical-align: baseline;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .fill.short { min-width: 44px; }
+    .sig-slot { min-height: 2.6em; }
+
+    /* A phrase printed only when the server gives it (", doing business as …"). */
+    .opt { white-space: normal; overflow-wrap: anywhere; }
+    .opt:empty { display: none; }
+
+    .fields { margin: 0 0 12px; }
+    .field {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin: 0 0 8px;
+    }
+    .field .label {
+      font-weight: 700;
+      white-space: nowrap;
+      min-width: 170px;
+    }
+    .field .fill { flex: 1 1 auto; min-width: 0; }
+
+    table.data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0 0 10px;
+    }
+    .data-table th, .data-table td {
+      border: 1px solid var(--rule);
+      padding: 6px 10px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    .data-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .data-table .empty-row td { color: #555; font-style: italic; }
+
+    /* Each party's lines stay on one page. */
+    .party {
+      margin: 0 0 20px;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .sig-line {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .sig-line .label {
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .sig-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+      min-width: 0;
+    }
+    .sig-group.grow { flex: 1 1 0; min-width: 0; }
+    .sig-group.grow .fill { flex: 1 1 0; width: auto; min-width: 0; }
+    .sig-group.fixed { flex: 0 0 auto; }
+    .sig-group.fixed .fill { min-width: 150px; }
+
+    .schedule {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    @media print {
+      html, body { background: #fff; }
+      .document {
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <p class="draft-banner">DRAFT FOR LEGAL REVIEW: NOT FOR SIGNATURE</p>
+    <div class="form-meta"><span>Form OO-1 DRAFT (October 2026)</span></div>
+
+    <p class="company">[CARRIER LEGAL NAME]</p>
+    <h1>OWNER-OPERATOR EQUIPMENT LEASE AND INDEPENDENT CONTRACTOR AGREEMENT</h1>
+
+    <p>This agreement is made on <span class="fill" aria-label="Agreement date"></span> between [CARRIER LEGAL NAME], a [STATE] [ENTITY TYPE] and motor carrier operating under USDOT/MC No. [MC/DOT NUMBER] (the "Carrier"), and <span class="fill" aria-label="Owner-operator name"></span><span class="opt" aria-label="Doing business as"></span>, of <span class="fill" aria-label="Owner-operator address"></span> (the "Owner-Operator").</p>
+
+    <p><strong>1. The equipment.</strong> The Owner-Operator leases to the Carrier the tractor described in Schedule A (the "Equipment"), with the Owner-Operator as its driver. The Owner-Operator states that the Owner-Operator owns the Equipment, or holds it under a lease from <span class="fill" aria-label="Registered owner"></span> that allows this lease to the Carrier, and will give the Carrier a copy of that lease on request.</p>
+
+    <p><strong>2. Term, possession and receipts.</strong> This lease starts on <span class="fill" aria-label="Lease start date"></span>, when the Carrier gives the Owner-Operator a written receipt for the Equipment. Either party may end it by written notice [14 days] ahead; the Carrier may end it at once for the causes in Section 12. While this lease is in effect, the Carrier has exclusive possession, control and use of the Equipment and full responsibility for its operation. This sentence does not make the Owner-Operator an employee. The Carrier does not dispatch loads to the Owner-Operator before both parties have signed this agreement or after this lease ends. When this lease ends, the Carrier gives a receipt for the Equipment's return, and the Owner-Operator removes the Carrier's name and USDOT number from the Equipment and returns the Carrier's plates, permits, ELD device and any fuel card or fuel-app access [that belong to the Carrier].</p>
+
+    <p><strong>3. Pay.</strong> For each load the Owner-Operator hauls for the Carrier under this lease, the Carrier credits the load pay: the whole pay for the load in the Carrier's record for that load, including line haul, fuel surcharge and accessorial charges. The Carrier keeps a company fee of <span class="fill short" aria-label="Company fee percent"></span>% of load pay, computed on each settlement week's total load pay and rounded to the nearest cent. The company fee is the Carrier's only fee or commission; the charge-backs in Section 6 are costs passed through at the amount the Carrier paid, not fees. If the Carrier's record of a load's pay changes after the load has been settled, the difference, with the company fee on it, goes on the next settlement; if a settled load is cancelled, its load pay and company fee are reversed on the next settlement. A change to the fee needs a written amendment signed by both parties.</p>
+
+    <p><strong>4. Weekly settlement and payment.</strong></p>
+    <p class="sub">(a) The settlement week runs Saturday through Friday. The first settlement week is the week in which the Owner-Operator's onboarding with the Carrier is complete, or the week in which the Owner-Operator completes a first load under this lease, if that is earlier.</p>
+    <p class="sub">(b) For each week the Carrier gives the Owner-Operator a written weekly settlement showing: each load and its load pay; the company fee; each charge-back item; the weekly and one-time charges; any item held for review and not deducted; the onboarding installment; the escrow fund's balance and that week's hold-back or use; any balance carried from an earlier week; and the net amount.</p>
+    <p class="sub">(c) The Carrier pays the net amount by the method in Schedule D on [the Friday after the settlement week ends].</p>
+    <p class="sub">(d) If a week's charges, together with any balance carried in, are more than its load pay, nothing is paid that week and the difference is carried to the next settlement. A settlement is still issued for that week to show the amount carried.</p>
+    <p class="sub">(e) A load, receipt or charge found or corrected after its week's settlement goes on the next settlement with its own date. Once the Carrier has approved a settlement, it is not changed; any correction is made as a charge or credit on a later settlement.</p>
+
+    <p><strong>5. Load records.</strong> At or before each settlement the Carrier gives the Owner-Operator, for each load, its load ID, dates, origin and destination (city and state) and load pay. The Carrier's rate confirmations and other agreements with its customers are the Carrier's confidential business records and are not provided.</p>
+
+    <p><strong>6. Charge-backs.</strong></p>
+    <p class="sub">(a) The Carrier may pay or advance these items and deduct them from the Owner-Operator's settlements, at the amount the Carrier actually paid, as shown on the receipt, invoice or notice, with no markup. Only an item the Carrier paid or advanced is deducted:</p>
+    <ol class="categories" data-charge-back-categories>
+      <li>fuel bought on the Carrier's account (through the Carrier's fuel app or a fuel card);</li>
+      <li>tolls, and toll violation or administrative fees;</li>
+      <li>repairs, tires, maintenance and roadside service;</li>
+      <li>the Equipment's insurance, at the weekly amount in Schedule B, and deductibles under Section 9;</li>
+      <li>ELD service, at the weekly amount in Schedule B;</li>
+      <li>heavy vehicle use tax (Form 2290), apportioned registration and plates (IRP), permits, and IFTA fuel tax for the Equipment's miles;</li>
+      <li>lettering and the other costs in Schedule C to make the Equipment ready for service;</li>
+      <li>cash advances the Owner-Operator asks for in writing;</li>
+      <li>[other items, each listed].</li>
+    </ol>
+    <p class="sub">(b) These are the only kinds of charge-back; any other needs a written amendment signed by both parties. Each item appears on the settlement for the week it is deducted, with its date and amount.</p>
+    <p class="sub">(c) A receipt the Owner-Operator files for a purchase on the Carrier's card or account is deducted on the next settlement. If the Carrier later rejects or corrects it, the difference goes on a later settlement. A purchase the Owner-Operator paid for with the Owner-Operator's own money is not deducted.</p>
+    <p class="sub">(d) An item a dispatcher enters for the Owner-Operator is deducted only after [an authorized manager] of the Carrier approves it, except a paper toll filed with its scanned notice.</p>
+    <p class="sub">(e) A paper toll is charged from the toll notice the Carrier's office scans. The settlement shows its travel date, the issuing agency, the notice number and the toll amount, with any violation or administrative fee as its own line, marked as filed by the office. A toll filed without its notice is deducted only after [an authorized manager] of the Carrier approves it. A notice that may repeat one already filed (the same plate or transponder, agency and travel date), or whose plate does not match the Equipment's, is held and not deducted until [an authorized manager] of the Carrier confirms it.</p>
+    <p class="sub">(f) The Owner-Operator may ask for a copy of the receipt, invoice or notice behind any charge-back.</p>
+
+    <p><strong>7. Onboarding balance.</strong></p>
+    <p class="sub">(a) The onboarding balance is: the costs the Carrier pays to make the Equipment ready for service, as listed in Schedule C [and any further cost of those kinds the Carrier pays, each shown with its record]; the Owner-Operator's charge-back items dated before the first settlement week, counted on the terms of Section 6; and the weekly charges in Schedule B for any weeks the Equipment was in service before the first settlement week. No interest or fee is added to it.</p>
+    <p class="sub">(b) The Carrier deducts the balance in the weekly installment shown in Schedule C until it is repaid; the last installment is whatever is left. After this agreement is signed, the Carrier may lower the installment but not raise it. If Schedule C shows no installment, the installment is one third of the onboarding balance at the first settlement that has a balance, rounded up to the cent, and it does not change after that unless the Carrier lowers it.</p>
+    <p class="sub">(c) An installment comes only from what is left of a week after its charges and any carried balance. It never makes a week negative.</p>
+    <p class="sub">(d) If this lease ends before the balance is repaid, the rest is settled on the final settlement under Section 10.</p>
+
+    <p><strong>8. No required purchases.</strong> The Owner-Operator is not required to buy or rent any product, equipment or service from the Carrier as a condition of this lease. [The fuel app or fuel card, toll account and ELD service are offered for convenience.]</p>
+
+    <p><strong>9. Insurance.</strong> The Carrier keeps public liability and property damage insurance on the Equipment while it is operated for the Carrier. The Owner-Operator keeps [non-trucking (bobtail) liability and physical damage insurance on the Equipment] [or: the Carrier provides it and charges the weekly amount in Schedule B]. If the Owner-Operator buys insurance through the Carrier, the Carrier gives the Owner-Operator a copy of each policy on request and a certificate showing the insurer, policy number, dates, coverage, the Owner-Operator's cost and the deductibles. Before deducting any cargo or property damage cost, the Carrier gives the Owner-Operator a written, itemized explanation; the deduction for one event is at most [$ DEDUCTIBLE AMOUNT].</p>
+
+    <p><strong>10. Escrow.</strong></p>
+    <p class="sub">(a) Build-up. Starting with the first settlement after the onboarding balance is repaid (or with the first settlement, if there is no onboarding balance), the Carrier holds back up to <span class="fill short" aria-label="Escrow weekly amount"></span> a week until the escrow fund reaches <span class="fill short" aria-label="Escrow target"></span>. A hold-back comes only from what is left of a week after its charges, any carried balance and any installment. It never makes a week negative.</p>
+    <p class="sub">(b) Uses. The fund is held for the Owner-Operator and may be used only for: (1) insurance deductibles for claims involving the Equipment; (2) charge-back items under Section 6 left unpaid, such as tolls or fuel; and (3) amounts the Owner-Operator owes the Carrier under this agreement when this lease ends, including any onboarding balance left. Each use is approved by [an authorized manager] of the Carrier, names the claim, receipt or notice it pays, and is never more than the fund's balance.</p>
+    <p class="sub">(c) How a use is shown. Each use appears on the next settlement as a line "paid from your escrow" naming what it pays. A use for an amount already charged and carried as an unpaid balance reduces that balance; no new charge is added. A use for a cost not already charged, such as a deductible, shows that cost as its own charge line, with the payment from the fund beside it.</p>
+    <p class="sub">(d) Refill. [After a use, the hold-back resumes on the terms of (a) until the fund is back at <span class="fill short" aria-label="Escrow target"></span>.]</p>
+    <p class="sub">(e) Accounting. Every settlement shows the fund's balance before, that week's hold-back or use, and the balance after. The Owner-Operator may ask for an accounting of the fund at any time.</p>
+    <p class="sub">(f) Interest. [No interest is paid on the fund.]</p>
+    <p class="sub">(g) End of the lease. The last settlement week is the week in which this lease ends, or the week of the Owner-Operator's last completed load, if later; no weekly settlement is issued after it. The Carrier holds the fund for [45] days after the last settlement week ends. Seven days before that period ends, the Carrier prepares a final settlement. It shows the items that arrived or remained by then (including any load pay still owed to the Owner-Operator), any carried balance and any onboarding balance left; applies the fund to what the Owner-Operator owes for the uses in (b); and returns the rest of the fund, with a final accounting. The final settlement is paid no later than [45] days after the last settlement week ends. If the Owner-Operator owes more than the fund holds, the rest is shown on the final settlement as owed to the Carrier. The fund is applied and returned in this way even if the Carrier has stopped taking new hold-backs.</p>
+    <p class="sub">(h) Changes. The amounts in (a) change only by a written amendment signed by both parties.</p>
+
+    <p><strong>11. Independent business.</strong> The Owner-Operator is an independent business, not an employee: no tax withholding and no employee benefits. The Carrier reports its payments to the Owner-Operator on Form 1099; the Owner-Operator pays the Owner-Operator's own taxes.</p>
+
+    <p><strong>12. Safety and conduct.</strong> The Owner-Operator keeps a valid CDL and medical certificate, stays "clear" in the Drug and Alcohol Clearinghouse, and follows the hours-of-service, inspection and drug and alcohol rules and the Carrier's [Mobile Policy] and [Substance Policy]; the Carrier's [Equipment Use and Care Policy] applies to the Carrier's trailers and devices. The Carrier may end this lease at once for a safety violation, a failed drug or alcohol test, a "prohibited" Clearinghouse status, the loss of the CDL or medical certificate, or an act that puts the Carrier's operating authority, safety rating or insurance at risk.</p>
+
+    <p><strong>13. Loading and unloading.</strong> [The shipper and receiver load and unload unless the load record says the driver must. Pay for driver loading or unloading, and lumper fees the customer repays, are part of load pay.]</p>
+
+    <p><strong>14. Copies.</strong> Each party keeps a signed copy. A copy stays in the Equipment while it is leased to the Carrier, on paper or electronically in the Carrier's driver app.</p>
+
+    <p><strong>15. Confidentiality, non-solicitation, indemnity, disputes and governing law.</strong> [As in the Carrier's Independent Contractor Agreement for company drivers: its confidentiality, non-solicitation, indemnity and dispute-resolution (arbitration) sections, and its governing-law section ([STATE]).]</p>
+
+    <h2>Signatures</h2>
+    <section class="signatures">
+      <div class="party" data-party="carrier">
+        <h3>[CARRIER LEGAL NAME]</h3>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">By:</span><span class="fill sig-slot" aria-label="Carrier signer name"></span></div>
+          <div class="sig-group fixed"><span class="label">Date:</span><span class="fill" aria-label="Carrier date"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Title:</span><span class="fill" aria-label="Carrier signer title"></span></div>
+        </div>
+      </div>
+
+      <div class="party" data-party="owner-operator">
+        <h3>Owner-Operator</h3>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Signature:</span><span class="fill sig-slot" aria-label="Owner-operator signature"></span></div>
+          <div class="sig-group fixed"><span class="label">Date:</span><span class="fill" aria-label="Owner-operator date"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Printed name:</span><span class="fill" aria-label="Owner-operator printed name"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="schedule">
+      <h2>Schedule A — Equipment</h2>
+      <div class="fields">
+        <div class="field"><span class="label">Year:</span><span class="fill" aria-label="Truck year"></span></div>
+        <div class="field"><span class="label">Make:</span><span class="fill" aria-label="Truck make"></span></div>
+        <div class="field"><span class="label">Model:</span><span class="fill" aria-label="Truck model"></span></div>
+        <div class="field"><span class="label">VIN:</span><span class="fill" aria-label="Truck VIN"></span></div>
+        <div class="field"><span class="label">Plate and state:</span><span class="fill" aria-label="Truck plate and state"></span></div>
+        <div class="field"><span class="label">Unit number:</span><span class="fill" aria-label="Truck unit number"></span></div>
+        <div class="field"><span class="label">Registered owner:</span><span class="fill" aria-label="Registered owner"></span></div>
+        <div class="field"><span class="label">Owned or leased:</span><span class="fill" aria-label="Truck ownership"></span></div>
+      </div>
+    </div>
+
+    <div class="schedule">
+      <h2>Schedule B — Weekly charges</h2>
+      <p>Insurance <span class="fill short" aria-label="Weekly insurance"></span> a week; ELD service <span class="fill short" aria-label="Weekly ELD service"></span> a week (each is the Carrier's monthly amount for the Equipment x 12 / 52, rounded to the cent); [other weekly costs passed through at the Carrier's cost]. Weekly charges apply for each week the Equipment is in service under this lease, starting on its in-service date: [the day the Carrier records the Owner-Operator's onboarding as complete] [or: DATE]. [If the Carrier's own cost for the Equipment changes, for example at an insurance renewal, the Carrier may change an amount in this Schedule by written notice at least [30] days before the change applies; a change applies only to later weeks.]</p>
+    </div>
+
+    <div class="schedule">
+      <h2>Schedule C — Onboarding costs</h2>
+      <p>Each cost with its amount (Form 2290; IRP registration and plates; ELD device; lettering; permits; [other]):</p>
+      <table class="data-table">
+        <thead><tr><th>Cost</th><th class="num">Amount</th></tr></thead>
+        <tbody id="oo-onboarding-costs">
+          <tr><td><span class="cell-text"></span></td><td class="num"><span class="cell-text"></span></td></tr>
+        </tbody>
+      </table>
+      <p>Total: <span class="fill short" aria-label="Onboarding total"></span>. Weekly installment: <span class="fill short" aria-label="Weekly installment"></span>. (The Carrier may set any installment before this agreement is signed; after signing it may only lower it. If left blank, the installment is one third of the onboarding balance at the first settlement that has a balance, rounded up to the cent.)</p>
+    </div>
+
+    <div class="schedule">
+      <h2>Schedule D — Payment method</h2>
+      <p><span class="fill" aria-label="Payment method"></span></p>
+    </div>
+  </main>
+</body>
+</html>
