@@ -32,6 +32,13 @@
 //      R11b: 201 / 200 with the same answer, `confirmLoads` ignored, no
 //      confirmation recorded or audited, the same audit lines, and Job
 //      Tracking never read (unreadable, nothing changes either)
+// The time-off ELD check (B) off, in a world with the main flag ON and
+// DRIVER_TIME_OFF_ELD_CHECK_ENABLED unset (production until the owner's yes):
+//   §7 no answer carries eldDays, eldSummary or eldChecked; the run does
+//      nothing; the 90-day purge still removes an old result's miles and times
+//      (D18: it runs with the check on or off); the results table dropped under
+//      the running server, the staff list, the driver's own route, the driver
+//      app's payload and the sweep still answer 200
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -196,6 +203,44 @@ const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.bo
 			["Hollis Renner: off 2026-10-20..2026-10-21 (vacation)", "Hollis Renner: off 2026-10-26..2026-10-27 (vacation)", "Hollis Renner: off 2026-11-03..2026-11-04 (vacation)"]);
 		eq("§6.8 the update audit line as before", on.audits("driver_availability_update").map((a) => a.details),
 			["Hollis Renner: off 2026-10-20..2026-10-21 (vacation) -> off 2026-10-20..2026-10-24 (vacation)"]);
+	});
+
+	section("§7 the main flag on, the ELD check's flag unset");
+	await R.guard("§7", async () => {
+		const ELD_KEYS = ["eldDays", "eldSummary", "eldChecked"];
+		const eldKeys = (value, out = new Set()) => {
+			if (Array.isArray(value)) value.forEach((v) => eldKeys(v, out));
+			else if (value && typeof value === "object") for (const k of Object.keys(value)) { if (ELD_KEYS.includes(k)) out.add(k); eldKeys(value[k], out); }
+			return out;
+		};
+		const on = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+		W.eldFixtures(on.db);
+		const created = await on.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { body: { kind: "vacation", from: "2026-10-05", to: "2026-10-07", reason: "Family" } });
+		const id = created.body && created.body.row ? created.body.row.id : 0;
+		// A result saved while the check was on, final 100 days ago.
+		const old = new Date(on.clock.ms - 100 * W.DAY).toISOString();
+		on.db.prepare(`INSERT INTO driver_time_off_days (availability_id, directory_id, day, state, reason, miles, samples, first_move_ms, last_move_ms, rule_version, first_evaluated_at, evaluated_at, final_at)
+			VALUES (?, ?, '2026-10-05', 'confirmed', 'parked', 2.5, 40, 123, 456, 1, ?, ?, ?)`).run(id, DIR.hollis, old, old, old);
+		const answers = async () => [
+			["GET /api/drivers-directory/:id/availability (Super Admin)", await on.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa })],
+			["GET /api/drivers-directory/:id/availability (Dispatcher)", await on.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp })],
+			["GET /api/driver/me/availability", await on.call("GET", "/api/driver/me/availability", { user: USERS.driver })],
+			["GET /api/driver/:driverName", await on.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver })],
+		];
+		for (const [label, r] of await answers()) eq(`§7.1 ${label}: 200, none of ${ELD_KEYS.join(" / ")}`, [r.status, [...eldKeys(r.body)]], [200, []]);
+		const audits = on.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n;
+		eq("§7.2 the run does nothing: no result written, audited or told", [await on.api.runTimeOffEldCheck({ nowMs: on.clock.ms }),
+			on.db.prepare("SELECT COUNT(*) AS n FROM driver_time_off_days").get().n, on.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n - audits,
+			on.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'time-off-eld'").get().n], [{ skipped: "off" }, 1, 0, 0]);
+		eq("§7.3 D18: the purge still runs, removing the old result's miles and times and keeping its verdict", [on.api.purgeTimeOffEldResults(on.clock.ms),
+			Object.values(on.db.prepare("SELECT miles, samples, first_move_ms, last_move_ms, state, reason, purged_at IS NOT NULL AS purged FROM driver_time_off_days").get())],
+			[1, [0, 0, null, null, "confirmed", "parked", 1]]);
+		on.db.exec("DROP TABLE driver_time_off_days");
+		for (const [label, r] of await answers()) eq(`§7.4 the results table dropped: ${label} still 200`, r.status, 200);
+		let swept = null;
+		try { swept = await on.sweep(); } catch (err) { swept = err.message; }
+		ok("§7.5 ...and the sweep still runs", swept && typeof swept === "object", String(swept));
+		eq("§7.6 the purge with no table logs and returns 0, never throws", on.api.purgeTimeOffEldResults(on.clock.ms), 0);
 	});
 	await R.finish();
 })().catch((err) => {
