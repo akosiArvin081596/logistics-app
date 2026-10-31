@@ -11,15 +11,19 @@
  *   §2 flag off: today's render path: one fill evaluate, then the PDF, no span;
  *      the substance policy's signature-and-date slot stays an input, cut short
  *      in the stand-in's painted text, and a required slot too narrow to show
- *      anything still renders
+ *      anything still renders; no slot lines up by its first line
  *   §3 flag on, the wrap, on a stand-in page that lays out its inputs (made-up
  *      metrics: 7px a character, a blank's 4px side padding): a value wider
  *      than its box becomes a span with the same text and attributes that
  *      wraps, takes the input's text styles and keeps the input's width and
- *      bottom rule where the template's rules would give a span others; a value
- *      that fits, an empty one, a hidden input and a checkbox are left alone;
- *      an unlabelled input is wrapped too; the substance policy's long
- *      signature line prints whole, and a short one prints as with the flag off
+ *      bottom rule where the template's rules would give a span others; an
+ *      inline-block span lines up by its first line (baseline-source: first),
+ *      so a wrapped value keeps its first line on its sentence's line, and a
+ *      block span gets none; a value that fits, an empty one, a hidden input
+ *      and a checkbox are left alone; an unlabelled input is wrapped too; the
+ *      substance policy's long signature line prints whole, a name long enough
+ *      to wrap in its "I, ____ ," sentence prints whole and lined up by its
+ *      first line, and a short one prints as with the flag off
  *   §4 flag on, the check: a required value that still overflows after the
  *      wrap is refused (DOCUMENT_FIELDS_UNFILLED) before any PDF exists, with
  *      the document and the label named and the value in neither the message
@@ -67,6 +71,9 @@ const SLOT = "Driver signature and date";
 const LONG_DATA = { fullName: LONG_NAME, signatureText: LONG_NAME, effectiveDate: DATE };
 const SHORT_DATA = { fullName: SHORT_NAME, signatureText: SHORT_NAME, effectiveDate: DATE };
 const PREVIEW_DATA = { fullName: LONG_NAME, signatureText: "", effectiveDate: DATE };
+// Long enough that the substance policy's "I, ____ ," slot (240px) wraps too.
+const VERY_LONG_NAME = "Annabel Quinn Testerson-Made Example";
+const VERY_LONG_DATA = { fullName: VERY_LONG_NAME, signatureText: VERY_LONG_NAME, effectiveDate: DATE };
 // The date the sign route prints (its own clock, as server.js computes it).
 const TODAY = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 // What must never appear in a message or a log line.
@@ -476,6 +483,11 @@ async function g2FlagOff(ctx) {
 	check("§2 flag off: the PDF options are today's", JSON.stringify(rec.pdfOptions[0]) === JSON.stringify({
 		format: "Letter", printBackground: true, margin: { top: 0, bottom: 0, left: 0, right: 0 }, preferCSSPageSize: true,
 	}), rec.pdfOptions[0]);
+	const longer = newRecord();
+	await rendering(ctx.R(longer), "substance_policy", VERY_LONG_DATA, undefined);
+	const ldoc = longer.docs[0];
+	check("§2 flag off, a name long enough to wrap in the \"I, ____ ,\" sentence: nothing is swapped and no slot lines up by its first line",
+		Boolean(ldoc) && ldoc.created.size === 0 && ldoc.nodes.every((n) => n.style.getPropertyValue("baseline-source") === ""));
 }
 
 // ── §3 flag on: the wrap ────────────────────────────────────────────────────
@@ -504,6 +516,9 @@ async function g3Wrap(ctx) {
 		doc.computed(long, "border-bottom-width") === "1px" && doc.computed(long, "border-bottom-style") === "solid");
 	check("§3 ...and its text now fits: nothing overflows and the whole value prints",
 		Boolean(long) && long.scrollWidth <= long.clientWidth && doc.visible(long) === ADDRESS);
+	const inlineSpans = doc.nodes.filter((n) => doc.created.has(n) && n.style.getPropertyValue("display") === "inline-block");
+	check("§3 every inline-block span, labelled or not, lines up by its first line (baseline-source: first), so the sentence it sits in stays on that line",
+		inlineSpans.length === 6 && inlineSpans.every((n) => n.style.getPropertyValue("baseline-source") === "first"), inlineSpans.length);
 	const deflt = one(doc, "Default width");
 	check("§3 an input with no width rule keeps its own width on the span (pinned)",
 		Boolean(deflt) && deflt.tagName === "SPAN" && deflt.style.getPropertyValue("width") === `${INPUT_DEFAULT_WIDTH}px` && deflt.clientWidth === INPUT_DEFAULT_WIDTH);
@@ -513,6 +528,8 @@ async function g3Wrap(ctx) {
 		rule.style.getPropertyValue("border-bottom-style") === "dotted" && rule.style.getPropertyValue("border-bottom-color") === "rgb(0, 0, 0)");
 	const block = one(doc, "Block");
 	check("§3 a display:block input becomes a block span", Boolean(block) && block.tagName === "SPAN" && block.style.getPropertyValue("display") === "block");
+	check("§3 ...with no first-line alignment: a block shares no line (nor does a flex item, which the browser makes a block)",
+		Boolean(block) && block.tagName === "SPAN" && block.style.getPropertyValue("baseline-source") === "");
 	const attrs = one(doc, "Attributes");
 	check("§3 the span keeps every other attribute (id, data-, its own inline style)",
 		Boolean(attrs) && attrs.tagName === "SPAN" && attrs.getAttribute("id") === "made-up-id" && attrs.getAttribute("data-row") === "3" &&
@@ -554,6 +571,13 @@ async function g3Wrap(ctx) {
 	check("§3 flag on: the span keeps the template's 260px box", Boolean(slot) && slot.style.getPropertyValue("width") === "260px" && slot.clientWidth === 260);
 	check("§3 flag on: the slots that fit stay inputs", Boolean(sdoc) && ["Driver/Associate name", "Name"].every((l) => { const n = one(sdoc, l); return n && n.tagName === "INPUT"; }));
 	check("§3 flag on: nothing is logged for a value that wraps and fits", r.warns.length === 0, r.warns.length);
+	const vrec = newRecord();
+	const vr = await rendering(ctx.R(vrec), "substance_policy", VERY_LONG_DATA, "true");
+	const vdoc = vrec.docs[0];
+	const vname = vdoc ? one(vdoc, "Name") : null;
+	check("§3 flag on, a name long enough to wrap in the \"I, ____ ,\" sentence: that slot prints the whole name, lined up by its first line",
+		!vr.error && Boolean(vname) && vname.tagName === "SPAN" && vname.textContent === VERY_LONG_NAME && vdoc.visible(vname) === VERY_LONG_NAME &&
+		vname.style.getPropertyValue("baseline-source") === "first", vr.error ? vr.error.message : undefined);
 
 	const offRec = newRecord();
 	await rendering(ctx.R(offRec), "substance_policy", SHORT_DATA, undefined);
@@ -818,6 +842,8 @@ const MUTANTS = [
 	{ name: "the input's bottom rule is not kept", renderer: [["if (now.getPropertyValue(p) !== was[p]) span.style.setProperty(p, was[p]);", "void now;"]] },
 	{ name: "the input's text styles are not copied", renderer: [["for (const p of TEXT_STYLES) span.style.setProperty(p, was[p]);", ""]] },
 	{ name: "the span does not wrap", renderer: [["span.style.setProperty(\"white-space\", \"normal\", \"important\");", ""]] },
+	{ name: "the span lines up by its last line again (no baseline-source)", renderer: [["\t\tif (was.display !== \"block\") span.style.setProperty(\"baseline-source\", \"first\");\n", ""]] },
+	{ name: "a block span gets the first-line alignment too", renderer: [["if (was.display !== \"block\") span.style.setProperty(\"baseline-source\"", "if (true) span.style.setProperty(\"baseline-source\""]] },
 	{ name: "only labelled inputs are wrapped", renderer: [["document.querySelectorAll(\"input\")", "document.querySelectorAll(\"input[aria-label]\")"]] },
 	{ name: "the wrap step moved ahead of the table and vehicle-row steps", renderer: [[WRAP_STEP, ""], ["\t\t// --- 5a. Clone table rows", `${WRAP_STEP}\t\t// --- 5a. Clone table rows`]] },
 	{ name: "writeSignedArtifact() drops the clipped labels", server: [["\t\tif (Array.isArray(err.clippedLabels)) e.clippedLabels = err.clippedLabels;\n", ""]] },
