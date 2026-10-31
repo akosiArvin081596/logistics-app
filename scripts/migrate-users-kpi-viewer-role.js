@@ -169,8 +169,9 @@ function main(argv = process.argv.slice(2), { env = process.env, root = ROOT, re
 		return EXIT.REFUSED;
 	}
 	let db;
-	const Database = createRequire(path.join(root, "server.js"))("better-sqlite3");
+	let Database;
 	try {
+		Database = createRequire(path.join(root, "server.js"))("better-sqlite3");
 		db = new Database(target.file, { readonly: !opts.apply, fileMustExist: true });
 		if (!opts.apply && !db.readonly) throw new Error("the dry run's SQLite handle is not read-only");
 		db.pragma("busy_timeout = 10000");
@@ -192,7 +193,8 @@ function main(argv = process.argv.slice(2), { env = process.env, root = ROOT, re
 			}
 		}
 		const r = migration.applyRebuild(db, { expect: opts.expect, expectFk: opts.expectFk, Database, hooks });
-		report(r, log, target.file);
+		// The exit code is the outcome's, even if printing it fails.
+		try { report(r, log, target.file); } catch (err) { log.error(`exit ${r.exit} (${r.state}); the report failed to print: ${err.message}`); }
 		return r.exit;
 	} finally {
 		db.close();
