@@ -39,6 +39,7 @@ const DOC_FILES = {
 	service_invoice_manual: "service-invoice-manual.html",
 	master_agreement: "master-agreement.html",
 	vehicle_lease: "vehicle-lease.html",
+	passenger_authorization: "passenger-authorization.html",
 };
 
 // Every mapper field is exercised with a non-empty, OBVIOUSLY FAKE value, so a
@@ -55,6 +56,8 @@ const PROBE = new Proxy(
 		entityType: "Other - PROBE",
 		accountType: "Business Checking",
 		paymentMethod: "ach",
+		// A minor's passenger authorization fills every label, the guardian's included.
+		passengerAdult: false,
 	},
 	{
 		// Any key the mappers read that is not pinned above resolves to a non-empty
@@ -169,6 +172,9 @@ for (const [docKey, file] of Object.entries(DOC_FILES)) {
 
 	const sigTarget = fields.signatureLabelForImage;
 	const sigMissing = sigTarget && !have.has(sigTarget);
+	// The renderer places a per-label image only on a label the map fills.
+	const imageOrphans = Object.keys(fields.signatureImagesByLabel || {})
+		.filter((l) => !Object.prototype.hasOwnProperty.call(fields.text || {}, l) || !have.has(l));
 
 	// --- Duplicated aria-labels: ONE symptom, TWO renderers, TWO verdicts ------
 	//
@@ -212,6 +218,7 @@ for (const [docKey, file] of Object.entries(DOC_FILES)) {
 		orphanRequired.length +
 		requiredNotInTemplate.length +
 		(sigMissing ? 1 : 0) +
+		imageOrphans.length +
 		duplicatedCb.length;
 	problems += bad;
 	cbDuplicates += duplicatedCb.length;
@@ -225,6 +232,7 @@ for (const [docKey, file] of Object.entries(DOC_FILES)) {
 		if (orphanRequired.length) console.log(`   requiredText names a key not in text{}     : ${orphanRequired.join(", ")}`);
 		if (requiredNotInTemplate.length) console.log(`   requiredText absent from template          : ${requiredNotInTemplate.join(", ")}`);
 		if (sigMissing) console.log(`   signatureLabelForImage absent from template: ${sigTarget}`);
+		if (imageOrphans.length) console.log(`   signatureImagesByLabel not a filled label  : ${imageOrphans.join(", ")}`);
 		if (duplicatedCb.length) {
 			console.log(`   duplicated CHECKBOX aria-labels — only the FIRST is ticked, the rest stay`);
 			console.log(`   unchecked on a signed attestation (lib/policy-renderer.js:290 is still`);
