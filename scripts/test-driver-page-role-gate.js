@@ -245,6 +245,10 @@ function makeDeps() {
 		// scripts/test-emergency-contacts-routes.js §7).
 		EMERGENCY_CONTACTS_ENABLED: false,
 		emergencyContactsCount: () => { throw new Error("emergencyContactsCount() ran with EMERGENCY_CONTACTS_ENABLED off"); },
+		// Training videos: off here, so the placement must never run (its subject is
+		// scripts/test-driver-training-videos.js).
+		DRIVER_TRAINING_VIDEOS_ENABLED: false,
+		driverTrainingVideos: { trainingVideoPlacement: () => { throw new Error("trainingVideoPlacement() ran with DRIVER_TRAINING_VIDEOS_ENABLED off"); } },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
 	};

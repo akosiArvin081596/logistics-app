@@ -48464,6 +48464,11 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 	}
 });
 
+// Driver training videos, default OFF (true/1/yes/on turns it on). On, the driver app's payload carries
+// `trainingVideos` (lib/driver-training-videos.js); off, no key and the app shows nothing new.
+const DRIVER_TRAINING_VIDEOS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TRAINING_VIDEOS_ENABLED ?? "").trim());
+const driverTrainingVideos = require("./lib/driver-training-videos");
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -48961,6 +48966,8 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			// How many emergency contacts the driver has on file (never the contacts), by his
 			// session's account id, only while the flag is on; a Super Admin's payload has none.
 			...(EMERGENCY_CONTACTS_ENABLED && req.session.user.role !== "Super Admin" ? { emergencyContacts: { required: emergencyContactRules.MIN_CONTACTS, maximum: emergencyContactRules.MAX_CONTACTS, onFile: emergencyContactsCount(req.session.user.id) } } : {}),
+			// Where the training videos show, from the session's own onboarding status (never the drug-test columns).
+			...(DRIVER_TRAINING_VIDEOS_ENABLED ? { trainingVideos: driverTrainingVideos.trainingVideoPlacement(onboarding ? onboarding.status : null) } : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
@@ -75116,6 +75123,21 @@ function sentIfRendererBusy(res, err) {
 	res.status(503).json({ error: "PDF renderer is busy. Try again in a moment.", code: "PDF_RENDERER_BUSY" });
 	return true;
 }
+
+// Chromium's controls (lib/pdf-browser.js): a start line when any is on, and the
+// alert for its first launch failure in this process by the admin alert's two
+// channels, which pdf-browser.js sends only with CHROMIUM_LAUNCH_ALERT_SEND on.
+const chromiumControlsLine = require("./lib/pdf-browser").describeChromiumControls();
+if (chromiumControlsLine) console.log(chromiumControlsLine);
+require("./lib/pdf-browser").setLaunchFailureAlert(require("./lib/chromium-launch-alert").create({
+	sendEmail,
+	to: ADMIN_NOTIFY_EMAIL,
+	emailHtml: invoiceEmailHtml,
+	notify: (notice) => {
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));
+		emitDispatchNotice(notice);
+	},
+}));
 
 const { shutdownBrowser } = require("./lib/pdf-browser");
 async function gracefulShutdown(signal) {
