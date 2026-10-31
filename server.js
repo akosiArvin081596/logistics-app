@@ -639,6 +639,13 @@ try {
 	db.exec("ALTER TABLE users ADD COLUMN company_name TEXT NOT NULL DEFAULT ''");
 } catch { /* column already exists */ }
 
+// "KPI Viewer" enters the CHECK above only through scripts/migrate-users-kpi-viewer-role.js, which writes
+// only while KPI_VIEWER_ENABLED is on (lib/users-role-migration.js). With the flag on, each start checks it.
+const usersRoleMigration = require("./lib/users-role-migration");
+const KPI_VIEWER_ENABLED = usersRoleMigration.kpiViewerEnabled(process);
+// True only with the flag on and a CHECK that admits the role; false keeps the role closed.
+const KPI_VIEWER_SCHEMA_READY = usersRoleMigration.kpiViewerBootCheck(db, { enabled: KPI_VIEWER_ENABLED, log: console });
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS expenses (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
