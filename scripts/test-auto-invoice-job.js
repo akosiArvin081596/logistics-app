@@ -56,6 +56,11 @@
 //   §19 the render records' keeping time: the decision plus 30 days, 45 days at
 //       most, pruned once a day, and at start while the job is off
 //   §20 one builder and one digest (a source check, with mutants)
+//   §21 a load a person drafted before the render shadow built it (delivered in
+//       the Friday evening quiet window, drafted at 7 PM): nothing is built after
+//       midnight, no engine call, and its record says so; a draft made while a
+//       load is being built: nothing built is kept, and a render made before
+//       stays with the change noted; mutants of each check
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -1626,6 +1631,86 @@ async function renderShadowSections() {
 			["a report with its own Sent digest", JOB_SRC, REPORT_SRC.replace("digest: rules.messageDigest(m, { renderedAt:", "digest: ownDigest(m, { renderedAt:")],
 		]) {
 			ok(parity(src, report).length > 0, `§20 MUTANT ${label}: caught`);
+		}
+	}
+
+	// ---------------------------------------------------------------- §21
+	section("§21 a load drafted before the render shadow built it");
+	// Delivered Friday 6:35 PM Eastern (the quiet window, no build), drafted by a
+	// person at 7 PM, and the next sweep after midnight.
+	const draftedInQuiet = async (lib = jobLib) => {
+		const w = makeWorld();
+		w.richRender = true;
+		w.now = Date.parse("2026-10-23T22:30:00Z");
+		const job = lib.create(w.deps(SHADOW_ON));
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0350", { "Status Update Date": "10/23/2026 9:00:00", "Completion Date": "10/23/2026 9:00:00" });
+		const quiet = await job.tick();
+		w.now += 25 * MIN;
+		w.handDraft("LD-TEST-0350", "10232026-7");
+		await job.tick();
+		w.now = Date.parse("2026-10-24T04:05:00Z");
+		const sat = await job.tick();
+		return { w, job, quiet, sat, rec: recordOf(w, "LD-TEST-0350") };
+	};
+	// A person drafts while the load is being built; `before`: a render made first,
+	// then a change to the load, so the draft comes during the build again.
+	const draftedWhileBuilt = async ({ before = false } = {}, lib = jobLib) => {
+		const w = makeWorld();
+		w.richRender = true;
+		const job = lib.create(w.deps(SHADOW_ON));
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0351");
+		let first = null;
+		if (before) {
+			await job.tick();
+			first = recordOf(w, "LD-TEST-0351");
+			w.now += 5 * MIN;
+			w.setRow("LD-TEST-0351", { "  Payment  ": "$1,250.00" });
+		}
+		w.renderHook = (ctx) => { if (ctx.loadId === "LD-TEST-0351" && !w.draftRows("LD-TEST-0351").length) w.handDraft("LD-TEST-0351", "10202026-71"); };
+		await job.tick();
+		return { w, first, rec: recordOf(w, "LD-TEST-0351") };
+	};
+	{
+		const { w, job, quiet, sat, rec } = await draftedInQuiet();
+		eq([shadowRowOf(w, "LD-TEST-0350") && shadowRowOf(w, "LD-TEST-0350").verdict, quiet.sweep && quiet.sweep.renders], ["WOULD_ATTEMPT", { rendered: 0, refused: 0, quiet: true }],
+			"§21 delivered in the Friday evening quiet window: WOULD_ATTEMPT, nothing built");
+		eq([w.calls.prepare.length, w.calls.render.length, sat.sweep && sat.sweep.renders], [0, 0, { rendered: 0, refused: 1 }],
+			"§21 FAILS ON THE OLD CODE: drafted by a person at 7 PM: nothing built after midnight, no engine call (no Drive or Gemini either)");
+		eq(rec && Object.keys(rec), ["v", "refusedAt", "code", "domain", "fingerprintSha256"], "§21 ...its record: a code, the domain, the fingerprint, no digest");
+		eq(rec && [rec.code, rec.domain, rec.refusedAt], ["DRAFTED_BEFORE_RENDER", "example-broker.test", new Date(w.now).toISOString()],
+			"§21 ...DRAFTED_BEFORE_RENDER (the report counts the load unmatched), for the broker's domain");
+		w.now += 10 * MIN;
+		await job.tick();
+		eq([w.calls.prepare.length, JSON.stringify(recordOf(w, "LD-TEST-0350")) === JSON.stringify(rec)], [0, true], "§21 ...and nothing more on the next sweep");
+	}
+	{
+		const { w, rec } = await draftedWhileBuilt();
+		eq(rec && [rec.code, "renderedAt" in rec, w.calls.render.length], ["DRAFTED_BEFORE_RENDER", false, 1],
+			"§21 FAILS ON THE OLD CODE: a person drafts while the load is being built: nothing built is kept (it could carry that person's note)");
+		const again = await draftedWhileBuilt({ before: true });
+		const r = again.rec;
+		ok(again.first && r && r.renderedAt === again.first.renderedAt && r.invoiceTextSha256 === again.first.invoiceTextSha256 && r.draftSeenAt
+			&& r.fingerprintAtDraftSha256 !== r.fingerprintSha256 && again.w.calls.render.length === 2,
+		"§21 FAILS ON THE OLD CODE: ...with a render made before: that one is kept, the change before the draft noted (the report counts a difference)");
+	}
+	{
+		const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+		for (const [label, from, to, shows] of [
+			["the draft rows not read around the build", "const draftedNow = () => ledger.draftRowsFor(db, key).length > 0;", "const draftedNow = () => false;",
+				async (lib) => Boolean(((await draftedInQuiet(lib)).rec || {}).renderedAt)],
+			["no read before the build (an engine call for a drafted load)", "if (draftedNow()) return draftSeen(key, facts, fp, prev);\n\t\tconst refuse = (code, retry) => {", "const refuse = (code, retry) => {",
+				async (lib) => (await draftedInQuiet(lib)).w.calls.prepare.length > 0],
+			["no read after the build", "if (!msg.ok) return refuse(msg.code, false);\n\t\tif (draftedNow()) return draftSeen(key, facts, fp, prev);", "if (!msg.ok) return refuse(msg.code, false);",
+				async (lib) => Boolean(((await draftedWhileBuilt({}, lib)).rec || {}).renderedAt)],
+		]) {
+			const lib = mutantModule(JOB_FILE, from, to);
+			ok(lib, `§21 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+			if (!lib) continue;
+			ok(!(await shows(jobLib)) && (await shows(lib)), `§21 MUTANT ${label}: caught`);
 		}
 	}
 }

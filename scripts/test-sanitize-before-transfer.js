@@ -535,9 +535,9 @@ function seedDatabase(dbPath) {
 	// One render shadow record (section 15b): hashes, a billing address on a
 	// reserved domain and attachment names, as lib/auto-invoice-job.js stores them.
 	db.prepare("INSERT INTO auto_invoice_shadow (load_key,load_id,first_seen_at,ready_at,verdict,reason_code,facts_json,updated_at,render_digest_json) VALUES (?,?,?,?,?,?,?,?,?)")
-		.run("562620215", "562620215", "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", "WOULD_ATTEMPT", "", "{}", "2026-10-30T12:05:00.000Z",
+		.run("123456789", "123456789", "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", "WOULD_ATTEMPT", "", "{}", "2026-10-30T12:05:00.000Z",
 			JSON.stringify({ v: 1, renderedAt: "2026-10-30T12:05:00.000Z", recipient: "billing@example-broker.test", cc: [], bcc: [], subjectSha256: "c0ffee11".repeat(8),
-				bodyTextSha256: "b".repeat(64), invoiceTextSha256: "a".repeat(64), attachments: [{ name: "Example Broker Invoice Order #562620215.pdf", sha256: "" }] }));
+				bodyTextSha256: "b".repeat(64), invoiceTextSha256: "a".repeat(64), attachments: [{ name: "Example Broker Invoice Order #123456789.pdf", sha256: "" }] }));
 
 	// sam.driver's two emergency contacts (section 16).
 	const ec = db.prepare("INSERT INTO driver_emergency_contacts (user_id,position,contact_name,relationship,contact_phone,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?,?)");

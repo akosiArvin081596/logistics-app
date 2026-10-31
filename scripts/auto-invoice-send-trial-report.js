@@ -9,8 +9,11 @@
 //   for it, matched by invoice or load number: the message whose subject carries
 //   the load's order number and, when the app has the person's draft row for the
 //   load, whose invoice prints that row's invoice number, sent to that row's
-//   recipient after it (with no row, to the render's recipient), at most 7 days
-//   after the render. A load matches when:
+//   recipient after it (with no row, to the render's recipient), within 7 days
+//   after the render. The render compared must come before the person's first
+//   draft of the load, by the times recorded (the render's, and the draft row's
+//   in the app): a render made at or after it, or a load drafted before any
+//   render (the job builds none then), is unmatched. A load matches when:
 //     1. found: exactly one such message (none, or several: unmatched);
 //     2. recipient: its To is the render's one recipient, no Cc, no Bcc as far
 //        as the Sent copy shows;
@@ -26,8 +29,7 @@
 //        number.
 //   2-6 failing is a difference. Pass: at least 6 matched, 0 differences and 0
 //   unmatched. Refused renders and other domains are counted, not judged. A
-//   render with no message yet and less than 7 days old is pending: nothing
-//   passes, and nothing is recorded, while one is.
+//   render with no message yet and less than 7 days old is pending.
 // --trial: the draft week. Each automatic draft in the window (a drafted claim
 //   with its auto-imap row, auto_invoice_claims.draft_digest_json) against its
 //   Sent copy, found by its Message-ID, else by its exact subject, To and invoice
@@ -41,6 +43,10 @@
 //   The window is the first 7 days of drafts, longer by a day at a time while
 //   fewer than 6 drafts were sent, up to 14. Pass: every draft sent unchanged,
 //   at least 6.
+// Either mode decides nothing, pass or fail, before its evidence is complete:
+//   the window over (no more loads can join it), every load's 7 days to be sent
+//   over, and every message found its 7 days for a correction. Until then the
+//   result is pending, whatever the counts, and nothing is recorded.
 // Both compare digests made by lib/auto-invoice-rules.js messageDigest(): the
 // job's, stored when it built the message, and the Sent copy's, read in memory by
 // lib/mime-read.js from what lib/imap-draft.js fetchMessages() returns. The
@@ -196,10 +202,13 @@ function emptyCounts(mode, window, domains) {
 		population: 0,
 		matched: 0,
 		differences: { total: 0, ...Object.fromEntries(CONDITIONS.map((c) => [c, 0])) },
-		unmatched: { total: 0, none: 0, several: 0 },
+		// late (shadow): not rendered before the person's first draft of the load.
+		unmatched: { total: 0, none: 0, several: 0, ...(mode === "shadow" ? { late: 0 } : {}) },
 		pending: 0,
 		outside: {},
 		minimum: PASS_MINIMUM,
+		closesAt: "",
+		complete: false,
 		pass: false,
 		reason: "",
 	};
@@ -219,12 +228,26 @@ function tally(counts, verdict) {
 	}
 }
 
+// When the evidence is complete: the window over, then 7 days for each load to
+// be sent (from its render or draft) and 7 for a correction after each message
+// found. `startsMs`: the loads judged; `foundMs`: the messages found for them.
+function closesAt(windowEndMs, startsMs, foundMs) {
+	let at = windowEndMs;
+	for (const t of startsMs) at = Math.max(at, t + MATCH_MS);
+	for (const t of foundMs) at = Math.max(at, t + MATCH_MS);
+	return at;
+}
+
 // Arvin's rule: at least 6 matched, 0 differences, 0 unmatched; anything else
-// fails, and nothing is final while a message may still be sent.
-function decide(counts) {
-	if (counts.unmatched.total) counts.reason = "unmatched";
+// fails, and nothing is decided before the evidence is complete (`closesAtMs`).
+// `failure`: a reason that fails it once it is complete (step 0).
+function decide(counts, { nowMs, closesAtMs, failure = "" }) {
+	counts.closesAt = Number.isFinite(closesAtMs) ? new Date(closesAtMs).toISOString() : "";
+	counts.complete = Number.isFinite(closesAtMs) && nowMs >= closesAtMs && !counts.pending;
+	if (!counts.complete) counts.reason = `pending: the window and its 7-day periods are over at ${counts.closesAt || "an unknown time"}; run it again then`;
+	else if (failure) counts.reason = failure;
+	else if (counts.unmatched.total) counts.reason = "unmatched";
 	else if (counts.differences.total) counts.reason = "differences";
-	else if (counts.pending) counts.reason = "pending: some have had less than 7 days to be sent; run it again later";
 	else if (counts.matched < PASS_MINIMUM) counts.reason = `fewer than ${PASS_MINIMUM} matched`;
 	counts.pass = !counts.reason;
 	return counts;
@@ -242,33 +265,48 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 	const counts = emptyCounts("shadow", { since: first, until, zone }, domains);
 	counts.outside = { refused: 0, otherDomains: 0 };
 	const rows = ledger.hasTable(db, ledger.SHADOW) && ledger.hasRenderColumn(db) ? ledger.listShadow(db) : [];
+	const starts = [];
+	const found = [];
 	for (const row of rows) {
 		const rec = parseJson(row.render_digest_json);
 		const at = Date.parse(String((rec && (rec.renderedAt || rec.refusedAt)) || ""));
 		if (!rec || !(at >= fromMs && at < toMs)) continue;
-		if (rec.refusedAt) {
+		const draftedFirst = Boolean(rec.refusedAt) && rec.code === rules.SHADOW_DRAFTED_FIRST;
+		if (rec.refusedAt && !draftedFirst) {
 			counts.outside.refused++;
 			continue;
 		}
-		if (!domains.includes(domainOf(rec.recipient))) {
+		if (!domains.includes(draftedFirst ? String(rec.domain || "").toLowerCase() : domainOf(rec.recipient))) {
 			counts.outside.otherDomains++;
 			continue;
 		}
 		counts.population++;
+		// The render compared must be older than the person's first draft, by the
+		// times recorded: a later one could carry what that person typed. A later
+		// render, a load drafted before any render, or a time that can't be read: unmatched.
+		const allDrafts = personDrafts(db, row.load_key);
+		const firstDraftMs = allDrafts.length ? Math.min(...allDrafts.map((r) => Date.parse(r.created_at))) : Infinity;
+		const seenMs = rec.draftSeenAt ? Date.parse(rec.draftSeenAt) : Infinity;
+		if (draftedFirst || !(firstDraftMs > at) || !(seenMs > at)) {
+			tally(counts, { found: "late", failed: [] });
+			continue;
+		}
 		const word = orderNumberOf(row.load_id);
-		const drafts = personDrafts(db, row.load_key).filter((r) => {
+		const drafts = allDrafts.filter((r) => {
 			const t = Date.parse(r.created_at);
 			return t >= fromMs && t < toMs;
 		});
 		// Matched by invoice or load number: the person's draft row gives the
 		// invoice number its Sent copy prints, where it went and from when; with no
-		// row, the load number in the subject, the render's recipient and the
-		// window's start.
-		const lowMs = drafts.length ? Date.parse(drafts[0].created_at) : fromMs;
+		// row, the load number in the subject and the render's recipient. Either way
+		// the copy was sent within 7 days after the render.
+		const lowMs = drafts.length ? Date.parse(drafts[0].created_at) : at;
 		const lookFor = drafts.length && drafts[0].recipient ? drafts[0].recipient : rec.recipient;
 		const invoiceId = drafts.length ? String(drafts[0].invoice_id || "") : "";
-		const copies = await sentFor(fetchSent, word, Math.min(lowMs, at), at + 2 * MATCH_MS);
+		const copies = await sentFor(fetchSent, word, fromMs, at + 2 * MATCH_MS);
 		const candidates = copies.filter((x) => carries(x, lookFor) && x.at >= lowMs && x.at <= at + MATCH_MS && (!invoiceId || x.invoiceNumber === invoiceId));
+		starts.push(at);
+		for (const x of candidates) found.push(x.at);
 		tally(counts, judge({
 			expected: rec,
 			candidates,
@@ -283,7 +321,7 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 			},
 		}));
 	}
-	return decide(counts);
+	return decide(counts, { nowMs, closesAtMs: closesAt(toMs, starts, found) });
 }
 
 // ── --trial ──────────────────────────────────────────────────────────────────
@@ -323,7 +361,7 @@ async function compareTrial({ db, since, domains, zone, fetchSent, nowMs }) {
 				return !laterMessage(copies, matched, x.digest.recipient);
 			},
 		});
-		judged.push({ at, day: appTime.dayInZone(new Date(at), zone), verdict });
+		judged.push({ at, day: appTime.dayInZone(new Date(at), zone), verdict, foundMs: candidates.map((y) => y.at) });
 	}
 
 	// The window: 7 days, then a day more at a time while fewer than the minimum
@@ -335,19 +373,18 @@ async function compareTrial({ db, since, domains, zone, fetchSent, nowMs }) {
 	const counts = emptyCounts("trial", { since: firstDay, until, zone }, domains);
 	counts.outside = { otherDomains: own.filter((x) => x.digest && !domains.includes(domainOf(x.digest.recipient))).length, noDigest: own.filter((x) => !x.digest).length };
 	const inW = judged.filter((j) => j.day <= until);
+	const closesAtMs = closesAt(dayStartMs(addDays(until, 1), zone), inW.map((j) => j.at), inW.flatMap((j) => j.foundMs));
 	counts.population = inW.length;
 	const v0 = inW.length ? inW[0].verdict : null;
 	counts.step0 = !v0 ? "none" : v0.found === "pending" ? "pending" : v0.found !== "one" ? "not found" : v0.failed.length ? "differs" : "unchanged";
 	if (counts.step0 === "differs" || counts.step0 === "not found") {
 		tally(counts, v0);
-		counts.reason = counts.step0 === "differs"
+		return decide(counts, { nowMs, closesAtMs, failure: counts.step0 === "differs"
 			? "step 0: the first draft was not sent unchanged; write the normalization rule before judging the week"
-			: "step 0: the first draft is not in Sent Mail; nothing else is judged";
-		counts.pass = false;
-		return counts;
+			: "step 0: the first draft is not in Sent Mail; nothing else is judged" });
 	}
 	for (const j of inW) tally(counts, j.verdict);
-	return decide(counts);
+	return decide(counts, { nowMs, closesAtMs });
 }
 
 // ── output ───────────────────────────────────────────────────────────────────
@@ -370,11 +407,11 @@ function textOf(counts, sha) {
 	lines.push(
 		`Matched (all six conditions): ${counts.matched}`,
 		`Differences: ${d.total} (recipient ${d.recipient}, subject ${d.subject}, attachments and amount ${d.attachments}, body ${d.body}, nothing after ${d.nothingAfter})`,
-		`Unmatched: ${counts.unmatched.total} (no Sent message ${counts.unmatched.none}, several ${counts.unmatched.several})`,
+		`Unmatched: ${counts.unmatched.total} (no Sent message ${counts.unmatched.none}, several ${counts.unmatched.several}${counts.mode === "shadow" ? `, not rendered before the person's draft ${counts.unmatched.late}` : ""})`,
 		`Pending (less than 7 days to be sent): ${counts.pending}`,
 		`Outside the population (counted, not judged): ${Object.entries(counts.outside).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`,
-		`Pass rule: at least ${counts.minimum} matched, 0 differences, 0 unmatched`,
-		`Result: ${counts.pass ? "PASS" : `FAIL (${counts.reason}): the draft week runs`}`,
+		`Pass rule: at least ${counts.minimum} matched, 0 differences, 0 unmatched, decided once the window and its 7-day periods are over (${counts.closesAt})`,
+		`Result: ${counts.pass ? "PASS" : counts.complete ? `FAIL (${counts.reason}): the draft week runs` : `PENDING (${counts.reason}): nothing decided yet`}`,
 		`Report SHA-256: ${sha}`,
 	);
 	return lines.join("\n");
@@ -394,7 +431,7 @@ function record({ db, result, domain, expect, dryRun, nowIso }) {
 		throw new Refusal("this run's report SHA-256 is not the one given by --expect: nothing recorded (re-run on the data that was reviewed)");
 	}
 	const c = result.counts;
-	if (c.pending) throw new Refusal("some messages may still be sent (pending): no decision is recorded yet");
+	if (!c.complete || c.pending) throw new Refusal(`the comparison is pending until ${c.closesAt || "its evidence is complete"}: no decision is recorded yet`);
 	const key = `${c.pass ? "send_pass" : "draft_week"}:${domain}`;
 	const value = c.pass
 		? { source: c.mode, window: { since: c.window.since, until: c.window.until }, [c.mode === "shadow" ? "invoices" : "drafts"]: c.matched, passedAt: nowIso, reportSha256: result.reportSha256 }

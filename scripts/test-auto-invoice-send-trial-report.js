@@ -28,6 +28,13 @@
 //   §8 mutants of the report, each caught: every found load counted a
 //      difference (match), condition 2-5 dropped (difference), several Sent
 //      copies accepted (unmatched), the minimum lowered (fewer than 6)
+//   §9 the order and the timing: a render made after the person's draft (the
+//      review's case: five matches and one such render stay FAIL), or a load
+//      drafted before any render, is unmatched; a Sent copy from before the
+//      render is not its copy; nothing is decided, pass or fail, before the
+//      window and its 7-day periods are over (a run on day 5.5; a run on day 13.5
+//      before a correction on day 14; an early run with only unmatched loads;
+//      the trial before W is over, step 0 included); each with a mutant
 //
 // Made-up data only, an in-memory database, no network beyond a loopback
 // listener.
@@ -109,9 +116,10 @@ const numberOn = (date, n) => {
 };
 const HTML = (ref) => `<div style="font-family:Arial"><p>Hello,</p><p>Please see the attached documents for load number ${ref}: the rate confirmation, the signed POD, and the invoice.</p><p>Thank you,</p></div>`;
 // One invoice email as the engine builds it: the invoice PDF (number, date and
-// total printed, read the way Chromium writes text), then the POD and the rate con.
-function message(ref, { number, day, total = "$1,500.00", to = BILLING, cc, bcc } = {}) {
-	const printed = `INVOICE Invoice ID # : ${number} Date: ${mdy(day)} Made-up Co. Invoice To Example Broker ${BILLING} Load ID# Delivery Date Total Example Broker Order: #${ref} 11/01/2026 ${total} SUB-TOTAL ${total} Total ${total}`;
+// total printed, read the way Chromium writes text, with the notes a person typed
+// when there are any), then the POD and the rate con.
+function message(ref, { number, day, total = "$1,500.00", to = BILLING, cc, bcc, notes = "" } = {}) {
+	const printed = `INVOICE Invoice ID # : ${number} Date: ${mdy(day)} Made-up Co. Invoice To Example Broker ${BILLING} Load ID# Delivery Date Total Example Broker Order: #${ref} 11/01/2026 ${total} ${notes ? `${notes} ` : ""}SUB-TOTAL ${total} Total ${total}`;
 	return {
 		to, cc, bcc,
 		subject: `Example Broker Order #${ref}`,
@@ -152,13 +160,16 @@ function newDb() {
 const personRow = (db, { id, number, at, recipient = BILLING, editedFields = "", minted = "" }) =>
 	db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_at, created_by, edited, edited_fields, invoice_id_minted) VALUES (?, ?, ?, 'ratecon', 'imap', ?, 'made-up-admin', ?, ?, ?)")
 		.run(id, number, recipient, at.toISOString(), editedFields ? 1 : 0, editedFields, minted);
-const fetcher = (sent) => async ({ subject, since, before }) =>
-	sent.filter((m) => m.subject.includes(subject) && m.at >= since.getTime() && m.at < before.getTime()).map((m) => ({ raw: m.raw, internalDate: "" }));
+// Sent Mail as the IMAP read finds it at `nowMs`: what was sent by then.
+const fetcher = (sent, nowMs = Infinity) => async ({ subject, since, before }) =>
+	sent.filter((m) => m.at <= nowMs && m.subject.includes(subject) && m.at >= since.getTime() && m.at < before.getTime()).map((m) => ({ raw: m.raw, internalDate: "" }));
 
 // ------------------------------------------------------------------ --shadow worlds
 // One load of the shadow week: the render (placeholder number, render day), the
 // person's draft row hours later, and the Sent copy an hour after that, each
-// part changeable.
+// part changeable. `draftedFirst`: the job's record of a load a person drafted
+// before any render (no digest); `seenAt`: when the record says the draft was
+// seen ("none": not at all).
 async function shadowLoad(db, sent, n, o = {}) {
 	const id = o.id || `LD-TEST-04${String(n).padStart(2, "0")}`;
 	const renderAt = o.renderAt || T(o.day ?? 1, 2);
@@ -166,8 +177,12 @@ async function shadowLoad(db, sent, n, o = {}) {
 	const draftAt = new Date(renderAt.getTime() + (o.draftAfterHours ?? 3) * HOUR);
 	let record = o.refused
 		? { v: 1, refusedAt: renderAt.toISOString(), code: "TOTAL_MISMATCH", fingerprintSha256: FP }
-		: { ...rules.messageDigest(renderMsg, { renderedAt: renderAt.toISOString() }), fingerprintSha256: FP };
-	if (!o.refused && !o.noDraftRow) record = { ...record, draftSeenAt: draftAt.toISOString(), fingerprintAtDraftSha256: o.fpChanged ? "e".repeat(64) : FP };
+		: o.draftedFirst
+			? { v: 1, refusedAt: renderAt.toISOString(), code: rules.SHADOW_DRAFTED_FIRST, domain: o.domain || DOMAIN, fingerprintSha256: FP }
+			: { ...rules.messageDigest(renderMsg, { renderedAt: renderAt.toISOString() }), fingerprintSha256: FP };
+	if (!o.refused && !o.draftedFirst && !o.noDraftRow && o.seenAt !== "none") {
+		record = { ...record, draftSeenAt: (o.seenAt || draftAt).toISOString(), fingerprintAtDraftSha256: o.fpChanged ? "e".repeat(64) : FP };
+	}
 	ledger.upsertShadow(db, { key: rules.loadKey(id), loadId: id, verdict: "WOULD_ATTEMPT", readyAt: renderAt.toISOString(), nowIso: renderAt.toISOString() });
 	ledger.setRenderDigest(db, rules.loadKey(id), JSON.stringify(record), renderAt.toISOString());
 	const number = o.number || numberOn(draftAt, n);
@@ -191,8 +206,13 @@ async function runShadow(specs, { since, now = NOW, mod = report } = {}) {
 	ledger.setMeta(db, "shadow_renders_on_at", ON_AT);
 	const sent = [];
 	for (const [i, spec] of specs.entries()) await shadowLoad(db, sent, i + 1, spec);
-	const result = await mod.report({ db, mode: "shadow", since, domains: [DOMAIN], fetchSent: fetcher(sent), zone: ZONE, nowMs: now });
+	const result = await mod.report({ db, mode: "shadow", since, domains: [DOMAIN], fetchSent: fetcher(sent, now), zone: ZONE, nowMs: now });
 	return { db, sent, result, counts: result.counts };
+}
+// The same world's report run again at another time (or by a mutant).
+async function rerun(world, now, { mode = "shadow", mod = report } = {}) {
+	const result = await mod.report({ db: world.db, mode, domains: [DOMAIN], fetchSent: fetcher(world.sent, now), zone: ZONE, nowMs: now });
+	return { ...world, result, counts: result.counts };
 }
 const matching = (n) => Array.from({ length: n }, () => ({}));
 const withFirst = (o, n = 6) => [o, ...matching(n - 1)];
@@ -229,8 +249,8 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 	const db = newDb();
 	const sent = [];
 	for (const [i, spec] of specs.entries()) await trialLoad(db, sent, i + 1, spec);
-	const result = await report.report({ db, mode: "trial", since, domains: [DOMAIN], fetchSent: fetcher(sent), zone: ZONE, nowMs: now });
-	return { db, result, counts: result.counts };
+	const result = await report.report({ db, mode: "trial", since, domains: [DOMAIN], fetchSent: fetcher(sent, now), zone: ZONE, nowMs: now });
+	return { db, sent, result, counts: result.counts };
 }
 
 (async () => {
@@ -264,12 +284,12 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 	}
 	{
 		const none = await runShadow(withFirst({ copies: 0 }));
-		eq([brief(none.counts), none.counts.unmatched, none.counts.reason], [{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 1, several: 0 }, "unmatched"],
+		eq([brief(none.counts), none.counts.unmatched, none.counts.reason], [{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 1, several: 0, late: 0 }, "unmatched"],
 			"§1 unmatched: no Sent copy within 7 days of the render; FAIL");
 		const several = await runShadow(withFirst({ copies: 2 }));
-		eq([several.counts.unmatched, several.counts.pass], [{ total: 1, none: 0, several: 1 }, false], "§1 unmatched: two Sent copies for the load; FAIL");
+		eq([several.counts.unmatched, several.counts.pass], [{ total: 1, none: 0, several: 1, late: 0 }, false], "§1 unmatched: two Sent copies for the load; FAIL");
 		const other = await runShadow(withFirst({ printedNumber: "10302026-4" }));
-		eq([other.counts.unmatched, other.counts.pass], [{ total: 1, none: 1, several: 0 }, false], "§1 matched by invoice number: a Sent copy printing another invoice than the person's draft row is not its copy");
+		eq([other.counts.unmatched, other.counts.pass], [{ total: 1, none: 1, several: 0, late: 0 }, false], "§1 matched by invoice number: a Sent copy printing another invoice than the person's draft row is not its copy");
 		const noRow = await runShadow(withFirst({ noDraftRow: true }));
 		eq(brief(noRow.counts), { population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: true }, "§1 no draft row in the app: matched by the load number in the subject and the To alone");
 		const pending = await runShadow([{ renderAt: T(6, 2), copies: 0 }, ...matching(6)], { now: T(8).getTime() });
@@ -496,5 +516,91 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 		const real = await runShadow(specs);
 		const mutated = await runShadow(specs, { mod });
 		ok(still(real.counts) && !still(mutated.counts), `§8 MUTANT ${label}: the shipped report passes the case, the mutant fails it (caught)`);
+	}
+
+	// ===================================================================== §9
+	section("§9  the order and the timing: a render before the person's draft; nothing decided early");
+	const nowIso9 = "2026-11-24T15:00:00.000Z";
+	const refusal9 = (fn) => { try { fn(); return null; } catch (e) { return e instanceof report.Refusal ? e.message : `threw ${e.message}`; } };
+	// The review's case: a sixth load whose only render came three hours after the
+	// person drafted and sent it, its invoice carrying the note the person typed
+	// (the engine prints the newest draft row's note), its record noting the draft
+	// at the render, as a job that built after a draft wrote it.
+	const NOTE = "Note: made-up lumper";
+	const lateRender = { renderAt: T(5, 3), draftAfterHours: -4, sentAt: T(5, 0), seenAt: T(5, 3), render: { notes: NOTE }, sentMsg: { notes: NOTE } };
+	const draftedFirst = { draftedFirst: true, draftAfterHours: -1 };
+	const beforeRender = { noDraftRow: true, sentAt: T(1, 0) };
+	// The second review case: six loads, the sixth sent on day 7 and corrected on day 14.
+	const correctedLater = [...matching(5), { renderAt: T(6, 2), draftAfterHours: 23, sentAt: T(7, 2), laterAt: T(14, 0) }];
+	const days0to5 = [0, 1, 2, 3, 4, 5].map((n) => ({ renderAt: T(n, 2) }));
+	{
+		const five = await runShadow(matching(5));
+		eq([brief(five.counts), five.counts.reason], [{ population: 5, matched: 5, differences: 0, unmatched: 0, pending: 0, pass: false }, "fewer than 6 matched"], "§9 five ordinary loads: fewer than 6, FAIL");
+		const withLate = await runShadow([...matching(5), lateRender]);
+		eq([brief(withLate.counts), withLate.counts.unmatched, withLate.counts.reason],
+			[{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 0, several: 0, late: 1 }, "unmatched"],
+			"§9 FAILS ON THE OLD CODE: ...and a sixth rendered after the person's draft and send, with that person's note: unmatched (not rendered before the draft), still FAIL");
+		ok(/not rendered before the person's draft 1\)/.test(withLate.result.text), "§9 ...counted as such in the text");
+		const unnoted = await runShadow([...matching(5), { ...lateRender, seenAt: "none" }]);
+		eq([unnoted.counts.unmatched.late, unnoted.counts.pass], [1, false], "§9 ...the order taken from the draft row's own time when the record doesn't name the draft");
+		const first = await runShadow([...matching(6), draftedFirst]);
+		eq([brief(first.counts), first.counts.unmatched.late, first.counts.outside], [{ population: 7, matched: 6, differences: 0, unmatched: 1, pending: 0, pass: false }, 1, { refused: 0, otherDomains: 0 }],
+			"§9 FAILS ON THE OLD CODE: a load a person drafted before any render (the job's record, nothing built): unmatched, FAIL");
+		const firstOther = await runShadow([...matching(6), { ...draftedFirst, domain: "example-other.test" }]);
+		eq([brief(firstOther.counts), firstOther.counts.outside], [{ population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: true }, { refused: 0, otherDomains: 1 }],
+			"§9 ...one for another domain: counted outside, not judged");
+		const before = await runShadow(withFirst(beforeRender));
+		eq([brief(before.counts), before.counts.unmatched.none], [{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, 1],
+			"§9 FAILS ON THE OLD CODE: no draft row in the app, the only Sent copy sent before the render: not within 7 days after it, unmatched");
+	}
+	{
+		const early = await runShadow(days0to5, { now: T(5, 12).getTime() });
+		eq([brief(early.counts), early.counts.complete, /^pending: /.test(early.counts.reason)], [{ population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: false }, false, true],
+			"§9 FAILS ON THE OLD CODE: a run on day 5.5 with six matched: pending (the window isn't over), not PASS");
+		ok(/^Result: PENDING \(pending: /m.test(early.result.text), "§9 ...the text says PENDING");
+		ok(/pending/.test(refusal9(() => report.record({ db: early.db, result: early.result, domain: DOMAIN, expect: early.result.reportSha256, dryRun: false, nowIso: nowIso9 })) || ""),
+			"§9 ...and --record refuses it");
+		await shadowLoad(early.db, early.sent, 7, { renderAt: T(6, 2), sentMsg: { notes: "Note: made-up correction" } });
+		const full = await rerun(early, NOW);
+		eq([brief(full.counts), full.counts.complete, full.counts.reason], [{ population: 7, matched: 6, differences: 1, unmatched: 0, pending: 0, pass: false }, true, "differences"],
+			"§9 ...the whole week, a seventh load sent with another invoice text on day 6, run on day 21: FAIL (differences)");
+		const d13 = await runShadow(correctedLater, { now: T(13, 12).getTime() });
+		eq([brief(d13.counts), d13.counts.complete, /^pending: /.test(d13.counts.reason)], [{ population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: false }, false, true],
+			"§9 FAILS ON THE OLD CODE: six matched, the sixth sent on day 7: a run on day 13.5 is pending (its 7 days for a correction aren't over), not PASS");
+		const d21 = await rerun(d13, NOW);
+		eq([brief(d21.counts), d21.counts.differences.nothingAfter, d21.counts.reason], [{ population: 6, matched: 5, differences: 1, unmatched: 0, pending: 0, pass: false }, 1, "differences"],
+			"§9 ...a correction to the same To on day 14: the run on day 21 says FAIL (nothing after)");
+		const startOnly = await runShadow([draftedFirst, { ...draftedFirst, day: 2 }], { now: T(3).getTime() });
+		eq([brief(startOnly.counts), startOnly.counts.complete], [{ population: 2, matched: 0, differences: 0, unmatched: 2, pending: 0, pass: false }, false],
+			"§9 FAILS ON THE OLD CODE: a run on day 3, two loads already unmatched: pending until the window is over, nothing recorded early");
+		const trialEarly = await runTrial(matching(6), { now: T(6, 12).getTime() });
+		eq([brief(trialEarly.counts), trialEarly.counts.step0, trialEarly.counts.complete], [{ population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: false }, "unchanged", false],
+			"§9 FAILS ON THE OLD CODE: --trial, six drafts sent unchanged, run before W is over: pending, not PASS");
+		const step0Early = await runTrial(withFirst({ mutateSent: (m) => ({ ...m, html: m.html.replace("Hello,", "Hello there,") }) }), { now: T(6, 12).getTime() });
+		eq([step0Early.counts.step0, step0Early.counts.pass, step0Early.counts.complete, /^pending: /.test(step0Early.counts.reason)], ["differs", false, false, true],
+			"§9 FAILS ON THE OLD CODE: --trial, step 0 differs before W is over: shown, and pending (decided once W and its 7 days are over)");
+		const step0Late = await runTrial(withFirst({ mutateSent: (m) => ({ ...m, html: m.html.replace("Hello,", "Hello there,") }) }));
+		eq([step0Late.counts.complete, /^step 0/.test(step0Late.counts.reason)], [true, true], "§9 ...and FAIL on step 0 once they are");
+	}
+	for (const [label, from, to, run, still] of [
+		["a render after the person's draft compared as usual", "if (draftedFirst || !(firstDraftMs > at) || !(seenMs > at)) {", "if (draftedFirst) {",
+			(mod) => runShadow([...matching(5), lateRender], { mod }), (c) => c.unmatched.late === 1 && !c.pass],
+		["a load drafted before any render counted as a refusal", "const draftedFirst = Boolean(rec.refusedAt) && rec.code === rules.SHADOW_DRAFTED_FIRST;", "const draftedFirst = false;",
+			(mod) => runShadow([...matching(6), draftedFirst], { mod }), (c) => c.unmatched.late === 1 && !c.pass],
+		["a Sent copy from before the render accepted (no draft row)", "const lowMs = drafts.length ? Date.parse(drafts[0].created_at) : at;", "const lowMs = drafts.length ? Date.parse(drafts[0].created_at) : fromMs;",
+			(mod) => runShadow(withFirst(beforeRender), { mod }), (c) => c.unmatched.none === 1 && !c.pass],
+		["decided before the evidence is complete", "counts.complete = Number.isFinite(closesAtMs) && nowMs >= closesAtMs && !counts.pending;", "counts.complete = !counts.pending;",
+			(mod) => runShadow(days0to5, { now: T(5, 12).getTime(), mod }), (c) => !c.complete && !c.pass],
+		["the 7 days for a correction not waited for", "\tfor (const t of foundMs) at = Math.max(at, t + MATCH_MS);\n", "",
+			(mod) => runShadow(correctedLater, { now: T(13, 12).getTime(), mod }), (c) => !c.complete && !c.pass],
+		["the window's end not waited for", "let at = windowEndMs;", "let at = 0;",
+			(mod) => runShadow([draftedFirst, { ...draftedFirst, day: 2 }], { now: T(3).getTime(), mod }), (c) => !c.complete && !c.pass],
+	]) {
+		const mod = mutant(from, to);
+		ok(mod, `§9 MUTANT ${label}: applied to the shipped source once`);
+		if (!mod) continue;
+		const real = await run(report);
+		const mutated = await run(mod);
+		ok(still(real.counts) && !still(mutated.counts), `§9 MUTANT ${label}: the shipped report holds, the mutant doesn't (caught)`);
 	}
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(finish);

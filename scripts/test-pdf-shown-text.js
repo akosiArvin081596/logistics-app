@@ -16,8 +16,17 @@
 //      built-in extractPdfText() reads none of those words (why this reader exists)
 //   §5 mutants: a reader that ignores ToUnicode, or joins glyphs with a space,
 //      fails §1
+//   §6 the work budget: four small documents that are far more work than their
+//      size (a form drawing itself, pages sharing one stream, overlapping
+//      ToUnicode ranges, a long run of digits) read as unreadable within 2 s;
+//      one document past each limit (bytes inflated, characters and tokens read,
+//      form draws and depth, map entries, word length, pages, page-tree depth,
+//      text) reads as unreadable, never as a partial text, and a reader with that
+//      limit raised reads past it; a ToUnicode code longer than four bytes is no
+//      code, and the read finishes
 //
-// Made-up text only, apart from the committed documentation PDFs. No network.
+// Made-up text only, apart from the committed documentation PDFs. No network;
+// §6 runs two reads in a child process it stops itself.
 //   node scripts/test-pdf-shown-text.js      # exits 1 on any failure
 "use strict";
 
@@ -25,6 +34,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const Module = require("module");
+const { spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const READER_FILE = path.join(ROOT, "lib", "pdf-shown-text.js");
@@ -174,13 +184,118 @@ function mutant(from, to) {
 	return { applied: true, read: m.exports.shownText };
 }
 for (const [label, from, to] of [
-	["a reader that ignores ToUnicode", "const cmap = tu && tu.ref !== undefined ? parseCMap(streamText(tu.ref)) : null;", "const cmap = null;"],
+	["a reader that ignores ToUnicode", "const cmap = tu && tu.ref !== undefined ? parseCMap(streamText(tu.ref), work) : null;", "const cmap = null;"],
 	["a reader that joins glyphs with a space", "return out.parts.join(\"\");", "return out.parts.join(\" \");"],
 ]) {
 	const r = mutant(from, to);
 	ok(r.applied, `§5 MUTANT ${label}: applied to the shipped source once`);
 	if (r.applied) ok(!checks(r.read), `§5 MUTANT ${label}: is caught by §1`);
 }
+
+// ------------------------------------------------------------------ §6
+section("§6  the work budget: past any limit the whole document is unreadable");
+const FONT = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+const CATALOG = { dict: "<< /Type /Catalog /Pages 2 0 R >>" };
+const HOSTILE_MS = 2000;
+const timed = (read, buf, opts) => {
+	const t0 = Date.now();
+	const text = read(buf, opts);
+	return { text, ms: Date.now() - t0 };
+};
+// One Pages node over n pages (objects first to first+n-1), the font inherited;
+// pageObjects() makes those pages, each showing one content stream.
+const pagesSharing = (n, first, fontRef) => ({ dict: `<< /Type /Pages /Kids [${Array.from({ length: n }, (_, i) => `${first + i} 0 R`).join(" ")}] /Count ${n} /Resources << /Font << /F1 ${fontRef} 0 R >> >> >>` });
+const pageObjects = (n, streamRef) => Array.from({ length: n }, () => ({ dict: `<< /Type /Page /Parent 2 0 R /Contents ${streamRef} 0 R >>` }));
+const onePage = (content, resources = "/Font << /F1 5 0 R >>", more = [{ dict: FONT }]) => pdfOf([
+	CATALOG,
+	{ dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+	{ dict: `<< /Type /Page /Parent 2 0 R /Resources << ${resources} >> /Contents 4 0 R >>` },
+	{ stream: content },
+	...more,
+]);
+const toUnicodePage = (cmap) => onePage("BT /F1 9 Tf <41> Tj ET", "/Font << /F1 5 0 R >>", [{ dict: "<< /Type /Font /Subtype /TrueType /ToUnicode 6 0 R >>" }, { stream: cmap }]);
+
+// Four small documents that are far more work than their size: each reads as
+// unreadable, and quickly.
+for (const [label, make] of [
+	["a form that draws itself eight times at every level", () => onePage("/X Do", "/XObject << /X 5 0 R >>",
+		[{ dict: "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /XObject << /X 5 0 R >> >>", stream: "/X Do ".repeat(8) }])],
+	["800 pages sharing one 256 KB content stream", () => pdfOf([CATALOG, pagesSharing(800, 5, 4), { stream: "q Q ".repeat(65536) }, { dict: FONT }, ...pageObjects(800, 3)])],
+	["160 overlapping ToUnicode ranges of 32,768 codes each", () => toUnicodePage(`1 begincodespacerange <00> <FF> endcodespacerange 160 beginbfrange\n${"<0000> <7FFF> <0041>\n".repeat(160)}endbfrange`)],
+	["an object holding a run of 128,000 digits", () => Buffer.from(`%PDF-1.7\n1 0 obj\n${"1".repeat(128000)}x\nendobj\n`, "latin1")],
+]) {
+	const r = timed(shownText, make());
+	eq(r.text.length, 0, `§6 ${label}: unreadable (characters read)`);
+	ok(r.ms < HOSTILE_MS, `§6 ...within ${HOSTILE_MS} ms (took ${r.ms} ms)`);
+}
+
+// One document past each limit: "" from the shipped reader, never the part it
+// read before the limit; with the limit raised (a mutant), a reader reads past it.
+const nested = () => {
+	// Forms 4 to 12 each show a letter and draw the next: nine inside one another.
+	const forms = Array.from({ length: 9 }, (_, i) => ({
+		dict: `/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 14 0 R >> ${i < 8 ? `/XObject << /X ${i + 5} 0 R >> ` : ""}>>`,
+		stream: `BT /F1 9 Tf (${"abcdefghi"[i]}) Tj ET${i < 8 ? " /X Do" : ""}`,
+	}));
+	return pdfOf([CATALOG, { dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" }, { dict: "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /X 4 0 R >> >> /Contents 13 0 R >>" },
+		...forms, { stream: "/X Do" }, { dict: FONT }]);
+};
+const deepTree = () => {
+	// Pages nodes 2 to 71 in a chain: page "a" under the first, page "b" under the last.
+	const chain = Array.from({ length: 70 }, (_, i) => ({
+		dict: `<< /Type /Pages /Kids [${i === 0 ? "72 0 R 3 0 R" : i < 69 ? `${i + 3} 0 R` : "73 0 R"}] /Count 1${i === 0 ? " /Resources << /Font << /F1 76 0 R >> >>" : ""} >>`,
+	}));
+	return pdfOf([CATALOG, ...chain, { dict: "<< /Type /Page /Contents 74 0 R >>" }, { dict: "<< /Type /Page /Contents 75 0 R >>" },
+		{ stream: "BT /F1 9 Tf (a) Tj ET" }, { stream: "BT /F1 9 Tf (b) Tj ET" }, { dict: FONT }]);
+};
+for (const [label, make, opts, from, to] of [
+	["bytes inflated (the second page's stream past the budget)", () => pdfOf([CATALOG,
+		{ dict: "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /Resources << /Font << /F1 7 0 R >> >> >>" },
+		{ dict: "<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>" }, { dict: "<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>" },
+		{ stream: "BT /F1 9 Tf (abc) Tj ET" }, { stream: `BT /F1 9 Tf (${"z".repeat(4000)}) Tj ET` }, { dict: FONT }]),
+	{ maxInflatedBytes: 1000 }, "if (tooLarge(e)) throw new LimitReached(\"inflatedBytes\");", "if (tooLarge(e)) return \"\";"],
+	["characters read (40 pages sharing one 1 MB stream)", () => pdfOf([CATALOG, pagesSharing(40, 5, 4), { stream: `${" ".repeat(1024 * 1024)}BT /F1 9 Tf (a) Tj ET` }, { dict: FONT }, ...pageObjects(40, 3)]),
+		{}, "chars: 32 * 1024 * 1024,", "chars: Infinity,"],
+	["tokens read (2.1 million)", () => onePage(`${"q Q ".repeat(1050000)}BT /F1 9 Tf (a) Tj ET`), {}, "tokens: 2000000,", "tokens: Infinity,"],
+	["form draws (1,100)", () => onePage("/X Do ".repeat(1100), "/XObject << /X 5 0 R >>",
+		[{ dict: "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 6 0 R >> >>", stream: "BT /F1 9 Tf (a) Tj ET" }, { dict: FONT }]), {}, "formDraws: 1024,", "formDraws: Infinity,"],
+	["form depth (nine forms inside one another)", nested, {}, "formDepth: 8,", "formDepth: 64,"],
+	["ToUnicode entries set (nine overlapping ranges of 32,768 codes)", () => toUnicodePage(`1 begincodespacerange <00> <FF> endcodespacerange 9 beginbfrange\n${"<0000> <7FFF> <0041>\n".repeat(9)}endbfrange`),
+		{}, "mapSteps: 4 * 65536,", "mapSteps: Infinity,"],
+	["word length (a number of 300 digits and a letter)", () => onePage(`BT /F1 9 Tf ${"1".repeat(300)}x (a) Tj ET`), {}, "wordChars: 256,", "wordChars: Infinity,"],
+	["pages (2,001)", () => pdfOf([CATALOG, pagesSharing(2001, 5, 4), { stream: "BT /F1 9 Tf (a) Tj ET" }, { dict: FONT }, ...pageObjects(2001, 3)]), {}, "pages: 2000,", "pages: Infinity,"],
+	["page-tree depth (70 levels)", deepTree, {}, "treeDepth: 64,", "treeDepth: Infinity,"],
+	["text shown (2.2 million characters)", () => onePage(`BT /F1 9 Tf (${"x".repeat(2200000)}) Tj ET`), {}, "textChars: 2 * 1024 * 1024,", "textChars: Infinity,"],
+]) {
+	const buf = make();
+	const r = timed(shownText, buf, opts);
+	eq(r.text.length, 0, `§6 ${label}: unreadable, not a partial text (characters read)`);
+	ok(r.ms < HOSTILE_MS, `§6 ...within ${HOSTILE_MS} ms (took ${r.ms} ms)`);
+	const m = mutant(from, to);
+	ok(m.applied, `§6 MUTANT ${label}, the limit raised: applied to the shipped source once`);
+	if (m.applied) ok(m.read(buf, opts) !== "", `§6 MUTANT ${label}, the limit raised: reads past it (caught)`);
+}
+
+// A ToUnicode range of codes longer than four bytes is skipped (the glyph reads as
+// unmapped). Read in a child process, stopped by its own handle if it doesn't
+// finish, so this run always ends.
+const READER_SRC = fs.readFileSync(READER_FILE, "utf8");
+function readInChild(source, pdf, timeoutMs) {
+	const script = `const Module = require("module");
+const m = new Module(${JSON.stringify(READER_FILE)}, null);
+m._compile(${JSON.stringify(source)}, ${JSON.stringify(READER_FILE)});
+process.stdout.write(JSON.stringify(m.exports.shownText(Buffer.from(${JSON.stringify(pdf.toString("base64"))}, "base64"))));`;
+	const r = spawnSync(process.execPath, ["-"], { input: script, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL" });
+	return r.status === 0 ? { finished: true, text: JSON.parse(r.stdout) } : { finished: false };
+}
+const longCodes = (bytes) => toUnicodePage(`1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfrange\n<${"FF".repeat(bytes)}> <${"FF".repeat(bytes)}> <0041>\nendbfrange`);
+for (const bytes of [7, 200]) {
+	eq(readInChild(READER_SRC, longCodes(bytes), 10000), { finished: true, text: "�" }, `§6 a ToUnicode range of ${bytes}-byte codes: skipped (the glyph unmapped), and the read finishes`);
+}
+const IS_CODE = "const isCode = (b) => Buffer.isBuffer(b) && b.length >= 1 && b.length <= 4;";
+const anyLength = READER_SRC.split(IS_CODE).length === 2 ? READER_SRC.replace(IS_CODE, () => "const isCode = (b) => Buffer.isBuffer(b);") : null;
+ok(anyLength, "§6 MUTANT codes of any length: applied to the shipped source once");
+if (anyLength) eq(readInChild(anyLength, longCodes(7), 2000).finished, false, "§6 MUTANT codes of any length: caught (the read doesn't finish within 2 s; the child is stopped)");
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {
