@@ -261,7 +261,7 @@ POST /api/n8n/load-distance · n8nDistanceLimiter=limiter · inline@8d72033d7030
 PUT /api/notifications/read · requireAuth@2f5c61384511 · driverWriteLimiter=limiter · inline@927e5d55cc78
 GET /api/onboarding · requireRole("Super Admin")=anon@12b84c4b0134 · inline@0b785f923b48
 GET /api/onboarding/:userId · requireAuth@2f5c61384511 · inline@a576daa87f64
-POST /api/onboarding/:userId/documents/:docKey/sign · requireAuth@2f5c61384511 · onboardingSignLimiter=limiter · inline@0269fdae7ee2
+POST /api/onboarding/:userId/documents/:docKey/sign · requireAuth@2f5c61384511 · onboardingSignLimiter=limiter · inline@a0baff6fedcf
 POST /api/onboarding/:userId/drug-test · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3cddd4e66e63
 GET /api/onboarding/documents/:docKey/pdf · requireAuth@2f5c61384511 · onboardingPreviewLimiter=limiter · inline@097177ebb747
 GET /api/payouts · requireRole("Super Admin")=anon@12b84c4b0134 · inline@cdcd07154fc0
