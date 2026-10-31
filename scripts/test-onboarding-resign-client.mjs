@@ -147,8 +147,14 @@ const ct = read(CONTROL)
 ok('§7 the request posts the trimmed reason to requestUrl()', ct.includes('await api.post(requestUrl(props.userId, props.doc.doc_key), { reason: reason.value.trim() })'))
 ok('§7 the withdrawal posts nothing to cancelUrl()', ct.includes('await api.post(cancelUrl(props.userId, props.doc.doc_key), {})'))
 ok('§7 the state comes from staffState()', ct.includes('const state = computed(() => staffState(props.doc))'))
+// Comments are dropped until none is left, so a comment inside a comment can't hide a role test.
+const stripComments = (s) => {
+  let prev
+  do { prev = s; s = s.replace(/<!--[\s\S]*?-->/g, '') } while (s !== prev)
+  return s.replace(/\/\/.*$/gm, '')
+}
 ok('§7 no role is tested in the browser (the server sends the keys to a Super Admin only)',
-  ct !== '' && !/useAuthStore|\bauth\.|\.role\b/.test(ct.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\/.*$/gm, '')))
+  ct !== '' && !/useAuthStore|\bauth\.|\.role\b/.test(stripComments(ct)))
 ok('§7 the form says the original stays and the driver is told in the app only', ct.includes('The signed original stays on file as history. The driver is told in the app only: no email or text.'))
 
 console.log(`\ntest-onboarding-resign-client: ${pass} passed, ${fail} failed`)
