@@ -11,19 +11,20 @@
  *   §2 flag off: today's render path: one fill evaluate, then the PDF, no span;
  *      the substance policy's signature-and-date slot stays an input, cut short
  *      in the stand-in's painted text, and a required slot too narrow to show
- *      anything still renders; no slot lines up by its first line
+ *      anything still renders; a name too long for its slot in a sentence
+ *      stays an input too
  *   §3 flag on, the wrap, on a stand-in page that lays out its inputs (made-up
  *      metrics: 7px a character, a blank's 4px side padding): a value wider
  *      than its box becomes a span with the same text and attributes that
  *      wraps, takes the input's text styles and keeps the input's width and
- *      bottom rule where the template's rules would give a span others; an
- *      inline-block span lines up by its first line (baseline-source: first),
- *      so a wrapped value keeps its first line on its sentence's line, and a
- *      block span gets none; a value that fits, an empty one, a hidden input
- *      and a checkbox are left alone; an unlabelled input is wrapped too; the
- *      substance policy's long signature line prints whole, a name long enough
- *      to wrap in its "I, ____ ," sentence prints whole and lined up by its
- *      first line, and a short one prints as with the flag off
+ *      bottom rule where the template's rules would give a span others; a value
+ *      that fits, an empty one, a hidden input and a checkbox are left alone;
+ *      an unlabelled input is wrapped too; in running text (text, or an inline
+ *      element with text, beside the slot) the span is inline and flows with
+ *      the sentence, while a slot on a line of its own keeps the box and a
+ *      block slot stays a block; the substance policy's long signature line
+ *      prints whole in its box, a name too long for its "I, ____ ," slot flows
+ *      inline, and a short one prints as with the flag off
  *   §4 flag on, the check: a required value that still overflows after the
  *      wrap is refused (DOCUMENT_FIELDS_UNFILLED) before any PDF exists, with
  *      the document and the label named and the value in neither the message
@@ -178,6 +179,9 @@ function makeNode(doc, tagName, attrs = {}, initialText = "") {
 	};
 	const node = {
 		tagName,
+		nodeType: 1,
+		// Set for inputs by attachParents(): what the in-page check for running text reads.
+		parentElement: null,
 		style,
 		get type() { return tagName === "INPUT" ? String(attributes.get("type") || "text").toLowerCase() : undefined; },
 		getAttribute: (n) => (attributes.has(n) ? attributes.get(n) : null),
@@ -228,6 +232,7 @@ function stubDocument(html, { parent = {} } = {}) {
 		// The computed value of one property: the inline style, then the made-up
 		// sheet below. A detached element has none, as in a browser.
 		computed(node, prop) {
+			if (node && node.stub) return prop === "display" ? node.display : "";
 			if (!doc.nodes.includes(node)) return "";
 			const inline = node.style.getPropertyValue(prop);
 			if (inline !== "") return inline;
@@ -264,6 +269,8 @@ function stubDocument(html, { parent = {} } = {}) {
 		layout(node) {
 			if (node.hasAttribute("hidden") || !doc.nodes.includes(node)) return { width: 0, needed: 0 };
 			const c = (p) => doc.computed(node, p);
+			// An inline span has no box of its own (Chromium reports 0 for both widths): its text flows.
+			if (node.tagName === "SPAN" && c("display") === "inline") return { width: 0, needed: 0 };
 			const padding = px(c("padding-left")) + px(c("padding-right"));
 			const inline = node.style.getPropertyValue("width");
 			const cls = String(node.getAttribute("class") || "").split(/\s+/).filter(Boolean);
@@ -319,7 +326,54 @@ function stubDocument(html, { parent = {} } = {}) {
 		const after = m.index + m[0].length;
 		doc.nodes.push(makeNode(doc, tagName, attrs, tagName === "INPUT" ? "" : html.slice(after, html.indexOf("<", after))));
 	}
+	attachParents(html, doc.nodes.filter((n) => n.tagName === "INPUT"));
 	return doc;
+}
+
+// Each input's parent, as the in-page check for running text reads it: its child nodes in order, text
+// ({ nodeType: 3, data }) and elements ({ nodeType: 1, display, textContent }), the input itself among them.
+// A walk over start tags, end tags and the text between them, enough for the pages here.
+const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+const INLINE_TAGS = new Set(["a", "abbr", "b", "cite", "code", "em", "i", "label", "mark", "q", "s", "small", "span", "strong", "sub", "sup", "time", "u"]);
+const ENTITIES = { nbsp: String.fromCharCode(0xa0), amp: "&", quot: "\"", lt: "<", gt: ">", sect: "§" };
+const decodeText = (s) => s.replace(/&([a-z]+);/g, (all, name) => (Object.prototype.hasOwnProperty.call(ENTITIES, name) ? ENTITIES[name] : all));
+function attachParents(html, inputs) {
+	const frame = (tag) => ({ tag, el: { nodeType: 1, stub: true, display: INLINE_TAGS.has(tag) ? "inline" : "block", childNodes: [], textContent: "" } });
+	const stack = [frame("#root")];
+	const addText = (raw) => {
+		if (!raw) return;
+		const data = decodeText(raw);
+		stack[stack.length - 1].el.childNodes.push({ nodeType: 3, data });
+		for (const f of stack) f.el.textContent += data;
+	};
+	const tokenRe = /<!--[\s\S]*?-->|<!doctype[^>]*>|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/gi;
+	let at = 0;
+	let placed = 0;
+	let m;
+	while ((m = tokenRe.exec(html))) {
+		addText(html.slice(at, m.index));
+		at = tokenRe.lastIndex;
+		if (!m[2]) continue;
+		const tag = m[2].toLowerCase();
+		if (m[1]) {
+			const open = stack.map((f) => f.tag).lastIndexOf(tag);
+			if (open > 0) stack.length = open;
+			continue;
+		}
+		const parent = stack[stack.length - 1].el;
+		if (tag === "input") {
+			const node = inputs[placed++];
+			if (!node) throw new Error("stand-in page: more inputs in the markup than in the document");
+			node.parentElement = parent;
+			parent.childNodes.push(node);
+			continue;
+		}
+		const f = frame(tag);
+		parent.childNodes.push(f.el);
+		if (!VOID_TAGS.has(tag)) stack.push(f);
+	}
+	addText(html.slice(at));
+	if (placed !== inputs.length) throw new Error(`stand-in page: ${inputs.length} inputs in the document, ${placed} in the markup`);
 }
 
 const newRecord = (transform = null, opts = {}) => ({ transform, opts, docs: [], calls: [], results: [], pdfOptions: [], closed: 0 });
@@ -420,11 +474,26 @@ const UNIT_HTML = `<!doctype html><html><head><style>
 </body></html>`;
 const UNIT_LABELS = ["Fits", "Long", "Empty", "Default width", "Input rule", "Block", "Hidden", "Box", "Tiny", "Attributes"];
 
-async function unitWrap(ctx, opts = {}) {
+// A made-up page for slots in running text: in a sentence, after a label, on a line of their own.
+const SENTENCE_HTML = `<!doctype html><html><head><style>
+  .blank-md { width: 240px; }
+</style></head><body>
+<p>Made-up words before, <input type="text" class="blank blank-md" aria-label="In a sentence" value="${ADDRESS}"> , made-up words after.</p>
+<p><strong>Made-up label:</strong> <input type="text" class="blank blank-md" aria-label="After a label" value="${ADDRESS}"></p>
+<div>
+  <input type="text" class="blank blank-md" aria-label="Own line" value="${ADDRESS}">
+  <div>Made-up caption under it</div>
+</div>
+<p>&nbsp; <input type="text" class="blank blank-md" aria-label="Beside a space" value="${ADDRESS}"> &nbsp;</p>
+<p>Made-up words, <input type="text" class="blank blank-block" aria-label="Block in a sentence" value="${ADDRESS} ${ADDRESS}"> , more.</p>
+</body></html>`;
+const SENTENCE_LABELS = ["In a sentence", "After a label", "Own line", "Beside a space", "Block in a sentence"];
+
+async function unitWrap(ctx, opts = {}, html = UNIT_HTML, labels = UNIT_LABELS) {
 	const rec = newRecord(null, opts);
 	const R = ctx.R(rec);
-	const page = fakePage(UNIT_HTML, rec);
-	const report = await page.evaluate(R.wrapOverflowingInputs, UNIT_LABELS);
+	const page = fakePage(html, rec);
+	const report = await page.evaluate(R.wrapOverflowingInputs, labels);
 	return { doc: rec.docs[0], report: report || {} };
 }
 const one = (doc, label) => doc.slots(label)[0] || null;
@@ -486,8 +555,9 @@ async function g2FlagOff(ctx) {
 	const longer = newRecord();
 	await rendering(ctx.R(longer), "substance_policy", VERY_LONG_DATA, undefined);
 	const ldoc = longer.docs[0];
-	check("§2 flag off, a name long enough to wrap in the \"I, ____ ,\" sentence: nothing is swapped and no slot lines up by its first line",
-		Boolean(ldoc) && ldoc.created.size === 0 && ldoc.nodes.every((n) => n.style.getPropertyValue("baseline-source") === ""));
+	const lname = ldoc ? one(ldoc, "Name") : null;
+	check("§2 flag off, a name too long for the \"I, ____ ,\" slot: nothing is swapped, so nothing flows inline (the slot stays an input)",
+		Boolean(ldoc) && ldoc.created.size === 0 && Boolean(lname) && lname.tagName === "INPUT" && lname.value === VERY_LONG_NAME);
 }
 
 // ── §3 flag on: the wrap ────────────────────────────────────────────────────
@@ -516,9 +586,6 @@ async function g3Wrap(ctx) {
 		doc.computed(long, "border-bottom-width") === "1px" && doc.computed(long, "border-bottom-style") === "solid");
 	check("§3 ...and its text now fits: nothing overflows and the whole value prints",
 		Boolean(long) && long.scrollWidth <= long.clientWidth && doc.visible(long) === ADDRESS);
-	const inlineSpans = doc.nodes.filter((n) => doc.created.has(n) && n.style.getPropertyValue("display") === "inline-block");
-	check("§3 every inline-block span, labelled or not, lines up by its first line (baseline-source: first), so the sentence it sits in stays on that line",
-		inlineSpans.length === 6 && inlineSpans.every((n) => n.style.getPropertyValue("baseline-source") === "first"), inlineSpans.length);
 	const deflt = one(doc, "Default width");
 	check("§3 an input with no width rule keeps its own width on the span (pinned)",
 		Boolean(deflt) && deflt.tagName === "SPAN" && deflt.style.getPropertyValue("width") === `${INPUT_DEFAULT_WIDTH}px` && deflt.clientWidth === INPUT_DEFAULT_WIDTH);
@@ -528,8 +595,6 @@ async function g3Wrap(ctx) {
 		rule.style.getPropertyValue("border-bottom-style") === "dotted" && rule.style.getPropertyValue("border-bottom-color") === "rgb(0, 0, 0)");
 	const block = one(doc, "Block");
 	check("§3 a display:block input becomes a block span", Boolean(block) && block.tagName === "SPAN" && block.style.getPropertyValue("display") === "block");
-	check("§3 ...with no first-line alignment: a block shares no line (nor does a flex item, which the browser makes a block)",
-		Boolean(block) && block.tagName === "SPAN" && block.style.getPropertyValue("baseline-source") === "");
 	const attrs = one(doc, "Attributes");
 	check("§3 the span keeps every other attribute (id, data-, its own inline style)",
 		Boolean(attrs) && attrs.tagName === "SPAN" && attrs.getAttribute("id") === "made-up-id" && attrs.getAttribute("data-row") === "3" &&
@@ -551,6 +616,26 @@ async function g3Wrap(ctx) {
 	check("§3 ...and keeps the input's alignment, case and indent, not the line's",
 		Boolean(oddLong) && odd.doc.computed(oddLong, "text-align") === "start" &&
 		odd.doc.computed(oddLong, "text-transform") === "none" && odd.doc.computed(oddLong, "text-indent") === "0px");
+
+	// Slots in running text.
+	const sent = await unitWrap(ctx, {}, SENTENCE_HTML, SENTENCE_LABELS);
+	const inSentence = one(sent.doc, "In a sentence");
+	check("§3 a value too long for its slot in a sentence becomes an inline span: it flows with the sentence, whole, under the blank's rule, with no width and never reported cut off",
+		Boolean(inSentence) && inSentence.tagName === "SPAN" && inSentence.style.getPropertyValue("display") === "inline" && inSentence.textContent === ADDRESS &&
+		sent.doc.visible(inSentence) === ADDRESS && sent.doc.computed(inSentence, "border-bottom-style") === "solid" &&
+		inSentence.style.getPropertyValue("width") === "" && !(sent.report.clipped || []).includes("In a sentence"));
+	const afterLabel = one(sent.doc, "After a label");
+	check("§3 after a label on its line (an inline element with text beside it), it flows inline too",
+		Boolean(afterLabel) && afterLabel.tagName === "SPAN" && afterLabel.style.getPropertyValue("display") === "inline");
+	const ownLine = one(sent.doc, "Own line");
+	check("§3 on a line of its own (only a block caption beside it), it keeps #681's box: an inline-block of the slot's width",
+		Boolean(ownLine) && ownLine.tagName === "SPAN" && ownLine.style.getPropertyValue("display") === "inline-block" && ownLine.clientWidth === 240);
+	const besideSpace = one(sent.doc, "Beside a space");
+	check("§3 blank text beside a slot (an nbsp) is no sentence: it keeps the box",
+		Boolean(besideSpace) && besideSpace.tagName === "SPAN" && besideSpace.style.getPropertyValue("display") === "inline-block");
+	const blockInText = one(sent.doc, "Block in a sentence");
+	check("§3 a block slot beside text stays a block span (as does a flex item, which the browser makes a block)",
+		Boolean(blockInText) && blockInText.tagName === "SPAN" && blockInText.style.getPropertyValue("display") === "block");
 
 	// The substance policy itself.
 	const rec = newRecord();
@@ -575,9 +660,14 @@ async function g3Wrap(ctx) {
 	const vr = await rendering(ctx.R(vrec), "substance_policy", VERY_LONG_DATA, "true");
 	const vdoc = vrec.docs[0];
 	const vname = vdoc ? one(vdoc, "Name") : null;
-	check("§3 flag on, a name long enough to wrap in the \"I, ____ ,\" sentence: that slot prints the whole name, lined up by its first line",
-		!vr.error && Boolean(vname) && vname.tagName === "SPAN" && vname.textContent === VERY_LONG_NAME && vdoc.visible(vname) === VERY_LONG_NAME &&
-		vname.style.getPropertyValue("baseline-source") === "first", vr.error ? vr.error.message : undefined);
+	const vsig = vdoc ? one(vdoc, SLOT) : null;
+	check("§3 flag on, a name too long for the \"I, ____ ,\" slot: it flows inline with its sentence, the whole name printed, with no width",
+		!vr.error && Boolean(vname) && vname.tagName === "SPAN" && vname.style.getPropertyValue("display") === "inline" &&
+		vname.textContent === VERY_LONG_NAME && vdoc.visible(vname) === VERY_LONG_NAME && vname.style.getPropertyValue("width") === "",
+		vr.error ? vr.error.message : undefined);
+	check("§3 ...while the signature-and-date slot, on a line of its own, keeps #681's box: an inline-block of the template's 260px",
+		Boolean(vsig) && vsig.tagName === "SPAN" && vsig.style.getPropertyValue("display") === "inline-block" && vsig.clientWidth === 260 &&
+		vdoc.visible(vsig).includes(DATE));
 
 	const offRec = newRecord();
 	await rendering(ctx.R(offRec), "substance_policy", SHORT_DATA, undefined);
@@ -842,8 +932,13 @@ const MUTANTS = [
 	{ name: "the input's bottom rule is not kept", renderer: [["if (now.getPropertyValue(p) !== was[p]) span.style.setProperty(p, was[p]);", "void now;"]] },
 	{ name: "the input's text styles are not copied", renderer: [["for (const p of TEXT_STYLES) span.style.setProperty(p, was[p]);", ""]] },
 	{ name: "the span does not wrap", renderer: [["span.style.setProperty(\"white-space\", \"normal\", \"important\");", ""]] },
-	{ name: "the span lines up by its last line again (no baseline-source)", renderer: [["\t\tif (was.display !== \"block\") span.style.setProperty(\"baseline-source\", \"first\");\n", ""]] },
-	{ name: "a block span gets the first-line alignment too", renderer: [["if (was.display !== \"block\") span.style.setProperty(\"baseline-source\"", "if (true) span.style.setProperty(\"baseline-source\""]] },
+	{ name: "a slot in text keeps the wrapping box (nothing flows inline)", renderer: [["const inText = new Set(long.filter(sitsInText));", "const inText = new Set();"]] },
+	{ name: "every slot flows inline, those on a line of their own too", renderer: [["const inText = new Set(long.filter(sitsInText));", "const inText = new Set(long);"]] },
+	{ name: "blank text (an nbsp) beside a slot counts as a sentence", renderer: [["n.data.trim() !== \"\"", "n.data !== \"\""]] },
+	{ name: "a block element beside a slot counts as a sentence", renderer: [["/^inline/.test(getComputedStyle(n).getPropertyValue(\"display\"))", "true"]] },
+	{ name: "an inline element (a label) beside a slot doesn't count", renderer: [["n.nodeType === 1 && /^inline/", "n.nodeType === -1 && /^inline/"]] },
+	{ name: "a block (or flex) slot beside text flows inline too", renderer: [["const inline = was.display !== \"block\" && inText.has(input);", "const inline = inText.has(input);"]] },
+	{ name: "an inline span gets the input's width pinned too", renderer: [["if (!inline && Math.abs(", "if (Math.abs("]] },
 	{ name: "only labelled inputs are wrapped", renderer: [["document.querySelectorAll(\"input\")", "document.querySelectorAll(\"input[aria-label]\")"]] },
 	{ name: "the wrap step moved ahead of the table and vehicle-row steps", renderer: [[WRAP_STEP, ""], ["\t\t// --- 5a. Clone table rows", `${WRAP_STEP}\t\t// --- 5a. Clone table rows`]] },
 	{ name: "writeSignedArtifact() drops the clipped labels", server: [["\t\tif (Array.isArray(err.clippedLabels)) e.clippedLabels = err.clippedLabels;\n", ""]] },
