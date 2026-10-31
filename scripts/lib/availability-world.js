@@ -12,6 +12,9 @@
 //                  PUT /api/data/:rowIndex, PUT /api/load/:loadId, POST /api/data
 //   driver app     GET /api/driver/:driverName (the driver app's payload)
 //   sweep          sweepEldFeedSilence() and eldFeedHealthReport()
+//   ELD check      the time-off ELD check's run, plan, apply, tick and purge
+//                  (when server.js has them), with eldFixtures() and addFixes()
+//                  for made-up trucks T1 and T2, their devices and fixes
 //
 // What stands in for the server's process: a header-driven session
 // (x-test-user), a fake Google Sheet holding one Job Tracking tab (reads and
@@ -82,6 +85,9 @@ const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "nor
 // as jtCacheInvalidate()'s `_jtInflight = null;` and PUT /api/data/:rowIndex's
 // `restoreUntouchedCells(...)` do.
 const NAMED_ROOTS = ["_jtInflight", "restoreUntouchedCells"].filter((n) => SRC.includes(`\nlet ${n} =`) || SRC.includes(`\nfunction ${n}(`));
+// The time-off ELD check's job, lifted when server.js has it.
+const ELD_CHECK_ROOTS = ["runTimeOffEldCheck", "timeOffEldRunPlan", "applyTimeOffEldPlan", "timeOffEldCheckTick", "purgeTimeOffEldResults"]
+	.filter((n) => SRC.includes(`\nfunction ${n}(`) || SRC.includes(`\nasync function ${n}(`));
 
 const LIFT_CACHE = new Map();
 function lifted(keys) {
@@ -89,7 +95,7 @@ function lifted(keys) {
 	if (!LIFT_CACHE.has(id)) {
 		const heads = keys.map((k) => routeHead(...ROUTES[k])).filter(Boolean);
 		const found = keys.filter((k) => routeHead(...ROUTES[k]));
-		LIFT_CACHE.set(id, { ...closure(SRC, { roots: [...ROOTS, ...NAMED_ROOTS], routes: heads, provided: PROVIDED, denied: DENIED }), found });
+		LIFT_CACHE.set(id, { ...closure(SRC, { roots: [...ROOTS, ...NAMED_ROOTS, ...ELD_CHECK_ROOTS], routes: heads, provided: PROVIDED, denied: DENIED }), found });
 	}
 	return LIFT_CACHE.get(id);
 }
@@ -271,6 +277,28 @@ function hisLoadsRows() {
 	];
 }
 
+// The time-off ELD check's made-up fixtures: trucks T1 (id 21, device vid-t1)
+// and T2 (id 22, device vid-t2), Hollis on T1 and Soren on T2 since Aug 1 (the
+// seed's own assignments removed), and a yard at 29.70, -95.40 (Central time).
+const ELD = { t1: 21, t2: 22, vid1: "vid-t1", vid2: "vid-t2", yard: { lat: 29.7, lng: -95.4 } };
+function eldFixtures(db) {
+	db.prepare("DELETE FROM truck_assignments").run();
+	const truck = db.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, assigned_driver, routemate_vehicle_id)
+		VALUES (?, ?, 5, 'Active', '2026-08-01', '2026-08-01 00:00:00', ?, ?)`);
+	truck.run(ELD.t1, "T1", "Hollis Renner", ELD.vid1);
+	truck.run(ELD.t2, "T2", "Soren King", ELD.vid2);
+	const assign = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, '2026-08-01T12:00:00.000Z')");
+	assign.run(ELD.t1, "Hollis Renner");
+	assign.run(ELD.t2, "Soren King");
+}
+// Clean fixes for `vid`, each { ms, odo, eh, lat, lng, speed, source }; by default
+// a parked RouteMate truck at the yard.
+function addFixes(db, vid, fixes) {
+	const ins = db.prepare(`INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, engine_hours, location_date_ms, dropped_reason, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)`);
+	for (const f of fixes) ins.run(vid, f.lat ?? ELD.yard.lat, f.lng ?? ELD.yard.lng, f.speed ?? 0, f.odo ?? 100000, f.eh ?? 5000, f.ms, f.source ?? "routemate");
+}
+
 const servers = new Set();
 const agent = new http.Agent({ keepAlive: false });
 
@@ -342,7 +370,7 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		fetch: () => { throw new Error("no network in a test"); },
 		REPLICA: null,
 	};
-	const body = ['"use strict";', L.text, `return { ${ROOTS.join(", ")} };`].join("\n");
+	const body = ['"use strict";', L.text, `return { ${[...ROOTS, ...ELD_CHECK_ROOTS].join(", ")} };`].join("\n");
 	world.api = new Function(...Object.keys(deps), body)(...Object.values(deps));
 
 	const server = http.createServer(app);
@@ -417,6 +445,6 @@ function createRunner(title) {
 }
 
 module.exports = {
-	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, ASSIGN_ROUTES, HEADERS, COL, USERS, DIR, TRUCK, VID, DEFAULT_NOW, HOUR, DAY,
-	routeHead, jtRow, defaultRows, hisLoadsRows, startWorld, closeAll, createRunner, fakeSheet,
+	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, ASSIGN_ROUTES, ELD_CHECK_ROOTS, HEADERS, COL, USERS, DIR, TRUCK, VID, ELD, DEFAULT_NOW, HOUR, DAY,
+	routeHead, jtRow, defaultRows, hisLoadsRows, startWorld, closeAll, createRunner, fakeSheet, eldFixtures, addFixes,
 };

@@ -30,6 +30,16 @@
 //      steps (the Job Tracking read, the decision, the confirmations) is the
 //      first statement of an `if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED...) {`,
 //      which gates nothing else
+// The time-off ELD check (B) is tracked the same way: its results table, its
+// module and binding, every name the module exports and its server.js helpers.
+// §1 also gives the month off Confirmed and Not-confirmed day results; §3 allows
+// its binding, helpers, job and purge, and its table in the same migration; and
+//   §4.8 DRIVER_TIME_OFF_ELD_CHECK_ENABLED folds in DRIVER_AVAILABILITY_ENABLED
+//      first and gates only the job's registration (with its start-up line), the
+//      job's own guard, the staff list's spread and the driver's eldChecked line
+//   §5 GET /api/trucks and every investor route name none of the check's names
+//   §6 its helpers are defined and survive comment stripping, and its table is
+//      created in the time-off migration
 //
 // Tracked names: the table, the module path, the module's binding in server.js,
 // every name lib/driver-availability.js exports (read from the module, so a new
@@ -64,7 +74,20 @@ const SERVER_HELPERS = ["driverAvailabilityByName", "truckDriverAvailability", "
 	"availabilityRowView", "driverOwnTimeOff", "driverLoadsForTimeOff", "recordTimeOffLoadConfirmations"];
 let libExports = [];
 try { libExports = Object.keys(require("../lib/driver-availability")); } catch { libExports = []; }
-const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports];
+// The time-off ELD check: its results table (created in the same migration),
+// module and binding, server.js helpers and the module's exports; §3 also allows
+// its binding, helpers and two job registrations (ELD_ALLOW_HEADS).
+const ELD_CHECK_HELPERS = ["timeOffDayEvidence", "timeOffEldRowFields", "timeOffEldRunPlan", "applyTimeOffEldPlan", "runTimeOffEldCheck", "timeOffEldCheckTick", "purgeTimeOffEldResults"];
+let eldCheckExports = [];
+try { eldCheckExports = Object.keys(require("../lib/time-off-eld-check")); } catch { eldCheckExports = []; }
+const ELD_CHECK_NAMES = ["driver_time_off_days", "time-off-eld-check", "timeOffEldCheck", ...ELD_CHECK_HELPERS, ...eldCheckExports];
+const ELD_ALLOW_HEADS = [
+	'const timeOffEldCheck = require("./lib/time-off-eld-check");',
+	...ELD_CHECK_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
+	'if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {',
+	'if (startsJob("time-off ELD results purge (at boot, then weekly)")) {',
+];
+const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports, ...ELD_CHECK_NAMES];
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A tracked name as a whole word ("driver_availability_create", an audit
 // action, is not the table).
@@ -190,6 +213,7 @@ const ALLOW_HEADS = [
 	"function availabilityFlagGate(",
 	...SERVER_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
 	"function eldFeedSnapshot(",
+	...ELD_ALLOW_HEADS,
 	'app.get("/api/drivers-directory/:id/availability",',
 	'app.post("/api/drivers-directory/:id/availability",',
 	'app.put("/api/driver-availability/:id",',
@@ -265,9 +289,21 @@ function moneyWorld(withRow) {
 		const dir = w.db.prepare("SELECT id FROM drivers_directory WHERE driver_name = ?").get(AMY).id;
 		w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at)
 			VALUES (?, ?, 'vacation', '2026-10-01', '2026-10-30', 'Vacation', 'super_admin', '2026-09-30T12:00:00Z')`).run(dir, AMY);
+		// ...and the ELD check's results for its days, Confirmed and Not confirmed
+		// (the shipped table, else the plan's shape), the loaded days among them.
+		w.db.exec(PLAN_DAYS_DDL);
+		const avail = w.db.prepare("SELECT id FROM driver_availability WHERE directory_id = ?").get(dir).id;
+		const day = w.db.prepare(`INSERT INTO driver_time_off_days (availability_id, directory_id, day, state, reason, miles, rule_version, first_evaluated_at, evaluated_at, final_at)
+			VALUES (?, ?, ?, ?, ?, ?, 1, '2026-10-12T10:00:00Z', '2026-10-12T10:00:00Z', '2026-10-12T10:00:00Z')`);
+		for (const d of ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]) day.run(avail, dir, d, "confirmed", "parked", 0);
+		for (const d of ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]) day.run(avail, dir, d, "not_confirmed", "truck_moved", 250);
 	}
 	return w;
 }
+const PLAN_DAYS_DDL = `CREATE TABLE IF NOT EXISTS driver_time_off_days (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, availability_id INTEGER NOT NULL, directory_id INTEGER NOT NULL, day TEXT NOT NULL,
+	state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', miles REAL NOT NULL DEFAULT 0, rule_version INTEGER NOT NULL,
+	first_evaluated_at TEXT NOT NULL, evaluated_at TEXT NOT NULL, final_at TEXT)`;
 async function moneyViews(withRow) {
 	const w = moneyWorld(withRow);
 	const excludedBefore = w.db.prepare("SELECT COUNT(*) AS n FROM excluded_driver_days").get().n;
@@ -283,6 +319,7 @@ async function moneyViews(withRow) {
 		investorMonths: inv.months,
 		excluded: w.db.prepare("SELECT COUNT(*) AS n FROM excluded_driver_days").get().n - excludedBefore,
 		availabilityRows: withRow ? w.db.prepare("SELECT COUNT(*) AS n FROM driver_availability").get().n : 0,
+		eldDays: withRow ? w.db.prepare("SELECT state, COUNT(*) AS n FROM driver_time_off_days GROUP BY state ORDER BY state").all().map((r) => [r.state, r.n]) : [],
 	};
 	return out;
 }
@@ -402,6 +439,7 @@ async function moneyViews(withRow) {
 		eq("§1.0 the fixture invoices Oct 5-8 and the row covers the month", [base.invoiceStatus, base.invoiceDays.map((d) => d.day), offAllMonth.availabilityRows],
 			[200, ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"], 1]);
 		ok("§1.0b the ledger has fixed-cost items to compare", base.ledgerItems.some((i) => /fixed|insurance|payment/i.test(`${i.kind} ${i.label}`)));
+		eq("§1.0c the month off carries ELD results: 4 Confirmed, 4 Not confirmed (its loaded days)", offAllMonth.eldDays, [["confirmed", 4], ["not_confirmed", 4]]);
 		eq("§1.1 the weekly invoice's days are the same", offAllMonth.invoiceDays, base.invoiceDays);
 		eq("§1.2 ...and its total", offAllMonth.invoiceTotal, base.invoiceTotal);
 		eq("§1.3 the payout ledger's items (driver pay, fixed costs, fees) are the same", offAllMonth.ledgerItems, base.ledgerItems);
@@ -488,6 +526,53 @@ async function moneyViews(withRow) {
 		const gates = code.map((l, i) => [l, i]).filter(([l]) => /\bDRIVER_AVAILABILITY_LOADS_WARNING_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ="));
 		const strayGates = gates.filter(([l, i]) => !GATE_RE.test(l.trim()) || !STEPS.some((n) => stepRe(n).test(nextCode(i)))).map(([l, i]) => `line ${i + 1}: ${l.trim().slice(0, 80)}`);
 		ok(`§4.6 ...and every other mention of it (${gates.length}) is such a gate around one of those steps`, gates.length > 0 && strayGates.length === 0, strayGates.join(" | "));
+
+		// The time-off ELD check: its flag works only while the main flag is on, and
+		// gates its job, the job's own guard, the staff list's spread and the
+		// driver's eldChecked line, each in its own place, and nothing else.
+		const eldDefs = code.filter((l) => l.startsWith("const DRIVER_TIME_OFF_ELD_CHECK_ENABLED ="));
+		ok("§4.8 DRIVER_TIME_OFF_ELD_CHECK_ENABLED is defined once and folds in DRIVER_AVAILABILITY_ENABLED first",
+			eldDefs.length === 1 && eldDefs[0].startsWith("const DRIVER_TIME_OFF_ELD_CHECK_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test("),
+			`${eldDefs.length} definition(s): ${eldDefs.join(" | ")}`);
+		const headLine = (i) => { for (let j = i; j >= 0; j--) if (/^[^\s}\])`/]/.test(code[j])) return code[j]; return ""; };
+		const JOB_HEAD = 'if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {';
+		const ELD_FLAG_USES = [
+			[/^if \(DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob\("time-off ELD check"\)\) \{$/, JOB_HEAD],
+			[/^\} else if \(!DRIVER_TIME_OFF_ELD_CHECK_ENABLED\) \{$/, JOB_HEAD],
+			[/^console\.log\("\[time-off-eld\] ELD check OFF \(DRIVER_TIME_OFF_ELD_CHECK_ENABLED\)"\);$/, JOB_HEAD],
+			[/^if \(!DRIVER_TIME_OFF_ELD_CHECK_ENABLED\) return \{ skipped: "off" \};$/, "async function runTimeOffEldCheck("],
+			[/^rows: rows\.map\(\(r\) => \(\{ \.\.\.availabilityRowView\(r, today, user\), \.\.\.\(DRIVER_TIME_OFF_ELD_CHECK_ENABLED \? timeOffEldRowFields\(r, \{ today, req \}\) : \{\}\) \}\)\),$/,
+				'app.get("/api/drivers-directory/:id/availability",'],
+			[/^\.\.\.\(DRIVER_TIME_OFF_ELD_CHECK_ENABLED \? \{ eldChecked: true \} : \{\}\),$/, "function driverOwnTimeOff("],
+		];
+		const eldUses = code.map((l, i) => [l.trim(), i]).filter(([l]) => /\bDRIVER_TIME_OFF_ELD_CHECK_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_TIME_OFF_ELD_CHECK_ENABLED ="));
+		const placed = eldUses.filter(([l, i]) => ELD_FLAG_USES.some(([re, head]) => re.test(l) && headLine(i).startsWith(head)));
+		const strayEld = eldUses.filter((u) => !placed.includes(u)).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 80)}`);
+		ok(`§4.8b ...and its ${eldUses.length} other mentions are exactly the job's registration and start-up line, the job's own guard, the staff list's spread and the driver's eldChecked line`,
+			eldUses.length === ELD_FLAG_USES.length && strayEld.length === 0, strayEld.join(" | "));
+	}
+
+	console.log("\n── §5 the ELD check's names stay off the trucks list and every investor route");
+	{
+		const code = blankComments(SRC).split("\n");
+		const names = [...ELD_CHECK_NAMES, "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", "eldDays", "eldSummary", "eldChecked"];
+		const NAME_RE = new RegExp(`(?<![\\w$-])(?:${names.map(escapeRe).join("|")})(?![\\w$])`);
+		const isHead = (l) => /^[^\s}\])`/]/.test(l);
+		const statementAt = (i) => { let k = i + 1; while (k < code.length && !isHead(code[k])) k++; return code.slice(i, k).join("\n"); };
+		const routes = code.map((l, i) => [l, i]).filter(([l]) => /^app\.(get|post|put|patch|delete)\(/.test(l)
+			&& (l.startsWith('app.get("/api/trucks",') || /^app\.\w+\("\/api\/investor/.test(l) || /requireRole\([^)]*"Investor"/.test(l)));
+		ok(`§5.1 GET /api/trucks and the investor routes are found (${routes.length})`, routes.some(([l]) => l.startsWith('app.get("/api/trucks",')) && routes.length > 30);
+		eq("§5.2 none of them names the check's table, module, helpers, exports, flag or keys",
+			routes.filter(([, i]) => NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`), []);
+	}
+
+	console.log("\n── §6 the ELD check's helpers are where §3 can see them");
+	{
+		const code = blankComments(SRC).split("\n");
+		eq("§6.1 each is defined in server.js and survives comment stripping, so §3 judges its mentions",
+			ELD_CHECK_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`))), []);
+		ok("§6.2 its results table is created in the time-off migration, so §3 allows it there",
+			/db\.exec\(`\s*CREATE TABLE IF NOT EXISTS driver_availability \([^`]*CREATE TABLE IF NOT EXISTS driver_time_off_days \(/.test(SRC));
 	}
 
 	WD.cleanup();
