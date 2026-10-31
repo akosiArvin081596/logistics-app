@@ -100,7 +100,7 @@ PUT /api/driver-availability/:id · availabilityFlagGate@10695c42d6d5 · require
 POST /api/driver-availability/:id/cancel · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@609579864594
 GET /api/driver-instructions/edit-locks · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 POST /api/driver-instructions/edit-locks/:userId/clear · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)
-GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@41d6d7fc935e | after: GET ["/api/driver/position","/api/driver/me/position"]
+GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@1c710f62290b | after: GET ["/api/driver/position","/api/driver/me/position"]
 GET /api/driver/loads/:loadId/instructions · driverGate@7e9b5dcc294e · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@ad583e999b5f
 GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · inline@c6cac740a042
