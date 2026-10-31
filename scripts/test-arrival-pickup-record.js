@@ -2,8 +2,8 @@
 /**
  * The arrival recorder: who set each load status, and for "At Shipper" where the
  * truck was and the shipper's zone, stored on the load_status_history row as it
- * is written (ARRIVAL_PICKUP_RECORDER_ENABLED, lib/arrival-recorder.js). Nothing
- * reads the facts for pay yet.
+ * is written (ARRIVAL_PICKUP_RECORDER_ENABLED, lib/arrival-recorder.js). Only the
+ * arrival pickup date reads the facts for pay (scripts/test-arrival-pickup.js).
  *
  *   §0 the flag is on only when exactly "true" and says so at start; the six
  *      columns are added at boot whatever the flag, to a fresh database and to
@@ -14,7 +14,8 @@
  *      fix 40 km out: "outside"; a fix 6 minutes old, no truck, or no pickup
  *      point: no position, and the zone from the next source (the pickup point,
  *      the fix, the app zone); the load's Truck cell names the truck first; a
- *      fix stamped after the write is not the position at it
+ *      shipper on a band edge with the truck across it takes the pickup point's
+ *      zone; a fix stamped after the write is not the position at it
  *   §2 the same tap from a Dispatcher or a Super Admin session (the dashboard's
  *      dropdown) records that role, never one the body names; the override
  *      (PUT /api/loads/:loadId/status-override) records the session's role and,
@@ -23,7 +24,8 @@
  *      Linxup webhook) and the shipped tryGeofenceAdvance(): a ping 70 s old at
  *      processing stores its own time, "system", the distance it measured,
  *      "inside" and the zone; other_load_hauling is 1 beside another load In
- *      Transit, 0 beside one At Receiver or none
+ *      Transit, 0 beside one At Receiver or none; on a band edge, the pickup
+ *      point's zone, not the truck's
  *   §4 other statuses carry actor_role only: the tap's other steps, dispatch,
  *      accept (a driver's and a dispatcher's), decline, cancel, the geofence's
  *      departure and its At Receiver; a fix from before the device's link is
@@ -42,7 +44,8 @@
  *      zone banding, the statuses that count as under way, its requires
  *   §8 mutants, each caught: the role from the body; "inside" from a stale fix;
  *      the processing time stored as the geofence row's fix; an At Receiver load
- *      counted as under way
+ *      counted as under way; the tap's zone from the truck first; the geofence
+ *      passing no pickup point
  *
  * Every recorder-on case fails on origin/main (no flag, no columns, no module);
  * the §6 pins pass on both. The routes and functions are lifted whole from
@@ -107,7 +110,12 @@ const OTHER_PICKUP = { latitude: 30.1, longitude: -95.4 };
 const OTHER_DROP = { latitude: 29.4, longitude: -98.5 };
 const MOUNTAIN = { latitude: 39.0, longitude: -105.0 };
 const north = (p, metres) => ({ latitude: p.latitude + metres / 111320, longitude: p.longitude });
+const west = (p, metres) => ({ latitude: p.latitude, longitude: p.longitude - metres / (111320 * Math.cos((p.latitude * Math.PI) / 180)) });
 const NEAR = north(PICKUP, 900);
+// A shipper just east of the -100 band edge (Central) and a truck 2 km west of it
+// (Mountain): the zone must be the pickup point's.
+const EDGE_PICKUP = { latitude: 34.0, longitude: -99.99 };
+const EDGE_TRUCK = west(EDGE_PICKUP, 2000);
 const FAR = north(PICKUP, 40000);
 const NEAR_DISTANCE = geolib.getDistance(NEAR, PICKUP);
 const APP_ZONE = appTime.appTimeZone();
@@ -485,6 +493,15 @@ async function main() {
 		eq("§1 the load's Truck cell names the truck first (its fix, inside), before the driver's own truck", [f.fix_ms, f.pickup_zone], [w.now0 - 40 * SEC, "inside"]);
 	}
 	{
+		const w = world({ loads: [LOAD("L-1011", "Heading to Shipper")] });
+		coordsFor(w, "L-1011", EDGE_PICKUP, DROP);
+		fixAt(w, "DEV-701", 30 * SEC, EDGE_TRUCK);
+		await tap(w, sess.driver(), "L-1011", "At Shipper");
+		const f = factsOf(lastRow(w));
+		eq("§1 a shipper just inside the Central band, the truck 2 km west in the Mountain band: the pickup point's zone", [f.pickup_zone, f.local_tz, lib && lib.shipperZone(null, EDGE_TRUCK)],
+			["inside", "America/Chicago", "America/Denver"]);
+	}
+	{
 		// A fix stamped after the write (a device clock ahead) is not the position at the write.
 		const w = world({ loads: [LOAD("L-1010", "Heading to Shipper")] });
 		coordsFor(w, "L-1010", PICKUP, DROP);
@@ -556,6 +573,22 @@ async function main() {
 				row && [row.changed_at, new Date(ping.location_date_ms).toISOString()]);
 			eq(`§3 ${label}, ${why}: no error`, w.errors, []);
 		}
+	}
+
+	// The geofence at a shipper on the band edge, the truck 2 km west of it.
+	const edgeWorld = () => {
+		const w = world({ loads: [LOAD("L-1202", "Dispatched")] });
+		coordsFor(w, "L-1202", EDGE_PICKUP, DROP);
+		fixAt(w, "DEV-701", 130 * SEC, EDGE_TRUCK);
+		return w;
+	};
+	for (const [label, path_] of [["the Routemate poller", "poll"], ["the Linxup webhook", "linxup"]]) {
+		const w = edgeWorld();
+		const ping = path_ === "poll" ? livePing("DEV-701", EDGE_TRUCK, 70 * SEC) : linxupPos("DEV-701", EDGE_TRUCK, 70 * SEC);
+		if (path_ === "poll") await poll(w, [ping]); else await linxup(w, ping);
+		const row = history(w).find((r) => r.load_id === "l-1202") || null;
+		eq(`§3 ${label}, the shipper on the band edge, the truck 2 km west: the pickup point's zone (Central), not the truck's (Mountain)`,
+			row && [row.new_status, row.pickup_zone, row.local_tz], ["At Shipper", "inside", "America/Chicago"]);
 	}
 
 	// ══ §4 ════════════════════════════════════════════════════════════════════
@@ -902,6 +935,30 @@ async function main() {
 			await poll(w, [ping]);
 			const row = history(w).find((r) => r.load_id === "l-1201");
 			ok("§8 MUTANT the processing time stored as the geofence row's fix: caught (§3's ping time flips)", !!row && row.fix_ms !== ping.location_date_ms, row && [row.fix_ms, ping.location_date_ms]);
+		}
+	}
+	{
+		const m = libMutant("const facts = { localTz: shipperZone(pickup, fix) };", "const facts = { localTz: shipperZone(fix, pickup) };");
+		ok("§8 (anchor) the tap takes the pickup point's zone first", !!m);
+		if (m) {
+			const w = world({ loads: [LOAD("L-3004", "Heading to Shipper")], stubs: { arrivalRecorder: m } });
+			coordsFor(w, "L-3004", EDGE_PICKUP, DROP);
+			fixAt(w, "DEV-701", 30 * SEC, EDGE_TRUCK);
+			await tap(w, sess.driver(), "L-3004", "At Shipper");
+			ok("§8 MUTANT the tap's zone from the truck before the pickup point: caught (§1's band-edge case flips)", factsOf(lastRow(w)).local_tz !== "America/Chicago", factsOf(lastRow(w)));
+		}
+	}
+	{
+		const FROM_CALL = "pickup: zonePoints.origin, candidates }),";
+		ok("§8 (anchor) the geofence hands the recorder its pickup point", SRC.includes(FROM_CALL));
+		if (SRC.includes(FROM_CALL)) {
+			const src = SRC.replace(FROM_CALL, "pickup: null, candidates }),");
+			const w = world({ loads: [LOAD("L-3005", "Dispatched")], src });
+			coordsFor(w, "L-3005", EDGE_PICKUP, DROP);
+			fixAt(w, "DEV-701", 130 * SEC, EDGE_TRUCK);
+			await poll(w, [livePing("DEV-701", EDGE_TRUCK, 70 * SEC)]);
+			const row = history(w).find((r) => r.load_id === "l-3005") || null;
+			ok("§8 MUTANT the geofence passing no pickup point: caught (§3's band-edge case flips)", !!row && row.local_tz !== "America/Chicago", row && row.local_tz);
 		}
 	}
 	{

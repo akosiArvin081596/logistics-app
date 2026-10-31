@@ -1,0 +1,285 @@
+{
+ "note": "Captured on the base's own server.js by scripts/test-arrival-pickup-pay-paths.js --capture; made-up data.",
+ "answers": [
+  [
+   "late, early, after the drop-off, blank pickup",
+   {
+    "invoice": [
+     {
+      "day": "2026-12-07",
+      "loads": [
+       "L-2101",
+       "L-2103"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-08",
+      "loads": [
+       "L-2101",
+       "L-2103"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-09",
+      "loads": [
+       "L-2101",
+       "L-2102"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-10",
+      "loads": [
+       "L-2102"
+      ],
+      "total": 300
+     }
+    ],
+    "total": 1200,
+    "warnings": [],
+    "ledger": [
+     [
+      "2026-12",
+      "2026-12-07",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-08",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-09",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-10",
+      30000,
+      "L-2102"
+     ]
+    ],
+    "months": [
+     {
+      "month": "2026-12",
+      "revenue": 8000,
+      "driverPay": 1200,
+      "fixedCosts": 0,
+      "tripExpenses": 0,
+      "maintFundCost": 0,
+      "complianceCost": 0,
+      "netProfit": 6800,
+      "exact": {
+       "revenue": 8000,
+       "driverPay": 1200,
+       "fixedCosts": 0,
+       "tripExpenses": 0,
+       "maintFundCost": 0,
+       "complianceCost": 0,
+       "netProfit": 6800
+      },
+      "investorEarnings": 3400,
+      "isCurrentMonth": true
+     }
+    ],
+    "investor": [
+     "2026-12 2026-12-07",
+     "2026-12 2026-12-08",
+     "2026-12 2026-12-09",
+     "2026-12 2026-12-10"
+    ]
+   }
+  ],
+  [
+   "an ELD truck",
+   {
+    "invoice": [
+     {
+      "day": "2026-12-07",
+      "loads": [
+       "L-2101"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-09",
+      "loads": [
+       "L-2101",
+       "L-2102"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-10",
+      "loads": [
+       "L-2102"
+      ],
+      "total": 300
+     }
+    ],
+    "total": 900,
+    "warnings": [],
+    "ledger": [
+     [
+      "2026-12",
+      "2026-12-07",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-09",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-10",
+      30000,
+      "L-2102"
+     ]
+    ],
+    "months": [
+     {
+      "month": "2026-12",
+      "revenue": 4000,
+      "driverPay": 900,
+      "fixedCosts": 0,
+      "tripExpenses": 0,
+      "maintFundCost": 0,
+      "complianceCost": 0,
+      "netProfit": 3100,
+      "exact": {
+       "revenue": 4000,
+       "driverPay": 900,
+       "fixedCosts": 0,
+       "tripExpenses": 0,
+       "maintFundCost": 0,
+       "complianceCost": 0,
+       "netProfit": 3100
+      },
+      "investorEarnings": 1550,
+      "isCurrentMonth": true
+     }
+    ],
+    "investor": [
+     "2026-12 2026-12-07",
+     "2026-12 2026-12-09",
+     "2026-12 2026-12-10"
+    ]
+   }
+  ],
+  [
+   "a percentage driver beside",
+   {
+    "invoice": [
+     {
+      "day": "2026-12-07",
+      "loads": [
+       "L-2101"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-08",
+      "loads": [
+       "L-2101"
+      ],
+      "total": 300
+     },
+     {
+      "day": "2026-12-09",
+      "loads": [
+       "L-2101"
+      ],
+      "total": 300
+     }
+    ],
+    "total": 900,
+    "warnings": [],
+    "ledger": [
+     [
+      "2026-12",
+      "2026-12-07",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-08",
+      30000,
+      "L-2101"
+     ],
+     [
+      "2026-12",
+      "2026-12-09",
+      30000,
+      "L-2101"
+     ]
+    ],
+    "months": [
+     {
+      "month": "2026-12",
+      "revenue": 4000,
+      "driverPay": 1500,
+      "fixedCosts": 0,
+      "tripExpenses": 0,
+      "maintFundCost": 0,
+      "complianceCost": 0,
+      "netProfit": 2500,
+      "exact": {
+       "revenue": 4000,
+       "driverPay": 1500,
+       "fixedCosts": 0,
+       "tripExpenses": 0,
+       "maintFundCost": 0,
+       "complianceCost": 0,
+       "netProfit": 2500
+      },
+      "investorEarnings": 1250,
+      "isCurrentMonth": true
+     }
+    ],
+    "investor": [
+     "2026-12 2026-12-07",
+     "2026-12 2026-12-08",
+     "2026-12 2026-12-09"
+    ]
+   }
+  ],
+  [
+   "a percentage driver beside: Bo Wyn",
+   {
+    "invoice": [],
+    "total": 600,
+    "ledger": [
+     [
+      "2026-12",
+      null,
+      60000,
+      3
+     ]
+    ],
+    "investor": [
+     "2026-12 2026-12-07",
+     "2026-12 2026-12-08",
+     "2026-12 2026-12-09"
+    ]
+   }
+  ],
+  [
+   "the gate",
+   [
+    200,
+    null,
+    null
+   ]
+  ]
+ ]
+}
