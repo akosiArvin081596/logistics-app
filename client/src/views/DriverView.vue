@@ -63,6 +63,9 @@
           </div>
         </div>
 
+        <!-- Training videos: only where the server's placement says, from its status -->
+        <DriverTrainingVideos v-if="driverStore.trainingVideos === 'onboarding'" variant="onboarding" />
+
         <!-- Step 2: Complete -->
         <div class="card ob-step">
           <div class="ob-step-header">
@@ -294,6 +297,7 @@
             :time-off="driverStore.timeOff"
             @message-dispatch="handleTabSwitch('messages')"
           />
+          <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
         </template>
       </section>
 
@@ -405,6 +409,7 @@ import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
 import EmergencyContactsForm from '../components/driver/EmergencyContactsForm.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
+import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 

@@ -57,7 +57,6 @@ const ALLOW = new Map([
 	["scripts/test-broker-column-redaction.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-csrf-guard.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-deleted-loads-route.js", owned("feat/restore-deleted-loads")],
-	["scripts/test-driver-availability-guards.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-jt-cache-isolation.js", owned("feat/restore-deleted-loads")],
 ]);
 
