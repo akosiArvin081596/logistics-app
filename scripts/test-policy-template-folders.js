@@ -25,12 +25,15 @@
  *      made-up build): unset or blank, every answer equals the static mount's
  *      alone; set, every spelling the static mount resolves to the build's
  *      copy gets the folder's PDF (GET, HEAD, a range, a revalidation), any
- *      other path or method is answered as without the route, and a PDF that
+ *      other path or method is answered as without the route, a failed
+ *      precondition (412) or a range past the end (416) is answered exactly
+ *      as the static mount alone answers it, with no log line, and a PDF that
  *      can't be served is a 503 that never carries the build's copy
  *   §7 the start log: nothing while unset; where each document is read from
  *      and what can't be read, never a folder
- *   §8 server.js mounts the route once, after the replica banner and right
- *      before the static mount, and names no folder setting itself
+ *   §8 server.js mounts the route once, after the load-key gate and above
+ *      every route (so ahead of the static mount), and names no folder
+ *      setting itself
  *   §9 renders with a stand-in page (no browser; the fill code runs on a stub
  *      document): each document read from a folder of copies of the repo's
  *      templates fills its required labels, the folder's text is what reaches
@@ -185,6 +188,12 @@ FX.route = folderOf("route", {
 	[`sub/${PDF}`]: "%PDF-1.4\n% made-up inner copy\n",
 });
 FX.routeLocked = folderOf("route-locked", { [PDF]: "%PDF-1.4\n% made-up locked copy\n" });
+// Twin PDFs, a made-up build's and a folder's: the same length and modified time, so the
+// same ETag, Last-Modified and Content-Range, but different bytes.
+FX.twinDist = folderOf("twin-dist", { [`policies/${PDF}`]: "%PDF-1.4\n% made-up twin, build  copy\n" });
+FX.twinFolder = folderOf("twin-folder", { [PDF]: "%PDF-1.4\n% made-up twin, folder copy\n" });
+const TWIN_TIME = new Date("2026-01-15T12:00:00Z");
+for (const f of [path.join(FX.twinDist, "policies", PDF), path.join(FX.twinFolder, PDF)]) fs.utimesSync(f, TWIN_TIME, TWIN_TIME);
 
 // --- loading the code under test (or a mutant of it) ------------------------------
 function compileAt(file, src, overrides = {}) {
@@ -472,6 +481,8 @@ function request(port, method, reqPath, headers = {}) {
 }
 // Status, body and every header but the clock.
 const view = (r) => JSON.stringify([r.status, r.body.toString("latin1"), Object.entries(r.headers).filter(([k]) => k !== "date").sort()]);
+// Lets Express's deferred error log land before the log lines are read.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 // Spellings of the link, each with whether the route serves the folder's PDF
 // for it: every spelling the static mount resolves to the file (decoded and
@@ -516,6 +527,14 @@ const OTHERS = [
 	"/",
 	"/api/made-up",
 ];
+// Requests the file can't satisfy, each with the static mount's own status for it.
+const UNSATISFIABLE = [
+	{ label: "a range past the end", method: "GET", headers: { Range: "bytes=999999-" }, status: 416 },
+	{ label: "a range past the end, HEAD", method: "HEAD", headers: { Range: "bytes=999999-" }, status: 416 },
+	{ label: "a failed If-Match", method: "GET", headers: { "If-Match": "\"made-up-etag\"" }, status: 412 },
+	{ label: "a failed If-Match, HEAD", method: "HEAD", headers: { "If-Match": "\"made-up-etag\"" }, status: 412 },
+	{ label: "an If-Unmodified-Since before the file's time", method: "GET", headers: { "If-Unmodified-Since": "Mon, 01 Jan 1990 00:00:00 GMT" }, status: 412 },
+];
 
 async function g6Route({ F, check, skipCase }) {
 	if (!F || typeof F.substancePolicyPdf !== "function") { check("§6 the route exists (substancePolicyPdf)", false); return; }
@@ -525,8 +544,8 @@ async function g6Route({ F, check, skipCase }) {
 		const s = app.listen(0, "127.0.0.1", () => resolve(s.address().port));
 		servers.push(s);
 	});
-	const staticOnly = () => { const app = express(); app.use(express.static(FX.dist)); app.use(passOn); return app; };
-	const withRoute = (env) => { const app = express(); app.use(F.substancePolicyPdf({ env })); app.use(express.static(FX.dist)); app.use(passOn); return app; };
+	const staticOnly = (dist = FX.dist) => { const app = express(); app.use(express.static(dist)); app.use(passOn); return app; };
+	const withRoute = (env, dist = FX.dist) => { const app = express(); app.use(F.substancePolicyPdf({ env })); app.use(express.static(dist)); app.use(passOn); return app; };
 	const BUILD = fs.readFileSync(path.join(FX.dist, "policies", PDF));
 	const FOLDER = fs.readFileSync(path.join(FX.route, PDF));
 	const folderFiles = [PDF, DOCS.substance_policy.file, DOCS.contractor_agreement.file, DOCS.vehicle_lease.file, "made-up-other.txt", `sub/${PDF}`]
@@ -602,6 +621,32 @@ async function g6Route({ F, check, skipCase }) {
 			check(`§6 set: ${method} on the link is answered as without the route`, view(g) === view(w) && !g.body.equals(FOLDER));
 		}
 		check("§6 set and served: no log line", policyLines(takeLogs()).length === 0);
+
+		// Set: a request the file can't satisfy is answered exactly as the static mount alone
+		// answers it, with no log line. On the twins every header compares; the apps run in
+		// Express's production mode, where its error page carries no stack trace.
+		const asProduction = (app) => { app.set("env", "production"); return app; };
+		const twinAlone = await start(asProduction(staticOnly(FX.twinDist)));
+		const twinUnset = await start(asProduction(withRoute({}, FX.twinDist)));
+		const twinSet = await start(asProduction(withRoute({ [SUB]: FX.twinFolder }, FX.twinDist)));
+		const answers = [];
+		for (const c of UNSATISFIABLE) {
+			answers.push({ ...c, alone: await request(twinAlone, c.method, LINK, c.headers), unset: await request(twinUnset, c.method, LINK, c.headers) });
+		}
+		await settle();
+		takeLogs();
+		for (const a of answers) a.set = await request(twinSet, a.method, LINK, a.headers);
+		await settle();
+		const quiet = takeLogs();
+		for (const a of answers) {
+			check(`§6 unset, ${a.label}: the static mount's own ${a.status}`, a.alone.status === a.status && view(a.unset) === view(a.alone), [a.alone.status, a.unset.status]);
+			check(`§6 set, ${a.label}: answered exactly as the static mount alone answers it (${a.status}: status, headers, page)`,
+				view(a.set) === view(a.alone), [a.set.status, a.set.headers["content-type"], a.set.headers["content-range"]]);
+		}
+		check("§6 set: none of those answers writes a log line", quiet.length === 0, quiet);
+		const past = await request(set, "GET", LINK, { Range: "bytes=999999-" });
+		check("§6 set, a range past the end: 416 with the folder PDF's length in its Content-Range, not the build's",
+			past.status === 416 && past.headers["content-range"] === `bytes */${FOLDER.length}`, [past.status, past.headers["content-range"]]);
 
 		// Set, but the PDF can't be served: a 503, never the build's copy.
 		const refusals = [
@@ -755,6 +800,10 @@ const MUTANTS = [
 	] },
 	{ name: "the route passes a refusal on to the build's copy", edits: [["if (found.reason) return substancePdfUnavailable(res, setting, found.reason);", "if (found.reason) return next();"]] },
 	{ name: "the route passes a failed send on to the build's copy", edits: [["substancePdfUnavailable(res, setting, err.code === \"ENOENT\" ? \"the file is missing\" : \"the file can't be read\");", "next();"]], needsNonRoot: true },
+	{ name: "a failed precondition or a range past the end answered with the 503", edits: [["if (err.status === 412 || err.status === 416) return answerUnsatisfiable(res, err);", ""]] },
+	{ name: "a failed precondition or a range past the end logged", edits: [["return answerUnsatisfiable(res, err);", "{ console.error(`[policy-templates] ${setting}: answered ${err.status}`); return answerUnsatisfiable(res, err); }"]] },
+	{ name: "a failed precondition or a range past the end answered with a bare status", edits: [[".set({ \"Content-Security-Policy\": \"default-src 'none'\", \"X-Content-Type-Options\": \"nosniff\" }).type(\"html\")\n\t\t.send(", ".end(void "]] },
+	{ name: "any error the send hands back answered with its own status", edits: [["if (err.status === 412 || err.status === 416) return", "if (err.status) return"]], needsNonRoot: true },
 	{ name: "the 503 may be cached", edits: [["res.status(503).set(\"Cache-Control\", \"no-store\")", "res.status(503)"]] },
 	{ name: "the link match without decoding", edits: [["decoded = decodeURIComponent(String(requestPath));", "decoded = String(requestPath);"]] },
 	{ name: "the link match without normalizing", edits: [["path.posix.normalize(`./${decoded}`).toLowerCase()", "decoded.replace(/^\\//, \"\").toLowerCase()"]] },
