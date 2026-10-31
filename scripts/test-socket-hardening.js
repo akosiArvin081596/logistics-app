@@ -948,7 +948,7 @@ const isCallOf = (arg, names) => {
 const ROLE_LITERAL = /^"(dispatch|investor|super-admin)"$/;
 const IDENTITY_HELPERS = ["driverRoom", "userRoom", "chatRooms"];
 // Events addressed to one driver. Each site must name its room with driverRoom().
-const DRIVER_EVENTS = { "load-assigned": 2, "load-cancelled": 2, "fuel-low": 1, "location-update": 2, "geofence-trigger": 1 };
+const DRIVER_EVENTS = { "load-assigned": 2, "load-cancelled": 2, "fuel-low": 1, "location-update": 2, "geofence-trigger": 1, "onboarding-resign-requested": 1 };
 
 function roomPinProblems(fullSrc) {
 	const code = stripComments(fullSrc);

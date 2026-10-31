@@ -656,6 +656,13 @@ async function main() {
 		const n = db.prepare("DELETE FROM sign_in_network").run().changes;
 		summary.push(`sign_in_network: emptied (${n}) — staff sign-in IP and browser stay on production`);
 	}
+	// The automatic-invoice render shadow's digests (lib/auto-invoice-job.js): a
+	// broker's billing address and attachment names beside hashes, kept on
+	// production only until the send comparison's decision. Never on a copy.
+	{
+		const n = setCols("auto_invoice_shadow", { render_digest_json: "" }, "COALESCE(render_digest_json, '') <> ''");
+		if (n) summary.push(`auto_invoice_shadow: render digests cleared (${n})`);
+	}
 
 	// 3b. Passwords. Production hashes are bcrypt, so they are not reversible —
 	//     but they ARE the live credentials, and a copy of them on a laptop or a
@@ -812,7 +819,9 @@ async function main() {
 	//     is not copied anyway discloses nothing.
 	let sigs = 0;
 	const EVIDENCE_REDACTIONS = { signed_ip: "", signed_ip_source: "", signed_user_agent: "", consent_text: "" };
-	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS });
+	// A driver document's history keeps the replaced original's signature text, IP and
+	// browser word for word (lib/onboarding-resign.js), so it goes too.
+	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS, superseded_artifacts: "" });
 	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
 	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
@@ -1116,6 +1125,8 @@ const REDACTED_EMPTY = [
 	// of a file this script never copies discloses nothing.
 	["onboarding_documents", "signed_ip", "signer IP address"],
 	["onboarding_documents", "signed_user_agent", "signer user agent"],
+	// A replaced original's signer IP, browser and signature, kept in its document's history.
+	["onboarding_documents", "superseded_artifacts", "signature history entry"],
 	["investor_onboarding_documents", "signed_ip", "signer IP address"],
 	["investor_onboarding_documents", "signed_user_agent", "signer user agent"],
 	// Added 2026-08-13. Stage 3e/3f has always emptied these; nothing asserted
@@ -1128,6 +1139,9 @@ const REDACTED_EMPTY = [
 	// with every check still green.
 	["job_applications", "dob", "applicant date of birth"],
 	["job_applications", "signature", "applicant signature"],
+	// The render shadow's digests: a billing address among hashes, which the
+	// free-text sweep would only rewrite, never remove.
+	["auto_invoice_shadow", "render_digest_json", "automatic-invoice render digest"],
 	// ⚠️ The three document columns. Asserted for a reason the others do not
 	// need: they are invisible to BOTH the free-text sweep (base64 has no "@"
 	// and no ###-##-####) and to any human spot-check, because a 2 MB base64

@@ -18,7 +18,9 @@
 //      (directoryPayStruct(), read from server.js)
 //   §2 how the server's mapping (read from server.js) receives them
 //   §3 both forms build their pay cells with it, and with nothing else; the
-//      Edit dialog opens the type through directoryPayType()
+//      Edit dialog opens the type through directoryPayType(); both label the
+//      percentage type for a "percentage driver" ("owner-operator" now names
+//      another driver category)
 //   §4 MUTANTS: the amount sent as a number again; the other type's amount
 //      sent as "0"; the type opened as stored (not lowercased); the type
 //      trimmed as well. Each must fail §1, §1b or §2.
@@ -178,6 +180,9 @@ function functionBody(src, head) {
     ok(`§3 ${file}: ...from the form's own fields and the role's pay rights`,
       ['canEditPay: props.canEditPay', `payType: ${form}.payType`, `payPercentage: ${form}.payPercentage`, `payDaily: ${form}.payDaily`].every((s) => body.includes(s)))
     ok(`§3 ${file}: ...and turns no amount into a number itself`, body.length > 0 && !/Number\(/.test(body))
+    ok(`§3 ${file}: the percentage pay type is labelled for a percentage driver, and nothing in it says owner-operator`,
+      src.includes('<span>Percentage of Net Load Revenue (percentage driver)</span>') &&
+      src.includes('Percentage Driver Share (%)</label>') && !/owner[\s-]?op/i.test(src))
   }
   // The Edit dialog opens the stored type through directoryPayType(), and sets
   // the type nowhere else.

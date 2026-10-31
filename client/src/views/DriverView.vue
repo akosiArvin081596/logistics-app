@@ -32,7 +32,7 @@
             <div v-for="doc in onboardingDocs" :key="doc.doc_key" class="ob-doc-item" @click="openOnboardingDoc(doc)">
               <div class="ob-doc-icon" v-html="doc.signed ? '&#9989;' : '&#9723;'"></div>
               <div class="ob-doc-name">{{ doc.doc_name }}</div>
-              <div class="ob-doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
+              <div class="ob-doc-action">{{ docAction(doc) }}</div>
             </div>
             <!-- Emergency contacts: only when the payload carries the counts (the server's flag) -->
             <div v-if="signingStep.item" class="ob-doc-item ob-contacts" data-testid="ob-contacts">
@@ -62,6 +62,9 @@
             <p><b>The LogisX Safety Team</b></p>
           </div>
         </div>
+
+        <!-- Training videos: only where the server's placement says, from its status -->
+        <DriverTrainingVideos v-if="driverStore.trainingVideos === 'onboarding'" variant="onboarding" />
 
         <!-- Step 2: Complete -->
         <div class="card ob-step">
@@ -177,6 +180,10 @@
                controls. The active-load action hero (status stepper,
                documents, expense form) lives BELOW the list.
                ============================================================ -->
+
+          <!-- A fresh signature a Super Admin asked for: only when the payload marks a
+               document with resign_requested (ONBOARDING_RESIGN_ENABLED). -->
+          <ResignRequestCard v-if="resignDocs.length" :docs="resignDocs" @sign="openOnboardingDoc" />
 
           <!-- His time off (R11 follow-up): one line while he is off and in
                the 7 days before. Only when the payload carried `timeOff`. -->
@@ -294,6 +301,7 @@
             :time-off="driverStore.timeOff"
             @message-dispatch="handleTabSwitch('messages')"
           />
+          <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
         </template>
       </section>
 
@@ -340,6 +348,15 @@
       :unread-count="driverStore.unreadCount"
       :unread-notif-count="driverStore.unreadNotifCount"
       @switch="handleTabSwitch"
+    />
+
+    <!-- The signing window, for a document asked to be signed again -->
+    <DocumentSignModal
+      :show="showSignModal"
+      :doc="selectedDoc"
+      :driver-name="driverStore.driverName"
+      @close="showSignModal = false"
+      @signed="onDocSigned"
     />
 
     <!-- Decline confirmation overlay -->
@@ -389,6 +406,7 @@ import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
 import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { signingStepView } from '../lib/emergencyContacts'
+import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -402,9 +420,11 @@ import DocumentList from '../components/driver/DocumentList.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
 import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
+import ResignRequestCard from '../components/driver/ResignRequestCard.vue'
 import EmergencyContactsForm from '../components/driver/EmergencyContactsForm.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
+import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -436,6 +456,8 @@ const isOnboarding = computed(() => {
   return !!ob?.status && ob.status !== 'fully_onboarded'
 })
 const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
+// Signed documents a Super Admin asked to be signed again (the payload's resign_requested).
+const resignDocs = computed(() => requestedDocs(driverStore.onboarding?.documents))
 const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
 const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
 // Drug test progress is intentionally NOT shown to drivers (legal requirement).
@@ -794,6 +816,11 @@ function handleNotificationTap(notif) {
       detailRowIndex.value = meta.rowIndex
     } else if (notif.type === 'message') {
       currentTab.value = 'messages'
+    } else if (notif.type === NOTICE_TYPE) {
+      // Still asked for: open its signing window. Signed again or withdrawn: the Kit lists it.
+      const doc = resignDocs.value.find((d) => d.doc_key === noticeDocKey(notif))
+      if (doc) openOnboardingDoc(doc)
+      else currentTab.value = 'kit'
     }
   } catch {
     // ignore parse errors
@@ -1042,6 +1069,14 @@ function onInstructionsChanged(payload) {
   scheduleDriverRefetch()
 }
 
+// A Super Admin asked for a fresh signature (the event carries a document key and a
+// notice id only): the refetch brings the notice and the "Please sign again" card.
+function onResignRequested() {
+  if (!isMounted) return
+  toast.show('You have a document to sign again.')
+  scheduleDriverRefetch()
+}
+
 function onLoadCancelled(payload) {
   if (!isMounted) return
   const reassigned = payload.reason === 'reassigned'
@@ -1212,6 +1247,7 @@ async function attemptInitialLoad() {
     socket.on('geofence-trigger', onGeofenceTrigger)
     socket.on('location-update', onLocationUpdate)
     socket.on('driver-instructions-changed', onInstructionsChanged)
+    socket.on(LIVE_EVENT, onResignRequested)
     socketSetupDone = true
   }
 }
@@ -1265,6 +1301,7 @@ onUnmounted(() => {
   socket.off('geofence-trigger', onGeofenceTrigger)
   socket.off('location-update', onLocationUpdate)
   socket.off('driver-instructions-changed', onInstructionsChanged)
+  socket.off(LIVE_EVENT, onResignRequested)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   socket.disconnect()
 })

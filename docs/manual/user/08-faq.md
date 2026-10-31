@@ -42,7 +42,7 @@ No. The driver tab reports your position only while it's open. Close the tab —
 The geofence works most of the time, but GPS in dense urban areas, parking lots, or close to large buildings can be unreliable. When auto-update misses, you can update the status manually from the Loads or Status tab.
 
 **Q. How is my pay calculated?**
-For most drivers, it's a daily rate times the number of unique calendar days you were active on a load. A multi-day load (Monday pickup, Wednesday delivery) counts every day. Two loads on the same day count as one day. For owner-operators, pay is a percentage of the load revenue. Your administrator can tell you which rate applies to you.
+For most drivers, it's a daily rate times the number of unique calendar days you were active on a load. A multi-day load (Monday pickup, Wednesday delivery) counts every day. Two loads on the same day count as one day. For percentage drivers, pay is a percentage of the load revenue. Your administrator can tell you which rate applies to you.
 
 **Q. Why is an invoice showing wrong?**
 Two common reasons: the pay_type on your account doesn't match the rate that was actually used, or a load's dates in the sheet are wrong, which changes the active-day count. Message dispatch with the invoice number.

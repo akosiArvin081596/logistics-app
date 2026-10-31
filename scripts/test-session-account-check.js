@@ -60,7 +60,8 @@ function check(args) {
 	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
 }
 
-// The users table as server.js creates it, and the sessions table as better-sqlite3-session-store does.
+// The users table as server.js creates it, with the CHECK scripts/migrate-users-kpi-viewer-role.js widens,
+// and the sessions table as better-sqlite3-session-store does.
 function makeDb(name, { disableColumn = true } = {}) {
 	const file = path.join(tmp, `${name}.db`);
 	const db = new Database(file);
@@ -69,7 +70,7 @@ function makeDb(name, { disableColumn = true } = {}) {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL DEFAULT 'x',
-			role TEXT NOT NULL CHECK(role IN ('Super Admin', 'Dispatcher', 'Driver', 'Investor')),
+			role TEXT NOT NULL CHECK(role IN ('Super Admin', 'Dispatcher', 'Driver', 'Investor', 'KPI Viewer')),
 			driver_name TEXT DEFAULT '',
 			email TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -123,19 +124,21 @@ try {
 		fine.addUser(21, "desk_sample_two", "Dispatcher");
 		fine.addUser(30, "dana_sample", "Driver");
 		fine.addUser(40, "ivan_sample", "Investor");
+		fine.addUser(50, "kay_sample", "KPI Viewer");
 		fine.addSession("sid-fine-0001", { id: 7, username: "owner_sample", role: "Super Admin" });
 		fine.addSession("sid-fine-0002", { id: 20, username: "desk_sample", role: "Dispatcher" });
 		fine.addSession("sid-fine-0003", { id: 21, username: "desk_sample_two", role: "Dispatcher" });
 		fine.addSession("sid-fine-0004", { id: 30, username: "dana_sample", role: "Driver" });
 		fine.addSession("sid-fine-0005", { id: 40, username: "ivan_sample", role: "Investor" });
+		fine.addSession("sid-fine-0007", { id: 50, username: "kay_sample", role: "KPI Viewer" });
 		// Expired, and it would be signed out (no such account): not counted.
 		fine.addSession("sid-fine-0006", { id: 99, username: "ghost_sample", role: "Dispatcher" }, EARLIER);
 		fine.db.close();
 		const f = check([`--db=${fine.file}`]);
 		eq("§2 every live session survives: exit 0", f.code, 0);
-		ok("§2 ...counted by role, the expired one left out",
-			/sessions read: 6 \(live: 5; not counted: 1 expired, 0 signed out, 0 unreadable\)/.test(f.out) &&
-			/would stay signed in: 5 \(Dispatcher 2, Driver 1, Investor 1, Super Admin 1\)/.test(f.out) &&
+		ok("§2 ...counted by role (a KPI Viewer's too, its role matching its row), the expired one left out",
+			/sessions read: 7 \(live: 6; not counted: 1 expired, 0 signed out, 0 unreadable\)/.test(f.out) &&
+			/would stay signed in: 6 \(Dispatcher 2, Driver 1, Investor 1, KPI Viewer 1, Super Admin 1\)/.test(f.out) &&
 			/would be signed out: 0 \(none\)/.test(f.out), f.out);
 	}
 

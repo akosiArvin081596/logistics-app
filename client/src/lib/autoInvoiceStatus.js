@@ -3,7 +3,9 @@
 // ({ state, code, invoiceId, changed }; Super Admin only, real-draft mode only).
 // The server sends codes (lib/auto-invoice-rules.js); this file is the one place
 // they are worded. scripts/test-auto-invoice-status-client.mjs pins the codes,
-// states and changed-field names to the server's. Display only.
+// states and changed-field names to the server's. Display only, plus two checks
+// the page runs (the Approve re-check and the settings Save), with no network:
+// the page hands in its own read.
 
 // Each reason: `short` follows "Needs attention: " on the chip; `text` is the
 // sentence in the load dialog.
@@ -41,8 +43,8 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   TRAILER_MISMATCH: { short: 'trailer differs', text: "The rate con's trailer differs from Job Tracking. Draft it by hand." },
   DRAFT_REFUSED: { short: 'draft refused', text: 'The invoice draft was refused. Draft it by hand to see why.' },
   DRAFT_FAILED: { short: 'Gmail kept failing', text: 'Saving the draft to Gmail kept failing. Try again, or draft it by hand.' },
-  MAYBE_IN_GMAIL: { short: 'may already be in Gmail', text: 'The draft may already be in Gmail. Try again looks for it there first; or check Gmail Drafts.' },
-  IN_GMAIL_UNRECORDED: { short: 'in Gmail, not recorded', text: "The draft is in Gmail, but LogisX couldn't record it. Check Gmail Drafts before drafting again." },
+  MAYBE_IN_GMAIL: { short: 'may already be in Gmail', text: 'The draft may already be in Gmail. Try again looks for it in Drafts and Sent Mail first; or check Gmail Drafts and Sent Mail.' },
+  IN_GMAIL_UNRECORDED: { short: 'in Gmail, not recorded', text: "The draft is in Gmail, but LogisX couldn't record it. Check Gmail Drafts and Sent Mail before drafting again." },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
@@ -110,3 +112,49 @@ export function autoInvoiceNeedsAttention(row) {
 
 export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention')
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
+
+// --- Approve on the Draft Invoice preview, while real automatic drafts are on ---
+// The job may draft a load while a person reads its preview, so Approve reads the
+// load's latest draft row again and sets it against the one the load dialog had
+// when it opened: a draft made in between (the job's, or another person's) is
+// named and needs a yes, and so does a read that failed. A second invoice is never
+// made unseen.
+
+const DRAFT_FIELDS = Object.freeze(['invoice_id', 'created_at', 'via'])
+const draftKey = (d) => (d && typeof d === 'object' ? DRAFT_FIELDS.map((f) => String(d[f] ?? '')).join('|') : '')
+
+// Is `latest` (the row now, or null) a draft the dialog didn't know as `known`?
+export function draftMadeSince(known, latest) {
+  if (!latest || typeof latest !== 'object') return false
+  return draftKey(known) !== draftKey(latest)
+}
+
+export const DRAFT_RECHECK_FAILED_TEXT = 'Could not check whether an invoice draft was made for this load since you opened it. Approve anyway?'
+
+export function draftMadeSinceText(latest) {
+  const id = latest && typeof latest.invoice_id === 'string' && latest.invoice_id ? ` (invoice ${latest.invoice_id})` : ''
+  const who = latest && latest.via === 'auto-imap' ? 'The automatic invoice drafts made' : 'Someone made'
+  return `${who} an invoice draft for this load${id} since you opened it. Approving creates ANOTHER Gmail draft with a new invoice number (that draft is NOT removed). Continue?`
+}
+
+// Resolves { go, asked, latest }: `go` false stops the approve; `asked` says a
+// question was put, so the preview asks no second one; `latest` is the row read
+// (null for none), or undefined when the read failed. `readLatest` and `confirm`
+// come from the page.
+export async function recheckLoadDrafts({ known = null, readLatest, confirm }) {
+  let latest
+  try {
+    latest = await readLatest()
+  } catch {
+    return { go: confirm(DRAFT_RECHECK_FAILED_TEXT) === true, asked: true, latest: undefined }
+  }
+  if (!draftMadeSince(known, latest)) return { go: true, asked: false, latest }
+  return { go: confirm(draftMadeSinceText(latest)) === true, asked: true, latest }
+}
+
+// The automatic-draft settings dialog's Save: only once this opening's read has
+// worked (lists saved without it would replace the stored ones, the opt-outs
+// among them), and not while a read or a save is running.
+export function canSaveAutoSettings({ read = false, loading = false, saving = false } = {}) {
+  return read === true && !loading && !saving
+}

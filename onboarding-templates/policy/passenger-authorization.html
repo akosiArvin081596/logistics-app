@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogisX Inc. — Passenger Authorization and Accident Waiver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    /* A footer on every printed page, in a rule of its own so a browser
+       without page margin boxes drops only this. */
+    @page {
+      @bottom-center {
+        content: "LogisX Inc. Form PA-1 (October 2026), page " counter(page) " of " counter(pages);
+        font-family: 'Open Sans', Arial, sans-serif;
+        font-size: 9pt;
+        color: #444;
+      }
+    }
+
+    :root {
+      --ink: #000;
+      --rule: #d0d0d0;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 88px 80px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    .form-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      margin: 0 0 18px;
+    }
+
+    .company {
+      font-size: 15px;
+      font-weight: 700;
+      text-align: center;
+      letter-spacing: 1px;
+      margin: 0 0 4px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      text-align: center;
+      margin: 0 0 6px;
+      letter-spacing: 0.2px;
+      line-height: 1.25;
+    }
+
+    .subtitle {
+      text-align: center;
+      font-size: 13px;
+      margin: 0 0 18px;
+    }
+
+    .notice {
+      margin: 0 0 20px;
+      padding: 8px 12px;
+      border: 2px solid var(--ink);
+      font-weight: 700;
+      text-align: center;
+      letter-spacing: 0.4px;
+    }
+
+    h2 {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 22px 0 10px;
+      line-height: 1.3;
+      break-after: avoid;
+      page-break-after: avoid;
+    }
+
+    h3 {
+      font-size: 14px;
+      font-weight: 700;
+      margin: 0 0 10px;
+    }
+
+    p { margin: 0 0 12px; }
+
+    ol {
+      padding-left: 24px;
+      margin: 0 0 12px;
+    }
+    li { margin-bottom: 8px; }
+
+    strong { font-weight: 700; }
+
+    .fields { margin: 0 0 14px; }
+    .field {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin: 0 0 10px;
+    }
+    .field .label {
+      font-weight: 700;
+      white-space: nowrap;
+      min-width: 190px;
+    }
+    .field .fill { flex: 1 1 auto; min-width: 0; }
+
+    /* A filled-in value: an underline under a box that grows with its text and
+       wraps, so a long trip point or name prints whole instead of being cut. */
+    .fill {
+      display: inline-block;
+      max-width: 100%;
+      min-height: 1.4em;
+      min-width: 140px;
+      padding: 0 4px;
+      border-bottom: 1px solid var(--ink);
+      vertical-align: baseline;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    /* Room for a drawn signature, or a hand-signed one on a printed blank. */
+    .sig-slot { min-height: 2.6em; }
+
+    /* Each signer's lines stay on one page. */
+    .party {
+      margin: 0 0 20px;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .sig-line {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .sig-line .label {
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .sig-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+      min-width: 0;
+    }
+    .sig-group.grow { flex: 1 1 0; min-width: 0; }
+    .sig-group.grow .fill {
+      flex: 1 1 0;
+      width: auto;
+      min-width: 0;
+    }
+    .sig-group.fixed { flex: 0 0 auto; }
+    .sig-group.fixed .fill { min-width: 150px; }
+
+    .closing {
+      font-size: 12px;
+      margin-top: 18px;
+    }
+
+    @media print {
+      html, body { background: #fff; }
+      .document {
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <div class="form-meta">
+      <span>Form PA-1 (October 2026)</span>
+      <span>Reference: <span class="fill" aria-label="Authorization reference"></span></span>
+    </div>
+
+    <p class="company">LOGISX INC.</p>
+    <h1>PASSENGER AUTHORIZATION AND ACCIDENT WAIVER</h1>
+    <p class="subtitle">The motor carrier's written authorization for a passenger, as 49 CFR 392.60 requires</p>
+
+    <p class="notice" aria-label="Validity notice">NOT VALID UNTIL SIGNED FOR LOGISX INC.</p>
+
+    <h2>Part 1. Who may ride</h2>
+    <p>LogisX Inc., a Texas corporation and authorized U.S. motor carrier (the "Company"), gives permission for the passenger named below to ride in the truck named below. The driver named below is the only person who may drive the truck while the passenger is aboard.</p>
+    <div class="fields">
+      <div class="field"><span class="label">Passenger:</span><span class="fill" aria-label="Passenger name"></span></div>
+      <div class="field"><span class="label">Passenger's age:</span><span class="fill" aria-label="Passenger age statement"></span></div>
+      <div class="field"><span class="label">Driver (the only driver):</span><span class="fill" aria-label="Driver name"></span></div>
+      <div class="field"><span class="label">Truck unit number:</span><span class="fill" aria-label="Truck unit"></span></div>
+    </div>
+
+    <h2>Part 2. Trip and dates</h2>
+    <div class="fields">
+      <div class="field"><span class="label">Trip starts at:</span><span class="fill" aria-label="Trip start"></span></div>
+      <div class="field"><span class="label">Trip ends at:</span><span class="fill" aria-label="Trip end"></span></div>
+      <div class="field"><span class="label">Valid from:</span><span class="fill" aria-label="Valid from"></span></div>
+      <div class="field"><span class="label">Expires on:</span><span class="fill" aria-label="Expires on"></span></div>
+    </div>
+    <p>This authorization covers the trip between the start and end points above, on routes the Company approves, from the "Valid from" date through the "Expires on" date. It expires at the end of the day on the "Expires on" date. After that, the passenger may not ride unless the Company signs a new authorization. The Company may end this authorization sooner by telling the driver, and it then ends at once.</p>
+    <p><strong>This authorization is not valid until it is signed for the Company in Part 6.</strong></p>
+
+    <h2>Part 3. Rules the passenger must follow</h2>
+    <ol>
+      <li>The passenger must never drive the truck, never sit in the driver's seat while the engine is running, and never try to operate the truck in any way.</li>
+      <li>The passenger must be older than 10.</li>
+      <li>The passenger must fit the seat and the seat belt properly: sitting all the way back with their back against the seat back, knees bent over the front edge of the seat, the lap part of the belt low across the hips and upper thighs (below the stomach), and the shoulder part resting on the shoulder and the middle of the chest, clear of the neck and face.</li>
+      <li>The passenger must wear the seat belt the whole time the truck is moving, and may unbuckle only after the truck has come to a full stop and the engine has been turned off.</li>
+      <li>The driver agrees to make sure the passenger follows these rules.</li>
+      <li>A copy of this authorization, on paper or on the driver's phone, must be kept in the truck while the passenger is aboard and shown to any law enforcement or safety official who asks to see it.</li>
+    </ol>
+
+    <h2>Part 4. No insurance for passengers</h2>
+    <p>The Company does not offer insurance for passengers, and nothing in this form promises the passenger any insurance coverage. The passenger (or, for a passenger under 18, the parent or legal guardian) is responsible for any insurance the passenger wants or needs.</p>
+
+    <h2>Part 5. Release of claims</h2>
+    <p>By signing below, the passenger (or, for a passenger under 18, the parent or legal guardian, for the passenger and for themselves) and the driver each agree, to the fullest extent the law allows:</p>
+    <p>(a) to give up and release every claim they have now or may have later against the Company and its owners, officers, employees, agents and representatives, and anyone acting for the Company, for injury, illness, death, or damage to or loss of property that results from any accident or event while the passenger is riding in, getting into or getting out of any vehicle the Company owns, leases, operates or has under contract, whether or not the claim is known today; and</p>
+    <p>(b) to hold the Company and those people harmless for those claims, meaning they will not sue them or ask them to pay for them.</p>
+    <p>Each person signing confirms that they have read this form, understand that they are giving up legal rights, and are signing it of their own free will.</p>
+
+    <h2>Part 6. Signatures</h2>
+    <section class="signatures">
+      <div class="party" data-party="passenger">
+        <h3>Passenger (18 or older), or parent or legal guardian (if the passenger is under 18)</h3>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Signature:</span><span class="fill sig-slot" aria-label="Passenger or guardian signature"></span></div>
+          <div class="sig-group fixed"><span class="label">Date:</span><span class="fill" aria-label="Passenger or guardian date"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Printed name:</span><span class="fill" aria-label="Passenger or guardian printed name"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Relationship to the passenger (parent or guardian only):</span><span class="fill" aria-label="Guardian relationship"></span></div>
+        </div>
+      </div>
+
+      <div class="party" data-party="driver">
+        <h3>Driver</h3>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Signature:</span><span class="fill sig-slot" aria-label="Driver signature"></span></div>
+          <div class="sig-group fixed"><span class="label">Date:</span><span class="fill" aria-label="Driver date"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Printed name:</span><span class="fill" aria-label="Driver printed name"></span></div>
+        </div>
+      </div>
+
+      <div class="party" data-party="company">
+        <h3>Authorized for LogisX Inc. (required: this authorization is not valid without it)</h3>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Signature:</span><span class="fill sig-slot" aria-label="Company signature"></span></div>
+          <div class="sig-group fixed"><span class="label">Date:</span><span class="fill" aria-label="Company date"></span></div>
+        </div>
+        <div class="sig-line">
+          <div class="sig-group grow"><span class="label">Printed name:</span><span class="fill" aria-label="Company printed name"></span></div>
+          <div class="sig-group grow"><span class="label">Title:</span><span class="fill" aria-label="Company title"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <p class="closing">Form PA-1 (October 2026) &middot; Reference: <span class="fill" aria-label="Authorization reference"></span></p>
+  </main>
+</body>
+</html>

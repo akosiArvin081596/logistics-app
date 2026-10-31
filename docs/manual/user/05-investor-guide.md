@@ -41,7 +41,7 @@ Beneath that, an **all-time totals** strip shows lifetime revenue, lifetime expe
 ### How each number is calculated
 
 - **Revenue.** The total payment amount for every load assigned to a truck you own during the month. Loads that were cancelled or removed are excluded. A load counts in the month it was **assigned**, not delivered — this matches how dispatch reports revenue, so the numbers line up.
-- **Driver Pay.** For drivers on a **daily rate**, this is $250 (or whatever rate is configured) times the number of unique calendar days the driver was active on your loads. Multi-day trips count every day they spanned. Multiple loads in one day count as one day. For drivers on an **owner-operator** pay type, this is a percentage of revenue per the agreed split.
+- **Driver Pay.** For drivers on a **daily rate**, this is $250 (or whatever rate is configured) times the number of unique calendar days the driver was active on your loads. Multi-day trips count every day they spanned. Multiple loads in one day count as one day. For drivers on a **percentage** pay type (percentage drivers), this is a percentage of revenue per the agreed split.
 - **Fixed Costs.** The monthly portion of insurance, ELD service, IRP, HVUT, and the maintenance fund for each truck you own. Fixed costs only accrue for months the truck has actually existed in your fleet — they don't backdate.
 - **Trip Expenses.** Fuel, tolls, weight tickets, repairs, and any other variable expense logged against one of your trucks for the month.
 - **Net Profit.** Revenue minus all expenses.

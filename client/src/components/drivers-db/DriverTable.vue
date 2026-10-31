@@ -153,6 +153,13 @@
                     <span v-if="doc.signed_at"> · {{ fmtTimestamp(doc.signed_at) }}</span>
                   </div>
                   <div v-else class="doc-meta doc-pending">Not signed</div>
+                  <!-- Only when a Super Admin's answer carries the request keys (ONBOARDING_RESIGN_ENABLED) -->
+                  <ResignRequestControl
+                    v-if="docsData.userId && 'resignable' in doc"
+                    :doc="doc"
+                    :user-id="docsData.userId"
+                    @changed="reloadDocs"
+                  />
                 </div>
                 <a v-if="doc.signed && doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="doc-link">View PDF</a>
                 <span v-else class="doc-pending-badge">Pending</span>
@@ -305,7 +312,7 @@
               </label>
               <label class="pay-radio">
                 <input type="radio" v-model="editForm.payType" value="percentage" />
-                <span>Percentage of Net Load Revenue (owner-operator)</span>
+                <span>Percentage of Net Load Revenue (percentage driver)</span>
               </label>
             </div>
             <div v-if="editForm.payType === 'fixed'" class="edit-field" style="margin-top:0.5rem;">
@@ -314,7 +321,7 @@
               <p class="status-help">{{ dailyRateHelpText(dailyRateRule) }}</p>
             </div>
             <div v-if="editForm.payType === 'percentage'" class="edit-field" style="margin-top:0.5rem;">
-              <label>Owner-Operator Share (%)</label>
+              <label>Percentage Driver Share (%)</label>
               <input v-model.number="editForm.payPercentage" type="number" min="0" max="100" step="0.1" placeholder="e.g. 30" />
               <p class="status-help">Driver gets {{ Number(editForm.payPercentage) || 0 }}% of (weekly load revenue &minus; fuel &amp; maintenance expenses). LogisX keeps the rest.</p>
             </div>
@@ -354,6 +361,7 @@ import StarRating from '../shared/StarRating.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import DriverAvailabilityPanel from './DriverAvailabilityPanel.vue'
+import ResignRequestControl from './ResignRequestControl.vue'
 import { availabilityRangeText } from '../../lib/availabilityText'
 
 const api = useApi()
@@ -388,7 +396,9 @@ const docsLoading = ref(false)
 // silently switch on a panel of DOB / licence / felony history — more PII on
 // screen, in a change whose whole purpose is less. Only the id is kept, which
 // is all the reveal call needs.
-const docsData = reactive({ documents: [], drugTest: null, linked: true, ssn: null, applicationId: null })
+// userId: the driver account a fresh-signature request goes to, sent to a Super
+// Admin only while ONBOARDING_RESIGN_ENABLED is on.
+const docsData = reactive({ documents: [], drugTest: null, linked: true, ssn: null, applicationId: null, userId: null })
 const showSsn = ref(false)
 // The API now returns the SSN already masked, so revealing means asking for it
 // explicitly — GET /api/applications/:id/sensitive, which writes an audit row.
@@ -505,6 +515,7 @@ watch(viewDrv, async (d) => {
   docsData.linked = true
   docsData.ssn = null
   docsData.applicationId = null
+  docsData.userId = null
   showSsn.value = false
   ssnFull.value = ''
   ssnRevealError.value = ''
@@ -520,9 +531,22 @@ watch(viewDrv, async (d) => {
     docsData.linked = res.linked !== false
     docsData.ssn = res.ssn || null
     docsData.applicationId = res.application?.id || null
+    docsData.userId = res.userId || null
   } catch { /* ignore */ }
   finally { docsLoading.value = false }
 })
+
+// After a fresh-signature request or its withdrawal, the documents are read again.
+async function reloadDocs() {
+  const d = viewDrv.value
+  if (!d || !d._rowIndex) return
+  try {
+    const res = await api.get(`/api/drivers-directory/${d._rowIndex}/documents`)
+    if (viewDrv.value !== d) return
+    docsData.documents = res.documents || []
+    docsData.userId = res.userId || null
+  } catch { /* the rows keep what they showed */ }
+}
 
 function closeView() {
   viewDrv.value = null

@@ -17,11 +17,12 @@
 
         <!-- Right: Sign panel -->
         <div class="sign-panel">
-          <div v-if="doc && !doc.signed" class="sign-content">
+          <div v-if="showSignForm(doc)" class="sign-content">
             <div class="sign-panel-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-              Sign Document
+              {{ isResign ? 'Sign Again' : 'Sign Document' }}
             </div>
+            <p v-if="isResign" class="sign-again-note">{{ SIGN_AGAIN_NOTE }}</p>
 
             <label class="sign-checkbox">
               <input type="checkbox" v-model="state.agreed" />
@@ -130,6 +131,7 @@ import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 import { useGoogleMaps } from '../../composables/useGoogleMaps'
 import { SIGNING_CONSENT_TEXT, buildConsent } from '../../lib/signingConsent'
+import { SIGN_AGAIN_NOTE, documentUrl, isRequested, showSignForm } from '../../lib/resignRequest'
 import { fmtAppDate } from '../../utils/datetime'
 
 const props = defineProps({
@@ -191,12 +193,12 @@ function blankState() {
 const state = ref(blankState())
 
 const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
+// A signed document a Super Admin asked to be signed again (ONBOARDING_RESIGN_ENABLED).
+const isResign = computed(() => isRequested(props.doc))
 
 const pdfUrl = computed(() => {
   if (state.value.pdfUrlOverride) return state.value.pdfUrlOverride
-  if (!props.doc) return ''
-  if (props.doc.signed && props.doc.signed_pdf_url) return props.doc.signed_pdf_url
-  return `/api/onboarding/documents/${props.doc.doc_key}/pdf`
+  return documentUrl(props.doc)
 })
 
 const canSign = computed(() => {
@@ -411,6 +413,7 @@ function formatDate(d) {
   padding-bottom: 0.75rem; border-bottom: 1px solid #e8edf2;
 }
 .sign-panel-title svg { color: #3b82f6; }
+.sign-again-note { font-size: 0.8rem; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 0.5rem 0.65rem; margin: 0; line-height: 1.4; }
 
 /* ─── Fields ─── */
 .sign-checkbox {

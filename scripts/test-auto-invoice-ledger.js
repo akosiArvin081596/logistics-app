@@ -13,6 +13,8 @@
 //   §7 the local records the rules read, on a database without some tables
 //   §8 the shadow log keeps when a load was first seen
 //   §9 counters and the queue order
+//   §10 the digest columns, added once to tables made before them; the render
+//       records' keeping time (the earliest decision plus 30 days)
 //
 // Made-up loads only (LD-TEST-*), in memory or a fresh temp folder.
 //   node scripts/test-auto-invoice-ledger.js      # exits 1 on any failure
@@ -273,6 +275,45 @@ eq(L.countsByState(q), { baseline: 0, waiting: 0, queued: 2, working: 1, drafted
 ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(L.getClaim(q, "a").first_seen_at), "§9 times are ISO 'Z' strings");
 q.close();
 db.close();
+
+section("§10 the digest columns and the render records' keeping time");
+if (typeof L.hasRenderColumn !== "function" || typeof L.pruneRenderDigests !== "function") {
+	failures.push("§10 FAILS ON THE OLD CODE: the ledger adds the digest columns and prunes render records");
+} else {
+	// Tables made before the columns existed (the shape #628 shipped).
+	const old = new Database(":memory:");
+	old.exec(`CREATE TABLE auto_invoice_claims (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, reason_code TEXT NOT NULL DEFAULT '',
+		first_seen_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, ratecon_checks INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '',
+		lease_owner TEXT NOT NULL DEFAULT '', lease_until TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT '', invoice_id TEXT NOT NULL DEFAULT '',
+		invoice_date TEXT NOT NULL DEFAULT '', reserved_at TEXT NOT NULL DEFAULT '', message_id TEXT NOT NULL DEFAULT '', sent_json TEXT NOT NULL DEFAULT '',
+		draft_row_id INTEGER, drafted_at TEXT NOT NULL DEFAULT '', fingerprint_json TEXT NOT NULL DEFAULT '', changed_at TEXT NOT NULL DEFAULT '',
+		changed_fields TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL DEFAULT '', checked_by TEXT NOT NULL DEFAULT '', number_voided_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL);
+		CREATE TABLE auto_invoice_shadow (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', first_seen_at TEXT NOT NULL, ready_at TEXT NOT NULL DEFAULT '',
+		verdict TEXT NOT NULL, reason_code TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+		INSERT INTO auto_invoice_shadow (load_key, load_id, first_seen_at, verdict, updated_at) VALUES ('ld-test-0900', 'LD-TEST-0900', '2026-10-20T14:00:00.000Z', 'WOULD_ATTEMPT', '2026-10-20T14:00:00.000Z');`);
+	const cols = (t) => old.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+	ok(!L.hasRenderColumn(old), "§10 a table from before: no render column");
+	eq(L.pruneRenderDigests(old, { nowMs: Date.parse("2026-12-31T00:00:00Z") }), 0, "§10 ...and the prune does nothing there (no column, no meta table)");
+	L.ensureSchema(old);
+	L.ensureSchema(old);
+	eq([cols("auto_invoice_shadow").includes("render_digest_json"), cols("auto_invoice_claims").includes("draft_digest_json")], [true, true], "§10 ensureSchema() adds render_digest_json and draft_digest_json, and again changes nothing");
+	eq(old.prepare("SELECT render_digest_json FROM auto_invoice_shadow").get().render_digest_json, "", "§10 ...existing rows read ''");
+	eq(L.setRenderDigest(old, "ld-test-0900", JSON.stringify({ v: 1, renderedAt: "2026-11-05T14:00:00.000Z" }), "2026-11-05T14:05:00.000Z"), 1, "§10 setRenderDigest() writes the row's record");
+	eq(L.decisionAtMs(old), null, "§10 no decision recorded");
+	L.setMeta(old, "send_pass:example-broker.test", JSON.stringify({ passedAt: "2026-11-10T15:00:00.000Z" }));
+	L.setMeta(old, "draft_week:example-other.test", JSON.stringify({ decidedAt: "2026-11-09T15:00:00.000Z" }));
+	L.setMeta(old, "send_pass:example-bad.test", "{not json");
+	eq(L.decisionAtMs(old), Date.parse("2026-11-09T15:00:00.000Z"), "§10 the decision is the earliest pass or draft-week row (an unreadable one ignored)");
+	eq(L.pruneRenderDigests(old, { nowMs: Date.parse("2026-12-09T14:59:00.000Z") }), 0, "§10 kept until the decision plus 30 days");
+	eq(L.pruneRenderDigests(old, { nowMs: Date.parse("2026-12-09T15:00:00.000Z") }), 1, "§10 cleared at the decision plus 30 days");
+	eq([old.prepare("SELECT render_digest_json, verdict FROM auto_invoice_shadow").get()], [{ render_digest_json: "", verdict: "WOULD_ATTEMPT" }], "§10 ...the record only; the row stays");
+	const t = new Database(":memory:");
+	L.ensureSchema(t);
+	ok(L.transition(t, "none", { from: ["queued"], patch: { draft_digest_json: "{}" }, nowIso: "x" }) === 0, "§10 draft_digest_json is a claim column a move may set");
+	old.close();
+	t.close();
+}
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {

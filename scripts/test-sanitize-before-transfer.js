@@ -46,6 +46,13 @@
 //   exactly one account, a Super Admin, from the environment only. The C-series
 //   mutants in section 15 write a known password and break each guard.
 //
+// WHY IT GREW A RENDER-DIGEST HALF
+//
+//   The automatic-invoice render shadow keeps digests of what it would have
+//   sent (auto_invoice_shadow.render_digest_json) on production only. Section
+//   15b checks a refreshed copy has none; MUST_NOT_SURVIVE carries one of its
+//   hashes, and mutant M12 drops the clear step.
+//
 // WHY IT GREW AN EMERGENCY-CONTACTS HALF
 //
 //   A driver's emergency contacts (driver_emergency_contacts) are third
@@ -326,6 +333,11 @@ const PRIOR_HASHES = [
 const OPERATOR_PW = "op-Tangerine-Lantern-47";
 
 // Everything that must be absent from the bytes that would cross the network.
+// A replaced original's evidence, kept word for word in its document's history
+// (lib/onboarding-resign.js): JSON in one column, neither email- nor SSN-shaped,
+// so only the column scrub reaches it.
+const HISTORY = { ip: "198.51.100.44", agent: "MadeUpHistoryBrowser/3.1", signature: "Sam Q. Historysigner" };
+
 const MUST_NOT_SURVIVE = [
 	// The snapshot's own password hashes — see PRIOR_HASHES.
 	SHARED_PUBLISHED_HASH,
@@ -340,8 +352,12 @@ const MUST_NOT_SURVIVE = [
 	// Signing evidence — personal data about the SIGNER, and invisible to the
 	// free-text sweep because none of it is email- or SSN-shaped.
 	"203.0.113.77", "AppleWebKit/605.1.15", "I, Sam Driver, agree to the terms",
+	// The same evidence for a replaced original, in its document's history.
+	HISTORY.ip, HISTORY.agent, HISTORY.signature,
 	// A staff sign-in's IP and browser (sign_in_network): the table is emptied.
 	"203.0.113.88", "NamedLoginsTest/1.0",
+	// The automatic-invoice render shadow's digest (section 15b).
+	"c0ffee11".repeat(8),
 	// ⚠️ The 2026-08-13 HIGH finding: licence and medical-card PHOTOGRAPHS, and
 	// the home locality left behind beside an already-"REDACTED" address. All of
 	// it invisible to stage 3h, so the column list is the only thing that reaches
@@ -424,12 +440,13 @@ function seedDatabase(dbPath) {
 		CREATE TABLE sheet_job_tracking (id INTEGER PRIMARY KEY, load_id TEXT, email TEXT, phone_number TEXT);
 		CREATE TABLE investor_payment_info (id INTEGER PRIMARY KEY, investor_id INTEGER, routing_number TEXT, account_number TEXT, account_name TEXT, bank_name TEXT);
 		CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY, driver TEXT, bank_routing TEXT, bank_account TEXT, bank_acct_name TEXT, bank_name TEXT, bank_address TEXT, bank_phone TEXT, check_name TEXT);
-		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
+		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT, superseded_artifacts TEXT);
 		CREATE TABLE investor_onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signature_image TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY, driver_name TEXT, latitude REAL, longitude REAL, recorded_at TEXT);
 		CREATE TABLE sign_in_network (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, user_id INTEGER NOT NULL, at TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', ip_source TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '');
 		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, dropped_reason TEXT DEFAULT '', geocoded_location TEXT, fetched_at TEXT);
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, sender TEXT, body TEXT, created_at TEXT);
+		CREATE TABLE auto_invoice_shadow (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', first_seen_at TEXT NOT NULL, ready_at TEXT NOT NULL DEFAULT '', verdict TEXT NOT NULL, reason_code TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, render_digest_json TEXT NOT NULL DEFAULT '');
 		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY, action TEXT, details TEXT, created_at TEXT);
 		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, recipient TEXT, subject TEXT, created_at TEXT);
 		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL, contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by INTEGER NOT NULL DEFAULT 0, updated_by INTEGER NOT NULL DEFAULT 0);
@@ -521,8 +538,9 @@ function seedDatabase(dbPath) {
 		// regime, and a digest of a file this script never copies discloses
 		// nothing. Asserted below, so "deliberately kept" stays a decision.
 		"v2", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"];
-	db.prepare("INSERT INTO onboarding_documents (id,signature_text,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256) VALUES (?,?,?,?,?,?,?,?)")
-		.run(1, "Sam Driver", ...EVIDENCE);
+	db.prepare("INSERT INTO onboarding_documents (id,signature_text,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256,superseded_artifacts) VALUES (?,?,?,?,?,?,?,?,?)")
+		.run(1, "Sam Driver", ...EVIDENCE, JSON.stringify([{ kind: "fresh_signature", file: "mobile_policy-1-signed.superseded-made-up.pdf",
+			original: { signatureText: HISTORY.signature, signedIp: HISTORY.ip, userAgent: HISTORY.agent } }]));
 	db.prepare("INSERT INTO investor_onboarding_documents (id,signature_text,signature_image,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256) VALUES (?,?,?,?,?,?,?,?,?)")
 		.run(1, "Pat Investor", "data:image/png;base64,BBBB", ...EVIDENCE);
 	db.prepare("INSERT INTO driver_locations (id,driver_name,latitude,longitude,recorded_at) VALUES (?,?,?,?,?)")
@@ -568,6 +586,13 @@ function seedDatabase(dbPath) {
 	const dr = db.prepare("INSERT INTO load_invoice_drafts (id,load_id,recipient,subject,created_at) VALUES (?,?,?,?,?)");
 	dr.run(1, "562620213", FREE.agent, "Invoice INV-SK-2026W19-01", "2026-08-02");
 	dr.run(2, "562620214", FREE.billing, "Invoice INV-SK-2026W19-02", "2026-08-02");
+
+	// One render shadow record (section 15b): hashes, a billing address on a
+	// reserved domain and attachment names, as lib/auto-invoice-job.js stores them.
+	db.prepare("INSERT INTO auto_invoice_shadow (load_key,load_id,first_seen_at,ready_at,verdict,reason_code,facts_json,updated_at,render_digest_json) VALUES (?,?,?,?,?,?,?,?,?)")
+		.run("123456789", "123456789", "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", "WOULD_ATTEMPT", "", "{}", "2026-10-30T12:05:00.000Z",
+			JSON.stringify({ v: 1, renderedAt: "2026-10-30T12:05:00.000Z", recipient: "billing@example-broker.test", cc: [], bcc: [], subjectSha256: "c0ffee11".repeat(8),
+				bodyTextSha256: "b".repeat(64), invoiceTextSha256: "a".repeat(64), attachments: [{ name: "Example Broker Invoice Order #123456789.pdf", sha256: "" }] }));
 
 	// sam.driver's two emergency contacts (section 16).
 	const ec = db.prepare("INSERT INTO driver_emergency_contacts (user_id,position,contact_name,relationship,contact_phone,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?,?)");
@@ -1852,6 +1877,12 @@ function extractFn(src, name) {
 			`const n = db.prepare("DELETE FROM sign_in_network").run().changes;`,
 			"const n = 0;",
 			/staff sign-in IP and browser record\(s\) survived/);
+		// A replaced original's signer evidence in a driver document's history: only
+		// the REDACTED_EMPTY entry beside the scrub can refuse it.
+		scrubMutant("M9c", "the onboarding_documents history scrub is dropped",
+			`...EVIDENCE_REDACTIONS, superseded_artifacts: "" });`,
+			`...EVIDENCE_REDACTIONS });`,
+			/signature history entr\w*\(s\) survived in onboarding_documents\.superseded_artifacts/);
 		// ⚠️ M10 proves the NUL fixture is load-bearing rather than merely
 		// present. Removing the prefilter's blob-length clause makes SQLite's
 		// LIKE/GLOB stop at the embedded NUL, so the scrub can no longer SEE that
@@ -1868,6 +1899,12 @@ function extractFn(src, name) {
 			`secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });`,
 			"",
 			/emergency contact (name|phone number)\(s\) survived un-replaced in driver_emergency_contacts\.contact_(name|phone)/);
+		// The render shadow's digests: only the clear step reaches them, and only the
+		// REDACTED_EMPTY entry proves it still runs.
+		scrubMutant("M12", "the automatic-invoice render digest clear is dropped",
+			`setCols("auto_invoice_shadow", { render_digest_json: "" }, "COALESCE(render_digest_json, '') <> ''")`,
+			"0",
+			/automatic-invoice render digest\(s\) survived in auto_invoice_shadow\.render_digest_json/);
 
 		// ===================================================================
 		// C-SERIES — the password half (sections 13 and 14).
@@ -2010,6 +2047,20 @@ function extractFn(src, name) {
 				const who = accountsAccepting(gunzipToFile(r.artifact, path.join(dir, "mutant.db")), OPERATOR_PW);
 				return { caught: who.length > 0, detail: who.length ? `the artifact accepts it for ${who[0].username} — section 14 fails` : "SURVIVED" };
 			});
+	}
+
+	// =======================================================================
+	section("15b. The automatic-invoice render shadow's digests — a refreshed copy has none");
+	{
+		let rows = [];
+		{
+			const db = openDb(artifactDb);
+			try { rows = db.prepare("SELECT load_key, verdict, render_digest_json FROM auto_invoice_shadow").all(); }
+			catch { rows = []; }
+			finally { db.close(); }
+		}
+		check("the shadow row is still in the artifact, its verdict kept", rows.length === 1 && rows[0].verdict === "WOULD_ATTEMPT", JSON.stringify(rows.map((r) => r.verdict)));
+		check("its render digest is cleared", rows.length === 1 && rows[0].render_digest_json === "", rows.length ? `${rows[0].render_digest_json.length} characters left` : "no row");
 	}
 
 	// =======================================================================
