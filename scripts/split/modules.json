@@ -328,12 +328,13 @@
 		]
 	},
 	"kpi": {
-		"about": "KPI admin routes.",
+		"about": "KPI routes: the admin page's, and the shared KPI page's read.",
 		"moved": false,
 		"routes": [
 			"GET /api/admin/kpis",
 			"PUT /api/admin/kpis/approvals/:key",
-			"PUT /api/admin/kpis/settings"
+			"PUT /api/admin/kpis/settings",
+			"GET /api/kpis/viewer"
 		]
 	},
 	"maps": {

@@ -19,6 +19,8 @@
  *    invalid, nothing when valid, and never the setting's text.
  * §5 server.js reads the setting once, at module scope, through fromSetting(),
  *    and hands the same gate to the PDF route.
+ * §6 KPI_VIEWER_IDS (lib/kpi-viewer.js) is read once, strictly, and fails
+ *    closed: unset, empty or invalid lets no KPI Viewer see figures.
  *
  * Pure: no server, no database, no network. Every id and name is made up.
  * Run: node scripts/test-listed-accounts.js
@@ -153,6 +155,30 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	const block = ex.slice(ex.indexOf("# --- Rate-con viewers and protected accounts"), ex.indexOf("# RATECON_PDF_VIEWER_IDS="));
 	ok("§5 .env.example says to create the account first, then list its id (ids are given out in order)", /create the account first, then list its id/i.test(block) && /in order/i.test(block));
 	ok("§5 .env.example gives the recovery: if every listed account loses Super Admin, fix or unset the list and restart", /fix or unset the list and restart/i.test(block));
+}
+
+// ── §6 KPI_VIEWER_IDS, read fail-closed ─────────────────────────────────────
+// The second list (lib/kpi-viewer.js): unlike RATECON_PDF_VIEWER_IDS, its unset state lets nobody in,
+// because the shared KPI page had no earlier behaviour to keep.
+{
+	let KV = null;
+	try { KV = require(path.join(ROOT, "lib", "kpi-viewer.js")); } catch (e) { ok(`§6 lib/kpi-viewer.js loads (${e.code || e.message})`, false); }
+	if (KV) {
+		const SRC = require("./lib/server-source").serverSource();
+		const reads = SRC.match(/process\.env\.KPI_VIEWER_IDS/g) || [];
+		ok(`§6 server.js reads KPI_VIEWER_IDS in one place (${reads.length})`, reads.length === 1);
+		ok("§6 ...at module scope, through lib/kpi-viewer.js viewerList(), the strict reader", /\nconst KPI_VIEWERS = kpiViewer\.viewerList\(process\.env\.KPI_VIEWER_IDS\);\n/.test(SRC));
+		const kay = { id: 41, username: "kay_sample", role: "KPI Viewer" };
+		const verdictOf = (raw) => KV.viewerRefusal({ enabled: true, schemaReady: true, list: KV.viewerList(raw), user: kay });
+		for (const [label, raw] of [["unset", undefined], ["empty", ""], ["blank", "  "], ["a username", "kay_sample"], ["\"041\"", "041"], ["another id", "7"]]) {
+			const r = verdictOf(raw);
+			ok(`§6 ${label}: a KPI Viewer is refused (KPI_VIEWER_NOT_LISTED)`, !!r && r.status === 403 && r.body.code === "KPI_VIEWER_NOT_LISTED");
+		}
+		ok("§6 its own id listed: it reads", verdictOf("7,41") === null);
+		ok("§6 the reader is lib/listed-accounts.js's, strictly", KV.viewerList("41").state === "valid" && KV.viewerList("").state === "invalid" && KV.viewerList(undefined).state === "unset");
+		const ex = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		ok("§6 .env.example names KPI_VIEWER_IDS, commented out (unset by default)", /^# KPI_VIEWER_IDS=$/m.test(ex) && !/^KPI_VIEWER_IDS=/m.test(ex));
+	}
 }
 
 console.log(`\nlisted-accounts: ${passed} passed, ${failed} failed`);

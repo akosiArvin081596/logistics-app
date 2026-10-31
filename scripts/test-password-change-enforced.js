@@ -317,8 +317,10 @@ for (const makeBackend of BACKENDS) {
 
 	const at = (s, needle) => s.indexOf(needle);
 	const SESSION = "if (!req.session.user)", ROLE = "if (!roles.includes(req.session.user.role))", CSRF = 'req.method !== "GET"';
-	ok(at(REQUIRE_AUTH, SESSION) >= 0 && at(REQUIRE_AUTH, SESSION) < at(REQUIRE_AUTH, GATE_HEAD) && at(REQUIRE_AUTH, GATE_HEAD) < at(REQUIRE_AUTH, CSRF),
-		"§5 requireAuth must run session → gate → CSRF");
+	// requireAuth's own role check: the four roles only (lib/kpi-viewer.js), after the session and before the gate.
+	const FOUR = 'if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(req.session.user.role)';
+	ok(at(REQUIRE_AUTH, SESSION) >= 0 && at(REQUIRE_AUTH, SESSION) < at(REQUIRE_AUTH, FOUR) && at(REQUIRE_AUTH, FOUR) < at(REQUIRE_AUTH, GATE_HEAD) && at(REQUIRE_AUTH, GATE_HEAD) < at(REQUIRE_AUTH, CSRF),
+		"§5 requireAuth must run session → the four roles → gate → CSRF");
 	ok(at(REQUIRE_ROLE, SESSION) >= 0 && at(REQUIRE_ROLE, SESSION) < at(REQUIRE_ROLE, ROLE) && at(REQUIRE_ROLE, ROLE) < at(REQUIRE_ROLE, GATE_HEAD) && at(REQUIRE_ROLE, GATE_HEAD) < at(REQUIRE_ROLE, CSRF),
 		"§5 requireRole must run session → role → gate → CSRF");
 
@@ -383,7 +385,8 @@ for (const makeBackend of BACKENDS) {
 	const registerHead = regAt > 0 ? SRC.slice(regAt, SRC.indexOf("const requested", regAt)) : "";
 	ok(regAt > io && !/currentMustChangePassword/.test(beforeRegister),
 		"§5 the Socket.IO gate must NOT refuse the connection — a server-initiated disconnect is never retried by the client (see §4b)");
-	ok(/\n\s*if \(currentMustChangePassword\(sessionUser\)\) return;\s*$/.test(registerHead),
+	// The forced-change refusal comes first; only the four-role return (lib/kpi-viewer.js) follows it.
+	ok(/\n\s*if \(currentMustChangePassword\(sessionUser\)\) return;\n(?:\s*\/\/[^\n]*\n)*\s*if \(!\["Super Admin", "Dispatcher", "Driver", "Investor"\]\.includes\(role\)\) return;\s*$/.test(registerHead),
 		"§5 the register handler must refuse the room join before anything else, read from the database");
 }
 

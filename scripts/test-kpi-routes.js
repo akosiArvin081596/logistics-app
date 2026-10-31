@@ -319,12 +319,15 @@ function orderSection(src) {
 	t(catchAll > 0, "§1 the SPA catch-all is found");
 	const block = src.indexOf(START_MARK);
 	t(block > 0 && block < catchAll, "§1 the KPI block sits above app.get(\"*\")");
-	const regs = [...src.matchAll(/^app\.(get|post|put|patch|delete)\("\/api\/admin\/kpis[^"]*"/gm)];
-	t(regs.length === 4, `§1 four /api/admin/kpis registrations (${regs.length})`);
+	const regs = [...src.matchAll(/^app\.(get|post|put|patch|delete)\("\/api\/(?:admin\/kpis[^"]*|kpis\/viewer)"/gm)];
+	t(regs.length === 5, `§1 five KPI registrations: four /api/admin/kpis and the shared page's read (${regs.length})`);
 	t(regs.every((m) => m.index < catchAll), "§1 ...every one above the catch-all");
 	for (const [k, head] of Object.entries(HEADS)) t(src.split(`\n${head}`).length === 2, `§1 ${k}: registered exactly once as ${head.slice(0, 70)}…`);
+	// The shared page's read (lib/kpi-viewer.js): requireRole first, then its limiter, inside the block.
+	t(src.split(`\n${VIEWER_HEAD}`).length === 2 && src.indexOf(`\n${VIEWER_HEAD}`) > block, `§1 viewer: registered exactly once, in the block, as ${VIEWER_HEAD.slice(0, 70)}…`);
 	return r;
 }
+const VIEWER_HEAD = 'app.get("/api/kpis/viewer", requireRole("Super Admin", "KPI Viewer"), kpiViewerLimiter, (req, res) => {';
 
 // ─────────────────────────────────────────── §2 the gates (HTTP)
 const ROUTES = [

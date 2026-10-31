@@ -40,7 +40,8 @@
  *      socket, and a role room never by name, whatever the recipient is
  *      called or spelled like; a driver target spelled like another kind's
  *      room reaches no one; a register payload that is not a string is read
- *      as no name
+ *      as no name; a role outside the four (the KPI Viewer) joins no room,
+ *      receives nothing and has its chat refused
  *   §4 SOURCE pins (comment-stripped): every room argument in server.js is a
  *      role-room literal or a room helper (the public tracker's `load:` rooms
  *      live in their own namespace); every driver-addressed event goes through
@@ -290,6 +291,8 @@ const USERS = {
 	opsNamed: { id: 11, username: "dee", role: "Dispatcher", driverName: "Dee Dispatcher" },
 	invNamed: { id: 12, username: "ivy", role: "Investor", driverName: "Ivy Investor" },
 	rootNamed: { id: 13, username: "root.preview", role: "Super Admin", driverName: "Root Preview" },
+	// A role outside the four (lib/kpi-viewer.js).
+	kay: { id: 14, username: "kay_sample", role: "KPI Viewer", driverName: "" },
 };
 const ALLOWLIST = ["https://driver-mobile.example"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -776,6 +779,33 @@ const SCENARIOS = {
 		} finally { await w.close(); }
 	},
 
+	// §3, a role outside the four (the KPI Viewer, lib/kpi-viewer.js): whatever it registers, it joins no
+	// room, its own user room included, so no event reaches it; and requireAuth refuses its chat.
+	async kpiViewer(sources, p) {
+		const w = await startWorld({ sources });
+		try {
+			const root = await openClient(w, { user: "root" });
+			const kay = await openClient(w, { user: "kay" });
+			root.s.emit("register", "dispatch");
+			for (const name of ["kay_sample", "dispatch", "investor", "root", "Bob Driver"]) kay.s.emit("register", name);
+			for (const c of [root, kay]) c.s.emit("register", "__sentinel__");
+			const settled = await waitUntil(() => [root, kay].every((x) => w.received.some((r) => r.id === x.id && r.args[0] === "__sentinel__")));
+			p.kpiViewerJoinsNoRoom = settled && sameSet(roomsOf(w, kay), []) && sameSet(roomsOf(w, root), ["dispatch", "super-admin", "user:root"]);
+			w.io.to("dispatch").emit("dispatch-notification", { n: 5 });
+			w.io.to("super-admin").emit("dispatch-notification", { n: 6 });
+			w.io.to("investor").emit("investor:changed");
+			w.io.to(w.rooms.userRoom("kay_sample")).emit("dispatch-notification", { n: 7 });
+			const delivered = await barrier(w, [root, kay], 5);
+			p.kpiViewerGetsNoEvents = delivered && copies(kay, "dispatch-notification") === 0 && copies(kay, "investor:changed") === 0 && copies(root, "dispatch-notification") === 2;
+			const posted = await chat(w, "kay", { to: "dispatch", message: "k1" });
+			let body = null;
+			try { body = JSON.parse(posted.body); } catch { body = null; }
+			p.kpiViewerChatRefused = posted.status === 403 && !!body && body.code === "ROLE_NOT_ALLOWED" && (await barrier(w, [root, kay], 6)) &&
+				copies(root, "new-message") === 0 && copies(kay, "new-message") === 0;
+			p.kpiViewerRan = true;
+		} finally { await w.close(); }
+	},
+
 	// §3, accounts of other roles that carry a driver name. A driver room's
 	// notices name the driver's loads as stored, which a Dispatcher and an
 	// Investor are served withheld: registering that name joins the driver room
@@ -1176,6 +1206,10 @@ Object.assign(PROPS, {
 	unlinkedJoinsOwnRoomOnly: ["unlinked", "§3 a driver with no driver name must join only its own user room (fixture unlinked)"],
 	unlinkedGetsNoDispatchEvents: ["unlinked", "§3 ...and receive no dispatch-room event"],
 	unlinkedRan: ["unlinked", "§3 the unlinked-driver scenario must run to the end"],
+	kpiViewerJoinsNoRoom: ["kpiViewer", "§3 a role outside the four (the KPI Viewer) must join no room, its own user room included, whatever it registers"],
+	kpiViewerGetsNoEvents: ["kpiViewer", "§3 ...so no role-room or user-room event reaches it"],
+	kpiViewerChatRefused: ["kpiViewer", "§3 ...and requireAuth refuses its chat (403 ROLE_NOT_ALLOWED), no copy to any socket"],
+	kpiViewerRan: ["kpiViewer", "§3 the KPI Viewer scenario must run to the end"],
 	staffDriverNameJoinsNoDriverRoom: ["staffNames", "§3 a Dispatcher or an Investor whose account carries a driver name must join no driver room, whatever it registers (fixtures opsNamed, invNamed)"],
 	staffDriverNameGetsNoDriverEvent: ["staffNames", "§3 ...and receive no event sent to that driver room"],
 	superAdminPreviewJoinsOwnDriverRoom: ["staffNames", "§3 a Super Admin registering his own driver name (the /driver preview) must join that driver room (fixture rootNamed)"],
@@ -1356,6 +1390,12 @@ const MUTANTS = [
 		target: "sendChat",
 		mutate: cut("if (investorChat) io.to(\"super-admin\").emit(\"new-message\", payload);", "if (investorChat) io.to(\"dispatch\").emit(\"new-message\", payload);"),
 		caughtBy: ["chatFromInvestorSparesRoleNames"],
+	},
+	{
+		name: "register without its four-role return (a KPI Viewer joins its own user room)",
+		target: "ioHandler",
+		mutate: cut('\n\t\tif (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) return;', ""),
+		caughtBy: ["kpiViewerJoinsNoRoom", "kpiViewerGetsNoEvents"],
 	},
 	{
 		name: "register normalises a name without checking its type",
