@@ -27,7 +27,7 @@
  *      `clipped` (the flag-off shape) is not
  *   §5 the failure path, lifted from server.js onto an in-memory database:
  *      writeSignedArtifact() keeps the labels; the driver sign route answers
- *      503 with a "wait for the office" message (retryable false); signing_error,
+ *      503 with a "wait to hear from our team" message (retryable false); signing_error,
  *      the alert row, the staff notice and the log lines name the document and
  *      the label and never the value; any other failure keeps today's "try
  *      again" answer; with room, a long name signs
@@ -754,8 +754,8 @@ async function g5Server(ctx) {
 	const r = await sign(h, "true");
 	check("§5 a cut-off refusal answers 503 DOCUMENT_FIELDS_UNFILLED, not retryable",
 		r.status === 503 && r.body && r.body.code === "DOCUMENT_FIELDS_UNFILLED" && r.body.retryable === false, r.body);
-	check("§5 ...the driver is told the office has it and to wait before signing again, with no value",
-		Boolean(r.body) && /The office has been told; please wait for them before signing it again\./.test(r.body.error || "") &&
+	check("§5 ...the driver is told staff have it and to wait before signing again, with no value",
+		Boolean(r.body) && /Our team has been told; please wait to hear from them before signing it again\./.test(r.body.error || "") &&
 		!/try again in a moment/.test(r.body.error || "") && leaks(JSON.stringify(r.body)).length === 0);
 	const row = h.db.prepare("SELECT signed, signed_pdf_url, signing_error, signing_failed_at, signature_text FROM onboarding_documents WHERE user_id = 7").get();
 	check("§5 ...the document stays unsigned with no file, the signature kept",
