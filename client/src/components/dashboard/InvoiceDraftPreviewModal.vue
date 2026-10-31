@@ -656,6 +656,10 @@ const props = defineProps({
   // True when an official draft already exists for this load (opened via
   // "Review"); re-approving mints a second draft, so gate it behind a confirm.
   alreadyDrafted: { type: Boolean, default: false },
+  // The page's check at Approve, before anything is made (while automatic drafts
+  // are on): resolves { go, asked }. go false stops; asked means it already put a
+  // question, so the confirm above isn't asked as well.
+  beforeApprove: { type: Function, default: null },
 })
 
 const emit = defineEmits(['update:open', 'approved'])
@@ -1533,9 +1537,23 @@ function totalChangeConfirm() {
 
 async function approve() {
   if (approving.value || !canApprove.value) return
+  // The page's check first, when it gives one. Approve stays held while it reads,
+  // so a second click makes nothing.
+  let check = null
+  if (props.beforeApprove) {
+    approving.value = true
+    try {
+      check = await props.beforeApprove()
+    } catch {
+      approveError.value = "Could not check this load's drafts. Nothing was sent — try again."
+    } finally {
+      approving.value = false
+    }
+    if (!check || !check.go) return
+  }
   // Re-approving an already-drafted load mints a SECOND draft + invoice number
   // (the first is not removed), so require an explicit confirm first.
-  if (props.alreadyDrafted && !window.confirm(DUPLICATE_APPROVE_MSG)) return
+  if (props.alreadyDrafted && !(check && check.asked) && !window.confirm(DUPLICATE_APPROVE_MSG)) return
   // Second confirm, and only for the total: it is the one edit that makes the
   // invoice disagree with the books on purpose.
   if (edited.value.total && !window.confirm(totalChangeConfirm())) return

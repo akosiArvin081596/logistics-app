@@ -12,6 +12,10 @@
 //      by hand; WOULD_ATTEMPT stays, so the report can compare it with the hand draft
 //   §4 the shadow-week report reads that log
 //   §5 the job module reaches no network or Google client itself
+//   §6 the one thing shadow does besides its log: a settings problem stores and
+//      sends one in-app Super Admin notice (and a meta row), worded for shadow:
+//      it makes no Gmail drafts, it only records what it would draft; still no
+//      engine, number, Gmail or audit call, and once per problem
 //
 // Made-up loads only, an in-memory database.
 //   node scripts/test-auto-invoice-shadow.js      # exits 1 on any failure
@@ -188,6 +192,50 @@ async function main() {
 	eq(requires, ["./app-time", "./auto-invoice-ledger", "./auto-invoice-rules", "./imap-draft", "crypto", "fs", "os"], "§5 it loads only its own lib modules and built-ins");
 	ok(!/\bfetch\s*\(|googleapis|getSheets|getDrive|https?:\/\//.test(SRC), "§5 no fetch, Google client or URL: every outside call is a dependency it is given");
 	ok(/newMessageId: \(user\) => require\("\.\/imap-draft"\)\.newMessageId\(user\)/.test(SRC), "§5 lib/imap-draft.js is loaded only for a Message-ID default");
+
+	// ---------------------------------------------------------------- §6
+	section("§6  the shadow notice: a settings problem, worded for shadow");
+	{
+		const db2 = new Database(":memory:");
+		db2.exec("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '')");
+		const setSettings = (value) => db2.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(value);
+		const notices = [];
+		const paid = { prepare: 0, render: 0, record: 0, mint: 0, append: 0, search: 0, audit: 0 };
+		const spy = (key) => () => { paid[key]++; throw new Error(`${key} called in shadow mode`); };
+		let t = T0;
+		const shadowJob = jobLib.create({
+			db: db2,
+			env: { AUTO_INVOICE_DRAFTS_ENABLED: "true" },
+			now: () => new Date(t),
+			readJobTracking: async () => Object.freeze({ headers: HEADERS, data: Object.freeze([]) }),
+			engine: { prepare: spy("prepare"), render: spy("render"), record: spy("record") },
+			nextInvoiceNumber: spy("mint"),
+			appendGmailDraft: spy("append"),
+			findDraftByMessageId: spy("search"),
+			newMessageId: () => "<made-up@example.com>",
+			logAudit: spy("audit"),
+			notify: (n) => notices.push(n),
+			log: { warn: () => {}, error: () => {} },
+			timeZone: ET,
+		});
+		const SHADOW_WORDS = "Shadow mode makes no Gmail drafts: it only records what it would draft.";
+		setSettings(JSON.stringify({ optOutDomains: [], confirmedBrokerDomains: ["example-broker.test", "comcast.net"] }));
+		for (let i = 0; i < 3; i++) { await shadowJob.tick(); t += 5 * MIN; }
+		eq(notices.map((n) => n.title), ["Automatic invoice drafts (shadow mode): settings"], "§6 an entry the rules now refuse: one notice, however many sweeps");
+		eq(notices[0] && notices[0].body,
+			`Some automatic-draft settings no longer pass the rules and are ignored: comcast.net (confirmed, CONFIRMED_DOMAIN_FREEMAIL). Save the lists again to remove them. ${SHADOW_WORDS}`,
+			"§6 ...naming the entry, and saying shadow makes no Gmail drafts and only records what it would draft");
+		ok(db2.prepare("SELECT value FROM auto_invoice_meta WHERE key = 'settings_notice'").get(), "§6 ...remembered in its meta row, so it isn't sent again");
+		setSettings("{broken");
+		for (let i = 0; i < 3; i++) { await shadowJob.tick(); t += 5 * MIN; }
+		eq(notices.length, 2, "§6 an unreadable row is a new problem: one more notice");
+		eq(notices[1] && notices[1].body,
+			`The automatic-draft settings can't be read, so shadow mode records nothing until both the opt-out list and the confirmed broker domains are saved again. ${SHADOW_WORDS}`,
+			"§6 ...saying what stops in shadow (its record), not that drafting stops");
+		eq(paid, { prepare: 0, render: 0, record: 0, mint: 0, append: 0, search: 0, audit: 0 }, "§6 and still no engine, number, Gmail or audit call");
+		ok(!notices.some((n) => /@/.test(n.body)), "§6 no address in a notice");
+		db2.close();
+	}
 }
 
 main()
