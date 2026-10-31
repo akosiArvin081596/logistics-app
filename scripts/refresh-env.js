@@ -656,6 +656,13 @@ async function main() {
 		const n = db.prepare("DELETE FROM sign_in_network").run().changes;
 		summary.push(`sign_in_network: emptied (${n}) — staff sign-in IP and browser stay on production`);
 	}
+	// The automatic-invoice render shadow's digests (lib/auto-invoice-job.js): a
+	// broker's billing address and attachment names beside hashes, kept on
+	// production only until the send comparison's decision. Never on a copy.
+	{
+		const n = setCols("auto_invoice_shadow", { render_digest_json: "" }, "COALESCE(render_digest_json, '') <> ''");
+		if (n) summary.push(`auto_invoice_shadow: render digests cleared (${n})`);
+	}
 
 	// 3b. Passwords. Production hashes are bcrypt, so they are not reversible —
 	//     but they ARE the live credentials, and a copy of them on a laptop or a
@@ -1122,6 +1129,9 @@ const REDACTED_EMPTY = [
 	// with every check still green.
 	["job_applications", "dob", "applicant date of birth"],
 	["job_applications", "signature", "applicant signature"],
+	// The render shadow's digests: a billing address among hashes, which the
+	// free-text sweep would only rewrite, never remove.
+	["auto_invoice_shadow", "render_digest_json", "automatic-invoice render digest"],
 	// ⚠️ The three document columns. Asserted for a reason the others do not
 	// need: they are invisible to BOTH the free-text sweep (base64 has no "@"
 	// and no ###-##-####) and to any human spot-check, because a 2 MB base64

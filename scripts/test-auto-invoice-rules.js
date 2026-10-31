@@ -20,6 +20,9 @@
 //   §10 server.js parity: the completed and cancelled patterns, the load key, the
 //       rate-con types and the draft route's date and email columns
 //   §11 the module stays pure
+//   §12 the message digest's parts: HTML as text, the invoice text masked, the
+//       invoice attachment, the digest and the comparison of two, retention and
+//       the Friday quiet window
 //
 // Made-up data only. No network, no database, no files written.
 //   node scripts/test-auto-invoice-rules.js      # exits 1 on any failure
@@ -324,10 +327,93 @@ for (const text of [
 section("§11 the module stays pure");
 const MOD = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-rules.js"), "utf8");
 const requires = [...MOD.matchAll(/require\(\s*["']([^"']{1,80})["']\s*\)/g)].map((m) => m[1]).sort();
-eq(requires, ["./cell-compare", "./free-mail-domains", "path"], "§11 it requires only path, lib/cell-compare.js and lib/free-mail-domains.js");
+eq(requires, ["./cell-compare", "./free-mail-domains", "./pdf-shown-text", "crypto", "path"],
+	"§11 it requires only path, crypto (SHA-256), lib/cell-compare.js, lib/free-mail-domains.js and lib/pdf-shown-text.js");
 ok(!/\bfs\.|process\.env|\bfetch\(|Date\.now\(\)|new Date\(\)/.test(MOD), "§11 no files, environment, network or clock");
+const READER_FILE = path.join(ROOT, "lib", "pdf-shown-text.js");
+const READER = fs.existsSync(READER_FILE) ? fs.readFileSync(READER_FILE, "utf8") : "";
+eq([...READER.matchAll(/require\(\s*["']([^"']{1,80})["']\s*\)/g)].map((m) => m[1]), ["zlib"], "§11 the PDF text reader it uses requires zlib alone");
+ok(!/\bfs\.|process\.env|\bfetch\(|Date\.now\(\)|new Date\(\)/.test(READER), "§11 ...and reads no file, environment, network or clock");
 eq(R.REASON_CODES.length, new Set(R.REASON_CODES).size, "§11 every reason code once");
 for (const c of [...R.ATTENTION_REFUSALS]) ok(R.REASON_CODES.includes(c), `§11 refusal ${c} is a reason code`);
+
+// ------------------------------------------------------------------ §12
+section("§12 the message digest's parts");
+if (typeof R.messageDigest !== "function") {
+	failures.push("§12 FAILS ON THE OLD CODE: the rules carry messageDigest(), htmlToText() and the masking");
+} else {
+	// HTML as text: blocks are breaks, inline tags vanish, entities decode,
+	// whitespace collapses, so a mail program's rewrap reads the same.
+	const ours = "<div style=\"x\"><p>Hello,</p><p>Please see the attached documents for load number 123456789: the rate confirmation, the signed POD, and the invoice.</p><p>--<br>Made-up Co.<br><a href=\"https://example.test\">example.test</a></p><p><img src=\"x\" alt=\"Logo\"></p></div>";
+	const rewrapped = "<div dir=\"ltr\"><div>Hello,</div><div><br></div><div>Please see the attached documents for load number 123456789: the rate confirmation, the signed POD, and the invoice.</div>\r\n<div>--<br>Made-up Co.<br><a href=\"https://example.test\" target=\"_blank\">example.test</a></div></div>";
+	eq(R.htmlToText(ours), "Hello, Please see the attached documents for load number 123456789: the rate confirmation, the signed POD, and the invoice. -- Made-up Co. example.test",
+		"§12 htmlToText: block tags are breaks, links keep their text, images and their alt text go");
+	eq(R.htmlToText(rewrapped), R.htmlToText(ours), "§12 htmlToText: a div for a p, a br between paragraphs and a target attribute read the same");
+	eq(R.htmlToText("<head><title>T</title><style>p{x}</style></head><!-- c --><p>A &amp; B&#39;s &lt;x&gt;&nbsp;C</p><script>evil()</script>"), "A & B's <x> C",
+		"§12 htmlToText: head, title, styles, scripts and comments dropped; entities decoded");
+	eq(R.htmlToText("<p>one</p><p>two</p>") === R.htmlToText("<p>one two</p>"), true, "§12 htmlToText: a paragraph break reads as one space");
+	ok(R.htmlToText("<b>tw</b>o") === "two", "§12 htmlToText: an inline tag inside a word leaves no space");
+	const big = "<".repeat(200000) + "p>x";
+	const t0 = Date.now();
+	R.htmlToText(big);
+	ok(Date.now() - t0 < 2000, "§12 htmlToText: 200,000 unclosed \"<\" read in linear time");
+
+	// The invoice's text masked: its number and date (the first after the number).
+	const inv = (n, d, total = "$1,500.00", delivery = "10/19/2026") =>
+		`INVOICE Invoice ID # : ${n} Date: ${d} Made-up Co. Invoice To Example Broker billing@example-broker.test Load ID# Delivery Date Total Example Broker Order: #123456789 ${delivery} ${total} SUB-TOTAL ${total} Total ${total}`;
+	const a = R.maskedInvoiceText(inv("10202026-1", "10/20/2026"));
+	ok(a.includes("[invoice number]") && a.includes("[invoice date]") && !a.includes("10202026-1") && !a.includes("10/20/2026"), "§12 maskedInvoiceText: the number and the date are masked");
+	eq(R.maskedInvoiceText(inv(R.SHADOW_INVOICE_ID, "10/24/2026")), a, "§12 ...so the placeholder number on another day gives the same text");
+	ok(R.maskedInvoiceText(inv("10202026-1", "10/20/2026", "$1,550.00")) !== a, "§12 ...and another amount does not");
+	ok(R.maskedInvoiceText(inv("10202026-1", "10/20/2026", "$1,500.00", "10/20/2026")).includes("10/20/2026"), "§12 ...a delivery date on the invoice's day stays (only the first Date: after the number is masked)");
+	eq(R.maskedInvoiceText(inv("10202026-1", "10/20/2026", "$1,500.00", "10/21/2026")) === a, false, "§12 ...and a different delivery date differs");
+	eq([R.maskedInvoiceText(""), R.maskedInvoiceText("Invoice ID # : 10202026-1 no date $1.00"), R.maskedInvoiceText("Invoice ID # : 10202026-1 Date: 10/20/2026 no amount"),
+		R.maskedInvoiceText("�� binary junk")], ["", "", "", ""], "§12 maskedInvoiceText: no number, no date or no amount is unreadable (\"\")");
+	eq(R.maskedInvoiceText("Invoice ID #:10202026-1Date:10/20/2026 $1,500.00"), "Invoice ID #:[invoice number]Date:[invoice date] $1,500.00", "§12 maskedInvoiceText: labels run together still mask");
+
+	// Which attachment is the invoice.
+	eq(R.invoiceAttachmentIndex(["Example Broker Invoice Order #123456789.pdf", "POD_1_of_2_123456789.pdf", "123456789.pdf"]), 0, "§12 invoiceAttachmentIndex: the engine's invoice name");
+	eq(R.invoiceAttachmentIndex(["123456789_POD.pdf", "Invoice Order #123456789.pdf"]), 1, "§12 ...with no broker name, wherever it is");
+	eq(R.invoiceAttachmentIndex(["Bison Invoice Order #7007280.pdf"]), 0, "§12 ...Bison's name");
+	eq([R.invoiceAttachmentIndex(["a.pdf"]), R.invoiceAttachmentIndex(["X Invoice Order #1.pdf", "Y Invoice Order #1.pdf"]), R.invoiceAttachmentIndex([])], [-1, -1, -1],
+		"§12 ...none, or two, is -1");
+
+	// The digest and the comparison of two.
+	const pdf = (n, d) => Buffer.from(`made-up ${n} ${d}`);
+	const msg = { to: "Billing@Example-Broker.test", subject: "Example Broker Order #123456789", html: ours,
+		attachments: [{ filename: "Example Broker Invoice Order #123456789.pdf", content: pdf("10202026-1", "10/20/2026") }, { filename: "123456789_POD.pdf", content: Buffer.from("pod") }] };
+	const dg = R.messageDigest(msg, { renderedAt: "2026-10-20T14:00:00.000Z" });
+	eq(Object.keys(dg), ["v", "renderedAt", "recipient", "cc", "bcc", "subjectSha256", "bodyTextSha256", "invoiceTextSha256", "attachments"], "§12 messageDigest: its fields");
+	eq([dg.v, dg.recipient, dg.cc, dg.bcc, dg.attachments.map((x) => x.name)], [1, "billing@example-broker.test", [], [], ["Example Broker Invoice Order #123456789.pdf", "123456789_POD.pdf"]],
+		"§12 messageDigest: plain values are the recipient (lower case), Cc, Bcc and the attachment names");
+	eq([dg.attachments[0].sha256, dg.attachments[1].sha256.length, dg.invoiceTextSha256], ["", 64, ""], "§12 ...the invoice by its text (unreadable here: no PDF), the POD by its bytes");
+	ok(!JSON.stringify(dg).includes("Hello") && !JSON.stringify(dg).includes("Order #123456789\""), "§12 ...no body text or subject text in it");
+	eq(R.digestDifferences(dg, dg), ["attachments"], "§12 digestDifferences: an unreadable invoice is never equal, even to itself");
+	const readable = { ...dg, invoiceTextSha256: "a".repeat(64) };
+	eq(R.digestDifferences(readable, readable), [], "§12 digestDifferences: equal digests, nothing differs");
+	eq(R.digestDifferences(readable, { ...readable, recipient: "other@example-broker.test" }), ["recipient"], "§12 ...another To");
+	eq(R.digestDifferences(readable, { ...readable, cc: ["x@example.test"] }), ["recipient"], "§12 ...a Cc");
+	eq(R.digestDifferences(readable, { ...readable, bcc: ["x@example.test"] }), ["recipient"], "§12 ...a Bcc");
+	eq(R.digestDifferences(readable, { ...readable, subjectSha256: "b".repeat(64) }), ["subject"], "§12 ...another subject");
+	eq(R.digestDifferences(readable, { ...readable, attachments: [...readable.attachments].reverse() }), ["attachments"], "§12 ...the attachments in another order");
+	eq(R.digestDifferences(readable, { ...readable, invoiceTextSha256: "c".repeat(64) }), ["attachments"], "§12 ...another invoice text (amount)");
+	eq(R.digestDifferences(readable, { ...readable, bodyTextSha256: "d".repeat(64) }), ["body"], "§12 ...another body");
+	eq(R.digestDifferences({ ...readable, recipient: "a@example.test,b@example.test" }, { ...readable, recipient: "a@example.test,b@example.test" }), ["recipient"],
+		"§12 ...a render with two recipients never matches");
+	eq(R.fingerprintSha256({ completed: true, live: true, paymentCents: 150000, brokerEmail: "ops@example-broker.test", trailer: "", podIds: [1], rateConIds: [] }).length, 64, "§12 fingerprintSha256: a hash");
+
+	// Retention and the Friday quiet window.
+	const D = 24 * HOUR;
+	const at = Date.parse("2026-10-20T14:00:00Z");
+	const rec = { renderedAt: new Date(at).toISOString() };
+	eq([R.renderRecordExpired(rec, { nowMs: at + 44 * D }), R.renderRecordExpired(rec, { nowMs: at + 45 * D })], [false, true], "§12 renderRecordExpired: 45 days after the render with no decision");
+	eq([R.renderRecordExpired(rec, { nowMs: at + 37 * D, decisionAtMs: at + 8 * D }), R.renderRecordExpired(rec, { nowMs: at + 38 * D, decisionAtMs: at + 8 * D })], [false, true],
+		"§12 renderRecordExpired: the decision plus 30 days");
+	eq([R.renderRecordExpired({ refusedAt: rec.renderedAt }, { nowMs: at + 45 * D }), R.renderRecordExpired({}, { nowMs: at })], [true, true], "§12 ...a refusal ages the same; a record with no time is cleared");
+	eq([R.shadowRenderQuiet(new Date("2026-10-23T21:59:00Z"), "America/New_York"), R.shadowRenderQuiet(new Date("2026-10-23T22:00:00Z"), "America/New_York"),
+		R.shadowRenderQuiet(new Date("2026-10-24T03:59:00Z"), "America/New_York"), R.shadowRenderQuiet(new Date("2026-10-24T04:00:00Z"), "America/New_York")],
+	[false, true, true, false], "§12 shadowRenderQuiet: Friday from 6 PM Eastern to midnight");
+}
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {
