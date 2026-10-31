@@ -24,6 +24,9 @@
  *            saved addresses are unchanged. The line wraps.
  *   6        TOTAL DUE could print alone on a new page under the repeated table
  *            header: it stays with the row above it.
+ *   E1       the percentage-pay weekly invoice names its payee a "percentage
+ *            driver"; "owner-operator" is kept for the new driver category.
+ *            The file name and the stored template key keep their old names.
  *
  * Issued invoices are never regenerated, and no render_data is rewritten.
  *
@@ -329,7 +332,7 @@ test("D3 A two-load day's Load / BOL # wraps inside its cell: each day row's box
 	eq("Tuesday's value", text["Tuesday Load/BOL number"], "30080873, 209875716");
 });
 
-test("D4 TOTAL DUE stays with the rows above it: on the weekly invoice no table row splits and neither TOTAL DUE nor the adjustment line may start a page; the owner-operator and manual invoices keep their pay summary's last lines the same way. Base: no rule", ({ ok }) => {
+test("D4 TOTAL DUE stays with the rows above it: on the weekly invoice no table row splits and neither TOTAL DUE nor the adjustment line may start a page; the percentage-driver and manual invoices keep their pay summary's last lines the same way. Base: no rule", ({ ok }) => {
 	const svc = TEMPLATES.service_invoice;
 	ok("service_invoice: rows don't split", declares(svc, ".service-table tr", "break-inside: avoid"));
 	ok("service_invoice: TOTAL DUE never starts a page", declares(svc, ".service-table .total-row", "break-before: avoid"));
@@ -354,6 +357,15 @@ test("D5 (B23, 2026-10-23) Each day row prints its date under the weekday: the d
 	ok("smaller than the table's 14px", /font-size:\s*1[0-2]px/.test(r), r);
 	ok("no box, border, padding or minimum height: an empty slot takes no room", r && !/min-height|border|padding/.test(r), r);
 	eq("the field map asks for it on every weekday", WEEK.map((d) => `${d} date` in FIELD_MAPS.service_invoice({}).text), WEEK.map(() => true));
+});
+
+test("E1 The percentage-pay weekly invoice names its payee a percentage driver: its <title>, its heading and its share line say \"Percentage Driver\", and no text in it says owner-operator. Base: \"Owner-Operator\" in all three", ({ eq, ok }) => {
+	const html = TEMPLATES.service_invoice_owner_op;
+	eq("the <title>", (/<title>([^<]*)<\/title>/.exec(html) || [])[1], "LogisX Inc. — Percentage Driver Weekly Invoice");
+	eq("the heading", (/<h1>([^<]*)<\/h1>/.exec(html) || [])[1], "PERCENTAGE DRIVER WEEKLY INVOICE");
+	ok("the share line", html.includes('<span class="label">&times; Percentage Driver Share (<span aria-label="Pay percentage"></span>%)</span>'));
+	const left = /[^\n]*owner[\s-]?op[^\n]*/i.exec(html);
+	ok("no owner-operator wording left", !left, left ? left[0].trim() : "");
 });
 
 console.log(`\n${passed} passed, ${failed} failed (of ${passed + failed})`);

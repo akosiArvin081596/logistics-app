@@ -292,6 +292,19 @@ check("the socket event still fires (to the dispatch room, per role)", ROUTE_COD
 check("the dispatch feed row is still written", ROUTE_CODE.includes("insertDispatchNotification.run"), true);
 check("the success audit line is still written", ROUTE_CODE.includes("'update_status'"), true);
 check("load_status_history is still stamped", ROUTE_CODE.includes("recordStatusChange("), true);
+// The arrival recorder's facts (lib/arrival-recorder.js) go to the history row
+// only: the sheet gets the same cells, in one batchUpdate, before the row.
+{
+	const writes = ROUTE_CODE.match(/spreadsheets\.values\.(?:batchUpdate|update|append)\(/g) || [];
+	const pushes = ROUTE_CODE.match(/updateData\.push\(\{ range: `Job Tracking!\$\{colLetter\((dateIdx|compDateIdx)\)\}\$\{rowIndex\}`, values: \[\[dateTime\]\] \}\);/g) || [];
+	check("the same sheet cells are written: one batchUpdate of the status, the Status Update Date and the Completion Date",
+		[writes.length, /const updateData = \[\n\t\t\t\{ range: `Job Tracking!\$\{colLetter\(statusIdx\)\}\$\{rowIndex\}`, values: \[\[newStatus\]\] \},\n\t\t\];/.test(ROUTE_CODE),
+			pushes.length, (ROUTE_CODE.match(/updateData\.push\(/g) || []).length], [1, true, 2, 2]);
+	const recordAt = ROUTE_CODE.indexOf("recordStatusChange(");
+	const recorderRefs = [...ROUTE_CODE.matchAll(/\barrivalRecorder\b/g)].map((m) => m.index);
+	check("...and nothing the recorder adds reaches them: its facts sit inside the recordStatusChange() call, after the write",
+		recordAt > ROUTE_CODE.indexOf("values.batchUpdate") && recorderRefs.every((i) => i > recordAt && i < ROUTE_CODE.indexOf("res.json({ success: true })", recordAt)), true);
+}
 
 // ================================================= 4. cancel notifies the bound driver
 section("4. POST /api/dispatch/cancel — the notification target");

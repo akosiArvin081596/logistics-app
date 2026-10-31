@@ -31,7 +31,7 @@ No. You see only your own.
 No. The dispatcher's tracking view is for their workflow.
 
 **Q. How is my pay calculated?**
-Either $250 per unique active day (daily-rate drivers) or a percentage of load revenue (owner-operators). Check your contract for which applies and at what rate.
+Either $250 per unique active day (daily-rate drivers) or a percentage of load revenue (percentage drivers). Check your contract for which applies and at what rate.
 
 **Q. What's an "active day"?**
 For daily-rate pay: any calendar day you spent some portion of on a load. Pickup Monday + delivery Wednesday = 3 active days. Three short loads all on Thursday = 1 active day.

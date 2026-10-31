@@ -136,7 +136,7 @@ If dispatch needs anything else (a particular note about the load, a follow-up a
 A few things in the background once POD is uploaded:
 
 - **Your status** is updated everywhere — admin dashboards, the customer's public tracker, the broker's view.
-- **Your driver pay** for this load is accrued. (Calculated based on either daily rate or owner-operator percentage — see Getting Paid.)
+- **Your driver pay** for this load is accrued. (Calculated by either daily rate or, for a percentage driver, a percentage of revenue — see Getting Paid.)
 - **Your invoice** for the current week is updated.
 
 You don't have to do anything for any of this. The system handles it automatically.

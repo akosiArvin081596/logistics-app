@@ -38,6 +38,9 @@
  *   §10 both ingest paths: a fix from before the link runs no low-fuel check
  *      and asks no geofence advance (it is still stored); a fix after the link,
  *      or with no known link time, does both as before
+ *   §11 both ingest paths hand the geofence the ping's own time and the loads
+ *      they ask, with their statuses (the arrival recorder's facts); a mutant
+ *      that drops them is caught
  *
  * The routes are lifted whole from server.js (scripts/lib/server-lift.js), with
  * the shipped eld_device_assignments DDL and telemetry indexes, and run against
@@ -209,8 +212,9 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 		return res;
 	};
 	// §8: one ingest round, the poller's (its Routemate answer is `live`) or the
-	// Linxup webhook's (one position), recording every socket send.
-	const pushes = (live) => {
+	// Linxup webhook's (one position), recording every socket send. `text` is the
+	// lifted pair (a mutant's in §11).
+	const pushes = (live, text = liftedPush.text) => {
 		const sent = [];
 		const fuelChecks = [];
 		const geofenceAsks = [];
@@ -231,7 +235,7 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 			geofenceCandidatesAcrossSpacing: () => [], linxupHealth: { unlinked: 0, lastWritten: null }, linxupTrackSpeedUnit: () => {},
 			routemateUpsertVehicleMinimalStmt: { run() {} },
 		};
-		const p = new Function(...PUSH_PROVIDED, "require", `${liftedPush.text}\nreturn { routemateSyncTelemetry, ingestLinxupPosition };`)(
+		const p = new Function(...PUSH_PROVIDED, "require", `${text}\nreturn { routemateSyncTelemetry, ingestLinxupPosition };`)(
 			...PUSH_PROVIDED.map((k) => pdeps[k]), appRequire);
 		return { sent, fuelChecks, geofenceAsks, p };
 	};
@@ -239,8 +243,8 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 		fixMs, routeCalls, poiCalls, db,
 		// Each returns the socket sends; `.ingest` adds the low-fuel checks and
 		// geofence asks the same round made.
-		poll: async (live) => { const r = pushes(live); await r.p.routemateSyncTelemetry(); return Object.assign(r.sent, { ingest: r }); },
-		linxup: async (pos) => { const r = pushes([]); await r.p.ingestLinxupPosition(pos); return Object.assign(r.sent, { ingest: r }); },
+		poll: async (live, text) => { const r = pushes(live, text); await r.p.routemateSyncTelemetry(); return Object.assign(r.sent, { ingest: r }); },
+		linxup: async (pos, text) => { const r = pushes([], text); await r.p.ingestLinxupPosition(pos); return Object.assign(r.sent, { ingest: r }); },
 		approach: () => fns.approachStopsFor("T-200", PICKUP.lat, PICKUP.lng),
 		latest: async () => {
 			const r = await call("/api/locations/latest", { session: { user: { role: "Super Admin", username: "admin_test" } } });
@@ -574,6 +578,33 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		ok("§10 ...one after it: both, as before", fuel === 1 && geo >= 1 && after.ingest.geofenceAsks[0].loadId === "T-200", checks(after));
 		const stored = w.db.prepare("SELECT COUNT(*) AS n FROM routemate_telemetry WHERE routemate_vehicle_id = ?").get(DEVICE).n;
 		ok("§10 ...and both fixes are stored", stored === 2, stored);
+	}
+
+	// ══ §11 the ping's own time and the loads asked, to the geofence ═════════
+	// The arrival recorder stores both on a geofence "At Shipper" row
+	// (lib/arrival-recorder.js): when the truck was there, and whether another
+	// of the loads asked at that ping was under way.
+	console.log("§11 the ping's time and the loads asked");
+	const DROP_ARGS = [/\n\t*fixMs: t\._fixMs, candidates,/, /\n\t*fixMs: pos\.location_date_ms \|\| Date\.now\(\), candidates: driverActiveLoads,/];
+	const CANDIDATES = [{ loadId: "T-200", status: "In Transit" }];
+	const asks = (sent) => sent.ingest.geofenceAsks.map((a) => [a.loadId, a.fixMs, a.candidates]);
+	const askedWith = async (via, text) => {
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const ping = via === "poll" ? live(70 * 1000, PICKUP) : linxupPos(70 * 1000, PICKUP);
+		const sent = via === "poll" ? await w.poll([ping], text) : await w.linxup(ping, text);
+		return JSON.stringify(asks(sent)) === JSON.stringify([["T-200", ping.location_date_ms, CANDIDATES]]) ? true : asks(sent);
+	};
+	const pollAsk = await askedWith("poll");
+	ok("§11 the poller asks with the ping's own time (70 s old) and the loads it asks, with their statuses", pollAsk === true, pollAsk);
+	const linxupAsk = await askedWith("linxup");
+	ok("§11 the Linxup webhook does the same", linxupAsk === true, linxupAsk);
+	const anchored = DROP_ARGS.every((re) => re.test(SRC));
+	ok("§11 (anchor) both position paths pass them", anchored);
+	if (anchored) {
+		const mutant = closure(DROP_ARGS.reduce((s, re) => s.replace(re, ""), SRC), {
+			roots: ["routemateSyncTelemetry", "ingestLinxupPosition"], provided: PUSH_PROVIDED, denied: ["server", "transporter", "sendEmail"],
+		});
+		ok("§11 MUTANT both paths dropping them: caught", (await askedWith("poll", mutant.text)) !== true && (await askedWith("linxup", mutant.text)) !== true);
 	}
 })().then(() => {
 	if (failures.length) {

@@ -297,6 +297,7 @@
       :preview="previewData"
       :pod-url="podUrl"
       :already-drafted="!!approvedDraft"
+      :before-approve="autoMode === 'on' ? beforeApproveDraft : null"
       @update:open="v => { previewOpen = v }"
       @approved="onDraftApproved"
     />
@@ -311,14 +312,14 @@
           <p v-if="autoSettingsProblem" class="auto-settings-problem" role="alert">{{ autoSettingsProblem }}</p>
           <label class="auto-settings-label" for="auto-confirmed">Confirmed broker domains</label>
           <p class="auto-settings-help">A broker other than Bison gets an automatic draft only when its Email on Job Tracking is on one of these domains, and only to its rate con's billing email on the same domain. Free mail can't be confirmed. One domain per line, such as example-broker.com.</p>
-          <textarea id="auto-confirmed" v-model="autoConfirmedText" rows="4" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading" />
+          <textarea id="auto-confirmed" v-model="autoConfirmedText" rows="4" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading || !autoSettingsRead" />
           <label class="auto-settings-label" for="auto-opt-out">Brokers left out</label>
           <p class="auto-settings-help">Loads for these domains, and their subdomains, are never drafted automatically: invoice them by hand.</p>
-          <textarea id="auto-opt-out" v-model="autoOptOutText" rows="3" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading" />
+          <textarea id="auto-opt-out" v-model="autoOptOutText" rows="3" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading || !autoSettingsRead" />
           <p v-if="autoSettingsError" class="auto-settings-error" role="alert">{{ autoSettingsError }}</p>
           <div class="auto-settings-actions">
             <button type="button" class="cl-clear" @click="autoSettingsOpen = false">Cancel</button>
-            <button type="button" class="cl-download" :disabled="autoSettingsLoading || autoSettingsSaving" @click="saveAutoSettings">{{ autoSettingsSaving ? 'Saving…' : 'Save' }}</button>
+            <button type="button" class="cl-download" :disabled="!autoSettingsCanSave" @click="saveAutoSettings">{{ autoSettingsSaving ? 'Saving…' : 'Save' }}</button>
           </div>
         </div>
       </DialogContent>
@@ -348,7 +349,7 @@ import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain } from '../../lib/autoInvoiceStatus'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -945,6 +946,21 @@ async function onDraftApproved(payload) {
     approvedDraft.value = r.draft || null
   } catch { /* keep the success banner even if the refresh fails */ }
 }
+// The preview's Approve while real automatic drafts are on: the job may have
+// drafted this load since its dialog opened, so the latest draft is read again
+// and one made meanwhile needs a yes (recheckLoadDrafts()).
+async function beforeApproveDraft() {
+  if (!auth.isSuperAdmin || !loadIdValue.value) return { go: false, asked: false }
+  const lid = loadIdValue.value
+  const r = await recheckLoadDrafts({
+    known: approvedDraft.value,
+    readLatest: async () => (await api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`)).draft || null,
+    confirm: (text) => window.confirm(text),
+  })
+  // The dialog's draft line then shows the draft made meanwhile, whatever the answer.
+  if (r.asked && r.latest) approvedDraft.value = r.latest
+  return r
+}
 
 // --- Automatic invoice drafts (Super Admin only) -----------------------------
 const selectedAutoChip = computed(() => autoChip(selectedJob.value))
@@ -977,8 +993,11 @@ const autoSettingsLoading = ref(false)
 const autoSettingsSaving = ref(false)
 const autoSettingsError = ref('')
 const autoSettingsProblem = ref('')
+// True once this opening's read worked: Save and the lists wait for it.
+const autoSettingsRead = ref(false)
 const autoConfirmedText = ref('')
 const autoOptOutText = ref('')
+const autoSettingsCanSave = computed(() => canSaveAutoSettings({ read: autoSettingsRead.value, loading: autoSettingsLoading.value, saving: autoSettingsSaving.value }))
 const autoModeText = computed(() => (autoMode.value === 'on'
   ? 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
   : 'Shadow: it records what it would draft, and drafts nothing.'))
@@ -987,12 +1006,16 @@ const domainList = (text) => String(text || '').split(/[\s,;]+/).filter(Boolean)
 async function openAutoSettings() {
   if (!auth.isSuperAdmin || autoSettingsLoading.value) return
   autoSettingsOpen.value = true; autoSettingsError.value = ''; autoSettingsProblem.value = ''; autoSettingsLoading.value = true
+  // Nothing from an earlier opening is kept: lists saved without this read would
+  // replace the stored ones (the opt-outs among them).
+  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''
   try {
     const s = await api.get('/api/auto-invoice/settings')
     autoConfirmedText.value = (s.confirmedBrokerDomains || []).join('\n')
     autoOptOutText.value = (s.optOutDomains || []).join('\n')
     if (s.unreadable) autoSettingsProblem.value = AUTO_INVOICE_REASONS.SETTINGS_UNREADABLE.text
     else if (Array.isArray(s.dropped) && s.dropped.length) autoSettingsProblem.value = `Ignored until saved again: ${s.dropped.map((x) => x.domain).join(', ')}.`
+    autoSettingsRead.value = true
   } catch (e) {
     autoSettingsError.value = (e && e.message) || 'The settings could not be read.'
   } finally {
@@ -1000,7 +1023,7 @@ async function openAutoSettings() {
   }
 }
 async function saveAutoSettings() {
-  if (!auth.isSuperAdmin || autoSettingsSaving.value) return
+  if (!auth.isSuperAdmin || !canSaveAutoSettings({ read: autoSettingsRead.value, loading: autoSettingsLoading.value, saving: autoSettingsSaving.value })) return
   autoSettingsSaving.value = true; autoSettingsError.value = ''
   try {
     await api.put('/api/auto-invoice/settings', { confirmedBrokerDomains: domainList(autoConfirmedText.value), optOutDomains: domainList(autoOptOutText.value) })

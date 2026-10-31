@@ -123,7 +123,7 @@ Don't just complain — be specific. Check:
 
 1. **Are all your loads listed?** Count them, compare to what you remember.
 2. **Are the active days right?** For daily-rate pay, count the calendar days each load actually spanned.
-3. **Are the rates right?** For owner-op, compare to what the rate con showed for each load.
+3. **Are the rates right?** For a percentage driver, compare to what the rate con showed for each load.
 
 Then message dispatch with the specifics. "Load LD-3492 ran Mon-Wed but invoice shows 2 days, should be 3" is easy to verify and fix.
 

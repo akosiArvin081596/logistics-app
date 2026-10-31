@@ -18,6 +18,22 @@
 // §2 is the guard the whole design rests on: a blind retry would turn a
 // genuinely unsettleable template into a doubled 60 s hang in production.
 //
+// Chromium's controls (lib/pdf-browser.js), each in a child process of its own
+// with the normal navigation budget:
+//   §3  the render check: with the request allowlist and the fixed environment
+//       on, a payout statement, a broker invoice and every onboarding and
+//       invoice template render on made-up data with no request refused; a
+//       control page's loopback stylesheet and image are refused, logged by
+//       host name only, and never reach their server.
+//   §4  the render comparison: one statement and one invoice, rendered with
+//       the controls off and on, have the same pages, the same text on each
+//       page, the same fonts by name and type, the same embedded font files,
+//       and the same glyphs drawn within 0.001 em (Chromium moves a variable
+//       web font's glyphs by less from render to render, controls off or on;
+//       scripts/lib/pdf-text.js). Chromium's own sandbox is left off
+//       here: it changes isolation, not layout, and its render is proven where
+//       its account and profile exist.
+//
 // ⚠️ EVERY SECTION ASSERTS ON THE MODULE'S OWN RETRY/NO-RETRY DECISION, NOT ON
 // WALL-CLOCK. Elapsed time is reported, and bounded only in §1/§2 where the
 // bound is a genuine property of the design (one budget vs two) rather than a
@@ -246,8 +262,150 @@ async function main() {
 	await new Promise((r) => holding.close(r));
 	await shutdownBrowser();
 
+	await controlsSections();
+
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
+}
+
+// ── §3 and §4: Chromium's controls, each mode in a child process ─────────────
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+const ROOT = path.join(__dirname, "..");
+
+// Made-up documents: one investor statement, one broker invoice.
+const CHILD_SRC = `"use strict";
+const fs = require("fs");
+const path = require("path");
+const [root, outDir, mode, controlPort] = process.argv.slice(2);
+const lines = [];
+for (const k of ["log", "warn", "error"]) {
+	const orig = console[k].bind(console);
+	console[k] = (...a) => { lines.push(a.map(String).join(" ")); orig(...a); };
+}
+const { renderHtmlToPdf, shutdownBrowser } = require(path.join(root, "lib", "pdf-browser.js"));
+const { buildPayoutStatementHtml } = require(path.join(root, "lib", "payout-statement.js"));
+const { buildInvoiceHtml } = require(path.join(root, "lib", "broker-invoice.js"));
+const { renderPolicy, prepareTemplateHtml } = require(path.join(root, "lib", "policy-renderer.js"));
+const STATEMENT = {
+	investorName: "Made-Up Investor", investorCompany: "Made-Up Holdings LLC", period: "2026-06", periodLabel: "June 2026",
+	statementNo: "202606-7", generatedAt: new Date("2026-08-14T17:00:00Z"),
+	status: "paid", paidAt: "2026-07-31T15:00:00.000Z", paidBy: "made-up-admin", dueDate: "2026-07-31",
+	breakdown: { revenue: 35161.76, driverPay: 9000, fixedCosts: 6149.16, tripExpenses: 2431.72, maintFundCost: 0, complianceCost: 0, netProfit: 17580.88, splitPct: 50, monthShare: 8790 },
+	lossCarriedIn: 0, lossDeferred: 0, adjustment: 0, amount: 8790, effectiveAmount: 8790,
+	detail: {
+		revenueLoads: [{ loadId: "MADE-UP-1", date: "2026-06-03", driver: "Driver One", truck: "91", pickup: "Laredo, TX", dropoff: "Irving, TX", amount: 20161.76 }],
+		driverPayRows: [{ driver: "Driver One", payType: "daily", activeDays: 20, dailyRate: 250, pay: 5000 }],
+		fixedCostItems: [{ truck: "91", insurance: 1800, eld: 45, truckPayment: 3800, irp: 300.16, hvut: 204, total: 6149.16 }],
+		tripExpenseItems: [{ date: "2026-06-05", type: "Fuel", description: "Diesel", driver: "Driver One", city: "Laredo", state: "TX", truck: "91", amount: 1931.72 }],
+	},
+};
+const INVOICE = {
+	invoiceId: "MADE-UP-INV-1", invoiceDate: "09/30/2026", brokerName: "Acme Freight",
+	invoiceTo: { name: "Acme Freight", email: "ap@example.test" }, orderNumber: "ORD-1", poNumber: "", deliveryDate: "09/29/2026", total: "$1,500.00",
+};
+(async () => {
+	const save = (name, pdf) => fs.writeFileSync(path.join(outDir, name + ".pdf"), pdf);
+	save("statement", await renderHtmlToPdf(buildPayoutStatementHtml(STATEMENT)));
+	save("invoice", await renderHtmlToPdf(buildInvoiceHtml(INVOICE)));
+	const rendered = ["statement", "invoice"];
+	if (mode === "on") {
+		const keys = fs.readdirSync(path.join(root, "onboarding-templates", "policy")).filter((f) => f.endsWith(".html")).map((f) => f.slice(0, -5).replace(/-/g, "_")).sort();
+		for (const key of keys) {
+			try { prepareTemplateHtml(key, {}); } catch (e) { if (/Unknown onboarding doc/.test(e.message)) continue; throw e; }
+			save("policy-" + key, await renderPolicy(key, {}));
+			rendered.push("policy-" + key);
+		}
+		lines.push("--- control page ---");
+		await renderHtmlToPdf('<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="http://127.0.0.1:' + controlPort + '/made-up.css"></head><body><p>control</p><img src="http://127.0.0.1:' + controlPort + '/made-up.png"></body></html>');
+	}
+	await shutdownBrowser();
+	fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify({ rendered, lines }));
+	process.exit(0);
+})().catch((e) => { fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify({ error: String(e && e.stack || e), lines })); process.exit(1); });
+`;
+
+function renderIn(mode, outDir, childFile, controlPort, extraEnv) {
+	return new Promise((resolve) => {
+		const env = { ...process.env };
+		delete env.PDF_NAV_TIMEOUT_MS; // the child keeps the app's own budget
+		for (const k of ["CHROMIUM_UNPRIVILEGED_ENABLED", "CHROMIUM_REQUEST_ALLOWLIST_ENABLED", "CHROMIUM_SANDBOX_ENABLED", "CHROMIUM_RUN_AS"]) delete env[k];
+		Object.assign(env, extraEnv);
+		const child = spawn(process.execPath, [childFile, ROOT, outDir, mode, String(controlPort)], { env, stdio: ["ignore", "pipe", "pipe"] });
+		let out = "";
+		child.stdout.on("data", (d) => { out += d; });
+		child.stderr.on("data", (d) => { out += d; });
+		const timer = setTimeout(() => child.kill("SIGKILL"), 50000);
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			let result = null;
+			try { result = JSON.parse(fs.readFileSync(path.join(outDir, "result.json"), "utf8")); } catch { /* reported by the caller */ }
+			resolve({ code, out, result });
+		});
+	});
+}
+
+async function controlsSections() {
+	const { pdfReport, compareRenders, GLYPH_TOLERANCE_EM } = require("./lib/pdf-text");
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-pdf-controls-"));
+	const childFile = path.join(tmp, "render-child.js");
+	fs.writeFileSync(childFile, CHILD_SRC);
+	const offDir = path.join(tmp, "off");
+	const onDir = path.join(tmp, "on");
+	fs.mkdirSync(offDir);
+	fs.mkdirSync(onDir);
+	// The control page's server: anything that reaches it went past the allowlist.
+	const reached = [];
+	const control = http.createServer((req, res) => { reached.push(req.url); res.writeHead(200, { "Content-Type": "text/css" }).end(""); });
+	await new Promise((r) => control.listen(0, "127.0.0.1", r));
+	const port = control.address().port;
+	try {
+		const [off, on] = await Promise.all([
+			renderIn("off", offDir, childFile, port, {}),
+			renderIn("on", onDir, childFile, port, { CHROMIUM_UNPRIVILEGED_ENABLED: "true", CHROMIUM_REQUEST_ALLOWLIST_ENABLED: "true" }),
+		]);
+
+		console.log(`\n§3  the render check: the request allowlist with a real Chromium`);
+		ok(on.code === 0 && on.result && !on.result.error, "every document rendered with the controls on", on.result && on.result.error ? on.result.error.split("\n")[0] : `exit ${on.code}`);
+		const rendered = (on.result && on.result.rendered) || [];
+		ok(rendered.length >= 4 && rendered.some((r) => r.startsWith("policy-service_invoice")), "the statement, the invoice and the onboarding and invoice templates", rendered.join(", "));
+		const lines = (on.result && on.result.lines) || [];
+		const cut = lines.indexOf("--- control page ---");
+		const before = cut >= 0 ? lines.slice(0, cut) : lines;
+		const after = cut >= 0 ? lines.slice(cut + 1) : [];
+		const refusedBefore = before.filter((l) => l.includes("request allowlist"));
+		ok(refusedBefore.length === 0, "no request from any real template is refused", refusedBefore.join(" | ") || "none");
+		const refusedControl = after.filter((l) => l.includes("request allowlist"));
+		ok(refusedControl.length === 1 && /refused 2 request\(s\) to 127\.0\.0\.1$/.test(refusedControl[0]), "the control page's two loopback requests are refused, logged by host name", refusedControl.join(" | ") || "no line");
+		ok(!refusedControl.some((l) => /made-up\.(css|png)|https?:\/\//.test(l)), "the line carries no path or full address");
+		ok(reached.length === 0, "nothing reached the control page's server", reached.join(", ") || "nothing");
+
+		console.log(`\n§4  the render comparison: controls off against controls on`);
+		ok(off.code === 0 && off.result && !off.result.error, "every document rendered with the controls off", off.result && off.result.error ? off.result.error.split("\n")[0] : `exit ${off.code}`);
+		for (const name of ["statement", "invoice"]) {
+			let a = null;
+			let b = null;
+			try {
+				a = await pdfReport(fs.readFileSync(path.join(offDir, `${name}.pdf`)));
+				b = await pdfReport(fs.readFileSync(path.join(onDir, `${name}.pdf`)));
+			} catch (e) {
+				ok(false, `${name}: both PDFs read`, e.message);
+				continue;
+			}
+			// scripts/lib/pdf-text.js's comparison: nothing holds by being empty
+			// (scripts/test-pdf-text.js pins it on made-up PDFs).
+			const diff = compareRenders(a, b);
+			ok(diff.pages === null, `${name}: the same number of pages`, diff.pages || `${a.pages.length} page(s)`);
+			ok(diff.text === null, `${name}: the same text on every page`, diff.text || `${a.pages.reduce((n, t) => n + t.length, 0)} glyphs`);
+			ok(diff.fonts === null, `${name}: the same embedded fonts, by name and type, and the same glyphs within ${GLYPH_TOLERANCE_EM} em`, diff.fonts || `${a.fonts.length}: ${a.fonts.map((f) => f.replace(/ #[0-9a-f]{12}$/, "")).join(", ")}`);
+			ok(diff.drawing === null, `${name}: neither text nor fonts would mean comparing what the pages draw`, diff.drawing || "not needed");
+		}
+	} finally {
+		await new Promise((r) => control.close(r));
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
 }
 
 main().catch(async (e) => {
