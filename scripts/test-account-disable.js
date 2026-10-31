@@ -275,6 +275,7 @@ function makeDb() {
 		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, user_id INTEGER);
 		CREATE TABLE driver_onboarding (id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT DEFAULT '');
 		CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY, user_id INTEGER);
+		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY, user_id INTEGER);
 		CREATE TABLE investor_config (id INTEGER PRIMARY KEY, owner_id INTEGER);
 		CREATE TABLE investors (id INTEGER PRIMARY KEY, user_id INTEGER);
 	`);

@@ -28,6 +28,11 @@
 // child statements and is required to fail with a FOREIGN KEY error — that is
 // the assertion that fails against origin/main.
 //
+// A fourth FK child, driver_emergency_contacts (FOREIGN KEY ... ON DELETE
+// CASCADE), is deleted explicitly in the same transaction so the audit line
+// counts it; the EMERGENCY CONTACTS section proves both, with a mutant that
+// drops the explicit DELETE.
+//
 // No network, no app.db, no server. Files are written only under a fresh
 // mkdtemp.
 //
@@ -132,6 +137,24 @@ function runCascade(db, user, name, id, body = CASCADE) {
 }
 
 // ---------------------------------------------------------------- scratch DB
+// driver_emergency_contacts from server.js's own CREATE text. Before the table
+// existed, the shape it was planned with, so every other section runs the same
+// on the old code and only the EMERGENCY CONTACTS section fails there.
+const PLANNED_CONTACTS_DDL = `CREATE TABLE IF NOT EXISTS driver_emergency_contacts (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL,
+	contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL,
+	created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+	created_by INTEGER NOT NULL DEFAULT 0, updated_by INTEGER NOT NULL DEFAULT 0,
+	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`;
+function shippedContactsDdl() {
+	const at = SRC.indexOf("CREATE TABLE IF NOT EXISTS driver_emergency_contacts (");
+	if (at < 0) return null;
+	const open = SRC.lastIndexOf("db.exec(`", at);
+	const close = SRC.indexOf("`);", at);
+	return open < 0 || close < 0 ? null : SRC.slice(open + "db.exec(`".length, close);
+}
+const SHIPPED_CONTACTS_DDL = shippedContactsDdl();
+
 // The real schema for every table the cascade touches, including the three
 // FOREIGN KEY declarations verbatim — they are the whole point.
 function scratch() {
@@ -166,6 +189,7 @@ function scratch() {
 		CREATE TABLE investor_config (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER);
 		CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
 	`);
+	db.exec(SHIPPED_CONTACTS_DDL || PLANNED_CONTACTS_DDL);
 	return db;
 }
 
@@ -321,6 +345,76 @@ function seedOnboardedDriver(db) {
 	const { removed } = runCascade(db, { id: 12, username: "inv_t", role: "Investor" }, "inv_t", 12);
 	check("an ordinary account's messages still leave with it", removed.messages, 1);
 	db.close();
+}
+
+// ---------------------------------------------------------------------------
+// EMERGENCY CONTACTS — the fourth FK child, deleted explicitly so the audit
+// line counts it. ON DELETE CASCADE would remove the rows anyway, which is why
+// the mutant below is graded on the count, not on the rows.
+// ---------------------------------------------------------------------------
+{
+	check("contacts: server.js creates driver_emergency_contacts with ON DELETE CASCADE",
+		!!SHIPPED_CONTACTS_DDL && /FOREIGN KEY \(user_id\) REFERENCES users\(id\) ON DELETE CASCADE/.test(SHIPPED_CONTACTS_DDL), true);
+	check("contacts: the cascade deletes them explicitly",
+		/removed\.driver_emergency_contacts = db\.prepare\("DELETE FROM driver_emergency_contacts WHERE user_id = \?"\)\.run\(id\)\.changes;/.test(CASCADE), true);
+	// The delete_user audit line's tally, as the route writes it.
+	const tallyLine = (SRC.match(/^\tconst tally = \(obj\) => .*;$/m) || [])[0];
+	check("contacts: the route's tally was lifted", !!tallyLine, true);
+	const tally = tallyLine ? new Function(`${tallyLine.trim()}\nreturn tally;`)() : () => "";
+	const named = (removed) => tally(removed).split(", ").filter((t) => t.startsWith("driver_emergency_contacts="));
+	const addContacts = (db, userId, rows) => {
+		const add = db.prepare(`INSERT INTO driver_emergency_contacts (user_id, position, contact_name, relationship, contact_phone, created_at, updated_at, created_by, updated_by)
+			VALUES (?, ?, ?, ?, ?, '2026-10-30T00:00:00.000Z', '2026-10-30T00:00:00.000Z', ?, ?)`);
+		rows.forEach(([name, relationship, phone], i) => add.run(userId, i + 1, name, relationship, phone, userId, userId));
+	};
+	const left = (db, userId) => db.prepare("SELECT COUNT(*) AS c FROM driver_emergency_contacts WHERE user_id = ?").get(userId).c;
+	// The onboarded driver (7) with two contacts, and another driver (8) with two.
+	const world = () => {
+		const db = scratch();
+		const user = seedOnboardedDriver(db);
+		db.prepare("INSERT INTO users (id, username, driver_name, full_name, role) VALUES (8,'rsample','Robin Sample','Robin Sample','Driver')").run();
+		addContacts(db, 7, [["Quinn Example", "Spouse", "+12025550143"], ["Harper Example", "Parent", "+13125550178"]]);
+		addContacts(db, 8, [["Morgan Placeholder", "Sibling", "+15125550147"], ["Avery Madeup", "Friend", "+15125550148"]]);
+		return { db, user };
+	};
+	{
+		const { db, user } = world();
+		const { removed, threw } = runCascade(db, user, "soren king", 7);
+		check("contacts: the delete completes", threw, null);
+		check("contacts: removed.driver_emergency_contacts is the deleted driver's two", removed.driver_emergency_contacts, 2);
+		check("contacts: none of his remain, the other driver's two do", [left(db, 7), left(db, 8)], [0, 2]);
+		check("contacts: the delete_user tally names the count", named(removed), ["driver_emergency_contacts=2"]);
+		db.close();
+	}
+	{
+		// Contacts but no onboarding rows (staff added them to a driver who never
+		// went through onboarding here): still deletable, still counted.
+		const db = scratch();
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (9,'jtwin','Jamie Twin','Driver')").run();
+		addContacts(db, 9, [["Jordan Placeholder", "Friend", "+442079460958"], ["Riley Fixture", "Relative", "+15125550149"]]);
+		const { removed, threw } = runCascade(db, { id: 9, username: "jtwin", driver_name: "Jamie Twin", role: "Driver" }, "jamie twin", 9);
+		check("contacts: a driver never onboarded here, with contacts: deleted and counted", [threw, removed.driver_emergency_contacts, left(db, 9)], [null, 2, 0]);
+		db.close();
+	}
+	{
+		// A user without contacts: the DELETE is a no-op and the tally says nothing.
+		const db = scratch();
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (10,'pdispatch','','Dispatcher')").run();
+		const { removed, threw } = runCascade(db, { id: 10, username: "pdispatch", driver_name: "", role: "Dispatcher" }, "pdispatch", 10);
+		check("contacts: none on file: a no-op, not in the tally", [threw, removed.driver_emergency_contacts, named(removed)], [null, 0, []]);
+		db.close();
+	}
+	{
+		// MUTANT: the explicit DELETE dropped. The FK cascade still removes the
+		// rows, so only the audit line's count can tell, and it must.
+		const noDelete = CASCADE.replace(/[ \t]*removed\.driver_emergency_contacts = [^\n]*\n/, "");
+		check("contacts mutant: the explicit DELETE was removed", noDelete !== CASCADE && !/DELETE FROM driver_emergency_contacts/.test(noDelete), true);
+		const { db, user } = world();
+		const m = runCascade(db, user, "soren king", 7, noDelete);
+		check("contacts mutant: the delete still completes and the rows still go (the FK cascade)", [m.threw, left(db, 7), left(db, 8)], [null, 0, 2]);
+		check("contacts mutant is caught: the tally no longer names them", named(m.removed), []);
+		db.close();
+	}
 }
 
 // ---------------------------------------------------------------------------
