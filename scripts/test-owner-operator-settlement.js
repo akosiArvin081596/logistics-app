@@ -9,15 +9,19 @@
  *   §3 rounding half away from zero; dollars to cents (null when unreadable)
  *   §4 Saturday keys; a stamp's day on the business clock (an evening completion)
  *   §5 the first settlement week: the earlier of onboarding and the first load,
- *      never before the profile's week; the list of loads before it; the chain
- *      fixes it; where a receipt goes
+ *      never before the profile's week; the list of loads before that week; his
+ *      earliest settlement's first week stays, whatever week it was for (week 1
+ *      skipped, its loads cancelled), and nothing settled is charged again; a load
+ *      found late lands on the next settlement; where a receipt goes
  *   §6 the truck: the in-service date at onboarding, in-service weeks, weekly
  *      insurance and ELD from monthly amounts, skipped and pre-first weeks
  *   §7 the owner's example and Appendix B weeks 1-5 to the cent, a pay change, the final
  *      settlement with the escrow flag off, a partner source
  *   §8 the cases: short week, escrow start and cap, rejected receipt, removed
- *      load, installment default written once, escrow uses, the final's
- *      onboarding balance, the hold's dates, refusals
+ *      load (and nothing repeats the week after), installment default written
+ *      once, an overpaid onboarding balance returned, escrow uses, the final's
+ *      onboarding balance, the hold's dates, refusals (a settled load whose pay
+ *      turns unreadable)
  *   §9 the investor-ledger test inputs
  *   §10 validators
  *   §11 the schema: eight tables and two columns, their checks, run by server.js
@@ -131,20 +135,23 @@ function appendixBWorld(opts = {}) {
 function generate(L, world, weekStart, { asOf, final = false } = {}) {
 	let result;
 	try { result = buildWeek(L, world, weekStart, asOf, final); } catch (err) { result = { ok: false, code: "THREW", error: err.message }; }
-	if (result && result.ok) world.settlements.push({ weekStart, lines: result.lines, final });
+	if (result && result.ok) world.settlements.push({ weekStart, firstWeekStart: result.firstWeekStart, lines: result.lines, final });
 	return result;
 }
 
-// One week, as the server will run it: every input read, then the builder.
+// One week, as the server will run it: every input read, then the builder. Each
+// settlement keeps the first week it was built with, as its row will.
 function buildWeek(L, world, weekStart, asOf, final) {
 	const seen = (items) => items.filter((i) => !i.filedOn || i.filedOn <= asOf);
 	const liveLines = world.settlements.flatMap((s) => s.lines);
-	const chainStartWeek = world.settlements.length ? world.settlements[0].weekStart : "";
-	const win = L.ooFirstSettlementWeek({ profileCreatedAt: world.createdAt, onboardedAt: world.onboardedAt, loads: seen(world.loads), chainStartWeek, timeZone: TZ });
+	const earliest = world.settlements.length ? world.settlements[0] : null;
+	const win = L.ooFirstSettlementWeek({ profileCreatedAt: world.createdAt, onboardedAt: world.onboardedAt, loads: seen(world.loads),
+		earliestSettlement: earliest && { weekStart: earliest.weekStart, firstWeekStart: earliest.firstWeekStart }, timeZone: TZ });
+	world.lastWindow = win;
 	const settled = L.ooSettledFromLines(liveLines);
 	const receipts = seen(world.receipts);
-	const split = L.ooSplitReceipts(receipts, win);
-	const pre = L.ooPreFirstWeekTruckCharges({ floorWeekStart: win.floorWeekStart, firstWeekStart: win.firstWeekStart, links: world.links });
+	const split = L.ooSplitReceipts(receipts, win, settled.receipts);
+	const pre = L.ooPreFirstWeekTruckCharges({ floorWeekStart: win.floorWeekStart, firstWeekStart: win.firstWeekStart, links: world.links, chargedRefs: settled.weekly });
 	const onboardingLeftCents = L.ooOnboardingLeftCents({
 		chargeCents: L.ooOnboardingChargeCents(world.charges),
 		receiptCents: sum(split.onboarding.map((r) => r.cents)),
@@ -280,18 +287,19 @@ function firstWeekSection(c, L) {
 	// An older load under his name (a deleted account's, a namesake's) is never his to settle.
 	const old = L.ooFirstSettlementWeek({ ...base, loads: [{ ref: "qa-oo-old", day: "2026-10-20" }, { ref: "qa-oo-1", day: "2026-11-09" }] });
 	c.eq("§5 a load dated before the profile's week never moves the first week", old.firstWeekStart, "2026-11-07");
-	c.eq("§5 ...and goes on the safety-net list", (old.beforeFirstWeek || []).map((l) => l.ref), ["qa-oo-old"]);
+	c.eq("§5 ...and goes on the safety-net list", (old.beforeFloor || []).map((l) => l.ref), ["qa-oo-old"]);
 	const reused = L.ooFirstSettlementWeek({ ...base, onboardedAt: "2026-08-01T15:00:00.000Z", loads: [] });
 	c.eq("§5 an onboarding stamp older than the profile never sets an earlier week", reused.firstWeekStart, "2026-10-31");
 	const none = L.ooFirstSettlementWeek({ ...base, onboardedAt: "", loads: [] });
 	c.eq("§5 no onboarding and no load: no first week yet", pick(none, ["ok", "firstWeekStart"]), [true, ""]);
 	const onlyOld = L.ooFirstSettlementWeek({ ...base, onboardedAt: "", loads: [{ ref: "qa-oo-old", day: "2026-10-20" }] });
-	c.eq("§5 ...and an older load alone is listed, not settled", [onlyOld.firstWeekStart, (onlyOld.beforeFirstWeek || []).map((l) => l.ref)], ["", ["qa-oo-old"]]);
+	c.eq("§5 ...and an older load alone is listed, not settled", [onlyOld.firstWeekStart, (onlyOld.beforeFloor || []).map((l) => l.ref)], ["", ["qa-oo-old"]]);
 	c.eq("§5 an unreadable profile date refuses", L.ooFirstSettlementWeek({ ...base, profileCreatedAt: "" }).code, "OO_PROFILE_DATE_UNREADABLE");
-	const chained = L.ooFirstSettlementWeek({ ...base, chainStartWeek: "2026-11-07", loads: [{ ref: "qa-oo-found", day: "2026-11-03" }, { ref: "qa-oo-1", day: "2026-11-09" }] });
-	c.eq("§5 once a live settlement exists, its chain fixes the first week", chained.firstWeekStart, "2026-11-07");
-	c.eq("§5 ...and a load found later before it is listed", (chained.beforeFirstWeek || []).map((l) => l.ref), ["qa-oo-found"]);
-	c.eq("§5 a chain week that is not a Saturday refuses", L.ooFirstSettlementWeek({ ...base, chainStartWeek: "2026-11-08", loads: [] }).code, "OO_CHAIN_WEEK_UNREADABLE");
+	const chained = L.ooFirstSettlementWeek({ ...base, earliestSettlement: { weekStart: "2026-11-14", firstWeekStart: "2026-11-07" },
+		loads: [{ ref: "qa-oo-found", day: "2026-11-03" }, { ref: "qa-oo-old", day: "2026-10-20" }, { ref: "qa-oo-1", day: "2026-11-09" }] });
+	c.eq("§5 once a live settlement exists, the first week it was built with stays (not its own week)", chained.firstWeekStart, "2026-11-07");
+	c.eq("§5 ...and only a load from before the profile's week is listed", (chained.beforeFloor || []).map((l) => l.ref), ["qa-oo-old"]);
+	c.eq("§5 an earliest settlement with no readable first week refuses", L.ooFirstSettlementWeek({ ...base, earliestSettlement: { weekStart: "2026-11-07", firstWeekStart: "2026-11-08" }, loads: [] }).code, "OO_CHAIN_WEEK_UNREADABLE");
 	const evening = L.ooFirstSettlementWeek({ ...base, onboardedAt: "2026-11-14T03:30:00.000Z", loads: [] });
 	c.eq("§5 a Friday-evening completion (Saturday in UTC) starts that Friday's week", evening.firstWeekStart, "2026-11-07");
 	const undated = L.ooFirstSettlementWeek({ ...base, loads: [{ ref: "qa-oo-x", day: "" }] });
@@ -303,6 +311,44 @@ function firstWeekSection(c, L) {
 	c.eq("§5 ...one from his first week on is settled", split.settlement.map((r) => r.ref), ["e3"]);
 	c.eq("§5 ...and one with an unreadable date is listed apart", split.undated.map((r) => r.ref), ["e4"]);
 	c.eq("§5 with no first week yet, a receipt after the floor waits in the onboarding balance", L.ooPlaceDay("2026-11-09", { floorWeekStart: "2026-10-31", firstWeekStart: "" }), "onboarding");
+	const settledSplit = L.ooSplitReceipts([{ ref: "e2", day: "2026-11-03" }], { floorWeekStart: "2026-10-31", firstWeekStart: "2026-11-14" }, new Map([["e2", 5000]]));
+	c.eq("§5 a receipt already on a live settlement line never joins his onboarding balance, whatever his first week",
+		[settledSplit.onboarding.map((r) => r.ref), settledSplit.settlement.map((r) => r.ref)], [[], ["e2"]]);
+}
+
+// His earliest settlement is not for his first week: week 1 was skipped, or the loads that
+// set the first week were cancelled after it settled. Nothing settled is charged again.
+function chainSection(c, L) {
+	const skipped = appendixBWorld();
+	const s2 = generate(L, skipped, "2026-11-14", { asOf: "2026-11-20" });
+	c.eq("§5 week 1 skipped: the first settlement, for week 2, takes weeks 1 and 2 with his first week", s2.ok ? [s2.firstWeekStart, s2.totals.loadCents, s2.totals.weeklyCents, s2.totals.onboardingLeftAfterCents] : s2,
+		["2026-11-07", 960000, 65000, 195000]);
+	skipped.receipts.push({ ref: "exp-150", day: "2026-11-10", cents: 4200, label: "Toll", filedOn: "2026-11-25" });
+	const s3 = generate(L, skipped, "2026-11-21", { asOf: "2026-11-27" });
+	c.eq("§5 ...the next one keeps that first week, not the settlement's own", skipped.lastWindow && skipped.lastWindow.firstWeekStart, "2026-11-07");
+	c.eq("§5 ...its onboarding balance is still $1,950.00", s3.ok ? s3.totals.installmentCents + s3.totals.onboardingLeftAfterCents : s3, 195000);
+	c.eq("§5 ...a late week-1 receipt lands on it with its own date", s3.ok ? s3.lines.filter((l) => l.ref === "exp-150").map((l) => [l.kind, l.lineDate, l.cents]) : s3, [["receipt", "2026-11-10", -4200]]);
+	c.eq("§5 ...and nothing settled is charged again", s3.ok ? s3.lines.filter((l) => ["exp-101", "exp-102", "exp-103", "ins:2026-11-07", "eld:2026-11-07", "ins:2026-11-14", "eld:2026-11-14"].includes(l.ref)).length : -1, 0);
+
+	const cancelled = appendixBWorld();
+	cancelled.onboardedAt = "2026-11-20T15:00:00.000Z";
+	generate(L, cancelled, "2026-11-07", { asOf: "2026-11-13" });
+	cancelled.loads = cancelled.loads.filter((l) => l.ref !== "qa-oo-1" && l.ref !== "qa-oo-2");
+	const c2 = generate(L, cancelled, "2026-11-14", { asOf: "2026-11-20" });
+	c.eq("§5 the loads that set his first week cancelled after they settled: the first week stays", cancelled.lastWindow && cancelled.lastWindow.firstWeekStart, "2026-11-07");
+	c.eq("§5 ...his onboarding balance stays $1,950.00 (week 1's receipts and truck week are not charged again)",
+		c2.ok ? c2.totals.installmentCents + c2.totals.onboardingLeftAfterCents : c2, 195000);
+	c.eq("§5 ...the cancelled loads are reversed", c2.ok ? c2.lines.filter((l) => l.kind === "load_change").map((l) => [l.ref, l.cents]) : c2, [["qa-oo-1", -350000], ["qa-oo-2", -400000]]);
+	c.eq("§5 ...and the safety-net list stays empty", ((cancelled.lastWindow && cancelled.lastWindow.beforeFloor) || []).map((l) => l.ref), []);
+
+	const late = appendixBWorld();
+	late.loads.push({ ref: "qa-oo-late", day: "2026-11-05", cents: 150000, label: "QA-OO-LATE", filedOn: "2026-11-16" });
+	generate(L, late, "2026-11-07", { asOf: "2026-11-13" });
+	const l2 = generate(L, late, "2026-11-14", { asOf: "2026-11-20" });
+	c.eq("§5 a load after his profile's week but before his first, found after his first settlement, lands on the next one",
+		l2.ok ? l2.lines.filter((l) => l.ref === "qa-oo-late").map((l) => [l.kind, l.lineDate, l.cents]) : l2, [["load", "2026-11-05", 150000]]);
+	c.eq("§5 ...with its fee, while his first week stays", l2.ok ? [l2.totals.loadCents, l2.totals.feeCents, late.lastWindow && late.lastWindow.firstWeekStart] : l2, [360000, 64800, "2026-11-07"]);
+	c.eq("§5 ...and it is never on the safety-net list", ((late.lastWindow && late.lastWindow.beforeFloor) || []).map((l) => l.ref), []);
 }
 
 // ── §6 ───────────────────────────────────────────────────────────────────────
@@ -323,6 +369,9 @@ function truckSection(c, L) {
 		{ cents: 32500, weeks: [{ weekStart: "2026-10-31", insuranceCents: 31000, eldCents: 1500 }] });
 	c.eq("§6 ...none when in service from his first week", L.ooPreFirstWeekTruckCharges({ floorWeekStart: "2026-10-31", firstWeekStart: "2026-11-07", links: [{ startWeekStart: "2026-10-31", endWeekStart: "", truck: TRUCK }] }).cents, 0);
 	c.eq("§6 ...and none before the profile's week", L.ooPreFirstWeekTruckCharges({ floorWeekStart: "2026-11-07", firstWeekStart: "2026-11-07", links: preLinks }).cents, 0);
+	c.eq("§6 a truck week a settlement already charged never joins his onboarding balance, whatever his first week",
+		L.ooPreFirstWeekTruckCharges({ floorWeekStart: "2026-10-31", firstWeekStart: "2026-11-14", links: preLinks, chargedRefs: new Set(["ins:2026-11-07", "eld:2026-11-07"]) }),
+		{ cents: 32500, weeks: [{ weekStart: "2026-10-31", insuranceCents: 31000, eldCents: 1500 }] });
 
 	const links = [{ startWeekStart: "2026-10-31", endWeekStart: "", truck: TRUCK }];
 	const skipped = L.ooWeeklyChargeLines({ weekStart: "2026-11-21", firstWeekStart: "2026-11-07", endWeekStart: "", links, charges: [], chargedRefs: new Set(["ins:2026-11-07", "eld:2026-11-07"]) });
@@ -374,6 +423,8 @@ function appendixBSection(c, L) {
 	const w6 = generate(L, world, "2026-12-12", { asOf: "2026-12-18" });
 	c.eq("§7 a lowered pay comes as its difference on the next settlement", w6.ok ? w6.lines.filter((l) => l.ref === "qa-oo-2").map((l) => [l.kind, l.cents, l.baseCents]) : w6, [["load_change", -3500, 396500]]);
 	c.eq("§7 ...and its fee, -$6.30, inside the week's fee", w6.ok ? [w6.totals.loadCents, w6.totals.feeCents] : w6, [96500, 18000 - 630]);
+	const w7 = generate(L, world, "2026-12-19", { asOf: "2026-12-25" });
+	c.eq("§7 ...and the change does not come again the week after", w7.ok ? [w7.lines.filter((l) => l.ref === "qa-oo-2").length, w7.totals.loadCents] : w7, [0, 0]);
 
 	const partner = appendixBWorld({ source: "partner" });
 	const pr = runAppendixB(L, partner);
@@ -432,6 +483,39 @@ function casesSection(c, L) {
 	c.eq("§8 a load removed after its settlement is reversed, and its fee given back", w3.ok ? [w3.lines.filter((l) => l.ref === "qa-oo-3").map((l) => [l.kind, l.cents]), w3.totals.feeCents] : w3,
 		[[["load_change", -210000]], 144000 - 37800]);
 	c.eq("§8 nothing settled is settled again", w3.ok ? w3.lines.filter((l) => ["qa-oo-1", "qa-oo-2", "exp-102", "exp-104"].includes(l.ref)).length : -1, 0);
+	const w4 = generate(L, world, "2026-11-28", { asOf: "2026-12-04" });
+	c.eq("§8 ...and the reversal and the credit do not come again the week after", w4.ok ? w4.lines.filter((l) => l.ref === "qa-oo-3" || l.ref === "exp-101").length : w4, 0);
+
+	// A settled load whose pay later reads unreadable or $0 stops the settlement; it is never reversed by accident.
+	const unread = appendixBWorld();
+	generate(L, unread, "2026-11-07", { asOf: "2026-11-13" });
+	unread.loads.find((l) => l.ref === "qa-oo-1").cents = null;
+	const u2 = generate(L, unread, "2026-11-14", { asOf: "2026-11-20" });
+	c.eq("§8 a settled load whose pay later reads unreadable stops the settlement, naming it", [u2.code, u2.refs], ["OO_SETTLEMENT_LOAD_NO_PAY", ["qa-oo-1"]]);
+	unread.loads.find((l) => l.ref === "qa-oo-1").cents = 0;
+	const z2 = generate(L, unread, "2026-11-14", { asOf: "2026-11-20" });
+	c.eq("§8 ...and so does one whose pay later reads $0.00", [z2.code, z2.refs], ["OO_SETTLEMENT_LOAD_NO_PAY", ["qa-oo-1"]]);
+
+	// An overpaid onboarding balance comes back on the next settlement.
+	const over = appendixBWorld();
+	over.receipts.push({ ref: "exp-pre", day: "2026-11-04", cents: 50000, label: "Repair" });
+	runAppendixB(L, over);
+	over.receipts = over.receipts.filter((r) => r.ref !== "exp-pre");
+	const o6 = generate(L, over, "2026-12-12", { asOf: "2026-12-18" });
+	c.eq("§8 an onboarding receipt rejected after installments paid it: the next settlement returns the $500.00",
+		o6.ok ? o6.lines.filter((l) => l.kind === "installment").map((l) => [l.cents, l.label]) : o6, [[50000, "Onboarding balance overpaid, returned"]]);
+	c.eq("§8 ...leaving his onboarding balance at $0", o6.ok ? o6.totals.onboardingLeftAfterCents : o6, 0);
+	const o7 = generate(L, over, "2026-12-19", { asOf: "2026-12-25" });
+	c.eq("§8 ...and nothing more comes back the week after", o7.ok ? o7.lines.filter((l) => l.kind === "installment").length : o7, 0);
+	const truckOver = appendixBWorld({ installmentStored: 400000 });
+	truckOver.links[0].truck.in_service_date = "2026-11-02";
+	for (const w of ["2026-11-07", "2026-11-14", "2026-11-21"]) generate(L, truckOver, w, { asOf: L.ooWeekEnd(w) });
+	truckOver.links[0].truck.in_service_date = "2026-11-07";
+	const t4 = generate(L, truckOver, "2026-11-28", { asOf: "2026-12-04" });
+	c.eq("§8 a truck week that drops out of a paid onboarding balance comes back on the next settlement",
+		t4.ok ? t4.lines.filter((l) => l.kind === "installment").map((l) => [l.cents, l.label]) : t4, [[32500, "Onboarding balance overpaid, returned"]]);
+	c.eq("§8 ...and the final settlement returns an overpaid balance too", pick(mathCase(L, { onboardingLeftCents: -50000, final: true, escrow: { enabled: false, balanceCents: 0 } }), ["installmentCents", "netCents", "onboardingLeftAfterCents"]),
+		[-50000, 50000, 0]);
 	const only = L.ooBuildSettlement({ weekStart: "2026-11-21", window: { floorWeekStart: "2026-10-31", firstWeekStart: "2026-11-07" }, profile: { feeBps: 1800 },
 		loads: [], receipts: [], settled: L.ooSettledFromLines([{ kind: "load", ref: "qa-oo-3", cents: 210000 }]), escrow: {} });
 	c.eq("§8 a week of only a reversal gives the fee back", only.ok ? only.lines.map((l) => [l.kind, l.cents]) : only, [["load_change", -210000], ["fee", 37800]]);
@@ -689,7 +773,7 @@ function mutant(id, label, edits, run) {
 (function main() {
 	const sections = [
 		["§1 the module", moduleSection], ["§2 the flags", flagsSection], ["§3 rounding", roundingSection],
-		["§4 Saturday keys and stamps", daysSection], ["§5 the first settlement week", firstWeekSection],
+		["§4 Saturday keys and stamps", daysSection], ["§5 the first settlement week", (c, L) => { firstWeekSection(c, L); chainSection(c, L); }],
 		["§6 the truck", truckSection], ["§7 the owner's example and Appendix B", (c, L) => { appendixBSection(c, L); finalSection(c, L); }],
 		["§8 the cases", casesSection], ["§9 the investor-ledger test inputs", ledgerSection], ["§10 validators", validatorsSection],
 		["§11 the schema", schemaSection],
@@ -705,7 +789,7 @@ function mutant(id, label, edits, run) {
 	console.log("\n§13 mutants");
 	const appendixB = (c, L) => { roundingSection(c, L); appendixBSection(c, L); casesSection(c, L); };
 	mutant("M1", "escrow held back before the onboarding balance clears", [["const depositAllowed = !final && escrowOn && onboardingLeftCents <= 0;", "const depositAllowed = !final && escrowOn;"]], appendixB);
-	mutant("M2", "an installment taken on a short week", [["Math.min(installmentCents, leftCents, Math.max(0, beforeCents))", "Math.min(installmentCents, leftCents)"]], appendixB);
+	mutant("M2", "an installment taken on a short week", [["Math.min(installmentCents, onboardingLeftCents, Math.max(0, beforeCents))", "Math.min(installmentCents, onboardingLeftCents)"]], appendixB);
 	mutant("M3", "the fee taken on net instead of load pay", [["const feeCents = ooFeeCents(loadCents, feeBps);", "const feeCents = ooFeeCents(loadCents - chargeCents, feeBps);"]], appendixB);
 	mutant("M4", "the carried balance ignored", [["const beforeCents = shareCents - carriedInCents + escrowUseCents;", "const beforeCents = shareCents + escrowUseCents;"]], appendixB);
 	mutant("M5", "a receipt settled twice", [["settled: settled.receipts,", "settled: new Map(),"]], appendixB);
@@ -718,6 +802,15 @@ function mutant(id, label, edits, run) {
 	mutant("M9", "rounding by Math.round (half up, not away from zero)", [["const q = Math.floor((2 * Math.abs(num) + den) / (2 * den));\n\treturn num < 0 ? -q : q;", "return Math.round(num / den);"]], roundingSection);
 	mutant("M10", "a truck week charged twice", [["if (cents > 0 && !charged.has(ref))", "if (cents > 0)"]], (c, L) => { truckSection(c, L); appendixBSection(c, L); });
 	mutant("M11", "a Friday-evening stamp read on the UTC day", [["return appTime.dayInZone(new Date(ms), timeZone || appTime.appTimeZone());", "return new Date(ms).toISOString().slice(0, 10);"]], (c, L) => { daysSection(c, L); firstWeekSection(c, L); });
+	mutant("M12", "the first week anchored on his earliest settlement's own week", [['const chain = String(earliestSettlement.firstWeekStart || "").trim();', 'const chain = String(earliestSettlement.weekStart || "").trim();']],
+		(c, L) => { firstWeekSection(c, L); chainSection(c, L); });
+	mutant("M13", "the no-pay check limited to new loads", [["l && onThis(l, settled.loads, eligibleLoad) &&", "l && !settled.loads.has(l.ref) && eligibleLoad(l) &&"]], casesSection);
+	mutant("M14", "settled loads ignoring their change lines", [['if (l.kind === "load" || l.kind === "load_change") loads.set(', 'if (l.kind === "load") loads.set(']],
+		(c, L) => { appendixBSection(c, L); casesSection(c, L); });
+	mutant("M15", "loads taken only from his first week", [["const eligibleLoad = eligibleFrom(floor);", "const eligibleLoad = eligibleFrom(first);"]], chainSection);
+	mutant("M16", "an overpaid onboarding balance clamped to $0", [["Math.min(installmentCents, onboardingLeftCents, Math.max(0, beforeCents))", "Math.max(0, Math.min(installmentCents, onboardingLeftCents, Math.max(0, beforeCents)))"]], casesSection);
+	mutant("M17", "a settled receipt joining his onboarding balance", [['bucket[settled.has(r.ref) ? "settlement" : ooPlaceDay(r.day, win || {})]', "bucket[ooPlaceDay(r.day, win || {})]"]], firstWeekSection);
+	mutant("M18", "a charged truck week joining his onboarding balance", [["const insuranceCents = charged.has(`ins:${w}`) ? 0 : weekly.insuranceCents;", "const insuranceCents = weekly.insuranceCents;"]], truckSection);
 
 	console.log(`\n${passed} passed, ${failures.length} failed`);
 	process.exit(failures.length ? 1 : 0);
