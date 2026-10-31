@@ -102,6 +102,10 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
+// A Super Admin asking a driver to sign one policy document again. DEFAULT OFF, on
+// only when exactly "true"; off, its routes answer 404 and every answer is as before.
+const onboardingResign = require("./lib/onboarding-resign");
+const ONBOARDING_RESIGN_ENABLED = process.env.ONBOARDING_RESIGN_ENABLED === "true";
 const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
@@ -11170,8 +11174,11 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			application = isSuperAdmin ? { ...safeApp, drivers_license: dl } : safeApp;
 		}
 
+		// A Super Admin also gets each document's fresh-signature request and the account
+		// to send one to (ONBOARDING_RESIGN_ENABLED); a Dispatcher's answer is as before.
+		const resignView = ONBOARDING_RESIGN_ENABLED && req.session.user.role === "Super Admin";
 		res.json({
-			documents,
+			documents: resignView ? onboardingResign.staffDocs(db, user.id, documents) : documents,
 			drugTest: onboarding && onboarding.drug_test_result ? {
 				result: onboarding.drug_test_result,
 				file_url: onboarding.drug_test_file_url,
@@ -11181,6 +11188,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			linked: true,
 			ssn,
 			application,
+			...(resignView ? { userId: user.id } : {}),
 		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -15118,6 +15126,8 @@ function sha256File(filePath) {
 const SIGNING_EVIDENCE_COLUMNS = [
 	"signed_ip", "signed_ip_source", "signed_user_agent", "consent_agreed", "consent_text",
 	"artifact_sha256", "artifact_bytes", "superseded_artifacts", "evidence_version",
+	// A fresh-signature request's reason and requester are staff-only too.
+	...onboardingResign.STAFF_ONLY_COLUMNS,
 ];
 function stripSigningEvidence(rows) {
 	const strip = (r) => {
@@ -18767,6 +18777,91 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 	}
 });
 
+// ============================================================
+// REQUEST A FRESH SIGNATURE (ONBOARDING_RESIGN_ENABLED; rules in lib/onboarding-resign.js)
+// ============================================================
+// A Super Admin asks a driver to sign one policy document again; the driver signs it
+// through the sign route below, which keeps the signed original as history. The driver
+// is told in the app only (a notice and a live refresh): nothing is emailed or texted.
+for (const col of onboardingResign.ensureColumns(db)) console.error(`[onboarding-resign] could not add column ${col} to onboarding_documents`);
+
+// Off, both request routes answer 404 FEATURE_OFF, before any role check.
+function onboardingResignFlagGate(req, res, next) {
+	if (!ONBOARDING_RESIGN_ENABLED) return res.status(404).json({ error: "Not found", code: "FEATURE_OFF" });
+	return next();
+}
+
+// Keyed per account, as onboardingSignLimiter is: each request writes a notice and an audit row.
+const onboardingResignLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many signature requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// What the two request routes hand lib/onboarding-resign.js.
+function onboardingResignStaffDeps(req) {
+	return {
+		db,
+		signedDir: path.join(DATA_DIR, "uploads", "onboarding-signed"),
+		artifactLooksValid: signedArtifactLooksValid,
+		sha256File,
+		sanitize: sanitizeEvidenceText,
+		now: () => new Date().toISOString(),
+		audit: (action, docId, details) => logAudit(req, action, "onboarding_document", docId, details),
+	};
+}
+
+// What the sign route hands it for a fresh signature: the same artifact helpers the
+// first signing uses, so both write, prove and archive a document the same way.
+function onboardingResignSignDeps(req) {
+	return {
+		db,
+		writeSignedArtifact,
+		archiveSignedArtifact,
+		artifactLooksValid: signedArtifactLooksValid,
+		sha256File,
+		copyFile: (from, to) => fs.copyFileSync(from, to),
+		archiveDir: SIGNED_ARCHIVE_DIR,
+		appendHistory: appendSupersededArtifact,
+		sanitize: sanitizeEvidenceText,
+		now: () => new Date().toISOString(),
+		audit: (action, docId, details) => logAudit(req, action, "onboarding_document", docId, details),
+	};
+}
+
+// POST /api/admin/onboarding/:userId/documents/:docKey/request-signature — Super Admin,
+// body { reason } (10+ characters). The document, its file and its evidence stay as they
+// are; the driver gets one notice and a live refresh (the document key and the notice id).
+app.post("/api/admin/onboarding/:userId/documents/:docKey/request-signature", onboardingResignFlagGate, requireRole("Super Admin"), refuseCrossSite, onboardingResignLimiter, (req, res) => {
+	try {
+		const out = onboardingResign.requestSignature(onboardingResignStaffDeps(req), {
+			userId: req.params.userId, docKey: req.params.docKey, reason: req.body ? req.body.reason : undefined, actor: req.session.user,
+		});
+		if (out.live) io.to(driverRoom(out.live.driverName)).emit("onboarding-resign-requested", { docKey: out.live.docKey, notificationId: out.live.noticeId });
+		res.status(out.status).json(out.body);
+	} catch (err) {
+		console.error("[onboarding-resign] request failed:", err.message);
+		res.status(500).json({ error: "The request could not be saved.", code: "REQUEST_FAILED" });
+	}
+});
+
+// POST /api/admin/onboarding/:userId/documents/:docKey/cancel-signature-request — Super
+// Admin. Withdraws an open request; the document is untouched.
+app.post("/api/admin/onboarding/:userId/documents/:docKey/cancel-signature-request", onboardingResignFlagGate, requireRole("Super Admin"), refuseCrossSite, onboardingResignLimiter, (req, res) => {
+	try {
+		const out = onboardingResign.cancelRequest(onboardingResignStaffDeps(req), { userId: req.params.userId, docKey: req.params.docKey });
+		res.status(out.status).json(out.body);
+	} catch (err) {
+		console.error("[onboarding-resign] cancel failed:", err.message);
+		res.status(500).json({ error: "The request could not be withdrawn.", code: "CANCEL_FAILED" });
+	}
+});
+
 // POST /api/onboarding/:userId/documents/:docKey/sign — driver signs a document
 app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardingSignLimiter, async (req, res) => {
 	try {
@@ -18786,7 +18881,11 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		}
 		const docRow = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
-		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
+		// Signed is final, unless a Super Admin asked for a fresh signature on this
+		// document (ONBOARDING_RESIGN_ENABLED, lib/onboarding-resign.js).
+		if (docRow.signed && !(ONBOARDING_RESIGN_ENABLED && onboardingResign.isRequested(docRow))) {
+			return res.json({ success: true, message: "Already signed" });
+		}
 
 		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
 		if (!consent) return;
@@ -18861,6 +18960,15 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		};
 
 		const nowIso = new Date().toISOString();
+		// A fresh signature has its own path: the original is kept as history, and the
+		// completion step below (emails, the Carrier sheet, the directory) never runs.
+		if (docRow.signed) {
+			const out = await onboardingResign.signAgain(onboardingResignSignDeps(req), {
+				userId, docKey, docRow, signedPath, publicUrl, label: docRow.doc_name || docKey, render,
+				evidence: { signatureText: signatureText.trim(), signedAt: nowIso, consent, net, effectiveDate, evidenceVersion: SIGNING_EVIDENCE_VERSION },
+			});
+			return res.status(out.status).json(out.body);
+		}
 		let artifact;
 		try {
 			artifact = await writeSignedArtifact({
@@ -48887,8 +48995,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		const onboarding = db.prepare(
 			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId) || null;
+		// With ONBOARDING_RESIGN_ENABLED on, each document also says whether a fresh
+		// signature is asked for (yes or no only; never the reason or who asked).
 		const onboardingDocs = onboarding
-			? stripSigningEvidence(db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId))
+			? onboardingResign.driverDocs(db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId), { enabled: ONBOARDING_RESIGN_ENABLED, strip: stripSigningEvidence })
 			: [];
 		// Also fetch the original application so the driver Kit can display
 		// the documents and qualifications the applicant submitted. SSN is

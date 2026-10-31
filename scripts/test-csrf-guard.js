@@ -306,11 +306,15 @@ eq("refuseCrossSite is on exactly the cost tier", mountedOn("refuseCrossSite").j
 	 // One registration, two paths — the legacy Bison alias is separately
 	 // reachable, so it is separately pinned.
 	 "/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice",
-	 "/api/loads/:loadId/invoice-preview"].sort().join(" "));
-// Six REGISTRATIONS carrying seven paths. Asserted beside the list for the same
+	 "/api/loads/:loadId/invoice-preview",
+	 // A Super Admin asking a driver to sign a document again, and withdrawing it:
+	 // each writes a driver notice or an audit row (ONBOARDING_RESIGN_ENABLED).
+	 "/api/admin/onboarding/:userId/documents/:docKey/request-signature",
+	 "/api/admin/onboarding/:userId/documents/:docKey/cancel-signature-request"].sort().join(" "));
+// Eight REGISTRATIONS carrying nine paths. Asserted beside the list for the same
 // reason the other tiers are: a guard that reappears under a third name shows up
 // as a list/count disagreement instead of silently.
-eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossSite"), 6);
+eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossSite"), 8);
 // ⚠️ ALL SEVEN GUARDED ROUTES, NAMED, IN ONE PLACE — the review's finding 5.
 // The count above was the only thing covering the database export, and a count
 // cannot say WHICH route lost its guard. `mountCount` is kept beside the list so

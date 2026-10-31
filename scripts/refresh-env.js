@@ -803,7 +803,9 @@ async function main() {
 	//     is not copied anyway discloses nothing.
 	let sigs = 0;
 	const EVIDENCE_REDACTIONS = { signed_ip: "", signed_ip_source: "", signed_user_agent: "", consent_text: "" };
-	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS });
+	// A driver document's history keeps the replaced original's signature text, IP and
+	// browser word for word (lib/onboarding-resign.js), so it goes too.
+	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS, superseded_artifacts: "" });
 	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
 	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
@@ -1106,6 +1108,8 @@ const REDACTED_EMPTY = [
 	// of a file this script never copies discloses nothing.
 	["onboarding_documents", "signed_ip", "signer IP address"],
 	["onboarding_documents", "signed_user_agent", "signer user agent"],
+	// A replaced original's signer IP, browser and signature, kept in its document's history.
+	["onboarding_documents", "superseded_artifacts", "signature history entry"],
 	["investor_onboarding_documents", "signed_ip", "signer IP address"],
 	["investor_onboarding_documents", "signed_user_agent", "signer user agent"],
 	// Added 2026-08-13. Stage 3e/3f has always emptied these; nothing asserted
