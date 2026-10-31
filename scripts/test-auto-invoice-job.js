@@ -41,6 +41,21 @@
 //   §16 a refusal the engine throws instead of returning is classed like a
 //       returned one: a person, a counted wait or the rate-con re-check, never
 //       an uncounted retry with a paid call each time
+//   §17 the render shadow (AUTO_INVOICE_SHADOW_RENDERS_ENABLED): a WOULD_ATTEMPT
+//       load gets a render digest, built again when its fingerprint changes and
+//       kept once a person drafts it; refusals keep their code; caps, the Friday
+//       evening quiet window, Gemini's latch, a busy renderer; nextInvoiceNumber,
+//       reserveNumber(), appendGmailDraft, engine.record() and the SMTP sender
+//       stay at 0
+//   §17b the render shadow off (or in real-draft mode): the shadow rows, the
+//       sweep's answer and the meta rows exactly as today
+//   §18 the claim's draft digest equals messageDigest() of the MIME the fake IMAP
+//       server received; the render shadow's digest (placeholder number, one day)
+//       equals it (the real number, the next day), and the report's six
+//       conditions hold on it; mutants of the render shadow are caught
+//   §19 the render records' keeping time: the decision plus 30 days, 45 days at
+//       most, pruned once a day, and at start while the job is off
+//   §20 one builder and one digest (a source check, with mutants)
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -57,7 +72,20 @@ const ledgerLib = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
 const imapDraft = require(path.join(ROOT, "lib", "imap-draft.js"));
 const appTime = require(path.join(ROOT, "lib", "app-time.js"));
 const { liftSheetHelpers } = require(path.join(ROOT, "scripts", "auto-invoice-shadow-report.js"));
+// Absent from a tree before the render shadow: the sections that need them fail
+// by name instead of the whole run.
+const optional = (p) => {
+	try {
+		return require(p);
+	} catch {
+		return null;
+	}
+};
+const mimeRead = optional(path.join(ROOT, "lib", "mime-read.js"));
+const trialReport = optional(path.join(ROOT, "scripts", "auto-invoice-send-trial-report.js"));
+const { textPdf } = require(path.join(ROOT, "scripts", "lib", "made-up-pdf.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
+const Module = require("module");
 
 let pass = 0;
 const failures = [];
@@ -140,6 +168,8 @@ function makeWorld({ dbFile = null } = {}) {
 		overrideTo: "",
 		readFails: false,
 		ids: 0,
+		mimes: [],
+		shadowMessages: [],
 	};
 	w.db = dbFile ? new Database(dbFile) : new Database(":memory:");
 	if (dbFile) w.db.pragma("busy_timeout = 2000");
@@ -198,7 +228,30 @@ function makeWorld({ dbFile = null } = {}) {
 			w.calls.render.push({ loadId: ctx.loadId, ...opts });
 			if (w.renderHook) w.renderHook(ctx);
 			if (w.renderHang) return never();
-			return { to: ctx.to, subject: `Made-up invoice ${opts.invoiceId}`, html: "<p>made-up</p>", attachments: [], total: w.total || "$1,000.00" };
+			if (w.renderThrows) throw w.renderThrows;
+			if (!w.richRender) return { to: ctx.to, subject: `Made-up invoice ${opts.invoiceId}`, html: "<p>made-up</p>", attachments: [], total: w.total || "$1,000.00" };
+			// The engine's shapes: "<Broker> Order #<ref>", the invoice PDF first (its
+			// number, date and total printed), then the POD and the rate con.
+			const row = w.rows.find((r) => rules.loadKey(r["Load ID"]) === rules.loadKey(ctx.loadId)) || {};
+			const ref = String(ctx.loadId).replace(/^#/, "");
+			const total = row["  Payment  "] || "$1,000.00";
+			const [y, m, d] = String(opts.invoiceDate).split("-");
+			const printed = `INVOICE Invoice ID # : ${opts.invoiceId} Date: ${m}/${d}/${y} Made-up Co. Invoice To Example Broker ${ctx.to} Load ID# Delivery Date Total Example Broker Order: #${ref} 10/20/2026 ${total} SUB-TOTAL ${total} Total ${total}`;
+			let out = {
+				to: ctx.to,
+				subject: `Example Broker Order #${ref}`,
+				html: `<div style="font-family:Arial"><p>Hello,</p><p>Please see the attached documents for load number ${ref}: the rate confirmation, the signed POD, and the invoice.</p><p>Thank you,</p></div>`,
+				attachments: [
+					{ filename: `Example Broker Invoice Order #${ref}.pdf`, content: textPdf(printed), contentType: "application/pdf" },
+					{ filename: `${ref}_POD.pdf`, content: Buffer.from(`%PDF-1.4 made-up POD for ${ref}`), contentType: "application/pdf" },
+					{ filename: `${ref}.pdf`, content: Buffer.from(`%PDF-1.4 made-up rate con for ${ref}`), contentType: "application/pdf" },
+				],
+				total,
+			};
+			// A mutant render shadow: only the shadow's calls carry the placeholder number.
+			if (w.mutateShadow && opts.invoiceId === rules.SHADOW_INVOICE_ID) out = w.mutateShadow(out);
+			if (w.keepShadowMessage && opts.invoiceId === rules.SHADOW_INVOICE_ID) w.shadowMessages.push(out);
+			return out;
 		},
 		async record(ctx, rendered, opts) {
 			w.calls.record.push({ loadId: ctx && ctx.loadId, via: opts.via, invoiceId: opts.invoiceId, actor: opts.actor.username });
@@ -230,6 +283,8 @@ function makeWorld({ dbFile = null } = {}) {
 		},
 		async appendGmailDraft(o) {
 			w.calls.append.push({ to: o.to, subject: o.subject, messageId: o.messageId, user: o.user });
+			// What a Gmail IMAP server would receive: lib/imap-draft.js's own MIME.
+			if (w.captureMime) w.mimes.push(await imapDraft.buildMime({ from: o.from, to: o.to, subject: o.subject, html: o.html, attachments: o.attachments, messageId: o.messageId }));
 			const b = w.appendBehaviors.shift() || "OK";
 			if (b === "OK") { w.gmail.push(o.messageId); return { ok: true }; }
 			if (b === "NO") throw imapError("IMAP APPEND failed: a2 NO made-up", "literal", true);
@@ -1179,6 +1234,399 @@ async function main() {
 			"§16 an error with no code: queued again in 15 minutes, the attempt counted");
 		w.prepareHook = null;
 		ok(!w.logs.some((l) => /@|made-up RATECON|made-up POD/.test(l)), "§16 no error message or address in the logs");
+	}
+
+	await renderShadowSections();
+}
+
+// ------------------------------------------------------------------ the render shadow
+const SHADOW_ON = Object.freeze({ env: { AUTO_INVOICE_DRAFTS_SHADOW: "" }, shadowRenders: true });
+const shadowRowOf = (w, id) => w.db.prepare("SELECT * FROM auto_invoice_shadow WHERE load_key = ?").get(rules.loadKey(id)) || null;
+const recordOf = (w, id) => {
+	const r = shadowRowOf(w, id);
+	try {
+		return r && r.render_digest_json ? JSON.parse(r.render_digest_json) : null;
+	} catch {
+		return null;
+	}
+};
+const DIGEST_FIELDS = ["v", "recipient", "cc", "bcc", "subjectSha256", "bodyTextSha256", "invoiceTextSha256", "attachments"];
+const digestPart = (d) => (d ? Object.fromEntries(DIGEST_FIELDS.map((k) => [k, d[k]])) : null);
+// Counts every reserveNumber() the job makes, through the ledger module it shares.
+function spyReserve() {
+	const real = ledgerLib.reserveNumber;
+	const spy = { n: 0, restore: () => { ledgerLib.reserveNumber = real; } };
+	ledgerLib.reserveNumber = (...args) => { spy.n++; return real(...args); };
+	return spy;
+}
+// A copy of a lib module with one edit, compiled beside the original so its own
+// relative requires resolve; null when the edit doesn't match exactly once.
+function mutantModule(file, from, to) {
+	const src = fs.readFileSync(file, "utf8");
+	if (src.split(from).length !== 2) return null;
+	const m = new Module(file, module);
+	m.filename = file;
+	m.paths = Module._nodeModulePaths(path.dirname(file));
+	m._compile(src.replace(from, () => to), file);
+	return m.exports;
+}
+
+async function renderShadowSections() {
+	// ---------------------------------------------------------------- §17
+	section("§17 the render shadow: digests of what it would send, no number, no Gmail");
+	{
+		const w = makeWorld();
+		w.richRender = true;
+		const reserve = spyReserve();
+		const smtp = [];
+		try {
+			const job = w.job({ ...SHADOW_ON, sendMail: (m) => smtp.push(m) });
+			eq([job.mode, job.shadowRenders], ["shadow", true], "§17 shadow mode with the render shadow on");
+			await job.tick();
+			w.now += 5 * MIN;
+			w.ready("LD-TEST-0300");
+			const first = await job.tick();
+			const row = shadowRowOf(w, "LD-TEST-0300");
+			eq(row && [row.verdict, row.reason_code], ["WOULD_ATTEMPT", ""], "§17 the load is WOULD_ATTEMPT, as without the render shadow");
+			const rec = recordOf(w, "LD-TEST-0300");
+			ok(rec && rec.renderedAt, "§17 FAILS ON THE OLD CODE: a WOULD_ATTEMPT load gets a render digest (render_digest_json)");
+			eq(rec && Object.keys(rec), ["v", "renderedAt", "recipient", "cc", "bcc", "subjectSha256", "bodyTextSha256", "invoiceTextSha256", "attachments", "fingerprintSha256"],
+				"§17 the record: the digest's fields and the fingerprint's hash, nothing else");
+			eq(rec && [rec.recipient, rec.attachments.map((a) => a.name), rec.renderedAt],
+				["billing@example-broker.test", ["Example Broker Invoice Order #LD-TEST-0300.pdf", "LD-TEST-0300_POD.pdf", "LD-TEST-0300.pdf"], new Date(w.now).toISOString()],
+				"§17 its plain values: the recipient, the attachment names and the render time");
+			ok(rec && /^[0-9a-f]{64}$/.test(rec.invoiceTextSha256) && rec.attachments[0].sha256 === "" && rec.attachments.slice(1).every((a) => /^[0-9a-f]{64}$/.test(a.sha256)),
+				"§17 the invoice by its masked text (read), the POD and the rate con by their bytes");
+			ok(rec && !JSON.stringify(rec).includes("1,000.00") && !JSON.stringify(rec).includes("Hello"), "§17 no amount or body text stored");
+			eq(w.calls.prepare[0], { loadId: "LD-TEST-0300", body: {}, dryRun: false, mode: "auto" }, "§17 built through the engine's auto mode, as the real draft is");
+			eq(w.calls.render[0] && [w.calls.render[0].invoiceId, w.calls.render[0].invoiceDate], [rules.SHADOW_INVOICE_ID, "2026-10-20"], "§17 with the placeholder number and the render day");
+			eq(first.sweep && first.sweep.renders, { rendered: 1, refused: 0 }, "§17 the sweep says what it rendered");
+			const nothing = () => [w.calls.mint.length, reserve.n, w.calls.append.length, w.calls.search.length, w.calls.record.length, smtp.length,
+				w.db.prepare("SELECT COUNT(*) n FROM auto_invoice_claims").get().n];
+			eq(nothing(), [0, 0, 0, 0, 0, 0, 0], "§17 no nextInvoiceNumber, reserveNumber(), appendGmailDraft, Gmail search, engine.record() or SMTP call; no claim");
+
+			await job.tick();
+			eq(w.calls.render.length, 1, "§17 the load unchanged: not built again");
+			w.now += 5 * MIN;
+			w.setRow("LD-TEST-0300", { "  Payment  ": "$1,250.00" });
+			await job.tick();
+			const rec2 = recordOf(w, "LD-TEST-0300");
+			eq(w.calls.render.length, 2, "§17 FAILS ON THE OLD CODE: its fingerprint changed (payment): built again");
+			ok(rec2 && rec.invoiceTextSha256 !== rec2.invoiceTextSha256 && rec.fingerprintSha256 !== rec2.fingerprintSha256 && rec2.renderedAt > rec.renderedAt,
+				"§17 ...so the latest render matches the load as it stands");
+
+			w.now += 5 * MIN;
+			w.handDraft("LD-TEST-0300", "10202026-60");
+			await job.tick();
+			const rec3 = recordOf(w, "LD-TEST-0300");
+			ok(rec3 && rec3.draftSeenAt === new Date(w.now).toISOString() && rec3.fingerprintAtDraftSha256 === rec3.fingerprintSha256 && rec3.invoiceTextSha256 === rec2.invoiceTextSha256,
+				"§17 a person drafts it: the render made before is kept, with the fingerprint at the draft");
+			w.now += 5 * MIN;
+			w.setRow("LD-TEST-0300", { "  Payment  ": "$1,300.00" });
+			await job.tick();
+			const rec4 = recordOf(w, "LD-TEST-0300");
+			eq([w.calls.render.length, rec4 && rec4.invoiceTextSha256 === rec2.invoiceTextSha256, rec4 && rec4.fingerprintAtDraftSha256 === rec3.fingerprintAtDraftSha256], [2, true, true],
+				"§17 ...and a change after the draft builds nothing more (the report compares the render made before it)");
+
+			// A refusal keeps its code, with no digest, and waits for the load to change.
+			w.now += 5 * MIN;
+			w.ready("LD-TEST-0301");
+			w.prepareHook = (id) => (id === "LD-TEST-0301" ? { ok: false, http: 422, code: "TOTAL_MISMATCH" } : null);
+			await job.tick();
+			const refused = recordOf(w, "LD-TEST-0301");
+			eq(refused && [refused.code, Boolean(refused.refusedAt), "renderedAt" in refused, "invoiceTextSha256" in refused, "retryAt" in refused], ["TOTAL_MISMATCH", true, false, false, false],
+				"§17 a load the builder refuses keeps its refusal code, with no digest");
+			const prepares = () => w.calls.prepare.filter((p) => p.loadId === "LD-TEST-0301").length;
+			w.now += 5 * MIN;
+			await job.tick();
+			eq(prepares(), 1, "§17 ...and is not tried again while the load is unchanged");
+			w.prepareHook = null;
+			w.setRow("LD-TEST-0301", { "  Payment  ": "$1,100.00" });
+			w.now += 5 * MIN;
+			await job.tick();
+			ok((recordOf(w, "LD-TEST-0301") || {}).renderedAt, "§17 ...the load changes: built, and its digest replaces the refusal");
+
+			// No rate con yet: looked at again every 2 hours, three times, as the job would.
+			w.ready("LD-TEST-0302");
+			w.prepareHook = (id) => (id === "LD-TEST-0302" ? { ok: false, http: 422, code: "RATECON_MISSING" } : null);
+			const seen = [];
+			for (let i = 0; i < 5; i++) {
+				await job.tick();
+				const r = recordOf(w, "LD-TEST-0302");
+				seen.push(r ? [r.code, r.checks || 0, Boolean(r.retryAt)] : null);
+				w.now += 2 * HOUR;
+			}
+			eq(seen, [["RATECON_MISSING", 1, true], ["RATECON_MISSING", 2, true], ["RATECON_MISSING", 3, true], ["RATECON_MISSING", 4, false], ["RATECON_MISSING", 4, false]],
+				"§17 RATECON_MISSING: re-checked every 2 hours, three times, then left for a person");
+			w.prepareHook = null;
+
+			// A busy renderer stores nothing, and the load is built a few minutes later.
+			w.ready("LD-TEST-0303");
+			w.renderThrows = Object.assign(new Error("made-up: renderer busy"), { code: "RENDERER_BUSY" });
+			await job.tick();
+			eq(recordOf(w, "LD-TEST-0303"), null, "§17 a busy renderer: nothing stored");
+			w.renderThrows = null;
+			w.now += 6 * MIN;
+			await job.tick();
+			ok(recordOf(w, "LD-TEST-0303") && recordOf(w, "LD-TEST-0303").renderedAt, "§17 ...and built on a later sweep");
+			eq(nothing(), [0, 0, 0, 0, 0, 0, 0], "§17 still no number, reservation, Gmail, record or SMTP call after all of it");
+		} finally {
+			reserve.restore();
+		}
+	}
+	{
+		// The job's caps, the Friday evening quiet window and Gemini's latch.
+		const w = makeWorld();
+		w.richRender = true;
+		const job = w.job(SHADOW_ON);
+		await job.tick();
+		w.now += 5 * MIN;
+		for (const id of ["LD-TEST-0310", "LD-TEST-0311", "LD-TEST-0312"]) w.ready(id);
+		await job.tick();
+		eq(w.calls.render.length, 2, "§17 two builds a sweep (the job's per-sweep cap)");
+		w.now += 5 * MIN;
+		await job.tick();
+		eq(w.calls.render.length, 3, "§17 ...the third on the next sweep");
+		const capped = makeWorld();
+		capped.richRender = true;
+		const capJob = capped.job({ ...SHADOW_ON, env: { AUTO_INVOICE_DRAFTS_SHADOW: "", AUTO_INVOICE_MAX_PER_HOUR: "1" } });
+		await capJob.tick();
+		capped.now += 5 * MIN;
+		capped.ready("LD-TEST-0313");
+		capped.ready("LD-TEST-0314");
+		for (let i = 0; i < 3; i++) { await capJob.tick(); capped.now += 5 * MIN; }
+		eq(capped.calls.render.length, 1, "§17 the hourly cap counts the builds");
+		const friday = makeWorld();
+		friday.richRender = true;
+		friday.now = Date.parse("2026-10-23T22:30:00Z"); // Friday 6:30 PM Eastern
+		const fJob = friday.job(SHADOW_ON);
+		await fJob.tick();
+		friday.now += 5 * MIN;
+		friday.ready("LD-TEST-0315", { "Status Update Date": "10/23/2026 9:00:00", "Completion Date": "10/23/2026 9:00:00" });
+		const quiet = await fJob.tick();
+		eq([friday.calls.render.length, quiet.sweep && quiet.sweep.renders], [0, { rendered: 0, refused: 0, quiet: true }], "§17 Friday evening (Eastern): no build, the weekly batch keeps the renderer");
+		friday.now = Date.parse("2026-10-24T04:05:00Z"); // Saturday, just after midnight
+		await fJob.tick();
+		eq(friday.calls.render.length, 1, "§17 ...built after midnight");
+		const down = makeWorld();
+		down.richRender = true;
+		const dJob = down.job(SHADOW_ON);
+		await dJob.tick();
+		down.now += 5 * MIN;
+		down.geminiDownAt = down.now - 5 * MIN;
+		down.ready("LD-TEST-0316");
+		await dJob.tick();
+		eq(down.calls.prepare.length, 0, "§17 Gemini seen down: a non-Bison load is not built (no engine call)");
+	}
+
+	// ---------------------------------------------------------------- §17b
+	section("§17b the render shadow off: the shadow is today's");
+	for (const [label, extra] of [["no setting", { env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } }],
+		["the server setting given but the wiring's flag false", { env: { AUTO_INVOICE_DRAFTS_SHADOW: "", AUTO_INVOICE_SHADOW_RENDERS_ENABLED: "true" }, shadowRenders: false }],
+		["the flag on in real-draft mode (read only in shadow)", { env: { AUTO_INVOICE_DRAFTS_SHADOW: "false" }, shadowRenders: true, onMode: true }]]) {
+		const w = makeWorld();
+		w.richRender = true;
+		const job = w.job(extra);
+		eq(job.shadowRenders, false, `§17b ${label}: the render shadow is off`);
+		if (extra.onMode) continue;
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0320");
+		w.setRow("LD-TEST-0321");
+		const out = await job.tick();
+		const rows = w.db.prepare("SELECT load_key, load_id, first_seen_at, ready_at, verdict, reason_code, facts_json, updated_at FROM auto_invoice_shadow ORDER BY load_key").all();
+		const t1 = new Date(w.now).toISOString();
+		const facts = (pods) => JSON.stringify({ bison: false, domain: "example-broker.test", optedOut: false, month: "open", deliveryDate: true, pods, podsUnreadable: 0,
+			rateConRows: 0, advanceLines: 0, drafted: false, bisonRecipient: true, freemail: false, confirmed: true });
+		eq(rows, [
+			{ load_key: "ld-test-0320", load_id: "LD-TEST-0320", first_seen_at: t1, ready_at: t1, verdict: "WOULD_ATTEMPT", reason_code: "", facts_json: facts(1), updated_at: t1 },
+			{ load_key: "ld-test-0321", load_id: "LD-TEST-0321", first_seen_at: t1, ready_at: "", verdict: "WOULD_WAIT", reason_code: "WAITING_POD", facts_json: facts(0), updated_at: t1 },
+		], `§17b ${label}: the shadow rows, column for column, as the shadow writes them today`);
+		eq(out.sweep, { mode: "shadow", logged: 2 }, `§17b ${label}: the sweep's answer as today`);
+		eq(Object.keys(ledgerLib.getMeta(w.db)).sort(), ["last_sweep_at", "shadow_baseline_at"], `§17b ${label}: the meta rows as today`);
+		eq([w.calls.prepare.length, w.calls.render.length, w.calls.mint.length, w.calls.append.length, w.calls.record.length], [0, 0, 0, 0, 0], `§17b ${label}: no engine, number or Gmail call`);
+		let digests = null;
+		try { digests = w.db.prepare("SELECT render_digest_json FROM auto_invoice_shadow").all().map((r) => r.render_digest_json); } catch { digests = null; }
+		eq(digests, ["", ""], `§17b ${label}: render_digest_json stays empty`);
+	}
+
+	// ---------------------------------------------------------------- §18
+	section("§18 the draft's digest, and the render shadow's parity with the real draft");
+	// Two copies of one world: the render shadow builds load 123456789 on Oct 20;
+	// real drafts draft it on Oct 21 (another number, another date).
+	const world = () => {
+		const w = makeWorld();
+		w.richRender = true;
+		w.captureMime = true;
+		return w;
+	};
+	const shadowRender = async (mutate) => {
+		const w = world();
+		w.mutateShadow = mutate || null;
+		w.keepShadowMessage = true;
+		const job = w.job(SHADOW_ON);
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("123456789");
+		await job.tick();
+		return { w, rec: recordOf(w, "123456789") };
+	};
+	const realDraft = async () => {
+		const w = world();
+		w.now += 24 * HOUR;
+		const job = await w.started();
+		w.ready("123456789", { "Status Update Date": "10/21/2026 9:00:00", "Completion Date": "10/21/2026 9:00:00" });
+		await job.tick();
+		return w;
+	};
+	const real = await realDraft();
+	const claim = real.claim("123456789");
+	eq(claim && [claim.state, claim.invoice_id, claim.invoice_date], ["drafted", "10212026-1", "2026-10-21"], "§18 real drafts: drafted with number N and day D");
+	const mime = real.mimes[0];
+	ok(Buffer.isBuffer(mime) && mime.length > 0, "§18 the fake IMAP server kept the MIME it was handed");
+	let stored = null;
+	try {
+		stored = claim && claim.draft_digest_json ? JSON.parse(claim.draft_digest_json) : null;
+	} catch {
+		stored = null;
+	}
+	ok(stored && stored.renderedAt, "§18 FAILS ON THE OLD CODE: the claim keeps the digest of what it handed to Gmail (draft_digest_json)");
+	const sent = mimeRead && mime ? rules.messageDigest(mimeRead.parseMessage(mime), { renderedAt: stored ? stored.renderedAt : "" }) : null;
+	ok(sent && stored && JSON.stringify(sent) === JSON.stringify(stored), "§18 the claim's digest equals messageDigest() of what the fake IMAP server received, field by field");
+	ok(sent && /^[0-9a-f]{64}$/.test(sent.invoiceTextSha256), "§18 ...its invoice text read back from the MIME");
+
+	const { rec } = await shadowRender();
+	eq(digestPart(rec), digestPart(sent), "§18 parity: the render shadow's stored digest (placeholder number, Oct 20) equals the Sent copy's (N, Oct 21), number and date masked, field by field");
+	const verdict = trialReport && mime && rec ? trialReport.judge({ expected: rec, candidates: [trialReport.sentCopy({ raw: mime })], nothingAfter: () => true }) : null;
+	eq(verdict, { found: "one", failed: [] }, "§18 ...and the report's six conditions, run on that MIME as the Sent copy, all hold");
+
+	// Item 3: a render shadow that differs from the real draft in any way fails.
+	const judgeShadow = (r) => (trialReport && r && r.renderedAt ? trialReport.judge({ expected: r, candidates: [trialReport.sentCopy({ raw: mime })], nothingAfter: () => true }).failed : ["(no digest)"]);
+	const swap = (xs, i, j) => { const ys = [...xs]; [ys[i], ys[j]] = [ys[j], ys[i]]; return ys; };
+	for (const [label, mutate, want] of [
+		["edits the body", (o) => ({ ...o, html: o.html.replace("Thank you,", "Thank you very much,") }), ["body"]],
+		["drops an attachment (the POD)", (o) => ({ ...o, attachments: o.attachments.filter((a) => !/_POD\.pdf$/.test(a.filename)) }), ["attachments"]],
+		["adds an attachment", (o) => ({ ...o, attachments: [...o.attachments, { filename: "extra.pdf", content: Buffer.from("made-up extra") }] }), ["attachments"]],
+		["reorders the attachments", (o) => ({ ...o, attachments: swap(o.attachments, 1, 2) }), ["attachments"]],
+		["swaps the rate con", (o) => ({ ...o, attachments: o.attachments.map((a) => (/^123456789\.pdf$/.test(a.filename) ? { ...a, content: Buffer.from("%PDF-1.4 made-up other rate con") } : a)) }), ["attachments"]],
+		["changes the amount on the invoice", (o) => ({ ...o, attachments: o.attachments.map((a, i) => (i === 0 ? { ...a, content: textPdf(`INVOICE Invoice ID # : ${rules.SHADOW_INVOICE_ID} Date: 10/20/2026 Made-up Co. $1,000.01`) } : a)) }), ["attachments"]],
+		["changes the subject", (o) => ({ ...o, subject: `${o.subject} ` }), ["subject"]],
+	]) {
+		const m = await shadowRender(mutate);
+		eq(judgeShadow(m.rec), want, `§18 MUTANT a render shadow that ${label}: caught (${want.join(", ")})`);
+	}
+	{
+		// A recipient changed in the build is refused by buildMessage() itself; one
+		// changed after it (in the digest) fails the recipient condition.
+		const m = await shadowRender((o) => ({ ...o, to: "other@example-broker.test" }));
+		eq(m.rec && [m.rec.code, "renderedAt" in m.rec], ["DRAFT_REFUSED", false], "§18 MUTANT a render shadow that changes the recipient: refused by the builder, no digest to match");
+		eq(judgeShadow(rec && { ...rec, recipient: "other@example-broker.test" }), ["recipient"], "§18 MUTANT a digest with another recipient: caught (recipient)");
+	}
+	{
+		// Skipping the masking: the shadow's placeholder number and day stay in its
+		// invoice text, so it can never equal a real invoice's.
+		const RULES_FILE = path.join(ROOT, "lib", "auto-invoice-rules.js");
+		const unmasked = mutantModule(RULES_FILE, "invoiceTextSha256 = masked ? sha256(masked) : \"\";", "invoiceTextSha256 = masked ? sha256(collapse(shownText(asBuffer(atts[inv].content)))) : \"\";");
+		ok(unmasked, "§18 MUTANT skip the masking: applied to lib/auto-invoice-rules.js once");
+		const { w: sw } = await shadowRender();
+		const shadowMsg = sw.shadowMessages[0];
+		if (unmasked && shadowMsg && mimeRead) {
+			const a = unmasked.messageDigest(shadowMsg, { renderedAt: "x" });
+			const b = unmasked.messageDigest(mimeRead.parseMessage(mime), { renderedAt: "x" });
+			eq(rules.digestDifferences(a, b), ["attachments"], "§18 MUTANT skip the masking: caught (attachments: the invoice text differs)");
+		} else {
+			failures.push("§18 MUTANT skip the masking: not evaluated");
+		}
+	}
+	{
+		// Item 5 for the parity world: the shadow's spies stay at 0, and the fake
+		// IMAP server receives nothing from it.
+		const { w } = await shadowRender();
+		eq([w.calls.mint.length, w.calls.append.length, w.calls.record.length, w.mimes.length], [0, 0, 0, 0], "§18 the render shadow's world: no number, no append, no record, nothing at the fake IMAP server");
+	}
+
+	// ---------------------------------------------------------------- §19
+	section("§19 the render records' keeping time: the decision plus 30 days, 45 days at most");
+	if (typeof ledgerLib.setRenderDigest !== "function") {
+		failures.push("§19 FAILS ON THE OLD CODE: the ledger stores and prunes render records (setRenderDigest, pruneRenderDigests)");
+	} else {
+		const DAY = 24 * HOUR;
+		const w = makeWorld();
+		const put = (id, record) => {
+			ledgerLib.upsertShadow(w.db, { key: rules.loadKey(id), loadId: id, verdict: "WOULD_ATTEMPT", nowIso: new Date(w.now).toISOString() });
+			ledgerLib.setRenderDigest(w.db, rules.loadKey(id), JSON.stringify(record), new Date(w.now).toISOString());
+		};
+		const kept = (id) => Boolean(shadowRowOf(w, id) && shadowRowOf(w, id).render_digest_json);
+		const first = w.job(SHADOW_ON);
+		await first.tick();
+		const ago = (days) => new Date(w.now - days * DAY).toISOString();
+		put("LD-TEST-0340", { v: 1, renderedAt: ago(44), recipient: "billing@example-broker.test" });
+		put("LD-TEST-0341", { v: 1, renderedAt: ago(45), recipient: "billing@example-broker.test" });
+		put("LD-TEST-0342", { v: 1, refusedAt: ago(46), code: "TOTAL_MISMATCH" });
+		await first.tick();
+		eq([kept("LD-TEST-0340"), kept("LD-TEST-0341"), kept("LD-TEST-0342")], [true, true, true], "§19 the prune runs once a day: not again on the same day");
+		w.now += 6 * HOUR;
+		const next = w.job(SHADOW_ON);
+		await next.tick();
+		eq([kept("LD-TEST-0340"), kept("LD-TEST-0341"), kept("LD-TEST-0342")], [true, false, false], "§19 FAILS ON THE OLD CODE: no decision: cleared 45 days after the render (a refusal too), kept before");
+		ok(shadowRowOf(w, "LD-TEST-0341") && shadowRowOf(w, "LD-TEST-0341").verdict === "WOULD_ATTEMPT", "§19 ...only the record is cleared; the shadow row stays");
+		put("LD-TEST-0343", { v: 1, renderedAt: ago(10), recipient: "billing@example-broker.test" });
+		ledgerLib.setMeta(w.db, "send_pass:example-broker.test", JSON.stringify({ source: "shadow", passedAt: ago(28), reportSha256: "a".repeat(64) }));
+		w.now += DAY;
+		await next.tick();
+		eq([kept("LD-TEST-0340"), kept("LD-TEST-0343")], [false, true], "§19 a recorded pass: kept until 30 days after it");
+		w.now += DAY;
+		await next.tick();
+		eq(kept("LD-TEST-0343"), false, "§19 ...cleared at the decision plus 30 days");
+		const w2 = makeWorld();
+		const j2 = w2.job(SHADOW_ON);
+		await j2.tick();
+		ledgerLib.upsertShadow(w2.db, { key: "ld-test-0344", loadId: "LD-TEST-0344", verdict: "WOULD_ATTEMPT", nowIso: new Date(w2.now).toISOString() });
+		ledgerLib.setRenderDigest(w2.db, "ld-test-0344", JSON.stringify({ v: 1, renderedAt: new Date(w2.now - 2 * DAY).toISOString() }), new Date(w2.now).toISOString());
+		ledgerLib.setMeta(w2.db, "draft_week:example-broker.test", JSON.stringify({ source: "shadow", decidedAt: new Date(w2.now - 31 * DAY).toISOString() }));
+		const offJob = jobLib.create({ ...w2.deps(), env: {} });
+		eq([offJob.mode, Boolean(w2.db.prepare("SELECT render_digest_json FROM auto_invoice_shadow WHERE load_key = 'ld-test-0344'").get().render_digest_json)], ["off", false],
+			"§19 a recorded draft week counts as the decision too; with the job off, the prune runs at start");
+	}
+
+	// ---------------------------------------------------------------- §20
+	section("§20 one builder, one digest: every path's message comes from buildMessage()");
+	{
+		const JOB_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-job.js"), "utf8");
+		const REPORT_FILE = path.join(ROOT, "scripts", "auto-invoice-send-trial-report.js");
+		const REPORT_SRC = fs.existsSync(REPORT_FILE) ? fs.readFileSync(REPORT_FILE, "utf8") : "";
+		const parity = (src, report) => {
+			const block = /\/\/ <build-message>([\s\S]*?)\/\/ <\/build-message>/.exec(src);
+			if (!block) return ["no <build-message> block"];
+			// Code only: comment lines name these functions too. The engine's own
+			// timeout wrapper (d.engine.prepare) is the engine, not a caller.
+			const strip = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
+			const inside = strip(block[1]);
+			const outside = strip(src.replace(block[0], ""));
+			const code = strip(src);
+			const rep = strip(report);
+			const count = (s, re) => (s.match(re) || []).length;
+			const out = [];
+			if (count(inside, /(?<![.\w])engine\.prepare\(/g) !== 1 || count(inside, /(?<![.\w])engine\.render\(/g) !== 1) out.push("the block calls engine.prepare and engine.render once each");
+			if (/(?<![.\w])engine\.(prepare|render)\(/.test(outside)) out.push("no engine.prepare or engine.render outside the block");
+			if (count(code, /\bbuildMessage\.prepare\(/g) !== 3 || count(code, /\bbuildMessage\.render\(/g) !== 3) out.push("the draft, the recovery and the render shadow build through buildMessage()");
+			if (count(code, /\brules\.messageDigest\(/g) !== 1 || !/const digestOf = \(message, renderedAt\) => rules\.messageDigest\(message, \{ renderedAt \}\);/.test(code)) out.push("one digest helper, rules.messageDigest()");
+			if (count(code, /\bdigestOf\(/g) !== 2) out.push("the draft and the render shadow store digestOf()");
+			if (/createHash/.test(code)) out.push("no digest of its own");
+			if (!/to: message\.to,\s+subject: message\.subject,\s+html: message\.html,\s+attachments: message\.attachments,/.test(code)) out.push("Gmail gets buildMessage()'s message");
+			if (count(rep, /\brules\.messageDigest\(/g) !== 1 || !/rules\.messageDigest\(m, \{ renderedAt:/.test(rep)) out.push("the report digests a Sent copy with rules.messageDigest()");
+			if (count(rep, /createHash/g) !== 1) out.push("the report hashes nothing but its own counts");
+			return out;
+		};
+		eq(parity(JOB_SRC, REPORT_SRC), [], "§20 FAILS ON THE OLD CODE: one builder and one digest for the render shadow, the draft path and the report");
+		for (const [label, src, report] of [
+			["the render shadow calling engine.render itself", JOB_SRC.replace("msg = await buildMessage.render(built, facts, { invoiceId: rules.SHADOW_INVOICE_ID", "msg = await engine.render(built.ctx, { invoiceId: rules.SHADOW_INVOICE_ID"), REPORT_SRC],
+			["a second digest in the job", JOB_SRC.replace("// Every digest the job keeps", "const otherDigest = (m) => require(\"crypto\").createHash(\"sha256\").update(String(m.html)).digest(\"hex\");\n\t// Every digest the job keeps"), REPORT_SRC],
+			["Gmail handed the rendered fields directly", JOB_SRC.replace("subject: message.subject,", "subject: rendered.subject,"), REPORT_SRC],
+			["a report with its own Sent digest", JOB_SRC, REPORT_SRC.replace("digest: rules.messageDigest(m, { renderedAt:", "digest: ownDigest(m, { renderedAt:")],
+		]) {
+			ok(parity(src, report).length > 0, `§20 MUTANT ${label}: caught`);
+		}
 	}
 }
 

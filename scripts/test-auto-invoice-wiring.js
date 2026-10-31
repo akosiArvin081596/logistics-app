@@ -36,6 +36,12 @@
  *      the block to BISON_INVOICE_EMAIL (a block reading a misnamed setting is
  *      caught); a draft in Gmail whose row wasn't written, recovered through the real
  *      engine's render and recorded only because it matches what went to Gmail
+ *   §9 the render shadow (AUTO_INVOICE_SHADOW_RENDERS_ENABLED): on only when exactly
+ *      "true", in shadow mode, never in a replica; with a renderer that writes the
+ *      invoice's text as Chromium does, the shadow's stored digest of load
+ *      123456789 equals the digest of the MIME real drafts handed Gmail for it (and
+ *      the claim's own), the report's six conditions hold on that MIME, and the
+ *      shadow paid for no number, Gmail call, record() or audit row
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -66,7 +72,18 @@ const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const realImap = require(path.join(ROOT, "lib", "imap-draft.js"));
 const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
 const appTime = require(path.join(ROOT, "lib", "app-time.js"));
+const { textPdf } = require(path.join(__dirname, "lib", "made-up-pdf.js"));
 const serverRequire = createRequire(path.join(ROOT, "server.js"));
+// Absent from a tree before the render shadow: §9 fails by name instead.
+const optional = (p) => {
+	try {
+		return require(p);
+	} catch {
+		return null;
+	}
+};
+const mimeRead = optional(path.join(ROOT, "lib", "mime-read.js"));
+const trialReport = optional(path.join(ROOT, "scripts", "auto-invoice-send-trial-report.js"));
 
 let pass = 0;
 const failures = [];
@@ -144,7 +161,10 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(r)));
 
 // ------------------------------------------------------------------ a world
 const openWorlds = [];
-async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK } = {}) {
+// `readablePdf`: the stub renderer writes the invoice HTML's text into a PDF the
+// way Chromium writes text (lib/pdf-shown-text.js reads it); otherwise a
+// constant made-up PDF. `replica`: server.js's REPLICA for the block.
+async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, readablePdf = false, replica = null } = {}) {
 	const w = {
 		env: { ...env },
 		sheet: [HEADERS.slice()],
@@ -195,10 +215,10 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK } = {
 		return { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 	};
 	// lib/pdf-browser.js's busy refusal carries this code.
-	const renderHtmlToPdf = async () => {
+	const renderHtmlToPdf = async (html) => {
 		w.calls.renderer++;
 		if (w.rendererBusy) throw Object.assign(new Error("made-up: every page is in use"), { code: "PDF_RENDERER_BUSY" });
-		return Buffer.from("%PDF-1.4 made-up invoice");
+		return readablePdf ? textPdf(rules.htmlToText(html)) : Buffer.from("%PDF-1.4 made-up invoice");
 	};
 	const H = new Function(...PROVIDED, `${LIFT.text}\nreturn { ${LIFT.names.join(", ")} };`)(
 		db, brokerInvoice, quiet, proc, serverRequire, async () => sheets, async () => drive, "made-up-sheet", "made-up-gemini-key",
@@ -268,7 +288,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK } = {
 		brokerInvoiceDraft: engine,
 		nextInvoiceNumber: (date) => { w.calls.mint++; return H.nextInvoiceNumber(date); },
 		appendGmailDraft,
-		REPLICA: null,
+		REPLICA: replica,
 		logAudit: H.logAudit,
 		insertDispatchNotification: H.insertDispatchNotification,
 		io: { to: (room) => ({ emit: (event, payload) => w.sockets.push({ room, event, payload }) }) },
@@ -672,6 +692,61 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq([w.calls.prepare - before.prepare, w.calls.render - before.render, w.calls.renderer - before.renderer, w.calls.append - before.append, w.gmail.length],
 			[1, 1, 1, 0, 1], "§8 L4c ...one prepare and one render more, never a second append");
 		eq(w.drafts().map((r) => [r.invoice_id, r.recipient, r.total, r.via]), [[stuck.invoice_id, BILLING, "$1,500.00", "auto-imap"]], "§8 L4c ...one draft row, with the claim's number and the billed total");
+	}
+
+	// ===================================================================== §9
+	section("§9  the render shadow through the block, against a real draft of the same load");
+	{
+		const RENDERS = "AUTO_INVOICE_SHADOW_RENDERS_ENABLED";
+		for (const [value, want] of [["true", true], [" true ", true], ["TRUE", false], ["1", false], ["yes", false], ["on", false], ["false", false], ["", false]]) {
+			const x = await world({ env: { ...SHADOW_ENV, [RENDERS]: value } });
+			eq(x.job.shadowRenders, want, `§9 ${RENDERS}=${JSON.stringify(value)}: render shadow ${want ? "on" : "off"} (on only when exactly "true")`);
+		}
+		eq((await world({ env: { ...SHADOW_ENV, [RENDERS]: "true" }, replica: { stamp: "made-up" } })).job.shadowRenders, false, "§9 ...never in a replica (REPLICA set)");
+		eq((await world({ env: { ...ON_ENV, [RENDERS]: "true" } })).job.shadowRenders, false, "§9 ...read only in shadow mode (real drafts ignore it)");
+		ok(BLOCK.split(`process.env.${RENDERS}`).length === 2, "§9 the block reads the setting once");
+
+		// Load 123456789: the render shadow builds it, real drafts draft it; the
+		// renderer writes the invoice's text as Chromium does.
+		const shadow = await world({ env: { ...SHADOW_ENV, [RENDERS]: "true" }, readablePdf: true });
+		eq((await shadow.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§9 shadow world: the broker domain confirmed");
+		await shadow.job.tick();
+		shadow.deliver("123456789", rateCon());
+		await shadow.job.tick();
+		let row = {};
+		try { row = shadow.db.prepare("SELECT verdict, render_digest_json FROM auto_invoice_shadow WHERE load_key = '123456789'").get() || {}; } catch { row = {}; }
+		let rec = null;
+		try { rec = row.render_digest_json ? JSON.parse(row.render_digest_json) : null; } catch { rec = null; }
+		ok(row.verdict === "WOULD_ATTEMPT" && rec && rec.renderedAt, "§9 FAILS ON THE OLD CODE: the shadow stores a render digest for the ready load");
+		eq([shadow.calls.prepare, shadow.calls.render, shadow.calls.renderer], [1, 1, 1], "§9 built once, through the engine and the PDF renderer");
+		eq([shadow.calls.mint, shadow.calls.append, shadow.calls.search, shadow.calls.record, shadow.seq(), shadow.gmail.length,
+			shadow.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims").get().n, shadow.drafts().length], [0, 0, 0, 0, 0, 0, 0, 0],
+		"§9 no invoice number, no Gmail append or search, no record(), no claim and no draft row: nothing reached the fake Gmail");
+		eq(shadow.db.prepare("SELECT action FROM audit_trail ORDER BY id").all().map((r) => r.action), ["update_auto_invoice_settings"], "§9 ...and no audit row of its own");
+
+		const real = await world({ env: ON_ENV, readablePdf: true });
+		eq((await real.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§9 real-draft world: the broker domain confirmed");
+		await real.job.tick();
+		real.deliver("123456789", rateCon());
+		await real.job.tick();
+		const claim = real.claim("123456789") || {};
+		const mime = real.gmail[0] ? Buffer.from(real.gmail[0].mime, "latin1") : null;
+		eq([claim.state, Boolean(mime), claim.invoice_id], ["drafted", true, `${TODAY_SEQ}-1`], "§9 drafted with the next number, its MIME kept by the fake Gmail");
+		const sent = mimeRead && mime ? rules.messageDigest(mimeRead.parseMessage(mime), { renderedAt: "" }) : null;
+		const part = (d) => (d ? { ...d, renderedAt: undefined, fingerprintSha256: undefined } : null);
+		ok(sent && /^[0-9a-f]{64}$/.test(sent.invoiceTextSha256), "§9 the invoice PDF in the MIME is read (its masked text has a digest)");
+		eq(part(rec), part(sent), "§9 parity: the render shadow's digest equals the real draft's MIME's, field by field (the number masked)");
+		let stored = null;
+		try { stored = claim.draft_digest_json ? JSON.parse(claim.draft_digest_json) : null; } catch { stored = null; }
+		eq(part(stored), part(sent), "§9 ...and the claim's own draft digest equals it too");
+		const verdict = trialReport && mime && rec ? trialReport.judge({ expected: rec, candidates: [trialReport.sentCopy({ raw: mime })], nothingAfter: () => true }) : null;
+		eq(verdict, { found: "one", failed: [] }, "§9 the report's six conditions, run on that MIME as the Sent copy, all hold");
+
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		const at = TEMPLATE.indexOf("# --- Automatic broker invoice drafts");
+		const words = (at >= 0 ? TEMPLATE.slice(at, TEMPLATE.indexOf("\n# ---", at + 1)) : "").replace(/\n#\s?/g, " ");
+		ok(new RegExp(`(^|\\s)# ${RENDERS}=(\\s|$)|\\s${RENDERS}=\\s`).test(words) && /exactly "true", read only in shadow mode, and never in a replica/.test(words),
+			"§9 the settings template's section names it, unset: on only when exactly \"true\", shadow mode only, never in a replica");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});
