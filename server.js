@@ -3392,7 +3392,8 @@ function availabilityLoadIndexOf(jt) {
 }
 async function refreshAvailabilityLoadIndex() {
 	try {
-		availabilityLoadIndex = availabilityLoadIndexOf(await getJobTrackingCached());
+		const jt = await getJobTrackingCached();
+		availabilityLoadIndex = availabilityLoadIndexOf(jt);
 	} catch (e) {
 		availabilityLoadIndex = null;
 		console.error("[eld-feed] Job Tracking unreadable; \"Assign anyway\" confirmations count as recorded:", e.message);
@@ -11836,7 +11837,8 @@ async function runTimeOffEldCheck({ nowMs = Date.now() } = {}) {
 	if (!DRIVER_TIME_OFF_ELD_CHECK_ENABLED) return { skipped: "off" };
 	let loadIndex = null;
 	try {
-		loadIndex = availabilityLoadIndexOf(await getJobTrackingCached());
+		const jt = await getJobTrackingCached();
+		loadIndex = availabilityLoadIndexOf(jt);
 	} catch (e) {
 		console.error("[time-off-eld] Job Tracking unreadable; Not-confirmed days carry no load explanation this run:", e.message);
 	}
