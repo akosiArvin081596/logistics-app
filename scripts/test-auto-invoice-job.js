@@ -35,6 +35,12 @@
 //   §13 the recipient anchor: a non-Bison draft only to a broker domain a person
 //       confirmed (never free mail, refused by the settings); the job's own
 //       re-checks use the same rule
+//   §15 a draft a person sends from Drafts before the job looks again (after a
+//       lost answer, or a crash): found in Sent Mail, recorded, never appended
+//       a second time
+//   §16 a refusal the engine throws instead of returning is classed like a
+//       returned one: a person, a counted wait or the rate-con re-check, never
+//       an uncounted retry with a paid call each time
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -48,6 +54,7 @@ const ROOT = path.join(__dirname, "..");
 const jobLib = require(path.join(ROOT, "lib", "auto-invoice-job.js"));
 const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
 const ledgerLib = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
+const imapDraft = require(path.join(ROOT, "lib", "imap-draft.js"));
 const appTime = require(path.join(ROOT, "lib", "app-time.js"));
 const { liftSheetHelpers } = require(path.join(ROOT, "scripts", "auto-invoice-shadow-report.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
@@ -117,8 +124,9 @@ function makeWorld({ dbFile = null } = {}) {
 		files: new Set(),
 		rateCons: new Map(), // load key -> the rate con's documents email ("" for none)
 		gmail: [], // Message-IDs of the drafts in Gmail
+		sent: [], // Message-IDs in Sent Mail: drafts a person sent
 		appendBehaviors: [],
-		calls: { prepare: [], render: [], record: [], append: [], search: [], mint: [] },
+		calls: { prepare: [], render: [], record: [], append: [], search: [], searchBoxes: [], mint: [] },
 		audits: [],
 		notices: [],
 		logs: [],
@@ -161,6 +169,11 @@ function makeWorld({ dbFile = null } = {}) {
 		w.setRow(id, over);
 		w.addPod(id);
 		w.rateCons.set(rules.loadKey(id), docEmail);
+	};
+	// A person sends a draft from Gmail Drafts: it leaves Drafts for Sent Mail.
+	w.sendFromDrafts = (messageId) => {
+		const i = w.gmail.indexOf(messageId);
+		if (i >= 0) { w.gmail.splice(i, 1); w.sent.push(messageId); }
 	};
 	w.handDraft = (id, invoiceId = "10202026-50") =>
 		w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', 'made-up-admin')")
@@ -230,12 +243,22 @@ function makeWorld({ dbFile = null } = {}) {
 			if (b === "CRASH_BEFORE") return never();
 			throw new Error(`unknown behaviour ${b}`);
 		},
-		async findDraftByMessageId({ messageId }) {
+		// Searches what lib/imap-draft.js would: the mailboxes asked for, else the
+		// library's own list (Drafts alone for a library that names none), and
+		// stops at the first that holds the Message-ID.
+		async findDraftByMessageId({ messageId, mailboxes }) {
+			const boxes = mailboxes || imapDraft.SEARCH_MAILBOXES || ["[Gmail]/Drafts"];
 			w.calls.search.push(messageId);
+			w.calls.searchBoxes.push([...boxes]);
 			if (w.searchFails) throw imapError("IMAP SEARCH failed: made-up", "search", true);
-			const n = w.gmail.filter((id) => id === messageId).length;
+			let hit = { found: false, count: 0, mailbox: "" };
+			for (const box of boxes) {
+				const held = box === "[Gmail]/Drafts" ? w.gmail : box === "[Gmail]/Sent Mail" ? w.sent : [];
+				const n = held.filter((id) => id === messageId).length;
+				if (n) { hit = { found: true, count: n, mailbox: box }; break; }
+			}
 			if (w.pendingLanding) { w.gmail.push(w.pendingLanding); w.pendingLanding = null; }
-			return { found: n > 0, count: n };
+			return hit;
 		},
 		newMessageId: () => `<made-up-${++w.ids}.auto-invoice@example.com>`,
 		mailbox: () => w.mailbox,
@@ -1060,6 +1083,102 @@ async function main() {
 		await job.tick();
 		eq(w.state("LD-TEST-0183"), ["needs_attention", "BROKER_DOMAIN_UNCONFIRMED"], "§14 a Bison lookalike is not Bison: it needs a confirmed domain");
 		eq([w.state("LD-TEST-0184"), w.calls.append.map((a) => a.to)], [["drafted", ""], [BISON_AP]], "§14 a Bison subdomain is Bison: its configured inbox");
+	}
+
+	// ---------------------------------------------------------------- §15
+	section("§15 a draft a person sends from Drafts before the job looks again");
+	{
+		// The review's case: the answer is lost, the draft lands after the search,
+		// and a person sends it from Drafts within the 15 minutes before the retry.
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0190");
+		w.appendBehaviors = ["LANDS_LATE", "OK"];
+		await job.tick();
+		const lost = w.claim("LD-TEST-0190");
+		eq([lost.state, lost.stage, w.gmail, w.calls.append.length], ["queued", "appending", [lost.message_id], 1], "§15 the answer was lost and the draft landed after the search");
+		w.sendFromDrafts(lost.message_id);
+		eq([w.gmail.length, w.sent], [0, [lost.message_id]], "§15 a person sends it from Drafts: it is in Sent Mail now");
+		w.now += 16 * MIN;
+		await job.tick();
+		eq(w.state("LD-TEST-0190"), ["drafted", ""], "§15 the retry finds it in Sent Mail and records it");
+		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0190").length], [1, 0, 1, 1], "§15 one append in all: the sent invoice is never appended again");
+		eq(w.calls.searchBoxes.slice(-1)[0], ["[Gmail]/Drafts", "[Gmail]/Sent Mail"], "§15 the retry looked in Drafts, then in Sent Mail");
+		eq([w.claim("LD-TEST-0190").invoice_id, w.calls.mint.length], [lost.invoice_id, 1], "§15 one invoice number");
+	}
+	{
+		// A crash while the draft was being appended; a person sends it before the restart.
+		const w = makeWorld();
+		const before = await w.started({ workerId: "before-crash" });
+		w.ready("LD-TEST-0191");
+		w.appendBehaviors = ["CRASH_AFTER"];
+		before.tick();
+		await until(() => (w.claim("LD-TEST-0191") || {}).stage === "appending" && w.gmail.length === 1, "§15 the claim reaches appending, the draft made");
+		await tick();
+		w.sendFromDrafts(w.claim("LD-TEST-0191").message_id);
+		w.now += 16 * MIN; // the lease has run out
+		await w.job({ workerId: "after-restart" }).tick();
+		eq(w.state("LD-TEST-0191"), ["drafted", ""], "§15 after a crash: the recovery finds the sent draft in Sent Mail and records it");
+		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0191").length], [1, 0, 1, 1], "§15 after a crash: one append, never a second draft of a sent invoice");
+	}
+	{
+		// Absent from both mailboxes: the retry may append (the number never reached Gmail).
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0192");
+		w.appendBehaviors = ["LOST", "OK"];
+		await job.tick();
+		w.now += 16 * MIN;
+		await job.tick();
+		eq([w.state("LD-TEST-0192"), w.calls.append.length, w.gmail.length, w.sent.length], [["drafted", ""], 2, 1, 0], "§15 in neither mailbox: appended once more, one draft in Gmail");
+	}
+
+	// ---------------------------------------------------------------- §16
+	section("§16 a refusal the engine throws instead of returning");
+	{
+		const w = makeWorld();
+		const job = await w.started();
+		const throws = (forId, code) => (id) => {
+			if (id !== forId) return null;
+			throw Object.assign(new Error(`made-up ${code} for ${BROKER}`), { code });
+		};
+		const prepares = (id) => w.calls.prepare.filter((p) => p.loadId === id).length;
+
+		// A rate-con total that wasn't read: a person after one engine call.
+		w.ready("LD-TEST-0200");
+		w.prepareHook = throws("LD-TEST-0200", "RATECON_TOTAL_UNREAD");
+		await job.tick();
+		for (let i = 0; i < 4; i++) { w.now += 15 * MIN; await job.tick(); }
+		eq([w.state("LD-TEST-0200"), prepares("LD-TEST-0200"), w.calls.mint.length], [["needs_attention", "RATECON_TOTAL_UNREAD"], 1, 0],
+			"§16 a thrown RATECON_TOTAL_UNREAD: a person after one engine call, no number, never retried");
+
+		// "Not ready" thrown: counted like a returned one, a person after three.
+		w.ready("LD-TEST-0201");
+		w.prepareHook = throws("LD-TEST-0201", "POD_NOT_FOUND");
+		for (let i = 0; i < 6; i++) { await job.tick(); w.now += 5 * MIN; }
+		const wait = w.claim("LD-TEST-0201");
+		eq([wait.state, wait.reason_code, wait.attempts, prepares("LD-TEST-0201")], ["needs_attention", "POD_UNREADABLE", 3, 3],
+			"§16 a thrown POD_NOT_FOUND: counted, a person after three engine calls");
+
+		// No rate con thrown: the 2-hour re-check, not a retry every 5 minutes.
+		w.ready("LD-TEST-0202");
+		w.prepareHook = throws("LD-TEST-0202", "RATECON_MISSING");
+		await job.tick();
+		w.now += HOUR;
+		await job.tick();
+		const missing = w.claim("LD-TEST-0202");
+		eq([missing.state, missing.reason_code, missing.ratecon_checks, prepares("LD-TEST-0202")], ["waiting", "RATECON_MISSING", 1, 1],
+			"§16 a thrown RATECON_MISSING: waiting for the 2-hour re-check, one engine call in the hour");
+
+		// Anything else thrown (an outage, a bug): a counted retry, as before.
+		w.ready("LD-TEST-0203");
+		w.prepareHook = throws("LD-TEST-0203", undefined);
+		await job.tick();
+		const other = w.claim("LD-TEST-0203");
+		eq([other.state, other.reason_code, other.attempts, other.next_attempt_at], ["queued", "RETRY_LATER", 1, new Date(w.now + 15 * MIN).toISOString()],
+			"§16 an error with no code: queued again in 15 minutes, the attempt counted");
+		w.prepareHook = null;
+		ok(!w.logs.some((l) => /@|made-up RATECON|made-up POD/.test(l)), "§16 no error message or address in the logs");
 	}
 }
 

@@ -17,7 +17,7 @@ Four roles, each with a tailored experience.
 | **Super Admin** | Operations leadership. Manages users, reviews applications, approves invoices, sees full financials. | Dashboard + every admin route |
 | **Dispatcher** | Daily operations. Assigns loads, tracks trucks live, handles driver communication. | Dashboard, tracking map, messages |
 | **Driver** | The person in the truck. Accepts loads, reports GPS, updates status, uploads POD, logs expenses. | Mobile-optimized `/driver` view |
-| **Investor** | The owner-operator who funded a truck. Sees earnings, fleet performance, and signed documents. | `/investor` dashboard |
+| **Investor** | The person who funded a truck. Sees earnings, fleet performance, and signed documents. | `/investor` dashboard |
 
 In addition, three public flows require no login: driver applications at `/apply`, investor applications at `/invest`, and the customer load tracker at `/track/:loadId`.
 

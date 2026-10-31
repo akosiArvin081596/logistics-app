@@ -42,7 +42,7 @@ Edge cases where the approval succeeded but the user creation failed silently. R
 ## Invoices
 
 **Q. How are invoices generated?**
-A scheduled background job runs weekly and creates an invoice per driver for the prior period. It includes all loads delivered in the period, calculates active days (for daily-rate) or revenue × percentage (for owner-op), and saves the invoice with status Pending.
+A scheduled background job runs weekly and creates an invoice per driver for the prior period. It includes all loads delivered in the period, calculates active days (for daily-rate) or revenue × percentage (for percentage drivers), and saves the invoice with status Pending.
 
 **Q. Can I generate an invoice manually?**
 Yes — the `POST /api/invoices/generate` endpoint. The UI may surface this as a button on the Invoices page.

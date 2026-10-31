@@ -28,7 +28,10 @@
  *      answered: only a timeout after the message was streamed ("literal", no
  *      answer) leaves the draft possibly made. findDraftByMessageId() opens the
  *      Drafts read-only (EXAMINE), searches the header and finds a draft by its
- *      Message-ID, or not; its failures name their stage too.
+ *      Message-ID, or not; its failures name their stage too. A draft a person
+ *      has sent is in Sent Mail, not Drafts: the search opens Sent Mail next
+ *      (read-only too) and says where it found the message; a Sent Mail it
+ *      can't open is a failure, never "absent".
  *   §5 THE HARNESS'S FAKE GMAIL (scripts/e2e/fake-gmail.cjs), preloaded into a
  *      child process as the browser harness preloads it into the server: drafts
  *      APPENDed through the library are found by their Message-ID with EXAMINE
@@ -95,11 +98,13 @@ const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer 
 // ---------------------------------------------------------------- fake IMAP
 // Greeting, LOGIN, APPEND with a synchronizing literal, LOGOUT; anything else
 // is BAD (§4 adds EXAMINE and SEARCH HEADER Message-ID, answered from the
-// Message-IDs of the drafts APPENDed so far). `answer` picks OK or NO for LOGIN,
-// APPEND and SEARCH; "HANG" for the greeting or the APPEND sends nothing. Every
-// connection is recorded in `sessions`: the commands in order, the LOGIN
-// arguments, the APPEND with its literal, the EXAMINE mailbox, the SEARCH
-// arguments and the raw bytes received.
+// Message-IDs held in the mailbox examined: the drafts APPENDed so far are in
+// [Gmail]/Drafts, and `sent` holds [Gmail]/Sent Mail's). `answer` picks OK or NO
+// for LOGIN, APPEND and SEARCH; "HANG" for the greeting or the APPEND sends
+// nothing; `answer.examineNo` names a mailbox whose EXAMINE gets NO, and a
+// mailbox the server doesn't have gets NO too. Every connection is recorded in
+// `sessions`: the commands in order, the LOGIN arguments, the APPEND with its
+// literal, the EXAMINE mailboxes, the SEARCH arguments and the raw bytes received.
 function unquote(q) { return q.slice(1, -1).replace(/\\(.)/g, "$1"); }
 const QUOTED = '"(?:[^"\\\\]|\\\\.)*"';
 const LOGIN_ARGS = new RegExp(`^(${QUOTED}) (${QUOTED})$`);
@@ -116,10 +121,12 @@ function messageIdOf(literal) {
 
 function fakeImap() {
 	const sessions = [];
-	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK" };
+	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK", examineNo: "" };
 	const stored = []; // Message-IDs of the drafts appended, in order
+	const sent = []; // Message-IDs in Sent Mail
+	const held = { "[Gmail]/Drafts": stored, "[Gmail]/Sent Mail": sent };
 	const server = net.createServer((sock) => {
-		const s = { commands: [], login: null, append: null, examine: null, search: null, received: [], appendLineEnd: null };
+		const s = { commands: [], login: null, append: null, examine: null, examines: [], search: null, received: [], appendLineEnd: null };
 		s.closed = new Promise((resolve) => sock.on("close", resolve));
 		sessions.push(s);
 		let buf = Buffer.alloc(0);
@@ -169,14 +176,16 @@ function fakeImap() {
 					const m = EXAMINE_ARGS.exec(args);
 					if (!m) { reply(`${tag} BAD malformed EXAMINE`); continue; }
 					s.examine = unquote(m[1]);
-					reply(`* ${stored.length} EXISTS`);
+					s.examines.push(s.examine);
+					if (!held[s.examine] || s.examine === answer.examineNo) { reply(`${tag} NO [NONEXISTENT] Unknown Mailbox`); continue; }
+					reply(`* ${held[s.examine].length} EXISTS`);
 					reply(`${tag} OK [READ-ONLY] EXAMINE completed`);
 				} else if (/^SEARCH$/i.test(verb)) {
 					const m = SEARCH_ARGS.exec(args);
 					s.search = m ? unquote(m[1]) : { unparsed: args };
 					if (!m) { reply(`${tag} BAD malformed SEARCH`); continue; }
 					if (answer.search !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
-					const hits = stored.map((id, i) => (id === s.search ? i + 1 : 0)).filter(Boolean);
+					const hits = (held[s.examine] || []).map((id, i) => (id === s.search ? i + 1 : 0)).filter(Boolean);
 					reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
 					reply(`${tag} OK SEARCH completed`);
 				} else if (/^LOGOUT$/i.test(verb)) {
@@ -190,7 +199,7 @@ function fakeImap() {
 			}
 		});
 	});
-	return { server, sessions, answer, stored };
+	return { server, sessions, answer, stored, sent };
 }
 
 // The bytes the client sent for the APPEND literal, counted from the raw stream
@@ -247,7 +256,7 @@ function decodedBody(part) {
 
 // ------------------------------------------------------------------- the run
 async function main() {
-	const { server, sessions, answer } = fakeImap();
+	const { server, sessions, answer, sent } = fakeImap();
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = server.address().port;
 
@@ -376,10 +385,35 @@ async function main() {
 		const found = await find();
 		const findSession = sessions[sessions.length - 1];
 		await within(findSession.closed, 3000);
-		eq(found.value, { found: true, count: 1 }, "§4 the draft appended with that Message-ID is found");
-		eq(findSession.commands, ["LOGIN", "EXAMINE", "SEARCH", "LOGOUT"], "§4 the search is LOGIN, EXAMINE (read-only), SEARCH, LOGOUT");
-		eq([findSession.login && findSession.login.user, findSession.examine, findSession.search], [USER, "[Gmail]/Drafts", ID], "§4 it opens the Drafts and searches the Message-ID header");
-		eq((await find({ messageId: "<made-up-9999.auto-invoice@example.com>" })).value, { found: false, count: 0 }, "§4 an unknown Message-ID is not found");
+		eq(found.value, { found: true, count: 1, mailbox: "[Gmail]/Drafts" }, "§4 the draft appended with that Message-ID is found, in Drafts");
+		eq(findSession.commands, ["LOGIN", "EXAMINE", "SEARCH", "LOGOUT"], "§4 found in Drafts: LOGIN, EXAMINE (read-only), SEARCH, LOGOUT; Sent Mail is not opened");
+		eq([findSession.login && findSession.login.user, findSession.examines, findSession.search], [USER, ["[Gmail]/Drafts"], ID], "§4 it opens the Drafts and searches the Message-ID header");
+		const unknown = await find({ messageId: "<made-up-9999.auto-invoice@example.com>" });
+		const unknownSession = sessions[sessions.length - 1];
+		await within(unknownSession.closed, 3000);
+		eq(unknown.value, { found: false, count: 0, mailbox: "" }, "§4 an unknown Message-ID is not found");
+		eq([unknownSession.commands, unknownSession.examines], [["LOGIN", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "LOGOUT"], ["[Gmail]/Drafts", "[Gmail]/Sent Mail"]],
+			"§4 ...after Drafts and then Sent Mail were searched, each opened read-only");
+
+		// A draft a person sent from Drafts lives in Sent Mail.
+		const SENT_ID = "<made-up-0002.auto-invoice@example.com>";
+		sent.push(SENT_ID);
+		const inSent = await find({ messageId: SENT_ID });
+		const sentSession = sessions[sessions.length - 1];
+		await within(sentSession.closed, 3000);
+		eq(inSent.value, { found: true, count: 1, mailbox: "[Gmail]/Sent Mail" }, "§4 a draft a person has sent is found in Sent Mail, and says so");
+		eq(sentSession.commands, ["LOGIN", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "LOGOUT"], "§4 ...Drafts first, then Sent Mail: EXAMINE and SEARCH only, never SELECT, STORE or APPEND");
+		eq(sentSession.examines, ["[Gmail]/Drafts", "[Gmail]/Sent Mail"], "§4 ...both opened with EXAMINE (read-only)");
+		eq((await find({ messageId: SENT_ID, mailboxes: ["[Gmail]/Drafts"] })).value, { found: false, count: 0, mailbox: "" }, "§4 a search asked for Drafts alone looks nowhere else");
+		answer.examineNo = "[Gmail]/Sent Mail";
+		const noSent = await find({ messageId: "<made-up-9998.auto-invoice@example.com>" });
+		eq(noSent.error && [noSent.error.stage, noSent.error.answered, noSent.value], ["examine", true, undefined],
+			"§4 a Sent Mail that can't be opened rejects (stage examine): \"absent\" is never said without both searches");
+		answer.examineNo = "";
+		const dialsBeforeBoxes = dials.length;
+		const badBoxes = await Promise.all([[], ["[Gmail]/Drafts\r\na9 SELECT x"], "[Gmail]/Drafts", [""]].map((mailboxes) => find({ mailboxes })));
+		eq([badBoxes.map((r) => r.error && r.error.stage), dials.length], [["credentials", "credentials", "credentials", "credentials"], dialsBeforeBoxes],
+			"§4 a mailbox list that is empty, not a list, or holds a line break is refused before any connection");
 		answer.search = "NO";
 		const searchNo = await find();
 		eq(searchNo.error && [searchNo.error.stage, searchNo.error.answered], ["search", true], "§4 a NO to the SEARCH rejects: stage search");
@@ -415,9 +449,9 @@ async function main() {
 		eq(child.status, 0, `§5 the child ran (stderr: ${String(child.stderr || "").trim().split("\n").slice(-1)[0] || "none"})`);
 		const g = got || {};
 		eq(g.appended, [true, true, true], "§5 three drafts appended through the library");
-		eq(g.findA, { found: true, count: 1 }, "§5 findDraftByMessageId() finds the first draft by its Message-ID");
-		eq(g.findB, { found: true, count: 1 }, "§5 and the second");
-		eq(g.findUnknown, { found: false, count: 0 }, "§5 an unknown Message-ID is not found");
+		eq(g.findA, { found: true, count: 1, mailbox: "[Gmail]/Drafts" }, "§5 findDraftByMessageId() finds the first draft by its Message-ID");
+		eq(g.findB, { found: true, count: 1, mailbox: "[Gmail]/Drafts" }, "§5 and the second");
+		eq(g.findUnknown, { found: false, count: 0, mailbox: "" }, "§5 an unknown Message-ID is not found (Drafts and Sent Mail both answer)");
 		eq(g.raw, [
 			"a1 OK", "a2 BAD", "* 3 EXISTS", "a3 OK", "* SEARCH 2", "a4 OK", "* SEARCH", "a5 OK", "a6 BAD", "a7 OK",
 		], "§5 raw: LOGIN; SEARCH before a mailbox BAD; SELECT counts 3; SEARCH finds #2; an unknown id finds none; SEARCH ALL is BAD");

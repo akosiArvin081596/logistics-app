@@ -150,6 +150,8 @@ const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
+// Who set each load status, and where the truck was at "At Shipper" (ARRIVAL_PICKUP_RECORDER_ENABLED).
+const arrivalRecorder = require("./lib/arrival-recorder");
 // A live ETA against the Drop-off Appointment, on the receiver's clock.
 const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
@@ -1488,19 +1490,58 @@ const insertStatusHistory = db.prepare(
 	`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason) VALUES (?, ?, ?, ?, ?, ?)`
 );
 
+// The arrival recorder's facts (lib/arrival-recorder.js). Added at boot whatever
+// the flag, so every copy of the database has them; rows written with it off
+// keep them empty.
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN actor_role TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN fix_ms INTEGER"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_distance_m REAL"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_zone TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN local_tz TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN other_load_hauling INTEGER"); } catch { /* column already exists */ }
+// On only when exactly "true", read once. Off, every writer inserts today's six
+// columns through today's statement and no lookup runs.
+const ARRIVAL_PICKUP_RECORDER_ENABLED = process.env.ARRIVAL_PICKUP_RECORDER_ENABLED === "true";
+console.log(`[arrival-recorder] ARRIVAL_PICKUP_RECORDER_ENABLED ${ARRIVAL_PICKUP_RECORDER_ENABLED ? "on" : "off"}`);
+// The same row with the recorder's six facts. null when it can't be prepared,
+// and every row then takes today's statement.
+const insertStatusHistoryRecorded = (() => {
+	try {
+		return db.prepare(
+			`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason,
+				actor_role, fix_ms, pickup_distance_m, pickup_zone, local_tz, other_load_hauling)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		);
+	} catch (err) {
+		console.error("[arrival-recorder] the recorder's insert could not be prepared:", err.message);
+		return null;
+	}
+})();
+
 // Record one load status transition for the phase timeline. Best-effort: never
 // throws into the caller (a failed history write must not break a status update),
 // and skips no-op transitions (old === new, case-insensitive) so a re-saved
 // identical status or a geofence re-fire doesn't create duplicate rows. load_id
 // is normalized (lowercase, leading '#' stripped) to match the lookup convention.
-function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reason }) {
+// `facts` are the arrival recorder's (actorRole, fixMs, ...), stored only with it on.
+function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reason, ...facts }) {
 	try {
 		const lid = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
 		const ns = String(newStatus || "").trim();
 		if (!lid || !ns) return;
 		const os = String(oldStatus || "").trim();
 		if (os && os.toLowerCase() === ns.toLowerCase()) return; // no-op transition
-		insertStatusHistory.run(lid, os, ns, source || "manual", String(actor || "").trim(), String(reason || "").trim().slice(0, 500));
+		const row = [lid, os, ns, source || "manual", String(actor || "").trim(), String(reason || "").trim().slice(0, 500)];
+		// A failed write of the facts falls back to today's row, so no transition goes unrecorded.
+		if (ARRIVAL_PICKUP_RECORDER_ENABLED && insertStatusHistoryRecorded) {
+			try {
+				insertStatusHistoryRecorded.run(...row, ...arrivalRecorder.historyColumns(facts));
+				return;
+			} catch (err) {
+				console.error("recordStatusChange (arrival facts) error:", err.message);
+			}
+		}
+		insertStatusHistory.run(...row);
 	} catch (err) {
 		console.error("recordStatusChange error:", err.message);
 	}
@@ -4695,6 +4736,7 @@ async function routemateSyncTelemetry() {
 						loadId: cand.loadId,
 						routemateVehicleId: t.routemate_vehicle_id,
 						speedMps: t.speed,
+						fixMs: t._fixMs, candidates,
 					});
 					if (advanced) break;   // one transition per ping
 				} catch (geoErr) {
@@ -37784,7 +37826,7 @@ function refusePayEdit(req, res, { entity, entityId, subject, changes }) {
 	logAuditRefusal(req, "pay_edit_blocked", entity, auditText(entityId, 100),
 		`${auditText(subject, 300) || "pay settings"}: ${auditText(attempted, 300)} WITHHELD [${PAY_EDIT_ADMIN_ONLY}] — nothing was written`,
 		PAY_EDIT_ADMIN_ONLY);
-	const LABEL = { pay_type: "pay type", pay_percentage: "owner-operator share", pay_daily: "daily rate", driver_pay_daily: "truck's driver pay" };
+	const LABEL = { pay_type: "pay type", pay_percentage: "percentage driver share", pay_daily: "daily rate", driver_pay_daily: "truck's driver pay" };
 	const show = (field, v) => {
 		if (field === "pay_type") return String(v);
 		if (field === "pay_percentage") return `${v}%`;
@@ -44797,7 +44839,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
-			recordStatusChange({ loadId, newStatus: 'Dispatched', source: 'dispatch', actor: req.session?.user?.username || '' });
+			recordStatusChange({ loadId, newStatus: 'Dispatched', source: 'dispatch', actor: req.session?.user?.username || '', actorRole: req.session?.user?.role });
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
@@ -45151,7 +45193,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				requestBody: { values: [["Cancelled"]] },
 			});
 		}
-		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason });
+		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason, actorRole: req.session?.user?.role });
 		logAudit(req, 'cancel_load', 'load', loadId, `Cancelled load ${loadId || 'N/A'}${boundDriver ? ` (driver: ${boundDriver})` : ''} — reason: ${cancelReason}`);
 
 		// Notify driver — the one the SHEET says is on this load.
@@ -45975,7 +46017,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 					requestBody: { values: [["Assigned"]] },
 				});
 			}
-			recordStatusChange({ loadId, oldStatus: 'Dispatched', newStatus: 'Assigned', source: 'accept', actor: driverName });
+			recordStatusChange({ loadId, oldStatus: 'Dispatched', newStatus: 'Assigned', source: 'accept', actor: driverName, actorRole: req.session?.user?.role });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -46013,7 +46055,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 					requestBody: { values: [["Unassigned"]] },
 				});
 			}
-			recordStatusChange({ loadId, newStatus: 'Unassigned', source: 'decline', actor: driverName });
+			recordStatusChange({ loadId, newStatus: 'Unassigned', source: 'decline', actor: driverName, actorRole: req.session?.user?.role });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -49751,7 +49793,8 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		});
 
 		logAudit(req, 'update_status', 'load', loadId, `Status changed to "${newStatus}" for load ${loadId} (driver: ${driverName})`);
-		recordStatusChange({ loadId, oldStatus, newStatus, source: 'manual', actor: driverName });
+		recordStatusChange({ loadId, oldStatus, newStatus, source: 'manual', actor: driverName, actorRole: req.session?.user?.role,
+			...arrivalRecorder.positionFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, newStatus, loadId, headers, row: currentRow, readers: arrivalRecorderReaders }) });
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating driver status:", error.message);
@@ -50058,7 +50101,8 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		});
 
 		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${canonicalStatus}" by ${overrideUser}: ${reason.trim()}`);
-		recordStatusChange({ loadId, oldStatus, newStatus: canonicalStatus, source: 'override', actor: overrideUser });
+		recordStatusChange({ loadId, oldStatus, newStatus: canonicalStatus, source: 'override', actor: overrideUser, actorRole: req.session?.user?.role,
+			...arrivalRecorder.positionFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, newStatus: canonicalStatus, loadId, headers, row: currentRow, readers: arrivalRecorderReaders }) });
 		res.json({ success: true, oldStatus, newStatus: canonicalStatus });
 	} catch (error) {
 		console.error("Error overriding load status:", error.message);
@@ -50929,6 +50973,7 @@ async function ingestLinxupPosition(pos) {
 					// Linxup replaces the Routemate poller — taking the time-out
 					// half of detention with it.
 					speedMps: pos.speed,
+					fixMs: pos.location_date_ms || Date.now(), candidates: driverActiveLoads,
 				});
 				if (advanced) break;   // one transition per ping
 			} catch (e) { console.error("[linxup] geofence error:", e.message); }
@@ -58972,6 +59017,22 @@ function resolveGeofencePoints(loadData, headers, loadId) {
 	};
 }
 
+// The arrival recorder's readers for a tap or an override (lib/arrival-recorder.js
+// positionFacts()): the load's truck as the Truck cell or the money stamps name it,
+// the device's link time, and the geofence's own pickup point, never the network
+// geocode in ensureLoadCoordinates().
+function arrivalRecorderReaders() {
+	return {
+		db,
+		radiusM: GEOFENCE_RADIUS,
+		truckColRe: HAUL_TRUCK_COL_RE,
+		truckByUnit: (unit) => haulTruckByUnitStmt.get(unit),
+		truckForDriver: (name) => findTruckForDriverStamp(name, { activeAssignment: true }),
+		linkedSinceMs: (truckId, vid) => eldDeviceLinkedSinceMs(truckId, vid),
+		pickupPoint: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId).origin,
+	};
+}
+
 function checkGeofence(lat, lng, loadData, headers, loadId) {
 	const { origin, dest } = resolveGeofencePoints(loadData, headers, loadId);
 	const here = { latitude: lat, longitude: lng };
@@ -58987,7 +59048,9 @@ function checkGeofence(lat, lng, loadData, headers, loadId) {
 // status, only transitions from a valid predecessor status, AND requires the
 // previous (non-dropped) telemetry fix to also be inside the same geofence
 // trigger so a single noisy ping can't flip status mid-highway-pass.
-async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps }) {
+// `fixMs` (the ping's own time) and `candidates` (the loads asked at this ping,
+// with their statuses) are for the arrival recorder's facts only.
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps, fixMs, candidates }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
 	// Never advance a soft-deleted load — its sheet row keeps its old status.
 	// Both location paths already skip them; this holds for any future caller.
@@ -59138,6 +59201,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				reason: distanceM === null
 					? "auto by GPS"
 					: `auto by GPS — ${distanceM} m from the mapped ${trigger === "At Receiver" ? "delivery" : "pickup"} point (radius ${GEOFENCE_RADIUS} m)`,
+				...arrivalRecorder.geofenceFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, trigger, loadId, fixMs, latitude, longitude, distanceM, pickup: zonePoints.origin, candidates }),
 			});
 
 			const geoMsg = (trigger === "At Shipper"
@@ -73443,8 +73507,9 @@ require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folde
 // live in lib/kpi-metrics.js; this block only gathers, stores and serves.
 //
 // WHAT IT WRITES: its own kpi_* tables, app_settings 'kpi.settings' (the page's
-// settings) and server_state 'kpi.derived' (the AI dispatch start the last run
-// derived). Nothing else, and never a money record.
+// settings), server_state 'kpi.derived' (the AI dispatch start the last run
+// derived) and, with KPI_WEEKLY_ENABLED, server_state 'kpi.weekly_since'.
+// Nothing else, and never a money record.
 //
 // AGGREGATES ONLY. What leaves this block (the API, the stored payloads, the
 // email, the logs) is counts, totals and rates. No driver, broker, shipper or
@@ -73524,6 +73589,29 @@ db.exec(`
 		PRIMARY KEY (metric_key, period)
 	)
 `);
+// The weekly series (KPI_WEEKLY_ENABLED; lib/kpi-metrics.js): per weekly metric,
+// the 13 complete Saturday-to-Friday weeks before the run's week and that week to
+// date (partial 1); each complete week holds its comparison with the week before
+// (vs_*), worked out by the run. Replaced by every run with the flag on, never
+// read or written with it off. Created whatever the flag.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_series_weekly (
+		metric_key TEXT NOT NULL,
+		week_start TEXT NOT NULL,
+		week_end TEXT NOT NULL,
+		to_day TEXT NOT NULL,
+		partial INTEGER NOT NULL DEFAULT 0,
+		label TEXT NOT NULL DEFAULT '',
+		value REAL,
+		display TEXT NOT NULL DEFAULT '',
+		coverage REAL,
+		vs_label TEXT,
+		vs_display TEXT,
+		vs_status TEXT,
+		computed_at TEXT NOT NULL,
+		PRIMARY KEY (metric_key, week_start)
+	)
+`);
 // A Super Admin's "approved for public use" per metric. It counts only while
 // definition_version and settings_hash still match the catalog and the settings
 // the metric reads (kpiCatalog.approvalIsValid()); no row means not approved.
@@ -73588,6 +73676,22 @@ const KPI_DIGEST_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_DI
 // The nightly deadhead route calls (paid Google Routes calls, about $0 inside the
 // free tier): default OFF, on only for true/1/yes/on (kpiDeadheadRoutes.routesEnabled()).
 const KPI_DEADHEAD_ROUTES_ENABLED = kpiDeadheadRoutes.routesEnabled(process.env.KPI_DEADHEAD_ROUTES_ENABLED);
+// Weekly figures beside the monthly ones (R16): default OFF, on only for exactly
+// "true". Off, nothing weekly is computed, stored or served, and every KPI
+// answer is as it was before weekly figures existed.
+const KPI_WEEKLY_ENABLED = process.env.KPI_WEEKLY_ENABLED === "true";
+const KPI_WEEKLY_SINCE_KEY = "kpi.weekly_since";
+const KPI_WEEKLY_VS_STATUSES = ["ok", "missing", "withheld"];
+console.log(`[kpi] weekly figures ${KPI_WEEKLY_ENABLED ? "on" : "off"} (KPI_WEEKLY_ENABLED)`);
+// The first start with weekly figures on records when they began, once, so an
+// approval given before weekly figures existed can be told from one given after.
+if (KPI_WEEKLY_ENABLED) {
+	try {
+		db.prepare("INSERT OR IGNORE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(KPI_WEEKLY_SINCE_KEY, new Date().toISOString());
+	} catch {
+		console.error("[kpi] could not record when weekly figures began");
+	}
+}
 
 // The run's time box, and the Drive phase's and the deadhead route phase's
 // shares of it.
@@ -73964,6 +74068,8 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 		deadheadRoutes: dbIn.milesData.routes,
 		truckAt: buildHaulTruckResolver(),
 		timeZone: APP_TIMEZONE,
+		// R16: weekly rows only with the flag on; off, the inputs are as before.
+		...(KPI_WEEKLY_ENABLED ? { weekly: true } : {}),
 	};
 }
 
@@ -74138,15 +74244,37 @@ function kpiPayload(m, note) {
 	return "{}";
 }
 
+// One metric's weekly rows as kpi_series_weekly stores them (R16), each field
+// checked and cut to size; a row that is not a real week is dropped. Only a
+// weekly metric (lib/kpi-catalog.js weeklyModeOf()) has rows.
+function kpiWeeklyRowsOf(m) {
+	const w = m && m.weekly && typeof m.weekly === "object" && m.weekly.mode === "weekly" && Array.isArray(m.weekly.rows) ? m.weekly.rows : [];
+	const text = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+	const out = [];
+	for (const r of w) {
+		if (!r || !kpiIsDay(r.weekStart) || !kpiIsDay(r.weekEnd) || !kpiIsDay(r.to)) continue;
+		const vs = r.vs && typeof r.vs === "object" ? r.vs : null;
+		out.push([
+			r.weekStart, r.weekEnd, r.to, r.partial === true ? 1 : 0, text(r.label, 60),
+			Number.isFinite(r.value) ? r.value : null, text(r.display, 60), Number.isFinite(r.coverage) ? r.coverage : null,
+			vs ? text(vs.label, 60) : null, vs ? text(vs.display, 60) : null,
+			vs ? (KPI_WEEKLY_VS_STATUSES.includes(vs.status) ? vs.status : "missing") : null,
+		]);
+	}
+	return out;
+}
+
 // Store one run's results for business day `day`, in ONE transaction: that
-// day's snapshot rows (upserted), the whole series (replaced) and the derived
-// AI dispatch start. Returns the number of metrics stored.
+// day's snapshot rows (upserted), the whole series (replaced), with
+// KPI_WEEKLY_ENABLED the whole weekly series (replaced), and the derived AI
+// dispatch start. Returns the number of metrics stored.
 function kpiStoreResult(day, result, note) {
 	const computedAt = new Date().toISOString();
 	const latest = db.prepare("SELECT MAX(day) AS day FROM kpi_snapshots").get();
 	if (latest && latest.day && latest.day > day) throw kpiStop("CLOCK_BEHIND");
 	const snapRows = [];
 	const seriesRows = [];
+	const weeklyRows = [];
 	for (const m of (result && Array.isArray(result.metrics) ? result.metrics : [])) {
 		const meta = m && kpiCatalog.METRIC_KEYS.includes(m.key) ? kpiCatalog.metricByKey(m.key) : null;
 		if (!meta) {
@@ -74173,6 +74301,7 @@ function kpiStoreResult(day, result, note) {
 				computedAt,
 			]);
 		}
+		if (KPI_WEEKLY_ENABLED) for (const w of kpiWeeklyRowsOf(m)) weeklyRows.push([m.key, ...w, computedAt]);
 	}
 	const a = result && result.derived && result.derived.aiDispatchStart ? result.derived.aiDispatchStart : {};
 	const derived = { aiDispatchStart: { value: kpiIsDay(a.value) ? a.value : null, evidence: typeof a.evidence === "string" ? a.evidence.slice(0, 300) : "" } };
@@ -74184,10 +74313,18 @@ function kpiStoreResult(day, result, note) {
 			definition_version = excluded.definition_version, payload = excluded.payload, computed_at = excluded.computed_at
 	`);
 	const series = db.prepare("INSERT INTO kpi_series (metric_key, period, value, display, coverage, computed_at) VALUES (?, ?, ?, ?, ?, ?)");
+	const weeklyInsert = KPI_WEEKLY_ENABLED ? db.prepare(
+		`INSERT INTO kpi_series_weekly (metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status, computed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) : null;
 	db.transaction(() => {
 		for (const r of snapRows) snap.run(...r);
 		db.prepare("DELETE FROM kpi_series").run();
 		for (const r of seriesRows) series.run(...r);
+		if (weeklyInsert) {
+			db.prepare("DELETE FROM kpi_series_weekly").run();
+			for (const r of weeklyRows) weeklyInsert.run(...r);
+		}
 		db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(KPI_DERIVED_KEY, JSON.stringify(derived));
 	})();
 	return snapRows.length;
@@ -74386,6 +74523,11 @@ function kpiResponse(nowMs) {
 		: [];
 	const series = db.prepare("SELECT metric_key, period, value, display, coverage, computed_at FROM kpi_series ORDER BY metric_key, period").all();
 	const approvals = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals").all();
+	// R16: the stored weekly rows, only with the flag on; off, the builder gets
+	// exactly the arguments it got before weekly figures existed.
+	const weeklyArgs = KPI_WEEKLY_ENABLED
+		? { weekly: true, weeklyRows: db.prepare("SELECT metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status FROM kpi_series_weekly ORDER BY metric_key, week_start").all() }
+		: {};
 	const response = kpiMetrics.buildKpiResponse({
 		asOfDay: latestDay || appTime.dayInZone(new Date(nowMs), APP_TIMEZONE),
 		timeZone: APP_TIMEZONE,
@@ -74400,6 +74542,7 @@ function kpiResponse(nowMs) {
 		snapshots,
 		series,
 		approvals,
+		...weeklyArgs,
 	});
 	return kpiEnforceApprovals(response, approvals, kpiApprovalSettings(settings));
 }

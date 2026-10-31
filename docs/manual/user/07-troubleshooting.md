@@ -61,7 +61,7 @@ The Carrier Database is the source of truth for driver names. Find the load in D
 ## Super Admin issues
 
 **"An invoice has the wrong driver pay."**
-Check the driver's pay_type. Owner-operators are paid as a percentage of revenue; standard drivers are paid by active days. Check the load dates the invoice covers — if a load spans a date with a different pay rate, you may need to manually adjust.
+Check the driver's pay_type. Percentage drivers are paid as a percentage of revenue; standard drivers are paid by active days. Check the load dates the invoice covers — if a load spans a date with a different pay rate, you may need to manually adjust.
 
 **"Cancelling a load didn't remove it from financials."**
 Cancellations are filtered out by the standard exclusion logic. If the load is still showing in financials, check the load's actual status — if it says "Cancellation Pending" or similar instead of "Cancelled", the exclusion regex didn't match. Set the status to exactly "Cancelled" and the load drops out.

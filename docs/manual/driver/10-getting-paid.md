@@ -23,9 +23,9 @@ Driver Pay for the week =
   $250 × (number of unique calendar days you were active on any load)
 ```
 
-### Owner-operator (percentage of revenue)
+### Percentage driver (percentage of revenue)
 
-If you're an owner-operator, you get a **percentage of the load's revenue** rather than a daily rate.
+If you're a percentage driver, you get a **percentage of the load's revenue** rather than a daily rate.
 
 - Typical splits are **70% to driver / 30% to company** but yours may differ — check your contract.
 - The percentage is calculated on **gross revenue** of the load.
@@ -50,7 +50,7 @@ Each invoice shows:
 
 - **The period covered** (e.g., "Apr 14 - Apr 20, 2026").
 - **The loads included** — Load ID, pickup city, dropoff city, dates.
-- **Active days** (daily rate) or **revenue and percentage** (owner-op).
+- **Active days** (daily rate) or **revenue and percentage** (percentage driver).
 - **Base pay** before any adjustments.
 - **Adjustments** — additions or subtractions for unusual circumstances.
 - **Total** — what you'll be paid.
@@ -90,7 +90,7 @@ Three common things to verify before you complain:
 
 2. **Are the dates correct?** For daily-rate pay, an incorrect pickup or dropoff date can mean a multi-day load is counted as fewer days. The dates need to match the actual pickup-to-delivery span.
 
-3. **Are the rates correct?** For owner-op, the rate per load comes from the original rate confirmation. If the rate in the system doesn't match what was agreed, ask dispatch — there may have been a typo on entry.
+3. **Are the rates correct?** For a percentage driver, the rate per load comes from the original rate confirmation. If the rate in the system doesn't match what was agreed, ask dispatch — there may have been a typo on entry.
 
 To raise an issue:
 

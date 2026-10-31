@@ -26,7 +26,8 @@
  *      by $X. This may be a DVIR deduction; check the rate con." when there is no readable text
  *      and the held Payment (the first Payment column holding amounts, "Payment Terms" skipped)
  *      dropped by a positive multiple of $35, and no line otherwise; long whitespace runs and
- *      many DVIR mentions stay fast.
+ *      many DVIR mentions stay fast; both readers decode one string's escapes in at most its
+ *      first 200,000 characters (a 4 MB string promptly, the escape across the cut whole).
  *   §2 the extract route, lifted (Gemini stubbed): the text is read after the response is sent;
  *      a readable rate con's reading is kept under the extracted load number (any spelling
  *      normLoadKey() folds), an unreadable one as not readable; the response is unchanged; a
@@ -221,6 +222,21 @@ function section1() {
 	t0 = Date.now();
 	line(null, [{ column: `Payment${" ".repeat(1_000_000)}`, stored: "$70.00", sent: "$35.00" }]);
 	ok("§1 a 1 MB column name is read in under 1000 ms", Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+
+	// One string's escapes are decoded in at most its first 200,000 characters as written
+	// (MAX_TEXT_CHARS); an escape that starts there is decoded whole, the rest is left out.
+	const fits = pdfOf([`BT (${"\\101".repeat(50_000)}) Tj ET`]);
+	eq([dvir.pdfText(fits) === "A".repeat(50_000), dvir.pdfVisibleText(fits) === "A".repeat(50_000)], [true, true],
+		"§1 a string of exactly 200,000 characters with escapes is decoded whole (both readers)");
+	const longString = pdfOf([`BT (x${"\\101".repeat(1_000_000)}) Tj ET`]);
+	const cutWant = `x${"A".repeat(50_000)}`;
+	for (const [what, readText] of [["pdfText()", dvir.pdfText], ["pdfVisibleText()", dvir.pdfVisibleText]]) {
+		t0 = Date.now();
+		const text = readText(longString);
+		const ms = Date.now() - t0;
+		ok(`§1 ${what}: a 4 MB string is decoded only in its first 200,000 characters, the escape across the cut whole, in under 200 ms (${ms} ms)`,
+			text === cutWant && ms < 200, { length: text.length, tail: text.slice(-4), ms });
+	}
 }
 
 // --- §2 the extract route ------------------------------------------------------------
