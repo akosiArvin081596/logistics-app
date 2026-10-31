@@ -3,17 +3,22 @@
 // what the job built against what people actually sent from Gmail, judged by six
 // exact conditions, counts only.
 //
-// --shadow: the shadow week. Each load the render shadow built in the window
-//   (auto_invoice_shadow.render_digest_json, lib/auto-invoice-job.js) whose
-//   recipient domain is on --domains, against the Sent Mail message people sent
-//   for it, matched by invoice or load number: the message whose subject carries
+// --shadow: the shadow week. Each load whose first render-shadow record falls in
+//   the window (auto_invoice_shadow.render_digest_json, lib/auto-invoice-job.js:
+//   its first build, or for a load a person drafted before any build, that
+//   person's first draft) and whose recipient domain is on --domains, against the
+//   Sent Mail message people sent for it. The job keeps that first time and
+//   domain through every later build, so a load in the window stays in it, and in
+//   the population, whatever its later records say; its latest record is judged.
+//   It is matched by invoice or load number: the message whose subject carries
 //   the load's order number and, when the app has the person's draft row for the
 //   load, whose invoice prints that row's invoice number, sent to that row's
 //   recipient after it (with no row, to the render's recipient), within 7 days
-//   after the render. The render compared must come before the person's first
-//   draft of the load, by the times recorded (the render's, and the draft row's
-//   in the app): a render made at or after it, or a load drafted before any
-//   render (the job builds none then), is unmatched. A load matches when:
+//   after the render. The render compared is the latest, and it must come before
+//   the person's first draft of the load, by the times recorded (the render's,
+//   and the draft row's in the app): a render made at or after it, a load drafted
+//   before any render (the job builds none then), or one whose later build was
+//   refused (no render left to compare), is unmatched. A load matches when:
 //     1. found: exactly one such message (none, or several: unmatched);
 //     2. recipient: its To is the render's one recipient, no Cc, no Bcc as far
 //        as the Sent copy shows;
@@ -22,14 +27,14 @@
 //        and the rate con's bytes the same, and the invoice PDF's masked text the
 //        same (it carries every billed figure);
 //     5. body: the same text (lib/auto-invoice-rules.js htmlToText());
-//     6. nothing after: at most one person-made draft row for the load in the
-//        window, no number voided or typed over, its invoice number and date not
-//        edited, the load unchanged between the render and the person's draft,
-//        and no later message to the same To within 7 days carrying the order
-//        number.
+//     6. nothing after: at most one person-made draft row for the load (in the
+//        window or after it), no number voided or typed over, its invoice number
+//        and date not edited, the load unchanged between the render and the
+//        person's draft, and no later message to the same To within 7 days
+//        carrying the order number.
 //   2-6 failing is a difference. Pass: at least 6 matched, 0 differences and 0
-//   unmatched. Refused renders and other domains are counted, not judged. A
-//   render with no message yet and less than 7 days old is pending.
+//   unmatched. Loads only ever refused and other domains are counted, not
+//   judged. A render with no message yet and less than 7 days old is pending.
 // --trial: the draft week. Each automatic draft in the window (a drafted claim
 //   with its auto-imap row, auto_invoice_claims.draft_digest_json) against its
 //   Sent copy, found by its Message-ID, else by its exact subject, To and invoice
@@ -44,9 +49,11 @@
 //   fewer than 6 drafts were sent, up to 14. Pass: every draft sent unchanged,
 //   at least 6.
 // Either mode decides nothing, pass or fail, before its evidence is complete:
-//   the window over (no more loads can join it), every load's 7 days to be sent
-//   over, and every message found its 7 days for a correction. Until then the
-//   result is pending, whatever the counts, and nothing is recorded.
+//   the window over (no more loads can join it; for --shadow, 7 days after it,
+//   since a load drafted in the window before any build may be recorded after
+//   it), every load's 7 days to be sent over, and every message found its 7 days
+//   for a correction. Until then the result is pending, whatever the counts, and
+//   nothing is recorded.
 // Both compare digests made by lib/auto-invoice-rules.js messageDigest(): the
 // job's, stored when it built the message, and the Sent copy's, read in memory by
 // lib/mime-read.js from what lib/imap-draft.js fetchMessages() returns. The
@@ -202,8 +209,9 @@ function emptyCounts(mode, window, domains) {
 		population: 0,
 		matched: 0,
 		differences: { total: 0, ...Object.fromEntries(CONDITIONS.map((c) => [c, 0])) },
-		// late (shadow): not rendered before the person's first draft of the load.
-		unmatched: { total: 0, none: 0, several: 0, ...(mode === "shadow" ? { late: 0 } : {}) },
+		// late (shadow): not rendered before the person's first draft of the load;
+		// rebuildRefused (shadow): rendered, then built again and refused.
+		unmatched: { total: 0, none: 0, several: 0, ...(mode === "shadow" ? { late: 0, rebuildRefused: 0 } : {}) },
 		pending: 0,
 		outside: {},
 		minimum: PASS_MINIMUM,
@@ -269,18 +277,31 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 	const found = [];
 	for (const row of rows) {
 		const rec = parseJson(row.render_digest_json);
-		const at = Date.parse(String((rec && (rec.renderedAt || rec.refusedAt)) || ""));
-		if (!rec || !(at >= fromMs && at < toMs)) continue;
+		if (!rec) continue;
+		// The window a load belongs to is its first record's (the job keeps that
+		// time through every later build), never its latest's: a load built in the
+		// window and built again after it is still judged in it.
+		const at = Date.parse(String(rec.renderedAt || rec.refusedAt || ""));
+		const firstMs = rec.firstAt && Number.isFinite(Date.parse(rec.firstAt)) ? Date.parse(rec.firstAt) : at;
+		if (!(firstMs >= fromMs && firstMs < toMs)) continue;
 		const draftedFirst = Boolean(rec.refusedAt) && rec.code === rules.SHADOW_DRAFTED_FIRST;
-		if (rec.refusedAt && !draftedFirst) {
+		const refused = Boolean(rec.refusedAt) && !draftedFirst;
+		// Rendered or found drafted first once (firstDomain), it stays in the
+		// population: a later refusal, or a build for another domain, can't take it out.
+		if (refused && typeof rec.firstDomain !== "string") {
 			counts.outside.refused++;
 			continue;
 		}
-		if (!domains.includes(draftedFirst ? String(rec.domain || "").toLowerCase() : domainOf(rec.recipient))) {
+		const nowDomain = draftedFirst ? rec.domain : refused ? "" : domainOf(rec.recipient);
+		if (![rec.firstDomain, nowDomain].some((x) => x && domains.includes(String(x).toLowerCase()))) {
 			counts.outside.otherDomains++;
 			continue;
 		}
 		counts.population++;
+		if (refused) {
+			tally(counts, { found: "rebuildRefused", failed: [] });
+			continue;
+		}
 		// The render compared must be older than the person's first draft, by the
 		// times recorded: a later one could carry what that person typed. A later
 		// render, a load drafted before any render, or a time that can't be read: unmatched.
@@ -292,10 +313,9 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 			continue;
 		}
 		const word = orderNumberOf(row.load_id);
-		const drafts = allDrafts.filter((r) => {
-			const t = Date.parse(r.created_at);
-			return t >= fromMs && t < toMs;
-		});
+		// All the load's person rows, in the window or after it: a load judged in the
+		// window can be built again and drafted after it, and a second row is a re-draft.
+		const drafts = allDrafts;
 		// Matched by invoice or load number: the person's draft row gives the
 		// invoice number its Sent copy prints, where it went and from when; with no
 		// row, the load number in the subject and the render's recipient. Either way
@@ -321,7 +341,9 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 			},
 		}));
 	}
-	return decide(counts, { nowMs, closesAtMs: closesAt(toMs, starts, found) });
+	// Seven days past the window's end at least: a load drafted in the window before
+	// any build joins it by that draft, and its record can come after the window.
+	return decide(counts, { nowMs, closesAtMs: closesAt(toMs + MATCH_MS, starts, found) });
 }
 
 // ── --trial ──────────────────────────────────────────────────────────────────
@@ -407,7 +429,7 @@ function textOf(counts, sha) {
 	lines.push(
 		`Matched (all six conditions): ${counts.matched}`,
 		`Differences: ${d.total} (recipient ${d.recipient}, subject ${d.subject}, attachments and amount ${d.attachments}, body ${d.body}, nothing after ${d.nothingAfter})`,
-		`Unmatched: ${counts.unmatched.total} (no Sent message ${counts.unmatched.none}, several ${counts.unmatched.several}${counts.mode === "shadow" ? `, not rendered before the person's draft ${counts.unmatched.late}` : ""})`,
+		`Unmatched: ${counts.unmatched.total} (no Sent message ${counts.unmatched.none}, several ${counts.unmatched.several}${counts.mode === "shadow" ? `, built again and refused ${counts.unmatched.rebuildRefused}, not rendered before the person's draft ${counts.unmatched.late}` : ""})`,
 		`Pending (less than 7 days to be sent): ${counts.pending}`,
 		`Outside the population (counted, not judged): ${Object.entries(counts.outside).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`,
 		`Pass rule: at least ${counts.minimum} matched, 0 differences, 0 unmatched, decided once the window and its 7-day periods are over (${counts.closesAt})`,

@@ -61,6 +61,14 @@
 //       midnight, no engine call, and its record says so; a draft made while a
 //       load is being built: nothing built is kept, and a render made before
 //       stays with the change noted; mutants of each check
+//   §22 a load stays in the shadow week of its first record: rendered on day 6
+//       and built again on day 8 (a second POD), drafted after, or refused when
+//       built again, its record keeps the first time and domain and the report
+//       still judges it in the week; refused on day 6 and rendered on day 8, it
+//       joins the population in day 6's week; a load drafted before any render
+//       is dated by the person's draft (in the week though recorded after it;
+//       outside the week when drafted before the render shadow first ran); one
+//       write path; mutants of each
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -210,9 +218,10 @@ function makeWorld({ dbFile = null } = {}) {
 		const i = w.gmail.indexOf(messageId);
 		if (i >= 0) { w.gmail.splice(i, 1); w.sent.push(messageId); }
 	};
+	// Dated by the world's clock, in the server's own format (ISO, whole seconds, Z).
 	w.handDraft = (id, invoiceId = "10202026-50") =>
-		w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', 'made-up-admin')")
-			.run(id, invoiceId, "billing@example-broker.test");
+		w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by, created_at) VALUES (?, ?, ?, 'ratecon', 'imap', 'made-up-admin', ?)")
+			.run(id, invoiceId, "billing@example-broker.test", new Date(w.now).toISOString().replace(/\.\d{3}Z$/, "Z"));
 	w.engine = {
 		async prepare({ loadId, body, dryRun, mode }) {
 			w.calls.prepare.push({ loadId, body, dryRun, mode });
@@ -1295,8 +1304,8 @@ async function renderShadowSections() {
 			eq(row && [row.verdict, row.reason_code], ["WOULD_ATTEMPT", ""], "§17 the load is WOULD_ATTEMPT, as without the render shadow");
 			const rec = recordOf(w, "LD-TEST-0300");
 			ok(rec && rec.renderedAt, "§17 FAILS ON THE OLD CODE: a WOULD_ATTEMPT load gets a render digest (render_digest_json)");
-			eq(rec && Object.keys(rec), ["v", "renderedAt", "recipient", "cc", "bcc", "subjectSha256", "bodyTextSha256", "invoiceTextSha256", "attachments", "fingerprintSha256"],
-				"§17 the record: the digest's fields and the fingerprint's hash, nothing else");
+			eq(rec && Object.keys(rec), ["v", "renderedAt", "recipient", "cc", "bcc", "subjectSha256", "bodyTextSha256", "invoiceTextSha256", "attachments", "fingerprintSha256", "firstAt", "firstDomain"],
+				"§17 the record: the digest's fields, the fingerprint's hash, and when and for which domain the load got its first record; nothing else");
 			eq(rec && [rec.recipient, rec.attachments.map((a) => a.name), rec.renderedAt],
 				["billing@example-broker.test", ["Example Broker Invoice Order #LD-TEST-0300.pdf", "LD-TEST-0300_POD.pdf", "LD-TEST-0300.pdf"], new Date(w.now).toISOString()],
 				"§17 its plain values: the recipient, the attachment names and the render time");
@@ -1680,7 +1689,7 @@ async function renderShadowSections() {
 			"§21 delivered in the Friday evening quiet window: WOULD_ATTEMPT, nothing built");
 		eq([w.calls.prepare.length, w.calls.render.length, sat.sweep && sat.sweep.renders], [0, 0, { rendered: 0, refused: 1 }],
 			"§21 FAILS ON THE OLD CODE: drafted by a person at 7 PM: nothing built after midnight, no engine call (no Drive or Gemini either)");
-		eq(rec && Object.keys(rec), ["v", "refusedAt", "code", "domain", "fingerprintSha256"], "§21 ...its record: a code, the domain, the fingerprint, no digest");
+		eq(rec && Object.keys(rec), ["v", "refusedAt", "code", "domain", "fingerprintSha256", "firstAt", "firstDomain"], "§21 ...its record: a code, the domain, the fingerprint, its first-record time and domain, no digest");
 		eq(rec && [rec.code, rec.domain, rec.refusedAt], ["DRAFTED_BEFORE_RENDER", "example-broker.test", new Date(w.now).toISOString()],
 			"§21 ...DRAFTED_BEFORE_RENDER (the report counts the load unmatched), for the broker's domain");
 		w.now += 10 * MIN;
@@ -1712,6 +1721,142 @@ async function renderShadowSections() {
 			if (!lib) continue;
 			ok(!(await shows(jobLib)) && (await shows(lib)), `§21 MUTANT ${label}: caught`);
 		}
+	}
+
+	// ---------------------------------------------------------------- §22
+	section("§22 a load stays in the shadow week of its first record");
+	// The report on the job's own database, long after every period closed, with
+	// no Sent copy for anything.
+	const weekOf = async (w) => {
+		if (!trialReport) return null;
+		const c = (await trialReport.report({ db: w.db, mode: "shadow", domains: ["example-broker.test"], fetchSent: async () => [], zone: ET, nowMs: Date.parse("2026-11-20T15:00:00Z") })).counts;
+		return { since: c.window.since, population: c.population, unmatched: c.unmatched, outside: c.outside, complete: c.complete, reason: c.reason };
+	};
+	const unmatchedOf = (o) => ({ total: 0, none: 0, several: 0, late: 0, rebuildRefused: 0, ...o });
+	// The render shadow goes on Tuesday 10-20 (its week: 10-20 to 10-26). A load is
+	// rendered on Monday 10-26 (day 6); a second POD comes on Wednesday 10-28 (day 8)
+	// before anyone drafted it, so it is built again after the week.
+	const builtAgainAfter = async (lib = jobLib) => {
+		const w = makeWorld();
+		w.richRender = true;
+		const job = lib.create(w.deps(SHADOW_ON));
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		w.now = Date.parse("2026-10-26T14:00:00Z");
+		w.ready("LD-TEST-0360", { "Status Update Date": "10/26/2026 9:00:00", "Completion Date": "10/26/2026 9:00:00" });
+		await job.tick();
+		const first = recordOf(w, "LD-TEST-0360");
+		w.now = Date.parse("2026-10-28T14:00:00Z");
+		w.addPod("LD-TEST-0360");
+		await job.tick();
+		return { w, job, first, rec: recordOf(w, "LD-TEST-0360") };
+	};
+	// The render shadow goes on Saturday 10-17 (its week: 10-17 to Friday 10-23). A
+	// load delivered Friday 6:35 PM Eastern (the quiet window, nothing built) is
+	// drafted by a person at 7 PM; the job sees it after midnight, after the week.
+	const draftedLateFriday = async (lib = jobLib) => {
+		const w = makeWorld();
+		w.richRender = true;
+		w.now = Date.parse("2026-10-17T14:00:00Z");
+		const job = lib.create(w.deps(SHADOW_ON));
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		w.now = Date.parse("2026-10-23T22:35:00Z");
+		w.ready("LD-TEST-0361", { "Status Update Date": "10/23/2026 18:30:00", "Completion Date": "10/23/2026 18:30:00" });
+		await job.tick();
+		w.now = Date.parse("2026-10-23T23:00:00Z");
+		w.handDraft("LD-TEST-0361", "10232026-8");
+		await job.tick();
+		w.now = Date.parse("2026-10-24T04:05:00Z");
+		await job.tick();
+		return { w, rec: recordOf(w, "LD-TEST-0361") };
+	};
+	{
+		const { w, job, first, rec } = await builtAgainAfter();
+		eq(first && [first.renderedAt, first.firstAt, first.firstDomain], ["2026-10-26T14:00:00.000Z", "2026-10-26T14:00:00.000Z", "example-broker.test"],
+			"§22 FAILS ON THE OLD CODE: rendered on day 6: its record is its first, for the broker's domain");
+		eq(rec && [w.calls.render.length, rec.renderedAt, rec.firstAt, rec.firstDomain], [2, "2026-10-28T14:00:00.000Z", "2026-10-26T14:00:00.000Z", "example-broker.test"],
+			"§22 FAILS ON THE OLD CODE: a second POD on day 8, nobody drafted it: built again, and the record still says it was first made on day 6");
+		eq(await weekOf(w), { since: "2026-10-20", population: 1, unmatched: unmatchedOf({ total: 1, none: 1 }), outside: { refused: 0, otherDomains: 0 }, complete: true, reason: "unmatched" },
+			"§22 FAILS ON THE OLD CODE: the report still has it in the week's population, judged (never sent: unmatched, FAIL), not \"population 0, outside 0\"");
+		w.now = Date.parse("2026-10-29T14:00:00Z");
+		w.handDraft("LD-TEST-0360", "10292026-3");
+		await job.tick();
+		const drafted = recordOf(w, "LD-TEST-0360");
+		eq(drafted && [drafted.draftSeenAt, drafted.renderedAt, drafted.firstAt], ["2026-10-29T14:00:00.000Z", "2026-10-28T14:00:00.000Z", "2026-10-26T14:00:00.000Z"],
+			"§22 ...a person drafts it on day 9: the day-8 render kept with the draft noted, and its first time too");
+		eq((await weekOf(w) || {}).population, 1, "§22 ...still in the week");
+	}
+	{
+		const { w, job } = await builtAgainAfter();
+		w.now = Date.parse("2026-10-30T14:00:00Z");
+		w.setRow("LD-TEST-0360", { "  Payment  ": "$1,250.00", "Status Update Date": "10/26/2026 9:00:00", "Completion Date": "10/26/2026 9:00:00" });
+		w.prepareHook = (id) => (id === "LD-TEST-0360" ? { ok: false, http: 422, code: "TOTAL_MISMATCH" } : null);
+		await job.tick();
+		const rec = recordOf(w, "LD-TEST-0360");
+		eq(rec && [rec.code, "renderedAt" in rec, rec.firstAt, rec.firstDomain], ["TOTAL_MISMATCH", false, "2026-10-26T14:00:00.000Z", "example-broker.test"],
+			"§22 FAILS ON THE OLD CODE: built again on day 10 and refused: the refusal replaces the render and keeps the first time and domain");
+		eq(await weekOf(w), { since: "2026-10-20", population: 1, unmatched: unmatchedOf({ total: 1, rebuildRefused: 1 }), outside: { refused: 0, otherDomains: 0 }, complete: true, reason: "unmatched" },
+			"§22 FAILS ON THE OLD CODE: ...the report keeps it in the population (built again and refused: unmatched), not counted outside as refused");
+	}
+	{
+		// Refused on day 6, its first record; rendered on day 8 once the load changed.
+		const w = makeWorld();
+		w.richRender = true;
+		const job = w.job(SHADOW_ON);
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		w.now = Date.parse("2026-10-26T14:00:00Z");
+		w.ready("LD-TEST-0362", { "Status Update Date": "10/26/2026 9:00:00", "Completion Date": "10/26/2026 9:00:00" });
+		w.prepareHook = (id) => (id === "LD-TEST-0362" ? { ok: false, http: 422, code: "TOTAL_MISMATCH" } : null);
+		await job.tick();
+		const refused = recordOf(w, "LD-TEST-0362");
+		const then = await weekOf(w);
+		w.prepareHook = null;
+		w.now = Date.parse("2026-10-28T14:00:00Z");
+		w.setRow("LD-TEST-0362", { "  Payment  ": "$1,100.00", "Status Update Date": "10/26/2026 9:00:00", "Completion Date": "10/26/2026 9:00:00" });
+		await job.tick();
+		const rec = recordOf(w, "LD-TEST-0362");
+		eq([refused && refused.firstAt, refused && "firstDomain" in refused, then && [then.population, then.outside.refused]], ["2026-10-26T14:00:00.000Z", false, [0, 1]],
+			"§22 FAILS ON THE OLD CODE: refused on day 6: its first record, for no domain yet, counted outside as refused");
+		eq(rec && [rec.renderedAt, rec.firstAt, rec.firstDomain], ["2026-10-28T14:00:00.000Z", "2026-10-26T14:00:00.000Z", "example-broker.test"],
+			"§22 FAILS ON THE OLD CODE: ...rendered on day 8 once the load changed: still first recorded on day 6, now for the broker's domain");
+		eq(((await weekOf(w)) || {}).population, 1, "§22 FAILS ON THE OLD CODE: ...so it is judged in day 6's week (its first record of any kind)");
+	}
+	{
+		const { w, rec } = await draftedLateFriday();
+		eq([w.calls.prepare.length, rec && rec.code, rec && rec.refusedAt], [0, "DRAFTED_BEFORE_RENDER", "2026-10-24T04:05:00.000Z"],
+			"§22 drafted at 7 PM Friday in the quiet window: no engine call, its record written after midnight, after the week");
+		eq(rec && [rec.firstAt, rec.firstDomain], ["2026-10-23T23:00:00.000Z", "example-broker.test"], "§22 FAILS ON THE OLD CODE: ...dated as a first record by the person's draft (7 PM, in the week)");
+		eq(await weekOf(w), { since: "2026-10-17", population: 1, unmatched: unmatchedOf({ total: 1, late: 1 }), outside: { refused: 0, otherDomains: 0 }, complete: true, reason: "unmatched" },
+			"§22 FAILS ON THE OLD CODE: ...so it is in the week's population (unmatched, FAIL) though its record came after the week");
+		const before = await draftedInQuiet();
+		eq([ledgerLib.getMeta(before.w.db).shadow_renders_on_at, before.rec && before.rec.firstAt, ((await weekOf(before.w)) || {}).population], ["2026-10-24T04:05:00.000Z", "2026-10-23T23:00:00.000Z", 0],
+			"§22 FAILS ON THE OLD CODE: a load drafted before the render shadow first ran (§21's world) is outside its week, not unmatched in it");
+	}
+	{
+		const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+		const code = fs.readFileSync(JOB_FILE, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+		const at = code.indexOf("function storeRecord(");
+		const body = at < 0 ? "" : code.slice(at, code.indexOf("\n\t}\n", at));
+		eq([(code.match(/ledger\.setRenderDigest\(/g) || []).length, /ledger\.setRenderDigest\(/.test(body)], [1, true],
+			"§22 FAILS ON THE OLD CODE: every record the render shadow writes goes through storeRecord(), its one write");
+		for (const [label, from, to, shows] of [
+			["the first time not carried through a later build", "firstAt: was.firstAt || was.renderedAt || was.refusedAt || firstAt", "firstAt",
+				async (lib) => ((await weekOf((await builtAgainAfter(lib)).w)) || {}).population === 1],
+			["a load drafted before any render dated by when the sweep saw it", "fingerprintSha256: fp }, at, firstDraftAt(key, nowMs));", "fingerprintSha256: fp }, at);",
+				async (lib) => ((await weekOf((await draftedLateFriday(lib)).w)) || {}).population === 1 && ((await weekOf((await draftedInQuiet(lib)).w)) || {}).population === 0],
+		]) {
+			const lib = mutantModule(JOB_FILE, from, to);
+			ok(lib, `§22 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+			if (!lib) continue;
+			ok((await shows(jobLib)) && !(await shows(lib)), `§22 MUTANT ${label}: caught`);
+		}
+		const bypass = code.replace("storeRecord(key, { ...digestOf(msg.message, at), fingerprintSha256: fp }, at);", "ledger.setRenderDigest(db, key, JSON.stringify({ ...digestOf(msg.message, at), fingerprintSha256: fp }), at);");
+		ok(bypass !== code && (bypass.match(/ledger\.setRenderDigest\(/g) || []).length !== 1, "§22 MUTANT a render stored around storeRecord(): caught by the one-write check");
 	}
 }
 

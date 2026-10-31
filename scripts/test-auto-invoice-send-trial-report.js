@@ -35,6 +35,15 @@
 //      window and its 7-day periods are over (a run on day 5.5; a run on day 13.5
 //      before a correction on day 14; an early run with only unmatched loads;
 //      the trial before W is over, step 0 included); each with a mutant
+//   §10 a load stays in the week of its first record (the re-check's cases):
+//      six matched and a seventh rendered on day 6 and never sent FAIL, and still
+//      FAIL when it was built again on day 8, then drafted and sent with a typed
+//      note, or drafted twice after the week, or built again and refused, or
+//      built again for another domain; a load drafted before any render whose
+//      record came 5 minutes before or after the week's end gives the same FAIL,
+//      and one drafted after the week is outside it; a load only ever refused is
+//      counted outside; nothing is decided until 7 days after the window's end
+//      (a record of a draft in the window can come after it); each with a mutant
 //
 // Made-up data only, an in-memory database, no network beyond a loopback
 // listener.
@@ -284,12 +293,12 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 	}
 	{
 		const none = await runShadow(withFirst({ copies: 0 }));
-		eq([brief(none.counts), none.counts.unmatched, none.counts.reason], [{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 1, several: 0, late: 0 }, "unmatched"],
+		eq([brief(none.counts), none.counts.unmatched, none.counts.reason], [{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 1, several: 0, late: 0, rebuildRefused: 0 }, "unmatched"],
 			"§1 unmatched: no Sent copy within 7 days of the render; FAIL");
 		const several = await runShadow(withFirst({ copies: 2 }));
-		eq([several.counts.unmatched, several.counts.pass], [{ total: 1, none: 0, several: 1, late: 0 }, false], "§1 unmatched: two Sent copies for the load; FAIL");
+		eq([several.counts.unmatched, several.counts.pass], [{ total: 1, none: 0, several: 1, late: 0, rebuildRefused: 0 }, false], "§1 unmatched: two Sent copies for the load; FAIL");
 		const other = await runShadow(withFirst({ printedNumber: "10302026-4" }));
-		eq([other.counts.unmatched, other.counts.pass], [{ total: 1, none: 1, several: 0, late: 0 }, false], "§1 matched by invoice number: a Sent copy printing another invoice than the person's draft row is not its copy");
+		eq([other.counts.unmatched, other.counts.pass], [{ total: 1, none: 1, several: 0, late: 0, rebuildRefused: 0 }, false], "§1 matched by invoice number: a Sent copy printing another invoice than the person's draft row is not its copy");
 		const noRow = await runShadow(withFirst({ noDraftRow: true }));
 		eq(brief(noRow.counts), { population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: true }, "§1 no draft row in the app: matched by the load number in the subject and the To alone");
 		const pending = await runShadow([{ renderAt: T(6, 2), copies: 0 }, ...matching(6)], { now: T(8).getTime() });
@@ -538,7 +547,7 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 		eq([brief(five.counts), five.counts.reason], [{ population: 5, matched: 5, differences: 0, unmatched: 0, pending: 0, pass: false }, "fewer than 6 matched"], "§9 five ordinary loads: fewer than 6, FAIL");
 		const withLate = await runShadow([...matching(5), lateRender]);
 		eq([brief(withLate.counts), withLate.counts.unmatched, withLate.counts.reason],
-			[{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 0, several: 0, late: 1 }, "unmatched"],
+			[{ population: 6, matched: 5, differences: 0, unmatched: 1, pending: 0, pass: false }, { total: 1, none: 0, several: 0, late: 1, rebuildRefused: 0 }, "unmatched"],
 			"§9 FAILS ON THE OLD CODE: ...and a sixth rendered after the person's draft and send, with that person's note: unmatched (not rendered before the draft), still FAIL");
 		ok(/not rendered before the person's draft 1\)/.test(withLate.result.text), "§9 ...counted as such in the text");
 		const unnoted = await runShadow([...matching(5), { ...lateRender, seenAt: "none" }]);
@@ -591,8 +600,10 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 			(mod) => runShadow(withFirst(beforeRender), { mod }), (c) => c.unmatched.none === 1 && !c.pass],
 		["decided before the evidence is complete", "counts.complete = Number.isFinite(closesAtMs) && nowMs >= closesAtMs && !counts.pending;", "counts.complete = !counts.pending;",
 			(mod) => runShadow(days0to5, { now: T(5, 12).getTime(), mod }), (c) => !c.complete && !c.pass],
+		// Run past the window's end + 7 days (day 13 + 15 h) but before the sixth's
+		// correction period closes (day 14 + 2 h).
 		["the 7 days for a correction not waited for", "\tfor (const t of foundMs) at = Math.max(at, t + MATCH_MS);\n", "",
-			(mod) => runShadow(correctedLater, { now: T(13, 12).getTime(), mod }), (c) => !c.complete && !c.pass],
+			(mod) => runShadow(correctedLater, { now: T(13, 20).getTime(), mod }), (c) => !c.complete && !c.pass],
 		["the window's end not waited for", "let at = windowEndMs;", "let at = 0;",
 			(mod) => runShadow([draftedFirst, { ...draftedFirst, day: 2 }], { now: T(3).getTime(), mod }), (c) => !c.complete && !c.pass],
 	]) {
@@ -602,5 +613,133 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 		const real = await run(report);
 		const mutated = await run(mod);
 		ok(still(real.counts) && !still(mutated.counts), `§9 MUTANT ${label}: the shipped report holds, the mutant doesn't (caught)`);
+	}
+
+	// ===================================================================== §10
+	section("§10 a load stays in the week of its first record: built again, refused, or recorded after the week");
+	// Six loads that match, then a seventh written as the job writes it: firstAt and
+	// firstDomain kept from its first record through every later one.
+	const S7 = "LD-TEST-0407";
+	const FP2 = "2".repeat(64);
+	const WEEK_END = Date.parse("2026-11-09T05:00:00.000Z"); // Monday 11-09, 00:00 Eastern: the window's end
+	const MINUTE = 60 * 1000;
+	const store7 = (db, record) => {
+		ledger.upsertShadow(db, { key: rules.loadKey(S7), loadId: S7, verdict: "WOULD_ATTEMPT", readyAt: ON_AT, nowIso: ON_AT });
+		ledger.setRenderDigest(db, rules.loadKey(S7), JSON.stringify(record), ON_AT);
+	};
+	const render7 = (at, fp = FP, to = BILLING) => ({ ...rules.messageDigest(message(S7, { number: rules.SHADOW_INVOICE_ID, day: dayOf(at), to }), { renderedAt: at.toISOString() }), fingerprintSha256: fp });
+	const first7 = (at) => ({ firstAt: at.toISOString(), firstDomain: DOMAIN });
+	const seen7 = (at, fp) => ({ draftSeenAt: at.toISOString(), fingerprintAtDraftSha256: fp });
+	const refusal7 = (at, code, fp) => ({ v: 1, refusedAt: at.toISOString(), code, fingerprintSha256: fp });
+	// A person's draft row for the seventh and, with `sentAt`, the copy they send.
+	const sends7 = async (db, sent, { draftAt, sentAt = null, n = 7, notes = "" }) => {
+		const number = numberOn(draftAt, n);
+		personRow(db, { id: S7, number, at: draftAt });
+		if (!sentAt) return;
+		const copy = message(S7, { number, day: dayOf(draftAt), notes });
+		sent.push({ subject: copy.subject, at: sentAt.getTime(), raw: await compose(copy, { date: sentAt }) });
+	};
+	async function week7(seventh, { six = matching(6), now = NOW, mod = report } = {}) {
+		const db = newDb();
+		ledger.setMeta(db, "shadow_renders_on_at", ON_AT);
+		const sent = [];
+		for (const [i, spec] of six.entries()) await shadowLoad(db, sent, i + 1, spec);
+		await seventh(db, sent);
+		const result = await mod.report({ db, mode: "shadow", domains: [DOMAIN], fetchSent: fetcher(sent, now), zone: ZONE, nowMs: now });
+		return { db, sent, result, counts: result.counts };
+	}
+	const SEVEN_ONE_UNMATCHED = { population: 7, matched: 6, differences: 0, unmatched: 1, pending: 0, pass: false };
+	const SEVEN_ONE_DIFFERENCE = { population: 7, matched: 6, differences: 1, unmatched: 0, pending: 0, pass: false };
+	const SIX_PASS = { population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: true };
+	const G = {
+		renderedDay6: async (db) => store7(db, { ...render7(T(6, 2)), ...first7(T(6, 2)) }),
+		builtAgainDay8: async (db) => store7(db, { ...render7(T(8, 2), FP2), ...first7(T(6, 2)) }),
+		sentWithNote: async (db, sent) => {
+			store7(db, { ...render7(T(8, 2), FP2), ...first7(T(6, 2)), ...seen7(T(9, 5.1), FP2) });
+			await sends7(db, sent, { draftAt: T(9, 5), sentAt: T(9, 6), notes: "Note: made-up lumper" });
+		},
+		redraftedAfter: async (db, sent) => {
+			store7(db, { ...render7(T(8, 2), FP2), ...first7(T(6, 2)), ...seen7(T(9, 5.1), FP2) });
+			await sends7(db, sent, { draftAt: T(9, 5), sentAt: T(9, 7) });
+			await sends7(db, sent, { draftAt: T(9, 6), n: 57 });
+		},
+		draftedFirst: (writtenAt, draftAt) => async (db, sent) => {
+			store7(db, { ...refusal7(writtenAt, rules.SHADOW_DRAFTED_FIRST, FP), domain: DOMAIN, ...first7(draftAt) });
+			await sends7(db, sent, { draftAt, sentAt: new Date(draftAt.getTime() + 10 * MINUTE) });
+		},
+		rebuiltRefused: async (db) => store7(db, { ...refusal7(T(8, 2), "TOTAL_MISMATCH", FP2), ...first7(T(6, 2)) }),
+		rebuiltRefusedSent: async (db, sent) => {
+			store7(db, { ...refusal7(T(8, 2), "TOTAL_MISMATCH", FP2), ...first7(T(6, 2)) });
+			await sends7(db, sent, { draftAt: T(9, 5), sentAt: T(9, 6) });
+		},
+		onlyRefused: async (db) => store7(db, { ...refusal7(T(3, 2), "TOTAL_MISMATCH", FP), firstAt: T(3, 2).toISOString() }),
+		otherDomainLater: async (db) => store7(db, { ...render7(T(8, 2), FP2, "billing@example-other.test"), ...first7(T(6, 2)) }),
+	};
+	// Six matched on day 0, their periods closed by day 7 + 6 h; a person drafts a
+	// seventh on day 6 + 12 h (in the window), and its record is written on day 7 + 13 h.
+	const day0 = Array.from({ length: 6 }, () => ({ renderAt: T(0, 2) }));
+	const lateRecord = async (db) => store7(db, { ...refusal7(T(7, 13), rules.SHADOW_DRAFTED_FIRST, FP), domain: DOMAIN, ...first7(T(6, 12)) });
+	{
+		const g1 = await week7(G.renderedDay6);
+		eq([brief(g1.counts), g1.counts.complete, g1.counts.reason], [SEVEN_ONE_UNMATCHED, true, "unmatched"],
+			"§10 six matched and a seventh rendered on day 6 (in the week), never sent: unmatched, FAIL");
+		const unreadable = await week7(async (db) => store7(db, { ...render7(T(6, 2)), firstAt: "not a time", firstDomain: DOMAIN }));
+		eq(brief(unreadable.counts), SEVEN_ONE_UNMATCHED, "§10 ...a first time that can't be read falls back to the record's own time, never drops the load");
+		const g2 = await week7(G.builtAgainDay8);
+		eq([brief(g2.counts), g2.counts.unmatched.none, g2.counts.complete, g2.counts.reason], [SEVEN_ONE_UNMATCHED, 1, true, "unmatched"],
+			"§10 FAILS ON THE OLD CODE: ...the same seventh built again on day 8 (after the week), never sent: still unmatched, FAIL, not a complete PASS");
+		const g3 = await week7(G.sentWithNote);
+		eq([brief(g3.counts), g3.counts.differences.attachments, g3.counts.complete, g3.counts.reason], [SEVEN_ONE_DIFFERENCE, 1, true, "differences"],
+			"§10 FAILS ON THE OLD CODE: ...built again on day 8, then drafted on day 9 and sent with a typed note: judged against the day-8 render, a difference, FAIL");
+		const g3b = await week7(G.redraftedAfter);
+		eq([brief(g3b.counts), g3b.counts.differences.nothingAfter], [SEVEN_ONE_DIFFERENCE, 1],
+			"§10 FAILS ON THE OLD CODE: ...built again on day 8 and drafted twice after the week, the first draft sent as built: the re-draft counts (nothing after), FAIL");
+		const edge = [];
+		for (const writtenAt of [new Date(WEEK_END - 5 * MINUTE), new Date(WEEK_END + 5 * MINUTE)]) {
+			const r = await week7(G.draftedFirst(writtenAt, new Date(WEEK_END - 55 * MINUTE)));
+			edge.push([brief(r.counts), r.counts.unmatched.late, r.counts.reason]);
+		}
+		eq(edge, [[SEVEN_ONE_UNMATCHED, 1, "unmatched"], [SEVEN_ONE_UNMATCHED, 1, "unmatched"]],
+			"§10 FAILS ON THE OLD CODE: a load a person drafted 55 minutes before the week's end, its record written 5 minutes before or after the end: the same FAIL either way (by the draft, its first record's time)");
+		const afterEnd = await week7(G.draftedFirst(new Date(WEEK_END + 10 * MINUTE), new Date(WEEK_END + 5 * MINUTE)));
+		eq(brief(afterEnd.counts), SIX_PASS, "§10 ...one a person drafted 5 minutes after the week's end is outside the week (its first record's time decides)");
+		const backlog = await week7(G.draftedFirst(T(0, 1), T(-3)));
+		eq(brief(backlog.counts), SIX_PASS, "§10 FAILS ON THE OLD CODE: one a person drafted 3 days before the render shadow went on, recorded on its first day: outside the week, not unmatched in it");
+		const g5 = await week7(G.rebuiltRefused);
+		eq([brief(g5.counts), g5.counts.unmatched, g5.counts.outside], [SEVEN_ONE_UNMATCHED, { total: 1, none: 0, several: 0, late: 0, rebuildRefused: 1 }, { refused: 0, otherDomains: 0 }],
+			"§10 FAILS ON THE OLD CODE: rendered on day 6, built again on day 8 and refused: still in the population (built again and refused: unmatched), FAIL");
+		ok(/built again and refused 1, not rendered before the person's draft 0\)/.test(g5.result.text), "§10 ...counted as such in the text");
+		const g5s = await week7(G.rebuiltRefusedSent);
+		eq(brief(g5s.counts), SEVEN_ONE_UNMATCHED, "§10 FAILS ON THE OLD CODE: ...and so when a person drafts and sends it afterwards");
+		const only = await week7(G.onlyRefused);
+		eq([brief(only.counts), only.counts.outside], [SIX_PASS, { refused: 1, otherDomains: 0 }], "§10 a load only ever refused in the week: counted outside, not judged");
+		const g6 = await week7(G.otherDomainLater);
+		eq([brief(g6.counts), g6.counts.outside], [SEVEN_ONE_UNMATCHED, { refused: 0, otherDomains: 0 }],
+			"§10 FAILS ON THE OLD CODE: rendered on day 6 for a listed domain, built again on day 8 for another: still in the population, FAIL");
+		const early = await week7(async () => {}, { six: day0, now: T(7, 12).getTime() });
+		eq([brief(early.counts), early.counts.complete, /^pending: /.test(early.counts.reason)], [{ ...SIX_PASS, pass: false }, false, true],
+			"§10 FAILS ON THE OLD CODE: six matched on day 0 and their periods over, run on day 7 + 12 h: pending until 7 days after the window's end, not PASS");
+		await lateRecord(early.db);
+		const later = await rerun(early, NOW);
+		eq([brief(later.counts), later.counts.unmatched.late, later.counts.reason], [SEVEN_ONE_UNMATCHED, 1, "unmatched"],
+			"§10 ...a load drafted in the window and recorded after that run joins it: FAIL");
+	}
+	for (const [label, from, to, run, still] of [
+		["a load placed by its latest record", "const firstMs = rec.firstAt && Number.isFinite(Date.parse(rec.firstAt)) ? Date.parse(rec.firstAt) : at;", "const firstMs = at;",
+			async (mod) => [await week7(G.builtAgainDay8, { mod }), await week7(G.sentWithNote, { mod }), await week7(G.draftedFirst(new Date(WEEK_END + 5 * MINUTE), new Date(WEEK_END - 55 * MINUTE)), { mod })],
+			(ws) => ws.every((x) => x.counts.population === 7 && !x.counts.pass)],
+		["a refusal after a render counted outside as refused", "if (refused && typeof rec.firstDomain !== \"string\") {", "if (refused) {",
+			async (mod) => [await week7(G.rebuiltRefused, { mod })], (ws) => ws.every((x) => x.counts.unmatched.rebuildRefused === 1 && !x.counts.pass)],
+		["the domain taken from the latest record only", "if (![rec.firstDomain, nowDomain].some(", "if (![nowDomain].some(",
+			async (mod) => [await week7(G.otherDomainLater, { mod })], (ws) => ws.every((x) => x.counts.population === 7 && !x.counts.pass)],
+		["only the draft rows made in the window", "const drafts = allDrafts;", "const drafts = allDrafts.filter((r) => Date.parse(r.created_at) >= fromMs && Date.parse(r.created_at) < toMs);",
+			async (mod) => [await week7(G.redraftedAfter, { mod })], (ws) => ws.every((x) => x.counts.differences.nothingAfter === 1 && !x.counts.pass)],
+		["no wait past the window's end", "closesAt(toMs + MATCH_MS, starts, found)", "closesAt(toMs, starts, found)",
+			async (mod) => [await week7(async () => {}, { six: day0, now: T(7, 12).getTime(), mod })], (ws) => ws.every((x) => !x.counts.complete && !x.counts.pass)],
+	]) {
+		const mod = mutant(from, to);
+		ok(mod, `§10 MUTANT ${label}: applied to the shipped source once`);
+		if (!mod) continue;
+		ok(still(await run(report)) && !still(await run(mod)), `§10 MUTANT ${label}: the shipped report holds, the mutant doesn't (caught)`);
 	}
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(finish);

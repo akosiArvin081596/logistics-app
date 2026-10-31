@@ -733,7 +733,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const mime = real.gmail[0] ? Buffer.from(real.gmail[0].mime, "latin1") : null;
 		eq([claim.state, Boolean(mime), claim.invoice_id], ["drafted", true, `${TODAY_SEQ}-1`], "§9 drafted with the next number, its MIME kept by the fake Gmail");
 		const sent = mimeRead && mime ? rules.messageDigest(mimeRead.parseMessage(mime), { renderedAt: "" }) : null;
-		const part = (d) => (d ? { ...d, renderedAt: undefined, fingerprintSha256: undefined } : null);
+		const part = (d) => (d ? { ...d, renderedAt: undefined, fingerprintSha256: undefined, firstAt: undefined, firstDomain: undefined } : null);
 		ok(sent && /^[0-9a-f]{64}$/.test(sent.invoiceTextSha256), "§9 the invoice PDF in the MIME is read (its masked text has a digest)");
 		eq(part(rec), part(sent), "§9 parity: the render shadow's digest equals the real draft's MIME's, field by field (the number masked)");
 		let stored = null;
