@@ -325,6 +325,7 @@ USE / · sessionMiddleware=session | after: USE /api/public/investor-rfi, USE /a
 USE / · refreshPasswordChangeFlag@b641bea4399b | after: USE /api/public/investor-rfi, USE /api/public/investor-w9-check
 USE / · signOutEndedAccount@ce4c28ff665c | after: USE /api/public/investor-rfi, USE /api/public/investor-w9-check
 USE / · withheldLoadKeyGate@8aa424668fb7 | after: USE /api/public/investor-rfi, USE /api/public/investor-w9-check
+USE / · rateLimit(policyTemplateFolders.substancePolicyPdfLimits())=limiter · policyTemplateFolders.substancePolicyPdf()=substancePolicyPdf@3c444a2582c9 | after: USE /api/public/investor-rfi, USE /api/public/investor-w9-check
 USE / · express.static(clientDistPath)=serveStatic | after: USE /api/public/investor-rfi, USE /api/public/investor-w9-check
 GET * · pageLimiter=limiter · inline@c26b1f45e549 | last
 USE / · inline@adbfc3fa9d44 | last
