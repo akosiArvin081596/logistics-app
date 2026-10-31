@@ -149,6 +149,8 @@ const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
+// Who set each load status, and where the truck was at "At Shipper" (ARRIVAL_PICKUP_RECORDER_ENABLED).
+const arrivalRecorder = require("./lib/arrival-recorder");
 // A live ETA against the Drop-off Appointment, on the receiver's clock.
 const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
@@ -1487,19 +1489,58 @@ const insertStatusHistory = db.prepare(
 	`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason) VALUES (?, ?, ?, ?, ?, ?)`
 );
 
+// The arrival recorder's facts (lib/arrival-recorder.js). Added at boot whatever
+// the flag, so every copy of the database has them; rows written with it off
+// keep them empty.
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN actor_role TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN fix_ms INTEGER"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_distance_m REAL"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_zone TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN local_tz TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN other_load_hauling INTEGER"); } catch { /* column already exists */ }
+// On only when exactly "true", read once. Off, every writer inserts today's six
+// columns through today's statement and no lookup runs.
+const ARRIVAL_PICKUP_RECORDER_ENABLED = process.env.ARRIVAL_PICKUP_RECORDER_ENABLED === "true";
+console.log(`[arrival-recorder] ARRIVAL_PICKUP_RECORDER_ENABLED ${ARRIVAL_PICKUP_RECORDER_ENABLED ? "on" : "off"}`);
+// The same row with the recorder's six facts. null when it can't be prepared,
+// and every row then takes today's statement.
+const insertStatusHistoryRecorded = (() => {
+	try {
+		return db.prepare(
+			`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason,
+				actor_role, fix_ms, pickup_distance_m, pickup_zone, local_tz, other_load_hauling)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		);
+	} catch (err) {
+		console.error("[arrival-recorder] the recorder's insert could not be prepared:", err.message);
+		return null;
+	}
+})();
+
 // Record one load status transition for the phase timeline. Best-effort: never
 // throws into the caller (a failed history write must not break a status update),
 // and skips no-op transitions (old === new, case-insensitive) so a re-saved
 // identical status or a geofence re-fire doesn't create duplicate rows. load_id
 // is normalized (lowercase, leading '#' stripped) to match the lookup convention.
-function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reason }) {
+// `facts` are the arrival recorder's (actorRole, fixMs, ...), stored only with it on.
+function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reason, ...facts }) {
 	try {
 		const lid = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
 		const ns = String(newStatus || "").trim();
 		if (!lid || !ns) return;
 		const os = String(oldStatus || "").trim();
 		if (os && os.toLowerCase() === ns.toLowerCase()) return; // no-op transition
-		insertStatusHistory.run(lid, os, ns, source || "manual", String(actor || "").trim(), String(reason || "").trim().slice(0, 500));
+		const row = [lid, os, ns, source || "manual", String(actor || "").trim(), String(reason || "").trim().slice(0, 500)];
+		// A failed write of the facts falls back to today's row, so no transition goes unrecorded.
+		if (ARRIVAL_PICKUP_RECORDER_ENABLED && insertStatusHistoryRecorded) {
+			try {
+				insertStatusHistoryRecorded.run(...row, ...arrivalRecorder.historyColumns(facts));
+				return;
+			} catch (err) {
+				console.error("recordStatusChange (arrival facts) error:", err.message);
+			}
+		}
+		insertStatusHistory.run(...row);
 	} catch (err) {
 		console.error("recordStatusChange error:", err.message);
 	}
@@ -4628,6 +4669,7 @@ async function routemateSyncTelemetry() {
 						loadId: cand.loadId,
 						routemateVehicleId: t.routemate_vehicle_id,
 						speedMps: t.speed,
+						fixMs: t._fixMs, candidates,
 					});
 					if (advanced) break;   // one transition per ping
 				} catch (geoErr) {
@@ -44429,7 +44471,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
-			recordStatusChange({ loadId, newStatus: 'Dispatched', source: 'dispatch', actor: req.session?.user?.username || '' });
+			recordStatusChange({ loadId, newStatus: 'Dispatched', source: 'dispatch', actor: req.session?.user?.username || '', actorRole: req.session?.user?.role });
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
@@ -44783,7 +44825,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				requestBody: { values: [["Cancelled"]] },
 			});
 		}
-		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason });
+		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason, actorRole: req.session?.user?.role });
 		logAudit(req, 'cancel_load', 'load', loadId, `Cancelled load ${loadId || 'N/A'}${boundDriver ? ` (driver: ${boundDriver})` : ''} — reason: ${cancelReason}`);
 
 		// Notify driver — the one the SHEET says is on this load.
@@ -45607,7 +45649,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 					requestBody: { values: [["Assigned"]] },
 				});
 			}
-			recordStatusChange({ loadId, oldStatus: 'Dispatched', newStatus: 'Assigned', source: 'accept', actor: driverName });
+			recordStatusChange({ loadId, oldStatus: 'Dispatched', newStatus: 'Assigned', source: 'accept', actor: driverName, actorRole: req.session?.user?.role });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -45645,7 +45687,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 					requestBody: { values: [["Unassigned"]] },
 				});
 			}
-			recordStatusChange({ loadId, newStatus: 'Unassigned', source: 'decline', actor: driverName });
+			recordStatusChange({ loadId, newStatus: 'Unassigned', source: 'decline', actor: driverName, actorRole: req.session?.user?.role });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -49383,7 +49425,8 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		});
 
 		logAudit(req, 'update_status', 'load', loadId, `Status changed to "${newStatus}" for load ${loadId} (driver: ${driverName})`);
-		recordStatusChange({ loadId, oldStatus, newStatus, source: 'manual', actor: driverName });
+		recordStatusChange({ loadId, oldStatus, newStatus, source: 'manual', actor: driverName, actorRole: req.session?.user?.role,
+			...arrivalRecorder.positionFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, newStatus, loadId, headers, row: currentRow, readers: arrivalRecorderReaders }) });
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating driver status:", error.message);
@@ -49690,7 +49733,8 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		});
 
 		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${canonicalStatus}" by ${overrideUser}: ${reason.trim()}`);
-		recordStatusChange({ loadId, oldStatus, newStatus: canonicalStatus, source: 'override', actor: overrideUser });
+		recordStatusChange({ loadId, oldStatus, newStatus: canonicalStatus, source: 'override', actor: overrideUser, actorRole: req.session?.user?.role,
+			...arrivalRecorder.positionFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, newStatus: canonicalStatus, loadId, headers, row: currentRow, readers: arrivalRecorderReaders }) });
 		res.json({ success: true, oldStatus, newStatus: canonicalStatus });
 	} catch (error) {
 		console.error("Error overriding load status:", error.message);
@@ -50561,6 +50605,7 @@ async function ingestLinxupPosition(pos) {
 					// Linxup replaces the Routemate poller — taking the time-out
 					// half of detention with it.
 					speedMps: pos.speed,
+					fixMs: pos.location_date_ms || Date.now(), candidates: driverActiveLoads,
 				});
 				if (advanced) break;   // one transition per ping
 			} catch (e) { console.error("[linxup] geofence error:", e.message); }
@@ -58604,6 +58649,22 @@ function resolveGeofencePoints(loadData, headers, loadId) {
 	};
 }
 
+// The arrival recorder's readers for a tap or an override (lib/arrival-recorder.js
+// positionFacts()): the load's truck as the Truck cell or the money stamps name it,
+// the device's link time, and the geofence's own pickup point, never the network
+// geocode in ensureLoadCoordinates().
+function arrivalRecorderReaders() {
+	return {
+		db,
+		radiusM: GEOFENCE_RADIUS,
+		truckColRe: HAUL_TRUCK_COL_RE,
+		truckByUnit: (unit) => haulTruckByUnitStmt.get(unit),
+		truckForDriver: (name) => findTruckForDriverStamp(name, { activeAssignment: true }),
+		linkedSinceMs: (truckId, vid) => eldDeviceLinkedSinceMs(truckId, vid),
+		pickupPoint: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId).origin,
+	};
+}
+
 function checkGeofence(lat, lng, loadData, headers, loadId) {
 	const { origin, dest } = resolveGeofencePoints(loadData, headers, loadId);
 	const here = { latitude: lat, longitude: lng };
@@ -58619,7 +58680,9 @@ function checkGeofence(lat, lng, loadData, headers, loadId) {
 // status, only transitions from a valid predecessor status, AND requires the
 // previous (non-dropped) telemetry fix to also be inside the same geofence
 // trigger so a single noisy ping can't flip status mid-highway-pass.
-async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps }) {
+// `fixMs` (the ping's own time) and `candidates` (the loads asked at this ping,
+// with their statuses) are for the arrival recorder's facts only.
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps, fixMs, candidates }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
 	// Never advance a soft-deleted load — its sheet row keeps its old status.
 	// Both location paths already skip them; this holds for any future caller.
@@ -58770,6 +58833,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				reason: distanceM === null
 					? "auto by GPS"
 					: `auto by GPS — ${distanceM} m from the mapped ${trigger === "At Receiver" ? "delivery" : "pickup"} point (radius ${GEOFENCE_RADIUS} m)`,
+				...arrivalRecorder.geofenceFacts({ enabled: ARRIVAL_PICKUP_RECORDER_ENABLED, trigger, loadId, fixMs, latitude, longitude, distanceM, pickup: zonePoints.origin, candidates }),
 			});
 
 			const geoMsg = (trigger === "At Shipper"
