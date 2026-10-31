@@ -15168,6 +15168,9 @@ async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
 		// retry/regenerate paths and the ops alert read.
 		const e = new Error(err.code ? `${label}: ${err.message}` : `${label}: render failed — ${err.message}`);
 		e.code = err.code || "DOCUMENT_RENDER_FAILED";
+		// The labels a render refused as cut off (POLICY_FIELD_WRAP_ENABLED): that
+		// refusal recurs on every try, and the sign route tells the signer so.
+		if (Array.isArray(err.clippedLabels)) e.clippedLabels = err.clippedLabels;
 		throw e;
 	}
 	// fillW9Form returns null when no template resolves. That null is the exact
@@ -18889,10 +18892,15 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 					docName: docRow.doc_name, reason: genErr.message,
 				});
 			}
+			// A required field cut off by its box fails the same way on every try, so
+			// the driver is told to wait for the office rather than to retry.
+			const cutOff = Array.isArray(genErr.clippedLabels) && genErr.clippedLabels.length > 0;
 			return res.status(503).json({
-				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
+				error: cutOff
+					? "We saved your signature, but the signed copy of this document could not be produced. The office has been told; please wait for them before signing it again."
+					: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
 				code: genErr.code || "DOCUMENT_RENDER_FAILED",
-				retryable: true,
+				retryable: !cutOff,
 			});
 		}
 
