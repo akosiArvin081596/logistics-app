@@ -57,6 +57,7 @@ function typeIcon(type) {
   if (type === 'load-assigned') return '&#128666;'
   if (type === 'geofence') return '&#128205;'
   if (type === 'message') return '&#128172;'
+  if (type === 'resign-requested') return '&#9997;'
   return '&#128276;'
 }
 

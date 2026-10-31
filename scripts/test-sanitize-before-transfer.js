@@ -300,6 +300,11 @@ const PRIOR_HASHES = [
 const OPERATOR_PW = "op-Tangerine-Lantern-47";
 
 // Everything that must be absent from the bytes that would cross the network.
+// A replaced original's evidence, kept word for word in its document's history
+// (lib/onboarding-resign.js): JSON in one column, neither email- nor SSN-shaped,
+// so only the column scrub reaches it.
+const HISTORY = { ip: "198.51.100.44", agent: "MadeUpHistoryBrowser/3.1", signature: "Sam Q. Historysigner" };
+
 const MUST_NOT_SURVIVE = [
 	// The snapshot's own password hashes — see PRIOR_HASHES.
 	SHARED_PUBLISHED_HASH,
@@ -314,6 +319,8 @@ const MUST_NOT_SURVIVE = [
 	// Signing evidence — personal data about the SIGNER, and invisible to the
 	// free-text sweep because none of it is email- or SSN-shaped.
 	"203.0.113.77", "AppleWebKit/605.1.15", "I, Sam Driver, agree to the terms",
+	// The same evidence for a replaced original, in its document's history.
+	HISTORY.ip, HISTORY.agent, HISTORY.signature,
 	// A staff sign-in's IP and browser (sign_in_network): the table is emptied.
 	"203.0.113.88", "NamedLoginsTest/1.0",
 	// The automatic-invoice render shadow's digest (section 15b).
@@ -396,7 +403,7 @@ function seedDatabase(dbPath) {
 		CREATE TABLE sheet_job_tracking (id INTEGER PRIMARY KEY, load_id TEXT, email TEXT, phone_number TEXT);
 		CREATE TABLE investor_payment_info (id INTEGER PRIMARY KEY, investor_id INTEGER, routing_number TEXT, account_number TEXT, account_name TEXT, bank_name TEXT);
 		CREATE TABLE driver_payment_info (id INTEGER PRIMARY KEY, driver TEXT, bank_routing TEXT, bank_account TEXT, bank_acct_name TEXT, bank_name TEXT, bank_address TEXT, bank_phone TEXT, check_name TEXT);
-		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
+		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT, superseded_artifacts TEXT);
 		CREATE TABLE investor_onboarding_documents (id INTEGER PRIMARY KEY, signature_text TEXT, signature_image TEXT, signed_ip TEXT, signed_ip_source TEXT, signed_user_agent TEXT, consent_text TEXT, evidence_version TEXT, artifact_sha256 TEXT);
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY, driver_name TEXT, latitude REAL, longitude REAL, recorded_at TEXT);
 		CREATE TABLE sign_in_network (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, user_id INTEGER NOT NULL, at TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', ip_source TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '');
@@ -484,8 +491,9 @@ function seedDatabase(dbPath) {
 		// regime, and a digest of a file this script never copies discloses
 		// nothing. Asserted below, so "deliberately kept" stays a decision.
 		"v2", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"];
-	db.prepare("INSERT INTO onboarding_documents (id,signature_text,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256) VALUES (?,?,?,?,?,?,?,?)")
-		.run(1, "Sam Driver", ...EVIDENCE);
+	db.prepare("INSERT INTO onboarding_documents (id,signature_text,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256,superseded_artifacts) VALUES (?,?,?,?,?,?,?,?,?)")
+		.run(1, "Sam Driver", ...EVIDENCE, JSON.stringify([{ kind: "fresh_signature", file: "mobile_policy-1-signed.superseded-made-up.pdf",
+			original: { signatureText: HISTORY.signature, signedIp: HISTORY.ip, userAgent: HISTORY.agent } }]));
 	db.prepare("INSERT INTO investor_onboarding_documents (id,signature_text,signature_image,signed_ip,signed_ip_source,signed_user_agent,consent_text,evidence_version,artifact_sha256) VALUES (?,?,?,?,?,?,?,?,?)")
 		.run(1, "Pat Investor", "data:image/png;base64,BBBB", ...EVIDENCE);
 	db.prepare("INSERT INTO driver_locations (id,driver_name,latitude,longitude,recorded_at) VALUES (?,?,?,?,?)")
@@ -1801,6 +1809,12 @@ function extractFn(src, name) {
 			`const n = db.prepare("DELETE FROM sign_in_network").run().changes;`,
 			"const n = 0;",
 			/staff sign-in IP and browser record\(s\) survived/);
+		// A replaced original's signer evidence in a driver document's history: only
+		// the REDACTED_EMPTY entry beside the scrub can refuse it.
+		scrubMutant("M9c", "the onboarding_documents history scrub is dropped",
+			`...EVIDENCE_REDACTIONS, superseded_artifacts: "" });`,
+			`...EVIDENCE_REDACTIONS });`,
+			/signature history entr\w*\(s\) survived in onboarding_documents\.superseded_artifacts/);
 		// ⚠️ M10 proves the NUL fixture is load-bearing rather than merely
 		// present. Removing the prefilter's blob-length clause makes SQLite's
 		// LIKE/GLOB stop at the embedded NUL, so the scrub can no longer SEE that
