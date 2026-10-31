@@ -42,6 +42,8 @@
         </ul>
       </section>
 
+      <KpiWeeklyBlock v-if="metric.weekly" :weekly="metric.weekly" :label="metric.label" :metric-key="metric.key" />
+
       <section v-if="beforeAfter.length" class="kpi-block" :aria-labelledby="`${titleId}-ba`">
         <h5 :id="`${titleId}-ba`" class="kpi-block-title">Before and after</h5>
         <ul class="kpi-ba-list">
@@ -107,7 +109,7 @@
         </ul>
       </section>
 
-      <KpiApprovalToggle :metric="metric" :saving="saving" @set="(e) => emit('set-approval', e)" />
+      <KpiApprovalToggle :metric="metric" :saving="saving" :weekly-note="weeklyNote" @set="(e) => emit('set-approval', e)" />
 
       <details class="kpi-details">
         <summary>Definition, source and monthly figures</summary>
@@ -156,6 +158,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import KpiBadge from './KpiBadge.vue'
 import KpiSparkline from './KpiSparkline.vue'
 import KpiApprovalToggle from './KpiApprovalToggle.vue'
+import KpiWeeklyBlock from './KpiWeeklyBlock.vue'
 import {
   PARTIAL_BADGE, beforeAfterRow, comparisonRow, confidenceBadge, coverageText, fmtSettingDate as settingDate, kindBadge,
 } from '../../lib/kpiView.js'
@@ -169,6 +172,8 @@ const props = defineProps({
   saving: { type: Boolean, default: false },
   // The as-of month ('YYYY-MM'), still in progress.
   openPeriod: { type: String, default: '' },
+  // The server's approve-dialog sentence while weekly figures are on, else ''.
+  weeklyNote: { type: String, default: '' },
 })
 const emit = defineEmits(['set-approval'])
 

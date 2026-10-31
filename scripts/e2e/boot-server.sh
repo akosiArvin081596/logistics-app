@@ -44,6 +44,11 @@
 #                 never a real one; it is set in this server's environment only and
 #                 never printed. Unset or empty: both off and blank. The driver
 #                 screen flag and the Drive uploader stay off.
+#   E2E_DRIVER_VIDEOS=1  boot with the driver training videos ON
+#                 (DRIVER_TRAINING_VIDEOS_ENABLED=true), for the browser check of
+#                 the Training videos card. The server only names where the card
+#                 shows; the page contacts YouTube only when a tester taps the
+#                 player. Anything else, or unset: off.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -136,6 +141,11 @@ NOTICE=false
 if [ "${E2E_MAINTENANCE_NOTICE:-}" = "1" ]; then NOTICE=true; fi
 echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)' || echo off)"
 
+# The driver training videos: off unless asked for.
+VIDEOS=false
+if [ "${E2E_DRIVER_VIDEOS:-}" = "1" ]; then VIDEOS=true; fi
+echo "driver training videos: $([ "$VIDEOS" = true ] && echo ON || echo off)"
+
 # The lease payout flag (a money flag that ships off): as the caller set it, else off.
 LEASE="${INVESTOR_LEASE_PAYOUTS_ENABLED:-false}"
 echo "lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED=$LEASE"
@@ -213,6 +223,7 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   ELD_STALE_ALERT_ENABLED=false FUEL_LOW_ALERT_ENABLED=false EXPENSE_DUPLICATE_ALERT_ENABLED=false \
   INVOICE_UNDATED_ALERT_ENABLED=false RATECON_EXTRACT_ALERT_ENABLED=false \
   MAINTENANCE_NOTICE_ENABLED="$NOTICE" MAINTENANCE_NOTICE_AUDIENCE=investor \
+  DRIVER_TRAINING_VIDEOS_ENABLED="$VIDEOS" \
   INVESTOR_LEASE_PAYOUTS_ENABLED="$LEASE" \
   RATECON_DRIVER_INSTRUCTIONS_ENABLED="$DI_ENABLED" CARRIER_ACCOUNT_NUMBERS_DENY_SECRET="$DI_DENY" CARRIER_ACCOUNT_NUMBERS_DENY= \
   DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED=false RATECON_DRIVE_UPLOADER_EMAIL= \

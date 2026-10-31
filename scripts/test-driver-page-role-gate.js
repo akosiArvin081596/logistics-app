@@ -245,6 +245,10 @@ function makeDeps() {
 		// scripts/test-emergency-contacts-routes.js §7).
 		EMERGENCY_CONTACTS_ENABLED: false,
 		emergencyContactsCount: () => { throw new Error("emergencyContactsCount() ran with EMERGENCY_CONTACTS_ENABLED off"); },
+		// Training videos: off here, so the placement must never run (its subject is
+		// scripts/test-driver-training-videos.js).
+		DRIVER_TRAINING_VIDEOS_ENABLED: false,
+		driverTrainingVideos: { trainingVideoPlacement: () => { throw new Error("trainingVideoPlacement() ran with DRIVER_TRAINING_VIDEOS_ENABLED off"); } },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
 	};
@@ -707,9 +711,10 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			if (broken) adb.exec("DROP TABLE driver_availability");
 			return adb;
 		}
-		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", [
+		// The time-off ELD check is off here (its own runners cover it), so no eldChecked.
+		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", [
 			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, "return { driverAvailabilityByName, driverOwnTimeOff };",
-		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet);
+		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false);
 		const counted = (fn) => { const f = (...a) => { f.calls++; return fn(...a); }; f.calls = 0; return f; };
 		// The payload with the time-off reader wired to `adb`, the sub-flag as given.
 		const pageRoute = (screen, adb, src = ROUTE_SRC) => {

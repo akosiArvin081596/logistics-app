@@ -62,6 +62,8 @@ import {
 const props = defineProps({
   metric: { type: Object, required: true },
   saving: { type: Boolean, default: false },
+  // The server's sentence while weekly figures are on, added to the approve text.
+  weeklyNote: { type: String, default: '' },
 })
 const emit = defineEmits(['set'])
 
@@ -71,7 +73,7 @@ const staleId = computed(() => `kpi-approval-stale-${props.metric.key}`)
 
 const confirming = ref(false)
 const next = ref(false)
-const confirmText = computed(() => approvalConfirmText(props.metric.label, next.value))
+const confirmText = computed(() => approvalConfirmText(props.metric.label, next.value, props.weeklyNote))
 
 function ask() {
   if (props.saving) return

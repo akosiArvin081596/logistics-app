@@ -63,7 +63,7 @@ Deduplication happens across all loads for the same driver in the period.
 
 The $250 default rate comes from each truck's `driver_pay_daily` setting; can vary per truck.
 
-### Owner-Operator Drivers
+### Percentage Drivers
 
 ```
 Driver Pay = Σ (load_revenue × driver_pay_percentage) for each load
@@ -77,7 +77,7 @@ TRK-101 has daily-rate driver Leonora:
 - 4 loads spanning Apr 5-15. Unique active days: Apr 5, 6, 7, 8, 9, 10, 14, 15 = 8 days.
 - 8 × $250 = **$2,000**.
 
-TRK-102 has owner-op driver Kendall at 70%:
+TRK-102 has percentage driver Kendall at 70%:
 - 3 loads at $2,200, $2,500, $1,900.
 - Driver pay: $1,540 + $1,750 + $1,330 = **$4,620**.
 
@@ -186,7 +186,7 @@ A few patterns are worth checking:
 
 **Driver pay much higher than expected.** Check:
 - Are the load dates correct in the system? A typo can inflate active-day counts.
-- Is the driver's pay_type correct (daily vs. owner-op)?
+- Is the driver's pay_type correct (daily vs. percentage)?
 
 **Fixed costs higher than expected.** Check the truck record for the monthly amounts. They should match your contract.
 

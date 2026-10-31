@@ -56,7 +56,7 @@ The expense list only counts **approved** expenses — pending and rejected are 
 Calculated per the formula in the [Invoice Approvals](#) chapter:
 
 - **Daily rate drivers**: $250 × unique active days.
-- **Owner-operator**: percentage of load revenue.
+- **Percentage drivers**: percentage of load revenue.
 
 The total here is across all drivers for the period.
 

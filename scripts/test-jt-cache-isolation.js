@@ -31,7 +31,9 @@
  *   §4 the incident, replayed: the old statement hides a cancelled load from a
  *      second reader; the view does not
  *   §5 the readers that must NOT see dropped loads now filter them themselves
- *      (they used to lean, unknowingly, on another route's in-place filter)
+ *      (they used to lean, unknowingly, on another route's in-place filter);
+ *      §5b the geofence's own write, run to the end on a deep-frozen cache,
+ *      hands the history row the arrival recorder's facts and writes nothing back
  *   §6 DISCRIMINATION — mutants of the helper, and of server.js for the sweep
  *   §7 the dashboard's search references (`_refs`, lib/load-search-refs.js)
  *      land on the view's rows, never on the cache
@@ -367,6 +369,50 @@ pending.push(Promise.all([
 		deleted.r === null && deleted.reads === 0);
 	ok("...and still reads the sheet for a live one", liveLoad.reads === 1);
 }));
+
+// §5b The geofence's own write, run to the end on a deep-frozen cache: the
+// arrival recorder's facts (lib/arrival-recorder.js) come from the loads the
+// position path asked, read and never written.
+{
+	const { closure } = require("./lib/server-lift");
+	const PROVIDED = ["getDeletedLoadIds", "getJobTrackingCached", "console", "require", "getSheets", "SPREADSHEET_ID", "jtCacheInvalidate",
+		"recordStatusChange", "insertNotification", "io", "emitLoadEventToDispatch", "insertDispatchNotification", "emitDispatchNotice",
+		"findDriverAccountSpelling", "ensureLoadCoordinates", "prevCleanFixStmt", "loadCoordsStmt", "ARRIVAL_PICKUP_RECORDER_ENABLED"];
+	const lifted = closure(SRC, { roots: ["tryGeofenceAdvance"], provided: PROVIDED, denied: ["app", "server", "db"] });
+	const PICKUP = { lat: 32.5, lng: -97.25 };
+	const cache = deepFreeze({
+		headers: ["Load ID", "Driver", "Job Status"],
+		data: [
+			{ _rowIndex: 2, "Load ID": "QA-1200", Driver: "Driver Able", "Job Status": "In Transit" },
+			{ _rowIndex: 3, "Load ID": "QA-1201", Driver: "Driver Able", "Job Status": "Dispatched" },
+		],
+	});
+	const before = JSON.stringify(cache);
+	const recorded = [];
+	const coords = { "QA-1200": { origin_lat: 30.1, origin_lng: -95.4, dest_lat: 29.4, dest_lng: -98.5 }, "QA-1201": { origin_lat: PICKUP.lat, origin_lng: PICKUP.lng, dest_lat: 33.2, dest_lng: -96.6 } };
+	const room = { emit() {}, except() { return room; } };
+	const deps = {
+		getDeletedLoadIds: () => new Set(), getJobTrackingCached: async () => cache, console: { error() {}, warn() {}, log() {} },
+		require: require("module").createRequire(path.join(__dirname, "..", "server.js")),
+		getSheets: async () => ({ spreadsheets: { values: { update: async () => ({}) } } }), SPREADSHEET_ID: "sheet-test", jtCacheInvalidate: () => {},
+		recordStatusChange: (row) => { recorded.push(row); }, insertNotification: { run: () => ({ lastInsertRowid: 1 }) }, io: { to: () => room },
+		emitLoadEventToDispatch: () => {}, insertDispatchNotification: { run() {} }, emitDispatchNotice: () => {}, findDriverAccountSpelling: (n) => n,
+		ensureLoadCoordinates: async () => false, prevCleanFixStmt: { get: () => ({ latitude: PICKUP.lat + 0.008, longitude: PICKUP.lng }) },
+		loadCoordsStmt: { get: (id) => coords[id] }, ARRIVAL_PICKUP_RECORDER_ENABLED: true,
+	};
+	const geo = new Function(...PROVIDED, `"use strict";\n${lifted.text}\nreturn tryGeofenceAdvance;`)(...PROVIDED.map((k) => deps[k]));
+	const fixMs = Date.UTC(2026, 10, 20, 14, 40, 0);
+	const candidates = cache.data.map((r) => ({ loadId: r["Load ID"], status: r["Job Status"] }));
+	pending.push(geo({ latitude: PICKUP.lat + 0.008, longitude: PICKUP.lng, driverName: "Driver Able", loadId: "QA-1201", routemateVehicleId: "DEV-701", speedMps: 0, fixMs, candidates })
+		.then((trigger) => {
+			const row = recorded[0] || {};
+			ok("§5b tryGeofenceAdvance() runs to its write on a deep-frozen cache, which stays byte-identical",
+				trigger === "At Shipper" && recorded.length === 1 && JSON.stringify(cache) === before);
+			ok("§5b ...and hands the history row the arrival recorder's facts: system, the ping's time, inside, the zone, another load under way",
+				row.source === "geofence" && row.actorRole === "system" && row.fixMs === fixMs && row.pickupZone === "inside"
+				&& row.localTz === "America/Chicago" && row.otherLoadHauling === 1 && row.pickupDistanceM > 850 && row.pickupDistanceM < 950);
+		}, (e) => ok(`§5b tryGeofenceAdvance() runs on a frozen cache (${e.message})`, false)));
+}
 
 // ===========================================================================
 console.log("\n§6  DISCRIMINATION — each mutant must be caught");
