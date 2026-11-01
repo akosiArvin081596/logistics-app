@@ -19,7 +19,7 @@
 //   §7 driverVideoAssets.js: walkthrough null, or the three `?url` files
 //   §8 DriverView.vue: the lock-screen card after "Documents Received!" and before
 //      "Start Driving", on the server's placement; the Kit card after the time-off
-//      card
+//      card and outside the Kit's loading swap
 //   §9 the store: trainingVideos null, then the payload's word through
 //      normalizePlacement()
 //
@@ -88,14 +88,16 @@ eq('§1 the watch URL, exact', v.ROUTEMATE_WATCH_URL, 'https://www.youtube.com/w
 console.log('\n§2 the frame\'s attributes')
 eq('§2 title, allow, referrer policy and sandbox, exact', [v.ROUTEMATE_FRAME_TITLE, v.ROUTEMATE_FRAME_ALLOW, v.ROUTEMATE_FRAME_REFERRER_POLICY, v.ROUTEMATE_FRAME_SANDBOX], [
   'RouteMate ELD: how to log in to your mobile app',
-  'accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen',
+  'encrypted-media; picture-in-picture; fullscreen',
   'strict-origin-when-cross-origin',
-  'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation',
+  'allow-scripts allow-same-origin allow-popups',
 ])
 eq('§2 the sandbox never lets the frame navigate the app\'s page or submit forms',
   v.ROUTEMATE_FRAME_SANDBOX.split(' ').filter((t) => /top-navigation|allow-forms|allow-modals|allow-downloads/.test(t)), [])
-eq('§2 the frame may not use the camera, microphone, location or autoplay',
-  v.ROUTEMATE_FRAME_ALLOW.split(';').map((s) => s.trim()).filter((f) => /camera|microphone|geolocation|autoplay|clipboard|usb|payment/.test(f)), [])
+eq('§2 a window the player opens keeps the sandbox, and the frame gets no casting',
+  v.ROUTEMATE_FRAME_SANDBOX.split(' ').filter((t) => /escape-sandbox|allow-presentation/.test(t)), [])
+eq('§2 the frame may not use the camera, microphone, location, motion sensors or autoplay',
+  v.ROUTEMATE_FRAME_ALLOW.split(';').map((s) => s.trim()).filter((f) => /camera|microphone|geolocation|autoplay|clipboard|usb|payment|accelerometer|gyroscope|magnetometer/.test(f)), [])
 
 // ── §3 the placement word ────────────────────────────────────────────────────
 console.log('\n§3 normalizePlacement()')
@@ -241,6 +243,13 @@ eq('§8 it is never keyed on the client\'s document count', /allDocsSigned|signe
 const kitStart = at('<!-- KIT TAB -->')
 const kitEnd = vt.indexOf('</section>', kitStart)
 eq('§8 the Kit card is inside the Kit tab, after the time-off card', [kitStart < at(kitCard), at(kitCard) < kitEnd, at('<DriverTimeOffCard\n            v-if="driverStore.timeOff"') < at(kitCard)], [true, true, true])
+// Every refresh sets isLoading; inside that swap a playing video would be unmounted.
+const kitLoading = vt.indexOf('<div v-if="driverStore.isLoading">', kitStart)
+const kitLoaded = vt.indexOf('<template v-else>', kitLoading)
+const kitLoadedEnd = vt.indexOf('</template>', kitLoaded)
+eq('§8 the Kit card sits after the Kit\'s loading swap closes, so a refresh never unmounts it', [
+  kitStart < kitLoading, kitLoading < kitLoaded, kitLoaded < kitLoadedEnd, kitLoadedEnd < at(kitCard), at(kitCard) < kitEnd,
+], [true, true, true, true, true])
 eq('§8 the component is imported once', count(vs, "import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'"), 1)
 
 // ── §9 the store ─────────────────────────────────────────────────────────────

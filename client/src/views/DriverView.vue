@@ -301,8 +301,10 @@
             :time-off="driverStore.timeOff"
             @message-dispatch="handleTabSwitch('messages')"
           />
-          <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
         </template>
+        <!-- Outside the loading swap: every refresh sets isLoading, and a playing video
+             must survive it. -->
+        <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
       </section>
 
       <!-- NOTIFICATIONS TAB -->
