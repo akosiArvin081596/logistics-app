@@ -6552,6 +6552,21 @@ const ONBOARDING_DOCS = [
 	{ key: "substance_policy", name: "Substance Policy and Procedure", confidential: 0 },
 ];
 
+// --- Owner-operators (lib/owner-operator.js) ---
+// The eight tables and the two filed-by columns on expenses exist whatever the
+// flags (additive); nothing reads them, or the four flags, until their routes ship.
+const ownerOperator = require("./lib/owner-operator");
+db.exec(ownerOperator.OO_SCHEMA_SQL);
+for (const sql of ownerOperator.OO_EXPENSE_COLUMN_SQL) {
+	try { db.exec(sql); } catch { /* the column exists */ }
+}
+const OO_FLAGS = ownerOperator.ooFlagsFromEnv(process.env);
+const OWNER_OPERATOR_ONBOARDING_ENABLED = OO_FLAGS.onboarding;
+const OWNER_OPERATOR_LOAD_PAY_ENABLED = OO_FLAGS.loadPay;
+const OWNER_OPERATOR_SETTLEMENTS_ENABLED = OO_FLAGS.settlements;
+const OWNER_OPERATOR_ESCROW_ENABLED = OO_FLAGS.escrow;
+console.log(ownerOperator.ooFlagsStartupLine(OO_FLAGS));
+
 // --- Investor Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_applications (
