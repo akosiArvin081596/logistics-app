@@ -10750,6 +10750,13 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 				route: `PUT /api/drivers-directory/${dirExisting.id}`,
 			});
 		}
+		// An owner-operator's first row takes the default pay and no carrier, for any role
+		// (lib/owner-operator-onboarding.js); contact fields go in as sent.
+		const ooCreate = ooOnboarding.directoryCreateRefusal(createRow, directoryDefaultRow(insName));
+		if (ooCreate) {
+			logAuditRefusal(req, "create_driver_pay_blocked", "driver", auditText(insName, 100), ooCreate.audit, ooCreate.body.code);
+			return res.status(409).json(ooCreate.body);
+		}
 
 		// A first row restates the finalized months this driver worked when it
 		// sets anything but the defaults; see directoryCreateLockBlockers(). The
@@ -33998,6 +34005,14 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				unresolved,
 				blockers: lock.blockers,
 			});
+		}
+
+		// An owner-operator's account keeps its company name: the sync below would make
+		// it his directory carrier (lib/owner-operator-onboarding.js).
+		const ooCompany = ooOnboarding.accountCompanyRefusal(user, accountCompanyChange(user, companyName));
+		if (ooCompany) {
+			logAuditRefusal(req, "update_user_blocked", "user", String(id), ooCompany.audit, ooCompany.body.code);
+			return res.status(409).json(ooCompany.body);
 		}
 
 		// (c2) The month-end lock on the drivers_directory carrier the sync after

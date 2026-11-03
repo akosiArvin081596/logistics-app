@@ -661,6 +661,9 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		investorCompanyMoves: () => [],
 		investorCompanyLockBlockers: () => null,
 		getJobTrackingCached: async () => ({ headers: [], data: [] }),
+		// The owner-operator directory check, with no owner-operator here (scripts/test-owner-operator-onboarding.js §9).
+		ooOnboarding: require("./lib/oo-onboarding-env").ooOnboardingNoProfile(),
+		logAuditRefusal: () => {},
 	};
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));

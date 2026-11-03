@@ -115,7 +115,7 @@ GET /api/driver/shared-documents/:id/download · requireAuth@2f5c61384511 · inl
 PUT /api/driver/status · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@36432051331d
 GET /api/driver/truck-documents/:id/view · requireAuth@2f5c61384511 · truckDocViewLimiter=limiter · inline@fd3eb05a68a6
 GET /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@65f41ab129f2
-POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@692400a60522
+POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@7c18a1e6bafe
 DELETE /api/drivers-directory/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b244c9c7ef55
 PUT /api/drivers-directory/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ac072241ae21
 GET /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5e38514ab834
@@ -306,7 +306,7 @@ POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b8
 GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c9395146e033
 POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2aa9a5c0afb8
-PUT /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · userPasswordResetLimiter=limiter · inline@a0aa8f1e05e2
+PUT /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · userPasswordResetLimiter=limiter · inline@0ec94734e9b5
 POST /api/users/:id/disable · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@7a760a5a1a0a
 POST /api/users/:id/enable · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@671853345cd5
 PUT /api/users/:id/rating · requireRole("Super Admin")=anon@12b84c4b0134 · inline@afdcf7a41d18

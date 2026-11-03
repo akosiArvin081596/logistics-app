@@ -45,6 +45,8 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator account check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let passed = 0;
 let failed = 0;
@@ -181,6 +183,7 @@ function world(viewers) {
 		userDeleteLockBlockers: () => { seen.lockCalls++; return { unreadable: true, blockers: [] }; },
 		// DELETE's last-Super-Admin count (shipped lib code).
 		accountDisable,
+		ooOnboarding: OO_NO_PROFILE,
 	};
 	const names = Object.keys(env);
 	new Function(...names, PUT_ROUTE)(...names.map((k) => env[k]));

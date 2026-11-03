@@ -64,6 +64,8 @@ function ooOnboardingNoProfile(driverDocs) {
 		refuseLoad: () => false,
 		rowDriverChange: () => "",
 		directoryEditRefusal: () => null,
+		directoryCreateRefusal: () => null,
+		accountCompanyRefusal: () => null,
 		setInServiceOnCompletion: () => "",
 		notifyAgreementReady: () => false,
 		sweepAgreementReadyNotices: () => 0,

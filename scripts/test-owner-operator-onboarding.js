@@ -157,12 +157,15 @@ const HEADS = {
 	sign: 'app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardingSignLimiter, async (req, res) => {',
 	preview: 'app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewLimiter, async (req, res) => {',
 	directory: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
+	directoryCreate: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
+	userEdit: 'app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {',
 };
 const PROVIDED = ["db", "app", "require", "console", "process", "sendEmail", "notifyChange", "io", "renderPolicy", "fillW9Form", "DATA_DIR",
 	"ADMIN_NOTIFY_EMAIL", "OWNER_OPERATOR_ONBOARDING_ENABLED", "EMERGENCY_CONTACTS_ENABLED", "ONBOARDING_RESIGN_ENABLED",
-	"publicFormLimiter", "onboardingSignLimiter", "onboardingPreviewLimiter", "bcrypt", "getJobTrackingCached", "syncDriverToCarrierSheet",
-	"accountDirectoryCarrier", "accountDirectoryRowJudged", "syncCarrierDriverHistory", "recordPayRateChanges", "Date"];
-const DENIED = ["server", "sheets", "getSheets", "getDrive", "transporter", "sheetsClient", "KEY_FILE", "jtCacheInvalidate"];
+	"publicFormLimiter", "onboardingSignLimiter", "onboardingPreviewLimiter", "userPasswordResetLimiter", "bcrypt", "getJobTrackingCached",
+	"syncDriverToCarrierSheet", "accountDirectoryCarrier", "accountDirectoryRowJudged", "syncCarrierDriverHistory", "recordPayRateChanges", "Date",
+	"getSheets", "SPREADSHEET_ID"];
+const DENIED = ["server", "sheets", "getDrive", "transporter", "sheetsClient", "KEY_FILE", "jtCacheInvalidate"];
 const ROOTS = ["checkAndCompleteOnboarding", "onboardingSigningStepState", "ONBOARDING_DOCS"];
 const SESSIONS = {
 	sa: { id: 1, username: "super_admin", role: "Super Admin" },
@@ -189,7 +192,7 @@ async function world({ src = SRC, flag = true, lib = realLib, text = AGREEMENT_T
 	const db = shared || freshDb();
 	const dataDir = fs.mkdtempSync(path.join(TMP, "w-"));
 	const lifted = lift(src);
-	const log = { mail: [], notified: [], renders: [], synced: [] };
+	const log = { mail: [], notified: [], renders: [], synced: [], pairings: [] };
 	const app = express();
 	app.use(express.json({ limit: "5mb" }));
 	app.use((req, res, next) => {
@@ -232,14 +235,18 @@ async function world({ src = SRC, flag = true, lib = realLib, text = AGREEMENT_T
 		publicFormLimiter: (req, res, next) => next(),
 		onboardingSignLimiter: (req, res, next) => next(),
 		onboardingPreviewLimiter: (req, res, next) => next(),
-		bcrypt: { hash: async () => "made-up-hash" },
+		userPasswordResetLimiter: (req, res, next) => next(),
+		bcrypt: { hash: async () => "made-up-hash", compare: async () => false },
 		getJobTrackingCached: async () => ({ headers: [], data: [] }),
-		syncDriverToCarrierSheet: (name, opts = {}) => log.synced.push({ name, action: opts.action }),
+		syncDriverToCarrierSheet: (name, opts = {}) => log.synced.push({ name, action: opts.action, companyName: opts.companyName }),
 		accountDirectoryCarrier: (name, company) => company,
 		accountDirectoryRowJudged: () => true,
-		syncCarrierDriverHistory: () => {},
+		// The carrier pairing the investor ledger reads (leg 3): recorded, so a refused write is seen writing none.
+		syncCarrierDriverHistory: (rows, driverCol, carrierCol) => log.pairings.push(...rows.map((r) => [r[driverCol], r[carrierCol]])),
 		recordPayRateChanges: () => {},
 		Date: FixedDate,
+		getSheets: async () => { throw new Error("no sheet in this world"); },
+		SPREADSHEET_ID: "oo-onboarding-test-sheet",
 	};
 	const names = Object.keys(scope);
 	const exported = ROOTS.filter((n) => lifted.names.includes(n));
@@ -367,6 +374,8 @@ function standInSection(c) {
 		["loadRefusal", real.loadRefusal("Casey Example"), stand.loadRefusal("Casey Example")],
 		["refuseLoad", [real.refuseLoad({}, a.res, { driver: "Casey Example", via: "t" }), a.out.code], [stand.refuseLoad({}, b.res, { driver: "Casey Example", via: "t" }), b.out.code]],
 		["directoryEditRefusal", real.directoryEditRefusal({ driver_name: "Casey Example", pay_type: "fixed" }, { pay_type: "percentage", carrier_name: "Other" }), stand.directoryEditRefusal({ driver_name: "Casey Example" }, {})],
+		["directoryCreateRefusal", real.directoryCreateRefusal({ driver_name: "Casey Example", carrier_name: "Other", pay_type: "fixed" }, { pay_type: "fixed", carrier_name: "" }), stand.directoryCreateRefusal({ driver_name: "Casey Example" }, {})],
+		["accountCompanyRefusal", real.accountCompanyRefusal({ id: 7, driver_name: "Casey Example" }, true), stand.accountCompanyRefusal({ id: 7 }, true)],
 		["setInServiceOnCompletion", real.setInServiceOnCompletion(7, "2026-11-02T15:00:00.000Z"), stand.setInServiceOnCompletion(7, "2026-11-02T15:00:00.000Z")],
 		["notifyAgreementReady", real.notifyAgreementReady(7), stand.notifyAgreementReady(7)],
 		["sweepAgreementReadyNotices", real.sweepAgreementReadyNotices(), stand.sweepAgreementReadyNotices()],
@@ -408,11 +417,19 @@ function baseSource() {
 	}
 	return serverSource({ file });
 }
+// The stamps SQLite writes itself (CURRENT_TIMESTAMP), which the fixed Date can't
+// reach: dropped at any depth, so two worlds a second apart still compare equal.
+const CLOCK_FIELDS = new Set(["created_at", "updated_at", "signed_at", "timestamp", "signing_failed_at", "submitted_at", "onboarded_at", "deleted_at"]);
+function dropClock(v) {
+	if (Array.isArray(v)) return v.map(dropClock);
+	if (!v || typeof v !== "object") return v;
+	return Object.fromEntries(Object.entries(v).filter(([k]) => !CLOCK_FIELDS.has(k)).map(([k, x]) => [k, dropClock(x)]));
+}
 // One script of requests, the same on both sides; what each answers and every
 // table it touches afterwards, with the clock and the made-up hash fixed.
 async function baselineScript(w) {
 	const out = [];
-	const keep = (r) => ({ status: r.status, body: r.body });
+	const keep = (r) => ({ status: r.status, body: dropClock(r.body) });
 	const company = await w.call("POST", "/api/public/apply", { user: null, body: application({ position: "Company Driver", owner_operator: undefined }) });
 	const ooPos = await w.call("POST", "/api/public/apply", { user: null, body: application() });
 	out.push(keep(company), keep(ooPos));
@@ -430,8 +447,7 @@ async function baselineScript(w) {
 	out.push(keep(await w.call("POST", `/api/onboarding/${userId}/documents/contractor_agreement/sign`, { user: me, body: signBody({ paymentInfo: { paymentMethod: "check", checkName: "Alex Example" } }) })).status);
 	const preview = await w.call("GET", "/api/onboarding/documents/equipment_policy/pdf", { user: me });
 	out.push(preview.status, preview.type);
-	const strip = (rows) => (rows || []).map((r) => { const o = { ...r }; for (const k of ["created_at", "signed_at", "timestamp", "signing_failed_at", "submitted_at"]) delete o[k]; return o; });
-	for (const t of ["job_applications", "users", "driver_onboarding", "onboarding_documents", "driver_payment_info", "trucks", "truck_assignments", "notifications"]) out.push([t, strip(tableRows(w.db, t))]);
+	for (const t of ["job_applications", "users", "driver_onboarding", "onboarding_documents", "driver_payment_info", "trucks", "truck_assignments", "notifications"]) out.push([t, dropClock(tableRows(w.db, t) || [])]);
 	out.push(["audit", audits(w.db).map((a) => [a.action, a.entity, a.details.replace(/created account "[^"]+"/, "")])]);
 	out.push(["mail", w.log.mail.map((m) => [m.to, m.subject, m.html.replace(/>[0-9a-f]{8}</g, ">(pw)<")])]);
 	return out;
@@ -737,6 +753,45 @@ async function directorySection(c, opts = {}) {
 		const driver = await put(other, { Driver: "Sam Company", "Carrier Name": "Example Carrier Co" });
 		c.eq("§9 a company driver's carrier change is as before (no owner-operator refusal)", [driver.status, rowOf(other).carrier_name], [200, "Example Carrier Co"]);
 	});
+	// His first row (POST /api/drivers-directory), open from acceptance until his signing
+	// step adds it, and after a delete: the same rule as the edit.
+	await inWorld(c, "§9 the first row", { flag: true, ...opts }, async (w) => {
+		const { userId } = await applyAndAccept(w);
+		const name = w.db.prepare("SELECT driver_name FROM users WHERE id = ?").get(userId).driver_name;
+		const add = (values, user = "disp") => w.call("POST", "/api/drivers-directory", { user, body: { headers: Object.keys(values), values: Object.values(values) } });
+		const rowsOf = () => w.db.prepare("SELECT driver_name, carrier_name, pay_type, pay_percentage, pay_daily, phone FROM drivers_directory WHERE driver_name = ?").all(name);
+		const pairingsBefore = w.log.pairings.length;
+		const carrier = await add({ Driver: name, "Carrier Name": "Example Investor Co" });
+		c.eq("§9 a Dispatcher adding his row with an investor company as carrier: 409 OWNER_OPERATOR_DIRECTORY, no row, no carrier pairing",
+			[carrier.status, carrier.body && carrier.body.code, rowsOf().length, w.log.pairings.length - pairingsBefore], [409, "OWNER_OPERATOR_DIRECTORY", 0, 0]);
+		const terms = await add({ Driver: name, PayType: "percentage", PayPercentage: "80" }, "sa");
+		c.eq("§9 a Super Admin adding his row with pay terms: 409 OWNER_OPERATOR_DIRECTORY, no row", [terms.status, terms.body && terms.body.code, rowsOf().length], [409, "OWNER_OPERATOR_DIRECTORY", 0]);
+		c.ok("§9 ...both refusals audited under create_driver_pay_blocked with the code",
+			audits(w.db).filter((a) => a.action === "create_driver_pay_blocked" && a.details.includes("[OWNER_OPERATOR_DIRECTORY]")).length === 2);
+		const contact = await add({ Driver: name, PhoneNumber: "555-0100", "Carrier Name": "" });
+		c.eq("§9 a contact-only add goes through: his row with the default pay and no carrier", [contact.status, rowsOf()], [200, [{ driver_name: name, carrier_name: "", pay_type: "fixed", pay_percentage: 0, pay_daily: 0, phone: "555-0100" }]]);
+		const other = await add({ Driver: "Sam Company", "Carrier Name": "Example Carrier Co" });
+		c.eq("§9 a company driver's row is added with its carrier as before", [other.status, w.log.pairings.some(([d, k]) => d === "Sam Company" && k === "Example Carrier Co")], [200, true]);
+	});
+	// His account's company name: the account edit's directory sync and the signing
+	// step copy it into his carrier, so it doesn't change for an owner-operator.
+	await inWorld(c, "§9 the account's company name", { flag: true, ...opts }, async (w) => {
+		// The account edit re-reads the acting Super Admin's own row.
+		w.db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', 'x', 'Super Admin')").run();
+		const { userId } = await applyAndAccept(w);
+		const before = w.db.prepare("SELECT company_name, email FROM users WHERE id = ?").get(userId);
+		const r = await w.call("PUT", `/api/users/${userId}`, { body: { companyName: "Example Investor Co" } });
+		c.eq("§9 changing his account's company name: 409 OWNER_OPERATOR_DIRECTORY, the account unchanged, no directory sync",
+			[r.status, r.body && r.body.code, w.db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId).company_name, w.log.synced.filter((s) => s.companyName !== undefined).length],
+			[409, "OWNER_OPERATOR_DIRECTORY", before.company_name, 0]);
+		c.ok("§9 ...audited under update_user_blocked with the code", audits(w.db).some((a) => a.action === "update_user_blocked" && a.details.includes("[OWNER_OPERATOR_DIRECTORY]")));
+		const same = await w.call("PUT", `/api/users/${userId}`, { body: { companyName: before.company_name, email: "qa-oo-new@example.com" } });
+		c.eq("§9 an edit that sends his company name back unchanged goes through", [same.status, w.db.prepare("SELECT email FROM users WHERE id = ?").get(userId).email], [200, "qa-oo-new@example.com"]);
+		const a = await w.call("POST", "/api/public/apply", { user: null, body: application({ position: "Company Driver" }) });
+		const d = await w.call("PUT", `/api/applications/${a.body.id}/status`, { body: { status: "Accepted" } });
+		const co = await w.call("PUT", `/api/users/${d.body.credentials.userId}`, { body: { companyName: "Example Carrier Co" } });
+		c.eq("§9 a company driver's account company change is as before", [co.status, w.db.prepare("SELECT company_name FROM users WHERE id = ?").get(d.body.credentials.userId).company_name], [200, "Example Carrier Co"]);
+	});
 }
 
 // ── §10 G13: the five routes that put a driver on a load ──────────────────────
@@ -881,6 +936,10 @@ async function mutants(c, base) {
 		db.prepare("INSERT INTO owner_operators (user_id, status, created_at) VALUES (10, 'onboarding', 'x')").run();
 		s.eq("M16 a spacing and case variant is still him", (oo.loadRefusal("  hollis   RENNER") || { body: {} }).body.code, "OWNER_OPERATOR_UNSIGNED");
 	});
+	await runOn("M17 his first directory row without the owner-operator check (review M1)", srcMutant("const ooCreate = ooOnboarding.directoryCreateRefusal(createRow, directoryDefaultRow(insName));", "const ooCreate = null;"),
+		(s, src) => directorySection(s, { src }));
+	await runOn("M18 his account's company name without the owner-operator check", srcMutant("const ooCompany = ooOnboarding.accountCompanyRefusal(user, accountCompanyChange(user, companyName));", "const ooCompany = null;"),
+		(s, src) => directorySection(s, { src }));
 	await runOn("M15 the list annotated with the flag off", srcMutant("if (OWNER_OPERATOR_ONBOARDING_ENABLED) apps = ooOnboarding.annotateApplications(apps);", "apps = ooOnboarding.annotateApplications(apps);"), (s, src) => inWorld(s, "M15", { src, flag: false }, async (w) => {
 		await w.call("POST", "/api/public/apply", { user: null, body: application() });
 		const l = await w.call("GET", "/api/applications");
