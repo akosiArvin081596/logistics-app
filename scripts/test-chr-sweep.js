@@ -22,7 +22,8 @@
 //       reach no row, state, audit or log
 //   §12 the source: lib/chr-*.js has no Sheets write, Drive, mail or n8n; its
 //       SQL names neither actor nor reason; no SELECT *; it never names
-//       driver_emergency_contacts
+//       driver_emergency_contacts or driver_locations, and every routemate_telemetry
+//       SQL keeps source = 'routemate' and dropped_reason = '' (with mutants)
 //   §13 a protected number inside a load key is withheld on all four paths (a
 //       9-digit Load ID, one that is not, a blank or unreadable Email, a load
 //       missing from Job Tracking): no table, audit, log or result holds it
@@ -495,6 +496,12 @@ async function main() {
 	const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => /^chr-.*\.js$/.test(f)).sort();
 	eq(libFiles, ["chr-events.js", "chr-integration.js", "chr-store.js", "chr-sweep.js", "chr-verify.js"], "§12 the five lib/chr-*.js files");
 	const sqlOf = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /\b(?:SELECT|UPDATE|INSERT|DELETE|CREATE)\b/.test(s));
+	// Any string naming the table counts, SQL keyword or not, so a split query is still seen.
+	const telemetrySql = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /routemate_telemetry/i.test(s));
+	const locationScan = (text) => [
+		...(/driver_locations/i.test(text) ? ["driver_locations"] : []),
+		...telemetrySql(text).filter((s) => !/\bsource\s*=\s*'routemate'/i.test(s) || !/\bdropped_reason\s*=\s*''/i.test(s)),
+	];
 	for (const f of libFiles) {
 		const src = fs.readFileSync(path.join(ROOT, "lib", f), "utf8");
 		const code = src.replace(/^\s*\/\/.*$/gm, "");
@@ -506,7 +513,16 @@ async function main() {
 		ok(!/SELECT \*/i.test(src), `§12 ${f}: no SELECT *`);
 		// Addendum C9: a driver's emergency contacts are no CHR input, in SQL or anywhere else.
 		ok(!/driver_emergency_contacts/i.test(src), `§12 ${f}: never names driver_emergency_contacts`);
+		eq(locationScan(src), [], `§12 ${f}: never names driver_locations; every routemate_telemetry SQL keeps the clean-RouteMate filter`);
 	}
+	// Addendum R3.7: a position reaches CHR only from the truck's clean RouteMate
+	// fixes, never from drivers' phones (driver_locations) or Linxup/dropped rows.
+	ok(telemetrySql(fs.readFileSync(path.join(ROOT, "lib", "chr-verify.js"), "utf8")).length >= 2, "§12 (check) the scan sees chr-verify.js's two telemetry reads, so it is not vacuous");
+	eq(locationScan("const Q = `SELECT lat, lng FROM driver_locations WHERE driver_id = ?`;"), ["driver_locations"], "§12 mutant: a made-up driver_locations read is caught");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry WHERE routemate_vehicle_id = ?`;").length, 1, "§12 mutant: a routemate_telemetry read with no filter is caught");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND dropped_reason = ''`;").length, 1, "§12 mutant: ...and one with only the dropped_reason half");
+	eq(locationScan("const Q = \"SELECT latitude FROM routemate_telemetry WHERE source = 'routemate'\";").length, 1, "§12 mutant: ...and one with only the source half");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry\n\tWHERE source = 'routemate' AND dropped_reason = ''`;"), [], "§12 (check) a filtered read passes");
 
 	// ---------------------------------------------------------------- §13
 	section("§13 a protected number inside a load key");
