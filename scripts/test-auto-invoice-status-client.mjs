@@ -357,15 +357,18 @@ section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it
     '§9 SEND_UNCONFIRMED and MAYBE_SENT say the invoice is never sent again')
   ok(/SENT an invoice/.test(S.draftMadeSinceText({ invoice_id: '10202026-1', via: 'auto-smtp' })), '§9 FAILS ON THE OLD CODE: Approve names an invoice the job SENT since the dialog opened')
   ok(/automatic invoice drafts made/.test(S.draftMadeSinceText({ invoice_id: '10202026-1', via: 'auto-imap' })), '§9 ...and the job\'s draft as before')
-  eq([...(S.AUTO_INVOICE_VIAS || [])].sort(), [...rules.JOB_VIAS].sort(), '§9 the client knows the job\'s via values exactly (rules.JOB_VIAS)')
+  eq([...(S.AUTO_INVOICE_VIAS || [])].sort(), [...(rules.JOB_VIAS || ['(none on this tree)'])].sort(), '§9 FAILS ON THE OLD CODE: the client knows the job\'s via values exactly (rules.JOB_VIAS)')
 
-  // The stop's words: exactly the server's reasons.
-  const sendRules = require(path.join(ROOT, 'lib', 'auto-invoice-send.js'))
-  eq(Object.keys(S.AUTO_INVOICE_STOP_WORDS || {}).sort(), [...sendRules.STOP_REASONS].sort(), '§9 the client words exactly the server\'s stop reasons')
-  eq(S.autoSendState(null), null, '§9 sending off: no sending section')
-  const on = S.autoSendState({ domains: ['example-broker.test'], stopped: null })
+  // The stop's words: exactly the server's reasons. A tree without sending names
+  // its failures instead of stopping the run.
+  let sendRules = null
+  try { sendRules = require(path.join(ROOT, 'lib', 'auto-invoice-send.js')) } catch { sendRules = null }
+  eq(Object.keys(S.AUTO_INVOICE_STOP_WORDS || {}).sort(), [...((sendRules && sendRules.STOP_REASONS) || ['(none on this tree)'])].sort(), '§9 FAILS ON THE OLD CODE: the client words exactly the server\'s stop reasons')
+  const sendState = fnOf('autoSendState') || (() => undefined)
+  eq(sendState(null), null, '§9 FAILS ON THE OLD CODE: sending off: no sending section')
+  const on = sendState({ domains: ['example-broker.test'], stopped: null })
   ok(on && on.canStop === true && /example-broker\.test/.test(on.text), '§9 sending on: the domains it sends to, and Stop offered')
-  const stopped = S.autoSendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'SMTP_REFUSED' } })
+  const stopped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'SMTP_REFUSED' } })
   ok(stopped && stopped.canStop === false && /stopped/.test(stopped.text) && /refused an invoice email/.test(stopped.text) && /Only the server/.test(stopped.text),
     '§9 stopped: why, and no button (only the server resumes)')
   const stopTag = (/<button[^>]*@click="stopAutoSend"[^>]*>/.exec(TAB) || [''])[0]

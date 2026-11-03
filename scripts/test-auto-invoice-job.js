@@ -2436,12 +2436,12 @@ async function sendSections() {
 	eq(s.records, ["auto-smtp"], "§24 FAILS ON THE OLD CODE: engine.record() is told the send's via");
 	eq(s.sentRows, [["auto-invoice", "10202026-1 → example-broker.test (sent by the automatic invoice job)"]],
 		"§24 FAILS ON THE OLD CODE: one auto_invoice_sent row by the system actor: the invoice number and the recipient's domain only");
-	eq(s.other, 0, "§24 FAILS ON THE OLD CODE: otherDraftRows() is empty after the send (the sent row is the job's own)");
+	eq(s.other, 0, "§24 otherDraftRows() is empty after the send (the sent row is the job's own; the via-set mutant below pins it)");
 	eq(s.message, { to: "billing@example-broker.test", from: `LogisX Inc. <${MAILBOX.user}>`, user: MAILBOX.user, subject: "Example Broker Order #LD-TEST-0500",
 		attachments: ["Example Broker Invoice Order #LD-TEST-0500.pdf", "LD-TEST-0500_POD.pdf", "LD-TEST-0500.pdf"], idIsClaims: true },
 	"§24 FAILS ON THE OLD CODE: the message is the render's own: the one recipient, the subject, the invoice, the POD and the rate con, as they are, with the claim's Message-ID");
 	eq(s.digest, ["billing@example-broker.test", ["Example Broker Invoice Order #LD-TEST-0500.pdf", "LD-TEST-0500_POD.pdf", "LD-TEST-0500.pdf"]],
-		"§24 FAILS ON THE OLD CODE: the claim keeps the digest of what was sent");
+		"§24 the claim keeps the digest of what was sent, as a draft keeps its own");
 	eq(s.annotation && s.annotation.sent, true, "§24 FAILS ON THE OLD CODE: a Super Admin's row says the invoice was sent (`sent: true`)");
 	ok(s.logsClean, "§24 no email address in the logs");
 
@@ -2575,26 +2575,25 @@ async function sendSections() {
 	eq([stopR.r1, stopR.r2], [[200, false, "STOPPED_BY_ADMIN"], [200, true]], "§24 FAILS ON THE OLD CODE: Stop sets the stop; a second press finds it set");
 	eq([stopR.put, stopR.stop, stopR.statusSend, stopR.settingsSend], [200, "STOPPED_BY_ADMIN", [[SEND_DOMAIN], "STOPPED_BY_ADMIN"], "STOPPED_BY_ADMIN"],
 		"§24 FAILS ON THE OLD CODE: saving a domain through PUT /api/auto-invoice/settings keeps the stop; status and settings show it");
-	eq([stopR.smtp, stopR.append, stopR.next], [0, 1, ["drafted", ""]], "§24 FAILS ON THE OLD CODE: ...and the next tick only drafts");
+	eq([stopR.smtp, stopR.append, stopR.next], [0, 1, ["drafted", ""]], "§24 ...and the next tick only drafts");
 	eq(stopR.audits, [["made-up-admin", "STOPPED_BY_ADMIN by made-up-admin: made-up: checking a broker"]], "§24 FAILS ON THE OLD CODE: one audit row, by the person who pressed it");
 	eq(stopR.clears, [], "§24 no route clears the stop");
 	const stopOff = await SEND_CASES.stopRoute(jobLib, { send: { enabled: false, domains: [SEND_DOMAIN] } });
 	eq([stopOff.registered, stopOff.statusSend, stopOff.settingsSend], [false, null, null], "§24 sending off: no Stop route, and status and settings answer as before");
 	const between = await SEND_CASES.stopAtSend(jobLib);
 	eq([between.smtp, between.append, between.state, between.delivery, between.rows], [0, 1, ["drafted", ""], "", [{ invoice_id: "10202026-1", via: "auto-imap" }]],
-		"§24 FAILS ON THE OLD CODE: a stop set between the gate and the send: the load is drafted instead, nothing sent");
+		"§24 a stop set between the gate and the send: the load is drafted instead, nothing sent (the stop mutant below pins it)");
 
 	// The Draft Invoice button.
 	const b = await SEND_CASES.button(jobLib);
+	// On a tree without the check every line below fails by name (b.missing).
 	ok(!b.missing, "§24 FAILS ON THE OLD CODE: the job exports draftButtonCheck()");
-	if (!b.missing) {
-		eq([b.working, b.workingPreview, b.workingOff], [[409, "AUTO_INVOICE_IN_FLIGHT"], "ok", "ok"], "§24 FAILS ON THE OLD CODE: a claim in flight: 409 AUTO_INVOICE_IN_FLIGHT while sending is on (a preview and sending off: as before)");
-		eq([b.sentState, b.sent], [["drafted", "send"], [409, "INVOICE_ALREADY_SENT", true, true]], "§24 FAILS ON THE OLD CODE: a load whose invoice the job sent: 409 INVOICE_ALREADY_SENT, naming its invoice");
-		eq([b.preview, b.noReason, b.notTrue], ["ok", [409, "INVOICE_ALREADY_SENT"], [409, "INVOICE_ALREADY_SENT"]], "§24 ...a preview is never refused; a re-issue needs confirmReissue true and a reason");
-		eq([b.reissued, b.reissueRows], [[true, "made-up: corrected rate"], [["made-up-admin", "re-issue after the automatic send of 10202026-2: made-up: corrected rate"]]],
-			"§24 FAILS ON THE OLD CODE: a confirmed re-issue with a reason goes on, audited by the person");
-		eq([b.sentOff, b.unknown], [[409, "INVOICE_ALREADY_SENT"], "ok"], "§24 FAILS ON THE OLD CODE: sending switched off later still guards what was sent; a load with no claim: as before");
-	}
+	eq([b.working, b.workingPreview, b.workingOff], [[409, "AUTO_INVOICE_IN_FLIGHT"], "ok", "ok"], "§24 FAILS ON THE OLD CODE: a claim in flight: 409 AUTO_INVOICE_IN_FLIGHT while sending is on (a preview and sending off: as before)");
+	eq([b.sentState, b.sent], [["drafted", "send"], [409, "INVOICE_ALREADY_SENT", true, true]], "§24 FAILS ON THE OLD CODE: a load whose invoice the job sent: 409 INVOICE_ALREADY_SENT, naming its invoice");
+	eq([b.preview, b.noReason, b.notTrue], ["ok", [409, "INVOICE_ALREADY_SENT"], [409, "INVOICE_ALREADY_SENT"]], "§24 FAILS ON THE OLD CODE: ...a preview is never refused; a re-issue needs confirmReissue true and a reason");
+	eq([b.reissued, b.reissueRows], [[true, "made-up: corrected rate"], [["made-up-admin", "re-issue after the automatic send of 10202026-2: made-up: corrected rate"]]],
+		"§24 FAILS ON THE OLD CODE: a confirmed re-issue with a reason goes on, audited by the person");
+	eq([b.sentOff, b.unknown], [[409, "INVOICE_ALREADY_SENT"], "ok"], "§24 FAILS ON THE OLD CODE: sending switched off later still guards what was sent; a load with no claim: as before");
 
 	// The resume script: the one way the stop is cleared.
 	ok(resumeScript, "§24 FAILS ON THE OLD CODE: scripts/auto-invoice-send-resume.js exists");

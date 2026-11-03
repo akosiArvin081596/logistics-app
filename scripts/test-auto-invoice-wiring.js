@@ -820,7 +820,8 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq([stop.status, stop.json && stop.json.stopped && stop.json.stopped.reason, w.limited - limitedBefore], [200, "STOPPED_BY_ADMIN", 1], "§10 FAILS ON THE OLD CODE: a Super Admin stops it, through the limiter");
 		eq(w.audits("auto_invoice_send_stopped").map((a) => [a.username, a.details]), [[SA.username, `STOPPED_BY_ADMIN by ${SA.username}`]], "§10 FAILS ON THE OLD CODE: ...audited by the person");
 		const settings = await w.call("GET", "/api/auto-invoice/settings", SA);
-		eq(settings.json && settings.json.send, { domains: ["example-broker.test"], stopped: { at: stop.json.stopped.at, reason: "STOPPED_BY_ADMIN" } }, "§10 FAILS ON THE OLD CODE: the settings read shows the dialog the stop");
+		const stoppedAt = stop.json && stop.json.stopped ? stop.json.stopped.at : "(no stop on this tree)";
+		eq(settings.json && settings.json.send, { domains: ["example-broker.test"], stopped: { at: stoppedAt, reason: "STOPPED_BY_ADMIN" } }, "§10 FAILS ON THE OLD CODE: the settings read shows the dialog the stop");
 		w.deliver("LD-TEST-0102", rateCon());
 		await w.job.tick();
 		eq([w.smtp.length, w.gmail.length, w.state("LD-TEST-0102")], [1, 1, ["drafted", ""]], "§10 FAILS ON THE OLD CODE: stopped: the next load is a Gmail draft, nothing sent");
