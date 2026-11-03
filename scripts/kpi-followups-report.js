@@ -23,8 +23,27 @@
 //      the weeks touch, read only.
 // Exit codes: 0 done, 1 a proof failed (2 or 3) or an error, 2 refused.
 //
+// --part=viewer (KPI_VIEWER_ENABLED, KPI_VIEWER_IDS; lane V, before it and at its steps 6 and 9). The
+// database only, opened read-only; no settings file is read. It prints ids, counts, metric keys and
+// field names only (no username, email or figure), and:
+//   1-5. the users table as the rebuild script sees it: the live CREATE, the columns, the row count, the
+//        highest id and the sequence, the four child tables' foreign keys, the sessions;
+//   6. the rebuild script's dry-run verdict, its structural fingerprint and the foreign-key violations
+//      already there (lib/users-role-migration.js);
+//   7. the KPI Viewer accounts, each by id: enabled, must change its password, signed in yet;
+//   8. the metrics approved now (key and day), the stale approvals, and those given after
+//      kpi.weekly_since;
+//   9. the shared page's answer on this data (lib/kpi-viewer.js), with weekly figures off and on: its
+//      field names at every depth and its size, and that none is outside the allowlist;
+//   10. a KPI Viewer's verdict on every registered route and mount (scripts/fixtures/route-snapshot.txt)
+//       from this checkout's lifted requireAuth and requireRole;
+//   11. the flag and the list, from the app's own [kpi-viewer] start-up line (--startup-log), never
+//       from the settings file.
+// Exit codes: 0 done, 1 a proof failed (9 or 10) or an error, 2 refused.
+//
 // Usage:
 //   node scripts/kpi-followups-report.js --part=weekly --db=app.db --sheet-id=env [--as-of=YYYY-MM-DD] [--json]
+//   node scripts/kpi-followups-report.js --part=viewer --db=app.db [--startup-log=<the app's log>] [--json]
 //   --sheet-id=env         the SPREADSHEET_ID the app's .env sets (refused when none)
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
 //   --env-file=<file>      with a copy of the database under the temp directory only
@@ -32,9 +51,10 @@
 
 "use strict";
 
+const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
-const { parseArgs, sheetFor, envFor, openDb } = require("./lib/ledger-world");
+const { parseArgs, sheetFor, envFor, openDb, dbScope } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
 const { serverSource } = require("./lib/server-source");
 
@@ -158,6 +178,185 @@ async function weeklyPart(args) {
 	}
 }
 
+// ── --part=viewer ────────────────────────────────────────────────────────────────────────────────────
+const VIEWER_ROOTS = ["kpiResponse", "kpiReadSettings", "kpiApprovalSettings", "requireAuth", "requireRole", "APP_TIMEZONE"];
+// What the shared page's answer must never carry, at any depth (lib/kpi-viewer.js).
+const NEVER_IN_ANSWER = ["job", "settings", "recipients", "approval", "definitionVersion", "breakdown", "coverage", "beforeAfter"];
+
+function liftViewer(db, weekly) {
+	const SRC = serverSource({ root: ROOT });
+	const appRequire = createRequire(path.join(ROOT, "server.js"));
+	const lifted = closure(SRC, { roots: VIEWER_ROOTS, provided: PROVIDED, denied: DENIED });
+	const liftedRequire = (m) => {
+		if (!LIFTED_REQUIRE_OK(m)) throw new Error(`lifted code required ${m}, which this report does not load`);
+		return appRequire(m);
+	};
+	const noFetch = () => { throw new Error("lifted code called fetch(); this report makes no network calls"); };
+	const quiet = { log() {}, warn() {}, error() {} };
+	// The only setting the lifted code reads is whether weekly figures are on; nothing else is set.
+	const env = weekly ? { KPI_WEEKLY_ENABLED: "true" } : {};
+	const body = `"use strict";\n${lifted.text}\nreturn { kpiResponse, kpiReadSettings, kpiApprovalSettings, requireAuth, requireRole, APP_TIMEZONE };`;
+	return new Function("db", "require", "console", "process", "__dirname", "fetch", body)(
+		db, liftedRequire, quiet, { env, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } }, ROOT, noFetch,
+	);
+}
+
+// Every field name in `value`, as a path ("metrics[].weekly.series[].label").
+function fieldPaths(value, prefix = "", out = new Set()) {
+	if (Array.isArray(value)) { for (const v of value) fieldPaths(v, `${prefix}[]`, out); return out; }
+	if (!value || typeof value !== "object") return out;
+	for (const [k, v] of Object.entries(value)) {
+		const p = prefix ? `${prefix}.${k}` : k;
+		out.add(p);
+		fieldPaths(v, p, out);
+	}
+	return out;
+}
+
+// A KPI Viewer's verdict on each registration in the route snapshot, from the lifted guards: the first
+// guard the line names decides (a flag gate in front of it is taken as open).
+function routeVerdicts(k, lib) {
+	const text = fs.readFileSync(path.join(ROOT, "scripts", "fixtures", "route-snapshot.txt"), "utf8");
+	const lines = text.slice(text.indexOf("[routes]\n") + 9, text.indexOf("\n[middleware]")).split("\n").filter(Boolean);
+	const roleClosure = Function.prototype.toString.call(k.requireRole("Super Admin"));
+	const anonFp = (lines.map((l) => (l.match(/requireRole\([^)]*\)=anon@([0-9a-f]{12})/) || [])[1]).find(Boolean)) || null;
+	const user = { id: 1, username: "kpi_viewer_probe", role: lib.ROLE, mustChangePassword: false };
+	const decide = (guard, method, routePath) => {
+		const out = { status: null, body: null, nexted: false };
+		const req = { method, url: routePath || "/uploads/x", originalUrl: routePath || "/uploads/x", headers: { "x-requested-with": "XMLHttpRequest" }, session: { user } };
+		if (routePath) req.route = { path: routePath };
+		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+		guard(req, res, () => { out.nexted = true; });
+		return out.nexted ? "allowed" : `${out.status} ${(out.body && (out.body.code || out.body.error)) || ""}`.trim();
+	};
+	const rows = [];
+	for (const line of lines) {
+		const [head, ...chain] = line.split(" · ");
+		const sp = head.indexOf(" ");
+		const method = head.slice(0, sp);
+		const where = head.slice(sp + 1);
+		const auth = chain.findIndex((h) => /^requireAuth@/.test(h));
+		const role = chain.findIndex((h) => /^requireRole\(/.test(h) || (anonFp && h.startsWith(`anon@${anonFp}`)));
+		const first = [auth, role].filter((i) => i >= 0).sort((a, b) => a - b)[0];
+		const kind = method === "USE" ? "mount" : "route";
+		const path0 = where.startsWith("[") ? JSON.parse(where)[0] : where;
+		let verdict = "no guard";
+		if (first !== undefined && first === auth) verdict = decide(k.requireAuth, method === "USE" ? "GET" : method === "ALL" ? "GET" : method, kind === "route" ? path0 : null);
+		else if (first !== undefined) {
+			const listed = (chain[first].match(/^requireRole\(([^)]*)\)/) || [])[1];
+			const roles = listed ? listed.split(",").map((s) => JSON.parse(s.trim())) : ["(a lib mount's list)"];
+			if (Function.prototype.toString.call(k.requireRole(...roles)) !== roleClosure) throw new Error("requireRole's closure isn't the one the snapshot fingerprints");
+			verdict = decide(k.requireRole(...roles), method === "USE" || method === "ALL" ? "GET" : method, kind === "route" ? path0 : null);
+		}
+		rows.push({ kind, id: `${method} ${where}`, verdict });
+	}
+	return rows;
+}
+
+async function viewerPart(args) {
+	let file;
+	try {
+		({ file } = dbScope(args.db, ROOT));
+	} catch (err) {
+		refuse(err.message);
+	}
+	const db = openDb({ root: ROOT, dbFile: file, readonly: true });
+	const appRequire = createRequire(path.join(ROOT, "server.js"));
+	const migration = appRequire("./lib/users-role-migration");
+	const lib = appRequire("./lib/kpi-viewer");
+	const kpiCatalog = appRequire("./lib/kpi-catalog");
+	try {
+		const dry = migration.dryRunReport(db);
+		const s = dry.structure;
+		const accounts = s.admits
+			? db.prepare("SELECT * FROM users WHERE role = ? ORDER BY id").all(lib.ROLE).map((r) => ({
+				id: r.id, enabled: String(r.disabled_at ?? "") === "", mustChangePassword: !!r.must_change_password, signedIn: !!r.last_login_at,
+			}))
+			: [];
+		const off = liftViewer(db, false);
+		const on = liftViewer(db, true);
+		const settings = off.kpiApprovalSettings(off.kpiReadSettings());
+		let since = null;
+		try { since = (db.prepare("SELECT value FROM server_state WHERE key = 'kpi.weekly_since'").get() || {}).value || null; } catch { since = null; }
+		const approvalRows = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_at FROM kpi_metric_approvals ORDER BY metric_key").all();
+		const valid = approvalRows.filter((r) => kpiCatalog.approvalIsValid(r, r.metric_key, settings));
+		const stale = approvalRows.filter((r) => r.approved === 1 && !valid.includes(r)).map((r) => r.metric_key);
+		const day = (v) => (typeof v === "string" ? v.slice(0, 10) : null);
+		const after = since ? valid.filter((r) => Date.parse(r.approved_at) > Date.parse(since)).map((r) => r.metric_key) : [];
+		const now = Date.now();
+		const answers = {
+			weeklyOff: lib.viewerAnswer(off.kpiResponse(now), { weeklySince: null }),
+			weeklyOn: lib.viewerAnswer(on.kpiResponse(now), { weeklySince: since }),
+		};
+		const answer = Object.fromEntries(Object.entries(answers).map(([k, a]) => {
+			const fields = [...fieldPaths(a)].sort();
+			const outside = fields.filter((f) => NEVER_IN_ANSWER.includes(f.split(".").pop().replace(/\[\]$/, "")));
+			return [k, { metrics: a.metrics.map((m) => m.key), fields, outside, bytes: Buffer.byteLength(JSON.stringify(a)) }];
+		}));
+		const verdicts = routeVerdicts(off, lib);
+		const allowed = verdicts.filter((v) => v.verdict === "allowed").map((v) => v.id);
+		const refused = (re) => verdicts.filter((v) => re.test(v.verdict));
+		let startup = null;
+		if (typeof args["startup-log"] === "string") {
+			const lines = fs.readFileSync(args["startup-log"], "utf8").split("\n").filter((l) => /\[kpi-viewer\] (on|off)\b/.test(l));
+			startup = lines.length ? lines[lines.length - 1].replace(/^.*?(\[kpi-viewer\])/, "$1") : "(no [kpi-viewer] start-up line in that log)";
+		}
+		return {
+			part: "viewer",
+			users: {
+				ddl: s.ddl,
+				columns: s.columns.map((c) => `${c.name} ${c.type}${c.notnull ? " NOT NULL" : ""}${c.dflt_value !== null ? ` DEFAULT ${c.dflt_value}` : ""}${c.pk ? " PRIMARY KEY" : ""}`),
+				rows: dry.counts.rows, highestId: dry.counts.highestId, sequence: dry.counts.sequence, sessions: dry.counts.sessions,
+				children: s.children.map((c) => `${c.table}: ${c.keys.map((k) => `${k.from} -> ${k.table}(${k.to})${k.on_delete && k.on_delete !== "NO ACTION" ? ` ON DELETE ${k.on_delete}` : ""}`).join(", ")}`),
+			},
+			rebuild: {
+				verdict: dry.nothingToDo ? "nothing to do: the CHECK admits KPI Viewer" : dry.problems.length ? `refused: ${dry.problems.join("; ")}` : "would rebuild",
+				fingerprint: dry.fingerprint, baseline: dry.baseline, violations: dry.counts.violations,
+			},
+			kpiViewers: accounts,
+			approvals: { valid: valid.map((r) => ({ key: r.metric_key, day: day(r.approved_at) })), stale, weeklySince: since, afterWeeklySince: after },
+			answer,
+			routes: {
+				allowed,
+				ownWithoutGuard: verdicts.filter((v) => v.verdict === "no guard" && /^(GET \/api\/auth\/session|POST \/api\/auth\/(login|logout))$/.test(v.id)).map((v) => v.id),
+				forbidden: refused(/^403 Forbidden$/).length,
+				roleNotAllowed: refused(/^403 ROLE_NOT_ALLOWED$/).length,
+				mountsRefused: verdicts.filter((v) => v.kind === "mount" && /^403 /.test(v.verdict)).map((v) => v.id),
+				noGuard: verdicts.filter((v) => v.verdict === "no guard").length,
+				other: verdicts.filter((v) => !/^(allowed|no guard|403 Forbidden|403 ROLE_NOT_ALLOWED)$/.test(v.verdict)).map((v) => `${v.id}: ${v.verdict}`),
+			},
+			startup,
+			proofs: {
+				answerWithinAllowlist: Object.values(answer).every((a) => a.outside.length === 0),
+				onlyItsOwnRoutes: allowed.length === 2 && allowed.includes("POST /api/auth/change-password") && allowed.includes("GET /api/kpis/viewer"),
+			},
+		};
+	} finally {
+		db.close();
+	}
+}
+
+function printViewer(r) {
+	const u = r.users;
+	const lines = [
+		"KPI follow-ups report, part viewer (read-only; the database only).",
+		"1. The users table:", `  ${u.ddl}`,
+		"2. Columns:", ...u.columns.map((c) => `  ${c}`),
+		`3. Rows ${u.rows}; highest id ${u.highestId}; sqlite_sequence ${u.sequence}.`,
+		"4. Child tables' foreign keys:", ...u.children.map((c) => `  ${c}`),
+		`5. Sessions: ${u.sessions}.`,
+		`6. The rebuild's dry run: ${r.rebuild.verdict}. Structural fingerprint ${r.rebuild.fingerprint}; baseline ${r.rebuild.baseline}; violations already there: ${r.rebuild.violations.map((v) => `${v.table} ${v.count}`).join(", ") || "none"}.`,
+		`7. KPI Viewer accounts: ${r.kpiViewers.length}${r.kpiViewers.map((a) => `\n  #${a.id}: ${a.enabled ? "enabled" : "disabled"}; ${a.mustChangePassword ? "must change its password" : "password changed"}; ${a.signedIn ? "has signed in" : "never signed in"}`).join("")}`,
+		`8. Approved now: ${r.approvals.valid.map((a) => `${a.key} (${a.day})`).join(", ") || "none"}. Stale: ${r.approvals.stale.join(", ") || "none"}. Weekly figures since ${r.approvals.weeklySince || "(never)"}; approved after that: ${r.approvals.afterWeeklySince.join(", ") || "none"}.`,
+		"9. The shared page's answer on this data:",
+		...Object.entries(r.answer).map(([k, a]) => `  ${k}: ${a.metrics.length} metric(s) [${a.metrics.join(", ")}], ${a.bytes} bytes; fields: ${a.fields.join(", ")}; outside the allowlist: ${a.outside.join(", ") || "none"}`),
+		`10. A KPI Viewer's verdict on every route and mount: allowed by its guard: ${r.routes.allowed.join(", ")}; its own with no guard: ${r.routes.ownWithoutGuard.join(", ")}; 403 Forbidden ${r.routes.forbidden}; 403 ROLE_NOT_ALLOWED ${r.routes.roleNotAllowed}; mounts refused: ${r.routes.mountsRefused.join(", ")}; no guard (as signed out) ${r.routes.noGuard}; other: ${r.routes.other.join("; ") || "none"}.`,
+		`11. The flag and the list: ${r.startup || "not read; pass --startup-log=<the app's own log file> (this report never reads the settings file)"}`,
+		"", `Proofs: answer within the allowlist ${r.proofs.answerWithinAllowlist ? "yes" : "NO"}; only its own routes allowed ${r.proofs.onlyItsOwnRoutes ? "yes" : "NO"}.`,
+	];
+	console.log(lines.join("\n"));
+}
+
 function printText(r) {
 	const lines = [`KPI follow-ups report, part ${r.part} (read-only). As of ${r.asOfDay} (${r.timeZone}); weeks from ${r.weeksFrom || "-"}.`, r.weekRule, "", "1. Per metric:"];
 	for (const m of r.metrics) {
@@ -175,8 +374,15 @@ function printText(r) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	if (args.part !== "weekly") refuse("--part=weekly is the one part this checkout has");
+	if (args.part !== "weekly" && args.part !== "viewer") refuse("--part=weekly or --part=viewer");
 	if (!args.db || args.db === true) refuse("--db is required");
+	if (args.part === "viewer") {
+		const result = await viewerPart(args);
+		if (args.json === true) console.log(JSON.stringify(result, null, 1));
+		else printViewer(result);
+		if (!result.proofs.answerWithinAllowlist || !result.proofs.onlyItsOwnRoutes) process.exitCode = 1;
+		return;
+	}
 	const result = await weeklyPart(args);
 	if (args.json === true) console.log(JSON.stringify(result, null, 1));
 	else printText(result);
@@ -185,4 +391,4 @@ async function main() {
 
 if (require.main === module) main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
 
-module.exports = { ROOTS, DENIED };
+module.exports = { ROOTS, DENIED, VIEWER_ROOTS, NEVER_IN_ANSWER };

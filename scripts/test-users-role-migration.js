@@ -568,8 +568,10 @@ try {
 			at > SRC.indexOf("ALTER TABLE users ADD COLUMN company_name") && at < SRC.indexOf("CREATE TABLE IF NOT EXISTS expenses ("));
 		const routeHead = 'app.post("/api/users", requireRole("Super Admin")';
 		const addUser = SRC.slice(SRC.indexOf(routeHead), SRC.indexOf("\n});", SRC.indexOf(routeHead)));
-		ok("§11 Add User still takes only the four roles, and no route lists KPI Viewer or serves /api/kpis/viewer",
-			addUser.includes('if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {') && !/requireRole\([^)]*"KPI Viewer"/.test(SRC) && !SRC.includes("/api/kpis/viewer"));
+		ok("§11 Add User takes the four roles, and KPI Viewer only past lib/kpi-viewer.js's refusal (flag on, CHECK widened); one route lists it, GET /api/kpis/viewer",
+			addUser.includes('if (!kpiViewerRole && !["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {')
+			&& addUser.includes("kpiViewer.createRefusal({ enabled: KPI_VIEWER_ENABLED, schemaReady: KPI_VIEWER_SCHEMA_READY,")
+			&& (SRC.match(/requireRole\([^)]*"KPI Viewer"/g) || []).length === 1 && SRC.includes('\napp.get("/api/kpis/viewer", requireRole("Super Admin", "KPI Viewer")'));
 		if (at > -1 && readyAt > -1 && L) {
 			const text = SRC.slice(at, SRC.indexOf("\n", readyAt));
 			const boot = (env, db) => {
@@ -604,7 +606,8 @@ try {
 				const db2 = new Database(w2.file, { readonly: true });
 				const mig = boot(ON, db2);
 				db2.close();
-				eq("§11 flag on, table migrated: ready, one yes line, no error", [mig.KPI_VIEWER_SCHEMA_READY, mig.lines], [true, [["log", "[kpi-viewer] on; users CHECK admits KPI Viewer: yes"]]]);
+				eq("§11 flag on, table migrated: ready, one yes line naming the list and the KPI Viewer accounts, no error", [mig.KPI_VIEWER_SCHEMA_READY, mig.lines],
+					[true, [["log", "[kpi-viewer] on; users CHECK admits KPI Viewer: yes; KPI_VIEWER_IDS unset; 0 KPI Viewer accounts, 0 listed"]]]);
 			}
 		}
 	}

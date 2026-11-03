@@ -21,6 +21,8 @@
  *   §6 the check is SELF-CONTAINED — no module-scope identifiers — or
  *      scripts/test-db-export-guard.js's `new Function` lift throws at call time
  *   §7 CSRF_HEADER_REQUIRED is a kill switch: default ON, only "false" disables
+ *   §8 requireAuth's four-role check, ahead of both pinned blocks, changes
+ *      neither for the four roles
  *
  * Lifts both guards out of server.js the same way test-db-export-guard.js does,
  * so it exercises the code that ships rather than a copy.
@@ -195,6 +197,23 @@ for (const [label, guard] of [["requireAuth", buildAuth()], ["requireRole", buil
 		if (prev === undefined) delete process.env.CSRF_HEADER_REQUIRED;
 		else process.env.CSRF_HEADER_REQUIRED = prev;
 	}
+}
+
+// ────────────────────────── §8 requireAuth's four-role check leaves the pinned blocks as they were
+{
+	// It sits after the session check and before both pinned blocks (lib/kpi-viewer.js): every one of
+	// the four roles still meets the CSRF check exactly as before, and any other role is refused first.
+	const guard = buildAuth();
+	const roleAt = REQUIRE_AUTH.indexOf('if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(req.session.user.role)');
+	ok(roleAt > REQUIRE_AUTH.indexOf("if (!req.session.user)") && roleAt < REQUIRE_AUTH.indexOf("if (req.session.user.mustChangePassword")
+		&& roleAt < REQUIRE_AUTH.indexOf('req.method !== "GET"'), "§8 the four-role check sits between the session check and the pinned blocks");
+	for (const role of ["Super Admin", "Dispatcher", "Driver", "Investor"]) {
+		const r = run(guard, { method: "POST", headers: NO_HDR, user: { role } });
+		ok(r.status === 403 && r.body.code === "CSRF_HEADER_REQUIRED", `§8 a ${role}'s write without the header is still refused by the CSRF check`);
+		ok(run(guard, { method: "POST", headers: HDR, user: { role } }).nexted, `§8 ...and passes with it`);
+	}
+	const other = run(guard, { method: "POST", headers: NO_HDR, user: { role: "KPI Viewer" } });
+	ok(other.status === 403 && other.body.code === "ROLE_NOT_ALLOWED", "§8 a role outside the four is refused before the CSRF check");
 }
 
 console.log(`\n${"=".repeat(64)}`);

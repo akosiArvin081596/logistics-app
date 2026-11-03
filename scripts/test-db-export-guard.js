@@ -126,6 +126,41 @@ function buildGuards(block, allowlist) {
 }
 const buildRequireRole = () => new Function(REQUIRE_ROLE + "\nreturn requireRole;")();
 
+// requireAuth lifts the same way, with nothing injected: its four-role check (lib/kpi-viewer.js) is a
+// literal inside the function, so both guards stay self-contained.
+{
+	const a = src.indexOf("function requireAuth(req, res, next) {");
+	let text = null;
+	if (a >= 0) {
+		let depth = 0;
+		for (let i = src.indexOf("{", a); i < src.length; i++) {
+			if (src[i] === "{") depth++;
+			else if (src[i] === "}" && --depth === 0) { text = src.slice(a, i + 1); break; }
+		}
+	}
+	const verdict = (guard, user, method = "GET") => {
+		const out = { status: null, body: null, nexted: false };
+		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+		guard({ method, url: "/api/tabs", headers: { "x-requested-with": "XMLHttpRequest" }, route: { path: "/api/tabs" }, session: user ? { user } : {} }, res, () => { out.nexted = true; });
+		return out;
+	};
+	let threw = null;
+	let results = null;
+	try {
+		const requireAuth = new Function(text + "\nreturn requireAuth;")();
+		const requireRole = buildRequireRole();
+		results = {
+			authDriver: verdict(requireAuth, { id: 3, role: "Driver" }).nexted,
+			authOther: verdict(requireAuth, { id: 4, role: "KPI Viewer" }).body,
+			authNone: verdict(requireAuth, null).status,
+			roleSa: verdict(requireRole("Super Admin"), { id: 1, role: "Super Admin" }, "POST").nexted,
+		};
+	} catch (err) { threw = err; }
+	ok("both guards lift and run with nothing injected (requireAuth and requireRole)", !!text && !threw && !!results, threw && threw.message);
+	ok("...requireAuth passes a Driver, refuses a role outside the four (ROLE_NOT_ALLOWED) and answers no session 401",
+		!!results && results.authDriver === true && results.authOther && results.authOther.code === "ROLE_NOT_ALLOWED" && results.authNone === 401 && results.roleSa === true);
+}
+
 // ── optional deps ───────────────────────────────────────────────────────────
 // express / express-rate-limit / better-sqlite3 are absent in a bare git
 // worktree. The source-and-decision half above needs none of them; the sections

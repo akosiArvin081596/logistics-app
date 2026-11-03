@@ -647,8 +647,17 @@ try {
 // only while KPI_VIEWER_ENABLED is on (lib/users-role-migration.js). With the flag on, each start checks it.
 const usersRoleMigration = require("./lib/users-role-migration");
 const KPI_VIEWER_ENABLED = usersRoleMigration.kpiViewerEnabled(process);
+// KPI_VIEWER_IDS: the KPI Viewer accounts whose shared KPI page shows figures, read once and strictly
+// (lib/kpi-viewer.js). Unset, empty or invalid shows them to nobody. Server environment only.
+const kpiViewer = require("./lib/kpi-viewer");
+const KPI_VIEWERS = kpiViewer.viewerList(process.env.KPI_VIEWER_IDS);
+// With the flag on, the start-up line also names the list and the KPI Viewer accounts, by id.
+const KPI_VIEWER_CENSUS = KPI_VIEWER_ENABLED
+	? kpiViewer.census(KPI_VIEWERS, () => db.prepare("SELECT * FROM users WHERE role = ?").all(kpiViewer.ROLE))
+	: null;
 // True only with the flag on and a CHECK that admits the role; false keeps the role closed.
-const KPI_VIEWER_SCHEMA_READY = usersRoleMigration.kpiViewerBootCheck(db, { enabled: KPI_VIEWER_ENABLED, log: console });
+const KPI_VIEWER_SCHEMA_READY = usersRoleMigration.kpiViewerBootCheck(db, { enabled: KPI_VIEWER_ENABLED, log: console, detail: KPI_VIEWER_CENSUS && KPI_VIEWER_CENSUS.summary });
+if (KPI_VIEWER_CENSUS) kpiViewer.logCensus(KPI_VIEWER_CENSUS, console);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS expenses (
@@ -12281,6 +12290,11 @@ function signOutEndedAccount(req, res, next) {
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
+	// The four roles only: any other role (the KPI Viewer, lib/kpi-viewer.js) reaches just the routes whose
+	// requireRole names it, and its own password change, exempt by matched route as the block below is.
+	// A literal list, so this guard stays self-contained.
+	if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(req.session.user.role) && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password"))
+		return res.status(403).json({ error: "This account can't open this page.", code: "ROLE_NOT_ALLOWED" });
 	if (req.session.user.mustChangePassword && !(req.method === "POST" && req.route && req.route.path === "/api/auth/change-password")) {
 		// FORCED PASSWORD CHANGE (see the note above refreshPasswordChangeFlag).
 		// Duplicated verbatim in requireAuth and requireRole; pinned identical.
@@ -32766,9 +32780,10 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 // With NAMED_LOGINS_ENABLED a create answers whether the password is the acting
 // admin's own (PASSWORD_IS_YOURS), as PUT /api/users/:id's reset does, so it
 // spends that reset's budget: userPasswordResetLimiter, one store for both routes,
-// 5 password-bearing requests per 15 minutes per acting admin. Off: no limit.
+// 5 password-bearing requests per 15 minutes per acting admin. Off: no limit,
+// except for a KPI Viewer, whose create answers it whatever the flag says.
 function userCreatePasswordLimit(req, res, next) {
-	if (!NAMED_LOGINS_ENABLED) return next();
+	if (!NAMED_LOGINS_ENABLED && !(req.body && req.body.role === "KPI Viewer")) return next();
 	return userPasswordResetLimiter(req, res, next);
 }
 
@@ -32779,8 +32794,20 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 		if (!username || !password || !role) {
 			return res.status(400).json({ error: "Username, password, and role required" });
 		}
-		if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
+		const kpiViewerRole = role === "KPI Viewer";
+		if (!kpiViewerRole && !["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
 			return res.status(400).json({ error: "Invalid role" });
+		}
+		// A KPI Viewer only while KPI_VIEWER_ENABLED is on and the users CHECK admits the role, and never
+		// with a driver or company name (lib/kpi-viewer.js). A refusal writes nothing and is audited.
+		if (kpiViewerRole) {
+			const refusal = kpiViewer.createRefusal({ enabled: KPI_VIEWER_ENABLED, schemaReady: KPI_VIEWER_SCHEMA_READY, driverName, companyName });
+			if (refusal) {
+				const who = auditText(String(username).trim(), 100);
+				recordPeriodRefusal({ req, action: "create_user_blocked", entity: "user", entityId: who, subject: `create ${who} as KPI Viewer`, tail: refusal.tail },
+					refusal.code, []);
+				return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+			}
 		}
 
 		// Coerced, not trusted. PUT /api/users/:id learned this the hard way in
@@ -32811,8 +32838,8 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 
 		// NAMED_LOGINS_ENABLED: the password meets the one rule for a new password
 		// (lib/password-rules.js, as the admin reset in PUT /api/users/:id), for
-		// every role, before anything awaits.
-		if (NAMED_LOGINS_ENABLED) {
+		// every role, before anything awaits. A KPI Viewer's always does.
+		if (NAMED_LOGINS_ENABLED || kpiViewerRole) {
 			const weakRefusal = passwordRules.newPasswordRefusal(password);
 			if (weakRefusal) return res.status(400).json(weakRefusal);
 		}
@@ -32828,8 +32855,9 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 		// NAMED_LOGINS_ENABLED: the acting admin's own password is refused beside
 		// the hash, in the same await, as PUT does (PASSWORD_IS_YOURS): that is a
 		// browser filling the admin's saved login into the new account's form.
+		// A KPI Viewer's create always checks it.
 		let hash;
-		if (NAMED_LOGINS_ENABLED) {
+		if (NAMED_LOGINS_ENABLED || kpiViewerRole) {
 			const actor = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(Number(req.session?.user?.id));
 			const [newHash, isActorsOwn] = await Promise.all([
 				bcrypt.hash(password, 10),
@@ -32963,8 +32991,9 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 
 		// NAMED_LOGINS_ENABLED: a new Super Admin or Dispatcher changes the password
 		// at first sign-in (requireAuth/requireRole enforce must_change_password).
-		// Off, every account starts at 0, the column's default, as before.
-		const forceChange = NAMED_LOGINS_ENABLED && (role === "Super Admin" || role === "Dispatcher");
+		// Off, every account starts at 0, the column's default, as before. A new KPI
+		// Viewer always changes it, so the creating admin's password never stays its.
+		const forceChange = kpiViewerRole || (NAMED_LOGINS_ENABLED && (role === "Super Admin" || role === "Dispatcher"));
 		const created = db.prepare(
 			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "", forceChange ? 1 : 0);
@@ -32974,8 +33003,9 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 			syncDriverToCarrierSheet(newDriverName, { email, companyName, action: "add" });
 		}
 
+		// The account id is named whenever it may later go on a list (KPI_VIEWER_IDS for a KPI Viewer).
 		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}` +
-			(NAMED_LOGINS_ENABLED ? `; account id ${Number(created.lastInsertRowid)}${forceChange ? "; must change password at first sign-in" : ""}` : ""));
+			(NAMED_LOGINS_ENABLED || kpiViewerRole ? `; account id ${Number(created.lastInsertRowid)}${forceChange ? "; must change password at first sign-in" : ""}` : ""));
 		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
@@ -32989,6 +33019,8 @@ app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, asyn
 // as the sign-in lookup compares it) and SharedLogin (lib/sign-in.js) are the
 // Users page's chips. newStaffMustChangePassword: whether a new Super Admin or
 // Dispatcher changes the password at first sign-in (NAMED_LOGINS_ENABLED).
+// kpiViewerEnabled: true, and only present, while Add User takes the KPI Viewer
+// role (KPI_VIEWER_ENABLED on and the users CHECK admits it).
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
 		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
@@ -33027,7 +33059,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			DisabledBy: u.disabled_by ? { id: u.disabled_by, username: u.disabled_by_username || null } : null,
 			DisabledReason: u.disabled_reason || null,
 		}));
-	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
+	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED, ...(KPI_VIEWER_SCHEMA_READY ? { kpiViewerEnabled: true } : {}) });
 });
 
 // ============================================================
@@ -33635,13 +33667,17 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		// An unrecognised role used to fall through the `if (role && …)` below and
 		// be silently dropped: the request returned 200 and nothing changed, so a
 		// typo read to the admin as "the role change didn't stick". POST
-		// /api/users 400s on the same input; match it.
-		if (role !== undefined && role !== null && role !== "" && !ROLES.includes(role)) {
+		// /api/users 400s on the same input; match it. "KPI Viewer" is never
+		// written here: guard (a00) below answers it.
+		if (role !== undefined && role !== null && role !== "" && !ROLES.includes(role) && role !== "KPI Viewer") {
 			return res.status(400).json({ error: "Invalid role", code: "INVALID_ROLE" });
 		}
 		// The role that will actually be written — the guards below must reason
 		// about that value and not about the raw body.
 		const nextRole = ROLES.includes(role) ? role : null;
+		// What the refusal rows say was asked of the role: nextRole, or a KPI Viewer
+		// role asked for another account, which (a00) refuses.
+		const roleAsked = role === "KPI Viewer" && user.role !== "KPI Viewer" ? role : nextRole;
 
 		// ⚠️ ALL GUARDS BEFORE THE FIRST WRITE. No transactions in this app, so a
 		// refusal discovered halfway through the cascade is not a refusal.
@@ -33684,9 +33720,20 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				// `PUT /api/users/26 {"driverName":"…"}` wrote exactly that. It is an
 				// over-claim in the one table this batch exists to make trustworthy, and
 				// it is now rendered on the Data Issues page as "what was attempted".
-				`, role ${JSON.stringify(user.role || "")} -> ${nextRole === null ? "(unchanged)" : JSON.stringify(auditText(nextRole, 60))}` +
+				`, role ${JSON.stringify(user.role || "")} -> ${roleAsked === null ? "(unchanged)" : JSON.stringify(auditText(roleAsked, 60))}` +
 				(req.body && req.body.password ? ", password reset requested" : ""),
 		};
+
+		// (a00) A KPI Viewer account (lib/kpi-viewer.js) keeps its role, no account
+		// becomes one (409), and it holds no driver or company name (400). Its own
+		// role resent is no change, so an email or password edit goes through.
+		if (role === "KPI Viewer" || user.role === "KPI Viewer") {
+			const kpiViewerRefusal = kpiViewer.editRefusal({ currentRole: user.role, role, driverName, companyName });
+			if (kpiViewerRefusal) {
+				recordPeriodRefusal({ req, ...userEditAudit, tail: kpiViewerRefusal.tail }, kpiViewerRefusal.code, []);
+				return res.status(kpiViewerRefusal.status).json({ error: kpiViewerRefusal.error, code: kpiViewerRefusal.code });
+			}
+		}
 
 		// (a0) PROTECTED ACCOUNTS (RATECON_PDF_VIEWER_IDS). A listed account's
 		// password, role, email and driver name change only when the acting account
@@ -74832,6 +74879,34 @@ app.get("/api/admin/kpis", requireRole("Super Admin"), (req, res) => {
 	}
 });
 
+// GET /api/kpis/viewer — the shared KPI page's read (R15, lib/kpi-viewer.js): the metrics approved for
+// public use now, field by field from an allowlist, for a KPI Viewer on KPI_VIEWER_IDS, or a Super Admin
+// as a preview. Stored rows only, like GET /api/admin/kpis; writes nothing. requireRole comes first, so a
+// refused caller never spends the limiter.
+const kpiViewerLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests for the KPI page. Try again in a few minutes.", code: "KPI_VIEWER_RATE_LIMITED" },
+	standardHeaders: true,
+});
+app.get("/api/kpis/viewer", requireRole("Super Admin", "KPI Viewer"), kpiViewerLimiter, (req, res) => {
+	const refusal = kpiViewer.viewerRefusal({ enabled: KPI_VIEWER_ENABLED, schemaReady: KPI_VIEWER_SCHEMA_READY, list: KPI_VIEWERS, user: req.session.user });
+	if (refusal) return res.status(refusal.status).json(refusal.body);
+	try {
+		// When weekly figures began (K8): only an approval given after it shows them. Read only while they are on.
+		const since = KPI_WEEKLY_ENABLED ? db.prepare("SELECT value FROM server_state WHERE key = ?").get(KPI_WEEKLY_SINCE_KEY) : null;
+		res.set("Cache-Control", "no-store");
+		res.json(kpiViewer.viewerAnswer(kpiResponse(Date.now()), { weeklySince: since ? since.value : null }));
+	} catch {
+		console.error("[kpi] GET /api/kpis/viewer could not build its answer");
+		res.status(500).json({ error: "The KPI figures could not be read.", code: "KPI_READ_FAILED" });
+	}
+});
+
 // PUT /api/admin/kpis/approvals/:key — approve a metric for public use, or take
 // the approval back. The body names the definitionVersion the admin reviewed; a
 // definition that has changed since is refused (409), so nobody approves wording
@@ -75170,6 +75245,9 @@ io.on("connection", (socket) => {
 		// change, which closes it with the old session ID; the client reconnects
 		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
+		// A role outside the four (the KPI Viewer) joins no room, its own user room included, so nothing
+		// is pushed to it; its socket stays connected and inert. A literal list, as in requireAuth.
+		if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) return;
 		const requested = identityRoomKey(clientName);
 		// An account disabled or removed since the handshake joins no room.
 		const stillLive = liveSessionIds([sid]);

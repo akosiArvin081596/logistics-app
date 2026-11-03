@@ -409,7 +409,8 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		liveSessionIds: helpers.liveSessionIds, disconnectSessionSockets: helpers.disconnectSessionSockets,
 		notifyPasswordChanged: () => Promise.resolve({ recipients: 0, sent: 0 }), passwordRules,
 	});
-	mount(SRCS.users, { app, requireRole, db, signInLib, NAMED_LOGINS_ENABLED: false });
+	// KPI_VIEWER_SCHEMA_READY false: the KPI Viewer role closed, as with its flag off.
+	mount(SRCS.users, { app, requireRole, db, signInLib, NAMED_LOGINS_ENABLED: false, KPI_VIEWER_SCHEMA_READY: false });
 	const changes = [];
 	const notifyChange = (domain) => changes.push(domain);
 	// PUT's machinery, stubbed to "nothing blocks". The Job Tracking read is one of

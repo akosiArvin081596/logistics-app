@@ -156,6 +156,11 @@ const STAMP = "2026-10-20T14:00:00.000Z";
 	for (const role of ["Driver", "Investor"]) {
 		eq(code({ ...base, target: { id: 30, username: "someone", role, disabled_at: null } }), "409 ROLE_NOT_DISABLEABLE", `§4 a ${role}`);
 	}
+	// A KPI Viewer's access is the account alone, so it can be switched off (lib/kpi-viewer.js).
+	eq(code({ ...base, target: { id: 41, username: "kay_sample", role: "KPI Viewer", disabled_at: null }, listed: list("unset") }), "ok", "§4 a KPI Viewer is disableable");
+	ok(JSON.stringify(lib.DISABLEABLE_ROLES) === JSON.stringify(["Super Admin", "Dispatcher", "KPI Viewer"]), "§4 DISABLEABLE_ROLES: Super Admin, Dispatcher and KPI Viewer");
+	ok(/Only Super Admin, Dispatcher and KPI Viewer accounts can be\./.test(lib.disableDecision({ ...base, target: { id: 30, username: "someone", role: "Driver", disabled_at: null } }).refusal.error),
+		"§4 ...and the refusal says so");
 	eq(code({ ...base, target: { id: 30, username: "dana", role: "Driver", disabled_at: null }, actor: { id: 30, username: "dana", role: "Super Admin" } }),
 		"409 CANNOT_DISABLE_SELF", "§4 self comes before the role");
 	const dispatcher = { id: 20, username: "desk_one", role: "Dispatcher", disabled_at: null };

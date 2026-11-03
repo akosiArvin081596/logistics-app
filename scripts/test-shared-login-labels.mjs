@@ -140,7 +140,7 @@ console.log('§3 GET /api/users')
     ins.run(8, 'arvin_named', 'x', 'Super Admin', 'arvin@example.test', 0)
     ins.run(20, 'disp.one', 'x', 'Dispatcher', '', 0)
     ins.run(21, 'disp.two', 'x', 'Dispatcher', '', 0)
-    const run = (flag) => callGet(route, { db, signInLib, NAMED_LOGINS_ENABLED: flag }).body || {}
+    const run = (flag, kpiViewer = false) => callGet(route, { db, signInLib, NAMED_LOGINS_ENABLED: flag, KPI_VIEWER_SCHEMA_READY: kpiViewer }).body || {}
     const off = run(false)
     const users = off.users || []
     const u = (id) => users.find((x) => x.id === id) || {}
@@ -150,6 +150,7 @@ console.log('§3 GET /api/users')
     ok('§3 SharedLogin marks the shared login only', u(1).SharedLogin === true && [7, 8, 20, 21].every((id) => u(id).SharedLogin === false))
     ok('§3 the existing fields are unchanged', u(8).Username === 'arvin_named' && u(8).Role === 'Super Admin' && u(8).Email === 'arvin@example.test' && u(8).LastLoginAt === null)
     ok('§3 newStaffMustChangePassword follows NAMED_LOGINS_ENABLED', off.newStaffMustChangePassword === false && run(true).newStaffMustChangePassword === true)
+    ok('§3 kpiViewerEnabled is there, true, only while the KPI Viewer role is open', !('kpiViewerEnabled' in off) && run(false, true).kpiViewerEnabled === true)
   }
 }
 
