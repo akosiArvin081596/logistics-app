@@ -1173,6 +1173,9 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		// The Needs Confirmation pickup codes (test-ratecon-pickup-confirmation-routes.js
 		// covers them, a withheld Load ID included): inert here, as with their flag off.
 		annotateDashboardPickupReview: () => 0,
+		// The arrival pickup line (scripts/test-arrival-pickup-display.mjs and the pay-paths
+		// runner's §D cover it, a withheld Load ID included): inert here, as with its flag off.
+		annotatePickupArrival: () => 0,
 		console: { error: (...a) => errors.push(a.join(" ")), log() {}, warn() {} },
 	};
 	const names = Object.keys(env);

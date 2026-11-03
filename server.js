@@ -158,6 +158,8 @@ const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
 // Who set each load status, and where the truck was at "At Shipper" (ARRIVAL_PICKUP_RECORDER_ENABLED).
 const arrivalRecorder = require("./lib/arrival-recorder");
+// The load detail's read-only pickup line under the arrival pickup date rule (`_pickupArrival`).
+const arrivalPickupDisplay = require("./lib/arrival-pickup-display");
 // A live ETA against the Drop-off Appointment, on the receiver's clock.
 const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
@@ -46865,6 +46867,28 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 // ============================================================
 // DASHBOARD — Aggregated data from multiple sheets
 // ============================================================
+// `_pickupArrival` (lib/arrival-pickup-display.js) on request-local rows, before any
+// sanitizing, each cell read as the weekly invoice reads it. No key while the rule is off.
+function annotatePickupArrival(headers, rows) {
+	const cols = invoiceWeekColumns(headers);
+	const assignedCol = jobTrackingMonthCols(headers).dateCol;
+	const cell = (row, col) => (col ? row[col] : "");
+	return arrivalPickupDisplay.annotateRows({
+		db, env: process.env, rows, zone: APP_TIMEZONE, tripFrom: TRIP_WORK_DAYS_FROM, payTypes: getDriverPayStructures,
+		read: {
+			loadId: (row) => cell(row, cols.loadIdCol),
+			completed: (row) => /delivered|completed|pod received/i.test(cell(row, cols.statusCol) || ""),
+			driverKey: (row) => normalizeDriverName(cell(row, cols.driverCol)),
+			assigned: (row) => (cell(row, assignedCol) ? moneySheetDate(cell(row, assignedCol)) : null),
+			scheduled: (row) => {
+				const d = cell(row, cols.pickupCol) ? parseInvoiceDate(cell(row, cols.pickupCol)) : null;
+				return d && !isNaN(d) ? fmtLocalDate(d) : "";
+			},
+		},
+		log: (msg) => console.warn(`[arrival-pickup] ${msg}`),
+	});
+}
+
 app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
@@ -47130,6 +47154,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Needs Review codes (`_review`, lib/load-review-flags.js): on these raw rows, before
 		// sanitizing, so a withheld Load ID still gets its code (nothing with the flag off)
 		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
+		annotatePickupArrival(jobTracking.headers, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
 		// A Dispatcher's rows also carry `_loadKey` beside a withheld Load ID
@@ -49387,6 +49412,8 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			load._receiptCount = receiptCounts[lid] || 0;
 			load._otherCount = otherCounts[lid] || 0;
 		});
+		// The pickup line on his own rows only (`loads` holds no one else's)
+		annotatePickupArrival(jobTracking.headers, loads);
 
 		// Strip rate/revenue columns for every caller but Super Admin, which
 		// in practice is the Driver reading their own loads.
