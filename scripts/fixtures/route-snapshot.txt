@@ -163,7 +163,8 @@ GET /api/geocode · geocodeLimiter=limiter · inline@baaf22ce326c
 GET /api/geocode/bulk · requireRole("Super Admin")=anon@12b84c4b0134 · inline@594abf5f9636
 GET /api/geocode/load/:loadId · requireAuth@2f5c61384511 · inline@2fd74a8afd18
 GET /api/geocode/search · geocodeLimiter=limiter · inline@ff67e8d9f80c
-GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@eb684906925c
+USE /api/integrations/chr · anon@12b84c4b0134 · chrRoutes@3120617997f1 · (lib mount)
+GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@a6fa53525d07
 GET /api/investor-applications · requireRole("Super Admin")=anon@12b84c4b0134 · inline@72c9057ae964
 DELETE /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@f6357c8c538e
 GET /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4044527e9ca5
@@ -209,7 +210,7 @@ PUT /api/invoices/:id/revert · requireRole("Super Admin")=anon@12b84c4b0134 · 
 PUT /api/invoices/:id/submit · requireAuth@2f5c61384511 · inline@30a7a3069d71
 DELETE /api/invoices/corrections/:lineId · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · correctionRouteLimiter=limiter · inline@91ef6142171c
 GET /api/invoices/corrections/waiting · requireRole("Super Admin")=anon@12b84c4b0134 · inline@6894b51f99b3
-POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@967531564117
+POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@59dd3cc4afe4
 POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e059be016674
 POST /api/invoices/manual/totals · requireRole("Super Admin")=anon@12b84c4b0134 · inline@19a163742032
 GET /api/invoices/payees · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4189f2fbaec6
