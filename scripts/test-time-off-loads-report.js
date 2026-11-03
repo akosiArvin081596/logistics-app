@@ -52,6 +52,11 @@
  *   8402  Tamsin           10/13-10/15  10/10          not listed (ended before D was recorded)
  *   8403  Tamsin           10/20-10/21  10/10          not listed (the early end left it out)
  *
+ * Drivers' requests (PR 4, a world of their own with the request routes): only
+ * an approved one is listed, recorded at its approval (asked 10/15 before --since,
+ * approved 10/18), its loads checked as of that day; a waiting or declined one is
+ * no time off; a copy without the request columns lists the same staff rows.
+ *
  * Read-only: the database file keeps its bytes and mtime and its folder gains no
  * file; a missing database is refused, never created; a WAL database another
  * connection holds open is read (rows still in its -wal included) and its main
@@ -268,6 +273,66 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 	R.ok("exits 0 and says nothing was written", text.code === 0 && /Nothing was written/.test(text.stdout), (text.stderr || text.stdout).slice(0, 300));
 	R.ok("names the driver, the groups and the Eastern stamps", ["Hollis Renner", "Already had", "Same day", "Not yet assigned", "Assigned date unknown", "10:00 EDT", "cancelled"].every((x) => text.stdout.includes(x)), text.stdout.slice(0, 400));
 	R.ok("ends with the counts", /rows checked 6.*rows with already-had loads 4.*loads listed 14 \(already had 7, same day 2, .*loads skipped for no dates 1/s.test(text.stdout.split("\n").slice(-3).join("\n")), text.stdout.split("\n").slice(-3).join(" | "));
+
+	// PR 4: only approved time off is time off. A driver's request is recorded by
+	// its approval (the R11b check runs then), so its loads are checked as of the
+	// approval, and a request asked before --since but approved after it is listed.
+	R.section("Drivers' requests: approved ones only, recorded at their approval (PR 4)");
+	{
+		const q = await A.startWorld({ routes: ["requestCreate", "requestApprove", "requestDecline"], rows: sheetRows(), now: Date.parse("2026-10-15T20:00:00Z"),
+			env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" } });
+		const at = (iso) => { q.clock.ms = Date.parse(iso); };
+		const ask = async (iso, from, to) => {
+			at(iso);
+			// H1: a driver's own request names where he needs to be (made-up city).
+			const r = await q.call("POST", "/api/driver/me/availability", { user: A.USERS.driver, body: { from, to, homeCity: "Lincoln", homeState: "NE" } });
+			if (r.status !== 201) throw new Error(`ask ${from}..${to}: ${r.status} ${String(r.text).slice(0, 200)}`);
+			return r.body.request.id;
+		};
+		const decide = async (iso, reqId, what) => {
+			at(iso);
+			const r = await q.call("POST", `/api/driver-availability/${reqId}/${what}`, { user: SA, body: {} });
+			if (r.status !== 200) throw new Error(`${what} ${reqId}: ${r.status} ${String(r.text).slice(0, 200)}`);
+		};
+		try {
+			// Asked 10/15 16:00 EDT (before --since), approved 10/18 11:00 EDT.
+			const P = await ask("2026-10-15T20:00:00.000Z", "2026-10-24", "2026-10-25");
+			const waiting = await ask("2026-10-16T13:05:00.000Z", "2026-10-28", "2026-10-29");
+			const declined = await ask("2026-10-16T13:10:00.000Z", "2026-11-04", "2026-11-05");
+			await decide("2026-10-18T15:00:00.000Z", P, "approve");
+			await decide("2026-10-18T15:05:00.000Z", declined, "decline");
+			const qCopy = saveCopy(q);
+			const qj = run(qCopy, ["--json"]).json || {};
+			const qrows = Array.isArray(qj.rows) ? qj.rows : [];
+			R.eq("only the approved request is listed (asked before since, approved after it); the waiting and declined ones are no time off",
+				[qrows.map((r) => r.id), [waiting, declined].some((x) => qrows.some((r) => r.id === x))], [[P], false]);
+			const p = qrows[0] || { loads: [], saves: [] };
+			R.eq("...recorded by its approval (10/18 11:00 EDT), not when it was asked (10/15)",
+				[p.askedByDriver, p.recordedAt, p.approvedAt, p.approvedAtText, (p.saves || []).map((s) => `${s.change} ${s.day} ${s.from}..${s.to}`), p.historyComplete],
+				[true, "2026-10-15T20:00:00.000Z", "2026-10-18T15:00:00.000Z", "2026-10-18 11:00 EDT", ["recorded 2026-10-18 2026-10-24..2026-10-25"], true]);
+			R.eq("...so its loads are checked as of the approval: 8113 and 8114, assigned 10/17 between the ask and the approval, already had",
+				(p.loads || []).map((l) => `${l.loadId} ${l.alreadyHad} ${l.checkedAsOf}`), ["8106 unknown 2026-10-18", "8113 yes 2026-10-18", "8114 yes 2026-10-18"]);
+			const qtext = run(qCopy, []);
+			R.ok("...and the text says who asked and when it was approved", qtext.stdout.includes("asked by the driver 2026-10-15 16:00 EDT; approved 2026-10-18 11:00 EDT"), qtext.stdout.slice(0, 500));
+		} catch (err) {
+			R.ok("the requests fixture builds through the shipped routes", false, err.message);
+		}
+		await q.close();
+		// A copy from before the request columns holds staff rows only, all approved: the same rows.
+		const oldCopy = saveCopy(w);
+		const oldDb = new W.Database(oldCopy.db);
+		let dropped = null;
+		try {
+			for (const col of ["request_status", "source", "decided_by", "decided_by_user_id", "decided_at"]) oldDb.exec(`ALTER TABLE driver_availability DROP COLUMN ${col}`);
+		} catch (err) {
+			dropped = err.message;
+		} finally {
+			oldDb.close();
+		}
+		R.ok("the world's table has the five request columns to drop", dropped === null, dropped);
+		const oldRun = run(oldCopy, ["--json"]);
+		R.eq("a copy from before the request columns lists the same rows", [oldRun.code, ((oldRun.json || {}).rows || []).map((r) => r.id)], [0, rows.map((r) => r.id)]);
+	}
 
 	R.section("Read-only");
 	R.eq("the database file's bytes, mtime and folder after five runs", snapshot(copy), before);
