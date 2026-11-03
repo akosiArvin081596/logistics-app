@@ -47,6 +47,9 @@
 //      rows and the driver's answers carry exactly the keys they had before; a
 //      waiting request left from before holds no days and warns no one; staff
 //      changing a driver-made row tell the driver nothing
+//   §9 home time (H1), on the same flag, with it unset: a staff create or edit
+//      naming a home time answers, audits and stores exactly as one that doesn't;
+//      a home time stored before the switch-off is in no answer
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -302,6 +305,35 @@ const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.bo
 		eq("§8.7 staff shortening, then cancelling, his approved request tell him nothing (no notice, no live event)",
 			[notices(), on.emits.filter((e) => e.event === "time-off-updated").length, on.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'time-off-request'").get().n], [0, 0, 0]);
 		eq("§8.8 the waiting request is left as it was", on.db.prepare("SELECT request_status, cancelled_at FROM driver_availability WHERE id = ?").get(waiting), { request_status: "requested", cancelled_at: null });
+	});
+
+	// Home time (H1) rides the requests flag: with it unset, a staff body naming a home time
+	// answers exactly as one that doesn't, and a home time left from before shows nowhere.
+	section("§9 the requests flag unset: home time is ignored and never sent");
+	await R.guard("§9", async () => {
+		const pair = async (home) => {
+			const w = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+			const made = await w.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { body: { kind: "vacation", from: "2026-10-20", to: "2026-10-21", ...home } });
+			const id = made.body && made.body.row ? made.body.row.id : 0;
+			const edited = await w.call("PUT", `/api/driver-availability/${id}`, { body: { to: "2026-10-22", ...home } });
+			const scrub = (x) => JSON.stringify(x.body).replace(/"(createdAt|updatedAt)":"[^"]*"/g, "");
+			return {
+				w, id,
+				said: [made.status, scrub(made), edited.status, scrub(edited)],
+				stored: w.db.prepare("SELECT home_city, home_state FROM driver_availability WHERE id = ?").get(id),
+				audits: [...w.audits("driver_availability_create"), ...w.audits("driver_availability_update")].map((a) => a.details),
+			};
+		};
+		const plain = await pair({});
+		const named = await pair({ homeCity: "Riverton", homeState: "ZZ" });
+		eq("§9.1 a staff create and edit naming a home time (a bad one too) answer and audit exactly as without it, and store none",
+			[named.said, named.audits, named.stored], [plain.said, plain.audits, { home_city: null, home_state: null }]);
+		named.w.db.prepare("UPDATE driver_availability SET home_city = 'Riverton', home_state = 'WY' WHERE id = ?").run(named.id);
+		const panel = await named.w.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa });
+		const mine = await named.w.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		const pg = await named.w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
+		eq("§9.2 a home time stored before the switch-off is in no answer: the staff panel, his own route, the driver app's payload",
+			[/Riverton|"home"|homeTime|homeDefault/.test(`${panel.text}${mine.text}${pg.text}`), mine.body.rows.length], [false, 1]);
 	});
 	await R.finish();
 })().catch((err) => {

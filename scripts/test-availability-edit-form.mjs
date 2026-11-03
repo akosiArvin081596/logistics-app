@@ -47,12 +47,18 @@
 //   §12 staff: the request on its in-app notice, stored or live
 //      (timeOffRequestOfNotice(), noticeWithDecision(), requestDecisionText())
 //      and in the Drivers panel (panelGroup(), panelPastText(), panelRequestText())
+//   §13 home time (H1): his rows and requests keep a well-formed `home`; the
+//      form starts at the server's homeDefault and won't send without a city
+//      and a listed state; the staff forms take both or neither and send a
+//      changed home time only on a row carrying `home`; the words; the state
+//      list is the server's (lib/us-states.js STATE_CODES)
 //
 // No DOM, no server. Files under test come from LOGISX_ROOT (default: this
 // checkout).
 //   node scripts/test-availability-edit-form.mjs
 import fs from 'fs'
 import path from 'path'
+import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const HERE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -80,7 +86,9 @@ const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBou
   'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote',
   // A driver's own request (PR 4).
   'shiftDayKey', 'driverRequestRows', 'driverRequestStatusText', 'requestFormStart', 'requestFormBounds', 'canSendRequest', 'requestBody',
-  'timeOffRequestOfNotice', 'noticeWithDecision', 'requestDecisionText', 'panelGroup', 'panelPastText', 'panelRequestText']
+  'timeOffRequestOfNotice', 'noticeWithDecision', 'requestDecisionText', 'panelGroup', 'panelPastText', 'panelRequestText',
+  // Home time (H1).
+  'homeReady', 'staffHomeReady', 'createBody', 'homeLocationText', 'homeTimeText', 'panelHomeText']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
 eq('§0 ...and the card\'s two hints', [T.REQUEST_HINT, T.RECORDED_HINT], [
   'Ask at least 5 days ahead. Dispatch approves each request. For sooner days or changes, message dispatch.',
@@ -285,22 +293,25 @@ function scenario() {
   rec('§11 ...nothing sent, or not a list', [call('driverRequestRows', undefined), call('driverRequestRows', { requests: [] })], [[], []])
   rec('§11 driverRequestStatusText(): the card\'s words', [call('driverRequestStatusText', { request: 'waiting' }), call('driverRequestStatusText', { request: 'declined' }),
     call('driverRequestStatusText', { request: 'approved' }), call('driverRequestStatusText', null)], ['Waiting for approval', 'Not approved. Message dispatch.', '', ''])
-  rec('§11 requestFormStart(): the first day the server allows, one day, "Off duty"', call('requestFormStart', LIMITS), { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20' })
-  rec('§11 ...no limits sent: empty days', call('requestFormStart', null), { kind: 'off_duty', from: '', to: '' })
+  rec('§11 requestFormStart(): the first day the server allows, one day, "Off duty" (no home time sent: blank)', call('requestFormStart', LIMITS),
+    { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: '', homeState: '' })
+  rec('§11 ...no limits sent: empty days', call('requestFormStart', null), { kind: 'off_duty', from: '', to: '', homeCity: '', homeState: '' })
   rec('§11 requestFormBounds(): the first day from fromMin to fromMax; the last from the first to the 60th day', call('requestFormBounds', LIMITS, { from: '2026-10-20', to: '2026-10-20' }),
     { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: '2026-12-18' })
   rec('§11 ...across a year end', call('requestFormBounds', LIMITS, { from: '2026-12-01', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-12-01', toMax: '2027-01-29' })
   rec('§11 ...an empty first day: the last day starts at fromMin, no end limit', call('requestFormBounds', LIMITS, { from: '', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: null })
   rec('§11 ...no limits sent: only "not before the first day"', call('requestFormBounds', null, { from: '2026-11-02', to: '' }), { fromMin: null, fromMax: null, toMin: '2026-11-02', toMax: null })
-  const sendable = (form, limits = LIMITS) => call('canSendRequest', { kind: 'off_duty', ...form }, limits)
+  // H1: a request names its home time, so each form here carries one.
+  const sendable = (form, limits = LIMITS) => call('canSendRequest', { kind: 'off_duty', homeCity: 'Springfield', homeState: 'MO', ...form }, limits)
   rec('§11 canSendRequest(): Send inside the limits only', [
     sendable({ from: '2026-10-20', to: '2026-10-22' }), sendable({ from: '2026-10-19', to: '2026-10-22' }), sendable({ from: '2027-01-13', to: '2027-01-13' }),
     sendable({ from: '2027-01-14', to: '2027-01-14' }), sendable({ from: '2026-10-22', to: '2026-10-21' }), sendable({ from: '2026-10-20', to: '2026-12-18' }),
     sendable({ from: '2026-10-20', to: '2026-12-19' }), sendable({ from: '2026-10-20', to: '' }), sendable({ from: '2026-10-20', to: '2026-10-20', kind: 'sick' }),
     sendable({ from: '2026-10-20', to: '2026-10-20' }, null),
   ], [true, false, true, false, false, true, false, false, false, false])
-  rec('§11 requestBody(): the two days and the kind, never anything else', call('requestBody', { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', reason: 'Family', driver: 'Demo Driver' }),
-    { kind: 'vacation', from: '2026-11-02', to: '2026-11-03' })
+  rec('§11 requestBody(): the two days, the kind and (H1) the home time, never anything else',
+    call('requestBody', { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', reason: 'Family', driver: 'Demo Driver', homeCity: ' Springfield ', homeState: 'MO' }),
+    { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', homeCity: 'Springfield', homeState: 'MO' })
 
   // §12 staff: the request on its in-app notice (stored, or live with its payload
   // nested in `metadata`) and in the Drivers panel.
@@ -336,6 +347,56 @@ function scenario() {
     call('panelRequestText', prow({ request: 'waiting', source: 'driver' })), call('panelRequestText', prow({ source: 'driver', decidedBy: 'dispatch_demo' })),
     call('panelRequestText', prow({ request: 'declined', source: 'driver', decidedBy: 'super_demo' })), call('panelRequestText', prow({})), call('panelRequestText', { status: 'upcoming' }),
   ], ['Cancelled', 'Declined', 'Ended', 'Asked by the driver', 'Asked by the driver, approved by dispatch_demo', 'Asked by the driver, declined by super_demo', '', ''])
+
+  // §13 home time (H1). Made-up places.
+  const H = { city: 'Riverton', state: 'WY' }
+  rec('§13 driverTimeOffRows(): a row naming a home time keeps it; a malformed or null one is left out', call('driverTimeOffRows', [
+    { id: 1, kind: 'vacation', from: '2026-10-20', to: '2026-10-21', status: 'upcoming', home: H },
+    { id: 2, kind: 'vacation', from: '2026-10-22', to: '2026-10-23', status: 'upcoming', home: null },
+    { id: 3, kind: 'vacation', from: '2026-10-24', to: '2026-10-25', status: 'upcoming', home: { city: 'Riverton', state: 7, phone: '555-0100' } },
+  ]), [
+    { id: 1, kind: 'vacation', from: '2026-10-20', to: '2026-10-21', status: 'upcoming', home: H },
+    { id: 2, kind: 'vacation', from: '2026-10-22', to: '2026-10-23', status: 'upcoming' },
+    { id: 3, kind: 'vacation', from: '2026-10-24', to: '2026-10-25', status: 'upcoming' },
+  ])
+  rec('§13 driverRequestRows(): the same for a request, nothing else of `home` kept', call('driverRequestRows', [
+    { id: 4, kind: 'off_duty', from: '2026-11-09', to: '2026-11-10', request: 'waiting', canCancel: true, home: { ...H, note: 'x' } },
+  ]), [{ id: 4, kind: 'off_duty', from: '2026-11-09', to: '2026-11-10', request: 'waiting', canCancel: true, home: H }])
+  rec('§13 the words: the card\'s, the panel\'s, and none for no home time', [
+    call('homeTimeText', H), call('panelHomeText', { home: H }), call('homeLocationText', H), call('homeTimeText', null), call('panelHomeText', { home: { city: '', state: 'WY' } }), call('panelHomeText', null),
+  ], ['Home time in Riverton, WY', 'Home time: Riverton, WY', 'Riverton, WY', '', '', ''])
+  rec('§13 requestFormStart(): the home time at the server\'s homeDefault; a state off the list starts blank', [
+    call('requestFormStart', LIMITS, { city: 'Springfield', state: 'MO' }), call('requestFormStart', LIMITS, { city: 'Springfield', state: 'Missouri' }),
+  ], [{ kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: 'Springfield', homeState: 'MO' },
+    { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: 'Springfield', homeState: '' }])
+  rec('§13 canSendRequest(): not without a city, a listed state, or with a city over 60 characters', [
+    sendable({ from: '2026-10-20', to: '2026-10-20' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: '   ' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeState: '' }),
+    sendable({ from: '2026-10-20', to: '2026-10-20', homeState: 'ZZ' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: 'A'.repeat(60) }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: 'A'.repeat(61) }),
+  ], [true, false, false, false, true, false])
+  rec('§13 staffHomeReady(): both or neither', [
+    call('staffHomeReady', { homeCity: '', homeState: '' }), call('staffHomeReady', { homeCity: 'Riverton', homeState: 'WY' }), call('staffHomeReady', { homeCity: 'Riverton', homeState: '' }),
+    call('staffHomeReady', { homeCity: ' ', homeState: 'WY' }), call('staffHomeReady', {}),
+  ], [true, true, false, false, true])
+  const HROW = stored({ home: H, request: 'approved', source: 'staff' })
+  const NOHOME = stored({ home: null, request: 'approved', source: 'staff' })
+  rec('§13 editFormFor(): the row\'s home time as fields, only on a row carrying `home`', [call('editFormFor', HROW, TODAY), call('editFormFor', NOHOME, TODAY), call('editFormFor', SA, TODAY)], [
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family', homeCity: 'Riverton', homeState: 'WY' },
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family', homeCity: '', homeState: '' },
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family' },
+  ])
+  const hform = (row, over) => ({ ...call('editFormFor', row, TODAY), ...over })
+  rec('§13 editPatch(): an unchanged home time sends nothing; a changed city sends both parts; cleared sends both ""', [
+    call('editPatch', HROW, hform(HROW)), call('editPatch', HROW, hform(HROW, { homeCity: ' Lincoln ' })), call('editPatch', HROW, hform(HROW, { homeCity: '', homeState: '' })),
+    call('editPatch', NOHOME, hform(NOHOME, { homeCity: 'Lincoln', homeState: 'NE' })),
+  ], [{}, { homeCity: 'Lincoln', homeState: 'WY' }, { homeCity: '', homeState: '' }, { homeCity: 'Lincoln', homeState: 'NE' }])
+  rec('§13 ...never on an end-early edit, nor on a row without `home` (the flag off)', [
+    call('editPatch', { ...HROW, editable: 'end_early', limits: OLD.limits }, hform(HROW, { homeCity: 'Lincoln' })), call('editPatch', SA, { ...formOf(SA), homeCity: 'Lincoln', homeState: 'NE' }),
+  ], [{}, {}])
+  rec('§13 canSaveEdit(): not with a city and no state', [call('canSaveEdit', HROW, hform(HROW, { homeState: '' })), call('canSaveEdit', HROW, hform(HROW, { homeCity: 'Lincoln', homeState: 'NE' }))], [false, true])
+  rec('§13 createBody(): the home time\'s two parts (trimmed) only when the server offered it', [
+    call('createBody', { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: ' Family ', homeCity: ' Riverton ', homeState: 'WY' }, true),
+    call('createBody', { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: ' Family ', homeCity: ' Riverton ', homeState: 'WY' }, false),
+  ], [{ kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: 'Family', homeCity: 'Riverton', homeState: 'WY' }, { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: 'Family' }])
   return out.join('|')
 }
 
@@ -364,7 +425,7 @@ eq('§9 the card lists rows through driverTimeOffRows()', !!card && /driverTimeO
 eq('§9 the banner text comes from driverTimeOffBanner()', !!card && /driverTimeOffBanner\(/.test(card), true)
 // PR 4: the request part of the card follows the keys the server sent.
 eq('§9 the request part shows only when the payload carried `requests` (the server\'s flag)', !!card && /Array\.isArray\(props\.timeOff\.requests\)/.test(card) && /v-if="requestsOn && !loadFailed"/.test(card), true)
-eq('§9 "Request days off" only on a session the server says may ask', !!card && /v-else-if="timeOff\.canRequest === true"[^>]*>Request days off</.test(card), true)
+eq('§9 "Request home time / days off" (H1) only on a session the server says may ask', !!card && /v-else-if="timeOff\.canRequest === true"[^>]*>Request home time \/ days off</.test(card), true)
 eq('§9 its requests come through driverRequestRows(), Cancel only where r.canCancel', !!card && /driverRequestRows\(/.test(card) && /v-if="r\.canCancel"[^>]*>Cancel request</.test(card), true)
 eq('§9 the form\'s days come from requestFormBounds() and requestFormStart(); Send waits for canSendRequest() and sends requestBody()',
   !!card && [/requestFormBounds\(/, /requestFormStart\(/, /canSendRequest\(/, /requestTimeOff\(requestBody\(form\)\)/].every((re) => re.test(card)), true)
@@ -421,6 +482,24 @@ eq('§9 ...and builds no echo of its own (no confirmLoads written in the panel)'
 eq('§9 PR 4: the panel groups rows by panelGroup(), a waiting request first with Approve and Decline posting to its own route',
   [/panelGroup\(r\) === 'waiting'/.test(panel), /api\.post\(`\/api\/driver-availability\/\$\{r\.id\}\/\$\{decision\}`, body\)/.test(panel),
     /confirm-text="Approve anyway"/.test(panel), panel.indexOf('v-for="r in waiting"') > -1 && panel.indexOf('v-for="r in waiting"') < panel.indexOf('v-for="r in live"')], [true, true, true, true])
+// §13 the source (H1).
+eq('§13 the card asks "Where do you need to be?" with a city and a state, starting at the server\'s homeDefault, and shows each home time through homeTimeText()', !!card && [
+  /<legend[^>]*>Where do you need to be\?<\/legend>/.test(card), /v-model="form\.homeCity"[^>]*:maxlength="HOME_CITY_MAX"/.test(card), /v-model="form\.homeState"/.test(card),
+  /v-for="s in US_STATES"/.test(card), /requestFormStart\(limits\.value, props\.timeOff\.homeDefault\)/.test(card), (card.match(/homeTimeText\(r\.home\)/g) || []).length === 2,
+].every(Boolean), true)
+eq('§13 the panel shows each row\'s home time through panelHomeText(), takes one in its edit form only on a row carrying `home`, and in its add form only with the server\'s homeTime', [
+  (panel.match(/panelHomeText\(r\)/g) || []).length >= 3, /v-if="'home' in r"/.test(panel), /v-if="homeTime"/.test(panel), /homeTime\.value = data\.homeTime === true/.test(panel),
+  /createBody\(form, homeTime\.value\)/.test(panel), /staffHomeReady\(form\)/.test(panel),
+], [true, true, true, true, true, true])
+{
+  let serverCodes = null
+  try { serverCodes = createRequire(import.meta.url)(path.join(ROOT, 'lib', 'us-states.js')).STATE_CODES } catch { serverCodes = null }
+  let clientStates = null
+  try { clientStates = (await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'utils', 'usStates.js')).href)).US_STATES } catch { clientStates = null }
+  eq('§13 the forms\' state list is the server\'s: client/src/utils/usStates.js codes = lib/us-states.js STATE_CODES (the 50 states and DC)',
+    [Array.isArray(serverCodes) && serverCodes.length, Array.isArray(clientStates) && clientStates.map((s) => s.code).sort().join() === (serverCodes || []).join()], [51, true])
+}
+
 for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/components/shared/OffDutyConfirmHost.vue']) {
   const src = read(rel)
   eq(`§9 ${rel} is left to the dispatch side (it never names DRIVER_HAS_LOADS)`, src !== null && !/DRIVER_HAS_LOADS|confirmLoads/.test(src), true)
