@@ -177,6 +177,12 @@ export function ladderOf(events) {
   return LADDER.map((event) => ({ event, label: CHR_EVENT_WORDS[event], row: latest.get(event) || null }))
 }
 
+// A load's last position line on the page. The page shows it only while
+// location is on; none yet reads as no fresh RouteMate position.
+export function lastPositionText(at, fmt = (v) => v) {
+  return at ? `Last position sent or recorded: ${fmt(at)}` : 'No fresh RouteMate position'
+}
+
 export function pageLinkForLoad(loadId) {
   return `${CHR_PAGE_PATH}?load=${encodeURIComponent(String(loadId || ''))}`
 }
