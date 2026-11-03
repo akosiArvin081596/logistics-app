@@ -74267,6 +74267,18 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
 require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES, viewerGate: rateconViewGate });
 
+// Passenger authorizations (lib/passenger-authorization.js; PASSENGER_AUTHORIZATION_ENABLED, off:
+// every route answers 404). Above app.get("*"); scripts/test-passenger-authorization-routes.js pins it.
+const passengerAuthorization = require("./lib/passenger-authorization");
+passengerAuthorization.mount(app, {
+	db, enabled: passengerAuthorization.enabled(process.env), requireAuth, requireRole, refuseCrossSite,
+	renderPolicy, safeSignatureImage, writeSignedArtifact, readTransmittedConsent, signerNetworkEvidence,
+	cleanText: sanitizeEvidenceText, imageLimits, logAudit, insertDispatchNotification, emitDispatchNotice,
+	insertNotification, notifyChange, appDay,
+	emitToDriver: (name) => io.to(driverRoom(name)).emit("passenger-authorizations:changed"),
+	storageDir: path.join(DATA_DIR, "storage", "passenger-authorizations"),
+});
+
 // <chr-wiring>
 // C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
 // No CHR connection exists, so nothing is sent. Its three switches (the settings example)
