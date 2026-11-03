@@ -18511,8 +18511,8 @@ function onboardingSigningStepState(userId, ob) {
 }
 
 // Helper: check if onboarding is complete and finalize. `req` is the request
-// that got here (the driver signing, or the admin recording a drug test), the
-// actor on a withheld-carrier audit row.
+// that got here (the driver signing, the admin recording a drug test, or an
+// emergency-contacts save by the driver or staff), the actor on a withheld-carrier audit row.
 async function checkAndCompleteOnboarding(userId, req = null) {
 	// The drivers_directory row added below carries the account's company name as
 	// its carrier, held to the month-end lock (accountDirectoryCarrier()), which
