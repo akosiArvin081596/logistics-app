@@ -224,6 +224,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/admin/integrations/chr',
+    name: 'chr-integration',
+    component: () => import('../views/ChrIntegrationView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/',
     redirect: '/login',
   },

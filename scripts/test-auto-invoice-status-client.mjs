@@ -309,6 +309,8 @@ section('§7  the settings dialog: Save waits for a read that worked')
 // ------------------------------------------------------------------ §8
 section('§8  a draft that may be in Gmail: Drafts and Sent Mail')
 ok(/Drafts and Sent Mail/.test(S.AUTO_INVOICE_REASONS.MAYBE_IN_GMAIL.text), '§8 MAYBE_IN_GMAIL: Try again looks in Drafts and Sent Mail')
+ok(S.AUTO_INVOICE_REASONS.LOAD_FACTORED && /Triumph/.test(S.AUTO_INVOICE_REASONS.LOAD_FACTORED.text) && /not by email/.test(S.AUTO_INVOICE_REASONS.LOAD_FACTORED.text),
+  '§8 FAILS ON THE OLD CODE: LOAD_FACTORED has words: its invoice goes through Triumph, not by email')
 ok(/Drafts and Sent Mail/.test(S.AUTO_INVOICE_REASONS.IN_GMAIL_UNRECORDED.text), '§8 IN_GMAIL_UNRECORDED: a person checks Drafts and Sent Mail before drafting again')
 
 console.log(`\n${'='.repeat(64)}`)

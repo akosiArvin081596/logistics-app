@@ -10,7 +10,9 @@
 // scripts/test-availability-edit-form.mjs covers the edit and driver-screen
 // helpers below.
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+import { US_STATES } from '../utils/usStates.js'
+
+const MONTHS =['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const DAY_MS = 24 * 60 * 60 * 1000
 // Whole days on the UTC calendar (Date.UTC), which no zone can shift.
 const dayIndex = (key) => Date.UTC(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, Number(key.slice(8, 10))) / DAY_MS
@@ -118,7 +120,9 @@ export function rowActions(row) {
 }
 
 // The body of an edit: only the fields that changed. An "end_early" row only
-// ever sends { to }; a row the caller may not change sends nothing.
+// ever sends { to }; a row the caller may not change sends nothing. A changed
+// home time (only on a row carrying `home`, the server's requests flag) sends
+// both its parts, "" for none.
 export function editPatch(row, form) {
   const mode = editMode(row)
   if (mode === 'none') return {}
@@ -131,6 +135,11 @@ export function editPatch(row, form) {
     } else if (f[key] !== row[key]) {
       patch[key] = f[key]
     }
+  }
+  if (mode === 'full' && homeKeyed(row)) {
+    const was = homeFormFields(row)
+    const next = { homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) }
+    if (next.homeCity !== was.homeCity || next.homeState !== was.homeState) Object.assign(patch, next)
   }
   return patch
 }
@@ -193,21 +202,24 @@ export function endEarlyNote(createLimits) {
     : 'Started too long ago: only a Super Admin can change the other details.'
 }
 
-// Save is offered once something changed and the days sit inside the limits.
+// Save is offered once something changed, the days sit inside the limits and a
+// home time, where the row has one's key, is whole or empty (staffHomeReady()).
 export function canSaveEdit(row, form) {
   const mode = editMode(row)
   if (mode === 'none') return false
   if (Object.keys(editPatch(row, form)).length === 0) return false
+  if (mode === 'full' && homeKeyed(row) && !staffHomeReady(form)) return false
   const days = mode === 'end_early' ? { from: row.from, to: (form || {}).to } : form
   return datesWithinBounds(days, editDateBounds(row, form))
 }
 
-// Where an edit form starts: the stored row. End early starts at today, moved
-// inside the server's limits, so one tap ends the time off as early as allowed
-// (the stored end when today can't be read).
+// Where an edit form starts: the stored row, with its home time when the row
+// carries one's key (the server's requests flag). End early starts at today,
+// moved inside the server's limits, so one tap ends the time off as early as
+// allowed (the stored end when today can't be read).
 export function editFormFor(row, today) {
   const r = row || {}
-  const form = { kind: r.kind, from: r.from, to: r.to, reason: reasonText(r.reason) }
+  const form = { kind: r.kind, from: r.from, to: r.to, reason: reasonText(r.reason), ...homeFormFields(r) }
   if (editMode(r) === 'end_early' && isAvailabilityDay(today)) {
     const b = editDateBounds(r, form)
     let to = laterDay(today, b.toMin)
@@ -260,12 +272,13 @@ export function loadsUncheckedNote(reply) {
 const DRIVER_STATUSES = ['current', 'upcoming']
 const BANNER_LEAD_DAYS = 7
 
-// His current and upcoming rows, by first day, as { id, kind, from, to, status }.
+// His current and upcoming rows, by first day, as { id, kind, from, to, status },
+// plus `home` ({ city, state }) on a row that names a home time.
 export function driverTimeOffRows(rows) {
   if (!Array.isArray(rows)) return []
   return rows
     .filter((r) => r && typeof r === 'object' && DRIVER_STATUSES.includes(r.status) && isAvailabilityDay(r.from) && isAvailabilityDay(r.to) && r.from <= r.to)
-    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, status: r.status }))
+    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, status: r.status, ...homeKey(r) }))
     .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
 }
 
@@ -315,12 +328,13 @@ export function shiftDayKey(key, n) {
 }
 
 // Their waiting and declined requests, by first day, each rebuilt from
-// { id, kind, from, to, request, canCancel } only.
+// { id, kind, from, to, request, canCancel } only, plus `home` on one that names
+// a home time.
 export function driverRequestRows(requests) {
   if (!Array.isArray(requests)) return []
   return requests
     .filter((r) => r && typeof r === 'object' && REQUEST_STATES.includes(r.request) && isAvailabilityDay(r.from) && isAvailabilityDay(r.to) && r.from <= r.to)
-    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, request: r.request, canCancel: r.request === 'waiting' && r.canCancel === true }))
+    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, request: r.request, canCancel: r.request === 'waiting' && r.canCancel === true, ...homeKey(r) }))
     .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
 }
 
@@ -332,10 +346,12 @@ export function driverRequestStatusText(r) {
 }
 
 // Where the request form starts: the first day the server allows, for one day,
-// "Off duty" (the server's default kind).
-export function requestFormStart(limits) {
+// "Off duty" (the server's default kind), and the home time at the server's
+// `homeDefault` (his Drivers page city and state; a state off the list starts blank).
+export function requestFormStart(limits, homeDefault) {
   const from = isAvailabilityDay((limits || {}).fromMin) ? limits.fromMin : ''
-  return { kind: 'off_duty', from, to: from }
+  const d = homeDefault && typeof homeDefault === 'object' ? homeDefault : {}
+  return { kind: 'off_duty', from, to: from, homeCity: typeof d.city === 'string' ? d.city : '', homeState: STATE_CODES.has(d.state) ? d.state : '' }
 }
 
 // The form's date limits from the server's requestLimits: the first day from
@@ -353,20 +369,98 @@ export function requestFormBounds(limits, form) {
   }
 }
 
-// Send is offered once both days are real days inside those limits.
+// Send is offered once both days are real days inside those limits and the
+// home time is filled in (homeReady(): the server requires it on his request).
 export function canSendRequest(form, limits) {
   const f = form || {}
   const b = requestFormBounds(limits, f)
   if (!b.fromMin || !isAvailabilityDay(f.from) || !isAvailabilityDay(f.to)) return false
   if (f.from < b.fromMin || (b.fromMax && f.from > b.fromMax)) return false
   if (f.to < b.toMin || (b.toMax && f.to > b.toMax)) return false
+  if (!homeReady(f)) return false
   return AVAILABILITY_KINDS.some((k) => k.value === f.kind)
 }
 
-// The body a request sends: the two days and the kind, never anything else.
+// The body a request sends: the two days, the kind and the home time (the city
+// trimmed), never anything else.
 export function requestBody(form) {
   const f = form || {}
-  return { kind: f.kind, from: f.from, to: f.to }
+  return { kind: f.kind, from: f.from, to: f.to, homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) }
+}
+
+// ── Home time (H1) ──────────────────────────────────────────────────────────
+// With the server's DRIVER_TIME_OFF_REQUESTS_ENABLED on, `timeOff` carries
+// `homeDefault` (where his request form starts) and each row and request `home`
+// ({ city, state } or null); each staff row carries `home`, and the staff list
+// `homeTime: true` for the add form. His request must name a city and a state;
+// a staff row both or neither. The server checks every rule (a city name, not
+// digits or contact details) and refuses in its own words: the forms only hold
+// back a blank city, one over 60 characters, or a state not on the list.
+
+export const HOME_CITY_MAX = 60
+const STATE_CODES = new Set(US_STATES.map((s) => s.code))
+const homePart = (v) => (typeof v === 'string' ? v.trim() : '')
+
+// { city, state } when both are text, else null.
+function homeOf(h) {
+  return h && typeof h === 'object' && typeof h.city === 'string' && h.city && typeof h.state === 'string' && h.state ? { city: h.city, state: h.state } : null
+}
+
+// `{ home }` for a row that names a home time, {} otherwise.
+function homeKey(r) {
+  const h = homeOf(r && r.home)
+  return h ? { home: h } : {}
+}
+
+// Whether a staff row carries the `home` key (the server's requests flag).
+const homeKeyed = (row) => !!row && typeof row === 'object' && Object.prototype.hasOwnProperty.call(row, 'home')
+
+// A staff row's home time as form fields ({} when the row has no `home` key).
+function homeFormFields(row) {
+  if (!homeKeyed(row)) return {}
+  const h = homeOf(row.home)
+  return { homeCity: h ? h.city : '', homeState: h ? h.state : '' }
+}
+
+// Both parts filled in: a city of 1-60 characters and a state on the list.
+export function homeReady(form) {
+  const f = form || {}
+  const city = homePart(f.homeCity)
+  return city.length > 0 && city.length <= HOME_CITY_MAX && STATE_CODES.has(f.homeState)
+}
+
+// A staff form's home time: both parts (homeReady()) or neither.
+export function staffHomeReady(form) {
+  const f = form || {}
+  return (!homePart(f.homeCity) && !homePart(f.homeState)) || homeReady(f)
+}
+
+// The staff add form's body: its days, kind and reason, and the home time's two
+// parts ("" for none) only when the server offered it (`homeTime`).
+export function createBody(form, homeTime) {
+  const f = form || {}
+  return {
+    kind: f.kind, from: f.from, to: f.to, reason: reasonText(f.reason),
+    ...(homeTime === true ? { homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) } : {}),
+  }
+}
+
+// "Springfield, MO" ("" for none).
+export function homeLocationText(home) {
+  const h = homeOf(home)
+  return h ? `${h.city}, ${h.state}` : ''
+}
+
+// The driver's card: "Home time in Springfield, MO" ("" for none).
+export function homeTimeText(home) {
+  const t = homeLocationText(home)
+  return t ? `Home time in ${t}` : ''
+}
+
+// The staff panel: "Home time: Springfield, MO" ("" for none).
+export function panelHomeText(row) {
+  const t = homeLocationText(row && row.home)
+  return t ? `Home time: ${t}` : ''
 }
 
 // ── Staff: a request on the in-app notice and in the Drivers panel ──────────

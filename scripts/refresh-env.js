@@ -858,6 +858,16 @@ async function main() {
 	// browser word for word (lib/onboarding-resign.js), so it goes too.
 	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS, superseded_artifacts: "" });
 	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
+	// A passenger authorization (lib/passenger-authorization.js): a rider's name, a minor's
+	// included, the guardian, the trip, three signatures, their evidence and a decision's
+	// reason. The dates, the truck and the reference stay, so a copy still reads each status.
+	sigs += setCols("passenger_authorizations", {
+		passenger_signature_image: "", driver_signature_image: "", company_signature_image: "",
+		passenger_consent_text: "", driver_consent_text: "", company_consent_text: "",
+		driver_signed_ip: "", driver_signed_ip_source: "", driver_signed_user_agent: "",
+		company_signed_ip: "", company_signed_ip_source: "", company_signed_user_agent: "",
+	});
+	for (const c of PASSENGER_AUTHORIZATION_TEXT) sigs += setCols("passenger_authorizations", { [c]: "REDACTED" }, `COALESCE("${c}",'') <> ''`);
 	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
 	// 3g. investor_applications.access_token: no route accepts these tokens since
@@ -1202,6 +1212,20 @@ const REDACTED_EMPTY = [
 	["owner_operator_applications", "truck_plate", "owner-operator truck plate (application)"],
 	["owner_operator_toll_notices", "plate_or_transponder", "toll notice plate or transponder"],
 	["owner_operator_toll_notices", "notice_number", "toll notice number"],
+	// A passenger authorization's drawn signatures, consent text and signers' IP and browser:
+	// base64 and addresses the free-text sweep cannot see.
+	["passenger_authorizations", "passenger_signature_image", "passenger or guardian signature image"],
+	["passenger_authorizations", "driver_signature_image", "passenger authorization driver signature image"],
+	["passenger_authorizations", "company_signature_image", "passenger authorization company signature image"],
+	["passenger_authorizations", "passenger_consent_text", "passenger or guardian consent text"],
+	["passenger_authorizations", "driver_consent_text", "passenger authorization driver consent text"],
+	["passenger_authorizations", "company_consent_text", "passenger authorization company consent text"],
+	["passenger_authorizations", "driver_signed_ip", "passenger authorization driver IP address"],
+	["passenger_authorizations", "driver_signed_ip_source", "passenger authorization driver IP provenance"],
+	["passenger_authorizations", "driver_signed_user_agent", "passenger authorization driver user agent"],
+	["passenger_authorizations", "company_signed_ip", "passenger authorization company signer IP address"],
+	["passenger_authorizations", "company_signed_ip_source", "passenger authorization company signer IP provenance"],
+	["passenger_authorizations", "company_signed_user_agent", "passenger authorization company signer user agent"],
 ];
 
 // The other half of stage 3e/3f: columns replaced with a PLACEHOLDER rather
@@ -1260,9 +1284,22 @@ const REDACTED_LITERAL = [
 	["owner_operator_escrow_uses", "reason", "REDACTED", "escrow use reason"],
 	["owner_operator_escrow_uses", "void_reason", "REDACTED", "escrow use void reason"],
 	["owner_operator_ledger_exits", "reason", "REDACTED", "ledger exit reason"],
+	// A passenger authorization's names, trip and free text (PASSENGER_AUTHORIZATION_TEXT): none
+	// is email- or SSN-shaped, so only these rows notice a scrub that stopped matching.
+	["passenger_authorizations", "passenger_name", "REDACTED", "passenger name"],
+	["passenger_authorizations", "guardian_name", "REDACTED", "passenger's guardian name"],
+	["passenger_authorizations", "guardian_relationship", "REDACTED", "passenger's guardian relationship"],
+	["passenger_authorizations", "trip_start", "REDACTED", "passenger trip start"],
+	["passenger_authorizations", "trip_end", "REDACTED", "passenger trip end"],
+	["passenger_authorizations", "passenger_signature_text", "REDACTED", "passenger or guardian typed signature"],
+	["passenger_authorizations", "driver_signature_text", "REDACTED", "passenger authorization driver typed signature"],
+	["passenger_authorizations", "company_printed_name", "REDACTED", "passenger authorization company signer name"],
+	["passenger_authorizations", "decided_reason", "REDACTED", "passenger authorization decision reason"],
 ];
 // Stage 3e's owner-operator free text, replaced with "REDACTED" where it is not empty.
 const OWNER_OPERATOR_TEXT = REDACTED_LITERAL.filter(([t]) => t.startsWith("owner_operator")).map(([t, c]) => [t, c]);
+// Stage 3f's passenger-authorization text, replaced with "REDACTED" where it is not empty.
+const PASSENGER_AUTHORIZATION_TEXT = REDACTED_LITERAL.filter(([t]) => t === "passenger_authorizations").map(([, c]) => c);
 // Columns emptied on an owner-operator's rows only: his own truck's VIN and plate, and
 // a toll notice receipt's OCR lines. [table, column, the table marking the row, where, label]
 const OWNER_OPERATOR_LINKED = [

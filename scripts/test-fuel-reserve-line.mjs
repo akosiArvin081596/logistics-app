@@ -278,6 +278,15 @@ const STOPS = {
 }
 // Words that are working, not an answer: none may reach the driver with the flag on.
 const WORKING_RE = /minus|reserve|mpg|miles per gallon|%|until the tank is empty|how we know/i
+// Rows the block can't count, with few miles left (the re-check's D1 and D2, and the 50 mi edge).
+const LOW_UNCOUNTED = {
+  'before pickup, no position, 12%': { pct: 12, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 },
+  'unmapped pickup, 12%': { pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 12 },
+  'dropout in transit, 10%': { fuelSource: 'carried', pct: 10, anchor: 10, milesSince: 0, pickedUp: true, leg: 'to_delivery', routeMiles: 200 },
+  'before pickup, no position, 12.8% (49 mi)': { pct: 12.8, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 },
+  'before pickup, no position, 13% (50 mi)': { pct: 13, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 },
+  'dropout in transit, 14% (55 mi)': { fuelSource: 'carried', pct: 14, anchor: 14, milesSince: 0, pickedUp: true, leg: 'to_delivery', routeMiles: 200 },
+}
 
 // ---------------------------------------------------------------------------
 console.log('§7 client/src/lib/driverFuelView.js')
@@ -400,6 +409,18 @@ if (v) {
     const chipOf = (o) => v.driverFuelChip(world(o).rangeBlock)
     check('§7 (a) the chip\'s colour is the block\'s miles left (under 50 red, under 150 amber), with its figure',
       [chipOf({}), chipOf({ pct: 30 }), chipOf({ pct: 12 })].map((c) => [c.text, c.tone]), [['225 mi', 'ok'], ['135 mi', 'warn'], ['45 mi', 'bad']])
+    // A row with no number under 50 mi left: the top and the badge are red like the chip.
+    const LOW = Object.entries(LOW_UNCOUNTED).map(([name, o]) => [name, world(o).planBlock.milesLeft, toneOf(o), v.driverFuelBadge(world(o).plan), chipOf(o).tone])
+    check('§7 (a) a row the block can\'t count under 50 mi left: the top and the badge red, like the chip; 50 mi and up amber',
+      LOW, [
+        ['before pickup, no position, 12%', 45, 'bad', { tone: 'bad', text: 'Check gauge' }, 'bad'],
+        ['unmapped pickup, 12%', 45, 'bad', { tone: 'bad', text: 'Check gauge' }, 'bad'],
+        ['dropout in transit, 10%', 35, 'bad', { tone: 'bad', text: 'Check gauge' }, 'bad'],
+        ['before pickup, no position, 12.8% (49 mi)', 49, 'bad', { tone: 'bad', text: 'Check gauge' }, 'bad'],
+        ['before pickup, no position, 13% (50 mi)', 50, 'warn', { tone: 'warn', text: 'Check gauge' }, 'warn'],
+        ['dropout in transit, 14% (55 mi)', 55, 'warn', { tone: 'warn', text: 'Check gauge' }, 'warn'],
+      ])
+    check('§7 (a) …and every one of those rows has no number', Object.values(LOW_UNCOUNTED).every((o) => world(o).planBlock.legs.every((l) => l.status === 'check_gauge' && l.miles === null)), true)
   }
 
   const noteOf = (problem) => v.driverFuelView(world().rangeBlock, { planProblem: problem }).rowsNote
@@ -717,6 +738,10 @@ if (panelFactory) {
       [await topClass({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }), await topClass({ fuelSource: 'carried', pct: 70, anchor: 72, milesSince: 10, leg: 'to_delivery', routeMiles: 200 }),
         await topClass({}), await topClass({ leg: 'to_delivery', routeMiles: 180 })],
       ['warn', 'warn', 'bad', 'ok'])
+    const lowTops = []
+    for (const o of Object.values(LOW_UNCOUNTED)) lowTops.push(await topClass(o))
+    check('§8b (a) …a row it can\'t count under 50 mi left is red on the rendered top (45, 45, 35, 49 mi); 50 and 55 mi amber',
+      lowTops, ['bad', 'bad', 'bad', 'bad', 'warn', 'warn'])
   }
   check('§8b load not mapped (400 NO_ROUTE): the top from the range answer, and why there are no rows',
     blockText(await on({}, { '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })),
@@ -824,6 +849,9 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
   check('§9 flag on, the badge never falls back to the verdict: a delivered load shows none (its verdict would say "Fuel stop needed"), an unmapped pickup "Check gauge" (not a range on its clearing verdict)',
     [badgeFor(world({ loadDone: true }).plan).badge, badgeFor(world({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }).plan).badge],
     [null, { tone: 'warn', text: 'Check gauge' }])
+  check('§9 flag on, a row the block can\'t count under 50 mi left: the load badge "Check gauge" in red (45 mi); amber at 50 mi',
+    [badgeFor(world(LOW_UNCOUNTED['before pickup, no position, 12%']).plan).badge, badgeFor(world(LOW_UNCOUNTED['before pickup, no position, 13% (50 mi)']).plan).badge],
+    [{ tone: 'bad', text: 'Check gauge' }, { tone: 'warn', text: 'Check gauge' }])
   {
     const off = badgeFor(world({ flag: false }).plan)
     const offClears = badgeFor(world({ flag: false, leg: 'to_delivery', routeMiles: 180 }).plan)

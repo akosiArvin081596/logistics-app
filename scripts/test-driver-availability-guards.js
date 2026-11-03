@@ -50,6 +50,13 @@
 //      notice's guard, the staff row view's request keys, the overlap check's
 //      bound value and driverOwnTimeOff()'s request keys
 //   §5b GET /api/trucks and every investor route name none of the request names
+// Home time (H1) rides the same flag: its two columns are tracked names (so §3
+// keeps them to the allowlisted places), the lib's home exports are tracked as
+// exports; §1 also runs that month with a home time on every row; §4.9b names
+// the flag's four new places (the staff list's homeTime key, the staff create's
+// and edit's validator scope, the driver's rows' home key); and
+//   §5c GET /api/trucks, every investor route, every KPI route and the KPI
+//      modules in lib/ name none of the home time's names
 //
 // Tracked names: the table, the module path, the module's binding in server.js,
 // every name lib/driver-availability.js exports (read from the module, so a new
@@ -100,7 +107,9 @@ const ELD_ALLOW_HEADS = [
 	'if (DRIVER_TIME_OFF_ELD_CHECK_ENABLED && startsJob("time-off ELD check")) {',
 	'if (startsJob("time-off ELD results purge (at boot, then weekly)")) {',
 ];
-const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports, ...ELD_CHECK_NAMES];
+// Home time (H1): its columns, so no money path can read them.
+const HOME_COLUMNS = ["home_city", "home_state"];
+const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports, ...ELD_CHECK_NAMES, ...HOME_COLUMNS];
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A tracked name as a whole word ("driver_availability_create", an audit
 // action, is not the table).
@@ -318,13 +327,15 @@ function moneyWorld(withRow) {
 		for (const d of ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]) day.run(avail, dir, d, "confirmed", "parked", 0);
 		for (const d of ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]) day.run(avail, dir, d, "not_confirmed", "truck_moved", 250);
 		// PR 4: a driver's waiting, declined and approved requests over the loaded days (the shipped columns).
-		if (withRow === "requests") {
+		if (withRow === "requests" || withRow === "home") {
 			const req = w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
 				request_status, source, decided_by, decided_at) VALUES (?, ?, 'off_duty', ?, ?, '', 'drv_amy', 0, '2026-09-20T12:00:00Z', ?, 'driver', ?, ?)`);
 			req.run(dir, AMY, "2026-10-05", "2026-10-06", "requested", null, null);
 			req.run(dir, AMY, "2026-10-07", "2026-10-08", "declined", "dispatch_t", "2026-09-21T12:00:00Z");
 			req.run(dir, AMY, "2026-10-08", "2026-10-09", "approved", "dispatch_t", "2026-09-21T12:00:00Z");
 		}
+		// H1: every row (the staff month off and the three requests) with a home time (the shipped columns).
+		if (withRow === "home") w.db.prepare("UPDATE driver_availability SET home_city = 'Springfield', home_state = 'MO'").run();
 	}
 	return w;
 }
@@ -487,6 +498,15 @@ async function moneyViews(withRow) {
 	} catch (err) {
 		ok("§1.7 ran", false, `threw: ${err && err.message}`);
 	}
+	try {
+		const base = await moneyViews(false);
+		const home = await moneyViews("home");
+		eq("§1.11 H1: the same month with a home time on every row gives the same weekly invoice (days and total), payout ledger (items and months), investor months, and no excluded day",
+			[home.availabilityRows, home.invoiceDays, home.invoiceTotal, home.ledgerItems, JSON.stringify(home.ledgerMonths), JSON.stringify(home.investorMonths), home.excluded],
+			[4, base.invoiceDays, base.invoiceTotal, base.ledgerItems, JSON.stringify(base.ledgerMonths), JSON.stringify(base.investorMonths), 0]);
+	} catch (err) {
+		ok("§1.11 ran", false, `threw: ${err && err.message}`);
+	}
 
 	console.log("\n── §2 the money modules in lib/ never name a tracked name");
 	for (const f of ["load-pay-days.js", "financials-calc.js", "investor-payout-basis.js", "financials-report.js"]) {
@@ -606,11 +626,17 @@ async function moneyViews(withRow) {
 			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? driverAvailability\.requestRowFields\(r\) : \{\}\),$/, "function availabilityRowView("],
 			[/^`\)\.get\(directoryId, exceptId, to, from, DRIVER_TIME_OFF_REQUESTS_ENABLED && !approvedOnly \? 1 : 0\);$/, "function availabilityOverlap("],
 			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? driverTimeOffRequestKeys\(key, today, viewer\) : \{\}\),$/, "function driverOwnTimeOff("],
+			// H1: the staff list's add-form key, the staff create's and edit's validator scope, the driver's rows' home key.
+			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? \{ homeTime: true \} : \{\}\),$/, 'app.get("/api/drivers-directory/:id/availability",'],
+			[/^const v = driverAvailability\.validateAvailability\(req\.body, \{ todayKey: today, isSuperAdmin: user\.role === "Super Admin", home: DRIVER_TIME_OFF_REQUESTS_ENABLED \}\);$/,
+				'app.post("/api/drivers-directory/:id/availability",'],
+			[/^const scope = \{ todayKey: today, isSuperAdmin, home: DRIVER_TIME_OFF_REQUESTS_ENABLED \};$/, 'app.put("/api/driver-availability/:id",'],
+			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? \{ home: driverAvailability\.homeLocationOf\(r\) \} : \{\}\),$/, "function driverOwnTimeOff("],
 		];
 		const reqUses = code.map((l, i) => [l.trim(), i]).filter(([l]) => /\bDRIVER_TIME_OFF_REQUESTS_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_TIME_OFF_REQUESTS_ENABLED ="));
 		const reqPlaced = reqUses.filter(([l, i]) => REQ_FLAG_USES.some(([re, head]) => re.test(l) && headLine(i).startsWith(head)));
 		const strayReq = reqUses.filter((u) => !reqPlaced.includes(u)).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 90)}`);
-		ok(`§4.9b ...and its ${reqUses.length} other mentions are exactly the route gate, the start-up line, the driver notice's guard, the staff row view's keys, the overlap check's bound value and driverOwnTimeOff()'s keys`,
+		ok(`§4.9b ...and its ${reqUses.length} other mentions are exactly the route gate, the start-up line, the driver notice's guard, the staff row view's keys, the overlap check's bound value, driverOwnTimeOff()'s keys and (H1) the home time's four places`,
 			reqUses.length === REQ_FLAG_USES.length && strayReq.length === 0, strayReq.join(" | "));
 		const gated = ['app.post("/api/driver/me/availability",', 'app.post("/api/driver/me/availability/:id/cancel",',
 			'app.post("/api/driver-availability/:id/approve",', 'app.post("/api/driver-availability/:id/decline",'];
@@ -639,6 +665,18 @@ async function moneyViews(withRow) {
 		const REQ_NAME_RE = new RegExp(`(?<![\\w$-])(?:${reqNames.map(escapeRe).join("|")})(?![\\w$])`);
 		eq("§5b none of them names a driver's request: its column, flag, helpers or answer keys",
 			routes.filter(([, i]) => REQ_NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`), []);
+		// §5c: nor the home time (H1): its columns, answer keys and the lib's home helpers. The
+		// KPI routes and the KPI modules join the investor routes here.
+		const homeNames = [...HOME_COLUMNS, "homeCity", "homeState", "homeDefault", "homeTime", ...libExports.filter((n) => /home/i.test(n))];
+		const HOME_NAME_RE = new RegExp(`(?<![\\w$-])(?:${homeNames.map(escapeRe).join("|")})(?![\\w$])`);
+		const kpiRoutes = code.map((l, i) => [l, i]).filter(([l]) => /^app\.(get|post|put|patch|delete)\("[^"]*kpi/i.test(l));
+		const kpiFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => /^kpi-.*\.js$/.test(f));
+		const homeIn = code.filter((l) => HOME_NAME_RE.test(l)).length;
+		eq("§5c the home time's names are in server.js, and none of GET /api/trucks, the investor routes, the KPI routes or lib/kpi-*.js names one", [
+			homeIn > 0, libExports.filter((n) => /home/i.test(n)).length > 0, kpiRoutes.length > 0 && kpiFiles.length > 0,
+			[...routes, ...kpiRoutes].filter(([, i]) => HOME_NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`),
+			kpiFiles.filter((f) => HOME_NAME_RE.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))),
+		], [true, true, true, [], []]);
 	}
 
 	console.log("\n── §6 the ELD check's helpers are where §3 can see them");

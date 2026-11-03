@@ -144,6 +144,8 @@ const navConfig = {
     { to: '/admin/data-issues', icon: '&#9888;', label: 'Data Issues' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
+    { divider: true, label: 'Integrations' },
+    { to: '/admin/integrations/chr', icon: '&#128279;', label: 'C.H. Robinson' },
   ],
   Dispatcher: [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },

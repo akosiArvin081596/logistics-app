@@ -37,6 +37,8 @@
 // closed-month check is not applied: a month closed today was open when the load
 // was delivered. Opt-outs and confirmed domains are the copy's own settings (none
 // until set) and Bison's recipient is taken as configured (production sets it).
+// A load marked factored is WOULD_SKIP LOAD_FACTORED, as the job judges it, and
+// a Triumph submission's draft row is no person's draft (both modes).
 //
 //   node scripts/auto-invoice-shadow-report.js --retro --db=<app.db>
 //     (--sheets-json=<sheets.json> | --values-json=<values.json>)
@@ -63,6 +65,7 @@ const fs = require("fs");
 const path = require("path");
 const rules = require("../lib/auto-invoice-rules");
 const ledger = require("../lib/auto-invoice-ledger");
+const factoring = require("../lib/factoring-store");
 const appTime = require("../lib/app-time");
 const { closure } = require("./lib/server-lift");
 
@@ -195,6 +198,10 @@ function dayDiff(a, b) {
 	return Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
 }
 
+// A load's draft rows people made: a Triumph submission's row (a factored load)
+// is not one.
+const handDrafts = (rec) => (rec ? rec.drafts.filter((d) => String(d.via || "") !== "triumph") : []);
+
 // What the hand draft says about the automatic one (domains compared, nothing
 // printed): A likely the same, B the recipient rule hands it to a person, C edited.
 function compareHandDraft(facts, draft) {
@@ -223,8 +230,10 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 	const cols = rules.jobColumns(parsed.headers);
 	if (!cols.loadIdCol || !cols.statusCol) throw refused("the Job Tracking copy has no Load ID or status column");
 	const records = rules.indexRecords(ledger.readRecords(db));
-	// The copy's own automatic-draft settings (none until a Super Admin sets them).
+	// The copy's own automatic-draft settings (none until a Super Admin sets them),
+	// and its factored loads, which the job never drafts.
 	const settings = ledger.readSettings(db);
+	const factored = factoring.factoredKeys(db);
 	const podReadable = uploadsDir
 		? (doc) => {
 			if (String(doc.drive_file_id || "")) return true;
@@ -244,7 +253,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		const completed = rules.isCompletedStatus(row[cols.statusCol]);
 		const facts = rules.loadFacts({ row, cols, records: rec, bisonRecipientConfigured: true, podReadable,
 			optOutDomains: settings.optOutDomains, confirmedDomains: settings.confirmedBrokerDomains,
-			activeAdvanceLines: completed ? ledger.activeAdvanceLines(db, key) : 0 });
+			activeAdvanceLines: completed ? ledger.activeAdvanceLines(db, key) : 0, factored: factored.has(key) });
 		if (!facts.completed || !facts.live) continue;
 		let day = helpers.sheetDayKey(cols.completionCol ? row[cols.completionCol] : "");
 		let dayFrom = day ? "completion" : "";
@@ -254,7 +263,8 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		}
 		const verdict = rules.freeVerdict(facts, { checkMonth: false, checkDrafted: false });
 		const ifConfirmed = rules.freeVerdict(facts, { checkMonth: false, checkDrafted: false, assumeConfirmed: true });
-		const latestDraft = rec && rec.drafts.length ? rec.drafts[rec.drafts.length - 1] : null;
+		const people = handDrafts(rec);
+		const latestDraft = people.length ? people[people.length - 1] : null;
 		const entry = {
 			load: suffix(row[cols.loadIdCol]),
 			day,
@@ -280,7 +290,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		}
 		// The first draft made on or after the delivered day (an older one belongs
 		// to an earlier delivery of the same load).
-		const draftDays = rec ? rec.drafts.map((d) => stampDay(d.created_at, zone)).filter((d) => d && day && d >= day).sort() : [];
+		const draftDays = people.map((d) => stampDay(d.created_at, zone)).filter((d) => d && day && d >= day).sort();
 		if (draftDays.length) entry.daysToHandDraft = dayDiff(day, draftDays[0]);
 		if (!day) unknown.push(entry);
 		else if (inWindow(day)) loads.push(entry);
@@ -311,7 +321,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 
 	const draftsInWindow = [];
 	for (const [key, rec] of records) {
-		for (const d of rec.drafts) {
+		for (const d of handDrafts(rec)) {
 			if (!inWindow(stampDay(d.created_at, zone))) continue;
 			const row = rowByKey.get(key);
 			const domain = row ? rules.emailDomain(row[cols.emailCol]) || NO_DOMAIN : NOT_ON_SHEET;
@@ -423,7 +433,7 @@ function buildShadow({ db, since, until, zone = appTime.appTimeZone(), today = a
 		const facts = parseFacts(r.facts_json);
 		const rec = records.get(r.load_key);
 		const firstMs = Date.parse(r.first_seen_at);
-		const later = rec ? rec.drafts.filter((d) => Date.parse(stampIso(d.created_at)) >= firstMs) : [];
+		const later = handDrafts(rec).filter((d) => Date.parse(stampIso(d.created_at)) >= firstMs);
 		const draft = later[0] || null;
 		const entry = {
 			load: suffix(r.load_id || r.load_key),

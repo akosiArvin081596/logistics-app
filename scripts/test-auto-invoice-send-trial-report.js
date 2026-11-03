@@ -742,4 +742,49 @@ async function runTrial(specs, { since, now = NOW } = {}) {
 		if (!mod) continue;
 		ok(still(await run(report)) && !still(await run(mod)), `§10 MUTANT ${label}: the shipped report holds, the mutant doesn't (caught)`);
 	}
+
+	// ===================================================================== §11
+	section("§11 factored loads (Triumph): left out of the shadow week; a Triumph row is no person's draft");
+	{
+		// The marker as lib/factoring-store.js keeps it (the columns the report reads).
+		const markFactored = (db, id, at) => {
+			db.exec("CREATE TABLE IF NOT EXISTS load_factoring (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', factored INTEGER NOT NULL, source TEXT NOT NULL, set_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+			db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'person', ?, ?)").run(rules.loadKey(id), id, at.toISOString(), at.toISOString());
+		};
+		const notEmailed = [{ copies: 0, noDraftRow: true }, ...matching(6)];
+		const factoredIn = async (mod, at) => {
+			const w = await runShadow(notEmailed, { mod });
+			markFactored(w.db, "LD-TEST-0401", at);
+			return rerun(w, NOW, { mod });
+		};
+		const inWeek = await factoredIn(report, T(3));
+		eq([brief(inWeek.counts), inWeek.counts.outside], [SIX_PASS_11, { refused: 0, otherDomains: 0, factored: 1 }],
+			"§11 FAILS ON THE OLD CODE: a load rendered, then factored in the week (people never email it): left out, counted 'outside: factored'; the six PASS");
+		ok(/factored 1/.test(inWeek.result.text), "§11 FAILS ON THE OLD CODE: ...the text says so on the outside line");
+		const after = await factoredIn(report, T(9));
+		eq([brief(after.counts), after.counts.outside], [SEVEN_ONE_UNMATCHED_11, { refused: 0, otherDomains: 0 }], "§11 factored only after the window's end: still judged (unmatched), FAIL");
+		const none = await runShadow(matching(6));
+		eq(Object.keys(none.counts.outside), ["refused", "otherDomains"], "§11 nothing factored: the outside line is today's (no factored key)");
+
+		const triumphRow = async (mod) => {
+			const w = await runShadow(matching(6), { mod });
+			w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_at, created_by) VALUES (?, ?, '', '', 'triumph', ?, 'triumph')")
+				.run("LD-TEST-0401", "11042026-90", T(2).toISOString());
+			return rerun(w, NOW, { mod });
+		};
+		const tr = await triumphRow(report);
+		eq([brief(tr.counts), tr.counts.differences.nothingAfter], [SIX_PASS_11, 0], "§11 FAILS ON THE OLD CODE: a 'triumph' draft row is not a person's second draft (nothing after holds)");
+		for (const [label, from, to, run, still] of [
+			["factored loads judged", "if (factored.has(row.load_key)) {", "if (false) {", (mod) => factoredIn(mod, T(3)), (x) => x.counts.pass && x.counts.population === 6],
+			["a Triumph row counted as a person's draft", " && !TRIUMPH_VIA.includes(String(r.via || \"\"))", "", triumphRow, (x) => x.counts.pass],
+		]) {
+			const mod = mutant(from, to);
+			ok(mod, `§11 MUTANT ${label}: applied to the shipped source once`);
+			if (!mod) continue;
+			ok(still(await run(report)) && !still(await run(mod)), `§11 MUTANT ${label}: caught`);
+		}
+	}
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(finish);
+
+const SIX_PASS_11 = { population: 6, matched: 6, differences: 0, unmatched: 0, pending: 0, pass: true };
+const SEVEN_ONE_UNMATCHED_11 = { population: 7, matched: 6, differences: 0, unmatched: 1, pending: 0, pass: false };
