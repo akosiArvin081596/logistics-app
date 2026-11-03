@@ -262,7 +262,8 @@ ok(!/\bfetch\s*\(|googleapis|https?:\/\/|\.env\b/.test(SRC), "§5 no fetch, Goog
 const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
 eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]).sort(), ["\"./auto-invoice-rules\"", "\"./broker-invoice\"", "\"./factoring-store\""],
 	"§5 the ledger it reads with loads only the rules, lib/broker-invoice.js (for the advance lines) and the factoring marker");
-const STORE_SRC = fs.readFileSync(path.join(ROOT, "lib", "factoring-store.js"), "utf8");
+const STORE_FILE = path.join(ROOT, "lib", "factoring-store.js");
+const STORE_SRC = fs.existsSync(STORE_FILE) ? fs.readFileSync(STORE_FILE, "utf8") : "";
 eq([...STORE_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]).sort(), ["\"./auto-invoice-rules\""], "§5 ...which loads only the rules");
 
 // ------------------------------------------------------------------ §6
