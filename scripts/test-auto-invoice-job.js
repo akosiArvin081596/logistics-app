@@ -3078,7 +3078,7 @@ async function sendSections() {
 			["the gate ignores the stop", "\tif (stopped) return { send: false, why: \"STOPPED\" };\n", ""],
 			["a subdomain taken as listed", "if (!domain || !(settings.domains || []).includes(domain)) return { send: false, why: \"DOMAIN_NOT_LISTED\" };",
 				"if (!domain || !(settings.domains || []).some((x) => domain === x || domain.endsWith(`.${x}`))) return { send: false, why: \"DOMAIN_NOT_LISTED\" };"],
-			["the flag read loosely", "String(e.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim() === \"true\"", "/^(true|1|yes)$/i.test(String(e.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim())"],
+			["the flag read loosely", "String(env?.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim() === \"true\"", "/^(true|1|yes)$/i.test(String(env?.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim())"],
 			["on in a replica", "const enabled = replica !== true && ", "const enabled = "],
 			["the To compared loosely", "if (!to || rules.normalizeEmail(to) !== to || to.toLowerCase() !== String(planned || \"\").toLowerCase()) return \"RECIPIENT\";",
 				"if (!to || !to.toLowerCase().includes(String(planned || \"\").toLowerCase())) return \"RECIPIENT\";"],
