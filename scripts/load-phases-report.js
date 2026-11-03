@@ -62,6 +62,7 @@ const appTime = require("../lib/app-time");
 const eldMiles = require("../lib/eld-miles");
 const tripWorkDays = require("../lib/trip-work-days");
 const loadPayDays = require("../lib/load-pay-days");
+const arrivalPickup = require("../lib/arrival-pickup");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 
 const ROOT = path.join(__dirname, "..");
@@ -96,7 +97,7 @@ const SHEET_ROOTS = [
 	"normalizeDriverName", "appStamp", "jobTrackingRowsOf", "dispatchWriteBlocker", "tripDayLockCover",
 	"invoiceWeekColumns", "invoiceCompletionDay", "selectInvoiceWeekLoads", "getWeekRange", "invoiceWeekPaidDays", "invoiceDayPricing",
 	"liveWeeklyInvoicesForDriverWeek", "getDriverPayStructures", "truckDailyRateCandidates", "resolveDailyRate", "loadKeySet",
-	"getDeletedLoadIds", "tripDayResolver", "invoiceExtraRuleLoads",
+	"getDeletedLoadIds", "tripDayResolver", "invoiceExtraRuleLoads", "jobTrackingMonthCols", "moneySheetDate",
 ];
 const LIFT_DENIED = ["app", "io", "server", "sheets", "getSheets", "sendEmail", "transporter", "getDrive", "KEY_FILE", "jtCacheInvalidate",
 	"logAudit", "recordStatusChange", "insertDispatchNotification", "emitDispatchNotice", "emitLoadEventToDispatch", "notifyChange"];
@@ -113,13 +114,10 @@ function openReadOnly(dbFile) {
 	return openDb({ root: ROOT, dbFile, readonly: true });
 }
 
-// normalizeDriverName() as the server has it, lifted alone (no database, no
-// sheet); and whether this checkout's invoice code has plan A's arrival rule.
+// normalizeDriverName() as the server has it, lifted alone (no database, no sheet).
 function liftNames() {
-	const src = serverSource({ root: ROOT });
-	const lifted = closure(src, { roots: LIFT_ROOTS, provided: [], denied: LIFT_DENIED });
-	const names = new Function("fetch", `"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(refuseFetch);
-	return { ...names, planARule: src.includes("ARRIVAL_PICKUP_DATE_ENABLED") };
+	const lifted = closure(serverSource({ root: ROOT }), { roots: LIFT_ROOTS, provided: [], denied: LIFT_DENIED });
+	return new Function("fetch", `"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(refuseFetch);
 }
 
 // ── reading ──────────────────────────────────────────────────────────────────
@@ -348,6 +346,7 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	const decisions = [];
 	const sheetOutcomes = {};
 	let closedSince = 0;
+	let cancelledSince = 0;
 	for (const doc of pods.all) {
 		if (!inWindow(doc.ms)) continue;
 		const rows = rowsOf(doc.key);
@@ -361,9 +360,11 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 		else if (latest.lc === "at receiver" && latest.source === "geofence") outcome = firedRuns.has(latest.id) ? "already_fired" : "candidate";
 		else outcome = "receiver_not_gps";
 		if (outcome === "candidate") {
-			const verdict = sheet ? sheet.half(doc) : { outcome: "would_fire" };
+			const cancelledAfter = rows.slice(idx + 1).some((r) => r.source === "cancel" || CANCELLED_RE.test(r.status));
+			const verdict = sheet ? sheet.half(doc, { cancelledAfter }) : { outcome: "would_fire" };
 			outcome = verdict.outcome;
 			if (verdict.closedSince) closedSince += 1;
+			if (verdict.cancelledSince) cancelledSince += 1;
 			if (outcome !== "would_fire") inc(sheetOutcomes, outcome);
 		}
 		const d = { doc, latest, idx, outcome };
@@ -373,12 +374,9 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	const outcomes = {};
 	for (const d of decisions) inc(outcomes, d.outcome);
 
-	// The would-fire runs against what happened next.
-	const fires = [];
-	for (const d of decisions) {
-		if (d.outcome !== "would_fire") continue;
-		const rows = rowsOf(d.doc.key);
-		const after = rows.slice(d.idx + 1);
+	// What happened after an upload: the next completed row, and how it was reached.
+	const followOf = (d) => {
+		const after = rowsOf(d.doc.key).slice(d.idx + 1);
 		const dIdx = after.findIndex((r) => COMPLETED_RE.test(r.status));
 		const delivered = dIdx >= 0 ? after[dIdx] : null;
 		const between = dIdx >= 0 ? after.slice(0, dIdx) : after;
@@ -388,6 +386,14 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 		else if (!between.length) follow = "delivered";
 		else if (between.every(isStaffRow) && delivered.ms - between[0].ms <= STAFF_CORRECTION_MS) follow = "staff_correction";
 		else follow = "other_status_between";
+		return { after, delivered, follow };
+	};
+
+	// The would-fire runs against what happened next.
+	const fires = [];
+	for (const d of decisions) {
+		if (d.outcome !== "would_fire") continue;
+		const { after, delivered, follow } = followOf(d);
 		const docs = pods.byLoad.get(d.doc.key) || [];
 		// The proof's files end at the Delivered, or at a later arrival (another stop's proof).
 		const nextArrival = after.find((r) => r.lc === "at receiver");
@@ -416,6 +422,10 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	for (const f of fires) labelOf(f.key);
 	const delivered = fires.filter((f) => f.deliveredMs !== null);
 	const falseCompletions = fires.filter((f) => f.follow === "never_delivered" || f.follow === "later_arrival" || f.follow === "other_status_between");
+	// Refusals the sheet as it reads now may not have made at the upload (a row
+	// removed since, a duplicate completed since): shown beside criterion 1.
+	const notJudged = decisions.filter((d) => d.outcome === "not_on_sheet" || d.outcome === "ambiguous")
+		.map((d) => ({ load: labelOf(d.doc.key), upload: appDayTime(d.doc.ms, zone), outcome: d.outcome, follow: followOf(d).follow }));
 	const tapBuckets = {};
 	for (const f of delivered) inc(tapBuckets, bucket(f.gapMs, TAP_EDGES));
 	const fileBuckets = {};
@@ -616,7 +626,7 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 
 	// 3. The pay effect: the loads whose stamp would move to another day.
 	const payLoads = fires.filter((f) => f.deliveredMs !== null && !f.sameDay);
-	const pay = sheet ? { ...sheet.payEffect(payLoads), planARule: names.planARule } : null;
+	const pay = sheet ? sheet.payEffect(payLoads) : null;
 
 	// The switch-on criteria (plan §3.4) on the backtest.
 	const n = delivered.length;
@@ -628,7 +638,9 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	const overQuiet = fires.filter((f) => f.laterFiles.some((g) => g > QUIET_MS));
 	const verdict = (ok, checked = true) => (!checked ? "NOT CHECKED" : ok ? "PASS" : "FAIL");
 	const criteria = [
-		{ n: 1, what: "no false completion (a staff correction ending in Delivered within 1 h is listed, not failed)", verdict: verdict(!falseCompletions.length), detail: `${falseCompletions.length} false, ${fires.filter((f) => f.follow === "staff_correction").length} staff correction(s), of ${fires.length}` },
+		{ n: 1, what: "no false completion (a staff correction ending in Delivered within 1 h is listed, not failed)", verdict: verdict(!falseCompletions.length),
+			detail: `${falseCompletions.length} false, ${fires.filter((f) => f.follow === "staff_correction").length} staff correction(s), of ${fires.length}`
+				+ (notJudged.length ? `; not judged: ${notJudged.length} upload(s) the sheet half refused as not on the sheet or ambiguous (as it reads now), whose follow-up reads ${notJudged.map((x) => `${x.load} ${x.follow}`).join(", ")}` : "") },
 		{ n: 2, what: "the same billing week as the actual Delivered on 100%", verdict: verdict(sameWeek === n, n > 0), detail: `${sameWeek} of ${n}` },
 		{ n: 3, what: "the same Eastern day on at least 95%", verdict: verdict(n > 0 && sameDay / n >= 0.95, n > 0), detail: `${sameDay} of ${n} (${pct(sameDay, n)}%)` },
 		{ n: 4, what: "the actual Delivered within 60 minutes on at least 90%", verdict: verdict(n > 0 && within60 / n >= 0.9, n > 0), detail: `${within60} of ${n} (${pct(within60, n)}%)` },
@@ -639,6 +651,9 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 		{ n: 7, what: "no further POD file more than 15 minutes after the upload that would fire, before the actual Delivered", verdict: verdict(!overQuiet.length), detail: `${overQuiet.length} load(s) over; largest gap between consecutive files ${minutes(Math.max(0, ...fires.map((f) => f.maxStepMs)))} min` },
 	];
 	if (!sheet) criteria.push({ n: "pay", what: "the pay effect (M2) is computed", verdict: "NOT CHECKED", detail: "needs --values-json" });
+	else if (pay.planA.notModelled.length) {
+		criteria.push({ n: "pay", what: "the pay effect (M2) is computed", verdict: "NOT CHECKED", detail: `plan A's arrival rule is on and ${pay.planA.notModelled.length} load(s) are not modelled` });
+	}
 	const fridays = [];
 	for (let d = dayOf(fromMs); d <= dayOf(nowMs); d = new Date(Date.parse(`${d}T12:00:00Z`) + DAY_MS).toISOString().slice(0, 10)) {
 		const [y, m, dd] = d.split("-").map(Number);
@@ -663,7 +678,7 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 		sheet: sheet ? "read from --values-json (as it reads now, not at each upload)" : "not checked (no --values-json)",
 		writers,
 		backtest: {
-			podUploads: decisions.length, outcomes, sheetOutcomes, closedSinceUpload: closedSince,
+			podUploads: decisions.length, outcomes, sheetOutcomes, closedSinceUpload: closedSince, cancelledSinceUpload: cancelledSince, notJudged,
 			loadsDelivered: deliveredLoads.length, loadsWouldFire: deliveredLoads.filter((k) => firedKeys.has(k)).length,
 			wouldFire: fires.length, uploaderRoleNotRecorded: unrecordedRole,
 			tap: tapBuckets, sameDay, sameWeek, delivered: n,
@@ -697,7 +712,7 @@ function appDayTime(ms, zone) {
 // ── the sheet half and the pay effect (--values-json) ────────────────────────
 // The server's own code, lifted over the read-only handle: the period guard the
 // tap passes, the stamp it writes, and the weekly invoice's days and pricing.
-function sheetSide({ api, db, values, driverLabel, loadLabel }) {
+function sheetSide({ api, db, env, values, driverLabel, loadLabel }) {
 	const { headers, data } = api.jobTrackingRowsOf(values);
 	const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h)) || null;
 	const driverCol = headers.find((h) => /driver/i.test(h)) || null;
@@ -722,11 +737,18 @@ function sheetSide({ api, db, values, driverLabel, loadLabel }) {
 	};
 
 	// Condition 3 and the period guard, as the sheet and the locks read now. A
-	// month locked after the upload was open then.
-	function half(doc) {
+	// month locked after the upload was open then, and so was a row the history
+	// cancels after it (`cancelledAfter`).
+	function half(doc, { cancelledAfter = false } = {}) {
 		const all = rowsByKey.get(doc.key) || [];
 		if (!all.length) return { outcome: "not_on_sheet" };
-		const live = liveRows(doc.key);
+		let live = liveRows(doc.key);
+		let cancelledSince = false;
+		if (!live.length && cancelledAfter) {
+			const mine = all.filter((r) => api.normalizeDriverName(driverCol ? r[driverCol] : "") === api.normalizeDriverName(doc.driver));
+			live = mine.length ? mine : all;
+			cancelledSince = true;
+		}
 		if (!live.length) return { outcome: "load_cancelled" };
 		if (live.length > 1) return { outcome: "ambiguous" };
 		const row = live[0];
@@ -735,10 +757,10 @@ function sheetSide({ api, db, values, driverLabel, loadLabel }) {
 		const before = { ...row, ...(statusCol ? { [statusCol]: "At Receiver" } : {}), ...(completionCol ? { [completionCol]: "" } : {}) };
 		const edits = { ...(statusCol ? { [statusCol]: "Delivered" } : {}), ...stampEdits(api.appStamp(new Date(doc.ms))) };
 		const blocked = api.dispatchWriteBlocker(headers, before, edits, api.tripDayLockCover(headers));
-		if (!blocked) return { outcome: "would_fire" };
+		if (!blocked) return { outcome: "would_fire", cancelledSince };
 		if (blocked.code === "PERIOD_FINALIZED") {
 			const since = blocked.periods.every((p) => lockedAt.get(p) > doc.ms);
-			return since ? { outcome: "would_fire", closedSince: true } : { outcome: "month_closed" };
+			return since ? { outcome: "would_fire", closedSince: true, cancelledSince } : { outcome: "month_closed" };
 		}
 		if (blocked.code === "PERIOD_UNRESOLVED") return { outcome: "period_unresolved" };
 		if (blocked.code === "PERIOD_LOCK_UNREADABLE") return { outcome: "lock_unreadable" };
@@ -771,14 +793,33 @@ function sheetSide({ api, db, values, driverLabel, loadLabel }) {
 		return { days: [...paid.activeDaySet].sort(), amount, percentage };
 	}
 
+	// Plan A's arrival rule (ARRIVAL_PICKUP_DATE, as the app's .env sets it) ends an
+	// in-scope load's window at the status history's first Delivered row, which a
+	// sheet re-stamp doesn't move: such a load is not modelled here.
+	const arrivalFrom = arrivalPickup.ruleFromEnv(env);
+	const arrivalRule = arrivalFrom ? arrivalPickup.createArrivalResolver({ db, fromDay: arrivalFrom }) : null;
+	const monthCols = api.jobTrackingMonthCols(headers);
+	const historyWindow = (row, display) => {
+		if (!arrivalRule || (payStructs[api.normalizeDriverName(display)] || {}).payType === "percentage") return false;
+		const assigned = monthCols.dateCol && row[monthCols.dateCol] ? api.moneySheetDate(row[monthCols.dateCol]) : null;
+		const answer = arrivalRule.forLoad({ loadId: loadIdCol ? row[loadIdCol] : "", assigned, completed: true });
+		return !!answer && !answer.none;
+	};
+
 	// The listed loads (Eastern day differs, and a blank Drop-off Appointment or
 	// another billing week) re-stamped together with their uploads' stamps, and
 	// each driver-week they bill in, paid as the sheet reads now and as re-stamped.
 	function payEffect(fires) {
 		const cols = api.invoiceWeekColumns(headers);
-		const out = { loads: [], weeks: [], notListed: {} };
+		const out = { loads: [], weeks: [], notListed: {}, planA: { rule: arrivalFrom ? "on" : "off", from: arrivalFrom || null, notModelled: [] } };
 		const restamped = new Map();
 		const weeks = new Map();
+		const week = (display, day) => {
+			const { weekStart, weekEnd } = api.getWeekRange(day);
+			const wk = `${api.normalizeDriverName(display)}\t${weekStart}`;
+			if (!weeks.has(wk)) weeks.set(wk, { display, weekStart, weekEnd, loads: new Set(), gainers: [], modelled: true });
+			return weeks.get(wk);
+		};
 		for (const f of fires) {
 			const done = liveRows(f.key).filter((r) => COMPLETED_RE.test(String(statusCol ? r[statusCol] : "").trim()));
 			if (done.length !== 1) { inc(out.notListed, done.length ? "several completed rows" : "no completed row"); continue; }
@@ -787,41 +828,60 @@ function sheetSide({ api, db, values, driverLabel, loadLabel }) {
 			const tapDay = api.invoiceCompletionDay(row, cols);
 			const uploadDay = api.invoiceCompletionDay({ ...row, ...stampEdits(stamp) }, cols);
 			const otherWeek = !!tapDay && !!uploadDay && api.getWeekRange(tapDay).weekStart !== api.getWeekRange(uploadDay).weekStart;
-			if (!otherWeek && cols.dropoffCol && String(row[cols.dropoffCol] || "").trim()) { inc(out.notListed, "Drop-off Appointment set, same week"); continue; }
 			const display = driverCol ? String(row[driverCol] || "").trim() : "";
 			if (!display) { inc(out.notListed, "no driver"); continue; }
+			if (historyWindow(row, display)) {
+				out.planA.notModelled.push(loadLabel(f.key));
+				for (const day of [tapDay, uploadDay]) if (day) Object.assign(week(display, day), { modelled: false }).loads.add(loadLabel(f.key));
+				continue;
+			}
+			if (!otherWeek && cols.dropoffCol && String(row[cols.dropoffCol] || "").trim()) { inc(out.notListed, "Drop-off Appointment set, same week"); continue; }
 			restamped.set(row, stamp);
 			const driver = driverLabel(api.normalizeDriverName(display));
 			out.loads.push({ load: loadLabel(f.key), driver, tapDay, uploadDay, otherWeek });
-			for (const day of [tapDay, uploadDay]) {
-				if (!day) continue;
-				const { weekStart, weekEnd } = api.getWeekRange(day);
-				const wk = `${api.normalizeDriverName(display)}\t${weekStart}`;
-				if (!weeks.has(wk)) weeks.set(wk, { display, weekStart, weekEnd, loads: new Set() });
-				weeks.get(wk).loads.add(loadLabel(f.key));
-			}
+			for (const day of [tapDay, uploadDay]) if (day) week(display, day).loads.add(loadLabel(f.key));
+			if (otherWeek) week(display, uploadDay).gainers.push(f);
 		}
 		const uploadRows = data.map((r) => (restamped.has(r) ? { ...r, ...stampEdits(restamped.get(r)) } : r));
 		for (const w of weeks.values()) {
+			const driver = driverLabel(api.normalizeDriverName(w.display));
+			const head = { driver, weekStart: w.weekStart, weekEnd: w.weekEnd, loads: [...w.loads].sort(), modelled: w.modelled };
+			if (!w.modelled) {
+				out.weeks.push({ ...head, daysTap: null, daysUpload: null, amountTap: null, amountUpload: null, delta: null, invoice: null, once: "not modelled (plan A's window)" });
+				continue;
+			}
 			const tap = weekPay(data, w.display, w.weekStart, w.weekEnd);
 			const upload = weekPay(uploadRows, w.display, w.weekStart, w.weekEnd);
 			const live = api.liveWeeklyInvoicesForDriverWeek(w.display, w.weekStart);
 			const inv = live.length === 1 ? live[0] : null;
-			const changed = tap.days.join() !== upload.days.join() || tap.amount !== upload.amount;
-			const once = !changed ? "nothing changes"
-				: live.length > 1 ? `${live.length} live invoices for this week: a person decides`
-					: !inv ? "no invoice yet: generate pays the days the sheet then gives"
-						: inv.status === "Draft" ? "Draft: a person regenerates it"
-							: `issued (${inv.status}): generate refuses it, so the days go through scripts/create-correction-invoice-draft.js`;
 			out.weeks.push({
-				driver: driverLabel(api.normalizeDriverName(w.display)), weekStart: w.weekStart, weekEnd: w.weekEnd, loads: [...w.loads].sort(),
-				daysTap: tap.days, daysUpload: upload.days, amountTap: tap.amount, amountUpload: upload.amount,
+				...head, daysTap: tap.days, daysUpload: upload.days, amountTap: tap.amount, amountUpload: upload.amount,
 				delta: tap.amount === null ? null : Math.round((upload.amount - tap.amount) * 100) / 100,
-				invoice: inv ? inv.status : null, once,
+				invoice: inv ? inv.status : null, once: onceOn({ tap, upload, live, inv, gainers: w.gainers }),
 			});
 		}
 		out.weeks.sort((a, b) => a.driver.localeCompare(b.driver) || a.weekStart.localeCompare(b.weekStart));
 		return out;
+	}
+
+	// What happens to the week once the trigger is on, by direction. A load moved
+	// into the week is billed by its Friday batch unless the upload came after that
+	// batch; a day the week loses is paid by nothing (nothing is backfilled).
+	function onceOn({ tap, upload, live, inv, gainers }) {
+		const gained = upload.days.filter((d) => !tap.days.includes(d));
+		const lost = tap.days.filter((d) => !upload.days.includes(d));
+		if (!gained.length && !lost.length) return tap.amount === upload.amount ? "nothing changes" : "the same days at another amount: a person checks the week";
+		const parts = [];
+		if (gained.length) {
+			const head = `gains ${gained.join(", ")}: `;
+			if (live.length > 1) parts.push(`${head}${live.length} live invoices for this week: a person decides`);
+			else if (!inv) parts.push(`${head}generate pays them`);
+			else if (inv.status === "Draft") parts.push(`${head}a person regenerates the Draft`);
+			else if (gainers.some((f) => f.afterBatch)) parts.push(`${head}issued (${inv.status}) by the Friday batch before the upload, so a person adds them with scripts/create-correction-invoice-draft.js`);
+			else parts.push(`${head}the Friday batch runs after the upload and bills them`);
+		}
+		if (lost.length) parts.push(`loses ${lost.join(", ")}: the week is billed on the upload's day, so these days go unpaid; no correction applies`);
+		return parts.join("; ");
 	}
 
 	return { half, truckCell, payEffect };
@@ -838,7 +898,7 @@ function printText(r, { env }) {
 	for (const phase of Object.keys(r.writers.byPhase).sort()) L.push(`   ${phase}: ${pairs(r.writers.byPhase[phase])}`);
 	L.push(`   Manual rows ${r.writers.manualRows}; role from actor_role ${r.writers.roleFrom.actor_role}, from the audit row ${r.writers.roleFrom.audit}, unmatched ${r.writers.roleFrom.none}.`);
 	L.push(`2. The POD trigger, backtest: ${b.podUploads} POD upload(s): ${pairs(b.outcomes)}.`);
-	if (Object.keys(b.sheetOutcomes).length || b.closedSinceUpload) L.push(`   Refused by the sheet half (as the sheet reads now): ${pairs(b.sheetOutcomes)}; months locked after the upload, counted as open: ${b.closedSinceUpload}.`);
+	if (Object.keys(b.sheetOutcomes).length || b.closedSinceUpload || b.cancelledSinceUpload) L.push(`   Refused by the sheet half (as the sheet reads now): ${pairs(b.sheetOutcomes)}; counted as open at the upload: months locked after it ${b.closedSinceUpload}, loads the history cancels after it ${b.cancelledSinceUpload}.`);
 	L.push(`   Loads delivered in the window ${b.loadsDelivered}; the trigger would complete ${b.loadsWouldFire} of them. Would fire ${b.wouldFire} (uploader role not recorded on ${b.uploaderRoleNotRecorded}).`);
 	L.push(`   The actual Delivered after the upload: ${pairs(b.tap)}; same Eastern day ${b.sameDay} of ${b.delivered}; same billing week ${b.sameWeek} of ${b.delivered}.`);
 	L.push(`   Fridays: fired ${b.fridays.fired}, after the 19:00 batch ${b.fridays.afterBatch}; week changes ${b.fridays.weekChanges}.`);
@@ -854,10 +914,15 @@ function printText(r, { env }) {
 		L.push(`3. The pay effect (would-fire loads whose Eastern day differs and whose Drop-off Appointment is blank or billing week differs; the weekly invoice's code, lifted): ${r.pay.loads.length} load(s)${Object.keys(r.pay.notListed).length ? `; not listed: ${pairs(r.pay.notListed)}` : ""}.`);
 		for (const w of r.pay.weeks) {
 			const usd = (x) => (x === null ? "n/a (percentage pay)" : `$${x.toFixed(2)}`);
+			if (!w.modelled) { L.push(`   ${w.driver} ${w.weekStart}..${w.weekEnd} (${w.loads.join(", ")}): ${w.once}.`); continue; }
 			L.push(`   ${w.driver} ${w.weekStart}..${w.weekEnd} (${w.loads.join(", ")}): tap's stamp ${w.daysTap.length} day(s) [${w.daysTap.join(", ")}] ${usd(w.amountTap)}; upload's stamp ${w.daysUpload.length} day(s) [${w.daysUpload.join(", ")}] ${usd(w.amountUpload)}; invoice ${w.invoice || "none"}; once on: ${w.once}.`);
 		}
 		const ledgerFrom = loadPayDays.blankFallbackFromEnv(env, "dropoff");
-		L.push(`   The ledger and the investor view: ${ledgerFrom ? `not checked: LEDGER_BLANK_DROPOFF_FALLBACK_FROM is ${ledgerFrom}, so they read the completion day on a blank drop-off` : "unchanged (LEDGER_BLANK_DROPOFF_FALLBACK_FROM is not set, so a blank drop-off doesn't end at the completion day there)"}. Plan A's arrival rule: ${r.pay.planARule ? "in this checkout's invoice code, so the days above follow it as the app's .env sets it" : "not in this checkout, not checked"}.`);
+		const a = r.pay.planA;
+		L.push(`   The ledger and the investor view: ${ledgerFrom ? `not checked: LEDGER_BLANK_DROPOFF_FALLBACK_FROM is ${ledgerFrom}, so they read the completion day on a blank drop-off` : "unchanged (LEDGER_BLANK_DROPOFF_FALLBACK_FROM is not set, so a blank drop-off doesn't end at the completion day there)"}.`);
+		L.push(a.rule === "on"
+			? `   Plan A's arrival rule: on from ${a.from}. Its window ends at the status history's first Delivered row, which this report does not re-time: ${a.notModelled.length} load(s) not modelled${a.notModelled.length ? ` (${a.notModelled.join(", ")}), their weeks printed as not modelled and the pay line not checked` : ""}.`
+			: "   Plan A's arrival rule: off in the app's .env, so every window above is today's.");
 	} else {
 		L.push("3. The pay effect: not checked (needs --values-json).");
 	}
@@ -916,7 +981,7 @@ async function main() {
 		let sheet = null;
 		if (values) {
 			const world = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData: { values }, envFile, extraRoots: SHEET_ROOTS, db });
-			sheet = sheetSide({ api: world.api, db, values, driverLabel: labels.driver, loadLabel: labels.load });
+			sheet = sheetSide({ api: world.api, db, env, values, driverLabel: labels.driver, loadLabel: labels.load });
 		}
 		const result = tidy(buildReport(db, { env, zone, nowMs, days, labels, sheet, names }));
 		if (args.json === true) console.log(JSON.stringify(result, null, 1));

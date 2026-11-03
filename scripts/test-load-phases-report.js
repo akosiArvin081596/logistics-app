@@ -26,7 +26,10 @@
  *   L-2015    a cancelled copy names C, the live row A: C's POD is not_his_row
  *   L-2016 B  two live rows: ambiguous
  *   L-2017 B  Assigned in September, closed 10/5: month_closed
- *   L-2018 A  its only sheet row is cancelled: load_cancelled
+ *   L-2018 A  a POD at the geofence's arrival, then cancelled through the
+ *             cancel route: its row was live at the upload, so it fires and is
+ *             never delivered (a false completion)
+ *   L-2025 B  cancelled on the sheet with no cancel row: load_cancelled
  * C's Oct 22 is removed from his pay (an override the invoice code honours).
  * Planted (the gate fixture): L-2019 B fires, then a manual In Transit and a
  * second geo arrival (a false completion); L-2020 C fires on a POD deleted
@@ -34,7 +37,9 @@
  * L-2021 A's August closed after its upload (it fires); L-2022 C a Super
  * Admin's Dispatched then Delivered (a staff correction); L-2023 B a
  * Friday-night week change with a drop-off set (listed in the pay effect);
- * L-2024 C a midnight day change in the same week with one set (not listed).
+ * L-2024 C a midnight day change in the same week with one set (not listed);
+ * L-2026 C a Friday 18:30 upload whose tap comes after midnight (the week it
+ * moves into is billed by the batch that follows the upload).
  * The clean fixture: thirty deliveries that pass every checked criterion.
  *
  * Run: node scripts/test-load-phases-report.js    # exits 1 on failure
@@ -64,7 +69,10 @@ const row = (id, driver, { pickup = "", dropoff = "", assigned = "", done = "", 
 	return r;
 };
 
-function fixture({ planted = false } = {}) {
+// `issued`: Submitted weekly invoices for C's week of Oct 17 and B's of Oct 24
+// (generate refuses an issued week, so the parity case builds without them).
+// `planARows`: L-2005's arrival as the arrival recorder writes it.
+function fixture({ planted = false, issued = false, planARows = false } = {}) {
 	const rows = [
 		row("L-2001", A, { pickup: "2026-10-12 8:00", dropoff: "2026-10-13 15:00", assigned: "2026-10-12", done: "10/13/2026 14:23:00", truck: "T1" }),
 		row("L-2002", A, { pickup: "2026-10-14 8:00", dropoff: "2026-10-15 10:00", assigned: "2026-10-14", done: "10/15/2026 9:16:00", truck: "T1" }),
@@ -82,6 +90,7 @@ function fixture({ planted = false } = {}) {
 		row("L-2016", B, { pickup: "2026-10-15 8:00", dropoff: "2026-10-16 15:00", assigned: "2026-10-15", status: "Dispatched", truck: "T2" }),
 		row("L-2017", B, { pickup: "2026-09-29 8:00", dropoff: "2026-10-08 10:00", assigned: "2026-09-29", status: "At Receiver", truck: "T2" }),
 		row("L-2018", A, { pickup: "2026-10-26 8:00", dropoff: "2026-10-27 12:00", assigned: "2026-10-26", status: "Cancelled", truck: "T1" }),
+		row("L-2025", B, { pickup: "2026-10-12 8:00", dropoff: "2026-10-13 12:00", assigned: "2026-10-12", status: "Cancelled", truck: "T2" }),
 	];
 	if (planted) {
 		rows.push(row("L-2019", B, { pickup: "2026-10-20 8:00", dropoff: "2026-10-20 13:00", assigned: "2026-10-20", done: "10/20/2026 12:15:00", truck: "T2" }));
@@ -90,6 +99,7 @@ function fixture({ planted = false } = {}) {
 		rows.push(row("L-2022", C, { pickup: "2026-10-26 8:00", dropoff: "2026-10-26 12:00", assigned: "2026-10-26", done: "10/26/2026 13:00:06", truck: "T3" }));
 		rows.push(row("L-2023", B, { pickup: "2026-10-15 8:00", dropoff: "2026-10-16 23:00", assigned: "2026-10-15", done: "10/17/2026 0:02:00", truck: "T2" }));
 		rows.push(row("L-2024", C, { pickup: "2026-10-20 8:00", dropoff: "2026-10-21 23:00", assigned: "2026-10-20", done: "10/22/2026 0:01:00", truck: "T3" }));
+		rows.push(row("L-2026", C, { pickup: "2026-10-07 8:00", dropoff: "", assigned: "2026-10-07", done: "10/10/2026 0:10:00", truck: "T3" }));
 	}
 	// vid-t1: parked at L-2001's drop-off (a slow drift outside the fence at
 	// 13:30 is no exit), then leaving at 14:40; two fixes at L-2002's drop-off
@@ -217,6 +227,16 @@ function fixture({ planted = false } = {}) {
 	pod("L-2018", A, "2026-10-27 10:10");
 	s("L-2018", "Cancelled", "cancel", "2026-10-27 12:00", "super_admin");
 
+	// Cancelled on the sheet alone (no cancel row): when is unknown, so it stays load_cancelled.
+	start("L-2025", B, "2026-10-12 07:00");
+	s("L-2025", "At Receiver", "geofence", "2026-10-13 10:00", B);
+	pod("L-2025", B, "2026-10-13 10:10");
+
+	if (planARows) {
+		db.prepare(`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason, actor_role, fix_ms, pickup_zone, local_tz, other_load_hauling, changed_at)
+			VALUES ('l-2005', 'Assigned', 'At Shipper', 'geofence', ?, ?, 'system', NULL, 'inside', 'America/Chicago', 0, ?)`).run(B, geoReason(300, "pickup"), W.et("2026-10-26 09:00"));
+	}
+
 	if (planted) {
 		start("L-2021", A, "2026-08-28 07:00");
 		s("L-2021", "At Receiver", "geofence", "2026-10-09 10:00", A);
@@ -239,6 +259,11 @@ function fixture({ planted = false } = {}) {
 		pod("L-2024", C, "2026-10-21 23:58");
 		tap("L-2024", "Delivered", "2026-10-22 00:01", C);
 
+		start("L-2026", C, "2026-10-07 07:00");
+		s("L-2026", "At Receiver", "geofence", "2026-10-09 18:00", C);
+		pod("L-2026", C, "2026-10-09 18:30");
+		tap("L-2026", "Delivered", "2026-10-10 00:10", C);
+
 		start("L-2019", B, "2026-10-20 07:00");
 		s("L-2019", "At Receiver", "geofence", "2026-10-20 10:00", B);
 		pod("L-2019", B, "2026-10-20 10:10", null);
@@ -258,13 +283,19 @@ function fixture({ planted = false } = {}) {
 	const co = db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, 34.0, -95.1, ?, ?)");
 	const dests = { "L-2001": [32.0, -96.0], "L-2002": [31.0, -97.0], "L-2016": [null, null] };
 	for (const id of ["L-2001", "L-2002", "L-2003", "L-2004", "L-2005", "L-2006", "L-2007", "L-2008", "L-2013", "L-2015", "L-2016", "L-2017", "L-2018",
-		"L-2019", "L-2020", "L-2021", "L-2022", "L-2023"]) {
+		"L-2019", "L-2020", "L-2021", "L-2022", "L-2023", "L-2025", "L-2026"]) {
 		const [lat, lng] = dests[id] || [30.5, -95.5];
 		co.run(id, lat, lng);
 	}
 	const alert = db.prepare("INSERT INTO ratecon_extract_alerts (load_id, unusable, first_seen) VALUES (?, 'pickup', ?)");
 	alert.run("L-2012", W.et("2026-10-08 06:00"));
 	alert.run("L-9999", W.et("2026-10-10 06:00"));
+	const invoice = db.prepare("INSERT INTO invoices (invoice_number, driver, week_start, week_end, status, total_earnings) VALUES (?, ?, ?, ?, 'Submitted', ?)");
+	if (issued) {
+		invoice.run("INV-T-1", C, "2026-10-17", "2026-10-23", 0);
+		invoice.run("INV-T-2", B, "2026-10-24", "2026-10-30", 1200);
+	}
+	if (issued && planted) invoice.run("INV-T-3", C, "2026-10-03", "2026-10-09", 300);
 	return w;
 }
 
@@ -303,7 +334,7 @@ const criteria = (j) => Object.fromEntries(((j && j.criteria) || []).map((c) => 
 const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-phases-report.js)");
 
 (async () => {
-	const base = fixture();
+	const base = fixture({ issued: true });
 	const copy = W.saveCopy(base, {});
 	const before = W.fileHash(copy.db);
 	const filesBefore = fs.readdirSync(copy.dir).sort();
@@ -381,8 +412,8 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 		eq("At Shipper (geofence, and a tap with no audit row)", w.byPhase && w.byPhase["At Shipper"], { geofence: 1, unmatched: 1 });
 		eq("Heading to Shipper is not a geofence phase", Object.keys((w.byPhase && w.byPhase["Heading to Shipper"]) || {}).includes("geofence"), false);
 		eq("Delivered", w.byPhase && w.byPhase.Delivered, { Driver: 12 });
-		eq("Dispatched: L-2017's September dispatch is outside the window", w.byPhase && w.byPhase.Dispatched, { dispatch: 13 });
-		eq("At Receiver", w.byPhase && w.byPhase["At Receiver"], { Driver: 1, geofence: 13, override: 1 });
+		eq("Dispatched: L-2017's September dispatch is outside the window", w.byPhase && w.byPhase.Dispatched, { dispatch: 14 });
+		eq("At Receiver", w.byPhase && w.byPhase["At Receiver"], { Driver: 1, geofence: 14, override: 1 });
 		eq("[manual rows, role from actor_role, audit, none]", [w.manualRows, w.roleFrom], [18, { actor_role: 1, audit: 16, none: 1 }]);
 	});
 
@@ -390,7 +421,7 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 		const eq = (l, a, e) => eqRaw(l, canon(a), canon(e));
 		ran(ok, noSheet);
 		const b = j0.backtest || {};
-		eq("outcomes", b.outcomes, { already_fired: 2, not_at_receiver: 2, receiver_not_gps: 2, staff_upload: 1, would_fire: 10 });
+		eq("outcomes", b.outcomes, { already_fired: 2, not_at_receiver: 2, receiver_not_gps: 2, staff_upload: 1, would_fire: 11 });
 		eq("[L-2001 fires, L-2002 not, L-2003 the second upload fires, L-2008 fires once]", [load(j0, "L-2001").length, load(j0, "L-2002").length, load(j0, "L-2003").map((x) => x.upload), load(j0, "L-2008").map((x) => x.upload)],
 			[1, 0, ["2026-10-19 17:30"], ["2026-10-07 11:15"]]);
 		eq("without the sheet, the closed-month load fires and is never delivered (criterion 1 fails), and the sheet half is not checked", [load(j0, "L-2017").map((x) => x.follow), criteria(j0)["1"], criteria(j0)["5"], criteria(j0).pay], [["never_delivered"], "FAIL", "NOT CHECKED", "NOT CHECKED"]);
@@ -402,9 +433,19 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 		ran(ok, withSheet);
 		const b = j.backtest || {};
 		eq("refusals", b.sheetOutcomes, { ambiguous: 1, load_cancelled: 1, month_closed: 1, not_his_row: 1 });
-		eq("outcomes", b.outcomes, { already_fired: 1, ambiguous: 1, load_cancelled: 1, month_closed: 1, not_at_receiver: 2, not_his_row: 1, receiver_not_gps: 2, staff_upload: 1, would_fire: 7 });
+		eq("outcomes", b.outcomes, { already_fired: 1, ambiguous: 1, load_cancelled: 1, month_closed: 1, not_at_receiver: 2, not_his_row: 1, receiver_not_gps: 2, staff_upload: 1, would_fire: 8 });
 		eq("L-2015 fires on its own driver's upload", load(j, "L-2015").map((x) => [x.upload, x.minutesToDelivered]), [["2026-10-14 16:20", 10]]);
 		eq("[loads delivered, would complete]", [b.loadsDelivered, b.loadsWouldFire], [12, 7]);
+	});
+
+	await R.test("7b A load cancelled through the cancel route after its POD was live at the upload: the sheet half judges it then, so it fires and its never-delivered follow-up fails criterion 1 with the sheet as without; uploads refused as not on the sheet or ambiguous are listed beside criterion 1 with their follow-up", async ({ eq: eqRaw, ok }) => {
+		const eq = (l, a, e) => eqRaw(l, canon(a), canon(e));
+		ran(ok, withSheet);
+		const b = j.backtest || {};
+		eq("[L-2018 with the sheet, without]", [load(j, "L-2018").map((x) => x.follow), load(j0, "L-2018").map((x) => x.follow)], [["never_delivered"], ["never_delivered"]]);
+		eq("[cancelled since the upload, criterion 1 with the sheet]", [b.cancelledSinceUpload, criteria(j)["1"]], [1, "FAIL"]);
+		eq("the refusals criterion 1 can't judge, with their follow-up", (b.notJudged || []).map((x) => [x.load, x.outcome, x.follow]), [["l-2016", "ambiguous", "delivered"]]);
+		ok("criterion 1's line names them", /1 upload\(s\) the sheet half refused as not on the sheet or ambiguous/.test(((j.criteria || []).find((c) => c.n === 1) || {}).detail || ""), JSON.stringify((j.criteria || [])[0]));
 	});
 
 	await R.test("8 The stamp against the actual Delivered: a Friday 23:50 ET upload with a Saturday 00:05 tap is a week change; a Wednesday 23:55 upload with a Thursday 00:03 tap a day change in the same week", async ({ eq: eqRaw, ok }) => {
@@ -431,12 +472,19 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 		ran(ok, withSheet);
 		const p = j.pay || {};
 		eq("the loads", (p.loads || []).map((l) => [l.load, l.tapDay, l.uploadDay, l.otherWeek]), [["l-2004", "2026-10-24", "2026-10-23", true], ["l-2005", "2026-10-29", "2026-10-28", false]]);
-		eq("plan A's arrival rule is named only when this checkout's invoice code has it", p.planARule, W.SRC.includes("ARRIVAL_PICKUP_DATE_ENABLED"));
+		eq("plan A's arrival rule is off in the app's .env, so nothing is left unmodelled", p.planA, { rule: "off", from: null, notModelled: [] });
 		eq("the weeks", (p.weeks || []).map((w) => [w.weekStart, w.daysTap, w.amountTap, w.daysUpload, w.amountUpload, w.delta]), [
 			["2026-10-17", [], 0, ["2026-10-21", "2026-10-23"], 600, 600],
 			["2026-10-24", ["2026-10-24", "2026-10-26", "2026-10-27"], 900, ["2026-10-26", "2026-10-27"], 600, -300],
 			["2026-10-24", ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29"], 1200, ["2026-10-26", "2026-10-27", "2026-10-28"], 900, -300],
 		]);
+		// Once on, by direction: a week the trigger moves a load into after its Friday
+		// batch invoiced it needs the correction script; a week that loses a day has
+		// no step that pays it.
+		const once = (p.weeks || []).map((w) => w.once);
+		ok("C's week of Oct 17 gains two days after its Submitted invoice: the correction script", /^gains 2026-10-21, 2026-10-23: issued \(Submitted\) by the Friday batch before the upload, so a person adds them with scripts\/create-correction-invoice-draft\.js$/.test(once[0] || ""), once[0]);
+		ok("C's week of Oct 24 loses Oct 24 (no invoice): unpaid, no correction", /^loses 2026-10-24: the week is billed on the upload's day, so these days go unpaid; no correction applies$/.test(once[1] || ""), once[1]);
+		ok("B's week of Oct 24 loses Oct 29 though its invoice is Submitted: unpaid, no correction, no correction script", /^loses 2026-10-29: .*no correction applies$/.test(once[2] || "") && !/create-correction/.test(once[2] || ""), once[2]);
 	});
 
 	await R.test("11 Parity: the report's paid days and amounts equal what the weekly invoice's generate route pays, on the sheet as it is and with both loads re-stamped at their uploads", async ({ eq: eqRaw, ok }) => {
@@ -479,32 +527,34 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 		eq("Heading", [j.heading && j.heading.loads, j.heading && j.heading.sameDay, j.heading && j.heading.withinHour], [2, 2, 0]);
 		eq("Loading", j.loading, { rows: 1, toNext: { "1-6 h": 1 }, daysSpanned: { 0: 1 }, writers: { Driver: 1 } });
 		const c = j.coordinates || {};
-		eq("[active, both, no row, no destination, by month]", [c.activeLoads, c.bothPoints, c.noRow, c.noDestination, c.withoutPointByMonth], [14, 12, 1, 1, { "2026-10": 2 }]);
-		eq("the geofence's distances", [c.distances, c.maxM], [{ "At Shipper": { "250-1000 m": 1 }, "At Receiver": { "1-2 km": 1, "250-1000 m": 11, ">2 km": 1 } }, { "At Receiver": 2600, "At Shipper": 420 }]);
+		eq("[active, both, no row, no destination, by month]", [c.activeLoads, c.bothPoints, c.noRow, c.noDestination, c.withoutPointByMonth], [15, 13, 1, 1, { "2026-10": 2 }]);
+		eq("the geofence's distances", [c.distances, c.maxM], [{ "At Shipper": { "250-1000 m": 1 }, "At Receiver": { "1-2 km": 1, "250-1000 m": 12, ">2 km": 1 } }, { "At Receiver": 2600, "At Shipper": 420 }]);
 		eq("delivered with no geofence row", c.deliveredNoGeofence, { loads: 1, withEld: 1 });
 		eq("alerts", c.alerts, { inWindow: 2, becameLoads: 1, delivered: 1, withBothPoints: 0, geofenceAtShipper: 0, geofenceAtReceiver: 0 });
 		eq("taps", [j.taps && j.taps.byPhase.Delivered, j.taps && j.taps.byPhase["At Receiver"], j.taps && j.taps.geofencedOnEldLoads], [{ taps: 12, onEldLoads: 3 }, { taps: 1, onEldLoads: 1 }, 1]);
 		eq("Truck cells: one disagrees", [j.truckCells && j.truckCells.disagree, j.truckCells && j.truckCells.noTruck], [1, 0]);
 	});
 
-	await R.test("14 The gate: exit 1 on a planted false completion and a withdrawn upload (criteria 1 and 5 FAIL); the base passes 1 and 5; criterion 6 is never passed here (no claims are read)", async ({ eq: eqRaw, ok }) => {
+	await R.test("14 The gate: exit 1 on a planted false completion and a withdrawn upload (criteria 1 and 5 FAIL); the base passes 5 and fails 1 on its cancelled load; criterion 6 is never passed here (no claims are read)", async ({ eq: eqRaw, ok }) => {
 		const eq = (l, a, e) => eqRaw(l, canon(a), canon(e));
 		ran(ok, withSheet);
-		const planted = W.saveCopy(fixture({ planted: true }), {});
+		const planted = W.saveCopy(fixture({ planted: true, issued: true }), {});
 		const g = W.runScript(SCRIPT, argsFor(planted, ["--ids", "--json", "--gate", `--values-json=${planted.values}`]));
 		const pj = g.json || {};
 		eq("[planted exit, criterion 1, criterion 5, gate]", [g.code, criteria(pj)["1"], criteria(pj)["5"], pj.gate], [1, "FAIL", "FAIL", "FAIL"]);
 		const pb = pj.backtest || {};
 		eq("the false completion and the withdrawn upload", [(pb.falseCompletions || []).map((x) => [x.load, x.follow]), (pb.withdrawn || []).map((x) => x.load), pb.uploaderRoleNotRecorded],
-			[[["l-2019", "later_arrival"]], ["l-2020"], 1]);
+			[[["l-2019", "later_arrival"], ["l-2018", "never_delivered"]], ["l-2020"], 1]);
+		const before = ((pj.pay && pj.pay.weeks) || []).find((w) => w.weekStart === "2026-10-03" && w.loads.includes("l-2026"));
+		ok("a week gaining a load whose upload came before its Friday batch: the batch bills it", /^gains 2026-10-07, 2026-10-09: the Friday batch runs after the upload and bills them$/.test((before && before.once) || ""), before && before.once);
 		eq("a staff correction ending in Delivered within the hour is listed, not failed", (pb.staffCorrections || []).map((x) => x.load), ["l-2022"]);
 		eq("one fire per arrival: L-2019 fires on each of its two arrivals", load(pj, "L-2019").map((x) => x.upload), ["2026-10-20 10:10", "2026-10-20 12:10"]);
 		eq("a month closed after the upload was open then: L-2021 fires", [pb.closedSinceUpload, load(pj, "L-2021").length], [1, 1]);
 		eq("a week change with a Drop-off Appointment set is listed in the pay effect; a day change in the same week with one set is not", [((pj.pay && pj.pay.loads) || []).filter((l) => l.load === "l-2023" || l.load === "l-2024").map((l) => [l.load, l.tapDay, l.uploadDay, l.otherWeek]), pj.pay && pj.pay.notListed],
 			[[["l-2023", "2026-10-17", "2026-10-16", true]], { "Drop-off Appointment set, same week": 1 }]);
 		eq("a POD after Delivered: already_completed, counted as a file after the tap and not as a later file of the proof", [pb.outcomes && pb.outcomes.already_completed, pb.laterFiles && pb.laterFiles.podsAfterTapIn24h, ((pb.laterFiles && pb.laterFiles.overQuiet) || []).map((x) => x.load)], [1, 1, ["l-2007"]]);
-		eq("base: [1, 5, 6, S2, gate]", [criteria(j)["1"], criteria(j)["5"], criteria(j)["6"], j.s2, j.gate], ["PASS", "PASS", "NOT CHECKED", "FAIL", "FAIL"]);
-		eq("the shadow-run minimums: 28 days, 4 Friday batches, 7 would-fire loads", (j.preconditions || []).map((p) => [p.verdict, p.detail]), [["PASS", "28 days"], ["PASS", "4"], ["FAIL", "7"]]);
+		eq("base: [1, 5, 6, S2, gate]", [criteria(j)["1"], criteria(j)["5"], criteria(j)["6"], j.s2, j.gate], ["FAIL", "PASS", "NOT CHECKED", "FAIL", "FAIL"]);
+		eq("the shadow-run minimums: 28 days, 4 Friday batches, 8 would-fire loads", (j.preconditions || []).map((p) => [p.verdict, p.detail]), [["PASS", "28 days"], ["PASS", "4"], ["FAIL", "8"]]);
 		const text = W.runScript(SCRIPT, argsFor(planted, ["--gate", `--values-json=${planted.values}`]));
 		ok("the text names each criterion and the gate", text.code === 1 && /^ {3}1\. FAIL: /m.test(text.stdout) && /^ {3}6\. NOT CHECKED: /m.test(text.stdout) && /^Gate: FAIL\.$/m.test(text.stdout), text.stdout.slice(-600));
 	});
@@ -519,6 +569,21 @@ const R = W.createRunner("Load phases PR 1: the read-only report (scripts/load-p
 			[1, { 1: "PASS", 2: "PASS", 3: "PASS", 4: "PASS", 5: "PASS", 6: "NOT CHECKED", 7: "PASS" }, "PASS", ["PASS", "PASS", "PASS"], "FAIL"]);
 		const bare = W.runScript(SCRIPT, argsFor(clean, ["--json", "--gate"]));
 		eq("without the sheet: [exit, 5, pay]", [bare.code, criteria(bare.json)["5"], criteria(bare.json).pay], [1, "NOT CHECKED", "NOT CHECKED"]);
+	});
+
+	await R.test("16 Plan A's arrival rule on: its window ends at the status history's first Delivered row, which the report does not re-time, so a load with an official pickup and its week read \"not modelled\", the pay line NOT CHECKED and the gate fails; the text never says the days follow the rule", async ({ eq: eqRaw, ok }) => {
+		const eq = (l, a, e) => eqRaw(l, canon(a), canon(e));
+		const on = W.saveCopy(fixture({ issued: true, planARows: true }), { ARRIVAL_PICKUP_DATE_ENABLED: "true", ARRIVAL_PICKUP_DATE_FROM: "2026-10-01" });
+		const r = W.runScript(SCRIPT, argsFor(on, ["--ids", "--json", "--gate", `--values-json=${on.values}`]));
+		ok("the report answers JSON", !!r.json, (r.stderr || r.stdout).slice(0, 300));
+		const p = (r.json && r.json.pay) || {};
+		eq("[rule, FROM, not modelled]", p.planA, { rule: "on", from: "2026-10-01", notModelled: ["l-2005"] });
+		eq("C's weeks (L-2004 has no official pickup) are computed; B's week with L-2005 is not", (p.weeks || []).map((w) => [w.weekStart, w.loads, w.modelled, w.daysUpload]),
+			[["2026-10-17", ["l-2004"], true, ["2026-10-21", "2026-10-23"]], ["2026-10-24", ["l-2004"], true, ["2026-10-26", "2026-10-27"]], ["2026-10-24", ["l-2005"], false, null]]);
+		eq("[pay line, gate, exit]", [criteria(r.json).pay, r.json && r.json.gate, r.code], ["NOT CHECKED", "FAIL", 1]);
+		const text = W.runScript(SCRIPT, argsFor(on, [`--values-json=${on.values}`])).stdout;
+		const paySection = text.includes("3. The pay effect") ? text.slice(text.indexOf("3. The pay effect"), text.indexOf("4. The shadow")) : "";
+		ok("the text says not modelled and never that the days follow the rule", /Plan A's arrival rule: on from 2026-10-01\..*1 load\(s\) not modelled/.test(paySection) && /not modelled \(plan A's window\)/.test(paySection) && !/follow/i.test(paySection), paySection);
 	});
 
 	R.finish();
