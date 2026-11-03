@@ -898,6 +898,11 @@ async function section8() {
 	W.approve(226); W.receipt(227, { truck: "T-226", status: "Rejected", by: PERSON }); // a rejected copy is no spend: no group
 	W.approve(228, { keyless: true }); W.relink(228, { shiftMs: -3 * MIN, prune: false }); // no stored key: the old row, still there, gives it
 	W.approve(229, { keyless: true }); W.relink(229, { shiftMs: -3 * MIN }); // no stored key and the old row gone: only its id is known
+	// Still Approved, but a person's record stamped since (recorder on): a bulk approve that took it in, and a Personal
+	// mark. Each fill is pruned too; the receipt is the person's now, so it is not named.
+	const personStamp = db.prepare("UPDATE expenses SET status_by_role = 'Super Admin', status_by_id = 1, status_by_name = 'made_up_admin', status_at = ? WHERE id = ?");
+	W.approve(230); personStamp.run("2026-10-19T09:00:00.000Z", 230); db.prepare("DELETE FROM fuel_events WHERE expense_id = 230").run();
+	W.approve(231); personStamp.run("2026-10-19T09:30:00.000Z", 231); db.prepare("DELETE FROM fuel_events WHERE expense_id = 231").run();
 
 	const sheet = jt([{ id: "1", pickup: "p", assigned: "" }]);
 	const before = businessDump(db);
@@ -925,6 +930,8 @@ async function section8() {
 	ok("a held same-paper receipt whose twin was decided is named, whoever decided it", got.includes("208:twin") && got.includes("220:twin") && got.includes("222:twin"));
 	ok("an undecided twin, a rejected held copy and a shadow hold are not named", !named(210) && !named(224) && !named(213));
 	ok("a receipt a person took back is not the pass's any more: not named", !named(214));
+	ok("nor one a person stamped while it stayed Approved (a bulk approve, a Personal mark, recorder on)",
+		!named(230) && !named(231) && db.prepare("SELECT COUNT(*) AS c FROM expenses WHERE id IN (230, 231) AND status = 'Approved'").get().c === 2);
 	ok("a closed month is not raised, only counted for the log line", !named(212) && auto.closed === 1, auto.closed);
 	ok("each finding once per receipt and kind", new Set(got).size === got.length);
 
