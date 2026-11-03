@@ -353,10 +353,12 @@ because it produces a file everyone believes is clean):
 | Bank routing + account numbers, account/check names (`investor_payment_info`, `driver_payment_info`) | emptied / `REDACTED` | Nothing computes from them; they are only displayed or printed. No test value, unlimited downside. |
 | `ein_ssn`, `ssn`, `dob`, `drivers_license`, personal `address` | emptied / `REDACTED` | Same. |
 | Driver emergency contacts — `driver_emergency_contacts.contact_name`, `contact_phone` | `REDACTED` / `555-0100` | Third parties' names and numbers. `relationship` is kept: it identifies no one alone and keeps the copy testable. |
+| Owner-operators — his truck's VIN and plate (`owner_operator_applications.truck_vin`, `truck_plate`, and `trucks.vin`, `license_plate` on a truck linked in `owner_operator_trucks`); a toll notice's `plate_or_transponder` and `notice_number`, and its receipt's `expenses.receipt_details`; the registered owner, business names, labels, reasons and notes in the `owner_operator_*` tables | emptied / `REDACTED` | His truck is his own, so its VIN and plate identify a person where a company truck's do not (company trucks keep theirs); a toll notice and its OCR lines can carry the registered owner's name and address. None of it is email- or SSN-shaped, so each column has its own assertion (the linked-truck and toll-receipt rows by their link). |
 | `signature_text`, `signature_image` | `REDACTED` / emptied | A legal artefact, and as base64 the bulk of the onboarding tables. |
 | Signing evidence — `signed_ip`, `signed_ip_source`, `signed_user_agent`, `consent_text` (both onboarding-document tables) | emptied | Personal data *about the signer*: an IP address and a browser fingerprint, plus free text off the wire. `evidence_version` and `artifact_sha256` are deliberately **kept** — the version is what marks a row as captured under the evidence regime, and a digest of a file this script never copies discloses nothing. |
 | `investor_applications.access_token` | regenerated | No route accepts these tokens since the token-gated public onboarding routes were removed (2026-09-30); they are regenerated anyway, so a copy carries none of production's. |
 | `driver_locations` | emptied | Retired 2026-05-13; no endpoint reads or writes it. Pure historical position PII. |
+| C.H. Robinson outbox — `chr_events`, `chr_loads`, `app_settings` `chr.settings`, `server_state` `chr.state` | every row not sent, dry-run or skipped → `skipped_refresh`; every payload emptied; holds, the cursor and the heartbeat cleared; both modes Off | A copy can never send production's backlog, and the positions in payloads stay on production. Nothing is created when the tables don't exist. |
 | **Free text — every text column of every table** (stage `3h`) | routable addresses → `<10 hex>@invalid`, `###-##-####` → `000-00-0000`, substituted **in place** | Everything above names a table and a column, so an address typed into a notes field, embedded in a JSON blob, or recorded in an audit line walked straight through. Measured on the 2026-08-13 production-shaped database: **21 routable third-party addresses survived a run that reported success** — `job_applications.reference_info` (6 of 8 rows: applicants' references and previous employers, third parties who never consented to anything — ⚠️ the address is stored under the key `relationship`, not `email`), `audit_trail.details` (8 of 1455), `load_invoice_drafts.recipient` (7 of 7, broker AP addresses). |
 
 ### Stage 3h — the free-text sweep, and what constrains it
@@ -401,7 +403,8 @@ not rewrite the deliberately-fake addresses in fixtures and documentation.
   the only coordinate source geofencing has (`checkGeofence`'s sheet columns do not exist), so
   scrubbing them disables the feature you would be trying to test.
 - `trucks.license_plate`, `trailers.license_plate`, `routemate_vehicles.license_num` — company
-  asset identifiers; the ELD linkage keys off adjacent columns.
+  asset identifiers; the ELD linkage keys off adjacent columns. An owner-operator's own truck is
+  the exception (above).
 - `messages` / `notifications` bodies — operational content, worth exercising at realistic volume.
   **Note the scope, which narrowed on 2026-08-13:** the body text is still kept in full, and stage
   3h neutralizes only an email address or SSN shape appearing *inside* it. Realistic volume was
