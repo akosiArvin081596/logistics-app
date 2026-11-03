@@ -31,6 +31,11 @@ import { fileURLToPath, pathToFileURL } from 'url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')
+// One pass can join two halves into a new comment, so strip until nothing changes.
+const stripHtmlComments = (s) => {
+  for (let prev = null; prev !== s;) { prev = s; s = s.replace(/<!--[\s\S]*?-->/g, '') }
+  return s
+}
 const STEPPER = 'client/src/components/driver/StatusStepper.vue'
 const LIB = 'client/src/lib/gpsPhases.js'
 
@@ -126,9 +131,9 @@ const load = (status, phases, more = {}) => ({
   'Load ID': 'L-3001', Driver: 'Driver Able', 'Job Status': status, _podCount: 0,
   ...(phases === undefined ? {} : { _gpsPhases: phases }), ...more,
 })
-const html = async (Comp, status, phases, more = {}, props = {}) => (await renderToString(Vue.createSSRApp(Comp, {
+const html = async (Comp, status, phases, more = {}, props = {}) => stripHtmlComments(await renderToString(Vue.createSSRApp(Comp, {
   load: load(status, phases, more), headers: HEADERS, currentStatus: status, driverName: 'Driver Able', ...props,
-}))).replace(/<!--[\s\S]*?-->/g, '')
+})))
 const primary = (h) => (/<button class="action-btn primary"[^>]*>([^<]*)<\/button>/.exec(h) || [])[1] || null
 const gpsHint = (h) => {
   const m = /<div class="gps-hint"><div class="gps-hint-step">([^<]*)<\/div><div class="gps-hint-text">([^<]*)<\/div><button type="button" class="gps-self-link"[^>]*>([^<]*)<\/button><\/div>/.exec(h)
@@ -301,7 +306,7 @@ if (Stepper) {
   const code = lib.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
   check('N1 gpsPhases.js reads no clock, position, distance or network', /\bDate\b|\bMath\b|latitude|longitude|setTimeout|fetch|navigator|geolocation/.test(code) || !lib, false)
   check('N2 ...and exports only the wording and its one reader', [...code.matchAll(/^export (?:const|function) (\w+)/gm)].map((m) => m[1]).sort(), ['GPS_STEPS', 'MARK_IT_MYSELF', 'gpsStepLine'])
-  const stepperCode = SRC.replace(/<!--[\s\S]*?-->/g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
+  const stepperCode = stripHtmlComments(SRC).split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
   check('N3 the stepper reads the server\'s answer through gpsStepLine() only',
     /const gpsLine = computed\(\(\) => \(nextStep\.value \? gpsStepLine\(nextStep\.value\.value, props\.load\._gpsPhases\) : null\)\)/.test(stepperCode)
       && stepperCode.split('_gpsPhases').length === 2, true)
