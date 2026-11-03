@@ -181,6 +181,11 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		crossSite: 0,
 		rendererBusy: false,
 		geminiAt: 0,
+		smtp: [],
+		smtpFails: null,
+		transports: [],
+		limiters: [],
+		limited: 0,
 		dir: fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-wiring-")),
 	};
 	fs.mkdirSync(path.join(w.dir, "uploads"));
@@ -297,6 +302,24 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		refuseCrossSite: (req, res, next) => { w.crossSite++; next(); },
 		startsJob: (name) => { w.startsJob.push(name); return startsJobAnswer; },
 		setInterval: (fn, ms) => { w.intervals.push({ fn, ms }); return 0; },
+		// SMTP, made up: each message nodemailer would send is built into MIME by
+		// nodemailer's own composer and kept; nothing leaves the process.
+		nodemailer: {
+			createTransport: (opts) => {
+				w.transports.push({ service: opts.service, user: opts.auth && opts.auth.user });
+				return {
+					sendMail: async (m) => {
+						if (w.smtpFails) throw w.smtpFails;
+						const mime = await realImap.buildMime(m);
+						w.smtp.push({ from: m.from, to: m.to, envelope: m.envelope, subject: m.subject, messageId: m.messageId,
+							attachments: (m.attachments || []).map((a) => a.filename), html: m.html, attachmentBytes: (m.attachments || []).map((a) => a.content), mime: mime.toString("latin1") });
+						return { accepted: [m.to], rejected: [] };
+					},
+					close: () => {},
+				};
+			},
+		},
+		rateLimit: (opts) => { w.limiters.push(opts); return (req, res, next) => { w.limited++; next(); }; },
 	};
 	w.schemaBefore = schema(db);
 	const names = Object.keys(scope);
@@ -424,7 +447,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			"GET /api/auto-invoice/settings", "GET /api/auto-invoice/status", "POST /api/auto-invoice/loads/:loadKey/checked",
 			"POST /api/auto-invoice/loads/:loadKey/retry", "PUT /api/auto-invoice/settings",
 		], "§3 the five routes are registered");
-		eq(w.required.filter((p) => p.startsWith("./lib/")), ["./lib/imap-draft", "./lib/auto-invoice-job"], "§3 the block loads the job and lib/imap-draft.js as shipped");
+		eq(w.required.filter((p) => p.startsWith("./lib/")), ["./lib/imap-draft", "./lib/auto-invoice-send", "./lib/auto-invoice-job"], "§3 the block loads the job, lib/imap-draft.js and lib/auto-invoice-send.js as shipped");
 		eq((await w.call("PUT", "/api/auto-invoice/settings", DISP, CONFIRMED)).status, 403, "§3 a Dispatcher can't change the settings");
 		const crossBefore = w.crossSite;
 		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§3 a Super Admin confirms example-broker.test");
@@ -593,7 +616,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			dash.indexOf("autoInvoice: { mode: autoInvoice.mode }") > dash.indexOf("res.json({"),
 		"§7 ...and names the mode to a Super Admin only, and only while it isn't off (its answer as before)");
 		ok(/^const \{ appendGmailDraft \} = require\("\.\/lib\/imap-draft"\);$/m.test(SRC), "§7 the block's appendGmailDraft is server.js's own, from lib/imap-draft.js");
-		ok(/if \(autoInvoice\.mode !== "off"\) autoInvoice\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(BLOCK) &&
+		ok(/if \(autoInvoice\.mode !== "off"\) \{\n\tautoInvoice\.mount\(app, \{\n\t\trequireRole,\n\t\trefuseCrossSite,\n\t\tstopLimiter: rateLimit\(/.test(BLOCK) &&
 			/if \(autoInvoice\.mode !== "off" && startsJob\("automatic invoice drafts"\)\) \{/.test(BLOCK),
 		"§7 the block mounts the routes and starts the timer only when the mode isn't off");
 		ok(SRC.indexOf(START) < SRC.indexOf("const brokerInvoiceDraft = require(\"./lib/broker-invoice-draft\")") &&
@@ -747,6 +770,74 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const words = (at >= 0 ? TEMPLATE.slice(at, TEMPLATE.indexOf("\n# ---", at + 1)) : "").replace(/\n#\s?/g, " ");
 		ok(new RegExp(`(^|\\s)# ${RENDERS}=(\\s|$)|\\s${RENDERS}=\\s`).test(words) && /exactly "true", read only in shadow mode, and never in a replica/.test(words),
 			"§9 the settings template's section names it, unset: on only when exactly \"true\", shadow mode only, never in a replica");
+	}
+
+	// ===================================================================== §10
+	section("§10 sending through the block (AUTO_INVOICE_SEND_ENABLED), the engine as shipped");
+	{
+		const SEND_ENV = Object.freeze({ ...ON_ENV, AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test" });
+		for (const [v, want] of [["true", true], ["TRUE", false], ["1", false], ["yes", false], ["", false]]) {
+			eq((await world({ env: { ...SEND_ENV, AUTO_INVOICE_SEND_ENABLED: v } })).job.sending, want, `§10 FAILS ON THE OLD CODE: AUTO_INVOICE_SEND_ENABLED=${JSON.stringify(v)}: ${want ? "on" : "off"} (only exactly "true")`);
+		}
+		eq((await world({ env: SEND_ENV, replica: { stamp: "made-up" } })).job.sending, false, "§10 ...never in a replica (REPLICA set)");
+		eq((await world({ env: { ...SEND_ENV, AUTO_INVOICE_DRAFTS_SHADOW: "" } })).job.sending, false, "§10 ...nor in shadow mode");
+		eq((await world({ env: { ...SEND_ENV, AUTO_INVOICE_SEND_DOMAINS: "" } })).job.status().send, { domains: [], stopped: null }, "§10 ...and with no domain listed, it sends to none");
+		const off = await world({ env: ON_ENV });
+		eq([off.job.sending, off.registered.length, off.transports.length, off.job.status().send], [false, 5, 0, undefined], "§10 sending off: the five routes and the status as before, no SMTP transport");
+
+		const w = await world({ env: SEND_ENV, readablePdf: true });
+		eq([w.job.sending, w.registered.includes("POST /api/auto-invoice/send/stop"), w.registered.length], [true, true, 6], "§10 FAILS ON THE OLD CODE: sending on: the Stop route too");
+		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§10 the broker domain confirmed");
+		await w.job.tick();
+		// Hard rule 7's canary: a driver name and phone on the load must reach nothing LogisX composes.
+		const CANARY = "Canary Q. Driverson 321-555-0147";
+		w.deliver("LD-TEST-0101", rateCon(), { Driver: CANARY });
+		await w.job.tick();
+		const c = w.claim("LD-TEST-0101") || {};
+		eq([c.state, c.delivery, c.stage, w.gmail.length], ["drafted", "send", "recorded", 0], "§10 FAILS ON THE OLD CODE: a load delivered after switch-on is sent, not drafted");
+		eq(w.smtp.map((m) => ({ from: m.from, to: m.to, envelope: m.envelope, subject: m.subject, attachments: m.attachments })), [{
+			from: `LogisX Inc. <${MAILBOX.GMAIL_USER}>`, to: BILLING, envelope: { from: MAILBOX.GMAIL_USER, to: [BILLING] }, subject: "Example Broker Order #LD-TEST-0101",
+			attachments: ["Example Broker Invoice Order #LD-TEST-0101.pdf", "LD-TEST-0101_POD.pdf", "LD-TEST-0101.pdf"],
+		}], "§10 FAILS ON THE OLD CODE: one message: from the mailbox, to the rate con's billing email alone, the invoice, the POD and the rate con");
+		eq(w.transports, [{ service: "gmail", user: MAILBOX.GMAIL_USER }], "§10 FAILS ON THE OLD CODE: through Gmail's SMTP with the mailbox's own login");
+		ok(w.smtp[0] && w.smtp[0].messageId === c.message_id && w.smtp[0].mime.includes(`Message-ID: ${c.message_id}`), "§10 FAILS ON THE OLD CODE: ...carrying the claim's own Message-ID, so a lost answer is looked for in Sent Mail");
+		const files = w.smtp[0] ? w.smtp[0].attachmentBytes : [];
+		ok(files[1] && files[1].toString("latin1") === "%PDF-1.4 made-up POD for LD-TEST-0101", "§10 FAILS ON THE OLD CODE: the POD goes as it is, byte for byte");
+		eq(w.drafts().map(({ id, ...r }) => [r.invoice_id === c.invoice_id, r.recipient, r.via, r.created_by]), [[true, BILLING, "auto-smtp", "auto-invoice"]],
+			"§10 FAILS ON THE OLD CODE: one draft row, via auto-smtp, by the system");
+		eq([w.audits("invoice_draft_created").map((a) => a.details), w.audits("auto_invoice_sent").map((a) => [a.username, a.role, a.details])],
+			[[`${c.invoice_id} → ${BILLING} (auto-smtp)`], [["auto-invoice", "system", `${c.invoice_id} → example-broker.test (sent by the automatic invoice job)`]]],
+			"§10 FAILS ON THE OLD CODE: the engine's audit row names auto-smtp; one auto_invoice_sent row names the domain only");
+		const invoiceText = files[0] ? require(path.join(ROOT, "lib", "pdf-shown-text.js")).shownText(files[0]) : "";
+		const composed = [w.smtp[0] ? w.smtp[0].subject : "", w.smtp[0] ? rules.htmlToText(w.smtp[0].html) : "", invoiceText, w.smtp[0] ? w.smtp[0].attachments.join(" ") : ""].join(" ");
+		ok(invoiceText && /Invoice ?ID/.test(invoiceText) && !/Canary|Driverson|555-0147/.test(composed),
+			"§10 hard rule 7: the subject, the body, the invoice PDF and the file names LogisX composes carry no driver name or phone");
+
+		// Stop, through the real Express app.
+		eq((await w.call("POST", "/api/auto-invoice/send/stop", DISP, {})).status, 403, "§10 a Dispatcher can't stop sending");
+		const limitedBefore = w.limited;
+		const stop = await w.call("POST", "/api/auto-invoice/send/stop", SA, {});
+		eq([stop.status, stop.json && stop.json.stopped && stop.json.stopped.reason, w.limited - limitedBefore], [200, "STOPPED_BY_ADMIN", 1], "§10 FAILS ON THE OLD CODE: a Super Admin stops it, through the limiter");
+		eq(w.audits("auto_invoice_send_stopped").map((a) => [a.username, a.details]), [[SA.username, `STOPPED_BY_ADMIN by ${SA.username}`]], "§10 FAILS ON THE OLD CODE: ...audited by the person");
+		const settings = await w.call("GET", "/api/auto-invoice/settings", SA);
+		eq(settings.json && settings.json.send, { domains: ["example-broker.test"], stopped: { at: stop.json.stopped.at, reason: "STOPPED_BY_ADMIN" } }, "§10 FAILS ON THE OLD CODE: the settings read shows the dialog the stop");
+		w.deliver("LD-TEST-0102", rateCon());
+		await w.job.tick();
+		eq([w.smtp.length, w.gmail.length, w.state("LD-TEST-0102")], [1, 1, ["drafted", ""]], "§10 FAILS ON THE OLD CODE: stopped: the next load is a Gmail draft, nothing sent");
+
+		// The Draft Invoice button: server.js asks the job right after the factoring check.
+		const route = SRC.slice(SRC.indexOf('["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],'));
+		const early = route.indexOf("const factoringCheck = factoringRoutes.draftEarly(req, loadId);");
+		const sentCheck = route.indexOf("const sentCheck = autoInvoice.draftButtonCheck(req, loadId, { dryRun });");
+		ok(early > 0 && sentCheck > early && sentCheck < route.indexOf("// 1)") && route.includes("if (!sentCheck.ok) return res.status(sentCheck.http).json(sentCheck.json);"),
+			"§10 FAILS ON THE OLD CODE: the Draft Invoice route asks draftButtonCheck() (with its dry-run flag) after the factoring check, before anything is read or minted");
+
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		const at = TEMPLATE.indexOf("# --- Automatic broker invoice sending");
+		const sectionText = at >= 0 ? TEMPLATE.slice(at, TEMPLATE.indexOf("\n# ---", at + 1)) : "";
+		const words = sectionText.replace(/\n#\s?/g, " ");
+		ok(/^# AUTO_INVOICE_SEND_ENABLED=$/m.test(sectionText) && /^# AUTO_INVOICE_SEND_DOMAINS=$/m.test(sectionText) && /exactly "true", and never in a replica/.test(words) && /Unset: nothing is sent/.test(words),
+			"§10 FAILS ON THE OLD CODE: the settings template's section names both settings, unset: on only when exactly \"true\", never in a replica, no domain no send");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

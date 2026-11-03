@@ -73,6 +73,17 @@
 //       the number, or between the render and the hand-off, a load is never
 //       appended; shadow says WOULD_SKIP LOAD_FACTORED; the render shadow never
 //       builds one; a marker that can't be read fails the sweep; mutants of each
+//   §24 sending without review (AUTO_INVOICE_SEND_ENABLED, lib/auto-invoice-send.js):
+//       with the gate met, one message at the made-up SMTP sender and no APPEND,
+//       recorded via auto-smtp with one auto_invoice_sent row; flag off, a domain
+//       not listed (or a subdomain of one) and shadow mode draft as before; the
+//       last check on the message (SEND_REFUSED); the factoring marker read last,
+//       with no wait before the SMTP call, a mark or a throw there sends nothing
+//       (LOAD_FACTORED, the number voided, one refusal row); one send per load
+//       through a restart, a lost answer, Try again and two workers (Sent Mail is
+//       searched at once, +15 and +60 minutes, then MAYBE_SENT; never a resend);
+//       the Stop route, the automatic stops and the resume script; the Draft
+//       Invoice button's two 409s; the shared via set; mutants of each
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -268,6 +279,8 @@ function makeWorld({ dbFile = null } = {}) {
 			};
 			// A mutant render shadow: only the shadow's calls carry the placeholder number.
 			if (w.mutateShadow && opts.invoiceId === rules.SHADOW_INVOICE_ID) out = w.mutateShadow(out);
+			// A render whose files differ from the engine's own (the send's last check).
+			if (w.mutateRender) out = w.mutateRender(out);
 			if (w.keepShadowMessage && opts.invoiceId === rules.SHADOW_INVOICE_ID) w.shadowMessages.push(out);
 			return out;
 		},
@@ -1256,6 +1269,7 @@ async function main() {
 
 	await renderShadowSections();
 	await factoredSections();
+	await sendSections();
 }
 
 // ------------------------------------------------------------------ factored loads
@@ -1789,9 +1803,9 @@ async function renderShadowSections() {
 			if (/(?<![.\w])engine\.(prepare|render)\(/.test(outside)) out.push("no engine.prepare or engine.render outside the block");
 			if (count(code, /\bbuildMessage\.prepare\(/g) !== 3 || count(code, /\bbuildMessage\.render\(/g) !== 3) out.push("the draft, the recovery and the render shadow build through buildMessage()");
 			if (count(code, /\brules\.messageDigest\(/g) !== 1 || !/const digestOf = \(message, renderedAt\) => rules\.messageDigest\(message, \{ renderedAt \}\);/.test(code)) out.push("one digest helper, rules.messageDigest()");
-			if (count(code, /\bdigestOf\(/g) !== 2) out.push("the draft and the render shadow store digestOf()");
+			if (count(code, /\bdigestOf\(/g) !== 3) out.push("the draft, the send and the render shadow store digestOf()");
 			if (/createHash/.test(code)) out.push("no digest of its own");
-			if (!/to: message\.to,\s+subject: message\.subject,\s+html: message\.html,\s+attachments: message\.attachments,/.test(code)) out.push("Gmail gets buildMessage()'s message");
+			if (count(code, /to: message\.to,\s+subject: message\.subject,\s+html: message\.html,\s+attachments: message\.attachments,/g) !== 2) out.push("Gmail's draft and the SMTP send get buildMessage()'s message");
 			if (count(rep, /\brules\.messageDigest\(/g) !== 1 || !/rules\.messageDigest\(m, \{ renderedAt:/.test(rep)) out.push("the report digests a Sent copy with rules.messageDigest()");
 			if (count(rep, /createHash/g) !== 1) out.push("the report hashes nothing but its own counts");
 			return out;
@@ -1801,6 +1815,10 @@ async function renderShadowSections() {
 			["the render shadow calling engine.render itself", JOB_SRC.replace("msg = await buildMessage.render(built, facts, { invoiceId: rules.SHADOW_INVOICE_ID", "msg = await engine.render(built.ctx, { invoiceId: rules.SHADOW_INVOICE_ID"), REPORT_SRC],
 			["a second digest in the job", JOB_SRC.replace("// Every digest the job keeps", "const otherDigest = (m) => require(\"crypto\").createHash(\"sha256\").update(String(m.html)).digest(\"hex\");\n\t// Every digest the job keeps"), REPORT_SRC],
 			["Gmail handed the rendered fields directly", JOB_SRC.replace("subject: message.subject,", "subject: rendered.subject,"), REPORT_SRC],
+			["the SMTP send handed the rendered fields directly", (() => {
+				const at = JOB_SRC.lastIndexOf("attachments: message.attachments,");
+				return at < 0 ? JOB_SRC : `${JOB_SRC.slice(0, at)}attachments: rendered.attachments,${JOB_SRC.slice(at + "attachments: message.attachments,".length)}`;
+			})(), REPORT_SRC],
 			["a report with its own Sent digest", JOB_SRC, REPORT_SRC.replace("digest: rules.messageDigest(m, { renderedAt:", "digest: ownDigest(m, { renderedAt:")],
 		]) {
 			ok(parity(src, report).length > 0, `§20 MUTANT ${label}: caught`);
@@ -2021,6 +2039,805 @@ async function renderShadowSections() {
 		}
 		const bypass = code.replace("storeRecord(key, { ...digestOf(msg.message, at), fingerprintSha256: fp }, at);", "ledger.setRenderDigest(db, key, JSON.stringify({ ...digestOf(msg.message, at), fingerprintSha256: fp }), at);");
 		ok(bypass !== code && (bypass.match(/ledger\.setRenderDigest\(/g) || []).length !== 1, "§22 MUTANT a render stored around storeRecord(): caught by the one-write check");
+	}
+}
+
+// ------------------------------------------------------------------ sending (§24)
+// Absent from a tree before sending: its cases fail by name instead of the run.
+const sendLib = optional(path.join(ROOT, "lib", "auto-invoice-send.js"));
+const resumeScript = optional(path.join(ROOT, "scripts", "auto-invoice-send-resume.js"));
+const SEND_DOMAIN = "example-broker.test";
+const SEND_ON = Object.freeze({ enabled: true, domains: [SEND_DOMAIN] });
+const SENT_BOX = "[Gmail]/Sent Mail";
+const smtpError = (outcome, code) => Object.assign(new Error(`made-up SMTP failure for ${BROKER}`), { code, outcome });
+
+// A world whose job may send: the engine's rich render (the invoice, a POD and
+// the rate con) and a made-up SMTP sender that keeps what it is handed. Sent
+// messages land in the fake Gmail's Sent Mail (w.sent), as Gmail keeps an SMTP
+// send's copy. Behaviours, one per send: OK, LOGIN, REFUSED, LOST (no answer, not
+// delivered), SENT_NO_ANSWER (delivered, no answer), CRASH_AFTER (delivered, the
+// process dies), CRASH_BEFORE (the process dies first).
+function sendWorld({ send = SEND_ON, dbFile = null } = {}) {
+	const w = makeWorld({ dbFile });
+	w.richRender = true;
+	w.smtp = [];
+	w.smtpBehaviors = [];
+	w.events = [];
+	w.sendMail = async (o) => {
+		w.events.push("send");
+		w.smtp.push({ to: o.to, from: o.from, user: o.user, subject: o.subject, messageId: o.messageId, attachments: (o.attachments || []).map((a) => a.filename) });
+		const b = w.smtpBehaviors.shift() || "OK";
+		if (b === "OK") { w.sent.push(o.messageId); return { ok: true }; }
+		if (b === "LOGIN") throw smtpError("login", "EAUTH");
+		if (b === "REFUSED") throw smtpError("refused", "EENVELOPE");
+		if (b === "LOST") throw smtpError("unknown", "ETIMEDOUT");
+		if (b === "SENT_NO_ANSWER") { w.sent.push(o.messageId); throw smtpError("unknown", "ETIMEDOUT"); }
+		if (b === "CRASH_AFTER") { w.sent.push(o.messageId); return never(); }
+		if (b === "CRASH_BEFORE") return never();
+		throw new Error(`unknown behaviour ${b}`);
+	};
+	w.sendDeps = (more = {}) => w.deps({ send, sendMail: w.sendMail, ...more });
+	w.stop = () => {
+		try {
+			return ledgerLib.getSendStop ? ledgerLib.getSendStop(w.db) : null;
+		} catch {
+			return null;
+		}
+	};
+	return w;
+}
+// A send-capable job past its first baseline, the clock moved on 5 minutes.
+async function sendStarted(lib, w, more = {}) {
+	const job = lib.create(w.sendDeps(more));
+	await job.tick();
+	w.now += 5 * MIN;
+	return job;
+}
+// Runs `fn` with module exports replaced, then puts them back.
+async function withPatched(patches, fn) {
+	const saved = patches.map(([obj, name]) => [obj, name, obj[name]]);
+	for (const [obj, name, value] of patches) obj[name] = value;
+	try {
+		return await fn();
+	} finally {
+		for (const [obj, name, value] of saved) obj[name] = value;
+	}
+}
+const claimOf = (w, id) => w.claim(id) || {};
+
+const SEND_CASES = {
+	// The whole gate met: one message by SMTP, no draft; recorded as the job's send.
+	async sends(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0500");
+		await job.tick();
+		const first = { smtp: w.smtp.length, append: w.calls.append.length };
+		w.now += 6 * MIN;
+		await job.tick();
+		w.now += 60 * MIN;
+		await job.tick();
+		const c = claimOf(w, "LD-TEST-0500");
+		const rows = [{ ...w.rows[0] }];
+		job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+		let digest = null;
+		try { digest = JSON.parse(c.draft_digest_json || "null"); } catch { digest = null; }
+		return {
+			...first,
+			smtpAfter: w.smtp.length,
+			appendAfter: w.calls.append.length,
+			state: [c.state, c.reason_code, c.delivery, c.stage, Boolean(c.sent_at)],
+			rows: w.draftRows("LD-TEST-0500"),
+			records: w.calls.record.map((r) => r.via),
+			sentRows: w.actions("auto_invoice_sent").map((a) => [a.who, a.details]),
+			other: c.load_key ? ledgerLib.otherDraftRows(w.db, c).length : -1,
+			message: w.smtp[0] ? { ...w.smtp[0], idIsClaims: w.smtp[0].messageId === c.message_id, messageId: undefined } : null,
+			digest: digest && [digest.recipient, digest.attachments.map((a) => a.name)],
+			annotation: rows[0]._autoInvoice,
+			logsClean: !w.logs.some((l) => /@/.test(l)),
+		};
+	},
+	// Anything short of the whole gate drafts as before. `make(w)` sets the world up.
+	async drafts(lib, { send = SEND_ON, extra = {}, setup = null } = {}) {
+		const w = sendWorld({ send });
+		const job = await sendStarted(lib, w, extra);
+		if (setup) setup(w);
+		else w.ready("LD-TEST-0501");
+		await job.tick();
+		const id = setup ? w.sendCaseId : "LD-TEST-0501";
+		const c = claimOf(w, id);
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], delivery: c.delivery || "",
+			refused: w.actions("auto_invoice_send_refused").map((a) => a.details) };
+	},
+	// The last check on the message: a render whose files aren't the engine's own.
+	async lastCheck(lib, mutate) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0502");
+		w.mutateRender = mutate;
+		await job.tick();
+		w.mutateRender = null;
+		const c = claimOf(w, "LD-TEST-0502");
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at),
+			refused: w.actions("auto_invoice_send_refused").map((a) => a.details), notices: w.notices.map((n) => n.title) };
+	},
+	// The marker read last: marked (or unreadable) right after the render's own
+	// re-check, before the send. The marking route refuses a working claim, so the
+	// mark is written directly.
+	async factoredAtSend(lib, { throws = false } = {}) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0510");
+		const check3 = ledgerLib.factoredOrUnreadable;
+		const isFactored = factoringStore && factoringStore.isFactored;
+		let armed = false;
+		await withPatched([
+			[ledgerLib, "factoredOrUnreadable", (db, key) => {
+				const r = check3(db, key);
+				if (throws) armed = true;
+				else markFactored(w, "LD-TEST-0510");
+				return r;
+			}],
+			...(factoringStore ? [[factoringStore, "isFactored", (db, key) => {
+				if (armed) throw Object.assign(new Error("made-up: the marker can't be read"), { code: "SQLITE_CORRUPT" });
+				return isFactored(db, key);
+			}]] : []),
+		], () => job.tick());
+		const c = claimOf(w, "LD-TEST-0510");
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at), number: c.invoice_id,
+			refused: w.actions("auto_invoice_send_refused").map((a) => a.details), voidRows: w.actions("auto_invoice_number_void").length, drafts: w.draftRows("LD-TEST-0510").length, w, job };
+	},
+	// The marker is the last thing read before the SMTP call, with no wait between:
+	// a microtask queued by the read runs only after the call.
+	async lastBeforeSend(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0512");
+		const isFactored = factoringStore && factoringStore.isFactored;
+		if (!factoringStore) return { before: "", after: "", smtp: 0 };
+		await withPatched([[factoringStore, "isFactored", (db, key) => {
+			w.events.push("marker");
+			queueMicrotask(() => w.events.push("next microtask"));
+			return isFactored(db, key);
+		}]], () => job.tick());
+		const at = w.events.indexOf("send");
+		return { before: at > 0 ? w.events[at - 1] : "", after: at >= 0 ? w.events[at + 1] : "", smtp: w.smtp.length };
+	},
+	// A hand draft lands after the render's re-check, before the send.
+	async handDraftAtSend(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0513");
+		const check3 = ledgerLib.factoredOrUnreadable;
+		await withPatched([[ledgerLib, "factoredOrUnreadable", (db, key) => { const r = check3(db, key); w.handDraft("LD-TEST-0513"); return r; }]], () => job.tick());
+		const c = claimOf(w, "LD-TEST-0513");
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at) };
+	},
+	// Sending is stopped after the gate read it open, before the send.
+	async stopAtSend(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0514");
+		const read = ledgerLib.getSendStop;
+		await withPatched([[ledgerLib, "getSendStop", (db) => {
+			const r = read(db);
+			ledgerLib.setSendStop(db, { reason: "STOPPED_BY_ADMIN", nowIso: new Date(w.now).toISOString() });
+			return r;
+		}]], () => job.tick());
+		const c = claimOf(w, "LD-TEST-0514");
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], delivery: c.delivery || "", rows: w.draftRows("LD-TEST-0514") };
+	},
+	// A send with no answer: Sent Mail at once, at +15 and at +60 minutes, then a
+	// person; never sent again. `landsAt`: the search after which the copy appears.
+	async unanswered(lib, { behaviour = "LOST", landsAt = 0 } = {}) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0520");
+		w.smtpBehaviors = [behaviour];
+		const states = [];
+		const step = async (ms) => {
+			w.now += ms;
+			await job.tick();
+			if (landsAt && w.calls.search.length >= landsAt && !w.sent.length && w.smtp[0]) w.sent.push(w.smtp[0].messageId);
+			states.push(w.state("LD-TEST-0520"));
+		};
+		await step(0);
+		await step(5 * MIN);
+		await step(10 * MIN);
+		await step(45 * MIN);
+		const stop = w.stop();
+		const c = claimOf(w, "LD-TEST-0520");
+		return { states, smtp: w.smtp.length, append: w.calls.append.length, searches: w.calls.search.length, boxes: w.calls.searchBoxes,
+			stop: stop && stop.reason, notices: w.notices.map((n) => n.title), sentRows: w.actions("auto_invoice_sent").length,
+			rows: w.draftRows("LD-TEST-0520"), checks: c.send_checks, w, job };
+	},
+	// A crash while sending, then a restart.
+	async restart(lib, behaviour) {
+		const w = sendWorld();
+		const before = await sendStarted(lib, w, { workerId: "before-crash" });
+		w.ready("LD-TEST-0521");
+		w.smtpBehaviors = [behaviour];
+		before.tick();
+		const reached = await until(() => w.smtp.length === 1, `§24 crash (${behaviour}): the send is reached`);
+		await tick();
+		w.now += 16 * MIN;
+		const after = lib.create(w.sendDeps({ workerId: "after-restart" }));
+		for (let i = 0; i < 6; i++) {
+			await after.tick();
+			w.now += 15 * MIN;
+		}
+		const c = claimOf(w, "LD-TEST-0521");
+		const stop = w.stop();
+		return { reached, smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], searches: w.calls.search.length,
+			boxes: [...new Set(w.calls.searchBoxes.map((b) => b.join("|")))], rows: w.draftRows("LD-TEST-0521"), stop: stop && stop.reason };
+	},
+	// Two workers on one database file: one send per load.
+	async twoWorkers(lib) {
+		const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-send-"));
+		try {
+			const w = sendWorld({ dbFile: path.join(TMP, "app.db") });
+			w.db.pragma("journal_mode = WAL");
+			const jobA = await sendStarted(lib, w, { workerId: "worker-a" });
+			const dbB = new Database(path.join(TMP, "app.db"));
+			dbB.pragma("busy_timeout = 2000");
+			const jobB = lib.create({ ...w.sendDeps({ workerId: "worker-b" }), db: dbB });
+			w.ready("LD-TEST-0530");
+			w.ready("LD-TEST-0531");
+			await Promise.all([jobA.tick(), jobB.tick(), jobA.tick(), jobB.tick()]);
+			w.now += 20 * MIN;
+			await Promise.all([jobA.tick(), jobB.tick()]);
+			const out = { smtp: w.smtp.map((m) => m.subject).sort(), append: w.calls.append.length, states: [w.state("LD-TEST-0530"), w.state("LD-TEST-0531")] };
+			dbB.close();
+			w.db.close();
+			return out;
+		} finally {
+			fs.rmSync(TMP, { recursive: true, force: true });
+		}
+	},
+	// An SMTP refusal (or a login refusal): nothing left, sending stops, the load is drafted.
+	async smtpRefused(lib, behaviour) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0540");
+		w.smtpBehaviors = [behaviour];
+		await job.tick();
+		const c = claimOf(w, "LD-TEST-0540");
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0541");
+		await job.tick();
+		const stop = w.stop();
+		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code, c.delivery || ""], rows: w.draftRows("LD-TEST-0540"),
+			next: w.state("LD-TEST-0541"), stop: stop && stop.reason, stopRows: w.actions("auto_invoice_send_stopped").length, notices: w.notices.map((n) => n.title) };
+	},
+	// A load changed after its invoice was sent: a notice, and sending stops.
+	async changedAfterSend(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0550");
+		await job.tick();
+		w.now += 5 * MIN;
+		w.setRow("LD-TEST-0550", { "  Payment  ": "$1,250.00" });
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0551");
+		await job.tick();
+		const stop = w.stop();
+		return { smtp: w.smtp.length, append: w.calls.append.length, stop: stop && stop.reason, notices: w.notices.map((n) => n.title), next: w.state("LD-TEST-0551") };
+	},
+	// The Stop route, the settings route beside it, and the next tick.
+	async stopRoute(lib, { send = SEND_ON } = {}) {
+		const w = sendWorld({ send });
+		const job = await sendStarted(lib, w);
+		const f = fakeApp();
+		const limited = [];
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next(), stopLimiter: (req, res, next) => { limited.push(req.session.user.role); next(); } });
+		const route = "POST /api/auto-invoice/send/stop";
+		const disp = await f.call("POST", "/api/auto-invoice/send/stop", { role: "Dispatcher", body: {} });
+		const r1 = await f.call("POST", "/api/auto-invoice/send/stop", { body: { note: "made-up: checking a broker" } });
+		const r2 = await f.call("POST", "/api/auto-invoice/send/stop", { body: {} });
+		const put = await f.call("PUT", "/api/auto-invoice/settings", { body: { confirmedBrokerDomains: [SEND_DOMAIN, "example-other.test"] } });
+		const status = await f.call("GET", "/api/auto-invoice/status");
+		const settings = await f.call("GET", "/api/auto-invoice/settings");
+		w.ready("LD-TEST-0560");
+		await job.tick();
+		const stop = w.stop();
+		return {
+			registered: Boolean(f.routes[route]), chain: f.routes[route] ? f.routes[route].length : 0, limited,
+			disp: disp.status, r1: [r1.status, r1.body && r1.body.already, r1.body && r1.body.stopped && r1.body.stopped.reason],
+			r2: [r2.status, r2.body && r2.body.already], put: put.status, stop: stop && stop.reason,
+			statusSend: status.body && status.body.send ? [status.body.send.domains, status.body.send.stopped && status.body.send.stopped.reason] : null,
+			settingsSend: settings.body && settings.body.send ? settings.body.send.stopped && settings.body.send.stopped.reason : null,
+			smtp: w.smtp.length, append: w.calls.append.length, next: w.state("LD-TEST-0560"),
+			audits: w.actions("auto_invoice_send_stopped").map((a) => [a.who, a.details]),
+			clears: Object.keys(f.routes).filter((r) => /resume|clear|unstop|send\/start/i.test(r)),
+		};
+	},
+	// The Draft Invoice button's check.
+	async button(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		if (typeof job.draftButtonCheck !== "function") return { missing: true };
+		const req = (body = {}) => ({ body, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } });
+		const answer = (r) => (r.ok ? "ok" : [r.http, r.json.code]);
+		w.ready("LD-TEST-0570");
+		w.renderHang = true;
+		job.tick();
+		await until(() => claimOf(w, "LD-TEST-0570").state === "working", "§24 the button: the claim is working");
+		const working = answer(job.draftButtonCheck(req(), "LD-TEST-0570"));
+		const workingPreview = answer(job.draftButtonCheck(req(), "LD-TEST-0570", { dryRun: true }));
+		const offJob = lib.create(w.deps({ send: { enabled: false, domains: [SEND_DOMAIN] }, sendMail: w.sendMail }));
+		const workingOff = answer(offJob.draftButtonCheck(req(), "LD-TEST-0570"));
+		w.renderHang = false;
+		w.ready("LD-TEST-0571");
+		w.now += 20 * MIN;
+		const job2 = lib.create(w.sendDeps({ workerId: "worker-2" }));
+		await job2.tick();
+		await job2.tick();
+		const sentClaim = claimOf(w, "LD-TEST-0571");
+		const sent = job2.draftButtonCheck(req(), "#LD-TEST-0571");
+		const preview = answer(job2.draftButtonCheck(req(), "LD-TEST-0571", { dryRun: true }));
+		const noReason = answer(job2.draftButtonCheck(req({ confirmReissue: true, reissueReason: "   " }), "LD-TEST-0571"));
+		const notTrue = answer(job2.draftButtonCheck(req({ confirmReissue: "true", reissueReason: "made-up reason" }), "LD-TEST-0571"));
+		const reissued = job2.draftButtonCheck(req({ confirmReissue: true, reissueReason: "made-up: corrected rate" }), "LD-TEST-0571");
+		const sentOff = answer(offJob.draftButtonCheck(req(), "LD-TEST-0571"));
+		const unknown = answer(job2.draftButtonCheck(req(), "LD-TEST-0999"));
+		return {
+			working, workingPreview, workingOff, sentState: [sentClaim.state, sentClaim.delivery],
+			sent: sent.ok ? "ok" : [sent.http, sent.json.code, sent.json.invoiceId === sentClaim.invoice_id, /already been sent|already sent/.test(sent.json.error)],
+			preview, noReason, notTrue, reissued: reissued.ok ? [true, reissued.reissue.reason] : answer(reissued),
+			reissueRows: w.actions("auto_invoice_reissue_confirmed").map((a) => [a.who, a.details]), sentOff, unknown,
+		};
+	},
+	// A load whose send got no answer can't be marked factored: it may be with the broker.
+	async markWhileUnconfirmed(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0580");
+		w.smtpBehaviors = ["LOST"];
+		await job.tick();
+		const c = claimOf(w, "LD-TEST-0580");
+		if (!factoringStore) return { state: [c.state, c.reason_code], mark: null };
+		factoringStore.ensureSchema(w.db);
+		const r = factoringStore.mark(w.db, { key: "ld-test-0580", loadId: "LD-TEST-0580", reason: "made-up", source: "script", actor: { id: 0, username: "made-up" }, nowIso: new Date(w.now).toISOString() });
+		return { state: [c.state, c.reason_code], mark: r.ok ? "marked" : r.code };
+	},
+	// A send search goes on after a person drafts by hand; a person's draft closes
+	// a MAYBE_SENT claim only once the search has handed it over.
+	async handDraftWhileSearching(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0590");
+		w.smtpBehaviors = ["LOST"];
+		await job.tick();
+		w.handDraft("LD-TEST-0590", "10202026-60");
+		w.now += 15 * MIN;
+		await job.tick();
+		const searching = w.state("LD-TEST-0590");
+		w.now += 45 * MIN;
+		await job.tick();
+		const handedOver = w.state("LD-TEST-0590");
+		w.now += 5 * MIN;
+		await job.tick();
+		return { searching, handedOver, closed: w.state("LD-TEST-0590"), smtp: w.smtp.length, searches: w.calls.search.length };
+	},
+};
+
+async function sendSections() {
+	// ---------------------------------------------------------------- §24
+	section("§24 sending without review (AUTO_INVOICE_SEND_ENABLED)");
+	ok(sendLib, "§24 FAILS ON THE OLD CODE: lib/auto-invoice-send.js exists");
+
+	// The gate met: a send, not a draft.
+	const s = await SEND_CASES.sends(jobLib);
+	eq([s.smtp, s.append], [1, 0], "§24 FAILS ON THE OLD CODE: the whole gate met: one message at the SMTP sender and no APPEND");
+	eq([s.smtpAfter, s.appendAfter], [1, 0], "§24 FAILS ON THE OLD CODE: ...and later sweeps send nothing more (one send per load)");
+	eq(s.state, ["drafted", "", "send", "recorded", true], "§24 FAILS ON THE OLD CODE: the claim is drafted with delivery 'send', recorded, its send time kept");
+	eq(s.rows, [{ invoice_id: "10202026-1", via: "auto-smtp" }], "§24 FAILS ON THE OLD CODE: one draft row, via auto-smtp (the job's send)");
+	eq(s.records, ["auto-smtp"], "§24 FAILS ON THE OLD CODE: engine.record() is told the send's via");
+	eq(s.sentRows, [["auto-invoice", "10202026-1 → example-broker.test (sent by the automatic invoice job)"]],
+		"§24 FAILS ON THE OLD CODE: one auto_invoice_sent row by the system actor: the invoice number and the recipient's domain only");
+	eq(s.other, 0, "§24 FAILS ON THE OLD CODE: otherDraftRows() is empty after the send (the sent row is the job's own)");
+	eq(s.message, { to: "billing@example-broker.test", from: `LogisX Inc. <${MAILBOX.user}>`, user: MAILBOX.user, subject: "Example Broker Order #LD-TEST-0500",
+		attachments: ["Example Broker Invoice Order #LD-TEST-0500.pdf", "LD-TEST-0500_POD.pdf", "LD-TEST-0500.pdf"], idIsClaims: true },
+	"§24 FAILS ON THE OLD CODE: the message is the render's own: the one recipient, the subject, the invoice, the POD and the rate con, as they are, with the claim's Message-ID");
+	eq(s.digest, ["billing@example-broker.test", ["Example Broker Invoice Order #LD-TEST-0500.pdf", "LD-TEST-0500_POD.pdf", "LD-TEST-0500.pdf"]],
+		"§24 FAILS ON THE OLD CODE: the claim keeps the digest of what was sent");
+	eq(s.annotation && s.annotation.sent, true, "§24 FAILS ON THE OLD CODE: a Super Admin's row says the invoice was sent (`sent: true`)");
+	ok(s.logsClean, "§24 no email address in the logs");
+
+	// Short of the whole gate: drafts as before.
+	const off = await SEND_CASES.drafts(jobLib, { send: { enabled: false, domains: [SEND_DOMAIN] } });
+	eq([off.smtp, off.append, off.state, off.delivery], [0, 1, ["drafted", ""], ""], "§24 AUTO_INVOICE_SEND_ENABLED off: a draft, no SMTP call");
+	const none = await SEND_CASES.drafts(jobLib, { send: null });
+	eq([none.smtp, none.append], [0, 1], "§24 no send settings at all: a draft, no SMTP call");
+	const noSender = await SEND_CASES.drafts(jobLib, { extra: { sendMail: undefined } });
+	eq([noSender.smtp, noSender.append], [0, 1], "§24 sending on without a sender: a draft");
+	eq([off.refused, none.refused], [[], []], "§24 ...and sending off writes no refusal row");
+	const notListed = await SEND_CASES.drafts(jobLib, { send: { enabled: true, domains: ["example-other.test"] } });
+	eq([notListed.smtp, notListed.append], [0, 1], "§24 a domain not on AUTO_INVOICE_SEND_DOMAINS: a draft");
+	eq(notListed.refused, ["10202026-1: DOMAIN_NOT_LISTED (example-broker.test); drafted for a person instead"],
+		"§24 FAILS ON THE OLD CODE: ...with one auto_invoice_send_refused row naming the domain (the allowlist's refusal)");
+	const sub = await SEND_CASES.drafts(jobLib, { setup: (w) => {
+		w.sendCaseId = "LD-TEST-0503";
+		setSettings(w.db, { optOutDomains: [], confirmedBrokerDomains: [SEND_DOMAIN, "ap.example-broker.test"] });
+		w.ready("LD-TEST-0503", { Email: "ops@ap.example-broker.test" }, "billing@ap.example-broker.test");
+	} });
+	eq([sub.smtp, sub.append, sub.state], [0, 1, ["drafted", ""]], "§24 a subdomain of a listed domain is not on the list: a draft");
+	const shadow = await SEND_CASES.drafts(jobLib, { extra: { env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } } });
+	eq([shadow.smtp, shadow.append, shadow.state], [0, 0, [undefined, undefined]], "§24 shadow mode with sending on: nothing sent, nothing drafted");
+
+	// The last check on the message (check 4).
+	const renamed = await SEND_CASES.lastCheck(jobLib, (out) => ({ ...out, attachments: out.attachments.map((a, i) => (i === 2 ? { ...a, filename: "LD-TEST-9999.pdf" } : a)) }));
+	eq([renamed.smtp, renamed.append, renamed.state, renamed.voided], [0, 0, ["needs_attention", "SEND_REFUSED"], false],
+		"§24 FAILS ON THE OLD CODE: a rate con named for another load: SEND_REFUSED, nothing sent or drafted, the number kept");
+	eq(renamed.refused, ["10202026-1: SEND_REFUSED (ATTACHMENTS); nothing sent"], "§24 FAILS ON THE OLD CODE: ...one auto_invoice_send_refused row with its reason");
+	ok(renamed.notices.includes("Invoice not sent"), "§24 FAILS ON THE OLD CODE: ...and a Super Admin notice");
+	const noRateCon = await SEND_CASES.lastCheck(jobLib, (out) => ({ ...out, attachments: out.attachments.slice(0, 2) }));
+	eq([noRateCon.smtp, noRateCon.state], [0, ["needs_attention", "SEND_REFUSED"]], "§24 FAILS ON THE OLD CODE: no rate con among the files: SEND_REFUSED");
+	const twoTo = mutantModule(path.join(ROOT, "lib", "auto-invoice-job.js"), "message: Object.freeze({ to, subject: rendered.subject,", "message: Object.freeze({ to: `${to}, other@example-broker.test`, subject: rendered.subject,");
+	const twoToRun = twoTo ? await SEND_CASES.lastCheck(twoTo, null) : null;
+	eq(twoToRun && [twoToRun.smtp, twoToRun.state, twoToRun.refused], [0, ["needs_attention", "SEND_REFUSED"], ["10202026-1: SEND_REFUSED (RECIPIENT); nothing sent"]],
+		"§24 FAILS ON THE OLD CODE: a message whose To isn't the one planned recipient (the builder broken): SEND_REFUSED, nothing sent");
+	const ccd = mutantModule(path.join(ROOT, "lib", "auto-invoice-job.js"), "message: Object.freeze({ to, subject: rendered.subject,", "message: Object.freeze({ to, cc: \"ap@example-broker.test\", subject: rendered.subject,");
+	const ccRun = ccd ? await SEND_CASES.lastCheck(ccd, null) : null;
+	eq(ccRun && [ccRun.smtp, ccRun.refused], [0, ["10202026-1: SEND_REFUSED (HEADERS); nothing sent"]], "§24 FAILS ON THE OLD CODE: a message with a Cc: SEND_REFUSED");
+
+	// D5: the factoring marker, read last.
+	const before = await SEND_CASES.drafts(jobLib, { setup: (w) => { w.sendCaseId = "LD-TEST-0511"; w.ready("LD-TEST-0511"); markFactored(w, "LD-TEST-0511"); } });
+	eq([before.smtp, before.append, before.state], [0, 0, ["skipped", "LOAD_FACTORED"]], "§24 the whole gate met and the load marked factored: no SMTP call and no APPEND");
+	const atSend = await SEND_CASES.factoredAtSend(jobLib);
+	eq([atSend.smtp, atSend.append, atSend.state, atSend.voided, atSend.drafts], [0, 0, ["needs_attention", "LOAD_FACTORED"], true, 0],
+		"§24 FAILS ON THE OLD CODE: marked between the render and the send: no SMTP call, Needs attention LOAD_FACTORED, the number voided");
+	eq([atSend.refused, atSend.voidRows], [["10202026-1: LOAD_FACTORED; nothing sent"], 1], "§24 FAILS ON THE OLD CODE: ...one auto_invoice_send_refused row (LOAD_FACTORED) and the number's void row");
+	const throwsAt = await SEND_CASES.factoredAtSend(jobLib, { throws: true });
+	eq([throwsAt.smtp, throwsAt.append, throwsAt.state], [0, 0, ["needs_attention", "LOAD_FACTORED"]], "§24 FAILS ON THE OLD CODE: isFactored() throwing right before the send: no send (fails closed)");
+	// The voided number is never used again: cleared and tried again, a fresh one.
+	if (atSend.w && atSend.w.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'load_factoring'").get()) {
+		atSend.w.db.prepare("DELETE FROM load_factoring").run();
+		const f = fakeApp();
+		atSend.job.mount(f.app, { requireRole: f.requireRole });
+		await f.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "ld-test-0510" } });
+		atSend.w.now += 5 * MIN;
+		await atSend.job.tick();
+		const again = claimOf(atSend.w, "LD-TEST-0510");
+		eq([again.state, again.delivery, again.invoice_id !== atSend.number, atSend.w.smtp.length], ["drafted", "send", true, 1],
+			"§24 FAILS ON THE OLD CODE: the mark cleared and Try again: sent with a fresh number, never the voided one");
+	}
+	const order = await SEND_CASES.lastBeforeSend(jobLib);
+	eq([order.before, order.after, order.smtp], ["marker", "next microtask", 1], "§24 FAILS ON THE OLD CODE: the factoring marker is the last read before the SMTP call, with no wait between them");
+	const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
+	const JOB_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-job.js"), "utf8");
+	const sendOrder = (ledgerSrc, jobSrc) => {
+		const body = (/function beginSend\([\s\S]*?\n}\n/.exec(ledgerSrc) || [""])[0];
+		const at = (s) => body.indexOf(s);
+		const steps = ["otherDraftRows(db, claim)", "getSendStop(db)", "factoredOrUnreadable(db, key)", "transition(db, key"].map(at);
+		const code = jobSrc.replace(/^[ \t]*\/\/.*$/gm, "");
+		const between = (/ledger\.beginSend\(([\s\S]*?)await d\.sendMail\(/.exec(code) || [null, null])[1];
+		return { ordered: steps.every((n, i) => n > 0 && (i === 0 || n > steps[i - 1])), noWait: between !== null && !/\bawait\b/.test(between) };
+	};
+	eq(sendOrder(LEDGER_SRC, JOB_SRC), { ordered: true, noWait: true },
+		"§24 FAILS ON THE OLD CODE: beginSend() reads the hand drafts, then the stop, then the marker last, then commits; nothing awaited between it and the SMTP call");
+	const hand = await SEND_CASES.handDraftAtSend(jobLib);
+	eq([hand.smtp, hand.append, hand.state, hand.voided], [0, 0, ["skipped", "DRAFTED_BY_HAND"], true], "§24 FAILS ON THE OLD CODE: a hand draft right before the send wins: nothing sent, the number voided");
+
+	// One send per load.
+	const lost = await SEND_CASES.unanswered(jobLib);
+	eq(lost.states, [["queued", "SEND_UNCONFIRMED"], ["queued", "SEND_UNCONFIRMED"], ["queued", "SEND_UNCONFIRMED"], ["needs_attention", "MAYBE_SENT"]],
+		"§24 FAILS ON THE OLD CODE: an unanswered send: searched at once and at +15 minutes, MAYBE_SENT only after the third search (+60)");
+	eq([lost.smtp, lost.append, lost.searches, lost.checks], [1, 0, 3, 3], "§24 FAILS ON THE OLD CODE: ...one SMTP call, never re-sent and never drafted, three searches");
+	ok(lost.boxes.length === 3 && lost.boxes.every((b) => JSON.stringify(b) === JSON.stringify([SENT_BOX])), "§24 FAILS ON THE OLD CODE: ...each in Sent Mail only");
+	eq(lost.stop, "SEND_UNANSWERED", "§24 FAILS ON THE OLD CODE: ...and sending stops at once (SEND_UNANSWERED), drafts carrying on");
+	ok(lost.notices.includes("Invoice may have been sent") && lost.notices.filter((t) => t === "Automatic invoice sending stopped").length === 1,
+		"§24 FAILS ON THE OLD CODE: ...a notice for the stop (once) and one for MAYBE_SENT");
+	if (lost.job && lost.job.mount) {
+		const f = fakeApp();
+		lost.job.mount(f.app, { requireRole: f.requireRole });
+		const retry = await f.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "ld-test-0520" } });
+		lost.w.now += 5 * MIN;
+		await lost.job.tick();
+		eq([retry.status, lost.w.state("LD-TEST-0520"), lost.w.smtp.length, lost.w.calls.append.length, lost.w.calls.search.length], [200, ["needs_attention", "MAYBE_SENT"], 1, 0, 4],
+			"§24 FAILS ON THE OLD CODE: Try again on MAYBE_SENT searches Sent Mail once more and never sends");
+	}
+	const late = await SEND_CASES.unanswered(jobLib, { landsAt: 2 });
+	eq([late.states[late.states.length - 1], late.smtp, late.append, late.sentRows, late.rows], [["drafted", ""], 1, 0, 1, [{ invoice_id: "10202026-1", via: "auto-smtp" }]],
+		"§24 FAILS ON THE OLD CODE: a copy that turns up in Sent Mail later: recorded as sent, never sent twice");
+	const delivered = await SEND_CASES.unanswered(jobLib, { behaviour: "SENT_NO_ANSWER" });
+	eq([delivered.states[0], delivered.smtp, delivered.searches, delivered.sentRows], [["drafted", ""], 1, 1, 1], "§24 FAILS ON THE OLD CODE: delivered with no answer: found by the first search, recorded");
+	const crashSent = await SEND_CASES.restart(jobLib, "CRASH_AFTER");
+	eq([crashSent.smtp, crashSent.append, crashSent.state, crashSent.rows, crashSent.boxes], [1, 0, ["drafted", ""], [{ invoice_id: "10202026-1", via: "auto-smtp" }], [SENT_BOX]],
+		"§24 FAILS ON THE OLD CODE: a crash after the send, then a restart: found in Sent Mail and recorded; one SMTP call");
+	const crashLost = await SEND_CASES.restart(jobLib, "CRASH_BEFORE");
+	eq([crashLost.smtp, crashLost.append, crashLost.state, crashLost.searches, crashLost.stop], [1, 0, ["needs_attention", "MAYBE_SENT"], 3, "MAYBE_SENT"],
+		"§24 FAILS ON THE OLD CODE: a crash with the send's fate unknown, then a restart: three searches, then MAYBE_SENT; never sent again");
+	const two = await SEND_CASES.twoWorkers(jobLib);
+	eq(two, { smtp: ["Example Broker Order #LD-TEST-0530", "Example Broker Order #LD-TEST-0531"], append: 0, states: [["drafted", ""], ["drafted", ""]] },
+		"§24 FAILS ON THE OLD CODE: two workers on one database: one send per load, no draft");
+	const searching = await SEND_CASES.handDraftWhileSearching(jobLib);
+	eq([searching.searching, searching.handedOver, searching.closed, searching.smtp], [["queued", "SEND_UNCONFIRMED"], ["needs_attention", "MAYBE_SENT"], ["skipped", "DRAFTED_BY_HAND"], 1],
+		"§24 FAILS ON THE OLD CODE: a hand draft while the send is searched for doesn't stop the search; once a person has it (MAYBE_SENT), their draft closes it");
+	const mark = await SEND_CASES.markWhileUnconfirmed(jobLib);
+	eq(mark, { state: ["queued", "SEND_UNCONFIRMED"], mark: "INVOICE_ALREADY_SENT" }, "§24 FAILS ON THE OLD CODE: a load whose send got no answer can't be marked factored (INVOICE_ALREADY_SENT)");
+
+	// The stops.
+	const refused = await SEND_CASES.smtpRefused(jobLib, "REFUSED");
+	eq([refused.smtp, refused.append, refused.state, refused.rows, refused.next], [1, 2, ["drafted", "", ""], [{ invoice_id: "10202026-1", via: "auto-imap" }], ["drafted", ""]],
+		"§24 FAILS ON THE OLD CODE: Gmail refuses the message: nothing left, the load is drafted with its number, and the next load is drafted too");
+	eq([refused.stop, refused.stopRows], ["SMTP_REFUSED", 1], "§24 FAILS ON THE OLD CODE: ...sending stops (SMTP_REFUSED), one audit row");
+	const login = await SEND_CASES.smtpRefused(jobLib, "LOGIN");
+	eq([login.smtp, login.append, login.stop], [1, 2, "SMTP_LOGIN_REFUSED"], "§24 FAILS ON THE OLD CODE: Gmail refuses the login: drafts carry on, sending stops (SMTP_LOGIN_REFUSED)");
+	const changed = await SEND_CASES.changedAfterSend(jobLib);
+	eq([changed.smtp, changed.append, changed.stop, changed.next], [1, 1, "LOAD_CHANGED_AFTER_SEND", ["drafted", ""]],
+		"§24 FAILS ON THE OLD CODE: a load changed after its invoice was sent: sending stops, the next load is drafted");
+	ok(changed.notices.includes("Sent invoice: load changed"), "§24 FAILS ON THE OLD CODE: ...with a notice that the invoice already went");
+	const stopR = await SEND_CASES.stopRoute(jobLib);
+	eq([stopR.registered, stopR.chain, stopR.disp, stopR.limited], [true, 4, 403, ["Super Admin", "Super Admin"]],
+		"§24 FAILS ON THE OLD CODE: the Stop route: Super Admin, the cross-site check, then the limiter (a Dispatcher is refused before the limiter)");
+	eq([stopR.r1, stopR.r2], [[200, false, "STOPPED_BY_ADMIN"], [200, true]], "§24 FAILS ON THE OLD CODE: Stop sets the stop; a second press finds it set");
+	eq([stopR.put, stopR.stop, stopR.statusSend, stopR.settingsSend], [200, "STOPPED_BY_ADMIN", [[SEND_DOMAIN], "STOPPED_BY_ADMIN"], "STOPPED_BY_ADMIN"],
+		"§24 FAILS ON THE OLD CODE: saving a domain through PUT /api/auto-invoice/settings keeps the stop; status and settings show it");
+	eq([stopR.smtp, stopR.append, stopR.next], [0, 1, ["drafted", ""]], "§24 FAILS ON THE OLD CODE: ...and the next tick only drafts");
+	eq(stopR.audits, [["made-up-admin", "STOPPED_BY_ADMIN by made-up-admin: made-up: checking a broker"]], "§24 FAILS ON THE OLD CODE: one audit row, by the person who pressed it");
+	eq(stopR.clears, [], "§24 no route clears the stop");
+	const stopOff = await SEND_CASES.stopRoute(jobLib, { send: { enabled: false, domains: [SEND_DOMAIN] } });
+	eq([stopOff.registered, stopOff.statusSend, stopOff.settingsSend], [false, null, null], "§24 sending off: no Stop route, and status and settings answer as before");
+	const between = await SEND_CASES.stopAtSend(jobLib);
+	eq([between.smtp, between.append, between.state, between.delivery, between.rows], [0, 1, ["drafted", ""], "", [{ invoice_id: "10202026-1", via: "auto-imap" }]],
+		"§24 FAILS ON THE OLD CODE: a stop set between the gate and the send: the load is drafted instead, nothing sent");
+
+	// The Draft Invoice button.
+	const b = await SEND_CASES.button(jobLib);
+	ok(!b.missing, "§24 FAILS ON THE OLD CODE: the job exports draftButtonCheck()");
+	if (!b.missing) {
+		eq([b.working, b.workingPreview, b.workingOff], [[409, "AUTO_INVOICE_IN_FLIGHT"], "ok", "ok"], "§24 FAILS ON THE OLD CODE: a claim in flight: 409 AUTO_INVOICE_IN_FLIGHT while sending is on (a preview and sending off: as before)");
+		eq([b.sentState, b.sent], [["drafted", "send"], [409, "INVOICE_ALREADY_SENT", true, true]], "§24 FAILS ON THE OLD CODE: a load whose invoice the job sent: 409 INVOICE_ALREADY_SENT, naming its invoice");
+		eq([b.preview, b.noReason, b.notTrue], ["ok", [409, "INVOICE_ALREADY_SENT"], [409, "INVOICE_ALREADY_SENT"]], "§24 ...a preview is never refused; a re-issue needs confirmReissue true and a reason");
+		eq([b.reissued, b.reissueRows], [[true, "made-up: corrected rate"], [["made-up-admin", "re-issue after the automatic send of 10202026-2: made-up: corrected rate"]]],
+			"§24 FAILS ON THE OLD CODE: a confirmed re-issue with a reason goes on, audited by the person");
+		eq([b.sentOff, b.unknown], [[409, "INVOICE_ALREADY_SENT"], "ok"], "§24 FAILS ON THE OLD CODE: sending switched off later still guards what was sent; a load with no claim: as before");
+	}
+
+	// The resume script: the one way the stop is cleared.
+	ok(resumeScript, "§24 FAILS ON THE OLD CODE: scripts/auto-invoice-send-resume.js exists");
+	if (resumeScript) {
+		const w = sendWorld();
+		const job = await sendStarted(jobLib, w);
+		w.db.exec("CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, user_id INTEGER, username TEXT, role TEXT, action TEXT, entity TEXT, entity_id TEXT, details TEXT)");
+		const audits = () => w.db.prepare("SELECT username, role, action, details FROM audit_trail").all();
+		eq(resumeScript.run({ db: w.db, dryRun: true }), { dryRun: true, stopped: false, changed: false, unconfirmed: 0 }, "§24 resume, nothing stopped: nothing to do");
+		ledgerLib.setSendStop(w.db, { reason: "SMTP_REFUSED", nowIso: "2026-10-20T14:05:00.000Z" });
+		const dry = resumeScript.run({ db: w.db, dryRun: true });
+		eq([dry.stopped, dry.changed, dry.reason, Boolean(w.stop()), audits().length], [true, true, "SMTP_REFUSED", true, 0], "§24 resume --dry-run: says what it would clear and writes nothing");
+		const applied = resumeScript.run({ db: w.db, dryRun: false, nowIso: "2026-10-20T15:00:00.000Z" });
+		eq([applied.changed, w.stop(), audits()], [true, null, [{ username: "auto-invoice-send-resume", role: "system", action: "auto_invoice_send_resumed", details: "cleared the stop of 2026-10-20T14:05:00.000Z (SMTP_REFUSED)" }]],
+			"§24 resume --apply: the stop cleared, one audit row as a system change");
+		eq([resumeScript.run({ db: w.db, dryRun: false }).changed, audits().length], [false, 1], "§24 ...a replay changes nothing");
+		w.ready("LD-TEST-0595");
+		await job.tick();
+		eq(w.smtp.length, 1, "§24 ...and the next load is sent again");
+		ledgerLib.setSendStop(w.db, { reason: "SEND_UNANSWERED", nowIso: "2026-10-20T16:00:00.000Z" });
+		w.db.prepare("UPDATE auto_invoice_claims SET state = 'needs_attention', reason_code = 'MAYBE_SENT', stage = 'appending' WHERE load_key = 'ld-test-0595'").run();
+		let refusedResume = "";
+		try {
+			resumeScript.run({ db: w.db, dryRun: false });
+		} catch (e) {
+			refusedResume = e instanceof resumeScript.Refusal ? e.message : `other: ${e && e.message}`;
+		}
+		ok(/1 send\(s\) not confirmed/.test(refusedResume) && w.stop() && audits().length === 1, "§24 resume refuses while a send is unconfirmed (MAYBE_SENT): nothing cleared");
+		const argsRefused = [["--db=x"], ["--dry-run"], ["--db=x", "--dry-run", "--apply"], ["--db=x", "--apply", "--force"]].map((a) => {
+			try { resumeScript.parseArgs(a); return "accepted"; } catch (e) { return e instanceof resumeScript.Refusal ? "refused" : "threw"; }
+		});
+		eq(argsRefused, ["refused", "refused", "refused", "refused"], "§24 resume: --db and exactly one of --dry-run and --apply, nothing else");
+	}
+
+	// The pure rules (lib/auto-invoice-send.js).
+	const SEND_FILE = path.join(ROOT, "lib", "auto-invoice-send.js");
+	const pure = (lib) => {
+		if (!lib) return null;
+		const ON = { AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "Example-Broker.test, example-other.test  gmail.com @example-x.test" };
+		const att = (name) => ({ filename: name, content: Buffer.from(`%PDF-1.4 ${name}`) });
+		const files = [att("Example Broker Invoice Order #123456789.pdf"), att("123456789_POD.pdf"), att("123456789.pdf")];
+		const rendered = { attachments: files };
+		const msg = (over = {}) => ({ to: "billing@example-broker.test", subject: "Example Broker Order #123456789", html: "<p>made-up</p>", attachments: files, ...over });
+		const check = (over, r = rendered) => lib.outgoingCheck({ message: msg(over), rendered: r, planned: "billing@example-broker.test", domains: [SEND_DOMAIN] });
+		// The render's own array, handed on as it is: only the rule under test differs.
+		const same = (list) => check({ attachments: list }, { attachments: list });
+		return {
+			settings: lib.readSettings(ON),
+			flags: ["true", " true ", "TRUE", "1", "yes", "", undefined].map((v) => lib.readSettings({ AUTO_INVOICE_SEND_ENABLED: v }).enabled),
+			replica: lib.readSettings(ON, { replica: true }).enabled,
+			noDomains: lib.readSettings({ AUTO_INVOICE_SEND_ENABLED: "true" }).domains,
+			gate: [
+				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: true, to: "billing@example-broker.test" }).send,
+				lib.gate({ settings: { enabled: false, domains: [SEND_DOMAIN] }, on: true, to: "billing@example-broker.test" }).why,
+				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: false, to: "billing@example-broker.test" }).why,
+				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: true, stopped: true, to: "billing@example-broker.test" }).why,
+				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: true, to: "billing@ap.example-broker.test" }).why,
+				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: true, to: "billing@notexample-broker.test" }).why,
+			],
+			check: [
+				check({}), check({ to: "BILLING@example-broker.test" }), check({ to: "other@example-broker.test" }), check({ to: "billing@example-broker.test, x@example-broker.test" }),
+				check({ to: "ap-billing@example-broker.test" }),
+				check({ cc: "x@example-broker.test" }), check({ bcc: "x@example-broker.test" }), check({ subject: "" }),
+				check({}, { attachments: [...files] }), same([files[0], files[1]]), same([files[1], files[0], files[2]]),
+				same([files[0], files[1], att("987654321.pdf")]), same([files[0], files[1], { filename: "123456789.pdf", content: Buffer.alloc(0) }]),
+				same([files[0], att("123456789.pdf"), files[2]]), same([files[0], att("POD_1_of_2_123456789.pdf"), att("POD_2_of_2_123456789.pdf"), files[2]]),
+			],
+			outcomes: [
+				{ code: "EAUTH", command: "AUTH PLAIN" }, { code: "EENVELOPE", command: "RCPT TO" }, { code: "EENVELOPE", command: "DATA" }, { code: "EMESSAGE", command: "DATA" },
+				{ code: "ECONNECTION", command: "CONN" }, { code: "ETIMEDOUT", command: "CONN" }, { code: "ETIMEDOUT", command: "DATA" }, { code: "ECONNECTION", command: "API" },
+				{ code: "ESOCKET" }, {}, null,
+			].map((e) => lib.smtpOutcome(e)),
+		};
+	};
+	const pureNow = pure(sendLib);
+	const PURE_WANT = {
+		settings: { enabled: true, domains: ["example-broker.test", "example-other.test", "example-x.test"], refused: 1 },
+		flags: [true, true, false, false, false, false, false],
+		replica: false,
+		noDomains: [],
+		gate: [true, "OFF", "OFF", "STOPPED", "DOMAIN_NOT_LISTED", "DOMAIN_NOT_LISTED"],
+		check: [null, null, "RECIPIENT", "RECIPIENT", "RECIPIENT", "HEADERS", "HEADERS", "HEADERS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", null],
+		outcomes: ["login", "refused", "refused", "refused", "refused", "refused", "unknown", "unknown", "unknown", "unknown", "unknown"],
+	};
+	eq(pureNow, PURE_WANT, "§24 FAILS ON THE OLD CODE: the settings (exactly \"true\", never in a replica; exact domains, free mail refused, none by default), the gate, the last check and the SMTP outcomes");
+
+	// The SMTP sender over a made-up nodemailer: one envelope recipient, no file or
+	// URL access, the transport closed, and a failure without the server's text.
+	if (sendLib) {
+		const seen = [];
+		const fakeMailer = (fail) => ({ createTransport: (opts) => ({
+			sendMail: async (m) => { seen.push({ opts, m }); if (fail) throw Object.assign(new Error(`550 refused for ${BROKER}`), fail); return { accepted: [m.to] }; },
+			close: () => seen.push("closed"),
+		}) });
+		const mail = { user: MAILBOX.user, pass: MAILBOX.pass, from: `LogisX Inc. <${MAILBOX.user}>`, to: "billing@example-broker.test", subject: "made-up", html: "<p>made-up</p>", attachments: [], messageId: "<made-up-1@example.com>" };
+		await sendLib.createSmtpSender({ nodemailer: fakeMailer(null) })(mail);
+		const sentWith = seen[0] && seen[0].m;
+		eq(sentWith && [seen[0].opts.service, seen[0].opts.auth.user, sentWith.envelope, sentWith.messageId, sentWith.disableFileAccess, sentWith.disableUrlAccess, seen[1]],
+			["gmail", MAILBOX.user, { from: MAILBOX.user, to: ["billing@example-broker.test"] }, "<made-up-1@example.com>", true, true, "closed"],
+			"§24 the SMTP sender: the mailbox's own login, exactly one envelope recipient, the claim's Message-ID, no file or URL access, closed after");
+		let failed = null;
+		try {
+			await sendLib.createSmtpSender({ nodemailer: fakeMailer({ code: "EENVELOPE", command: "RCPT TO" }) })(mail);
+		} catch (e) {
+			failed = e;
+		}
+		eq(failed && [failed.code, failed.outcome, /@/.test(failed.message)], ["EENVELOPE", "refused", false], "§24 ...a failure carries its code and outcome, never the server's text");
+		let setup = null;
+		try {
+			await sendLib.createSmtpSender({ nodemailer: fakeMailer(null) })({ ...mail, pass: "" });
+		} catch (e) {
+			setup = e;
+		}
+		eq(setup && [setup.code, setup.outcome], ["SEND_SETUP", "refused"], "§24 ...no password: refused before any connection");
+	}
+
+	// One shared via set: the job's literals live only in lib/auto-invoice-rules.js.
+	const literalHits = [];
+	for (const file of [...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join("lib", f)), "server.js"]) {
+		const n = (fs.readFileSync(path.join(ROOT, file), "utf8").match(/["'`]auto-(?:imap|smtp)["'`]/g) || []).length;
+		if (n) literalHits.push([file, n]);
+	}
+	eq(literalHits, [[path.join("lib", "auto-invoice-rules.js"), 2]], "§24 FAILS ON THE OLD CODE: the literals \"auto-imap\" and \"auto-smtp\" appear only in the shared set (rules.JOB_VIAS)");
+	const sendSrc = sendLib ? fs.readFileSync(SEND_FILE, "utf8") : "";
+	const resumeSrc = resumeScript ? fs.readFileSync(path.join(ROOT, "scripts", "auto-invoice-send-resume.js"), "utf8") : "";
+	ok(sendLib && !/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]/.test(sendSrc + resumeSrc), "§24 no email address in lib/auto-invoice-send.js or the resume script (nothing to default to)");
+
+	// Each decision removed in turn: the case that pins it must change.
+	const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+	const LEDGER_FILE = path.join(ROOT, "lib", "auto-invoice-ledger.js");
+	const FACTORING_FILE = path.join(ROOT, "lib", "factoring-store.js");
+	const jobMutants = [
+		["the send's last check skipped", "if (check) return refuseSend(c, \"SEND_REFUSED\", check);", "",
+			() => SEND_CASES.lastCheck, (lib) => SEND_CASES.lastCheck(lib, (out) => ({ ...out, attachments: out.attachments.map((a, i) => (i === 2 ? { ...a, filename: "LD-TEST-9999.pdf" } : a)) })), (x) => x.smtp === 0],
+		["a wait between the commit and the SMTP call", "\t\ttry {\n\t\t\tawait d.sendMail({", "\t\tawait Promise.resolve();\n\t\ttry {\n\t\t\tawait d.sendMail({",
+			null, (lib) => SEND_CASES.lastBeforeSend(lib), (x) => x.before === "marker" && x.after === "next microtask"],
+		["an unanswered send handled as a draft's lost append", "if (sendInFlight(fresh)) return searchSent(fresh, mb);", "",
+			null, (lib) => SEND_CASES.unanswered(lib), (x) => x.smtp === 1 && x.append === 0],
+		["MAYBE_SENT after the first search", "if (checks >= sendRules.SEARCH_AFTER_MS.length) {", "if (checks >= 1) {",
+			null, (lib) => SEND_CASES.unanswered(lib), (x) => x.states[0][1] === "SEND_UNCONFIRMED"],
+		["a refused send searched for instead of drafted", "if (outcome !== \"unknown\") {", "if (false) {",
+			null, (lib) => SEND_CASES.smtpRefused(lib, "REFUSED"), (x) => x.append === 2],
+		["no stop for a load changed after its send", "stopSending(\"LOAD_CHANGED_AFTER_SEND\", c);", "",
+			null, (lib) => SEND_CASES.changedAfterSend(lib), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND"],
+		["a send recorded as a draft", "const via = c.delivery === \"send\" ? rules.VIA_SEND : rules.VIA_DRAFT;", "const via = rules.VIA_DRAFT;",
+			null, (lib) => SEND_CASES.sends(lib), (x) => JSON.stringify(x.rows) === JSON.stringify([{ invoice_id: "10202026-1", via: "auto-smtp" }])],
+		["no auto_invoice_sent row", "audit(\"auto_invoice_sent\", c.load_id,", "void (\"auto_invoice_sent\", c.load_id,",
+			null, (lib) => SEND_CASES.sends(lib), (x) => x.sentRows.length === 1],
+		["a sent row shown as a draft", "...(c.state === \"drafted\" && sendRules.claimSent(c) ? { sent: true } : {}),", "",
+			null, (lib) => SEND_CASES.sends(lib), (x) => x.annotation && x.annotation.sent === true],
+		["the sweep moves a send being searched for", "if (sendInFlight(c) && c.state !== \"needs_attention\") continue;", "",
+			null, (lib) => SEND_CASES.handDraftWhileSearching(lib), (x) => x.searching && x.searching[1] === "SEND_UNCONFIRMED"],
+		["the button refuses a preview", "if (dryRun === true) return { ok: true };", "",
+			null, (lib) => SEND_CASES.button(lib), (x) => x.workingPreview === "ok" && x.preview === "ok"],
+		["the stop route mounted with sending off", "\t\tif (sending) {\n\t\t\tconst limited", "\t\tif (true) {\n\t\t\tconst limited",
+			null, (lib) => SEND_CASES.stopRoute(lib, { send: { enabled: false, domains: [SEND_DOMAIN] } }), (x) => x.registered === false],
+		["no row for the allowlist's refusal", "} else if (g && g.why === \"DOMAIN_NOT_LISTED\") {", "} else if (false) {",
+			null, (lib) => SEND_CASES.drafts(lib, { send: { enabled: true, domains: ["example-other.test"] } }), (x) => x.refused.length === 1],
+	];
+	for (const [label, from, to, , run, pinned] of jobMutants) {
+		const lib = mutantModule(JOB_FILE, from, to);
+		ok(lib, `§24 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+		if (!lib) continue;
+		ok(pinned(await run(jobLib)) && !pinned(await run(lib)), `§24 MUTANT ${label}: caught`);
+	}
+	// The ledger's own decisions, put in place through its exports for the case.
+	const ledgerMutants = [
+		["beginSend() without the marker", "\t\tif (factoredOrUnreadable(db, key)) return { ok: false, reason: \"factored\" };\n\t\ttransition(", "\t\ttransition(", "beginSend",
+			() => SEND_CASES.factoredAtSend(jobLib), (x) => x.smtp === 0],
+		["beginSend() without the stop", "\t\tif (getSendStop(db)) return { ok: false, reason: \"stopped\" };\n", "", "beginSend",
+			() => SEND_CASES.stopAtSend(jobLib), (x) => x.smtp === 0],
+		["beginSend() without the hand-draft check", "\t\tif (otherDraftRows(db, claim).length) return { ok: false, reason: \"drafted\" };\n\t\tif (getSendStop", "\t\tif (getSendStop", "beginSend",
+			() => SEND_CASES.handDraftAtSend(jobLib), (x) => x.smtp === 0],
+		["the sent row taken for somebody else's", "rules.isJobVia(r.via) && claim.invoice_id && r.invoice_id === claim.invoice_id", "r.via === \"auto-imap\" && claim.invoice_id && r.invoice_id === claim.invoice_id", "otherDraftRows",
+			() => SEND_CASES.sends(jobLib), (x) => x.other === 0],
+		["a voided number used again", "const usable = Boolean(claim.invoice_id) && !claim.number_voided_at;", "const usable = Boolean(claim.invoice_id);", "reserveNumber",
+			async () => {
+				const r = await SEND_CASES.factoredAtSend(jobLib);
+				if (!r.w.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'load_factoring'").get()) return { fresh: false };
+				r.w.db.prepare("DELETE FROM load_factoring").run();
+				const f = fakeApp();
+				r.job.mount(f.app, { requireRole: f.requireRole });
+				await f.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "ld-test-0510" } });
+				r.w.now += 5 * MIN;
+				await r.job.tick();
+				return { fresh: claimOf(r.w, "LD-TEST-0510").invoice_id !== r.number };
+			}, (x) => x.fresh === true],
+	];
+	for (const [label, from, to, name, run, pinned] of ledgerMutants) {
+		const lib = mutantModule(LEDGER_FILE, from, to);
+		ok(lib, `§24 MUTANT ${label}: applied to lib/auto-invoice-ledger.js once`);
+		if (!lib) continue;
+		const real = pinned(await run());
+		const mutated = pinned(await withPatched([[ledgerLib, name, lib[name]]], run));
+		ok(real && !mutated, `§24 MUTANT ${label}: caught`);
+	}
+	const markMutant = mutantModule(FACTORING_FILE, "\t\tif (autoClaimSent(db, k)) return refusal(\"INVOICE_ALREADY_SENT\");\n", "");
+	ok(markMutant, "§24 MUTANT mark() without the unconfirmed-send check: applied to lib/factoring-store.js once");
+	if (markMutant && factoringStore) {
+		const real = await SEND_CASES.markWhileUnconfirmed(jobLib);
+		const mutated = await withPatched([[factoringStore, "mark", markMutant.mark]], () => SEND_CASES.markWhileUnconfirmed(jobLib));
+		ok(real.mark === "INVOICE_ALREADY_SENT" && mutated.mark !== "INVOICE_ALREADY_SENT", "§24 MUTANT mark() without the unconfirmed-send check: caught");
+	}
+	for (const [label, from, to] of [
+		["the marker read before the stop", "\t\tif (getSendStop(db)) return { ok: false, reason: \"stopped\" };\n\t\tif (factoredOrUnreadable(db, key)) return { ok: false, reason: \"factored\" };",
+			"\t\tif (factoredOrUnreadable(db, key)) return { ok: false, reason: \"factored\" };\n\t\tif (getSendStop(db)) return { ok: false, reason: \"stopped\" };"],
+	]) {
+		const src = fs.readFileSync(LEDGER_FILE, "utf8");
+		ok(src.split(from).length === 2 && !sendOrder(src.replace(from, to), JOB_SRC).ordered, `§24 MUTANT ${label}: caught by the order check`);
+	}
+	if (sendLib) {
+		const RESUME_FILE = path.join(ROOT, "scripts", "auto-invoice-send-resume.js");
+		const resumeMutant = mutantModule(RESUME_FILE, "\t\tif (unconfirmed > 0) throw new Refusal(", "\t\tif (false) throw new Refusal(");
+		ok(resumeMutant, "§24 MUTANT resume without the unconfirmed-send refusal: applied once");
+		if (resumeMutant) {
+			const w = sendWorld();
+			await sendStarted(jobLib, w);
+			w.db.exec("CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, user_id INTEGER, username TEXT, role TEXT, action TEXT, entity TEXT, entity_id TEXT, details TEXT)");
+			w.db.prepare("INSERT INTO auto_invoice_claims (load_key, load_id, state, reason_code, first_seen_at, stage, delivery, updated_at) VALUES ('ld-test-0596', 'LD-TEST-0596', 'needs_attention', 'MAYBE_SENT', ?, 'appending', 'send', ?)")
+				.run(new Date(w.now).toISOString(), new Date(w.now).toISOString());
+			ledgerLib.setSendStop(w.db, { reason: "MAYBE_SENT", nowIso: new Date(w.now).toISOString() });
+			let caught = false;
+			try { resumeMutant.run({ db: w.db, dryRun: true }); } catch { caught = true; }
+			ok(!caught, "§24 MUTANT resume without the unconfirmed-send refusal: caught (the mutant resumes; the real script refuses, above)");
+		}
+		const pureMutants = [
+			["the gate ignores the stop", "\tif (stopped) return { send: false, why: \"STOPPED\" };\n", ""],
+			["a subdomain taken as listed", "if (!domain || !(settings.domains || []).includes(domain)) return { send: false, why: \"DOMAIN_NOT_LISTED\" };",
+				"if (!domain || !(settings.domains || []).some((x) => domain === x || domain.endsWith(`.${x}`))) return { send: false, why: \"DOMAIN_NOT_LISTED\" };"],
+			["the flag read loosely", "String(e.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim() === \"true\"", "/^(true|1|yes)$/i.test(String(e.AUTO_INVOICE_SEND_ENABLED ?? \"\").trim())"],
+			["on in a replica", "const enabled = replica !== true && ", "const enabled = "],
+			["the To compared loosely", "if (!to || rules.normalizeEmail(to) !== to || to.toLowerCase() !== String(planned || \"\").toLowerCase()) return \"RECIPIENT\";",
+				"if (!to || !to.toLowerCase().includes(String(planned || \"\").toLowerCase())) return \"RECIPIENT\";"],
+			["a Cc or Bcc let through", "if (JSON.stringify(Object.keys(m).sort()) !== JSON.stringify(MESSAGE_KEYS)) return \"HEADERS\";", ""],
+			["files not the render's own", "atts !== rendered.attachments || ", ""],
+			["the rate con not matched to the invoice", "if (names[names.length - 1] !== rateCon || names.indexOf(rateCon) !== names.length - 1) return \"ATTACHMENTS\";", ""],
+			["an unanswered DATA taken as refused", "if (String((e && e.command) || \"\") === \"CONN\") return \"refused\";", "if (String((e && e.command) || \"\") !== \"\") return \"refused\";"],
+		];
+		for (const [label, from, to] of pureMutants) {
+			const lib = mutantModule(SEND_FILE, from, to);
+			ok(lib, `§24 MUTANT ${label}: applied to lib/auto-invoice-send.js once`);
+			if (lib) ok(JSON.stringify(pure(lib)) !== JSON.stringify(PURE_WANT), `§24 MUTANT ${label}: caught`);
+		}
 	}
 }
 
