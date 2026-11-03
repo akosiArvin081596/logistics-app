@@ -19,6 +19,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   RENDERER_BUSY: { short: 'PDF renderer busy', text: 'The PDF renderer was busy. It is tried again in a few minutes.' },
   MAILBOX_PAUSED: { short: 'Gmail paused', text: 'Gmail refused the mailbox login, so automatic drafts are paused. They try again on their own.' },
   SETTINGS_UNREADABLE: { short: 'opt-out list unreadable', text: 'The opt-out list could not be read, so nothing is drafted. Save the opt-out list again.' },
+  SEND_UNCONFIRMED: { short: 'checking Sent Mail', text: 'The invoice email got no answer from Gmail, so it may have been sent. Sent Mail is checked again shortly. It is never sent twice.' },
   ALREADY_DRAFTED: { short: 'drafted by hand', text: 'An invoice draft already existed for this load.' },
   DRAFTED_BY_HAND: { short: 'drafted by hand', text: 'Someone drafted this invoice by hand.' },
   BROKER_OPTED_OUT: { short: 'broker opted out', text: 'This broker is opted out of automatic drafts.' },
@@ -46,6 +47,8 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   DRAFT_FAILED: { short: 'Gmail kept failing', text: 'Saving the draft to Gmail kept failing. Try again, or draft it by hand.' },
   MAYBE_IN_GMAIL: { short: 'may already be in Gmail', text: 'The draft may already be in Gmail. Try again looks for it in Drafts and Sent Mail first; or check Gmail Drafts and Sent Mail.' },
   IN_GMAIL_UNRECORDED: { short: 'in Gmail, not recorded', text: "The draft is in Gmail, but LogisX couldn't record it. Check Gmail Drafts and Sent Mail before drafting again." },
+  SEND_REFUSED: { short: 'not sent: last check failed', text: "The invoice email failed its last check before sending (recipient or attachments), so nothing was sent. Draft it by hand and check it." },
+  MAYBE_SENT: { short: 'may already be sent', text: "The invoice email may have been sent to the broker, but it wasn't found in Gmail Sent Mail. Check Sent Mail before drafting it again. Try again searches Sent Mail once more; it never sends." },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
@@ -74,7 +77,9 @@ function changedOf(status) {
 export function changedText(status) {
   const fields = changedOf(status)
   if (!fields.length) return ''
-  return `Changed since the draft: ${fields.map((f) => AUTO_INVOICE_CHANGED_WORDS[f]).join(', ')}. Check the draft in Gmail, then Mark checked.`
+  const list = fields.map((f) => AUTO_INVOICE_CHANGED_WORDS[f]).join(', ')
+  if (status.sent === true) return `Changed since the invoice was sent to the broker: ${list}. Check with the broker whether a corrected invoice is needed, then Mark checked.`
+  return `Changed since the draft: ${list}. Check the draft in Gmail, then Mark checked.`
 }
 
 // The chip for a row's `_autoInvoice`: { label, tone, reason }, or null when
@@ -84,8 +89,13 @@ export function autoInvoiceChip(status) {
   const reason = reasonOf(status.code)
   switch (status.state) {
     case 'drafted': {
-      if (changedOf(status).length) return { label: 'Draft ready in Gmail: load changed', tone: 'warn', reason: changedText(status) }
       const id = typeof status.invoiceId === 'string' ? status.invoiceId : ''
+      // Sent by the automatic job: it is in Sent Mail, and nobody sends it again.
+      if (status.sent === true) {
+        if (changedOf(status).length) return { label: 'Sent to the broker: load changed', tone: 'warn', reason: changedText(status) }
+        return { label: 'Sent to the broker', tone: 'ok', reason: id ? `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` : 'The invoice was sent to the broker automatically. Its copy is in Gmail Sent Mail.' }
+      }
+      if (changedOf(status).length) return { label: 'Draft ready in Gmail: load changed', tone: 'warn', reason: changedText(status) }
       return { label: 'Draft ready in Gmail', tone: 'ok', reason: id ? `Invoice ${id} is in Gmail Drafts. Check it and send it.` : 'The invoice is in Gmail Drafts. Check it and send it.' }
     }
     case 'waiting':
@@ -93,6 +103,7 @@ export function autoInvoiceChip(status) {
       if (status.code === 'RATECON_MISSING') return { label: 'Waiting for the rate con', tone: 'muted', reason: reason.text }
       return { label: reason ? `Waiting: ${reason.short}` : 'Waiting', tone: 'muted', reason: reason ? reason.text : '' }
     case 'queued':
+      if (status.code === 'SEND_UNCONFIRMED') return { label: 'Checking Sent Mail', tone: 'warn', reason: reason.text }
       return { label: 'Drafting soon', tone: 'muted', reason: reason ? reason.text : 'The draft will be made shortly.' }
     case 'working':
       return { label: 'Drafting now', tone: 'muted', reason: 'The draft is being made.' }
@@ -132,9 +143,18 @@ export function draftMadeSince(known, latest) {
 
 export const DRAFT_RECHECK_FAILED_TEXT = 'Could not check whether an invoice draft was made for this load since you opened it. Approve anyway?'
 
+// The automatic job's own rows: its Gmail draft, and an invoice it sent
+// (JOB_VIAS in lib/auto-invoice-rules.js).
+const AUTO_DRAFT_VIA = 'auto-imap'
+const AUTO_SENT_VIA = 'auto-smtp'
+export const AUTO_INVOICE_VIAS = Object.freeze([AUTO_DRAFT_VIA, AUTO_SENT_VIA])
+
 export function draftMadeSinceText(latest) {
   const id = latest && typeof latest.invoice_id === 'string' && latest.invoice_id ? ` (invoice ${latest.invoice_id})` : ''
-  const who = latest && latest.via === 'auto-imap' ? 'The automatic invoice drafts made' : 'Someone made'
+  if (latest && latest.via === AUTO_SENT_VIA) {
+    return `The automatic invoice job SENT an invoice for this load to the broker${id} since you opened it. Approving creates ANOTHER invoice with a new invoice number. Continue?`
+  }
+  const who = latest && latest.via === AUTO_DRAFT_VIA ? 'The automatic invoice drafts made' : 'Someone made'
   return `${who} an invoice draft for this load${id} since you opened it. Approving creates ANOTHER Gmail draft with a new invoice number (that draft is NOT removed). Continue?`
 }
 
@@ -151,6 +171,52 @@ export async function recheckLoadDrafts({ known = null, readLatest, confirm }) {
   }
   if (!draftMadeSince(known, latest)) return { go: true, asked: false, latest }
   return { go: confirm(draftMadeSinceText(latest)) === true, asked: true, latest }
+}
+
+// --- Approve on a load whose invoice the automatic job sent ---
+// The server answers 409 INVOICE_ALREADY_SENT; another invoice goes only with a
+// reason the person types, which the server records.
+export const isReissueRefusal = (e) => Boolean(e && e.status === 409 && e.code === 'INVOICE_ALREADY_SENT')
+
+export function reissuePrompt(e) {
+  const said = (e && typeof e.message === 'string' && e.message) || "This load's invoice was already sent to the broker automatically."
+  return `${said}\n\nTo issue another invoice anyway, type the reason (it is recorded). Cancel keeps things as they are.`
+}
+
+// The approve body again with the re-issue confirmed, or null when no reason was
+// typed (Cancel, or only spaces).
+export function reissueBody(body, reason) {
+  const why = typeof reason === 'string' ? reason.trim().slice(0, 200) : ''
+  if (!why) return null
+  return { ...(body && typeof body === 'object' ? body : {}), confirmReissue: true, reissueReason: why }
+}
+
+// --- Automatic sending (AUTO_INVOICE_SEND_ENABLED), in the settings dialog ---
+// The settings read carries `send` ({ domains, stopped: { at, reason } | null })
+// only while sending is on. Why it stopped, by the server's codes
+// (STOP_WORDS in lib/auto-invoice-send.js; pinned equal by the runner).
+export const AUTO_INVOICE_STOP_WORDS = Object.freeze({
+  STOPPED_BY_ADMIN: 'A Super Admin stopped it.',
+  SMTP_LOGIN_REFUSED: 'Gmail refused the mailbox login for sending.',
+  SMTP_REFUSED: 'Gmail refused an invoice email.',
+  SEND_UNANSWERED: 'Gmail did not answer an invoice email, so it may have been sent.',
+  MAYBE_SENT: 'An invoice email may have been sent but was not found in Sent Mail.',
+  LOAD_CHANGED_AFTER_SEND: 'A load changed after its invoice was sent.',
+})
+
+export const AUTO_SEND_STOP_CONFIRM = 'Stop sending invoices automatically? Invoices will be drafted in Gmail for a person to send. Only the server can turn sending back on.'
+
+// The dialog's sentence about sending, and whether Stop is offered.
+export function autoSendState(send) {
+  if (!send || typeof send !== 'object') return null
+  const domains = Array.isArray(send.domains) ? send.domains.filter((d) => typeof d === 'string') : []
+  const where = domains.length ? domains.join(', ') : 'no domain'
+  const stopped = send.stopped && typeof send.stopped === 'object' ? send.stopped : null
+  if (stopped) {
+    const why = typeof stopped.reason === 'string' && Object.hasOwn(AUTO_INVOICE_STOP_WORDS, stopped.reason) ? ` ${AUTO_INVOICE_STOP_WORDS[stopped.reason]}` : ''
+    return { stopped: true, canStop: false, text: `Automatic sending is stopped.${why} Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.` }
+  }
+  return { stopped: false, canStop: true, text: `On: invoices to ${where} are sent to the broker automatically, with the POD and the rate con, and their copies are in Gmail Sent Mail. Other brokers get Gmail drafts.` }
 }
 
 // The automatic-draft settings dialog's Save: only once this opening's read has
