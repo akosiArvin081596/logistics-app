@@ -73800,9 +73800,11 @@ const chr = chrIntegration.create({
 	logAudit,
 	// The page's live refresh: no payload, Super Admins' room only.
 	onChange: () => io.to("super-admin").emit("chr:changed"),
+	// Who may choose Live: the listed accounts only (A3).
+	listedAccounts: RATECON_PDF_VIEWERS,
 	log: console,
 });
-chr.mount(app, { requireRole });
+chr.mount(app, { requireRole, refuseCrossOrigin });
 if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
 	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
 }

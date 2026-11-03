@@ -10,8 +10,9 @@
 //   §3  create(): only the listed dependencies (no Sheets, Drive, mail or
 //       network client can be handed in); a config from chrConfig() only
 //   §4  the instance: the config view; mount(): one app.use behind
-//       requireRole("Super Admin") (none without it), GET /status and a JSON
-//       404 (FEATURE_OFF while off); status() { enabled: false } read from
+//       requireRole("Super Admin") (none without it or the same-origin guard),
+//       the page's router (scripts/test-chr-routes.js runs it over HTTP): GET
+//       /status and a JSON 404 FEATURE_OFF while off; status() { enabled: false } read from
 //       nothing while off; jobs(): the recorder while on, the prune whenever
 //       the tables exist (NL5); the two intervals; sweep() with the switch
 //       off; prune() whatever the switch
@@ -130,7 +131,8 @@ function deps(over = {}) {
 		...over,
 	};
 }
-eq(I.DEP_NAMES, ["db", "config", "readSheet", "stopPointsFor", "truckResolver", "deviceResolver", "instructionStopsFor", "logAudit", "onChange", "now", "log"], "§3 the dependency list (plan 4.1)");
+eq(I.DEP_NAMES, ["db", "config", "readSheet", "stopPointsFor", "truckResolver", "deviceResolver", "instructionStopsFor", "logAudit", "onChange", "listedAccounts", "now", "log"],
+	"§3 the dependency list (plan 4.1; the listed accounts for who may choose Live, A3)");
 for (const name of ["sheets", "getSheets", "drive", "getDrive", "sendEmail", "appendGmailDraft", "transporter", "fetch", "env", "transport", "io"]) {
 	throws(() => I.create(deps({ [name]: () => {} })), /not a dependency/, `§3 ${name} is refused: the lib can never be handed it`);
 }
@@ -152,32 +154,36 @@ eq(inst.config(), { updatesEnabled: false, sendEnabled: false, locationEnabled: 
 ok(!JSON.stringify(inst.config()).includes(DENY_CANARY), "§4 ...and so no deny value");
 eq([inst.sweepIntervalMs, inst.pruneIntervalMs], [60 * 1000, 24 * 60 * 60 * 1000], "§4 one sweep a minute, one prune a day");
 eq([I.MOUNT_PATH, I.NOTICE_TYPE], ["/api/integrations/chr", "chr-attention"], "§4 the mount path and the notice type server.js hides from every role but Super Admin");
-// mount(): one registration, the role gate first. Any other app call throws.
+// mount(): app.get, put, post and use only, each with the role gate first. Any
+// other app call throws.
 function mountOn(instance, guards) {
 	const regs = [];
-	const app = new Proxy({}, { get: (_t, k) => (k === "use" ? (...a) => regs.push(a) : () => { throw new Error(`mount() called app.${String(k)}`); }) });
+	const app = new Proxy({}, { get: (_t, k) => (["get", "put", "post", "use"].includes(k) ? (...a) => regs.push([k, ...a]) : () => { throw new Error(`mount() called app.${String(k)}`); }) });
 	instance.mount(app, guards);
 	return regs;
 }
 guarded("§4 mount(), the routes, status() and jobs()", () => {
 	const gateCalls = [];
 	const gate = () => {};
-	const regs = mountOn(inst, { requireRole: (...roles) => { gateCalls.push(roles); return gate; } });
-	eq([regs.length, regs[0] && regs[0][0], regs[0] && regs[0][1] === gate, regs[0] && regs[0].length, gateCalls], [1, "/api/integrations/chr", true, 3, [["Super Admin"]]],
-		"§4 mount(): one app.use at /api/integrations/chr, requireRole(\"Super Admin\") first, then the routes");
+	const sameOrigin = (req, res, next) => next();
+	const regs = mountOn(inst, { requireRole: (...roles) => { gateCalls.push(roles); return gate; }, refuseCrossOrigin: sameOrigin });
+	eq([regs.map((r) => [r[0], r[1], r[2] === gate, r.length]), gateCalls], [[["get", "/api/integrations/chr/status", true, 4], ["use", "/api/integrations/chr", true, 4]], [["Super Admin"]]],
+		"§4 mount() while off: GET /status and a catch-all at /api/integrations/chr, requireRole(\"Super Admin\") first on each");
 	throws(() => mountOn(inst), /requireRole/, "§4 mount() without requireRole throws: no CHR path is ever served ungated");
-	throws(() => mountOn(inst, { requireRole: "Super Admin" }), /requireRole/, "§4 ...nor with anything else in its place");
-	// The routes as Express calls them past the gate, with the mount path stripped.
+	throws(() => mountOn(inst, { requireRole: "Super Admin", refuseCrossOrigin: sameOrigin }), /requireRole/, "§4 ...nor with anything else in its place");
+	throws(() => mountOn(inst, { requireRole: () => gate }), /refuseCrossOrigin/, "§4 mount() without refuseCrossOrigin throws: no CHR write is ever served unguarded");
+	// Each handler as Express calls it past the gate.
 	const answer = (handler, method, p) => {
 		const out = { code: 200, body: undefined, next: false };
 		const res = { status(c) { out.code = c; return res; }, json(b) { out.body = b; return res; } };
-		handler({ method, path: p }, res, () => { out.next = true; });
+		handler({ method, url: p, path: p, query: {} }, res, () => { out.next = true; });
 		return out;
 	};
-	const offRoutes = regs[0] && regs[0][2];
-	eq(answer(offRoutes, "GET", "/status"), { code: 200, body: { enabled: false }, next: false }, "§4 off: GET /status answers { enabled: false }");
+	const handlerOf = (rs, verb, p) => { const r = rs.find((x) => x[0] === verb && x[1] === p); return r ? r[r.length - 1] : () => {}; };
+	eq(answer(handlerOf(regs, "get", "/api/integrations/chr/status"), "GET", "/status"), { code: 200, body: { enabled: false }, next: false }, "§4 off: GET /status answers { enabled: false }");
+	const offAll = handlerOf(regs, "use", "/api/integrations/chr");
 	for (const [m, p] of [["GET", "/"], ["GET", "/events"], ["POST", "/status"], ["PUT", "/settings"], ["GET", "/loads/123456789"], ["GET", "/status/x"]]) {
-		eq(answer(offRoutes, m, p), { code: 404, body: { error: "Not found", code: "FEATURE_OFF" }, next: false }, `§4 off: ${m} ${p} answers 404 FEATURE_OFF and never falls through`);
+		eq(answer(offAll, m, p), { code: 404, body: { error: "Not found", code: "FEATURE_OFF" }, next: false }, `§4 off: ${m} ${p} answers 404 FEATURE_OFF and never falls through`);
 	}
 	const unreadable = { prepare: () => { throw new Error("made-up: nothing may be read"); } };
 	eq(I.create(deps({ db: unreadable, config: I.chrConfig({}) })).status(), { enabled: false }, "§4 off: status() reads nothing (a database that refuses every read)");
@@ -189,13 +195,17 @@ guarded("§4 mount(), the routes, status() and jobs()", () => {
 	const dOn = deps({ config: I.chrConfig({ updatesEnabled: true, denyList: DENY_CANARY }), now: () => Date.parse("2026-11-02T15:00:00Z"), log: quietLog });
 	const onInst = I.create(dOn);
 	eq(onInst.jobs(), { sweep: true, prune: true }, "§4 on: the recorder and the prune");
-	eq(onInst.status(), { enabled: true, sendEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", lastTickAt: "", lastSweepOk: "", lastErrorCode: "" },
-		"§4 on: status() gives the switches, each kind's effective mode and the recorder's last tick");
+	eq(onInst.status(), { enabled: true, sendEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", settings: { ...S.DEFAULT_SETTINGS }, lastTickAt: "", lastSweepOk: "", lastErrorCode: "" },
+		"§4 on: status() gives the switches, each kind's effective mode, the page's settings and the recorder's last tick");
 	ok(!JSON.stringify(onInst.status()).includes(DENY_CANARY), "§4 ...and no deny value (NL1)");
 	eq(dOn.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'chr_%'").get().n, 0, "§4 ...read from the settings and state, with no table made");
-	const onRoutes = mountOn(onInst, { requireRole: () => gate })[0][2];
-	eq([answer(onRoutes, "GET", "/status").body.enabled, answer(onRoutes, "GET", "/events")], [true, { code: 404, body: { error: "Not found", code: "NOT_FOUND" }, next: false }],
-		"§4 on: GET /status is the status; any other path a JSON 404 until the page's routes exist");
+	const onRegs = mountOn(onInst, { requireRole: () => gate, refuseCrossOrigin: sameOrigin });
+	eq([onRegs.every((r) => r[2] === gate), onRegs[onRegs.length - 1].slice(0, 2)], [true, ["use", "/api/integrations/chr"]], "§4 on: every route behind the gate; the catch-all last");
+	eq([answer(handlerOf(onRegs, "get", "/api/integrations/chr/status"), "GET", "/status").body.enabled, answer(handlerOf(onRegs, "get", "/api/integrations/chr/events"), "GET", "/events"),
+		answer(handlerOf(onRegs, "use", "/api/integrations/chr"), "GET", "/nothing")],
+		[true, { code: 200, body: { events: [], next: null }, next: false }, { code: 404, body: { error: "Not found", code: "NOT_FOUND" }, next: false }],
+		"§4 on: GET /status is the status; GET /events the (empty) send log; any other path a JSON 404 (scripts/test-chr-routes.js runs every route over HTTP)");
+	eq(dOn.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'chr_%'").get().n, 0, "§4 ...and reading them made no table");
 });
 
 async function asyncChecks() {
