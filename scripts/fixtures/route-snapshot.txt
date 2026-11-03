@@ -44,6 +44,7 @@ GET /api/admin/period-lock-issues · requireRole("Super Admin")=anon@12b84c4b013
 POST /api/admin/ratecon-index · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · rateconIndexLimiter=limiter · inline@b8e2ac71b634
 GET /api/admin/ratecon-reconcile · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · rateconReconcileLimiter=limiter · inline@5bbd5008e653
 POST /api/admin/ratecon-reconcile/run · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · rateconReconcileLimiter=limiter · inline@886484d835b0
+GET /api/admin/receipt-auto-approve · anon@12b84c4b0134 · anon@d9d42eb8ab85 · (lib mount)
 POST /api/admin/remove-rows · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7d07429533a6
 ALL /api/admin/routemate/sync-now · inline@0eb4422cf678
 POST /api/admin/routemate/sync-now · requireRole("Super Admin")=anon@12b84c4b0134 · routemateSyncNowHandler@657fa7b28d41 | after: ALL /api/admin/routemate/sync-now
@@ -142,7 +143,7 @@ POST /api/expenses/:id/personal/reverse · requireRole("Super Admin")=anon@12b84
 GET /api/expenses/:id/receipt-pages · requireRole("Super Admin")=anon@12b84c4b0134 · receiptPagesLimiter=limiter · inline@a0e4cfda1ab8
 POST /api/expenses/:id/receipt-pages/:page · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · receiptPagesLimiter=limiter · inline@c0c52349f763
 GET /api/expenses/:id/receipt-thumbnail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@35a780e954fc
-PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3290dfb13c70
+PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@21d4e4ec31f8
 PATCH /api/expenses/:id/vendor · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f6b7ed0bc20
 GET /api/expenses/ai/insights · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · insightsCacheGate@9f2abb4009f7 · expenseAiLimiter=limiter · inline@f4a9780b3065
 POST /api/expenses/ai/query · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseAiLimiter=limiter · inline@6a4671ec31e4
@@ -151,7 +152,7 @@ GET /api/expenses/analytics · requireRole("Super Admin", "Dispatcher")=anon@12b
 DELETE /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@b0ffc7c60693
 GET /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@cf7e89f29561
 PUT /api/expenses/bulk-draft · requireAuth@2f5c61384511 · bulkDraftLimiter=limiter · inline@9f9e93b38128
-PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@6ec648ca3c3d
+PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4bc39f485e81
 GET /api/expenses/fuel-analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · fuelAnalyticsLimiter=limiter · inline@42166b2c8a68
 POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter · inline@ea8104cc4944
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
