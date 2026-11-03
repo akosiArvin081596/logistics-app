@@ -448,6 +448,16 @@ function checkRoutes(routesSrc) {
 	c.eq([off.routes.markingOn, o.status, o.body, marker(off.db, "ld-test-0003").locked_via], [false, 200, { ok: true, locked: true }, "outside"],
 		"§9 \"Handled in Triumph's process\" works with every switch off (no switch)");
 	c.eq(off.outside(ME, 3).body.code, "FACTORING_LOCKED", "§9 ...once");
+	// The dashboard's annotation: a Super Admin's rows only.
+	const rows = () => [{ "Load ID": "LD-TEST-0003" }, { "Load ID": "LD-TEST-0006" }];
+	const headers = ["Load ID", "Job Status"];
+	const dispatcherRows = { active: rows(), completed: rows() };
+	off.routes.annotateDashboard({ session: { user: { id: 2, username: "made-up-dispatch", role: "Dispatcher" } } }, { headers, ...dispatcherRows });
+	c.eq([...dispatcherRows.active, ...dispatcherRows.completed].map((r) => Object.keys(r).length), [1, 1, 1, 1], "§9 a Dispatcher's rows get nothing");
+	const adminRows = { active: rows(), completed: rows() };
+	off.routes.annotateDashboard({ session: { user: OTHER } }, { headers, ...adminRows });
+	c.eq([adminRows.completed[0]._factoring && adminRows.completed[0]._factoring.factored, adminRows.completed[1]._factoring, adminRows.active[0]._factoring.canRecordOutside],
+		[true, undefined, false], "§9 a Super Admin's rows: the marked load only; an unlisted one may not record");
 	return c;
 }
 section("§9  the routes: who may mark, the switch");
@@ -507,6 +517,7 @@ const ROUTE_MUTANTS = [
 	["marking with the switch off", "if (!markingOn) return res.status(404)", "if (false) return res.status(404)"],
 	["a replica marks", "const markingOn = !replica && ", "const markingOn = "],
 	["the shared login listed", "&& !isSharedLoginName(user.username)", ""],
+	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
 	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
 		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
 	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", ...writeGuard, (req, res) => {\n",
