@@ -22,6 +22,7 @@
 //   node scripts/test-owner-operator-apply-client.mjs    # exits 1 on any failure
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -39,10 +40,15 @@ const eq = (name, got, want) => ok(name, JSON.stringify(got) === JSON.stringify(
 const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return '' } }
 
 const LIB_SRC = read(LIB_FILE)
+// A mutant of the module, loaded from a temp folder of its own: runners run side by side
+// and write nothing into the repo tree (scripts/run-unit-tests.js). The module imports nothing.
+const MUTANT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'oo-apply-client-'))
+process.on('exit', () => { try { fs.rmSync(MUTANT_DIR, { recursive: true, force: true }) } catch { /* scratch */ } })
+let mutantSeq = 0
 async function loadLib (text) {
-  const file = path.join(path.dirname(LIB_FILE), `.oo-apply-${process.pid}-${Math.random().toString(36).slice(2)}.mjs`)
+  const file = path.join(MUTANT_DIR, `mutant-${++mutantSeq}.mjs`)
   fs.writeFileSync(file, text)
-  try { return await import(pathToFileURL(file).href) } finally { fs.rmSync(file, { force: true }) }
+  return import(pathToFileURL(file).href)
 }
 const mutate = (text, from, to) => {
   const n = text.split(from).length - 1

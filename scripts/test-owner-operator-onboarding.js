@@ -12,8 +12,9 @@
  *   §3 the renderer (review L1 of #686): with OWNER_OPERATOR_ONBOARDING_ENABLED
  *      off the agreement renders only for a caller passing the profile path; the
  *      statement never does; a value other than true opens nothing
- *   §4 the flag-off baseline: the same requests against origin/main's server.js
- *      and this one, with the flag off, answer and write the same; the
+ *   §4 the flag-off baseline: the same requests, with the flag off, answer and
+ *      write as the base's server.js did (a fixture captured there with
+ *      --capture, through scripts/lib/server-source.js); the
  *      application's truck section is never read; `as: "owner_operator"` is 404
  *   §5 the application and the Applications screen with the flag on: the
  *      section stored beside its application, the category, source and truck
@@ -54,7 +55,6 @@ const os = require("os");
 const path = require("path");
 const http = require("http");
 const Module = require("module");
-const { execFileSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const { serverSource } = require("./lib/server-source");
@@ -407,16 +407,11 @@ function rendererSection(c, renderer = require(RENDERER_FILE)) {
 	}
 }
 
-// ── §4 the flag-off baseline: origin/main's server.js against this one ────────
-function baseSource() {
-	const file = path.join(TMP, "base-server.js");
-	try {
-		fs.writeFileSync(file, execFileSync("git", ["-C", ROOT, "show", "origin/main:server.js"], { maxBuffer: 1 << 28 }));
-	} catch (e) {
-		return null;
-	}
-	return serverSource({ file });
-}
+// ── §4 the flag-off baseline: the base's answers (a fixture) against this code ──
+// Captured on the base's own server.js, read through scripts/lib/server-source.js:
+//   SERVER_ROOT=<a checkout of the base> node scripts/test-owner-operator-onboarding.js --capture=<file>
+const FIXTURE = path.join(__dirname, "fixtures", "owner-operator-onboarding-flag-off.json");
+const CAPTURE = (process.argv.find((a) => a.startsWith("--capture=")) || "").slice("--capture=".length);
 // The stamps SQLite writes itself (CURRENT_TIMESTAMP), which the fixed Date can't
 // reach: dropped at any depth, so two worlds a second apart still compare equal.
 const CLOCK_FIELDS = new Set(["created_at", "updated_at", "signed_at", "timestamp", "signing_failed_at", "submitted_at", "onboarded_at", "deleted_at"]);
@@ -452,12 +447,11 @@ async function baselineScript(w) {
 	out.push(["mail", w.log.mail.map((m) => [m.to, m.subject, m.html.replace(/>[0-9a-f]{8}</g, ">(pw)<")])]);
 	return out;
 }
-async function baselineSection(c, base) {
-	if (!base) return c.ok("§4 origin/main's server.js could be read", false, "git show origin/main:server.js failed");
+async function baselineSection(c) {
 	let a = null;
 	let b = null;
-	seq = 1000;
-	await inWorld(c, "§4 the old code", { src: base, flag: false }, async (w) => { a = await baselineScript(w); });
+	try { a = JSON.parse(fs.readFileSync(FIXTURE, "utf8")).answers; } catch { a = null; }
+	c.ok("§4 the base's flag-off answers are on file (scripts/fixtures/owner-operator-onboarding-flag-off.json)", Array.isArray(a));
 	seq = 1000;
 	await inWorld(c, "§4 this code", { src: SRC, flag: false }, async (w) => {
 		b = await baselineScript(w);
@@ -472,7 +466,7 @@ async function baselineSection(c, base) {
 	if (a && b) {
 		for (let i = 0; i < Math.max(a.length, b.length); i++) {
 			const label = Array.isArray(a[i]) && typeof a[i][0] === "string" ? a[i][0] : `answer ${i + 1}`;
-			c.eq(`§4 flag off: ${label} the same on origin/main's server.js and this one`, b[i], a[i]);
+			c.eq(`§4 flag off: ${label} the same on the base's server.js and this one`, b[i], a[i]);
 		}
 	}
 }
@@ -881,7 +875,7 @@ function pinSection(c) {
 }
 
 // ── §12 mutants ───────────────────────────────────────────────────────────────
-async function mutants(c, base) {
+async function mutants(c) {
 	const runOn = async (name, build, check) => {
 		const sub = counter();
 		let built;
@@ -949,12 +943,23 @@ async function mutants(c, base) {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
-	const base = baseSource();
+	// --capture: the flag-off answers of the server.js the helper reads (SERVER_ROOT names
+	// the base), written to the file given; nothing else runs.
+	if (CAPTURE) {
+		let answers = null;
+		seq = 1000;
+		await inWorld(MAIN, "capture", { src: SRC, flag: false, lib: null }, async (w) => { answers = await baselineScript(w); });
+		if (!answers || MAIN.fail.length) { console.error(`capture failed: ${MAIN.fail.join("; ")}`); process.exit(1); }
+		fs.writeFileSync(CAPTURE, `${JSON.stringify({ about: "Flag-off answers of the base's server.js for scripts/test-owner-operator-onboarding.js §4 (made-up data). Re-capture with --capture when a later change to these routes is intended.", answers }, null, 1)}\n`);
+		try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* scratch */ }
+		console.log(`captured ${answers.length} answers to ${CAPTURE}`);
+		process.exit(0);
+	}
 	const steps = [
 		["§1 the pure rules", () => pureSection(MAIN)],
 		["§2 the stand-in other runners use", () => standInSection(MAIN)],
 		["§3 the renderer's flag gate and the profile path", () => rendererSection(MAIN)],
-		["§4 the flag-off baseline (origin/main's server.js)", () => baselineSection(MAIN, base)],
+		["§4 the flag-off baseline (the base's answers, a fixture)", () => baselineSection(MAIN)],
 		["§5 the application and the Applications screen", () => applicationSection(MAIN)],
 		["§6 acceptance as an owner-operator", () => acceptanceSection(MAIN)],
 		["§7 the agreement", () => agreementSection(MAIN)],
@@ -962,7 +967,7 @@ async function mutants(c, base) {
 		["§9 his directory row", () => directorySection(MAIN)],
 		["§10 no load before he signs or after his end week", () => loadsSection(MAIN)],
 		["§11 source pins", () => pinSection(MAIN)],
-		["§12 mutants", () => mutants(MAIN, base)],
+		["§12 mutants", () => mutants(MAIN)],
 	];
 	for (const [title, fn] of steps) {
 		const before = MAIN.pass + MAIN.fail.length;

@@ -1,0 +1,554 @@
+{
+ "about": "Flag-off answers of the base's server.js for scripts/test-owner-operator-onboarding.js §4 (made-up data). Re-capture with --capture when a later change to these routes is intended.",
+ "answers": [
+  {
+   "status": 200,
+   "body": {
+    "success": true,
+    "id": 1
+   }
+  },
+  {
+   "status": 200,
+   "body": {
+    "success": true,
+    "id": 2
+   }
+  },
+  {
+   "status": 200,
+   "body": [
+    {
+     "id": 1,
+     "full_name": "Alex Example 1001",
+     "email": "qa-oo-1001@example.com",
+     "phone": "(555) 555-011001",
+     "dob": "1990-01-01",
+     "address": "1 QA Test Way, Testville, TX 77001",
+     "drivers_license": "â¢â¢â¢â¢",
+     "position": "Company Driver",
+     "experience": "5",
+     "has_cdl": "Yes",
+     "work_authorized": "Yes",
+     "felony_convicted": "No",
+     "accident_history": "No",
+     "certifications": "",
+     "status": "New",
+     "city": "Testville",
+     "state": "TX",
+     "zip": "77001",
+     "cell": "",
+     "dot": "",
+     "mc": "",
+     "hazmat": "No",
+     "onboarding_user_id": null,
+     "onboarding_status": null,
+     "drug_test_result": null
+    },
+    {
+     "id": 2,
+     "full_name": "Alex Example 1002",
+     "email": "qa-oo-1002@example.com",
+     "phone": "(555) 555-011002",
+     "dob": "1990-01-01",
+     "address": "1 QA Test Way, Testville, TX 77001",
+     "drivers_license": "â¢â¢â¢â¢",
+     "position": "Owner Operator",
+     "experience": "5",
+     "has_cdl": "Yes",
+     "work_authorized": "Yes",
+     "felony_convicted": "No",
+     "accident_history": "No",
+     "certifications": "",
+     "status": "New",
+     "city": "Testville",
+     "state": "TX",
+     "zip": "77001",
+     "cell": "",
+     "dot": "",
+     "mc": "",
+     "hazmat": "No",
+     "onboarding_user_id": null,
+     "onboarding_status": null,
+     "drug_test_result": null
+    }
+   ]
+  },
+  {
+   "status": 200,
+   "body": {
+    "id": 2,
+    "full_name": "Alex Example 1002",
+    "email": "qa-oo-1002@example.com",
+    "phone": "(555) 555-011002",
+    "dob": "1990-01-01",
+    "address": "1 QA Test Way, Testville, TX 77001",
+    "ssn": "***-**-6789",
+    "drivers_license": "â¢â¢â¢â¢",
+    "position": "Owner Operator",
+    "experience": "5",
+    "has_cdl": "Yes",
+    "work_authorized": "Yes",
+    "felony_convicted": "No",
+    "felony_explanation": "",
+    "accident_history": "No",
+    "accident_description": "",
+    "traffic_citations": "",
+    "certifications": "",
+    "availability": "[\"Full-time\"]",
+    "skills": "",
+    "reference_info": "[]",
+    "additional_info": "",
+    "signature": "Alex Example",
+    "signature_date": "11/2/2026",
+    "status": "New",
+    "city": "Testville",
+    "state": "TX",
+    "zip": "77001",
+    "cell": "",
+    "dot": "",
+    "mc": "",
+    "hazmat": "No",
+    "onboarding_user_id": null,
+    "onboarding_status": null,
+    "drug_test_result": null
+   }
+  },
+  {
+   "status": 200,
+   "body": {
+    "success": true,
+    "accountCreated": true,
+    "credentials": {
+     "username": "LogisX-1001",
+     "tempPassword": "(random)",
+     "userId": 1,
+     "driverName": "Alex Example 1001"
+    }
+   }
+  },
+  {
+   "status": 200,
+   "body": {
+    "success": true
+   }
+  },
+  {
+   "status": 200,
+   "body": {
+    "onboarding": {
+     "id": 1,
+     "user_id": 1,
+     "application_id": 1,
+     "driver_name": "Alex Example 1001",
+     "status": "documents_pending"
+    },
+    "documents": [
+     {
+      "id": 1,
+      "user_id": 1,
+      "doc_key": "contractor_agreement",
+      "doc_name": "Contractor Agreement",
+      "signed": 0,
+      "signature_text": "",
+      "confidential": 1,
+      "signed_pdf_url": "",
+      "signing_error": "",
+      "different": null,
+      "truncated": null,
+      "effective_date": ""
+     },
+     {
+      "id": 2,
+      "user_id": 1,
+      "doc_key": "equipment_policy",
+      "doc_name": "Contracted Provider Equipment Policy",
+      "signed": 0,
+      "signature_text": "",
+      "confidential": 0,
+      "signed_pdf_url": "",
+      "signing_error": "",
+      "different": null,
+      "truncated": null,
+      "effective_date": ""
+     },
+     {
+      "id": 3,
+      "user_id": 1,
+      "doc_key": "w9",
+      "doc_name": "W-9 Tax Form",
+      "signed": 0,
+      "signature_text": "",
+      "confidential": 1,
+      "signed_pdf_url": "",
+      "signing_error": "",
+      "different": null,
+      "truncated": null,
+      "effective_date": ""
+     },
+     {
+      "id": 4,
+      "user_id": 1,
+      "doc_key": "mobile_policy",
+      "doc_name": "LogisX Inc. Mobile Policy",
+      "signed": 0,
+      "signature_text": "",
+      "confidential": 0,
+      "signed_pdf_url": "",
+      "signing_error": "",
+      "different": null,
+      "truncated": null,
+      "effective_date": ""
+     },
+     {
+      "id": 5,
+      "user_id": 1,
+      "doc_key": "substance_policy",
+      "doc_name": "Substance Policy and Procedure",
+      "signed": 0,
+      "signature_text": "",
+      "confidential": 0,
+      "signed_pdf_url": "",
+      "signing_error": "",
+      "different": null,
+      "truncated": null,
+      "effective_date": ""
+     }
+    ],
+    "totalDocs": 5
+   }
+  },
+  {
+   "status": 200,
+   "success": true
+  },
+  200,
+  200,
+  "application/pdf",
+  [
+   "job_applications",
+   [
+    {
+     "id": 1,
+     "full_name": "Alex Example 1001",
+     "email": "qa-oo-1001@example.com",
+     "phone": "(555) 555-011001",
+     "dob": "1990-01-01",
+     "address": "1 QA Test Way, Testville, TX 77001",
+     "ssn": "123-45-6789",
+     "drivers_license": "QA-TEST-DL",
+     "position": "Company Driver",
+     "experience": "5",
+     "has_cdl": "Yes",
+     "work_authorized": "Yes",
+     "felony_convicted": "No",
+     "felony_explanation": "",
+     "accident_history": "No",
+     "accident_description": "",
+     "traffic_citations": "",
+     "certifications": "",
+     "availability": "[\"Full-time\"]",
+     "skills": "",
+     "reference_info": "[]",
+     "additional_info": "",
+     "signature": "Alex Example",
+     "signature_date": "11/2/2026",
+     "status": "Accepted",
+     "cdl_front": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "cdl_back": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "medical_card": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "city": "Testville",
+     "state": "TX",
+     "zip": "77001",
+     "cell": "",
+     "dot": "",
+     "mc": "",
+     "hazmat": "No"
+    },
+    {
+     "id": 2,
+     "full_name": "Alex Example 1002",
+     "email": "qa-oo-1002@example.com",
+     "phone": "(555) 555-011002",
+     "dob": "1990-01-01",
+     "address": "1 QA Test Way, Testville, TX 77001",
+     "ssn": "123-45-6789",
+     "drivers_license": "QA-TEST-DL",
+     "position": "Owner Operator",
+     "experience": "5",
+     "has_cdl": "Yes",
+     "work_authorized": "Yes",
+     "felony_convicted": "No",
+     "felony_explanation": "",
+     "accident_history": "No",
+     "accident_description": "",
+     "traffic_citations": "",
+     "certifications": "",
+     "availability": "[\"Full-time\"]",
+     "skills": "",
+     "reference_info": "[]",
+     "additional_info": "",
+     "signature": "Alex Example",
+     "signature_date": "11/2/2026",
+     "status": "Reviewed",
+     "cdl_front": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "cdl_back": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "medical_card": "data:application/pdf;base64,JVBERi0xLjQKJVFBLVRFU1QK",
+     "city": "Testville",
+     "state": "TX",
+     "zip": "77001",
+     "cell": "",
+     "dot": "",
+     "mc": "",
+     "hazmat": "No"
+    }
+   ]
+  ],
+  [
+   "users",
+   [
+    {
+     "id": 1,
+     "username": "LogisX-1001",
+     "password_hash": "made-up-hash",
+     "role": "Driver",
+     "driver_name": "Alex Example 1001",
+     "email": "qa-oo-1001@example.com",
+     "full_name": "Alex Example 1001",
+     "company_name": "",
+     "rating": 0,
+     "must_change_password": 1,
+     "last_login_at": "",
+     "disabled_at": null,
+     "disabled_by": null,
+     "disabled_reason": null
+    }
+   ]
+  ],
+  [
+   "driver_onboarding",
+   [
+    {
+     "id": 1,
+     "user_id": 1,
+     "application_id": 1,
+     "driver_name": "Alex Example 1001",
+     "status": "documents_pending",
+     "drug_test_result": "",
+     "drug_test_file_url": "",
+     "drug_test_uploaded_at": ""
+    }
+   ]
+  ],
+  [
+   "onboarding_documents",
+   [
+    {
+     "id": 1,
+     "user_id": 1,
+     "doc_key": "contractor_agreement",
+     "doc_name": "Contractor Agreement",
+     "signed": 1,
+     "signature_text": "Alex Example",
+     "confidential": 1,
+     "signed_pdf_url": "/uploads/onboarding-signed/contractor_agreement-1-signed.pdf",
+     "signing_error": "",
+     "signed_ip": "127.0.0.1",
+     "signed_ip_source": "proxy",
+     "signed_user_agent": "",
+     "consent_agreed": 1,
+     "consent_text": "I agree to sign this document electronically.",
+     "artifact_sha256": "c32f792277d79cc72f56a9ed7232abf37ee2f0f1e12d556211b2c099142d4bc4",
+     "artifact_bytes": 2547,
+     "different": null,
+     "truncated": null,
+     "effective_date": "November 2, 2026",
+     "superseded_artifacts": "",
+     "evidence_version": 1
+    },
+    {
+     "id": 2,
+     "user_id": 1,
+     "doc_key": "equipment_policy",
+     "doc_name": "Contracted Provider Equipment Policy",
+     "signed": 0,
+     "signature_text": "",
+     "confidential": 0,
+     "signed_pdf_url": "",
+     "signing_error": "",
+     "signed_ip": "",
+     "signed_ip_source": "",
+     "signed_user_agent": "",
+     "consent_agreed": 0,
+     "consent_text": "",
+     "artifact_sha256": "",
+     "artifact_bytes": 0,
+     "different": null,
+     "truncated": null,
+     "effective_date": "",
+     "superseded_artifacts": "",
+     "evidence_version": 0
+    },
+    {
+     "id": 3,
+     "user_id": 1,
+     "doc_key": "w9",
+     "doc_name": "W-9 Tax Form",
+     "signed": 0,
+     "signature_text": "",
+     "confidential": 1,
+     "signed_pdf_url": "",
+     "signing_error": "",
+     "signed_ip": "",
+     "signed_ip_source": "",
+     "signed_user_agent": "",
+     "consent_agreed": 0,
+     "consent_text": "",
+     "artifact_sha256": "",
+     "artifact_bytes": 0,
+     "different": null,
+     "truncated": null,
+     "effective_date": "",
+     "superseded_artifacts": "",
+     "evidence_version": 0
+    },
+    {
+     "id": 4,
+     "user_id": 1,
+     "doc_key": "mobile_policy",
+     "doc_name": "LogisX Inc. Mobile Policy",
+     "signed": 1,
+     "signature_text": "Alex Example",
+     "confidential": 0,
+     "signed_pdf_url": "/uploads/onboarding-signed/mobile_policy-1-signed.pdf",
+     "signing_error": "",
+     "signed_ip": "127.0.0.1",
+     "signed_ip_source": "proxy",
+     "signed_user_agent": "",
+     "consent_agreed": 1,
+     "consent_text": "I agree to sign this document electronically.",
+     "artifact_sha256": "fb68b771c5405009f97b8ac4175aa9ad132e71a865b7ff51733a52dad39bc991",
+     "artifact_bytes": 2540,
+     "different": null,
+     "truncated": null,
+     "effective_date": "November 2, 2026",
+     "superseded_artifacts": "",
+     "evidence_version": 1
+    },
+    {
+     "id": 5,
+     "user_id": 1,
+     "doc_key": "substance_policy",
+     "doc_name": "Substance Policy and Procedure",
+     "signed": 0,
+     "signature_text": "",
+     "confidential": 0,
+     "signed_pdf_url": "",
+     "signing_error": "",
+     "signed_ip": "",
+     "signed_ip_source": "",
+     "signed_user_agent": "",
+     "consent_agreed": 0,
+     "consent_text": "",
+     "artifact_sha256": "",
+     "artifact_bytes": 0,
+     "different": null,
+     "truncated": null,
+     "effective_date": "",
+     "superseded_artifacts": "",
+     "evidence_version": 0
+    }
+   ]
+  ],
+  [
+   "driver_payment_info",
+   [
+    {
+     "id": 1,
+     "user_id": 1,
+     "payment_method": "check",
+     "check_name": "Alex Example",
+     "bank_name": "",
+     "bank_address": "",
+     "bank_phone": "",
+     "bank_routing": "",
+     "bank_account": "",
+     "bank_acct_name": "",
+     "account_type": ""
+    }
+   ]
+  ],
+  [
+   "trucks",
+   []
+  ],
+  [
+   "truck_assignments",
+   []
+  ],
+  [
+   "notifications",
+   []
+  ],
+  [
+   "audit",
+   [
+    [
+     "submit_application",
+     "application",
+     "Submitted by Alex Example 1001 (qa-oo-1001@example.com)"
+    ],
+    [
+     "submit_application",
+     "application",
+     "Submitted by Alex Example 1002 (qa-oo-1002@example.com)"
+    ],
+    [
+     "accept_application",
+     "application",
+     "Accepted driver \"Alex Example 1001\", "
+    ],
+    [
+     "status_reviewed_application",
+     "application",
+     "Set status to Reviewed"
+    ]
+   ]
+  ],
+  [
+   "mail",
+   [
+    [
+     "qa-oo-1001@example.com",
+     "LogisX - Onboarding Status: Documents Received!",
+     "\n\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t</div>\n\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none\">\n\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">Onboarding Status: Documents Received!</h2>\n\t\t\t\t<p style=\"margin:0 0 12px;line-height:1.6;color:#334155\">Hi <b>Alex Example 1001</b>,</p>\n\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>\n\n\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px\">\n\t\t\t\t\t<div style=\"font-size:13px;font-weight:700;color:#0f172a;margin-bottom:12px\">Here is what happens next:</div>\n\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:13px;color:#334155\">\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top;width:24px\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">1</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9\"><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">2</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9\"><b>FMCSA Clearinghouse:</b> This is mandatory. If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">3</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5\"><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t</table>\n\t\t\t\t</div>\n\n\t\t\t\t<div style=\"background:#fffbeb;border:1px solid #fef3c7;border-left:4px solid #f59e0b;border-radius:8px;padding:14px 18px;margin:0 0 24px\">\n\t\t\t\t\t<div style=\"font-size:13px;font-weight:700;color:#92400e;margin-bottom:6px\">Pro-Tip: Don't end up on the internet for the wrong reasons.</div>\n\t\t\t\t\t<p style=\"margin:0;font-size:13px;color:#78350f;line-height:1.5\">To understand the standard of safety we expect, take a look at what <em>not</em> to do out there. Check out these \"professional\" moves on <b>Bonehead Truckers</b> &mdash; study them so you don't repeat them.</p>\n\t\t\t\t</div>\n\n\t\t\t\t<div style=\"text-align:center;margin:0 0 24px\">\n\t\t\t\t\t<a href=\"https://www.youtube.com/watch?v=KpHxeBQ3TSc&list=PL7DBE50EBBC23F024\" style=\"display:inline-block;background:#dc2626;color:#ffffff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px\">&#9654; Watch Bonehead Truckers</a>\n\t\t\t\t</div>\n\n\t\t\t\t<p style=\"margin:0 0 6px;font-size:14px;color:#334155;text-align:center\">Stand by for a call from our safety coordinator.</p>\n\t\t\t\t<p style=\"margin:0;font-size:14px;font-weight:700;color:#0f172a;text-align:center\">&mdash; The LogisX Safety Team</p>\n\t\t\t</div>\n\t\t\t<div style=\"padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t</div>\n\t\t</div>"
+    ],
+    [
+     "admin@example.test",
+     "New Driver Application: Alex Example 1001",
+     "\n\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t</div>\n\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">New Driver Application</h2>\n\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">A new driver application has been submitted and is ready for review.</p>\n\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px\">\n\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:14px\">\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b;width:140px\">Name</td><td style=\"padding:5px 0;font-weight:600\">Alex Example 1001</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Email</td><td style=\"padding:5px 0\"><a href=\"mailto:qa-oo-1001@example.com\">qa-oo-1001@example.com</a></td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Phone</td><td style=\"padding:5px 0\">(555) 555-011001</td></tr>\n\t\t\t\t\t\t\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Position</td><td style=\"padding:5px 0\">Company Driver</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Experience</td><td style=\"padding:5px 0\">5 years</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">CDL</td><td style=\"padding:5px 0\">Yes</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Hazmat</td><td style=\"padding:5px 0\">No</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Work Authorized</td><td style=\"padding:5px 0\">Yes</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Felony</td><td style=\"padding:5px 0\">No</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Address</td><td style=\"padding:5px 0\">1 QA Test Way, Testville, TX 77001</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">City / State / ZIP</td><td style=\"padding:5px 0\">Testville, TX 77001</td></tr>\n\t\t\t\t\t\t\n\t\t\t\t\t\t\n\t\t\t\t\t</table>\n\t\t\t\t</div>\n\t\t\t\t<div style=\"text-align:center;margin:24px 0\">\n\t\t\t\t\t<a href=\"https://app.logisx.com/applications\" style=\"display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px\">Review Application</a>\n\t\t\t\t</div>\n\t\t\t</div>\n\t\t\t<div style=\"padding:16px 32px;text-align:center\">\n\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t</div>\n\t\t</div>"
+    ],
+    [
+     "qa-oo-1002@example.com",
+     "LogisX - Onboarding Status: Documents Received!",
+     "\n\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t</div>\n\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none\">\n\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">Onboarding Status: Documents Received!</h2>\n\t\t\t\t<p style=\"margin:0 0 12px;line-height:1.6;color:#334155\">Hi <b>Alex Example 1002</b>,</p>\n\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>\n\n\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px\">\n\t\t\t\t\t<div style=\"font-size:13px;font-weight:700;color:#0f172a;margin-bottom:12px\">Here is what happens next:</div>\n\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:13px;color:#334155\">\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top;width:24px\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">1</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9\"><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">2</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9\"><b>FMCSA Clearinghouse:</b> This is mandatory. If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t<td style=\"padding:8px 10px 8px 0;vertical-align:top\"><div style=\"width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px\">3</div></td>\n\t\t\t\t\t\t\t<td style=\"padding:8px 0;line-height:1.5\"><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</td>\n\t\t\t\t\t\t</tr>\n\t\t\t\t\t</table>\n\t\t\t\t</div>\n\n\t\t\t\t<div style=\"background:#fffbeb;border:1px solid #fef3c7;border-left:4px solid #f59e0b;border-radius:8px;padding:14px 18px;margin:0 0 24px\">\n\t\t\t\t\t<div style=\"font-size:13px;font-weight:700;color:#92400e;margin-bottom:6px\">Pro-Tip: Don't end up on the internet for the wrong reasons.</div>\n\t\t\t\t\t<p style=\"margin:0;font-size:13px;color:#78350f;line-height:1.5\">To understand the standard of safety we expect, take a look at what <em>not</em> to do out there. Check out these \"professional\" moves on <b>Bonehead Truckers</b> &mdash; study them so you don't repeat them.</p>\n\t\t\t\t</div>\n\n\t\t\t\t<div style=\"text-align:center;margin:0 0 24px\">\n\t\t\t\t\t<a href=\"https://www.youtube.com/watch?v=KpHxeBQ3TSc&list=PL7DBE50EBBC23F024\" style=\"display:inline-block;background:#dc2626;color:#ffffff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px\">&#9654; Watch Bonehead Truckers</a>\n\t\t\t\t</div>\n\n\t\t\t\t<p style=\"margin:0 0 6px;font-size:14px;color:#334155;text-align:center\">Stand by for a call from our safety coordinator.</p>\n\t\t\t\t<p style=\"margin:0;font-size:14px;font-weight:700;color:#0f172a;text-align:center\">&mdash; The LogisX Safety Team</p>\n\t\t\t</div>\n\t\t\t<div style=\"padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t</div>\n\t\t</div>"
+    ],
+    [
+     "admin@example.test",
+     "New Driver Application: Alex Example 1002",
+     "\n\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t</div>\n\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">New Driver Application</h2>\n\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">A new driver application has been submitted and is ready for review.</p>\n\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px\">\n\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:14px\">\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b;width:140px\">Name</td><td style=\"padding:5px 0;font-weight:600\">Alex Example 1002</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Email</td><td style=\"padding:5px 0\"><a href=\"mailto:qa-oo-1002@example.com\">qa-oo-1002@example.com</a></td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Phone</td><td style=\"padding:5px 0\">(555) 555-011002</td></tr>\n\t\t\t\t\t\t\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Position</td><td style=\"padding:5px 0\">Owner Operator</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Experience</td><td style=\"padding:5px 0\">5 years</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">CDL</td><td style=\"padding:5px 0\">Yes</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Hazmat</td><td style=\"padding:5px 0\">No</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Work Authorized</td><td style=\"padding:5px 0\">Yes</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Felony</td><td style=\"padding:5px 0\">No</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Address</td><td style=\"padding:5px 0\">1 QA Test Way, Testville, TX 77001</td></tr>\n\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">City / State / ZIP</td><td style=\"padding:5px 0\">Testville, TX 77001</td></tr>\n\t\t\t\t\t\t\n\t\t\t\t\t\t\n\t\t\t\t\t</table>\n\t\t\t\t</div>\n\t\t\t\t<div style=\"text-align:center;margin:24px 0\">\n\t\t\t\t\t<a href=\"https://app.logisx.com/applications\" style=\"display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px\">Review Application</a>\n\t\t\t\t</div>\n\t\t\t</div>\n\t\t\t<div style=\"padding:16px 32px;text-align:center\">\n\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t</div>\n\t\t</div>"
+    ],
+    [
+     "qa-oo-1001@example.com",
+     "Welcome to LogisX — Your Driver Account is Ready",
+     "\n\t\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t\t</div>\n\t\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none\">\n\t\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">Welcome to LogisX!</h2>\n\t\t\t\t\t<p style=\"margin:0 0 12px;line-height:1.6;color:#334155\">Hi <b>Alex Example 1001</b>,</p>\n\t\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">Congratulations! Your driver application has been <b style=\"color:#16a34a\">approved</b>. Your account is ready — please log in and complete your onboarding documents to get on the road.</p>\n\n\t\t\t\t\t<div style=\"background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px\">\n\t\t\t\t\t\t<div style=\"font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px\">Your Login Credentials</div>\n\t\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:14px\">\n\t\t\t\t\t\t\t<tr><td style=\"padding:6px 0;color:#64748b;width:130px\">Username</td><td style=\"padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace\">LogisX-1001</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:6px 0;color:#64748b\">Temporary Password</td><td style=\"padding:6px 0;font-weight:700;color:#d97706;font-family:monospace\">(pw)</td></tr>\n\t\t\t\t\t\t</table>\n\t\t\t\t\t</div>\n\n\t\t\t\t\t<div style=\"text-align:center;margin:28px 0\">\n\t\t\t\t\t\t<a href=\"https://app.logisx.com/login\" style=\"display:inline-block;background:#0f2847;color:#ffffff;padding:14px 40px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px\">Login &amp; Start Onboarding &rarr;</a>\n\t\t\t\t\t</div>\n\n\t\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px\">\n\t\t\t\t\t\t<div style=\"font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px\">What to expect:</div>\n\t\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:13px;color:#334155\">\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 8px 5px 0;vertical-align:top;width:20px\"><b>1.</b></td><td style=\"padding:5px 0;border-bottom:1px solid #f1f5f9\">Sign 5 onboarding documents (Contractor Agreement, Equipment Policy, W-9, Mobile Policy, Substance Policy)</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 8px 5px 0;vertical-align:top\"><b>2.</b></td><td style=\"padding:5px 0;border-bottom:1px solid #f1f5f9\">Complete pre-employment drug test (our safety team will contact you)</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 8px 5px 0;vertical-align:top\"><b>3.</b></td><td style=\"padding:5px 0\">Once cleared, you'll be fully onboarded and ready to receive loads</td></tr>\n\t\t\t\t\t\t</table>\n\t\t\t\t\t</div>\n\n\t\t\t\t\t<div style=\"background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:12px 16px;margin:0 0 20px\">\n\t\t\t\t\t\t<p style=\"margin:0;font-size:13px;color:#92400e;line-height:1.5\"><b>Important:</b> Please change your password after your first login for security.</p>\n\t\t\t\t\t</div>\n\n\t\t\t\t\t<p style=\"color:#64748b;font-size:13px;margin:20px 0 0\">Questions? Contact us at <a href=\"mailto:info@logisx.com\" style=\"color:#3b82f6;text-decoration:none\">info@logisx.com</a>.</p>\n\t\t\t\t</div>\n\t\t\t\t<div style=\"padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t\t</div>\n\t\t\t</div>"
+    ],
+    [
+     "admin@example.test",
+     "Driver Accepted: Alex Example 1001",
+     "\n\t\t\t<div style=\"font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b\">\n\t\t\t\t<div style=\"background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0\">\n\t\t\t\t\t<img src=\"https://app.logisx.com/logo.avif\" alt=\"LogisX\" style=\"height:36px\" />\n\t\t\t\t</div>\n\t\t\t\t<div style=\"padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px\">\n\t\t\t\t\t<h2 style=\"margin:0 0 16px;font-size:20px;color:#0f172a\">Driver Application Accepted</h2>\n\t\t\t\t\t<p style=\"margin:0 0 20px;line-height:1.6;color:#334155\">Driver <b>Alex Example 1001</b> has been accepted and their account has been created. They will now proceed to the onboarding phase.</p>\n\n\t\t\t\t\t<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px\">\n\t\t\t\t\t\t<table style=\"width:100%;border-collapse:collapse;font-size:14px\">\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b;width:140px\">Driver Name</td><td style=\"padding:5px 0;font-weight:600\">Alex Example 1001</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Username</td><td style=\"padding:5px 0;font-weight:600;font-family:monospace\">LogisX-1001</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Email</td><td style=\"padding:5px 0\">qa-oo-1001@example.com</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Phone</td><td style=\"padding:5px 0\">(555) 555-011001</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Position</td><td style=\"padding:5px 0\">Company Driver</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Onboarding Status</td><td style=\"padding:5px 0;font-weight:600;color:#d97706\">Documents Pending (5 docs)</td></tr>\n\t\t\t\t\t\t\t<tr><td style=\"padding:5px 0;color:#64748b\">Accepted By</td><td style=\"padding:5px 0\">super_admin</td></tr>\n\t\t\t\t\t\t</table>\n\t\t\t\t\t</div>\n\n\t\t\t\t\t<div style=\"text-align:center;margin:24px 0\">\n\t\t\t\t\t\t<a href=\"https://app.logisx.com/applications\" style=\"display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px\">View Applications</a>\n\t\t\t\t\t</div>\n\t\t\t\t</div>\n\t\t\t\t<div style=\"padding:16px 32px;text-align:center\">\n\t\t\t\t\t<div style=\"font-size:11px;color:#94a3b8;line-height:1.6\">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>\n\t\t\t\t</div>\n\t\t\t</div>"
+    ]
+   ]
+  ]
+ ]
+}
