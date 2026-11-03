@@ -213,6 +213,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
 		// The signing step's contacts rule, off here (its subject is test-emergency-contacts-routes.js §10).
 		"EMERGENCY_CONTACTS_ENABLED", "emergencyContactsCount", "emergencyContactRules",
+		// The owner-operator document set, with no profile here (scripts/test-owner-operator-onboarding.js).
+		"ooOnboarding",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04", () => true,
 		{ hash: async () => "hash" }, () => {}, { run() {} }, () => {},
@@ -221,7 +223,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 		(name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		(audit, code, periods, subject) => { S.recorded.push({ audit, code, periods, subject }); },
 		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test",
-		false, () => 0, require("../lib/emergency-contacts"));
+		false, () => 0, require("../lib/emergency-contacts"),
+		require("./lib/oo-onboarding-env").ooOnboardingEnv(db, { src: SRC }).ooOnboarding);
 	let handler = null;
 	const env = {
 		app: server || { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },

@@ -997,8 +997,8 @@ async function mutant(id, label, build, run) {
 		"stepDone: requiredSigned && contactsOk"),
 		(c, src) => stepSection(c, src));
 	await mutant("M12", "every signed document counted, one outside ONBOARDING_DOCS too", () => mutate(SRC,
-		"const requiredSigned = ONBOARDING_DOCS.every((d) => signed.has(d.key));",
-		"const requiredSigned = signed.size === ONBOARDING_DOCS.length;"),
+		"const requiredSigned = ooOnboarding.docsFor(userId).every((d) => signed.has(d.key));",
+		"const requiredSigned = signed.size === ooOnboarding.docsFor(userId).length;"),
 		(c, src) => stepSection(c, src));
 	await mutant("M13", "the PUTs' step check removed", () => mutate(SRC,
 		'\t\tif (ob && ob.status === "documents_pending") await checkAndCompleteOnboarding(userId, req);\n', ""),

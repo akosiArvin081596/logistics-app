@@ -68,6 +68,7 @@ const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
+const { ooOnboardingEnv } = require("./lib/oo-onboarding-env");
 
 let pass = 0;
 const failures = [];
@@ -382,10 +383,13 @@ function agreementBattery(build) {
 }
 
 // ─────────────────────────────── §3 the acceptance route
-function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashSrc = CLASH_SRC } = {}) {
+function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashSrc = CLASH_SRC, ownerOperatorFlag = false } = {}) {
 	const log = { audits: [], notified: [], mail: [] };
 	let handler = null;
 	const env = {
+		// Acceptance as an owner-operator (scripts/test-owner-operator-onboarding.js);
+		// its flag is off unless a case turns it on.
+		...ooOnboardingEnv(db, { src: SRC, driverDocs: docs, onboarding: ownerOperatorFlag }),
 		app: { put: (p, guard, h) => { handler = h; } },
 		requireRole: () => (req, res, next) => next(),
 		db,
@@ -409,14 +413,14 @@ function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashS
 	if (typeof handler !== "function") die("the lifted acceptance route did not register a handler");
 	// Synchronous up to the handler call, so two calls started together
 	// interleave exactly as two requests do: each runs until its first await.
-	const call = (appId, status = "Accepted") => {
+	const call = (appId, status = "Accepted", extra = {}) => {
 		const out = { status: 200, body: null };
 		const res = {
 			status(c) { out.status = c; return this; },
 			json(b) { out.body = b; return this; },
 		};
 		return handler({
-			params: { id: String(appId) }, body: { status },
+			params: { id: String(appId) }, body: { status, ...extra },
 			session: { user: { id: 1, username: "super_admin", role: "Super Admin" } },
 		}, res).then(() => out);
 	};
@@ -503,6 +507,19 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 			String(refusals[0].details).includes(matched) && String(refusals[0].details).includes("[DRIVER_NAME_TAKEN]"));
 		t(`${label}: no success audit, no change notification, no email`,
 			log.audits.length === 1 && log.notified.length === 0 && log.mail.length === 0);
+	}
+
+	// Accepting as an owner-operator asks the same name check first (plan C PR 3):
+	// a name in use is 409 DRIVER_NAME_TAKEN, with no profile and no truck written.
+	{
+		const db = acceptFixture();
+		const appId = addApplication(db, "Soren King", "713-555-0125");
+		const before = counts(db);
+		const { call } = mountAccept(db, { routeSrc, clashSrc, ownerOperatorFlag: true });
+		const r = await quiet(() => call(appId, "Accepted", { as: "owner_operator" }));
+		const ooCount = () => { try { return db.prepare("SELECT COUNT(*) AS n FROM owner_operators").get().n; } catch { return 0; } };
+		t("accept as owner-operator, a name in use: 409 DRIVER_NAME_TAKEN, nothing written",
+			r.status === 409 && r.body && r.body.code === "DRIVER_NAME_TAKEN" && counts(db) === before && ooCount() === 0 && appStatus(db, appId) === "New");
 	}
 
 	// A name that only contains a built-in property name is an ordinary name.

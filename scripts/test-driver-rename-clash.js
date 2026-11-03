@@ -99,6 +99,8 @@
 "use strict";
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator directory check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -364,7 +366,7 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		purgeUserSessions: () => 0,
 		logAudit: (req, action, entity, entityId, details) => log.audits.push({ action, details }),
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		refreshOwnSession: () => true,
 		normalizeDriverName: m.normalizeDriverName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -439,7 +441,7 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		syncCarrierDriverHistory: (rows) => log.history.push(rows),
 		logAudit: () => {},
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		normalizeDriverName: m.normalizeDriverName,
 		isBuiltInPropertyName: m.isBuiltInPropertyName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -486,7 +488,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		// The success lines name the truck through it.
 		auditText: m.auditText,
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,
 		reservedDriverNameRefusal: m.reservedDriverNameRefusal,
@@ -1250,7 +1252,7 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 		normalizeDriverName: m.normalizeDriverName,
 		chatDeskKey,
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
 		userVoiceNoteFiles: () => [],
 		removeUserVoiceNotes: () => 0,

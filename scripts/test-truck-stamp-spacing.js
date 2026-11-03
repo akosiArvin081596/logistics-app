@@ -65,6 +65,8 @@ const crypto = require("crypto");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let Database;
 try {
@@ -455,7 +457,7 @@ function mountDispatch(db, routeSrc, helperOver) {
 		...KEY_HELPERS,
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db,
 		findTruckForDriverStamp: helpers.findTruckForDriverStamp,

@@ -83,6 +83,7 @@ try {
 }
 const imageLimits = require(path.join(ROOT, "lib", "image-size"));
 const publicFormInput = require(path.join(ROOT, "lib", "public-form-input"));
+const { ooOnboardingEnv } = require("./lib/oo-onboarding-env");
 
 // A (possibly mutated) copy of the lib, loaded without touching the real module.
 function loadLib(src) {
@@ -240,12 +241,15 @@ const LIMITER = () => {};
 const QUIET = { error() {}, warn() {}, log() {} };
 // The handler as server.js registers it, with the route's own helpers and
 // lists lifted beside it. Only the outbound effects are stubbed.
-function applyRoute(src = SRC, lib = LIB) {
+function applyRoute(src = SRC, lib = LIB, { ownerOperatorFlag = false, partnerRef = "" } = {}) {
 	const db = freshDb(src);
 	const mail = [];
 	const audits = [];
 	const handlers = {};
 	const app = { post: (p, ...h) => { handlers[p] = h; } };
+	// The owner-operator names the route reads (scripts/lib/oo-onboarding-env.js), the
+	// onboarding flag off unless a case turns it on.
+	const oo = ooOnboardingEnv(db, { src, onboarding: ownerOperatorFlag, partnerRef });
 	const lifted = [
 		liftConst("PUBLIC_APPLY_SCALAR_FIELDS", src),
 		liftConst("PUBLIC_APPLY_REQUIRED_FIELDS", src),
@@ -257,8 +261,10 @@ function applyRoute(src = SRC, lib = LIB) {
 		`${routeSource("post", "/api/public/apply", src)};`,
 	].join("\n");
 	new Function("app", "publicFormLimiter", "publicFormInput", "w9Input", "imageLimits", "db", "logAudit", "sendEmail", "console", "ADMIN_NOTIFY_EMAIL",
+		"OWNER_OPERATOR_ONBOARDING_ENABLED", "ownerOperator", "ooOnboarding",
 		`"use strict";\n${lifted}`)(app, LIMITER, publicFormInput, lib, imageLimits, db,
-		(...a) => audits.push(a), (...a) => mail.push(a), QUIET, "admin@example.test");
+		(...a) => audits.push(a), (...a) => mail.push(a), QUIET, "admin@example.test",
+		oo.OWNER_OPERATOR_ONBOARDING_ENABLED, oo.ownerOperator, oo.ooOnboarding);
 	const mounted = handlers["/api/public/apply"];
 	if (!mounted || mounted.length !== 2 || mounted[0] !== LIMITER) die("POST /api/public/apply is not mounted behind publicFormLimiter");
 	const call = (body) => {
@@ -284,7 +290,9 @@ function realFormPayload(fill, view = APPLY_VIEW_SRC) {
 	const a = view.indexOf("const defaultForm = () => ({");
 	if (a < 0) die("ApplyView.vue: defaultForm not found");
 	const end = view.indexOf("\n})\n", a);
-	const form = new Function(`return (${view.slice(view.indexOf("() => ({", a), end + 3)})();`)();
+	// The owner-operator's truck section starts blank (scripts/test-owner-operator-apply-client.mjs
+	// covers it); the submit below sends it only when the form showed its step.
+	const form = new Function("emptyOwnerOperatorTruck", `return (${view.slice(view.indexOf("() => ({", a), end + 3)})();`)(() => ({}));
 	Object.assign(form, fill);
 	const p = view.indexOf("const payload = { ...form,");
 	if (p < 0) die("ApplyView.vue: the submit payload not found");
@@ -537,6 +545,80 @@ async function mutantRows() {
 	return r;
 }
 
+// §7 the owner-operator's truck section (plan C PR 3): read only with
+// OWNER_OPERATOR_ONBOARDING_ENABLED on and the position "Owner Operator"; stored
+// beside the application in one transaction; off, the body's section is never read.
+const OO_TRUCK = {
+	truck_year: "2019", truck_make: "Madeup", truck_model: "Hauler 9", truck_vin: "1mdexp0vt00000001", truck_plate: "qa-1234",
+	truck_plate_state: "tx", truck_unit: "", truck_ownership: "own", registered_owner: "QA-TEST Owner", business_name: "QA-TEST Hauling LLC",
+};
+const ooRows = (db) => { try { return db.prepare("SELECT * FROM owner_operator_applications ORDER BY application_id").all(); } catch { return null; } };
+function ownerOperatorRows(src = SRC, lib = LIB) {
+	const r = rows();
+	const stored = (route, id) => route.db.prepare("SELECT * FROM job_applications WHERE id = ?").get(id);
+	const strip = (row) => { if (!row) return row; const { id, email, full_name, signature, created_at, ...rest } = row; return rest; };
+
+	// Flag off: the section is never read, whatever it holds.
+	{
+		const route = applyRoute(src, lib);
+		const plain = route.call(realForm({ position: "Owner Operator" }));
+		const withSection = route.call(realForm({ position: "Owner Operator", owner_operator: OO_TRUCK }));
+		const junk = route.call(realForm({ position: "Owner Operator", owner_operator: "not an object" }));
+		r.t(plain.status === 200 && withSection.status === 200 && junk.status === 200, `flag off: an Owner Operator application is stored with or without a section, even a malformed one (got ${plain.status}, ${withSection.status}, ${junk.status})`);
+		r.t(JSON.stringify(strip(stored(route, plain.body.id))) === JSON.stringify(strip(stored(route, withSection.body.id))), "flag off: the stored application is the same with the section as without it");
+		const rowsOff = ooRows(route.db);
+		r.t(rowsOff === null || rowsOff.length === 0, "flag off: no owner-operator section row is written");
+	}
+	// Flag on.
+	{
+		const route = applyRoute(src, lib, { ownerOperatorFlag: true, partnerRef: "QA-PARTNER-CODE" });
+		const driver = route.call(realForm({ position: "Company Driver", owner_operator: OO_TRUCK }));
+		r.t(driver.status === 200 && (ooRows(route.db) || []).length === 0, "flag on: a Company Driver application's section is ignored");
+		const before = route.count();
+		const none = route.call(realForm({ position: "Owner Operator" }));
+		r.t(none.status === 400 && none.body.code === "FIELD_REQUIRED" && route.count() === before,
+			`flag on: an Owner Operator application with no truck section: 400 FIELD_REQUIRED, nothing stored (got ${none.status} ${JSON.stringify(none.body)})`);
+		const good = route.call(realForm({ position: " owner operator ", owner_operator: OO_TRUCK }));
+		const sec = (ooRows(route.db) || []).find((x) => good.body && x.application_id === good.body.id);
+		r.t(good.status === 200 && !!sec, `flag on: a valid section is stored with its application (got ${good.status} ${JSON.stringify(good.body)})`);
+		r.t(!!sec && sec.truck_vin === "1MDEXP0VT00000001" && sec.truck_plate === "QA-1234" && sec.truck_plate_state === "TX" && sec.truck_year === 2019 &&
+			sec.truck_ownership === "own" && sec.registered_owner === "QA-TEST Owner" && sec.business_name === "QA-TEST Hauling LLC" && sec.source === "direct",
+			`flag on: the section as stored: VIN, plate and state upper case, year a number, source "direct" (got ${JSON.stringify(sec)})`);
+		for (const [label, over, field, code] of [
+			["a blank VIN", { truck_vin: "" }, "owner_operator.truck_vin", "FIELD_REQUIRED"],
+			["a VIN with a symbol", { truck_vin: "1MDEXP0VT0000000!" }, "owner_operator.truck_vin", "INVALID_FIELD"],
+			["an 18-character VIN", { truck_vin: "1MDEXP0VT000000012" }, "owner_operator.truck_vin", "INVALID_FIELD"],
+			["a three-letter plate state", { truck_plate_state: "TXX" }, "owner_operator.truck_plate_state", "INVALID_FIELD"],
+			["ownership neither own nor lease", { truck_ownership: "rent" }, "owner_operator.truck_ownership", "INVALID_FIELD"],
+			["a year of 1899", { truck_year: "1899" }, "owner_operator.truck_year", "INVALID_FIELD"],
+			["a list as the make", { truck_make: ["Madeup"] }, "owner_operator.truck_make", "INVALID_FIELD"],
+			["a < in the registered owner", { registered_owner: "QA <b>" }, "owner_operator.registered_owner", "INVALID_FIELD"],
+			["no registered owner", { registered_owner: "  " }, "owner_operator.registered_owner", "FIELD_REQUIRED"],
+			["a 10,000-character business name", { business_name: "x".repeat(10000) }, "owner_operator.business_name", "INVALID_FIELD"],
+		]) {
+			const n = route.count();
+			const got = route.call(realForm({ position: "Owner Operator", owner_operator: { ...OO_TRUCK, ...over } }));
+			r.t(got.status === 400 && got.body.code === code && got.body.field === field && route.count() === n,
+				`flag on: ${label}: 400 ${code} naming ${field}, nothing stored (got ${got.status} ${JSON.stringify(got.body)})`);
+		}
+		// The source: the partner's own code, else "direct"; the answer never says which.
+		const partner = route.call(realForm({ position: "Owner Operator", owner_operator: { ...OO_TRUCK, referral_code: "QA-PARTNER-CODE" } }));
+		const wrong = route.call(realForm({ position: "Owner Operator", owner_operator: { ...OO_TRUCK, referral_code: "QA-OTHER" } }));
+		const src2 = (id) => ((ooRows(route.db) || []).find((x) => x.application_id === id) || {}).source;
+		r.t(src2(partner.body.id) === "partner" && src2(wrong.body.id) === "direct", "flag on: the partner's code stores \"partner\"; an unknown code stores \"direct\"");
+		r.t(Object.keys(partner.body).join() === Object.keys(wrong.body).join() && Object.keys(partner.body).join() === "success,id", "flag on: the answer is { success, id } whatever the code matched");
+	}
+	// The two rows are one write: a section that can't be stored leaves no application.
+	{
+		const route = applyRoute(src, lib, { ownerOperatorFlag: true });
+		try { route.db.exec("DROP TABLE owner_operator_applications"); } catch { /* the old code has none */ }
+		const n = route.count();
+		const got = route.call(realForm({ position: "Owner Operator", owner_operator: OO_TRUCK }));
+		r.t(got.status === 500 && route.count() === n, `flag on: a section write that fails leaves no application behind (got ${got.status}, ${route.count() - n} row(s) added)`);
+	}
+	return r;
+}
+
 function record(r) {
 	for (const x of r) ok(x.ok, x.name);
 	console.log(`  ${r.filter((x) => x.ok).length}/${r.length} checks`);
@@ -557,6 +639,8 @@ function record(r) {
 	record(await stepRows());
 	section("§6 mutants");
 	record(await mutantRows());
+	section("§7 the owner-operator's truck section (OWNER_OPERATOR_ONBOARDING_ENABLED)");
+	record(ownerOperatorRows());
 	if (failures.length) {
 		console.error(`\nFAILURES (${failures.length}):`);
 		for (const f of failures) console.error(`  x ${f}`);

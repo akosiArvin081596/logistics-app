@@ -6554,7 +6554,9 @@ const ONBOARDING_DOCS = [
 
 // --- Owner-operators (lib/owner-operator.js) ---
 // The eight tables and the two filed-by columns on expenses exist whatever the
-// flags (additive); nothing reads them, or the four flags, until their routes ship.
+// flags (additive). The onboarding readers below (lib/owner-operator-onboarding.js)
+// answer for every existing owner-operator profile whatever the flags; new profiles
+// only while OWNER_OPERATOR_ONBOARDING_ENABLED is on.
 const ownerOperator = require("./lib/owner-operator");
 db.exec(ownerOperator.OO_SCHEMA_SQL);
 for (const sql of ownerOperator.OO_EXPENSE_COLUMN_SQL) {
@@ -6566,6 +6568,13 @@ const OWNER_OPERATOR_LOAD_PAY_ENABLED = OO_FLAGS.loadPay;
 const OWNER_OPERATOR_SETTLEMENTS_ENABLED = OO_FLAGS.settlements;
 const OWNER_OPERATOR_ESCROW_ENABLED = OO_FLAGS.escrow;
 console.log(ownerOperator.ooFlagsStartupLine(OO_FLAGS));
+const ooOnboardingLib = require("./lib/owner-operator-onboarding");
+const ooOnboarding = ooOnboardingLib.createOwnerOperatorOnboarding({
+	db, driverDocs: ONBOARDING_DOCS, assignDriverToTruck, normalizeDriverName, todayKey: () => appTodayKey(),
+	logAudit, logAuditRefusal, notify: (...args) => insertNotification.run(...args),
+	partnerRef: process.env.OWNER_OPERATOR_PARTNER_REF || "",
+});
+try { ooOnboarding.sweepAgreementReadyNotices(); } catch (err) { console.error("[owner-operator] agreement-ready notices:", err.message); }
 
 // --- Investor Onboarding ---
 db.exec(`
@@ -10894,6 +10903,14 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 			? obj["Carrier Name"]
 			: (current?.carrier_name || "");
 
+		// An owner-operator's pay fields and carrier name don't change here, for any role
+		// (lib/owner-operator-onboarding.js); a resend of the stored values goes through.
+		const ooDirectory = ooOnboarding.directoryEditRefusal(current, { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily, carrier_name: nextCarrier });
+		if (ooDirectory) {
+			logAuditRefusal(req, "update_driver_pay_blocked", "driver", String(id), ooDirectory.audit, ooDirectory.body.code);
+			return res.status(409).json(ooDirectory.body);
+		}
+
 		// ⚠️ PAY SETTINGS ARE SUPER ADMIN ONLY — see PAY_EDIT_ADMIN_ONLY. Compared
 		// with the stored row as the money math reads it, so the edit form's
 		// whole-row resend of the current terms goes through, and judged before the
@@ -13755,16 +13772,28 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 			const refusal = applicantAttachmentRefusal(req.body[field]);
 			if (refusal) return res.status(refusal.status).json({ ...imageLimits.refusalBody(refusal, "attachment"), field });
 		}
+		// An owner-operator's truck section (lib/public-form-input.js), read only while
+		// OWNER_OPERATOR_ONBOARDING_ENABLED is on; off, the body's section is never read.
+		let ooTruck = null;
+		if (OWNER_OPERATOR_ONBOARDING_ENABLED && ownerOperator.ooIsOwnerOperatorPosition(position)) {
+			const truckCheck = publicFormInput.checkPublicOwnerOperatorTruck(req.body.owner_operator);
+			if (!truckCheck.ok) return res.status(400).json({ error: truckCheck.message, code: truckCheck.code, ...(truckCheck.field ? { field: truckCheck.field } : {}) });
+			ooTruck = truckCheck.value;
+		}
 		const duplicate = db.prepare(
 			"SELECT id FROM job_applications WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL"
 		).get(email);
 		if (duplicate) {
 			return res.status(409).json({ error: "An application with this email is already on file. Contact info@logisx.com if you need to update it." });
 		}
-		const result = db.prepare(`
+		const insertApplication = () => db.prepare(`
 			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '', city || '', state || '', zip || '', cell || '', dot || '', mc || '', hazmat || '');
+		// With a truck section, the application and its section are one write.
+		const result = ooTruck
+			? db.transaction(() => { const r = insertApplication(); ooOnboarding.insertApplicationSection(r.lastInsertRowid, ooTruck); return r; })()
+			: insertApplication();
 		res.json({ success: true, id: result.lastInsertRowid });
 		logAudit({ session: { user: { username: "public", role: "public" } } }, "submit_application", "application", result.lastInsertRowid, `Submitted by ${full_name} (${email})`);
 
@@ -13861,6 +13890,12 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	}
 });
 
+// Public by design, like the other /api/config routes: whether /apply shows the
+// owner-operator's "Your truck" step (OWNER_OPERATOR_ONBOARDING_ENABLED).
+app.get("/api/config/apply-options", (req, res) => {
+	res.json({ ownerOperator: OWNER_OPERATOR_ONBOARDING_ENABLED });
+});
+
 // ============================================================
 // PUBLIC: Investor Request for Information and call requests
 // ============================================================
@@ -13888,7 +13923,7 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 	try {
 		const includeDeleted = req.query.include_deleted === "true";
 		const whereClause = includeDeleted ? "" : "WHERE ja.deleted_at IS NULL";
-		const apps = db.prepare(`SELECT
+		let apps = db.prepare(`SELECT
 				ja.id, ja.full_name, ja.email, ja.phone, ja.dob, ja.address,
 				ja.drivers_license, ja.position, ja.experience, ja.has_cdl,
 				ja.work_authorized, ja.felony_convicted, ja.accident_history,
@@ -13900,6 +13935,9 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			${whereClause}
 			ORDER BY ja.created_at DESC`).all();
+		// The owner-operators tab's fields (category, truck section, source), only while
+		// OWNER_OPERATOR_ONBOARDING_ENABLED is on; off, the list is today's.
+		if (OWNER_OPERATOR_ONBOARDING_ENABLED) apps = ooOnboarding.annotateApplications(apps);
 		// This list already excludes `ssn` by column choice. `drivers_license`
 		// was not excluded, so every licence number in the system shipped on
 		// page load — and ApplicationsView renders it in full (no client-side
@@ -13984,6 +14022,8 @@ app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 		// (StepPersonalInfo.vue / ApplyView.vue) and DriverKit.vue, which uses
 		// the `*_type` columns rather than the blobs.
 		const { cdl_front, cdl_back, medical_card, ...safeRow } = row;
+		// His truck section and source, only while OWNER_OPERATOR_ONBOARDING_ENABLED is on.
+		if (OWNER_OPERATOR_ONBOARDING_ENABLED) Object.assign(safeRow, ooOnboarding.applicationDetail(safeRow));
 		res.json(maskingEnabled() ? piiMask.maskFields(safeRow, { ssn: "ssn", drivers_license: "license" }) : safeRow);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -14041,6 +14081,12 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
+		// "Accept as owner-operator" (`as`, lib/owner-operator-onboarding.js): new
+		// behaviour behind OWNER_OPERATOR_ONBOARDING_ENABLED; off, it answers 404 and
+		// every other acceptance is today's.
+		const acceptAs = ooOnboardingLib.ooAcceptAs(req.body, status, OWNER_OPERATOR_ONBOARDING_ENABLED);
+		if (acceptAs.refusal) return res.status(acceptAs.refusal.status).json(acceptAs.refusal.body);
+		const asOwnerOperator = acceptAs.ownerOperator === true;
 		// Run only once a transition is certain to go through. For "Accepted" that
 		// is after every check below, so a refused acceptance leaves the
 		// application exactly as it was.
@@ -14061,8 +14107,12 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			if (!application) return res.status(404).json({ error: "Application not found" });
 
 			// Check if already onboarded for this application
-			const existingOnboarding = db.prepare("SELECT id FROM driver_onboarding WHERE application_id = ?").get(appId);
+			const existingOnboarding = db.prepare("SELECT id, user_id FROM driver_onboarding WHERE application_id = ?").get(appId);
 			if (existingOnboarding) {
+				// Accepted as a company driver already: converting a driver is a later phase.
+				if (asOwnerOperator && !ooOnboarding.hasProfile(existingOnboarding.user_id)) {
+					return res.status(409).json({ error: "This applicant was already accepted as a company driver. Nothing was changed.", code: "OO_ACCEPTED_AS_DRIVER" });
+				}
 				setStatus.run(status, appId);
 				notifyChange("applications");
 				return res.json({ success: true, message: "Application accepted (account already exists)" });
@@ -14103,6 +14153,14 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				});
 			}
 
+			// As an owner-operator: his truck section, the VIN rule and the source, all
+			// checked before anything is written.
+			const ooAccept = asOwnerOperator ? ooOnboarding.acceptanceCheck({ appId, body: req.body }) : null;
+			if (ooAccept && !ooAccept.ok) {
+				if (ooAccept.audit) logAudit(req, "accept_application_blocked", "application", appId, ooAccept.audit);
+				return res.status(ooAccept.status).json(ooAccept.body);
+			}
+
 			// Generate username from phone: LogisX-{last4digits} (e.g., "LogisX-2609")
 			const phoneDigits = (application.phone || "").replace(/\D/g, "");
 			const last4 = phoneDigits.slice(-4) || "0000";
@@ -14120,6 +14178,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			// One transaction with the status change and the onboarding rows: an
 			// acceptance that fails part-way leaves no account behind to hold the name
 			// and refuse the retry.
+			let ooAccepted = null;
 			const userId = db.transaction(() => {
 				setStatus.run(status, appId);
 				const userResult = db.prepare(
@@ -14132,24 +14191,37 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 					"INSERT INTO driver_onboarding (user_id, application_id, driver_name, status) VALUES (?, ?, ?, 'documents_pending')"
 				).run(newUserId, appId, fullName);
 
-				// Seed the onboarding documents
+				// Seed the onboarding documents (an owner-operator's set has his agreement
+				// in place of the contractor agreement).
 				const seedDoc = db.prepare(
 					"INSERT OR IGNORE INTO onboarding_documents (user_id, doc_key, doc_name, confidential) VALUES (?, ?, ?, ?)"
 				);
-				for (const doc of ONBOARDING_DOCS) {
+				for (const doc of (ooAccept ? ooOnboarding.docSet(true) : ONBOARDING_DOCS)) {
 					seedDoc.run(newUserId, doc.key, doc.name, doc.confidential);
 				}
+				// His profile, and his truck created, linked and assigned, in this transaction.
+				if (ooAccept) ooAccepted = ooOnboarding.writeAcceptance({ appId, userId: newUserId, fullName, accept: ooAccept, actor: req.session.user.username });
 				return newUserId;
 			})();
 
-			logAudit(req, "accept_application", "application", appId, `Accepted driver "${auditText(fullName, 120)}", created account "${username}"`);
+			if (ooAccepted) {
+				logAudit(req, "accept_owner_operator", "application", appId,
+					`Accepted owner-operator "${auditText(fullName, 120)}", created account "${username}", owner-operator ${ooAccepted.ooId}, truck ${ooAccepted.unit} (id ${ooAccepted.truckId}), source ${ooAccepted.source}`);
+			} else {
+				logAudit(req, "accept_application", "application", appId, `Accepted driver "${auditText(fullName, 120)}", created account "${username}"`);
+			}
 			notifyChange("applications"); notifyChange("users"); notifyChange("drivers");
+			if (ooAccepted) notifyChange("trucks");
 
 			res.json({
 				success: true,
 				accountCreated: true,
 				credentials: { username, tempPassword, userId, driverName: fullName },
+				...(ooAccepted ? { ownerOperator: { truckUnit: ooAccepted.unit, source: ooAccepted.source } } : {}),
 			});
+			if (ooAccepted) {
+				try { ooOnboarding.notifyAgreementReady(userId); } catch (err) { console.error("[owner-operator] agreement-ready notice:", err.message); }
+			}
 
 			// Welcome email to driver (branded)
 			const driverWelcomeHtml = `
@@ -14177,7 +14249,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 						<div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px">What to expect:</div>
 						<table style="width:100%;border-collapse:collapse;font-size:13px;color:#334155">
-							<tr><td style="padding:5px 8px 5px 0;vertical-align:top;width:20px"><b>1.</b></td><td style="padding:5px 0;border-bottom:1px solid #f1f5f9">Sign 5 onboarding documents (Contractor Agreement, Equipment Policy, W-9, Mobile Policy, Substance Policy)</td></tr>
+							<tr><td style="padding:5px 8px 5px 0;vertical-align:top;width:20px"><b>1.</b></td><td style="padding:5px 0;border-bottom:1px solid #f1f5f9">${ooAccepted ? ooOnboarding.welcomeDocsText() : "Sign 5 onboarding documents (Contractor Agreement, Equipment Policy, W-9, Mobile Policy, Substance Policy)"}</td></tr>
 							<tr><td style="padding:5px 8px 5px 0;vertical-align:top"><b>2.</b></td><td style="padding:5px 0;border-bottom:1px solid #f1f5f9">Complete pre-employment drug test (our safety team will contact you)</td></tr>
 							<tr><td style="padding:5px 8px 5px 0;vertical-align:top"><b>3.</b></td><td style="padding:5px 0">Once cleared, you'll be fully onboarded and ready to receive loads</td></tr>
 						</table>
@@ -14211,7 +14283,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 							<tr><td style="padding:5px 0;color:#64748b">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(application.phone)}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(application.position)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(application.position)}</td></tr>${ooAccepted ? `<tr><td style="padding:5px 0;color:#64748b">Accepted as</td><td style="padding:5px 0">Owner-operator, truck ${escapeHtml(ooAccepted.unit)} (Inactive), source ${escapeHtml(ooAccepted.source)}</td></tr>` : ""}
 							<tr><td style="padding:5px 0;color:#64748b">Onboarding Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Documents Pending (5 docs)</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
@@ -18501,11 +18573,12 @@ app.get("/api/investor-outreach/log", requireRole("Super Admin"), (req, res) => 
 // === DRIVER ONBOARDING ENDPOINTS ===
 
 // The signing step (documents_pending -> documents_signed), one rule for checkAndCompleteOnboarding() and
-// onboardingAddsJudgedRow(): every ONBOARDING_DOCS document signed (no other document counts) and, with
+// onboardingAddsJudgedRow(): every document of his set signed (ONBOARDING_DOCS, or an owner-operator's set
+// by his profile, ooOnboarding.docsFor(); no other document counts) and, with
 // EMERGENCY_CONTACTS_ENABLED, two contacts on file, which hold back only a driver still at the step.
 function onboardingSigningStepState(userId, ob) {
 	const signed = new Set(db.prepare("SELECT doc_key FROM onboarding_documents WHERE user_id = ? AND signed = 1").all(userId).map((r) => r.doc_key));
-	const requiredSigned = ONBOARDING_DOCS.every((d) => signed.has(d.key));
+	const requiredSigned = ooOnboarding.docsFor(userId).every((d) => signed.has(d.key));
 	const contactsOk = !EMERGENCY_CONTACTS_ENABLED || emergencyContactsCount(userId) >= emergencyContactRules.MIN_CONTACTS;
 	return { requiredSigned, contactsOk, stepDone: requiredSigned && (contactsOk || ob.status !== "documents_pending") };
 }
@@ -18679,6 +18752,9 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 	if (step.stepDone && ob.drug_test_result === "pass") {
 		const now = new Date().toISOString();
 		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
+		// An owner-operator's truck goes in service on his completion day, unless already set.
+		// A failure is logged, never the reason a completed onboarding answers 500.
+		try { ooOnboarding.setInServiceOnCompletion(userId, now); } catch (err) { console.error("[owner-operator] in-service date at completion:", err.message); }
 		notifyChange("applications");
 		// Sync driver to drivers_directory + activate
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
@@ -18786,7 +18862,7 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 		const documents = stripSigningEvidence(
 			db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
 		);
-		res.json({ onboarding, documents, totalDocs: ONBOARDING_DOCS.length });
+		res.json({ onboarding, documents, totalDocs: ooOnboarding.docsFor(userId).length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -18901,6 +18977,12 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		if (docRow.signed && !(ONBOARDING_RESIGN_ENABLED && onboardingResign.isRequested(docRow))) {
 			return res.json({ success: true, message: "Already signed" });
 		}
+		// The owner-operator agreement is signed only once it is ready: his truck linked,
+		// his terms set and counsel's final text in place. Refused before anything is written.
+		if (docKey === "owner_operator_agreement") {
+			const notReady = ooOnboarding.agreementSignRefusal(userId);
+			if (notReady) return res.status(409).json(notReady);
+		}
 
 		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
 		if (!consent) return;
@@ -18924,8 +19006,9 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 
 		// Contractor agreement has banking info — persist it before rendering, and
 		// keep it even if the render then fails: it is the signer's own data and
-		// re-typing bank details is exactly the work we don't want to lose.
-		if (docKey === "contractor_agreement" && paymentInfo) {
+		// re-typing bank details is exactly the work we don't want to lose. The
+		// owner-operator agreement's Schedule D carries the same details.
+		if ((docKey === "contractor_agreement" || docKey === "owner_operator_agreement") && paymentInfo) {
 			db.prepare(`INSERT OR REPLACE INTO driver_payment_info
 				(user_id, payment_method, check_name, bank_name, bank_address, bank_phone, bank_routing, bank_account, bank_acct_name, account_type)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -18961,6 +19044,14 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 					signatureText: signatureText.trim(),
 					signatureImage: signatureImage || null,
 				});
+			}
+			// His agreement, from his profile, truck and charges; the profile path opens
+			// the template whatever OWNER_OPERATOR_ONBOARDING_ENABLED says.
+			if (docKey === "owner_operator_agreement") {
+				return renderPolicy(docKey, ooOnboarding.agreementRenderData(userId, {
+					effectiveDate, fullName: resolvedFullName, address: application?.address || "",
+					signatureText: signatureText.trim(), signatureImage: signatureImage || null, paymentMethod: paymentInfo?.paymentMethod || "",
+				}), { ownerOperatorProfile: true });
 			}
 			// W-9: fill form fields (same as investor) + overlay signature and date
 			return fillW9Form({
@@ -19099,7 +19190,9 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewLimiter, async (req, res) => {
 	try {
 		const { docKey } = req.params;
-		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
+		// The caller's own document set: an owner-operator's has his agreement in place
+		// of the contractor agreement.
+		const docDef = ooOnboarding.docsFor(req.session.user.id).find(d => d.key === docKey);
 		if (!docDef) return res.status(404).json({ error: "Unknown document" });
 
 		const userId = req.session.user.id;
@@ -19107,6 +19200,16 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewL
 		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
 		const driverName = user?.driver_name || application?.full_name || "";
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
+
+		// His agreement as it stands (unsigned), whatever OWNER_OPERATOR_ONBOARDING_ENABLED says.
+		if (docKey === "owner_operator_agreement") {
+			const pdf = await renderPolicy(docKey, ooOnboarding.agreementRenderData(userId, {
+				effectiveDate, fullName: driverName, address: application?.address || "",
+			}), { ownerOperatorProfile: true });
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", `inline; filename="${docKey}-preview.pdf"`);
+			return res.send(pdf);
+		}
 
 		if (docKey === "w9") {
 			// W-9: fill form fields (same as investor) — preview without signature
@@ -43663,6 +43766,9 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
 			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
+		// A new row naming an owner-operator who can't haul yet (or any more) is refused
+		// as POST /api/dispatch refuses him.
+		if (appendHeaders && ooOnboarding.refuseLoad(req, res, { driver: ooOnboarding.rowDriverChange(appendHeaders, [], values), via: "POST /api/data", action: "create_sheet_row_blocked" })) return;
 
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
@@ -44101,6 +44207,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
 			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
+		// A Driver cell set to an owner-operator who can't haul yet (or any more) is
+		// refused as POST /api/dispatch refuses him; after the re-read, before the write.
+		if (guarded && ooOnboarding.refuseLoad(req, res, { driver: ooOnboarding.rowDriverChange(headers, before, after), via: "PUT /api/data/:rowIndex", action: "update_sheet_row_blocked" })) return;
 
 		// Only the cells this save changes, one range each (sheetRowCellWrites()):
 		// a cell sent back as read is not rewritten, so every cell nobody edited,
@@ -44812,6 +44921,9 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// sheet is read.
 		const reservedDriver = reservedDriverNameRefusal(driver, "driver");
 		if (reservedDriver) return res.status(400).json(reservedDriver);
+		// An owner-operator gets no load before his agreement is signed or after his
+		// end week: 409, audited, before the sheet is read (lib/owner-operator-onboarding.js).
+		if (ooOnboarding.refuseLoad(req, res, { driver, loadId, via: "POST /api/dispatch" })) return;
 
 		// Queueing is allowed: dispatch to a driver who's already on a load,
 		// the new row lands as "Dispatched" and queues behind their current
@@ -45016,6 +45128,8 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// Refused as POST /api/dispatch refuses it (reservedDriverNameRefusal()).
 		const reservedDriver = reservedDriverNameRefusal(newDriver, "newDriver");
 		if (reservedDriver) return res.status(400).json(reservedDriver);
+		// Refused as POST /api/dispatch refuses an owner-operator who can't haul yet.
+		if (ooOnboarding.refuseLoad(req, res, { driver: newDriver, loadId, via: "POST /api/dispatch/reassign" })) return;
 
 		const sheets = await getSheets();
 		// Headers, every row AND the target row in one round trip; RUNG 2 refuses
@@ -60469,6 +60583,9 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
 			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
+		// A Driver cell set to an owner-operator who can't haul yet (or any more) is
+		// refused as POST /api/dispatch refuses him.
+		if (guarded && ooOnboarding.refuseLoad(req, res, { driver: ooOnboarding.rowDriverChange(headers, before, after), loadId, via: "PUT /api/load/:loadId", action: "update_sheet_row_blocked" })) return;
 
 		// Only the cells this save changes, one range each (sheetRowCellWrites(), as
 		// PUT /api/data/:rowIndex writes): a column the body left out, or sent back

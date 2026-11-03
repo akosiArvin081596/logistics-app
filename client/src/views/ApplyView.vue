@@ -111,11 +111,12 @@
             <p>{{ sidebarSteps[step].desc }}</p>
           </div>
 
-          <StepPersonalInfo v-if="step === 0" :form="form" @open-map="showMapPicker = true" />
-          <StepExperience v-if="step === 1" :form="form" />
-          <StepDrivingHistory v-if="step === 2" :form="form" />
-          <StepCertifications v-if="step === 3" :form="form" />
-          <StepReferences v-if="step === 4" :form="form" />
+          <StepPersonalInfo v-if="page === 'personal'" :form="form" @open-map="showMapPicker = true" />
+          <StepOwnerOperator v-if="page === 'truck'" :truck="form.owner_operator" />
+          <StepExperience v-if="page === 'experience'" :form="form" />
+          <StepDrivingHistory v-if="page === 'history'" :form="form" />
+          <StepCertifications v-if="page === 'certifications'" :form="form" />
+          <StepReferences v-if="page === 'references'" :form="form" />
 
           <div v-if="restoreNotice" class="notice-bar" role="status">{{ restoreNotice }}</div>
           <div v-if="error" class="error-bar">{{ error }}</div>
@@ -126,7 +127,7 @@
               Back
             </button>
             <div style="flex:1"></div>
-            <button v-if="step < 4" class="btn-primary" @click="nextStep">
+            <button v-if="step < sidebarSteps.length - 1" class="btn-primary" @click="nextStep">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -171,6 +172,20 @@
               <div class="review-item"><span class="review-label">CDL Front</span><span class="review-value" :class="form.cdl_front ? 'text-green' : 'text-amber'">{{ form.cdl_front ? 'Uploaded' : 'Missing' }}</span></div>
               <div class="review-item"><span class="review-label">CDL Back</span><span class="review-value" :class="form.cdl_back ? 'text-green' : 'text-amber'">{{ form.cdl_back ? 'Uploaded' : 'Missing' }}</span></div>
               <div class="review-item"><span class="review-label">Medical Card</span><span class="review-value" :class="form.medical_card ? 'text-green' : 'text-amber'">{{ form.medical_card ? 'Uploaded' : 'Missing' }}</span></div>
+            </div>
+          </div>
+
+          <!-- Your truck (owner-operators) -->
+          <div v-if="pages.includes('truck')" class="review-section">
+            <div class="review-section-title">Your Truck</div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Truck</span><span class="review-value">{{ form.owner_operator.truck_year }} {{ form.owner_operator.truck_make }} {{ form.owner_operator.truck_model }}</span></div>
+              <div class="review-item"><span class="review-label">VIN</span><span class="review-value">{{ form.owner_operator.truck_vin }}</span></div>
+              <div class="review-item"><span class="review-label">Plate</span><span class="review-value">{{ form.owner_operator.truck_plate }} ({{ form.owner_operator.truck_plate_state }})</span></div>
+              <div v-if="form.owner_operator.truck_unit" class="review-item"><span class="review-label">Unit</span><span class="review-value">{{ form.owner_operator.truck_unit }}</span></div>
+              <div class="review-item"><span class="review-label">Own or lease</span><span class="review-value">{{ form.owner_operator.truck_ownership === 'lease' ? 'Lease' : 'Own' }}</span></div>
+              <div class="review-item"><span class="review-label">Registered owner</span><span class="review-value">{{ form.owner_operator.registered_owner }}</span></div>
+              <div v-if="form.owner_operator.business_name" class="review-item full"><span class="review-label">Business name</span><span class="review-value">{{ form.owner_operator.business_name }}</span></div>
             </div>
           </div>
 
@@ -254,24 +269,33 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { createFormDraft, deleteIndexedDb } from '../lib/formDraft'
 import { checkEmail } from '../lib/emailAddress'
 import { checkSsn } from '../lib/taxId'
+import { BASE_PAGES, applyPages, emptyOwnerOperatorTruck, validateOwnerOperatorTruck, ownerOperatorSection, referralCodeFrom } from '../lib/ownerOperatorApply'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
+import StepOwnerOperator from '../components/apply/StepOwnerOperator.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
 import StepDrivingHistory from '../components/apply/StepDrivingHistory.vue'
 import StepCertifications from '../components/apply/StepCertifications.vue'
 import StepReferences from '../components/apply/StepReferences.vue'
 
-const sidebarSteps = [
-  { title: 'Personal Info', desc: 'Basic details & documents' },
-  { title: 'Experience', desc: 'Work history & qualifications' },
-  { title: 'Driving History', desc: 'Accidents & citations' },
-  { title: 'Certifications', desc: 'Skills & availability' },
-  { title: 'References', desc: 'Contacts & signature' },
-]
+const PAGE_INFO = {
+  personal: { title: 'Personal Info', desc: 'Basic details & documents' },
+  truck: { title: 'Your Truck', desc: 'The truck you will drive' },
+  experience: { title: 'Experience', desc: 'Work history & qualifications' },
+  history: { title: 'Driving History', desc: 'Accidents & citations' },
+  certifications: { title: 'Certifications', desc: 'Skills & availability' },
+  references: { title: 'References', desc: 'Contacts & signature' },
+}
+
+// Whether the server offers the owner-operator's truck step (GET
+// /api/config/apply-options); off, or unanswered, the form is the drivers' five steps.
+const ownerOperatorOffered = ref(false)
+// The partner's apply link carries its referral code; the form never says whether it matched.
+const referralCode = referralCodeFrom(typeof window !== 'undefined' ? window.location.search : '')
 
 const step = ref(0)
 const maxStep = ref(0)
@@ -282,7 +306,7 @@ const showMapPicker = ref(false)
 const showReviewModal = ref(false)
 
 function openReview() {
-  const err = validate(step.value)
+  const err = validatePage(step.value)
   if (err) { error.value = err; return }
   error.value = ''
   showReviewModal.value = true
@@ -308,9 +332,25 @@ const defaultForm = () => ({
     { name: '', phone: '', relationship: '', contactPerson: '' },
   ],
   additional_info: '', signature: '', signature_date: '',
+  owner_operator: emptyOwnerOperatorTruck(),
 })
 
 const form = reactive(defaultForm())
+
+// The steps this applicant sees, by key, and the one on screen.
+const pages = computed(() => applyPages({ ownerOperatorEnabled: ownerOperatorOffered.value, position: form.position }))
+const sidebarSteps = computed(() => pages.value.map((k) => PAGE_INFO[k]))
+const page = computed(() => pages.value[step.value] || 'personal')
+// A step's check: the truck's own, or validate() by the drivers' step number.
+function validatePage(i) {
+  const key = pages.value[i]
+  return key === 'truck' ? validateOwnerOperatorTruck(form.owner_operator) : validate(BASE_PAGES.indexOf(key))
+}
+// Choosing or leaving Owner Operator adds or removes a step: stay inside the list.
+watch(() => pages.value.length, (n) => {
+  if (step.value > n - 1) step.value = n - 1
+  if (maxStep.value > n - 1) maxStep.value = n - 1
+})
 
 // ── Draft persistence — see client/src/lib/formDraft.js for the reasoning ──
 //
@@ -391,7 +431,18 @@ onMounted(() => {
   // Purge the pre-fix photo store. Base64 images of a driver's licence sat in
   // IndexedDB with no expiry, cleared only on a successful submit.
   deleteIndexedDb('logisx_apply')
+  loadApplyOptions()
 })
+
+async function loadApplyOptions() {
+  try {
+    const res = await fetch('/api/config/apply-options')
+    const data = res.ok ? await res.json() : null
+    ownerOperatorOffered.value = !!data && data.ownerOperator === true
+  } catch {
+    ownerOperatorOffered.value = false
+  }
+}
 
 // Auto-save on any change
 watch(step, saveState)
@@ -436,7 +487,7 @@ function validate(s) {
 }
 
 function nextStep() {
-  const err = validate(step.value)
+  const err = validatePage(step.value)
   if (err) { error.value = err; return }
   error.value = ''
   restoreNotice.value = ''
@@ -450,8 +501,8 @@ async function submitForm() {
   // safe only because the step gate made it impossible to reach the end with an
   // earlier step invalid — an assumption that stops holding the moment a restore
   // can legitimately blank a field on step 1.
-  for (let s = 0; s <= 4; s++) {
-    const stepErr = validate(s)
+  for (let s = 0; s < pages.value.length; s++) {
+    const stepErr = validatePage(s)
     if (stepErr) {
       step.value = s
       maxStep.value = Math.max(maxStep.value, s)
@@ -464,6 +515,9 @@ async function submitForm() {
   submitting.value = true
   try {
     const payload = { ...form, full_name: `${form.first_name} ${form.last_name}`.trim(), reference_info: JSON.stringify(form.references) }
+    // The truck section only when the form showed its step (the server reads it only then too).
+    if (pages.value.includes('truck')) payload.owner_operator = ownerOperatorSection(form.owner_operator, referralCode)
+    else delete payload.owner_operator
     const res = await fetch('/api/public/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

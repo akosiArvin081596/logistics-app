@@ -148,14 +148,35 @@
             <span class="text-[12px] text-gray-500 font-medium">Applicant</span>
             <span class="text-[14px] font-semibold text-gray-900">{{ pendingApp.full_name }}</span>
           </div>
+          <!-- Owner-operators (only while the server sends the category): the source
+               the application came with, which this acceptance confirms or corrects. -->
+          <template v-if="ownerOperatorChoice">
+            <div v-if="pendingApp.oo_truck" class="flex items-center justify-between py-2 px-3 mt-2 bg-gray-50 rounded-lg">
+              <span class="text-[12px] text-gray-500 font-medium">Source</span>
+              <select v-model="acceptSource" class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" aria-label="Owner-operator source">
+                <option value="direct">Direct</option>
+                <option value="partner">The partner</option>
+              </select>
+            </div>
+            <p v-else class="text-[12px] text-amber-700 mt-2">No truck details: accept as a company driver, or ask the applicant to apply again.</p>
+          </template>
         </div>
         <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-[#e8edf2] bg-gray-50/40">
           <Button variant="outline" class="rounded-md text-[13px] h-9" :disabled="statusSaving" @click="cancelStatusChange">Cancel</Button>
+          <template v-if="ownerOperatorChoice">
+            <Button variant="outline" class="rounded-md text-[13px] h-9" :disabled="statusSaving" @click="confirmStatusChange('company_driver')">
+              {{ statusSaving ? 'Saving...' : 'Accept as company driver' }}
+            </Button>
+            <Button class="rounded-md text-[13px] h-9 text-white bg-emerald-600 hover:bg-emerald-700" :disabled="statusSaving || !pendingApp?.oo_truck" @click="confirmStatusChange('owner_operator')">
+              {{ statusSaving ? 'Saving...' : 'Accept as owner-operator' }}
+            </Button>
+          </template>
           <Button
+            v-else
             class="rounded-md text-[13px] h-9 text-white"
             :class="pendingStatus === 'Accepted' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'"
             :disabled="statusSaving"
-            @click="confirmStatusChange"
+            @click="confirmStatusChange()"
           >
             {{ statusSaving ? 'Saving...' : (pendingStatus === 'Accepted' ? 'Accept driver' : 'Reject') }}
           </Button>
@@ -175,6 +196,10 @@
             <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
               <span class="text-[12px] text-gray-500 font-medium">Driver</span>
               <span class="text-[14px] font-bold text-gray-900">{{ createdCredentials.driverName }}</span>
+            </div>
+            <div v-if="createdOwnerOperator" class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
+              <span class="text-[12px] text-gray-500 font-medium">Owner-operator truck</span>
+              <span class="text-[14px] font-mono font-bold text-gray-900">{{ createdOwnerOperator.truckUnit }} (Inactive)</span>
             </div>
             <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg gap-2">
               <span class="text-[12px] text-gray-500 font-medium">Username</span>
@@ -225,6 +250,21 @@
               <div v-if="selectedApp.dot" class="detail-row"><span>DOT #:</span><span>{{ selectedApp.dot }}</span></div>
               <div v-if="selectedApp.mc" class="detail-row"><span>MC #:</span><span>{{ selectedApp.mc }}</span></div>
               <div class="detail-row"><span>Hazmat:</span><span>{{ selectedApp.hazmat || 'No' }}</span></div>
+            </div>
+            <div v-if="selectedApp.owner_operator" class="detail-section">
+              <h4>Owner-operator: Truck</h4>
+              <div class="detail-row"><span>Truck:</span><span>{{ selectedApp.owner_operator.truck_year }} {{ selectedApp.owner_operator.truck_make }} {{ selectedApp.owner_operator.truck_model }}</span></div>
+              <div class="detail-row"><span>VIN:</span><span>{{ selectedApp.owner_operator.truck_vin }}</span></div>
+              <div class="detail-row"><span>Plate:</span><span>{{ selectedApp.owner_operator.truck_plate }} ({{ selectedApp.owner_operator.truck_plate_state }})</span></div>
+              <div v-if="selectedApp.owner_operator.truck_unit" class="detail-row"><span>Unit:</span><span>{{ selectedApp.owner_operator.truck_unit }}</span></div>
+              <div class="detail-row"><span>Own or lease:</span><span>{{ selectedApp.owner_operator.truck_ownership === 'lease' ? 'Lease' : 'Own' }}</span></div>
+              <div class="detail-row"><span>Registered owner:</span><span>{{ selectedApp.owner_operator.registered_owner }}</span></div>
+              <div v-if="selectedApp.owner_operator.business_name" class="detail-row"><span>Business name:</span><span>{{ selectedApp.owner_operator.business_name }}</span></div>
+              <div class="detail-row"><span>Source:</span><span>{{ selectedApp.owner_operator.source === 'partner' ? 'The partner' : 'Direct' }}</span></div>
+            </div>
+            <div v-else-if="selectedApp.category === 'owner_operator'" class="detail-section">
+              <h4>Owner-operator: Truck</h4>
+              <div class="detail-row"><span>Truck:</span><span>No truck details: accept as a company driver, or ask the applicant to apply again.</span></div>
             </div>
             <div class="detail-section">
               <h4>Experience &amp; Qualifications</h4>
@@ -332,8 +372,14 @@ const selectedApp = ref(null)
 const activeFilter = ref(null)
 const statuses = ['New', 'Reviewed', 'Accepted', 'Rejected']
 
+// The owner-operators tab and accept buttons: only while the server sends each
+// application's category (OWNER_OPERATOR_ONBOARDING_ENABLED); without it the screen is as before.
+const OO_FILTER = 'owner_operator'
+const ownerOperatorsOn = computed(() => applications.value.some(a => Object.prototype.hasOwnProperty.call(a, 'category')))
+
 const filteredApplications = computed(() => {
   if (!activeFilter.value) return applications.value
+  if (activeFilter.value === OO_FILTER) return applications.value.filter(a => a.category === OO_FILTER)
   return applications.value.filter(a => a.status === activeFilter.value)
 })
 
@@ -359,6 +405,9 @@ const kpiCards = computed(() => {
     { label: 'New', value: a.filter(x => x.status === 'New').length, sub: 'Pending review', icon: '&#10071;', theme: 'kpi-amber', iconTheme: 'kpi-icon-amber', filter: 'New' },
     { label: 'Accepted', value: a.filter(x => x.status === 'Accepted').length, sub: 'Approved', icon: '&#10003;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Accepted' },
     { label: 'Rejected', value: a.filter(x => x.status === 'Rejected').length, sub: 'Declined', icon: '&#10007;', theme: 'kpi-violet', iconTheme: 'kpi-icon-violet', filter: 'Rejected' },
+    ...(ownerOperatorsOn.value
+      ? [{ label: 'Owner-operators', value: a.filter(x => x.category === OO_FILTER).length, sub: 'Own their truck', icon: '&#128666;', theme: 'kpi-blue', iconTheme: 'kpi-icon-blue', filter: OO_FILTER }]
+      : []),
   ]
 })
 
@@ -388,6 +437,11 @@ const showStatusConfirm = ref(false)
 const pendingApp = ref(null)
 const pendingStatus = ref('')
 const statusSaving = ref(false)
+// Accepting an owner-operator application: the source it came with, which the
+// acceptance confirms or corrects; and what the server answered about his truck.
+const acceptSource = ref('direct')
+const createdOwnerOperator = ref(null)
+const ownerOperatorChoice = computed(() => pendingStatus.value === 'Accepted' && ownerOperatorsOn.value && pendingApp.value?.category === OO_FILTER)
 
 // Bounce the <select> back to the row's current status when the user picks
 // Accepted/Rejected; we only persist after the confirm dialog. New/Reviewed
@@ -398,6 +452,7 @@ function requestStatusChange(app, event) {
   if (next === 'Accepted' || next === 'Rejected') {
     pendingApp.value = app
     pendingStatus.value = next
+    acceptSource.value = app.oo_source === 'partner' ? 'partner' : 'direct'
     showStatusConfirm.value = true
     event.target.value = app.status
     return
@@ -411,11 +466,13 @@ function cancelStatusChange() {
   pendingStatus.value = ''
 }
 
-async function confirmStatusChange() {
+// `as`: "owner_operator" or "company_driver" from the owner-operator buttons; none otherwise.
+async function confirmStatusChange(as) {
   if (!pendingApp.value || !pendingStatus.value) return
   statusSaving.value = true
   try {
-    await updateStatus(pendingApp.value.id, pendingStatus.value)
+    const extra = as === 'owner_operator' ? { as, source: acceptSource.value } : as === 'company_driver' ? { as } : {}
+    await updateStatus(pendingApp.value.id, pendingStatus.value, extra)
   } finally {
     statusSaving.value = false
     showStatusConfirm.value = false
@@ -424,10 +481,11 @@ async function confirmStatusChange() {
   }
 }
 
-async function updateStatus(id, status) {
+async function updateStatus(id, status, extra = {}) {
   try {
-    const result = await api.put(`/api/applications/${id}/status`, { status })
+    const result = await api.put(`/api/applications/${id}/status`, { status, ...extra })
     if (result.accountCreated && result.credentials) {
+      createdOwnerOperator.value = result.ownerOperator || null
       createdCredentials.value = result.credentials
       usernameCopied.value = false
       passwordCopied.value = false

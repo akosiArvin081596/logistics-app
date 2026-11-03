@@ -51,6 +51,8 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 const bc = require(path.join(ROOT, "lib", "broker-contact"));
 let keyLib = null;
 try { keyLib = require(path.join(ROOT, "lib", "withheld-load-key")); } catch { keyLib = null; }
@@ -529,7 +531,7 @@ function dispatchStubs(state, errors, sheet, more = {}) {
 		requireRole: () => null, getSheets: sheet.getSheets, SPREADSHEET_ID: "sheet-under-test",
 		db: { prepare: () => ({ get: () => undefined, run: () => ({ changes: 0 }), all: () => [] }) },
 		findTruckForDriverStamp: () => null, dispatchWriteBlocker: () => null, tripDayLockCover: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false, insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE, insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
 		insertDispatchNotification: { run: () => ({ lastInsertRowid: 1 }) }, io: fakeIo([]), emitDispatchNotice: () => {},
 		emitLoadEventToDispatch: () => {}, logAudit: () => {}, logAuditRefusal: () => {}, recordPeriodRefusal: () => {},
 		recordStatusChange: () => {}, notifyChange: () => {}, jtCacheInvalidate: () => {}, ...more,
@@ -913,6 +915,7 @@ section("§5 a receipt and a row save by key", async () => {
 			changedGuardedCells: () => [], guardedColumnReason: () => "", validateOwnerIdCell: () => null,
 			sheetRowUpdateBlocker: () => null, buildSheetUpdateAudit: (o) => o, sheetAuditWithCode: (d) => d,
 			logAudit: () => {}, logAuditRefusal: () => {}, jtCacheInvalidate: () => {}, notifyChange: () => {}, recordPersonCellEdits: () => {},
+			ooOnboarding: OO_NO_PROFILE,
 		}));
 		const r = await call(gate, handler, { method: "PUT", path: `/api/data/${ROWNO(H4)}`, params: { rowIndex: String(ROWNO(H4)) }, query: { sheet: "Job Tracking" }, body, session: D });
 		return { ...r, rows };

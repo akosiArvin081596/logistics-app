@@ -71,6 +71,8 @@ const fs = require("fs");
 const path = require("path");
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -344,7 +346,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		normalizeLoadId,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		ROW_EDITOR_CANCEL_GUARD_ENABLED: cancelGuard,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",

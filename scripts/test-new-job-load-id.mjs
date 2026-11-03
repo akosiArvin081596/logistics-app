@@ -39,6 +39,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const require = createRequire(import.meta.url)
 const SRC = require('./lib/server-source.js').serverSource()
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require('./lib/oo-onboarding-env.js').ooOnboardingNoProfile()
 const RATECON_ROUTE_SRC = fs.readFileSync(path.join(ROOT, 'lib', 'ratecon-pdf-route.js'), 'utf8')
 const VIEW_SRC = fs.readFileSync(path.join(ROOT, 'client', 'src', 'views', 'NewJobView.vue'), 'utf8')
 
@@ -194,7 +196,7 @@ function mountPostData({ sheet = 'Job Tracking', guarded = true } = {}) {
     app: { post: (p, gate, h) => { handler = h } },
     requireRole: () => null,
     loadIdRule: rule,
-    DRIVER_AVAILABILITY_ENABLED: false,
+    DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
     getSheets: async () => sheets,
     SPREADSHEET_ID: 'sheet-under-test',
     getSheetName: () => sheet,
