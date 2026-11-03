@@ -261,7 +261,7 @@ function lintStoryboard({ DEMO, CARDS, CHAPTERS }) {
 			beatIds.add(b.id);
 			if (!b.say) continue;
 			if (b.say.length > SAY_MAX_CHARS) p.push(`${where}: say is longer than ${SAY_MAX_CHARS} characters`);
-			if (/[<>&]|-->/.test(b.say)) p.push(`${where}: say holds a character WebVTT would need escaped (< > & or -->)`);
+			if (/[<>&]/.test(b.say)) p.push(`${where}: say holds a character WebVTT would need escaped (< > & or -->)`);
 			let cues = [];
 			try { cues = beatPlan(b).cues; } catch (e) { p.push(`${where}: ${e.message}`); }
 			for (const c of cues) {
