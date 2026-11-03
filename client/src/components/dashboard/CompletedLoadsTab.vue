@@ -291,6 +291,7 @@
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" :planned-lane="plannedLane" dispatch-mode />
             <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" @lane="onPlannedLane" />
           </div>
+          <ChrSendBadge v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -360,6 +361,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
+import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import FactoringControls from './FactoringControls.vue'

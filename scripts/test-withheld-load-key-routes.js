@@ -359,6 +359,7 @@ section("§1 every route that reads a load ID reads a key through loadIdFor()", 
 	const LIB_RESOLVED = ["driver-instructions-runtime.js"];
 	const LIB_EXEMPT = {
 		"ratecon-pdf-route.js": "Super Admin only: requireRole before any lookup",
+		"chr-routes.js": "Super Admin only: requireRole first on every C.H. Robinson route, before any lookup",
 		"factoring-routes.js": "Super Admin only: requireRole before any lookup (a Super Admin is never served a withheld Load ID)",
 	};
 	check("§1 lib/: the files that read a load ID from a request are exactly the listed ones: unlisted, then gone",
