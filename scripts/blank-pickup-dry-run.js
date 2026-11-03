@@ -24,7 +24,10 @@
 //            included; computeInvestorMonthlyEarnings() and
 //            computeLossCarryForward(), as the server settles).
 // Then every closed month and every month before each FROM checked identical
-// with and without the flag (if not, the run exits 1 after printing).
+// with and without the flag (if not, the run exits 1 after printing). With the
+// arrival pickup date on in the app's .env, both runs pay its windows, and the
+// loads whose status history could not be read (each paid its scheduled window)
+// are listed under "arrival not read".
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/blank-pickup-dry-run.js --db=app.db --sheet-id=<id> --invoice-from=YYYY-MM --ledger-from=YYYY-MM [--key=service-account-key.json] [--names] [--json]
@@ -84,7 +87,9 @@ const EXTRA_ROOTS = [
 ];
 
 // Section 1: the weekly invoice, the blank-pickup fallback off and on from `from`.
-function invoiceSection(api, sheetValues, from, problems) {
+// `arrivalNotRead` (loadId -> error) collects the loads whose status history the
+// arrival pickup date could not read.
+function invoiceSection(api, sheetValues, from, problems, arrivalNotRead) {
 	const { headers, data } = api.jobTrackingRowsOf(sheetValues);
 	const cols = api.invoiceWeekColumns(headers);
 	const monthCols = api.jobTrackingMonthCols(headers);
@@ -123,6 +128,7 @@ function invoiceSection(api, sheetValues, from, problems) {
 		const now = api.invoiceWeekPaidDays({ ...args, blankPickupFrom: null });
 		const withFlag = api.invoiceWeekPaidDays({ ...args, blankPickupFrom: from });
 		for (const loadId of withFlag.blankPickupLoads) loads.push({ loadId, driver: w.nameNorm, weekStart: w.weekStart });
+		for (const e of (withFlag.arrival && withFlag.arrival.errors) || []) arrivalNotRead.set(e.loadId, e.error);
 		// Priced as generate prices them: a percentage driver's total reads revenue,
 		// not days, so it does not move.
 		const truckRate = api.truckDailyRateCandidates(w.display).slice(-1)[0];
@@ -173,10 +179,12 @@ function invoiceSection(api, sheetValues, from, problems) {
 }
 
 // Section 2: the payout ledger, the blank drop-off fallback off and on from `from`.
-async function ledgerSection(api, from, names, problems) {
+// `arrivalRule` is the arrival pickup date's resolver as the app's .env sets it
+// (null while off), shared by both runs so its unreadable loads can be listed.
+async function ledgerSection(api, from, names, problems, arrivalRule) {
 	const base = api.payoutRules();
-	const offRules = { ...base, blankDropoffFrom: null };
-	const onRules = { ...base, blankDropoffFrom: from };
+	const offRules = { ...base, blankDropoffFrom: null, arrivalRule };
+	const onRules = { ...base, blankDropoffFrom: from, arrivalRule };
 	const off = await api.computeFleetLedger({ rules: offRules });
 	const on = await api.computeFleetLedger({ rules: onRules });
 	const perDay = [];
@@ -303,6 +311,10 @@ function printText(r) {
 		lines.push("Investor payable by month:");
 		for (const i of r.ledger.investorMonths) lines.push(`  owner ${i.ownerId}${i.investor ? ` (${i.investor})` : ""}  ${i.period}  ${usd(i.current)} -> ${usd(i.withFlag)}  (${usd(i.delta)}; driver pay ${usd(i.driverPayChange)})`);
 	}
+	if (r.arrivalPickupDateFrom) {
+		lines.push("", `ARRIVAL_PICKUP_DATE is on from ${r.arrivalPickupDateFrom} in the app's .env: both runs pay its windows.`);
+		lines.push(`Arrival not read (status history unreadable; each paid its scheduled window): ${r.arrivalNotRead.length ? r.arrivalNotRead.map((e) => `${e.loadId} (${e.error})`).join(", ") : "none"}.`);
+	}
 	lines.push("", `Closed months (${r.closedMonths.join(", ") || "none"}) unchanged: ${r.closedMonthsUnchanged ? "yes" : "NO"}. Months before FROM unchanged: ${r.monthsBeforeFromUnchanged ? "yes" : "NO"}.`);
 	for (const p of r.problems) lines.push(`PROBLEM (${p.section}${p.ownerId !== undefined ? `, owner ${p.ownerId}` : ""}): ${p.issue}`);
 	console.log(lines.join("\n"));
@@ -345,13 +357,19 @@ async function main() {
 	try {
 		const api = { ...world.api, db: world.db };
 		const problems = [];
+		const arrivalFrom = loadPayDays.arrivalPickup.ruleFromEnv(env);
+		const arrivalRule = loadPayDays.arrivalPickup.ledgerResolver({ db: world.db, env });
+		const arrivalNotRead = new Map();
 		const result = {
 			latestClosedMonth: latestClosed,
 			closedMonths: world.db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period").all().map((r) => r.period),
 			baseline: "both blank-appointment fallbacks off; every other setting as the app's .env has it",
-			invoice: invoiceFrom ? invoiceSection(api, sheetData.values || [], invoiceFrom, problems) : null,
-			ledger: ledgerFrom ? await ledgerSection(api, ledgerFrom, args.names === true, problems) : null,
+			arrivalPickupDateFrom: arrivalFrom,
+			invoice: invoiceFrom ? invoiceSection(api, sheetData.values || [], invoiceFrom, problems, arrivalNotRead) : null,
+			ledger: ledgerFrom ? await ledgerSection(api, ledgerFrom, args.names === true, problems, arrivalRule) : null,
 		};
+		for (const e of arrivalRule ? arrivalRule.errors() : []) arrivalNotRead.set(e.loadId, e.error);
+		result.arrivalNotRead = [...arrivalNotRead].map(([loadId, error]) => ({ loadId, error })).sort((p, q) => p.loadId.localeCompare(q.loadId));
 		const { headers, data } = api.jobTrackingRowsOf(sheetData.values || []);
 		const driverCol = api.invoiceWeekColumns(headers).driverCol;
 		const displayOf = new Map();

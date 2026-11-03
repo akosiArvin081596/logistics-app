@@ -40,9 +40,10 @@
 // Which days, and at what rate: the weekly generator's own code, lifted. Each
 // day must be one invoiceWeekPaidDays() pays for one of the driver's completed,
 // live loads billed in another week (its pay window, the ELD intersection, the
-// pre-dispatch and blank-pickup rules and the Super Admin day overrides, all as
-// the app's flags have them), or a day a Super Admin added for the driver. A day
-// the rules would not pay is refused, with why (no window covers it, the ELD
+// pre-dispatch and blank-pickup rules, the arrival pickup date and the Super Admin
+// day overrides, all as the app's flags have them), or a day a Super Admin added
+// for the driver. A day the rules would not pay is refused, with why (no window
+// covers it, the ELD
 // shows the truck parked, an override removed it); there is no option to force
 // one: a Super Admin adds the day in the app (excluded days, "add") and the run
 // then reads it. Without --loads every such load counts; a load with a window
@@ -87,7 +88,8 @@
 //     is held (planned again inside the write's transaction);
 //   - a write with DRIVER_RATE_ONLY on, on a database the app never ran with it
 //     (the write would stamp the rule's start record; the dry run reads it in
-//     memory).
+//     memory);
+//   - ARRIVAL_PICKUP_DATE is on and the status history can't be read.
 // Every run lists the driver's live invoices from the week on (number, status,
 // total due, lines or adjustment), the week's other days the same loads would
 // pay, and the "related" loads: the driver's other loads whose window touches
@@ -158,11 +160,15 @@ const ROOTS = [
 	"DRIVER_RATE_ONLY_FROM", "loadKeySet", "getDeletedLoadIds", "normalizeLoadId", "tripDayResolver", "invoiceExtraRuleLoads",
 	"invoiceTruckVidReader", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "jobTrackingMonthCols", "parseInvoiceDate",
 	"fmtLocalDate", "preDispatchPayDayFilter", "INVOICE_BLANK_PICKUP_FALLBACK_FROM",
+	// The arrival pickup date: each load's window as the generator pays it.
+	"invoiceLoadWindow", "loadPayDays",
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "DATA_DIR", "fetch"];
 const DENIED = ["app", "getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "sendEmail", "transporter", "getDrive", "notifyChange"];
 // What the lifted code may require: Node's path, fs and crypto, and the app's own lib/.
 const LIFTED_REQUIRE_OK = (m) => ["crypto", "path", "fs"].includes(m) || /^\.\/lib\/[\w.-]+$/.test(m);
+// The environment a world's lifted code reads as process.env.
+const WORLD_ENV = Symbol("the world's process.env");
 
 class Refusal extends Error {}
 
@@ -231,6 +237,7 @@ function buildWorld({ root = ROOT, db, env = {}, dataDir, render = null, log = c
 		db, liftedRequire, log, scriptProcess, root, dataDir, noFetch,
 	);
 	if (render) api.renderPolicy = render;
+	api[WORLD_ENV] = scriptProcess.env;
 	return { api, liftedNames: lifted.names };
 }
 
@@ -298,6 +305,14 @@ function plan(db, api, values, opts, { today = null } = {}) {
 		}
 	}
 	const paid = api.invoiceWeekPaidDays({ headers, cols, loads: used, extraRuleLoads: [], weekRule, weekStart, weekEnd, nameNorm });
+	// With the arrival pickup date on (as this run's settings set it), a load whose
+	// status history can't be read is paid its scheduled window by generate; a
+	// draft is written from these days, so the script refuses instead.
+	if (paid.arrival && paid.arrival.errors.length) {
+		throw new Refusal(`ARRIVAL_PICKUP_DATE is on and the status history could not be read for load ${paid.arrival.errors.map((e) => e.loadId).join(", ")} (${paid.arrival.errors[0].error}); nothing was drafted`);
+	}
+	const arrivalFrom = api.loadPayDays.arrivalPickup.ruleFromEnv(api[WORLD_ENV]);
+	const arrivalRule = arrivalFrom ? api.loadPayDays.arrivalPickup.createArrivalResolver({ db, fromDay: arrivalFrom }) : null;
 
 	// The rate, as generate prices it today.
 	const truckRate = api.truckDailyRateCandidates(payee).slice(-1)[0];
@@ -392,8 +407,16 @@ function plan(db, api, values, opts, { today = null } = {}) {
 	};
 	const dayKey = (v) => { const p = v ? api.parseInvoiceDate(v) : null; return p && !isNaN(p) ? api.fmtLocalDate(p) : ""; };
 	// The load's window as the cells read: pickup to drop-off (a delivered load's
-	// completion date when the drop-off is blank), else its pickup day.
+	// completion date when the drop-off is blank), else its pickup day. With the
+	// arrival pickup date on, an in-scope load's arrival window, as generate pays it.
+	const arrivalCols = arrivalRule ? api.jobTrackingMonthCols(headers) : null;
 	const rawWindow = (row) => {
+		const paidWin = arrivalRule ? api.invoiceLoadWindow(row, { cols, headers, monthCols: arrivalCols, arrivalRule }) : null;
+		if (paidWin && paidWin.arrival && paidWin.arrival.start && paidWin.win) {
+			const from = api.fmtLocalDate(paidWin.win.start);
+			const to = paidWin.win.end ? api.fmtLocalDate(paidWin.win.end) : from;
+			return { start: from, end: to < from ? from : to };
+		}
 		const start = dayKey(cols.pickupCol && row[cols.pickupCol]);
 		if (!start) return null;
 		const done = /delivered|completed|pod received/i.test(cols.statusCol ? row[cols.statusCol] || "" : "");
@@ -573,6 +596,7 @@ function plan(db, api, values, opts, { today = null } = {}) {
 		flags: {
 			TRIP_WORK_DAYS_FROM: api.TRIP_WORK_DAYS_FROM || null, DRIVER_RATE_ONLY_FROM: api.DRIVER_RATE_ONLY_FROM || null,
 			INVOICE_BLANK_PICKUP_FALLBACK_FROM: api.INVOICE_BLANK_PICKUP_FALLBACK_FROM || null, preDispatch: !!api.preDispatchPayDayFilter(),
+			ARRIVAL_PICKUP_DATE_FROM: arrivalFrom,
 		},
 		pay: { payDaily: payStruct.payDaily, truckRate: truckRate === undefined ? null : truckRate, dailyRate },
 	};
@@ -664,7 +688,8 @@ function describe(p, opts) {
 	if (p.state === "draft") {
 		const f = p.flags;
 		out.push(`Flags as the app has them: TRIP_WORK_DAYS ${f.TRIP_WORK_DAYS_FROM ? `from ${f.TRIP_WORK_DAYS_FROM}` : "off"}, DRIVER_RATE_ONLY ${f.DRIVER_RATE_ONLY_FROM ? `from ${f.DRIVER_RATE_ONLY_FROM}` : "off"}, ` +
-			`INVOICE_BLANK_PICKUP_FALLBACK ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM ? `from ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM}` : "off"}, pre-dispatch rule ${f.preDispatch ? "on" : "off"}`);
+			`INVOICE_BLANK_PICKUP_FALLBACK ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM ? `from ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM}` : "off"}, pre-dispatch rule ${f.preDispatch ? "on" : "off"}, ` +
+			`ARRIVAL_PICKUP_DATE ${f.ARRIVAL_PICKUP_DATE_FROM ? `from ${f.ARRIVAL_PICKUP_DATE_FROM}` : "off"}`);
 		out.push(`Pay: fixed; drivers directory ${p.pay.payDaily > 0 ? usd(p.pay.payDaily) : "not set"}; truck rate ${p.pay.truckRate == null ? "no truck" : usd(p.pay.truckRate)}; the week's rate ${usd(p.pay.dailyRate)}`);
 		out.push("Days:");
 		for (const d of p.perDay) {
