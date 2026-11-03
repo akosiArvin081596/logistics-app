@@ -391,13 +391,29 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			"§4 …and the generated email, unedited");
 		eq(rendered.html, rendered.draftHtml, "§4 html is the route's draftHtml");
 
+		// The Draft Invoice button's in-flight rows (lib/factoring-store.js): record()
+		// touches one only when told to (settleInflight), inside its own write.
+		require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(w.db);
+		const inflight = () => w.db.prepare("SELECT load_key, invoice_id FROM invoice_draft_inflight ORDER BY invoice_id").all();
+		const putInflight = w.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES ('ld-test-0001', 'LD-TEST-0001', ?, 'imap', 'in_flight', '2026-10-28T12:00:00Z', '2026-10-28T12:00:00Z')");
+		putInflight.run("10282026-7");
+		putInflight.run("10282026-6");
 		w.engine.record(ctx, rendered, { via: "auto-imap", actor: AUTO_ACTOR, invoiceId: "10282026-7", mintedInvoiceId: "10282026-7", editDiffs: [] });
+		eq(inflight().length, 2, "§4 record() without settleInflight leaves the in-flight table untouched (the automatic drafts' calls)");
 		const row = w.db.prepare("SELECT load_id, invoice_id, recipient, recipient_source, total, via, created_by, edited, invoice_id_minted FROM load_invoice_drafts").all();
 		eq(row, [{ load_id: "LD-TEST-0001", invoice_id: "10282026-7", recipient: BILLING, recipient_source: "ratecon", total: "$1,500.00", via: "auto-imap", created_by: "auto-invoice", edited: 0, invoice_id_minted: "" }],
 			"§4 one draft row: auto-imap, the invoice #, created by auto-invoice, unedited");
 		const audit = w.db.prepare("SELECT user_id, username, role, action, entity, entity_id, details FROM audit_trail").all();
 		eq(audit, [{ user_id: 0, username: "auto-invoice", role: "system", action: "invoice_draft_created", entity: "load", entity_id: "LD-TEST-0001", details: `10282026-7 → ${BILLING} (auto-imap)` }],
 			"§4 one audit row, the system actor, in today's invoice_draft_created shape");
+		const settled = w.engine.record(ctx, rendered, { via: "imap", actor: AUTO_ACTOR, invoiceId: "10282026-7", mintedInvoiceId: "10282026-7", editDiffs: [],
+			settleInflight: { loadKey: "ld-test-0001", invoiceId: "10282026-7" } });
+		eq([settled.recorded, inflight()], [true, [{ load_key: "ld-test-0001", invoice_id: "10282026-6" }]],
+			"§4 FAILS ON THE OLD CODE: with settleInflight, exactly that in-flight row goes, with the draft row");
+		w.db.exec("CREATE TRIGGER made_up_refuse BEFORE INSERT ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'made-up refusal'); END;");
+		const refused = w.engine.record(ctx, rendered, { via: "imap", actor: AUTO_ACTOR, invoiceId: "10282026-6", mintedInvoiceId: "10282026-6", editDiffs: [], draftWarnings: [],
+			settleInflight: { loadKey: "ld-test-0001", invoiceId: "10282026-6" } });
+		eq([refused.recorded, inflight().length], [false, 1], "§4 FAILS ON THE OLD CODE: an INSERT that fails takes the delete with it (the row stays; record() answers recorded:false)");
 
 		const busy = world({ rendererBusy: true });
 		const bctx = (await busy.auto("LD-TEST-0001")).ctx;

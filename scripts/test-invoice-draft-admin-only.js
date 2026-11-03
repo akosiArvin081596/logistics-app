@@ -39,6 +39,12 @@
  * line and settings dialog, and calls them, for a Super Admin only. Each gate is
  * broken in turn and must be caught.
  *
+ * The factoring routes too (§6): lib/factoring-routes.js mounts marking,
+ * "Handled in Triumph's process" and the button draft's "Check Gmail"
+ * (POST /api/loads/:loadId/invoice-draft-inflight/resolve), from server.js's
+ * <factoring-wiring> block; each admits Super Admin alone, then the cross-site
+ * guard.
+ *
  * Pure: no server, no port, no app.db, no network.
  * Run: node scripts/test-invoice-draft-admin-only.js
  */
@@ -459,6 +465,71 @@ function autoClientViolations(src) {
 		if (TAB.split(from).length - 1 !== 1) { ok(`client mutant anchor found once: ${name}`, false); continue; }
 		ok(`MUTANT ${name}: caught`, autoClientViolations(TAB.replace(from, to)).length > 0);
 	}
+}
+
+// ===========================================================================
+console.log("\n§6  the factoring routes (and the button draft's \"Check Gmail\") admit Super Admin alone");
+// ===========================================================================
+// lib/factoring-routes.js mount(), from the module's text, registered on a
+// capturing app with the real requireRole: marking (its switch), "Handled in
+// Triumph's process" and the in-flight draft's resolve (no switch). Each answers
+// anyone but Super Admin at its first middleware, before the cross-site check.
+const FACTORING_FILE = path.join(ROOT, "lib", "factoring-routes.js");
+const FACTORING_SRC = fs.existsSync(FACTORING_FILE) ? fs.readFileSync(FACTORING_FILE, "utf8") : "";
+function factoringRoutes(src) {
+	const mod = { exports: {} };
+	new Function("module", "exports", "require", src)(mod, mod.exports, require("module").createRequire(FACTORING_FILE));
+	const regs = [];
+	const app = {};
+	for (const verb of ["get", "put", "post", "patch", "delete", "all", "use"]) app[verb] = (p, ...chain) => { regs.push({ verb, paths: [p], chain }); };
+	mod.exports.create({ db: null, env: {} }).mount(app, { requireRole, refuseCrossSite: passThrough });
+	return regs;
+}
+function factoringGateViolations(src) {
+	const v = [];
+	for (const route of factoringRoutes(src)) {
+		const label = `${route.verb.toUpperCase()} ${route.paths[0]}`;
+		if (!call(route, route.verb, USERS["Super Admin"]).reached) v.push(`${label}: Super Admin does not reach the handler`);
+		for (const role of ["Dispatcher", "Driver", "Investor"]) {
+			const r = call(route, route.verb, USERS[role]);
+			if (r.reached || r.status !== 403) v.push(`${label}: ${role} gets ${r.reached ? "the handler" : r.status}`);
+			else if (r.stubCalls) v.push(`${label}: ${role}'s refusal ran ${r.stubCalls} middleware after the gate`);
+		}
+		const anon = call(route, route.verb, null);
+		if (anon.reached || anon.status !== 401) v.push(`${label}: no session gets ${anon.reached ? "the handler" : anon.status}`);
+		const first = route.chain[0] && route.chain[0].toString();
+		if (!first || !/roles\.includes/.test(first)) v.push(`${label}: the role gate is not the first middleware`);
+		if (route.chain.length !== 3 || route.chain[1] !== passThrough) v.push(`${label}: the cross-site guard does not follow the role gate`);
+	}
+	return v;
+}
+{
+	ok("lib/factoring-routes.js exists (FAILS ON THE OLD CODE)", FACTORING_SRC.length > 0);
+	const routes = FACTORING_SRC ? factoringRoutes(FACTORING_SRC) : [];
+	const fPaths = routes.map((r) => `${r.verb.toUpperCase()} ${r.paths[0]}`).sort();
+	ok(`the factoring routes are exactly the known three (${fPaths.join(", ")})`, fPaths.join() === [
+		"POST /api/factoring/loads/:loadKey",
+		"POST /api/factoring/loads/:loadKey/handled-outside",
+		"POST /api/loads/:loadId/invoice-draft-inflight/resolve",
+	].join());
+	const fv = FACTORING_SRC ? factoringGateViolations(FACTORING_SRC) : ["no module"];
+	ok("every one admits Super Admin alone, at its first middleware, then the cross-site guard", fv.length === 0, fv.join("; "));
+	const start = SRC.indexOf("// <factoring-wiring>");
+	const end = SRC.indexOf("// </factoring-wiring>");
+	const block = start >= 0 && end > start ? SRC.slice(start, end) : "";
+	ok("server.js mounts them from its <factoring-wiring> block, with its own requireRole and refuseCrossSite, and nowhere else",
+		block.split("factoringRoutes.mount(").length === 2 && /factoringRoutes\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(block) &&
+		SRC.split("factoringRoutes.mount(").length === 2 && !/["']\/api\/factoring\//.test(SRC) && !/invoice-draft-inflight/.test(SRC));
+	const from = 'const guard = [requireRole("Super Admin")];';
+	if (FACTORING_SRC.split(from).length - 1 !== 1) ok("factoring mutant anchor found once", false);
+	else {
+		const v = factoringGateViolations(FACTORING_SRC.replace(from, 'const guard = [requireRole("Super Admin", "Dispatcher")];'));
+		ok(`MUTANT Dispatcher re-admitted to the factoring routes: caught (${v.length} violation(s))`, v.filter((s) => s.includes("Dispatcher gets the handler")).length === 3);
+	}
+	const xs = "const writeGuard = refuseCrossSite ? [...guard, refuseCrossSite] : guard;";
+	if (FACTORING_SRC.split(xs).length - 1 !== 1) ok("factoring cross-site mutant anchor found once", false);
+	else ok("MUTANT the cross-site guard dropped from the factoring routes: caught",
+		factoringGateViolations(FACTORING_SRC.replace(xs, "const writeGuard = guard;")).some((s) => s.includes("cross-site")));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

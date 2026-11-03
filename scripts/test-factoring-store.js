@@ -15,6 +15,9 @@
 //   §5 the Draft Invoice button's checks and its in-flight row
 //   §6 "Check Gmail" on a maybe-drafted row; the dashboard annotation
 //   §7 the only writer of locked_at in this PR
+//   §9 the routes (lib/factoring-routes.js): the marking switch (never in a
+//      replica); only listed accounts, never the shared login; "Handled in
+//      Triumph's process" with every switch off; refusals audited with codes
 //   §8 mutants: each rule above removed in turn, and a case catches it
 //
 // Made-up loads only (LD-TEST-*), in memory.
@@ -383,6 +386,70 @@ section("§7  locked_at's writers");
 	failures.push(...c.out);
 }
 
+// ------------------------------------------------------------------ §9
+// lib/factoring-routes.js: who may mark, clear and record; the switch; the
+// answers. The handlers run on a capturing app (the role gate is its own runner's,
+// scripts/test-invoice-draft-admin-only.js §6).
+function checkRoutes(routesSrc) {
+	const c = checker();
+	const ROUTES_FILE = path.join(ROOT, "lib", "factoring-routes.js");
+	const lib = (() => { const mod = { exports: {} }; new Function("module", "exports", "require", routesSrc)(mod, mod.exports, Module.createRequire(ROUTES_FILE)); return mod.exports; })();
+	const build = (env, { replica = false } = {}) => {
+		const db = freshDb(REAL);
+		const refusals = [];
+		const audits = [];
+		const routes = lib.create({ db, env, replica, now: () => new Date(T0), logAudit: (req, action) => audits.push(action), logAuditRefusal: (req, action, e, id, d, code) => refusals.push(`${action}:${code}`) });
+		const mounted = {};
+		routes.mount({ post: (p, ...chain) => { mounted[p] = chain[chain.length - 1]; } }, { requireRole: () => () => {} });
+		const post = (p, user, params, body) => {
+			const out = { status: 200, body: null };
+			mounted[p]({ params, body, session: { user } }, { status(s) { out.status = s; return this; }, json(b) { out.body = b; return this; } });
+			return out;
+		};
+		return { db, routes, refusals, audits,
+			mark: (user, n, body = { factored: true, reason: "made-up" }) => post("/api/factoring/loads/:loadKey", user, { loadKey: `ld-test-000${n}` }, body),
+			outside: (user, n, body = { reason: "made-up: handled in Triumph's portal" }) => post("/api/factoring/loads/:loadKey/handled-outside", user, { loadKey: `ld-test-000${n}` }, body) };
+	};
+	const ME = { id: 7, username: "made-up-admin", role: "Super Admin" };
+	const OTHER = { id: 8, username: "made-up-other", role: "Super Admin" };
+	const SHARED = { id: 9, username: "super_admin", role: "Super Admin" };
+	const ON = { TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7,9" };
+	let w = build({ TRIUMPH_FACTOR_MARK_IDS: "7" });
+	c.eq([w.routes.markingOn, w.mark(ME, 1).status, w.mark(ME, 1).body.code], [false, 404, "FEATURE_OFF"], "§9 marking off: 404 FEATURE_OFF");
+	c.eq(w.routes.markingOn, false, "§9 off unless exactly \"true\"");
+	c.eq(build({ TRIUMPH_FACTORING_ENABLED: "true" }, { replica: true }).routes.markingOn, false, "§9 a replica never marks");
+	c.eq(build({ TRIUMPH_FACTORING_ENABLED: "TRUE" }).routes.markingOn, false, "§9 \"TRUE\" is not \"true\"");
+	for (const [label, ids] of [["unset", undefined], ["invalid", "seven"], ["blank", " "]]) {
+		const x = build({ TRIUMPH_FACTORING_ENABLED: "true", ...(ids === undefined ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) });
+		c.eq([x.mark(ME, 1).status, x.mark(ME, 1).body.code, x.outside(ME, 1).status], [403, "FACTORING_NOT_LISTED", 403], `§9 TRIUMPH_FACTOR_MARK_IDS ${label}: nobody may mark or record`);
+	}
+	w = build(ON);
+	c.eq([w.mark(OTHER, 1).status, w.outside(OTHER, 1).status], [403, 403], "§9 a Super Admin not listed: 403");
+	c.eq([w.mark(SHARED, 1).status, w.outside(SHARED, 1).status], [403, 403], "§9 the shared login, even with its id listed: 403");
+	c.eq(w.mark(ME, 1, { factored: "yes" }).body.code, "FACTORED_INVALID", "§9 factored must be true or false");
+	const m = w.mark(ME, 1);
+	c.eq([m.status, m.body, marker(w.db, "ld-test-0001").factored], [200, { ok: true, changed: true, factored: true }, 1], "§9 a listed account marks it");
+	c.eq(w.audits, ["factoring_marked"], "§9 ...audited");
+	putInflight(w.db, "ld-test-0002", { startedAt: T0 });
+	c.eq([w.mark(ME, 2).status, w.refusals], [409, ["factoring_mark_blocked:INVOICE_DRAFT_IN_FLIGHT"]], "§9 a refusal answers 409 and writes a refusal audit row with its code");
+	c.eq(w.mark(ME, 1, { factored: false, reason: "made-up" }).body, { ok: true, changed: true, factored: false }, "§9 ...and clears it");
+	const off = build({ TRIUMPH_FACTOR_MARK_IDS: "7" });
+	putMarker(off.db, "ld-test-0003");
+	const o = off.outside(ME, 3);
+	c.eq([off.routes.markingOn, o.status, o.body, marker(off.db, "ld-test-0003").locked_via], [false, 200, { ok: true, locked: true }, "outside"],
+		"§9 \"Handled in Triumph's process\" works with every switch off (no switch)");
+	c.eq(off.outside(ME, 3).body.code, "FACTORING_LOCKED", "§9 ...once");
+	return c;
+}
+section("§9  the routes: who may mark, the switch");
+const ROUTES_FILE_SRC = fs.existsSync(path.join(ROOT, "lib", "factoring-routes.js")) ? fs.readFileSync(path.join(ROOT, "lib", "factoring-routes.js"), "utf8") : "";
+{
+	const c = ROUTES_FILE_SRC ? checkRoutes(ROUTES_FILE_SRC) : { out: ["lib/factoring-routes.js is missing"], count: () => 1 };
+	pass += c.count() - c.out.length;
+	failures.push(...c.out);
+	console.log(`  ${c.count() - c.out.length}/${c.count()} ok`);
+}
+
 // ------------------------------------------------------------------ §8
 section("§8  mutants: each rule removed, and a case catches it");
 const MUTANTS = [
@@ -426,7 +493,24 @@ for (const [name, from, to, group] of MUTANTS) {
 	if (c.out.length) { caught++; pass++; console.log(`  MUTANT ${name}: caught`); }
 	else failures.push(`MUTANT ${name}: NOT caught`);
 }
-console.log(`  ${caught}/${MUTANTS.length} mutants caught`);
+const ROUTE_MUTANTS = [
+	["marking with the switch off", "if (!markingOn) return res.status(404)", "if (false) return res.status(404)"],
+	["a replica marks", "const markingOn = !replica && ", "const markingOn = "],
+	["the shared login listed", "&& !isSharedLoginName(user.username)", ""],
+	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
+		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
+	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", ...writeGuard, (req, res) => {\n",
+		"app.post(\"/api/factoring/loads/:loadKey/handled-outside\", ...writeGuard, (req, res) => {\n\t\t\tif (!markingOn) return res.status(404).json({ code: \"FEATURE_OFF\" });\n"],
+];
+let routeCaught = 0;
+for (const [name, from, to] of ROUTE_MUTANTS) {
+	if (!ROUTES_FILE_SRC || ROUTES_FILE_SRC.split(from).length - 1 !== 1) { failures.push(`route mutant anchor not found once: ${name}`); continue; }
+	let c;
+	try { c = checkRoutes(ROUTES_FILE_SRC.replace(from, to)); } catch (e) { c = { out: [`threw: ${e && e.message}`] }; }
+	if (c.out.length) { routeCaught++; pass++; console.log(`  MUTANT ${name}: caught`); }
+	else failures.push(`MUTANT ${name}: NOT caught`);
+}
+console.log(`  ${caught}/${MUTANTS.length} store mutants and ${routeCaught}/${ROUTE_MUTANTS.length} route mutants caught`);
 
 console.log(`\n${pass} passed, ${failures.length} failed`);
 for (const f of failures) console.log(`FAIL  ${f}`);
