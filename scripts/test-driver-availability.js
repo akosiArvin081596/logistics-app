@@ -72,7 +72,8 @@
 //   §15 a run: one row per finished day, final at d + 3, rule version 2, one
 //       system audit row per time-off row (no reason text); a second run writes
 //       no second audit row and never touches a final row; a row that can't be
-//       judged waits for the next run while the others are judged
+//       judged waits for the next run while the others are judged; a silence
+//       across the device history's re-link is judged by its two ends
 //   §16 notices: one for a newly Not-confirmed day, none for a load staff
 //       confirmed, one follow-up when a told day changes (to Unclear here),
 //       never a third; late pings change only days not yet final; the
@@ -1055,6 +1056,19 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			[1, 0, ["confirmed", "confirmed"], true]);
 		await runCheck(e);
 		eq("§15.13 ...and the next run judges it", dayRows(e, bad).map((d) => d.state), ["confirmed", "confirmed"]);
+
+		// The device history records T1's device unlinked and linked to T1 again while T1 is dark, and T1 reports
+		// again 300 km on with 190 more odometer miles.
+		const rl = await eldWorld();
+		rl.db.prepare("INSERT INTO server_state (key, value, updated_at) VALUES ('eld_device_history_started', ?, CURRENT_TIMESTAMP)").run(JSON.stringify({ atMs: Date.parse("2026-08-01T00:00:00.000Z") }));
+		const deviceLink = rl.db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until) VALUES (?, ?, ?, ?)");
+		deviceLink.run(EW.t1, EW.vid1, "2026-08-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z");
+		deviceLink.run(EW.t1, EW.vid1, "2026-10-06T17:00:00.000Z", "");
+		W.addFixes(rl.db, EW.vid1, [...pings(at("2026-10-01"), at("2026-10-04", 18), 30), ...pings(at("2026-10-07", 8), rl.clock.ms - 30 * MIN, 30, () => ({ lat: 32.4, odo: 100190 }))]);
+		const rid = rowId(await create(rl, DIR.hollis, vacation("2026-10-05", "2026-10-06")));
+		await runCheck(rl);
+		eq("§15.14 a silence across his truck's device linked to it again, the truck back 300 km on with 190 more miles: each day Not confirmed (moved_while_dark)",
+			dayRows(rl, rid).map((d) => [d.day, d.state, d.reason]), [["2026-10-05", "not_confirmed", "moved_while_dark"], ["2026-10-06", "not_confirmed", "moved_while_dark"]]);
 	});
 
 	section("§16 notices, follow-ups and late pings");

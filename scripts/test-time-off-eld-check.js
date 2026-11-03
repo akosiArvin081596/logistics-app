@@ -14,11 +14,13 @@
 //       speed-only fallback; the days with no ELD data at all, each "Confirmed
 //       (no ELD data)" (no truck held, no device linked, a device that never
 //       reported, no reading before or after the silence); ELD data that
-//       conflicts reads Unclear (the truck changed hands); a device linked to
-//       his truck again while he held it is no change of hands, and a relief
-//       or a gap in holding inside the silence still is; a handover day; a
-//       relief driver; a team truck; a Central midnight; a DST day; the rule
-//       version
+//       conflicts reads Unclear (the truck changed hands); a silence across
+//       his device being linked to his truck again while he held it is judged
+//       by its two ends as one link would be (no miles, 190 mi, 3 mi, still
+//       dark), and reads Unclear when the device sat on another truck or left
+//       again; a relief or a gap in holding inside it still changes hands, and
+//       a takeover reaches no day before it; a handover day; a relief driver; a
+//       team truck; a Central midnight; a DST day; the rule version
 //   §4  dark stretches: a 7 h stretch carrying 200 mi; the lead-in step; a 0 mi
 //       odometer step with the ends 200 km apart; 0 mi, 0.3 km and +4 engine
 //       hours; a moving dark tail; a 5 h unplugged drive; 40 against 25 minutes;
@@ -228,25 +230,59 @@ section("§3 the rule's rows");
 	// Part of the day judged parked and part with no reading before: Confirmed on what was read.
 	const partly = judge(["2026-10-07"], { fixes: [...firstEver, fix(at("2026-10-08", 9), { lat: north(300000) })] });
 	eq("§3.9e a day with readings and a part with none before them: Confirmed (parked), the ordinary label", noData(partly, "2026-10-07"), ["confirmed", "parked", false, "Confirmed"]);
-	// T1 dark from Oct 4 evening to Oct 7 morning; its device unlinked at the start of Oct 6 (UTC) and linked to
-	// T1 again that noon (Central).
-	const relinkRows = [
-		{ truck_id: 11, routemate_vehicle_id: "vid-t1", assigned_from: "2026-01-01T00:00:00.000Z", assigned_until: "2026-10-06T00:00:00.000Z" },
-		{ truck_id: 11, routemate_vehicle_id: "vid-t1", assigned_from: "2026-10-06T17:00:00.000Z", assigned_until: "" },
-	];
-	const darkAround = [...pings(at("2026-10-04", 8), at("2026-10-04", 18), 15), ...pings(at("2026-10-07", 8), at("2026-10-09", 8), 15)];
-	const relinked = (assignments) => {
-		const r = judge(["2026-10-05", "2026-10-06", "2026-10-07"], { assignments, deviceStartMs: Date.parse("2026-01-01T00:00:00.000Z"), deviceRows: relinkRows, fixes: darkAround });
-		return ["2026-10-05", "2026-10-06", "2026-10-07"].map((d) => noData(r, d));
+	// T1 parked on Oct 4 until 18:00, then dark; its device unlinked at the start of Oct 6 (UTC) and linked to T1
+	// again that noon (Central); the device reports again from Oct 7 08:00. He holds T1 throughout unless a case says.
+	const link = (truckId, from, until = "") => ({ truck_id: truckId, routemate_vehicle_id: "vid-t1", assigned_from: from, assigned_until: until });
+	const relinkRows = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z")];
+	const oct4 = pings(at("2026-10-04", 8), at("2026-10-04", 18), 15);
+	const back = (o = {}) => pings(at("2026-10-07", 8), at("2026-10-09", 8), 15, () => ({ lat: o.lat ?? YARD.lat, odo: o.odo ?? 100000 }));
+	const DAYS = range("2026-10-04", "2026-10-07");
+	const across = ({ assignments = [HIS_T1], deviceRows = relinkRows, fixes = [...oct4, ...back()], days = DAYS, nowMs } = {}) => {
+		const r = judge(days, { assignments, deviceStartMs: Date.parse("2026-01-01T00:00:00.000Z"), deviceRows, fixes, ...(nowMs ? { nowMs } : {}) });
+		return days.map((d) => noData(r, d));
 	};
-	eq("§3.9f a device linked to his truck again while he held it and it was dark: no change of hands (Confirmed, no ELD data; parked once it reports)",
-		relinked([HIS_T1]), [["confirmed", "no_device", true, "Confirmed (no ELD data)"], ["confirmed", "no_device", true, "Confirmed (no ELD data)"], ["confirmed", "parked", false, "Confirmed"]]);
+	const oneLink = (fixes, days = DAYS, nowMs) => { const r = judge(days, { fixes, ...(nowMs ? { nowMs } : {}) }); return days.map((d) => noData(r, d)); };
+	const each = (n, v) => Array.from({ length: n }, () => v);
+	const parkedAcross = across();
+	eq("§3.9f a device linked to his truck again while he held it and it was dark, back where it was with no miles: judged by its two ends (Confirmed, dark_parked inside the silence), not \"no ELD data\" and no change of hands",
+		parkedAcross, [["confirmed", "parked", false, "Confirmed"], ["confirmed", "dark_parked", false, "Confirmed"], ["confirmed", "dark_parked", false, "Confirmed"], ["confirmed", "parked", false, "Confirmed"]]);
+	ok("§3.9f2 ...as one unbroken link reads the same readings", JSON.stringify(parkedAcross) === JSON.stringify(oneLink([...oct4, ...back()])), JSON.stringify(oneLink([...oct4, ...back()])));
+	const far = [...oct4, ...back({ lat: north(300000), odo: 100190 })];
+	const movedAcross = across({ fixes: far });
+	eq("§3.9f3 ...back 300 km on with 190 more odometer miles: every day of the silence Not confirmed (moved_while_dark), as one link reads it",
+		[movedAcross, JSON.stringify(movedAcross) === JSON.stringify(oneLink(far))], [each(4, ["not_confirmed", "moved_while_dark", false, "Not confirmed"]), true]);
+	eq("§3.9f4 ...back where it was with 3 more odometer miles: every day Not confirmed (moved_while_dark)",
+		across({ fixes: [...oct4, ...back({ odo: 100003 })] }), each(4, ["not_confirmed", "moved_while_dark", false, "Not confirmed"]));
+	const stillDays = range("2026-10-05", "2026-10-08");
+	const stillDark = across({ fixes: oct4, days: stillDays, nowMs: at("2026-10-12", 12) });
+	eq("§3.9f5 ...still dark on Oct 12: every day of the silence Checking (dark_waiting), so none is final, as one link reads it",
+		[stillDark, JSON.stringify(stillDark) === JSON.stringify(oneLink(oct4, stillDays, at("2026-10-12", 12)))], [each(4, ["pending", "dark_waiting", false, "Checking"]), true]);
+	const viaT2 = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(12, "2026-10-06T00:00:00.000Z", "2026-10-06T17:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z")];
+	eq("§3.9f6 ...the device on T2 in between: its two ends can't be compared, so every day of the silence reads Unclear (device_relinked)",
+		across({ deviceRows: viaT2 }), each(4, ["no_data", "device_relinked", false, "Unclear"]));
+	const leftAgain = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z", "2026-10-08T00:00:00.000Z")];
+	const threeDays = range("2026-10-05", "2026-10-07");
+	eq("§3.9f7 ...linked to T1 again, then unlinked again with no reading: Unclear (device_relinked) on every day, never no data",
+		across({ deviceRows: leftAgain, fixes: oct4, days: threeDays }), each(3, ["no_data", "device_relinked", false, "Unclear"]));
+	eq("§3.9f8 ...and the same with its next reading taken while unlinked: Unclear (device_relinked)",
+		across({ deviceRows: leftAgain, fixes: [...oct4, ...pings(at("2026-10-09", 8), at("2026-10-09", 12), 15)], days: threeDays }), each(3, ["no_data", "device_relinked", false, "Unclear"]));
 	const reliefInside = [HIS_T1, asg(11, "Soren King", "2026-10-05T12:00:00.000Z", "2026-10-06T12:00:00.000Z")];
 	eq("§3.9g ...but with a relief driver holding T1 inside the same silence: shared_truck once he holds it again",
-		relinked(reliefInside)[2].slice(0, 2), ["no_data", "shared_truck"]);
+		across({ assignments: reliefInside })[3].slice(0, 2), ["no_data", "shared_truck"]);
 	const holdGap = [asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-05T12:00:00.000Z"), asg(11, "Hollis Renner", "2026-10-06T12:00:00.000Z")];
 	eq("§3.9h ...and with no one holding T1 for part of it: shared_truck, only his own unbroken hold clears it",
-		relinked(holdGap)[2].slice(0, 2), ["no_data", "shared_truck"]);
+		across({ assignments: holdGap })[3].slice(0, 2), ["no_data", "shared_truck"]);
+	const rto2 = judge(["2026-10-04", "2026-10-05"], { assignments: takeover, fixes: [fix(at("2026-10-04", 18)), fix(at("2026-10-06", 8))] });
+	eq("§3.9i a takeover while dark reaches no day before he held the truck: Oct 4 no truck held, Oct 5 Unclear (shared_truck)",
+		[noData(rto2, "2026-10-04"), noData(rto2, "2026-10-05")], [["confirmed", "no_truck", true, "Confirmed (no ELD data)"], ["no_data", "shared_truck", false, "Unclear"]]);
+	const handedOn = [asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-07T00:00:00.000Z"), asg(11, "Soren King", "2026-10-07T00:00:00.000Z")];
+	eq("§3.9j a re-link, then T1 handed to Soren before the device reports: his days Unclear (shared_truck), the far end not his",
+		across({ assignments: handedOn, fixes: [...oct4, ...pings(at("2026-10-08", 8), at("2026-10-09", 8), 15)], days: ["2026-10-05", "2026-10-06"] }).map((x) => x.slice(0, 2)),
+		[["no_data", "shared_truck"], ["no_data", "shared_truck"]]);
+	const fromT2 = [link(12, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T00:00:00.000Z")];
+	eq("§3.9k a device moved onto his truck from another while dark: no reading on his truck before, so Confirmed (no ELD data), then parked",
+		across({ deviceRows: fromT2, days: ["2026-10-05", "2026-10-06", "2026-10-07"] }).map((x) => x.slice(0, 3)),
+		[["confirmed", "no_device", true], ["confirmed", "no_fix_before", true], ["confirmed", "parked", false]]);
 
 	// A handover at noon on Oct 5: his morning parked, Soren drives the afternoon.
 	const handover = asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-05T17:00:00.000Z");
