@@ -38,6 +38,20 @@
           Complete your current active job before starting a new one.
         </div>
 
+        <!-- The geofence marks this step on its own (the server's `_gpsPhases`):
+             a line instead of the button, and a smaller link to the same
+             confirm and the same status tap. -->
+        <div v-else-if="gpsLine" class="gps-hint">
+          <div class="gps-hint-step">{{ nextStep.label }}</div>
+          <div class="gps-hint-text">{{ gpsLine }}</div>
+          <button
+            type="button"
+            class="gps-self-link"
+            :disabled="updating"
+            @click="showConfirm = true"
+          >{{ updating ? 'Updating...' : MARK_IT_MYSELF }}</button>
+        </div>
+
         <!-- Normal action button -->
         <template v-else>
           <button
@@ -81,6 +95,7 @@
 import { computed, ref } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import { gpsStepLine, MARK_IT_MYSELF } from '../../lib/gpsPhases'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -141,6 +156,10 @@ const requiresUpload = computed(() => {
   if (!nextStep.value) return false
   return nextStep.value.value === 'Delivered' && (props.load._podCount || 0) === 0
 })
+
+// The server's answer for the next step's stop, worded (lib/gpsPhases.js); null
+// keeps today's button.
+const gpsLine = computed(() => (nextStep.value ? gpsStepLine(nextStep.value.value, props.load._gpsPhases) : null))
 
 function stepState(i) {
   if (allDone.value && i <= currentIdx.value) return 'done'
@@ -288,6 +307,47 @@ async function onConfirm() {
   border-radius: var(--radius);
   margin-bottom: 0.75rem;
   line-height: 1.4;
+}
+
+/* The geofence marks the next step: a line, and a smaller link that is still a
+   full-height tap target (gloved hands, a phone on a dash mount). */
+.gps-hint {
+  text-align: center;
+  padding: 0.75rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  line-height: 1.4;
+}
+
+.gps-hint-step {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.gps-hint-text {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-top: 0.2rem;
+}
+
+.gps-self-link {
+  margin-top: 0.35rem;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.gps-self-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Action buttons */
