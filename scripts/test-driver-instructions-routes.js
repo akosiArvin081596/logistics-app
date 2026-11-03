@@ -43,6 +43,11 @@
  *      driver_shown_at; a dirty stored row serves none of the four values; a re-issue
  *      keeps the published version; `driver-instructions-changed` { loadId } goes to that
  *      driver's room only, when what he can see changes; the leak test over both
+ *   §14 the reference re-read (plan X1, DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED, off
+ *      unless exactly "true"): one more call, with the fixed line and no number, only when
+ *      the first reading missed numbers on readable text; within the same budget and
+ *      pauses; a re-read with no slot, or a failed one, keeps the first reading; ledger
+ *      note and audit codes and counts only; the drag-and-drop and staff re-reads too
  *
  * The fixtures use production's header layout for the Payments Table and Job Details.
  * Every value is made up: the account number, amounts, phones, emails, names, places,
@@ -293,7 +298,7 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	}
 	const w = {
 		db, env: { ...env }, files: [...files], gemini: [...gemini], logs: [], sockets: [], emails: [], responses: [], startsJob: [], intervals: [],
-		calls: { list: 0, download: [], meta: [], gemini: 0, geminiBodies: [], sheet: 0, side: 0 }, ingestionAt, sheetFails, sideFails,
+		calls: { list: 0, download: [], meta: [], gemini: 0, geminiBodies: [], geminiPrompts: [], sheet: 0, side: 0 }, ingestionAt, sheetFails, sideFails,
 		uploads: fs.mkdtempSync(path.join(os.tmpdir(), "rcpr2-uploads-")),
 	};
 	const cap = (kind) => (...a) => w.logs.push(`${kind} ${a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")}`);
@@ -303,6 +308,9 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	const geminiFetch = async (url, opts) => {
 		w.calls.gemini++;
 		w.calls.geminiBodies.push(String(opts && opts.body ? opts.body : "").length);
+		let prompt = "";
+		try { prompt = JSON.parse(opts.body).system_instruction.parts[0].text; } catch { /* not this request shape */ }
+		w.calls.geminiPrompts.push(prompt);
 		// Something that happens while Gemini reads (a load reassigned on the sheet).
 		if (typeof w.onGemini === "function") w.onGemini();
 		const next = w.gemini.length ? w.gemini.shift() : geminiAnswer(cleanExtraction());
@@ -1866,6 +1874,153 @@ test("§13 37 L2 a Super Admin account created after the lock was set (or whose 
 	eq("created in the same second as the lock: refused too", (await w.call("POST", `${LOCKS}/1/clear`, fresh, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
 	eq("an account the users table doesn't hold: refused", (await w.call("POST", `${LOCKS}/1/clear`, { id: 99, username: "ghost", role: "Super Admin" }, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
 	eq("a Super Admin created before the lock clears it", [(await w.call("POST", `${LOCKS}/1/clear`, SA2, {})).status, lockRows(w)], [200, []]);
+});
+
+// ── §14 the reference re-read (plan X1, DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED) ──
+// A readable rate con printing two numbers cleanExtraction() leaves out: a PO at the pickup
+// and an appointment number at the delivery.
+const X1_TEXT = `${READABLE_TEXT} Purchase Order PO-77120 Appointment Number AP55091`;
+const X1_PDF = pdfWith(X1_TEXT);
+const RETRY_ON = Object.freeze({ ...ON, DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED: "true" });
+// The re-read: the two missed numbers, plus what must never be added (one already read, one
+// not on the rate con, the account number, an answer marker).
+function x1Retry(over = {}) {
+	const x = cleanExtraction(over);
+	x.stops[0].references.push(
+		{ type: "po_number", label: "PO", value: "PO-77120" },
+		{ type: "other_reference", label: "Ref", value: "ZZ99999" },
+		{ type: "other_reference", label: "Ref", value: DENY },
+		{ type: "other_reference", label: "Ref", value: GEMINI_MARKER },
+	);
+	x.stops[1].references.push({ type: "appointment_number", label: "Appointment#", value: "AP55091" });
+	x.loadRequirements.push({ category: "hazmat", text: "Placards required on this load." });
+	return x;
+}
+const extractAudits = (w) => w.audits().filter((a) => a.action === "extract").map((a) => JSON.parse(a.details));
+const reasonsOf = (w, id = LOAD_ID) => JSON.parse(w.row(id).review_reasons);
+
+test("§14 X1 on: a reading that missed numbers on readable text is re-read once, the missed numbers are added, and the load publishes without a person", async ({ eq, ok }) => {
+	useClock();
+	const rt = require(RUNTIME);
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, X1_PDF);
+	const w = await world({ env: RETRY_ON, files: [f], gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	await w.service.sweep();
+	eq("two Gemini calls", w.calls.gemini, 2);
+	eq("the re-read's prompt is the first's plus the fixed line", w.calls.geminiPrompts[1], `${w.calls.geminiPrompts[0]}\n\n${rt.RETRY_LINE}`);
+	ok("the fixed line carries no number", typeof rt.RETRY_LINE === "string" && rt.RETRY_LINE.length > 20 && !/\d/.test(rt.RETRY_LINE), rt.RETRY_LINE);
+	const row = w.row();
+	eq("auto and published", [row.status, !!row.published_at, reasonsOf(w)], ["auto", true, []]);
+	const p = JSON.parse(row.payload);
+	eq("each missed number at its stop", p.stops.map((s) => s.references.map((r) => [r.type, r.value])),
+		[[["pickup_number", PU], ["po_number", "PO-77120"]], [["delivery_number", DEL], ["appointment_number", "AP55091"]]]);
+	ok("nothing else from the re-read", !row.payload.includes("ZZ99999") && !/Placards/.test(row.payload), row.payload);
+	eq("ledger done, its note codes only", [w.ledger(f.meta.id).state, w.ledger(f.meta.id).note], ["done", "insert retry_merged"]);
+	const a = extractAudits(w);
+	eq("one extract audit row with the re-read's codes and counts", a.map((d) => [d.retry, d.retryAdded, d.retryTypes, d.retryDropped]),
+		[["retry_merged", 2, { po_number: 1, appointment_number: 1 }, { not_missed: 5 }]]);
+	eq("no table holds the re-read's text, the account number or any other withheld value", w.allRows().filter((r) => leaksIn(r).length).map((r) => r.slice(0, 200)), []);
+	eq("no log line either", w.logs.filter((l) => leaksIn(l).length), []);
+	ok("no log line holds a reference", !w.logs.some((l) => /PO-77120|AP55091|ZZ99999/.test(l)), w.logs);
+});
+
+test("§14 X1 off (unset, or anything but exactly \"true\"): one call per PDF and the missed numbers wait for staff, as before", async ({ eq, ok }) => {
+	for (const v of [undefined, "", "1", "yes", "TRUE", " true"]) {
+		useClock();
+		const env = { ...ON };
+		if (v !== undefined) env.DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED = v;
+		const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, X1_PDF);
+		const w = await world({ env, files: [f], gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+		await w.service.sweep();
+		const tag = JSON.stringify(v === undefined ? "unset" : v);
+		eq(`${tag}: one call`, w.calls.gemini, 1);
+		eq(`${tag}: needs review for the missed numbers, unpublished`, [w.row().status, !!w.row().published_at, reasonsOf(w)], ["needs_review", false, ["reference_missed"]]);
+		eq(`${tag}: ledger note as before`, w.ledger(f.meta.id).note, "insert");
+		ok(`${tag}: the audit row has no re-read key`, extractAudits(w).every((d) => !Object.keys(d).some((k) => k.startsWith("retry"))), extractAudits(w));
+		ok(`${tag}: no re-read warning`, !w.logs.some((l) => l.includes("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED")), w.logs);
+	}
+});
+
+test("§14 X1 on, but no missed number, or the instructions themselves off: no re-read", async ({ eq, ok }) => {
+	useClock();
+	const clean = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const w = await world({ env: RETRY_ON, files: [clean], gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	await w.service.sweep();
+	eq("a complete first reading: one call, published, ledger as before", [w.calls.gemini, w.row().status, w.ledger(clean.meta.id).note], [1, "auto", "insert"]);
+	const unreadable = driveFile(`Load ${LOAD_ID} Booked.pdf`, UNREADABLE);
+	const w2 = await world({ env: RETRY_ON, files: [unreadable], gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	await w2.service.sweep();
+	eq("unreadable text (no missed-number check): one call, not_cross_checked", [w2.calls.gemini, reasonsOf(w2)], [1, ["not_cross_checked"]]);
+	const rt = require(RUNTIME);
+	for (const env of [{ DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED: "true" }, { ...RETRY_ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" }, { ...RETRY_ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: "" }]) {
+		eq(`readConfig: no re-read without the instructions in effect (${Object.keys(env).length} settings)`, [rt.readConfig(env).retryFlag, rt.readConfig(env).referenceRetry], [true, false]);
+	}
+	eq("readConfig: on with the instructions in effect", rt.readConfig(RETRY_ON).referenceRetry, true);
+	const w3 = await world({ env: { ...RETRY_ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" } });
+	ok("one warning per start naming the switch, never a value", w3.logs.filter((l) => l.includes("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED is on but the driver instructions are off")).length === 1, w3.logs);
+	ok("no such warning when the instructions are on", !w.logs.some((l) => l.includes("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED")), w.logs);
+});
+
+test("§14 X1 shares the budget and its pauses: a re-read with no slot, or a failed or invalid one, keeps the first reading", async ({ eq, ok }) => {
+	const clock = useClock();
+	// Load ingestion sees a Gemini 429 while the first reading is under way.
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, X1_PDF);
+	const w = await world({ env: RETRY_ON, files: [f], gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	w.onGemini = () => { w.ingestionAt = clock.t; };
+	await w.service.sweep();
+	eq("no slot: one call, the first reading kept for staff", [w.calls.gemini, w.row().status, reasonsOf(w)], [1, "needs_review", ["reference_missed"]]);
+	eq("ledger done (not failed), note says why", [w.ledger(f.meta.id).state, w.ledger(f.meta.id).note], ["done", "insert retry_budget"]);
+	eq("audited by code", extractAudits(w).map((d) => [d.retry, d.retryError]), [["retry_budget", "ingestion_paused"]]);
+	for (const [label, answer, error] of [["invalid", geminiAnswer("not json at all"), "invalid_json"], ["a 429", { status: 429, body: { error: { message: GEMINI_MARKER } } }, "gemini_429"]]) {
+		useClock();
+		const g = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, X1_PDF);
+		const w2 = await world({ env: RETRY_ON, files: [g], gemini: [geminiAnswer(cleanExtraction()), answer] });
+		await w2.service.sweep();
+		eq(`${label} re-read: two calls, the first reading kept for staff`, [w2.calls.gemini, w2.row().status, reasonsOf(w2)], [2, "needs_review", ["reference_missed"]]);
+		eq(`${label} re-read: ledger done, note says why`, [w2.ledger(g.meta.id).state, w2.ledger(g.meta.id).note], ["done", "insert retry_failed"]);
+		eq(`${label} re-read: audited by code`, extractAudits(w2).map((d) => [d.retry, d.retryError]), [["retry_failed", error]]);
+		ok(`${label} re-read: nothing of the answer anywhere`, !w2.logs.some((l) => l.includes(GEMINI_MARKER)) && !w2.allRows().some((r) => r.includes(GEMINI_MARKER)));
+	}
+	// The window: 6 calls in 15 minutes, re-reads included.
+	useClock();
+	const ids = [0, 1, 2, 3].map((i) => [`7712010${i}0`, `48201937${i}0`, `AP5509${i}`]);
+	const rows = [...ROWS, ...ids.map(([id, pu]) => [id, "Assigned", "Test Driver D", `Test Mill REF/PU#: ${pu}`, "100 Test Park Dr, Springfield, IL 62701", "55 Depot Ln, Riverton, WY 82501", "$1,200.00", "", "", ""])];
+	const files = ids.map(([id, pu, ap]) => driveFile(`Load ${id}.pdf`, pdfWith(`${READABLE_TEXT.replace(LOAD_ID, id).replace(PU, pu)} Appointment Number ${ap}`)));
+	const answers = ids.flatMap(([id, pu, ap]) => {
+		const first = cleanExtraction({ loadNumber: id });
+		first.stops[0].references = [{ type: "pickup_number", label: "Pickup#", value: pu }];
+		const again = JSON.parse(JSON.stringify(first));
+		again.stops[1].references.push({ type: "appointment_number", label: "Appointment#", value: ap });
+		return [geminiAnswer(first), geminiAnswer(again)];
+	});
+	const wb = await world({ env: RETRY_ON, rows, files, gemini: answers });
+	await wb.service.sweep();
+	eq("6 calls: three loads read twice", wb.calls.gemini, 6);
+	eq("three published with their appointment numbers", ids.slice(0, 3).map(([id, , ap]) => [wb.row(id).status, wb.row(id).payload.includes(ap)]), [["auto", true], ["auto", true], ["auto", true]]);
+	eq("the fourth waits for the next window", [wb.ledger(files[3].meta.id).state, wb.ledger(files[3].meta.id).note], ["deferred", "budget"]);
+});
+
+test("§14 X1 on the drag-and-drop read and a staff re-read too, audited as the person", async ({ eq, ok }) => {
+	const clock = useClock();
+	const w = await world({ env: RETRY_ON, gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	await w.service.afterDropzone({ loadId: LOAD_ID, base64: X1_PDF.toString("base64"), amounts: [], user: DISP });
+	eq("drag-and-drop: two calls, published with both numbers", [w.calls.gemini, w.row().status, w.row().payload.includes("AP55091"), w.row().payload.includes("PO-77120")], [2, "auto", true, true]);
+	ok("audited as the user, with the code", w.audits().some((a) => a.action === "extract" && a.username === "disp_test" && JSON.parse(a.details).retry === "retry_merged"));
+	const w2 = await world({ env: RETRY_ON, gemini: [geminiAnswer(cleanExtraction()), geminiAnswer(x1Retry())] });
+	fs.mkdirSync(path.join(w2.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(w2.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), X1_PDF);
+	w2.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', ?, ?)").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
+	clock.t += 1000;
+	const r = await w2.call("POST", `${API}/re-extract`, SA, {});
+	eq("staff re-read: 200, two calls, published", [r.status, w2.calls.gemini, w2.row().status], [200, 2, "auto"]);
+	eq("the staff answer holds no re-read key", Object.keys(r.body).filter((k) => /retry/i.test(k)), []);
+});
+
+test("§14 X1 is named in .env.example with no value, and replica:pull refuses to switch it on", async ({ eq, ok }) => {
+	const ex = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+	const line = ex.split("\n").find((l) => /^#?\s*DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED=/.test(l));
+	eq(".env.example names it with no value", line, "DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED=");
+	const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
+	ok("--enable refuses it", typeof rules.enableRefusal("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED") === "string" && /Gemini/.test(rules.enableRefusal("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED")), rules.enableRefusal("DRIVER_INSTRUCTIONS_REFERENCE_RETRY_ENABLED"));
 });
 
 if (!fs.existsSync(RUNTIME)) {
