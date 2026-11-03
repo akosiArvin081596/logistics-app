@@ -62598,6 +62598,7 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 				reading: receiptMpg ? resolveCredibleFuelReading(vehicleId, rows, receiptMpg.mpg, preTank) : reading,
 				hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: estimate.tankSource, tankGallons: preTank,
 				mpg: receiptMpg ? receiptMpg.mpg : preMpg, burn, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+				nowMs: Date.now(),
 			}) } : {}) });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
@@ -62974,6 +62975,8 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
 				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId), pickupUnmapped: !pickedUp && !pickup,
 				approachUncounted: !pickedUp && !fixFresh,
+				// Read after fixFresh's clock, so a reading it trusts came with a fresh fix.
+				nowMs: Date.now(),
 			}) } : {}),
 		});
 	} catch (err) {

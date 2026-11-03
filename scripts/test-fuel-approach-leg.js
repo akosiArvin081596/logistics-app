@@ -376,6 +376,61 @@ check("the block says when the pickup isn't on the map (pickupUnmapped), so the 
 	], [true, false, false]);
 });
 
+// === §7e the reading's 6 h, on the position's exact clock ====================
+// The trip plan's fix is fresh only under 6 h to the millisecond; the reading's
+// age was rounded minutes, so for 30 s a reading was trusted while its own fix was
+// not, and after pickup the whole load (planned from the pickup) said "enough".
+console.log("\n§7e driver gallons: the reading's 6 h on the position's exact clock");
+const H6 = 6 * 60 * 60 * 1000;
+const T7 = Date.parse("2026-10-30T15:00:00Z");
+// The reading as resolveFuelReading() hands it over: one 80% row, `agoMs` before `now`.
+const readAt = (agoMs, now = T7) => fuel.resolveFuelReading({
+	rows: [{ fuel_pct: 80, odometer: 100000, location_date_ms: now - agoMs }], mpg: 6.0, tankGallons: 150, nowMs: now,
+});
+// After pickup: a fix under 6 h plans from it (finish), else from the pickup (whole
+// load), as server.js fixFresh decides; the reading is that fix's row.
+const afterPickup = (agoMs, now = T7) => driverFuel({
+	plan: tripPlanFor({ routeMiles: 280, pct: 80 }), reading: readAt(agoMs, now), pct: 80, leg: "to_delivery",
+	fromLivePosition: agoMs < H6, positionAgeMinutes: agoMs < H6 ? Math.round(agoMs / 60000) : null, nowMs: now,
+});
+const rowFigures = (df) => [df.fuelState, df.milesLeft, df.legs.map((l) => [l.key, l.status, l.miles, l.usesGallons, l.needInTankGallons])];
+const STALE_WHOLE_LOAD = ["stale", null, [["whole_load", "check_gauge", null, null, null]]];
+for (const [label, agoMs] of [["exactly 6 h", H6], ["6 h and 1 ms", H6 + 1], ["6 h 15 s", H6 + 15000], ["6 h 29.999 s (still 360 rounded minutes)", H6 + 29999],
+	["6 h 30 s (361 rounded minutes)", H6 + 30000]]) {
+	check(`after pickup, an 80% reading ${label} old with no fresh fix: 'stale', the whole-load row has no number (no 'enough')`, () => {
+		assert.deepStrictEqual(rowFigures(afterPickup(agoMs)), STALE_WHOLE_LOAD);
+	});
+}
+check("...the control, 1 ms under 6 h: the fix is fresh, the reading is live, and the finish row keeps its figures", () => {
+	assert.deepStrictEqual(rowFigures(afterPickup(H6 - 1)), ["live", 385, [["finish", "enough", 280, 55, 100]]]);
+});
+check("the range block (no plan) on the same clock: live 1 ms under 6 h, stale at 6 h and at 6 h 15 s", () => {
+	const top = (agoMs) => fuel.planDriverFuel({ reading: readAt(agoMs), hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150,
+		mpg: 6.0, burn: BURN5, reserve: R15, nowMs: T7 });
+	assert.deepStrictEqual([H6 - 1, H6, H6 + 15000].map((a) => [top(a).fuelState, top(a).milesLeft]), [["live", 385], ["stale", null], ["stale", null]]);
+});
+for (const [label, now] of [["the November change (2026-11-01, 1 a.m. twice)", Date.parse("2026-11-01T10:30:00Z")],
+	["the March change (2026-03-08, no 2 a.m.)", Date.parse("2026-03-08T10:00:00Z")]]) {
+	check(`across ${label}: elapsed time decides, not the wall clock (1 ms under 6 h live, 6 h stale)`, () => {
+		assert.deepStrictEqual([afterPickup(H6 - 1, now).fuelState, rowFigures(afterPickup(H6, now))], ["live", STALE_WHOLE_LOAD]);
+	});
+}
+check("a reading with no time of its own: its rounded age must be under 6 h (359 min live, 360 min stale)", () => {
+	const at = (ageMinutes) => driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 80 }), pct: 80, leg: "to_delivery", fromLivePosition: false,
+		positionAgeMinutes: null, reading: { fuelPct: 80, fuelSource: "live", anchorPct: 80, ageMinutes, milesSinceReading: 0 } });
+	assert.deepStrictEqual([at(359).fuelState, at(359).legs[0].status, rowFigures(at(360))], ["live", "enough", STALE_WHOLE_LOAD]);
+});
+check("a reading dated after now (a device clock running ahead) is not trusted", () => {
+	const df = driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 80 }), pct: 80, leg: "to_delivery", fromLivePosition: false, positionAgeMinutes: null,
+		reading: { fuelPct: 80, fuelSource: "live", anchorPct: 80, anchorAtMs: T7 + 60000, ageMinutes: 0, milesSinceReading: 0 }, nowMs: T7 });
+	assert.deepStrictEqual(rowFigures(df), STALE_WHOLE_LOAD);
+});
+check("an empty reading is still acted on at any age (0% read 7 h ago: 0 mi, refuel now)", () => {
+	const df = driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 0 }), pct: 0, leg: "to_delivery", fromLivePosition: false, positionAgeMinutes: null,
+		reading: { fuelPct: 0, fuelSource: "carried", anchorPct: 5, anchorAtMs: T7 - 7 * 3600000, ageMinutes: 420, milesSinceReading: 40 }, nowMs: T7 });
+	assert.deepStrictEqual([df.milesLeft, df.refuelNow], [0, true]);
+});
+
 // === §8 the flag in server.js ================================================
 console.log("\n§8 driver gallons: the flag in server.js");
 const { serverSource, resolveServerFile } = require("./lib/server-source");
@@ -732,7 +787,8 @@ async function routeSections() {
 		["before pickup, no ELD device on the truck", "none"],
 		["before pickup, no fuel level, ELD silent 8 h", "none"],
 		["before pickup, device re-linked 5 min ago (its newest fix is from before)", "none"],
-		["6 h edge: an 80% reading 6 h 18 s old, before pickup", "live"],
+		// Past 6 h to the millisecond, so not trusted, like its fix (§7e).
+		["6 h edge: an 80% reading 6 h 18 s old, before pickup", "stale"],
 	]) {
 		check(`${w}: approachUncounted, one whole-load row with no number`, () => {
 			const b = at(on, `${w} / trip-plan, Driver`).body;
@@ -761,6 +817,34 @@ async function routeSections() {
 	check("the rate-con stop list with two pickups marks extra stops", () => {
 		assert.strictEqual(at(on, "stop list with two pickups / trip-plan, Driver").body.driverFuel.extraStops, true);
 	});
+
+	// The reading's 6 h on the fix's exact clock, through both routes (§7e). Worlds of
+	// their own, so the counts and digests above are unchanged.
+	const edge = async (o) => {
+		const wOn = buildWorld(Database, lifted, appRequire, o, true);
+		const wOff = buildWorld(Database, lifted, appRequire, o, false);
+		return { plan: await wOn.plan(), range: await wOn.range(), planOff: await wOff.plan(), rangeOff: await wOff.range() };
+	};
+	const legFigures = (df) => df.legs.map((l) => [l.key, l.status, l.miles, l.usesGallons, l.needInTankGallons]);
+	for (const [label, fixAgoMin] of [["exactly 6 h", 360], ["6 h 15 s", 360.25]]) {
+		const e = await edge({ status: "In Transit", fuel: 80, fixAgoMin });
+		check(`in transit, an 80% reading ${label} old, ELD silent since: 'stale' on both routes, the whole-load row has no number (no 'enough')`, () => {
+			const df = e.plan.body.driverFuel;
+			assert.deepStrictEqual([e.plan.body.fromLivePosition, df.fuelState, df.milesLeft, legFigures(df), e.range.body.driverFuel.fuelState],
+				[false, "stale", null, [["whole_load", "check_gauge", null, null, null]], "stale"]);
+		});
+		check(`...flag off, the ${label} answers are as before (only driverFuel added)`, () => {
+			assert.deepStrictEqual([omitDriverFuel(e.plan.body), omitDriverFuel(e.range.body)], [e.planOff.body, e.rangeOff.body]);
+		});
+	}
+	{
+		const e = await edge({ status: "In Transit", fuel: 80, fixAgoMin: 359.99 });
+		check("...the control, a fix 0.6 s under 6 h: planned from it, the reading live, the finish row keeps its figures", () => {
+			const df = e.plan.body.driverFuel;
+			assert.deepStrictEqual([e.plan.body.fromLivePosition, df.fuelState, df.milesLeft, legFigures(df), e.range.body.driverFuel.fuelState],
+				[true, "live", 385, [["finish", "enough", 300, 55, 105]], "live"]);
+		});
+	}
 }
 
 routeSections().catch((e) => { failed++; console.error(`FAIL  §9 crashed\n      ${e.stack}`); }).then(() => {

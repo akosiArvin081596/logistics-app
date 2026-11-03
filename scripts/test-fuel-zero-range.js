@@ -339,10 +339,11 @@ const LIVE90 = (ageMinutes) => ({ fuelPct: 90, fuelSource: "live", anchorPct: 90
 const oldLive = DF({ reading: LIVE90(9 * 60) });
 check("a live reading 9 h old: 'stale', no miles, no 'enough' (90% at 5.0 mi a point would have cleared 420 mi)",
 	oldLive.fuelState === "stale" && oldLive.milesLeft === null && oldLive.fuelReadAgeMinutes === 540 && allNumberless(oldLive), JSON.stringify(oldLive));
+// With no time of its own the age is rounded minutes, and 360 may already be past 6 h.
+const under6h = DF({ reading: LIVE90(359) });
 const at6h = DF({ reading: LIVE90(360) });
-const past6h = DF({ reading: LIVE90(361) });
-check("...the line is the trip plan's 6 h: 360 min is live and clears, 361 min is stale",
-	at6h.fuelState === "live" && at6h.legs[0] && at6h.legs[0].status === "enough" && past6h.fuelState === "stale", `${at6h.fuelState} ${past6h.fuelState}`);
+check("...the line is the trip plan's 6 h: 359 min is live and clears, 360 min is stale",
+	under6h.fuelState === "live" && under6h.legs[0] && under6h.legs[0].status === "enough" && at6h.fuelState === "stale", `${under6h.fuelState} ${at6h.fuelState}`);
 const carriedOld = DF({ reading: { fuelPct: 30, fuelSource: "carried", anchorPct: 30, ageMinutes: 7 * 60, milesSinceReading: 50 } });
 check("a carried reading 7 h old: 'stale', no miles", carriedOld.fuelState === "stale" && carriedOld.milesLeft === null, JSON.stringify(carriedOld));
 const carriedBlind = DF({ reading: { fuelPct: 90, fuelSource: "carried", anchorPct: 90, ageMinutes: 30, milesSinceReading: null } });
