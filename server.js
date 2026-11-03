@@ -10911,8 +10911,9 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 			: (current?.carrier_name || "");
 
 		// An owner-operator's pay fields and carrier name don't change here, for any role
-		// (lib/owner-operator-onboarding.js); a resend of the stored values goes through.
-		const ooDirectory = ooOnboarding.directoryEditRefusal(current, { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily, carrier_name: nextCarrier });
+		// (lib/owner-operator-onboarding.js); a resend of the stored values goes through. A
+		// rename onto his name makes this his first row, held to the create's rule.
+		const ooDirectory = ooOnboarding.directoryEditRefusal(current, { driver_name: nextName, pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily, carrier_name: nextCarrier }, directoryDefaultRow(nextName));
 		if (ooDirectory) {
 			logAuditRefusal(req, "update_driver_pay_blocked", "driver", String(id), ooDirectory.audit, ooDirectory.body.code);
 			return res.status(409).json(ooDirectory.body);

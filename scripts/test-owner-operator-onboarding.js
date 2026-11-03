@@ -34,7 +34,8 @@
  *   §8 R2-M1: onboarding completion puts his truck in service on his completion
  *      day (business clock) unless a date is set, audited as a system change
  *   §9 G10: his directory row keeps its pay fields and carrier name for every
- *      role; a resend of the stored values goes through; a driver's is unchanged
+ *      role; a resend of the stored values goes through; a driver's is unchanged;
+ *      his first row, added or renamed onto his name, takes the defaults and no carrier
  *  §10 G13 through the five routes that put a driver on a load (dispatch,
  *      reassign, the row editor, PUT /api/load/:loadId, POST /api/data): refused
  *      before he signs and after his end week, nothing written, audited; a
@@ -374,6 +375,8 @@ function standInSection(c) {
 		["loadRefusal", real.loadRefusal("Casey Example"), stand.loadRefusal("Casey Example")],
 		["refuseLoad", [real.refuseLoad({}, a.res, { driver: "Casey Example", via: "t" }), a.out.code], [stand.refuseLoad({}, b.res, { driver: "Casey Example", via: "t" }), b.out.code]],
 		["directoryEditRefusal", real.directoryEditRefusal({ driver_name: "Casey Example", pay_type: "fixed" }, { pay_type: "percentage", carrier_name: "Other" }), stand.directoryEditRefusal({ driver_name: "Casey Example" }, {})],
+		["directoryEditRefusal (a rename)", real.directoryEditRefusal({ driver_name: "Sam Other", pay_type: "fixed" }, { driver_name: "Casey Example", pay_type: "percentage", carrier_name: "Other" }, { pay_type: "fixed", carrier_name: "" }),
+			stand.directoryEditRefusal({ driver_name: "Sam Other" }, { driver_name: "Casey Example" }, {})],
 		["directoryCreateRefusal", real.directoryCreateRefusal({ driver_name: "Casey Example", carrier_name: "Other", pay_type: "fixed" }, { pay_type: "fixed", carrier_name: "" }), stand.directoryCreateRefusal({ driver_name: "Casey Example" }, {})],
 		["accountCompanyRefusal", real.accountCompanyRefusal({ id: 7, driver_name: "Casey Example" }, true), stand.accountCompanyRefusal({ id: 7 }, true)],
 		["setInServiceOnCompletion", real.setInServiceOnCompletion(7, "2026-11-02T15:00:00.000Z"), stand.setInServiceOnCompletion(7, "2026-11-02T15:00:00.000Z")],
@@ -767,6 +770,69 @@ async function directorySection(c, opts = {}) {
 		const other = await add({ Driver: "Sam Company", "Carrier Name": "Example Carrier Co" });
 		c.eq("§9 a company driver's row is added with its carrier as before", [other.status, w.log.pairings.some(([d, k]) => d === "Sam Company" && k === "Example Carrier Co")], [200, true]);
 	});
+	// Another driver's row renamed onto his name (PUT /api/drivers-directory/:id) while he
+	// has no row: what the edit leaves is his first row, held to the create's rule.
+	await inWorld(c, "§9 a rename onto him", { flag: true, ...opts }, async (w) => {
+		const { userId } = await applyAndAccept(w);
+		const name = w.db.prepare("SELECT driver_name FROM users WHERE id = ?").get(userId).driver_name;
+		const addRow = (driverName, carrier, payType, pct) => Number(w.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_percentage, pay_daily, phone, status) VALUES (?, ?, ?, ?, 0, '', 'active')")
+			.run(driverName, carrier, payType, pct).lastInsertRowid);
+		const put = (id, values, user) => w.call("PUT", `/api/drivers-directory/${id}`, { user, body: { headers: Object.keys(values), values: Object.values(values) } });
+		const rowOf = (id) => w.db.prepare("SELECT driver_name, carrier_name, pay_type, pay_percentage, pay_daily, phone FROM drivers_directory WHERE id = ?").get(id);
+		// A rename the code under test lets through is undone, so every case meets the rows as set up.
+		const refused = async (label, id, values, user) => {
+			const was = rowOf(id);
+			const p0 = w.log.pairings.length;
+			const r = await put(id, values, user);
+			const unchanged = JSON.stringify(rowOf(id)) === JSON.stringify(was);
+			if (!unchanged) w.db.prepare("UPDATE drivers_directory SET driver_name = ?, carrier_name = ?, pay_type = ?, pay_percentage = ?, pay_daily = ?, phone = ? WHERE id = ?")
+				.run(was.driver_name, was.carrier_name, was.pay_type, was.pay_percentage, was.pay_daily, was.phone, id);
+			c.eq(`§9 ${label}: 409 OWNER_OPERATOR_DIRECTORY, the row unchanged, no carrier pairing`,
+				[r.status, r.body && r.body.code, unchanged, w.log.pairings.length - p0], [409, "OWNER_OPERATOR_DIRECTORY", true, 0]);
+		};
+		const plain = addRow("Sam Other", "", "fixed", 0);
+		const legacy = addRow("Sam Legacy", "Example Investor Co", "fixed", 0);
+		const terms = addRow("Pat Other", "Example Investor Co", "percentage", 80);
+		await refused("a Dispatcher renaming another driver's row onto his name with an investor company as carrier", plain, { Driver: name, "Carrier Name": "Example Investor Co" }, "disp");
+		await refused("a Dispatcher renaming a row that carries an investor company onto his name, as the edit form sends it (carrier blank, so kept)", legacy,
+			{ Driver: name, "Carrier Name": "", PayType: "fixed", PayDaily: "", PayPercentage: "", PhoneNumber: "555-0101" }, "disp");
+		await refused("a Dispatcher renaming that row onto a case and spacing variant of his name", legacy, { Driver: ` ${name.toUpperCase().replace(/ /g, "  ")} ` }, "disp");
+		await refused("a Super Admin renaming a row with 80% terms and an investor carrier onto his name", terms, { Driver: name }, "sa");
+		await refused("a Super Admin renaming a default row onto his name and setting pay terms", plain, { Driver: name, PayType: "percentage", PayPercentage: "80" }, "sa");
+		await refused("a Super Admin renaming a default row onto his name and setting an investor carrier", plain, { Driver: name, "Carrier Name": "Example Investor Co" }, "sa");
+		const blocked = audits(w.db).filter((a) => a.action === "update_driver_pay_blocked" && a.details.includes("[OWNER_OPERATOR_DIRECTORY]"));
+		c.ok("§9 ...the refusals audited under update_driver_pay_blocked with the code, on the renamed row, naming him, for each role",
+			blocked.some((a) => a.username === "dispatch_t" && a.entity_id === String(plain)) && blocked.some((a) => a.username === "super_admin" && a.entity_id === String(terms)) &&
+			blocked.every((a) => a.details.startsWith(`${name}: `)), JSON.stringify(blocked));
+		// A rename onto any other name is as before: the row's terms and carrier go with it.
+		const p1 = w.log.pairings.length;
+		const away = await put(terms, { Driver: "Pat Newname" }, "sa");
+		c.eq("§9 a Super Admin renaming that row onto another name is as before: its terms and carrier go with it, the pairing written",
+			[away.status, rowOf(terms), w.log.pairings.slice(p1)],
+			[200, { driver_name: "Pat Newname", carrier_name: "Example Investor Co", pay_type: "percentage", pay_percentage: 80, pay_daily: 0, phone: "" }, [["Pat Newname", "Example Investor Co"]]]);
+		const p2 = w.log.pairings.length;
+		const elsewhere = await put(plain, { Driver: "Sam Newname", "Carrier Name": "Example Carrier Co" }, "disp");
+		c.eq("§9 a Dispatcher renaming a row onto another name with a carrier is as before", [elsewhere.status, rowOf(plain).driver_name, rowOf(plain).carrier_name, w.log.pairings.slice(p2)],
+			[200, "Sam Newname", "Example Carrier Co", [["Sam Newname", "Example Carrier Co"]]]);
+		// A default, carrier-less row renamed onto him goes through, for either role, and is then his row.
+		const typo = addRow("Sam Typo", "", "fixed", 0);
+		const p3 = w.log.pairings.length;
+		const disp = await put(typo, { Driver: name, "Carrier Name": "", PayType: "fixed", PayDaily: "", PayPercentage: "", PhoneNumber: "555-0102" }, "disp");
+		c.eq("§9 a Dispatcher renaming a default, carrier-less row onto him goes through: his row at the defaults, no carrier, no pairing",
+			[disp.status, rowOf(typo), w.log.pairings.length - p3], [200, { driver_name: name, carrier_name: "", pay_type: "fixed", pay_percentage: 0, pay_daily: 0, phone: "555-0102" }, 0]);
+		const then = await put(typo, { Driver: name, "Carrier Name": "Example Investor Co" }, "sa");
+		c.eq("§9 ...and it is then his row: a carrier on it is refused as before", [then.status, then.body && then.body.code], [409, "OWNER_OPERATOR_DIRECTORY"]);
+		w.db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(typo);
+		const typo2 = addRow("Sam Typo Two", "", "fixed", 0);
+		const sa = await put(typo2, { Driver: name, PhoneNumber: "555-0103" }, "sa");
+		c.eq("§9 after his row is deleted, a Super Admin renaming a default, carrier-less row onto him goes through",
+			[sa.status, rowOf(typo2)], [200, { driver_name: name, carrier_name: "", pay_type: "fixed", pay_percentage: 0, pay_daily: 0, phone: "555-0103" }]);
+		// His own row's edits keep their rule, even on a row holding a carrier (as a Super Admin's name merge can leave it).
+		w.db.prepare("UPDATE drivers_directory SET carrier_name = 'Example Investor Co' WHERE id = ?").run(typo2);
+		const own = await put(typo2, { Driver: name.toLowerCase(), "Carrier Name": "", PayType: "fixed", PayDaily: "", PayPercentage: "", PhoneNumber: "555-0104" }, "disp");
+		c.eq("§9 his own row holding a carrier: a contact edit that re-spells his name goes through as before, the carrier kept",
+			[own.status, rowOf(typo2)], [200, { driver_name: name.toLowerCase(), carrier_name: "Example Investor Co", pay_type: "fixed", pay_percentage: 0, pay_daily: 0, phone: "555-0104" }]);
+	});
 	// His account's company name: the account edit's directory sync and the signing
 	// step copy it into his carrier, so it doesn't change for an owner-operator.
 	await inWorld(c, "§9 the account's company name", { flag: true, ...opts }, async (w) => {
@@ -934,6 +1000,12 @@ async function mutants(c) {
 		(s, src) => directorySection(s, { src }));
 	await runOn("M18 his account's company name without the owner-operator check", srcMutant("const ooCompany = ooOnboarding.accountCompanyRefusal(user, accountCompanyChange(user, companyName));", "const ooCompany = null;"),
 		(s, src) => directorySection(s, { src }));
+	await runOn("M19 the directory edit judging only the row's old name (recheck R1)", libMutant("const onto = profileForDriverName(next.driver_name);", "const onto = null;"),
+		(s, lib) => directorySection(s, { lib }));
+	await runOn("M20 the route handing G10 the row's old name, not the new one", srcMutant("{ driver_name: nextName, pay_type: nextPayType,", "{ driver_name: current.driver_name, pay_type: nextPayType,"),
+		(s, src) => directorySection(s, { src }));
+	await runOn("M21 his own row judged as a first row (re-spelling his row's name)", libMutant("if (!onto || (own && own.id === onto.id)) return null;", "if (!onto) return null;"),
+		(s, lib) => directorySection(s, { lib }));
 	await runOn("M15 the list annotated with the flag off", srcMutant("if (OWNER_OPERATOR_ONBOARDING_ENABLED) apps = ooOnboarding.annotateApplications(apps);", "apps = ooOnboarding.annotateApplications(apps);"), (s, src) => inWorld(s, "M15", { src, flag: false }, async (w) => {
 		await w.call("POST", "/api/public/apply", { user: null, body: application() });
 		const l = await w.call("GET", "/api/applications");

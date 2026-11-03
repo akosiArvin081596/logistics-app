@@ -117,7 +117,7 @@ GET /api/driver/truck-documents/:id/view · requireAuth@2f5c61384511 · truckDoc
 GET /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@65f41ab129f2
 POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@7c18a1e6bafe
 DELETE /api/drivers-directory/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b244c9c7ef55
-PUT /api/drivers-directory/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ac072241ae21
+PUT /api/drivers-directory/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@02d91be55e54
 GET /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5e38514ab834
 POST /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@60336818ad3e
 GET /api/drivers-directory/:id/documents · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ec5014497d5e

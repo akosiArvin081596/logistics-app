@@ -168,6 +168,8 @@ const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("findT
 const LOCK_SRC = liftFunction("userUpdateLockBlockers");
 // The pay fields PUT /api/drivers-directory/:id reads (scripts/test-pay-settings-admin-only.js).
 const DIRECTORY_PAY = new Function(`${liftFunction("parsePlainDecimal")}\n${liftFunction("directoryPayValue")}\nreturn directoryPayValue;`)();
+// The default row it hands the owner-operator directory check.
+const DIRECTORY_DEFAULT_ROW = new Function(`${liftConst("const DIRECTORY_DEFAULT_STRUCT = ")}\n${liftFunction("directoryDefaultRow")}\nreturn directoryDefaultRow;`)();
 // assignDriverToTruck() asks driverNameHeldByOtherSpelling() before it releases a
 // spacing variant of the driver's name, and keeps the carrier pairing through
 // syncOpenCarrierPairing().
@@ -441,7 +443,7 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		syncCarrierDriverHistory: (rows) => log.history.push(rows),
 		logAudit: () => {},
 		notifyChange: () => {},
-		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE, directoryDefaultRow: DIRECTORY_DEFAULT_ROW,
 		normalizeDriverName: m.normalizeDriverName,
 		isBuiltInPropertyName: m.isBuiltInPropertyName,
 		findDriverNameClash: m.findDriverNameClash,
