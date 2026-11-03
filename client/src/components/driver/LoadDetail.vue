@@ -511,12 +511,12 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
 })
 
+const pickupArrivalText = computed(() => pickupArrivalLine(props.load))
+
 // May the driver add a receipt here? The SERVER's verdict for this load
 // (`_expenseWindow`, from GET /api/driver/:driverName — active, or delivered
 // within the last 7 days), re-checked against this phone's clock (nowTick). Never
 // re-derived from the status here; POST /api/expenses enforces the same verdict.
-const pickupArrivalText = computed(() => pickupArrivalLine(props.load))
-
 const expenseWin = computed(() => liveExpenseWindow(props.load && props.load._expenseWindow, { status: status.value, now: nowTick.value }))
 const expenseCopy = computed(() => expenseWindowCopy(expenseWin.value))
 

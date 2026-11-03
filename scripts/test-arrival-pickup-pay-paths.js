@@ -56,7 +56,9 @@
  *   D1-D5 the load detail's line (`_pickupArrival`) on GET /api/dashboard and the
  *       driver's GET /api/driver/:driverName: the facts on in-scope loads only; no
  *       Load ID, distance or name; a Load ID withheld from a Dispatcher still gets
- *       it; a driver sees it on his own loads only; flag off, no key; MD1-MD3 mutants
+ *       it; a driver sees it on his own loads only; flag off, no key; D6 a percentage
+ *       driver's load, one assigned before FROM and one with no Assigned Date show the
+ *       rate con's date only; MD1-MD7 mutants
  *   M   mutants, each caught
  *
  * Every "on" case fails on a base without the rule (no flag); the pins pass on
@@ -72,6 +74,7 @@ const path = require("path");
 const crypto = require("crypto");
 const Module = require("module");
 const { spawnSync } = require("child_process");
+const { pathToFileURL } = require("url");
 const M = require("./lib/money-plans-world");
 const { closure } = require("./lib/server-lift");
 const { loadRow } = M;
@@ -695,6 +698,19 @@ const FIELD_2102 = { scheduled: "2026-12-09", day: "2026-12-08", at: "2026-12-09
 // A broker phone held in the Load ID itself: withheld from a Dispatcher, so the
 // stored ID is all that ties the row to its history.
 const WITHHELD_ID = "5552014477";
+const BO_DIRECTORY = { name: BO, payType: "percentage", payPct: 30 };
+// L-2101's trip (a GPS arrival, a Delivered row) under another Load ID, row cells and driver.
+const lateAs = (id, cells = {}, actor = AMY) => {
+	const x = L.late();
+	return { row: { ...x.row, "Load ID": id, ...cells }, history: x.history.map((r) => ({ ...r, load: id, actor })) };
+};
+// Out of scope though each has a qualifying arrival and a Delivered row: the weekly
+// invoice pays none of them from the arrival (P6, P7, P12).
+const OUT_OF_SCOPE = {
+	"L-2123": () => lateAs("L-2123", { Driver: BO, Truck: "T3" }, BO), // a percentage driver
+	"L-2124": () => lateAs("L-2124", { "Assigned Date": "11/19/2026" }), // assigned the day before FROM, done Dec 10
+	"L-2125": () => lateAs("L-2125", { "Assigned Date": "" }), // no Assigned Date
+};
 const displayLoads = () => {
 	// Set back to In Transit by hand after its Delivered row: not completed on the sheet.
 	const reopened = { ...L.late(), row: { ...L.late().row, "Load ID": "L-2122", "Job Status": "In Transit" } };
@@ -705,10 +721,10 @@ const displayLoads = () => {
 		history: tripEvents("L-2121", { dispatchAt: "2026-12-04 15:00:00", headingAt: "2026-12-08 13:00:00", arrival: { ...geoEv("L-2121", "2026-12-08 16:06:00", "2026-12-08 16:05:00"), actor: CY },
 			loadingAt: "2026-12-08 17:00:00", receiverAt: "2026-12-10 15:00:00", deliveredAt: "2026-12-10 19:00:00" }).map((r) => ({ ...r, actor: CY })),
 	};
-	return [L.late(), L.early(), reopened, withheld, cy];
+	return [L.late(), L.early(), reopened, withheld, cy, ...Object.values(OUT_OF_SCOPE).map((make) => make())];
 };
 const displayWorld = (env) => {
-	const w = world(env, displayLoads(), { drivers: [{ name: CY, payDaily: 280 }], world: { trucks: [{ unit: "T1", driver: AMY }, { unit: "T2", driver: CY }] } });
+	const w = world(env, displayLoads(), { drivers: [{ name: CY, payDaily: 280 }, BO_DIRECTORY], world: { trucks: [{ unit: "T1", driver: AMY }, { unit: "T2", driver: CY }, { unit: "T3", driver: BO }] } });
 	const user = w.db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', 'Driver', ?)");
 	user.run(AMY_DRIVER.id, AMY_DRIVER.username, AMY);
 	user.run(CY_DRIVER.id, CY_DRIVER.username, CY);
@@ -729,7 +745,7 @@ async function displayCases() {
 		const keys = [...new Set(admin.rows.flatMap((x) => Object.keys(x._pickupArrival || {})))].sort();
 		eq("the keys", keys, ["at", "atDay", "atTime", "day", "scheduled", "source"]);
 		const text = JSON.stringify([...admin.rows, ...disp.rows].map((x) => x._pickupArrival));
-		ok("no Load ID, driver name or distance in any field", !/L-21|5552014477|Amy|Birch|Cy Dale|distance|_m"/i.test(text), text);
+		ok("no Load ID, driver name or distance in any field", !/L-21|5552014477|Amy|Birch|Cy Dale|Bo Wyn|distance|_m"/i.test(text), text);
 		eq("the Dispatcher's fields equal Super Admin's", disp.rows.map((x) => x._pickupArrival), admin.rows.map((x) => x._pickupArrival));
 		eq("the withheld row: its Load ID served blank, its arrival there", disp.rows.filter((x) => x["Load ID"] === "").map((x) => x._pickupArrival), [FIELD_2101]);
 	});
@@ -738,8 +754,8 @@ async function displayCases() {
 		const mine = await r.driverPage(AMY_DRIVER, AMY);
 		eq("her page: 200", mine.status, 200);
 		const f = fieldsOf(mine.body.loads || []);
-		eq("her loads, each with the field", Object.keys(f).sort(), ["5552014477", "L-2101", "L-2102", "L-2122"]);
-		eq("L-2101 and L-2102", [f["L-2101"], f["L-2102"]], [FIELD_2101, FIELD_2102]);
+		eq("her loads, each with the field", Object.keys(f).sort(), ["5552014477", "L-2101", "L-2102", "L-2122", "L-2124", "L-2125"]);
+		eq("L-2101, L-2102, and the load whose ID holds the broker phone (her own ID, put back as stored)", [f["L-2101"], f["L-2102"], f[WITHHELD_ID]], [FIELD_2101, FIELD_2102, FIELD_2101]);
 		ok("nothing of Cy's load or arrival in her answer", !/L-2121|2026-12-08T16:05/.test(JSON.stringify(mine.body)), "");
 		const his = await r.driverPage(AMY_DRIVER, CY);
 		eq("Cy's page as Amy: 403, no loads", [his.status, JSON.stringify(his.body).includes("_pickupArrival")], [403, false]);
@@ -758,6 +774,28 @@ async function displayCases() {
 		const env = { ...ON, TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-11" };
 		const { rows } = await displayRoutes(displayWorld(env), env).dashboard();
 		eq("L-2101", fieldsOf(rows)["L-2101"], { scheduled: "2026-12-07" });
+	});
+	const client = await import(pathToFileURL(path.join(ROOT, "client", "src", "lib", "pickupArrival.js")).href).catch(() => ({ pickupArrivalLine: () => null }));
+	const RATE_CON_ONLY = { scheduled: "2026-12-07" };
+	// The out-of-scope loads' fields on both routes, as server.js reads them (`src`).
+	const outOfScope = async (src = M.SRC) => {
+		const r = displayRoutes(displayWorld(ON), ON, src);
+		const dash = fieldsOf((await r.dashboard()).rows);
+		const amy = fieldsOf((await r.driverPage(AMY_DRIVER, AMY)).body.loads || []);
+		const bo = fieldsOf((await r.driverPage(M.ADMIN.session.user, BO)).body.loads || []);
+		return { dash: Object.keys(OUT_OF_SCOPE).map((id) => dash[id]), page: [bo["L-2123"], amy["L-2124"], amy["L-2125"]] };
+	};
+	const paysStart = (fields) => fields.some((f) => !!(f && f.day));
+	await test("D6 out of scope though each has a qualifying arrival and a Delivered row (a percentage driver's load, one assigned the day before FROM and done after it, one with no Assigned Date): the rate con's date only, on both routes and on screen, and the weekly invoice pays each as with the flag off", async ({ eq }) => {
+		const got = await outOfScope();
+		eq("the dashboard: [L-2123, L-2124, L-2125]", got.dash, [RATE_CON_ONLY, RATE_CON_ONLY, RATE_CON_ONLY]);
+		eq("the driver pages: [Bo's L-2123 (as Super Admin), Amy's L-2124, L-2125]", got.page, [RATE_CON_ONLY, RATE_CON_ONLY, RATE_CON_ONLY]);
+		eq("the line each shows: no \"Pay starts\"", [...got.dash, ...got.page].map((f) => client.pickupArrivalLine({ _pickupArrival: f })), Array(6).fill("Pickup (rate con): Mon Dec 7"));
+		for (const [id, opts, driver] of [["L-2123", { drivers: [BO_DIRECTORY], world: { trucks: [{ unit: "T1", driver: AMY }, { unit: "T3", driver: BO }] } }, BO], ["L-2124", {}, AMY], ["L-2125", {}, AMY]]) {
+			const on = await paths(world(ON, [OUT_OF_SCOPE[id]()], opts), { driver });
+			const off = await paths(world(OFF, [OUT_OF_SCOPE[id]()], opts), { driver });
+			eq(`${id}: the weekly invoice's days and total, flag on = off`, [on.invoice, on.invoiceTotal], [off.invoice, off.invoiceTotal]);
+		}
 	});
 
 	// Mutants of the two routes' wiring, each a copy of server.js with one change.
@@ -781,6 +819,19 @@ async function displayCases() {
 		const { rows } = await displayRoutes(displayWorld(ON), ON, src).dashboard();
 		ok("caught", !!(fieldsOf(rows)["L-2122"] || {}).day, "");
 	});
+	// The review's four surviving reader mutants (review-1 M1: Y3, Y4, Y5, Y7), each now
+	// caught by D6: an out-of-scope load gains "Pay starts" on a route.
+	for (const [name, from, to] of [
+		["MD4 (Y3) no driver read: the percentage check finds no one", "driverKey: (row) => normalizeDriverName(cell(row, cols.driverCol)),", "driverKey: () => \"\","],
+		["MD5 (Y4) the Assigned Date read from the invoice's completion column", "const assignedCol = jobTrackingMonthCols(headers).dateCol;", "const assignedCol = invoiceCompletionCol(headers);"],
+		["MD6 (Y5) no pay structures", "payTypes: getDriverPayStructures,", "payTypes: () => ({}),"],
+		["MD7 (Y7) every load read as assigned in 2099 (FROM ignored)", "assigned: (row) => (cell(row, assignedCol) ? moneySheetDate(cell(row, assignedCol)) : null),", "assigned: () => \"2099-01-01\","],
+	]) {
+		await test(`${name} (D6)`, async ({ ok }) => {
+			const got = await outOfScope(mutated(from, to));
+			ok("caught: an out-of-scope load shows \"Pay starts\"", paysStart(got.dash) || paysStart(got.page), JSON.stringify(got));
+		});
+	}
 }
 
 // ── P16/P17 the three scripts ─────────────────────────────────────────────────
