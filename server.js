@@ -133,6 +133,8 @@ const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDe
 const expenseAi = require("./lib/expense-ai");
 // "Personal" receipts: the rules, the line text and the two expense sources.
 const personalExpense = require("./lib/personal-expense");
+// Who last set a receipt's status (RECEIPT_STATUS_RECORDER_ENABLED).
+const receiptStatusRecorder = require("./lib/receipt-status-recorder");
 const invoiceCorrections = require("./lib/invoice-corrections");
 // Their receipts on the invoice: the re-encode service, the PDF receipt pages
 // service and the page layout.
@@ -852,6 +854,18 @@ try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_details TEXT DEFAULT ''")
 // never move. `date` is left untouched: it stays the true purchase date that
 // IFTA and fuel cost-per-gallon depend on. See EXPENSE_PERIOD_EXPR.
 try { db.exec("ALTER TABLE expenses ADD COLUMN posted_period TEXT DEFAULT ''"); } catch {}
+
+// Who last set a receipt's status (lib/receipt-status-recorder.js). Added at boot
+// whatever the flag, so every copy of the database has them; written only with
+// the recorder on, so every row from before keeps them empty.
+try { db.exec("ALTER TABLE expenses ADD COLUMN status_by_role TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE expenses ADD COLUMN status_by_id INTEGER"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE expenses ADD COLUMN status_by_name TEXT DEFAULT ''"); } catch { /* column already exists */ }
+try { db.exec("ALTER TABLE expenses ADD COLUMN status_at TEXT DEFAULT ''"); } catch { /* column already exists */ }
+// On only when exactly "true", read once. Off, the status routes and the Personal
+// mark run today's statements and the admin list carries no status_by.
+const RECEIPT_STATUS_RECORDER_ENABLED = process.env.RECEIPT_STATUS_RECORDER_ENABLED === "true";
+console.log(`[receipt-status-recorder] RECEIPT_STATUS_RECORDER_ENABLED ${RECEIPT_STATUS_RECORDER_ENABLED ? "on" : "off"}`);
 
 // Bulk receipt upload drafts — one in-progress batch per user so a stack a
 // dispatcher starts on a phone can be finished on a computer. draft_json holds
@@ -31179,6 +31193,12 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
 		};
 		const approve = inPlace && String(expense.status || "") === "Pending";
+		// With the recorder on, its write (lib/receipt-status-recorder.js) also says
+		// whether the approval happened, for the audit row below.
+		let recorded = null;
+		const onCommit = RECEIPT_STATUS_RECORDER_ENABLED
+			? () => { recorded = receiptStatusRecorder.markPersonalWrite(db, { id, user, at: new Date().toISOString(), inPlace, approve, rowLocked: expenseRowPeriodLocked }); }
+			: approve ? () => { db.prepare("UPDATE expenses SET status = 'Approved' WHERE id = ? AND status = 'Pending'").run(id); } : null;
 		// The receipt's page image starts now, and the invoice render below joins it
 		warmReceiptImage(expense);
 		// So do a PDF receipt's page verdicts (driver privacy D9); the answer carries their counts (D8).
@@ -31186,10 +31206,7 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 			? receiptPageVerdictsFor(expense) : null;
 		let placed;
 		try {
-			placed = await placePersonalLine({
-				row, receiptType: expense.type, driverName, actor: req,
-				onCommit: approve ? () => { db.prepare("UPDATE expenses SET status = 'Approved' WHERE id = ? AND status = 'Pending'").run(id); } : null,
-			});
+			placed = await placePersonalLine({ row, receiptType: expense.type, driverName, actor: req, onCommit });
 		} catch (err) {
 			const won = err && err.code === "SQLITE_CONSTRAINT_UNIQUE" ? livePersonalDeduct(id) : null;
 			if (won) return personalAlreadyMarked(res, won, amount.cents, user);
@@ -31202,7 +31219,7 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 		logAudit(req, "mark_expense_personal", "expense", id,
 			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}${lineWeek.why ? ` (${lineWeek.why})` : ""}; ${where}; ${books}` +
 			(row.share_cents ? `; share returned ${personalExpense.formatMoney(row.share_cents)}` : "") + (reason ? `; reason: ${reason}` : ""));
-		if (approve) logAudit(req, "update_expense_status", "expense", id, `status Pending -> Approved (marked Personal; period ${row.cost_period})`);
+		if (RECEIPT_STATUS_RECORDER_ENABLED ? !!(recorded && recorded.approved) : approve) logAudit(req, "update_expense_status", "expense", id, `status Pending -> Approved (marked Personal; period ${row.cost_period})`);
 		if (placed.invoice && !placed.created) {
 			logAudit(req, "invoice_personal_lines", "invoice", placed.invoice.id, `${placed.invoice.invoice_number}: Personal line for receipt ${id} added (${personalExpense.formatMoney(row.cents)})`);
 		}
@@ -71814,7 +71831,8 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		// posted_period is exposed so a receipt that was redirected out of a closed
 		// month is visible as such in the admin list — otherwise a March-dated row
 		// silently counting in August looks like a bug rather than the rule.
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at" +
+			receiptStatusRecorder.listColumns(RECEIPT_STATUS_RECORDER_ENABLED) + " FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
@@ -71880,7 +71898,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		const expenses = rows.map((e) => {
 			const period = expensePostedPeriod(e);
 			return {
-				...e,
+				...(RECEIPT_STATUS_RECORDER_ENABLED ? receiptStatusRecorder.withStatusBy(e) : e),
 				...(withholdIds ? { load_id: shownLoadId(req, e.load_id, { index: loadIdIndex }) } : {}),
 				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
 			};
@@ -72151,7 +72169,9 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		}
 
 		const prevStatus = expense.status || "Pending";
-		db.prepare("UPDATE expenses SET status = ? WHERE id = ?").run(status, id);
+		// With the recorder on, the same write records who set it; off, today's statement.
+		const set = receiptStatusRecorder.statusSet(RECEIPT_STATUS_RECORDER_ENABLED, status, req.session.user, new Date().toISOString());
+		db.prepare(`UPDATE expenses SET ${set.sql} WHERE id = ?`).run(...set.params, id);
 		// ⚠️ THIS IS A MONEY WRITE AND IT USED TO LEAVE NO TRACE. Rejecting an
 		// expense removes it from every P&L (EXPENSE_PNL_FILTER) and therefore from
 		// the investor payout deduction for that month — the same class of change as
@@ -72309,9 +72329,12 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		let changed = 0;
 		if (existingIds.length) {
 			const updatePh = existingIds.map(() => "?").join(",");
+			// With the recorder on, every row this writes records who set it, a row
+			// already at the target included: the click is a person's decision on each.
+			const set = receiptStatusRecorder.statusSet(RECEIPT_STATUS_RECORDER_ENABLED, status, req.session.user, new Date().toISOString());
 			changed = db
-				.prepare(`UPDATE expenses SET status = ? WHERE id IN (${updatePh})`)
-				.run(status, ...existingIds).changes;
+				.prepare(`UPDATE expenses SET ${set.sql} WHERE id IN (${updatePh})`)
+				.run(...set.params, ...existingIds).changes;
 			// ⚠️ THIS IS THE ROUTE THAT MATTERS MOST, not the single-row one. The Data
 			// Issues page voids DUPLICATE receipts through THIS endpoint — so the
 			// operation "an admin rejects a duplicate, removing money from the P&L and
