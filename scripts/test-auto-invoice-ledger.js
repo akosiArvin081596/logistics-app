@@ -158,6 +158,32 @@ try {
 	L.reserveNumber(db, "ld-test-0001", "nobody", { mint: () => { throw new Error("boom"); }, now: new Date(T0), dayKey: "2026-10-20", messageId: "<y@example.com>", nowIso: T0 });
 } catch { failed = true; }
 eq(failed, false, "§4 a claim that isn't working never reaches the mint");
+// A factored load (Triumph) gets no number, inside the same transaction.
+{
+	const s = new Database(":memory:");
+	serverTables(s);
+	L.ensureSchema(s);
+	s.exec(`CREATE TABLE load_factoring (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', factored INTEGER NOT NULL, source TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '', set_at TEXT NOT NULL, set_by TEXT NOT NULL DEFAULT '', set_by_id INTEGER NOT NULL DEFAULT 0,
+		locked_at TEXT NOT NULL DEFAULT '', locked_via TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)`);
+	const ms = minter(s);
+	const opts = { mint: ms.mint, now: new Date(T0), dayKey: "2026-10-20", messageId: "<f@example.com>", nowIso: T0 };
+	for (const k of ["ld-test-0020", "ld-test-0021", "ld-test-0022"]) {
+		L.insertClaim(s, { key: k, loadId: k.toUpperCase(), state: "queued", nowIso: T0 });
+		L.lease(s, k, "w", { nowIso: T0, untilIso: at(15) });
+	}
+	s.prepare("INSERT INTO load_factoring (load_key, factored, source, set_at, updated_at) VALUES ('ld-test-0020', 1, 'script', ?, ?)").run(T0, T0);
+	s.prepare("INSERT INTO load_factoring (load_key, factored, source, set_at, updated_at) VALUES ('ld-test-0021', 0, 'person', ?, ?)").run(T0, T0);
+	eq(L.reserveNumber(s, "ld-test-0020", "w", opts), { ok: false, reason: "factored" }, "§4 FAILS ON THE OLD CODE: a factored load mints nothing (reason factored)");
+	eq([ms.calls.length, L.getClaim(s, "ld-test-0020").invoice_id], [0, ""], "§4 ...the sequence is never called and the claim holds no number");
+	eq(L.reserveNumber(s, "ld-test-0021", "w", opts).ok, true, "§4 a row at 0 (cleared) mints as before");
+	eq(L.reserveNumber(s, "ld-test-0022", "w", opts).ok, true, "§4 no row mints as before");
+	s.exec("DROP TABLE load_factoring; CREATE TABLE load_factoring (load_key TEXT PRIMARY KEY)");
+	s.prepare("INSERT INTO load_factoring (load_key) VALUES ('ld-test-0022')").run();
+	L.transition(s, "ld-test-0022", { from: ["working"], owner: "w", patch: { invoice_id: "", stage: "" }, nowIso: T0 });
+	eq(L.reserveNumber(s, "ld-test-0022", "w", opts), { ok: false, reason: "factored" }, "§4 a marker it can't read as 0 or 1 refuses too (fail closed)");
+	s.close();
+}
 
 // ------------------------------------------------------------------ §5
 section("§5  two processes on one database file");

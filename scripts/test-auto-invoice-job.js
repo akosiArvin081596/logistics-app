@@ -69,6 +69,10 @@
 //       is dated by the person's draft (in the week though recorded after it;
 //       outside the week when drafted before the render shadow first ran); one
 //       write path; mutants of each
+//   §23 factored loads (lib/factoring-store.js): marked while queued, before
+//       the number, or between the render and the hand-off, a load is never
+//       appended; shadow says WOULD_SKIP LOAD_FACTORED; the render shadow never
+//       builds one; a marker that can't be read fails the sweep; mutants of each
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -1251,6 +1255,163 @@ async function main() {
 	}
 
 	await renderShadowSections();
+	await factoredSections();
+}
+
+// ------------------------------------------------------------------ factored loads
+const factoringStore = require(path.join(ROOT, "lib", "factoring-store.js"));
+const markFactored = (w, id) => {
+	factoringStore.ensureSchema(w.db);
+	w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
+		.run(rules.loadKey(id), id, new Date(w.now).toISOString(), new Date(w.now).toISOString());
+};
+const enginePrepares = (w, id) => w.calls.prepare.filter((p) => rules.loadKey(p.loadId) === rules.loadKey(id)).length;
+
+// Each case runs on a job library (the real one, or a mutant) and answers its
+// observations, so a mutant's run can be compared with the real one's.
+const FACTORED_CASES = {
+	// Marked while its claim is queued: skipped by the sweep, never reaches the
+	// engine, a number or Gmail.
+	async queued(lib) {
+		const w = makeWorld();
+		const job = lib.create(w.deps());
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0400");
+		await job.sweep();
+		const before = w.state("LD-TEST-0400");
+		markFactored(w, "LD-TEST-0400");
+		await job.tick();
+		w.now += 20 * MIN;
+		await job.tick();
+		return { before, after: w.state("LD-TEST-0400"), prepares: enginePrepares(w, "LD-TEST-0400"), mint: w.calls.mint.length, append: w.calls.append.length };
+	},
+	// Marked between the prepare and the number: reserveNumber() mints nothing.
+	async atNumber(lib) {
+		const w = makeWorld();
+		const job = lib.create(w.deps());
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0401");
+		w.prepareHook = (id) => { if (rules.loadKey(id) === "ld-test-0401") markFactored(w, id); return null; };
+		await job.tick();
+		w.prepareHook = null;
+		const c = w.claim("LD-TEST-0401");
+		return { state: [c.state, c.reason_code, c.lease_owner], mint: w.calls.mint.length, append: w.calls.append.length };
+	},
+	// Marked between the render and the hand-off: the re-check catches it and
+	// voids the number, with one audit row. (The marking route refuses a working
+	// claim, so the mark is written directly.)
+	async afterRender(lib) {
+		const w = makeWorld();
+		const job = lib.create(w.deps());
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0402");
+		w.renderHook = (ctx) => { if (rules.loadKey(ctx.loadId) === "ld-test-0402") markFactored(w, ctx.loadId); };
+		await job.tick();
+		w.renderHook = null;
+		const c = w.claim("LD-TEST-0402");
+		return { state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at), number: c.invoice_id, mint: w.calls.mint.length, append: w.calls.append.length,
+			voidRows: w.actions("auto_invoice_number_void").length, drafts: w.draftRows("LD-TEST-0402").length };
+	},
+	// Shadow: a load first seen factored, and a WOULD_WAIT row marked later.
+	async shadow(lib) {
+		const w = makeWorld();
+		const job = lib.create(w.deps({ env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } }));
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0403");
+		markFactored(w, "LD-TEST-0403");
+		w.setRow("LD-TEST-0404");
+		await job.tick();
+		const waited = shadowRowOf(w, "LD-TEST-0404");
+		markFactored(w, "LD-TEST-0404");
+		w.now += 5 * MIN;
+		await job.tick();
+		const a = shadowRowOf(w, "LD-TEST-0403");
+		const b = shadowRowOf(w, "LD-TEST-0404");
+		return { first: a && [a.verdict, a.reason_code], waitedBefore: waited && waited.verdict, waitedAfter: b && [b.verdict, b.reason_code], prepares: w.calls.prepare.length };
+	},
+	// The render shadow: a WOULD_ATTEMPT row marked factored before it was built
+	// is never built, and its record says LOAD_FACTORED.
+	async renderShadow(lib) {
+		const w = makeWorld();
+		w.richRender = true;
+		const job = lib.create(w.deps(SHADOW_ON));
+		await job.tick();
+		w.now += 5 * MIN;
+		w.geminiDownAt = w.now;
+		w.ready("LD-TEST-0405");
+		await job.tick();
+		const before = shadowRowOf(w, "LD-TEST-0405");
+		const builtBefore = w.calls.prepare.length;
+		markFactored(w, "LD-TEST-0405");
+		w.geminiDownAt = null;
+		w.now += 5 * MIN;
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		const rec = recordOf(w, "LD-TEST-0405");
+		return { verdict: before && before.verdict, builtBefore, prepares: w.calls.prepare.length, renders: w.calls.render.length, code: rec && rec.code,
+			refusedAt: Boolean(rec && rec.refusedAt), mint: w.calls.mint.length, append: w.calls.append.length };
+	},
+	// A marker that can't be read: the sweep fails and nothing is drafted.
+	async unreadable(lib) {
+		const w = makeWorld();
+		const job = lib.create(w.deps());
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0406");
+		w.db.exec("CREATE TABLE load_factoring (load_key TEXT PRIMARY KEY)");
+		const out = await job.tick();
+		return { sweep: out.sweep, mint: w.calls.mint.length, append: w.calls.append.length, prepares: w.calls.prepare.length };
+	},
+};
+
+async function factoredSections() {
+	// ---------------------------------------------------------------- §23
+	section("§23 factored loads (Triumph): never drafted, whatever stage the mark lands at");
+	const q = await FACTORED_CASES.queued(jobLib);
+	eq(q.before, ["queued", ""], "§23 the load is queued before the mark");
+	eq(q.after, ["skipped", "LOAD_FACTORED"], "§23 FAILS ON THE OLD CODE: marked while queued: skipped LOAD_FACTORED");
+	eq([q.prepares, q.mint, q.append], [0, 0, 0], "§23 FAILS ON THE OLD CODE: ...no engine call, no number, appendGmailDraft never called");
+
+	const n = await FACTORED_CASES.atNumber(jobLib);
+	eq([n.state, n.mint, n.append], [["skipped", "LOAD_FACTORED", ""], 0, 0], "§23 FAILS ON THE OLD CODE: marked before the number: reserveNumber() mints nothing, the claim is skipped and released");
+
+	const r = await FACTORED_CASES.afterRender(jobLib);
+	eq([r.state, r.voided, r.mint, r.append, r.drafts], [["skipped", "LOAD_FACTORED"], true, 1, 0, 0],
+		"§23 FAILS ON THE OLD CODE: marked between the render and the hand-off: caught before Gmail, its number voided");
+	eq(r.voidRows, 1, "§23 ...with one auto_invoice_number_void audit row");
+
+	const s = await FACTORED_CASES.shadow(jobLib);
+	eq(s.first, ["WOULD_SKIP", "LOAD_FACTORED"], "§23 FAILS ON THE OLD CODE: shadow: a load first seen factored is WOULD_SKIP LOAD_FACTORED");
+	eq([s.waitedBefore, s.waitedAfter], ["WOULD_WAIT", ["WOULD_SKIP", "LOAD_FACTORED"]], "§23 FAILS ON THE OLD CODE: shadow: a WOULD_WAIT row marked later turns WOULD_SKIP LOAD_FACTORED");
+	eq(s.prepares, 0, "§23 ...and shadow calls no engine");
+
+	const rs = await FACTORED_CASES.renderShadow(jobLib);
+	eq([rs.verdict, rs.builtBefore], ["WOULD_ATTEMPT", 0], "§23 the render shadow: the load is WOULD_ATTEMPT and not yet built (Gemini's latch)");
+	eq([rs.prepares, rs.renders, rs.mint, rs.append], [0, 0, 0, 0], "§23 FAILS ON THE OLD CODE: marked factored, it is never built (the engine spies stay at 0)");
+	eq([rs.code, rs.refusedAt], ["LOAD_FACTORED", true], "§23 FAILS ON THE OLD CODE: ...and its record says LOAD_FACTORED");
+
+	const u = await FACTORED_CASES.unreadable(jobLib);
+	eq([u.sweep, u.mint, u.append, u.prepares], [{ mode: "on", error: "SWEEP_FAILED" }, 0, 0, 0], "§23 FAILS ON THE OLD CODE: a marker that can't be read: SWEEP_FAILED, nothing drafted");
+
+	// Each decision removed in turn: the case that pins it must change.
+	const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+	for (const [label, from, to, caseName, pinned] of [
+		["the sweep's facts without the marker", "factored: snap.factored.has(key),", "factored: false,", "queued", (x) => x.prepares === 0 && x.after[1] === "LOAD_FACTORED"],
+		["no release on reserveNumber()'s 'factored'", "if (r.reason === \"factored\") {", "if (false) {", "atNumber", (x) => x.state[0] === "skipped"],
+		["no re-check after the render", "if (ledger.factoredOrUnreadable(db, key)) return release(rendering, \"skipped\", \"LOAD_FACTORED\");", "", "afterRender", (x) => x.append === 0],
+		["the render shadow builds a factored row", "if (facts.factored) {\n\t\t\t\tif (!prev", "if (false) {\n\t\t\t\tif (!prev", "renderShadow", (x) => x.renders === 0 && x.code === "LOAD_FACTORED"],
+		["an unreadable marker read as none", "factored: factoring.factoredKeys(db) };", "factored: (() => { try { return factoring.factoredKeys(db); } catch { return new Set(); } })() };", "unreadable", (x) => x.append === 0],
+	]) {
+		const lib = mutantModule(JOB_FILE, from, to);
+		ok(lib, `§23 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+		if (!lib) continue;
+		ok(pinned(await FACTORED_CASES[caseName](jobLib)) && !pinned(await FACTORED_CASES[caseName](lib)), `§23 MUTANT ${label}: caught`);
+	}
 }
 
 // ------------------------------------------------------------------ the render shadow
