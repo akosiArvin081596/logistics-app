@@ -520,16 +520,16 @@ function factoringGateViolations(src) {
 	ok("server.js mounts them from its <factoring-wiring> block, with its own requireRole and refuseCrossSite, and nowhere else",
 		block.split("factoringRoutes.mount(").length === 2 && /factoringRoutes\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(block) &&
 		SRC.split("factoringRoutes.mount(").length === 2 && !/["']\/api\/factoring\//.test(SRC) && !/invoice-draft-inflight/.test(SRC));
-	const from = 'const guard = [requireRole("Super Admin")];';
-	if (FACTORING_SRC.split(from).length - 1 !== 1) ok("factoring mutant anchor found once", false);
+	const from = 'requireRole("Super Admin")';
+	if (FACTORING_SRC.split(from).length - 1 !== 3) ok("factoring mutant anchor found on each of the three routes", false);
 	else {
-		const v = factoringGateViolations(FACTORING_SRC.replace(from, 'const guard = [requireRole("Super Admin", "Dispatcher")];'));
+		const v = factoringGateViolations(FACTORING_SRC.split(from).join('requireRole("Super Admin", "Dispatcher")'));
 		ok(`MUTANT Dispatcher re-admitted to the factoring routes: caught (${v.length} violation(s))`, v.filter((s) => s.includes("Dispatcher gets the handler")).length === 3);
 	}
-	const xs = "const writeGuard = refuseCrossSite ? [...guard, refuseCrossSite] : guard;";
+	const xs = "const crossSite = refuseCrossSite ? [refuseCrossSite] : [];";
 	if (FACTORING_SRC.split(xs).length - 1 !== 1) ok("factoring cross-site mutant anchor found once", false);
 	else ok("MUTANT the cross-site guard dropped from the factoring routes: caught",
-		factoringGateViolations(FACTORING_SRC.replace(xs, "const writeGuard = guard;")).some((s) => s.includes("cross-site")));
+		factoringGateViolations(FACTORING_SRC.replace(xs, "const crossSite = [];")).some((s) => s.includes("cross-site")));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

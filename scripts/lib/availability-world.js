@@ -77,7 +77,7 @@ function routeHead(method, p) {
 }
 
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange", "getJobTrackingCached", "getSheets",
-	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice"];
+	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice", "factoringRoutes"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"];
 const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "normalizeDriverName"];
 // Lifted by name: server-lift's closure walk misses a statement that starts the
@@ -349,6 +349,8 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
+		factoringRoutes: { annotateDashboard() {} },
 		getJobTrackingCached: async () => {
 			jt.reads++;
 			if (typeof jt.during === "function") {

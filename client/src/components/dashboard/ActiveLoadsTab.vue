@@ -183,7 +183,7 @@
             </div>
           </div>
           <!-- Factored loads (Triumph): Super Admin only, in lib/factoringStatus.js's words. -->
-          <FactoringControls v-if="auth.isSuperAdmin" :job="selectedJob" :load-id="loadIdValue" @changed="onFactoringChanged" />
+          <FactoringControls v-if="auth.isSuperAdmin" :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
           <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">

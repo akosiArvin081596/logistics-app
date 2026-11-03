@@ -140,7 +140,7 @@
             </div>
             <div v-if="autoActionResult" class="auto-result" :class="`auto-result--${autoActionResult.tone}`" :role="autoActionResult.tone === 'error' ? 'alert' : 'status'">{{ autoActionResult.msg }}</div>
             <!-- Factored loads (Triumph), in lib/factoringStatus.js's words. -->
-            <FactoringControls :job="selectedJob" :load-id="loadIdValue" @changed="onFactoringChanged" />
+            <FactoringControls :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
             <!-- A Draft Invoice press whose Gmail draft may be there: "Check Gmail"
                  searches for it, or (the fallback's drafts) asks a person. -->
             <div v-if="selectedInflight" class="auto-line auto-line--warn">
@@ -1017,14 +1017,14 @@ const inflightBusy = ref(false)
 const inflightResult = ref(null)
 const inflightAsk = ref(false)
 const inflightReason = ref('')
-watch(() => loadIdValue.value, () => { inflightResult.value = null; inflightAsk.value = false; inflightReason.value = '' })
+watch(() => loadRefValue.value, () => { inflightResult.value = null; inflightAsk.value = false; inflightReason.value = '' })
 async function checkGmail(answer = '') {
-  if (!auth.isSuperAdmin || !loadIdValue.value || inflightBusy.value) return
+  if (!auth.isSuperAdmin || !loadRefValue.value || inflightBusy.value) return
   const d = selectedJob.value && selectedJob.value._draftInflight
   inflightBusy.value = true; inflightResult.value = null
   try {
     const body = { invoiceId: d && d.invoiceId, ...(answer ? { answer, reason: reasonInput(inflightReason.value) } : {}) }
-    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/invoice-draft-inflight/resolve`, body)
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadRefValue.value)}/invoice-draft-inflight/resolve`, body)
     if (selectedJob.value) selectedJob.value = { ...selectedJob.value, _draftInflight: undefined }
     inflightAsk.value = false; inflightReason.value = ''
     inflightResult.value = { tone: 'ok', msg: r.found ? `Invoice #${r.invoiceId} is in Gmail: recorded as this load's draft.` : `Invoice #${r.invoiceId} is not in Gmail: its number was given up. You can draft again.` }

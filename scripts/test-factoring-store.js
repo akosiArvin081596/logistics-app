@@ -366,13 +366,17 @@ function checkResolveAndAnnotate(S) {
 // ------------------------------------------------------------------ §7
 function checkLockWriters() {
 	const c = checker();
-	const files = [path.join(ROOT, "server.js"), ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join(ROOT, "lib", f)),
-		...fs.readdirSync(path.join(ROOT, "scripts")).filter((f) => f.endsWith(".js") && !f.startsWith("test-")).map((f) => path.join(ROOT, "scripts", f))];
+	// The server as the scripts read it (scripts/lib/server-source.js, its route
+	// modules spliced in), then lib/ and scripts/.
+	const writes = (text) => (text.match(/locked_at\s*=\s*\?/g) || []).length;
 	const writers = [];
-	for (const f of files) {
-		const text = fs.readFileSync(f, "utf8");
-		const n = (text.match(/locked_at\s*=\s*\?/g) || []).length;
-		if (n) writers.push(`${path.relative(ROOT, f)}:${n}`);
+	const serverWrites = writes(require("./lib/server-source").serverSource());
+	if (serverWrites) writers.push(`the server:${serverWrites}`);
+	for (const dir of ["lib", "scripts"]) {
+		for (const f of fs.readdirSync(path.join(ROOT, dir)).filter((x) => x.endsWith(".js") && !x.startsWith("test-"))) {
+			const n = writes(fs.readFileSync(path.join(ROOT, dir, f), "utf8"));
+			if (n) writers.push(`${dir}/${f}:${n}`);
+		}
 	}
 	c.eq(writers, ["lib/factoring-store.js:1"], "§7 locked_at has one writer: handledOutside() (lockForUpload() joins it in PR T2)");
 	return c;
@@ -520,8 +524,8 @@ const ROUTE_MUTANTS = [
 	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
 	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
 		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
-	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", ...writeGuard, (req, res) => {\n",
-		"app.post(\"/api/factoring/loads/:loadKey/handled-outside\", ...writeGuard, (req, res) => {\n\t\t\tif (!markingOn) return res.status(404).json({ code: \"FEATURE_OFF\" });\n"],
+	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n",
+		"app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n\t\t\tif (!markingOn) return res.status(404).json({ code: \"FEATURE_OFF\" });\n"],
 ];
 let routeCaught = 0;
 for (const [name, from, to] of ROUTE_MUTANTS) {
