@@ -6552,6 +6552,21 @@ const ONBOARDING_DOCS = [
 	{ key: "substance_policy", name: "Substance Policy and Procedure", confidential: 0 },
 ];
 
+// --- Owner-operators (lib/owner-operator.js) ---
+// The eight tables and the two filed-by columns on expenses exist whatever the
+// flags (additive); nothing reads them, or the four flags, until their routes ship.
+const ownerOperator = require("./lib/owner-operator");
+db.exec(ownerOperator.OO_SCHEMA_SQL);
+for (const sql of ownerOperator.OO_EXPENSE_COLUMN_SQL) {
+	try { db.exec(sql); } catch { /* the column exists */ }
+}
+const OO_FLAGS = ownerOperator.ooFlagsFromEnv(process.env);
+const OWNER_OPERATOR_ONBOARDING_ENABLED = OO_FLAGS.onboarding;
+const OWNER_OPERATOR_LOAD_PAY_ENABLED = OO_FLAGS.loadPay;
+const OWNER_OPERATOR_SETTLEMENTS_ENABLED = OO_FLAGS.settlements;
+const OWNER_OPERATOR_ESCROW_ENABLED = OO_FLAGS.escrow;
+console.log(ownerOperator.ooFlagsStartupLine(OO_FLAGS));
+
 // --- Investor Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_applications (
@@ -18496,8 +18511,8 @@ function onboardingSigningStepState(userId, ob) {
 }
 
 // Helper: check if onboarding is complete and finalize. `req` is the request
-// that got here (the driver signing, or the admin recording a drug test), the
-// actor on a withheld-carrier audit row.
+// that got here (the driver signing, the admin recording a drug test, or an
+// emergency-contacts save by the driver or staff), the actor on a withheld-carrier audit row.
 async function checkAndCompleteOnboarding(userId, req = null) {
 	// The drivers_directory row added below carries the account's company name as
 	// its carrier, held to the month-end lock (accountDirectoryCarrier()), which
@@ -52120,8 +52135,8 @@ const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock",
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
-	// The automatic invoice drafts' notices too (the <auto-invoice-wiring> block).
-	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE] : types;
+	// The automatic invoice drafts' and C.H. Robinson's notices too (their wiring blocks).
+	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE, CHR_NOTICE_TYPE] : types;
 	return { sql: hidden.length ? `type NOT IN (${hidden.map(() => "?").join(",")})` : "1 = 1", params: [...hidden] };
 }
 
@@ -73743,6 +73758,56 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
 require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES, viewerGate: rateconViewGate });
+
+// <chr-wiring>
+// C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
+// No CHR connection exists, so nothing is sent. Its three switches (the settings example)
+// are read once and are off in a replica; off, nothing runs but the daily prune once the
+// tables exist. scripts/test-chr-wiring.js lifts this block.
+const CHR_NOTICE_TYPE = "chr-attention";
+const chrIntegration = require("./lib/chr-integration");
+// The Job Tracking view the recorder read last. Its rows stay here, read only by
+// resolveGeofencePoints(): lib/chr-*.js gets projections only.
+let chrSheetView = chrIntegration.projectView(null);
+const chr = chrIntegration.create({
+	db,
+	config: chrIntegration.chrConfig({
+		updatesEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_UPDATES_ENABLED ?? "").trim()),
+		sendEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_SEND_ENABLED ?? "").trim()),
+		locationEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LOCATION_ENABLED ?? "").trim()),
+		geofenceRadiusM: GEOFENCE_RADIUS,
+		// Read through its one spelling (lib/driver-instructions-runtime.js).
+		denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "",
+		replica: Boolean(REPLICA),
+	}),
+	readSheet: async () => {
+		chrSheetView = chrIntegration.projectView(liveJobTrackingView(await getJobTrackingCached()));
+		return chrSheetView.projections;
+	},
+	// The geofence's own rule: the row's coordinate cells, else load_coordinates
+	// under the Load ID as written.
+	stopPointsFor: (key) => {
+		const r = chrSheetView.rowOf.get(key);
+		return resolveGeofencePoints(r ? r.row : {}, chrSheetView.headers, r ? r.loadIdCell || key : key);
+	},
+	truckResolver: buildHaulTruckResolver,
+	deviceResolver: buildEldDeviceResolver,
+	instructionStopsFor: chrIntegration.instructionStopsReader(db),
+	logAudit,
+	// The page's live refresh: no payload, Super Admins' room only.
+	onChange: () => io.to("super-admin").emit("chr:changed"),
+	log: console,
+});
+chr.mount(app, { requireRole });
+if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
+	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
+}
+if (chr.jobs().prune && startsJob("C.H. Robinson prune (at boot, then daily)")) {
+	const chrPrune = () => { try { chr.prune(); } catch { console.error("[chr] prune failed"); } };
+	chrPrune();
+	setInterval(chrPrune, chr.pruneIntervalMs);
+}
+// </chr-wiring>
 
 // ============================================================
 // KPI BOT — nightly KPI snapshots, the admin KPI API and the weekly digest

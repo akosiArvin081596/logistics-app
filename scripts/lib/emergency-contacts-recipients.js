@@ -65,9 +65,10 @@ function campaignStates(db, campaign) {
 }
 
 // One entry per Driver account, by id: { id, enabled, onboarding (status or
-// null), allSigned, contacts, directoryStatus, address }. Works on a database
-// without the contacts table (every count 0) or without the onboarding tables.
-//   deps: { findDirectoryRowForDriver, onboardingDocCount }
+// null), allSigned, contacts, directoryStatus, address }. allSigned is the
+// server's signing-step rule: every one of the ONBOARDING_DOCS keys signed, no
+// other key counted. Works without the contacts table or the onboarding tables.
+//   deps: { findDirectoryRowForDriver, onboardingDocKeys }
 function driverFacts(db, deps) {
 	const userCols = columnsOf(db, "users");
 	const users = db.prepare(`SELECT id, driver_name, email${userCols.has("disabled_at") ? ", disabled_at" : ""} FROM users WHERE role = 'Driver' ORDER BY id`).all();
@@ -76,8 +77,14 @@ function driverFacts(db, deps) {
 		? countBy("SELECT user_id, COUNT(*) AS n FROM driver_emergency_contacts GROUP BY user_id") : new Map();
 	const onboarding = tableExists(db, "driver_onboarding")
 		? new Map(db.prepare("SELECT user_id, status FROM driver_onboarding").all().map((r) => [r.user_id, r.status])) : new Map();
-	const signed = tableExists(db, "onboarding_documents")
-		? countBy("SELECT user_id, COUNT(*) AS n FROM onboarding_documents WHERE signed = 1 GROUP BY user_id") : new Map();
+	const signed = new Map();
+	if (tableExists(db, "onboarding_documents")) {
+		for (const r of db.prepare("SELECT user_id, doc_key FROM onboarding_documents WHERE signed = 1").all()) {
+			if (!signed.has(r.user_id)) signed.set(r.user_id, new Set());
+			signed.get(r.user_id).add(r.doc_key);
+		}
+	}
+	const keys = Array.isArray(deps.onboardingDocKeys) ? deps.onboardingDocKeys : [];
 	const dirCols = columnsOf(db, "drivers_directory");
 	const dirRow = db.prepare(`SELECT ${dirCols.has("status") ? "status" : "'' AS status"}, ${dirCols.has("email") ? "email" : "'' AS email"} FROM drivers_directory WHERE id = ?`);
 	return users.map((u) => {
@@ -87,7 +94,7 @@ function driverFacts(db, deps) {
 			id: u.id,
 			enabled: String(u.disabled_at ?? "") === "",
 			onboarding: onboarding.get(u.id) || null,
-			allSigned: (signed.get(u.id) || 0) === deps.onboardingDocCount,
+			allSigned: keys.length > 0 && keys.every((k) => (signed.get(u.id) || new Set()).has(k)),
 			contacts: contacts.get(u.id) || 0,
 			directoryStatus: dir ? String(dir.status || "").trim().toLowerCase() : "",
 			address: usableAddress(u.email) || (dir ? usableAddress(dir.email) : null),

@@ -82,6 +82,11 @@ for (const name of ["PERSONAL_EXPENSE_DEDUCTIONS_ENABLED", "PAYOUT_RULES_V2_ENAB
 // B20 advance lines: an allowed flag the app reads in a default-off shape (the
 // generic checks below), and one that needs no first month.
 ok("BROKER_INVOICE_LINES_ENABLED needs no --from-month", !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, "BROKER_INVOICE_LINES_ENABLED"));
+// The owner-operator flags: rows in the task's own database and its own PDFs; nothing sent.
+for (const name of ["OWNER_OPERATOR_ONBOARDING_ENABLED", "OWNER_OPERATOR_LOAD_PAY_ENABLED", "OWNER_OPERATOR_SETTLEMENTS_ENABLED", "OWNER_OPERATOR_ESCROW_ENABLED"]) {
+	eq(`${name} is accepted`, refusal(name), null);
+	ok(`...and needs no --from-month`, !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, name));
+}
 for (const name of ALLOWED) eq(`allowlisted ${name} is accepted`, refusal(name), null);
 // The switches that reach outside this machine, by what they reach.
 const OUTBOUND = {

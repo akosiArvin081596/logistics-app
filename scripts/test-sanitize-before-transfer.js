@@ -60,6 +60,13 @@
 //   grades the column scrub on the artifact, --verify on a planted survivor,
 //   and the mutants M11 (the scrub dropped) and E1 (its assertion dropped).
 //
+// WHY IT GREW AN OWNER-OPERATOR HALF
+//
+//   An owner-operator's truck is his own, so its VIN and plate are personal
+//   where a company truck's are not; his names, the free text staff type about
+//   him and a toll notice's plate, number and OCR lines are too. Section 17
+//   grades them on the artifact, --verify on planted survivors, and mutants O1-O3.
+//
 // ⚠️ WHAT MAKES THIS TEST NON-VACUOUS, and what would quietly make it vacuous.
 //
 //   • collectLeaks() guards EVERY entry with has_(table, column). A column the
@@ -180,6 +187,32 @@ const FAKE = {
 	contactNameB: "Morgan Contactsample",
 	contactPhoneA: "+15125550161",
 	contactPhoneB: "+15125550162",
+};
+// An owner-operator (section 17). None is email- or SSN-shaped, so only the
+// column lists reach them; the company truck's VIN and plate are kept.
+const OO = {
+	truckVin: "1XKYDP9X8LJ385417",
+	truckPlate: "OOPLATE77",
+	appVin: "4V4NC9EH5LN227561",
+	appPlate: "APPLATE55",
+	ownerName: "Taylor Ownersample",
+	business: "Sampleton Freight Co",
+	linkReason: "Relinked after the Elmwood breakdown",
+	chargeLabel: "Lettering for the Cedarview cab",
+	chargeReason: "Paid at Birchfield Signs counter",
+	chargeVoid: "Entered twice by Oakmont desk",
+	lineLabel: "Toll TN-88317-XQ plate TOLLPL8",
+	useNote: "Claim CL-5521 Pinecrest",
+	useReason: "Deductible after the Pinecrest claim",
+	useVoid: "Wrong claim Maplehurst",
+	exitReason: "Stays with the Willowbank investor",
+	notice: "TN-88317-XQ",
+	tollPlate: "TOLLPL8",
+	tollDetails: "Registered owner Taylor Ownersample, 44 Notice Lane, Madeupville",
+	agency: "Example Toll Authority",
+	companyVin: "1FUJGHDV0CLBP8899",
+	companyPlate: "CO12345",
+	keptDetails: "Pump 4, diesel, 82.1 gal",
 };
 // The sha256 an invitation link is stored as (investor_invites.token_sha256).
 const INVITE_TOKEN_HASH = "1a2b3c4d".repeat(8);
@@ -333,6 +366,10 @@ const MUST_NOT_SURVIVE = [
 	FAKE.city, FAKE.zip,
 	// Emergency contacts (section 16).
 	FAKE.contactNameA, FAKE.contactNameB, FAKE.contactPhoneA, FAKE.contactPhoneB,
+	// Owner-operators (section 17).
+	OO.truckVin, OO.truckPlate, OO.appVin, OO.appPlate, OO.ownerName, OO.business, OO.linkReason, OO.chargeLabel,
+	OO.chargeReason, OO.chargeVoid, OO.lineLabel, OO.useNote, OO.useReason, OO.useVoid, OO.exitReason, OO.notice,
+	OO.tollPlate, OO.tollDetails,
 ];
 
 // The two evidence columns refresh-env.js deliberately KEEPS. Asserted so that
@@ -413,6 +450,16 @@ function seedDatabase(dbPath) {
 		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY, action TEXT, details TEXT, created_at TEXT);
 		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, recipient TEXT, subject TEXT, created_at TEXT);
 		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL, contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by INTEGER NOT NULL DEFAULT 0, updated_by INTEGER NOT NULL DEFAULT 0);
+		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT NOT NULL, vin TEXT DEFAULT '', license_plate TEXT DEFAULT '', owner_id INTEGER DEFAULT 0);
+		CREATE TABLE expenses (id INTEGER PRIMARY KEY, driver TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, date TEXT NOT NULL, receipt_details TEXT DEFAULT '');
+		CREATE TABLE owner_operator_applications (application_id INTEGER PRIMARY KEY, truck_vin TEXT NOT NULL DEFAULT '', truck_plate TEXT NOT NULL DEFAULT '', truck_plate_state TEXT NOT NULL DEFAULT '', registered_owner TEXT NOT NULL DEFAULT '', business_name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+		CREATE TABLE owner_operators (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE, business_name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_trucks (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, truck_id INTEGER NOT NULL, start_week_start TEXT NOT NULL, end_week_start TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_charges (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, kind TEXT NOT NULL, category TEXT NOT NULL, label TEXT NOT NULL, cents INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', voided_at TEXT NOT NULL DEFAULT '', void_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_settlement_lines (id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL, oo_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL DEFAULT '', label TEXT NOT NULL, cents INTEGER NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_escrow_uses (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, purpose TEXT NOT NULL, cents INTEGER NOT NULL, record_note TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL, voided_at TEXT NOT NULL DEFAULT '', void_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_toll_notices (expense_id INTEGER PRIMARY KEY, agency TEXT NOT NULL, agency_key TEXT NOT NULL, notice_number TEXT NOT NULL DEFAULT '', plate_or_transponder TEXT NOT NULL DEFAULT '', toll_date TEXT NOT NULL, toll_cents INTEGER NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE owner_operator_ledger_exits (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, item_kind TEXT NOT NULL, ref TEXT NOT NULL, reason TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TEXT NOT NULL);
 	`);
 
 	// super_admin starts with a forced password change pending: operator access
@@ -551,6 +598,27 @@ function seedDatabase(dbPath) {
 	const ec = db.prepare("INSERT INTO driver_emergency_contacts (user_id,position,contact_name,relationship,contact_phone,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?,?)");
 	ec.run(3, 1, FAKE.contactNameA, "Spouse", FAKE.contactPhoneA, "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", 3, 3);
 	ec.run(3, 2, FAKE.contactNameB, "Sibling", FAKE.contactPhoneB, "2026-10-30T12:00:00.000Z", "2026-10-30T12:00:00.000Z", 3, 3);
+
+	// An owner-operator (section 17): his own truck (id 2) beside a company truck
+	// (id 1), his application and profile, staff free text, and a scanned toll
+	// notice on receipt 2 beside an ordinary receipt 1.
+	const AT = "2026-11-02T15:00:00.000Z";
+	db.prepare("INSERT INTO trucks (id, unit_number, vin, license_plate) VALUES (?, ?, ?, ?)").run(1, "101", OO.companyVin, OO.companyPlate);
+	db.prepare("INSERT INTO trucks (id, unit_number, vin, license_plate) VALUES (?, ?, ?, ?)").run(2, "OO-9001-A", OO.truckVin, OO.truckPlate);
+	db.prepare("INSERT INTO expenses (id, driver, type, amount, date, receipt_details) VALUES (?, ?, ?, ?, ?, ?)").run(1, "Sam Driver", "Fuel", 301.66, "2026-11-08", OO.keptDetails);
+	db.prepare("INSERT INTO expenses (id, driver, type, amount, date, receipt_details) VALUES (?, ?, ?, ?, ?, ?)").run(2, "Sam Driver", "Toll", 23.75, "2026-11-18", OO.tollDetails);
+	db.prepare("INSERT INTO owner_operator_applications (application_id, truck_vin, truck_plate, truck_plate_state, registered_owner, business_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+		.run(7, OO.appVin, OO.appPlate, "TX", OO.ownerName, OO.business, AT);
+	db.prepare("INSERT INTO owner_operators (id, user_id, business_name, created_at) VALUES (?, ?, ?, ?)").run(1, 3, OO.business, AT);
+	db.prepare("INSERT INTO owner_operator_trucks (id, oo_id, truck_id, start_week_start, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(1, 1, 2, "2026-10-31", OO.linkReason, AT);
+	db.prepare("INSERT INTO owner_operator_charges (id, oo_id, kind, category, label, cents, reason, voided_at, void_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		.run(1, 1, "onboarding", "onboarding_ready", OO.chargeLabel, 25000, OO.chargeReason, AT, OO.chargeVoid, AT);
+	db.prepare("INSERT INTO owner_operator_settlement_lines (id, invoice_id, oo_id, kind, ref, label, cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, 99, 1, "receipt", "2", OO.lineLabel, -2375, AT);
+	db.prepare("INSERT INTO owner_operator_escrow_uses (id, oo_id, purpose, cents, record_note, reason, voided_at, void_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		.run(1, 1, "deductible", 100000, OO.useNote, OO.useReason, AT, OO.useVoid, AT);
+	db.prepare("INSERT INTO owner_operator_toll_notices (expense_id, agency, agency_key, notice_number, plate_or_transponder, toll_date, toll_cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+		.run(2, OO.agency, "example toll authority", OO.notice, OO.tollPlate, "2026-11-18", 2375, AT);
+	db.prepare("INSERT INTO owner_operator_ledger_exits (id, oo_id, item_kind, ref, reason, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(1, 1, "load", "qa-oo-2", OO.exitReason, "made.up.admin", AT);
 
 	db.close();
 }
@@ -2054,6 +2122,94 @@ function extractFn(src, name) {
 		} else {
 			check("E1: is caught", false, "not evaluated");
 		}
+	}
+
+	// =======================================================================
+	section("17. Owner-operators — his truck's VIN and plate, his names, staff free text and toll notices never leave");
+	{
+		const Database = require("better-sqlite3");
+		const db = openDb(artifactDb);
+		const get = (sql) => { try { return db.prepare(sql).get(); } catch { return null; } };
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+		try {
+			const app = get("SELECT truck_vin, truck_plate, truck_plate_state, registered_owner, business_name FROM owner_operator_applications WHERE application_id = 7");
+			check("his application's VIN and plate are emptied, its plate state kept", same(app && [app.truck_vin, app.truck_plate, app.truck_plate_state], ["", "", "TX"]), JSON.stringify(app));
+			check("...its registered owner and business name read REDACTED", same(app && [app.registered_owner, app.business_name], ["REDACTED", "REDACTED"]), JSON.stringify(app));
+			const his = get("SELECT vin, license_plate FROM trucks WHERE id = 2");
+			check("his own truck's VIN and plate are emptied", same(his, { vin: "", license_plate: "" }), JSON.stringify(his));
+			const company = get("SELECT vin, license_plate FROM trucks WHERE id = 1");
+			check("a company truck's VIN and plate are kept", same(company, { vin: OO.companyVin, license_plate: OO.companyPlate }), JSON.stringify(company));
+			const text = [
+				get("SELECT business_name v FROM owner_operators WHERE id = 1"),
+				get("SELECT reason v FROM owner_operator_trucks WHERE id = 1"),
+				get("SELECT label v FROM owner_operator_charges WHERE id = 1"),
+				get("SELECT reason v FROM owner_operator_charges WHERE id = 1"),
+				get("SELECT void_reason v FROM owner_operator_charges WHERE id = 1"),
+				get("SELECT label v FROM owner_operator_settlement_lines WHERE id = 1"),
+				get("SELECT record_note v FROM owner_operator_escrow_uses WHERE id = 1"),
+				get("SELECT reason v FROM owner_operator_escrow_uses WHERE id = 1"),
+				get("SELECT void_reason v FROM owner_operator_escrow_uses WHERE id = 1"),
+				get("SELECT reason v FROM owner_operator_ledger_exits WHERE id = 1"),
+			].map((r) => (r ? r.v : null));
+			check("every owner-operator name and free-text column reads REDACTED", text.every((v) => v === "REDACTED"), JSON.stringify(text));
+			const notice = get("SELECT agency, notice_number, plate_or_transponder, toll_cents FROM owner_operator_toll_notices WHERE expense_id = 2");
+			check("a toll notice's plate and number are emptied; its agency and amount kept", same(notice, { agency: OO.agency, notice_number: "", plate_or_transponder: "", toll_cents: 2375 }), JSON.stringify(notice));
+			const details = [get("SELECT receipt_details v FROM expenses WHERE id = 2"), get("SELECT receipt_details v FROM expenses WHERE id = 1")].map((r) => (r ? r.v : null));
+			check("the toll notice receipt's OCR lines are emptied; another receipt's are kept", same(details, ["", OO.keptDetails]), JSON.stringify(details));
+		} finally { db.close(); }
+
+		// Planted survivors on the clean artifact, as a scrub that stopped matching would leave them.
+		const planted = path.join(readDir, "planted-owner-operator.db");
+		fs.copyFileSync(artifactDb, planted);
+		{
+			const pdb = new Database(planted);
+			try {
+				pdb.prepare("UPDATE trucks SET vin = ? WHERE id = 2").run("1XKYDP9X8LJ385499");
+				pdb.prepare("UPDATE expenses SET receipt_details = ? WHERE id = 2").run("Registered owner Plantedname Example");
+				pdb.prepare("UPDATE owner_operator_applications SET registered_owner = ? WHERE application_id = 7").run("Plantedname Example");
+			} catch { /* no table: the checks below fail by name */ }
+			finally { pdb.close(); }
+		}
+		const VIN_RE = /1 owner-operator truck VIN\(s\) survived in trucks\.vin on an owner-operator's row/;
+		const DETAILS_RE = /1 toll notice OCR text\(s\) survived in expenses\.receipt_details on an owner-operator's row/;
+		const OWNER_RE = /1 registered owner name\(s\) survived un-replaced in owner_operator_applications\.registered_owner/;
+		const v = run(["--verify", planted]);
+		check("--verify refuses each planted survivor, naming its column", v.code === 1 && VIN_RE.test(v.out) && DETAILS_RE.test(v.out) && OWNER_RE.test(v.out),
+			v.code === 1 ? [VIN_RE, DETAILS_RE, OWNER_RE].map((re) => re.test(v.out)).join(",") : `exit ${v.code}`);
+
+		// O-series mutants: each edit must match once and still parse; a sanitize mutant
+		// must be refused by name, a verify mutant must stop naming the planted survivor.
+		const ooMutant = (id, label, from, to, mode, expect) => {
+			const dir = path.join(ROOT, "mutants", id);
+			fs.mkdirSync(dir, { recursive: true });
+			const src = fs.readFileSync(SCRIPT, "utf8");
+			const hits = src.split(from).length - 1;
+			check(`${id}: ${label} — actually mutated the shipped source`, hits === 1, hits === 1 ? "" : `anchor matched ${hits} time(s)`);
+			if (hits !== 1) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			const script = path.join(dir, "refresh-env.js");
+			fs.writeFileSync(script, src.replace(from, () => to));
+			try { fs.symlinkSync(NODE_MODULES, path.join(dir, "node_modules"), "dir"); } catch {}
+			const parsed = spawnSync(process.execPath, ["--check", script], { encoding: "utf8" });
+			check(`${id}: ${label} — the mutant still parses`, parsed.status === 0, parsed.status === 0 ? "" : "the mutation broke the syntax");
+			if (parsed.status !== 0) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			if (mode === "sanitize") {
+				const out = path.join(dir, "mutant.db.gz");
+				const r = runScript(script, ["--sanitize-only", "--from", snapshot, "--emit", out, "--telemetry-days", "45"], dir);
+				check(`${id}: ${label} — is caught, by name`, r.code !== 0 && !fs.existsSync(out) && expect.test(r.out), `exit ${r.code}, artifact ${fs.existsSync(out) ? "EMITTED" : "absent"}`);
+			} else {
+				const m = runScript(script, ["--verify", planted], dir);
+				check(`${id}: ${label} — is caught: its --verify no longer names the planted survivor`, !(m.code === 1 && expect.test(m.out)), `exit ${m.code}`);
+			}
+		};
+		ooMutant("O1", "his own truck's VIN and plate scrub dropped",
+			`if (tableExists(ref)) secrets += setCols(t, { [c]: "" }, where);`, `if (false) secrets += setCols(t, { [c]: "" }, where);`,
+			"sanitize", /owner-operator truck (VIN|plate)\(s\) survived in trucks\.(vin|license_plate)/);
+		ooMutant("O2", "the owner-operator-row assertion dropped",
+			"for (const [t, c, ref, where, label] of OWNER_OPERATOR_LINKED) {", "for (const [t, c, ref, where, label] of []) {",
+			"verify", VIN_RE);
+		ooMutant("O3", "the owner-operator free-text scrub dropped",
+			"for (const [t, c] of OWNER_OPERATOR_TEXT) secrets +=", "for (const [t, c] of []) secrets +=",
+			"sanitize", /registered owner name\(s\) survived un-replaced in owner_operator_applications\.registered_owner/);
 	}
 
 	// =======================================================================
