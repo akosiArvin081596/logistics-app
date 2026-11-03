@@ -255,9 +255,9 @@ section("§5  no network");
 const SRC = fs.readFileSync(SCRIPT, "utf8");
 const requires = [...SRC.matchAll(/require\(((?:[^()]|\([^()]{0,100}\)){1,160})\)/g)].map((m) => m[1].trim()).sort();
 eq(requires, [
-	"\"../lib/app-time\"", "\"../lib/auto-invoice-ledger\"", "\"../lib/auto-invoice-rules\"", "\"./lib/server-lift\"", "\"./lib/server-source\"", "\"fs\"", "\"path\"",
+	"\"../lib/app-time\"", "\"../lib/auto-invoice-ledger\"", "\"../lib/auto-invoice-rules\"", "\"../lib/factoring-store\"", "\"./lib/server-lift\"", "\"./lib/server-source\"", "\"fs\"", "\"path\"",
 	"path.join(ROOT, \"node_modules\", \"better-sqlite3\")",
-].sort(), "§5 it loads only fs, path, the rules, the ledger, app-time, server-lift, server-source and better-sqlite3");
+].sort(), "§5 it loads only fs, path, the rules, the ledger, the factoring marker, app-time, server-lift, server-source and better-sqlite3");
 ok(!/\bfetch\s*\(|googleapis|https?:\/\/|\.env\b/.test(SRC), "§5 no fetch, Google client, URL or settings file");
 const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
 eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]).sort(), ["\"./auto-invoice-rules\"", "\"./broker-invoice\"", "\"./factoring-store\""],
@@ -326,6 +326,28 @@ section("§6  the shadow-week report (no --retro)");
 	const empty = cli(`--db=${DB_FILE}`, "--since=2026-10-20", "--until=2026-10-26");
 	ok(empty.status === 0 && /no shadow log/.test(empty.stdout), "§6 a database with no shadow log says so");
 	eq(listing(), before6, "§6 nothing written");
+}
+
+// ------------------------------------------------------------------ §7
+section("§7  factored loads (Triumph) and Triumph's draft rows");
+{
+	// The retro copy again, with one load marked factored (the marker as
+	// lib/factoring-store.js keeps it) and a Triumph submission's draft row.
+	const F_DB = path.join(TMP, "factored.db");
+	fs.copyFileSync(DB_FILE, F_DB);
+	const fdb = new Database(F_DB);
+	fdb.exec("CREATE TABLE load_factoring (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', factored INTEGER NOT NULL, source TEXT NOT NULL, set_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+	fdb.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-0004', 'LD-TEST-0004', 1, 'script', '2026-10-03T12:00:00Z', '2026-10-03T12:00:00Z')").run();
+	fdb.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_at, edited, edited_fields) VALUES ('LD-TEST-0001', '10042026-9', '', '', 'triumph', '2026-10-04T15:00:00Z', 0, '')").run();
+	fdb.close();
+	const ro = new Database(F_DB, { readonly: true, fileMustExist: true });
+	const f = report.buildRetro({ values: VALUES, db: ro, uploadsDir: UPLOADS, zone, helpers, today: "2026-10-20" });
+	ro.close();
+	const by = Object.fromEntries(f.loads.map((l) => [l.load, l]));
+	eq([by["...0004"].verdict, by["...0004"].code, by["...0004"].ifConfirmed], ["WOULD_SKIP", "LOAD_FACTORED", { verdict: "WOULD_SKIP", code: "LOAD_FACTORED" }],
+		"§7 FAILS ON THE OLD CODE: retro: a factored load is WOULD_SKIP LOAD_FACTORED, as the job judges it");
+	eq([f.verdicts.WOULD_ATTEMPT.count, f.verdicts.WOULD_SKIP.reasons], [0, { LOAD_FACTORED: 1 }], "§7 FAILS ON THE OLD CODE: ...so it leaves WOULD_ATTEMPT");
+	eq([by["...0001"].compare, f.buttonDrafts.inWindow, f.buttonDrafts.loads], ["A", 5, 5], "§7 FAILS ON THE OLD CODE: a Triumph row is no button draft: the comparison and the window's count are as without it");
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
