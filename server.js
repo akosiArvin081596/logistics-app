@@ -153,6 +153,8 @@ const receiptFiles = require("./lib/receipt-files");
 // and the copy (photos without metadata).
 const chatFiles = require("./lib/chat-files");
 const fuelModel = require("./lib/fuel-model");
+// The fuel trip plan's "picked up": the ELD or the geofence put the truck at the shipper.
+const fuelPickupArrival = require("./lib/fuel-pickup-arrival");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
@@ -63394,8 +63396,9 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
 
 		// The load's Job Tracking row. Hoisted out of the dispatcher branch because
-		// EVERY path needs it now: the status decides whether the run to the shipper
-		// is still ahead of the truck, and therefore whether its fuel counts.
+		// EVERY path needs it now: the status, with the truck's arrival at the
+		// shipper, decides whether the run to the shipper is still ahead of the
+		// truck, and therefore whether its fuel counts.
 		// getJobTrackingCached() is the 60 s cache, so this is not a new sheet read.
 		const jt = await getJobTrackingCached();
 		const jtHeaders = jt.headers || [];
@@ -63407,7 +63410,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			: null;
 		const statusCol = findCol(jtHeaders, /^status$/i) || findCol(jtHeaders, /status/i);
 		const loadStatus = jtRow && statusCol ? String(jtRow[statusCol] || "").trim() : "";
-		const pickedUp = fuelModel.isPickedUp(loadStatus);
+		const statusPickedUp = fuelModel.isPickedUp(loadStatus);
 
 		let truck = null;
 		if (isDriver) {
@@ -63443,7 +63446,8 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const newest = vehicleId ? db.prepare(`
 			SELECT latitude, longitude, fuel_pct, odometer, location_date_ms FROM routemate_telemetry
 			WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vehicleId) : null;
-		const latest = newest && !eldPosition.fixPredatesLink(newest.location_date_ms, eldDeviceLinkedSinceMs(truck && truck.id, vehicleId)) ? newest : null;
+		const linkedSinceMs = eldDeviceLinkedSinceMs(truck && truck.id, vehicleId);
+		const latest = newest && !eldPosition.fixPredatesLink(newest.location_date_ms, linkedSinceMs) ? newest : null;
 		const fixFresh = latest && latest.location_date_ms
 			&& Date.now() - latest.location_date_ms < 6 * 60 * 60 * 1000
 			&& Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude);
@@ -63474,6 +63478,10 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const dest = { latitude: lc.dest_lat, longitude: lc.dest_lng };
 		const pickup = Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
 			? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null;
+		// The status alone can run ahead of the truck, so the ELD or the geofence must
+		// also have put it at the shipper in this run (lib/fuel-pickup-arrival.js).
+		const pickedUp = statusPickedUp && !!fuelPickupArrival.shipperArrival({ db, loadId, vehicleId, pickup, linkedSinceMs,
+			radiusM: GEOFENCE_RADIUS, maxSpeedMps: GEOFENCE_ARRIVE_MAX_SPEED_MPS, nowMs: Date.now() });
 		// Post-pickup the approach leg is zero BY DEFINITION; the status gate is what
 		// stops a phantom second leg being added to a truck already loaded.
 		const planApproach = fuelModel.shouldPlanApproach({ fixFresh, pickedUp, hasPickup: !!pickup });
