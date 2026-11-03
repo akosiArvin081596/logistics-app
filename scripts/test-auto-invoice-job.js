@@ -1259,9 +1259,12 @@ async function main() {
 }
 
 // ------------------------------------------------------------------ factored loads
-const factoringStore = require(path.join(ROOT, "lib", "factoring-store.js"));
+// The marker as lib/factoring-store.js keeps it (a tree before it gets the same
+// columns, so its job's run fails by name).
+const factoringStore = optional(path.join(ROOT, "lib", "factoring-store.js"));
 const markFactored = (w, id) => {
-	factoringStore.ensureSchema(w.db);
+	if (factoringStore) factoringStore.ensureSchema(w.db);
+	else w.db.exec("CREATE TABLE IF NOT EXISTS load_factoring (load_key TEXT PRIMARY KEY, load_id TEXT NOT NULL DEFAULT '', factored INTEGER NOT NULL, source TEXT NOT NULL, set_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
 	w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
 		.run(rules.loadKey(id), id, new Date(w.now).toISOString(), new Date(w.now).toISOString());
 };

@@ -182,6 +182,11 @@ eq(failed, false, "§4 a claim that isn't working never reaches the mint");
 	s.prepare("INSERT INTO load_factoring (load_key) VALUES ('ld-test-0022')").run();
 	L.transition(s, "ld-test-0022", { from: ["working"], owner: "w", patch: { invoice_id: "", stage: "" }, nowIso: T0 });
 	eq(L.reserveNumber(s, "ld-test-0022", "w", opts), { ok: false, reason: "factored" }, "§4 a marker it can't read as 0 or 1 refuses too (fail closed)");
+	s.exec("DROP TABLE load_factoring; CREATE TABLE made_up_gone (load_key TEXT); CREATE VIEW load_factoring AS SELECT load_key, 1 AS factored FROM made_up_gone; DROP TABLE made_up_gone");
+	let threw = false;
+	try { L.reserveNumber(s, "ld-test-0022", "w", opts); } catch { threw = true; }
+	eq([threw, L.reserveNumber(s, "ld-test-0022", "w", opts)], [false, { ok: false, reason: "factored" }], "§4 FAILS ON THE OLD CODE: a marker that throws when read: no number, no throw (read as factored)");
+	eq(ms.calls.length, 2, "§4 ...and the sequence was called only for the two loads not factored");
 	s.close();
 }
 

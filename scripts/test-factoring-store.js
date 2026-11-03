@@ -30,6 +30,10 @@ const Module = require("module");
 
 const ROOT = path.join(__dirname, "..");
 const STORE_FILE = path.join(ROOT, "lib", "factoring-store.js");
+if (!fs.existsSync(STORE_FILE)) {
+	console.log("FAIL  lib/factoring-store.js is missing: the marker and its checks don't exist");
+	process.exit(1);
+}
 const STORE_SRC = fs.readFileSync(STORE_FILE, "utf8");
 const ledger = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
@@ -126,6 +130,11 @@ function checkSchema(S) {
 	threw = false;
 	try { S.isFactored(closed, "LD-TEST-0001"); } catch { threw = true; }
 	c.ok(threw, "§1 a marker that can't be read throws, never answers false");
+	const view = new Database(":memory:");
+	view.exec("CREATE TABLE made_up_gone (load_key TEXT); CREATE VIEW load_factoring AS SELECT load_key, 1 AS factored FROM made_up_gone; DROP TABLE made_up_gone");
+	threw = false;
+	try { S.isFactored(view, "LD-TEST-0001"); } catch { threw = true; }
+	c.ok(threw, "§1 a view of that name that can't be read throws too, never reads as no marker");
 	return c;
 }
 
@@ -455,6 +464,7 @@ section("§8  mutants: each rule removed, and a case catches it");
 const MUTANTS = [
 	["isFactored() answers false on a broken marker", "return rowFactored(markerFor(db, key));", "try { return rowFactored(markerFor(db, key)); } catch { return false; }", checkSchema],
 	["a value that isn't 0 or 1 read as not factored", "Boolean(row) && Number(row.factored) !== 0", "Boolean(row) && row.factored === 1", checkSchema],
+	["a view of that name read as no marker", "WHERE type IN ('table', 'view') AND name = ?", "WHERE type = 'table' AND name = ?", checkSchema],
 	["mark: no lock check", "const row = markerFor(db, k);\n\t\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (autoClaimWorking",
 		"const row = markerFor(db, k);\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (autoClaimWorking", checkMark],
 	["mark: the auto job's working claim ignored", "if (autoClaimWorking(db, k)) return refusal(\"AUTO_INVOICE_IN_FLIGHT\");", "", checkMark],

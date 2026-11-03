@@ -393,7 +393,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 
 		// The Draft Invoice button's in-flight rows (lib/factoring-store.js): record()
 		// touches one only when told to (settleInflight), inside its own write.
-		require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(w.db);
+		w.db.exec(`CREATE TABLE IF NOT EXISTS invoice_draft_inflight (load_key TEXT NOT NULL, load_id TEXT NOT NULL DEFAULT '', invoice_id TEXT NOT NULL,
+			path TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (load_key, invoice_id))`);
 		const inflight = () => w.db.prepare("SELECT load_key, invoice_id FROM invoice_draft_inflight ORDER BY invoice_id").all();
 		const putInflight = w.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES ('ld-test-0001', 'LD-TEST-0001', ?, 'imap', 'in_flight', '2026-10-28T12:00:00Z', '2026-10-28T12:00:00Z')");
 		putInflight.run("10282026-7");
