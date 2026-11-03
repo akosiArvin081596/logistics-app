@@ -67,28 +67,32 @@
 //       covers today; an unchecked confirmation whose load was since
 //       reassigned no longer counts
 //
-// The time-off ELD check (B), with DRIVER_TIME_OFF_ELD_CHECK_ENABLED on, on
+// The time-off ELD check, with DRIVER_TIME_OFF_ELD_CHECK_ENABLED on, on
 // made-up trucks T1 and T2 (scripts/lib/availability-world.js eldFixtures()):
-//   §15 a run: one row per finished day, final at d + 3, one system audit row per
-//       time-off row (no reason text); a second run writes no second audit row
-//       (L10) and never touches a final row
+//   §15 a run: one row per finished day, final at d + 3, rule version 2, one
+//       system audit row per time-off row (no reason text); a second run writes
+//       no second audit row and never touches a final row; a row that can't be
+//       judged waits for the next run while the others are judged
 //   §16 notices: one for a newly Not-confirmed day, none for a load staff
-//       confirmed, one follow-up when a told day changes, never a third; late
-//       pings change only days not yet final; the explanation's loads
-//   §17 the 90-day purge (D18): miles and times removed, the verdict kept in the
-//       row and its audit row, the day shown "ELD results are kept 90 days"
-//   §18 who sees what: eldDays and eldSummary for Super Admin and Dispatcher;
-//       403 for a Driver and an Investor on the staff route; the driver's own
-//       answers carry `eldChecked` only
+//       confirmed, one follow-up when a told day changes (to Unclear here),
+//       never a third; late pings change only days not yet final; the
+//       explanation's loads
+//   §17 the 90-day purge: miles and times removed, the verdict kept in the row
+//       and its audit row, the day shown "ELD results are kept 90 days"; a day
+//       that never became final (a cancelled row's, or left while the check was
+//       off) is purged 90 days after it was last judged, and never judged again
+//   §18 who sees what: eldDays and eldSummary for Super Admin and Dispatcher, a
+//       day not over yet "Upcoming"; 403 for a Driver and an Investor on the
+//       staff route; the driver's own answers carry `eldChecked` only; results
+//       that can't be read leave the staff list answering, with no ELD keys
 //   §19 closed months: a month closing between the plan and its write is never
-//       written (N-L1); a backdated row in a closed month writes nothing and
-//       shows "Not checked (month closed)", whatever settlement_grace_days says
-//       (L4); a waiting day its month closes on shows the same
+//       written; a backdated row in a closed month writes nothing and shows
+//       "Not checked (month closed)", whatever settlement_grace_days says; a
+//       waiting day its month closes on shows the same
 //   §20 his own app activity counts, staff acting for him does not; with two
 //       Driver accounts or none the check is skipped and noted; another role's
 //       account under his name changes nothing
-//   §21 "Confirmed (no ELD data)": no truck held, no device linked (the owner's
-//       correction of 2026-10-31)
+//   §21 "Confirmed (no ELD data)": no truck held, no device linked
 //   §22 the 06:00 tick and its marker; a failed run leaves the marker
 //
 // A driver's request (plan B Revision 2, PR 4; §1 also gains the five columns
@@ -995,9 +999,9 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		parkedT1(w);
 		const id = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-09")));
 		const res = await runCheck(w);
-		eq("§15.1 one row per finished day, each Confirmed (parked), final, rule version 1, on T1",
+		eq("§15.1 one row per finished day, each Confirmed (parked), final, rule version 2, on T1",
 			dayRows(w, id).map((d) => [d.day, d.state, d.reason, !!d.final_at, d.rule_version, d.truck_ids]),
-			["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"].map((d) => [d, "confirmed", "parked", true, 1, "[21]"]));
+			["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"].map((d) => [d, "confirmed", "parked", true, 2, "[21]"]));
 		eq("§15.2 the run's counts", [res.days, res.confirmed, res.notConfirmed, res.requested, res.checking, res.notices], [5, 5, 0, 0, 0, 0]);
 		const audits = w.audits("driver_time_off_eld_check");
 		eq("§15.3 one audit row, as the system, on the driver", audits.map((a) => [a.user_id, a.username, a.role, a.entity, a.entity_id]), [[0, "system", "system", "driver", String(DIR.hollis)]]);
@@ -1011,7 +1015,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		await runCheck(w);
 		eq("§15.6 Oct 12 final, Oct 13 and 14 not yet; run twice they are evaluated twice", dayRows(w, id2).map((d) => [d.day, !!d.final_at, d.evaluations]),
 			[["2026-10-12", true, 1], ["2026-10-13", false, 2], ["2026-10-14", false, 2]]);
-		eq("§15.7 L10: the unchanged second run writes no second audit row for it", w.audits("driver_time_off_eld_check").filter((a) => a.details.startsWith("off 2026-10-12")).length, 1);
+		eq("§15.7 the unchanged second run writes no second audit row for it", w.audits("driver_time_off_eld_check").filter((a) => a.details.startsWith("off 2026-10-12")).length, 1);
 		ok("§15.8 no position stored: the table has no latitude or longitude column",
 			!w.db.prepare("PRAGMA table_info(driver_time_off_days)").all().some((c) => /lat|lng|lon/i.test(c.name)));
 		// PR 4: only approved time off is judged. His own requests over finished days,
@@ -1030,6 +1034,27 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const panel = await list(w, DIR.hollis);
 		const keysOf = (id) => { const r = panel.body.rows.find((x) => x.id === id); return r ? ["eldDays", "eldSummary"].filter((k) => k in r) : null; };
 		eq("§15.11 ...and staff see ELD results on the approved one only", [keysOf(waiting), keysOf(declined), keysOf(approved)], [[], [], ["eldDays", "eldSummary"]]);
+
+		// One row whose stored results can't be read (a made-up read failure, injected for its id only).
+		const e = await eldWorld();
+		parkedT1(e);
+		const bad = rowId(await create(e, DIR.hollis, vacation("2026-10-05", "2026-10-06")));
+		const good = rowId(await create(e, DIR.hollis, vacation("2026-10-08", "2026-10-09")));
+		const prepare = e.db.prepare.bind(e.db);
+		e.db.prepare = (sql) => {
+			const st = prepare(sql);
+			if (!/FROM driver_time_off_days WHERE availability_id = \?/.test(sql)) return st;
+			const all = st.all.bind(st);
+			st.all = (rowIdArg, ...rest) => { if (rowIdArg === bad) throw new Error("made-up read failure"); return all(rowIdArg, ...rest); };
+			return st;
+		};
+		let isolated = null;
+		try { isolated = await runCheck(e); } finally { e.db.prepare = prepare; }
+		eq("§15.12 a row that can't be judged is counted and logged, and waits for the next run; the other row is judged",
+			[isolated && isolated.rowErrors, dayRows(e, bad).length, dayRows(e, good).map((d) => d.state), e.logs.some((l) => l.includes(`time-off row ${bad} not judged this run`))],
+			[1, 0, ["confirmed", "confirmed"], true]);
+		await runCheck(e);
+		eq("§15.13 ...and the next run judges it", dayRows(e, bad).map((d) => d.state), ["confirmed", "confirmed"]);
 	});
 
 	section("§16 notices, follow-ups and late pings");
@@ -1058,8 +1083,8 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const before12 = dayRows(w, id).find((d) => d.day === "2026-10-12");
 		await runCheck(w);
 		n = eldNotices(w);
-		eq("§16.4 the late break: Oct 13 now Requested (device_changed_vehicle); one follow-up in one notice, with Oct 14 newly told",
-			[d13().state, d13().reason, n.length, n[1] && n[1].title, n[1] && n[1].body.includes("Update: Oct 13 now reads Requested"), n[1] && n[1].body.includes("Oct 14: the ELD on T1 may be in another vehicle")],
+		eq("§16.4 the late break: Oct 13 now Unclear (device_changed_vehicle); one follow-up in one notice, with Oct 14 newly told",
+			[d13().state, d13().reason, n.length, n[1] && n[1].title, n[1] && n[1].body.includes("Update: Oct 13 now reads Unclear"), n[1] && n[1].body.includes("Oct 14: the ELD on T1 may be in another vehicle")],
 			["no_data", "device_changed_vehicle", 2, "Time off not confirmed: Hollis Renner (Oct 11 – Oct 14)".replace("not confirmed", "can't be checked"), true, true]);
 		const after12 = dayRows(w, id).find((d) => d.day === "2026-10-12");
 		eq("§16.5 the final Oct 12 is untouched by its late readings", [after12.state, after12.evaluated_at, after12.evaluations], [before12.state, before12.evaluated_at, before12.evaluations]);
@@ -1080,7 +1105,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§16.7 a day under a load staff confirmed: Not confirmed (confirmed_load), and no notice", [s12.state, s12.explanation, s12.load_ids, eldNotices(w).length - before], ["not_confirmed", "confirmed_load", "[\"7101\"]", 0]);
 	});
 
-	section("§17 the 90-day purge (D18)");
+	section("§17 the 90-day purge");
 	await R.guard("§17", async () => {
 		const w = await eldWorld();
 		parkedT1(w);
@@ -1103,6 +1128,42 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const shown = g.body && g.body.rows && g.body.rows[0].eldDays.find((d) => d.day === "2026-10-05");
 		eq("§17.5 staff see that day as \"ELD results are kept 90 days\", not \"Not checked\", with nothing else", shown, { day: "2026-10-05", state: "purged", label: "ELD results are kept 90 days" });
 		eq("§17.6 a second purge removes nothing", w.api.purgeTimeOffEldResults(w.clock.ms), 0);
+
+		// Days that never become final: Oct 13 and 14 are not final yet on Oct 15 (final from d + 3).
+		const ago = (days) => new Date(w.clock.ms - days * DAYMS).toISOString();
+		const c = await eldWorld();
+		parkedT1(c);
+		const cid = rowId(await create(c, DIR.hollis, vacation("2026-10-13", "2026-10-14")));
+		await runCheck(c);
+		await cancel(c, cid);
+		c.db.prepare("UPDATE driver_time_off_days SET evaluated_at = ?, miles = 1.5, first_move_ms = 1, last_move_ms = 2 WHERE availability_id = ? AND day = '2026-10-13'").run(ago(91), cid);
+		c.db.prepare("UPDATE driver_time_off_days SET evaluated_at = ? WHERE availability_id = ? AND day = '2026-10-14'").run(ago(89), cid);
+		const removedUnfinal = c.api.purgeTimeOffEldResults(c.clock.ms);
+		const [c13, c14] = dayRows(c, cid);
+		eq("§17.7 a cancelled row's day that never became final, last judged 91 days ago: its miles and times are removed, its verdict stays; one last judged 89 days ago keeps them",
+			[removedUnfinal, c13.final_at, c13.miles, c13.samples, c13.first_move_ms, c13.last_move_ms, !!c13.purged_at, c13.state, c13.reason, c14.samples > 0, c14.purged_at],
+			[1, null, 0, 0, null, null, true, "confirmed", "parked", true, null]);
+		const off = await W.startWorld();
+		W.eldFixtures(off.db);
+		const oid = rowId(await create(off, DIR.hollis, vacation("2026-10-05", "2026-10-05")));
+		off.db.prepare(`INSERT INTO driver_time_off_days (availability_id, directory_id, day, state, reason, miles, samples, first_move_ms, rule_version, first_evaluated_at, evaluated_at)
+			VALUES (?, ?, '2026-10-05', 'pending', 'dark_waiting', 0.5, 12, 7, 2, ?, ?)`).run(oid, DIR.hollis, ago(95), ago(91));
+		eq("§17.8 with the check's flag off, a day left waiting and last judged 91 days ago is purged too, its verdict kept",
+			[await off.api.runTimeOffEldCheck({ nowMs: off.clock.ms }), off.api.purgeTimeOffEldResults(off.clock.ms),
+				Object.values(off.db.prepare("SELECT miles, samples, first_move_ms, state, reason, purged_at IS NOT NULL AS purged FROM driver_time_off_days").get())],
+			[{ skipped: "off" }, 1, [0, 0, null, "pending", "dark_waiting", 1]]);
+		const live = await eldWorld();
+		parkedT1(live);
+		const lid = rowId(await create(live, DIR.hollis, vacation("2026-10-13", "2026-10-14")));
+		await runCheck(live);
+		live.db.prepare("UPDATE driver_time_off_days SET evaluated_at = ? WHERE availability_id = ? AND day = '2026-10-13'").run(ago(91), lid);
+		const purgedLive = live.api.purgeTimeOffEldResults(live.clock.ms);
+		await runCheck(live);
+		const [l13, l14] = dayRows(live, lid);
+		eq("§17.9 a day purged before it became final is never judged again: no miles or times come back; the day after it is judged as before",
+			[purgedLive, l13.evaluations, l13.samples, !!l13.purged_at, l14.evaluations, l14.samples > 0], [1, 1, 0, true, 2, true]);
+		const shownLive = (await list(live, DIR.hollis)).body.rows[0].eldDays.find((d) => d.day === "2026-10-13");
+		eq("§17.10 ...and staff see it as \"ELD results are kept 90 days\"", shownLive, { day: "2026-10-13", state: "purged", label: "ELD results are kept 90 days" });
 	});
 
 	section("§18 who sees the results");
@@ -1114,8 +1175,8 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const sa = await list(w, DIR.hollis);
 		const disp = await list(w, DIR.hollis, USERS.disp);
 		const days = (r) => r.body.rows[0].eldDays.map((d) => [d.day, d.state, d.label]);
-		const expected = [["2026-10-13", "confirmed", "Confirmed"], ["2026-10-14", "confirmed", "Confirmed"], ["2026-10-15", "upcoming", "Requested"], ["2026-10-16", "upcoming", "Requested"], ["2026-10-17", "upcoming", "Requested"]];
-		eq("§18.1 Super Admin and Dispatcher get eldDays per row", [sa.status, days(sa), disp.status, days(disp)], [200, expected, 200, expected]);
+		const expected = [["2026-10-13", "confirmed", "Confirmed"], ["2026-10-14", "confirmed", "Confirmed"], ["2026-10-15", "upcoming", "Upcoming"], ["2026-10-16", "upcoming", "Upcoming"], ["2026-10-17", "upcoming", "Upcoming"]];
+		eq("§18.1 Super Admin and Dispatcher get eldDays per row, a day not over yet \"Upcoming\"", [sa.status, days(sa), disp.status, days(disp)], [200, expected, 200, expected]);
 		eq("§18.2 ...and eldSummary", sa.body.rows[0].eldSummary.text, "ELD: 2 of 5 days confirmed");
 		eq("§18.3 a Driver and an Investor get 403 on the staff route; signed out 401",
 			[(await list(w, DIR.hollis, USERS.driver)).status, (await list(w, DIR.hollis, USERS.inv)).status, (await w.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: null })).status], [403, 403, 401]);
@@ -1124,9 +1185,19 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const pageAnswer = await w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
 		eq("§18.5 the driver app's payload: the same timeOff", pageAnswer.body && pageAnswer.body.timeOff, mine.body);
 		ok("§18.6 no result reaches the driver: no ELD days, state, reason or miles", !/eldDays|eldSummary|"state"|"reason"|"miles"|not_confirmed|parked/.test(`${mine.text}${JSON.stringify(pageAnswer.body && pageAnswer.body.timeOff)}`));
+		// The results can't be read: the staff list still answers, without them.
+		const f = await eldWorld();
+		parkedT1(f);
+		await create(f, DIR.hollis, vacation("2026-10-13", "2026-10-14"));
+		await runCheck(f);
+		f.db.exec("DROP TABLE driver_time_off_days");
+		const unread = await list(f, DIR.hollis);
+		eq("§18.7 results that can't be read: the staff list still answers 200, the row with no ELD keys, and the log says so",
+			[unread.status, unread.body && unread.body.rows.length, unread.body && ["eldDays", "eldSummary"].filter((k) => k in unread.body.rows[0]), f.logs.some((l) => /\[time-off-eld\] results unreadable/.test(l))],
+			[200, 1, [], true]);
 	});
 
-	section("§19 closed months (N-L1, L4)");
+	section("§19 closed months");
 	await R.guard("§19", async () => {
 		const w = await eldWorld();
 		parkedT1(w);
@@ -1135,7 +1206,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§19.1 the plan holds its three days", plan.rows.map((r) => r.days.length), [3]);
 		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-10', 'locked', ?)").run(new Date(w.clock.ms).toISOString());
 		const res = w.api.applyTimeOffEldPlan(plan, { nowMs: w.clock.ms });
-		eq("§19.2 N-L1: October closed between the plan and its write: nothing written, nothing audited, nothing told",
+		eq("§19.2 October closed between the plan and its write: nothing written, nothing audited, nothing told",
 			[res.days, res.skippedClosed, dayRows(w, id).length, w.audits("driver_time_off_eld_check").length, eldNotices(w).length], [0, 3, 0, 0, 0]);
 		for (const grace of ["0", "7", "14"]) {
 			const g = await eldWorld();
@@ -1146,7 +1217,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			const back = rowId(await create(g, DIR.hollis, vacation("2026-09-20", "2026-09-22")));
 			const r = await runCheck(g);
 			const shown = (await list(g, DIR.hollis)).body.rows.find((x) => x.id === back).eldDays.map((d) => d.label);
-			eq(`§19.3 L4 (settlement_grace_days ${grace}): a backdated row in a closed month writes nothing and shows "Not checked (month closed)"`,
+			eq(`§19.3 (settlement_grace_days ${grace}) a backdated row in a closed month writes nothing and shows "Not checked (month closed)"`,
 				[r.days, dayRows(g, back).length, shown], [0, 0, ["Not checked (month closed)", "Not checked (month closed)", "Not checked (month closed)"]]);
 		}
 		// A waiting day: T1 dark since Oct 3 evening; then October closes.
