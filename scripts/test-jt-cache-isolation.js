@@ -298,8 +298,10 @@ for (const f of live.findings) console.log(`      ${f}`);
 ok("no caller writes to the shared cache, its arrays or its rows — or reads another route's annotations off them",
 	live.findings.length === 0);
 const kinds = live.sites.reduce((a, s) => ((a[s.kind] = (a[s.kind] || 0) + 1), a), {});
+// Five read through the view: the four routes of §2 and the C.H. Robinson
+// recorder's sheet reader (server.js's <chr-wiring> block).
 ok(`found the callers (${live.sites.length}: ${kinds.raw || 0} raw, ${kinds.view || 0} view, ${kinds.prime || 0} prime) — ` +
-	"a sweep that finds nothing proves nothing", live.sites.length >= 25 && (kinds.view || 0) === 4);
+	"a sweep that finds nothing proves nothing", live.sites.length >= 25 && (kinds.view || 0) === 5);
 ok("every allow-listed annotation still exists (a stale allow-list hides nothing but lies)",
 	ANNOTATION_ALLOW.every((a) => liftFn(a.fn).includes(a.write)));
 

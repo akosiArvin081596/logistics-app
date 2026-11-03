@@ -3400,12 +3400,15 @@ function eldFixCountsByVehicle(vehicleIds, sinceMs) {
 // normalizeDriverName() of the directory row's CURRENT name (a renamed driver
 // keeps his rows). The JOIN is what keeps an orphan inert: a row whose directory
 // row is gone matches no one. Rows that ended before `sinceDay` are left out.
+// Only approved rows count, whatever DRIVER_TIME_OFF_REQUESTS_ENABLED says: a
+// driver's request still waiting or declined never warns dispatch, pauses an
+// alert or shows as time off, and stays inert after a switch-off.
 function driverAvailabilityByName(sinceDay) {
 	const rows = db.prepare(`
 		SELECT a.id, a.directory_id, a.kind, a.from_date, a.to_date, a.cancelled_at, d.driver_name AS directory_name
 		FROM driver_availability a
 		JOIN drivers_directory d ON d.id = a.directory_id
-		WHERE a.cancelled_at IS NULL AND a.to_date >= ?
+		WHERE a.cancelled_at IS NULL AND a.request_status = 'approved' AND a.to_date >= ?
 		ORDER BY a.from_date ASC, a.id ASC
 	`).all(String(sinceDay || ""));
 	return driverAvailability.groupAvailabilityByDriver(rows, normalizeDriverName);
@@ -6871,6 +6874,11 @@ const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED &&
 // The time-off ELD check (lib/time-off-eld-check.js), default OFF, and only while DRIVER_AVAILABILITY_ENABLED is
 // on. Off, no job runs, nothing but the 90-day purge touches its results, and no answer carries an ELD key.
 const DRIVER_TIME_OFF_ELD_CHECK_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_ELD_CHECK_ENABLED ?? "").trim());
+// Drivers ask for days off in the app, at least 5 days ahead, and a Super Admin or Dispatcher approves or declines
+// each request (D's rules of 2026-10-31), default OFF, and only while DRIVER_TIME_OFF_SCREEN_ENABLED is on (folded in
+// here: the request button sits on that screen's card). Off, the four request routes answer as unknown paths, no
+// answer carries a request key, no request or decision notice is written, and a waiting request holds no days.
+const DRIVER_TIME_OFF_REQUESTS_ENABLED = DRIVER_TIME_OFF_SCREEN_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_REQUESTS_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
@@ -6893,6 +6901,11 @@ db.exec(`
 		updated_at TEXT,
 		cancelled_at TEXT,
 		cancelled_by TEXT,
+		request_status TEXT NOT NULL DEFAULT 'approved' CHECK(request_status IN ('requested', 'approved', 'declined')),
+		source TEXT NOT NULL DEFAULT 'staff' CHECK(source IN ('staff', 'driver')),
+		decided_by TEXT,
+		decided_by_user_id INTEGER NOT NULL DEFAULT 0,
+		decided_at TEXT,
 		CHECK(from_date <= to_date)
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_dir ON driver_availability(directory_id, from_date);
@@ -6946,6 +6959,20 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_tod_dir_day ON driver_time_off_days(directory_id, day);
 	CREATE INDEX IF NOT EXISTS idx_tod_final ON driver_time_off_days(final_at);
 `);
+// A driver's request (DRIVER_TIME_OFF_REQUESTS_ENABLED): the columns the CREATE above has, added to a table made
+// before them. Each definition is the CREATE's word for word, so every existing row reads approved and staff and
+// counts as it did. Asked of PRAGMA first, so an ALTER that fails for any other reason stops the start.
+function addTimeOffRequestColumns() {
+	db.transaction(() => {
+		const have = new Set(db.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name));
+		if (!have.has("request_status")) db.exec("ALTER TABLE driver_availability ADD COLUMN request_status TEXT NOT NULL DEFAULT 'approved' CHECK(request_status IN ('requested', 'approved', 'declined'))");
+		if (!have.has("source")) db.exec("ALTER TABLE driver_availability ADD COLUMN source TEXT NOT NULL DEFAULT 'staff' CHECK(source IN ('staff', 'driver'))");
+		if (!have.has("decided_by")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_by TEXT");
+		if (!have.has("decided_by_user_id")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_by_user_id INTEGER NOT NULL DEFAULT 0");
+		if (!have.has("decided_at")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_at TEXT");
+	}).immediate();
+}
+addTimeOffRequestColumns();
 
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
 // ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
@@ -11373,6 +11400,9 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // Behind DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), a create, or an edit
 // reaching days the row did not cover, over loads he already has asks first
 // (409 DRIVER_HAS_LOADS) and "Save anyway" records a confirmation per load.
+// Behind DRIVER_TIME_OFF_REQUESTS_ENABLED, a Driver asks for days off and a
+// Super Admin or Dispatcher approves or declines the request (four more routes
+// below); only approved rows count anywhere.
 // Nothing here reaches pay or money.
 
 // The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
@@ -11385,9 +11415,85 @@ function availabilityFlagGate(req, res, next) {
 	return next();
 }
 
+// The four request routes, the same way, behind DRIVER_TIME_OFF_REQUESTS_ENABLED
+// (which folds in the screen flag and DRIVER_AVAILABILITY_ENABLED).
+function timeOffRequestsFlagGate(req, res, next) {
+	if (!DRIVER_TIME_OFF_REQUESTS_ENABLED) return next("route");
+	return next();
+}
+console.log(`[availability] driver time-off requests ${DRIVER_TIME_OFF_REQUESTS_ENABLED ? "ON" : "OFF"} (DRIVER_TIME_OFF_REQUESTS_ENABLED)`);
+
+// Keyed per account, as emergencyContactsWriteLimiter is: each request or cancel
+// writes a row, an audit line and a staff notice.
+const timeOffRequestLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many time-off requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// The signed-in driver's account, read again from the session's id (never the
+// session's name), and the one Drivers page row a request is for
+// (driverAvailability.driverRequestIdentity()): { account, directory } or
+// { refusal: { status, body } }. Nothing in a URL or a body names the driver.
+// Its own helper: the emergency contacts pins keep theirs to their own routes.
+function timeOffRequestDriver(user) {
+	const id = user ? user.id : undefined;
+	const account = Number.isSafeInteger(id) && id > 0 ? db.prepare("SELECT id, username, role, driver_name FROM users WHERE id = ?").get(id) : undefined;
+	const name = account && account.role === "Driver" ? String(account.driver_name || "") : "";
+	const decided = driverAvailability.driverRequestIdentity({
+		account: account || null,
+		directoryRows: name ? findDriverNameClashes(name, { users: false }) : [],
+		heldByOther: name ? driverNameHeldByOtherAccount(name, [account.id]) : false,
+	});
+	if (!decided.ok) return { refusal: { status: decided.status, body: { error: decided.error, code: decided.code } } };
+	return { account, directory: { id: decided.directory.id, driver_name: decided.directory.driver_name } };
+}
+
+// The name a time-off row's driver notices go to: the account that asked (its
+// driver name as stored, which is how notifications and the driver's live room
+// are keyed), else the Driver account spelling of the directory name. "" for none.
+function timeOffNoticeRecipient(row) {
+	const asked = row && Number(row.created_by_user_id) > 0
+		? db.prepare("SELECT driver_name FROM users WHERE id = ? AND role = 'Driver'").get(Number(row.created_by_user_id))
+		: undefined;
+	const name = asked && String(asked.driver_name || "").trim() ? asked.driver_name : findDriverAccountSpelling(row ? row.directory_name : "");
+	return String(name || "").trim();
+}
+
+// One in-app notice to a driver about time off that began as their request
+// (driverAvailability.driverTimeOffNotice()): the notifications row, written in
+// the caller's transaction; the caller sends the live event after it commits.
+// Only while DRIVER_TIME_OFF_REQUESTS_ENABLED is on and only for a driver-made
+// row; returns { room, notificationId } or null.
+function timeOffDriverNotice(row, event, from, to) {
+	if (!DRIVER_TIME_OFF_REQUESTS_ENABLED || !row || row.source !== "driver") return null;
+	const text = driverAvailability.driverTimeOffNotice({ event, from, to });
+	const name = timeOffNoticeRecipient(row);
+	if (!text || !name) return null;
+	const info = insertNotification.run(name.toLowerCase(), "time-off", text.title, text.body, JSON.stringify({ availabilityId: row.id, event }));
+	return { room: name, notificationId: Number(info.lastInsertRowid) };
+}
+
+// The staff notice of a request, once decided or cancelled: the decision goes
+// into its metadata (the Approve and Decline buttons go away), parameterized.
+// `by` is the deciding username, "driver" (their own cancel) or "system".
+function markTimeOffRequestNotice(availabilityId, decision, by) {
+	db.prepare(`UPDATE dispatch_notifications SET metadata = json_set(metadata, '$.decision', ?, '$.decidedBy', ?)
+		WHERE type = 'time-off-request' AND json_valid(metadata) AND json_extract(metadata, '$.availabilityId') = ?`)
+		.run(String(decision), String(by || ""), Number(availabilityId));
+}
+
 // One stored row as the staff screens get it, with what `viewer` (the session
 // user) may change on it: `editable` "full" | "end_early" | "none" and `limits`
-// { fromMin, toMin, toMax, maxDays } (null on "none").
+// { fromMin, toMin, toMax, maxDays } (null on "none"). While
+// DRIVER_TIME_OFF_REQUESTS_ENABLED is on it also says whose request the row is
+// and its decision (request, source, decidedBy, decidedAt): the keys' presence is
+// the flag, so after a switch-off the panel shows no request controls.
 function availabilityRowView(r, todayKey, viewer) {
 	const scope = { todayKey, isSuperAdmin: !!viewer && viewer.role === "Super Admin" };
 	return {
@@ -11405,14 +11511,17 @@ function availabilityRowView(r, todayKey, viewer) {
 		status: r.cancelled_at ? "cancelled" : r.to_date < todayKey ? "past" : r.from_date > todayKey ? "upcoming" : "current",
 		editable: driverAvailability.availabilityEditScope(r, scope),
 		limits: driverAvailability.availabilityEditLimits(r, scope),
+		...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? driverAvailability.requestRowFields(r) : {}),
 	};
 }
 
 // A time-off row's ELD check results as staff see them: `eldDays` and
 // `eldSummary` (lib/time-off-eld-check.js timeOffEldDaysView()), each month's
 // lock read once, load IDs as the viewer may see them. Unreadable, the row
-// carries no ELD keys, so the time-off list still answers.
+// carries no ELD keys, so the time-off list still answers; nor does a driver's
+// request that is waiting or declined, which the check never judges.
 function timeOffEldRowFields(r, { today, req }) {
+	if (driverAvailability.requestStatusOf(r) !== "approved") return {};
 	try {
 		const stored = new Map(db.prepare("SELECT * FROM driver_time_off_days WHERE availability_id = ?").all(r.id).map((s) => [s.day, s]));
 		const locked = new Map();
@@ -11432,16 +11541,19 @@ function timeOffEldRowFields(r, { today, req }) {
 	}
 }
 
-// Cancels a deleted directory row's live time off (the system's cancel,
-// audited per row). Runs inside the delete's transaction.
+// Cancels a deleted directory row's live time off and waiting requests (the
+// system's cancel, audited per row; a waiting request's staff notice says so).
+// A declined row is left as it is. Runs inside the delete's transaction.
 function cancelDirectoryAvailability(req, directoryId, driverName) {
-	const live = db.prepare("SELECT id, kind, from_date, to_date FROM driver_availability WHERE directory_id = ? AND cancelled_at IS NULL").all(directoryId);
+	const live = db.prepare("SELECT id, kind, from_date, to_date, request_status FROM driver_availability WHERE directory_id = ? AND cancelled_at IS NULL AND request_status <> 'declined'").all(directoryId);
 	const now = new Date().toISOString();
 	const stamp = db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = 'system:directory-delete' WHERE id = ? AND cancelled_at IS NULL");
 	for (const r of live) {
+		const waiting = r.request_status === "requested";
 		stamp.run(now, r.id);
 		logAudit(req, "driver_availability_cancel", "driver", String(directoryId),
-			`${driverName}: off ${r.from_date}..${r.to_date} (${r.kind}) cancelled by the system: directory row deleted`);
+			`${driverName}: off ${r.from_date}..${r.to_date} (${r.kind}) ${waiting ? "request " : ""}cancelled by the system: directory row deleted`);
+		if (waiting) markTimeOffRequestNotice(r.id, "cancelled", "system");
 	}
 	return live.length;
 }
@@ -11453,18 +11565,32 @@ function availabilityRowWithDriver(id) {
 	return db.prepare(`SELECT a.*, d.driver_name AS directory_name FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id WHERE a.id = ?`).get(id);
 }
 
-// The live row of the same driver that overlaps from..to, other than `exceptId`.
-function availabilityOverlap(directoryId, exceptId, from, to) {
+// The live claim of the same driver that overlaps from..to, other than
+// `exceptId`: an approved row always; a waiting request only while
+// DRIVER_TIME_OFF_REQUESTS_ENABLED is on, so a switch-off never leaves staff
+// blocked by a request no one can decide; a declined row never. `approvedOnly`
+// (an approval's own check) leaves waiting requests out. The flag is a bound value.
+function availabilityOverlap(directoryId, exceptId, from, to, { approvedOnly = false } = {}) {
 	return db.prepare(`
-		SELECT id, from_date, to_date FROM driver_availability
+		SELECT id, from_date, to_date, request_status FROM driver_availability
 		WHERE directory_id = ? AND cancelled_at IS NULL AND id <> ? AND from_date <= ? AND to_date >= ?
+			AND (request_status = 'approved' OR (request_status = 'requested' AND ? = 1))
 		ORDER BY from_date ASC LIMIT 1
-	`).get(directoryId, exceptId, to, from);
+	`).get(directoryId, exceptId, to, from, DRIVER_TIME_OFF_REQUESTS_ENABLED && !approvedOnly ? 1 : 0);
 }
 
+// The staff answer to an overlap; a waiting request is named as one (decide it first).
 function availabilityOverlapBody(name, clash) {
+	const range = driverAvailability.availabilityRangeText(clash.from_date, clash.to_date);
+	if (clash.request_status === "requested") {
+		return {
+			error: `${name} has a request for time off ${range} waiting on these dates. Approve or decline it first.`,
+			code: "AVAILABILITY_OVERLAP",
+			overlapping: { id: clash.id, from: clash.from_date, to: clash.to_date, request: "waiting" },
+		};
+	}
 	return {
-		error: `${name} already has time off ${driverAvailability.availabilityRangeText(clash.from_date, clash.to_date)} that overlaps these dates. Change or cancel that one instead.`,
+		error: `${name} already has time off ${range} that overlaps these dates. Change or cancel that one instead.`,
 		code: "AVAILABILITY_OVERLAP",
 		overlapping: { id: clash.id, from: clash.from_date, to: clash.to_date },
 	};
@@ -11569,9 +11695,10 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: current.driver_name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, todayKey: today });
 			}
 			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: current.driver_name, from, to, loads: loadsCheck.ask }) };
+			// Staff time off is approved when recorded (S2: no 5-day rule for staff).
 			const info = db.prepare(`
-				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'staff')
 			`).run(id, current.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
 			logAudit(req, "driver_availability_create", "driver", String(id),
 				`${current.driver_name}: off ${from}..${to} (${kind})${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
@@ -11640,6 +11767,7 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, oldFrom: cur.from_date, oldTo: cur.to_date, todayKey: today });
 			}
 			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: name, from, to, loads: loadsCheck.ask }) };
+			let told = null;
 			if (!unchanged) {
 				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
 					.run(kind, from, to, reason, new Date().toISOString(), cur.id);
@@ -11649,8 +11777,11 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 				if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
 					recordTimeOffLoadConfirmations(req, { availabilityId: cur.id, directoryId: cur.directory_id, driverName: name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_update_unchecked" : "availability_update" });
 				}
+				// Their own request, approved and now changed by staff: they are told the new days (not for a
+				// reason-only change, which they never see).
+				if (kind !== cur.kind || from !== cur.from_date || to !== cur.to_date) told = timeOffDriverNotice(cur, "changed", from, to);
 			}
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), unchanged, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), unchanged, told, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
 		})();
 		if (outcome.gone) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
 		if (outcome.refused) {
@@ -11667,6 +11798,7 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 		}
 		if (outcome.asked) return res.status(409).json(outcome.asked);
 		if (!outcome.unchanged) notifyChange("drivers");
+		if (outcome.told) io.to(driverRoom(outcome.told.room)).emit("time-off-updated", { notificationId: outcome.told.notificationId });
 		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchanged ? { unchanged: true } : {}), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
 	} catch (err) {
 		console.error("[availability] update failed:", err.message);
@@ -11689,17 +11821,134 @@ app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRol
 				`${row.directory_name}: cancel row ${row.id} (${row.from_date}..${row.to_date}) [${v.code}]`, v.code);
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
-		db.transaction(() => {
+		const told = db.transaction(() => {
 			db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cancelled_at IS NULL")
 				.run(new Date().toISOString(), String(user.username || ""), row.id);
 			logAudit(req, "driver_availability_cancel", "driver", String(row.directory_id),
 				`${row.directory_name}: off ${row.from_date}..${row.to_date} (${row.kind}) cancelled`);
+			// Their own request, approved and now cancelled by staff: they are told.
+			return timeOffDriverNotice(row, "cancelled", row.from_date, row.to_date);
 		})();
 		notifyChange("drivers");
+		if (told) io.to(driverRoom(told.room)).emit("time-off-updated", { notificationId: told.notificationId });
 		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today, user) });
 	} catch (err) {
 		console.error("[availability] cancel failed:", err.message);
 		res.status(500).json({ error: "The time off could not be cancelled." });
+	}
+});
+
+// A refused approve or decline: audited (never a reason), then the answer, which
+// names who decided and when for a request already decided (staff only).
+function timeOffDecisionRefused(req, res, row, decision, refusal) {
+	logAuditRefusal(req, "driver_availability_decision_blocked", "driver", String(row.directory_id),
+		`${row.directory_name}: ${decision} row ${row.id} (${row.from_date}..${row.to_date}) [${refusal.code}]`, refusal.code);
+	const said = refusal.code === "TIME_OFF_REQUEST_DECIDED" ? { decision: refusal.decision, decidedBy: refusal.decidedBy, decidedAt: refusal.decidedAt } : {};
+	return res.status(refusal.status).json({ error: refusal.error, code: refusal.code, ...said });
+}
+
+// POST /api/driver-availability/:id/approve — a Super Admin or Dispatcher
+// approves a driver's waiting request (D's "someone has to manually approve
+// it"); it counts from then. Body { confirmLoads? }. 404 for an unknown id or a
+// row whose driver is gone; 409 TIME_OFF_REQUEST_DECIDED (who decided and when)
+// or AVAILABILITY_CANCELLED; 400 BACKDATE_LIMIT for a Dispatcher on a request
+// starting over 30 days back; 409 AVAILABILITY_OVERLAP against approved rows.
+// With DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), its three steps run as
+// the staff create runs them: 409 DRIVER_HAS_LOADS over loads they already
+// have, "Approve anyway" (the loads echoed as confirmLoads) records a
+// confirmation per load, and Job Tracking unreadable approves unchecked and says
+// so. The sheet read is the one await; the row is read again after it, and the
+// UPDATE repeats "still waiting", so two staff deciding at once get one decision
+// and one 409. The driver gets one notice; the staff notice gets the decision.
+app.post("/api/driver-availability/:id/approve", timeOffRequestsFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const scope = { todayKey: today, isSuperAdmin: user.role === "Super Admin", decision: "approve" };
+		const check = driverAvailability.requestDecisionCheck(row, scope);
+		if (!check.ok) return timeOffDecisionRefused(req, res, row, "approve", check);
+		let jtLoads;
+		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+			jtLoads = await driverLoadsForTimeOff(req);
+		}
+		const by = String(user.username || "");
+		const outcome = db.transaction(() => {
+			const cur = availabilityRowWithDriver(row.id);
+			if (!cur) return { gone: true };
+			const again = driverAvailability.requestDecisionCheck(cur, scope);
+			if (!again.ok) return { refused: again, cur };
+			const clash = availabilityOverlap(cur.directory_id, cur.id, cur.from_date, cur.to_date, { approvedOnly: true });
+			if (clash) return { clash, cur };
+			let loadsCheck = null;
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: cur.directory_name, normalize: normalizeDriverName, loadKey: normLoadKey, from: cur.from_date, to: cur.to_date, todayKey: today });
+			}
+			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: cur.directory_name, from: cur.from_date, to: cur.to_date, loads: loadsCheck.ask, approve: true }) };
+			const done = db.prepare("UPDATE driver_availability SET request_status = 'approved', decided_by = ?, decided_by_user_id = ?, decided_at = ? WHERE id = ? AND request_status = 'requested' AND cancelled_at IS NULL")
+				.run(by, Number(user.id) || 0, new Date().toISOString(), cur.id);
+			if (!done.changes) return { refused: driverAvailability.requestDecisionCheck(availabilityRowWithDriver(cur.id), scope), cur };
+			logAudit(req, "driver_availability_approve", "driver", String(cur.directory_id),
+				`${cur.directory_name}: off ${cur.from_date}..${cur.to_date} (${cur.kind}) approved${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
+				recordTimeOffLoadConfirmations(req, { availabilityId: cur.id, directoryId: cur.directory_id, driverName: cur.directory_name, kind: cur.kind, from: cur.from_date, to: cur.to_date, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_approve_unchecked" : "availability_approve" });
+			}
+			markTimeOffRequestNotice(cur.id, "approved", by);
+			const told = timeOffDriverNotice(cur, "approved", cur.from_date, cur.to_date);
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), told, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
+		})();
+		if (outcome.gone) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		if (outcome.refused) return timeOffDecisionRefused(req, res, outcome.cur, "approve", outcome.refused.ok ? { status: 409, code: "TIME_OFF_REQUEST_DECIDED", error: "This request was just decided." } : outcome.refused);
+		if (outcome.clash) {
+			const { cur } = outcome;
+			logAuditRefusal(req, "driver_availability_decision_blocked", "driver", String(cur.directory_id),
+				`${cur.directory_name}: approve row ${cur.id} (${cur.from_date}..${cur.to_date}) overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(cur.directory_name, outcome.clash));
+		}
+		if (outcome.asked) return res.status(409).json(outcome.asked);
+		notifyChange("drivers");
+		io.to("dispatch").emit("time-off-request-decided", { availabilityId: outcome.row.id, decision: "approved", decidedBy: by });
+		if (outcome.told) io.to(driverRoom(outcome.told.room)).emit("time-off-updated", { notificationId: outcome.told.notificationId });
+		res.json({ success: true, decision: "approved", decidedBy: by, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
+	} catch (err) {
+		console.error("[availability] approve failed:", err.message);
+		res.status(500).json({ error: "The request could not be approved." });
+	}
+});
+
+// POST /api/driver-availability/:id/decline — a Super Admin or Dispatcher
+// declines a driver's waiting request: it never counts and never blocks, not
+// even a new request for the same days. The approve route's checks without the
+// loads step and its date limit; the driver gets one notice, which never says
+// who declined or why.
+app.post("/api/driver-availability/:id/decline", timeOffRequestsFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const scope = { todayKey: today, isSuperAdmin: user.role === "Super Admin", decision: "decline" };
+		const by = String(user.username || "");
+		const outcome = db.transaction(() => {
+			const check = driverAvailability.requestDecisionCheck(row, scope);
+			if (!check.ok) return { refused: check };
+			const done = db.prepare("UPDATE driver_availability SET request_status = 'declined', decided_by = ?, decided_by_user_id = ?, decided_at = ? WHERE id = ? AND request_status = 'requested' AND cancelled_at IS NULL")
+				.run(by, Number(user.id) || 0, new Date().toISOString(), row.id);
+			if (!done.changes) return { refused: driverAvailability.requestDecisionCheck(availabilityRowWithDriver(row.id), scope) };
+			logAudit(req, "driver_availability_decline", "driver", String(row.directory_id), `${row.directory_name}: off ${row.from_date}..${row.to_date} (${row.kind}) declined`);
+			markTimeOffRequestNotice(row.id, "declined", by);
+			const told = timeOffDriverNotice(row, "declined", row.from_date, row.to_date);
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), told };
+		})();
+		if (outcome.refused) return timeOffDecisionRefused(req, res, row, "decline", outcome.refused.ok ? { status: 409, code: "TIME_OFF_REQUEST_DECIDED", error: "This request was just decided." } : outcome.refused);
+		notifyChange("drivers");
+		io.to("dispatch").emit("time-off-request-decided", { availabilityId: outcome.row.id, decision: "declined", decidedBy: by });
+		if (outcome.told) io.to(driverRoom(outcome.told.room)).emit("time-off-updated", { notificationId: outcome.told.notificationId });
+		res.json({ success: true, decision: "declined", decidedBy: by, row: availabilityRowView(outcome.row, today, user) });
+	} catch (err) {
+		console.error("[availability] decline failed:", err.message);
+		res.status(500).json({ error: "The request could not be declined." });
 	}
 });
 
@@ -11712,8 +11961,12 @@ app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRol
 // A blank name has none. A failed read gives { today, rows: [], error: true }
 // with one logged error, so a caller never fails on it. Callers sit behind
 // DRIVER_AVAILABILITY_ENABLED (the me route below, and the driver app's payload
-// behind DRIVER_TIME_OFF_SCREEN_ENABLED, which folds it in).
-function driverOwnTimeOff(name, todayKey) {
+// behind DRIVER_TIME_OFF_SCREEN_ENABLED, which folds it in). `viewer` is the
+// session's user: a name alone can't tell the driver from a Super Admin viewing
+// their page. With DRIVER_TIME_OFF_REQUESTS_ENABLED on, the answer adds their
+// requests, the days a request may use and whether this session may ask
+// (driverTimeOffRequestKeys()); `rows` keeps its shape either way.
+function driverOwnTimeOff(name, viewer, todayKey) {
 	let today = todayKey || "";
 	try {
 		if (!today) today = appTodayKey();
@@ -11724,6 +11977,7 @@ function driverOwnTimeOff(name, todayKey) {
 			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
 			// Only that the check is on, for his card's one line: never a result.
 			...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? { eldChecked: true } : {}),
+			...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? driverTimeOffRequestKeys(key, today, viewer) : {}),
 		};
 	} catch (err) {
 		console.error("[availability] driver's own time off could not be read:", err.message);
@@ -11731,14 +11985,139 @@ function driverOwnTimeOff(name, todayKey) {
 	}
 }
 
+// The request keys of a driver's own time off: `requests` (their waiting and
+// declined requests, driverAvailability.driverRequestsView(), keyed like `rows`
+// on the directory rows whose current name normalizes to `key`),
+// `requestLimits` (driverAvailability.driverRequestLimits()) and `canRequest`:
+// true only on that driver's own Driver session whose account names exactly one
+// directory row (timeOffRequestDriver()), so false for a Super Admin viewing the
+// driver's page, who also gets no Cancel on any request.
+function driverTimeOffRequestKeys(key, today, viewer) {
+	const who = viewer && viewer.role === "Driver" ? timeOffRequestDriver(viewer) : null;
+	const own = who && who.account && normalizeDriverName(who.account.driver_name) === key ? who : null;
+	const rows = key
+		? db.prepare(`
+			SELECT a.id, a.kind, a.from_date, a.to_date, a.cancelled_at, a.request_status, a.source, a.created_by_user_id, d.driver_name AS directory_name
+			FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id
+			WHERE a.cancelled_at IS NULL AND a.request_status IN ('requested', 'declined') AND a.to_date >= ?
+		`).all(today).filter((r) => normalizeDriverName(r.directory_name) === key)
+		: [];
+	return {
+		requests: driverAvailability.driverRequestsView(rows, { todayKey: today, accountId: own ? own.account.id : 0, canAct: !!own }),
+		requestLimits: driverAvailability.driverRequestLimits({ todayKey: today }),
+		canRequest: !!own,
+	};
+}
+
 // GET /api/driver/me/availability — the signed-in driver's own current and
 // upcoming time off, read-only, without the reason; 500 when it can't be read.
 // Two path segments under /api/driver/, so `/api/driver/:driverName` can never
-// capture it.
+// capture it. The request keys ride along when driverOwnTimeOff() sent them.
 app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
-	const own = driverOwnTimeOff(req.session.user.driverName);
+	const own = driverOwnTimeOff(req.session.user.driverName, req.session.user);
 	if (own.error) return res.status(500).json({ error: "Your time off could not be read." });
-	res.json({ today: own.today, rows: own.rows, ...(own.eldChecked ? { eldChecked: true } : {}) });
+	res.json({
+		today: own.today, rows: own.rows, ...(own.eldChecked ? { eldChecked: true } : {}),
+		...(own.requests ? { requests: own.requests, requestLimits: own.requestLimits, canRequest: own.canRequest } : {}),
+	});
+});
+
+// POST /api/driver/me/availability — a Driver asks for days off for themselves
+// (D's rules 1 and 5). Body { from, to, kind? }; kind defaults to off_duty, and a
+// reason is refused. 201 { success, request } as they see it. 400
+// TIME_OFF_TOO_SOON (with fromMin) / TIME_OFF_TOO_FAR / INVALID_DATE /
+// RANGE_REVERSED / RANGE_TOO_LONG / INVALID_KIND / REASON_NOT_ALLOWED; 409
+// TOO_MANY_WAITING, AVAILABILITY_OVERLAP (time off or a request on those days; a
+// declined row never blocks), DRIVER_NOT_ON_DIRECTORY or
+// DRIVER_DIRECTORY_AMBIGUOUS; 403 DRIVER_ACCOUNT_REQUIRED. No loads check: a
+// request changes nothing until staff approve it, and they see the loads then.
+app.post("/api/driver/me/availability", timeOffRequestsFlagGate, requireRole("Driver"), timeOffRequestLimiter, (req, res) => {
+	try {
+		const who = timeOffRequestDriver(req.session.user);
+		if (who.refusal) {
+			logAuditRefusal(req, "driver_availability_request_blocked", "driver", "",
+				`${auditText(req.session.user.driverName, 120) || "a driver"}: ${availabilityAttempt(req.body)} [${who.refusal.body.code}]`, who.refusal.body.code);
+			return res.status(who.refusal.status).json(who.refusal.body);
+		}
+		const { account } = who;
+		const today = appTodayKey();
+		const v = driverAvailability.validateDriverRequest(req.body, { todayKey: today });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_request_blocked", "driver", String(who.directory.id),
+				`${who.directory.driver_name}: ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code, ...(v.fromMin ? { fromMin: v.fromMin } : {}), ...(v.fromMax ? { fromMax: v.fromMax } : {}) });
+		}
+		const { kind, from, to } = v.value;
+		const outcome = db.transaction(() => {
+			const dir = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(who.directory.id);
+			if (!dir) return { gone: true };
+			const waiting = db.prepare("SELECT COUNT(*) AS n FROM driver_availability WHERE directory_id = ? AND cancelled_at IS NULL AND request_status = 'requested' AND to_date >= ?")
+				.get(dir.id, today).n;
+			if (waiting >= driverAvailability.REQUEST_WAITING_MAX) return { tooMany: true, name: dir.driver_name };
+			const clash = availabilityOverlap(dir.id, 0, from, to);
+			if (clash) return { clash, name: dir.driver_name };
+			const info = db.prepare(`
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source)
+				VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 'requested', 'driver')
+			`).run(dir.id, dir.driver_name, kind, from, to, String(account.username || ""), account.id, new Date().toISOString());
+			const id = Number(info.lastInsertRowid);
+			logAudit(req, "driver_availability_request", "driver", String(dir.id), `${dir.driver_name}: off ${from}..${to} (${kind}) requested by the driver`);
+			const text = driverAvailability.requestNoticeText({ driverName: dir.driver_name, kind, from, to, askedDay: today });
+			// No load ID: the panel shows those under each viewer's own rule.
+			const metadata = { availabilityId: id, directoryId: dir.id };
+			insertDispatchNotification.run("time-off-request", text.title, text.body, JSON.stringify(metadata));
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(id), notice: { type: "time-off-request", title: text.title, body: text.body, metadata } };
+		})();
+		if (outcome.gone) return res.status(409).json({ error: "Your name isn't on the Drivers list, so the request can't be saved. Message dispatch.", code: "DRIVER_NOT_ON_DIRECTORY" });
+		if (outcome.tooMany) {
+			logAuditRefusal(req, "driver_availability_request_blocked", "driver", String(who.directory.id), `${outcome.name}: off ${from}..${to} [TOO_MANY_WAITING]`, "TOO_MANY_WAITING");
+			return res.status(409).json({ error: `You already have ${driverAvailability.REQUEST_WAITING_MAX} requests waiting. Wait for an answer, or cancel one, before asking again.`, code: "TOO_MANY_WAITING" });
+		}
+		if (outcome.clash) {
+			logAuditRefusal(req, "driver_availability_request_blocked", "driver", String(who.directory.id),
+				`${outcome.name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json({ error: "You already have time off or a request on these days.", code: "AVAILABILITY_OVERLAP", overlapping: { from: outcome.clash.from_date, to: outcome.clash.to_date } });
+		}
+		notifyChange("drivers");
+		emitDispatchNotice(outcome.notice);
+		const [request] = driverAvailability.driverRequestsView([outcome.row], { todayKey: today, accountId: account.id, canAct: true });
+		res.status(201).json({ success: true, request });
+	} catch (err) {
+		console.error("[availability] request failed:", err.message);
+		res.status(500).json({ error: "Your request could not be saved." });
+	}
+});
+
+// POST /api/driver/me/availability/:id/cancel — a Driver withdraws their own
+// request while it still waits (stamped, never deleted). 404 for another
+// driver's row or an unknown id; 409 TIME_OFF_REQUEST_DECIDED once decided
+// ("Message dispatch to change it": any change after a decision is dispatch's),
+// AVAILABILITY_CANCELLED when already withdrawn.
+app.post("/api/driver/me/availability/:id/cancel", timeOffRequestsFlagGate, requireRole("Driver"), timeOffRequestLimiter, (req, res) => {
+	try {
+		const who = timeOffRequestDriver(req.session.user);
+		if (who.refusal) return res.status(who.refusal.status).json(who.refusal.body);
+		const id = Number(req.params.id);
+		const outcome = db.transaction(() => {
+			const row = Number.isInteger(id) && id > 0 ? db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(id) : undefined;
+			const check = driverAvailability.driverRequestCancelCheck(row, { accountId: who.account.id, directoryId: who.directory.id });
+			if (!check.ok) return { refused: check };
+			// The WHERE repeats the check, so a decision that won the row first leaves it as decided.
+			const done = db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND request_status = 'requested' AND cancelled_at IS NULL")
+				.run(new Date().toISOString(), String(who.account.username || ""), row.id);
+			if (!done.changes) return { refused: { status: 409, code: "TIME_OFF_REQUEST_DECIDED", error: "This request was already decided. Message dispatch to change it." } };
+			logAudit(req, "driver_availability_request_cancel", "driver", String(row.directory_id), `${who.directory.driver_name}: off ${row.from_date}..${row.to_date} (${row.kind}) request cancelled by the driver`);
+			markTimeOffRequestNotice(row.id, "cancelled", "driver");
+			return { cancelled: row.id };
+		})();
+		if (outcome.refused) return res.status(outcome.refused.status).json({ error: outcome.refused.error, code: outcome.refused.code });
+		notifyChange("drivers");
+		io.to("dispatch").emit("time-off-request-decided", { availabilityId: outcome.cancelled, decision: "cancelled", decidedBy: "driver" });
+		res.json({ success: true });
+	} catch (err) {
+		console.error("[availability] request cancel failed:", err.message);
+		res.status(500).json({ error: "Your request could not be cancelled." });
+	}
 });
 
 // GET /api/driver-availability — every driver's current and upcoming time off
@@ -11788,10 +12167,11 @@ function timeOffEldRunPlan({ nowMs, loadIndex }) {
 		SELECT c.id, c.load_id, c.load_from, c.load_to, d.driver_name AS directory_name
 		FROM driver_availability_confirmations c JOIN drivers_directory d ON d.id = c.directory_id
 	`).all();
+	// Approved rows only: a driver's request still waiting or declined is never judged.
 	const rows = db.prepare(`
 		SELECT a.id, a.directory_id, a.from_date, a.to_date, d.driver_name AS directory_name
 		FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id
-		WHERE a.cancelled_at IS NULL AND a.from_date <= ?
+		WHERE a.cancelled_at IS NULL AND a.request_status = 'approved' AND a.from_date <= ?
 		ORDER BY a.from_date ASC, a.id ASC
 	`).all(yesterday);
 	const storedOf = db.prepare("SELECT * FROM driver_time_off_days WHERE availability_id = ?");
@@ -18511,8 +18891,8 @@ function onboardingSigningStepState(userId, ob) {
 }
 
 // Helper: check if onboarding is complete and finalize. `req` is the request
-// that got here (the driver signing, or the admin recording a drug test), the
-// actor on a withheld-carrier audit row.
+// that got here (the driver signing, the admin recording a drug test, or an
+// emergency-contacts save by the driver or staff), the actor on a withheld-carrier audit row.
 async function checkAndCompleteOnboarding(userId, req = null) {
 	// The drivers_directory row added below carries the account's company name as
 	// its carrier, held to the month-end lock (accountDirectoryCarrier()), which
@@ -22056,7 +22436,10 @@ function invoiceCompletionCol(headers) {
 // and every other reading of an invoice's window (the trip rule's late days, the
 // dry run, the month-lock cover) call this one. `assumeCompleted` reads the row as
 // completed whatever its status (the month-lock cover is status-blind).
-function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM, assumeCompleted = false }) {
+// `arrivalRule`, the arrival pickup date's resolver (null while off), makes `win`
+// the arrival's window for an in-scope load (`arrival`, its answer); `tripWindow`
+// stays the scheduled one.
+function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM, assumeCompleted = false, arrivalRule = null }) {
 	const { statusCol, pickupCol, dropoffCol } = cols;
 	const completionCol = invoiceCompletionCol(headers);
 	const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
@@ -22073,7 +22456,12 @@ function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = I
 		pickup, dropoff: scheduledDropoff, assigned, completion, completed, settleMonth: assignedMonth,
 		rules: { pickupFromAssigned: blankPickupFrom, dropoffFromCompletion: true },
 	});
-	return { pickup, scheduledDropoff, completion, completed, assignedMonth, win, tripWindow: loadPayDays.tripWindowOf(win, { pickup, assigned: assignedDate }) };
+	const arrival = arrivalRule ? arrivalRule.forLoad({ loadId: cols.loadIdCol ? load[cols.loadIdCol] : "", assigned: assignedDate, completed }) : null;
+	return {
+		pickup, scheduledDropoff, completion, completed, assignedMonth, arrival,
+		win: (arrival && arrival.start && loadPayDays.payWindow({ dropoff: scheduledDropoff, arrival })) || win,
+		tripWindow: loadPayDays.tripWindowOf(win, { pickup, assigned: assignedDate }),
+	};
 }
 
 // The days one driver's weekly invoice pays for weekStart..weekEnd, before
@@ -22089,7 +22477,10 @@ function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = I
 // as dayPayMonth does); blankPickupLoads each load whose window started at its
 // Assigned Date and that pays a day of the invoice no other load, trip rule or
 // added day pays; tripErrors each load the trip work-day rule could not read
-// ({ loadId, error }: its window paid it).
+// ({ loadId, error }: its window paid it); arrival, null while the arrival pickup
+// date rule is off (`arrivalFrom`, ARRIVAL_PICKUP_DATE_FROM as process.env sets it),
+// else { errors, fallbacks, extended }: the loads it could not read or place (each
+// paid its scheduled window) and those paid 2+ days past their drop-off.
 //
 // dayListed is the loads each paid day lists on the invoice (B23, 2026-10-23),
 // built once the overrides have set the paid days: a trip-rule load on its trip
@@ -22100,7 +22491,7 @@ function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = I
 // day no load is listed on lists its paying loads, and dayScheduled names them
 // (the PDF prints each "<id> (scheduled)"). Neither changes which days are paid
 // or what they pay.
-function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
+function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM, arrivalFrom = loadPayDays.arrivalPickup.ruleFromEnv(process.env) }) {
 	const { loadIdCol } = cols;
 	const tripErrors = [];
 
@@ -22128,7 +22519,13 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	// The pre-dispatch rule (off unless enabled) and the month each load's days
 	// settle in, read as the ledger reads it (the load's Assigned month).
 	const preDispatch = preDispatchPayDayFilter();
-	const monthCols = preDispatch || weekRule || DRIVER_RATE_ONLY_FROM || blankPickupFrom ? jobTrackingMonthCols(headers) : null;
+	// The arrival pickup date, for a daily-rate driver only (percentage pay reads
+	// revenue), with the status history read once for the week.
+	const arrivalRule = arrivalFrom && (getDriverPayStructures()[nameNorm] || { payType: "fixed" }).payType !== "percentage"
+		? loadPayDays.arrivalPickup.createArrivalResolver({ db, fromDay: arrivalFrom })
+		: null;
+	const arrivalNotes = arrivalRule ? { errors: [], fallbacks: [], extended: [] } : null;
+	const monthCols = preDispatch || weekRule || DRIVER_RATE_ONLY_FROM || blankPickupFrom || arrivalRule ? jobTrackingMonthCols(headers) : null;
 
 	const activeDaySet = new Set();
 	const dayLoadMap = {}; // date string → [load IDs]
@@ -22158,8 +22555,9 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		// pickup to drop-off, a blank drop-off on a delivered load to its
 		// completion date. A blank or non-date pickup has no window, so no day,
 		// unless the blank-pickup fallback covers the load's Assigned month: then it
-		// starts at the Assigned Date, read as the ledger reads it.
-		const { scheduledDropoff, completion, completed, assignedMonth, win, tripWindow } = invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom });
+		// starts at the Assigned Date, read as the ledger reads it. An in-scope load
+		// with an official arrival runs from the arrival instead (arrivalRule).
+		const { scheduledDropoff, completion, completed, assignedMonth, win, tripWindow, arrival } = invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom, arrivalRule });
 		const lid = loadIdCol ? (load[loadIdCol] || "") : "";
 		// The trip work-day rule first, before the pickup gate (weekRule is null
 		// while it is off): a load it covers pays its trip days in this week. A
@@ -22183,6 +22581,16 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 				continue;
 			}
 		}
+		// What the arrival pickup date could not read or place (its scheduled window
+		// pays it), and a window it ends 2+ days past the drop-off, for the warnings.
+		if (arrival) {
+			const named = String(lid).trim() || `(sheet row ${load._rowIndex})`;
+			if (arrival.error) arrivalNotes.errors.push({ loadId: named, error: arrival.error });
+			else if (arrival.fallback) arrivalNotes.fallbacks.push({ loadId: named, reason: arrival.fallback });
+			const dropoffDay = scheduledDropoff && !isNaN(scheduledDropoff) ? fmtLocalDate(scheduledDropoff) : "";
+			const days = loadPayDays.arrivalPickup.extensionDays(arrival, dropoffDay);
+			if (arrival.start && days >= loadPayDays.arrivalPickup.EXTENDED_DAYS) arrivalNotes.extended.push({ loadId: named, dropoff: dropoffDay, delivered: arrival.delivered, days });
+		}
 		if (!win) continue;
 		const fallbackKey = win.pickupFallback ? (String(lid).trim() || `(sheet row ${load._rowIndex})`) : null;
 		if (fallbackKey) fallbackLoads.push(fallbackKey);
@@ -22190,9 +22598,9 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		// the pre-dispatch rule only: the drop-off appointment, else the pickup
 		// day (the completion date only where the ledger's blank drop-off
 		// fallback covers the load), capped at 31 days, by the ledger's own
-		// expansion.
-		const ledgerWin = preDispatch
-			? loadPayDays.payWindow({
+		// expansion. An arrival's window is the ledger's too.
+		const ledgerWin = preDispatch && win.fromArrival ? win
+			: preDispatch ? loadPayDays.payWindow({
 				pickup: win.start, dropoff: scheduledDropoff, completion, completed, settleMonth: assignedMonth,
 				rules: { pickupFromAssigned: true, dropoffFromCompletion: LEDGER_BLANK_DROPOFF_FALLBACK_FROM },
 			})
@@ -22308,7 +22716,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
 	}
 	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
-	return { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors };
+	return { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors, arrival: arrivalNotes };
 }
 
 // How a weekly invoice prices the days invoiceWeekPaidDays() returns, for a
@@ -22593,7 +23001,7 @@ async function generateInvoiceHandler(req, res) {
 		// --- Active-day algorithm for driver pay ---
 		// invoiceWeekPaidDays() (above the route) is the one copy of the week's
 		// days; scripts/blank-pickup-dry-run.js runs it too.
-		const { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
+		const { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors, arrival } = invoiceWeekPaidDays({
 			headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads, weekRule, weekStart, weekEnd: computedWeekEnd, nameNorm,
 		});
 		// A load paid from its Assigned Date (the blank-pickup fallback) is named
@@ -22603,6 +23011,10 @@ async function generateInvoiceHandler(req, res) {
 		for (const e of [...tripErrors, ...extraRuleErrors]) {
 			warnings.push(`${e.fallback ? "TRIP RULE NOT APPLIED" : "TRIP DAYS NOT READ"}: load ${e.loadId}: ${e.error}. ${extraRuleErrors.includes(e) ? "Its days in this week are not on this invoice." : "This invoice pays its scheduled window instead."}`);
 		}
+		// The same for the arrival pickup date (null while off), and each window it
+		// ends 2+ days past the drop-off; the PDF says neither.
+		const arrivalLines = arrival ? loadPayDays.arrivalPickup.invoiceWarnings(arrival) : [];
+		warnings.push(...arrivalLines);
 		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
 		// the route; the dry run prices with it too).
 		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
@@ -22875,6 +23287,16 @@ async function generateInvoiceHandler(req, res) {
 		let invoice = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(result.lastInsertRowid);
+		// Its ARRIVAL lines, kept for the Friday batch's report of the week: no client
+		// reads this response's warnings, and a submitted invoice answers the batch
+		// INVOICE_EXISTS without them.
+		if (arrival) {
+			try {
+				loadPayDays.arrivalPickup.recordWeekLines(db, { weekStart, driverKey: nameNorm, driver: canonicalDriverName(driverName), invoiceId: invoice.id, lines: arrivalLines });
+			} catch (e) {
+				console.error(`[arrival-pickup] ${invoice.invoice_number}: its lines were not kept for the Friday report (${e.message}): ${arrivalLines.join(" | ")}`);
+			}
+		}
 		if (personalFit.fit.length) {
 			logAudit(req, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: generated with ${personalFit.fit.length} Personal line(s), repays ${personalExpense.formatMoney(Math.round(personalFit.personalTotal * 100))}`);
 		}
@@ -23181,6 +23603,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 		}
 	}
 	if (submitted > 0) notifyChange("invoices");
+	// The ARRIVAL lines generate kept for the week's live invoices, while the arrival
+	// pickup date rule is on: those billed above, and those a driver submitted or an
+	// earlier attempt billed (INVOICE_EXISTS above). Named like the undated loads.
+	const arrivalLines = loadPayDays.arrivalPickup.ruleFromEnv(process.env)
+		? loadPayDays.arrivalPickup.weekLines(db, range.weekStart, (e) => liveWeeklyInvoicesForDriverWeek(e.driver, range.weekStart).some((r) => r.id === e.invoiceId))
+		: [];
 
 	// Coverage: every driver who WORKED this week must have been billed (or already
 	// had an invoice). Anyone left is a real gap — a transient per-driver read, a
@@ -23196,12 +23624,15 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const unbilled = offRosterClosed.length ? [] : unbilledAll;
 	const notBilled = [...closedWeek, ...offRosterClosed];
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
-	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || notBilled.length > 0 || closedWeekDraft.length > 0;
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || notBilled.length > 0 || closedWeekDraft.length > 0 || arrivalLines.length > 0;
 	// How many undatedInWeek entries each channel prints: the in-app line (this
 	// summary) and the email cap them differently. The undated-load ledger reads
 	// the same two numbers, so a load counts as told only if it was printed.
 	const undatedEntriesInApp = 6;
 	const undatedEntriesByEmail = 20;
+	// The same caps for the ARRIVAL lines, which are whole sentences.
+	const arrivalEntriesInApp = 3;
+	const arrivalEntriesByEmail = 20;
 	const summary =
 		`${submitted} generated & submitted · ${skipped - closedWeek.length - closedWeekDraft.length} skipped (no loads)` +
 		(notBilled.length ? ` · ${notBilled.length} NOT BILLED, the week touches a closed month (${notBilled.slice(0, 8).join(", ")}): pay their days on a correction invoice dated in the current month` : "") +
@@ -23209,6 +23640,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
 		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, undatedEntriesInApp).join("; ")})` : "") +
+		(arrivalLines.length ? ` · ${arrivalLines.length} ARRIVAL line${arrivalLines.length === 1 ? "" : "s"} to check (${arrivalLines.slice(0, arrivalEntriesInApp).join("; ")}${arrivalLines.length > arrivalEntriesInApp ? "; …" : ""})` : "") +
 		(errors.length ? ` · ${errors.length} errored` : "");
 
 	try {
@@ -23251,7 +23683,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					${closedWeekDraft.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>Unsubmitted Draft for this week, which touches a closed month:</b> ${escHtml(closedWeekDraft.slice(0, 20).join(", "))}. Submit it as is; only days it misses go on a correction invoice dated in the current month.</p>` : ""}
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
-					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
+					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}${arrivalLines.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>Arrival pickup date — loads to check</b> (a wrong paid day is corrected with Driver Pay Overrides):<br>${arrivalLines.slice(0, arrivalEntriesByEmail).map((l) => escHtml(l)).join("<br>")}${arrivalLines.length > arrivalEntriesByEmail ? `<br>…and ${arrivalLines.length - arrivalEntriesByEmail} more.` : ""}</p>` : ""}
 					${errors.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:12px">Errors: ${escHtml(errors.slice(0, 10).join("; "))}</p>` : ""}
 				`,
 				ctaText: "Review Invoices",
@@ -45742,7 +46174,11 @@ app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res)
 // (loadRowPeriods(), the cover included) join the answer. A driver's load whose
 // trip history or ELD could not be read makes the answer null: the gate refuses
 // as unresolved.
-function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null, tripCover = null }) {
+//
+// `arrivalCover` is arrivalDayLockCover()'s answer (null while the arrival pickup
+// date is off), added the same way: a load also covers the date when its arrival
+// window does, and a status history that can't be read makes the answer null.
+function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null, tripCover = null, arrivalCover = null }) {
 	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY, because
 	// filtering it would DROP it from the array, which is a PERMIT. The producers
 	// below need the test because they build their keys from arbitrary sheet cells;
@@ -45773,6 +46209,11 @@ function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFro
 			const trip = tripCover.daysFor(row);
 			if (trip.error) return null;
 			covers = covers || trip.days.includes(date);
+		}
+		if (arrivalCover) {
+			const arrival = arrivalCover.daysFor(row);
+			if (arrival.error) return null;
+			covers = covers || arrival.days.includes(date);
 		}
 		if (!covers) continue;
 		loadRowPeriods(row, cols).periods.forEach((m) => months.add(m));
@@ -45822,9 +46263,11 @@ async function excludedDayGate({ driver, date, action }) {
 	// The blank drop-off fallback's FROM, read as the payout ledger reads it
 	// (gatherLedgerScopeFacts()), so the lock covers the days the ledger pays.
 	const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
-	// The trip work-day rule's days (null while it is off): see excludedDayPeriods().
+	// The trip work-day rule's days and the arrival pickup date's (each null while
+	// it is off): see excludedDayPeriods().
 	const tripCover = action !== "add" && jobTracking ? tripDayLockCover(jobTracking.headers) : null;
-	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom, tripCover });
+	const arrivalCover = action !== "add" && jobTracking ? arrivalDayLockCover(jobTracking.headers) : null;
+	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom, tripCover, arrivalCover });
 	if (periods === null) return { refuse: "unresolved", periods: [] };
 	const locked = lockedAmong(periods);
 	return locked.length ? { refuse: "finalized", periods: locked } : { refuse: null, periods };
@@ -47868,6 +48311,28 @@ function tripDayLockCover(headers) {
 	};
 }
 
+// The override gate's cover for the arrival pickup date (null while off): an arrival
+// window can start before the Pickup Appointment, so excludedDayPeriods() also asks
+// daysFor(row), status- and pay-type-blind like the trip cover; { error } refuses.
+function arrivalDayLockCover(headers) {
+	const fromDay = financialsCalc.arrivalPickup.ruleFromEnv(process.env);
+	const resolver = fromDay ? financialsCalc.arrivalPickup.createArrivalResolver({ db, fromDay }) : null;
+	if (!resolver) return null;
+	const cols = jobTrackingMonthCols(headers);
+	return {
+		daysFor(row) {
+			const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
+			if (!loadId) return { days: [] };
+			const assigned = cols.dateCol && row[cols.dateCol] ? moneySheetDate(row[cols.dateCol]) : null;
+			const answer = resolver.forLoad({ loadId, assigned, completed: true });
+			if (answer && answer.error) return { days: [], error: answer.error };
+			if (!answer || !answer.start) return { days: [] };
+			const win = loadPayDays.payWindow({ dropoff: moneySheetDate(cols.dropoffDateCol ? row[cols.dropoffDateCol] : null), arrival: answer });
+			return { days: win ? jtExpandDateRange(win.start, win.end || win.start) : [] };
+		},
+	};
+}
+
 // One notice at boot when TRIP_WORK_DAYS_FROM is at or before the latest closed
 // month, built like the two above. The rule keeps running either way.
 function warnTripWorkDaysFromClosedMonth() {
@@ -47911,6 +48376,20 @@ function warnTruckChargeFromClosedMonth() {
 	if (msg) console.warn(`[truck-charge] ${msg}`);
 }
 warnTruckChargeFromClosedMonth();
+// The arrival pickup date at boot: its state and FROM, a warning for a FROM that is no
+// date or for the recorder off, and the closed-month notice. The pay paths read the
+// same two settings through lib/arrival-pickup.js on each request.
+function warnArrivalPickupFromClosedMonth() {
+	const arrival = financialsCalc.arrivalPickup;
+	const notes = [];
+	const fromDay = arrival.ruleFromEnv(process.env, (msg) => notes.push(msg));
+	console.log(`[arrival-pickup] ${arrival.stateLine(fromDay)}`);
+	if (fromDay && !ARRIVAL_PICKUP_RECORDER_ENABLED) notes.push(arrival.RECORDER_OFF_WARNING);
+	const closed = fromDay ? arrival.fromMonthClosedWarning(fromDay, financialsCalc.ledgerDayOnce.latestClosedMonth(db)) : null;
+	if (closed) notes.push(closed);
+	for (const msg of notes) console.warn(`[arrival-pickup] ${msg}`);
+}
+warnArrivalPickupFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -49151,9 +49630,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			...(Object.keys(diagnostic).length ? { diagnostic } : {}),
 			// The driver's own time off (R11 follow-up), only while the screen
 			// sub-flag is on: a non-Super-Admin's rows by his SESSION's name,
-			// never the URL's; a Super Admin's by the URL's. The only availability
-			// read in this route (scripts/test-driver-availability-guards.js).
-			...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName) } : {}),
+			// never the URL's; a Super Admin's by the URL's. The session's user
+			// rides along so a Super Admin's view is never offered a request. The
+			// only availability read in this route (scripts/test-driver-availability-guards.js).
+			...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName, req.session.user) } : {}),
 			// How many emergency contacts the driver has on file (never the contacts), by his
 			// session's account id, only while the flag is on; a Super Admin's payload has none.
 			...(EMERGENCY_CONTACTS_ENABLED && req.session.user.role !== "Super Admin" ? { emergencyContacts: { required: emergencyContactRules.MIN_CONTACTS, maximum: emergencyContactRules.MAX_CONTACTS, onFile: emergencyContactsCount(req.session.user.id) } } : {}),
@@ -52036,8 +52516,8 @@ const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock",
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
-	// The automatic invoice drafts' notices too (the <auto-invoice-wiring> block).
-	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE] : types;
+	// The automatic invoice drafts' and C.H. Robinson's notices too (their wiring blocks).
+	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE, CHR_NOTICE_TYPE] : types;
 	return { sql: hidden.length ? `type NOT IN (${hidden.map(() => "?").join(",")})` : "1 = 1", params: [...hidden] };
 }
 
@@ -59169,10 +59649,9 @@ function resolveGeofencePoints(loadData, headers, loadId) {
 	};
 }
 
-// The arrival recorder's readers for a tap or an override (lib/arrival-recorder.js
-// positionFacts()): the load's truck as the Truck cell or the money stamps name it,
-// the device's link time, and the geofence's own pickup point, never the network
-// geocode in ensureLoadCoordinates().
+// The arrival recorder's readers for a tap or an override (positionFacts()): the
+// load's truck (Truck cell, else the money stamps), its link time, and the geofence's
+// own pickup point, never the network geocode in ensureLoadCoordinates().
 function arrivalRecorderReaders() {
 	return {
 		db,
@@ -62923,12 +63402,16 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		// answer a driver acts on. Without it, the 2026-08-17 run-dry returns
 		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
 		const reading = resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
-		const pct = reading.fuelPct;
+		const pct = fuelModel.planningRateFuelPct({ reading, burn, tankGallons: tank, mpg });
 		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
 
 		const plan = fuelModel.planTripFuel({
 			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
 			reserve: FUEL_RESERVE_OPTS,
+			// Before pickup, routeMiles holds the run to the shipper only when it was routed.
+			approachCounted: pickedUp || planApproach,
+			// Its clock reads after fixFresh's, so a live reading it trusts came with a fresh fix.
+			readingTrusted: fuelModel.tripReadingTrusted({ reading, nowMs: Date.now() }),
 		});
 
 		res.json({
@@ -64464,6 +64947,12 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		blankDropoffFrom: Object.prototype.hasOwnProperty.call(rules, "blankDropoffFrom")
 			? (rules.blankDropoffFrom || null)
 			: financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff"),
+		// The arrival pickup date (off by default), read through financialsCalc like the
+		// rules above: `rules.arrivalFrom` is a report's candidate FROM, `rules.arrivalRule`
+		// the one reading computeFleetLedger() shares across its scopes.
+		arrivalRule: Object.prototype.hasOwnProperty.call(rules, "arrivalRule")
+			? rules.arrivalRule
+			: financialsCalc.arrivalPickup.ledgerResolver({ db, env: process.env, rules, log: (msg) => console.warn(`[arrival-pickup] ${msg}`) }),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -64653,7 +65142,14 @@ async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
 	// One trip work-day reading (the status history) for every scope
 	// (gatherLedgerScopeFacts() takes it from rules.tripFacts), or the caller's
 	// (the work-days dry run reads each load's answer from it afterwards).
-	const rules = { ...given, tripFacts: given.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
+	const rules = {
+		...given,
+		tripFacts: given.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }),
+		// The arrival pickup date's resolver, shared the same way.
+		arrivalRule: Object.prototype.hasOwnProperty.call(given, "arrivalRule")
+			? given.arrivalRule
+			: financialsCalc.arrivalPickup.ledgerResolver({ db, env: process.env, rules: given, log: (msg) => console.warn(`[arrival-pickup] ${msg}`) }),
+	};
 	// One Job Tracking snapshot for every scope, so they all read the same sheet.
 	const jobTracking = await getJobTrackingCached();
 	const carrierDB = getCarrierDBFromSQLite();
@@ -66112,7 +66608,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// unless enabled). The rule is asked first, for daily-rate drivers (their
 		// pay structures read once, only while it is on).
 		const { tripDays, dayOnceFrom } = financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env });
-		const tripPayStructures = tripDays ? getDriverPayStructures() : null;
+		// The arrival pickup date, as the payout ledger reads it (off by default),
+		// also for daily-rate drivers only.
+		const arrivalRule = financialsCalc.arrivalPickup.ledgerResolver({ db, env: process.env, log: (msg) => console.warn(`[arrival-pickup] ${msg}`) });
+		const tripPayStructures = tripDays || arrivalRule ? getDriverPayStructures() : null;
 		// The blank drop-off fallback, as the payout ledger reads it (off by default).
 		const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
 		// Per-driver-per-month day-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est,trip} } }.
@@ -66238,7 +66737,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const first = new Date(`${trip[0]}T12:00:00`);
 					if (!earliestDate || first < earliestDate) earliestDate = first;
 				}
-				const win = trip ? null : window;
+				// The arrival pickup date after the trip rule, as the ledger pays it.
+				const arrival = !trip && arrivalRule && (tripPayStructures[driver] || {}).payType !== "percentage"
+					? arrivalRule.forLoad({ loadId: lid, assigned: jtDateCol && r[jtDateCol] ? moneySheetDate(r[jtDateCol]) : null, completed: true })
+					: null;
+				const win = trip ? null : ((arrival && arrival.start && loadPayDays.payWindow({ dropoff, arrival })) || window);
 				if (trip || win) {
 					const windowDays = trip ? [] : expandDateRange(win.start, win.end || win.start);
 					const eld = vid ? eldByVid[vid] : null;
@@ -73640,6 +74143,56 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
 require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES, viewerGate: rateconViewGate });
+
+// <chr-wiring>
+// C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
+// No CHR connection exists, so nothing is sent. Its three switches (the settings example)
+// are read once and are off in a replica; off, nothing runs but the daily prune once the
+// tables exist. scripts/test-chr-wiring.js lifts this block.
+const CHR_NOTICE_TYPE = "chr-attention";
+const chrIntegration = require("./lib/chr-integration");
+// The Job Tracking view the recorder read last. Its rows stay here, read only by
+// resolveGeofencePoints(): lib/chr-*.js gets projections only.
+let chrSheetView = chrIntegration.projectView(null);
+const chr = chrIntegration.create({
+	db,
+	config: chrIntegration.chrConfig({
+		updatesEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_UPDATES_ENABLED ?? "").trim()),
+		sendEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_SEND_ENABLED ?? "").trim()),
+		locationEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LOCATION_ENABLED ?? "").trim()),
+		geofenceRadiusM: GEOFENCE_RADIUS,
+		// Read through its one spelling (lib/driver-instructions-runtime.js).
+		denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "",
+		replica: Boolean(REPLICA),
+	}),
+	readSheet: async () => {
+		chrSheetView = chrIntegration.projectView(liveJobTrackingView(await getJobTrackingCached()));
+		return chrSheetView.projections;
+	},
+	// The geofence's own rule: the row's coordinate cells, else load_coordinates
+	// under the Load ID as written.
+	stopPointsFor: (key) => {
+		const r = chrSheetView.rowOf.get(key);
+		return resolveGeofencePoints(r ? r.row : {}, chrSheetView.headers, r ? r.loadIdCell || key : key);
+	},
+	truckResolver: buildHaulTruckResolver,
+	deviceResolver: buildEldDeviceResolver,
+	instructionStopsFor: chrIntegration.instructionStopsReader(db),
+	logAudit,
+	// The page's live refresh: no payload, Super Admins' room only.
+	onChange: () => io.to("super-admin").emit("chr:changed"),
+	log: console,
+});
+chr.mount(app, { requireRole });
+if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
+	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
+}
+if (chr.jobs().prune && startsJob("C.H. Robinson prune (at boot, then daily)")) {
+	const chrPrune = () => { try { chr.prune(); } catch { console.error("[chr] prune failed"); } };
+	chrPrune();
+	setInterval(chrPrune, chr.pruneIntervalMs);
+}
+// </chr-wiring>
 
 // ============================================================
 // KPI BOT — nightly KPI snapshots, the admin KPI API and the weekly digest

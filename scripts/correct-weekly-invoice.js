@@ -14,9 +14,9 @@
 // (scripts/lib/server-lift.js) and composed as the handler composes it:
 // selectInvoiceWeekLoads(), getDriverPayStructures(), truckDailyRateCandidates()
 // and resolveDailyRate(), invoiceWeekPaidDays() (the ELD intersection, the
-// pre-dispatch and blank-pickup rules and the overrides), invoiceDayPricing(),
-// weeklyManualInvoiceHolds() (a day a live manual invoice pays is left off) and
-// invoiceDayGrid(). scripts/test-correct-weekly-invoice.js pins it equal to the
+// pre-dispatch and blank-pickup rules, the arrival pickup date and the
+// overrides), invoiceDayPricing(), weeklyManualInvoiceHolds() (a day a live
+// manual invoice pays is left off) and invoiceDayGrid(). scripts/test-correct-weekly-invoice.js pins it equal to the
 // handler on fixture weeks.
 //
 // The guard: the recompute must equal the stored invoice except for the
@@ -48,7 +48,8 @@
 // driver is inside the week; its PDF is not on disk, or another invoice names
 // the same file; an adjustment was saved under 2 minutes ago (its re-render may
 // be in flight); DRIVER_RATE_ONLY is on and the app never ran with it on this
-// database (pricing would stamp the rule's start record).
+// database (pricing would stamp the rule's start record); ARRIVAL_PICKUP_DATE is
+// on and the status history can't be read.
 //
 // The write (--apply, with the dry run's fingerprint): an owner-only backup of
 // the row and the issued PDF beside the database (outside uploads/), checked;
@@ -126,7 +127,7 @@ const ROOTS = [
 	"liveWeeklyInvoicesForDriverWeek", "invoicePaidDaysOf", "invoiceTotalDue",
 	// the overrides and the months they move (excludedDayGate()'s reading)
 	"driverNameForTotals", "periodLocksReadable", "periodWriteLocked", "excludedDayPeriods", "parseSheet", "deduplicateLoads",
-	"financialsCalc", "tripDayLockCover",
+	"financialsCalc", "tripDayLockCover", "arrivalDayLockCover",
 	// the PDF
 	"personalRenderData", "renderPolicy",
 ];
@@ -245,6 +246,12 @@ function recompute(db, api, values, { driverName, weekEnd }) {
 	const loadIds = uniqueLoads.map((l) => (loadIdCol ? l[loadIdCol] : "")).filter(Boolean);
 	const expenseIds = expenses.map((e) => e.id);
 	const paid = api.invoiceWeekPaidDays({ headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads: [], weekRule: null, weekStart, weekEnd: computedWeekEnd, nameNorm });
+	// With the arrival pickup date on (as this run's settings set it), a load whose
+	// status history can't be read is paid its scheduled window by generate; this
+	// script writes an invoice, so it refuses instead.
+	if (paid.arrival && paid.arrival.errors.length) {
+		throw new Refusal(`ARRIVAL_PICKUP_DATE is on and the status history could not be read for load ${paid.arrival.errors.map((e) => e.loadId).join(", ")} (${paid.arrival.errors[0].error}); nothing is corrected`);
+	}
 	const { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth } = paid;
 	const { rateOf, totalOf } = api.invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule: null, dayPayMonth });
 	const holds = api.weeklyManualInvoiceHolds({ driverNorm: nameNorm, days: activeDaySet, weekStart, weekEnd: computedWeekEnd, rateOf: (ds) => (rateOf ? rateOf(ds) : dailyRate) });
@@ -423,12 +430,13 @@ function plan(db, api, values, opts, { dataDir }) {
 	jobTracking.data = api.deduplicateLoads(jobTracking.data, jobTracking.headers);
 	const blankDropoffFrom = api.financialsCalc.loadPayDays.blankFallbackFromEnv(api[WORLD_ENV], "dropoff");
 	const tripCover = api.tripDayLockCover(jobTracking.headers);
+	const arrivalCover = api.arrivalDayLockCover(jobTracking.headers);
 	const unpaidRow = (name) => api.invoiceDayGrid({ days: new Set(), weekStart: ws, dailyRate: r.dailyRate })[name];
 	const removed = [];
 	for (const d of removedDays) {
 		const own = d.slice(0, 7);
-		const periods = api.excludedDayPeriods({ driver: nameNorm, date: d, action: "remove", jobTracking, blankDropoffFrom, tripCover });
-		if (periods === null) throw new Refusal(`${dayText(d)}: the months it moves can't be resolved (a load's trip history or ELD could not be read); nothing is corrected`);
+		const periods = api.excludedDayPeriods({ driver: nameNorm, date: d, action: "remove", jobTracking, blankDropoffFrom, tripCover, arrivalCover });
+		if (periods === null) throw new Refusal(`${dayText(d)}: the months it moves can't be resolved (a load's trip history, status history or ELD could not be read); nothing is corrected`);
 		if (periods.length !== 1 || periods[0] !== own) {
 			throw new Refusal(`${dayText(d)}: excludedDayPeriods() gives ${periods.join(", ") || "no month"}; a removed day may move only its own month (${own}), so a person decides`);
 		}
@@ -471,6 +479,7 @@ function plan(db, api, values, opts, { dataDir }) {
 	const flags = {
 		TRIP_WORK_DAYS_FROM: api.TRIP_WORK_DAYS_FROM || null, DRIVER_RATE_ONLY_FROM: api.DRIVER_RATE_ONLY_FROM || null,
 		INVOICE_BLANK_PICKUP_FALLBACK_FROM: api.INVOICE_BLANK_PICKUP_FALLBACK_FROM || null, preDispatch: !!api.preDispatchPayDayFilter(), APP_TIMEZONE: api.APP_TIMEZONE,
+		ARRIVAL_PICKUP_DATE_FROM: api.financialsCalc.arrivalPickup.ruleFromEnv(api[WORLD_ENV]),
 	};
 	const fingerprint = sha256Of(JSON.stringify({
 		v: 1, row, pdf: servedPdf.sha256, overrides, periods: removed.map((x) => [x.day, x.periods]), nextJson, total: r.totalEarnings, loadsCount: r.loadsCount, flags,
@@ -656,7 +665,8 @@ function describe(out) {
 	if (out.state === "dry-run") lines.push("DRY RUN: nothing written.");
 	lines.push(`Invoice ${p.number} (id ${p.row.id}): weekly, Submitted${p.row.submitted_at ? ` (submitted ${p.row.submitted_at})` : ""}, driver "${p.row.driver}", week ${p.row.week_start} to ${p.row.week_end}`);
 	lines.push(`Flags as this run reads them: TRIP_WORK_DAYS ${f.TRIP_WORK_DAYS_FROM ? `from ${f.TRIP_WORK_DAYS_FROM}` : "off"}, DRIVER_RATE_ONLY ${f.DRIVER_RATE_ONLY_FROM ? `from ${f.DRIVER_RATE_ONLY_FROM}` : "off"}, ` +
-		`INVOICE_BLANK_PICKUP_FALLBACK ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM ? `from ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM}` : "off"}, pre-dispatch rule ${f.preDispatch ? "on" : "off"}; ` +
+		`INVOICE_BLANK_PICKUP_FALLBACK ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM ? `from ${f.INVOICE_BLANK_PICKUP_FALLBACK_FROM}` : "off"}, pre-dispatch rule ${f.preDispatch ? "on" : "off"}, ` +
+		`ARRIVAL_PICKUP_DATE ${f.ARRIVAL_PICKUP_DATE_FROM ? `from ${f.ARRIVAL_PICKUP_DATE_FROM}` : "off"}; ` +
 		`APP_TIMEZONE ${f.APP_TIMEZONE}; process TZ ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
 	lines.push(`Pay: fixed daily rate; the week's rate ${usd(r.dailyRate)} (drivers directory ${Number(r.payDaily) > 0 ? usd(r.payDaily) : "not set"}, truck ${r.truckRate === undefined ? "none" : usd(r.truckRate)})`);
 	lines.push("Overrides this correction relies on (the driver's live \"remove\" rows in the week):");

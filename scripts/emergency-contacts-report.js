@@ -57,7 +57,7 @@ function liftFromServer(db) {
 
 function buildReport(db, scope, { campaign, includeInactive }) {
 	const server = liftFromServer(db);
-	const facts = recipients.driverFacts(db, { findDirectoryRowForDriver: server.findDirectoryRowForDriver, onboardingDocCount: server.ONBOARDING_DOCS.length });
+	const facts = recipients.driverFacts(db, { findDirectoryRowForDriver: server.findDirectoryRowForDriver, onboardingDocKeys: server.ONBOARDING_DOCS.map((d) => d.key) });
 	const enabled = facts.filter((f) => f.enabled);
 	const min = rules.MIN_CONTACTS;
 	const max = rules.MAX_CONTACTS;
