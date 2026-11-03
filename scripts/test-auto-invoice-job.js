@@ -90,6 +90,7 @@
 "use strict";
 
 const fs = require("fs");
+const net = require("net");
 const os = require("os");
 const path = require("path");
 
@@ -2065,6 +2066,7 @@ function sendWorld({ send = SEND_ON, dbFile = null } = {}) {
 	w.events = [];
 	w.sendMail = async (o) => {
 		w.events.push("send");
+		if (w.onSend) w.onSend(o);
 		w.smtp.push({ to: o.to, from: o.from, user: o.user, subject: o.subject, messageId: o.messageId, attachments: (o.attachments || []).map((a) => a.filename) });
 		const b = w.smtpBehaviors.shift() || "OK";
 		if (b === "OK") { w.sent.push(o.messageId); return { ok: true }; }
@@ -2104,6 +2106,76 @@ async function withPatched(patches, fn) {
 	}
 }
 const claimOf = (w, id) => w.claim(id) || {};
+
+// An SMTP server stand-in on 127.0.0.1, inside this process (each case closes
+// it): made-up addresses only. Modes: "ok"; "drop-after-data" (the whole message
+// arrives, then the connection drops); "silent-after-data" (no reply to it);
+// "554-after-data"; "rcpt-550"; "auth-535"; "drop-at-greeting"; "closed-port"
+// (nothing listens).
+function smtpStandIn(mode) {
+	const st = { connections: 0, messages: 0, rcpt: [] };
+	const socks = new Set();
+	const srv = net.createServer((sock) => {
+		socks.add(sock);
+		sock.on("close", () => socks.delete(sock));
+		sock.on("error", () => {});
+		st.connections++;
+		if (mode === "drop-at-greeting") return sock.destroy();
+		let inData = false;
+		let buf = "";
+		sock.write("220 made-up.test ESMTP\r\n");
+		sock.on("data", (chunk) => {
+			buf += chunk.toString("latin1");
+			for (let i = buf.indexOf("\r\n"); i >= 0; i = buf.indexOf("\r\n")) {
+				const line = buf.slice(0, i);
+				buf = buf.slice(i + 2);
+				if (inData) {
+					if (line !== ".") continue;
+					inData = false;
+					st.messages++;
+					if (mode === "drop-after-data") sock.destroy();
+					else if (mode === "554-after-data") sock.write("554 made-up refusal\r\n");
+					else if (mode !== "silent-after-data") sock.write("250 queued\r\n");
+					continue;
+				}
+				const cmd = line.slice(0, 4).toUpperCase();
+				if (cmd === "EHLO") sock.write("250-made-up.test\r\n250-AUTH PLAIN\r\n250 8BITMIME\r\n");
+				else if (cmd === "AUTH") sock.write(mode === "auth-535" ? "535 made-up refusal\r\n" : "235 ok\r\n");
+				else if (cmd === "RCPT") { st.rcpt.push(line.slice(8)); sock.write(mode === "rcpt-550" ? "550 made-up refusal\r\n" : "250 ok\r\n"); }
+				else if (cmd === "DATA") { inData = true; sock.write("354 go ahead\r\n"); }
+				else if (cmd === "QUIT") { sock.write("221 bye\r\n"); sock.end(); }
+				else sock.write("250 ok\r\n");
+			}
+		});
+	});
+	const close = () => new Promise((r) => { for (const s of socks) s.destroy(); srv.close(() => r()); });
+	return new Promise((resolve) => srv.listen(0, "127.0.0.1", async () => {
+		const port = srv.address().port;
+		if (mode === "closed-port") await close();
+		resolve({ st, port, close: mode === "closed-port" ? async () => {} : close });
+	}));
+}
+// The real nodemailer, pointed at the stand-in instead of Gmail, with short timeouts.
+const realMailer = require(path.join(ROOT, "node_modules", "nodemailer"));
+const toStandIn = (port) => ({ createTransport: (opts) => realMailer.createTransport({
+	host: "127.0.0.1", port, secure: false, ignoreTLS: true, auth: opts.auth, connectionTimeout: 1500, greetingTimeout: 1500, socketTimeout: 500,
+}) });
+// One message through lib/auto-invoice-send.js's sender (`lib`) to a stand-in in `mode`.
+async function standInSend(mode, lib = sendLib) {
+	if (!lib) return { outcome: "no sender", messages: -1, connections: -1, rcpt: [] };
+	const s = await smtpStandIn(mode);
+	const mail = { user: MAILBOX.user, pass: MAILBOX.pass, from: `LogisX Inc. <${MAILBOX.user}>`, to: "billing@example-broker.test", subject: "Made-up Order #123456789",
+		html: "<p>made-up</p>", attachments: [], messageId: "<made-up-standin@example.com>" };
+	let out;
+	try {
+		await lib.createSmtpSender({ nodemailer: toStandIn(s.port) })(mail);
+		out = { outcome: "sent" };
+	} catch (e) {
+		out = { outcome: e && e.outcome, code: e && e.code };
+	}
+	await s.close();
+	return { ...out, messages: s.st.messages, connections: s.st.connections, rcpt: s.st.rcpt };
+}
 
 const SEND_CASES = {
 	// The whole gate met: one message by SMTP, no draft; recorded as the job's send.
@@ -2388,6 +2460,78 @@ const SEND_CASES = {
 			reissueRows: w.actions("auto_invoice_reissue_confirmed").map((a) => [a.who, a.details]), sentOff, unknown,
 		};
 	},
+	// The job over the real sender and nodemailer: the stand-in takes the whole
+	// message and drops the connection. Maybe delivered: Sent Mail is searched,
+	// sending stops, and nothing is drafted.
+	async standInJob(lib) {
+		const w = sendWorld();
+		const s = await smtpStandIn("drop-after-data");
+		try {
+			const job = await sendStarted(lib, w, { sendMail: sendLib ? sendLib.createSmtpSender({ nodemailer: toStandIn(s.port) }) : undefined });
+			w.ready("LD-TEST-0610");
+			await job.tick();
+		} finally {
+			await s.close();
+		}
+		const c = claimOf(w, "LD-TEST-0610");
+		const stop = w.stop();
+		return { messages: s.st.messages, state: [c.state, c.reason_code], delivery: c.delivery || "", append: w.calls.append.length, stop: stop && stop.reason, boxes: w.calls.searchBoxes };
+	},
+	// A Draft Invoice press whose draft is in flight when the job reaches its send
+	// (the press's late check ran during the job's render). `pressEnds`: its draft
+	// is recorded (the in-flight row swapped for a draft row) or dropped.
+	async pressFirst(lib, { pressEnds = "recorded" } = {}) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0600");
+		if (factoringStore) factoringStore.ensureSchema(w.db);
+		const check3 = ledgerLib.factoredOrUnreadable;
+		let press = null;
+		await withPatched([[ledgerLib, "factoredOrUnreadable", (db, key) => {
+			const r = check3(db, key);
+			if (!press && factoringStore) {
+				const p = factoringStore.draftBegin(db, { key, loadId: "LD-TEST-0600", invoiceId: "10202026-90", messageId: "<made-up-press@example.com>", path: "imap", nowIso: new Date(w.now).toISOString() });
+				press = p.ok ? "ok" : p.code;
+			}
+			return r;
+		}]], () => job.tick());
+		const atSend = { smtp: w.smtp.length, append: w.calls.append.length, state: w.state("LD-TEST-0600") };
+		if (factoringStore) w.db.prepare("DELETE FROM invoice_draft_inflight WHERE load_key = 'ld-test-0600'").run();
+		if (pressEnds === "recorded") w.handDraft("LD-TEST-0600", "10202026-90");
+		w.now += 6 * MIN;
+		await job.tick();
+		const c = claimOf(w, "LD-TEST-0600");
+		return { press, atSend, after: { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at) } };
+	},
+	// The job has committed its send when the press's late check runs (during the
+	// SMTP call): through factoring-store's draftBegin(), or the route's own
+	// draftHandoff() (`routesLib`), with or without a confirmed re-issue.
+	async jobFirst(lib, { reissue = false, routesLib = null } = {}) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0601");
+		if (!factoringStore) return { press: null };
+		factoringStore.ensureSchema(w.db);
+		const routes = routesLib ? routesLib.create({ db: w.db, env: {}, logAudit: (req, action, entity, id, details) => w.audits.push({ who: req.session.user.username, action, id, details }),
+			logAuditRefusal: () => {}, newMessageId: () => "<made-up-press@example.com>" }) : null;
+		const req = { body: {}, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } };
+		let press = null;
+		w.onSend = () => {
+			if (press) return;
+			const args = { loadId: "LD-TEST-0601", invoiceId: "10202026-91", path: "imap", reissue, recipient: "billing@example-broker.test", total: "$1,000.00" };
+			if (routes) {
+				const h = routes.draftHandoff(req, { ...args, mintedInvoiceId: "10202026-91", user: MAILBOX.user });
+				press = h.ok ? "ok" : [h.http, h.json.code];
+			} else {
+				const r = factoringStore.draftBegin(w.db, { ...args, key: "ld-test-0601", messageId: "<made-up-press@example.com>", nowIso: new Date(w.now).toISOString() });
+				press = r.ok ? "ok" : r.code;
+			}
+		};
+		await job.tick();
+		w.onSend = null;
+		return { press, smtp: w.smtp.length, state: w.state("LD-TEST-0601"), inflight: w.db.prepare("SELECT invoice_id FROM invoice_draft_inflight").all().map((r) => r.invoice_id),
+			voids: w.actions("invoice_number_void").map((a) => a.details) };
+	},
 	// A load whose send got no answer can't be marked factored: it may be with the broker.
 	async markWhileUnconfirmed(lib) {
 		const w = sendWorld();
@@ -2510,13 +2654,13 @@ async function sendSections() {
 	const sendOrder = (ledgerSrc, jobSrc) => {
 		const body = (/function beginSend\([\s\S]*?\n}\n/.exec(ledgerSrc) || [""])[0];
 		const at = (s) => body.indexOf(s);
-		const steps = ["otherDraftRows(db, claim)", "getSendStop(db)", "factoredOrUnreadable(db, key)", "transition(db, key"].map(at);
+		const steps = ["otherDraftRows(db, claim)", "inflightRows(db, key, nowIso)", "getSendStop(db)", "factoredOrUnreadable(db, key)", "transition(db, key"].map(at);
 		const code = jobSrc.replace(/^[ \t]*\/\/.*$/gm, "");
 		const between = (/ledger\.beginSend\(([\s\S]*?)await d\.sendMail\(/.exec(code) || [null, null])[1];
 		return { ordered: steps.every((n, i) => n > 0 && (i === 0 || n > steps[i - 1])), noWait: between !== null && !/\bawait\b/.test(between) };
 	};
 	eq(sendOrder(LEDGER_SRC, JOB_SRC), { ordered: true, noWait: true },
-		"§24 FAILS ON THE OLD CODE: beginSend() reads the hand drafts, then the stop, then the marker last, then commits; nothing awaited between it and the SMTP call");
+		"§24 FAILS ON THE OLD CODE: beginSend() reads the hand drafts, a press's draft in flight, then the stop, then the marker last, then commits; nothing awaited between it and the SMTP call");
 	const hand = await SEND_CASES.handDraftAtSend(jobLib);
 	eq([hand.smtp, hand.append, hand.state, hand.voided], [0, 0, ["skipped", "DRAFTED_BY_HAND"], true], "§24 FAILS ON THE OLD CODE: a hand draft right before the send wins: nothing sent, the number voided");
 
@@ -2557,6 +2701,30 @@ async function sendSections() {
 		"§24 FAILS ON THE OLD CODE: a hand draft while the send is searched for doesn't stop the search; once a person has it (MAYBE_SENT), their draft closes it");
 	const mark = await SEND_CASES.markWhileUnconfirmed(jobLib);
 	eq(mark, { state: ["queued", "SEND_UNCONFIRMED"], mark: "INVOICE_ALREADY_SENT" }, "§24 FAILS ON THE OLD CODE: a load whose send got no answer can't be marked factored (INVOICE_ALREADY_SENT)");
+
+	// H-1 through the job: nodemailer's own error after the whole message went.
+	const dropped = await SEND_CASES.standInJob(jobLib);
+	eq([dropped.messages, dropped.state, dropped.delivery, dropped.append, dropped.stop], [1, ["queued", "SEND_UNCONFIRMED"], "send", 0, "SEND_UNANSWERED"],
+		"§24 FAILS ON THE OLD CODE: the stand-in took the whole message, then dropped: searched for in Sent Mail, never drafted again, the send kept, sending stopped");
+	eq(dropped.boxes, [[SENT_BOX]], "§24 FAILS ON THE OLD CODE: ...searched in Sent Mail at once");
+
+	// M-1: a Draft Invoice press and the job's send: one immediate transaction each, one winner.
+	const pressFirst = await SEND_CASES.pressFirst(jobLib);
+	eq([pressFirst.press, pressFirst.atSend], ["ok", { smtp: 0, append: 0, state: ["queued", "HAND_DRAFT_IN_FLIGHT"] }],
+		"§24 FAILS ON THE OLD CODE: a press's draft in flight when the job reaches its send: nothing sent or drafted, the claim waits");
+	eq(pressFirst.after, { smtp: 0, append: 0, state: ["skipped", "DRAFTED_BY_HAND"], voided: true }, "§24 FAILS ON THE OLD CODE: ...the press's draft recorded: the job's claim closes and its number is void");
+	const pressDropped = await SEND_CASES.pressFirst(jobLib, { pressEnds: "dropped" });
+	eq(pressDropped.after, { smtp: 1, append: 0, state: ["drafted", ""], voided: false }, "§24 ...the press's draft dropped (never made): the job sends on its next look");
+	const jobFirstStore = await SEND_CASES.jobFirst(jobLib);
+	eq([jobFirstStore.press, jobFirstStore.smtp, jobFirstStore.state, jobFirstStore.inflight], ["INVOICE_SENT_MEANWHILE", 1, ["drafted", ""], []],
+		"§24 FAILS ON THE OLD CODE: the job's send committed first: the press's late check refuses it (INVOICE_SENT_MEANWHILE), no draft in flight");
+	const routesLibReal = optional(path.join(ROOT, "lib", "factoring-routes.js"));
+	const jobFirstRoute = routesLibReal ? await SEND_CASES.jobFirst(jobLib, { routesLib: routesLibReal }) : { press: null, voids: [] };
+	eq([jobFirstRoute.press, jobFirstRoute.voids], [[409, "INVOICE_SENT_MEANWHILE"], ["10202026-91 was minted for this load and never used (INVOICE_SENT_MEANWHILE)"]],
+		"§24 FAILS ON THE OLD CODE: ...through the route's hand-off: 409, and the press's number voided in the audit log");
+	const reissueStore = await SEND_CASES.jobFirst(jobLib, { reissue: true });
+	const reissueRoute = routesLibReal ? await SEND_CASES.jobFirst(jobLib, { reissue: true, routesLib: routesLibReal }) : { press: null };
+	eq([reissueStore.press, reissueStore.inflight, reissueRoute.press], ["ok", ["10202026-91"], "ok"], "§24 a press that confirmed a re-issue goes on (its draft in flight)");
 
 	// The stops.
 	const refused = await SEND_CASES.smtpRefused(jobLib, "REFUSED");
@@ -2661,11 +2829,35 @@ async function sendSections() {
 				same([files[0], files[1], att("987654321.pdf")]), same([files[0], files[1], { filename: "123456789.pdf", content: Buffer.alloc(0) }]),
 				same([files[0], att("123456789.pdf"), files[2]]), same([files[0], att("POD_1_of_2_123456789.pdf"), att("POD_2_of_2_123456789.pdf"), files[2]]),
 			],
+			// The shapes nodemailer's smtp-connection (10.1.4, the lockfile's) gives
+			// its errors: code, the command in flight, and a timeout's timeoutType.
 			outcomes: [
-				{ code: "EAUTH", command: "AUTH PLAIN" }, { code: "EENVELOPE", command: "RCPT TO" }, { code: "EENVELOPE", command: "DATA" }, { code: "EMESSAGE", command: "DATA" },
-				{ code: "ECONNECTION", command: "CONN" }, { code: "ETIMEDOUT", command: "CONN" }, { code: "ETIMEDOUT", command: "DATA" }, { code: "ECONNECTION", command: "API" },
-				{ code: "ESOCKET" }, {}, null,
-			].map((e) => lib.smtpOutcome(e)),
+				// Connect and log in (verify()): that connection carries no message.
+				[{ code: "ECONNECTION", command: "CONN" }, "verify"],
+				[{ code: "ESOCKET", command: "CONN", originalCode: "ECONNREFUSED" }, "verify"],
+				[{ code: "ETIMEDOUT", command: "CONN", timeoutType: "SOCKET_TIMEOUT" }, "verify"],
+				[{ code: "EAUTH", command: "AUTH PLAIN", responseCode: 535 }, "verify"],
+				// The send: before the body.
+				[{ code: "EAUTH", command: "AUTH PLAIN", responseCode: 535 }, "send"],
+				[{ code: "EENVELOPE", command: "MAIL FROM", responseCode: 550 }, "send"],
+				[{ code: "EENVELOPE", command: "RCPT TO", responseCode: 550 }, "send"],
+				[{ code: "EENVELOPE", command: "DATA", responseCode: 554 }, "send"],
+				[{ code: "EMESSAGE", command: "MAIL FROM" }, "send"],
+				[{ code: "EREQUIRETLS", command: "MAIL FROM" }, "send"],
+				[{ code: "EDNS", command: "CONN" }, "send"],
+				[{ code: "ETIMEDOUT", command: "CONN", timeoutType: "CONNECT_TIMEOUT" }, "send"],
+				[{ code: "ETIMEDOUT", command: "CONN", timeoutType: "GREETING_TIMEOUT" }, "send"],
+				// The send: the body may have gone.
+				[{ code: "EMESSAGE", command: "DATA", responseCode: 554 }, "send"],
+				[{ code: "ECONNECTION", command: "CONN" }, "send"],
+				[{ code: "ETIMEDOUT", command: "CONN", timeoutType: "SOCKET_TIMEOUT" }, "send"],
+				[{ code: "ETIMEDOUT", command: "CONN" }, "send"],
+				[{ code: "ESOCKET", command: "CONN" }, "send"],
+				[{ code: "ETLS", command: "CONN" }, "send"],
+				[{ code: "EPROTOCOL", command: "RSET" }, "send"],
+				[{ code: "ESTREAM", command: "API" }, "send"],
+				[{}, "send"], [null, "send"],
+			].map(([e, phase]) => lib.smtpOutcome(e, phase)),
 		};
 	};
 	const pureNow = pure(sendLib);
@@ -2676,7 +2868,9 @@ async function sendSections() {
 		noDomains: [],
 		gate: [true, "OFF", "OFF", "STOPPED", "DOMAIN_NOT_LISTED", "DOMAIN_NOT_LISTED"],
 		check: [null, null, "RECIPIENT", "RECIPIENT", "RECIPIENT", "HEADERS", "HEADERS", "HEADERS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", null],
-		outcomes: ["login", "refused", "refused", "refused", "refused", "refused", "unknown", "unknown", "unknown", "unknown", "unknown"],
+		outcomes: ["refused", "refused", "refused", "login",
+			"login", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "refused",
+			"unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"],
 	};
 	eq(pureNow, PURE_WANT, "§24 FAILS ON THE OLD CODE: the settings (exactly \"true\", never in a replica; exact domains, free mail refused, none by default), the gate, the last check and the SMTP outcomes");
 
@@ -2685,6 +2879,7 @@ async function sendSections() {
 	if (sendLib) {
 		const seen = [];
 		const fakeMailer = (fail) => ({ createTransport: (opts) => ({
+			verify: async () => true,
 			sendMail: async (m) => { seen.push({ opts, m }); if (fail) throw Object.assign(new Error(`550 refused for ${BROKER}`), fail); return { accepted: [m.to] }; },
 			close: () => seen.push("closed"),
 		}) });
@@ -2710,11 +2905,34 @@ async function sendSections() {
 		eq(setup && [setup.code, setup.outcome], ["SEND_SETUP", "refused"], "§24 ...no password: refused before any connection");
 	}
 
+	// The real nodemailer against an SMTP stand-in on 127.0.0.1 (in this process):
+	// what the sender answers when the server took the whole message and then
+	// dropped, went silent or refused it (H-1), and before the message.
+	{
+		const runs = {};
+		for (const mode of ["ok", "drop-after-data", "silent-after-data", "554-after-data", "rcpt-550", "auth-535", "drop-at-greeting", "closed-port"]) {
+			runs[mode] = await standInSend(mode);
+		}
+		const view = (r) => [r.outcome, r.messages];
+		eq([view(runs.ok), runs.ok.connections], [["sent", 1], 2], "§24 FAILS ON THE OLD CODE: a send: one message, after a login on a connection of its own that carries none");
+		eq(view(runs["drop-after-data"]), ["unknown", 1], "§24 FAILS ON THE OLD CODE: the whole message sent, then the connection dropped: it may be delivered (never 'refused')");
+		eq(view(runs["silent-after-data"]), ["unknown", 1], "§24 FAILS ON THE OLD CODE: the whole message sent, then no reply until the socket timeout: it may be delivered");
+		eq(view(runs["554-after-data"]), ["unknown", 1], "§24 FAILS ON THE OLD CODE: the whole message sent, then refused: counted as maybe delivered, never drafted again");
+		eq([view(runs["rcpt-550"]), view(runs["auth-535"]), view(runs["drop-at-greeting"]), view(runs["closed-port"])],
+			[["refused", 0], ["login", 0], ["refused", 0], ["refused", 0]], "§24 refused before the message (the recipient, the login, the greeting, the connection): nothing delivered");
+		ok(Object.values(runs).every((r) => r.rcpt.every((a) => a === "<billing@example-broker.test>")), "§24 ...and the stand-in only ever saw the one made-up recipient");
+	}
+
 	// One shared via set: the job's literals live only in lib/auto-invoice-rules.js.
+	// The server's text through the helper (scripts/lib/server-source.js), lib/ as is.
 	const literalHits = [];
-	for (const file of [...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join("lib", f)), "server.js"]) {
-		const n = (fs.readFileSync(path.join(ROOT, file), "utf8").match(/["'`]auto-(?:imap|smtp)["'`]/g) || []).length;
-		if (n) literalHits.push([file, n]);
+	const sources = [
+		...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => [path.join("lib", f), fs.readFileSync(path.join(ROOT, "lib", f), "utf8")]),
+		["the server's source", require("./lib/server-source").serverSource()],
+	];
+	for (const [label, text] of sources) {
+		const n = (text.match(/["'`]auto-(?:imap|smtp)["'`]/g) || []).length;
+		if (n) literalHits.push([label, n]);
 	}
 	eq(literalHits, [[path.join("lib", "auto-invoice-rules.js"), 2]], "§24 FAILS ON THE OLD CODE: the literals \"auto-imap\" and \"auto-smtp\" appear only in the shared set (rules.JOB_VIAS)");
 	const sendSrc = sendLib ? fs.readFileSync(SEND_FILE, "utf8") : "";
@@ -2752,6 +2970,9 @@ async function sendSections() {
 			null, (lib) => SEND_CASES.stopRoute(lib, { send: { enabled: false, domains: [SEND_DOMAIN] } }), (x) => x.registered === false],
 		["no row for the allowlist's refusal", "} else if (g && g.why === \"DOMAIN_NOT_LISTED\") {", "} else if (false) {",
 			null, (lib) => SEND_CASES.drafts(lib, { send: { enabled: true, domains: ["example-other.test"] } }), (x) => x.refused.length === 1],
+		["a press's draft in flight answered with a draft", "if (begun.reason === \"press\") return temporary(ledger.getClaim(db, key), { code: \"HAND_DRAFT_IN_FLIGHT\", countsAttempt: false });",
+			"if (begun.reason === \"press\") return DRAFT_INSTEAD;",
+			null, (lib) => SEND_CASES.pressFirst(lib), (x) => x.atSend.append === 0 && x.atSend.state[1] === "HAND_DRAFT_IN_FLIGHT"],
 	];
 	for (const [label, from, to, , run, pinned] of jobMutants) {
 		const lib = mutantModule(JOB_FILE, from, to);
@@ -2765,8 +2986,10 @@ async function sendSections() {
 			() => SEND_CASES.factoredAtSend(jobLib), (x) => x.smtp === 0],
 		["beginSend() without the stop", "\t\tif (getSendStop(db)) return { ok: false, reason: \"stopped\" };\n", "", "beginSend",
 			() => SEND_CASES.stopAtSend(jobLib), (x) => x.smtp === 0],
-		["beginSend() without the hand-draft check", "\t\tif (otherDraftRows(db, claim).length) return { ok: false, reason: \"drafted\" };\n\t\tif (getSendStop", "\t\tif (getSendStop", "beginSend",
+		["beginSend() without the hand-draft check", "\t\tif (otherDraftRows(db, claim).length) return { ok: false, reason: \"drafted\" };\n\t\tif (factoring.inflightRows", "\t\tif (factoring.inflightRows", "beginSend",
 			() => SEND_CASES.handDraftAtSend(jobLib), (x) => x.smtp === 0],
+		["beginSend() without a press's draft in flight", "\t\tif (factoring.inflightRows(db, key, nowIso).length) return { ok: false, reason: \"press\" };\n", "", "beginSend",
+			() => SEND_CASES.pressFirst(jobLib), (x) => x.atSend.smtp === 0],
 		["the sent row taken for somebody else's", "rules.isJobVia(r.via) && claim.invoice_id && r.invoice_id === claim.invoice_id", "r.via === \"auto-imap\" && claim.invoice_id && r.invoice_id === claim.invoice_id", "otherDraftRows",
 			() => SEND_CASES.sends(jobLib), (x) => x.other === 0],
 		["a voided number used again", "const usable = Boolean(claim.invoice_id) && !claim.number_voided_at;", "const usable = Boolean(claim.invoice_id);", "reserveNumber",
@@ -2796,6 +3019,38 @@ async function sendSections() {
 		const real = await SEND_CASES.markWhileUnconfirmed(jobLib);
 		const mutated = await withPatched([[factoringStore, "mark", markMutant.mark]], () => SEND_CASES.markWhileUnconfirmed(jobLib));
 		ok(real.mark === "INVOICE_ALREADY_SENT" && mutated.mark !== "INVOICE_ALREADY_SENT", "§24 MUTANT mark() without the unconfirmed-send check: caught");
+	}
+	// The press's side of M-1 (factoring-store's late check, and the route's hand-off).
+	for (const [label, from, to, opts, pinned] of [
+		["the press's late check blind to the job's send", "\tif (reissue !== true && autoClaimSent(db, k)) return refusal(\"INVOICE_SENT_MEANWHILE\");\n", "", {}, (x) => x.press === "INVOICE_SENT_MEANWHILE"],
+		["a confirmed re-issue refused late", "if (reissue !== true && autoClaimSent(db, k))", "if (autoClaimSent(db, k))", { reissue: true }, (x) => x.press === "ok"],
+		["draftBegin() dropping the re-issue", "const r = lateChecks(db, k, { confirmed, reissue, nowIso });", "const r = lateChecks(db, k, { confirmed, nowIso });", { reissue: true }, (x) => x.press === "ok"],
+	]) {
+		const lib = mutantModule(FACTORING_FILE, from, to);
+		ok(lib, `§24 MUTANT ${label}: applied to lib/factoring-store.js once`);
+		if (!lib || !factoringStore) continue;
+		const real = pinned(await SEND_CASES.jobFirst(jobLib, opts));
+		const mutated = pinned(await withPatched([[factoringStore, "draftBegin", lib.draftBegin]], () => SEND_CASES.jobFirst(jobLib, opts)));
+		ok(real && !mutated, `§24 MUTANT ${label}: caught`);
+	}
+	const ROUTES_FILE = path.join(ROOT, "lib", "factoring-routes.js");
+	const routesMutant = fs.existsSync(ROUTES_FILE) ? mutantModule(ROUTES_FILE, "path, confirmed, reissue, actorId", "path, confirmed, actorId") : null;
+	ok(routesMutant, "§24 MUTANT the route's hand-off dropping the re-issue: applied to lib/factoring-routes.js once");
+	if (routesMutant && routesLibReal) {
+		const real = await SEND_CASES.jobFirst(jobLib, { reissue: true, routesLib: routesLibReal });
+		const mutated = await SEND_CASES.jobFirst(jobLib, { reissue: true, routesLib: routesMutant });
+		ok(real.press === "ok" && mutated.press !== "ok", "§24 MUTANT the route's hand-off dropping the re-issue: caught");
+	}
+	// The sender's login-first connection (H-1).
+	if (sendLib) {
+		for (const [label, from, to, mode, pinned] of [
+			["no login-first connection", "\t\t\tawait transport.verify();\n", "", "ok", (x) => x.connections === 2],
+			["the phase never moves on to the send", "\t\t\tphase = \"send\";\n", "", "drop-after-data", (x) => x.outcome === "unknown"],
+		]) {
+			const lib = mutantModule(SEND_FILE, from, to);
+			ok(lib, `§24 MUTANT ${label}: applied to lib/auto-invoice-send.js once`);
+			if (lib) ok(pinned(await standInSend(mode)) && !pinned(await standInSend(mode, lib)), `§24 MUTANT ${label}: caught`);
+		}
 	}
 	for (const [label, from, to] of [
 		["the marker read before the stop", "\t\tif (getSendStop(db)) return { ok: false, reason: \"stopped\" };\n\t\tif (factoredOrUnreadable(db, key)) return { ok: false, reason: \"factored\" };",
@@ -2830,7 +3085,10 @@ async function sendSections() {
 			["a Cc or Bcc let through", "if (JSON.stringify(Object.keys(m).sort()) !== JSON.stringify(MESSAGE_KEYS)) return \"HEADERS\";", ""],
 			["files not the render's own", "atts !== rendered.attachments || ", ""],
 			["the rate con not matched to the invoice", "if (names[names.length - 1] !== rateCon || names.indexOf(rateCon) !== names.length - 1) return \"ATTACHMENTS\";", ""],
-			["an unanswered DATA taken as refused", "if (String((e && e.command) || \"\") === \"CONN\") return \"refused\";", "if (String((e && e.command) || \"\") !== \"\") return \"refused\";"],
+			["CONN taken as nothing sent", "\tconst command = String((e && e.command) || \"\");\n", "\tconst command = String((e && e.command) || \"\");\n\tif (command === \"CONN\") return \"refused\";\n"],
+			["a refusal after the body taken as nothing sent", "if (code === \"EMESSAGE\" && (command === \"API\" || command === \"MAIL FROM\")) return \"refused\";", "if (code === \"EMESSAGE\") return \"refused\";"],
+			["no login-first phase", "\tif (phase === \"verify\") return \"refused\";\n", ""],
+			["a socket timeout taken as a setup timeout", "new Set([\"CONNECT_TIMEOUT\", \"GREETING_TIMEOUT\", \"UPGRADE_TIMEOUT\"])", "new Set([\"CONNECT_TIMEOUT\", \"GREETING_TIMEOUT\", \"UPGRADE_TIMEOUT\", \"SOCKET_TIMEOUT\"])"],
 		];
 		for (const [label, from, to] of pureMutants) {
 			const lib = mutantModule(SEND_FILE, from, to);

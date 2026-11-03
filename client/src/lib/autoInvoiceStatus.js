@@ -20,6 +20,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   MAILBOX_PAUSED: { short: 'Gmail paused', text: 'Gmail refused the mailbox login, so automatic drafts are paused. They try again on their own.' },
   SETTINGS_UNREADABLE: { short: 'opt-out list unreadable', text: 'The opt-out list could not be read, so nothing is drafted. Save the opt-out list again.' },
   SEND_UNCONFIRMED: { short: 'checking Sent Mail', text: 'The invoice email got no answer from Gmail, so it may have been sent. Sent Mail is checked again shortly. It is never sent twice.' },
+  HAND_DRAFT_IN_FLIGHT: { short: 'being drafted by hand', text: 'Someone was drafting this invoice by hand, so it was not sent. It is looked at again in a few minutes.' },
   ALREADY_DRAFTED: { short: 'drafted by hand', text: 'An invoice draft already existed for this load.' },
   DRAFTED_BY_HAND: { short: 'drafted by hand', text: 'Someone drafted this invoice by hand.' },
   BROKER_OPTED_OUT: { short: 'broker opted out', text: 'This broker is opted out of automatic drafts.' },

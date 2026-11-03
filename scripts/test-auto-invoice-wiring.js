@@ -182,6 +182,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		rendererBusy: false,
 		geminiAt: 0,
 		smtp: [],
+		verifies: 0,
 		smtpFails: null,
 		transports: [],
 		limiters: [],
@@ -308,6 +309,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			createTransport: (opts) => {
 				w.transports.push({ service: opts.service, user: opts.auth && opts.auth.user });
 				return {
+					verify: async () => { w.verifies++; return true; },
 					sendMail: async (m) => {
 						if (w.smtpFails) throw w.smtpFails;
 						const mime = await realImap.buildMime(m);
@@ -800,6 +802,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			attachments: ["Example Broker Invoice Order #LD-TEST-0101.pdf", "LD-TEST-0101_POD.pdf", "LD-TEST-0101.pdf"],
 		}], "§10 FAILS ON THE OLD CODE: one message: from the mailbox, to the rate con's billing email alone, the invoice, the POD and the rate con");
 		eq(w.transports, [{ service: "gmail", user: MAILBOX.GMAIL_USER }], "§10 FAILS ON THE OLD CODE: through Gmail's SMTP with the mailbox's own login");
+		eq(w.verifies, 1, "§10 FAILS ON THE OLD CODE: it connects and logs in first, on a connection that carries no message");
 		ok(w.smtp[0] && w.smtp[0].messageId === c.message_id && w.smtp[0].mime.includes(`Message-ID: ${c.message_id}`), "§10 FAILS ON THE OLD CODE: ...carrying the claim's own Message-ID, so a lost answer is looked for in Sent Mail");
 		const files = w.smtp[0] ? w.smtp[0].attachmentBytes : [];
 		ok(files[1] && files[1].toString("latin1") === "%PDF-1.4 made-up POD for LD-TEST-0101", "§10 FAILS ON THE OLD CODE: the POD goes as it is, byte for byte");
@@ -832,6 +835,9 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const sentCheck = route.indexOf("const sentCheck = autoInvoice.draftButtonCheck(req, loadId, { dryRun });");
 		ok(early > 0 && sentCheck > early && sentCheck < route.indexOf("// 1)") && route.includes("if (!sentCheck.ok) return res.status(sentCheck.http).json(sentCheck.json);"),
 			"§10 FAILS ON THE OLD CODE: the Draft Invoice route asks draftButtonCheck() (with its dry-run flag) after the factoring check, before anything is read or minted");
+		const handoff = route.indexOf("factoringRoutes.draftHandoff(req, {");
+		ok(handoff > sentCheck && route.slice(handoff, route.indexOf("})", handoff)).includes("reissue: Boolean(sentCheck.reissue),"),
+			"§10 FAILS ON THE OLD CODE: its late hand-off check is told whether the press confirmed a re-issue (else a send the job began meanwhile refuses it)");
 
 		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		const at = TEMPLATE.indexOf("# --- Automatic broker invoice sending");
