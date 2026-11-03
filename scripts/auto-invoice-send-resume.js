@@ -2,7 +2,7 @@
 // Resume automatic invoice sending (AUTO_INVOICE_SEND_ENABLED) after a stop: the
 // one way the stop is cleared. A Super Admin's Stop, or an automatic one (an SMTP
 // refusal, an unanswered send, a send not found in Sent Mail, a load changed
-// after its send), stays until the lead runs this on the server, on Arvin's yes.
+// after its send), stays until this runs on the server, after an approved go-ahead.
 //
 //   node scripts/auto-invoice-send-resume.js --db=<app.db> (--dry-run | --apply) [--json]
 //
