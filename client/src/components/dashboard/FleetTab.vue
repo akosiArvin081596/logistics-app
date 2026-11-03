@@ -66,6 +66,8 @@
               <div style="font-size:0.875rem;margin-top:4px;">{{ selected?.Phone }}</div>
             </div>
           </div>
+          <!-- Emergency contacts: shown only once the server answers (staff, feature on) -->
+          <EmergencyContactsPanel v-if="selected" :driver-name="selected.Driver" />
           <!-- Time off (R11), for Super Admin and Dispatcher. The fleet entry
                carries offUntil only while availability is on. -->
           <DriverAvailabilityPanel
@@ -85,6 +87,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import EmptyState from '../shared/EmptyState.vue'
 import DriverAvailabilityPanel from '../drivers-db/DriverAvailabilityPanel.vue'
+import EmergencyContactsPanel from '../drivers-db/EmergencyContactsPanel.vue'
 import { fleetPillText } from '../../lib/availabilityText'
 // Two queued loads can read alike once their IDs are withheld ("QA-[contact
 // withheld]"): each chip is keyed by its load's key, else its position.
