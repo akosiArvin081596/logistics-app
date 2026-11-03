@@ -48,10 +48,11 @@ export const useDriverStore = defineStore('driver', {
     application: null,
     profilePictureUrl: '',
     driverDirectoryId: 0,
-    // His own current and upcoming time off (R11), { today, rows }. null when
-    // the payload carries no `timeOff` key (the server's
-    // DRIVER_TIME_OFF_SCREEN_ENABLED is off): the Kit card and the Loads
-    // banner then render nothing.
+    // His own current and upcoming time off (R11), { today, rows }, plus
+    // { requests, requestLimits, canRequest } while the server's
+    // DRIVER_TIME_OFF_REQUESTS_ENABLED is on. null when the payload carries no
+    // `timeOff` key (the server's DRIVER_TIME_OFF_SCREEN_ENABLED is off): the
+    // Kit card and the Loads banner then render nothing.
     timeOff: null,
     // How many emergency contacts he has on file, { required, maximum, onFile },
     // never the contacts (EmergencyContactsForm.vue reads those itself). null when
@@ -333,10 +334,12 @@ export const useDriverStore = defineStore('driver', {
   },
 
   actions: {
-    async loadData() {
+    async loadData(opts) {
       if (!this.driverName) return
       if (this._loadingPromise) return this._loadingPromise
-      this.isLoading = true
+      // { quiet: true } leaves the screen up (no skeleton swap), so a card that
+      // asked for the reload stays mounted and keeps its own note.
+      if (!(opts && opts.quiet === true)) this.isLoading = true
       this._loadingPromise = api.get(
         `/api/driver/${encodeURIComponent(this.driverName)}`
       )
@@ -579,6 +582,30 @@ export const useDriverStore = defineStore('driver', {
 
     addNotification(notif) {
       this.notifications.unshift(notif)
+    },
+
+    // A request for days off for themselves (POST /api/driver/me/availability,
+    // only while the server's DRIVER_TIME_OFF_REQUESTS_ENABLED is on), then a
+    // quiet reload so the card lists it. A refusal throws with the server's own
+    // words (useApi), which the card shows; the reply is captured before the
+    // reload, whose failure never hides a request that was saved.
+    async requestTimeOff(body) {
+      const res = await api.post('/api/driver/me/availability', body)
+      await this.loadData({ quiet: true }).catch(() => {})
+      return res
+    },
+
+    // Withdraws their own request while it still waits, then reloads quietly.
+    async cancelTimeOffRequest(id) {
+      const res = await api.post(`/api/driver/me/availability/${encodeURIComponent(id)}/cancel`, {})
+      await this.loadData({ quiet: true }).catch(() => {})
+      return res
+    },
+
+    // After a refusal over the days (the business day moved on while the form
+    // was open): a quiet reload, so the form's limits are the server's again.
+    async refreshTimeOffLimits() {
+      await this.loadData({ quiet: true }).catch(() => {})
     },
 
     // `consent` is REQUIRED by the server (400 CONSENT_REQUIRED without it) —

@@ -19,7 +19,9 @@
 //      over today-32..today+1 (still both sides of the floor and of yesterday)
 //   §3 every create over the same grid (and 60 and 61 days from each first
 //      day), by createLimits
-//   §4 a cancelled row, and a today that can't be read
+//   §4 a cancelled row, and a today that can't be read; a driver's request
+//      (PR 4) still waiting or declined reads "none" and the validator refuses
+//      any change of it, an approved one reads as a staff row
 //   §5 the real panel code: client/src/lib/availabilityText.js canSaveEdit(),
 //      rowActions() and datesWithinBounds(createDateBounds()), on the rows as
 //      served, against the validator given the body the panel would send
@@ -214,6 +216,27 @@ function clientAgreement(T, today) {
 			eq("§4.5 Super Admin, today unreadable: still \"full\" (the validator never reads today for him)",
 				[A.availabilityEditScope(row("2026-10-14", "2026-10-20"), { todayKey: "", isSuperAdmin: true }), A.availabilityCreateLimits({ todayKey: "", isSuperAdmin: true })],
 				["full", { fromMin: null, toMin: null, maxDays: 60, dispatcherBackDays: 30 }]);
+			// A driver's request (plan B Revision 2, PR 4) is decided, never edited:
+			// waiting or declined, no one may change or cancel it; once approved it is
+			// time off like any other row.
+			const asked = (status) => row("2026-10-20", "2026-10-22", { request_status: status, source: "driver" });
+			for (const [role, isSuperAdmin] of ROLES) {
+				const ctx = { todayKey: "2026-10-15", isSuperAdmin };
+				eq(`§4.6 ${role}, a waiting request and a declined one: "none", limits null`,
+					[A.availabilityEditScope(asked("requested"), ctx), A.availabilityEditLimits(asked("requested"), ctx), A.availabilityEditScope(asked("declined"), ctx), A.availabilityEditLimits(asked("declined"), ctx)],
+					["none", null, "none", null]);
+				eq("§4.7 ...and the validator refuses any change or cancel of either (409 TIME_OFF_REQUEST_PENDING, TIME_OFF_REQUEST_DECLINED)",
+					[{}, { to: "2026-10-21" }, { reason: "x" }].map((body) => [A.validateAvailability(body, { ...ctx, existing: asked("requested") }).code, A.validateAvailability(body, { ...ctx, existing: asked("declined") }).code]),
+					[["TIME_OFF_REQUEST_PENDING", "TIME_OFF_REQUEST_DECLINED"], ["TIME_OFF_REQUEST_PENDING", "TIME_OFF_REQUEST_DECLINED"], ["TIME_OFF_REQUEST_PENDING", "TIME_OFF_REQUEST_DECLINED"]]);
+				eq("§4.8 ...an approved one reads as a staff row on the same days", [A.availabilityEditScope(asked("approved"), ctx), A.availabilityEditLimits(asked("approved"), ctx)],
+					[A.availabilityEditScope(row("2026-10-20", "2026-10-22"), ctx), A.availabilityEditLimits(row("2026-10-20", "2026-10-22"), ctx)]);
+				if (T) {
+					const served = (status) => ({ id: 1, kind: "vacation", from: "2026-10-20", to: "2026-10-22", reason: "", request: status === "requested" ? "waiting" : status, source: "driver",
+						editable: A.availabilityEditScope(asked(status), ctx), limits: A.availabilityEditLimits(asked(status), ctx) });
+					eq("§4.9 ...so the panel gives a waiting or declined row no Edit, End early or Cancel", [T.rowActions(served("requested")), T.rowActions(served("declined"))],
+						[{ edit: false, endEarly: false, cancel: false }, { edit: false, endEarly: false, cancel: false }]);
+				}
+			}
 		}
 
 		if (T) {

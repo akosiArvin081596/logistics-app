@@ -2,7 +2,8 @@
 // scripts/time-off-eld-check-report.js — the time-off ELD check's read-only "what
 // would change" report, run before DRIVER_TIME_OFF_ELD_CHECK_ENABLED goes on:
 //   1. flag states: not read here (the start-up line and the bugs.md record say)
-//   2. live time-off rows and their days to check
+//   2. live time-off rows (approved, by source) and their days to check; drivers'
+//      requests still waiting or declined counted apart, never judged
 //   3. what the first run would write: day results by state and reason, and the
 //      notices (the server's own timeOffEldRunPlan(), lifted)
 //   4. --shadow: every driver-day of the last --days finished days judged as if
@@ -108,8 +109,14 @@ async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 	const normalize = server.normalizeDriverName;
 	const monthClosed = (day) => server.periodWriteLocked(day.slice(0, 7));
 
-	// 2 and 3: the live rows and what the first run would write.
-	const live = db.prepare("SELECT id, from_date, to_date FROM driver_availability WHERE cancelled_at IS NULL").all();
+	// 2 and 3: the live rows and what the first run would write. Approved rows only, as the run judges them; a
+	// driver's request still waiting or declined is counted apart and never judged.
+	const live = db.prepare("SELECT id, from_date, to_date, source FROM driver_availability WHERE cancelled_at IS NULL AND request_status = 'approved'").all();
+	const requests = { waiting: 0, declined: 0 };
+	for (const r of db.prepare("SELECT request_status, COUNT(*) AS n FROM driver_availability WHERE cancelled_at IS NULL AND request_status <> 'approved' GROUP BY request_status").all()) {
+		if (r.request_status === "requested") requests.waiting = r.n;
+		else if (r.request_status === "declined") requests.declined = r.n;
+	}
 	const plan = server.timeOffEldRunPlan({ nowMs, loadIndex });
 	const firstRun = { rows: plan.rows.length, days: 0, byVerdict: {}, notices: 0, noticeLines: 0 };
 	const perRow = [];
@@ -226,7 +233,11 @@ async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 	return {
 		generatedAt: new Date().toISOString(), asOf: new Date(nowMs).toISOString(), today, rule: eldCheck.TIME_OFF_ELD_RULE,
 		flags: "not read here: the start-up line ([time-off-eld] ELD check ON/OFF) and the bugs.md record say",
-		liveRows: { rows: live.length, bySource: { staff: live.length }, daysToCheck: firstRun.days, futureDays },
+		liveRows: {
+			rows: live.length,
+			bySource: { staff: live.filter((r) => r.source !== "driver").length, driver: live.filter((r) => r.source === "driver").length },
+			requestsNotJudged: requests, daysToCheck: firstRun.days, futureDays,
+		},
 		firstRun, perRow,
 		shadow: shadowOut,
 		devices,
@@ -299,7 +310,7 @@ function printText(r) {
 	const pairs = (obj) => Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k} ${n}`).join("; ") || "none";
 	L.push(`Time-off ELD check: what would change, as of ${r.asOf} (business day ${r.today}). Read-only; nothing was written. Rule version ${r.rule.version}.`);
 	L.push(`1. Flags: ${r.flags}.`);
-	L.push(`2. Live time-off rows: ${r.liveRows.rows} (by source: staff ${r.liveRows.bySource.staff}); finished days to check ${r.liveRows.daysToCheck}; days still to come ${r.liveRows.futureDays}.`);
+	L.push(`2. Live time-off rows (approved): ${r.liveRows.rows} (by source: staff ${r.liveRows.bySource.staff}, driver ${r.liveRows.bySource.driver}); finished days to check ${r.liveRows.daysToCheck}; days still to come ${r.liveRows.futureDays}. Drivers' requests not judged: waiting ${r.liveRows.requestsNotJudged.waiting}, declined ${r.liveRows.requestsNotJudged.declined}.`);
 	L.push(`3. The first run would write ${r.firstRun.days} day result(s) for ${r.firstRun.rows} row(s): ${pairs(r.firstRun.byVerdict)}. Notices: ${r.firstRun.notices} (${r.firstRun.noticeLines} day line(s)).`);
 	for (const row of r.perRow) L.push(`   ${row.driver} ${row.from}..${row.to}: ${row.days.map(([d, v]) => `${d} ${v}`).join(", ")}`);
 	if (r.shadow) {
@@ -346,6 +357,10 @@ async function main() {
 	try {
 		const missing = TABLES.filter((t) => !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t));
 		if (missing.length) refuse(`the database has no ${missing.join(", ")} table: it is older than the check, or not this app's`);
+		// The run plan reads approved rows only, so a copy from before the request columns can't be read as the app reads it.
+		if (!db.prepare("PRAGMA table_info(driver_availability)").all().some((c) => c.name === "request_status")) {
+			refuse("driver_availability has no request_status column: this copy is older than the time-off request columns, which the app adds when it starts; use a copy taken after a start of this version");
+		}
 		const result = await buildReport(db, { sheetData, nowMs, days, shadow: args.shadow === true, names: args.names === true });
 		if (args.json === true) console.log(JSON.stringify(result, null, 1));
 		else printText(result);
