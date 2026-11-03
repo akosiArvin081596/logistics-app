@@ -13,7 +13,10 @@
        screens whose data says availability is on. While the rows carry
        `request` (the server's DRIVER_TIME_OFF_REQUESTS_ENABLED), a driver's
        waiting request shows first with Approve and Decline, and a declined
-       one sits with the past rows; neither can be edited or cancelled. -->
+       one sits with the past rows; neither can be edited or cancelled. While
+       rows carry `home` (and the list `homeTime`), each row shows its home
+       time, and the edit and add forms take one: a city and a state, or
+       neither. -->
   <section ref="panelEl" class="avail" aria-label="Time off">
     <!-- One row's buttons and its inline edit form, shared by the live and the
          past lists. -->
@@ -39,6 +42,20 @@
             <input v-model="editForm.reason" type="text" maxlength="200" class="avail-input" autocomplete="off" />
             <span class="avail-hint">Type of leave only (for example vacation or family). No medical details.</span>
           </label>
+          <template v-if="'home' in r">
+            <label class="avail-label">
+              Home time city (optional)
+              <input v-model="editForm.homeCity" type="text" :maxlength="HOME_CITY_MAX" class="avail-input" autocomplete="off" />
+            </label>
+            <label class="avail-label">
+              Home time state
+              <select v-model="editForm.homeState" class="avail-input">
+                <option value="">None</option>
+                <option v-for="s in US_STATES" :key="s.code" :value="s.code">{{ s.name }} ({{ s.code }})</option>
+              </select>
+              <span class="avail-hint">Where the driver needs to be. Both or neither.</span>
+            </label>
+          </template>
         </div>
         <template v-else>
           <p class="avail-note">{{ endEarlyNote(createLimits) }}</p>
@@ -74,6 +91,7 @@
           <span class="avail-tag avail-tag-wait">Waiting for approval</span>
           <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
           <span class="avail-muted">{{ panelRequestText(r) }}</span>
+          <span v-if="panelHomeText(r)" class="avail-home">{{ panelHomeText(r) }}</span>
         </div>
         <div class="avail-actions">
           <button type="button" class="btn btn-primary" :disabled="busy" @click="decide(r, 'approve')">Approve</button>
@@ -90,6 +108,7 @@
           <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
           <span v-if="r.reason" class="avail-reason">{{ r.reason }}</span>
           <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
+          <span v-if="panelHomeText(r)" class="avail-home">{{ panelHomeText(r) }}</span>
         </div>
         <ReuseRowEdit :r="r" />
       </li>
@@ -117,10 +136,24 @@
           <input v-model="form.reason" type="text" maxlength="200" class="avail-input" autocomplete="off" />
           <span class="avail-hint">Type of leave only (for example vacation or family). No medical details.</span>
         </label>
+        <template v-if="homeTime">
+          <label class="avail-label">
+            Home time city (optional)
+            <input v-model="form.homeCity" type="text" :maxlength="HOME_CITY_MAX" class="avail-input" autocomplete="off" />
+          </label>
+          <label class="avail-label">
+            Home time state
+            <select v-model="form.homeState" class="avail-input">
+              <option value="">None</option>
+              <option v-for="s in US_STATES" :key="s.code" :value="s.code">{{ s.name }} ({{ s.code }})</option>
+            </select>
+            <span class="avail-hint">Where the driver needs to be. Both or neither.</span>
+          </label>
+        </template>
       </div>
       <p v-if="addHint" class="avail-note" role="status">{{ addHint }}</p>
       <div class="avail-actions">
-        <button type="submit" class="btn btn-primary" :disabled="busy || !dirId || !datesWithinBounds(form, createBounds)">Add time off</button>
+        <button type="submit" class="btn btn-primary" :disabled="busy || !dirId || !canAdd">Add time off</button>
       </div>
     </form>
 
@@ -133,6 +166,7 @@
             <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
             <span class="avail-muted">{{ panelPastText(r) }}</span>
             <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
+            <span v-if="panelHomeText(r)" class="avail-home">{{ panelHomeText(r) }}</span>
           </div>
           <ReuseRowEdit :r="r" />
         </li>
@@ -176,10 +210,11 @@ import { createReusableTemplate } from '@vueuse/core'
 import { useApi } from '../../composables/useApi'
 import { normDriver } from '../../lib/driverName'
 import {
-  AVAILABILITY_KINDS, availabilityRangeText, canSaveEdit, createDateBounds, datesWithinBounds,
+  AVAILABILITY_KINDS, HOME_CITY_MAX, availabilityRangeText, canSaveEdit, createBody, createDateBounds, datesWithinBounds,
   editDateBounds, editFormFor, editPatch, endEarlyNote, isDriverHasLoadsWarning, kindLabel,
-  loadsUncheckedNote, panelGroup, panelPastText, panelRequestText, rangeHint, rowActions, withLoadsConfirmed,
+  loadsUncheckedNote, panelGroup, panelHomeText, panelPastText, panelRequestText, rangeHint, rowActions, staffHomeReady, withLoadsConfirmed,
 } from '../../lib/availabilityText'
+import { US_STATES } from '../../utils/usStates'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
 // `directoryId` when the caller has it (the Drivers page); otherwise the
@@ -199,12 +234,14 @@ const dirId = computed(() => props.directoryId || resolvedId.value)
 const rows = ref([])
 const today = ref('')
 const createLimits = ref(null)
+// The list's `homeTime` (the server's requests flag): the add form takes a home time.
+const homeTime = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const error = ref('')
-const form = reactive({ kind: 'vacation', from: '', to: '', reason: '' })
+const form = reactive({ kind: 'vacation', from: '', to: '', reason: '', homeCity: '', homeState: '' })
 const editingId = ref(null)
-const editForm = reactive({ kind: '', from: '', to: '', reason: '' })
+const editForm = reactive({ kind: '', from: '', to: '', reason: '', homeCity: '', homeState: '' })
 const pendingCancel = ref(null)
 // The server's loads warning on a save: { message, resend } ("Save anyway").
 const pendingLoads = ref(null)
@@ -224,6 +261,7 @@ const editBounds = computed(() => (editingRow.value ? editDateBounds(editingRow.
 const canSave = computed(() => !!editingRow.value && canSaveEdit(editingRow.value, editForm))
 const editHint = computed(() => (editBounds.value ? rangeHint(editForm, editBounds.value) : ''))
 const addHint = computed(() => rangeHint(form, createBounds.value))
+const canAdd = computed(() => datesWithinBounds(form, createBounds.value) && (!homeTime.value || staffHomeReady(form)))
 
 // A reload that leaves the open form's row gone or no longer editable closes it.
 watch(editingRow, (r) => {
@@ -250,6 +288,7 @@ async function load() {
     rows.value = data.rows || []
     today.value = data.today || ''
     createLimits.value = data.createLimits || null
+    homeTime.value = data.homeTime === true
     if (!form.from) form.from = today.value
     if (!form.to) form.to = today.value
   } catch (err) {
@@ -298,10 +337,10 @@ function saveAnyway() {
 }
 
 async function add() {
-  if (!datesWithinBounds(form, createBounds.value)) return
-  const body = { kind: form.kind, from: form.from, to: form.to, reason: form.reason.trim() }
+  if (!canAdd.value) return
+  const body = createBody(form, homeTime.value)
   const url = `/api/drivers-directory/${dirId.value}/availability`
-  await save((b) => api.post(url, b), body, () => { form.reason = '' })
+  await save((b) => api.post(url, b), body, () => { form.reason = ''; form.homeCity = ''; form.homeState = '' })
 }
 
 // Focus moves into the form when it opens and back to the row's button when it
@@ -356,8 +395,11 @@ watch(() => [props.directoryId, props.driverName], () => {
   resolvedId.value = null
   form.from = ''
   form.to = ''
+  form.homeCity = ''
+  form.homeState = ''
   editingId.value = null
   createLimits.value = null
+  homeTime.value = false
   pendingLoads.value = null
   pendingApprove.value = null
   notice.value = ''
@@ -384,6 +426,7 @@ watch(() => [props.directoryId, props.driverName], () => {
 .avail-row-waiting { border-color: #fcd34d; }
 .avail-kind { font-size: 0.75rem; color: #4b5563; }
 .avail-reason { font-size: 0.75rem; color: #6b7280; overflow-wrap: anywhere; }
+.avail-home { font-size: 0.75rem; color: #374151; overflow-wrap: anywhere; }
 .avail-edit { display: flex; flex-direction: column; gap: 0.5rem; width: 100%; padding-top: 0.5rem; border-top: 1px dashed #e5e7eb; }
 .avail-note { font-size: 0.72rem; color: #6b7280; margin: 0; }
 .avail-label-end { max-width: 16rem; }

@@ -7,8 +7,10 @@
        renders this only when the payload carried `timeOff` (the server's
        DRIVER_TIME_OFF_SCREEN_ENABLED). While the payload also carries
        `requests` (the server's DRIVER_TIME_OFF_REQUESTS_ENABLED), the card
-       lists his waiting and declined requests and offers "Request days off";
-       every day limit is the one the server sent. -->
+       lists his waiting and declined requests and offers "Request home time /
+       days off", whose form asks where he needs to be (a city and a state,
+       starting at the server's `homeDefault`); every day limit is the one the
+       server sent. A row or request naming a home time shows it. -->
   <div v-if="variant === 'banner'" role="status" class="time-off-live">
     <p v-if="bannerText" :class="['time-off-banner', offNow ? 'time-off-banner-now' : 'time-off-banner-next']">
       <span class="time-off-banner-icon" aria-hidden="true">&#128197;</span>
@@ -30,6 +32,7 @@
           <span class="time-off-kind">{{ kindLabel(r.kind) }}</span>
           <span :class="['time-off-tag', r.status === 'current' ? 'time-off-tag-now' : 'time-off-tag-next']">{{ r.status === 'current' ? 'Off now' : 'Upcoming' }}</span>
         </span>
+        <span v-if="r.home" class="time-off-home">{{ homeTimeText(r.home) }}</span>
       </li>
     </ul>
     <p v-else class="time-off-empty">No time off recorded.</p>
@@ -43,6 +46,7 @@
             <span class="time-off-kind">{{ kindLabel(r.kind) }}</span>
             <span :class="['time-off-tag', r.request === 'waiting' ? 'time-off-tag-wait' : 'time-off-tag-no']">{{ driverRequestStatusText(r) }}</span>
           </span>
+          <span v-if="r.home" class="time-off-home">{{ homeTimeText(r.home) }}</span>
           <button v-if="r.canCancel" type="button" class="time-off-btn time-off-btn-quiet" :disabled="busy" @click="withdraw(r)">Cancel request</button>
         </li>
       </ul>
@@ -62,13 +66,27 @@
             <option v-for="k in AVAILABILITY_KINDS" :key="k.value" :value="k.value">{{ k.label }}</option>
           </select>
         </label>
+        <fieldset class="time-off-where">
+          <legend class="time-off-label">Where do you need to be?</legend>
+          <label class="time-off-label">
+            City
+            <input v-model="form.homeCity" type="text" class="time-off-input" :maxlength="HOME_CITY_MAX" autocomplete="address-level2" required />
+          </label>
+          <label class="time-off-label">
+            State
+            <select v-model="form.homeState" class="time-off-input" autocomplete="address-level1" required>
+              <option value="" disabled>Choose a state</option>
+              <option v-for="s in US_STATES" :key="s.code" :value="s.code">{{ s.name }} ({{ s.code }})</option>
+            </select>
+          </label>
+        </fieldset>
         <p v-if="error" class="time-off-error" role="alert">{{ error }}</p>
         <div class="time-off-actions">
           <button type="button" class="time-off-btn time-off-btn-quiet" :disabled="busy" @click="closeForm">Back</button>
           <button type="submit" class="time-off-btn time-off-btn-main" :disabled="busy || !canSend">Send request</button>
         </div>
       </form>
-      <button v-else-if="timeOff.canRequest === true" type="button" class="time-off-btn time-off-btn-main" :disabled="busy" @click="openForm">Request days off</button>
+      <button v-else-if="timeOff.canRequest === true" type="button" class="time-off-btn time-off-btn-main" :disabled="busy" @click="openForm">Request home time / days off</button>
       <p v-if="!formOpen && error" class="time-off-error" role="alert">{{ error }}</p>
       <p v-if="notice" class="time-off-note" role="status">{{ notice }}</p>
     </template>
@@ -81,15 +99,16 @@
 <script setup>
 import { computed, nextTick, reactive, ref, useId, watch } from 'vue'
 import {
-  AVAILABILITY_KINDS, RECORDED_HINT, REQUEST_HINT, availabilityRangeText, canSendRequest, driverRequestRows,
-  driverRequestStatusText, driverTimeOffBanner, driverTimeOffRows, kindLabel, requestBody, requestFormBounds, requestFormStart,
+  AVAILABILITY_KINDS, HOME_CITY_MAX, RECORDED_HINT, REQUEST_HINT, availabilityRangeText, canSendRequest, driverRequestRows,
+  driverRequestStatusText, driverTimeOffBanner, driverTimeOffRows, homeTimeText, kindLabel, requestBody, requestFormBounds, requestFormStart,
 } from '../../lib/availabilityText'
+import { US_STATES } from '../../utils/usStates'
 import { useDriverStore } from '../../stores/driver'
 
 const props = defineProps({
   // The payload's `timeOff`: { today, rows }, or { today, rows: [], error: true }
   // when the server could not read it; with requests on, also { requests,
-  // requestLimits, canRequest }.
+  // requestLimits, canRequest, homeDefault }.
   timeOff: { type: Object, required: true },
   variant: { type: String, default: 'card' },
 })
@@ -107,7 +126,7 @@ const requestsOn = computed(() => Array.isArray(props.timeOff.requests))
 const requests = computed(() => driverRequestRows(props.timeOff.requests))
 const limits = computed(() => props.timeOff.requestLimits || null)
 const formOpen = ref(false)
-const form = reactive({ kind: 'off_duty', from: '', to: '' })
+const form = reactive({ kind: 'off_duty', from: '', to: '', homeCity: '', homeState: '' })
 const bounds = computed(() => requestFormBounds(limits.value, form))
 const canSend = computed(() => canSendRequest(form, limits.value))
 const busy = ref(false)
@@ -115,7 +134,7 @@ const error = ref('')
 const notice = ref('')
 
 async function openForm() {
-  Object.assign(form, requestFormStart(limits.value))
+  Object.assign(form, requestFormStart(limits.value, props.timeOff.homeDefault))
   error.value = ''
   notice.value = ''
   formOpen.value = true
@@ -236,6 +255,21 @@ async function withdraw(r) {
 .time-off-kind {
   font-size: 0.8rem;
   color: var(--text-dim);
+}
+.time-off-home {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.time-off-where {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
 }
 .time-off-tag {
   font-size: 0.68rem;

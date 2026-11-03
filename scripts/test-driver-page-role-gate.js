@@ -843,25 +843,36 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 					VALUES (11, 'Desoren King', ?, ?, ?, ?, ?, '2026-10-10T12:00:00Z', ?, 'driver')`);
 				ask.run("vacation", "2026-11-09", "2026-11-13", DK.username, DK.id, "requested");
 				ask.run("off_duty", "2026-11-20", "2026-11-21", DK.username, DK.id, "declined");
+				// H1: his Drivers page row names his city and state, his waiting request and his
+				// current time off a home time.
+				rdb.prepare("UPDATE drivers_directory SET city = 'Springfield', state = 'mo' WHERE id = 11").run();
+				rdb.prepare("UPDATE driver_availability SET home_city = 'Riverton', home_state = 'WY' WHERE directory_id = 11 AND from_date IN ('2026-11-09', '2026-10-14')").run();
 				const keys = (x) => (x.body && x.body.timeOff ? Object.keys(x.body.timeOff).sort().join() : "");
 				const reqs = (x) => (x.body && x.body.timeOff && Array.isArray(x.body.timeOff.requests) ? x.body.timeOff.requests.map((q) => [q.from, q.request, q.canCancel]) : null);
 				const page = pageRoute(true, rdb, ROUTE_SRC, true);
 				r = await call(page, DK, "Desoren King");
-				ok("§7.18 requests on, Driver: timeOff also carries requests, requestLimits and canRequest",
-					r.status === 200 && keys(r) === "canRequest,requestLimits,requests,rows,today", told(r));
-				ok("§7.19 ...rows keep their shape and rows (the requests are not time off)", same(shape(r), DK_ROWS)
-					&& r.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,id,kind,status,to"), told(r));
+				ok("§7.18 requests on, Driver: timeOff also carries requests, requestLimits, canRequest and (H1) homeDefault",
+					r.status === 200 && keys(r) === "canRequest,homeDefault,requestLimits,requests,rows,today", told(r));
+				ok("§7.19 ...rows keep their rows (the requests are not time off), each with (H1) its home time",
+					same(shape(r), DK_ROWS) && r.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,home,id,kind,status,to"), told(r));
 				ok("§7.20 ...his waiting request (he may cancel it) and his declined one; the limits from today + 5; he may ask",
 					same(reqs(r), [["2026-11-09", "waiting", true], ["2026-11-20", "declined", false]])
 					&& same(r.body.timeOff.requestLimits, { fromMin: "2026-10-20", fromMax: "2027-01-13", maxDays: 60, waitingMax: 5 }) && r.body.timeOff.canRequest === true, told(r));
-				ok("§7.21 ...no reason, decider or author on a request", r.body.timeOff.requests.every((q) => Object.keys(q).sort().join() === "canCancel,from,id,kind,request,to"), told(r));
+				ok("§7.21 ...no reason, decider or author on a request (H1: its home time beside it)", r.body.timeOff.requests.every((q) => Object.keys(q).sort().join() === "canCancel,from,home,id,kind,request,to"), told(r));
+				ok("§7.21b H1: his form starts at his Drivers page city and state; his waiting request and his current row show their home time, the rest null",
+					same(r.body.timeOff.homeDefault, { city: "Springfield", state: "MO" })
+					&& same(r.body.timeOff.requests.map((q) => q.home), [{ city: "Riverton", state: "WY" }, null])
+					&& same(r.body.timeOff.rows.map((t) => t.home), [{ city: "Riverton", state: "WY" }, null]), told(r));
 				const meOn = await meRoute(rdb, true)(DK);
 				ok("§7.22 ...the same as GET /api/driver/me/availability for his session", meOn.status === 200 && same(r.body.timeOff, meOn.body), `me ${meOn.status} ${JSON.stringify(meOn.body).slice(0, 200)}`);
 				r = await call(page, SUPER, "Desoren King");
 				ok("§7.23 a Super Admin on his page: his requests listed, but canRequest false and no Cancel on any",
 					r.status === 200 && same(reqs(r), [["2026-11-09", "waiting", false], ["2026-11-20", "declined", false]]) && r.body.timeOff.canRequest === false, told(r));
+				ok("§7.23b H1: ...and no form start (homeDefault null), his Drivers page city never sent", r.body.timeOff.homeDefault === null && !JSON.stringify(r.body).includes("Springfield"), told(r));
 				r = await call(page, SK, "Soren King");
 				ok("§7.24 another driver: none of his requests, and may ask for himself", r.status === 200 && same(reqs(r), []) && r.body.timeOff.canRequest === true, told(r));
+				ok("§7.24b H1: ...his own form start (none recorded: blank), never the other driver's city or home time",
+					same(r.body.timeOff.homeDefault, { city: "", state: "" }) && !/Springfield|Riverton/.test(JSON.stringify(r.body)), told(r));
 				const NO_VIEWER = softMutate(ROUTE_SRC, `${SPREAD_ARG}, req.session.user)`, `${SPREAD_ARG})`);
 				ok("§7.25a the viewer mutant applies (the spread passes the session's user)", !!NO_VIEWER);
 				if (NO_VIEWER) {
