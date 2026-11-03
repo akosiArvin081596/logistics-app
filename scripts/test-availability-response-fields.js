@@ -16,6 +16,8 @@
 //
 // A driver's request (plan B Revision 2, PR 4) shows in none of them until it is
 // approved: a waiting or declined one sets no offUntil, DriverOffUntil or chip.
+// Home time (H1) shows in none of them, nor in GET /api/driver-availability: only
+// the staff panel, the driver's own view and the request notice carry it.
 //
 // "Today" is 2026-10-15 on the business clock. The routes are the shipped ones,
 // lifted out of server.js (scripts/lib/availability-world.js). With the flag
@@ -106,6 +108,27 @@ const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
 			[["2026-10-14", "2026-10-20"], [null, null], [null, null]]);
 		const inv = await q.call("GET", "/api/trucks", { user: USERS.inv });
 		ok("Investor: still no DriverOffUntil key, and no request key, on any truck", ((inv.body && inv.body.trucks) || []).every((x) => !has(x, "DriverOffUntil") && !has(x, "request")) && inv.status === 200);
+	});
+
+	// H1: a home time on time off (the requests flag on) reaches none of these answers: they
+	// carry the days only. Hollis's approved request and Soren's staff row name one.
+	section("Home time: none of these answers names it (H1)");
+	await R.guard("home", async () => {
+		const h = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" } });
+		const row = h.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at, request_status, source, home_city, home_state)
+			VALUES (?, ?, 'off_duty', ?, ?, '', 'test', '2026-10-05T12:00:00Z', 'approved', ?, ?, ?)`);
+		row.run(DIR.hollis, "Hollis Renner", "2026-10-14", "2026-10-20", "driver", "Riverton", "WY");
+		row.run(DIR.soren, "Soren King", "2026-10-15", "2026-10-16", "staff", "Lincoln", "NE");
+		const said = [];
+		for (const [label, url, user] of [["dashboard", "/api/dashboard", USERS.disp], ["trucks", "/api/trucks", USERS.disp], ["trucks (investor)", "/api/trucks", USERS.inv],
+			["directory", "/api/drivers-directory", USERS.disp], ["every driver's time off", "/api/driver-availability", USERS.disp]]) {
+			const r = await h.call("GET", url, { user });
+			said.push([label, r.status, /Riverton|Lincoln|"home"|home_city|homeCity/.test(r.text)]);
+		}
+		eq("dashboard, trucks (staff and investor), directory and every driver's time off: 200, and no home time anywhere in them", said,
+			[["dashboard", 200, false], ["trucks", 200, false], ["trucks (investor)", 200, false], ["directory", 200, false], ["every driver's time off", 200, false]]);
+		const panel = await h.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp });
+		eq("...while the staff panel, its own place, shows it", panel.body && panel.body.rows.map((x) => x.home), [{ city: "Riverton", state: "WY" }]);
 	});
 
 	await R.finish();

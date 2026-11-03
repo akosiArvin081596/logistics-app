@@ -3416,10 +3416,12 @@ function eldFixCountsByVehicle(vehicleIds, sinceMs) {
 // row is gone matches no one. Rows that ended before `sinceDay` are left out.
 // Only approved rows count, whatever DRIVER_TIME_OFF_REQUESTS_ENABLED says: a
 // driver's request still waiting or declined never warns dispatch, pauses an
-// alert or shows as time off, and stays inert after a switch-off.
+// alert or shows as time off, and stays inert after a switch-off. The home time
+// rides along for the driver's own view (driverOwnTimeOff()); no other reader
+// passes it on.
 function driverAvailabilityByName(sinceDay) {
 	const rows = db.prepare(`
-		SELECT a.id, a.directory_id, a.kind, a.from_date, a.to_date, a.cancelled_at, d.driver_name AS directory_name
+		SELECT a.id, a.directory_id, a.kind, a.from_date, a.to_date, a.cancelled_at, a.home_city, a.home_state, d.driver_name AS directory_name
 		FROM driver_availability a
 		JOIN drivers_directory d ON d.id = a.directory_id
 		WHERE a.cancelled_at IS NULL AND a.request_status = 'approved' AND a.to_date >= ?
@@ -6920,6 +6922,8 @@ db.exec(`
 		decided_by TEXT,
 		decided_by_user_id INTEGER NOT NULL DEFAULT 0,
 		decided_at TEXT,
+		home_city TEXT,
+		home_state TEXT,
 		CHECK(from_date <= to_date)
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_dir ON driver_availability(directory_id, from_date);
@@ -6973,9 +6977,10 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_tod_dir_day ON driver_time_off_days(directory_id, day);
 	CREATE INDEX IF NOT EXISTS idx_tod_final ON driver_time_off_days(final_at);
 `);
-// A driver's request (DRIVER_TIME_OFF_REQUESTS_ENABLED): the columns the CREATE above has, added to a table made
-// before them. Each definition is the CREATE's word for word, so every existing row reads approved and staff and
-// counts as it did. Asked of PRAGMA first, so an ALTER that fails for any other reason stops the start.
+// A driver's request and its home time (DRIVER_TIME_OFF_REQUESTS_ENABLED): the columns the CREATE above has, added
+// to a table made before them. Each definition is the CREATE's word for word, so every existing row reads approved
+// and staff, with no home time, and counts as it did. Asked of PRAGMA first, so an ALTER that fails for any other
+// reason stops the start.
 function addTimeOffRequestColumns() {
 	db.transaction(() => {
 		const have = new Set(db.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name));
@@ -6984,6 +6989,8 @@ function addTimeOffRequestColumns() {
 		if (!have.has("decided_by")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_by TEXT");
 		if (!have.has("decided_by_user_id")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_by_user_id INTEGER NOT NULL DEFAULT 0");
 		if (!have.has("decided_at")) db.exec("ALTER TABLE driver_availability ADD COLUMN decided_at TEXT");
+		if (!have.has("home_city")) db.exec("ALTER TABLE driver_availability ADD COLUMN home_city TEXT");
+		if (!have.has("home_state")) db.exec("ALTER TABLE driver_availability ADD COLUMN home_state TEXT");
 	}).immediate();
 }
 addTimeOffRequestColumns();
@@ -11648,7 +11655,9 @@ function recordTimeOffLoadConfirmations(req, { availabilityId, directoryId, driv
 }
 
 // GET /api/drivers-directory/:id/availability — one driver's rows, newest first,
-// each with what the caller may change, and `createLimits` for a new row.
+// each with what the caller may change, and `createLimits` for a new row. While
+// DRIVER_TIME_OFF_REQUESTS_ENABLED is on, `homeTime: true` tells the panel's add
+// form to offer the home time (a driver with no rows yet has no row to say so).
 app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -11660,6 +11669,7 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 		res.json({
 			directoryId: dir.id, driver: dir.driver_name, today,
 			createLimits: driverAvailability.availabilityCreateLimits({ todayKey: today, isSuperAdmin: user.role === "Super Admin" }),
+			...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? { homeTime: true } : {}),
 			rows: rows.map((r) => ({ ...availabilityRowView(r, today, user), ...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? timeOffEldRowFields(r, { today, req }) : {}) })),
 		});
 	} catch (err) {
@@ -11671,7 +11681,10 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 // POST /api/drivers-directory/:id/availability — record a period off.
 // Body { kind, from, to, reason }. 400 INVALID_KIND / INVALID_REASON /
 // REASON_TOO_LONG / INVALID_DATE / RANGE_REVERSED / RANGE_TOO_LONG /
-// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP. With
+// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP. With DRIVER_TIME_OFF_REQUESTS_ENABLED
+// the body may also name the home time, { homeCity, homeState }, both or neither
+// (400 HOME_LOCATION_INCOMPLETE / INVALID_HOME_CITY / HOME_CITY_TOO_LONG /
+// INVALID_HOME_STATE); off, those keys are ignored. With
 // DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), then 409 DRIVER_HAS_LOADS
 // when the days cover loads he already has (nothing written, not audited); the
 // same body with `confirmLoads`, the 409's loads echoed, saves and records a
@@ -11686,13 +11699,13 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
 		const user = req.session.user;
 		const today = appTodayKey();
-		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin" });
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin", home: DRIVER_TIME_OFF_REQUESTS_ENABLED });
 		if (!v.ok) {
 			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
 				`${dir.driver_name}: ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
-		const { kind, from, to, reason } = v.value;
+		const { kind, from, to, reason, homeCity, homeState } = v.value;
 		let jtLoads;
 		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
 			jtLoads = await driverLoadsForTimeOff(req);
@@ -11711,11 +11724,11 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: current.driver_name, from, to, loads: loadsCheck.ask }) };
 			// Staff time off is approved when recorded (S2: no 5-day rule for staff).
 			const info = db.prepare(`
-				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'staff')
-			`).run(id, current.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source, home_city, home_state)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'staff', ?, ?)
+			`).run(id, current.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString(), homeCity, homeState);
 			logAudit(req, "driver_availability_create", "driver", String(id),
-				`${current.driver_name}: off ${from}..${to} (${kind})${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+				`${current.driver_name}: off ${from}..${to} (${kind})${driverAvailability.homeAuditNote({ homeCity, homeState })}${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
 			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
 				recordTimeOffLoadConfirmations(req, { availabilityId: info.lastInsertRowid, directoryId: id, driverName: current.driver_name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_create_unchecked" : "availability_create" });
 			}
@@ -11753,7 +11766,9 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 		const user = req.session.user;
 		const today = appTodayKey();
 		const isSuperAdmin = user.role === "Super Admin";
-		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: row });
+		// The body's home time is read only while drivers' requests are on; off, the stored one is kept.
+		const scope = { todayKey: today, isSuperAdmin, home: DRIVER_TIME_OFF_REQUESTS_ENABLED };
+		const v = driverAvailability.validateAvailability(req.body, { ...scope, existing: row });
 		if (!v.ok) {
 			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
 				`${row.directory_name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
@@ -11768,12 +11783,14 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 			// body merged over it and checked again
 			const cur = jtLoads === undefined ? row : availabilityRowWithDriver(row.id);
 			if (!cur) return { gone: true };
-			const checked = jtLoads === undefined ? v : driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: cur });
+			const checked = jtLoads === undefined ? v : driverAvailability.validateAvailability(req.body, { ...scope, existing: cur });
 			if (!checked.ok) return { refused: checked, cur };
-			const { kind, from, to, reason } = checked.value;
+			const { kind, from, to, reason, homeCity, homeState } = checked.value;
 			const name = cur.directory_name;
 			const reasonChanged = reason !== String(cur.reason || "");
-			const unchanged = kind === cur.kind && from === cur.from_date && to === cur.to_date && !reasonChanged;
+			const homeBefore = driverAvailability.storedHomeLocation(cur);
+			const homeChanged = homeCity !== homeBefore.homeCity || homeState !== homeBefore.homeState;
+			const unchanged = kind === cur.kind && from === cur.from_date && to === cur.to_date && !reasonChanged && !homeChanged;
 			const clash = availabilityOverlap(cur.directory_id, cur.id, from, to);
 			if (clash) return { clash, cur, from, to };
 			let loadsCheck = null;
@@ -11783,11 +11800,11 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: name, from, to, loads: loadsCheck.ask }) };
 			let told = null;
 			if (!unchanged) {
-				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
-					.run(kind, from, to, reason, new Date().toISOString(), cur.id);
-				// That the reason changed, never the reason itself (as the create line)
+				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, home_city = ?, home_state = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
+					.run(kind, from, to, reason, homeCity, homeState, new Date().toISOString(), cur.id);
+				// That the reason changed, never the reason itself; the home time's state, never its city (as the create line)
 				logAudit(req, "driver_availability_update", "driver", String(cur.directory_id),
-					`${name}: off ${cur.from_date}..${cur.to_date} (${cur.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+					`${name}: off ${cur.from_date}..${cur.to_date} (${cur.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}${driverAvailability.homeAuditNote({ homeCity, homeState }, homeBefore)}${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
 				if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
 					recordTimeOffLoadConfirmations(req, { availabilityId: cur.id, directoryId: cur.directory_id, driverName: name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_update_unchecked" : "availability_update" });
 				}
@@ -11978,8 +11995,9 @@ app.post("/api/driver-availability/:id/decline", timeOffRequestsFlagGate, requir
 // behind DRIVER_TIME_OFF_SCREEN_ENABLED, which folds it in). `viewer` is the
 // session's user: a name alone can't tell the driver from a Super Admin viewing
 // their page. With DRIVER_TIME_OFF_REQUESTS_ENABLED on, the answer adds their
-// requests, the days a request may use and whether this session may ask
-// (driverTimeOffRequestKeys()); `rows` keeps its shape either way.
+// requests, the days a request may use, whether this session may ask and where
+// its form starts (driverTimeOffRequestKeys()), and each row its home time
+// (`home`, { city, state } or null); off, `rows` keeps today's shape.
 function driverOwnTimeOff(name, viewer, todayKey) {
 	let today = todayKey || "";
 	try {
@@ -11988,7 +12006,10 @@ function driverOwnTimeOff(name, viewer, todayKey) {
 		const rows = key ? driverAvailabilityByName(today).get(key) || [] : [];
 		return {
 			today,
-			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
+			rows: rows.map((r) => ({
+				id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current",
+				...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? { home: driverAvailability.homeLocationOf(r) } : {}),
+			})),
 			// Only that the check is on, for his card's one line: never a result.
 			...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? { eldChecked: true } : {}),
 			...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? driverTimeOffRequestKeys(key, today, viewer) : {}),
@@ -12002,24 +12023,28 @@ function driverOwnTimeOff(name, viewer, todayKey) {
 // The request keys of a driver's own time off: `requests` (their waiting and
 // declined requests, driverAvailability.driverRequestsView(), keyed like `rows`
 // on the directory rows whose current name normalizes to `key`),
-// `requestLimits` (driverAvailability.driverRequestLimits()) and `canRequest`:
+// `requestLimits` (driverAvailability.driverRequestLimits()), `canRequest`:
 // true only on that driver's own Driver session whose account names exactly one
 // directory row (timeOffRequestDriver()), so false for a Super Admin viewing the
-// driver's page, who also gets no Cancel on any request.
+// driver's page, who also gets no Cancel on any request; and `homeDefault`, where
+// the request form's city and state start (that Drivers page row's own, as
+// driverAvailability.homeLocationDefault() keeps them), null unless canRequest.
 function driverTimeOffRequestKeys(key, today, viewer) {
 	const who = viewer && viewer.role === "Driver" ? timeOffRequestDriver(viewer) : null;
 	const own = who && who.account && normalizeDriverName(who.account.driver_name) === key ? who : null;
 	const rows = key
 		? db.prepare(`
-			SELECT a.id, a.kind, a.from_date, a.to_date, a.cancelled_at, a.request_status, a.source, a.created_by_user_id, d.driver_name AS directory_name
+			SELECT a.id, a.kind, a.from_date, a.to_date, a.cancelled_at, a.request_status, a.source, a.created_by_user_id, a.home_city, a.home_state, d.driver_name AS directory_name
 			FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id
 			WHERE a.cancelled_at IS NULL AND a.request_status IN ('requested', 'declined') AND a.to_date >= ?
 		`).all(today).filter((r) => normalizeDriverName(r.directory_name) === key)
 		: [];
+	const directory = own ? db.prepare("SELECT city, state FROM drivers_directory WHERE id = ?").get(own.directory.id) : undefined;
 	return {
 		requests: driverAvailability.driverRequestsView(rows, { todayKey: today, accountId: own ? own.account.id : 0, canAct: !!own }),
 		requestLimits: driverAvailability.driverRequestLimits({ todayKey: today }),
 		canRequest: !!own,
+		homeDefault: own ? driverAvailability.homeLocationDefault(directory || {}) : null,
 	};
 }
 
@@ -12032,15 +12057,18 @@ app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver
 	if (own.error) return res.status(500).json({ error: "Your time off could not be read." });
 	res.json({
 		today: own.today, rows: own.rows, ...(own.eldChecked ? { eldChecked: true } : {}),
-		...(own.requests ? { requests: own.requests, requestLimits: own.requestLimits, canRequest: own.canRequest } : {}),
+		...(own.requests ? { requests: own.requests, requestLimits: own.requestLimits, canRequest: own.canRequest, homeDefault: own.homeDefault } : {}),
 	});
 });
 
 // POST /api/driver/me/availability — a Driver asks for days off for themselves
-// (D's rules 1 and 5). Body { from, to, kind? }; kind defaults to off_duty, and a
-// reason is refused. 201 { success, request } as they see it. 400
+// (D's rules 1 and 5). Body { from, to, kind?, homeCity, homeState }; kind
+// defaults to off_duty, a reason is refused, and where they need to be is
+// required. 201 { success, request } as they see it. 400
 // TIME_OFF_TOO_SOON (with fromMin) / TIME_OFF_TOO_FAR / INVALID_DATE /
-// RANGE_REVERSED / RANGE_TOO_LONG / INVALID_KIND / REASON_NOT_ALLOWED; 409
+// RANGE_REVERSED / RANGE_TOO_LONG / INVALID_KIND / REASON_NOT_ALLOWED /
+// HOME_LOCATION_REQUIRED / INVALID_HOME_CITY / HOME_CITY_TOO_LONG /
+// INVALID_HOME_STATE; 409
 // TOO_MANY_WAITING, AVAILABILITY_OVERLAP (time off or a request on those days; a
 // declined row never blocks), DRIVER_NOT_ON_DIRECTORY or
 // DRIVER_DIRECTORY_AMBIGUOUS; 403 DRIVER_ACCOUNT_REQUIRED. No loads check: a
@@ -12061,7 +12089,7 @@ app.post("/api/driver/me/availability", timeOffRequestsFlagGate, requireRole("Dr
 				`${who.directory.driver_name}: ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
 			return res.status(v.status).json({ error: v.error, code: v.code, ...(v.fromMin ? { fromMin: v.fromMin } : {}), ...(v.fromMax ? { fromMax: v.fromMax } : {}) });
 		}
-		const { kind, from, to } = v.value;
+		const { kind, from, to, homeCity, homeState } = v.value;
 		const outcome = db.transaction(() => {
 			const dir = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(who.directory.id);
 			if (!dir) return { gone: true };
@@ -12071,12 +12099,13 @@ app.post("/api/driver/me/availability", timeOffRequestsFlagGate, requireRole("Dr
 			const clash = availabilityOverlap(dir.id, 0, from, to);
 			if (clash) return { clash, name: dir.driver_name };
 			const info = db.prepare(`
-				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source)
-				VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 'requested', 'driver')
-			`).run(dir.id, dir.driver_name, kind, from, to, String(account.username || ""), account.id, new Date().toISOString());
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source, home_city, home_state)
+				VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 'requested', 'driver', ?, ?)
+			`).run(dir.id, dir.driver_name, kind, from, to, String(account.username || ""), account.id, new Date().toISOString(), homeCity, homeState);
 			const id = Number(info.lastInsertRowid);
-			logAudit(req, "driver_availability_request", "driver", String(dir.id), `${dir.driver_name}: off ${from}..${to} (${kind}) requested by the driver`);
-			const text = driverAvailability.requestNoticeText({ driverName: dir.driver_name, kind, from, to, askedDay: today });
+			logAudit(req, "driver_availability_request", "driver", String(dir.id),
+				`${dir.driver_name}: off ${from}..${to} (${kind}) requested by the driver${driverAvailability.homeAuditNote({ homeCity, homeState })}`);
+			const text = driverAvailability.requestNoticeText({ driverName: dir.driver_name, kind, from, to, askedDay: today, homeCity, homeState });
 			// No load ID: the panel shows those under each viewer's own rule.
 			const metadata = { availabilityId: id, directoryId: dir.id };
 			insertDispatchNotification.run("time-off-request", text.title, text.body, JSON.stringify(metadata));

@@ -133,8 +133,8 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		try { run(db); run(db); } catch (err) { threw = err.message; }
 		eq("§1.2 the migration runs twice without error", threw, null);
 		const cols = db.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name);
-		eq("§1.3 its columns, a driver's request's five last (PR 4)", cols, ["id", "directory_id", "driver_name", "kind", "from_date", "to_date", "reason", "created_by",
-			"created_by_user_id", "created_at", "updated_at", "cancelled_at", "cancelled_by", "request_status", "source", "decided_by", "decided_by_user_id", "decided_at"]);
+		eq("§1.3 its columns, a driver's request's five (PR 4) and its home time's two (H1) last", cols, ["id", "directory_id", "driver_name", "kind", "from_date", "to_date", "reason", "created_by",
+			"created_by_user_id", "created_at", "updated_at", "cancelled_at", "cancelled_by", "request_status", "source", "decided_by", "decided_by_user_id", "decided_at", "home_city", "home_state"]);
 		ok("§1.4 the (directory_id, from_date) index exists",
 			db.prepare("PRAGMA index_list(driver_availability)").all().some((i) => i.name === "idx_driver_avail_dir"));
 		eq("§1.4b the same migration records \"Assign anyway\" confirmations, with the load's window",
@@ -156,7 +156,8 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 
 		// The production path (plan B Revision 2, review 1 M2): the table as it was
 		// before PR 4, with a live row, then addTimeOffRequestColumns() at boot, twice.
-		const REQUEST_COLS = ["request_status", "source", "decided_by", "decided_by_user_id", "decided_at"];
+		// It adds the request's five columns and (H1) the home time's two.
+		const REQUEST_COLS = ["request_status", "source", "decided_by", "decided_by_user_id", "decided_at", "home_city", "home_state"];
 		const { decls } = require("./lib/server-lift").indexDeclarations(W.SRC);
 		const fn = (name) => (decls.get(name) || {}).text || "";
 		ok("§1.6 server.js has addTimeOffRequestColumns(), called once at boot", !!fn("addTimeOffRequestColumns") && (W.SRC.match(/^addTimeOffRequestColumns\(\);$/gm) || []).length === 1);
@@ -173,7 +174,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const snap = () => JSON.stringify([prod.prepare("SELECT sql FROM sqlite_master WHERE name = 'driver_availability'").get(), prod.prepare("SELECT * FROM driver_availability").all()]);
 		add();
 		const once = snap();
-		eq("§1.7 after it, the five columns exist, in the CREATE's order", prod.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name), cols);
+		eq("§1.7 after it, the seven columns exist, in the CREATE's order", prod.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name), cols);
 		const row = prod.prepare("SELECT request_status, source, decided_by, decided_by_user_id, decided_at FROM driver_availability").get();
 		eq("§1.8 ...the live row reads approved and staff, nothing decided", row, { request_status: "approved", source: "staff", decided_by: null, decided_by_user_id: 0, decided_at: null });
 		const hub = new Function("db", "driverAvailability", `${fn("normalizeDriverName")}\n${fn("driverAvailabilityByName")}\nreturn driverAvailabilityByName;`)(prod, require("../lib/driver-availability"));
@@ -191,6 +192,22 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		let failed = null;
 		try { new Function("db", `${fn("addTimeOffRequestColumns")}\nreturn addTimeOffRequestColumns;`)(ro)(); } catch (err) { failed = err.message; }
 		ok("§1.12 an ALTER that fails for any other reason throws, so the start stops", !!failed, String(failed));
+
+		// H1 after PR 4: a table that already has the request's columns, with a driver's
+		// approved request, gains only the home time's two, empty, and nothing else moves.
+		const HOME_COLS = ["home_city", "home_state"];
+		const pr4Create = m[0].split("\n").filter((l) => !HOME_COLS.some((c) => l.trim().startsWith(`${c} `))).join("\n");
+		const pr4 = new Database(":memory:");
+		new Function("db", pr4Create)(pr4);
+		pr4.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source, decided_by, decided_at)
+			VALUES (1, 'Hollis Renner', 'off_duty', '2026-11-09', '2026-11-13', '', 'drv_hollis', 10, '2026-10-30T12:00:00Z', 'approved', 'driver', 'dispatch_t', '2026-10-31T12:00:00Z')`).run();
+		const beforeRow = pr4.prepare("SELECT * FROM driver_availability").get();
+		new Function("db", `${fn("addTimeOffRequestColumns")}\nreturn addTimeOffRequestColumns;`)(pr4)();
+		const afterRow = pr4.prepare("SELECT * FROM driver_availability").get();
+		const pr4Cols = pr4.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name);
+		eq("§1.13 H1 on a table PR 4 already widened: the two home columns added last, empty on the existing request, the rest as it was",
+			[pr4Cols.length, pr4Cols.slice(-2), afterRow.home_city === null && afterRow.home_state === null, { ...afterRow, home_city: undefined, home_state: undefined }],
+			[20, ["home_city", "home_state"], true, { ...beforeRow, home_city: undefined, home_state: undefined }]);
 	});
 
 	section("§2 create");

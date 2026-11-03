@@ -284,7 +284,8 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 		const at = (iso) => { q.clock.ms = Date.parse(iso); };
 		const ask = async (iso, from, to) => {
 			at(iso);
-			const r = await q.call("POST", "/api/driver/me/availability", { user: A.USERS.driver, body: { from, to } });
+			// H1: a driver's own request names where he needs to be (made-up city).
+			const r = await q.call("POST", "/api/driver/me/availability", { user: A.USERS.driver, body: { from, to, homeCity: "Lincoln", homeState: "NE" } });
 			if (r.status !== 201) throw new Error(`ask ${from}..${to}: ${r.status} ${String(r.text).slice(0, 200)}`);
 			return r.body.request.id;
 		};

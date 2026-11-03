@@ -43,6 +43,13 @@
 //      unset): the routes answer as unknown paths, no answer carries a request
 //      key, and a waiting request holds no days
 //   §13 privacy: no decider, reason or author ever reaches the driver
+//   §14 home time (H1): where he needs to be, a city and a state, required on
+//      his own request (both, a real state's code, a city name that is not
+//      digits or contact details), pre-filled from his Drivers page row; shown
+//      to him and to staff, in the staff notice; the audit names the state
+//      only; optional on a staff row (both or neither), edited like the dates;
+//      the keys only while the requests flag is on; nothing composed for CHR
+//      names it
 //
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // lifted out of server.js on an in-memory SQLite, over HTTP. Made-up data only.
@@ -50,6 +57,8 @@
 
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
 const W = require("./lib/availability-world");
 
 const R = W.createRunner("test-driver-time-off-requests");
@@ -58,7 +67,12 @@ const { USERS, DIR } = W;
 
 const ON = { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" };
 const world = (opts = {}) => W.startWorld({ ...opts, env: { ...ON, ...(opts.env || {}) } });
-const ask = (w, body, user = USERS.driver, opts = {}) => w.call("POST", "/api/driver/me/availability", { user, body, ...opts });
+// A request names where he needs to be (H1: required); a §14 case passes its own
+// homeCity / homeState, `undefined` leaving that key out of the body.
+const HOME = { homeCity: "Springfield", homeState: "MO" };
+const withHome = (body) => (body && typeof body === "object" && !Array.isArray(body) ? { ...HOME, ...body } : body);
+const ask = (w, body, user = USERS.driver, opts = {}) => w.call("POST", "/api/driver/me/availability", { user, body: withHome(body), ...opts });
+const bare = (w, body, user = USERS.driver) => w.call("POST", "/api/driver/me/availability", { user, body });
 const withdraw = (w, id, user = USERS.driver, opts = {}) => w.call("POST", `/api/driver/me/availability/${id}/cancel`, { user, body: {}, ...opts });
 const approve = (w, id, user = USERS.disp, body = {}, opts = {}) => w.call("POST", `/api/driver-availability/${id}/approve`, { user, body, ...opts });
 const decline = (w, id, user = USERS.disp, opts = {}) => w.call("POST", `/api/driver-availability/${id}/decline`, { user, body: {}, ...opts });
@@ -90,18 +104,18 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 	await R.guard("§1", async () => {
 		const w = await world();
 		const r = await ask(w, { from: "2026-10-20", to: "2026-10-22" });
-		eq("§1.1 Hollis asks for Oct 20-22 (today + 5): 201, Waiting, his to cancel, kind Off duty by default",
-			[r.status, r.body && r.body.request], [201, { id: reqId(r), kind: "off_duty", from: "2026-10-20", to: "2026-10-22", request: "waiting", canCancel: true }]);
+		eq("§1.1 Hollis asks for Oct 20-22 (today + 5): 201, Waiting, his to cancel, kind Off duty by default, his home time",
+			[r.status, r.body && r.body.request], [201, { id: reqId(r), kind: "off_duty", from: "2026-10-20", to: "2026-10-22", request: "waiting", canCancel: true, home: { city: "Springfield", state: "MO" } }]);
 		const s = stored(w, reqId(r));
-		eq("§1.2 ...stored as his request: requested, driver, his account, no reason, nothing decided",
-			s && [s.directory_id, s.driver_name, s.request_status, s.source, s.created_by, s.created_by_user_id, s.reason, s.decided_by, s.decided_by_user_id, s.decided_at, s.cancelled_at],
-			[DIR.hollis, "Hollis Renner", "requested", "driver", "drv_hollis", USERS.driver.id, "", null, 0, null, null]);
-		eq("§1.3 ...one audit line, on the driver's directory row", w.audits("driver_availability_request").map((a) => [a.entity, a.entity_id, a.details]),
-			[["driver", String(DIR.hollis), "Hollis Renner: off 2026-10-20..2026-10-22 (off_duty) requested by the driver"]]);
+		eq("§1.2 ...stored as his request: requested, driver, his account, no reason, nothing decided, his home time",
+			s && [s.directory_id, s.driver_name, s.request_status, s.source, s.created_by, s.created_by_user_id, s.reason, s.decided_by, s.decided_by_user_id, s.decided_at, s.cancelled_at, s.home_city, s.home_state],
+			[DIR.hollis, "Hollis Renner", "requested", "driver", "drv_hollis", USERS.driver.id, "", null, 0, null, null, "Springfield", "MO"]);
+		eq("§1.3 ...one audit line, on the driver's directory row, naming the home time's state only", w.audits("driver_availability_request").map((a) => [a.entity, a.entity_id, a.details]),
+			[["driver", String(DIR.hollis), "Hollis Renner: off 2026-10-20..2026-10-22 (off_duty) requested by the driver; home time in MO"]]);
 		const n = staffNotices(w);
-		eq("§1.4 ...one staff notice: who and which days, the kind and the day asked, no load ID",
+		eq("§1.4 ...one staff notice: who and which days, the kind, the day asked and the home time, no load ID",
 			[n.length, n[0] && n[0].title, n[0] && n[0].body, metaOf(n[0])],
-			[1, "Time off request: Hollis Renner (Oct 20 – Oct 22)", "Off duty. Asked Oct 15.", { availabilityId: reqId(r), directoryId: DIR.hollis }]);
+			[1, "Time off request: Hollis Renner (Oct 20 – Oct 22)", "Off duty. Asked Oct 15. Home time: Springfield, MO.", { availabilityId: reqId(r), directoryId: DIR.hollis }]);
 		const live = w.emits.filter((e) => e.event === "dispatch-notification");
 		eq("§1.5 ...sent live to the staff rooms only (the dispatch room and its Super Admins), never a driver's room",
 			[live.map((e) => [e.room, e.except]), w.emits.some((e) => String(e.room).startsWith("driver:"))], [[["super-admin", null], ["dispatch", "super-admin"]], false]);
@@ -459,9 +473,150 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 		const told = JSON.stringify(w.db.prepare("SELECT title, body, metadata FROM notifications WHERE driver_name = 'hollis renner'").all());
 		const said = `${own.text}${JSON.stringify(pg.body && pg.body.timeOff)}${told}`;
 		ok("§13.1 neither his answers nor his notices name who decided, the reason, or who recorded a row", !/dispatch_t|super_admin|Private details|decided|createdBy|reason/.test(said), said.slice(0, 300));
-		eq("§13.2 his requests carry six keys each", (own.body.requests || []).every((q) => Object.keys(q).sort().join() === "canCancel,from,id,kind,request,to"), true);
+		eq("§13.2 his requests carry seven keys each (H1: with the home time)", (own.body.requests || []).every((q) => Object.keys(q).sort().join() === "canCancel,from,home,id,kind,request,to"), true);
 		const other = await mine(w, USERS.otherDriver);
 		eq("§13.3 another driver sees none of his requests", [other.status, other.body.requests, other.body.rows], [200, [], []]);
+	});
+
+	section("§14 home time (H1)");
+	await R.guard("§14", async () => {
+		const w = await world();
+		w.db.prepare("UPDATE drivers_directory SET city = ' Springfield ', state = 'mo' WHERE id = ?").run(DIR.hollis);
+		const day = { from: "2026-11-02", to: "2026-11-02" };
+		const before = count(w);
+		for (const [label, home, want] of [
+			["no city or state", {}, [400, "HOME_LOCATION_REQUIRED"]],
+			["a state only", { homeState: "MO" }, [400, "HOME_LOCATION_REQUIRED"]],
+			["a city only", { homeCity: "Springfield" }, [400, "HOME_LOCATION_REQUIRED"]],
+			["a blank city and state", { homeCity: "   ", homeState: "" }, [400, "HOME_LOCATION_REQUIRED"]],
+			["state \"ZZ\"", { homeCity: "Springfield", homeState: "ZZ" }, [400, "INVALID_HOME_STATE"]],
+			["state \"Missouri\" (a name, not its code)", { homeCity: "Springfield", homeState: "Missouri" }, [400, "INVALID_HOME_STATE"]],
+			["state PR (a territory)", { homeCity: "Springfield", homeState: "PR" }, [400, "INVALID_HOME_STATE"]],
+			["city \"75001\" (digits only)", { homeCity: "75001", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city \"12\" (no letter)", { homeCity: "12", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city a phone number", { homeCity: "555-0100", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city a name with a phone number", { homeCity: "Springfield 5550100", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city an email", { homeCity: "hollis@example.com", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city a web address", { homeCity: "www.example.com/home", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city a street address", { homeCity: "12 Elm Street, Apt 4", homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+			["city 61 letters", { homeCity: "A".repeat(61), homeState: "TX" }, [400, "HOME_CITY_TOO_LONG"]],
+			["city a number", { homeCity: 12, homeState: "TX" }, [400, "INVALID_HOME_CITY"]],
+		]) eq(`§14.1 his request with ${label}: ${want.join(" ")}`, code(await bare(w, { ...day, ...home })), want);
+		eq("§14.1b ...none wrote a row, and no refusal's audit line names a city", [count(w), w.audits("driver_availability_request_blocked").some((a) => /Springfield|Elm|example/.test(a.details))], [before, false]);
+
+		const r = await bare(w, { from: "2026-11-09", to: "2026-11-10", homeCity: "  Coeur   d'Alene ", homeState: " id " });
+		const s = stored(w, reqId(r));
+		eq("§14.2 the city trimmed with each run of spaces made one, the state's code upper-cased: 201, stored and shown so",
+			[r.status, r.body && r.body.request && r.body.request.home, s && [s.home_city, s.home_state]], [201, { city: "Coeur d'Alene", state: "ID" }, ["Coeur d'Alene", "ID"]]);
+		const more = [];
+		for (const [from, homeCity, homeState] of [["2026-11-16", "Winston-Salem", "NC"], ["2026-11-23", "St. Louis", "MO"], ["2026-11-30", "Twin 29 Pines", "CA"]]) {
+			const m = await bare(w, { from, to: from, homeCity, homeState });
+			more.push([m.status, m.body && m.body.request && m.body.request.home && m.body.request.home.city]);
+		}
+		eq("§14.3 a hyphen, a period, two digits: each a city, taken as typed", more, [[201, "Winston-Salem"], [201, "St. Louis"], [201, "Twin 29 Pines"]]);
+		const asked = w.audits("driver_availability_request").map((a) => a.details);
+		eq("§14.4 the audit names the home time's state, never its city",
+			[asked[0], asked.some((d) => /Coeur|Winston|Louis|Pines/.test(d))], ["Hollis Renner: off 2026-11-09..2026-11-10 (off_duty) requested by the driver; home time in ID", false]);
+		eq("§14.5 the staff notice names the city and state", staffNotices(w)[0] && staffNotices(w)[0].body, "Off duty. Asked Oct 15. Home time: Coeur d'Alene, ID.");
+
+		const me = await mine(w);
+		eq("§14.6 his answer: the form starts at his Drivers page city and state (trimmed, the code upper-cased); each request with its home time",
+			[me.body.homeDefault, (me.body.requests || []).map((q) => q.home)],
+			[{ city: "Springfield", state: "MO" }, [{ city: "Coeur d'Alene", state: "ID" }, { city: "Winston-Salem", state: "NC" }, { city: "St. Louis", state: "MO" }, { city: "Twin 29 Pines", state: "CA" }]]);
+		eq("§14.6b ...the payload's timeOff says the same, form start included", [(await page(w)).body.timeOff, "homeDefault" in me.body], [me.body, true]);
+		eq("§14.6c a Super Admin on his page: no form start (he can't ask), the requests' home time shown", [(await page(w, USERS.sa)).body.timeOff.homeDefault, (await page(w, USERS.sa)).body.timeOff.requests.length], [null, 4]);
+		w.db.prepare("UPDATE drivers_directory SET city = '75001', state = 'Missouri' WHERE id = ?").run(DIR.hollis);
+		eq("§14.6d a Drivers page city or state the request would refuse starts the form blank; none recorded, blank too",
+			[(await mine(w)).body.homeDefault, (await mine(w, USERS.otherDriver)).body.homeDefault], [{ city: "", state: "" }, { city: "", state: "" }]);
+
+		await approve(w, reqId(r));
+		const staffRow = (await staffCreate(w, DIR.hollis, { kind: "vacation", from: "2026-10-24", to: "2026-10-25" })).body.row.id;
+		const rows = (await mine(w)).body.rows;
+		eq("§14.7 approved, his request's row keeps its home time; a staff row without one says null",
+			[rows.find((x) => x.id === reqId(r)).home, rows.find((x) => x.id === staffRow).home], [{ city: "Coeur d'Alene", state: "ID" }, null]);
+
+		const panel = await w.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp });
+		eq("§14.8 the staff panel offers home time on its add form, and every row carries its home time",
+			[panel.body.homeTime, panel.body.rows.every((x) => "home" in x), panel.body.rows.find((x) => x.id === reqId(r)).home], [true, true, { city: "Coeur d'Alene", state: "ID" }]);
+		const none = await staffCreate(w, DIR.soren, { kind: "vacation", from: "2026-12-01", to: "2026-12-02" });
+		const both = await staffCreate(w, DIR.soren, { kind: "vacation", from: "2026-12-07", to: "2026-12-08", homeCity: "Riverton", homeState: "wy" });
+		eq("§14.9 staff record time off with no home time, or with one: 201 each; the audit names the state only",
+			[none.status, none.body.row.home, both.status, both.body.row.home, w.audits("driver_availability_create").slice(-2).map((a) => a.details)],
+			[201, null, 201, { city: "Riverton", state: "WY" }, ["Soren King: off 2026-12-01..2026-12-02 (vacation)", "Soren King: off 2026-12-07..2026-12-08 (vacation); home time in WY"]]);
+		eq("§14.10 ...a city without a state, a state without a city, or a bad state: 400, nothing written", [
+			code(await staffCreate(w, DIR.soren, { kind: "vacation", from: "2026-12-14", to: "2026-12-14", homeCity: "Riverton" })),
+			code(await staffCreate(w, DIR.soren, { kind: "vacation", from: "2026-12-14", to: "2026-12-14", homeState: "WY" })),
+			code(await staffCreate(w, DIR.soren, { kind: "vacation", from: "2026-12-14", to: "2026-12-14", homeCity: "Riverton", homeState: "Wyoming" })),
+		], [[400, "HOME_LOCATION_INCOMPLETE"], [400, "HOME_LOCATION_INCOMPLETE"], [400, "INVALID_HOME_STATE"]]);
+		const put = (id, body, user = USERS.disp) => w.call("PUT", `/api/driver-availability/${id}`, { user, body });
+		const noneId = none.body.row.id;
+		const set = await put(noneId, { homeCity: "Lincoln", homeState: "NE" });
+		const kept = await put(noneId, { to: "2026-12-03" });
+		const same = await put(noneId, { homeCity: "Lincoln", homeState: "NE" });
+		eq("§14.11 staff edit the home time like the dates: set it (200), change the days and keep it, the same again is no change",
+			[set.status, set.body.row.home, kept.body.row.home, same.body.unchanged], [200, { city: "Lincoln", state: "NE" }, { city: "Lincoln", state: "NE" }, true]);
+		const half = await put(noneId, { homeCity: "" });
+		const cleared = await put(noneId, { homeCity: "", homeState: "" });
+		eq("§14.12 ...clearing one side only: 400 HOME_LOCATION_INCOMPLETE; both: 200, none",
+			[code(half), cleared.status, cleared.body.row.home, [stored(w, noneId).home_city, stored(w, noneId).home_state]], [[400, "HOME_LOCATION_INCOMPLETE"], 200, null, [null, null]]);
+		eq("§14.13 ...each change audited with the state only, a removal as such",
+			w.audits("driver_availability_update").filter((a) => a.entity_id === String(DIR.soren)).map((a) => a.details),
+			["Soren King: off 2026-12-01..2026-12-02 (vacation) -> off 2026-12-01..2026-12-02 (vacation); home time in NE",
+				"Soren King: off 2026-12-01..2026-12-02 (vacation) -> off 2026-12-01..2026-12-03 (vacation)",
+				"Soren King: off 2026-12-01..2026-12-03 (vacation) -> off 2026-12-01..2026-12-03 (vacation); home time removed"]);
+		const told = driverNotices(w).length;
+		const homeOnly = await put(reqId(r), { homeCity: "Boise", homeState: "ID" }, USERS.sa);
+		eq("§14.14 staff changing only the home time of his approved request: 200, changed, and no notice (it names days only)",
+			[homeOnly.status, homeOnly.body.row.home, driverNotices(w).length], [200, { city: "Boise", state: "ID" }, told]);
+
+		// An older row (started Sep 5, over 30 days back): a Dispatcher may only end it early.
+		const old = Number(w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at, home_city, home_state)
+			VALUES (?, 'Tamsin Vale', 'vacation', '2026-09-05', '2026-10-20', '', 'super_admin', '2026-09-01T12:00:00Z', 'Riverton', 'WY')`).run(DIR.tamsin).lastInsertRowid);
+		const early = await put(old, { to: "2026-10-18" });
+		const moved = await put(old, { to: "2026-10-17", homeCity: "Lincoln", homeState: "NE" });
+		eq("§14.15 a Dispatcher ends an older row early (its home time kept), but can't change its home time: 400 BACKDATE_LIMIT; a Super Admin can",
+			[early.status, early.body.row.home, code(moved), (await put(old, { to: "2026-10-17", homeCity: "Lincoln", homeState: "NE" }, USERS.sa)).body.row.home],
+			[200, { city: "Riverton", state: "WY" }, [400, "BACKDATE_LIMIT"], { city: "Lincoln", state: "NE" }]);
+	});
+
+	await R.guard("§14 flag off", async () => {
+		// The requests flag off (the screen flag on): the home keys are ignored and never sent.
+		const off = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+		off.db.prepare("UPDATE drivers_directory SET city = 'Springfield', state = 'MO' WHERE id = ?").run(DIR.hollis);
+		const offRow = await staffCreate(off, DIR.hollis, { kind: "vacation", from: "2026-10-20", to: "2026-10-21", homeCity: "Riverton", homeState: "ZZ" });
+		const offStored = off.db.prepare("SELECT home_city, home_state FROM driver_availability WHERE id = ?").get(offRow.body.row.id);
+		const offEdit = await off.call("PUT", `/api/driver-availability/${offRow.body.row.id}`, { user: USERS.sa, body: { homeCity: "Lincoln", homeState: "NE" } });
+		const offPanel = await off.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa });
+		const offMine = await mine(off);
+		eq("§14.16 flag off: a staff body's home time (even a bad one) is ignored: 201, nothing stored, an edit of it alone is no change",
+			[offRow.status, offStored, offEdit.body.unchanged, off.audits("driver_availability_create").map((a) => a.details)],
+			[201, { home_city: null, home_state: null }, true, ["Hollis Renner: off 2026-10-20..2026-10-21 (vacation)"]]);
+		eq("§14.17 ...and no answer carries a home key: the panel, its rows, his rows, his own answer",
+			[("homeTime" in offPanel.body), offPanel.body.rows.some((x) => "home" in x), offMine.body.rows.some((x) => "home" in x), Object.keys(offMine.body).sort().join()],
+			[false, false, false, "rows,today"]);
+	});
+
+	await R.guard("§14 CHR", async () => {
+		// Nothing composed for CHR names the home time: the lib modules named for CHR (chr-*.js,
+		// and a time-off-chr-draft.js once it exists), and every server.js statement whose head
+		// names CHR (chrIntegration, CHR_..., buildChrDraft; not "chromium"), mention none of its names.
+		const HOME_NAMES_RE = /\b(?:home_city|home_state|homeCity|homeState|homeDefault|homeLocation\w*|validateHomeLocation|storedHomeLocation|homeAuditNote)\b/;
+		const CHR_FILE_RE = /(?:^|-)chr[-.]/;
+		const CHR_HEAD_RE = /\bchr(?:[A-Z_.-]|\b)|CHR|Chr(?=[A-Z])/;
+		const libDir = path.join(W.ROOT, "lib");
+		const chrFiles = fs.readdirSync(libDir).filter((f) => CHR_FILE_RE.test(f) && f.endsWith(".js"));
+		const isHead = (l) => /^[^\s}\])`/]/.test(l);
+		const statements = [];
+		for (const l of W.SRC.split("\n")) {
+			if (isHead(l)) statements.push({ head: l, lines: [l] });
+			else if (statements.length) statements[statements.length - 1].lines.push(l);
+		}
+		const chrStatements = statements.filter((st) => CHR_HEAD_RE.test(st.head));
+		eq("§14.18 nothing composed for CHR names the home time: its names exist, and no CHR module or CHR statement in server.js mentions one",
+			[HOME_NAMES_RE.test(W.SRC), chrFiles.length >= 5,
+				chrFiles.filter((f) => HOME_NAMES_RE.test(fs.readFileSync(path.join(libDir, f), "utf8"))),
+				chrStatements.filter((st) => HOME_NAMES_RE.test(st.lines.join("\n"))).map((st) => st.head.slice(0, 80))],
+			[true, true, [], []]);
 	});
 
 	await R.finish();
