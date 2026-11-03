@@ -62931,6 +62931,8 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			reserve: FUEL_RESERVE_OPTS,
 			// Before pickup, routeMiles holds the run to the shipper only when it was routed.
 			approachCounted: pickedUp || planApproach,
+			// Its clock reads after fixFresh's, so a live reading it trusts came with a fresh fix.
+			readingTrusted: fuelModel.tripReadingTrusted({ reading, nowMs: Date.now() }),
 		});
 
 		res.json({
