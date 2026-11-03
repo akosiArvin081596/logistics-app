@@ -21,8 +21,13 @@
 //      Gmail" words; a refusal before n8n after an unanswered IMAP; a definite
 //      failure deletes the row and voids the number
 //   §6 "Check Gmail": found, absent, unknown; a person's answer for n8n
-//   §7 every switch off and nothing marked: today's answers, a Message-ID on the
-//      draft, and no row left behind
+//   §7 nothing marked: today's answers, a Message-ID on the draft, and no row
+//      left behind
+//   Then §1b and §4-§7 again with every switch off (TRIUMPH_FACTORING_ENABLED and
+//   TRIUMPH_FACTOR_MARK_IDS unset, as production ships): a load the lead's
+//   scripts/factoring-mark.js marked is refused before prepare() and caught by the
+//   late re-check, and the in-flight row works the same (plan §11.5).
+//   §8 mutants, among them the button's checks made to follow the marking switch
 //
 // Made-up loads only (LD-TEST-*), domain example-broker.test. Pure: no server,
 // port, app.db or network.
@@ -48,20 +53,26 @@ const optional = (p) => {
 };
 const store = optional(path.join(ROOT, "lib", "factoring-store.js"));
 const routesLib = optional(path.join(ROOT, "lib", "factoring-routes.js"));
+const markScript = optional(path.join(ROOT, "scripts", "factoring-mark.js"));
 
 let pass = 0;
 const failures = [];
 // Where a failure goes: the run's list, or a mutant's own (§8).
 let sink = failures;
 let sectionLog = (t) => console.log(`\n${t}`);
+// The settings a world is built with: "on" (marking on, accounts 7 and 9 listed)
+// or "off" (both settings unset, as production ships), and the tag a case's label
+// carries in the "off" run.
+let MODE = "on";
+const modeTag = () => (MODE === "off" ? " [every switch off]" : "");
 function eq(actual, expected, label) {
 	const a = JSON.stringify(actual);
 	const e = JSON.stringify(expected);
 	if (a === e) { if (sink === failures) pass++; return; }
-	sink.push(`${label}\n      expected ${e}\n      actual   ${a}`);
+	sink.push(`${label}${modeTag()}\n      expected ${e}\n      actual   ${a}`);
 }
 function ok(cond, label) { eq(Boolean(cond), true, label); }
-function section(t) { sectionLog(t); }
+function section(t) { sectionLog(`${t}${modeTag()}`); }
 
 const QUIET = { log() {}, warn() {}, error() {}, info() {} };
 const SENDER = "drafts@example.test";
@@ -122,12 +133,17 @@ const deferred = () => {
 const stagedError = (message, stage, answered) => Object.assign(new Error(message), { stage, ...(answered ? { answered: true } : {}) });
 
 // One world: the route over a fresh database. `gmail` and `n8n` say which
-// hand-off targets are set; `ids` is TRIUMPH_FACTOR_MARK_IDS.
-function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false } = {}) {
+// hand-off targets are set; `ids` is TRIUMPH_FACTOR_MARK_IDS; `off` builds it
+// with TRIUMPH_FACTORING_ENABLED and TRIUMPH_FACTOR_MARK_IDS both unset (the
+// run's MODE by default). With every switch off, loads are marked the way the
+// lead's scripts/factoring-mark.js marks them.
+function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off" } = {}) {
 	const db = new Database(":memory:");
 	db.exec(LIFT.createSql);
 	for (const a of LIFT.alters) db.exec(a);
 	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, type TEXT, file_name TEXT, uploaded_at TEXT, deleted_at TEXT)");
+	db.exec(`CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER NOT NULL, username TEXT NOT NULL,
+		role TEXT NOT NULL, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '')`);
 	const addPod = db.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES (?, 'POD', ?, '2026-11-02T15:00:00Z')");
 	for (const row of SHEET.slice(1)) addPod.run(row[0], `${row[0]}_POD.pdf`);
 	if (store) store.ensureSchema(db);
@@ -206,7 +222,7 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	const routesDb = unreadableMarker ? (() => { const x = new Database(":memory:"); if (store) store.ensureSchema(x); x.close(); return x; })() : db;
 	const routes = CUR.routesLib ? CUR.routesLib.create({
 		db: routesDb,
-		env: { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) },
+		env: off ? {} : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) },
 		now: () => new Date(w.now || NOW),
 		logAudit: scope.logAudit,
 		logAuditRefusal: (req, action, entity, entityId, details, code) => w.seen.refusals.push({ action, code }),
@@ -252,8 +268,18 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 		}
 		return out;
 	};
-	w.mark = (n, body = {}) => w.route("/api/factoring/loads/:loadKey", { params: { loadKey: key(n) }, body: { factored: true, reason: "made-up reason", ...body } });
-	w.clear = (n) => w.route("/api/factoring/loads/:loadKey", { params: { loadKey: key(n) }, body: { factored: false, reason: "made-up reason" } });
+	// Marking: the route (marking on), or the lead's script (every switch off),
+	// answered in the route's shape.
+	const byScript = (n, mode) => {
+		if (!markScript) return { status: 0, body: { code: "NO_SCRIPT" } };
+		const r = markScript.run({ db, ids: [id(n)], mode, dryRun: false, reason: "made-up reason", nowIso: NOW });
+		const one = r.loads[0] || {};
+		return { status: one.code ? 409 : 200, body: one.code ? { code: one.code } : { ok: true, changed: one.outcome === "changed" } };
+	};
+	w.mark = async (n, body = {}) => (off ? byScript(n, "mark")
+		: w.route("/api/factoring/loads/:loadKey", { params: { loadKey: key(n) }, body: { factored: true, reason: "made-up reason", ...body } }));
+	w.clear = async (n) => (off ? byScript(n, "clear")
+		: w.route("/api/factoring/loads/:loadKey", { params: { loadKey: key(n) }, body: { factored: false, reason: "made-up reason" } }));
 	w.resolve = (n, body = {}) => w.route("/api/loads/:loadId/invoice-draft-inflight/resolve", { params: { loadId: id(n) }, body });
 	w.putMarker = (n, { factored = 1, locked = "" } = {}) => db.prepare(`INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, locked_at, locked_via, updated_at)
 		VALUES (?, ?, ?, 'script', ?, ?, ?, ?) ON CONFLICT(load_key) DO UPDATE SET factored = excluded.factored, locked_at = excluded.locked_at, locked_via = excluded.locked_via`)
@@ -298,6 +324,32 @@ async function s1() {
 		eq((await notListedAtAll.press(1, { body: CONFIRM })).body.code, "FACTORING_NOT_LISTED", "§1 TRIUMPH_FACTOR_MARK_IDS unset: nobody confirms");
 	}
 
+}
+
+// ---------------------------------------------------------------- §1b
+// As production ships: TRIUMPH_FACTORING_ENABLED and TRIUMPH_FACTOR_MARK_IDS unset.
+// The first marks come from the lead's scripts/factoring-mark.js, and the button
+// honours them all the same.
+async function s1off() {
+	section("§1b every switch off: a load the lead's script marked is refused all the same");
+	{
+		const w = world({ off: true, n8n: true });
+		const marked = await w.mark(30);
+		eq([marked.status, w.db.prepare("SELECT factored, source FROM load_factoring WHERE load_key = ?").get(key(30))], [200, { factored: 1, source: "script" }],
+			"§1b scripts/factoring-mark.js --apply marks the load with every switch off");
+		for (const dry of [true, false]) {
+			const r = await w.press(30, { dry });
+			eq([r.status, r.body && r.body.code], [409, "LOAD_FACTORED"], `§1b FAILS ON THE OLD CODE: every switch off, the marked load answers 409 LOAD_FACTORED${dry ? " (the preview too)" : ""}`);
+		}
+		eq(w.spies(), [0, 0, 0, 0], "§1b FAILS ON THE OLD CODE: prepare, nextInvoiceNumber, IMAP and n8n spies all at 0");
+		eq([w.drafts(30), w.inflight(30)], [[], []], "§1b no draft row and no in-flight row");
+		const confirm = await w.press(30, { body: CONFIRM });
+		eq([confirm.status, confirm.body && confirm.body.code], [403, "FACTORING_NOT_LISTED"], "§1b with nobody listed, nobody can confirm it");
+		w.duringRender = () => { w.duringRender = null; w.mark(31); };
+		const late = await w.press(31);
+		eq([late.status, late.body && late.body.code, w.seen.imap.length, w.seen.n8n.length, w.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
+			"§1b FAILS ON THE OLD CODE: every switch off, a mark that lands during the render is caught by the late re-check, its number voided");
+	}
 }
 
 // ---------------------------------------------------------------- §2
@@ -394,8 +446,9 @@ async function s4() {
 		w2.holds.shift().resolve({ ok: true });
 		await a;
 
-		// Clearing a factored load's mark while its confirmed draft is in flight.
-		const w3 = world();
+		// Clearing a factored load's mark while its confirmed draft is in flight (the
+		// confirmation needs a listed account, so marking is on here in both runs).
+		const w3 = world({ off: false });
 		w3.putMarker(15);
 		w3.imap = ["HOLD"];
 		const c = w3.press(15, { body: CONFIRM });
@@ -523,7 +576,7 @@ async function s6() {
 
 // ---------------------------------------------------------------- §7
 async function s7() {
-	section("§7  every switch off, nothing marked: today's answers");
+	section("§7  nothing marked: today's answers");
 	{
 		const w = world();
 		const r = await w.press(27);
@@ -568,28 +621,44 @@ async function mutants() {
 		["the confirmation from any Super Admin", "routes", "mayConfirm: mayMark(userOf(req)),", "mayConfirm: true,", s1],
 		["the shared login counts as listed", "routes", "&& !isSharedLoginName(user.username)", "", s1],
 		["Check Gmail without the search", "routes", "const canSearch = row.path === \"imap\"", "const canSearch = false && row.path === \"imap\"", s6],
+		// The review's two: the button's checks, or its in-flight row and late
+		// re-check, made to follow the marking switch. Caught with every switch off.
+		["the button's checks run only while marking is on", "routes", [
+			["function draftEarly(req, loadId) {\n", "function draftEarly(req, loadId) {\n\t\tif (!markingOn) return { ok: true, factored: false, confirmed: false, reason: \"\" };\n"],
+			["const begun = store.draftBegin(db, {", "const begun = !markingOn ? { ok: true } : store.draftBegin(db, {"],
+		], null, s1off, "off"],
+		["the in-flight row and the late re-check skipped while marking is off", "routes",
+			"const begun = store.draftBegin(db, {", "const begun = !markingOn ? { ok: true } : store.draftBegin(db, {", s4, "off"],
+		["the same, caught by the late mark with every switch off", "routes",
+			"const begun = store.draftBegin(db, {", "const begun = !markingOn ? { ok: true } : store.draftBegin(db, {", s1off, "off"],
 	];
 	let caught = 0;
-	for (const [label, where, from, to, sec] of list) {
+	for (const [label, where, from, to, sec, mode = "on"] of list) {
 		const text = where === "route" ? LIFT.route : ROUTES_SRC;
-		if (text.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once: ${label}`); continue; }
+		// One edit, or several ([from, to] pairs), each anchored exactly once.
+		const edits = Array.isArray(from) ? from : [[from, to]];
+		if (edits.some(([f]) => text.split(f).length - 1 !== 1)) { failures.push(`§8 mutant anchor not found once: ${label}`); continue; }
+		const mutated = edits.reduce((t, [f, r]) => t.replace(f, r), text);
 		const saved = { ...CUR };
-		if (where === "route") CUR.route = text.replace(from, to);
-		else CUR.routesLib = moduleFrom(ROUTES_FILE, text.replace(from, to));
+		if (where === "route") CUR.route = mutated;
+		else CUR.routesLib = moduleFrom(ROUTES_FILE, mutated);
 		const before = sink;
 		sink = [];
 		const quietSection = sectionLog;
 		sectionLog = () => {};
+		const savedMode = MODE;
+		MODE = mode;
 		try {
 			await sec();
 		} catch (e) {
 			sink.push(`threw: ${e && e.message}`);
 		}
+		MODE = savedMode;
 		const hit = sink.length > 0;
 		sink = before;
 		sectionLog = quietSection;
 		Object.assign(CUR, saved);
-		if (hit) { caught++; pass++; console.log(`  MUTANT ${label}: caught`); }
+		if (hit) { caught++; pass++; console.log(`  MUTANT ${label}${mode === "off" ? " [every switch off]" : ""}: caught`); }
 		else failures.push(`§8 MUTANT ${label}: NOT caught`);
 	}
 	console.log(`  ${caught}/${list.length} mutants caught`);
@@ -601,6 +670,10 @@ async function main() {
 	process.env.DEFAULT_INVOICE_EMAIL = TO;
 	delete process.env.BISON_INVOICE_EMAIL;
 	for (const s of [s1, s2, s3, s4, s5, s6, s7]) await s();
+	// Again as production ships: both factoring settings unset (plan §11.5).
+	MODE = "off";
+	for (const s of [s1off, s4, s5, s6, s7]) await s();
+	MODE = "on";
 	if (routesLib) await mutants();
 	else failures.push("§8 lib/factoring-routes.js is missing: no mutant can run");
 }
