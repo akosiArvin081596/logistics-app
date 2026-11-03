@@ -164,7 +164,9 @@ function liftHandler(head, stubs) {
 	const driverInstructions = { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } };
 	// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
 	const autoInvoice = { mode: "off", annotateCompletedRows: ({ rows }) => rows };
-	const scope = makeScope({ app: { get: register, put: register, post: register, delete: register }, require: realRequire, driverInstructions, autoInvoice, ...stubs });
+	// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
+	const factoringRoutes = { annotateDashboard() {} };
+	const scope = makeScope({ app: { get: register, put: register, post: register, delete: register }, require: realRequire, driverInstructions, autoInvoice, factoringRoutes, ...stubs });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return handler;
@@ -355,7 +357,10 @@ section("§1 every route that reads a load ID reads a key through loadIdFor()", 
 	const codeOf = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 	const libReading = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && LIB_READS_RE.test(codeOf(libText(f)))).sort();
 	const LIB_RESOLVED = ["driver-instructions-runtime.js"];
-	const LIB_EXEMPT = { "ratecon-pdf-route.js": "Super Admin only: requireRole before any lookup" };
+	const LIB_EXEMPT = {
+		"ratecon-pdf-route.js": "Super Admin only: requireRole before any lookup",
+		"factoring-routes.js": "Super Admin only: requireRole before any lookup (a Super Admin is never served a withheld Load ID)",
+	};
 	check("§1 lib/: the files that read a load ID from a request are exactly the listed ones: unlisted, then gone",
 		[libReading.filter((f) => !LIB_RESOLVED.includes(f) && !LIB_EXEMPT[f]), [...LIB_RESOLVED, ...Object.keys(LIB_EXEMPT)].filter((f) => !libReading.includes(f)).sort()], [[], []]);
 	const runtime = libText("driver-instructions-runtime.js");

@@ -182,6 +182,8 @@
               </button>
             </div>
           </div>
+          <!-- Factored loads (Triumph): Super Admin only, in lib/factoringStatus.js's words. -->
+          <FactoringControls v-if="auth.isSuperAdmin" :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
           <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -544,6 +546,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import DriverInstructionsSection from './DriverInstructionsSection.vue'
+import FactoringControls from './FactoringControls.vue'
 import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DeletedLoadsLink from './DeletedLoadsLink.vue'
@@ -886,6 +889,11 @@ function runCancel() {
 }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; closeDeleteConfirm() }
+// Factored loads (Triumph): the row's `_factoring` after a change, then a refresh.
+async function onFactoringChanged(patch) {
+  if (selectedJob.value && patch) selectedJob.value = { ...selectedJob.value, _factoring: patch }
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+}
 // The Driver instructions section changed this load's review codes: refresh the lists,
 // then give the open load its fresh codes so its badge follows.
 async function onInstructionsChanged() {

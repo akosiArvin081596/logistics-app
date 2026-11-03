@@ -47160,6 +47160,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
 		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
 		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
+		// Factored loads (`_factoring`) and button drafts that may be in Gmail
+		// (`_draftInflight`): a Super Admin's rows, only where a row exists or
+		// marking is on for a listed account (lib/factoring-routes.js).
+		factoringRoutes.annotateDashboard(req, { headers: jobTracking.headers, active: respActive, completed: respCompleted });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -55537,6 +55541,27 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 }
 // </driver-instructions-wiring>
 
+// <factoring-wiring>
+// FACTORED LOADS (Triumph, per load): the marker every path that hands a broker invoice
+// to Gmail reads, so a factored load is never emailed (lib/factoring-store.js, the
+// rules; lib/factoring-routes.js, the routes and the Draft Invoice button's steps).
+// The tables are made here whatever the settings, empty until a mark. Settings, read
+// once at start (off in a replica): TRIUMPH_FACTORING_ENABLED (marking, exactly
+// "true") and TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody).
+require("./lib/factoring-store").ensureSchema(db);
+const factoringRoutes = require("./lib/factoring-routes").create({
+	db,
+	env: process.env,
+	replica: Boolean(REPLICA),
+	logAudit,
+	logAuditRefusal,
+	findDraftByMessageId: require("./lib/imap-draft").findDraftByMessageId,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
+});
+factoringRoutes.mount(app, { requireRole, refuseCrossSite });
+console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}`);
+// </factoring-wiring>
+
 // <auto-invoice-wiring>
 // AUTOMATIC BROKER INVOICE DRAFTS. Every 5 minutes a sweep of the cached Job Tracking
 // finds the loads that became Delivered and drafts each one's broker invoice into Gmail
@@ -56981,6 +57006,11 @@ app.post(
 			const linesOn = invoiceLines.linesEnabled(process.env);
 			const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
 			if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
+			// 0c) A factored load (Triumph), a locked one, or a draft of this load still
+			//     in flight or maybe in Gmail: refused before anything is read or minted
+			//     (lib/factoring-routes.js draftEarly()).
+			const factoringCheck = factoringRoutes.draftEarly(req, loadId);
+			if (!factoringCheck.ok) return res.status(factoringCheck.http).json(factoringCheck.json);
 
 			// 1)-6a-2) The load, its PODs and rate cons, every printed field, and
 			//    every refusal that must come before the invoice number:
@@ -57198,12 +57228,30 @@ app.post(
 			// modal can show "approved draft → recipient / invoice #": record() in
 			// lib/broker-invoice-draft.js. Best-effort — never fails the draft. Only
 			// called on a real (non-dryRun) success.
-			const recordDraft = (via) => brokerInvoiceDraft.record(draft, rendered, {
-				via, actor: req, invoiceId, mintedInvoiceId, editDiffs, emailApplied: editEmailApplied, lineAuditNotes, draftWarnings,
-			});
-
 			const gmailUser = process.env.GMAIL_USER;
 			const gmailPass = REPLICA ? "" : process.env.GMAIL_APP_PASSWORD; // none in a replica: no mail leaves it
+			const webhookUrl = REPLICA ? "" : process.env.N8N_INVOICE_WEBHOOK_URL; // none in a replica: no webhook is called
+			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
+			// After the render (the last await), before any hand-off: the marker's
+			// checks again and this draft's in-flight row (lib/factoring-routes.js
+			// draftHandoff()). A refusal voids the minted number. Nothing to hand off
+			// to (no mailbox, no webhook) writes no row.
+			const handoff = (gmailUser && gmailPass) || (webhookUrl && webhookSecret)
+				? factoringRoutes.draftHandoff(req, {
+					loadId, invoiceId, mintedInvoiceId, confirmed: factoringCheck.confirmed, reason: factoringCheck.reason,
+					path: gmailUser && gmailPass ? "imap" : "n8n", user: gmailUser, recipient: invoiceTo.email, total: rendered.total,
+				})
+				: null;
+			if (handoff && !handoff.ok) return res.status(handoff.http).json(handoff.json);
+
+			// The in-flight row goes in record()'s own transaction; a draft it could
+			// not record leaves the row maybe drafted.
+			const settleDraft = handoff ? handoff.recorded : (recorded) => recorded;
+			const recordDraft = (via) => settleDraft(brokerInvoiceDraft.record(draft, rendered, {
+				via, actor: req, invoiceId, mintedInvoiceId, editDiffs, emailApplied: editEmailApplied, lineAuditNotes, draftWarnings,
+				settleInflight: handoff ? handoff.settle : null,
+			}));
+
 			let imapError = null;
 			if (gmailUser && gmailPass) {
 				try {
@@ -57215,20 +57263,26 @@ app.post(
 						subject: draftSubject,
 						html: draftHtml,
 						attachments: draftAttachments,
+						// So "Check Gmail" can find a draft whose answer never came.
+						messageId: handoff.messageId,
 					});
 					recordDraft("imap");
 					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts", warnings: draftWarnings });
 				} catch (e) {
 					imapError = e;
+					handoff.imapFailed(e);
 					console.error("Draft invoice: IMAP draft failed:", e.message);
 					// fall through to the n8n fallback (if configured), else surface the error below
 				}
 			}
 
 			// FALLBACK: POST to the n8n webhook, only if explicitly configured.
-			const webhookUrl = REPLICA ? "" : process.env.N8N_INVOICE_WEBHOOK_URL; // none in a replica: no webhook is called
-			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
 			if (webhookUrl && webhookSecret) {
+				// After a failed IMAP append the checks run again before the POST.
+				if (imapError) {
+					const again = handoff.beforeN8n();
+					if (!again.ok) return res.status(again.http).json(again.json);
+				}
 				// ⚠️ The workflow does not use emailHtml (below): this path's draft
 				// carries the GENERATED message. An edited one must not vanish
 				// silently, so the answer warns and the audit line records the edit
@@ -57293,18 +57347,32 @@ app.post(
 					const txt = await r.text().catch(() => "");
 					let n8nResponse;
 					try { n8nResponse = txt ? JSON.parse(txt) : {}; } catch { n8nResponse = { raw: txt.slice(0, 500) }; }
-					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
+					// The workflow may have made the draft before it failed: maybe drafted.
+					if (!r.ok) {
+						handoff.n8nFailed();
+						return res.status(502).json({ error: `n8n webhook returned ${r.status}. ${handoff.maybeWords}`, code: "DRAFT_MAYBE_SAVED", invoiceId, details: n8nResponse });
+					}
 					recordDraft("n8n");
 					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse, warnings: draftWarnings });
 				} catch (e) {
 					console.error("Draft invoice: n8n webhook call failed:", e.message);
-					return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
+					handoff.n8nFailed();
+					return res.status(502).json({ error: `Failed to reach the invoice-draft webhook. ${handoff.maybeWords}`, code: "DRAFT_MAYBE_SAVED", invoiceId });
 				}
 			}
 
 			// IMAP was configured but failed, and no n8n fallback handled it →
-			// surface the failure instead of pretending it worked.
+			// surface the failure instead of pretending it worked. Gmail got the
+			// message and never answered: it may be there, so say that instead.
+			if (imapError && handoff.maybe) {
+				return res.status(502).json({
+					error: `Invoice #${invoiceId} may have been saved as a Gmail draft: Gmail didn't answer. Use 'Check Gmail' on the load before drafting again.`,
+					code: "DRAFT_MAYBE_SAVED",
+					invoiceId,
+				});
+			}
 			if (imapError) {
+				handoff.noDraft("DRAFT_SAVE_FAILED");
 				return res.status(502).json({
 					error: `Invoice ${invoiceId} was generated, but saving the Gmail draft failed (${imapError.message}). No draft was created — please retry.`,
 					code: "DRAFT_SAVE_FAILED",
