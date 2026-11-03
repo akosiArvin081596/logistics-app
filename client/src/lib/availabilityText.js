@@ -281,3 +281,179 @@ export function driverTimeOffBanner(rows, today) {
   const next = list.find((r) => r.from > today && dayIndex(r.from) - dayIndex(today) <= BANNER_LEAD_DAYS)
   return next ? `Time off coming up: ${availabilityRangeText(next.from, next.to)}.` : ''
 }
+
+// ── A driver's own request (D's rules of 2026-10-31) ────────────────────────
+// With the server's DRIVER_TIME_OFF_REQUESTS_ENABLED on, `timeOff` also carries
+// `requests` ([{ id, kind, from, to, request: "waiting" | "declined",
+// canCancel }]), `requestLimits` ({ fromMin, fromMax, maxDays, waitingMax }) and
+// `canRequest`. The server decides every day: the form starts at fromMin, which
+// it worked out from its own business day, and it refuses anything else in
+// words. Nothing here counts days ahead from the phone's clock.
+
+export const REQUEST_HINT = 'Ask at least 5 days ahead. Dispatch approves each request. For sooner days or changes, message dispatch.'
+export const RECORDED_HINT = 'Dispatch records your time off. To change it, message dispatch.'
+const REQUEST_STATES = ['waiting', 'declined']
+
+// A day key from whole days since 1970-01-01 (Howard Hinnant's civil_from_days):
+// integer arithmetic only, so no Date and no zone is involved.
+function keyFromDayIndex(n) {
+  const z = n + 719468
+  const era = Math.floor(z / 146097)
+  const doe = z - era * 146097
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+  const mp = Math.floor((5 * doy + 2) / 153)
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1
+  const m = mp < 10 ? mp + 3 : mp - 9
+  const y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+}
+
+// `key` moved by n whole days ("" for a key that is not a day).
+export function shiftDayKey(key, n) {
+  return isAvailabilityDay(key) && Number.isInteger(n) ? keyFromDayIndex(dayIndex(key) + n) : ''
+}
+
+// Their waiting and declined requests, by first day, each rebuilt from
+// { id, kind, from, to, request, canCancel } only.
+export function driverRequestRows(requests) {
+  if (!Array.isArray(requests)) return []
+  return requests
+    .filter((r) => r && typeof r === 'object' && REQUEST_STATES.includes(r.request) && isAvailabilityDay(r.from) && isAvailabilityDay(r.to) && r.from <= r.to)
+    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, request: r.request, canCancel: r.request === 'waiting' && r.canCancel === true }))
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
+}
+
+// What a request's card row says about it.
+export function driverRequestStatusText(r) {
+  if (r && r.request === 'waiting') return 'Waiting for approval'
+  if (r && r.request === 'declined') return 'Not approved. Message dispatch.'
+  return ''
+}
+
+// Where the request form starts: the first day the server allows, for one day,
+// "Off duty" (the server's default kind).
+export function requestFormStart(limits) {
+  const from = isAvailabilityDay((limits || {}).fromMin) ? limits.fromMin : ''
+  return { kind: 'off_duty', from, to: from }
+}
+
+// The form's date limits from the server's requestLimits: the first day from
+// fromMin to fromMax; the last day from the form's first day to the last one
+// the server's maxDays allows.
+export function requestFormBounds(limits, form) {
+  const l = limits || {}
+  const from = isAvailabilityDay((form || {}).from) ? form.from : null
+  const max = countOrNull(l.maxDays)
+  return {
+    fromMin: dayOrNull(l.fromMin),
+    fromMax: dayOrNull(l.fromMax),
+    toMin: laterDay(from, l.fromMin),
+    toMax: from && max ? shiftDayKey(from, max - 1) : null,
+  }
+}
+
+// Send is offered once both days are real days inside those limits.
+export function canSendRequest(form, limits) {
+  const f = form || {}
+  const b = requestFormBounds(limits, f)
+  if (!b.fromMin || !isAvailabilityDay(f.from) || !isAvailabilityDay(f.to)) return false
+  if (f.from < b.fromMin || (b.fromMax && f.from > b.fromMax)) return false
+  if (f.to < b.toMin || (b.toMax && f.to > b.toMax)) return false
+  return AVAILABILITY_KINDS.some((k) => k.value === f.kind)
+}
+
+// The body a request sends: the two days and the kind, never anything else.
+export function requestBody(form) {
+  const f = form || {}
+  return { kind: f.kind, from: f.from, to: f.to }
+}
+
+// ── Staff: a request on the in-app notice and in the Drivers panel ──────────
+// The notice (type "time-off-request") carries { availabilityId, directoryId }
+// in its metadata, and the decision once made ({ decision, decidedBy }); a live
+// notice nests its whole payload in `metadata`, so both shapes are read.
+
+const DECISIONS = ['approved', 'declined', 'cancelled']
+
+function parseMeta(meta) {
+  if (meta && typeof meta === 'object') return meta
+  if (typeof meta !== 'string') return null
+  try {
+    const v = JSON.parse(meta || '{}')
+    return v && typeof v === 'object' ? v : null
+  } catch {
+    return null
+  }
+}
+
+// { availabilityId, decision, decidedBy } of a time-off-request notice, decision
+// "" while it waits; null for any other notice.
+export function timeOffRequestOfNotice(n) {
+  if (!n || n.type !== 'time-off-request') return null
+  const meta = parseMeta(n.metadata)
+  if (!meta) return null
+  const inner = meta.metadata && typeof meta.metadata === 'object' ? meta.metadata : meta
+  const id = Number(inner.availabilityId)
+  if (!Number.isInteger(id) || id <= 0) return null
+  const decision = DECISIONS.includes(inner.decision) ? inner.decision : ''
+  return { availabilityId: id, decision, decidedBy: decision && typeof inner.decidedBy === 'string' ? inner.decidedBy : '' }
+}
+
+// The notice with a decision written in (a live update or this user's own tap),
+// its metadata kept in the shape it came in.
+export function noticeWithDecision(n, availabilityId, decision, decidedBy) {
+  const req = timeOffRequestOfNotice(n)
+  if (!req || req.availabilityId !== Number(availabilityId) || !DECISIONS.includes(decision)) return n
+  const meta = parseMeta(n.metadata) || {}
+  const by = typeof decidedBy === 'string' ? decidedBy : ''
+  const next = meta.metadata && typeof meta.metadata === 'object'
+    ? { ...meta, metadata: { ...meta.metadata, decision, decidedBy: by } }
+    : { ...meta, decision, decidedBy: by }
+  return { ...n, metadata: typeof n.metadata === 'string' ? JSON.stringify(next) : next }
+}
+
+// What a decided request says: "Approved by dispatch_t", "Declined by
+// dispatch_t", "Cancelled by the driver", or, when the driver was removed from
+// the Drivers list, "Cancelled: driver removed from the Drivers list"; "" while
+// it waits.
+export function requestDecisionText(decision, decidedBy) {
+  const by = typeof decidedBy === 'string' && decidedBy.trim() ? decidedBy.trim() : 'staff'
+  if (decision === 'approved') return `Approved by ${by}`
+  if (decision === 'declined') return `Declined by ${by}`
+  if (decision === 'cancelled') return decidedBy === 'system' ? 'Cancelled: driver removed from the Drivers list' : 'Cancelled by the driver'
+  return ''
+}
+
+// Which list of the Drivers panel a staff row goes in: "waiting" (a driver's
+// request still waiting, shown first), "live" (approved time off from today on)
+// or "past" (ended, cancelled or declined). A row with no `request` key (the
+// requests flag off) goes by its status alone.
+export function panelGroup(row) {
+  const r = row || {}
+  if (r.status === 'cancelled') return 'past'
+  if (r.request === 'waiting') return 'waiting'
+  if (r.request === 'declined') return 'past'
+  return r.status === 'current' || r.status === 'upcoming' ? 'live' : 'past'
+}
+
+// The word on a row of the past list.
+export function panelPastText(row) {
+  const r = row || {}
+  if (r.status === 'cancelled') return 'Cancelled'
+  if (r.request === 'declined') return 'Declined'
+  return 'Ended'
+}
+
+// Who asked and who decided, for a row the panel shows: "Asked by the driver"
+// on a request still waiting; "Asked by the driver, approved by X" or
+// "...declined by X" once decided; "" for a row staff recorded or no request keys.
+export function panelRequestText(row) {
+  const r = row || {}
+  if (r.source !== 'driver') return ''
+  if (r.request === 'waiting') return 'Asked by the driver'
+  const by = typeof r.decidedBy === 'string' && r.decidedBy ? r.decidedBy : 'staff'
+  if (r.request === 'approved') return `Asked by the driver, approved by ${by}`
+  if (r.request === 'declined') return `Asked by the driver, declined by ${by}`
+  return ''
+}

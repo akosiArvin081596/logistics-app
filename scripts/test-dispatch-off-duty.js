@@ -9,6 +9,9 @@
 //
 //   §1 the five routes: 409 without the confirmation, nothing written; 200 with
 //      it, plus a dispatch_off_duty_confirmed audit row
+//   §1b a driver's request (plan B Revision 2, PR 4) warns only once approved:
+//      over a waiting or a declined one each route answers 200 and writes; over
+//      an approved one, 409 as above (requests flag off: the filter is not behind it)
 //   §2 no warning: a window that misses the off days, a past load, a driver
 //      with no rows, a cancelled row, the same driver kept on a row
 //   §3 the load window (sheetDayKey() on Pickup / Drop-off Appointment):
@@ -106,6 +109,30 @@ const ROUTES = [
 			eq(`§1 ${label}: one dispatch_off_duty_confirmed audit row`, a.length, 1);
 			ok(`§1 ${label}: ...naming the driver, the off dates and the load window`,
 				a[0] && /Tamsin Vale/.test(a[0].details) && /2026-10-18\.\.2026-10-22/.test(a[0].details) && /2026-10-18\.\.2026-10-19/.test(a[0].details), a[0] && a[0].details);
+		});
+	}
+
+	// PR 4: a driver's request counts only once approved, whatever
+	// DRIVER_TIME_OFF_REQUESTS_ENABLED says (off here). Each route, over Tamsin's
+	// own request for Oct 18-22, written as the request routes leave it.
+	section("§1b a waiting or declined request never warns; an approved one does");
+	for (const [label, send] of ROUTES) {
+		await R.guard(`§1b ${label}`, async () => {
+			const outcomes = [];
+			for (const status of ["requested", "declined", "approved"]) {
+				const w = await W.startWorld();
+				w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+					request_status, source, decided_by, decided_at) VALUES (?, 'Tamsin Vale', 'vacation', '2026-10-18', '2026-10-22', '', 'drv_tamsin', 0, '2026-10-10T12:00:00Z', ?, 'driver', ?, ?)`)
+					.run(DIR.tamsin, status, status === "requested" ? null : "dispatch_t", status === "requested" ? null : "2026-10-11T12:00:00Z");
+				const rowsBefore = w.sheet.tabs["Job Tracking"].length;
+				const r = await send(w, "Tamsin Vale", false);
+				const rows = w.sheet.tabs["Job Tracking"];
+				const written = label === "POST /api/data" ? rows.length === rowsBefore + 1 && rows[rows.length - 1][COL.Driver] === "Tamsin Vale" : driverAt(w, 4) === "Tamsin Vale";
+				outcomes.push([status, r.status, (r.body && r.body.code) || "", written]);
+			}
+			eq(`§1b ${label}: waiting 200 and written, declined 200 and written, approved 409 DRIVER_OFF_DUTY and not`, outcomes, [
+				["requested", 200, "", true], ["declined", 200, "", true], ["approved", 409, "DRIVER_OFF_DUTY", false],
+			]);
 		});
 	}
 

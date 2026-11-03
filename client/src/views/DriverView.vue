@@ -294,8 +294,9 @@
             :profile-picture-url="driverStore.profilePictureUrl"
             :driver-id="driverStore.driverDirectoryId"
           />
-          <!-- "My time off" (R11 follow-up), read-only. Only when the payload
-               carried `timeOff`; with no key the Kit is as it was. -->
+          <!-- "My time off" (R11 follow-up). Only when the payload carried
+               `timeOff`; with no key the Kit is as it was. With drivers'
+               requests on it also asks for days off. -->
           <DriverTimeOffCard
             v-if="driverStore.timeOff"
             :time-off="driverStore.timeOff"
@@ -821,6 +822,9 @@ function handleNotificationTap(notif) {
       const doc = resignDocs.value.find((d) => d.doc_key === noticeDocKey(notif))
       if (doc) openOnboardingDoc(doc)
       else currentTab.value = 'kit'
+    } else if (notif.type === 'time-off') {
+      // An answer to a request, or a change by dispatch: the Kit's "My time off" card shows it.
+      currentTab.value = 'kit'
     }
   } catch {
     // ignore parse errors
@@ -1077,6 +1081,15 @@ function onResignRequested() {
   scheduleDriverRefetch()
 }
 
+// Dispatch answered a time-off request of his, or changed time off that began as
+// one (the event carries a notice id only): the refetch brings the notice and
+// the card's new state.
+function onTimeOffUpdated() {
+  if (!isMounted) return
+  toast.show('Your time off was updated. See My time off.')
+  scheduleDriverRefetch()
+}
+
 function onLoadCancelled(payload) {
   if (!isMounted) return
   const reassigned = payload.reason === 'reassigned'
@@ -1248,6 +1261,7 @@ async function attemptInitialLoad() {
     socket.on('location-update', onLocationUpdate)
     socket.on('driver-instructions-changed', onInstructionsChanged)
     socket.on(LIVE_EVENT, onResignRequested)
+    socket.on('time-off-updated', onTimeOffUpdated)
     socketSetupDone = true
   }
 }
@@ -1302,6 +1316,7 @@ onUnmounted(() => {
   socket.off('location-update', onLocationUpdate)
   socket.off('driver-instructions-changed', onInstructionsChanged)
   socket.off(LIVE_EVENT, onResignRequested)
+  socket.off('time-off-updated', onTimeOffUpdated)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   socket.disconnect()
 })

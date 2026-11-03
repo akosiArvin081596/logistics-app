@@ -10,7 +10,10 @@
        already has (R11b, when the server's loads warning is on) the server
        asks first, in its own words: "Keep as is" writes nothing, "Save anyway"
        re-sends with the server's list of loads echoed back. Rendered only by
-       screens whose data says availability is on. -->
+       screens whose data says availability is on. While the rows carry
+       `request` (the server's DRIVER_TIME_OFF_REQUESTS_ENABLED), a driver's
+       waiting request shows first with Approve and Decline, and a declined
+       one sits with the past rows; neither can be edited or cancelled. -->
   <section ref="panelEl" class="avail" aria-label="Time off">
     <!-- One row's buttons and its inline edit form, shared by the live and the
          past lists. -->
@@ -64,6 +67,21 @@
     <p v-if="error" class="avail-error" role="alert">{{ error }}</p>
     <p v-if="notice" class="avail-note" role="status">{{ notice }}</p>
 
+    <ul v-if="waiting.length" class="avail-list" aria-label="Waiting for approval">
+      <li v-for="r in waiting" :key="r.id" class="avail-row avail-row-waiting">
+        <div class="avail-row-main">
+          <span class="avail-range">{{ availabilityRangeText(r.from, r.to) }}</span>
+          <span class="avail-tag avail-tag-wait">Waiting for approval</span>
+          <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
+          <span class="avail-muted">{{ panelRequestText(r) }}</span>
+        </div>
+        <div class="avail-actions">
+          <button type="button" class="btn btn-primary" :disabled="busy" @click="decide(r, 'approve')">Approve</button>
+          <button type="button" class="btn btn-secondary" :disabled="busy" @click="decide(r, 'decline')">Decline</button>
+        </div>
+      </li>
+    </ul>
+
     <ul v-if="live.length" class="avail-list">
       <li v-for="r in live" :key="r.id" class="avail-row">
         <div class="avail-row-main">
@@ -71,6 +89,7 @@
           <span :class="['avail-tag', r.status === 'current' ? 'avail-tag-now' : 'avail-tag-next']">{{ r.status === 'current' ? 'Off now' : 'Upcoming' }}</span>
           <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
           <span v-if="r.reason" class="avail-reason">{{ r.reason }}</span>
+          <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
         </div>
         <ReuseRowEdit :r="r" />
       </li>
@@ -106,13 +125,14 @@
     </form>
 
     <details v-if="past.length" class="avail-past">
-      <summary>Past and cancelled ({{ past.length }})</summary>
+      <summary>{{ requestsOn ? 'Past, declined and cancelled' : 'Past and cancelled' }} ({{ past.length }})</summary>
       <ul class="avail-list">
         <li v-for="r in past" :key="r.id" class="avail-row avail-row-past">
           <div class="avail-row-main">
             <span class="avail-range">{{ availabilityRangeText(r.from, r.to) }}</span>
             <span class="avail-kind">{{ kindLabel(r.kind) }}</span>
-            <span class="avail-muted">{{ r.status === 'cancelled' ? 'Cancelled' : 'Ended' }}</span>
+            <span class="avail-muted">{{ panelPastText(r) }}</span>
+            <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
           </div>
           <ReuseRowEdit :r="r" />
         </li>
@@ -138,6 +158,15 @@
       @confirm="saveAnyway"
       @cancel="pendingLoads = null"
     />
+    <ConfirmModal
+      :open="!!pendingApprove"
+      title="This driver has loads on these days"
+      :message="pendingApprove ? pendingApprove.message : ''"
+      confirm-text="Approve anyway"
+      cancel-text="Keep waiting"
+      @confirm="approveAnyway"
+      @cancel="pendingApprove = null"
+    />
   </section>
 </template>
 
@@ -149,7 +178,7 @@ import { normDriver } from '../../lib/driverName'
 import {
   AVAILABILITY_KINDS, availabilityRangeText, canSaveEdit, createDateBounds, datesWithinBounds,
   editDateBounds, editFormFor, editPatch, endEarlyNote, isDriverHasLoadsWarning, kindLabel,
-  loadsUncheckedNote, rangeHint, rowActions, withLoadsConfirmed,
+  loadsUncheckedNote, panelGroup, panelPastText, panelRequestText, rangeHint, rowActions, withLoadsConfirmed,
 } from '../../lib/availabilityText'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
@@ -179,11 +208,16 @@ const editForm = reactive({ kind: '', from: '', to: '', reason: '' })
 const pendingCancel = ref(null)
 // The server's loads warning on a save: { message, resend } ("Save anyway").
 const pendingLoads = ref(null)
+// ...and on approving a driver's request: { row, message, body } ("Approve anyway").
+const pendingApprove = ref(null)
 const notice = ref('')
 
-const live = computed(() => rows.value.filter((r) => r.status === 'current' || r.status === 'upcoming')
-  .slice().sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0)))
-const past = computed(() => rows.value.filter((r) => r.status === 'past' || r.status === 'cancelled'))
+const byFirstDay = (a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0)
+// The rows' `request` key is the server's requests flag.
+const requestsOn = computed(() => rows.value.some((r) => typeof r.request === 'string'))
+const waiting = computed(() => rows.value.filter((r) => panelGroup(r) === 'waiting').slice().sort(byFirstDay))
+const live = computed(() => rows.value.filter((r) => panelGroup(r) === 'live').slice().sort(byFirstDay))
+const past = computed(() => rows.value.filter((r) => panelGroup(r) === 'past'))
 const createBounds = computed(() => createDateBounds(createLimits.value, form))
 const editingRow = computed(() => rows.value.find((r) => r.id === editingId.value) || null)
 const editBounds = computed(() => (editingRow.value ? editDateBounds(editingRow.value, editForm) : null))
@@ -302,6 +336,22 @@ async function confirmCancel() {
   if (r && rowActions(r).cancel) await run(() => api.post(`/api/driver-availability/${r.id}/cancel`, {}))
 }
 
+// Approve or decline a driver's waiting request. Over loads the driver already
+// has, the server asks first in its own words; "Approve anyway" re-sends with
+// its list echoed back.
+async function decide(r, decision, body = {}) {
+  if (!r || r.request !== 'waiting') return
+  await run(() => api.post(`/api/driver-availability/${r.id}/${decision}`, body), decision === 'approve'
+    ? (err) => { pendingApprove.value = { row: r, message: err.message, body: withLoadsConfirmed({}, err.data) } }
+    : undefined)
+}
+
+function approveAnyway() {
+  const pending = pendingApprove.value
+  pendingApprove.value = null
+  if (pending) decide(pending.row, 'approve', pending.body)
+}
+
 watch(() => [props.directoryId, props.driverName], () => {
   resolvedId.value = null
   form.from = ''
@@ -309,6 +359,7 @@ watch(() => [props.directoryId, props.driverName], () => {
   editingId.value = null
   createLimits.value = null
   pendingLoads.value = null
+  pendingApprove.value = null
   notice.value = ''
   load()
 }, { immediate: true })
@@ -329,6 +380,8 @@ watch(() => [props.directoryId, props.driverName], () => {
 .avail-tag { font-size: 0.65rem; font-weight: 700; padding: 1px 8px; border-radius: 999px; }
 .avail-tag-now { background: #eef2ff; color: #3730a3; }
 .avail-tag-next { background: #f1f5f9; color: #475569; }
+.avail-tag-wait { background: #fef3c7; color: #92400e; }
+.avail-row-waiting { border-color: #fcd34d; }
 .avail-kind { font-size: 0.75rem; color: #4b5563; }
 .avail-reason { font-size: 0.75rem; color: #6b7280; overflow-wrap: anywhere; }
 .avail-edit { display: flex; flex-direction: column; gap: 0.5rem; width: 100%; padding-top: 0.5rem; border-top: 1px dashed #e5e7eb; }
