@@ -62923,12 +62923,14 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		// answer a driver acts on. Without it, the 2026-08-17 run-dry returns
 		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
 		const reading = resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
-		const pct = reading.fuelPct;
+		const pct = fuelModel.planningRateFuelPct({ reading, burn, tankGallons: tank, mpg });
 		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
 
 		const plan = fuelModel.planTripFuel({
 			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
 			reserve: FUEL_RESERVE_OPTS,
+			// Before pickup, routeMiles holds the run to the shipper only when it was routed.
+			approachCounted: pickedUp || planApproach,
 		});
 
 		res.json({
