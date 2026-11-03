@@ -280,6 +280,34 @@
     null,
     null
    ]
+  ],
+  [
+   "the Friday batch",
+   {
+    "marker": {
+     "attempts": 1,
+     "created": 1,
+     "submitted": 1,
+     "skipped": 0,
+     "failed": 0,
+     "summary": "1 generated & submitted · 0 skipped (no loads)"
+    },
+    "notices": [
+     {
+      "title": "Weekly invoices generated · 2026-12-05 to 2026-12-11",
+      "body": "1 generated & submitted · 0 skipped (no loads)",
+      "metadata": "{\"weekStart\":\"2026-12-05\",\"weekEnd\":\"2026-12-11\",\"submitted\":1,\"skipped\":0,\"zeroPay\":0,\"unbilled\":0,\"undatedInWeek\":0,\"errored\":0}"
+     }
+    ],
+    "emails": [
+     [
+      "ops@example.invalid",
+      "Weekly Invoices — 2026-12-05 to 2026-12-11",
+      1981,
+      "d5b985fcb864570f58d4d79cfca86f14f46c93276aa50335230c30439ae03c96"
+     ]
+    ]
+   }
   ]
  ]
 }

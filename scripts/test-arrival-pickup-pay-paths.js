@@ -42,8 +42,17 @@
  *   N1-N3 the end is the first Delivered row of the current delivery, never the
  *       Status Update Date; a load completed outside the routes, or moved off
  *       Delivered since, pays its scheduled window and is named
- *   T   a DST night and local midnight; and §Z the window cases again under TZ
- *       America/New_York, America/Chicago, UTC and Asia/Manila
+ *   B1  the Friday batch (runWeeklyInvoiceBatch(), lifted) names each extension of
+ *       2+ days in its summary, its in-app notice and its email, as ACTION NEEDED;
+ *       a 1-day one is not named; flag off, nothing is kept or named (P15 pins the
+ *       batch's flag-off output to the base's)
+ *   B2  an invoice the driver generated and submitted before the batch (it answers
+ *       INVOICE_EXISTS): still named, and the run is ACTION NEEDED with nothing
+ *       submitted
+ *   B3  a week the batch retries: the final attempt names attempt 1's invoice
+ *   B4  a kept line whose invoice is no longer live is not named
+ *   T   a DST night and local midnight; and §Z the window cases and B1 again under
+ *       TZ America/New_York, America/Chicago, UTC and Asia/Manila
  *   M   mutants, each caught
  *
  * Every "on" case fails on a base without the rule (no flag); the pins pass on
@@ -56,6 +65,7 @@ if (!process.env.ARRIVAL_PAY_PATHS_TZ_CHILD) process.env.TZ = "UTC"; // producti
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const Module = require("module");
 const { spawnSync } = require("child_process");
 const M = require("./lib/money-plans-world");
@@ -129,7 +139,16 @@ const L = {
 		history: tripEvents("L-2104", { dispatchAt: "2026-12-07 15:00:00", headingAt: "2026-12-08 12:00:00", arrival: geoEv("L-2104", "2026-12-08 14:41:00", "2026-12-08 14:40:00"),
 			loadingAt: "2026-12-08 16:00:00", receiverAt: "2026-12-09 18:00:00", deliveredAt: "2026-12-09 20:00:00" }),
 	}),
+	// B1: rate con Mon 12/7-Wed 12/9; arrived Wed 12/9 08:00 CST; delivered Fri 12/11 12:00 CST, exactly 2 days past the drop-off.
+	twoDays: () => ({
+		row: loadRow({ id: "L-2114", driver: AMY, pickup: "2026-12-07 8:00", dropoff: "2026-12-09 17:00", assigned: "2026-12-04", done: "2026-12-11", truck: "T1" }),
+		history: tripEvents("L-2114", { dispatchAt: "2026-12-04 15:00:00", headingAt: "2026-12-09 12:00:00", arrival: geoEv("L-2114", "2026-12-09 14:01:00", "2026-12-09 14:00:00"),
+			loadingAt: "2026-12-09 16:00:00", receiverAt: "2026-12-11 15:00:00", deliveredAt: "2026-12-11 18:00:00" }),
+	}),
 };
+// The invoice's extension lines for L-2103 (3 days) and L-2114 (2 days).
+const EXT_2103 = "ARRIVAL WINDOW EXTENDED: load L-2103 is paid to 2026-12-11, 3 days after its Drop-off Appointment (2026-12-08), the day the status history shows it delivered.";
+const EXT_2114 = "ARRIVAL WINDOW EXTENDED: load L-2114 is paid to 2026-12-11, 2 days after its Drop-off Appointment (2026-12-09), the day the status history shows it delivered.";
 // The late load with another arrival event or history.
 const lateWith = (arrival) => { const x = L.late(); x.history[2] = arrival; return x; };
 
@@ -197,6 +216,65 @@ function overrideRoutes(w, env, src = M.SRC) {
 	return (key, req) => M.call(routes[key], { ...M.ADMIN, query: {}, params: {}, body: {}, ...req });
 }
 
+// The Friday batch (runWeeklyInvoiceBatch()) and the generate it calls, lifted onto a
+// world's database, sheet, clock and settings (from `src`, so a case can lift a
+// mutated copy). What it tells staff: its marker's summary (invoice_autogen_runs),
+// its in-app notice (dispatch_notifications) and its email (captured here). The
+// undated-load digest is off: scripts/test-invoice-week-selection.js covers it.
+const BATCH_PROVIDED = [...OVERRIDE_PROVIDED.filter((n) => n !== "jtCacheInvalidate"), "renderPolicy", "DATA_DIR", "setTimeout"];
+const BATCH_LIFTS = new Map();
+function batchOn(w, env, src = M.SRC) {
+	if (!BATCH_LIFTS.has(src)) {
+		// Lifted by name, as scripts/lib/work-days-world.js lifts them: the closure walk
+		// misses a call that starts the line after a comment ending in ".".
+		const named = [...["assertInvoiceFileStillOwn"].filter((n) => src.includes(`\nfunction ${n}(`)), ...["_jtInflight"].filter((n) => src.includes(`\nlet ${n} =`))];
+		BATCH_LIFTS.set(src, closure(src, { roots: ["runWeeklyInvoiceBatch", "generateInvoiceHandler", "parseSheet", "deduplicateLoads", ...named], provided: BATCH_PROVIDED, denied: ["server", "transporter", "getDrive", "KEY_FILE"] }));
+	}
+	class FixedDate extends Date {
+		constructor(...args) { super(...(args.length ? args : [w.clock.ms])); }
+		static now() { return w.clock.ms; }
+	}
+	const pass = () => (req, res, next) => (next ? next() : undefined);
+	const emails = [];
+	const logs = [];
+	const log = (...a) => logs.push(a.join(" "));
+	const deps = {
+		db: w.db, require: Module.createRequire(path.join(ROOT, "server.js")), console: { log, info: log, error: log, warn: log },
+		process: { env: { ...env, INVOICE_UNDATED_ALERT_ENABLED: "false", GMAIL_USER: "ops@example.invalid" }, argv: [], cwd: () => ROOT, pid: 4246 }, __dirname: ROOT, Date: FixedDate,
+		app: { get() {}, put() {}, post() {}, delete() {}, use() {} },
+		requireRole: pass, requireAuth: pass(), refuseCrossOrigin: pass(), notifyChange: () => {}, logAudit: () => {},
+		getJobTrackingCached: null,
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: M.sheetValues(w.rows) } }) } } }),
+		SPREADSHEET_ID: "test-sheet", REPLICA: null, SHEET_TARGET: null,
+		fs: { existsSync: () => true, mkdirSync: () => {}, readFileSync: () => "", writeFileSync: () => {}, renameSync: () => {}, unlinkSync: () => {} },
+		fetch: () => { throw new Error("no network in a test"); }, io: null,
+		sendEmail: async (to, subject, html) => { emails.push({ to, subject, html }); return true; },
+		renderPolicy: async () => Buffer.from("%PDF-stub"), DATA_DIR: "/nonexistent-arrival-batch",
+		// The batch races each driver against a 90 s timer: real, but never holding the process open.
+		setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); if (t && t.unref) t.unref(); return t; },
+	};
+	const body = ['"use strict";', BATCH_LIFTS.get(src).text,
+		"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet() }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
+		"return { runWeeklyInvoiceBatch, generateInvoiceHandler };"].join("\n");
+	const api = new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), () => M.sheetValues(w.rows));
+	return {
+		emails, logs,
+		run: (weekEnd, attempt = 1) => api.runWeeklyInvoiceBatch(weekEnd, attempt),
+		generate: (user, body) => M.call(api.generateInvoiceHandler, { session: { user }, headers: {}, query: {}, params: {}, body }),
+		marker: (weekEnd) => w.db.prepare("SELECT attempts, created, submitted, skipped, failed, summary FROM invoice_autogen_runs WHERE week_end = ?").get(weekEnd) || null,
+		notices: () => w.db.prepare("SELECT title, body, metadata FROM dispatch_notifications WHERE type = 'invoices-autogen' ORDER BY id").all(),
+		kept: () => w.db.prepare("SELECT key, value FROM server_state WHERE substr(key, 1, 21) = 'arrival_pickup_lines:' ORDER BY key").all(),
+	};
+}
+const AMY_DRIVER = { id: 9, role: "Driver", username: "abirch", driverName: AMY };
+// One batch run of W49 and its three channels, for a check.
+async function batchRun(w, env, { src = M.SRC } = {}) {
+	const b = batchOn(w, env, src);
+	await b.run(W49, 1);
+	const m = b.marker(W49);
+	return { b, marker: m, summary: (m && m.summary) || "", notices: b.notices(), emails: b.emails, kept: b.kept() };
+}
+
 // A mutated copy of a lib module (and the modules after it, compiled fresh so they
 // take it), swapped into the require cache while `fn` starts its worlds.
 async function withLibs(changes, fn) {
@@ -253,6 +331,11 @@ async function flagOffAnswers(env) {
 	const call = overrideRoutes(gw, env);
 	const post = await call("POST /api/admin/excluded-days", { body: { driverName: AMY, date: "2026-12-08", action: "remove", reason: "test" } });
 	out.push(["the gate", [post.status, post.body && post.body.code, post.body && post.body.periods]]);
+	// The Friday batch over the first set's loads: what it tells staff, to the byte
+	// (the email's HTML by its length and sha256).
+	const batch = await batchRun(world(env, [L.late(), L.early(), L.afterDropoff(), L.blankPickup()]), env);
+	out.push(["the Friday batch", { marker: batch.marker, notices: batch.notices,
+		emails: batch.emails.map((e) => [e.to, e.subject, e.html.length, crypto.createHash("sha256").update(e.html).digest("hex")]) }]);
 	return out;
 }
 
@@ -302,6 +385,22 @@ async function cases() {
 		const before = await paths(world(env, [load("2026-11-02 05:59:00")]), { weekEnd: "2026-11-06" });
 		const after = await paths(world(env, [load("2026-11-02 06:01:00")]), { weekEnd: "2026-11-06" });
 		eq("23:59 CST is still Nov 1; 00:01 CST is Nov 2", [before.invoice[0], after.invoice[0], after.ledger[0]], ["2026-11-01", "2026-11-02", "2026-11-02"]);
+	});
+	// ══ the Friday batch: where staff see the lines ═════════════════════════════
+	await test("B1 the Friday batch bills W49 and names L-2103 (3 days past its drop-off) and L-2114 (exactly 2) in its summary, its in-app notice and its email, as ACTION NEEDED; L-2101 (1 day) is not named. Off: nothing kept or named", async ({ eq, ok }) => {
+		const loads = () => [L.late(), L.afterDropoff(), L.twoDays()];
+		const on = await batchRun(world(ON, loads()), ON);
+		const seg = ` · 2 ARRIVAL lines to check (Amy Birch: ${EXT_2103}; Amy Birch: ${EXT_2114})`;
+		eq("on: the marker [submitted, failed]", on.marker && [on.marker.submitted, on.marker.failed], [1, 0]);
+		ok("on: the summary names both", on.summary.includes(seg), on.summary);
+		ok("on: ...and not L-2101", !/ARRIVAL[^;]*L-2101/.test(on.summary), on.summary);
+		eq("on: one in-app notice, ACTION NEEDED, its body the summary", on.notices.map((n) => [n.title, n.body]), [["Weekly invoices — ACTION NEEDED · 2026-12-05 to 2026-12-11", on.summary]]);
+		eq("on: one email, ACTION NEEDED", on.emails.map((e) => [e.to, e.subject]), [["ops@example.invalid", "Weekly Invoices — ACTION NEEDED — 2026-12-05 to 2026-12-11"]]);
+		ok("on: the email names both", on.emails.length === 1 && on.emails[0].html.includes(`Amy Birch: ${EXT_2103}<br>Amy Birch: ${EXT_2114}</p>`), on.emails[0] && on.emails[0].html.slice(-900));
+		const off = await batchRun(world(OFF, loads()), OFF);
+		eq("off: nothing kept", off.kept.length, 0);
+		ok("off: no ARRIVAL in the summary, the notice or the email", !/ARRIVAL|Arrival pickup/.test(JSON.stringify([off.summary, off.notices, off.emails])), off.summary);
+		eq("off: the notice says generated", off.notices.map((n) => n.title), ["Weekly invoices generated · 2026-12-05 to 2026-12-11"]);
 	});
 }
 
@@ -447,6 +546,9 @@ async function moreCases() {
 		}
 	});
 
+	// ── the Friday batch: invoices it did not generate ─────────────────────────
+	await batchCases();
+
 	// ── P17: a history that can't be read ───────────────────────────────────────
 	const dropColumn = (w) => w.db.exec("ALTER TABLE load_status_history DROP COLUMN actor_role");
 	await test("P17 an older copy without the recorder's columns: the invoice pays the scheduled window and says ARRIVAL NOT READ; the ledger and the investor view pay it; the gate refuses as unresolved", async ({ eq, ok }) => {
@@ -462,6 +564,72 @@ async function moreCases() {
 
 	// ── P16: the scripts ────────────────────────────────────────────────────────
 	await scriptCases(dropColumn);
+}
+
+// ── B2-B4 the batch and the invoices it finds already there ───────────────────
+// The driver's own invoice of W49, generated (and submitted) before the batch.
+async function ownInvoice(w, b, { submit = true } = {}) {
+	const g = await b.generate(AMY_DRIVER, { weekEnd: W49 });
+	if (g.status !== 200) throw new Error(`the driver's generate: ${g.status} ${JSON.stringify(g.body).slice(0, 200)}`);
+	if (submit) w.db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = '2026-12-10T15:00:00.000Z' WHERE id = ?").run(g.body.invoice.id);
+	return g.body.invoice;
+}
+// A driver off the roster (no directory row) with a completed W49 load: worked but
+// unbilled, so the batch retries the week.
+const offRoster = () => ({ row: loadRow({ id: "L-2115", driver: "Cy Tester", pickup: "2026-12-08 8:00", dropoff: "2026-12-09 17:00", assigned: "2026-12-04", done: "2026-12-09" }) });
+// Each scenario on `src` (the shipping server.js, or a mutant's copy): what the
+// batch's channels said.
+const told = (b) => ({ marker: b.marker(W49), summary: (b.marker(W49) || {}).summary || "", notices: b.notices(), emails: b.emails, kept: b.kept() });
+const SCENARIOS = {
+	// B2: Amy's own invoice, generated and submitted before the batch.
+	async ownSubmitted(src) {
+		const w = world(ON, [L.afterDropoff()]);
+		const b = batchOn(w, ON, src);
+		await ownInvoice(w, b);
+		await b.run(W49, 1);
+		return told(b);
+	},
+	// B3: three attempts; after attempt 1, what it had said.
+	async retried(src) {
+		const w = world(ON, [L.afterDropoff(), offRoster()]);
+		const b = batchOn(w, ON, src);
+		await b.run(W49, 1);
+		const first = { marker: b.marker(W49), notices: b.notices().length, emails: b.emails.length };
+		await b.run(W49, 2);
+		await b.run(W49, 3);
+		return { first, ...told(b) };
+	},
+	// B4: Amy's Draft deleted and L-2103 cancelled before the batch.
+	async stale(src) {
+		const w = world(ON, [L.afterDropoff()]);
+		const b = batchOn(w, ON, src);
+		const inv = await ownInvoice(w, b, { submit: false });
+		w.db.prepare("UPDATE invoices SET deleted_at = '2026-12-10T15:00:00.000Z', deleted_by = 'super_admin' WHERE id = ?").run(inv.id);
+		w.setRow("L-2103", { "Job Status": "Cancelled" });
+		await b.run(W49, 1);
+		return told(b);
+	},
+};
+async function batchCases() {
+	await test("B2 Amy generated and submitted her own W49 invoice before the batch (it answers INVOICE_EXISTS): the batch still names L-2103's extension, ACTION NEEDED though it submitted nothing", async ({ eq, ok }) => {
+		const t = await SCENARIOS.ownSubmitted(M.SRC);
+		eq("the batch: [submitted, skipped, failed]", t.marker && [t.marker.submitted, t.marker.skipped, t.marker.failed], [0, 1, 0]);
+		ok("the summary names it", t.summary.includes(` · 1 ARRIVAL line to check (Amy Birch: ${EXT_2103})`), t.summary);
+		eq("one in-app notice, ACTION NEEDED", t.notices.map((n) => [n.title, n.body.includes(EXT_2103)]), [["Weekly invoices — ACTION NEEDED · 2026-12-05 to 2026-12-11", true]]);
+		eq("one email naming it", t.emails.map((e) => e.html.includes(`Amy Birch: ${EXT_2103}</p>`)), [true]);
+	});
+	await test("B3 a week the batch retries (Cy Tester, off the roster, worked it): attempt 1 bills Amy and tells no one; attempts 2-3 find her invoice there (INVOICE_EXISTS), and the final attempt's notice and email still name L-2103", async ({ eq, ok }) => {
+		const t = await SCENARIOS.retried(M.SRC);
+		eq("attempt 1: [submitted, failed, notices, emails]", [t.first.marker.submitted, t.first.marker.failed, t.first.notices, t.first.emails], [1, 1, 0, 0]);
+		eq("attempt 3: [attempts, submitted, skipped, failed]", [t.marker.attempts, t.marker.submitted, t.marker.skipped, t.marker.failed], [3, 0, 1, 1]);
+		ok("its summary names L-2103 beside the unbilled driver", t.summary.includes("WORKED-BUT-UNBILLED (cy tester)") && t.summary.includes(`(Amy Birch: ${EXT_2103})`), t.summary);
+		eq("one notice and one email in all, both naming L-2103", [t.notices.map((n) => n.body.includes(EXT_2103)), t.emails.map((e) => e.html.includes(EXT_2103))], [[true], [true]]);
+	});
+	await test("B4 a kept line whose invoice is no longer Amy's live one is not named: her W49 Draft deleted and L-2103 cancelled before the batch", async ({ eq, ok }) => {
+		const t = await SCENARIOS.stale(M.SRC);
+		eq("the line was kept", t.kept.length, 1);
+		ok("not named, and nobody is told", !/ARRIVAL/.test(t.summary) && t.notices.length === 0 && t.emails.length === 0, [t.summary, t.notices.length, t.emails.length]);
+	});
 }
 
 // ── P16/P17 the three scripts ─────────────────────────────────────────────────
@@ -629,12 +797,47 @@ async function mutants() {
 		try { await mod.exports.run(w.db, api, { values: M.sheetValues(w.rows) }, { driver: JO, weekStart: "2026-11-28", weekEnd: W48, days: ["2026-12-02"], date: "2026-12-12", loads: null, dryRun: true }, { today: "2026-12-14" }); } catch (e) { err = e; }
 		ok("caught: the text says no window covers it", !!err && /no load billed in another week has a pay window covering it/.test(err.message), err ? err.message : "drafted");
 	});
+
+	// The Friday batch's mutants, each a copy of server.js with one change.
+	const mutated = (from, to) => {
+		if (M.SRC.split(from).length !== 2) throw new Error(`the mutant's anchor is not in server.js exactly once: ${JSON.stringify(from.slice(0, 70))}`);
+		return M.SRC.replace(from, to);
+	};
+	const READ = "const arrivalLines = loadPayDays.arrivalPickup.ruleFromEnv(process.env)\n\t\t? loadPayDays.arrivalPickup.weekLines(";
+	const KEEP = "if (arrival) {\n\t\t\ttry {\n\t\t\t\tloadPayDays.arrivalPickup.recordWeekLines(";
+	const LIVE = "(e) => liveWeeklyInvoicesForDriverWeek(e.driver, range.weekStart).some((r) => r.id === e.invoiceId)";
+	const START = "async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {\n\tconst range = getWeekRange(weekEnd);";
+	const b1 = (src) => batchRun(world(ON, [L.late(), L.afterDropoff(), L.twoDays()]), ON, { src });
+	await test("MB1 the batch reads no kept line (B1): its summary names no extension", async ({ ok }) => {
+		const p = await b1(mutated(READ, READ.replace("ruleFromEnv(process.env)", "ruleFromEnv(process.env) && false")));
+		ok("caught: no ARRIVAL line", !p.summary.includes("ARRIVAL") && !p.emails.some((e) => e.html.includes(EXT_2103)), p.summary);
+	});
+	await test("MB2 generate keeps no line (B1): the batch names nothing", async ({ ok }) => {
+		const p = await b1(mutated(KEEP, KEEP.replace("if (arrival) {", "if (false) {")));
+		ok("caught: no ARRIVAL line", !p.summary.includes("ARRIVAL"), p.summary);
+	});
+	await test("MB3 lines kept only when the batch itself generates, as the batch reading its own responses would (B2): the driver's submitted invoice goes unnamed", async ({ ok }) => {
+		const t = await SCENARIOS.ownSubmitted(mutated(KEEP, KEEP.replace("if (arrival) {", "if (arrival && user.username === \"auto-invoice\") {")));
+		ok("caught: no ARRIVAL line, and nobody is told", !t.summary.includes("ARRIVAL") && t.notices.length === 0, [t.summary, t.notices.length]);
+	});
+	await test("MB4 the live check dropped (B4): the deleted Draft's line is named", async ({ ok }) => {
+		const t = await SCENARIOS.stale(mutated(LIVE, "() => true"));
+		ok("caught: named", t.summary.includes(EXT_2103), t.summary);
+	});
+	await test("MB5 the lines don't make the run ACTION NEEDED (B2): with nothing submitted, no notice or email goes out", async ({ ok }) => {
+		const t = await SCENARIOS.ownSubmitted(mutated(" || closedWeekDraft.length > 0 || arrivalLines.length > 0;", " || closedWeekDraft.length > 0;"));
+		ok("caught: no notice, no email", t.notices.length === 0 && t.emails.length === 0, [t.notices.length, t.emails.length]);
+	});
+	await test("MB6 the batch reads only what its own attempt generated (B3): the final attempt names nothing", async ({ ok }) => {
+		const t = await SCENARIOS.retried(mutated(START, `${START}\n\tdb.prepare("DELETE FROM server_state WHERE substr(key, 1, 21) = 'arrival_pickup_lines:'").run();`));
+		ok("caught: the final notice names no extension", !t.notices.some((n) => n.body.includes(EXT_2103)), t.notices.map((n) => n.body));
+	});
 }
 
 // ── §Z the window cases under each process zone ───────────────────────────────
 async function zones() {
 	for (const zone of ZONES) {
-		await test(`Z the window cases (P1-P4, T1) under TZ=${zone}`, ({ ok }) => {
+		await test(`Z the window cases (P1-P4, T1) and B1 under TZ=${zone}`, ({ ok }) => {
 			const r = spawnSync(process.execPath, [__filename], { env: { ...process.env, TZ: zone, ARRIVAL_PAY_PATHS_TZ_CHILD: "1" }, encoding: "utf8", timeout: 120000 });
 			ok(String(r.stdout || "").trim().split("\n").pop(), r.status === 0, `${String(r.stdout || "").trim()}\n${String(r.stderr || "").slice(0, 1500)}`);
 		});

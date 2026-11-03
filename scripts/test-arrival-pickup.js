@@ -41,6 +41,10 @@
  *      or after the arrival is the arrival day alone; local-midnight Dates; no
  *      answer leaves payWindow() exactly as it was
  *   §K the invoice's notes: the 2-day extension and the warning lines
+ *   §L the lines kept for the Friday batch's report (server.js's own
+ *      server_state table): one row per driver-week, replaced on each save and
+ *      dropped with no line; read by week, live invoices only; a failed read, a
+ *      row it can't parse or a failed live check is named or kept, never dropped
  *   §M mutants of the two modules, each caught by the case it names
  *   §Z every case above again under TZ America/New_York, America/Chicago, UTC
  *      and Asia/Manila (child processes)
@@ -137,6 +141,20 @@ function insertRows(db, rows) {
 		const use = Object.keys(r).filter((k) => cols.includes(k));
 		db.prepare(`INSERT INTO load_status_history (${use.join(", ")}) VALUES (${use.map(() => "?").join(", ")})`).run(...use.map((k) => r[k]));
 	}
+}
+// server.js's own server_state table, for the kept lines (§L).
+function stateDb() {
+	const db = new Database(":memory:");
+	const create = SRC.match(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/);
+	if (!create) throw new Error("server.js has no server_state table");
+	db.exec(create[0]);
+	return db;
+}
+// Two drivers' kept lines for W49 and one for W48, as generate keeps them.
+function keptWeeks(m, db) {
+	m.recordWeekLines(db, { weekStart: "2026-12-05", driverKey: "bo wyn", driver: "Bo Wyn", invoiceId: 12, lines: ["ARRIVAL NOT READ: load L-2."] });
+	m.recordWeekLines(db, { weekStart: "2026-12-05", driverKey: "amy birch", driver: "Amy Birch", invoiceId: 11, lines: ["ARRIVAL WINDOW EXTENDED: load L-1."] });
+	m.recordWeekLines(db, { weekStart: "2026-11-28", driverKey: "amy birch", driver: "Amy Birch", invoiceId: 7, lines: ["ARRIVAL WINDOW EXTENDED: load L-0."] });
 }
 // A load's usual history: dispatched Fri, accepted, heading Mon morning.
 const lead = (load = "l-1001") => [
@@ -450,6 +468,29 @@ async function cases() {
 		]);
 		eq("off: none", lib.invoiceWarnings(null), []);
 	});
+
+	// ══ §L ═══════════════════════════════════════════════════════════════════
+	section("§L the lines kept for the Friday batch's report");
+	await test("L1 one row per driver-week: W49 reads its two drivers' lines in key order, not W48's; a save replaces the row, a save with no line drops it; only live invoices are named", ({ eq }) => {
+		const db = stateDb();
+		keptWeeks(lib, db);
+		const all = () => true;
+		eq("W49", lib.weekLines(db, "2026-12-05", all), ["Amy Birch: ARRIVAL WINDOW EXTENDED: load L-1.", "Bo Wyn: ARRIVAL NOT READ: load L-2."]);
+		eq("W48", lib.weekLines(db, "2026-11-28", all), ["Amy Birch: ARRIVAL WINDOW EXTENDED: load L-0."]);
+		lib.recordWeekLines(db, { weekStart: "2026-12-05", driverKey: "amy birch", driver: "Amy Birch", invoiceId: 13, lines: ["ARRIVAL RULE NOT APPLIED: load L-3.", "ARRIVAL WINDOW EXTENDED: load L-4."] });
+		lib.recordWeekLines(db, { weekStart: "2026-12-05", driverKey: "bo wyn", driver: "Bo Wyn", invoiceId: 14, lines: [] });
+		eq("W49 after Amy's new invoice and Bo's with no line", lib.weekLines(db, "2026-12-05", all), ["Amy Birch: ARRIVAL RULE NOT APPLIED: load L-3.", "Amy Birch: ARRIVAL WINDOW EXTENDED: load L-4."]);
+		eq("rows left", db.prepare("SELECT key FROM server_state ORDER BY key").all().map((r) => r.key), ["arrival_pickup_lines:2026-11-28:amy birch", "arrival_pickup_lines:2026-12-05:amy birch"]);
+		eq("the live check reads { driver, invoiceId }; a row it doesn't find is skipped", lib.weekLines(db, "2026-12-05", (e) => e.driver === "Amy Birch" && e.invoiceId === 11), []);
+	});
+	await test("L2 never throws: no table gives one NOT READ line; a row that isn't JSON is named by its driver key; a live check that throws keeps the lines", ({ eq }) => {
+		eq("no server_state table", lib.weekLines(new Database(":memory:"), "2026-12-05", () => true).map((l) => l.replace(/\(.*\)/, "(…)")), ["ARRIVAL LINES NOT READ: the week's arrival lines could not be read (…)."]);
+		const db = stateDb();
+		keptWeeks(lib, db);
+		db.prepare("UPDATE server_state SET value = 'not json' WHERE key = ?").run("arrival_pickup_lines:2026-12-05:bo wyn");
+		eq("a row it can't parse", lib.weekLines(db, "2026-12-05", () => true), ["Amy Birch: ARRIVAL WINDOW EXTENDED: load L-1.", "ARRIVAL LINES NOT READ: the kept lines of bo wyn could not be read."]);
+		eq("a live check that throws", lib.weekLines(db, "2026-11-28", () => { throw new Error("no invoices table"); }), ["Amy Birch: ARRIVAL WINDOW EXTENDED: load L-0."]);
+	});
 }
 
 // ── §M mutants: each changes one module in one place; the case it names flips ─
@@ -503,6 +544,12 @@ async function mutants() {
 		{ name: "ENABLED read loosely (I1)", from: "if (!env || env.ARRIVAL_PICKUP_DATE_ENABLED !== \"true\") return null;", to: "if (!env || !/^(true|1|yes|on)$/i.test(String(env.ARRIVAL_PICKUP_DATE_ENABLED || \"\"))) return null;",
 			caught: (m) => m.ruleFromEnv({ ARRIVAL_PICKUP_DATE_ENABLED: "1", ARRIVAL_PICKUP_DATE_FROM: "2026-11-20" }) !== null },
 		{ name: "the extension warning's threshold 3 days (K1)", from: "const EXTENDED_DAYS = 2;", to: "const EXTENDED_DAYS = 3;", caught: (m) => m.EXTENDED_DAYS !== 2 },
+		{ name: "the kept lines read across weeks (L1)", from: "\tconst prefix = weekLinesPrefix(weekStart);", to: "\tconst prefix = WEEK_LINES_PREFIX;",
+			caught: (m) => { const db = stateDb(); keptWeeks(m, db); return m.weekLines(db, "2026-12-05", () => true).length !== 2; } },
+		{ name: "a save with no line leaves the old invoice's lines (L1)", from: "\t\tdb.prepare(\"DELETE FROM server_state WHERE key = ?\").run(key);\n\t\treturn;", to: "\t\treturn;",
+			caught: (m) => { const db = stateDb(); keptWeeks(m, db); m.recordWeekLines(db, { weekStart: "2026-12-05", driverKey: "bo wyn", driver: "Bo Wyn", invoiceId: 14, lines: [] }); return m.weekLines(db, "2026-12-05", () => true).some((l) => l.startsWith("Bo Wyn")); } },
+		{ name: "a failed live check drops the lines (L2)", from: "try { live = !!isLive(e); } catch { live = true; }", to: "try { live = !!isLive(e); } catch { live = false; }",
+			caught: (m) => { const db = stateDb(); keptWeeks(m, db); return m.weekLines(db, "2026-11-28", () => { throw new Error("x"); }).length === 0; } },
 	];
 	for (const mu of LIB_MUTANTS) {
 		await test(`M ${mu.name}`, ({ ok }) => {

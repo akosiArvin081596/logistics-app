@@ -22618,7 +22618,8 @@ async function generateInvoiceHandler(req, res) {
 		}
 		// The same for the arrival pickup date (null while off), and each window it
 		// ends 2+ days past the drop-off; the PDF says neither.
-		if (arrival) warnings.push(...loadPayDays.arrivalPickup.invoiceWarnings(arrival));
+		const arrivalLines = arrival ? loadPayDays.arrivalPickup.invoiceWarnings(arrival) : [];
+		warnings.push(...arrivalLines);
 		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
 		// the route; the dry run prices with it too).
 		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
@@ -22891,6 +22892,16 @@ async function generateInvoiceHandler(req, res) {
 		let invoice = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(result.lastInsertRowid);
+		// Its ARRIVAL lines, kept for the Friday batch's report of the week: no client
+		// reads this response's warnings, and a submitted invoice answers the batch
+		// INVOICE_EXISTS without them.
+		if (arrival) {
+			try {
+				loadPayDays.arrivalPickup.recordWeekLines(db, { weekStart, driverKey: nameNorm, driver: canonicalDriverName(driverName), invoiceId: invoice.id, lines: arrivalLines });
+			} catch (e) {
+				console.error(`[arrival-pickup] ${invoice.invoice_number}: its lines were not kept for the Friday report (${e.message}): ${arrivalLines.join(" | ")}`);
+			}
+		}
 		if (personalFit.fit.length) {
 			logAudit(req, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: generated with ${personalFit.fit.length} Personal line(s), repays ${personalExpense.formatMoney(Math.round(personalFit.personalTotal * 100))}`);
 		}
@@ -23197,6 +23208,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 		}
 	}
 	if (submitted > 0) notifyChange("invoices");
+	// The ARRIVAL lines generate kept for the week's live invoices, while the arrival
+	// pickup date rule is on: those billed above, and those a driver submitted or an
+	// earlier attempt billed (INVOICE_EXISTS above). Named like the undated loads.
+	const arrivalLines = loadPayDays.arrivalPickup.ruleFromEnv(process.env)
+		? loadPayDays.arrivalPickup.weekLines(db, range.weekStart, (e) => liveWeeklyInvoicesForDriverWeek(e.driver, range.weekStart).some((r) => r.id === e.invoiceId))
+		: [];
 
 	// Coverage: every driver who WORKED this week must have been billed (or already
 	// had an invoice). Anyone left is a real gap — a transient per-driver read, a
@@ -23212,12 +23229,15 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const unbilled = offRosterClosed.length ? [] : unbilledAll;
 	const notBilled = [...closedWeek, ...offRosterClosed];
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
-	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || notBilled.length > 0 || closedWeekDraft.length > 0;
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || notBilled.length > 0 || closedWeekDraft.length > 0 || arrivalLines.length > 0;
 	// How many undatedInWeek entries each channel prints: the in-app line (this
 	// summary) and the email cap them differently. The undated-load ledger reads
 	// the same two numbers, so a load counts as told only if it was printed.
 	const undatedEntriesInApp = 6;
 	const undatedEntriesByEmail = 20;
+	// The same caps for the ARRIVAL lines, which are whole sentences.
+	const arrivalEntriesInApp = 3;
+	const arrivalEntriesByEmail = 20;
 	const summary =
 		`${submitted} generated & submitted · ${skipped - closedWeek.length - closedWeekDraft.length} skipped (no loads)` +
 		(notBilled.length ? ` · ${notBilled.length} NOT BILLED, the week touches a closed month (${notBilled.slice(0, 8).join(", ")}): pay their days on a correction invoice dated in the current month` : "") +
@@ -23225,6 +23245,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
 		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, undatedEntriesInApp).join("; ")})` : "") +
+		(arrivalLines.length ? ` · ${arrivalLines.length} ARRIVAL line${arrivalLines.length === 1 ? "" : "s"} to check (${arrivalLines.slice(0, arrivalEntriesInApp).join("; ")}${arrivalLines.length > arrivalEntriesInApp ? "; …" : ""})` : "") +
 		(errors.length ? ` · ${errors.length} errored` : "");
 
 	try {
@@ -23267,7 +23288,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					${closedWeekDraft.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>Unsubmitted Draft for this week, which touches a closed month:</b> ${escHtml(closedWeekDraft.slice(0, 20).join(", "))}. Submit it as is; only days it misses go on a correction invoice dated in the current month.</p>` : ""}
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
-					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
+					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}${arrivalLines.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>Arrival pickup date — loads to check</b> (a wrong paid day is corrected with Driver Pay Overrides):<br>${arrivalLines.slice(0, arrivalEntriesByEmail).map((l) => escHtml(l)).join("<br>")}${arrivalLines.length > arrivalEntriesByEmail ? `<br>…and ${arrivalLines.length - arrivalEntriesByEmail} more.` : ""}</p>` : ""}
 					${errors.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:12px">Errors: ${escHtml(errors.slice(0, 10).join("; "))}</p>` : ""}
 				`,
 				ctaText: "Review Invoices",
