@@ -53,6 +53,9 @@
           </div>
         </div>
 
+        <!-- Optional passenger authorization: never part of the step or its count -->
+        <PassengerAuthorizationsCard compact :driver-name="driverStore.driverName" :truck-unit="String(driverStore.truck?.unit_number ?? '')" />
+
         <!-- Next steps once the server has accepted the signing step -->
         <div v-if="stepAccepted" class="card ob-step">
           <div class="ob-next-steps">
@@ -317,6 +320,8 @@
         </template>
         <!-- His emergency contacts: outside the loading template, so a refresh never re-reads them -->
         <DriverEmergencyContactsCard v-if="canEditContacts" :revision="contactsRevision" @edit="openContactsForm" />
+        <!-- Passenger authorizations: outside the loading swap too, so a refresh never closes a form being signed -->
+        <PassengerAuthorizationsCard :driver-name="driverStore.driverName" :truck-unit="String(driverStore.truck?.unit_number ?? '')" />
       </section>
 
       <!-- NOTIFICATIONS TAB -->
@@ -438,6 +443,7 @@ import ResignRequestCard from '../components/driver/ResignRequestCard.vue'
 import EmergencyContactsForm from '../components/driver/EmergencyContactsForm.vue'
 import EmergencyContactsPrompt from '../components/driver/EmergencyContactsPrompt.vue'
 import DriverEmergencyContactsCard from '../components/driver/DriverEmergencyContactsCard.vue'
+import PassengerAuthorizationsCard from '../components/driver/PassengerAuthorizationsCard.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
