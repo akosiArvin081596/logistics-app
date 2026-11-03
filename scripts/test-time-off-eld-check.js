@@ -17,7 +17,9 @@
 //       conflicts reads Unclear (the truck changed hands); a silence across
 //       his device being linked to his truck again while he held it is judged
 //       by its two ends as one link would be (no miles, 190 mi, 3 mi, still
-//       dark), and reads Unclear when the device sat on another truck or left
+//       dark), its continuity too (an odometer or engine hours lower after it,
+//       a break in the first link, a before-fix older than the lookback: Unclear),
+//       and reads Unclear when the device sat on another truck or left
 //       again; a relief or a gap in holding inside it still changes hands, and
 //       a takeover reaches no day before it; a handover day; a relief driver; a
 //       team truck; a Central midnight; a DST day; the rule version
@@ -235,7 +237,7 @@ section("§3 the rule's rows");
 	const link = (truckId, from, until = "") => ({ truck_id: truckId, routemate_vehicle_id: "vid-t1", assigned_from: from, assigned_until: until });
 	const relinkRows = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z")];
 	const oct4 = pings(at("2026-10-04", 8), at("2026-10-04", 18), 15);
-	const back = (o = {}) => pings(at("2026-10-07", 8), at("2026-10-09", 8), 15, () => ({ lat: o.lat ?? YARD.lat, odo: o.odo ?? 100000 }));
+	const back = (o = {}) => pings(at("2026-10-07", 8), at("2026-10-09", 8), 15, () => ({ lat: o.lat ?? YARD.lat, odo: o.odo ?? 100000, eh: o.eh ?? 5000 }));
 	const DAYS = range("2026-10-04", "2026-10-07");
 	const across = ({ assignments = [HIS_T1], deviceRows = relinkRows, fixes = [...oct4, ...back()], days = DAYS, nowMs } = {}) => {
 		const r = judge(days, { assignments, deviceStartMs: Date.parse("2026-01-01T00:00:00.000Z"), deviceRows, fixes, ...(nowMs ? { nowMs } : {}) });
@@ -283,6 +285,20 @@ section("§3 the rule's rows");
 	eq("§3.9k a device moved onto his truck from another while dark: no reading on his truck before, so Confirmed (no ELD data), then parked",
 		across({ deviceRows: fromT2, days: ["2026-10-05", "2026-10-06", "2026-10-07"] }).map((x) => x.slice(0, 3)),
 		[["confirmed", "no_device", true], ["confirmed", "no_fix_before", true], ["confirmed", "parked", false]]);
+	// Readings across the re-link that one link reads as a break: each day Unclear, the same as its one-link twin.
+	const twins = (fixes) => [across({ fixes }), oneLink(fixes)];
+	const unclear4 = each(4, ["no_data", "device_changed_vehicle", false, "Unclear"]);
+	eq("§3.9l across the re-link, the odometer 1,000 mi lower after: every day Unclear (device_changed_vehicle), as one link reads it",
+		twins([...oct4, ...back({ odo: 99000 })]), [unclear4, unclear4]);
+	eq("§3.9m ...the odometer 0.3 mi lower: the same, as one link", twins([...oct4, ...back({ odo: 99999.7 })]), [unclear4, unclear4]);
+	eq("§3.9n ...the engine hours 1,000 h lower: the same, as one link", twins([...oct4, ...back({ eh: 4000 })]), [unclear4, unclear4]);
+	const breakOct1 = [...pings(at("2026-10-01", 6), at("2026-10-01", 7), 15, () => ({ eh: 1000 })), ...pings(at("2026-10-01", 8), at("2026-10-04", 18), 30), ...back()];
+	eq("§3.9o ...an engine-hours break in the first link on Oct 1, inside the 7-day window: the same, as one link", twins(breakOct1), [unclear4, unclear4]);
+	// The same step from a before-fix older than the 100-day lookback, against a lookback that reaches it.
+	const oldBefore = [fix(at("2026-07-01", 12)), ...back({ odo: 99000 })];
+	const lookback = (lookFromMs) => { const r = T.judgeTimeOffDays({ days: ["2026-10-05", "2026-10-06"], anchorOf: () => "2026-10-05", driverKey: HOLLIS, normalize, evidence: { ...evidence({ fixes: oldBefore }), ...(lookFromMs ? { lookFromMs } : {}) }, nowMs: at("2026-10-20", 12) }); return ["2026-10-05", "2026-10-06"].map((d) => noData(r, d)); };
+	eq("§3.9p ...and from a before-fix older than the lookback, the odometer lower after: Unclear, as a lookback that reaches it reads",
+		[lookback(null), lookback(at("2026-06-01"))], [each(2, ["no_data", "device_changed_vehicle", false, "Unclear"]), each(2, ["no_data", "device_changed_vehicle", false, "Unclear"])]);
 
 	// A handover at noon on Oct 5: his morning parked, Soren drives the afternoon.
 	const handover = asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-05T17:00:00.000Z");
