@@ -74269,10 +74269,19 @@ require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folde
 
 // <chr-wiring>
 // C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
-// No CHR connection exists, so nothing is sent. Its three switches (the settings example)
-// are read once and are off in a replica; off, nothing runs but the daily prune once the
-// tables exist. scripts/test-chr-wiring.js lifts this block.
+// No CHR connection exists (its transport has no CHR host yet), so nothing is sent. Its
+// four switches (the settings example) are read once and are off in a replica; off,
+// nothing runs but the daily prune once the tables exist. The connection settings have
+// no default; their names are provisional until CHR's docs, and a value is never logged.
+// scripts/test-chr-wiring.js lifts this block.
 const CHR_NOTICE_TYPE = "chr-attention";
+const chrConnection = {
+	baseUrl: String(process.env.CHR_API_BASE_URL ?? "").trim(),
+	tokenUrl: String(process.env.CHR_TOKEN_URL ?? "").trim(),
+	clientId: String(process.env.CHR_CLIENT_ID ?? "").trim(),
+	clientSecret: String(process.env.CHR_CLIENT_SECRET ?? "").trim(),
+	carrierCode: String(process.env.CHR_CARRIER_CODE_SECRET ?? "").trim(),
+};
 const chrIntegration = require("./lib/chr-integration");
 // The Job Tracking view the recorder read last. Its rows stay here, read only by
 // resolveGeofencePoints(): lib/chr-*.js gets projections only.
@@ -74282,10 +74291,12 @@ const chr = chrIntegration.create({
 	config: chrIntegration.chrConfig({
 		updatesEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_UPDATES_ENABLED ?? "").trim()),
 		sendEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_SEND_ENABLED ?? "").trim()),
+		liveAllEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LIVE_ALL_ENABLED ?? "").trim()),
 		locationEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LOCATION_ENABLED ?? "").trim()),
 		geofenceRadiusM: GEOFENCE_RADIUS,
 		// Read through its one spelling (lib/driver-instructions-runtime.js).
 		denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "",
+		connection: chrConnection,
 		replica: Boolean(REPLICA),
 	}),
 	readSheet: async () => {
@@ -74304,11 +74315,21 @@ const chr = chrIntegration.create({
 	logAudit,
 	// The page's live refresh: no payload, Super Admins' room only.
 	onChange: () => io.to("super-admin").emit("chr:changed"),
-	// Who may choose Live: the listed accounts only (A3).
+	// Pauses and refused updates: an in-app notice to Super Admins only, never an email.
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(CHR_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: CHR_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	// Who may choose Pilot or Live and test the connection: the listed accounts only (A3).
 	listedAccounts: RATECON_PDF_VIEWERS,
 	log: console,
 });
 chr.mount(app, { requireRole, refuseCrossOrigin });
+if (chr.config().sendEnabled && !chr.config().credentialsConfigured) {
+	const missing = [["CHR_API_BASE_URL", chrConnection.baseUrl], ["CHR_TOKEN_URL", chrConnection.tokenUrl], ["CHR_CLIENT_ID", chrConnection.clientId], ["CHR_CLIENT_SECRET", chrConnection.clientSecret]]
+		.filter(([, v]) => !v).map(([name]) => name);
+	console.warn(`[chr] sending is on but the connection is not configured (${missing.join(", ")} not set): nothing is sent`);
+}
 if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
 	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
 }

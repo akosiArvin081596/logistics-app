@@ -6,11 +6,16 @@
 // Counts only: never a load ID, a name, an address or a truck.
 //
 //   node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD
+//   node scripts/chr-dry-run-report.js --pilot --db <app.db>
 //
 // --db is opened read-only and must exist; --sheets is the replica's Job
 // Tracking working copy, read once. Settings are the page's first-enable
 // defaults: Dry run, "Arrived at pickup" off, positions off. A bad argument or
 // input exits 2 before anything else is read.
+// --pilot (the one-load test, addendum §4.2) reads only the recorder's own rows
+// in --db: what went Live, its results, whether any other load went Live, the
+// payloads' keys and patterns, the time from each event to its send. Counts and
+// yes/no only; it never names the pilot load.
 "use strict";
 
 const fs = require("fs");
@@ -25,7 +30,7 @@ const loadHaul = require(path.join(ROOT, "lib", "load-haul.js"));
 const eldMiles = require(path.join(ROOT, "lib", "eld-miles.js"));
 const tripWorkDays = require(path.join(ROOT, "lib", "trip-work-days.js"));
 
-const USAGE = "usage: node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD";
+const USAGE = "usage: node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD\n       node scripts/chr-dry-run-report.js --pilot --db <app.db>";
 // Reads copied from server.js (buildHaulTruckResolver(), buildEldDeviceResolver(),
 // eldDeviceHistoryStartMs(), getLoadCoordsRow(), getDeletedLoadIds()); a runner
 // pins each one to server.js's text.
@@ -54,6 +59,12 @@ function isDay(v) {
 function parseArgs(argv) {
 	const out = {};
 	if (!argv.length) throw new UsageError("no arguments");
+	const modes = argv.filter((a) => a === "--pilot");
+	if (modes.length) {
+		const rest = argv.filter((a) => a !== "--pilot");
+		if (rest.length !== 2 || rest[0] !== "--db" || !rest[1] || rest[1].startsWith("--")) throw new UsageError("--pilot takes --db <app.db> and nothing else");
+		return { mode: "pilot", db: rest[1] };
+	}
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a !== "--db" && a !== "--sheets" && a !== "--since") throw new UsageError(`unknown option ${String(a).slice(0, 40)}`);
@@ -256,10 +267,69 @@ function report({ db, sheets, since }) {
 	].join("\n");
 }
 
+// The payload rules lib/chr-events.js buildPayload() applies, checked again on
+// what was stored: only the allowlisted keys, each passing its pattern.
+const PAYLOAD_RULES = Object.freeze({
+	loadNumber: (v) => typeof v === "string" && /^\d{9}$/.test(v),
+	event: (v) => E.MILESTONE_EVENTS.includes(v) || v === "location",
+	stop: (v) => Boolean(v) && typeof v === "object" && ["pickup", "delivery"].includes(v.kind),
+	eventAt: (v) => typeof v === "string" && Number.isFinite(Date.parse(v)),
+	eventLocal: (v) => Boolean(v) && typeof v === "object" && typeof v.time === "string" && typeof v.zone === "string",
+	place: (v) => Boolean(v) && typeof v === "object" && /^[A-Z]{2}$/.test(String(v.state || "")) && (v.city === undefined || /^[A-Za-z .'-]{1,40}$/.test(v.city)),
+	position: (v) => Boolean(v) && Number.isFinite(v.lat) && Number.isFinite(v.lng),
+	truck: (v) => typeof v === "string" && /^[A-Za-z0-9-]{1,12}$/.test(v),
+	trailer: (v) => typeof v === "string" && /^[A-Za-z0-9-]{1,12}$/.test(v),
+});
+function payloadFails(json) {
+	let p;
+	try { p = JSON.parse(json); } catch { return true; }
+	if (!p || typeof p !== "object" || Array.isArray(p)) return true;
+	return Object.keys(p).some((k) => !E.PAYLOAD_KEYS.includes(k) || !PAYLOAD_RULES[k] || !PAYLOAD_RULES[k](p[k]));
+}
+
+function pilotReport({ db }) {
+	const hasTable = (name) => Boolean(db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+	if (!hasTable("chr_events")) return "C.H. Robinson pilot report: read-only, counts and yes/no only\n  No CHR table: the recorder never ran on this copy.";
+	const readJson = (sql, key) => {
+		try { return JSON.parse((db.prepare(sql).get(key) || {}).value || "null"); } catch { return null; }
+	};
+	const settings = readJson("SELECT value FROM app_settings WHERE key = ?", "chr.settings") || {};
+	const state = readJson("SELECT value FROM server_state WHERE key = ?", "chr.state") || {};
+	const live = db.prepare("SELECT load_id, event, status, result_code, attempts, event_at, sent_at, payload_json FROM chr_events WHERE mode = 'live'").all();
+	const byStatus = {};
+	const byResult = {};
+	for (const r of live) { tally(byStatus, r.status); if (r.result_code) tally(byResult, r.result_code); }
+	const loads = new Set(live.map((r) => r.load_id));
+	const pilotKey = settings.pilot && typeof settings.pilot.loadKey === "string" ? settings.pilot.loadKey : "";
+	const minutes = live.filter((r) => r.status === "sent" && r.sent_at && r.event_at)
+		.map((r) => (Date.parse(r.sent_at) - Date.parse(r.event_at)) / 60000).filter(Number.isFinite).sort((a, b) => a - b);
+	const median = minutes.length ? minutes[Math.floor((minutes.length - 1) / 2)] : null;
+	const held = {};
+	for (const r of db.prepare("SELECT hold_reason FROM chr_events WHERE status = 'held'").all()) tally(held, r.hold_reason || "unknown");
+	const yes = (b) => (b ? "yes" : "no");
+	return [
+		"C.H. Robinson pilot report: read-only, counts and yes/no only",
+		`  A pilot load is set now: ${yes(Boolean(pilotKey))}; milestones mode now: ${typeof settings.milestones === "string" ? settings.milestones : "unknown"}`,
+		`  Sending went on: ${yes(Boolean(state.sendOnAt))}; paused now: ${state.pausedReason || "no"}`,
+		"Live rows",
+		`  Live rows: ${live.length} (${list(byStatus)}); result codes: ${list(byResult)}; attempts: ${live.reduce((n, r) => n + (Number(r.attempts) || 0), 0)}`,
+		`  Loads with live rows: ${loads.size} (a one-load pilot: 1)`,
+		`  Live rows on a load other than the pilot load: ${pilotKey ? live.filter((r) => r.load_id !== pilotKey).length : "no pilot set now; see the line above"}`,
+		`  Payloads with a key off the allowlist or failing its pattern: ${live.filter((r) => r.payload_json && payloadFails(r.payload_json)).length}`,
+		`  Minutes from event to send: ${minutes.length ? `median ${median.toFixed(1)}, longest ${minutes[minutes.length - 1].toFixed(1)} (${minutes.length} sent)` : "none sent"}`,
+		`  Held rows, by reason: ${list(held)}`,
+	].join("\n");
+}
+
 function main() {
 	let db = null;
 	try {
 		const args = parseArgs(process.argv.slice(2));
+		if (args.mode === "pilot") {
+			db = openDb(args.db);
+			process.stdout.write(`${pilotReport({ db })}\n`);
+			return 0;
+		}
 		const sheets = readSheets(args.sheets);
 		db = openDb(args.db);
 		process.stdout.write(`${report({ db, sheets, since: args.since })}\n`);
@@ -278,4 +348,4 @@ function main() {
 
 if (require.main === module) process.exitCode = main();
 
-module.exports = { SERVER_SQL, DEVICE_HISTORY_START_KEY, USAGE, parseArgs, readSheets, report };
+module.exports = { SERVER_SQL, DEVICE_HISTORY_START_KEY, USAGE, parseArgs, readSheets, report, payloadFails, pilotReport };
