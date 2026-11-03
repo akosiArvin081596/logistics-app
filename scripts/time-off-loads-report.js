@@ -14,7 +14,10 @@
 // --since, and older ones whose days a change at or after --since moved. A row's
 // saves are rebuilt from the audit lines R11 writes for it (its create line, then
 // each update line "old days -> new days"); a kind or reason change alone moves
-// no days. A row the audit log does not fully account for (logAudit() is best
+// no days. Approved rows only: a driver's request still waiting or declined is no
+// time off. A driver's approved request is recorded by its approval line, at the
+// approval (when R11b's check ran), not when it was asked. A copy without the
+// request columns holds staff rows only, all approved. A row the audit log does not fully account for (logAudit() is best
 // effort) is listed when its created_at or updated_at is at or after --since,
 // checked as of its last change, and flagged; one whose created_at cannot be read
 // is counted, not listed. Cancelled and ended rows are listed too, with their
@@ -97,6 +100,8 @@ const TABLES = ["driver_availability", "drivers_directory", "driver_availability
 // The audit lines server.js writes when time off is recorded and changed:
 // "<name>: off <from>..<to> (<kind>)" and
 // "<name>: off <old from>..<old to> (<kind>) -> off <from>..<to> (<kind>)".
+// A driver's request is recorded as time off by its approval line, which starts
+// the same way: "<name>: off <from>..<to> (<kind>) approved".
 const DAYS = "(\\d{4}-\\d{2}-\\d{2})\\.\\.(\\d{4}-\\d{2}-\\d{2}) \\([a-z_]{1,20}\\)";
 const CREATE_LINE_RE = new RegExp(`: off ${DAYS}`);
 const UPDATE_LINE_RE = new RegExp(`: off ${DAYS} -> off ${DAYS}`);
@@ -195,17 +200,20 @@ function rowSaves(row, lines) {
 		changes.unshift({ at: a.timestamp, from: m[3], to: m[4], oldFrom: m[1], oldTo: m[2] });
 		cur = { from: m[1], to: m[2] };
 	}
-	const created = life.some((a) => {
-		const m = a.action === "driver_availability_create" ? CREATE_LINE_RE.exec(a.details || "") : null;
+	// A staff row's create line, or a driver row's approval line (its approval made it time off).
+	const recordingAction = row.source === "driver" ? "driver_availability_approve" : "driver_availability_create";
+	const recording = life.find((a) => {
+		const m = a.action === recordingAction ? CREATE_LINE_RE.exec(a.details || "") : null;
 		return !!m && m[1] === cur.from && m[2] === cur.to;
 	});
 	const lastChange = changes.length ? stampMs(changes[changes.length - 1].at) : NaN;
-	const complete = created && (!row.updated_at || lastChange >= stampMs(row.updated_at));
+	const complete = !!recording && (!row.updated_at || lastChange >= stampMs(row.updated_at));
 	if (!complete) {
-		return { complete, saves: [{ change: row.updated_at ? "changed" : "recorded", at: row.updated_at || row.created_at, from: row.from_date, to: row.to_date, oldFrom: null, oldTo: null }] };
+		return { complete, saves: [{ change: row.updated_at ? "changed" : "recorded", at: row.updated_at || row.decided_at || row.created_at, from: row.from_date, to: row.to_date, oldFrom: null, oldTo: null }] };
 	}
 	const moved = changes.filter((c) => c.from !== c.oldFrom || c.to !== c.oldTo).map((c) => ({ change: "changed", ...c }));
-	return { complete, saves: [{ change: "recorded", at: row.created_at, from: cur.from, to: cur.to, oldFrom: null, oldTo: null }, ...moved] };
+	const recordedAt = recording.action === "driver_availability_approve" ? recording.timestamp : row.created_at;
+	return { complete, saves: [{ change: "recorded", at: recordedAt, from: cur.from, to: cur.to, oldFrom: null, oldTo: null }, ...moved] };
 }
 
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -241,7 +249,7 @@ async function buildReport(db, sheetData, sinceMs) {
 	const linesOf = new Map();
 	const lines = db.prepare(`
 		SELECT id, timestamp, action, entity_id, details FROM audit_trail
-		WHERE entity = 'driver' AND action IN ('driver_availability_create', 'driver_availability_update')
+		WHERE entity = 'driver' AND action IN ('driver_availability_create', 'driver_availability_update', 'driver_availability_approve')
 	`).all().sort((a, b) => stampMs(a.timestamp) - stampMs(b.timestamp) || a.id - b.id);
 	for (const a of lines) {
 		if (!linesOf.has(a.entity_id)) linesOf.set(a.entity_id, []);
@@ -259,11 +267,21 @@ async function buildReport(db, sheetData, sinceMs) {
 	const skippedNoDates = new Set();
 	const skippedLongId = new Set();
 	const out = [];
-	const stored = db.prepare(`
-		SELECT a.id, a.directory_id, a.driver_name, a.kind, a.from_date, a.to_date, a.created_at, a.updated_at, a.cancelled_at,
-			d.driver_name AS directory_name
-		FROM driver_availability a LEFT JOIN drivers_directory d ON d.id = a.directory_id
-	`).all().sort((a, b) => stampMs(a.created_at) - stampMs(b.created_at) || a.id - b.id);
+	// Approved rows only. A copy from before the request columns holds staff rows only, all approved.
+	const withRequests = db.prepare("PRAGMA table_info(driver_availability)").all().some((c) => c.name === "request_status");
+	const stored = (withRequests
+		? db.prepare(`
+			SELECT a.id, a.directory_id, a.driver_name, a.kind, a.from_date, a.to_date, a.created_at, a.updated_at, a.cancelled_at,
+				a.source, a.decided_at, d.driver_name AS directory_name
+			FROM driver_availability a LEFT JOIN drivers_directory d ON d.id = a.directory_id
+			WHERE a.request_status = 'approved'
+		`)
+		: db.prepare(`
+			SELECT a.id, a.directory_id, a.driver_name, a.kind, a.from_date, a.to_date, a.created_at, a.updated_at, a.cancelled_at,
+				'staff' AS source, NULL AS decided_at, d.driver_name AS directory_name
+			FROM driver_availability a LEFT JOIN drivers_directory d ON d.id = a.directory_id
+		`)
+	).all().sort((a, b) => stampMs(a.created_at) - stampMs(b.created_at) || a.id - b.id);
 	let unreadableStamps = 0;
 	for (const row of stored) {
 		if (!Number.isFinite(stampMs(row.created_at))) {
@@ -272,8 +290,8 @@ async function buildReport(db, sheetData, sinceMs) {
 		}
 		const { complete, saves } = rowSaves(row, linesOf.get(String(row.directory_id)) || []);
 		const listed = complete
-			? stampMs(row.created_at) >= sinceMs || saves.some((s) => s.change === "changed" && stampMs(s.at) >= sinceMs)
-			: [row.created_at, row.updated_at].some((t) => stampMs(t) >= sinceMs);
+			? stampMs(saves[0].at) >= sinceMs || saves.some((s) => s.change === "changed" && stampMs(s.at) >= sinceMs)
+			: [row.created_at, row.updated_at, row.decided_at].some((t) => stampMs(t) >= sinceMs);
 		if (!listed) continue;
 		const driverName = String(row.directory_name || row.driver_name || "").trim();
 		const driverKey = normalize(driverName);
@@ -317,6 +335,7 @@ async function buildReport(db, sheetData, sinceMs) {
 			kind: row.kind, from: row.from_date, to: row.to_date,
 			state: row.cancelled_at ? "cancelled" : row.to_date < today ? "ended" : row.from_date > today ? "upcoming" : "current",
 			recordedAt: row.created_at, recordedAtText: zoneText(row.created_at),
+			...(row.source === "driver" ? { askedByDriver: true, approvedAt: row.decided_at || null, approvedAtText: zoneText(row.decided_at) } : {}),
 			lastChangedAt: row.updated_at || null, lastChangedAtText: zoneText(row.updated_at),
 			cancelledAt: row.cancelled_at || null, cancelledAtText: zoneText(row.cancelled_at),
 			historyComplete: complete,
@@ -359,7 +378,10 @@ function printText(r) {
 	for (const row of r.rows) {
 		lines.push("");
 		lines.push(`Row ${row.id}  ${row.driver}${row.recordedAs ? ` (recorded as ${row.recordedAs})` : ""}  ${driverAvailability.availabilityRangeText(row.from, row.to)} (${row.from}..${row.to}, ${row.kind})  ${row.state}`);
-		lines.push(`  recorded ${row.recordedAtText || row.recordedAt}; last changed ${row.lastChangedAtText || "never"}${row.cancelledAt ? `; cancelled ${row.cancelledAtText || row.cancelledAt}` : ""}`);
+		const recorded = row.askedByDriver
+			? `asked by the driver ${row.recordedAtText || row.recordedAt}; approved ${row.approvedAtText || row.approvedAt || "(time unknown)"}`
+			: `recorded ${row.recordedAtText || row.recordedAt}`;
+		lines.push(`  ${recorded}; last changed ${row.lastChangedAtText || "never"}${row.cancelledAt ? `; cancelled ${row.cancelledAtText || row.cancelledAt}` : ""}`);
 		if (!row.historyComplete) lines.push("  note: the audit log does not account for every change of this row, so its loads are checked as of its last change");
 		const groups = [
 			["yes", "Already had (assigned before the save)"],

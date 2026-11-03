@@ -41,6 +41,12 @@
 //      "Save anyway" re-sends the same body with the listed loads echoed as
 //      `confirmLoads` (withLoadsConfirmed()), never anything the panel worked
 //      out; a save the server could not check says so (loadsUncheckedNote())
+//   §11 a driver's own request (DRIVER_TIME_OFF_REQUESTS_ENABLED): the card's
+//      request rows, its words, and a form that only applies the server's
+//      requestLimits (shiftDayKey() counts whole calendar days, no Date)
+//   §12 staff: the request on its in-app notice, stored or live
+//      (timeOffRequestOfNotice(), noticeWithDecision(), requestDecisionText())
+//      and in the Drivers panel (panelGroup(), panelPastText(), panelRequestText())
 //
 // No DOM, no server. Files under test come from LOGISX_ROOT (default: this
 // checkout).
@@ -71,8 +77,14 @@ try {
 eq('§0 client/src/lib/availabilityText.js loads', !!text, true)
 const T = text || {}
 const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote', 'rangeHint',
-  'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote']
+  'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote',
+  // A driver's own request (PR 4).
+  'shiftDayKey', 'driverRequestRows', 'driverRequestStatusText', 'requestFormStart', 'requestFormBounds', 'canSendRequest', 'requestBody',
+  'timeOffRequestOfNotice', 'noticeWithDecision', 'requestDecisionText', 'panelGroup', 'panelPastText', 'panelRequestText']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
+eq('§0 ...and the card\'s two hints', [T.REQUEST_HINT, T.RECORDED_HINT], [
+  'Ask at least 5 days ahead. Dispatch approves each request. For sooner days or changes, message dispatch.',
+  'Dispatch records your time off. To change it, message dispatch.'])
 const call = (name, ...args) => (typeof T[name] === 'function' ? T[name](...args) : undefined)
 
 // Made-up rows, as the staff GET will send them (today 2026-10-16).
@@ -248,6 +260,82 @@ function scenario() {
     [{ loadId: 'L-103', from: '2026-10-22', to: '2026-10-23' }])
   rec('§10 a save the server could not check says so', call('loadsUncheckedNote', { success: true, row: {}, loadsUnchecked: true }), 'Loads couldn\'t be checked. Look at the Job Board for his loads.')
   rec('§10 ...a checked save says nothing', [call('loadsUncheckedNote', { success: true, row: {} }), call('loadsUncheckedNote', { loadsUnchecked: 'yes' }), call('loadsUncheckedNote', null)], ['', '', ''])
+
+  // §11 a driver's own request (PR 4): the card applies the days the server sent
+  // (requestLimits, from its own business day "today" Oct 15) and nothing else.
+  const LIMITS = { fromMin: '2026-10-20', fromMax: '2027-01-13', maxDays: 60, waitingMax: 5 }
+  rec('§11 shiftDayKey(): a month end, a year end, a leap day, backwards, 90 days on', [
+    call('shiftDayKey', '2026-10-31', 1), call('shiftDayKey', '2026-12-31', 1), call('shiftDayKey', '2028-02-28', 1), call('shiftDayKey', '2027-02-28', 1),
+    call('shiftDayKey', '2026-03-01', -1), call('shiftDayKey', '2026-10-15', 90), call('shiftDayKey', '2026-11-01', 0),
+  ], ['2026-11-01', '2027-01-01', '2028-02-29', '2027-03-01', '2026-02-28', '2027-01-13', '2026-11-01'])
+  rec('§11 ..."" for a key that is not a day or a count that is not whole', [call('shiftDayKey', '2026-13-01', 1), call('shiftDayKey', '', 1), call('shiftDayKey', '2026-10-15', 1.5)], ['', '', ''])
+  const asked = [
+    { id: 9, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', request: 'waiting', canCancel: true, reason: 'Family', decidedBy: 'dispatch_demo' },
+    { id: 8, kind: 'off_duty', from: '2026-11-02', to: '2026-11-02', request: 'declined', canCancel: true },
+    { id: 7, kind: 'other', from: '2026-11-20', to: '2026-11-21', request: 'approved', canCancel: false },
+    { id: 6, kind: 'other', from: '2026-11-25', to: '2026-11-24', request: 'waiting', canCancel: true },
+    { id: 5, kind: 'other', from: '2026-11-26', to: '2026-11-26', request: 'waiting', canCancel: 'yes' },
+    null,
+  ]
+  rec('§11 driverRequestRows(): waiting and declined only, by first day, six fields; Cancel only on a waiting one the server offered it on', call('driverRequestRows', asked), [
+    { id: 8, kind: 'off_duty', from: '2026-11-02', to: '2026-11-02', request: 'declined', canCancel: false },
+    { id: 9, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', request: 'waiting', canCancel: true },
+    { id: 5, kind: 'other', from: '2026-11-26', to: '2026-11-26', request: 'waiting', canCancel: false },
+  ])
+  rec('§11 ...nothing sent, or not a list', [call('driverRequestRows', undefined), call('driverRequestRows', { requests: [] })], [[], []])
+  rec('§11 driverRequestStatusText(): the card\'s words', [call('driverRequestStatusText', { request: 'waiting' }), call('driverRequestStatusText', { request: 'declined' }),
+    call('driverRequestStatusText', { request: 'approved' }), call('driverRequestStatusText', null)], ['Waiting for approval', 'Not approved. Message dispatch.', '', ''])
+  rec('§11 requestFormStart(): the first day the server allows, one day, "Off duty"', call('requestFormStart', LIMITS), { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20' })
+  rec('§11 ...no limits sent: empty days', call('requestFormStart', null), { kind: 'off_duty', from: '', to: '' })
+  rec('§11 requestFormBounds(): the first day from fromMin to fromMax; the last from the first to the 60th day', call('requestFormBounds', LIMITS, { from: '2026-10-20', to: '2026-10-20' }),
+    { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: '2026-12-18' })
+  rec('§11 ...across a year end', call('requestFormBounds', LIMITS, { from: '2026-12-01', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-12-01', toMax: '2027-01-29' })
+  rec('§11 ...an empty first day: the last day starts at fromMin, no end limit', call('requestFormBounds', LIMITS, { from: '', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: null })
+  rec('§11 ...no limits sent: only "not before the first day"', call('requestFormBounds', null, { from: '2026-11-02', to: '' }), { fromMin: null, fromMax: null, toMin: '2026-11-02', toMax: null })
+  const sendable = (form, limits = LIMITS) => call('canSendRequest', { kind: 'off_duty', ...form }, limits)
+  rec('§11 canSendRequest(): Send inside the limits only', [
+    sendable({ from: '2026-10-20', to: '2026-10-22' }), sendable({ from: '2026-10-19', to: '2026-10-22' }), sendable({ from: '2027-01-13', to: '2027-01-13' }),
+    sendable({ from: '2027-01-14', to: '2027-01-14' }), sendable({ from: '2026-10-22', to: '2026-10-21' }), sendable({ from: '2026-10-20', to: '2026-12-18' }),
+    sendable({ from: '2026-10-20', to: '2026-12-19' }), sendable({ from: '2026-10-20', to: '' }), sendable({ from: '2026-10-20', to: '2026-10-20', kind: 'sick' }),
+    sendable({ from: '2026-10-20', to: '2026-10-20' }, null),
+  ], [true, false, true, false, false, true, false, false, false, false])
+  rec('§11 requestBody(): the two days and the kind, never anything else', call('requestBody', { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', reason: 'Family', driver: 'Demo Driver' }),
+    { kind: 'vacation', from: '2026-11-02', to: '2026-11-03' })
+
+  // §12 staff: the request on its in-app notice (stored, or live with its payload
+  // nested in `metadata`) and in the Drivers panel.
+  const notice = (metadata, type = 'time-off-request') => ({ id: 41, type, title: 'Time off request: Demo Driver (Nov 9 – Nov 13)', body: 'Off duty. Asked Nov 2.', metadata, read: 0 })
+  const STORED = notice(JSON.stringify({ availabilityId: 12, directoryId: 3 }))
+  const LIVE = notice(JSON.stringify({ type: 'time-off-request', title: 'x', body: 'y', metadata: { availabilityId: 12, directoryId: 3 } }))
+  rec('§12 timeOffRequestOfNotice(): a stored notice and a live one both name the request', [call('timeOffRequestOfNotice', STORED), call('timeOffRequestOfNotice', LIVE)],
+    [{ availabilityId: 12, decision: '', decidedBy: '' }, { availabilityId: 12, decision: '', decidedBy: '' }])
+  rec('§12 ...a decided one says who', call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' }))),
+    { availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' })
+  rec('§12 ...another type, unreadable metadata, no request id, or an unknown decision', [
+    call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12 }), 'eld-feed-silent')), call('timeOffRequestOfNotice', notice('{not json')),
+    call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 'x' }))), call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12, decision: 'maybe', decidedBy: 'x' }))),
+  ], [null, null, null, { availabilityId: 12, decision: '', decidedBy: '' }])
+  const decidedStored = call('noticeWithDecision', STORED, 12, 'declined', 'super_demo')
+  const decidedLive = call('noticeWithDecision', LIVE, 12, 'approved', 'dispatch_demo')
+  rec('§12 noticeWithDecision(): the decision written in, the metadata kept in the shape it came in', [
+    call('timeOffRequestOfNotice', decidedStored), typeof decidedStored?.metadata, call('timeOffRequestOfNotice', decidedLive), JSON.parse(decidedLive?.metadata || '{}').type,
+  ], [{ availabilityId: 12, decision: 'declined', decidedBy: 'super_demo' }, 'string', { availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' }, 'time-off-request'])
+  rec('§12 ...another request\'s notice, or an unknown decision: the same notice', [call('noticeWithDecision', STORED, 13, 'approved', 'x') === STORED, call('noticeWithDecision', STORED, 12, 'maybe', 'x') === STORED], [true, true])
+  rec('§12 requestDecisionText(): who decided, as staff read it', [
+    call('requestDecisionText', 'approved', 'dispatch_demo'), call('requestDecisionText', 'declined', 'super_demo'), call('requestDecisionText', 'cancelled', 'driver'),
+    call('requestDecisionText', 'cancelled', 'system'), call('requestDecisionText', 'approved', ''), call('requestDecisionText', '', 'x'),
+  ], ['Approved by dispatch_demo', 'Declined by super_demo', 'Cancelled by the driver', 'Cancelled: driver removed from the Drivers list', 'Approved by staff', ''])
+  const prow = (over) => ({ id: 1, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', status: 'upcoming', request: 'approved', source: 'staff', decidedBy: null, ...over })
+  rec('§12 panelGroup(): a waiting request first, a declined one with the past rows, approved time off as before', [
+    call('panelGroup', prow({ request: 'waiting', source: 'driver' })), call('panelGroup', prow({ request: 'declined', source: 'driver' })), call('panelGroup', prow({})),
+    call('panelGroup', prow({ status: 'current' })), call('panelGroup', prow({ status: 'past' })), call('panelGroup', prow({ status: 'cancelled', request: 'waiting', source: 'driver' })),
+    call('panelGroup', { id: 2, from: '2026-11-09', to: '2026-11-13', status: 'upcoming' }), call('panelGroup', null),
+  ], ['waiting', 'past', 'live', 'live', 'past', 'past', 'live', 'past'])
+  rec('§12 panelPastText() and panelRequestText(): the words beside a row', [
+    call('panelPastText', prow({ status: 'cancelled' })), call('panelPastText', prow({ request: 'declined' })), call('panelPastText', prow({ status: 'past' })),
+    call('panelRequestText', prow({ request: 'waiting', source: 'driver' })), call('panelRequestText', prow({ source: 'driver', decidedBy: 'dispatch_demo' })),
+    call('panelRequestText', prow({ request: 'declined', source: 'driver', decidedBy: 'super_demo' })), call('panelRequestText', prow({})), call('panelRequestText', { status: 'upcoming' }),
+  ], ['Cancelled', 'Declined', 'Ended', 'Asked by the driver', 'Asked by the driver, approved by dispatch_demo', 'Asked by the driver, declined by super_demo', '', ''])
   return out.join('|')
 }
 
@@ -269,9 +357,18 @@ eq('§9 availabilityText.js uses no zone-dependent Date', !!lib && !ZONED_DATE.t
 const card = read('client/src/components/driver/DriverTimeOffCard.vue')
 eq('§9 DriverTimeOffCard.vue exists', !!card, true)
 eq('§9 the card uses no zone-dependent Date', !!card && !ZONED_DATE.test(card), true)
-eq('§9 the card never names a reason, an author or a cancelled row', !!card && !/reason|created|cancel|directoryId/i.test(card), true)
+// "Cancel request" on a waiting request (PR 4) is the one cancel the card may name.
+const cardOwnCancel = /Cancel request|canCancel|cancelTimeOffRequest/g
+eq('§9 the card never names a reason, an author or a cancelled row', !!card && !/reason|created|cancel|directoryId|decided/i.test(card.replace(cardOwnCancel, '')), true)
 eq('§9 the card lists rows through driverTimeOffRows()', !!card && /driverTimeOffRows\(/.test(card), true)
 eq('§9 the banner text comes from driverTimeOffBanner()', !!card && /driverTimeOffBanner\(/.test(card), true)
+// PR 4: the request part of the card follows the keys the server sent.
+eq('§9 the request part shows only when the payload carried `requests` (the server\'s flag)', !!card && /Array\.isArray\(props\.timeOff\.requests\)/.test(card) && /v-if="requestsOn && !loadFailed"/.test(card), true)
+eq('§9 "Request days off" only on a session the server says may ask', !!card && /v-else-if="timeOff\.canRequest === true"[^>]*>Request days off</.test(card), true)
+eq('§9 its requests come through driverRequestRows(), Cancel only where r.canCancel', !!card && /driverRequestRows\(/.test(card) && /v-if="r\.canCancel"[^>]*>Cancel request</.test(card), true)
+eq('§9 the form\'s days come from requestFormBounds() and requestFormStart(); Send waits for canSendRequest() and sends requestBody()',
+  !!card && [/requestFormBounds\(/, /requestFormStart\(/, /canSendRequest\(/, /requestTimeOff\(requestBody\(form\)\)/].every((re) => re.test(card)), true)
+eq('§9 the hint is the lib\'s, by the flag', !!card && /requestsOn \? REQUEST_HINT : RECORDED_HINT/.test(card), true)
 
 const view = read('client/src/views/DriverView.vue') || ''
 const cardTags = view.match(/<DriverTimeOffCard\b[^>]*>/g) || []
@@ -282,6 +379,30 @@ eq('§9 one of them is the banner', cardTags.filter((t) => /variant="banner"/.te
 const store = read('client/src/stores/driver.js') || ''
 eq('§9 the store starts with no time off', /\btimeOff: null,/.test(store), true)
 eq('§9 the store takes `timeOff` from the payload only when it is there', /this\.timeOff = [^\n]*data\.timeOff/.test(store), true)
+eq('§9 PR 4: the store asks and withdraws through the driver\'s own routes only (no name in the path or body)', [
+  /api\.post\('\/api\/driver\/me\/availability', body\)/.test(store), /api\.post\(`\/api\/driver\/me\/availability\/\$\{encodeURIComponent\(id\)\}\/cancel`, \{\}\)/.test(store),
+], [true, true])
+// Every plain reload swaps the Kit tab for its skeleton, which remounts the card and drops its note.
+const actionBody = (name) => {
+  const at = store.indexOf(`async ${name}(`)
+  return at < 0 ? '' : store.slice(at, store.indexOf('\n    },', at))
+}
+eq('§9 ...each reloads quietly (no skeleton swap), and a refusal over the days takes the server\'s limits again', [
+  ['requestTimeOff', 'cancelTimeOffRequest', 'refreshTimeOffLimits'].filter((n) => /this\.loadData\(\{ quiet: true \}\)/.test(actionBody(n))).length,
+  /if \(!\(opts && opts\.quiet === true\)\) this\.isLoading = true/.test(store),
+  !!card && /err\.code === 'TIME_OFF_TOO_SOON' \|\| err\.code === 'TIME_OFF_TOO_FAR'\)\) await driverStore\.refreshTimeOffLimits\(\)/.test(card),
+], [3, true, true])
+eq('§9 ...and DriverView opens the Kit tab on a time-off notice and refetches on `time-off-updated`',
+  [/notif\.type === 'time-off'/.test(view), /socket\.on\('time-off-updated', onTimeOffUpdated\)/.test(view), /socket\.off\('time-off-updated', onTimeOffUpdated\)/.test(view)], [true, true, true])
+
+// PR 4, staff: one tap on the notice, and the same two buttons in the panel.
+const notices = read('client/src/views/NotificationsView.vue') || ''
+eq('§9 Notifications: Approve and Decline keep their click on the button (@click.stop), on a waiting request only',
+  [/@click\.stop="decide\(n, 'approve'\)"/.test(notices), /@click\.stop="decide\(n, 'decline'\)"/.test(notices), /v-if="requestOf\(n\)\.decision"/.test(notices)], [true, true, true])
+eq('§9 ...each tap posts to the request\'s own route; "Approve anyway" re-sends withLoadsConfirmed()',
+  [/api\.post\(`\/api\/driver-availability\/\$\{req\.availabilityId\}\/\$\{decision\}`, body\)/.test(notices), /withLoadsConfirmed\(\{\}, err\.data\)/.test(notices),
+    /confirm-text="Approve anyway"/.test(notices), /cancel-text="Keep waiting"/.test(notices)], [true, true, true, true])
+eq('§9 ...and a decision made elsewhere reaches an open page', /socket\.on\('time-off-request-decided', onRequestDecided\)/.test(notices) && /socket\.off\('time-off-request-decided', onRequestDecided\)/.test(notices), true)
 
 const panel = read('client/src/components/drivers-db/DriverAvailabilityPanel.vue') || ''
 eq('§9 the panel uses no zone-dependent Date', !ZONED_DATE.test(panel), true)
@@ -297,6 +418,9 @@ eq('§9 ...says when loads were not checked through loadsUncheckedNote()', /load
 eq('§9 ...asks in its own dialog: "He has loads on these days", "Keep as is" (the safe button, first) and "Save anyway"',
   [/title="He has loads on these days"/.test(panel), /cancel-text="Keep as is"/.test(panel), /confirm-text="Save anyway"/.test(panel)], [true, true, true])
 eq('§9 ...and builds no echo of its own (no confirmLoads written in the panel)', /confirmLoads/.test(panel), false)
+eq('§9 PR 4: the panel groups rows by panelGroup(), a waiting request first with Approve and Decline posting to its own route',
+  [/panelGroup\(r\) === 'waiting'/.test(panel), /api\.post\(`\/api\/driver-availability\/\$\{r\.id\}\/\$\{decision\}`, body\)/.test(panel),
+    /confirm-text="Approve anyway"/.test(panel), panel.indexOf('v-for="r in waiting"') > -1 && panel.indexOf('v-for="r in waiting"') < panel.indexOf('v-for="r in live"')], [true, true, true, true])
 for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/components/shared/OffDutyConfirmHost.vue']) {
   const src = read(rel)
   eq(`§9 ${rel} is left to the dispatch side (it never names DRIVER_HAS_LOADS)`, src !== null && !/DRIVER_HAS_LOADS|confirmLoads/.test(src), true)

@@ -35,14 +35,20 @@
               <div class="ob-doc-action">{{ docAction(doc) }}</div>
             </div>
             <!-- Emergency contacts: only when the payload carries the counts (the server's flag) -->
-            <div v-if="signingStep.item" class="ob-doc-item ob-contacts" data-testid="ob-contacts">
+            <div
+              v-if="signingStep.item"
+              class="ob-doc-item ob-contacts"
+              :class="{ 'ob-contacts-open': canEditContacts }"
+              data-testid="ob-contacts"
+              @click="openContactsForm"
+            >
               <div class="ob-doc-icon" v-html="signingStep.item.done ? '&#9989;' : '&#9723;'"></div>
               <div class="ob-doc-name">
                 Emergency contacts
                 <div class="ob-contacts-sub">At least {{ signingStep.item.required }} people we can call if something happens on the road</div>
                 <div class="ob-contacts-count" data-testid="ob-contacts-count">{{ signingStep.item.label }}</div>
               </div>
-              <button v-if="canEditContacts" type="button" class="ob-doc-action ob-contacts-btn" data-testid="ob-contacts-btn" @click="showContactsForm = true">{{ signingStep.item.action }}</button>
+              <button v-if="canEditContacts" type="button" class="ob-doc-action ob-contacts-btn" data-testid="ob-contacts-btn" @click.stop="openContactsForm">{{ signingStep.item.action }}</button>
             </div>
           </div>
         </div>
@@ -112,6 +118,11 @@
 
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
+    <!-- Emergency contacts: asked once per app start until two are on file, never over
+         another window or while the truck reads as moving (contactsPromptDue()). -->
+    <EmergencyContactsPrompt v-if="canEditContacts" :show="showContactsPrompt" @add="contactsPromptAdd" @later="contactsPromptLater" />
+    <EmergencyContactsForm v-if="canEditContacts" :show="showContactsForm" @close="showContactsForm = false" @saved="contactsRevision++" />
+
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
     <div v-if="showWelcomeModal" class="welcome-overlay" tabindex="-1" @click.self="dismissWelcome" @keydown.esc="dismissWelcome">
       <div class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
@@ -294,8 +305,9 @@
             :profile-picture-url="driverStore.profilePictureUrl"
             :driver-id="driverStore.driverDirectoryId"
           />
-          <!-- "My time off" (R11 follow-up), read-only. Only when the payload
-               carried `timeOff`; with no key the Kit is as it was. -->
+          <!-- "My time off" (R11 follow-up). Only when the payload carried
+               `timeOff`; with no key the Kit is as it was. With drivers'
+               requests on it also asks for days off. -->
           <DriverTimeOffCard
             v-if="driverStore.timeOff"
             :time-off="driverStore.timeOff"
@@ -303,6 +315,8 @@
           />
           <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
         </template>
+        <!-- His emergency contacts: outside the loading template, so a refresh never re-reads them -->
+        <DriverEmergencyContactsCard v-if="canEditContacts" :revision="contactsRevision" @edit="openContactsForm" />
       </section>
 
       <!-- NOTIFICATIONS TAB -->
@@ -405,7 +419,7 @@ import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
 import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
-import { signingStepView } from '../lib/emergencyContacts'
+import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
@@ -422,6 +436,8 @@ import NotificationList from '../components/driver/NotificationList.vue'
 import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
 import ResignRequestCard from '../components/driver/ResignRequestCard.vue'
 import EmergencyContactsForm from '../components/driver/EmergencyContactsForm.vue'
+import EmergencyContactsPrompt from '../components/driver/EmergencyContactsPrompt.vue'
+import DriverEmergencyContactsCard from '../components/driver/DriverEmergencyContactsCard.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
@@ -458,11 +474,12 @@ const isOnboarding = computed(() => {
 const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
 // Signed documents a Super Admin asked to be signed again (the payload's resign_requested).
 const resignDocs = computed(() => requestedDocs(driverStore.onboarding?.documents))
-const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
-const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
+const totalDocs = computed(() => driverStore.onboarding?.totalDocs || ONBOARDING_DOC_KEYS.length)
+// The five documents the server's step counts; a signed one under another key never counts.
+const signedCount = computed(() => requiredSignedCount(onboardingDocs.value))
 // Drug test progress is intentionally NOT shown to drivers (legal requirement).
-// Progress reflects the signing step only (the documents, and the emergency
-// contacts while the step is open); admin handles the final activation.
+// Progress is the signing step only: the documents, and the emergency contacts
+// while the step is open or once on file; admin handles the final activation.
 const signingStep = computed(() => signingStepView({
   status: driverStore.onboarding?.status,
   signed: signedCount.value,
@@ -474,6 +491,11 @@ const stepAccepted = computed(() => driverStore.onboarding?.status === 'document
 // The contacts item's button and form: a Driver only, as the routes behind them.
 const canEditContacts = computed(() => auth.user?.role === 'Driver' && !!driverStore.emergencyContacts)
 const showContactsForm = ref(false)
+function openContactsForm() {
+  if (canEditContacts.value) showContactsForm.value = true
+}
+// Moved on by each save in the form, so the Kit card reads the list again.
+const contactsRevision = ref(0)
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
@@ -821,6 +843,9 @@ function handleNotificationTap(notif) {
       const doc = resignDocs.value.find((d) => d.doc_key === noticeDocKey(notif))
       if (doc) openOnboardingDoc(doc)
       else currentTab.value = 'kit'
+    } else if (notif.type === 'time-off') {
+      // An answer to a request, or a change by dispatch: the Kit's "My time off" card shows it.
+      currentTab.value = 'kit'
     }
   } catch {
     // ignore parse errors
@@ -971,6 +996,39 @@ async function handleSendVoiceNote({ clip, loadId }) {
   await driverStore.sendVoiceNote(clip, loadId)
 }
 
+// The emergency contacts prompt. The answer is kept in this view only, so it returns
+// at the next app start (each sign-in mounts the view afresh); ready waits a moment
+// after the first load so the truck's first ELD read can hold it back.
+const CONTACTS_PROMPT_SETTLE_MS = 3000
+const contactsPromptAnswered = ref(false)
+const contactsPromptReady = ref(false)
+let contactsPromptTimer = null
+function scheduleContactsPrompt() {
+  if (contactsPromptReady.value || contactsPromptTimer) return
+  contactsPromptTimer = setTimeout(() => {
+    contactsPromptTimer = null
+    if (isMounted) contactsPromptReady.value = true
+  }, CONTACTS_PROMPT_SETTLE_MS)
+}
+const showContactsPrompt = computed(() => contactsPromptDue({
+  role: auth.user?.role,
+  counts: driverStore.emergencyContacts,
+  onboarding: isOnboarding.value,
+  loaded: contactsPromptReady.value,
+  answered: contactsPromptAnswered.value,
+  welcomeOpen: showWelcomeModal.value,
+  loadOpen: !!detailLoad.value,
+  dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value,
+  motionAllowed: voiceGate.value.allowed,
+}))
+function contactsPromptAdd() {
+  contactsPromptAnswered.value = true
+  openContactsForm()
+}
+function contactsPromptLater() {
+  contactsPromptAnswered.value = true
+}
+
 function handleMarkRead(ids) {
   driverStore.markMessagesRead(ids)
 }
@@ -1074,6 +1132,15 @@ function onInstructionsChanged(payload) {
 function onResignRequested() {
   if (!isMounted) return
   toast.show('You have a document to sign again.')
+  scheduleDriverRefetch()
+}
+
+// Dispatch answered a time-off request of his, or changed time off that began as
+// one (the event carries a notice id only): the refetch brings the notice and
+// the card's new state.
+function onTimeOffUpdated() {
+  if (!isMounted) return
+  toast.show('Your time off was updated. See My time off.')
   scheduleDriverRefetch()
 }
 
@@ -1232,6 +1299,7 @@ async function attemptInitialLoad() {
     await driverStore.loadData()
     initialLoadFailed.value = false
     maybeShowWelcome()
+    scheduleContactsPrompt()
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')
@@ -1248,6 +1316,7 @@ async function attemptInitialLoad() {
     socket.on('location-update', onLocationUpdate)
     socket.on('driver-instructions-changed', onInstructionsChanged)
     socket.on(LIVE_EVENT, onResignRequested)
+    socket.on('time-off-updated', onTimeOffUpdated)
     socketSetupDone = true
   }
 }
@@ -1291,6 +1360,7 @@ onUnmounted(() => {
   // torn-down view. `isMounted` guards the socket handlers that SCHEDULE it, not
   // the timer already scheduled, so the timer itself has to be cleared.
   if (refetchTimer) { clearTimeout(refetchTimer); refetchTimer = null }
+  if (contactsPromptTimer) { clearTimeout(contactsPromptTimer); contactsPromptTimer = null }
   // Stops the ELD poll, the freshness clock AND the phone watcher — leaving the
   // geolocation watcher running after the driver app unmounts would keep the
   // GPS radio (and the battery drain) alive for the rest of the session.
@@ -1302,6 +1372,7 @@ onUnmounted(() => {
   socket.off('location-update', onLocationUpdate)
   socket.off('driver-instructions-changed', onInstructionsChanged)
   socket.off(LIVE_EVENT, onResignRequested)
+  socket.off('time-off-updated', onTimeOffUpdated)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   socket.disconnect()
 })
@@ -1363,14 +1434,17 @@ onUnmounted(() => {
   font-size: 0.72rem; font-weight: 700; color: var(--accent);
   padding: 0.2rem 0.6rem; border-radius: 99px; background: var(--accent-dim);
 }
-/* The contacts row is not one tap target like a document's: its button is. */
+/* For a Driver the whole contacts row opens the form, as a document row opens its
+   document; for anyone else it is a status line. */
 .ob-contacts { cursor: default; align-items: flex-start; }
 .ob-contacts:active { background: none; }
+.ob-contacts-open { cursor: pointer; }
+.ob-contacts-open:active { background: var(--bg); }
 .ob-contacts-sub { font-size: 0.72rem; font-weight: 400; color: var(--text-dim); margin-top: 0.1rem; line-height: 1.35; }
 .ob-contacts-count { font-size: 0.72rem; font-weight: 600; margin-top: 0.15rem; }
 .ob-contacts-btn {
   border: none; font-family: inherit; cursor: pointer; flex-shrink: 0;
-  min-height: 36px; padding: 0.35rem 0.95rem; font-size: 0.78rem;
+  min-height: 44px; padding: 0.35rem 0.95rem; font-size: 0.78rem;
 }
 .ob-next-steps {
   margin-top: 1rem; padding: 1rem; background: #f0fdf4; border-radius: 10px;

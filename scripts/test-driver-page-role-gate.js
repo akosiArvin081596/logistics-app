@@ -44,6 +44,10 @@
  *      in-memory SQLite built from server.js's own CREATE TABLE text. Mutants:
  *      the self-check removed (the session's rows still come back), the rows
  *      read by the URL's name (flips), the spread without the sub-flag (flips).
+ *      With drivers' requests on (PR 4): `timeOff` adds requests, requestLimits
+ *      and canRequest, `rows` unchanged; canRequest and Cancel only on the
+ *      driver's own session, never a Super Admin's view; mutant: the spread
+ *      without the session's user (flips).
  *   §8 the driver's load instructions (plan PR 4, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED):
  *      GET /api/driver/loads/:loadId/instructions (lib/driver-instructions-runtime.js,
  *      with server.js's loadBelongsToDriver() lifted in) answers 404 with no code, and
@@ -712,20 +716,23 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			return adb;
 		}
 		// The time-off ELD check is off here (its own runners cover it), so no eldChecked.
-		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", [
-			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, "return { driverAvailabilityByName, driverOwnTimeOff };",
-		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false);
+		// Drivers' requests (PR 4) are off unless `requests` is given; on, the request
+		// keys' helpers are lifted too (a missing one is a FAIL below, never a crash).
+		const REQUEST_SRC = ["driverTimeOffRequestKeys", "timeOffRequestDriver", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(softFn);
+		const timeOffHelpers = (adb, requests = false) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", "DRIVER_TIME_OFF_REQUESTS_ENABLED", [
+			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, ...(requests ? REQUEST_SRC.filter(Boolean) : []), "return { driverAvailabilityByName, driverOwnTimeOff };",
+		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false, requests);
 		const counted = (fn) => { const f = (...a) => { f.calls++; return fn(...a); }; f.calls = 0; return f; };
 		// The payload with the time-off reader wired to `adb`, the sub-flag as given.
-		const pageRoute = (screen, adb, src = ROUTE_SRC) => {
-			const h = timeOffHelpers(adb);
+		const pageRoute = (screen, adb, src = ROUTE_SRC, requests = false) => {
+			const h = timeOffHelpers(adb, requests);
 			const reader = counted(h.driverOwnTimeOff);
 			const route = buildRoute(src, { DRIVER_TIME_OFF_SCREEN_ENABLED: screen, driverOwnTimeOff: reader });
 			return { ...route, reader };
 		};
 		// GET /api/driver/me/availability, the shipped registration, main flag on.
-		const meRoute = (adb) => {
-			const h = timeOffHelpers(adb);
+		const meRoute = (adb, requests = false) => {
+			const h = timeOffHelpers(adb, requests);
 			const deps = {
 				availabilityFlagGate: new Function("DRIVER_AVAILABILITY_ENABLED", `${liftFn("availabilityFlagGate")}\nreturn availabilityFlagGate;`)(true),
 				requireRole, requireAuth, normalizeDriverName: helpers.normalizeDriverName, appTodayKey: () => TODAY, console: quiet,
@@ -820,6 +827,48 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			if (NO_FLAG) {
 				r = await call(pageRoute(false, adb, NO_FLAG), DK, "Desoren King");
 				ok("MUTANT 8 (the spread without the sub-flag): §7.14 flips, timeOff sent with the sub-flag off", r.status === 200 && "timeOff" in r.body, told(r));
+			}
+
+			// Drivers' requests (plan B Revision 2, PR 4), DRIVER_TIME_OFF_REQUESTS_ENABLED on:
+			// Desoren King (account 2) has one request waiting and one declined.
+			ok("§7.18a server.js has the request keys' helpers and the users table's CREATE TABLE", REQUEST_SRC.every(Boolean) && !!ddl("users"), REQUEST_SRC.map((s) => !!s).join());
+			if (REQUEST_SRC.every(Boolean) && ddl("users")) {
+				const rdb = availabilityDb();
+				new Function("db", ddl("users"))(rdb);
+				const acct = rdb.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', ?, ?)");
+				acct.run(SUPER.id, SUPER.username, "Super Admin", "");
+				acct.run(DK.id, DK.username, "Driver", DK.driverName);
+				acct.run(SK.id, SK.username, "Driver", SK.driverName);
+				const ask = rdb.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_by_user_id, created_at, request_status, source)
+					VALUES (11, 'Desoren King', ?, ?, ?, ?, ?, '2026-10-10T12:00:00Z', ?, 'driver')`);
+				ask.run("vacation", "2026-11-09", "2026-11-13", DK.username, DK.id, "requested");
+				ask.run("off_duty", "2026-11-20", "2026-11-21", DK.username, DK.id, "declined");
+				const keys = (x) => (x.body && x.body.timeOff ? Object.keys(x.body.timeOff).sort().join() : "");
+				const reqs = (x) => (x.body && x.body.timeOff && Array.isArray(x.body.timeOff.requests) ? x.body.timeOff.requests.map((q) => [q.from, q.request, q.canCancel]) : null);
+				const page = pageRoute(true, rdb, ROUTE_SRC, true);
+				r = await call(page, DK, "Desoren King");
+				ok("§7.18 requests on, Driver: timeOff also carries requests, requestLimits and canRequest",
+					r.status === 200 && keys(r) === "canRequest,requestLimits,requests,rows,today", told(r));
+				ok("§7.19 ...rows keep their shape and rows (the requests are not time off)", same(shape(r), DK_ROWS)
+					&& r.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,id,kind,status,to"), told(r));
+				ok("§7.20 ...his waiting request (he may cancel it) and his declined one; the limits from today + 5; he may ask",
+					same(reqs(r), [["2026-11-09", "waiting", true], ["2026-11-20", "declined", false]])
+					&& same(r.body.timeOff.requestLimits, { fromMin: "2026-10-20", fromMax: "2027-01-13", maxDays: 60, waitingMax: 5 }) && r.body.timeOff.canRequest === true, told(r));
+				ok("§7.21 ...no reason, decider or author on a request", r.body.timeOff.requests.every((q) => Object.keys(q).sort().join() === "canCancel,from,id,kind,request,to"), told(r));
+				const meOn = await meRoute(rdb, true)(DK);
+				ok("§7.22 ...the same as GET /api/driver/me/availability for his session", meOn.status === 200 && same(r.body.timeOff, meOn.body), `me ${meOn.status} ${JSON.stringify(meOn.body).slice(0, 200)}`);
+				r = await call(page, SUPER, "Desoren King");
+				ok("§7.23 a Super Admin on his page: his requests listed, but canRequest false and no Cancel on any",
+					r.status === 200 && same(reqs(r), [["2026-11-09", "waiting", false], ["2026-11-20", "declined", false]]) && r.body.timeOff.canRequest === false, told(r));
+				r = await call(page, SK, "Soren King");
+				ok("§7.24 another driver: none of his requests, and may ask for himself", r.status === 200 && same(reqs(r), []) && r.body.timeOff.canRequest === true, told(r));
+				const NO_VIEWER = softMutate(ROUTE_SRC, `${SPREAD_ARG}, req.session.user)`, `${SPREAD_ARG})`);
+				ok("§7.25a the viewer mutant applies (the spread passes the session's user)", !!NO_VIEWER);
+				if (NO_VIEWER) {
+					r = await call(pageRoute(true, rdb, NO_VIEWER, true), DK, "Desoren King");
+					ok("MUTANT 8b (the spread without the session's user): §7.20 flips, the driver may no longer ask or cancel",
+						r.status === 200 && r.body.timeOff.canRequest === false && same(reqs(r), [["2026-11-09", "waiting", false], ["2026-11-20", "declined", false]]), told(r));
+				}
 			}
 		}
 	}

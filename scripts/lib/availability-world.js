@@ -6,6 +6,8 @@
 // server.js, and driven over HTTP on 127.0.0.1.
 //
 //   availability   the six availability routes (listed in ROUTES)
+//   requests       a driver's request and its cancel, the staff approve and
+//                  decline (DRIVER_TIME_OFF_REQUESTS_ENABLED; pass it in `env`)
 //   directory      GET /api/drivers-directory, DELETE /api/drivers-directory/:id
 //   responses      GET /api/dashboard, GET /api/trucks
 //   assign         POST /api/dispatch, POST /api/dispatch/reassign,
@@ -20,7 +22,8 @@
 // (x-test-user), a fake Google Sheet holding one Job Tracking tab (reads and
 // writes in A1 notation, as the API answers them), a clock the test moves
 // (world.clock.ms; "today" is the business day of that instant), and recording
-// stubs for mail, sockets and notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
+// stubs for mail, sockets (world.emits: { room, except, event, payload }) and
+// notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
 // is read from the world's own process.env, as the server reads it at boot, and
 // so are DRIVER_TIME_OFF_SCREEN_ENABLED (pass it in `env`) and
 // DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b; `loadsWarning: true`).
@@ -55,6 +58,10 @@ const ROUTES = {
 	availabilityCancel: ["post", "/api/driver-availability/:id/cancel"],
 	availabilityMine: ["get", "/api/driver/me/availability"],
 	availabilityAll: ["get", "/api/driver-availability"],
+	requestCreate: ["post", "/api/driver/me/availability"],
+	requestCancel: ["post", "/api/driver/me/availability/:id/cancel"],
+	requestApprove: ["post", "/api/driver-availability/:id/approve"],
+	requestDecline: ["post", "/api/driver-availability/:id/decline"],
 	directory: ["get", "/api/drivers-directory"],
 	directoryDelete: ["delete", "/api/drivers-directory/:id"],
 	dashboard: ["get", "/api/dashboard"],
@@ -67,6 +74,7 @@ const ROUTES = {
 	driverPage: ["get", "/api/driver/:driverName"],
 };
 const AVAILABILITY_ROUTES = ["availabilityList", "availabilityCreate", "availabilityEdit", "availabilityCancel", "availabilityMine", "availabilityAll"];
+const REQUEST_ROUTES = ["requestCreate", "requestCancel", "requestApprove", "requestDecline"];
 const ASSIGN_ROUTES = ["dispatch", "reassign", "dataPut", "loadPut", "dataPost"];
 
 // The registration line of METHOD PATH in server.js, or null when it has none.
@@ -316,7 +324,7 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 	seed(db, now);
 	const sheet = fakeSheet(rows);
 	const jt = { reads: 0, fail: false, during: null };
-	const world = { db, clock, sheet, jt, emails: [], changes: [], logs: [], mailFails: false, found: L.found };
+	const world = { db, clock, sheet, jt, emails: [], changes: [], logs: [], emits: [], mailFails: false, found: L.found };
 
 	class FixedDate extends Date {
 		constructor(...args) { super(...(args.length ? args : [clock.ms])); }
@@ -365,7 +373,13 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		},
 		getSheets: async () => sheet.api,
 		SPREADSHEET_ID: "availability-test-sheet",
-		io: { to: () => ({ emit() {}, except: () => ({ emit() {} }) }), emit() {} },
+		io: {
+			to: (room) => ({
+				emit: (event, payload) => { world.emits.push({ room, except: null, event, payload }); },
+				except: (except) => ({ emit: (event, payload) => { world.emits.push({ room, except, event, payload }); } }),
+			}),
+			emit() {},
+		},
 		sendEmail: async (to, subject, html) => { world.emails.push({ to, subject, html }); return !world.mailFails; },
 		fs,
 		DATA_DIR: path.join(os.tmpdir(), "r11-availability-no-uploads"),
@@ -447,6 +461,6 @@ function createRunner(title) {
 }
 
 module.exports = {
-	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, ASSIGN_ROUTES, ELD_CHECK_ROOTS, HEADERS, COL, USERS, DIR, TRUCK, VID, ELD, DEFAULT_NOW, HOUR, DAY,
+	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, REQUEST_ROUTES, ASSIGN_ROUTES, ELD_CHECK_ROOTS, HEADERS, COL, USERS, DIR, TRUCK, VID, ELD, DEFAULT_NOW, HOUR, DAY,
 	routeHead, jtRow, defaultRows, hisLoadsRows, startWorld, closeAll, createRunner, fakeSheet, eldFixtures, addFixes,
 };

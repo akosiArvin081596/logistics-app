@@ -33,6 +33,7 @@
               label-align="top"
               placeholder="Their full name"
               :maxlength="CONTACT_NAME_MAX"
+              :formatter="clampName"
               autocomplete="off"
               :error-message="fieldError(i, 'name')"
             />
@@ -43,6 +44,7 @@
               label-align="top"
               placeholder="Spouse, parent, friend..."
               :maxlength="RELATIONSHIP_MAX"
+              :formatter="clampRelationship"
               autocomplete="off"
               :error-message="fieldError(i, 'relationship')"
             />
@@ -64,6 +66,7 @@
               inputmode="tel"
               placeholder="(202) 555-0143"
               :maxlength="PHONE_RAW_MAX"
+              :formatter="clampPhone"
               autocomplete="off"
               :error-message="fieldError(i, 'phone')"
             />
@@ -96,9 +99,11 @@ import { Popup as VanPopup, Field as VanField, Button as VanButton } from 'vant'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDriverStore } from '../../stores/driver'
+import { replyLost } from '../../lib/saveOutcome'
 import {
   MIN_CONTACTS, MAX_CONTACTS, CONTACT_NAME_MAX, RELATIONSHIP_MAX, PHONE_RAW_MAX, RELATIONSHIP_SUGGESTIONS,
   CONTACTS_URL, blankRow, draftRows, listToSend, validateContactList, fieldOfRefusal, refusalText,
+  adoptStoredIds, clampToLimit,
 } from '../../lib/emergencyContacts'
 
 const props = defineProps({
@@ -121,11 +126,18 @@ const formError = ref('')
 const fieldErrors = ref({})
 // Moved on by every open, close and read: an answer that arrives after one is dropped.
 let loadSeq = 0
+// Set when a save got no answer: it may be stored, so the next Save reads the list first.
+let idsStale = false
 let rowKey = 0
 const keyed = (row) => ({ ...row, key: ++rowKey })
+// Each field holds no more than the server counts (UTF-16 units as sent).
+const clampName = (v) => clampToLimit(v, CONTACT_NAME_MAX)
+const clampRelationship = (v) => clampToLimit(v, RELATIONSHIP_MAX)
+const clampPhone = (v) => clampToLimit(v, PHONE_RAW_MAX)
 
 function reset() {
   loadSeq++
+  idsStale = false
   rows.value = []
   loading.value = false
   loadError.value = ''
@@ -191,9 +203,29 @@ function showRefusal(code, index, rowOf, text) {
   }
 }
 
+// Before the Save after a lost answer: the stored ids taken back (adoptStoredIds()),
+// so this Save never deletes and re-adds what the lost one stored.
+async function takeBackStoredIds() {
+  const seq = loadSeq
+  saving.value = true
+  try {
+    const fresh = await api.get(CONTACTS_URL)
+    if (seq !== loadSeq) return false
+    rows.value = adoptStoredIds(rows.value, fresh && fresh.contacts)
+    idsStale = false
+    return true
+  } catch (err) {
+    if (seq === loadSeq) formError.value = refusalText(err, 'READ_FAILED')
+    return false
+  } finally {
+    if (seq === loadSeq) saving.value = false
+  }
+}
+
 async function save() {
   if (!ready.value || saving.value) return
   clearErrors()
+  if (idsStale && !(await takeBackStoredIds())) return
   const { body, rowOf } = listToSend(rows.value)
   const check = validateContactList(body)
   if (!check.ok) { showRefusal(check.code, check.index, rowOf, check.error); return }
@@ -209,6 +241,7 @@ async function save() {
     if (seq === loadSeq) emit('close')
   } catch (err) {
     if (seq !== loadSeq) return
+    if (replyLost(err)) idsStale = true
     showRefusal(err && err.code, err && err.data ? err.data.index : undefined, rowOf, refusalText(err))
   } finally {
     if (seq === loadSeq) saving.value = false
@@ -246,10 +279,10 @@ function close() {
   border: none; background: none; color: #b91c1c; font-size: 0.8rem; font-weight: 600;
   min-height: 40px; padding: 0 0.6rem; cursor: pointer;
 }
-.ec-chips { display: flex; gap: 0.4rem; overflow-x: auto; padding: 0.15rem 1rem 0.4rem; scrollbar-width: none; }
-.ec-chips::-webkit-scrollbar { display: none; }
+/* The suggestions wrap (two lines at phone width), so every one is in sight. */
+.ec-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.15rem 1rem 0.4rem; }
 .ec-chip {
-  flex-shrink: 0; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155;
+  border: 1px solid #cbd5e1; background: #f8fafc; color: #334155;
   border-radius: 99px; padding: 0.35rem 0.75rem; font-size: 0.75rem; cursor: pointer;
 }
 .ec-chip-on { border-color: #1d4ed8; background: #dbeafe; color: #1e3a8a; font-weight: 600; }

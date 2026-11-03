@@ -40,6 +40,16 @@
 //   §5 GET /api/trucks and every investor route name none of the check's names
 //   §6 its helpers are defined and survive comment stripping, and its table is
 //      created in the time-off migration
+// A driver's request (plan B Revision 2, PR 4) is tracked the same way: its four
+// routes, its helpers and the column migration are allowlisted in §3 (so §3.1
+// proves no request name reaches a money path); §1 also runs a month holding a
+// waiting, a declined and an approved driver request beside the staff row and
+// expects the same figures; and
+//   §4.9 DRIVER_TIME_OFF_REQUESTS_ENABLED folds in DRIVER_TIME_OFF_SCREEN_ENABLED
+//      first and appears only in its route gate, its start-up line, the driver
+//      notice's guard, the staff row view's request keys, the overlap check's
+//      bound value and driverOwnTimeOff()'s request keys
+//   §5b GET /api/trucks and every investor route name none of the request names
 //
 // Tracked names: the table, the module path, the module's binding in server.js,
 // every name lib/driver-availability.js exports (read from the module, so a new
@@ -71,7 +81,10 @@ const eq = (name, a, e) => ok(name, JSON.stringify(a) === JSON.stringify(e), `ex
 // ── tracked names ──────────────────────────────────────────────────────────────
 const SERVER_HELPERS = ["driverAvailabilityByName", "truckDriverAvailability", "driverOffDutyRefusal", "cancelDirectoryAvailability",
 	"availabilityRowWithDriver", "availabilityOverlap", "availabilityOverlapBody", "recordOffDutyConfirmation", "sheetRowOffDutyDriver",
-	"availabilityRowView", "driverOwnTimeOff", "driverLoadsForTimeOff", "recordTimeOffLoadConfirmations"];
+	"availabilityRowView", "driverOwnTimeOff", "driverLoadsForTimeOff", "recordTimeOffLoadConfirmations",
+	// A driver's request (PR 4): the column migration, who asks, the notices, the request keys and a refused decision.
+	"addTimeOffRequestColumns", "timeOffRequestDriver", "timeOffNoticeRecipient", "timeOffDriverNotice", "markTimeOffRequestNotice",
+	"driverTimeOffRequestKeys", "timeOffDecisionRefused"];
 let libExports = [];
 try { libExports = Object.keys(require("../lib/driver-availability")); } catch { libExports = []; }
 // The time-off ELD check: its results table (created in the same migration),
@@ -220,6 +233,13 @@ const ALLOW_HEADS = [
 	'app.post("/api/driver-availability/:id/cancel",',
 	'app.get("/api/driver/me/availability",',
 	'app.get("/api/driver-availability",',
+	// A driver's request and its cancel, the staff approve and decline, and the
+	// column migration's one call at boot (PR 4).
+	'app.post("/api/driver/me/availability",',
+	'app.post("/api/driver/me/availability/:id/cancel",',
+	'app.post("/api/driver-availability/:id/approve",',
+	'app.post("/api/driver-availability/:id/decline",',
+	"addTimeOffRequestColumns();",
 	'app.get("/api/drivers-directory",',
 	'app.delete("/api/drivers-directory/:id",',
 	'app.post("/api/dispatch",',
@@ -297,6 +317,14 @@ function moneyWorld(withRow) {
 			VALUES (?, ?, ?, ?, ?, ?, 1, '2026-10-12T10:00:00Z', '2026-10-12T10:00:00Z', '2026-10-12T10:00:00Z')`);
 		for (const d of ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]) day.run(avail, dir, d, "confirmed", "parked", 0);
 		for (const d of ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]) day.run(avail, dir, d, "not_confirmed", "truck_moved", 250);
+		// PR 4: a driver's waiting, declined and approved requests over the loaded days (the shipped columns).
+		if (withRow === "requests") {
+			const req = w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+				request_status, source, decided_by, decided_at) VALUES (?, ?, 'off_duty', ?, ?, '', 'drv_amy', 0, '2026-09-20T12:00:00Z', ?, 'driver', ?, ?)`);
+			req.run(dir, AMY, "2026-10-05", "2026-10-06", "requested", null, null);
+			req.run(dir, AMY, "2026-10-07", "2026-10-08", "declined", "dispatch_t", "2026-09-21T12:00:00Z");
+			req.run(dir, AMY, "2026-10-08", "2026-10-09", "approved", "dispatch_t", "2026-09-21T12:00:00Z");
+		}
 	}
 	return w;
 }
@@ -449,6 +477,16 @@ async function moneyViews(withRow) {
 	} catch (err) {
 		ok("§1 ran", false, `threw: ${err && err.message}`);
 	}
+	try {
+		const base = await moneyViews(false);
+		const requests = await moneyViews("requests");
+		eq("§1.7 PR 4: the month also holds a waiting, a declined and an approved driver request", requests.availabilityRows, 4);
+		eq("§1.8 ...and the weekly invoice's days and total are the same", [requests.invoiceDays, requests.invoiceTotal], [base.invoiceDays, base.invoiceTotal]);
+		eq("§1.9 ...the payout ledger's items and months are the same", [requests.ledgerItems, JSON.stringify(requests.ledgerMonths)], [base.ledgerItems, JSON.stringify(base.ledgerMonths)]);
+		eq("§1.10 ...the investor view's months are the same, and no excluded day is written", [JSON.stringify(requests.investorMonths), requests.excluded], [JSON.stringify(base.investorMonths), 0]);
+	} catch (err) {
+		ok("§1.7 ran", false, `threw: ${err && err.message}`);
+	}
 
 	console.log("\n── §2 the money modules in lib/ never name a tracked name");
 	for (const f of ["load-pay-days.js", "financials-calc.js", "investor-payout-basis.js", "financials-report.js"]) {
@@ -502,7 +540,11 @@ async function moneyViews(withRow) {
 		ok("§4.2 DRIVER_TIME_OFF_SCREEN_ENABLED, where defined, is defined once and folds in DRIVER_AVAILABILITY_ENABLED first",
 			defs.length <= 1 && defs.every((l) => l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(")), defs.join(" | "));
 		const uses = code.map((l, i) => [l, i + 1]).filter(([l]) => /\bDRIVER_TIME_OFF_SCREEN_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED ="));
-		ok("§4.3 ...and every other mention is the timeOff spread", uses.every(([l]) => l.trim().startsWith("...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(")),
+		// ...and, since PR 4, exactly one more line: the requests flag folding the screen flag in.
+		const REQUESTS_DEF = "const DRIVER_TIME_OFF_REQUESTS_ENABLED = DRIVER_TIME_OFF_SCREEN_ENABLED && /^(true|1|yes|on)$/i.test(";
+		ok("§4.3 ...and every other mention is the timeOff spread, or the requests flag's one definition",
+			uses.every(([l]) => l.trim().startsWith("...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(") || l.startsWith(REQUESTS_DEF))
+				&& uses.filter(([l]) => l.startsWith(REQUESTS_DEF)).length <= 1,
 			uses.map(([l, n]) => `line ${n}: ${l.trim().slice(0, 80)}`).join(" | "));
 
 		// R11b: the time-off loads warning works only while the main flag is on, and
@@ -550,6 +592,33 @@ async function moneyViews(withRow) {
 		const strayEld = eldUses.filter((u) => !placed.includes(u)).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 80)}`);
 		ok(`§4.8b ...and its ${eldUses.length} other mentions are exactly the job's registration and start-up line, the job's own guard, the staff list's spread and the driver's eldChecked line`,
 			eldUses.length === ELD_FLAG_USES.length && strayEld.length === 0, strayEld.join(" | "));
+
+		// A driver's request (PR 4): its flag works only while the screen flag is on,
+		// and switches exactly these places, each in its own helper or route.
+		const reqDefs = code.filter((l) => l.startsWith("const DRIVER_TIME_OFF_REQUESTS_ENABLED ="));
+		ok("§4.9 DRIVER_TIME_OFF_REQUESTS_ENABLED is defined once and folds in DRIVER_TIME_OFF_SCREEN_ENABLED first",
+			reqDefs.length === 1 && reqDefs[0].startsWith(REQUESTS_DEF), `${reqDefs.length} definition(s): ${reqDefs.join(" | ")}`);
+		const REQ_FLAG_USES = [
+			[/^if \(!DRIVER_TIME_OFF_REQUESTS_ENABLED\) return next\("route"\);$/, "function timeOffRequestsFlagGate("],
+			[/^console\.log\(`\[availability\] driver time-off requests \$\{DRIVER_TIME_OFF_REQUESTS_ENABLED \? "ON" : "OFF"\} \(DRIVER_TIME_OFF_REQUESTS_ENABLED\)`\);$/,
+				"console.log(`[availability] driver time-off requests "],
+			[/^if \(!DRIVER_TIME_OFF_REQUESTS_ENABLED \|\| !row \|\| row\.source !== "driver"\) return null;$/, "function timeOffDriverNotice("],
+			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? driverAvailability\.requestRowFields\(r\) : \{\}\),$/, "function availabilityRowView("],
+			[/^`\)\.get\(directoryId, exceptId, to, from, DRIVER_TIME_OFF_REQUESTS_ENABLED && !approvedOnly \? 1 : 0\);$/, "function availabilityOverlap("],
+			[/^\.\.\.\(DRIVER_TIME_OFF_REQUESTS_ENABLED \? driverTimeOffRequestKeys\(key, today, viewer\) : \{\}\),$/, "function driverOwnTimeOff("],
+		];
+		const reqUses = code.map((l, i) => [l.trim(), i]).filter(([l]) => /\bDRIVER_TIME_OFF_REQUESTS_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_TIME_OFF_REQUESTS_ENABLED ="));
+		const reqPlaced = reqUses.filter(([l, i]) => REQ_FLAG_USES.some(([re, head]) => re.test(l) && headLine(i).startsWith(head)));
+		const strayReq = reqUses.filter((u) => !reqPlaced.includes(u)).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 90)}`);
+		ok(`§4.9b ...and its ${reqUses.length} other mentions are exactly the route gate, the start-up line, the driver notice's guard, the staff row view's keys, the overlap check's bound value and driverOwnTimeOff()'s keys`,
+			reqUses.length === REQ_FLAG_USES.length && strayReq.length === 0, strayReq.join(" | "));
+		const gated = ['app.post("/api/driver/me/availability",', 'app.post("/api/driver/me/availability/:id/cancel",',
+			'app.post("/api/driver-availability/:id/approve",', 'app.post("/api/driver-availability/:id/decline",'];
+		const heads = code.filter((l) => gated.some((g) => l.startsWith(g)));
+		ok("§4.9c each of the four request routes is registered once, its flag gate first and its role check second",
+			heads.length === 4 && gated.every((g) => heads.filter((l) => l.startsWith(g)).length === 1)
+				&& heads.every((l) => /^app\.post\("[^"]+", timeOffRequestsFlagGate, requireRole\(/.test(l)),
+			heads.map((l) => l.slice(0, 120)).join(" | "));
 	}
 
 	console.log("\n── §5 the ELD check's names stay off the trucks list and every investor route");
@@ -564,6 +633,12 @@ async function moneyViews(withRow) {
 		ok(`§5.1 GET /api/trucks and the investor routes are found (${routes.length})`, routes.some(([l]) => l.startsWith('app.get("/api/trucks",')) && routes.length > 30);
 		eq("§5.2 none of them names the check's table, module, helpers, exports, flag or keys",
 			routes.filter(([, i]) => NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`), []);
+		// §5b: nor a driver's request: its column, flag, helpers or answer keys.
+		const reqNames = ["DRIVER_TIME_OFF_REQUESTS_ENABLED", "request_status", "decided_by", "decided_by_user_id", "decided_at", "requestRowFields",
+			"driverTimeOffRequestKeys", "timeOffRequestDriver", "timeOffDriverNotice", "markTimeOffRequestNotice", "canRequest", "requestLimits", "decidedBy"];
+		const REQ_NAME_RE = new RegExp(`(?<![\\w$-])(?:${reqNames.map(escapeRe).join("|")})(?![\\w$])`);
+		eq("§5b none of them names a driver's request: its column, flag, helpers or answer keys",
+			routes.filter(([, i]) => REQ_NAME_RE.test(statementAt(i))).map(([l, i]) => `line ${i + 1}: ${l.slice(0, 70)}`), []);
 	}
 
 	console.log("\n── §6 the ELD check's helpers are where §3 can see them");
