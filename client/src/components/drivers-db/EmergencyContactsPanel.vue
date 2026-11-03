@@ -72,6 +72,13 @@
   </section>
 </template>
 
+<script>
+// One memo for the page load: <script setup> runs again for every panel, and both screens
+// mount a new panel on each open. Once the server says the feature is off, no panel asks
+// again until the next page load.
+let featureOffSeen = false
+</script>
+
 <script setup>
 import { computed, onUnmounted, ref, useId, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
@@ -82,9 +89,6 @@ import {
   adoptStoredIds, blankRow, contactLines, draftRows, fieldOfRefusal, isFeatureOff, linkedText, listToSend,
   staffContactsUrl, staffRefusalText, validateContactList,
 } from '../../lib/emergencyContacts'
-
-// Once the server says the feature is off, no panel on this page load asks again.
-let featureOffSeen = false
 
 // `directoryId` when the caller has it (the Drivers page); otherwise the driver is
 // found in the directory by name (the dashboard's Fleet & Drivers).

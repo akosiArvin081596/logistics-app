@@ -31,7 +31,8 @@
 //      write no web storage, and the answer lives in the view (back at the next start)
 //  §10 the Kit card: only with the counts and for a Driver; the list read from the
 //      driver's own route into the card alone; tel: links from the stored number only
-//  §11 the office panel: the staff routes only, hidden while the feature is off, the
+//  §11 the office panel: the staff routes only, hidden while the feature is off and
+//      asking once per page load (the memo in the module, not in each panel), the
 //      linked:false words, and mounted in the Drivers page detail and the Fleet dialog
 //  §12 a save whose answer was lost: the next Save reads the list and takes back the
 //      stored ids, so it changes nothing it already made
@@ -66,7 +67,10 @@ const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
 const S0 = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)]))
 const LIB_SRC = read(LIB)
 // A .vue file's <script setup>, <template> and <style>, apart.
-const scriptOf = (src) => (src.match(/<script setup>([\s\S]*?)<\/script>/) || [])[1] || ''
+// The tags are matched at the start of a line, so a comment naming one is not taken for it.
+const scriptOf = (src) => (src.match(/^<script setup>([\s\S]*?)^<\/script>/m) || [])[1] || ''
+// The plain <script> runs once per page load; <script setup> runs again for each mount.
+const moduleScriptOf = (src) => (src.match(/^<script>([\s\S]*?)^<\/script>/m) || [])[1] || ''
 const templateOf = (src) => src.slice(0, Math.max(0, src.indexOf('<script')))
 const styleOf = (src) => (src.match(/<style scoped>([\s\S]*?)<\/style>/) || [])[1] || ''
 const storageRe = /localStorage|sessionStorage|indexedDB|document\.cookie/
@@ -405,9 +409,15 @@ function panelSection(c, L, S) {
   ], [['/api/drivers-directory'], false, true])
   c.eq('§11 ...reads and writes through it', [/const answer = await api\.get\(url\)/.test(ps), /await api\.put\(url, body\)/.test(ps)], [true, true])
   c.eq('§11 the list lives in the panel only, never the browser\'s storage, never the console', [/^const stored = ref\(\[\]\)$/m.test(ps), storageRe.test(S.panel), /console\./.test(S.panel)], [true, false, false])
-  c.eq('§11 hidden until the server answers, and for the rest of the page load once it says the feature is off', [
-    /^const hidden = ref\(true\)$/m.test(ps), /if \(isFeatureOff\(err\)\) \{\s*featureOffSeen = true/.test(ps), /^let featureOffSeen = false$/m.test(ps), /^\s*<section v-if="!hidden"/m.test(pt),
-  ], [true, true, true, true])
+  c.eq('§11 hidden until the server answers, and once it says the feature is off', [
+    /^const hidden = ref\(true\)$/m.test(ps), /if \(isFeatureOff\(err\)\) \{\s*featureOffSeen = true/.test(ps), /^\s*<section v-if="!hidden"/m.test(pt),
+  ], [true, true, true])
+  // Both mounts make a new panel on every open, so a memo in <script setup> would ask again each time.
+  c.eq('§11 ...and for the rest of the page load: the memo is the module\'s (plain <script>), never declared or cleared in a panel, and read before any request', [
+    /^let featureOffSeen = false$/m.test(moduleScriptOf(S.panel)),
+    /\b(?:let|var|const)\s+featureOffSeen\b|\bfeatureOffSeen\s*=\s*false\b/.test(ps),
+    /async function load\(\) \{[^}]*?if \(featureOffSeen\) return\s*let id = null\s*try \{\s*id = await resolveId\(\)/.test(ps),
+  ], [true, false, true])
   c.eq('§11 linked:false shown in words; each number a tap to call; the lib\'s lines', [
     ps.includes('linkedText('), /<a v-if="line\.tel" :href="line\.tel"/.test(pt), ps.includes('contactLines(stored.value)'),
   ], [true, true, true])
@@ -561,6 +571,14 @@ if (!fs.existsSync(LIB) || !fs.existsSync(FILES.form)) {
   await mutant('M20', 'one field without the clamp', fileMut('form', ':formatter="clampName"', ''), ['limits'])
   await mutant('M21', 'the contacts row no longer a tap target', fileMut('view', '@click="openContactsForm"', ''), ['lock'])
   await mutant('M22', 'the card keeping the list in the store', fileMut('card', 'const contacts = ref([])', 'const contacts = ref(useDriverStore().contactsList || [])'), ['card'])
+  await mutant('M23', 'the feature-off memo declared in <script setup>: one per panel, so every open asks again', () => {
+    const moved = once(S0.panel, '\nlet featureOffSeen = false\n', '\n')
+    return { files: { panel: once(moved, "} from '../../lib/emergencyContacts'\n", "} from '../../lib/emergencyContacts'\n\nlet featureOffSeen = false\n") } }
+  }, ['panel'])
+  await mutant('M24', 'the feature-off memo cleared when a panel closes', fileMut('panel', 'onUnmounted(() => { seq++;', 'onUnmounted(() => { featureOffSeen = false; seq++;'), ['panel'])
+  await mutant('M25', 'the feature-off memo read only after the directory read (a Fleet dialog asks the directory on every open)',
+    fileMut('panel', '  if (featureOffSeen) return\n  let id = null\n  try {\n    id = await resolveId()\n  } catch {\n    id = null\n  }\n',
+      '  let id = null\n  try {\n    id = await resolveId()\n  } catch {\n    id = null\n  }\n  if (featureOffSeen) return\n'), ['panel'])
 }
 
 console.log(`\ntest-emergency-contacts-client: ${pass} passed, ${fail} failed`)
