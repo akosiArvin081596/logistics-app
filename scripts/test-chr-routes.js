@@ -245,9 +245,9 @@ const EVENT_KEYS = ["id", "loadId", "kind", "event", "stop", "source", "eventAt"
 // ------------------------------------------------------------------ the checks
 async function checkRegistrations(t, opts = {}) {
 	const w = await world(opts);
-	const gate = w.gates.length === 1 && JSON.stringify(w.gates[0].roles) === JSON.stringify(["Super Admin"]) ? w.gates[0].g : null;
-	t.ok(gate, "§1 one gate, requireRole(\"Super Admin\")", w.gates.map((g) => g.roles));
-	const name = (fn) => (fn === gate ? "requireRole" : typeof fn.resetKey === "function" ? "rateLimit" : fn === w.H.refuseCrossOrigin ? "refuseCrossOrigin" : "handler");
+	t.ok(w.gates.length >= 1 && w.gates.every((g) => JSON.stringify(g.roles) === JSON.stringify(["Super Admin"])), "§1 every gate is requireRole(\"Super Admin\")", w.gates.map((g) => g.roles));
+	const gates = new Set(w.gates.map((g) => g.g));
+	const name = (fn) => (gates.has(fn) ? "requireRole" : typeof fn.resetKey === "function" ? "rateLimit" : fn === w.H.refuseCrossOrigin ? "refuseCrossOrigin" : "handler");
 	t.eq(w.registered.map(([verb, p, ...fns]) => `${verb.toUpperCase()} ${p.replace(I.MOUNT_PATH, "") || "/"} · ${fns.map(name).join(" · ")}`), [
 		"GET /status · requireRole · handler",
 		"GET /events · requireRole · handler",
@@ -555,10 +555,11 @@ async function main() {
 	section("§13 mutants");
 	if (!REAL) return;
 	const direct = (m) => ({ viaMount: false, routes: m });
+	const G = "requireRole(\"Super Admin\")";
 	const M = {
-		noWriteGuard: mutate("app.put(at(\"/settings\"), gate, write, ", "app.put(at(\"/settings\"), gate, "),
-		limiterFirst: mutate("app.post(at(\"/loads/:loadId/hold\"), gate, write, holdLimiter, ", "app.post(at(\"/loads/:loadId/hold\"), gate, holdLimiter, write, "),
-		noLimiter: mutate("app.post(at(\"/loads/:loadId/hold\"), gate, write, holdLimiter, ", "app.post(at(\"/loads/:loadId/hold\"), gate, write, "),
+		noWriteGuard: mutate(`app.put(at("/settings"), ${G}, write, `, `app.put(at("/settings"), ${G}, `),
+		limiterFirst: mutate(`app.post(at("/loads/:loadId/hold"), ${G}, write, holdLimiter, `, `app.post(at("/loads/:loadId/hold"), ${G}, holdLimiter, write, `),
+		noLimiter: mutate(`app.post(at("/loads/:loadId/hold"), ${G}, write, holdLimiter, `, `app.post(at("/loads/:loadId/hold"), ${G}, write, `),
 		noIdCheck: mutate("return LOAD_ID_RE.test(raw) ? E.loadKey(raw) : null;", "return E.loadKey(raw);"),
 		allColumns: mutate("return {\n\t\tid: r.id, loadId: r.load_id,", "return {\n\t\t...r, id: r.id, loadId: r.load_id,"),
 		rawPayload: mutate("for (const k of E.PAYLOAD_KEYS) if (p[k] !== undefined) payload[k] = p[k];", "Object.assign(payload, p);"),
@@ -570,10 +571,10 @@ async function main() {
 		noReason: mutate("if (typeof body.hold !== \"boolean\" || !reason || reason.length > REASON_MAX)", "if (typeof body.hold !== \"boolean\" || reason.length > REASON_MAX)"),
 		draftAddress: mutate("draft = d ? { at: String(d.created_at || \"\"),", "draft = d ? { to: d.recipient, at: String(d.created_at || \"\"),"),
 		stopMilestonesOnly: mutate("Object.fromEntries(MODE_KINDS.map((k) => [k, \"off\"]))", "{ milestones: \"off\" }"),
-		offRoutes: mutate("app.use(MOUNT_PATH, gate, (req, res) => notFound(res, \"FEATURE_OFF\"));", ""),
-		noNotFound: mutate("app.use(MOUNT_PATH, gate, (req, res) => notFound(res, \"NOT_FOUND\"));", ""),
+		offRoutes: mutate(`app.use(MOUNT_PATH, ${G}, (req, res) => notFound(res, "FEATURE_OFF"));`, ""),
+		noNotFound: mutate(`app.use(MOUNT_PATH, ${G}, (req, res) => notFound(res, "NOT_FOUND"));`, ""),
 		announceReads: mutate("(req, res) => res.json(statusFor(req))));", "(req, res) => { onChange(); return res.json(statusFor(req)); }));"),
-		holdUngated: mutate("app.post(at(\"/loads/:loadId/hold\"), gate, ", "app.post(at(\"/loads/:loadId/hold\"), "),
+		holdUngated: mutate(`app.post(at("/loads/:loadId/hold"), ${G}, `, `app.post(at("/loads/:loadId/hold"), `),
 	};
 	await mutantFails("a settings save without the same-origin guard", (t) => checkGates(t, direct(M.noWriteGuard)));
 	await mutantFails("the hold's limiter before the same-origin guard", (t) => checkGates(t, direct(M.limiterFirst)));

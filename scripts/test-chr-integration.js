@@ -167,7 +167,7 @@ guarded("§4 mount(), the routes, status() and jobs()", () => {
 	const gate = () => {};
 	const sameOrigin = (req, res, next) => next();
 	const regs = mountOn(inst, { requireRole: (...roles) => { gateCalls.push(roles); return gate; }, refuseCrossOrigin: sameOrigin });
-	eq([regs.map((r) => [r[0], r[1], r[2] === gate, r.length]), gateCalls], [[["get", "/api/integrations/chr/status", true, 4], ["use", "/api/integrations/chr", true, 4]], [["Super Admin"]]],
+	eq([regs.map((r) => [r[0], r[1], r[2] === gate, r.length]), gateCalls], [[["get", "/api/integrations/chr/status", true, 4], ["use", "/api/integrations/chr", true, 4]], [["Super Admin"], ["Super Admin"]]],
 		"§4 mount() while off: GET /status and a catch-all at /api/integrations/chr, requireRole(\"Super Admin\") first on each");
 	throws(() => mountOn(inst), /requireRole/, "§4 mount() without requireRole throws: no CHR path is ever served ungated");
 	throws(() => mountOn(inst, { requireRole: "Super Admin", refuseCrossOrigin: sameOrigin }), /requireRole/, "§4 ...nor with anything else in its place");
