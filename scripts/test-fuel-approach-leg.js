@@ -454,7 +454,7 @@ const DISPATCH = { id: 2, role: "Dispatcher", username: "dispatch_qa" };
 function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const opt = { status: "Assigned", fuel: 48, fixAgoMin: 12, coords: true, pickupMapped: true, truck: true, tank: 150, avgMpg: 6.0,
 		burn: BURN5, receipt: { mpg: 6.0 }, rollupMpg: null, details: "Dry van, 43,764 lbs", otherLoad: null, stopPayload: null,
-		anchor: null, routesDown: false, device: true, linkedAgoMin: null, fixAgoMs: null, ...o };
+		anchor: null, routesDown: false, device: true, linkedAgoMin: null, fixAgoMs: null, odo: 100000, ...o };
 	const db = new Database(":memory:");
 	db.exec(`
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, routemate_vehicle_id TEXT DEFAULT '', assigned_driver TEXT DEFAULT '',
@@ -482,7 +482,7 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1, 'Driver QA', '2026-10-01', '')").run();
 		const tel = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
 		if (opt.device && opt.anchor) tel.run(VID, FIX.lat, FIX.lng, opt.anchor.odo, opt.anchor.fuel, NOW - opt.anchor.agoMin * 60000);
-		if (opt.device) tel.run(VID, FIX.lat, FIX.lng, 100000, opt.fuel, NOW - (opt.fixAgoMs != null ? opt.fixAgoMs : opt.fixAgoMin * 60000));
+		if (opt.device) tel.run(VID, FIX.lat, FIX.lng, opt.odo, opt.fuel, NOW - (opt.fixAgoMs != null ? opt.fixAgoMs : opt.fixAgoMin * 60000));
 		// A device linked to the truck after its newest fix (B11): that fix belongs to another vehicle.
 		if (opt.linkedAgoMin != null) {
 			db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (1, ?, ?, '', 'admin_qa')")
@@ -852,9 +852,19 @@ async function liveVerdictSection(Database, lifted, appRequire) {
 		// No time to judge the reading by is no pass, whatever its rounded age says.
 		assert.strictEqual(t({ fuelSource: "live", fuelPct: 80, anchorPct: 80, milesSinceReading: 0, ageMinutes: 12 }), false);
 	});
-	check("tripReadingTrusted: a carried reading with no miles since (the odometer behind its anchor) is not trusted; one with miles since, or 0, is", () => {
-		const t = (milesSinceReading) => fuel.tripReadingTrusted({ reading: carried({ fuelPct: 90, anchorPct: 90, milesSinceReading, anchorAtMs: NOW - 60 * 60000 }), nowMs: NOW });
-		assert.deepStrictEqual([t(null), t(0), t(50)], [false, true, true]);
+	check("tripReadingTrusted: a carried reading is trusted only on miles since measured between two real odometers (50, or 0 parked), not with none or between zeros", () => {
+		const t = (milesSinceReading, milesSinceMeasured) => fuel.tripReadingTrusted({
+			reading: carried({ fuelPct: 90, anchorPct: 90, milesSinceReading, milesSinceMeasured, anchorAtMs: NOW - 60 * 60000 }), nowMs: NOW });
+		assert.deepStrictEqual([t(null, false), t(0, true), t(50, true), t(0, false), t(0, undefined)], [false, true, true, false, false]);
+	});
+	check("resolveFuelReading: miles since count as measured only between two real odometers (a 0 is how the feeds store a missing one)", () => {
+		const measured = (anchorOdo, latestOdo) => {
+			const r = fuel.resolveFuelReading({ rows: [{ fuel_pct: 0, odometer: latestOdo, location_date_ms: NOW - 60000 },
+				{ fuel_pct: 90, odometer: anchorOdo, location_date_ms: NOW - 120 * 60000 }], mpg: 6.0, tankGallons: 150, nowMs: NOW });
+			return [r.fuelSource, r.milesSinceReading, r.milesSinceMeasured];
+		};
+		assert.deepStrictEqual([measured(99950, 100000), measured(100000, 100000), measured(0, 0), measured(0, 100000), measured(100500, 0), measured(null, null)],
+			[["carried", 50, true], ["carried", 0, true], ["carried", 0, false], ["carried", 100000, false], ["carried", null, false], ["carried", null, false]]);
 	});
 	check("planTripFuel: a pass on a reading it can't count on is held at 'tight'; 'tight' and 'insufficient' stay; left out, it is trusted", () => {
 		const held = fuel.planTripFuel({ ...args, readingTrusted: false });
@@ -887,6 +897,8 @@ async function liveVerdictSection(Database, lifted, appRequire) {
 			{ status: "In Transit", fuel: 80, fixAgoMs: 6 * 60 * 60 * 1000 }, answer("tight", false, null, 385, 80, 280, "to_delivery", false)],
 		["P4-carried in transit, a fresh fix but a reading carried from 7 h ago (50 mi since): held",
 			{ status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 420, odo: 99950 } }, answer("tight", false, null, 435, 90, 300, "to_delivery", true)],
+		["P5-zero in transit, a dropout whose two odometers are both 0 (how the feeds store a missing one): 0 mi since is unknown, so 90% unburned is held",
+			{ status: "In Transit", fuel: 0, odo: 0, anchor: { fuel: 90, agoMin: 120, odo: 0 } }, answer("tight", false, null, 435, 90, 300, "to_delivery", true)],
 	];
 	const CONTROLS = [
 		["control: before pickup, a live fix and 100%: the run to the shipper is routed (140 + 280), so it still clears",
@@ -897,6 +909,8 @@ async function liveVerdictSection(Database, lifted, appRequire) {
 			{ status: "In Transit", fuel: 80, fixAgoMs: 6 * 60 * 60 * 1000 - 1 }, answer("clears", true, 0, 385, 80, 300, "to_delivery", true)],
 		["control: in transit, a 2 h dropout from 100% with 50 mi since: 90% at the planning rate, so it still clears",
 			{ status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 120, odo: 99950 } }, answer("clears", true, 0, 435, 90, 300, "to_delivery", true)],
+		["control: in transit, a 2 h dropout from 90% parked (both odometers 100,000): 0 mi measured, so it still clears",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 90, agoMin: 120, odo: 100000 } }, answer("clears", true, 0, 435, 90, 300, "to_delivery", true)],
 	];
 	const asked = [];
 	for (const [label, o, want] of [...LIVE, ...CONTROLS]) {
@@ -930,7 +944,7 @@ async function liveVerdictSection(Database, lifted, appRequire) {
 		const lines = asked.filter((x) => LIVE.some(([label]) => label === x.label)).map((x) => [x.label.split(" ")[0], review.tripVerdict(x.card.body.verdict).dispatch]);
 		const tight = "Tight — plan a stop";
 		assert.deepStrictEqual(lines, [["T1", tight], ["T2", "Will not reach — fuel stop required"], ["P3", tight], ["P4", tight], ["P5", tight],
-			["P4-edge", tight], ["P4-carried", tight]]);
+			["P4-edge", tight], ["P4-carried", tight], ["P5-zero", tight]]);
 	});
 }
 
