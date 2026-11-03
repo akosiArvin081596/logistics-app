@@ -78,7 +78,7 @@ GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c
 GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@42d95dbb10fa
 GET /api/config/maintenance · inline@52e452699466
 GET /api/config/maps-key · mapsKeyLimiter=limiter · inline@65cbbd301ebe
-GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@eff328dde760
+GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@8f2da1dde373
 GET /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7ba9d8e49ad5
 POST /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bd7b03307cdd
 DELETE /api/data/:rowIndex · requireRole("Super Admin")=anon@12b84c4b0134 · inline@162c6fef6371
@@ -102,13 +102,17 @@ GET /api/documents/:loadId · requireRole("Super Admin", "Dispatcher", "Driver")
 POST /api/documents/scan · requireAuth@2f5c61384511 · scanKitLimiter=limiter · inline@1edcfc9c9f64
 POST /api/documents/upload · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@140672c02477
 GET /api/driver-availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@af45a3fd793b
-PUT /api/driver-availability/:id · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@7799f7c7623f
-POST /api/driver-availability/:id/cancel · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@609579864594
+PUT /api/driver-availability/:id · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f60450db6f55
+POST /api/driver-availability/:id/approve · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ca112b304ab2
+POST /api/driver-availability/:id/cancel · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f91cd727ff8e
+POST /api/driver-availability/:id/decline · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@49b69e59b4b6
 GET /api/driver-instructions/edit-locks · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 POST /api/driver-instructions/edit-locks/:userId/clear · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)
-GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@b5b73b246633 | after: GET ["/api/driver/position","/api/driver/me/position"]
+GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@04fc02984e5c | after: GET ["/api/driver/position","/api/driver/me/position"]
 GET /api/driver/loads/:loadId/instructions · driverGate@7e9b5dcc294e · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
-GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@c925307dcaaa
+GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@ad2caf2947da
+POST /api/driver/me/availability · timeOffRequestsFlagGate@8e7690535088 · requireRole("Driver")=anon@12b84c4b0134 · timeOffRequestLimiter=limiter · inline@ca07d9c8a6be
+POST /api/driver/me/availability/:id/cancel · timeOffRequestsFlagGate@8e7690535088 · requireRole("Driver")=anon@12b84c4b0134 · timeOffRequestLimiter=limiter · inline@16b435bf0c6d
 GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · inline@c6cac740a042
 PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
@@ -121,8 +125,8 @@ GET /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b8
 POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@692400a60522
 DELETE /api/drivers-directory/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b244c9c7ef55
 PUT /api/drivers-directory/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@58b769643145
-GET /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5e38514ab834
-POST /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@60336818ad3e
+GET /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5fc1a76bffd4
+POST /api/drivers-directory/:id/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@dd7e5fd0da40
 GET /api/drivers-directory/:id/documents · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ec5014497d5e
 GET /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@b14128480511
 PUT /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@f58eed4c2843
@@ -133,25 +137,27 @@ POST /api/expenses · requireAuth@2f5c61384511 · driverWriteLimiter=limiter · 
 POST /api/expenses/:id/extract-details · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseOcrLimiter=limiter · inline@937a224600bf
 PATCH /api/expenses/:id/location · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@59a266c035f1
 DELETE /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@137ee876c16b
-POST /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@d152eed5d3e3
+POST /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@821f6fe85059
 POST /api/expenses/:id/personal/reverse · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@6eb1fe73329a
 GET /api/expenses/:id/receipt-pages · requireRole("Super Admin")=anon@12b84c4b0134 · receiptPagesLimiter=limiter · inline@a0e4cfda1ab8
 POST /api/expenses/:id/receipt-pages/:page · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · receiptPagesLimiter=limiter · inline@c0c52349f763
 GET /api/expenses/:id/receipt-thumbnail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@35a780e954fc
-PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3230683f4e26
+PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3290dfb13c70
 PATCH /api/expenses/:id/vendor · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f6b7ed0bc20
 GET /api/expenses/ai/insights · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · insightsCacheGate@9f2abb4009f7 · expenseAiLimiter=limiter · inline@f4a9780b3065
 POST /api/expenses/ai/query · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseAiLimiter=limiter · inline@6a4671ec31e4
-GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3fc1ffc22de0
+GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f2654f4473a3
 GET /api/expenses/analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@9a36473ed670
 DELETE /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@b0ffc7c60693
 GET /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@cf7e89f29561
 PUT /api/expenses/bulk-draft · requireAuth@2f5c61384511 · bulkDraftLimiter=limiter · inline@9f9e93b38128
-PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@d193560440a6
+PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@6ec648ca3c3d
 GET /api/expenses/fuel-analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · fuelAnalyticsLimiter=limiter · inline@42166b2c8a68
 POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter · inline@ea8104cc4944
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
+POST /api/factoring/loads/:loadKey · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@afdf206f4fc8 · (lib mount)
+POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@9c4c8c534884 · (lib mount)
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
 GET /api/financials/overview · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7c94116b08cc
 GET /api/financials/overview.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3bc178b2c5a0
@@ -160,15 +166,16 @@ GET /api/financials/report.csv · requireRole("Super Admin")=anon@12b84c4b0134 �
 GET /api/financials/settings · requireRole("Super Admin")=anon@12b84c4b0134 · inline@256b07247a52
 PUT /api/financials/settings · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@6fe57bf55010
 GET /api/financials/state-miles · requireRole("Super Admin")=anon@12b84c4b0134 · inline@0a66abb17c09
-GET /api/fuel/range · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · inline@9d913e9b69f1
-GET /api/fuel/trip-plan · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · fuelPlanLimiter=limiter · inline@364a322a150b
+GET /api/fuel/range · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · inline@ce88d078ebb2
+GET /api/fuel/trip-plan · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · fuelPlanLimiter=limiter · inline@bac4c897e9c3
 GET /api/fuel/verify · requireRole("Super Admin")=anon@12b84c4b0134 · inline@92aca9465685
 GET /api/geocode · geocodeLimiter=limiter · inline@baaf22ce326c
 GET /api/geocode/bulk · requireRole("Super Admin")=anon@12b84c4b0134 · inline@594abf5f9636
 GET /api/geocode/load/:loadId · requireAuth@2f5c61384511 · inline@2fd74a8afd18
 GET /api/geocode/search · geocodeLimiter=limiter · inline@ff67e8d9f80c
-USE /api/integrations/chr · anon@12b84c4b0134 · chrRoutes@3120617997f1 · (lib mount)
-GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@eb684906925c
+USE /api/integrations/chr · anon@12b84c4b0134 · anon@3fd8e742e943 · (lib mount) | after: GET /api/integrations/chr/status
+GET /api/integrations/chr/status · anon@12b84c4b0134 · anon@22f9089ae793 · (lib mount)
+GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@a6fa53525d07
 GET /api/investor-applications · requireRole("Super Admin")=anon@12b84c4b0134 · inline@72c9057ae964
 DELETE /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@f6357c8c538e
 GET /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4044527e9ca5
@@ -214,7 +221,7 @@ PUT /api/invoices/:id/revert · requireRole("Super Admin")=anon@12b84c4b0134 · 
 PUT /api/invoices/:id/submit · requireAuth@2f5c61384511 · inline@30a7a3069d71
 DELETE /api/invoices/corrections/:lineId · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · correctionRouteLimiter=limiter · inline@91ef6142171c
 GET /api/invoices/corrections/waiting · requireRole("Super Admin")=anon@12b84c4b0134 · inline@6894b51f99b3
-POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@967531564117
+POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@59dd3cc4afe4
 POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e059be016674
 POST /api/invoices/manual/totals · requireRole("Super Admin")=anon@12b84c4b0134 · inline@19a163742032
 GET /api/invoices/payees · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4189f2fbaec6
@@ -238,6 +245,7 @@ POST /api/loads/:loadId/driver-instructions/re-extract · gate@114647a18c99 · a
 POST /api/loads/:loadId/driver-instructions/review · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)
 GET /api/loads/:loadId/haul · requireAuth@2f5c61384511 · haulLimiter=limiter · inline@9b07f23ecc25
 GET /api/loads/:loadId/invoice-draft · requireRole("Super Admin")=anon@12b84c4b0134 · inline@0dece8a98c25
+POST /api/loads/:loadId/invoice-draft-inflight/resolve · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@fcdf3826e548 · (lib mount)
 GET /api/loads/:loadId/invoice-lines · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@a643e8f124cd
 POST /api/loads/:loadId/invoice-lines · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@08b9dc600f1f
 POST /api/loads/:loadId/invoice-lines/:id/void · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@62a6db81ae24
@@ -327,7 +335,7 @@ USE /uploads · requireAuth@2f5c61384511 · inline@2f3241547ecf | after: USE /up
 USE /uploads · requireAuth@2f5c61384511 · uploadMissLimiter@8f0251d68f52 · uploadsPathGuard@f27a7636ef08 | after: USE /uploads/rate-cons
 USE /uploads/rate-cons · requireRole("Super Admin")=anon@12b84c4b0134
 GET ["/api/driver/position","/api/driver/me/position"] · requireRole("Driver", "Super Admin")=anon@12b84c4b0134 · driverPositionLimiter=limiter · inline@c90bcab9d57f
-POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@e452226d8a9f
+POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@93b09c89ce2f
 
 [middleware]
 USE / · inline@0b6a9c7a9ce3 | first

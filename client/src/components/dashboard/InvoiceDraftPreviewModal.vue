@@ -645,6 +645,7 @@ import {
 } from '../../lib/invoiceFields'
 import { footnoteDefaultFor } from '../../lib/invoiceLines'
 import { RATECON_RESTRICTED_TEXT } from '../../lib/rateConView'
+import { isMaybeSaved } from '../../lib/factoringStatus'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -1595,6 +1596,12 @@ async function approve() {
       activeTab.value = 'email'
       // After the render that re-enables the box (approving clears in finally).
       nextTick(() => { if (emailBodyInput.value) emailBodyInput.value.focus() })
+      return
+    }
+    // Gmail (or the fallback) never answered: the draft may exist, so this one
+    // says so and never "Nothing was sent". Use "Check Gmail" on the load.
+    if (isMaybeSaved(e)) {
+      approveError.value = (e && e.message) || "The draft may have been saved in Gmail. Use 'Check Gmail' on the load before drafting again."
       return
     }
     // Always true and worth saying: the modal stays open and every field keeps its
