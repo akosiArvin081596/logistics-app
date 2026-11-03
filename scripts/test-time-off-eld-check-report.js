@@ -5,9 +5,11 @@
 // (T2, no device) and Tamsin Vale (no truck); T3 (device vid-t3) with two
 // engine-hours breaks, one in a closed September.
 //   §1 refusals: no --db, a missing file, --days outside 1-90, a bad --now
-//   §2 counts only: the live rows, what the first run would write and its
-//      notices, the device scan (breaks, closed-month ones, engine-hours
-//      advances), the unlinked drivers, the fingerprint; no initials
+//   §2 counts only: the live rows (approved only, by source; drivers' waiting
+//      and declined requests counted apart and never judged), what the first
+//      run would write and its notices, the device scan (breaks, closed-month
+//      ones, engine-hours advances), the unlinked drivers, the fingerprint; no
+//      initials; a copy from before the request columns is refused
 //   §3 --shadow: per-verdict counts, "Confirmed (no ELD data)" on its own line,
 //      the S2 measures (0 mi odometer stretches, return days, the 1 h engine
 //      rule's share), S4 and S4b with the loads read from a saved values.get,
@@ -92,6 +94,17 @@ function seed(db) {
 	const off = db.prepare("INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at, cancelled_at) VALUES (?, ?, 'vacation', ?, ?, 'Family', 'super_admin', '2026-10-01T12:00:00Z', ?)");
 	off.run(1, "Hollis Renner", "2026-10-05", "2026-10-07", null);
 	off.run(1, "Hollis Renner", "2026-10-20", "2026-10-21", "2026-10-02T12:00:00Z");
+	// PR 4: his own requests. Waiting (Oct 8-9) and declined (Oct 10-11) over finished days are never judged;
+	// an approved one (Oct 22-23) is time off like a staff row.
+	try {
+		const asked = db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+			request_status, source, decided_by, decided_at) VALUES (1, 'Hollis Renner', 'off_duty', ?, ?, '', 'drv_hollis', 10, '2026-10-01T12:00:00Z', ?, 'driver', ?, ?)`);
+		asked.run("2026-10-08", "2026-10-09", "requested", null, null);
+		asked.run("2026-10-10", "2026-10-11", "declined", "super_admin", "2026-10-02T12:00:00Z");
+		asked.run("2026-10-22", "2026-10-23", "approved", "super_admin", "2026-10-02T12:00:00Z");
+	} catch (err) {
+		ok("§0 the seed stores his requests (the request columns exist)", false, err.message);
+	}
 	// His own status update on Oct 6, 3:12 PM Eastern.
 	db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, 10, 'drv_hollis', 'Driver', 'update_status', 'load', '7001', 'Status changed')")
 		.run(new Date(at("2026-10-06", 15, 12, "America/New_York")).toISOString());
@@ -132,8 +145,9 @@ section("§2 counts only");
 	const r = run([`--db=${DB_FILE}`, `--now=${NOW}`, "--json"]);
 	eq("§2.0 exit 0", [r.status, r.stderr.slice(0, 300)], [0, ""]);
 	const j = r.json || {};
-	eq("§2.1 the live rows (the cancelled one left out) and their days", j.liveRows, { rows: 1, bySource: { staff: 1 }, daysToCheck: 3, futureDays: 0 });
-	eq("§2.2 the first run would write Oct 5 and 7 Confirmed and Oct 6 Not confirmed (his own update), with one notice",
+	eq("§2.1 the live rows (approved: the staff row and his approved request; the cancelled one left out), his waiting and declined requests counted apart, and their days",
+		j.liveRows, { rows: 2, bySource: { staff: 1, driver: 1 }, requestsNotJudged: { waiting: 1, declined: 1 }, daysToCheck: 3, futureDays: 2 });
+	eq("§2.2 the first run would write Oct 5 and 7 Confirmed and Oct 6 Not confirmed (his own update), with one notice; his waiting and declined requests (Oct 8-11) are not judged",
 		[j.firstRun && j.firstRun.byVerdict, j.firstRun && j.firstRun.notices, j.firstRun && j.firstRun.noticeLines], [{ "confirmed:parked": 2, "not_confirmed:app_activity": 1 }, 1, 1]);
 	eq("§2.3 the device scan: T1 and T3; T3's two breaks, one in closed September; T1's engine run across its dark night",
 		j.devices, { devices: 2, devicesWithBreaks: 1, breaks: { engine_hours: 2 }, breaksInClosedMonths: 1, devicesWithEngineRan: 1, engineRanStretches: 1 });
@@ -143,6 +157,20 @@ section("§2 counts only");
 	ok("§2.7 no name and no initials in the output", !/Hollis|Renner|Soren|King|Tamsin|Vale|H\.R\.|S\.K\./.test(r.stdout));
 	const text = run([`--db=${DB_FILE}`, `--now=${NOW}`]);
 	ok("§2.8 the text report has its seven parts", [1, 2, 3, 4, 5, 6, 7].every((n) => text.stdout.includes(`\n${n}. `) || text.stdout.startsWith(`${n}. `)) && text.status === 0, text.stdout.slice(0, 400));
+	ok("§2.9 ...its part 2 counts approved rows by source and the requests it doesn't judge",
+		text.stdout.includes("2. Live time-off rows (approved): 2 (by source: staff 1, driver 1); finished days to check 3; days still to come 2. Drivers' requests not judged: waiting 1, declined 1."),
+		(text.stdout.split("\n").find((l) => l.startsWith("2. ")) || "").slice(0, 300));
+	// A copy taken before the request columns: the run plan can't read it as the app does.
+	const oldDb = WD.schemaDb();
+	oldDb.exec(`DROP TABLE driver_availability; CREATE TABLE driver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, directory_id INTEGER NOT NULL, driver_name TEXT NOT NULL,
+		kind TEXT NOT NULL, from_date TEXT NOT NULL, to_date TEXT NOT NULL, reason TEXT, created_by TEXT, created_by_user_id INTEGER, created_at TEXT, updated_at TEXT, cancelled_at TEXT, cancelled_by TEXT)`);
+	const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), "time-off-eld-report-old-"));
+	const OLD_FILE = path.join(oldDir, "app.db");
+	fs.writeFileSync(OLD_FILE, oldDb.serialize());
+	oldDb.close();
+	const old = run([`--db=${OLD_FILE}`, `--now=${NOW}`, "--json"]);
+	eq("§2.10 a copy from before the request columns: exit 2, saying so", [old.status, /no request_status column/.test(old.stderr)], [2, true]);
+	fs.rmSync(oldDir, { recursive: true, force: true });
 }
 
 section("§3 the shadow (S2, S4, S4b)");

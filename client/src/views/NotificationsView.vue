@@ -29,12 +29,31 @@
           <div class="notif-content">
             <div class="notif-title">{{ n.title }}</div>
             <div class="notif-body" v-if="n.body">{{ n.body }}</div>
+            <!-- A driver's time-off request: one tap approves or declines it;
+                 a button's click stays on the button. Once decided, who did. -->
+            <template v-if="requestOf(n)">
+              <div v-if="requestOf(n).decision" class="notif-decision">{{ requestDecisionText(requestOf(n).decision, requestOf(n).decidedBy) }}</div>
+              <div v-else class="notif-actions">
+                <button type="button" class="btn btn-primary btn-sm notif-act" :disabled="deciding !== 0" @click.stop="decide(n, 'approve')">Approve</button>
+                <button type="button" class="btn btn-secondary btn-sm notif-act" :disabled="deciding !== 0" @click.stop="decide(n, 'decline')">Decline</button>
+              </div>
+              <div v-if="decideError.id === requestOf(n).availabilityId" class="notif-error" role="alert">{{ decideError.text }}</div>
+            </template>
             <div class="notif-time">{{ formatNotificationTime(n.createdAt) }}</div>
           </div>
           <span v-if="!n.read" class="notif-dot"></span>
         </div>
       </template>
     </div>
+    <ConfirmModal
+      :open="!!pendingLoads"
+      title="This driver has loads on these days"
+      :message="pendingLoads ? pendingLoads.message : ''"
+      confirm-text="Approve anyway"
+      cancel-text="Keep waiting"
+      @confirm="approveAnyway"
+      @cancel="pendingLoads = null"
+    />
     <!-- Mobile: Mark-all-read as a sticky action bar. On desktop the page
          header button covers this; we hide it above 767 px. -->
     <div v-if="isMobile && store.unreadCount > 0" class="notif-mobile-footer">
@@ -46,18 +65,69 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, computed } from 'vue'
+import { onMounted, onUnmounted, computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDispatchNotificationsStore } from '../stores/dispatchNotifications'
 import { useSocket } from '../composables/useSocket'
 import { useViewport } from '../composables/useViewport'
+import { useApi } from '../composables/useApi'
 import { appDayOf, appToday, shiftYmd } from '../utils/datetime'
 import { loadIdRef } from '../lib/loadRef'
+import { isDriverHasLoadsWarning, requestDecisionText, timeOffRequestOfNotice, withLoadsConfirmed } from '../lib/availabilityText'
+import ConfirmModal from '../components/shared/ConfirmModal.vue'
 
 const store = useDispatchNotificationsStore()
 const socket = useSocket()
 const router = useRouter()
+const api = useApi()
 const { isMobile } = useViewport()
+
+// The request a time-off-request notice is about, or null (lib/availabilityText.js).
+const requestOf = (n) => timeOffRequestOfNotice(n)
+// The request being decided (its availability id; 0 for none), the last refusal
+// in the server's words, and the server's loads question ("Approve anyway").
+const deciding = ref(0)
+const decideError = reactive({ id: 0, text: '' })
+const pendingLoads = ref(null)
+
+// One tap: approve or decline. Over loads the driver already has, the server
+// asks first in its own words; "Approve anyway" re-sends with its list echoed
+// back. A request someone else decided (or the driver withdrew) meanwhile shows
+// the server's words and the notices reload.
+async function decide(n, decision, body = {}) {
+  const req = requestOf(n)
+  if (!req || deciding.value) return
+  deciding.value = req.availabilityId
+  decideError.id = 0
+  decideError.text = ''
+  try {
+    const reply = await api.post(`/api/driver-availability/${req.availabilityId}/${decision}`, body)
+    store.setRequestDecision(req.availabilityId, reply.decision, reply.decidedBy)
+    if (!n.read) store.markRead([n.id])
+  } catch (err) {
+    if (decision === 'approve' && isDriverHasLoadsWarning(err)) {
+      pendingLoads.value = { n, message: err.message, body: withLoadsConfirmed({}, err.data) }
+    } else {
+      decideError.id = req.availabilityId
+      decideError.text = (err && err.message) || 'The request could not be decided.'
+      if (err && (err.status === 409 || err.status === 404)) store.fetch()
+    }
+  } finally {
+    deciding.value = 0
+  }
+}
+
+function approveAnyway() {
+  const pending = pendingLoads.value
+  pendingLoads.value = null
+  if (pending) decide(pending.n, 'approve', pending.body)
+}
+
+// Another staff member's decision, or the driver's own withdrawal, while this page is open.
+function onRequestDecided(payload) {
+  if (!payload || typeof payload !== 'object') return
+  store.setRequestDecision(payload.availabilityId, payload.decision, payload.decidedBy)
+}
 
 // Day-bucket grouping. Today / Yesterday / This Week / Older — applied to
 // both desktop and mobile because scanning a 200-row flat list is tedious
@@ -90,6 +160,7 @@ function iconFor(type) {
   if (type === 'status-updated') return '&#128260;'
   if (type === 'pod-uploaded') return '&#128196;'
   if (type === 'geofence') return '&#128205;'
+  if (type === 'time-off-request') return '&#128197;'
   return '&#128276;'
 }
 
@@ -149,10 +220,12 @@ onMounted(() => {
   socket.connect()
   socket.register('dispatch')
   socket.on('dispatch-notification', onSocketNotification)
+  socket.on('time-off-request-decided', onRequestDecided)
 })
 
 onUnmounted(() => {
   socket.off('dispatch-notification', onSocketNotification)
+  socket.off('time-off-request-decided', onRequestDecided)
 })
 </script>
 
@@ -212,6 +285,24 @@ onUnmounted(() => {
   margin-top: 0.25rem;
   font-family: 'JetBrains Mono', monospace;
 }
+.notif-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.notif-decision {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 0.35rem;
+}
+.notif-error {
+  font-size: 0.75rem;
+  color: #b91c1c;
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
 .notif-dot {
   width: 8px;
   height: 8px;
@@ -259,6 +350,7 @@ onUnmounted(() => {
   }
   .notif-title { font-size: 0.9rem; }
   .notif-body { font-size: 0.8rem; }
+  .notif-act { min-height: 44px; min-width: 44px; flex: 1 1 8rem; }
   .notif-time { font-size: 0.72rem; margin-top: 0.3rem; }
   .notif-mobile-footer {
     position: sticky;
