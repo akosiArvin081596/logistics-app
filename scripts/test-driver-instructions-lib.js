@@ -27,6 +27,10 @@
  *   §7 pdfVisibleText() in lib/ratecon-dvir.js: only text shown between BT and ET, TJ arrays
  *      joined, within pdfText()'s inflate caps (a deflate bomb included).
  *   §8 every pattern stays fast on long whitespace, digit and "@" runs.
+ *   §11 the reference re-read merge (plan X1): only a whole token the first reading missed
+ *      on readable text, at the stop of the same kind and order, once, within the cap, and
+ *      only when the filter keeps it; never a stop, requirement or instruction; the first
+ *      reading never changed.
  *
  * Every value in this file is made up: the account number, amounts, phones, emails, names,
  * places and references. None comes from a real rate con or from production.
@@ -779,6 +783,132 @@ section(() => {
 	const many = context({ amounts: Array.from({ length: 40 }, (_, i) => `$${2000 + i * 10}.00`) });
 	eq(di.filterInstructions(last, many).payload.loadRequirements, [], "§10 PR 2b the 40th own amount is still withheld");
 }, "§10");
+
+// --- §11 the reference re-read merge (plan X1) ------------------------------------------------
+// A readable rate con whose first reading misses the delivery and appointment numbers. The
+// account number is printed twice (with its letter, and inside a longer run).
+const X1_TEXT = [
+	"Rate Confirmation Carrier Load Confirmation Load 771200345 Freight Trailer Equipment Dry Van",
+	`SHIPPER#1 ACME DOCK Springfield, IL Pickup#: PU48213 Ref 9${DENY_DIGITS} Carrier ${DENY}`,
+	"RECEIVER #1 ZETA DC Riverton, WY Delivery#: DL77120 Appointment#: AP55091",
+].join(" ");
+// The same numbers with too few rate-con words: not readable text.
+const X1_NOT_READABLE = "Zeta notes for the yard team: DL77120 AP55091 PU48213 bay fourteen, door seven, lane three, north gate.";
+function x1Stop(kind, facility, place, references) {
+	return { kind, facility, place, references, requirements: [], instructions: [] };
+}
+function x1First() {
+	return {
+		loadNumber: LOAD_ID,
+		documentKind: "carrier_load_confirmation",
+		contacts: [],
+		loadRequirements: [],
+		stops: [
+			x1Stop("pickup", "ACME DOCK", "Springfield, IL", [{ type: "pickup_number", label: "Pickup#", value: "PU48213" }]),
+			x1Stop("delivery", "ZETA DC", "Riverton, WY", []),
+		],
+	};
+}
+function x1Retry() {
+	return {
+		loadRequirements: [{ category: "hazmat", text: "Placards required on this load." }],
+		stops: [
+			{
+				kind: "pickup",
+				references: [
+					{ type: "pickup_number", label: "Pickup#", value: "PU48213" },
+					{ type: "other_reference", label: "Ref", value: "ZZ99999" },
+					{ type: "other_reference", label: "Ref", value: `9${DENY_DIGITS}` },
+					{ type: "other_reference", label: "Ref", value: DENY },
+				],
+				requirements: [{ category: "seal", text: "Seal the trailer at the dock." }],
+				instructions: [{ kind: "shipper", text: "Use door 4." }],
+			},
+			{
+				kind: "delivery",
+				references: [
+					{ type: "delivery_number", label: "Delivery#", value: "DL77120" },
+					{ type: "appointment_number", label: "Appointment#", value: "AP55091" },
+					{ type: "appointment_number", label: "Appt", value: "ap55091" },
+				],
+			},
+			{ kind: "delivery", references: [{ type: "delivery_number", label: "Delivery#", value: "DL77120" }] },
+		],
+	};
+}
+const refValues = (stop) => stop.references.map((r) => r.value);
+section(() => {
+	ok("§11 the lib exports mergeReferenceRetry()", typeof di.mergeReferenceRetry === "function");
+	const ctx = context();
+	const first = x1First();
+	const before = JSON.stringify(first);
+	const base = { ctx, visibleText: X1_TEXT, byteLength: 20000, loadId: LOAD_ID };
+	// Not vacuous: the first reading is readable and misses exactly the two numbers.
+	const r1 = di.reviewReasons({ ...base, extraction: first });
+	eq([r1.codes, r1.counts.reference_missed], [["reference_missed"], 2], "§11 the first reading: reference_missed, 2 (the delivery and appointment numbers)");
+	const m = di.mergeReferenceRetry({ ...base, first, retry: x1Retry() });
+	eq([m.added, m.addedByType], [2, { delivery_number: 1, appointment_number: 1 }], "§11 the two missed numbers are added, counted by type");
+	eq(m.dropped, { not_missed: 4, duplicate: 1, no_stop: 1 }, "§11 dropped and counted: one already read, one not on the rate con, the account number twice; the same number again at one stop; a stop the first reading doesn't have");
+	eq(JSON.stringify(first), before, "§11 the first reading is never changed");
+	const f = di.filterInstructions(m.extraction, ctx);
+	eq(f.payload.stops.map(refValues), [["PU48213"], ["DL77120", "AP55091"]], "§11 the merged payload: each number at its stop, with its type");
+	eq(f.payload.stops[1].references.map((r) => [r.type, r.label]), [["delivery_number", "Delivery#"], ["appointment_number", "Appointment#"]], "§11 ... and its printed label");
+	eq([f.payload.loadRequirements, f.payload.stops.map((s) => [s.requirements.length, s.instructions.length]), f.payload.stops.length], [[], [[0, 0], [0, 0]], 2],
+		"§11 never a requirement, an instruction or a stop from the re-read");
+	const r2 = di.reviewReasons({ ...base, extraction: m.extraction, filtered: f });
+	eq(r2.codes, [], "§11 the merged reading: reference_missed is gone, and no reason is added");
+	eq(leaks(m), [], "§11 nothing withheld reaches the merge's answer");
+	ok("§11 the account number's digits are in no merged value", !JSON.stringify(m.extraction).includes(DENY_DIGITS));
+
+	// Only a whole printed token: not a part of one, not a respaced or re-dashed form.
+	const parts = { stops: [{ kind: "pickup", references: [] }, { kind: "delivery", references: [{ type: "delivery_number", value: "DL 77120" }, { type: "delivery_number", value: "77120" }, { type: "appointment_number", value: "AP-55091" }] }] };
+	const mp = di.mergeReferenceRetry({ ...base, first, retry: parts });
+	eq([mp.added, mp.dropped, mp.extraction === first], [0, { not_missed: 3 }, true], "§11 a part of a token or another spelling of it is not added; nothing added answers the first reading itself");
+
+	// Text the reader can't use: nothing is added, whatever the re-read says.
+	const mu = di.mergeReferenceRetry({ ...base, visibleText: X1_NOT_READABLE, first, retry: x1Retry() });
+	eq([mu.added, mu.extraction === first], [0, true], "§11 unreadable text: nothing added");
+	eq(di.mergeReferenceRetry({ ...base, visibleText: "", first, retry: x1Retry() }).added, 0, "§11 no text: nothing added");
+
+	// Stops by kind and order: the n-th delivery of the re-read is the first reading's n-th.
+	const two = x1First();
+	two.stops.push(x1Stop("delivery", "ZETA ANNEX", "Riverton, WY", []));
+	const twoText = `${X1_TEXT} RECEIVER #2 ZETA ANNEX Riverton, WY Delivery#: DL77121`;
+	const mt = di.mergeReferenceRetry({ ...base, visibleText: twoText, first: two, retry: { stops: [
+		{ kind: "delivery", references: [{ type: "delivery_number", label: "Delivery#", value: "DL77120" }] },
+		{ kind: "transfer", references: [{ type: "delivery_number", value: "AP55091" }] },
+		{ kind: "pickup", references: [] },
+		{ kind: "delivery", references: [{ type: "delivery_number", label: "Delivery#", value: "DL77121" }] },
+	] } });
+	eq(mt.extraction.stops.map(refValues), [["PU48213"], ["DL77120"], ["DL77121"]], "§11 the first delivery's number to the first delivery, the second's to the second; a stop kind the app doesn't know adds nothing");
+
+	// The per-stop cap: a stop already holding 12 references takes no more.
+	const full = x1First();
+	full.stops[1].references = Array.from({ length: 12 }, (_v, i) => ({ type: "other_reference", label: "Ref", value: `RX${40001 + i}` }));
+	const mc = di.mergeReferenceRetry({ ...base, first: full, retry: x1Retry() });
+	eq([mc.added, mc.dropped.caps], [0, 3], "§11 a stop at the 12-reference cap takes none (the two numbers, and the second spelling of one)");
+	const eleven = x1First();
+	eleven.stops[1].references = full.stops[1].references.slice(0, 11);
+	const me = di.mergeReferenceRetry({ ...base, first: eleven, retry: x1Retry() });
+	eq([me.added, me.dropped.caps, refValues(me.extraction.stops[1]).slice(-1)], [1, 2, ["DL77120"]], "§11 a stop at 11 takes one, up to the cap");
+
+	// A missed token the filter would withhold (the load's own amount as bare cents) is not added.
+	const amountText = `${X1_TEXT} Declared 120000`;
+	const r3 = di.reviewReasons({ ...base, visibleText: amountText, extraction: first });
+	eq(r3.counts.reference_missed, 3, "§11 (setup) the bare amount counts as a missed reference-shaped token");
+	const ma = di.mergeReferenceRetry({ ...base, visibleText: amountText, first, retry: { stops: [{ kind: "pickup", references: [{ type: "other_reference", label: "Ref", value: "120000" }] }] } });
+	eq([ma.added, ma.dropped], [0, { withheld: 1 }], "§11 a missed token the filter withholds is not added, so the merge adds no money_or_number_withheld");
+
+	// Anything else in a re-read's reference list is dropped as invalid.
+	const mi = di.mergeReferenceRetry({ ...base, first, retry: { stops: [{ kind: "pickup", references: [{ type: "carrier_number", value: "AP55091" }, { type: "po_number", value: "" }, null, "AP55091", { type: "po_number" }] }] } });
+	eq([mi.added, mi.dropped], [0, { invalid: 5 }], "§11 an unknown type, an empty value, a non-object: invalid");
+	for (const retry of [null, "x", [], {}, { stops: "x" }, { stops: [] }]) {
+		eq(di.mergeReferenceRetry({ ...base, first, retry }).added, 0, `§11 a re-read answer of ${JSON.stringify(retry)} adds nothing`);
+	}
+	let threw = "";
+	try { di.mergeReferenceRetry({ first, retry: x1Retry(), visibleText: X1_TEXT, byteLength: 20000, ctx: {} }); } catch (e) { threw = e.code || e.message; }
+	ok("§11 no context from buildContext(): it refuses to run", threw !== "", threw);
+}, "§11");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
