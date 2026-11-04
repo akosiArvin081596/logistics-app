@@ -110,10 +110,19 @@ db.close();
 section("§2  settings");
 db = freshDb();
 eq(S.SETTINGS_KEY, "chr.settings", "§2 app_settings key chr.settings");
-eq(S.DEFAULT_SETTINGS, { milestones: "dry_run", location: "off", positionsInMilestones: false, arrivedPickup: false, settleMin: 5, locationIntervalMin: 15 }, "§2 defaults: milestones in Dry run on the first enable, location off, positions and arrivals off, 5-minute settle (A7)");
+eq(S.DEFAULT_SETTINGS, { milestones: "dry_run", location: "off", positionsInMilestones: false, arrivedPickup: false, settleMin: 5, locationIntervalMin: 15, pilot: null },
+	"§2 defaults: milestones in Dry run on the first enable, location off, positions and arrivals off, 5-minute settle (A7), no pilot");
 eq(S.readSettings(db), S.DEFAULT_SETTINGS, "§2 no row: the defaults");
 eq(S.normalizeSettings({ milestones: "live", location: "sideways", positionsInMilestones: "yes", arrivedPickup: true, settleMin: 99, locationIntervalMin: 30, extra: 1 }),
-	{ milestones: "live", location: "off", positionsInMilestones: false, arrivedPickup: true, settleMin: 5, locationIntervalMin: 30 }, "§2 normalize: each bad value falls back to its default, unknown keys dropped");
+	{ milestones: "live", location: "off", positionsInMilestones: false, arrivedPickup: true, settleMin: 5, locationIntervalMin: 30, pilot: null }, "§2 normalize: each bad value falls back to its default, unknown keys dropped");
+eq(S.MODES, ["off", "dry_run", "pilot", "live"], "§2 the modes: Off, Dry run, Pilot (one load Live), Live");
+eq(S.normalizeSettings({ milestones: "pilot", pilot: { loadKey: "123456789", setAt: "2026-11-02T14:00:00.000Z", setBy: "admin.one", until: "", extra: "x" } }).pilot,
+	{ loadKey: "123456789", setAt: "2026-11-02T14:00:00.000Z", setBy: "admin.one", until: "" }, "§2 the pilot record: its four fields, nothing else");
+eq([{ loadKey: "12345678" }, { loadKey: 123456789 }, "123456789", [], null].map((p) => S.normalizeSettings({ pilot: p }).pilot), [null, null, null, null, null],
+	"§2 a pilot record without a 9-digit load key reads as none");
+eq(S.settingsPatch({ milestones: "pilot", pilotLoad: " #123456789 " }), { patch: { milestones: "pilot", pilotLoad: "123456789" } }, "§2 patch: Pilot and its load (one leading # dropped)");
+eq([S.settingsPatch({ pilotLoad: "12345678" }).field, S.settingsPatch({ pilotLoad: 123456789 }).field, S.settingsPatch({ pilot: { loadKey: "123456789" } }).field],
+	["pilotLoad", "pilotLoad", "pilot"], "§2 patch: a pilot load that is not 9 digits refused; the record itself can't be sent");
 eq(S.normalizeSettings("garbage"), S.DEFAULT_SETTINGS, "§2 normalize: not an object, the defaults");
 eq(S.settingsPatch({ milestones: "off", settleMin: 0 }), { patch: { milestones: "off", settleMin: 0 } }, "§2 patch: listed keys with good values");
 eq(S.settingsPatch({ settleMin: 16 }).field, "settleMin", "§2 patch: settleMin above 15 refused, naming the field");
@@ -137,7 +146,11 @@ section("§3  the recorder's state");
 db = freshDb();
 eq(S.STATE_KEY, "chr.state", "§3 server_state key chr.state");
 eq(S.readState(db), S.DEFAULT_STATE, "§3 no row: the defaults");
-eq(Object.keys(S.DEFAULT_STATE), ["cursor", "baselineId", "lastMode", "lastTickAt", "firstEnabledAt", "lastBaselineAt", "lastSweepOk", "lastErrorCode", "withheldRows"], "§3 the state's fields (never a token)");
+eq(Object.keys(S.DEFAULT_STATE), ["cursor", "baselineId", "lastMode", "lastTickAt", "firstEnabledAt", "lastBaselineAt", "lastSweepOk", "lastErrorCode", "withheldRows",
+	"sendOnAt", "pausedReason", "pausedAt", "pausedUntil", "lastTokenOkAt", "failStreak", "lastLocationMode", "locationSince"],
+	"§3 the state's fields (never a token): the sender's pause, when sending went on, the last good token check, location's own mode and since when it records");
+eq(S.normalizeState({ pausedReason: "MADE_UP", lastMode: "pilot", failStreak: 3 }).pausedReason, "", "§3 a pause reason off the list reads as none");
+eq(S.normalizeState({ lastMode: "pilot" }).lastMode, "pilot", "§3 pilot is a mode the state may hold");
 S.writeState(db, { ...S.DEFAULT_STATE, cursor: 12, baselineId: 9, lastMode: "dry_run", lastTickAt: NOW, junk: "x" }, NOW);
 eq(S.readState(db), { ...S.DEFAULT_STATE, cursor: 12, baselineId: 9, lastMode: "dry_run", lastTickAt: NOW }, "§3 round trip; an unknown field is not stored");
 eq(S.normalizeState({ cursor: -4, baselineId: "x", lastMode: "warp", withheldRows: 2.7 }), S.DEFAULT_STATE, "§3 normalize: bad values fall back");

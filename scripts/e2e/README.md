@@ -254,6 +254,10 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `driver-emergency-contacts-profile.mjs` | Emergency contacts after onboarding (`EMERGENCY_CONTACTS_ENABLED`), on made-up data with the same static server: the driver's sign-in prompt at 375 x 667 and 390 x 664 ("Remind me later" writes no storage and it returns at a reload; "Add now" saves two; none for a moving truck or with the flag off), the Kit card's tel: links, and the office panel at 1280 x 800 and 390 x 844 as a Super Admin (Drivers page detail, edit and save through the staff route) and a Dispatcher (Fleet & Drivers dialog), hidden with the flag off. |
 | `driver-videos.mjs` | The driver's "Training videos" card (`DRIVER_TRAINING_VIDEOS_ENABLED`) at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: where the card shows for each placement the payload names, the tap-to-load YouTube frame and its attributes, the YouTube link, the 16:9 frame (see "The driver training videos check"). |
 | `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
+| `driver-walkthrough.mjs` | Records the driver app walkthrough video on the e2e server (made-up seed plus `walkthrough/plant.cjs`): a CDP screencast per chapter, then the MP4, VTT and poster with the system ffmpeg (see "The driver app walkthrough video"). |
+| `walkthrough/storyboard.cjs` | The walkthrough's chapters, each beat's caption (`say`) and `DEMO`, every made-up value it shows. |
+| `walkthrough/captions.cjs` | Caption cues and WebVTT from `say` plus the measured beat times, and the storyboard lint. Pure. |
+| `walkthrough/plant.cjs` | Plants the walkthrough's made-up driver, truck, three loads, alerts, messages and invoice into a fresh made-up database, before the recording server boots on it. |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -268,6 +272,7 @@ directory outside every checkout.
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
 | `fake-gmail/` (`0700`) | The drafts the fake Gmail captured (`E2E_FAKE_GMAIL=1`): each holds a real recipient, and the real invoice and POD PDFs of the load under test. |
 | `plant-journal.json` | Exists only while a planted value, a row the money path created, F1's planted sheet cell or RC1's sheet rows are live (see "Planting"). |
+| `walkthrough-login.json` (`0600`) | The walkthrough driver's name, id and Keychain item (`walkthrough/plant.cjs`). No password. |
 
 ## Local run
 
@@ -1794,6 +1799,55 @@ FAILs (a SKIP is not a failure).
 
 For the same card on the e2e server (the made-up seed's `qa-e2e-driver`, fully onboarded, so the Kit card), boot it
 with `E2E_DRIVER_VIDEOS=1 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3191 "$W/qa.db"`.
+
+## The driver app walkthrough video (`driver-walkthrough.mjs`)
+
+Our own silent "how to use the app" video for drivers (plan 2026-10-30, PR 2), filmed on the e2e server with made-up
+data only, captioned through WebVTT. The committed result is three files in `client/src/assets/driver-videos/`, and
+`scripts/test-driver-walkthrough-media.js` checks them. **Every frame is reviewed before anything is committed**: the
+video ships in the public repo and is served to drivers.
+
+- **Data.** The default made-up seed (`setup-db.cjs`, never `SOURCE_DB`, never `E2E_LINK_PODS`), then
+  `walkthrough/plant.cjs`: driver "Casey Example" (`casey.example`, fully onboarded 60 days ago), truck T-101, loads
+  LX-20311 (Delivered), LX-20398 (In Transit) and LX-20417 (Dispatched), alerts, two messages and last week's invoice.
+  Every value comes from `DEMO` in `walkthrough/storyboard.cjs`. The POD and receipt pictures are drawn by the browser at
+  run time and say "SAMPLE — NOT A REAL DOCUMENT".
+- **Own work dir and Keychain service.** Use a private `E2E_WORK_DIR` and `E2E_KEYCHAIN_SERVICE=logisx-e2e-walkthrough`,
+  so the seed's passwords never replace the ones other e2e databases use. The driver's password is in that service,
+  account `walkthroughDriver`; nothing prints it.
+- **Recording.** One take per chapter, through `Page.startScreencast` (JPEG, 780 x 1688, each frame's timestamp kept),
+  in a 390 x 844, 2x, touch context with an iPhone user agent. The tap cursor and spotlight come from
+  `scripts/docs/lib/video-fx.js`; its caption band is hidden (captions live in the VTT only). Each frame lasts until the
+  next one (`frames.ffconcat`), so a still screen needs no repeated frames. The browser reaches the e2e server only: every
+  other host is aborted and listed in `timeline.json` (the web font, so text renders in the fallback font).
+- **Refusals.** A base other than `127.0.0.1`/`localhost`, ports 3000 and 5173, an `--out` inside a checkout, a storyboard
+  that fails its lint, a chapter whose starting state is wrong (`--only` lists the chapters before it too: `--only=5,6`).
+- **Not filmed.** The route map and fuel panel (no Maps key on the e2e server), voice notes, time off and load
+  instructions (their flags are off here), and the training videos card itself.
+
+```bash
+# The steps, all made-up (the lead's run script does them in order, with a heavy slot and the e2e lock):
+export E2E_WORK_DIR=/a/private/folder/outside/the/checkout E2E_KEYCHAIN_SERVICE=logisx-e2e-walkthrough
+fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$E2E_WORK_DIR/walkthrough.db" --force
+fnm exec --using=22.23.2 node scripts/e2e/walkthrough/plant.cjs "$E2E_WORK_DIR/walkthrough.db"
+fnm exec --using=22.23.2 bash scripts/e2e/boot-server.sh "$PWD" 3192 "$E2E_WORK_DIR/walkthrough.db"
+fnm exec --using=22.23.2 node scripts/e2e/driver-walkthrough.mjs --base=http://127.0.0.1:3192 --out=/an/absolute/folder/outside/the/checkout
+fnm exec --using=22.23.2 bash scripts/e2e/stop-server.sh 3192
+node scripts/test-driver-walkthrough-media.js --media-dir=<that --out folder>
+```
+
+| Mode | What it does |
+|---|---|
+| (none) | Films every chapter (or `--only=<n or id>[,…]`), writes `frames/NN-<id>/` and `timeline.json`, then encodes once every chapter is recorded (`--no-encode` skips it). |
+| `--dry` | No browser: the storyboard lint and each chapter's shortest length from its captions. |
+| `--captions-only` | Rebuilds the VTT and `transcript.txt` from `timeline.json` and the storyboard. Wording changes go in the storyboard, then this; never edit the VTT. |
+| `--encode-only` | Re-encodes the recorded frames: MP4 (H.264 High 4.0, CRF 26, raised to 28 at most to stay at or under 12 MB, no audio, faststart), the poster from the title card at 1.5 s (390 px, at most 150 KB), the VTT, and contact sheets in `review/` (`sheet-NN.jpg`, one frame every 2 s, and `large-NN.jpg`, the same frames at 390 px). |
+
+Exit 0 done; 1 a chapter failed (nothing encoded; the message names the step); 2 could not start (no server, no
+ffmpeg, a refusal of the arguments, a lint problem); 3 a refusal or block from the browser or the network, printed as
+received and never retried. Needs the system `ffmpeg` (Homebrew). Run it outside the Claude Code Bash sandbox (Chrome
+binds its own sockets). The frames, takes and review sheets are made up but large: delete the `--out` folder once the
+files are committed.
 
 ## Teardown (once the whole QA cycle is done)
 

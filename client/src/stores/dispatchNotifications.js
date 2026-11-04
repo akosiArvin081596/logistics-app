@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
-import { noticeWithDecision } from '../lib/availabilityText'
+import { noticeWithChrDraft, noticeWithDecision } from '../lib/availabilityText'
 
 const api = useApi()
 
@@ -54,6 +54,11 @@ export const useDispatchNotificationsStore = defineStore('dispatchNotifications'
     // decision in place of Approve and Decline.
     setRequestDecision(availabilityId, decision, decidedBy) {
       this.notifications = this.notifications.map((n) => noticeWithDecision(n, availabilityId, decision, decidedBy))
+    },
+
+    // This user's approval answered with the note to CHR's contact (its state and line).
+    setRequestChrDraft(availabilityId, chrDraft) {
+      this.notifications = this.notifications.map((n) => noticeWithChrDraft(n, availabilityId, chrDraft))
     },
   },
 })

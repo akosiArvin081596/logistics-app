@@ -50,6 +50,10 @@
 //   §9 home time (H1), on the same flag, with it unset: a staff create or edit
 //      naming a home time answers, audits and stores exactly as one that doesn't;
 //      a home time stored before the switch-off is in no answer
+//   §10 the note to CHR's contact (plan B PR 5) with requests on and its own
+//      switch unset: the approve answer gains only chrDraft "off" and its line;
+//      the panel, an edit, a cancel and the delete answer as before; the Retry
+//      route is unknown; no draft row, no Gmail call
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -334,6 +338,32 @@ const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.bo
 		const pg = await named.w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
 		eq("§9.2 a home time stored before the switch-off is in no answer: the staff panel, his own route, the driver app's payload",
 			[/Riverton|"home"|homeTime|homeDefault/.test(`${panel.text}${mine.text}${pg.text}`), mine.body.rows.length], [false, 1]);
+	});
+
+	// The note to CHR's contact (plan B PR 5) off: DRIVER_TIME_OFF_CHR_DRAFT_ENABLED unset with requests on (production
+	// until Arvin's own go-ahead). The only change from before it: the approval and its notice carry the line to copy
+	// ("off"), and a staff record its by-hand line; nothing reads the drafts table and nothing calls Gmail.
+	section("§10 requests on, the CHR draft switch unset");
+	await R.guard("§10", async () => {
+		const on = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true", GMAIL_APP_PASSWORD: "" } });
+		on.db.prepare("UPDATE trucks SET unit_number = 'T-101' WHERE id = ?").run(W.TRUCK.t91);
+		const asked = await on.call("POST", "/api/driver/me/availability", { user: USERS.driver, body: { from: "2026-11-09", to: "2026-11-13", homeCity: "Riverton", homeState: "WY" } });
+		const id = asked.body && asked.body.request ? asked.body.request.id : 0;
+		const approved = await on.call("POST", `/api/driver-availability/${id}/approve`, { user: USERS.disp, body: {} });
+		eq("§10.1 the approve answer: PR 4's keys and chrDraft \"off\" with the line to copy",
+			[approved.status, Object.keys(approved.body || {}).sort().join(), approved.body.chrDraft],
+			[200, "chrDraft,decidedBy,decision,row,success", { state: "off", line: "Driver Hollis Renner, LogisX truck T-101, unavailable Nov 9 – Nov 13" }]);
+		const panel = await on.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp });
+		const edit = await on.call("PUT", `/api/driver-availability/${id}`, { user: USERS.disp, body: { to: "2026-11-11" } });
+		const cancel = await on.call("POST", `/api/driver-availability/${id}/cancel`, { user: USERS.disp, body: {} });
+		const unknown = await on.call("POST", "/api/no-such-route-pr5", { body: {} });
+		const retry = await on.call("POST", `/api/driver-availability/${id}/chr-draft`, { user: USERS.disp, body: {} });
+		const del = await on.call("DELETE", `/api/drivers-directory/${DIR.hollis}`, { user: USERS.sa });
+		eq("§10.2 every other answer is as before: no chrDraft on the panel's rows, no change line on the edit, the cancel or the delete, and the Retry route unknown",
+			[panel.body.rows.some((r) => "chrDraft" in r), Object.keys(edit.body).sort().join(), Object.keys(cancel.body).sort().join(), Object.keys(del.body).sort().join(),
+				retry.status === unknown.status && retry.text === unknown.text.replace("/api/no-such-route-pr5", `/api/driver-availability/${id}/chr-draft`)],
+			[false, "row,success", "row,success", "cascadedDocs,success", true]);
+		eq("§10.3 no draft row and no Gmail call", [on.db.prepare("SELECT COUNT(*) AS n FROM time_off_chr_drafts").get().n, on.mail.appends.length, on.mail.searches.length], [0, 0, 0]);
 	});
 	await R.finish();
 })().catch((err) => {

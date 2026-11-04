@@ -76,9 +76,9 @@ const SIZES = [
 const EMBED_SRC = 'https://www.youtube-nocookie.com/embed/GV9ztmoomgw?rel=0&playsinline=1&cc_load_policy=1&cc_lang_pref=en&hl=en'
 const FRAME = {
   title: 'RouteMate ELD: how to log in to your mobile app',
-  allow: 'accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen',
+  allow: 'encrypted-media; picture-in-picture; fullscreen',
   referrerpolicy: 'strict-origin-when-cross-origin',
-  sandbox: 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation',
+  sandbox: 'allow-scripts allow-same-origin allow-popups',
 }
 const WATCH = { href: 'https://www.youtube.com/watch?v=GV9ztmoomgw', target: '_blank', rel: 'noopener noreferrer' }
 const PLAY_NAME = 'Play the ELD video (loads YouTube)'
@@ -267,6 +267,15 @@ async function scrollTo(page, selector) {
   await page.evaluate((sel) => document.querySelector(sel)?.scrollIntoView({ block: 'center' }), selector)
   await page.waitForTimeout(150)
 }
+// The app scrolls an inner container, so a screenshot holds only what is in view:
+// the steps with no card bring the spot it would take into view first.
+async function scrollToText(page, selector, text, block = 'center') {
+  await page.evaluate(({ sel, text, block }) => {
+    const el = [...document.querySelectorAll(sel)].find((e) => e.textContent.includes(text))
+    el?.scrollIntoView({ block })
+  }, { sel: selector, text, block })
+  await page.waitForTimeout(150)
+}
 const noSideScroll = (page) => page.evaluate(() => {
   const el = document.scrollingElement || document.documentElement
   return { ok: el.scrollWidth <= el.clientWidth, scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }
@@ -285,7 +294,9 @@ async function noCardAnywhere(browser, size) {
     await kit.page.waitForTimeout(300)
     const kitCards = await kit.page.locator(CARD).count()
     const kitText = await kit.page.locator('text=Training videos').count()
+    await scrollToText(lock.page, '.ob-step-title', 'Start Driving')
     const shotFile = await shot(lock.page, `V0-${size.tag}-lock`)
+    await scrollToText(kit.page, '.tab-panel', 'Driver Kit', 'end')
     await shot(kit.page, `V0-${size.tag}-kit`)
     record(`V0-${size.tag}`, 'No key (the flag off): no card on the lock screen or the Kit tab', 'lock screen and Kit up; no card, no "Training videos" text',
       `lock screen ${lockUp ? 'up' : 'NOT up'}: ${lockCards} card(s), ${lockText} text; Kit ${kitUp ? 'up' : 'NOT up'}: ${kitCards} card(s), ${kitText} text`,
@@ -302,6 +313,7 @@ async function stillSigning(browser, size) {
     const up = (await settled(page)) && (await shown(page, '.ob-doc-list'))
     await page.waitForTimeout(300)
     const cards = await page.locator(CARD).count()
+    await scrollToText(page, '.ob-step-title', 'Start Driving')
     record(`V1-${size.tag}`, 'documents_pending (the key null): no card', 'the signing list up; no card',
       `signing list ${up ? 'up' : 'NOT up'}; ${cards} card(s)`, up && cards === 0, await shot(page, `V1-${size.tag}`))
   } finally {
@@ -335,6 +347,7 @@ async function lockScreenCard(browser, size) {
       const placed = y(receivedCard).bottom <= y(card).top + 0.5 && y(card).bottom <= y(startCard).top + 0.5
       return { ok: lock.contains(card) && after && before && placed, why: `inside lock ${lock.contains(card)}; after "Documents Received!" ${after}; before "Start Driving" ${before}; stacked on the page ${placed}; variant ${card.dataset.variant}` }
     }, CARD)
+    await scrollTo(page, CARD)
     record(`V2-${size.tag}`, 'documents_signed with "onboarding": the card between "Documents Received!" and "Start Driving"',
       'inside the lock screen, after the next-steps card and before step 2', order.why, order.ok, await shot(page, `V2-${size.tag}`))
 

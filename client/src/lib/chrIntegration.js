@@ -78,16 +78,34 @@ export const CHR_RESULT_SENTENCES = Object.freeze({
   TOO_LARGE: 'C.H. Robinson\'s answer was too large to read.',
   REJECTED: 'C.H. Robinson refused this update. Post it in Navisphere.',
   BAD_RESPONSE: 'C.H. Robinson\'s answer could not be read.',
+  NOT_CONFIGURED: 'LogisX has no C.H. Robinson connection yet, so nothing was sent.',
 })
 
 // Why Live can't be chosen (the server's reason codes).
 export const CHR_LIVE_REASONS = Object.freeze({
   not_listed: 'Only an account on the listed-accounts setting may choose Live.',
+  live_all_off: 'Live for every C.H. Robinson load is switched off on the server; a pilot can reach one load.',
   send_off: 'Sending to C.H. Robinson is switched off on the server.',
   not_connected: 'LogisX has no C.H. Robinson connection yet.',
 })
 
-export const CHR_MODE_LABELS = Object.freeze({ off: 'Off', dry_run: 'Dry run', live: 'Live' })
+// Why the pilot can't be set or moved.
+export const CHR_PILOT_REASONS = Object.freeze({
+  not_listed: 'Only an account on the listed-accounts setting may set or move the pilot.',
+  send_on: 'The pilot can be set or moved only while sending to C.H. Robinson is off.',
+})
+
+export const CHR_PAUSE_WORDS = Object.freeze({
+  AUTH_FAILED: 'Paused: credentials',
+  CHR_UNAVAILABLE: 'Paused: CHR unavailable',
+})
+
+export const CHR_MODE_LABELS = Object.freeze({ off: 'Off', dry_run: 'Dry run', pilot: 'Pilot (one load)', live: 'Live' })
+
+// A live update a person may send back to the sender.
+export function isRetryable(row) {
+  return Boolean(row) && row.mode === 'live' && ['failed', 'gave_up', 'outcome_unknown'].includes(row.status)
+}
 
 // The badge and the page are Super Admin only; the server is the real gate.
 export function showChrBadge(role) {
@@ -105,7 +123,9 @@ export function kindChip(status, kind) {
   if (!status || status.enabled !== true) return { label: 'Off: server setting', tone: 'muted' }
   if (kind === 'location' && status.locationEnabled !== true) return { label: 'Off: server setting', tone: 'muted' }
   const mode = kind === 'location' ? status.location : status.milestones
+  if ((mode === 'live' || mode === 'pilot') && status.paused && CHR_PAUSE_WORDS[status.paused.reason]) return { label: CHR_PAUSE_WORDS[status.paused.reason], tone: 'warn' }
   if (mode === 'live') return { label: 'Live', tone: 'live' }
+  if (mode === 'pilot') return { label: 'Pilot: one load Live', tone: 'live' }
   if (mode === 'dry_run') return { label: 'Dry run', tone: 'dry' }
   return { label: 'Off', tone: 'muted' }
 }
@@ -155,6 +175,12 @@ export function ladderOf(events) {
     if (!prev || e.id > prev.id) latest.set(e.event, e)
   }
   return LADDER.map((event) => ({ event, label: CHR_EVENT_WORDS[event], row: latest.get(event) || null }))
+}
+
+// A load's last position line on the page. The page shows it only while
+// location is on; none yet reads as no fresh RouteMate position.
+export function lastPositionText(at, fmt = (v) => v) {
+  return at ? `Last position sent or recorded: ${fmt(at)}` : 'No fresh RouteMate position'
 }
 
 export function pageLinkForLoad(loadId) {

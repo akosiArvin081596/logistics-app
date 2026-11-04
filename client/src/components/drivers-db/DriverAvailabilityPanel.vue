@@ -16,8 +16,23 @@
        one sits with the past rows; neither can be edited or cancelled. While
        rows carry `home` (and the list `homeTime`), each row shows its home
        time, and the edit and add forms take one: a city and a state, or
-       neither. -->
+       neither. A driver's approved row with a note to CHR's contact carries
+       `chrDraft` (the server's state, the line to copy, and whether to offer
+       Retry); an approval, a staff record, an edit or a cancel answers with
+       the server's lines about that note, shown under the title. -->
   <section ref="panelEl" class="avail" aria-label="Time off">
+    <!-- A row's note to CHR's contact: the server's words, the line to copy,
+         and Retry where the server offers it. -->
+    <DefineChrDraft v-slot="{ r }">
+      <div v-if="chrDraftText(r.chrDraft)" class="avail-chr">
+        <span>{{ chrDraftText(r.chrDraft).words }}</span>
+        <template v-if="chrDraftText(r.chrDraft).line">
+          <span class="avail-chr-line">{{ chrDraftText(r.chrDraft).line }}</span>
+          <button type="button" class="btn btn-secondary" @click="copyLine(`row-${r.id}`, chrDraftText(r.chrDraft).line)">{{ copied === `row-${r.id}` ? CHR_DRAFT_COPIED : CHR_DRAFT_COPY }}</button>
+        </template>
+        <button v-if="r.chrDraft.canRetry === true" type="button" class="btn btn-secondary" :disabled="busy" @click="retryChr(r)">{{ CHR_DRAFT_RETRY }}</button>
+      </div>
+    </DefineChrDraft>
     <!-- One row's buttons and its inline edit form, shared by the live and the
          past lists. -->
     <DefineRowEdit v-slot="{ r }">
@@ -83,6 +98,13 @@
     </div>
     <p v-if="error" class="avail-error" role="alert">{{ error }}</p>
     <p v-if="notice" class="avail-note" role="status">{{ notice }}</p>
+    <div v-for="(c, i) in chrNotes" :key="`chr-${i}`" class="avail-chr" role="status">
+      <span>{{ c.words }}</span>
+      <template v-if="c.line">
+        <span class="avail-chr-line">{{ c.line }}</span>
+        <button type="button" class="btn btn-secondary" @click="copyLine(`note-${i}`, c.line)">{{ copied === `note-${i}` ? CHR_DRAFT_COPIED : CHR_DRAFT_COPY }}</button>
+      </template>
+    </div>
 
     <ul v-if="waiting.length" class="avail-list" aria-label="Waiting for approval">
       <li v-for="r in waiting" :key="r.id" class="avail-row avail-row-waiting">
@@ -110,6 +132,7 @@
           <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
           <span v-if="panelHomeText(r)" class="avail-home">{{ panelHomeText(r) }}</span>
         </div>
+        <ReuseChrDraft :r="r" />
         <ReuseRowEdit :r="r" />
       </li>
     </ul>
@@ -168,6 +191,7 @@
             <span v-if="panelRequestText(r)" class="avail-muted">{{ panelRequestText(r) }}</span>
             <span v-if="panelHomeText(r)" class="avail-home">{{ panelHomeText(r) }}</span>
           </div>
+          <ReuseChrDraft :r="r" />
           <ReuseRowEdit :r="r" />
         </li>
       </ul>
@@ -210,8 +234,8 @@ import { createReusableTemplate } from '@vueuse/core'
 import { useApi } from '../../composables/useApi'
 import { normDriver } from '../../lib/driverName'
 import {
-  AVAILABILITY_KINDS, HOME_CITY_MAX, availabilityRangeText, canSaveEdit, createBody, createDateBounds, datesWithinBounds,
-  editDateBounds, editFormFor, editPatch, endEarlyNote, isDriverHasLoadsWarning, kindLabel,
+  AVAILABILITY_KINDS, CHR_DRAFT_COPIED, CHR_DRAFT_COPY, CHR_DRAFT_RETRY, HOME_CITY_MAX, availabilityRangeText, canSaveEdit, chrDraftReplyNotes, chrDraftText,
+  createBody, createDateBounds, datesWithinBounds, editDateBounds, editFormFor, editPatch, endEarlyNote, isDriverHasLoadsWarning, kindLabel,
   loadsUncheckedNote, panelGroup, panelHomeText, panelPastText, panelRequestText, rangeHint, rowActions, staffHomeReady, withLoadsConfirmed,
 } from '../../lib/availabilityText'
 import { US_STATES } from '../../utils/usStates'
@@ -226,6 +250,7 @@ const props = defineProps({
 const emit = defineEmits(['changed'])
 const api = useApi()
 const [DefineRowEdit, ReuseRowEdit] = createReusableTemplate({ props: { r: { type: Object, required: true } } })
+const [DefineChrDraft, ReuseChrDraft] = createReusableTemplate({ props: { r: { type: Object, required: true } } })
 
 const panelEl = ref(null)
 const titleEl = ref(null)
@@ -248,6 +273,11 @@ const pendingLoads = ref(null)
 // ...and on approving a driver's request: { row, message, body } ("Approve anyway").
 const pendingApprove = ref(null)
 const notice = ref('')
+// The last answer's lines about the note to CHR's contact ([{ words, line }]),
+// and which line was just copied.
+const chrNotes = ref([])
+const copied = ref('')
+let copiedTimer = null
 
 const byFirstDay = (a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0)
 // The rows' `request` key is the server's requests flag.
@@ -304,9 +334,11 @@ async function run(fn, onLoadsWarning) {
   busy.value = true
   error.value = ''
   notice.value = ''
+  chrNotes.value = []
   try {
     const reply = await fn()
     notice.value = loadsUncheckedNote(reply)
+    chrNotes.value = chrDraftReplyNotes(reply)
     await load()
     emit('changed')
     return true
@@ -391,6 +423,25 @@ function approveAnyway() {
   if (pending) decide(pending.row, 'approve', pending.body)
 }
 
+// Retry the note to CHR's contact where the server offers it; the server looks
+// for the note in Gmail first, so it is never drafted twice.
+async function retryChr(r) {
+  if (!r || !r.chrDraft || r.chrDraft.canRetry !== true) return
+  await run(() => api.post(`/api/driver-availability/${r.id}/chr-draft`, {}))
+}
+
+async function copyLine(key, line) {
+  try {
+    await navigator.clipboard.writeText(line)
+    copied.value = key
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copied.value = '' }, 1500)
+  } catch {
+    // The clipboard can be refused (permissions, no HTTPS): the line is shown to copy by hand.
+    window.prompt('Copy this line for CHR\'s contact:', line)
+  }
+}
+
 watch(() => [props.directoryId, props.driverName], () => {
   resolvedId.value = null
   form.from = ''
@@ -403,6 +454,7 @@ watch(() => [props.directoryId, props.driverName], () => {
   pendingLoads.value = null
   pendingApprove.value = null
   notice.value = ''
+  chrNotes.value = []
   load()
 }, { immediate: true })
 </script>
@@ -439,4 +491,7 @@ watch(() => [props.directoryId, props.driverName], () => {
 .avail-input { width: 100%; min-width: 0; padding: 0.45rem 0.55rem; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.85rem; font-family: inherit; background: #fff; }
 .avail-hint { font-size: 0.68rem; font-weight: 400; color: #9ca3af; }
 .avail-past summary { cursor: pointer; font-size: 0.75rem; color: #6b7280; margin-bottom: 0.4rem; }
+.avail-chr { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.5rem; flex-basis: 100%; font-size: 0.75rem; color: #374151; overflow-wrap: anywhere; }
+.avail-chr-line { font-weight: 600; color: #111827; }
+.avail-chr .btn { padding: 0.35rem 0.75rem; font-size: 0.78rem; }
 </style>
