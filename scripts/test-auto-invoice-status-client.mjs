@@ -405,7 +405,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
   const R = S.AUTO_INVOICE_REASONS
   const TEXT = {
     WAITING_POD: 'Waiting for the POD. Upload it; no invoice is made until then.',
-    NOT_COMPLETED: 'The load is no longer marked Delivered, so no invoice is made. If it was delivered, set it back, then draft it by hand.',
+    NOT_COMPLETED: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. If this line is still here a few minutes later, draft it by hand.",
     LOAD_DROPPED: 'The load was cancelled or deleted, so no invoice is made. Nothing to do.',
     SETTINGS_UNREADABLE: 'The automatic invoice settings could not be read, so nothing is made or sent. Save both lists in Automatic drafts.',
     NO_BROKER_EMAIL: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.',
@@ -463,6 +463,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
     eq(S.canTryAgain({ state: 'queued', code }), false, `§11 ${code}, queued: no Try again button`)
     ok(!/Try again/.test(R[code].text), `§11 ${code}: its queued sentence doesn't ask for Try again`)
   }
+  eq(S.autoInvoiceChip({ state: 'waiting', code: 'NOT_COMPLETED' }).label, 'Waiting: not delivered', '§11 NOT_COMPLETED keeps its chip words')
   eq(R.SETTINGS_UNREADABLE && R.SETTINGS_UNREADABLE.short, 'settings unreadable', '§11 FAILS ON THE OLD CODE: SETTINGS_UNREADABLE names the settings, not one list')
   ok(!/within a few minutes/.test(R.WAITING_POD.text), '§11 WAITING_POD promises no time: nothing but the sweep could keep one')
   eq(rules.LOGIN_PAUSE_MAX_MS, 6 * 60 * 60 * 1000, '§11 MAILBOX_PAUSED\'s "up to 6 hours" is the job\'s longest pause')
@@ -479,6 +480,10 @@ section('§12 the driver\'s line above Delivered')
   const tag = (new RegExp(`<div ([^>]*)>\\s*${LINE.slice(0, 40)}`).exec(STEPPER) || ['', ''])[1]
   ok(/v-if="nextStep && nextStep\.value === 'Delivered'"/.test(tag), '§12 FAILS ON THE OLD CODE: only while the next step is Delivered')
   ok(!/v-else/.test(tag), '§12 ...outside the hint chain, so it shows with the upload hint too')
+  // The driver walkthrough's strict locator and the guide capture's querySelector
+  // both find the POD gate by this class, so it stays on one element.
+  eq((STEPPER.match(/class="upload-hint"/g) || []).length, 1, '§12 .upload-hint is on the POD gate alone')
+  ok(/class="delivered-line"/.test(tag) && /\.upload-hint,\s*\.delivered-line \{/.test(STEPPER), '§12 ...the line has its own class, with the same style')
   ok(/<div v-if="requiresUpload"/.test(STEPPER) && /<div v-else-if="blocked"/.test(STEPPER) && /<div v-else-if="gpsLine"/.test(STEPPER), '§12 the hint chain below it is unchanged')
 }
 
