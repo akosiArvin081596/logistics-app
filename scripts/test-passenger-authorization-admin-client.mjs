@@ -674,6 +674,48 @@ async function mountedSection(c, L, S) {
     p.done()
   }
 
+  // A decline that lands (table).
+  {
+    const p = await mountPage()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Decline'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Trip cancelled')
+    await press(p, p.button('Decline', p.reasonDialog))
+    await press(p, p.button('Cancel', p.reasonDialog))
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].resolve({ ok: true })
+    await drain()
+    c.ok('§3b a decline that lands: only the answer closes the dialog; the toast names it; the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === false && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/1/decline'
+      && p.api.gets.length === 2 && p.toasts.includes('Declined PA-0000ABC1. The driver is told in the app.'))
+    const after = await rowActions(p)
+    c.ok('§3b ...the rows\' actions come back only with the decline\'s answer', live(rows).live.length === 0 && rows.length === 8 && live(after).live.length === 8)
+    p.done()
+  }
+
+  // A revoke that lands (phone cards, Authorized tab).
+  {
+    const p = await mountPage({ mobile: true })
+    const tabs = p.m.find((n) => n.tag === 'x-tabs')
+    if (tabs) fire(p, tabs.props['onUpdate:modelValue'], 'authorized')
+    await drain()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Revoke'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Rider changed')
+    await press(p, p.button('Revoke', p.reasonDialog))
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].resolve({ ok: true })
+    await drain()
+    c.ok('§3b a revoke that lands: only the answer closes the dialog; the toast names it; the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === false && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/2/revoke'
+      && p.api.gets.length === 3 && p.toasts.includes('Revoked PA-0000ABC2. The driver is told in the app.'))
+    const after = await rowActions(p)
+    c.ok('§3b ...the rows\' actions come back only with the revoke\'s answer', live(rows).live.length === 0 && rows.length === 4 && live(after).live.length === 4)
+    p.done()
+  }
+
   c.eq('§3b harness: the page ran with no Vue warning and no handler threw', noise, [])
 }
 
@@ -825,6 +867,10 @@ try { lib = await import(pathToFileURL(LIB).href) } catch { lib = null }
     await mutant('M46', 'a second decline tap while one is out sending again', fileMut('view', 'if (d.busy || !d.row) return', 'if (!d.row) return'), ['mounted'])
     await mutant('M47', 'the list not read again after a countersign lands', fileMut('view', '    toast(`Signed for LogisX Inc. (${s.row.reference}). The driver is told in the app.`)\n    load()\n', '    toast(`Signed for LogisX Inc. (${s.row.reference}). The driver is told in the app.`)\n'), ['mounted'])
     await mutant('M48', 'the Sign button live while the signature is out', fileMut('view', '<Button :disabled="sign.busy" @click="submitSign">', '<Button @click="submitSign">'), ['mounted'])
+    await mutant('M49', 'a decline or revoke that landed waiting on a close the person can\'t make', fileMut('view', '    if (decide.value === d) closeReason()\n', '    if (decide.value === d) dismissReason()\n'), ['mounted'])
+    await mutant('M50', 'the list not read again after a decline or revoke lands', fileMut('view', "    toast(`${d.kind === 'revoke' ? 'Revoked' : 'Declined'} ${d.row.reference}. The driver is told in the app.`)\n    load()\n",
+      "    toast(`${d.kind === 'revoke' ? 'Revoked' : 'Declined'} ${d.row.reference}. The driver is told in the app.`)\n"), ['mounted'])
+    await mutant('M51', 'a landed decline or revoke closing its dialog but leaving every row\'s actions off', fileMut('view', '    if (decide.value === d) closeReason()\n', '    if (decide.value === d) decide.value.open = false\n'), ['mounted'])
   }
 }
 
