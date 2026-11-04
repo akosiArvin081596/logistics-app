@@ -39,6 +39,21 @@
 //      (D18: it runs with the check on or off); the results table dropped under
 //      the running server, the staff list, the driver's own route, the driver
 //      app's payload and the sweep still answer 200
+// Drivers' requests (plan B Revision 2, PR 4) off: DRIVER_TIME_OFF_REQUESTS_ENABLED
+// is set in the first world too (its four routes join §1), then
+//   §8 with the main and screen flags on and the requests flag unset, or set
+//      with the screen flag unset: the four request routes answer like an
+//      unknown path; a staff row is stored approved and staff; the panel's
+//      rows and the driver's answers carry exactly the keys they had before; a
+//      waiting request left from before holds no days and warns no one; staff
+//      changing a driver-made row tell the driver nothing
+//   §9 home time (H1), on the same flag, with it unset: a staff create or edit
+//      naming a home time answers, audits and stores exactly as one that doesn't;
+//      a home time stored before the switch-off is in no answer
+//   §10 the note to CHR's contact (plan B PR 5) with requests on and its own
+//      switch unset: the approve answer gains only chrDraft "off" and its line;
+//      the panel, an edit, a cancel and the delete answer as before; the Retry
+//      route is unknown; no draft row, no Gmail call
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -85,8 +100,8 @@ const page = (w) => w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renn
 const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.body.loads.length > 0, !!r.body && "timeOff" in r.body];
 
 (async () => {
-	// The screen sub-flag and R11b's flag are set; without the main flag they must do nothing.
-	const w = await W.startWorld({ flag: false, loadsWarning: true, env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+	// The screen sub-flag, R11b's flag and the requests flag are set; without the main flag they must do nothing.
+	const w = await W.startWorld({ flag: false, loadsWarning: true, env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" } });
 	let seeded = false;
 	try {
 		w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at)
@@ -114,6 +129,11 @@ const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.bo
 				["POST", "/api/driver-availability/1/cancel", {}],
 				["GET", "/api/driver/me/availability", undefined],
 				["GET", "/api/driver-availability", undefined],
+				// A driver's request and the staff decision (PR 4), their own flag set here too.
+				["POST", "/api/driver/me/availability", { from: "2026-11-02", to: "2026-11-03" }],
+				["POST", "/api/driver/me/availability/1/cancel", {}],
+				["POST", "/api/driver-availability/1/approve", {}],
+				["POST", "/api/driver-availability/1/decline", {}],
 			];
 			for (const [method, url, body] of ROUTES) {
 				for (const user of [USERS.sa, USERS.disp, USERS.driver, USERS.inv, null]) {
@@ -241,6 +261,109 @@ const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.bo
 		try { swept = await on.sweep(); } catch (err) { swept = err.message; }
 		ok("§7.5 ...and the sweep still runs", swept && typeof swept === "object", String(swept));
 		eq("§7.6 the purge with no table logs and returns 0, never throws", on.api.purgeTimeOffEldResults(on.clock.ms), 0);
+	});
+
+	// Drivers' requests (plan B Revision 2, PR 4) off: DRIVER_TIME_OFF_REQUESTS_ENABLED
+	// unset with the screen flag on (production until its checkpoint), or set with
+	// the screen flag unset. The request columns exist (they are additive).
+	section("§8 the main and screen flags on, the requests flag unset (or set without the screen flag)");
+	await R.guard("§8", async () => {
+		const REQUEST_ROUTES = [["POST", "/api/driver/me/availability"], ["POST", "/api/driver/me/availability/1/cancel"], ["POST", "/api/driver-availability/1/approve"], ["POST", "/api/driver-availability/1/decline"]];
+		for (const [label, env] of [["requests unset", { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" }], ["requests set, screen unset", { DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" }]]) {
+			const on = await W.startWorld({ env });
+			const unknown = await on.call("POST", "/api/no-such-route-pr4", { body: {} });
+			const answered = [];
+			for (const [method, url] of REQUEST_ROUTES) {
+				for (const user of [USERS.sa, USERS.disp, USERS.driver, null]) {
+					const r = await on.call(method, url, { user, body: { from: "2026-11-02", to: "2026-11-02" } });
+					answered.push(r.status === unknown.status && r.text === unknown.text.replace("/api/no-such-route-pr4", url));
+				}
+			}
+			ok(`§8.1 ${label}: the four request routes answer like an unknown path, for every role`, answered.every(Boolean), answered.join());
+		}
+		const on = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+		const created = await on.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { body: { kind: "vacation", from: "2026-10-14", to: "2026-10-16", reason: "Family" } });
+		const staffId = created.body && created.body.row ? created.body.row.id : 0;
+		const stored = on.db.prepare("SELECT request_status, source, decided_by, decided_by_user_id, decided_at FROM driver_availability WHERE id = ?").get(staffId);
+		eq("§8.2 a staff row is stored approved and staff, nothing decided", stored, { request_status: "approved", source: "staff", decided_by: null, decided_by_user_id: 0, decided_at: null });
+		// Left from before the switch-off: his own waiting request (Nov 2-4) and an approved one (Oct 26-27).
+		const leftover = (from, to, status) => Number(on.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+			request_status, source, decided_by, decided_at) VALUES (?, 'Hollis Renner', 'off_duty', ?, ?, '', 'drv_hollis', ?, '2026-10-05T12:00:00Z', ?, 'driver', ?, ?)`)
+			.run(DIR.hollis, from, to, USERS.driver.id, status, status === "approved" ? "dispatch_t" : null, status === "approved" ? "2026-10-06T12:00:00Z" : null).lastInsertRowid);
+		const waiting = leftover("2026-11-02", "2026-11-04", "requested");
+		const approved = leftover("2026-10-26", "2026-10-27", "approved");
+		const panel = await on.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa });
+		const ROW_KEYS = "cancelledAt,cancelledBy,createdAt,createdBy,directoryId,editable,from,id,kind,limits,reason,status,to,updatedAt";
+		eq("§8.3 the staff panel's rows carry exactly the keys they had before requests", [panel.status, [...new Set((panel.body.rows || []).map((r) => Object.keys(r).sort().join()))]], [200, [ROW_KEYS]]);
+		const mine = await on.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		const pg = await on.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
+		eq("§8.4 his own answers carry exactly today's keys, and his rows are the approved ones only",
+			[Object.keys(mine.body || {}).sort().join(), Object.keys((pg.body && pg.body.timeOff) || {}).sort().join(), (mine.body.rows || []).map((r) => r.id)], ["rows,today", "rows,today", [staffId, approved]]);
+		const over = await on.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { body: { kind: "vacation", from: "2026-11-03", to: "2026-11-05" } });
+		eq("§8.5 the waiting request holds no days: staff record Nov 3-5 over it, 201", over.status, 201);
+		const load = await on.call("POST", "/api/data", { user: USERS.sa, body: { values: W.jtRow({ id: "7880", driver: "Hollis Renner", pickup: "11/2/2026", dropoff: "11/2/2026", status: "Dispatched" }) } });
+		eq("§8.6 ...and warns no one: a load on Nov 2 (its first day, before the staff row) for him, 200", load.status, 200);
+		const notices = () => on.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE type = 'time-off'").get().n;
+		await on.call("PUT", `/api/driver-availability/${approved}`, { user: USERS.sa, body: { to: "2026-10-26" } });
+		await on.call("POST", `/api/driver-availability/${approved}/cancel`, { user: USERS.sa, body: {} });
+		eq("§8.7 staff shortening, then cancelling, his approved request tell him nothing (no notice, no live event)",
+			[notices(), on.emits.filter((e) => e.event === "time-off-updated").length, on.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'time-off-request'").get().n], [0, 0, 0]);
+		eq("§8.8 the waiting request is left as it was", on.db.prepare("SELECT request_status, cancelled_at FROM driver_availability WHERE id = ?").get(waiting), { request_status: "requested", cancelled_at: null });
+	});
+
+	// Home time (H1) rides the requests flag: with it unset, a staff body naming a home time
+	// answers exactly as one that doesn't, and a home time left from before shows nowhere.
+	section("§9 the requests flag unset: home time is ignored and never sent");
+	await R.guard("§9", async () => {
+		const pair = async (home) => {
+			const w = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+			const made = await w.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { body: { kind: "vacation", from: "2026-10-20", to: "2026-10-21", ...home } });
+			const id = made.body && made.body.row ? made.body.row.id : 0;
+			const edited = await w.call("PUT", `/api/driver-availability/${id}`, { body: { to: "2026-10-22", ...home } });
+			const scrub = (x) => JSON.stringify(x.body).replace(/"(createdAt|updatedAt)":"[^"]*"/g, "");
+			return {
+				w, id,
+				said: [made.status, scrub(made), edited.status, scrub(edited)],
+				stored: w.db.prepare("SELECT home_city, home_state FROM driver_availability WHERE id = ?").get(id),
+				audits: [...w.audits("driver_availability_create"), ...w.audits("driver_availability_update")].map((a) => a.details),
+			};
+		};
+		const plain = await pair({});
+		const named = await pair({ homeCity: "Riverton", homeState: "ZZ" });
+		eq("§9.1 a staff create and edit naming a home time (a bad one too) answer and audit exactly as without it, and store none",
+			[named.said, named.audits, named.stored], [plain.said, plain.audits, { home_city: null, home_state: null }]);
+		named.w.db.prepare("UPDATE driver_availability SET home_city = 'Riverton', home_state = 'WY' WHERE id = ?").run(named.id);
+		const panel = await named.w.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa });
+		const mine = await named.w.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		const pg = await named.w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
+		eq("§9.2 a home time stored before the switch-off is in no answer: the staff panel, his own route, the driver app's payload",
+			[/Riverton|"home"|homeTime|homeDefault/.test(`${panel.text}${mine.text}${pg.text}`), mine.body.rows.length], [false, 1]);
+	});
+
+	// The note to CHR's contact (plan B PR 5) off: DRIVER_TIME_OFF_CHR_DRAFT_ENABLED unset with requests on (production
+	// until Arvin's own go-ahead). The only change from before it: the approval and its notice carry the line to copy
+	// ("off"), and a staff record its by-hand line; nothing reads the drafts table and nothing calls Gmail.
+	section("§10 requests on, the CHR draft switch unset");
+	await R.guard("§10", async () => {
+		const on = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true", GMAIL_APP_PASSWORD: "" } });
+		on.db.prepare("UPDATE trucks SET unit_number = 'T-101' WHERE id = ?").run(W.TRUCK.t91);
+		const asked = await on.call("POST", "/api/driver/me/availability", { user: USERS.driver, body: { from: "2026-11-09", to: "2026-11-13", homeCity: "Riverton", homeState: "WY" } });
+		const id = asked.body && asked.body.request ? asked.body.request.id : 0;
+		const approved = await on.call("POST", `/api/driver-availability/${id}/approve`, { user: USERS.disp, body: {} });
+		eq("§10.1 the approve answer: PR 4's keys and chrDraft \"off\" with the line to copy",
+			[approved.status, Object.keys(approved.body || {}).sort().join(), approved.body.chrDraft],
+			[200, "chrDraft,decidedBy,decision,row,success", { state: "off", line: "Driver Hollis Renner, LogisX truck T-101, unavailable Nov 9 – Nov 13" }]);
+		const panel = await on.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp });
+		const edit = await on.call("PUT", `/api/driver-availability/${id}`, { user: USERS.disp, body: { to: "2026-11-11" } });
+		const cancel = await on.call("POST", `/api/driver-availability/${id}/cancel`, { user: USERS.disp, body: {} });
+		const unknown = await on.call("POST", "/api/no-such-route-pr5", { body: {} });
+		const retry = await on.call("POST", `/api/driver-availability/${id}/chr-draft`, { user: USERS.disp, body: {} });
+		const del = await on.call("DELETE", `/api/drivers-directory/${DIR.hollis}`, { user: USERS.sa });
+		eq("§10.2 every other answer is as before: no chrDraft on the panel's rows, no change line on the edit, the cancel or the delete, and the Retry route unknown",
+			[panel.body.rows.some((r) => "chrDraft" in r), Object.keys(edit.body).sort().join(), Object.keys(cancel.body).sort().join(), Object.keys(del.body).sort().join(),
+				retry.status === unknown.status && retry.text === unknown.text.replace("/api/no-such-route-pr5", `/api/driver-availability/${id}/chr-draft`)],
+			[false, "row,success", "row,success", "cascadedDocs,success", true]);
+		eq("§10.3 no draft row and no Gmail call", [on.db.prepare("SELECT COUNT(*) AS n FROM time_off_chr_drafts").get().n, on.mail.appends.length, on.mail.searches.length], [0, 0, 0]);
 	});
 	await R.finish();
 })().catch((err) => {

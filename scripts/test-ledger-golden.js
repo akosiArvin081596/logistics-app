@@ -297,6 +297,31 @@ const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 			check(gaps.length === 0, `${scope}: the line items add back to every month's figures to the cent`, gaps.slice(0, 4).join("; "));
 		}
 	}
+	// Receipts auto-approve moves receipts from Pending to Approved: no figure may move.
+	// The Rejected control proves the second run reads the receipts afresh.
+	const scopes = async () => JSON.parse(JSON.stringify({
+		owner5: await run({ user: { ...SUPER, id: 5 }, isSuperAdmin: false, investorDriverSet: setOf(5), investorOwnerId: 5, config: cfg(5), detailForMonth: "2026-06" }),
+		owner6: await run({ user: { ...SUPER, id: 6 }, isSuperAdmin: false, investorDriverSet: setOf(6), investorOwnerId: 6, config: cfg(6), detailForMonth: "2026-04" }),
+		fleet: await run({ user: SUPER, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, config: cfg(0), detailForMonth: "2026-07" }),
+	}));
+	const pendingIds = db.prepare("SELECT id FROM expenses WHERE status = 'Pending'").all().map((r) => r.id);
+	check(pendingIds.length > 0, "fixture: a Pending receipt to approve", "none");
+	const setStatus = db.prepare("UPDATE expenses SET status = ? WHERE id = ?");
+	for (const id of pendingIds) setStatus.run("Approved", id);
+	const approved = await scopes();
+	// A line item carries its receipt's status as a label; every figure must stay.
+	const figures = (o) => JSON.stringify(Object.fromEntries(["owner5", "owner6", "fleet"].map((k) => [k, {
+		monthlyEarnings: o[k].monthlyEarnings, currentMonthKey: o[k].currentMonthKey, detail: o[k].detail,
+		items: (o[k].items || []).map(({ status, ...rest }) => rest),
+	}])));
+	check(figures(approved) === figures(actual), "every Pending receipt approved: every scope's figures and items byte-identical (receipts auto-approve)", "a figure moved");
+	const labels = ["owner5", "owner6", "fleet"].flatMap((k) => (approved[k].items || []).map((x, i) => [x, (actual[k].items || [])[i]]))
+		.filter(([a, b]) => JSON.stringify(a) !== JSON.stringify(b));
+	check(labels.length > 0 && labels.every(([a, b]) => a.status === "Approved" && b.status === "Pending"), "…the only change is the approved receipts' status label on their line items", JSON.stringify(labels.slice(0, 2)));
+	setStatus.run("Rejected", pendingIds[0]);
+	check(figures(await scopes()) !== figures(actual), "control: the same receipt Rejected does move a figure", "nothing moved");
+	for (const id of pendingIds) setStatus.run("Pending", id);
+
 	check(errors.length === 0, "the lifted code logged no error", errors.join(" | "));
 
 	console.log(`\n${pass} passed, ${fail} failed`);

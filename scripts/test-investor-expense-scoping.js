@@ -953,6 +953,24 @@ for (const m of MUTANTS) {
 	ok(caught, `§6 mutant NOT caught: ${m.name}`);
 }
 
+// ---------------------------------------------------------------------- §7
+// Receipts auto-approve moves receipts from Pending to Approved: no investor's scope
+// moves. The Rejected control proves the figures are read afresh.
+{
+	const owners = db.prepare("SELECT owner_id FROM trucks UNION SELECT owner_id FROM expenses ORDER BY 1").all().map((r) => r.owner_id);
+	const all = () => owners.map((o) => monthlyTripExp(o));
+	const rows = db.prepare("SELECT id, status FROM expenses WHERE COALESCE(status, '') <> 'Rejected'").all();
+	ok(rows.length > 0, "§7 the fixture holds receipts that aren't Rejected");
+	const setStatus = db.prepare("UPDATE expenses SET status = ? WHERE id = ?");
+	for (const r of rows) setStatus.run("Pending", r.id);
+	const before = all();
+	for (const r of rows) setStatus.run("Approved", r.id);
+	eq(all(), before, "§7 every Pending receipt approved: every investor's monthly trip expenses unchanged");
+	setStatus.run("Rejected", rows[0].id);
+	ok(JSON.stringify(all()) !== JSON.stringify(before), "§7 control: one of them Rejected does move a month");
+	for (const r of rows) setStatus.run(r.status, r.id);
+}
+
 // -------------------------------------------------------------------- report
 db.close();
 if (failures.length) {

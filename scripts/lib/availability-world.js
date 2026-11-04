@@ -6,6 +6,10 @@
 // server.js, and driven over HTTP on 127.0.0.1.
 //
 //   availability   the six availability routes (listed in ROUTES)
+//   requests       a driver's request and its cancel, the staff approve and
+//                  decline (DRIVER_TIME_OFF_REQUESTS_ENABLED; pass it in `env`),
+//                  and the Retry of the note to CHR's contact (its two Gmail
+//                  calls are the world's fakes, world.mail)
 //   directory      GET /api/drivers-directory, DELETE /api/drivers-directory/:id
 //   responses      GET /api/dashboard, GET /api/trucks
 //   assign         POST /api/dispatch, POST /api/dispatch/reassign,
@@ -20,7 +24,8 @@
 // (x-test-user), a fake Google Sheet holding one Job Tracking tab (reads and
 // writes in A1 notation, as the API answers them), a clock the test moves
 // (world.clock.ms; "today" is the business day of that instant), and recording
-// stubs for mail, sockets and notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
+// stubs for mail, sockets (world.emits: { room, except, event, payload }) and
+// notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
 // is read from the world's own process.env, as the server reads it at boot, and
 // so are DRIVER_TIME_OFF_SCREEN_ENABLED (pass it in `env`) and
 // DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b; `loadsWarning: true`).
@@ -55,6 +60,11 @@ const ROUTES = {
 	availabilityCancel: ["post", "/api/driver-availability/:id/cancel"],
 	availabilityMine: ["get", "/api/driver/me/availability"],
 	availabilityAll: ["get", "/api/driver-availability"],
+	requestCreate: ["post", "/api/driver/me/availability"],
+	requestCancel: ["post", "/api/driver/me/availability/:id/cancel"],
+	requestApprove: ["post", "/api/driver-availability/:id/approve"],
+	requestDecline: ["post", "/api/driver-availability/:id/decline"],
+	chrDraftRetry: ["post", "/api/driver-availability/:id/chr-draft"],
 	directory: ["get", "/api/drivers-directory"],
 	directoryDelete: ["delete", "/api/drivers-directory/:id"],
 	dashboard: ["get", "/api/dashboard"],
@@ -67,6 +77,7 @@ const ROUTES = {
 	driverPage: ["get", "/api/driver/:driverName"],
 };
 const AVAILABILITY_ROUTES = ["availabilityList", "availabilityCreate", "availabilityEdit", "availabilityCancel", "availabilityMine", "availabilityAll"];
+const REQUEST_ROUTES = ["requestCreate", "requestCancel", "requestApprove", "requestDecline"];
 const ASSIGN_ROUTES = ["dispatch", "reassign", "dataPut", "loadPut", "dataPost"];
 
 // The registration line of METHOD PATH in server.js, or null when it has none.
@@ -77,7 +88,8 @@ function routeHead(method, p) {
 }
 
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange", "getJobTrackingCached", "getSheets",
-	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice"];
+	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice", "factoringRoutes",
+	"appendGmailDraft", "findDraftByMessageId"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"];
 const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "normalizeDriverName"];
 // Lifted by name: server-lift's closure walk misses a statement that starts the
@@ -316,7 +328,10 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 	seed(db, now);
 	const sheet = fakeSheet(rows);
 	const jt = { reads: 0, fail: false, during: null };
-	const world = { db, clock, sheet, jt, emails: [], changes: [], logs: [], mailFails: false, found: L.found };
+	// The two Gmail calls of the note to CHR's contact, as fakes that record every call and reach no network:
+	// world.mail.onAppend / onSearch, when set, decide each call (await, throw an error with a `stage`, or answer).
+	const mail = { appends: [], searches: [], onAppend: null, onSearch: null };
+	const world = { db, clock, sheet, jt, mail, emails: [], changes: [], logs: [], out: [], emits: [], mailFails: false, found: L.found };
 
 	class FixedDate extends Date {
 		constructor(...args) { super(...(args.length ? args : [clock.ms])); }
@@ -329,7 +344,7 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		req.session = raw ? { user: JSON.parse(raw) } : {};
 		next();
 	});
-	const quiet = { log() {}, info() {}, warn: (...a) => world.logs.push(a.join(" ")), error: (...a) => world.logs.push(a.join(" ")) };
+	const quiet = { log: (...a) => world.out.push(a.join(" ")), info: (...a) => world.out.push(a.join(" ")), warn: (...a) => world.logs.push(a.join(" ")), error: (...a) => world.logs.push(a.join(" ")) };
 	const procEnv = {
 		...(flag ? { DRIVER_AVAILABILITY_ENABLED: "true" } : {}),
 		...(loadsWarning ? { DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED: "true" } : {}),
@@ -349,6 +364,8 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
+		factoringRoutes: { annotateDashboard() {} },
 		getJobTrackingCached: async () => {
 			jt.reads++;
 			if (typeof jt.during === "function") {
@@ -363,8 +380,24 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		},
 		getSheets: async () => sheet.api,
 		SPREADSHEET_ID: "availability-test-sheet",
-		io: { to: () => ({ emit() {}, except: () => ({ emit() {} }) }), emit() {} },
+		io: {
+			to: (room) => ({
+				emit: (event, payload) => { world.emits.push({ room, except: null, event, payload }); },
+				except: (except) => ({ emit: (event, payload) => { world.emits.push({ room, except, event, payload }); } }),
+			}),
+			emit() {},
+		},
 		sendEmail: async (to, subject, html) => { world.emails.push({ to, subject, html }); return !world.mailFails; },
+		appendGmailDraft: async (opts) => {
+			mail.appends.push(opts);
+			if (typeof mail.onAppend === "function") return mail.onAppend(opts, mail.appends.length);
+			return { ok: true, bytes: 1, mailbox: "[Gmail]/Drafts" };
+		},
+		findDraftByMessageId: async (opts) => {
+			mail.searches.push(opts);
+			if (typeof mail.onSearch === "function") return mail.onSearch(opts, mail.searches.length);
+			return { found: false, count: 0, mailbox: "" };
+		},
 		fs,
 		DATA_DIR: path.join(os.tmpdir(), "r11-availability-no-uploads"),
 		fetch: () => { throw new Error("no network in a test"); },
@@ -445,6 +478,6 @@ function createRunner(title) {
 }
 
 module.exports = {
-	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, ASSIGN_ROUTES, ELD_CHECK_ROOTS, HEADERS, COL, USERS, DIR, TRUCK, VID, ELD, DEFAULT_NOW, HOUR, DAY,
+	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, REQUEST_ROUTES, ASSIGN_ROUTES, ELD_CHECK_ROOTS, HEADERS, COL, USERS, DIR, TRUCK, VID, ELD, DEFAULT_NOW, HOUR, DAY,
 	routeHead, jtRow, defaultRows, hisLoadsRows, startWorld, closeAll, createRunner, fakeSheet, eldFixtures, addFixes,
 };

@@ -688,6 +688,21 @@ section("§2b pure — driver availability pauses and resumes the alert");
 		eq("§2b.17 no rows at all", [fieldsOn([], "2026-10-16").driverOffUntil, fieldsOn([], "2026-10-16").driverLastOffTo], [null, null]);
 	}
 	{
+		// A driver's request (plan B Revision 2, PR 4) pauses nothing until it is
+		// approved. The server's reader keeps such rows out, and liveRows() drops
+		// them too, so rows handed in unfiltered still can't pause an alert.
+		const now = Date.parse("2026-10-16T16:00:00Z");
+		const asked = (status, today = "2026-10-16") => truckFields(today, [row(1, "2026-10-14", "2026-10-20", { request_status: status, source: "driver" })]);
+		const seen = (v) => [v.state, v.alert];
+		eq("§2b.45 a waiting request over today pauses nothing: stale, alert", seen(dark(now, asked("requested"))), ["stale", true]);
+		eq("§2b.46 ...nor a declined one", seen(dark(now, asked("declined"))), ["stale", true]);
+		eq("§2b.47 an approved one pauses it, as staff time off does", seen(dark(now, asked("approved"))), ["driver_off", false]);
+		eq("§2b.48 ...and so does a row read without request_status (saved before requests)", seen(dark(now, truckFields("2026-10-16", [row(1, "2026-10-14", "2026-10-20")]))), ["driver_off", false]);
+		const back = Date.parse("2026-10-21T16:00:00Z");
+		eq("§2b.49 a waiting request that ended yesterday gives no returning grace; an approved one does",
+			[dark(back, asked("requested", "2026-10-21")).state, dark(back, asked("approved", "2026-10-21")).state], ["stale", "driver_returning"]);
+	}
+	{
 		// Whose availability counts for a truck: its driver's. The newest open
 		// assignment, else trucks.assigned_driver, matched through
 		// normalizeDriverName() on both sides.

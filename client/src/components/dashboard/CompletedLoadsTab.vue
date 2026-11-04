@@ -139,6 +139,21 @@
               <button v-if="canTryAgain(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('retry')">Try again</button>
             </div>
             <div v-if="autoActionResult" class="auto-result" :class="`auto-result--${autoActionResult.tone}`" :role="autoActionResult.tone === 'error' ? 'alert' : 'status'">{{ autoActionResult.msg }}</div>
+            <!-- Factored loads (Triumph), in lib/factoringStatus.js's words. -->
+            <FactoringControls :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
+            <!-- A Draft Invoice press whose Gmail draft may be there: "Check Gmail"
+                 searches for it, or (the fallback's drafts) asks a person. -->
+            <div v-if="selectedInflight" class="auto-line auto-line--warn">
+              <span class="auto-line-text">{{ selectedInflight.text }}</span>
+              <button v-if="selectedInflight.canCheck && !(selectedInflight.askPerson || inflightAsk)" type="button" class="auto-line-btn" :disabled="inflightBusy" @click="checkGmail()">Check Gmail</button>
+            </div>
+            <div v-if="selectedInflight && selectedInflight.canCheck && (selectedInflight.askPerson || inflightAsk)" class="auto-line auto-line--warn">
+              <span class="auto-line-text">Look in Gmail Drafts and Sent Mail, then say whether the draft is there.</span>
+              <input v-model="inflightReason" class="inflight-reason" type="text" maxlength="200" placeholder="Reason (required)" aria-label="Reason" :disabled="inflightBusy" />
+              <button type="button" class="auto-line-btn" :disabled="inflightBusy || !reasonInput(inflightReason)" @click="checkGmail('in_gmail')">It is in Gmail</button>
+              <button type="button" class="auto-line-btn" :disabled="inflightBusy || !reasonInput(inflightReason)" @click="checkGmail('not_in_gmail')">It is not in Gmail</button>
+            </div>
+            <div v-if="inflightResult" class="inflight-result" :class="`inflight-result--${inflightResult.tone}`" :role="inflightResult.tone === 'error' ? 'alert' : 'status'">{{ inflightResult.msg }}</div>
           </template>
           <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
@@ -160,6 +175,8 @@
             <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
           </div>
           <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+          <!-- The arrival pickup date's read-only line: the server's facts, worded by lib/pickupArrival.js. -->
+          <p v-if="selectedJob && pickupArrivalLine(selectedJob)" class="pickup-arrival" role="note">{{ pickupArrivalLine(selectedJob) }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -276,6 +293,7 @@
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" :planned-lane="plannedLane" dispatch-mode />
             <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" @lane="onPlannedLane" />
           </div>
+          <ChrSendBadge v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -310,6 +328,11 @@
         </DialogHeader>
         <div class="auto-settings">
           <p v-if="autoSettingsProblem" class="auto-settings-problem" role="alert">{{ autoSettingsProblem }}</p>
+          <template v-if="autoSendView">
+            <p class="auto-settings-label">Automatic sending</p>
+            <p :class="autoSendView.stopped ? 'auto-settings-problem' : 'auto-settings-help'">{{ autoSendView.text }}</p>
+            <button v-if="autoSendView.canStop" type="button" class="cl-clear" :disabled="autoSendStopping" @click="stopAutoSend">{{ autoSendStopping ? 'Stopping…' : 'Stop automatic sending' }}</button>
+          </template>
           <label class="auto-settings-label" for="auto-confirmed">Confirmed broker domains</label>
           <p class="auto-settings-help">A broker other than Bison gets an automatic draft only when its Email on Job Tracking is on one of these domains, and only to its rate con's billing email on the same domain. Free mail can't be confirmed. One domain per line, such as example-broker.com.</p>
           <textarea id="auto-confirmed" v-model="autoConfirmedText" rows="4" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading || !autoSettingsRead" />
@@ -345,11 +368,15 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
+import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
+import FactoringControls from './FactoringControls.vue'
+import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings } from '../../lib/autoInvoiceStatus'
+import { pickupArrivalLine } from '../../lib/pickupArrival'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -988,6 +1015,38 @@ async function autoInvoiceAction(kind) {
   }
 }
 
+// Factored loads (Triumph): the row's `_factoring` after a change, then a refresh.
+function onFactoringChanged(patch) {
+  if (selectedJob.value && patch) selectedJob.value = { ...selectedJob.value, _factoring: patch }
+  dashboard.refresh().catch(() => {})
+}
+
+// A Draft Invoice press whose Gmail draft may be there (`_draftInflight`).
+const selectedInflight = computed(() => (auth.isSuperAdmin && selectedJob.value ? inflightLine(selectedJob.value._draftInflight) : null))
+const inflightBusy = ref(false)
+const inflightResult = ref(null)
+const inflightAsk = ref(false)
+const inflightReason = ref('')
+watch(() => loadRefValue.value, () => { inflightResult.value = null; inflightAsk.value = false; inflightReason.value = '' })
+async function checkGmail(answer = '') {
+  if (!auth.isSuperAdmin || !loadRefValue.value || inflightBusy.value) return
+  const d = selectedJob.value && selectedJob.value._draftInflight
+  inflightBusy.value = true; inflightResult.value = null
+  try {
+    const body = { invoiceId: d && d.invoiceId, ...(answer ? { answer, reason: reasonInput(inflightReason.value) } : {}) }
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadRefValue.value)}/invoice-draft-inflight/resolve`, body)
+    if (selectedJob.value) selectedJob.value = { ...selectedJob.value, _draftInflight: undefined }
+    inflightAsk.value = false; inflightReason.value = ''
+    inflightResult.value = { tone: 'ok', msg: r.found ? `Invoice #${r.invoiceId} is in Gmail: recorded as this load's draft.` : `Invoice #${r.invoiceId} is not in Gmail: its number was given up. You can draft again.` }
+    dashboard.refresh().catch(() => {})
+  } catch (e) {
+    if (e && e.code === 'ANSWER_REQUIRED') inflightAsk.value = true
+    inflightResult.value = { tone: 'error', msg: (e && e.message) || 'That did not go through. Try again.' }
+  } finally {
+    inflightBusy.value = false
+  }
+}
+
 const autoSettingsOpen = ref(false)
 const autoSettingsLoading = ref(false)
 const autoSettingsSaving = ref(false)
@@ -998,9 +1057,29 @@ const autoSettingsRead = ref(false)
 const autoConfirmedText = ref('')
 const autoOptOutText = ref('')
 const autoSettingsCanSave = computed(() => canSaveAutoSettings({ read: autoSettingsRead.value, loading: autoSettingsLoading.value, saving: autoSettingsSaving.value }))
+// Automatic sending as this opening's read gave it; null while sending is off.
+const autoSend = ref(null)
+const autoSendStopping = ref(false)
+const autoSendView = computed(() => autoSendState(autoSend.value))
 const autoModeText = computed(() => (autoMode.value === 'on'
-  ? 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  ? (autoSendView.value
+    ? 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
+    : 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.')
   : 'Shadow: it records what it would draft, and drafts nothing.'))
+async function stopAutoSend() {
+  if (!auth.isSuperAdmin || !autoSendView.value || !autoSendView.value.canStop || autoSendStopping.value) return
+  if (!window.confirm(AUTO_SEND_STOP_CONFIRM)) return
+  autoSendStopping.value = true; autoSettingsError.value = ''
+  try {
+    const r = await api.post('/api/auto-invoice/send/stop', {})
+    autoSend.value = { ...autoSend.value, stopped: (r && r.stopped) || { at: '', reason: 'STOPPED_BY_ADMIN' } }
+    toast('Automatic sending stopped')
+  } catch (e) {
+    autoSettingsError.value = (e && e.message) || 'Sending could not be stopped. Try again.'
+  } finally {
+    autoSendStopping.value = false
+  }
+}
 // One domain per line; commas and spaces separate them too. The server checks each.
 const domainList = (text) => String(text || '').split(/[\s,;]+/).filter(Boolean)
 async function openAutoSettings() {
@@ -1008,9 +1087,10 @@ async function openAutoSettings() {
   autoSettingsOpen.value = true; autoSettingsError.value = ''; autoSettingsProblem.value = ''; autoSettingsLoading.value = true
   // Nothing from an earlier opening is kept: lists saved without this read would
   // replace the stored ones (the opt-outs among them).
-  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''
+  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''; autoSend.value = null
   try {
     const s = await api.get('/api/auto-invoice/settings')
+    autoSend.value = s && s.send && typeof s.send === 'object' ? s.send : null
     autoConfirmedText.value = (s.confirmedBrokerDomains || []).join('\n')
     autoOptOutText.value = (s.optOutDomains || []).join('\n')
     if (s.unreadable) autoSettingsProblem.value = AUTO_INVOICE_REASONS.SETTINGS_UNREADABLE.text
@@ -1103,8 +1183,11 @@ const detailSections = computed(() => {
 }
 .auto-line-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .auto-line-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.inflight-reason { flex: 1 1 10rem; min-width: 0; font-size: 0.78rem; padding: 0.2rem 0.4rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #111827; }
 .auto-result { margin-top: 0.35rem; font-size: 0.75rem; font-weight: 600; color: #166534; }
 .auto-result--error { color: #991b1b; }
+.inflight-result { margin-top: 0.35rem; font-size: 0.75rem; font-weight: 600; color: #166534; }
+.inflight-result--error { color: #991b1b; }
 .auto-settings { display: flex; flex-direction: column; gap: 0.4rem; }
 .auto-settings-label { margin-top: 0.4rem; font-size: 0.75rem; font-weight: 700; color: #334155; }
 .auto-settings-help { margin: 0; font-size: 0.75rem; color: #64748b; line-height: 1.4; }
@@ -1153,6 +1236,12 @@ const detailSections = computed(() => {
 .pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
 .pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
+/* Information only, so neutral: no button, no badge colour. */
+.pickup-arrival {
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb;
+  color: #374151; font-size: 0.8125rem; line-height: 1.4;
+}
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */
 .doc-del {

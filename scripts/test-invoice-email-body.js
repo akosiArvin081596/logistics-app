@@ -514,6 +514,11 @@ function harness(L, env = {}, { imapFails = false, rateconFiles = [], viewers, u
 	};
 	// The engine the route calls, built from the (possibly mutated) text over the same stubs.
 	scope.brokerInvoiceDraft = draftLift.loadEngine(L.engine, { ...scope, env: scope.process.env });
+	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
+	require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(db);
+	scope.factoringRoutes = require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db, logAudit: scope.logAudit });
+	// The automatic job's check for a load it sent (shipped lib code; the job off, nothing sent).
+	scope.autoInvoice = require(path.join(ROOT, "lib", "auto-invoice-job.js")).create({ db, env: {}, logAudit: scope.logAudit, log: { warn() {}, error() {} } });
 	const handlerOf = (text) => {
 		const registered = [];
 		new Function("app", ...Object.keys(scope), text)({ post: (...args) => registered.push(args) }, ...Object.values(scope));

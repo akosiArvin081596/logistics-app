@@ -41,12 +41,28 @@
 //      "Save anyway" re-sends the same body with the listed loads echoed as
 //      `confirmLoads` (withLoadsConfirmed()), never anything the panel worked
 //      out; a save the server could not check says so (loadsUncheckedNote())
+//   §11 a driver's own request (DRIVER_TIME_OFF_REQUESTS_ENABLED): the card's
+//      request rows, its words, and a form that only applies the server's
+//      requestLimits (shiftDayKey() counts whole calendar days, no Date)
+//   §12 staff: the request on its in-app notice, stored or live
+//      (timeOffRequestOfNotice(), noticeWithDecision(), requestDecisionText())
+//      and in the Drivers panel (panelGroup(), panelPastText(), panelRequestText())
+//   §13 home time (H1): his rows and requests keep a well-formed `home`; the
+//      form starts at the server's homeDefault and won't send without a city
+//      and a listed state; the staff forms take both or neither and send a
+//      changed home time only on a row carrying `home`; the words; the state
+//      list is the server's (lib/us-states.js STATE_CODES)
+//   §14 the note to CHR's contact (plan B PR 5): each state's words and the
+//      line staff copy (chrDraftText()), on the notice (chrDraftOfNotice(),
+//      noticeWithChrDraft()) and in an answer's lines (chrDraftReplyNotes());
+//      where Notifications, the panel and the Drivers page show them
 //
 // No DOM, no server. Files under test come from LOGISX_ROOT (default: this
 // checkout).
 //   node scripts/test-availability-edit-form.mjs
 import fs from 'fs'
 import path from 'path'
+import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const HERE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -71,8 +87,16 @@ try {
 eq('§0 client/src/lib/availabilityText.js loads', !!text, true)
 const T = text || {}
 const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote', 'rangeHint',
-  'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote']
+  'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote',
+  // A driver's own request (PR 4).
+  'shiftDayKey', 'driverRequestRows', 'driverRequestStatusText', 'requestFormStart', 'requestFormBounds', 'canSendRequest', 'requestBody',
+  'timeOffRequestOfNotice', 'noticeWithDecision', 'requestDecisionText', 'panelGroup', 'panelPastText', 'panelRequestText',
+  // Home time (H1).
+  'homeReady', 'staffHomeReady', 'createBody', 'homeLocationText', 'homeTimeText', 'panelHomeText']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
+eq('§0 ...and the card\'s two hints', [T.REQUEST_HINT, T.RECORDED_HINT], [
+  'Ask at least 5 days ahead. Dispatch approves each request. For sooner days or changes, message dispatch.',
+  'Dispatch records your time off. To change it, message dispatch.'])
 const call = (name, ...args) => (typeof T[name] === 'function' ? T[name](...args) : undefined)
 
 // Made-up rows, as the staff GET will send them (today 2026-10-16).
@@ -248,6 +272,135 @@ function scenario() {
     [{ loadId: 'L-103', from: '2026-10-22', to: '2026-10-23' }])
   rec('§10 a save the server could not check says so', call('loadsUncheckedNote', { success: true, row: {}, loadsUnchecked: true }), 'Loads couldn\'t be checked. Look at the Job Board for his loads.')
   rec('§10 ...a checked save says nothing', [call('loadsUncheckedNote', { success: true, row: {} }), call('loadsUncheckedNote', { loadsUnchecked: 'yes' }), call('loadsUncheckedNote', null)], ['', '', ''])
+
+  // §11 a driver's own request (PR 4): the card applies the days the server sent
+  // (requestLimits, from its own business day "today" Oct 15) and nothing else.
+  const LIMITS = { fromMin: '2026-10-20', fromMax: '2027-01-13', maxDays: 60, waitingMax: 5 }
+  rec('§11 shiftDayKey(): a month end, a year end, a leap day, backwards, 90 days on', [
+    call('shiftDayKey', '2026-10-31', 1), call('shiftDayKey', '2026-12-31', 1), call('shiftDayKey', '2028-02-28', 1), call('shiftDayKey', '2027-02-28', 1),
+    call('shiftDayKey', '2026-03-01', -1), call('shiftDayKey', '2026-10-15', 90), call('shiftDayKey', '2026-11-01', 0),
+  ], ['2026-11-01', '2027-01-01', '2028-02-29', '2027-03-01', '2026-02-28', '2027-01-13', '2026-11-01'])
+  rec('§11 ..."" for a key that is not a day or a count that is not whole', [call('shiftDayKey', '2026-13-01', 1), call('shiftDayKey', '', 1), call('shiftDayKey', '2026-10-15', 1.5)], ['', '', ''])
+  const asked = [
+    { id: 9, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', request: 'waiting', canCancel: true, reason: 'Family', decidedBy: 'dispatch_demo' },
+    { id: 8, kind: 'off_duty', from: '2026-11-02', to: '2026-11-02', request: 'declined', canCancel: true },
+    { id: 7, kind: 'other', from: '2026-11-20', to: '2026-11-21', request: 'approved', canCancel: false },
+    { id: 6, kind: 'other', from: '2026-11-25', to: '2026-11-24', request: 'waiting', canCancel: true },
+    { id: 5, kind: 'other', from: '2026-11-26', to: '2026-11-26', request: 'waiting', canCancel: 'yes' },
+    null,
+  ]
+  rec('§11 driverRequestRows(): waiting and declined only, by first day, six fields; Cancel only on a waiting one the server offered it on', call('driverRequestRows', asked), [
+    { id: 8, kind: 'off_duty', from: '2026-11-02', to: '2026-11-02', request: 'declined', canCancel: false },
+    { id: 9, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', request: 'waiting', canCancel: true },
+    { id: 5, kind: 'other', from: '2026-11-26', to: '2026-11-26', request: 'waiting', canCancel: false },
+  ])
+  rec('§11 ...nothing sent, or not a list', [call('driverRequestRows', undefined), call('driverRequestRows', { requests: [] })], [[], []])
+  rec('§11 driverRequestStatusText(): the card\'s words', [call('driverRequestStatusText', { request: 'waiting' }), call('driverRequestStatusText', { request: 'declined' }),
+    call('driverRequestStatusText', { request: 'approved' }), call('driverRequestStatusText', null)], ['Waiting for approval', 'Not approved. Message dispatch.', '', ''])
+  rec('§11 requestFormStart(): the first day the server allows, one day, "Off duty" (no home time sent: blank)', call('requestFormStart', LIMITS),
+    { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: '', homeState: '' })
+  rec('§11 ...no limits sent: empty days', call('requestFormStart', null), { kind: 'off_duty', from: '', to: '', homeCity: '', homeState: '' })
+  rec('§11 requestFormBounds(): the first day from fromMin to fromMax; the last from the first to the 60th day', call('requestFormBounds', LIMITS, { from: '2026-10-20', to: '2026-10-20' }),
+    { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: '2026-12-18' })
+  rec('§11 ...across a year end', call('requestFormBounds', LIMITS, { from: '2026-12-01', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-12-01', toMax: '2027-01-29' })
+  rec('§11 ...an empty first day: the last day starts at fromMin, no end limit', call('requestFormBounds', LIMITS, { from: '', to: '' }), { fromMin: '2026-10-20', fromMax: '2027-01-13', toMin: '2026-10-20', toMax: null })
+  rec('§11 ...no limits sent: only "not before the first day"', call('requestFormBounds', null, { from: '2026-11-02', to: '' }), { fromMin: null, fromMax: null, toMin: '2026-11-02', toMax: null })
+  // H1: a request names its home time, so each form here carries one.
+  const sendable = (form, limits = LIMITS) => call('canSendRequest', { kind: 'off_duty', homeCity: 'Springfield', homeState: 'MO', ...form }, limits)
+  rec('§11 canSendRequest(): Send inside the limits only', [
+    sendable({ from: '2026-10-20', to: '2026-10-22' }), sendable({ from: '2026-10-19', to: '2026-10-22' }), sendable({ from: '2027-01-13', to: '2027-01-13' }),
+    sendable({ from: '2027-01-14', to: '2027-01-14' }), sendable({ from: '2026-10-22', to: '2026-10-21' }), sendable({ from: '2026-10-20', to: '2026-12-18' }),
+    sendable({ from: '2026-10-20', to: '2026-12-19' }), sendable({ from: '2026-10-20', to: '' }), sendable({ from: '2026-10-20', to: '2026-10-20', kind: 'sick' }),
+    sendable({ from: '2026-10-20', to: '2026-10-20' }, null),
+  ], [true, false, true, false, false, true, false, false, false, false])
+  rec('§11 requestBody(): the two days, the kind and (H1) the home time, never anything else',
+    call('requestBody', { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', reason: 'Family', driver: 'Demo Driver', homeCity: ' Springfield ', homeState: 'MO' }),
+    { kind: 'vacation', from: '2026-11-02', to: '2026-11-03', homeCity: 'Springfield', homeState: 'MO' })
+
+  // §12 staff: the request on its in-app notice (stored, or live with its payload
+  // nested in `metadata`) and in the Drivers panel.
+  const notice = (metadata, type = 'time-off-request') => ({ id: 41, type, title: 'Time off request: Demo Driver (Nov 9 – Nov 13)', body: 'Off duty. Asked Nov 2.', metadata, read: 0 })
+  const STORED = notice(JSON.stringify({ availabilityId: 12, directoryId: 3 }))
+  const LIVE = notice(JSON.stringify({ type: 'time-off-request', title: 'x', body: 'y', metadata: { availabilityId: 12, directoryId: 3 } }))
+  rec('§12 timeOffRequestOfNotice(): a stored notice and a live one both name the request', [call('timeOffRequestOfNotice', STORED), call('timeOffRequestOfNotice', LIVE)],
+    [{ availabilityId: 12, decision: '', decidedBy: '' }, { availabilityId: 12, decision: '', decidedBy: '' }])
+  rec('§12 ...a decided one says who', call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' }))),
+    { availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' })
+  rec('§12 ...another type, unreadable metadata, no request id, or an unknown decision', [
+    call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12 }), 'eld-feed-silent')), call('timeOffRequestOfNotice', notice('{not json')),
+    call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 'x' }))), call('timeOffRequestOfNotice', notice(JSON.stringify({ availabilityId: 12, decision: 'maybe', decidedBy: 'x' }))),
+  ], [null, null, null, { availabilityId: 12, decision: '', decidedBy: '' }])
+  const decidedStored = call('noticeWithDecision', STORED, 12, 'declined', 'super_demo')
+  const decidedLive = call('noticeWithDecision', LIVE, 12, 'approved', 'dispatch_demo')
+  rec('§12 noticeWithDecision(): the decision written in, the metadata kept in the shape it came in', [
+    call('timeOffRequestOfNotice', decidedStored), typeof decidedStored?.metadata, call('timeOffRequestOfNotice', decidedLive), JSON.parse(decidedLive?.metadata || '{}').type,
+  ], [{ availabilityId: 12, decision: 'declined', decidedBy: 'super_demo' }, 'string', { availabilityId: 12, decision: 'approved', decidedBy: 'dispatch_demo' }, 'time-off-request'])
+  rec('§12 ...another request\'s notice, or an unknown decision: the same notice', [call('noticeWithDecision', STORED, 13, 'approved', 'x') === STORED, call('noticeWithDecision', STORED, 12, 'maybe', 'x') === STORED], [true, true])
+  rec('§12 requestDecisionText(): who decided, as staff read it', [
+    call('requestDecisionText', 'approved', 'dispatch_demo'), call('requestDecisionText', 'declined', 'super_demo'), call('requestDecisionText', 'cancelled', 'driver'),
+    call('requestDecisionText', 'cancelled', 'system'), call('requestDecisionText', 'approved', ''), call('requestDecisionText', '', 'x'),
+  ], ['Approved by dispatch_demo', 'Declined by super_demo', 'Cancelled by the driver', 'Cancelled: driver removed from the Drivers list', 'Approved by staff', ''])
+  const prow = (over) => ({ id: 1, kind: 'vacation', from: '2026-11-09', to: '2026-11-13', status: 'upcoming', request: 'approved', source: 'staff', decidedBy: null, ...over })
+  rec('§12 panelGroup(): a waiting request first, a declined one with the past rows, approved time off as before', [
+    call('panelGroup', prow({ request: 'waiting', source: 'driver' })), call('panelGroup', prow({ request: 'declined', source: 'driver' })), call('panelGroup', prow({})),
+    call('panelGroup', prow({ status: 'current' })), call('panelGroup', prow({ status: 'past' })), call('panelGroup', prow({ status: 'cancelled', request: 'waiting', source: 'driver' })),
+    call('panelGroup', { id: 2, from: '2026-11-09', to: '2026-11-13', status: 'upcoming' }), call('panelGroup', null),
+  ], ['waiting', 'past', 'live', 'live', 'past', 'past', 'live', 'past'])
+  rec('§12 panelPastText() and panelRequestText(): the words beside a row', [
+    call('panelPastText', prow({ status: 'cancelled' })), call('panelPastText', prow({ request: 'declined' })), call('panelPastText', prow({ status: 'past' })),
+    call('panelRequestText', prow({ request: 'waiting', source: 'driver' })), call('panelRequestText', prow({ source: 'driver', decidedBy: 'dispatch_demo' })),
+    call('panelRequestText', prow({ request: 'declined', source: 'driver', decidedBy: 'super_demo' })), call('panelRequestText', prow({})), call('panelRequestText', { status: 'upcoming' }),
+  ], ['Cancelled', 'Declined', 'Ended', 'Asked by the driver', 'Asked by the driver, approved by dispatch_demo', 'Asked by the driver, declined by super_demo', '', ''])
+
+  // §13 home time (H1). Made-up places.
+  const H = { city: 'Riverton', state: 'WY' }
+  rec('§13 driverTimeOffRows(): a row naming a home time keeps it; a malformed or null one is left out', call('driverTimeOffRows', [
+    { id: 1, kind: 'vacation', from: '2026-10-20', to: '2026-10-21', status: 'upcoming', home: H },
+    { id: 2, kind: 'vacation', from: '2026-10-22', to: '2026-10-23', status: 'upcoming', home: null },
+    { id: 3, kind: 'vacation', from: '2026-10-24', to: '2026-10-25', status: 'upcoming', home: { city: 'Riverton', state: 7, phone: '555-0100' } },
+  ]), [
+    { id: 1, kind: 'vacation', from: '2026-10-20', to: '2026-10-21', status: 'upcoming', home: H },
+    { id: 2, kind: 'vacation', from: '2026-10-22', to: '2026-10-23', status: 'upcoming' },
+    { id: 3, kind: 'vacation', from: '2026-10-24', to: '2026-10-25', status: 'upcoming' },
+  ])
+  rec('§13 driverRequestRows(): the same for a request, nothing else of `home` kept', call('driverRequestRows', [
+    { id: 4, kind: 'off_duty', from: '2026-11-09', to: '2026-11-10', request: 'waiting', canCancel: true, home: { ...H, note: 'x' } },
+  ]), [{ id: 4, kind: 'off_duty', from: '2026-11-09', to: '2026-11-10', request: 'waiting', canCancel: true, home: H }])
+  rec('§13 the words: the card\'s, the panel\'s, and none for no home time', [
+    call('homeTimeText', H), call('panelHomeText', { home: H }), call('homeLocationText', H), call('homeTimeText', null), call('panelHomeText', { home: { city: '', state: 'WY' } }), call('panelHomeText', null),
+  ], ['Home time in Riverton, WY', 'Home time: Riverton, WY', 'Riverton, WY', '', '', ''])
+  rec('§13 requestFormStart(): the home time at the server\'s homeDefault; a state off the list starts blank', [
+    call('requestFormStart', LIMITS, { city: 'Springfield', state: 'MO' }), call('requestFormStart', LIMITS, { city: 'Springfield', state: 'Missouri' }),
+  ], [{ kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: 'Springfield', homeState: 'MO' },
+    { kind: 'off_duty', from: '2026-10-20', to: '2026-10-20', homeCity: 'Springfield', homeState: '' }])
+  rec('§13 canSendRequest(): not without a city, a listed state, or with a city over 60 characters', [
+    sendable({ from: '2026-10-20', to: '2026-10-20' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: '   ' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeState: '' }),
+    sendable({ from: '2026-10-20', to: '2026-10-20', homeState: 'ZZ' }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: 'A'.repeat(60) }), sendable({ from: '2026-10-20', to: '2026-10-20', homeCity: 'A'.repeat(61) }),
+  ], [true, false, false, false, true, false])
+  rec('§13 staffHomeReady(): both or neither', [
+    call('staffHomeReady', { homeCity: '', homeState: '' }), call('staffHomeReady', { homeCity: 'Riverton', homeState: 'WY' }), call('staffHomeReady', { homeCity: 'Riverton', homeState: '' }),
+    call('staffHomeReady', { homeCity: ' ', homeState: 'WY' }), call('staffHomeReady', {}),
+  ], [true, true, false, false, true])
+  const HROW = stored({ home: H, request: 'approved', source: 'staff' })
+  const NOHOME = stored({ home: null, request: 'approved', source: 'staff' })
+  rec('§13 editFormFor(): the row\'s home time as fields, only on a row carrying `home`', [call('editFormFor', HROW, TODAY), call('editFormFor', NOHOME, TODAY), call('editFormFor', SA, TODAY)], [
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family', homeCity: 'Riverton', homeState: 'WY' },
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family', homeCity: '', homeState: '' },
+    { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family' },
+  ])
+  const hform = (row, over) => ({ ...call('editFormFor', row, TODAY), ...over })
+  rec('§13 editPatch(): an unchanged home time sends nothing; a changed city sends both parts; cleared sends both ""', [
+    call('editPatch', HROW, hform(HROW)), call('editPatch', HROW, hform(HROW, { homeCity: ' Lincoln ' })), call('editPatch', HROW, hform(HROW, { homeCity: '', homeState: '' })),
+    call('editPatch', NOHOME, hform(NOHOME, { homeCity: 'Lincoln', homeState: 'NE' })),
+  ], [{}, { homeCity: 'Lincoln', homeState: 'WY' }, { homeCity: '', homeState: '' }, { homeCity: 'Lincoln', homeState: 'NE' }])
+  rec('§13 ...never on an end-early edit, nor on a row without `home` (the flag off)', [
+    call('editPatch', { ...HROW, editable: 'end_early', limits: OLD.limits }, hform(HROW, { homeCity: 'Lincoln' })), call('editPatch', SA, { ...formOf(SA), homeCity: 'Lincoln', homeState: 'NE' }),
+  ], [{}, {}])
+  rec('§13 canSaveEdit(): not with a city and no state', [call('canSaveEdit', HROW, hform(HROW, { homeState: '' })), call('canSaveEdit', HROW, hform(HROW, { homeCity: 'Lincoln', homeState: 'NE' }))], [false, true])
+  rec('§13 createBody(): the home time\'s two parts (trimmed) only when the server offered it', [
+    call('createBody', { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: ' Family ', homeCity: ' Riverton ', homeState: 'WY' }, true),
+    call('createBody', { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: ' Family ', homeCity: ' Riverton ', homeState: 'WY' }, false),
+  ], [{ kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: 'Family', homeCity: 'Riverton', homeState: 'WY' }, { kind: 'vacation', from: '2026-10-20', to: '2026-10-21', reason: 'Family' }])
   return out.join('|')
 }
 
@@ -269,9 +422,18 @@ eq('§9 availabilityText.js uses no zone-dependent Date', !!lib && !ZONED_DATE.t
 const card = read('client/src/components/driver/DriverTimeOffCard.vue')
 eq('§9 DriverTimeOffCard.vue exists', !!card, true)
 eq('§9 the card uses no zone-dependent Date', !!card && !ZONED_DATE.test(card), true)
-eq('§9 the card never names a reason, an author or a cancelled row', !!card && !/reason|created|cancel|directoryId/i.test(card), true)
+// "Cancel request" on a waiting request (PR 4) is the one cancel the card may name.
+const cardOwnCancel = /Cancel request|canCancel|cancelTimeOffRequest/g
+eq('§9 the card never names a reason, an author or a cancelled row', !!card && !/reason|created|cancel|directoryId|decided/i.test(card.replace(cardOwnCancel, '')), true)
 eq('§9 the card lists rows through driverTimeOffRows()', !!card && /driverTimeOffRows\(/.test(card), true)
 eq('§9 the banner text comes from driverTimeOffBanner()', !!card && /driverTimeOffBanner\(/.test(card), true)
+// PR 4: the request part of the card follows the keys the server sent.
+eq('§9 the request part shows only when the payload carried `requests` (the server\'s flag)', !!card && /Array\.isArray\(props\.timeOff\.requests\)/.test(card) && /v-if="requestsOn && !loadFailed"/.test(card), true)
+eq('§9 "Request home time / days off" (H1) only on a session the server says may ask', !!card && /v-else-if="timeOff\.canRequest === true"[^>]*>Request home time \/ days off</.test(card), true)
+eq('§9 its requests come through driverRequestRows(), Cancel only where r.canCancel', !!card && /driverRequestRows\(/.test(card) && /v-if="r\.canCancel"[^>]*>Cancel request</.test(card), true)
+eq('§9 the form\'s days come from requestFormBounds() and requestFormStart(); Send waits for canSendRequest() and sends requestBody()',
+  !!card && [/requestFormBounds\(/, /requestFormStart\(/, /canSendRequest\(/, /requestTimeOff\(requestBody\(form\)\)/].every((re) => re.test(card)), true)
+eq('§9 the hint is the lib\'s, by the flag', !!card && /requestsOn \? REQUEST_HINT : RECORDED_HINT/.test(card), true)
 
 const view = read('client/src/views/DriverView.vue') || ''
 const cardTags = view.match(/<DriverTimeOffCard\b[^>]*>/g) || []
@@ -282,6 +444,30 @@ eq('§9 one of them is the banner', cardTags.filter((t) => /variant="banner"/.te
 const store = read('client/src/stores/driver.js') || ''
 eq('§9 the store starts with no time off', /\btimeOff: null,/.test(store), true)
 eq('§9 the store takes `timeOff` from the payload only when it is there', /this\.timeOff = [^\n]*data\.timeOff/.test(store), true)
+eq('§9 PR 4: the store asks and withdraws through the driver\'s own routes only (no name in the path or body)', [
+  /api\.post\('\/api\/driver\/me\/availability', body\)/.test(store), /api\.post\(`\/api\/driver\/me\/availability\/\$\{encodeURIComponent\(id\)\}\/cancel`, \{\}\)/.test(store),
+], [true, true])
+// Every plain reload swaps the Kit tab for its skeleton, which remounts the card and drops its note.
+const actionBody = (name) => {
+  const at = store.indexOf(`async ${name}(`)
+  return at < 0 ? '' : store.slice(at, store.indexOf('\n    },', at))
+}
+eq('§9 ...each reloads quietly (no skeleton swap), and a refusal over the days takes the server\'s limits again', [
+  ['requestTimeOff', 'cancelTimeOffRequest', 'refreshTimeOffLimits'].filter((n) => /this\.loadData\(\{ quiet: true \}\)/.test(actionBody(n))).length,
+  /if \(!\(opts && opts\.quiet === true\)\) this\.isLoading = true/.test(store),
+  !!card && /err\.code === 'TIME_OFF_TOO_SOON' \|\| err\.code === 'TIME_OFF_TOO_FAR'\)\) await driverStore\.refreshTimeOffLimits\(\)/.test(card),
+], [3, true, true])
+eq('§9 ...and DriverView opens the Kit tab on a time-off notice and refetches on `time-off-updated`',
+  [/notif\.type === 'time-off'/.test(view), /socket\.on\('time-off-updated', onTimeOffUpdated\)/.test(view), /socket\.off\('time-off-updated', onTimeOffUpdated\)/.test(view)], [true, true, true])
+
+// PR 4, staff: one tap on the notice, and the same two buttons in the panel.
+const notices = read('client/src/views/NotificationsView.vue') || ''
+eq('§9 Notifications: Approve and Decline keep their click on the button (@click.stop), on a waiting request only',
+  [/@click\.stop="decide\(n, 'approve'\)"/.test(notices), /@click\.stop="decide\(n, 'decline'\)"/.test(notices), /v-if="requestOf\(n\)\.decision"/.test(notices)], [true, true, true])
+eq('§9 ...each tap posts to the request\'s own route; "Approve anyway" re-sends withLoadsConfirmed()',
+  [/api\.post\(`\/api\/driver-availability\/\$\{req\.availabilityId\}\/\$\{decision\}`, body\)/.test(notices), /withLoadsConfirmed\(\{\}, err\.data\)/.test(notices),
+    /confirm-text="Approve anyway"/.test(notices), /cancel-text="Keep waiting"/.test(notices)], [true, true, true, true])
+eq('§9 ...and a decision made elsewhere reaches an open page', /socket\.on\('time-off-request-decided', onRequestDecided\)/.test(notices) && /socket\.off\('time-off-request-decided', onRequestDecided\)/.test(notices), true)
 
 const panel = read('client/src/components/drivers-db/DriverAvailabilityPanel.vue') || ''
 eq('§9 the panel uses no zone-dependent Date', !ZONED_DATE.test(panel), true)
@@ -297,9 +483,108 @@ eq('§9 ...says when loads were not checked through loadsUncheckedNote()', /load
 eq('§9 ...asks in its own dialog: "He has loads on these days", "Keep as is" (the safe button, first) and "Save anyway"',
   [/title="He has loads on these days"/.test(panel), /cancel-text="Keep as is"/.test(panel), /confirm-text="Save anyway"/.test(panel)], [true, true, true])
 eq('§9 ...and builds no echo of its own (no confirmLoads written in the panel)', /confirmLoads/.test(panel), false)
+eq('§9 PR 4: the panel groups rows by panelGroup(), a waiting request first with Approve and Decline posting to its own route',
+  [/panelGroup\(r\) === 'waiting'/.test(panel), /api\.post\(`\/api\/driver-availability\/\$\{r\.id\}\/\$\{decision\}`, body\)/.test(panel),
+    /confirm-text="Approve anyway"/.test(panel), panel.indexOf('v-for="r in waiting"') > -1 && panel.indexOf('v-for="r in waiting"') < panel.indexOf('v-for="r in live"')], [true, true, true, true])
+// §13 the source (H1).
+eq('§13 the card asks "Where do you need to be?" with a city and a state, starting at the server\'s homeDefault, and shows each home time through homeTimeText()', !!card && [
+  /<legend[^>]*>Where do you need to be\?<\/legend>/.test(card), /v-model="form\.homeCity"[^>]*:maxlength="HOME_CITY_MAX"/.test(card), /v-model="form\.homeState"/.test(card),
+  /v-for="s in US_STATES"/.test(card), /requestFormStart\(limits\.value, props\.timeOff\.homeDefault\)/.test(card), (card.match(/homeTimeText\(r\.home\)/g) || []).length === 2,
+].every(Boolean), true)
+eq('§13 the panel shows each row\'s home time through panelHomeText(), takes one in its edit form only on a row carrying `home`, and in its add form only with the server\'s homeTime', [
+  (panel.match(/panelHomeText\(r\)/g) || []).length >= 3, /v-if="'home' in r"/.test(panel), /v-if="homeTime"/.test(panel), /homeTime\.value = data\.homeTime === true/.test(panel),
+  /createBody\(form, homeTime\.value\)/.test(panel), /staffHomeReady\(form\)/.test(panel),
+], [true, true, true, true, true, true])
+{
+  let serverCodes = null
+  try { serverCodes = createRequire(import.meta.url)(path.join(ROOT, 'lib', 'us-states.js')).STATE_CODES } catch { serverCodes = null }
+  let clientStates = null
+  try { clientStates = (await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'utils', 'usStates.js')).href)).US_STATES } catch { clientStates = null }
+  eq('§13 the forms\' state list is the server\'s: client/src/utils/usStates.js codes = lib/us-states.js STATE_CODES (the 50 states and DC)',
+    [Array.isArray(serverCodes) && serverCodes.length, Array.isArray(clientStates) && clientStates.map((s) => s.code).sort().join() === (serverCodes || []).join()], [51, true])
+}
+
 for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/components/shared/OffDutyConfirmHost.vue']) {
   const src = read(rel)
   eq(`§9 ${rel} is left to the dispatch side (it never names DRIVER_HAS_LOADS)`, src !== null && !/DRIVER_HAS_LOADS|confirmLoads/.test(src), true)
+}
+
+// §14 the note to CHR's contact (plan B PR 5): the words staff read for each of the server's states, the line they
+// copy, the notice's and the answers' shapes, and where the screens show them. Made-up line.
+{
+  const LINE = 'Driver A. Example, LogisX truck T-101, unavailable Nov 9 – Nov 13'
+  for (const name of ['chrDraftText', 'chrDraftOfNotice', 'noticeWithChrDraft', 'chrDraftReplyNotes', 'chrDraftNoteText']) eq(`§14 availabilityText.js exports ${name}()`, typeof T[name], 'function')
+  eq('§14 the Copy button\'s words, and Retry\'s', [T.CHR_DRAFT_COPY, T.CHR_DRAFT_COPIED, T.CHR_DRAFT_RETRY], ['Copy', 'Copied', 'Retry the note to CHR'])
+  const said = (state, line, extra = {}) => call('chrDraftText', { state, ...(line ? { line } : {}), ...extra })
+  eq('§14 chrDraftText(): each state\'s words, with the line where the server sends one', [
+    said('pending'), said('made'), said('failed', LINE), said('no_recipient', LINE), said('no_truck'), said('refused'), said('past'), said('off', LINE), said('by_hand', LINE),
+  ], [
+    { words: 'Drafting the note to CHR\'s contact…', line: '' },
+    { words: 'Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.', line: '' },
+    { words: 'The note to CHR\'s contact couldn\'t be drafted. Retry, or tell them by hand:', line: LINE },
+    { words: 'No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand:', line: LINE },
+    { words: 'No truck on record for this driver: tell CHR\'s contact by hand.', line: '' },
+    { words: 'No draft: the note would carry a number that can\'t go to CHR. Tell CHR\'s contact by hand.', line: '' },
+    { words: 'These days are over, so no note to CHR.', line: '' },
+    { words: 'Tell CHR\'s contact:', line: LINE },
+    { words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE },
+  ])
+  eq('§14 ...a failed note with no line (its days changed) says to tell them by hand; a line on a state that never carries one is not shown; anything else is nothing',
+    [said('failed', '', { canRetry: false }), said('made', LINE), said('pending', LINE), call('chrDraftText', { state: 'sent' }), call('chrDraftText', null), call('chrDraftText', 'made')],
+    [{ words: 'The note to CHR\'s contact couldn\'t be drafted. Tell them by hand.', line: '' }, { words: 'Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.', line: '' },
+      { words: 'Drafting the note to CHR\'s contact…', line: '' }, null, null, null])
+  const unitWords = (why) => ({ words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' })
+  eq('§14 chrDraftText(): a truck unit the note can\'t carry says so with the server\'s reason, never "No truck on record"; no truck keeps its own words', [
+    said('unit_refused', '', { reason: 'characters' }), said('unit_refused', '', { reason: 'length' }), said('unit_refused', '', { reason: 'person' }),
+    said('unit_refused', '', { reason: 'number' }), said('unit_refused', LINE, { reason: 'made-up' }), said('no_truck'),
+  ], [
+    unitWords('it has characters other than letters, digits, dashes and a leading #'), unitWords('it is longer than 16 characters'),
+    unitWords('it looks like a phone number, an SSN or a date'), unitWords('it reads as a phone, load or account number'),
+    unitWords('it doesn\'t fit the note\'s rule'), { words: 'No truck on record for this driver: tell CHR\'s contact by hand.', line: '' },
+  ])
+  const noticeOf = (meta, type = 'time-off-request') => ({ id: 5, type, title: 't', body: 'b', metadata: meta })
+  const storedMeta = JSON.stringify({ availabilityId: 12, directoryId: 3, decision: 'approved', decidedBy: 'dispatch_demo', chrDraft: { state: 'off', line: LINE } })
+  const liveMeta = JSON.stringify({ type: 'time-off-request', metadata: { availabilityId: 12, directoryId: 3 } })
+  eq('§14 chrDraftOfNotice(): the stored notice\'s chrDraft; none on a live one not yet decided, or on another notice', [
+    call('chrDraftOfNotice', noticeOf(storedMeta)), call('chrDraftOfNotice', noticeOf(liveMeta)), call('chrDraftOfNotice', noticeOf(storedMeta, 'geofence')), call('chrDraftOfNotice', noticeOf('{not json')),
+  ], [{ state: 'off', line: LINE }, null, null, null])
+  const withStored = call('noticeWithChrDraft', noticeOf(JSON.stringify({ availabilityId: 12, directoryId: 3 })), 12, { state: 'pending' })
+  const withLive = call('noticeWithChrDraft', noticeOf(liveMeta), 12, { state: 'no_recipient', line: LINE })
+  const other = noticeOf(JSON.stringify({ availabilityId: 13 }))
+  eq('§14 noticeWithChrDraft(): this approval\'s chrDraft written in, the metadata kept in its shape; another request\'s notice untouched', [
+    typeof withStored?.metadata, call('chrDraftOfNotice', withStored), JSON.parse(withLive?.metadata || '{}').metadata?.chrDraft, call('noticeWithChrDraft', other, 12, { state: 'made' }) === other,
+  ], ['string', { state: 'pending' }, { state: 'no_recipient', line: LINE }, true])
+  const MADE_NOTE = 'CHR\'s contact was drafted about these days on Oct 15: tell them about this change.'
+  const MAY_NOTE = 'A note to CHR\'s contact about the old days may be in Gmail Drafts: check it before sending anything, and tell them about this change if it went out.'
+  eq('§14 chrDraftReplyNotes(): an approval\'s or a staff record\'s chrDraft; an edit\'s or a cancel\'s change, with the new days\' line; the Drivers-page delete\'s changes; nothing else', [
+    call('chrDraftReplyNotes', { success: true, chrDraft: { state: 'off', line: LINE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraft: { state: 'by_hand', line: LINE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChange: { state: 'made', note: MADE_NOTE, newDays: { state: 'by_hand', line: LINE } } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChange: { state: 'pending', note: MAY_NOTE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChanges: [{ availabilityId: 1, state: 'made', note: MADE_NOTE }, { availabilityId: 2, state: 'failed', note: MAY_NOTE }] }),
+    call('chrDraftReplyNotes', { success: true }), call('chrDraftReplyNotes', null),
+  ], [
+    [{ words: 'Tell CHR\'s contact:', line: LINE }],
+    [{ words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE }],
+    [{ words: MADE_NOTE, line: '' }, { words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE }],
+    [{ words: MAY_NOTE, line: '' }],
+    [{ words: MADE_NOTE, line: '' }, { words: MAY_NOTE, line: '' }],
+    [], [],
+  ])
+  eq('§14 chrDraftNoteText(): the words, then the line', [call('chrDraftNoteText', { words: 'Tell CHR\'s contact:', line: LINE }), call('chrDraftNoteText', { words: MADE_NOTE, line: '' }), call('chrDraftNoteText', null)],
+    [`Tell CHR's contact: ${LINE}`, MADE_NOTE, ''])
+  const notif = read('client/src/views/NotificationsView.vue') || ''
+  const panelSrc = read('client/src/components/drivers-db/DriverAvailabilityPanel.vue') || ''
+  const dbView = read('client/src/views/DriversDbView.vue') || ''
+  eq('§14 Notifications: the notice shows the note\'s words and line with a Copy button, takes the approve answer\'s chrDraft, and reloads on the live event', [
+    /chrDraftText\(chrDraftOfNotice\(n\)\)/.test(notif), /\{\{ chrOf\(n\)\.line \}\}/.test(notif), /copyLine\(n\.id, chrOf\(n\)\.line\)/.test(notif),
+    /if \(reply\.chrDraft\) store\.setRequestChrDraft\(req\.availabilityId, reply\.chrDraft\)/.test(notif), /socket\.on\('time-off-chr-draft', onChrDraft\)/.test(notif), /socket\.off\('time-off-chr-draft', onChrDraft\)/.test(notif),
+  ], [true, true, true, true, true, true])
+  eq('§14 the panel: each row\'s note in the live and past lists, Retry only where the server sends canRetry: true (posting to its route), and every answer\'s lines', [
+    (panelSrc.match(/<ReuseChrDraft :r="r" \/>/g) || []).length, /v-if="r\.chrDraft\.canRetry === true"/.test(panelSrc), /api\.post\(`\/api\/driver-availability\/\$\{r\.id\}\/chr-draft`, \{\}\)/.test(panelSrc),
+    /chrNotes\.value = chrDraftReplyNotes\(reply\)/.test(panelSrc), /created_?[aA]t|RETRY_AFTER|10 \* 60/.test(panelSrc),
+  ], [2, true, true, true, false])
+  eq('§14 the Drivers page: the delete\'s lines stay on the page until dismissed', [/chrDeleteNotes\.value = chrDraftReplyNotes\(reply\)\.map\(chrDraftNoteText\)/.test(dbView), /v-if="chrDeleteNotes\.length"/.test(dbView)], [true, true])
 }
 
 console.log(`\ntest-availability-edit-form: ${pass} passed, ${failures.length} failed`)

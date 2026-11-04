@@ -18,12 +18,26 @@
 //       row ends dry_run, held or skipped, and nothing reaches the network
 //   §10 reverts: pending rows become skipped_backwards; a dry-run row is flagged
 //   §11 the canary: made-up person data and a protected number planted in the
-//       history, the sheet and the settings reach no row, state, audit or log
+//       history, the sheet and the settings, and a driver's emergency contact,
+//       reach no row, state, audit or log
 //   §12 the source: lib/chr-*.js has no Sheets write, Drive, mail or n8n; its
-//       SQL names neither actor nor reason; no SELECT *
+//       SQL names neither actor nor reason; no SELECT *; it never names
+//       driver_emergency_contacts or driver_locations, and every routemate_telemetry
+//       SQL keeps source = 'routemate' and dropped_reason = '' (with mutants)
 //   §13 a protected number inside a load key is withheld on all four paths (a
 //       9-digit Load ID, one that is not, a blank or unreadable Email, a load
 //       missing from Job Tracking): no table, audit, log or result holds it
+//   §14 PR 3-shell, the pilot: two CHR loads and the pilot on one (Live rows
+//       only for it); its end at its delivered update or 72 hours after sending
+//       went on; Stop everything in the middle; Off saved during a request; the
+//       page's Live without CHR_LIVE_ALL_ENABLED is Dry run for every load; the
+//       pilot moved or sending switched off drops pending live rows; R3.7's
+//       location Pilot
+//   §15 the sender, with a made-up transport: SENT and its reference; backoff
+//       and Retry-After; AUTH_FAILED pauses; a refusal fails with one notice per
+//       load a day; five failures pause 15 minutes; a row cut off mid-request;
+//       the 24-hour give-up and a confirmed retry; 30 a minute; the CHR-load test
+//       and holds again before each request; no ready transport sends nothing
 //
 // Made-up data only. In-memory SQLite; every network call is refused and counted.
 //   node scripts/test-chr-sweep.js      # exits 1 on any failure
@@ -42,6 +56,9 @@ const E = require(path.join(ROOT, "lib", "chr-events.js"));
 const S = require(path.join(ROOT, "lib", "chr-store.js"));
 const W = require(path.join(ROOT, "lib", "chr-sweep.js"));
 const I = require(path.join(ROOT, "lib", "chr-integration.js"));
+// A config from the inputs this tree's chrConfig() takes, so a run on an older
+// tree fails on what it does rather than stopping at an input it lacks.
+const chrCfg = (input) => I.chrConfig(Object.fromEntries(Object.entries(input || {}).filter(([k]) => I.CONFIG_INPUTS.includes(k))));
 
 let pass = 0;
 const failures = [];
@@ -65,7 +82,7 @@ const MIN = 60 * 1000;
 const CANARY = Object.freeze({
 	name: "Canary Testdriver", phone: "(555) 555-0147", email: "canary.agent@example.test", ssn: "000-12-3456",
 	cdl: "CDL D0000001", dob: "01/02/1970", street: "742 Evergreen Terrace", money: "$1,234.56", carrier: "77700011122233",
-	note: "canary internal note",
+	note: "canary internal note", emergencyName: "Canary Emergencycontact", emergencyPhone: "(555) 555-0199",
 });
 const PICKUP = { latitude: 42.0347, longitude: -93.62 };
 const DROP = { latitude: 41.525, longitude: -88.0817 };
@@ -82,8 +99,11 @@ const TRUCKS = Object.freeze({
 	"driver two": { truck_id: 2, unit: "T-102", vid: "" },
 	"driver three": { truck_id: 3, unit: "T-103", vid: "" },
 });
-function world({ config = { updatesEnabled: true }, settings = null, sheetRows = [], points = {}, instructions = {}, trucks = TRUCKS } = {}) {
-	const db = new Database(":memory:");
+// `transport`: a made-up transport for the sender's cases; the sweep is then built
+// directly (lib/chr-integration.js builds its own, which is never ready).
+function world({ config = { updatesEnabled: true }, settings = null, sheetRows = [], points = {}, instructions = {}, trucks = TRUCKS, transport = null, db: given = null } = {}) {
+	const db = given || new Database(":memory:");
+	if (given) return worldOn(db, { config, sheetRows, points, instructions, trucks, transport });
 	db.exec(`
 		CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
 		CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -93,12 +113,18 @@ function world({ config = { updatesEnabled: true }, settings = null, sheetRows =
 			speed REAL DEFAULT 0, bearing TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, fuel_pct INTEGER,
 			geocoded_location TEXT DEFAULT '', location_date_ms INTEGER DEFAULT 0, fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			dropped_reason TEXT DEFAULT '', source TEXT DEFAULT '');
+		CREATE TABLE driver_emergency_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position INTEGER NOT NULL,
+			contact_name TEXT NOT NULL, relationship TEXT NOT NULL, contact_phone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 	`);
 	if (settings) S.writeSettings(db, { ...S.DEFAULT_SETTINGS, ...settings }, { by: "admin.one", nowIso: "2026-11-02T14:00:00.000Z" });
+	return worldOn(db, { config, sheetRows, points, instructions, trucks, transport });
+}
+// A world on an existing database: a restart with other switches is a new world on the same db.
+function worldOn(db, { config, sheetRows, points, instructions, trucks, transport }) {
 	const w = {
-		db, clock: Date.parse("2026-11-02T15:00:00Z"), sheetReads: 0, sheetFails: false, audits: [], logs: [], changes: 0, sheetRows,
+		db, clock: Date.parse("2026-11-02T15:00:00Z"), sheetReads: 0, sheetFails: false, audits: [], logs: [], changes: 0, sheetRows, notices: [],
 	};
-	const cfg = I.chrConfig(config);
+	const cfg = chrCfg(config);
 	const deps = {
 		db,
 		config: cfg,
@@ -113,10 +139,17 @@ function world({ config = { updatesEnabled: true }, settings = null, sheetRows =
 		instructionStopsFor: (key) => instructions[key] || null,
 		logAudit: (actor, action, entity, entityId, details) => w.audits.push({ user: actor.session.user, action, entity, entityId, details }),
 		onChange: () => { w.changes++; },
+		// Handed in only where the integration takes it, so an older tree still runs.
+		...(I.DEP_NAMES.includes("notify") ? { notify: (n) => w.notices.push(n) } : {}),
 		now: () => w.clock,
 		log: { info: (...a) => w.logs.push(a.join(" ")), warn: (...a) => w.logs.push(a.join(" ")), error: (...a) => w.logs.push(a.join(" ")) },
 	};
-	w.integration = I.create(deps);
+	if (transport) {
+		const sweep = W.createSweep({ ...deps, transport });
+		w.integration = { sweep: () => sweep.tick(), config: () => ({}) };
+	} else {
+		w.integration = I.create(deps);
+	}
 	w.tick = () => w.integration.sweep();
 	w.at = (iso) => { w.clock = Date.parse(iso); };
 	w.advance = (min) => { w.clock += min * MIN; };
@@ -159,7 +192,9 @@ async function main() {
 	eq(W.effectiveMode("milestone", { settings: set({ milestones: "dry_run" }), config: cfgSend, transportReady: true }), "dry_run", "§2 the page's Dry run: dry run");
 	eq(W.effectiveMode("milestone", { settings: set({ milestones: "live" }), config: cfgOn, transportReady: true }), "dry_run", "§2 Live without the send switch: dry run");
 	eq(W.effectiveMode("milestone", { settings: set({ milestones: "live" }), config: cfgSend }), "dry_run", "§2 Live with no transport (none exists in PR 1a): dry run");
-	eq(W.effectiveMode("milestone", { settings: set({ milestones: "live" }), config: cfgSend, transportReady: true }), "live", "§2 Live, the send switch and a transport: live");
+	eq(W.effectiveMode("milestone", { settings: set({ milestones: "live" }), config: cfgSend, transportReady: true }), "dry_run", "§2 Live, the send switch and a transport, without CHR_LIVE_ALL_ENABLED: dry run");
+	const cfgAll = chrCfg({ updatesEnabled: true, sendEnabled: true, liveAllEnabled: true, locationEnabled: true });
+	eq(W.effectiveMode("milestone", { settings: set({ milestones: "live" }), config: cfgAll, transportReady: true }), "live", "§2 ...with it: live");
 	eq(W.effectiveMode("location", { settings: set({ location: "dry_run" }), config: cfgOn }), "off", "§2 location without its server switch: off");
 	eq(W.effectiveMode("location", { settings: set({ location: "dry_run" }), config: cfgSend }), "dry_run", "§2 location with it: the page's mode");
 	eq([W.modeChange("", "dry_run"), W.modeChange("off", "live"), W.modeChange("dry_run", "off"), W.modeChange("live", "dry_run"), W.modeChange("live", "off"), W.modeChange("dry_run", "live"), W.modeChange("dry_run", "dry_run")],
@@ -449,12 +484,16 @@ async function main() {
 			config: { updatesEnabled: true, locationEnabled: true, denyList: CANARY.carrier },
 			settings: { arrivedPickup: true, positionsInMilestones: true },
 			sheetRows: [sheetRow("123456789", {
-				"Trailer Number": `53001 call ${CANARY.name} ${CANARY.phone}`, "Pickup Address": `Attn ${CANARY.name} ${CANARY.phone}, ${CANARY.street}, Ames, IA 50010`,
+				"Trailer Number": `53001 call ${CANARY.name} ${CANARY.phone}`,
+				"Pickup Address": `Attn ${CANARY.name} ${CANARY.phone} or ${CANARY.emergencyName} ${CANARY.emergencyPhone}, ${CANARY.street}, Ames, IA 50010`,
 				"Drop-off Address": `${CANARY.email} ${CANARY.ssn}, ${CANARY.cdl} ${CANARY.dob}, ${CANARY.name}, IL 60431`, Email: "made-up.agent@chrobinson.com",
 				"Broker Contact Name": `${CANARY.name} ${CANARY.carrier}`,
 			}), sheetRow("223456789", { "Trailer Number": CANARY.carrier.slice(0, 12), Email: "" })],
 			points: { 123456789: P2, 223456789: P2 },
 		});
+		// A driver's emergency contact (addendum C9): a table lib/chr-*.js never reads.
+		w.db.prepare("INSERT INTO driver_emergency_contacts (user_id, position, contact_name, relationship, contact_phone, created_at, updated_at) VALUES (1, 1, ?, 'Sibling', ?, ?, ?)")
+			.run(CANARY.emergencyName, CANARY.emergencyPhone, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z");
 		await w.tick();
 		w.advance(1);
 		for (const s of ["At Shipper", "In Transit", "At Receiver", "Delivered"]) { w.history("123456789", s); w.ping(1, AT_PICKUP); }
@@ -475,6 +514,8 @@ async function main() {
 			JSON.stringify(w.integration.config()),
 		].join("\n").toLowerCase();
 		eq(Object.entries(CANARY).filter(([, v]) => dump.includes(v.toLowerCase())).map(([k]) => k), [], "§11 no canary in any chr_ row, the state, the settings, an audit row, a log line or the config view");
+		ok(w.db.prepare("SELECT COUNT(*) AS n FROM driver_emergency_contacts WHERE contact_name = ? AND contact_phone = ?").get(CANARY.emergencyName, CANARY.emergencyPhone).n === 1,
+			"§11 (check) the emergency contact sat in its table the whole time");
 		ok(w.db.prepare("SELECT COUNT(*) AS n FROM chr_events WHERE status = 'dry_run'").get().n >= 1, "§11 ...while the pipeline ran (dry-run rows exist)");
 		ok(w.db.prepare("SELECT SUM(fields_dropped) AS n FROM chr_events").get().n >= 1, "§11 ...and dropped the planted fields, counted");
 		eq(networkCalls, 0, "§11 nothing reached the network");
@@ -483,18 +524,37 @@ async function main() {
 	// ---------------------------------------------------------------- §12
 	section("§12 the source");
 	const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => /^chr-.*\.js$/.test(f)).sort();
-	eq(libFiles, ["chr-events.js", "chr-integration.js", "chr-store.js", "chr-sweep.js", "chr-verify.js"], "§12 the five lib/chr-*.js files");
+	eq(libFiles, ["chr-events.js", "chr-integration.js", "chr-location.js", "chr-routes.js", "chr-store.js", "chr-sweep.js", "chr-transport.js", "chr-verify.js"], "§12 the eight lib/chr-*.js files");
 	const sqlOf = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /\b(?:SELECT|UPDATE|INSERT|DELETE|CREATE)\b/.test(s));
+	// Any string naming the table counts, SQL keyword or not, so a split query is still seen.
+	const telemetrySql = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /routemate_telemetry/i.test(s));
+	const locationScan = (text) => [
+		...(/driver_locations/i.test(text) ? ["driver_locations"] : []),
+		...telemetrySql(text).filter((s) => !/\bsource\s*=\s*'routemate'/i.test(s) || !/\bdropped_reason\s*=\s*''/i.test(s)),
+	];
 	for (const f of libFiles) {
 		const src = fs.readFileSync(path.join(ROOT, "lib", f), "utf8");
 		const code = src.replace(/^\s*\/\/.*$/gm, "");
 		ok(!/spreadsheets\.values\.(?:update|append|batchUpdate)|spreadsheets\.batchUpdate|getSheets\(|google\.sheets|google\.drive|getDrive\(|drive\.files/.test(code), `§12 ${f}: no Sheets or Drive call`);
 		ok(!/sendEmail|appendGmailDraft|nodemailer|imap|n8n|webhook/i.test(code), `§12 ${f}: no mail, draft, n8n or webhook`);
-		ok(!/\bfetch\s*\(|require\(["'](?:https?|net|tls)["']\)/.test(code), `§12 ${f}: no network call`);
+		// The transport is the one file that may call fetch (scripts/test-chr-transport.js §7 pins it to one call).
+		if (f === "chr-transport.js") ok(!/require\(["'](?:https?|net|tls)["']\)/.test(code), `§12 ${f}: no network module beyond its one fetch`);
+		else ok(!/\bfetch\s*\(|require\(["'](?:https?|net|tls)["']\)/.test(code), `§12 ${f}: no network call`);
 		ok(!/\bprocess\b/.test(src), `§12 ${f}: no environment read (the flags arrive as booleans through chrConfig())`);
 		eq(sqlOf(src).filter((s) => /\bactor\b|(?<![a-z_])reason\b/.test(s)), [], `§12 ${f}: its SQL names neither actor nor reason`);
 		ok(!/SELECT \*/i.test(src), `§12 ${f}: no SELECT *`);
+		// Addendum C9: a driver's emergency contacts are no CHR input, in SQL or anywhere else.
+		ok(!/driver_emergency_contacts/i.test(src), `§12 ${f}: never names driver_emergency_contacts`);
+		eq(locationScan(src), [], `§12 ${f}: never names driver_locations; every routemate_telemetry SQL keeps the clean-RouteMate filter`);
 	}
+	// Addendum R3.7: a position reaches CHR only from the truck's clean RouteMate
+	// fixes, never from drivers' phones (driver_locations) or Linxup/dropped rows.
+	ok(telemetrySql(fs.readFileSync(path.join(ROOT, "lib", "chr-verify.js"), "utf8")).length >= 2, "§12 (check) the scan sees chr-verify.js's two telemetry reads, so it is not vacuous");
+	eq(locationScan("const Q = `SELECT lat, lng FROM driver_locations WHERE driver_id = ?`;"), ["driver_locations"], "§12 mutant: a made-up driver_locations read is caught");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry WHERE routemate_vehicle_id = ?`;").length, 1, "§12 mutant: a routemate_telemetry read with no filter is caught");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry WHERE routemate_vehicle_id = ? AND dropped_reason = ''`;").length, 1, "§12 mutant: ...and one with only the dropped_reason half");
+	eq(locationScan("const Q = \"SELECT latitude FROM routemate_telemetry WHERE source = 'routemate'\";").length, 1, "§12 mutant: ...and one with only the source half");
+	eq(locationScan("const Q = `SELECT latitude FROM routemate_telemetry\n\tWHERE source = 'routemate' AND dropped_reason = ''`;"), [], "§12 (check) a filtered read passes");
 
 	// ---------------------------------------------------------------- §13
 	section("§13 a protected number inside a load key");
@@ -553,6 +613,254 @@ async function main() {
 			"§13 a due row whose key holds a protected number is decided as withheld (with no sheet row, not load_missing), with no payload");
 		eq(networkCalls, 0, "§13 nothing reached the network");
 	}
+
+	await pilotSections();
+	await senderSections();
+}
+
+// ------------------------------------------------------------------ PR 3-shell: the pilot and the sender
+// A made-up transport: ready, answering from a script (SENT by default), recording
+// each payload it is handed. It never touches the network.
+function fakeTransport(answers = []) {
+	const t = { sent: [], queue: answers.slice(), readyNow: true, drops: 0, during: null };
+	t.ready = () => t.readyNow;
+	t.send = async (payload, { reference } = {}) => {
+		t.sent.push({ payload, reference });
+		if (typeof t.during === "function") t.during(t.sent.length);
+		const a = t.queue.length ? t.queue.shift() : { resultCode: "SENT", httpStatus: 200 };
+		return { httpStatus: null, chrCode: "", retryAfterS: null, remoteRef: "", ...a };
+	};
+	t.dropToken = () => { t.drops++; };
+	return t;
+}
+const PILOT = (loadKey) => ({ loadKey, setAt: "2026-11-02T14:00:00.000Z", setBy: "admin.one", until: "" });
+const BOTH = { "123456789": { origin: PICKUP, dest: DROP }, "223456789": { origin: PICKUP, dest: DROP } };
+const iso = (ms) => new Date(ms).toISOString();
+// A departure from pickup 1 on each load, confirmed by its own truck's pings.
+function departBoth(w) {
+	w.ping(-5, AT_PICKUP);
+	w.ping(-5, AT_PICKUP, { device: "RM-TEST-2" });
+	w.history("123456789", "In Transit");
+	w.history("223456789", "In Transit");
+	w.ping(4, OUTSIDE, { speed: 20 });
+	w.ping(4, OUTSIDE, { speed: 20, device: "RM-TEST-2" });
+}
+const readyRow = (w, load, n, over = {}) => w.db.prepare(`INSERT INTO chr_events (load_id, kind, event, stop_kind, stop_index, event_at, verify, idem_key, payload_json, mode, status,
+	next_attempt_at, attempts, claimed_at, created_at, updated_at)
+	VALUES (?, 'milestone', 'departed_pickup', 'pickup', 1, ?, 'confirmed', ?, ?, 'live', ?, ?, ?, ?, ?, ?)`)
+	.run(load, over.eventAt || iso(w.clock), `ms|${load}|departed_pickup|p1|h${n}`, JSON.stringify({ loadNumber: load, event: "departed_pickup", stop: { kind: "pickup", index: 1 }, eventAt: iso(w.clock).replace(/\.\d{3}Z$/, "Z") }),
+		over.status || "pending", over.next || iso(w.clock), over.attempts || 0, over.claimedAt || "", iso(w.clock), iso(w.clock)).lastInsertRowid;
+const rowOf = (w, id) => w.db.prepare("SELECT status, mode, attempts, result_code, http_status, next_attempt_at, sent_at, skip_reason FROM chr_events WHERE id = ?").get(id);
+
+async function pilotSections() {
+	section("§14 the pilot (one load Live) and CHR_LIVE_ALL_ENABLED");
+	const set = (over) => ({ ...S.DEFAULT_SETTINGS, ...over });
+	const cfgSend = I.chrConfig({ updatesEnabled: true, sendEnabled: true });
+	const pilotOn = set({ milestones: "pilot", pilot: PILOT("123456789") });
+	eq([W.effectiveMode("milestone", { settings: pilotOn, config: cfgSend, transportReady: true }),
+		W.effectiveMode("milestone", { settings: pilotOn, config: cfgSend, transportReady: true, loadKey: "123456789" }),
+		W.effectiveMode("milestone", { settings: pilotOn, config: cfgSend, transportReady: true, loadKey: "223456789" }),
+		W.effectiveMode("milestone", { settings: pilotOn, config: I.chrConfig({ updatesEnabled: true }), transportReady: true, loadKey: "123456789" }),
+		W.effectiveMode("milestone", { settings: set({ milestones: "pilot" }), config: cfgSend, transportReady: true, loadKey: "123456789" })],
+	["pilot", "live", "dry_run", "dry_run", "dry_run"], "§14 Pilot: the pilot load Live, every other load Dry run; Dry run without the send switch or without a pilot record");
+	eq(S.normalizeSettings({ milestones: "pilot", location: "pilot", pilot: PILOT("123456789") }).milestones, "pilot", "§14 the settings keep \"pilot\" (it used to be read back as off)");
+	// Addendum R3.7: the pilot rule is written per kind, so location reuses it.
+	const locPilot = set({ location: "pilot", pilot: PILOT("123456789") });
+	eq([W.effectiveMode("location", { settings: locPilot, config: cfgSend, transportReady: true, loadKey: "123456789" }),
+		W.effectiveMode("location", { settings: locPilot, config: I.chrConfig({ updatesEnabled: true, locationEnabled: true }), transportReady: true, loadKey: "123456789" }),
+		W.effectiveMode("location", { settings: locPilot, config: I.chrConfig({ updatesEnabled: true, sendEnabled: true, locationEnabled: true }), transportReady: true, loadKey: "123456789" })],
+	["off", "dry_run", "live"], "§14 R3.7 location's Pilot: off without CHR_LOCATION_ENABLED; with it and sending off, dry run; with both, the pilot load Live");
+
+	// Two CHR loads, the pilot on one.
+	const tr = fakeTransport();
+	const w = world({ config: { updatesEnabled: true, sendEnabled: true }, settings: pilotOn, sheetRows: [sheetRow("123456789"), sheetRow("223456789", { Driver: "driver two" })], points: BOTH, transport: tr });
+	await w.tick();
+	departBoth(w);
+	await w.runFor(16);
+	eq(w.events().map((e) => `${e.load_id}:${e.mode}:${e.status}`), ["123456789:live:sent", "223456789:dry_run:dry_run"], "§14 two CHR loads, the pilot on one: Live rows only for it, Dry run for the other");
+	eq(tr.sent.map((s) => s.payload.loadNumber), ["123456789"], "§14 ...one request, for the pilot load");
+	eq((S.readSettings(w.db).pilot || {}).until, iso(Date.parse("2026-11-02T15:00:00Z") + 72 * 60 * MIN), "§14 the pilot's end: 72 hours after sending went on (the first tick that saw the switch)");
+	// Its delivered update sent: the pilot ends, and every load is Dry run again.
+	w.ping(-1, AT_DROP);
+	w.history("123456789", "Delivered");
+	w.ping(1, AT_DROP);
+	await w.runFor(8);
+	await w.runFor(2);
+	const ended = S.readSettings(w.db);
+	eq([ended.milestones, ended.pilot, w.events().filter((e) => e.event === "delivered").map((e) => `${e.mode}:${e.status}`)], ["dry_run", null, ["live:sent"]],
+		"§14 the pilot's delivered update sent: the pilot ends, milestones back to Dry run");
+	ok(w.audits.some((a) => a.action === "chr_pilot_end" && /delivered update was sent/.test(a.details)) && w.notices.some((n) => /pilot ended/.test(n.title)), "§14 ...one system audit row and one notice say so");
+
+	// The end counts from the send switch's start, not from when the pilot was set.
+	const db = new Database(":memory:");
+	const w1 = world({ db: null, config: { updatesEnabled: true }, settings: pilotOn, sheetRows: [sheetRow("123456789")], points: BOTH, transport: fakeTransport() });
+	await w1.tick();
+	eq([S.readSettings(w1.db).milestones, (S.readSettings(w1.db).pilot || {}).until, w1.state().sendOnAt], ["pilot", "", ""], "§14 the pilot set while sending is off: no end time yet");
+	db.close();
+	const w2 = world({ db: w1.db, config: { updatesEnabled: true, sendEnabled: true }, sheetRows: [sheetRow("123456789")], points: BOTH, transport: fakeTransport() });
+	w2.clock = w1.clock + 5 * 24 * 60 * MIN;
+	await w2.tick();
+	const onAt = w2.clock;
+	eq([w2.state().sendOnAt, (S.readSettings(w2.db).pilot || {}).until], [iso(onAt), iso(onAt + 72 * 60 * MIN)], "§14 sending on five days later: the 72 hours start then");
+	w2.clock = onAt + 72 * 60 * MIN - MIN;
+	await w2.tick();
+	eq(S.readSettings(w2.db).milestones, "pilot", "§14 ...a minute before them: still the pilot");
+	w2.clock = onAt + 72 * 60 * MIN;
+	await w2.tick();
+	eq([S.readSettings(w2.db).milestones, w2.audits.filter((a) => a.action === "chr_pilot_end").map((a) => /72 hours/.test(a.details))], ["dry_run", [true]], "§14 ...at 72 hours: back to Dry run, audited");
+
+	// Stop everything in the middle: no request starts after Off is saved.
+	const tr3 = fakeTransport([{ resultCode: "CHR_UNAVAILABLE", httpStatus: 503 }]);
+	const w3 = world({ config: { updatesEnabled: true, sendEnabled: true }, settings: pilotOn, sheetRows: [sheetRow("123456789")], points: BOTH, transport: tr3 });
+	await w3.tick();
+	const a = readyRow(w3, "123456789", 1);
+	await w3.runFor(1);
+	eq([rowOf(w3, a).status, tr3.sent.length], ["pending", 1], "§14 the pilot load's update met a 503: pending, its retry due in 2 minutes");
+	S.writeSettings(w3.db, { ...S.readSettings(w3.db), milestones: "off", location: "off" }, { by: "admin.one", nowIso: iso(w3.clock) });
+	await w3.runFor(5);
+	eq([rowOf(w3, a).status, rowOf(w3, a).skip_reason, tr3.sent.length], ["skipped_off", "mode_off", 1], "§14 Stop everything before the retry: skipped, never sent again");
+	// Off saved while a request is under way: the next queued one never starts.
+	const tr4 = fakeTransport();
+	const w4 = world({ config: { updatesEnabled: true, sendEnabled: true }, settings: pilotOn, sheetRows: [sheetRow("123456789")], points: BOTH, transport: tr4 });
+	await w4.tick();
+	const b1 = readyRow(w4, "123456789", 1);
+	const b2 = readyRow(w4, "123456789", 2);
+	tr4.during = (n) => { if (n === 1) S.writeSettings(w4.db, { ...S.readSettings(w4.db), milestones: "off" }, { by: "admin.one", nowIso: iso(w4.clock) }); };
+	w4.advance(1);
+	await w4.tick();
+	eq([rowOf(w4, b1).status, rowOf(w4, b2).status, rowOf(w4, b2).skip_reason, tr4.sent.length], ["sent", "skipped_off", "live_dropped", 1],
+		"§14 Off saved during a request: that one finishes, the next queued one is skipped and never starts");
+
+	// The page's Live with CHR_LIVE_ALL_ENABLED off: Dry run for every load.
+	const tr5 = fakeTransport();
+	const w5 = world({ config: { updatesEnabled: true, sendEnabled: true }, settings: set({ milestones: "live" }), sheetRows: [sheetRow("123456789"), sheetRow("223456789", { Driver: "driver two" })], points: BOTH, transport: tr5 });
+	await w5.tick();
+	departBoth(w5);
+	await w5.runFor(16);
+	eq([w5.events().map((e) => `${e.mode}:${e.status}`), tr5.sent.length], [["dry_run:dry_run", "dry_run:dry_run"], 0], "§14 the page's Live without CHR_LIVE_ALL_ENABLED: Dry run for every load, nothing sent");
+	// The pilot moved to another load: the old one's pending live rows are dropped.
+	const tr6 = fakeTransport([{ resultCode: "TIMEOUT" }]);
+	const w6 = world({ config: { updatesEnabled: true, sendEnabled: true }, settings: pilotOn, sheetRows: [sheetRow("123456789"), sheetRow("223456789")], points: BOTH, transport: tr6 });
+	await w6.tick();
+	const c1 = readyRow(w6, "123456789", 1);
+	await w6.runFor(1);
+	S.writeSettings(w6.db, { ...S.readSettings(w6.db), pilot: PILOT("223456789") }, { by: "admin.one", nowIso: iso(w6.clock) });
+	await w6.runFor(3);
+	eq([rowOf(w6, c1).status, rowOf(w6, c1).skip_reason, tr6.sent.length], ["skipped_off", "live_dropped", 1], "§14 the pilot moved: the old load's pending live update is dropped, never sent");
+	// Sending switched off (a restart without CHR_SEND_ENABLED): the sender no longer
+	// runs, and the pending live rows are skipped at once, never sent later.
+	const w7 = world({ db: w6.db, config: { updatesEnabled: true }, sheetRows: [sheetRow("123456789"), sheetRow("223456789")], points: BOTH, transport: fakeTransport() });
+	w7.clock = w6.clock + MIN;
+	const c2 = readyRow(w7, "223456789", 2);
+	await w7.tick();
+	eq([rowOf(w7, c2).status, rowOf(w7, c2).skip_reason, w7.audits.filter((x) => x.action === "chr_live_dropped").length], ["skipped_off", "live_dropped", 1],
+		"§14 sending switched off: the pending live update is skipped at once (live_dropped), audited");
+	eq(networkCalls, 0, "§14 nothing reached the network");
+}
+
+async function senderSections() {
+	section("§15 the sender (Live for every load, a made-up transport)");
+	const liveAll = { updatesEnabled: true, sendEnabled: true, liveAllEnabled: true };
+	const live = { ...S.DEFAULT_SETTINGS, milestones: "live" };
+	const fresh = async (answers) => {
+		const tr = fakeTransport(answers);
+		const w = world({ config: liveAll, settings: live, sheetRows: [sheetRow("123456789"), sheetRow("223456789")], points: BOTH, transport: tr });
+		await w.tick();
+		return { w, tr };
+	};
+	eq([1, 2, 3, 4, 5, 6, 7].map((n) => W.backoffMs(n) / MIN), [2, 5, 15, 30, 60, 120, 120], "§15 backoff: 2, 5, 15, 30 and 60 minutes, then every 2 hours");
+	{
+		const { w, tr } = await fresh();
+		const id = readyRow(w, "123456789", 1);
+		await w.runFor(1);
+		const r = rowOf(w, id);
+		eq([r.status, r.attempts, r.result_code, r.http_status, r.sent_at === iso(w.clock)], ["sent", 1, "SENT", 200, true], "§15 SENT: sent, one attempt, the result kept");
+		eq([tr.sent.length, tr.sent[0].reference, tr.sent[0].payload.loadNumber], [1, W.referenceOf("ms|123456789|departed_pickup|p1|h1"), "123456789"], "§15 ...the stored payload, with an opaque reference from the row's key");
+		ok(/^[0-9a-f]{32}$/.test(tr.sent[0].reference) && !tr.sent[0].reference.includes("123456789"), "§15 ...the reference carries nothing of the load");
+	}
+	{
+		const { w } = await fresh([{ resultCode: "CHR_UNAVAILABLE", httpStatus: 503 }, { resultCode: "RATE_LIMITED", httpStatus: 429, retryAfterS: 600 }, { resultCode: "TIMEOUT" }]);
+		const id = readyRow(w, "123456789", 1);
+		await w.runFor(1);
+		eq([rowOf(w, id).status, rowOf(w, id).next_attempt_at], ["pending", iso(w.clock + 2 * MIN)], "§15 a 503: pending, next try in 2 minutes");
+		await w.runFor(2);
+		eq([rowOf(w, id).attempts, rowOf(w, id).result_code, rowOf(w, id).next_attempt_at], [2, "RATE_LIMITED", iso(w.clock + 10 * MIN)], "§15 a 429 asking for 10 minutes: honoured over the 5-minute backoff");
+		await w.runFor(10);
+		eq([rowOf(w, id).attempts, rowOf(w, id).next_attempt_at], [3, iso(w.clock + 15 * MIN)], "§15 a timeout on the third try: 15 minutes");
+	}
+	{
+		const { w, tr } = await fresh([{ resultCode: "AUTH_FAILED", httpStatus: 401 }]);
+		const id1 = readyRow(w, "123456789", 1);
+		const id2 = readyRow(w, "223456789", 2);
+		await w.runFor(1);
+		eq([w.state().pausedReason, rowOf(w, id1).status, rowOf(w, id2).status, tr.sent.length, tr.drops], ["AUTH_FAILED", "pending", "pending", 1, 1],
+			"§15 AUTH_FAILED: sending pauses at once, the token is dropped, both updates wait");
+		await w.runFor(20);
+		eq([tr.sent.length, w.audits.filter((a) => a.action === "chr_paused").length, w.notices.filter((n) => /paused/.test(n.title)).length], [1, 1, 1], "§15 ...nothing more is sent while paused; one audit row, one notice");
+	}
+	{
+		const { w } = await fresh([{ resultCode: "REJECTED", httpStatus: 400 }, { resultCode: "REJECTED", httpStatus: 422 }]);
+		const id1 = readyRow(w, "123456789", 1);
+		const id2 = readyRow(w, "123456789", 2);
+		await w.runFor(1);
+		eq([rowOf(w, id1).status, rowOf(w, id2).status], ["failed", "failed"], "§15 any other 4xx: failed, final until a person retries");
+		eq(w.notices.filter((n) => /refused/.test(n.title)).length, 1, "§15 ...one notice for the load that day, not one per update");
+		ok(w.notices.every((n) => !n.body.toLowerCase().includes(CANARY.name.toLowerCase())), "§15 ...naming no driver");
+	}
+	{
+		const fives = Array.from({ length: 5 }, () => ({ resultCode: "CHR_UNAVAILABLE", httpStatus: 502 }));
+		const { w, tr } = await fresh(fives);
+		for (let i = 1; i <= 5; i++) readyRow(w, i % 2 ? "123456789" : "223456789", i);
+		await w.runFor(1);
+		eq([tr.sent.length, w.state().pausedReason, w.state().pausedUntil], [5, "CHR_UNAVAILABLE", iso(w.clock + 15 * MIN)], "§15 five retryable failures in a row: paused as CHR_UNAVAILABLE for 15 minutes");
+		await w.runFor(14);
+		eq(tr.sent.length, 5, "§15 ...nothing sent during it");
+		await w.runFor(1);
+		eq([w.state().pausedReason, w.audits.some((a) => a.action === "chr_unpaused")], ["", true], "§15 ...then it resumes by itself, audited");
+	}
+	{
+		const { w, tr } = await fresh();
+		const stuck = readyRow(w, "123456789", 1, { status: "sending", claimedAt: iso(w.clock - 11 * MIN), attempts: 1 });
+		const old = readyRow(w, "223456789", 2, { eventAt: iso(w.clock - 25 * 60 * MIN) });
+		await w.runFor(1);
+		eq([rowOf(w, stuck).status, rowOf(w, old).status, tr.sent.length], ["outcome_unknown", "gave_up", 0], "§15 cut off mid-request: outcome_unknown, never sent again by itself; a milestone 24 hours old: given up");
+		ok(w.notices.some((n) => /given up/.test(n.title)), "§15 ...the give-up is told to the Super Admins");
+		// A person retried an old update on purpose (confirmOld): it is sent, not given up again.
+		const retried = readyRow(w, "223456789", 3, { eventAt: iso(w.clock - 30 * 60 * MIN) });
+		w.db.prepare("UPDATE chr_events SET acted_by = 'admin.one' WHERE id = ?").run(retried);
+		await w.runFor(1);
+		eq([rowOf(w, retried).status, tr.sent.length], ["sent", 1], "§15 an old update a person retried on purpose: sent, not given up again");
+	}
+	{
+		const { w, tr } = await fresh();
+		for (let i = 1; i <= 35; i++) readyRow(w, "123456789", i);
+		await w.runFor(1);
+		eq(tr.sent.length, W.MAX_SENDS_PER_MIN, "§15 at most 30 requests a minute");
+		await w.runFor(1);
+		eq(tr.sent.length, 35, "§15 ...the rest the next minute");
+	}
+	{
+		const { w, tr } = await fresh();
+		const id = readyRow(w, "123456789", 1);
+		w.sheetRows = [sheetRow("123456789", { Email: "made-up.agent@example-broker.test" })];
+		await w.runFor(1);
+		eq([rowOf(w, id).status, tr.sent.length], ["skipped_not_chr", 0], "§15 right before the request the CHR-load test runs again: another broker's load now is never sent");
+		const id2 = readyRow(w, "223456789", 2);
+		S.setHold(w.db, { loadId: "223456789", hold: true, reason: "made-up", by: "admin.one", nowIso: iso(w.clock), redactor: E.createRedactor({}) });
+		w.sheetRows = [sheetRow("223456789")];
+		await w.runFor(1);
+		eq([rowOf(w, id2).status, tr.sent.length], ["held", 0], "§15 ...and a load put on hold is held, not sent");
+	}
+	{
+		const tr = fakeTransport();
+		tr.readyNow = false;
+		const w = world({ config: liveAll, settings: live, sheetRows: [sheetRow("123456789"), sheetRow("223456789", { Driver: "driver two" })], points: BOTH, transport: tr });
+		await w.tick();
+		departBoth(w);
+		await w.runFor(16);
+		eq([w.events().map((e) => `${e.mode}:${e.status}`), tr.sent.length], [["dry_run:dry_run", "dry_run:dry_run"], 0], "§15 no ready transport (as shipped): Live is Dry run, nothing sent");
+	}
+	eq(networkCalls, 0, "§15 nothing reached the network");
 }
 
 main().then(() => {
@@ -567,5 +875,8 @@ main().then(() => {
 	process.exit(0);
 }).catch((err) => {
 	console.error(err);
+	// What failed before the stop, so a run on an older tree still says what it lacks.
+	failures.forEach((f) => console.log(`  ✗ ${f}`));
+	console.log(`\n${pass} passed, ${failures.length} failed, then stopped`);
 	process.exit(1);
 });

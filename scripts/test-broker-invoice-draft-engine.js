@@ -27,6 +27,10 @@
  *      free-mail list (lib/free-mail-domains.js) the engine reads.
  *   §6 the automatic job's calls as it makes them: the bare actor, record()'s
  *      answer, recovery's to/subject/total comparison, the refusal codes.
+ *   §7 mode "auto" reads Job Tracking's Payment as one plain amount: a cell
+ *      holding two figures, a note or an accounting negative is TOTAL_MISMATCH
+ *      (logged without its value); plain amounts prepare, render and record as
+ *      before; a load already held stays held; the button is unchanged.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -171,8 +175,9 @@ const QUIET = { log() {}, warn() {}, error() {} };
 const AUTO_ACTOR = { session: { user: { id: 0, username: "auto-invoice", role: "system" } } };
 const ADMIN = { session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } };
 
-// `sheet` and `ratecons` replace the fixtures for one world (a load that changed).
-function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS } = {}) {
+// `sheet` and `ratecons` replace the fixtures for one world (a load that changed);
+// `log` is the console the engine writes to.
+function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET } = {}) {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_SQL);
 	for (const a of DRAFTS_ALTERS) db.exec(a);
@@ -213,7 +218,7 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 			return Buffer.from("%PDF-1.4 invoice");
 		},
 		env,
-		console: QUIET,
+		console: log,
 	});
 	const ov = (body = {}) => helpers.parseInvoiceOverrides(body);
 	const auto = (loadId, extra = {}) => engine.prepare({ loadId, mode: "auto", ...extra });
@@ -391,13 +396,30 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			"§4 …and the generated email, unedited");
 		eq(rendered.html, rendered.draftHtml, "§4 html is the route's draftHtml");
 
+		// The Draft Invoice button's in-flight rows (lib/factoring-store.js): record()
+		// touches one only when told to (settleInflight), inside its own write.
+		w.db.exec(`CREATE TABLE IF NOT EXISTS invoice_draft_inflight (load_key TEXT NOT NULL, load_id TEXT NOT NULL DEFAULT '', invoice_id TEXT NOT NULL,
+			path TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (load_key, invoice_id))`);
+		const inflight = () => w.db.prepare("SELECT load_key, invoice_id FROM invoice_draft_inflight ORDER BY invoice_id").all();
+		const putInflight = w.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES ('ld-test-0001', 'LD-TEST-0001', ?, 'imap', 'in_flight', '2026-10-28T12:00:00Z', '2026-10-28T12:00:00Z')");
+		putInflight.run("10282026-7");
+		putInflight.run("10282026-6");
 		w.engine.record(ctx, rendered, { via: "auto-imap", actor: AUTO_ACTOR, invoiceId: "10282026-7", mintedInvoiceId: "10282026-7", editDiffs: [] });
+		eq(inflight().length, 2, "§4 record() without settleInflight leaves the in-flight table untouched (the automatic drafts' calls)");
 		const row = w.db.prepare("SELECT load_id, invoice_id, recipient, recipient_source, total, via, created_by, edited, invoice_id_minted FROM load_invoice_drafts").all();
 		eq(row, [{ load_id: "LD-TEST-0001", invoice_id: "10282026-7", recipient: BILLING, recipient_source: "ratecon", total: "$1,500.00", via: "auto-imap", created_by: "auto-invoice", edited: 0, invoice_id_minted: "" }],
 			"§4 one draft row: auto-imap, the invoice #, created by auto-invoice, unedited");
 		const audit = w.db.prepare("SELECT user_id, username, role, action, entity, entity_id, details FROM audit_trail").all();
 		eq(audit, [{ user_id: 0, username: "auto-invoice", role: "system", action: "invoice_draft_created", entity: "load", entity_id: "LD-TEST-0001", details: `10282026-7 → ${BILLING} (auto-imap)` }],
 			"§4 one audit row, the system actor, in today's invoice_draft_created shape");
+		const settled = w.engine.record(ctx, rendered, { via: "imap", actor: AUTO_ACTOR, invoiceId: "10282026-7", mintedInvoiceId: "10282026-7", editDiffs: [],
+			settleInflight: { loadKey: "ld-test-0001", invoiceId: "10282026-7" } });
+		eq([settled.recorded, inflight()], [true, [{ load_key: "ld-test-0001", invoice_id: "10282026-6" }]],
+			"§4 FAILS ON THE OLD CODE: with settleInflight, exactly that in-flight row goes, with the draft row");
+		w.db.exec("CREATE TRIGGER made_up_refuse BEFORE INSERT ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'made-up refusal'); END;");
+		const refused = w.engine.record(ctx, rendered, { via: "imap", actor: AUTO_ACTOR, invoiceId: "10282026-6", mintedInvoiceId: "10282026-6", editDiffs: [], draftWarnings: [],
+			settleInflight: { loadKey: "ld-test-0001", invoiceId: "10282026-6" } });
+		eq([refused.recorded, inflight().length], [false, 1], "§4 FAILS ON THE OLD CODE: an INSERT that fails takes the delete with it (the row stays; record() answers recorded:false)");
 
 		const busy = world({ rendererBusy: true });
 		const bctx = (await busy.auto("LD-TEST-0001")).ctx;
@@ -494,6 +516,128 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		let threw = "";
 		try { await world().engine.prepare({ loadId: "LD-TEST-0001", body: {}, dryRun: true, mode: "auto" }); } catch (e) { threw = e.message; }
 		ok(/never dry-runs/.test(threw), "§6 mode \"auto\" refuses a dry run (it would skip the approve's refusals)");
+	}
+
+	// ===================================================================== §7
+	// The sheet's side of the automatic total check is the raw Payment cell read
+	// as one plain amount (lib/cell-compare.js moneyCents()): parseMoney() keeps
+	// digits, "." and "-", so it reads "1,800.00 / 1,875.00" as $1,800.00. Every
+	// cell is made up; in each red case the rate con prints the cell's first figure.
+	section("7. mode \"auto\" — Job Tracking's Payment must be one plain amount");
+	{
+		const PAY = "  Payment  ";
+		const ID = "LD-TEST-0001";
+		// `id`'s Payment cell set to `pay`; with `total`, its one rate con prints that
+		// Total Rate (read by the free scan, no Gemini).
+		const payWorld = (id, pay, total = null, extra = {}) => {
+			const sheet = SHEET.map((r) => (r[0] === id ? r.map((c, i) => (HEADERS[i] === PAY ? pay : c)) : r));
+			const rc = id === "LD-TEST-0002" ? cand(rateCon({ order: "7101852", total }), "drive") : cand(rateCon({ docs: BILLING, total }), "documents");
+			return world({ ...extra, sheet, ratecons: total === null ? RATECONS : { ...RATECONS, [id]: [rc] } });
+		};
+		const capture = () => {
+			const lines = [];
+			const put = (...a) => lines.push(a.map(String).join(" "));
+			return { lines, log: { log: put, warn: put, error: put } };
+		};
+		const aboutPayment = (lines) => lines.filter((l) => /one amount/.test(l));
+		// No digit and no "$" once the load ID is taken out: no figure is carried.
+		const noValue = (text) => !/[\d$]/.test(String(text).split(ID).join(""));
+		const NOT_ONE = `Job Tracking's Payment on load ${ID} isn't one amount.`;
+		const DIFFER = `The rate con's total and Job Tracking's Payment differ on load ${ID}.`;
+		const LOGGED = `Draft invoice ${ID}: Job Tracking's Payment isn't one amount; held for a person.`;
+
+		for (const [pay, total, what] of [
+			["1,800.00 / 1,875.00", "$1,800.00", "two figures with a slash"],
+			["$1,950.00 - $150.00", "$1,950.00", "a figure less another"],
+			["1,800.00 (1,875 w/ det)", "$1,800.00", "a figure and a note holding another"],
+			["1800.00 1875.00", "$1,800.00", "two figures side by side"],
+			["$1,800.00\n$1,875.00", "$1,800.00", "two figures on two lines of one cell"],
+			["$1,800.00 - 35 DVIR", "$1,800.00", "a figure with a deduction noted"],
+			["1,800.00 TONU", "$1,800.00", "a figure with a word after it"],
+			["$1,800.00*", "$1,800.00", "a figure with a footnote mark"],
+		]) {
+			const c = capture();
+			const r = await payWorld(ID, pay, total, { log: c.log }).auto(ID);
+			eq([code(r), r.http, r.json && r.json.error], ["TOTAL_MISMATCH", 422, NOT_ONE],
+				`§7 FAILS ON THE OLD CODE: ${what}, ${JSON.stringify(pay)}, its first figure the rate con's total (${total}) → TOTAL_MISMATCH, for a person`);
+			eq(aboutPayment(c.lines), [LOGGED], `§7 …one log line says why (${what})`);
+			ok(noValue(JSON.stringify(r.json)) && c.lines.every(noValue), `§7 …neither the refusal nor the log carries a figure (${what})`);
+		}
+		const bison = await payWorld("LD-TEST-0002", "2,400.00 / 2,475.00", "$2,400.00").auto("LD-TEST-0002");
+		eq([code(bison), bison.json && bison.json.error], ["TOTAL_MISMATCH", "Job Tracking's Payment on load LD-TEST-0002 isn't one amount."],
+			"§7 FAILS ON THE OLD CODE: a Bison load's two-figure Payment, its rate con's total the first figure → TOTAL_MISMATCH");
+		const negative = await payWorld(ID, "($1,800.00)", "$1,800.00").auto(ID);
+		eq([code(negative), negative.json && negative.json.error], ["TOTAL_MISMATCH", DIFFER],
+			"§7 FAILS ON THE OLD CODE: an accounting negative \"($1,800.00)\" is -$1,800.00, never the rate con's $1,800.00 → TOTAL_MISMATCH");
+
+		for (const [pay, total, n] of [
+			["$1,950.00", "$1,950.00", 1950],
+			["1950", "$1,950.00", 1950],
+			[" $ 4,100.00 ", "$4,100.00", 4100],
+			["$1,800.00", "$1,800.00", 1800],
+			[" $ 1,800.00 ", "$1,800.00", 1800],
+			["1800", "$1,800.00", 1800],
+			["1,800", "$1,800.00", 1800],
+			["$1,234.56", "$1,234.56", 1234.56],
+		]) {
+			const c = capture();
+			const r = await payWorld(ID, pay, total, { log: c.log }).auto(ID);
+			eq([code(r), r.ok && [r.ctx.rcTotal, r.ctx.sheetTotal, r.ctx.totalAmount, r.ctx.totalSource, r.ctx.total, r.ctx.billedTotal]],
+				["ok", [n, n, n, "ratecon", total, total]], `§7 one plain amount, ${JSON.stringify(pay)}, equal to the rate con's ${total}: prepares exactly as before`);
+			eq(aboutPayment(c.lines), [], `§7 …and logs nothing about the Payment (${JSON.stringify(pay)})`);
+		}
+		const pw = payWorld(ID, " $ 4,100.00 ", "$4,100.00");
+		const prep = await pw.auto(ID);
+		const rendered = await pw.engine.render(prep.ctx, { invoiceId: "11042026-1", invoiceDate: "11/04/2026" });
+		pw.engine.record(prep.ctx, rendered, { via: "auto-imap", actor: AUTO_ACTOR, invoiceId: "11042026-1", mintedInvoiceId: "11042026-1", editDiffs: [] });
+		eq([rendered.total, pw.db.prepare("SELECT total, total_source, sheet_total, ratecon_total FROM load_invoice_drafts").all()],
+			["$4,100.00", [{ total: "$4,100.00", total_source: "ratecon", sheet_total: "$4,100.00", ratecon_total: "$4,100.00" }]],
+			"§7 …the draft for \" $ 4,100.00 \" bills $4,100.00 and its row records it, as before");
+
+		for (const [pay, total, want, what] of [
+			["$1,800.00", "$1,800.01", DIFFER, "one cent apart"],
+			["1,800.01", "$1,800.00", DIFFER, "one cent apart, the other way"],
+			["-$1,800.00", "$1,800.00", DIFFER, "a negative"],
+			["1,500 + 75 det", "$1,500.00", null, "a sum written out"],
+			["1,800.00 + 75.00 det", "$1,800.00", null, "a sum written out with cents"],
+			["", "$1,800.00", null, "an empty cell"],
+		]) {
+			const r = await payWorld(ID, pay, total).auto(ID);
+			eq([code(r), want ? r.json && r.json.error : null], ["TOTAL_MISMATCH", want], `§7 still held: ${what} (${JSON.stringify(pay)} against ${total}) → TOTAL_MISMATCH`);
+		}
+		const noColumn = await world({ sheet: SHEET.map((r) => r.filter((c, i) => HEADERS[i] !== PAY)) }).auto(ID);
+		eq([code(noColumn), noColumn.json && noColumn.json.error], ["TOTAL_MISMATCH", NOT_ONE],
+			"§7 still held: a sheet with no Payment column → TOTAL_MISMATCH, there is no figure to check the rate con's against");
+		// It only adds holds: a cell the strict reading takes as a positive amount
+		// is that amount to parseMoney() too, so nothing the old check held passes.
+		const { moneyCents } = require(path.join(ROOT, "lib", "cell-compare.js"));
+		const AMOUNTS = ["0", "1800", "1,800", "1800.5", "1,800.00", "$1,800.00", "1,234.56", "1234.560", "-1,800.00", "$-1,800.00"];
+		const SHAPES = [(a) => a, (a) => ` ${a} `, (a) => `$ ${a}`, (a) => `(${a})`, (a) => `${a} / 1,875.00`, (a) => `1,875.00 / ${a}`,
+			(a) => `${a} - 150`, (a) => `${a}*`, (a) => `${a} USD`, (a) => `${a}\n${a}`, (a) => `${a} ${a}`, (a) => `${a}${a}`];
+		const disagree = [];
+		let taken = 0;
+		for (const a of AMOUNTS) {
+			for (const shape of SHAPES) {
+				const s = moneyCents(shape(a));
+				if (s === null || s <= 0) continue;
+				taken++;
+				if (Math.round(brokerInvoice.parseMoney(shape(a)) * 100) !== s) disagree.push(shape(a));
+			}
+		}
+		eq([disagree, taken >= 20], [[], true],
+			`§7 only adds holds: of ${AMOUNTS.length * SHAPES.length} made-up cells, every one the strict reading takes as a positive amount (${taken}) reads the same under parseMoney()`);
+
+		const mc = capture();
+		const m = await payWorld(ID, "1,800.00 / 1,875.00", "$1,800.00", { log: mc.log }).manual(ID);
+		eq([code(m), m.ok && [m.ctx.totalSource, m.ctx.total, m.ctx.sheetTotal]], ["ok", ["ratecon", "$1,800.00", brokerInvoice.parseMoney("1,800.00 / 1,875.00")]],
+			"§7 the button, the same two-figure cell: nothing refused, the rate con's total billed, the sheet read as before");
+		eq(aboutPayment(mc.lines), [], "§7 …and nothing logged about the Payment");
+		const unread = payWorld("LD-TEST-0024", "1,800.00 / 1,875.00");
+		const m2 = await unread.manual("LD-TEST-0024");
+		eq([code(m2), m2.ok && [m2.ctx.totalSource, m2.ctx.total]], ["ok", ["sheet", "$1,800.00"]],
+			"§7 the button with no rate-con total read: it bills the sheet's figure as before, for the person to review");
+		eq(code(await unread.auto("LD-TEST-0024")), "RATECON_TOTAL_UNREAD",
+			"§7 mode \"auto\" on that load: the unread rate-con total is still the refusal it gives (checked first, as before)");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);

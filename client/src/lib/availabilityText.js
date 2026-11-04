@@ -10,7 +10,9 @@
 // scripts/test-availability-edit-form.mjs covers the edit and driver-screen
 // helpers below.
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+import { US_STATES } from '../utils/usStates.js'
+
+const MONTHS =['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const DAY_MS = 24 * 60 * 60 * 1000
 // Whole days on the UTC calendar (Date.UTC), which no zone can shift.
 const dayIndex = (key) => Date.UTC(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, Number(key.slice(8, 10))) / DAY_MS
@@ -118,7 +120,9 @@ export function rowActions(row) {
 }
 
 // The body of an edit: only the fields that changed. An "end_early" row only
-// ever sends { to }; a row the caller may not change sends nothing.
+// ever sends { to }; a row the caller may not change sends nothing. A changed
+// home time (only on a row carrying `home`, the server's requests flag) sends
+// both its parts, "" for none.
 export function editPatch(row, form) {
   const mode = editMode(row)
   if (mode === 'none') return {}
@@ -131,6 +135,11 @@ export function editPatch(row, form) {
     } else if (f[key] !== row[key]) {
       patch[key] = f[key]
     }
+  }
+  if (mode === 'full' && homeKeyed(row)) {
+    const was = homeFormFields(row)
+    const next = { homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) }
+    if (next.homeCity !== was.homeCity || next.homeState !== was.homeState) Object.assign(patch, next)
   }
   return patch
 }
@@ -193,21 +202,24 @@ export function endEarlyNote(createLimits) {
     : 'Started too long ago: only a Super Admin can change the other details.'
 }
 
-// Save is offered once something changed and the days sit inside the limits.
+// Save is offered once something changed, the days sit inside the limits and a
+// home time, where the row has one's key, is whole or empty (staffHomeReady()).
 export function canSaveEdit(row, form) {
   const mode = editMode(row)
   if (mode === 'none') return false
   if (Object.keys(editPatch(row, form)).length === 0) return false
+  if (mode === 'full' && homeKeyed(row) && !staffHomeReady(form)) return false
   const days = mode === 'end_early' ? { from: row.from, to: (form || {}).to } : form
   return datesWithinBounds(days, editDateBounds(row, form))
 }
 
-// Where an edit form starts: the stored row. End early starts at today, moved
-// inside the server's limits, so one tap ends the time off as early as allowed
-// (the stored end when today can't be read).
+// Where an edit form starts: the stored row, with its home time when the row
+// carries one's key (the server's requests flag). End early starts at today,
+// moved inside the server's limits, so one tap ends the time off as early as
+// allowed (the stored end when today can't be read).
 export function editFormFor(row, today) {
   const r = row || {}
-  const form = { kind: r.kind, from: r.from, to: r.to, reason: reasonText(r.reason) }
+  const form = { kind: r.kind, from: r.from, to: r.to, reason: reasonText(r.reason), ...homeFormFields(r) }
   if (editMode(r) === 'end_early' && isAvailabilityDay(today)) {
     const b = editDateBounds(r, form)
     let to = laterDay(today, b.toMin)
@@ -260,12 +272,13 @@ export function loadsUncheckedNote(reply) {
 const DRIVER_STATUSES = ['current', 'upcoming']
 const BANNER_LEAD_DAYS = 7
 
-// His current and upcoming rows, by first day, as { id, kind, from, to, status }.
+// His current and upcoming rows, by first day, as { id, kind, from, to, status },
+// plus `home` ({ city, state }) on a row that names a home time.
 export function driverTimeOffRows(rows) {
   if (!Array.isArray(rows)) return []
   return rows
     .filter((r) => r && typeof r === 'object' && DRIVER_STATUSES.includes(r.status) && isAvailabilityDay(r.from) && isAvailabilityDay(r.to) && r.from <= r.to)
-    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, status: r.status }))
+    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, status: r.status, ...homeKey(r) }))
     .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
 }
 
@@ -280,4 +293,348 @@ export function driverTimeOffBanner(rows, today) {
   if (now) return `You're marked off ${availabilityRangeText(now.from, now.to)} (${kindLabel(now.kind)}).`
   const next = list.find((r) => r.from > today && dayIndex(r.from) - dayIndex(today) <= BANNER_LEAD_DAYS)
   return next ? `Time off coming up: ${availabilityRangeText(next.from, next.to)}.` : ''
+}
+
+// ── A driver's own request (D's rules of 2026-10-31) ────────────────────────
+// With the server's DRIVER_TIME_OFF_REQUESTS_ENABLED on, `timeOff` also carries
+// `requests` ([{ id, kind, from, to, request: "waiting" | "declined",
+// canCancel }]), `requestLimits` ({ fromMin, fromMax, maxDays, waitingMax }) and
+// `canRequest`. The server decides every day: the form starts at fromMin, which
+// it worked out from its own business day, and it refuses anything else in
+// words. Nothing here counts days ahead from the phone's clock.
+
+export const REQUEST_HINT = 'Ask at least 5 days ahead. Dispatch approves each request. For sooner days or changes, message dispatch.'
+export const RECORDED_HINT = 'Dispatch records your time off. To change it, message dispatch.'
+const REQUEST_STATES = ['waiting', 'declined']
+
+// A day key from whole days since 1970-01-01 (Howard Hinnant's civil_from_days):
+// integer arithmetic only, so no Date and no zone is involved.
+function keyFromDayIndex(n) {
+  const z = n + 719468
+  const era = Math.floor(z / 146097)
+  const doe = z - era * 146097
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+  const mp = Math.floor((5 * doy + 2) / 153)
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1
+  const m = mp < 10 ? mp + 3 : mp - 9
+  const y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+}
+
+// `key` moved by n whole days ("" for a key that is not a day).
+export function shiftDayKey(key, n) {
+  return isAvailabilityDay(key) && Number.isInteger(n) ? keyFromDayIndex(dayIndex(key) + n) : ''
+}
+
+// Their waiting and declined requests, by first day, each rebuilt from
+// { id, kind, from, to, request, canCancel } only, plus `home` on one that names
+// a home time.
+export function driverRequestRows(requests) {
+  if (!Array.isArray(requests)) return []
+  return requests
+    .filter((r) => r && typeof r === 'object' && REQUEST_STATES.includes(r.request) && isAvailabilityDay(r.from) && isAvailabilityDay(r.to) && r.from <= r.to)
+    .map((r) => ({ id: r.id, kind: r.kind, from: r.from, to: r.to, request: r.request, canCancel: r.request === 'waiting' && r.canCancel === true, ...homeKey(r) }))
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
+}
+
+// What a request's card row says about it.
+export function driverRequestStatusText(r) {
+  if (r && r.request === 'waiting') return 'Waiting for approval'
+  if (r && r.request === 'declined') return 'Not approved. Message dispatch.'
+  return ''
+}
+
+// Where the request form starts: the first day the server allows, for one day,
+// "Off duty" (the server's default kind), and the home time at the server's
+// `homeDefault` (his Drivers page city and state; a state off the list starts blank).
+export function requestFormStart(limits, homeDefault) {
+  const from = isAvailabilityDay((limits || {}).fromMin) ? limits.fromMin : ''
+  const d = homeDefault && typeof homeDefault === 'object' ? homeDefault : {}
+  return { kind: 'off_duty', from, to: from, homeCity: typeof d.city === 'string' ? d.city : '', homeState: STATE_CODES.has(d.state) ? d.state : '' }
+}
+
+// The form's date limits from the server's requestLimits: the first day from
+// fromMin to fromMax; the last day from the form's first day to the last one
+// the server's maxDays allows.
+export function requestFormBounds(limits, form) {
+  const l = limits || {}
+  const from = isAvailabilityDay((form || {}).from) ? form.from : null
+  const max = countOrNull(l.maxDays)
+  return {
+    fromMin: dayOrNull(l.fromMin),
+    fromMax: dayOrNull(l.fromMax),
+    toMin: laterDay(from, l.fromMin),
+    toMax: from && max ? shiftDayKey(from, max - 1) : null,
+  }
+}
+
+// Send is offered once both days are real days inside those limits and the
+// home time is filled in (homeReady(): the server requires it on his request).
+export function canSendRequest(form, limits) {
+  const f = form || {}
+  const b = requestFormBounds(limits, f)
+  if (!b.fromMin || !isAvailabilityDay(f.from) || !isAvailabilityDay(f.to)) return false
+  if (f.from < b.fromMin || (b.fromMax && f.from > b.fromMax)) return false
+  if (f.to < b.toMin || (b.toMax && f.to > b.toMax)) return false
+  if (!homeReady(f)) return false
+  return AVAILABILITY_KINDS.some((k) => k.value === f.kind)
+}
+
+// The body a request sends: the two days, the kind and the home time (the city
+// trimmed), never anything else.
+export function requestBody(form) {
+  const f = form || {}
+  return { kind: f.kind, from: f.from, to: f.to, homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) }
+}
+
+// ── Home time (H1) ──────────────────────────────────────────────────────────
+// With the server's DRIVER_TIME_OFF_REQUESTS_ENABLED on, `timeOff` carries
+// `homeDefault` (where his request form starts) and each row and request `home`
+// ({ city, state } or null); each staff row carries `home`, and the staff list
+// `homeTime: true` for the add form. His request must name a city and a state;
+// a staff row both or neither. The server checks every rule (a city name, not
+// digits or contact details) and refuses in its own words: the forms only hold
+// back a blank city, one over 60 characters, or a state not on the list.
+
+export const HOME_CITY_MAX = 60
+const STATE_CODES = new Set(US_STATES.map((s) => s.code))
+const homePart = (v) => (typeof v === 'string' ? v.trim() : '')
+
+// { city, state } when both are text, else null.
+function homeOf(h) {
+  return h && typeof h === 'object' && typeof h.city === 'string' && h.city && typeof h.state === 'string' && h.state ? { city: h.city, state: h.state } : null
+}
+
+// `{ home }` for a row that names a home time, {} otherwise.
+function homeKey(r) {
+  const h = homeOf(r && r.home)
+  return h ? { home: h } : {}
+}
+
+// Whether a staff row carries the `home` key (the server's requests flag).
+const homeKeyed = (row) => !!row && typeof row === 'object' && Object.prototype.hasOwnProperty.call(row, 'home')
+
+// A staff row's home time as form fields ({} when the row has no `home` key).
+function homeFormFields(row) {
+  if (!homeKeyed(row)) return {}
+  const h = homeOf(row.home)
+  return { homeCity: h ? h.city : '', homeState: h ? h.state : '' }
+}
+
+// Both parts filled in: a city of 1-60 characters and a state on the list.
+export function homeReady(form) {
+  const f = form || {}
+  const city = homePart(f.homeCity)
+  return city.length > 0 && city.length <= HOME_CITY_MAX && STATE_CODES.has(f.homeState)
+}
+
+// A staff form's home time: both parts (homeReady()) or neither.
+export function staffHomeReady(form) {
+  const f = form || {}
+  return (!homePart(f.homeCity) && !homePart(f.homeState)) || homeReady(f)
+}
+
+// The staff add form's body: its days, kind and reason, and the home time's two
+// parts ("" for none) only when the server offered it (`homeTime`).
+export function createBody(form, homeTime) {
+  const f = form || {}
+  return {
+    kind: f.kind, from: f.from, to: f.to, reason: reasonText(f.reason),
+    ...(homeTime === true ? { homeCity: homePart(f.homeCity), homeState: homePart(f.homeState) } : {}),
+  }
+}
+
+// "Springfield, MO" ("" for none).
+export function homeLocationText(home) {
+  const h = homeOf(home)
+  return h ? `${h.city}, ${h.state}` : ''
+}
+
+// The driver's card: "Home time in Springfield, MO" ("" for none).
+export function homeTimeText(home) {
+  const t = homeLocationText(home)
+  return t ? `Home time in ${t}` : ''
+}
+
+// The staff panel: "Home time: Springfield, MO" ("" for none).
+export function panelHomeText(row) {
+  const t = homeLocationText(row && row.home)
+  return t ? `Home time: ${t}` : ''
+}
+
+// ── Staff: a request on the in-app notice and in the Drivers panel ──────────
+// The notice (type "time-off-request") carries { availabilityId, directoryId }
+// in its metadata, and the decision once made ({ decision, decidedBy }); a live
+// notice nests its whole payload in `metadata`, so both shapes are read.
+
+const DECISIONS = ['approved', 'declined', 'cancelled']
+
+function parseMeta(meta) {
+  if (meta && typeof meta === 'object') return meta
+  if (typeof meta !== 'string') return null
+  try {
+    const v = JSON.parse(meta || '{}')
+    return v && typeof v === 'object' ? v : null
+  } catch {
+    return null
+  }
+}
+
+// { availabilityId, decision, decidedBy } of a time-off-request notice, decision
+// "" while it waits; null for any other notice.
+export function timeOffRequestOfNotice(n) {
+  if (!n || n.type !== 'time-off-request') return null
+  const meta = parseMeta(n.metadata)
+  if (!meta) return null
+  const inner = meta.metadata && typeof meta.metadata === 'object' ? meta.metadata : meta
+  const id = Number(inner.availabilityId)
+  if (!Number.isInteger(id) || id <= 0) return null
+  const decision = DECISIONS.includes(inner.decision) ? inner.decision : ''
+  return { availabilityId: id, decision, decidedBy: decision && typeof inner.decidedBy === 'string' ? inner.decidedBy : '' }
+}
+
+// The notice with a decision written in (a live update or this user's own tap),
+// its metadata kept in the shape it came in.
+export function noticeWithDecision(n, availabilityId, decision, decidedBy) {
+  const req = timeOffRequestOfNotice(n)
+  if (!req || req.availabilityId !== Number(availabilityId) || !DECISIONS.includes(decision)) return n
+  const meta = parseMeta(n.metadata) || {}
+  const by = typeof decidedBy === 'string' ? decidedBy : ''
+  const next = meta.metadata && typeof meta.metadata === 'object'
+    ? { ...meta, metadata: { ...meta.metadata, decision, decidedBy: by } }
+    : { ...meta, decision, decidedBy: by }
+  return { ...n, metadata: typeof n.metadata === 'string' ? JSON.stringify(next) : next }
+}
+
+// What a decided request says: "Approved by dispatch_t", "Declined by
+// dispatch_t", "Cancelled by the driver", or, when the driver was removed from
+// the Drivers list, "Cancelled: driver removed from the Drivers list"; "" while
+// it waits.
+export function requestDecisionText(decision, decidedBy) {
+  const by = typeof decidedBy === 'string' && decidedBy.trim() ? decidedBy.trim() : 'staff'
+  if (decision === 'approved') return `Approved by ${by}`
+  if (decision === 'declined') return `Declined by ${by}`
+  if (decision === 'cancelled') return decidedBy === 'system' ? 'Cancelled: driver removed from the Drivers list' : 'Cancelled by the driver'
+  return ''
+}
+
+// Which list of the Drivers panel a staff row goes in: "waiting" (a driver's
+// request still waiting, shown first), "live" (approved time off from today on)
+// or "past" (ended, cancelled or declined). A row with no `request` key (the
+// requests flag off) goes by its status alone.
+export function panelGroup(row) {
+  const r = row || {}
+  if (r.status === 'cancelled') return 'past'
+  if (r.request === 'waiting') return 'waiting'
+  if (r.request === 'declined') return 'past'
+  return r.status === 'current' || r.status === 'upcoming' ? 'live' : 'past'
+}
+
+// The word on a row of the past list.
+export function panelPastText(row) {
+  const r = row || {}
+  if (r.status === 'cancelled') return 'Cancelled'
+  if (r.request === 'declined') return 'Declined'
+  return 'Ended'
+}
+
+// Who asked and who decided, for a row the panel shows: "Asked by the driver"
+// on a request still waiting; "Asked by the driver, approved by X" or
+// "...declined by X" once decided; "" for a row staff recorded or no request keys.
+export function panelRequestText(row) {
+  const r = row || {}
+  if (r.source !== 'driver') return ''
+  if (r.request === 'waiting') return 'Asked by the driver'
+  const by = typeof r.decidedBy === 'string' && r.decidedBy ? r.decidedBy : 'staff'
+  if (r.request === 'approved') return `Asked by the driver, approved by ${by}`
+  if (r.request === 'declined') return `Asked by the driver, declined by ${by}`
+  return ''
+}
+
+// ── Staff: the note to CHR's contact about a driver's approved days ─────────
+// The server sends `chrDraft: { state, line?, reason? }` on the approve answer,
+// the request's notice and the panel's rows (with canRetry there), and a staff
+// create's answer; `line` (the driver, the truck and the days) is for staff to
+// copy and send by hand. The server decides every state, line and reason.
+
+export const CHR_DRAFT_COPY = 'Copy'
+export const CHR_DRAFT_COPIED = 'Copied'
+export const CHR_DRAFT_RETRY = 'Retry the note to CHR'
+// Each state's words with its line, then without one.
+const CHR_DRAFT_WORDS = {
+  pending: ['Drafting the note to CHR\'s contact…'],
+  made: ['Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.'],
+  failed: ['The note to CHR\'s contact couldn\'t be drafted. Retry, or tell them by hand:', 'The note to CHR\'s contact couldn\'t be drafted. Tell them by hand.'],
+  no_recipient: ['No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand:', 'No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand.'],
+  no_truck: ['No truck on record for this driver: tell CHR\'s contact by hand.'],
+  refused: ['No draft: the note would carry a number that can\'t go to CHR. Tell CHR\'s contact by hand.'],
+  past: ['These days are over, so no note to CHR.'],
+  off: ['Tell CHR\'s contact:', 'Tell CHR\'s contact by hand.'],
+  by_hand: ['Staff-recorded days get no draft. Tell CHR\'s contact:', 'Staff-recorded days get no draft. Tell CHR\'s contact by hand.'],
+}
+const CHR_LINE_STATES = ['off', 'no_recipient', 'failed', 'by_hand']
+// Why the truck's unit can't go in the note (the server's `reason`).
+const CHR_UNIT_REASONS = {
+  characters: 'it has characters other than letters, digits, dashes and a leading #',
+  length: 'it is longer than 16 characters',
+  person: 'it looks like a phone number, an SSN or a date',
+  number: 'it reads as a phone, load or account number',
+}
+
+// { words, line } for a chrDraft as staff read it, or null for none; `line` is
+// "" where there is nothing to copy.
+export function chrDraftText(chrDraft) {
+  const d = chrDraft && typeof chrDraft === 'object' ? chrDraft : null
+  if (d && d.state === 'unit_refused') {
+    const why = Object.prototype.hasOwnProperty.call(CHR_UNIT_REASONS, d.reason) ? CHR_UNIT_REASONS[d.reason] : 'it doesn\'t fit the note\'s rule'
+    return { words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' }
+  }
+  if (!d || !Object.prototype.hasOwnProperty.call(CHR_DRAFT_WORDS, d.state)) return null
+  const [withLine, without] = CHR_DRAFT_WORDS[d.state]
+  const line = CHR_LINE_STATES.includes(d.state) && typeof d.line === 'string' ? d.line.trim() : ''
+  return line ? { words: withLine, line } : { words: without || withLine, line: '' }
+}
+
+// The chrDraft a time-off-request notice carries (stored or live), or null.
+export function chrDraftOfNotice(n) {
+  if (!timeOffRequestOfNotice(n)) return null
+  const meta = parseMeta(n.metadata) || {}
+  const inner = meta.metadata && typeof meta.metadata === 'object' ? meta.metadata : meta
+  return inner.chrDraft && typeof inner.chrDraft === 'object' ? inner.chrDraft : null
+}
+
+// The notice with this user's approve answer's chrDraft written in, its
+// metadata kept in the shape it came in.
+export function noticeWithChrDraft(n, availabilityId, chrDraft) {
+  const req = timeOffRequestOfNotice(n)
+  if (!req || req.availabilityId !== Number(availabilityId) || !chrDraft || typeof chrDraft !== 'object') return n
+  const meta = parseMeta(n.metadata) || {}
+  const next = meta.metadata && typeof meta.metadata === 'object'
+    ? { ...meta, metadata: { ...meta.metadata, chrDraft } }
+    : { ...meta, chrDraft }
+  return { ...n, metadata: typeof n.metadata === 'string' ? JSON.stringify(next) : next }
+}
+
+// What an answer tells staff about the note to CHR's contact, as [{ words,
+// line }]: an approve's or a staff create's `chrDraft`, and after an edit, a
+// cancel (`chrDraftChange`) or the Drivers-page delete (`chrDraftChanges`) the
+// server's line to tell CHR about the change, with the new days' line.
+export function chrDraftReplyNotes(reply) {
+  const r = reply && typeof reply === 'object' ? reply : {}
+  const out = []
+  const own = chrDraftText(r.chrDraft)
+  if (own) out.push(own)
+  const changes = Array.isArray(r.chrDraftChanges) ? r.chrDraftChanges : r.chrDraftChange ? [r.chrDraftChange] : []
+  for (const c of changes) {
+    if (c && typeof c.note === 'string' && c.note) out.push({ words: c.note, line: '' })
+    const days = c ? chrDraftText(c.newDays) : null
+    if (days) out.push(days)
+  }
+  return out
+}
+
+// One note as plain text: its words, then its line.
+export function chrDraftNoteText(note) {
+  return note && note.line ? `${note.words} ${note.line}` : (note && note.words) || ''
 }

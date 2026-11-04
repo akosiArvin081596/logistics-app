@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
+import { noticeWithChrDraft, noticeWithDecision } from '../lib/availabilityText'
 
 const api = useApi()
 
@@ -46,6 +47,18 @@ export const useDispatchNotificationsStore = defineStore('dispatchNotifications'
     addRealtime(notification) {
       this.notifications.unshift(notification)
       this.unreadCount++
+    },
+
+    // A driver's time-off request was decided or withdrawn (this user's tap, or
+    // the server's live `time-off-request-decided`): its notice shows the
+    // decision in place of Approve and Decline.
+    setRequestDecision(availabilityId, decision, decidedBy) {
+      this.notifications = this.notifications.map((n) => noticeWithDecision(n, availabilityId, decision, decidedBy))
+    },
+
+    // This user's approval answered with the note to CHR's contact (its state and line).
+    setRequestChrDraft(availabilityId, chrDraft) {
+      this.notifications = this.notifications.map((n) => noticeWithChrDraft(n, availabilityId, chrDraft))
     },
   },
 })

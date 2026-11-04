@@ -15,10 +15,23 @@
 // planDriverFuel() itself, the flag in server.js, and both fuel routes lifted
 // out of server.js and run on an in-memory database with the flag off and on
 // (off: the answer is exactly as before). Made-up truck, load and places.
+//
+// §10 pins the live verdict, whatever the flag: GET /api/fuel/trip-plan never
+// says 'clears' when the truck could run short, for the driver or for the
+// dispatch card (client/src/components/dashboard/FuelFinderPanel.vue).
+//
+// §11 pins "picked up" (lib/fuel-pickup-arrival.js): the sheet's status alone
+// never drops the run to the shipper; the ELD or the geofence must have put the
+// truck there in the load's current run, with no twin in that visit. A truck
+// with no ELD device keeps the status's answer. The driver's panel says why the
+// run is kept (client/src/lib/fuelReview.js pickupUnconfirmedLine()).
 
 "use strict";
 const assert = require("assert");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { pathToFileURL } = require("url");
 const fuel = require("../lib/fuel-model");
 
 let failed = 0;
@@ -376,6 +389,61 @@ check("the block says when the pickup isn't on the map (pickupUnmapped), so the 
 	], [true, false, false]);
 });
 
+// === §7e the reading's 6 h, on the position's exact clock ====================
+// The trip plan's fix is fresh only under 6 h to the millisecond; the reading's
+// age was rounded minutes, so for 30 s a reading was trusted while its own fix was
+// not, and after pickup the whole load (planned from the pickup) said "enough".
+console.log("\n§7e driver gallons: the reading's 6 h on the position's exact clock");
+const H6 = 6 * 60 * 60 * 1000;
+const T7 = Date.parse("2026-10-30T15:00:00Z");
+// The reading as resolveFuelReading() hands it over: one 80% row, `agoMs` before `now`.
+const readAt = (agoMs, now = T7) => fuel.resolveFuelReading({
+	rows: [{ fuel_pct: 80, odometer: 100000, location_date_ms: now - agoMs }], mpg: 6.0, tankGallons: 150, nowMs: now,
+});
+// After pickup: a fix under 6 h plans from it (finish), else from the pickup (whole
+// load), as server.js fixFresh decides; the reading is that fix's row.
+const afterPickup = (agoMs, now = T7) => driverFuel({
+	plan: tripPlanFor({ routeMiles: 280, pct: 80 }), reading: readAt(agoMs, now), pct: 80, leg: "to_delivery",
+	fromLivePosition: agoMs < H6, positionAgeMinutes: agoMs < H6 ? Math.round(agoMs / 60000) : null, nowMs: now,
+});
+const rowFigures = (df) => [df.fuelState, df.milesLeft, df.legs.map((l) => [l.key, l.status, l.miles, l.usesGallons, l.needInTankGallons])];
+const STALE_WHOLE_LOAD = ["stale", null, [["whole_load", "check_gauge", null, null, null]]];
+for (const [label, agoMs] of [["exactly 6 h", H6], ["6 h and 1 ms", H6 + 1], ["6 h 15 s", H6 + 15000], ["6 h 29.999 s (still 360 rounded minutes)", H6 + 29999],
+	["6 h 30 s (361 rounded minutes)", H6 + 30000]]) {
+	check(`after pickup, an 80% reading ${label} old with no fresh fix: 'stale', the whole-load row has no number (no 'enough')`, () => {
+		assert.deepStrictEqual(rowFigures(afterPickup(agoMs)), STALE_WHOLE_LOAD);
+	});
+}
+check("...the control, 1 ms under 6 h: the fix is fresh, the reading is live, and the finish row keeps its figures", () => {
+	assert.deepStrictEqual(rowFigures(afterPickup(H6 - 1)), ["live", 385, [["finish", "enough", 280, 55, 100]]]);
+});
+check("the range block (no plan) on the same clock: live 1 ms under 6 h, stale at 6 h and at 6 h 15 s", () => {
+	const top = (agoMs) => fuel.planDriverFuel({ reading: readAt(agoMs), hasTruck: true, hasDevice: true, tankSource: "truck", tankGallons: 150,
+		mpg: 6.0, burn: BURN5, reserve: R15, nowMs: T7 });
+	assert.deepStrictEqual([H6 - 1, H6, H6 + 15000].map((a) => [top(a).fuelState, top(a).milesLeft]), [["live", 385], ["stale", null], ["stale", null]]);
+});
+for (const [label, now] of [["the November change (2026-11-01, 1 a.m. twice)", Date.parse("2026-11-01T10:30:00Z")],
+	["the March change (2026-03-08, no 2 a.m.)", Date.parse("2026-03-08T10:00:00Z")]]) {
+	check(`across ${label}: elapsed time decides, not the wall clock (1 ms under 6 h live, 6 h stale)`, () => {
+		assert.deepStrictEqual([afterPickup(H6 - 1, now).fuelState, rowFigures(afterPickup(H6, now))], ["live", STALE_WHOLE_LOAD]);
+	});
+}
+check("a reading with no time of its own: its rounded age must be under 6 h (359 min live, 360 min stale)", () => {
+	const at = (ageMinutes) => driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 80 }), pct: 80, leg: "to_delivery", fromLivePosition: false,
+		positionAgeMinutes: null, reading: { fuelPct: 80, fuelSource: "live", anchorPct: 80, ageMinutes, milesSinceReading: 0 } });
+	assert.deepStrictEqual([at(359).fuelState, at(359).legs[0].status, rowFigures(at(360))], ["live", "enough", STALE_WHOLE_LOAD]);
+});
+check("a reading dated after now (a device clock running ahead) is not trusted", () => {
+	const df = driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 80 }), pct: 80, leg: "to_delivery", fromLivePosition: false, positionAgeMinutes: null,
+		reading: { fuelPct: 80, fuelSource: "live", anchorPct: 80, anchorAtMs: T7 + 60000, ageMinutes: 0, milesSinceReading: 0 }, nowMs: T7 });
+	assert.deepStrictEqual(rowFigures(df), STALE_WHOLE_LOAD);
+});
+check("an empty reading is still acted on at any age (0% read 7 h ago: 0 mi, refuel now)", () => {
+	const df = driverFuel({ plan: tripPlanFor({ routeMiles: 280, pct: 0 }), pct: 0, leg: "to_delivery", fromLivePosition: false, positionAgeMinutes: null,
+		reading: { fuelPct: 0, fuelSource: "carried", anchorPct: 5, anchorAtMs: T7 - 7 * 3600000, ageMinutes: 420, milesSinceReading: 40 }, nowMs: T7 });
+	assert.deepStrictEqual([df.milesLeft, df.refuelNow], [0, true]);
+});
+
 // === §8 the flag in server.js ================================================
 console.log("\n§8 driver gallons: the flag in server.js");
 const { serverSource, resolveServerFile } = require("./lib/server-source");
@@ -433,12 +501,25 @@ class FixedDate extends Date {
 const PICKUP = { lat: 35.0, lng: -97.0 };   // "Riverton"
 const DROP = { lat: 37.0, lng: -99.0 };     // "Lakeside"
 const FIX = { lat: 34.0, lng: -96.0 };
+// §11: a truck 75 road miles short of the shipper and 160 from the receiver.
+const FIX_SHORT = { lat: 35.8, lng: -97.6 };
 const pairKey = (a, b) => `${a.latitude},${a.longitude}>${b.latitude},${b.longitude}`;
 const ROAD_MILES = new Map([
 	[`${FIX.lat},${FIX.lng}>${PICKUP.lat},${PICKUP.lng}`, 140],
 	[`${PICKUP.lat},${PICKUP.lng}>${DROP.lat},${DROP.lng}`, 280],
 	[`${FIX.lat},${FIX.lng}>${DROP.lat},${DROP.lng}`, 300],
+	[`${FIX_SHORT.lat},${FIX_SHORT.lng}>${PICKUP.lat},${PICKUP.lng}`, 75],
+	[`${FIX_SHORT.lat},${FIX_SHORT.lng}>${DROP.lat},${DROP.lng}`, 160],
 ]);
+// The shipped status history table, columns and all, so a world's rows read as production's do.
+const HISTORY_DDL = [
+	...(SRC.match(/CREATE TABLE IF NOT EXISTS load_status_history \([\s\S]*?\n\t\)/g) || []),
+	...(SRC.match(/ALTER TABLE load_status_history ADD COLUMN [a-z_]+ [A-Z]+(?: DEFAULT '')?/g) || []),
+];
+const sqlStamp = (ms) => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+// A load the sheet has past the shipper arrived there in the run, by the geofence, unless a world says otherwise.
+const DISPATCHED = { status: "Dispatched", source: "dispatch", agoMin: 48 * 60 };
+const GEOFENCE_ARRIVAL = { status: "At Shipper", source: "geofence", agoMin: 30 * 60 };
 const PROVIDED = ["app", "db", "requireRole", "fuelPlanLimiter", "getJobTrackingCached", "loadBelongsToDriver",
 	"burnRateForVehicle", "receiptMpgForVehicle", "getRoute", "geolib"];
 const DRIVER = { id: 7, role: "Driver", driverName: "Driver QA", username: "driver_qa" };
@@ -447,14 +528,17 @@ const DISPATCH = { id: 2, role: "Dispatcher", username: "dispatch_qa" };
 function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const opt = { status: "Assigned", fuel: 48, fixAgoMin: 12, coords: true, pickupMapped: true, truck: true, tank: 150, avgMpg: 6.0,
 		burn: BURN5, receipt: { mpg: 6.0 }, rollupMpg: null, details: "Dry van, 43,764 lbs", otherLoad: null, stopPayload: null,
-		anchor: null, routesDown: false, device: true, linkedAgoMin: null, ...o };
+		anchor: null, routesDown: false, device: true, linkedAgoMin: null, fixAgoMs: null, odo: 100000,
+		fixAt: FIX, history: undefined, track: [], noHistoryTable: false, otherHistory: [], sheetDriver: "Driver QA", otherDriver: "Driver QA",
+		otherCoords: null, drop: DROP, ...o };
+	if (opt.history === undefined) opt.history = fuel.isPickedUp(opt.status) ? [DISPATCHED, GEOFENCE_ARRIVAL] : [DISPATCHED];
 	const db = new Database(":memory:");
 	db.exec(`
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, routemate_vehicle_id TEXT DEFAULT '', assigned_driver TEXT DEFAULT '',
 			fuel_tank_gallons REAL DEFAULT 0, avg_mpg REAL DEFAULT 0);
 		CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT DEFAULT '', end_date TEXT DEFAULT '');
 		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL, latitude REAL, longitude REAL,
-			odometer REAL DEFAULT 0, fuel_pct INTEGER, location_date_ms INTEGER DEFAULT 0, dropped_reason TEXT DEFAULT '');
+			speed REAL DEFAULT 0, odometer REAL DEFAULT 0, fuel_pct INTEGER, location_date_ms INTEGER DEFAULT 0, dropped_reason TEXT DEFAULT '');
 		CREATE TABLE routemate_fuel_daily (routemate_vehicle_id TEXT, date TEXT, mpg REAL, miles REAL, derivation_notes TEXT DEFAULT '');
 		CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL);
 		CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, routemate_vehicle_id TEXT,
@@ -464,6 +548,16 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 		CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 		CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	`);
+	if (!opt.noHistoryTable) {
+		for (const sql of HISTORY_DDL) db.exec(sql);
+		const row = db.prepare(`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, changed_at, actor_role, fix_ms, pickup_zone, other_load_hauling)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+		// This load's rows, then the driver's other load's (QA-FUEL-0), each written by "Driver QA" unless a row names another actor.
+		for (const [loadKey, rows] of [["qa-fuel-1", opt.history], ["qa-fuel-0", opt.otherHistory]]) for (const h of rows) {
+			row.run(loadKey, h.old || "", h.status, h.source, h.actor || "Driver QA", sqlStamp(NOW - h.agoMin * 60000), h.role || "",
+				h.fixAgoMin != null ? NOW - h.fixAgoMin * 60000 : null, h.zone || "", h.hauling === undefined ? null : h.hauling);
+		}
+	}
 	// The driver's accept times, which order his queue (computeDriverQueues()).
 	for (const [loadId, at] of opt.accepts || []) {
 		db.prepare("INSERT INTO load_responses (load_id, driver_name, response, responded_at) VALUES (?, 'Driver QA', 'accepted', ?)").run(loadId, at);
@@ -474,8 +568,13 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 			.run(opt.device ? VID : "", opt.tank, opt.avgMpg);
 		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (1, 'Driver QA', '2026-10-01', '')").run();
 		const tel = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
-		if (opt.device && opt.anchor) tel.run(VID, FIX.lat, FIX.lng, opt.anchor.odo, opt.anchor.fuel, NOW - opt.anchor.agoMin * 60000);
-		if (opt.device) tel.run(VID, FIX.lat, FIX.lng, 100000, opt.fuel, NOW - opt.fixAgoMin * 60000);
+		// Earlier fixes on the way (no fuel level, so no fuel read picks them), oldest first, below the newest fix's id.
+		if (opt.device) for (const t of opt.track) {
+			db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, 0, NULL, ?)")
+				.run(VID, t.at.lat, t.at.lng, t.speed, NOW - t.agoMin * 60000);
+		}
+		if (opt.device && opt.anchor) tel.run(VID, opt.fixAt.lat, opt.fixAt.lng, opt.anchor.odo, opt.anchor.fuel, NOW - opt.anchor.agoMin * 60000);
+		if (opt.device) tel.run(VID, opt.fixAt.lat, opt.fixAt.lng, opt.odo, opt.fuel, NOW - (opt.fixAgoMs != null ? opt.fixAgoMs : opt.fixAgoMin * 60000));
 		// A device linked to the truck after its newest fix (B11): that fix belongs to another vehicle.
 		if (opt.linkedAgoMin != null) {
 			db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (1, ?, ?, '', 'admin_qa')")
@@ -487,12 +586,17 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	}
 	if (opt.coords) {
 		db.prepare("INSERT INTO load_coordinates VALUES ('qa-fuel-1', ?, ?, ?, ?)")
-			.run(opt.pickupMapped ? PICKUP.lat : null, opt.pickupMapped ? PICKUP.lng : null, DROP.lat, DROP.lng);
+			.run(opt.pickupMapped ? PICKUP.lat : null, opt.pickupMapped ? PICKUP.lng : null, opt.drop.lat, opt.drop.lng);
+	}
+	// The other load's own mapped points (§11's twins), as [pickup, receiver].
+	if (opt.otherCoords) {
+		const [p, d] = opt.otherCoords;
+		db.prepare("INSERT INTO load_coordinates VALUES ('qa-fuel-0', ?, ?, ?, ?)").run(p.lat, p.lng, d.lat, d.lng);
 	}
 	if (opt.stopPayload) db.prepare("INSERT INTO load_driver_instructions VALUES ('qa-fuel-1', ?)").run(JSON.stringify(opt.stopPayload));
 	const headers = ["Load ID", "Status", "Driver", "Details"];
-	const data = [{ "Load ID": "QA-FUEL-1", Status: opt.status, Driver: "Driver QA", Details: opt.details }];
-	if (opt.otherLoad) data.push({ "Load ID": "QA-FUEL-0", Status: opt.otherLoad, Driver: "Driver QA", Details: "" });
+	const data = [{ "Load ID": "QA-FUEL-1", Status: opt.status, Driver: opt.sheetDriver, Details: opt.details }];
+	if (opt.otherLoad) data.push({ "Load ID": "QA-FUEL-0", Status: opt.otherLoad, Driver: opt.otherDriver, Details: "" });
 	const handlers = {};
 	const deps = {
 		app: { get: (p, ...h) => { handlers[p] = h[h.length - 1]; } },
@@ -604,6 +708,10 @@ async function routeSections() {
 	const pinned2 = off.slice(0, DIGEST_WORLDS_2 * CALLS.length);
 	console.log(`      flag-off answers, the first ${DIGEST_WORLDS_2} worlds: ${pinned2.length}, sha256 ${digestOf(pinned2)}`);
 	console.log(`      flag-off answers, all ${WORLDS.length} worlds: ${off.length}, sha256 ${digestOf(off)}`);
+	// The flag-on blocks alone: equal on a base and the branch means a change to the
+	// verdict left every driverFuel block as it was.
+	const blocks = on.map((x) => ({ name: x.name, r: { status: x.r.status, body: x.r.body && x.r.body.driverFuel } }));
+	console.log(`      flag-on driverFuel blocks, all ${WORLDS.length} worlds: ${blocks.length}, sha256 ${digestOf(blocks)}`);
 	const at = (list, name) => list.find((x) => x.name === name).r;
 
 	check("flag off: no answer carries driverFuel or a 400 code, and none failed (500)", () => {
@@ -668,15 +776,16 @@ async function routeSections() {
 		const df = at(on, "'two stops' in Details / trip-plan, Driver").body.driverFuel;
 		assert.ok(df.extraStops === true && df.legs.every((l) => l.status !== "enough"), JSON.stringify(df));
 	});
-	check("pre-pickup with the pickup not geocoded: the route plans truck to delivery (verdict clears); the block says so and its row has no number", () => {
+	check("pre-pickup with the pickup not geocoded: the route plans truck to delivery and holds the verdict at 'tight'; the block says so and its row has no number", () => {
 		const b = at(on, "pre-pickup, pickup not geocoded, 70% / trip-plan, Driver").body;
 		assert.deepStrictEqual([b.verdict, b.leg, b.laneMiles, b.driverFuel.pickupUnmapped, b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.needInTankGallons])],
-			["clears", "to_delivery", 300, true, [["finish", "check_gauge", null, null]]]);
+			["tight", "to_delivery", 300, true, [["finish", "check_gauge", null, null]]]);
 	});
-	check("in transit after a 4 h dropout from 100%: the top carries the level at the planning rate (40%, 185 left); the row has no number", () => {
+	check("in transit after a 4 h dropout from 100%: the verdict and the top both carry the level at the planning rate (40%, 185 left, insufficient); the row has no number", () => {
 		const b = at(on, "in transit after a 4 h dropout from 100% (300 mi since) / trip-plan, Driver").body;
-		assert.deepStrictEqual([b.verdict, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft, b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.addGallons])],
-			["clears", "carried", "estimated", 185, [["finish", "check_gauge", null, null]]]);
+		assert.deepStrictEqual([b.verdict, b.fuelPct, b.refuelWithinMiles, b.fuelSource, b.driverFuel.fuelState, b.driverFuel.milesLeft,
+			b.driverFuel.legs.map((l) => [l.key, l.status, l.miles, l.addGallons])],
+		["insufficient", 40, 185, "carried", "estimated", 185, [["finish", "check_gauge", null, null]]]);
 	});
 	check("a Driver's answers carry no vehicle id, and the block only its listed keys (all 52 Driver answers that succeed)", () => {
 		const driverAnswers = on.filter((y) => y.name.endsWith("Driver") && y.r.status === 200);
@@ -732,7 +841,8 @@ async function routeSections() {
 		["before pickup, no ELD device on the truck", "none"],
 		["before pickup, no fuel level, ELD silent 8 h", "none"],
 		["before pickup, device re-linked 5 min ago (its newest fix is from before)", "none"],
-		["6 h edge: an 80% reading 6 h 18 s old, before pickup", "live"],
+		// Past 6 h to the millisecond, so not trusted, like its fix (§7e).
+		["6 h edge: an 80% reading 6 h 18 s old, before pickup", "stale"],
 	]) {
 		check(`${w}: approachUncounted, one whole-load row with no number`, () => {
 			const b = at(on, `${w} / trip-plan, Driver`).body;
@@ -760,6 +870,693 @@ async function routeSections() {
 	});
 	check("the rate-con stop list with two pickups marks extra stops", () => {
 		assert.strictEqual(at(on, "stop list with two pickups / trip-plan, Driver").body.driverFuel.extraStops, true);
+	});
+
+	// The reading's 6 h on the fix's exact clock, through both routes (§7e). Worlds of
+	// their own, so the counts and digests above are unchanged.
+	const edge = async (o) => {
+		const wOn = buildWorld(Database, lifted, appRequire, o, true);
+		const wOff = buildWorld(Database, lifted, appRequire, o, false);
+		return { plan: await wOn.plan(), range: await wOn.range(), planOff: await wOff.plan(), rangeOff: await wOff.range() };
+	};
+	const legFigures = (df) => df.legs.map((l) => [l.key, l.status, l.miles, l.usesGallons, l.needInTankGallons]);
+	for (const [label, fixAgoMin] of [["exactly 6 h", 360], ["6 h 15 s", 360.25]]) {
+		const e = await edge({ status: "In Transit", fuel: 80, fixAgoMin });
+		check(`in transit, an 80% reading ${label} old, ELD silent since: 'stale' on both routes, the whole-load row has no number (no 'enough')`, () => {
+			const df = e.plan.body.driverFuel;
+			assert.deepStrictEqual([e.plan.body.fromLivePosition, df.fuelState, df.milesLeft, legFigures(df), e.range.body.driverFuel.fuelState],
+				[false, "stale", null, [["whole_load", "check_gauge", null, null, null]], "stale"]);
+		});
+		check(`...flag off, the ${label} answers are as before (only driverFuel added)`, () => {
+			assert.deepStrictEqual([omitDriverFuel(e.plan.body), omitDriverFuel(e.range.body)], [e.planOff.body, e.rangeOff.body]);
+		});
+	}
+	{
+		const e = await edge({ status: "In Transit", fuel: 80, fixAgoMin: 359.99 });
+		check("...the control, a fix 0.6 s under 6 h: planned from it, the reading live, the finish row keeps its figures", () => {
+			const df = e.plan.body.driverFuel;
+			assert.deepStrictEqual([e.plan.body.fromLivePosition, df.fuelState, df.milesLeft, legFigures(df), e.range.body.driverFuel.fuelState],
+				[true, "live", 385, [["finish", "enough", 300, 55, 105]], "live"]);
+		});
+	}
+
+	await liveVerdictSection(Database, lifted, appRequire);
+	await arrivalSection(Database, lifted, appRequire);
+}
+
+// === §10 the live verdict, flag off ==========================================
+// The answer a driver ("You can make this run") and the dispatch card ("Route
+// clears") read. A pass must not rest on a route that skips the shipper ahead,
+// on a carried level burned at a gentler rate than the verdict plans at, or on a
+// reading 6 h old or carried with no miles since.
+async function liveVerdictSection(Database, lifted, appRequire) {
+	console.log("\n§10 the live trip-plan verdict, flag off: never 'clears' when the truck could run short");
+	const args = { routeMiles: 300, fuelPct: 70, burn: BURN5, rangeMiles: 630, mpg: 6.0, reserve: R15 };
+	check("planTripFuel: a pass on a route that leaves out the run to the shipper is held at 'tight' (stop, no shortfall, the same refuel distance)", () => {
+		const counted = fuel.planTripFuel(args);
+		const held = fuel.planTripFuel({ ...args, approachCounted: false });
+		assert.deepStrictEqual([counted.verdict, counted.canMakeIt, counted.shortfallMiles], ["clears", true, 0]);
+		assert.deepStrictEqual([held.verdict, held.canMakeIt, held.shortfallMiles, held.refuelWithinMiles, held.decidedOn, held.requiredMiles],
+			["tight", false, null, counted.refuelWithinMiles, counted.decidedOn, counted.requiredMiles]);
+	});
+	check("planTripFuel: 'tight' and 'insufficient' already say stop, so they stay as they are", () => {
+		for (const fuelPct of [50, 20]) {
+			const a = { ...args, fuelPct };
+			assert.deepStrictEqual(fuel.planTripFuel({ ...a, approachCounted: false }), fuel.planTripFuel(a), `${fuelPct}%`);
+		}
+		assert.deepStrictEqual([50, 20].map((fuelPct) => fuel.planTripFuel({ ...args, fuelPct }).verdict), ["tight", "insufficient"]);
+	});
+
+	const carried = (o) => ({ fuelSource: "carried", ageMinutes: 240, anchorAtMs: NOW - 240 * 60000, ...o });
+	const levelOf = (reading, burn = BURN5, tankGallons = 150, mpg = 6.0) => fuel.planningRateFuelPct({ reading, burn, tankGallons, mpg });
+	check("planningRateFuelPct: a carried level is burned at the planning rate (100% less 300 mi at p10 5.0 is 40%, not 66.7%; 58.5% on the estimate, not 76.9%)", () => {
+		assert.strictEqual(levelOf(carried({ fuelPct: 66.7, anchorPct: 100, milesSinceReading: 300 })), 40);
+		// 300 mi x 1.8 / (200 gal x 6.5 MPG) = 41.5 points; at the MPG on file it was 23.1.
+		assert.strictEqual(levelOf(carried({ fuelPct: 76.9, anchorPct: 100, milesSinceReading: 300 }), NO_BURN, 0, 6.5), 58.5);
+	});
+	check("planningRateFuelPct: the lower level is kept, so a measured rate gentler than the MPG on file leaves the MPG level (and the verdict with it)", () => {
+		const gentle = { ...BURN5, p10: 12, p50: 14, p90: 16 };
+		// 300 mi at 6.0 MPG from a 150-gal tank is 33.3 points (26.7% left); at p10 12 it would be 25 (35% left).
+		const pct = levelOf(carried({ fuelPct: 26.7, anchorPct: 60, milesSinceReading: 300 }), gentle);
+		const verdictAt = (fuelPct) => fuel.planTripFuel({ routeMiles: 330, fuelPct, burn: gentle, rangeMiles: 0, mpg: 6.0, reserve: R15 }).verdict;
+		assert.deepStrictEqual([pct, verdictAt(pct), verdictAt(35)], [26.7, "tight", "clears"]);
+	});
+	check("planningRateFuelPct: a live, stale or missing reading, or a carried one with no miles since, is returned as it is", () => {
+		assert.deepStrictEqual([
+			levelOf({ fuelSource: "live", fuelPct: 48, anchorPct: 48, milesSinceReading: 0, ageMinutes: 12 }),
+			levelOf({ fuelSource: "stale", fuelPct: null, anchorPct: 80, milesSinceReading: null, ageMinutes: 540 }),
+			levelOf({ fuelSource: "none", fuelPct: null, anchorPct: null, milesSinceReading: null, ageMinutes: null }),
+			levelOf(carried({ fuelPct: 90, anchorPct: 90, milesSinceReading: null })),
+			levelOf(carried({ fuelPct: 90, anchorPct: 90, milesSinceReading: 0 })),
+			levelOf(null),
+		], [48, null, null, 90, 90, null]);
+	});
+	check("planningRateFuelPct sweep: after a dropout the level never rises, and the planning miles are at most the anchor's less the miles driven", () => {
+		const bad = [];
+		let runs = 0;
+		const gentle = { ...BURN5, p10: 12, p50: 14, p90: 16 };
+		for (const [burn, tank, mpg] of [[BURN5, 150, 6.0], [NO_BURN, 150, 6.0], [NO_BURN, 0, 6.5], [BURN5, 0, 8.0], [gentle, 150, 6.0]]) {
+			const planningAt = (p) => fuel.rangeInterval({ fuelPct: p, burn, rangeMiles: fuel.computeRange({ fuelPct: p, tankGallons: tank, mpg }).rangeMiles }).planning;
+			for (const anchorPct of [20, 45, 70, 100]) for (const milesSinceReading of [10, 80, 150, 300, 600]) {
+				const mpgPct = Math.max(0, anchorPct - (milesSinceReading / mpg / (tank || 200)) * 100);   // resolveFuelReading()'s decay
+				const reading = carried({ fuelPct: Math.round(mpgPct * 10) / 10, anchorPct, milesSinceReading });
+				const pct = levelOf(reading, burn, tank, mpg);
+				runs++;
+				if (!(pct <= reading.fuelPct)) bad.push(["rose", anchorPct, milesSinceReading, pct, reading.fuelPct]);
+				if (planningAt(pct) > Math.max(0, planningAt(anchorPct) - milesSinceReading) + 1) bad.push(["planning", anchorPct, milesSinceReading, planningAt(pct)]);
+			}
+		}
+		assert.strictEqual(runs, 100);
+		assert.deepStrictEqual(bad.slice(0, 5), []);
+	});
+
+	const SIX_H = 6 * 60 * 60 * 1000;
+	const liveAt = (agoMs) => ({ fuelSource: "live", fuelPct: 80, anchorPct: 80, milesSinceReading: 0, anchorAtMs: NOW - agoMs, ageMinutes: Math.round(agoMs / 60000) });
+	check("tripReadingTrusted: under 6 h to the millisecond (1 ms under is trusted; exactly 6 h, 1 ms over, or a future time is not)", () => {
+		const t = (reading) => fuel.tripReadingTrusted({ reading, nowMs: NOW });
+		assert.deepStrictEqual([t(liveAt(12 * 60000)), t(liveAt(SIX_H - 1)), t(liveAt(SIX_H)), t(liveAt(SIX_H + 1)), t(liveAt(-1000))],
+			[true, true, false, false, false]);
+		// No time to judge the reading by is no pass, whatever its rounded age says.
+		assert.strictEqual(t({ fuelSource: "live", fuelPct: 80, anchorPct: 80, milesSinceReading: 0, ageMinutes: 12 }), false);
+	});
+	check("tripReadingTrusted: a carried reading is trusted only on miles since measured between two real odometers (50, or 0 parked), not with none or between zeros", () => {
+		const t = (milesSinceReading, milesSinceMeasured) => fuel.tripReadingTrusted({
+			reading: carried({ fuelPct: 90, anchorPct: 90, milesSinceReading, milesSinceMeasured, anchorAtMs: NOW - 60 * 60000 }), nowMs: NOW });
+		assert.deepStrictEqual([t(null, false), t(0, true), t(50, true), t(0, false), t(0, undefined)], [false, true, true, false, false]);
+	});
+	check("resolveFuelReading: miles since count as measured only between two real odometers (a 0 is how the feeds store a missing one)", () => {
+		const measured = (anchorOdo, latestOdo) => {
+			const r = fuel.resolveFuelReading({ rows: [{ fuel_pct: 0, odometer: latestOdo, location_date_ms: NOW - 60000 },
+				{ fuel_pct: 90, odometer: anchorOdo, location_date_ms: NOW - 120 * 60000 }], mpg: 6.0, tankGallons: 150, nowMs: NOW });
+			return [r.fuelSource, r.milesSinceReading, r.milesSinceMeasured];
+		};
+		assert.deepStrictEqual([measured(99950, 100000), measured(100000, 100000), measured(0, 0), measured(0, 100000), measured(100500, 0), measured(null, null)],
+			[["carried", 50, true], ["carried", 0, true], ["carried", 0, false], ["carried", 100000, false], ["carried", null, false], ["carried", null, false]]);
+	});
+	check("planTripFuel: a pass on a reading it can't count on is held at 'tight'; 'tight' and 'insufficient' stay; left out, it is trusted", () => {
+		const held = fuel.planTripFuel({ ...args, readingTrusted: false });
+		assert.deepStrictEqual([held.verdict, held.canMakeIt, held.shortfallMiles, held.refuelWithinMiles], ["tight", false, null, fuel.planTripFuel(args).refuelWithinMiles]);
+		for (const fuelPct of [50, 20]) {
+			const a = { ...args, fuelPct };
+			assert.deepStrictEqual(fuel.planTripFuel({ ...a, readingTrusted: false }), fuel.planTripFuel(a), `${fuelPct}%`);
+		}
+		assert.strictEqual(fuel.planTripFuel({ ...args, readingTrusted: true, approachCounted: true }).verdict, "clears");
+	});
+
+	// Through the route, as the driver (DriverFuelPanel) and as the dispatch card
+	// (FuelFinderPanel: the load alone, no vehicle) ask it.
+	const pick = (b) => ({ verdict: b.verdict, canMakeIt: b.canMakeIt, shortfallMiles: b.shortfallMiles, fuelStopsRecommended: b.fuelStopsRecommended,
+		refuelWithinMiles: b.refuelWithinMiles, fuelPct: b.fuelPct, routeMiles: b.routeMiles, leg: b.leg, fromLivePosition: b.fromLivePosition });
+	const answer = (verdict, canMakeIt, shortfallMiles, refuelWithinMiles, fuelPct, routeMiles, leg, fromLivePosition) => ({ verdict, canMakeIt, shortfallMiles,
+		fuelStopsRecommended: verdict === "tight" || verdict === "insufficient", refuelWithinMiles, fuelPct, routeMiles, leg, fromLivePosition });
+	const LIVE = [
+		["T1 before pickup, the pickup not on the map, 70%: routed truck to delivery past the shipper (300 counted, 420 ahead)",
+			{ pickupMapped: false, fuel: 70 }, answer("tight", false, null, 335, 70, 300, "to_delivery", true)],
+		["T2 in transit, a 4 h dropout from 100%, 300 mi since: 40% at the planning rate (200 mi against 315), not 66.7%",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 240, odo: 99700 } }, answer("insufficient", false, 100, 185, 40, 300, "to_delivery", true)],
+		["P3 before pickup, the ELD silent 8 h after an 80% reading: planned from the pickup, the run to the shipper not counted",
+			{ fuel: 80, fixAgoMin: 480 }, answer("tight", false, null, 385, 80, 280, "to_delivery", false)],
+		["P4 in transit, an 80% reading 9 h old, the ELD silent since: the truck may have driven far on it",
+			{ status: "In Transit", fuel: 80, fixAgoMin: 540 }, answer("tight", false, null, 385, 80, 280, "to_delivery", false)],
+		["P5 in transit, a dropout whose odometer reads behind its anchor: no miles since, so 90% carried unburned",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 90, agoMin: 120, odo: 100500 } }, answer("tight", false, null, 435, 90, 300, "to_delivery", true)],
+		["P4-edge in transit, an 80% reading exactly 6 h old: planned from the pickup and held",
+			{ status: "In Transit", fuel: 80, fixAgoMs: 6 * 60 * 60 * 1000 }, answer("tight", false, null, 385, 80, 280, "to_delivery", false)],
+		["P4-carried in transit, a fresh fix but a reading carried from 7 h ago (50 mi since): held",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 420, odo: 99950 } }, answer("tight", false, null, 435, 90, 300, "to_delivery", true)],
+		["P5-zero in transit, a dropout whose two odometers are both 0 (how the feeds store a missing one): 0 mi since is unknown, so 90% unburned is held",
+			{ status: "In Transit", fuel: 0, odo: 0, anchor: { fuel: 90, agoMin: 120, odo: 0 } }, answer("tight", false, null, 435, 90, 300, "to_delivery", true)],
+	];
+	const CONTROLS = [
+		["control: before pickup, a live fix and 100%: the run to the shipper is routed (140 + 280), so it still clears",
+			{ fuel: 100 }, answer("clears", true, 0, 485, 100, 420, "to_pickup", true)],
+		["control: in transit, a live fix and 80%: the miles ahead are all routed, so it still clears",
+			{ status: "In Transit", fuel: 80 }, answer("clears", true, 0, 385, 80, 300, "to_delivery", true)],
+		["control: in transit, an 80% reading 1 ms under 6 h: planned from that fix, so it still clears",
+			{ status: "In Transit", fuel: 80, fixAgoMs: 6 * 60 * 60 * 1000 - 1 }, answer("clears", true, 0, 385, 80, 300, "to_delivery", true)],
+		["control: in transit, a 2 h dropout from 100% with 50 mi since: 90% at the planning rate, so it still clears",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 100, agoMin: 120, odo: 99950 } }, answer("clears", true, 0, 435, 90, 300, "to_delivery", true)],
+		["control: in transit, a 2 h dropout from 90% parked (both odometers 100,000): 0 mi measured, so it still clears",
+			{ status: "In Transit", fuel: 0, anchor: { fuel: 90, agoMin: 120, odo: 100000 } }, answer("clears", true, 0, 435, 90, 300, "to_delivery", true)],
+	];
+	const asked = [];
+	for (const [label, o, want] of [...LIVE, ...CONTROLS]) {
+		const w = buildWorld(Database, lifted, appRequire, o, false);
+		const driver = await w.plan();
+		const card = await w.plan(DISPATCH);
+		asked.push({ label, want, driver, card });
+	}
+	for (const { label, want, driver, card } of asked) {
+		check(label, () => {
+			assert.deepStrictEqual([driver.status, card.status], [200, 200]);
+			assert.deepStrictEqual(pick(driver.body), want, "the driver's answer");
+			assert.deepStrictEqual(pick(card.body), want, "the dispatch card's answer");
+		});
+	}
+
+	// The card's own words for those answers, from the module it renders them with.
+	let review = null;
+	let reviewError = null;
+	try {
+		review = await import(pathToFileURL(path.join(__dirname, "..", "client", "src", "lib", "fuelReview.js")).href);
+	} catch (e) { reviewError = e.message; }
+	check("the dispatch card reads this verdict: it asks the route for the load alone and prints tripVerdict(verdict).dispatch, never 'Route clears' in the cases above", () => {
+		if (reviewError) assert.fail(reviewError);
+		const vue = fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "dashboard", "FuelFinderPanel.vue"), "utf8");
+		for (const pin of ["api.get(`/api/fuel/trip-plan?loadId=${encodeURIComponent(props.loadId)}`)",
+			"const verdict = computed(() => (plan.value ? tripVerdict(plan.value.verdict) : null))",
+			"{{ verdict.dispatch }}"]) {
+			assert.ok(vue.includes(pin), `FuelFinderPanel.vue no longer has: ${pin}`);
+		}
+		const lines = asked.filter((x) => LIVE.some(([label]) => label === x.label)).map((x) => [x.label.split(" ")[0], review.tripVerdict(x.card.body.verdict).dispatch]);
+		const tight = "Tight — plan a stop";
+		assert.deepStrictEqual(lines, [["T1", tight], ["T2", "Will not reach — fuel stop required"], ["P3", tight], ["P4", tight], ["P5", tight],
+			["P4-edge", tight], ["P4-carried", tight], ["P5-zero", tight]]);
+	});
+}
+
+// === §11 picked up only on the ELD or a geofence arrival =====================
+// A load marked In Transit before the truck reaches the shipper must keep the run
+// to the shipper in the plan. Made-up case: the truck is 75 mi short of the
+// shipper and 160 mi from the receiver, the lane is 280 mi, and 60% at p10 5.5
+// gives 330 mi to plan on. Skipping the shipper planned 160 mi and cleared; the
+// miles ahead are 75 + 280 = 355, and 355 + 15 needs more than 330.
+async function arrivalSection(Database, lifted, appRequire) {
+	console.log("\n§11 picked up only on the ELD or a geofence arrival");
+	let arrival = null;
+	let arrivalError = null;
+	try { arrival = require("../lib/fuel-pickup-arrival"); } catch (e) { arrivalError = e.message; }
+	const lib = () => { if (!arrival) assert.fail(`lib/fuel-pickup-arrival.js: ${arrivalError}`); return arrival; };
+	// Rows as the history stores them, written by the load's driver unless a row names another actor.
+	const H = (new_status, source, agoMin, extra = {}) => ({ new_status, source, actor: "Driver QA", changed_at: sqlStamp(NOW - agoMin * 60000), ...extra });
+	const HOUR_MIN = 60;
+	const normalizeDriverName = new Function(`${declText("normalizeDriverName")}\nreturn normalizeDriverName;`)();
+	const OPTS = { driver: "Driver QA", normalizeName: normalizeDriverName };
+	const D50 = H("Dispatched", "dispatch", 50 * HOUR_MIN, { actor: "dispatch_qa" });
+	const runOf = (...rows) => lib().currentRun([D50, ...rows]).rows;
+
+	check("currentRun: plan A's undo rule starts the run (a staff or sheet move back after an arrival cuts it, the driver's own stale Accept doesn't), so does a later Dispatched row, and nothing before the last Cancelled counts", () => {
+		const at = (rows) => { const r = lib().currentRun(rows); return r && [r.rows.map((x) => x.status), r.startMs]; };
+		const AS40 = H("At Shipper", "geofence", 40 * HOUR_MIN);
+		assert.deepStrictEqual([
+			at([D50, AS40, H("Heading to Shipper", "manual", 30 * HOUR_MIN), H("In Transit", "manual", 20 * HOUR_MIN)]),
+			at([D50, AS40, H("Assigned", "accept", 30 * HOUR_MIN), H("In Transit", "manual", 20 * HOUR_MIN)]),
+			at([D50, AS40, H("In Transit", "manual", 20 * HOUR_MIN, { old_status: "Assigned" })]),
+			at([D50, AS40, H("Assigned", "accept", 30 * HOUR_MIN, { actor_role: "Driver" }), H("In Transit", "manual", 20 * HOUR_MIN, { actor_role: "Driver" })]),
+			at([D50, H("Dispatched", "dispatch", 30 * HOUR_MIN), H("In Transit", "manual", 20 * HOUR_MIN)]),
+			at([D50, AS40, H("Cancelled", "cancel", 30 * HOUR_MIN), H("Assigned", "accept", 20 * HOUR_MIN), H("In Transit", "manual", 10 * HOUR_MIN)]),
+		], [
+			[["heading to shipper", "in transit"], NOW - 30 * 3600000],
+			[["assigned", "in transit"], NOW - 30 * 3600000],
+			[["in transit"], NOW - 20 * 3600000],
+			[["dispatched", "at shipper", "assigned", "in transit"], NOW - 50 * 3600000],
+			[["dispatched", "in transit"], NOW - 30 * 3600000],
+			[["assigned", "in transit"], NOW - 20 * 3600000],
+		]);
+		assert.deepStrictEqual(lib().currentRun([D50, AS40]).rows.map((x) => x.actor), ["dispatch_qa", "Driver QA"]);
+		assert.deepStrictEqual([at([]), at([H("Cancelled", "cancel", 10)]), at(null)], [null, null, null]);
+	});
+	check("historyArrival: by the load's driver now, a geofence 'At Shipper' or one set with the recorder's ELD fix inside the pickup zone; never a tap with no fix or one outside, a departure, another status, another driver's row or a staff override", () => {
+		const by = (row) => lib().historyArrival(runOf(row), OPTS).by;
+		assert.deepStrictEqual([
+			by(H("At Shipper", "geofence", 60)),
+			by(H("At Shipper", "geofence", 60, { actor_role: "system", pickup_zone: "inside", other_load_hauling: 0 })),
+			by(H("At Shipper", "manual", 60, { actor_role: "Driver", pickup_zone: "inside" })),
+			by(H("At Shipper", "manual", 60, { actor_role: "Super Admin", pickup_zone: "inside" })),
+			by(H("At Shipper", "override", 60, { actor: "dispatch_qa", actor_role: "Dispatcher", pickup_zone: "inside" })),
+			by(H("At Shipper", "manual", 60, { actor_role: "Driver", pickup_zone: "" })),
+			by(H("At Shipper", "manual", 60, { actor_role: "Driver", pickup_zone: "outside" })),
+			by(H("At Shipper", "manual", 60)),
+			by(H("In Transit", "geofence", 60)),
+			by(H("Loading", "manual", 60, { pickup_zone: "inside" })),
+			by(H("At Shipper", "geofence", 60, { actor: "Driver Prior" })),
+			by(H("At Shipper", "geofence", 60, { actor: " driver  QA" })),
+			by(H("At Shipper", "geofence", 60, { actor: "" })),
+		], ["geofence", "geofence", "recorded_fix", "recorded_fix", null, null, null, null, null, null, null, "geofence", null]);
+		assert.strictEqual(lib().historyArrival(runOf(H("At Shipper", "geofence", 60)), { ...OPTS, driver: "" }).by, null);
+	});
+	check("historyArrival: an arrival made while another load was under way (the recorder's mark, or the check rebuilt from the history) is no arrival, and holds the ELD test from the later of its fix and row times", () => {
+		const hold = (rows, errandAt) => { const r = lib().historyArrival(rows, { ...OPTS, errandAt }); return [r.by, r.holdMs]; };
+		assert.deepStrictEqual(hold(runOf(H("At Shipper", "geofence", 120, { other_load_hauling: 1, pickup_zone: "inside", fix_ms: NOW - 125 * 60000 }),
+			H("At Shipper", "geofence", 60, { other_load_hauling: 1, pickup_zone: "inside" }))), [null, NOW - 60 * 60000]);
+		assert.deepStrictEqual(hold(runOf(H("At Shipper", "geofence", 120, { other_load_hauling: 1, fix_ms: NOW - 125 * 60000 }))), [null, NOW - 120 * 60000]);
+		assert.deepStrictEqual(hold(runOf(H("At Shipper", "geofence", 120, { other_load_hauling: 1, fix_ms: NOW - 118 * 60000 }))), [null, NOW - 118 * 60000]);
+		assert.deepStrictEqual(hold(runOf(H("At Shipper", "geofence", 120, { other_load_hauling: 0 }))), ["geofence", null]);
+		assert.strictEqual(lib().historyArrival(runOf(H("At Shipper", "geofence", 120, { other_load_hauling: 1 }), H("At Shipper", "geofence", 60, { other_load_hauling: 0 })), OPTS).by, "geofence");
+		// Rebuilt: an errand up to 90 min ago.
+		const errandAt = (ms) => ms <= NOW - 90 * 60000;
+		assert.deepStrictEqual([
+			hold(runOf(H("At Shipper", "geofence", 120)), errandAt),
+			hold(runOf(H("At Shipper", "manual", 120, { actor_role: "Driver", pickup_zone: "inside" })), errandAt),
+			hold(runOf(H("At Shipper", "geofence", 120), H("At Shipper", "geofence", 60)), errandAt),
+			hold(runOf(H("At Shipper", "geofence", 120)), () => false),
+		], [[null, NOW - 120 * 60000], [null, NOW - 120 * 60000], ["geofence", NOW - 120 * 60000], ["geofence", null]]);
+	});
+	check("otherLoadUnderWayAt: another of the driver's loads (his on the sheet, or with a row by him) whose last status by then was Heading to Shipper, At Shipper, Loading or In Transit", () => {
+		const R = (loadId, new_status, agoMin, actor = "Driver QA") => ({ load_id: loadId, new_status, actor, changed_at: sqlStamp(NOW - agoMin * 60000) });
+		const at = (history, sheetLoadIds = []) => {
+			const f = lib().otherLoadUnderWayAt({ history, loadId: "QA-FUEL-1", driver: "Driver QA", sheetLoadIds, normalizeName: normalizeDriverName });
+			return [50, 39, 30, 15, 5].map((h) => f(NOW - h * 3600000));
+		};
+		const OTHER = [R("qa-fuel-0", "Dispatched", 60 * 60, "dispatch_qa"), R("qa-fuel-0", "In Transit", 40 * 60), R("qa-fuel-0", "At Receiver", 20 * 60),
+			R("qa-fuel-0", "Delivered", 10 * 60)];
+		const BY_STAFF = [R("qa-fuel-2", "Loading", 40 * 60, "dispatch_qa"), R("qa-fuel-2", "Delivered", 20 * 60, "dispatch_qa")];
+		assert.deepStrictEqual([
+			at(OTHER),
+			at(OTHER.map((r) => ({ ...r, actor: r.actor === "Driver QA" ? "  driver QA" : r.actor }))),
+			at(BY_STAFF, ["QA-FUEL-2"]),
+			at(BY_STAFF),
+			at([R("qa-fuel-3", "In Transit", 40 * 60, "Driver Other")]),
+			at([R("qa-fuel-1", "In Transit", 40 * 60)], ["QA-FUEL-1"]),
+			at([R("qa-fuel-4", "Heading to Shipper", 45 * 60), R("qa-fuel-4", "Cancelled", 35 * 60)]),
+			at([R("qa-fuel-5", "At Shipper", 45 * 60), R("qa-fuel-5", "Delivered", 35 * 60)]),
+		], [
+			[false, true, true, false, false],
+			[false, true, true, false, false],
+			[false, true, true, false, false],
+			[false, false, false, false, false],
+			[false, false, false, false, false],
+			[false, false, false, false, false],
+			[false, true, false, false, false],
+			[false, true, false, false, false],
+		]);
+	});
+	check("eldArrivalMs: the live geofence's arrival test on the truck's own fixes: inside the radius, at arrival speed (none counts, as live), the fix before it inside too", () => {
+		const P = { latitude: PICKUP.lat, longitude: PICKUP.lng };
+		const near = (dLat) => ({ latitude: PICKUP.lat + dLat, longitude: PICKUP.lng });   // 0.01 deg is about 1.1 km
+		const far = { latitude: FIX.lat, longitude: FIX.lng };
+		const fx = (ms, p, speed) => ({ ms, latitude: p.latitude, longitude: p.longitude, speed });
+		const opts = { pickup: P, radiusM: 3218.69, maxSpeedMps: 4.5 };
+		const t = (fixes, o = opts) => lib().eldArrivalMs(fixes, o);
+		assert.deepStrictEqual([
+			t([fx(1, far, 25), fx(2, near(0.02), 20), fx(3, near(0.01), 2), fx(4, P, 0)]),
+			t([fx(1, near(0.01), 25), fx(2, P, 25)]),
+			t([fx(1, far, 2), fx(2, P, 1), fx(3, far, 25)]),
+			t([fx(1, near(0.01), null), fx(2, P, null)]),
+			t([fx(1, P, 4.5), fx(2, P, 4.5)]),
+			t([fx(1, P, 4.6), fx(2, P, 4.6)]),
+			t([fx(1, near(0.04), 1), fx(2, near(0.04), 1)]),
+			t([fx(1, P, 1), fx(2, P, 1)], { ...opts, pickup: null }),
+			t([fx(1, P, 1), fx(2, P, 1)], { ...opts, radiusM: 0 }),
+			t([]),
+		], [3, null, null, 2, 2, null, null, null, null, null]);
+	});
+	check("eldArrivalMs with a hold: that visit never counts, even as the truck lingers; once it has left the zone, a later arrival does", () => {
+		const P = { latitude: PICKUP.lat, longitude: PICKUP.lng };
+		const far = { latitude: FIX.lat, longitude: FIX.lng };
+		const fx = (ms, p, speed) => ({ ms, latitude: p.latitude, longitude: p.longitude, speed });
+		const t = (fixes, holdMs) => lib().eldArrivalMs(fixes, { pickup: P, radiusM: 3218.69, maxSpeedMps: 4.5, holdMs });
+		assert.deepStrictEqual([
+			t([fx(1, P, 1), fx(2, P, 1), fx(3, P, 0), fx(4, P, 0), fx(5, P, 0), fx(6, P, 0)], 2),
+			t([fx(1, P, 1), fx(2, P, 1), fx(3, far, 20), fx(4, P, 2), fx(5, P, 0)], 2),
+			t([fx(1, far, 20), fx(2, P, 1), fx(3, P, 0)], 1),
+			t([fx(1, P, 1), fx(2, P, 1), fx(3, P, 0)], null),
+		], [null, 5, null, 2]);
+	});
+	check("eldArrivalMs with an errand check: a visit made while another load was under way is held like a hold, until the truck has left the zone", () => {
+		const P = { latitude: PICKUP.lat, longitude: PICKUP.lng };
+		const far = { latitude: FIX.lat, longitude: FIX.lng };
+		const fx = (ms, p, speed) => ({ ms, latitude: p.latitude, longitude: p.longitude, speed });
+		const t = (fixes) => lib().eldArrivalMs(fixes, { pickup: P, radiusM: 3218.69, maxSpeedMps: 4.5, errandAt: (ms) => ms <= 3 });
+		assert.deepStrictEqual([
+			t([fx(1, P, 1), fx(2, P, 1), fx(3, P, 0), fx(4, P, 0), fx(5, P, 0)]),
+			t([fx(1, P, 1), fx(2, P, 1), fx(3, far, 20), fx(4, P, 1), fx(5, P, 0)]),
+			t([fx(4, P, 1), fx(5, P, 0)]),
+		], [null, 5, 5]);
+	});
+
+	// The twin hold: an arrival is held when another of his loads has an "At Shipper"
+	// row in the same visit, the stretch around it in which the truck stays within
+	// 25 mi of the pickup (or half the lane).
+	const MIN = 60000;
+	const P_AT = { latitude: PICKUP.lat, longitude: PICKUP.lng };
+	const north = (miles) => ({ latitude: PICKUP.lat + miles / 69.05, longitude: PICKUP.lng });
+	check("visitRadiusM: 25 mi, or half the lane (pickup to receiver, a straight line) when that is less; none with no mapped pickup", () => {
+		const r = (p, d) => lib().visitRadiusM(p, d);
+		assert.strictEqual(r(P_AT, { latitude: DROP.lat, longitude: DROP.lng }), 25 * 1609.344);
+		assert.strictEqual(r(P_AT, null), 25 * 1609.344);
+		assert.strictEqual(r(null, { latitude: DROP.lat, longitude: DROP.lng }), null);
+		const half = r(P_AT, north(20)) / 1609.344;
+		assert.ok(half > 9.9 && half < 10.1, `a 20-mi lane: ${half} mi`);
+		assert.strictEqual(r(P_AT, north(52)), 25 * 1609.344, "a 52-mi lane");
+		const under = r(P_AT, north(48)) / 1609.344;
+		assert.ok(under > 23.9 && under < 24.1, `a 48-mi lane: ${under} mi`);
+	});
+	check("visitBounds: within the radius on each side, out to the first fix beyond it or 2 h past the last fix within it, whichever comes first; a gap within it stays in; 2 h either side with no fixes or no mapped pickup", () => {
+		const A = 1000 * MIN;
+		const R25 = 25 * 1609.344;
+		const fx = (min, p) => ({ ms: A + min * MIN, latitude: p.latitude, longitude: p.longitude });
+		const IN = north(10);
+		const OUT = north(30);
+		const b = (fixes, o = { pickup: P_AT, radiusM: R25 }) => lib().visitBounds(A, fixes, o).map((ms) => (ms - A) / MIN);
+		assert.strictEqual(lib().VISIT_SIDE_MS, 2 * 60 * MIN);
+		assert.deepStrictEqual([
+			b([]),
+			b([fx(-30, OUT), fx(-20, IN), fx(0, P_AT), fx(20, IN), fx(30, OUT)]),
+			b([fx(-30, OUT), fx(-20, IN), fx(0, P_AT), fx(20, IN), fx(30, OUT)], { pickup: null, radiusM: R25 }),
+			b([fx(-300, OUT), fx(-60, IN), fx(60, IN), fx(360, OUT)]),
+			b([fx(-600, IN), fx(0, P_AT), fx(600, IN), fx(660, OUT)]),
+			b([fx(-1, OUT), fx(1, OUT)]),
+			b([fx(-20, IN), fx(20, IN)]),
+			b([fx(-30, north(12)), fx(30, north(12))]),
+			b([fx(-30, north(12)), fx(30, north(12))], { pickup: P_AT, radiusM: lib().visitRadiusM(P_AT, north(20)) }),
+		], [
+			[-120, 120],
+			[-30, 30],
+			[-120, 120],
+			[-180, 180],
+			[-720, 660],
+			[-1, 1],
+			[-140, 140],
+			[-150, 150],
+			[-30, 30],
+		]);
+	});
+	check("twinAtShipper: another of his loads (his on the sheet, or with a row by him) with an 'At Shipper' row in the visit, by anyone and from any source; never another status, another driver's load, this load's own row or a row after now", () => {
+		const A = NOW - 30 * 60 * MIN;
+		const R = (loadId, new_status, msAt, actor = "Driver QA", source = "geofence") => ({ load_id: loadId, new_status, actor, source, changed_at: sqlStamp(msAt) });
+		const at = (history, o = {}) => lib().twinAtShipper({ history, loadId: "QA-FUEL-1", driver: "Driver QA", normalizeName: normalizeDriverName,
+			pickup: P_AT, radiusM: 25 * 1609.344, nowMs: NOW, ...o })(A);
+		assert.deepStrictEqual([
+			at([R("qa-fuel-0", "At Shipper", A + MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A - MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + 100 * MIN, "  driver QA", "manual")]),
+			at([R("qa-fuel-2", "At Shipper", A + MIN, "dispatch_qa", "override")], { sheetLoadIds: ["QA-FUEL-2"] }),
+			at([R("qa-fuel-2", "At Shipper", A + MIN, "dispatch_qa", "override")]),
+			at([R("qa-fuel-3", "At Shipper", A + MIN, "Driver Other")]),
+			at([R("qa-fuel-0", "Loading", A + MIN), R("qa-fuel-0", "Heading to Shipper", A - MIN)]),
+			at([R("qa-fuel-1", "At Shipper", A + MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + 121 * MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + MIN)], { nowMs: A }),
+			at([R("qa-fuel-0", "At Shipper", A + 5 * MIN)], { fixes: [{ ms: A + 3 * MIN, latitude: FIX.lat, longitude: FIX.lng }] }),
+			at([R("qa-fuel-0", "At Shipper", A + 5 * MIN)], { fixes: [{ ms: A + 3 * MIN, ...north(3) }, { ms: A + 9 * MIN, latitude: FIX.lat, longitude: FIX.lng }] }),
+			at([]),
+		], [true, true, true, true, false, false, false, false, false, false, false, true, false]);
+	});
+	check("tripPlanPickup: a status that isn't picked up never is; with no ELD device the status stands; otherwise the arrival decides, and 'unconfirmed' says the status ran ahead", () => {
+		const t = (o) => lib().tripPlanPickup(o);
+		assert.deepStrictEqual([
+			t({ statusPickedUp: false, vehicleId: "" }),
+			t({ statusPickedUp: false, vehicleId: "DEV-QA-901" }),
+			t({ statusPickedUp: true, vehicleId: "" }),
+			t({ statusPickedUp: true, vehicleId: "  " }),
+			t({ statusPickedUp: true, vehicleId: null }),
+			t({ statusPickedUp: true, vehicleId: "DEV-QA-901", db: null }),
+		], [
+			{ pickedUp: false, unconfirmed: false },
+			{ pickedUp: false, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: false, unconfirmed: true },
+		]);
+		assert.strictEqual(lib().FIX_READ_CAP_MS, 14 * 24 * 60 * MIN);
+	});
+
+	// Through the route, flag off, as the driver and as the dispatch card ask it.
+	const BURN55 = { ...BURN5, p10: 5.5 };
+	const SHORT = { status: "In Transit", fixAt: FIX_SHORT, fuel: 60, burn: BURN55 };
+	const NEAR_PICKUP = { lat: PICKUP.lat + 0.01, lng: PICKUP.lng };
+	const visit = (agoMin, speed = 1) => [{ at: NEAR_PICKUP, agoMin: agoMin + 1, speed }, { at: PICKUP, agoMin, speed: 0 }];
+	// The geofence's arrival while another load was under way (recorder on), and the truck slow in the zone through and after it.
+	const HAULING_ARRIVAL = { status: "At Shipper", source: "geofence", agoMin: 20 * 60, role: "system", zone: "inside", hauling: 1, fixAgoMin: 20 * 60 + 1 };
+	const LINGER = [...visit(20 * 60 + 1), ...[5, 10, 15, 20].map((m) => ({ at: PICKUP, agoMin: 20 * 60 - m, speed: 0 }))];
+	// The driver's other load, In Transit from 40 h ago until delivered 10 h ago, so under way through the 30 h arrival.
+	const OTHER_IN_TRANSIT_THEN_DELIVERED = [{ status: "Dispatched", source: "dispatch", agoMin: 60 * 60, actor: "dispatch_qa" },
+		{ status: "In Transit", source: "manual", agoMin: 40 * 60 }, { status: "Delivered", source: "manual", agoMin: 10 * 60 }];
+	// Twins: the truck at the shipper around this load's 30 h geofence arrival, 3 mi off at another dock, then gone.
+	const TWIN_DOCK = { lat: PICKUP.lat + 3 / 69.05, lng: PICKUP.lng };
+	const TWIN_TRACK = [{ at: NEAR_PICKUP, agoMin: 30 * 60 + 5, speed: 1 }, { at: PICKUP, agoMin: 30 * 60, speed: 0 }, { at: PICKUP, agoMin: 30 * 60 - 5, speed: 0 },
+		{ at: TWIN_DOCK, agoMin: 30 * 60 - 13, speed: 1 }, { at: TWIN_DOCK, agoMin: 30 * 60 - 17, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }];
+	// The other load's rows: dispatched, then the geofence's "At Shipper" `agoMin` ago, under his name unless `actor` says otherwise.
+	const twinRows = (agoMin, actor = "Driver QA") => [{ status: "Dispatched", source: "dispatch", agoMin: 50 * 60, actor: "dispatch_qa" },
+		{ status: "At Shipper", source: "geofence", agoMin, actor, role: "system" }];
+	const pick = (b) => [b.verdict, b.canMakeIt, b.shortfallMiles, b.refuelWithinMiles, b.routeMiles, b.leg, b.approachMiles, b.fromLivePosition];
+	const KEEPS = ["tight", false, 40, 315, 355, "to_pickup", 75, true];
+	const DROPS = ["clears", true, 0, 315, 160, "to_delivery", 0, true];
+	const CASES = [
+		["A1 In Transit, no arrival in the run: the run to the shipper stays (75 + 280 = 355 + 15 needed against 330): tight, not 'clears'",
+			{ ...SHORT, history: [DISPATCHED] }, KEEPS],
+		["A2 ...with a geofence 'At Shipper' in the run: dropped, as today", { ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL] }, DROPS],
+		["A3 ...with the truck's own fixes at the shipper (inside, slowing, two in a row) in the run: dropped", { ...SHORT, history: [DISPATCHED], track: visit(20 * 60) }, DROPS],
+		["A4 ...with a driver's 'At Shipper' carrying the recorder's ELD fix inside the pickup zone: dropped",
+			{ ...SHORT, history: [DISPATCHED, { status: "At Shipper", source: "manual", agoMin: 20 * 60, role: "Driver", zone: "inside", fixAgoMin: 20 * 60 + 2 }] }, DROPS],
+		["A5 ...with a driver's 'At Shipper' tap and no position: the run stays",
+			{ ...SHORT, history: [DISPATCHED, { status: "At Shipper", source: "manual", agoMin: 20 * 60, role: "Driver", zone: "" }] }, KEEPS],
+		["A6 ...with a driver's 'At Shipper' tap 40 km out: the run stays",
+			{ ...SHORT, history: [DISPATCHED, { status: "At Shipper", source: "manual", agoMin: 20 * 60, role: "Driver", zone: "outside", fixAgoMin: 20 * 60 + 1 }] }, KEEPS],
+		["A7 ...with only a geofence arrival made while another load was under way, the truck lingering in the zone after it: the run stays",
+			{ ...SHORT, history: [DISPATCHED, HAULING_ARRIVAL], track: LINGER }, KEEPS],
+		["A7b ...and, once it had left the zone, the truck's own arrival there: dropped",
+			{ ...SHORT, history: [DISPATCHED, HAULING_ARRIVAL], track: [...LINGER, { at: FIX, agoMin: 15 * 60, speed: 20 }, ...visit(10 * 60)] }, DROPS],
+		["A8 ...with a geofence arrival before the load was dispatched again: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "Dispatched", source: "dispatch", agoMin: 10 * 60 }] }, KEEPS],
+		["A9 ...with a geofence arrival before the load was cancelled (then accepted and marked In Transit): the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "Cancelled", source: "cancel", agoMin: 25 * 60 },
+				{ status: "Assigned", source: "accept", agoMin: 24 * 60 }, { status: "In Transit", source: "manual", agoMin: 23 * 60 }] }, KEEPS],
+		["A10 ...with fixes through the pickup zone at highway speed: the run stays", { ...SHORT, history: [DISPATCHED], track: visit(20 * 60, 25).map((t) => ({ ...t, speed: 25 })) }, KEEPS],
+		["A11 ...with one fix inside the pickup zone between two outside it: the run stays",
+			{ ...SHORT, history: [DISPATCHED], track: [{ at: FIX, agoMin: 20 * 60 + 1, speed: 20 }, { at: PICKUP, agoMin: 20 * 60, speed: 1 }, { at: FIX, agoMin: 20 * 60 - 1, speed: 20 }] }, KEEPS],
+		["A12 ...with the truck at the shipper only before the load was dispatched: the run stays", { ...SHORT, history: [DISPATCHED], track: visit(50 * 60) }, KEEPS],
+		["A13 ...with the fixes at the shipper taken before the ELD device was linked to this truck: the run stays",
+			{ ...SHORT, history: [DISPATCHED], track: visit(20 * 60), linkedAgoMin: 10 * 60 }, KEEPS],
+		["A14 the status still comes first: Heading to Shipper after a geofence arrival in the run plans the run to the shipper, as today",
+			{ ...SHORT, status: "Heading to Shipper", history: [DISPATCHED, GEOFENCE_ARRIVAL] }, KEEPS],
+		["A15 the status history can't be read: answered, with the run to the shipper kept", { ...SHORT, noHistoryTable: true }, KEEPS],
+		// Fix round 1, High 1: a move back after an arrival undoes it (plan A's undo rule, lib/arrival-pickup.js isCut()).
+		["B1 a geofence arrival, then a dispatcher sets Heading to Shipper, then an early In Transit: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "Heading to Shipper", source: "manual", agoMin: 25 * 60, actor: "Driver QA" },
+				{ status: "In Transit", source: "manual", agoMin: 20 * 60 }] }, KEEPS],
+		["B2 ...the move back an Accept from a staff session (recorder off): the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "Assigned", source: "accept", agoMin: 25 * 60 }, { status: "In Transit", source: "manual", agoMin: 20 * 60 }] }, KEEPS],
+		["B3 ...the move back made in the sheet, seen only as the next row's old status: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "In Transit", source: "manual", agoMin: 20 * 60, old: "Assigned" }] }, KEEPS],
+		["B4 ...the truck's fixes at the shipper before the move back don't count after it either",
+			{ ...SHORT, history: [DISPATCHED, { status: "In Transit", source: "manual", agoMin: 40 * 60 }, { status: "Heading to Shipper", source: "manual", agoMin: 25 * 60 },
+				{ status: "In Transit", source: "manual", agoMin: 20 * 60 }], track: visit(30 * 60) }, KEEPS],
+		["B5 control: the driver's own stale Accept after the arrival (recorder on) doesn't undo it, as plan A's rule says",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL, { status: "Assigned", source: "accept", agoMin: 25 * 60, role: "Driver" }, { status: "In Transit", source: "manual", agoMin: 20 * 60, role: "Driver" }] }, DROPS],
+		["B6 a load dispatched again with no arrival between, the truck at the shipper only before the second dispatch: the run stays",
+			{ ...SHORT, history: [DISPATCHED, { status: "Dispatched", source: "dispatch", agoMin: 20 * 60, actor: "dispatch_qa" }], track: visit(30 * 60) }, KEEPS],
+		// Fix round 1, High 2 (b): a reassign writes no row, so an arrival counts only when its driver is the load's driver now.
+		["C1 a geofence arrival by the driver the load had before a reassign: the run stays",
+			{ ...SHORT, history: [DISPATCHED, { ...GEOFENCE_ARRIVAL, actor: "Driver Prior" }] }, KEEPS],
+		["C2 ...a recorded fix inside the zone by that earlier driver: the run stays",
+			{ ...SHORT, history: [DISPATCHED, { status: "At Shipper", source: "manual", agoMin: 20 * 60, actor: "Driver Prior", role: "Driver", zone: "inside", fixAgoMin: 20 * 60 + 2 }] }, KEEPS],
+		["C3 control: the same driver spelled with other case and spacing: dropped", { ...SHORT, history: [DISPATCHED, { ...GEOFENCE_ARRIVAL, actor: "  driver   QA " }] }, DROPS],
+		// Fix round 1, High 2 (a): an arrival made while another of the driver's loads was under way, rebuilt from the
+		// status history with the recorder off.
+		["D1 a geofence arrival while the driver's other load was In Transit (delivered since): the run stays",
+			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED, GEOFENCE_ARRIVAL], otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED }, KEEPS],
+		["D2 ...the other load no longer his on the sheet, known from his own rows on it: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED }, KEEPS],
+		["D3 ...the other load his on the sheet, its statuses set by staff: the run stays",
+			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED, GEOFENCE_ARRIVAL], otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED.map((h) => ({ ...h, source: "override", actor: "dispatch_qa" })) }, KEEPS],
+		["D4 ...found by the truck's own fixes, with no geofence row: the run stays",
+			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED], track: visit(30 * 60), otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED }, KEEPS],
+		["D5 ...and the truck's own arrival there after the other load was delivered: dropped",
+			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED], track: [...visit(30 * 60), { at: FIX, agoMin: 20 * 60, speed: 20 }, ...visit(8 * 60)], otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED }, DROPS],
+		["D6 control: the other load was At Receiver at the arrival (as the recorder judges it, not under way): dropped",
+			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED, GEOFENCE_ARRIVAL], otherHistory: [
+				{ status: "Dispatched", source: "dispatch", agoMin: 60 * 60, actor: "dispatch_qa" }, { status: "In Transit", source: "manual", agoMin: 50 * 60 },
+				{ status: "At Receiver", source: "geofence", agoMin: 35 * 60 }, { status: "Delivered", source: "manual", agoMin: 28 * 60 }] }, DROPS],
+		["D7 ...the other load his on the sheet under another spelling of his name, its statuses set by staff: the run stays",
+			{ ...SHORT, otherLoad: "Delivered", otherDriver: "  driver   QA ", history: [DISPATCHED, GEOFENCE_ARRIVAL],
+				otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED.map((h) => ({ ...h, source: "override", actor: "dispatch_qa" })) }, KEEPS],
+		// The twin hold (decision 3a): an arrival with another of his loads' "At Shipper" in the same visit is held.
+		["F4 a twin advanced at the same visit, its row a minute before this load's: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 + 1) }, KEEPS],
+		["F4c ...its row a minute after this load's (the later-trip load written first; the truck hauls the twin and heads back): the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1) }, KEEPS],
+		["F4c' ...the twin's own point 3 mi from this one's, its row written at that dock: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 15),
+				otherCoords: [TWIN_DOCK, { lat: DROP.lat, lng: DROP.lng }] }, KEEPS],
+		["F4f ...this load's arrival seen only by the truck's own fixes, the twin's row after it: the run stays",
+			{ ...SHORT, history: [DISPATCHED], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 10) }, KEEPS],
+		["F4g ...the twin's row 3 h before this load was dispatched, the truck at the shipper throughout: the run stays",
+			{ ...SHORT, history: [{ status: "Dispatched", source: "dispatch", agoMin: 30 * 60 - 10, actor: "dispatch_qa" }, { ...GEOFENCE_ARRIVAL, agoMin: 30 * 60 - 15 }],
+				track: [33, 32, 31, 30.5].map((h) => ({ at: PICKUP, agoMin: h * 60, speed: 0 })).concat([{ at: PICKUP, agoMin: 30 * 60 - 16, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }]),
+				otherHistory: [...twinRows(33 * 60 - 10), { status: "At Receiver", source: "manual", agoMin: 30 * 60 - 12 }] }, KEEPS],
+		["F4x control: the other load's 'At Shipper' written after the truck left the shipper's 25 mi: dropped",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(24 * 60) }, DROPS],
+		["F4y control: another driver's load with an 'At Shipper' row in the visit: dropped",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1, "Driver Other") }, DROPS],
+		// The truck's fixes are read at most 14 days back (#713 review-1 Low 1).
+		["F12 a run 16 days long, the truck at the shipper 13 days ago: dropped",
+			{ ...SHORT, history: [{ ...DISPATCHED, agoMin: 16 * 24 * 60 }], track: visit(13 * 24 * 60) }, DROPS],
+		["F12b ...the truck at the shipper only 15 days ago: the run stays",
+			{ ...SHORT, history: [{ ...DISPATCHED, agoMin: 16 * 24 * 60 }], track: visit(15 * 24 * 60) }, KEEPS],
+	];
+	const asked = [];
+	for (const [label, o, want] of CASES) {
+		const w = buildWorld(Database, lifted, appRequire, o, false);
+		asked.push({ label, want, driver: await w.plan(), card: await w.plan(DISPATCH) });
+	}
+	for (const { label, want, driver, card } of asked) {
+		check(label, () => {
+			assert.deepStrictEqual([driver.status, card.status], [200, 200]);
+			assert.deepStrictEqual(pick(driver.body), want, "the driver's answer");
+			assert.deepStrictEqual(pick(card.body), want, "the dispatch card's answer");
+		});
+	}
+	{
+		const w = buildWorld(Database, lifted, appRequire, { ...SHORT, sheetDriver: "", history: [DISPATCHED, GEOFENCE_ARRIVAL], track: visit(20 * 60) }, false);
+		const driver = await w.plan();
+		check("E1 the load's Driver cell is blank: no driver to tie an arrival to, so the driver's own plan keeps the run, even with his truck's fixes at the shipper", () => {
+			assert.deepStrictEqual([driver.status, pick(driver.body)], [200, KEEPS]);
+		});
+	}
+	// Form 0: a truck with no ELD device has no fuel reading, so no verdict can pass; its
+	// status stands, as before. Asked with the Dispatched row alone and with a geofence
+	// arrival too, which every rule counts: the answers are equal, flag off and on.
+	for (const [label, o] of [["F0 a device-less truck", { status: "In Transit", device: false }], ["F0b no truck on the driver", { status: "In Transit", truck: false }]]) {
+		const answers = [];
+		for (const flagOn of [false, true]) {
+			for (const history of [[DISPATCHED], [DISPATCHED, GEOFENCE_ARRIVAL]]) {
+				const w = buildWorld(Database, lifted, appRequire, { ...o, history }, flagOn);
+				answers.push({ flagOn, driver: await w.plan(), card: await w.plan(DISPATCH) });
+			}
+		}
+		check(`${label}, In Transit with no arrival in the run: the status stands, flag off and on (the whole-load row keeps its figures), and no line says the pickup isn't confirmed`, () => {
+			for (const k of [0, 2]) {
+				for (const who of ["driver", "card"]) {
+					assert.strictEqual(answers[k][who].status, 200, who);
+					assert.deepStrictEqual(answers[k][who].body, answers[k + 1][who].body, `${who}, flag ${answers[k].flagOn ? "on" : "off"}`);
+					assert.ok(!("pickupUnconfirmed" in answers[k][who].body), who);
+					assert.strictEqual(answers[k][who].body.leg, "to_delivery", who);
+				}
+			}
+			const df = answers[2].driver.body.driverFuel;
+			assert.ok(df, "the flag-on block");
+			assert.strictEqual(df.approachUncounted, false);
+		});
+	}
+	{
+		// Decision 5 (a): no "past the shipper" form, so a twin's hold lasts to the receiver.
+		const w = buildWorld(Database, lifted, appRequire, { ...SHORT, fixAt: DROP, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK,
+			otherHistory: twinRows(30 * 60 + 1), otherCoords: [PICKUP, { lat: DROP.lat - 1, lng: DROP.lng + 1 }] }, false);
+		const driver = await w.plan();
+		const card = await w.plan(DISPATCH);
+		check("F4d twins with different receivers, asked for the twin written second, the truck now at its own receiver: the run to the shipper stays", () => {
+			for (const b of [driver.body, card.body]) {
+				assert.strictEqual(b.leg, "to_pickup");
+				assert.ok(b.approachMiles > 0, String(b.approachMiles));
+			}
+		});
+	}
+	{
+		// Form 0 is the device alone: a truck with a device and no mapped pickup still needs its arrival.
+		const w = buildWorld(Database, lifted, appRequire, { ...SHORT, pickupMapped: false, history: [DISPATCHED] }, false);
+		const answers = [(await w.plan()).body, (await w.plan(DISPATCH)).body];
+		check("A16 In Transit with no arrival, a truck with a device and no mapped pickup: nothing to route to the shipper, so the pass is held at 'tight', never 'clears'", () => {
+			for (const b of answers) assert.deepStrictEqual([b.verdict, b.leg, b.approachMiles], ["tight", "to_delivery", 0]);
+		});
+	}
+	{
+		// On a 20-mi lane the visit's radius is half the lane, 10 mi: the receiver stays outside it.
+		const lane20 = { lat: PICKUP.lat + 20 / 69.05, lng: PICKUP.lng };
+		const south12 = { lat: PICKUP.lat - 12 / 69.05, lng: PICKUP.lng };
+		const track = [{ at: NEAR_PICKUP, agoMin: 30 * 60 + 5, speed: 1 }, { at: PICKUP, agoMin: 30 * 60, speed: 0 }, { at: PICKUP, agoMin: 30 * 60 - 5, speed: 0 },
+			{ at: south12, agoMin: 30 * 60 - 15, speed: 1 }, { at: south12, agoMin: 30 * 60 - 17, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }];
+		const legs = [];
+		for (const twinAgo of [30 * 60 - 16, 30 * 60 - 4]) {
+			const w = buildWorld(Database, lifted, appRequire, { ...SHORT, drop: lane20, history: [DISPATCHED, GEOFENCE_ARRIVAL], track, otherHistory: twinRows(twinAgo) }, false);
+			legs.push([(await w.plan()).body.leg, (await w.plan(DISPATCH)).body.leg]);
+		}
+		check("F4h a 20-mi lane: a twin's row written 12 mi out (past half the lane) is another visit, so this arrival counts; one written at the shipper holds it", () => {
+			assert.deepStrictEqual(legs, [["to_delivery", "to_delivery"], ["to_pickup", "to_pickup"]]);
+		});
+	}
+	{
+		// The driver's panel line: the status says picked up, the arrival isn't seen, and the plan counts the run there.
+		const flagOf = async (o) => {
+			const w = buildWorld(Database, lifted, appRequire, o, false);
+			return [(await w.plan()).body.pickupUnconfirmed, (await w.plan(DISPATCH)).body.pickupUnconfirmed];
+		};
+		const got = [
+			await flagOf({ ...SHORT, history: [DISPATCHED] }),
+			await flagOf({ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL] }),
+			await flagOf({ ...SHORT, status: "Assigned", history: [DISPATCHED] }),
+			await flagOf({ ...SHORT, history: [DISPATCHED], fixAgoMin: 7 * 60 }),
+			await flagOf({ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1) }),
+			await flagOf({ ...SHORT, noHistoryTable: true }),
+		];
+		check("pickupUnconfirmed: only when the status says picked up, the arrival isn't seen (none, a twin, an unreadable history) and the plan includes the run to the shipper; never on a seen arrival, a status before pickup or a plan from the pickup (no fresh fix)", () => {
+			assert.deepStrictEqual(got, [[true, true], [undefined, undefined], [undefined, undefined], [undefined, undefined], [true, true], [true, true]]);
+		});
+	}
+	{
+		const on = await buildWorld(Database, lifted, appRequire, { ...SHORT, history: [DISPATCHED] }, true).plan();
+		check("A1 flag on: the block plans the run to the shipper too (75 mi, then 355 to the receiver), and no row says 'enough' for the whole run", () => {
+			const df = on.body && on.body.driverFuel;
+			assert.ok(df, JSON.stringify(on.body));
+			assert.deepStrictEqual(df.legs.map((l) => [l.key, l.miles, l.status]), [["pickup", 75, "enough"], ["finish", 355, "add"]]);
+		});
+	}
+	let review = null;
+	try { review = await import(pathToFileURL(path.join(__dirname, "..", "client", "src", "lib", "fuelReview.js")).href); } catch (e) { review = null; }
+	check("A1 the dispatch card reads 'Tight — plan a stop' (it read 'Route clears' when the plan skipped the shipper)", () => {
+		assert.ok(review, "client/src/lib/fuelReview.js did not load");
+		const a1 = asked[0];
+		assert.strictEqual(review.tripVerdict(a1.card.body.verdict).dispatch, "Tight — plan a stop");
+	});
+	const PICKUP_LINE = "Pickup not confirmed yet, so this plan includes the run to the shipper.";
+	check("the driver's panel line has one home (client/src/lib/fuelReview.js), word for word, shown only on the server's flag", () => {
+		assert.ok(review, "client/src/lib/fuelReview.js did not load");
+		assert.strictEqual(review.PICKUP_UNCONFIRMED_LINE, PICKUP_LINE);
+		assert.deepStrictEqual([
+			review.pickupUnconfirmedLine(asked[0].driver.body),
+			review.pickupUnconfirmedLine(asked[1].driver.body),
+			review.pickupUnconfirmedLine({ pickupUnconfirmed: "true" }),
+			review.pickupUnconfirmedLine({}),
+			review.pickupUnconfirmedLine(null),
+		], [PICKUP_LINE, "", "", "", ""]);
+	});
+	check("the driver's fuel panel shows that line on both screens, from the lib, with no copy of its words", () => {
+		const vue = fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "driver", "DriverFuelPanel.vue"), "utf8");
+		assert.ok(vue.includes("const pickupLine = computed(() => pickupUnconfirmedLine(plan.value))"), "the computed line");
+		assert.strictEqual(vue.split("{{ pickupLine }}</p>").length - 1, 2, "rendered on the gallons screen and in the verdict card");
+		assert.ok(!vue.includes("Pickup not confirmed"), "no copy of the words in the component");
 	});
 }
 

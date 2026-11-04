@@ -245,6 +245,11 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 	scope.brokerInvoiceLinesGate = new Function("brokerInvoice", "process", `${Lf.gate}\nreturn brokerInvoiceLinesGate;`)(brokerInvoice, processStub);
 	// The engine the draft route calls, over the same stubs and the same env.
 	scope.brokerInvoiceDraft = draftLift.loadEngine(Lf.engine, { ...scope, env: processStub.env });
+	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
+	require("../lib/factoring-store.js").ensureSchema(db);
+	scope.factoringRoutes = require("../lib/factoring-routes.js").create({ db, logAudit: scope.logAudit });
+	// The automatic job's check for a load it sent (shipped lib code; the job off, nothing sent).
+	scope.autoInvoice = require("../lib/auto-invoice-job.js").create({ db, env: {}, logAudit: scope.logAudit, log: { warn() {}, error() {} } });
 	const register = (text) => {
 		const registered = [];
 		const app = { post: (...a) => registered.push(a), get: (...a) => registered.push(a) };
