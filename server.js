@@ -49186,6 +49186,11 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 const DRIVER_TRAINING_VIDEOS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TRAINING_VIDEOS_ENABLED ?? "").trim());
 const driverTrainingVideos = require("./lib/driver-training-videos");
 
+// The driver stepper's GPS phases, off unless exactly "true" (lib/gps-phases.js). On, each active
+// load in the driver app's payload carries `_gpsPhases` { pickup, drop }; off, no key and no lookup.
+const DRIVER_STEPPER_GPS_PHASES_ENABLED = process.env.DRIVER_STEPPER_GPS_PHASES_ENABLED === "true";
+const driverGpsPhases = require("./lib/gps-phases").create({ enabled: DRIVER_STEPPER_GPS_PHASES_ENABLED, readers: () => gpsPhasesReaders() });
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -49474,6 +49479,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// `_instructions` { state, highlights } per load, codes only, keyed by each
 		// row's own stored Load ID (lib/driver-instructions-runtime.js).
 		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
+		// The stepper's GPS phases (DRIVER_STEPPER_GPS_PHASES_ENABLED): `_gpsPhases` on each
+		// active load, judged from the rows as stored (lib/gps-phases.js); off, rows as they are.
+		filteredLoads = driverGpsPhases.annotate(filteredLoads, loads, jobTracking.headers);
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -59770,6 +59778,15 @@ function arrivalRecorderReaders() {
 		truckForDriver: (name) => findTruckForDriverStamp(name, { activeAssignment: true }),
 		linkedSinceMs: (truckId, vid) => eldDeviceLinkedSinceMs(truckId, vid),
 		pickupPoint: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId).origin,
+	};
+}
+
+// The driver stepper's GPS phases (lib/gps-phases.js): the recorder's readers above
+// and both of the geofence's own mapped points, never the network geocode.
+function gpsPhasesReaders() {
+	return {
+		...arrivalRecorderReaders(),
+		points: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId),
 	};
 }
 
