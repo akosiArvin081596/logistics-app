@@ -316,12 +316,15 @@
             :time-off="driverStore.timeOff"
             @message-dispatch="handleTabSwitch('messages')"
           />
-          <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
         </template>
         <!-- His emergency contacts: outside the loading template, so a refresh never re-reads them -->
         <DriverEmergencyContactsCard v-if="canEditContacts" :revision="contactsRevision" @edit="openContactsForm" />
         <!-- Passenger authorizations: outside the loading swap too, so a refresh never closes a form being signed -->
         <PassengerAuthorizationsCard :driver-name="driverStore.driverName" :truck-unit="String(driverStore.truck?.unit_number ?? '')" />
+        <!-- Outside the loading swap: every refresh sets isLoading, and a playing video
+             must survive it. -->
+        <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
+
       </section>
 
       <!-- NOTIFICATIONS TAB -->

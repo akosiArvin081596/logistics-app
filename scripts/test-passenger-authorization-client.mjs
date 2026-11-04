@@ -540,7 +540,9 @@ if (missing.length) {
   await mutant('M19', 'the Kit card inside the loading swap', () => {
     const tag = '        <!-- Passenger authorizations: outside the loading swap too, so a refresh never closes a form being signed -->\n        <PassengerAuthorizationsCard :driver-name="driverStore.driverName" :truck-unit="String(driverStore.truck?.unit_number ?? \'\')" />\n'
     const out = once(S0.view, tag, '')
-    return { files: { view: once(out, '          <DriverTrainingVideos v-if="driverStore.trainingVideos === \'kit\'" variant="kit" />\n', `          <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />\n${tag}`) } }
+    // Anchored on the last card inside the loading template (the time-off card's close).
+    const inside = '            @message-dispatch="handleTabSwitch(\'messages\')"\n          />\n'
+    return { files: { view: once(out, inside, `${inside}${tag}`) } }
   }, ['view'])
   await mutant('M20', 'the card for any role', fileMut('card', 'const shown = computed(() => isDriver.value && enabled.value)', 'const shown = computed(() => enabled.value)'), ['feature'])
   await mutant('M21', 'the rows kept in the driver store', fileMut('card', 'const rows = ref([])', 'const rows = ref(useDriverStore().passengerRows || [])'), ['privacy'])
