@@ -56469,7 +56469,8 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 						{ responseType: "arraybuffer" },
 					);
 					const buffer = Buffer.from(resp.data);
-					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive" });
+					// driveFileName: the whole name, since `label` is cut for the review. The automatic blank Email path tests it.
+					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive", driveFileName: f.name || "" });
 				} catch (e) {
 					console.error("Draft invoice: rate-con Drive file fetch failed:", e.message);
 				}

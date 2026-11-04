@@ -1084,6 +1084,8 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq((await tap(DRIVER, "LD-TEST-1206")).status, 200, "§12 ...his next tap");
 		await until(() => w.smtp.length === 3 && open(w) === 0, "§12 the later tap's send");
 		eq(w.state("LD-TEST-1206"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: ...arms it: one send");
+		eq(w.looks.map((l) => l.loadNumber), ["LD-TEST-1206"], "§12 FAILS ON THE OLD CODE (L3): ...after the look a press would get, by the search as the block hands it over");
+		w.looks.length = 0;
 
 		// A throw after the write (R-M1): the notification insert, with no try around it.
 		atReceiver(w, "LD-TEST-1207");
@@ -1221,69 +1223,91 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 
 		const w = await started();
 		const tap = w.statusRoute();
-		atReceiver(w, "LD-TEST-1401");
-		eq((await tap(DRIVER, "LD-TEST-1401")).status, 200, "§14 the driver's tap answers as before");
+		atReceiver(w, "900001401");
+		eq((await tap(DRIVER, "900001401")).status, 200, "§14 the driver's tap answers as before");
 		await until(() => w.smtp.length === 1 && open(w) === 0, "§14 the send");
-		eq(w.state("LD-TEST-1401"), ["drafted", ""], "§14 FAILS ON THE OLD CODE: the setting named nowhere: a blank Email on a CHR load is sent");
+		eq(w.state("900001401"), ["drafted", ""], "§14 FAILS ON THE OLD CODE: the setting named nowhere: a blank Email on a CHR load is sent");
 		const sent = w.smtp[0] || { envelope: {}, mime: "" };
-		eq([sent.to, sent.envelope.to, sent.subject], [CHR_ADDRESS, [CHR_ADDRESS], "C.H. Robinson Order #LD-TEST-1401"], "§14 FAILS ON THE OLD CODE: one message to the one address, the subject from its domain");
-		eq(sent.attachments, ["C.H. Robinson Invoice Order #LD-TEST-1401.pdf", "LD-TEST-1401_POD.pdf", "LD-TEST-1401.pdf"], "§14 FAILS ON THE OLD CODE: the invoice, the POD and the rate con, through the engine as shipped");
-		eq(w.drafts().filter((r) => r.load_id === "LD-TEST-1401").map((r) => [r.recipient, r.via]), [[CHR_ADDRESS, "auto-smtp"]], "§14 FAILS ON THE OLD CODE: one row, the job's send");
-		ok(!/Contactperson/.test(sent.mime) && !/Contactperson/.test(JSON.stringify(w.db.prepare("SELECT * FROM load_invoice_drafts WHERE load_id = 'LD-TEST-1401'").all())), "§14 the contact's name isn't in the MIME or the row");
+		eq([sent.to, sent.envelope.to, sent.subject], [CHR_ADDRESS, [CHR_ADDRESS], "C.H. Robinson Order #900001401"], "§14 FAILS ON THE OLD CODE: one message to the one address, the subject from its domain");
+		eq(sent.attachments, ["C.H. Robinson Invoice Order #900001401.pdf", "900001401_POD.pdf", "900001401.pdf"], "§14 FAILS ON THE OLD CODE: the invoice, the POD and the rate con, through the engine as shipped");
+		eq(w.drafts().filter((r) => r.load_id === "900001401").map((r) => [r.recipient, r.via]), [[CHR_ADDRESS, "auto-smtp"]], "§14 FAILS ON THE OLD CODE: one row, the job's send");
+		ok(!/Contactperson/.test(sent.mime) && !/Contactperson/.test(JSON.stringify(w.db.prepare("SELECT * FROM load_invoice_drafts WHERE load_id = '900001401'").all())), "§14 the contact's name isn't in the MIME or the row");
 		eq(w.gmail.length, 0, "§14 no draft");
 
-		atReceiver(w, "LD-TEST-1402", { Email: "see rate con" });
-		await tap(DRIVER, "LD-TEST-1402");
-		await until(() => open(w) === 0 && Boolean(w.state("LD-TEST-1402")), "§14 a malformed cell");
+		atReceiver(w, "900001402", { Email: "see rate con" });
+		await tap(DRIVER, "900001402");
+		await until(() => open(w) === 0 && Boolean(w.state("900001402")), "§14 a malformed cell");
 		await settle();
-		eq([w.state("LD-TEST-1402"), w.smtp.length], [["needs_attention", "NO_BROKER_EMAIL"], 1], "§14 a malformed cell isn't blank: a person, nothing sent");
+		eq([w.state("900001402"), w.smtp.length], [["needs_attention", "NO_BROKER_EMAIL"], 1], "§14 a malformed cell isn't blank: a person, nothing sent");
 
 		// The confirm, read as a Super Admin's row reads it, and Try again's look through the block.
 		const few = await started({ rows: 2 });
 		const fewTap = few.statusRoute();
-		atReceiver(few, "LD-TEST-1403");
-		await fewTap(DRIVER, "LD-TEST-1403");
-		await until(() => open(few) === 0 && Boolean(few.state("LD-TEST-1403")), "§14 too few rows");
+		atReceiver(few, "900001403");
+		await fewTap(DRIVER, "900001403");
+		await until(() => open(few) === 0 && Boolean(few.state("900001403")), "§14 too few rows");
 		await settle();
-		eq([few.state("LD-TEST-1403"), few.smtp.length, few.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 2 rows: a person, nothing sent, no number");
+		eq([few.state("900001403"), few.smtp.length, few.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 2 rows: a person, nothing sent, no number");
 
 		const held = await started();
 		const heldTap = held.statusRoute();
-		atReceiver(held, "LD-TEST-1404", { "  Payment  ": "900" });
-		await heldTap(DRIVER, "LD-TEST-1404");
-		await until(() => open(held) === 0 && Boolean(held.state("LD-TEST-1404")), "§14 held");
+		atReceiver(held, "900001404", { "  Payment  ": "900" });
+		await heldTap(DRIVER, "900001404");
+		await until(() => open(held) === 0 && Boolean(held.state("900001404")), "§14 held");
 		await settle();
-		eq([held.state("LD-TEST-1404"), held.smtp.length], [["needs_attention", "TOTAL_MISMATCH"], 0], "§14 FAILS ON THE OLD CODE: a total that disagrees: a person");
-		held.setLoad("LD-TEST-1404", { "Job Status": "Delivered", Email: "", "  Payment  ": "1500" });
-		const rows = [{ "Load ID": "LD-TEST-1404", "Job Status": "Delivered", Email: "", "Completion Date": DELIVERED_ON }];
+		eq([held.state("900001404"), held.smtp.length], [["needs_attention", "TOTAL_MISMATCH"], 0], "§14 FAILS ON THE OLD CODE: a total that disagrees: a person");
+		held.setLoad("900001404", { "Job Status": "Delivered", Email: "", "  Payment  ": "1500" });
+		const rows = [{ "Load ID": "900001404", "Job Status": "Delivered", Email: "", "Completion Date": DELIVERED_ON }];
 		held.job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
 		eq(rows[0]._autoInvoice.retry, "send", "§14 FAILS ON THE OLD CODE: the confirm says Try again can send");
 		held.lookAnswer = { verdict: "invoice", mailboxes: {} };
-		eq((await held.call("POST", "/api/auto-invoice/loads/LD-TEST-1404/retry", SA, {})).status, 200, "§14 Try again");
+		eq((await held.call("POST", "/api/auto-invoice/loads/900001404/retry", SA, {})).status, 200, "§14 Try again");
 		await until(() => held.looks.length === 1 && open(held) === 0, "§14 the look");
-		eq([held.state("LD-TEST-1404"), held.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§14 FAILS ON THE OLD DESIGN (R-H2 (a)): billed from Gmail: the look runs, and no second invoice");
+		eq([held.state("900001404"), held.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§14 FAILS ON THE OLD DESIGN (R-H2 (a)): billed from Gmail: the look runs, and no second invoice");
 		held.lookAnswer = { verdict: "clean", mailboxes: {} };
-		await held.call("POST", "/api/auto-invoice/loads/LD-TEST-1404/retry", SA, {});
+		await held.call("POST", "/api/auto-invoice/loads/900001404/retry", SA, {});
 		await until(() => held.smtp.length === 1 && open(held) === 0, "§14 the clean look");
-		eq([held.state("LD-TEST-1404"), held.smtp[0].to], [["drafted", ""], CHR_ADDRESS], "§14 FAILS ON THE OLD CODE: both clean: one send");
+		eq([held.state("900001404"), held.smtp[0].to], [["drafted", ""], CHR_ADDRESS], "§14 FAILS ON THE OLD CODE: both clean: one send");
 
 		for (const v of ["false", "off"]) {
 			const off = await started({ env: { ...CHR_ON, AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED: v } });
 			const offTap = off.statusRoute();
-			atReceiver(off, "LD-TEST-1405");
-			await offTap(DRIVER, "LD-TEST-1405");
-			await until(() => open(off) === 0 && Boolean(off.state("LD-TEST-1405")), "§14 the kill switch");
+			atReceiver(off, "900001405");
+			await offTap(DRIVER, "900001405");
+			await until(() => open(off) === 0 && Boolean(off.state("900001405")), "§14 the kill switch");
 			await settle();
-			eq([off.state("LD-TEST-1405"), off.smtp.length, off.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], `§14 AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED=${v}: a person, no engine call`);
+			eq([off.state("900001405"), off.smtp.length, off.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], `§14 AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED=${v}: a person, no engine call`);
 		}
 		const sweep = await started({ env: { ...CHR_ON, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
-		sweep.deliver("LD-TEST-1406", plainRateCon(CHR_ADDRESS), { Email: "" });
+		sweep.deliver("900001406", plainRateCon(CHR_ADDRESS), { Email: "" });
 		await sweep.job.tick();
-		sweep.setLoad("LD-TEST-1407", { Email: "" });
+		sweep.setLoad("900001407", { Email: "" });
 		await sweep.job.tick();
-		eq([sweep.state("LD-TEST-1407"), sweep.smtp.length, sweep.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 the sweep: the flag ignored");
+		eq([sweep.state("900001407"), sweep.smtp.length, sweep.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 the sweep: the flag ignored");
 		const replica = await world({ env: CHR_ON, replica: { stamp: "made-up" } });
 		eq(replica.job.sending, false, "§14 a replica never sends, so this path can't run there");
+
+		// getRateConBytes() as shipped finds a Drive file by a substring of its name, so load
+		// 9000015 finds the rate con of load 900001502.
+		const named = await started();
+		const namedTap = named.statusRoute();
+		const inLonger = (x, id, over = {}) => {
+			x.setLoad(id, { "Job Status": "At Receiver", Email: "", "Broker Contact Name": "Madeup Q. Contactperson", ...over });
+			x.addPod(id);
+			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name: "Subject: Rate Confirmation 900001502.pdf", bytes: plainRateCon(CHR_ADDRESS) });
+		};
+		inLonger(named, "9000015");
+		await namedTap(DRIVER, "9000015");
+		await until(() => open(named) === 0 && Boolean(named.state("9000015")), "§14 another load's Drive file");
+		await settle();
+		ok(named.calls.driveGet >= 1, "§14 ...the file was found, and read");
+		eq([named.state("9000015"), named.smtp.length, named.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 FAILS ON THE OLD CODE (L6): a blank Email: a Drive file named for a longer number names no recipient: a person, nothing sent, no number");
+		const plain = await started();
+		const plainTap = plain.statusRoute();
+		inLonger(plain, "9000015", { Email: `made-up.agent@${CHR}` });
+		await plainTap(DRIVER, "9000015");
+		await until(() => plain.smtp.length === 1 && open(plain) === 0, "§14 the plain path's send");
+		eq(plain.smtp.map((m) => m.to), [CHR_ADDRESS], "§14 a filled Email keeps today's file-name test: the plain path isn't changed");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

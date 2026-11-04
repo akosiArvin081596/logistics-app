@@ -12,9 +12,10 @@
 //   §5  every other check applies unchanged
 //   §6  no contact name anywhere
 //   §7  a later fill with the same domain raises no change, and adds no new stop
-//   §8  Try again's look and its confirm on this path (R-H2 (a)), across a restart too
+//   §8  Try again's look and its confirm on this path (R-H2 (a)), across a restart too; a
+//       stale tap's re-armed claim gets the same look, on a filled Email too
 //   §9  outside the driver's trigger the flag is ignored
-//   §10 it can't send twice
+//   §10 it can't send twice, across a restart during SMTP too
 //
 // Addresses on chrobinson.com use made-up local parts. No network, no files, never reads
 // app.db.
@@ -211,10 +212,10 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 		return name;
 	};
 	// One rate con on file, named by `source`, whose Gemini read gives the address and the total.
-	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "documents", trailer = null, note = id } = {}) => {
+	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "documents", trailer = null, note = id, driveFileName = `Subject: Rate Confirmation ${id}.pdf` } = {}) => {
 		const bytes = plainPdf(note);
 		w.answers.set(bytes.toString("base64"), { "Total Rate": total, Rate: null, "Order Number": null, "PO Number": null, "Trailer Number": trailer, "Documents Email": address });
-		const cand = { buffer: bytes, source, label: source, fileName: "rc.pdf" };
+		const cand = { buffer: bytes, source, label: source, fileName: "rc.pdf", ...(source === "drive" ? { driveFileName } : {}) };
 		w.candidates.set(rules.loadKey(id), [...(w.candidates.get(rules.loadKey(id)) || []), cand]);
 		return cand;
 	};
@@ -401,6 +402,7 @@ const jsonOf = (text) => {
 		eq(w.calls.prepare.map((a) => a.blankEmailDomain), [DOMAIN], "§2 FAILS ON THE OLD CODE: the job names the one domain to the engine");
 		eq(w.notices.length, 0, "§2 no notice, no stop");
 		eq(ledger.getSendStop(w.db), null, "§2 sending isn't stopped");
+		eq([w.calls.look.length, w.calls.payments], [0, 0], "§2 a driver's first tap asks for no look");
 
 		// Any spelling of a blank cell, and any way the address was proved.
 		for (const [label, cell] of [["spaces", "   "], ["a tab", "\t"], ["a non-breaking space", " "]]) {
@@ -413,9 +415,8 @@ const jsonOf = (text) => {
 		for (const [label, make] of [
 			["3 of a person's rows by Gmail", (x) => x.proof(ADDRESS, 3)],
 			["3 rows by the n8n fallback", (x) => x.proof(ADDRESS, 3, "n8n")],
-			["3 rows the job sent", (x) => x.proof(ADDRESS, 3, rules.VIA_SEND)],
 			["old rows with no via", (x) => x.proof(ADDRESS, 3, "")],
-			["a person's rows and the job's sends", (x) => { x.proof(ADDRESS, 1); x.proof(ADDRESS, 2, rules.VIA_SEND); }],
+			["a person's rows, whichever way they left", (x) => { x.proof(ADDRESS, 1); x.proof(ADDRESS, 1, "n8n"); x.proof(ADDRESS, 1, ""); }],
 			["rows in another case", (x) => x.proof(ADDRESS.toUpperCase(), 3)],
 			["rows with spaces around the address", (x) => x.proof(` ${ADDRESS} `, 3)],
 		]) {
@@ -480,7 +481,12 @@ const jsonOf = (text) => {
 		for (const source of ["drive-content", "documents-bol", "upload", "", null, undefined]) {
 			eq(rr({}, { primary: { primarySource: source, recipientFrom: -1 } }), REFUSED, `§3 recipientRule(): a primary whose source is ${JSON.stringify(source)}`);
 		}
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1 } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: found by file name");
+		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf", loadId: "9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: found by file name");
+		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf", loadId: "#9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: ...either spelling of the load ID");
+		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 900001502.pdf", loadId: "9000015" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a file named for a longer number");
+		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, loadId: "9000015" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a Drive file with no name to test");
+		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): no load ID to test it against");
+		eq(rr({}, { primary: { primarySource: "documents", recipientFrom: -1, loadId: "9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: a rate-con row needs no file name");
 		eq(rr({ confirmedDomains: [] }), REFUSED, "§3 recipientRule(): not confirmed");
 		eq(rr({}, { sendDomains: [] }), REFUSED, "§3 recipientRule(): not on the send list");
 		eq(rr({}, { optOutDomains: [DOMAIN] }), REFUSED, "§3 recipientRule(): opted out");
@@ -581,7 +587,7 @@ const jsonOf = (text) => {
 		lw.proof(ADDRESS, 4, "triumph");
 		lw.proof(AGENT, 5);
 		lw.proof("", 5);
-		eq(rowsTo(lw.db, ADDRESS), 3, "§3 ledger.js FAILS ON THE OLD CODE: a person's rows and the job's sends, on the exact address");
+		eq(rowsTo(lw.db, ADDRESS), 2, "§3 ledger.js FAILS ON THE OLD CODE (L1): only a person's rows, on the exact address");
 		eq(rowsTo(lw.db, ""), 0, "§3 ledger.js FAILS ON THE OLD CODE: no address: no rows, whatever is blank");
 		const noTable = new Database(":memory:");
 		eq(rowsTo(noTable, ADDRESS), 0, "§3 ledger.js FAILS ON THE OLD CODE: no table: none");
@@ -623,6 +629,35 @@ const jsonOf = (text) => {
 		await refusedAlone("clause 1, no rate con on file", { setup: (w) => { w.candidates.delete(rules.loadKey(ID)); } });
 		await refusedAlone("clause 1, only a BOL on file", { rc: { source: "documents-bol" } });
 		await refusedAlone("clause 1, a rate con that names no address", { rc: { address: null } });
+		// A Drive file is found by a substring of its name, so a load's number inside a longer one
+		// finds another load's rate con. With no sheet Email to anchor it, this path asks more.
+		const SHORT = "9000015";
+		const named = async (driveFileName, over = {}) => {
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready(SHORT, over, { source: "drive", driveFileName });
+			await deliver(w, job, SHORT);
+			return w;
+		};
+		for (const [label, name] of [
+			["inside a longer number", "Subject: Rate Confirmation 900001502.pdf"],
+			["after another digit", "Subject: Rate Confirmation 19000015.pdf"],
+			["after letters", "Subject: Rate Confirmation LD9000015.pdf"],
+			["continued by a joiner and a digit", "Subject: Rate Confirmation 9000015-2.pdf"],
+			["after a digit and a joiner", "Subject: Rate Confirmation 2-9000015.pdf"],
+			["continued by a dot and a digit", "Subject: Rate Confirmation 9000015.1.pdf"],
+			["not there at all", ""],
+		]) {
+			const w = await named(name);
+			eq([w.state(SHORT), paidNothing(w)], [NEEDS_EMAIL, [0, 0, 0]], `§4 FAILS ON THE OLD CODE (L6): clause 1, a Drive file with load ${SHORT} ${label}: Needs attention, nothing sent, drafted or numbered`);
+		}
+		for (const name of ["Subject: Rate Confirmation 9000015.pdf", "Subject: Order #9000015", "9000015-ratecon.pdf", "Load 9000015 Rate Con.pdf"]) {
+			const w = await named(name);
+			eq(w.smtp.map((m) => m.to), [ADDRESS], `§4 FAILS ON THE OLD CODE: clause 1, a Drive file named ${JSON.stringify(name)}: this load's own, so it goes`);
+		}
+		// The plain path has the sheet's domain to anchor it, and keeps today's test.
+		const plainNamed = await named("Subject: Rate Confirmation 900001502.pdf", { Email: AGENT });
+		eq(plainNamed.smtp.map((m) => m.to), [ADDRESS], "§4 a filled Email keeps today's file-name test: the plain path isn't changed");
 		// 2. Exactly chrobinson.com, the only domain this path takes.
 		for (const [label, address] of [
 			["a subdomain", `made-up.billing@mail.${DOMAIN}`],
@@ -644,13 +679,30 @@ const jsonOf = (text) => {
 		await refusedAlone("clause 3, nothing on the send list", { opts: { domains: [] }, paid: false });
 		await refusedAlone("clause 3, opted out", { opts: { optOut: [DOMAIN] }, paid: false });
 		await refusedAlone("clause 3, sending off", { opts: { send: false }, paid: false });
-		// 4. The exact address on at least 3 rows a person made or the job sent.
+		// 4. The exact address on at least 3 rows a person made.
 		await refusedAlone("clause 4, no rows", { opts: { proofs: 0 } });
+		await refusedAlone("clause 4, only the job's sends: FAILS ON THE OLD CODE (L1)", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, rules.VIA_SEND) });
+		await refusedAlone("clause 4, 2 of a person's rows and the job's send: FAILS ON THE OLD CODE (L1)", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_SEND) });
 		await refusedAlone("clause 4, 2 rows", { opts: { proofs: 2 } });
 		await refusedAlone("clause 4, the rows on another address at the domain", { opts: { proofs: 0 }, setup: (w) => w.proof(AGENT, 5) });
 		await refusedAlone("clause 4, only the job's own drafts", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, rules.VIA_DRAFT) });
 		await refusedAlone("clause 4, only Triumph's rows", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, "triumph") });
 		await refusedAlone("clause 4, 2 rows and one of the job's own drafts", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_DRAFT) });
+		// The plain path checks the domain only, so its sends can't vouch for an address: three
+		// misreads there would otherwise earn the proof for a fourth on this path.
+		{
+			const w = makeWorld({ proofs: 0 });
+			const job = await w.started();
+			for (const id of ["LD-TEST-2001", "LD-TEST-2002", "LD-TEST-2003"]) {
+				w.ready(id, { Email: `made-up.other@${DOMAIN}` }, { address: AGENT });
+				await deliver(w, job, id);
+			}
+			eq(w.smtp.map((m) => m.to), [AGENT, AGENT, AGENT], "§4 three misreads on the plain path go out, on the domain's anchor alone, as they do today");
+			eq(rowsTo(w.db, AGENT), 0, "§4 FAILS ON THE OLD CODE (L1): ...and earn no proof");
+			w.ready("LD-TEST-2004", {}, { address: AGENT });
+			await deliver(w, job, "LD-TEST-2004");
+			eq([w.state("LD-TEST-2004"), w.smtp.length], [NEEDS_EMAIL, 3], "§4 FAILS ON THE OLD CODE (L1): a fourth misread on a blank load: Needs attention, nothing sent to the agent");
+		}
 
 		// A malformed cell isn't blank, whatever else holds.
 		for (const cell of ["see rate con", "N/A", "-", "made-up.billing@", "@chrobinson.com", `Made Up <${ADDRESS}>`, `${ADDRESS}; ${AGENT}`]) {
@@ -891,6 +943,49 @@ const jsonOf = (text) => {
 		await pressed({ w: old, job: oj });
 		eq([old.state(ID), old.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§8 FAILS ON THE OLD DESIGN: ...and the same look first");
 
+		// A stale tap on a row already Delivered: a person may have billed it from Gmail with no
+		// press since the claim stopped. The re-armed claim gets the look a press would.
+		const reArmed = async (over = {}, setup = null) => {
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready(ID, { "Job Status": "Delivered", ...over });
+			ledger.insertClaim(w.db, { key: rules.loadKey(ID), loadId: ID, state: "waiting", code: "NOT_COMPLETED", nowIso: iso(w.now) });
+			if (setup) setup(w);
+			return { w, job };
+		};
+		for (const [label, over] of [["a blank Email", {}], ["a filled Email", { Email: AGENT }]]) {
+			let s = await reArmed(over, (w) => { w.lookAnswer = { verdict: "invoice", mailboxes: {} }; });
+			await deliver(s.w, s.job, ID);
+			eq([s.w.state(ID), s.w.smtp.length, s.w.calls.mint, s.w.calls.look.length], [["needs_attention", "MAILBOX_HIT"], 0, 0, 1], `§8 FAILS ON THE OLD CODE (L3): ${label}, a stale tap re-arms the claim, the mailbox holds an invoice: no second invoice`);
+			s = await reArmed(over, (w) => { w.lookFails = true; });
+			await deliver(s.w, s.job, ID);
+			eq([s.w.state(ID), s.w.smtp.length, s.w.calls.mint, Boolean(s.w.claim(ID).look_first)], [["needs_attention", "MAILBOX_UNREAD"], 0, 0, true], `§8 FAILS ON THE OLD CODE (L3): ${label}, the look fails: MAILBOX_UNREAD, no send, no number, the look still asked for`);
+			s.w.lookFails = false;
+			eq((await tryAgain(s.job, ID)).status, 200, `§8 ${label}: ...a person's Try again`);
+			await drained(s.w, "§8 after a failed look");
+			await turn();
+			eq([s.w.state(ID), s.w.smtp.length], [["drafted", ""], 1], `§8 FAILS ON THE OLD CODE (L3): ${label}: ...looks again, and sends once it reads clean`);
+			s = await reArmed(over, (w) => { w.payments.push([ID, "Example", "1000", "", "", "Paid"]); });
+			await deliver(s.w, s.job, ID);
+			eq([s.w.state(ID), s.w.smtp.length], [["needs_attention", "PAYMENTS_TABLE_HIT"], 0], `§8 FAILS ON THE OLD CODE (L3): ${label}, a filled Payments Table row: no send`);
+			s = await reArmed(over);
+			await deliver(s.w, s.job, ID);
+			eq([s.w.state(ID), s.w.smtp.length, s.w.calls.look.length, s.w.claim(ID).look_first], [["drafted", ""], 1, 1, ""], `§8 FAILS ON THE OLD CODE (L3): ${label}, all clean: one look, one send, the look cleared`);
+		}
+		// The claim itself asks, so a restart between the tap and the run can't lose the look.
+		{
+			const { w, job } = await reArmed({}, (x) => { x.lookAnswer = { verdict: "invoice", mailboxes: {} }; });
+			job.driverDelivered({ role: "Driver", loadId: ID, oldStatus: "Delivered", newStatus: "Delivered", readBack: async () => "Delivered" });
+			ok(w.claim(ID).look_first, "§8 FAILS ON THE OLD CODE (L3): the re-armed claim itself asks for the look");
+			eq(w.state(ID), ["waiting", "DRIVER_PENDING"], "§8 ...its write not yet answered");
+			const next = w.job();
+			next.startTrigger();
+			await next.finishStartUp();
+			await drained(w, "§8 re-armed, then a restart");
+			await turn();
+			eq([w.state(ID), w.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§8 FAILS ON THE OLD CODE (L3): ...across a restart: the look still runs first");
+		}
+
 		// What the confirm says when this path isn't open.
 		const confirm = async (over, opts = {}, setup = null) => {
 			const w = makeWorld(opts);
@@ -1016,6 +1111,61 @@ const jsonOf = (text) => {
 		await drained(lost2, "§10 recording, flag off");
 		await turn();
 		eq([lost2.state(ID), lost2.smtp.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1], "§10 FAILS ON THE OLD CODE: ...the rebuild is refused: a person, still one SMTP call");
+
+		// A restart with the send in flight. The stand-in never answers, so the old process stays
+		// inside its SMTP call and only the new one moves the claim.
+		const inFlight = (w, { sent = false } = {}) => (o) => {
+			w.smtp.push(o);
+			if (sent) w.sent.push(o.messageId);
+			return new Promise(() => {});
+		};
+		const pressed = (job) => {
+			const p = job.draftButtonCheck({ session: { user: { username: "made-up-admin" } }, body: {} }, ID);
+			return [p.ok, p.http, (p.json || {}).code];
+		};
+		const restartMidSend = async (w, env = null) => {
+			await until(() => w.smtp.length === 1, "§10 the send started");
+			const atCrash = w.claim(ID);
+			const next = env ? w.job({ env }) : w.job();
+			next.startTrigger();
+			await next.finishStartUp();
+			await drained(w, "§10 the restart");
+			await turn();
+			return { next, atCrash };
+		};
+		// The Sent copy found: recorded through the blank path's rebuild, and never sent again.
+		{
+			const x = makeWorld();
+			const a = await x.started({ sendMail: inFlight(x, { sent: true }) });
+			x.ready(ID);
+			tap(x, a, ID);
+			const { next: b, atCrash } = await restartMidSend(x);
+			eq([atCrash.state, atCrash.stage, atCrash.delivery], ["working", "appending", "send"], "§10 FAILS ON THE OLD CODE: the send started, and the app restarts with it in flight");
+			eq([x.state(ID), x.smtp.length, x.appends.length, x.draftRow(ID).map((r) => r.via), x.calls.mint], [["drafted", ""], 1, 0, ["auto-smtp"], 1], "§10 FAILS ON THE OLD CODE: the Sent copy is found: recorded through the blank path, one SMTP call, one number");
+			eq(pressed(b), [false, 409, "INVOICE_ALREADY_SENT"], "§10 FAILS ON THE OLD CODE: ...a person's Draft Invoice: refused");
+		}
+		// No Sent copy: a person, the stop, and Try again only searches.
+		{
+			const x = makeWorld();
+			const a = await x.started({ sendMail: inFlight(x) });
+			x.ready(ID);
+			tap(x, a, ID);
+			const { next: b } = await restartMidSend(x);
+			eq([x.state(ID), x.smtp.length, Boolean(ledger.getSendStop(x.db))], [["needs_attention", "MAYBE_SENT"], 1, true], "§10 FAILS ON THE OLD CODE: no Sent copy: MAYBE_SENT and the stop, one SMTP call");
+			eq((await tryAgain(b, ID)).status, 200, "§10 FAILS ON THE OLD CODE: ...a person's Try again is taken");
+			await drained(x, "§10 Try again on a send that started");
+			await turn();
+			eq([x.state(ID), x.smtp.length, x.appends.length, x.calls.look.length, pressed(b)], [["needs_attention", "MAYBE_SENT"], 1, 0, 0, [false, 409, "INVOICE_ALREADY_SENT"]], "§10 FAILS ON THE OLD CODE: ...it only searches again: still one SMTP call, no draft, the button refused");
+		}
+		// The kill switch set in the restart that catches the send: never a second one.
+		{
+			const x = makeWorld();
+			const a = await x.started({ sendMail: inFlight(x, { sent: true }) });
+			x.ready(ID);
+			tap(x, a, ID);
+			const { next: b } = await restartMidSend(x, { ...x.env0, AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED: "false" });
+			eq([x.state(ID), x.smtp.length, x.appends.length, pressed(b)], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1, 0, [false, 409, "INVOICE_ALREADY_SENT"]], "§10 FAILS ON THE OLD CODE: the flag off in that restart: the rebuild is refused, a person, still one SMTP call");
+		}
 
 		// The deploy itself sends nothing: a load already held stays held until a person presses.
 		const old = makeWorld();
