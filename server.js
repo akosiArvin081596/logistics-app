@@ -63481,6 +63481,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		// The status alone can run ahead of the truck, so the ELD or the geofence must
 		// also have put it at the shipper in this run (lib/fuel-pickup-arrival.js).
 		const pickedUp = statusPickedUp && !!fuelPickupArrival.shipperArrival({ db, loadId, vehicleId, pickup, linkedSinceMs,
+			sheet: { headers: jtHeaders, rows: jt.data || [], row: jtRow }, normalizeName: normalizeDriverName,
 			radiusM: GEOFENCE_RADIUS, maxSpeedMps: GEOFENCE_ARRIVE_MAX_SPEED_MPS, nowMs: Date.now() });
 		// Post-pickup the approach leg is zero BY DEFINITION; the status gate is what
 		// stops a phantom second leg being added to a truck already loaded.
