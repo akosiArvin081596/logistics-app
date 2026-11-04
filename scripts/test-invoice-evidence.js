@@ -35,7 +35,6 @@ const ROOT = path.join(__dirname, "..");
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 const ledger = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
 const factoring = require(path.join(ROOT, "lib", "factoring-store.js"));
-const S = require(path.join(ROOT, "lib", "invoice-status.js"));
 const { csvRows } = require(path.join(ROOT, "lib", "csv.js"));
 const SRC = require("./lib/server-source").serverSource();
 const { liftRoute } = require("./lib/server-lift.js");
@@ -66,14 +65,16 @@ process.on("exit", () => {
 });
 
 let E = null;
+let S = null;
 try {
 	E = require(path.join(ROOT, "lib", "invoice-evidence.js"));
+	S = require(path.join(ROOT, "lib", "invoice-status.js"));
 } catch {
 	// asserted next
 }
 section("§1  the table");
-ok(E, "§1 FAILS ON THE OLD CODE: lib/invoice-evidence.js exists");
-if (!E) finish();
+ok(E && S, "§1 FAILS ON THE OLD CODE: lib/invoice-evidence.js exists");
+if (!E || !S) finish();
 const { STATUS } = S;
 
 // ------------------------------------------------------------------ made-up data
@@ -330,6 +331,17 @@ async function main() {
 		eq((await broken.runOnce()).ran, true, "§3 the sheet can't be read: the run ends, it doesn't throw");
 		eq(w.searches.length, 0, "§3 ...and searches nothing");
 		ok(!w.logs.join(" ").includes("example-broker"), "§3 ...logging a code, never the error's text");
+	}
+
+	{
+		const w = world({ loads: [load("900000241"), load("900000242")] });
+		const at = [];
+		const { gapMs, ...deps } = w.deps;
+		const store = E.create({ ...deps, search: async () => { at.push(Date.now()); return CLEAN; } });
+		await store.runOnce();
+		eq(gapMs, 0, "§3 (fixture) the other cases run with no gap");
+		ok(at.length === 2 && at[1] - at[0] >= 900, "§3 a second between one load's session and the next, by default");
+		eq(w.intervals.length, 0, "§3 ...and a run starts no timer of its own");
 	}
 
 	// ================================================================= §4

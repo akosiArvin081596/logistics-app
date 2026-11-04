@@ -491,6 +491,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// The invoice status (scripts/test-invoice-evidence.js covers it): off here.
+		invoiceEvidence: { annotateCompletedRows: ({ rows }) => rows, exportColumns: () => null },
 		// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
 		factoringRoutes: { annotateDashboard() {} },
 		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
