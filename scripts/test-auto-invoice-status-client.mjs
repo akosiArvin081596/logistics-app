@@ -23,6 +23,8 @@
 //      stored lists; the page's open and save, lifted and run over stand-ins
 //   §8 a draft that may be in Gmail: the words send a person to Drafts and Sent
 //      Mail, where the job itself looks
+//   §9 invoices the job sent: "Sent to the broker", the stop words, the dialog
+//   §10 a send waiting for its PODs to settle: "Waiting: settling before sending"
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -211,21 +213,26 @@ const HAND_DRAFT = Object.freeze({ invoice_id: '10192026-3', created_at: '2026-1
   ok(src && /beforeApprove/.test(src), '§6 the preview\'s approve() asks the page\'s check')
   ok(/\bbeforeApprove: \{ type: Function, default: null \}/.test(MODAL), '§6 the preview\'s beforeApprove prop: a function, none by default')
   if (src) {
-    const approveWith = ({ beforeApprove, alreadyDrafted = false, confirm = true }) => {
+    const approveWith = ({ beforeApprove, alreadyDrafted = false, confirm = true, refuseFirst = null, prompt = null }) => {
       const posts = []
+      const bodies = []
       const confirms = []
+      const prompts = []
       const approving = { value: false }
       const approveError = { value: '' }
       const fn = new Function(
         'approving', 'canApprove', 'props', 'window', 'edited', 'approveError', 'buildOverrideBody', 'api', 'APPROVE_TIMEOUT_MS',
-        'emit', 'recipient', 'originalTo', 'str', 'totalChangeConfirm', 'DUPLICATE_APPROVE_MSG',
+        'emit', 'recipient', 'originalTo', 'str', 'totalChangeConfirm', 'DUPLICATE_APPROVE_MSG', 'isMaybeSaved', 'isReissueRefusal', 'reissuePrompt', 'reissueBody',
         `${src}\nreturn approve;`,
       )(
-        approving, { value: true }, { alreadyDrafted, loadId: 'LD-TEST-0007', beforeApprove }, { confirm: (t) => { confirms.push(t); return confirm } },
-        { value: { total: false } }, approveError, () => ({}), { post: async (u) => { posts.push(u); return { invoiceId: 'INV-1', warnings: [] } } }, 60000,
+        approving, { value: true }, { alreadyDrafted, loadId: 'LD-TEST-0007', beforeApprove },
+        { confirm: (t) => { confirms.push(t); return confirm }, prompt: (t) => { prompts.push(t); return prompt } },
+        { value: { total: false } }, approveError, () => ({ invoiceTo: 'ap@example.com' }),
+        { post: async (u, b) => { posts.push(u); bodies.push(b); if (refuseFirst && posts.length === 1) throw refuseFirst; return { invoiceId: 'INV-1', warnings: [] } } }, 60000,
         () => {}, { value: 'ap@example.com' }, { value: 'ap@example.com' }, (v) => (v == null ? '' : String(v)), () => '', 'ALREADY DRAFTED?',
+        () => false, S.isReissueRefusal, S.reissuePrompt, S.reissueBody,
       )
-      return { approve: fn, posts, confirms, approving, approveError }
+      return { approve: fn, posts, bodies, confirms, prompts, approving, approveError }
     }
     let a = approveWith({ beforeApprove: async () => ({ go: false, asked: true }) })
     await a.approve()
@@ -251,6 +258,24 @@ const HAND_DRAFT = Object.freeze({ invoice_id: '10192026-3', created_at: '2026-1
     a = approveWith({ beforeApprove: null, alreadyDrafted: true })
     await a.approve()
     eq([a.posts.length, a.confirms], [1, ['ALREADY DRAFTED?']], '§6 no check (automatic drafts off or shadow): the approve as before')
+
+    // The automatic job sent this load's invoice: another goes only with a reason.
+    const sentRefusal = Object.assign(new Error('Invoice #10202026-1 for this load was already sent to the broker automatically.'), { status: 409, code: 'INVOICE_ALREADY_SENT' })
+    a = approveWith({ beforeApprove: null, refuseFirst: sentRefusal, prompt: '  corrected rate per the broker  ' })
+    await a.approve()
+    eq([a.posts.length, a.prompts.length, a.bodies[1]], [2, 1, { invoiceTo: 'ap@example.com', confirmReissue: true, reissueReason: 'corrected rate per the broker' }],
+      '§6 FAILS ON THE OLD CODE: refused as already sent: the reason is asked once, and the same body goes again with the re-issue confirmed')
+    ok(/already sent/.test(a.prompts[0] || '') && /reason/.test(a.prompts[0] || ''), '§6 ...the question says the invoice went and asks for the reason')
+    a = approveWith({ beforeApprove: null, refuseFirst: sentRefusal, prompt: null })
+    await a.approve()
+    eq([a.posts.length, /already sent/.test(a.approveError.value), /Nothing was sent/.test(a.approveError.value)], [1, true, true],
+      '§6 ...Cancel (or no reason): nothing more is posted, and the refusal is shown')
+    a = approveWith({ beforeApprove: null, refuseFirst: sentRefusal, prompt: '   ' })
+    await a.approve()
+    eq(a.posts.length, 1, '§6 ...only spaces: nothing more is posted')
+    a = approveWith({ beforeApprove: null, refuseFirst: Object.assign(new Error('made-up refusal'), { status: 409, code: 'TRAILER_MISMATCH' }), prompt: 'x' })
+    await a.approve()
+    eq([a.posts.length, a.prompts.length], [1, 0], '§6 any other refusal: no re-issue question, one post')
   }
 }
 {
@@ -351,19 +376,19 @@ section('§7  the settings dialog: Save waits for a read that worked')
   ok(openSrc && saveSrc, '§7 the page\'s openAutoSettings() and saveAutoSettings() are found')
   if (openSrc && saveSrc) {
     const NAMES = ['auth', 'autoSettingsLoading', 'autoSettingsOpen', 'autoSettingsError', 'autoSettingsProblem', 'autoSettingsRead', 'autoConfirmedText',
-      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard']
+      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard', 'autoSend']
     const dialog = (getAnswer) => {
       const st = {
         auth: { isSuperAdmin: true }, autoSettingsLoading: { value: false }, autoSettingsOpen: { value: false }, autoSettingsError: { value: '' },
         autoSettingsProblem: { value: '' }, autoSettingsRead: { value: true }, autoConfirmedText: { value: 'stale-confirmed.test' },
-        autoOptOutText: { value: 'stale-optout.test' }, puts: [],
+        autoOptOutText: { value: 'stale-optout.test' }, puts: [], autoSend: { value: { domains: ['stale.test'], stopped: null } },
       }
       const api = {
         get: async () => { const v = getAnswer(); if (v instanceof Error) throw v; return v },
         put: async (u, body) => { st.puts.push([u, body]); return body },
       }
       const deps = [st.auth, st.autoSettingsLoading, st.autoSettingsOpen, st.autoSettingsError, st.autoSettingsProblem, st.autoSettingsRead, st.autoConfirmedText,
-        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }]
+        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }, st.autoSend]
       const open = new Function(...NAMES, `${openSrc}\nreturn openAutoSettings;`)(...deps)
       const save = new Function(...NAMES, `${saveSrc}\nreturn saveAutoSettings;`)(...deps)
       return { st, open, save }
@@ -379,6 +404,10 @@ section('§7  the settings dialog: Save waits for a read that worked')
     const good = dialog(() => ({ optOutDomains: ['example-optout.test'], confirmedBrokerDomains: ['example-broker.test'], unreadable: false, dropped: [] }))
     await good.open()
     eq([good.st.autoConfirmedText.value, good.st.autoOptOutText.value, good.st.autoSettingsRead.value], ['example-broker.test', 'example-optout.test', true], '§7 a read that worked fills both lists')
+    eq([bad.st.autoSend.value, good.st.autoSend.value], [null, null], '§7 sending off (no `send` in the read), or a failed read: no sending section, nothing kept from an earlier opening')
+    const sendOn = dialog(() => ({ optOutDomains: [], confirmedBrokerDomains: ['example-broker.test'], unreadable: false, dropped: [], send: { domains: ['example-broker.test'], stopped: null } }))
+    await sendOn.open()
+    eq(sendOn.st.autoSend.value, { domains: ['example-broker.test'], stopped: null }, '§7 sending on: the read\'s `send` is kept for the dialog')
     good.st.autoConfirmedText.value = 'example-broker.test\nexample-new.test'
     await good.save()
     eq(good.st.puts, [['/api/auto-invoice/settings', { confirmedBrokerDomains: ['example-broker.test', 'example-new.test'], optOutDomains: ['example-optout.test'] }]],
@@ -398,6 +427,58 @@ ok(/Drafts and Sent Mail/.test(S.AUTO_INVOICE_REASONS.MAYBE_IN_GMAIL.text), '§8
 ok(S.AUTO_INVOICE_REASONS.LOAD_FACTORED && /Triumph/.test(S.AUTO_INVOICE_REASONS.LOAD_FACTORED.text) && /not by email/.test(S.AUTO_INVOICE_REASONS.LOAD_FACTORED.text),
   '§8 FAILS ON THE OLD CODE: LOAD_FACTORED has words: its invoice goes through Triumph, not by email')
 ok(/Drafts and Sent Mail/.test(S.AUTO_INVOICE_REASONS.IN_GMAIL_UNRECORDED.text), '§8 IN_GMAIL_UNRECORDED: a person checks Drafts and Sent Mail before drafting again')
+
+// ------------------------------------------------------------------ §9
+section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it and send it"')
+{
+  const sentChip = S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '10202026-1', changed: [], sent: true })
+  eq(sentChip && [sentChip.label, sentChip.tone], ['Sent to the broker', 'ok'], '§9 FAILS ON THE OLD CODE: an invoice the job sent reads "Sent to the broker"')
+  ok(sentChip && /Sent Mail/.test(sentChip.reason) && !/Drafts|send it/i.test(sentChip.reason), '§9 ...in Sent Mail, never "in Gmail Drafts, check it and send it"')
+  const changed = S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '10202026-1', changed: ['payment'], sent: true })
+  ok(changed && changed.label === 'Sent to the broker: load changed' && /sent to the broker/.test(changed.reason) && !/Check the draft/.test(changed.reason),
+    '§9 FAILS ON THE OLD CODE: a load changed after its send says the invoice already went, not "check the draft"')
+  const draft = S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '10202026-1', changed: [] })
+  eq(draft && draft.label, 'Draft ready in Gmail', '§9 a draft (no `sent`) reads as before')
+  const checking = S.autoInvoiceChip({ state: 'queued', code: 'SEND_UNCONFIRMED' })
+  eq(checking && checking.label, 'Checking Sent Mail', '§9 FAILS ON THE OLD CODE: a send with no answer reads "Checking Sent Mail", not "Drafting soon"')
+  ok(/never sent twice/i.test((S.AUTO_INVOICE_REASONS.SEND_UNCONFIRMED || {}).text || '') && /never sends/i.test((S.AUTO_INVOICE_REASONS.MAYBE_SENT || {}).text || ''),
+    '§9 SEND_UNCONFIRMED and MAYBE_SENT say the invoice is never sent again')
+  ok(/SENT an invoice/.test(S.draftMadeSinceText({ invoice_id: '10202026-1', via: 'auto-smtp' })), '§9 FAILS ON THE OLD CODE: Approve names an invoice the job SENT since the dialog opened')
+  ok(/automatic invoice drafts made/.test(S.draftMadeSinceText({ invoice_id: '10202026-1', via: 'auto-imap' })), '§9 ...and the job\'s draft as before')
+  eq([...(S.AUTO_INVOICE_VIAS || [])].sort(), [...(rules.JOB_VIAS || ['(none on this tree)'])].sort(), '§9 FAILS ON THE OLD CODE: the client knows the job\'s via values exactly (rules.JOB_VIAS)')
+
+  // The stop's words: exactly the server's reasons. A tree without sending names
+  // its failures instead of stopping the run.
+  let sendRules = null
+  try { sendRules = require(path.join(ROOT, 'lib', 'auto-invoice-send.js')) } catch { sendRules = null }
+  eq(Object.keys(S.AUTO_INVOICE_STOP_WORDS || {}).sort(), [...((sendRules && sendRules.STOP_REASONS) || ['(none on this tree)'])].sort(), '§9 FAILS ON THE OLD CODE: the client words exactly the server\'s stop reasons')
+  const sendState = fnOf('autoSendState') || (() => undefined)
+  eq(sendState(null), null, '§9 FAILS ON THE OLD CODE: sending off: no sending section')
+  const on = sendState({ domains: ['example-broker.test'], stopped: null })
+  ok(on && on.canStop === true && /example-broker\.test/.test(on.text), '§9 sending on: the domains it sends to, and Stop offered')
+  const stopped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'SMTP_REFUSED' } })
+  ok(stopped && stopped.canStop === false && /stopped/.test(stopped.text) && /refused an invoice email/.test(stopped.text) && /Only the server/.test(stopped.text),
+    '§9 stopped: why, and no button (only the server resumes)')
+  const stopTag = (/<button[^>]*@click="stopAutoSend"[^>]*>/.exec(TAB) || [''])[0]
+  ok(/v-if="autoSendView\.canStop"/.test(stopTag) && /:disabled="autoSendStopping"/.test(stopTag), '§9 FAILS ON THE OLD CODE: the dialog\'s Stop button shows only while sending can be stopped')
+  const stopSrc = liftFn(TAB, 'stopAutoSend', { async: true })
+  ok(stopSrc && /window\.confirm\(AUTO_SEND_STOP_CONFIRM\)/.test(stopSrc) && /api\.post\('\/api\/auto-invoice\/send\/stop', \{\}\)/.test(stopSrc),
+    '§9 ...asks first, then posts to the set-only Stop route')
+  ok(!/send\/resume|clearSendStop/.test(TAB), '§9 the page has no way to resume sending')
+}
+
+// ------------------------------------------------------------------ §10
+section('§10 a send waiting for its PODs to settle (AUTO_INVOICE_SEND_SETTLE_MINUTES)')
+{
+  const settling = S.autoInvoiceChip({ state: 'waiting', code: 'SEND_SETTLING' })
+  eq(settling && [settling.label, settling.tone], ['Waiting: settling before sending', 'muted'],
+    '§10 FAILS ON THE OLD CODE: a load whose invoice waits for its PODs to settle reads "Waiting: settling before sending" (the waiting chip, muted)')
+  const text = (S.AUTO_INVOICE_REASONS.SEND_SETTLING || {}).text || ''
+  ok(/sent automatically/.test(text) && /newest POD/.test(text) && /new POD starts the wait again/.test(text),
+    '§10 FAILS ON THE OLD CODE: ...it says the invoice goes on its own after the wait that follows the newest POD, and that a new POD starts the wait again')
+  eq([S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'waiting', code: 'SEND_SETTLING' } }), S.canTryAgain({ state: 'waiting', code: 'SEND_SETTLING' })], [false, false],
+    '§10 ...not a load for a person: not counted as Needs attention, no Try again')
+}
 
 console.log(`\n${'='.repeat(64)}`)
 if (failures.length) {

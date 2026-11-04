@@ -175,6 +175,8 @@
             <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
           </div>
           <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+          <!-- The arrival pickup date's read-only line: the server's facts, worded by lib/pickupArrival.js. -->
+          <p v-if="selectedJob && pickupArrivalLine(selectedJob)" class="pickup-arrival" role="note">{{ pickupArrivalLine(selectedJob) }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -326,6 +328,11 @@
         </DialogHeader>
         <div class="auto-settings">
           <p v-if="autoSettingsProblem" class="auto-settings-problem" role="alert">{{ autoSettingsProblem }}</p>
+          <template v-if="autoSendView">
+            <p class="auto-settings-label">Automatic sending</p>
+            <p :class="autoSendView.stopped ? 'auto-settings-problem' : 'auto-settings-help'">{{ autoSendView.text }}</p>
+            <button v-if="autoSendView.canStop" type="button" class="cl-clear" :disabled="autoSendStopping" @click="stopAutoSend">{{ autoSendStopping ? 'Stopping…' : 'Stop automatic sending' }}</button>
+          </template>
           <label class="auto-settings-label" for="auto-confirmed">Confirmed broker domains</label>
           <p class="auto-settings-help">A broker other than Bison gets an automatic draft only when its Email on Job Tracking is on one of these domains, and only to its rate con's billing email on the same domain. Free mail can't be confirmed. One domain per line, such as example-broker.com.</p>
           <textarea id="auto-confirmed" v-model="autoConfirmedText" rows="4" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading || !autoSettingsRead" />
@@ -368,7 +375,8 @@ import FactoringControls from './FactoringControls.vue'
 import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings } from '../../lib/autoInvoiceStatus'
+import { pickupArrivalLine } from '../../lib/pickupArrival'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -1049,9 +1057,29 @@ const autoSettingsRead = ref(false)
 const autoConfirmedText = ref('')
 const autoOptOutText = ref('')
 const autoSettingsCanSave = computed(() => canSaveAutoSettings({ read: autoSettingsRead.value, loading: autoSettingsLoading.value, saving: autoSettingsSaving.value }))
+// Automatic sending as this opening's read gave it; null while sending is off.
+const autoSend = ref(null)
+const autoSendStopping = ref(false)
+const autoSendView = computed(() => autoSendState(autoSend.value))
 const autoModeText = computed(() => (autoMode.value === 'on'
-  ? 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  ? (autoSendView.value
+    ? 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
+    : 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.')
   : 'Shadow: it records what it would draft, and drafts nothing.'))
+async function stopAutoSend() {
+  if (!auth.isSuperAdmin || !autoSendView.value || !autoSendView.value.canStop || autoSendStopping.value) return
+  if (!window.confirm(AUTO_SEND_STOP_CONFIRM)) return
+  autoSendStopping.value = true; autoSettingsError.value = ''
+  try {
+    const r = await api.post('/api/auto-invoice/send/stop', {})
+    autoSend.value = { ...autoSend.value, stopped: (r && r.stopped) || { at: '', reason: 'STOPPED_BY_ADMIN' } }
+    toast('Automatic sending stopped')
+  } catch (e) {
+    autoSettingsError.value = (e && e.message) || 'Sending could not be stopped. Try again.'
+  } finally {
+    autoSendStopping.value = false
+  }
+}
 // One domain per line; commas and spaces separate them too. The server checks each.
 const domainList = (text) => String(text || '').split(/[\s,;]+/).filter(Boolean)
 async function openAutoSettings() {
@@ -1059,9 +1087,10 @@ async function openAutoSettings() {
   autoSettingsOpen.value = true; autoSettingsError.value = ''; autoSettingsProblem.value = ''; autoSettingsLoading.value = true
   // Nothing from an earlier opening is kept: lists saved without this read would
   // replace the stored ones (the opt-outs among them).
-  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''
+  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''; autoSend.value = null
   try {
     const s = await api.get('/api/auto-invoice/settings')
+    autoSend.value = s && s.send && typeof s.send === 'object' ? s.send : null
     autoConfirmedText.value = (s.confirmedBrokerDomains || []).join('\n')
     autoOptOutText.value = (s.optOutDomains || []).join('\n')
     if (s.unreadable) autoSettingsProblem.value = AUTO_INVOICE_REASONS.SETTINGS_UNREADABLE.text
@@ -1207,6 +1236,12 @@ const detailSections = computed(() => {
 .pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
 .pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
+/* Information only, so neutral: no button, no badge colour. */
+.pickup-arrival {
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb;
+  color: #374151; font-size: 0.8125rem; line-height: 1.4;
+}
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */
 .doc-del {

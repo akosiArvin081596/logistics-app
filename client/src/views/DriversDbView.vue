@@ -4,6 +4,13 @@
       <h2>Driver Database</h2>
     </div>
 
+    <!-- After a delete that cancelled time off a note to CHR's contact was
+         about: the server's lines, kept until dismissed. -->
+    <div v-if="chrDeleteNotes.length" class="chr-delete-notes" role="status">
+      <p v-for="(line, i) in chrDeleteNotes" :key="i">{{ line }}</p>
+      <button type="button" class="btn btn-secondary btn-sm" @click="chrDeleteNotes = []">Dismiss</button>
+    </div>
+
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:1.25rem;">
       <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="card.theme">
@@ -37,8 +44,8 @@
         :daily-rate-rule="store.dailyRateRule"
         @delete="handleDelete"
         @update="handleUpdate"
-        @picture-updated="store.load()"
-        @availability-changed="store.load()"
+        @picture-updated="store.load({ quiet: true })"
+        @availability-changed="store.load({ quiet: true })"
       />
     </template>
   </div>
@@ -56,6 +63,7 @@ import DriverTable from '../components/drivers-db/DriverTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import { usePagination } from '../composables/usePagination'
+import { chrDraftNoteText, chrDraftReplyNotes } from '../lib/availabilityText'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useDriversDbStore()
@@ -65,9 +73,10 @@ const store = useDriversDbStore()
 const auth = useAuthStore()
 const api = useApi()
 const { show: toast } = useToast()
-useSocketRefresh('drivers:changed', () => store.load())
+useSocketRefresh('drivers:changed', () => store.load({ quiet: true }))
 const driverRatings = ref({})
 const truckAssignments = ref([])
+const chrDeleteNotes = ref([])
 
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.drivers), 25)
 watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
@@ -105,7 +114,8 @@ async function handleUpdate({ rowIndex, values }) {
 
 async function handleDelete(rowIndex) {
   try {
-    await store.remove(rowIndex)
+    const reply = await store.remove(rowIndex)
+    chrDeleteNotes.value = chrDraftReplyNotes(reply).map(chrDraftNoteText)
     toast('Driver deleted')
   } catch {
     toast('Failed to delete driver', 'error')
@@ -118,3 +128,8 @@ onMounted(async () => {
   try { const d = await api.get('/api/truck-assignments'); truckAssignments.value = d.assignments || [] } catch {}
 })
 </script>
+
+<style scoped>
+.chr-delete-notes { display: flex; flex-direction: column; gap: 0.35rem; align-items: flex-start; margin-bottom: 1rem; padding: 0.65rem 0.85rem; border: 1px solid #fcd34d; border-radius: 8px; background: #fffbeb; font-size: 0.82rem; color: #374151; overflow-wrap: anywhere; }
+.chr-delete-notes p { margin: 0; }
+</style>

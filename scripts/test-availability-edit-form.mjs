@@ -52,6 +52,10 @@
 //      and a listed state; the staff forms take both or neither and send a
 //      changed home time only on a row carrying `home`; the words; the state
 //      list is the server's (lib/us-states.js STATE_CODES)
+//   §14 the note to CHR's contact (plan B PR 5): each state's words and the
+//      line staff copy (chrDraftText()), on the notice (chrDraftOfNotice(),
+//      noticeWithChrDraft()) and in an answer's lines (chrDraftReplyNotes());
+//      where Notifications, the panel and the Drivers page show them
 //
 // No DOM, no server. Files under test come from LOGISX_ROOT (default: this
 // checkout).
@@ -503,6 +507,84 @@ eq('§13 the panel shows each row\'s home time through panelHomeText(), takes on
 for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/components/shared/OffDutyConfirmHost.vue']) {
   const src = read(rel)
   eq(`§9 ${rel} is left to the dispatch side (it never names DRIVER_HAS_LOADS)`, src !== null && !/DRIVER_HAS_LOADS|confirmLoads/.test(src), true)
+}
+
+// §14 the note to CHR's contact (plan B PR 5): the words staff read for each of the server's states, the line they
+// copy, the notice's and the answers' shapes, and where the screens show them. Made-up line.
+{
+  const LINE = 'Driver A. Example, LogisX truck T-101, unavailable Nov 9 – Nov 13'
+  for (const name of ['chrDraftText', 'chrDraftOfNotice', 'noticeWithChrDraft', 'chrDraftReplyNotes', 'chrDraftNoteText']) eq(`§14 availabilityText.js exports ${name}()`, typeof T[name], 'function')
+  eq('§14 the Copy button\'s words, and Retry\'s', [T.CHR_DRAFT_COPY, T.CHR_DRAFT_COPIED, T.CHR_DRAFT_RETRY], ['Copy', 'Copied', 'Retry the note to CHR'])
+  const said = (state, line, extra = {}) => call('chrDraftText', { state, ...(line ? { line } : {}), ...extra })
+  eq('§14 chrDraftText(): each state\'s words, with the line where the server sends one', [
+    said('pending'), said('made'), said('failed', LINE), said('no_recipient', LINE), said('no_truck'), said('refused'), said('past'), said('off', LINE), said('by_hand', LINE),
+  ], [
+    { words: 'Drafting the note to CHR\'s contact…', line: '' },
+    { words: 'Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.', line: '' },
+    { words: 'The note to CHR\'s contact couldn\'t be drafted. Retry, or tell them by hand:', line: LINE },
+    { words: 'No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand:', line: LINE },
+    { words: 'No truck on record for this driver: tell CHR\'s contact by hand.', line: '' },
+    { words: 'No draft: the note would carry a number that can\'t go to CHR. Tell CHR\'s contact by hand.', line: '' },
+    { words: 'These days are over, so no note to CHR.', line: '' },
+    { words: 'Tell CHR\'s contact:', line: LINE },
+    { words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE },
+  ])
+  eq('§14 ...a failed note with no line (its days changed) says to tell them by hand; a line on a state that never carries one is not shown; anything else is nothing',
+    [said('failed', '', { canRetry: false }), said('made', LINE), said('pending', LINE), call('chrDraftText', { state: 'sent' }), call('chrDraftText', null), call('chrDraftText', 'made')],
+    [{ words: 'The note to CHR\'s contact couldn\'t be drafted. Tell them by hand.', line: '' }, { words: 'Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.', line: '' },
+      { words: 'Drafting the note to CHR\'s contact…', line: '' }, null, null, null])
+  const unitWords = (why) => ({ words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' })
+  eq('§14 chrDraftText(): a truck unit the note can\'t carry says so with the server\'s reason, never "No truck on record"; no truck keeps its own words', [
+    said('unit_refused', '', { reason: 'characters' }), said('unit_refused', '', { reason: 'length' }), said('unit_refused', '', { reason: 'person' }),
+    said('unit_refused', '', { reason: 'number' }), said('unit_refused', LINE, { reason: 'made-up' }), said('no_truck'),
+  ], [
+    unitWords('it has characters other than letters, digits, dashes and a leading #'), unitWords('it is longer than 16 characters'),
+    unitWords('it looks like a phone number, an SSN or a date'), unitWords('it reads as a phone, load or account number'),
+    unitWords('it doesn\'t fit the note\'s rule'), { words: 'No truck on record for this driver: tell CHR\'s contact by hand.', line: '' },
+  ])
+  const noticeOf = (meta, type = 'time-off-request') => ({ id: 5, type, title: 't', body: 'b', metadata: meta })
+  const storedMeta = JSON.stringify({ availabilityId: 12, directoryId: 3, decision: 'approved', decidedBy: 'dispatch_demo', chrDraft: { state: 'off', line: LINE } })
+  const liveMeta = JSON.stringify({ type: 'time-off-request', metadata: { availabilityId: 12, directoryId: 3 } })
+  eq('§14 chrDraftOfNotice(): the stored notice\'s chrDraft; none on a live one not yet decided, or on another notice', [
+    call('chrDraftOfNotice', noticeOf(storedMeta)), call('chrDraftOfNotice', noticeOf(liveMeta)), call('chrDraftOfNotice', noticeOf(storedMeta, 'geofence')), call('chrDraftOfNotice', noticeOf('{not json')),
+  ], [{ state: 'off', line: LINE }, null, null, null])
+  const withStored = call('noticeWithChrDraft', noticeOf(JSON.stringify({ availabilityId: 12, directoryId: 3 })), 12, { state: 'pending' })
+  const withLive = call('noticeWithChrDraft', noticeOf(liveMeta), 12, { state: 'no_recipient', line: LINE })
+  const other = noticeOf(JSON.stringify({ availabilityId: 13 }))
+  eq('§14 noticeWithChrDraft(): this approval\'s chrDraft written in, the metadata kept in its shape; another request\'s notice untouched', [
+    typeof withStored?.metadata, call('chrDraftOfNotice', withStored), JSON.parse(withLive?.metadata || '{}').metadata?.chrDraft, call('noticeWithChrDraft', other, 12, { state: 'made' }) === other,
+  ], ['string', { state: 'pending' }, { state: 'no_recipient', line: LINE }, true])
+  const MADE_NOTE = 'CHR\'s contact was drafted about these days on Oct 15: tell them about this change.'
+  const MAY_NOTE = 'A note to CHR\'s contact about the old days may be in Gmail Drafts: check it before sending anything, and tell them about this change if it went out.'
+  eq('§14 chrDraftReplyNotes(): an approval\'s or a staff record\'s chrDraft; an edit\'s or a cancel\'s change, with the new days\' line; the Drivers-page delete\'s changes; nothing else', [
+    call('chrDraftReplyNotes', { success: true, chrDraft: { state: 'off', line: LINE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraft: { state: 'by_hand', line: LINE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChange: { state: 'made', note: MADE_NOTE, newDays: { state: 'by_hand', line: LINE } } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChange: { state: 'pending', note: MAY_NOTE } }),
+    call('chrDraftReplyNotes', { success: true, chrDraftChanges: [{ availabilityId: 1, state: 'made', note: MADE_NOTE }, { availabilityId: 2, state: 'failed', note: MAY_NOTE }] }),
+    call('chrDraftReplyNotes', { success: true }), call('chrDraftReplyNotes', null),
+  ], [
+    [{ words: 'Tell CHR\'s contact:', line: LINE }],
+    [{ words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE }],
+    [{ words: MADE_NOTE, line: '' }, { words: 'Staff-recorded days get no draft. Tell CHR\'s contact:', line: LINE }],
+    [{ words: MAY_NOTE, line: '' }],
+    [{ words: MADE_NOTE, line: '' }, { words: MAY_NOTE, line: '' }],
+    [], [],
+  ])
+  eq('§14 chrDraftNoteText(): the words, then the line', [call('chrDraftNoteText', { words: 'Tell CHR\'s contact:', line: LINE }), call('chrDraftNoteText', { words: MADE_NOTE, line: '' }), call('chrDraftNoteText', null)],
+    [`Tell CHR's contact: ${LINE}`, MADE_NOTE, ''])
+  const notif = read('client/src/views/NotificationsView.vue') || ''
+  const panelSrc = read('client/src/components/drivers-db/DriverAvailabilityPanel.vue') || ''
+  const dbView = read('client/src/views/DriversDbView.vue') || ''
+  eq('§14 Notifications: the notice shows the note\'s words and line with a Copy button, takes the approve answer\'s chrDraft, and reloads on the live event', [
+    /chrDraftText\(chrDraftOfNotice\(n\)\)/.test(notif), /\{\{ chrOf\(n\)\.line \}\}/.test(notif), /copyLine\(n\.id, chrOf\(n\)\.line\)/.test(notif),
+    /if \(reply\.chrDraft\) store\.setRequestChrDraft\(req\.availabilityId, reply\.chrDraft\)/.test(notif), /socket\.on\('time-off-chr-draft', onChrDraft\)/.test(notif), /socket\.off\('time-off-chr-draft', onChrDraft\)/.test(notif),
+  ], [true, true, true, true, true, true])
+  eq('§14 the panel: each row\'s note in the live and past lists, Retry only where the server sends canRetry: true (posting to its route), and every answer\'s lines', [
+    (panelSrc.match(/<ReuseChrDraft :r="r" \/>/g) || []).length, /v-if="r\.chrDraft\.canRetry === true"/.test(panelSrc), /api\.post\(`\/api\/driver-availability\/\$\{r\.id\}\/chr-draft`, \{\}\)/.test(panelSrc),
+    /chrNotes\.value = chrDraftReplyNotes\(reply\)/.test(panelSrc), /created_?[aA]t|RETRY_AFTER|10 \* 60/.test(panelSrc),
+  ], [2, true, true, true, false])
+  eq('§14 the Drivers page: the delete\'s lines stay on the page until dismissed', [/chrDeleteNotes\.value = chrDraftReplyNotes\(reply\)\.map\(chrDraftNoteText\)/.test(dbView), /v-if="chrDeleteNotes\.length"/.test(dbView)], [true, true])
 }
 
 console.log(`\ntest-availability-edit-form: ${pass} passed, ${failures.length} failed`)

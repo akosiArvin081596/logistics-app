@@ -646,6 +646,7 @@ import {
 import { footnoteDefaultFor } from '../../lib/invoiceLines'
 import { RATECON_RESTRICTED_TEXT } from '../../lib/rateConView'
 import { isMaybeSaved } from '../../lib/factoringStatus'
+import { isReissueRefusal, reissuePrompt, reissueBody } from '../../lib/autoInvoiceStatus'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -1566,11 +1567,17 @@ async function approve() {
     // differs from its own re-resolved value, so an unchanged send preserves the
     // ratecon/default source badge.
     const body = buildOverrideBody()
-    const r = await api.post(
-      `/api/loads/${encodeURIComponent(props.loadId)}/draft-invoice`,
-      body,
-      { timeout: APPROVE_TIMEOUT_MS },
-    )
+    const url = `/api/loads/${encodeURIComponent(props.loadId)}/draft-invoice`
+    let r
+    try {
+      r = await api.post(url, body, { timeout: APPROVE_TIMEOUT_MS })
+    } catch (e) {
+      // The automatic job already sent this load's invoice (or may have): another
+      // goes only with a typed reason, which the server records. Asked once.
+      const again = isReissueRefusal(e) ? reissueBody(body, window.prompt(reissuePrompt(e))) : null
+      if (!again) throw e
+      r = await api.post(url, again, { timeout: APPROVE_TIMEOUT_MS })
+    }
     // ⚠️ A 200 is not proof a draft exists. A server with no mail target answers
     // 200 with `preview: true` and creates nothing, so pass that on (strictly —
     // only a real `true`) with its note, and the draft's warnings, which were

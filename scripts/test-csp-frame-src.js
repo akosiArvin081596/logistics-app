@@ -20,10 +20,14 @@
  * §6 the live check against a server in this process on 127.0.0.1 only.
  *
  * After the nginx edit (plan §5.3), the lead checks a live host with one
- * signed-out GET (no cookie, 10 s timeout, body discarded):
+ * signed-out GET (no cookie, 10 s timeout, body discarded), on `/` and on `/driver`,
+ * since nginx sets headers per location and the page that frames may get another:
  *   node scripts/test-csp-frame-src.js --live https://staging-app.logisx.com/ --before <file>
- * <file> holds the header value saved before the edit (optionally prefixed
- * "Content-Security-Policy:"), or nothing when there was no header.
+ *   node scripts/test-csp-frame-src.js --live https://staging-app.logisx.com/driver --before <file>
+ * <file> holds the header value the same URL sent before the edit, on one line
+ * (optionally prefixed "Content-Security-Policy:"), or nothing when there was no
+ * header. Two CSP header lines go on that line joined with ", " (two policies, as a
+ * browser reads them).
  * Exit: 0 PASS, 1 FAIL, 2 a usage, file or network problem.
  *
  * Made-up policies only. Run: node scripts/test-csp-frame-src.js

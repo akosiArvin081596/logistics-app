@@ -537,6 +537,8 @@ function draftHarness(L) {
 	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
 	require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(db);
 	scope.factoringRoutes = require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db, logAudit: scope.logAudit });
+	// The automatic job's check for a load it sent (shipped lib code; the job off, nothing sent).
+	scope.autoInvoice = require(path.join(ROOT, "lib", "auto-invoice-job.js")).create({ db, env: {}, logAudit: scope.logAudit, log: QUIET });
 	const registered = [];
 	new Function("app", ...Object.keys(scope), L.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	if (registered.length !== 1) throw new Error(`expected 1 registration, got ${registered.length}`);
@@ -797,6 +799,20 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§1 lib/broker-invoice.js exports no AP inbox value (${exported.join(", ") || "none"})`, exported.length === 0);
 			check("§1 server.js passes ADMIN_NOTIFY_EMAIL to the investor RFI middleware",
 				SRC.includes("investorRfi.createInvestorRfiMiddleware({ sendEmail, to: ADMIN_NOTIFY_EMAIL })"));
+
+			// The day-off note to C.H. Robinson's contact (plan B PR 5): its one recipient has no default in code. It is
+			// read once, from the environment, through the note's own rule, and a run without it drafts nothing.
+			const chrReads = SRC.split("process.env.TIME_OFF_CHR_DRAFT_TO").length - 1;
+			check(`§1 server.js reads process.env.TIME_OFF_CHR_DRAFT_TO at most once (found ${chrReads})`, chrReads <= 1);
+			if (chrReads === 1) {
+				check("§1 …only through timeOffChrDraft.chrRecipient(), with no fallback",
+					SRC.includes("timeOffChrDraft.chrRecipient(process.env.TIME_OFF_CHR_DRAFT_TO) : \"\";") && !/process\.env\.TIME_OFF_CHR_DRAFT_TO\s*(?:\|\||\?\?)/.test(SRC));
+				const note = require(path.join(ROOT, "lib", "time-off-chr-draft.js"));
+				check("§1 …and the rule answers \"\" unset, blank or for any address not on chrobinson.com",
+					[undefined, "", "  ", "ap@example.test", "chr@example.test"].every((v) => note.chrRecipient(v) === ""));
+			}
+			const chrLiterals = APP_FILES.filter((f) => /["'`][^"'`\s]{1,64}@chrobinson\.com["'`]/i.test(readSource(f)));
+			check(`§1 no app file holds a literal chrobinson.com address (${chrLiterals.join(", ") || "none"})`, chrLiterals.length === 0);
 		});
 
 		await section("§2 server.js, booted", async () => {

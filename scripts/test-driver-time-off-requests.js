@@ -272,9 +272,12 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 			[1, "hollis renner", "Time off approved: Oct 20 – Oct 22", "", false]);
 		eq("§6.4 ...and a live event to his room only, with the notice's id", w.emits.filter((e) => e.event === "time-off-updated").map((e) => [e.room, e.payload]),
 			[["driver:hollis renner", { notificationId: dn[0] && dn[0].id }]]);
+		// The note to CHR's contact (plan B PR 5) rides on the notice too: with its own switch off, the line to send by
+		// hand, naming his truck "LogisX-#91" as "#91" (scripts/test-time-off-chr-draft.js covers every state).
 		eq("§6.5 ...the staff notice now carries the decision; open pages hear it",
 			[metaOf(staffNotices(w)[0]), w.emits.filter((e) => e.event === "time-off-request-decided").map((e) => [e.room, e.payload])],
-			[{ availabilityId: id, directoryId: DIR.hollis, decision: "approved", decidedBy: "dispatch_t" }, [["dispatch", { availabilityId: id, decision: "approved", decidedBy: "dispatch_t" }]]]);
+			[{ availabilityId: id, directoryId: DIR.hollis, decision: "approved", decidedBy: "dispatch_t", chrDraft: { state: "off", line: "Driver Hollis Renner, LogisX truck #91, unavailable Oct 20 – Oct 22" } },
+				[["dispatch", { availabilityId: id, decision: "approved", decidedBy: "dispatch_t" }]]]);
 		const again = await approve(w, id, USERS.sa);
 		eq("§6.6 a second decision: 409 TIME_OFF_REQUEST_DECIDED naming the first (staff only)", [...code(again), again.body && again.body.error, again.body && again.body.decidedBy],
 			[409, "TIME_OFF_REQUEST_DECIDED", "Already approved by dispatch_t on Oct 15.", "dispatch_t"]);
@@ -597,12 +600,16 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 	});
 
 	await R.guard("§14 CHR", async () => {
-		// Nothing composed for CHR names the home time: the lib modules named for CHR (chr-*.js,
-		// and a time-off-chr-draft.js once it exists), and every server.js statement whose head
-		// names CHR (chrIntegration, CHR_..., buildChrDraft; not "chromium"), mention none of its names.
+		// Nothing composed for CHR or Triumph names the home time: the lib modules named for either
+		// (chr-*.js, time-off-chr-draft.js, triumph-*.js), every server.js statement whose head names
+		// one (chrIntegration, CHR_..., timeOffChrDraft...; not "chromium"), and the approve and decline
+		// routes, whose heads name neither but which decide the note to CHR's contact, mention none of
+		// its names. A scan by name: code reaching the note under another name is caught by the note's
+		// own runner (scripts/test-time-off-chr-draft.js §15), which feeds a home time through approval.
 		const HOME_NAMES_RE = /\b(?:home_city|home_state|homeCity|homeState|homeDefault|homeLocation\w*|validateHomeLocation|storedHomeLocation|homeAuditNote)\b/;
-		const CHR_FILE_RE = /(?:^|-)chr[-.]/;
-		const CHR_HEAD_RE = /\bchr(?:[A-Z_.-]|\b)|CHR|Chr(?=[A-Z])/;
+		const CHR_FILE_RE = /(?:^|-)(?:chr|triumph)[-.]/;
+		const CHR_HEAD_RE = /\bchr(?:[A-Z_.-]|\b)|CHR|Chr(?=[A-Z])|\btriumph(?:[A-Z_.-]|\b)|TRIUMPH|Triumph(?=[A-Z])/;
+		const DECISION_HEADS = ['app.post("/api/driver-availability/:id/approve",', 'app.post("/api/driver-availability/:id/decline",'];
 		const libDir = path.join(W.ROOT, "lib");
 		const chrFiles = fs.readdirSync(libDir).filter((f) => CHR_FILE_RE.test(f) && f.endsWith(".js"));
 		const isHead = (l) => /^[^\s}\])`/]/.test(l);
@@ -611,12 +618,15 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 			if (isHead(l)) statements.push({ head: l, lines: [l] });
 			else if (statements.length) statements[statements.length - 1].lines.push(l);
 		}
-		const chrStatements = statements.filter((st) => CHR_HEAD_RE.test(st.head));
-		eq("§14.18 nothing composed for CHR names the home time: its names exist, and no CHR module or CHR statement in server.js mentions one",
-			[HOME_NAMES_RE.test(W.SRC), chrFiles.length >= 5,
+		const chrStatements = statements.filter((st) => CHR_HEAD_RE.test(st.head) || DECISION_HEADS.some((h) => st.head.startsWith(h)));
+		eq("§14.18 nothing composed for CHR names the home time: its names exist, and no CHR or Triumph module, CHR or Triumph statement in server.js, or the approve or decline route mentions one",
+			[HOME_NAMES_RE.test(W.SRC), chrFiles.length >= 5, DECISION_HEADS.map((h) => chrStatements.filter((st) => st.head.startsWith(h)).length),
 				chrFiles.filter((f) => HOME_NAMES_RE.test(fs.readFileSync(path.join(libDir, f), "utf8"))),
 				chrStatements.filter((st) => HOME_NAMES_RE.test(st.lines.join("\n"))).map((st) => st.head.slice(0, 80))],
-			[true, true, [], []]);
+			[true, true, [1, 1], [], []]);
+		ok("§14.18b ...and the scan reads the note's own module and its server.js wiring (when they exist)",
+			!fs.existsSync(path.join(libDir, "time-off-chr-draft.js"))
+				|| (chrFiles.includes("time-off-chr-draft.js") && chrStatements.some((st) => st.head.startsWith("function startTimeOffChrDraft("))));
 	});
 
 	await R.finish();
