@@ -16,8 +16,9 @@
  *      store is reported without its contents.
  *   §3 ci-run.sh refuses SOURCE_DB, a missing or non-empty work dir and an unknown
  *      part before it builds anything; it runs every part it lists (never names,
- *      eldlink, invoice or report), with the stand-in Keychain; paths.cjs's
- *      E2E_BROWSER takes only "playwright".
+ *      eldlink, invoice or report), with the stand-in Keychain; it and the seed clear
+ *      every feature toggle boot-server.sh reads; paths.cjs's E2E_BROWSER takes only
+ *      "playwright".
  *   §4 e2e.yml: its own workflow (ci.yml unchanged), read-only token, no
  *      pull_request_target, no secret or environment, only ci.yml's pinned actions,
  *      no artifact upload, Playwright's Chromium, ci-run.sh on a runner.temp work dir.
@@ -226,6 +227,16 @@ const fresh = () => path.join(SANDBOX, `ci-work-${++n}`);
 	ok(/^export E2E_SECURITY_BIN="\$HERE\/ci-keychain\.cjs"$/m.test(src) && /^export E2E_KEYCHAIN_SERVICE=logisx-e2e-ci$/m.test(src),
 		"ci-run.sh keeps the logins' passwords in the stand-in, never the Keychain");
 	ok(/"\$NODE_BIN" "\$HERE\/setup-db\.cjs" "\$DB"$/m.test(src) && !/SOURCE_DB=/.test(src), "ci-run.sh builds the made-up database and never names a SOURCE_DB");
+	// An exported toggle would otherwise switch a feature on for every part's server
+	// and the seed's. E2E_NO_CLIENT is the seed's own setting, not a feature.
+	const boot = fs.readFileSync(path.join(E2E, "boot-server.sh"), "utf8");
+	const seed = fs.readFileSync(path.join(E2E, "seed-made-up.cjs"), "utf8");
+	const toggles = [...new Set([...boot.matchAll(/"\$\{(E2E_[A-Z_]+):-\}"/g)].map((m) => m[1]))].filter((k) => k !== "E2E_NO_CLIENT");
+	const unset = ((/^unset ([\s\S]*?[^\\])$/m.exec(src) || [])[1] || "").split(/[\s\\]+/);
+	const deleted = [...((/for \(const k of \[([^\]]*)\]\) delete env\[k\]/.exec(seed) || [])[1] || "").matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]);
+	ok(toggles.includes("E2E_DRIVER_VIDEOS") && toggles.includes("E2E_MAINTENANCE_NOTICE"), "the boot's feature toggles are found", toggles.join(" "));
+	eq("ci-run.sh clears every boot feature toggle before its parts", toggles.filter((k) => !unset.includes(k)), []);
+	eq("the seed's server boots with every boot feature toggle cleared", toggles.filter((k) => !deleted.includes(k)), []);
 }
 (async () => {
 	console.log("§3 paths.cjs chromePath()");
