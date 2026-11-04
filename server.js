@@ -12172,10 +12172,9 @@ function timeOffChrDraftChangesForDirectory(directoryId, today) {
 		.all(directoryId).map((r) => ({ availabilityId: r.id, ...timeOffChrDraftChange(r.id, today) }));
 }
 
-// POST /api/driver-availability/:id/chr-draft — staff try the note to CHR's contact again, where the server offers it
-// (canRetry): a failed draft, or a pending one whose step never ended. The row is read again first, then the stored
-// Message-ID is looked for in Drafts and Sent Mail, so a note is never drafted twice. 404 for an unknown id or a row
-// with no draft; 409 CHR_DRAFT_MADE, CHR_DRAFT_IN_FLIGHT or CHR_DRAFT_ROW_CHANGED. Audited, never with the address.
+// POST /api/driver-availability/:id/chr-draft — staff try the note again where the server offers it (canRetry): the row
+// is read again and the stored Message-ID looked for in Drafts and Sent Mail first, so a note is never drafted twice.
+// 404 no draft; 409 CHR_DRAFT_MADE, CHR_DRAFT_IN_FLIGHT or CHR_DRAFT_ROW_CHANGED. Audited, never with the address.
 app.post("/api/driver-availability/:id/chr-draft", timeOffChrDraftFlagGate, requireRole("Super Admin", "Dispatcher"), timeOffChrDraftRetryLimiter, async (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
