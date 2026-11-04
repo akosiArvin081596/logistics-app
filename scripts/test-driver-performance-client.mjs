@@ -98,10 +98,11 @@ const showsDecoy = (json) => DECOY_MARKS.filter((mark) => has(json, mark))
 
 // ── §1 the words ─────────────────────────────────────────────────────────────
 console.log('§1 the fixed words')
-eq('§1 the hours-of-service line, with the GPS sentence out and "tell dispatch" until the tap exists', v.HOS_LINE,
-  'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch: that week is excused.')
+eq('§1 the hours-of-service line: no GPS sentence, "tell dispatch" until the tap exists, and no promise about the week', v.HOS_LINE,
+  'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.')
 eq('§1 the guide line', v.GUIDE_LINE, 'Targets are a guide, not a requirement.')
-eq('§1 the neutral line', v.NO_HOURS_LINE, "Drive hours will show here when your truck's ELD reports them.")
+eq('§1 the neutral line fits every truck and promises nothing', v.NO_HOURS_LINE, "Drive hours aren't shown yet.")
+eq('§1 the Safety line claims nothing about what is recorded', v.CATEGORIES.find((c) => c.id === 'safety').line, "Safety isn't ranked yet.")
 eq('§1 the closing line', v.WEEK_CLOSES, 'Week closes Fri 11:59 PM ET')
 eq('§1 "Coming soon" and "You"', [v.COMING_SOON, v.YOU], ['Coming soon', 'You'])
 eq('§1 the three periods', v.PERIODS.map((p) => [p.id, p.label, p.kind]), [['this-week', 'This week', 'week'], ['last-week', 'Last week', 'week'], ['this-month', 'This month', 'month']])

@@ -9,9 +9,9 @@ import { availabilityRangeText } from './availabilityText.js'
 export const OWN_URL = '/api/driver/me/performance'
 export const BOARD_URL = '/api/driver/performance/leaderboard'
 
-export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch: that week is excused.'
+export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
 export const GUIDE_LINE = 'Targets are a guide, not a requirement.'
-export const NO_HOURS_LINE = "Drive hours will show here when your truck's ELD reports them."
+export const NO_HOURS_LINE = "Drive hours aren't shown yet."
 export const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 export const NOT_RANKED = 'Not ranked'
 export const NO_RANK = '–'
@@ -39,7 +39,7 @@ export const boardUrl = (kind) => `${BOARD_URL}?period=${kind}`
 export const CATEGORIES = Object.freeze([
   Object.freeze({ id: 'most-loads', title: 'Most loads', live: true, line: 'Loads delivered in this period.' }),
   Object.freeze({ id: 'least-fuel-cost', title: 'Least fuel cost', live: false, line: "Fuel receipts and ELD miles aren't complete enough to compare fairly yet." }),
-  Object.freeze({ id: 'safety', title: 'Safety', live: false, line: 'Nothing in the app records safety events yet, so there is nothing fair to rank.' }),
+  Object.freeze({ id: 'safety', title: 'Safety', live: false, line: "Safety isn't ranked yet." }),
   Object.freeze({ id: 'lowest-idle', title: 'Lowest idle', live: false, line: "Idle time is only an estimate today, so it isn't ranked yet." }),
 ])
 
@@ -55,8 +55,8 @@ export function tabProbeUrl(role) {
 
 export const showsMyWeek = (role) => role === 'Driver'
 
-// 404 is the switch off, or a driver who isn't on the board; 401 and 403 aren't his to see. The
-// answer never says which, and neither does the screen.
+// 404 is the switch off (FEATURE_OFF), or a driver who isn't on the board (NOT_ELIGIBLE); 401 and
+// 403 aren't his to see. The codes give no reason, and the screen never says which.
 export const isGoneAnswer = (status) => status === 404 || status === 401 || status === 403
 
 // Only a 200 shows the tab. A server or network failure says nothing either way, so it leaves

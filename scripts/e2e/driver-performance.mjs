@@ -73,9 +73,9 @@ if (process.env.SHOT_DIR && !path.isAbsolute(process.env.SHOT_DIR)) die('SHOT_DI
 }
 
 // ---------------------------------------------------------------- the words the screen must say
-const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch: that week is excused.'
+const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
 const GUIDE_LINE = 'Targets are a guide, not a requirement.'
-const NO_HOURS_LINE = "Drive hours will show here when your truck's ELD reports them."
+const NO_HOURS_LINE = "Drive hours aren't shown yet."
 const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
 const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
