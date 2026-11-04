@@ -69762,10 +69762,12 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 				});
 		}
 		const pending = pendingReceiptsInPeriod(period);
+		const autoApproved = autoApprovedReceiptsInPeriod(period);
 		const personalWaiting = personalWaitingInPeriod(period);
 		const correctionWaiting = correctionWaitingForClose();
 		logAudit(req, "period_finalize", "period", period,
 			`Finalized ${period} early (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+			receiptAutoApproveWatch.closeAuditPart(autoApproved, receiptIdList) +
 			(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") +
 			(correctionWaiting.length ? `; ${correctionWaiting.length} correction line(s) waiting for a weekly invoice: line ${correctionWaiting.map((x) => x.id).join(", ")}` : "") + ")");
 		res.json({ success: true, period, ...result, pendingReceipts: pending, personalWaiting, ...(correctionWaiting.length ? { correctionWaiting } : {}) });
@@ -70533,6 +70535,13 @@ function pendingReceiptsInPeriod(period) {
 	).all(period);
 }
 
+// The receipts booked into a month that the automatic pass approved; the close
+// counts them beside the Pending ones (lib/receipt-auto-approve-watch.js).
+const receiptAutoApproveWatch = require("./lib/receipt-auto-approve-watch");
+function autoApprovedReceiptsInPeriod(period) {
+	return receiptAutoApproveWatch.approvedInPeriod(db, period, EXPENSE_PERIOD_EXPR);
+}
+
 // Personal lines booked to `period` that no live invoice carries yet (waiting
 // for their week's invoice, or for a correction): the month's books already
 // leave them out of the company's costs, and the driver has not been charged
@@ -70920,11 +70929,13 @@ async function maybeCloseFinishedPeriods() {
 		for (const period of result.periods) {
 			try {
 				const pending = pendingReceiptsInPeriod(period);
+				const autoApproved = autoApprovedReceiptsInPeriod(period);
 				const personalWaiting = personalWaitingInPeriod(period);
 				const correctionWaiting = correctionWaitingForClose();
 				// The audit row the manual close writes, for the close nobody pressed
 				logAudit(PERIOD_CLOSE_SYSTEM_ACTOR, "period_finalize", "period", period,
 					`Finalized ${period} at month end (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+					receiptAutoApproveWatch.closeAuditPart(autoApproved, receiptIdList) +
 					(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") +
 					(correctionWaiting.length ? `; ${correctionWaiting.length} correction line(s) waiting for a weekly invoice: line ${correctionWaiting.map((x) => x.id).join(", ")}` : "") + ")");
 				insertDispatchNotification.run(
@@ -70932,10 +70943,12 @@ async function maybeCloseFinishedPeriods() {
 					`${periodLabel(period)} is closed`,
 					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.` +
 						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : "") +
+						receiptAutoApproveWatch.closeNoticePart(autoApproved, periodLabel(period), receiptIdList) +
 						(personalWaiting.length ? ` ${personalWaiting.length} Personal line(s) booked to ${periodLabel(period)} are on no invoice yet; the driver has not been charged for them (receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}).` : "") +
 						(correctionWaiting.length ? ` ${correctionWaiting.length} correction line(s) wait for a weekly invoice (line ${correctionWaiting.map((x) => x.id).join(", ")}).` : ""),
 					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id), personalWaitingLineIds: personalWaiting.map((x) => x.id),
-						...(correctionWaiting.length ? { correctionWaitingLineIds: correctionWaiting.map((x) => x.id) } : {}) }),
+						...(correctionWaiting.length ? { correctionWaitingLineIds: correctionWaiting.map((x) => x.id) } : {}),
+						...(autoApproved.length ? { autoApprovedReceiptIds: autoApproved.map((x) => x.id) } : {}) }),
 				);
 			} catch {}
 		}

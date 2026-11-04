@@ -357,11 +357,14 @@ async function main() {
 
 	await section("3. on: exactly the passing receipt approved, its record, one audit row", async () => {
 		const w = world({ env: ON_ENV });
-		fixture(w, 101);
+		const f101 = fixture(w, 101);
 		fixture(w, 102, { fill: { lat: LAT + 0.6 } });
 		await w.pass.run();
 		const e = expense(w, 101);
 		const rv = review(w, 101);
+		const link = (JSON.parse(rv.evidence || "{}").link) || {};
+		eq([link.fill, link.vehicle, link.start, link.day], [101, f101.vid, Date.parse(`${f101.day}T16:00:00Z`), f101.day],
+			"the evidence keeps the fill's truck, start and business day, so the daily check knows a re-detected fill (L18)");
 		eq([e.status, e.status_by_role, e.status_by_id, e.status_by_name], ["Approved", "system", 0, "receipt-auto-approve"], "101 approved by the system actor");
 		ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(e.status_at) && e.status_at === rv.applied_at, "its status_at is the review row's applied_at", `${e.status_at} vs ${rv.applied_at}`);
 		eq([expense(w, 102).status, expense(w, 102).status_by_role], ["Pending", ""], "102 (held) left as it was");
