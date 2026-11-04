@@ -19,7 +19,8 @@
 //       the mailbox and a filled Payments Table row send nothing; "looks in Gmail" on MAYBE_SENT, which
 //       never sends; "a Gmail draft" while sending is stopped; no Try again on OFF_GAP
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
-//       asked no other host
+//       opened no socket off this machine and asked no mail host. Any other host it asks (its web
+//       fonts) is aborted, and only reported, as in time-off-chr-draft.mjs
 //
 // Like time-off-chr-draft.mjs this boots no server.js, reads no settings file or key and signs nobody
 // in. It serves the checkout's built client/dist on 127.0.0.1 (E2E_PORT, or a free port the system
@@ -695,9 +696,13 @@ async function tryAgainRun(browser, size) {
 
 // ---------------------------------------------------------------- G: nothing left
 function wireStep() {
-  const off = [...wire.offHost, ...wire.offHostSockets]
-  record('G', 'Nothing left this machine', 'no TLS connection, no socket to another host or a mail port; the browser asked no other host', `TLS ${wire.tls.length}, remote ${wire.remote.length}, mail ports ${wire.mailPorts.length}, off-host ${off.join(',') || 'none'}`,
-    wire.tls.length === 0 && wire.remote.length === 0 && wire.mailPorts.length === 0 && off.length === 0)
+  // A page request to another host (its web fonts) is aborted in openPage(), so it's only reported.
+  const offHost = [...wire.offHost].sort()
+  const mailHosts = offHost.filter((h) => /mail|imap|smtp/i.test(h))
+  record('G', 'Nothing left this machine',
+    'no TLS connection, no socket to another host or a mail port; no browser socket off this machine and no mail host asked by the browser (any other host it asked was aborted, and is only reported)',
+    `TLS ${wire.tls.length}, remote ${wire.remote.length}, mail ports ${wire.mailPorts.length}, browser sockets off this machine ${wire.offHostSockets.length}, hosts aborted ${offHost.join(',') || 'none'}`,
+    wire.tls.length === 0 && wire.remote.length === 0 && wire.mailPorts.length === 0 && wire.offHostSockets.length === 0 && mailHosts.length === 0)
 }
 
 async function main() {
