@@ -533,6 +533,15 @@ for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/co
     [said('failed', '', { canRetry: false }), said('made', LINE), said('pending', LINE), call('chrDraftText', { state: 'sent' }), call('chrDraftText', null), call('chrDraftText', 'made')],
     [{ words: 'The note to CHR\'s contact couldn\'t be drafted. Tell them by hand.', line: '' }, { words: 'Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.', line: '' },
       { words: 'Drafting the note to CHR\'s contact…', line: '' }, null, null, null])
+  const unitWords = (why) => ({ words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' })
+  eq('§14 chrDraftText(): a truck unit the note can\'t carry says so with the server\'s reason, never "No truck on record"; no truck keeps its own words', [
+    said('unit_refused', '', { reason: 'characters' }), said('unit_refused', '', { reason: 'length' }), said('unit_refused', '', { reason: 'person' }),
+    said('unit_refused', '', { reason: 'number' }), said('unit_refused', LINE, { reason: 'made-up' }), said('no_truck'),
+  ], [
+    unitWords('it has characters other than letters, digits, dashes and a leading #'), unitWords('it is longer than 16 characters'),
+    unitWords('it looks like a phone number, an SSN or a date'), unitWords('it reads as a phone, load or account number'),
+    unitWords('it doesn\'t fit the note\'s rule'), { words: 'No truck on record for this driver: tell CHR\'s contact by hand.', line: '' },
+  ])
   const noticeOf = (meta, type = 'time-off-request') => ({ id: 5, type, title: 't', body: 'b', metadata: meta })
   const storedMeta = JSON.stringify({ availabilityId: 12, directoryId: 3, decision: 'approved', decidedBy: 'dispatch_demo', chrDraft: { state: 'off', line: LINE } })
   const liveMeta = JSON.stringify({ type: 'time-off-request', metadata: { availabilityId: 12, directoryId: 3 } })

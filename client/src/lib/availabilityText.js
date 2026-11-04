@@ -553,10 +553,10 @@ export function panelRequestText(row) {
 }
 
 // ── Staff: the note to CHR's contact about a driver's approved days ─────────
-// The server sends `chrDraft: { state, line? }` on the approve answer, the
-// request's notice and the panel's rows (with canRetry there), and a staff
+// The server sends `chrDraft: { state, line?, reason? }` on the approve answer,
+// the request's notice and the panel's rows (with canRetry there), and a staff
 // create's answer; `line` (the driver, the truck and the days) is for staff to
-// copy and send by hand. The server decides every state and every line.
+// copy and send by hand. The server decides every state, line and reason.
 
 export const CHR_DRAFT_COPY = 'Copy'
 export const CHR_DRAFT_COPIED = 'Copied'
@@ -574,11 +574,22 @@ const CHR_DRAFT_WORDS = {
   by_hand: ['Staff-recorded days get no draft. Tell CHR\'s contact:', 'Staff-recorded days get no draft. Tell CHR\'s contact by hand.'],
 }
 const CHR_LINE_STATES = ['off', 'no_recipient', 'failed', 'by_hand']
+// Why the truck's unit can't go in the note (the server's `reason`).
+const CHR_UNIT_REASONS = {
+  characters: 'it has characters other than letters, digits, dashes and a leading #',
+  length: 'it is longer than 16 characters',
+  person: 'it looks like a phone number, an SSN or a date',
+  number: 'it reads as a phone, load or account number',
+}
 
 // { words, line } for a chrDraft as staff read it, or null for none; `line` is
 // "" where there is nothing to copy.
 export function chrDraftText(chrDraft) {
   const d = chrDraft && typeof chrDraft === 'object' ? chrDraft : null
+  if (d && d.state === 'unit_refused') {
+    const why = Object.prototype.hasOwnProperty.call(CHR_UNIT_REASONS, d.reason) ? CHR_UNIT_REASONS[d.reason] : 'it doesn\'t fit the note\'s rule'
+    return { words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' }
+  }
   if (!d || !Object.prototype.hasOwnProperty.call(CHR_DRAFT_WORDS, d.state)) return null
   const [withLine, without] = CHR_DRAFT_WORDS[d.state]
   const line = CHR_LINE_STATES.includes(d.state) && typeof d.line === 'string' ? d.line.trim() : ''

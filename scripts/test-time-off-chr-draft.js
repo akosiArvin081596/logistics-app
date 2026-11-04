@@ -255,10 +255,8 @@ function subjectOf(mime) {
 			["a 7-digit phone split by a space", { driverName: "A. Example 555 0100" }],
 			["an SSN shape in the name", { driverName: "A. Example 900-12-3456" }],
 			["a date shape in the name", { driverName: "A. Example 11-09-2026" }],
-			["a 10-digit unit", { unit: "5550100147" }],
-			["a deny-list value as the unit", { unit: "T-55501" }],
-			["a 6-digit unit the reconcile sweep reads as a load", { unit: "456789" }],
 			["a load-shaped number in the name", { driverName: "A. Example 7891234" }],
+			["a load number only the sweep's body reader takes (\"Load 456789x\")", { driverName: "A. Example Load 456789x" }],
 			["an empty name after cleaning", { driverName: "​‮" }],
 		];
 		// Each case meets the deny list only where it is the point, so no other check hides a missing one.
@@ -268,19 +266,29 @@ function subjectOf(mime) {
 		}
 		eq("§5.1c the deny list reads digits across separators, as CHR's redactor does: a deny value split by spaces is refused",
 			draft.chrDraftDecision(input({ unit: "T-101", driverName: "A. Example 5 5 5 0 1" }), { ...CTX, denyHits: deny }).state, "refused");
-		eq("§5.1b a person-shaped unit (a 7-digit phone, an SSN or a date inside it) fails CHR's unit rule: no_truck, no line",
-			[decide({ unit: "T-555-0100" }), decide({ unit: "900-12-3456" }), decide({ unit: "11-09-2026" })], [{ state: "no_truck" }, { state: "no_truck" }, { state: "no_truck" }]);
+		const { extractLoadNumbers, extractLoadNumbersFromBody } = require("../lib/ratecon-reconcile");
+		const bodyOnly = decide({ driverName: "A. Example", unit: "T-101" });
+		const bodyCase = "Driver A. Example Load 456789x, LogisX truck T-101, unavailable Nov 9 – Nov 13";
+		eq("§5.1d (review L4) ...that case is the body reader's alone: the plain extractor finds nothing in it, the body reader finds the load",
+			[extractLoadNumbers(bodyCase), extractLoadNumbersFromBody(bodyCase), bodyOnly.state], [[], ["456789"], "pending"]);
+		const unitSaid = (unit, denyHits = NO_DENY) => draft.chrDraftAnswer(draft.chrDraftDecision(input({ unit }), { ...CTX, denyHits }));
+		eq("§5.1b a person-shaped unit (a 7-digit phone, an SSN or a date inside it): unit_refused, reason person, no line",
+			[unitSaid("T-555-0100"), unitSaid("900-12-3456"), unitSaid("11-09-2026")],
+			[{ state: "unit_refused", reason: "person" }, { state: "unit_refused", reason: "person" }, { state: "unit_refused", reason: "person" }]);
+		eq("§5.1e a unit that is on its own a phone-, carrier- or load-shaped number (10 digits, a deny-list value, a 6-digit run the sweep reads): unit_refused, reason number",
+			[unitSaid("5550100147"), unitSaid("T-55501", deny), unitSaid("456789"), unitSaid("LogisX-#456789")],
+			[{ state: "unit_refused", reason: "number" }, { state: "unit_refused", reason: "number" }, { state: "unit_refused", reason: "number" }, { state: "unit_refused", reason: "number" }]);
 		eq("§5.2 a unit the sweep does not read (a 6-digit run it takes for a date) is kept: \"123456\"", decide({ unit: "123456" }).state, "pending");
-		const { extractLoadNumbers } = require("../lib/ratecon-reconcile");
-		eq("§5.3 the sweep's own extractor finds nothing in a passing note's subject or body", [extractLoadNumbers(decide().subject), extractLoadNumbers(decide().text)], [[], []]);
+		eq("§5.3 the sweep's own extractors find nothing in a passing note's subject or body",
+			[extractLoadNumbers(decide().subject), extractLoadNumbers(decide().text), extractLoadNumbersFromBody(decide().text)], [[], [], []]);
 		const w = await world();
 		const before = w.mail.appends.length;
 		w.db.prepare("UPDATE trucks SET unit_number = 'T-55501' WHERE id = ?").run(TRUCK.t91);
 		const denied = await approve(w, reqId(await ask(w, "2026-11-09", "2026-11-13")));
 		w.db.prepare("UPDATE trucks SET unit_number = '456789' WHERE id = ?").run(TRUCK.t91);
 		const loadish = await approve(w, reqId(await ask(w, "2026-11-16", "2026-11-17")));
-		eq("§5.4 through the approve route, a deny-list unit and a load-shaped unit: refused, no line, no draft row, no Gmail call",
-			[denied.body.chrDraft, loadish.body.chrDraft, draftCount(w), w.mail.appends.length - before], [{ state: "refused" }, { state: "refused" }, 0, 0]);
+		eq("§5.4 through the approve route, a deny-list unit and a load-shaped unit: unit_refused (number), no line, no draft row, no Gmail call",
+			[denied.body.chrDraft, loadish.body.chrDraft, draftCount(w), w.mail.appends.length - before], [{ state: "unit_refused", reason: "number" }, { state: "unit_refused", reason: "number" }, 0, 0]);
 	});
 
 	section("§6 the order");
@@ -289,7 +297,12 @@ function subjectOf(mime) {
 		eq("§6.1 the switch off: no truck is no_truck, days over are past, a refused value is refused; never \"off\" with a line",
 			[decide({ unit: "" }, off), decide({ to: "2026-11-03", from: "2026-11-01" }, off), decide({ driverName: "A. Example 555-0100" }, off)],
 			[{ state: "no_truck" }, { state: "past" }, { state: "refused" }]);
-		eq("§6.2 past before no_truck before refused", [decide({ to: "2026-11-03", from: "2026-11-01", unit: "", driverName: "" }).state, decide({ unit: "", driverName: "" }).state], ["past", "no_truck"]);
+		eq("§6.2 past before no_truck and unit_refused, both before refused",
+			[decide({ to: "2026-11-03", from: "2026-11-01", unit: "", driverName: "" }).state, decide({ to: "2026-11-03", from: "2026-11-01", unit: "T 1" }).state,
+				decide({ unit: "", driverName: "" }).state, decide({ unit: "T 1", driverName: "" }).state], ["past", "past", "no_truck", "unit_refused"]);
+		eq("§6.2b with the switch off and for a staff row, a refused unit keeps its own state and reason, never a line",
+			[draft.chrDraftAnswer(decide({ unit: "T 1" }, off)), draft.chrDraftAnswer(decide({ unit: "T 1" }, { staffRecorded: true }))],
+			[{ state: "unit_refused", reason: "characters" }, { state: "unit_refused", reason: "characters" }]);
 		eq("§6.3 then by_hand for a staff row, off, no_recipient, pending: each with the line", [
 			draft.chrDraftAnswer(decide({}, { staffRecorded: true })), draft.chrDraftAnswer(decide({}, off)), draft.chrDraftAnswer(decide({}, { recipientOk: false })), draft.chrDraftAnswer(decide()),
 		], [
@@ -352,23 +365,45 @@ function subjectOf(mime) {
 			[["[availability] CHR day-off drafts ON (DRIVER_TIME_OFF_CHR_DRAFT_ENABLED), address: set, chrobinson.com"], 0]);
 	});
 
-	section("§9 no truck");
+	section("§9 the truck: the fleet's \"#\" units, a unit the note can't carry, no truck");
 	await R.guard("§9", async () => {
+		const LINE91 = "Driver Hollis Renner, LogisX truck #91, unavailable Nov 9 – Nov 13";
+		const f = await world();
+		f.db.prepare("UPDATE trucks SET unit_number = 'LogisX-#91' WHERE id = ?").run(TRUCK.t91);
+		const fid = reqId(await ask(f, "2026-11-09", "2026-11-13"));
+		const fa = await approve(f, fid);
+		await until(() => draftRow(f, fid).state === "made");
+		eq("§9.1 (review M1) the fleet's unit \"LogisX-#91\" drafts: pending, then made; the note reads \"LogisX truck #91\", and the row keeps that unit",
+			[fa.body.chrDraft, draftRow(f, fid).state, draftRow(f, fid).unit, f.mail.appends.map((m) => m.subject), /LogisX truck #91, will be unavailable from Monday, Nov 9/.test((f.mail.appends[0] || {}).text)],
+			[{ state: "pending" }, "made", "#91", [LINE91], true]);
+		const offW = await world({ DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: "" });
+		offW.db.prepare("UPDATE trucks SET unit_number = 'LogisX-#91' WHERE id = ?").run(TRUCK.t91);
+		const staffRow = await offW.call("POST", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.sa, body: { kind: "vacation", from: "2026-12-01", to: "2026-12-02" } });
+		eq("§9.1b ...with the switch off: \"off\" with that line; a staff record: by_hand with it",
+			[(await approve(offW, reqId(await ask(offW, "2026-11-09", "2026-11-13")))).body.chrDraft, staffRow.body.chrDraft],
+			[{ state: "off", line: LINE91 }, { state: "by_hand", line: "Driver Hollis Renner, LogisX truck #91, unavailable Dec 1 – Dec 2" }]);
 		const w = await world();
-		w.db.prepare("UPDATE trucks SET unit_number = 'LogisX-#91' WHERE id = ?").run(TRUCK.t91);
-		const a = await approve(w, reqId(await ask(w, "2026-11-09", "2026-11-13")));
+		w.db.prepare("UPDATE trucks SET unit_number = 'LogisX-#91 B' WHERE id = ?").run(TRUCK.t91);
+		const aid = reqId(await ask(w, "2026-11-09", "2026-11-13"));
+		const a = await approve(w, aid);
+		w.db.prepare("UPDATE trucks SET unit_number = ? WHERE id = ?").run("LogisX-#91-EXTRA-LONG-UNIT", TRUCK.t91);
+		const long = await approve(w, reqId(await ask(w, "2026-11-16", "2026-11-17")));
 		w.db.prepare("DELETE FROM truck_assignments").run();
 		w.db.prepare("UPDATE trucks SET assigned_driver = '' ").run();
-		const b = await approve(w, reqId(await ask(w, "2026-11-16", "2026-11-17")));
+		const b = await approve(w, reqId(await ask(w, "2026-11-23", "2026-11-24")));
 		await new Promise((r) => setTimeout(r, 10));
-		eq("§9.1 a unit CHR's rule refuses (\"LogisX-#91\"), and no truck at all: no_truck, no line, no draft row, no Gmail call",
-			[a.body.chrDraft, b.body.chrDraft, draftCount(w), w.mail.appends.length], [{ state: "no_truck" }, { state: "no_truck" }, 0, 0]);
+		eq("§9.2 a unit the note can't carry gets its own state and reason (a space; over 16 characters), and no truck at all stays no_truck: no line, no draft row, no Gmail call",
+			[a.body.chrDraft, long.body.chrDraft, b.body.chrDraft, draftCount(w), w.mail.appends.length],
+			[{ state: "unit_refused", reason: "characters" }, { state: "unit_refused", reason: "length" }, { state: "no_truck" }, 0, 0]);
+		eq("§9.2b ...and the notice says the same", notice(w, aid).chrDraft, { state: "unit_refused", reason: "characters" });
 		const n = await world();
 		n.db.prepare("DELETE FROM truck_assignments").run();
 		const c = await approve(n, reqId(await ask(n, "2026-11-09", "2026-11-13")));
 		await until(() => n.mail.appends.length === 1);
-		eq("§9.2 no active assignment: the truck that names him (T-101)", [c.body.chrDraft, n.mail.appends.map((m) => m.subject)], [{ state: "pending" }, [LINE]]);
-		eq("§9.3 the first truck found decides: an assignment's bad unit is no truck, never another truck's", draft.chooseTruckUnit([{ unit_number: "LogisX-#9" }, { unit_number: "T-101" }]), "LogisX-#9");
+		eq("§9.3 no active assignment: the truck that names him (T-101)", [c.body.chrDraft, n.mail.appends.map((m) => m.subject)], [{ state: "pending" }, [LINE]]);
+		eq("§9.4 the first truck found decides: an assignment's refused unit never falls through to another truck",
+			[draft.chooseTruckUnit([{ unit_number: "LogisX-#9 B" }, { unit_number: "T-101" }]), draft.chrDraftAnswer(decide({ unit: draft.chooseTruckUnit([{ unit_number: "LogisX-#9 B" }, { unit_number: "T-101" }]) }))],
+			["LogisX-#9 B", { state: "unit_refused", reason: "characters" }]);
 	});
 
 	section("§10 days already over");
@@ -651,6 +686,14 @@ function subjectOf(mime) {
 			.run(kid, new Date(k.clock.ms - 30 * 60000).toISOString());
 		eq("§16d.7 a pending row left by a restart (none in flight), 30 minutes old: Retry offered and it drafts", [panelRow(await panel(k), kid).chrDraft.canRetry, (await retry(k, kid)).body.chrDraft.state, k.mail.searches.length, k.mail.appends.length],
 			[true, "made", 1, 1]);
+		const nr = await world({ TIME_OFF_CHR_DRAFT_TO: undefined });
+		const nid = reqId(await ask(nr, "2026-11-09", "2026-11-13"));
+		nr.db.prepare("UPDATE driver_availability SET request_status = 'approved', decided_by = 'dispatch_t', decided_at = '2026-10-15T12:00:00Z' WHERE id = ?").run(nid);
+		nr.db.prepare("INSERT INTO time_off_chr_drafts (availability_id, message_id, unit, from_day, to_day, state, created_at) VALUES (?, '<made-up.time-off-chr@example.invalid>', 'T-101', '2026-11-09', '2026-11-13', 'pending', ?)")
+			.run(nid, new Date(nr.clock.ms - 30 * 60000).toISOString());
+		const nrRetry = await retry(nr, nid);
+		eq("§16d.7b (review L4) ...the same row after a restart without the recipient setting: the re-read refuses it before any search or append (409 CHR_DRAFT_ROW_CHANGED; failed, refused)",
+			[code(nrRetry), nr.mail.searches.length, nr.mail.appends.length, [draftRow(nr, nid).state, draftRow(nr, nid).last_stage]], [[409, "CHR_DRAFT_ROW_CHANGED"], 0, 0, ["failed", "refused"]]);
 		const on = await panel(w);
 		const off = await W.startWorld({ env: { ...ON, DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: "" } });
 		for (const sql of w.db.prepare("SELECT * FROM driver_availability ORDER BY id").all().map((r) => r)) {
@@ -713,10 +756,15 @@ function subjectOf(mime) {
 		eq("§19.2 the Message-ID: the shape lib/imap-draft.js takes, its own marker, the mailbox's domain (logisx.invalid without one)",
 			[imap.MESSAGE_ID_RE.test(id), /^<[0-9a-f-]{36}\.time-off-chr@example\.invalid>$/.test(id), /\.time-off-chr@logisx\.invalid>$/.test(draft.newChrDraftMessageId("")), id === draft.newChrDraftMessageId("ops@example.invalid")],
 			[true, true, true, false]);
-		const chrSrc = fs.readFileSync(path.join(W.ROOT, "lib", "chr-events.js"), "utf8");
-		const m = /\nconst UNIT_RE = (\/[^\n]+\/);\n/.exec(chrSrc);
-		eq("§19.3 the unit rule is CHR's own (lib/chr-events.js UNIT_RE), and units are held to it", [m && m[1], String(draft.UNIT_RE), draft.cleanUnit(" T-101 "), draft.cleanUnit("T 101"), draft.cleanUnit("T-12345678901"), draft.cleanUnit("#91"), draft.cleanUnit(91)],
-			[String(draft.UNIT_RE), "/^[A-Za-z0-9-]{1,12}$/", "T-101", "", "", "", "91"]);
+		const unitOf = (raw) => draft.noteUnit(raw, NO_DENY);
+		eq("§19.3 (review M1) the note's own unit rule: the fleet's stored units read with their \"#\" and without the \"LogisX\" the sentence already says; other units as stored; none is no truck",
+			[unitOf("LogisX-#33"), unitOf("Logisx-#91"), unitOf("LogisX #7"), unitOf("LogisX#12"), unitOf(" T-101 "), unitOf("#91"), unitOf(91), unitOf("LogisXT1"), unitOf(""), unitOf(null), draft.UNIT_MAX],
+			[{ unit: "#33" }, { unit: "#91" }, { unit: "#7" }, { unit: "#12" }, { unit: "T-101" }, { unit: "#91" }, { unit: "91" }, { unit: "LogisXT1" }, { unit: "" }, { unit: "" }, 16]);
+		eq("§19.3b ...and what it refuses, with why: characters (a space, a \"#\" not leading, nothing after it), length (over 16), person shapes, numbers",
+			[unitOf("T 101"), unitOf("LogisX-#33 B"), unitOf("T-#1"), unitOf("LogisX-#"), unitOf("#ABCDEFGHIJKLMNOP"), unitOf("x".repeat(300)), unitOf("555-0100"), unitOf("5550100147"), unitOf("456789"), draft.noteUnit("T-55501", draft.createDenyCheck(DENY))],
+			[{ refused: "characters" }, { refused: "characters" }, { refused: "characters" }, { refused: "characters" }, { refused: "length" }, { refused: "length" }, { refused: "person" },
+				{ refused: "number" }, { refused: "number" }, { refused: "number" }]);
+		eq("§19.3c the reasons the answers carry", [draft.UNIT_REASONS, draft.chrDraftAnswer({ state: "unit_refused", reason: "made-up" })], [["characters", "length", "person", "number"], { state: "unit_refused", reason: "characters" }]);
 		const t0 = Date.parse("2026-11-04T12:00:00Z");
 		const failed = (stage, to = "2026-11-13") => ({ state: "failed", last_stage: stage, to_day: to, created_at: "2026-11-04T11:00:00Z" });
 		eq("§19.4 Retry is offered on a failed draft whose row holds and whose days aren't over, and on a pending one older than 10 minutes", [

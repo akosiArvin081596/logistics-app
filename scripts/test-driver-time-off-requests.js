@@ -272,11 +272,12 @@ const page = (w, user = USERS.driver, name = "Hollis Renner") => w.call("GET", `
 			[1, "hollis renner", "Time off approved: Oct 20 – Oct 22", "", false]);
 		eq("§6.4 ...and a live event to his room only, with the notice's id", w.emits.filter((e) => e.event === "time-off-updated").map((e) => [e.room, e.payload]),
 			[["driver:hollis renner", { notificationId: dn[0] && dn[0].id }]]);
-		// The note to CHR's contact (plan B PR 5) rides on the notice too: his truck's unit "LogisX-#91" fails CHR's
-		// unit rule, so there is no truck to name (scripts/test-time-off-chr-draft.js covers every state).
+		// The note to CHR's contact (plan B PR 5) rides on the notice too: with its own switch off, the line to send by
+		// hand, naming his truck "LogisX-#91" as "#91" (scripts/test-time-off-chr-draft.js covers every state).
 		eq("§6.5 ...the staff notice now carries the decision; open pages hear it",
 			[metaOf(staffNotices(w)[0]), w.emits.filter((e) => e.event === "time-off-request-decided").map((e) => [e.room, e.payload])],
-			[{ availabilityId: id, directoryId: DIR.hollis, decision: "approved", decidedBy: "dispatch_t", chrDraft: { state: "no_truck" } }, [["dispatch", { availabilityId: id, decision: "approved", decidedBy: "dispatch_t" }]]]);
+			[{ availabilityId: id, directoryId: DIR.hollis, decision: "approved", decidedBy: "dispatch_t", chrDraft: { state: "off", line: "Driver Hollis Renner, LogisX truck #91, unavailable Oct 20 – Oct 22" } },
+				[["dispatch", { availabilityId: id, decision: "approved", decidedBy: "dispatch_t" }]]]);
 		const again = await approve(w, id, USERS.sa);
 		eq("§6.6 a second decision: 409 TIME_OFF_REQUEST_DECIDED naming the first (staff only)", [...code(again), again.body && again.body.error, again.body && again.body.decidedBy],
 			[409, "TIME_OFF_REQUEST_DECIDED", "Already approved by dispatch_t on Oct 15.", "dispatch_t"]);
