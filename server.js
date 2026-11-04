@@ -62939,6 +62939,25 @@ if (startsJob("load rate-con miles sync")) {
 	setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
 }
 
+// Daily ELD activity (lib/eld-activity-daily.js), a kill switch, so ="true" is a no-op:
+// it moves no money and calls no provider. Off, it creates no table and starts no job.
+// Stored only, with the miles rollups' resolvers and purge boundary, staggered after them.
+const ELD_ACTIVITY_DAILY_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.ELD_ACTIVITY_DAILY_ENABLED ?? "").trim());
+const eldActivityRollup = ELD_ACTIVITY_DAILY_ENABLED
+	? require("./lib/eld-activity-daily").createEldActivityRollup({
+		db,
+		deviceResolver: () => buildEldDeviceResolver(),
+		driverResolver: (truckIds) => buildDriverAtResolver(truckIds),
+		weekStartOf: (ms) => getWeekRange(ms).weekStart,
+		driverIdFor: (name) => (findDirectoryRowForDriver(name) || { id: 0 }).id,
+		boundaryMs: ELD_STATE_MILES_BOUNDARY_MS,
+	})
+	: null;
+if (eldActivityRollup && startsJob("ELD activity daily rollup")) {
+	setTimeout(() => { eldActivityRollup.run(); }, 12 * 60 * 1000);
+	setInterval(() => { eldActivityRollup.run(); }, 6 * 60 * 60 * 1000);
+}
+
 const haulLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	// A cache MISS on the lane costs one billed Routes call; every repeat for the
