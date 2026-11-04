@@ -307,7 +307,8 @@ function makeWorld({ dbFile = null } = {}) {
 	};
 	w.deps = (extra = {}) => ({
 		db: w.db,
-		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", ...(extra.env || {}) },
+		// The 5-minute sweep: the driver's trigger has its own runner, and off leaves this exact.
+		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false", ...(extra.env || {}) },
 		now: () => new Date(w.now),
 		readJobTracking: async () => w.jt(),
 		closedMonthsOf: (headers, row) => w.closed(row),
@@ -366,7 +367,7 @@ function makeWorld({ dbFile = null } = {}) {
 		timeZone: ET,
 		workerId: "worker-1",
 		...extra,
-		...(extra.env ? { env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", ...extra.env } } : {}),
+		...(extra.env ? { env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false", ...extra.env } } : {}),
 	});
 	w.job = (extra = {}) => jobLib.create(w.deps(extra));
 	w.claim = (id) => w.db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(rules.loadKey(id)) || null;
@@ -3019,7 +3020,7 @@ async function sendSections() {
 			null, (lib) => SEND_CASES.lastBeforeSend(lib), (x) => x.before === "marker" && x.after === "next microtask"],
 		["an unanswered send handled as a draft's lost append", "if (sendInFlight(fresh)) return searchSent(fresh, mb);", "",
 			null, (lib) => SEND_CASES.unanswered(lib), (x) => x.smtp === 1 && x.append === 0],
-		["MAYBE_SENT after the first search", "if (checks >= sendRules.SEARCH_AFTER_MS.length) {", "if (checks >= 1) {",
+		["MAYBE_SENT after the first search", "if (triggerMode || checks >= sendRules.SEARCH_AFTER_MS.length) {", "if (checks >= 1) {",
 			null, (lib) => SEND_CASES.unanswered(lib), (x) => x.states[0][1] === "SEND_UNCONFIRMED"],
 		["a refused send searched for instead of drafted", "if (outcome !== \"unknown\") {", "if (false) {",
 			null, (lib) => SEND_CASES.smtpRefused(lib, "REFUSED"), (x) => x.append === 2],
@@ -3027,11 +3028,11 @@ async function sendSections() {
 			null, (lib) => SEND_CASES.changedAfterSend(lib), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND"],
 		["a send recorded as a draft", "const via = c.delivery === \"send\" ? rules.VIA_SEND : rules.VIA_DRAFT;", "const via = rules.VIA_DRAFT;",
 			null, (lib) => SEND_CASES.sends(lib), (x) => JSON.stringify(x.rows) === JSON.stringify([{ invoice_id: "10202026-1", via: "auto-smtp" }])],
-		["no auto_invoice_sent row", "audit(\"auto_invoice_sent\", c.load_id,", "void (\"auto_invoice_sent\", c.load_id,",
+		["no auto_invoice_sent row", "audit(\"auto_invoice_sent\", c.load_id, `${c.invoice_id} → ${sentDomain(c) || \"unknown domain\"} (sent by", "void (\"auto_invoice_sent\", c.load_id, `${c.invoice_id} → ${sentDomain(c) || \"unknown domain\"} (sent by",
 			null, (lib) => SEND_CASES.sends(lib), (x) => x.sentRows.length === 1],
 		["a sent row shown as a draft", "...(c.state === \"drafted\" && sendRules.claimSent(c) ? { sent: true } : {}),", "",
 			null, (lib) => SEND_CASES.sends(lib), (x) => x.annotation && x.annotation.sent === true],
-		["the sweep moves a send being searched for", "if (sendInFlight(c) && c.state !== \"needs_attention\") continue;", "",
+		["the sweep moves a send being searched for", "own draft closes it.\n\t\t\tif (sendInFlight(c) && c.state !== \"needs_attention\") continue;", "own draft closes it.",
 			null, (lib) => SEND_CASES.handDraftWhileSearching(lib), (x) => x.searching && x.searching[1] === "SEND_UNCONFIRMED"],
 		["the button refuses a preview", "if (dryRun === true) return { ok: true };", "",
 			null, (lib) => SEND_CASES.button(lib), (x) => x.workingPreview === "ok" && x.preview === "ok"],
@@ -3503,13 +3504,13 @@ async function settleSections() {
 			(lib) => SETTLE_CASES.retryHeld(lib), (x) => x.held.prepares === 1 && x.held.mint === 0],
 		["no second look after the build", "const g = sending ? sendRules.sendDecision({", "const g = sending ? sendRules.gate({",
 			(lib) => SETTLE_CASES.podDuringBuild(lib), (x) => x.first.smtp === 0 && x.first.state[1] === "SEND_SETTLING"],
-		["a POD time that can't be read drafted with no row", "} else if (g && g.why === \"POD_TIME_UNKNOWN\") {", "} else if (false) {",
+		["a POD time that can't be read drafted with no row", "} else if (g && (g.why === \"POD_TIME_UNKNOWN\" || g.why === \"SETTLING\")) {", "} else if (false) {",
 			(lib) => SETTLE_CASES.unknownTime(lib, "not a time"), (x) => x.refused.length === 1],
-		["the job deaf to the setting", "settleMinutes: sendRules.settleMinutesOf(d.send.settleMinutes) }", "settleMinutes: sendRules.SETTLE_MINUTES_DEFAULT }",
+		["the job deaf to the setting", "settleMinutes: triggerMode ? 0 : sendRules.settleMinutesOf(d.send.settleMinutes) }", "settleMinutes: sendRules.SETTLE_MINUTES_DEFAULT }",
 			(lib) => SETTLE_CASES.setting(lib, 0, [0]), (x) => x[0][1] === "drafted"],
 		["the stop not read before a wait", "stopped: Boolean(ledger.getSendStop(db)),\n\t\t\tto: facts.isBison", "stopped: false,\n\t\t\tto: facts.isBison",
 			(lib) => SETTLE_CASES.stoppedWhileWaiting(lib), (x) => JSON.stringify(x.after) === JSON.stringify(["drafted", ""])],
-		["a load with no sender held", "\t\tif (!sending) return null;\n\t\tconst g = sendRules.sendDecision(", "\t\tconst g = sendRules.sendDecision(",
+		["a load with no sender held", "\t\tif (!sending || triggerMode) return null;\n\t\tconst g = sendRules.sendDecision(", "\t\tconst g = sendRules.sendDecision(",
 			(lib) => SETTLE_CASES.draftsAtOnce(lib, { extra: { sendMail: undefined } }), (x) => x.append === 1],
 		["Bison judged by the broker Email, not its inbox", "to: facts.isBison ? d.bisonRecipient() : facts.brokerEmail,", "to: facts.brokerEmail,",
 			(lib) => SETTLE_CASES.draftsAtOnce(lib, { send: { enabled: true, domains: [SEND_DOMAIN, "example-bison-ap.test"] },

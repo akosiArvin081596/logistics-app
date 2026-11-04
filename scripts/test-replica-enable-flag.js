@@ -117,6 +117,8 @@ const OUTBOUND = {
 	AUTO_INVOICE_SHADOW_RENDERS_ENABLED: /render shadow reads Drive and calls Gemini/i,
 	// Automatic invoice sending: email to brokers, behind the job's timer.
 	AUTO_INVOICE_SEND_ENABLED: /emails brokers by SMTP/i,
+	// The driver's Delivered starts the invoice: Drive, Gemini and mail to brokers. A kill switch.
+	AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: /a driver's Delivered makes the invoice.*kill switch/i,
 };
 for (const [name, why] of Object.entries(OUTBOUND)) {
 	const r = refusal(name);
