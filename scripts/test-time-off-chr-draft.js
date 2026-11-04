@@ -259,10 +259,13 @@ function subjectOf(mime) {
 			["a load-shaped number in the name", { driverName: "A. Example 7891234" }],
 			["an empty name after cleaning", { driverName: "​‮" }],
 		];
+		// Each case meets the deny list only where it is the point, so no other check hides a missing one.
 		for (const [label, o] of cases) {
-			const d = draft.chrDraftDecision(input(o), { ...CTX, denyHits: deny });
+			const d = draft.chrDraftDecision(input(o), { ...CTX, denyHits: /deny-list/.test(label) ? deny : NO_DENY });
 			eq(`§5.1 ${label}: refused, no line`, [d.state, "line" in d, draft.chrDraftAnswer(d)], ["refused", false, { state: "refused" }]);
 		}
+		eq("§5.1c the deny list reads digits across separators, as CHR's redactor does: a deny value split by spaces is refused",
+			draft.chrDraftDecision(input({ unit: "T-101", driverName: "A. Example 5 5 5 0 1" }), { ...CTX, denyHits: deny }).state, "refused");
 		eq("§5.1b a person-shaped unit (a 7-digit phone, an SSN or a date inside it) fails CHR's unit rule: no_truck, no line",
 			[decide({ unit: "T-555-0100" }), decide({ unit: "900-12-3456" }), decide({ unit: "11-09-2026" })], [{ state: "no_truck" }, { state: "no_truck" }, { state: "no_truck" }]);
 		eq("§5.2 a unit the sweep does not read (a 6-digit run it takes for a date) is kept: \"123456\"", decide({ unit: "123456" }).state, "pending");

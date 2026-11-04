@@ -94,6 +94,8 @@ const OUTBOUND = {
 	LINXUP_ENABLED: /ELD|outside/i,
 	SCANKIT_ENABLED: /OCR|outside/i,
 	RATECON_RECONCILE_ENABLED: /Gmail/i,
+	// The day-off note to C.H. Robinson's contact (plan B PR 5): a Gmail draft naming a driver.
+	DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: /Gmail drafts naming a driver/i,
 	RATECON_INDEX_APPLY_ENABLED: /Drive/i,
 	FUEL_GALLONS_RECOVERY_ENABLED: /Gemini/i,
 	KPI_DEADHEAD_ROUTES_ENABLED: /Routes/i,
@@ -109,8 +111,6 @@ const OUTBOUND = {
 	CHAT_ORPHAN_SWEEP_ENABLED: /scheduled job/i,
 	// The automatic invoice render shadow: Drive and Gemini, behind the job's timer.
 	AUTO_INVOICE_SHADOW_RENDERS_ENABLED: /render shadow reads Drive and calls Gemini/i,
-	// The day-off note to C.H. Robinson's contact (plan B PR 5): a Gmail draft naming a driver.
-	DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: /Gmail drafts naming a driver/i,
 };
 for (const [name, why] of Object.entries(OUTBOUND)) {
 	const r = refusal(name);
