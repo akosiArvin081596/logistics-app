@@ -49,8 +49,11 @@ const scriptOf = (src) => (src.match(/^<script setup>([\s\S]*?)^<\/script>/m) ||
 const templateOf = (src) => src.slice(0, Math.max(0, src.indexOf('\n<script')))
 // Comments are dropped until none is left, so a comment inside a comment can't hide code.
 const stripComments = (s) => {
-  let prev
-  do { prev = s; s = s.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '') } while (s !== prev)
+  for (let prev = null; prev !== s;) {
+    prev = s
+    for (let p = null; p !== s;) { p = s; s = s.replace(/<!--[\s\S]*?-->/g, '') }
+    for (let p = null; p !== s;) { p = s; s = s.replace(/\/\*[\s\S]*?\*\//g, '') }
+  }
   return s.replace(/(^|[^:'"`])\/\/.*$/gm, '$1')
 }
 const count = (s, needle) => s.split(needle).length - 1
