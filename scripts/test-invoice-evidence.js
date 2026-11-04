@@ -51,11 +51,19 @@ function eq(actual, expected, label) {
 }
 function ok(cond, label) { eq(Boolean(cond), true, label); }
 function section(t) { console.log(`\n${t}`); }
+let finished = false;
 function finish() {
+	finished = true;
 	for (const f of failures) console.log(`  FAIL ${f}`);
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	process.exit(failures.length ? 1 : 0);
 }
+// A promise nothing will settle ends the process with exit 0, which must not read as a pass.
+process.on("exit", () => {
+	if (finished) return;
+	console.log("  FAIL the runner ended before its last section: something it awaited never answered");
+	process.exitCode = 1;
+});
 
 let E = null;
 try {
@@ -243,7 +251,7 @@ async function main() {
 	eq(next({ status: STATUS.UNKNOWN, code: "NOT_SEARCHED" }, { tried_at: "" }), 0, "§2 a row with no search yet (the Payments Table's own): now");
 	eq(next(NONE, triedAgo(1)), NOW - DAY + 7 * DAY, "§2 No invoice found: weekly");
 	eq(next({ status: STATUS.DRAFT, whose: "job" }, triedAgo(1)), NOW, "§2 a draft not yet seen in Sent Mail, delivered lately: daily");
-	eq(next({ status: STATUS.DRAFT, whose: "job" }, triedAgo(1), "2026-09-01"), NOW - DAY + 7 * DAY, "§2 L-9: ...over 30 days after delivery: weekly, so it doesn't go stale for good");
+	eq(next({ status: STATUS.DRAFT, whose: "job" }, triedAgo(1), "2026-09-01"), NOW - DAY + 7 * DAY, "§2 ...over 30 days after delivery: weekly, so it doesn't go stale for good");
 	eq(next({ status: STATUS.ATTENTION, code: "TOTAL_MISMATCH" }, triedAgo(1)), NOW, "§2 Needs attention: daily");
 	eq(next({ status: STATUS.UNKNOWN, code: "MENTIONED" }, triedAgo(1)), NOW, "§2 a mention: daily");
 	eq(next({ status: STATUS.UNKNOWN, code: "SEARCH_FAILED" }, triedAgo(1, { result: "failed" })), NOW, "§2 a failed search: daily");
@@ -286,7 +294,7 @@ async function main() {
 		w.addRow("#900000201", { invoice_id: "11012026-6", order_number: "", via: "n8n" });
 		await w.store.runOnce();
 		eq(w.searches.map((s) => s.loadNumber), ["900000201"], "§3 only a completed load is searched");
-		eq([w.searches[0].invoiceNumbers, w.searches[0].orderNumbers], [["11012026-5", "11012026-6"], ["#7000001"]], "§3 M-4: each row's invoice and order number are search terms, either spelling of the load");
+		eq([w.searches[0].invoiceNumbers, w.searches[0].orderNumbers], [["11012026-5", "11012026-6"], ["#7000001"]], "§3 each row's invoice and order number are search terms, either spelling of the load");
 	}
 	{
 		const w = world({ loads: [load("900000211"), load("900000212"), load("900000213"), load("900000214"), load("900000215")] });
@@ -375,6 +383,8 @@ async function main() {
 		eq([odd.row("900000323").drafts_mention, odd.row("900000323").sent_mention], [3, 0], "§4 hits never read count as doubt");
 		E.saveAnswer(odd.db, "900000323", { verdict: "invoice", mailboxes: { drafts: BOX, sent: BOX, trash: { ...BOX, invoice: 1 } } }, { nowIso: iso(NOW) });
 		eq([odd.row("900000323").sent_invoice, odd.row("900000323").sent_mention], [0, 1], "§4 an invoice in Trash is doubt, not an invoice sent");
+		E.saveAnswer(odd.db, "900000323", { verdict: "mention", mailboxes: { drafts: { ...BOX, mention: 1 }, sent: BOX, trash: { ...BOX, invoice: 1 } } }, { nowIso: iso(NOW) });
+		eq([odd.row("900000323").drafts_mention, odd.row("900000323").sent_mention], [1, 1], "§4 ...beside a mention in Drafts too");
 	}
 	{
 		const w = world({ loads: [load("900000331", { "Completion Date": "2026-11-03" }), load("900000332", { "Completion Date": "2026-11-02" })] });
@@ -441,7 +451,7 @@ async function main() {
 		eq(w.row("900000499"), null, "§5 a Payments Table row with no completed load saves nothing");
 		const dump = JSON.stringify(w.db.prepare(`SELECT * FROM ${E.TABLE}`).all());
 		ok(!dump.includes("INV-MADE-UP") && !dump.includes("Paid in made-up") && !dump.includes("C-1") && !dump.includes("1500"), "§5 never the values");
-		eq(w.rowFor("900000401"), { status: STATUS.BY_HAND, found: "payments_table" }, "§5 H-3: a filled cell reads Invoiced by hand (Payments Table)");
+		eq(w.rowFor("900000401"), { status: STATUS.BY_HAND, found: "payments_table" }, "§5 a filled cell reads Invoiced by hand (Payments Table)");
 		eq(w.rowFor("900000404"), { status: STATUS.NONE_FOUND, searchedAt: iso(NOW) }, "§5 ...a blank one reads by the mailbox");
 
 		// Filled later: seen on the next run, with no new search; cleared later, the same.
@@ -538,7 +548,7 @@ async function main() {
 		const shut = world({ loads: [load("900000605")], closedMonthsOf: (h, row) => { closedAsked.push(row["Load ID"]); return ["2026-09"]; } });
 		shut.addRow("900000605");
 		await shut.store.runOnce();
-		eq(shut.rowFor("900000605"), { status: STATUS.UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: "11012026-1" }, "§7 M-8: a closed month's row, in neither mailbox: Couldn't check");
+		eq(shut.rowFor("900000605"), { status: STATUS.UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: "11012026-1" }, "§7 a closed month's row, in neither mailbox: Couldn't check");
 		ok(closedAsked.includes("900000605"), "§7 ...read through closedMonthsOf()");
 
 		const bison = world({ loads: [load("900000606", { Email: "ops@bisontransport.com" })] });
@@ -551,6 +561,28 @@ async function main() {
 		const trigger = world({ env: {}, sweepOn: false, loads: [load("900000607")] });
 		trigger.addClaim("900000607", { state: "waiting", reason_code: "WAITING_POD" });
 		eq(trigger.rowFor("900000607"), { status: STATUS.UNKNOWN, code: "NOT_SEARCHED" }, "§7 the sweep off: it doesn't");
+
+		const pressed = world({ env: {}, loads: [load("900000611"), load("900000612"), load("900000613")] });
+		const press = pressed.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES (?, ?, ?, 'imap', ?, ?, ?)");
+		press.run("900000611", "900000611", "11052026-1", "in_flight", iso(NOW - 60 * 1000), iso(NOW));
+		press.run("900000612", "900000612", "11052026-2", "in_flight", iso(NOW - 20 * 60 * 1000), iso(NOW));
+		press.run("900000613", "900000613", "11052026-3", "maybe_drafted", iso(NOW - 60 * 1000), iso(NOW));
+		eq(pressed.rowFor("900000611"), { status: STATUS.WAITING, code: "HAND_DRAFT_IN_FLIGHT" }, "§7 a press row in flight, through the store");
+		eq(pressed.rowFor("900000612"), { status: STATUS.ATTENTION, code: "INVOICE_MAYBE_DRAFTED" }, "§7 ...one in flight too long reads maybe drafted");
+		eq(pressed.rowFor("900000613"), { status: STATUS.ATTENTION, code: "INVOICE_MAYBE_DRAFTED" }, "§7 ...and one marked so");
+
+		const handed = world({ env: {}, loads: [load("900000621"), load("900000622"), load("900000623")] });
+		const submit = handed.db.prepare("INSERT INTO triumph_submissions (load_key, load_id, state, first_seen_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+		submit.run("900000621", "900000621", "submitted", iso(NOW), iso(NOW));
+		submit.run("900000622", "900000622", "closed_outside", iso(NOW), iso(NOW));
+		submit.run("900000623", "900000623", "waiting", iso(NOW), iso(NOW));
+		eq(handed.rowFor("900000621"), { status: STATUS.FACTORED }, "§7 a Triumph submission that went reads Factored, through the store");
+		eq(handed.rowFor("900000622"), { status: STATUS.FACTORED }, "§7 ...one handled outside the app too");
+		eq(handed.rowFor("900000623"), { status: STATUS.UNKNOWN, code: "NOT_SEARCHED" }, "§7 ...one still waiting doesn't");
+
+		const hashed = world({ env: {}, loads: [load("#900000631", { Email: "ops@example-broker.test" })] });
+		hashed.addRow("900000631");
+		eq(hashed.rowFor("#900000631").invoiceId, "11012026-1", "§7 either spelling of a load finds its rows");
 
 		const dated = world({ env: {}, loads: [load("900000608")] });
 		E.saveAnswer(dated.db, "900000608", { verdict: "invoice", mailboxes: { drafts: BOX, sent: { ...BOX, invoice: 1, firstInvoiceDate: "2026-11-02T02:30:00.000Z" } } }, { nowIso: iso(NOW) });
@@ -586,7 +618,7 @@ async function main() {
 		eq(saved(), true, "§8 an invoice in Sent Mail");
 		const filled = "900000702";
 		E.savePayments(w.db, filled, { payments_invoice_number: 0, payments_payment_date: 0, payments_status: 1 }, { nowIso: iso(NOW) });
-		eq(E.savedInvoice(w.db, filled), true, "§8 R-H2 (c): a filled Payments Table row");
+		eq(E.savedInvoice(w.db, filled), true, "§8 a filled Payments Table row");
 		w.addClaim(key, { state: "needs_attention", reason_code: "MAYBE_IN_GMAIL", stage: "appending" });
 		eq(saved(), false, "§8 a claim past the build: Try again only searches for it, so it isn't refused");
 		w.addClaim(filled, { state: "needs_attention", reason_code: "TOTAL_MISMATCH", stage: "reserved", invoice_id: "11012026-1" });
@@ -621,19 +653,19 @@ async function main() {
 		SENT.push({ subject: "Load 900000801: a re-issued rate con was held", date: DATE, to: "alerts@example-other.test", text: "900000801" });
 		let w = real();
 		await w.store.runOnce();
-		eq(w.rowFor("900000801"), { status: STATUS.NONE_FOUND, searchedAt: iso(NOW) }, "§9 H-1: an unbilled load named only by the app's own mail doesn't read billed");
-		eq(w.row("900000801").sent_invoice, 0, "§9 H-1: ...no invoice hit saved");
+		eq(w.rowFor("900000801"), { status: STATUS.NONE_FOUND, searchedAt: iso(NOW) }, "§9 an unbilled load named only by the app's own mail doesn't read billed");
+		eq(w.row("900000801").sent_invoice, 0, "§9 ...no invoice hit saved");
 		ok(fake.commands.every((c) => ["LOGIN", "CAPABILITY", "EXAMINE", "SEARCH", "FETCH", "LOGOUT"].includes(c)), "§9 only the read-only commands reach the mailbox");
 		ok(!fake.commands.includes("STORE") && !fake.commands.includes("APPEND") && !fake.commands.includes("SELECT"), "§9 ...nothing that could set a flag");
 
 		w = real();
 		w.addClaim("900000801", { state: "needs_attention", reason_code: "TOTAL_MISMATCH" });
 		await w.store.runOnce();
-		eq(w.rowFor("900000801"), { status: STATUS.ATTENTION, code: "TOTAL_MISMATCH" }, "§9 H-1: a held load the weekly batch names stays held, not Invoiced by hand");
+		eq(w.rowFor("900000801"), { status: STATUS.ATTENTION, code: "TOTAL_MISMATCH" }, "§9 a held load the weekly batch names stays held, not Invoiced by hand");
 		w = real();
 		w.addRow("900000801");
 		await w.store.runOnce();
-		eq(w.rowFor("900000801").code, "DRAFT_NOT_IN_GMAIL", "§9 H-1: a person's unsent draft the batch names isn't made Invoiced by hand");
+		eq(w.rowFor("900000801").code, "DRAFT_NOT_IN_GMAIL", "§9 a person's unsent draft the batch names isn't made Invoiced by hand");
 
 		SENT.push({ subject: "Re: Load 900000801 tracking", date: DATE, to: "ops@example-broker.test", text: "900000801" });
 		w = real();
@@ -655,13 +687,13 @@ async function main() {
 		w = real({ loads: [load("900000802", { Email: "ops@bisontransport.com" })] });
 		w.addRow("900000802", { order_number: "7000001" });
 		await w.store.runOnce();
-		eq(w.rowFor("900000802"), { status: STATUS.BY_HAND, invoiceId: "11012026-1", found: "sent_mail", date: "2026-11-02" }, "§9 M-4: a Bison row found by its order number, which the load number can't find");
+		eq(w.rowFor("900000802"), { status: STATUS.BY_HAND, invoiceId: "11012026-1", found: "sent_mail", date: "2026-11-02" }, "§9 a Bison row found by its order number, which the load number can't find");
 
 		clearBoxes();
 		DRAFTS.push({ subject: "Example Broker Order #900000803", date: DATE, to: "", names: ["Example Broker Invoice Order #900000803.pdf"], text: "" });
 		w = real({ loads: [load("900000803")] });
 		await w.store.runOnce();
-		eq(w.rowFor("900000803"), { status: STATUS.UNKNOWN, code: "MENTIONED" }, "§9 R-M6: a blank-To draft with an invoice file is doubt, so the load can't read clean");
+		eq(w.rowFor("900000803"), { status: STATUS.UNKNOWN, code: "MENTIONED" }, "§9 a blank-To draft with an invoice file is doubt, so the load can't read clean");
 
 		clearBoxes();
 		fake.refuse.LOGIN = "NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)";

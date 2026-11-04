@@ -53,7 +53,7 @@ const { STATUS, STATUS_LABELS, STATUS_CODES, FOUND, statusOf, exportCells, statu
 
 eq(Object.values(STATUS).map((s) => STATUS_LABELS[s]), [
 	"Sent by LogisX", "Invoiced by hand", "Draft in Gmail", "Waiting", "Needs attention", "Factored (Triumph)", "No invoice found", "Couldn't check",
-], "§1 the eight statuses and their words, in the plan's order");
+], "§1 the eight statuses and their words");
 for (const v of ["false", "0", "no", "off", "FALSE", "No", "OFF", " off "]) {
 	eq(statusEnabled({ INVOICE_STATUS_ENABLED: v }), false, `§1 INVOICE_STATUS_ENABLED=${JSON.stringify(v)}: off`);
 }
@@ -186,41 +186,41 @@ eq(read({ saved: saved({ sent_invoice: 1, first_sent_at: "" }) }), { status: BY_
 // ===================================================================== §4
 section("§4  an unbilled load must not read billed, and a billed one must not read unbilled");
 const CLOSED_MAYBE = claim({ state: "skipped", reason_code: "DRAFTED_BY_HAND", delivery: "send", stage: "appending", invoice_id: "11042026-9" });
-eq(read({ claim: CLOSED_MAYBE, rows: [row()], saved: inSent }), { ...BY_SENT_MAIL, invoiceId: INV }, "§4 M-3: a person closed a MAYBE_SENT with their draft: rule 8, not Waiting for good");
-eq(read({ claim: CLOSED_MAYBE, rows: [row()] }), { status: BY_HAND, invoiceId: INV, found: FOUND.DRAFT_ROW, sentUnchecked: true }, "§4 M-3: ...not searched yet");
+eq(read({ claim: CLOSED_MAYBE, rows: [row()], saved: inSent }), { ...BY_SENT_MAIL, invoiceId: INV }, "§4 a person closed a MAYBE_SENT with their draft: rule 8, not Waiting for good");
+eq(read({ claim: CLOSED_MAYBE, rows: [row()] }), { status: BY_HAND, invoiceId: INV, found: FOUND.DRAFT_ROW, sentUnchecked: true }, "§4 ...not searched yet");
 eq(read({ claim: { ...CLOSED_MAYBE, reason_code: "LOAD_FACTORED" }, saved: clean }), { status: UNKNOWN, code: "MAYBE_SENT" }, "§4 a send that started, closed with no row: never No invoice found, whatever the mailbox says");
 eq(read({ claim: { ...CLOSED_MAYBE, reason_code: "LOAD_FACTORED" }, saved: inSent }), BY_SENT_MAIL, "§4 ...and an invoice found there reads as found");
 
-eq(read({ claim: claim({ state: "skipped", reason_code: "LOAD_FACTORED" }), factored: false, saved: clean }), { status: NONE_FOUND, searchedAt: LATER }, "§4 M-3: a factoring mark since cleared reads by the mailbox");
-eq(read({ claim: null, saved: clean }), { status: NONE_FOUND, searchedAt: LATER }, "§4 M-3: no claim with the job off reads by the mailbox");
-eq(read({ claim: JOB_DRAFT, saved: clean }).code, "DRAFT_NOT_IN_GMAIL", "§4 M-3: a job draft deleted from Gmail doesn't read Draft in Gmail");
-eq(read({ rows: [row({ via: null })], saved: clean }).status, ATTENTION, "§4 M-3: a blank `via` is a row, never No invoice found");
-eq(read({ claim: claim({ state: "needs_attention", reason_code: "OFF_GAP" }), saved: clean }).status, NONE_FOUND, "§4 M-2: an OFF_GAP load can reach No invoice found");
+eq(read({ claim: claim({ state: "skipped", reason_code: "LOAD_FACTORED" }), factored: false, saved: clean }), { status: NONE_FOUND, searchedAt: LATER }, "§4 a factoring mark since cleared reads by the mailbox");
+eq(read({ claim: null, saved: clean }), { status: NONE_FOUND, searchedAt: LATER }, "§4 no claim with the job off reads by the mailbox");
+eq(read({ claim: JOB_DRAFT, saved: clean }).code, "DRAFT_NOT_IN_GMAIL", "§4 a job draft deleted from Gmail doesn't read Draft in Gmail");
+eq(read({ rows: [row({ via: null })], saved: clean }).status, ATTENTION, "§4 a blank `via` is a row, never No invoice found");
+eq(read({ claim: claim({ state: "needs_attention", reason_code: "OFF_GAP" }), saved: clean }).status, NONE_FOUND, "§4 an OFF_GAP load can reach No invoice found");
 
 const BISON_ROW = [row({ order_number: "7000001", via: "imap" })];
-eq(read({ rows: BISON_ROW, saved: inSent, isBison: true }), { ...BY_SENT_MAIL, invoiceId: INV }, "§4 M-4: a Bison row found by its order number: Invoiced by hand");
-eq(read({ rows: BISON_ROW, saved: clean, isBison: true }).code, "DRAFT_NOT_IN_GMAIL", "§4 M-4: its order number was searched, so in neither means in neither");
-eq(read({ rows: [row({ order_number: "" })], saved: clean, isBison: true }), { status: UNKNOWN, code: "BISON_ORDER_NUMBER", invoiceId: INV }, "§4 M-4: a Bison row with no order number can't be found by a search, so it isn't called missing");
-eq(read({ claim: JOB_DRAFT, saved: clean, isBison: true }), { status: UNKNOWN, code: "BISON_ORDER_NUMBER", invoiceId: INV }, "§4 M-4: the same for the job's own Bison draft");
+eq(read({ rows: BISON_ROW, saved: inSent, isBison: true }), { ...BY_SENT_MAIL, invoiceId: INV }, "§4 a Bison row found by its order number: Invoiced by hand");
+eq(read({ rows: BISON_ROW, saved: clean, isBison: true }).code, "DRAFT_NOT_IN_GMAIL", "§4 its order number was searched, so in neither means in neither");
+eq(read({ rows: [row({ order_number: "" })], saved: clean, isBison: true }), { status: UNKNOWN, code: "BISON_ORDER_NUMBER", invoiceId: INV }, "§4 a Bison row with no order number can't be found by a search, so it isn't called missing");
+eq(read({ claim: JOB_DRAFT, saved: clean, isBison: true }), { status: UNKNOWN, code: "BISON_ORDER_NUMBER", invoiceId: INV }, "§4 the same for the job's own Bison draft");
 
-eq(read({ claim: JOB_DRAFT, saved: mentioned }), { status: UNKNOWN, code: "MENTIONED", invoiceId: INV }, "§4 L10: rule 7, only a mention: not in neither, and not proven a draft");
-eq(read({ rows: [row()], saved: mentioned }), { status: UNKNOWN, code: "MENTIONED", invoiceId: INV }, "§4 L10: rule 8, only a mention");
-eq(read({ claim: HELD, saved: mentioned }), { status: ATTENTION, code: "TOTAL_MISMATCH", mentioned: true }, "§4 L10: rule 10, only a mention: Needs attention, saying so");
+eq(read({ claim: JOB_DRAFT, saved: mentioned }), { status: UNKNOWN, code: "MENTIONED", invoiceId: INV }, "§4 rule 7, only a mention: not in neither, and not proven a draft");
+eq(read({ rows: [row()], saved: mentioned }), { status: UNKNOWN, code: "MENTIONED", invoiceId: INV }, "§4 rule 8, only a mention");
+eq(read({ claim: HELD, saved: mentioned }), { status: ATTENTION, code: "TOTAL_MISMATCH", mentioned: true }, "§4 rule 10, only a mention: Needs attention, saying so");
 
-eq(read({ claim: HELD, saved: filled }), FROM_PAYMENTS, "§4 R-H2 (c): a filled Payments Table row above rule 10: it reads billed, not held");
-eq(read({ claim: { ...HELD, reason_code: "TOTAL_MISMATCH" }, saved: saved({ payments_status: 1, sent_mention: 1 }) }), FROM_PAYMENTS, "§4 R-H2 (c): ...above a mention too");
-eq(read({ claim: JOB_DRAFT, saved: filled }), { ...FROM_PAYMENTS, invoiceId: INV }, "§4 R-H2 (c): above rule 7's in neither");
-eq(read({ rows: [row()], saved: filled }), { ...FROM_PAYMENTS, invoiceId: INV }, "§4 R-H2 (c): above rule 8's in neither");
-eq(read({ claim: claim({ state: "queued" }), saved: filled }), { status: WAITING }, "§4 R-H2 (c): rule 9 stays above it: the job is on the load right now");
+eq(read({ claim: HELD, saved: filled }), FROM_PAYMENTS, "§4 a filled Payments Table row above rule 10: it reads billed, not held");
+eq(read({ claim: { ...HELD, reason_code: "TOTAL_MISMATCH" }, saved: saved({ payments_status: 1, sent_mention: 1 }) }), FROM_PAYMENTS, "§4 ...above a mention too");
+eq(read({ claim: JOB_DRAFT, saved: filled }), { ...FROM_PAYMENTS, invoiceId: INV }, "§4 above rule 7's in neither");
+eq(read({ rows: [row()], saved: filled }), { ...FROM_PAYMENTS, invoiceId: INV }, "§4 above rule 8's in neither");
+eq(read({ claim: claim({ state: "queued" }), saved: filled }), { status: WAITING }, "§4 rule 9 stays above it: the job is on the load right now");
 eq(read({ saved: saved({ payments_payment_date: 1, sent_invoice: 1, first_sent_at: "2026-11-02T18:30:00.000Z" }), rows: [row()] }), { ...BY_SENT_MAIL, invoiceId: INV }, "§4 an invoice in Sent Mail says more than the table: it has the date");
 
 // ===================================================================== §5
 section("§5  closed months never read Needs attention from the mailbox");
 const closedMonth = () => true;
-eq(read({ claim: JOB_DRAFT, saved: clean, closedMonth }), { status: UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: INV }, "§5 M-8: rule 7, closed month, in neither: Couldn't check, the same sentence");
-eq(read({ rows: [row()], saved: clean, closedMonth }), { status: UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: INV }, "§5 M-8: rule 8, the same");
+eq(read({ claim: JOB_DRAFT, saved: clean, closedMonth }), { status: UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: INV }, "§5 rule 7, closed month, in neither: Couldn't check, the same sentence");
+eq(read({ rows: [row()], saved: clean, closedMonth }), { status: UNKNOWN, code: "DRAFT_NOT_IN_GMAIL", invoiceId: INV }, "§5 rule 8, the same");
 eq(read({ rows: [row()], saved: clean, closedMonth: () => { throw new Error("made up"); } }).status, UNKNOWN, "§5 a month that can't be read isn't raised either");
-eq(read({ saved: clean, closedMonth }), { status: NONE_FOUND, searchedAt: LATER }, "§5 M-8: No invoice found on a closed month is a status, as the brief asks");
+eq(read({ saved: clean, closedMonth }), { status: NONE_FOUND, searchedAt: LATER }, "§5 No invoice found on a closed month is a status, not an alert");
 eq(read({ claim: claim({ state: "needs_attention", reason_code: "CLOSED_MONTH" }), saved: clean, closedMonth }), { status: ATTENTION, code: "CLOSED_MONTH" }, "§5 the job's own CLOSED_MONTH stays as it is");
 let asked = 0;
 read({ saved: clean, closedMonth: () => { asked++; return true; } });
