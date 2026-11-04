@@ -36,8 +36,13 @@
 //       confirmed (never free mail, refused by the settings); the job's own
 //       re-checks use the same rule
 //   §15 a draft a person sends from Drafts before the job looks again (after a
-//       lost answer, or a crash): found in Sent Mail, recorded, never appended
-//       a second time
+//       lost answer, or a crash), its Message-ID kept: found in Sent Mail,
+//       recorded, never appended a second time
+//   §15b the same with Gmail giving the copy its own Message-ID (sent, or edited
+//       and saved in Drafts): a copy with the claim's subject and recipient sends
+//       the load to a person (MAYBE_IN_GMAIL), never a second append; a like
+//       search that fails or can't be made is the same; nothing like it: appended
+//       once more; mutants of each
 //   §16 a refusal the engine throws instead of returning is classed like a
 //       returned one: a person, a counted wait or the rate-con re-check, never
 //       an uncounted retry with a paid call each time
@@ -170,8 +175,11 @@ function makeWorld({ dbFile = null } = {}) {
 		rateCons: new Map(), // load key -> the rate con's documents email ("" for none)
 		gmail: [], // Message-IDs of the drafts in Gmail
 		sent: [], // Message-IDs in Sent Mail: drafts a person sent
+		// Copies Gmail gave a Message-ID of its own, found only by the like search:
+		// { box, subject, to }.
+		lookalikes: [],
 		appendBehaviors: [],
-		calls: { prepare: [], render: [], record: [], append: [], search: [], searchBoxes: [], mint: [] },
+		calls: { prepare: [], render: [], record: [], append: [], search: [], searchBoxes: [], mint: [], like: [] },
 		audits: [],
 		notices: [],
 		logs: [],
@@ -222,6 +230,17 @@ function makeWorld({ dbFile = null } = {}) {
 		const i = w.gmail.indexOf(messageId);
 		if (i >= 0) { w.gmail.splice(i, 1); w.sent.push(messageId); }
 	};
+	// The same, with Gmail giving the copy its own Message-ID: sent (Sent Mail), or
+	// edited and saved (Drafts). Only its subject and recipient are left to find it by.
+	w.rebuiltCopy = (messageId, box) => {
+		const i = w.gmail.indexOf(messageId);
+		const made = w.calls.append.find((a) => a.messageId === messageId);
+		if (i < 0 || !made) return;
+		w.gmail.splice(i, 1);
+		w.lookalikes.push({ box, subject: made.subject, to: made.to });
+	};
+	w.sendAsNew = (messageId) => w.rebuiltCopy(messageId, "[Gmail]/Sent Mail");
+	w.saveAsNew = (messageId) => w.rebuiltCopy(messageId, "[Gmail]/Drafts");
 	// Dated by the world's clock, in the server's own format (ISO, whole seconds, Z).
 	w.handDraft = (id, invoiceId = "10202026-50") =>
 		w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by, created_at) VALUES (?, ?, ?, 'ratecon', 'imap', 'made-up-admin', ?)")
@@ -319,7 +338,7 @@ function makeWorld({ dbFile = null } = {}) {
 		// Searches what lib/imap-draft.js would: the mailboxes asked for, else the
 		// library's own list (Drafts alone for a library that names none), and
 		// stops at the first that holds the Message-ID.
-		async findDraftByMessageId({ messageId, mailboxes }) {
+		async findDraftByMessageId({ messageId, mailboxes, alsoLike }) {
 			const boxes = mailboxes || imapDraft.SEARCH_MAILBOXES || ["[Gmail]/Drafts"];
 			w.calls.search.push(messageId);
 			w.calls.searchBoxes.push([...boxes]);
@@ -329,6 +348,15 @@ function makeWorld({ dbFile = null } = {}) {
 				const held = box === "[Gmail]/Drafts" ? w.gmail : box === "[Gmail]/Sent Mail" ? w.sent : [];
 				const n = held.filter((id) => id === messageId).length;
 				if (n) { hit = { found: true, count: n, mailbox: box }; break; }
+			}
+			// The Message-ID nowhere and alsoLike asked: a copy with that subject and
+			// recipient, as the library's like search answers.
+			if (!hit.found && alsoLike) {
+				w.calls.like.push({ subject: alsoLike.subject, to: alsoLike.to, since: alsoLike.since ? alsoLike.since.toISOString() : null, boxes: [...boxes] });
+				if (w.likeFails) throw imapError("IMAP SEARCH failed: made-up", "search", true);
+				const like = (box) => w.lookalikes.filter((m) => m.box === box && m.subject === alsoLike.subject && m.to.toLowerCase() === String(alsoLike.to).toLowerCase()).length;
+				const box = boxes.find((b) => like(b) > 0);
+				hit = { ...hit, like: box ? { count: like(box), mailbox: box } : { count: 0, mailbox: "" } };
 			}
 			if (w.pendingLanding) { w.gmail.push(w.pendingLanding); w.pendingLanding = null; }
 			return hit;
@@ -1159,10 +1187,11 @@ async function main() {
 	}
 
 	// ---------------------------------------------------------------- §15
-	section("§15 a draft a person sends from Drafts before the job looks again");
+	section("§15 a draft a person sends from Drafts before the job looks again, its Message-ID kept");
 	{
 		// The review's case: the answer is lost, the draft lands after the search,
-		// and a person sends it from Drafts within the 15 minutes before the retry.
+		// and a person sends it from Drafts within the 15 minutes before the retry
+		// (Gmail keeping its Message-ID, which is not verified: §15b covers the other way).
 		const w = makeWorld();
 		const job = await w.started();
 		w.ready("LD-TEST-0190");
@@ -1175,7 +1204,7 @@ async function main() {
 		w.now += 16 * MIN;
 		await job.tick();
 		eq(w.state("LD-TEST-0190"), ["drafted", ""], "§15 the retry finds it in Sent Mail and records it");
-		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0190").length], [1, 0, 1, 1], "§15 one append in all: the sent invoice is never appended again");
+		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0190").length], [1, 0, 1, 1], "§15 one append in all: the sent invoice, its Message-ID kept, is never appended again");
 		eq(w.calls.searchBoxes.slice(-1)[0], ["[Gmail]/Drafts", "[Gmail]/Sent Mail"], "§15 the retry looked in Drafts, then in Sent Mail");
 		eq([w.claim("LD-TEST-0190").invoice_id, w.calls.mint.length], [lost.invoice_id, 1], "§15 one invoice number");
 	}
@@ -1192,7 +1221,7 @@ async function main() {
 		w.now += 16 * MIN; // the lease has run out
 		await w.job({ workerId: "after-restart" }).tick();
 		eq(w.state("LD-TEST-0191"), ["drafted", ""], "§15 after a crash: the recovery finds the sent draft in Sent Mail and records it");
-		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0191").length], [1, 0, 1, 1], "§15 after a crash: one append, never a second draft of a sent invoice");
+		eq([w.calls.append.length, w.gmail.length, w.sent.length, w.draftRows("LD-TEST-0191").length], [1, 0, 1, 1], "§15 after a crash: one append, never a second draft of a sent invoice whose Message-ID Gmail kept");
 	}
 	{
 		// Absent from both mailboxes: the retry may append (the number never reached Gmail).
@@ -1204,6 +1233,162 @@ async function main() {
 		w.now += 16 * MIN;
 		await job.tick();
 		eq([w.state("LD-TEST-0192"), w.calls.append.length, w.gmail.length, w.sent.length], [["drafted", ""], 2, 1, 0], "§15 in neither mailbox: appended once more, one draft in Gmail");
+	}
+
+	// ---------------------------------------------------------------- §15b
+	section("§15b a copy Gmail gave its own Message-ID: a person looks, never a second append");
+	{
+		const DAY = 24 * HOUR;
+		// The cases a decision rests on, run on the job library given (or a mutant of it).
+		const LIKE_CASES = {
+			// The answer was lost, the draft landed late, a person sent it, and the sent
+			// copy carries a Message-ID of Gmail's own.
+			async sentAsNew(lib) {
+				const w = makeWorld();
+				const job = lib.create(w.deps());
+				await job.tick();
+				w.now += 5 * MIN;
+				w.ready("LD-TEST-0193");
+				w.appendBehaviors = ["LANDS_LATE", "OK"];
+				await job.tick();
+				const lost = w.claim("LD-TEST-0193");
+				const firstLike = w.calls.like.length;
+				w.sendAsNew(lost.message_id);
+				w.now += 16 * MIN;
+				await job.tick();
+				return { lost, firstLike, state: w.state("LD-TEST-0193"), append: w.calls.append.length, rows: w.draftRows("LD-TEST-0193").length,
+					mint: w.calls.mint.length, like: w.calls.like.slice(-1)[0] || null };
+			},
+			// A search answer that doesn't say what the like search found (an older
+			// library), right after the lost answer.
+			async noLikeAnswer(lib) {
+				const w = makeWorld();
+				const job = lib.create(w.deps({ findDraftByMessageId: async ({ messageId }) => { w.calls.search.push(messageId); return { found: false, count: 0, mailbox: "" }; } }));
+				await job.tick();
+				w.now += 5 * MIN;
+				w.ready("LD-TEST-0194");
+				w.appendBehaviors = ["LOST", "OK"];
+				await job.tick();
+				return { state: w.state("LD-TEST-0194"), append: w.calls.append.length };
+			},
+			// Nothing with its Message-ID, and only messages with another subject or
+			// another recipient: the number never reached Gmail.
+			async nothingLike(lib) {
+				const w = makeWorld();
+				const job = lib.create(w.deps());
+				await job.tick();
+				w.now += 5 * MIN;
+				w.ready("LD-TEST-0195");
+				w.appendBehaviors = ["LOST", "OK"];
+				await job.tick();
+				const handed = JSON.parse(w.claim("LD-TEST-0195").sent_json || "{}");
+				w.lookalikes.push({ box: "[Gmail]/Sent Mail", subject: "Made-up invoice for another load", to: String(handed.to) },
+					{ box: "[Gmail]/Drafts", subject: String(handed.subject), to: "someone-else@example-broker.test" });
+				w.now += 16 * MIN;
+				await job.tick();
+				return { state: w.state("LD-TEST-0195"), append: w.calls.append.length, like: w.calls.like.length };
+			},
+		};
+
+		const a = await LIKE_CASES.sentAsNew(jobLib);
+		eq([a.lost.state, a.lost.stage, a.firstLike], ["queued", "appending", 1],
+			"§15b FAILS ON THE OLD CODE: the answer was lost: the first search also looked for a copy like it, found none, and the load waits for the retry");
+		eq(a.state, ["needs_attention", "MAYBE_IN_GMAIL"],
+			"§15b FAILS ON THE OLD CODE: a person sent the late draft and Gmail's copy has its own Message-ID: a copy like it is in Sent Mail, so a person checks Gmail (MAYBE_IN_GMAIL)");
+		eq([a.append, a.rows, a.mint], [1, 0, 1], "§15b FAILS ON THE OLD CODE: ...never appended a second time, never recorded as drafted, one number");
+		const handed = JSON.parse(a.lost.sent_json || "{}");
+		eq(a.like, { subject: handed.subject, to: handed.to, since: new Date(Date.parse(a.lost.reserved_at) - DAY).toISOString(), boxes: ["[Gmail]/Drafts", "[Gmail]/Sent Mail"] },
+			"§15b FAILS ON THE OLD CODE: the like search: the subject and recipient handed to Gmail, since the day before the number was reserved, in Drafts and Sent Mail");
+		{
+			// A crash while appending; a person sends the draft before the restart.
+			const w = makeWorld();
+			const before = await w.started({ workerId: "before-crash" });
+			w.ready("LD-TEST-0196");
+			w.appendBehaviors = ["CRASH_AFTER"];
+			before.tick();
+			await until(() => (w.claim("LD-TEST-0196") || {}).stage === "appending" && w.gmail.length === 1, "§15b the claim reaches appending, the draft made");
+			await tick();
+			w.sendAsNew(w.claim("LD-TEST-0196").message_id);
+			w.now += 16 * MIN; // the lease has run out
+			await w.job({ workerId: "after-restart" }).tick();
+			eq([w.state("LD-TEST-0196"), w.calls.append.length, w.draftRows("LD-TEST-0196").length], [["needs_attention", "MAYBE_IN_GMAIL"], 1, 0],
+				"§15b FAILS ON THE OLD CODE: after a crash, the same: the recovery finds a copy like it, a person checks, no second append");
+		}
+		{
+			// A person edits and saves the late draft: a new Message-ID, still in Drafts.
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready("LD-TEST-0197");
+			w.appendBehaviors = ["LANDS_LATE", "OK"];
+			await job.tick();
+			w.saveAsNew(w.claim("LD-TEST-0197").message_id);
+			w.now += 16 * MIN;
+			await job.tick();
+			eq([w.state("LD-TEST-0197"), w.calls.append.length], [["needs_attention", "MAYBE_IN_GMAIL"], 1],
+				"§15b FAILS ON THE OLD CODE: a person edited and saved the late draft (a new Message-ID, still in Drafts): a person checks, no second append");
+		}
+		{
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready("LD-TEST-0198");
+			w.appendBehaviors = ["LOST", "OK"];
+			await job.tick();
+			eq(w.state("LD-TEST-0198"), ["queued", "RETRY_LATER"], "§15b nothing in Gmail after the lost answer: queued again");
+			w.likeFails = true;
+			w.now += 16 * MIN;
+			await job.tick();
+			eq([w.state("LD-TEST-0198"), w.calls.append.length], [["needs_attention", "MAYBE_IN_GMAIL"], 1],
+				"§15b FAILS ON THE OLD CODE: a like search that fails is \"unknown\": a person, never a second append");
+		}
+		const n = await LIKE_CASES.noLikeAnswer(jobLib);
+		eq([n.state, n.append], [["needs_attention", "MAYBE_IN_GMAIL"], 1],
+			"§15b FAILS ON THE OLD CODE: a search answer that doesn't say what the like search found (an older library) is \"unknown\": a person, right after the lost answer");
+		{
+			// The claim doesn't hold what went to Gmail: no like search can be made.
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready("LD-TEST-0199");
+			w.appendBehaviors = ["LOST", "OK"];
+			await job.tick();
+			w.db.prepare("UPDATE auto_invoice_claims SET sent_json = '' WHERE load_key = ?").run(rules.loadKey("LD-TEST-0199"));
+			w.now += 16 * MIN;
+			await job.tick();
+			eq([w.state("LD-TEST-0199"), w.calls.append.length, w.calls.search.length], [["needs_attention", "MAYBE_IN_GMAIL"], 1, 2],
+				"§15b FAILS ON THE OLD CODE: a claim without what went to Gmail can't be looked for by a copy: its Message-ID is still searched, then a person, no second append");
+		}
+		{
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready("LD-TEST-0189");
+			w.appendBehaviors = ["LANDS_LATE", "OK"];
+			await job.tick();
+			w.db.prepare("UPDATE auto_invoice_claims SET sent_json = '' WHERE load_key = ?").run(rules.loadKey("LD-TEST-0189"));
+			w.now += 16 * MIN;
+			await job.tick();
+			eq([w.state("LD-TEST-0189"), w.calls.append.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1],
+				"§15b ...one found by its Message-ID is still found (with nothing to rebuild its record from, left to a person as before)");
+		}
+		const g = await LIKE_CASES.nothingLike(jobLib);
+		eq([g.state, g.append, g.like], [["drafted", ""], 2, 2],
+			"§15b FAILS ON THE OLD CODE: nothing with its Message-ID, nor with its subject and recipient (only another subject, or another recipient): appended once more, after a like search each time");
+
+		// Each decision removed in turn: the case that pins it must change.
+		const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+		for (const [label, from, to, caseName, pinned] of [
+			["a copy like it read as absent", "found.like.count === 0 ? \"absent\"", "found.like.count >= 0 ? \"absent\"", "sentAsNew", (x) => x.state[1] === "MAYBE_IN_GMAIL" && x.append === 1],
+			["a copy like it taken as found", "return found && found.found ? \"found\"", "return found && (found.found || (found.like && found.like.count > 0)) ? \"found\"", "sentAsNew",
+				(x) => x.state[1] === "MAYBE_IN_GMAIL" && x.rows === 0],
+			["an answer without the like search read as absent", "found && found.like && found.like.count === 0 ? \"absent\"", "found && (!found.like || found.like.count === 0) ? \"absent\"", "noLikeAnswer",
+				(x) => x.state[1] === "MAYBE_IN_GMAIL"],
+			["the like search not asked", "...(alsoLike ? { alsoLike } : {})", "...({})", "nothingLike", (x) => x.state[0] === "drafted" && x.like === 2],
+			["the like search since the reservation, not the day before", "new Date(reserved - DAY_MS)", "new Date(reserved)", "sentAsNew",
+				(x) => Boolean(x.like) && x.like.since === new Date(Date.parse(x.lost.reserved_at) - DAY).toISOString()],
+		]) {
+			const lib = mutantModule(JOB_FILE, from, to);
+			ok(lib, `§15b MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+			if (!lib) continue;
+			ok(pinned(await LIKE_CASES[caseName](jobLib)) && !pinned(await LIKE_CASES[caseName](lib)), `§15b MUTANT ${label}: caught`);
+		}
 	}
 
 	// ---------------------------------------------------------------- §16
