@@ -38,6 +38,14 @@
                 <button type="button" class="btn btn-secondary btn-sm notif-act" :disabled="deciding !== 0" @click.stop="decide(n, 'decline')">Decline</button>
               </div>
               <div v-if="decideError.id === requestOf(n).availabilityId" class="notif-error" role="alert">{{ decideError.text }}</div>
+              <!-- The note to CHR's contact, once approved: the server's state, and the line to copy. -->
+              <div v-if="chrOf(n)" class="notif-chr">
+                <span>{{ chrOf(n).words }}</span>
+                <template v-if="chrOf(n).line">
+                  <span class="notif-chr-line">{{ chrOf(n).line }}</span>
+                  <button type="button" class="btn btn-secondary btn-sm notif-act" @click.stop="copyLine(n.id, chrOf(n).line)">{{ copiedId === n.id ? CHR_DRAFT_COPIED : CHR_DRAFT_COPY }}</button>
+                </template>
+              </div>
             </template>
             <div class="notif-time">{{ formatNotificationTime(n.createdAt) }}</div>
           </div>
@@ -73,7 +81,9 @@ import { useViewport } from '../composables/useViewport'
 import { useApi } from '../composables/useApi'
 import { appDayOf, appToday, shiftYmd } from '../utils/datetime'
 import { loadIdRef } from '../lib/loadRef'
-import { isDriverHasLoadsWarning, requestDecisionText, timeOffRequestOfNotice, withLoadsConfirmed } from '../lib/availabilityText'
+import {
+  CHR_DRAFT_COPIED, CHR_DRAFT_COPY, chrDraftOfNotice, chrDraftText, isDriverHasLoadsWarning, requestDecisionText, timeOffRequestOfNotice, withLoadsConfirmed,
+} from '../lib/availabilityText'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 
 const store = useDispatchNotificationsStore()
@@ -84,6 +94,23 @@ const { isMobile } = useViewport()
 
 // The request a time-off-request notice is about, or null (lib/availabilityText.js).
 const requestOf = (n) => timeOffRequestOfNotice(n)
+// The note to CHR's contact on that notice, as { words, line }, or null.
+const chrOf = (n) => chrDraftText(chrDraftOfNotice(n))
+// The notice whose line was just copied (its button says so for a moment).
+const copiedId = ref(0)
+let copiedTimer = null
+
+async function copyLine(id, line) {
+  try {
+    await navigator.clipboard.writeText(line)
+    copiedId.value = id
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copiedId.value = 0 }, 1500)
+  } catch {
+    // The clipboard can be refused (permissions, no HTTPS): the line is shown to copy by hand.
+    window.prompt('Copy this line for CHR\'s contact:', line)
+  }
+}
 // The request being decided (its availability id; 0 for none), the last refusal
 // in the server's words, and the server's loads question ("Approve anyway").
 const deciding = ref(0)
@@ -103,6 +130,7 @@ async function decide(n, decision, body = {}) {
   try {
     const reply = await api.post(`/api/driver-availability/${req.availabilityId}/${decision}`, body)
     store.setRequestDecision(req.availabilityId, reply.decision, reply.decidedBy)
+    if (reply.chrDraft) store.setRequestChrDraft(req.availabilityId, reply.chrDraft)
     if (!n.read) store.markRead([n.id])
   } catch (err) {
     if (decision === 'approve' && isDriverHasLoadsWarning(err)) {
@@ -127,6 +155,12 @@ function approveAnyway() {
 function onRequestDecided(payload) {
   if (!payload || typeof payload !== 'object') return
   store.setRequestDecision(payload.availabilityId, payload.decision, payload.decidedBy)
+}
+
+// A note to CHR's contact finished drafting (the event carries its state only):
+// the notices are read again for its words and line.
+function onChrDraft() {
+  store.fetch()
 }
 
 // Day-bucket grouping. Today / Yesterday / This Week / Older — applied to
@@ -221,11 +255,14 @@ onMounted(() => {
   socket.register('dispatch')
   socket.on('dispatch-notification', onSocketNotification)
   socket.on('time-off-request-decided', onRequestDecided)
+  socket.on('time-off-chr-draft', onChrDraft)
 })
 
 onUnmounted(() => {
   socket.off('dispatch-notification', onSocketNotification)
   socket.off('time-off-request-decided', onRequestDecided)
+  socket.off('time-off-chr-draft', onChrDraft)
+  if (copiedTimer) clearTimeout(copiedTimer)
 })
 </script>
 
@@ -302,6 +339,19 @@ onUnmounted(() => {
   color: #b91c1c;
   margin-top: 0.35rem;
   overflow-wrap: anywhere;
+}
+.notif-chr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text);
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+.notif-chr-line {
+  font-weight: 600;
 }
 .notif-dot {
   width: 8px;

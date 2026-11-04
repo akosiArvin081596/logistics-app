@@ -36,9 +36,12 @@ export const useDriversDbStore = defineStore('driversDb', {
       await this.load()
     },
 
+    // The server's answer comes back: it may tell staff about notes to CHR's
+    // contact for the time off the delete cancelled.
     async remove(id) {
-      await api.del(`/api/drivers-directory/${id}`)
+      const reply = await api.del(`/api/drivers-directory/${id}`)
       await this.load()
+      return reply
     },
   },
 })
