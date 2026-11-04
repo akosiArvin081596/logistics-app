@@ -15,6 +15,9 @@
       <!-- Personal lines waiting for a correction invoice (Super Admin only;
            hidden when none waits). -->
       <PersonalCorrectionsPanel v-if="auth.isSuperAdmin" />
+      <!-- Fuel receipts approved by rule: the report, Super Admin only, while the
+           pass flag is on (counts only in shadow). -->
+      <ReceiptAutoApprovePanel v-if="auth.isSuperAdmin && autoApproveMode !== 'off'" :mode="autoApproveMode" />
       <!-- Download Receipts — Super Admin only.
            Streams a ZIP of every receipt file for a specific truck in a
            date range, plus a manifest.csv for accounting review. -->
@@ -156,6 +159,7 @@
             <option value="">All Status</option>
             <option>Pending</option>
             <option>Approved</option>
+            <option v-if="autoApproveMode === 'on'" :value="AUTO_APPROVED_FILTER">{{ AUTO_APPROVED_FILTER }}</option>
             <option>Rejected</option>
           </select>
           <select v-model="allFilter.state" class="filter-select" aria-label="Filter by state" @change="loadAll">
@@ -336,6 +340,7 @@
                 <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
               </div>
             </div>
+            <div v-if="reviewLines.get(e.id)" :class="['auto-review', 'auto-review--' + reviewLines.get(e.id).kind]" :title="reviewLines.get(e.id).detail">{{ reviewLines.get(e.id).label }}</div>
             <!-- No status change on a receipt in a finalized month: the server
                  refuses it, and the receipt is already in that month's figures. -->
             <div v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)" class="mobile-exp-actions" @click.stop>
@@ -450,6 +455,7 @@
               </td>
               <td>
                 <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
+                <div v-if="reviewLines.get(e.id)" :class="['cell-line', 'auto-review', 'auto-review--' +reviewLines.get(e.id).kind]" :title="reviewLines.get(e.id).detail">{{ reviewLines.get(e.id).label }}</div>
               </td>
               <td class="action-cell" @click.stop>
                 <div v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)" class="action-status">
@@ -596,6 +602,20 @@
                         <button class="loc-edit-btn" @click="startEditLocation" aria-label="Edit city and state">Edit</button>
                       </span>
                     </div>
+                  </div>
+                  <!-- Receipts auto-approve: the verdict or the "who set it" record, in full. -->
+                  <div v-if="selectedReview" :class="['exp-auto-review', 'auto-review--' + selectedReview.kind]">
+                    <template v-if="selectedReview.kind === 'held'">
+                      <div class="exp-desc-label">Needs a person</div>
+                      <ul class="exp-auto-review-list">
+                        <li v-for="(r, i) in selectedReview.reasons" :key="i">{{ r }}</li>
+                      </ul>
+                    </template>
+                    <template v-else>
+                      <div class="exp-desc-label">{{ selectedReview.label }}</div>
+                      <div>{{ selectedReview.detail }}</div>
+                      <div v-if="selectedReview.at" class="exp-sub-dim">Set {{ fmtUploaded(selectedReview.at) }}</div>
+                    </template>
                   </div>
                   <div v-if="selectedExpense.description" class="exp-desc">
                     <div class="exp-desc-label">Description</div>
@@ -1673,7 +1693,9 @@ import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import PersonalReceiptActions from './expenses/PersonalReceiptActions.vue'
 import PersonalCorrectionsPanel from './expenses/PersonalCorrectionsPanel.vue'
 import ReceiptPagesPanel from './expenses/ReceiptPagesPanel.vue'
+import ReceiptAutoApprovePanel from './expenses/ReceiptAutoApprovePanel.vue'
 import { personalBlocksStatus } from '../../lib/personalReceipt'
+import { AUTO_APPROVED_FILTER, autoApproveModeOf, autoReviewLine, localStatusChange } from '../../lib/receiptAutoReview'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
 import { appDayEndIso, appDayStartIso, appToday, fmtAppInstant, fmtTimestamp, fmtYmd, parseYmdLocal } from '../../utils/datetime'
@@ -1752,6 +1774,17 @@ const allExpenses = ref([])
 const personalEnabled = ref(false)
 // Its personalReceiptWeek: a Personal line takes its receipt's week (the Mark dialog's text).
 const personalReceiptWeek = ref(false)
+// Its autoApprove.mode: 'on', 'shadow' or 'off' (receipts auto-approve; absent while off).
+const autoApproveMode = ref('off')
+// Each row's line under its status (lib/receiptAutoReview.js), by expense id.
+const reviewLines = computed(() => {
+  const out = new Map()
+  for (const e of allExpenses.value) {
+    const line = autoReviewLine(e, autoApproveMode.value)
+    if (line) out.set(e.id, line)
+  }
+  return out
+})
 // Client-side pagination for the expenses list — render one page of rows at a
 // time (default 25) instead of all rows at once. Server-side filtering already
 // scopes `allExpenses`; this only pages the render (and limits how many receipt
@@ -1817,6 +1850,8 @@ const viewingLabel = computed(() => {
   if (!e) return ''
   return expenseStatusClass(e) === 'st-finalized' ? expenseStatusLabel(e) : (e.status || 'Pending').toLowerCase()
 })
+// The open receipt's line under its status, in full in the detail modal.
+const selectedReview = computed(() => (selectedExpense.value ? reviewLines.value.get(selectedExpense.value.id) || null : null))
 // Hover text on a status in a finalized month: why there are no buttons.
 function finalizedTitle(e) {
   const month = monthLabel(e?.finalized_period)
@@ -2619,6 +2654,7 @@ async function loadAll() {
     allExpenses.value = data.expenses || []
     personalEnabled.value = data.personalEnabled === true
     personalReceiptWeek.value = data.personalReceiptWeek === true
+    autoApproveMode.value = autoApproveModeOf(data)
     // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
       try {
@@ -2645,6 +2681,7 @@ async function quietReload() {
     allExpenses.value = data.expenses || []
     personalEnabled.value = data.personalEnabled === true
     personalReceiptWeek.value = data.personalReceiptWeek === true
+    autoApproveMode.value = autoApproveModeOf(data)
     pruneSelection()
   } catch { /* empty — leave existing data in place */ }
 }
@@ -2664,7 +2701,7 @@ async function setStatus(id, status) {
   try {
     await api.put(`/api/expenses/${id}/status`, { status })
     const exp = allExpenses.value.find(e => e.id === id)
-    if (exp) exp.status = status
+    if (exp) Object.assign(exp, localStatusChange(exp, status))
     toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
     return true
   } catch (err) {
@@ -3002,7 +3039,7 @@ async function bulkSetStatus(status, ids = [...selectedIds.value]) {
       } else {
         const chunkSet = new Set(chunk)
         allExpenses.value = allExpenses.value.map(e =>
-          chunkSet.has(e.id) ? { ...e, status } : e
+          chunkSet.has(e.id) ? { ...e, ...localStatusChange(e, status) } : e
         )
       }
     }
@@ -4614,6 +4651,13 @@ tr:hover td { background: var(--surface-hover); }
 .st-rejected { background: var(--danger-dim); color: var(--danger); }
 /* Two lines in the table's narrow Status column, not one word per line. */
 .st-finalized { background: var(--blue-dim); color: var(--blue); min-width: 10rem; }
+/* Receipts auto-approve: the line under a status (lib/receiptAutoReview.js). */
+.auto-review { font-size: 0.68rem; margin-top: 0.15rem; color: #64748b; }
+.mobile-exp-card .auto-review { text-align: right; margin-top: 0.35rem; }
+.auto-review--held { color: var(--amber); }
+.auto-review--auto { color: var(--accent); }
+.exp-auto-review { margin-top: 0.75rem; font-size: 0.85rem; color: #0f172a; line-height: 1.4; }
+.exp-auto-review-list { margin: 0; padding-left: 1.1rem; }
 
 .receipt-thumb {
   width: 80px; height: 60px; object-fit: cover; border-radius: 4px;
