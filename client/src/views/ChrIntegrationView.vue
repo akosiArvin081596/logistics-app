@@ -44,7 +44,32 @@
           <div><dt>Last check</dt><dd>{{ status.lastTickAt ? fmt(status.lastTickAt) : 'Not yet' }}</dd></div>
           <div v-if="status.lastErrorCode"><dt>Last problem</dt><dd>{{ status.lastErrorCode }}</dd></div>
           <div><dt>Today</dt><dd>{{ todayText }}</dd></div>
+          <div><dt>Live for every load</dt><dd>{{ status.liveAllEnabled ? 'Allowed on the server' : 'Off on the server (a pilot can reach one load)' }}</dd></div>
         </dl>
+        <div v-if="status.paused" class="chr-pause" role="alert">
+          <p>{{ pauseWords[status.paused.reason] || 'Paused' }} since {{ fmt(status.paused.at) }}<template v-if="status.paused.until">, until {{ fmt(status.paused.until) }}</template>.
+            Waiting updates are kept. The owner may have posted some in Navisphere meanwhile.</p>
+          <label class="chr-check">
+            <input v-model="resumeConfirm" type="checkbox" :disabled="busy" />
+            <span>Also send updates more than 2 hours old (otherwise they are given up)</span>
+          </label>
+          <button type="button" class="btn btn-secondary btn-sm" :disabled="busy" @click="resume">Resume</button>
+        </div>
+      </section>
+
+      <section class="chr-card" aria-labelledby="chr-conn-title">
+        <h3 id="chr-conn-title" class="chr-title">Connection</h3>
+        <dl class="chr-facts">
+          <div><dt>Credentials</dt><dd>{{ status.connection && status.connection.configured ? 'Configured' : 'Not configured' }}</dd></div>
+          <div><dt>Carrier number</dt><dd>{{ status.connection && status.connection.carrierCodeConfigured ? 'Configured' : 'Not configured' }}</dd></div>
+          <div><dt>Ready to send</dt><dd>{{ status.connection && status.connection.ready ? 'Yes' : 'No: LogisX has no C.H. Robinson connection yet' }}</dd></div>
+          <div><dt>Last good check</dt><dd>{{ status.connection && status.connection.lastTokenOkAt ? fmt(status.connection.lastTokenOkAt) : 'Never' }}</dd></div>
+        </dl>
+        <div class="chr-actions">
+          <button type="button" class="btn btn-secondary btn-sm" :disabled="busy || !(status.testConnection && status.testConnection.allowed)" @click="testConnection">Test connection</button>
+        </div>
+        <p v-if="!(status.testConnection && status.testConnection.allowed)" class="chr-hint">Only an account on the listed-accounts setting may test the connection.</p>
+        <p v-if="testResult" class="chr-note">{{ testResult }}</p>
       </section>
 
       <section class="chr-card" aria-labelledby="chr-controls-title">
@@ -55,9 +80,19 @@
             <select v-model="draft.milestones" :disabled="busy">
               <option value="off">Off</option>
               <option value="dry_run">Dry run</option>
+              <option value="pilot" :disabled="status.settings.milestones !== 'pilot' && !(status.pilot && status.pilot.allowed)">Pilot (one load)</option>
               <option value="live" :disabled="!status.live || !status.live.allowed">Live</option>
             </select>
           </label>
+          <label v-if="draft.milestones === 'pilot'" class="chr-field">
+            <span>Pilot load (9-digit Load ID)</span>
+            <input v-model="draft.pilotLoad" type="text" inputmode="numeric" maxlength="10" :disabled="busy || !(status.pilot && status.pilot.allowed)" />
+          </label>
+          <p v-if="status.settings.pilot" class="chr-hint">
+            The pilot load is {{ status.settings.pilot.loadKey }}, set by {{ status.settings.pilot.setBy }}.
+            {{ status.settings.pilot.until ? `It ends by ${fmt(status.settings.pilot.until)} at the latest, or when its delivered update is sent.` : 'Its 72 hours start when sending goes on.' }}
+          </p>
+          <p v-if="status.pilot && !status.pilot.allowed" class="chr-hint">The pilot can't be set or moved now: {{ pilotReason }}</p>
           <p v-if="status.live && !status.live.allowed" class="chr-hint">Live is not available: {{ liveReason }}</p>
           <label class="chr-check">
             <input v-model="draft.arrivedPickup" type="checkbox" :disabled="busy" />
@@ -167,6 +202,10 @@
               <template v-if="row.attempts"> · {{ row.attempts }} attempt(s)</template>
               <template v-if="row.fieldsDropped"> · {{ row.fieldsDropped }} field(s) dropped</template>
             </div>
+            <div v-if="isRetryable(row)" class="chr-actions">
+              <button type="button" class="btn btn-secondary btn-sm" :disabled="busy" @click="retry(row)">{{ retryAsk[row.id] ? 'Confirm and retry' : 'Retry' }}</button>
+              <span v-if="retryAsk[row.id]" class="chr-hint">{{ retryAsk[row.id].text }}</span>
+            </div>
           </li>
         </ul>
         <div v-if="nextBefore" class="chr-actions">
@@ -184,8 +223,8 @@ import { useApi } from '../composables/useApi'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { fmtAppInstant } from '../utils/datetime'
 import {
-  CHR_API, CHR_EVENT_WORDS, CHR_STATUS_WORDS, CHR_VERIFY_WORDS, CHR_LIVE_REASONS,
-  kindChip, rowStatusText, stopText, ladderOf, eventsQuery, loadSummaryUrl,
+  CHR_API, CHR_EVENT_WORDS, CHR_STATUS_WORDS, CHR_VERIFY_WORDS, CHR_LIVE_REASONS, CHR_PILOT_REASONS, CHR_PAUSE_WORDS, CHR_RESULT_SENTENCES,
+  kindChip, rowStatusText, stopText, ladderOf, eventsQuery, loadSummaryUrl, isRetryable,
 } from '../lib/chrIntegration.js'
 
 // The C.H. Robinson page: Super Admin only (router meta and requireRole on every
@@ -205,9 +244,14 @@ const actionError = ref('')
 const busy = ref(false)
 const confirmStop = ref(false)
 const holdReason = ref('')
+const resumeConfirm = ref(false)
+const testResult = ref('')
+// A retry the server asked to confirm, by row id: { flag, text }.
+const retryAsk = reactive({})
 const filter = reactive({ status: '', loadId: '' })
-const draft = reactive({ milestones: 'dry_run', arrivedPickup: false, positionsInMilestones: false, settleMin: 5 })
+const draft = reactive({ milestones: 'dry_run', arrivedPickup: false, positionsInMilestones: false, settleMin: 5, pilotLoad: '' })
 
+const pauseWords = CHR_PAUSE_WORDS
 const statusWords = CHR_STATUS_WORDS
 const eventWords = CHR_EVENT_WORDS
 const verifyWords = CHR_VERIFY_WORDS
@@ -217,6 +261,7 @@ const eventText = (row) => CHR_EVENT_WORDS[row.event] || row.event
 const milestoneChip = computed(() => kindChip(status.value, 'milestones'))
 const locationChip = computed(() => kindChip(status.value, 'location'))
 const liveReason = computed(() => CHR_LIVE_REASONS[status.value?.live?.reason] || '')
+const pilotReason = computed(() => CHR_PILOT_REASONS[status.value?.pilot?.reason] || '')
 const ladder = computed(() => ladderOf(detail.value?.events))
 const todayText = computed(() => {
   const t = status.value?.today || {}
@@ -229,12 +274,15 @@ const draftText = computed(() => {
   return `Made ${fmt(d.at)}${d.toChr ? ', to a chrobinson.com address' : ''}`
 })
 const FIELDS = ['milestones', 'arrivedPickup', 'positionsInMilestones', 'settleMin']
-const dirty = computed(() => Boolean(status.value?.settings) && FIELDS.some((k) => draft[k] !== status.value.settings[k]))
+const currentPilotLoad = () => status.value?.settings?.pilot?.loadKey || ''
+const dirty = computed(() => Boolean(status.value?.settings) && (FIELDS.some((k) => draft[k] !== status.value.settings[k])
+  || (draft.milestones === 'pilot' && draft.pilotLoad.trim().replace(/^#/, '') !== currentPilotLoad())))
 
 function syncDraft() {
   const s = status.value?.settings
   if (!s) return
   for (const k of FIELDS) draft[k] = s[k]
+  draft.pilotLoad = currentPilotLoad()
 }
 
 async function loadStatus() {
@@ -294,8 +342,44 @@ function saveSettings() {
   return act(async () => {
     const patch = {}
     for (const k of FIELDS) if (draft[k] !== status.value.settings[k]) patch[k] = draft[k]
+    const load = draft.pilotLoad.trim().replace(/^#/, '')
+    if (draft.milestones === 'pilot' && load !== currentPilotLoad()) patch.pilotLoad = load
     await api.put(`${CHR_API}/settings`, patch)
     await refreshAll()
+  })
+}
+
+function resume() {
+  return act(async () => {
+    await api.post(`${CHR_API}/resume`, { confirm: resumeConfirm.value === true })
+    resumeConfirm.value = false
+    await refreshAll()
+  })
+}
+
+function testConnection() {
+  return act(async () => {
+    testResult.value = ''
+    const r = await api.post(`${CHR_API}/test-connection`, {})
+    testResult.value = CHR_RESULT_SENTENCES[r.resultCode] || `Result: ${r.resultCode}`
+    await refreshAll()
+  })
+}
+
+// The server asks for a confirmation on an unknown outcome or an old update;
+// the second click sends it.
+function retry(row) {
+  return act(async () => {
+    const ask = retryAsk[row.id]
+    try {
+      await api.post(`${CHR_API}/events/${row.id}/retry`, ask ? { [ask.flag]: true } : {})
+      delete retryAsk[row.id]
+      await refreshAll()
+    } catch (e) {
+      if (e.code === 'CONFIRM_UNKNOWN') retryAsk[row.id] = { flag: 'confirmUnknown', text: e.message }
+      else if (e.code === 'CONFIRM_OLD') retryAsk[row.id] = { flag: 'confirmOld', text: e.message }
+      else throw e
+    }
   })
 }
 
@@ -388,6 +472,20 @@ refreshAll()
 .chr-note { margin: 0; font-size: 0.82rem; color: var(--text-dim); }
 .chr-ladder { margin: 0 0 0.6rem; padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.8rem; }
 .chr-ladder li span { display: block; }
+.chr-pause {
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  background: #fffbeb;
+  color: #78350f;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+.chr-pause p { margin: 0; }
 .chr-error {
   display: flex;
   align-items: center;

@@ -65,7 +65,35 @@ const SECOND = "66600022233344";
 // ------------------------------------------------------------------ §1
 section("§1  chrConfig()");
 const off = I.chrConfig();
-eq(Object.keys(off), ["updatesEnabled", "sendEnabled", "locationEnabled", "geofenceRadiusM", "denyListCount", "redactor"], "§1 exactly these fields");
+eq(Object.keys(off), ["updatesEnabled", "sendEnabled", "liveAllEnabled", "locationEnabled", "geofenceRadiusM", "denyListCount", "credentialsConfigured", "carrierCodeConfigured", "redactor"],
+	"§1 exactly these fields (the connection: configured or not, never a value)");
+eq([I.chrConfig({ updatesEnabled: true, liveAllEnabled: true }).liveAllEnabled, I.chrConfig({ liveAllEnabled: "true" }).liveAllEnabled, I.chrConfig({ liveAllEnabled: true, replica: true }).liveAllEnabled],
+	[true, false, false], "§1 CHR_LIVE_ALL_ENABLED: true is on, anything else off, off in a replica");
+{
+	const conn = { baseUrl: "https://chr.example.test", tokenUrl: "https://chr.example.test/t", clientId: "made-up-client-0001", clientSecret: "made-up-secret-0001", carrierCode: "made-up-carrier-0042" };
+	const c1 = I.chrConfig({ connection: conn });
+	eq([c1.credentialsConfigured, c1.carrierCodeConfigured], [true, true], "§1 a full connection: configured, carrier code configured");
+	eq([I.chrConfig({ connection: { ...conn, clientSecret: "" } }).credentialsConfigured, I.chrConfig({ connection: { ...conn, carrierCode: " " } }).carrierCodeConfigured], [false, false],
+		"§1 a missing secret: not configured; a blank carrier code: not configured");
+	const rep2 = I.chrConfig({ connection: conn, replica: true });
+	eq([rep2.credentialsConfigured, rep2.carrierCodeConfigured, rep2.redactor.hits(conn.clientSecret)], [false, false, false], "§1 a replica takes no connection at all");
+	ok(c1.redactor.hits(`x ${conn.clientSecret} y`) && c1.redactor.hits(conn.clientId) && c1.redactor.hits(conn.carrierCode), "§1 the client id, secret and carrier code are seeded into the redactor (exact values)");
+	eq(c1.redactor.redact(`token for ${conn.clientId}`), "token for [withheld]", "§1 ...and withheld wherever they appear");
+	const seen1 = [];
+	(function walk(v, depth) {
+		if (depth > 6 || v === null || v === undefined) return;
+		if (typeof v === "string" || typeof v === "number") { seen1.push(String(v)); return; }
+		if (typeof v === "function" || typeof v === "object") {
+			for (const k of [...Object.getOwnPropertyNames(v), ...Object.getOwnPropertySymbols(v)]) {
+				const d = Object.getOwnPropertyDescriptor(v, k);
+				seen1.push(String(k));
+				if (d && "value" in d) walk(d.value, depth + 1);
+			}
+		}
+	}(c1, 0));
+	eq(seen1.filter((s) => [conn.clientId, conn.clientSecret, conn.carrierCode, conn.baseUrl].some((v) => s.includes(v))), [], "§1 no field of the config, walked to depth 6, holds a connection value");
+	ok(!util.inspect(c1, { showHidden: true, depth: Infinity, getters: true }).includes(conn.clientSecret), "§1 ...nor does inspect show one");
+}
 eq([off.updatesEnabled, off.sendEnabled, off.locationEnabled], [false, false, false], "§1 nothing given: every switch off");
 eq(off.geofenceRadiusM, tripWorkDays.DEFAULT_GEOFENCE_RADIUS_M, "§1 the default radius is the geofence's (3218.69 m)");
 ok(Object.isFrozen(off) && Object.isFrozen(off.redactor), "§1 frozen, its redactor too");
@@ -131,8 +159,8 @@ function deps(over = {}) {
 		...over,
 	};
 }
-eq(I.DEP_NAMES, ["db", "config", "readSheet", "stopPointsFor", "truckResolver", "deviceResolver", "instructionStopsFor", "logAudit", "onChange", "listedAccounts", "now", "log"],
-	"§3 the dependency list (plan 4.1; the listed accounts for who may choose Live, A3)");
+eq(I.DEP_NAMES, ["db", "config", "readSheet", "stopPointsFor", "truckResolver", "deviceResolver", "instructionStopsFor", "logAudit", "onChange", "notify", "listedAccounts", "now", "log"],
+	"§3 the dependency list (plan 4.1; in-app notices; the listed accounts for who may choose Pilot or Live, A3)");
 for (const name of ["sheets", "getSheets", "drive", "getDrive", "sendEmail", "appendGmailDraft", "transporter", "fetch", "env", "transport", "io"]) {
 	throws(() => I.create(deps({ [name]: () => {} })), /not a dependency/, `§3 ${name} is refused: the lib can never be handed it`);
 }
@@ -150,7 +178,8 @@ const d0 = deps({ config: I.chrConfig({ updatesEnabled: false, denyList: DENY_CA
 const inst = I.create(d0);
 eq(Object.keys(inst).sort(), ["config", "jobs", "mount", "prune", "pruneIntervalMs", "status", "sweep", "sweepIntervalMs"],
 	"§4 config(), status(), mount(), jobs(), sweep(), prune() and the two intervals");
-eq(inst.config(), { updatesEnabled: false, sendEnabled: false, locationEnabled: false, geofenceRadiusM: tripWorkDays.DEFAULT_GEOFENCE_RADIUS_M, denyListCount: 1 }, "§4 config(): the switches, the radius and a count; no redactor, no value");
+eq(inst.config(), { updatesEnabled: false, sendEnabled: false, liveAllEnabled: false, locationEnabled: false, geofenceRadiusM: tripWorkDays.DEFAULT_GEOFENCE_RADIUS_M, denyListCount: 1,
+	credentialsConfigured: false, carrierCodeConfigured: false }, "§4 config(): the switches, the radius, a count and whether the connection is set; no redactor, no value");
 ok(!JSON.stringify(inst.config()).includes(DENY_CANARY), "§4 ...and so no deny value");
 eq([inst.sweepIntervalMs, inst.pruneIntervalMs], [60 * 1000, 24 * 60 * 60 * 1000], "§4 one sweep a minute, one prune a day");
 eq([I.MOUNT_PATH, I.NOTICE_TYPE], ["/api/integrations/chr", "chr-attention"], "§4 the mount path and the notice type server.js hides from every role but Super Admin");
@@ -195,8 +224,10 @@ guarded("§4 mount(), the routes, status() and jobs()", () => {
 	const dOn = deps({ config: I.chrConfig({ updatesEnabled: true, denyList: DENY_CANARY }), now: () => Date.parse("2026-11-02T15:00:00Z"), log: quietLog });
 	const onInst = I.create(dOn);
 	eq(onInst.jobs(), { sweep: true, prune: true }, "§4 on: the recorder and the prune");
-	eq(onInst.status(), { enabled: true, sendEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", settings: { ...S.DEFAULT_SETTINGS }, lastTickAt: "", lastSweepOk: "", lastErrorCode: "" },
-		"§4 on: status() gives the switches, each kind's effective mode, the page's settings and the recorder's last tick");
+	eq(onInst.status(), {
+		enabled: true, sendEnabled: false, liveAllEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", settings: { ...S.DEFAULT_SETTINGS }, paused: null,
+		connection: { configured: false, carrierCodeConfigured: false, ready: false, lastTokenOkAt: "" }, lastTickAt: "", lastSweepOk: "", lastErrorCode: "",
+	}, "§4 on: status() gives the switches, each kind's effective mode, the page's settings, the pause, the connection (never ready as shipped) and the recorder's last tick");
 	ok(!JSON.stringify(onInst.status()).includes(DENY_CANARY), "§4 ...and no deny value (NL1)");
 	eq(dOn.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'chr_%'").get().n, 0, "§4 ...read from the settings and state, with no table made");
 	const onRegs = mountOn(onInst, { requireRole: () => gate, refuseCrossOrigin: sameOrigin });
