@@ -98,10 +98,10 @@ GET /api/dispatch-notifications · requireRole("Super Admin", "Dispatcher")=anon
 PUT /api/dispatch-notifications/read · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4d5b2c160481
 POST /api/dispatch/cancel · requireRole("Super Admin")=anon@12b84c4b0134 · inline@0217915c1306
 POST /api/dispatch/reassign · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@54d99c8474bc
-DELETE /api/documents/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c8a61ca2bd27
+DELETE /api/documents/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@facb6c0af85f
 GET /api/documents/:loadId · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · inline@d60b0fb3f8bf
 POST /api/documents/scan · requireAuth@2f5c61384511 · scanKitLimiter=limiter · inline@1edcfc9c9f64
-POST /api/documents/upload · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@140672c02477
+POST /api/documents/upload · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@4e885cde1d91
 GET /api/driver-availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@af45a3fd793b
 PUT /api/driver-availability/:id · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@6fa480145814
 POST /api/driver-availability/:id/approve · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@9376d4bb855b
@@ -121,7 +121,7 @@ GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline
 GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc0
 POST /api/driver/respond · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@89982e68df5a
 GET /api/driver/shared-documents/:id/download · requireAuth@2f5c61384511 · inline@05bdd1cc1b0b
-PUT /api/driver/status · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@36432051331d
+PUT /api/driver/status · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@981f76896cd2
 GET /api/driver/truck-documents/:id/view · requireAuth@2f5c61384511 · truckDocViewLimiter=limiter · inline@fd3eb05a68a6
 GET /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@65f41ab129f2
 POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@692400a60522
