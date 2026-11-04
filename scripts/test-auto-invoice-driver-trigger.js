@@ -221,14 +221,14 @@ function makeWorld() {
 			if (b === "LANDED_LOST") { w.gmail.push(o.messageId); throw Object.assign(new Error("IMAP timeout"), { stage: "literal", answered: false }); }
 			throw new Error(`unknown append behaviour ${b}`);
 		},
-		async findDraftByMessageId({ messageId, mailboxes }) {
+		async findDraftByMessageId({ messageId, mailboxes, alsoLike }) {
 			const boxes = mailboxes || [DRAFTS, SENT];
 			w.calls.search++;
 			w.calls.searchBoxes.push([...boxes]);
 			if (w.searchFails) throw new Error("made-up search failure");
 			const held = (box) => (box === DRAFTS ? w.gmail : w.sent).filter((id) => id === messageId).length;
 			const hit = boxes.find((b) => held(b) > 0);
-			return { found: Boolean(hit), count: hit ? held(hit) : 0, mailbox: hit || "" };
+			return { found: Boolean(hit), count: hit ? held(hit) : 0, mailbox: hit || "", ...(alsoLike ? { like: { count: 0 } } : {}) };
 		},
 		newMessageId: () => `<made-up-${++w.ids}.auto-invoice@example.com>`,
 		mailbox: () => w.mailbox,
