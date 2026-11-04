@@ -27697,6 +27697,8 @@ console.log(receiptAutoApprovePass.startLine(receiptAutoApproveConfig));
 receiptAutoApprove.mount(app, { requireRole });
 if (receiptAutoApproveConfig.runs && startsJob("receipt auto-approve pass")) receiptAutoApprove.start({ setTimeout, setInterval });
 // </receipt-auto-approve-wiring>
+// What GET /api/expenses/all carries of the pass: its mode, and each verdict in on mode only.
+const receiptAutoApproveList = require("./lib/receipt-auto-approve-list");
 
 // Validate + normalize the line-item/deduction rows of a manual invoice.
 // Returns { items } on success or { error } with a user-facing message.
@@ -72036,6 +72038,7 @@ app.put("/api/investor/config", requireRole("Super Admin"), refuseCrossOrigin, (
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status, truck, from, to, state, region, q } = req.query;
+		const autoMode = receiptAutoApproveConfig.mode;
 		// posted_period is exposed so a receipt that was redirected out of a closed
 		// month is visible as such in the admin list — otherwise a March-dated row
 		// silently counting in August looks like a bug rather than the rule.
@@ -72045,7 +72048,9 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
 		if (type) { conditions.push("LOWER(type) = ?"); params.push(type.toLowerCase()); }
-		if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
+		const autoStatus = receiptAutoApproveList.statusCondition(autoMode, status);
+		if (autoStatus) { conditions.push(autoStatus.sql); params.push(...autoStatus.params); }
+		else if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
 		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
 		if (from) {
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return res.status(400).json({ error: "Invalid date" });
@@ -72103,15 +72108,17 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		// Every role but Super Admin: each receipt's load named as shownLoadId() does.
 		const withholdIds = loadIdWithheldFor(req);
 		const loadIdIndex = withholdIds ? currentShownLoadIdIndex() : null;
+		const reviews = receiptAutoApproveList.reviewsFor(db, autoMode);
 		const expenses = rows.map((e) => {
 			const period = expensePostedPeriod(e);
 			return {
 				...(RECEIPT_STATUS_RECORDER_ENABLED ? receiptStatusRecorder.withStatusBy(e) : e),
 				...(withholdIds ? { load_id: shownLoadId(req, e.load_id, { index: loadIdIndex }) } : {}),
 				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
+				...(reviews ? { auto_review: reviews.get(e.id) || null } : {}),
 			};
 		});
-		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED });
+		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED, ...receiptAutoApproveList.listMeta(autoMode) });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
