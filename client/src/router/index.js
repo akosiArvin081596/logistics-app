@@ -218,6 +218,13 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    // Countersigning is the company's act: Super Admin only, as on the server.
+    path: '/admin/passenger-authorizations',
+    name: 'admin-passenger-authorizations',
+    component: () => import('../views/PassengerAuthorizationsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/admin/kpis',
     name: 'kpis',
     component: () => import('../views/KpisView.vue'),
