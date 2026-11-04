@@ -1,8 +1,6 @@
-// The driver training videos (components/driver/DriverTrainingVideos.vue): the
-// RouteMate ELD video on YouTube's no-cookie host, the placement word the server
-// puts on the driver payload, the card's words, and the walkthrough's captions.
-// Pure, so scripts/test-driver-videos-client.mjs and scripts/test-csp-frame-src.js
-// import it under plain Node; the video files' URLs are in driverVideoAssets.js.
+// The training videos card's pure parts, kept free of Vite imports so the runners
+// (test-driver-videos-client.mjs, test-csp-frame-src.js) load it under plain Node;
+// the video files' URLs are in driverVideoAssets.js.
 
 // The one origin the site's frame-src gains for this (scripts/test-csp-frame-src.js
 // reads it from here, so the two can't drift).
@@ -24,21 +22,21 @@ export function routemateEmbedUrl() {
   return `${YOUTUBE_FRAME_ORIGIN}/embed/${ROUTEMATE_VIDEO_ID}?${new URLSearchParams(EMBED_PARAMS).toString()}`
 }
 
-// The player frame. The sandbox keeps it from navigating the app's page; YouTube
-// needs a referrer origin to play, which the element's own policy sends whatever
-// the page-wide header says.
+// The player frame. Windows it opens inherit its sandbox, so neither can navigate
+// the app's page; YouTube needs the referrer origin the element's own policy sends.
 export const ROUTEMATE_FRAME_TITLE = 'RouteMate ELD: how to log in to your mobile app'
-export const ROUTEMATE_FRAME_ALLOW = 'accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen'
+export const ROUTEMATE_FRAME_ALLOW = 'encrypted-media; picture-in-picture; fullscreen'
 export const ROUTEMATE_FRAME_REFERRER_POLICY = 'strict-origin-when-cross-origin'
-export const ROUTEMATE_FRAME_SANDBOX = 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation'
+export const ROUTEMATE_FRAME_SANDBOX = 'allow-scripts allow-same-origin allow-popups'
 
 // The payload's `trainingVideos`: exactly "onboarding" or "kit", else nothing.
 export function normalizePlacement(value) {
   return value === 'onboarding' || value === 'kit' ? value : null
 }
 
-// The walkthrough file's size, for the data note; null until the file exists.
-export const WALKTHROUGH_APPROX_MB = null
+// The walkthrough MP4's size, for the data note (scripts/test-driver-walkthrough-media.js
+// holds it within 1 MB of the committed file).
+export const WALKTHROUGH_APPROX_MB = 8
 
 // The card's words. Never a screening result: the driver is not told one.
 export const TRAINING_VIDEOS_HEADING = 'Training videos'
