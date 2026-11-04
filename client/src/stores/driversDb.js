@@ -14,15 +14,17 @@ export const useDriversDbStore = defineStore('driversDb', {
   }),
 
   actions: {
-    async load() {
-      this.isLoading = true
+    // A quiet load leaves isLoading alone: the page swaps the table for its
+    // skeleton on isLoading, and that unmounts an open Edit dialog or drawer.
+    async load({ quiet = false } = {}) {
+      if (!quiet) this.isLoading = true
       try {
         const data = await api.get('/api/drivers-directory')
         this.headers = data.headers || []
         this.drivers = data.data || []
         this.dailyRateRule = data.dailyRateRule || null
       } finally {
-        this.isLoading = false
+        if (!quiet) this.isLoading = false
       }
     },
 

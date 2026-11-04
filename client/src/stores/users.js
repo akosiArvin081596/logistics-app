@@ -25,8 +25,10 @@ export const useUsersStore = defineStore('users', {
   },
 
   actions: {
-    async loadUsers() {
-      this.isLoading = true
+    // A quiet load leaves isLoading alone: the page swaps the table for its
+    // skeleton on isLoading, and that unmounts an open Edit User dialog.
+    async loadUsers({ quiet = false } = {}) {
+      if (!quiet) this.isLoading = true
       try {
         const data = await api.get('/api/users')
         this.users = data.users || []
@@ -34,7 +36,7 @@ export const useUsersStore = defineStore('users', {
       } catch (err) {
         throw err
       } finally {
-        this.isLoading = false
+        if (!quiet) this.isLoading = false
       }
     },
 
