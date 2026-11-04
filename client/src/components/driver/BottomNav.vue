@@ -16,23 +16,29 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { Tabbar as VanTabbar, TabbarItem as VanTabbarItem, Badge as VanBadge } from 'vant'
 
-defineProps({
+const props = defineProps({
   currentTab: { type: String, default: 'loads' },
   unreadCount: { type: Number, default: 0 },
   unreadNotifCount: { type: Number, default: 0 },
+  // Only once the server has said this viewer gets it (DriverView).
+  showPerformance: { type: Boolean, default: false },
 })
 
 defineEmits(['switch'])
 
-const tabs = [
+const baseTabs = [
   { key: 'loads', label: 'Loads', icon: '&#128230;' },
   { key: 'notifications', label: 'Alerts', icon: '&#128276;' },
   { key: 'kit', label: 'Kit', icon: '&#128196;' },
   { key: 'messages', label: 'Messages', icon: '&#128172;' },
   { key: 'invoices', label: 'Invoices', icon: '&#128179;' },
 ]
+const performanceTab = { key: 'performance', label: 'Performance', icon: '&#127942;' }
+
+const tabs = computed(() => (props.showPerformance ? [...baseTabs, performanceTab] : baseTabs))
 </script>
 
 <style scoped>
