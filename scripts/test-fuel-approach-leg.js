@@ -22,7 +22,9 @@
 //
 // §11 pins "picked up" (lib/fuel-pickup-arrival.js): the sheet's status alone
 // never drops the run to the shipper; the ELD or the geofence must have put the
-// truck there in the load's current run.
+// truck there in the load's current run, with no twin in that visit. A truck
+// with no ELD device keeps the status's answer. The driver's panel says why the
+// run is kept (client/src/lib/fuelReview.js pickupUnconfirmedLine()).
 
 "use strict";
 const assert = require("assert");
@@ -527,7 +529,8 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const opt = { status: "Assigned", fuel: 48, fixAgoMin: 12, coords: true, pickupMapped: true, truck: true, tank: 150, avgMpg: 6.0,
 		burn: BURN5, receipt: { mpg: 6.0 }, rollupMpg: null, details: "Dry van, 43,764 lbs", otherLoad: null, stopPayload: null,
 		anchor: null, routesDown: false, device: true, linkedAgoMin: null, fixAgoMs: null, odo: 100000,
-		fixAt: FIX, history: undefined, track: [], noHistoryTable: false, otherHistory: [], sheetDriver: "Driver QA", ...o };
+		fixAt: FIX, history: undefined, track: [], noHistoryTable: false, otherHistory: [], sheetDriver: "Driver QA", otherDriver: "Driver QA",
+		otherCoords: null, drop: DROP, ...o };
 	if (opt.history === undefined) opt.history = fuel.isPickedUp(opt.status) ? [DISPATCHED, GEOFENCE_ARRIVAL] : [DISPATCHED];
 	const db = new Database(":memory:");
 	db.exec(`
@@ -583,12 +586,17 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	}
 	if (opt.coords) {
 		db.prepare("INSERT INTO load_coordinates VALUES ('qa-fuel-1', ?, ?, ?, ?)")
-			.run(opt.pickupMapped ? PICKUP.lat : null, opt.pickupMapped ? PICKUP.lng : null, DROP.lat, DROP.lng);
+			.run(opt.pickupMapped ? PICKUP.lat : null, opt.pickupMapped ? PICKUP.lng : null, opt.drop.lat, opt.drop.lng);
+	}
+	// The other load's own mapped points (§11's twins), as [pickup, receiver].
+	if (opt.otherCoords) {
+		const [p, d] = opt.otherCoords;
+		db.prepare("INSERT INTO load_coordinates VALUES ('qa-fuel-0', ?, ?, ?, ?)").run(p.lat, p.lng, d.lat, d.lng);
 	}
 	if (opt.stopPayload) db.prepare("INSERT INTO load_driver_instructions VALUES ('qa-fuel-1', ?)").run(JSON.stringify(opt.stopPayload));
 	const headers = ["Load ID", "Status", "Driver", "Details"];
 	const data = [{ "Load ID": "QA-FUEL-1", Status: opt.status, Driver: opt.sheetDriver, Details: opt.details }];
-	if (opt.otherLoad) data.push({ "Load ID": "QA-FUEL-0", Status: opt.otherLoad, Driver: "Driver QA", Details: "" });
+	if (opt.otherLoad) data.push({ "Load ID": "QA-FUEL-0", Status: opt.otherLoad, Driver: opt.otherDriver, Details: "" });
 	const handlers = {};
 	const deps = {
 		app: { get: (p, ...h) => { handlers[p] = h[h.length - 1]; } },
@@ -1217,6 +1225,94 @@ async function arrivalSection(Database, lifted, appRequire) {
 		], [null, 5, 5]);
 	});
 
+	// The twin hold: an arrival is held when another of his loads has an "At Shipper"
+	// row in the same visit, the stretch around it in which the truck stays within
+	// 25 mi of the pickup (or half the lane).
+	const MIN = 60000;
+	const P_AT = { latitude: PICKUP.lat, longitude: PICKUP.lng };
+	const north = (miles) => ({ latitude: PICKUP.lat + miles / 69.05, longitude: PICKUP.lng });
+	check("visitRadiusM: 25 mi, or half the lane (pickup to receiver, a straight line) when that is less; none with no mapped pickup", () => {
+		const r = (p, d) => lib().visitRadiusM(p, d);
+		assert.strictEqual(r(P_AT, { latitude: DROP.lat, longitude: DROP.lng }), 25 * 1609.344);
+		assert.strictEqual(r(P_AT, null), 25 * 1609.344);
+		assert.strictEqual(r(null, { latitude: DROP.lat, longitude: DROP.lng }), null);
+		const half = r(P_AT, north(20)) / 1609.344;
+		assert.ok(half > 9.9 && half < 10.1, `a 20-mi lane: ${half} mi`);
+		assert.strictEqual(r(P_AT, north(52)), 25 * 1609.344, "a 52-mi lane");
+		const under = r(P_AT, north(48)) / 1609.344;
+		assert.ok(under > 23.9 && under < 24.1, `a 48-mi lane: ${under} mi`);
+	});
+	check("visitBounds: within the radius on each side, out to the first fix beyond it or 2 h past the last fix within it, whichever comes first; a gap within it stays in; 2 h either side with no fixes or no mapped pickup", () => {
+		const A = 1000 * MIN;
+		const R25 = 25 * 1609.344;
+		const fx = (min, p) => ({ ms: A + min * MIN, latitude: p.latitude, longitude: p.longitude });
+		const IN = north(10);
+		const OUT = north(30);
+		const b = (fixes, o = { pickup: P_AT, radiusM: R25 }) => lib().visitBounds(A, fixes, o).map((ms) => (ms - A) / MIN);
+		assert.strictEqual(lib().VISIT_SIDE_MS, 2 * 60 * MIN);
+		assert.deepStrictEqual([
+			b([]),
+			b([fx(-30, OUT), fx(-20, IN), fx(0, P_AT), fx(20, IN), fx(30, OUT)]),
+			b([fx(-30, OUT), fx(-20, IN), fx(0, P_AT), fx(20, IN), fx(30, OUT)], { pickup: null, radiusM: R25 }),
+			b([fx(-300, OUT), fx(-60, IN), fx(60, IN), fx(360, OUT)]),
+			b([fx(-600, IN), fx(0, P_AT), fx(600, IN), fx(660, OUT)]),
+			b([fx(-1, OUT), fx(1, OUT)]),
+			b([fx(-20, IN), fx(20, IN)]),
+			b([fx(-30, north(12)), fx(30, north(12))]),
+			b([fx(-30, north(12)), fx(30, north(12))], { pickup: P_AT, radiusM: lib().visitRadiusM(P_AT, north(20)) }),
+		], [
+			[-120, 120],
+			[-30, 30],
+			[-120, 120],
+			[-180, 180],
+			[-720, 660],
+			[-1, 1],
+			[-140, 140],
+			[-150, 150],
+			[-30, 30],
+		]);
+	});
+	check("twinAtShipper: another of his loads (his on the sheet, or with a row by him) with an 'At Shipper' row in the visit, by anyone and from any source; never another status, another driver's load, this load's own row or a row after now", () => {
+		const A = NOW - 30 * 60 * MIN;
+		const R = (loadId, new_status, msAt, actor = "Driver QA", source = "geofence") => ({ load_id: loadId, new_status, actor, source, changed_at: sqlStamp(msAt) });
+		const at = (history, o = {}) => lib().twinAtShipper({ history, loadId: "QA-FUEL-1", driver: "Driver QA", normalizeName: normalizeDriverName,
+			pickup: P_AT, radiusM: 25 * 1609.344, nowMs: NOW, ...o })(A);
+		assert.deepStrictEqual([
+			at([R("qa-fuel-0", "At Shipper", A + MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A - MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + 100 * MIN, "  driver QA", "manual")]),
+			at([R("qa-fuel-2", "At Shipper", A + MIN, "dispatch_qa", "override")], { sheetLoadIds: ["QA-FUEL-2"] }),
+			at([R("qa-fuel-2", "At Shipper", A + MIN, "dispatch_qa", "override")]),
+			at([R("qa-fuel-3", "At Shipper", A + MIN, "Driver Other")]),
+			at([R("qa-fuel-0", "Loading", A + MIN), R("qa-fuel-0", "Heading to Shipper", A - MIN)]),
+			at([R("qa-fuel-1", "At Shipper", A + MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + 121 * MIN)]),
+			at([R("qa-fuel-0", "At Shipper", A + MIN)], { nowMs: A }),
+			at([R("qa-fuel-0", "At Shipper", A + 5 * MIN)], { fixes: [{ ms: A + 3 * MIN, latitude: FIX.lat, longitude: FIX.lng }] }),
+			at([R("qa-fuel-0", "At Shipper", A + 5 * MIN)], { fixes: [{ ms: A + 3 * MIN, ...north(3) }, { ms: A + 9 * MIN, latitude: FIX.lat, longitude: FIX.lng }] }),
+			at([]),
+		], [true, true, true, true, false, false, false, false, false, false, false, true, false]);
+	});
+	check("tripPlanPickup: a status that isn't picked up never is; with no ELD device the status stands; otherwise the arrival decides, and 'unconfirmed' says the status ran ahead", () => {
+		const t = (o) => lib().tripPlanPickup(o);
+		assert.deepStrictEqual([
+			t({ statusPickedUp: false, vehicleId: "" }),
+			t({ statusPickedUp: false, vehicleId: "DEV-QA-901" }),
+			t({ statusPickedUp: true, vehicleId: "" }),
+			t({ statusPickedUp: true, vehicleId: "  " }),
+			t({ statusPickedUp: true, vehicleId: null }),
+			t({ statusPickedUp: true, vehicleId: "DEV-QA-901", db: null }),
+		], [
+			{ pickedUp: false, unconfirmed: false },
+			{ pickedUp: false, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: true, unconfirmed: false },
+			{ pickedUp: false, unconfirmed: true },
+		]);
+		assert.strictEqual(lib().FIX_READ_CAP_MS, 14 * 24 * 60 * MIN);
+	});
+
 	// Through the route, flag off, as the driver and as the dispatch card ask it.
 	const BURN55 = { ...BURN5, p10: 5.5 };
 	const SHORT = { status: "In Transit", fixAt: FIX_SHORT, fuel: 60, burn: BURN55 };
@@ -1228,6 +1324,13 @@ async function arrivalSection(Database, lifted, appRequire) {
 	// The driver's other load, In Transit from 40 h ago until delivered 10 h ago, so under way through the 30 h arrival.
 	const OTHER_IN_TRANSIT_THEN_DELIVERED = [{ status: "Dispatched", source: "dispatch", agoMin: 60 * 60, actor: "dispatch_qa" },
 		{ status: "In Transit", source: "manual", agoMin: 40 * 60 }, { status: "Delivered", source: "manual", agoMin: 10 * 60 }];
+	// Twins: the truck at the shipper around this load's 30 h geofence arrival, 3 mi off at another dock, then gone.
+	const TWIN_DOCK = { lat: PICKUP.lat + 3 / 69.05, lng: PICKUP.lng };
+	const TWIN_TRACK = [{ at: NEAR_PICKUP, agoMin: 30 * 60 + 5, speed: 1 }, { at: PICKUP, agoMin: 30 * 60, speed: 0 }, { at: PICKUP, agoMin: 30 * 60 - 5, speed: 0 },
+		{ at: TWIN_DOCK, agoMin: 30 * 60 - 13, speed: 1 }, { at: TWIN_DOCK, agoMin: 30 * 60 - 17, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }];
+	// The other load's rows: dispatched, then the geofence's "At Shipper" `agoMin` ago, under his name unless `actor` says otherwise.
+	const twinRows = (agoMin, actor = "Driver QA") => [{ status: "Dispatched", source: "dispatch", agoMin: 50 * 60, actor: "dispatch_qa" },
+		{ status: "At Shipper", source: "geofence", agoMin, actor, role: "system" }];
 	const pick = (b) => [b.verdict, b.canMakeIt, b.shortfallMiles, b.refuelWithinMiles, b.routeMiles, b.leg, b.approachMiles, b.fromLivePosition];
 	const KEEPS = ["tight", false, 40, 315, 355, "to_pickup", 75, true];
 	const DROPS = ["clears", true, 0, 315, 160, "to_delivery", 0, true];
@@ -1297,6 +1400,32 @@ async function arrivalSection(Database, lifted, appRequire) {
 			{ ...SHORT, otherLoad: "Delivered", history: [DISPATCHED, GEOFENCE_ARRIVAL], otherHistory: [
 				{ status: "Dispatched", source: "dispatch", agoMin: 60 * 60, actor: "dispatch_qa" }, { status: "In Transit", source: "manual", agoMin: 50 * 60 },
 				{ status: "At Receiver", source: "geofence", agoMin: 35 * 60 }, { status: "Delivered", source: "manual", agoMin: 28 * 60 }] }, DROPS],
+		["D7 ...the other load his on the sheet under another spelling of his name, its statuses set by staff: the run stays",
+			{ ...SHORT, otherLoad: "Delivered", otherDriver: "  driver   QA ", history: [DISPATCHED, GEOFENCE_ARRIVAL],
+				otherHistory: OTHER_IN_TRANSIT_THEN_DELIVERED.map((h) => ({ ...h, source: "override", actor: "dispatch_qa" })) }, KEEPS],
+		// The twin hold (decision 3a): an arrival with another of his loads' "At Shipper" in the same visit is held.
+		["F4 a twin advanced at the same visit, its row a minute before this load's: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 + 1) }, KEEPS],
+		["F4c ...its row a minute after this load's (the later-trip load written first; the truck hauls the twin and heads back): the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1) }, KEEPS],
+		["F4c' ...the twin's own point 3 mi from this one's, its row written at that dock: the run stays",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 15),
+				otherCoords: [TWIN_DOCK, { lat: DROP.lat, lng: DROP.lng }] }, KEEPS],
+		["F4f ...this load's arrival seen only by the truck's own fixes, the twin's row after it: the run stays",
+			{ ...SHORT, history: [DISPATCHED], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 10) }, KEEPS],
+		["F4g ...the twin's row 3 h before this load was dispatched, the truck at the shipper throughout: the run stays",
+			{ ...SHORT, history: [{ status: "Dispatched", source: "dispatch", agoMin: 30 * 60 - 10, actor: "dispatch_qa" }, { ...GEOFENCE_ARRIVAL, agoMin: 30 * 60 - 15 }],
+				track: [33, 32, 31, 30.5].map((h) => ({ at: PICKUP, agoMin: h * 60, speed: 0 })).concat([{ at: PICKUP, agoMin: 30 * 60 - 16, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }]),
+				otherHistory: [...twinRows(33 * 60 - 10), { status: "At Receiver", source: "manual", agoMin: 30 * 60 - 12 }] }, KEEPS],
+		["F4x control: the other load's 'At Shipper' written after the truck left the shipper's 25 mi: dropped",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(24 * 60) }, DROPS],
+		["F4y control: another driver's load with an 'At Shipper' row in the visit: dropped",
+			{ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1, "Driver Other") }, DROPS],
+		// The truck's fixes are read at most 14 days back (#713 review-1 Low 1).
+		["F12 a run 16 days long, the truck at the shipper 13 days ago: dropped",
+			{ ...SHORT, history: [{ ...DISPATCHED, agoMin: 16 * 24 * 60 }], track: visit(13 * 24 * 60) }, DROPS],
+		["F12b ...the truck at the shipper only 15 days ago: the run stays",
+			{ ...SHORT, history: [{ ...DISPATCHED, agoMin: 16 * 24 * 60 }], track: visit(15 * 24 * 60) }, KEEPS],
 	];
 	const asked = [];
 	for (const [label, o, want] of CASES) {
@@ -1317,6 +1446,85 @@ async function arrivalSection(Database, lifted, appRequire) {
 			assert.deepStrictEqual([driver.status, pick(driver.body)], [200, KEEPS]);
 		});
 	}
+	// Form 0: a truck with no ELD device has no fuel reading, so no verdict can pass; its
+	// status stands, as before. Asked with the Dispatched row alone and with a geofence
+	// arrival too, which every rule counts: the answers are equal, flag off and on.
+	for (const [label, o] of [["F0 a device-less truck", { status: "In Transit", device: false }], ["F0b no truck on the driver", { status: "In Transit", truck: false }]]) {
+		const answers = [];
+		for (const flagOn of [false, true]) {
+			for (const history of [[DISPATCHED], [DISPATCHED, GEOFENCE_ARRIVAL]]) {
+				const w = buildWorld(Database, lifted, appRequire, { ...o, history }, flagOn);
+				answers.push({ flagOn, driver: await w.plan(), card: await w.plan(DISPATCH) });
+			}
+		}
+		check(`${label}, In Transit with no arrival in the run: the status stands, flag off and on (the whole-load row keeps its figures), and no line says the pickup isn't confirmed`, () => {
+			for (const k of [0, 2]) {
+				for (const who of ["driver", "card"]) {
+					assert.strictEqual(answers[k][who].status, 200, who);
+					assert.deepStrictEqual(answers[k][who].body, answers[k + 1][who].body, `${who}, flag ${answers[k].flagOn ? "on" : "off"}`);
+					assert.ok(!("pickupUnconfirmed" in answers[k][who].body), who);
+					assert.strictEqual(answers[k][who].body.leg, "to_delivery", who);
+				}
+			}
+			const df = answers[2].driver.body.driverFuel;
+			assert.ok(df, "the flag-on block");
+			assert.strictEqual(df.approachUncounted, false);
+		});
+	}
+	{
+		// Decision 5 (a): no "past the shipper" form, so a twin's hold lasts to the receiver.
+		const w = buildWorld(Database, lifted, appRequire, { ...SHORT, fixAt: DROP, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK,
+			otherHistory: twinRows(30 * 60 + 1), otherCoords: [PICKUP, { lat: DROP.lat - 1, lng: DROP.lng + 1 }] }, false);
+		const driver = await w.plan();
+		const card = await w.plan(DISPATCH);
+		check("F4d twins with different receivers, asked for the twin written second, the truck now at its own receiver: the run to the shipper stays", () => {
+			for (const b of [driver.body, card.body]) {
+				assert.strictEqual(b.leg, "to_pickup");
+				assert.ok(b.approachMiles > 0, String(b.approachMiles));
+			}
+		});
+	}
+	{
+		// Form 0 is the device alone: a truck with a device and no mapped pickup still needs its arrival.
+		const w = buildWorld(Database, lifted, appRequire, { ...SHORT, pickupMapped: false, history: [DISPATCHED] }, false);
+		const answers = [(await w.plan()).body, (await w.plan(DISPATCH)).body];
+		check("A16 In Transit with no arrival, a truck with a device and no mapped pickup: nothing to route to the shipper, so the pass is held at 'tight', never 'clears'", () => {
+			for (const b of answers) assert.deepStrictEqual([b.verdict, b.leg, b.approachMiles], ["tight", "to_delivery", 0]);
+		});
+	}
+	{
+		// On a 20-mi lane the visit's radius is half the lane, 10 mi: the receiver stays outside it.
+		const lane20 = { lat: PICKUP.lat + 20 / 69.05, lng: PICKUP.lng };
+		const south12 = { lat: PICKUP.lat - 12 / 69.05, lng: PICKUP.lng };
+		const track = [{ at: NEAR_PICKUP, agoMin: 30 * 60 + 5, speed: 1 }, { at: PICKUP, agoMin: 30 * 60, speed: 0 }, { at: PICKUP, agoMin: 30 * 60 - 5, speed: 0 },
+			{ at: south12, agoMin: 30 * 60 - 15, speed: 1 }, { at: south12, agoMin: 30 * 60 - 17, speed: 0 }, { at: FIX, agoMin: 25 * 60, speed: 20 }];
+		const legs = [];
+		for (const twinAgo of [30 * 60 - 16, 30 * 60 - 4]) {
+			const w = buildWorld(Database, lifted, appRequire, { ...SHORT, drop: lane20, history: [DISPATCHED, GEOFENCE_ARRIVAL], track, otherHistory: twinRows(twinAgo) }, false);
+			legs.push([(await w.plan()).body.leg, (await w.plan(DISPATCH)).body.leg]);
+		}
+		check("F4h a 20-mi lane: a twin's row written 12 mi out (past half the lane) is another visit, so this arrival counts; one written at the shipper holds it", () => {
+			assert.deepStrictEqual(legs, [["to_delivery", "to_delivery"], ["to_pickup", "to_pickup"]]);
+		});
+	}
+	{
+		// The driver's panel line: the status says picked up, the arrival isn't seen, and the plan counts the run there.
+		const flagOf = async (o) => {
+			const w = buildWorld(Database, lifted, appRequire, o, false);
+			return [(await w.plan()).body.pickupUnconfirmed, (await w.plan(DISPATCH)).body.pickupUnconfirmed];
+		};
+		const got = [
+			await flagOf({ ...SHORT, history: [DISPATCHED] }),
+			await flagOf({ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL] }),
+			await flagOf({ ...SHORT, status: "Assigned", history: [DISPATCHED] }),
+			await flagOf({ ...SHORT, history: [DISPATCHED], fixAgoMin: 7 * 60 }),
+			await flagOf({ ...SHORT, history: [DISPATCHED, GEOFENCE_ARRIVAL], track: TWIN_TRACK, otherHistory: twinRows(30 * 60 - 1) }),
+			await flagOf({ ...SHORT, noHistoryTable: true }),
+		];
+		check("pickupUnconfirmed: only when the status says picked up, the arrival isn't seen (none, a twin, an unreadable history) and the plan includes the run to the shipper; never on a seen arrival, a status before pickup or a plan from the pickup (no fresh fix)", () => {
+			assert.deepStrictEqual(got, [[true, true], [undefined, undefined], [undefined, undefined], [undefined, undefined], [true, true], [true, true]]);
+		});
+	}
 	{
 		const on = await buildWorld(Database, lifted, appRequire, { ...SHORT, history: [DISPATCHED] }, true).plan();
 		check("A1 flag on: the block plans the run to the shipper too (75 mi, then 355 to the receiver), and no row says 'enough' for the whole run", () => {
@@ -1331,6 +1539,24 @@ async function arrivalSection(Database, lifted, appRequire) {
 		assert.ok(review, "client/src/lib/fuelReview.js did not load");
 		const a1 = asked[0];
 		assert.strictEqual(review.tripVerdict(a1.card.body.verdict).dispatch, "Tight — plan a stop");
+	});
+	const PICKUP_LINE = "Pickup not confirmed yet, so this plan includes the run to the shipper.";
+	check("the driver's panel line has one home (client/src/lib/fuelReview.js), word for word, shown only on the server's flag", () => {
+		assert.ok(review, "client/src/lib/fuelReview.js did not load");
+		assert.strictEqual(review.PICKUP_UNCONFIRMED_LINE, PICKUP_LINE);
+		assert.deepStrictEqual([
+			review.pickupUnconfirmedLine(asked[0].driver.body),
+			review.pickupUnconfirmedLine(asked[1].driver.body),
+			review.pickupUnconfirmedLine({ pickupUnconfirmed: "true" }),
+			review.pickupUnconfirmedLine({}),
+			review.pickupUnconfirmedLine(null),
+		], [PICKUP_LINE, "", "", "", ""]);
+	});
+	check("the driver's fuel panel shows that line on both screens, from the lib, with no copy of its words", () => {
+		const vue = fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "driver", "DriverFuelPanel.vue"), "utf8");
+		assert.ok(vue.includes("const pickupLine = computed(() => pickupUnconfirmedLine(plan.value))"), "the computed line");
+		assert.strictEqual(vue.split("{{ pickupLine }}</p>").length - 1, 2, "rendered on the gallons screen and in the verdict card");
+		assert.ok(!vue.includes("Pickup not confirmed"), "no copy of the words in the component");
 	});
 }
 

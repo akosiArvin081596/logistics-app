@@ -63597,11 +63597,13 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const dest = { latitude: lc.dest_lat, longitude: lc.dest_lng };
 		const pickup = Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
 			? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null;
-		// The status alone can run ahead of the truck, so the ELD or the geofence must
-		// also have put it at the shipper in this run (lib/fuel-pickup-arrival.js).
-		const pickedUp = statusPickedUp && !!fuelPickupArrival.shipperArrival({ db, loadId, vehicleId, pickup, linkedSinceMs,
+		// The status alone can run ahead of the truck, so with an ELD device the ELD or
+		// the geofence must also have put it at the shipper in this run
+		// (lib/fuel-pickup-arrival.js tripPlanPickup()).
+		const pickupRead = fuelPickupArrival.tripPlanPickup({ statusPickedUp, db, loadId, vehicleId, pickup, dest, linkedSinceMs,
 			sheet: { headers: jtHeaders, rows: jt.data || [], row: jtRow }, normalizeName: normalizeDriverName,
 			radiusM: GEOFENCE_RADIUS, maxSpeedMps: GEOFENCE_ARRIVE_MAX_SPEED_MPS, nowMs: Date.now() });
+		const pickedUp = pickupRead.pickedUp;
 		// Post-pickup the approach leg is zero BY DEFINITION; the status gate is what
 		// stops a phantom second leg being added to a truck already loaded.
 		const planApproach = fuelModel.shouldPlanApproach({ fixFresh, pickedUp, hasPickup: !!pickup });
@@ -63674,6 +63676,9 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			leg: planApproach ? "to_pickup" : "to_delivery",
 			approachMiles: planApproach ? Math.round(approachMiles * 10) / 10 : 0,
 			laneMiles: Math.round(laneMiles * 10) / 10,
+			// The status says picked up, the truck's arrival isn't seen, and the plan
+			// includes the run to the shipper: the driver's panel says why.
+			...(pickupRead.unconfirmed && planApproach ? { pickupUnconfirmed: true } : {}),
 			loadStatus: loadStatus || null,
 			fuelPct: pct,
 			// See the same block on /api/fuel/range: provenance of the READING, which
