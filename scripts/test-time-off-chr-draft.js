@@ -150,7 +150,9 @@ function subjectOf(mime) {
 		const text = closure(W.SRC, { roots: [], routes: heads, provided: PROVIDED, denied: [] }).text;
 		ok("§0.3 the lifted server text holds no require of lib/imap-draft.js, so a missed fake can't bind the real Gmail calls", !/require\(["']\.\/lib\/imap-draft["']\)/.test(text));
 		ok("§0.4 ...and it does call both Gmail functions by name (the fakes stand in for them)", /\bappendGmailDraft\(/.test(text) && /\bfindDraftByMessageId\(/.test(text));
-		ok("§0.5 server.js itself requires them at the top, from lib/imap-draft.js (which the world never runs)", /\nconst \{ appendGmailDraft, findDraftByMessageId \} = require\("\.\/lib\/imap-draft"\);\n/.test(W.SRC));
+		ok("§0.5 server.js takes them from lib/imap-draft.js (lines the world never runs): its one appendGmailDraft, shared with the invoice drafts, and findDraftByMessageId once",
+			/\nconst \{ appendGmailDraft \} = require\("\.\/lib\/imap-draft"\);\n/.test(W.SRC) && W.SRC.split('\nconst { findDraftByMessageId } = require("./lib/imap-draft");\n').length === 2
+				&& W.SRC.split(/\n(?:const|let) \{[^}\n]*\bappendGmailDraft\b/).length === 2);
 		eq("§0.6 this runner's worlds hold an empty app password", ON.GMAIL_APP_PASSWORD, "");
 	});
 

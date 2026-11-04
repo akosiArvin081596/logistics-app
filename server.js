@@ -127,7 +127,7 @@ const timeOffEldCheck = require("./lib/time-off-eld-check");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
-const { appendGmailDraft, findDraftByMessageId } = require("./lib/imap-draft");
+const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
 const expenseAi = require("./lib/expense-ai");
@@ -12009,6 +12009,8 @@ app.post("/api/driver-availability/:id/decline", timeOffRequestsFlagGate, requir
 // table, no Gmail call, no Retry route, and staff get the checked line to send by hand.
 const DRIVER_TIME_OFF_CHR_DRAFT_ENABLED = DRIVER_TIME_OFF_REQUESTS_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_CHR_DRAFT_ENABLED ?? "").trim());
 const timeOffChrDraft = require("./lib/time-off-chr-draft");
+// A Retry's search; the append is server.js's one appendGmailDraft, shared with the invoice drafts.
+const { findDraftByMessageId } = require("./lib/imap-draft");
 // The note's one recipient, read once at boot from production's settings (no default here), and one start-up line
 // saying whether it is set, never what it is. "" while the switch is off or the setting isn't one chrobinson.com address.
 function timeOffChrDraftRecipientAtBoot() {
