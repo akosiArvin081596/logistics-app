@@ -244,6 +244,7 @@ function documentDeps(overrides = {}) {
 		SPREADSHEET_ID: "sheet-under-test",
 		colLetter: () => "A",
 		queueReceiptOcr: () => {},
+		autoInvoicePodChanged: () => {},
 		console: quiet,
 		...overrides,
 	};
