@@ -77,12 +77,12 @@ const SENT = "[Gmail]/Sent Mail";
 
 const turn = () => new Promise((r) => setImmediate(r));
 const never = () => new Promise(() => {});
-// By the clock, not by turns: a run past its limit waits on a real timer, on a loaded CI box too.
-async function until(cond, label, ms = 3000) {
-	const end = Date.now() + ms;
-	while (Date.now() < end) {
+// By turns of the event loop, never the clock: nothing here waits on a real timer (a run's limit
+// passes only when a case calls w.passRunLimit()), so a loaded box can't change an outcome.
+async function until(cond, label, turns = 3000) {
+	for (let i = 0; i < turns; i++) {
 		if (cond()) return true;
-		await new Promise((r) => setTimeout(r, 1));
+		await turn();
 	}
 	failures.push(`${label}: the condition was never met`);
 	return false;
@@ -115,6 +115,7 @@ function makeWorld() {
 		closed: () => [],
 		ids: 0,
 		invalidated: 0,
+		runLimits: [],
 	};
 	w.db = new Database(":memory:");
 	w.db.exec(`
@@ -265,8 +266,22 @@ function makeWorld() {
 			return w.lookAnswer;
 		},
 		sleep: async (ms) => { w.calls.sleep.push(ms); },
+		setTimer: (fn, ms) => {
+			const limit = { fn, ms, live: true };
+			w.runLimits.push(limit);
+			return limit;
+		},
+		clearTimer: (limit) => { limit.live = false; },
 		...extra,
 	});
+	// The oldest run still going passes its limit, now.
+	w.passRunLimit = () => {
+		const limit = w.runLimits.find((x) => x.live);
+		if (!limit) return false;
+		limit.live = false;
+		limit.fn();
+		return true;
+	};
 	w.job = (extra = {}) => jobLib.create(w.deps(extra));
 	w.claim = (id) => w.db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(rules.loadKey(id)) || null;
 	w.state = (id) => {
@@ -1285,18 +1300,67 @@ async function main() {
 		heldForAPerson(sw, "LD-TEST-0911", "OFF_GAP");
 		eq((await tryAgain(swj, "LD-TEST-0911")).status, 200, "§10 the sweep's Try again on OFF_GAP: as today");
 		eq(sw.claim("LD-TEST-0911").look_first, "", "§10 ...and it asks for no look");
+		eq(sw.invalidated, 0, "§10 ...and it leaves the cached sheet alone");
+
+		// A sheet fix, then Try again inside the cached sheet's minute: the invoice and the
+		// fingerprint saved for it must both come from the fixed row. The stand-in keeps a copy
+		// until it's dropped, as getJobTrackingCached() does; the engine reads the sheet itself.
+		const fix = makeWorld();
+		let cachedSheet = null;
+		const fixJob = await fix.started({
+			readJobTracking: async () => {
+				fix.calls.reads++;
+				if (!cachedSheet) cachedSheet = Object.freeze({ headers: HEADERS, data: Object.freeze([...fix.rows]) });
+				return cachedSheet;
+			},
+			invalidateJobTracking: () => { fix.invalidated++; cachedSheet = null; },
+		});
+		fix.ready("LD-TEST-0913");
+		fix.prepareHook = () => ({ ok: false, http: 422, code: "TOTAL_MISMATCH" });
+		const fixStart = fixJob.driverDelivered({ role: "Driver", loadId: "LD-TEST-0913", oldStatus: "At Receiver", newStatus: "Delivered" });
+		fix.setRow("LD-TEST-0913", { "Job Status": "Delivered" });
+		cachedSheet = null; // the status route drops the cache before written()
+		fixStart.written();
+		await drained(fix, "§10 sheet fix: the hold");
+		eq([fix.state("LD-TEST-0913"), fix.smtp.length], [["needs_attention", "TOTAL_MISMATCH"], 0], "§10 a total that disagrees: held for a person");
+		ok(cachedSheet && cachedSheet.data.some((r) => r["  Payment  "] === "$1,000.00"), "§10 ...the cached sheet now holds the old Payment");
+		// The person's fix goes straight into the sheet: nothing in the app hears of it.
+		fix.setRow("LD-TEST-0913", { "  Payment  ": "$1,200.00" });
+		fix.prepareHook = null;
+		eq((await tryAgain(fixJob, "LD-TEST-0913")).status, 200, "§10 Try again, seconds after the fix");
+		await drained(fix, "§10 sheet fix: the send");
+		eq([fix.state("LD-TEST-0913"), fix.smtp.length], [["drafted", ""], 1], "§10 ...one SMTP call");
+		eq(JSON.parse(fix.claim("LD-TEST-0913").fingerprint_json).paymentCents, 120000, "§10 FAILS ON THE OLD DESIGN: the fingerprint holds the fixed Payment, the one the invoice went out with");
+		// The cache refills, and a Super Admin's read compares.
+		cachedSheet = null;
+		fix.now += 2 * MIN;
+		await fixJob.checkClaims();
+		const fixed = fix.claim("LD-TEST-0913");
+		eq([fixed.changed_fields, fixed.changed_at, ledger.getSendStop(fix.db), fix.actions("auto_invoice_load_changed").length, fix.notices.filter((n) => /load changed/.test(n.title)).length, fix.smtp.length],
+			["", "", null, 0, 0, 1], "§10 FAILS ON THE OLD DESIGN: no change mark, no notice and no stop on a correct invoice: sending carries on");
+		fix.ready("LD-TEST-0914");
+		const nextStart = fixJob.driverDelivered({ role: "Driver", loadId: "LD-TEST-0914", oldStatus: "At Receiver", newStatus: "Delivered" });
+		fix.setRow("LD-TEST-0914", { "Job Status": "Delivered" });
+		cachedSheet = null;
+		nextStart.written();
+		await drained(fix, "§10 sheet fix: the next load");
+		eq([fix.state("LD-TEST-0914"), fix.smtp.length, fix.appends.length], [["drafted", ""], 2, 0], "§10 FAILS ON THE OLD DESIGN: ...the next driver's load is sent, not left as a draft");
 	}
 
 	section("§11 a stuck run (R-M4)");
 	{
 		// A attempt stuck in its build, past the limit; a person presses Try again; A wakes.
 		const w = makeWorld();
-		const job = await w.started({ runLimitMs: 5 });
+		const job = await w.started();
 		w.ready("LD-TEST-1001");
 		const stuck = gate();
 		let renders = 0;
 		w.renderHook = async () => { renders++; if (renders === 1) await stuck.p; };
 		tap(w, job, "LD-TEST-1001");
+		await until(() => renders === 1, "§11 attempt A is in its build");
+		eq([w.runLimits.filter((x) => x.live).map((x) => x.ms), jobLib.LEASE_MS], [[15 * MIN], 15 * MIN], "§11 FAILS ON THE OLD DESIGN: each run has a limit of 15 minutes, the lease's");
+		eq(w.claim("LD-TEST-1001").state, "working", "§11 ...and until it passes, the run keeps its claim");
+		ok(w.passRunLimit(), "§11 attempt A passes its limit");
 		await until(() => w.claim("LD-TEST-1001").state === "needs_attention", "§11 past the limit");
 		const c1 = w.claim("LD-TEST-1001");
 		eq([c1.state, c1.reason_code, c1.lease_owner], ["needs_attention", "DRAFT_FAILED", ""], "§11 FAILS ON THE OLD DESIGN: past the limit, by its stage: a person");
@@ -1329,11 +1393,13 @@ async function main() {
 
 		// Stuck at the SMTP call itself: a send that started is only ever searched for.
 		const s = makeWorld();
-		const sj = await s.started({ runLimitMs: 5 });
+		const sj = await s.started();
 		s.ready("LD-TEST-1003");
 		const inSmtp = gate();
 		s.smtpHook = () => inSmtp.p;
 		tap(s, sj, "LD-TEST-1003");
+		await until(() => s.smtp.length === 1, "§11 the run is in its SMTP call");
+		ok(s.passRunLimit(), "§11 it passes its limit there");
 		await until(() => s.claim("LD-TEST-1003").state === "needs_attention", "§11 stuck in SMTP");
 		const c3 = s.claim("LD-TEST-1003");
 		eq([c3.state, c3.reason_code, c3.stage, c3.delivery, Boolean(ledger.getSendStop(s.db))], ["needs_attention", "MAYBE_SENT", "appending", "send", true], "§11 FAILS ON THE OLD DESIGN: stuck in SMTP: MAYBE_SENT and the stop");
@@ -1352,14 +1418,47 @@ async function main() {
 
 		// A run past the limit at a draft's append.
 		const d = makeWorld();
-		const dj = await d.started({ runLimitMs: 5 });
+		const dj = await d.started();
 		d.ready("LD-TEST-1004", { Email: OTHER }, "billing@example-other.test");
 		const inAppend = gate();
 		d.recordHook = () => inAppend.p;
 		tap(d, dj, "LD-TEST-1004");
+		await until(() => d.calls.record === 1, "§11 the run is recording its draft");
+		ok(d.passRunLimit(), "§11 it passes its limit there");
 		await until(() => d.claim("LD-TEST-1004").state === "needs_attention", "§11 stuck recording");
 		eq([d.state("LD-TEST-1004"), d.appends.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1], "§11 stuck recording a draft: IN_GMAIL_UNRECORDED");
 		inAppend.open();
+
+		// The job's own default timer, still with no clock: setTimeout is held here, and this case
+		// fires the one the run asked for. Everything above hands the job its own.
+		const plain = makeWorld();
+		plain.meta("baseline_at", iso(T0 - 24 * HOUR));
+		plain.meta("trigger_on_at", iso(T0 - HOUR));
+		const plainDeps = plain.deps();
+		delete plainDeps.setTimer;
+		delete plainDeps.clearTimer;
+		const realSetTimeout = globalThis.setTimeout;
+		const asked = [];
+		globalThis.setTimeout = (fn, ms) => {
+			asked.push({ fn, ms });
+			return { unref() {} };
+		};
+		try {
+			const plainJob = jobLib.create(plainDeps);
+			plainJob.startTrigger();
+			await plainJob.finishStartUp();
+			plain.ready("LD-TEST-1005");
+			plain.renderHook = never;
+			tap(plain, plainJob, "LD-TEST-1005");
+			await until(() => plain.calls.render === 1, "§11 the default timer: the run is in its build");
+			const limit = asked.find((x) => x.ms === 15 * MIN);
+			ok(limit, "§11 FAILS ON THE OLD DESIGN: by default a run asks for a real timer of 15 minutes");
+			if (limit) limit.fn();
+			await until(() => plain.claim("LD-TEST-1005").state === "needs_attention", "§11 the default timer: past the limit");
+			eq(plain.state("LD-TEST-1005"), ["needs_attention", "DRAFT_FAILED"], "§11 FAILS ON THE OLD DESIGN: ...and when it fires, the stuck run is closed");
+		} finally {
+			globalThis.setTimeout = realSetTimeout;
+		}
 	}
 
 	section("§12 the watching");
