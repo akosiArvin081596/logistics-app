@@ -51,6 +51,9 @@
  * this file again as a child with the harness fake preloaded and a private
  * temp folder for its captures. Nothing leaves the machine.
  *
+ * §8 THE READ-ONLY MAILBOX SEARCH AND ITS CLASSIFIER (lib/invoice-mailbox-search.js)
+ * has its own fake IMAP server and its notes above mailboxSearchSection().
+ *
  * Plain node, no server, no fixtures, no network, never touches app.db.
  * Run: node scripts/test-imap-draft.js
  */
@@ -613,6 +616,601 @@ function rawSession(commands) {
 	});
 }
 
+// ------------------------------------------------------------ §8 the fake mailbox
+// LOGIN, CAPABILITY, EXAMINE, SEARCH X-GM-RAW, SEARCH SUBJECT, FETCH of the header
+// fields and BODYSTRUCTURE, LOGOUT; anything else is BAD. A mailbox holds made-up
+// messages: { subject, date, to, cc, bcc, names, text, lagging, rawHeaders, structure }.
+// Gmail's web search finds a term in the subject, the attachment names or the text
+// (body or PDF), leaves Trash out unless asked with in:trash, and misses a `lagging`
+// message; SEARCH SUBJECT reads subjects only. FETCH answers the items in Gmail's own
+// order, BODYSTRUCTURE first, and only the header fields asked for.
+// `script[VERB]` answers instead when it returns a list: strings are lines, a Buffer is
+// raw bytes, MAILBOX_DROP closes the connection, an empty list hangs.
+const MAILBOX_DROP = Symbol("drop");
+const FETCH_ASK = /^(\d{1,6}(?:,\d{1,6}){0,60}) \(BODY\.PEEK\[HEADER\.FIELDS \(([A-Z ]{1,40})\)\] BODYSTRUCTURE\)$/;
+function fakeMailbox() {
+	const sessions = [];
+	const boxes = { "[Gmail]/Drafts": [], "[Gmail]/Sent Mail": [], "[Gmail]/Trash": [] };
+	const script = {};
+	const opts = { greeting: "* OK Gimap ready", capability: "IMAP4rev1 IDLE UIDPLUS X-GM-EXT-1 CHILDREN", headerFirst: false, inPieces: false };
+	const server = net.createServer((sock) => {
+		const s = { commands: [], lines: [], examines: [], searches: [], fetches: [] };
+		s.closed = new Promise((resolve) => sock.on("close", resolve));
+		sessions.push(s);
+		let buf = "";
+		let box = null;
+		const reply = (line) => sock.write(line + "\r\n");
+		sock.on("error", () => {});
+		if (opts.greeting) reply(opts.greeting);
+		sock.on("data", (chunk) => {
+			buf += chunk.toString("latin1");
+			let eol;
+			while ((eol = buf.indexOf("\r\n")) >= 0) {
+				const line = buf.slice(0, eol);
+				buf = buf.slice(eol + 2);
+				s.lines.push(line);
+				const [tag, word = ""] = line.split(" ", 2);
+				const verb = word.toUpperCase();
+				const args = line.slice(tag.length + word.length + 2);
+				s.commands.push(verb);
+				const scripted = script[verb] && script[verb](tag, args, s);
+				if (scripted) {
+					for (const x of scripted) {
+						if (x === MAILBOX_DROP) { sock.destroy(); return; }
+						if (Buffer.isBuffer(x)) sock.write(x);
+						else reply(x);
+					}
+					continue;
+				}
+				if (verb === "LOGIN") {
+					reply(`${tag} OK ${unquote(args.split(" ")[0])} authenticated (Success)`);
+				} else if (verb === "CAPABILITY") {
+					reply(`* CAPABILITY ${opts.capability}`);
+					reply(`${tag} OK Success`);
+				} else if (verb === "EXAMINE") {
+					const name = /^"[^"]*"$/.test(args) ? unquote(args) : "";
+					s.examines.push(name);
+					if (!boxes[name]) { reply(`${tag} NO [NONEXISTENT] Unknown Mailbox`); continue; }
+					box = name;
+					reply(`* ${boxes[box].length} EXISTS`);
+					reply("* OK [PERMANENTFLAGS ()] Flags permitted.");
+					reply(`${tag} OK [READ-ONLY] ${box} selected. (Success)`);
+				} else if (verb === "SEARCH") {
+					s.searches.push(args);
+					const raw = new RegExp(`^X-GM-RAW (${QUOTED})$`, "i").exec(args);
+					const plain = new RegExp(`^SUBJECT (${QUOTED})$`, "i").exec(args);
+					const web = raw && /^(in:trash )?"([^"]{1,80})"$/.exec(unquote(raw[1]));
+					if (!box || (!web && !plain)) { reply(`${tag} BAD Could not parse command`); continue; }
+					const term = (web ? web[2] : unquote(plain[1])).toLowerCase();
+					const inWeb = (m) => !m.lagging && (box !== "[Gmail]/Trash" || web[1]) && [m.subject, ...(m.names || []), m.text].some((t) => String(t || "").toLowerCase().includes(term));
+					const inSubject = (m) => String(m.subject || "").toLowerCase().includes(term);
+					const hits = boxes[box].map((m, i) => ((web ? inWeb(m) : inSubject(m)) ? i + 1 : 0)).filter(Boolean);
+					reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
+					reply(`${tag} OK SEARCH completed (Success)`);
+				} else if (verb === "FETCH") {
+					s.fetches.push(args);
+					const ask = FETCH_ASK.exec(args);
+					if (!box || !ask) { reply(`${tag} BAD Could not parse command`); continue; }
+					const fields = ask[2].split(" ");
+					const pieces = ask[1].split(",").map(Number).filter((n) => boxes[box][n - 1]).map((n) => {
+						const m = boxes[box][n - 1];
+						const block = m.rawHeaders !== undefined ? m.rawHeaders : `${fields.map((f) => {
+							const v = { SUBJECT: m.subject, DATE: m.date, TO: m.to, CC: m.cc, BCC: m.bcc }[f];
+							return v ? `${f[0]}${f.slice(1).toLowerCase()}: ${v}\r\n` : "";
+						}).join("")}\r\n`;
+						const parts = (m.names || []).map((x) => `("APPLICATION" "PDF" ("NAME" "${x.replace(/(["\\])/g, "\\$1")}") NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME" "${x.replace(/(["\\])/g, "\\$1")}")) NIL)`).join("");
+						const structure = m.structure || (parts ? `(("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)${parts} "MIXED")` : '("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)');
+						const bytes = Buffer.from(block, "utf8").toString("latin1");
+						const head = `BODY[HEADER.FIELDS (${ask[2]})] {${bytes.length}}\r\n${bytes}`;
+						return opts.headerFirst
+							? `* ${n} FETCH (${head} BODYSTRUCTURE ${structure})\r\n`
+							: `* ${n} FETCH (BODYSTRUCTURE ${structure} ${head})\r\n`;
+					});
+					const answer = Buffer.from(`${pieces.join("")}${tag} OK Success\r\n`, "latin1");
+					if (opts.inPieces) {
+						sock.write(answer.subarray(0, answer.length >> 1));
+						setTimeout(() => sock.write(answer.subarray(answer.length >> 1)), 5);
+					} else sock.write(answer);
+				} else if (verb === "LOGOUT") {
+					reply("* BYE LOGOUT Requested");
+					reply(`${tag} OK 73 good day (Success)`);
+					sock.end();
+					return;
+				} else {
+					reply(`${tag} BAD Could not parse command`);
+				}
+			}
+		});
+	});
+	return { server, sessions, boxes, script, opts };
+}
+
+// ---------------------------------------------------------- §8 the search and classifier
+// lib/invoice-mailbox-search.js, the read-only search and the classifier. Made-up data.
+//   THE CLASSIFIER. One case per row of the table: Invoice needs a recipient outside, the
+//   load named as a whole token, no reply prefix, and the word invoice or `Order #<n>`.
+//   Ignored has to be proven: a To, every recipient on the mailbox's domain, no invoice
+//   look. The app's own mail reads Ignored by shape: its alerts whatever the To, its mail
+//   to itself only when sent to this mailbox alone. Anything else is a Mention.
+//   THE SESSION. Exactly LOGIN, CAPABILITY, EXAMINE, SEARCH, FETCH, LOGOUT; a term failing
+//   the shape is never sent; a NO, BAD, BYE, throttle, unreadable answer, dropped
+//   connection or missing X-GM-EXT-1 rejects, never "nothing found"; no server text in an
+//   error; To, Cc, Bcc and Subject never leave the function.
+async function mailboxSearchSection() {
+	section("§8  the read-only mailbox search and its classifier");
+	const LIB_FILE = path.join(__dirname, "..", "lib", "invoice-mailbox-search.js");
+	let lib = null;
+	try { lib = require(LIB_FILE); } catch { /* asserted next */ }
+	ok(lib, "§8 FAILS ON THE OLD CODE: lib/invoice-mailbox-search.js exists");
+	if (!lib) return;
+	const { searchMailboxForLoad, classifyHit, searchTerm, searchTermsFor, parseAddressList, KIND, CLEAN, MAILBOXES } = lib;
+	const OWN = "info@example.test";
+	const COLLEAGUE = "dispatch@example.test";
+	const BROKER = "billing@example-broker.test";
+	const LOAD = "900000019";
+	const ORDER = "7000001";
+	const INV = "11052026-3";
+	const ENGINE_SUBJECT = `Example Broker Order #${LOAD}`;
+	const ENGINE_FILE = `Example Broker Invoice Order #${LOAD}.pdf`;
+	const WEEK = "2026-10-24 to 2026-10-30";
+	const EM = "\u2014";
+	const DOT = "\u00b7";
+	const WARN = "\u26a0\ufe0f";
+	const ctx = { ownAddress: OWN, terms: [LOAD, ORDER, INV] };
+	const read = (hit, over = {}) => classifyHit(hit, { ...ctx, ...over }).kind;
+
+	// -------------------------------------------------- the classifier, row by row
+	const { INVOICE, MENTION, IGNORED } = KIND;
+	for (const [label, hit, want] of [
+		// Invoice: outside, names it, not a reply, says invoice or ends Order #<that number>.
+		["the engine's own send: <Broker> Order #<n>, to the broker", { subject: ENGINE_SUBJECT, to: BROKER, attachmentNames: [ENGINE_FILE] }, INVOICE],
+		["the subject ends Order #<n> and no attachment says invoice", { subject: ENGINE_SUBJECT, to: BROKER }, INVOICE],
+		["a Bison invoice: Order #<the row's order number>, not the load number", { subject: `Example Transport Order #${ORDER}`, to: BROKER }, INVOICE],
+		["the subject says invoice and names the load", { subject: `Invoice for load ${LOAD}`, to: BROKER }, INVOICE],
+		["only an attachment says invoice and names the load", { subject: "Paperwork", to: BROKER, attachmentNames: [`Invoice_${LOAD}.pdf`] }, INVOICE],
+		["the subject says invoice, a POD file names the load", { subject: "Your invoice", to: BROKER, attachmentNames: [`POD_1_of_2_${LOAD}.pdf`] }, INVOICE],
+		["by the row's invoice number", { subject: `Invoice ${INV}`, to: BROKER }, INVOICE],
+		["a Cc outside the company counts as outside", { subject: ENGINE_SUBJECT, to: COLLEAGUE, cc: BROKER }, INVOICE],
+		["To on the company's domain, the broker on Bcc, reads Invoice", { subject: ENGINE_SUBJECT, to: COLLEAGUE, bcc: BROKER, attachmentNames: [ENGINE_FILE] }, INVOICE],
+		["INV-<n>.pdf says invoice", { subject: "Paperwork", to: BROKER, attachmentNames: [`INV-${LOAD}.pdf`] }, INVOICE],
+		// Mention: anything that can't be placed.
+		["a draft with a blank To, the engine's subject and invoice file is never Ignored", { subject: ENGINE_SUBJECT, to: "", attachmentNames: [ENGINE_FILE] }, MENTION],
+		["a blank To with no invoice look is not proven internal either", { subject: `Load ${LOAD} notes`, to: "" }, MENTION],
+		["an internal subject ending Order #<n> has an invoice look", { subject: ENGINE_SUBJECT, to: COLLEAGUE }, MENTION],
+		["an internal note with an invoice-named attachment", { subject: `Load ${LOAD} paperwork`, to: COLLEAGUE, attachmentNames: ["Invoice draft.pdf"] }, MENTION],
+		["an internal subject saying invoice that names no load", { subject: "Invoice question", to: COLLEAGUE }, MENTION],
+		["an internal subject that says invoice and names the load", { subject: `Invoice for ${LOAD}?`, to: COLLEAGUE }, MENTION],
+		["a Re: to the broker", { subject: `Re: Invoice for load ${LOAD}`, to: BROKER }, MENTION],
+		["a Fw: to the broker", { subject: `Fw: ${ENGINE_SUBJECT}`, to: BROKER }, MENTION],
+		["a Fwd: to the broker", { subject: `FWD: ${ENGINE_SUBJECT}`, to: BROKER }, MENTION],
+		["a numbered reply to the broker", { subject: `RE[2]: ${ENGINE_SUBJECT}`, to: BROKER }, MENTION],
+		["outside and says invoice, but names no load", { subject: "Invoice for last week", to: BROKER, attachmentNames: ["inv.pdf"] }, MENTION],
+		["outside and names the load, but no invoice word", { subject: `Load ${LOAD} pickup update`, to: BROKER }, MENTION],
+		["a longer number holding the load number is not a token", { subject: `Invoice ${LOAD}0`, to: BROKER }, MENTION],
+		["letters glued to the load number are not a token", { subject: `Invoice CHR${LOAD}`, to: BROKER }, MENTION],
+		["Order #<another number> outside is no invoice for this load", { subject: "Example Broker Order #123456789", to: BROKER }, MENTION],
+		["...even with a POD file naming this load beside it", { subject: "Example Broker Order #123456789", to: BROKER, attachmentNames: [`POD_${LOAD}.pdf`] }, MENTION],
+		["a blank subject outside is a hit, and doubt", { subject: "", to: BROKER }, MENTION],
+		["a header block too long to read is a hit, and doubt", { unreadable: true, attachmentNames: [] }, MENTION],
+		["a group address can't be read, so not internal", { subject: `Load ${LOAD} notes`, to: "undisclosed-recipients:;" }, MENTION],
+		["one unreadable Cc among internal recipients", { subject: `Load ${LOAD} notes`, to: COLLEAGUE, cc: "not an address" }, MENTION],
+		["one unreadable Bcc among internal recipients", { subject: `Load ${LOAD} notes`, to: COLLEAGUE, bcc: "not an address" }, MENTION],
+		["an unterminated quote can hide a recipient", { subject: `Load ${LOAD} notes`, to: `"a <${COLLEAGUE}>, ${BROKER}` }, MENTION],
+		["two angle-addrs with no comma can hide a recipient", { subject: `Load ${LOAD} notes`, to: `<${BROKER}> <${COLLEAGUE}>` }, MENTION],
+		// Ignored: proven internal with no invoice look, or the app's own shape.
+		["an internal note naming the load, no invoice look", { subject: `Load ${LOAD} notes`, to: COLLEAGUE }, IGNORED],
+		["an internal reply, no invoice look", { subject: `Re: Load ${LOAD} notes`, to: COLLEAGUE, cc: OWN }, IGNORED],
+		["a blank subject, proven internal", { subject: "", to: COLLEAGUE }, IGNORED],
+		["the app's unusable-address alert to itself", { subject: `${WARN} Load ${LOAD} ingested with an unusable address`, to: OWN }, IGNORED],
+		["the mailbox's own domain, any case", { subject: `Load ${LOAD} notes`, to: "Dispatch@EXAMPLE.Test" }, IGNORED],
+		// The app's mail to itself, whose subjects say invoice.
+		["Weekly Invoices, action needed", { subject: `Weekly Invoices ${EM} ACTION NEEDED ${EM} ${WEEK}`, to: OWN }, IGNORED],
+		["Weekly Invoices, plain", { subject: `Weekly Invoices ${EM} ${WEEK}`, to: OWN }, IGNORED],
+		["the weekly run's sheet alert", { subject: `Weekly invoices ${EM} ACTION NEEDED ${DOT} ${WEEK}`, to: OWN }, IGNORED],
+		["New Invoice, with the driver's PDF", { subject: "New Invoice: INV-MD-2026W43 - Made Up Driver", to: `"LogisX Inc." <${OWN}>`, attachmentNames: ["INV-MD-2026W43.pdf"] }, IGNORED],
+		["the digest of completed loads no weekly invoice will bill", { subject: `${WARN} 3 completed loads no weekly invoice will bill`, to: OWN }, IGNORED],
+		["...its one-load form", { subject: `${WARN} 1 completed load no weekly invoice will bill`, to: OWN }, IGNORED],
+		// The alerts to the notify address, which may be outside.
+		["the re-issue alert, To outside the company", { subject: `Load ${LOAD}: a re-issued rate con was held`, to: "owner@elsewhere.test" }, IGNORED],
+		["the re-issue alert's other form, To outside", { subject: `Load ${LOAD}: a re-issued rate con changed fields`, to: "owner@elsewhere.test" }, IGNORED],
+		["the kept-date alert, To outside", { subject: `Load ${LOAD}: a later rate con did not replace a corrected date`, to: "owner@elsewhere.test" }, IGNORED],
+		["the re-issue alert, To inside", { subject: `Load ${LOAD}: a re-issued rate con was held`, to: COLLEAGUE }, IGNORED],
+		["the daily integrity digest, To outside", { subject: "LogisX integrity check (Nov 5, 2026): 2 issues", to: "owner@elsewhere.test" }, IGNORED],
+		// The shapes are tight: a near miss is at least a Mention.
+		["a reply to the re-issue alert", { subject: `Re: Load ${LOAD}: a re-issued rate con was held`, to: "owner@elsewhere.test" }, MENTION],
+		["a re-issue alert shape carrying an attachment", { subject: `Load ${LOAD}: a re-issued rate con was held`, to: "owner@elsewhere.test", attachmentNames: ["notes.pdf"] }, MENTION],
+		["a re-issue alert shape carrying an invoice for the load", { subject: `Load ${LOAD}: a re-issued rate con was held`, to: BROKER, attachmentNames: [`Invoice ${LOAD}.pdf`] }, INVOICE],
+		["Weekly Invoices forwarded to a colleague", { subject: `Weekly Invoices ${EM} ${WEEK}`, to: COLLEAGUE }, MENTION],
+		["Weekly Invoices with a Cc", { subject: `Weekly Invoices ${EM} ${WEEK}`, to: OWN, cc: COLLEAGUE }, MENTION],
+		["Weekly Invoices with a Bcc", { subject: `Weekly Invoices ${EM} ${WEEK}`, to: OWN, bcc: COLLEAGUE }, MENTION],
+		["Weekly Invoices carrying an attachment", { subject: `Weekly Invoices ${EM} ${WEEK}`, to: OWN, attachmentNames: ["x.pdf"] }, MENTION],
+		["a reply to Weekly Invoices", { subject: `Re: Weekly Invoices ${EM} ${WEEK}`, to: OWN }, MENTION],
+		["New Invoice to a colleague", { subject: "New Invoice: INV-MD-2026W43 - Made Up Driver", to: COLLEAGUE }, MENTION],
+		["New Invoice with two attachments", { subject: "New Invoice: INV-MD-2026W43 - Made Up Driver", to: OWN, attachmentNames: ["a.pdf", "b.pdf"] }, MENTION],
+		["New Invoice to the broker, naming the load, is an invoice", { subject: `New Invoice: ${LOAD} - Example Broker`, to: BROKER }, INVOICE],
+		["New Invoice with no driver part", { subject: "New Invoice: 123", to: OWN }, MENTION],
+	]) {
+		eq(read(hit), want, `§8 classifier: ${label}: ${want}`);
+	}
+
+	// Addresses: the parsed address decides, never a display name.
+	for (const [label, to, want] of [
+		["a display name naming the company can't hide the broker", `"${OWN}" <${BROKER}>`, INVOICE],
+		["a display name naming the broker doesn't make it outside", `"${BROKER}" <${COLLEAGUE}>`, MENTION],
+		["a quoted angle-addr can't hide the broker", `"x <${COLLEAGUE}>" <${BROKER}>`, INVOICE],
+		["a comma inside a display name doesn't split it", `"Billing, AP" <${BROKER}>, ${COLLEAGUE}`, INVOICE],
+		["a comment naming the company can't hide the broker", `${BROKER} (${OWN})`, INVOICE],
+		["a subdomain isn't the company", "x@mail.example.test", INVOICE],
+		["a lookalike domain isn't the company", "x@example.test.example-broker.test", INVOICE],
+		["a longer domain isn't the company", "x@notexample.test", INVOICE],
+	]) {
+		eq(read({ subject: ENGINE_SUBJECT, to }), want, `§8 classifier: ${label}`);
+	}
+	eq(parseAddressList(`"A, B" <A@Example.TEST>, c@example-broker.test; (x) d@example.test`), { addresses: ["a@example.test", "c@example-broker.test", "d@example.test"], unreadable: false },
+		"§8 parseAddressList(): lower case, split only outside quotes and comments");
+	eq(parseAddressList(["a@example.test", "b@example.test"]), { addresses: ["a@example.test", "b@example.test"], unreadable: false }, "§8 parseAddressList(): a header given twice is both");
+	eq(parseAddressList("").addresses, [], "§8 parseAddressList(): blank is no address");
+	eq(parseAddressList(`${"x".repeat(2000)}@example.test`).unreadable, true, "§8 parseAddressList(): an over-long entry is unreadable");
+	eq(read({ subject: ENGINE_SUBJECT, to: BROKER }, { ownAddress: "" }), MENTION, "§8 classifier: no mailbox address to compare with: doubt");
+	eq(read({ subject: "=?UTF-8?Q?Weekly_Invoices_=E2=80=94_ACTION_NEEDED_=E2=80=94_2026-10-24_to_2026-10-30?=", to: OWN }), IGNORED, "§8 classifier: Weekly Invoices as MailComposer encodes it");
+	const facts = classifyHit({ subject: `Load ${LOAD}: a re-issued rate con was held`, to: "owner@elsewhere.test" }, ctx);
+	eq(facts, { kind: IGNORED, namesIt: true, invoiceLook: false, invoiceFile: false, outside: true }, "§8 classifier: the answer is the kind and four facts, no address or subject");
+
+	// ----------------------------------------------------------------- the terms
+	eq(searchTerm(`#${LOAD}`), LOAD, "§8 terms: a leading # is dropped");
+	eq(searchTerm(` ${LOAD} `), LOAD, "§8 terms: spaces around it are dropped");
+	eq(searchTerm(INV), INV, "§8 terms: an invoice number passes");
+	eq(searchTerm("DMF-8657"), "DMF-8657", "§8 terms: a load number with letters passes");
+	eq(searchTerm("LD_TEST.0007"), "LD_TEST.0007", "§8 terms: . and _ pass");
+	const BAD_TERMS = [`${LOAD}" OR "x`, "9000 0019", "in:trash", "OR", "AROUND", `${LOAD}\r\na9 STORE 1 +FLAGS (\\Seen)`, "{5}", "12", "#", "##900000019", "(900000019)", `-${LOAD}`, `${LOAD}-`, "x".repeat(70) + "1", `"${LOAD}"`, "1234*"];
+	eq(BAD_TERMS.map(searchTerm), BAD_TERMS.map(() => ""), "§8 terms: quotes, spaces, operators, line breaks, no digit, too short or too long: refused");
+	eq(searchTermsFor({ loadNumber: `#${LOAD}`, invoiceNumbers: [INV, "", null], orderNumbers: [LOAD, ORDER] }), { terms: [LOAD, INV, ORDER], unsearchable: 0 },
+		"§8 terms: the load number, then each row's numbers; a blank row value and a repeat are dropped");
+	eq(searchTermsFor({ loadNumber: LOAD, invoiceNumbers: ["bad term"] }).unsearchable, 1, "§8 terms: a bad row value counts as unsearchable");
+	eq(searchTermsFor({ loadNumber: "" }).unsearchable, 1, "§8 terms: no load number counts as unsearchable");
+
+	// ---------------------------------------------------------------- the session
+	const fake = fakeMailbox();
+	await new Promise((resolve) => fake.server.listen(0, "127.0.0.1", resolve));
+	const port = fake.server.address().port;
+	const realConnect = tls.connect;
+	const dials = [];
+	tls.connect = (...args) => {
+		dials.push(args);
+		return net.connect(port, "127.0.0.1");
+	};
+	const DATE = "Wed, 04 Nov 2026 15:00:00 +0000";
+	const mail = (over = {}) => ({ subject: "", date: DATE, to: "", cc: "", bcc: "", names: [], text: "", ...over });
+	const clearBoxes = () => { for (const k of Object.keys(fake.boxes)) fake.boxes[k].length = 0; };
+	const SENT = fake.boxes[MAILBOXES.sent];
+	const DRAFTS = fake.boxes[MAILBOXES.drafts];
+	const TRASH = fake.boxes[MAILBOXES.trash];
+	const noScript = () => { for (const k of Object.keys(fake.script)) delete fake.script[k]; };
+	const run = async (over = {}) => {
+		const before = fake.sessions.length;
+		const r = await settle(searchMailboxForLoad({ user: OWN, pass: "made-up-pass", loadNumber: LOAD, timeoutMs: 2000, ...over }));
+		const s = fake.sessions.length > before ? fake.sessions[fake.sessions.length - 1] : null;
+		if (s) await within(s.closed, 2500);
+		return { value: r.value, error: r.error, s };
+	};
+	const EMPTY_BOX = { hits: 0, invoice: 0, mention: 0, ignored: 0, ignoredNamed: 0, overCap: 0, firstInvoiceDate: null };
+	const q = (term) => `X-GM-RAW "\\"${term}\\""`;
+
+	try {
+		const clean = await run();
+		eq(clean.value, { verdict: CLEAN, mailboxes: { drafts: EMPTY_BOX, sent: EMPTY_BOX } }, "§8 FAILS ON THE OLD CODE: both mailboxes answered with nothing: clean");
+		eq(clean.s.commands, ["LOGIN", "CAPABILITY", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "LOGOUT"], "§8 nothing found: LOGIN, CAPABILITY, EXAMINE, SEARCH per mailbox, LOGOUT, no FETCH");
+		eq(dials[dials.length - 1], [993, "imap.gmail.com", { servername: "imap.gmail.com" }], "§8 it connects to imap.gmail.com:993 over TLS");
+		eq(clean.s.lines.slice(0, 4), ['a1 LOGIN "info@example.test" "made-up-pass"', "a2 CAPABILITY", 'a3 EXAMINE "[Gmail]/Drafts"', `a4 SEARCH ${q(LOAD)}`], "§8 the commands, word for word: EXAMINE, never SELECT; the term is one quoted phrase");
+
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: [ENGINE_FILE] }));
+		DRAFTS.push(mail({ subject: `Re: Load ${LOAD} tracking`, to: BROKER }));
+		const both = await run();
+		eq(both.s.commands, ["LOGIN", "CAPABILITY", "EXAMINE", "SEARCH", "FETCH", "EXAMINE", "SEARCH", "FETCH", "LOGOUT"], "§8 FAILS ON THE OLD CODE: exactly the listed commands: LOGIN, CAPABILITY, EXAMINE, SEARCH, FETCH, LOGOUT");
+		eq(both.s.fetches, ["1 (BODY.PEEK[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] BODYSTRUCTURE)", "1 (BODY.PEEK[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] BODYSTRUCTURE)"], "§8 FETCH reads headers and BODYSTRUCTURE with BODY.PEEK, Bcc included, never a body");
+		eq(both.s.examines, ["[Gmail]/Drafts", "[Gmail]/Sent Mail"], "§8 Drafts and Sent Mail, each opened read-only; Trash isn't opened");
+		eq(both.value, { verdict: INVOICE, mailboxes: { drafts: { ...EMPTY_BOX, hits: 1, mention: 1 }, sent: { ...EMPTY_BOX, hits: 1, invoice: 1, firstInvoiceDate: "2026-11-04T15:00:00.000Z" } } }, "§8 the answer: an invoice in Sent Mail, a mention in Drafts, the invoice's date");
+
+		// The answer holds no address, subject or file name, nor do the console or an error.
+		const printed = [];
+		const realLog = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+		for (const k of Object.keys(realLog)) console[k] = (...a) => printed.push(a.join(" "));
+		let quiet;
+		try { quiet = await run(); } finally { Object.assign(console, realLog); }
+		const leaked = JSON.stringify(quiet.value);
+		ok(quiet.value && !/@|example-broker|Example Broker|Order|tracking|Re:|\.pdf/.test(leaked), "§8 To never leaves: no address, subject or file name in the answer");
+		eq(Object.keys(quiet.value), ["verdict", "mailboxes"], "§8 To never leaves: the answer is the verdict and the mailboxes");
+		eq(Object.keys(quiet.value.mailboxes.sent), Object.keys(EMPTY_BOX), "§8 To never leaves: a mailbox's answer is counts and a date");
+		eq(printed, [], "§8 To never leaves: nothing on the console");
+
+		// The app's own mail, whose body or PDF names the load, doesn't count.
+		clearBoxes();
+		SENT.push(mail({ subject: `Weekly Invoices ${EM} ACTION NEEDED ${EM} ${WEEK}`, to: OWN, text: `Undated loads: ${LOAD}` }));
+		SENT.push(mail({ subject: "New Invoice: INV-MD-2026W43 - Made Up Driver", to: OWN, names: ["INV-MD-2026W43.pdf"], text: `Day grid: ${LOAD}` }));
+		SENT.push(mail({ subject: `${WARN} 2 completed loads no weekly invoice will bill`, to: OWN, text: `Load ${LOAD}` }));
+		SENT.push(mail({ subject: `Load ${LOAD}: a re-issued rate con was held`, to: "owner@elsewhere.test" }));
+		const own = await run();
+		eq([own.value.verdict, own.value.mailboxes.sent], [CLEAN, { ...EMPTY_BOX, hits: 4, ignored: 4, ignoredNamed: 2 }], "§8 an unbilled load named only by the app's own mail reads clean; ignoredNamed counts the two naming a load or carrying an invoice-named file");
+
+		// A real invoice through the whole session: never clean.
+		clearBoxes();
+		DRAFTS.push(mail({ subject: ENGINE_SUBJECT, names: [ENGINE_FILE] }));
+		const blankTo = await run();
+		eq([blankTo.value.verdict, blankTo.value.mailboxes.drafts.mention], [MENTION, 1], "§8 a draft with a blank To and an invoice file: a mention, never clean");
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: COLLEAGUE, bcc: BROKER, names: [ENGINE_FILE] }));
+		const onBcc = await run();
+		eq([onBcc.value.verdict, onBcc.value.mailboxes.sent.invoice], [INVOICE, 1], "§8 the broker on Bcc reaches the classifier: an invoice");
+		clearBoxes();
+		SENT.push(mail({ subject: `Load ${LOAD}: a re-issued rate con changed fields`, to: "owner@elsewhere.test" }));
+		const alertOutside = await run();
+		eq(alertOutside.value.verdict, CLEAN, "§8 the re-issue alert to an outside address: clean, so Try again isn't refused on a re-issued load");
+
+		// A blank subject is a hit, not a line to skip.
+		clearBoxes();
+		SENT.push(mail({ subject: "", to: BROKER, text: LOAD }));
+		const blankSubject = await run();
+		eq([blankSubject.value.verdict, blankSubject.value.mailboxes.sent.mention], [MENTION, 1], "§8 a hit with a blank subject is a mention, not skipped");
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: "\r\n", text: LOAD }));
+		const blankHeaders = await run();
+		eq(blankHeaders.value.verdict, MENTION, "§8 a hit with no headers at all is a mention");
+		for (const [label, item] of [["NIL", "NIL"], ["an empty string", '""']]) {
+			fake.script.FETCH = (t) => [`* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML" NIL NIL NIL "7BIT" 1 1) BODY[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] ${item})`, `${t} OK Success`];
+			const r = await run();
+			noScript();
+			eq(r.value && r.value.verdict, MENTION, `§8 a header item answered as ${label} is a mention`);
+		}
+
+		// Every search term, in every mailbox.
+		clearBoxes();
+		const terms = await run({ loadNumber: `#${LOAD}`, invoiceNumbers: [INV, null], orderNumbers: [ORDER, LOAD] });
+		eq(terms.s.searches, [q(LOAD), q(INV), q(ORDER), q(LOAD), q(INV), q(ORDER)], "§8 the load number, each row's invoice and order number, in each mailbox");
+		SENT.push(mail({ subject: `Example Transport Order #${ORDER}`, to: BROKER, text: "no load number here" }));
+		const byOrder = await run({ orderNumbers: [ORDER] });
+		eq(byOrder.value.verdict, INVOICE, "§8 a Bison invoice with only the order number is found and reads as an invoice");
+
+		// A term failing the shape is never sent, and nothing connects.
+		const dialsBefore = dials.length;
+		const sessionsBefore = fake.sessions.length;
+		for (const [label, over] of [
+			["a load number with a quote", { loadNumber: `${LOAD}" OR "x` }],
+			["a load number with a space", { loadNumber: "9000 0019" }],
+			["a load number with a line break", { loadNumber: `${LOAD}\r\na9 STORE 1 +FLAGS (\\Seen)` }],
+			["an operator as the load number", { loadNumber: "in:anywhere" }],
+			["no load number", { loadNumber: "" }],
+			["a bad invoice number on a row", { invoiceNumbers: ['1" OR "x'] }],
+			["a bad order number on a row", { orderNumbers: ["70 001"] }],
+		]) {
+			const refused = await run(over);
+			eq(refused.error && [refused.error.stage, refused.value], ["terms", undefined], `§8 refused before any connection: ${label}`);
+		}
+		eq([dials.length, fake.sessions.length], [dialsBefore, sessionsBefore], "§8 ...no connection opened, so no such term is ever sent");
+		for (const [label, over] of [["no password", { pass: "" }], ["no user", { user: "" }], ["a user with no domain", { user: "info" }], ["a line break in the password", { pass: "x\r\ny" }]]) {
+			const refused = await run(over);
+			eq(refused.error && refused.error.stage, "credentials", `§8 refused before any connection: ${label}`);
+		}
+		eq(dials.length, dialsBefore, "§8 ...no connection opened");
+
+		// Any refusal, at any stage, ends the run. Never "nothing found", never server text.
+		const SERVER_TEXT = "made-up-server-text-q7";
+		const noLeak = (r) => r.error && !JSON.stringify([r.error.message, Object.values(r.error)]).includes(SERVER_TEXT) && !String(r.error.stack).includes(SERVER_TEXT);
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER }));
+		const STAGES = [["LOGIN", "login"], ["CAPABILITY", "capability"], ["EXAMINE", "examine"], ["SEARCH", "search"], ["FETCH", "fetch"]];
+		const ANSWERS = [
+			["NO", (t) => [`${t} NO [CANNOT] ${SERVER_TEXT}`], { answered: true }],
+			["BAD", (t) => [`${t} BAD ${SERVER_TEXT}`], { answered: true }],
+			["an untagged NO", (t) => [`* NO ${SERVER_TEXT}`, `${t} OK Success`], { answered: true }],
+			["an untagged BAD", (t) => [`* BAD ${SERVER_TEXT}`, `${t} OK Success`], { answered: true }],
+			["a BYE before the tagged answer", (t) => [`* BYE ${SERVER_TEXT}`, `${t} OK Success`], { answered: true }],
+			["a throttle in the tagged OK", (t) => [`${t} OK Success [THROTTLED]`], { answered: true, throttled: true }],
+			["a throttle alert", (t) => [`* OK [ALERT] ${SERVER_TEXT}`, `${t} OK Success`], { answered: true, throttled: true }],
+			["a BYE and a dropped connection", () => [`* BYE ${SERVER_TEXT}`, MAILBOX_DROP], {}],
+			["a dropped connection", () => [MAILBOX_DROP], {}],
+		];
+		for (const [verb, stage] of STAGES) {
+			for (const [label, answer, want] of ANSWERS) {
+				fake.script[verb] = (t) => answer(t);
+				const r = await run();
+				noScript();
+				eq(r.error ? [r.error.stage, Boolean(r.error.answered), Boolean(r.error.throttled)] : ["resolved", r.value && r.value.verdict],
+					[stage, Boolean(want.answered), Boolean(want.throttled)], `§8 ${verb}: ${label}: rejects at ${stage}`);
+				ok(noLeak(r), `§8 ${verb}: ${label}: no server text in the error`);
+			}
+		}
+		fake.opts.greeting = `* BYE ${SERVER_TEXT}`;
+		const byeHello = await run();
+		eq(byeHello.error && [byeHello.error.stage, byeHello.error.answered], ["greeting", true], "§8 a BYE for a greeting rejects at greeting");
+		ok(noLeak(byeHello), "§8 ...with no server text");
+		fake.opts.greeting = "";
+		const silent = await run({ timeoutMs: 150 });
+		eq(silent.error && silent.error.stage, "greeting", "§8 no greeting: a timeout, at greeting");
+		fake.opts.greeting = "* OK Gimap ready";
+		fake.script.SEARCH = () => [];
+		const hang = await run({ timeoutMs: 150 });
+		noScript();
+		eq(hang.error && hang.error.stage, "search", "§8 no answer to a SEARCH: a timeout, at search, never nothing found");
+		fake.script.SEARCH = () => [MAILBOX_DROP];
+		const droppedAt = Date.now();
+		const dropped = await run({ timeoutMs: 20000 });
+		noScript();
+		eq(dropped.error && dropped.error.stage, "search", "§8 a dropped connection rejects at its stage");
+		ok(Date.now() - droppedAt < 5000, "§8 ...at once, not at the time limit");
+		// A refusal in Sent Mail after a clean Drafts is still a failure.
+		clearBoxes();
+		fake.script.EXAMINE = (t, args) => (args.includes("Sent Mail") ? [`${t} NO [NONEXISTENT] ${SERVER_TEXT}`] : null);
+		const noSent = await run();
+		noScript();
+		eq(noSent.error && [noSent.error.stage, noSent.value], ["examine", undefined], "§8 Drafts clean but Sent Mail won't open: rejects, never clean");
+		fake.script.SEARCH = (t) => [`${t} OK Success [THROTTLED]`];
+		const throttled = await run();
+		noScript();
+		eq(throttled.s.commands.filter((c) => c === "SEARCH"), ["SEARCH"], "§8 a throttle ends the run: no further command but the LOGOUT");
+		eq(throttled.s.commands[throttled.s.commands.length - 1], "LOGOUT", "§8 ...the session still ends with a LOGOUT");
+
+		// X-GM-EXT-1.
+		for (const [label, capability] of [["not advertised", "IMAP4rev1 IDLE UIDPLUS"], ["only a longer name", "IMAP4rev1 X-GM-EXT-10 X-GM-EXT-1X"]]) {
+			fake.opts.capability = capability;
+			const r = await run();
+			eq(r.error && [r.error.stage, r.s.commands], ["capability", ["LOGIN", "CAPABILITY", "LOGOUT"]], `§8 X-GM-EXT-1 ${label}: rejects at capability, and no search runs`);
+		}
+		fake.opts.capability = "IMAP4rev1 IDLE UIDPLUS X-GM-EXT-1 CHILDREN";
+		fake.script.CAPABILITY = (t) => [`${t} OK Success`];
+		const noCaps = await run();
+		noScript();
+		eq(noCaps.error && noCaps.error.stage, "capability", "§8 no CAPABILITY line at all: rejects at capability");
+
+		// Unreadable answers.
+		const UNREADABLE = [
+			["SEARCH", "search", "no * SEARCH line in an OK answer", (t) => [`${t} OK SEARCH completed`]],
+			["SEARCH", "search", "a garbled * SEARCH line", (t) => ["* SEARCH 1 two", `${t} OK SEARCH completed`]],
+			["SEARCH", "search", "a zero in a * SEARCH line", (t) => ["* SEARCH 0", `${t} OK SEARCH completed`]],
+			["SEARCH", "search", "an EXPUNGE, which moves the numbers", (t) => ["* 1 EXPUNGE", "* SEARCH", `${t} OK SEARCH completed`]],
+			["FETCH", "fetch", "an OK answer with no message", (t) => [`${t} OK Success`]],
+			["FETCH", "fetch", "an answer with no header item", (t) => ['* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML" NIL NIL NIL "7BIT" 1 1))', `${t} OK Success`]],
+			["FETCH", "fetch", "an answer with no BODYSTRUCTURE", (t) => [Buffer.from('* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n\r\n\r\n)\r\n', "latin1"), `${t} OK Success`]],
+			["FETCH", "fetch", "an answer for another message", (t) => [Buffer.from('* 9 FETCH (BODYSTRUCTURE ("TEXT" "HTML") BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n\r\n\r\n)\r\n', "latin1"), `${t} OK Success`]],
+		];
+		clearBoxes();
+		DRAFTS.push(mail({ subject: `Load ${LOAD} notes`, to: COLLEAGUE }));
+		for (const [verb, stage, label, answer] of UNREADABLE) {
+			fake.script[verb] = answer;
+			const r = await run();
+			noScript();
+			eq(r.error ? r.error.stage : `resolved ${r.value && r.value.verdict}`, stage, `§8 unreadable: ${label}: rejects at ${stage}, never nothing found`);
+		}
+		DRAFTS.push(mail({ subject: `Load ${LOAD} more notes`, to: COLLEAGUE }));
+		fake.script.FETCH = (t) => [Buffer.from('* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML") BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n\r\n\r\n)\r\n', "latin1"), `${t} OK Success`];
+		const oneMissing = await run();
+		noScript();
+		eq(oneMissing.error && oneMissing.error.stage, "fetch", "§8 unreadable: one of two hits missing from the answer: rejects at fetch");
+		const fits = await run({ maxReaderBytes: 4096 });
+		ok(fits.value, "§8 (control) a small answer fits the reader's smallest limit");
+		SENT.length = 0;
+		for (let i = 0; i < 20; i++) SENT.push(mail({ subject: `Load ${LOAD} ${"x".repeat(400)}`, to: COLLEAGUE }));
+		const overflow = await run({ maxReaderBytes: 4096 });
+		eq(overflow.error && overflow.error.stage, "fetch", "§8 an answer past the reader's limit rejects at fetch");
+
+		// The 20-hit cap: the newest 20 are read, the rest are doubt.
+		clearBoxes();
+		for (let i = 1; i <= 25; i++) SENT.push(mail({ subject: `Load ${LOAD} note ${i}`, to: COLLEAGUE }));
+		const capped = await run();
+		eq(capped.s.fetches, [`${Array.from({ length: 20 }, (_, i) => i + 6).join(",")} (BODY.PEEK[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] BODYSTRUCTURE)`], "§8 25 hits: the newest 20 fetched, in one command");
+		eq([capped.value.verdict, capped.value.mailboxes.sent], [MENTION, { ...EMPTY_BOX, hits: 25, ignored: 20, ignoredNamed: 20, overCap: 5 }], "§8 ...every one read Ignored, but 5 went unread: a mention, never clean");
+		clearBoxes();
+		for (let i = 1; i <= 20; i++) SENT.push(mail({ subject: `Load ${LOAD} note ${i}`, to: COLLEAGUE }));
+		const atCap = await run();
+		eq([atCap.value.verdict, atCap.value.mailboxes.sent.overCap], [CLEAN, 0], "§8 exactly 20 hits, all Ignored: clean");
+		clearBoxes();
+		for (let i = 1; i <= 21; i++) SENT.push(mail({ subject: `Load ${LOAD} note ${i}`, to: COLLEAGUE }));
+		SENT[20] = mail({ subject: ENGINE_SUBJECT, to: BROKER });
+		const capInvoice = await run();
+		eq(capInvoice.value.verdict, INVOICE, "§8 over the cap with an invoice among the newest: an invoice");
+
+		// Trash, only when asked, by in:trash.
+		clearBoxes();
+		TRASH.push(mail({ subject: ENGINE_SUBJECT, to: BROKER }));
+		const noTrash = await run();
+		eq([noTrash.value.verdict, noTrash.s.examines], [CLEAN, ["[Gmail]/Drafts", "[Gmail]/Sent Mail"]], "§8 Trash isn't searched unless asked");
+		const withTrash = await run({ includeTrash: true });
+		eq([withTrash.value.verdict, withTrash.s.examines, withTrash.s.searches[2]], [INVOICE, ["[Gmail]/Drafts", "[Gmail]/Sent Mail", "[Gmail]/Trash"], `X-GM-RAW "in:trash \\"${LOAD}\\""`],
+			"§8 includeTrash: Trash opened read-only and searched with in:trash, which the web search needs");
+		eq([withTrash.value.mailboxes.trash.invoice, Object.keys(withTrash.value.mailboxes)], [1, ["drafts", "sent", "trash"]], "§8 ...and answered for by name");
+
+		// The send's last check: a message the web search hasn't indexed yet.
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, lagging: true }));
+		const lagging = await run();
+		eq([lagging.value.verdict, lagging.s.searches], [CLEAN, [q(LOAD), q(LOAD)]], "§8 without lastCheck: the web search alone, which misses a just-sent message");
+		const lastCheck = await run({ lastCheck: true, orderNumbers: [ORDER] });
+		eq(lastCheck.s.searches, [q(LOAD), `SUBJECT "${LOAD}"`, q(ORDER), `SUBJECT "${ORDER}"`, q(LOAD), `SUBJECT "${LOAD}"`, q(ORDER), `SUBJECT "${ORDER}"`], "§8 lastCheck: a plain SEARCH SUBJECT beside each web search");
+		eq([lastCheck.value.verdict, lastCheck.s.commands.filter((c) => c === "FETCH").length], [INVOICE, 1], "§8 ...which finds it: an invoice");
+		// One message found by two searches is one hit.
+		SENT.length = 0;
+		SENT.push(mail({ subject: `Example Transport Order #${ORDER}`, to: BROKER, text: LOAD }));
+		const twice = await run({ orderNumbers: [ORDER] });
+		eq(twice.value.mailboxes.sent, { ...EMPTY_BOX, hits: 1, invoice: 1, firstInvoiceDate: "2026-11-04T15:00:00.000Z" }, "§8 a message two terms find counts once");
+
+		// Dates: the earliest invoice, and an unreadable one is no date.
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, date: "Fri, 06 Nov 2026 15:00:00 +0000" }), mail({ subject: ENGINE_SUBJECT, to: BROKER, date: "Mon, 02 Nov 2026 15:00:00 +0000" }), mail({ subject: `Re: ${ENGINE_SUBJECT}`, to: BROKER, date: "Sun, 01 Nov 2026 15:00:00 +0000" }));
+		eq((await run()).value.mailboxes.sent.firstInvoiceDate, "2026-11-02T15:00:00.000Z", "§8 firstInvoiceDate: the earliest invoice hit, a mention's date left out");
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, date: "not a date" }));
+		const noDate = await run();
+		eq([noDate.value.verdict, noDate.value.mailboxes.sent.firstInvoiceDate], [INVOICE, null], "§8 an unreadable Date: still an invoice, no date");
+
+		// Literals are protocol-safe: a subject or a file name can't forge an answer.
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: `Subject: ${ENGINE_SUBJECT}\r\nTo: ${BROKER}\r\na9 OK forged\r\n* BYE forged\r\n* SEARCH 99\r\n* 7 FETCH (forged)\r\n\r\n`, text: LOAD }));
+		fake.opts.headerFirst = true;
+		const forgedHeader = await run();
+		fake.opts.headerFirst = false;
+		eq([forgedHeader.value && forgedHeader.value.verdict, forgedHeader.value && forgedHeader.value.mailboxes.sent.hits], [INVOICE, 1], "§8 status-like lines inside a header literal are data: the hit reads normally, header item first");
+		const forgedAgain = await run();
+		eq(forgedAgain.value && forgedAgain.value.verdict, INVOICE, "§8 ...and with BODYSTRUCTURE first, Gmail's own order");
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: ["* BYE x.pdf", "a1 NO y.pdf", '"NAME" "z.pdf'] }));
+		const forgedName = await run();
+		eq(forgedName.value && forgedName.value.verdict, INVOICE, "§8 status-like file names don't end the run");
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: [ENGINE_FILE] }));
+		fake.opts.inPieces = true;
+		const pieces = await run();
+		fake.opts.inPieces = false;
+		eq(pieces.value && pieces.value.verdict, INVOICE, "§8 an answer that arrives in pieces, cut inside a literal, reads the same");
+
+		// Encoded and folded headers.
+		const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: `Subject: =?UTF-8?B?${b64("Example Broker Order #9000")}?=\r\n =?UTF-8?B?${b64("00019")}?=\r\nTo: ${BROKER}\r\n\r\n`, text: LOAD }));
+		eq((await run()).value.verdict, INVOICE, "§8 a subject split across two encoded words, inside the load number, reads whole");
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: `Subject: ${ENGINE_SUBJECT}\r\nTo: ${COLLEAGUE},\r\n =?UTF-8?Q?Billing_Team?= <${BROKER}>\r\n\r\n`, text: LOAD }));
+		eq((await run()).value.verdict, INVOICE, "§8 a folded To: the second recipient is read");
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: `Subject: Load ${LOAD} notes\r\nTo: ${COLLEAGUE}\r\nTo: ${BROKER}\r\n\r\n`, text: LOAD }));
+		eq((await run()).value.verdict, MENTION, "§8 a To given twice: both are read");
+		clearBoxes();
+		SENT.push(mail({ rawHeaders: `Subject: Load ${LOAD} notes\r\nTo: ${COLLEAGUE}\r\nX-Pad: ${"x".repeat(70000)}\r\n\r\n`, text: LOAD }));
+		eq((await run()).value.verdict, MENTION, "§8 a header block too long to read: a mention, never Ignored");
+
+		// Attachment names in the forms a server can send them.
+		const NAME_FORMS = [
+			["RFC 2231, in pieces", `("APPLICATION" "PDF" NIL NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME*0*" "utf-8''Example%20Broker%20Inv" "FILENAME*1*" "oice%20Order%20%23${LOAD}.pdf")) NIL)`],
+			["RFC 2231, one piece", `("APPLICATION" "PDF" NIL NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME*" "utf-8''Invoice%20${LOAD}.pdf")) NIL)`],
+			["an encoded word", `("APPLICATION" "PDF" ("NAME" "=?UTF-8?B?${b64(`Invoice ${LOAD}.pdf`)}?=") NIL NIL "BASE64" 10 NIL NIL NIL)`],
+			["a literal", `("APPLICATION" "PDF" ("NAME" {${`Invoice ${LOAD}.pdf`.length}}\r\nInvoice ${LOAD}.pdf) NIL NIL "BASE64" 10 NIL NIL NIL)`],
+			["a literal in RFC 2231 form", `("APPLICATION" "PDF" ("NAME*" {${`utf-8''Invoice%20${LOAD}.pdf`.length}}\r\nutf-8''Invoice%20${LOAD}.pdf) NIL NIL "BASE64" 10 NIL NIL NIL)`],
+		];
+		for (const [label, structure] of NAME_FORMS) {
+			clearBoxes();
+			SENT.push(mail({ subject: "Paperwork", to: BROKER, text: LOAD, structure }));
+			const asInvoice = await run();
+			eq(asInvoice.value && asInvoice.value.verdict, INVOICE, `§8 an attachment name as ${label}: says invoice and names the load`);
+			clearBoxes();
+			SENT.push(mail({ subject: "Paperwork", to: COLLEAGUE, text: LOAD, structure }));
+			const internal = await run();
+			eq(internal.value && internal.value.verdict, MENTION, `§8 ...and on internal mail it's an invoice look, so not Ignored`);
+		}
+		clearBoxes();
+		SENT.push(mail({ subject: "Paperwork", to: BROKER, text: LOAD, structure: `(("APPLICATION" "PDF" NIL NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME*0*" "utf-8''Inv" "FILENAME*1*" "oice%20${LOAD}.pdf")) NIL)("APPLICATION" "PDF" NIL NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME*0*" "utf-8''Rate%20con" "FILENAME*1*" ".pdf")) NIL) "MIXED")` }));
+		eq((await run()).value.verdict, INVOICE, "§8 two RFC 2231 names stay two names: the later one doesn't replace the invoice");
+
+		// Nothing else can be sent: the source's commands are the listed ones.
+		const SRC = fs.readFileSync(LIB_FILE, "utf8");
+		const verbs = [...new Set([...SRC.matchAll(/\bsend\([`"]([A-Z][A-Z-]+)/g)].map((m) => m[1]))].sort();
+		eq(verbs, ["CAPABILITY", "EXAMINE", "FETCH", "LOGIN", "SEARCH"], "§8 the source sends only LOGIN, CAPABILITY, EXAMINE, SEARCH and FETCH (and its LOGOUT)");
+		eq([...SRC.matchAll(/\brequire\("([^"]+)"\)/g)].map((m) => m[1]).sort(), ["./mime-read", "./ratecon-reconcile", "tls"], "§8 it requires only tls, the IMAP reader and the MIME reader: no mail sender, database or file");
+		ok(!/\bprocess\b|\bconsole\b|\bdb\b|\bfs\b|sendMail|nodemailer/.test(SRC), "§8 it reads no setting, logs nothing, and touches no database, file or mail sender");
+		ok(/BODY\.PEEK\[/.test(SRC) && !/[^.]BODY\[HEADER\.FIELDS \(/.test(SRC), "§8 its FETCH is BODY.PEEK, never BODY[");
+	} finally {
+		tls.connect = realConnect;
+		fake.server.close();
+	}
+}
+
 // -------------------------------------------------------------------- report
 if (process.argv.includes(CHILD_FLAG)) {
 	fakeGmailChild().then(
@@ -620,6 +1218,7 @@ if (process.argv.includes(CHILD_FLAG)) {
 		(e) => { console.error(e && e.stack); process.exit(1); },
 	);
 } else main()
+	.then(() => mailboxSearchSection())
 	.catch((e) => failures.push(`the run threw: ${e && e.stack}`))
 	.then(() => {
 		console.log(`\n${"=".repeat(64)}`);
