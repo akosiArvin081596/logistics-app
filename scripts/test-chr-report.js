@@ -12,6 +12,9 @@
 //   §4  the inputs are byte-for-byte unchanged afterwards
 //   §5  usage: a missing or bad argument, or an input that is not a copy, exits 2
 //       before reading anything else
+//   §6  --pilot (PR 3-shell): what went Live, its results, how many loads went
+//       Live, payloads off the allowlist, event-to-send minutes, held rows;
+//       counts and yes/no only, never a load ID; the database unchanged
 //
 // Made-up data only. The copy is written to a fresh mkdtemp folder; no network.
 //   node scripts/test-chr-report.js      # exits 1 on any failure
@@ -218,6 +221,53 @@ for (const [label, args, re] of [
 	ok(re.test(`${r.stdout}${r.stderr}`), `§5 ${label}: says what is wrong`);
 }
 eq(fs.readdirSync(TMP).sort(), ["app.db", "sheets.json"], "§5 no file made by a refused run");
+
+// ------------------------------------------------------------------ §6
+section("§6  --pilot: the one-load test's report (PR 3-shell)");
+{
+	const PILOT_DB = path.join(TMP, "pilot.db");
+	const pdb = new Database(PILOT_DB);
+	pdb.exec(`CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+		CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');`);
+	const S = require(path.join(ROOT, "lib", "chr-store.js"));
+	S.ensureSchema(pdb);
+	S.writeSettings(pdb, { ...S.DEFAULT_SETTINGS, milestones: "pilot", pilot: { loadKey: "123456789", setAt: "2026-11-02T14:00:00.000Z", setBy: "made_up_admin", until: "" } }, { by: "made_up_admin", nowIso: "2026-11-02T14:00:00.000Z" });
+	S.writeState(pdb, { ...S.readState(pdb), sendOnAt: "2026-11-02T14:30:00.000Z" }, "2026-11-02T14:30:00.000Z");
+	const good = JSON.stringify({ loadNumber: "123456789", event: "departed_pickup", stop: { kind: "pickup", index: 1 }, eventAt: "2026-11-02T15:00:00Z", place: { city: "Ames", state: "IA" }, truck: "T-101" });
+	const bad = JSON.stringify({ loadNumber: "123456789", event: "delivered", stop: { kind: "delivery", index: "final" }, eventAt: "2026-11-02T19:00:00Z", driver: "Canary Testdriver" });
+	const ins = pdb.prepare(`INSERT INTO chr_events (load_id, kind, event, event_at, idem_key, payload_json, mode, status, result_code, attempts, sent_at, created_at, updated_at, hold_reason)
+		VALUES (?, 'milestone', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+	const at = "2026-11-02T15:00:00.000Z";
+	ins.run("123456789", "departed_pickup", at, "k1", good, "live", "sent", "SENT", 1, "2026-11-02T15:06:00.000Z", at, at, "");
+	ins.run("123456789", "arrived_delivery", "2026-11-02T18:00:00.000Z", "k2", good, "live", "sent", "SENT", 2, "2026-11-02T18:20:00.000Z", at, at, "");
+	ins.run("123456789", "delivered", "2026-11-02T19:00:00.000Z", "k3", bad, "live", "failed", "REJECTED", 1, "", at, at, "");
+	ins.run("223456789", "departed_pickup", at, "k4", good, "dry_run", "dry_run", "", 0, at, at, at, "");
+	ins.run("323456789", "departed_pickup", at, "k5", good, "live", "pending", "", 0, "", at, at, "");
+	ins.run("423456789", "arrived_delivery", at, "k6", "", "dry_run", "held", "", 0, "", at, at, "tap_unverified");
+	pdb.close();
+	const before6 = hash(PILOT_DB);
+	const r = run(["--pilot", "--db", PILOT_DB]);
+	eq(r.status, 0, "§6 --pilot --db: exit 0");
+	const out = r.stdout;
+	for (const [label, re] of [
+		["a pilot set, the mode", /A pilot load is set now: yes; milestones mode now: pilot/],
+		["sending went on, no pause", /Sending went on: yes; paused now: no/],
+		["live rows by status and result", /Live rows: 4 \(failed 1, pending 1, sent 2\); result codes: REJECTED 1, SENT 2; attempts: 4/],
+		["how many loads went Live", /Loads with live rows: 2 \(a one-load pilot: 1\)/],
+		["live rows on another load (must be 0)", /Live rows on a load other than the pilot load: 1/],
+		["payloads off the allowlist", /Payloads with a key off the allowlist or failing its pattern: 1/],
+		["event to send", /Minutes from event to send: median 6\.0, longest 20\.0 \(2 sent\)/],
+		["held rows", /Held rows, by reason: tap_unverified 1/],
+	]) ok(re.test(out), `§6 the report says ${label}`, out);
+	eq(["123456789", "223456789", "323456789", "423456789", "Canary", "T-101", "Ames"].filter((v) => out.includes(v)), [], "§6 ...and never a load ID, a name, a truck or a place");
+	eq(hash(PILOT_DB), before6, "§6 the database is byte-for-byte unchanged");
+	const check = typeof R.payloadFails === "function" ? R.payloadFails : () => null;
+	eq([check(good), check(bad), check("{bad"), check(JSON.stringify({ loadNumber: "12345" }))], [false, true, true, true], "§6 the payload check: the allowlisted keys, each passing its pattern");
+	for (const [label, args] of [["--pilot with --sheets", ["--pilot", "--db", PILOT_DB, "--sheets", SHEETS_FILE]], ["--pilot without --db", ["--pilot"]]]) {
+		const x = run(args);
+		eq([x.status, /--pilot takes --db/.test(x.stderr)], [2, true], `§6 ${label}: exit 2, says what is wrong`);
+	}
+}
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {

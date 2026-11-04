@@ -319,6 +319,8 @@ const driverDeps = (over = {}) => ({
 	// So are the training videos (scripts/test-driver-training-videos.js).
 	DRIVER_TRAINING_VIDEOS_ENABLED: false,
 	driverInstructions: { annotateDriverLoads() {} },
+	// The stepper's GPS phases are off here (scripts/test-driver-page-role-gate.js §9).
+	driverGpsPhases: { annotate: (rows) => rows },
 	LOAD_PANEL_DOCUMENT_FILTER,
 	documentFiledUnder,
 	console: quiet,

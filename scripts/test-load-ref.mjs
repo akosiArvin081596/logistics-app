@@ -121,6 +121,18 @@ const withheldDocsBlock = (src) => {
   return src.slice(start, end < 0 ? undefined : end)
 }
 const linksIn = (block) => (block == null ? null : ['<a', 'href', 'drive_url', 'file_name', 'confirmDeleteDoc'].filter((s) => block.includes(s)))
+// Every opening tag of a panel, and whether each renders for a Super Admin only.
+const panelTags = (src, tag) => [...src.matchAll(new RegExp(`<${tag}\\b(?:[^<>"]|"[^"]*")*?/?>`, 'g'))].map((m) => m[0])
+const superAdminOnly = (src, tag) => panelTags(src, tag).map((t) => /\sv-if="auth\.isSuperAdmin"/.test(t))
+// The C.H. Robinson badge is handed the served Load ID text too: it renders for a
+// Super Admin only (who is never served a key), in the tab and in itself, and asks
+// for nothing before its own role check.
+const BADGE = read('components/integrations/ChrSendBadge.vue')
+const badgeGuards = [
+  /const visible = computed\(\(\) => showChrBadge\(auth\.user\?\.role\)\)/.test(BADGE),
+  /<router-link v-if="badge"/.test(BADGE) && /const badge = computed\(\(\) => \(visible\.value \? badgeFor\(summary\.value\) : null\)\)/.test(BADGE),
+  BADGE.indexOf('if (!visible.value || !id) return') > 0 && BADGE.indexOf('if (!visible.value || !id) return') < BADGE.indexOf('featureStatus()\n  if'),
+]
 
 section('§2 the template helpers', () => {
   check('§2 servedIdPanels(): finds a panel after an attribute whose value holds a ">", and none handed the reference',
@@ -142,10 +154,13 @@ section('§2 Active Loads', () => {
     /const lid = loadRef\(job, lc\)\.trim\(\)/.test(src), true)
   check('§2 Active Loads: the driver instructions panel is handed the load\'s reference',
     /<DriverInstructionsSection :load-id="loadRefValue"/.test(src), true)
-  // The rate-con PDF section is the one exception: it renders for a Super Admin
-  // only, who is never served a key (loadRef() is the served ID for him).
-  check('§2 Active Loads: no per-load panel but the Super Admin-only rate-con PDF is handed the served Load ID text',
-    servedIdPanels(src), ['RateConPdfSection'])
+  // The rate-con PDF section and the C.H. Robinson badge are the exceptions: they
+  // render for a Super Admin only, who is never served a key (loadRef() is the
+  // served ID for him).
+  check('§2 Active Loads: no per-load panel but the Super Admin-only CHR badge and rate-con PDF is handed the served Load ID text',
+    servedIdPanels(src), ['ChrSendBadge', 'RateConPdfSection'])
+  check('§2 Active Loads: each of those renders for a Super Admin only (v-if="auth.isSuperAdmin" on every tag)',
+    [superAdminOnly(src, 'ChrSendBadge'), superAdminOnly(src, 'RateConPdfSection')], [[true], [true]])
   check('§2 Active Loads: the override, the status timeline, the haul, the POD upload and the documents refresh go by the load\'s reference',
     [/status-override`/.test(src) && /encodeURIComponent\(loadRefValue\.value\)\}\/status-override/.test(src),
       /<StatusTimeline v-if="loadRefValue" :load-id="loadRefValue"/.test(src), /<LoadHaulSection :load-id="loadRefValue"/.test(src),
@@ -199,10 +214,14 @@ section('§2 Completed Loads', () => {
       /<DocumentUpload\s+:load-id="loadRefValue"\s+:load-label="loadIdShownValue"/.test(src),
       /api\.get\(`\/api\/documents\/\$\{encodeURIComponent\(loadRefValue\.value\)\}`\)/.test(src)],
     [true, true, true, true])
-  // The Super Admin-only rate-con PDF section and invoice draft preview stay on the
-  // served ID: a Super Admin is never served a key.
+  // The Super Admin-only CHR badge, rate-con PDF section and invoice draft preview
+  // stay on the served ID: a Super Admin is never served a key.
   check('§2 Completed Loads: only the Super Admin-only panels are handed the served Load ID text',
-    servedIdPanels(src), ['RateConPdfSection', 'InvoiceDraftPreviewModal'])
+    servedIdPanels(src), ['ChrSendBadge', 'RateConPdfSection', 'InvoiceDraftPreviewModal'])
+  check('§2 Completed Loads: the CHR badge and the rate-con PDF render for a Super Admin only (v-if="auth.isSuperAdmin" on every tag)',
+    [superAdminOnly(src, 'ChrSendBadge'), superAdminOnly(src, 'RateConPdfSection')], [[true], [true]])
+  check('§2 the CHR badge itself: shown only for the Super Admin role, and no request before that check',
+    badgeGuards, [true, true, true])
   check('§2 Completed Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
     [/v-else-if="docsWithheldNote"/.test(src), (src.match(/r\.documentsWithheld \?/g) || []).length, linksIn(withheldDocsBlock(src))], [true, 2, []])
   check('§2 Completed Loads: the title and the list show the ID as served ("[contact withheld]" when served blank)',

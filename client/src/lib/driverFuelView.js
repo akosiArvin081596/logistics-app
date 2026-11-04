@@ -161,13 +161,21 @@ function milesTone(miles) {
   return miles < 50 ? 'bad' : miles < 150 ? 'warn' : 'ok';
 }
 
+// A row the block can't count is amber, unless the miles left are already in the
+// chip's red band: then the section top and the badge are red like the chip.
+function uncountedTone(b) {
+  const miles = toNum(b && b.milesLeft);
+  return miles !== null && milesTone(miles) === 'bad' ? 'bad' : 'warn';
+}
+
 function liveLegs(b) {
   return b && Array.isArray(b.legs) && b.loadDone !== true ? b.legs.filter(Boolean) : [];
 }
 
 /**
  * The colour of the section's top, from the block alone: 'bad' (refuel now, or a
- * row says add or refill), 'warn' (a row it can't count), 'ok', or 'unknown'.
+ * row says add or refill), 'warn' (a row it can't count; 'bad' under 50 mi left),
+ * 'ok', or 'unknown'.
  */
 export function driverFuelTone(b) {
   const top = fuelTop(b);
@@ -175,7 +183,7 @@ export function driverFuelTone(b) {
   if (top.kind !== 'miles') return 'unknown';
   const legs = liveLegs(b);
   if (legs.some((l) => l.status === 'add' || l.status === 'refill_on_way')) return 'bad';
-  if (legs.some((l) => l.status === 'check_gauge')) return 'warn';
+  if (legs.some((l) => l.status === 'check_gauge')) return uncountedTone(b);
   return legs.length ? 'ok' : milesTone(toNum(b.milesLeft));
 }
 
@@ -224,7 +232,7 @@ export function driverFuelBadge(plan) {
   if (top.kind === 'now') return { tone: 'bad', text: 'Refuel now' };
   if (finish && finish.status === 'refill_on_way') return { tone: 'bad', text: 'Fuel stop needed' };
   if (WITHHELD.has(b.fuelState) || top.kind === 'unknown') return { tone: 'warn', text: 'Fuel unknown' };
-  if (finish && finish.status === 'check_gauge') return { tone: 'warn', text: 'Check gauge' };
+  if (finish && finish.status === 'check_gauge') return { tone: uncountedTone(b), text: 'Check gauge' };
   // The same figure the section headlines, so the badge and the section agree.
   return { tone: 'plain', text: `${top.headline} mi range` };
 }

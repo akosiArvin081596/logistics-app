@@ -67,6 +67,13 @@
 //   him and a toll notice's plate, number and OCR lines are too. Section 17
 //   grades them on the artifact, --verify on planted survivors, and mutants O1-O3.
 //
+// WHY IT GREW A PASSENGER-AUTHORIZATIONS HALF
+//
+//   A passenger authorization (passenger_authorizations) holds a rider's name, a
+//   minor's guardian, the trip, three drawn signatures and the evidence about the
+//   signers, none of it email- or SSN-shaped. Section 18 grades the scrub on the
+//   artifact (blank stays blank), --verify on planted survivors, and mutants P1-P4.
+//
 // ⚠️ WHAT MAKES THIS TEST NON-VACUOUS, and what would quietly make it vacuous.
 //
 //   • collectLeaks() guards EVERY entry with has_(table, column). A column the
@@ -187,6 +194,28 @@ const FAKE = {
 	contactNameB: "Morgan Contactsample",
 	contactPhoneA: "+15125550161",
 	contactPhoneB: "+15125550162",
+};
+// A passenger authorization (section 18): a minor's, countersigned and then ended.
+// None is email- or SSN-shaped, so only the column lists reach them.
+const PAX = {
+	rider: "Rowan Passengersample",
+	rider2: "Ellis Passengersample",
+	guardian: "Avery Guardiansample",
+	relationship: "Legal guardian (sample)",
+	tripStart: "Quillfield Yard, TX",
+	tripEnd: "Brackenmoor Depot, TX",
+	company: "Morgan Q. Countersample",
+	reason: "Ended after the trip review (made-up)",
+	imgPassenger: "data:image/png;base64,UEFTU0VOR0VSX1NJR19NVVNUX05PVF9TVVJWSVZF",
+	imgDriver: "data:image/png;base64,UEFYX0RSSVZFUl9TSUdfTVVTVF9OT1RfU1VSVklWRQ==",
+	imgCompany: "data:image/png;base64,UEFYX0NPTVBBTllfU0lHX01VU1RfTk9UX1NVUlZJVkU=",
+	consentPassenger: "I, Avery Guardiansample, agree for the rider (made-up)",
+	consentDriver: "Driver agrees to the rider form (made-up consent)",
+	consentCompany: "Company signer agrees to the rider form (made-up)",
+	ipDriver: "203.0.113.91",
+	ipCompany: "203.0.113.92",
+	uaDriver: "PassengerTestPhone/2.0",
+	uaCompany: "PassengerTestDesk/3.0",
 };
 // An owner-operator (section 17). None is email- or SSN-shaped, so only the
 // column lists reach them; the company truck's VIN and plate are kept.
@@ -370,6 +399,10 @@ const MUST_NOT_SURVIVE = [
 	OO.truckVin, OO.truckPlate, OO.appVin, OO.appPlate, OO.ownerName, OO.business, OO.linkReason, OO.chargeLabel,
 	OO.chargeReason, OO.chargeVoid, OO.lineLabel, OO.useNote, OO.useReason, OO.useVoid, OO.exitReason, OO.notice,
 	OO.tollPlate, OO.tollDetails,
+	// Passenger authorizations (section 18).
+	PAX.rider, PAX.rider2, PAX.guardian, PAX.relationship, PAX.tripStart, PAX.tripEnd, PAX.company, PAX.reason,
+	PAX.imgPassenger, PAX.imgDriver, PAX.imgCompany, PAX.consentPassenger, PAX.consentDriver, PAX.consentCompany,
+	PAX.ipDriver, PAX.ipCompany, PAX.uaDriver, PAX.uaCompany,
 ];
 
 // The two evidence columns refresh-env.js deliberately KEEPS. Asserted so that
@@ -460,6 +493,7 @@ function seedDatabase(dbPath) {
 		CREATE TABLE owner_operator_escrow_uses (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, purpose TEXT NOT NULL, cents INTEGER NOT NULL, record_note TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL, voided_at TEXT NOT NULL DEFAULT '', void_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 		CREATE TABLE owner_operator_toll_notices (expense_id INTEGER PRIMARY KEY, agency TEXT NOT NULL, agency_key TEXT NOT NULL, notice_number TEXT NOT NULL DEFAULT '', plate_or_transponder TEXT NOT NULL DEFAULT '', toll_date TEXT NOT NULL, toll_cents INTEGER NOT NULL, created_at TEXT NOT NULL);
 		CREATE TABLE owner_operator_ledger_exits (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, item_kind TEXT NOT NULL, ref TEXT NOT NULL, reason TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TEXT NOT NULL);
+		CREATE TABLE passenger_authorizations (id INTEGER PRIMARY KEY AUTOINCREMENT, reference TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL UNIQUE, driver_user_id INTEGER NOT NULL, driver_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'awaiting_company', form_version TEXT NOT NULL, passenger_name TEXT NOT NULL, passenger_adult INTEGER NOT NULL, guardian_name TEXT NOT NULL DEFAULT '', guardian_relationship TEXT NOT NULL DEFAULT '', minor_attested INTEGER NOT NULL DEFAULT 0, truck_unit TEXT NOT NULL DEFAULT '', trip_start TEXT NOT NULL, trip_end TEXT NOT NULL, valid_from TEXT NOT NULL, expires_on TEXT NOT NULL, passenger_signature_text TEXT NOT NULL, passenger_signature_image TEXT NOT NULL, passenger_consent_text TEXT NOT NULL DEFAULT '', driver_signature_text TEXT NOT NULL, driver_signature_image TEXT NOT NULL, driver_consent_text TEXT NOT NULL DEFAULT '', driver_signed_at TEXT NOT NULL, driver_signed_on TEXT NOT NULL, driver_signed_ip TEXT NOT NULL DEFAULT '', driver_signed_ip_source TEXT NOT NULL DEFAULT '', driver_signed_user_agent TEXT NOT NULL DEFAULT '', driver_pdf_file TEXT NOT NULL, driver_pdf_sha256 TEXT NOT NULL, driver_pdf_bytes INTEGER NOT NULL, company_user_id INTEGER, company_account TEXT NOT NULL DEFAULT '', company_printed_name TEXT NOT NULL DEFAULT '', company_title TEXT NOT NULL DEFAULT '', company_signature_image TEXT NOT NULL DEFAULT '', company_consent_text TEXT NOT NULL DEFAULT '', company_signed_at TEXT NOT NULL DEFAULT '', company_signed_on TEXT NOT NULL DEFAULT '', company_signed_ip TEXT NOT NULL DEFAULT '', company_signed_ip_source TEXT NOT NULL DEFAULT '', company_signed_user_agent TEXT NOT NULL DEFAULT '', final_pdf_file TEXT NOT NULL DEFAULT '', final_pdf_sha256 TEXT NOT NULL DEFAULT '', final_pdf_bytes INTEGER NOT NULL DEFAULT 0, decided_reason TEXT NOT NULL DEFAULT '', decided_by TEXT NOT NULL DEFAULT '', decided_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 	`);
 
 	// super_admin starts with a forced password change pending: operator access
@@ -619,6 +653,36 @@ function seedDatabase(dbPath) {
 	db.prepare("INSERT INTO owner_operator_toll_notices (expense_id, agency, agency_key, notice_number, plate_or_transponder, toll_date, toll_cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 		.run(2, OO.agency, "example toll authority", OO.notice, OO.tollPlate, "2026-11-18", 2375, AT);
 	db.prepare("INSERT INTO owner_operator_ledger_exits (id, oo_id, item_kind, ref, reason, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(1, 1, "load", "qa-oo-2", OO.exitReason, "made.up.admin", AT);
+
+	// sam.driver's passenger authorizations (section 18): a minor's, countersigned and
+	// then ended, so every scrubbed column holds a value; and an adult's still waiting,
+	// whose blank guardian, company and decision columns must stay blank.
+	const pa = (row) => {
+		const cols = Object.keys(row);
+		db.prepare(`INSERT INTO passenger_authorizations (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c]));
+	};
+	const PA_COMMON = {
+		driver_user_id: 3, driver_name: "Sam Driver", form_version: "PA-1", truck_unit: "T-0000", trip_start: PAX.tripStart, trip_end: PAX.tripEnd,
+		valid_from: "2026-11-02", expires_on: "2026-11-09", driver_signature_text: "Sam Driver", driver_signature_image: PAX.imgDriver,
+		driver_consent_text: PAX.consentDriver, driver_signed_at: "2026-11-02T15:00:00.000Z", driver_signed_on: "November 2, 2026",
+		driver_signed_ip: PAX.ipDriver, driver_signed_ip_source: "proxy", driver_signed_user_agent: PAX.uaDriver,
+		driver_pdf_sha256: "a".repeat(64), driver_pdf_bytes: 2048, created_at: "2026-11-02T15:00:00.000Z",
+	};
+	pa({
+		...PA_COMMON, reference: "PA-0000ABCD", request_id: "00000000-0000-4000-8000-000000000001", status: "revoked",
+		passenger_name: PAX.rider, passenger_adult: 0, guardian_name: PAX.guardian, guardian_relationship: PAX.relationship, minor_attested: 1,
+		passenger_signature_text: PAX.guardian, passenger_signature_image: PAX.imgPassenger, passenger_consent_text: PAX.consentPassenger,
+		driver_pdf_file: `pa-${"1".repeat(32)}-driver.pdf`, company_user_id: 1, company_account: "super_admin", company_printed_name: PAX.company,
+		company_title: "Safety Manager", company_signature_image: PAX.imgCompany, company_consent_text: PAX.consentCompany,
+		company_signed_at: "2026-11-03T15:00:00.000Z", company_signed_on: "November 3, 2026", company_signed_ip: PAX.ipCompany,
+		company_signed_ip_source: "proxy", company_signed_user_agent: PAX.uaCompany, final_pdf_file: `pa-${"2".repeat(32)}-final.pdf`,
+		final_pdf_sha256: "b".repeat(64), final_pdf_bytes: 3072, decided_reason: PAX.reason, decided_by: "super_admin", decided_at: "2026-11-04T15:00:00.000Z",
+	});
+	pa({
+		...PA_COMMON, reference: "PA-0000ABCE", request_id: "00000000-0000-4000-8000-000000000002", status: "awaiting_company",
+		passenger_name: PAX.rider2, passenger_adult: 1, passenger_signature_text: PAX.rider2, passenger_signature_image: PAX.imgPassenger.replace("UEFT", "UEFU"),
+		passenger_consent_text: PAX.consentPassenger, driver_pdf_file: `pa-${"3".repeat(32)}-driver.pdf`,
+	});
 
 	db.close();
 }
@@ -2210,6 +2274,104 @@ function extractFn(src, name) {
 		ooMutant("O3", "the owner-operator free-text scrub dropped",
 			"for (const [t, c] of OWNER_OPERATOR_TEXT) secrets +=", "for (const [t, c] of []) secrets +=",
 			"sanitize", /registered owner name\(s\) survived un-replaced in owner_operator_applications\.registered_owner/);
+	}
+
+	// =======================================================================
+	section("18. Passenger authorizations — a rider's name, the guardian, the trip and three signatures never leave");
+	{
+		const Database = require("better-sqlite3");
+		let rows = [];
+		{
+			const db = openDb(artifactDb);
+			try { rows = db.prepare("SELECT * FROM passenger_authorizations ORDER BY id").all(); }
+			catch { rows = []; }
+			finally { db.close(); }
+		}
+		check("both authorizations are still in the artifact", rows.length === 2, `${rows.length} row(s)`);
+		const [minor, adult] = rows;
+		const TEXT = ["passenger_name", "guardian_name", "guardian_relationship", "trip_start", "trip_end", "passenger_signature_text",
+			"driver_signature_text", "company_printed_name", "decided_reason"];
+		const EMPTIED = ["passenger_signature_image", "driver_signature_image", "company_signature_image", "passenger_consent_text", "driver_consent_text",
+			"company_consent_text", "driver_signed_ip", "driver_signed_ip_source", "driver_signed_user_agent", "company_signed_ip", "company_signed_ip_source",
+			"company_signed_user_agent"];
+		check("the minor's names, trip, typed signatures, company signer and reason read REDACTED", !!minor && TEXT.every((c) => minor[c] === "REDACTED"),
+			minor ? JSON.stringify(TEXT.filter((c) => minor[c] !== "REDACTED")) : "no row");
+		check("...its drawn signatures, consent texts and both signers' IP and browser are emptied", !!minor && EMPTIED.every((c) => minor[c] === ""),
+			minor ? JSON.stringify(EMPTIED.filter((c) => minor[c] !== "")) : "no row");
+		const BLANK = ["guardian_name", "guardian_relationship", "company_printed_name", "decided_reason"];
+		check("the adult's blank guardian, company signer and reason stay blank (only a value is replaced)",
+			!!adult && BLANK.every((c) => adult[c] === "") && adult.passenger_name === "REDACTED", adult ? JSON.stringify(BLANK.map((c) => adult[c])) : "no row");
+		const KEPT = { reference: "PA-0000ABCD", status: "revoked", valid_from: "2026-11-02", expires_on: "2026-11-09", truck_unit: "T-0000", driver_name: "Sam Driver",
+			company_title: "Safety Manager", passenger_adult: 0, minor_attested: 1, driver_pdf_sha256: "a".repeat(64) };
+		check("its reference, status, dates, truck, driver, company title, age flags and digest are kept", !!minor && Object.entries(KEPT).every(([c, v]) => minor[c] === v),
+			minor ? JSON.stringify(Object.keys(KEPT).filter((c) => minor[c] !== KEPT[c])) : "no row");
+
+		// Planted survivors on the clean artifact, as a scrub that stopped matching would leave them.
+		const planted = path.join(readDir, "planted-passenger.db");
+		fs.copyFileSync(artifactDb, planted);
+		{
+			const pdb = new Database(planted);
+			try {
+				pdb.prepare("UPDATE passenger_authorizations SET passenger_name = ? WHERE reference = 'PA-0000ABCD'").run("Plantedrider Example");
+				pdb.prepare("UPDATE passenger_authorizations SET company_signature_image = ? WHERE reference = 'PA-0000ABCD'").run("data:image/png;base64,UExBTlRFRA==");
+			} catch { /* no table: the checks below fail by name */ }
+			finally { pdb.close(); }
+		}
+		const NAME_RE = /1 passenger name\(s\) survived un-replaced in passenger_authorizations\.passenger_name/;
+		const IMAGE_RE = /1 passenger authorization company signature image\(s\) survived in passenger_authorizations\.company_signature_image/;
+		const v = run(["--verify", planted]);
+		check("--verify refuses a planted rider's name and company signature, naming each column", v.code === 1 && NAME_RE.test(v.out) && IMAGE_RE.test(v.out),
+			v.code === 1 ? [NAME_RE, IMAGE_RE].map((re) => re.test(v.out)).join(",") : `exit ${v.code}`);
+
+		// P-series mutants: each edit must match once and still parse. A sanitize mutant must be
+		// refused by name; a verify mutant must stop naming its planted survivor; an artifact
+		// mutant must leave its mark on the copy it emits.
+		const paMutant = (id, label, from, to, mode, expect) => {
+			const dir = path.join(ROOT, "mutants", id);
+			fs.mkdirSync(dir, { recursive: true });
+			const src = fs.readFileSync(SCRIPT, "utf8");
+			const hits = src.split(from).length - 1;
+			check(`${id}: ${label} — actually mutated the shipped source`, hits === 1, hits === 1 ? "" : `anchor matched ${hits} time(s)`);
+			if (hits !== 1) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			const script = path.join(dir, "refresh-env.js");
+			fs.writeFileSync(script, src.replace(from, () => to));
+			try { fs.symlinkSync(NODE_MODULES, path.join(dir, "node_modules"), "dir"); } catch {}
+			const parsed = spawnSync(process.execPath, ["--check", script], { encoding: "utf8" });
+			check(`${id}: ${label} — the mutant still parses`, parsed.status === 0, parsed.status === 0 ? "" : "the mutation broke the syntax");
+			if (parsed.status !== 0) { check(`${id}: ${label} — is caught`, false, "not evaluated"); return; }
+			if (mode === "verify") {
+				const m = runScript(script, ["--verify", planted], dir);
+				check(`${id}: ${label} — is caught: its --verify no longer names the planted survivor`, !(m.code === 1 && expect.test(m.out)), `exit ${m.code}`);
+				return;
+			}
+			const out = path.join(dir, "mutant.db.gz");
+			const r = runScript(script, ["--sanitize-only", "--from", snapshot, "--emit", out, "--telemetry-days", "45"], dir);
+			if (mode === "sanitize") {
+				check(`${id}: ${label} — is caught, by name`, r.code !== 0 && !fs.existsSync(out) && expect.test(r.out), `exit ${r.code}, artifact ${fs.existsSync(out) ? "EMITTED" : "absent"}`);
+				return;
+			}
+			let marked = false;
+			if (r.code === 0 && fs.existsSync(out)) {
+				const mdb = openDb(gunzipToFile(out, path.join(dir, "mutant.db")));
+				try { marked = expect(mdb); } catch { marked = false; } finally { mdb.close(); }
+			}
+			check(`${id}: ${label} — is caught on the copy it emits`, marked, `exit ${r.code}`);
+		};
+		paMutant("P1", "the signature, consent and evidence scrub dropped",
+			"sigs += setCols(\"passenger_authorizations\", {\n\t\tpassenger_signature_image", "sigs += 0 && setCols(\"passenger_authorizations\", {\n\t\tpassenger_signature_image",
+			"sanitize", /passenger or guardian signature image\(s\) survived in passenger_authorizations\.passenger_signature_image/);
+		paMutant("P2", "the names, trip and free-text scrub dropped",
+			"for (const c of PASSENGER_AUTHORIZATION_TEXT) sigs +=", "for (const c of []) sigs +=",
+			"sanitize", /passenger name\(s\) survived un-replaced in passenger_authorizations\.passenger_name/);
+		paMutant("P3", "the rider's-name assertion dropped",
+			"\t[\"passenger_authorizations\", \"passenger_name\", \"REDACTED\", \"passenger name\"],\n", "",
+			"verify", NAME_RE);
+		paMutant("P4", "a blank column replaced too",
+			"sigs += setCols(\"passenger_authorizations\", { [c]: \"REDACTED\" }, `COALESCE(\"${c}\",'') <> ''`);", "sigs += setCols(\"passenger_authorizations\", { [c]: \"REDACTED\" });",
+			"artifact", (db) => db.prepare("SELECT guardian_name FROM passenger_authorizations WHERE reference = 'PA-0000ABCE'").get().guardian_name !== "");
+		paMutant("P5", "the company-signature assertion dropped",
+			"\t[\"passenger_authorizations\", \"company_signature_image\", \"passenger authorization company signature image\"],\n", "",
+			"verify", IMAGE_RE);
 	}
 
 	// =======================================================================

@@ -219,6 +219,13 @@ eq(fv({}), { state: "queued", code: "" }, "§6 every check passes: queued");
 eq(fv({ live: false, completed: false }), { state: "waiting", code: "LOAD_DROPPED" }, "§6 cancelled or deleted: waiting LOAD_DROPPED");
 eq(fv({ completed: false }), { state: "waiting", code: "NOT_COMPLETED" }, "§6 not completed: waiting");
 eq(fv({ drafts: 1, optedOut: true }), { state: "skipped", code: "ALREADY_DRAFTED" }, "§6 already drafted, before anything else");
+// Factored loads (Triumph): never emailed, whatever else holds.
+eq(fv({ factored: true }), { state: "skipped", code: "LOAD_FACTORED" }, "§6 FAILS ON THE OLD CODE: a factored load is skipped LOAD_FACTORED (the old code says queued)");
+eq(fv({ factored: true, drafts: 1, brokerDomainConfirmed: false, pods: 0 }).code, "LOAD_FACTORED", "§6 factored outranks drafted, unconfirmed and no POD");
+eq(fv({ factored: true, completed: false }).code, "NOT_COMPLETED", "§6 ...but a load not delivered still waits");
+eq(fv({ factored: true }, { checkDrafted: false, checkMonth: false }).code, "LOAD_FACTORED", "§6 the reports' options never un-skip a factored load");
+eq([R.loadFacts({ row: ROW, cols, records: one }).factored, R.loadFacts({ row: ROW, cols, records: one, factored: true }).factored, R.loadFacts({ row: ROW, cols, records: one, factored: "true" }).factored],
+	[false, true, false], "§5 facts: factored only when the caller says true; not factored by default");
 eq(fv({ drafts: 1 }, { checkDrafted: false }), { state: "queued", code: "" }, "§6 checkDrafted:false ignores a hand draft (the retro report)");
 eq(fv({ optedOut: true, brokerDomain: "" }), { state: "skipped", code: "BROKER_OPTED_OUT" }, "§6 opted out: skipped");
 eq(fv({ brokerDomain: "" }), { state: "needs_attention", code: "NO_BROKER_EMAIL" }, "§6 no broker Email: a person");
@@ -246,6 +253,11 @@ eq(nv({ completionDay: "" }, after), { state: "queued", code: "" }, "§7 no Comp
 eq(nv({ drafts: 1 }, { ...after, offGap: true }), { state: "skipped", code: "ALREADY_DRAFTED" }, "§7 drafted by hand is checked before the off gap");
 eq(nv({ optedOut: true }, { ...after, offGap: true }), { state: "skipped", code: "BROKER_OPTED_OUT" }, "§7 opted out is checked before the off gap");
 eq(nv({}, { ...after, offGap: true }), { state: "needs_attention", code: "OFF_GAP" }, "§7 first sweep after an off gap: a person drafts it");
+eq(nv({ factored: true }, { ...after, offGap: true }), { state: "skipped", code: "LOAD_FACTORED" },
+	"§7 FAILS ON THE OLD CODE: factored, first seen after an off gap: skipped, never a person's email (the old code says OFF_GAP)");
+eq(nv({ factored: true }, after), { state: "skipped", code: "LOAD_FACTORED" }, "§7 FAILS ON THE OLD CODE: factored, first seen: skipped LOAD_FACTORED (the old code says queued)");
+eq(nv({ factored: true, drafts: 1 }, after).code, "LOAD_FACTORED", "§7 factored outranks a hand draft");
+eq(nv({ factored: true, completionDay: "2026-10-14" }, after).code, "", "§7 the baseline still comes first (a load delivered before it stays with people)");
 eq(nv({ pods: 0 }, { ...after, offGap: true }), { state: "needs_attention", code: "OFF_GAP" }, "§7 off gap even before its POD (a person decides)");
 eq(nv({ pods: 0 }, after), { state: "waiting", code: "WAITING_POD" }, "§7 otherwise the free checks");
 const NOW = Date.parse("2026-10-20T12:00:00Z");

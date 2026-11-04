@@ -534,6 +534,9 @@ function draftHarness(L) {
 		console: QUIET,
 	};
 	scope.brokerInvoiceDraft = require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js")).loadEngine(L.engine, { ...scope, env: scope.process.env });
+	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
+	require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(db);
+	scope.factoringRoutes = require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db, logAudit: scope.logAudit });
 	const registered = [];
 	new Function("app", ...Object.keys(scope), L.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	if (registered.length !== 1) throw new Error(`expected 1 registration, got ${registered.length}`);

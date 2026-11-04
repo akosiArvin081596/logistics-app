@@ -34,7 +34,10 @@
 //        carrying the order number.
 //   2-6 failing is a difference. Pass: at least 6 matched, 0 differences and 0
 //   unmatched. Loads only ever refused and other domains are counted, not
-//   judged. A render with no message yet and less than 7 days old is pending.
+//   judged; so are loads marked factored before the window's end (outside:
+//   factored), whose invoice goes through Triumph and is never emailed. A
+//   Triumph submission's draft row is not a person's. A render with no message
+//   yet and less than 7 days old is pending.
 // --trial: the draft week. Each automatic draft in the window (a drafted claim
 //   with its auto-imap row, auto_invoice_claims.draft_digest_json) against its
 //   Sent copy, found by its Message-ID, else by its exact subject, To and invoice
@@ -97,8 +100,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MATCH_MS = 7 * DAY_MS;
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
-// The job's own rows; every other draft row was made by a person.
+// The job's own rows; every other draft row was made by a person, except a
+// Triumph submission's (a factored load, lib/factoring-store.js).
 const JOB_VIA = Object.freeze(["auto-imap"]);
+const TRIUMPH_VIA = Object.freeze(["triumph"]);
 const CONDITIONS = Object.freeze(["recipient", "subject", "attachments", "body", "nothingAfter"]);
 const KNOWN = { flags: new Set(["shadow", "trial", "json", "record", "dry-run"]), values: new Set(["since", "db", "domains", "expect"]) };
 
@@ -167,7 +172,15 @@ function personDrafts(db, key) {
 	const cols = new Set(db.prepare("PRAGMA table_info(load_invoice_drafts)").all().map((c) => c.name));
 	const pick = ["id", "invoice_id", "via", "created_at", "recipient"].concat(["edited_fields", "invoice_id_minted"].filter((c) => cols.has(c)));
 	return db.prepare(`SELECT ${pick.join(", ")} FROM load_invoice_drafts WHERE LOWER(TRIM(load_id)) IN (?, ?) ORDER BY id`).all(key, `#${key}`)
-		.filter((r) => !JOB_VIA.includes(String(r.via || "")));
+		.filter((r) => !JOB_VIA.includes(String(r.via || "")) && !TRIUMPH_VIA.includes(String(r.via || "")));
+}
+
+// The loads marked factored by `beforeMs` (still marked now): people never email
+// one, so the comparison leaves them out and counts them on their own.
+function factoredBy(db, beforeMs) {
+	if (!ledger.hasTable(db, "load_factoring")) return new Set();
+	return new Set(db.prepare("SELECT load_key, set_at FROM load_factoring WHERE factored <> 0").all()
+		.filter((r) => Date.parse(String(r.set_at || "")) < beforeMs).map((r) => r.load_key));
 }
 
 // A Sent copy read and digested, or null when it can't be read.
@@ -271,7 +284,10 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 	const fromMs = dayStartMs(first, zone);
 	const toMs = dayStartMs(addDays(first, WINDOW_DAYS), zone);
 	const counts = emptyCounts("shadow", { since: first, until, zone }, domains);
+	// `factored` appears only when a load was left out for it, so with nothing
+	// factored the report (and its SHA-256) is as before.
 	counts.outside = { refused: 0, otherDomains: 0 };
+	const factored = factoredBy(db, toMs);
 	const rows = ledger.hasTable(db, ledger.SHADOW) && ledger.hasRenderColumn(db) ? ledger.listShadow(db) : [];
 	const starts = [];
 	const found = [];
@@ -284,6 +300,10 @@ async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 		const at = Date.parse(String(rec.renderedAt || rec.refusedAt || ""));
 		const firstMs = rec.firstAt && Number.isFinite(Date.parse(rec.firstAt)) ? Date.parse(rec.firstAt) : at;
 		if (!(firstMs >= fromMs && firstMs < toMs)) continue;
+		if (factored.has(row.load_key)) {
+			counts.outside.factored = (counts.outside.factored || 0) + 1;
+			continue;
+		}
 		const draftedFirst = Boolean(rec.refusedAt) && rec.code === rules.SHADOW_DRAFTED_FIRST;
 		const refused = Boolean(rec.refusedAt) && !draftedFirst;
 		// Rendered or found drafted first once (firstDomain), it stays in the
