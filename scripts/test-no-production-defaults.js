@@ -537,6 +537,8 @@ function draftHarness(L) {
 	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
 	require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(db);
 	scope.factoringRoutes = require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db, logAudit: scope.logAudit });
+	// The automatic job's check for a load it sent (shipped lib code; the job off, nothing sent).
+	scope.autoInvoice = require(path.join(ROOT, "lib", "auto-invoice-job.js")).create({ db, env: {}, logAudit: scope.logAudit, log: QUIET });
 	const registered = [];
 	new Function("app", ...Object.keys(scope), L.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	if (registered.length !== 1) throw new Error(`expected 1 registration, got ${registered.length}`);

@@ -236,6 +236,9 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	}) : null;
 	w.ids = 0;
 	scope.factoringRoutes = routes;
+	// The automatic job's check for a load it sent (pinned in scripts/test-auto-invoice-job.js
+	// §24): no claim here, so it lets every press through, as the job does.
+	scope.autoInvoice = { draftButtonCheck: () => ({ ok: true }) };
 	const registered = [];
 	new Function("app", ...Object.keys(scope), CUR.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	const handler = registered[0][registered[0].length - 1];
