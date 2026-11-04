@@ -11376,8 +11376,11 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		// The driver's live time off (R11) is cancelled with the row, in one
 		// transaction, while the flag is on. A re-added driver gets a new id and
 		// starts with none; with the flag off the rows stay, inert, because every
-		// read joins on an existing directory row.
+		// read joins on an existing directory row. The rows with a note to CHR's
+		// contact are read first, so the answer can tell staff to tell CHR.
+		let chrDraftChanges = [];
 		if (DRIVER_AVAILABILITY_ENABLED) {
+			chrDraftChanges = timeOffChrDraftChangesForDirectory(id, appTodayKey());
 			db.transaction(() => {
 				db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
 				cancelDirectoryAvailability(req, id, dirRow.driver_name);
@@ -11403,7 +11406,7 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 			(orphanedDocs.length ? ` — cascaded ${orphanedDocs.length} shared document${orphanedDocs.length === 1 ? "" : "s"}` : ""));
 
 		notifyChange("drivers");
-		res.json({ success: true, cascadedDocs: orphanedDocs.length });
+		res.json({ success: true, cascadedDocs: orphanedDocs.length, ...(chrDraftChanges.length ? { chrDraftChanges } : {}) });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -11662,6 +11665,8 @@ function recordTimeOffLoadConfirmations(req, { availabilityId, directoryId, driv
 // each with what the caller may change, and `createLimits` for a new row. While
 // DRIVER_TIME_OFF_REQUESTS_ENABLED is on, `homeTime: true` tells the panel's add
 // form to offer the home time (a driver with no rows yet has no row to say so).
+// While DRIVER_TIME_OFF_CHR_DRAFT_ENABLED is on, a driver-made row with a note
+// to CHR's contact carries `chrDraft` (its state, line, canRetry, draftedOn).
 app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -11674,7 +11679,7 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 			directoryId: dir.id, driver: dir.driver_name, today,
 			createLimits: driverAvailability.availabilityCreateLimits({ todayKey: today, isSuperAdmin: user.role === "Super Admin" }),
 			...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? { homeTime: true } : {}),
-			rows: rows.map((r) => ({ ...availabilityRowView(r, today, user), ...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? timeOffEldRowFields(r, { today, req }) : {}) })),
+			rows: rows.map((r) => ({ ...availabilityRowView(r, today, user), ...(DRIVER_TIME_OFF_ELD_CHECK_ENABLED ? timeOffEldRowFields(r, { today, req }) : {}), ...(DRIVER_TIME_OFF_CHR_DRAFT_ENABLED ? timeOffChrDraftPanelFields(r, dir.driver_name, today) : {}) })),
 		});
 	} catch (err) {
 		console.error("[availability] list failed:", err.message);
@@ -11695,7 +11700,9 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 // confirmation per load (recordTimeOffLoadConfirmations()). Job Tracking
 // unreadable: saved unchecked, the answer saying `loadsUnchecked: true`. The
 // sheet read is the one await; the directory row is read again after it, in
-// the write's transaction (404 when it was deleted meanwhile).
+// the write's transaction (404 when it was deleted meanwhile). With
+// DRIVER_TIME_OFF_REQUESTS_ENABLED the answer carries `chrDraft`: staff-recorded
+// days get the checked line to tell CHR's contact by hand, never a draft.
 app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = Number(req.params.id);
@@ -11746,7 +11753,10 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 		}
 		if (outcome.asked) return res.status(409).json(outcome.asked);
 		notifyChange("drivers");
-		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
+		res.status(201).json({
+			success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}),
+			...(DRIVER_TIME_OFF_REQUESTS_ENABLED ? { chrDraft: timeOffChrDraftByHand(outcome.row.id, today) } : {}),
+		});
 	} catch (err) {
 		console.error("[availability] create failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -11762,7 +11772,9 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 // the create does; any other edit (the kind or reason only, an end-early, a
 // shrink) never reads it. After that read the stored row is read again and the
 // body merged over it and checked again, so the old days are the row as it is
-// now (404 / 409 AVAILABILITY_CANCELLED / 400 when it changed meanwhile).
+// now (404 / 409 AVAILABILITY_CANCELLED / 400 when it changed meanwhile). Days
+// changed on a row with a note to CHR's contact: the answer's `chrDraftChange`
+// tells staff to tell CHR, with the new days' line to send by hand.
 app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
@@ -11834,7 +11846,9 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 		if (outcome.asked) return res.status(409).json(outcome.asked);
 		if (!outcome.unchanged) notifyChange("drivers");
 		if (outcome.told) io.to(driverRoom(outcome.told.room)).emit("time-off-updated", { notificationId: outcome.told.notificationId });
-		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchanged ? { unchanged: true } : {}), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
+		const moved = !outcome.unchanged && (outcome.row.from_date !== row.from_date || outcome.row.to_date !== row.to_date);
+		const chrDraftChange = moved ? timeOffChrDraftChange(row.id, today, { moved: true }) : null;
+		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchanged ? { unchanged: true } : {}), ...(outcome.unchecked ? { loadsUnchecked: true } : {}), ...(chrDraftChange ? { chrDraftChange } : {}) });
 	} catch (err) {
 		console.error("[availability] update failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -11843,7 +11857,8 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 
 // POST /api/driver-availability/:id/cancel — cancel a period (stamped, never
 // deleted). 409 AVAILABILITY_CANCELLED; 400 BACKDATE_LIMIT for a Dispatcher on
-// a row that starts more than 30 days back.
+// a row that starts more than 30 days back. A row with a note to CHR's contact:
+// the answer's `chrDraftChange` tells staff to tell CHR.
 app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
@@ -11866,7 +11881,8 @@ app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRol
 		})();
 		notifyChange("drivers");
 		if (told) io.to(driverRoom(told.room)).emit("time-off-updated", { notificationId: told.notificationId });
-		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today, user) });
+		const chrDraftChange = timeOffChrDraftChange(row.id, today);
+		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today, user), ...(chrDraftChange ? { chrDraftChange } : {}) });
 	} catch (err) {
 		console.error("[availability] cancel failed:", err.message);
 		res.status(500).json({ error: "The time off could not be cancelled." });
@@ -11895,6 +11911,8 @@ function timeOffDecisionRefused(req, res, row, decision, refusal) {
 // so. The sheet read is the one await; the row is read again after it, and the
 // UPDATE repeats "still waiting", so two staff deciding at once get one decision
 // and one 409. The driver gets one notice; the staff notice gets the decision.
+// The answer and the notice carry `chrDraft`, the note to CHR's contact (its
+// state, and the line to copy); a pending note is drafted after the answer.
 app.post("/api/driver-availability/:id/approve", timeOffRequestsFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
@@ -11931,7 +11949,8 @@ app.post("/api/driver-availability/:id/approve", timeOffRequestsFlagGate, requir
 			}
 			markTimeOffRequestNotice(cur.id, "approved", by);
 			const told = timeOffDriverNotice(cur, "approved", cur.from_date, cur.to_date);
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), told, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
+			const chrDraft = startTimeOffChrDraft(cur, today);
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), told, unchecked: !!(loadsCheck && loadsCheck.unchecked), chrDraft };
 		})();
 		if (outcome.gone) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
 		if (outcome.refused) return timeOffDecisionRefused(req, res, outcome.cur, "approve", outcome.refused.ok ? { status: 409, code: "TIME_OFF_REQUEST_DECIDED", error: "This request was just decided." } : outcome.refused);
@@ -11945,7 +11964,8 @@ app.post("/api/driver-availability/:id/approve", timeOffRequestsFlagGate, requir
 		notifyChange("drivers");
 		io.to("dispatch").emit("time-off-request-decided", { availabilityId: outcome.row.id, decision: "approved", decidedBy: by });
 		if (outcome.told) io.to(driverRoom(outcome.told.room)).emit("time-off-updated", { notificationId: outcome.told.notificationId });
-		res.json({ success: true, decision: "approved", decidedBy: by, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
+		res.json({ success: true, decision: "approved", decidedBy: by, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}), chrDraft: outcome.chrDraft });
+		if (outcome.chrDraft.state === "pending") queueTimeOffChrDraft(outcome.row.id);
 	} catch (err) {
 		console.error("[availability] approve failed:", err.message);
 		res.status(500).json({ error: "The request could not be approved." });
@@ -11984,6 +12004,203 @@ app.post("/api/driver-availability/:id/decline", timeOffRequestsFlagGate, requir
 	} catch (err) {
 		console.error("[availability] decline failed:", err.message);
 		res.status(500).json({ error: "The request could not be declined." });
+	}
+});
+
+// ── The note to CHR's contact about a driver's approved request (lib/time-off-chr-draft.js) ──────────────────────
+// Its own switch, default OFF, folding in DRIVER_TIME_OFF_REQUESTS_ENABLED. On, an approval answers at once and the
+// note then goes into the company Gmail's Drafts for a person to read and send; nothing here sends mail. Off: no
+// table, no Gmail call, no Retry route, and staff get the checked line to send by hand.
+const DRIVER_TIME_OFF_CHR_DRAFT_ENABLED = DRIVER_TIME_OFF_REQUESTS_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_CHR_DRAFT_ENABLED ?? "").trim());
+const timeOffChrDraft = require("./lib/time-off-chr-draft");
+// A Retry's search; the append is server.js's one appendGmailDraft, shared with the invoice drafts.
+const { findDraftByMessageId } = require("./lib/imap-draft");
+// The note's one recipient, read once at boot from production's settings (no default here), and one start-up line
+// saying whether it is set, never what it is. "" while the switch is off or the setting isn't one chrobinson.com address.
+function timeOffChrDraftRecipientAtBoot() {
+	const to = DRIVER_TIME_OFF_CHR_DRAFT_ENABLED ? timeOffChrDraft.chrRecipient(process.env.TIME_OFF_CHR_DRAFT_TO) : "";
+	console.log(`[availability] CHR day-off drafts ${DRIVER_TIME_OFF_CHR_DRAFT_ENABLED ? `ON (DRIVER_TIME_OFF_CHR_DRAFT_ENABLED), address: ${to ? "set, chrobinson.com" : "not set"}` : "OFF (DRIVER_TIME_OFF_CHR_DRAFT_ENABLED)"}`);
+	if (DRIVER_TIME_OFF_CHR_DRAFT_ENABLED && !to) console.warn("[availability] TIME_OFF_CHR_DRAFT_TO is unset or is not exactly one chrobinson.com address, so no note is drafted: staff get the line to send by hand");
+	return to;
+}
+const TIME_OFF_CHR_DRAFT_TO = timeOffChrDraftRecipientAtBoot();
+// The carrier deny list, read through its one spelling as the CHR redactor reads it; its values stay in the check.
+const timeOffChrDraftDeny = timeOffChrDraft.createDenyCheck(process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "");
+if (DRIVER_TIME_OFF_CHR_DRAFT_ENABLED) {
+	// One row per approved driver request with a draft: its Message-ID (stored before the append), the unit and days
+	// the note names, and how its Gmail step ended. No name, phone, place, address or reason.
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS time_off_chr_drafts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			availability_id INTEGER NOT NULL UNIQUE,
+			message_id TEXT NOT NULL,
+			unit TEXT NOT NULL,
+			from_day TEXT NOT NULL,
+			to_day TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending', 'made', 'failed')),
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_stage TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			drafted_at TEXT
+		)
+	`);
+}
+
+// The Retry route answers as an unknown path while the switch is off, before any role check.
+function timeOffChrDraftFlagGate(req, res, next) {
+	if (!DRIVER_TIME_OFF_CHR_DRAFT_ENABLED) return next("route");
+	return next();
+}
+
+// Keyed per account: a Retry may open a Gmail session.
+const timeOffChrDraftRetryLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many retries. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// The Gmail step runs one note at a time, in the order the approvals came, so each one's re-read sees every change
+// made while it waited; a row's own attempts never overlap (a Retry meanwhile is refused)
+const timeOffChrDraftBusy = new Set();
+let timeOffChrDraftQueue = Promise.resolve();
+
+// The note's decision for a time-off row (with its directory name) on the business day `today`, naming the truck of
+// the driver's active assignment, else the truck that names them, as it is now.
+function timeOffChrDraftDecision(row, today, { staffRecorded }) {
+	const name = row.directory_name;
+	const unit = timeOffChrDraft.chooseTruckUnit([findActiveAssignmentTruckForDriver(name), findTruckForDriver(name)]);
+	return timeOffChrDraft.chrDraftDecision({ driverName: name, unit, from: row.from_date, to: row.to_date, todayKey: today },
+		{ draftOn: DRIVER_TIME_OFF_CHR_DRAFT_ENABLED, recipientOk: !!TIME_OFF_CHR_DRAFT_TO, staffRecorded, denyHits: timeOffChrDraftDeny });
+}
+
+// The request's staff notice carries the note's state and line, parameterized, as it carries the decision.
+function markTimeOffChrDraftNotice(availabilityId, chrDraft) {
+	db.prepare(`UPDATE dispatch_notifications SET metadata = json_set(metadata, '$.chrDraft', json(?))
+		WHERE type = 'time-off-request' AND json_valid(metadata) AND json_extract(metadata, '$.availabilityId') = ?`)
+		.run(JSON.stringify(chrDraft), Number(availabilityId));
+}
+
+// At an approval, inside its transaction: the decision, the pending draft row with its Message-ID (stored before any
+// append), and the notice's state. Returns what the answer carries: { state, line? }.
+function startTimeOffChrDraft(cur, today) {
+	const decided = timeOffChrDraftDecision(cur, today, { staffRecorded: false });
+	if (decided.state === "pending") {
+		db.prepare("INSERT INTO time_off_chr_drafts (availability_id, message_id, unit, from_day, to_day, state, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
+			.run(cur.id, timeOffChrDraft.newChrDraftMessageId(process.env.GMAIL_USER), decided.unit, cur.from_date, cur.to_date, new Date().toISOString());
+	}
+	const chrDraft = timeOffChrDraft.chrDraftAnswer(decided);
+	markTimeOffChrDraftNotice(cur.id, chrDraft);
+	return chrDraft;
+}
+
+// A staff-recorded row gets the checked line to send by hand, never a draft.
+function timeOffChrDraftByHand(availabilityId, today) {
+	const row = availabilityRowWithDriver(availabilityId);
+	return row ? timeOffChrDraft.chrDraftAnswer(timeOffChrDraftDecision(row, today, { staffRecorded: true })) : { state: "refused" };
+}
+
+// A row's draft row; nothing reads the table while the switch is off.
+function timeOffChrDraftRow(availabilityId) {
+	if (!DRIVER_TIME_OFF_CHR_DRAFT_ENABLED) return undefined;
+	return db.prepare("SELECT * FROM time_off_chr_drafts WHERE availability_id = ?").get(Number(availabilityId));
+}
+
+// A draft as staff see it (timeOffChrDraft.draftView()), by the server's clock and the row's current directory name.
+function timeOffChrDraftView(draft, row, today) {
+	return timeOffChrDraft.draftView(draft, { driverName: row.directory_name, todayKey: today, nowMs: Date.now(),
+		draftedOn: draft.drafted_at ? appDay(new Date(draft.drafted_at)) : "", denyHits: timeOffChrDraftDeny });
+}
+
+// The staff panel's `chrDraft` on a driver-made row with a draft.
+function timeOffChrDraftPanelFields(r, driverName, today) {
+	const draft = r && r.source === "driver" ? timeOffChrDraftRow(r.id) : undefined;
+	return draft ? { chrDraft: timeOffChrDraftView(draft, { ...r, directory_name: driverName }, today) } : {};
+}
+
+// One attempt at a row's note in the company Gmail's Drafts, after its approval's answer (queued) or on a Retry: the
+// row is read again right before the append, a Retry looks for the stored Message-ID first, and the outcome is
+// stored, put on the notice and told to the dispatch room ({ availabilityId, state } only). Never rejects.
+async function runTimeOffChrDraft(availabilityId, { retry }) {
+	if (timeOffChrDraftBusy.has(availabilityId)) return { state: "", stage: "", skipped: true };
+	timeOffChrDraftBusy.add(availabilityId);
+	try {
+		const draft = timeOffChrDraftRow(availabilityId);
+		if (!draft || draft.state === "made" || (!retry && draft.state !== "pending")) return { state: draft ? draft.state : "", stage: "", skipped: true };
+		const mailbox = { user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" };
+		const outcome = await timeOffChrDraft.attemptChrDraft({
+			check: () => timeOffChrDraft.draftStillHolds({ row: availabilityRowWithDriver(availabilityId), draft: timeOffChrDraftRow(availabilityId), todayKey: appTodayKey(), recipientOk: !!TIME_OFF_CHR_DRAFT_TO, denyHits: timeOffChrDraftDeny }),
+			search: retry ? () => findDraftByMessageId({ ...mailbox, messageId: draft.message_id }) : null,
+			append: (note) => appendGmailDraft({ ...mailbox, to: TIME_OFF_CHR_DRAFT_TO, subject: note.subject, text: note.text, messageId: draft.message_id }),
+		});
+		const done = db.prepare("UPDATE time_off_chr_drafts SET state = ?, last_stage = ?, attempts = attempts + ?, drafted_at = COALESCE(drafted_at, ?) WHERE availability_id = ? AND state <> 'made'")
+			.run(outcome.state, outcome.stage, outcome.tried ? 1 : 0, outcome.state === "made" ? new Date().toISOString() : null, availabilityId);
+		if (done.changes) {
+			const view = timeOffChrDraftView(timeOffChrDraftRow(availabilityId), availabilityRowWithDriver(availabilityId) || {}, appTodayKey());
+			markTimeOffChrDraftNotice(availabilityId, view.line ? { state: view.state, line: view.line } : { state: view.state });
+			io.to("dispatch").emit("time-off-chr-draft", { availabilityId, state: outcome.state });
+		}
+		if (outcome.state === "failed") console.error(`[availability] the note to CHR's contact for time off ${availabilityId} was not drafted (stage ${outcome.stage})`);
+		return outcome;
+	} catch (err) {
+		console.error(`[availability] the note to CHR's contact for time off ${availabilityId} could not be recorded:`, err.message);
+		return { state: "failed", stage: "error" };
+	} finally {
+		timeOffChrDraftBusy.delete(availabilityId);
+	}
+}
+
+// An approval's Gmail step, after its answer, behind every step queued before it.
+function queueTimeOffChrDraft(availabilityId) {
+	const run = () => runTimeOffChrDraft(availabilityId, { retry: false });
+	timeOffChrDraftQueue = timeOffChrDraftQueue.then(run, run);
+	return timeOffChrDraftQueue;
+}
+
+// What staff are told when an approved row with a draft is cancelled or has its days changed: { state, note }, and
+// for changed days `newDays`, the new days' line to send by hand (no second draft). null for a row with no draft.
+function timeOffChrDraftChange(availabilityId, today, { moved = false } = {}) {
+	const draft = timeOffChrDraftRow(availabilityId);
+	if (!draft) return null;
+	const note = timeOffChrDraft.laterChangeNote({ state: draft.state, draftedOn: draft.drafted_at ? appDay(new Date(draft.drafted_at)) : "" });
+	const row = moved ? availabilityRowWithDriver(availabilityId) : undefined;
+	return { state: draft.state, note, ...(row ? { newDays: timeOffChrDraft.chrDraftAnswer(timeOffChrDraftDecision(row, today, { staffRecorded: true })) } : {}) };
+}
+
+// The same for each live row with a draft that the Drivers-page delete is about to cancel.
+function timeOffChrDraftChangesForDirectory(directoryId, today) {
+	if (!DRIVER_TIME_OFF_CHR_DRAFT_ENABLED) return [];
+	return db.prepare("SELECT a.id FROM driver_availability a JOIN time_off_chr_drafts c ON c.availability_id = a.id WHERE a.directory_id = ? AND a.cancelled_at IS NULL ORDER BY a.from_date, a.id")
+		.all(directoryId).map((r) => ({ availabilityId: r.id, ...timeOffChrDraftChange(r.id, today) }));
+}
+
+// POST /api/driver-availability/:id/chr-draft — staff try the note again where the server offers it (canRetry): the row
+// is read again and the stored Message-ID looked for in Drafts and Sent Mail first, so a note is never drafted twice.
+// 404 no draft; 409 CHR_DRAFT_MADE, CHR_DRAFT_IN_FLIGHT or CHR_DRAFT_ROW_CHANGED. Audited, never with the address.
+app.post("/api/driver-availability/:id/chr-draft", timeOffChrDraftFlagGate, requireRole("Super Admin", "Dispatcher"), timeOffChrDraftRetryLimiter, async (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		const draft = row ? timeOffChrDraftRow(row.id) : undefined;
+		const today = appTodayKey();
+		const refusal = timeOffChrDraft.retryRefusal(draft, { nowMs: Date.now(), todayKey: today, inFlight: !!draft && timeOffChrDraftBusy.has(row.id) });
+		if (refusal) {
+			if (draft) logAuditRefusal(req, "time_off_chr_draft_retry_blocked", "driver", String(row.directory_id), `${row.directory_name}: CHR note for time off ${row.id} (${row.from_date}..${row.to_date}) [${refusal.code}]`, refusal.code);
+			return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+		}
+		const outcome = await runTimeOffChrDraft(row.id, { retry: true });
+		const after = timeOffChrDraftRow(row.id);
+		const result = outcome.state === "made" ? `made${outcome.found ? ` (found in ${outcome.found})` : ""}` : `not made (${outcome.stage || "busy"})`;
+		logAudit(req, "time_off_chr_draft_retry", "driver", String(row.directory_id), `${row.directory_name}: CHR note for time off ${row.id} (${row.from_date}..${row.to_date}) retried: ${result}`);
+		const changed = outcome.state === "failed" && timeOffChrDraft.FINAL_STAGES.includes(outcome.stage) ? timeOffChrDraft.retryRefusal(after, { nowMs: Date.now(), todayKey: today, inFlight: false }) : null;
+		if (changed) return res.status(changed.status).json({ error: changed.error, code: changed.code });
+		res.json({ success: outcome.state === "made", chrDraft: after ? timeOffChrDraftView(after, availabilityRowWithDriver(row.id) || row, today) : { state: outcome.state } });
+	} catch (err) {
+		console.error("[availability] CHR note retry failed:", err.message);
+		res.status(500).json({ error: "The note to CHR's contact could not be retried." });
 	}
 });
 

@@ -36,8 +36,9 @@
 #      changed, after the first time), with a progress line. They are updated in
 #      place, so a pull that fails from here on says they may be newer than the
 #      clean snapshot. storage/voice-notes/ is left out (and a copy an earlier
-#      pull left is removed) unless REPLICA_PULL_VOICE_NOTES=1 is set. The shared
-#      connection is closed after them;
+#      pull left is removed) unless REPLICA_PULL_VOICE_NOTES=1 is set. Passenger
+#      authorization PDFs are always left out (and removed): their folder and
+#      their file names, in all three. The shared connection is closed after them;
 #   7. the new snapshot replaces the clean one, then its settings are written to
 #      ~/LogisX-replica/settings.env (mode 600). A pull interrupted between the
 #      two renames of that swap puts the previous clean snapshot back.
@@ -406,23 +407,34 @@ REMOTE_STARTED=0
 "$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" 2>&1 | tee -a "$LOG"
 
 # --- 6: uploaded files, updated in place; then the shared connection closes ------------
+# Passenger authorizations (lib/passenger-authorization.js) are signed waivers with a
+# rider's name, a minor's included, and drawn signatures: no pull copies them, with no
+# opt-in (decision 4e). Their folder is left out of storage/, and their file names
+# (pa-<hex>-driver.pdf, pa-<hex>-final.pdf, and any copy that keeps the stem) out of all
+# three trees, wherever one lands. Arrays: an unquoted pattern would glob here.
+PASSENGER_EXCLUDES=(--exclude='pa-[0-9a-f]*-driver*.pdf' --exclude='pa-[0-9a-f]*-final*.pdf')
+PASSENGER_STORAGE_EXCLUDE=--exclude=/passenger-authorizations/
 # Voice notes (storage/voice-notes/) are people's voices: they stay on the server unless
-# this pull is run with REPLICA_PULL_VOICE_NOTES=1 (decision 13). --delete-excluded also
-# removes a copy an earlier opt-in pull left here.
-STORAGE_EXCLUDES="--exclude=/voice-notes/ --delete-excluded"
+# this pull is run with REPLICA_PULL_VOICE_NOTES=1 (decision 13).
+VOICE_NOTES_EXCLUDE=--exclude=/voice-notes/
 if [ "${REPLICA_PULL_VOICE_NOTES:-}" = "1" ]; then
-  STORAGE_EXCLUDES=""
+  VOICE_NOTES_EXCLUDE=""
   log "storage/: voice notes are copied (REPLICA_PULL_VOICE_NOTES=1)"
 else
   log "storage/: voice notes left out (set REPLICA_PULL_VOICE_NOTES=1 to copy them)"
 fi
+log "uploads/, storage/, evidence-archive/: passenger authorization PDFs left out (no opt-in)"
 T0=$(date +%s)
 for d in uploads storage evidence-archive; do
   need_conn "copying $d/"
   FILES_STARTED=1
-  EXCLUDES=""
-  if [ "$d" = storage ]; then EXCLUDES="$STORAGE_EXCLUDES"; fi
-  rsync -rlt --delete $EXCLUDES --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
+  # --delete-excluded also removes a copy an earlier pull left here.
+  EXCLUDES=("${PASSENGER_EXCLUDES[@]}" --delete-excluded)
+  if [ "$d" = storage ]; then
+    EXCLUDES+=("$PASSENGER_STORAGE_EXCLUDE")
+    if [ -n "$VOICE_NOTES_EXCLUDE" ]; then EXCLUDES+=("$VOICE_NOTES_EXCLUDE"); fi
+  fi
+  rsync -rlt --delete "${EXCLUDES[@]}" --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
   chmod -R go-rwx "$ROOT/$d"
 done
 log "files: $(( $(date +%s) - T0 )) s"

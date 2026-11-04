@@ -551,3 +551,90 @@ export function panelRequestText(row) {
   if (r.request === 'declined') return `Asked by the driver, declined by ${by}`
   return ''
 }
+
+// ── Staff: the note to CHR's contact about a driver's approved days ─────────
+// The server sends `chrDraft: { state, line?, reason? }` on the approve answer,
+// the request's notice and the panel's rows (with canRetry there), and a staff
+// create's answer; `line` (the driver, the truck and the days) is for staff to
+// copy and send by hand. The server decides every state, line and reason.
+
+export const CHR_DRAFT_COPY = 'Copy'
+export const CHR_DRAFT_COPIED = 'Copied'
+export const CHR_DRAFT_RETRY = 'Retry the note to CHR'
+// Each state's words with its line, then without one.
+const CHR_DRAFT_WORDS = {
+  pending: ['Drafting the note to CHR\'s contact…'],
+  made: ['Note to CHR\'s contact is in the company Gmail\'s Drafts. A person sends it.'],
+  failed: ['The note to CHR\'s contact couldn\'t be drafted. Retry, or tell them by hand:', 'The note to CHR\'s contact couldn\'t be drafted. Tell them by hand.'],
+  no_recipient: ['No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand:', 'No CHR contact address is set, so no draft was made. Tell CHR\'s contact by hand.'],
+  no_truck: ['No truck on record for this driver: tell CHR\'s contact by hand.'],
+  refused: ['No draft: the note would carry a number that can\'t go to CHR. Tell CHR\'s contact by hand.'],
+  past: ['These days are over, so no note to CHR.'],
+  off: ['Tell CHR\'s contact:', 'Tell CHR\'s contact by hand.'],
+  by_hand: ['Staff-recorded days get no draft. Tell CHR\'s contact:', 'Staff-recorded days get no draft. Tell CHR\'s contact by hand.'],
+}
+const CHR_LINE_STATES = ['off', 'no_recipient', 'failed', 'by_hand']
+// Why the truck's unit can't go in the note (the server's `reason`).
+const CHR_UNIT_REASONS = {
+  characters: 'it has characters other than letters, digits, dashes and a leading #',
+  length: 'it is longer than 16 characters',
+  person: 'it looks like a phone number, an SSN or a date',
+  number: 'it reads as a phone, load or account number',
+}
+
+// { words, line } for a chrDraft as staff read it, or null for none; `line` is
+// "" where there is nothing to copy.
+export function chrDraftText(chrDraft) {
+  const d = chrDraft && typeof chrDraft === 'object' ? chrDraft : null
+  if (d && d.state === 'unit_refused') {
+    const why = Object.prototype.hasOwnProperty.call(CHR_UNIT_REASONS, d.reason) ? CHR_UNIT_REASONS[d.reason] : 'it doesn\'t fit the note\'s rule'
+    return { words: `The truck's unit can't go in the note: ${why}. Tell CHR's contact by hand.`, line: '' }
+  }
+  if (!d || !Object.prototype.hasOwnProperty.call(CHR_DRAFT_WORDS, d.state)) return null
+  const [withLine, without] = CHR_DRAFT_WORDS[d.state]
+  const line = CHR_LINE_STATES.includes(d.state) && typeof d.line === 'string' ? d.line.trim() : ''
+  return line ? { words: withLine, line } : { words: without || withLine, line: '' }
+}
+
+// The chrDraft a time-off-request notice carries (stored or live), or null.
+export function chrDraftOfNotice(n) {
+  if (!timeOffRequestOfNotice(n)) return null
+  const meta = parseMeta(n.metadata) || {}
+  const inner = meta.metadata && typeof meta.metadata === 'object' ? meta.metadata : meta
+  return inner.chrDraft && typeof inner.chrDraft === 'object' ? inner.chrDraft : null
+}
+
+// The notice with this user's approve answer's chrDraft written in, its
+// metadata kept in the shape it came in.
+export function noticeWithChrDraft(n, availabilityId, chrDraft) {
+  const req = timeOffRequestOfNotice(n)
+  if (!req || req.availabilityId !== Number(availabilityId) || !chrDraft || typeof chrDraft !== 'object') return n
+  const meta = parseMeta(n.metadata) || {}
+  const next = meta.metadata && typeof meta.metadata === 'object'
+    ? { ...meta, metadata: { ...meta.metadata, chrDraft } }
+    : { ...meta, chrDraft }
+  return { ...n, metadata: typeof n.metadata === 'string' ? JSON.stringify(next) : next }
+}
+
+// What an answer tells staff about the note to CHR's contact, as [{ words,
+// line }]: an approve's or a staff create's `chrDraft`, and after an edit, a
+// cancel (`chrDraftChange`) or the Drivers-page delete (`chrDraftChanges`) the
+// server's line to tell CHR about the change, with the new days' line.
+export function chrDraftReplyNotes(reply) {
+  const r = reply && typeof reply === 'object' ? reply : {}
+  const out = []
+  const own = chrDraftText(r.chrDraft)
+  if (own) out.push(own)
+  const changes = Array.isArray(r.chrDraftChanges) ? r.chrDraftChanges : r.chrDraftChange ? [r.chrDraftChange] : []
+  for (const c of changes) {
+    if (c && typeof c.note === 'string' && c.note) out.push({ words: c.note, line: '' })
+    const days = c ? chrDraftText(c.newDays) : null
+    if (days) out.push(days)
+  }
+  return out
+}
+
+// One note as plain text: its words, then its line.
+export function chrDraftNoteText(note) {
+  return note && note.line ? `${note.words} ${note.line}` : (note && note.words) || ''
+}

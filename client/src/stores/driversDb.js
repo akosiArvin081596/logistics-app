@@ -14,15 +14,17 @@ export const useDriversDbStore = defineStore('driversDb', {
   }),
 
   actions: {
-    async load() {
-      this.isLoading = true
+    // A quiet load leaves isLoading alone: the page swaps the table for its
+    // skeleton on isLoading, and that unmounts an open Edit dialog or drawer.
+    async load({ quiet = false } = {}) {
+      if (!quiet) this.isLoading = true
       try {
         const data = await api.get('/api/drivers-directory')
         this.headers = data.headers || []
         this.drivers = data.data || []
         this.dailyRateRule = data.dailyRateRule || null
       } finally {
-        this.isLoading = false
+        if (!quiet) this.isLoading = false
       }
     },
 
@@ -36,9 +38,12 @@ export const useDriversDbStore = defineStore('driversDb', {
       await this.load()
     },
 
+    // The server's answer comes back: it may tell staff about notes to CHR's
+    // contact for the time off the delete cancelled.
     async remove(id) {
-      await api.del(`/api/drivers-directory/${id}`)
+      const reply = await api.del(`/api/drivers-directory/${id}`)
       await this.load()
+      return reply
     },
   },
 })
