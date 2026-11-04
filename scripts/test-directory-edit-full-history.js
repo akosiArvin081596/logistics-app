@@ -47,6 +47,8 @@ const fs = require("fs");
 const path = require("path");
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator directory check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -214,7 +216,7 @@ function makeApp() {
 		},
 		syncCarrierDriverHistory: () => {},
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		// Driver availability off (R11): the delete leaves time-off rows alone.
 		DRIVER_AVAILABILITY_ENABLED: false,
 		console: { error() {}, log() {}, warn() {} },

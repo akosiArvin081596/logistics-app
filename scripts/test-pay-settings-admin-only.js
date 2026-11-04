@@ -82,6 +82,8 @@ const fs = require("fs");
 const path = require("path");
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator directory check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -415,7 +417,7 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		syncCarrierDriverHistory: () => {},
 		fuelModel: { DEFAULT_TANK_GALLONS: 200 },
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 	};
 	const call = Object.fromEntries(["dirPost", "dirPut", "truckPost", "truckPut"].map((k) => [k, mountRoute(r[k], env)]));
 	const as = (user) => ({ session: { user } });

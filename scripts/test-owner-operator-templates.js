@@ -684,8 +684,9 @@ function statementCases(T) {
 		ok(!(AG in docFiles) && !(ST in docFiles), "§1 neither document is in DOC_FILES (served whatever the flags)");
 		const flagged = filesBlockOf(RENDERER_SRC, "FLAGGED_DOC_FILES");
 		eq(flagged, FILES, "§1 FLAGGED_DOC_FILES maps each document to its template");
-		ok(/owner_operator_agreement: \{ file: "owner-operator-agreement\.html", flag: "onboarding" \}/.test(RENDERER_SRC) &&
-			/owner_operator_settlement: \{ file: "owner-operator-settlement\.html", flag: "settlements" \}/.test(RENDERER_SRC),
+		// The agreement's profile path (plan C PR 3) is scripts/test-owner-operator-onboarding.js §3's subject.
+		ok(/owner_operator_agreement: \{ file: "owner-operator-agreement\.html", flag: "onboarding", profilePath: true \}/.test(RENDERER_SRC) &&
+			/owner_operator_settlement: \{ file: "owner-operator-settlement\.html", flag: "settlements", profilePath: false \}/.test(RENDERER_SRC),
 		"§1 the agreement sits behind ONBOARDING and the statement behind SETTLEMENTS");
 		const audit = read(AUDIT_PATH);
 		eq(filesBlockOf(audit, "FLAGGED_DOC_FILES"), flagged, "§1 scripts/audit-policy-labels.js mirrors FLAGGED_DOC_FILES");
@@ -876,11 +877,13 @@ function statementCases(T) {
 	await part("§9 mutants", async () => {
 		const flips = (cases) => cases.some(([, fn]) => !holds(fn));
 		const renderer = (pairs) => loadRenderer(mutate(RENDERER_SRC, pairs), recorder());
-		const gateLine = "return flagged && ooFlagsFromEnv(env)[flagged.flag] === true ? flagged.file : null;";
-		ok(flips(gateCases(renderer([[gateLine, "return flagged ? flagged.file : null;"]]))), "§9 the gate removed: §1 fails");
-		ok(flips(gateCases(renderer([["owner_operator_agreement: { file: \"owner-operator-agreement.html\", flag: \"onboarding\" }",
-			"owner_operator_agreement: { file: \"owner-operator-agreement.html\", flag: \"settlements\" }"]]))), "§9 the agreement behind the wrong flag: §1 fails");
-		ok(flips(gateCases(renderer([["\tif (!docFileFor(docKey)) throw new Error(`Unknown onboarding doc: ${docKey}`);\n\tconst mapper", "\tconst mapper"]]))),
+		// The gate since plan C PR 3 also opens the agreement for the server's existing-profile
+		// path (scripts/test-owner-operator-onboarding.js §3); these mutants remove the flag half.
+		const gateLine = "return ooFlagsFromEnv(env)[flagged.flag] === true || profileOpens ? flagged.file : null;";
+		ok(flips(gateCases(renderer([[gateLine, "return flagged.file;"]]))), "§9 the gate removed: §1 fails");
+		ok(flips(gateCases(renderer([["owner_operator_agreement: { file: \"owner-operator-agreement.html\", flag: \"onboarding\", profilePath: true }",
+			"owner_operator_agreement: { file: \"owner-operator-agreement.html\", flag: \"settlements\", profilePath: true }"]]))), "§9 the agreement behind the wrong flag: §1 fails");
+		ok(flips(gateCases(renderer([["\tif (!docFileFor(docKey, process.env, options)) throw new Error(`Unknown onboarding doc: ${docKey}`);\n\tconst mapper", "\tconst mapper"]]))),
 			"§9 the field map left ungated: §1 fails");
 		ok(flips(gateCases(renderer([["DOC_FILES[docKey]) return DOC_FILES[docKey];", "DOC_FILES[docKey]) return DOC_FILES[docKey];\n\tif (FLAGGED_DOC_FILES[docKey]) return FLAGGED_DOC_FILES[docKey].file;"]]))),
 			"§9 the flagged documents served whatever the flags: §1 fails");

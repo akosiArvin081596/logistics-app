@@ -432,6 +432,25 @@ ok("PUBLIC_APPLY_SCALAR_FIELDS = every field /api/public/apply destructures, les
 ok("…and the route really does serialize those two before binding",
 	/JSON\.stringify\(availability \|\| \[\]\)/.test(APPLY) &&
 	/typeof reference_info === 'string' \? reference_info : JSON\.stringify\(reference_info/.test(APPLY));
+// The owner-operator's truck section (plan C PR 3): read only behind its flag and
+// the position, through the one boundary check, before the first query or email.
+{
+	const lib = require(path.join(ROOT, "lib", "public-form-input"));
+	const fields = lib.OWNER_OPERATOR_TRUCK_FIELDS || [];
+	const fnSrc = (LIB_SRC.match(/function checkPublicOwnerOperatorTruck\([\s\S]*?\n\}\n/) || [""])[0];
+	ok("POST /api/public/apply: the owner-operator section is checked by checkPublicOwnerOperatorTruck(), only with the flag on and the position, before the first query, audit row or email; 400 on refusal",
+		callsFirst(APPLY, "publicFormInput.checkPublicOwnerOperatorTruck(req.body.owner_operator)", ["db.prepare(", "sendEmail(", "logAudit("]) &&
+		APPLY.includes("if (OWNER_OPERATOR_ONBOARDING_ENABLED && ownerOperator.ooIsOwnerOperatorPosition(position)) {") &&
+		/if \(!truckCheck\.ok\) return res\.status\(400\)/.test(APPLY));
+	ok("OWNER_OPERATOR_TRUCK_FIELDS: each one scalar (checkPublicScalars over the list), each read by the check",
+		fields.length === 11 && fnSrc.includes("checkPublicScalars(raw, OWNER_OPERATOR_TRUCK_FIELDS)") && fields.every((f) => fnSrc.includes(f) || LIB_SRC.includes(`["${f}",`)));
+	const base = { truck_year: "2019", truck_make: "Madeup", truck_model: "Hauler 9", truck_vin: "1MDEXP0VT00000001", truck_plate: "QA-1234", truck_plate_state: "TX", truck_ownership: "own", registered_owner: "Alex Example" };
+	ok("OWNER_OPERATOR_TRUCK_FIELDS: a list in any of them is refused, naming it",
+		fields.every((f) => { const r = lib.checkPublicOwnerOperatorTruck({ ...base, [f]: ["x"] }); return r.ok === false && r.field === `owner_operator.${f}`; }));
+	const t0 = Date.now();
+	const huge = lib.checkPublicOwnerOperatorTruck({ ...base, business_name: `${" ".repeat(1 << 20)}x` });
+	ok("…an oversized value is refused before any pattern runs, quickly", huge.ok === false && huge.field === "owner_operator.business_name" && Date.now() - t0 < 1000);
+}
 ok("PUBLIC_INVESTOR_SCALAR_FIELDS = every field /api/public/investor-apply destructures, less vehicles/banking/signatures",
 	sameSet(investorList, bodyFields(INVEST).filter((f) => !["vehicles", "banking", "signatures"].includes(f))));
 // The payment terms invitation fields: one scalar each, checked before the

@@ -99,6 +99,8 @@
 "use strict";
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator directory check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -166,6 +168,8 @@ const SYNC_SRC = [liftFunction("findDirectoryRowForDriver"), liftFunction("findT
 const LOCK_SRC = liftFunction("userUpdateLockBlockers");
 // The pay fields PUT /api/drivers-directory/:id reads (scripts/test-pay-settings-admin-only.js).
 const DIRECTORY_PAY = new Function(`${liftFunction("parsePlainDecimal")}\n${liftFunction("directoryPayValue")}\nreturn directoryPayValue;`)();
+// The default row it hands the owner-operator directory check.
+const DIRECTORY_DEFAULT_ROW = new Function(`${liftConst("const DIRECTORY_DEFAULT_STRUCT = ")}\n${liftFunction("directoryDefaultRow")}\nreturn directoryDefaultRow;`)();
 // assignDriverToTruck() asks driverNameHeldByOtherSpelling() before it releases a
 // spacing variant of the driver's name, and keeps the carrier pairing through
 // syncOpenCarrierPairing().
@@ -364,7 +368,7 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		purgeUserSessions: () => 0,
 		logAudit: (req, action, entity, entityId, details) => log.audits.push({ action, details }),
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		refreshOwnSession: () => true,
 		normalizeDriverName: m.normalizeDriverName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -439,7 +443,7 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		syncCarrierDriverHistory: (rows) => log.history.push(rows),
 		logAudit: () => {},
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE, directoryDefaultRow: DIRECTORY_DEFAULT_ROW,
 		normalizeDriverName: m.normalizeDriverName,
 		isBuiltInPropertyName: m.isBuiltInPropertyName,
 		findDriverNameClash: m.findDriverNameClash,
@@ -486,7 +490,7 @@ function mountTrucks(db, { putSrc = ROUTES.truckPut, postSrc = ROUTES.truckPost,
 		// The success lines name the truck through it.
 		auditText: m.auditText,
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		canonicalDriverName: m.canonicalDriverName,
 		normalizeDriverName: m.normalizeDriverName,
 		reservedDriverNameRefusal: m.reservedDriverNameRefusal,
@@ -1250,7 +1254,7 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 		normalizeDriverName: m.normalizeDriverName,
 		chatDeskKey,
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
 		userVoiceNoteFiles: () => [],
 		removeUserVoiceNotes: () => 0,

@@ -47,6 +47,8 @@
 "use strict";
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator account check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -254,6 +256,7 @@ function makeApp() {
 		refreshOwnSession: () => true,
 		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
 		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
+		ooOnboarding: OO_NO_PROFILE,
 	};
 	const register = (method, src) => {
 		let handler = null;

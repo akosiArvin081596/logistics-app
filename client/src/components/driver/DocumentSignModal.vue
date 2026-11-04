@@ -37,9 +37,9 @@
               />
             </div>
 
-            <!-- Payment section (Contractor Agreement only) -->
-            <div v-if="isContractorAgreement" class="payment-section">
-              <div class="payment-title">Payment Method (Exhibit A)</div>
+            <!-- Payment section (the contractor agreement's Exhibit A; the owner-operator agreement's Schedule D) -->
+            <div v-if="hasPaymentSection" class="payment-section">
+              <div class="payment-title">Payment Method ({{ isOwnerOperatorAgreement ? 'Schedule D' : 'Exhibit A' }})</div>
               <div class="payment-radios">
                 <label class="payment-radio"><input type="radio" v-model="state.paymentMethod" value="check" :disabled="!state.agreed" /> Check</label>
                 <label class="payment-radio"><input type="radio" v-model="state.paymentMethod" value="ach" :disabled="!state.agreed" /> Direct Deposit (ACH)</label>
@@ -175,7 +175,7 @@ function blankState() {
     isDrawing: false,           // ⚠️ the gate draw() checks — must reset with the rest
     hasDrawn: false,            // arms the Sign button and the Clear link
     pdfUrlOverride: '',         // set after signing to show the signed PDF
-    // Payment info (contractor_agreement only) — bank routing and account
+    // Payment info (the two agreements, hasPaymentSection) — bank routing and account
     // numbers. Released on close, not merely overwritten on the next open.
     paymentMethod: '',
     checkName: '',
@@ -192,7 +192,10 @@ function blankState() {
 
 const state = ref(blankState())
 
-const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
+// The two agreements that carry the signer's payment details: the contractor
+// agreement and, for an owner-operator, his agreement (saved the same way).
+const isOwnerOperatorAgreement = computed(() => props.doc?.doc_key === 'owner_operator_agreement')
+const hasPaymentSection = computed(() => props.doc?.doc_key === 'contractor_agreement' || isOwnerOperatorAgreement.value)
 // A signed document a Super Admin asked to be signed again (ONBOARDING_RESIGN_ENABLED).
 const isResign = computed(() => isRequested(props.doc))
 
@@ -204,7 +207,7 @@ const pdfUrl = computed(() => {
 const canSign = computed(() => {
   const s = state.value
   if (!s.agreed || !s.signatureText.trim() || !s.hasDrawn || s.signing) return false
-  if (isContractorAgreement.value) {
+  if (hasPaymentSection.value) {
     if (!s.paymentMethod) return false
     if (s.paymentMethod === 'check' && !s.checkName.trim()) return false
     if (s.paymentMethod === 'ach' && (!s.bankName.trim() || !s.bankRouting.trim() || !s.bankAccount.trim() || !s.accountType)) return false
@@ -311,7 +314,7 @@ async function handleSign() {
   s.signing = true
   try {
     const signatureImage = canvasRef.value?.toDataURL('image/png') || null
-    const payInfo = isContractorAgreement.value ? {
+    const payInfo = hasPaymentSection.value ? {
       paymentMethod: s.paymentMethod,
       checkName: s.checkName,
       bankName: s.bankName,

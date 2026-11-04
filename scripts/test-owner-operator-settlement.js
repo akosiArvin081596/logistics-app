@@ -722,16 +722,21 @@ function schemaSection(c, L) {
 function inertSection(c) {
 	const names = ["OWNER_OPERATOR_ONBOARDING_ENABLED", "OWNER_OPERATOR_LOAD_PAY_ENABLED", "OWNER_OPERATOR_SETTLEMENTS_ENABLED", "OWNER_OPERATOR_ESCROW_ENABLED"];
 	const defs = { onboarding: names[0], loadPay: names[1], settlements: names[2], escrow: names[3] };
+	// From plan C PR 3 the onboarding flag gates the application branch and acceptance
+	// (scripts/test-owner-operator-onboarding.js); the other three are still read nowhere.
+	const READ_SINCE_PR3 = { OWNER_OPERATOR_ONBOARDING_ENABLED: true };
 	for (const [key, name] of Object.entries(defs)) {
 		c.ok(`§12 server.js defines ${name} from the module's reader`, SRC.includes(`\nconst ${name} = OO_FLAGS.${key};\n`));
-		c.eq(`§12 ...and nothing reads it`, SRC.split(new RegExp(`\\b${name}\\b`)).length - 1, 1);
+		if (!READ_SINCE_PR3[name]) c.eq(`§12 ...and nothing reads it`, SRC.split(new RegExp(`\\b${name}\\b`)).length - 1, 1);
 	}
 	c.ok("§12 the flags are read once, from the environment, through the module", SRC.split("ownerOperator.ooFlagsFromEnv(process.env)").length === 2);
 	c.ok("§12 one start-up line logs the four flags", SRC.split("console.log(ownerOperator.ooFlagsStartupLine(OO_FLAGS));").length === 2);
 	c.eq("§12 OO_FLAGS is used by the four flags and the start-up line only", SRC.split(/\bOO_FLAGS\b/).length - 1, 6);
 	const uses = [...new Set((SRC.match(/\bownerOperator\.[A-Za-z_]+/g) || []).map((m) => m.slice("ownerOperator.".length)))].sort();
-	c.eq("§12 server.js uses the module for the schema, the flags and the line only", uses, ["OO_EXPENSE_COLUMN_SQL", "OO_SCHEMA_SQL", "ooFlagsFromEnv", "ooFlagsStartupLine"]);
-	c.eq("§12 no SQL in server.js names a new table or column", ["owner_operator", "filed_by_role", "filed_by_user_id"].filter((n) => SRC.includes(n)), []);
+	c.eq("§12 server.js uses the module for the schema, the flags, the line and the application's category only", uses,
+		["OO_EXPENSE_COLUMN_SQL", "OO_SCHEMA_SQL", "ooFlagsFromEnv", "ooFlagsStartupLine", "ooIsOwnerOperatorPosition"]);
+	c.eq("§12 no SQL in server.js names a new table or column (lib/owner-operator-onboarding.js holds it)",
+		[...TABLES, "filed_by_role", "filed_by_user_id"].filter((n) => new RegExp(`\\b${n}\\b`).test(SRC)), []);
 	const start = SRC.indexOf('const ownerOperator = require("./lib/owner-operator");');
 	const end = SRC.indexOf("console.log(ownerOperator.ooFlagsStartupLine(OO_FLAGS));");
 	const region = start >= 0 && end > start ? SRC.slice(start, end) : "";

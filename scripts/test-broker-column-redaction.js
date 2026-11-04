@@ -79,6 +79,8 @@ const path = require("path");
 
 const SERVER = path.join(__dirname, "..", "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -688,7 +690,7 @@ function mountPut(routeSrc, M, rows) {
 		...KEY_HELPERS,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		ROW_EDITOR_CANCEL_GUARD_ENABLED: false,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
@@ -882,7 +884,7 @@ function mountPostData(routeSrc, M, rows) {
 	const env = {
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		getSheetName: () => "Job Tracking",
@@ -1143,7 +1145,7 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		...KEY_HELPERS,
 		app: { get: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		getJobTrackingCached: async () => cache,
 		liveJobTrackingView: VIEW.liveJobTrackingView,
 		findCol: VIEW.findCol,

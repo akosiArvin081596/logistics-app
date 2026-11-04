@@ -65,6 +65,8 @@ const { once } = require("events");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator account check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -432,7 +434,7 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		accountCompanyChange: new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
 		findDirectoryRowForDriver: () => null, investorCompanyMoves: () => [], investorCompanyLockBlockers: () => null,
 		notifyPasswordChanged: () => Promise.resolve({ recipients: 0, sent: 0 }), passwordRules, userPasswordResetLimiter: passThrough,
-		RATECON_PDF_VIEWERS: UNSET_VIEWERS,
+		RATECON_PDF_VIEWERS: UNSET_VIEWERS, ooOnboarding: OO_NO_PROFILE,
 	});
 	mount(SRCS.deleteUser, {
 		app, requireRole, db, recordPeriodRefusal: audit.recordPeriodRefusal, auditText: audit.auditText,

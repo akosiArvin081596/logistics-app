@@ -87,6 +87,8 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator checks on a row save, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
 
 let pass = 0, fail = 0;
@@ -461,6 +463,7 @@ function liftLoadPut(rows, errors, overrides = {}) {
 		normalizeLoadId, changedGuardedCells: () => [], guardedColumnReason: () => "", validateOwnerIdCell: () => null,
 		sheetRowUpdateBlocker: () => null, buildSheetUpdateAudit: (o) => o, sheetAuditWithCode: (d) => d,
 		logAudit: () => {}, logAuditRefusal: () => {}, jtCacheInvalidate: () => {}, notifyChange: () => {},
+		ooOnboarding: OO_NO_PROFILE,
 		console: quietConsole(errors),
 		...overrides,
 	});
@@ -841,6 +844,7 @@ function liftDataPut(rows, errors, overrides = {}) {
 		normalizeLoadId, changedGuardedCells: () => [], guardedColumnReason: () => "", validateOwnerIdCell: () => null,
 		sheetRowUpdateBlocker: () => null, buildSheetUpdateAudit: (o) => o, sheetAuditWithCode: (d) => d,
 		logAudit: () => {}, logAuditRefusal: () => {}, jtCacheInvalidate: () => {}, notifyChange: () => {},
+		ooOnboarding: OO_NO_PROFILE,
 		console: quietConsole(errors),
 		...overrides,
 	});

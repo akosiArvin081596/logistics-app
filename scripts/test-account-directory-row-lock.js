@@ -209,10 +209,15 @@ function makeApp({ server = null, createLimit = null } = {}) {
 	db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (7, 'acme', 'Investor', 'Acme Leasing')").run();
 	// The acting admin's own row: PUT /api/users/:id re-reads it after its awaits.
 	db.prepare("INSERT INTO users (id, username, role) VALUES (1, 'super_admin', 'Super Admin')").run();
+	// The owner-operator module over this database, with no owner-operator here
+	// (scripts/test-owner-operator-onboarding.js covers it).
+	const ooOnboarding = require("./lib/oo-onboarding-env").ooOnboardingEnv(db, { src: SRC }).ooOnboarding;
 	const m = new Function("db", "appTodayKey", "periodLocksReadable", "bcrypt", "sendEmail", "insertNotification", "notifyChange",
 		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
 		// The signing step's contacts rule, off here (its subject is test-emergency-contacts-routes.js §10).
 		"EMERGENCY_CONTACTS_ENABLED", "emergencyContactsCount", "emergencyContactRules",
+		// The owner-operator document set, with no profile here (scripts/test-owner-operator-onboarding.js).
+		"ooOnboarding",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04", () => true,
 		{ hash: async () => "hash" }, () => {}, { run() {} }, () => {},
@@ -221,7 +226,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 		(name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		(audit, code, periods, subject) => { S.recorded.push({ audit, code, periods, subject }); },
 		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test",
-		false, () => 0, require("../lib/emergency-contacts"));
+		false, () => 0, require("../lib/emergency-contacts"),
+		ooOnboarding);
 	let handler = null;
 	const env = {
 		app: server || { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
@@ -248,6 +254,7 @@ function makeApp({ server = null, createLimit = null } = {}) {
 		},
 		notifyChange: () => {},
 		console: { error() {}, log() {}, warn() {} },
+		ooOnboarding,
 	};
 	const names = Object.keys(env);
 	new Function(...names, USERS_ROUTE)(...names.map((k) => env[k]));

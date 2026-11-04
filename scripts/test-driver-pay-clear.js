@@ -46,6 +46,8 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator directory check, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0;
 const failures = [];
@@ -298,7 +300,7 @@ function mountAll(db, routes = {}) {
 		}),
 		directoryEditMayMoveMoney: new Function(`"use strict";\n${liftFunction("directoryEditMayMoveMoney")}\nreturn directoryEditMayMoveMoney;`)(),
 		notifyChange: () => {},
-		recordPayRateChanges: () => {},
+		recordPayRateChanges: () => {}, ooOnboarding: OO_NO_PROFILE,
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const post = mountRoute(r.dirPost, env);

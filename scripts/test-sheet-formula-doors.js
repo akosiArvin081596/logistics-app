@@ -51,6 +51,8 @@ const path = require("path");
 const rateconLoad = require("../lib/ratecon-load");
 
 const SRC = require("./lib/server-source").serverSource();
+// The owner-operator load checks, as with no owner-operator profile (scripts/test-owner-operator-onboarding.js).
+const OO_NO_PROFILE = require("./lib/oo-onboarding-env").ooOnboardingNoProfile();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -365,7 +367,7 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 	const env = {
 		app: { post: (p, gate, limiter, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		rateConLimiter: null,
 		formulaCellRefusal: H.formulaCellRefusal,
 		RATECON_SHEET_FIELDS,
@@ -654,7 +656,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 		...KEY_HELPERS,
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
-		DRIVER_AVAILABILITY_ENABLED: false,
+		DRIVER_AVAILABILITY_ENABLED: false, ooOnboarding: OO_NO_PROFILE,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db: { prepare: (sql) => ({
 			get: () => (/FROM users/.test(sql) ? (account ? { driver_name: account } : undefined)
