@@ -23,6 +23,7 @@
             <p class="dff-head" :class="{ 'dff-head-words': fuelView.top.kind !== 'miles' }">{{ fuelView.top.headline }}</p>
             <p class="dff-sub">{{ fuelView.top.sub }}</p>
             <p v-for="n in fuelView.top.notes" :key="n" class="dff-note">{{ n }}</p>
+            <p v-if="pickupLine" class="dff-note" data-testid="fuel-pickup-unconfirmed">{{ pickupLine }}</p>
             <p v-if="fuelView.top.readAgo" class="dff-stamp">{{ fuelView.top.readAgo }}</p>
           </div>
           <div v-for="row in fuelView.rows" :key="row.key" class="dff-row" :class="'row-' + row.tone" data-testid="driver-fuel-row">
@@ -70,6 +71,7 @@
              sunlight on a windshield-mounted phone. -->
         <p v-if="actionText" class="dfp-verdict-action">{{ actionText }}</p>
 
+        <p v-if="pickupLine" class="dfp-verdict-caveat" data-testid="fuel-pickup-unconfirmed">{{ pickupLine }}</p>
         <p v-for="c in planCaveats" :key="c" class="dfp-verdict-caveat">{{ c }}</p>
       </section>
 
@@ -399,6 +401,7 @@ import {
   tripVerdict,
   rangeEvidenceText,
   milesText,
+  pickupUnconfirmedLine,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
 import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
@@ -464,6 +467,8 @@ const interval = computed(() =>
   plan.value ? planRangeReadout(plan.value) : rangeReadout(range.value || {}),
 )
 const verdict = computed(() => (plan.value ? tripVerdict(plan.value.verdict) : null))
+// Why the plan counts the run to the shipper on a load marked picked up; on both screens.
+const pickupLine = computed(() => pickupUnconfirmedLine(plan.value))
 
 // The headline figure takes the VERDICT's colour when there is one, and falls
 // back to the fuel gauge otherwise. Two independent colour rules on one card

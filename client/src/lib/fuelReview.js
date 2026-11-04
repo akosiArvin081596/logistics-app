@@ -715,6 +715,15 @@ export function tripVerdict(value) {
   return TRIP_VERDICTS[value] || null;
 }
 
+// The driver's one line when the server flags `pickupUnconfirmed` on a trip plan:
+// the load's status says picked up, but the truck hasn't been seen at the shipper,
+// so the plan counts the run there. Pinned by scripts/test-fuel-approach-leg.js §11.
+export const PICKUP_UNCONFIRMED_LINE = 'Pickup not confirmed yet, so this plan includes the run to the shipper.';
+
+export function pickupUnconfirmedLine(plan) {
+  return plan && plan.pickupUnconfirmed === true ? PICKUP_UNCONFIRMED_LINE : '';
+}
+
 /**
  * Normalize the interval half of either fuel payload into ONE shape.
  *
