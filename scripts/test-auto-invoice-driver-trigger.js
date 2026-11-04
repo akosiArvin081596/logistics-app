@@ -77,12 +77,12 @@ const SENT = "[Gmail]/Sent Mail";
 
 const turn = () => new Promise((r) => setImmediate(r));
 const never = () => new Promise(() => {});
-// By the clock, not by turns: a run past its limit waits on a real timer, on a loaded CI box too.
-async function until(cond, label, ms = 3000) {
-	const end = Date.now() + ms;
-	while (Date.now() < end) {
+// By turns of the event loop, never the clock: nothing here waits on a real timer (a run's limit
+// passes only when a case calls w.passRunLimit()), so a loaded box can't change an outcome.
+async function until(cond, label, turns = 3000) {
+	for (let i = 0; i < turns; i++) {
 		if (cond()) return true;
-		await new Promise((r) => setTimeout(r, 1));
+		await turn();
 	}
 	failures.push(`${label}: the condition was never met`);
 	return false;
@@ -115,6 +115,7 @@ function makeWorld() {
 		closed: () => [],
 		ids: 0,
 		invalidated: 0,
+		runLimits: [],
 	};
 	w.db = new Database(":memory:");
 	w.db.exec(`
@@ -265,8 +266,22 @@ function makeWorld() {
 			return w.lookAnswer;
 		},
 		sleep: async (ms) => { w.calls.sleep.push(ms); },
+		setTimer: (fn, ms) => {
+			const limit = { fn, ms, live: true };
+			w.runLimits.push(limit);
+			return limit;
+		},
+		clearTimer: (limit) => { limit.live = false; },
 		...extra,
 	});
+	// The oldest run still going passes its limit, now.
+	w.passRunLimit = () => {
+		const limit = w.runLimits.find((x) => x.live);
+		if (!limit) return false;
+		limit.live = false;
+		limit.fn();
+		return true;
+	};
 	w.job = (extra = {}) => jobLib.create(w.deps(extra));
 	w.claim = (id) => w.db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(rules.loadKey(id)) || null;
 	w.state = (id) => {
@@ -1336,12 +1351,16 @@ async function main() {
 	{
 		// A attempt stuck in its build, past the limit; a person presses Try again; A wakes.
 		const w = makeWorld();
-		const job = await w.started({ runLimitMs: 5 });
+		const job = await w.started();
 		w.ready("LD-TEST-1001");
 		const stuck = gate();
 		let renders = 0;
 		w.renderHook = async () => { renders++; if (renders === 1) await stuck.p; };
 		tap(w, job, "LD-TEST-1001");
+		await until(() => renders === 1, "§11 attempt A is in its build");
+		eq([w.runLimits.filter((x) => x.live).map((x) => x.ms), jobLib.LEASE_MS], [[15 * MIN], 15 * MIN], "§11 FAILS ON THE OLD DESIGN: each run has a limit of 15 minutes, the lease's");
+		eq(w.claim("LD-TEST-1001").state, "working", "§11 ...and until it passes, the run keeps its claim");
+		ok(w.passRunLimit(), "§11 attempt A passes its limit");
 		await until(() => w.claim("LD-TEST-1001").state === "needs_attention", "§11 past the limit");
 		const c1 = w.claim("LD-TEST-1001");
 		eq([c1.state, c1.reason_code, c1.lease_owner], ["needs_attention", "DRAFT_FAILED", ""], "§11 FAILS ON THE OLD DESIGN: past the limit, by its stage: a person");
@@ -1374,11 +1393,13 @@ async function main() {
 
 		// Stuck at the SMTP call itself: a send that started is only ever searched for.
 		const s = makeWorld();
-		const sj = await s.started({ runLimitMs: 5 });
+		const sj = await s.started();
 		s.ready("LD-TEST-1003");
 		const inSmtp = gate();
 		s.smtpHook = () => inSmtp.p;
 		tap(s, sj, "LD-TEST-1003");
+		await until(() => s.smtp.length === 1, "§11 the run is in its SMTP call");
+		ok(s.passRunLimit(), "§11 it passes its limit there");
 		await until(() => s.claim("LD-TEST-1003").state === "needs_attention", "§11 stuck in SMTP");
 		const c3 = s.claim("LD-TEST-1003");
 		eq([c3.state, c3.reason_code, c3.stage, c3.delivery, Boolean(ledger.getSendStop(s.db))], ["needs_attention", "MAYBE_SENT", "appending", "send", true], "§11 FAILS ON THE OLD DESIGN: stuck in SMTP: MAYBE_SENT and the stop");
@@ -1397,14 +1418,47 @@ async function main() {
 
 		// A run past the limit at a draft's append.
 		const d = makeWorld();
-		const dj = await d.started({ runLimitMs: 5 });
+		const dj = await d.started();
 		d.ready("LD-TEST-1004", { Email: OTHER }, "billing@example-other.test");
 		const inAppend = gate();
 		d.recordHook = () => inAppend.p;
 		tap(d, dj, "LD-TEST-1004");
+		await until(() => d.calls.record === 1, "§11 the run is recording its draft");
+		ok(d.passRunLimit(), "§11 it passes its limit there");
 		await until(() => d.claim("LD-TEST-1004").state === "needs_attention", "§11 stuck recording");
 		eq([d.state("LD-TEST-1004"), d.appends.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1], "§11 stuck recording a draft: IN_GMAIL_UNRECORDED");
 		inAppend.open();
+
+		// The job's own default timer, still with no clock: setTimeout is held here, and this case
+		// fires the one the run asked for. Everything above hands the job its own.
+		const plain = makeWorld();
+		plain.meta("baseline_at", iso(T0 - 24 * HOUR));
+		plain.meta("trigger_on_at", iso(T0 - HOUR));
+		const plainDeps = plain.deps();
+		delete plainDeps.setTimer;
+		delete plainDeps.clearTimer;
+		const realSetTimeout = globalThis.setTimeout;
+		const asked = [];
+		globalThis.setTimeout = (fn, ms) => {
+			asked.push({ fn, ms });
+			return { unref() {} };
+		};
+		try {
+			const plainJob = jobLib.create(plainDeps);
+			plainJob.startTrigger();
+			await plainJob.finishStartUp();
+			plain.ready("LD-TEST-1005");
+			plain.renderHook = never;
+			tap(plain, plainJob, "LD-TEST-1005");
+			await until(() => plain.calls.render === 1, "§11 the default timer: the run is in its build");
+			const limit = asked.find((x) => x.ms === 15 * MIN);
+			ok(limit, "§11 FAILS ON THE OLD DESIGN: by default a run asks for a real timer of 15 minutes");
+			if (limit) limit.fn();
+			await until(() => plain.claim("LD-TEST-1005").state === "needs_attention", "§11 the default timer: past the limit");
+			eq(plain.state("LD-TEST-1005"), ["needs_attention", "DRAFT_FAILED"], "§11 FAILS ON THE OLD DESIGN: ...and when it fires, the stuck run is closed");
+		} finally {
+			globalThis.setTimeout = realSetTimeout;
+		}
 	}
 
 	section("§12 the watching");

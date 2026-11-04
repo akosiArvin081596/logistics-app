@@ -992,9 +992,10 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 	{
 		const SEND_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test", ...MAILBOX });
 		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
-		// By the clock, not by turns: the engine and the MIME builder do real work here.
+		// By the clock, not by turns: the engine and the MIME builder do real work here. Only a
+		// failure ever waits this long, so the budget is generous for a loaded box.
 		const until = async (cond, label) => {
-			const end = Date.now() + 10000;
+			const end = Date.now() + 30000;
 			while (Date.now() < end) {
 				if (cond()) return true;
 				await new Promise((r) => setTimeout(r, 2));
