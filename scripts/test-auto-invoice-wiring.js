@@ -106,7 +106,8 @@ const BROKER = "ops@example-broker.test";
 const BILLING = "billing@example-broker.test";
 const MAILBOX = Object.freeze({ GMAIL_USER: "drafts@example.com", GMAIL_APP_PASSWORD: "made-up-app-password" });
 const SHADOW_ENV = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", ...MAILBOX });
-const ON_ENV = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", ...MAILBOX });
+// The 5-minute sweep, §12 and §13 turn the driver's trigger on; off leaves every case here exact.
+const ON_ENV = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false", ...MAILBOX });
 const SA = Object.freeze({ id: 1, username: "made_up_admin", role: "Super Admin" });
 const DISP = Object.freeze({ id: 2, username: "made_up_dispatcher", role: "Dispatcher" });
 const CONFIRMED = Object.freeze({ optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] });
