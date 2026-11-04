@@ -18,6 +18,9 @@
          `_instructions`); what it shows is the server's (LoadInstructions.vue). -->
     <LoadInstructions v-if="load._instructions" :load-id="String(loadId || '')" :summary="load._instructions" />
 
+    <!-- The arrival pickup date's read-only line: the server's facts, worded by lib/pickupArrival.js. -->
+    <p v-if="pickupArrivalText" class="pickup-arrival" role="note">{{ pickupArrivalText }}</p>
+
     <!-- Phone-GPS outcome. Shown ONLY on the load whose Navigate button was
          actually tapped — DriverView folds that match into `phoneGpsModeActive`,
          because the status behind it is a module singleton and would otherwise
@@ -279,6 +282,7 @@ import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCe
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
 import { driverFuelOf, driverFuelBadge } from '../../lib/driverFuelView.js'
+import { pickupArrivalLine } from '../../lib/pickupArrival.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusTimeline from '../shared/StatusTimeline.vue'
 import StatusStepper from './StatusStepper.vue'
@@ -507,6 +511,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
 })
 
+const pickupArrivalText = computed(() => pickupArrivalLine(props.load))
+
 // May the driver add a receipt here? The SERVER's verdict for this load
 // (`_expenseWindow`, from GET /api/driver/:driverName — active, or delivered
 // within the last 7 days), re-checked against this phone's clock (nowTick). Never
@@ -605,6 +611,16 @@ const dropoffFields = computed(() => {
   background: var(--bg);
   border-radius: 8px;
   margin-bottom: 0.75rem;
+}
+
+/* Information only, so neutral, like the route banner above it. */
+.pickup-arrival {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  line-height: 1.4;
 }
 
 /* Status update lives inside a van-collapse-item now (toggleable like

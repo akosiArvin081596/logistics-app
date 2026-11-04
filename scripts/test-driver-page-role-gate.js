@@ -261,6 +261,9 @@ function makeDeps() {
 		driverTrainingVideos: { trainingVideoPlacement: () => { throw new Error("trainingVideoPlacement() ran with DRIVER_TRAINING_VIDEOS_ENABLED off"); } },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
+		// The arrival pickup line: off here (scripts/test-arrival-pickup-pay-paths.js §D
+		// pins who receives it), so it adds nothing.
+		annotatePickupArrival: () => 0,
 		// The stepper's GPS phases (§9): off here, so rows go back as they came.
 		driverGpsPhases: { annotate: (rows) => rows },
 	};
