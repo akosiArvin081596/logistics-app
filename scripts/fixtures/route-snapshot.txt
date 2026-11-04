@@ -147,7 +147,7 @@ PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12
 PATCH /api/expenses/:id/vendor · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f6b7ed0bc20
 GET /api/expenses/ai/insights · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · insightsCacheGate@9f2abb4009f7 · expenseAiLimiter=limiter · inline@f4a9780b3065
 POST /api/expenses/ai/query · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseAiLimiter=limiter · inline@6a4671ec31e4
-GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f2654f4473a3
+GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3cb852099588
 GET /api/expenses/analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@9a36473ed670
 DELETE /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@b0ffc7c60693
 GET /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@cf7e89f29561
@@ -287,7 +287,7 @@ GET /api/passenger-authorizations/feature · requireAuth@2f5c61384511 · anon@e7
 GET /api/passenger-authorizations/form.pdf · anon@12b84c4b0134 · off@3f0f32b06a54 · limiter · needAccount@7073adea5729 · anon@fb32eb94c120 · (lib mount)
 GET /api/payouts · requireRole("Super Admin")=anon@12b84c4b0134 · inline@cdcd07154fc0
 GET /api/periods · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a1b746082b35
-POST /api/periods/:period/finalize · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@bd09f81f9ef3
+POST /api/periods/:period/finalize · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@b740e0525260
 POST /api/periods/:period/reopen · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@d263c86e2a5b
 GET /api/poi/fuel-stops · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · poiLimiter=limiter · inline@11a96f7acab9
 POST /api/public/apply · publicFormLimiter=limiter · inline@0e5c9abc3339
