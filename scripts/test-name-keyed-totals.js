@@ -491,9 +491,13 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
+		factoringRoutes: { annotateDashboard() {} },
 		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
 		// as with their flag off.
 		annotateDashboardPickupReview: () => 0,
+		// The arrival pickup line (its own runners cover it): inert here, as with its flag off.
+		annotatePickupArrival: () => 0,
 		// GET /api/dashboard requires lib/load-search-refs.js inline.
 		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, "..", p) : p),
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },

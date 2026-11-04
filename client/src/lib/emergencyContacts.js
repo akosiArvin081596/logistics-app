@@ -17,6 +17,11 @@ export const RELATIONSHIP_SUGGESTIONS = Object.freeze(['Spouse', 'Partner', 'Par
 // The driver's own list: the only route the phone reads or writes.
 export const CONTACTS_URL = '/api/driver/me/emergency-contacts'
 
+// The five documents the signing step needs, as server.js's ONBOARDING_DOCS lists
+// them (scripts/test-emergency-contacts-client.mjs pins the two equal). A signed
+// document under any other key never counts, as on the server.
+export const ONBOARDING_DOC_KEYS = Object.freeze(['contractor_agreement', 'equipment_policy', 'w9', 'mobile_policy', 'substance_policy'])
+
 // What the phone says for each refusal code, the server's and its own.
 export const MESSAGES = Object.freeze({
   INVALID_BODY: 'This list could not be read. Close it and try again.',
@@ -34,6 +39,16 @@ export const MESSAGES = Object.freeze({
   TOO_MANY: 'Too many changes in a short time. Wait a few minutes, then try again.',
   OFFLINE: 'Couldn\'t reach LogisX. Check your signal and try again.',
   SESSION_ENDED: 'Your session ended. Sign in again.',
+  NO_DRIVER_ACCOUNT: 'No driver account is linked to this directory row. Contacts are kept on the driver\'s sign-in account.',
+  DRIVER_ACCOUNT_AMBIGUOUS: 'Two driver accounts match this name. Fix the names first.',
+  DRIVER_NOT_FOUND: 'This driver is not in the Drivers directory.',
+  INVALID_DRIVER_ID: 'This driver is not in the Drivers directory.',
+})
+
+// The office screens' words for a failed read or save: about the driver, not "your".
+const STAFF_WORDS = Object.freeze({
+  READ_FAILED: 'This driver\'s emergency contacts couldn\'t be loaded. Try again.',
+  SAVE_FAILED: 'This driver\'s emergency contacts couldn\'t be saved. Try again.',
 })
 
 // One character each.
@@ -165,6 +180,30 @@ export function refusalText(err, fallback = 'SAVE_FAILED') {
   return MESSAGES[fallback] || MESSAGES.SAVE_FAILED
 }
 
+// refusalText() for the office panel.
+export function staffRefusalText(err, fallback = 'SAVE_FAILED') {
+  const text = refusalText(err, fallback)
+  if (text === MESSAGES.READ_FAILED) return STAFF_WORDS.READ_FAILED
+  if (text === MESSAGES.SAVE_FAILED) return STAFF_WORDS.SAVE_FAILED
+  return text
+}
+
+// A 404 FEATURE_OFF: EMERGENCY_CONTACTS_ENABLED is off on the server.
+export function isFeatureOff(err) {
+  return !!err && err.status === 404 && err.code === 'FEATURE_OFF'
+}
+
+// A Drivers page row's list: the office screens' only contacts route (Super Admin
+// and Dispatcher). null for anything but a positive whole id.
+export function staffContactsUrl(directoryId) {
+  return Number.isSafeInteger(directoryId) && directoryId > 0 ? `/api/drivers-directory/${directoryId}/emergency-contacts` : null
+}
+
+// The staff GET's linked:false reason in words.
+export function linkedText(reason) {
+  return reason === 'ambiguous' ? MESSAGES.DRIVER_ACCOUNT_AMBIGUOUS : MESSAGES.NO_DRIVER_ACCOUNT
+}
+
 export function blankRow() {
   return { id: null, name: '', relationship: '', phone: '' }
 }
@@ -197,6 +236,66 @@ export function listToSend(rows) {
   return { body: { contacts }, rowOf }
 }
 
+// A name, relationship and number as the server would store them, or null.
+function storedKey(name, relationship, phone) {
+  const n = cleanContactText(name, CONTACT_NAME_MAX)
+  const r = cleanContactText(relationship, RELATIONSHIP_MAX)
+  const p = normalizePhone(phone)
+  return n.ok && r.ok && p.ok ? `${n.value}\u0000${r.value}\u0000${p.e164}` : null
+}
+
+// After a save whose answer was lost the list may be stored already: each row with
+// no id takes the id of a stored contact it matches as stored, one row per contact,
+// so the next Save changes nothing instead of replacing the list with copies.
+export function adoptStoredIds(rows, stored) {
+  const list = Array.isArray(rows) ? rows : []
+  const held = new Set(list.map((r) => (isPlainObject(r) ? r.id : null)).filter((id) => Number.isSafeInteger(id) && id > 0))
+  const free = (Array.isArray(stored) ? stored : [])
+    .filter((c) => isPlainObject(c) && Number.isSafeInteger(c.id) && c.id > 0 && !held.has(c.id))
+    .map((c) => ({ id: c.id, key: storedKey(c.name, c.relationship, c.phone) }))
+  return list.map((row) => {
+    if (!isPlainObject(row) || row.id !== null) return row
+    const key = storedKey(row.name, row.relationship, row.phone)
+    const hit = key === null ? -1 : free.findIndex((c) => c.key === key)
+    if (hit < 0) return row
+    const [c] = free.splice(hit, 1)
+    return { ...row, id: c.id }
+  })
+}
+
+// A field's text cut to `limit` UTF-16 units, the length the server counts, never
+// splitting a character in two (Vant's maxlength counts characters instead).
+export function clampToLimit(value, limit) {
+  if (typeof value !== 'string') return ''
+  if (value.length <= limit) return value
+  const cut = value.slice(0, limit)
+  const last = cut.charCodeAt(cut.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut
+}
+
+// A stored number fit to dial: + and 8 to 15 digits, the first not 0, or ''.
+function telNumber(phone) {
+  if (typeof phone !== 'string' || phone.length < 9 || phone.length > 16 || phone[0] !== '+' || phone[1] === '0') return ''
+  for (const ch of phone.slice(1)) if (ch < '0' || ch > '9') return ''
+  return phone
+}
+
+// The stored contacts as a list shows them: the number as the server shows it, and
+// a tel: link built from the stored E.164 number only.
+export function contactLines(contacts) {
+  return (Array.isArray(contacts) ? contacts : []).filter(isPlainObject).slice(0, MAX_CONTACTS).map((c, i) => {
+    const tel = telNumber(c.phone)
+    return {
+      id: Number.isSafeInteger(c.id) ? c.id : null,
+      primary: i === 0,
+      name: typeof c.name === 'string' ? c.name : '',
+      relationship: typeof c.relationship === 'string' ? c.relationship : '',
+      phone: typeof c.phoneDisplay === 'string' && c.phoneDisplay ? c.phoneDisplay : tel,
+      tel: tel ? `tel:${tel}` : null,
+    }
+  })
+}
+
 const wholeAtLeast = (n, min, fallback) => (Number.isInteger(n) && n >= min ? n : fallback)
 
 // The driver payload's emergencyContacts as the store keeps it: the three counts and
@@ -219,12 +318,19 @@ export function contactsItem(counts) {
   return { required, onFile, done, label: done ? `${onFile} added` : `${onFile} of ${required} added`, action: onFile > 0 ? 'Edit' : 'Add' }
 }
 
+// How many of the five documents the payload's rows show signed.
+export function requiredSignedCount(documents) {
+  if (!Array.isArray(documents)) return 0
+  const signedKeys = new Set(documents.filter((d) => isPlainObject(d) && d.signed).map((d) => d.doc_key))
+  return ONBOARDING_DOC_KEYS.filter((k) => signedKeys.has(k)).length
+}
+
 // Step 1 of the lock screen as the server judges it (onboardingSigningStepState()):
-// the documents, and the contacts item while the step is open (documents_pending).
-// A driver already past it sees the item but is never shown a lower percentage.
+// the documents, and the contacts item while the step is open or once it is done
+// (so the count never drops on completion). Past the step, never a lower percentage.
 export function signingStepView({ status, signed, total, counts }) {
   const item = contactsItem(counts)
-  const counted = !!item && status === 'documents_pending'
+  const counted = !!item && (status === 'documents_pending' || item.done)
   const docsTotal = Number.isInteger(total) && total > 0 ? total : 0
   const docsSigned = Number.isInteger(signed) && signed > 0 ? Math.min(signed, docsTotal) : 0
   const done = docsSigned + (counted && item.done ? 1 : 0)
@@ -237,4 +343,16 @@ export function signingStepView({ status, signed, total, counts }) {
     pct: of > 0 ? Math.round((done / of) * 100) : 0,
     stepDone: docsTotal > 0 && docsSigned >= docsTotal && (!item || item.done || status !== 'documents_pending'),
   }
+}
+
+// Whether the sign-in prompt for emergency contacts may show now. The caller asks
+// again whenever an input changes, so a prompt held back (another window up, the
+// load page where Drive Mode lives, a moving truck) waits instead of being skipped.
+export function contactsPromptDue(s) {
+  if (!isPlainObject(s) || s.role !== 'Driver') return false
+  const counts = contactCounts(s.counts)
+  if (!counts || counts.onFile >= counts.required) return false
+  if (s.onboarding !== false || s.loaded !== true || s.answered !== false) return false
+  if (s.welcomeOpen || s.loadOpen || s.dialogOpen) return false
+  return s.motionAllowed === true
 }

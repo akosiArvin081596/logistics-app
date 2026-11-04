@@ -61,6 +61,8 @@ import { useSocket } from '../../composables/useSocket'
 import { useDispatchNotificationsStore } from '../../stores/dispatchNotifications'
 import { useViewport } from '../../composables/useViewport'
 import { useAppShellStore } from '../../stores/appShell'
+import { useApi } from '../../composables/useApi'
+import { usePassengerAuthorizationFeature } from '../../composables/usePassengerAuthorizationFeature'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -135,6 +137,7 @@ const navConfig = {
     { divider: true, label: 'Applications' },
     { to: '/applications', icon: '&#128221;', label: 'Driver Applications' },
     { to: '/investor-applications', icon: '&#128188;', label: 'Investor Applications' },
+    { to: '/admin/passenger-authorizations', icon: '&#128101;', label: 'Passenger Authorizations', feature: 'passengerAuthorization' },
     { divider: true, label: 'System' },
     { to: '/analytics', icon: '&#128202;', label: 'Mileage Analytics' },
     { to: '/admin/financials', icon: '&#128200;', label: 'Financials' },
@@ -144,6 +147,8 @@ const navConfig = {
     { to: '/admin/data-issues', icon: '&#9888;', label: 'Data Issues' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
+    { divider: true, label: 'Integrations' },
+    { to: '/admin/integrations/chr', icon: '&#128279;', label: 'C.H. Robinson' },
   ],
   Dispatcher: [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
@@ -163,7 +168,12 @@ const navConfig = {
   Driver: [],
 }
 
-const navItems = computed(() => navConfig[auth.user?.role] || [])
+// The entry shows only while the server says the feature is on, and only a Super Admin
+// asks; the page and every route it calls refuse other roles whatever this says.
+const passengerAuthEnabled = auth.user?.role === 'Super Admin' ? usePassengerAuthorizationFeature(useApi()) : ref(false)
+
+const navItems = computed(() => (navConfig[auth.user?.role] || [])
+  .filter((item) => item.feature !== 'passengerAuthorization' || passengerAuthEnabled.value === true))
 
 async function handleLogout() {
   await auth.logout()

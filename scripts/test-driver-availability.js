@@ -91,6 +91,13 @@
 //       correction of 2026-10-31)
 //   §22 the 06:00 tick and its marker; a failed run leaves the marker
 //
+// A driver's request (plan B Revision 2, PR 4; §1 also gains the five columns
+// and the production migration path, §15 the check on approved rows only):
+//   §23 a waiting or declined request never warns dispatch, never shows in the
+//       staff list or the driver's own rows, can't be edited or cancelled by
+//       staff, and pauses no dark-ELD alert; an approved one does all of that as
+//       time off (the requests flag off: the filter is not behind it)
+//
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // and sweep lifted out of server.js on an in-memory SQLite, over HTTP.
 // Run: node scripts/test-driver-availability.js
@@ -126,8 +133,8 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		try { run(db); run(db); } catch (err) { threw = err.message; }
 		eq("§1.2 the migration runs twice without error", threw, null);
 		const cols = db.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name);
-		eq("§1.3 its columns", cols, ["id", "directory_id", "driver_name", "kind", "from_date", "to_date", "reason", "created_by",
-			"created_by_user_id", "created_at", "updated_at", "cancelled_at", "cancelled_by"]);
+		eq("§1.3 its columns, a driver's request's five (PR 4) and its home time's two (H1) last", cols, ["id", "directory_id", "driver_name", "kind", "from_date", "to_date", "reason", "created_by",
+			"created_by_user_id", "created_at", "updated_at", "cancelled_at", "cancelled_by", "request_status", "source", "decided_by", "decided_by_user_id", "decided_at", "home_city", "home_state"]);
 		ok("§1.4 the (directory_id, from_date) index exists",
 			db.prepare("PRAGMA index_list(driver_availability)").all().some((i) => i.name === "idx_driver_avail_dir"));
 		eq("§1.4b the same migration records \"Assign anyway\" confirmations, with the load's window",
@@ -140,6 +147,67 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			} catch { return "refused"; }
 		};
 		eq("§1.5 the table refuses an unknown kind and a reversed range", [ins("sick", "2026-10-01", "2026-10-02"), ins("vacation", "2026-10-05", "2026-10-02"), ins("off_duty", "2026-10-01", "2026-10-01")], ["refused", "refused", "ok"]);
+		const status = (v) => {
+			try { db.prepare("UPDATE driver_availability SET request_status = ? WHERE id = 1").run(v); return "ok"; } catch { return "refused"; }
+		};
+		eq("§1.5b ...and a request status or source it doesn't know", [status("pending"), status("declined"), (() => {
+			try { db.prepare("UPDATE driver_availability SET source = 'investor' WHERE id = 1").run(); return "ok"; } catch { return "refused"; }
+		})()], ["refused", "ok", "refused"]);
+
+		// The production path (plan B Revision 2, review 1 M2): the table as it was
+		// before PR 4, with a live row, then addTimeOffRequestColumns() at boot, twice.
+		// It adds the request's five columns and (H1) the home time's two.
+		const REQUEST_COLS = ["request_status", "source", "decided_by", "decided_by_user_id", "decided_at", "home_city", "home_state"];
+		const { decls } = require("./lib/server-lift").indexDeclarations(W.SRC);
+		const fn = (name) => (decls.get(name) || {}).text || "";
+		ok("§1.6 server.js has addTimeOffRequestColumns(), called once at boot", !!fn("addTimeOffRequestColumns") && (W.SRC.match(/^addTimeOffRequestColumns\(\);$/gm) || []).length === 1);
+		if (!fn("addTimeOffRequestColumns")) return;
+		const oldCreate = m[0].split("\n").filter((l) => !REQUEST_COLS.some((c) => l.trim().startsWith(`${c} `))).join("\n");
+		const prod = new Database(":memory:");
+		new Function("db", oldCreate)(prod);
+		prod.exec("CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY, driver_name TEXT)");
+		prod.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (1, 'Hollis Renner')").run();
+		prod.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
+			VALUES (1, 'Hollis Renner', 'vacation', '2026-10-14', '2026-10-20', 'Family', 'super_admin', 1, '2026-10-01T12:00:00Z')`).run();
+		eq("§1.6b the old table has production's 13 columns", prod.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name), cols.slice(0, 13));
+		const add = new Function("db", `${fn("addTimeOffRequestColumns")}\nreturn addTimeOffRequestColumns;`)(prod);
+		const snap = () => JSON.stringify([prod.prepare("SELECT sql FROM sqlite_master WHERE name = 'driver_availability'").get(), prod.prepare("SELECT * FROM driver_availability").all()]);
+		add();
+		const once = snap();
+		eq("§1.7 after it, the seven columns exist, in the CREATE's order", prod.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name), cols);
+		const row = prod.prepare("SELECT request_status, source, decided_by, decided_by_user_id, decided_at FROM driver_availability").get();
+		eq("§1.8 ...the live row reads approved and staff, nothing decided", row, { request_status: "approved", source: "staff", decided_by: null, decided_by_user_id: 0, decided_at: null });
+		const hub = new Function("db", "driverAvailability", `${fn("normalizeDriverName")}\n${fn("driverAvailabilityByName")}\nreturn driverAvailabilityByName;`)(prod, require("../lib/driver-availability"));
+		const byName = hub("2026-10-15");
+		const held = byName instanceof Map ? byName.get("hollis renner") : byName["hollis renner"];
+		eq("§1.9 ...and driverAvailabilityByName() still returns it", (held || []).map((r) => [r.id, r.from_date, r.to_date]), [[1, "2026-10-14", "2026-10-20"]]);
+		add();
+		eq("§1.10 a second run changes nothing (the table's SQL and its rows)", snap(), once);
+		const alters = [...fn("addTimeOffRequestColumns").matchAll(/ALTER TABLE driver_availability ADD COLUMN (\w+) ([^"]+)"/g)].map((x) => [x[1], `${x[1]} ${x[2]}`]);
+		const created = REQUEST_COLS.map((c) => [c, (m[0].split("\n").find((l) => l.trim().startsWith(`${c} `)) || "").trim().replace(/,$/, "")]);
+		eq("§1.11 each ALTER's column definition is the CREATE's, word for word", alters, created);
+		const ro = new Database(":memory:");
+		new Function("db", oldCreate)(ro);
+		ro.pragma("query_only = ON");
+		let failed = null;
+		try { new Function("db", `${fn("addTimeOffRequestColumns")}\nreturn addTimeOffRequestColumns;`)(ro)(); } catch (err) { failed = err.message; }
+		ok("§1.12 an ALTER that fails for any other reason throws, so the start stops", !!failed, String(failed));
+
+		// H1 after PR 4: a table that already has the request's columns, with a driver's
+		// approved request, gains only the home time's two, empty, and nothing else moves.
+		const HOME_COLS = ["home_city", "home_state"];
+		const pr4Create = m[0].split("\n").filter((l) => !HOME_COLS.some((c) => l.trim().startsWith(`${c} `))).join("\n");
+		const pr4 = new Database(":memory:");
+		new Function("db", pr4Create)(pr4);
+		pr4.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source, decided_by, decided_at)
+			VALUES (1, 'Hollis Renner', 'off_duty', '2026-11-09', '2026-11-13', '', 'drv_hollis', 10, '2026-10-30T12:00:00Z', 'approved', 'driver', 'dispatch_t', '2026-10-31T12:00:00Z')`).run();
+		const beforeRow = pr4.prepare("SELECT * FROM driver_availability").get();
+		new Function("db", `${fn("addTimeOffRequestColumns")}\nreturn addTimeOffRequestColumns;`)(pr4)();
+		const afterRow = pr4.prepare("SELECT * FROM driver_availability").get();
+		const pr4Cols = pr4.prepare("PRAGMA table_info(driver_availability)").all().map((c) => c.name);
+		eq("§1.13 H1 on a table PR 4 already widened: the two home columns added last, empty on the existing request, the rest as it was",
+			[pr4Cols.length, pr4Cols.slice(-2), afterRow.home_city === null && afterRow.home_state === null, { ...afterRow, home_city: undefined, home_state: undefined }],
+			[20, ["home_city", "home_state"], true, { ...beforeRow, home_city: undefined, home_state: undefined }]);
 	});
 
 	section("§2 create");
@@ -946,6 +1014,22 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§15.7 L10: the unchanged second run writes no second audit row for it", w.audits("driver_time_off_eld_check").filter((a) => a.details.startsWith("off 2026-10-12")).length, 1);
 		ok("§15.8 no position stored: the table has no latitude or longitude column",
 			!w.db.prepare("PRAGMA table_info(driver_time_off_days)").all().some((c) => /lat|lng|lon/i.test(c.name)));
+		// PR 4: only approved time off is judged. His own requests over finished days,
+		// one waiting and one declined, are never judged; an approved one is.
+		const asked = (from, to, status) => Number(w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+			request_status, source, decided_by, decided_at) VALUES (?, 'Hollis Renner', 'off_duty', ?, ?, '', 'drv_hollis', ?, '2026-09-25T12:00:00Z', ?, 'driver', ?, ?)`)
+			.run(DIR.hollis, from, to, USERS.driver.id, status, status === "requested" ? null : "dispatch_t", status === "requested" ? null : "2026-09-26T12:00:00Z").lastInsertRowid);
+		const waiting = asked("2026-10-01", "2026-10-02", "requested");
+		const declined = asked("2026-10-03", "2026-10-04", "declined");
+		const approved = asked("2026-10-10", "2026-10-11", "approved");
+		const auditsBefore = w.audits("driver_time_off_eld_check").length;
+		await runCheck(w);
+		eq("§15.9 PR 4: his waiting and declined requests are never judged (no day rows); his approved one is, like any time off",
+			[dayRows(w, waiting).length, dayRows(w, declined).length, dayRows(w, approved).map((d) => [d.day, d.state])], [0, 0, [["2026-10-10", "confirmed"], ["2026-10-11", "confirmed"]]]);
+		eq("§15.10 ...one audit row more, for the approved one only", w.audits("driver_time_off_eld_check").slice(auditsBefore).map((a) => a.details.slice(0, 26)), ["off 2026-10-10..2026-10-11"]);
+		const panel = await list(w, DIR.hollis);
+		const keysOf = (id) => { const r = panel.body.rows.find((x) => x.id === id); return r ? ["eldDays", "eldSummary"].filter((k) => k in r) : null; };
+		eq("§15.11 ...and staff see ELD results on the approved one only", [keysOf(waiting), keysOf(declined), keysOf(approved)], [[], [], ["eldDays", "eldSummary"]]);
 	});
 
 	section("§16 notices, follow-ups and late pings");
@@ -1141,6 +1225,52 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		w.db.exec("DROP TABLE driver_time_off_days");
 		eq("§22.4 a failed run leaves the marker, so the next tick tries again", [await w.api.timeOffEldCheckTick(), mark()], [null, "2026-10-15"]);
 		ok("§22.5 ...and says so once in the log", w.logs.some((l) => /\[time-off-eld\] run failed/.test(l)), w.logs.join(" | ").slice(0, 200));
+	});
+
+	// ── A driver's request (plan B Revision 2, PR 4) ─────────────────────────────
+	// Only approved time off counts, whatever DRIVER_TIME_OFF_REQUESTS_ENABLED says
+	// (off here): a request still waiting or declined never warns dispatch and
+	// never shows as time off. Rows are written as the request routes leave them.
+	section("§23 waiting and declined requests count for nothing; approved ones count");
+	await R.guard("§23", async () => {
+		const w = await W.startWorld({ rows: [...W.defaultRows(),
+			W.jtRow({ id: "7901", pickup: "10/18/2026 08:00", dropoff: "10/19/2026 17:00" }),
+			W.jtRow({ id: "7902", pickup: "10/18/2026 08:00", dropoff: "10/19/2026 17:00" }),
+			W.jtRow({ id: "7903", pickup: "10/18/2026 08:00", dropoff: "10/19/2026 17:00" })] });
+		const asked = (dir, name, status, account) => Number(w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+			request_status, source, decided_by, decided_at) VALUES (?, ?, 'off_duty', '2026-10-18', '2026-10-19', '', 'driver', ?, '2026-10-10T12:00:00Z', ?, 'driver', ?, ?)`)
+			.run(dir, name, account, status, status === "requested" ? null : "dispatch_t", status === "requested" ? null : "2026-10-11T12:00:00Z").lastInsertRowid);
+		asked(DIR.hollis, "Hollis Renner", "requested", USERS.driver.id);
+		asked(DIR.soren, "Soren King", "declined", USERS.otherDriver.id);
+		asked(DIR.tamsin, "Tamsin Vale", "approved", 0);
+		const dispatch = (rowIndex, loadId, driver) => w.call("POST", "/api/dispatch", { user: USERS.disp, body: { rowIndex, loadId, driver } });
+		const r1 = await dispatch(6, "7901", "Hollis Renner");
+		const r2 = await dispatch(7, "7902", "Soren King");
+		eq("§23.1 a waiting request and a declined one never warn: POST /api/dispatch over their days, 200 with no DRIVER_OFF_DUTY", [r1.status, r1.body && r1.body.code, r2.status, r2.body && r2.body.code], [200, undefined, 200, undefined]);
+		eq("§23.2 ...while an approved one does, as any time off: 409 DRIVER_OFF_DUTY", code(await dispatch(8, "7903", "Tamsin Vale")), [409, "DRIVER_OFF_DUTY"]);
+		const all = await w.call("GET", "/api/driver-availability", { user: USERS.disp });
+		eq("§23.3 the staff list for the assign screens holds only the approved one", (all.body && all.body.rows || []).map((r) => r.driver || r.driverName || r.directoryId), ["Tamsin Vale"]);
+		const mine = await w.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		eq("§23.4 his own time off holds no request (the flag off, no request key either)", [mine.status, mine.body && mine.body.rows, mine.body && "requests" in mine.body], [200, [], false]);
+		const scopeOf = (row) => require("../lib/driver-availability").availabilityEditScope(row, { todayKey: "2026-10-15", isSuperAdmin: true });
+		const panel = await list(w, DIR.hollis);
+		eq("§23.5 staff can't edit or cancel a request, even a Super Admin (editable \"none\"), and the panel answer carries no request key with the flag off",
+			[panel.body.rows.map((r) => [r.editable, "request" in r]), scopeOf({ from_date: "2026-10-18", to_date: "2026-10-19", request_status: "approved" })], [[["none", false]], "full"]);
+
+		// The dark-ELD alert, through the server's own reader: #91 (Hollis's truck) is dark.
+		const s = await W.startWorld();
+		const id = Number(s.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, request_status, source)
+			VALUES (?, 'Hollis Renner', 'off_duty', '2026-10-14', '2026-10-20', '', 'drv_hollis', ?, '2026-10-01T12:00:00Z', 'requested', 'driver')`).run(DIR.hollis, USERS.driver.id).lastInsertRowid);
+		await s.sweep();
+		const state91 = () => (s.api.eldFeedHealthReport(s.clock.ms).feeds.find((f) => f.vehicleId === W.VID.t91) || {}).state;
+		const alert91 = () => s.db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`);
+		eq("§23.6 his waiting request over today pauses nothing: #91 is stale and its alert opens", [state91(), !!alert91() && !alert91().resolved_at], ["stale", true]);
+		s.db.prepare("UPDATE driver_availability SET request_status = 'declined', decided_by = 'dispatch_t', decided_at = '2026-10-15T12:00:00Z' WHERE id = ?").run(id);
+		await s.sweep();
+		eq("§23.7 ...declined, the same", [state91(), !!alert91().resolved_at], ["stale", false]);
+		s.db.prepare("UPDATE driver_availability SET request_status = 'approved' WHERE id = ?").run(id);
+		await s.sweep();
+		eq("§23.8 ...approved, it is time off: driver_off, and the open alert resolves", [state91(), !!alert91().resolved_at], ["driver_off", true]);
 	});
 
 	await R.finish();

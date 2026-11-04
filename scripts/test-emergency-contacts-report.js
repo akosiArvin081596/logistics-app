@@ -19,6 +19,9 @@
  *   §5 before the table exists: the report runs and counts every driver at 0
  *   §6 refusals (exit 2): a missing database, replica mode without --db, a bad
  *      campaign key
+ *   §7 only the five ONBOARDING_DOCS keys count toward "would wait on the contacts
+ *      item", as the server's signing step counts them: never a signed row under
+ *      another key
  *
  * Databases are made-up, in a mkdtemp folder outside the repository, built with
  * server.js's own CREATE text for driver_emergency_contacts and audit_trail.
@@ -103,19 +106,21 @@ const contactName = (id, i) => `Contact ${String.fromCharCode(65 + (id % 26))}${
 // 555-0100 to 555-0199 only (the fictional range).
 const contactPhone = (id, i) => `+151255501${String((id + i) % 100).padStart(2, "0")}`;
 
+const BASE_DDL = `
+	CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL, driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT NOT NULL DEFAULT '', disabled_at TEXT DEFAULT NULL);
+	CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+		status TEXT DEFAULT 'active', email TEXT DEFAULT '', phone TEXT DEFAULT '');
+	CREATE TABLE driver_onboarding (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, application_id INTEGER NOT NULL DEFAULT 0,
+		driver_name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'documents_pending', drug_test_result TEXT DEFAULT '');
+	CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, doc_key TEXT NOT NULL, doc_name TEXT NOT NULL DEFAULT '',
+		signed INTEGER DEFAULT 0, UNIQUE(user_id, doc_key));
+`;
+
 function buildDb(file, { withContacts = true } = {}) {
 	const db = new Database(file);
 	db.pragma("journal_mode = DELETE");
-	db.exec(`
-		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL DEFAULT '',
-			role TEXT NOT NULL, driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT NOT NULL DEFAULT '', disabled_at TEXT DEFAULT NULL);
-		CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-			status TEXT DEFAULT 'active', email TEXT DEFAULT '', phone TEXT DEFAULT '');
-		CREATE TABLE driver_onboarding (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, application_id INTEGER NOT NULL DEFAULT 0,
-			driver_name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'documents_pending', drug_test_result TEXT DEFAULT '');
-		CREATE TABLE onboarding_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, doc_key TEXT NOT NULL, doc_name TEXT NOT NULL DEFAULT '',
-			signed INTEGER DEFAULT 0, UNIQUE(user_id, doc_key));
-	`);
+	db.exec(BASE_DDL);
 	db.exec(AUDIT_DDL);
 	if (withContacts) db.exec(CONTACTS_DDL);
 	const user = db.prepare("INSERT INTO users (id, username, role, driver_name, email, disabled_at) VALUES (?, ?, ?, ?, ?, ?)");
@@ -247,6 +252,34 @@ console.log("\n§6 refusals");
 	ok("§6 replica mode without --db: exit 2", replica.code === 2, `exit ${replica.code}: ${replica.out.slice(0, 200)}`);
 	const badKey = DB ? report([`--db=${DB}`, "--campaign=Not A Key"]) : { code: -1, out: "" };
 	ok("§6 a campaign key that is not lower-case letters, digits and hyphens: exit 2", badKey.code === 2, `exit ${badKey.code}: ${badKey.out.slice(0, 200)}`);
+}
+
+// ── §7 only the five documents count ──────────────────────────────────────────
+console.log("\n§7 only the five onboarding documents count");
+if (AUDIT_DDL && CONTACTS_DDL) {
+	// Two drivers at the step with no contacts. 90421: four of the five and one other
+	// document signed (five signed rows, the step not done). 90422: the five and one
+	// other (six signed rows, the step done, so waiting on the contacts item).
+	const file = path.join(TMP, "made-up-keys.db");
+	const db = new Database(file);
+	db.pragma("journal_mode = DELETE");
+	db.exec(BASE_DDL);
+	db.exec(AUDIT_DDL);
+	db.exec(CONTACTS_DDL);
+	const docKeys = ["contractor_agreement", "equipment_policy", "w9", "mobile_policy", "substance_policy"];
+	const doc = db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, signed) VALUES (?, ?, ?)");
+	for (const [id, name, signedOfFive] of [[90421, "Quinn Fourplus", 4], [90422, "Rowan Fiveplus", 5]]) {
+		db.prepare("INSERT INTO users (id, username, role, driver_name, email) VALUES (?, ?, 'Driver', ?, ?)").run(id, `driver.${id}`, name, `driver.${id}@example.com`);
+		db.prepare("INSERT INTO driver_onboarding (user_id, driver_name, status) VALUES (?, ?, 'documents_pending')").run(id, name);
+		docKeys.forEach((k, i) => doc.run(id, k, i < signedOfFive ? 1 : 0));
+		doc.run(id, "service_invoice", 1);
+	}
+	db.close();
+	const r = report([`--db=${file}`, "--json"]);
+	eq("§7 the driver with the five signed waits on the contacts item; the one with four of the five and another does not",
+		r.json && [r.json.onboarding.documentsPending, r.json.onboarding.pendingAllSignedWaiting, r.json.onboarding.pendingAllSignedWaitingIds], [2, 1, [90422]]);
+} else {
+	ok("§7 ran", false, "no CREATE text");
 }
 
 console.log(`\ntest-emergency-contacts-report: ${passed} passed, ${failures.length} failed`);

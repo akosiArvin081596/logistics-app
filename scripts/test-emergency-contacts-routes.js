@@ -38,7 +38,8 @@
  *      URL's name; and for §10: either branch of checkAndCompleteOnboarding()
  *      ignoring the contacts; onboardingAddsJudgedRow() ignoring them; the flag
  *      ignored; a driver already past the step held back; every signed document
- *      counted; the PUTs' step check removed
+ *      counted; the PUTs' step check removed; the onboarding row read before the
+ *      step's one await (two saves in flight would both send the emails)
  *  §10 the onboarding signing step (onboardingSigningStepState()): with the flag
  *      on, a driver with every document signed stays documents_pending (no
  *      directory row, no "Documents Received" emails) until two contacts are on
@@ -48,7 +49,8 @@
  *      onboardingAddsJudgedRow() agrees with what checkAndCompleteOnboarding()
  *      does in every case. Through the routes: the driver's PUT and the staff
  *      PUT complete a pending driver's step once (emails once), never touch a
- *      driver past it, and a failing step check never fails the save
+ *      driver past it, and a failing step check never fails the save; two saves
+ *      in flight at once (held on the step's Job Tracking read) send the emails once
  *
  * Runs the shipped code: the four registrations, the helpers and the guards
  * (requireRole, logAudit, logAuditRefusal, auditText, the limiter) are lifted
@@ -264,7 +266,8 @@ function seedOnboarding(db, docs, onboarding) {
 	}
 }
 
-async function world({ src = SRC, flag = true, lib = realLib, record = false, onboarding = {}, failSync = false } = {}) {
+// `jtHold`: a promise the step's Job Tracking read waits on, to hold saves in flight.
+async function world({ src = SRC, flag = true, lib = realLib, record = false, onboarding = {}, failSync = false, jtHold = null } = {}) {
 	const db = new Database(":memory:");
 	db.pragma("foreign_keys = ON");
 	db.exec(USERS_DDL);
@@ -298,7 +301,7 @@ async function world({ src = SRC, flag = true, lib = realLib, record = false, on
 		require: (m) => (m === "./lib/emergency-contacts" ? lib : require(m.startsWith("./lib/") ? path.join(ROOT, m) : m)),
 		console: QUIET,
 		sendEmail: (to, subject, html) => { mail.push({ to, subject, html: String(html) }); return Promise.resolve(true); },
-		getJobTrackingCached: async () => { jt.reads++; return { headers: [], data: [] }; },
+		getJobTrackingCached: async () => { jt.reads++; if (jtHold) await jtHold; return { headers: [], data: [] }; },
 		syncDriverToCarrierSheet: (name, opts = {}) => {
 			if (failSync) throw Object.assign(new Error("made-up sync failure"), { code: "SYNC_FAILED" });
 			synced.push({ name, action: opts.action });
@@ -640,6 +643,7 @@ const STEP_CASES = [
 	["flag off, four signed: stays, as before", false, { signed: 4, contacts: 0 }, "documents_pending", 0, 0, []],
 	["flag off, five signed, a passed drug test: the step, then onboarded, as before", false, { drug: "pass", contacts: 0 }, "fully_onboarded", 2, 2, ["documents_signed", "onboarding_complete"]],
 	["flag off, four of the five and another document signed: stays at the step", false, { signed: 4, extra: ["service_invoice"], contacts: 0 }, "documents_pending", 0, 0, []],
+	["flag off, the five and another document signed: the step is done, as before", false, { extra: ["service_invoice"], contacts: 0 }, "documents_signed", 2, 1, ["documents_signed"]],
 ];
 const statusOf = (db, userId) => db.prepare("SELECT status FROM driver_onboarding WHERE user_id = ?").get(userId).status;
 const addsOf = (w) => w.synced.filter((s) => s.action === "add").length;
@@ -704,6 +708,37 @@ async function stepRoutesSection(c, src = SRC) {
 			logged.length === 1 && logged[0].includes("[emergency-contacts]") && logged[0].includes("SYNC_FAILED") && leaks(logged[0], CONTACT_VALUES).length === 0,
 			JSON.stringify(logged));
 	});
+}
+
+// Resolves true once `cond()` holds, false after `ms`.
+async function waitFor(cond, ms) {
+	const until = Date.now() + ms;
+	while (!cond()) {
+		if (Date.now() > until) return false;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	return true;
+}
+
+// The driver's save and a Dispatcher's save for the same driver at the step, both in
+// flight at once: each reaches the step check and waits on its one Job Tracking read.
+// Released together, the first to resume moves the status and sends the emails; the
+// second must read documents_signed and send nothing.
+async function inFlightSection(c, src = SRC) {
+	let release = () => {};
+	const hold = new Promise((resolve) => { release = resolve; });
+	await inWorld(c, "§10 two saves in flight", { src, onboarding: { 90102: { email: CASEY_MAIL } }, jtHold: hold, record: true }, async (w) => {
+		const first = w.call("PUT", ME, { user: "casey", body: { contacts: CASEY_LIST } });
+		const second = w.call("PUT", staffUrl(501), { user: "dispatcher", body: { contacts: [EXTRA[1], EXTRA[2]] } });
+		const bothWaiting = await waitFor(() => w.jt.reads >= 2, 5000);
+		release();
+		const [a, b] = await Promise.all([first, second]);
+		c.eq("§10 two saves in flight (the driver's and a Dispatcher's) both wait on the step's Job Tracking read", [bothWaiting, w.jt.reads], [true, 2]);
+		c.eq("§10 ...released together: both 200, documents_signed, the two emails once, one directory add, one notification",
+			[a.status, b.status, statusOf(w.db, 90102), w.mail.map((m) => m.to), addsOf(w), w.notes],
+			[200, 200, "documents_signed", [CASEY_MAIL, ADMIN_MAIL], 1, ["documents_signed"]]);
+	});
+	release();
 }
 
 // ── §8 the pin ────────────────────────────────────────────────────────────────
@@ -951,6 +986,7 @@ async function mutant(id, label, build, run) {
 	console.log("\n§10 the onboarding signing step");
 	await stepSection(MAIN);
 	await stepRoutesSection(MAIN);
+	await inFlightSection(MAIN);
 	console.log("\n§8 the pin");
 	await pinSection(MAIN);
 	pinExtras(MAIN);
@@ -1003,6 +1039,11 @@ async function mutant(id, label, build, run) {
 	await mutant("M13", "the PUTs' step check removed", () => mutate(SRC,
 		'\t\tif (ob && ob.status === "documents_pending") await checkAndCompleteOnboarding(userId, req);\n', ""),
 		(c, src) => stepRoutesSection(c, src));
+	await mutant("M14", "the onboarding row read before the step's Job Tracking await", () => {
+		const read = '\tconst ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);\n\tif (!ob || ob.status === "fully_onboarded") return ob;\n';
+		const early = mutate(SRC, "\tlet jt = null;\n\tif (onboardingAddsJudgedRow(userId)) {\n", `${read}\tlet jt = null;\n\tif (onboardingAddsJudgedRow(userId)) {\n`);
+		return mutate(early, `\t}\n${read}\tconst step = ${STEP_HELPER}(userId, ob);`, `\t}\n\tconst step = ${STEP_HELPER}(userId, ob);`);
+	}, (c, src) => inFlightSection(c, src));
 
 	console.log(`\ntest-emergency-contacts-routes: ${passed} passed, ${failures.length} failed`);
 	if (failures.length) {

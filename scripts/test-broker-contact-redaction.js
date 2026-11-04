@@ -221,7 +221,9 @@ function lift(head, stubs) {
 	const driverInstructions = { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } };
 	// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
 	const autoInvoice = { mode: "off", annotateCompletedRows: ({ rows }) => rows };
-	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, autoInvoice, ...kept });
+	// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
+	const factoringRoutes = { annotateDashboard() {} };
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, autoInvoice, factoringRoutes, ...kept });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {

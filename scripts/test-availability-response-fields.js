@@ -14,6 +14,11 @@
 //   GET /api/drivers-directory `OffFrom` / `OffTo` per driver: the row covering
 //                             today, else the next one (the directory chip)
 //
+// A driver's request (plan B Revision 2, PR 4) shows in none of them until it is
+// approved: a waiting or declined one sets no offUntil, DriverOffUntil or chip.
+// Home time (H1) shows in none of them, nor in GET /api/driver-availability: only
+// the staff panel, the driver's own view and the request notice carry it.
+//
 // "Today" is 2026-10-15 on the business clock. The routes are the shipped ones,
 // lifted out of server.js (scripts/lib/availability-world.js). With the flag
 // off none of these keys is sent at all: scripts/test-driver-availability-flag-off.js.
@@ -75,6 +80,55 @@ const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
 		eq("Hollis: off now, Oct 14 through Oct 23", d("Hollis Renner") && [d("Hollis Renner").OffFrom, d("Hollis Renner").OffTo], ["2026-10-14", "2026-10-23"]);
 		eq("Tamsin: the next row, Nov 1-3", d("Tamsin Vale") && [d("Tamsin Vale").OffFrom, d("Tamsin Vale").OffTo], ["2026-11-01", "2026-11-03"]);
 		eq("Soren: none (keys present, null)", d("Soren King") && [has(d("Soren King"), "OffFrom"), d("Soren King").OffFrom, d("Soren King").OffTo], [true, null, null]);
+	});
+
+	// PR 4: a driver's request shows nowhere until it is approved (the requests
+	// flag off here: the filter is not behind it). Hollis's own request for
+	// Oct 14-20 is approved; Soren's for Oct 14-16 waits; Tamsin's for Oct 15 was
+	// declined. Each written as the request routes leave it.
+	section("A driver's request: only an approved one shows (PR 4)");
+	await R.guard("requests", async () => {
+		const q = await W.startWorld();
+		const asked = (dir, name, from, to, status) => q.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at,
+			request_status, source, decided_by, decided_at) VALUES (?, ?, 'off_duty', ?, ?, '', 'driver', 0, '2026-10-05T12:00:00Z', ?, 'driver', ?, ?)`)
+			.run(dir, name, from, to, status, status === "requested" ? null : "dispatch_t", status === "requested" ? null : "2026-10-06T12:00:00Z");
+		asked(DIR.hollis, "Hollis Renner", "2026-10-14", "2026-10-20", "approved");
+		asked(DIR.soren, "Soren King", "2026-10-14", "2026-10-16", "requested");
+		asked(DIR.tamsin, "Tamsin Vale", "2026-10-15", "2026-10-15", "declined");
+		const dash = await q.call("GET", "/api/dashboard", { user: USERS.disp });
+		const entry = (name) => ((dash.body && dash.body.fleet) || []).find((f) => f.Driver === name) || {};
+		eq("dashboard: the dropdowns' map names only Hollis; Soren's and Tamsin's pills are not off",
+			[dash.body && dash.body.offUntil, entry("Soren King").offUntil, entry("Tamsin Vale").offUntil], [{ "Hollis Renner": "2026-10-20" }, null, null]);
+		const trucks = await q.call("GET", "/api/trucks", { user: USERS.disp });
+		const t = (unit) => ((trucks.body && trucks.body.trucks) || []).find((x) => x.UnitNumber === unit) || {};
+		eq("trucks: #91 (Hollis, approved) off until Oct 20; #33 (Soren, waiting) not off", [t("LogisX-#91").DriverOffUntil, t("LogisX-#33").DriverOffUntil], ["2026-10-20", null]);
+		const dir = await q.call("GET", "/api/drivers-directory", { user: USERS.disp });
+		const d = (name) => ((dir.body && dir.body.data) || []).find((x) => x.Driver === name) || {};
+		eq("directory: Hollis's chip Oct 14-20; none for Soren or Tamsin", [[d("Hollis Renner").OffFrom, d("Hollis Renner").OffTo], [d("Soren King").OffFrom, d("Soren King").OffTo], [d("Tamsin Vale").OffFrom, d("Tamsin Vale").OffTo]],
+			[["2026-10-14", "2026-10-20"], [null, null], [null, null]]);
+		const inv = await q.call("GET", "/api/trucks", { user: USERS.inv });
+		ok("Investor: still no DriverOffUntil key, and no request key, on any truck", ((inv.body && inv.body.trucks) || []).every((x) => !has(x, "DriverOffUntil") && !has(x, "request")) && inv.status === 200);
+	});
+
+	// H1: a home time on time off (the requests flag on) reaches none of these answers: they
+	// carry the days only. Hollis's approved request and Soren's staff row name one.
+	section("Home time: none of these answers names it (H1)");
+	await R.guard("home", async () => {
+		const h = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true", DRIVER_TIME_OFF_REQUESTS_ENABLED: "true" } });
+		const row = h.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at, request_status, source, home_city, home_state)
+			VALUES (?, ?, 'off_duty', ?, ?, '', 'test', '2026-10-05T12:00:00Z', 'approved', ?, ?, ?)`);
+		row.run(DIR.hollis, "Hollis Renner", "2026-10-14", "2026-10-20", "driver", "Riverton", "WY");
+		row.run(DIR.soren, "Soren King", "2026-10-15", "2026-10-16", "staff", "Lincoln", "NE");
+		const said = [];
+		for (const [label, url, user] of [["dashboard", "/api/dashboard", USERS.disp], ["trucks", "/api/trucks", USERS.disp], ["trucks (investor)", "/api/trucks", USERS.inv],
+			["directory", "/api/drivers-directory", USERS.disp], ["every driver's time off", "/api/driver-availability", USERS.disp]]) {
+			const r = await h.call("GET", url, { user });
+			said.push([label, r.status, /Riverton|Lincoln|"home"|home_city|homeCity/.test(r.text)]);
+		}
+		eq("dashboard, trucks (staff and investor), directory and every driver's time off: 200, and no home time anywhere in them", said,
+			[["dashboard", 200, false], ["trucks", 200, false], ["trucks (investor)", 200, false], ["directory", 200, false], ["every driver's time off", 200, false]]);
+		const panel = await h.call("GET", `/api/drivers-directory/${DIR.hollis}/availability`, { user: USERS.disp });
+		eq("...while the staff panel, its own place, shows it", panel.body && panel.body.rows.map((x) => x.home), [{ city: "Riverton", state: "WY" }]);
 	});
 
 	await R.finish();

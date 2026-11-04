@@ -19,8 +19,24 @@
  * row reads '' and the list still loads (the status route then refuses with
  * PERIOD_LOCK_UNREADABLE, which the screen now shows as the reason).
  *
+ * THE STATUS RECORDER (RECEIPT_STATUS_RECORDER_ENABLED, on only when exactly
+ * "true"). Off (unset, "1", "TRUE"): the single and bulk status routes prepare
+ * today's UPDATE statements exactly, no statement names a recorder column, every
+ * row keeps them empty, and the list carries no status_by. On: a Super Admin's
+ * approve and undo record role, id, name and time; a Dispatcher's bulk records
+ * them on every row it writes, a row already at the target included; a write
+ * refused for a closed month records nothing; the list gives status_by
+ * { role, name, at } or null.
+ *
+ * RECEIPTS AUTO-APPROVE ON THE LIST (lib/receipt-auto-approve-list.js). Pass flag
+ * off: no `autoApprove`, no `auto_review`, no read of the review table, and the
+ * filter's value is today's status filter. Shadow: the mode only, never a verdict.
+ * On: each row's `auto_review` (checking, held with its codes and evidence, the
+ * pass's own approval) or null, from on-mode rows only; the "Approved automatically"
+ * filter lists exactly the receipts whose Approved status is the pass's write.
+ *
  * The shipped code runs, lifted out of server.js with scripts/lib/server-lift.js:
- * both routes and every helper they reach, on an in-memory SQLite built from
+ * the three routes and every helper they reach, on an in-memory SQLite built from
  * server.js's own CREATE TABLE and ALTER TABLE statements.
  *
  * Pure: no server, no app.db, no network.
@@ -42,6 +58,14 @@ try { Database = require("better-sqlite3"); } catch (e) { die(`better-sqlite3 di
 
 const LIST_HEAD = 'app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {';
 const STATUS_HEAD = 'app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (req, res) => {';
+const BULK_HEAD = 'app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (req, res) => {';
+const RECORDER = "RECEIPT_STATUS_RECORDER_ENABLED";
+// Today's two status writes, as the routes prepare them with the recorder off.
+const TODAY_SINGLE = "UPDATE expenses SET status = ? WHERE id = ?";
+const TODAY_BULK = (n) => `UPDATE expenses SET status = ? WHERE id IN (${Array(n).fill("?").join(",")})`;
+const STAMP_COLS = ["status_by_role", "status_by_id", "status_by_name", "status_at"];
+const ADMIN = { id: 1, username: "admin", role: "Super Admin" };
+const DISPATCHER = { id: 2, username: "dispatch_a", role: "Dispatcher" };
 
 function createTable(name) {
 	const m = SRC.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${name} \\(([\\s\\S]*?)\\n\\t\\)`));
@@ -79,9 +103,13 @@ const ROWS = [
 	{ id: 151, date: "2026-09-01", posted: "2026-08", want: "2026-08", what: "a receipt booked to a finalized month" },
 ];
 
-function world(db) {
+// `recorder`: the value RECEIPT_STATUS_RECORDER_ENABLED holds while the lifted
+// code is built (undefined = unset); the flag is read once there, as at boot.
+// `auto`: the receipts auto-approve settings for that build (none by default).
+const AUTO_KEYS = ["RECEIPT_AUTO_APPROVE_ENABLED", "RECEIPT_AUTO_APPROVE_SHADOW"];
+function world(db, recorder, auto = {}) {
 	const lifted = closure(SRC, {
-		routes: [LIST_HEAD, STATUS_HEAD],
+		routes: [LIST_HEAD, STATUS_HEAD, BULK_HEAD],
 		provided: ["db", "app", "requireRole", "console", "notifyChange", "require", "process"],
 		denied: ["server", "io", "sheets", "getSheets", "SPREADSHEET_ID"],
 	});
@@ -94,17 +122,44 @@ function world(db) {
 	const body = `"use strict";\n${lifted.text}`;
 	// The lifted code requires "./lib/…" as server.js does, from the repo root.
 	const rootRequire = (m) => require(m.startsWith("./") ? path.join(ROOT, m) : m);
+	const env = { ...process.env };
+	delete env[RECORDER];
+	for (const k of AUTO_KEYS) delete env[k];
+	if (recorder !== undefined) env[RECORDER] = recorder;
+	Object.assign(env, auto);
 	new Function("db", "app", "requireRole", "console", "notifyChange", "require", "process", body)(
-		db, app, () => (q, s, n) => n && n(), quiet, () => {}, rootRequire, process);
+		db, app, () => (q, s, n) => n && n(), quiet, () => {}, rootRequire, Object.create(process, { env: { value: env } }));
 	return routes;
 }
 
-function call(handler, req) {
+function call(handler, req, user = ADMIN) {
 	const out = { status: 200, body: null };
 	const res = { status(c) { out.status = c; return res; }, json(b) { out.body = b; return res; } };
-	handler({ session: { user: { id: 1, username: "admin", role: "Super Admin" } }, query: {}, params: {}, body: {}, ...req }, res);
+	handler({ session: { user }, query: {}, params: {}, body: {}, ...req }, res);
 	return out;
 }
+
+// Every statement the routes prepare, in order.
+function spy(db) {
+	const seen = [];
+	const prepare = db.prepare.bind(db);
+	db.prepare = (sql) => { seen.push(sql); return prepare(sql); };
+	return seen;
+}
+
+// A receipt's four recorder columns, or the error reading them (no such column
+// on code without the recorder).
+function stampOf(db, id) {
+	try {
+		const r = db.prepare(`SELECT ${STAMP_COLS.join(", ")} FROM expenses WHERE id = ?`).get(id);
+		return r ? STAMP_COLS.map((c) => r[c]) : "row missing";
+	} catch (e) {
+		return `unreadable: ${e.message}`;
+	}
+}
+const EMPTY = ["", null, "", ""];
+const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 let failed = 0;
 function check(name, ok, detail = "") {
@@ -150,6 +205,180 @@ function check(name, ok, detail = "") {
 	check("unreadable period_locks: no row is called finalized", rows.length === ROWS.length && rows.every((e) => e.finalized_period === ""), JSON.stringify(rows.map((e) => e.finalized_period)));
 	const res = call(routes["PUT /api/expenses/:id/status"], { params: { id: "300" }, body: { status: "Approved" } });
 	check("unreadable period_locks: the status route still holds the change (PERIOD_LOCK_UNREADABLE)", res.status === 409 && res.body.code === "PERIOD_LOCK_UNREADABLE", JSON.stringify(res.body));
+}
+
+// ---- the status recorder off: today's statements, nothing recorded ----------
+for (const [label, value] of [["unset", undefined], ["'1'", "1"], ["'TRUE'", "TRUE"]]) {
+	const db = buildDb();
+	const seen = spy(db);
+	const routes = world(db, value);
+	const one = call(routes["PUT /api/expenses/:id/status"], { params: { id: "300" }, body: { status: "Approved" } });
+	const bulk = call(routes["PUT /api/expenses/bulk-status"], { body: { ids: [300, 254, 211], status: "Approved" } }, DISPATCHER);
+	const list = call(routes["GET /api/expenses/all"], {});
+	check(`recorder ${label}: the single and bulk writes answer as today (200; bulk 2 updated, 1 withheld)`,
+		one.status === 200 && bulk.status === 200 && bulk.body.updated === 2 && bulk.body.skippedFinalized === 1, JSON.stringify([one, bulk]));
+	const updates = seen.filter((s) => /^\s*UPDATE expenses\b/.test(s));
+	check(`recorder ${label}: the status writes are today's statements exactly`, same(updates, [TODAY_SINGLE, TODAY_BULK(2)]), JSON.stringify(updates));
+	check(`recorder ${label}: no statement names a recorder column`, !seen.some((s) => /status_by_|status_at/.test(s)), JSON.stringify(seen.filter((s) => /status_by_|status_at/.test(s))));
+	const stamps = ROWS.map((r) => stampOf(db, r.id));
+	check(`recorder ${label}: every receipt keeps the four columns empty`, stamps.every((s) => same(s, EMPTY)), JSON.stringify(stamps));
+	const rows = (list.body && list.body.expenses) || [];
+	check(`recorder ${label}: the list carries no status_by`, rows.length === ROWS.length && rows.every((e) => !("status_by" in e) && !STAMP_COLS.some((c) => c in e)), JSON.stringify(rows[0]));
+}
+
+// ---- the status recorder on: who set each status, and when -----------------
+{
+	const db = buildDb();
+	const routes = world(db, "true");
+	const put = routes["PUT /api/expenses/:id/status"];
+	const t0 = new Date().toISOString();
+	const approve = call(put, { params: { id: "300" }, body: { status: "Approved" } });
+	const t1 = new Date().toISOString();
+	const s300 = stampOf(db, 300);
+	check("recorder on: a Super Admin's approve records role, id and name", approve.status === 200 && same(s300.slice(0, 3), ["Super Admin", 1, "admin"]), JSON.stringify([approve, s300]));
+	check("…and the time, ISO-8601 UTC, at the write", typeof s300[3] === "string" && ISO_Z.test(s300[3]) && s300[3] >= t0 && s300[3] <= t1, JSON.stringify(s300[3]));
+	check("…with the status written", db.prepare("SELECT status FROM expenses WHERE id = 300").get().status === "Approved");
+
+	call(put, { params: { id: "150" }, body: { status: "Approved" } });
+	const undo = call(put, { params: { id: "150" }, body: { status: "Pending" } }, DISPATCHER);
+	const s150 = stampOf(db, 150);
+	check("recorder on: an Undo to Pending records who undid it, over the earlier approver", undo.status === 200 && same(s150.slice(0, 3), ["Dispatcher", 2, "dispatch_a"]), JSON.stringify([undo, s150]));
+
+	const refused = call(put, { params: { id: "211" }, body: { status: "Approved" } });
+	check("recorder on: a write refused for a closed month records nothing", refused.status === 409 && refused.body.code === "PERIOD_FINALIZED" && same(stampOf(db, 211), EMPTY), JSON.stringify([refused.body, stampOf(db, 211)]));
+
+	const tb0 = new Date().toISOString();
+	const bulk = call(routes["PUT /api/expenses/bulk-status"], { body: { ids: [300, 254, 211, 151], status: "Approved" } }, DISPATCHER);
+	const s254 = stampOf(db, 254);
+	const s300b = stampOf(db, 300);
+	check("recorder on: a Dispatcher's bulk answers as today (2 updated, 2 withheld)", bulk.status === 200 && bulk.body.updated === 2 && bulk.body.skippedFinalized === 2, JSON.stringify(bulk.body));
+	check("…records the Dispatcher on the Pending row it approved", same(s254.slice(0, 3), ["Dispatcher", 2, "dispatch_a"]) && ISO_Z.test(String(s254[3])) && s254[3] >= tb0, JSON.stringify(s254));
+	check("…and on the row already Approved, which its click decided too", same(s300b.slice(0, 3), ["Dispatcher", 2, "dispatch_a"]) && s300b[3] === s254[3], JSON.stringify(s300b));
+	check("…and nothing on the two rows it withheld (closed August)", same(stampOf(db, 211), EMPTY) && same(stampOf(db, 151), EMPTY), JSON.stringify([stampOf(db, 211), stampOf(db, 151)]));
+	check("rows no one set keep the four columns empty", [212, 213, 255].every((id) => same(stampOf(db, id), EMPTY)), JSON.stringify([212, 213, 255].map((id) => stampOf(db, id))));
+
+	const list = call(routes["GET /api/expenses/all"], {}, DISPATCHER);
+	const byId = new Map(((list.body && list.body.expenses) || []).map((e) => [e.id, e]));
+	const e300 = byId.get(300) || {};
+	check("recorder on: the list gives status_by { role, name, at } for a receipt someone set",
+		same(e300.status_by, { role: "Dispatcher", name: "dispatch_a", at: s254[3] }), JSON.stringify(e300.status_by));
+	check("…null for one no one has set", (byId.get(213) || {}).status_by === null, JSON.stringify((byId.get(213) || {}).status_by));
+	check("…and no raw recorder column (the account id stays in the database)", [...byId.values()].every((e) => !STAMP_COLS.some((c) => c in e)), JSON.stringify(Object.keys(e300)));
+}
+
+// ---- receipts auto-approve on the list ---------------------------------------
+const PASS = "receipt-auto-approve";
+const FILTER = "Approved automatically";
+const AUTO_ON = { RECEIPT_AUTO_APPROVE_ENABLED: "true", RECEIPT_AUTO_APPROVE_SHADOW: "false" };
+const AUTO_SHADOW = { RECEIPT_AUTO_APPROVE_ENABLED: "true" };
+const APPLIED = "2026-09-21T15:00:00.000Z";
+const READ = { amount: 412, date: "2026-09-20", gallons: 98.5, state: "TX", brand: "made up fuel", confidence: "high", ppg: 4.18 };
+const EV_AUTO = JSON.stringify({ link: { fill: 31, basis: "exact_day", km: 4.2 }, truck: "T-101", owner: 7, truckOwner: 7, wait: "", read: READ, twins: [] });
+const EV_HOLD = JSON.stringify({ link: { fill: 32, basis: "exact_day", km: 63 }, truck: "T-101", owner: 7, truckOwner: 7, wait: "", read: READ, twins: [] });
+const EV_JUNK = JSON.stringify({ link: { fill: "32", km: "far" }, read: { amount: "412", date: "Sept 20", gallons: null, state: "Texas" } });
+const NOBODY = { role: "", uid: null, name: "", at: "" };
+// id -> the receipt, its review row, and the auto_review the list must give it in on mode
+const AUTO_ROWS = [
+	{ id: 401, status: "Pending", ...NOBODY, r: { mode: "on", verdict: "wait" }, want: { state: "checking" }, what: "a Pending receipt the pass is waiting on" },
+	{ id: 402, amount: 421, status: "Pending", ...NOBODY, r: { mode: "on", verdict: "hold", reasons: ["PLACE_FAR", "OCR_TOTAL"], evidence: EV_HOLD },
+		want: { state: "held", reasons: ["PLACE_FAR", "OCR_TOTAL"], fill: 32, km: 63, read: { amount: 412, date: "2026-09-20", gallons: 98.5, state: "TX" } }, what: "a Pending receipt the rules held" },
+	{ id: 403, status: "Approved", role: "system", uid: 0, name: PASS, at: APPLIED, r: { mode: "on", verdict: "approve", applied: APPLIED, evidence: EV_AUTO },
+		want: { state: "auto", fill: 31, km: 4.2, read: { amount: 412, date: "2026-09-20", gallons: 98.5, state: "TX" } }, what: "the pass's own approval" },
+	{ id: 404, status: "Approved", role: "Super Admin", uid: 1, name: "admin", at: "2026-09-22T10:00:00.000Z", r: { mode: "on", verdict: "approve", applied: APPLIED, undone: "2026-09-21T16:00:00.000Z", evidence: EV_AUTO },
+		want: null, what: "an approval a person undid and then approved again" },
+	{ id: 405, status: "Pending", role: "Dispatcher", uid: 2, name: "dispatch_a", at: "2026-09-21T09:00:00.000Z", r: { mode: "on", verdict: "wait" }, want: null, what: "a waiting row on a receipt a person has set" },
+	{ id: 406, status: "Pending", ...NOBODY, r: { mode: "shadow", verdict: "hold", reasons: ["NO_ELD_FILL"] }, want: null, what: "a shadow verdict" },
+	{ id: 407, status: "Approved", role: "Super Admin", uid: 1, name: "admin", at: "2026-09-21T09:00:00.000Z", r: { mode: "on", verdict: "hold", reasons: ["PRICE"] }, want: null, what: "a hold a person has since approved" },
+	{ id: 408, status: "Pending", ...NOBODY, r: null, want: null, what: "a receipt with no review row" },
+	{ id: 409, status: "Approved", role: "system", uid: 0, name: PASS, at: "2026-09-21T15:30:00.000Z", r: { mode: "on", verdict: "approve", applied: APPLIED, evidence: EV_AUTO },
+		want: null, what: "a record whose stamp isn't the pass's applied write" },
+	{ id: 410, status: "Pending", ...NOBODY, r: { mode: "on", verdict: "hold", reasons: ["OCR_DATE", "lower_case", "<b>X</b>", 7], evidence: EV_JUNK },
+		want: { state: "held", reasons: ["OCR_DATE"], fill: null, km: null, read: { amount: null, date: null, gallons: null, state: null } }, what: "a hold with malformed stored values" },
+	{ id: 411, status: "Rejected", role: "Super Admin", uid: 1, name: "admin", at: "2026-09-21T09:00:00.000Z", r: { mode: "on", verdict: "hold", reasons: ["DUPLICATE"] }, want: null, what: "a hold a person has since rejected" },
+	{ id: 412, status: "Approved", role: "system", uid: 0, name: PASS, at: APPLIED, r: { mode: "on", verdict: "approve", applied: APPLIED, undone: "2026-09-21T16:00:00.000Z", evidence: EV_AUTO },
+		want: null, what: "an applied approval its review row marks undone" },
+	{ id: 413, status: "Rejected", role: "system", uid: 0, name: PASS, at: APPLIED, r: { mode: "on", verdict: "approve", applied: APPLIED, evidence: EV_AUTO },
+		want: null, what: "the pass's approval, rejected by a person while the recorder was off" },
+	{ id: 414, status: "Approved", role: "Super Admin", uid: 1, name: PASS, at: APPLIED, r: { mode: "on", verdict: "approve", applied: APPLIED, evidence: EV_AUTO },
+		want: null, what: "a person's account that happens to bear the pass's name" },
+];
+// The receipts the filter must list: Approved, with the pass's record (newest first, as the list orders).
+const FILTERED = [412, 409, 403];
+
+function autoDb() {
+	const db = buildDb();
+	let pass;
+	try { pass = require(path.join(ROOT, "lib", "receipt-auto-approve-pass.js")); } catch (e) { die(`lib/receipt-auto-approve-pass.js did not load (${e.message})`); }
+	pass.ensureSchema(db);
+	const add = db.prepare(`INSERT INTO expenses (id, timestamp, driver, load_id, type, amount, date, status, created_at, posted_period, status_by_role, status_by_id, status_by_name, status_at)
+		VALUES (@id, '2026-09-20T20:06:12.000Z', 'Sample Driver', '', 'Fuel', @amount, '2026-09-20', @status, '2026-09-20 20:06:12', '', @role, @uid, @name, @at)`);
+	const review = db.prepare(`INSERT INTO receipt_auto_reviews (expense_id, rules_version, mode, verdict, reasons, evidence, first_seen_at, applied_at, undone_at)
+		VALUES (@id, 'v1', @mode, @verdict, @reasons, @evidence, '2026-09-20T21:00:00.000Z', @applied, @undone)`);
+	for (const row of AUTO_ROWS) {
+		add.run({ amount: 412, id: row.id, status: row.status, role: row.role, uid: row.uid, name: row.name, at: row.at, ...(row.amount ? { amount: row.amount } : {}) });
+		if (row.r) review.run({ id: row.id, mode: row.r.mode, verdict: row.r.verdict, reasons: JSON.stringify(row.r.reasons || []), evidence: row.r.evidence || "{}", applied: row.r.applied || "", undone: row.r.undone || "" });
+	}
+	return db;
+}
+const listOf = (got) => ((got.body && got.body.expenses) || []);
+const reviewsNamed = (seen) => seen.filter((s) => /receipt_auto_reviews|status_by_name = \?/.test(s));
+
+// Pass flag off (unset, "1", "TRUE"), with the recorder off and on: nothing added, nothing read.
+for (const [label, value] of [["unset", undefined], ["'1'", "1"], ["'TRUE'", "TRUE"]]) {
+	for (const recorder of [undefined, "true"]) {
+		const db = autoDb();
+		const routes = world(db, recorder, value === undefined ? {} : { RECEIPT_AUTO_APPROVE_ENABLED: value, RECEIPT_AUTO_APPROVE_SHADOW: "false" });
+		const seen = spy(db);
+		const got = call(routes["GET /api/expenses/all"], {});
+		const tag = `pass flag ${label}, recorder ${recorder ? "on" : "off"}`;
+		check(`${tag}: the list answers with today's three fields only`, got.status === 200 && same(Object.keys(got.body), ["expenses", "personalEnabled", "personalReceiptWeek"]), JSON.stringify(Object.keys(got.body || {})));
+		check(`${tag}: no row carries auto_review`, listOf(got).length > 0 && listOf(got).every((e) => !("auto_review" in e)), JSON.stringify(listOf(got)[0]));
+		check(`${tag}: the review table is never read`, reviewsNamed(seen).length === 0, JSON.stringify(reviewsNamed(seen)));
+		const filtered = call(routes["GET /api/expenses/all"], { query: { status: FILTER } });
+		check(`${tag}: the filter's value is today's status filter (no receipt has that status)`, filtered.status === 200 && listOf(filtered).length === 0, JSON.stringify(listOf(filtered).map((e) => e.id)));
+	}
+}
+
+// Shadow, and on asked for with the recorder off (which runs as shadow): the mode, never a verdict.
+for (const [label, recorder, auto] of [["shadow", "true", AUTO_SHADOW], ["on asked for, recorder off", undefined, AUTO_ON]]) {
+	const db = autoDb();
+	const routes = world(db, recorder, auto);
+	const seen = spy(db);
+	const got = call(routes["GET /api/expenses/all"], {});
+	check(`${label}: the list says the mode is shadow`, got.status === 200 && same(got.body.autoApprove, { mode: "shadow" }), JSON.stringify(got.body && got.body.autoApprove));
+	check(`${label}: no row carries auto_review, whatever its review rows say`, listOf(got).every((e) => !("auto_review" in e)), JSON.stringify(listOf(got).filter((e) => "auto_review" in e).map((e) => e.id)));
+	check(`${label}: the review table is never read`, reviewsNamed(seen).length === 0, JSON.stringify(reviewsNamed(seen)));
+	const filtered = call(routes["GET /api/expenses/all"], { query: { status: FILTER } });
+	check(`${label}: the filter's value is today's status filter`, listOf(filtered).length === 0, JSON.stringify(listOf(filtered).map((e) => e.id)));
+}
+
+// On: each receipt's verdict as the screen shows it, for both roles.
+{
+	const db = autoDb();
+	const routes = world(db, "true", AUTO_ON);
+	const got = call(routes["GET /api/expenses/all"], {});
+	check("on: the list says the mode is on", got.status === 200 && same(got.body.autoApprove, { mode: "on" }), JSON.stringify(got.body && got.body.autoApprove));
+	check("on: every row carries auto_review (null when there is nothing to show)", listOf(got).length === ROWS.length + AUTO_ROWS.length && listOf(got).every((e) => "auto_review" in e), JSON.stringify(listOf(got).filter((e) => !("auto_review" in e)).map((e) => e.id)));
+	const byId = new Map(listOf(got).map((e) => [e.id, e]));
+	for (const row of AUTO_ROWS) {
+		const e = byId.get(row.id) || {};
+		check(`on: #${row.id} ${row.what}: auto_review is ${JSON.stringify(row.want)}`, same(e.auto_review, row.want), JSON.stringify(e.auto_review));
+	}
+	check("on: receipts the pass never judged carry null", ROWS.every((r) => (byId.get(r.id) || {}).auto_review === null), JSON.stringify(ROWS.map((r) => (byId.get(r.id) || {}).auto_review)));
+	const disp = call(routes["GET /api/expenses/all"], {}, DISPATCHER);
+	const dispIds = new Map(listOf(disp).map((e) => [e.id, e.auto_review]));
+	check("on: a Dispatcher's list carries the same verdicts", AUTO_ROWS.every((r) => same(dispIds.get(r.id), byId.get(r.id).auto_review)), JSON.stringify([...dispIds]));
+
+	const filtered = call(routes["GET /api/expenses/all"], { query: { status: FILTER } });
+	check("on: \"Approved automatically\" lists exactly the receipts whose Approved status is the pass's write", same(listOf(filtered).map((e) => e.id), FILTERED), JSON.stringify(listOf(filtered).map((e) => e.id)));
+	const approved = call(routes["GET /api/expenses/all"], { query: { status: "Approved" } });
+	check("on: the Approved filter still lists every Approved receipt", same(listOf(approved).map((e) => e.id), [414, 412, 409, 407, 404, 403, 212]), JSON.stringify(listOf(approved).map((e) => e.id)));
+	const narrowed = call(routes["GET /api/expenses/all"], { query: { status: FILTER, driver: "Driver A" } });
+	check("on: the filter combines with the others", listOf(narrowed).length === 0, JSON.stringify(listOf(narrowed).map((e) => e.id)));
+
+	db.exec("DROP TABLE receipt_auto_reviews");
+	const blind = call(routes["GET /api/expenses/all"], {});
+	check("on, review table unreadable: the list still answers, with no verdict", blind.status === 200 && listOf(blind).length === ROWS.length + AUTO_ROWS.length && listOf(blind).every((e) => e.auto_review === null), JSON.stringify(blind.body && (blind.body.error || listOf(blind).filter((e) => e.auto_review !== null).map((e) => e.id))));
 }
 
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");

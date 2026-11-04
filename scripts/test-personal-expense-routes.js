@@ -41,6 +41,16 @@
  *      no receipt date, or a date after today
  *   §15 W18 GET /api/expenses/all carries personalReceiptWeek (the flag), for
  *      the Mark dialog's text
+ * The status recorder (RECEIPT_STATUS_RECORDER_ENABLED, on only when exactly "true"):
+ *   §16 off: the mark prepares today's one status write exactly, writes no
+ *      recorder column and audits its approval as today
+ *   §17 on: a mark on a Pending receipt records the marker and approves it; on
+ *      an Approved one it records the marker and writes no "Pending -> Approved"
+ *      row; on a closed-month receipt the row is left byte for byte; on one dated
+ *      in a closed month but booked to an open one it approves as today and
+ *      records nothing; a person's approval during the mark's render gets no
+ *      second audit row; a person's Undo during it is left as the person set it;
+ *      a refused status write records nothing; never stamped unless in place
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-routes.js    # exits 1 on failure
@@ -53,7 +63,23 @@ const { check, section, finish } = makeChecker();
 
 const ON = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
 const WEEK_ON = { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
+const RECORDER_ON = { ...ON, RECEIPT_STATUS_RECORDER_ENABLED: "true" };
 const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
+// The recorder's four columns on a receipt, or the error reading them.
+const STAMP_COLS = ["status_by_role", "status_by_id", "status_by_name", "status_at"];
+const EMPTY_STAMP = ["", null, "", ""];
+function stampOf(w, id) {
+	try {
+		const r = w.db.prepare(`SELECT ${STAMP_COLS.join(", ")} FROM expenses WHERE id = ?`).get(id);
+		return r ? STAMP_COLS.map((c) => r[c]) : "row missing";
+	} catch (e) {
+		return `unreadable: ${e.message}`;
+	}
+}
+const MARKER = ["Super Admin", 1, "super_admin"];
+const statusOf = (w, id) => w.db.prepare("SELECT status FROM expenses WHERE id = ?").get(id).status;
+// A person's status write as the recorder makes it, for the races below.
+const personSets = (w, id, status) => w.db.prepare("UPDATE expenses SET status = ?, status_by_role = 'Dispatcher', status_by_id = 2, status_by_name = 'dispatch_a', status_at = '2026-10-15T16:00:00.000Z' WHERE id = ?").run(status, id);
 // A receipt of the runner's own, beyond the world's eleven (made up, Approved).
 function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 45.5, date, vendor = "EXAMPLE DINER #3", truck = "T-1", owner = 7 }) {
 	const day = date || "2026-10-15";
@@ -385,6 +411,115 @@ function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 4
 			w.cleanup();
 		}
 		check("GET /api/expenses/all: personalReceiptWeek true only when the flag is exactly \"true\"", got, [true, false, false]);
+	}
+
+	section("§16 the status recorder off: the mark's write is today's");
+	for (const [label, env] of [["unset", ON], ["'1'", { ...ON, RECEIPT_STATUS_RECORDER_ENABLED: "1" }], ["'TRUE'", { ...ON, RECEIPT_STATUS_RECORDER_ENABLED: "TRUE" }]]) {
+		const w = world(env);
+		const seen = [];
+		const prepare = w.db.prepare.bind(w.db);
+		w.db.prepare = (sql) => { seen.push(sql); return prepare(sql); };
+		const r = await w.call("POST", "/api/expenses/2/personal", { body: {} });
+		w.db.prepare = prepare;
+		check(`recorder ${label}: marking Pending R2 approves it, as today`, [r.status, statusOf(w, 2)], [201, "Approved"]);
+		check(`recorder ${label}: its one status write is today's statement exactly`,
+			seen.filter((s) => /^\s*UPDATE expenses\b/.test(s)), ["UPDATE expenses SET status = 'Approved' WHERE id = ? AND status = 'Pending'"]);
+		check(`recorder ${label}: no statement names a recorder column`, seen.filter((s) => /status_by_|status_at/.test(s)), []);
+		check(`recorder ${label}: R2 keeps the four columns empty`, stampOf(w, 2), EMPTY_STAMP);
+		check(`recorder ${label}: the approval's audit row, as today`, w.audits("update_expense_status").map((a) => a.entity_id), ["2"]);
+		w.cleanup();
+	}
+
+	section("§17 the status recorder on: the mark records the marker, in open months only");
+	{
+		const w = world(RECORDER_ON);
+		const r2 = await w.call("POST", "/api/expenses/2/personal", { body: {} });
+		const s2 = stampOf(w, 2);
+		check("a mark on Pending R2 (open month): 201, approved, the marker recorded", [r2.status, statusOf(w, 2), Array.isArray(s2) ? s2.slice(0, 3) : s2], [201, "Approved", MARKER]);
+		// The world's clock: the stamp is taken at the write, no earlier than the line it placed.
+		const line2 = w.lines("expense_id = 2")[0] || {};
+		check("…at the write, ISO-8601 UTC", Array.isArray(s2) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(s2[3]) && s2[3] >= String(line2.created_at || "~"), true);
+		check("…and its implied approval audited once", w.audits("update_expense_status").map((a) => [a.entity_id, /Pending -> Approved \(marked Personal/.test(a.details)]), [["2", true]]);
+
+		const r1 = await w.call("POST", "/api/expenses/1/personal", { body: {} });
+		const s1 = stampOf(w, 1);
+		check("a mark on Approved R1: 201, still Approved, the marker recorded", [r1.status, statusOf(w, 1), Array.isArray(s1) ? s1.slice(0, 3) : s1], [201, "Approved", MARKER]);
+		check("…and no \"Pending -> Approved\" row for R1", w.audits("update_expense_status").filter((a) => a.entity_id === "1").length, 0);
+
+		const rej = await w.call("PUT", "/api/expenses/1/status", { as: "dispatcher", body: { status: "Rejected" } });
+		check("a status write refused for the Personal line (409 EXPENSE_PERSONAL) records nothing", [rej.status, rej.body && rej.body.code, stampOf(w, 1)], [409, "EXPENSE_PERSONAL", s1]);
+
+		const before3 = w.db.prepare("SELECT * FROM expenses WHERE id = 3").get();
+		const r3 = await w.call("POST", "/api/expenses/3/personal", { body: {} });
+		check("a mark on Pending R3 in closed August: 201, a credit in the open month", [r3.status, w.lines("expense_id = 3").map((l) => l.in_place)], [201, [0]]);
+		check("…and R3's row is byte for byte as it was", w.db.prepare("SELECT * FROM expenses WHERE id = 3").get(), before3);
+
+		addReceipt(w, { id: 30, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-08-20" });
+		w.db.prepare("UPDATE expenses SET status = 'Pending', posted_period = '2026-10' WHERE id = 30").run();
+		const r30 = await w.call("POST", "/api/expenses/30/personal", { body: {} });
+		check("a mark on a receipt dated in closed August, booked to October: approved as today, nothing recorded",
+			[r30.status, statusOf(w, 30), stampOf(w, 30), w.audits("update_expense_status").filter((a) => a.entity_id === "30").length], [201, "Approved", EMPTY_STAMP, 1]);
+		w.cleanup();
+	}
+	{
+		// Pending when marked; a person approves it while the invoice is drawn.
+		const w = world(RECORDER_ON);
+		addReceipt(w, { id: 40, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-10-12", amount: 45.5 });
+		w.db.prepare("UPDATE expenses SET status = 'Pending' WHERE id = 40").run();
+		const g = await w.generate("Test Driver A");
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g.body.invoice.id);
+		let drawn = 0;
+		w.hooks.render = async (t, d, def) => { drawn++; personSets(w, 40, "Approved"); return def(t, d); };
+		const r = await w.call("POST", "/api/expenses/40/personal", { body: {} });
+		const s = stampOf(w, 40);
+		check("a person approves during the mark's render: 201, Approved, the marker recorded last",
+			[r.status, drawn > 0, statusOf(w, 40), Array.isArray(s) ? s.slice(0, 3) : s], [201, true, "Approved", MARKER]);
+		check("…and the mark writes no \"Pending -> Approved\" row (it approved nothing)", w.audits("update_expense_status").filter((a) => a.entity_id === "40").length, 0);
+		w.cleanup();
+	}
+	{
+		// Approved when marked; a person undoes it to Pending while the invoice is drawn.
+		const w = world(RECORDER_ON);
+		addReceipt(w, { id: 41, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-10-12", amount: 45.5 });
+		const g = await w.generate("Test Driver A");
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g.body.invoice.id);
+		let drawn = 0;
+		w.hooks.render = async (t, d, def) => { drawn++; personSets(w, 41, "Pending"); return def(t, d); };
+		const r = await w.call("POST", "/api/expenses/41/personal", { body: {} });
+		check("a person's Undo during the mark's render stands: Pending, the person still recorded, no audit row",
+			[r.status, drawn > 0, statusOf(w, 41), stampOf(w, 41), w.audits("update_expense_status").filter((a) => a.entity_id === "41").length],
+			[201, true, "Pending", ["Dispatcher", 2, "dispatch_a", "2026-10-15T16:00:00.000Z"], 0]);
+		w.cleanup();
+	}
+	{
+		// Dated in closed August, booked to October, Approved when marked; a person
+		// undoes it while the invoice is drawn. The mark approves only what it found Pending.
+		const w = world(RECORDER_ON);
+		addReceipt(w, { id: 42, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-08-20", amount: 45.5 });
+		w.db.prepare("UPDATE expenses SET posted_period = '2026-10' WHERE id = 42").run();
+		const g = await w.generate("Test Driver A");
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g.body.invoice.id);
+		let drawn = 0;
+		w.hooks.render = async (t, d, def) => { drawn++; personSets(w, 42, "Pending"); return def(t, d); };
+		const r = await w.call("POST", "/api/expenses/42/personal", { body: {} });
+		check("…the same Undo on a receipt booked out of a closed month stands too: Pending, the person recorded, no audit row",
+			[r.status, drawn > 0, statusOf(w, 42), stampOf(w, 42), w.audits("update_expense_status").filter((a) => a.entity_id === "42").length],
+			[201, true, "Pending", ["Dispatcher", 2, "dispatch_a", "2026-10-15T16:00:00.000Z"], 0]);
+		w.cleanup();
+	}
+	{
+		// The rule itself: no stamp unless the line is placed in place, whatever the row's months.
+		const w = world(RECORDER_ON);
+		let out;
+		try {
+			const recorder = require("../lib/receipt-status-recorder");
+			out = recorder.markPersonalWrite(w.db, { id: 1, user: { id: 1, username: "super_admin", role: "Super Admin" }, at: "2026-10-15T17:00:00.000Z", inPlace: false, approve: false, rowLocked: () => false });
+		} catch (e) {
+			out = `unavailable: ${e.message}`;
+		}
+		check("a line not placed in place stamps nothing, even on an Approved receipt in an open month",
+			[out, stampOf(w, 1), statusOf(w, 1)], [{ approved: false, stamped: false }, EMPTY_STAMP, "Approved"]);
+		w.cleanup();
 	}
 
 	finish();

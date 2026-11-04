@@ -189,6 +189,9 @@
             <div v-else-if="docsData.linked !== false" class="docs-empty">No drug test uploaded yet.</div>
           </div>
 
+          <!-- Emergency contacts: shown only once the server answers (staff, feature on) -->
+          <EmergencyContactsPanel v-if="viewDrv._rowIndex" :directory-id="viewDrv._rowIndex" />
+
           <!-- Shared Documents — Super Admin uploads files the driver sees in their Kit tab -->
           <LegalDocumentPortal v-if="viewDrv._rowIndex" :driver-id="viewDrv._rowIndex" />
 
@@ -361,6 +364,7 @@ import StarRating from '../shared/StarRating.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import DriverAvailabilityPanel from './DriverAvailabilityPanel.vue'
+import EmergencyContactsPanel from './EmergencyContactsPanel.vue'
 import ResignRequestControl from './ResignRequestControl.vue'
 import { availabilityRangeText } from '../../lib/availabilityText'
 

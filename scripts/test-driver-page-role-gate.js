@@ -44,6 +44,10 @@
  *      in-memory SQLite built from server.js's own CREATE TABLE text. Mutants:
  *      the self-check removed (the session's rows still come back), the rows
  *      read by the URL's name (flips), the spread without the sub-flag (flips).
+ *      With drivers' requests on (PR 4): `timeOff` adds requests, requestLimits
+ *      and canRequest, `rows` unchanged; canRequest and Cancel only on the
+ *      driver's own session, never a Super Admin's view; mutant: the spread
+ *      without the session's user (flips).
  *   §8 the driver's load instructions (plan PR 4, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED):
  *      GET /api/driver/loads/:loadId/instructions (lib/driver-instructions-runtime.js,
  *      with server.js's loadBelongsToDriver() lifted in) answers 404 with no code, and
@@ -55,6 +59,12 @@
  *      Driver's read marks the version shown, a Super Admin's doesn't; this payload's
  *      `_instructions` per load is { state, highlights } codes only. Mutants: the
  *      ownership check removed (flips), the gate without flag 2 (flips).
+ *   §9 the stepper's GPS phases (load phases PR 3, DRIVER_STEPPER_GPS_PHASES_ENABLED):
+ *      with lib/gps-phases.js wired as server.js wires it, a Driver's own load
+ *      carries `_gpsPhases` and only his rows are looked up; Super Admin gets the
+ *      named driver's; every refused caller gets nothing and asks no reader; off,
+ *      no key and no reader. Mutants: the stored rows annotated instead of his
+ *      view (a rate column comes back), the annotation line removed.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -251,6 +261,11 @@ function makeDeps() {
 		driverTrainingVideos: { trainingVideoPlacement: () => { throw new Error("trainingVideoPlacement() ran with DRIVER_TRAINING_VIDEOS_ENABLED off"); } },
 		// The load-instructions codes (§8): off here, so they add nothing.
 		driverInstructions: { annotateDriverLoads() {} },
+		// The arrival pickup line: off here (scripts/test-arrival-pickup-pay-paths.js §D
+		// pins who receives it), so it adds nothing.
+		annotatePickupArrival: () => 0,
+		// The stepper's GPS phases (§9): off here, so rows go back as they came.
+		driverGpsPhases: { annotate: (rows) => rows },
 	};
 	return { deps, reads };
 }
@@ -712,20 +727,23 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			return adb;
 		}
 		// The time-off ELD check is off here (its own runners cover it), so no eldChecked.
-		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", [
-			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, "return { driverAvailabilityByName, driverOwnTimeOff };",
-		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false);
+		// Drivers' requests (PR 4) are off unless `requests` is given; on, the request
+		// keys' helpers are lifted too (a missing one is a FAIL below, never a crash).
+		const REQUEST_SRC = ["driverTimeOffRequestKeys", "timeOffRequestDriver", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(softFn);
+		const timeOffHelpers = (adb, requests = false) => new Function("db", "driverAvailability", "appTodayKey", "console", "DRIVER_TIME_OFF_ELD_CHECK_ENABLED", "DRIVER_TIME_OFF_REQUESTS_ENABLED", [
+			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, ...(requests ? REQUEST_SRC.filter(Boolean) : []), "return { driverAvailabilityByName, driverOwnTimeOff };",
+		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet, false, requests);
 		const counted = (fn) => { const f = (...a) => { f.calls++; return fn(...a); }; f.calls = 0; return f; };
 		// The payload with the time-off reader wired to `adb`, the sub-flag as given.
-		const pageRoute = (screen, adb, src = ROUTE_SRC) => {
-			const h = timeOffHelpers(adb);
+		const pageRoute = (screen, adb, src = ROUTE_SRC, requests = false) => {
+			const h = timeOffHelpers(adb, requests);
 			const reader = counted(h.driverOwnTimeOff);
 			const route = buildRoute(src, { DRIVER_TIME_OFF_SCREEN_ENABLED: screen, driverOwnTimeOff: reader });
 			return { ...route, reader };
 		};
 		// GET /api/driver/me/availability, the shipped registration, main flag on.
-		const meRoute = (adb) => {
-			const h = timeOffHelpers(adb);
+		const meRoute = (adb, requests = false) => {
+			const h = timeOffHelpers(adb, requests);
 			const deps = {
 				availabilityFlagGate: new Function("DRIVER_AVAILABILITY_ENABLED", `${liftFn("availabilityFlagGate")}\nreturn availabilityFlagGate;`)(true),
 				requireRole, requireAuth, normalizeDriverName: helpers.normalizeDriverName, appTodayKey: () => TODAY, console: quiet,
@@ -820,6 +838,59 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			if (NO_FLAG) {
 				r = await call(pageRoute(false, adb, NO_FLAG), DK, "Desoren King");
 				ok("MUTANT 8 (the spread without the sub-flag): §7.14 flips, timeOff sent with the sub-flag off", r.status === 200 && "timeOff" in r.body, told(r));
+			}
+
+			// Drivers' requests (plan B Revision 2, PR 4), DRIVER_TIME_OFF_REQUESTS_ENABLED on:
+			// Desoren King (account 2) has one request waiting and one declined.
+			ok("§7.18a server.js has the request keys' helpers and the users table's CREATE TABLE", REQUEST_SRC.every(Boolean) && !!ddl("users"), REQUEST_SRC.map((s) => !!s).join());
+			if (REQUEST_SRC.every(Boolean) && ddl("users")) {
+				const rdb = availabilityDb();
+				new Function("db", ddl("users"))(rdb);
+				const acct = rdb.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', ?, ?)");
+				acct.run(SUPER.id, SUPER.username, "Super Admin", "");
+				acct.run(DK.id, DK.username, "Driver", DK.driverName);
+				acct.run(SK.id, SK.username, "Driver", SK.driverName);
+				const ask = rdb.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_by_user_id, created_at, request_status, source)
+					VALUES (11, 'Desoren King', ?, ?, ?, ?, ?, '2026-10-10T12:00:00Z', ?, 'driver')`);
+				ask.run("vacation", "2026-11-09", "2026-11-13", DK.username, DK.id, "requested");
+				ask.run("off_duty", "2026-11-20", "2026-11-21", DK.username, DK.id, "declined");
+				// H1: his Drivers page row names his city and state, his waiting request and his
+				// current time off a home time.
+				rdb.prepare("UPDATE drivers_directory SET city = 'Springfield', state = 'mo' WHERE id = 11").run();
+				rdb.prepare("UPDATE driver_availability SET home_city = 'Riverton', home_state = 'WY' WHERE directory_id = 11 AND from_date IN ('2026-11-09', '2026-10-14')").run();
+				const keys = (x) => (x.body && x.body.timeOff ? Object.keys(x.body.timeOff).sort().join() : "");
+				const reqs = (x) => (x.body && x.body.timeOff && Array.isArray(x.body.timeOff.requests) ? x.body.timeOff.requests.map((q) => [q.from, q.request, q.canCancel]) : null);
+				const page = pageRoute(true, rdb, ROUTE_SRC, true);
+				r = await call(page, DK, "Desoren King");
+				ok("§7.18 requests on, Driver: timeOff also carries requests, requestLimits, canRequest and (H1) homeDefault",
+					r.status === 200 && keys(r) === "canRequest,homeDefault,requestLimits,requests,rows,today", told(r));
+				ok("§7.19 ...rows keep their rows (the requests are not time off), each with (H1) its home time",
+					same(shape(r), DK_ROWS) && r.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,home,id,kind,status,to"), told(r));
+				ok("§7.20 ...his waiting request (he may cancel it) and his declined one; the limits from today + 5; he may ask",
+					same(reqs(r), [["2026-11-09", "waiting", true], ["2026-11-20", "declined", false]])
+					&& same(r.body.timeOff.requestLimits, { fromMin: "2026-10-20", fromMax: "2027-01-13", maxDays: 60, waitingMax: 5 }) && r.body.timeOff.canRequest === true, told(r));
+				ok("§7.21 ...no reason, decider or author on a request (H1: its home time beside it)", r.body.timeOff.requests.every((q) => Object.keys(q).sort().join() === "canCancel,from,home,id,kind,request,to"), told(r));
+				ok("§7.21b H1: his form starts at his Drivers page city and state; his waiting request and his current row show their home time, the rest null",
+					same(r.body.timeOff.homeDefault, { city: "Springfield", state: "MO" })
+					&& same(r.body.timeOff.requests.map((q) => q.home), [{ city: "Riverton", state: "WY" }, null])
+					&& same(r.body.timeOff.rows.map((t) => t.home), [{ city: "Riverton", state: "WY" }, null]), told(r));
+				const meOn = await meRoute(rdb, true)(DK);
+				ok("§7.22 ...the same as GET /api/driver/me/availability for his session", meOn.status === 200 && same(r.body.timeOff, meOn.body), `me ${meOn.status} ${JSON.stringify(meOn.body).slice(0, 200)}`);
+				r = await call(page, SUPER, "Desoren King");
+				ok("§7.23 a Super Admin on his page: his requests listed, but canRequest false and no Cancel on any",
+					r.status === 200 && same(reqs(r), [["2026-11-09", "waiting", false], ["2026-11-20", "declined", false]]) && r.body.timeOff.canRequest === false, told(r));
+				ok("§7.23b H1: ...and no form start (homeDefault null), his Drivers page city never sent", r.body.timeOff.homeDefault === null && !JSON.stringify(r.body).includes("Springfield"), told(r));
+				r = await call(page, SK, "Soren King");
+				ok("§7.24 another driver: none of his requests, and may ask for himself", r.status === 200 && same(reqs(r), []) && r.body.timeOff.canRequest === true, told(r));
+				ok("§7.24b H1: ...his own form start (none recorded: blank), never the other driver's city or home time",
+					same(r.body.timeOff.homeDefault, { city: "", state: "" }) && !/Springfield|Riverton/.test(JSON.stringify(r.body)), told(r));
+				const NO_VIEWER = softMutate(ROUTE_SRC, `${SPREAD_ARG}, req.session.user)`, `${SPREAD_ARG})`);
+				ok("§7.25a the viewer mutant applies (the spread passes the session's user)", !!NO_VIEWER);
+				if (NO_VIEWER) {
+					r = await call(pageRoute(true, rdb, NO_VIEWER, true), DK, "Desoren King");
+					ok("MUTANT 8b (the spread without the session's user): §7.20 flips, the driver may no longer ask or cancel",
+						r.status === 200 && r.body.timeOff.canRequest === false && same(reqs(r), [["2026-11-09", "waiting", false], ["2026-11-20", "declined", false]]), told(r));
+				}
 			}
 		}
 	}
@@ -1021,6 +1092,85 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		if (noFlag2) {
 			r = await world({ ...ON, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "" }, { runtimeSrc: noFlag2 }).read(DK, "QA-DI-100");
 			ok("MUTANT 10 (the route gated without flag 2): §8.1 flips to a served payload", r.status === 200 && r.body && r.body.state === "published", said(r));
+		}
+	})();
+
+	// =========================================================================
+	console.log("\n§9  the stepper's GPS phases on the payload (DRIVER_STEPPER_GPS_PHASES_ENABLED)");
+	// =========================================================================
+	// The route with lib/gps-phases.js wired as server.js wires it, over made-up
+	// readers: every load mapped, Desoren King's truck reporting, Soren King's
+	// silent. The rule itself is scripts/test-stepper-gps-phases-server.js's
+	// subject; this pins who receives the key. What is missing on the base is a
+	// FAIL here, never a crash.
+	await (async () => {
+		let gpsLib = null;
+		try { gpsLib = require(path.join(ROOT, "lib", "gps-phases")); } catch { gpsLib = null; }
+		ok("§9.0 lib/gps-phases.js loads", !!gpsLib);
+		const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const LINE = "filteredLoads = driverGpsPhases.annotate(filteredLoads, loads, jobTracking.headers);";
+		ok("§9.0b the route annotates its loads once, after the receipt windows and before the reply",
+			routeCode.split(LINE).length === 2 && routeCode.indexOf("withExpenseWindows(") < routeCode.indexOf(LINE)
+			&& routeCode.indexOf(LINE) < routeCode.indexOf("res.json({"));
+		if (!gpsLib) return;
+		const tdb = new Database(":memory:");
+		tdb.exec("CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '')");
+		tdb.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, location_date_ms) VALUES ('DEV-100', 32.5, -97.25, ?)").run(Date.now() - 5 * 60 * 1000);
+		const asked = [];
+		const trucks = { "desoren king": { id: 7, routemate_vehicle_id: "DEV-100" }, "soren king": { id: 8, routemate_vehicle_id: "DEV-200" } };
+		const readers = () => {
+			asked.push("readers");
+			return {
+				db: tdb, truckColRe: /^truck$/i, truckByUnit: () => null, linkedSinceMs: () => null,
+				truckForDriver: (name) => { asked.push(name); return trucks[helpers.normalizeDriverName(name)] || null; },
+				points: () => ({ origin: { latitude: 32.5, longitude: -97.25 }, dest: { latitude: 33.2, longitude: -96.6 } }),
+			};
+		};
+		const pageWith = (enabled, src = ROUTE_SRC) => buildRoute(src, { driverGpsPhases: gpsLib.create({ enabled, readers }) });
+		const phasesOf = (x) => (x.body && Array.isArray(x.body.loads) ? x.body.loads.map((l) => [l["Load ID"], "_gpsPhases" in l ? l._gpsPhases : "(no key)"]) : null);
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+		const BOTH = { pickup: true, drop: true };
+		const NONE = { pickup: false, drop: false };
+
+		asked.length = 0;
+		r = await call(pageWith(true), DK, "Desoren King");
+		ok("§9.1 Driver, own page, flag on: his load carries _gpsPhases (his truck reporting: both true)",
+			r.status === 200 && same(phasesOf(r), [["L-100", BOTH]]), `${brief(r)} ${JSON.stringify(phasesOf(r))}`);
+		ok("§9.2 ...and only his own rows were asked about (no other driver's truck looked up)",
+			same(asked, ["readers", "Desoren King"]), JSON.stringify(asked));
+		ok("§9.3 ...his view stays his view: no rate column comes back with the annotation",
+			r.status === 200 && r.body.loads.every((l) => !("Rate" in l) && !("  Payment  " in l)), JSON.stringify(r.body && r.body.loads));
+		r = await call(pageWith(true), SUPER, "Soren King");
+		ok("§9.4 Super Admin on a driver's page: that driver's load, his truck silent (both false)",
+			r.status === 200 && same(phasesOf(r), [["L-200", NONE]]), JSON.stringify(phasesOf(r)));
+		asked.length = 0;
+		const refused = [
+			await call(pageWith(true), DK, "Soren King"), await call(pageWith(true), NAMELESS, "Desoren King"),
+			await call(pageWith(true), DISPATCH_NAMED, "Desoren King"), await call(pageWith(true), INVESTOR_NAMED, "Desoren King"),
+			await call(pageWith(true), null, "Desoren King"),
+		];
+		ok("§9.5 another driver's name, a blank session name, a Dispatcher or an Investor (even carrying his name): 403; signed out: 401; no reader asked",
+			same(refused.map((x) => x.status), [403, 403, 403, 403, 401]) && asked.length === 0, `${refused.map((x) => x.status).join()} asked ${JSON.stringify(asked)}`);
+		asked.length = 0;
+		r = await call(pageWith(false), DK, "Desoren King");
+		ok("§9.6 flag off: his load carries no _gpsPhases key, and no reader is asked",
+			r.status === 200 && same(phasesOf(r), [["L-100", "(no key)"]]) && asked.length === 0, `${JSON.stringify(phasesOf(r))} asked ${JSON.stringify(asked)}`);
+
+		// MUTANT 11: the stored rows annotated in place of the role's view.
+		const STORED = (() => { const n = ROUTE_SRC.split(LINE).length - 1; return n === 1 ? ROUTE_SRC.replace(LINE, "filteredLoads = driverGpsPhases.annotate(loads, loads, jobTracking.headers);") : null; })();
+		ok("§9.7a the stored-rows mutant applies", !!STORED);
+		if (STORED) {
+			r = await call(pageWith(true, STORED), DK, "Desoren King");
+			ok("MUTANT 11 (the stored rows annotated instead of his view): §9.3 flips, the rate column comes back",
+				r.status === 200 && r.body.loads.some((l) => "Rate" in l), JSON.stringify(r.body && r.body.loads));
+		}
+		// MUTANT 12: the annotation line removed.
+		const NO_LINE = ROUTE_SRC.split(LINE).length === 2 ? ROUTE_SRC.replace(LINE, "") : null;
+		ok("§9.8a the no-annotation mutant applies", !!NO_LINE);
+		if (NO_LINE) {
+			r = await call(pageWith(true, NO_LINE), DK, "Desoren King");
+			ok("MUTANT 12 (the route without the annotation): §9.1 flips, no key with the flag on",
+				r.status === 200 && same(phasesOf(r), [["L-100", "(no key)"]]), JSON.stringify(phasesOf(r)));
 		}
 	})();
 

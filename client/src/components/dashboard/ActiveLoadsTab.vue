@@ -182,6 +182,8 @@
               </button>
             </div>
           </div>
+          <!-- Factored loads (Triumph): Super Admin only, in lib/factoringStatus.js's words. -->
+          <FactoringControls v-if="auth.isSuperAdmin" :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
           <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -192,6 +194,8 @@
             <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
           </div>
           <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+          <!-- The arrival pickup date's read-only line: the server's facts, worded by lib/pickupArrival.js. -->
+          <p v-if="selectedJob && pickupArrivalLine(selectedJob)" class="pickup-arrival" role="note">{{ pickupArrivalLine(selectedJob) }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -321,6 +325,7 @@
             <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
           <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <ChrSendBadge v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -544,11 +549,14 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import DriverInstructionsSection from './DriverInstructionsSection.vue'
+import FactoringControls from './FactoringControls.vue'
 import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
+import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DeletedLoadsLink from './DeletedLoadsLink.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
+import { pickupArrivalLine } from '../../lib/pickupArrival'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
@@ -886,6 +894,11 @@ function runCancel() {
 }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; closeDeleteConfirm() }
+// Factored loads (Triumph): the row's `_factoring` after a change, then a refresh.
+async function onFactoringChanged(patch) {
+  if (selectedJob.value && patch) selectedJob.value = { ...selectedJob.value, _factoring: patch }
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+}
 // The Driver instructions section changed this load's review codes: refresh the lists,
 // then give the open load its fresh codes so its badge follows.
 async function onInstructionsChanged() {
@@ -1250,6 +1263,12 @@ const detailSections = computed(() => {
 .pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
 .pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
+/* Information only, so neutral: no button, no badge colour. */
+.pickup-arrival {
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb;
+  color: #374151; font-size: 0.8125rem; line-height: 1.4;
+}
 .mobile-load-list {
   display: flex;
   flex-direction: column;
