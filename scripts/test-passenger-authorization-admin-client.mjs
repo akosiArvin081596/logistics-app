@@ -16,14 +16,19 @@
 //      the bodies and URLs; one state object per dialog, replaced on open and close, and
 //      a click that keeps its own; an old tab's late answer dropped; the PDF opened in a
 //      new tab without an opener; nothing stored or logged; no role test; it compiles
+//   §3b the page, mounted: while a countersign, decline or revoke is out, its dialog
+//      can't be closed (Cancel, the X, Escape, a click outside), says it is being sent,
+//      sends once, and no row offers an action; the answer closes the dialog (it
+//      landed) or unlocks it with its words (refused, or no answer)
 //   §4 the route and the sidebar: Super Admin only; the entry under Applications, for
 //      no other role, shown only when the feature says true, asked by a Super Admin only
 //   §5 flag off: the page says so and lists nothing; the sidebar hides the entry
 //   §6 mutants: copies of the lib and the screens with one rule changed must each be
 //      caught by the sections above
 //
-// Made-up people only. No DOM, no server, no build.
+// Made-up people only. No DOM (§3b uses an in-memory renderer), no server, no build.
 //   node scripts/test-passenger-authorization-admin-client.mjs      # exits 1 on any failure
+//   PA_ADMIN_VIEW_VUE=<a copy of the page> node scripts/test-passenger-authorization-admin-client.mjs   # e.g. a base copy
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -33,7 +38,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SRC = path.join(ROOT, 'client', 'src')
 const LIB = path.join(CLIENT_SRC, 'lib', 'passengerAuthorizationAdmin.js')
 const FILES = {
-  view: path.join(CLIENT_SRC, 'views', 'PassengerAuthorizationsView.vue'),
+  view: process.env.PA_ADMIN_VIEW_VUE || path.join(CLIENT_SRC, 'views', 'PassengerAuthorizationsView.vue'),
   router: path.join(CLIENT_SRC, 'router', 'index.js'),
   sidebar: path.join(CLIENT_SRC, 'components', 'layout', 'AppSidebar.vue'),
 }
@@ -76,8 +81,8 @@ function checker(print) {
 }
 const MAIN = checker(true)
 // A throw (a missing export on the old code) is that section's failure, never a crash.
-function section(c, label, fn) {
-  try { fn() } catch (err) { c.eq(`${label} ran`, `threw: ${err && err.message}`, 'no throw') }
+async function section(c, label, fn) {
+  try { await fn() } catch (err) { c.eq(`${label} ran`, `threw: ${err && err.message}`, 'no throw') }
 }
 
 // Made-up rows, one per displayStatus.
@@ -306,8 +311,9 @@ function pageSection(c, L, S) {
     js.includes("const blankSign = () => ({ open: false, row: null, printedName: '', title: '', agreed: false, padKey: 0, busy: false, error: '' })")
     && !/signatureImage/.test(js.replace("signatureImage: (padRef.value && padRef.value.toDataURL()) || ''", '')))
   c.ok('§3 the reason dialog is replaced whole on open and on close', /function closeReason\(\) \{\n {2}decide\.value = blankDecide\(\)\n\}/.test(js) && js.includes('decide.value = { ...blankDecide(), open: true,'))
-  c.ok('§3 closing either dialog goes through its close function',
-    tpl.includes('<Dialog :open="sign.open" @update:open="(v) => { if (!v) closeSign() }">') && tpl.includes('<Dialog :open="decide.open" @update:open="(v) => { if (!v) closeReason() }">'))
+  c.ok('§3 every way to close either dialog (Cancel, the X, Escape, a click outside) goes through its dismiss function',
+    tpl.includes('<Dialog :open="sign.open" @update:open="(v) => { if (!v) dismissSign() }">') && tpl.includes('<Dialog :open="decide.open" @update:open="(v) => { if (!v) dismissReason() }">')
+    && count(tpl, '@click="dismissSign"') === 1 && count(tpl, '@click="dismissReason"') === 1 && !/closeSign|closeReason/.test(tpl))
   c.ok('§3 the pad is remounted per open and drawable only after the tick', /<SignaturePad\s+:key="sign\.padKey"\s+ref="padRef"\s+:disabled="!sign\.agreed"/.test(tpl))
   c.ok('§3 the tick\'s words are the consent text that is sent', tpl.includes('<span>{{ SIGNING_CONSENT_TEXT }}</span>') && js.includes("import { SIGNING_CONSENT_TEXT } from '../lib/signingConsent.js'"))
   c.ok('§3 the inputs stop at the server\'s lengths', tpl.includes(':maxlength="PRINTED_NAME_MAX"') && tpl.includes(':maxlength="TITLE_MAX"') && tpl.includes(':maxlength="REASON_MAX"'))
@@ -318,6 +324,399 @@ function pageSection(c, L, S) {
   c.ok('§3 nothing is kept in the browser\'s storage', !/localStorage|sessionStorage|indexedDB|document\.cookie/.test(js))
   c.ok('§3 nothing is logged', !/console\./.test(js))
   c.ok('§3 no role is tested in the page (the route and the server decide)', !/useAuthStore|\bauth\.|\.role\b/.test(js))
+}
+
+// ── §3b the page, mounted ────────────────────────────────────────────────────
+// No DOM: an in-memory renderer, with stubs for the API, toast, viewport, socket and
+// shadcn pieces. reka-ui's X, Escape and a click outside all call the root's
+// onOpenChange(false), which for a controlled `open` only emits update:open(false).
+let VUE = null
+function vue() {
+  if (VUE) return VUE
+  const req = createRequire(path.join(ROOT, 'client', 'package.json'))
+  VUE = { Vue: req('vue'), SFC: req('vue/compiler-sfc') }
+  // v-model asks whether a field's root is a Document; set after Vue, which reads `document` at load.
+  globalThis.document = globalThis.document || { activeElement: null }
+  globalThis.Document = globalThis.Document || class Document {}
+  globalThis.ShadowRoot = globalThis.ShadowRoot || class ShadowRoot {}
+  return VUE
+}
+
+// The page's script and template as one function of its imports, per source text.
+const viewFactories = new Map()
+function viewFactory(src) {
+  if (viewFactories.has(src)) return viewFactories.get(src)
+  const { SFC } = vue()
+  const { descriptor } = SFC.parse(src, { filename: 'PassengerAuthorizationsView.vue' })
+  let body = SFC.compileScript(descriptor, { id: 'pa-view', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } }).content
+  const specs = []
+  body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, names, q, spec) => {
+    specs.push(spec)
+    const binds = names.split(',').map((n) => n.trim()).filter(Boolean).map((n) => n.replace(/\s+as\s+/, ': '))
+    return `const { ${binds.join(', ')} } = __deps[${JSON.stringify(spec)}];`
+  })
+  body = body.replace(/^import\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, name, q, spec) => {
+    specs.push(spec)
+    return `const ${name} = __deps[${JSON.stringify(spec)}].default;`
+  })
+  body = body.replace(/^export default\s*/m, 'return ')
+  if (/^\s*(import|export)\s/m.test(body)) throw new Error('the page has an import or export this harness cannot map')
+  const make = (deps) => {
+    const missing = specs.filter((s) => !Object.prototype.hasOwnProperty.call(deps, s))
+    if (missing.length) throw new Error(`no stub for ${missing.join(', ')}`)
+    return new Function('__deps', body)(deps)
+  }
+  viewFactories.set(src, make)
+  return make
+}
+
+function viewDeps({ L, consent, api, toasts, isMobile }) {
+  const { Vue } = vue()
+  const stub = (tag) => Vue.defineComponent({ name: tag, inheritAttrs: false, setup: (_, { attrs, slots }) => () => Vue.h(tag, { ...attrs }, slots.default ? slots.default() : []) })
+  // As reka-ui's, the dialog's content is there only while it is open.
+  const Dialog = Vue.defineComponent({ name: 'Dialog', inheritAttrs: false, setup: (_, { attrs, slots }) => () => Vue.h('x-dialog', { ...attrs }, attrs.open && slots.default ? slots.default() : []) })
+  const SignaturePad = Vue.defineComponent({
+    name: 'SignaturePad',
+    props: { disabled: Boolean, label: String, hint: String },
+    setup(props, { expose }) {
+      expose({ toDataURL: () => PNG, reset() {} })
+      return () => Vue.h('x-pad', { disabled: props.disabled })
+    },
+  })
+  return {
+    vue: Vue,
+    '../composables/useApi': { useApi: () => api },
+    '../composables/useSocketRefresh': { useSocketRefresh: () => {} },
+    '../composables/useViewport': { useViewport: () => ({ isMobile }) },
+    '../composables/useToast': { useToast: () => ({ show: (message) => toasts.push(message) }) },
+    '../lib/signingConsent.js': consent,
+    '../lib/passengerAuthorizationAdmin.js': L,
+    '@/components/ui/table': { Table: stub('x-table'), TableHeader: stub('x-thead'), TableBody: stub('x-tbody'), TableRow: stub('x-tr'), TableHead: stub('x-th'), TableCell: stub('x-td') },
+    '@/components/ui/tabs': { Tabs: stub('x-tabs'), TabsList: stub('x-tabs-list'), TabsTrigger: stub('x-tab') },
+    '@/components/ui/dialog': {
+      Dialog, DialogContent: stub('x-dialog-content'), DialogScrollContent: stub('x-dialog-content'), DialogHeader: stub('x-dialog-header'),
+      DialogTitle: stub('x-dialog-title'), DialogDescription: stub('x-dialog-description'), DialogFooter: stub('x-dialog-footer'),
+    },
+    '@/components/ui/button': { Button: stub('button') },
+    '../components/shared/SkeletonLoader.vue': { default: stub('x-skeleton') },
+    '../components/shared/EmptyState.vue': { default: stub('x-empty') },
+    '../components/shared/SignaturePad.vue': { default: SignaturePad },
+  }
+}
+
+function mountInMemory(Comp) {
+  const { Vue } = vue()
+  const node = (type, tag) => {
+    const n = {
+      type, tag, children: [], parent: null, props: {}, text: '', value: '', checked: false, listeners: {},
+      addEventListener(ev, fn) { (n.listeners[ev] = n.listeners[ev] || []).push(fn) },
+      removeEventListener(ev, fn) { n.listeners[ev] = (n.listeners[ev] || []).filter((f) => f !== fn) },
+      getRootNode() { return {} },
+    }
+    return Vue.markRaw(n)
+  }
+  const ops = {
+    insert(child, parent, anchor) {
+      if (child.parent) ops.remove(child)
+      const i = anchor ? parent.children.indexOf(anchor) : -1
+      if (i >= 0) parent.children.splice(i, 0, child); else parent.children.push(child)
+      child.parent = parent
+    },
+    remove(child) {
+      const p = child.parent
+      if (!p) return
+      const i = p.children.indexOf(child)
+      if (i >= 0) p.children.splice(i, 1)
+      child.parent = null
+    },
+    createElement: (tag) => node('el', tag),
+    createText: (t) => Object.assign(node('text'), { text: t }),
+    createComment: (t) => Object.assign(node('comment'), { text: t }),
+    setText(n, t) { n.text = t },
+    setElementText(el, t) { el.children = []; if (t) ops.insert(Object.assign(node('text'), { text: t }), el) },
+    parentNode: (n) => n.parent,
+    nextSibling(n) { const p = n.parent; if (!p) return null; return p.children[p.children.indexOf(n) + 1] || null },
+    querySelector: () => null,
+    setScopeId() {},
+    patchProp(el, key, prev, next) { el.props[key] = next },
+  }
+  const warnings = []
+  const root = node('el', 'root')
+  const app = Vue.createRenderer(ops).createApp(Comp)
+  app.config.warnHandler = (msg) => warnings.push(String(msg))
+  app.mount(root)
+  const textOf = (n) => (!n ? '' : n.type === 'text' ? n.text : n.type === 'el' ? n.children.map(textOf).join(' ') : '')
+  const all = (n, pred, out = []) => {
+    if (!n) return out
+    if (n.type === 'el' && pred(n)) out.push(n)
+    for (const ch of n.children || []) all(ch, pred, out)
+    return out
+  }
+  return {
+    warnings,
+    findAll: (pred, from = root) => all(from, pred),
+    find: (pred, from = root) => all(from, pred)[0] || null,
+    text: (n) => textOf(n).replace(/\s+/g, ' ').trim(),
+    unmount: () => app.unmount(),
+  }
+}
+
+const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
+const evt = (el) => ({ preventDefault() {}, stopPropagation() {}, target: el, currentTarget: el })
+const isDisabled = (el) => !!el && el.props.disabled != null && el.props.disabled !== false
+// A handler the page gave an element, called as the browser would. A send it starts is
+// not awaited: it stays out until the test answers it.
+function fire(p, fn, ...args) {
+  for (const f of Array.isArray(fn) ? fn : [fn]) {
+    if (typeof f !== 'function') continue
+    const r = f(...args)
+    if (r && typeof r.then === 'function') r.catch((err) => p.thrown.push(String(err && err.message)))
+  }
+}
+// A press as the browser makes one: a disabled button takes no click.
+async function press(p, el) {
+  if (!el || isDisabled(el)) return
+  fire(p, el.props.onClick, evt(el))
+  await drain()
+}
+async function typeInto(el, text) {
+  if (!el) return
+  el.value = text
+  for (const fn of el.listeners.input || []) fn(evt(el))
+  await drain()
+}
+async function tick(el) {
+  if (!el) return
+  el.checked = true
+  for (const fn of el.listeners.change || []) fn(evt(el))
+  await drain()
+}
+// The X, Escape or a click outside: what reka-ui's root does for each of them.
+async function dismiss(p, dialog) {
+  if (dialog) fire(p, dialog.props['onUpdate:open'], false)
+  await drain()
+}
+
+const SIGNED_BY = { companyPrintedName: 'Sam Example', companyTitle: 'Safety Manager', companySignedOn: 'November 3, 2026' }
+const LISTS = {
+  waiting: [row(1, 'awaiting_company', { status: 'awaiting_company' }), row(7, 'awaiting_company', { status: 'awaiting_company' })],
+  authorized: [row(2, 'scheduled', { status: 'authorized', ...SIGNED_BY }), row(3, 'active', { status: 'authorized', ...SIGNED_BY })],
+}
+// Lists answer at once; each post stays out until the test answers it.
+function fakeApi() {
+  const api = { gets: [], posts: [] }
+  api.get = async (url) => {
+    api.gets.push(url)
+    const view = String(url).split('view=')[1] || ''
+    return { view, authorizations: Object.prototype.hasOwnProperty.call(LISTS, view) ? LISTS[view] : [], reviewNote: '' }
+  }
+  api.post = (url, body, opts) => new Promise((resolve, reject) => { api.posts.push({ url, body, opts, resolve, reject }) })
+  return api
+}
+const ROW_ACTIONS = ['Sign for LogisX', 'Decline', 'Revoke']
+const SENDING = {
+  sign: 'Sending your signature. You can\'t cancel it now: wait here for the answer, which can take up to a minute.',
+  decline: 'Sending the decline. You can\'t cancel it now: wait here for the answer.',
+  revoke: 'Sending the revocation. You can\'t cancel it now: wait here for the answer.',
+}
+const WORDS = {
+  ALREADY_DECIDED: 'This authorization was already signed, declined or revoked. The list now shows where it stands.',
+  TIMEOUT: 'No answer from the server. The list was read again: check whether the change went through before you try again.',
+  RENDER_FAILED: 'The signed PDF could not be made just now. Nothing was signed: try again.',
+}
+
+async function mountedSection(c, L, S) {
+  const { Vue } = vue()
+  const consent = await import(pathToFileURL(path.join(CLIENT_SRC, 'lib', 'signingConsent.js')).href)
+  const make = viewFactory(S.view)
+  const noise = []
+  async function mountPage({ mobile = false } = {}) {
+    const api = fakeApi()
+    const toasts = []
+    const isMobile = Vue.ref(mobile)
+    const m = mountInMemory(make(viewDeps({ L, consent, api, toasts, isMobile })))
+    await drain()
+    const inDialog = (n) => { for (let up = n.parent; up; up = up.parent) if (up.tag === 'x-dialog') return true; return false }
+    const [signDialog, reasonDialog] = m.findAll((n) => n.tag === 'x-dialog')
+    const p = {
+      m, api, toasts, isMobile, signDialog, reasonDialog, thrown: [],
+      button: (label, from) => m.find((n) => n.tag === 'button' && m.text(n) === label, from),
+      rowButtons: () => m.findAll((n) => n.tag === 'button' && !inDialog(n) && ROW_ACTIONS.includes(m.text(n))),
+      field: (pred) => m.find(pred),
+      status: (dialog) => m.text(m.find((n) => n.props.role === 'status', dialog)),
+      error: (dialog) => m.text(m.find((n) => n.props.role === 'alert', dialog)),
+      done() { noise.push(...m.warnings, ...p.thrown); m.unmount() },
+    }
+    return p
+  }
+  // Every row action on the page, in the table and in the phone cards.
+  async function rowActions(p) {
+    const start = p.isMobile.value
+    const seen = []
+    for (const mobile of [start, !start]) {
+      p.isMobile.value = mobile
+      await drain()
+      seen.push(...p.rowButtons().map((b) => ({ label: p.m.text(b), off: isDisabled(b), where: mobile ? 'card' : 'table' })))
+    }
+    p.isMobile.value = start
+    await drain()
+    return seen
+  }
+  const live = (seen) => ({ n: seen.length, live: seen.filter((b) => !b.off).map((b) => `${b.where} ${b.label}`) })
+  async function fillSign(p) {
+    await typeInto(p.field((n) => n.tag === 'input' && n.props.autocomplete === 'name'), 'Sam Example')
+    await typeInto(p.field((n) => n.tag === 'input' && n.props.autocomplete === 'organization-title'), 'Safety Manager')
+    await tick(p.field((n) => n.tag === 'input' && n.props.type === 'checkbox'))
+  }
+
+  // A countersign that lands (table).
+  {
+    const p = await mountPage()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Sign for LogisX'))
+    await fillSign(p)
+    const send = p.button('Sign for LogisX Inc.', p.signDialog)
+    const cancel = p.button('Cancel', p.signDialog)
+    await press(p, send)
+    await press(p, cancel)
+    await dismiss(p, p.signDialog)
+    const rows = await rowActions(p)
+    c.eq('§3b a countersign out: the dialog says it is being sent and can\'t be cancelled', p.status(p.signDialog), SENDING.sign)
+    c.ok('§3b ...its Cancel and Sign buttons are disabled', isDisabled(cancel) && isDisabled(send))
+    c.ok('§3b ...Cancel, the X, Escape and a click outside leave it open; it was sent once',
+      p.signDialog.props.open === true && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/1/countersign')
+    c.eq('§3b ...no row offers Sign or Decline, in the table or the cards', live(rows), { n: 8, live: [] })
+    const openTillAnswer = p.signDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].resolve({ ok: true })
+    await drain()
+    c.ok('§3b a countersign that lands: only the answer closes the dialog; the toast names it; the list is read again',
+      openTillAnswer && p.signDialog.props.open === false && p.api.gets.length === 2
+      && p.toasts.includes('Signed for LogisX Inc. (PA-0000ABC1). The driver is told in the app.'))
+    const after = await rowActions(p)
+    c.ok('§3b ...and only then do the rows offer their actions again', live(rows).live.length === 0 && rows.length === 8 && live(after).live.length === 8)
+    p.done()
+  }
+
+  // A countersign refused (table): the dialog unlocks, so the person can retry or leave.
+  {
+    const p = await mountPage()
+    await press(p, p.rowButtons().filter((b) => p.m.text(b) === 'Sign for LogisX')[1])
+    await fillSign(p)
+    const send = p.button('Sign for LogisX Inc.', p.signDialog)
+    const cancel = p.button('Cancel', p.signDialog)
+    await press(p, send)
+    await dismiss(p, p.signDialog)
+    const openTillAnswer = p.signDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].reject(apiError(503, 'RENDER_FAILED'))
+    await drain()
+    c.ok('§3b a countersign refused: the dialog stays with its words and unlocks (Cancel and Sign live, no "sending" line)',
+      openTillAnswer && p.signDialog.props.open === true && p.error(p.signDialog) === WORDS.RENDER_FAILED && p.status(p.signDialog) === ''
+      && !isDisabled(cancel) && !isDisabled(send) && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/7/countersign')
+    await dismiss(p, p.signDialog)
+    c.ok('§3b ...and now the X, Escape or a click outside closes it', openTillAnswer && p.signDialog.props.open === false)
+    p.done()
+  }
+
+  // A decline refused (phone cards); a second tap while it is out sends nothing.
+  {
+    const p = await mountPage({ mobile: true })
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Decline'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Trip cancelled')
+    const send = p.button('Decline', p.reasonDialog)
+    const cancel = p.button('Cancel', p.reasonDialog)
+    await press(p, send)
+    if (send) fire(p, send.props.onClick, evt(send))
+    await drain()
+    await press(p, cancel)
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    c.eq('§3b a decline out: the dialog says it is being sent and can\'t be cancelled', p.status(p.reasonDialog), SENDING.decline)
+    c.ok('§3b ...its Cancel and Decline buttons are disabled', isDisabled(cancel) && isDisabled(send))
+    c.ok('§3b ...a second tap, Cancel, the X, Escape and a click outside: still open, sent once',
+      p.reasonDialog.props.open === true && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/1/decline')
+    c.eq('§3b ...no row offers Sign or Decline, in the cards or the table', live(rows), { n: 8, live: [] })
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].reject(apiError(409, 'ALREADY_DECIDED'))
+    await drain()
+    c.ok('§3b a decline refused: the dialog stays with its words, unlocks, and the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === true && p.error(p.reasonDialog) === WORDS.ALREADY_DECIDED && p.status(p.reasonDialog) === ''
+      && !isDisabled(cancel) && !isDisabled(send) && p.api.gets.length === 2)
+    await press(p, cancel)
+    c.ok('§3b ...and now Cancel closes it', openTillAnswer && p.reasonDialog.props.open === false)
+    p.done()
+  }
+
+  // A revoke with no answer (table, Authorized tab).
+  {
+    const p = await mountPage()
+    const tabs = p.m.find((n) => n.tag === 'x-tabs')
+    if (tabs) fire(p, tabs.props['onUpdate:modelValue'], 'authorized')
+    await drain()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Revoke'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Rider changed')
+    const send = p.button('Revoke', p.reasonDialog)
+    const cancel = p.button('Cancel', p.reasonDialog)
+    await press(p, send)
+    await press(p, cancel)
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    c.eq('§3b a revoke out: the dialog says it is being sent and can\'t be cancelled', p.status(p.reasonDialog), SENDING.revoke)
+    c.ok('§3b ...Cancel, the X, Escape and a click outside leave it open; it was sent once',
+      p.reasonDialog.props.open === true && isDisabled(cancel) && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/2/revoke')
+    c.eq('§3b ...no row offers Revoke, in the table or the cards', live(rows), { n: 4, live: [] })
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].reject(apiError(0, 'TIMEOUT'))
+    await drain()
+    c.ok('§3b a revoke with no answer: the dialog says to check, unlocks, and the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === true && p.error(p.reasonDialog) === WORDS.TIMEOUT && p.status(p.reasonDialog) === ''
+      && !isDisabled(cancel) && p.api.gets.length === 3)
+    await dismiss(p, p.reasonDialog)
+    c.ok('§3b ...and now the X, Escape or a click outside closes it', openTillAnswer && p.reasonDialog.props.open === false)
+    p.done()
+  }
+
+  // A decline that lands (table).
+  {
+    const p = await mountPage()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Decline'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Trip cancelled')
+    await press(p, p.button('Decline', p.reasonDialog))
+    await press(p, p.button('Cancel', p.reasonDialog))
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].resolve({ ok: true })
+    await drain()
+    c.ok('§3b a decline that lands: only the answer closes the dialog; the toast names it; the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === false && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/1/decline'
+      && p.api.gets.length === 2 && p.toasts.includes('Declined PA-0000ABC1. The driver is told in the app.'))
+    const after = await rowActions(p)
+    c.ok('§3b ...the rows\' actions come back only with the decline\'s answer', live(rows).live.length === 0 && rows.length === 8 && live(after).live.length === 8)
+    p.done()
+  }
+
+  // A revoke that lands (phone cards, Authorized tab).
+  {
+    const p = await mountPage({ mobile: true })
+    const tabs = p.m.find((n) => n.tag === 'x-tabs')
+    if (tabs) fire(p, tabs.props['onUpdate:modelValue'], 'authorized')
+    await drain()
+    await press(p, p.rowButtons().find((b) => p.m.text(b) === 'Revoke'))
+    await typeInto(p.field((n) => n.tag === 'textarea'), 'Rider changed')
+    await press(p, p.button('Revoke', p.reasonDialog))
+    await dismiss(p, p.reasonDialog)
+    const rows = await rowActions(p)
+    const openTillAnswer = p.reasonDialog.props.open === true
+    if (p.api.posts[0]) p.api.posts[0].resolve({ ok: true })
+    await drain()
+    c.ok('§3b a revoke that lands: only the answer closes the dialog; the toast names it; the list is read again',
+      openTillAnswer && p.reasonDialog.props.open === false && p.api.posts.length === 1 && p.api.posts[0].url === '/api/admin/passenger-authorizations/2/revoke'
+      && p.api.gets.length === 3 && p.toasts.includes('Revoked PA-0000ABC2. The driver is told in the app.'))
+    const after = await rowActions(p)
+    c.ok('§3b ...the rows\' actions come back only with the revoke\'s answer', live(rows).live.length === 0 && rows.length === 4 && live(after).live.length === 4)
+    p.done()
+  }
+
+  c.eq('§3b harness: the page ran with no Vue warning and no handler threw', noise, [])
 }
 
 // ── §4 the route and the sidebar ─────────────────────────────────────────────
@@ -372,20 +771,23 @@ function compileSection(c) {
   }
 }
 
-const SECTIONS = { lib: libSection, parity: paritySection, page: pageSection, nav: navSection, off: offSection }
-function runSections(c, L, S, names) {
-  for (const n of names) section(c, n, () => (L ? SECTIONS[n](c, L, S) : c.eq(`${n}: the lib loads`, false, true)))
+const SECTIONS = { lib: libSection, parity: paritySection, page: pageSection, mounted: mountedSection, nav: navSection, off: offSection }
+async function runSections(c, L, S, names) {
+  for (const n of names) await section(c, n, () => (L ? SECTIONS[n](c, L, S) : c.eq(`${n}: the lib loads`, false, true)))
 }
 
 let lib = null
 try { lib = await import(pathToFileURL(LIB).href) } catch { lib = null }
 
 {
-  const HEADS = { lib: '§1 the lib', parity: '§2 parity with the server', page: '§3 the page', nav: '§4 the route and the sidebar', off: '§5 flag off' }
+  const HEADS = {
+    lib: '§1 the lib', parity: '§2 parity with the server', page: '§3 the page', mounted: '§3b the page, mounted: while an action is out',
+    nav: '§4 the route and the sidebar', off: '§5 flag off',
+  }
   for (const n of Object.keys(SECTIONS)) {
     console.log(`\n${HEADS[n]}`)
-    runSections(MAIN, lib, S0, [n])
-    if (n === 'page') section(MAIN, 'compile', () => compileSection(MAIN))
+    await runSections(MAIN, lib, S0, [n])
+    if (n === 'page') await section(MAIN, 'compile', () => compileSection(MAIN))
   }
 
   // ── §6 mutants ─────────────────────────────────────────────────────────────
@@ -407,7 +809,7 @@ try { lib = await import(pathToFileURL(LIB).href) } catch { lib = null }
       return
     }
     const c = checker(false)
-    runSections(c, L, S, names)
+    await runSections(c, L, S, names)
     MAIN.eq(`§6 ${id}: ${label}: is caught`, c.failed.length > 0 ? 'caught' : 'not caught', 'caught')
   }
   const libMut = (from, to) => () => ({ lib: once(LIB_SRC, from, to) })
@@ -430,8 +832,8 @@ try { lib = await import(pathToFileURL(LIB).href) } catch { lib = null }
     await mutant('M31', 'an expired awaiting row shown under Ended without its words', libMut("if (row.status === 'awaiting_company' && row.displayStatus === 'expired') return 'Expired before the company signed.'\n", ''), ['lib'])
     await mutant('M32', 'lengths counted in UTF-16 units', libMut('const n = Array.from(text).length', 'const n = text.length'), ['lib'])
     await mutant('M33', 'the page showing a field the server never sends', fileMut('view', '<TableCell>{{ r.driverName }}</TableCell>', '<TableCell>{{ r.driverName }} {{ r.driverPhone }}</TableCell>'), ['parity'])
-    await mutant('M13', 'the countersign button without its check', fileMut('view', '<Button v-if="actionsFor(r).countersign" size="sm" @click="openSign(r)">Sign for LogisX</Button>\n                  <Button v-if="actionsFor(r).decline"',
-      '<Button size="sm" @click="openSign(r)">Sign for LogisX</Button>\n                  <Button v-if="actionsFor(r).decline"'), ['page'])
+    await mutant('M13', 'the countersign button without its check', fileMut('view', '<Button v-if="actionsFor(r).countersign" size="sm" :disabled="sending" @click="openSign(r)">Sign for LogisX</Button>\n                  <Button v-if="actionsFor(r).decline"',
+      '<Button size="sm" :disabled="sending" @click="openSign(r)">Sign for LogisX</Button>\n                  <Button v-if="actionsFor(r).decline"'), ['page'])
     await mutant('M14', 'the countersign sent before its check', fileMut('view', '  const problem = countersignProblem(form)\n  if (problem) {\n    s.error = problem\n    return\n  }\n', ''), ['page'])
     await mutant('M15', 'the dialog state kept between opens', fileMut('view', 'sign.value = { ...blankSign(), open: true, row, padKey: ++padKey }', 'sign.value = { ...sign.value, open: true, row, padKey: ++padKey }'), ['page'])
     await mutant('M16', 'a late answer written into whatever dialog is open', fileMut('view', '    if (sign.value === s) {\n      s.error = actionErrorText(err)', '    if (true) {\n      s.error = actionErrorText(err)'), ['page'])
@@ -448,6 +850,27 @@ try { lib = await import(pathToFileURL(LIB).href) } catch { lib = null }
     await mutant('M25', 'the entry given to Dispatchers', fileMut('sidebar', "  Dispatcher: [\n", "  Dispatcher: [\n    { to: '/admin/passenger-authorizations', icon: '&#128101;', label: 'Passenger Authorizations', feature: 'passengerAuthorization' },\n"), ['nav'])
     await mutant('M26', 'the list kept after FEATURE_OFF', fileMut('view', '      featureOff.value = true\n      listed.value = []\n', '      featureOff.value = true\n'), ['off'])
     await mutant('M27', 'the reason dialog state kept between opens', fileMut('view', 'function closeReason() {\n  decide.value = blankDecide()\n}', 'function closeReason() {\n  decide.value.open = false\n}'), ['page'])
+    // While an action is out (§3b).
+    await mutant('M34', 'the X, Escape or a click outside closing a countersign that is out', fileMut('view', 'function dismissSign() {\n  if (sign.value.busy) return\n', 'function dismissSign() {\n'), ['mounted'])
+    await mutant('M35', 'Cancel live while the signature is out', fileMut('view', '<Button variant="outline" :disabled="sign.busy" @click="dismissSign">Cancel</Button>', '<Button variant="outline" @click="dismissSign">Cancel</Button>'), ['mounted'])
+    await mutant('M36', 'a decline or revoke dialog closed while its action is out', fileMut('view', 'function dismissReason() {\n  if (decide.value.busy) return\n', 'function dismissReason() {\n'), ['mounted'])
+    await mutant('M37', 'Cancel live while a decline or revoke is out', fileMut('view', '<Button variant="outline" :disabled="decide.busy" @click="dismissReason">Cancel</Button>', '<Button variant="outline" @click="dismissReason">Cancel</Button>'), ['mounted'])
+    await mutant('M38', 'no word that the signature is being sent', fileMut('view', '<p v-if="sign.busy" class="pa-sending" role="status">', '<p v-if="false" class="pa-sending" role="status">'), ['mounted'])
+    await mutant('M39', 'no word that a decline or revoke is being sent', fileMut('view', '<p v-if="decide.busy" class="pa-sending" role="status">', '<p v-if="false" class="pa-sending" role="status">'), ['mounted'])
+    await mutant('M40', 'the rows\' actions live while a decline or revoke is out', fileMut('view', 'const sending = computed(() => sign.value.busy || decide.value.busy)', 'const sending = computed(() => sign.value.busy)'), ['mounted'])
+    await mutant('M41', 'a phone card\'s Sign live while an action is out', fileMut('view', '<Button v-if="actionsFor(r).countersign" size="sm" :disabled="sending" @click="openSign(r)">Sign for LogisX</Button>\n              <Button',
+      '<Button v-if="actionsFor(r).countersign" size="sm" @click="openSign(r)">Sign for LogisX</Button>\n              <Button'), ['mounted'])
+    await mutant('M42', 'the table\'s Revoke live while a revoke is out', fileMut('view', ':disabled="sending" @click="openReason(r, \'revoke\')">Revoke</Button>\n                </div>', '@click="openReason(r, \'revoke\')">Revoke</Button>\n                </div>'), ['mounted'])
+    await mutant('M43', 'a countersign that landed waiting on a close the person can\'t make', fileMut('view', '    if (sign.value === s) closeSign()\n', '    if (sign.value === s) dismissSign()\n'), ['mounted'])
+    await mutant('M44', 'a refused countersign leaving its dialog locked', fileMut('view', '      s.busy = false\n', ''), ['mounted'])
+    await mutant('M45', 'a refused decline or revoke leaving its dialog locked', fileMut('view', '      d.busy = false\n', ''), ['mounted'])
+    await mutant('M46', 'a second decline tap while one is out sending again', fileMut('view', 'if (d.busy || !d.row) return', 'if (!d.row) return'), ['mounted'])
+    await mutant('M47', 'the list not read again after a countersign lands', fileMut('view', '    toast(`Signed for LogisX Inc. (${s.row.reference}). The driver is told in the app.`)\n    load()\n', '    toast(`Signed for LogisX Inc. (${s.row.reference}). The driver is told in the app.`)\n'), ['mounted'])
+    await mutant('M48', 'the Sign button live while the signature is out', fileMut('view', '<Button :disabled="sign.busy" @click="submitSign">', '<Button @click="submitSign">'), ['mounted'])
+    await mutant('M49', 'a decline or revoke that landed waiting on a close the person can\'t make', fileMut('view', '    if (decide.value === d) closeReason()\n', '    if (decide.value === d) dismissReason()\n'), ['mounted'])
+    await mutant('M50', 'the list not read again after a decline or revoke lands', fileMut('view', "    toast(`${d.kind === 'revoke' ? 'Revoked' : 'Declined'} ${d.row.reference}. The driver is told in the app.`)\n    load()\n",
+      "    toast(`${d.kind === 'revoke' ? 'Revoked' : 'Declined'} ${d.row.reference}. The driver is told in the app.`)\n"), ['mounted'])
+    await mutant('M51', 'a landed decline or revoke closing its dialog but leaving every row\'s actions off', fileMut('view', '    if (decide.value === d) closeReason()\n', '    if (decide.value === d) decide.value.open = false\n'), ['mounted'])
   }
 }
 
