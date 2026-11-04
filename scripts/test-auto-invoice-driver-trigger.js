@@ -1285,6 +1285,51 @@ async function main() {
 		heldForAPerson(sw, "LD-TEST-0911", "OFF_GAP");
 		eq((await tryAgain(swj, "LD-TEST-0911")).status, 200, "§10 the sweep's Try again on OFF_GAP: as today");
 		eq(sw.claim("LD-TEST-0911").look_first, "", "§10 ...and it asks for no look");
+		eq(sw.invalidated, 0, "§10 ...and it leaves the cached sheet alone");
+
+		// A sheet fix, then Try again inside the cached sheet's minute: the invoice and the
+		// fingerprint saved for it must both come from the fixed row. The stand-in keeps a copy
+		// until it's dropped, as getJobTrackingCached() does; the engine reads the sheet itself.
+		const fix = makeWorld();
+		let cachedSheet = null;
+		const fixJob = await fix.started({
+			readJobTracking: async () => {
+				fix.calls.reads++;
+				if (!cachedSheet) cachedSheet = Object.freeze({ headers: HEADERS, data: Object.freeze([...fix.rows]) });
+				return cachedSheet;
+			},
+			invalidateJobTracking: () => { fix.invalidated++; cachedSheet = null; },
+		});
+		fix.ready("LD-TEST-0913");
+		fix.prepareHook = () => ({ ok: false, http: 422, code: "TOTAL_MISMATCH" });
+		const fixStart = fixJob.driverDelivered({ role: "Driver", loadId: "LD-TEST-0913", oldStatus: "At Receiver", newStatus: "Delivered" });
+		fix.setRow("LD-TEST-0913", { "Job Status": "Delivered" });
+		cachedSheet = null; // the status route drops the cache before written()
+		fixStart.written();
+		await drained(fix, "§10 sheet fix: the hold");
+		eq([fix.state("LD-TEST-0913"), fix.smtp.length], [["needs_attention", "TOTAL_MISMATCH"], 0], "§10 a total that disagrees: held for a person");
+		ok(cachedSheet && cachedSheet.data.some((r) => r["  Payment  "] === "$1,000.00"), "§10 ...the cached sheet now holds the old Payment");
+		// The person's fix goes straight into the sheet: nothing in the app hears of it.
+		fix.setRow("LD-TEST-0913", { "  Payment  ": "$1,200.00" });
+		fix.prepareHook = null;
+		eq((await tryAgain(fixJob, "LD-TEST-0913")).status, 200, "§10 Try again, seconds after the fix");
+		await drained(fix, "§10 sheet fix: the send");
+		eq([fix.state("LD-TEST-0913"), fix.smtp.length], [["drafted", ""], 1], "§10 ...one SMTP call");
+		eq(JSON.parse(fix.claim("LD-TEST-0913").fingerprint_json).paymentCents, 120000, "§10 FAILS ON THE OLD DESIGN: the fingerprint holds the fixed Payment, the one the invoice went out with");
+		// The cache refills, and a Super Admin's read compares.
+		cachedSheet = null;
+		fix.now += 2 * MIN;
+		await fixJob.checkClaims();
+		const fixed = fix.claim("LD-TEST-0913");
+		eq([fixed.changed_fields, fixed.changed_at, ledger.getSendStop(fix.db), fix.actions("auto_invoice_load_changed").length, fix.notices.filter((n) => /load changed/.test(n.title)).length, fix.smtp.length],
+			["", "", null, 0, 0, 1], "§10 FAILS ON THE OLD DESIGN: no change mark, no notice and no stop on a correct invoice: sending carries on");
+		fix.ready("LD-TEST-0914");
+		const nextStart = fixJob.driverDelivered({ role: "Driver", loadId: "LD-TEST-0914", oldStatus: "At Receiver", newStatus: "Delivered" });
+		fix.setRow("LD-TEST-0914", { "Job Status": "Delivered" });
+		cachedSheet = null;
+		nextStart.written();
+		await drained(fix, "§10 sheet fix: the next load");
+		eq([fix.state("LD-TEST-0914"), fix.smtp.length, fix.appends.length], [["drafted", ""], 2, 0], "§10 FAILS ON THE OLD DESIGN: ...the next driver's load is sent, not left as a draft");
 	}
 
 	section("§11 a stuck run (R-M4)");
