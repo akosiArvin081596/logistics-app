@@ -15,13 +15,15 @@
 //      VIN, the plate, the device, the recipient (through the approve route, every one of them set)
 //   §4 header safety: a name holding CR/LF and a Bcc gives one Subject and no Bcc header; a non-ASCII name is encoded,
 //      not cut; format characters are dropped; a name over 80 characters is refused, never cut
-//   §5 each check refuses, with no line: phones, the person shapes, the deny list, load-shaped numbers, an empty name
-//   §6 the order: past, then no_truck, then refused, whatever the switch; a line only after the checks
+//   §5 each check refuses, with no line: phones, the person shapes, the deny list, load-shaped numbers (the sweep's
+//      body reader's alone too), an empty name; a unit that is on its own person- or number-shaped is unit_refused
+//   §6 the order: past, then no_truck or unit_refused, then refused, whatever the switch; a line only after the checks
 //   §7 the draft switch off (requests on): "off" with the line, no Gmail call, no draft row, the Retry route unknown,
 //      the table dropped under the running server and every route still answering; the CREATE runs only when on
 //   §8 no recipient (unset, two, gmail.com, example.invalid, a display name, a subdomain): one start-up warning
 //      naming the setting, never the value; a good one: the start-up line says set, never what
-//   §9 no truck, or a unit CHR's rule refuses: no_truck, no row, no line
+//   §9 the truck: the fleet's "LogisX-#91" drafts as "LogisX truck #91"; a unit the note can't carry is unit_refused
+//      with its reason; no truck at all is no_truck; neither makes a row or a line
 //   §10 days already over: past, no row; days started but not over: a draft with the full range
 //   §11 timing: the answer comes first with "pending" while the append is held; then "made", or "failed" with its stage
 //   §12 the Message-ID is stored, with its own marker, before the first append
@@ -37,8 +39,8 @@
 //        canRetry by the server's clock, the staff create's answer (only while requests are on)
 //   §17 nothing is ever sent: no send or SMTP name in the module or the wiring; Gmail calls are the two only
 //   §18 rule 7's boundary: no lib/chr-*.js requires the note's module
-//   §19 the module's own rules: the recipient, the Message-ID, the unit rule (CHR's own), Retry's offer and refusals,
-//       the later-change lines, one attempt's order
+//   §19 the module's own rules: the recipient, the Message-ID, the note's unit rule and its reasons, Retry's offer and
+//       refusals, the later-change lines, one attempt's order
 //
 // Made-up data only: driver "Hollis Renner" (the world's) and "A. Example", truck "T-101", home time "Riverton, WY",
 // recipient "made-up.agent@chrobinson.com".
