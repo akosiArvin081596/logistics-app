@@ -15,6 +15,10 @@
 //   §6  --pilot (PR 3-shell): what went Live, its results, how many loads went
 //       Live, payloads off the allowlist, event-to-send minutes, held rows;
 //       counts and yes/no only, never a load ID; the database unchanged
+//   §7  --location (PR 4-shell, gate G2): rows outside their window, rows after
+//       the first final event, non-clean or pre-link fixes, payloads beyond the
+//       four keys, failed milestone positions, loads with no position; counts
+//       only, never a load, name, address, device or position
 //
 // Made-up data only. The copy is written to a fresh mkdtemp folder; no network.
 //   node scripts/test-chr-report.js      # exits 1 on any failure
@@ -267,6 +271,58 @@ section("§6  --pilot: the one-load test's report (PR 3-shell)");
 		const x = run(args);
 		eq([x.status, /--pilot takes --db/.test(x.stderr)], [2, true], `§6 ${label}: exit 2, says what is wrong`);
 	}
+}
+
+// ------------------------------------------------------------------ §7
+section("§7  --location: gate G2's report (PR 4-shell)");
+{
+	const LOC_DB = path.join(TMP, "location.db");
+	const ldb = new Database(LOC_DB);
+	ldb.exec(`CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+		CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');
+		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL, latitude REAL, longitude REAL, speed REAL DEFAULT 0,
+			geocoded_location TEXT DEFAULT '', location_date_ms INTEGER DEFAULT 0, dropped_reason TEXT DEFAULT '', source TEXT DEFAULT '');
+		CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, routemate_vehicle_id TEXT, assigned_from TEXT, assigned_until TEXT, assigned_by TEXT DEFAULT '');`);
+	const S = require(path.join(ROOT, "lib", "chr-store.js"));
+	S.ensureSchema(ldb);
+	const t = (min) => Date.parse("2026-11-02T15:00:00Z") + min * 60000;
+	const isoT = (min) => new Date(t(min)).toISOString();
+	const fix = (vid, min, lat, lng, source = "routemate", dropped = "") => ldb.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, location_date_ms, source, dropped_reason, geocoded_location) VALUES (?, ?, ?, ?, ?, ?, 'Canary Testdriver, 742 Evergreen Terrace')").run(vid, lat, lng, t(min), source, dropped);
+	ldb.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until) VALUES (1, 'RM-TEST-1', ?, NULL)").run(isoT(-600));
+	ldb.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until) VALUES (2, 'RM-TEST-2', ?, NULL)").run(isoT(30));
+	fix("RM-TEST-1", 10, 42.0347, -93.42);
+	fix("RM-LX-9", 25, 42.0347, -93.12, "linxup");
+	fix("RM-TEST-2", 20, 41.5, -90.1);
+	const ev = ldb.prepare(`INSERT INTO chr_events (load_id, kind, event, stop_kind, stop_index, event_at, verify, idem_key, payload_json, mode, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'dry_run', ?, ?, ?)`);
+	ev.run("123456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d1", "", "dry_run", isoT(7), isoT(7));
+	ev.run("223456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d2", "", "dry_run", isoT(7), isoT(7));
+	ev.run("323456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d3", "", "dry_run", isoT(7), isoT(7));
+	ev.run("123456789", "milestone", "delivered", "delivery", 1, isoT(50), "away", "f1", JSON.stringify({ loadNumber: "123456789", position: { lat: 1, lng: 1 } }), "held", isoT(51), isoT(51));
+	const loc = (load, min, made, payload, key) => ev.run(load, "location", "location", "", 0, isoT(min), "n/a", key, JSON.stringify(payload), "dry_run", isoT(made), isoT(made));
+	const P = (n, min, lat, lng) => ({ loadNumber: n, event: "location", eventAt: isoT(min).replace(/\.\d{3}Z$/, "Z"), position: { lat, lng } });
+	loc("123456789", 10, 15, P("123456789", 10, 42.0347, -93.42), "l1");
+	loc("123456789", 25, 30, P("123456789", 25, 42.0347, -93.12), "l2");
+	loc("123456789", 55, 60, { ...P("123456789", 55, 9, 9), truck: "T-101" }, "l3");
+	loc("223456789", 20, 30, P("223456789", 20, 41.5, -90.1), "l4");
+	ldb.close();
+	const rl = run(["--location", "--db", LOC_DB]);
+	eq(rl.status, 0, "§7 --location --db: exit 0");
+	const out = rl.stdout;
+	for (const [label, re] of [
+		["the rows and loads", /Location rows: 4 \(dry_run 4\); loads with rows: 2; per load: median 1, most 3/],
+		["rows outside the window", /Rows outside their load's window \(must be 0\): 1/],
+		["rows after the first final event", /Rows recorded after the load's first final event \(must be 0\): 1/],
+		["non-clean fixes", /Linxup, untagged or dropped fixes used \(must be 0\): 1/],
+		["fixes before the link", /Fixes from before their device's link \(must be 0\): 1/],
+		["unmatched rows", /Rows with no matching fix in this copy's telemetry: 1/],
+		["payloads beyond four keys", /Payloads with a key beyond the four \(must be 0\): 1/],
+		["failed milestone positions", /Milestone positions that failed their test \(must be 0\): 1/],
+		["loads with no position", /Loads with a confirmed departure and no position: 1/],
+	]) ok(re.test(out), `§7 the report counts ${label}`, out);
+	eq(["123456789", "223456789", "323456789", "Canary", "Evergreen", "RM-TEST", "42.0347"].filter((v) => out.includes(v)), [], "§7 ...and never a load, a name, an address, a device or a position");
+	const x = run(["--location", "--pilot", "--db", LOC_DB]);
+	eq(x.status, 2, "§7 --location with --pilot: exit 2");
 }
 
 console.log(`\n${"=".repeat(64)}`);

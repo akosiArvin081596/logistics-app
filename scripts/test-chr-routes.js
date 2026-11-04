@@ -368,6 +368,16 @@ async function checkLoads(t, opts = {}) {
 	const j = one.json || {};
 	t.eq([one.status, j.load && j.load.loadId, j.load && j.load.hold, j.counts, (j.events || []).map((e) => e.event)], [200, "123456789", false, { dry_run: 1 }, ["departed_pickup"]],
 		"§5 GET /loads/#123456789: the load, its counts and its rows");
+	// PR 4-shell: each load's last location time ("" with none).
+	if (I.CONFIG_INPUTS.includes("liveAllEnabled") && fs.existsSync(path.join(ROOT, "lib", "chr-location.js"))) {
+		S.ensureSchema(w.db);
+		w.db.prepare(`INSERT INTO chr_events (load_id, kind, event, event_at, idem_key, payload_json, mode, status, created_at, updated_at)
+			VALUES ('123456789', 'location', 'location', '2026-11-02T15:30:00.000Z', 'loc|123456789|made-up', '{"loadNumber":"123456789"}', 'dry_run', 'dry_run', '2026-11-02T15:31:00.000Z', '2026-11-02T15:31:00.000Z')`).run();
+		const again = await w.call("GET", "/loads", SA);
+		t.eq(((again.json && again.json.loads) || []).map((l) => [l.loadId, l.lastLocationAt]).sort(), [["123456789", "2026-11-02T15:30:00.000Z"], ["223456789", ""]],
+			"§5 GET /loads: each load's last location time (none: \"\")");
+		t.eq(((await w.call("GET", "/loads/123456789", SA)).json || {}).lastLocationAt, "2026-11-02T15:30:00.000Z", "§5 ...and in a load's own answer");
+	}
 	t.eq([j.pod, j.draft], [{ count: 1 }, { at: "2026-11-02T17:00:00Z", toChr: true }], "§5 ...one live POD (a deleted one not counted); the newest draft's time, and that it went to CHR");
 	t.ok(!one.text.includes("made-up.agent") && !one.text.includes("INV-MADE-UP") && !one.text.includes("1,234"), "§5 ...never the draft's address, number or total");
 	const none = await w.call("GET", "/loads/923456789", SA);

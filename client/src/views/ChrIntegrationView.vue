@@ -84,7 +84,21 @@
               <option value="live" :disabled="!status.live || !status.live.allowed">Live</option>
             </select>
           </label>
-          <label v-if="draft.milestones === 'pilot'" class="chr-field">
+          <label class="chr-field">
+            <span>Location along the route (the truck's ELD, every {{ draft.locationIntervalMin }} minutes in transit)</span>
+            <select v-model="draft.location" :disabled="busy || !status.locationEnabled">
+              <option value="off">Off</option>
+              <option value="dry_run">Dry run</option>
+              <option value="pilot" :disabled="status.settings.location !== 'pilot' && !(status.pilot && status.pilot.allowed)">Pilot (one load)</option>
+              <option value="live" :disabled="!status.live || !status.live.allowed">Live</option>
+            </select>
+          </label>
+          <p v-if="!status.locationEnabled" class="chr-hint">Location is off on the server. No position is recorded or sent, and no update carries one.</p>
+          <label v-if="status.locationEnabled" class="chr-field">
+            <span>Location interval (minutes, 15 to 240)</span>
+            <input v-model.number="draft.locationIntervalMin" type="number" min="15" max="240" step="5" :disabled="busy" />
+          </label>
+          <label v-if="draft.milestones === 'pilot' || draft.location === 'pilot'" class="chr-field">
             <span>Pilot load (9-digit Load ID)</span>
             <input v-model="draft.pilotLoad" type="text" inputmode="numeric" maxlength="10" :disabled="busy || !(status.pilot && status.pilot.allowed)" />
           </label>
@@ -138,6 +152,7 @@
               <span v-if="l.multiStop" class="chr-chip chr-chip--warn">Multi-stop</span>
               <span v-if="l.hold" class="chr-chip chr-chip--warn">On hold</span>
             </div>
+            <div v-if="status.locationEnabled" class="chr-row-sub">{{ lastPositionText(l.lastLocationAt, fmt) }}</div>
           </li>
         </ul>
       </section>
@@ -224,7 +239,7 @@ import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { fmtAppInstant } from '../utils/datetime'
 import {
   CHR_API, CHR_EVENT_WORDS, CHR_STATUS_WORDS, CHR_VERIFY_WORDS, CHR_LIVE_REASONS, CHR_PILOT_REASONS, CHR_PAUSE_WORDS, CHR_RESULT_SENTENCES,
-  kindChip, rowStatusText, stopText, ladderOf, eventsQuery, loadSummaryUrl, isRetryable,
+  kindChip, rowStatusText, stopText, ladderOf, eventsQuery, loadSummaryUrl, isRetryable, lastPositionText,
 } from '../lib/chrIntegration.js'
 
 // The C.H. Robinson page: Super Admin only (router meta and requireRole on every
@@ -249,7 +264,7 @@ const testResult = ref('')
 // A retry the server asked to confirm, by row id: { flag, text }.
 const retryAsk = reactive({})
 const filter = reactive({ status: '', loadId: '' })
-const draft = reactive({ milestones: 'dry_run', arrivedPickup: false, positionsInMilestones: false, settleMin: 5, pilotLoad: '' })
+const draft = reactive({ milestones: 'dry_run', location: 'off', arrivedPickup: false, positionsInMilestones: false, settleMin: 5, locationIntervalMin: 15, pilotLoad: '' })
 
 const pauseWords = CHR_PAUSE_WORDS
 const statusWords = CHR_STATUS_WORDS
@@ -273,10 +288,11 @@ const draftText = computed(() => {
   if (!d) return 'None made'
   return `Made ${fmt(d.at)}${d.toChr ? ', to a chrobinson.com address' : ''}`
 })
-const FIELDS = ['milestones', 'arrivedPickup', 'positionsInMilestones', 'settleMin']
+const FIELDS = ['milestones', 'location', 'arrivedPickup', 'positionsInMilestones', 'settleMin', 'locationIntervalMin']
 const currentPilotLoad = () => status.value?.settings?.pilot?.loadKey || ''
+const wantsPilot = () => draft.milestones === 'pilot' || draft.location === 'pilot'
 const dirty = computed(() => Boolean(status.value?.settings) && (FIELDS.some((k) => draft[k] !== status.value.settings[k])
-  || (draft.milestones === 'pilot' && draft.pilotLoad.trim().replace(/^#/, '') !== currentPilotLoad())))
+  || (wantsPilot() && draft.pilotLoad.trim().replace(/^#/, '') !== currentPilotLoad())))
 
 function syncDraft() {
   const s = status.value?.settings
@@ -343,7 +359,7 @@ function saveSettings() {
     const patch = {}
     for (const k of FIELDS) if (draft[k] !== status.value.settings[k]) patch[k] = draft[k]
     const load = draft.pilotLoad.trim().replace(/^#/, '')
-    if (draft.milestones === 'pilot' && load !== currentPilotLoad()) patch.pilotLoad = load
+    if (wantsPilot() && load !== currentPilotLoad()) patch.pilotLoad = load
     await api.put(`${CHR_API}/settings`, patch)
     await refreshAll()
   })

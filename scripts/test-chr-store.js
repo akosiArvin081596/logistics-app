@@ -147,7 +147,8 @@ db = freshDb();
 eq(S.STATE_KEY, "chr.state", "§3 server_state key chr.state");
 eq(S.readState(db), S.DEFAULT_STATE, "§3 no row: the defaults");
 eq(Object.keys(S.DEFAULT_STATE), ["cursor", "baselineId", "lastMode", "lastTickAt", "firstEnabledAt", "lastBaselineAt", "lastSweepOk", "lastErrorCode", "withheldRows",
-	"sendOnAt", "pausedReason", "pausedAt", "pausedUntil", "lastTokenOkAt", "failStreak"], "§3 the state's fields (never a token): the sender's pause, when sending went on, the last good token check");
+	"sendOnAt", "pausedReason", "pausedAt", "pausedUntil", "lastTokenOkAt", "failStreak", "lastLocationMode", "locationSince"],
+	"§3 the state's fields (never a token): the sender's pause, when sending went on, the last good token check, location's own mode and since when it records");
 eq(S.normalizeState({ pausedReason: "MADE_UP", lastMode: "pilot", failStreak: 3 }).pausedReason, "", "§3 a pause reason off the list reads as none");
 eq(S.normalizeState({ lastMode: "pilot" }).lastMode, "pilot", "§3 pilot is a mode the state may hold");
 S.writeState(db, { ...S.DEFAULT_STATE, cursor: 12, baselineId: 9, lastMode: "dry_run", lastTickAt: NOW, junk: "x" }, NOW);
