@@ -44745,8 +44745,8 @@ const DISPATCH_COMPLETED_RE = /^(delivered|completed|pod received)$/i;
 //
 // ⚠️ IT IS NOT THE "DOES THIS ROW CONTRIBUTE TODAY?" PREDICATE statusOverrideBlocker()
 // warns against, and the difference is load-bearing. That predicate asks only
-// about the BEFORE state, so it answers "no" for the 25 Cancelled rows sitting
-// in locked months ($29,166.25) and waves through the flip to Delivered that
+// about the BEFORE state, so it answers "no" for Cancelled rows sitting
+// in locked months and waves through the flip to Delivered that
 // injects them. This asks about BOTH sides — `completed(before) || completed(after)`
 // — so the injection is material by the AFTER state and the erasure by the
 // BEFORE state, and both refuse. Reviving a cancelled load is allowed (it moves
@@ -45978,9 +45978,8 @@ function sendPeriodRefusal(req, res, kind, periods, extra, audit) {
 // (the drift figure printed beside the frozen one) and page 1 of the statement
 // PDF. Reopening a period also re-links an `owed` row to live earnings, so a
 // month reopened after such a delete settles at a different number with nothing
-// recording why. Measured on production 2026-08-08: 381 of 391 live loads sit in
-// a locked month, $313,922.93 of completed revenue, and the single largest
-// (load 553198052, $4,800, 2026-05) sits in a month already marked PAID.
+// recording why. Most live loads sit in a locked month, some of them in months
+// already marked PAID.
 //
 // Ungated on PERIOD_FINALIZE_ENABLED, like every other lock guard: with the flag
 // off period_locks is empty, isLocked() is false for everything, and this costs
@@ -49187,6 +49186,11 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 const DRIVER_TRAINING_VIDEOS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TRAINING_VIDEOS_ENABLED ?? "").trim());
 const driverTrainingVideos = require("./lib/driver-training-videos");
 
+// The driver stepper's GPS phases, off unless exactly "true" (lib/gps-phases.js). On, each active
+// load in the driver app's payload carries `_gpsPhases` { pickup, drop }; off, no key and no lookup.
+const DRIVER_STEPPER_GPS_PHASES_ENABLED = process.env.DRIVER_STEPPER_GPS_PHASES_ENABLED === "true";
+const driverGpsPhases = require("./lib/gps-phases").create({ enabled: DRIVER_STEPPER_GPS_PHASES_ENABLED, readers: () => gpsPhasesReaders() });
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -49475,6 +49479,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// `_instructions` { state, highlights } per load, codes only, keyed by each
 		// row's own stored Load ID (lib/driver-instructions-runtime.js).
 		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
+		// The stepper's GPS phases (DRIVER_STEPPER_GPS_PHASES_ENABLED): `_gpsPhases` on each
+		// active load, judged from the rows as stored (lib/gps-phases.js); off, rows as they are.
+		filteredLoads = driverGpsPhases.annotate(filteredLoads, loads, jobTracking.headers);
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -50486,18 +50493,15 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 // Two things make it non-obvious that this route needs it:
 //
 //   • BEFORE covers the RESURRECTION, and it does so only because
-//     loadRowPeriods() is deliberately status-blind. 26 rows sit at
-//     "Cancelled"/"Canceled" and are dropped from every aggregate by
+//     loadRowPeriods() is deliberately status-blind. Rows at
+//     "Cancelled"/"Canceled" are dropped from every aggregate by
 //     excludeDroppedLoads(), so a guard phrased as "does this row contribute to a
 //     locked month TODAY?" answers *no* for all of them and waves the write
-//     through. 25 of those 26 are inside a locked month and carry $29,166.25
-//     between them (the 26th, load 512441414, sits in an unlocked 2025-04) — so
-//     flipping them to "Delivered" INJECTS that money into closed months,
-//     including load 554481641, $4,100, assigned 2026-06, a month whose payout is
-//     already `paid`. Asking loadRowPeriods() instead — which reads dates and
-//     never looks at the status — gets that right for free, and is why no
-//     status-aware predicate belongs here. (Counts measured 2026-08-09; recount
-//     the CANCELLED rows and you get 26, not 25. The gap is the unlocked one.)
+//     through. Most of them sit inside locked months, so flipping them to
+//     "Delivered" INJECTS their money into closed months, including months whose
+//     payout is already `paid`. Asking loadRowPeriods() instead — which reads
+//     dates and never looks at the status — gets that right for free, and is why
+//     no status-aware predicate belongs here.
 //   • AFTER covers the DATES THIS ROUTE ITSELF WRITES. It stamps Status Update
 //     Date and sets or clears Completion Date, and jobTrackingMonthCols().dateCol
 //     matches `status.*update.*date|completion.*date|assigned.*date` on the FIRST
@@ -50574,10 +50578,9 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 // ⚠️ PERIOD-GUARDED, same three fail-closed rungs as DELETE /api/loads/:loadId.
 // This was the last route that could rewrite a settled month: it writes Job
 // Status — the column excludeDroppedLoads() and every `completedStatuses` test
-// branch on — with no period check of any kind. Measured on production
-// 2026-08-09: 407 of 421 rows sit in locked periods, $313,922.93 of completed-load
-// revenue erasable from closed months, plus the $29,166.25 of resurrection
-// described on statusOverrideBlocker() above.
+// branch on — with no period check of any kind. Most rows sit in locked
+// periods, so without it completed-load revenue was erasable from closed months,
+// plus the resurrection described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		// A Dispatcher's key reads as the stored ID; every reply names it as shown
@@ -59778,6 +59781,15 @@ function arrivalRecorderReaders() {
 	};
 }
 
+// The driver stepper's GPS phases (lib/gps-phases.js): the recorder's readers above
+// and both of the geofence's own mapped points, never the network geocode.
+function gpsPhasesReaders() {
+	return {
+		...arrivalRecorderReaders(),
+		points: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId),
+	};
+}
+
 function checkGeofence(lat, lng, loadData, headers, loadId) {
 	const { origin, dest } = resolveGeofencePoints(loadData, headers, loadId);
 	const here = { latitude: lat, longitude: lng };
@@ -66677,7 +66689,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const driverMonthlyDays = Object.create(null);    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		// Per-driver per-month per-day → contributing load IDs. Surfaces in the
 		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
-		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
+		// covered by two loads at once (one calendar day, two loads).
 		const driverMonthlyDayLoads = Object.create(null); // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
 		// Preserve original sheet casing for display ("Hollis Renner" vs the
 		// lowercased "hollis renner" key used internally).
@@ -74281,10 +74293,19 @@ passengerAuthorization.mount(app, {
 
 // <chr-wiring>
 // C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
-// No CHR connection exists, so nothing is sent. Its three switches (the settings example)
-// are read once and are off in a replica; off, nothing runs but the daily prune once the
-// tables exist. scripts/test-chr-wiring.js lifts this block.
+// No CHR connection exists (its transport has no CHR host yet), so nothing is sent. Its
+// four switches (the settings example) are read once and are off in a replica; off,
+// nothing runs but the daily prune once the tables exist. The connection settings have
+// no default; their names are provisional until CHR's docs, and a value is never logged.
+// scripts/test-chr-wiring.js lifts this block.
 const CHR_NOTICE_TYPE = "chr-attention";
+const chrConnection = {
+	baseUrl: String(process.env.CHR_API_BASE_URL ?? "").trim(),
+	tokenUrl: String(process.env.CHR_TOKEN_URL ?? "").trim(),
+	clientId: String(process.env.CHR_CLIENT_ID ?? "").trim(),
+	clientSecret: String(process.env.CHR_CLIENT_SECRET ?? "").trim(),
+	carrierCode: String(process.env.CHR_CARRIER_CODE_SECRET ?? "").trim(),
+};
 const chrIntegration = require("./lib/chr-integration");
 // The Job Tracking view the recorder read last. Its rows stay here, read only by
 // resolveGeofencePoints(): lib/chr-*.js gets projections only.
@@ -74294,10 +74315,12 @@ const chr = chrIntegration.create({
 	config: chrIntegration.chrConfig({
 		updatesEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_UPDATES_ENABLED ?? "").trim()),
 		sendEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_SEND_ENABLED ?? "").trim()),
+		liveAllEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LIVE_ALL_ENABLED ?? "").trim()),
 		locationEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LOCATION_ENABLED ?? "").trim()),
 		geofenceRadiusM: GEOFENCE_RADIUS,
 		// Read through its one spelling (lib/driver-instructions-runtime.js).
 		denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "",
+		connection: chrConnection,
 		replica: Boolean(REPLICA),
 	}),
 	readSheet: async () => {
@@ -74316,11 +74339,21 @@ const chr = chrIntegration.create({
 	logAudit,
 	// The page's live refresh: no payload, Super Admins' room only.
 	onChange: () => io.to("super-admin").emit("chr:changed"),
-	// Who may choose Live: the listed accounts only (A3).
+	// Pauses and refused updates: an in-app notice to Super Admins only, never an email.
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(CHR_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: CHR_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	// Who may choose Pilot or Live and test the connection: the listed accounts only (A3).
 	listedAccounts: RATECON_PDF_VIEWERS,
 	log: console,
 });
 chr.mount(app, { requireRole, refuseCrossOrigin });
+if (chr.config().sendEnabled && !chr.config().credentialsConfigured) {
+	const missing = [["CHR_API_BASE_URL", chrConnection.baseUrl], ["CHR_TOKEN_URL", chrConnection.tokenUrl], ["CHR_CLIENT_ID", chrConnection.clientId], ["CHR_CLIENT_SECRET", chrConnection.clientSecret]]
+		.filter(([, v]) => !v).map(([name]) => name);
+	console.warn(`[chr] sending is on but the connection is not configured (${missing.join(", ")} not set): nothing is sent`);
+}
 if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
 	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
 }

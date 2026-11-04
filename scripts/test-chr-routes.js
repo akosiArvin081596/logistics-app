@@ -35,7 +35,16 @@
  *       any answer or audit row
  *   §11 every write tells the page (onChange); no read does
  *   §12 an unknown path: a JSON 404, never the app page
- *   §13 mutants: a router that breaks each rule above fails its check
+ *   §14 PR 3-shell, the pilot: a listed account sets or moves it, only while
+ *       sending is off (M6), naming its load; anyone may leave it; Live for every
+ *       load needs CHR_LIVE_ALL_ENABLED
+ *   §15 retry: failed, given-up and unknown live updates only; an unknown outcome
+ *       and an old milestone need the person's confirmation; audited
+ *   §16 resume: only while paused; updates older than 2 hours given up unless
+ *       confirmed; audited
+ *   §17 test connection: the listed accounts only; NOT_CONFIGURED (no CHR host
+ *       yet), audited with the result code only
+ *   §18 mutants: a router that breaks each rule above fails its check
  *
  * Made-up data only (loads 123456789 and 223456789, truck T-101). In-memory
  * SQLite; no network beyond the loopback listener.
@@ -136,7 +145,7 @@ const REAL = ROUTES_SRC ? loadRoutes(ROUTES_SRC) : null;
 
 // ------------------------------------------------------------------ a world
 const open = [];
-async function world({ on = true, sendEnabled = false, listIds = "1,7,9", routes = REAL, viaMount = true, sheet = null } = {}) {
+async function world({ on = true, sendEnabled = false, liveAllEnabled = true, listIds = "1,7,9", routes = REAL, viaMount = true, sheet = null, denyList = DENY_CANARY } = {}) {
 	const w = { audits: [], changes: 0, reads: 0, clock: T0, logs: [] };
 	const db = makeDb();
 	w.db = db;
@@ -144,7 +153,8 @@ async function world({ on = true, sendEnabled = false, listIds = "1,7,9", routes
 	const H = new Function(...PROVIDED, `${LIFT.text}\nreturn { ${LIFT.names.join(", ")} };`)(db, quiet, { env: {} }, serverRequire);
 	w.H = H;
 	w.sheetRows = sheet || [sheetRow("#123456789"), sheetRow("223456789")];
-	const config = I.chrConfig({ updatesEnabled: on, sendEnabled, denyList: DENY_CANARY });
+	// liveAllEnabled is handed in only where the config takes it (CHR_LIVE_ALL_ENABLED, PR 3-shell).
+	const config = I.chrConfig({ updatesEnabled: on, sendEnabled, denyList, ...(I.CONFIG_INPUTS.includes("liveAllEnabled") ? { liveAllEnabled } : {}) });
 	const deps = {
 		db,
 		config,
@@ -237,6 +247,7 @@ async function recordedWorld(opts = {}) {
 const ROUTES = [
 	["GET", "/status"], ["GET", "/events"], ["GET", "/loads"], ["GET", "/loads/123456789"],
 	["PUT", "/settings"], ["POST", "/stop"], ["POST", "/loads/123456789/hold"],
+	["POST", "/events/1/retry"], ["POST", "/resume"], ["POST", "/test-connection"],
 ];
 const WRITES = ROUTES.filter(([m]) => m !== "GET");
 const EVENT_KEYS = ["id", "loadId", "kind", "event", "stop", "source", "eventAt", "verify", "mode", "status", "holdReason", "skipReason", "attempts", "httpStatus",
@@ -256,6 +267,9 @@ async function checkRegistrations(t, opts = {}) {
 		"PUT /settings · requireRole · refuseCrossOrigin · handler",
 		"POST /stop · requireRole · refuseCrossOrigin · handler",
 		"POST /loads/:loadId/hold · requireRole · refuseCrossOrigin · rateLimit · handler",
+		"POST /events/:id/retry · requireRole · refuseCrossOrigin · rateLimit · handler",
+		"POST /resume · requireRole · refuseCrossOrigin · rateLimit · handler",
+		"POST /test-connection · requireRole · refuseCrossOrigin · rateLimit · handler",
 		"USE / · requireRole · handler",
 	], "§1 the routes (plan 4.17, PR 2's part): the role gate first everywhere, each write's same-origin guard next and the hold's limiter after it, and a catch-all of the mount's own last");
 	let noGuard = "";
@@ -354,6 +368,16 @@ async function checkLoads(t, opts = {}) {
 	const j = one.json || {};
 	t.eq([one.status, j.load && j.load.loadId, j.load && j.load.hold, j.counts, (j.events || []).map((e) => e.event)], [200, "123456789", false, { dry_run: 1 }, ["departed_pickup"]],
 		"§5 GET /loads/#123456789: the load, its counts and its rows");
+	// PR 4-shell: each load's last location time ("" with none).
+	if (I.CONFIG_INPUTS.includes("liveAllEnabled") && fs.existsSync(path.join(ROOT, "lib", "chr-location.js"))) {
+		S.ensureSchema(w.db);
+		w.db.prepare(`INSERT INTO chr_events (load_id, kind, event, event_at, idem_key, payload_json, mode, status, created_at, updated_at)
+			VALUES ('123456789', 'location', 'location', '2026-11-02T15:30:00.000Z', 'loc|123456789|made-up', '{"loadNumber":"123456789"}', 'dry_run', 'dry_run', '2026-11-02T15:31:00.000Z', '2026-11-02T15:31:00.000Z')`).run();
+		const again = await w.call("GET", "/loads", SA);
+		t.eq(((again.json && again.json.loads) || []).map((l) => [l.loadId, l.lastLocationAt]).sort(), [["123456789", "2026-11-02T15:30:00.000Z"], ["223456789", ""]],
+			"§5 GET /loads: each load's last location time (none: \"\")");
+		t.eq(((await w.call("GET", "/loads/123456789", SA)).json || {}).lastLocationAt, "2026-11-02T15:30:00.000Z", "§5 ...and in a load's own answer");
+	}
 	t.eq([j.pod, j.draft], [{ count: 1 }, { at: "2026-11-02T17:00:00Z", toChr: true }], "§5 ...one live POD (a deleted one not counted); the newest draft's time, and that it went to CHR");
 	t.ok(!one.text.includes("made-up.agent") && !one.text.includes("INV-MADE-UP") && !one.text.includes("1,234"), "§5 ...never the draft's address, number or total");
 	const none = await w.call("GET", "/loads/923456789", SA);
@@ -364,7 +388,7 @@ async function checkLoads(t, opts = {}) {
 async function checkSettings(t, opts = {}) {
 	const w = await world({ ...opts, sendEnabled: true });
 	const bad = [
-		[{ milestones: "pilot" }, "milestones"], [{ milestones: "LIVE" }, "milestones"], [{ settleMin: 16 }, "settleMin"], [{ settleMin: "5" }, "settleMin"],
+		[{ milestones: "sideways" }, "milestones"], [{ milestones: "LIVE" }, "milestones"], [{ settleMin: 16 }, "settleMin"], [{ settleMin: "5" }, "settleMin"],
 		[{ arrivedPickup: "true" }, "arrivedPickup"], [{ locationIntervalMin: 10 }, "locationIntervalMin"], [{ madeUp: 1 }, "madeUp"], [[], null],
 	];
 	for (const [body, field] of bad) {
@@ -505,10 +529,146 @@ async function checkAnnounce(t, opts = {}) {
 
 async function checkUnknown(t, opts = {}) {
 	const w = await world(opts);
-	for (const [m, u] of [["GET", ""], ["GET", "/status/extra"], ["POST", "/status"], ["DELETE", "/loads/123456789"], ["GET", "/loads/123456789/hold"], ["POST", "/events/1/retry"]]) {
+	for (const [m, u] of [["GET", ""], ["GET", "/status/extra"], ["POST", "/status"], ["DELETE", "/loads/123456789"], ["GET", "/loads/123456789/hold"], ["POST", "/events/1/nothing"]]) {
 		const r = await w.call(m, u, SA, { body: m === "GET" || m === "DELETE" ? undefined : {} });
 		t.eq([r.status, r.json && r.json.code, /json/.test(r.type)], [404, "NOT_FOUND", true], `§12 ${m} ${u || "/"}: a JSON 404, never the app page`);
 	}
+	return w;
+}
+
+// ------------------------------------------------------------------ PR 3-shell: the pilot, retry, resume, test connection
+const FIVE = Object.freeze({ id: 5, username: "made_up_admin_five", role: "Super Admin" });
+const people = (w) => w.audits.filter((a) => a.by !== "chr-integration");
+
+// The chr_loads rows the recorder makes for CHR loads it has seen.
+function recordLoads(w, keys) {
+	S.ensureSchema(w.db);
+	for (const k of keys) w.db.prepare("INSERT OR IGNORE INTO chr_loads (load_id, updated_at) VALUES (?, ?)").run(k, new Date(T0).toISOString());
+}
+
+// Review M1: a pilot load holding a protected number is refused with a fixed
+// sentence and stored, shown and audited nowhere, a recorded load included (the
+// deny list can grow after a load was recorded).
+async function checkPilotDeny(t, opts = {}) {
+	const DENIED = "123456789";
+	const w = await world({ ...opts, sendEnabled: false, denyList: DENIED });
+	recordLoads(w, [DENIED]);
+	const r = await w.call("PUT", "/settings", SA, { body: { milestones: "pilot", pilotLoad: DENIED } });
+	t.eq([r.status, r.json && r.json.code, r.json && r.json.field], [400, "INVALID_CHR_SETTINGS", "pilotLoad"], "§14 M1: a pilot load holding a protected number: 400 (pilotLoad)");
+	const status = await w.call("GET", "/status", SA);
+	const row = (w.db.prepare("SELECT value FROM app_settings WHERE key = 'chr.settings'").get() || {}).value || "";
+	t.eq([r.text.includes(DENIED), status.text.includes(DENIED), row.includes(DENIED), JSON.stringify(w.audits).includes(DENIED)], [false, false, false, false],
+		"§14 M1: ...not in the answer, GET /status, the settings row or any audit row");
+	t.eq([w.settings().milestones, w.settings().pilot], ["dry_run", null], "§14 M1: ...and nothing changed");
+	return w;
+}
+
+async function checkPilot(t, opts = {}) {
+	const w = await world({ ...opts, sendEnabled: false });
+	const noLoad = await w.call("PUT", "/settings", SA, { body: { milestones: "pilot" } });
+	t.eq([noLoad.status, noLoad.json && noLoad.json.code, noLoad.json && noLoad.json.field], [400, "INVALID_CHR_SETTINGS", "pilotLoad"], "§14 Pilot with no pilot load named: 400 (pilotLoad)");
+	for (const [user, reason] of [[FIVE, "not_listed"], [SHARED, "not_listed"]]) {
+		const r = await w.call("PUT", "/settings", user, { body: { milestones: "pilot", pilotLoad: "123456789" } });
+		t.eq([r.status, r.json && r.json.code, r.json && r.json.reason], [409, "PILOT_NOT_PERMITTED", reason], `§14 Pilot by ${user.username}: 409 PILOT_NOT_PERMITTED (${reason})`);
+	}
+	t.eq([w.settings().milestones, w.settings().pilot, people(w).length], ["dry_run", null, 0], "§14 ...nothing written or audited");
+	const unseen = await w.call("PUT", "/settings", SA, { body: { milestones: "pilot", pilotLoad: "123456789" } });
+	t.eq([unseen.status, unseen.json && unseen.json.code, unseen.json && unseen.json.field, w.settings().pilot, people(w).length], [409, "NOT_A_CHR_LOAD", "pilotLoad", null, 0],
+		"§14 a pilot load the recorder has never seen as a CHR load: 409 NOT_A_CHR_LOAD, nothing written");
+	recordLoads(w, ["123456789", "223456789"]);
+	w.clock = T0 + 5 * MIN;
+	const ok1 = await w.call("PUT", "/settings", SA, { body: { milestones: "pilot", pilotLoad: "#123456789" } });
+	t.eq([ok1.status, w.settings().milestones, w.settings().pilot], [200, "pilot", { loadKey: "123456789", setAt: new Date(T0 + 5 * MIN).toISOString(), setBy: "made_up_admin", until: "" }],
+		"§14 Pilot by a listed account while sending is off: the pilot record, its end still unset");
+	t.eq(people(w).map((a) => [a.action, a.entityId, a.details]), [["chr_mode_change", "milestones", "milestones: dry_run → pilot"], ["chr_pilot_set", "pilot", "The pilot load is 123456789."]],
+		"§14 ...audited: the mode and the pilot's load");
+	t.eq([ok1.json.milestones, ok1.json.pilot], ["dry_run", { allowed: true, reason: "" }], "§14 ...with sending off its updates are Dry run; this account may still move it");
+	const moved = await w.call("PUT", "/settings", SA2, { body: { pilotLoad: "223456789" } });
+	t.eq([moved.status, w.settings().pilot.loadKey, people(w).slice(-1)[0].details], [200, "223456789", "The pilot load is 223456789 (was 123456789)."], "§14 moved by another listed account, audited");
+	const left = await w.call("PUT", "/settings", FIVE, { body: { milestones: "dry_run" } });
+	t.eq([left.status, w.settings().milestones, w.settings().pilot, people(w).slice(-1)[0].details], [200, "dry_run", null, "The pilot was cleared."],
+		"§14 any Super Admin may leave the pilot (Dry run); the record is cleared");
+	return w;
+}
+
+async function checkPilotLocked(t, opts = {}) {
+	const w = await world({ ...opts, sendEnabled: true });
+	S.writeSettings(w.db, { ...S.DEFAULT_SETTINGS, milestones: "pilot", pilot: { loadKey: "123456789", setAt: new Date(T0).toISOString(), setBy: "made_up_admin", until: "" } }, { by: "made_up_admin", nowIso: new Date(T0).toISOString() });
+	const move = await w.call("PUT", "/settings", SA, { body: { pilotLoad: "223456789" } });
+	t.eq([move.status, move.json && move.json.code, move.json && move.json.reason, w.settings().pilot.loadKey], [409, "PILOT_NOT_PERMITTED", "send_on", "123456789"],
+		"§14 M6: with sending on, the pilot can't be moved");
+	S.writeSettings(w.db, { ...w.settings(), location: "off" }, { by: "made_up_admin", nowIso: new Date(T0).toISOString() });
+	const loc = await w.call("PUT", "/settings", SA, { body: { location: "pilot" } });
+	t.eq([loc.status, loc.json && loc.json.reason], [409, "send_on"], "§14 M6: ...nor set for another kind (the same rule for every kind)");
+	t.eq((await w.call("GET", "/status", SA)).json.pilot, { allowed: false, reason: "send_on" }, "§14 GET /status says why");
+	const leave = await w.call("PUT", "/settings", FIVE, { body: { milestones: "off" } });
+	t.eq([leave.status, w.settings().milestones], [200, "off"], "§14 ...but leaving it is always allowed");
+	const all = await world({ ...opts, sendEnabled: true, liveAllEnabled: false });
+	const r = await all.call("PUT", "/settings", SA, { body: { milestones: "live" } });
+	t.eq([r.status, r.json && r.json.code, r.json && r.json.reason], [409, "SEND_NOT_PERMITTED", "live_all_off"], "§14 Live without CHR_LIVE_ALL_ENABLED: 409 (live_all_off)");
+	return w;
+}
+
+function insertRow(w, { id, status, mode = "live", eventAt = new Date(w.clock).toISOString(), load = "123456789" }) {
+	S.ensureSchema(w.db);
+	w.db.prepare(`INSERT INTO chr_events (id, load_id, kind, event, stop_kind, stop_index, event_at, verify, idem_key, payload_json, mode, status, next_attempt_at, created_at, updated_at)
+		VALUES (?, ?, 'milestone', 'departed_pickup', 'pickup', 1, ?, 'confirmed', ?, '{"loadNumber":"123456789"}', ?, ?, '', ?, ?)`)
+		.run(id, load, eventAt, `ms|${load}|departed_pickup|p1|h${id}`, mode, status, eventAt, eventAt);
+}
+const statusOf = (w, id) => w.db.prepare("SELECT status, acted_by FROM chr_events WHERE id = ?").get(id);
+
+async function checkRetry(t, opts = {}) {
+	const w = await world(opts);
+	w.clock = T0;
+	insertRow(w, { id: 11, status: "failed" });
+	insertRow(w, { id: 12, status: "gave_up", eventAt: new Date(T0 - 25 * 60 * MIN).toISOString() });
+	insertRow(w, { id: 13, status: "outcome_unknown" });
+	insertRow(w, { id: 14, status: "dry_run", mode: "dry_run" });
+	insertRow(w, { id: 15, status: "sent" });
+	t.eq([(await w.call("POST", "/events/abc/retry", SA, { body: {} })).json.code, (await w.call("POST", "/events/999/retry", SA, { body: {} })).status], ["INVALID_CHR_ROW", 404], "§15 a bad row number 400, an unknown row 404");
+	for (const id of [14, 15]) t.eq((await w.call("POST", `/events/${id}/retry`, SA, { body: {} })).json.code, "NOT_RETRYABLE", `§15 row ${id} (${id === 14 ? "dry run" : "sent"}): 409 NOT_RETRYABLE`);
+	t.eq((await w.call("POST", "/events/13/retry", SA, { body: {} })).json.code, "CONFIRM_UNKNOWN", "§15 an unknown outcome: 409 until the person confirms (CHR may have it)");
+	t.eq((await w.call("POST", "/events/12/retry", SA, { body: {} })).json.code, "CONFIRM_OLD", "§15 a milestone over 24 hours old: 409 until confirmed");
+	t.eq([statusOf(w, 12).status, statusOf(w, 13).status], ["gave_up", "outcome_unknown"], "§15 ...neither moved");
+	const r11 = await w.call("POST", "/events/11/retry", FIVE, { body: {} });
+	const r12 = await w.call("POST", "/events/12/retry", SA, { body: { confirmOld: true } });
+	const r13 = await w.call("POST", "/events/13/retry", SA, { body: { confirmUnknown: true } });
+	t.eq([r11.status, r12.status, r13.status, statusOf(w, 11), statusOf(w, 12).status, statusOf(w, 13).status], [200, 200, 200, { status: "pending", acted_by: "made_up_admin_five" }, "pending", "pending"],
+		"§15 retried by any Super Admin: back to the sender, the account kept");
+	t.eq(people(w).map((a) => [a.action, a.entityId]), [["chr_retry", "11"], ["chr_retry", "12"], ["chr_retry", "13"]], "§15 each retry audited");
+	t.eq((await w.call("POST", "/events/11/retry", SA, { body: {} })).json.code, "NOT_RETRYABLE", "§15 a row already pending: 409");
+	return w;
+}
+
+async function checkResume(t, opts = {}) {
+	const w = await world(opts);
+	w.clock = T0;
+	S.ensureSchema(w.db);
+	t.eq((await w.call("POST", "/resume", SA, { body: {} })).json.code, "NOT_PAUSED", "§16 Resume while not paused: 409 NOT_PAUSED");
+	const pauseNow = () => S.writeState(w.db, { ...S.readState(w.db), pausedReason: "AUTH_FAILED", pausedAt: new Date(T0).toISOString() }, new Date(T0).toISOString());
+	pauseNow();
+	insertRow(w, { id: 21, status: "pending", eventAt: new Date(T0 - 3 * 60 * MIN).toISOString() });
+	insertRow(w, { id: 22, status: "pending", eventAt: new Date(T0 - 60 * MIN).toISOString() });
+	const r = await w.call("POST", "/resume", FIVE, { body: {} });
+	t.eq([r.status, r.json && r.json.gaveUp, statusOf(w, 21).status, statusOf(w, 22).status, S.readState(w.db).pausedReason], [200, 1, "gave_up", "pending", ""],
+		"§16 Resume: updates older than 2 hours given up, the rest kept; the pause cleared");
+	pauseNow();
+	insertRow(w, { id: 23, status: "pending", eventAt: new Date(T0 - 5 * 60 * MIN).toISOString() });
+	const c = await w.call("POST", "/resume", SA, { body: { confirm: true } });
+	t.eq([c.json && c.json.gaveUp, c.json && c.json.confirmed, statusOf(w, 23).status], [0, 1, "pending"], "§16 Resume confirmed: the old ones go too");
+	t.eq(people(w).map((a) => [a.action, a.details]), [["chr_resume", "Resumed after AUTH_FAILED: 1 update(s) older than 2 hours given up."], ["chr_resume", "Resumed after AUTH_FAILED: 1 update(s) older than 2 hours confirmed to go."]],
+		"§16 each resume audited with what it did");
+	return w;
+}
+
+async function checkTestConnection(t, opts = {}) {
+	const w = await world(opts);
+	const no = await w.call("POST", "/test-connection", FIVE, { body: {} });
+	t.eq([no.status, no.json && no.json.code, people(w).length], [403, "TEST_NOT_PERMITTED", 0], "§17 Test connection by an unlisted account: 403, nothing audited");
+	const yes = await w.call("POST", "/test-connection", SA, { body: {} });
+	t.eq([yes.status, yes.json], [200, { resultCode: "NOT_CONFIGURED", httpStatus: null }], "§17 by a listed account: NOT_CONFIGURED (no CHR host yet), no request");
+	t.eq(people(w).map((a) => [a.action, a.details]), [["chr_test_connection", "Test connection: NOT_CONFIGURED."]], "§17 ...audited with the result code only");
+	t.eq([(await w.call("GET", "/status", SA)).json.testConnection, (await w.call("GET", "/status", FIVE)).json.testConnection], [{ allowed: true }, { allowed: false }], "§17 GET /status says who may test");
 	return w;
 }
 
@@ -523,7 +683,7 @@ async function mutantFails(label, check) {
 	try { await check(t); } catch (err) { threw = err; }
 	await closeAll();
 	const caught = !threw && t.failures.length > 0;
-	T.ok(caught, `§13 caught: ${label}`, caught ? undefined : threw ? `it threw: ${threw.message}` : `its check passed (${t.pass} assertions)`);
+	T.ok(caught, `§18 caught: ${label}`, caught ? undefined : threw ? `it threw: ${threw.message}` : `its check passed (${t.pass} assertions)`);
 	if (caught) console.log(`  ${label}: ${t.failures[0].split("\n")[0]}`);
 }
 
@@ -551,8 +711,12 @@ async function main() {
 	await run("§10 canaries", checkCanaries);
 	await run("§11 the page is told", checkAnnounce);
 	await run("§12 unknown paths", checkUnknown);
+	await run("§14 the pilot (A3, M6, a recorded CHR load, never a protected number) and Live for every load", checkPilot, checkPilotLocked, checkPilotDeny);
+	await run("§15 retry", checkRetry);
+	await run("§16 resume", checkResume);
+	await run("§17 test connection", checkTestConnection);
 
-	section("§13 mutants");
+	section("§18 mutants");
 	if (!REAL) return;
 	const direct = (m) => ({ viaMount: false, routes: m });
 	const G = "requireRole(\"Super Admin\")";
@@ -565,7 +729,7 @@ async function main() {
 		rawPayload: mutate("for (const k of E.PAYLOAD_KEYS) if (p[k] !== undefined) payload[k] = p[k];", "Object.assign(payload, p);"),
 		sharedListed: mutate("Boolean(user) && !isSharedLoginName(user.username) && Boolean(list)", "Boolean(user) && Boolean(list)"),
 		unsetListed: mutate("list.state === \"valid\" && list.verdict(user) === \"listed\"", "(list.state === \"unset\" || list.verdict(user) === \"listed\")"),
-		noLiveCheck: mutate("if (parsed.patch[kind] !== \"live\") continue;", "continue;"),
+		noLiveCheck: mutate("if (fields[kind] !== \"live\") continue;", "continue;"),
 		noAudit: mutate("for (const k of changed.filter((f) => MODE_KINDS.includes(f))) audit(", "for (const k of [].filter((f) => MODE_KINDS.includes(f))) audit("),
 		noRelease: mutate("return body.hold ? 0 : S.releaseHeld(db, key, nowIso);", "return 0;"),
 		noReason: mutate("if (typeof body.hold !== \"boolean\" || !reason || reason.length > REASON_MAX)", "if (typeof body.hold !== \"boolean\" || reason.length > REASON_MAX)"),
@@ -575,6 +739,16 @@ async function main() {
 		noNotFound: mutate(`app.use(MOUNT_PATH, ${G}, (req, res) => notFound(res, "NOT_FOUND"));`, ""),
 		announceReads: mutate("(req, res) => res.json(statusFor(req))));", "(req, res) => { onChange(); return res.json(statusFor(req)); }));"),
 		holdUngated: mutate(`app.post(at("/loads/:loadId/hold"), ${G}, `, `app.post(at("/loads/:loadId/hold"), `),
+		pilotAnyone: mutate("function pilotCheck(user) {\n\t\tif (!isListed(user)) return { allowed: false, reason: \"not_listed\" };", "function pilotCheck(user) {"),
+		pilotWhileSending: mutate("if (config.sendEnabled === true) return { allowed: false, reason: \"send_on\" };", ""),
+		liveWithoutAll: mutate("if (config.liveAllEnabled !== true) return { allowed: false, reason: \"live_all_off\" };", ""),
+		retryUnknown: mutate("if (row.status === \"outcome_unknown\" && body.confirmUnknown !== true) {", "if (false) {"),
+		retryOld: mutate("&& body.confirmOld !== true) {", "&& false) {"),
+		resumeKeepsOld: mutate("const gaveUp = body.confirm === true ? 0 : S.giveUpIds(db, old, nowIso);", "const gaveUp = 0;"),
+		testAnyone: mutate("if (!isListed(userOf(req))) return res.status(403).json({ error: \"Only an account on the listed-accounts setting may test the connection.\"", "if (false) return res.status(403).json({ error: \"Only an account on the listed-accounts setting may test the connection.\""),
+		pilotKept: mutate("if (!MODE_KINDS.some((k) => next[k] === \"pilot\")) next.pilot = null;", ""),
+		pilotDenyUnchecked: mutate("if (config.redactor.hits(pilotLoad)) return res.status(400)", "if (false) return res.status(400)"),
+		pilotUnrecorded: mutate("if (!S.tablesExist(db) || !S.loadRow(db, pilotLoad)) {", "if (false) {"),
 	};
 	await mutantFails("a settings save without the same-origin guard", (t) => checkGates(t, direct(M.noWriteGuard)));
 	await mutantFails("the hold's limiter before the same-origin guard", (t) => checkGates(t, direct(M.limiterFirst)));
@@ -594,6 +768,16 @@ async function main() {
 	await mutantFails("an unknown path falling through to the app page", (t) => checkUnknown(t, direct(M.noNotFound)));
 	await mutantFails("a read that tells the page", (t) => checkAnnounce(t, direct(M.announceReads)));
 	await mutantFails("a hold route registered without the role gate", (t) => checkGates(t, direct(M.holdUngated)));
+	await mutantFails("the pilot set by any Super Admin (A3)", (t) => checkPilot(t, direct(M.pilotAnyone)));
+	await mutantFails("the pilot moved while sending is on (M6)", (t) => checkPilotLocked(t, direct(M.pilotWhileSending)));
+	await mutantFails("Live for every load without CHR_LIVE_ALL_ENABLED", (t) => checkPilotLocked(t, direct(M.liveWithoutAll)));
+	await mutantFails("an unknown outcome retried without confirmation", (t) => checkRetry(t, direct(M.retryUnknown)));
+	await mutantFails("an old milestone retried without confirmation", (t) => checkRetry(t, direct(M.retryOld)));
+	await mutantFails("a resume that keeps updates older than 2 hours", (t) => checkResume(t, direct(M.resumeKeepsOld)));
+	await mutantFails("test connection for any Super Admin", (t) => checkTestConnection(t, direct(M.testAnyone)));
+	await mutantFails("a pilot record left behind when the pilot is left", (t) => checkPilot(t, direct(M.pilotKept)));
+	await mutantFails("a pilot load holding a protected number saved (review M1)", (t) => checkPilotDeny(t, direct(M.pilotDenyUnchecked)));
+	await mutantFails("a pilot load the recorder never saw saved", (t) => checkPilot(t, direct(M.pilotUnrecorded)));
 }
 
 main().then(async () => {
@@ -610,5 +794,8 @@ main().then(async () => {
 }).catch(async (err) => {
 	console.error(err);
 	await closeAll();
+	// What failed before the stop, so a run on an older tree still says what it lacks.
+	T.failures.forEach((f) => console.log(`  ✗ ${f}`));
+	console.log(`\n${T.pass} passed, ${T.failures.length} failed, then stopped`);
 	process.exit(1);
 });

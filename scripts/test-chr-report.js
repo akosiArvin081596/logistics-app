@@ -12,6 +12,13 @@
 //   §4  the inputs are byte-for-byte unchanged afterwards
 //   §5  usage: a missing or bad argument, or an input that is not a copy, exits 2
 //       before reading anything else
+//   §6  --pilot (PR 3-shell): what went Live, its results, how many loads went
+//       Live, payloads off the allowlist, event-to-send minutes, held rows;
+//       counts and yes/no only, never a load ID; the database unchanged
+//   §7  --location (PR 4-shell, gate G2): rows outside their window, rows after
+//       the first final event, non-clean or pre-link fixes, payloads beyond the
+//       four keys, failed milestone positions, loads with no position; counts
+//       only, never a load, name, address, device or position
 //
 // Made-up data only. The copy is written to a fresh mkdtemp folder; no network.
 //   node scripts/test-chr-report.js      # exits 1 on any failure
@@ -218,6 +225,105 @@ for (const [label, args, re] of [
 	ok(re.test(`${r.stdout}${r.stderr}`), `§5 ${label}: says what is wrong`);
 }
 eq(fs.readdirSync(TMP).sort(), ["app.db", "sheets.json"], "§5 no file made by a refused run");
+
+// ------------------------------------------------------------------ §6
+section("§6  --pilot: the one-load test's report (PR 3-shell)");
+{
+	const PILOT_DB = path.join(TMP, "pilot.db");
+	const pdb = new Database(PILOT_DB);
+	pdb.exec(`CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+		CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');`);
+	const S = require(path.join(ROOT, "lib", "chr-store.js"));
+	S.ensureSchema(pdb);
+	S.writeSettings(pdb, { ...S.DEFAULT_SETTINGS, milestones: "pilot", pilot: { loadKey: "123456789", setAt: "2026-11-02T14:00:00.000Z", setBy: "made_up_admin", until: "" } }, { by: "made_up_admin", nowIso: "2026-11-02T14:00:00.000Z" });
+	S.writeState(pdb, { ...S.readState(pdb), sendOnAt: "2026-11-02T14:30:00.000Z" }, "2026-11-02T14:30:00.000Z");
+	const good = JSON.stringify({ loadNumber: "123456789", event: "departed_pickup", stop: { kind: "pickup", index: 1 }, eventAt: "2026-11-02T15:00:00Z", place: { city: "Ames", state: "IA" }, truck: "T-101" });
+	const bad = JSON.stringify({ loadNumber: "123456789", event: "delivered", stop: { kind: "delivery", index: "final" }, eventAt: "2026-11-02T19:00:00Z", driver: "Canary Testdriver" });
+	const ins = pdb.prepare(`INSERT INTO chr_events (load_id, kind, event, event_at, idem_key, payload_json, mode, status, result_code, attempts, sent_at, created_at, updated_at, hold_reason)
+		VALUES (?, 'milestone', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+	const at = "2026-11-02T15:00:00.000Z";
+	ins.run("123456789", "departed_pickup", at, "k1", good, "live", "sent", "SENT", 1, "2026-11-02T15:06:00.000Z", at, at, "");
+	ins.run("123456789", "arrived_delivery", "2026-11-02T18:00:00.000Z", "k2", good, "live", "sent", "SENT", 2, "2026-11-02T18:20:00.000Z", at, at, "");
+	ins.run("123456789", "delivered", "2026-11-02T19:00:00.000Z", "k3", bad, "live", "failed", "REJECTED", 1, "", at, at, "");
+	ins.run("223456789", "departed_pickup", at, "k4", good, "dry_run", "dry_run", "", 0, at, at, at, "");
+	ins.run("323456789", "departed_pickup", at, "k5", good, "live", "pending", "", 0, "", at, at, "");
+	ins.run("423456789", "arrived_delivery", at, "k6", "", "dry_run", "held", "", 0, "", at, at, "tap_unverified");
+	pdb.close();
+	const before6 = hash(PILOT_DB);
+	const r = run(["--pilot", "--db", PILOT_DB]);
+	eq(r.status, 0, "§6 --pilot --db: exit 0");
+	const out = r.stdout;
+	for (const [label, re] of [
+		["a pilot set, the mode", /A pilot load is set now: yes; milestones mode now: pilot/],
+		["sending went on, no pause", /Sending went on: yes; paused now: no/],
+		["live rows by status and result", /Live rows: 4 \(failed 1, pending 1, sent 2\); result codes: REJECTED 1, SENT 2; attempts: 4/],
+		["how many loads went Live", /Loads with live rows: 2 \(a one-load pilot: 1\)/],
+		["live rows on another load (must be 0)", /Live rows on a load other than the pilot load: 1/],
+		["payloads off the allowlist", /Payloads with a key off the allowlist or failing its pattern: 1/],
+		["event to send", /Minutes from event to send: median 6\.0, longest 20\.0 \(2 sent\)/],
+		["held rows", /Held rows, by reason: tap_unverified 1/],
+	]) ok(re.test(out), `§6 the report says ${label}`, out);
+	eq(["123456789", "223456789", "323456789", "423456789", "Canary", "T-101", "Ames"].filter((v) => out.includes(v)), [], "§6 ...and never a load ID, a name, a truck or a place");
+	eq(hash(PILOT_DB), before6, "§6 the database is byte-for-byte unchanged");
+	const check = typeof R.payloadFails === "function" ? R.payloadFails : () => null;
+	eq([check(good), check(bad), check("{bad"), check(JSON.stringify({ loadNumber: "12345" }))], [false, true, true, true], "§6 the payload check: the allowlisted keys, each passing its pattern");
+	for (const [label, args] of [["--pilot with --sheets", ["--pilot", "--db", PILOT_DB, "--sheets", SHEETS_FILE]], ["--pilot without --db", ["--pilot"]]]) {
+		const x = run(args);
+		eq([x.status, /--pilot takes --db/.test(x.stderr)], [2, true], `§6 ${label}: exit 2, says what is wrong`);
+	}
+}
+
+// ------------------------------------------------------------------ §7
+section("§7  --location: gate G2's report (PR 4-shell)");
+{
+	const LOC_DB = path.join(TMP, "location.db");
+	const ldb = new Database(LOC_DB);
+	ldb.exec(`CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+		CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');
+		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL, latitude REAL, longitude REAL, speed REAL DEFAULT 0,
+			geocoded_location TEXT DEFAULT '', location_date_ms INTEGER DEFAULT 0, dropped_reason TEXT DEFAULT '', source TEXT DEFAULT '');
+		CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, routemate_vehicle_id TEXT, assigned_from TEXT, assigned_until TEXT, assigned_by TEXT DEFAULT '');`);
+	const S = require(path.join(ROOT, "lib", "chr-store.js"));
+	S.ensureSchema(ldb);
+	const t = (min) => Date.parse("2026-11-02T15:00:00Z") + min * 60000;
+	const isoT = (min) => new Date(t(min)).toISOString();
+	const fix = (vid, min, lat, lng, source = "routemate", dropped = "") => ldb.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, location_date_ms, source, dropped_reason, geocoded_location) VALUES (?, ?, ?, ?, ?, ?, 'Canary Testdriver, 742 Evergreen Terrace')").run(vid, lat, lng, t(min), source, dropped);
+	ldb.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until) VALUES (1, 'RM-TEST-1', ?, NULL)").run(isoT(-600));
+	ldb.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until) VALUES (2, 'RM-TEST-2', ?, NULL)").run(isoT(30));
+	fix("RM-TEST-1", 10, 42.0347, -93.42);
+	fix("RM-LX-9", 25, 42.0347, -93.12, "linxup");
+	fix("RM-TEST-2", 20, 41.5, -90.1);
+	const ev = ldb.prepare(`INSERT INTO chr_events (load_id, kind, event, stop_kind, stop_index, event_at, verify, idem_key, payload_json, mode, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'dry_run', ?, ?, ?)`);
+	ev.run("123456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d1", "", "dry_run", isoT(7), isoT(7));
+	ev.run("223456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d2", "", "dry_run", isoT(7), isoT(7));
+	ev.run("323456789", "milestone", "departed_pickup", "pickup", 1, isoT(2), "confirmed", "d3", "", "dry_run", isoT(7), isoT(7));
+	ev.run("123456789", "milestone", "delivered", "delivery", 1, isoT(50), "away", "f1", JSON.stringify({ loadNumber: "123456789", position: { lat: 1, lng: 1 } }), "held", isoT(51), isoT(51));
+	const loc = (load, min, made, payload, key) => ev.run(load, "location", "location", "", 0, isoT(min), "n/a", key, JSON.stringify(payload), "dry_run", isoT(made), isoT(made));
+	const P = (n, min, lat, lng) => ({ loadNumber: n, event: "location", eventAt: isoT(min).replace(/\.\d{3}Z$/, "Z"), position: { lat, lng } });
+	loc("123456789", 10, 15, P("123456789", 10, 42.0347, -93.42), "l1");
+	loc("123456789", 25, 30, P("123456789", 25, 42.0347, -93.12), "l2");
+	loc("123456789", 55, 60, { ...P("123456789", 55, 9, 9), truck: "T-101" }, "l3");
+	loc("223456789", 20, 30, P("223456789", 20, 41.5, -90.1), "l4");
+	ldb.close();
+	const rl = run(["--location", "--db", LOC_DB]);
+	eq(rl.status, 0, "§7 --location --db: exit 0");
+	const out = rl.stdout;
+	for (const [label, re] of [
+		["the rows and loads", /Location rows: 4 \(dry_run 4\); loads with rows: 2; per load: median 1, most 3/],
+		["rows outside the window", /Rows outside their load's window \(must be 0\): 1/],
+		["rows after the first final event", /Rows recorded after the load's first final event \(must be 0\): 1/],
+		["non-clean fixes", /Linxup, untagged or dropped fixes used \(must be 0\): 1/],
+		["fixes before the link", /Fixes from before their device's link \(must be 0\): 1/],
+		["unmatched rows", /Rows with no matching fix in this copy's telemetry: 1/],
+		["payloads beyond four keys", /Payloads with a key beyond the four \(must be 0\): 1/],
+		["failed milestone positions", /Milestone positions that failed their test \(must be 0\): 1/],
+		["loads with no position", /Loads with a confirmed departure and no position: 1/],
+	]) ok(re.test(out), `§7 the report counts ${label}`, out);
+	eq(["123456789", "223456789", "323456789", "Canary", "Evergreen", "RM-TEST", "42.0347"].filter((v) => out.includes(v)), [], "§7 ...and never a load, a name, an address, a device or a position");
+	const x = run(["--location", "--pilot", "--db", LOC_DB]);
+	eq(x.status, 2, "§7 --location with --pilot: exit 2");
+}
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {
