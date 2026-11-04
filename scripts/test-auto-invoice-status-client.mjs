@@ -14,8 +14,10 @@
 //   §6 Approve on the Draft Invoice preview, while real automatic drafts are on:
 //      the load's latest draft is read again, and one made since the load was
 //      opened (the job's, or another person's) is named and needs a yes, as does a
-//      read that failed; the page's check and the preview's approve(), lifted
-//      from their files and run over stand-ins; off or shadow, nothing changes
+//      read that failed; the check runs last, after every question and right
+//      before the save, and never drops the already-drafted question; the page's
+//      check and the preview's approve(), lifted from their files and run over
+//      stand-ins, with mutants; off or shadow, nothing changes
 //   §7 the automatic-draft settings dialog: each opening starts empty and Save
 //      waits for that opening's read, so a failed read never saves over the
 //      stored lists; the page's open and save, lifted and run over stand-ins
@@ -237,7 +239,8 @@ const HAND_DRAFT = Object.freeze({ invoice_id: '10192026-3', created_at: '2026-1
     eq([a.posts.length, a.confirms], [0, []], '§6 the check says stop: nothing is posted')
     a = approveWith({ beforeApprove: async () => ({ go: true, asked: true }), alreadyDrafted: true })
     await a.approve()
-    eq([a.posts.length, a.confirms], [1, []], '§6 the check asked and was told yes: one post, and the already-drafted question isn\'t asked twice')
+    eq([a.posts.length, a.confirms], [1, ['ALREADY DRAFTED?']],
+      '§6 FAILS ON THE OLD CODE: the check asked about something new and was told yes: one post, and the already-drafted question was still asked, before the check')
     a = approveWith({ beforeApprove: async () => ({ go: true, asked: false }), alreadyDrafted: true })
     await a.approve()
     eq([a.posts.length, a.confirms], [1, ['ALREADY DRAFTED?']], '§6 nothing new found: the already-drafted question is still asked')
@@ -273,6 +276,89 @@ const HAND_DRAFT = Object.freeze({ invoice_id: '10192026-3', created_at: '2026-1
     a = approveWith({ beforeApprove: null, refuseFirst: Object.assign(new Error('made-up refusal'), { status: 409, code: 'TRAILER_MISMATCH' }), prompt: 'x' })
     await a.approve()
     eq([a.posts.length, a.prompts.length], [1, 0], '§6 any other refusal: no re-issue question, one post')
+  }
+}
+{
+  // The order inside the preview's approve(): every question first, then the
+  // page's check, then the post, so the check sees a draft made while a question
+  // was open; the already-drafted question is never dropped for the check.
+  const src = liftFn(MODAL, 'approve', { async: true })
+  if (src) {
+    const order = (fnSrc, { check = async () => ({ go: true, asked: false }), alreadyDrafted = false, totalEdited = false, answers = [], events = [] } = {}) => {
+      const approving = { value: false }
+      const approveError = { value: '' }
+      const left = [...answers]
+      const fn = new Function(
+        'approving', 'canApprove', 'props', 'window', 'edited', 'approveError', 'buildOverrideBody', 'api', 'APPROVE_TIMEOUT_MS',
+        'emit', 'recipient', 'originalTo', 'str', 'totalChangeConfirm', 'DUPLICATE_APPROVE_MSG', 'isMaybeSaved', 'isReissueRefusal', 'reissuePrompt', 'reissueBody',
+        `${fnSrc}\nreturn approve;`,
+      )(
+        approving, { value: true },
+        { alreadyDrafted, loadId: 'LD-TEST-0008', beforeApprove: check && (async () => { events.push('check'); return check() }) },
+        { confirm: (t) => { events.push(`ask: ${t}`); return left.length ? left.shift() : true }, prompt: () => null },
+        { value: { total: totalEdited } }, approveError, () => ({}), { post: async () => { events.push('post'); return { invoiceId: 'INV-2', warnings: [] } } }, 60000,
+        () => {}, { value: 'ap@example.com' }, { value: 'ap@example.com' }, (v) => (v == null ? '' : String(v)), () => 'TOTAL CHANGED?', 'ALREADY DRAFTED?',
+        () => false, () => false, () => '', () => null,
+      )
+      return { approve: fn, events, approving, approveError }
+    }
+    const QUESTIONS = ['ask: ALREADY DRAFTED?', 'ask: TOTAL CHANGED?']
+    let o = order(src, { alreadyDrafted: true, totalEdited: true })
+    await o.approve()
+    eq(o.events, [...QUESTIONS, 'check', 'post'], '§6 FAILS ON THE OLD CODE: the check runs last, right before the save: after the already-drafted and total questions, nothing between it and the post')
+    o = order(src, { alreadyDrafted: true, answers: [false] })
+    await o.approve()
+    eq(o.events, ['ask: ALREADY DRAFTED?'], '§6 FAILS ON THE OLD CODE: a "no" to a question: no check is read and nothing is posted')
+    o = order(src, { totalEdited: true, check: async () => ({ go: false, asked: true }) })
+    await o.approve()
+    eq([o.events, o.approving.value], [['ask: TOTAL CHANGED?', 'check'], false], '§6 FAILS ON THE OLD CODE: the check says stop after the questions: nothing posted, Approve free again')
+    o = order(src, { alreadyDrafted: true, check: async () => ({ go: true, asked: true, latest: undefined }) })
+    await o.approve()
+    eq(o.events, ['ask: ALREADY DRAFTED?', 'check', 'post'], '§6 FAILS ON THE OLD CODE: a check whose read failed (its own question answered yes) never drops the already-drafted question')
+    const recheck = fnOf('recheckLoadDrafts')
+    const shared = []
+    o = order(src, {
+      alreadyDrafted: true,
+      events: shared,
+      check: () => recheck({ known: HAND_DRAFT, readLatest: async () => { throw new Error('made-up outage') }, confirm: (t) => { shared.push(`ask: ${t}`); return true } }),
+    })
+    await o.approve()
+    eq(shared, ['ask: ALREADY DRAFTED?', 'check', `ask: ${S.DRAFT_RECHECK_FAILED_TEXT}`, 'post'],
+      '§6 FAILS ON THE OLD CODE: with the page\'s own re-check and a read that fails: the already-drafted warning, then "could not check", then the post')
+    let calls = 0
+    o = order(src, { check: async () => { calls++; if (calls === 1) throw new Error('made-up'); return { go: false, asked: true } } })
+    await o.approve()
+    const shown = o.approveError.value
+    await o.approve()
+    eq([Boolean(shown), o.approveError.value, o.events.filter((e) => e === 'post').length], [true, '', 0],
+      '§6 FAILS ON THE OLD CODE: the error a check that threw left is cleared at the next Approve, before its check')
+
+    // Each decision removed in turn: the case that pins it must change.
+    const once = (s, from, to) => (s && s.split(from).length === 2 ? s.replace(from, () => to) : null)
+    const checkFirst = once(once(src, '  if (approving.value || !canApprove.value) return\n',
+      '  if (approving.value || !canApprove.value) return\n  if (props.beforeApprove) { const early = await props.beforeApprove(); if (!early || !early.go) return }\n'),
+    '    if (props.beforeApprove) {\n      let check = null', '    if (false) {\n      let check = null')
+    const noDuplicate = once(src, 'if (props.alreadyDrafted && !window.confirm(DUPLICATE_APPROVE_MSG)) return',
+      'if (props.alreadyDrafted && !props.beforeApprove && !window.confirm(DUPLICATE_APPROVE_MSG)) return')
+    const keepsError = once(src, '  approving.value = true\n  approveError.value = \'\'\n  try {\n', '  approving.value = true\n  try {\n')
+    ok(checkFirst && noDuplicate && keepsError, '§6 MUTANTS applied to approve() once each')
+    if (checkFirst) {
+      const m = order(checkFirst, { alreadyDrafted: true, totalEdited: true })
+      await m.approve()
+      ok(JSON.stringify(m.events) !== JSON.stringify([...QUESTIONS, 'check', 'post']), '§6 MUTANT the check before the questions (the old order): caught')
+    }
+    if (noDuplicate) {
+      const m = order(noDuplicate, { alreadyDrafted: true, check: async () => ({ go: true, asked: true, latest: undefined }) })
+      await m.approve()
+      ok(!m.events.includes('ask: ALREADY DRAFTED?'), '§6 MUTANT the already-drafted question dropped while a check runs: caught')
+    }
+    if (keepsError) {
+      let n = 0
+      const m = order(keepsError, { check: async () => { n++; if (n === 1) throw new Error('made-up'); return { go: false, asked: true } } })
+      await m.approve()
+      await m.approve()
+      ok(m.approveError.value !== '', '§6 MUTANT the old error kept at the next Approve: caught')
+    }
   }
 }
 

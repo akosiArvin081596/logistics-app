@@ -44,6 +44,14 @@
  *      inside included); nothing else is ever sent (no SELECT, STORE, APPEND,
  *      COPY, MOVE or EXPUNGE, also in its source); too many found, a NO, or a
  *      bad argument fails before or instead of a partial answer.
+ *   §7 THE LIKE SEARCH (findDraftByMessageId()'s alsoLike). Whether Gmail keeps a
+ *      draft's Message-ID when a person sends or saves it is not verified, so with
+ *      the Message-ID in neither mailbox the same session looks in each again for
+ *      a message with the subject and recipient given (since a day): read-only,
+ *      the answer says what it found and where, never "found"; a NO rejects; a
+ *      subject or recipient that can't be one plain quoted string is never put in
+ *      a command (like: null); without alsoLike the session is as before. Mutants
+ *      of each.
  *
  * HOW: tls.connect is replaced for the duration of the run by a stub that
  * returns a plain socket to a fake IMAP server on 127.0.0.1:0, which speaks
@@ -56,6 +64,7 @@
  */
 "use strict";
 const fs = require("fs");
+const Module = require("module");
 const net = require("net");
 const os = require("os");
 const path = require("path");
@@ -118,6 +127,8 @@ const APPEND_ARGS = new RegExp(`^(${QUOTED}) \\(([^)]*)\\) \\{(\\d+)\\}$`);
 const EXAMINE_ARGS = new RegExp(`^(${QUOTED})$`);
 const SEARCH_ARGS = new RegExp(`^HEADER Message-ID (${QUOTED})$`, "i");
 const CRITERIA_ARGS = new RegExp(`^SINCE (\\d{1,2}-[A-Za-z]{3}-\\d{4}) BEFORE (\\d{1,2}-[A-Za-z]{3}-\\d{4})(?: SUBJECT (${QUOTED}))?$`);
+// The like search: [SINCE <day>] SUBJECT "<subject>" TO "<recipient>".
+const LIKE_ARGS = new RegExp(`^(?:SINCE (\\d{1,2}-[A-Za-z]{3}-\\d{4}) )?SUBJECT (${QUOTED}) TO (${QUOTED})$`);
 const FETCH_ARGS = /^(\d{1,6}(?:,\d{1,6}){0,200}) \(INTERNALDATE BODY\.PEEK\[\]\)$/;
 // The top-level Message-ID header of a composed message.
 function messageIdOf(literal) {
@@ -129,13 +140,15 @@ function messageIdOf(literal) {
 
 function fakeImap() {
 	const sessions = [];
-	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK", examineNo: "", fetch: "OK" };
+	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK", examineNo: "", fetch: "OK", like: "OK" };
 	const stored = []; // Message-IDs of the drafts appended, in order
 	const sent = []; // Message-IDs in Sent Mail
 	const sentRaw = []; // Sent Mail's messages for SEARCH by date and subject, and FETCH: { subject, raw }
 	const held = { "[Gmail]/Drafts": stored, "[Gmail]/Sent Mail": sent };
+	// Messages carrying a Message-ID of Gmail's own, for the like search: { subject, to }.
+	const likes = { "[Gmail]/Drafts": [], "[Gmail]/Sent Mail": [] };
 	const server = net.createServer((sock) => {
-		const s = { commands: [], login: null, append: null, examine: null, examines: [], search: null, received: [], appendLineEnd: null };
+		const s = { commands: [], login: null, append: null, examine: null, examines: [], search: null, likeSearches: [], received: [], appendLineEnd: null };
 		s.closed = new Promise((resolve) => sock.on("close", resolve));
 		sessions.push(s);
 		let buf = Buffer.alloc(0);
@@ -192,6 +205,19 @@ function fakeImap() {
 				} else if (/^SEARCH$/i.test(verb)) {
 					const m = SEARCH_ARGS.exec(args);
 					const crit = m ? null : CRITERIA_ARGS.exec(args);
+					const like = m || crit ? null : LIKE_ARGS.exec(args);
+					if (like) {
+						// Substrings, case folded, as IMAP's SUBJECT and TO keys match.
+						s.likeSearches.push(args);
+						if (answer.like === "GARBLED") { reply("* SEARCH made-up"); reply(`${tag} OK SEARCH completed`); continue; }
+						if (answer.like !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
+						const subject = unquote(like[2]).toLowerCase();
+						const to = unquote(like[3]).toLowerCase();
+						const hits = (likes[s.examine] || []).map((x, i) => (x.subject.toLowerCase().includes(subject) && x.to.toLowerCase().includes(to) ? i + 1 : 0)).filter(Boolean);
+						reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
+						reply(`${tag} OK SEARCH completed`);
+						continue;
+					}
 					if (crit) {
 						s.criteria = args;
 						if (answer.search !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
@@ -231,7 +257,7 @@ function fakeImap() {
 			}
 		});
 	});
-	return { server, sessions, answer, stored, sent, sentRaw };
+	return { server, sessions, answer, stored, sent, sentRaw, likes };
 }
 
 // The bytes the client sent for the APPEND literal, counted from the raw stream
@@ -250,6 +276,18 @@ function literalBytesSent(s) {
 function settle(p) { return p.then((value) => ({ value }), (error) => ({ error })); }
 // Waits for `p`, or gives up after `ms` (a session that never closes fails its assertions).
 function within(p, ms) { return Promise.race([p, new Promise((r) => setTimeout(r, ms))]); }
+// A copy of lib/imap-draft.js with one edit, compiled beside it so its own
+// requires resolve as the library's do; null when the edit doesn't match once.
+function mutantImap(from, to) {
+	const file = path.join(__dirname, "..", "lib", "imap-draft.js");
+	const src = fs.readFileSync(file, "utf8");
+	if (src.split(from).length !== 2) return null;
+	const m = new Module(file, module);
+	m.filename = file;
+	m.paths = Module._nodeModulePaths(path.dirname(file));
+	m._compile(src.replace(from, () => to), file);
+	return m.exports;
+}
 
 // --------------------------------------------------------------------- MIME
 // Just enough to read MailComposer's output back: unfolded headers, the leaf
@@ -288,7 +326,7 @@ function decodedBody(part) {
 
 // ------------------------------------------------------------------- the run
 async function main() {
-	const { server, sessions, answer, sent, sentRaw } = fakeImap();
+	const { server, sessions, answer, sent, sentRaw, likes } = fakeImap();
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = server.address().port;
 
@@ -509,6 +547,86 @@ async function main() {
 			const fetchSrc = at < 0 ? "" : SRC.slice(at, SRC.indexOf("module.exports", at));
 			ok(/"EXAMINE "/.test(fetchSrc) && /BODY\.PEEK\[\]/.test(fetchSrc), "§6 its source sends EXAMINE and BODY.PEEK[]");
 			eq((fetchSrc.match(/\b(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE)\b/g) || []), [], "§6 ...and names no SELECT, STORE, APPEND, COPY, MOVE or EXPUNGE");
+		}
+
+		section("§7  the like search: a copy Gmail may have given its own Message-ID");
+		const LIKE = Object.freeze({ subject: "Example Broker Order #LD-TEST-0007", to: "billing@example-broker.test", since: new Date("2026-10-19T14:00:00Z") });
+		const LIKE_ID = "<made-up-0101.auto-invoice@example.com>";
+		const BOTH = ["[Gmail]/Drafts", "[Gmail]/Sent Mail"];
+		const CRITERIA = 'SINCE 19-Oct-2026 SUBJECT "Example Broker Order #LD-TEST-0007" TO "billing@example-broker.test"';
+		// One search through the library (or a mutant of it): its answer and its session.
+		const likeRun = async (over = {}, lib = null) => {
+			const fn = lib ? lib.findDraftByMessageId : findDraftByMessageId;
+			const r = await settle(fn({ user: USER, pass: PASS, messageId: LIKE_ID, timeoutMs: 3000, alsoLike: LIKE, ...over }));
+			const sess = sessions[sessions.length - 1];
+			await within(sess.closed, 3000);
+			return { value: r.value, error: r.error, commands: sess.commands, examines: sess.examines, likeSearches: sess.likeSearches || [] };
+		};
+		const likeKey = (r) => (r.value && "like" in r.value ? r.value.like : "no like key");
+		const none7 = await likeRun();
+		eq(none7.value, { found: false, count: 0, mailbox: "", like: { count: 0, mailbox: "" } },
+			"§7 FAILS ON THE OLD CODE: nothing with its Message-ID or like it: not found, and the answer says the like search found nothing");
+		eq([none7.commands, none7.examines], [["LOGIN", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "LOGOUT"], [...BOTH, ...BOTH]],
+			"§7 FAILS ON THE OLD CODE: ...the Message-ID in Drafts and Sent Mail first, then the like search in each, every mailbox opened with EXAMINE (read-only)");
+		eq(none7.likeSearches, [CRITERIA, CRITERIA], "§7 FAILS ON THE OLD CODE: ...searched by the subject and the recipient, since the day given");
+		likes["[Gmail]/Sent Mail"].push({ subject: LIKE.subject, to: LIKE.to });
+		const sentLike = await likeRun();
+		eq(sentLike.value, { found: false, count: 0, mailbox: "", like: { count: 1, mailbox: "[Gmail]/Sent Mail" } },
+			"§7 FAILS ON THE OLD CODE: a sent copy with a Message-ID of its own: like it, in Sent Mail, never \"found\"");
+		likes["[Gmail]/Drafts"].push({ subject: `Re: ${LIKE.subject}`, to: `Billing Team <${LIKE.to.toUpperCase()}>` });
+		const draftLike = await likeRun();
+		eq([likeKey(draftLike), draftLike.examines], [{ count: 1, mailbox: "[Gmail]/Drafts" }, [...BOTH, "[Gmail]/Drafts"]],
+			"§7 FAILS ON THE OLD CODE: a draft saved again in Drafts is like it too (IMAP's substring match): the search stops at the first mailbox holding one");
+		const byId = await likeRun({ messageId: ID });
+		eq([byId.value, byId.commands, byId.likeSearches], [{ found: true, count: 1, mailbox: "[Gmail]/Drafts" }, ["LOGIN", "EXAMINE", "SEARCH", "LOGOUT"], []],
+			"§7 found by its Message-ID: found, and no like search (the session as before)");
+		const plain = await likeRun({ alsoLike: undefined });
+		eq([likeKey(plain), plain.commands, plain.likeSearches], ["no like key", ["LOGIN", "EXAMINE", "SEARCH", "EXAMINE", "SEARCH", "LOGOUT"], []],
+			"§7 without alsoLike: the answer and the session exactly as before (no like key, no like search)");
+		const noDay = await likeRun({ alsoLike: { subject: LIKE.subject, to: LIKE.to } });
+		eq(noDay.likeSearches[0], 'SUBJECT "Example Broker Order #LD-TEST-0007" TO "billing@example-broker.test"', "§7 FAILS ON THE OLD CODE: no day given: no SINCE");
+		const quoted = await likeRun({ alsoLike: { ...LIKE, subject: 'Example "Quoted" \\ Broker Order #1' } });
+		eq(quoted.likeSearches[0], 'SINCE 19-Oct-2026 SUBJECT "Example \\"Quoted\\" \\\\ Broker Order #1" TO "billing@example-broker.test"',
+			"§7 FAILS ON THE OLD CODE: a quote or a backslash in the subject is escaped: one quoted string");
+		answer.like = "NO";
+		const likeNo = await likeRun();
+		eq(likeNo.error && [likeNo.error.stage, likeNo.error.answered], ["search", true], "§7 FAILS ON THE OLD CODE: a like search answered NO rejects (stage search), never \"nothing like it\"");
+		answer.like = "GARBLED";
+		const garbled = await likeRun();
+		eq(garbled.error && garbled.error.stage, "search", "§7 FAILS ON THE OLD CODE: a like search whose answer can't be read rejects (stage search), never \"nothing like it\"");
+		answer.like = "OK";
+		const unsafe = [];
+		for (const o of [{ subject: 'x\r\na9 SELECT "[Gmail]/Drafts"' }, { subject: `Caf${E_ACUTE} Order #1` }, { to: "billing team@example-broker.test" }, { subject: "" }, { since: new Date("not a day") }, { to: 7 }]) {
+			unsafe.push(await likeRun({ alsoLike: { ...LIKE, ...o } }));
+		}
+		eq(unsafe.map(likeKey), [null, null, null, null, null, null],
+			"§7 FAILS ON THE OLD CODE: a line break, non-ASCII, a space in the address, an empty subject, a bad day or a recipient that isn't text: like null, so a caller can't read it as nothing found");
+		ok(unsafe.every((u) => !u.likeSearches.length && !u.commands.includes("SELECT") && u.value && u.value.found === false), "§7 ...and none of it reaches a command: the Message-ID search alone ran");
+		// Each decision removed in turn: the case that pins it must change.
+		const CRLF_SUBJECT = { alsoLike: { ...LIKE, subject: 'x\r\na9 SELECT "[Gmail]/Drafts"' } };
+		for (const [label, from, to, over, pinned] of [
+			["no like search", "if (phase === 0 && like) {", "if (false) {", {}, (r) => likeKey(r) !== null && likeKey(r).count === 1],
+			["a copy like it answered as found", "{ found: false, count: 0, mailbox: \"\", like: { count, mailbox: mailboxes[box] } }", "{ found: true, count, mailbox: mailboxes[box] }", {}, (r) => r.value && r.value.found === false],
+			["the like search without the recipient", " + \" TO \" + imapQuote(to)", "", {}, (r) => r.likeSearches[0] === CRITERIA],
+			["the like search without its day", "(since ? \"SINCE \" + imapDay(since) + \" \" : \"\") + ", "", {}, (r) => r.likeSearches[0] === CRITERIA],
+			["a subject not checked", "if (typeof subject !== \"string\" || !LIKE_SUBJECT_RE.test(subject)) return null;", "if (typeof subject !== \"string\") return null;", CRLF_SUBJECT,
+				(r) => likeKey(r) === null && !r.commands.includes("SELECT")],
+		]) {
+			const lib = mutantImap(from, to);
+			ok(lib, `§7 MUTANT ${label}: applied to lib/imap-draft.js once`);
+			if (!lib) continue;
+			ok(pinned(await likeRun(over)) && !pinned(await likeRun(over, lib)), `§7 MUTANT ${label}: caught`);
+		}
+		{
+			const lib = mutantImap("if (phase === 1 && !line) return finish(stagedError(\"IMAP SEARCH answer unreadable\", \"search\"));", "");
+			ok(lib, "§7 MUTANT an unreadable like answer read as nothing like it: applied to lib/imap-draft.js once");
+			if (lib) {
+				answer.like = "GARBLED";
+				const real = await likeRun();
+				const mutated = await likeRun({}, lib);
+				answer.like = "OK";
+				ok(real.error && real.error.stage === "search" && !mutated.error, "§7 MUTANT an unreadable like answer read as nothing like it: caught");
+			}
 		}
 	} finally {
 		tls.connect = realConnect;

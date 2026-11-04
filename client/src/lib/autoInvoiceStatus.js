@@ -128,11 +128,9 @@ export const canTryAgain = (status) => Boolean(status && status.state === 'needs
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
 
 // --- Approve on the Draft Invoice preview, while real automatic drafts are on ---
-// The job may draft a load while a person reads its preview, so Approve reads the
-// load's latest draft row again and sets it against the one the load dialog had
-// when it opened: a draft made in between (the job's, or another person's) is
-// named and needs a yes, and so does a read that failed. A second invoice is never
-// made unseen.
+// Right before the save, Approve reads the load's latest draft row again: one made
+// since the load dialog opened (the job's, or another person's) is named and needs
+// a yes, and so does a read that failed.
 
 const DRAFT_FIELDS = Object.freeze(['invoice_id', 'created_at', 'via'])
 const draftKey = (d) => (d && typeof d === 'object' ? DRAFT_FIELDS.map((f) => String(d[f] ?? '')).join('|') : '')
