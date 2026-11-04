@@ -7,6 +7,7 @@
 //
 //   node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD
 //   node scripts/chr-dry-run-report.js --pilot --db <app.db>
+//   node scripts/chr-dry-run-report.js --location --db <app.db>
 //
 // --db is opened read-only and must exist; --sheets is the replica's Job
 // Tracking working copy, read once. Settings are the page's first-enable
@@ -16,6 +17,11 @@
 // in --db: what went Live, its results, whether any other load went Live, the
 // payloads' keys and patterns, the time from each event to its send. Counts and
 // yes/no only; it never names the pilot load.
+// --location (gate G2, addendum R3.5) reads the recorder's location rows and the
+// fixes they came from: rows outside their load's window, rows recorded after
+// the load's first final event, fixes that were not clean RouteMate or predate
+// their device's link, payloads beyond the four keys, milestone positions that
+// failed their test, loads with no position. Counts only.
 "use strict";
 
 const fs = require("fs");
@@ -30,7 +36,7 @@ const loadHaul = require(path.join(ROOT, "lib", "load-haul.js"));
 const eldMiles = require(path.join(ROOT, "lib", "eld-miles.js"));
 const tripWorkDays = require(path.join(ROOT, "lib", "trip-work-days.js"));
 
-const USAGE = "usage: node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD\n       node scripts/chr-dry-run-report.js --pilot --db <app.db>";
+const USAGE = "usage: node scripts/chr-dry-run-report.js --db <app.db> --sheets <sheets.json> --since YYYY-MM-DD\n       node scripts/chr-dry-run-report.js --pilot --db <app.db>\n       node scripts/chr-dry-run-report.js --location --db <app.db>";
 // Reads copied from server.js (buildHaulTruckResolver(), buildEldDeviceResolver(),
 // eldDeviceHistoryStartMs(), getLoadCoordsRow(), getDeletedLoadIds()); a runner
 // pins each one to server.js's text.
@@ -59,11 +65,11 @@ function isDay(v) {
 function parseArgs(argv) {
 	const out = {};
 	if (!argv.length) throw new UsageError("no arguments");
-	const modes = argv.filter((a) => a === "--pilot");
+	const modes = argv.filter((a) => a === "--pilot" || a === "--location");
 	if (modes.length) {
-		const rest = argv.filter((a) => a !== "--pilot");
-		if (rest.length !== 2 || rest[0] !== "--db" || !rest[1] || rest[1].startsWith("--")) throw new UsageError("--pilot takes --db <app.db> and nothing else");
-		return { mode: "pilot", db: rest[1] };
+		const rest = argv.filter((a) => a !== "--pilot" && a !== "--location");
+		if (modes.length !== 1 || rest.length !== 2 || rest[0] !== "--db" || !rest[1] || rest[1].startsWith("--")) throw new UsageError(`${modes[0]} takes --db <app.db> and nothing else`);
+		return { mode: modes[0].slice(2), db: rest[1] };
 	}
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
@@ -321,13 +327,77 @@ function pilotReport({ db }) {
 	].join("\n");
 }
 
+const LOCATION_KEYS = Object.freeze(["loadNumber", "event", "eventAt", "position"]);
+const FIX_MATCH_SQL = `SELECT routemate_vehicle_id AS vid, source, dropped_reason FROM routemate_telemetry
+	WHERE location_date_ms >= ? AND location_date_ms <= ? AND ROUND(latitude, 4) = ? AND ROUND(longitude, 4) = ?`;
+
+function locationReport({ db }) {
+	const hasTable = (name) => Boolean(db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+	const head = "C.H. Robinson location report (G2): read-only, counts only";
+	if (!hasTable("chr_events")) return `${head}\n  No CHR table: the recorder never ran on this copy.`;
+	const rows = db.prepare("SELECT load_id, event_at, created_at, status, payload_json FROM chr_events WHERE kind = 'location'").all();
+	const departures = db.prepare(`SELECT load_id, event_at FROM chr_events WHERE kind = 'milestone' AND event = 'departed_pickup' AND stop_index = 1
+		AND verify = 'confirmed' AND reverted_at = '' AND status <> 'skipped_backwards'`).all();
+	const finals = db.prepare("SELECT load_id, MIN(event_at) AS first_at, MIN(created_at) AS first_made FROM chr_events WHERE kind = 'milestone' AND event IN ('arrived_delivery', 'delivered') AND status <> 'skipped_backwards' GROUP BY load_id").all();
+	const finalOf = new Map(finals.map((f) => [f.load_id, f]));
+	const depsOf = new Map();
+	for (const d of departures) depsOf.set(d.load_id, [...(depsOf.get(d.load_id) || []), Date.parse(d.event_at)]);
+	const links = hasTable("eld_device_assignments") ? db.prepare(SERVER_SQL.deviceAssignments).all() : [];
+	const linksOf = new Map();
+	for (const l of links) linksOf.set(String(l.routemate_vehicle_id || ""), [...(linksOf.get(String(l.routemate_vehicle_id || "")) || []), l]);
+	const covered = (vid, ms) => {
+		const list = linksOf.get(vid);
+		if (!list || !list.length) return true;
+		return list.some((l) => Date.parse(l.assigned_from) <= ms && (!l.assigned_until || Date.parse(l.assigned_until) > ms));
+	};
+	const fixRead = hasTable("routemate_telemetry") ? db.prepare(FIX_MATCH_SQL) : null;
+	const c = { outside: 0, afterFinal: 0, nonClean: 0, preLink: 0, unmatched: 0, extraKeys: 0 };
+	const byStatus = {};
+	const perLoad = new Map();
+	for (const r of rows) {
+		tally(byStatus, r.status);
+		perLoad.set(r.load_id, (perLoad.get(r.load_id) || 0) + 1);
+		const at = Date.parse(r.event_at);
+		const deps = (depsOf.get(r.load_id) || []).filter((d) => d <= at);
+		const dep = deps.length ? Math.max(...deps) : null;
+		const fin = finalOf.get(r.load_id);
+		if (dep === null || at > dep + 72 * 60 * 60 * 1000 || (fin && Date.parse(fin.first_at) <= at)) c.outside++;
+		if (fin && r.created_at > fin.first_made) c.afterFinal++;
+		let p = null;
+		try { p = JSON.parse(r.payload_json); } catch { p = null; }
+		if (p && Object.keys(p).some((k) => !LOCATION_KEYS.includes(k))) c.extraKeys++;
+		if (!p || !p.position || !fixRead) { c.unmatched++; continue; }
+		const ms = Date.parse(p.eventAt);
+		const matches = fixRead.all(ms, ms + 999, p.position.lat, p.position.lng);
+		const clean = matches.filter((m) => m.source === "routemate" && m.dropped_reason === "");
+		if (!matches.length) c.unmatched++;
+		else if (!clean.length) c.nonClean++;
+		else if (!clean.some((m) => covered(String(m.vid || ""), ms))) c.preLink++;
+	}
+	const counts = [...perLoad.values()].sort((a, b) => a - b);
+	const failedPositions = db.prepare("SELECT payload_json FROM chr_events WHERE kind = 'milestone' AND verify <> 'confirmed' AND instr(payload_json, '\"position\"') > 0").all().length;
+	const noPosition = [...depsOf.keys()].filter((k) => !perLoad.has(k)).length;
+	return [
+		head,
+		`  Location rows: ${rows.length} (${list(byStatus)}); loads with rows: ${perLoad.size}${counts.length ? `; per load: median ${counts[Math.floor((counts.length - 1) / 2)]}, most ${counts[counts.length - 1]}` : ""}`,
+		`  Rows outside their load's window (must be 0): ${c.outside}`,
+		`  Rows recorded after the load's first final event (must be 0): ${c.afterFinal}`,
+		`  Linxup, untagged or dropped fixes used (must be 0): ${c.nonClean}`,
+		`  Fixes from before their device's link (must be 0): ${c.preLink}`,
+		`  Rows with no matching fix in this copy's telemetry: ${c.unmatched}`,
+		`  Payloads with a key beyond the four (must be 0): ${c.extraKeys}`,
+		`  Milestone positions that failed their test (must be 0): ${failedPositions}`,
+		`  Loads with a confirmed departure and no position: ${noPosition}`,
+	].join("\n");
+}
+
 function main() {
 	let db = null;
 	try {
 		const args = parseArgs(process.argv.slice(2));
-		if (args.mode === "pilot") {
+		if (args.mode === "pilot" || args.mode === "location") {
 			db = openDb(args.db);
-			process.stdout.write(`${pilotReport({ db })}\n`);
+			process.stdout.write(`${args.mode === "pilot" ? pilotReport({ db }) : locationReport({ db })}\n`);
 			return 0;
 		}
 		const sheets = readSheets(args.sheets);
@@ -348,4 +418,4 @@ function main() {
 
 if (require.main === module) process.exitCode = main();
 
-module.exports = { SERVER_SQL, DEVICE_HISTORY_START_KEY, USAGE, parseArgs, readSheets, report, payloadFails, pilotReport };
+module.exports = { SERVER_SQL, DEVICE_HISTORY_START_KEY, USAGE, parseArgs, readSheets, report, payloadFails, pilotReport, locationReport };

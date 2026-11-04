@@ -524,7 +524,7 @@ async function main() {
 	// ---------------------------------------------------------------- §12
 	section("§12 the source");
 	const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => /^chr-.*\.js$/.test(f)).sort();
-	eq(libFiles, ["chr-events.js", "chr-integration.js", "chr-routes.js", "chr-store.js", "chr-sweep.js", "chr-transport.js", "chr-verify.js"], "§12 the seven lib/chr-*.js files");
+	eq(libFiles, ["chr-events.js", "chr-integration.js", "chr-location.js", "chr-routes.js", "chr-store.js", "chr-sweep.js", "chr-transport.js", "chr-verify.js"], "§12 the eight lib/chr-*.js files");
 	const sqlOf = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /\b(?:SELECT|UPDATE|INSERT|DELETE|CREATE)\b/.test(s));
 	// Any string naming the table counts, SQL keyword or not, so a split query is still seen.
 	const telemetrySql = (text) => (text.match(/`[^`]*`|"(?:[^"\\\n]|\\.)*"/g) || []).filter((s) => /routemate_telemetry/i.test(s));
