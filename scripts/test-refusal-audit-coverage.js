@@ -32,11 +32,9 @@
 
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
 const Database = require("better-sqlite3");
 
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -625,6 +623,10 @@ const MUST_NOT_BE_PURGEABLE = [
 	// finalized months on its ledger: the create-side twin of update_user_blocked,
 	// from POST /api/users and from an investor application's acceptance.
 	"create_user_blocked", "accept_investor_blocked",
+	// The database admin routes refused to an account not on RATECON_PDF_VIEWER_IDS:
+	// an attempt to take the database, kept forever like db_export_blocked, never
+	// purged.
+	"db_download_blocked", "db_tables_blocked", "db_query_blocked",
 ];
 check("every new period-refusal action exists in server.js",
 	MUST_NOT_BE_PURGEABLE.filter((a) => !SRC.includes(`"${a}"`)), []);

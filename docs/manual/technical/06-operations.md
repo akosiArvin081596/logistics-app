@@ -40,7 +40,7 @@ Run scripts from the project root: `node scripts/<name>.js`. Each script is inde
 There is no APM or log-aggregation service. The two practical mechanisms are:
 
 - **`pm2 logs logistics-app`** — live tail of stdout and stderr. Errors land here.
-- **`audit_trail` table** — every admin-significant mutation. Run ad-hoc SQL via `GET /api/db/query/audit_trail` (Super Admin only).
+- **`audit_trail` table** — every admin-significant mutation. Read it via `GET /api/admin/audit-trail` (Super Admin). `GET /api/db/query/audit_trail` also returns it, for the accounts listed in `RATECON_PDF_VIEWER_IDS` only.
 
 Errors that surface to users return generic 500 JSON; the diagnostic detail is in pm2 logs. When investigating a user-reported issue, ask for the approximate time and look at `pm2 logs --lines 500` from that window.
 
@@ -48,7 +48,7 @@ Errors that surface to users return generic 500 JSON; the diagnostic detail is i
 
 The SQLite database is the only mutable state the repo doesn't own. Take a snapshot of:
 
-- `app.db` — via `POST /api/db/download` (Super Admin) or `scp` directly from the VPS. It is a **POST**, and it cannot be fetched from the browser address bar; see "Database admin tools" below for the exact command.
+- `app.db` — via `POST /api/db/download` (the accounts listed in `RATECON_PDF_VIEWER_IDS`) or `scp` directly from the VPS. It is a **POST**, and it cannot be fetched from the browser address bar; see "Database admin tools" below for the exact command.
 - `.env` — runtime secrets.
 - `service-account-key.json` — Google credentials.
 - `uploads/` — local copies of POD photos, signatures, receipts.
@@ -120,23 +120,27 @@ The Google Sheet is implicitly backed up by Google; you don't need to snapshot i
 
 ## Database admin tools
 
-`GET /api/db/tables` lists every table. `GET /api/db/query/:table` returns rows from a single table with optional `?where=` and `?limit=`. `POST /api/db/download` returns the entire `app.db` file. All three are Super Admin only.
+`GET /api/db/tables` lists every table. `GET /api/db/query/:table` returns rows from a single table, with optional `?limit=` (at most 500) and `?offset=`; sensitive columns are masked. `POST /api/db/download` returns the entire `app.db` file.
 
-**The export is a POST on purpose, and a GET to it returns 405.** It hands over every SSN, EIN and bank routing/account number in the system, unencrypted. `SameSite=Lax` — the session cookie's setting — withholds the cookie from every cross-site POST, but *not* from a top-level cross-site GET navigation, so while it was a GET one link a logged-in Super Admin followed from a chat message, an email or a bookmark ran a full ~313 MB backup and dropped a complete copy into their Downloads folder. Making it a POST removes that class outright, because a link cannot issue a POST. There is no UI button; use `curl`:
+**All three are limited to the accounts listed in `RATECON_PDF_VIEWER_IDS`** (account ids, set only in the server's `.env`). Every other Super Admin gets 403 `DB_DOWNLOAD_RESTRICTED`, before the rate limit, and the attempt is audited, one row a minute per account (`db_download_blocked`, `db_tables_blocked`, `db_query_blocked`; reason and IP, never data). Other roles get the usual 403 and signed-out callers 401, with no audit row. A refused download also raises a notice that only Super Admins see, at most once a day per account. A listed account is checked against the `users` table on every call, so one that has lost Super Admin is told to sign in again. With the list unset or invalid, nobody can use them in the app; `scp` from the VPS still works.
+
+**The export is a POST on purpose, and a GET to it returns 405.** It hands over every SSN, EIN and bank routing/account number in the system, unencrypted. `SameSite=Lax` — the session cookie's setting — withholds the cookie from every cross-site POST, but *not* from a top-level cross-site GET navigation, so while it was a GET one link a logged-in Super Admin followed from a chat message, an email or a bookmark ran a full ~313 MB backup and dropped a complete copy into their Downloads folder. Making it a POST removes that class outright, because a link cannot issue a POST. A listed account can use the *Download database backup* button in Admin Tools; from a terminal, use `curl`, which must send `X-Requested-With` like every write:
 
 ```bash
 # 1. log in, keeping the session cookie
 curl -sS -c /tmp/logisx.jar -X POST https://<host>/api/auth/login \
   -H 'Content-Type: application/json' \
+  -H 'X-Requested-With: XMLHttpRequest' \
   -d '{"username":"<user>","password":"<password>"}'
 
 # 2. export (POST, not GET)
-curl -sS -b /tmp/logisx.jar -X POST https://<host>/api/db/download -o app.db
+curl -sS -b /tmp/logisx.jar -X POST https://<host>/api/db/download \
+  -H 'X-Requested-With: XMLHttpRequest' -o app.db
 
 rm -f /tmp/logisx.jar
 ```
 
-The exported file is a full unencrypted copy of the PII inventory — treat it like the database itself, and delete it when you are done. Rate-limited to 10 requests / 15 min, and every export **and every refused cross-site attempt** writes an `audit_trail` row.
+The exported file is a full unencrypted copy of the PII inventory — treat it like the database itself, and delete it when you are done. Rate-limited to 10 requests / 15 min, and every export and **every refused cross-site attempt** writes an `audit_trail` row; **a refused Super Admin** writes one row a minute per refused account.
 
 For ad-hoc SQL beyond what `/api/db/query` exposes, `scp` the database off the VPS and open it in DB Browser for SQLite or `sqlite3` CLI locally — never write SQL directly against the production file.
 

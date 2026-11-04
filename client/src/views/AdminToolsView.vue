@@ -434,6 +434,7 @@ import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { fmtAppInstant } from '../utils/datetime'
+import { dbExportRefusalText } from '../lib/dbExportRefusal'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 
@@ -814,9 +815,12 @@ async function describeDbExportFailure(res) {
     return
   }
   if (s === 403) {
-    dbExportErrorTitle.value = 'Refused.'
-    dbExportError.value = data.error || 'The export is available to Super Admins, from this site only.'
-    dbExportHint.value = 'Open LogisX directly rather than through a link from another site, then try again.'
+    // An account not on the server's list (DB_DOWNLOAD_RESTRICTED) gets the
+    // server's sentence and no hint; any other 403 keeps the cross-site hint.
+    const refusal = dbExportRefusalText(s, data)
+    dbExportErrorTitle.value = refusal.title
+    dbExportError.value = refusal.error
+    dbExportHint.value = refusal.hint
     return
   }
   if (s === 401) {
