@@ -519,6 +519,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		DRIVER_TRAINING_VIDEOS_ENABLED: false,
 		// So are the load-instructions codes (scripts/test-driver-page-role-gate.js §8).
 		driverInstructions: { annotateDriverLoads() {} },
+		// So is the arrival pickup line (scripts/test-arrival-pickup-pay-paths.js §D).
+		annotatePickupArrival: () => 0,
 		// So are the stepper's GPS phases (scripts/test-driver-page-role-gate.js §9).
 		driverGpsPhases: { annotate: (rows) => rows },
 		// The per-load document counts (scripts/test-driver-docs-current-holder.js §4).

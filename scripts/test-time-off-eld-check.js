@@ -425,11 +425,15 @@ section("§11 the notice and audit text");
 	const lineMoved = T.timeOffNoticeLine({ verdict: { day: "2026-10-19", state: "not_confirmed", reason: "truck_moved", miles: 212.4, firstMoveMs: at("2026-10-19", 7, 5, tz), lastMoveMs: at("2026-10-19", 16, 40, tz) }, units: ["T1"], timeZone: tz });
 	const lineUp = T.timeOffNoticeLine({ verdict: { day: "2026-10-18", state: "confirmed", reason: "no_truck" }, followup: true, units: [], timeZone: tz });
 	eq("§11.1 the notice lines", [lineApp, lineDev, lineMoved, lineUp], [
-		"Oct 17: his account updated a load's status at 3:12 PM EDT.",
+		"Oct 17: his account updated a load's status.",
 		"Oct 18: the ELD on T1 may be in another vehicle since Oct 16 (a reading changed), so its days can't be checked from it.",
-		"Oct 19: T1 moved 212.4 mi (first at 7:05 AM, last at 4:40 PM EDT).",
+		"Oct 19: T1 moved 212.4 mi.",
 		"Update: Oct 18 now reads Confirmed (no ELD data): no truck on record.",
 	]);
+	const clock = /\d:\d\d|\b(AM|PM)\b|\b[ECMP][SD]T\b/;
+	const lineDark = T.timeOffNoticeLine({ verdict: { day: "2026-10-20", state: "not_confirmed", reason: "moved_while_dark", firstMoveMs: at("2026-10-20", 8, 0, tz), lastMoveMs: at("2026-10-20", 9, 30, tz) }, units: ["T1"], timeZone: tz });
+	ok("§11.1b no notice line carries a clock time, whatever times the day's results hold; a moved day keeps its miles",
+		![lineApp, lineDev, lineMoved, lineUp, lineDark].some((l) => clock.test(l)) && /212\.4 mi/.test(lineMoved), [lineApp, lineMoved, lineDark].join(" | "));
 	const n = T.timeOffNoticeText({ driverName: "Hollis Renner", from: "2026-10-17", to: "2026-10-21", lines: [{ kind: "first", state: "not_confirmed", text: lineApp }, { kind: "first", state: "no_data", text: lineDev }] });
 	eq("§11.2 the notice: title with the driver and his days, the lines as the body", [n.title, n.body], ["Time off not confirmed: Hollis Renner (Oct 17 – Oct 21)", `${lineApp} ${lineDev}`]);
 	eq("§11.3 a follow-up only: \"Time off update\"", T.timeOffNoticeText({ driverName: "Hollis Renner", from: "2026-10-17", to: "2026-10-21", lines: [{ kind: "followup", state: "no_data", text: lineUp }] }).title, "Time off update: Hollis Renner (Oct 17 – Oct 21)");

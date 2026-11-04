@@ -49,7 +49,7 @@ import { Card, CardContent } from '@/components/ui/card'
 const store = useUsersStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
-useSocketRefresh('users:changed', () => store.loadUsers())
+useSocketRefresh('users:changed', () => store.loadUsers({ quiet: true }))
 
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.users), 25)
 watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })

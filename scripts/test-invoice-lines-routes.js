@@ -248,6 +248,8 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 	// The factoring marker's checks around the draft (shipped lib code; nothing marked).
 	require("../lib/factoring-store.js").ensureSchema(db);
 	scope.factoringRoutes = require("../lib/factoring-routes.js").create({ db, logAudit: scope.logAudit });
+	// The automatic job's check for a load it sent (shipped lib code; the job off, nothing sent).
+	scope.autoInvoice = require("../lib/auto-invoice-job.js").create({ db, env: {}, logAudit: scope.logAudit, log: { warn() {}, error() {} } });
 	const register = (text) => {
 		const registered = [];
 		const app = { post: (...a) => registered.push(a), get: (...a) => registered.push(a) };

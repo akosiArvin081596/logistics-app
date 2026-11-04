@@ -46,6 +46,14 @@
  *      created) and never sends mail; with no lock table to read, check 5
  *      counts the load as untold (not closed) and says the closed months
  *      can't be read
+ *   §8 check 12 (receipts approved automatically, plan §4.12): over server.js's
+ *      own tables and the pass's review rows, each named once: a fill link gone,
+ *      a link moved (another start, another truck, another day), a place
+ *      changed, a duplicate group joined, and a held same-paper receipt whose
+ *      twin was decided; not named: a fill re-detected under a new id with the
+ *      same truck, day and start window (L18), a closed month, shadow rows, a
+ *      receipt a person took over, a group a person kept, an undecided twin;
+ *      with nothing to name the run reads as before and gains no table
  *
  * Hermetic: in-memory SQLite and a mkdtemp directory; no network.
  *   node scripts/test-integrity-check.js
@@ -670,11 +678,11 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own tables",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE|UNKNOWN_TRUCKS_TABLE|WITHHELD_LOAD_IDS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE|UNKNOWN_TRUCKS_TABLE|WITHHELD_LOAD_IDS_TABLE|AUTO_APPROVED_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
 	ok("the reported lists are written in the same transaction as the load state",
-		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody) && /markRate\.run\(/.test(txBody) && /markUnknownTruck\.run\(/.test(txBody), txBody);
+		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody) && /markRate\.run\(/.test(txBody) && /markUnknownTruck\.run\(/.test(txBody) && /markAutoApproved\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
@@ -778,6 +786,224 @@ async function section7() {
 	ok("the CLI writes no state (write: false)", /write: false/.test(cliSrc) && !/write: true/.test(cliSrc));
 }
 
+// The world check 12 reads: server.js's own tables (expenses with its ALTERs,
+// fuel_events, audit_trail, invoices, period_locks) and the pass's review table,
+// holding what the pass writes when it approves in mode on (the evidence's fill
+// key is pinned by scripts/test-receipt-auto-approve-sweep.js §3).
+const passLib = require("../lib/receipt-auto-approve-pass");
+function serverCreate(name) {
+	const m = SRC.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${name} \\(([\\s\\S]*?)\\n\\t\\)`));
+	if (!m) throw new Error(`server.js creates no ${name} table`);
+	return `CREATE TABLE ${name} (${m[1]}\n)`;
+}
+const altersFor = (t) => [...SRC.matchAll(new RegExp(`ALTER TABLE ${t} ADD COLUMN [^"\`]+`, "g"))].map((m) => m[0]);
+const MIN = 60 * 1000;
+const AUTO_NOW = new Date("2026-10-20T12:00:30Z");
+const APPLIED_AT = "2026-10-18T15:00:00.000Z";
+const AUTO_DAY = "2026-10-17";
+const SNAPSHOT_COLS = ["amount", "date", "truck_unit", "owner_id", "location_city", "location_state", "location_lat", "location_lng", "vendor", "gallons"];
+const PERSON = { role: "Super Admin", id: 1, name: "made_up_admin" };
+const PASS_BY = { role: "system", id: 0, name: passLib.PASS_NAME };
+
+function autoWorld({ locks = true, reviews = true } = {}) {
+	const db = new Database(":memory:");
+	for (const t of ["expenses", "fuel_events", "audit_trail", "invoices"]) db.exec(serverCreate(t));
+	for (const t of ["expenses", "invoices"]) {
+		for (const sql of altersFor(t)) {
+			try { db.exec(sql); } catch { /* a duplicate, or a comment's text */ }
+		}
+	}
+	if (locks) {
+		db.exec(serverCreate("period_locks"));
+		db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-09', 'locked', '2026-10-15T05:00:00.000Z')").run();
+	}
+	if (reviews) passLib.ensureSchema(db);
+	const startOf = (day) => Date.parse(`${day}T16:00:00Z`);
+	let nextFill = 900;
+	const w = { db };
+	// A fuel receipt on its own truck (T-<id>), so no two share a duplicate bucket unless asked.
+	w.receipt = (id, { truck = `T-${id}`, date = AUTO_DAY, status = "Pending", by = null, createdAt = "2026-10-18 14:00:00" } = {}) => {
+		db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, created_at, truck_unit, owner_id, gallons, vendor,
+			vendor_normalized, location_city, location_state, location_lat, location_lng, status_by_role, status_by_id, status_by_name, status_at)
+			VALUES (?, ?, ?, 'Fuel', 400, ?, ?, ?, ?, 101, 100, 'Pilot', 'PILOT', 'Sample City', 'OK', 35.2, -97.4, ?, ?, ?, ?)`)
+			.run(id, "2026-10-18T14:00:00.000Z", `Sample Driver ${id}`, date, status, createdAt, truck,
+				by ? by.role : "", by ? by.id : null, by ? by.name : "", by ? APPLIED_AT : "");
+	};
+	// What the pass writes when it approves: the status and its record, the review row
+	// with its evidence and the row's own values, and the fill linked to the receipt.
+	// `keyless` is an approval recorded before the evidence kept the fill's truck, start and day.
+	w.approve = (id, { date = AUTO_DAY, createdAt, keyless = false } = {}) => {
+		w.receipt(id, { date, status: "Approved", by: PASS_BY, ...(createdAt ? { createdAt } : {}) });
+		const vid = `VID-${id}`;
+		db.prepare(`INSERT INTO fuel_events (id, routemate_vehicle_id, start_ms, end_ms, local_day, expense_id, match_basis, match_distance_km)
+			VALUES (?, ?, ?, ?, ?, ?, 'exact_day', 3.2)`).run(id, vid, startOf(date), startOf(date) + 10 * MIN, date, id);
+		const row = db.prepare("SELECT * FROM expenses WHERE id = ?").get(id);
+		const snap = {};
+		for (const k of SNAPSHOT_COLS) snap[k] = row[k] == null ? null : row[k];
+		snap.photo = "";
+		const link = keyless ? { fill: id, basis: "exact_day", km: 3.2 } : { fill: id, basis: "exact_day", km: 3.2, vehicle: vid, start: startOf(date), day: date };
+		const evidence = { link, truck: `T-${id}`, owner: 101, truckOwner: 101, wait: "", read: null, twins: [] };
+		db.prepare(`INSERT INTO receipt_auto_reviews (expense_id, rules_version, mode, verdict, reasons, evidence, first_seen_at, decided_at, applied_at, applied_row, passes, status_seen)
+			VALUES (?, 'v1', 'on', 'approve', '[]', ?, ?, ?, ?, ?, 1, 'Pending')`).run(id, JSON.stringify(evidence), APPLIED_AT, APPLIED_AT, APPLIED_AT, JSON.stringify(snap));
+	};
+	// The receipt's fill replaced: the old row pruned (or only unlinked), a new one linked.
+	w.relink = (id, { shiftMs = 0, vid = null, day = null, prune = true } = {}) => {
+		const old = db.prepare("SELECT * FROM fuel_events WHERE expense_id = ?").get(id);
+		if (prune) db.prepare("DELETE FROM fuel_events WHERE id = ?").run(old.id);
+		else db.prepare("UPDATE fuel_events SET expense_id = NULL, match_basis = '' WHERE id = ?").run(old.id);
+		const start = old.start_ms + shiftMs;
+		db.prepare(`INSERT INTO fuel_events (id, routemate_vehicle_id, start_ms, end_ms, local_day, expense_id, match_basis, match_distance_km)
+			VALUES (?, ?, ?, ?, ?, ?, 'exact_day', 4.1)`).run(nextFill++, vid || old.routemate_vehicle_id, start, start + 10 * MIN, day || old.local_day, id);
+	};
+	// A receipt the pass held as the same paper (rule 18) as `twins`.
+	w.held = (id, { twins, mode = "on", status = "Pending", date = AUTO_DAY } = {}) => {
+		w.receipt(id, { status, date });
+		const evidence = { link: null, truck: `T-${id}`, owner: 101, truckOwner: 101, wait: "", read: null, twins };
+		db.prepare(`INSERT INTO receipt_auto_reviews (expense_id, rules_version, mode, verdict, reasons, evidence, fingerprints, first_seen_at, decided_at, passes, status_seen)
+			VALUES (?, 'v1', ?, 'hold', '["SAME_PAPER"]', ?, '["made-up-fingerprint"]', ?, ?, 1, 'Pending')`).run(id, mode, JSON.stringify(evidence), APPLIED_AT, APPLIED_AT);
+	};
+	w.audit = (action, entityId, details) => db.prepare(`INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details)
+		VALUES ('2026-10-18T16:00:00.000Z', 1, 'made_up_admin', 'Super Admin', ?, 'expense', ?, ?)`).run(action, String(entityId), details);
+	return w;
+}
+function businessDump(db) {
+	return JSON.stringify(tables(db).filter((t) => !t.startsWith("integrity_check_")).map((t) => [t, db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()]));
+}
+
+async function section8() {
+	console.log("§8 check 12 (receipts approved automatically whose evidence changed; a decided same-paper twin)");
+	ok("check 12 exists (lib/integrity-check.js autoApprovedChanges)", typeof ic.autoApprovedChanges === "function");
+	const W = autoWorld();
+	const { db } = W;
+	W.approve(201); // the control: nothing changed
+	W.approve(202); db.prepare("DELETE FROM fuel_events WHERE expense_id = 202").run(); // its fill pruned, never re-detected
+	W.approve(203); W.relink(203, { shiftMs: 5 * 60 * MIN, prune: false }); // linked now to the truck's later fill that day
+	W.approve(204); W.relink(204, { shiftMs: -4 * MIN }); // re-detected under a new id: same truck, day, start window (L18)
+	W.approve(205); db.prepare("UPDATE expenses SET location_city = 'Other Town', location_state = 'TX', location_lat = 31.1, location_lng = -97.3 WHERE id = 205").run();
+	W.approve(206); W.receipt(207, { truck: "T-206" }); // 207 filed later: same truck, day, amount, merchant and gallons
+	W.receipt(209, { status: "Approved", by: PERSON, date: "2026-10-16" }); W.held(208, { twins: [209] }); // a person approved the twin
+	W.receipt(211, { date: "2026-10-16" }); W.held(210, { twins: [211] }); // the twin is still Pending: nobody decided it
+	W.approve(212, { date: "2026-09-20", createdAt: "2026-09-21 14:00:00" }); db.prepare("DELETE FROM fuel_events WHERE expense_id = 212").run(); // a closed month
+	W.held(213, { twins: [209], mode: "shadow" }); // shadow verdicts stay hidden from people
+	W.approve(214); db.prepare("UPDATE expenses SET status = 'Pending', status_by_role = 'Super Admin', status_by_id = 1, status_by_name = 'made_up_admin', status_at = '2026-10-19T10:00:00.000Z' WHERE id = 214").run();
+	db.prepare("DELETE FROM fuel_events WHERE expense_id = 214").run(); // a person took it back; its fill gone too
+	W.approve(215); W.receipt(216, { truck: "T-215" }); W.audit("expense_duplicate_override", 216, "Logged despite matching expense #215"); // a person kept the pair
+	W.approve(217); W.relink(217, { shiftMs: 40 * MIN }); // re-detected 40 minutes later: outside one fill's window
+	W.approve(218); W.relink(218, { vid: "VID-OTHER" }); // the same start, another truck's fill
+	W.approve(219); W.relink(219, { shiftMs: 5 * MIN, day: "2026-10-18" }); // inside the window, another business day
+	W.approve(221, { date: "2026-10-16" }); W.held(220, { twins: [221] }); // the twin the pass approved
+	W.receipt(223, { status: "Rejected", by: PERSON, date: "2026-10-16" }); W.held(222, { twins: [223] }); // a person rejected the twin
+	W.held(224, { twins: [209], status: "Rejected" }); // the held copy itself was rejected: it no longer counts
+	W.approve(225); db.prepare("UPDATE expenses SET location_lat = 35.9 WHERE id = 225").run(); // only the map point moved
+	W.approve(226); W.receipt(227, { truck: "T-226", status: "Rejected", by: PERSON }); // a rejected copy is no spend: no group
+	W.approve(228, { keyless: true }); W.relink(228, { shiftMs: -3 * MIN, prune: false }); // no stored key: the old row, still there, gives it
+	W.approve(229, { keyless: true }); W.relink(229, { shiftMs: -3 * MIN }); // no stored key and the old row gone: only its id is known
+	// Still Approved, but a person's record stamped since (recorder on): a bulk approve that took it in, and a Personal
+	// mark. Each fill is pruned too; the receipt is the person's now, so it is not named.
+	const personStamp = db.prepare("UPDATE expenses SET status_by_role = 'Super Admin', status_by_id = 1, status_by_name = 'made_up_admin', status_at = ? WHERE id = ?");
+	W.approve(230); personStamp.run("2026-10-19T09:00:00.000Z", 230); db.prepare("DELETE FROM fuel_events WHERE expense_id = 230").run();
+	W.approve(231); personStamp.run("2026-10-19T09:30:00.000Z", 231); db.prepare("DELETE FROM fuel_events WHERE expense_id = 231").run();
+
+	const sheet = jt([{ id: "1", pickup: "p", assigned: "" }]);
+	const before = businessDump(db);
+	const spy = mailSpy();
+	const r1 = await run(db, sheet, { now: AUTO_NOW, sendEmail: spy });
+	const auto = r1.result.report.autoApproved || { findings: [] };
+	const got = auto.findings.map((f) => `${f.id}:${f.kind}`).sort();
+	const want = ["202:link_gone", "203:link_moved", "205:place", "206:duplicate", "208:twin", "217:link_moved", "218:link_moved", "219:link_moved", "220:twin", "222:twin", "225:place",
+		"229:link_moved"].sort();
+	ok("check 12 names exactly the changed approvals and the decided twins", JSON.stringify(got) === JSON.stringify(want), got);
+	const named = (id) => got.some((x) => x.startsWith(`${id}:`));
+	ok("an untouched approval is not named", !named(201));
+	ok("a fill gone is named", named(202));
+	ok("a link moved to the truck's later fill that day is named", got.includes("203:link_moved"));
+	ok("L18: a fill re-detected under a new id with the same truck, day and start window is not 'moved'", !named(204));
+	ok("...one 40 minutes off is another fill", got.includes("217:link_moved"));
+	ok("...one on another truck is another fill", got.includes("218:link_moved"));
+	ok("...one on another business day is another fill", got.includes("219:link_moved"));
+	ok("a place changed after approval is named", got.includes("205:place") && got.includes("225:place"));
+	ok("joining a duplicate group is named, on the approved receipt only", got.includes("206:duplicate") && !named(207));
+	ok("a rejected copy makes no group (rule 8 counts only spend)", !named(226) && !named(227));
+	ok("an approval without the stored fill key: judged by its old row while it lasts (the same fill), then by its id (named)",
+		!named(228) && got.includes("229:link_moved"));
+	ok("a group a person kept (an override) is not raised", !named(215) && !named(216));
+	ok("a held same-paper receipt whose twin was decided is named, whoever decided it", got.includes("208:twin") && got.includes("220:twin") && got.includes("222:twin"));
+	ok("an undecided twin, a rejected held copy and a shadow hold are not named", !named(210) && !named(224) && !named(213));
+	ok("a receipt a person took back is not the pass's any more: not named", !named(214));
+	ok("nor one a person stamped while it stayed Approved (a bulk approve, a Personal mark, recorder on)",
+		!named(230) && !named(231) && db.prepare("SELECT COUNT(*) AS c FROM expenses WHERE id IN (230, 231) AND status = 'Approved'").get().c === 2);
+	ok("a closed month is not raised, only counted for the log line", !named(212) && auto.closed === 1, auto.closed);
+	ok("each finding once per receipt and kind", new Set(got).size === got.length);
+
+	const line = (id) => (r1.result.report.text || "").split("\n").find((l) => l.includes(`Receipt #${id} `)) || "";
+	ok("the gone line", line(202) === "  - Receipt #202 (truck T-202, 2026-10-17, approved automatically): no ELD fill is linked to it any more.", line(202));
+	ok("the moved line names the fill it moved to", line(203) === "  - Receipt #203 (truck T-203, 2026-10-17, approved automatically): its ELD fill link moved to another fill (#900, 2026-10-17).", line(203));
+	ok("the place line, from and to", line(205) === "  - Receipt #205 (truck T-205, 2026-10-17, approved automatically): its place was changed after it was approved, from \"Sample City, OK\" to \"Other Town, TX\".", line(205));
+	ok("the map-point line", line(225) === "  - Receipt #225 (truck T-225, 2026-10-17, approved automatically): its map point was changed after it was approved (\"Sample City, OK\").", line(225));
+	ok("the duplicate line names the other receipt", line(206) === "  - Receipt #206 (truck T-206, 2026-10-17, approved automatically): it is now in a duplicate group with receipt #207.", line(206));
+	ok("the twin lines say who decided the twin", line(208) === "  - Receipt #208 (truck T-208, 2026-10-17, held for a person): it prints the same transaction code as receipt #209, which a person approved." &&
+		line(220) === "  - Receipt #220 (truck T-220, 2026-10-17, held for a person): it prints the same transaction code as receipt #221, which was approved automatically." &&
+		line(222) === "  - Receipt #222 (truck T-222, 2026-10-17, held for a person): it prints the same transaction code as receipt #223, which a person rejected.", [line(208), line(220), line(222)]);
+	ok("one email, both sections titled", spy.calls.length === 1 && /Receipts approved automatically whose evidence changed \(9\)/.test(spy.calls[0].html) &&
+		/Receipts held as the same paper as a receipt already decided \(3\)/.test(spy.calls[0].html), spy.calls[0] && spy.calls[0].subject);
+	const logText = r1.logger.lines.map((l) => l.text).join("\n");
+	ok("the log line lists the receipts by id and counts the closed month's", /receipts approved automatically whose evidence changed: receipt #202, #203, #205, #206, #217, #218, #219, #225, #229;/.test(logText) &&
+		/held as the same paper as a decided receipt: receipt #208, #220, #222/.test(logText) && /receipts approved automatically not raised: 1 in a closed month/.test(logText), logText);
+	ok("the run writes nothing but its own ledger", businessDump(db) === before);
+	ok("its ledger holds each finding", tables(db).includes(ic.AUTO_APPROVED_TABLE) &&
+		db.prepare(`SELECT COUNT(*) AS c FROM ${ic.AUTO_APPROVED_TABLE}`).get().c === want.length);
+
+	const spy2 = mailSpy();
+	const r2 = await run(db, sheet, { now: new Date("2026-10-21T12:00:30Z"), sendEmail: spy2 });
+	const auto2 = r2.result.report.autoApproved || { findings: [] };
+	ok("each named once: the next run names none of them again, and the count alone sends nothing", auto2.findings.length === 0 && auto2.reportedOpen === want.length && spy2.calls.length === 0, auto2);
+	ok("...its log line counts them", r2.logger.lines.some((l) => /12 such findings on receipts approved automatically reported earlier/.test(l.text)), r2.logger.lines);
+	db.prepare("UPDATE expenses SET location_city = 'Third Town' WHERE id = 205").run();
+	const r3 = await run(db, sheet, { now: new Date("2026-10-22T12:00:30Z"), sendEmail: mailSpy() });
+	ok("a later change to another place is a new finding, named once", ((r3.result.report.autoApproved || {}).findings || []).map((f) => `${f.id}:${f.kind}`).join() === "205:place");
+
+	// Nothing to name: the run reads as it did before check 12, and gains no table.
+	const plainRun = async (w) => {
+		w.receipt(300, { status: "Approved", by: PERSON, createdAt: "2026-10-05 10:00:00" }); // check 4 names it in both
+		return run(w.db, sheet, { now: AUTO_NOW });
+	};
+	const noTable = await plainRun(autoWorld({ reviews: false }));
+	const empty = autoWorld();
+	const emptyRun = await plainRun(empty);
+	const quiet = autoWorld();
+	quiet.approve(301);
+	const quietRun = await plainRun(quiet);
+	ok("an empty review table (the flag off) reads exactly as no table: the same email and log line",
+		emptyRun.result.mail && noTable.result.mail && emptyRun.result.mail.text === noTable.result.mail.text && emptyRun.result.mail.html === noTable.result.mail.html &&
+		emptyRun.result.logLine === noTable.result.logLine, [emptyRun.result.logLine, noTable.result.logLine]);
+	ok("...and an untouched approval too", quietRun.result.mail && quietRun.result.mail.text === noTable.result.mail.text && quietRun.result.logLine === noTable.result.logLine, quietRun.result.logLine);
+	ok("...and neither the line nor the email says anything of check 12", [emptyRun, quietRun, noTable].every((x) => !/automatically|same paper/i.test(`${x.result.logLine}\n${x.result.mail.text}\n${x.result.mail.html}`)),
+		emptyRun.result.logLine);
+	ok("...and no ledger table is created", !tables(empty.db).includes(ic.AUTO_APPROVED_TABLE || "integrity_check_auto_approved") && !tables(quiet.db).includes(ic.AUTO_APPROVED_TABLE || "integrity_check_auto_approved"));
+
+	// Closed months that can't be read: counted as untold, never raised.
+	const noLocks = autoWorld({ locks: false });
+	noLocks.approve(310);
+	noLocks.db.prepare("DELETE FROM fuel_events WHERE expense_id = 310").run();
+	const nl = await run(noLocks.db, sheet, { now: AUTO_NOW });
+	const nla = nl.result.report.autoApproved || {};
+	ok("no lock table to read: the finding is untold, not raised, and the note says why", (nla.findings || []).length === 0 && nla.unknownMonth === 1 &&
+		nl.result.report.notes.some((n) => /1 finding on receipts approved automatically could not be placed in an open or a closed month/.test(n)), nla);
+
+	// A review table it can't read: check 12 says so, the rest of the run goes on.
+	const broken = autoWorld({ reviews: false });
+	broken.db.exec("CREATE TABLE receipt_auto_reviews (expense_id INTEGER PRIMARY KEY)");
+	const br = await plainRun(broken);
+	ok("an unreadable review table: check 12 is skipped with the reason, check 4 still names its receipt",
+		/could not be read/.test((br.result.report.autoApproved || {}).skipped || "") && br.result.report.receipts.stale.map((r) => r.id).join() === "300" && br.result.ok === true,
+		br.result.report.autoApproved);
+
+	const watchPath = path.join(ROOT, "lib", "receipt-auto-approve-watch.js");
+	const watchSrc = fs.existsSync(watchPath) ? fs.readFileSync(watchPath, "utf8") : "";
+	ok("lib/receipt-auto-approve-watch.js reads only (no INSERT, UPDATE, DELETE, CREATE, ALTER, DROP or REPLACE)",
+		!!watchSrc && !/\b(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|CREATE\s+(TABLE|INDEX)|ALTER\s+TABLE|DROP\s+TABLE|REPLACE\s+INTO)\b/i.test(watchSrc));
+}
+
 (async () => {
 	try {
 		await section1();
@@ -787,6 +1013,7 @@ async function section7() {
 		await section5();
 		await section6();
 		await section7();
+		await section8();
 	} catch (e) {
 		console.error(`FAILED: ${e.stack || e.message}`);
 		process.exit(1);

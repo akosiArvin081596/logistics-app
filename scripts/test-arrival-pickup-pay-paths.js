@@ -53,6 +53,12 @@
  *   B4  a kept line whose invoice is no longer live is not named
  *   T   a DST night and local midnight; and §Z the window cases and B1 again under
  *       TZ America/New_York, America/Chicago, UTC and Asia/Manila
+ *   D1-D5 the load detail's line (`_pickupArrival`) on GET /api/dashboard and the
+ *       driver's GET /api/driver/:driverName: the facts on in-scope loads only; no
+ *       Load ID, distance or name; a Load ID withheld from a Dispatcher still gets
+ *       it; a driver sees it on his own loads only; flag off, no key; D6 a percentage
+ *       driver's load, one assigned before FROM and one with no Assigned Date show the
+ *       rate con's date only; MD1-MD7 mutants
  *   M   mutants, each caught
  *
  * Every "on" case fails on a base without the rule (no flag); the pins pass on
@@ -68,6 +74,7 @@ const path = require("path");
 const crypto = require("crypto");
 const Module = require("module");
 const { spawnSync } = require("child_process");
+const { pathToFileURL } = require("url");
 const M = require("./lib/money-plans-world");
 const { closure } = require("./lib/server-lift");
 const { loadRow } = M;
@@ -632,6 +639,201 @@ async function batchCases() {
 	});
 }
 
+// ── D the display field on GET /api/dashboard and the driver's GET /api/driver/:driverName ──
+// Both routes lifted onto a world's database, sheet, clock and settings (from `src`,
+// so a mutant can lift a changed copy). The driver-instructions runtime, automatic
+// invoice drafts and factored loads have their own runners: inert here.
+const DISPLAY_HEADS = ['app.get("/api/dashboard",', 'app.get("/api/driver/:driverName",'];
+const DISPLAY_PROVIDED = [...OVERRIDE_PROVIDED, "driverInstructions", "autoInvoice", "factoringRoutes"];
+const DISPLAY_LIFTS = new Map();
+function displayRoutes(w, env, src = M.SRC) {
+	if (!DISPLAY_LIFTS.has(src)) {
+		const heads = DISPLAY_HEADS.map((p) => {
+			const found = src.split("\n").filter((l) => l.startsWith(p));
+			if (found.length !== 1) throw new Error(`expected one registration starting ${p}, found ${found.length}`);
+			return found[0];
+		});
+		DISPLAY_LIFTS.set(src, closure(src, { roots: ["parseSheet", "deduplicateLoads"], routes: heads, provided: DISPLAY_PROVIDED, denied: ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"] }));
+	}
+	const routes = {};
+	const register = (method) => (p, ...h) => { routes[`${method} ${p}`] = h[h.length - 1]; };
+	class FixedDate extends Date {
+		constructor(...args) { super(...(args.length ? args : [w.clock.ms])); }
+		static now() { return w.clock.ms; }
+	}
+	const pass = () => (req, res, next) => (next ? next() : undefined);
+	const deps = {
+		db: w.db, require: Module.createRequire(path.join(ROOT, "server.js")), console: { log() {}, info() {}, error() {}, warn() {} },
+		process: { env: { ...env }, argv: [], cwd: () => ROOT, pid: 4247, on() {}, nextTick: process.nextTick, hrtime: process.hrtime, memoryUsage: process.memoryUsage }, __dirname: ROOT, Date: FixedDate,
+		app: { get: register("GET"), put: register("PUT"), post: register("POST"), delete: register("DELETE"), use() {} },
+		requireRole: pass, requireAuth: pass(), refuseCrossOrigin: pass(), notifyChange: () => {}, logAudit: () => {},
+		getJobTrackingCached: null, jtCacheInvalidate: () => {}, getSheets: null, SPREADSHEET_ID: "test-sheet", REPLICA: null, SHEET_TARGET: null,
+		fs: null, fetch: () => { throw new Error("no network in a test"); }, io: null, sendEmail: async () => undefined,
+		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		factoringRoutes: { annotateDashboard() {} },
+	};
+	const body = ['"use strict";', DISPLAY_LIFTS.get(src).text,
+		"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet() }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
+		"return null;"].join("\n");
+	new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), () => M.sheetValues(w.rows));
+	const ask = async (key, user, params = {}) => M.call(routes[key], { session: { user }, headers: {}, query: {}, params, body: {} });
+	return {
+		dashboard: async (user = M.ADMIN.session.user) => {
+			const r = await ask("GET /api/dashboard", user);
+			if (r.status !== 200) throw new Error(`dashboard: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+			return { body: r.body, rows: [...r.body.unassignedJobs, ...r.body.activeJobs, ...r.body.completedJobs] };
+		},
+		driverPage: (user, name) => ask("GET /api/driver/:driverName", user, { driverName: encodeURIComponent(name) }),
+	};
+}
+const DISPATCHER = { id: 2, role: "Dispatcher", username: "dispatch_t" };
+const CY = "Cy Dale";
+const CY_DRIVER = { id: 11, role: "Driver", username: "cdale", driverName: CY };
+const byLoadId = (rows) => Object.fromEntries(rows.map((r) => [r["Load ID"], r]));
+const fieldsOf = (rows) => Object.fromEntries(rows.filter((r) => Object.prototype.hasOwnProperty.call(r, "_pickupArrival")).map((r) => [r["Load ID"], r._pickupArrival]));
+const keyedRows = (rows) => rows.filter((r) => Object.prototype.hasOwnProperty.call(r, "_pickupArrival")).length;
+const FIELD_2101 = { scheduled: "2026-12-07", day: "2026-12-08", at: "2026-12-08T14:40:00.000Z", source: "gps", atDay: "2026-12-08", atTime: "9:40 AM EST" };
+const FIELD_2102 = { scheduled: "2026-12-09", day: "2026-12-08", at: "2026-12-09T03:30:00.000Z", source: "driver", atDay: "2026-12-08", atTime: "10:30 PM EST" };
+// A broker phone held in the Load ID itself: withheld from a Dispatcher, so the
+// stored ID is all that ties the row to its history.
+const WITHHELD_ID = "5552014477";
+const BO_DIRECTORY = { name: BO, payType: "percentage", payPct: 30 };
+// L-2101's trip (a GPS arrival, a Delivered row) under another Load ID, row cells and driver.
+const lateAs = (id, cells = {}, actor = AMY) => {
+	const x = L.late();
+	return { row: { ...x.row, "Load ID": id, ...cells }, history: x.history.map((r) => ({ ...r, load: id, actor })) };
+};
+// Out of scope though each has a qualifying arrival and a Delivered row: the weekly
+// invoice pays none of them from the arrival (P6, P7, P12).
+const OUT_OF_SCOPE = {
+	"L-2123": () => lateAs("L-2123", { Driver: BO, Truck: "T3" }, BO), // a percentage driver
+	"L-2124": () => lateAs("L-2124", { "Assigned Date": "11/19/2026" }), // assigned the day before FROM, done Dec 10
+	"L-2125": () => lateAs("L-2125", { "Assigned Date": "" }), // no Assigned Date
+};
+const displayLoads = () => {
+	// Set back to In Transit by hand after its Delivered row: not completed on the sheet.
+	const reopened = { ...L.late(), row: { ...L.late().row, "Load ID": "L-2122", "Job Status": "In Transit" } };
+	reopened.history = L.late().history.map((r) => ({ ...r, load: "L-2122" }));
+	const withheld = { row: { ...L.late().row, "Load ID": WITHHELD_ID, "Phone Number": "(555) 201-4477" }, history: L.late().history.map((r) => ({ ...r, load: WITHHELD_ID })) };
+	const cy = {
+		row: loadRow({ id: "L-2121", driver: CY, pickup: "2026-12-07 8:00", dropoff: "2026-12-09 17:00", assigned: "2026-12-04", done: "2026-12-10", truck: "T2" }),
+		history: tripEvents("L-2121", { dispatchAt: "2026-12-04 15:00:00", headingAt: "2026-12-08 13:00:00", arrival: { ...geoEv("L-2121", "2026-12-08 16:06:00", "2026-12-08 16:05:00"), actor: CY },
+			loadingAt: "2026-12-08 17:00:00", receiverAt: "2026-12-10 15:00:00", deliveredAt: "2026-12-10 19:00:00" }).map((r) => ({ ...r, actor: CY })),
+	};
+	return [L.late(), L.early(), reopened, withheld, cy, ...Object.values(OUT_OF_SCOPE).map((make) => make())];
+};
+const displayWorld = (env) => {
+	const w = world(env, displayLoads(), { drivers: [{ name: CY, payDaily: 280 }, BO_DIRECTORY], world: { trucks: [{ unit: "T1", driver: AMY }, { unit: "T2", driver: CY }, { unit: "T3", driver: BO }] } });
+	const user = w.db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', 'Driver', ?)");
+	user.run(AMY_DRIVER.id, AMY_DRIVER.username, AMY);
+	user.run(CY_DRIVER.id, CY_DRIVER.username, CY);
+	return w;
+};
+async function displayCases() {
+	await test("D1 the dashboard, flag on: each completed in-scope load with an arrival carries its day, instant, source and business-clock time; a load not completed on the sheet carries the rate con's date only", async ({ eq }) => {
+		const { rows } = await displayRoutes(displayWorld(ON), ON).dashboard();
+		const f = fieldsOf(rows);
+		eq("L-2101 (GPS) and L-2102 (his tap)", [f["L-2101"], f["L-2102"]], [FIELD_2101, FIELD_2102]);
+		eq("L-2122, set back to In Transit", f["L-2122"], { scheduled: "2026-12-07" });
+		eq("every row carries the field", keyedRows(rows), rows.length);
+	});
+	await test("D2 no Load ID, distance or name in the field; a Dispatcher's field reads as Super Admin's, and a Load ID withheld from him still gets its arrival", async ({ eq, ok }) => {
+		const r = displayRoutes(displayWorld(ON), ON);
+		const admin = await r.dashboard();
+		const disp = await r.dashboard(DISPATCHER);
+		const keys = [...new Set(admin.rows.flatMap((x) => Object.keys(x._pickupArrival || {})))].sort();
+		eq("the keys", keys, ["at", "atDay", "atTime", "day", "scheduled", "source"]);
+		const text = JSON.stringify([...admin.rows, ...disp.rows].map((x) => x._pickupArrival));
+		ok("no Load ID, driver name or distance in any field", !/L-21|5552014477|Amy|Birch|Cy Dale|Bo Wyn|distance|_m"/i.test(text), text);
+		eq("the Dispatcher's fields equal Super Admin's", disp.rows.map((x) => x._pickupArrival), admin.rows.map((x) => x._pickupArrival));
+		eq("the withheld row: its Load ID served blank, its arrival there", disp.rows.filter((x) => x["Load ID"] === "").map((x) => x._pickupArrival), [FIELD_2101]);
+	});
+	await test("D3 a driver sees the field on his own loads only: Amy's page has hers and nothing of Cy's; Amy asking for Cy's page gets 403", async ({ eq, ok }) => {
+		const r = displayRoutes(displayWorld(ON), ON);
+		const mine = await r.driverPage(AMY_DRIVER, AMY);
+		eq("her page: 200", mine.status, 200);
+		const f = fieldsOf(mine.body.loads || []);
+		eq("her loads, each with the field", Object.keys(f).sort(), ["5552014477", "L-2101", "L-2102", "L-2122", "L-2124", "L-2125"]);
+		eq("L-2101, L-2102, and the load whose ID holds the broker phone (her own ID, put back as stored)", [f["L-2101"], f["L-2102"], f[WITHHELD_ID]], [FIELD_2101, FIELD_2102, FIELD_2101]);
+		ok("nothing of Cy's load or arrival in her answer", !/L-2121|2026-12-08T16:05/.test(JSON.stringify(mine.body)), "");
+		const his = await r.driverPage(AMY_DRIVER, CY);
+		eq("Cy's page as Amy: 403, no loads", [his.status, JSON.stringify(his.body).includes("_pickupArrival")], [403, false]);
+		const asCy = await r.driverPage(CY_DRIVER, CY);
+		eq("Cy's own page has his arrival (so the 403 hides a real one)", fieldsOf(asCy.body.loads || [])["L-2121"], { scheduled: "2026-12-07", day: "2026-12-08", at: "2026-12-08T16:05:00.000Z", source: "gps", atDay: "2026-12-08", atTime: "11:05 AM EST" });
+	});
+	await test("D4 flag off, or on without a FROM date: no row of either route carries the key", async ({ eq }) => {
+		for (const [label, env] of [["off", OFF], ["on, FROM not a date", { ...ON, ARRIVAL_PICKUP_DATE_FROM: "2026-12" }]]) {
+			const r = displayRoutes(displayWorld(env), env);
+			const dash = await r.dashboard();
+			const page = await r.driverPage(AMY_DRIVER, AMY);
+			eq(`${label}: [dashboard rows keyed, driver rows keyed]`, [keyedRows(dash.rows), keyedRows(page.body.loads || [])], [0, 0]);
+		}
+	});
+	await test("D5 the trip work-day rule on for December: its trip days pay, so L-2101 shows the rate con's date only", async ({ eq }) => {
+		const env = { ...ON, TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-11" };
+		const { rows } = await displayRoutes(displayWorld(env), env).dashboard();
+		eq("L-2101", fieldsOf(rows)["L-2101"], { scheduled: "2026-12-07" });
+	});
+	const client = await import(pathToFileURL(path.join(ROOT, "client", "src", "lib", "pickupArrival.js")).href).catch(() => ({ pickupArrivalLine: () => null }));
+	const RATE_CON_ONLY = { scheduled: "2026-12-07" };
+	// The out-of-scope loads' fields on both routes, as server.js reads them (`src`).
+	const outOfScope = async (src = M.SRC) => {
+		const r = displayRoutes(displayWorld(ON), ON, src);
+		const dash = fieldsOf((await r.dashboard()).rows);
+		const amy = fieldsOf((await r.driverPage(AMY_DRIVER, AMY)).body.loads || []);
+		const bo = fieldsOf((await r.driverPage(M.ADMIN.session.user, BO)).body.loads || []);
+		return { dash: Object.keys(OUT_OF_SCOPE).map((id) => dash[id]), page: [bo["L-2123"], amy["L-2124"], amy["L-2125"]] };
+	};
+	const paysStart = (fields) => fields.some((f) => !!(f && f.day));
+	await test("D6 out of scope though each has a qualifying arrival and a Delivered row (a percentage driver's load, one assigned the day before FROM and done after it, one with no Assigned Date): the rate con's date only, on both routes and on screen, and the weekly invoice pays each as with the flag off", async ({ eq }) => {
+		const got = await outOfScope();
+		eq("the dashboard: [L-2123, L-2124, L-2125]", got.dash, [RATE_CON_ONLY, RATE_CON_ONLY, RATE_CON_ONLY]);
+		eq("the driver pages: [Bo's L-2123 (as Super Admin), Amy's L-2124, L-2125]", got.page, [RATE_CON_ONLY, RATE_CON_ONLY, RATE_CON_ONLY]);
+		eq("the line each shows: no \"Pay starts\"", [...got.dash, ...got.page].map((f) => client.pickupArrivalLine({ _pickupArrival: f })), Array(6).fill("Pickup (rate con): Mon Dec 7"));
+		for (const [id, opts, driver] of [["L-2123", { drivers: [BO_DIRECTORY], world: { trucks: [{ unit: "T1", driver: AMY }, { unit: "T3", driver: BO }] } }, BO], ["L-2124", {}, AMY], ["L-2125", {}, AMY]]) {
+			const on = await paths(world(ON, [OUT_OF_SCOPE[id]()], opts), { driver });
+			const off = await paths(world(OFF, [OUT_OF_SCOPE[id]()], opts), { driver });
+			eq(`${id}: the weekly invoice's days and total, flag on = off`, [on.invoice, on.invoiceTotal], [off.invoice, off.invoiceTotal]);
+		}
+	});
+
+	// Mutants of the two routes' wiring, each a copy of server.js with one change.
+	const mutated = (from, to) => {
+		if (M.SRC.split(from).length !== 2) throw new Error(`the mutant's anchor is not in server.js exactly once: ${JSON.stringify(from.slice(0, 70))}`);
+		return M.SRC.replace(from, to);
+	};
+	const DASH = "\t\tannotatePickupArrival(jobTracking.headers, [...unassignedJobs, ...activeJobs, ...completedJobs]);\n";
+	const SEARCH = "\t\t// Search references for the load search (lib/load-search-refs.js), on the\n";
+	await test("MD1 the dashboard's field built after sanitizing (D2): the Dispatcher's withheld row loses its arrival", async ({ ok }) => {
+		const src = mutated(SEARCH, `\t\tannotatePickupArrival(jobTracking.headers, [...respUnassigned, ...respActive, ...respCompleted]);\n${SEARCH}`).replace(DASH, "");
+		const disp = await displayRoutes(displayWorld(ON), ON, src).dashboard(DISPATCHER);
+		ok("caught: no row with a blank Load ID shows an arrival", !disp.rows.some((x) => x["Load ID"] === "" && x._pickupArrival && x._pickupArrival.day), "");
+	});
+	await test("MD2 the driver's page without the field (D3): her L-2101 has none", async ({ ok }) => {
+		const page = await displayRoutes(displayWorld(ON), ON, mutated("\t\tannotatePickupArrival(jobTracking.headers, loads);\n", "")).driverPage(AMY_DRIVER, AMY);
+		ok("caught", !fieldsOf(page.body.loads || [])["L-2101"], "");
+	});
+	await test("MD3 every row read as completed (D1): L-2122, set back to In Transit, shows an arrival", async ({ ok }) => {
+		const src = mutated("completed: (row) => /delivered|completed|pod received/i.test(cell(row, cols.statusCol) || \"\"),", "completed: () => true,");
+		const { rows } = await displayRoutes(displayWorld(ON), ON, src).dashboard();
+		ok("caught", !!(fieldsOf(rows)["L-2122"] || {}).day, "");
+	});
+	// The review's four surviving reader mutants (review-1 M1: Y3, Y4, Y5, Y7), each now
+	// caught by D6: an out-of-scope load gains "Pay starts" on a route.
+	for (const [name, from, to] of [
+		["MD4 (Y3) no driver read: the percentage check finds no one", "driverKey: (row) => normalizeDriverName(cell(row, cols.driverCol)),", "driverKey: () => \"\","],
+		["MD5 (Y4) the Assigned Date read from the invoice's completion column", "const assignedCol = jobTrackingMonthCols(headers).dateCol;", "const assignedCol = invoiceCompletionCol(headers);"],
+		["MD6 (Y5) no pay structures", "payTypes: getDriverPayStructures,", "payTypes: () => ({}),"],
+		["MD7 (Y7) every load read as assigned in 2099 (FROM ignored)", "assigned: (row) => (cell(row, assignedCol) ? moneySheetDate(cell(row, assignedCol)) : null),", "assigned: () => \"2099-01-01\","],
+	]) {
+		await test(`${name} (D6)`, async ({ ok }) => {
+			const got = await outOfScope(mutated(from, to));
+			ok("caught: an out-of-scope load shows \"Pay starts\"", paysStart(got.dash) || paysStart(got.page), JSON.stringify(got));
+		});
+	}
+}
+
 // ── P16/P17 the three scripts ─────────────────────────────────────────────────
 async function scriptCases(dropColumn) {
 	let CW = null;
@@ -855,6 +1057,7 @@ async function zones() {
 	await cases();
 	if (!CHILD) {
 		await moreCases();
+		await displayCases();
 		await mutants();
 		await zones();
 	}

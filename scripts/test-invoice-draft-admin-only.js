@@ -382,7 +382,7 @@ function autoGateViolations(jobSrc) {
 	const end = SRC.indexOf("// </auto-invoice-wiring>");
 	const block = start >= 0 && end > start ? SRC.slice(start, end) : "";
 	ok("server.js mounts them from its <auto-invoice-wiring> block, with its own requireRole and refuseCrossSite",
-		block.split("autoInvoice.mount(").length === 2 && /autoInvoice\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(block) &&
+		block.split("autoInvoice.mount(").length === 2 && /autoInvoice\.mount\(app, \{\n\t\trequireRole,\n\t\trefuseCrossSite,\n\t\tstopLimiter: rateLimit\(/.test(block) &&
 		!/\b(requireRole|refuseCrossSite)\s*=|function\s+(requireRole|refuseCrossSite)\b/.test(block) &&
 		/^const refuseCrossSite = /m.test(SRC) && /^function requireRole\(/m.test(SRC));
 	ok("...and nowhere else", SRC.split("autoInvoice.mount(").length === 2 && !/["']\/api\/auto-invoice\//.test(SRC));
@@ -430,16 +430,18 @@ function autoClientViolations(src) {
 	if (!/const autoChip = \(job\) => \(auth\.isSuperAdmin && /.test(script)) v.push("autoChip() does not refuse a non-Super-Admin first");
 	if (!/const autoAttentionCount = computed\(\(\) => \(auth\.isSuperAdmin \? /.test(script)) v.push("the Needs attention count is not Super Admin only");
 	if (!/const m = auth\.isSuperAdmin && dashboard\.data/.test(script)) v.push("the automatic drafts' mode is not read for a Super Admin only");
-	for (const fn of ["autoInvoiceAction", "openAutoSettings", "saveAutoSettings"]) {
+	// stopAutoSend(): "Stop automatic sending" in the settings dialog.
+	const GATED = ["autoInvoiceAction", "openAutoSettings", "saveAutoSettings", "stopAutoSend"];
+	for (const fn of GATED) {
 		if (!new RegExp(`async function ${fn}\\([^)]*\\) \\{\\n\\s*if \\(!auth\\.isSuperAdmin\\b`).test(script)) v.push(`${fn}() does not refuse a non-Super-Admin first`);
 	}
 	const calls = [];
 	for (let i = script.indexOf("/api/auto-invoice/"); i >= 0; i = script.indexOf("/api/auto-invoice/", i + 1)) calls.push(i);
-	if (calls.length !== 3) v.push(`expected three /api/auto-invoice/ call sites, found ${calls.length}`);
+	if (calls.length !== 4) v.push(`expected four /api/auto-invoice/ call sites, found ${calls.length}`);
 	for (const i of calls) {
 		const fnStart = script.lastIndexOf("\nasync function ", i);
 		const name = (/^\nasync function (\w+)/.exec(script.slice(fnStart)) || [])[1];
-		if (!["autoInvoiceAction", "openAutoSettings", "saveAutoSettings"].includes(name)) v.push(`an /api/auto-invoice/ call at offset ${i} is outside the gated functions`);
+		if (!GATED.includes(name)) v.push(`an /api/auto-invoice/ call at offset ${i} is outside the gated functions`);
 	}
 	return v;
 }

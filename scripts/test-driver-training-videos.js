@@ -3,7 +3,7 @@
 // driver app shows them, decided on the server from the onboarding status alone.
 //   §1 trainingVideoPlacement() (lib/driver-training-videos.js): no record → "kit";
 //      documents_pending → null; documents_signed → "onboarding"; fully_onboarded →
-//      "kit"; any other value (case, blanks, inherited names) → null
+//      "kit"; any other value (case, blanks, inherited names, non-strings) → null
 //   §2 GET /api/driver/:driverName, the shipped route lifted out of server.js
 //      (scripts/lib/availability-world.js), as the driver himself: with the flag
 //      unset, "", false, 0, off, no or another word, no trainingVideos key at any
@@ -75,6 +75,9 @@ function drugLeaks(r) {
 		eq("§1.5 anything else: nothing",
 			["", " documents_signed", "DOCUMENTS_SIGNED", "Fully_Onboarded", "__proto__", "constructor", "toString", "hasOwnProperty", "approved", 0, 1, true, false, {}, [], NaN].map(p),
 			[null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null]);
+		eq("§1.5b a non-string whose text is a status: nothing",
+			[["documents_signed"], ["fully_onboarded"], new String("documents_signed"), { toString: () => "fully_onboarded" }].map(p),
+			[null, null, null, null]);
 		eq("§1.6 the map holds exactly the two placements and cannot be changed", [Object.keys(lib.PLACEMENT_BY_STATUS).sort(), Object.isFrozen(lib.PLACEMENT_BY_STATUS)], [["documents_signed", "fully_onboarded"], true]);
 	}
 
