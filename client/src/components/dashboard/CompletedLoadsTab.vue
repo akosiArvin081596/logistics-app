@@ -376,7 +376,7 @@ import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -999,14 +999,16 @@ const autoActionResult = ref(null)
 // the row's own status back.
 async function autoInvoiceAction(kind) {
   if (!auth.isSuperAdmin || !loadRefValue.value || autoBusy.value) return
+  const status = selectedJob.value && selectedJob.value._autoInvoice
+  const ask = kind === 'retry' ? tryAgainConfirmText(status) : ''
+  if (ask && !window.confirm(ask)) return
   autoBusy.value = true; autoActionResult.value = null
   try {
     await api.post(`/api/auto-invoice/loads/${encodeURIComponent(loadRefValue.value)}/${kind === 'checked' ? 'checked' : 'retry'}`, {})
-    const status = selectedJob.value && selectedJob.value._autoInvoice
     if (selectedJob.value) {
       selectedJob.value = { ...selectedJob.value, _autoInvoice: kind === 'checked' ? { ...status, changed: [] } : { state: 'queued', code: '', invoiceId: '', changed: [] } }
     }
-    autoActionResult.value = { tone: 'ok', msg: kind === 'checked' ? 'Marked checked.' : 'It will be tried again within a few minutes.' }
+    autoActionResult.value = { tone: 'ok', msg: kind === 'checked' ? 'Marked checked.' : tryAgainDoneText(status) }
     dashboard.refresh().catch(() => {})
   } catch (e) {
     autoActionResult.value = { tone: 'error', msg: (e && e.message) || 'That did not go through. Try again.' }

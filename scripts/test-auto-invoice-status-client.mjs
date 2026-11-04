@@ -5,8 +5,8 @@
 //   §1 PARITY: every reason code lib/auto-invoice-rules.js can send has words, and
 //      nothing else does; every changed field the fingerprint can name has words;
 //      the states the server's annotation sends are the ones worded
-//   §2 the chips: "Draft ready in Gmail", "Waiting for POD", "Drafting soon",
-//      "Needs attention: <reason>", with their tones; nothing for a baseline,
+//   §2 the chips: "Draft ready in Gmail", "Waiting for POD", "Waiting: about to be
+//      made", "Needs attention: <reason>", with their tones; nothing for a baseline,
 //      skipped or malformed status
 //   §3 the words are plain sentences: no markup, no address, each ends with a stop
 //   §4 the "Needs attention" toggle, Try again and Mark checked
@@ -22,7 +22,11 @@
 //   §8 a draft that may be in Gmail: the words send a person to Drafts and Sent
 //      Mail, where the job itself looks
 //   §9 invoices the job sent: "Sent to the broker", the stop words, the dialog
-//   §10 a send waiting for its PODs to settle: "Waiting: settling before sending"
+//   §10 a send waiting for its PODs to settle: "Waiting: about to send"
+//   §11 each reason says what happened and what to do next, in words true whether
+//      the sweep or the driver's Delivered starts the invoice: a load waiting for a
+//      person never reads "tried again on its own"
+//   §12 the driver's line above Delivered: the driver app only, never the tracker
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -71,17 +75,18 @@ eq(S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '10202026-1', chan
 eq(S.autoInvoiceChip({ state: 'waiting', code: 'WAITING_POD' }).label, 'Waiting for POD', '§2 waiting for the POD')
 eq(S.autoInvoiceChip({ state: 'waiting', code: 'RATECON_MISSING' }).label, 'Waiting for the rate con', '§2 waiting for the rate con')
 eq(S.autoInvoiceChip({ state: 'waiting', code: 'LOAD_DROPPED' }).label, 'Waiting: cancelled or deleted', '§2 waiting for another reason')
-eq(S.autoInvoiceChip({ state: 'queued', code: '' }), { label: 'Drafting soon', tone: 'muted', reason: 'The draft will be made shortly.' }, '§2 queued')
-eq(S.autoInvoiceChip({ state: 'queued', code: 'GEMINI_DOWN' }).reason, S.AUTO_INVOICE_REASONS.GEMINI_DOWN.text, '§2 queued after a temporary failure says why')
-eq(S.autoInvoiceChip({ state: 'working' }).label, 'Drafting now', '§2 working')
+eq(S.autoInvoiceChip({ state: 'queued', code: '' }), { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' }, '§2 FAILS ON THE OLD CODE: queued')
+eq(S.autoInvoiceChip({ state: 'queued', code: 'GEMINI_DOWN' }), { label: 'Waiting: rate-con reader down', tone: 'muted', reason: S.AUTO_INVOICE_REASONS.GEMINI_DOWN.text }, '§2 FAILS ON THE OLD CODE: queued after a temporary failure says why, on the chip too')
+eq(S.autoInvoiceChip({ state: 'queued', code: 'SOMETHING_NEW' }), { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' }, '§2 FAILS ON THE OLD CODE: queued with an unknown code still reads as about to be made')
+eq(S.autoInvoiceChip({ state: 'working' }), { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' }, '§2 FAILS ON THE OLD CODE: working')
 eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'RECIPIENT_DOMAIN_MISMATCH' }),
   { label: 'Needs attention: billing email on another domain', tone: 'bad', reason: S.AUTO_INVOICE_REASONS.RECIPIENT_DOMAIN_MISMATCH.text }, '§2 needs attention, with its reason')
 eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'SOMETHING_NEW' }), { label: 'Needs attention', tone: 'bad', reason: 'Draft it by hand.' }, '§2 an unknown code still reads as needs attention')
 eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'BROKER_DOMAIN_UNCONFIRMED' }).label, 'Needs attention: broker domain not confirmed', '§2 the recipient anchor: an unconfirmed broker domain')
 eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'BROKER_EMAIL_FREEMAIL' }).label, 'Needs attention: broker email is free mail', '§2 the recipient anchor: a free-mail broker Email')
 eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'RATECON_TOTAL_UNREAD' }),
-  { label: "Needs attention: rate con total couldn't be read", tone: 'bad', reason: "The rate con's total couldn't be read, so it can't be checked against the Payment on Job Tracking. Draft it by hand." },
-  '§2 a rate-con total that wasn\'t read')
+  { label: "Needs attention: rate con total couldn't be read", tone: 'bad', reason: "The rate con's total couldn't be read, so it can't be checked against the Payment on Job Tracking. Try again reads it once more, or draft it by hand." },
+  '§2 FAILS ON THE OLD CODE: a rate-con total that wasn\'t read')
 ok(/Confirm it in the automatic-draft settings/.test(S.AUTO_INVOICE_REASONS.BROKER_DOMAIN_UNCONFIRMED.text), '§2 the unconfirmed reason says where to confirm the domain')
 for (const bad of [null, undefined, 'drafted', {}, { state: 'baseline' }, { state: 'skipped', code: 'DRAFTED_BY_HAND' }, { state: '__proto__' }]) {
   eq(S.autoInvoiceChip(bad), null, `§2 no chip for ${JSON.stringify(bad)}`)
@@ -91,10 +96,10 @@ for (const state of S.AUTO_INVOICE_STATES) ok(S.autoInvoiceChip({ state, code: '
 
 // ------------------------------------------------------------------ §3
 section('§3  plain sentences')
-for (const [code, { short, text }] of Object.entries(S.AUTO_INVOICE_REASONS)) {
-  ok(short && text && short === short.trim() && text === text.trim(), `§3 ${code}: words present, trimmed`)
-  ok(!/[<>@]/.test(short + text), `§3 ${code}: no markup or address`)
-  ok(/[.]$/.test(text) && !/[.]$/.test(short), `§3 ${code}: the sentence ends with a stop, the chip words don't`)
+for (const [code, { short, text, attentionText = text }] of Object.entries(S.AUTO_INVOICE_REASONS)) {
+  ok(short && text && attentionText && short === short.trim() && text === text.trim() && attentionText === attentionText.trim(), `§3 ${code}: words present, trimmed`)
+  ok(!/[<>@]/.test(short + text + attentionText), `§3 ${code}: no markup or address`)
+  ok(/[.]$/.test(text) && /[.]$/.test(attentionText) && !/[.]$/.test(short), `§3 ${code}: the sentences end with a stop, the chip words don't`)
   ok(short.length <= 32, `§3 ${code}: the chip words fit (${short.length})`)
 }
 
@@ -385,13 +390,130 @@ section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it
 section('§10 a send waiting for its PODs to settle (AUTO_INVOICE_SEND_SETTLE_MINUTES)')
 {
   const settling = S.autoInvoiceChip({ state: 'waiting', code: 'SEND_SETTLING' })
-  eq(settling && [settling.label, settling.tone], ['Waiting: settling before sending', 'muted'],
-    '§10 FAILS ON THE OLD CODE: a load whose invoice waits for its PODs to settle reads "Waiting: settling before sending" (the waiting chip, muted)')
+  eq(settling && [settling.label, settling.tone], ['Waiting: about to send', 'muted'],
+    '§10 FAILS ON THE OLD CODE: a load whose invoice waits for its PODs to settle reads "Waiting: about to send" (the waiting chip, muted)')
   const text = (S.AUTO_INVOICE_REASONS.SEND_SETTLING || {}).text || ''
   ok(/sent automatically/.test(text) && /newest POD/.test(text) && /new POD starts the wait again/.test(text),
     '§10 FAILS ON THE OLD CODE: ...it says the invoice goes on its own after the wait that follows the newest POD, and that a new POD starts the wait again')
   eq([S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'waiting', code: 'SEND_SETTLING' } }), S.canTryAgain({ state: 'waiting', code: 'SEND_SETTLING' })], [false, false],
     '§10 ...not a load for a person: not counted as Needs attention, no Try again')
+}
+
+// ------------------------------------------------------------------ §11
+section('§11 what happened and what to do next, whichever starts the invoice')
+{
+  const R = S.AUTO_INVOICE_REASONS
+  const TEXT = {
+    WAITING_POD: 'Waiting for the POD. Upload it; no invoice is made until then.',
+    NOT_COMPLETED: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. If this line is still here a few minutes later, draft it by hand.",
+    LOAD_DROPPED: 'The load was cancelled or deleted, so no invoice is made. Nothing to do.',
+    SETTINGS_UNREADABLE: 'The automatic invoice settings could not be read, so nothing is made or sent. Save both lists in Automatic drafts.',
+    NO_BROKER_EMAIL: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.',
+    BROKER_EMAIL_FREEMAIL: "The broker Email on Job Tracking is a free-mail address, so it can't vouch for a billing email. Put the broker's company email on Job Tracking, then Try again, or draft it by hand.",
+    MONTH_UNKNOWN: "The load's month can't be told from its dates. Check its dates, then Try again, or draft it by hand.",
+    OFF_GAP: 'The load was delivered while automatic invoices were off, so it may already be invoiced. Check Gmail Sent Mail, then draft it by hand if it still needs one.',
+    TOTAL_MISMATCH: "The rate con's total and the Payment on Job Tracking don't agree, or the Payment isn't one plain amount. Check both; if a re-issued rate con changed it, see its alert. Fix Job Tracking if it's wrong, then Try again, or draft it by hand.",
+    RATECON_TOTAL_UNREAD: "The rate con's total couldn't be read, so it can't be checked against the Payment on Job Tracking. Try again reads it once more, or draft it by hand.",
+    INVOICE_TOTAL_UNKNOWN: 'Neither the rate con nor Job Tracking gave an invoice total. Draft it by hand and type the total.',
+    TRAILER_MISMATCH: "The rate con's trailer differs from Job Tracking. If Job Tracking is wrong, fix it, then Try again, or draft it by hand.",
+    DRAFT_FAILED: 'Making the invoice or saving it to Gmail kept failing. Try again, or draft it by hand.',
+    POD_UNREADABLE: "A POD on file has no readable file. Upload the POD again, delete the one that won't open, then Try again.",
+    POD_PAGE_UNREADABLE: "A POD page couldn't be read. Upload the POD again, delete the one that won't open, then Try again.",
+    IN_GMAIL_UNRECORDED: "The invoice is in Gmail, but LogisX couldn't record it. Try again records it if it can. Check Gmail Drafts and Sent Mail before making another.",
+  }
+  for (const [code, words] of Object.entries(TEXT)) eq(R[code] && R[code].text, words, `§11 FAILS ON THE OLD CODE: ${code}: the sentence`)
+
+  // While a person must act: the job isn't coming back to this load by itself.
+  const ATTENTION = {
+    WAITING_POD: 'No POD was found when the invoice was started. Upload it, then Try again.',
+    RATECON_MISSING: 'No rate con was found for this load. Add the rate con, then Try again, or draft it by hand.',
+    RETRY_LATER: 'Making the invoice failed. Try again, or draft it by hand.',
+    GEMINI_DOWN: "The rate-con reader was unavailable, so no invoice was made. Try again once it's back, or draft it by hand.",
+    RENDERER_BUSY: 'The PDF renderer was busy, so no invoice was made. Try again in a few minutes.',
+    MAILBOX_PAUSED: 'Gmail refused the mailbox login, so no invoice was made. LogisX waits up to 6 hours before it logs in again, so Try again after that. If it lasts, ask the mailbox owner to check it.',
+    HAND_DRAFT_IN_FLIGHT: "Someone was drafting this invoice by hand, so it wasn't sent. If that draft didn't save, Try again.",
+    SETTINGS_UNREADABLE: 'The automatic invoice settings could not be read, so nothing is made or sent. Open Automatic drafts, then save both lists, then Try again.',
+  }
+  for (const [code, words] of Object.entries(ATTENTION)) {
+    const chip = S.autoInvoiceChip({ state: 'needs_attention', code })
+    eq(chip && chip.reason, words, `§11 FAILS ON THE OLD CODE: ${code}: while it needs a person, the chip reads its own sentence`)
+  }
+  eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'CLOSED_MONTH' }).reason, R.CLOSED_MONTH.text, '§11 a code with one sentence reads it in every state')
+
+  // The sentences the sweep's own retries show stay until a person is needed.
+  const SWEEP = {
+    RATECON_MISSING: ['waiting', 'No rate con was found for this load. It is looked for again every 2 hours, three times; after that, draft it by hand.'],
+    RETRY_LATER: ['queued', 'The last try failed. It is tried again on its own.'],
+    GEMINI_DOWN: ['queued', 'The rate-con reader is unavailable. It is tried again in 30 minutes.'],
+    RENDERER_BUSY: ['queued', 'The PDF renderer was busy. It is tried again in a few minutes.'],
+    MAILBOX_PAUSED: ['queued', 'Gmail refused the mailbox login, so automatic drafts are paused. They try again on their own.'],
+    HAND_DRAFT_IN_FLIGHT: ['queued', 'Someone was drafting this invoice by hand, so it was not sent. It is looked at again in a few minutes.'],
+  }
+  for (const [code, [state, words]] of Object.entries(SWEEP)) eq(S.autoInvoiceChip({ state, code }).reason, words, `§11 ${code}, ${state}: the sweep's sentence, for as long as the sweep holds it`)
+
+  // No code, in any state, tells a person the job comes back on its own once it needs them.
+  const COMES_BACK = /on (?:its|their) own|tried again in|looked for again|looked at again/
+  for (const code of rules.REASON_CODES) {
+    ok(!COMES_BACK.test(S.autoInvoiceChip({ state: 'needs_attention', code }).reason), `§11 FAILS ON THE OLD CODE: ${code}: needs attention, and no promise the job comes back by itself`)
+    ok(!/trying again/.test(S.autoInvoiceChip({ state: 'needs_attention', code }).label), `§11 FAILS ON THE OLD CODE: ${code}: the chip doesn't read "Needs attention: trying again"`)
+  }
+  // The states the sweep holds a load in have no Try again button, so their
+  // sentences can't ask for one; the settings dialog shows SETTINGS_UNREADABLE's too.
+  for (const code of ['RETRY_LATER', 'GEMINI_DOWN', 'RENDERER_BUSY', 'MAILBOX_PAUSED', 'SETTINGS_UNREADABLE', 'SEND_UNCONFIRMED', 'HAND_DRAFT_IN_FLIGHT']) {
+    eq(S.canTryAgain({ state: 'queued', code }), false, `§11 ${code}, queued: no Try again button`)
+    ok(!/Try again/.test(R[code].text), `§11 ${code}: its queued sentence doesn't ask for Try again`)
+  }
+  eq(S.autoInvoiceChip({ state: 'waiting', code: 'NOT_COMPLETED' }).label, 'Waiting: not delivered', '§11 NOT_COMPLETED keeps its chip words')
+  eq(R.SETTINGS_UNREADABLE && R.SETTINGS_UNREADABLE.short, 'settings unreadable', '§11 FAILS ON THE OLD CODE: SETTINGS_UNREADABLE names the settings, not one list')
+  ok(!/within a few minutes/.test(R.WAITING_POD.text), '§11 WAITING_POD promises no time: nothing but the sweep could keep one')
+  eq(rules.LOGIN_PAUSE_MAX_MS, 6 * 60 * 60 * 1000, '§11 MAILBOX_PAUSED\'s "up to 6 hours" is the job\'s longest pause')
+}
+
+// ------------------------------------------------------------------ §12
+section('§12 the driver\'s line above Delivered')
+{
+  const STEPPER = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'driver', 'StatusStepper.vue'), 'utf8')
+  const LINE = 'Upload every POD page before you tap Delivered. The invoice is made right after you tap. If anything changes later, tell dispatch or a Super Admin right away.'
+  eq(STEPPER.split(LINE).length - 1, 1, '§12 FAILS ON THE OLD CODE: the line is there once, word for word')
+  const actions = (/<template v-if="!readOnly">[\s\S]*?<div v-if="requiresUpload"/.exec(STEPPER) || [''])[0]
+  ok(actions.includes(LINE), '§12 FAILS ON THE OLD CODE: inside the driver-only block, never on the public tracker, and above the upload hint')
+  const tag = (new RegExp(`<div ([^>]*)>\\s*${LINE.slice(0, 40)}`).exec(STEPPER) || ['', ''])[1]
+  ok(/v-if="nextStep && nextStep\.value === 'Delivered'"/.test(tag), '§12 FAILS ON THE OLD CODE: only while the next step is Delivered')
+  ok(!/v-else/.test(tag), '§12 ...outside the hint chain, so it shows with the upload hint too')
+  // The driver walkthrough's strict locator and the guide capture's querySelector
+  // both find the POD gate by this class, so it stays on one element.
+  eq((STEPPER.match(/class="upload-hint"/g) || []).length, 1, '§12 .upload-hint is on the POD gate alone')
+  ok(/class="delivered-line"/.test(tag) && /\.upload-hint,\s*\.delivered-line \{/.test(STEPPER), '§12 ...the line has its own class, with the same style')
+  ok(/<div v-if="requiresUpload"/.test(STEPPER) && /<div v-else-if="blocked"/.test(STEPPER) && /<div v-else-if="gpsLine"/.test(STEPPER), '§12 the hint chain below it is unchanged')
+}
+
+// ------------------------------------------------------------------ §13
+section('§13 the driver\'s Delivered starts the invoice: what a Super Admin reads')
+{
+  const chip = S.autoInvoiceChip({ state: 'needs_attention', code: 'NOT_BY_DRIVER', invoiceId: '', changed: [], trigger: true, retry: 'none' })
+  eq(chip && [chip.label, chip.tone], ['No automatic invoice', 'warn'], '§13 FAILS ON THE OLD CODE: a completed load nothing will invoice reads "No automatic invoice", amber, never "Needs attention: ..." in red')
+  ok(chip && /only the driver's own Delivered/.test(chip.reason) && /Draft it by hand/.test(chip.reason), '§13 FAILS ON THE OLD CODE: ...it says why and what to do')
+  ok(chip && !/Someone other than the driver/.test(chip.reason), '§13 ...and doesn\'t blame the office: a failed write or a restart can leave a driver\'s own tap here too')
+  eq(S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code: 'NOT_BY_DRIVER' } }), true, '§13 ...the toggle counts it, so it can\'t be forgotten')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'NOT_BY_DRIVER' }), S.canMarkChecked({ state: 'needs_attention', code: 'NOT_BY_DRIVER' })], [false, false], '§13 FAILS ON THE OLD CODE: ...with no Try again: the route has no claim to retry')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP', retry: 'none' }), S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP' })], [false, true], '§13 FAILS ON THE OLD CODE: OFF_GAP: no Try again when the server says so (the driver\'s trigger); the sweep\'s row keeps it')
+
+  const send = { state: 'needs_attention', code: 'RETRY_LATER', trigger: true, retry: 'send' }
+  ok(/looks in the mailbox/.test(S.tryAgainConfirmText(send)) && /sends this invoice/.test(S.tryAgainConfirmText(send)), '§13 FAILS ON THE OLD CODE: the confirm says Try again looks first, then sends')
+  ok(/draft/.test(S.tryAgainConfirmText({ ...send, retry: 'draft' })) && !/sends this invoice/.test(S.tryAgainConfirmText({ ...send, retry: 'draft' })), '§13 FAILS ON THE OLD CODE: ...and makes a draft where it would (a broker not on the list, or sending stopped)')
+  ok(/looks in Gmail/.test(S.tryAgainConfirmText({ ...send, code: 'MAYBE_SENT', retry: 'search' })) && !/sends/.test(S.tryAgainConfirmText({ ...send, code: 'MAYBE_SENT', retry: 'search' })), '§13 FAILS ON THE OLD CODE: ...and never says "sends" on a load it only searches for')
+  eq([S.tryAgainConfirmText({ state: 'needs_attention', code: 'RETRY_LATER' }), S.tryAgainConfirmText(null)], ['', ''], '§13 the sweep\'s Try again only queues the load: nothing to ask')
+  eq([S.tryAgainDoneText(send), S.tryAgainDoneText({ state: 'needs_attention' })], ["It's being made now.", 'It will be tried again within a few minutes.'], '§13 FAILS ON THE OLD CODE: the answer says when, for each')
+
+  const NEW_CODES = ['DRIVER_PENDING', 'NOT_BY_DRIVER', 'CAP_REACHED', 'NO_MAILBOX', 'HANDED_OVER', 'MAILBOX_HIT', 'MAILBOX_UNREAD', 'PAYMENTS_TABLE_HIT', 'PAYMENTS_UNREAD']
+  for (const code of NEW_CODES) ok(rules.REASON_CODES.includes(code) && S.AUTO_INVOICE_REASONS[code], `§13 FAILS ON THE OLD CODE: ${code} is a server code with words`)
+  for (const code of ['MAILBOX_HIT', 'MAILBOX_UNREAD', 'PAYMENTS_TABLE_HIT', 'PAYMENTS_UNREAD']) ok(/nothing was sent/.test(S.AUTO_INVOICE_REASONS[code].text), `§13 ${code} says nothing was sent`)
+
+  const TAB_SRC = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue'), 'utf8')
+  const action = liftFn(TAB_SRC, 'autoInvoiceAction', { async: true })
+  ok(action && /const ask = kind === 'retry' \? tryAgainConfirmText\(status\) : ''/.test(action) && /if \(ask && !window\.confirm\(ask\)\) return/.test(action), '§13 FAILS ON THE OLD CODE: the dialog\'s Try again asks first, before anything is posted')
+  ok(action && action.indexOf('window.confirm(ask)') < action.indexOf('api.post('), '§13 ...a "no" posts nothing')
+  ok(action && /tryAgainDoneText\(status\)/.test(action) && !/within a few minutes/.test(action), '§13 FAILS ON THE OLD CODE: its answer comes from the status, not from a fixed sentence')
 }
 
 console.log(`\n${'='.repeat(64)}`)

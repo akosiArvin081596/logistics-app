@@ -50760,16 +50760,25 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			}
 		}
 
+		// A driver's own Delivered starts the load's invoice (lib/auto-invoice-job.js).
+		const invoiceStart = autoInvoiceDriverStart(req, {
+			loadId,
+			oldStatus,
+			newStatus,
+			readBack: () => readJobTrackingSnapshot(sheets, rowIndex).then((reread) => (reread ? reread.row[statusIdx] || "" : null)),
+		});
+
 		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: {
 				valueInputOption: "USER_ENTERED",
 				data: updateData,
 			},
-		});
+		}).catch(invoiceStart.writeFailed);
 
 		// Notify dispatch in real-time
 		jtCacheInvalidate();
+		invoiceStart.written();
 		emitLoadEventToDispatch("status-updated", { loadId, driverName, newStatus });
 		insertDispatchNotification.run(
 			'status-updated',
@@ -55903,6 +55912,9 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     the broker by SMTP instead of drafted, unless sending is stopped (the Stop route,
 //     or an automatic stop; scripts/auto-invoice-send-resume.js resumes). Nothing
 //     listed sends nothing (lib/auto-invoice-send.js).
+//   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
+//     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
+//     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -55910,6 +55922,7 @@ const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
 const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
 const autoInvoiceImap = require("./lib/imap-draft");
 const autoInvoiceSend = require("./lib/auto-invoice-send");
+const autoInvoiceLook = require("./lib/invoice-mailbox-search");
 const autoInvoice = require("./lib/auto-invoice-job").create({
 	db,
 	env: process.env,
@@ -55940,8 +55953,32 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
 	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
 	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
+	invalidateJobTracking: () => jtCacheInvalidate(),
+	// Try again's look: read-only, and only the job's own run calls it.
+	lookInMailbox: autoInvoiceLook.searchMailboxForLoad,
+	readPaymentsTable: async () => {
+		const sheets = await getSheets();
+		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
+	},
 	log: console,
 });
+// The status route's and the document routes' one call each into the job: nothing here
+// may fail those routes (the job logs its own failures).
+const AUTO_INVOICE_NO_START = Object.freeze({ written() {}, writeFailed(e) { throw e; } });
+function autoInvoiceDriverStart(req, args) {
+	try {
+		return autoInvoice.driverDelivered({ ...args, role: req.session && req.session.user && req.session.user.role });
+	} catch {
+		return AUTO_INVOICE_NO_START;
+	}
+}
+function autoInvoicePodChanged(loadId) {
+	try {
+		autoInvoice.podChanged(loadId);
+	} catch {
+		// the next Super Admin read checks the load
+	}
+}
 if (autoInvoice.mode !== "off") {
 	autoInvoice.mount(app, {
 		requireRole,
@@ -55951,15 +55988,20 @@ if (autoInvoice.mode !== "off") {
 }
 if (autoInvoice.sending) console.log(`[auto-invoice] sending on for ${autoInvoiceSend.readSettings(process.env).domains.length} domain(s)`);
 if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
-	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
-	let autoInvoiceTicking = false;
-	setInterval(() => {
-		if (autoInvoiceTicking) return;
-		autoInvoiceTicking = true;
-		autoInvoice.tick()
-			.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
-			.finally(() => { autoInvoiceTicking = false; });
-	}, AUTO_INVOICE_TICK_MS);
+	if (autoInvoice.triggerMode) {
+		// Before the app listens; server.listen's callback runs the rest (finishStartUp()).
+		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on, no timer");
+	} else {
+		// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
+		let autoInvoiceTicking = false;
+		setInterval(() => {
+			if (autoInvoiceTicking) return;
+			autoInvoiceTicking = true;
+			autoInvoice.tick()
+				.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
+				.finally(() => { autoInvoiceTicking = false; });
+		}, AUTO_INVOICE_TICK_MS);
+	}
 }
 // </auto-invoice-wiring>
 
@@ -56315,6 +56357,7 @@ app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) =>
 		);
 		notifyChange("dashboard"); // _podCount on the load card just changed
 		res.json({ success: true, id, loadId, type: doc.type || "", fileName: doc.file_name || "" });
+		if (isPod) autoInvoicePodChanged(loadId);
 	} catch (err) {
 		console.error("Document soft-delete failed:", err.message);
 		res.status(500).json({ error: "Delete failed. Please try again." });
@@ -59781,6 +59824,7 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 		if (req.session.user.role === "Dispatcher" && shownLoadId(req, loadId) !== loadId) driveUrl = undefined;
 		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
+		if (docType === "POD") autoInvoicePodChanged(loadId);
 
 		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
 		// get+update adds 2–3s+ and used to block the response long enough that
@@ -62939,6 +62983,25 @@ async function syncLoadRateconMiles() {
 if (startsJob("load rate-con miles sync")) {
 	setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
 	setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
+}
+
+// Daily ELD activity (lib/eld-activity-daily.js), a kill switch, so ="true" is a no-op:
+// it moves no money and calls no provider. Off, it creates no table and starts no job.
+// Stored only, with the miles rollups' resolvers and purge boundary, staggered after them.
+const ELD_ACTIVITY_DAILY_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.ELD_ACTIVITY_DAILY_ENABLED ?? "").trim());
+const eldActivityRollup = ELD_ACTIVITY_DAILY_ENABLED
+	? require("./lib/eld-activity-daily").createEldActivityRollup({
+		db,
+		deviceResolver: () => buildEldDeviceResolver(),
+		driverResolver: (truckIds) => buildDriverAtResolver(truckIds),
+		weekStartOf: (ms) => getWeekRange(ms).weekStart,
+		driverIdFor: (name) => (findDirectoryRowForDriver(name) || { id: 0 }).id,
+		boundaryMs: ELD_STATE_MILES_BOUNDARY_MS,
+	})
+	: null;
+if (eldActivityRollup && startsJob("ELD activity daily rollup")) {
+	setTimeout(() => { eldActivityRollup.run(); }, 12 * 60 * 1000);
+	setInterval(() => { eldActivityRollup.run(); }, 6 * 60 * 60 * 1000);
 }
 
 const haulLimiter = rateLimit({
@@ -76420,6 +76483,7 @@ const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 if (!IMPORT_ONLY) server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
 	if (REPLICA) REPLICA.listening(server.address());
+	autoInvoice.finishStartUp();
 	// Tripwire for the umask set at the top of this file — the create-time half
 	// of the uploads/app.db permission fix. Re-applying returns the PREVIOUS
 	// mask, so this both re-asserts and reads back the effective value without
