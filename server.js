@@ -44745,8 +44745,8 @@ const DISPATCH_COMPLETED_RE = /^(delivered|completed|pod received)$/i;
 //
 // ⚠️ IT IS NOT THE "DOES THIS ROW CONTRIBUTE TODAY?" PREDICATE statusOverrideBlocker()
 // warns against, and the difference is load-bearing. That predicate asks only
-// about the BEFORE state, so it answers "no" for the 25 Cancelled rows sitting
-// in locked months ($29,166.25) and waves through the flip to Delivered that
+// about the BEFORE state, so it answers "no" for Cancelled rows sitting
+// in locked months and waves through the flip to Delivered that
 // injects them. This asks about BOTH sides — `completed(before) || completed(after)`
 // — so the injection is material by the AFTER state and the erasure by the
 // BEFORE state, and both refuse. Reviving a cancelled load is allowed (it moves
@@ -45978,9 +45978,8 @@ function sendPeriodRefusal(req, res, kind, periods, extra, audit) {
 // (the drift figure printed beside the frozen one) and page 1 of the statement
 // PDF. Reopening a period also re-links an `owed` row to live earnings, so a
 // month reopened after such a delete settles at a different number with nothing
-// recording why. Measured on production 2026-08-08: 381 of 391 live loads sit in
-// a locked month, $313,922.93 of completed revenue, and the single largest
-// (load 553198052, $4,800, 2026-05) sits in a month already marked PAID.
+// recording why. Most live loads sit in a locked month, some of them in months
+// already marked PAID.
 //
 // Ungated on PERIOD_FINALIZE_ENABLED, like every other lock guard: with the flag
 // off period_locks is empty, isLocked() is false for everything, and this costs
@@ -50494,18 +50493,15 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 // Two things make it non-obvious that this route needs it:
 //
 //   • BEFORE covers the RESURRECTION, and it does so only because
-//     loadRowPeriods() is deliberately status-blind. 26 rows sit at
-//     "Cancelled"/"Canceled" and are dropped from every aggregate by
+//     loadRowPeriods() is deliberately status-blind. Rows at
+//     "Cancelled"/"Canceled" are dropped from every aggregate by
 //     excludeDroppedLoads(), so a guard phrased as "does this row contribute to a
 //     locked month TODAY?" answers *no* for all of them and waves the write
-//     through. 25 of those 26 are inside a locked month and carry $29,166.25
-//     between them (the 26th, load 512441414, sits in an unlocked 2025-04) — so
-//     flipping them to "Delivered" INJECTS that money into closed months,
-//     including load 554481641, $4,100, assigned 2026-06, a month whose payout is
-//     already `paid`. Asking loadRowPeriods() instead — which reads dates and
-//     never looks at the status — gets that right for free, and is why no
-//     status-aware predicate belongs here. (Counts measured 2026-08-09; recount
-//     the CANCELLED rows and you get 26, not 25. The gap is the unlocked one.)
+//     through. Most of them sit inside locked months, so flipping them to
+//     "Delivered" INJECTS their money into closed months, including months whose
+//     payout is already `paid`. Asking loadRowPeriods() instead — which reads
+//     dates and never looks at the status — gets that right for free, and is why
+//     no status-aware predicate belongs here.
 //   • AFTER covers the DATES THIS ROUTE ITSELF WRITES. It stamps Status Update
 //     Date and sets or clears Completion Date, and jobTrackingMonthCols().dateCol
 //     matches `status.*update.*date|completion.*date|assigned.*date` on the FIRST
@@ -50582,10 +50578,9 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 // ⚠️ PERIOD-GUARDED, same three fail-closed rungs as DELETE /api/loads/:loadId.
 // This was the last route that could rewrite a settled month: it writes Job
 // Status — the column excludeDroppedLoads() and every `completedStatuses` test
-// branch on — with no period check of any kind. Measured on production
-// 2026-08-09: 407 of 421 rows sit in locked periods, $313,922.93 of completed-load
-// revenue erasable from closed months, plus the $29,166.25 of resurrection
-// described on statusOverrideBlocker() above.
+// branch on — with no period check of any kind. Most rows sit in locked
+// periods, so without it completed-load revenue was erasable from closed months,
+// plus the resurrection described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		// A Dispatcher's key reads as the stored ID; every reply names it as shown
@@ -66694,7 +66689,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const driverMonthlyDays = Object.create(null);    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		// Per-driver per-month per-day → contributing load IDs. Surfaces in the
 		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
-		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
+		// covered by two loads at once (one calendar day, two loads).
 		const driverMonthlyDayLoads = Object.create(null); // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
 		// Preserve original sheet casing for display ("Hollis Renner" vs the
 		// lowercased "hollis renner" key used internally).
