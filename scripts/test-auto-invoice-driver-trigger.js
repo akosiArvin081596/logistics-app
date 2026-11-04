@@ -1308,12 +1308,18 @@ async function main() {
 		eq((await tryAgain(job, "LD-TEST-1001")).status, 200, "§11 a person presses Try again");
 		await until(() => w.calls.look.length === 1 && w.claim("LD-TEST-1001").state === "working", "§11 attempt B runs");
 		const tokenB = w.claim("LD-TEST-1001").lease_owner;
+		// Any SMTP call is held open, so an attempt A that reached one is still in it when B's build ends.
+		const inSmtpCall = gate();
+		w.smtpHook = () => inSmtpCall.p;
 		stuck.open();
-		await turn();
-		await turn();
-		await turn();
-		eq(w.claim("LD-TEST-1001").lease_owner, tokenB, "§11 FAILS ON THE OLD DESIGN: attempt A wakes: every write it tries fails, attempt B still holds the claim");
+		for (let i = 0; i < 20; i++) await turn();
+		eq(w.claim("LD-TEST-1001").stage === "appending", false, "§11 FAILS ON THE OLD DESIGN: attempt A wakes: every write it tries fails, nothing commits a send");
+		eq(w.claim("LD-TEST-1001").lease_owner, tokenB, "§11 FAILS ON THE OLD DESIGN: ...attempt B still holds the claim");
 		secondBuild.open();
+		await until(() => w.smtp.some((m) => m.subject === "Example Broker Order #LD-TEST-1001"), "§11 attempt B reaches its send");
+		for (let i = 0; i < 20; i++) await turn();
+		inSmtpCall.open();
+		w.smtpHook = null;
 		await drained(w, "§11 attempt B");
 		const sends = w.smtp.filter((m) => m.subject === "Example Broker Order #LD-TEST-1001").length;
 		eq([sends, w.state("LD-TEST-1001"), w.draftRows("LD-TEST-1001").length], [1, ["drafted", ""], 1], "§11 FAILS ON THE OLD DESIGN (R-M4's case): an abandoned attempt plus Try again: ONE SMTP call, one row");
