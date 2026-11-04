@@ -55,6 +55,19 @@ eq(sorted(C.CHR_VERIFY_WORDS), [...S.VERIFY_VALUES].sort(), '§1 every verify va
 eq(sorted(C.CHR_EVENT_WORDS), [...E.MILESTONE_EVENTS, 'location'].sort(), '§1 every event (the milestones and location)')
 eq(sorted(C.CHR_MODE_LABELS), [...S.MODES].sort(), '§1 every mode')
 eq(C.CHR_LIVE_REASONS, { ...R.LIVE_REFUSED }, '§1 the Live reasons are the server\'s own sentences')
+eq(C.CHR_PILOT_REASONS, { ...R.PILOT_REFUSED }, '§1 the pilot\'s reasons are the server\'s own sentences')
+const Tr = require(path.join(ROOT, 'lib', 'chr-transport.js'))
+eq(sorted(C.CHR_RESULT_SENTENCES), [...Tr.RESULT_CODES].sort(), '§1 every result code the transport can give has its fixed sentence, and nothing else')
+eq(sorted(C.CHR_PAUSE_WORDS), [...S.PAUSE_REASONS].sort(), '§1 every pause reason')
+eq([C.lastPositionText('2026-11-02T15:30:00Z', (v) => `<${v}>`), C.lastPositionText('')], ['Last position sent or recorded: <2026-11-02T15:30:00Z>', 'No fresh RouteMate position'],
+  '§1 a load\'s last position line (PR 4-shell)')
+eq([C.kindChip({ enabled: true, locationEnabled: true, location: 'dry_run' }, 'location').label, C.kindChip({ enabled: true, locationEnabled: false, location: 'dry_run' }, 'location').label],
+  ['Dry run', 'Off: server setting'], '§1 the Location chip: its mode, or "Off: server setting" while the server says no')
+eq([C.kindChip({ enabled: true, milestones: 'pilot' }, 'milestones').label, C.kindChip({ enabled: true, milestones: 'live', paused: { reason: 'AUTH_FAILED' } }, 'milestones').label,
+  C.kindChip({ enabled: true, milestones: 'pilot', paused: { reason: 'CHR_UNAVAILABLE' } }, 'milestones').label, C.kindChip({ enabled: true, milestones: 'dry_run', paused: { reason: 'AUTH_FAILED' } }, 'milestones').label],
+['Pilot: one load Live', 'Paused: credentials', 'Paused: CHR unavailable', 'Dry run'], '§1 the chips for the pilot and the two pauses (a pause shows only where something could be sent)')
+eq([{ mode: 'live', status: 'failed' }, { mode: 'live', status: 'gave_up' }, { mode: 'live', status: 'outcome_unknown' }, { mode: 'dry_run', status: 'failed' }, { mode: 'live', status: 'sent' }].map(C.isRetryable),
+  [true, true, true, false, false], '§1 Retry is offered for failed, given-up and unknown live updates only (the server\'s rule)')
 
 // ------------------------------------------------------------------ §2
 section('§2  who sees the badge')
@@ -113,7 +126,7 @@ eq([C.pageLinkForLoad('#123456789'), C.loadSummaryUrl('#123456789')], ['/admin/i
 
 // ------------------------------------------------------------------ §5
 section('§5  plain sentences')
-const sentences = [C.CHR_HOLD_WORDS, C.CHR_SKIP_WORDS, C.CHR_RESULT_SENTENCES, C.CHR_LIVE_REASONS].flatMap((o) => Object.values(o))
+const sentences = [C.CHR_HOLD_WORDS, C.CHR_SKIP_WORDS, C.CHR_RESULT_SENTENCES, C.CHR_LIVE_REASONS, C.CHR_PILOT_REASONS].flatMap((o) => Object.values(o))
 eq(sentences.filter((s) => /[<>]|@|https?:/.test(s)), [], '§5 no markup, no address, no link')
 eq(sentences.filter((s) => !/[.]$/.test(s)), [], '§5 each ends with a full stop')
 

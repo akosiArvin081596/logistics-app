@@ -123,10 +123,10 @@ const PROD_HEADERS = ["Contract ID", "Load ID", "Details", "Trailer Number", "Dr
 // A row in the header-keyed shape the guard reads.
 function row(over) {
 	return Object.assign({
-		"Load ID": "553198052",
+		"Load ID": "QA-LOAD-0512",
 		"Driver": "Hollis Renner",
 		"Job Status": "Delivered",
-		"  Payment  ": "$4,800.00",
+		"  Payment  ": "$3,750.00",
 		"Pickup Appointment": "2026-05-12",
 		"Drop-off Appointment": "2026-05-14",
 		"Assigned Date": "2026-05-11",
@@ -200,8 +200,8 @@ check("reassign a Delivered load in OPEN 2026-08 → allow",
 // =====================================================================
 section("3. The trap — 'does this row contribute TODAY?' is NOT the predicate");
 // =====================================================================
-// 25 production rows sit at Cancelled/Canceled inside locked months carrying
-// $29,166.25. excludeDroppedLoads() drops every one of them, so a before-only,
+// Rows at Cancelled/Canceled can sit inside locked months.
+// excludeDroppedLoads() drops every one of them, so a before-only,
 // contribution-based predicate answers "allow" for the flip that injects them.
 const cancelledRow = row({ "Job Status": "Cancelled", "Assigned Date": "2026-06-03", "Pickup Appointment": "2026-06-03", "Drop-off Appointment": "2026-06-04" });
 const naiveContributesToday = (r) => G.DISPATCH_COMPLETED_RE.test(String(r["Job Status"] || "").trim());

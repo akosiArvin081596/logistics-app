@@ -59,6 +59,12 @@
  *      Driver's read marks the version shown, a Super Admin's doesn't; this payload's
  *      `_instructions` per load is { state, highlights } codes only. Mutants: the
  *      ownership check removed (flips), the gate without flag 2 (flips).
+ *   §9 the stepper's GPS phases (load phases PR 3, DRIVER_STEPPER_GPS_PHASES_ENABLED):
+ *      with lib/gps-phases.js wired as server.js wires it, a Driver's own load
+ *      carries `_gpsPhases` and only his rows are looked up; Super Admin gets the
+ *      named driver's; every refused caller gets nothing and asks no reader; off,
+ *      no key and no reader. Mutants: the stored rows annotated instead of his
+ *      view (a rate column comes back), the annotation line removed.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -258,6 +264,8 @@ function makeDeps() {
 		// The arrival pickup line: off here (scripts/test-arrival-pickup-pay-paths.js §D
 		// pins who receives it), so it adds nothing.
 		annotatePickupArrival: () => 0,
+		// The stepper's GPS phases (§9): off here, so rows go back as they came.
+		driverGpsPhases: { annotate: (rows) => rows },
 	};
 	return { deps, reads };
 }
@@ -1084,6 +1092,85 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		if (noFlag2) {
 			r = await world({ ...ON, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "" }, { runtimeSrc: noFlag2 }).read(DK, "QA-DI-100");
 			ok("MUTANT 10 (the route gated without flag 2): §8.1 flips to a served payload", r.status === 200 && r.body && r.body.state === "published", said(r));
+		}
+	})();
+
+	// =========================================================================
+	console.log("\n§9  the stepper's GPS phases on the payload (DRIVER_STEPPER_GPS_PHASES_ENABLED)");
+	// =========================================================================
+	// The route with lib/gps-phases.js wired as server.js wires it, over made-up
+	// readers: every load mapped, Desoren King's truck reporting, Soren King's
+	// silent. The rule itself is scripts/test-stepper-gps-phases-server.js's
+	// subject; this pins who receives the key. What is missing on the base is a
+	// FAIL here, never a crash.
+	await (async () => {
+		let gpsLib = null;
+		try { gpsLib = require(path.join(ROOT, "lib", "gps-phases")); } catch { gpsLib = null; }
+		ok("§9.0 lib/gps-phases.js loads", !!gpsLib);
+		const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const LINE = "filteredLoads = driverGpsPhases.annotate(filteredLoads, loads, jobTracking.headers);";
+		ok("§9.0b the route annotates its loads once, after the receipt windows and before the reply",
+			routeCode.split(LINE).length === 2 && routeCode.indexOf("withExpenseWindows(") < routeCode.indexOf(LINE)
+			&& routeCode.indexOf(LINE) < routeCode.indexOf("res.json({"));
+		if (!gpsLib) return;
+		const tdb = new Database(":memory:");
+		tdb.exec("CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '')");
+		tdb.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, location_date_ms) VALUES ('DEV-100', 32.5, -97.25, ?)").run(Date.now() - 5 * 60 * 1000);
+		const asked = [];
+		const trucks = { "desoren king": { id: 7, routemate_vehicle_id: "DEV-100" }, "soren king": { id: 8, routemate_vehicle_id: "DEV-200" } };
+		const readers = () => {
+			asked.push("readers");
+			return {
+				db: tdb, truckColRe: /^truck$/i, truckByUnit: () => null, linkedSinceMs: () => null,
+				truckForDriver: (name) => { asked.push(name); return trucks[helpers.normalizeDriverName(name)] || null; },
+				points: () => ({ origin: { latitude: 32.5, longitude: -97.25 }, dest: { latitude: 33.2, longitude: -96.6 } }),
+			};
+		};
+		const pageWith = (enabled, src = ROUTE_SRC) => buildRoute(src, { driverGpsPhases: gpsLib.create({ enabled, readers }) });
+		const phasesOf = (x) => (x.body && Array.isArray(x.body.loads) ? x.body.loads.map((l) => [l["Load ID"], "_gpsPhases" in l ? l._gpsPhases : "(no key)"]) : null);
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+		const BOTH = { pickup: true, drop: true };
+		const NONE = { pickup: false, drop: false };
+
+		asked.length = 0;
+		r = await call(pageWith(true), DK, "Desoren King");
+		ok("§9.1 Driver, own page, flag on: his load carries _gpsPhases (his truck reporting: both true)",
+			r.status === 200 && same(phasesOf(r), [["L-100", BOTH]]), `${brief(r)} ${JSON.stringify(phasesOf(r))}`);
+		ok("§9.2 ...and only his own rows were asked about (no other driver's truck looked up)",
+			same(asked, ["readers", "Desoren King"]), JSON.stringify(asked));
+		ok("§9.3 ...his view stays his view: no rate column comes back with the annotation",
+			r.status === 200 && r.body.loads.every((l) => !("Rate" in l) && !("  Payment  " in l)), JSON.stringify(r.body && r.body.loads));
+		r = await call(pageWith(true), SUPER, "Soren King");
+		ok("§9.4 Super Admin on a driver's page: that driver's load, his truck silent (both false)",
+			r.status === 200 && same(phasesOf(r), [["L-200", NONE]]), JSON.stringify(phasesOf(r)));
+		asked.length = 0;
+		const refused = [
+			await call(pageWith(true), DK, "Soren King"), await call(pageWith(true), NAMELESS, "Desoren King"),
+			await call(pageWith(true), DISPATCH_NAMED, "Desoren King"), await call(pageWith(true), INVESTOR_NAMED, "Desoren King"),
+			await call(pageWith(true), null, "Desoren King"),
+		];
+		ok("§9.5 another driver's name, a blank session name, a Dispatcher or an Investor (even carrying his name): 403; signed out: 401; no reader asked",
+			same(refused.map((x) => x.status), [403, 403, 403, 403, 401]) && asked.length === 0, `${refused.map((x) => x.status).join()} asked ${JSON.stringify(asked)}`);
+		asked.length = 0;
+		r = await call(pageWith(false), DK, "Desoren King");
+		ok("§9.6 flag off: his load carries no _gpsPhases key, and no reader is asked",
+			r.status === 200 && same(phasesOf(r), [["L-100", "(no key)"]]) && asked.length === 0, `${JSON.stringify(phasesOf(r))} asked ${JSON.stringify(asked)}`);
+
+		// MUTANT 11: the stored rows annotated in place of the role's view.
+		const STORED = (() => { const n = ROUTE_SRC.split(LINE).length - 1; return n === 1 ? ROUTE_SRC.replace(LINE, "filteredLoads = driverGpsPhases.annotate(loads, loads, jobTracking.headers);") : null; })();
+		ok("§9.7a the stored-rows mutant applies", !!STORED);
+		if (STORED) {
+			r = await call(pageWith(true, STORED), DK, "Desoren King");
+			ok("MUTANT 11 (the stored rows annotated instead of his view): §9.3 flips, the rate column comes back",
+				r.status === 200 && r.body.loads.some((l) => "Rate" in l), JSON.stringify(r.body && r.body.loads));
+		}
+		// MUTANT 12: the annotation line removed.
+		const NO_LINE = ROUTE_SRC.split(LINE).length === 2 ? ROUTE_SRC.replace(LINE, "") : null;
+		ok("§9.8a the no-annotation mutant applies", !!NO_LINE);
+		if (NO_LINE) {
+			r = await call(pageWith(true, NO_LINE), DK, "Desoren King");
+			ok("MUTANT 12 (the route without the annotation): §9.1 flips, no key with the flag on",
+				r.status === 200 && same(phasesOf(r), [["L-100", "(no key)"]]), JSON.stringify(phasesOf(r)));
 		}
 	})();
 
