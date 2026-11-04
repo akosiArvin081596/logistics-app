@@ -42,9 +42,9 @@
             </dl>
             <div class="pa-actions">
               <a :href="pdfUrl(r.id)" target="_blank" rel="noopener noreferrer" class="pa-link">Open PDF</a>
-              <Button v-if="actionsFor(r).countersign" size="sm" @click="openSign(r)">Sign for LogisX</Button>
-              <Button v-if="actionsFor(r).decline" size="sm" variant="outline" @click="openReason(r, 'decline')">Decline</Button>
-              <Button v-if="actionsFor(r).revoke" size="sm" variant="outline" @click="openReason(r, 'revoke')">Revoke</Button>
+              <Button v-if="actionsFor(r).countersign" size="sm" :disabled="sending" @click="openSign(r)">Sign for LogisX</Button>
+              <Button v-if="actionsFor(r).decline" size="sm" variant="outline" :disabled="sending" @click="openReason(r, 'decline')">Decline</Button>
+              <Button v-if="actionsFor(r).revoke" size="sm" variant="outline" :disabled="sending" @click="openReason(r, 'revoke')">Revoke</Button>
             </div>
           </li>
         </ul>
@@ -72,9 +72,9 @@
               <TableCell>
                 <div class="pa-actions">
                   <a :href="pdfUrl(r.id)" target="_blank" rel="noopener noreferrer" class="pa-link">Open PDF</a>
-                  <Button v-if="actionsFor(r).countersign" size="sm" @click="openSign(r)">Sign for LogisX</Button>
-                  <Button v-if="actionsFor(r).decline" size="sm" variant="outline" @click="openReason(r, 'decline')">Decline</Button>
-                  <Button v-if="actionsFor(r).revoke" size="sm" variant="outline" @click="openReason(r, 'revoke')">Revoke</Button>
+                  <Button v-if="actionsFor(r).countersign" size="sm" :disabled="sending" @click="openSign(r)">Sign for LogisX</Button>
+                  <Button v-if="actionsFor(r).decline" size="sm" variant="outline" :disabled="sending" @click="openReason(r, 'decline')">Decline</Button>
+                  <Button v-if="actionsFor(r).revoke" size="sm" variant="outline" :disabled="sending" @click="openReason(r, 'revoke')">Revoke</Button>
                 </div>
               </TableCell>
             </TableRow>
@@ -83,7 +83,7 @@
       </template>
     </template>
 
-    <Dialog :open="sign.open" @update:open="(v) => { if (!v) closeSign() }">
+    <Dialog :open="sign.open" @update:open="(v) => { if (!v) dismissSign() }">
       <DialogScrollContent class="sm:max-w-[560px]">
         <DialogHeader>
           <DialogTitle>Sign for LogisX Inc.</DialogTitle>
@@ -116,15 +116,16 @@
             hint="Tick the box above, then sign with your finger or mouse."
           />
           <p v-if="sign.error" class="pa-error" role="alert">{{ sign.error }}</p>
+          <p v-if="sign.busy" class="pa-sending" role="status">Sending your signature. You can't cancel it now: wait here for the answer, which can take up to a minute.</p>
         </template>
         <DialogFooter>
-          <Button variant="outline" @click="closeSign">Cancel</Button>
+          <Button variant="outline" :disabled="sign.busy" @click="dismissSign">Cancel</Button>
           <Button :disabled="sign.busy" @click="submitSign">{{ sign.busy ? 'Signing…' : 'Sign for LogisX Inc.' }}</Button>
         </DialogFooter>
       </DialogScrollContent>
     </Dialog>
 
-    <Dialog :open="decide.open" @update:open="(v) => { if (!v) closeReason() }">
+    <Dialog :open="decide.open" @update:open="(v) => { if (!v) dismissReason() }">
       <DialogContent class="sm:max-w-[480px]">
         <DialogHeader>
           <DialogTitle>{{ decide.kind === 'revoke' ? 'Revoke this authorization' : 'Decline this authorization' }}</DialogTitle>
@@ -138,8 +139,9 @@
           <textarea v-model="decide.reason" class="pa-input" rows="3" :maxlength="REASON_MAX"></textarea>
         </label>
         <p v-if="decide.error" class="pa-error" role="alert">{{ decide.error }}</p>
+        <p v-if="decide.busy" class="pa-sending" role="status">{{ decide.kind === 'revoke' ? 'Sending the revocation.' : 'Sending the decline.' }} You can't cancel it now: wait here for the answer.</p>
         <DialogFooter>
-          <Button variant="outline" @click="closeReason">Cancel</Button>
+          <Button variant="outline" :disabled="decide.busy" @click="dismissReason">Cancel</Button>
           <Button variant="destructive" :disabled="decide.busy" @click="submitReason">
             {{ decide.busy ? 'Saving…' : (decide.kind === 'revoke' ? 'Revoke' : 'Decline') }}
           </Button>
@@ -237,6 +239,13 @@ function closeSign() {
   sign.value = blankSign()
 }
 
+// Cancel, the X, Escape and a click outside all come here, and do nothing while the
+// signature is out: it would land anyway. The answer closes the dialog or unlocks it.
+function dismissSign() {
+  if (sign.value.busy) return
+  closeSign()
+}
+
 // The click pins its own state object: a dialog closed or reopened while the request is
 // out never takes this answer.
 async function submitSign() {
@@ -267,12 +276,22 @@ async function submitSign() {
 const blankDecide = () => ({ open: false, kind: 'decline', row: null, reason: '', busy: false, error: '' })
 const decide = ref(blankDecide())
 
+// While a countersign, decline or revoke is out, no row offers another action.
+const sending = computed(() => sign.value.busy || decide.value.busy)
+
 function openReason(row, kind) {
   decide.value = { ...blankDecide(), open: true, kind: kind === 'revoke' ? 'revoke' : 'decline', row }
 }
 
 function closeReason() {
   decide.value = blankDecide()
+}
+
+// As dismissSign(): a decline or revoke that is out can't be called back, so its
+// dialog stays until the answer.
+function dismissReason() {
+  if (decide.value.busy) return
+  closeReason()
 }
 
 async function submitReason() {
@@ -329,6 +348,7 @@ load()
 .pa-note { margin: 0; font-size: 0.75rem; color: var(--text-dim); }
 .pa-consent { display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.82rem; }
 .pa-error { margin: 0; font-size: 0.8rem; font-weight: 600; color: #b91c1c; }
+.pa-sending { margin: 0; font-size: 0.8rem; font-weight: 600; color: var(--text); }
 .load-error {
   display: flex;
   align-items: center;
