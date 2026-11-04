@@ -624,14 +624,14 @@ function rawSession(commands) {
 // (body or PDF), leaves Trash out unless asked with in:trash, and misses a `lagging`
 // message; SEARCH SUBJECT reads subjects only. FETCH answers the items in Gmail's own
 // order, BODYSTRUCTURE first, and only the header fields asked for.
-// `script[VERB]` answers instead when it returns a list: strings are lines, a Buffer is
+// `script.get(VERB)` answers instead when it returns a list: strings are lines, a Buffer is
 // raw bytes, MAILBOX_DROP closes the connection, an empty list hangs.
 const MAILBOX_DROP = Symbol("drop");
 const FETCH_ASK = /^(\d{1,6}(?:,\d{1,6}){0,60}) \(BODY\.PEEK\[HEADER\.FIELDS \(([A-Z ]{1,40})\)\] BODYSTRUCTURE\)$/;
 function fakeMailbox() {
 	const sessions = [];
 	const boxes = { "[Gmail]/Drafts": [], "[Gmail]/Sent Mail": [], "[Gmail]/Trash": [] };
-	const script = {};
+	const script = new Map();
 	const opts = { greeting: "* OK Gimap ready", capability: "IMAP4rev1 IDLE UIDPLUS X-GM-EXT-1 CHILDREN", headerFirst: false, inPieces: false };
 	const server = net.createServer((sock) => {
 		const s = { commands: [], lines: [], examines: [], searches: [], fetches: [] };
@@ -653,7 +653,8 @@ function fakeMailbox() {
 				const verb = word.toUpperCase();
 				const args = line.slice(tag.length + word.length + 2);
 				s.commands.push(verb);
-				const scripted = script[verb] && script[verb](tag, args, s);
+				const scriptedAnswer = script.get(verb);
+				const scripted = scriptedAnswer && scriptedAnswer(tag, args, s);
 				if (scripted) {
 					for (const x of scripted) {
 						if (x === MAILBOX_DROP) { sock.destroy(); return; }
@@ -885,7 +886,7 @@ async function mailboxSearchSection() {
 	const SENT = fake.boxes[MAILBOXES.sent];
 	const DRAFTS = fake.boxes[MAILBOXES.drafts];
 	const TRASH = fake.boxes[MAILBOXES.trash];
-	const noScript = () => { for (const k of Object.keys(fake.script)) delete fake.script[k]; };
+	const noScript = () => fake.script.clear();
 	const run = async (over = {}) => {
 		const before = fake.sessions.length;
 		const r = await settle(searchMailboxForLoad({ user: OWN, pass: "made-up-pass", loadNumber: LOAD, timeoutMs: 2000, ...over }));
@@ -956,7 +957,7 @@ async function mailboxSearchSection() {
 		const blankHeaders = await run();
 		eq(blankHeaders.value.verdict, MENTION, "§8 a hit with no headers at all is a mention");
 		for (const [label, item] of [["NIL", "NIL"], ["an empty string", '""']]) {
-			fake.script.FETCH = (t) => [`* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML" NIL NIL NIL "7BIT" 1 1) BODY[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] ${item})`, `${t} OK Success`];
+			fake.script.set("FETCH", (t) => [`* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML" NIL NIL NIL "7BIT" 1 1) BODY[HEADER.FIELDS (SUBJECT DATE TO CC BCC)] ${item})`, `${t} OK Success`]);
 			const r = await run();
 			noScript();
 			eq(r.value && r.value.verdict, MENTION, `§8 a header item answered as ${label} is a mention`);
@@ -1011,7 +1012,7 @@ async function mailboxSearchSection() {
 		];
 		for (const [verb, stage] of STAGES) {
 			for (const [label, answer, want] of ANSWERS) {
-				fake.script[verb] = (t) => answer(t);
+				fake.script.set(verb, (t) => answer(t));
 				const r = await run();
 				noScript();
 				eq(r.error ? [r.error.stage, Boolean(r.error.answered), Boolean(r.error.throttled)] : ["resolved", r.value && r.value.verdict],
@@ -1027,11 +1028,11 @@ async function mailboxSearchSection() {
 		const silent = await run({ timeoutMs: 150 });
 		eq(silent.error && silent.error.stage, "greeting", "§8 no greeting: a timeout, at greeting");
 		fake.opts.greeting = "* OK Gimap ready";
-		fake.script.SEARCH = () => [];
+		fake.script.set("SEARCH", () => []);
 		const hang = await run({ timeoutMs: 150 });
 		noScript();
 		eq(hang.error && hang.error.stage, "search", "§8 no answer to a SEARCH: a timeout, at search, never nothing found");
-		fake.script.SEARCH = () => [MAILBOX_DROP];
+		fake.script.set("SEARCH", () => [MAILBOX_DROP]);
 		const droppedAt = Date.now();
 		const dropped = await run({ timeoutMs: 20000 });
 		noScript();
@@ -1039,11 +1040,11 @@ async function mailboxSearchSection() {
 		ok(Date.now() - droppedAt < 5000, "§8 ...at once, not at the time limit");
 		// A refusal in Sent Mail after a clean Drafts is still a failure.
 		clearBoxes();
-		fake.script.EXAMINE = (t, args) => (args.includes("Sent Mail") ? [`${t} NO [NONEXISTENT] ${SERVER_TEXT}`] : null);
+		fake.script.set("EXAMINE", (t, args) => (args.includes("Sent Mail") ? [`${t} NO [NONEXISTENT] ${SERVER_TEXT}`] : null));
 		const noSent = await run();
 		noScript();
 		eq(noSent.error && [noSent.error.stage, noSent.value], ["examine", undefined], "§8 Drafts clean but Sent Mail won't open: rejects, never clean");
-		fake.script.SEARCH = (t) => [`${t} OK Success [THROTTLED]`];
+		fake.script.set("SEARCH", (t) => [`${t} OK Success [THROTTLED]`]);
 		const throttled = await run();
 		noScript();
 		eq(throttled.s.commands.filter((c) => c === "SEARCH"), ["SEARCH"], "§8 a throttle ends the run: no further command but the LOGOUT");
@@ -1056,7 +1057,7 @@ async function mailboxSearchSection() {
 			eq(r.error && [r.error.stage, r.s.commands], ["capability", ["LOGIN", "CAPABILITY", "LOGOUT"]], `§8 X-GM-EXT-1 ${label}: rejects at capability, and no search runs`);
 		}
 		fake.opts.capability = "IMAP4rev1 IDLE UIDPLUS X-GM-EXT-1 CHILDREN";
-		fake.script.CAPABILITY = (t) => [`${t} OK Success`];
+		fake.script.set("CAPABILITY", (t) => [`${t} OK Success`]);
 		const noCaps = await run();
 		noScript();
 		eq(noCaps.error && noCaps.error.stage, "capability", "§8 no CAPABILITY line at all: rejects at capability");
@@ -1075,13 +1076,13 @@ async function mailboxSearchSection() {
 		clearBoxes();
 		DRAFTS.push(mail({ subject: `Load ${LOAD} notes`, to: COLLEAGUE }));
 		for (const [verb, stage, label, answer] of UNREADABLE) {
-			fake.script[verb] = answer;
+			fake.script.set(verb, answer);
 			const r = await run();
 			noScript();
 			eq(r.error ? r.error.stage : `resolved ${r.value && r.value.verdict}`, stage, `§8 unreadable: ${label}: rejects at ${stage}, never nothing found`);
 		}
 		DRAFTS.push(mail({ subject: `Load ${LOAD} more notes`, to: COLLEAGUE }));
-		fake.script.FETCH = (t) => [Buffer.from('* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML") BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n\r\n\r\n)\r\n', "latin1"), `${t} OK Success`];
+		fake.script.set("FETCH", (t) => [Buffer.from('* 1 FETCH (BODYSTRUCTURE ("TEXT" "HTML") BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n\r\n\r\n)\r\n', "latin1"), `${t} OK Success`]);
 		const oneMissing = await run();
 		noScript();
 		eq(oneMissing.error && oneMissing.error.stage, "fetch", "§8 unreadable: one of two hits missing from the answer: rejects at fetch");
