@@ -55671,12 +55671,19 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     shadow mode, never in a replica: the shadow also builds each ready load's email
 //     and invoice in memory (the engine, Drive, Gemini and the PDF renderer, as a
 //     real draft does) and keeps only their digest; still no number and no Gmail.
+//   AUTO_INVOICE_SEND_ENABLED  on only when exactly "true", with real drafts on, never
+//     in a replica: a load whose recipient's domain is on AUTO_INVOICE_SEND_DOMAINS
+//     (commas or spaces between; exact domains, a subdomain is not listed) is SENT to
+//     the broker by SMTP instead of drafted, unless sending is stopped (the Stop route,
+//     or an automatic stop; scripts/auto-invoice-send-resume.js resumes). Nothing
+//     listed sends nothing (lib/auto-invoice-send.js).
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
 const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
 const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
 const autoInvoiceImap = require("./lib/imap-draft");
+const autoInvoiceSend = require("./lib/auto-invoice-send");
 const autoInvoice = require("./lib/auto-invoice-job").create({
 	db,
 	env: process.env,
@@ -55704,9 +55711,18 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 	},
 	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
 	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
+	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
+	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
 	log: console,
 });
-if (autoInvoice.mode !== "off") autoInvoice.mount(app, { requireRole, refuseCrossSite });
+if (autoInvoice.mode !== "off") {
+	autoInvoice.mount(app, {
+		requireRole,
+		refuseCrossSite,
+		stopLimiter: rateLimit({ windowMs: 60 * 1000, max: 10, message: { error: "Too many requests. Try again in a minute." }, standardHeaders: true, legacyHeaders: false }),
+	});
+}
+if (autoInvoice.sending) console.log(`[auto-invoice] sending on for ${autoInvoiceSend.readSettings(process.env).domains.length} domain(s)`);
 if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
 	let autoInvoiceTicking = false;
@@ -57099,6 +57115,11 @@ app.post(
 			//     (lib/factoring-routes.js draftEarly()).
 			const factoringCheck = factoringRoutes.draftEarly(req, loadId);
 			if (!factoringCheck.ok) return res.status(factoringCheck.http).json(factoringCheck.json);
+			// 0d) A load whose invoice the automatic job sent (or may have), unless the
+			//     press confirms a re-issue with a reason; while sending is on, a load
+			//     the job is working on (lib/auto-invoice-job.js draftButtonCheck()).
+			const sentCheck = autoInvoice.draftButtonCheck(req, loadId, { dryRun });
+			if (!sentCheck.ok) return res.status(sentCheck.http).json(sentCheck.json);
 
 			// 1)-6a-2) The load, its PODs and rate cons, every printed field, and
 			//    every refusal that must come before the invoice number:
@@ -57328,6 +57349,7 @@ app.post(
 				? factoringRoutes.draftHandoff(req, {
 					loadId, invoiceId, mintedInvoiceId, confirmed: factoringCheck.confirmed, reason: factoringCheck.reason,
 					path: gmailUser && gmailPass ? "imap" : "n8n", user: gmailUser, recipient: invoiceTo.email, total: rendered.total,
+					reissue: Boolean(sentCheck.reissue),
 				})
 				: null;
 			if (handoff && !handoff.ok) return res.status(handoff.http).json(handoff.json);
