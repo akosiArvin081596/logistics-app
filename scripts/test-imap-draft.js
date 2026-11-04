@@ -92,15 +92,15 @@ const EM_DASH = String.fromCodePoint(0x2014);
 const USER = "info@example.com";
 const PASS = 'app "pass" \\ word'; // a quote and a backslash, which LOGIN must escape
 const TO = "ap@example.com";
-const SUBJECT = "Invoice 09302026-1 for Load 30080873";
+const SUBJECT = "Invoice 12312099-1 for Load 900000020";
 // Multi-line, non-ASCII and over 76 columns, so MailComposer quoted-printables it.
 const HTML = [
 	"<html><body>",
-	"<p>Please find attached invoice 09302026-1 for load 30080873.</p>",
+	"<p>Please find attached invoice 12312099-1 for load 900000020.</p>",
 	`<p>Total due: $1,234.00 ${EM_DASH} Caf${E_ACUTE} & Co. ${"A line long enough to need a soft break. ".repeat(3)}</p>`,
 	"</body></html>",
 ].join("\n");
-const PDF_NAME = "Invoice-09302026-1.pdf";
+const PDF_NAME = "Invoice-12312099-1.pdf";
 const INVOICE_NAME = "Acme Freight Invoice Order #1234567.pdf"; // lib/broker-invoice-draft.js's shape
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n", "latin1");
 
@@ -654,7 +654,8 @@ function fakeMailbox() {
 				const args = line.slice(tag.length + word.length + 2);
 				s.commands.push(verb);
 				const scriptedAnswer = script.get(verb);
-				const scripted = scriptedAnswer && scriptedAnswer(tag, args, s);
+				let scripted = null;
+				if (typeof scriptedAnswer === "function") scripted = scriptedAnswer(tag, args, s);
 				if (scripted) {
 					for (const x of scripted) {
 						if (x === MAILBOX_DROP) { sock.destroy(); return; }
@@ -750,7 +751,7 @@ async function mailboxSearchSection() {
 	const BROKER = "billing@example-broker.test";
 	const LOAD = "900000019";
 	const ORDER = "7000001";
-	const INV = "11052026-3";
+	const INV = "12312099-3";
 	const ENGINE_SUBJECT = `Example Broker Order #${LOAD}`;
 	const ENGINE_FILE = `Example Broker Invoice Order #${LOAD}.pdf`;
 	const WEEK = "2026-10-24 to 2026-10-30";
@@ -798,6 +799,9 @@ async function mailboxSearchSection() {
 		["one unreadable Bcc among internal recipients", { subject: `Load ${LOAD} notes`, to: COLLEAGUE, bcc: "not an address" }, MENTION],
 		["an unterminated quote can hide a recipient", { subject: `Load ${LOAD} notes`, to: `"a <${COLLEAGUE}>, ${BROKER}` }, MENTION],
 		["two angle-addrs with no comma can hide a recipient", { subject: `Load ${LOAD} notes`, to: `<${BROKER}> <${COLLEAGUE}>` }, MENTION],
+		["an unterminated comment can hide a recipient", { subject: `Load ${LOAD} notes`, to: `x (y <${BROKER}>, <${COLLEAGUE}>` }, MENTION],
+		["an unterminated angle-addr can hide a recipient", { subject: `Load ${LOAD} notes`, to: `"a <${COLLEAGUE}>" <${BROKER}` }, MENTION],
+		["Order #<n> in the middle of a subject isn't its ending", { subject: `${ENGINE_SUBJECT} pickup update`, to: BROKER }, MENTION],
 		// Ignored: proven internal with no invoice look, or the app's own shape.
 		["an internal note naming the load, no invoice look", { subject: `Load ${LOAD} notes`, to: COLLEAGUE }, IGNORED],
 		["an internal reply, no invoice look", { subject: `Re: Load ${LOAD} notes`, to: COLLEAGUE, cc: OWN }, IGNORED],
@@ -861,7 +865,7 @@ async function mailboxSearchSection() {
 	eq(searchTerm(`#${LOAD}`), LOAD, "§8 terms: a leading # is dropped");
 	eq(searchTerm(` ${LOAD} `), LOAD, "§8 terms: spaces around it are dropped");
 	eq(searchTerm(INV), INV, "§8 terms: an invoice number passes");
-	eq(searchTerm("DMF-8657"), "DMF-8657", "§8 terms: a load number with letters passes");
+	eq(searchTerm("ABC-1234"), "ABC-1234", "§8 terms: a load number with letters passes");
 	eq(searchTerm("LD_TEST.0007"), "LD_TEST.0007", "§8 terms: . and _ pass");
 	const BAD_TERMS = [`${LOAD}" OR "x`, "9000 0019", "in:trash", "OR", "AROUND", `${LOAD}\r\na9 STORE 1 +FLAGS (\\Seen)`, "{5}", "12", "#", "##900000019", "(900000019)", `-${LOAD}`, `${LOAD}-`, "x".repeat(70) + "1", `"${LOAD}"`, "1234*"];
 	eq(BAD_TERMS.map(searchTerm), BAD_TERMS.map(() => ""), "§8 terms: quotes, spaces, operators, line breaks, no digit, too short or too long: refused");
@@ -869,6 +873,10 @@ async function mailboxSearchSection() {
 		"§8 terms: the load number, then each row's numbers; a blank row value and a repeat are dropped");
 	eq(searchTermsFor({ loadNumber: LOAD, invoiceNumbers: ["bad term"] }).unsearchable, 1, "§8 terms: a bad row value counts as unsearchable");
 	eq(searchTermsFor({ loadNumber: "" }).unsearchable, 1, "§8 terms: no load number counts as unsearchable");
+	const MANY_NUMBERS = Array.from({ length: 13 }, (_, i) => `12312099-${i + 1}`);
+	const tooMany = searchTermsFor({ loadNumber: LOAD, invoiceNumbers: MANY_NUMBERS });
+	eq([tooMany.terms.length, tooMany.unsearchable], [12, 2], "§8 terms: more numbers than a search takes count as unsearchable, so none goes unsearched quietly");
+	eq(searchTermsFor({ loadNumber: LOAD, invoiceNumbers: MANY_NUMBERS.slice(0, 11) }), { terms: [LOAD, ...MANY_NUMBERS.slice(0, 11)], unsearchable: 0 }, "§8 terms: exactly 12 is fine");
 
 	// ---------------------------------------------------------------- the session
 	const fake = fakeMailbox();
@@ -982,6 +990,7 @@ async function mailboxSearchSection() {
 			["no load number", { loadNumber: "" }],
 			["a bad invoice number on a row", { invoiceNumbers: ['1" OR "x'] }],
 			["a bad order number on a row", { orderNumbers: ["70 001"] }],
+			["more numbers than a search takes", { invoiceNumbers: MANY_NUMBERS }],
 		]) {
 			const refused = await run(over);
 			eq(refused.error && [refused.error.stage, refused.value], ["terms", undefined], `§8 refused before any connection: ${label}`);
@@ -1028,6 +1037,11 @@ async function mailboxSearchSection() {
 		const silent = await run({ timeoutMs: 150 });
 		eq(silent.error && silent.error.stage, "greeting", "§8 no greeting: a timeout, at greeting");
 		fake.opts.greeting = "* OK Gimap ready";
+		fake.opts.greeting = "* OK [THROTTLED] slow down";
+		const throttledHello = await run();
+		fake.opts.greeting = "* OK Gimap ready";
+		eq(throttledHello.error && [throttledHello.error.stage, throttledHello.error.answered, throttledHello.error.throttled], ["greeting", true, true], "§8 a throttle in the greeting rejects at greeting");
+		eq(throttledHello.s.commands, ["LOGOUT"], "§8 ...and no LOGIN is sent");
 		fake.script.set("SEARCH", () => []);
 		const hang = await run({ timeoutMs: 150 });
 		noScript();
@@ -1038,6 +1052,16 @@ async function mailboxSearchSection() {
 		noScript();
 		eq(dropped.error && dropped.error.stage, "search", "§8 a dropped connection rejects at its stage");
 		ok(Date.now() - droppedAt < 5000, "§8 ...at once, not at the time limit");
+		// A socket error is a rejection, never an uncaught exception in the server's process.
+		const closedServer = net.createServer();
+		await new Promise((resolve) => closedServer.listen(0, "127.0.0.1", resolve));
+		const closedPort = closedServer.address().port;
+		await new Promise((resolve) => closedServer.close(resolve));
+		const stubbedConnect = tls.connect;
+		tls.connect = () => net.connect(closedPort, "127.0.0.1");
+		const connRefused = await settle(searchMailboxForLoad({ user: OWN, pass: "made-up-pass", loadNumber: LOAD, timeoutMs: 2000 }));
+		tls.connect = stubbedConnect;
+		eq(connRefused.error && connRefused.error.stage, "greeting", "§8 a socket error, a refused connection, rejects at greeting");
 		// A refusal in Sent Mail after a clean Drafts is still a failure.
 		clearBoxes();
 		fake.script.set("EXAMINE", (t, args) => (args.includes("Sent Mail") ? [`${t} NO [NONEXISTENT] ${SERVER_TEXT}`] : null));
@@ -1049,6 +1073,19 @@ async function mailboxSearchSection() {
 		noScript();
 		eq(throttled.s.commands.filter((c) => c === "SEARCH"), ["SEARCH"], "§8 a throttle ends the run: no further command but the LOGOUT");
 		eq(throttled.s.commands[throttled.s.commands.length - 1], "LOGOUT", "§8 ...the session still ends with a LOGOUT");
+		for (const [label, answer] of [
+			["too many", (t) => ["* OK Too many simultaneous connections", `${t} OK Success`]],
+			["exceeded", (t) => [`${t} OK Account exceeded command or bandwidth limits`]],
+			["throttled", (t) => ["* OK throttled, slow down", `${t} OK Success`]],
+			["[OVERQUOTA]", (t) => [`${t} OK [OVERQUOTA] made-up`]],
+			["[LIMIT]", (t) => ["* OK [LIMIT] made-up", `${t} OK Success`]],
+			["[UNAVAILABLE]", (t) => [`${t} OK [UNAVAILABLE] made-up`]],
+		]) {
+			fake.script.set("SEARCH", answer);
+			const r = await run();
+			noScript();
+			eq(r.error && [r.error.stage, r.error.answered, r.error.throttled], ["search", true, true], `§8 a throttle in an OK or untagged line, by its word: ${label}: rejects at search`);
+		}
 
 		// X-GM-EXT-1.
 		for (const [label, capability] of [["not advertised", "IMAP4rev1 IDLE UIDPLUS"], ["only a longer name", "IMAP4rev1 X-GM-EXT-10 X-GM-EXT-1X"]]) {
@@ -1155,6 +1192,10 @@ async function mailboxSearchSection() {
 		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: ["* BYE x.pdf", "a1 NO y.pdf", '"NAME" "z.pdf'] }));
 		const forgedName = await run();
 		eq(forgedName.value && forgedName.value.verdict, INVOICE, "§8 status-like file names don't end the run");
+		clearBoxes();
+		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: ["[THROTTLED] too many exceeded.pdf"] }));
+		const throttleName = await run();
+		eq(throttleName.value && throttleName.value.verdict, INVOICE, "§8 a file name with a throttle's words doesn't end the run: only status lines are read");
 		clearBoxes();
 		SENT.push(mail({ subject: ENGINE_SUBJECT, to: BROKER, names: [ENGINE_FILE] }));
 		fake.opts.inPieces = true;
