@@ -247,6 +247,7 @@ function subjectOf(mime) {
 			["a 10-digit phone in the name", { driverName: `A. Example ${PHONE}` }],
 			["a 10-digit phone without separators", { driverName: "A. Example 5550100147" }],
 			["a phone with dots", { driverName: "A. Example 555.010.0147" }],
+			["a phone in pairs, no other shape", { driverName: "A. Example 55 50 10 01 47" }],
 			["a + before digits", { driverName: "A. Example +1 555" }],
 			["a 7-digit phone in the name", { driverName: "A. Example 555-0100" }],
 			["a 7-digit phone split by a space", { driverName: "A. Example 555 0100" }],
