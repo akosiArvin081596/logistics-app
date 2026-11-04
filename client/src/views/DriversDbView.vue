@@ -44,8 +44,8 @@
         :daily-rate-rule="store.dailyRateRule"
         @delete="handleDelete"
         @update="handleUpdate"
-        @picture-updated="store.load()"
-        @availability-changed="store.load()"
+        @picture-updated="store.load({ quiet: true })"
+        @availability-changed="store.load({ quiet: true })"
       />
     </template>
   </div>
@@ -73,7 +73,7 @@ const store = useDriversDbStore()
 const auth = useAuthStore()
 const api = useApi()
 const { show: toast } = useToast()
-useSocketRefresh('drivers:changed', () => store.load())
+useSocketRefresh('drivers:changed', () => store.load({ quiet: true }))
 const driverRatings = ref({})
 const truckAssignments = ref([])
 const chrDeleteNotes = ref([])
