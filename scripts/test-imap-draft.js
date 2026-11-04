@@ -209,6 +209,7 @@ function fakeImap() {
 					if (like) {
 						// Substrings, case folded, as IMAP's SUBJECT and TO keys match.
 						s.likeSearches.push(args);
+						if (answer.like === "GARBLED") { reply("* SEARCH made-up"); reply(`${tag} OK SEARCH completed`); continue; }
 						if (answer.like !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
 						const subject = unquote(like[2]).toLowerCase();
 						const to = unquote(like[3]).toLowerCase();
@@ -590,6 +591,9 @@ async function main() {
 		answer.like = "NO";
 		const likeNo = await likeRun();
 		eq(likeNo.error && [likeNo.error.stage, likeNo.error.answered], ["search", true], "§7 FAILS ON THE OLD CODE: a like search answered NO rejects (stage search), never \"nothing like it\"");
+		answer.like = "GARBLED";
+		const garbled = await likeRun();
+		eq(garbled.error && garbled.error.stage, "search", "§7 FAILS ON THE OLD CODE: a like search whose answer can't be read rejects (stage search), never \"nothing like it\"");
 		answer.like = "OK";
 		const unsafe = [];
 		for (const o of [{ subject: 'x\r\na9 SELECT "[Gmail]/Drafts"' }, { subject: `Caf${E_ACUTE} Order #1` }, { to: "billing team@example-broker.test" }, { subject: "" }, { since: new Date("not a day") }, { to: 7 }]) {
@@ -612,6 +616,17 @@ async function main() {
 			ok(lib, `§7 MUTANT ${label}: applied to lib/imap-draft.js once`);
 			if (!lib) continue;
 			ok(pinned(await likeRun(over)) && !pinned(await likeRun(over, lib)), `§7 MUTANT ${label}: caught`);
+		}
+		{
+			const lib = mutantImap("if (phase === 1 && !line) return finish(stagedError(\"IMAP SEARCH answer unreadable\", \"search\"));", "");
+			ok(lib, "§7 MUTANT an unreadable like answer read as nothing like it: applied to lib/imap-draft.js once");
+			if (lib) {
+				answer.like = "GARBLED";
+				const real = await likeRun();
+				const mutated = await likeRun({}, lib);
+				answer.like = "OK";
+				ok(real.error && real.error.stage === "search" && !mutated.error, "§7 MUTANT an unreadable like answer read as nothing like it: caught");
+			}
 		}
 	} finally {
 		tls.connect = realConnect;
