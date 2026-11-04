@@ -700,6 +700,23 @@ async function main() {
 			eq([u.state("LD-TEST-0510"), u.appends.length], [["needs_attention", "MAYBE_IN_GMAIL"], 0], "§6 ...the search fails: MAYBE_IN_GMAIL, not appended");
 		}
 		{
+			// Past the hand-off, however the claim got back in line: recorded, never built.
+			const sentJson = (id) => JSON.stringify({ to: BILLING, subject: `Example Broker Order #${id}`, total: "$1,000.00" });
+			const q = makeWorld();
+			on(q);
+			ready(q, "LD-TEST-0517");
+			q.seed("LD-TEST-0517", { state: "queued", stage: "appended", delivery: "send", invoice_id: "10202026-86", invoice_date: "2026-10-20", message_id: "<made-up-86@example.com>", sent_json: sentJson("LD-TEST-0517"), updated_at: fresh() });
+			await restart(q);
+			eq([q.state("LD-TEST-0517"), q.smtp.length, q.calls.mint], [["drafted", ""], 0, 0], "§6 a queued claim past the hand-off, at start-up: recorded, nothing sent");
+			const t = makeWorld();
+			const tj = await t.started();
+			ready(t, "LD-TEST-0518");
+			t.seed("LD-TEST-0518", { state: "waiting", reason_code: "NOT_COMPLETED", stage: "appended", delivery: "send", invoice_id: "10202026-87", invoice_date: "2026-10-20", message_id: "<made-up-87@example.com>", sent_json: sentJson("LD-TEST-0518") });
+			tap(t, tj, "LD-TEST-0518", { oldStatus: "Delivered" });
+			await drained(t, "§6 past the hand-off, armed");
+			eq([t.state("LD-TEST-0518"), t.smtp.length, t.calls.mint], [["drafted", ""], 0, 0], "§6 FAILS ON THE OLD CODE: ...or armed by a tap: the run records it, and never builds a sent load again");
+		}
+		{
 			const w = makeWorld();
 			on(w);
 			ready(w, "LD-TEST-0511");
@@ -964,6 +981,20 @@ async function main() {
 		await runCase("SMTP refused: the same run makes the draft", { before: (w) => w.smtpBehaviors.push("REFUSED") }, ["drafted", ""], async (w) => {
 			eq([w.smtp.length, w.appends.length, w.claim("LD-TEST-0701").delivery, ledger.getSendStop(w.db).reason], [1, 1, "", "SMTP_REFUSED"], "§8 FAILS ON THE OLD DESIGN: ...one refused SMTP call, then one draft, and the stop");
 		});
+		{
+			// SMTP refused and the stop can't be written: nothing makes the next try a draft,
+			// and no timer would space the tries out. It goes to a person after one more.
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready("LD-TEST-0706");
+			w.smtpBehaviors.push("REFUSED", "REFUSED", "REFUSED", "REFUSED");
+			const realStop = ledger.setSendStop;
+			ledger.setSendStop = () => { throw Object.assign(new Error("made-up"), { code: "SQLITE_BUSY" }); };
+			tap(w, job, "LD-TEST-0706");
+			await drained(w, "§8 refused twice");
+			ledger.setSendStop = realStop;
+			eq([w.state("LD-TEST-0706"), w.smtp.length, w.appends.length], [["needs_attention", "RETRY_LATER"], 2, 0], "§8 FAILS ON THE OLD DESIGN: SMTP refused with no stop written: one more try, then a person, never a loop");
+		}
 		{
 			// A throw at stage appended: the record can't be made after the send went.
 			const w = makeWorld();
