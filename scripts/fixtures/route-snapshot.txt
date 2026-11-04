@@ -35,6 +35,10 @@ GET /api/admin/onboarding-evidence/:scope/:ownerId · requireRole("Super Admin")
 POST /api/admin/onboarding/:userId/documents/:docKey/cancel-signature-request · onboardingResignFlagGate@73d6aec6adfd · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · onboardingResignLimiter=limiter · inline@8898ed204997
 POST /api/admin/onboarding/:userId/documents/:docKey/request-signature · onboardingResignFlagGate@73d6aec6adfd · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · onboardingResignLimiter=limiter · inline@574ccb5ab598
 GET /api/admin/orphaned-signed-artifacts · requireRole("Super Admin")=anon@12b84c4b0134 · orphanScanLimiter=limiter · inline@0d6787413772
+GET /api/admin/passenger-authorizations · anon@12b84c4b0134 · off@3f0f32b06a54 · limiter · anon@e7e3f0d752ab · (lib mount)
+POST /api/admin/passenger-authorizations/:id/countersign · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · anon@a41360dacefc · (lib mount)
+POST /api/admin/passenger-authorizations/:id/decline · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · anon@6bd7018a7dca · (lib mount)
+POST /api/admin/passenger-authorizations/:id/revoke · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · anon@6bd7018a7dca · (lib mount)
 GET /api/admin/payout-rules/dry-run · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3fe37f15de46
 GET /api/admin/period-lock-issues · requireRole("Super Admin")=anon@12b84c4b0134 · periodIssueLimiter=limiter · inline@e15fafdb40fb
 POST /api/admin/ratecon-index · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · rateconIndexLimiter=limiter · inline@b8e2ac71b634
@@ -104,7 +108,7 @@ POST /api/driver-availability/:id/cancel · availabilityFlagGate@10695c42d6d5 ·
 POST /api/driver-availability/:id/decline · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@49b69e59b4b6
 GET /api/driver-instructions/edit-locks · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 POST /api/driver-instructions/edit-locks/:userId/clear · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)
-GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@04fc02984e5c | after: GET ["/api/driver/position","/api/driver/me/position"]
+GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@40618225fc59 | after: GET ["/api/driver/position","/api/driver/me/position"]
 GET /api/driver/loads/:loadId/instructions · driverGate@7e9b5dcc294e · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@ad2caf2947da
 POST /api/driver/me/availability · timeOffRequestsFlagGate@8e7690535088 · requireRole("Driver")=anon@12b84c4b0134 · timeOffRequestLimiter=limiter · inline@ca07d9c8a6be
@@ -275,6 +279,11 @@ GET /api/onboarding/:userId · requireAuth@2f5c61384511 · inline@a576daa87f64
 POST /api/onboarding/:userId/documents/:docKey/sign · requireAuth@2f5c61384511 · onboardingSignLimiter=limiter · inline@58411714fe9c
 POST /api/onboarding/:userId/drug-test · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3cddd4e66e63
 GET /api/onboarding/documents/:docKey/pdf · requireAuth@2f5c61384511 · onboardingPreviewLimiter=limiter · inline@097177ebb747
+GET /api/passenger-authorizations · anon@12b84c4b0134 · off@3f0f32b06a54 · limiter · needAccount@7073adea5729 · anon@d5431ba28d87 · (lib mount)
+POST /api/passenger-authorizations · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · needAccount@7073adea5729 · anon@6d21f48f8734 · (lib mount)
+GET /api/passenger-authorizations/:id/pdf · requireAuth@2f5c61384511 · off@3f0f32b06a54 · limiter · anon@78ba5eab9e58 · (lib mount)
+GET /api/passenger-authorizations/feature · requireAuth@2f5c61384511 · anon@e736228ee155 · (lib mount)
+GET /api/passenger-authorizations/form.pdf · anon@12b84c4b0134 · off@3f0f32b06a54 · limiter · needAccount@7073adea5729 · anon@fb32eb94c120 · (lib mount)
 GET /api/payouts · requireRole("Super Admin")=anon@12b84c4b0134 · inline@cdcd07154fc0
 GET /api/periods · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a1b746082b35
 POST /api/periods/:period/finalize · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@bd09f81f9ef3
