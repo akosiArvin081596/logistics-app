@@ -18,9 +18,11 @@
  *      "older than 10", "seat belt", "insurance"); NO review note (it is shown
  *      to the Super Admin and sent with the sample, never signed under); every
  *      capitalized word on a fixed list, so no person's or other carrier's
- *      name; no script, no resource but the fonts; what the map prints at each
+ *      name, in the template and in the lines the map prints from the wording
+ *      module; no script, no resource but the fonts; what the map prints at each
  *      stage (blank form, signed by passenger and driver, countersigned): the
- *      company lines never alone, and never AUTHORIZED with a 392.60 item blank
+ *      company lines never alone, and never AUTHORIZED with a 392.60 item or the
+ *      truck unit blank (spaces count as blank), or without the driver's name
  *   §3 safeSignatureImages(): keeps a raster data: URI per filled label; drops
  *      http(s), //host, SVG, an oversize URI, a label the document does not
  *      fill, a non-object or non-plain object, inherited keys and a 4th entry;
@@ -140,6 +142,9 @@ const FORM_WORDS = [
 	// the markup and the fonts
 	"Arial", "BlinkMacSystemFont", "DOCTYPE", "Open", "Roboto", "Sans", "Segoe", "UI", "UTF",
 ];
+// The capitalized words the map prints from the wording module that the template
+// itself lacks (the countersigned notice and the minor's age line).
+const PRINTED_WORDS = ["AUTHORIZED", "BY", "Under"];
 
 // The three signature blocks of Part 6, each from its data-party marker to the next.
 function partyBlocks(html) {
@@ -528,6 +533,14 @@ const holds = (fn) => { try { return fn() === true; } catch { return false; } };
 		eq([...capitalized].filter((w) => !FORM_WORDS.includes(w)).sort(), [],
 			"§2 every capitalized word in the template is on the form's list: no person's or other carrier's name");
 		eq(FORM_WORDS.filter((w) => !capitalized.has(w)), [], "§2 ...and the list holds no word the template lacks");
+		// The same rule for the fixed lines the map prints from the wording module.
+		const printedLines = [T.VALIDITY_NOTICE.pending, T.VALIDITY_NOTICE.authorized, T.AGE_STATEMENT.adult, T.AGE_STATEMENT.minor];
+		const printedCaps = new Set((printedLines.join(" ").match(/[A-Za-z][A-Za-z']*/g) || [])
+			.map((w) => w.replace(/'+$/, ""))
+			.filter((w) => /^[A-Z]/.test(w)));
+		eq([...printedCaps].filter((w) => !FORM_WORDS.includes(w) && !PRINTED_WORDS.includes(w)).sort(), [],
+			"§2 every capitalized word the map prints from the wording module is on the form's lists: no person's or other carrier's name");
+		eq(PRINTED_WORDS.filter((w) => !printedCaps.has(w)), [], "§2 ...and the printed-lines list holds no word those lines lack");
 		const tokens = new Set(lowerAll.match(/[a-z]+/g) || []);
 		const people = companyPeople();
 		ok(people.length > 0, "§2 the other documents' company signer could be read from their maps");
@@ -584,6 +597,24 @@ const holds = (fn) => { try { return fn() === true; } catch { return false; } };
 			const blankItem = map({ ...FINAL_MINOR, [key]: "" });
 			ok(blankItem.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(blankItem, COMPANY_LINES).every((v) => v === "") &&
 				!(IMAGE_LABELS.company in blankItem.signatureImagesByLabel), `§2 with ${key} blank it stays NOT VALID and nothing of the company's prints`);
+		}
+		// Spaces are blank too, and the truck counts on an adult's form as on a minor's.
+		for (const key of ["passengerName", "tripStart", "tripEnd", "validFrom", "expiresOn", "guardianRelationship", "truckUnit"]) {
+			const spaces = map({ ...FINAL_MINOR, [key]: "   " });
+			ok(spaces.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(spaces, COMPANY_LINES).every((v) => v === "") &&
+				!(IMAGE_LABELS.company in spaces.signatureImagesByLabel), `§2 with ${key} only spaces it stays NOT VALID and nothing of the company's prints`);
+		}
+		const adultNoTruck = map({ ...ADULT, ...COMPANY_SIGNED, truckUnit: "   " });
+		ok(adultNoTruck.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(adultNoTruck, COMPANY_LINES).every((v) => v === "") &&
+			!(IMAGE_LABELS.company in adultNoTruck.signatureImagesByLabel), "§2 an adult's form with only spaces for the truck unit stays NOT VALID");
+		// The driver signs under his own name: without it the driver has not signed,
+		// so neither his lines nor the company's print.
+		for (const driverName of ["", "   "]) {
+			const noDriver = map({ ...FINAL_MINOR, driverName });
+			ok(noDriver.text["Validity notice"] === T.VALIDITY_NOTICE.pending && values(noDriver, COMPANY_LINES).every((v) => v === "") &&
+				values(noDriver, PARTY_LABELS.driver).every((v) => v === "") && !(IMAGE_LABELS.driver in noDriver.signatureImagesByLabel) &&
+				!(IMAGE_LABELS.company in noDriver.signatureImagesByLabel),
+			`§2 with the driver's name ${JSON.stringify(driverName)}, the driver has not signed and it stays NOT VALID`);
 		}
 		eq(map({ ...ADULT, ...COMPANY_SIGNED }).text["Validity notice"], T.VALIDITY_NOTICE.authorized, "§2 an adult needs no relationship line to be AUTHORIZED");
 		const unsignedRider = map({ ...FINAL_MINOR, passengerSignedOn: "" });

@@ -194,6 +194,8 @@
             <button v-if="canConfirmPickup && canMarkPickupConfirmed(selectedJob, loadIdCol)" type="button" class="pickup-review-btn" :disabled="pickupMarking" :title="pickupConfirmTitle(selectedJob)" @click="markPickupConfirmed">{{ pickupMarking ? 'Marking…' : pickupConfirmLabel(selectedJob) }}</button>
           </div>
           <p v-if="pickupMarkError" class="pickup-review-error" role="alert">{{ pickupMarkError }}</p>
+          <!-- The arrival pickup date's read-only line: the server's facts, worded by lib/pickupArrival.js. -->
+          <p v-if="selectedJob && pickupArrivalLine(selectedJob)" class="pickup-arrival" role="note">{{ pickupArrivalLine(selectedJob) }}</p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -323,6 +325,7 @@
             <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
           <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <ChrSendBadge v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -549,9 +552,11 @@ import DriverInstructionsSection from './DriverInstructionsSection.vue'
 import FactoringControls from './FactoringControls.vue'
 import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
+import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DeletedLoadsLink from './DeletedLoadsLink.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
+import { pickupArrivalLine } from '../../lib/pickupArrival'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
@@ -1258,6 +1263,12 @@ const detailSections = computed(() => {
 .pickup-review-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .pickup-review-btn:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; }
 .pickup-review-error { margin: -0.5rem 0 1rem; color: #b91c1c; font-size: 0.8125rem; line-height: 1.4; }
+/* Information only, so neutral: no button, no badge colour. */
+.pickup-arrival {
+  margin: 0 0 1rem; padding: 0.6rem 0.75rem;
+  border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb;
+  color: #374151; font-size: 0.8125rem; line-height: 1.4;
+}
 .mobile-load-list {
   display: flex;
   flex-direction: column;

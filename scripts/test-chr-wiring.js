@@ -30,7 +30,10 @@
  *   §5 the switch on: GET /status with the switches and modes; a JSON 404 for an
  *      unknown path; the recorder's timer and the prune's; the timer's tick makes
  *      the tables, baselines with the system's audit row and tells the
- *      super-admin room only
+ *      super-admin room only; the listed accounts reach the Live check (A3); a
+ *      cross-site save refused by server.js's own refuseCrossOrigin; a save
+ *      audited through server.js's logAudit and announced (scripts/test-chr-routes.js
+ *      covers the page's routes)
  *   §6 a replica: every switch set and every switch off; replica:start refuses
  *      all three (lib/replica-rules.js ENABLE_REFUSED)
  *   §7 a Dry run through the wiring end to end: a dry_run row with exactly the
@@ -149,7 +152,7 @@ const row = (loadId, over = {}) => ({
 // ------------------------------------------------------------------ server.js, lifted
 const PROVIDED = ["db", "console", "process", "require"];
 const LIFT = closure(SRC, {
-	roots: ["requireRole", "liveJobTrackingView", "resolveGeofencePoints", "logAudit", "noticeTypeScope", "GEOFENCE_RADIUS"],
+	roots: ["requireRole", "refuseCrossOrigin", "RATECON_PDF_VIEWERS", "liveJobTrackingView", "resolveGeofencePoints", "logAudit", "noticeTypeScope", "GEOFENCE_RADIUS", "insertDispatchNotification"],
 	provided: PROVIDED,
 	denied: ["app", "server", "io", "getJobTrackingCached", "REPLICA", "chr", "chrIntegration", "chrSheetView"],
 });
@@ -245,6 +248,9 @@ async function world({ env = {}, replica = null, startsJobAnswer = true, blockTe
 		io: { to: (room) => ({ emit: (event, payload) => w.sockets.push({ room, event, payload }) }) },
 		app,
 		requireRole: H.requireRole,
+		refuseCrossOrigin: H.refuseCrossOrigin,
+		RATECON_PDF_VIEWERS: H.RATECON_PDF_VIEWERS,
+		insertDispatchNotification: H.insertDispatchNotification,
 		startsJob: (name) => { w.startsJob.push(name); return startsJobAnswer; },
 		setInterval: (fn, ms) => { w.intervals.push({ fn, ms }); return 0; },
 		fetch: transportSpy,
@@ -269,8 +275,8 @@ async function world({ env = {}, replica = null, startsJobAnswer = true, blockTe
 	if (listen) {
 		w.server = await new Promise((resolve) => { const s = realApp.listen(0, "127.0.0.1", () => resolve(s)); });
 		const base = `http://127.0.0.1:${w.server.address().port}`;
-		w.call = async (method, url, user, { body, xrw = true } = {}) => {
-			const headers = { "content-type": "application/json" };
+		w.call = async (method, url, user, { body, xrw = true, headers: extra = {} } = {}) => {
+			const headers = { "content-type": "application/json", ...extra };
 			if (xrw) headers["x-requested-with"] = "XMLHttpRequest";
 			if (user) headers["x-test-user"] = JSON.stringify(user);
 			const resp = await realFetch(`${base}${url}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -309,12 +315,13 @@ async function checkSource(t, blockText = BLOCK, src = SRC) {
 	t.ok(block > 0 && kpi > block && src.indexOf(END) < kpi, "§1 ...and ends above the KPI block the KPI runners lift");
 	t.ok(catchAll > 0 && src.indexOf(END) < catchAll, "§1 ...so above the SPA catch-all app.get(\"*\")");
 	const code = blockText.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
-	for (const name of ["CHR_UPDATES_ENABLED", "CHR_SEND_ENABLED", "CHR_LOCATION_ENABLED"]) {
+	for (const name of ["CHR_UPDATES_ENABLED", "CHR_SEND_ENABLED", "CHR_LIVE_ALL_ENABLED", "CHR_LOCATION_ENABLED"]) {
 		const reads = code.split(`process.env.${name}`).length - 1;
 		const shaped = code.split(`/^(true|1|yes|on)$/i.test(String(process.env.${name} ?? "").trim())`).length - 1;
 		t.eq([reads, shaped], [1, 1], `§1 ${name} is read once, in the default-off shape (true/1/yes/on)`);
 	}
 	t.eq(code.match(/\b(?:getSheets|getDrive|sendEmail|appendGmailDraft|nodemailer|transporter|imap|fetch|google)\b/g) || [], [], "§1 the block names no Sheets, Drive, mail or network dependency");
+	t.eq(code.split("chr.mount(app, { requireRole, refuseCrossOrigin });").length - 1, 1, "§1 the routes are mounted with server.js's role gate and its same-origin guard");
 }
 
 async function checkHandover(t, opts = {}) {
@@ -331,15 +338,17 @@ async function checkHandover(t, opts = {}) {
 		},
 	});
 	const input = w.seen.configInput || {};
-	t.eq(Object.keys(input).sort(), [...realChr.CONFIG_INPUTS].sort(), "§2 chrConfig() gets exactly its six inputs");
-	t.eq([input.updatesEnabled, input.sendEnabled, input.locationEnabled, input.replica, input.geofenceRadiusM === w.H.GEOFENCE_RADIUS, typeof input.denyList],
-		[true, false, false, false, true, "string"], "§2 ...the switches as booleans, the replica flag, the geofence's own radius and the deny list");
+	t.eq(Object.keys(input).sort(), [...realChr.CONFIG_INPUTS].sort(), "§2 chrConfig() gets exactly its inputs");
+	t.eq([input.updatesEnabled, input.sendEnabled, input.liveAllEnabled, input.locationEnabled, input.replica, input.geofenceRadiusM === w.H.GEOFENCE_RADIUS, typeof input.denyList],
+		[true, false, false, false, false, true, "string"], "§2 ...the switches as booleans, the replica flag, the geofence's own radius and the deny list");
+	t.eq(input.connection, { baseUrl: "", tokenUrl: "", clientId: "", clientSecret: "", carrierCode: "" }, "§2 ...and the connection's five settings, none set, no default");
 	t.eq(w.chr.config().denyListCount, 2, "§2 the deny list reaches the redactor (2 values), read through its one spelling");
 	const deps = w.seen.deps || {};
-	t.eq(Object.keys(deps).sort(), ["config", "db", "deviceResolver", "instructionStopsFor", "log", "logAudit", "onChange", "readSheet", "stopPointsFor", "truckResolver"],
+	t.eq(Object.keys(deps).sort(), ["config", "db", "deviceResolver", "instructionStopsFor", "listedAccounts", "log", "logAudit", "notify", "onChange", "readSheet", "stopPointsFor", "truckResolver"],
 		"§2 create() gets exactly its listed dependencies: no Sheets, Drive, mail or network client");
 	t.ok(deps.db === w.db && deps.logAudit === w.H.logAudit && deps.truckResolver === w.scope.buildHaulTruckResolver && deps.deviceResolver === w.scope.buildEldDeviceResolver,
 		"§2 ...the server's own database, logAudit and truck and device resolvers");
+	t.ok(deps.listedAccounts === w.H.RATECON_PDF_VIEWERS, "§2 ...and the server's own listed-accounts setting (A3: who may choose Live)");
 	const proj = typeof deps.readSheet === "function" ? await deps.readSheet() : new Map();
 	t.eq([...proj.keys()], ["123456789", "423456789"], "§2 readSheet(): the live loads by key; a cancelled, a soft-deleted and a blank Load ID are not there");
 	t.ok([...proj.values()].every((p) => JSON.stringify(Object.keys(p)) === JSON.stringify(E.PROJECTION_KEYS)), "§2 ...each projection has exactly its seven keys",
@@ -403,16 +412,19 @@ async function checkTablesOff(t, opts = {}) {
 }
 
 async function checkOn(t, opts = {}) {
-	const w = await world({ ...opts, env: { CHR_UPDATES_ENABLED: "true" } });
+	const w = await world({ ...opts, env: { CHR_UPDATES_ENABLED: "true", RATECON_PDF_VIEWER_IDS: "1" } });
 	t.eq([w.chr.config().updatesEnabled, w.chr.jobs()], [true, { sweep: true, prune: true }], "§5 true: the switch is on; the recorder and the prune");
 	t.eq([w.startsJob, w.intervals.map((i) => i.ms)], [["C.H. Robinson recorder", "C.H. Robinson prune (at boot, then daily)"], [MIN, 24 * 60 * MIN]],
 		"§5 ...each behind startsJob(): a tick a minute and a daily prune");
 	const before = await w.call("GET", "/api/integrations/chr/status", SA);
-	t.eq([before.status, before.json], [200, { enabled: true, sendEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", lastTickAt: "", lastSweepOk: "", lastErrorCode: "" }],
-		"§5 GET /status: on, milestones in Dry run (the first-enable default), location off, no tick yet");
+	t.eq([before.status, before.json], [200, {
+		enabled: true, sendEnabled: false, liveAllEnabled: false, locationEnabled: false, milestones: "dry_run", location: "off", settings: { ...S.DEFAULT_SETTINGS }, paused: null,
+		connection: { configured: false, carrierCodeConfigured: false, ready: false, lastTokenOkAt: "" },
+		lastTickAt: "", lastSweepOk: "", lastErrorCode: "", today: {}, live: { allowed: false, reason: "live_all_off" }, pilot: { allowed: true, reason: "" }, testConnection: { allowed: true },
+	}], "§5 GET /status: on, milestones in Dry run (the first-enable default), location off, no tick yet; the listed account (id 1) may set the pilot and test, and Live waits on CHR_LIVE_ALL_ENABLED");
 	t.eq(chrTables(w.db), [], "§5 ...and reading it made no table (the first tick does)");
-	const unknown = await w.call("GET", "/api/integrations/chr/events", SA);
-	t.eq([unknown.status, unknown.json && unknown.json.code, /json/.test(unknown.type)], [404, "NOT_FOUND", true], "§5 a path the page has no route for yet: a JSON 404, never the app page");
+	const unknown = await w.call("GET", "/api/integrations/chr/nothing", SA);
+	t.eq([unknown.status, unknown.json && unknown.json.code, /json/.test(unknown.type)], [404, "NOT_FOUND", true], "§5 a path the page has no route for: a JSON 404, never the app page");
 	t.eq((await w.call("GET", "/api/integrations/chr/status", DISP)).status, 403, "§5 a Dispatcher: 403 with the switch on too");
 	await at(T0, async () => {
 		const timer = w.intervals.find((i) => i.ms === MIN);
@@ -426,13 +438,20 @@ async function checkOn(t, opts = {}) {
 	t.eq(w.sockets.map((s) => [s.room, s.event, s.payload]), [["super-admin", "chr:changed", undefined]], "§5 ...and one chr:changed with no payload, to the super-admin room only");
 	const after = await w.call("GET", "/api/integrations/chr/status", SA);
 	t.eq([after.json && after.json.lastTickAt, after.json && after.json.milestones], [new Date(T0).toISOString(), "dry_run"], "§5 GET /status shows the tick");
+	const cross = await w.call("PUT", "/api/integrations/chr/settings", SA, { body: { settleMin: 6 }, headers: { "sec-fetch-site": "cross-site" } });
+	t.eq([cross.status, cross.json && cross.json.code, S.readSettings(w.db).settleMin], [403, "CROSS_SITE_REFUSED", 5], "§5 a cross-site settings save: refused by server.js's own refuseCrossOrigin");
+	const saved = await w.call("PUT", "/api/integrations/chr/settings", SA, { body: { settleMin: 6 } });
+	t.eq([saved.status, S.readSettings(w.db).settleMin], [200, 6], "§5 a same-origin save goes through");
+	t.eq(w.db.prepare("SELECT username, action, entity, entity_id, details FROM audit_trail WHERE action <> 'chr_baseline'").all(),
+		[{ username: "made_up_admin", action: "chr_settings_update", entity: "chr", entity_id: "settings", details: "settleMin: 5 → 6" }], "§5 ...audited through server.js's logAudit, naming the account");
+	t.eq(w.sockets.map((s) => [s.room, s.event]).slice(1), [["super-admin", "chr:changed"]], "§5 ...and the page told, in the super-admin room only");
 	return w;
 }
 
 async function checkReplica(t, opts = {}) {
-	const w = await world({ ...opts, env: { CHR_UPDATES_ENABLED: "true", CHR_SEND_ENABLED: "true", CHR_LOCATION_ENABLED: "true" }, replica: { fetch: transportSpy }, startsJobAnswer: false });
+	const w = await world({ ...opts, env: { CHR_UPDATES_ENABLED: "true", CHR_SEND_ENABLED: "true", CHR_LIVE_ALL_ENABLED: "true", CHR_LOCATION_ENABLED: "true" }, replica: { fetch: transportSpy }, startsJobAnswer: false });
 	const c = w.chr.config();
-	t.eq([c.updatesEnabled, c.sendEnabled, c.locationEnabled, w.chr.jobs()], [false, false, false, { sweep: false, prune: false }], "§6 a replica: all three set to true, all three off");
+	t.eq([c.updatesEnabled, c.sendEnabled, c.liveAllEnabled, c.locationEnabled, w.chr.jobs()], [false, false, false, false, { sweep: false, prune: false }], "§6 a replica: all four set to true, all four off");
 	t.eq(w.startsJob, [], "§6 ...no timer is asked for");
 	t.eq((await w.call("GET", "/api/integrations/chr/status", SA)).json, { enabled: false }, "§6 ...GET /status { enabled: false }");
 	t.eq((await w.call("GET", "/api/integrations/chr/events", SA)).json, { error: "Not found", code: "FEATURE_OFF" }, "§6 ...every other path 404 FEATURE_OFF");
@@ -609,6 +628,30 @@ async function checkRefresh(t, script = REFRESH_SCRIPT) {
 	}
 }
 
+// ------------------------------------------------------------------ §12: the connection settings and the notices (PR 3-shell)
+const CONNECTION_NAMES = ["CHR_API_BASE_URL", "CHR_TOKEN_URL", "CHR_CLIENT_ID", "CHR_CLIENT_SECRET", "CHR_CARRIER_CODE_SECRET"];
+const SECRET_CANARY = "made-up-secret-canary-0001";
+async function checkConnection(t, opts = {}) {
+	const read = [...replicaRules.namesReadBy([BLOCK])];
+	t.ok(CONNECTION_NAMES.every((n) => read.includes(n)), "§12 the block reads the five connection settings by name, where the replica rules' scanner sees them", read);
+	t.eq(["CHR_CLIENT_ID", "CHR_CLIENT_SECRET", "CHR_CARRIER_CODE_SECRET"].filter((n) => !replicaRules.OUTBOUND_CREDENTIALS.includes(n)), [], "§12 the client id, secret and carrier code: outbound credentials (a replica refuses to start with any set)");
+	t.eq(["CHR_CLIENT_ID", "CHR_CARRIER_CODE_SECRET"].filter((n) => !replicaRules.CARRIER_ACCOUNT_SETTINGS.includes(n)), [], "§12 the client id and carrier code: never copied, like the carrier's own numbers");
+	t.eq(["CHR_API_BASE_URL", "CHR_TOKEN_URL"].filter((n) => !replicaRules.PRODUCTION_TARGET_SETTINGS.includes(n)), [], "§12 the two URLs: production targets, never copied");
+	const w = await world({ ...opts, listen: false, env: { CHR_UPDATES_ENABLED: "true", CHR_SEND_ENABLED: "true", CHR_CLIENT_SECRET: SECRET_CANARY, CHR_TOKEN_URL: "https://chr.example.test/made-up" } });
+	const warn = w.logs.filter((l) => /\[chr\] sending is on but the connection is not configured/.test(l));
+	t.eq(warn, ["[chr] sending is on but the connection is not configured (CHR_API_BASE_URL, CHR_CLIENT_ID not set): nothing is sent"], "§12 sending on, the connection half set: one warning naming the missing settings");
+	t.ok(!w.logs.join("\n").includes(SECRET_CANARY) && !w.logs.join("\n").includes("chr.example.test"), "§12 ...never a value");
+	t.eq([w.chr.config().credentialsConfigured, JSON.stringify(w.chr.config()).includes(SECRET_CANARY)], [false, false], "§12 the config view: not configured, and no value");
+	const quiet = await world({ ...opts, listen: false, env: { CHR_UPDATES_ENABLED: "true" } });
+	t.eq(quiet.logs.filter((l) => /connection is not configured/.test(l)), [], "§12 sending off: no warning (nothing would be sent anyway)");
+	const deps = w.seen.deps || {};
+	if (typeof deps.notify === "function") deps.notify({ title: "C.H. Robinson: made-up notice", body: "Made-up body." });
+	t.eq(w.db.prepare("SELECT type, title, body FROM dispatch_notifications").all(), [{ type: "chr-attention", title: "C.H. Robinson: made-up notice", body: "Made-up body." }],
+		"§12 notify(): one in-app notice of the CHR type (hidden from every role but Super Admin, §9)");
+	t.eq(w.sockets.map((s) => [s.room, s.event, s.payload && s.payload.type]), [["super-admin", "dispatch-notification", "chr-attention"]], "§12 ...told to the super-admin room only, never by email");
+	return w;
+}
+
 // ------------------------------------------------------------------ mutants
 const mutateBlock = (from, to) => {
 	if (!BLOCK.includes(from)) throw new Error(`mutant: the block has no ${JSON.stringify(from)}`);
@@ -662,7 +705,7 @@ async function main() {
 	section("§6  a replica");
 	await checkReplica(T);
 	await closeAll();
-	for (const name of ["CHR_UPDATES_ENABLED", "CHR_SEND_ENABLED", "CHR_LOCATION_ENABLED"]) {
+	for (const name of ["CHR_UPDATES_ENABLED", "CHR_SEND_ENABLED", "CHR_LIVE_ALL_ENABLED", "CHR_LOCATION_ENABLED"]) {
 		const why = replicaRules.enableRefusal(name);
 		T.ok(typeof why === "string" && /C\.H\. Robinson/.test(why) && !replicaRules.ENABLE_ALLOWED.includes(name), `§6 replica:start --enable ${name} is refused, naming C.H. Robinson`, why);
 	}
@@ -679,6 +722,10 @@ async function main() {
 	await checkNotices(T);
 	await closeAll();
 
+	section("§12 the connection settings and the notices");
+	await checkConnection(T);
+	await closeAll();
+
 	section("§10 the refresh step");
 	await checkRefresh(T);
 
@@ -693,7 +740,11 @@ async function main() {
 		replica: mutateBlock("replica: Boolean(REPLICA),", "replica: false,"),
 		normalizedKey: mutateBlock("r ? r.loadIdCell || key : key", "key"),
 		noLiveView: mutateBlock("projectView(liveJobTrackingView(await getJobTrackingCached()))", "projectView(await getJobTrackingCached())"),
-		noDeny: mutateBlock('|| "",\n\t\treplica', '&& "",\n\t\treplica'),
+		noDeny: mutateBlock('|| "",\n\t\tconnection', '&& "",\n\t\tconnection'),
+		warnValues: mutateBlock(".filter(([, v]) => !v).map(([name]) => name);", ".filter(([, v]) => !v).map(([name]) => name).concat(Object.values(chrConnection));"),
+		noticeToDispatch: mutateBlock("io.to(\"super-admin\").emit(\"dispatch-notification\"", "io.to(\"dispatch\").emit(\"dispatch-notification\""),
+		passThroughGuard: mutateBlock("chr.mount(app, { requireRole, refuseCrossOrigin });", "chr.mount(app, { requireRole, refuseCrossOrigin: (req, res, next) => next() });"),
+		noListed: mutateBlock("\tlistedAccounts: RATECON_PDF_VIEWERS,\n", ""),
 		noticeScope: (() => {
 			const from = ", AUTO_INVOICE_NOTICE_TYPE, CHR_NOTICE_TYPE]";
 			if (!LIFT.text.includes(from)) throw new Error("mutant: noticeTypeScope() names no CHR_NOTICE_TYPE");
@@ -729,7 +780,7 @@ async function main() {
 		libWrap: wrapInstance((inst) => ({ ...inst, mount: (app, g) => app.use(realChr.MOUNT_PATH, g.requireRole("Super Admin"), (req, res, next) => (req.path === "/status" ? res.json(inst.status()) : next())) })),
 	}));
 	await mutantFails("routes mounted without the Super Admin gate", (t) => checkOff(t, {
-		libWrap: wrapInstance((inst) => ({ ...inst, mount: (app) => inst.mount(app, { requireRole: () => (req, res, next) => next() }) })),
+		libWrap: wrapInstance((inst) => ({ ...inst, mount: (app, g) => inst.mount(app, { requireRole: () => (req, res, next) => next(), refuseCrossOrigin: g.refuseCrossOrigin }) })),
 	}));
 	await mutantFails("a prune timer with no tables (NL5)", (t) => checkOff(t, { blockText: M.pruneNoTables }));
 	await mutantFails("the prune left out once the tables exist (NL5)", (t) => checkTablesOff(t, { blockText: M.pruneDropped }));
@@ -740,6 +791,10 @@ async function main() {
 		libWrap: (lib) => ({ ...lib, projectView: (v) => { const out = lib.projectView(v); for (const [k, p] of out.projections) out.projections.set(k, { ...p, payment: MONEY }); return out; } }),
 	}));
 	await mutantFails("the deny list not handed to the lib", (t) => checkHandover(t, { blockText: M.noDeny }));
+	await mutantFails("a mount whose same-origin guard lets everything through", (t) => checkOn(t, { blockText: M.passThroughGuard }));
+	await mutantFails("the listed-accounts setting not handed to the lib", (t) => checkOn(t, { blockText: M.noListed }));
+	await mutantFails("a missing-settings warning that prints the values", (t) => checkConnection(t, { blockText: M.warnValues }));
+	await mutantFails("a CHR notice told to the dispatch room", (t) => checkConnection(t, { blockText: M.noticeToDispatch }));
 	await mutantFails("GET /status showing the deny list (NL1)", (t) => checkCanary(t, {
 		libWrap: (lib, w) => ({ ...lib, create: (deps) => {
 			const inst = lib.create(deps);
@@ -774,5 +829,8 @@ main().then(async () => {
 }).catch(async (err) => {
 	console.error(err);
 	await closeAll();
+	// What failed before the stop, so a run on an older tree still says what it lacks.
+	T.failures.forEach((f) => console.log(`  ✗ ${f}`));
+	console.log(`\n${T.pass} passed, ${T.failures.length} failed, then stopped`);
 	process.exit(1);
 });

@@ -1,9 +1,7 @@
 <template>
-  <!-- The training videos (DRIVER_TRAINING_VIDEOS_ENABLED). DriverView renders this
-       only where the payload's `trainingVideos` says: "onboarding" on the lock
-       screen, "kit" on the Kit tab. Nothing reaches YouTube until the driver taps
-       the player, and the YouTube link always shows, since a refused frame can't be
-       detected. -->
+  <!-- Shown where the payload's `trainingVideos` says (DRIVER_TRAINING_VIDEOS_ENABLED).
+       Nothing reaches YouTube before the tap, and the YouTube link always shows, since
+       a refused frame can't be detected. -->
   <section :class="['card', 'tv-card', `tv-card-${variant}`]" :aria-labelledby="headingId" data-testid="training-videos" :data-variant="variant">
     <h2 :id="headingId" class="tv-heading">{{ TRAINING_VIDEOS_HEADING }}</h2>
     <p class="tv-intro">{{ intro }}</p>

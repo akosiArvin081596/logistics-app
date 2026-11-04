@@ -1016,11 +1016,18 @@ function extractRouteBody(pathLiteral) {
 const FINALIZE_BODY = extractRouteBody("/api/periods/:period/finalize");
 const REOPEN_BODY = extractRouteBody("/api/periods/:period/reopen");
 
+// Section 16's close text: server.js's own receipt list and the lib that counts
+// the receipts approved automatically (absent before it existed).
+const RECEIPT_ID_LIST = new Function(`${extractFn("receiptIdList")}\nreturn receiptIdList;`)();
+const WATCH_LIB = (() => {
+	try { return require(path.join(__dirname, "..", "lib", "receipt-auto-approve-watch")); } catch { return null; }
+})();
+
 // Stubs for everything the handlers touch besides the validation under test.
 // db is dispatched on SQL text so the reopen handler's three statements can be
 // told apart; `lockRow` is what SELECT … FROM period_locks returns.
-function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
-	const calls = { finalized: [], audited: [], reopened: [] };
+function runRoute(bodySrc, { period, lockRow = undefined, enabled = true, close = null }) {
+	const calls = { finalized: [], audited: [], reopened: [], autoAsked: [] };
 	const res = {
 		_status: 200, _json: null,
 		status(c) { this._status = c; return this; },
@@ -1040,7 +1047,7 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		const { req, res, db, calls, PERIOD_FINALIZE_ENABLED,
 			LOCKABLE_MONTH_KEY, isPlausibleLockPeriod, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR,
 			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, personalWaitingInPeriod, receiptIdList,
-			forgetDriverRateOnlyMonths, correctionWaitingForClose } = ctx;
+			forgetDriverRateOnlyMonths, correctionWaitingForClose, autoApprovedReceiptsInPeriod, receiptAutoApproveWatch } = ctx;
 		return (async () => ${bodySrc})();
 	`);
 	return fn({
@@ -1056,12 +1063,15 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		periodLockStmt: () => ({ get: () => undefined }),
 		finalizePeriod: async (p, a) => { calls.finalized.push([p, a]); return { stamped: 3, investors: 1, periods: [p] }; },
 		logAudit: (...a) => { calls.audited.push(a); },
-		pendingReceiptsInPeriod: () => [],
+		pendingReceiptsInPeriod: () => (close ? close.pending : []),
 		personalWaitingInPeriod: () => [],
 		correctionWaitingForClose: () => [],
-		receiptIdList: () => "",
+		receiptIdList: close ? RECEIPT_ID_LIST : () => "",
 		// The daily-rate rule's per-month answers, cleared after a reopen (none kept here).
 		forgetDriverRateOnlyMonths: () => {},
+		// Section 16: the receipts the automatic pass approved, and its text.
+		autoApprovedReceiptsInPeriod: (p) => { calls.autoAsked.push(p); return close ? close.autoApproved : []; },
+		receiptAutoApproveWatch: WATCH_LIB || {},
 	}).then(() => ({ status: res._status, body: res._json, calls }));
 }
 
@@ -1505,6 +1515,114 @@ if (!process.env.TZ_CHILD) {
 			`mileage detail, process zone ${tz}: each status change under its business day, and only days in the range`);
 	}
 	mdb.close();
+}
+
+// ------------------------ 16. the close counts the receipts approved automatically
+// Plan §4.12 (L14, NL9): the manual close's audit row, and the automatic close's
+// audit row and "is closed" notice, add "N receipt(s) approved automatically"
+// beside the Pending count, only when N > 0, so a close with none reads as before.
+// The handler body and maybeCloseFinishedPeriods() run as shipped, on stubs.
+if (!process.env.TZ_CHILD) {
+	console.log("\n16. the close counts the receipts approved automatically (plan §4.12, L14, NL9)");
+	const PENDING = [{ id: 3 }];
+	const AUTO = [{ id: 5 }, { id: 6 }];
+	const MANUAL_TODAY = "Finalized 2026-07 early (3 payout row(s) frozen; 1 receipt(s) still Pending review: #3)";
+	routeCase("manual close, two receipts approved automatically",
+		() => runRoute(FINALIZE_BODY, { period: "2026-07", close: { pending: PENDING, autoApproved: AUTO } }),
+		(r, label) => {
+			eq(r.calls.autoAsked, ["2026-07"], `${label} — it asks for the month's receipts approved automatically`);
+			eq(r.calls.audited.map((a) => a[4]), ["Finalized 2026-07 early (3 payout row(s) frozen; 1 receipt(s) still Pending review: #3; 2 receipt(s) approved automatically: #5, #6)"],
+				`${label} — the audit row carries the count beside the Pending one`);
+		});
+	routeCase("manual close, none approved automatically (NL9)",
+		() => runRoute(FINALIZE_BODY, { period: "2026-07", close: { pending: PENDING, autoApproved: [] } }),
+		(r, label) => eq(r.calls.audited.map((a) => a[4]), [MANUAL_TODAY], `${label} — the audit row is today's, byte for byte`));
+
+	// maybeCloseFinishedPeriods() as shipped: one month due, closed, then its audit
+	// row and notice. Its module-level state starts as at boot.
+	async function runSweep(autoApproved) {
+		const calls = { audits: [], notices: [], autoAsked: [] };
+		const fn = new Function("ctx", `
+			const { PERIOD_FINALIZE_ENABLED, PERIOD_CLOSE_RETRY_MS, PERIOD_CLOSE_MAX_RETRIES, PERIOD_CLOSE_MAX_ATTEMPTS, PERIOD_CLOSE_SYSTEM_ACTOR,
+				periodsDueForClose, finalizePeriods, insertDispatchNotification, periodLabel, pendingReceiptsInPeriod, personalWaitingInPeriod,
+				correctionWaitingForClose, logAudit, receiptIdList, settlementGraceDays, console, autoApprovedReceiptsInPeriod, receiptAutoApproveWatch } = ctx;
+			let periodCloseRunning = false, periodCloseFailStreak = 0, periodCloseLastAttempt = 0, periodCloseRetryStreak = 0;
+			${SWEEP_SRC}
+			return maybeCloseFinishedPeriods();
+		`);
+		await fn({
+			PERIOD_FINALIZE_ENABLED: true, PERIOD_CLOSE_RETRY_MS: 60000, PERIOD_CLOSE_MAX_RETRIES: 5, PERIOD_CLOSE_MAX_ATTEMPTS: 3,
+			PERIOD_CLOSE_SYSTEM_ACTOR: { session: { user: { id: 0, username: "period-close", role: "system" } } },
+			periodsDueForClose: () => ["2026-07"],
+			finalizePeriods: async (periods) => ({ periods, stamped: 2, investors: 1 }),
+			insertDispatchNotification: { run: (...a) => { calls.notices.push(a); } },
+			periodLabel: (p) => `label(${p})`,
+			pendingReceiptsInPeriod: () => PENDING,
+			personalWaitingInPeriod: () => [],
+			correctionWaitingForClose: () => [],
+			logAudit: (...a) => { calls.audits.push(a); },
+			receiptIdList: RECEIPT_ID_LIST,
+			settlementGraceDays: () => 14,
+			console: { log() {}, error() {}, warn() {} },
+			autoApprovedReceiptsInPeriod: (p) => { calls.autoAsked.push(p); return autoApproved; },
+			receiptAutoApproveWatch: WATCH_LIB || {},
+		});
+		return calls;
+	}
+	const NOTICE_TODAY = "Final settlement complete. Investor payouts for label(2026-07) are frozen at their final figure — statements are now available and payouts can be marked paid. " +
+		"Receipts dated in label(2026-07) that arrive from now on will be booked to the current open month. " +
+		"1 receipt(s) booked to label(2026-07) were still Pending review when it closed; they count in its figures (receipt #3).";
+	const AUTO_TODAY = "Finalized 2026-07 at month end (2 payout row(s) frozen; 1 receipt(s) still Pending review: #3)";
+	const META_TODAY = { period: "2026-07", stamped: 2, investors: 1, pendingReceiptIds: [3], personalWaitingLineIds: [] };
+	routeCase("automatic close, two receipts approved automatically",
+		() => runSweep(AUTO),
+		(c, label) => {
+			eq(c.autoAsked, ["2026-07"], `${label} — it asks for the closed month's receipts approved automatically`);
+			eq(c.audits.map((a) => [a[0].session.user.username, a[1], a[3], a[4]]),
+				[["period-close", "period_finalize", "2026-07", "Finalized 2026-07 at month end (2 payout row(s) frozen; 1 receipt(s) still Pending review: #3; 2 receipt(s) approved automatically: #5, #6)"]],
+				`${label} — the audit row carries the count (L14)`);
+			eq(c.notices.map((n) => [n[1], n[2]]),
+				[["label(2026-07) is closed", `${NOTICE_TODAY} 2 receipt(s) booked to label(2026-07) were approved automatically (receipt #5, #6).`]],
+				`${label} — the "is closed" notice carries it too`);
+			eq(c.notices.map((n) => JSON.parse(n[3])), [{ ...META_TODAY, autoApprovedReceiptIds: [5, 6] }], `${label} — and its data names them`);
+		});
+	routeCase("automatic close, none approved automatically (NL9)",
+		() => runSweep([]),
+		(c, label) => {
+			eq(c.audits.map((a) => a[4]), [AUTO_TODAY], `${label} — the audit row is today's, byte for byte`);
+			eq(c.notices.map((n) => [n[1], n[2], n[3]]), [["label(2026-07) is closed", NOTICE_TODAY, JSON.stringify(META_TODAY)]], `${label} — the notice and its data are today's, byte for byte`);
+		});
+
+	// The count itself: Approved, with the record still naming the pass, booked to
+	// the month by the settlement rule (EXPENSE_PERIOD_EXPR, read from server.js).
+	const Database = require("better-sqlite3");
+	const periodDef = SRC.match(/\nconst EXPENSE_PERIOD_EXPR =\s*("(?:[^"\\]|\\.)*");/);
+	const PERIOD_EXPR = periodDef ? JSON.parse(periodDef[1]) : "";
+	ok(!!WATCH_LIB && typeof WATCH_LIB.approvedInPeriod === "function", "lib/receipt-auto-approve-watch.js counts them (approvedInPeriod)");
+	if (WATCH_LIB && typeof WATCH_LIB.approvedInPeriod === "function") {
+		const cdb = new Database(":memory:");
+		cdb.exec(`CREATE TABLE expenses (id INTEGER PRIMARY KEY, date TEXT NOT NULL, posted_period TEXT DEFAULT '', created_at TEXT, status TEXT DEFAULT 'Pending',
+			status_by_role TEXT DEFAULT '', status_by_id INTEGER, status_by_name TEXT DEFAULT '', status_at TEXT DEFAULT '')`);
+		const put = cdb.prepare("INSERT INTO expenses (id, date, posted_period, created_at, status, status_by_role, status_by_name) VALUES (?, ?, ?, '2026-07-20 10:00:00', ?, ?, ?)");
+		put.run(1, "2026-07-10", "", "Approved", "system", "receipt-auto-approve"); // counted
+		put.run(2, "2026-07-11", "", "Approved", "Super Admin", "made_up_admin"); // a person's approval
+		put.run(3, "2026-07-12", "", "Pending", "", ""); // still Pending
+		put.run(4, "2026-07-13", "", "Pending", "system", "receipt-auto-approve-undo"); // undone by the rollback
+		put.run(5, "2026-08-02", "", "Approved", "system", "receipt-auto-approve"); // another month
+		put.run(6, "2026-06-30", "2026-07", "Approved", "system", "receipt-auto-approve"); // booked to July
+		put.run(7, "2026-07-14", "", "Approved", "", ""); // approved before the record existed
+		eq(WATCH_LIB.approvedInPeriod(cdb, "2026-07", PERIOD_EXPR).map((x) => x.id), [1, 6], "only the month's receipts whose standing approval is the pass's own");
+		const bare = new Database(":memory:");
+		bare.exec("CREATE TABLE expenses (id INTEGER PRIMARY KEY, date TEXT NOT NULL, posted_period TEXT DEFAULT '', created_at TEXT, status TEXT DEFAULT 'Pending')");
+		const errors = [];
+		let threw = false;
+		let got = null;
+		try { got = WATCH_LIB.approvedInPeriod(bare, "2026-07", PERIOD_EXPR, { error: (...a) => errors.push(a.join(" ")) }); } catch { threw = true; }
+		ok(!threw && Array.isArray(got) && got.length === 0 && errors.length === 1,
+			"a count it can't read is none, logged, never thrown: the close still writes its audit row and notice", JSON.stringify({ threw, got, errors }));
+		cdb.close();
+		bare.close();
+	}
 }
 
 // ⚠️ The section-12 route assertions are ASYNC (the finalize handler is an async

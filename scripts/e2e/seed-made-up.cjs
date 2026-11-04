@@ -195,7 +195,7 @@ async function seedMadeUp({ destAbs, passwords, log, Database }) {
 	const port = await freePort();
 	const env = { ...process.env, NODE_BIN: process.execPath, E2E_WORK_DIR: WORK, E2E_NO_CLIENT: "1" };
 	// The seed server runs with every optional feature off, whatever the caller exported.
-	for (const k of ["E2E_MAINTENANCE_NOTICE", "E2E_FAKE_GMAIL", "E2E_DRIVER_INSTRUCTIONS_DENY", "INVESTOR_LEASE_PAYOUTS_ENABLED"]) delete env[k];
+	for (const k of ["E2E_MAINTENANCE_NOTICE", "E2E_FAKE_GMAIL", "E2E_DRIVER_INSTRUCTIONS_DENY", "E2E_DRIVER_VIDEOS", "INVESTOR_LEASE_PAYOUTS_ENABLED"]) delete env[k];
 	const logFile = path.join(WORK, `server-${port}.log`);
 	let truckId = null;
 	try {
@@ -282,4 +282,6 @@ async function seedMadeUp({ destAbs, passwords, log, Database }) {
 	}
 }
 
-module.exports = { seedMadeUp, madeUpPng, madeUpJpeg, ACCOUNTS, DRIVER_NAME, TRUCK_UNIT };
+// The boot, client and stop helpers are shared with walkthrough/plant.cjs, which makes its
+// made-up driver through the same routes on a short-lived server of its own.
+module.exports = { seedMadeUp, madeUpPng, madeUpJpeg, ACCOUNTS, DRIVER_NAME, TRUCK_UNIT, client, freePort, runScript, stopSeedServer };

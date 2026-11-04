@@ -496,6 +496,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
 		// as with their flag off.
 		annotateDashboardPickupReview: () => 0,
+		// The arrival pickup line (its own runners cover it): inert here, as with its flag off.
+		annotatePickupArrival: () => 0,
 		// GET /api/dashboard requires lib/load-search-refs.js inline.
 		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, "..", p) : p),
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },

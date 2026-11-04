@@ -158,6 +158,8 @@ const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
 // Who set each load status, and where the truck was at "At Shipper" (ARRIVAL_PICKUP_RECORDER_ENABLED).
 const arrivalRecorder = require("./lib/arrival-recorder");
+// The load detail's read-only pickup line under the arrival pickup date rule (`_pickupArrival`).
+const arrivalPickupDisplay = require("./lib/arrival-pickup-display");
 // A live ETA against the Drop-off Appointment, on the receiver's clock.
 const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
@@ -25470,7 +25472,9 @@ function isDefReceipt(r) {
 // read-only inspection path can match without writing a single row. Without it a
 // dry run on a box that has never run the sweep matches against an empty table
 // and reports nothing — which looks identical to "nothing matches".
-function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = true, writeReceipts = true, events: providedEvents = null } = {}) {
+// `includeRejected` (receipts auto-approve's shadow) matches Rejected receipts too,
+// in memory only: such a match is never stored.
+function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = true, writeReceipts = true, events: providedEvents = null, includeRejected = false } = {}) {
 	// Two windows, and they must be nested this way round. Episodes are scoped to
 	// local_day >= sinceDay; receipts are loaded from ONE DAY EARLIER, because the
 	// +/-1 day rule means the oldest in-scope episode can legitimately be paid for
@@ -25509,7 +25513,7 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 		       posted_period, created_at
 		FROM expenses
 		WHERE type = 'Fuel' AND COALESCE(date,'') <> '' AND date >= ?
-		  AND ${EXPENSE_PNL_FILTER}
+		  AND ${includeRejected ? "1 = 1" : EXPENSE_PNL_FILTER}
 		ORDER BY date ASC, id ASC
 	`).all(receiptSinceDay);
 
@@ -25575,7 +25579,7 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 	// In-memory episodes carry synthetic negative ids that exist in no table, so
 	// they can never be persisted. Belt-and-braces against a future caller passing
 	// `events` and forgetting `persist: false`.
-	const canPersist = persist && !providedEvents;
+	const canPersist = persist && !providedEvents && !includeRejected;
 	let backfilled = 0;
 	let backfillSkippedLocked = 0;
 	// POSITIVE CONTROL, hoisted out of the write loop — the same probe the boot
@@ -27639,6 +27643,62 @@ app.post("/api/admin/fuel-gallons-recovery/apply", requireRole("Super Admin"), r
 		fuelGallonsRunning = false;
 	}
 });
+
+// <receipt-auto-approve-wiring>
+// Receipts auto-approve (lib/receipt-auto-approve-pass.js): an hourly pass approves a
+// Pending fuel receipt only when every rule v1 holds. The settings, read once at start:
+//   RECEIPT_AUTO_APPROVE_ENABLED  on only when exactly "true". Off: no timer, no pass, no
+//     OCR call, no review row; the report route answers mode "off".
+//   RECEIPT_AUTO_APPROVE_SHADOW  with the flag on, shadow unless exactly "false". Shadow
+//     records verdicts and writes no receipt; on also needs RECEIPT_STATUS_RECORDER_ENABLED.
+//   RECEIPT_AUTO_APPROVE_INTERVAL_MIN (60, 60-360), RECEIPT_AUTO_APPROVE_MAX_READS_PER_PASS
+//     (20, at most 40), RECEIPT_AUTO_APPROVE_MAX_READS_PER_DAY (30, at most 100).
+// Without FUEL_EVENTS_ENABLED or a Gemini key it doesn't start. A replica or an import
+// starts no timer (startsJob()). scripts/test-receipt-auto-approve-sweep.js lifts this block.
+const receiptAutoApprovePass = require("./lib/receipt-auto-approve-pass");
+const receiptAutoApproveConfig = receiptAutoApprovePass.readConfig(process.env, {
+	recorderOn: RECEIPT_STATUS_RECORDER_ENABLED,
+	fuelEventsOn: FUEL_EVENTS_ENABLED,
+	scannerConfigured: !!GEMINI_API_KEY,
+});
+receiptAutoApprovePass.ensureSchema(db);
+const receiptAutoApprove = receiptAutoApprovePass.create({
+	db,
+	config: receiptAutoApproveConfig,
+	fuel: {
+		take: () => {
+			if (fuelEventsRunning) return false;
+			fuelEventsRunning = true;
+			return true;
+		},
+		release: () => { fuelEventsRunning = false; },
+		// Links only: the odometer backfill and the "no receipt" alerts stay with the 6-hourly sweep.
+		detectAndMatch: () => {
+			detectAndPersistFuelEvents();
+			return matchFuelEventsToReceipts({ persist: true, writeReceipts: false });
+		},
+		matchWithRejected: () => matchFuelEventsToReceipts({ persist: false, writeReceipts: false, includeRejected: true }).matched,
+	},
+	closeRunning: () => periodCloseRunning,
+	expenseRowPeriodLocked,
+	periodLocksReadable,
+	monthDue: (period) => isPastGrace(period, settlementGraceDays()),
+	expensePostedPeriod,
+	band: fuelCpgBandFromFleet,
+	personalLiveIds: personalLiveExpenseIds,
+	receiptUri: receiptDataUriForOcr,
+	readReceipt: runReceiptOcr,
+	normalizeDriverName,
+	logAudit,
+	matchDays: FUEL_EVENTS_MATCH_DAYS,
+	log: console,
+});
+console.log(receiptAutoApprovePass.startLine(receiptAutoApproveConfig));
+receiptAutoApprove.mount(app, { requireRole });
+if (receiptAutoApproveConfig.runs && startsJob("receipt auto-approve pass")) receiptAutoApprove.start({ setTimeout, setInterval });
+// </receipt-auto-approve-wiring>
+// What GET /api/expenses/all carries of the pass: its mode, and each verdict in on mode only.
+const receiptAutoApproveList = require("./lib/receipt-auto-approve-list");
 
 // Validate + normalize the line-item/deduction rows of a manual invoice.
 // Returns { items } on success or { error } with a user-facing message.
@@ -44745,8 +44805,8 @@ const DISPATCH_COMPLETED_RE = /^(delivered|completed|pod received)$/i;
 //
 // ⚠️ IT IS NOT THE "DOES THIS ROW CONTRIBUTE TODAY?" PREDICATE statusOverrideBlocker()
 // warns against, and the difference is load-bearing. That predicate asks only
-// about the BEFORE state, so it answers "no" for the 25 Cancelled rows sitting
-// in locked months ($29,166.25) and waves through the flip to Delivered that
+// about the BEFORE state, so it answers "no" for Cancelled rows sitting
+// in locked months and waves through the flip to Delivered that
 // injects them. This asks about BOTH sides — `completed(before) || completed(after)`
 // — so the injection is material by the AFTER state and the erasure by the
 // BEFORE state, and both refuse. Reviving a cancelled load is allowed (it moves
@@ -45978,9 +46038,8 @@ function sendPeriodRefusal(req, res, kind, periods, extra, audit) {
 // (the drift figure printed beside the frozen one) and page 1 of the statement
 // PDF. Reopening a period also re-links an `owed` row to live earnings, so a
 // month reopened after such a delete settles at a different number with nothing
-// recording why. Measured on production 2026-08-08: 381 of 391 live loads sit in
-// a locked month, $313,922.93 of completed revenue, and the single largest
-// (load 553198052, $4,800, 2026-05) sits in a month already marked PAID.
+// recording why. Most live loads sit in a locked month, some of them in months
+// already marked PAID.
 //
 // Ungated on PERIOD_FINALIZE_ENABLED, like every other lock guard: with the flag
 // off period_locks is empty, isLocked() is false for everything, and this costs
@@ -46865,6 +46924,28 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 // ============================================================
 // DASHBOARD — Aggregated data from multiple sheets
 // ============================================================
+// `_pickupArrival` (lib/arrival-pickup-display.js) on request-local rows, before any
+// sanitizing, each cell read as the weekly invoice reads it. No key while the rule is off.
+function annotatePickupArrival(headers, rows) {
+	const cols = invoiceWeekColumns(headers);
+	const assignedCol = jobTrackingMonthCols(headers).dateCol;
+	const cell = (row, col) => (col ? row[col] : "");
+	return arrivalPickupDisplay.annotateRows({
+		db, env: process.env, rows, zone: APP_TIMEZONE, tripFrom: TRIP_WORK_DAYS_FROM, payTypes: getDriverPayStructures,
+		read: {
+			loadId: (row) => cell(row, cols.loadIdCol),
+			completed: (row) => /delivered|completed|pod received/i.test(cell(row, cols.statusCol) || ""),
+			driverKey: (row) => normalizeDriverName(cell(row, cols.driverCol)),
+			assigned: (row) => (cell(row, assignedCol) ? moneySheetDate(cell(row, assignedCol)) : null),
+			scheduled: (row) => {
+				const d = cell(row, cols.pickupCol) ? parseInvoiceDate(cell(row, cols.pickupCol)) : null;
+				return d && !isNaN(d) ? fmtLocalDate(d) : "";
+			},
+		},
+		log: (msg) => console.warn(`[arrival-pickup] ${msg}`),
+	});
+}
+
 app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
@@ -47130,6 +47211,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Needs Review codes (`_review`, lib/load-review-flags.js): on these raw rows, before
 		// sanitizing, so a withheld Load ID still gets its code (nothing with the flag off)
 		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
+		annotatePickupArrival(jobTracking.headers, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
 		// A Dispatcher's rows also carry `_loadKey` beside a withheld Load ID
@@ -49187,6 +49269,11 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 const DRIVER_TRAINING_VIDEOS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TRAINING_VIDEOS_ENABLED ?? "").trim());
 const driverTrainingVideos = require("./lib/driver-training-videos");
 
+// The driver stepper's GPS phases, off unless exactly "true" (lib/gps-phases.js). On, each active
+// load in the driver app's payload carries `_gpsPhases` { pickup, drop }; off, no key and no lookup.
+const DRIVER_STEPPER_GPS_PHASES_ENABLED = process.env.DRIVER_STEPPER_GPS_PHASES_ENABLED === "true";
+const driverGpsPhases = require("./lib/gps-phases").create({ enabled: DRIVER_STEPPER_GPS_PHASES_ENABLED, readers: () => gpsPhasesReaders() });
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -49387,6 +49474,8 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			load._receiptCount = receiptCounts[lid] || 0;
 			load._otherCount = otherCounts[lid] || 0;
 		});
+		// The pickup line on his own rows only (`loads` holds no one else's)
+		annotatePickupArrival(jobTracking.headers, loads);
 
 		// Strip rate/revenue columns for every caller but Super Admin, which
 		// in practice is the Driver reading their own loads.
@@ -49475,6 +49564,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// `_instructions` { state, highlights } per load, codes only, keyed by each
 		// row's own stored Load ID (lib/driver-instructions-runtime.js).
 		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
+		// The stepper's GPS phases (DRIVER_STEPPER_GPS_PHASES_ENABLED): `_gpsPhases` on each
+		// active load, judged from the rows as stored (lib/gps-phases.js); off, rows as they are.
+		filteredLoads = driverGpsPhases.annotate(filteredLoads, loads, jobTracking.headers);
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -50486,18 +50578,15 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 // Two things make it non-obvious that this route needs it:
 //
 //   • BEFORE covers the RESURRECTION, and it does so only because
-//     loadRowPeriods() is deliberately status-blind. 26 rows sit at
-//     "Cancelled"/"Canceled" and are dropped from every aggregate by
+//     loadRowPeriods() is deliberately status-blind. Rows at
+//     "Cancelled"/"Canceled" are dropped from every aggregate by
 //     excludeDroppedLoads(), so a guard phrased as "does this row contribute to a
 //     locked month TODAY?" answers *no* for all of them and waves the write
-//     through. 25 of those 26 are inside a locked month and carry $29,166.25
-//     between them (the 26th, load 512441414, sits in an unlocked 2025-04) — so
-//     flipping them to "Delivered" INJECTS that money into closed months,
-//     including load 554481641, $4,100, assigned 2026-06, a month whose payout is
-//     already `paid`. Asking loadRowPeriods() instead — which reads dates and
-//     never looks at the status — gets that right for free, and is why no
-//     status-aware predicate belongs here. (Counts measured 2026-08-09; recount
-//     the CANCELLED rows and you get 26, not 25. The gap is the unlocked one.)
+//     through. Most of them sit inside locked months, so flipping them to
+//     "Delivered" INJECTS their money into closed months, including months whose
+//     payout is already `paid`. Asking loadRowPeriods() instead — which reads
+//     dates and never looks at the status — gets that right for free, and is why
+//     no status-aware predicate belongs here.
 //   • AFTER covers the DATES THIS ROUTE ITSELF WRITES. It stamps Status Update
 //     Date and sets or clears Completion Date, and jobTrackingMonthCols().dateCol
 //     matches `status.*update.*date|completion.*date|assigned.*date` on the FIRST
@@ -50574,10 +50663,9 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 // ⚠️ PERIOD-GUARDED, same three fail-closed rungs as DELETE /api/loads/:loadId.
 // This was the last route that could rewrite a settled month: it writes Job
 // Status — the column excludeDroppedLoads() and every `completedStatuses` test
-// branch on — with no period check of any kind. Measured on production
-// 2026-08-09: 407 of 421 rows sit in locked periods, $313,922.93 of completed-load
-// revenue erasable from closed months, plus the $29,166.25 of resurrection
-// described on statusOverrideBlocker() above.
+// branch on — with no period check of any kind. Most rows sit in locked
+// periods, so without it completed-load revenue was erasable from closed months,
+// plus the resurrection described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		// A Dispatcher's key reads as the stored ID; every reply names it as shown
@@ -59800,6 +59888,15 @@ function arrivalRecorderReaders() {
 	};
 }
 
+// The driver stepper's GPS phases (lib/gps-phases.js): the recorder's readers above
+// and both of the geofence's own mapped points, never the network geocode.
+function gpsPhasesReaders() {
+	return {
+		...arrivalRecorderReaders(),
+		points: (headers, row, loadId) => resolveGeofencePoints(sheetRowToObject(headers, row), headers, loadId),
+	};
+}
+
 function checkGeofence(lat, lng, loadData, headers, loadId) {
 	const { origin, dest } = resolveGeofencePoints(loadData, headers, loadId);
 	const here = { latitude: lat, longitude: lng };
@@ -66699,7 +66796,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const driverMonthlyDays = Object.create(null);    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		// Per-driver per-month per-day → contributing load IDs. Surfaces in the
 		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
-		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
+		// covered by two loads at once (one calendar day, two loads).
 		const driverMonthlyDayLoads = Object.create(null); // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
 		// Preserve original sheet casing for display ("Hollis Renner" vs the
 		// lowercased "hollis renner" key used internally).
@@ -69687,10 +69784,12 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 				});
 		}
 		const pending = pendingReceiptsInPeriod(period);
+		const autoApproved = autoApprovedReceiptsInPeriod(period);
 		const personalWaiting = personalWaitingInPeriod(period);
 		const correctionWaiting = correctionWaitingForClose();
 		logAudit(req, "period_finalize", "period", period,
 			`Finalized ${period} early (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+			receiptAutoApproveWatch.closeAuditPart(autoApproved, receiptIdList) +
 			(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") +
 			(correctionWaiting.length ? `; ${correctionWaiting.length} correction line(s) waiting for a weekly invoice: line ${correctionWaiting.map((x) => x.id).join(", ")}` : "") + ")");
 		res.json({ success: true, period, ...result, pendingReceipts: pending, personalWaiting, ...(correctionWaiting.length ? { correctionWaiting } : {}) });
@@ -70458,6 +70557,13 @@ function pendingReceiptsInPeriod(period) {
 	).all(period);
 }
 
+// The receipts booked into a month that the automatic pass approved; the close
+// counts them beside the Pending ones (lib/receipt-auto-approve-watch.js).
+const receiptAutoApproveWatch = require("./lib/receipt-auto-approve-watch");
+function autoApprovedReceiptsInPeriod(period) {
+	return receiptAutoApproveWatch.approvedInPeriod(db, period, EXPENSE_PERIOD_EXPR);
+}
+
 // Personal lines booked to `period` that no live invoice carries yet (waiting
 // for their week's invoice, or for a correction): the month's books already
 // leave them out of the company's costs, and the driver has not been charged
@@ -70845,11 +70951,13 @@ async function maybeCloseFinishedPeriods() {
 		for (const period of result.periods) {
 			try {
 				const pending = pendingReceiptsInPeriod(period);
+				const autoApproved = autoApprovedReceiptsInPeriod(period);
 				const personalWaiting = personalWaitingInPeriod(period);
 				const correctionWaiting = correctionWaitingForClose();
 				// The audit row the manual close writes, for the close nobody pressed
 				logAudit(PERIOD_CLOSE_SYSTEM_ACTOR, "period_finalize", "period", period,
 					`Finalized ${period} at month end (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+					receiptAutoApproveWatch.closeAuditPart(autoApproved, receiptIdList) +
 					(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") +
 					(correctionWaiting.length ? `; ${correctionWaiting.length} correction line(s) waiting for a weekly invoice: line ${correctionWaiting.map((x) => x.id).join(", ")}` : "") + ")");
 				insertDispatchNotification.run(
@@ -70857,10 +70965,12 @@ async function maybeCloseFinishedPeriods() {
 					`${periodLabel(period)} is closed`,
 					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.` +
 						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : "") +
+						receiptAutoApproveWatch.closeNoticePart(autoApproved, periodLabel(period), receiptIdList) +
 						(personalWaiting.length ? ` ${personalWaiting.length} Personal line(s) booked to ${periodLabel(period)} are on no invoice yet; the driver has not been charged for them (receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}).` : "") +
 						(correctionWaiting.length ? ` ${correctionWaiting.length} correction line(s) wait for a weekly invoice (line ${correctionWaiting.map((x) => x.id).join(", ")}).` : ""),
 					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id), personalWaitingLineIds: personalWaiting.map((x) => x.id),
-						...(correctionWaiting.length ? { correctionWaitingLineIds: correctionWaiting.map((x) => x.id) } : {}) }),
+						...(correctionWaiting.length ? { correctionWaitingLineIds: correctionWaiting.map((x) => x.id) } : {}),
+						...(autoApproved.length ? { autoApprovedReceiptIds: autoApproved.map((x) => x.id) } : {}) }),
 				);
 			} catch {}
 		}
@@ -71950,6 +72060,7 @@ app.put("/api/investor/config", requireRole("Super Admin"), refuseCrossOrigin, (
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status, truck, from, to, state, region, q } = req.query;
+		const autoMode = receiptAutoApproveConfig.mode;
 		// posted_period is exposed so a receipt that was redirected out of a closed
 		// month is visible as such in the admin list — otherwise a March-dated row
 		// silently counting in August looks like a bug rather than the rule.
@@ -71959,7 +72070,9 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
 		if (type) { conditions.push("LOWER(type) = ?"); params.push(type.toLowerCase()); }
-		if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
+		const autoStatus = receiptAutoApproveList.statusCondition(autoMode, status);
+		if (autoStatus) { conditions.push(autoStatus.sql); params.push(...autoStatus.params); }
+		else if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
 		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
 		if (from) {
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return res.status(400).json({ error: "Invalid date" });
@@ -72017,15 +72130,17 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		// Every role but Super Admin: each receipt's load named as shownLoadId() does.
 		const withholdIds = loadIdWithheldFor(req);
 		const loadIdIndex = withholdIds ? currentShownLoadIdIndex() : null;
+		const reviews = receiptAutoApproveList.reviewsFor(db, autoMode);
 		const expenses = rows.map((e) => {
 			const period = expensePostedPeriod(e);
 			return {
 				...(RECEIPT_STATUS_RECORDER_ENABLED ? receiptStatusRecorder.withStatusBy(e) : e),
 				...(withholdIds ? { load_id: shownLoadId(req, e.load_id, { index: loadIdIndex }) } : {}),
 				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
+				...(reviews ? { auto_review: reviews.get(e.id) || null } : {}),
 			};
 		});
-		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED });
+		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED, ...receiptAutoApproveList.listMeta(autoMode) });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
@@ -72294,6 +72409,7 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		// With the recorder on, the same write records who set it; off, today's statement.
 		const set = receiptStatusRecorder.statusSet(RECEIPT_STATUS_RECORDER_ENABLED, status, req.session.user, new Date().toISOString());
 		db.prepare(`UPDATE expenses SET ${set.sql} WHERE id = ?`).run(...set.params, id);
+		if (receiptAutoApproveConfig.enabled) receiptAutoApprovePass.markUndone(db, [id], status, req.session.user, new Date().toISOString());
 		// ⚠️ THIS IS A MONEY WRITE AND IT USED TO LEAVE NO TRACE. Rejecting an
 		// expense removes it from every P&L (EXPENSE_PNL_FILTER) and therefore from
 		// the investor payout deduction for that month — the same class of change as
@@ -72457,6 +72573,7 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 			changed = db
 				.prepare(`UPDATE expenses SET ${set.sql} WHERE id IN (${updatePh})`)
 				.run(...set.params, ...existingIds).changes;
+			if (receiptAutoApproveConfig.enabled) receiptAutoApprovePass.markUndone(db, existingIds, status, req.session.user, new Date().toISOString());
 			// ⚠️ THIS IS THE ROUTE THAT MATTERS MOST, not the single-row one. The Data
 			// Issues page voids DUPLICATE receipts through THIS endpoint — so the
 			// operation "an admin rejects a duplicate, removing money from the P&L and
@@ -74289,12 +74406,33 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
 require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES, viewerGate: rateconViewGate });
 
+// Passenger authorizations (lib/passenger-authorization.js; PASSENGER_AUTHORIZATION_ENABLED, off:
+// every route answers 404). Above app.get("*"); scripts/test-passenger-authorization-routes.js pins it.
+const passengerAuthorization = require("./lib/passenger-authorization");
+passengerAuthorization.mount(app, {
+	db, enabled: passengerAuthorization.enabled(process.env), requireAuth, requireRole, refuseCrossSite,
+	renderPolicy, safeSignatureImage, writeSignedArtifact, readTransmittedConsent, signerNetworkEvidence,
+	cleanText: sanitizeEvidenceText, imageLimits, logAudit, insertDispatchNotification, emitDispatchNotice,
+	insertNotification, notifyChange, appDay,
+	emitToDriver: (name) => io.to(driverRoom(name)).emit("passenger-authorizations:changed"),
+	storageDir: path.join(DATA_DIR, "storage", "passenger-authorizations"),
+});
+
 // <chr-wiring>
 // C.H. ROBINSON UPDATES: the recorder of what LogisX would send CHR (lib/chr-integration.js).
-// No CHR connection exists, so nothing is sent. Its three switches (the settings example)
-// are read once and are off in a replica; off, nothing runs but the daily prune once the
-// tables exist. scripts/test-chr-wiring.js lifts this block.
+// No CHR connection exists (its transport has no CHR host yet), so nothing is sent. Its
+// four switches (the settings example) are read once and are off in a replica; off,
+// nothing runs but the daily prune once the tables exist. The connection settings have
+// no default; their names are provisional until CHR's docs, and a value is never logged.
+// scripts/test-chr-wiring.js lifts this block.
 const CHR_NOTICE_TYPE = "chr-attention";
+const chrConnection = {
+	baseUrl: String(process.env.CHR_API_BASE_URL ?? "").trim(),
+	tokenUrl: String(process.env.CHR_TOKEN_URL ?? "").trim(),
+	clientId: String(process.env.CHR_CLIENT_ID ?? "").trim(),
+	clientSecret: String(process.env.CHR_CLIENT_SECRET ?? "").trim(),
+	carrierCode: String(process.env.CHR_CARRIER_CODE_SECRET ?? "").trim(),
+};
 const chrIntegration = require("./lib/chr-integration");
 // The Job Tracking view the recorder read last. Its rows stay here, read only by
 // resolveGeofencePoints(): lib/chr-*.js gets projections only.
@@ -74304,10 +74442,12 @@ const chr = chrIntegration.create({
 	config: chrIntegration.chrConfig({
 		updatesEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_UPDATES_ENABLED ?? "").trim()),
 		sendEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_SEND_ENABLED ?? "").trim()),
+		liveAllEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LIVE_ALL_ENABLED ?? "").trim()),
 		locationEnabled: /^(true|1|yes|on)$/i.test(String(process.env.CHR_LOCATION_ENABLED ?? "").trim()),
 		geofenceRadiusM: GEOFENCE_RADIUS,
 		// Read through its one spelling (lib/driver-instructions-runtime.js).
 		denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "",
+		connection: chrConnection,
 		replica: Boolean(REPLICA),
 	}),
 	readSheet: async () => {
@@ -74326,9 +74466,21 @@ const chr = chrIntegration.create({
 	logAudit,
 	// The page's live refresh: no payload, Super Admins' room only.
 	onChange: () => io.to("super-admin").emit("chr:changed"),
+	// Pauses and refused updates: an in-app notice to Super Admins only, never an email.
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(CHR_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: CHR_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	// Who may choose Pilot or Live and test the connection: the listed accounts only (A3).
+	listedAccounts: RATECON_PDF_VIEWERS,
 	log: console,
 });
-chr.mount(app, { requireRole });
+chr.mount(app, { requireRole, refuseCrossOrigin });
+if (chr.config().sendEnabled && !chr.config().credentialsConfigured) {
+	const missing = [["CHR_API_BASE_URL", chrConnection.baseUrl], ["CHR_TOKEN_URL", chrConnection.tokenUrl], ["CHR_CLIENT_ID", chrConnection.clientId], ["CHR_CLIENT_SECRET", chrConnection.clientSecret]]
+		.filter(([, v]) => !v).map(([name]) => name);
+	console.warn(`[chr] sending is on but the connection is not configured (${missing.join(", ")} not set): nothing is sent`);
+}
 if (chr.jobs().sweep && startsJob("C.H. Robinson recorder")) {
 	setInterval(() => { chr.sweep().catch(() => console.error("[chr] sweep failed")); }, chr.sweepIntervalMs);
 }
