@@ -46,6 +46,12 @@
  *  §11 the settle window through the block: a POD a minute old holds the send for
  *      60 minutes after its own stamp, with no engine call; the block's
  *      AUTO_INVOICE_SEND_SETTLE_MINUTES reaches the job (a whole number 0-1440, else 60)
+ *  §12 the driver's Delivered through PUT /api/driver/status as shipped and the block,
+ *      the engine as shipped (AUTO_INVOICE_DRIVER_TRIGGER_ENABLED, named nowhere): no
+ *      timer; a Driver's tap: the record before the sheet write, one SMTP call after the
+ *      answer; a Dispatcher's and a Super Admin's: none; a sheet write that reports failure
+ *      but landed; a throw after the write; a repeat tap; a replica; Try again's look
+ *  §13 only this route starts one, and server.js around it (text pins)
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -71,7 +77,7 @@ const BLOCK = SRC.slice(SRC.indexOf(START), SRC.indexOf(END) + END.length);
 
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 const express = require(path.join(ROOT, "node_modules", "express"));
-const { closure, liftRoute } = require(path.join(__dirname, "lib", "server-lift.js"));
+const { closure, liftRoute, indexDeclarations } = require(path.join(__dirname, "lib", "server-lift.js"));
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const realImap = require(path.join(ROOT, "lib", "imap-draft.js"));
 const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
@@ -153,6 +159,8 @@ const createSql = (name) => {
 const TABLES = ["audit_trail", "documents", "deleted_loads", "load_invoice_drafts", "bison_invoice_seq", "dispatch_notifications", "app_settings", "period_locks"];
 const ALTERS = [...SRC.matchAll(/db\.exec\("(ALTER TABLE (?:documents|load_invoice_drafts) ADD COLUMN [^"]+)"\)/g)].map((m) => m[1]);
 const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {';
+const STATUS_HEAD = SRC.split("\n").find((l) => l.startsWith('app.put("/api/driver/status",'));
+const STATUS_INDEX = indexDeclarations(SRC);
 
 function deepFreeze(o) {
 	if (o && typeof o === "object" && !Object.isFrozen(o)) {
@@ -192,6 +200,12 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		transports: [],
 		limiters: [],
 		limited: 0,
+		out: [],
+		invalidated: 0,
+		payments: [[" Job ID", "Contract ID", "Payment Amount", "Invoice Number", "Payment Date", "Payment Status"]],
+		looks: [],
+		lookAnswer: { verdict: "clean", mailboxes: {} },
+		batchHook: null,
 		dir: fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-wiring-")),
 	};
 	fs.mkdirSync(path.join(w.dir, "uploads"));
@@ -200,10 +214,36 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	for (const t of TABLES) db.exec(createSql(t));
 	for (const a of ALTERS) db.exec(a);
 
-	const quiet = { log() {}, info() {}, warn: (...a) => w.logs.push(a.join(" ")), error: (...a) => w.logs.push(a.join(" ")) };
+	const quiet = { log: (...a) => w.out.push(a.join(" ")), info() {}, warn: (...a) => w.logs.push(a.join(" ")), error: (...a) => w.logs.push(a.join(" ")) };
 	const proc = { env: w.env };
+	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 	const sheets = {
-		spreadsheets: { values: { get: async () => { w.calls.sheetsGet++; return { data: { values: w.sheet.map((r) => r.slice()) } }; } } },
+		spreadsheets: { values: {
+			get: async ({ range } = {}) => {
+				w.calls.sheetsGet++;
+				if (range === "Payments Table") {
+					if (w.paymentsFail) throw new Error("made-up Sheets failure");
+					return { data: { values: w.payments.map((r) => r.slice()) } };
+				}
+				return { data: { values: w.sheet.map((r) => r.slice()) } };
+			},
+			// The status route's write. `w.batchFails`: it rejects, having landed or not.
+			batchUpdate: async ({ requestBody }) => {
+				if (w.batchHook) w.batchHook();
+				const write = () => {
+					for (const d of requestBody.data || []) {
+						const m = /!([A-Z]+)(\d+)$/.exec(d.range);
+						if (m) w.sheet[Number(m[2]) - 1][colIndex(m[1])] = d.values[0][0];
+					}
+				};
+				const fails = w.batchFails;
+				w.batchFails = null;
+				if (fails && !fails.landed) throw new Error("made-up: the sheet refused the write");
+				write();
+				if (fails) throw new Error("made-up: no answer in 15 seconds");
+				return { data: {} };
+			},
+		} },
 	};
 	const drive = {
 		files: {
@@ -269,6 +309,14 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		return { found: count > 0, count };
 	};
 	const imapModule = { ...realImap, findDraftByMessageId };
+	// Try again's look: the search's own contract, with no mailbox behind it.
+	const searchModule = {
+		searchMailboxForLoad: async (opts) => {
+			w.looks.push(opts);
+			if (w.lookFails) throw Object.assign(new Error("made-up"), { stage: "search" });
+			return w.lookAnswer;
+		},
+	};
 
 	const realApp = express();
 	realApp.use(express.json());
@@ -282,7 +330,10 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		app[verb] = (p, ...handlers) => { w.registered.push(`${verb.toUpperCase()} ${p}`); return realApp[verb](p, ...handlers); };
 	}
 	const scope = {
-		require: (p) => { w.required.push(p); return p === "./lib/imap-draft" ? imapModule : serverRequire(p); },
+		require: (p) => { w.required.push(p); return p === "./lib/imap-draft" ? imapModule : p === "./lib/invoice-mailbox-search" ? searchModule : serverRequire(p); },
+		getSheets: async () => sheets,
+		SPREADSHEET_ID: "made-up-sheet",
+		jtCacheInvalidate: () => { w.invalidated++; },
 		db,
 		process: proc,
 		console: quiet,
@@ -332,6 +383,56 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	const names = Object.keys(scope);
 	const block = blockText.replace(/\brateConGeminiUnavailableAt\b/g, "__geminiAt()");
 	w.job = new Function(...names, "__geminiAt", `${block}\nreturn autoInvoice;`)(...names.map((n) => scope[n]), () => w.geminiAt);
+
+	// PUT /api/driver/status as shipped: every name it reaches is server.js's own top-level
+	// declaration, unless it's the outside world (stubbed here) or the job above.
+	w.statusRoute = ({ notificationThrows = false } = {}) => {
+		const stubs = {
+			app: {}, db, getSheets: scope.getSheets, SPREADSHEET_ID: scope.SPREADSHEET_ID, require: serverRequire, console: quiet, process: proc,
+			autoInvoice: w.job,
+			requireRole: () => null, driverWriteLimiter: null, loadBelongsToDriver: async () => true,
+			logAudit: () => {}, logAuditRefusal: () => {}, WITHHELD_LOAD_REFS_ENABLED: false,
+			dispatchWriteBlocker: () => null, tripDayLockCover: () => null,
+			sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked && blocked.code }),
+			jtCacheInvalidate: scope.jtCacheInvalidate, notifyChange: () => {}, emitLoadEventToDispatch: () => {}, emitDispatchNotice: () => {},
+			insertDispatchNotification: { run: () => { if (notificationThrows) throw new Error("made-up: the notification insert failed"); return {}; } },
+			recordStatusChange: () => {}, arrivalRecorder: { positionFacts: () => ({}) }, arrivalRecorderReaders: {}, ARRIVAL_PICKUP_RECORDER_ENABLED: false,
+			io: { to: () => ({ emit() {}, except() { return { emit() {} }; } }) },
+			getJobTrackingCached: scope.getJobTrackingCached,
+			REPLICA: replica,
+		};
+		const cache = Object.create(null);
+		let proxy = null;
+		proxy = new Proxy(Object.create(null), {
+			has(_, key) {
+				if (typeof key !== "string" || key === "__scope") return false;
+				return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
+			},
+			get(_, key) {
+				if (key === Symbol.unscopables) return undefined;
+				if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
+				if (key in cache) return cache[key];
+				const decl = STATUS_INDEX.decls.get(key);
+				if (decl) {
+					cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
+					return cache[key];
+				}
+				if (key in globalThis) return globalThis[key];
+				throw new ReferenceError(`unstubbed in the lifted route: ${String(key)}`);
+			},
+			set(_, key, value) { cache[key] = value; return true; },
+		});
+		let handler = null;
+		stubs.app = { put: (...args) => { handler = args[args.length - 1]; } };
+		new Function("__scope", `with (__scope) { ${liftRoute(SRC, STATUS_HEAD)} }`)(proxy);
+		return async (user, id, newStatus = "Delivered") => {
+			const out = { status: 200, json: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
+			const rowIndex = w.sheet.findIndex((r, i) => i > 0 && r[0] === id) + 1;
+			await handler({ method: "PUT", query: {}, params: {}, headers: {}, session: { user }, body: { loadId: id, rowIndex, newStatus, driverName: "Made-up Driver" } }, res);
+			return out;
+		};
+	};
 
 	w.server = await new Promise((resolve) => { const s = realApp.listen(0, "127.0.0.1", () => resolve(s)); });
 	const base = `http://127.0.0.1:${w.server.address().port}`;
@@ -456,7 +557,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			"GET /api/auto-invoice/settings", "GET /api/auto-invoice/status", "POST /api/auto-invoice/loads/:loadKey/checked",
 			"POST /api/auto-invoice/loads/:loadKey/retry", "PUT /api/auto-invoice/settings",
 		], "§3 the five routes are registered");
-		eq(w.required.filter((p) => p.startsWith("./lib/")), ["./lib/imap-draft", "./lib/auto-invoice-send", "./lib/auto-invoice-job"], "§3 the block loads the job, lib/imap-draft.js and lib/auto-invoice-send.js as shipped");
+		eq(w.required.filter((p) => p.startsWith("./lib/")), ["./lib/imap-draft", "./lib/auto-invoice-send", "./lib/invoice-mailbox-search", "./lib/auto-invoice-job"], "§3 the block loads the job, lib/imap-draft.js, lib/auto-invoice-send.js and the mailbox search as shipped");
 		eq((await w.call("PUT", "/api/auto-invoice/settings", DISP, CONFIRMED)).status, 403, "§3 a Dispatcher can't change the settings");
 		const crossBefore = w.crossSite;
 		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§3 a Super Admin confirms example-broker.test");
@@ -884,6 +985,192 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			const r = await fresh({ ...SEND_ENV, AUTO_INVOICE_SEND_SETTLE_MINUTES: value }, minutesAgo);
 			eq(r.outcome, want, `§11 ${red ? "FAILS ON THE OLD CODE: " : ""}AUTO_INVOICE_SEND_SETTLE_MINUTES=${JSON.stringify(value)} through the block: a POD ${minutesAgo} minute(s) old is ${want}`);
 		}
+	}
+
+	// ===================================================================== §12
+	section("§12 the driver's Delivered, through the route and the block");
+	{
+		const SEND_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test", ...MAILBOX });
+		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
+		const until = async (cond, label) => {
+			for (let i = 0; i < 400; i++) {
+				if (cond()) return true;
+				await settle();
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const startedWorld = async (extra = {}) => {
+			const x = await world({ env: SEND_ON, ...extra });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§12 the broker domain confirmed");
+			await x.job.finishStartUp();
+			return x;
+		};
+		const atReceiver = (x, id) => {
+			x.setLoad(id, { "Job Status": "At Receiver" });
+			x.addPod(id);
+			x.fileRateCon(id, rateCon());
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+
+		const w = await startedWorld();
+		eq(w.job.triggerMode, true, "§12 FAILS ON THE OLD CODE: real drafts, the setting named nowhere: the driver's Delivered starts the invoice");
+		eq([w.startsJob, w.intervals.length], [["automatic invoice drafts"], 0], "§12 FAILS ON THE OLD CODE: behind startsJob(), and no timer");
+		ok(w.out.includes("[auto-invoice] trigger on, no timer"), "§12 FAILS ON THE OLD CODE: the start-up line says so");
+		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger && (await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger.timer, false, "§12 FAILS ON THE OLD CODE: and the status route");
+
+		const tap = w.statusRoute();
+		atReceiver(w, "LD-TEST-1201");
+		let atWrite = null;
+		w.batchHook = () => { atWrite = w.state("LD-TEST-1201"); };
+		const answered = await tap(DRIVER, "LD-TEST-1201");
+		w.batchHook = null;
+		eq([answered.status, answered.json], [200, { success: true }], "§12 the driver's tap answers as before");
+		eq(atWrite, ["waiting", "DRIVER_PENDING"], "§12 FAILS ON THE OLD CODE: the record is there when the sheet write starts");
+		eq(w.smtp.length, 0, "§12 ...and nothing has left when the route answers");
+		await until(() => w.smtp.length === 1 && open(w) === 0, "§12 the send");
+		const c = w.claim("LD-TEST-1201");
+		eq([c.state, c.delivery, c.stage], ["drafted", "send", "recorded"], "§12 FAILS ON THE OLD CODE: with no tick: sent and recorded");
+		eq(w.smtp.map((m) => [m.to, m.envelope.to, m.attachments]), [[BILLING, [BILLING], ["Example Broker Invoice Order #LD-TEST-1201.pdf", "LD-TEST-1201_POD.pdf", "LD-TEST-1201.pdf"]]],
+			"§12 FAILS ON THE OLD CODE: one message, through the engine as shipped: the invoice, the POD and the rate con, to the one recipient");
+		eq([w.gmail.length, w.drafts().map((r) => r.via), w.audits("auto_invoice_sent").length], [0, ["auto-smtp"], 1], "§12 no draft; one row, one audit row");
+		await tap(DRIVER, "LD-TEST-1201");
+		await settle();
+		await settle();
+		eq(w.smtp.length, 1, "§12 a repeat tap on the load sent: nothing more");
+
+		// Only the driver: the same route, the same load shape, the office's roles.
+		for (const [user, id] of [[DISP, "LD-TEST-1202"], [SA, "LD-TEST-1203"]]) {
+			atReceiver(w, id);
+			const r = await tap(user, id);
+			await settle();
+			await settle();
+			eq([r.status, w.claim(id), w.smtp.length], [200, null, 1], `§12 ${user.role} marks it Delivered: the status is written, no record, no send`);
+		}
+		const rows = [{ "Load ID": "LD-TEST-1202", "Job Status": "Delivered", Email: BROKER, "Completion Date": DELIVERED_ON }];
+		w.job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+		eq([rows[0]._autoInvoice.code, rows[0]._autoInvoice.retry], ["NOT_BY_DRIVER", "none"], "§12 FAILS ON THE OLD CODE: ...and a Super Admin's row reads \"No automatic invoice\"");
+
+		// The driver's other statuses.
+		atReceiver(w, "LD-TEST-1204");
+		await tap(DRIVER, "LD-TEST-1204", "At Receiver");
+		eq(w.claim("LD-TEST-1204"), null, "§12 a driver's other status: no record");
+
+		// A write that reports failure but landed (R-H1).
+		atReceiver(w, "LD-TEST-1205");
+		w.batchFails = { landed: true };
+		const lost = await tap(DRIVER, "LD-TEST-1205");
+		eq([lost.status, lost.json && lost.json.error], [500, "made-up: no answer in 15 seconds"], "§12 a write whose answer is lost: the driver gets the error he gets today");
+		await until(() => w.smtp.length === 2 && open(w) === 0, "§12 the landed write's send");
+		eq([w.state("LD-TEST-1205"), w.smtp.length], [["drafted", ""], 2], "§12 FAILS ON THE OLD DESIGN (R-H1): it landed: the row is read back and the invoice goes, once");
+		await tap(DRIVER, "LD-TEST-1205");
+		await settle();
+		await settle();
+		eq(w.smtp.length, 2, "§12 ...his second tap sends nothing more");
+
+		// A write that failed and didn't land.
+		atReceiver(w, "LD-TEST-1206");
+		w.batchFails = { landed: false };
+		eq((await tap(DRIVER, "LD-TEST-1206")).status, 500, "§12 a write refused");
+		await until(() => (w.claim("LD-TEST-1206") || {}).reason_code === "NOT_COMPLETED", "§12 read back");
+		eq([w.state("LD-TEST-1206"), w.smtp.length], [["waiting", "NOT_COMPLETED"], 2], "§12 FAILS ON THE OLD CODE: no send, the record says so");
+		eq((await tap(DRIVER, "LD-TEST-1206")).status, 200, "§12 ...his next tap");
+		await until(() => w.smtp.length === 3 && open(w) === 0, "§12 the later tap's send");
+		eq(w.state("LD-TEST-1206"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: ...arms it: one send");
+
+		// A throw after the write (R-M1): the notification insert, with no try around it.
+		atReceiver(w, "LD-TEST-1207");
+		const noisy = w.statusRoute({ notificationThrows: true });
+		const thrown = await noisy(DRIVER, "LD-TEST-1207");
+		eq([thrown.status, thrown.json && thrown.json.error], [500, "made-up: the notification insert failed"], "§12 a throw after the write answers 500, as today");
+		await until(() => w.smtp.length === 4 && open(w) === 0, "§12 the send after a throw");
+		eq(w.state("LD-TEST-1207"), ["drafted", ""], "§12 FAILS ON THE OLD DESIGN (R-M1): ...and the invoice still goes, once");
+
+		// The cache comes first: the run must not read the row from before the write.
+		ok(w.invalidated >= 4, "§12 the route drops the cached sheet");
+
+		// Try again through the route and the block's own readers.
+		w.setLoad("LD-TEST-1208", { "Job Status": "At Receiver" });
+		w.addPod("LD-TEST-1208");
+		w.fileRateCon("LD-TEST-1208", rateCon({ total: "$9,999.00" }));
+		await tap(DRIVER, "LD-TEST-1208");
+		await until(() => w.state("LD-TEST-1208") && w.state("LD-TEST-1208")[0] === "needs_attention", "§12 held");
+		eq(w.state("LD-TEST-1208"), ["needs_attention", "TOTAL_MISMATCH"], "§12 a total that disagrees: a person, nothing sent");
+		w.setLoad("LD-TEST-1208", { "  Payment  ": "9999" });
+		w.lookAnswer = { verdict: "invoice", mailboxes: {} };
+		eq((await w.call("POST", "/api/auto-invoice/loads/LD-TEST-1208/retry", SA, {})).status, 200, "§12 Try again");
+		await until(() => w.looks.length === 1 && open(w) === 0, "§12 the look");
+		eq([w.state("LD-TEST-1208"), w.smtp.length, w.looks[0].loadNumber, w.looks[0].lastCheck, w.looks[0].user], [["needs_attention", "MAILBOX_HIT"], 4, "LD-TEST-1208", true, MAILBOX.GMAIL_USER],
+			"§12 FAILS ON THE OLD CODE: an invoice in the mailbox: nothing sent, by the search as the block hands it over");
+		w.lookAnswer = { verdict: "clean", mailboxes: {} };
+		w.payments.push(["LD-TEST-1208", "Example", "9999", "", "", "Paid"]);
+		await w.call("POST", "/api/auto-invoice/loads/LD-TEST-1208/retry", SA, {});
+		await settle();
+		await until(() => open(w) === 0 && w.state("LD-TEST-1208")[1] === "PAYMENTS_TABLE_HIT", "§12 the Payments Table");
+		eq(w.smtp.length, 4, "§12 FAILS ON THE OLD CODE: a filled Payments Table row, read through the block: nothing sent");
+		w.payments.pop();
+		await w.call("POST", "/api/auto-invoice/loads/LD-TEST-1208/retry", SA, {});
+		await until(() => w.smtp.length === 5 && open(w) === 0, "§12 the clean look");
+		eq(w.state("LD-TEST-1208"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: both clean: one send");
+
+		// A replica or an import: no record, whatever the role.
+		const replica = await world({ env: SEND_ON, startsJobAnswer: false });
+		await replica.job.finishStartUp();
+		const replicaTap = replica.statusRoute();
+		replica.setLoad("LD-TEST-1209", { "Job Status": "At Receiver" });
+		replica.addPod("LD-TEST-1209");
+		eq((await replicaTap(DRIVER, "LD-TEST-1209")).status, 200, "§12 a process that may not run jobs: the status route answers");
+		eq([replica.claim("LD-TEST-1209"), replica.smtp.length, replica.intervals.length], [null, 0, 0], "§12 ...no record, no send, no timer");
+		eq((await world({ env: SEND_ON, replica: { stamp: "made-up" } })).job.sending, false, "§12 a replica never sends, whatever the trigger says");
+
+		// The kill switch: the sweep, its timer and today's route.
+		const off = await world({ env: { ...SEND_ON, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		eq([off.job.triggerMode, off.intervals.map((i) => i.ms)], [false, [300000]], "§12 AUTO_INVOICE_DRIVER_TRIGGER_ENABLED=false: the sweep's timer, as before");
+		const offTap = off.statusRoute();
+		off.setLoad("LD-TEST-1210", { "Job Status": "At Receiver" });
+		off.addPod("LD-TEST-1210");
+		eq((await offTap(DRIVER, "LD-TEST-1210")).status, 200, "§12 ...the status route as before");
+		eq(off.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims").get().n, 0, "§12 ...and no record until the sweep finds it");
+		// The job off: nothing at all.
+		const jobOff = await world({ env: { ...MAILBOX } });
+		const jobOffTap = jobOff.statusRoute();
+		jobOff.setLoad("LD-TEST-1211", { "Job Status": "At Receiver" });
+		jobOff.addPod("LD-TEST-1211");
+		await jobOff.job.finishStartUp();
+		eq([(await jobOffTap(DRIVER, "LD-TEST-1211")).status, jobOff.job.triggerMode, jobOff.intervals.length, JSON.stringify(schema(jobOff.db)) === JSON.stringify(jobOff.schemaBefore)], [200, false, 0, true], "§12 the job off: the route as before, no table, no timer");
+	}
+
+	// ===================================================================== §13
+	section("§13 only this route starts one, and server.js around it");
+	{
+		const STATUS = liftRoute(SRC, STATUS_HEAD);
+		eq(SRC.split("autoInvoiceDriverStart(").length - 1, 2, "§13 FAILS ON THE OLD CODE: one definition, one call");
+		ok(STATUS.includes("const invoiceStart = autoInvoiceDriverStart(req, {"), "§13 FAILS ON THE OLD CODE: the call is PUT /api/driver/status's");
+		eq(SRC.split(".driverDelivered(").length - 1, 1, "§13 nothing else reaches the job's record");
+		for (const head of [
+			SRC.split("\n").find((l) => l.startsWith('app.put("/api/loads/:loadId/status-override",')),
+			SRC.split("\n").find((l) => l.startsWith('app.put("/api/data/:rowIndex",')),
+			SRC.split("\n").find((l) => l.startsWith('app.put("/api/load/:loadId",')),
+			SRC.split("\n").find((l) => l.startsWith('app.post("/api/data",')),
+		]) {
+			ok(head && !/autoInvoiceDriverStart|driverDelivered|invoiceStart/.test(liftRoute(SRC, head)), `§13 ${head && head.slice(0, 50)}: starts nothing`);
+		}
+		const at = (needle) => STATUS.indexOf(needle);
+		ok(at("if (!podRow || podRow.n === 0)") < at("autoInvoiceDriverStart(") && at("dispatchWriteBlocker(") < at("autoInvoiceDriverStart(") && at("sentIfDriverWriteOnOthersRow(") < at("autoInvoiceDriverStart("),
+			"§13 FAILS ON THE OLD CODE: the record comes after every refusal: the POD gate, the month guard, the row's checks");
+		ok(at("autoInvoiceDriverStart(") < at("spreadsheets.values.batchUpdate(") && /\}\)\.catch\(invoiceStart\.writeFailed\);/.test(STATUS), "§13 FAILS ON THE OLD CODE: ...and before the sheet write, whose failure it hears");
+		ok(/jtCacheInvalidate\(\);\n\t\tinvoiceStart\.written\(\);\n\t\temitLoadEventToDispatch\(/.test(STATUS), "§13 FAILS ON THE OLD CODE: the record moves right after the cache is dropped, before anything that can throw");
+		const listen = SRC.slice(SRC.indexOf("server.listen(PORT, BIND_HOST"));
+		ok(listen.indexOf("autoInvoice.finishStartUp();") > 0 && listen.indexOf("autoInvoice.finishStartUp();") < listen.indexOf("process.umask(BOOT_UMASK)"), "§13 FAILS ON THE OLD CODE: start-up's second half runs when the app is listening");
+		ok(BLOCK.indexOf("autoInvoice.startTrigger()") > BLOCK.indexOf('startsJob("automatic invoice drafts")') && BLOCK.indexOf("autoInvoice.startTrigger()") < BLOCK.indexOf("setInterval("), "§13 FAILS ON THE OLD CODE: the first half runs behind startsJob(), before the app listens");
+		ok(/if \(autoInvoice\.triggerMode\) \{[\s\S]*?\} else \{[\s\S]*?setInterval\(/.test(BLOCK), "§13 FAILS ON THE OLD CODE: the sweep's timer only when the trigger is off");
+		const upload = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.post("/api/documents/upload",')));
+		ok(upload.indexOf('if (docType === "POD") autoInvoicePodChanged(loadId);') > upload.indexOf("res.json({ success: true, driveUrl });"), "§13 FAILS ON THE OLD CODE: a POD upload checks its load, after the answer");
+		const del = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.delete("/api/documents/:id",')));
+		ok(del.indexOf("if (isPod) autoInvoicePodChanged(loadId);") > del.indexOf("res.json({ success: true, id, loadId"), "§13 FAILS ON THE OLD CODE: a POD delete too");
+
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		ok(/^# AUTO_INVOICE_DRIVER_TRIGGER_ENABLED=$/m.test(TEMPLATE) && /a kill switch, ON unless set to false/.test(TEMPLATE), "§13 FAILS ON THE OLD CODE: the settings template names it, unset, a kill switch");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

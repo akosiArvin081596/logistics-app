@@ -200,7 +200,7 @@ const NAMED_ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "requireAuth", "refuseCrossOrigin",
 	"notifyChange", "logAudit", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs",
-	"DATA_DIR", "fetch", "io", "sendEmail"];
+	"DATA_DIR", "fetch", "io", "sendEmail", "autoInvoice"];
 // One lift per set of extra routes (startWorld's `routes`, [[method, path]]): the
 // month-lock runner adds the routes its guards sit on. `extraRoots` (startWorld's
 // `expose`) are more top-level names to lift and hand back on world.api.
@@ -389,6 +389,8 @@ function startWorld(opts = {}) {
 		fetch: () => { throw new Error("no network in a test"); },
 		io: null,
 		sendEmail: async () => undefined,
+		// The automatic invoice job (scripts/test-auto-invoice-wiring.js covers it): off here.
+		autoInvoice: { mode: "off" },
 	};
 	const body = [
 		'"use strict";',

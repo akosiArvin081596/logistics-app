@@ -50762,10 +50762,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			loadId,
 			oldStatus,
 			newStatus,
-			readBack: async () => {
-				const reread = await readJobTrackingSnapshot(sheets, rowIndex);
-				return reread ? reread.row[statusIdx] || "" : null;
-			},
+			readBack: () => readJobTrackingSnapshot(sheets, rowIndex).then((reread) => (reread ? reread.row[statusIdx] || "" : null)),
 		});
 
 		await sheets.spreadsheets.values.batchUpdate({
@@ -55918,6 +55915,7 @@ const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
 const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
 const autoInvoiceImap = require("./lib/imap-draft");
 const autoInvoiceSend = require("./lib/auto-invoice-send");
+const autoInvoiceLook = require("./lib/invoice-mailbox-search");
 const autoInvoice = require("./lib/auto-invoice-job").create({
 	db,
 	env: process.env,
@@ -55948,8 +55946,8 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
 	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
 	invalidateJobTracking: () => jtCacheInvalidate(),
-	// Try again's look. A tree without the search reads as a search that failed: nothing is sent.
-	lookInMailbox: typeof autoInvoiceImap.searchLoadMail === "function" ? (opts) => autoInvoiceImap.searchLoadMail(opts) : null,
+	// Try again's look: read-only, and only the job's own run calls it.
+	lookInMailbox: autoInvoiceLook.searchMailboxForLoad,
 	readPaymentsTable: async () => {
 		const sheets = await getSheets();
 		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];

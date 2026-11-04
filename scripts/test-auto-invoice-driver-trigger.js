@@ -108,7 +108,7 @@ function makeWorld() {
 		notices: [],
 		logs: [],
 		payments: [[...PAYMENTS_HEADERS]],
-		lookAnswer: { invoice: 0, mention: 0 },
+		lookAnswer: { verdict: "clean", mailboxes: {} },
 		mailbox: MAILBOX,
 		closed: () => [],
 		ids: 0,
@@ -414,6 +414,18 @@ async function main() {
 		await drained(w, "§2 Bison");
 		eq([w.state("LD-TEST-0103"), w.smtp.length, w.appends.length], [["drafted", ""], 1, 2], "§2 FAILS ON THE OLD CODE: Bison keeps its automatic draft");
 		ok(w.calls.reads > 0 && w.logs.every((l) => !l.includes("@")), "§2 no email address in the logs");
+
+		// A double tap, or a retried request while the first is still writing: one record, one run.
+		const twice = makeWorld();
+		const tj = await twice.started();
+		twice.ready("LD-TEST-0104");
+		const first = tj.driverDelivered({ role: "Driver", loadId: "LD-TEST-0104", oldStatus: "At Receiver", newStatus: "Delivered" });
+		const second = tj.driverDelivered({ role: "Driver", loadId: "#ld-test-0104", oldStatus: "At Receiver", newStatus: "Delivered" });
+		twice.setRow("LD-TEST-0104", { "Job Status": "Delivered" });
+		first.written();
+		second.written();
+		await drained(twice, "§2 double tap");
+		eq([twice.state("LD-TEST-0104"), twice.smtp.length, twice.calls.mint, twice.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims").get().n], [["drafted", ""], 1, 1, 1], "§2 FAILS ON THE OLD CODE: a double tap, either spelling of the ID: one record, one SMTP call");
 	}
 
 	section("§3  nothing else starts one");
@@ -701,6 +713,49 @@ async function main() {
 				await restart(w);
 				eq([w.state("LD-TEST-0512"), w.smtp.length], [["needs_attention", "RETRY_LATER"], 0], `§6 a ${fields.state} record over an hour old goes to a person, whose Try again looks first`);
 			}
+		}
+		{
+			// A first half that fails (the database busy at boot): the second half tries it
+			// once more, and nothing runs until it has.
+			const w = makeWorld();
+			on(w);
+			ready(w, "LD-TEST-0514");
+			w.seed("LD-TEST-0514", { state: "queued", updated_at: fresh() });
+			const j = w.job({ workerId: "worker-2" });
+			const realTx = w.db.transaction.bind(w.db);
+			w.db.transaction = () => { throw Object.assign(new Error("made-up"), { code: "SQLITE_BUSY" }); };
+			eq(j.startTrigger(), false, "§6 the first half fails on a busy database: logged, the process stays up");
+			ok(w.logs.some((l) => /did not start: SQLITE_BUSY/.test(l)), "§6 ...by its code");
+			const inert = j.driverDelivered({ role: "Driver", loadId: "LD-TEST-0514", oldStatus: "At Receiver", newStatus: "Delivered" });
+			inert.written();
+			eq(w.state("LD-TEST-0514"), ["queued", ""], "§6 ...and nothing has moved");
+			w.db.transaction = realTx;
+			await j.finishStartUp();
+			await drained(w, "§6 retried");
+			eq([w.state("LD-TEST-0514"), w.smtp.length], [["drafted", ""], 1], "§6 ...the second half tries it again, and the record runs once");
+		}
+		{
+			// The settings' notice, the daily prune: at start-up, with no tick to do them.
+			const w = makeWorld();
+			on(w);
+			w.db.prepare("UPDATE app_settings SET value = 'not json' WHERE key = 'auto_invoice.settings'").run();
+			w.db.prepare("INSERT INTO auto_invoice_shadow (load_key, load_id, first_seen_at, verdict, render_digest_json, updated_at) VALUES ('ld-test-0515', 'LD-TEST-0515', ?, 'WOULD_ATTEMPT', ?, ?)")
+				.run(iso(T0), JSON.stringify({ renderedAt: iso(T0 - 90 * 24 * HOUR) }), iso(T0));
+			const j = w.job({ workerId: "worker-2" });
+			j.startTrigger();
+			await j.finishStartUp();
+			ok(w.notices.some((n) => /settings/.test(n.title)), "§6 unreadable settings at start-up: one Super Admin notice");
+			eq(w.db.prepare("SELECT render_digest_json FROM auto_invoice_shadow WHERE load_key = 'ld-test-0515'").get().render_digest_json, "", "§6 the daily prune runs at start-up");
+		}
+		{
+			// The line stopped on a database error: the next read gives a queued claim its run.
+			const w = makeWorld();
+			const j = await w.started({ readCheckMs: 0 });
+			ready(w, "LD-TEST-0516");
+			w.seed("LD-TEST-0516", { state: "queued", next_attempt_at: iso(w.now), updated_at: iso(w.now) });
+			served(j, ["LD-TEST-0516"]);
+			await drained(w, "§6 the read wakes the line");
+			eq([w.state("LD-TEST-0516"), w.smtp.length], [["drafted", ""], 1], "§6 a claim left queued gets its run at a Super Admin's next read");
 		}
 		{
 			// A live request in flight: the first half of start-up runs before the app
@@ -1081,12 +1136,23 @@ async function main() {
 		ok(w.claim("LD-TEST-0901").look_first, "§10 FAILS ON THE OLD DESIGN: the claim itself asks for the look, so a restart can't lose it");
 		await drained(w, "§10 clean");
 		eq([w.state("LD-TEST-0901"), w.smtp.length, w.calls.payments, w.calls.look.length, w.claim("LD-TEST-0901").look_first], [["drafted", ""], 1, 1, 1, ""], "§10 FAILS ON THE OLD CODE: a clean look: one SMTP call, the look cleared");
-		eq(w.calls.look[0].loadNumber, "LD-TEST-0901", "§10 ...searched by the load number");
-		ok(w.calls.look[0].invoiceNumbers.length === 0 || w.calls.look[0].invoiceNumbers.every((n) => /^\d{8}-\d+$/.test(n)), "§10 ...and any invoice number on file");
+		eq([w.calls.look[0].loadNumber, w.calls.look[0].lastCheck], ["LD-TEST-0901", true], "§10 ...searched by the load number, as the send's last look");
+		ok(w.calls.look[0].invoiceNumbers.every((n) => /^\d{8}-\d+$/.test(n)), "§10 ...and any invoice number on file");
+		// The terms: every number the load's rows and its claim hold.
+		const terms = makeWorld();
+		const tj = await terms.started();
+		heldForAPerson(terms, "LD-TEST-0912", "TOTAL_MISMATCH", { invoice_id: "10202026-31", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), stage: "reserved", message_id: "<made-up-31@example.com>" });
+		terms.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, order_number, via, created_by) VALUES ('LD-TEST-0912', '10192026-4', 'ORD-5501', 'imap', 'made-up')").run();
+		terms.lookAnswer = { verdict: "invoice", mailboxes: {} };
+		ok(!(await tryAgain(tj, "LD-TEST-0912")).body.error, "§10 Try again on a load with rows");
+		await drained(terms, "§10 terms");
+		// A person's row closes the claim first, as today: the terms are read from the row the search would need.
+		eq(terms.state("LD-TEST-0912"), ["skipped", "DRAFTED_BY_HAND"], "§10 ...a person's row closes the claim first: no look is spent");
+		eq(ledger.draftRefsFor(terms.db, "ld-test-0912"), { invoiceNumbers: ["10192026-4"], orderNumbers: ["ORD-5501"] }, "§10 FAILS ON THE OLD CODE: ...the rows' invoice and order numbers are there for a search (a Bison invoice carries its own Order #)");
 
 		for (const [label, set, code] of [
-			["an invoice in the mailbox", (x) => { x.lookAnswer = { invoice: 1, mention: 0 }; }, "MAILBOX_HIT"],
-			["a mention in the mailbox", (x) => { x.lookAnswer = { invoice: 0, mention: 2 }; }, "MAILBOX_HIT"],
+			["an invoice in the mailbox", (x) => { x.lookAnswer = { verdict: "invoice", mailboxes: {} }; }, "MAILBOX_HIT"],
+			["a mention in the mailbox", (x) => { x.lookAnswer = { verdict: "mention", mailboxes: {} }; }, "MAILBOX_HIT"],
 			["a search that fails", (x) => { x.lookFails = true; }, "MAILBOX_UNREAD"],
 			["an unreadable answer", (x) => { x.lookAnswer = { found: 0 }; }, "MAILBOX_UNREAD"],
 			["no search on this tree", (x, extra) => { extra.lookInMailbox = null; }, "MAILBOX_UNREAD"],
@@ -1118,7 +1184,7 @@ async function main() {
 		const r = makeWorld();
 		const rj = await r.started();
 		heldForAPerson(r, "LD-TEST-0904");
-		r.lookAnswer = { invoice: 1, mention: 0 };
+		r.lookAnswer = { verdict: "invoice", mailboxes: {} };
 		const f = fakeApp();
 		rj.mount(f.app, { requireRole: f.requireRole });
 		await f.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-0904" } });
@@ -1134,7 +1200,7 @@ async function main() {
 		const aj = await a.started();
 		a.ready("LD-TEST-0905", { "Job Status": "Delivered" });
 		a.seed("LD-TEST-0905", { state: "needs_attention", reason_code: "MAYBE_IN_GMAIL", stage: "appending", invoice_id: "10202026-90", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: "<made-up-90@example.com>", sent_json: "{}" });
-		a.lookAnswer = { invoice: 1, mention: 0 };
+		a.lookAnswer = { verdict: "invoice", mailboxes: {} };
 		await tryAgain(aj, "LD-TEST-0905");
 		await drained(a, "§10 second branch");
 		eq([a.state("LD-TEST-0905"), a.smtp.length, a.appends.length], [["needs_attention", "MAILBOX_HIT"], 0, 0], "§10 FAILS ON THE OLD DESIGN (R-H2 b): a draft absent from Gmail, queued again: the look still runs");
@@ -1379,6 +1445,10 @@ async function main() {
 		tap(w, job, "LD-TEST-1203", { fails: true });
 		await until(() => w.claim("LD-TEST-1203").reason_code === "NOT_COMPLETED", "§13 not landed");
 		w.setRow("LD-TEST-1203", { "Job Status": "Delivered" });
+		// The same, with no POD: no verdict would queue it on this tick, but a POD on a later one would.
+		w.setRow("LD-TEST-1206", { "Job Status": "Delivered" });
+		w.rateCons.set("ld-test-1206", BILLING);
+		w.seed("LD-TEST-1206", { state: "waiting", reason_code: "NOT_COMPLETED" });
 		// Only 30 minutes later: a restart this short is no gap for the sweep's own heartbeat.
 		w.now += 30 * MIN;
 		ledger.setMeta(w.db, "last_on_tick_at", iso(w.now - 10 * MIN));
@@ -1386,9 +1456,10 @@ async function main() {
 		const sweep = w.job({ ...OFF, workerId: "worker-2" });
 		eq([sweep.triggerMode, sweep.startTrigger()], [false, false], "§13 the flag off: the sweep is back");
 		const out = await sweep.tick();
-		ok(out.sweep && out.sweep.offGap === 2, "§13 FAILS ON THE OLD CODE: the first tick reads the loads it never claimed as OFF_GAP, whatever the time gap");
+		ok(out.sweep && out.sweep.offGap === 3, "§13 FAILS ON THE OLD CODE: the first tick reads the loads it never claimed as OFF_GAP, whatever the time gap");
 		eq(w.state("LD-TEST-1202"), ["needs_attention", "OFF_GAP"], "§13 FAILS ON THE OLD CODE: a completed load with no claim: a person, not a send");
-		eq(w.state("LD-TEST-1203"), ["needs_attention", "OFF_GAP"], "§13 FAILS ON THE OLD DESIGN (R-M5's case): a `waiting` claim on a completed load: a person, not a send");
+		eq(w.state("LD-TEST-1203"), ["needs_attention", "OFF_GAP"], "§13 FAILS ON THE OLD DESIGN (R-M5's case): a `waiting` claim on a completed load: a person, never re-queued, not a send");
+		eq(w.state("LD-TEST-1206"), ["needs_attention", "OFF_GAP"], "§13 FAILS ON THE OLD DESIGN (R-M5's case): ...with no POD yet too, so a later POD can't re-queue it");
 		eq([w.smtp.length - smtpBefore, w.appends.length, ledger.getMeta(w.db).trigger_on_at, ledger.getMeta(w.db).back_from_trigger_at, ledger.getMeta(w.db).off_gap_since], [0, 0, "", "", ""], "§13 none is sent; the markers are cleared");
 		ok(w.actions("auto_invoice_off_gap").length === 1, "§13 one audit row");
 		// From the next tick on, the sweep is as it was.
@@ -1499,8 +1570,8 @@ async function main() {
 		eq(t.overCap({ lastHour: 12, lastDay: 0, caps: rules.readCaps({}) }), true, "§16 the hourly cap");
 		eq(t.overCap({ lastHour: 0, lastDay: 60, caps: rules.readCaps({}) }), true, "§16 the daily cap");
 		eq(t.overCap({ lastHour: 11, lastDay: 59, caps: rules.readCaps({}) }), false, "§16 under both");
-		eq(t.mailboxVerdict({ invoice: 0, mention: 0 }), null, "§16 clean only with both counts read as 0");
-		for (const bad of [null, {}, { invoice: 0 }, { invoice: "0", mention: 0 }, { invoice: -1, mention: 0 }]) eq(t.mailboxVerdict(bad), "MAILBOX_UNREAD", `§16 ${JSON.stringify(bad)}: unreadable, never "nothing found"`);
+		eq([t.mailboxVerdict({ verdict: "clean" }), t.mailboxVerdict({ verdict: "invoice" }), t.mailboxVerdict({ verdict: "mention" })], [null, "MAILBOX_HIT", "MAILBOX_HIT"], "§16 clean only when the search says clean; any hit is doubt");
+		for (const bad of [null, {}, { verdict: "" }, { verdict: "CLEAN" }, { invoice: 0, mention: 0 }]) eq(t.mailboxVerdict(bad), "MAILBOX_UNREAD", `§16 ${JSON.stringify(bad)}: unreadable, never "nothing found"`);
 		ok(sendLib.claimSent({ delivery: "send", stage: "appending" }), "§16 a claim holding a send reads as sent (the Draft Invoice button's refusal)");
 	}
 }
