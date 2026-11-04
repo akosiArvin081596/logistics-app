@@ -24,6 +24,10 @@
 //   §2 the swap: interrupted between its two renames, the previous clean
 //      snapshot is put back and the last line says so; one a killed pull left
 //      half done is put right by the next pull
+//   §2b storage/voice-notes/ is left out unless REPLICA_PULL_VOICE_NOTES=1
+//   §2c passenger authorization PDFs are left out of every tree, by folder and
+//      by file name, with no opt-in, and a copy an earlier pull left is removed
+//      (the trees go through the real rsync here)
 //   §3 settings.env is written after the swap (and tried once more by the trap
 //      when that failed); a failure once the uploads were being updated says
 //      they may be newer than the snapshot, one before them does not, and one
@@ -181,6 +185,18 @@ function fakeRsync() {
 	const r = spawnSync(cmd, [...opts, host, "rsync", "--server", "--sender", ".", remote], { stdio: ["ignore", "ignore", "inherit"] });
 	if (r.status !== 0) { fs.writeSync(2, "rsync: connection unexpectedly closed (0 bytes received so far) [receiver]\n"); process.exit(12); }
 	if (process.env.FAKE_RSYNC_FAIL === label) { fs.writeSync(2, "rsync(4242): error: unexpected end of file\n"); process.exit(12); }
+	// FAKE_REAL_RSYNC: the file trees go through the real rsync, locally, with the
+	// pull's own delete and exclude arguments, so its filter rules decide what lands.
+	if (process.env.FAKE_REAL_RSYNC && label !== "download") {
+		const keep = args.filter((a) => a === "--delete" || a === "--delete-excluded" || a.startsWith("--exclude="));
+		// A local copy starts its other end by name from PATH: without the stand-ins' folder.
+		const here = path.dirname(process.argv[1]);
+		const env = { ...process.env, PATH: String(process.env.PATH).split(":").filter((d) => d && path.resolve(d) !== path.resolve(here)).join(":") };
+		const c = spawnSync(process.env.FAKE_REAL_RSYNC, ["-rlt", ...keep, `${path.join(process.env.FAKE_SERVER, remote)}/`, `${dest.replace(/\/+$/, "")}/`], { stdio: ["ignore", "ignore", "inherit"], env });
+		if (c.status !== 0) process.exit(c.status === null ? 1 : c.status);
+		fs.writeSync(1, `Number of files: ${fs.readdirSync(dest).length}\n`);
+		process.exit(0);
+	}
 	for (const f of fs.readdirSync(dest)) fs.rmSync(path.join(dest, f), { recursive: true, force: true });
 	fs.cpSync(path.join(process.env.FAKE_SERVER, remote), dest, { recursive: true });
 	fs.writeSync(1, `Number of files: ${fs.readdirSync(dest).length}\n`);
@@ -257,7 +273,7 @@ fs.writeFileSync(MANIFEST, JSON.stringify({
 // One pull: a HOME holding a previous snapshot, settings and an upload; a
 // server with files in uploads/, storage/ and evidence-archive/.
 const allCalls = [];
-function pull({ env = () => ({}), home, before, brokenStdout = false } = {}) {
+function pull({ env = () => ({}), home, before, brokenStdout = false, serverFiles = [], cwd } = {}) {
 	const h = home || tmp("rpull-", HOME_BASE);
 	const R = path.join(h, "LogisX-replica");
 	fs.mkdirSync(path.join(R, "clean"), { recursive: true });
@@ -268,7 +284,7 @@ function pull({ env = () => ({}), home, before, brokenStdout = false } = {}) {
 	fs.writeFileSync(path.join(R, "uploads", "previous.pdf"), "x");
 	if (before) before(R);
 	const server = tmp("rpull-srv-");
-	for (const [f, body] of [["uploads/a.pdf", "a"], ["uploads/sub/b.jpg", "b"], ["storage/s.json", "{}"], ["evidence-archive/e.txt", "e"]]) {
+	for (const [f, body] of [["uploads/a.pdf", "a"], ["uploads/sub/b.jpg", "b"], ["storage/s.json", "{}"], ["evidence-archive/e.txt", "e"], ...serverFiles]) {
 		const p = path.join(server, "var", "www", "logistics-app", f);
 		fs.mkdirSync(path.dirname(p), { recursive: true });
 		fs.writeFileSync(p, body);
@@ -279,6 +295,7 @@ function pull({ env = () => ({}), home, before, brokenStdout = false } = {}) {
 	const opts = {
 		encoding: "utf8",
 		timeout: 60000,
+		...(cwd ? { cwd } : {}),
 		env: {
 			PATH: `${BIN}:${path.dirname(process.execPath)}:${process.env.PATH}`,
 			HOME: h,
@@ -493,13 +510,72 @@ console.log("§2b voice notes (storage/voice-notes/)");
 	ok("the storage/ copy leaves voice-notes/ out and removes a copy an earlier pull left (--exclude=/voice-notes/ --delete-excluded)",
 		plain.r.status === 0 && !!f && f.includes("--exclude=/voice-notes/") && f.includes("--delete-excluded"), [plain.r.status, f]);
 	ok("...and the log says so", /storage\/: voice notes left out \(set REPLICA_PULL_VOICE_NOTES=1 to copy them\)/.test(plain.out), plain.out);
-	ok("...uploads/ and evidence-archive/ exclude nothing",
-		["uploads", "evidence-archive"].every((l) => { const x = flagsOf(plain, l); return !!x && !x.some((a) => /exclude/.test(a)); }),
+	ok("...uploads/ and evidence-archive/ leave out no voice notes",
+		["uploads", "evidence-archive"].every((l) => { const x = flagsOf(plain, l); return !!x && !x.some((a) => /voice-notes/.test(a)); }),
 		["uploads", "evidence-archive"].map((l) => flagsOf(plain, l)));
 	const opted = pull({ env: () => ({ REPLICA_PULL_VOICE_NOTES: "1" }) });
 	const g = flagsOf(opted, "storage");
-	ok("REPLICA_PULL_VOICE_NOTES=1: the storage/ copy takes voice-notes/ too", opted.r.status === 0 && !!g && !g.some((a) => /exclude/.test(a)), [opted.r.status, g]);
+	ok("REPLICA_PULL_VOICE_NOTES=1: the storage/ copy takes voice-notes/ too", opted.r.status === 0 && !!g && !g.some((a) => /voice-notes/.test(a)), [opted.r.status, g]);
 	ok("...and the log says so", /storage\/: voice notes are copied \(REPLICA_PULL_VOICE_NOTES=1\)/.test(opted.out), opted.out);
+}
+
+// ---- §2c passenger authorization PDFs never leave the server -------------------------------
+// Made-up names in the shape lib/passenger-authorization.js writes. The trees go through the
+// real rsync (FAKE_REAL_RSYNC), so the pull's own filter rules decide what lands here.
+console.log("§2c passenger authorization PDFs (no opt-in)");
+{
+	const HEX = ["0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210", "00000000000000000000000000000abc", "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"];
+	const PA_NAME = /^pa-[0-9a-f]{32}-(driver|final)\b.*\.pdf$/;
+	const REAL_RSYNC = which("rsync");
+	const flagsOf = (p, label) => ((p.calls.find((c) => c.kind === "rsync" && c.label === label) || {}).flags || null);
+	const walk = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => fs.statSync(path.join(dir, f)).isFile()) : []);
+	const TREES = ["uploads", "storage", "evidence-archive"];
+	const paFiles = (R) => TREES.flatMap((t) => walk(path.join(R, t)).filter((f) => PA_NAME.test(path.basename(f)) || f.split(path.sep)[0] === "passenger-authorizations").map((f) => `${t}/${f}`));
+	const serverFiles = [
+		// The module's own folder: the driver-stage and the countersigned copy, and anything else in it.
+		[`storage/passenger-authorizations/pa-${HEX[0]}-driver.pdf`, "%PDF-made-up"],
+		[`storage/passenger-authorizations/pa-${HEX[0]}-final.pdf`, "%PDF-made-up"],
+		["storage/passenger-authorizations/preview.tmp", "made-up"],
+		// The same names wherever one lands, a copy that keeps the stem included.
+		[`uploads/stray/pa-${HEX[1]}-final.pdf`, "%PDF-made-up"],
+		[`evidence-archive/signed-artifacts/pa-${HEX[2]}-driver.superseded-2030-01-01T00-00-00-000Z.pdf`, "%PDF-made-up"],
+		[`storage/receipt-pdfs/pa-${HEX[3]}-final.pdf`, "%PDF-made-up"],
+		// Controls: still copied.
+		["storage/receipt-pdfs/r-1.pdf", "r"],
+		["uploads/pa-notes.pdf", "n"],
+		["uploads/pa-1234-driving-log.pdf", "d"],
+		["evidence-archive/signed-artifacts/w9-1.superseded-2030-01-01T00-00-00-000Z.pdf", "w"],
+		["storage/voice-notes/vn_1_0123456789abcdef.m4a", "v"],
+	];
+	// Copies an earlier pull left here: a pull removes them.
+	const stale = (R) => {
+		for (const f of [`storage/passenger-authorizations/pa-${HEX[3]}-final.pdf`, `uploads/pa-${HEX[2]}-driver.pdf`, `evidence-archive/signed-artifacts/pa-${HEX[1]}-final.superseded-2030-02-02T00-00-00-000Z.pdf`]) {
+			fs.mkdirSync(path.dirname(path.join(R, f)), { recursive: true });
+			fs.writeFileSync(path.join(R, f), "%PDF-old");
+		}
+	};
+	// A working folder holding files named like the pull's own arguments: an unquoted
+	// pattern would expand to them and stop matching.
+	const trapCwd = tmp("rpull-cwd-");
+	for (const n of ["--exclude=pa-0-driver.pdf", "--exclude=pa-0-final.pdf"]) fs.writeFileSync(path.join(trapCwd, n), "");
+	ok("the real rsync is on PATH (this section needs it)", !!REAL_RSYNC, REAL_RSYNC);
+	if (REAL_RSYNC) {
+		const realEnv = (extra = {}) => () => ({ FAKE_REAL_RSYNC: REAL_RSYNC, ...extra });
+		const p = pull({ env: realEnv(), serverFiles, before: stale, cwd: trapCwd });
+		ok("a pull copies no passenger authorization PDF, in any tree, and removes the copies an earlier pull left", p.r.status === 0 && paFiles(p.R).length === 0, [p.r.status, paFiles(p.R), p.readLog().slice(-1500)]);
+		ok("...leaves storage/passenger-authorizations/ out whole", !fs.existsSync(path.join(p.R, "storage", "passenger-authorizations")));
+		ok("...and still copies everything else",
+			["storage/receipt-pdfs/r-1.pdf", "uploads/pa-notes.pdf", "uploads/pa-1234-driving-log.pdf", "evidence-archive/signed-artifacts/w9-1.superseded-2030-01-01T00-00-00-000Z.pdf", "uploads/a.pdf", "storage/s.json"].every((f) => fs.existsSync(path.join(p.R, f))),
+			TREES.map((t) => [t, walk(path.join(p.R, t))]));
+		ok("...voice notes left out as before", !fs.existsSync(path.join(p.R, "storage", "voice-notes")));
+		ok("...and the log says so", /passenger authorization PDFs left out \(no opt-in\)/.test(p.out), p.out);
+		const opted = pull({ env: realEnv({ REPLICA_PULL_VOICE_NOTES: "1" }), serverFiles, before: stale });
+		ok("REPLICA_PULL_VOICE_NOTES=1 copies the voice notes but still no passenger authorization PDF",
+			opted.r.status === 0 && fs.existsSync(path.join(opted.R, "storage", "voice-notes", "vn_1_0123456789abcdef.m4a")) && paFiles(opted.R).length === 0,
+			[opted.r.status, paFiles(opted.R)]);
+		ok("...every tree's copy names --delete-excluded",
+			TREES.every((l) => { const x = flagsOf(opted, l); return !!x && x.includes("--delete-excluded"); }), TREES.map((l) => flagsOf(opted, l)));
+	}
 }
 
 // ---- §3 settings and the uploads -----------------------------------------------------------
