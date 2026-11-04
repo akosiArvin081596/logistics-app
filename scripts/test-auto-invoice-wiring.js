@@ -42,6 +42,10 @@
  *      123456789 equals the digest of the MIME real drafts handed Gmail for it (and
  *      the claim's own), the report's six conditions hold on that MIME, and the
  *      shadow paid for no number, Gmail call, record() or audit row
+ *  §10 sending through the block (AUTO_INVOICE_SEND_ENABLED), the engine as shipped
+ *  §11 the settle window through the block: a POD a minute old holds the send for
+ *      60 minutes after its own stamp, with no engine call; the block's
+ *      AUTO_INVOICE_SEND_SETTLE_MINUTES reaches the job (a whole number 0-1440, else 60)
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -351,16 +355,18 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		const at = w.sheet.findIndex((r, i) => i > 0 && r[0] === id);
 		if (at > 0) w.sheet[at] = cells; else w.sheet.push(cells);
 	};
-	w.addPod = (id) => {
+	// Uploaded now, or `minutesAgo`, stamped by SQLite as CURRENT_TIMESTAMP stamps a row.
+	w.addPod = (id, { minutesAgo = 0 } = {}) => {
 		const name = `${id}_POD.pdf`;
 		fs.writeFileSync(path.join(w.dir, "uploads", name), `%PDF-1.4 made-up POD for ${id}`);
-		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, 'Made-up Driver', 'POD', ?, ?)").run(id, name, `/uploads/${name}`);
+		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, uploaded_at) VALUES (?, 'Made-up Driver', 'POD', ?, ?, datetime('now', ?))")
+			.run(id, name, `/uploads/${name}`, `-${Number(minutesAgo) || 0} minutes`);
 	};
 	// Named as the n8n workflow names a rate con it files: the load ID in the subject.
 	w.fileRateCon = (id, bytes) => {
 		w.drive.push({ id: `made-up-file-${w.drive.length + 1}`, name: `Subject: Rate Confirmation ${id.replace(/[^A-Za-z0-9]/g, "")}.pdf`, bytes });
 	};
-	w.deliver = (id, rc, over = {}) => { w.setLoad(id, over); w.addPod(id); if (rc) w.fileRateCon(id, rc); };
+	w.deliver = (id, rc, over = {}, pod = {}) => { w.setLoad(id, over); w.addPod(id, pod); if (rc) w.fileRateCon(id, rc); };
 	w.claim = (id) => db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(rules.loadKey(id)) || null;
 	w.state = (id) => { const c = w.claim(id); return c ? [c.state, c.reason_code] : null; };
 	w.seq = () => db.prepare("SELECT COALESCE(SUM(n), 0) AS n FROM bison_invoice_seq").get().n;
@@ -792,8 +798,9 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§10 the broker domain confirmed");
 		await w.job.tick();
 		// Hard rule 7's canary: a driver name and phone on the load must reach nothing LogisX composes.
+		// Its POD came 61 minutes ago, past the settle window (below).
 		const CANARY = "Canary Q. Driverson 321-555-0147";
-		w.deliver("LD-TEST-0101", rateCon(), { Driver: CANARY });
+		w.deliver("LD-TEST-0101", rateCon(), { Driver: CANARY }, { minutesAgo: 61 });
 		await w.job.tick();
 		const c = w.claim("LD-TEST-0101") || {};
 		eq([c.state, c.delivery, c.stage, w.gmail.length], ["drafted", "send", "recorded", 0], "§10 FAILS ON THE OLD CODE: a load delivered after switch-on is sent, not drafted");
@@ -845,6 +852,37 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const words = sectionText.replace(/\n#\s?/g, " ");
 		ok(/^# AUTO_INVOICE_SEND_ENABLED=$/m.test(sectionText) && /^# AUTO_INVOICE_SEND_DOMAINS=$/m.test(sectionText) && /exactly "true", and never in a replica/.test(words) && /Unset: nothing is sent/.test(words),
 			"§10 FAILS ON THE OLD CODE: the settings template's section names both settings, unset: on only when exactly \"true\", never in a replica, no domain no send");
+	}
+
+	// ===================================================================== §11
+	section("§11 the settle window through the block (AUTO_INVOICE_SEND_SETTLE_MINUTES)");
+	{
+		const SEND_ENV = Object.freeze({ ...ON_ENV, AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test" });
+		// A load whose POD was uploaded `minutesAgo`, through the block with `env`.
+		const fresh = async (env, minutesAgo) => {
+			const x = await world({ env });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§11 the broker domain confirmed");
+			await x.job.tick();
+			x.deliver("LD-TEST-0111", rateCon(), {}, { minutesAgo });
+			const before = Date.now();
+			await x.job.tick();
+			const c = x.claim("LD-TEST-0111") || {};
+			const outcome = c.state === "drafted" && c.delivery === "send" && x.smtp.length === 1 ? "sent"
+				: c.state === "waiting" && c.reason_code === "SEND_SETTLING" && x.smtp.length === 0 ? "waiting" : `${c.state}/${c.reason_code}`;
+			return { x, c, before, outcome };
+		};
+		const held = await fresh(SEND_ENV, 1);
+		eq([held.c.state, held.c.reason_code, held.x.smtp.length, held.x.gmail.length, held.x.calls.prepare, held.x.calls.mint], ["waiting", "SEND_SETTLING", 0, 0, 0, 0],
+			"§11 FAILS ON THE OLD CODE: the setting unset: a POD uploaded a minute ago holds the send (Waiting, SEND_SETTLING), with no engine call, number or message");
+		const untilMs = Date.parse(held.c.next_attempt_at || "");
+		ok(Number.isFinite(untilMs) && Math.abs(untilMs - (held.before + 59 * 60 * 1000)) < 2 * 60 * 1000,
+			"§11 FAILS ON THE OLD CODE: ...until 60 minutes after the POD's own stamp (SQLite's CURRENT_TIMESTAMP, read as the UTC instant it is)");
+		// What the block's environment gives the job: a whole number from 0 to 1440, else 60.
+		for (const [value, minutesAgo, want, red] of [["0", 1, "sent", false], [" 2 ", 1, "waiting", true], ["90", 61, "waiting", true],
+			["", 61, "sent", false], ["abc", 61, "sent", false], ["-1", 61, "sent", false], ["5000", 61, "sent", false]]) {
+			const r = await fresh({ ...SEND_ENV, AUTO_INVOICE_SEND_SETTLE_MINUTES: value }, minutesAgo);
+			eq(r.outcome, want, `§11 ${red ? "FAILS ON THE OLD CODE: " : ""}AUTO_INVOICE_SEND_SETTLE_MINUTES=${JSON.stringify(value)} through the block: a POD ${minutesAgo} minute(s) old is ${want}`);
+		}
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

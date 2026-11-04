@@ -21,6 +21,8 @@
 //      stored lists; the page's open and save, lifted and run over stand-ins
 //   §8 a draft that may be in Gmail: the words send a person to Drafts and Sent
 //      Mail, where the job itself looks
+//   §9 invoices the job sent: "Sent to the broker", the stop words, the dialog
+//   §10 a send waiting for its PODs to settle: "Waiting: settling before sending"
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -377,6 +379,19 @@ section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it
   ok(stopSrc && /window\.confirm\(AUTO_SEND_STOP_CONFIRM\)/.test(stopSrc) && /api\.post\('\/api\/auto-invoice\/send\/stop', \{\}\)/.test(stopSrc),
     '§9 ...asks first, then posts to the set-only Stop route')
   ok(!/send\/resume|clearSendStop/.test(TAB), '§9 the page has no way to resume sending')
+}
+
+// ------------------------------------------------------------------ §10
+section('§10 a send waiting for its PODs to settle (AUTO_INVOICE_SEND_SETTLE_MINUTES)')
+{
+  const settling = S.autoInvoiceChip({ state: 'waiting', code: 'SEND_SETTLING' })
+  eq(settling && [settling.label, settling.tone], ['Waiting: settling before sending', 'muted'],
+    '§10 FAILS ON THE OLD CODE: a load whose invoice waits for its PODs to settle reads "Waiting: settling before sending" (the waiting chip, muted)')
+  const text = (S.AUTO_INVOICE_REASONS.SEND_SETTLING || {}).text || ''
+  ok(/sent automatically/.test(text) && /newest POD/.test(text) && /new POD starts the wait again/.test(text),
+    '§10 FAILS ON THE OLD CODE: ...it says the invoice goes on its own after the wait that follows the newest POD, and that a new POD starts the wait again')
+  eq([S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'waiting', code: 'SEND_SETTLING' } }), S.canTryAgain({ state: 'waiting', code: 'SEND_SETTLING' })], [false, false],
+    '§10 ...not a load for a person: not counted as Needs attention, no Try again')
 }
 
 console.log(`\n${'='.repeat(64)}`)

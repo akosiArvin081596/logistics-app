@@ -84,6 +84,15 @@
 //       searched at once, +15 and +60 minutes, then MAYBE_SENT; never a resend);
 //       the Stop route, the automatic stops and the resume script; the Draft
 //       Invoice button's two 409s; the shared via set; mutants of each
+//   §25 the settle window before a send (AUTO_INVOICE_SEND_SETTLE_MINUTES, 60):
+//       a load whose POD came 30 minutes ago waits (Waiting, SEND_SETTLING) with
+//       no engine call or number, and is sent at 61; a second POD at minute 50
+//       starts the wait again, and a deleted one doesn't count; a POD uploaded
+//       during the build holds the send, its number kept; a queued retry waits
+//       before the build; a POD time that can't be read (or from the future) is
+//       drafted, never sent; drafts never wait (sending off, a domain not listed,
+//       no sender, stopped, Bison's inbox not listed), nor take the sweep's slots;
+//       the stored stamps as SQLite reads them; the setting's parse; mutants
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -1271,6 +1280,7 @@ async function main() {
 	await renderShadowSections();
 	await factoredSections();
 	await sendSections();
+	await settleSections();
 }
 
 // ------------------------------------------------------------------ factored loads
@@ -2285,7 +2295,9 @@ const SEND_CASES = {
 		const c = claimOf(w, "LD-TEST-0513");
 		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code], voided: Boolean(c.number_voided_at) };
 	},
-	// Sending is stopped after the gate read it open, before the send.
+	// Sending is stopped after the gate read it open, before the send: the stop is
+	// set at the read made once the message is rendered (the job's earlier reads,
+	// before the build, see it open).
 	async stopAtSend(lib) {
 		const w = sendWorld();
 		const job = await sendStarted(lib, w);
@@ -2293,7 +2305,7 @@ const SEND_CASES = {
 		const read = ledgerLib.getSendStop;
 		await withPatched([[ledgerLib, "getSendStop", (db) => {
 			const r = read(db);
-			ledgerLib.setSendStop(db, { reason: "STOPPED_BY_ADMIN", nowIso: new Date(w.now).toISOString() });
+			if (claimOf(w, "LD-TEST-0514").stage === "rendered") ledgerLib.setSendStop(db, { reason: "STOPPED_BY_ADMIN", nowIso: new Date(w.now).toISOString() });
 			return r;
 		}]], () => job.tick());
 		const c = claimOf(w, "LD-TEST-0514");
@@ -2813,6 +2825,52 @@ async function sendSections() {
 			flags: ["true", " true ", "TRUE", "1", "yes", "", undefined].map((v) => lib.readSettings({ AUTO_INVOICE_SEND_ENABLED: v }).enabled),
 			replica: lib.readSettings(ON, { replica: true }).enabled,
 			noDomains: lib.readSettings({ AUTO_INVOICE_SEND_ENABLED: "true" }).domains,
+			// The settle window: the setting's parse, the wait after the newest POD,
+			// and the send decision around it (POD times are read only for a message
+			// that would be sent).
+			settle: (() => {
+				if (typeof lib.settleMinutesOf !== "function" || typeof lib.settleState !== "function" || typeof lib.sendDecision !== "function") return null;
+				const B = Date.parse("2026-10-20T13:00:00Z");
+				const Z = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+				const view = (s) => [s.settled === true, s.unknown === true, Number.isFinite(s.untilMs) ? (s.untilMs - B) / MIN : null];
+				const state = (podTimes, nowMs, settleMinutes = 60) => view(lib.settleState({ podTimes, nowMs, settleMinutes }));
+				let reads = 0;
+				const decide = (over, podTimes, nowMs) => {
+					const g = lib.sendDecision({ settings: { enabled: true, domains: [SEND_DOMAIN], settleMinutes: 15 }, on: true, to: "billing@example-broker.test",
+						podTimes: () => { reads++; return podTimes; }, nowMs, ...over });
+					return [g.send === true, g.why || "", Number.isFinite(g.untilMs) ? (g.untilMs - B) / MIN : null];
+				};
+				const decisions = [
+					decide({}, [Z(B)], B + 15 * MIN),
+					decide({}, [Z(B)], B + 10 * MIN),
+					decide({}, [null], B + 10 * MIN),
+					decide({ to: "billing@example-other.test" }, [Z(B)], B + 10 * MIN),
+					decide({ stopped: true }, [Z(B)], B + 10 * MIN),
+					decide({ settings: { enabled: false, domains: [SEND_DOMAIN], settleMinutes: 15 } }, [Z(B)], B + 10 * MIN),
+				];
+				return {
+					minutes: [undefined, "", "60", " 30 ", "0", "1440", "1441", "-5", "abc", "30.5", "1e3", "+30", "99999", 15].map((v) => lib.settleMinutesOf(v)),
+					read: [lib.readSettings(ON).settleMinutes, lib.readSettings({ ...ON, AUTO_INVOICE_SEND_SETTLE_MINUTES: " 45 " }).settleMinutes,
+						lib.readSettings({ ...ON, AUTO_INVOICE_SEND_SETTLE_MINUTES: "x" }).settleMinutes],
+					state: [
+						state([Z(B)], B + 60 * MIN - 1),
+						state([Z(B)], B + 60 * MIN),
+						state([Z(B), Z(B + 50 * MIN)], B + 61 * MIN),
+						state([Z(B + 50 * MIN), Z(B)], B + 61 * MIN),
+						state([], B),
+						state([null], B),
+						state([Z(B), null], B + 120 * MIN),
+						state(["2026-10-20 13:00:00"], B + 120 * MIN),
+						state([Z(B + 6 * MIN)], B),
+						state([Z(B + 4 * MIN)], B),
+						state([Z(B)], B, 0),
+						state([Z(B)], NaN),
+						state([Z(B)], B + 30 * MIN, "x"),
+					],
+					decisions,
+					reads,
+				};
+			})(),
 			gate: [
 				lib.gate({ settings: { enabled: true, domains: [SEND_DOMAIN] }, on: true, to: "billing@example-broker.test" }).send,
 				lib.gate({ settings: { enabled: false, domains: [SEND_DOMAIN] }, on: true, to: "billing@example-broker.test" }).why,
@@ -2862,17 +2920,28 @@ async function sendSections() {
 	};
 	const pureNow = pure(sendLib);
 	const PURE_WANT = {
-		settings: { enabled: true, domains: ["example-broker.test", "example-other.test", "example-x.test"], refused: 1 },
+		settings: { enabled: true, domains: ["example-broker.test", "example-other.test", "example-x.test"], refused: 1, settleMinutes: 60 },
 		flags: [true, true, false, false, false, false, false],
 		replica: false,
 		noDomains: [],
+		// Unset or not a whole number from 0 to 1440: 60. The wait ends exactly N
+		// minutes after the newest POD; no POD, one that can't be read, one that
+		// isn't SQLite's own stamp, or one more than 5 minutes ahead: unknown.
+		settle: {
+			minutes: [60, 60, 60, 30, 0, 1440, 60, 60, 60, 60, 60, 60, 60, 15],
+			read: [60, 45, 60],
+			state: [[false, false, 60], [true, false, 60], [false, false, 110], [false, false, 110], [false, true, null], [false, true, null], [false, true, null],
+				[false, true, null], [false, true, null], [false, false, 64], [true, false, 0], [false, true, null], [false, false, 60]],
+			decisions: [[true, "", null], [false, "SETTLING", 15], [false, "POD_TIME_UNKNOWN", null], [false, "DOMAIN_NOT_LISTED", null], [false, "STOPPED", null], [false, "OFF", null]],
+			reads: 3,
+		},
 		gate: [true, "OFF", "OFF", "STOPPED", "DOMAIN_NOT_LISTED", "DOMAIN_NOT_LISTED"],
 		check: [null, null, "RECIPIENT", "RECIPIENT", "RECIPIENT", "HEADERS", "HEADERS", "HEADERS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", "ATTACHMENTS", null],
 		outcomes: ["refused", "refused", "refused", "login",
 			"login", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "refused",
 			"unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"],
 	};
-	eq(pureNow, PURE_WANT, "§24 FAILS ON THE OLD CODE: the settings (exactly \"true\", never in a replica; exact domains, free mail refused, none by default), the gate, the last check and the SMTP outcomes");
+	eq(pureNow, PURE_WANT, "§24 FAILS ON THE OLD CODE: the settings (exactly \"true\", never in a replica; exact domains, free mail refused, none by default; the settle window, 60 minutes unless set), the settle rule and the send decision, the gate, the last check and the SMTP outcomes");
 
 	// The SMTP sender over a made-up nodemailer: one envelope recipient, no file or
 	// URL access, the transport closed, and a failure without the server's text.
@@ -3095,6 +3164,379 @@ async function sendSections() {
 			ok(lib, `§24 MUTANT ${label}: applied to lib/auto-invoice-send.js once`);
 			if (lib) ok(JSON.stringify(pure(lib)) !== JSON.stringify(PURE_WANT), `§24 MUTANT ${label}: caught`);
 		}
+		// The settle window's pure rules (§25), caught by the same table.
+		const settleMutants = [
+			["the setting not read", "settleMinutes: settleMinutesOf(env?.AUTO_INVOICE_SEND_SETTLE_MINUTES)", "settleMinutes: SETTLE_MINUTES_DEFAULT"],
+			["the default not 60", "const SETTLE_MINUTES_DEFAULT = 60;", "const SETTLE_MINUTES_DEFAULT = 0;"],
+			["no ceiling on the setting", "return n <= SETTLE_MINUTES_MAX ? n : SETTLE_MINUTES_DEFAULT;", "return n;"],
+			["a signed setting taken", "if (!/^\\d{1,4}$/.test(s)) return SETTLE_MINUTES_DEFAULT;", "if (!/^[+-]?\\d{1,4}$/.test(s)) return SETTLE_MINUTES_DEFAULT;"],
+			["the oldest POD counted, not the newest", "Math.max(...times)", "Math.min(...times)"],
+			["the wait ends a moment late", "settled: now >= untilMs", "settled: now > untilMs"],
+			["no POD time taken as settled", "!Number.isFinite(now) || !times.length || ", "!Number.isFinite(now) || "],
+			["a POD time that can't be read ignored", "times.some((t) => !Number.isFinite(t) || t > now + POD_TIME_AHEAD_MS)", "times.some((t) => t > now + POD_TIME_AHEAD_MS)"],
+			["a POD time ahead of the clock trusted", "times.some((t) => !Number.isFinite(t) || t > now + POD_TIME_AHEAD_MS)", "times.some((t) => !Number.isFinite(t))"],
+			["any text read as a time", "typeof t === \"string\" && POD_TIME_RE.test(t) ? Date.parse(t) : NaN", "Date.parse(t)"],
+			["the decision without the gate", "\tif (!g.send) return g;\n\tconst s = settleState(", "\tconst s = settleState("],
+			["the decision deaf to the setting", "settleMinutes: settings.settleMinutes });", "settleMinutes: undefined });"],
+			["a POD time that can't be read sends", "\tif (s.settled) return g;\n", "\tif (s.settled || s.unknown) return g;\n"],
+			["a POD time that can't be read waits", "return s.unknown ? { send: false, why: \"POD_TIME_UNKNOWN\" } : { send: false, why: \"SETTLING\", untilMs: s.untilMs };",
+				"return { send: false, why: \"SETTLING\", untilMs: s.untilMs };"],
+		];
+		for (const [label, from, to] of settleMutants) {
+			const lib = mutantModule(SEND_FILE, from, to);
+			ok(lib, `§25 MUTANT ${label}: applied to lib/auto-invoice-send.js once`);
+			if (lib) ok(JSON.stringify(pure(lib)) !== JSON.stringify(PURE_WANT), `§25 MUTANT ${label}: caught`);
+		}
+	}
+}
+
+// ------------------------------------------------------------------ the settle window (§25)
+// A POD row uploaded at `ms` on the world's clock, stored as SQLite's own
+// CURRENT_TIMESTAMP stores it (UTC, "YYYY-MM-DD HH:MM:SS"); `raw` stores that value
+// instead. Its file is on disk. Returns the row's id.
+const sqliteStamp = (ms) => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+function podAt(w, id, ms, { raw } = {}) {
+	const name = `pod-${rules.loadKey(id)}-${w.db.prepare("SELECT COUNT(*) n FROM documents").get().n}.pdf`;
+	w.files.add(name);
+	return Number(w.db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, ?)")
+		.run(id, name, `/uploads/${name}`, raw !== undefined ? raw : sqliteStamp(ms)).lastInsertRowid);
+}
+// Delivered with its rate con on file, no POD yet.
+function deliveredNoPod(w, id, over = {}, docEmail = "billing@example-broker.test") {
+	w.setRow(id, over);
+	w.rateCons.set(rules.loadKey(id), docEmail);
+}
+const isoOf = (ms) => new Date(ms).toISOString();
+// A second confirmed broker, not on the send list: its loads are drafted.
+const OTHER_BROKER = Object.freeze({ Email: "ops@example-other.test" });
+const OTHER_BILLING = "billing@example-other.test";
+const confirmBoth = (w) => setSettings(w.db, { optOutDomains: [], confirmedBrokerDomains: [SEND_DOMAIN, "example-other.test"] });
+// SEND_SETTLING among the server's reason codes (a tree before it fails by name).
+const reasonsHaveSettling = () => rules.REASON_CODES.includes("SEND_SETTLING");
+
+const SETTLE_CASES = {
+	// A POD uploaded at P, looked at on each minute of `at` after it.
+	async waitThenSend(lib, { send = SEND_ON, at = [0, 30, 59, 61] } = {}) {
+		const w = sendWorld({ send });
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0700";
+		deliveredNoPod(w, id);
+		const P = w.now;
+		podAt(w, id, P);
+		const seen = [];
+		for (const min of at) {
+			w.now = P + min * MIN;
+			await job.tick();
+			const c = claimOf(w, id);
+			const rows = [{ ...w.rows[w.rows.length - 1] }];
+			job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+			const shown = rows[0]._autoInvoice;
+			seen.push({ min, state: [c.state, c.reason_code], until: c.state === "waiting" ? c.next_attempt_at : "", smtp: w.smtp.length, append: w.calls.append.length,
+				prepares: enginePrepares(w, id), mint: w.calls.mint.length, shown: shown ? [shown.state, shown.code] : null });
+		}
+		const c = claimOf(w, id);
+		return { P, seen, delivery: c.delivery || "", stage: c.stage };
+	},
+	// A second POD at minute 50.
+	async secondPod(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0705";
+		deliveredNoPod(w, id);
+		const P = w.now;
+		podAt(w, id, P);
+		const seen = [];
+		for (const min of [0, 30, 50, 61, 109, 110]) {
+			w.now = P + min * MIN;
+			if (min === 50) podAt(w, id, w.now);
+			await job.tick();
+			const c = claimOf(w, id);
+			seen.push([min, c.state, c.reason_code, c.state === "waiting" ? c.next_attempt_at : "", w.smtp.length]);
+		}
+		return { P, seen };
+	},
+	// A second POD at minute 50, deleted at minute 55.
+	async deletedPod(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0706";
+		deliveredNoPod(w, id);
+		const P = w.now;
+		podAt(w, id, P);
+		let second = 0;
+		const seen = [];
+		for (const min of [0, 50, 55, 61]) {
+			w.now = P + min * MIN;
+			if (min === 50) second = podAt(w, id, w.now);
+			if (min === 55) w.db.prepare("UPDATE documents SET deleted_at = ? WHERE id = ?").run(sqliteStamp(w.now), second);
+			await job.tick();
+			const c = claimOf(w, id);
+			seen.push([min, c.state, c.reason_code, c.state === "waiting" ? c.next_attempt_at : "", w.smtp.length]);
+		}
+		return { P, seen };
+	},
+	// A POD uploaded just now, in a world that drafts it (`setup` sets the load up).
+	async draftsAtOnce(lib, { send = SEND_ON, extra = {}, setup = null } = {}) {
+		const w = sendWorld({ send });
+		const job = await sendStarted(lib, w, extra);
+		const id = "LD-TEST-0760";
+		if (setup) setup(w, id);
+		else deliveredNoPod(w, id);
+		podAt(w, id, w.now);
+		await job.tick();
+		const c = claimOf(w, id);
+		return { state: [c.state, c.reason_code], smtp: w.smtp.length, append: w.calls.append.length, prepares: enginePrepares(w, id), delivery: c.delivery || "",
+			to: w.calls.append.map((x) => x.to) };
+	},
+	// Two loads waiting to settle and other brokers' loads beside them: the sweep's
+	// two attempts go to the loads that can be drafted.
+	async slots(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		confirmBoth(w);
+		const P = w.now;
+		for (const id of ["LD-TEST-0701", "LD-TEST-0702"]) {
+			deliveredNoPod(w, id);
+			podAt(w, id, P);
+		}
+		deliveredNoPod(w, "LD-TEST-0703", OTHER_BROKER, OTHER_BILLING);
+		podAt(w, "LD-TEST-0703", P);
+		await job.tick();
+		const first = ["LD-TEST-0701", "LD-TEST-0702", "LD-TEST-0703"].map((id) => w.state(id));
+		w.now = P + 10 * MIN;
+		deliveredNoPod(w, "LD-TEST-0704", OTHER_BROKER, OTHER_BILLING);
+		podAt(w, "LD-TEST-0704", w.now);
+		await job.tick();
+		const second = ["LD-TEST-0701", "LD-TEST-0702", "LD-TEST-0704"].map((id) => w.state(id));
+		return { first, second, smtp: w.smtp.length, append: w.calls.append.length, prepares: ["LD-TEST-0701", "LD-TEST-0702"].map((id) => enginePrepares(w, id)) };
+	},
+	// Settled when first looked at; a second POD lands during the build (the render).
+	async podDuringBuild(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0710";
+		deliveredNoPod(w, id);
+		podAt(w, id, w.now - 61 * MIN);
+		let added = false;
+		w.renderHook = (ctx) => {
+			if (added || rules.loadKey(ctx.loadId) !== "ld-test-0710") return;
+			added = true;
+			podAt(w, id, w.now);
+		};
+		await job.tick();
+		w.renderHook = null;
+		const c1 = claimOf(w, id);
+		const first = { state: [c1.state, c1.reason_code], smtp: w.smtp.length, append: w.calls.append.length, number: c1.invoice_id, stage: c1.stage,
+			until: c1.next_attempt_at, expected: isoOf(w.now + 60 * MIN) };
+		w.now += 61 * MIN;
+		await job.tick();
+		const c2 = claimOf(w, id);
+		return { first, after: { state: [c2.state, c2.reason_code], delivery: c2.delivery || "", smtp: w.smtp.length,
+			sameNumber: Boolean(c2.invoice_id) && c2.invoice_id === first.number, mint: w.calls.mint.length } };
+	},
+	// Settled at its first attempt, which fails (a retry in 15 minutes); a new POD
+	// meanwhile: the retry waits before the build.
+	async retryHeld(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0720";
+		deliveredNoPod(w, id);
+		podAt(w, id, w.now - 61 * MIN);
+		let fail = true;
+		w.prepareHook = (loadId) => (fail && rules.loadKey(loadId) === "ld-test-0720" ? { ok: false, http: 503, code: "" } : null);
+		await job.tick();
+		const queued = w.state(id);
+		fail = false;
+		const P2 = w.now;
+		podAt(w, id, P2);
+		w.now += 15 * MIN;
+		await job.tick();
+		const c = claimOf(w, id);
+		const held = { state: [c.state, c.reason_code], prepares: enginePrepares(w, id), mint: w.calls.mint.length, until: c.next_attempt_at, attempts: c.attempts };
+		w.now = P2 + 60 * MIN;
+		await job.tick();
+		w.prepareHook = null;
+		return { queued, held, expectedUntil: isoOf(P2 + 60 * MIN), sent: { state: w.state(id), smtp: w.smtp.length, prepares: enginePrepares(w, id) } };
+	},
+	// A POD whose stored time can't prove the wait is over (`raw`, or raw(w)).
+	async unknownTime(lib, raw) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0730";
+		deliveredNoPod(w, id);
+		podAt(w, id, 0, { raw: typeof raw === "function" ? raw(w) : raw });
+		await job.tick();
+		const c = claimOf(w, id);
+		return { state: [c.state, c.reason_code], smtp: w.smtp.length, append: w.calls.append.length, refused: w.actions("auto_invoice_send_refused").map((x) => x.details) };
+	},
+	// Sending stopped while a load waits to settle.
+	async stoppedWhileWaiting(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0750";
+		deliveredNoPod(w, id);
+		const P = w.now;
+		podAt(w, id, P);
+		await job.tick();
+		const waiting = w.state(id);
+		w.now = P + 5 * MIN;
+		ledgerLib.setSendStop(w.db, { reason: "STOPPED_BY_ADMIN", nowIso: isoOf(w.now) });
+		await job.tick();
+		return { waiting, after: w.state(id), smtp: w.smtp.length, append: w.calls.append.length };
+	},
+	// The setting as handed to the job (`minutes`), looked at on each minute of `at`.
+	async setting(lib, minutes, at) {
+		const w = sendWorld({ send: { ...SEND_ON, settleMinutes: minutes } });
+		const job = await sendStarted(lib, w);
+		const id = "LD-TEST-0770";
+		deliveredNoPod(w, id);
+		const P = w.now;
+		podAt(w, id, P);
+		const seen = [];
+		for (const min of at) {
+			w.now = P + min * MIN;
+			await job.tick();
+			seen.push([min, ...(w.state(id) || ["", ""]), w.smtp.length]);
+		}
+		return seen;
+	},
+	// ledger.livePodTimes() on one database.
+	livePods() {
+		const w = makeWorld();
+		const t = (s) => Date.parse(s);
+		podAt(w, "LD-TEST-0740", t("2026-10-20T13:05:00Z"));
+		podAt(w, " #ld-test-0740 ", t("2026-10-20T13:06:00Z"));
+		const gone = podAt(w, "LD-TEST-0740", t("2026-10-20T13:07:00Z"));
+		w.db.prepare("UPDATE documents SET deleted_at = '2026-10-20 13:08:00' WHERE id = ?").run(gone);
+		podAt(w, "LD-TEST-0740", 0, { raw: "2026-10-20T09:11:00-04:00" });
+		podAt(w, "LD-TEST-0740", 0, { raw: "not a time" });
+		podAt(w, "LD-TEST-07400", t("2026-10-20T13:12:00Z"));
+		w.db.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES ('LD-TEST-0740', 'RATECON', 'made-up-rc.pdf', '2026-10-20 13:13:00')").run();
+		return typeof ledgerLib.livePodTimes === "function" ? ledgerLib.livePodTimes(w.db, "ld-test-0740") : null;
+	},
+};
+
+async function settleSections() {
+	// ---------------------------------------------------------------- §25
+	section("§25 the settle window before a send (AUTO_INVOICE_SEND_SETTLE_MINUTES)");
+	ok(reasonsHaveSettling(), "§25 FAILS ON THE OLD CODE: SEND_SETTLING is a reason code");
+
+	const a = await SETTLE_CASES.waitThenSend(jobLib);
+	const waitRow = (min) => ({ min, state: ["waiting", "SEND_SETTLING"], until: isoOf(a.P + 60 * MIN), smtp: 0, append: 0, prepares: 0, mint: 0, shown: ["waiting", "SEND_SETTLING"] });
+	eq(a.seen.slice(0, 3), [waitRow(0), waitRow(30), waitRow(59)],
+		"§25 FAILS ON THE OLD CODE: a POD 0, 30 and 59 minutes ago: the send waits (Waiting, SEND_SETTLING, until 60 minutes after the POD), with no engine call, number or message, and a Super Admin sees why");
+	const last = a.seen[3] || {};
+	eq([last.state, last.smtp, last.append, last.prepares, last.mint, a.delivery, a.stage], [["drafted", ""], 1, 0, 1, 1, "send", "recorded"],
+		"§25 ...and at 61 minutes it is sent, built once, with one number");
+
+	const b = await SETTLE_CASES.secondPod(jobLib);
+	const W = (min, until) => [min, "waiting", "SEND_SETTLING", isoOf(b.P + until * MIN), 0];
+	eq(b.seen, [W(0, 60), W(30, 60), W(50, 110), W(61, 110), W(109, 110), [110, "drafted", "", "", 1]],
+		"§25 FAILS ON THE OLD CODE: a second POD at minute 50 starts the wait again: still waiting at 61 and 109 minutes, sent at 110");
+
+	const del = await SETTLE_CASES.deletedPod(jobLib);
+	const D = (min, until) => [min, "waiting", "SEND_SETTLING", isoOf(del.P + until * MIN), 0];
+	eq(del.seen, [D(0, 60), D(50, 110), D(55, 60), [61, "drafted", "", "", 1]],
+		"§25 FAILS ON THE OLD CODE: a POD deleted at minute 55 doesn't count: the wait goes back to the first POD's, and the load is sent at 61");
+
+	// Drafts never wait: anything that would be drafted is drafted at once.
+	const DRAFTED_NOW = { state: ["drafted", ""], smtp: 0, append: 1, prepares: 1, delivery: "" };
+	const pick = (x) => ({ state: x.state, smtp: x.smtp, append: x.append, prepares: x.prepares, delivery: x.delivery });
+	eq(pick(await SETTLE_CASES.draftsAtOnce(jobLib, { send: { enabled: false, domains: [SEND_DOMAIN] } })), DRAFTED_NOW, "§25 sending off: a POD uploaded just now is drafted at once");
+	eq(pick(await SETTLE_CASES.draftsAtOnce(jobLib, { send: { enabled: true, domains: ["example-other.test"] } })), DRAFTED_NOW, "§25 a domain not on the send list: drafted at once");
+	eq(pick(await SETTLE_CASES.draftsAtOnce(jobLib, { extra: { sendMail: undefined } })), DRAFTED_NOW, "§25 sending on with no sender: drafted at once");
+	eq(pick(await SETTLE_CASES.draftsAtOnce(jobLib, { setup: (w, id) => {
+		ledgerLib.setSendStop(w.db, { reason: "STOPPED_BY_ADMIN", nowIso: isoOf(w.now) });
+		deliveredNoPod(w, id);
+	} })), DRAFTED_NOW, "§25 sending stopped: drafted at once");
+	const bisonDraft = await SETTLE_CASES.draftsAtOnce(jobLib, { setup: (w, id) => deliveredNoPod(w, id, { Email: BISON }, "billing@example-factor.test") });
+	eq([pick(bisonDraft), bisonDraft.to], [DRAFTED_NOW, [BISON_AP]], "§25 a Bison load whose inbox's domain isn't listed: drafted at once, to the inbox");
+	const bisonListed = await SETTLE_CASES.draftsAtOnce(jobLib, { send: { enabled: true, domains: [SEND_DOMAIN, "example-bison-ap.test"] },
+		setup: (w, id) => deliveredNoPod(w, id, { Email: BISON }, "billing@example-factor.test") });
+	eq([bisonListed.state, bisonListed.smtp, bisonListed.append, bisonListed.prepares], [["waiting", "SEND_SETTLING"], 0, 0, 0],
+		"§25 FAILS ON THE OLD CODE: a Bison load whose inbox's domain is listed waits like any send (its domain judged by the inbox), with no engine call");
+
+	const slots = await SETTLE_CASES.slots(jobLib);
+	eq([slots.first, slots.second, slots.smtp, slots.append, slots.prepares],
+		[[["waiting", "SEND_SETTLING"], ["waiting", "SEND_SETTLING"], ["drafted", ""]], [["waiting", "SEND_SETTLING"], ["waiting", "SEND_SETTLING"], ["drafted", ""]], 0, 2, [0, 0]],
+		"§25 FAILS ON THE OLD CODE: loads waiting to settle take none of a sweep's two attempts: another broker's load is drafted in the same sweep, on the first sweep and the next");
+
+	const build = await SETTLE_CASES.podDuringBuild(jobLib);
+	eq([build.first.state, build.first.smtp, build.first.append, build.first.number, build.first.stage, build.first.until === build.first.expected],
+		[["waiting", "SEND_SETTLING"], 0, 0, "10202026-1", "reserved", true],
+		"§25 FAILS ON THE OLD CODE: a POD uploaded during the build: nothing sent or drafted, the number kept, waiting 60 minutes from that POD");
+	eq(build.after, { state: ["drafted", ""], delivery: "send", smtp: 1, sameNumber: true, mint: 1 }, "§25 ...then sent with the same number");
+
+	const retry = await SETTLE_CASES.retryHeld(jobLib);
+	eq([retry.queued, retry.held, retry.sent], [["queued", "RETRY_LATER"], { state: ["waiting", "SEND_SETTLING"], prepares: 1, mint: 0, until: retry.expectedUntil, attempts: 1 },
+		{ state: ["drafted", ""], smtp: 1, prepares: 2 }],
+	"§25 FAILS ON THE OLD CODE: a queued retry whose load got a new POD waits before the build (no engine call, no number), its attempt count kept, and is sent once settled");
+
+	for (const [label, raw] of [["that can't be read", "not a time"], ["missing", null], ["a day ahead of the clock", (w) => sqliteStamp(w.now + 24 * HOUR)]]) {
+		const u = await SETTLE_CASES.unknownTime(jobLib, raw);
+		eq(u, { state: ["drafted", ""], smtp: 0, append: 1, refused: ["10202026-1: POD_TIME_UNKNOWN; drafted for a person instead"] },
+			`§25 FAILS ON THE OLD CODE: a POD time ${label}: never sent, never left waiting: drafted for a person, with one refusal row`);
+	}
+
+	const stopped = await SETTLE_CASES.stoppedWhileWaiting(jobLib);
+	eq(stopped, { waiting: ["waiting", "SEND_SETTLING"], after: ["drafted", ""], smtp: 0, append: 1 },
+		"§25 FAILS ON THE OLD CODE: sending stopped while a load waits to settle: drafted at the next sweep, not after the wait");
+
+	eq(await SETTLE_CASES.setting(jobLib, 0, [0]), [[0, "drafted", "", 1]], "§25 the setting handed to the job, 0: sent at once");
+	eq(await SETTLE_CASES.setting(jobLib, 15, [0, 14, 15]), [[0, "waiting", "SEND_SETTLING", 0], [14, "waiting", "SEND_SETTLING", 0], [15, "drafted", "", 1]],
+		"§25 FAILS ON THE OLD CODE: ...15: waiting until 15 minutes after the POD, then sent");
+
+	eq(SETTLE_CASES.livePods(), ["2026-10-20T13:05:00Z", "2026-10-20T13:06:00Z", "2026-10-20T13:11:00Z", null],
+		"§25 FAILS ON THE OLD CODE: ledger.livePodTimes(): the load's live POD rows (either spelling of its ID; deleted rows, other types and other loads left out), each stamp as SQLite reads it (an offset converted, an unreadable one null)");
+
+	// Each decision removed in turn: the case that pins it must change.
+	const JOB_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+	const LEDGER_FILE = path.join(ROOT, "lib", "auto-invoice-ledger.js");
+	const jobMutants = [
+		["a new load not held by the sweep", "const hold = v.state === \"queued\" ? settleHold(key, facts, nowMs) : null;", "const hold = null;",
+			(lib) => SETTLE_CASES.slots(lib), (x) => JSON.stringify(x.first[2]) === JSON.stringify(["drafted", ""])],
+		["a waiting load let go before it settles", "const hold = settleHold(c.load_key, facts, nowMs);", "const hold = null;",
+			(lib) => SETTLE_CASES.slots(lib), (x) => JSON.stringify(x.second[2]) === JSON.stringify(["drafted", ""])],
+		["the end of the wait not moved by a newer POD", "if (c.reason_code !== \"SEND_SETTLING\" || c.next_attempt_at !== hold.untilIso) {", "if (c.reason_code !== \"SEND_SETTLING\") {",
+			(lib) => SETTLE_CASES.secondPod(lib), (x) => x.seen[2][3] === isoOf(x.P + 110 * MIN)],
+		["no wait before the build", "if (hold) return release(fresh, \"waiting\", \"SEND_SETTLING\", { next_attempt_at: hold.untilIso });", "",
+			(lib) => SETTLE_CASES.retryHeld(lib), (x) => x.held.prepares === 1 && x.held.mint === 0],
+		["no second look after the build", "const g = sending ? sendRules.sendDecision({", "const g = sending ? sendRules.gate({",
+			(lib) => SETTLE_CASES.podDuringBuild(lib), (x) => x.first.smtp === 0 && x.first.state[1] === "SEND_SETTLING"],
+		["a POD time that can't be read drafted with no row", "} else if (g && g.why === \"POD_TIME_UNKNOWN\") {", "} else if (false) {",
+			(lib) => SETTLE_CASES.unknownTime(lib, "not a time"), (x) => x.refused.length === 1],
+		["the job deaf to the setting", "settleMinutes: sendRules.settleMinutesOf(d.send.settleMinutes) }", "settleMinutes: sendRules.SETTLE_MINUTES_DEFAULT }",
+			(lib) => SETTLE_CASES.setting(lib, 0, [0]), (x) => x[0][1] === "drafted"],
+		["the stop not read before a wait", "stopped: Boolean(ledger.getSendStop(db)),\n\t\t\tto: facts.isBison", "stopped: false,\n\t\t\tto: facts.isBison",
+			(lib) => SETTLE_CASES.stoppedWhileWaiting(lib), (x) => JSON.stringify(x.after) === JSON.stringify(["drafted", ""])],
+		["a load with no sender held", "\t\tif (!sending) return null;\n\t\tconst g = sendRules.sendDecision(", "\t\tconst g = sendRules.sendDecision(",
+			(lib) => SETTLE_CASES.draftsAtOnce(lib, { extra: { sendMail: undefined } }), (x) => x.append === 1],
+		["Bison judged by the broker Email, not its inbox", "to: facts.isBison ? d.bisonRecipient() : facts.brokerEmail,", "to: facts.brokerEmail,",
+			(lib) => SETTLE_CASES.draftsAtOnce(lib, { send: { enabled: true, domains: [SEND_DOMAIN, "example-bison-ap.test"] },
+				setup: (w, id) => deliveredNoPod(w, id, { Email: BISON }, "billing@example-factor.test") }), (x) => x.prepares === 0],
+	];
+	for (const [label, from, to, run, pinned] of jobMutants) {
+		const lib = mutantModule(JOB_FILE, from, to);
+		ok(lib, `§25 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+		if (!lib) continue;
+		ok(pinned(await run(jobLib)) && !pinned(await run(lib)), `§25 MUTANT ${label}: caught`);
+	}
+	// The ledger's read, put in place through its export for the case.
+	const ledgerMutants = [
+		["deleted PODs counted", " AND deleted_at IS NULL ORDER BY id", " ORDER BY id",
+			() => SETTLE_CASES.deletedPod(jobLib), (x) => x.seen[3][1] === "drafted"],
+		["the stored stamp not read by SQLite", "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS at FROM documents", "SELECT uploaded_at AS at FROM documents",
+			() => SETTLE_CASES.waitThenSend(jobLib, { at: [0] }), (x) => x.seen[0].state[1] === "SEND_SETTLING"],
+		["one spelling of the load ID only", "\t\t.all(key, `#${key}`)\n\t\t.map((r) => r.at);", "\t\t.all(key, key)\n\t\t.map((r) => r.at);",
+			() => SETTLE_CASES.livePods(), (x) => Array.isArray(x) && x.includes("2026-10-20T13:06:00Z")],
+	];
+	for (const [label, from, to, run, pinned] of ledgerMutants) {
+		const lib = mutantModule(LEDGER_FILE, from, to);
+		ok(lib, `§25 MUTANT ${label}: applied to lib/auto-invoice-ledger.js once`);
+		if (!lib) continue;
+		const real = pinned(await run());
+		const mutated = pinned(await withPatched([[ledgerLib, "livePodTimes", lib.livePodTimes]], run));
+		ok(real && !mutated, `§25 MUTANT ${label}: caught`);
 	}
 }
 

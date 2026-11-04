@@ -14,6 +14,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   NOT_COMPLETED: { short: 'not delivered', text: 'The load is no longer marked delivered.' },
   LOAD_DROPPED: { short: 'cancelled or deleted', text: 'The load was cancelled or deleted.' },
   RATECON_MISSING: { short: 'no rate con', text: 'No rate con was found for this load. It is looked for again every 2 hours, three times; after that, draft it by hand.' },
+  SEND_SETTLING: { short: 'settling before sending', text: 'The invoice is sent automatically once the wait after its newest POD is over, so a POD page added soon after goes with it. A new POD starts the wait again.' },
   RETRY_LATER: { short: 'trying again', text: 'The last try failed. It is tried again on its own.' },
   GEMINI_DOWN: { short: 'rate-con reader down', text: 'The rate-con reader is unavailable. It is tried again in 30 minutes.' },
   RENDERER_BUSY: { short: 'PDF renderer busy', text: 'The PDF renderer was busy. It is tried again in a few minutes.' },
