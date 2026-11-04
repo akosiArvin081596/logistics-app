@@ -6945,7 +6945,7 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_conf_dir ON driver_availability_confirmations(directory_id, load_to);
 	-- One row per judged day of a time-off row (the ELD check): miles and times only, never a position. A final
-	-- row is never rewritten; 90 days after final its miles and times are removed and its verdict stays.
+	-- row is never rewritten; 90 days after final (or last judged) its miles and times are removed and its verdict stays.
 	CREATE TABLE IF NOT EXISTS driver_time_off_days (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		availability_id INTEGER NOT NULL,
@@ -11543,11 +11543,9 @@ function availabilityRowView(r, todayKey, viewer) {
 	};
 }
 
-// A time-off row's ELD check results as staff see them: `eldDays` and
-// `eldSummary` (lib/time-off-eld-check.js timeOffEldDaysView()), each month's
-// lock read once, load IDs as the viewer may see them. Unreadable, the row
-// carries no ELD keys, so the time-off list still answers; nor does a driver's
-// request that is waiting or declined, which the check never judges.
+// A time-off row's ELD results as staff see them (timeOffEldDaysView()), load IDs as the viewer may see them. No ELD
+// keys when they can't be read, so the list still answers, nor for a driver's request that is waiting or declined,
+// which the check never judges.
 function timeOffEldRowFields(r, { today, req }) {
 	if (driverAvailability.requestStatusOf(r) !== "approved") return {};
 	try {
@@ -12405,19 +12403,16 @@ app.get("/api/driver-availability", availabilityFlagGate, requireRole("Super Adm
 });
 
 // ── The time-off ELD check: a daily run and a retention purge ─────────────────
-// Each run judges every finished, open-month, not-final day of every live
-// time-off row from the ELD (lib/time-off-eld-check.js) with no one approving
-// it. It writes only its own day rows, system audit rows and in-app notices:
-// never the time-off row, pay, a sheet, n8n, Drive or an email.
+// Staff approved or recorded the time off; each finished, open-month day is then judged from the ELD with no one's
+// click. A run writes only its day rows, system audit rows and notices: no time-off row, pay, sheet, n8n, Drive or email.
 const TIME_OFF_ELD_LAST_RUN_KEY = "time_off_eld_check_last_run";
 const TIME_OFF_ELD_TICK_MS = 30 * 60 * 1000;
 const TIME_OFF_ELD_BOOT_DELAY_MS = 10 * 60 * 1000;
 let timeOffEldRunning = false;
 
-// What a run at nowMs would write, read only (scripts/time-off-eld-check-report.js
-// prints it): per live row, each day to judge with its verdict, explanation,
-// finality and notice. `loadIndex` is availabilityLoadIndexOf() of a Job Tracking
-// read, null when it could not be read.
+// What a run at nowMs would write, read only (scripts/time-off-eld-check-report.js prints it): per live row, each day
+// to judge with its verdict, explanation, finality and notice. `loadIndex` is availabilityLoadIndexOf() of a Job
+// Tracking read, null when it could not be read.
 function timeOffEldRunPlan({ nowMs, loadIndex }) {
 	const today = appDay(new Date(nowMs));
 	const yesterday = driverAvailability.shiftAvailabilityDay(today, -1);
@@ -12451,7 +12446,8 @@ function timeOffEldRunPlan({ nowMs, loadIndex }) {
 			const days = [];
 			for (let d = r.from_date; d && d <= last; d = driverAvailability.shiftAvailabilityDay(d, 1)) {
 				const s = stored.get(d);
-				if (!monthClosed(d) && !(s && s.final_at)) days.push(d);
+				// A purged day keeps the verdict it had: its readings are past retention, so it is never judged again.
+				if (!monthClosed(d) && !(s && (s.final_at || s.purged_at))) days.push(d);
 			}
 			if (!days.length) continue;
 			const evidence = timeOffDayEvidence({ driverName: r.directory_name, fromDay: r.from_date, toDay: last, nowMs });
@@ -12594,9 +12590,8 @@ async function timeOffEldCheckTick() {
 	}
 }
 
-// Retention: 90 days after a day's result is final its ELD miles and times (and
-// the zone they read in) are removed; its verdict stays in the row and in its
-// audit rows. The one write to a closed month's results; it runs with the check
+// Retention: 90 days after a day's result is final, or was last judged when it never became final, its ELD miles,
+// times and zone are removed and its verdict stays. The one write to a closed month's results; it runs with the check
 // on or off, whenever the table has rows.
 function purgeTimeOffEldResults(nowMs = Date.now()) {
 	try {
@@ -12607,15 +12602,15 @@ function purgeTimeOffEldResults(nowMs = Date.now()) {
 				UPDATE driver_time_off_days
 				SET miles = 0, moving_pings = 0, samples = 0, first_move_ms = NULL, last_move_ms = NULL, activity_first_ms = NULL,
 					activity_last_ms = NULL, change_ms = NULL, day_zone = '', purged_at = ?
-				WHERE purged_at IS NULL AND final_at IS NOT NULL AND final_at < ?
+				WHERE purged_at IS NULL AND COALESCE(final_at, evaluated_at) < ?
 			`).run(new Date(nowMs).toISOString(), cutoff);
 			if (r.changes) {
 				logAudit({}, "driver_time_off_eld_purge", "driver_time_off_days", "",
-					`removed ELD miles and times from ${r.changes} day result(s) final before ${cutoff.slice(0, 10)}; each day's verdict stays`);
+					`removed ELD miles and times from ${r.changes} day result(s) final or last judged before ${cutoff.slice(0, 10)}; each day's verdict stays`);
 			}
 			return r.changes;
 		})();
-		if (removed) console.log(`[time-off-eld] removed ELD miles and times from ${removed} day result(s) final over 90 days ago`);
+		if (removed) console.log(`[time-off-eld] removed ELD miles and times from ${removed} day result(s) final or last judged over 90 days ago`);
 		return removed;
 	} catch (err) {
 		console.error("[time-off-eld] results purge failed:", err.message);
