@@ -472,7 +472,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
 section('§12 the driver\'s line above Delivered')
 {
   const STEPPER = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'driver', 'StatusStepper.vue'), 'utf8')
-  const LINE = 'Upload every POD page before you tap Delivered. The invoice is made soon after you tap. If anything changes later, tell dispatch or a Super Admin right away.'
+  const LINE = 'Upload every POD page before you tap Delivered. The invoice is made right after you tap. If anything changes later, tell dispatch or a Super Admin right away.'
   eq(STEPPER.split(LINE).length - 1, 1, '§12 FAILS ON THE OLD CODE: the line is there once, word for word')
   const actions = (/<template v-if="!readOnly">[\s\S]*?<div v-if="requiresUpload"/.exec(STEPPER) || [''])[0]
   ok(actions.includes(LINE), '§12 FAILS ON THE OLD CODE: inside the driver-only block, never on the public tracker, and above the upload hint')
@@ -480,6 +480,35 @@ section('§12 the driver\'s line above Delivered')
   ok(/v-if="nextStep && nextStep\.value === 'Delivered'"/.test(tag), '§12 FAILS ON THE OLD CODE: only while the next step is Delivered')
   ok(!/v-else/.test(tag), '§12 ...outside the hint chain, so it shows with the upload hint too')
   ok(/<div v-if="requiresUpload"/.test(STEPPER) && /<div v-else-if="blocked"/.test(STEPPER) && /<div v-else-if="gpsLine"/.test(STEPPER), '§12 the hint chain below it is unchanged')
+}
+
+// ------------------------------------------------------------------ §13
+section('§13 the driver\'s Delivered starts the invoice: what a Super Admin reads')
+{
+  const chip = S.autoInvoiceChip({ state: 'needs_attention', code: 'NOT_BY_DRIVER', invoiceId: '', changed: [], trigger: true, retry: 'none' })
+  eq(chip && [chip.label, chip.tone], ['No automatic invoice', 'warn'], '§13 FAILS ON THE OLD CODE: a completed load nothing will invoice reads "No automatic invoice", amber, never "Needs attention: ..." in red')
+  ok(chip && /only the driver's own Delivered/.test(chip.reason) && /Draft it by hand/.test(chip.reason), '§13 FAILS ON THE OLD CODE: ...it says why and what to do')
+  ok(chip && !/Someone other than the driver/.test(chip.reason), '§13 ...and doesn\'t blame the office: a failed write or a restart can leave a driver\'s own tap here too')
+  eq(S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code: 'NOT_BY_DRIVER' } }), true, '§13 ...the toggle counts it, so it can\'t be forgotten')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'NOT_BY_DRIVER' }), S.canMarkChecked({ state: 'needs_attention', code: 'NOT_BY_DRIVER' })], [false, false], '§13 FAILS ON THE OLD CODE: ...with no Try again: the route has no claim to retry')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP', retry: 'none' }), S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP' })], [false, true], '§13 FAILS ON THE OLD CODE: OFF_GAP: no Try again when the server says so (the driver\'s trigger); the sweep\'s row keeps it')
+
+  const send = { state: 'needs_attention', code: 'RETRY_LATER', trigger: true, retry: 'send' }
+  ok(/looks in the mailbox/.test(S.tryAgainConfirmText(send)) && /sends this invoice/.test(S.tryAgainConfirmText(send)), '§13 FAILS ON THE OLD CODE: the confirm says Try again looks first, then sends')
+  ok(/draft/.test(S.tryAgainConfirmText({ ...send, retry: 'draft' })) && !/sends this invoice/.test(S.tryAgainConfirmText({ ...send, retry: 'draft' })), '§13 FAILS ON THE OLD CODE: ...and makes a draft where it would (a broker not on the list, or sending stopped)')
+  ok(/looks in Gmail/.test(S.tryAgainConfirmText({ ...send, code: 'MAYBE_SENT', retry: 'search' })) && !/sends/.test(S.tryAgainConfirmText({ ...send, code: 'MAYBE_SENT', retry: 'search' })), '§13 FAILS ON THE OLD CODE: ...and never says "sends" on a load it only searches for')
+  eq([S.tryAgainConfirmText({ state: 'needs_attention', code: 'RETRY_LATER' }), S.tryAgainConfirmText(null)], ['', ''], '§13 the sweep\'s Try again only queues the load: nothing to ask')
+  eq([S.tryAgainDoneText(send), S.tryAgainDoneText({ state: 'needs_attention' })], ["It's being made now.", 'It will be tried again within a few minutes.'], '§13 FAILS ON THE OLD CODE: the answer says when, for each')
+
+  const NEW_CODES = ['DRIVER_PENDING', 'NOT_BY_DRIVER', 'CAP_REACHED', 'NO_MAILBOX', 'HANDED_OVER', 'MAILBOX_HIT', 'MAILBOX_UNREAD', 'PAYMENTS_TABLE_HIT', 'PAYMENTS_UNREAD']
+  for (const code of NEW_CODES) ok(rules.REASON_CODES.includes(code) && S.AUTO_INVOICE_REASONS[code], `§13 FAILS ON THE OLD CODE: ${code} is a server code with words`)
+  for (const code of ['MAILBOX_HIT', 'MAILBOX_UNREAD', 'PAYMENTS_TABLE_HIT', 'PAYMENTS_UNREAD']) ok(/nothing was sent/.test(S.AUTO_INVOICE_REASONS[code].text), `§13 ${code} says nothing was sent`)
+
+  const TAB_SRC = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue'), 'utf8')
+  const action = liftFn(TAB_SRC, 'autoInvoiceAction', { async: true })
+  ok(action && /const ask = kind === 'retry' \? tryAgainConfirmText\(status\) : ''/.test(action) && /if \(ask && !window\.confirm\(ask\)\) return/.test(action), '§13 FAILS ON THE OLD CODE: the dialog\'s Try again asks first, before anything is posted')
+  ok(action && action.indexOf('window.confirm(ask)') < action.indexOf('api.post('), '§13 ...a "no" posts nothing')
+  ok(action && /tryAgainDoneText\(status\)/.test(action) && !/within a few minutes/.test(action), '§13 FAILS ON THE OLD CODE: its answer comes from the status, not from a fixed sentence')
 }
 
 console.log(`\n${'='.repeat(64)}`)

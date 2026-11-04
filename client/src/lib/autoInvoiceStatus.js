@@ -52,6 +52,15 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   IN_GMAIL_UNRECORDED: { short: 'in Gmail, not recorded', text: "The invoice is in Gmail, but LogisX couldn't record it. Try again records it if it can. Check Gmail Drafts and Sent Mail before making another." },
   SEND_REFUSED: { short: 'not sent: last check failed', text: "The invoice email failed its last check before sending (recipient or attachments), so nothing was sent. Draft it by hand and check it." },
   MAYBE_SENT: { short: 'may already be sent', text: "The invoice email may have been sent to the broker, but it wasn't found in Gmail Sent Mail. Check Sent Mail before drafting it again. Try again searches Sent Mail once more; it never sends." },
+  DRIVER_PENDING: { short: 'about to be made', text: "The driver just marked this load Delivered, so its invoice is about to be made." },
+  NOT_BY_DRIVER: { short: 'no automatic invoice', text: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." },
+  CAP_REACHED: { short: 'hourly or daily limit reached', text: "More invoices came due than the hourly or daily limit allows, so this one wasn't made. Try again in a while, or draft it by hand." },
+  NO_MAILBOX: { short: 'no mailbox set', text: "No company mailbox is set on the server, so no invoice was made. Draft it by hand." },
+  HANDED_OVER: { short: 'was in line at the change', text: "This load was in line when automatic invoices moved to the driver's Delivered, so its invoice wasn't made. Check Gmail, then Try again, or draft it by hand." },
+  MAILBOX_HIT: { short: 'an email names this load', text: "An email already names this load, so nothing was sent. Check Gmail. If it still needs an invoice, draft it by hand." },
+  MAILBOX_UNREAD: { short: "mailbox couldn't be searched", text: "The mailbox couldn't be searched, so nothing was sent. Try again in a while, or draft it by hand." },
+  PAYMENTS_TABLE_HIT: { short: 'on the Payments Table', text: "The Payments Table already holds an invoice or payment for this load, so nothing was sent. Check it. If the load still needs an invoice, draft it by hand." },
+  PAYMENTS_UNREAD: { short: "Payments Table couldn't be read", text: "The Payments Table couldn't be read, so nothing was sent. Try again in a while, or draft it by hand." },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
@@ -112,6 +121,8 @@ export function autoInvoiceChip(status) {
     case 'working':
       return { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' }
     case 'needs_attention':
+      // Nothing failed on this load: nothing was started, so a person drafts it.
+      if (status.code === 'NOT_BY_DRIVER') return { label: 'No automatic invoice', tone: 'warn', reason: reason.text }
       return { label: reason ? `Needs attention: ${reason.short}` : 'Needs attention', tone: 'bad', reason: reason ? (reason.attentionText || reason.text) : 'Draft it by hand.' }
     default:
       return null
@@ -126,8 +137,22 @@ export function autoInvoiceNeedsAttention(row) {
   return s.state === 'needs_attention' || (s.state === 'drafted' && changedOf(s).length > 0)
 }
 
-export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention')
+// The server says what Try again would do (`retry`) while the driver's Delivered starts
+// the invoice: "none" is a load it refuses, and a load nothing started has nothing to retry.
+export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none')
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
+
+// The question before Try again, while it is the only retry and can send at once: "" asks
+// nothing (the 5-minute sweep's Try again only queues the load).
+export function tryAgainConfirmText(status) {
+  if (!status || status.trigger !== true) return ''
+  if (status.retry === 'send') return 'Try again looks in the mailbox and the Payments Table, then sends this invoice to the broker if every check passes. Continue?'
+  if (status.retry === 'search') return 'Try again looks in Gmail first for what may already have gone. Continue?'
+  return 'Try again makes this invoice a Gmail draft for a person to send, if every check passes. Continue?'
+}
+
+// What a person reads once the server has taken Try again.
+export const tryAgainDoneText = (status) => (status && status.trigger === true ? "It's being made now." : 'It will be tried again within a few minutes.')
 
 // --- Approve on the Draft Invoice preview, while real automatic drafts are on ---
 // The job may draft a load while a person reads its preview, so Approve reads the
