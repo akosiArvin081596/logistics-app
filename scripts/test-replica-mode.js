@@ -126,7 +126,9 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		eq(`${n} is never copied, even when the app reads it`, rules.classifySetting(n, "made-up", { readByApp: new Set([n]) }).rule, "production only: names a production target");
 	}
 	// Decision 36: four more of production's own targets, each with a value of its kind.
-	for (const [n, v] of [["GMAIL_USER", "dispatch@example.test"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GOOGLE_DRIVE_FOLDER_ID", "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ"], ["ARCHIVE_SPREADSHEET_ID", "made-up-archive-sheet-id"]]) {
+	// Plan B PR 5: the day-off note's one C.H. Robinson address (a made-up one here) is never copied either.
+	for (const [n, v] of [["GMAIL_USER", "dispatch@example.test"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GOOGLE_DRIVE_FOLDER_ID", "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ"], ["ARCHIVE_SPREADSHEET_ID", "made-up-archive-sheet-id"],
+		["TIME_OFF_CHR_DRAFT_TO", "made-up.agent@chrobinson.com"]]) {
 		const verdict = rules.classifySetting(n, v, { readByApp: new Set([n]) });
 		eq(`36 ${n} is never copied, even when the app reads it`, [verdict.copy, verdict.rule], [false, "production only: names a production target"]);
 		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });

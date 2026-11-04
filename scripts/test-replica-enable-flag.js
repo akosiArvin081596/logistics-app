@@ -94,6 +94,8 @@ const OUTBOUND = {
 	LINXUP_ENABLED: /ELD|outside/i,
 	SCANKIT_ENABLED: /OCR|outside/i,
 	RATECON_RECONCILE_ENABLED: /Gmail/i,
+	// The day-off note to C.H. Robinson's contact (plan B PR 5): a Gmail draft naming a driver.
+	DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: /Gmail drafts naming a driver/i,
 	RATECON_INDEX_APPLY_ENABLED: /Drive/i,
 	FUEL_GALLONS_RECOVERY_ENABLED: /Gemini/i,
 	RECEIPT_AUTO_APPROVE_ENABLED: /scheduled job that sends receipts to Gemini/i,
