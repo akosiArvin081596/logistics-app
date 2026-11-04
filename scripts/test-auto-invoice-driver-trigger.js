@@ -77,10 +77,12 @@ const SENT = "[Gmail]/Sent Mail";
 
 const turn = () => new Promise((r) => setImmediate(r));
 const never = () => new Promise(() => {});
-async function until(cond, label) {
-	for (let i = 0; i < 400; i++) {
+// By the clock, not by turns: a run past its limit waits on a real timer, on a loaded CI box too.
+async function until(cond, label, ms = 3000) {
+	const end = Date.now() + ms;
+	while (Date.now() < end) {
 		if (cond()) return true;
-		await turn();
+		await new Promise((r) => setTimeout(r, 1));
 	}
 	failures.push(`${label}: the condition was never met`);
 	return false;
