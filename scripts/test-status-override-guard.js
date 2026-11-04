@@ -24,13 +24,12 @@
  * different way to restate a closed month and each is invisible to a guard that
  * only looks at the other:
  *
- *   BEFORE  — 26 rows sit at "Cancelled"/"Canceled" and are dropped from every
+ *   BEFORE  — rows at "Cancelled"/"Canceled" are dropped from every
  *             aggregate by excludeDroppedLoads(). A guard phrased as "does this
  *             row contribute to a locked month today?" answers NO for all of
  *             them, so it permits flipping one to "Delivered" — which injects
- *             the $29,166.25 carried by the 25 of them inside locked months,
- *             including load 554481641 ($4,100, assigned 2026-06, a month whose
- *             payout is already `paid`). Section 2 asserts both halves:
+ *             the pay of those inside locked months back into them, including
+ *             a month whose payout is already `paid`. Section 2 asserts both halves:
  *             that such a naive predicate really does say "allow", and that the
  *             shipped guard refuses anyway. It refuses because loadRowPeriods()
  *             is deliberately status-blind.
@@ -198,10 +197,10 @@ function naiveContributesToLockedMonth(r) {
 }
 
 LOCKED = new Set(["2026-06"]);
-// Production load 554481641: $4,100, 2026-06, a month whose payout is PAID.
+// A made-up cancelled load in 2026-06, a month whose payout is PAID.
 const resurrect = row(PROD_HEADERS, {
-	"Load ID": "554481641", "Job Status": "Cancelled",
-	"Assigned Date": "2026-06-11", "  Payment  ": " $ 4,100.00 ",
+	"Load ID": "QA-CXL-0601", "Job Status": "Cancelled",
+	"Assigned Date": "2026-06-11", "  Payment  ": " $ 3,250.00 ",
 });
 
 eq(naiveContributesToLockedMonth(resurrect), false,
