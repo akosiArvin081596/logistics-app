@@ -29,7 +29,8 @@
  *     without hours
  * §7  Eastern bucketing: a Central and a Pacific driver's Friday night
  * §8  ranking: ties share the place, null is "not ranked" (never 0), order
- * §9  labels: most days, ties to the later unit; handovers "#703 (1)"/"(2)",
+ * §9  labels: one plain form ("LogisX-#101" reads "#101"), only a unit shape
+ *     passes; most days, ties to the later unit; handovers "#703 (1)"/"(2)",
  *     dates only on the driver's own row
  * §10 the driver projection: exact keys, byte-identical not-ranked rows
  *     whatever the reason, no figure on the safety board, top 3 plus "you"
@@ -48,6 +49,9 @@
  *     checked"; bad period 400; Job Tracking down 503
  * §17 wiring: one declaration above app.get("*"), the flag's exact shape, the
  *     replica's refusal (a kill switch never goes on its --enable allowlist)
+ * §18 a stored unit that isn't a unit: a name, phone or load number in
+ *     trucks.unit_number never reaches a driver; the row keeps its rank and
+ *     count under the neutral label; the Super Admin report names the truck
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -108,14 +112,15 @@ const DRIVERS = [
 ];
 const ALL_NAMES = [...DRIVERS.map((d) => d.name), "Lou Grant"];
 const TRUCKS = [
-	{ id: 1, unit: "501", retired_at: "" },
-	{ id: 2, unit: "502", retired_at: "" },
-	{ id: 3, unit: "503", retired_at: "" },
-	{ id: 4, unit: "504", retired_at: "" },
-	{ id: 5, unit: "505", retired_at: "" },
-	{ id: 6, unit: "506", retired_at: "" },
+	// The fleet's real spelling with made-up numbers, so a stored prefix can't hide behind bare ones.
+	{ id: 1, unit: "LogisX-#501", retired_at: "" },
+	{ id: 2, unit: "Logisx-#502", retired_at: "" },
+	{ id: 3, unit: "LogisX-#503", retired_at: "" },
+	{ id: 4, unit: "LogisX-#504", retired_at: "" },
+	{ id: 5, unit: "Logisx-#505", retired_at: "" },
+	{ id: 6, unit: "LogisX-#506", retired_at: "" },
 	{ id: 7, unit: "LogisX-TEST", retired_at: "" },
-	{ id: 9, unit: "509", retired_at: "2026-10" },
+	{ id: 9, unit: "LogisX-#509", retired_at: "2026-10" },
 ];
 const ASSIGNMENTS = [
 	{ truck: 1, driver: "Ada Quill", start: "2026-10-01T12:00:00.000Z", end: "" },
@@ -475,28 +480,85 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 	await section("9 unit labels", () => {
 		const p = need();
 		eq(p.chooseUnit([
-			{ truckId: 1, unit: "703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
-			{ truckId: 2, unit: "702", days: 4, firstDay: "2026-11-10", lastDay: "2026-11-13" },
-		]).unit, "702", "the unit held on the most days");
+			{ truckId: 1, unit: "LogisX-#703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
+			{ truckId: 2, unit: "LogisX-#702", days: 4, firstDay: "2026-11-10", lastDay: "2026-11-13" },
+		]).unit, "LogisX-#702", "the unit held on the most days");
 		eq(p.chooseUnit([
-			{ truckId: 2, unit: "702", days: 3, firstDay: "2026-11-11", lastDay: "2026-11-13" },
-			{ truckId: 1, unit: "703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
-		]).unit, "702", "a tie goes to the unit held later");
+			{ truckId: 2, unit: "LogisX-#702", days: 3, firstDay: "2026-11-11", lastDay: "2026-11-13" },
+			{ truckId: 1, unit: "LogisX-#703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
+		]).unit, "LogisX-#702", "a tie goes to the unit held later");
 		eq(p.chooseUnit([
-			{ truckId: 1, unit: "703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
-			{ truckId: 2, unit: "702", days: 3, firstDay: "2026-11-11", lastDay: "2026-11-13" },
-		]).unit, "702", "whatever order the holdings come in");
+			{ truckId: 1, unit: "LogisX-#703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" },
+			{ truckId: 2, unit: "LogisX-#702", days: 3, firstDay: "2026-11-11", lastDay: "2026-11-13" },
+		]).unit, "LogisX-#702", "whatever order the holdings come in");
 		const period = { start: "2026-11-07", lastDay: "2026-11-13" };
 		const labels = p.boardLabels(new Map([
-			[7, { truckId: 4, unit: "703", days: 3, firstDay: "2026-11-10", lastDay: "2026-11-12" }],
-			[3, { truckId: 4, unit: "703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" }],
-			[5, { truckId: 9, unit: "702", days: 7, firstDay: "2026-11-07", lastDay: "2026-11-13" }],
+			[7, { truckId: 4, unit: "LogisX-#703", days: 3, firstDay: "2026-11-10", lastDay: "2026-11-12" }],
+			[3, { truckId: 4, unit: "LogisX-#703", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" }],
+			[5, { truckId: 9, unit: "LogisX-#702", days: 7, firstDay: "2026-11-07", lastDay: "2026-11-13" }],
 		]), period);
 		eq(labels.get(3), { label: "#703 (1)", ownLabel: "#703 (1, to Nov 9)" }, "the first holder of a handed-over unit is (1); dates only on his own row");
 		eq(labels.get(7), { label: "#703 (2)", ownLabel: "#703 (2, Nov 10 to Nov 12)" }, "the next is (2)");
 		eq(labels.get(5), { label: "#702", ownLabel: "#702" }, "a unit with one driver has no number and no dates");
 		ok(![...labels.values()].some((l) => /\d{1,2}\b.*(Nov|Oct)|(Nov|Oct)/.test(l.label)), "no board label carries a date");
-		eq(p.unitText("#INV-00-Z"), "#INV-00-Z", "a unit already starting with # is not doubled");
+		// One plain form, however the unit is stored.
+		for (const [stored, label] of [
+			["LogisX-#101", "#101"], ["Logisx-#102", "#102"], ["LOGISX #103", "#103"], ["logisx_104", "#104"], ["LogisX105", "#105"],
+			["#106", "#106"], ["107", "#107"], ["  LogisX-#108  ", "#108"],
+			["INV-00-Z", "#INV-00-Z"], ["#INV-00-Z", "#INV-00-Z"], ["inv-00-z", "#INV-00-Z"], ["LogisX-INV-00-Z", "#INV-00-Z"],
+			["12345", "#12345"],
+		]) {
+			eq(p.unitLabel(stored), { text: label, refused: null }, `${JSON.stringify(stored)} reads ${label}`);
+		}
+		// Only a unit's shape passes: anything else reads the neutral label, and says why for the Super Admin.
+		const neutral = (refused) => ({ text: p.UNIT_NOT_SHOWN, refused });
+		ok(typeof p.UNIT_NOT_SHOWN === "string" && !/\d|#/.test(p.UNIT_NOT_SHOWN), "the neutral label is plain words, not a unit");
+		for (const [stored, why, says] of [
+			["", "empty", "nothing stored"],
+			[null, "empty", "nothing stored"],
+			["LogisX", "empty", "only the prefix"],
+			["LogisX-#", "empty", "only the prefix and #"],
+			["Ben Marsh truck", "characters", "a name with spaces"],
+			["Cal's Peterbilt", "characters", "an apostrophe"],
+			["Load 12345678", "characters", "a load with a word"],
+			["<b>502</b>", "characters", "markup"],
+			["##502", "characters", "a doubled #"],
+			["5O2_A", "characters", "an underscore"],
+			["-502", "characters", "a leading dash"],
+			["502-", "characters", "a trailing dash"],
+			["50--2", "characters", "a doubled dash"],
+			["٥٠٢", "characters", "digits outside 0-9"],
+			["A1B2C3D4E5F6G7H8", "length", "too long"],
+			["7".repeat(400), "length", "far too long, refused before any other check"],
+			["Ada-Quill", "no-digit", "a name with a dash and no digit"],
+			["TEST", "no-digit", "letters only"],
+			["Walter-1", "letters", "a word with a digit"],
+			["Peterbilt5", "letters", "a word glued to a digit"],
+			["555-867-5309", "number", "a phone number"],
+			["867-5309", "number", "a short phone number"],
+			["5558675309", "number", "a phone number unbroken"],
+			["12345678", "number", "a load number"],
+			["11-05-26", "number", "a date"],
+		]) {
+			eq(p.unitLabel(stored), neutral(why), `${JSON.stringify(stored).slice(0, 24)} (${says}) reads neutral, "${why}"`);
+		}
+		// A short unit-shaped value that is really someone: a name's part, its start, or its initials.
+		const parts = p.unitNameParts(["Ada Quill", "Ben O'Marsh", "Xi", " ", null]);
+		for (const [stored, says] of [["Ada-7", "a first name"], ["ADA7", "a first name in capitals"], ["Qui-7", "the start of a surname"], ["AQ-7", "initials"], ["7-Mar", "a name's part after the number"], ["Xi-7", "a two-letter name"], ["BOM-7", "initials across an apostrophe"], ["BM-7", "first and last initials"]]) {
+			eq(p.unitLabel(stored, parts), neutral("name"), `${stored} (${says}) reads neutral, "name"`);
+		}
+		for (const stored of ["LogisX-#101", "INV-00-Z", "A-7", "TRK-7", "QA-7"]) {
+			eq(p.unitLabel(stored, parts).refused, null, `${stored} is no one's name, and passes with the names in hand`);
+		}
+		const held = { truckId: 4, unit: "Ada-Quill", days: 3, firstDay: "2026-11-07", lastDay: "2026-11-09" };
+		const nextHeld = { truckId: 4, unit: "Ada-Quill", days: 3, firstDay: "2026-11-10", lastDay: "2026-11-12" };
+		const bad = p.boardLabels(new Map([[3, held], [7, nextHeld], [5, { truckId: 9, unit: "Ben Marsh truck", days: 7, firstDay: "2026-11-07", lastDay: "2026-11-13" }]]), period);
+		eq(bad.get(5), { label: p.UNIT_NOT_SHOWN, ownLabel: p.UNIT_NOT_SHOWN }, "a truck that fails reads neutral, to its own driver too");
+		eq(bad.get(3), { label: `${p.UNIT_NOT_SHOWN} (1)`, ownLabel: `${p.UNIT_NOT_SHOWN} (1, to Nov 9)` }, "a handover on such a truck keeps its numbers and own-row dates");
+		const named = p.boardLabels(new Map([[5, { truckId: 9, unit: "Ada-7", days: 7, firstDay: "2026-11-07", lastDay: "2026-11-13" }]]), period, parts);
+		eq(named.get(5).label, p.UNIT_NOT_SHOWN, "boardLabels checks the names it is given");
+		const namedHandover = p.boardLabels(new Map([[3, { ...held, unit: "Ada-7" }], [7, { ...nextHeld, unit: "Ada-7" }]]), period, parts);
+		eq(namedHandover.get(7).label, `${p.UNIT_NOT_SHOWN} (2)`, "and on a handover too");
 	});
 
 	// ── §10 ─────────────────────────────────────────────────────────────────
@@ -542,7 +604,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.boardExclusion({ status: "active", payType: "fixed", ownerOperator: true }), "owner-operator", "an owner-operator is out");
 		eq(p.boardExclusion({ status: "active", payType: "percentage" }, "all-drivers"), null, "the other answer to Q-A2 lets them in");
 		ok(p.isTestUnit("LogisX-TEST") && p.isTestUnit("test") && p.isTestUnit("TEST 2"), "test units are recognised");
-		ok(!p.isTestUnit("703") && !p.isTestUnit("Contest-1") && !p.isTestUnit("INV-00-Z"), "other units are not");
+		ok(!p.isTestUnit("LogisX-#703") && !p.isTestUnit("Contest-1") && !p.isTestUnit("INV-00-Z"), "other units are not");
 	});
 
 	// ── worlds ──────────────────────────────────────────────────────────────
@@ -714,7 +776,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(byName.get("Ben Marsh").pickups, { total: 2, geofence: 0, eld: 0, driver: 1, dispatch: 1 }, "Ben's pickups by source");
 		eq(byName.get("Cal Reyes").pickups, { total: 1, geofence: 0, eld: 0, driver: 1, dispatch: 0 }, "Cal's one tap is his own, not dispatch's");
 		eq(byName.get("Dee Stone").ownLabel, "#504 (1, to Nov 9)", "the report shows the handover dates");
-		eq(byName.get("Hal Briar").units, [{ unitLabel: "#504", days: 2, firstDay: "2026-11-10", lastDay: "2026-11-11" }], "and the days each unit was held");
+		eq(byName.get("Hal Briar").units, [{ unitLabel: "#504", unitNumber: "LogisX-#504", labelRefused: null, days: 2, firstDay: "2026-11-10", lastDay: "2026-11-11" }], "and the days each unit was held, with the unit as stored");
 		const last = new Map(r.json.boards[1].drivers.map((x) => [x.name, x]));
 		ok(!last.has("Hal Briar"), "last week Hal had no truck, load or pickup, so the report has no row for him");
 		eq([last.get("Dee Stone").listed, last.get("Dee Stone").unitLabel, last.get("Dee Stone").ownLabel], [true, "#504", "#504"], "and #504 was Dee's alone, no handover");
@@ -748,6 +810,52 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
 		ok(!(rules.ENABLE_ALLOWED || []).includes("DRIVER_PERFORMANCE_ENABLED"), "replica:start --enable doesn't take it: it is already on");
 		ok(/kill switch/.test(String((rules.ENABLE_REFUSED || {}).DRIVER_PERFORMANCE_ENABLED)), "the replica refuses it as a kill switch");
+	});
+
+	await section("18 a stored unit that isn't a unit", async () => {
+		if (!on) throw new Error("no world");
+		const setUnit = (id, unit) => {
+			on.db.prepare("UPDATE trucks SET unit_number = ? WHERE id = ?").run(unit, id);
+			on.handle.clearCache();
+		};
+		const boardAs = async (who) => {
+			const r = await on.get("/api/driver/performance/leaderboard?period=week", who);
+			return { json: r.json, text: r.text, rows: r.json.boards[0].categories[0].rows };
+		};
+		const notShown = need().UNIT_NOT_SHOWN;
+		// A name only an assignment holds: not in the directory, and on no load.
+		on.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (10, 'LogisX-#510', '')").run();
+		on.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (10, 'Zed Ames', '2026-10-01T12:00:00.000Z', '')").run();
+		on.handle.clearCache();
+		const plain = (await boardAs(USERS.ada)).rows;
+		for (const [stored, why] of [
+			["Ada-Quill", "no-digit"], ["Ben Marsh truck", "characters"], ["Cal's Peterbilt", "characters"], ["555-867-5309", "number"],
+			["Load 12345678", "characters"], ["12345678", "number"], ["<b>502</b>", "characters"], ["Walter-1", "letters"],
+			// A directory-only name, a sheet-only name and an assignment-only name: each list counts.
+			["Ben-7", "name"], ["BM-7", "name"], ["Gus-7", "name"], ["Lou-7", "name"], ["Zed-7", "name"],
+		]) {
+			setUnit(2, stored);
+			const asAda = await boardAs(USERS.ada);
+			ok(!asAda.text.includes(JSON.stringify(stored).slice(1, -1)), `${stored}: never reaches another driver, whole`);
+			// "load" is the board's own word ("3 loads"), and 502 is the unit number itself.
+			for (const part of stored.split(/[^A-Za-z0-9]+/).filter((x) => x.length > 2 && !["load", "502"].includes(x.toLowerCase()))) {
+				ok(!asAda.text.toLowerCase().includes(part.toLowerCase()), `${stored}: nor its part "${part}"`);
+			}
+			const rowFacts = (rows, label) => rows.map((r) => JSON.stringify([r.rank, label ? label(r.unitLabel) : r.unitLabel, r.value])).sort();
+			eq(rowFacts(asAda.rows), rowFacts(plain, (l) => (l === "#502" ? notShown : l)), `${stored}: the row keeps its rank and count under the neutral label`);
+			eq(Object.keys(asAda.rows.find((r) => r.unitLabel === notShown)), need().ROW_KEYS, `${stored}: the row has only the five keys`);
+			const asBen = await boardAs(USERS.ben);
+			eq(asBen.rows.filter((r) => r.isYou).map((r) => r.unitLabel), [notShown], `${stored}: its own driver reads the neutral label too`);
+			ok(!asBen.text.includes(JSON.stringify(stored).slice(1, -1)), `${stored}: and not the stored text`);
+			const report = await on.get("/api/admin/driver-performance?period=week", USERS.admin2);
+			const ben = report.json.boards[0].drivers.find((x) => x.name === "Ben Marsh");
+			eq([ben.unitLabel, ben.units.map((u) => [u.unitLabel, u.unitNumber, u.labelRefused])], [notShown, [[notShown, stored, why]]],
+				`${stored}: the Super Admin report names the truck as stored, and why`);
+		}
+		setUnit(2, "Logisx-#502");
+		eq((await boardAs(USERS.ada)).rows.map((r) => r.unitLabel), plain.map((r) => r.unitLabel), "corrected, the unit reads as itself again");
+		const own = await on.get("/api/driver/me/performance", USERS.ben);
+		ok(!/"unit/i.test(own.text), "a driver's own week carries no unit at all");
 	});
 
 	if (on) await on.close();
