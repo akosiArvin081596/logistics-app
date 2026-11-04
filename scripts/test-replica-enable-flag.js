@@ -116,6 +116,8 @@ const OUTBOUND = {
 	AUTO_INVOICE_SEND_ENABLED: /emails brokers by SMTP/i,
 	// The driver's Delivered starts the invoice: Drive, Gemini and mail to brokers. A kill switch.
 	AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: /a driver's Delivered makes the invoice.*kill switch/i,
+	// A blank Email: the rate con's address picks where the invoice goes. A kill switch.
+	AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED: /rate con's billing address choose where.*kill switch/i,
 };
 for (const [name, why] of Object.entries(OUTBOUND)) {
 	const r = refusal(name);

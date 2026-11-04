@@ -55908,6 +55908,9 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
 //     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
 //     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
+//   AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED  a kill switch, counted only with that trigger and
+//     sending on: a truly blank Email goes on with the rate con's billing address, under
+//     rules.recipientRule()'s every check. Set to false, every blank Email is a person's.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.

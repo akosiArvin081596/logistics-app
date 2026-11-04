@@ -52,6 +52,10 @@
  *      answer; a Dispatcher's and a Super Admin's: none; a sheet write that reports failure
  *      but landed; a throw after the write; a repeat tap; a replica; Try again's look
  *  §13 only this route starts one, and server.js around it (text pins)
+ *  §14 a blank Email through the route, the block and the engine as shipped
+ *      (AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED, named nowhere): one SMTP call to the rate
+ *      con's address, the contact's name nowhere in the MIME; a malformed cell; too few
+ *      rows; Try again's look; the kill switch
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -263,7 +267,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	// runRateConGemini()'s own answer shape, with nothing found.
 	const runRateConGemini = async () => {
 		w.calls.gemini++;
-		return { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
+		return w.geminiAnswer || { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 	};
 	// lib/pdf-browser.js's busy refusal carries this code.
 	const renderHtmlToPdf = async (html) => {
@@ -1173,6 +1177,110 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 
 		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		ok(/^# AUTO_INVOICE_DRIVER_TRIGGER_ENABLED=$/m.test(TEMPLATE) && /a kill switch, ON unless set to false/.test(TEMPLATE), "§13 FAILS ON THE OLD CODE: the settings template names it, unset, a kill switch");
+	}
+
+	// ===================================================================== §14
+	section("§14 a blank Email, through the route, the block and the engine as shipped");
+	{
+		const CHR = "chrobinson.com";
+		const CHR_ADDRESS = `made-up.billing@${CHR}`;
+		const CHR_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: CHR, ...MAILBOX });
+		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
+		const until = async (cond, label) => {
+			const end = Date.now() + 10000;
+			while (Date.now() < end) {
+				if (cond()) return true;
+				await new Promise((r) => setTimeout(r, 2));
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+		const proofs = (x, n) => {
+			for (let i = 0; i < n; i++) {
+				x.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', 'made_up_admin')")
+					.run(`LD-PROOF-${i}`, `09012026-${i}`, CHR_ADDRESS);
+			}
+		};
+		const started = async ({ env = CHR_ON, rows = 3 } = {}) => {
+			const x = await world({ env });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, { optOutDomains: [], confirmedBrokerDomains: [CHR] })).status, 200, "§14 chrobinson.com confirmed");
+			proofs(x, rows);
+			x.geminiAnswer = { "Total Rate": "$1,500.00", Rate: null, "Order Number": null, "PO Number": null, "Documents Email": CHR_ADDRESS };
+			await x.job.finishStartUp();
+			return x;
+		};
+		const atReceiver = (x, id, over = {}) => {
+			x.setLoad(id, { "Job Status": "At Receiver", Email: "", "Broker Contact Name": "Madeup Q. Contactperson", ...over });
+			x.addPod(id);
+			x.fileRateCon(id, plainRateCon(CHR_ADDRESS));
+		};
+
+		const w = await started();
+		const tap = w.statusRoute();
+		atReceiver(w, "LD-TEST-1401");
+		eq((await tap(DRIVER, "LD-TEST-1401")).status, 200, "§14 the driver's tap answers as before");
+		await until(() => w.smtp.length === 1 && open(w) === 0, "§14 the send");
+		eq(w.state("LD-TEST-1401"), ["drafted", ""], "§14 FAILS ON THE OLD CODE: the setting named nowhere: a blank Email on a CHR load is sent");
+		const sent = w.smtp[0] || { envelope: {}, mime: "" };
+		eq([sent.to, sent.envelope.to, sent.subject], [CHR_ADDRESS, [CHR_ADDRESS], "C.H. Robinson Order #LD-TEST-1401"], "§14 FAILS ON THE OLD CODE: one message to the one address, the subject from its domain");
+		eq(sent.attachments, ["C.H. Robinson Invoice Order #LD-TEST-1401.pdf", "LD-TEST-1401_POD.pdf", "LD-TEST-1401.pdf"], "§14 FAILS ON THE OLD CODE: the invoice, the POD and the rate con, through the engine as shipped");
+		eq(w.drafts().filter((r) => r.load_id === "LD-TEST-1401").map((r) => [r.recipient, r.via]), [[CHR_ADDRESS, "auto-smtp"]], "§14 FAILS ON THE OLD CODE: one row, the job's send");
+		ok(!/Contactperson/.test(sent.mime) && !/Contactperson/.test(JSON.stringify(w.db.prepare("SELECT * FROM load_invoice_drafts WHERE load_id = 'LD-TEST-1401'").all())), "§14 the contact's name isn't in the MIME or the row");
+		eq(w.gmail.length, 0, "§14 no draft");
+
+		atReceiver(w, "LD-TEST-1402", { Email: "see rate con" });
+		await tap(DRIVER, "LD-TEST-1402");
+		await until(() => open(w) === 0 && Boolean(w.state("LD-TEST-1402")), "§14 a malformed cell");
+		await settle();
+		eq([w.state("LD-TEST-1402"), w.smtp.length], [["needs_attention", "NO_BROKER_EMAIL"], 1], "§14 a malformed cell isn't blank: a person, nothing sent");
+
+		// The confirm, read as a Super Admin's row reads it, and Try again's look through the block.
+		const few = await started({ rows: 2 });
+		const fewTap = few.statusRoute();
+		atReceiver(few, "LD-TEST-1403");
+		await fewTap(DRIVER, "LD-TEST-1403");
+		await until(() => open(few) === 0 && Boolean(few.state("LD-TEST-1403")), "§14 too few rows");
+		await settle();
+		eq([few.state("LD-TEST-1403"), few.smtp.length, few.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 2 rows: a person, nothing sent, no number");
+
+		const held = await started();
+		const heldTap = held.statusRoute();
+		atReceiver(held, "LD-TEST-1404", { "  Payment  ": "900" });
+		await heldTap(DRIVER, "LD-TEST-1404");
+		await until(() => open(held) === 0 && Boolean(held.state("LD-TEST-1404")), "§14 held");
+		await settle();
+		eq([held.state("LD-TEST-1404"), held.smtp.length], [["needs_attention", "TOTAL_MISMATCH"], 0], "§14 FAILS ON THE OLD CODE: a total that disagrees: a person");
+		held.setLoad("LD-TEST-1404", { "Job Status": "Delivered", Email: "", "  Payment  ": "1500" });
+		const rows = [{ "Load ID": "LD-TEST-1404", "Job Status": "Delivered", Email: "", "Completion Date": DELIVERED_ON }];
+		held.job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+		eq(rows[0]._autoInvoice.retry, "send", "§14 FAILS ON THE OLD CODE: the confirm says Try again can send");
+		held.lookAnswer = { verdict: "invoice", mailboxes: {} };
+		eq((await held.call("POST", "/api/auto-invoice/loads/LD-TEST-1404/retry", SA, {})).status, 200, "§14 Try again");
+		await until(() => held.looks.length === 1 && open(held) === 0, "§14 the look");
+		eq([held.state("LD-TEST-1404"), held.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§14 FAILS ON THE OLD DESIGN (R-H2 (a)): billed from Gmail: the look runs, and no second invoice");
+		held.lookAnswer = { verdict: "clean", mailboxes: {} };
+		await held.call("POST", "/api/auto-invoice/loads/LD-TEST-1404/retry", SA, {});
+		await until(() => held.smtp.length === 1 && open(held) === 0, "§14 the clean look");
+		eq([held.state("LD-TEST-1404"), held.smtp[0].to], [["drafted", ""], CHR_ADDRESS], "§14 FAILS ON THE OLD CODE: both clean: one send");
+
+		for (const v of ["false", "off"]) {
+			const off = await started({ env: { ...CHR_ON, AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED: v } });
+			const offTap = off.statusRoute();
+			atReceiver(off, "LD-TEST-1405");
+			await offTap(DRIVER, "LD-TEST-1405");
+			await until(() => open(off) === 0 && Boolean(off.state("LD-TEST-1405")), "§14 the kill switch");
+			await settle();
+			eq([off.state("LD-TEST-1405"), off.smtp.length, off.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], `§14 AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED=${v}: a person, no engine call`);
+		}
+		const sweep = await started({ env: { ...CHR_ON, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		sweep.deliver("LD-TEST-1406", plainRateCon(CHR_ADDRESS), { Email: "" });
+		await sweep.job.tick();
+		sweep.setLoad("LD-TEST-1407", { Email: "" });
+		await sweep.job.tick();
+		eq([sweep.state("LD-TEST-1407"), sweep.smtp.length, sweep.calls.prepare], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 the sweep: the flag ignored");
+		const replica = await world({ env: CHR_ON, replica: { stamp: "made-up" } });
+		eq(replica.job.sending, false, "§14 a replica never sends, so this path can't run there");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});
