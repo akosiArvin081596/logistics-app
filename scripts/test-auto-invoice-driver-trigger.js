@@ -24,7 +24,7 @@
 //   §13 going back (R-M5): the sweep's first tick after the trigger sends nothing
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip
-//   §16 the first start-up's settings: production's own, through the module's own reader
+//   §16 the rules on their own, and the send's commit reaching the disk
 //
 // No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
@@ -41,12 +41,12 @@ const optional = (p) => {
 		return null;
 	}
 };
-const jobLib = require(process.env.TRIGGER_TEST_JOB || path.join(ROOT, "lib", "auto-invoice-job.js"));
+const jobLib = require(path.join(ROOT, "lib", "auto-invoice-job.js"));
 const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
-const ledger = require(process.env.TRIGGER_TEST_LEDGER || path.join(ROOT, "lib", "auto-invoice-ledger.js"));
+const ledger = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
 const sendLib = require(path.join(ROOT, "lib", "auto-invoice-send.js"));
 const factoring = require(path.join(ROOT, "lib", "factoring-store.js"));
-const trigger = optional(process.env.TRIGGER_TEST_TRIGGER || path.join(ROOT, "lib", "auto-invoice-trigger.js"));
+const trigger = optional(path.join(ROOT, "lib", "auto-invoice-trigger.js"));
 const { textPdf } = require(path.join(ROOT, "scripts", "lib", "made-up-pdf.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 
@@ -563,13 +563,17 @@ async function main() {
 		const n = await nope.started();
 		nope.ready("LD-TEST-0402");
 		const start = n.driverDelivered({ role: "Driver", loadId: "LD-TEST-0402", oldStatus: "At Receiver", newStatus: "Delivered" });
-		const realTransition = ledger.transition;
-		nope.db.exec("DROP TABLE auto_invoice_meta");
+		const realPrepare = nope.db.prepare.bind(nope.db);
+		nope.db.prepare = (sql) => {
+			if (/^UPDATE auto_invoice_claims/.test(sql)) throw Object.assign(new Error("made-up"), { code: "SQLITE_BUSY" });
+			return realPrepare(sql);
+		};
 		let threw = false;
 		try { start.written(); } catch { threw = true; }
+		nope.db.prepare = realPrepare;
 		await turn();
-		ok(!threw, "§5 written() never throws into the route");
-		void realTransition;
+		ok(!threw, "§5 a database error moving the record never throws into the route");
+		eq([nope.state("LD-TEST-0402"), nope.logs.some((l) => /the run wasn't queued: SQLITE_BUSY/.test(l))], [["waiting", "DRIVER_PENDING"], true], "§5 ...the record stays for a later tap or the next start-up, and the log says why");
 	}
 
 	section("§6  start-up, by where the app stopped (a later start, not the first)");
@@ -1312,8 +1316,6 @@ async function main() {
 		const dj = await d.started({ runLimitMs: 5 });
 		d.ready("LD-TEST-1004", { Email: OTHER }, "billing@example-other.test");
 		const inAppend = gate();
-		const deps = d.deps();
-		void deps;
 		d.recordHook = () => inAppend.p;
 		tap(d, dj, "LD-TEST-1004");
 		await until(() => d.claim("LD-TEST-1004").state === "needs_attention", "§11 stuck recording");
@@ -1405,7 +1407,6 @@ async function main() {
 		r.ready("LD-TEST-1107");
 		const slow = gate();
 		const staleRead = { headers: HEADERS, data: Object.freeze([Object.freeze({ ...r.row("LD-TEST-1107") })]) };
-		const realRead = rj; void realRead;
 		const checking = (async () => {
 			const job2 = r.job({ workerId: "worker-3", readJobTracking: async () => { await slow.p; return staleRead; } });
 			job2.startTrigger();
@@ -1573,6 +1574,29 @@ async function main() {
 		eq([t.mailboxVerdict({ verdict: "clean" }), t.mailboxVerdict({ verdict: "invoice" }), t.mailboxVerdict({ verdict: "mention" })], [null, "MAILBOX_HIT", "MAILBOX_HIT"], "§16 clean only when the search says clean; any hit is doubt");
 		for (const bad of [null, {}, { verdict: "" }, { verdict: "CLEAN" }, { invoice: 0, mention: 0 }]) eq(t.mailboxVerdict(bad), "MAILBOX_UNREAD", `§16 ${JSON.stringify(bad)}: unreadable, never "nothing found"`);
 		ok(sendLib.claimSent({ delivery: "send", stage: "appending" }), "§16 a claim holding a send reads as sent (the Draft Invoice button's refusal)");
+
+		// The send's commit is on disk before the SMTP call, whatever the connection's setting.
+		const w = makeWorld();
+		ledger.ensureSchema(w.db);
+		w.seed("LD-TEST-1501", { state: "working", stage: "rendered", lease_owner: "me", invoice_id: "10202026-94" });
+		const seen = [];
+		const realPragma = w.db.pragma.bind(w.db);
+		const realPrepare = w.db.prepare.bind(w.db);
+		const realTx = w.db.transaction.bind(w.db);
+		w.db.pragma = (text, opts) => { seen.push(text); return realPragma(text, opts); };
+		w.db.transaction = (fn) => { seen.push("transaction"); return realTx(fn); };
+		const answer = ledger.beginSend(w.db, "ld-test-1501", "me", { nowIso: iso(w.now) });
+		w.db.prepare = realPrepare;
+		w.db.pragma = realPragma;
+		w.db.transaction = realTx;
+		eq(answer, { ok: true }, "§16 beginSend() commits");
+		eq(seen.filter((s) => /synchronous|transaction/.test(s)).slice(0, 3), ["synchronous", "synchronous = FULL", "transaction"], "§16 FAILS ON THE OLD CODE: FULL is set before the transaction opens (it can't change inside one)");
+		ok(/^synchronous = \d$/.test(seen[seen.length - 1]), "§16 FAILS ON THE OLD CODE: ...and the connection's own setting is back after it");
+		const noPragma = makeWorld();
+		ledger.ensureSchema(noPragma.db);
+		noPragma.seed("LD-TEST-1502", { state: "working", stage: "rendered", lease_owner: "me", invoice_id: "10202026-95" });
+		noPragma.db.pragma = () => { throw new Error("made-up"); };
+		eq(ledger.beginSend(noPragma.db, "ld-test-1502", "me", { nowIso: iso(noPragma.now) }), { ok: true }, "§16 a setting that can't be changed never holds a send up");
 	}
 }
 
