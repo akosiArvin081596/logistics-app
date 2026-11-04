@@ -30,7 +30,7 @@
       <template v-if="!readOnly">
         <!-- Before Delivered: the invoice goes with the POD pages on file at the tap.
              Outside the chain below, so it shows with the upload hint too. -->
-        <div v-if="nextStep && nextStep.value === 'Delivered'" class="upload-hint">
+        <div v-if="nextStep && nextStep.value === 'Delivered'" class="delivered-line">
           Upload every POD page before you tap Delivered. The invoice is made right after you tap. If anything changes later, tell dispatch or a Super Admin right away.
         </div>
 
@@ -304,7 +304,8 @@ async function onConfirm() {
   line-height: 1.4;
 }
 
-.upload-hint {
+.upload-hint,
+.delivered-line {
   text-align: center;
   font-size: 0.82rem;
   color: var(--text-dim);
