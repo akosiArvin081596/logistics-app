@@ -265,7 +265,7 @@ eq('§6 last week: the final figure and its list, with no label and nothing left
   left: '', closes: '', newWeek: '', rule: COUNT_RULE,
   lowered: '', requirement: '7.5 is the target. 6 is required.', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
 })
-// The two figures are the server's: the app copies them, and whether he can earn it is the server's to say.
+// The two figures are the server's: the app copies them, and whether time off rules it out is the server's to say.
 const requiredFor = (target, required, id = 'this-week') => ownWeekView(answerOf(week(id, { left: id === 'this-week' ? 3 : null, pace: null, credits: { value: 3, target, required, deliveries: 3, pickups: 3 } })), id)?.requirement
 eq('§6 the line reads the week\'s own figures', requiredFor(6, 4.5), '6 is the target. 4.5 is required.')
 eq('§6 at the target\'s floor too', requiredFor(4.5, 3), '4.5 is the target. 3 is required.')
@@ -547,13 +547,13 @@ if (typeof server.personalWeek === 'function') {
   eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%' })
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
   eq('§14 the line on what\'s required, from the server\'s own figures', [ownWeekView(realAnswer, 'this-week')?.requirement, ownWeekView(offAnswer, 'this-week')?.requirement], ['7.5 is the target. 6 is required.', '6 is the target. 4.5 is required.'])
-  // Whether he can earn it comes from the real rules, through the view's own words.
+  // Whether time off makes it impossible comes from the real rules, through the view's own words.
   const offFrom = (from, n) => Array.from({ length: n }, (_x, i) => server.addDays(from, i))
   const realRequirement = (today, deliveries, offDays = []) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today, deliveries, pickups: 0, offDays, openLoad: true, loads: [] })] }, 'this-week')?.requirement
-  eq('§14 five days off, with two days left that can still earn it', realRequirement('2026-10-31', 0, offFrom('2026-11-02', 5)), '4.5 is the target. 3 is required.')
+  eq('§14 five days off, with two open days that hold it, whatever day he reads it', [realRequirement('2026-10-31', 0, offFrom('2026-11-02', 5)), realRequirement('2026-11-06', 0, offFrom('2026-11-02', 5))], new Array(2).fill('4.5 is the target. 3 is required.'))
   eq('§14 six days off: the target alone', realRequirement('2026-11-03', 0, offFrom('2026-10-31', 6)), '4.5 is the target.')
   eq('§14 seven days off: the target alone', realRequirement('2026-11-03', 0, offFrom('2026-10-31', 7)), '4.5 is the target.')
-  eq('§14 Friday, one day left: 4 can\'t earn 6, and 4.5 can', [realRequirement('2026-11-06', 8), realRequirement('2026-11-06', 9)], ['7.5 is the target.', '7.5 is the target. 6 is required.'])
+  eq('§14 behind midweek he still reads it: Thursday at 2.5, Friday at 4', [realRequirement('2026-11-05', 5), realRequirement('2026-11-06', 8)], new Array(2).fill('7.5 is the target. 6 is required.'))
   eq('§14 the new-week line, with the server\'s own date', [ownWeekView(realAnswer, 'this-week')?.newWeek, ownWeekView(realAnswer, 'this-week')?.closes], ['A new week starts Saturday, Nov 7.', ''])
   // "N loads left" reads true at every half the server can send, through the view's own words.
   const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left

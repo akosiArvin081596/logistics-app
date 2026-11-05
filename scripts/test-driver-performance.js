@@ -63,7 +63,7 @@
  * §19 pacing on loads alone: one constant; each day of a Sat-Fri week; a rest
  *     weekend never reads Needs Focus; the target met always reads Ahead of Pace
  * §20 his target and his week: 1.5 less per approved day off, not below 4.5; what's
- *     required, 1.5 below that, unless he can't earn it in the days left; the
+ *     required, 1.5 below that, unless time off makes it impossible for the week; the
  *     bar's percent rounded down and capped; what's left; no label on a week he
  *     can't act on; "a new week starts" when more is left than the days hold
  * §21 the board is absent to drivers: the kill switch's own 404, whoever asks and
@@ -850,7 +850,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			[["this-week", 3, 3, 3, 7.5], ["last-week", 2, 1, 1.5, 7.5]],
 			"Ada (ELD truck): geofence and ELD departures count, her early tap and her ELD truck's tap don't; Friday 11:30 PM ET is last week");
 		eq(weeks.ben.weeks[0].credits, { value: 2, target: 7.5, required: 6, deliveries: 2, pickups: 2 }, "Ben (no ELD): his tap and dispatch's tap count");
-		eq(weeks.cal.weeks[0].credits, { value: 1, target: 7.5, required: null, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts, and at 1 on Wednesday 3 days can't earn the required 6");
+		eq(weeks.cal.weeks[0].credits, { value: 1, target: 7.5, required: 6, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts, and behind on Wednesday he still reads the required 6");
 		eq(weeks.dee.weeks.map((w) => w.credits.deliveries), [1, 1], "Dee's deliveries, this week and last");
 		eq(weeks.hal.weeks.map((w) => w.credits.deliveries), [2, 0], "Hal's own week shows even with no truck last week");
 
@@ -1089,37 +1089,36 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		}
 
 		// What's required stays 1.5 below the target, whatever lowers it, the floor's weeks included,
-		// until he can't earn it: then it is null, so no screen asks it of him.
+		// until approved time off makes it impossible for the whole week: then it is null.
 		const SAT = "2026-11-07"; const SUN = "2026-11-08"; const MON = "2026-11-09"; const TUE = "2026-11-10"; const WED = "2026-11-11"; const THU = "2026-11-12"; const FRI = "2026-11-13";
 		const offFor = (n) => [SAT, SUN, MON, TUE, WED, THU, FRI].slice(0, n);
 		eq([0, 1, 2, 3, 5, 6, 7].map((n) => { const c = week({ today: SAT, offDays: offFor(n) }).credits; return [c.target, c.required]; }),
 			[[7.5, 6], [6, 4.5], [4.5, 3], [4.5, 3], [4.5, 3], [4.5, null], [4.5, null]], "Saturday at nothing: 1.5 below the target, until 6 or 7 days off leave too few days to earn it");
-		// Days left: today, all of it, through this week's Friday, approved days off not counted. He earns 1.5 on each, and what he has counts.
+		// The week's days not off, at 1.5 each, against what's required. Neither today nor what he has counts.
 		const required = (today, credits, offDays = []) => week({ today, deliveries: credits / p.CREDIT_WEIGHTS.delivery, offDays }).credits.required;
-		for (const [today, name, credits, want] of [
-			[SAT, "Sat", 0, 6], [SUN, "Sun", 0, 6], [MON, "Mon", 0, 6], [TUE, "Tue", 0, 6],
-			[WED, "Wed", 1, null], [WED, "Wed", 1.5, 6],
-			[THU, "Thu", 2.5, null], [THU, "Thu", 3, 6],
-			[FRI, "Fri", 4, null], [FRI, "Fri", 4.5, 6], [FRI, "Fri", 6, 6], [FRI, "Fri", 9, 6],
-		]) eq(required(today, credits), want, `a full week, ${name} at ${credits}: ${want === null ? "the days left can't earn 6" : "6 is required"}`);
-		eq([required(WED, 1, [THU]), required(WED, 1.5, [THU])], [null, 4.5], "Thu off, today Wed: Wed and Fri are left, 3 more, so 1 can't reach 4.5 and 1.5 can");
-		eq([required(THU, 2.5, [THU]), required(THU, 3, [THU])], [null, 4.5], "today itself off isn't a day left: only Fri");
+		for (const [today, name, credits] of [
+			[SAT, "Sat", 0], [TUE, "Tue", 0], [WED, "Wed", 0], [WED, "Wed", 1], [THU, "Thu", 0], [THU, "Thu", 2.5], [FRI, "Fri", 0], [FRI, "Fri", 4], [FRI, "Fri", 9],
+		]) eq(required(today, credits), 6, `a full week, ${name} at ${credits}: 6 is required, however far behind`);
+		eq([required(WED, 0, [THU]), required(THU, 0, [THU]), required(FRI, 0, [THU]), required(FRI, 6, [THU])], [4.5, 4.5, 4.5, 4.5], "Thu off: 4.5 on every day, at any figure");
+		eq([required(SAT, 0, offFor(4)), required(FRI, 0, offFor(4))], [3, 3], "four days off: three open days hold 3");
 		const workweekOff = [MON, TUE, WED, THU, FRI];
-		eq([required(SAT, 0, workweekOff), required(SUN, 0, workweekOff), required(SUN, 1.5, workweekOff), required(MON, 2.5, workweekOff), required(MON, 3, workweekOff)], [3, null, 3, null, 3], "five days off, Sat and Sun open: 3 is required while the days and what he has reach it");
-		eq([required(WED, 0, offFor(6)), required(WED, 1.5, offFor(6))], [null, 3], "six days off, Fri open: only with 1.5 already");
-		eq([required(WED, 0, offFor(7)), required(WED, 3, offFor(7))], [null, 3], "seven days off: nothing left to earn on, so only if he already has it");
-		// A closed week is read from its first day, so it still says what a week he fell short in asked.
+		eq([required(SAT, 0, workweekOff), required(SUN, 0, workweekOff), required(MON, 0, workweekOff), required(FRI, 0, workweekOff)], [3, 3, 3, 3], "five days off, Sat and Sun open: 2 days hold exactly 3, whatever day he reads it");
+		eq([required(SAT, 0, offFor(6)), required(FRI, 0, offFor(6)), required(FRI, 3, offFor(6))], [null, null, null], "six days off: 1 day can't hold 3, on any day, at any figure");
+		eq([required(SAT, 0, offFor(7)), required(FRI, 0, offFor(7)), required(FRI, 3, offFor(7))], [null, null, null], "seven days off: no day to hold it, at any figure");
+		// A closed week follows the same rule, whatever he reached.
 		const closedOff = (n) => ["2026-10-31", "2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"].slice(0, n);
 		const closedRequired = (credits, n = 0) => week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", deliveries: credits / p.CREDIT_WEIGHTS.delivery, offDays: closedOff(n) }).credits.required;
 		eq([closedRequired(0), closedRequired(4), closedRequired(8)], [6, 6, 6], "a closed full week: 6 was required, whatever he reached");
-		eq([closedRequired(0, 5), closedRequired(0, 6), closedRequired(0, 7)], [3, null, null], "a closed week with 6 or 7 days off couldn't hold what's required");
-		// Words only: reaching it, or being unable to, changes no figure, label or line.
+		eq([closedRequired(0, 5), closedRequired(0, 6), closedRequired(0, 7), closedRequired(3, 6), closedRequired(3, 7)], [3, null, null, null, null], "a closed week with 6 or 7 days off couldn't hold what's required, whatever he reached");
+		// Words only: reaching it, or being behind it, changes no figure, label or line.
 		const atRequired = week({ today: FRI, deliveries: 12 });
 		eq([atRequired.credits.value, atRequired.left, atRequired.percent, atRequired.pace, atRequired.newWeekNote], [6, 1.5, 80, "on-track", false], "at the required 6 on Friday: still 1.5 left, 80%, the label the pacing gives");
 		eq(week({ today: FRI, deliveries: 11 }).pace, "needs-focus", "just below it, the label the pacing gives");
 		eq(week({ today: WED, deliveries: 12 }).pace, "ahead", "and Wednesday at 6 is ahead, as the pacing says");
-		const outOfReach = week({ today: FRI, deliveries: 8 });
-		eq([outOfReach.credits.target, outOfReach.credits.required, outOfReach.left, outOfReach.percent, outOfReach.pace, outOfReach.newWeekNote], [7.5, null, 3.5, 53, "needs-focus", true], "out of reach on Friday at 4: the target, what's left, the percent and the label stand");
+		const behind = week({ today: FRI, deliveries: 8 });
+		eq([behind.credits.target, behind.credits.required, behind.left, behind.percent, behind.pace, behind.newWeekNote], [7.5, 6, 3.5, 53, "needs-focus", true], "behind on Friday at 4: the target, the required 6, what's left, the percent and the label all stand");
+		const allOff = week({ today: FRI, deliveries: 8, offDays: offFor(7) });
+		eq([allOff.credits.target, allOff.credits.required, allOff.left, allOff.percent, allOff.pace], [4.5, null, 0.5, 88, null], "no required figure takes nothing else with it: the target, what's left and the percent stand");
 
 		// Approved days off: a lower target, and pacing over the days he can work.
 		const oneOff =week({ offDays: ["2026-11-12"], deliveries: 6 });

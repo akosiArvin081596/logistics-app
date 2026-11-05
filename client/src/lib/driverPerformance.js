@@ -12,7 +12,7 @@ export const BOARD_URL = '/api/driver/performance/leaderboard'
 // The Super Admin's board only: no driver's screen shows it.
 export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
 export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-// Both figures are the server's, for the week on screen. It sends no required figure when he can't earn it.
+// Both figures are the server's, for the week on screen. It sends no required figure when time off rules it out.
 export const requirementLine = (target, required) => `${target} is the target. ${required} is required.`
 export const targetOnlyLine = (target) => `${target} is the target.`
 export const PRIVATE_LINE = 'No other driver can see this.'

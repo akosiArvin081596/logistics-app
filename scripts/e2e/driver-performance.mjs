@@ -28,7 +28,8 @@
 //   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
 //       starts Saturday, <the coming Saturday's date>." and no closing line; Ahead of Pace; the target reached; no label at all;
 //       a percentage driver's tab says nothing about pay, as nobody's does; an approved day off
-//       reads his lower figure, the one line saying why and that week's required figure
+//       reads his lower figure, the one line saying why and that week's required figure; time off
+//       that makes the required figure impossible reads the target alone
 //   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar; the held place goes on
 //       his first move between screens
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
@@ -715,7 +716,7 @@ async function goneRun(browser, size) {
 // ---------------------------------------------------------------- P: the other weeks
 async function weekShapesRun(browser, size) {
   const t = size.tag
-  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, required: null, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
+  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, required: 6, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, low)
     try {
@@ -735,9 +736,9 @@ async function weekShapesRun(browser, size) {
       const [chipBg, chipInk] = await colours(page, testid('perf-pace'))
       const red = [barBg, barInk, fillBg, chipBg, chipInk].filter(looksRed)
       record(`P-low-${t}`, 'A low week: no red, and no asking for more',
-        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; "7.5 is the target." with no required figure, as the server sent none; no closing line; no red on the bar or the chip`,
+        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; "${REQUIREMENT_LINE}", behind as he is; no closing line; no red on the bar or the chip`,
         `bar "${barText}", pace "${barPace}", left "${left}", note "${note}", required "${required}", closes ${closes}, colours ${JSON.stringify([barBg, barInk, fillBg, chipBg, chipInk])}, red ${JSON.stringify(red)}`,
-        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && required === '7.5 is the target.' && closes === 0 && red.length === 0,
+        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && required === REQUIREMENT_LINE && closes === 0 && red.length === 0,
         await shot(page, `P-low-${t}`))
     } finally {
       await ctx.close()
@@ -822,6 +823,23 @@ async function weekShapesRun(browser, size) {
         `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", required "${required}", follows ${follows}, on last week ${lastWeekLine}, last week's line "${lastRequired}"`,
         barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && required === '6 is the target. 4.5 is required.' && follows && lastWeekLine === 0 && lastRequired === REQUIREMENT_LINE,
         await shot(page, `P-day-off-${t}`))
+    } finally {
+      await ctx.close()
+    }
+  }
+  const timeOff = freshState({ thisWeek: { credits: { value: 0, target: 4.5, required: null, deliveries: 0, pickups: 0 }, left: 4.5, percent: 0, pace: null, newWeekNote: true, targetLowered: true, loads: [] } })
+  {
+    const { ctx, page } = await openPage(browser, size, DRIVER, timeOff)
+    try {
+      await barSettled(page, timeOff, true)
+      await appears(page, testid('perf-bar'), 8000)
+      await press(page.locator(testid('perf-bar')).first(), size)
+      await appears(page, testid('perf-requirement'), 8000)
+      const requirement = await text(page, testid('perf-requirement'))
+      const body = squeeze(await page.locator('body').innerText())
+      record(`P-time-off-${t}`, 'Time off makes the required figure impossible: the target alone', `"4.5 is the target."; "is required" nowhere on the page`,
+        `requirement "${requirement}", on the page ${body.includes('is required')}`,
+        requirement === '4.5 is the target.' && !body.includes('is required'), await shot(page, `P-time-off-${t}`))
     } finally {
       await ctx.close()
     }
