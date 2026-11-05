@@ -63,6 +63,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   PAYMENTS_UNREAD: { short: "Payments Table couldn't be read", text: "The Payments Table couldn't be read, so nothing was sent. Try again in a while, or draft it by hand." },
   RECIPIENT_NOT_KNOWN: { short: 'billing email not used before', text: "The rate con's billing email isn't one a person has already used on invoices for 3 loads, so nothing was sent. Check it against the rate con, then draft it by hand." },
   RATECON_NAME_MISMATCH: { short: "rate con's name doesn't match", text: "The rate con's file name doesn't carry this load's whole number, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand." },
+  RATECON_NUMBER_MISMATCH: { short: "rate con's number doesn't match", text: "The rate con doesn't give this load's number, or gives another one, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand." },
   RECIPIENT_CHECK_OFF: { short: 'billing email check is off', text: "The billing email check is switched off on the server, so this invoice wasn't made or sent. Draft it by hand." },
 })
 
@@ -238,17 +239,43 @@ export const AUTO_INVOICE_STOP_WORDS = Object.freeze({
 
 export const AUTO_SEND_STOP_CONFIRM = 'Stop sending invoices automatically? Invoices will be drafted in Gmail for a person to send. Only the server can turn sending back on.'
 
-// The dialog's sentence about sending, and whether Stop is offered.
-export function autoSendState(send) {
+// The dialog's sentence about sending, and whether Stop is offered. `check`: the settings read's
+// `recipientCheck`. With that check off, its domain's invoices stop at a person, so the sentence
+// doesn't say they are sent.
+export function autoSendState(send, check = null) {
   if (!send || typeof send !== 'object') return null
   const domains = Array.isArray(send.domains) ? send.domains.filter((d) => typeof d === 'string') : []
-  const where = domains.length ? domains.join(', ') : 'no domain'
   const stopped = send.stopped && typeof send.stopped === 'object' ? send.stopped : null
   if (stopped) {
     const why = typeof stopped.reason === 'string' && Object.hasOwn(AUTO_INVOICE_STOP_WORDS, stopped.reason) ? ` ${AUTO_INVOICE_STOP_WORDS[stopped.reason]}` : ''
     return { stopped: true, canStop: false, text: `Automatic sending is stopped.${why} Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.` }
   }
-  return { stopped: false, canStop: true, text: `On: invoices to ${where} are sent to the broker automatically, with the POD and the rate con, and their copies are in Gmail Sent Mail. Other brokers get Gmail drafts.` }
+  const heldDomain = check && typeof check === 'object' && check.on === false && typeof check.domain === 'string' ? check.domain : ''
+  const going = heldDomain ? domains.filter((d) => d !== heldDomain && !d.endsWith(`.${heldDomain}`)) : domains
+  const heldText = heldDomain ? `Invoices to ${heldDomain} aren't sent while the billing email check is off: each load stops at Needs attention for a person to draft by hand. ` : ''
+  if (heldDomain && !going.length) return { stopped: false, canStop: true, text: `${heldText}Other brokers get Gmail drafts.` }
+  const where = going.length ? going.join(', ') : 'no domain'
+  return { stopped: false, canStop: true, text: `On: invoices to ${where} are sent to the broker automatically, with the POD and the rate con, and their copies are in Gmail Sent Mail. ${heldText}Other brokers get Gmail drafts.` }
+}
+
+// The dialog's line about the billing email check, from the settings read's `recipientCheck`, which
+// the server sends only when it is off or has held loads lately. { text }, or null for no line.
+export function recipientCheckState(check) {
+  if (!check || typeof check !== 'object' || Array.isArray(check)) return null
+  const domain = typeof check.domain === 'string' ? check.domain : 'this broker'
+  const days = Number.isInteger(check.days) ? check.days : 7
+  const held = check.held && typeof check.held === 'object' ? check.held : {}
+  const count = Number.isInteger(held.count) && held.count > 0 ? held.count : 0
+  const loads = count === 1 ? '1 load' : `${count} loads`
+  if (check.on === false) {
+    const off = `The billing email check is switched off on the server, so invoices to ${domain} aren't made or sent: each load stops at Needs attention for a person to draft by hand.`
+    return { text: count ? `${off} It has held ${loads} in the last ${days} days.` : off }
+  }
+  if (check.on !== true || !count) return null
+  const reasons = Object.entries(held.byCode && typeof held.byCode === 'object' ? held.byCode : {})
+    .filter(([code]) => reasonOf(code))
+    .map(([code, n]) => `${n} ${reasonOf(code).short}`)
+  return { text: `The billing email check has held ${loads} in the last ${days} days, so ${count === 1 ? 'its invoice was' : 'their invoices were'} not sent${reasons.length ? ` (${reasons.join(', ')})` : ''}. If ${domain}'s billing address changed or its rate cons now read differently, every new load will stop too. See Needs attention on Completed Loads.` }
 }
 
 // The automatic-draft settings dialog's Save: only once this opening's read has

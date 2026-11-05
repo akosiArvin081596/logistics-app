@@ -16,6 +16,8 @@
 //   §9  other brokers, the sweep, shadow mode and a person's press
 //   §10 it can't send twice
 //   §11 deploying sends nothing and moves nothing already held
+//   §12 the rate con must say it's this load's: its own read gives the number, its text prints it
+//   §13 a hold tells a person: one notice, an audit row and a log line, and the settings say so
 //
 // Addresses on chrobinson.com use made-up local parts. No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-known-address.js      # exits 1 on any failure
@@ -67,6 +69,7 @@ const ID = "900000101";
 const NOT_KNOWN = Object.freeze(["needs_attention", "RECIPIENT_NOT_KNOWN"]);
 const NAME = Object.freeze(["needs_attention", "RATECON_NAME_MISMATCH"]);
 const CHECK_OFF = Object.freeze(["needs_attention", "RECIPIENT_CHECK_OFF"]);
+const NUMBER = Object.freeze(["needs_attention", "RATECON_NUMBER_MISMATCH"]);
 const SENT = Object.freeze(["drafted", ""]);
 // No SMTP call, no Gmail draft, no number.
 const NOTHING = Object.freeze([0, 0, 0]);
@@ -205,10 +208,11 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 		db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, '2026-10-20 13:00:00')").run(id, name, `/uploads/${name}`);
 		w.files.add(name);
 	};
-	// One rate con on file, named by `source`, whose Gemini read gives the address and the total.
-	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "drive", driveFileName = `Subject: Rate Confirmation ${String(id).replace(/^#/, "")}.pdf`, printed = address, read = address } = {}) => {
-		const bytes = plainPdf(id, printed);
-		w.answers.set(bytes.toString("base64"), { "Total Rate": total, Rate: null, "Load Number": id, "Order Number": null, "PO Number": null, "Documents Email": read });
+	// One rate con on file, named by `source`, whose Gemini read gives the address, the total and
+	// `number`, and whose text prints `note` and the address.
+	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "drive", driveFileName = `Subject: Rate Confirmation ${String(id).replace(/^#/, "")}.pdf`, printed = address, read = address, number = id, note = id, orderNumber = null } = {}) => {
+		const bytes = plainPdf(note, printed);
+		w.answers.set(bytes.toString("base64"), { "Total Rate": total, Rate: null, "Load Number": number, "Order Number": orderNumber, "PO Number": null, "Documents Email": read });
 		const cand = { buffer: bytes, source, label: source, fileName: "rc.pdf", ...(source === "drive" ? { driveFileName } : {}) };
 		w.candidates.set(rules.loadKey(id), [...(w.candidates.get(rules.loadKey(id)) || []), cand]);
 		return cand;
@@ -433,7 +437,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 	{
 		const row = { source: "documents" };
 		const known = () => 3;
-		const base = { to: ADDRESS, checkOn: true, primary: row, loadId: ID, loadsToAddress: known };
+		const base = { to: ADDRESS, checkOn: true, primary: row, loadId: ID, rateConNumber: ID, rateConText: () => `Load confirmation ${ID}`, loadsToAddress: known };
 		eq(refusalOf(base), null, "§3 a known address, a rate-con row: nothing stops it");
 		for (const [loads, want] of [[0, "RECIPIENT_NOT_KNOWN"], [1, "RECIPIENT_NOT_KNOWN"], [2, "RECIPIENT_NOT_KNOWN"], [3, null], [4, null], [NaN, "RECIPIENT_NOT_KNOWN"], [undefined, "RECIPIENT_NOT_KNOWN"]]) {
 			eq(refusalOf({ ...base, loadsToAddress: () => loads }), want, `§3 ${loads} loads: ${want || "passes"}`);
@@ -609,6 +613,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		late.renderHook = () => { late.db.prepare("DELETE FROM load_invoice_drafts").run(); };
 		await deliver(late, lj, ID, "§5 late");
 		eq([late.state(ID), late.smtp.length, late.appends.length], [NOT_KNOWN, 0, 0], "§5 the rows gone by the render: the check after it stops the load, nothing sent or drafted");
+		eq(late.notices.length, 1, "§5 ...and a person is told, as at any hold");
 
 		// A count that can't be read sends nothing.
 		const broken = makeWorld();
@@ -1128,8 +1133,366 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			eq(w.claim(sentId).state, "drafted", `§11 ${label}: a claim already sent stays sent after the claims are watched`);
 			eq([w.claim(sentId).changed_fields, ledger.getSendStop(w.db)], ["", null], `§11 ${label}: no change is read on it, and sending isn't stopped`);
 			eq(pressed(deployed, sentId), [false, 409, "INVOICE_ALREADY_SENT"], `§11 ${label}: a person's Draft Invoice on it stays refused`);
+			eq([w.notices, w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'auto_invoice_recipient_held'").get().n], [[], 0], `§11 ${label}: nothing already held raises a notice or an audit row at the deploy`);
+			eq(Object.keys(ledger.getMeta(w.db)).filter((k) => k.startsWith("held_notice")), [], `§11 ${label}: no meta row is written at the deploy`);
 		}
 		eq(Object.keys(rules.fingerprint(rules.loadFacts({ row: { "Load ID": ID, Email: AGENT }, cols: rules.jobColumns(["Load ID", "Email"]), knownAddressOn: false }))), ["completed", "live", "paymentCents", "brokerEmail", "trailer", "podIds", "rateConIds"], "§11 a sent claim's fingerprint reads no new field, so no load reads as changed");
+	}
+
+	// ===================================================================== §12
+	section("§12 the rate con must say it's this load's");
+	{
+		const B = "900001502";
+		const heldAtNumber = async (label, rc, { id = ID, over = {}, world = {} } = {}) => {
+			const w = makeWorld(world);
+			const job = await w.started();
+			w.ready(id, over, rc);
+			await deliver(w, job, id, `§12 ${label}`);
+			eq([w.state(id), paidNothing(w), w.draftRow(id)], [NUMBER, NOTHING, []], `§12 ${label}: Needs attention, nothing sent, no draft, no number used, the address known and the total equal`);
+			return { w, job };
+		};
+		// Another load's rate con whose file name carries this load's number whole.
+		for (const [label, driveFileName] of [
+			["a space between the two numbers in its name", `Subject: Rate Confirmation ${B} ${ID}.pdf`],
+			["a slash between them", `Subject: Rate Confirmation ${B}/${ID}.pdf`],
+			["this load's number as a PO in its name", `Subject: Rate Confirmation ${B} PO ${ID}.pdf`],
+		]) {
+			await heldAtNumber(`another load's rate con, ${label}`, { driveFileName, number: B, note: B });
+		}
+		// What the read gives.
+		for (const [label, rc] of [
+			["the read gives another number, the text printing both", { number: B, note: `${B} ${ID}` }],
+			["the read gives another number, the text printing this one", { number: B }],
+			["the read gives no number", { number: null }],
+			["the read answers None", { number: "None" }],
+			["the read gives a blank", { number: "  " }],
+			["the read gives a suffix on the number", { number: `${ID}-2` }],
+			["the read gives a second number beside it", { number: `${ID} / ${B}` }],
+			["the read gives a longer number", { number: `${ID}02` }],
+			["the read gives letters on it", { number: `LD${ID}` }],
+			["the read's Order Number is another, its Load Number this one", { orderNumber: B }],
+		]) {
+			await heldAtNumber(label, rc);
+		}
+		// What the text prints: a reader miss holds.
+		for (const [label, note] of [
+			["the text prints another number", B],
+			["the text prints no number", "with nothing to read"],
+			["the text prints it inside a longer one", `${ID}02`],
+			["the text prints a number before it", `7${ID}`],
+			["the text prints it with a suffix", `${ID}-2`],
+		]) {
+			await heldAtNumber(`the read gives this number, ${label}`, { note });
+		}
+		// A file with no text layer: the paid read gives the number, and the reader sees none.
+		const scanned = makeWorld();
+		const sjob = await scanned.started();
+		scanned.setRow(ID);
+		scanned.addPod(ID);
+		const scan = Buffer.from("%PDF-1.4 a made-up page with no text layer");
+		scanned.answers.set(scan.toString("base64"), { "Total Rate": "$1,000.00", Rate: null, "Load Number": ID, "Order Number": null, "PO Number": null, "Documents Email": ADDRESS });
+		scanned.candidates.set(rules.loadKey(ID), [{ buffer: scan, source: "drive", label: "drive", fileName: "rc.pdf", driveFileName: `${ID}.pdf` }]);
+		await deliver(scanned, sjob, ID, "§12 no text layer");
+		eq([scanned.state(ID), paidNothing(scanned)], [NUMBER, NOTHING], "§12 a rate con with no text layer: a reader miss holds, nothing sent");
+		// A rate-con row is read the same way.
+		await heldAtNumber("a rate-con row whose read gives another number", { source: "documents", number: B, note: B });
+		await heldAtNumber("a rate-con row whose read gives none", { source: "documents", number: null });
+		// Failing more than one: its own line, nothing sent. The name's comes first, then this one.
+		await heldAtNumber("another number on an address no person has invoiced", { number: B }, { world: { proofs: 0 } });
+		const both = makeWorld();
+		const bothJob = await both.started();
+		both.ready(ID, {}, { driveFileName: `${ID}02.pdf`, number: B });
+		await deliver(both, bothJob, ID, "§12 a name and a number");
+		eq([both.state(ID), paidNothing(both)], [NAME, NOTHING], "§12 failing the name and the number: the name's line, nothing sent");
+
+		// What passes.
+		for (const [label, id, rc] of [
+			["the read and the text give this number", ID, {}],
+			["the text prints another number beside it", ID, { note: `${ID} and ${B}` }],
+			["the number after a # in the text", ID, { note: `#${ID}` }],
+			["the read gives it after a #", ID, { number: `#${ID}` }],
+			["the read gives it with spaces around it", ID, { number: `  ${ID}  ` }],
+			["a load spelled with a # on the sheet", `#${ID}`, { number: ID, note: ID, driveFileName: `Load ${ID}.pdf` }],
+			["a rate-con row, its read and its text giving this number", ID, { source: "documents" }],
+			["letters in the number, in another case on the read", "LD-TEST-1401", { number: "ld-test-1401", note: "LD-TEST-1401", driveFileName: "Subject: Rate Confirmation LD-TEST-1401.pdf" }],
+			["the Order Number is this number", ID, { orderNumber: ID, number: null }],
+		]) {
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready(id, {}, rc);
+			await deliver(w, job, id, `§12 ${label}`);
+			eq([w.state(id), w.smtp.map((m) => m.to), w.appends.length], [SENT, [ADDRESS], 0], `§12 ${label}: one send`);
+		}
+		// A billing block the free scan reads whole: its Order # is the read's number.
+		const blockPdf = (order) => pdfWith(`BT (Billing Information: Order #: ${order} PO #: 1234567 Move #: 5501) Tj (Total Rate: $1,000.00) Tj (Email the signed POD and all billing documents to ${ADDRESS}) Tj ET`);
+		const onBlock = async (order) => {
+			const w = makeWorld();
+			const job = await w.started();
+			w.setRow(ID);
+			w.addPod(ID);
+			w.candidates.set(rules.loadKey(ID), [{ buffer: blockPdf(order), source: "drive", label: "drive", fileName: "rc.pdf", driveFileName: `${ID}.pdf` }]);
+			await deliver(w, job, ID, `§12 a block with Order # ${order}`);
+			return w;
+		};
+		const blockOk = await onBlock(ID);
+		eq([blockOk.state(ID), blockOk.smtp.length, blockOk.calls.gemini], [SENT, 1, 0], "§12 a billing block's Order # is this number: one send, with no paid read");
+		const blockOther = await onBlock(B);
+		eq([blockOther.state(ID), paidNothing(blockOther)], [NUMBER, NOTHING], "§12 a billing block's Order # is another: Needs attention, nothing sent");
+
+		// Other brokers, and Bison, aren't read for it.
+		const BROKER_DOMAIN = "example-broker.test";
+		const other = makeWorld({ proofs: 0, confirmed: [DOMAIN, BROKER_DOMAIN] });
+		const oj = await other.started();
+		other.ready(ID, { Email: `ops@${BROKER_DOMAIN}` }, { address: `billing@${BROKER_DOMAIN}`, number: B, note: B });
+		await deliver(other, oj, ID, "§12 another broker");
+		eq([other.state(ID), other.smtp.length, other.appends.map((a) => a.to)], [SENT, 0, [`billing@${BROKER_DOMAIN}`]], "§12 another broker's draft is unchanged, whatever its rate con's number");
+		const bison = makeWorld({ proofs: 0 });
+		const bj = await bison.started();
+		bison.ready(ID, { Email: "ops@bisontransport.com" }, { address: "", read: null, printed: "", orderNumber: "7001234", number: B, note: B });
+		bison.answers.forEach((a) => { a["PO Number"] = "12345"; });
+		await deliver(bison, bj, ID, "§12 Bison");
+		eq([bison.state(ID), bison.appends.map((a) => a.to)], [SENT, [process.env.BISON_INVOICE_EMAIL]], "§12 a Bison load's draft is unchanged: its Order # is its own");
+
+		// Try again reads it again; a person's press is untouched.
+		const { w, job } = await heldAtNumber("before Try again", { number: B });
+		eq(retryOf(w, job, ID), "send", "§12 the confirm says Try again can send");
+		eq((await tryAgain(job, ID)).status, 200, "§12 Try again");
+		await settled(w, "§12 Try again");
+		eq([w.state(ID), paidNothing(w), w.calls.look.length], [NUMBER, NOTHING, 0], "§12 Try again on the same read: the same line, and no look spent");
+		w.answers.forEach((a) => { a["Load Number"] = ID; });
+		eq((await tryAgain(job, ID)).status, 200, "§12 Try again once the read gives this number");
+		await settled(w, "§12 Try again, the number read");
+		eq([w.state(ID), w.smtp.map((m) => m.to), w.calls.look.length], [SENT, [ADDRESS], 1], "§12 one look, one send");
+		const press = await heldAtNumber("before a press", { number: B });
+		eq(press.job.draftButtonCheck({ session: { user: { username: "made-up-admin" } }, body: {} }, ID), { ok: true }, "§12 a person's Draft Invoice on a held load isn't refused");
+		const manual = await press.w.engine.prepare({ loadId: ID, body: {}, dryRun: true, mode: "manual", ov: press.w.helpers.parseInvoiceOverrides({}) });
+		eq([manual.ok, manual.ctx && manual.ctx.invoiceTo.email, manual.ctx && manual.ctx.rcFields.orderNumber], [true, ADDRESS, B], "§12 ...and the engine in manual mode answers as it did, whatever the number");
+
+		// What already went is recorded, whatever the read says now.
+		const lost = makeWorld();
+		const lj = await lost.started();
+		lost.ready(ID);
+		lost.recordThrowsOnce = true;
+		await deliver(lost, lj, ID, "§12 a row not written");
+		eq([lost.state(ID), lost.smtp.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1], "§12 sent, its row not written: a person, one SMTP call");
+		lost.answers.forEach((a) => { a["Load Number"] = B; });
+		eq((await tryAgain(lj, ID)).status, 200, "§12 Try again");
+		await settled(lost, "§12 recording");
+		eq([lost.state(ID), lost.smtp.length, lost.appends.length, lost.draftRow(ID).map((r) => r.via)], [SENT, 1, 0, ["auto-smtp"]], "§12 ...the read now giving another number: what already went is recorded, still one SMTP call");
+
+		// Across a restart, and on the sweep.
+		const queued = makeWorld();
+		await queued.started();
+		queued.ready(ID, { "Job Status": "Delivered" }, { number: B });
+		queued.seed(ID, { state: "queued" });
+		const qj = queued.job();
+		qj.startTrigger();
+		await qj.finishStartUp();
+		await settled(queued, "§12 a restart");
+		eq([queued.state(ID), paidNothing(queued), queued.calls.look.length], [NUMBER, NOTHING, 0], "§12 a claim queued at a restart: the same line, nothing sent, no look spent");
+		const sweep = makeWorld({ env: { AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		const sj = sweep.job();
+		await sj.tick();
+		sweep.ready(ID, { "Job Status": "Delivered" }, { number: B });
+		sweep.now += 5 * MIN;
+		await sj.tick();
+		eq([sweep.state(ID), paidNothing(sweep)], [NUMBER, NOTHING], "§12 the sweep: the same line, nothing sent");
+
+		// The rule on its own.
+		const named = { to: ADDRESS, checkOn: true, primary: { source: "drive", driveFileName: `${ID}.pdf` }, loadId: ID, loadsToAddress: () => 3 };
+		const text = `Load confirmation ${ID}`;
+		eq(refusalOf({ ...named, rateConNumber: ID, rateConText: () => text }), null, "§12 rule: this number, read and printed: nothing stops it");
+		for (const [label, over, want] of [
+			["no number given", { rateConNumber: undefined, rateConText: () => text }, "RATECON_NUMBER_MISMATCH"],
+			["another number", { rateConNumber: B, rateConText: () => text }, "RATECON_NUMBER_MISMATCH"],
+			["no text given", { rateConNumber: ID, rateConText: undefined }, "RATECON_NUMBER_MISMATCH"],
+			["text that doesn't print it", { rateConNumber: ID, rateConText: () => `Load confirmation ${B}` }, "RATECON_NUMBER_MISMATCH"],
+			["a number that isn't this load's, on a known address", { rateConNumber: `${ID}-2`, rateConText: () => text }, "RATECON_NUMBER_MISMATCH"],
+			["no load number", { loadId: "", rateConNumber: "", rateConText: () => "" }, "RATECON_NAME_MISMATCH"],
+		]) {
+			eq(refusalOf({ ...named, ...over }), want, `§12 rule: ${label}: ${want}`);
+		}
+		let asked = 0;
+		eq(refusalOf({ ...named, rateConNumber: B, rateConText: () => { asked++; return text; } }), "RATECON_NUMBER_MISMATCH", "§12 rule: a number that fails");
+		eq(asked, 0, "§12 ...reads no text");
+		eq(refusalOf({ ...named, to: "billing@example-broker.test", rateConNumber: B, rateConText: () => "" }), null, "§12 rule: another broker's domain isn't this check's");
+		eq(refusalOf({ ...named, rateConNumber: ID, rateConText: () => text, loadsToAddress: () => 0 }), "RECIPIENT_NOT_KNOWN", "§12 rule: the number passing, the count still asked");
+	}
+
+	// ===================================================================== §13
+	section("§13 a hold tells a person");
+	{
+		const heldRows = (w) => w.db.prepare("SELECT username, entity_id, details FROM audit_trail WHERE action = 'auto_invoice_recipient_held' ORDER BY id").all();
+		const heldLogs = (w) => w.logs.filter((l) => /held by the known-address check/.test(l));
+		const noSecrets = (w, label) => {
+			const told = JSON.stringify([w.notices, heldLogs(w), heldRows(w)]);
+			ok(!/@/.test(told), `§13 ${label}: no address in the notice, the log or the audit row`);
+			ok(!/Made-up Driver|Made-up Agent/.test(told), `§13 ${label}: no driver's or contact's name there either`);
+		};
+		const ids = ["900000401", "900000402", "900000403", "900000404", "900000405"];
+
+		// A run of holds.
+		const w = makeWorld({ proofs: 0 });
+		const job = await w.started();
+		for (const id of ids) {
+			w.ready(id);
+			await deliver(w, job, id, `§13 ${id}`);
+			eq(w.state(id), NOT_KNOWN, `§13 ${id}: held`);
+		}
+		eq(paidNothing(w), NOTHING, "§13 a run of holds: nothing sent");
+		eq(w.notices.length, 1, "§13 a run of 5 holds: one notice");
+		eq(w.notices[0] && w.notices[0].title, "Automatic invoice held", "§13 ...its title");
+		eq(w.notices[0] && w.notices[0].body, `Load ${ids[0]} was held (RECIPIENT_NOT_KNOWN): its rate con's billing email isn't one a person has already used on invoices for 3 loads, so its invoice wasn't sent. If C.H. Robinson's billing address changed or its rate cons now read differently, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.`, "§13 ...its words: the load's ID and the code, and what to do");
+		eq(heldRows(w), ids.map((id) => ({ username: "auto-invoice", entity_id: id, details: "RECIPIENT_NOT_KNOWN: nothing sent" })), "§13 an audit row on each hold, as the system, the load's ID and the code");
+		eq(heldLogs(w), ids.map((id) => `[auto-invoice] load ${id}: held by the known-address check: RECIPIENT_NOT_KNOWN`), "§13 a log line on each hold");
+		noSecrets(w, "a run of holds");
+
+		// A later day, a restart, another reason.
+		w.now += 23 * HOUR;
+		w.ready("900000406");
+		await deliver(w, job, "900000406", "§13 23 hours on");
+		eq(w.notices.length, 1, "§13 23 hours on: no second notice");
+		const restarted = w.job();
+		restarted.startTrigger();
+		await restarted.finishStartUp();
+		w.ready("900000407");
+		await deliver(w, restarted, "900000407", "§13 after a restart");
+		eq(w.notices.length, 1, "§13 after a restart: still no second notice");
+		w.ready("900000408", {}, { driveFileName: "900000408-2.pdf" });
+		await deliver(w, restarted, "900000408", "§13 another reason");
+		eq(w.notices.length, 2, "§13 another reason the same day: its own notice");
+		eq(w.notices[1] && w.notices[1].body, "Load 900000408 was held (RATECON_NAME_MISMATCH): its rate con's file name doesn't carry the load's whole number, so its invoice wasn't sent. If rate cons are now filed under other names, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.", "§13 ...in its own words");
+		w.ready("900000409", {}, { number: "900001502" });
+		await deliver(w, restarted, "900000409", "§13 a third reason");
+		eq(w.notices.length, 3, "§13 a third reason: its own notice");
+		eq(w.notices[2] && w.notices[2].body, "Load 900000409 was held (RATECON_NUMBER_MISMATCH): its rate con doesn't give the load's number, or gives another one, so its invoice wasn't sent. If its rate cons now read differently, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.", "§13 ...in its own words");
+		w.now += 1 * HOUR;
+		w.ready("900000410");
+		await deliver(w, restarted, "900000410", "§13 a day on");
+		eq(w.notices.length, 4, "§13 a day after the first: a new notice");
+		eq((await tryAgain(restarted, "900000410")).status, 200, "§13 Try again on it");
+		await settled(w, "§13 Try again");
+		eq([w.state("900000410"), w.notices.length, heldRows(w).filter((r) => r.entity_id === "900000410").length], [NOT_KNOWN, 4, 2], "§13 ...held again: an audit row, and no second notice");
+		noSecrets(w, "every reason");
+
+		// What isn't this check's.
+		const none = makeWorld();
+		const nj = await none.started();
+		none.ready("900000411");
+		await deliver(none, nj, "900000411", "§13 a send");
+		none.ready("900000412", { "  Payment  ": "$9,000.00" });
+		await deliver(none, nj, "900000412", "§13 a total that differs");
+		none.ready("900000413", {}, { printed: "", read: null });
+		await deliver(none, nj, "900000413", "§13 no address");
+		eq([none.state("900000411"), none.state("900000412"), none.state("900000413")], [SENT, ["needs_attention", "TOTAL_MISMATCH"], ["needs_attention", "NO_BILLING_EMAIL"]], "§13 a send, and two other holds");
+		eq([none.notices, heldRows(none), heldLogs(none)], [[], [], []], "§13 ...tell nothing here: their lines stand as they did");
+
+		// The check off.
+		const OFF = { AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: "false" };
+		const off = makeWorld({ env: OFF });
+		const oj = await off.started();
+		for (const id of ids.slice(0, 3)) {
+			off.ready(id);
+			await deliver(off, oj, id, `§13 off ${id}`);
+		}
+		eq([off.notices.length, off.notices[0] && off.notices[0].body], [1, `Load ${ids[0]} was held (RECIPIENT_CHECK_OFF): the billing email check is switched off on the server, so C.H. Robinson invoices aren't made or sent. Every such load stops here for a person to draft by hand. More held for this reason today get no notice of their own: the automatic-draft settings count them.`], "§13 the check off: one notice, in its own words");
+		eq(heldRows(off).map((r) => r.details), ["RECIPIENT_CHECK_OFF: nothing sent", "RECIPIENT_CHECK_OFF: nothing sent", "RECIPIENT_CHECK_OFF: nothing sent"], "§13 ...an audit row on each");
+		noSecrets(off, "the check off");
+
+		// The sweep: a claim it finds new, and one it was holding.
+		const sweep = makeWorld({ env: { ...OFF, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		const sj = sweep.job();
+		await sj.tick();
+		sweep.ready("900000414", { "Job Status": "Delivered" });
+		sweep.ready("900000415", { "Job Status": "Delivered" });
+		sweep.seed("900000415", { state: "waiting", code: "WAITING_POD" });
+		sweep.now += 5 * MIN;
+		await sj.tick();
+		eq([sweep.state("900000414"), sweep.state("900000415"), sweep.notices.length, heldRows(sweep).map((r) => r.entity_id).sort(), heldLogs(sweep).length], [CHECK_OFF, CHECK_OFF, 1, ["900000414", "900000415"], 2], "§13 the sweep, the check off: each load tells, one notice");
+		await sj.tick();
+		eq(heldRows(sweep).length, 2, "§13 ...and the next sweep tells nothing more");
+
+		// Shadow mode only records.
+		const shadow = makeWorld({ env: { ...OFF, AUTO_INVOICE_DRAFTS_SHADOW: "" } });
+		const shj = shadow.job();
+		await shj.tick();
+		shadow.ready(ID, { "Job Status": "Delivered" });
+		shadow.now += 5 * MIN;
+		await shj.tick();
+		eq([shadow.notices, heldRows(shadow), heldLogs(shadow)], [[], [], []], "§13 shadow: no notice, no audit row, no log line");
+
+		// A notice or an audit row that fails leaves the hold as it is.
+		for (const [label, extra, want] of [
+			["the notice fails", { notify: () => { throw new Error("made-up"); } }, 1],
+			["the audit row fails", { logAudit: () => { throw new Error("made-up"); } }, 0],
+		]) {
+			const x = makeWorld({ proofs: 0 });
+			const xj = await x.started(extra);
+			x.ready(ID);
+			await deliver(x, xj, ID, `§13 ${label}`);
+			eq([x.state(ID), paidNothing(x)], [NOT_KNOWN, NOTHING], `§13 ${label}: still held, nothing sent`);
+			eq(heldRows(x).length, want, `§13 ${label}: the rest still goes`);
+		}
+		const noMeta = makeWorld({ proofs: 0 });
+		const mj = await noMeta.started();
+		noMeta.ready(ID);
+		const realSet = ledger.setMeta;
+		ledger.setMeta = (db, key, value) => {
+			if (String(key).startsWith("held_notice")) throw Object.assign(new Error("made-up: the database is locked"), { code: "SQLITE_BUSY" });
+			return realSet(db, key, value);
+		};
+		await deliver(noMeta, mj, ID, "§13 the mark can't be written");
+		ledger.setMeta = realSet;
+		eq([noMeta.state(ID), noMeta.notices.length, heldRows(noMeta).length], [NOT_KNOWN, 1, 1], "§13 the notice's mark can't be written: still held, and a person is still told");
+
+		// What the settings read says.
+		const settingsOf = async (job2) => {
+			const f = fakeApp();
+			job2.mount(f.app, { requireRole: f.requireRole });
+			return (await f.call("GET", "/api/auto-invoice/settings")).body;
+		};
+		const read = makeWorld();
+		const rj = await read.started();
+		let body = await settingsOf(rj);
+		eq(Object.keys(body), ["optOutDomains", "confirmedBrokerDomains", "unreadable", "dropped", "send"], "§13 the check on, nothing held: the settings read as before");
+		ok(!("recipientCheck" in rj.status()), "§13 ...and the status");
+		read.ready("900000421");
+		await deliver(read, rj, "900000421", "§13 a send");
+		eq("recipientCheck" in (await settingsOf(rj)), false, "§13 a send changes nothing there");
+		read.db.prepare("DELETE FROM load_invoice_drafts WHERE load_id LIKE 'LD-PROOF-%'").run();
+		for (const id of ["900000422", "900000423"]) {
+			read.ready(id);
+			await deliver(read, rj, id, `§13 ${id}`);
+		}
+		read.ready("900000424", {}, { number: "900001502" });
+		await deliver(read, rj, "900000424", "§13 another reason");
+		read.ready("900000425", { "  Payment  ": "$9,000.00" });
+		await deliver(read, rj, "900000425", "§13 a total that differs");
+		const heldNow = { on: true, domain: DOMAIN, days: 7, held: { count: 3, byCode: { RATECON_NUMBER_MISMATCH: 1, RECIPIENT_NOT_KNOWN: 2 } } };
+		body = await settingsOf(rj);
+		eq(body.recipientCheck, heldNow, "§13 3 loads held: the settings read says so, by reason, with another hold left out");
+		eq(body.send, { domains: [DOMAIN], stopped: null }, "§13 ...beside what it said of sending");
+		eq(rj.status().recipientCheck, heldNow, "§13 ...and the status");
+		ok(!/@/.test(JSON.stringify(body.recipientCheck)), "§13 ...with no address");
+		read.rowFor("900000422", ADDRESS);
+		await rj.checkClaims("900000422");
+		eq(((await settingsOf(rj)).recipientCheck || { held: {} }).held.count, 2, "§13 a person drafts one by hand: it no longer counts");
+		read.now += 7 * 24 * HOUR + MIN;
+		eq("recipientCheck" in (await settingsOf(rj)), false, "§13 more than 7 days on, nothing more held: the settings read as before");
+		const offRead = makeWorld({ env: OFF });
+		const orj = await offRead.started();
+		eq((await settingsOf(orj)).recipientCheck, { on: false, domain: DOMAIN, days: 7, held: { count: 0, byCode: {} } }, "§13 the check off: the settings read says so, nothing held yet");
+		offRead.ready(ID);
+		await deliver(offRead, orj, ID, "§13 off, held");
+		eq((await settingsOf(orj)).recipientCheck, { on: false, domain: DOMAIN, days: 7, held: { count: 1, byCode: { RECIPIENT_CHECK_OFF: 1 } } }, "§13 ...and counts what it holds");
+		const noSend = makeWorld({ env: OFF, send: false });
+		const nsj = await noSend.started();
+		body = await settingsOf(nsj);
+		eq([Object.keys(body), (body.recipientCheck || {}).on], [["optOutDomains", "confirmedBrokerDomains", "unreadable", "dropped", "recipientCheck"], false], "§13 sending off too: the settings read still says the check is off");
+		const shadowRead = makeWorld({ env: { ...OFF, AUTO_INVOICE_DRAFTS_SHADOW: "" } });
+		const srj = shadowRead.job();
+		eq("recipientCheck" in (await settingsOf(srj)), false, "§13 shadow: nothing there");
+		eq("recipientCheck" in srj.status(), false, "§13 ...in the status either");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);

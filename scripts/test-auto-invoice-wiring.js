@@ -55,8 +55,9 @@
  *  §14 who a C.H. Robinson invoice may go to, through the route, the block, the engine and the
  *      Drive lookup as shipped (AUTO_INVOICE_KNOWN_ADDRESS_ENABLED, named nowhere): an address a
  *      person has invoiced on 3 loads: one SMTP call; one they haven't, a Drive file that doesn't
- *      carry the load's whole number, and the check off: a person, nothing sent; a typo; Try again's
- *      look; other brokers' drafts
+ *      carry the load's whole number, a rate con that gives another number, and the check off: a
+ *      person, nothing sent; a typo; Try again's look; other brokers' drafts; a hold's notice and
+ *      audit row through the block, and what the settings read says
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -1220,14 +1221,23 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			const x = await world({ env });
 			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, { optOutDomains: [], confirmedBrokerDomains: [CHR, "example-broker.test"] })).status, 200, "§14 the domains confirmed");
 			proofs(x, rows);
+			x.reads = new Map();
+			x.geminiAnswer = (b64) => x.reads.get(b64) || null;
 			await x.job.finishStartUp();
 			return x;
 		};
-		// A rate con filed in Drive under `name`, billing the address it prints.
-		const atReceiver = (x, id, { name = `Subject: Rate Confirmation ${id}.pdf`, docs = CHR_ADDRESS, over = {} } = {}) => {
+		// As a C.H. Robinson rate con reads: no billing block, so the paid read gives the total and
+		// `number`; its text prints `printed` and the address.
+		const chrRateCon = (x, id, { docs = CHR_ADDRESS, number = id, printed = number } = {}) => {
+			const bytes = pdfWith(`BT (Load confirmation for made-up shipment ${printed}) Tj (Send billing documents to ${docs}) Tj ET`);
+			x.reads.set(bytes.toString("base64"), { "Total Rate": "$1,500.00", Rate: null, "Load Number": number, "Order Number": null, "PO Number": null, "Documents Email": docs });
+			return bytes;
+		};
+		// That rate con, filed in Drive under `name`.
+		const atReceiver = (x, id, { name = `Subject: Rate Confirmation ${id}.pdf`, docs = CHR_ADDRESS, number = id, printed = number, over = {} } = {}) => {
 			x.setLoad(id, { "Job Status": "At Receiver", Email: CHR_AGENT, ...over });
 			x.addPod(id);
-			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: rateCon({ docs }) });
+			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: chrRateCon(x, id, { docs, number, printed }) });
 		};
 		const settledTap = async (x, tap, id, label) => {
 			eq((await tap(DRIVER, id)).status, 200, `§14 ${label}: the driver's tap answers as before`);
@@ -1279,10 +1289,43 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const storedTap = stored.statusRoute();
 		stored.setLoad("900001403", { "Job Status": "At Receiver", Email: CHR_AGENT });
 		stored.addPod("900001403");
-		fs.writeFileSync(path.join(stored.dir, "uploads", "made-up-rate-con.pdf"), rateCon({ docs: CHR_ADDRESS }));
+		fs.writeFileSync(path.join(stored.dir, "uploads", "made-up-rate-con.pdf"), chrRateCon(stored, "900001403"));
 		stored.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES ('900001403', '', 'RATECON', 'made-up-rate-con.pdf', '/uploads/made-up-rate-con.pdf')").run();
 		await settledTap(stored, storedTap, "900001403", "a rate-con row");
 		eq([stored.state("900001403"), stored.smtp.length], [["drafted", ""], 1], "§14 a rate-con row on the load: no name to read, one send");
+
+		// The rate con's own number, on a file the lookup as shipped finds by a whole token in its name.
+		for (const [label, id, opts] of [
+			["another load's rate con, this load's number a PO in its name", "900000019", { name: "Subject: Rate Confirmation 900001502 PO 900000019.pdf", number: "900001502" }],
+			["the read gives no number", "900000020", { number: null, printed: "900000020" }],
+			["the read gives this number, and the text prints another", "900000021", { number: "900000021", printed: "900001502" }],
+		]) {
+			const x = await started();
+			const xTap = x.statusRoute();
+			atReceiver(x, id, opts);
+			await settledTap(x, xTap, id, label);
+			ok(x.calls.driveGet >= 1 && x.calls.gemini >= 1, `§14 ${label}: the file was found, and read`);
+			eq([x.state(id), x.smtp.length, x.gmail.length, x.calls.mint], [["needs_attention", "RATECON_NUMBER_MISMATCH"], 0, 0, 0], `§14 ${label}: Needs attention, nothing sent or drafted, no number`);
+		}
+
+		// What a hold tells, through the block: a Super Admin's notice, an audit row, a log line.
+		const told = await started({ rows: 0 });
+		const toldTap = told.statusRoute();
+		for (const id of ["900001411", "900001412"]) {
+			atReceiver(told, id);
+			await settledTap(told, toldTap, id, `a hold, ${id}`);
+			eq(told.state(id), ["needs_attention", "RECIPIENT_NOT_KNOWN"], `§14 ${id}: held`);
+		}
+		const notices = told.db.prepare("SELECT type, title, body FROM dispatch_notifications WHERE type = 'auto-invoice'").all();
+		eq(notices.map((n) => n.title), ["Automatic invoice held"], "§14 two holds: one notice, the Super Admin-only type");
+		ok(notices[0] && /^Load 900001411 was held \(RECIPIENT_NOT_KNOWN\): /.test(notices[0].body) && !/@|Made-up/.test(notices[0].body), "§14 ...the load's ID and the code, no address, no name");
+		eq(told.audits("auto_invoice_recipient_held").map((r) => [r.username, r.entity_id, r.details]), [["auto-invoice", "900001411", "RECIPIENT_NOT_KNOWN: nothing sent"], ["auto-invoice", "900001412", "RECIPIENT_NOT_KNOWN: nothing sent"]], "§14 an audit row on each hold");
+		eq(told.logs.filter((l) => /held by the known-address check/.test(l)).length, 2, "§14 a log line on each hold");
+		const toldRead = (await told.call("GET", "/api/auto-invoice/settings", SA)).json || {};
+		eq(toldRead.recipientCheck, { on: true, domain: CHR, days: 7, held: { count: 2, byCode: { RECIPIENT_NOT_KNOWN: 2 } } }, "§14 the settings read says what the check has held");
+		eq((await told.call("GET", "/api/auto-invoice/settings", DISP)).status, 403, "§14 ...to a Super Admin only");
+		const notHeld = (await (await started()).call("GET", "/api/auto-invoice/settings", SA)).json || {};
+		ok(!("recipientCheck" in notHeld), "§14 nothing held: the settings read says nothing of it");
 
 		// A failed look through the block: a tap whose write didn't land, then his next tap.
 		const looked = await started();
@@ -1312,6 +1355,9 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			const offRows = [{ "Load ID": "900001405", "Job Status": "Delivered", Email: CHR_AGENT, "Completion Date": DELIVERED_ON }];
 			off.job.annotateCompletedRows({ rows: offRows, headers: HEADERS, isSuperAdmin: true });
 			eq(offRows[0]._autoInvoice.retry, "none", "§14 ...and a Super Admin's row offers no Try again");
+			const offRead = (await off.call("GET", "/api/auto-invoice/settings", SA)).json || {};
+			eq(offRead.recipientCheck && [offRead.recipientCheck.on, offRead.recipientCheck.held.count], [false, 1], "§14 ...and the settings read says the check is off, and what it holds");
+			eq(off.audits("auto_invoice_recipient_held").map((r) => r.details), ["RECIPIENT_CHECK_OFF: nothing sent"], "§14 ...an audit row");
 			atReceiver(off, "LD-TEST-1406", { name: "Subject: Rate Confirmation LDTEST1406.pdf", docs: BILLING, over: { Email: BROKER } });
 			await settledTap(off, offTap, "LD-TEST-1406", "another broker with the check off");
 			eq([off.state("LD-TEST-1406"), off.smtp.length, off.gmail.map((g) => g.to)], [["drafted", ""], 0, [BILLING]], "§14 ...another broker's draft is unchanged");
