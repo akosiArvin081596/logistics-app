@@ -47461,6 +47461,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
 		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
 		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
+		// One invoice status on each completed load (`_invoiceStatus`, codes only): a Super
+		// Admin's rows, after the job's own chip (lib/invoice-evidence.js).
+		invoiceEvidence.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
 		// Factored loads (`_factoring`) and button drafts that may be in Gmail
 		// (`_draftInflight`): a Super Admin's rows, only where a row exists or
 		// marking is on for a listed account (lib/factoring-routes.js).
@@ -51526,9 +51529,12 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 		// it. Unparseable cells pass through raw rather than silently blanking.
 		const dateCell = (r, col) => (col ? (sheetDayKey(r[col]) || oneLine(r[col])) : "");
 
+		// With INVOICE_STATUS_ENABLED off, null, and the file is as it always was.
+		const invoiceCols = invoiceEvidence.exportColumns({ headers });
 		const out = [[
 			"Load ID", "Job Status", "Driver", "Truck", "Pickup", "Drop-off",
 			"Assigned Date", "Delivery Date", "Payment",
+			...(invoiceCols ? invoiceCols.headers : []),
 		]];
 		for (const r of matched) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim() : "";
@@ -51555,6 +51561,7 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 				// Raw sheet value ("$1,800.00"), not a reformat — the export should
 				// reconcile to the sheet the invoices are billed from.
 				cell(r, paymentCol),
+				...(invoiceCols ? invoiceCols.cells(r) : []),
 			]);
 		}
 
@@ -55942,6 +55949,7 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		io.to("super-admin").emit("dispatch-notification", notice);
 	},
 	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	savedInvoiceEvidence: (key) => require("./lib/invoice-evidence").savedInvoice(db, key),
 	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
 	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
 	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
@@ -55996,6 +56004,44 @@ if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 	}
 }
 // </auto-invoice-wiring>
+
+// <invoice-status-wiring>
+// ONE INVOICE STATUS ON EVERY COMPLETED LOAD, for a Super Admin only: `_invoiceStatus` on
+// /api/dashboard's completed rows and three columns in the Completed Loads CSV
+// (lib/invoice-status.js, lib/invoice-evidence.js). Nothing here sends mail or writes a sheet.
+//   INVOICE_STATUS_ENABLED  a kill switch, on unless false, 0, no or off: statuses from the
+//     app's own rows, with no Gmail. A load it holds no record of reads "Couldn't check".
+//   INVOICE_MAILBOX_PASS_ENABLED  on only when exactly "true", with the status on, never in a
+//     replica: a read-only search of the company mailbox and one read of the Payments Table,
+//     at most 20 loads every 10 minutes. Only it can say "No invoice found".
+// scripts/test-invoice-evidence.js lifts this block.
+const invoiceEvidence = require("./lib/invoice-evidence").create({
+	db,
+	env: process.env,
+	replica: Boolean(REPLICA),
+	readCompletedLoads: async () => {
+		const jt = await getJobTrackingCached();
+		const headers = jt.headers || [];
+		return { headers, rows: excludeDroppedLoads(jt.data || [], headers) };
+	},
+	readPaymentsTable: async () => {
+		const sheets = await getSheets();
+		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
+	},
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	sweepOn: () => autoInvoice.mode === "on" && !autoInvoice.triggerMode,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mailbox is read
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(AUTO_INVOICE_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: AUTO_INVOICE_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	setInterval,
+	log: console,
+});
+console.log(`[invoice-status] status ${invoiceEvidence.statusOn ? "on" : "off"}; mailbox pass ${invoiceEvidence.passOn ? "on" : "off"}`);
+if (invoiceEvidence.passOn && startsJob("invoice mailbox pass")) invoiceEvidence.start();
+// </invoice-status-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment

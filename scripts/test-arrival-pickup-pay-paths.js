@@ -644,7 +644,7 @@ async function batchCases() {
 // so a mutant can lift a changed copy). The driver-instructions runtime, automatic
 // invoice drafts and factored loads have their own runners: inert here.
 const DISPLAY_HEADS = ['app.get("/api/dashboard",', 'app.get("/api/driver/:driverName",'];
-const DISPLAY_PROVIDED = [...OVERRIDE_PROVIDED, "driverInstructions", "autoInvoice", "factoringRoutes"];
+const DISPLAY_PROVIDED = [...OVERRIDE_PROVIDED, "driverInstructions", "autoInvoice", "invoiceEvidence", "factoringRoutes"];
 const DISPLAY_LIFTS = new Map();
 function displayRoutes(w, env, src = M.SRC) {
 	if (!DISPLAY_LIFTS.has(src)) {
@@ -671,6 +671,8 @@ function displayRoutes(w, env, src = M.SRC) {
 		fs: null, fetch: () => { throw new Error("no network in a test"); }, io: null, sendEmail: async () => undefined,
 		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// The invoice status (scripts/test-invoice-evidence.js covers it): off here.
+		invoiceEvidence: { annotateCompletedRows: ({ rows }) => rows, exportColumns: () => null },
 		factoringRoutes: { annotateDashboard() {} },
 	};
 	const body = ['"use strict";', DISPLAY_LIFTS.get(src).text,
