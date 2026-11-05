@@ -114,8 +114,8 @@ console.log('§1 the fixed words')
 eq('§1 no hours-of-service line is left', [v.HOS_LINE, v.HOS_SHORT_LINE], [undefined, undefined])
 eq('§1 nor its words, in the lib or on any of these screens', [libSrc, card, bar, board].filter((src) => /hours of service|hours-of-service|never drive past|\bHOS_|perf-hos|perf-bar-hos/i.test(src)).length, 0)
 eq('§1 the target line, exact', v.TARGET_LINE, 'Target: 7.5 loads a week (1.5 a day over 5 days)')
-eq('§1 the requirement line, exact', v.REQUIREMENT_LINE, 'Target is a requirement.')
-eq('§1 the old guide line is gone', v.GUIDE_LINE, undefined)
+eq('§1 the line on what\'s required, with the week\'s own figures', [fn('requirementLine')(7.5, 6), fn('requirementLine')(6, 4.5)], ['7.5 is the target. 6 is required.', '6 is the target. 4.5 is required.'])
+eq('§1 the old guide line and any fixed requirement line are gone', [v.GUIDE_LINE, v.REQUIREMENT_LINE, /Target is a requirement|a guide, not/.test(libSrc + card)], [undefined, undefined, false])
 eq('§1 the privacy line, exact', v.PRIVATE_LINE, 'No other driver can see this.')
 eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
 eq('§1 neither line about pay is left', [v.NOT_PAY_LINE, v.NOT_PAY_DAYS_LINE], [undefined, undefined])
@@ -131,7 +131,7 @@ eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, v.REQUIREMENT_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, fn('requirementLine')(7.5, 6), v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -222,7 +222,7 @@ eq('§5 each period\'s answer', v.PERIODS.map((p) => v.periodKind(p.id)), ['week
 console.log('§6 ownWeekView()')
 const ownWeekView = fn('ownWeekView')
 const week = (id, over) => ({
-  id, start: START, end: END, credits: { value: 4.5, target: 7.5, deliveries: 5, pickups: 4 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false, nextWeekStarts: 'Nov 7',
+  id, start: START, end: END, credits: { value: 4.5, target: 7.5, required: 6, deliveries: 5, pickups: 4 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false, nextWeekStarts: 'Nov 7',
   loads: [
     { loadId: 'DP-1', pickup: { day: 'Mon', credits: 0.5 }, delivery: { day: 'Tue', credits: 0.5 } },
     { loadId: 'DP-2', pickup: { day: 'Thu', credits: 0.5 }, delivery: null },
@@ -236,12 +236,12 @@ const week = (id, over) => ({
 })
 const COUNT_RULE = 'Each pickup counts 0.5 and each delivery 0.5.'
 const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 0.5, pickup: 0.5 }, invoicePaysDays: true, weeks })
-const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, loads: [] }))
+const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, loads: [] }))
 const thisWeek = ownWeekView(both, 'this-week') || {}
 eq('§6 this week, in words', { ...thisWeek, loads: undefined }, {
   range: 'Oct 31 – Nov 6', count: '4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%',
   left: '3 loads left this week.', closes: 'Week closes Fri 11:59 PM ET', newWeek: '', rule: COUNT_RULE,
-  lowered: '', title: 'What counted this week', empty: v.NO_LOADS_LINE,
+  lowered: '', requirement: '7.5 is the target. 6 is required.', title: 'What counted this week', empty: v.NO_LOADS_LINE,
 })
 eq('§6 each row shows both credits, or what became of the pickup', thisWeek.loads, [
   { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 0.5' },
@@ -260,8 +260,15 @@ const lastWeek = ownWeekView(both, 'last-week') || {}
 eq('§6 last week: the final figure and its list, with no label and nothing left', { ...lastWeek, loads: undefined }, {
   range: 'Oct 24 – Oct 30', count: '7.5 of 7.5 loads', pace: '', paceId: '', width: '100%',
   left: '', closes: '', newWeek: '', rule: COUNT_RULE,
-  lowered: '', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
+  lowered: '', requirement: '7.5 is the target. 6 is required.', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
 })
+// The two figures are the server's: the app copies them, and no figure it can't trust gets a line.
+const requiredFor = (target, required, id = 'this-week') => ownWeekView(answerOf(week(id, { left: id === 'this-week' ? 3 : null, pace: null, credits: { value: 3, target, required, deliveries: 3, pickups: 3 } })), id)?.requirement
+eq('§6 the line reads the week\'s own figures', requiredFor(6, 4.5), '6 is the target. 4.5 is required.')
+eq('§6 at the target\'s floor too', requiredFor(4.5, 3), '4.5 is the target. 3 is required.')
+eq('§6 and on last week, that week\'s own', requiredFor(6, 4.5, 'last-week'), '6 is the target. 4.5 is required.')
+eq('§6 the app never works required out from the target', requiredFor(7.5, 2), '7.5 is the target. 2 is required.')
+eq('§6 no figure it can trust, no line, never a wrong one', ['6', null, undefined, {}].map((required) => requiredFor(7.5, required)), ['', '', '', ''])
 // The server may still say what his invoice pays; no screen says anything about pay.
 eq('§6 no view carries a line about pay, whatever the answer says of his invoice', [true, false, 'true', undefined].map((invoicePaysDays) => has(ownWeekView({ ...answerOf(week('this-week')), invoicePaysDays }, 'this-week'), 'not pay')), [false, false, false, false])
 eq('§6 the app doesn\'t read what his invoice pays', /invoicePaysDays/.test(libSrc), false)
@@ -300,7 +307,7 @@ const decoyAnswer = {
     loads: [{ ...DECOYS, loadId: 'DP-1', pickup: { ...DECOYS, day: 'Mon', credits: 0.5 }, delivery: { ...DECOYS, day: 'Tue', credits: 0.5 } }],
   }), ...DECOYS, gap: 'decoy-gap', expected: 41 }],
 }
-eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'lowered', 'title', 'empty', 'loads'])
+eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'lowered', 'requirement', 'title', 'empty', 'loads'])
 eq('§6 exactly two fields on a row', Object.keys(ownWeekView(decoyAnswer, 'this-week')?.loads?.[0] || {}), ['title', 'line'])
 eq('§6 no name, hours, score, tier, pay, broker, rate, rank or other driver\'s figure gets through, whatever the answer holds', showsDecoy(ownWeekView(decoyAnswer, 'this-week')), [])
 eq('§6 no answer, no card', [ownWeekView(null, 'this-week'), ownWeekView({}, 'this-week'), ownWeekView({ weeks: [] }, 'this-week'), ownWeekView(both, 'this-month')], [null, null, null, null])
@@ -331,6 +338,8 @@ eq('§7 always this week, whichever order they come in', weekBarView(answerOf(we
 eq('§7 a lower target reads as its own figure', weekBarView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, percent: 50 })))?.text, 'This week: 3 of 6 loads')
 eq('§7 no decoy reaches the bar', showsDecoy(weekBarView(decoyAnswer)), [])
 eq('§7 exactly four fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width'])
+eq('§7 what\'s required is words on the tab only: no mark on the bar', has(weekBarView(both), 'required'), false)
+eq('§7 no read of it in the bar', /required|requirement/i.test(bar), false)
 for (const [says, over] of Object.entries(broken)) eq(`§7 ${says}: no bar, never a wrong number`, weekBarView(answerOf(week('this-week', over))), null)
 eq('§7 no answer, no bar', [weekBarView(null), weekBarView({}), weekBarView({ weeks: [] }), weekBarView(answerOf(week('last-week')))], [null, null, null, null])
 const weekFromAnswer = fn('weekFromAnswer')
@@ -417,8 +426,8 @@ const cardTemplate = templateOf(card)
 const cardScript = scriptOf(card)
 const printed = [...cardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]).sort()
 eq('§11 it prints only these, so a name or a figure can\'t be added by accident', [...new Set(printed)], [
-  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'PRIVATE_LINE', 'REQUIREMENT_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
-  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.rule', 'week.title',
+  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
+  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.requirement', 'week.rule', 'week.title',
 ].sort())
 eq('§11 no line about pay on the tab', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|notPay|perf-not-pay|invoice pays/.test(card), false)
 eq('§11 the lowered-target line only when the view has one, right after the target line', /\{\{ TARGET_LINE \}\}<\/p>\s*<p v-if="week\.lowered"[^>]*>\{\{ week\.lowered \}\}<\/p>/.test(cardTemplate), true)
@@ -437,8 +446,8 @@ eq('§11 the card computes nothing', ARITHMETIC.test(codeOf(cardScript)), false)
 eq('§11 the template computes nothing', [...cardTemplate.matchAll(/\{\{([^}]*)\}\}/g)].filter((m) => /[*/%+-]/.test(m[1])).length, 0)
 eq('§11 the fill is the server\'s percent', /:style="\{ width: week\.width \}"/.test(cardTemplate), true)
 eq('§11 no hours-of-service line on the tab', chainTo(cardTemplate, 'data-testid="perf-hos"'), null)
-eq('§11 the target, the requirement line, drive hours and the privacy line sit together', [cardTemplate.includes('{{ TARGET_LINE }}'), cardTemplate.includes('{{ REQUIREMENT_LINE }}'), cardTemplate.includes('{{ DRIVE_HOURS_LINE }}'), cardTemplate.includes('{{ PRIVATE_LINE }}')], [true, true, true, true])
-eq('§11 the requirement line has its own place, right after the lowered-target line', /\{\{ week\.lowered \}\}<\/p>\s*<p class="perf-note" data-testid="perf-requirement">\{\{ REQUIREMENT_LINE \}\}<\/p>/.test(cardTemplate), true)
+eq('§11 the target, the requirement line, drive hours and the privacy line sit together', [cardTemplate.includes('{{ TARGET_LINE }}'), cardTemplate.includes('{{ week.requirement }}'), cardTemplate.includes('{{ DRIVE_HOURS_LINE }}'), cardTemplate.includes('{{ PRIVATE_LINE }}')], [true, true, true, true])
+eq('§11 the requirement line has its own place, right after the lowered-target line, only when the view has one', /\{\{ week\.lowered \}\}<\/p>\s*<p v-if="week\.requirement" class="perf-note" data-testid="perf-requirement">\{\{ week\.requirement \}\}<\/p>/.test(cardTemplate), true)
 eq('§11 the label only when the view has one', /v-if="week\.pace"/.test(cardTemplate), true)
 eq('§11 This week and Last week, both', /<van-tab v-for="period in OWN_PERIODS" /.test(cardTemplate), true)
 eq('§11 the toggle is 44 px', /--van-tabs-line-height: 44px/.test(styleOf(card)), true)
@@ -529,6 +538,7 @@ if (typeof server.personalWeek === 'function') {
   ])
   eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%' })
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
+  eq('§14 the line on what\'s required, from the server\'s own figures', [ownWeekView(realAnswer, 'this-week')?.requirement, ownWeekView(offAnswer, 'this-week')?.requirement], ['7.5 is the target. 6 is required.', '6 is the target. 4.5 is required.'])
   eq('§14 the new-week line, with the server\'s own date', [ownWeekView(realAnswer, 'this-week')?.newWeek, ownWeekView(realAnswer, 'this-week')?.closes], ['A new week starts Saturday, Nov 7.', ''])
   // "N loads left" reads true at every half the server can send, through the view's own words.
   const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left

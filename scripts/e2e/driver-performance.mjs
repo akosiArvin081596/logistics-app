@@ -12,8 +12,8 @@
 //       read and the good one after it; the kill switch going off keeps the place until he moves
 //   T   tapping it opens the Performance tab; the sixth tab fits the nav and is 44 px or more
 //   W   this week: the count, the label, what's left, the closing line, how it counts, each row
-//       with both credits, "tell dispatch", drive hours coming soon, the target, "Target is a
-//       requirement." and "No other driver can see this."; no hours-of-service line; no name, rank, unit, "You",
+//       with both credits, "tell dispatch", drive hours coming soon, the target, "7.5 is the target.
+//       6 is required." and "No other driver can see this."; no hours-of-service line; no name, rank, unit, "You",
 //       month, tile, hours figure or dollars
 //   L   last week: its final figure and list, no label, nothing left; no new read
 //   R   read only: the page sent no write while the tab was in use, and never read the board
@@ -28,7 +28,7 @@
 //   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
 //       starts Saturday, <the coming Saturday's date>." and no closing line; Ahead of Pace; the target reached; no label at all;
 //       a percentage driver's tab says nothing about pay, as nobody's does; an approved day off
-//       reads his lower figure and the one line saying why
+//       reads his lower figure, the one line saying why and that week's required figure
 //   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar; the held place goes on
 //       his first move between screens
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
@@ -87,7 +87,7 @@ if (process.env.SHOT_DIR && !path.isAbsolute(process.env.SHOT_DIR)) die('SHOT_DI
 
 // ---------------------------------------------------------------- the words the screen must say
 const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-const REQUIREMENT_LINE = 'Target is a requirement.'
+const REQUIREMENT_LINE = '7.5 is the target. 6 is required.'
 const PRIVATE_LINE = 'No other driver can see this.'
 const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
@@ -99,7 +99,7 @@ const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
 const ALL_TABS = [...BASE_TABS, 'Performance']
 const TILES = ['Most loads', 'Least fuel cost', 'Safety', 'Lowest idle']
 // None of these may ever be on a driver's screen.
-const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days', 'Hours of service', 'hours of service', 'Never drive past', 'a guide']
+const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days', 'Hours of service', 'hours of service', 'Never drive past', 'a guide', 'Target is a requirement']
 
 // ---------------------------------------------------------------- made-up fixtures
 const DRIVER = { id: 90321, username: 'qa-performance-driver', role: 'Driver', driverName: 'Casey Example', email: '', fullName: 'Casey Example', companyName: '', mustChangePassword: false }
@@ -144,8 +144,8 @@ const THIS_LINES = [
 ]
 const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 0.5) }]
 const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 0.5']]
-const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, nextWeekStarts: NEXT_WEEK_STARTS, targetLowered: false, loads: THIS_LOADS }
-const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: LAST_LOADS }
+const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, required: 6, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, nextWeekStarts: NEXT_WEEK_STARTS, targetLowered: false, loads: THIS_LOADS }
+const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: LAST_LOADS }
 
 // What the server must never send. If it did, none of it may show.
 const DECOY_NAME = 'Decoy Peerdriver'
@@ -714,7 +714,7 @@ async function goneRun(browser, size) {
 // ---------------------------------------------------------------- P: the other weeks
 async function weekShapesRun(browser, size) {
   const t = size.tag
-  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
+  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, required: 6, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, low)
     try {
@@ -741,7 +741,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: 0, percent: 100, pace: 'ahead' } })
+  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: 0, percent: 100, pace: 'ahead' } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, met)
     try {
@@ -760,7 +760,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const none = freshState({ thisWeek: { credits: { value: 0, target: 7.5, deliveries: 0, pickups: 0 }, left: 7.5, percent: 0, pace: null, loads: [] } })
+  const none = freshState({ thisWeek: { credits: { value: 0, target: 7.5, required: 6, deliveries: 0, pickups: 0 }, left: 7.5, percent: 0, pace: null, loads: [] } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, none)
     try {
@@ -796,7 +796,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const dayOff = freshState({ thisWeek: { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, left: 3, percent: 50, pace: 'on-track', targetLowered: true } })
+  const dayOff = freshState({ thisWeek: { credits: { value: 3, target: 6, required: 4.5, deliveries: 3, pickups: 3 }, left: 3, percent: 50, pace: 'on-track', targetLowered: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, dayOff)
     try {
@@ -809,14 +809,16 @@ async function weekShapesRun(browser, size) {
       const left = await text(page, testid('perf-left'))
       const target = await text(page, testid('perf-target'))
       const lowered = await text(page, testid('perf-lowered'))
-      const follows = await page.locator(testid('perf-target')).first().evaluate((el) => (el.nextElementSibling || {}).dataset?.testid === 'perf-lowered').catch(() => false)
+      const required = await text(page, testid('perf-requirement'))
+      const follows =await page.locator(testid('perf-target')).first().evaluate((el) => (el.nextElementSibling || {}).dataset?.testid === 'perf-lowered').catch(() => false)
       await choose(page, size, 'Last week')
       await appears(page, testid('perf-counted-title'), 8000)
       await page.waitForTimeout(150)
       const lastWeekLine = await page.locator(testid('perf-lowered')).count()
-      record(`P-day-off-${t}`, 'An approved day off: his lower figure, and the line that says why', `"This week: 3 of 6 loads"; "3 of 6 loads"; "3 loads left this week."; "${TARGET_LINE}" then "${LOWER_TARGET_LINE}"; not on Last week, as its words say this week`,
-        `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", follows ${follows}, on last week ${lastWeekLine}`,
-        barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && follows && lastWeekLine === 0,
+      const lastRequired = await text(page, testid('perf-requirement'))
+      record(`P-day-off-${t}`, 'An approved day off: his lower figure, and the line that says why', `"This week: 3 of 6 loads"; "3 of 6 loads"; "3 loads left this week."; "${TARGET_LINE}" then "${LOWER_TARGET_LINE}"; "6 is the target. 4.5 is required."; not on Last week, as its words say this week; Last week's line is its own`,
+        `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", required "${required}", follows ${follows}, on last week ${lastWeekLine}, last week's line "${lastRequired}"`,
+        barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && required === '6 is the target. 4.5 is required.' && follows && lastWeekLine === 0 && lastRequired === REQUIREMENT_LINE,
         await shot(page, `P-day-off-${t}`))
     } finally {
       await ctx.close()

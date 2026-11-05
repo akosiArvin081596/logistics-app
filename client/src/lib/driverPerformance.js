@@ -10,7 +10,8 @@ export const OWN_URL = '/api/driver/me/performance'
 export const BOARD_URL = '/api/driver/performance/leaderboard'
 
 export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-export const REQUIREMENT_LINE = 'Target is a requirement.'
+// Both figures are the server's, for the week on screen.
+export const requirementLine = (target, required) => `${target} is the target. ${required} is required.`
 export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
@@ -132,6 +133,7 @@ export function ownWeekView(answer, periodId) {
     newWeek: newWeek ? newWeekLine(week.nextWeekStarts) : '',
     rule: `Each pickup counts ${weights.pickup} and each delivery ${weights.delivery}.`,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
+    requirement: isNumber(week.credits.required) ? requirementLine(target, week.credits.required) : '',
     title: current ? 'What counted this week' : 'What counted last week',
     empty: current ? NO_LOADS_LINE : NO_LOADS_LAST_WEEK,
     loads,

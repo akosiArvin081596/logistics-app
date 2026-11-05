@@ -839,7 +839,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(a.creditWeights, { delivery: 0.5, pickup: 0.5 }, "the weights the credits use");
 		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "nextWeekStarts", "pace", "percent", "start", "targetLowered"];
 		eq(a.weeks.map((w) => sortedKeys(w)), [WEEK_KEYS, WEEK_KEYS], "each week's keys");
-		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "target", "value"], ["deliveries", "pickups", "target", "value"]], "each week's credit keys");
+		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "required", "target", "value"], ["deliveries", "pickups", "required", "target", "value"]], "each week's credit keys");
 		const banned = /hour|rei|gap|reach|expected|rank|unit|streak|tier|bonus|earn/i;
 		for (const [who, body] of Object.entries(weeks)) {
 			ok(!allKeys(body).some((k) => banned.test(k)), `${who}: no hours, REI, gap, "out of reach", rank, unit, streak or earnings key`);
@@ -848,8 +848,8 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(a.weeks.map((w) => [w.id, w.credits.deliveries, w.credits.pickups, w.credits.value, w.credits.target]),
 			[["this-week", 3, 3, 3, 7.5], ["last-week", 2, 1, 1.5, 7.5]],
 			"Ada (ELD truck): geofence and ELD departures count, her early tap and her ELD truck's tap don't; Friday 11:30 PM ET is last week");
-		eq(weeks.ben.weeks[0].credits, { value: 2, target: 7.5, deliveries: 2, pickups: 2 }, "Ben (no ELD): his tap and dispatch's tap count");
-		eq(weeks.cal.weeks[0].credits, { value: 1, target: 7.5, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts");
+		eq(weeks.ben.weeks[0].credits, { value: 2, target: 7.5, required: 6, deliveries: 2, pickups: 2 }, "Ben (no ELD): his tap and dispatch's tap count");
+		eq(weeks.cal.weeks[0].credits, { value: 1, target: 7.5, required: 6, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts");
 		eq(weeks.dee.weeks.map((w) => w.credits.deliveries), [1, 1], "Dee's deliveries, this week and last");
 		eq(weeks.hal.weeks.map((w) => w.credits.deliveries), [2, 0], "Hal's own week shows even with no truck last week");
 
@@ -1038,7 +1038,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 
 	await section("19 pacing on loads alone", () => {
 		const p = need();
-		eq(p.LOADS_PACE, { creditsPerDay: 1.5, aheadBy: 1.5, targetFloor: 4.5, hideLabelAtDaysOff: 3 }, "the reading, in one constant");
+		eq(p.LOADS_PACE, { creditsPerDay: 1.5, aheadBy: 1.5, targetFloor: 4.5, hideLabelAtDaysOff: 3, requiredBelowTarget: 1.5 }, "the reading, in one constant");
 		// Today through Friday, at 1.5 a day: what he'd have by this morning to finish on 7.5.
 		const WEEK = { start: "2026-11-07", end: "2026-11-13" };
 		// The table is in credits, so the deliveries that earn each figure come from the weight.
@@ -1077,7 +1077,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(week({ deliveries: 2 }).percent, 13, "13.33 rounds down");
 		eq(week({ deliveries: 4, pickups: 3 }).percent, 46, "46.67 rounds down too, never up");
 		eq([6, 14, 15, 18].map((n) => week({ deliveries: n }).left), [4.5, 0.5, 0, 0], "what's left never goes below 0");
-		eq(week({ deliveries: 2, pickups: 3 }).credits, { value: 2.5, target: 7.5, deliveries: 2, pickups: 3 }, "the count: a pickup 0.5, a delivery 0.5");
+		eq(week({ deliveries: 2, pickups: 3 }).credits, { value: 2.5, target: 7.5, required: 6, deliveries: 2, pickups: 3 }, "the count: a pickup 0.5, a delivery 0.5");
 		eq(week({ deliveries: 1, pickups: 1 }).credits.value, 1, "one load, picked up and delivered, is 1");
 		eq(week({ deliveries: 5, pickups: 5 }).percent, 66, "5 loads are 66% of 7.5, not all of it");
 		// "N loads left" stays true at a half: the figure and what's left make the target, in whole stops.
@@ -1087,8 +1087,17 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			ok(Number.isInteger(w.left / 0.5), `${delivered} delivered, ${picked} picked up: ${w.left} left is a whole number of stops`);
 		}
 
+		// What's required stays 1.5 below the target, whatever lowers it, the floor's weeks included.
+		const offFor = (n) => ["2026-11-07", "2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"].slice(0, n);
+		eq([0, 1, 2, 3, 7].map((n) => { const c = week({ offDays: offFor(n) }).credits; return [c.target, c.required]; }), [[7.5, 6], [6, 4.5], [4.5, 3], [4.5, 3], [4.5, 3]], "required stays 1.5 below the target");
+		// Words only: reaching it changes no figure, label or line.
+		const atRequired = week({ today: "2026-11-13", deliveries: 12 });
+		eq([atRequired.credits.value, atRequired.left, atRequired.percent, atRequired.pace, atRequired.newWeekNote], [6, 1.5, 80, "on-track", false], "at the required 6 on Friday: still 1.5 left, 80%, the label the pacing gives");
+		eq(week({ today: "2026-11-13", deliveries: 11 }).pace, "needs-focus", "just below it, the label the pacing gives");
+		eq(week({ today: "2026-11-11", deliveries: 12 }).pace, "ahead", "and Wednesday at 6 is ahead, as the pacing says");
+
 		// Approved days off: a lower target, and pacing over the days he can work.
-		const oneOff = week({ offDays: ["2026-11-12"], deliveries: 6 });
+		const oneOff =week({ offDays: ["2026-11-12"], deliveries: 6 });
 		eq([oneOff.credits.target, oneOff.left, oneOff.percent, oneOff.pace], [6, 3, 50, "on-track"], "Thu off, today Wed: 6, and 2 working days left, so 3 is on pace");
 		eq(week({ offDays: ["2026-11-07"], deliveries: 4 }).pace, "on-track", "Sat off, today Wed: 3 working days left of 6, so 1.5 by now, and 2 is on pace");
 		eq(week({ offDays: ["2026-11-07"], deliveries: 2 }).pace, "needs-focus", "and 1 is below it");
@@ -1187,7 +1196,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		// A percentage driver gets the personal view: it counts loads and touches no pay.
 		const eli = await on.get("/api/driver/me/performance", USERS.eli);
 		eq(eli.status, 200, "a percentage driver on a truck: his own week");
-		eq(eli.json.weeks[0].credits, { value: 2, target: 7.5, deliveries: 4, pickups: 0 }, "and his count");
+		eq(eli.json.weeks[0].credits, { value: 2, target: 7.5, required: 6, deliveries: 4, pickups: 0 }, "and his count");
 		// Held a countable truck, or has a counted load, this week or last.
 		for (const who of ["ada", "dee", "hal", "jo", "kim"]) eq((await on.get("/api/driver/me/performance", USERS[who])).status, 200, `${who}: yes`);
 		eq((await on.get("/api/driver/me/performance", USERS.jo)).json.weeks[0].credits.deliveries, 1, "a test unit's driver with a counted load: yes");
@@ -1285,15 +1294,17 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			const week = async (world, who) => (await world.get("/api/driver/me/performance", USERS[who])).json.weeks;
 			const ben = await week(w, "ben");
 			eq([ben[0].credits.target, ben[0].left, ben[0].percent, ben[0].pace], [6, 4, 33, "needs-focus"], "Ben's approved Thursday off: 2 of 6, and 2 working days left, so 3 by now is on pace and 2 is below it");
-			eq(ben[1].credits.target, 7.5, "last week's target is its own");
+			eq(ben[0].credits.required, 4.5, "and 4.5 is required that week");
+			eq([ben[1].credits.target, ben[1].credits.required], [7.5, 6], "last week's figures are its own");
 			eq([ben[0].targetLowered, ben[1].targetLowered], [true, false], "the server flags his lowered target, this week only");
 			eq((await week(w, "cal"))[0].credits.target, 7.5, "a request still waiting changes nothing");
 			eq((await week(w, "cal"))[0].targetLowered, false, "and flags nothing");
 			const ada = await week(w, "ada");
 			eq([ada[0].credits.target, ada[1].credits.target], [7.5, 4.5], "days off last week lower last week only");
+			eq([ada[0].credits.required, ada[1].credits.required], [6, 3], "and what was required that week, 1.5 below its target");
 			eq([ada[0].targetLowered, ada[1].targetLowered], [false, false], "and a closed week flags nothing");
 			const hal = await week(w, "hal");
-			eq([hal[0].credits.target, hal[0].pace, hal[0].targetLowered], [4.5, null, true], "three days off: 4.5, no label, and flagged");
+			eq([hal[0].credits.target, hal[0].credits.required, hal[0].pace, hal[0].targetLowered], [4.5, 3, null, true], "three days off: 4.5, 3 required, no label, and flagged");
 			eq((await week(offFlag, "ben"))[0].credits.target, 7.5, "with availability off, its rows stay inert");
 			eq((await week(offFlag, "ben"))[0].targetLowered, false, "and flag nothing");
 		} finally {
