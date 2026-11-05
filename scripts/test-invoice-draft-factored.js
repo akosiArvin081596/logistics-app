@@ -141,8 +141,8 @@ const stagedError = (message, stage, answered) => Object.assign(new Error(messag
 // run's MODE by default). With every switch off, loads are marked the way the
 // lead's scripts/factoring-mark.js marks them. `lines` builds it as if assignment
 // lines existed, which keeps the confirmation's own rules pinned; the server never
-// says so, and no other world does.
-function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off", lines = false } = {}) {
+// says so, and no other world does. `settings`: more of the server's settings.
+function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off", lines = false, settings = {} } = {}) {
 	const db = new Database(":memory:");
 	db.exec(LIFT.createSql);
 	for (const a of LIFT.alters) db.exec(a);
@@ -227,7 +227,7 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	const routesDb = unreadableMarker ? (() => { const x = new Database(":memory:"); if (store) store.ensureSchema(x); x.close(); return x; })() : db;
 	const routes = CUR.routesLib ? CUR.routesLib.create({
 		db: routesDb,
-		env: off ? {} : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) },
+		env: off ? { ...settings } : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }), ...settings },
 		...(lines ? { hasAssignmentLines: true } : {}),
 		now: () => new Date(w.now || NOW),
 		logAudit: scope.logAudit,
@@ -343,6 +343,9 @@ async function s1() {
 		const nobody = world({ ids: null });
 		nobody.putMarker(1);
 		eq((await nobody.press(1, { body: CONFIRM })).body.code, "NOA_UNCONFIGURED", "§1 FAILS ON THE OLD CODE: TRIUMPH_FACTOR_MARK_IDS unset: the same answer");
+		const set = world({ settings: { TRIUMPH_NOA_LINES: "made-up line one" } });
+		set.putMarker(1);
+		eq((await set.press(1, { body: CONFIRM })).body.code, "NOA_UNCONFIGURED", "§1 FAILS ON THE OLD CODE: a setting named for the lines changes nothing: the invoice page can't print them yet");
 		w.putMarker(2, { locked: NOW });
 		eq((await w.press(2, { body: CONFIRM })).body.code, "FACTORING_LOCKED", "§1 a locked row answers with the lock first");
 		const plain = world();
@@ -677,6 +680,7 @@ async function mutants() {
 		["settling on 'no throw' (record() answering recorded:false ignored)", "routes", "if (!(result && result.recorded)) {", "if (false) {", s4],
 		["the confirmation with no assignment lines", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: true,", s1],
 		["a body that says the lines exist is believed", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: body.hasAssignmentLines === true,", s1],
+		["a setting says the lines exist", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: Boolean(d.env && d.env.TRIUMPH_NOA_LINES),", s1],
 		["the confirmation from any Super Admin", "routes", "mayConfirm: mayMark(userOf(req)),", "mayConfirm: true,", s1],
 		["the shared login counts as listed", "routes", "&& !isSharedLoginName(user.username)", "", s1],
 		["Check Gmail without the search", "routes", "const canSearch = row.path === \"imap\"", "const canSearch = false && row.path === \"imap\"", s6],

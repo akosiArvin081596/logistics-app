@@ -507,6 +507,17 @@ function checkRoutes(routesSrc) {
 	off.routes.annotateDashboard({ session: { user: OTHER } }, { headers, ...adminRows });
 	c.eq([adminRows.completed[0]._factoring && adminRows.completed[0]._factoring.factored, adminRows.completed[1]._factoring, adminRows.active[0]._factoring.canRecordOutside],
 		[true, undefined, false], "§9 a Super Admin's rows: the marked load only; an unlisted one may not record");
+	// The switch itself, with marking on: the server gives it to a listed account only.
+	const on = build(ON);
+	putMarker(on.db, "ld-test-0003");
+	const seen = (user) => {
+		const r = { active: rows(), completed: rows() };
+		on.routes.annotateDashboard({ session: { user } }, { headers, ...r });
+		return [...r.active, ...r.completed].map((x) => (x._factoring ? [x._factoring.factored, x._factoring.canMark] : null));
+	};
+	c.eq(seen(ME), [[true, true], [false, true], [true, true], [false, true]], "§9 marking on, a listed account: every row, each with the switch");
+	c.eq(seen(OTHER), [[true, false], null, [true, false], null], "§9 marking on, a Super Admin not listed: the marked load's chip and no switch; nothing on any other");
+	c.eq(seen(SHARED), [[true, false], null, [true, false], null], "§9 marking on, the shared login, even with its id listed: the same");
 	return c;
 }
 section("§9  the routes: who may mark, the switch");
@@ -575,6 +586,8 @@ const ROUTE_MUTANTS = [
 	["a replica marks", "const markingOn = !replica && ", "const markingOn = "],
 	["the shared login listed", "&& !isSharedLoginName(user.username)", ""],
 	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
+	["the switch given to any Super Admin", "canMark: markingOn && listed,", "canMark: markingOn,"],
+	["every row annotated for any Super Admin", "all: markingOn && listed,", "all: markingOn,"],
 	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
 		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
 	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n",
