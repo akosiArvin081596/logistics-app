@@ -13,7 +13,8 @@
 //   §6  no contact name anywhere
 //   §7  a later fill with the same domain raises no change, and adds no new stop
 //   §8  Try again's look and its confirm on this path (R-H2 (a)), across a restart too; a
-//       stale tap's re-armed claim gets the same look, on a filled Email too
+//       stale tap's re-armed claim and a claim re-queued at start-up get the same look, on a
+//       filled Email too
 //   §9  outside the driver's trigger the flag is ignored
 //   §10 it can't send twice, across a restart during SMTP too
 //
@@ -984,6 +985,44 @@ const jsonOf = (text) => {
 			await drained(w, "§8 re-armed, then a restart");
 			await turn();
 			eq([w.state(ID), w.smtp.length], [["needs_attention", "MAILBOX_HIT"], 0], "§8 FAILS ON THE OLD CODE (L3): ...across a restart: the look still runs first");
+		}
+
+		// A record that outlives a restart under an hour old is re-queued with no tap and no
+		// press: a person may have billed it from Gmail meanwhile, so it gets the same look.
+		const atRestart = async (over, fields, setup = null) => {
+			const w = makeWorld();
+			await w.started();
+			w.ready(ID, { "Job Status": "Delivered", ...over });
+			const { state, code = "", ...rest } = fields;
+			ledger.insertClaim(w.db, { key: rules.loadKey(ID), loadId: ID, state, code, nowIso: iso(w.now) });
+			const cols = Object.keys(rest);
+			if (cols.length) w.db.prepare(`UPDATE auto_invoice_claims SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE load_key = ?`).run(...cols.map((c) => rest[c]), rules.loadKey(ID));
+			if (setup) setup(w);
+			const next = w.job();
+			next.startTrigger();
+			await next.finishStartUp();
+			await drained(w, "§8 the restart");
+			await turn();
+			return { w, next };
+		};
+		const CAUGHT = { state: "working", lease_owner: "old-process", lease_until: iso(T0 + HOUR) };
+		for (const [email, over] of [["a blank Email", {}], ["a filled Email", { Email: AGENT }]]) {
+			for (const [label, fields] of [
+				["a queued claim", { state: "queued" }],
+				["a DRIVER_PENDING record", { state: "waiting", code: "DRIVER_PENDING" }],
+				["a claim caught building", CAUGHT],
+				["a claim caught building, its number held", { ...CAUGHT, stage: "reserved", invoice_id: "10202026-77", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: "<made-up-held.auto-invoice@example.com>" }],
+			]) {
+				const named = `§8 FAILS ON THE OLD CODE: ${email}, ${label} at a restart`;
+				let s = await atRestart(over, fields, (w) => { w.lookAnswer = { verdict: "invoice", mailboxes: {} }; });
+				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.mint, s.w.calls.look.length], [["needs_attention", "MAILBOX_HIT"], 0, 0, 0, 1], `${named}, the mailbox holds an invoice: no second invoice, no number`);
+				s = await atRestart(over, fields, (w) => { w.lookFails = true; });
+				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.mint, Boolean(s.w.claim(ID).look_first)], [["needs_attention", "MAILBOX_UNREAD"], 0, 0, 0, true], `${named}, the look fails: MAILBOX_UNREAD, no send, no number, the look still asked for`);
+				s = await atRestart(over, fields, (w) => { w.payments.push([ID, "Example", "1000", "", "", "Paid"]); });
+				eq([s.w.state(ID), s.w.smtp.length], [["needs_attention", "PAYMENTS_TABLE_HIT"], 0], `${named}, a filled Payments Table row: no send`);
+				s = await atRestart(over, fields);
+				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.look.length, s.w.claim(ID).look_first], [["drafted", ""], 1, 0, 1, ""], `${named}, all clean: no load is lost: one look, one send, the look cleared`);
+			}
 		}
 
 		// What the confirm says when this path isn't open.
