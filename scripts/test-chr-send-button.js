@@ -1181,6 +1181,39 @@ async function main() {
 		eq([r.status, r.body.code, w.claim(id)], [503, "SHEET_UNAVAILABLE", null], "§5 the sheet down at the press: nothing moves");
 	}
 	{
+		// The press's audit row fails: the claim has already moved, so the run must still happen.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		const pressAudit = w.audits;
+		w.audits = { push(row) { if (row.action === "auto_invoice_button_press") throw Object.assign(new Error("made-up: the audit table is locked for made-up.billing@chrobinson.com"), { code: "SQLITE_BUSY" }); pressAudit.push(row); }, filter: (f) => pressAudit.filter(f) };
+		const r = await w.press(id, p.body.token);
+		eq(r.status, 200, "§5 the press's audit row fails: the press stands");
+		await until(() => w.open() === 0, "§5 the run");
+		eq([w.st(id), w.smtp.length], [["drafted", ""], 1], "§5 ...and its run goes, once");
+		ok(w.logs.some((l) => /the press's audit row failed: SQLITE_BUSY/.test(l)), "§5 ...the failure is logged by its code");
+		ok(!w.logs.some((l) => l.includes("@")), "§5 ...never its message");
+	}
+	{
+		// The press's own write fails: nothing moved, and the answer says so rather than hanging.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		w.beforePress = () => {
+			const real = ledger.pressButton;
+			ledger.pressButton = () => {
+				ledger.pressButton = real;
+				throw Object.assign(new Error("made-up: locked"), { code: "SQLITE_BUSY" });
+			};
+		};
+		const r = await w.press(id, p.body.token);
+		eq([r.status, r.body.code, w.claim(id), w.actions("auto_invoice_button_press").length, w.smtp.length], [503, "SHEET_UNAVAILABLE", null, 0, 0], "§5 the press's write fails: 503, no audit row, nothing runs");
+	}
+	{
 		// After the press's last wait, the rows are read once more, with nothing awaited before the write.
 		const w = makeWorld();
 		await w.boot();
@@ -1315,6 +1348,39 @@ async function main() {
 		undo();
 		await backCase("a press in flight inside the send's commit", { code: "HAND_DRAFT_IN_FLIGHT", number: true, afterPress: (w, id) => { undo = wrapBegin(() => pressInFlight(w, id)); } });
 		undo();
+	}
+	{
+		// Only chrobinson.com, whatever the recipient rule lets through: another domain on the send list,
+		// with the rule itself gone loose, still stops at the button's own check, at each step.
+		const realRule = rules.recipientRule;
+		const looseRule = (o) => ({ ok: true, to: o.documentsEmail, source: "ratecon" });
+		const OTHER = "billing@example-other.test";
+		try {
+			const w = makeWorld();
+			w.sendDomains = ["chrobinson.com", "example-other.test"];
+			await w.boot();
+			let id = newId();
+			await w.armed(id);
+			const p = await w.preview(id);
+			w.afterPress = () => {
+				rules.recipientRule = looseRule;
+				w.rateCons.set(rules.loadKey(id), OTHER);
+			};
+			await w.press(id, p.body.token);
+			await until(() => w.open() === 0, "§7 the loose rule: the run");
+			eq([w.st(id), w.smtp.length, w.appends.length, w.calls.mint, w.actions("auto_invoice_button_back").map((a) => a.details.split(":")[0])], [["baseline", ""], 0, 0, 0, ["DOMAIN_NOT_LISTED"]], "§7 the recipient off chrobinson.com at the run: back, before any number");
+			id = newId();
+			w.ready(id, {}, OTHER);
+			await w.paidOk(id);
+			const refused = await w.preview(id);
+			eq([refused.status, refused.body.code, refused.body.token], [409, "DOMAIN_NOT_LISTED", undefined], "§7 ...at the preview: no confirm");
+			id = newId();
+			w.ready(id, {}, OTHER);
+			await w.btn.runPaidChecks();
+			eq((await w.state(id)).body.code, "DOMAIN_NOT_LISTED", "§7 ...at the paid check: saved, and its one line");
+		} finally {
+			rules.recipientRule = realRule;
+		}
 	}
 	{
 		const w = await backCase("SMTP refused before the body", { code: "SMTP_REFUSED", number: true, smtp: 1, stopped: true, setup: (x) => { x.smtpBehaviors = ["REFUSED"]; } });
@@ -1738,9 +1804,7 @@ async function main() {
 		await w.armed(id);
 		const p = await w.preview(id);
 		w.timeline = [];
-		const old = w.job;
-		const oldLine = old.runLine;
-		w.afterPress = () => {};
+		const oldLine = w.job.runLine;
 		const pressNow = await w.press(id, p.body.token);
 		eq(pressNow.status, 200, "§9 pressed");
 		// Taken before the line's next turn, as a process killed right there leaves it.
@@ -1900,7 +1964,6 @@ async function main() {
 			const p = await w.preview(id);
 			const hold = gate();
 			w[setHook] = () => hold.p;
-			w.afterPress = () => {};
 			const calls = setHook === "renderHook" ? 2 : 1;
 			await w.press(id, p.body.token);
 			await until(() => w.st(id)[0] === "working" && (setHook === "lookHook" ? w.calls.look.length === 2 : w.calls.render === calls), `§10 ${label}`);
@@ -1937,9 +2000,7 @@ async function main() {
 		await w.boot();
 		const id = newId();
 		await w.armed(id);
-		const p = await w.preview(id);
-		const record = JSON.parse(JSON.stringify({ by: "made-up-admin", from: { state: "baseline", code: "" }, digest: { recipient: "x" } }));
-		eq(p.status, 200, "§10 previewed");
+		const record = { by: "made-up-admin", from: { state: "baseline", code: "" }, digest: { recipient: "x" } };
 		w.seed(id, { state: "working", stage: "rendered", invoice_id: "10202026-9", invoice_date: "2026-10-20", message_id: "<lost@example.com>", lease_owner: "gone", lease_until: iso(w.now + HOUR), sent_json: JSON.stringify({ to: BILLING, subject: `C.H. Robinson Order #${id}`, total: "$1,000.00" }), button_send_json: JSON.stringify(record) });
 		w.sent.push("<lost@example.com>");
 		await w.restart();
@@ -2101,12 +2162,10 @@ async function main() {
 		const id = newId();
 		await w.armed(id);
 		w.seed(id, { state: "queued", button_send_json: JSON.stringify({ by: "made-up-admin", from: { state: "baseline", code: "" } }), next_attempt_at: iso(w.now) });
-		const p = gate();
 		w.env = { ...w.env, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
 		// The start date stays set: only the flag says no.
 		const sweep = jobLib.create(w.deps({ env: { ...w.env, CHR_SEND_BUTTON_FROM: FROM } }));
 		await sweep.work();
-		p.open();
 		eq([w.st(id), w.smtp.length, w.appends.length, w.calls.prepare, w.calls.look.length, w.actions("auto_invoice_button_back").map((a) => a.details.split(":")[0])],
 			[["baseline", ""], 0, 0, 0, 0, ["BUTTON_OFF"]], "§10 work() on a press with the button off: back, default-deny, nothing read or paid for");
 	}
@@ -2413,7 +2472,7 @@ async function throughTheBlocks() {
 	const COLS = ["Load ID", "Job Status", "Email", "Broker Contact Name", "Driver", "Driver Phone", "Trailer Number", "Completion Date", "  Payment  "];
 	const MAIL = Object.freeze({ GMAIL_USER: "drafts@example.com", GMAIL_APP_PASSWORD: "made-up-app-password" });
 	const ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "chrobinson.com", INVOICE_MAILBOX_PASS_ENABLED: "true", ...MAIL });
-	const BUTTON = Object.freeze({ CHR_SEND_BUTTON_ENABLED: "true", CHR_SEND_BUTTON_FROM: "2026-01-01" });
+	const BUTTON = Object.freeze({ CHR_SEND_BUTTON_ENABLED: "true", CHR_SEND_BUTTON_FROM: "2000-01-01" });
 	const ADMIN = Object.freeze({ id: 1, username: "made_up_admin", role: "Super Admin" });
 	const DISPATCHER = Object.freeze({ id: 2, username: "made_up_dispatcher", role: "Dispatcher" });
 	const pdfWith = (contentStream) => {
@@ -2669,7 +2728,7 @@ async function throughTheBlocks() {
 			eq(w.audits("invoice_draft_created").length, 1, "§14 ...and invoice_draft_created");
 			eq([w.audits("auto_invoice_button_back").length, w.calls.mint], [0, 1], "§14 nothing went back, one number");
 			const status = await w.call("GET", "/api/auto-invoice/status", ADMIN);
-			eq(status.json.button, { on: true, from: "2026-01-01" }, "§14 the status route reads it back");
+			eq(status.json.button, { on: true, from: "2000-01-01" }, "§14 the status route reads it back");
 		}
 		{
 			// A failed live search in the run, through the block's own note on the saved row.
