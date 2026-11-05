@@ -1,5 +1,5 @@
 <template>
-  <header class="app-header">
+  <header ref="headerEl" class="app-header">
     <div class="app-header-left">
       <img src="/logo.png" alt="LogisX" class="header-logo" />
       <span class="driver-name-label">{{ driverName }}</span>
@@ -8,20 +8,26 @@
         class="status-chip warn"
         title="Real-time connection lost — trying to reconnect"
       >&#9888; Offline</span>
-      <!-- Fuel range, on every driver screen.
-           The client's ask after the 2026-08-17 run-dry was that range be
-           "displayed throughout even when they park even when they're idling".
-           The detailed panel lives behind a tap inside one load's detail screen,
-           and a driver who runs dry is by definition one who never opened it —
-           so the number has to sit somewhere they cannot miss. This is that
-           somewhere. It is driver-scoped server-side (no params), so it costs
-           one indexed read and cannot leak another truck's state. -->
+    </div>
+    <!-- Fuel range, on every driver screen.
+         The client's ask after the 2026-08-17 run-dry was that range be
+         "displayed throughout even when they park even when they're idling".
+         The detailed panel lives behind a tap inside one load's detail screen,
+         and a driver who runs dry is by definition one who never opened it —
+         so the number has to sit somewhere they cannot miss. This is that
+         somewhere. It is driver-scoped server-side (no params), so it costs
+         one indexed read and cannot leak another truck's state.
+         A hidden stand-in with the chip's own box holds the row until the first
+         answer, so a phone's page doesn't move under the driver's thumb when the
+         sentence arrives. -->
+    <div v-if="auth.isDriver" class="fuel-row">
       <span
         v-if="fuelChip"
         class="status-chip fuel-chip"
         :class="fuelChip.tone"
         :title="fuelChip.title"
       >&#9981; {{ fuelChip.text }}</span>
+      <span v-else class="status-chip fuel-held">&#9981;</span>
     </div>
     <div class="app-header-right">
       <button class="header-btn" title="Change password" @click="showPwModal = true">Password</button>
@@ -36,7 +42,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import ChangePasswordModal from './ChangePasswordModal.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
-import { driverFuelOf, driverFuelChip } from '../../lib/driverFuelView'
+import { driverFuelOf, driverFuelChip, fuelRangeText, FUEL_RANGE_NOT_AVAILABLE } from '../../lib/driverFuelView'
 
 defineProps({
   driverName: { type: String, default: '' },
@@ -47,6 +53,28 @@ defineProps({
 defineEmits(['logout'])
 
 const showPwModal = ref(false)
+
+/* ── the header's height, for the page below it ───────────────────────────
+   The header is fixed, so the page can't make room for it by itself, and its
+   height moves with the screen width and the driver's name. DriverView starts
+   the page at this height. */
+const HEIGHT_VAR = '--driver-header-height'
+const headerEl = ref(null)
+let stopWatchingHeight = null
+
+function watchHeaderHeight() {
+  const el = headerEl.value
+  if (!el) return
+  const root = document.documentElement
+  const write = () => root.style.setProperty(HEIGHT_VAR, `${el.offsetHeight}px`)
+  write()
+  const watcher = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(write)
+  if (watcher) watcher.observe(el)
+  stopWatchingHeight = () => {
+    if (watcher) watcher.disconnect()
+    root.style.removeProperty(HEIGHT_VAR)
+  }
+}
 
 /* ── persistent fuel range ────────────────────────────────────────────────
    A Driver session resolves its own truck server-side, so this sends NO
@@ -70,11 +98,15 @@ async function loadRange() {
   }
 }
 onMounted(() => {
+  watchHeaderHeight()
   if (!auth.isDriver) return
   loadRange()
   timer = setInterval(loadRange, 120000)
 })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+onBeforeUnmount(() => {
+  if (timer) clearInterval(timer)
+  if (stopWatchingHeight) stopWatchingHeight()
+})
 
 const fuelChip = computed(() => {
   const r = range.value
@@ -93,7 +125,7 @@ const fuelChip = computed(() => {
     const known = r.fuelAnchorPct != null ? ` Last known ${Math.round(r.fuelAnchorPct)}%.` : ''
     return {
       tone: 'warn',
-      text: 'Fuel ?',
+      text: FUEL_RANGE_NOT_AVAILABLE,
       title: `No usable fuel reading from this truck's ELD.${known} Check the gauge before you set off.`,
     }
   }
@@ -121,7 +153,7 @@ const fuelChip = computed(() => {
     return {
       tone: usable === 0 ? 'bad' : tone,
       // 0 usable miles is an instruction, not a measurement.
-      text: usable === 0 ? 'Refuel now' : `${usable} mi`,
+      text: usable === 0 ? 'Refuel now' : fuelRangeText(usable),
       title: `About ${usable} miles before you need to refuel${pct}`
         + `. That is ${dry} miles until empty, minus a ${reserve} mile reserve.`
         + ' This is the low end of the range, not the best case.' + carried,
@@ -129,7 +161,7 @@ const fuelChip = computed(() => {
   }
   return {
     tone,
-    text: `${dry} mi`,
+    text: fuelRangeText(dry),
     title: `About ${dry} miles of fuel to plan on${pct}`
       + '. This is the low end of the range, not the best case.' + carried,
   }
@@ -149,15 +181,29 @@ const fuelChip = computed(() => {
   border-bottom: 1px solid var(--border);
   padding: 0.75rem max(1rem, env(safe-area-inset-right, 0px)) 0.75rem max(1rem, env(safe-area-inset-left, 0px));
   padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.5rem;
   align-items: center;
-  justify-content: space-between;
 }
 
 .app-header-left {
+  grid-row: 1;
+  grid-column: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+/* The fuel sentence has no room beside the name and the buttons on a phone, so it
+   takes its own row there. From the tablet width up, it sits after the name. */
+.fuel-row {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .header-logo {
@@ -169,6 +215,12 @@ const fuelChip = computed(() => {
   font-size: 0.85rem;
   color: var(--text-dim);
   font-weight: 500;
+  /* One line, whatever the length: Offline comes and goes beside the name, and a name
+     that wrapped would regrow the header and move the page under the driver's thumb. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-chip {
@@ -186,8 +238,20 @@ const fuelChip = computed(() => {
 /* Fuel range chip. `ok` is deliberately neutral grey rather than green: this is
    a figure the driver reads, not an all-clear. Only the states that need acting
    on carry colour. */
+.status-chip.fuel-chip,
+.status-chip.fuel-held {
+  font-size: 0.75rem;
+}
 .status-chip.fuel-chip {
   font-variant-numeric: tabular-nums;
+  /* On the narrowest screens the sentence wraps inside the chip instead of running off it. */
+  white-space: normal;
+}
+/* Same font, padding and border width as the chip, so the row is the same height
+   with or without it. Every chip colour has a 1px border. */
+.status-chip.fuel-held {
+  visibility: hidden;
+  border: 1px solid transparent;
 }
 .status-chip.fuel-chip.ok {
   background: #f1f5f9;
@@ -201,9 +265,24 @@ const fuelChip = computed(() => {
 }
 
 .app-header-right {
+  grid-row: 1;
+  grid-column: 2;
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+@media (min-width: 768px) {
+  .app-header {
+    grid-template-columns: auto minmax(max-content, 1fr) auto;
+  }
+  .fuel-row {
+    grid-row: 1;
+    grid-column: 2;
+  }
+  .app-header-right {
+    grid-column: 3;
+  }
 }
 
 .header-btn {
