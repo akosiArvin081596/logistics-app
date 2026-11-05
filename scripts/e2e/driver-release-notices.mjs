@@ -31,8 +31,9 @@
 //   L   a server that keeps saying "due" after he signs back in: one sign-out, no loop
 //   C   two tabs hold each other: neither signs out; with one left the other does; a logout he asks for
 //       in one tab still takes the other along; a browser that can't keep a tab's record holds; so does
-//       a tab frozen by the browser, and a tab that died without saying so (its record planted), for
-//       up to a day; a record over a day old doesn't, and is tidied away
+//       a tab really frozen by the browser (shown by its `freeze` event and its stopped timer; where the
+//       browser won't freeze one, C5 says so and proves only a silent tab), and a tab that died without
+//       saying so (its record planted), for up to a day; a record over a day old doesn't, and is tidied away
 //   H   a shared phone: the next driver signs in, reads his own answer, and the login line is gone
 //   O   a first-time driver: the offer, Skip for now, no nagging; Take the tour walks every tab; the
 //       tour marks no message or alert read and writes only its own marks; the Kit's button runs it
@@ -235,6 +236,10 @@ async function shot(page, name) {
 async function newContext(browser, size, state, writes) {
   const phone = size.viewport.width < 640
   const ctx = await browser.newContext({ viewport: size.viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
+  await answerRequests(ctx, state, writes)
+  return ctx
+}
+async function answerRequests(ctx, state, writes) {
   await ctx.route('**/*', async (route) => {
     const req = route.request()
     const u = new URL(req.url())
@@ -277,7 +282,6 @@ async function newContext(browser, size, state, writes) {
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) })
   })
-  return ctx
 }
 function holdOpen() {
   let release
@@ -867,6 +871,119 @@ async function openTabs(ctx, size, count) {
   return pages
 }
 
+// A tab stopped from running anything, and tab A's next moment: what C5 and C6 share. `stop` and `go` act
+// on the stopped tab's DevTools session. What the step may claim comes from that page, afterwards: whether
+// `freeze` fired there, and how long its own timer stood still against how long it was meant to.
+async function momentBesideStillTab(ctx, size, state, stop, go) {
+  await ctx.addInitScript(() => {
+    let last = Date.now()
+    let longest = 0
+    setInterval(() => {
+      longest = Math.max(longest, Date.now() - last)
+      last = Date.now()
+    }, 50)
+    window.__madeUpStartWatching = () => { last = Date.now(); longest = 0 }
+    window.__madeUpLongestStill = () => Math.max(longest, Date.now() - last)
+    document.addEventListener('freeze', () => { window.__madeUpFroze = true })
+  })
+  const [a, b] = await openTabs(ctx, size, 2)
+  await momentPassed(state, 0, 2)
+  await a.bringToFront()
+  const session = await ctx.newCDPSession(b)
+  await b.evaluate(() => window.__madeUpStartWatching())
+  await stop(session)
+  const stoppedAt = Date.now()
+  state.due = true
+  const before = state.calls.release
+  await comeBackToApp(a)
+  await momentPassed(state, before)
+  // Long enough that a running page's timer, even one held to a tick a second, can't pass for a still one.
+  await new Promise((r) => setTimeout(r, 1500))
+  const meantMs = Date.now() - stoppedAt
+  const held = state.calls.logout
+  const onApp = !onLogin(a)
+  const aVisible = await a.evaluate(() => document.visibilityState === 'visible')
+  await go(session)
+  // A page that won't wake must not hang the run: it counts as a step that couldn't be done.
+  const { froze, stillMs } = await Promise.race([
+    b.evaluate(() => ({ froze: window.__madeUpFroze === true, stillMs: window.__madeUpLongestStill() })),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('the stopped tab did not wake in 15 s')), 15000)),
+  ])
+  return { a, b, held, onApp, aVisible, froze, stillMs, meantMs, ranNothing: stillMs >= meantMs - 250 }
+}
+const stillLine = (s) => `sign-outs ${s.held}, A at ${new URL(s.a.url()).pathname}, A visible ${s.aVisible}, froze ${s.froze}, timer still ${s.stillMs} ms of ${s.meantMs} ms`
+
+async function itLeavesThenSignOut(seen, state, t) {
+  let left = false
+  let trouble = ''
+  try {
+    await seen.b.goto('about:blank')
+    await seen.a.bringToFront()
+    await comeBackToApp(seen.a)
+    left = await until(() => state.calls.logout === 1, 12000)
+  } catch (e) {
+    trouble = `, ${String(e.message || e).split('\n')[0].slice(0, 160)}`
+  }
+  record(`C6-${t}`, 'Once that tab has left, the next moment signs them out, so the hold was its record', 'one sign-out', `sign-outs ${state.calls.logout}${trouble}`, left)
+}
+
+// Playwright keeps every page it opens reading as visible (focus emulation), and a page that reads as
+// visible may not freeze. `noDefaults` turns that off, but only for a browser's default context over its
+// DevTools port, so this step has a browser of its own.
+async function freezeAttempt(size, state) {
+  const probe = net.createServer()
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, HOST, resolve) })
+  const port = probe.address().port
+  await new Promise((resolve) => probe.close(resolve))
+  const host = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED, args: [`--remote-debugging-port=${port}`] })
+  let connected = null
+  try {
+    connected = await chromium.connectOverCDP(`http://${HOST}:${port}`, { noDefaults: true, isLocal: true, timeout: 15000 })
+    const ctx = connected.contexts()[0]
+    await answerRequests(ctx, state, [])
+    const seen = await momentBesideStillTab(ctx, size, state,
+      (session) => session.send('Page.setWebLifecycleState', { state: 'frozen' }),
+      (session) => session.send('Page.setWebLifecycleState', { state: 'active' }))
+    if (seen.froze && seen.ranNothing && seen.aVisible) {
+      record(`C5-${size.tag}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; `freeze` fired there and its own timer stood still',
+        stillLine(seen), seen.held === 0 && seen.onApp)
+      await itLeavesThenSignOut(seen, state, size.tag)
+      return ''
+    }
+    return stillLine(seen)
+  } finally {
+    await connected?.close().catch(() => {})
+    await host.close().catch(() => {})
+  }
+}
+
+// A frozen page runs nothing, so nothing it could answer would ever arrive. Where this browser won't freeze
+// one, the step says so and proves only what's left: a tab that runs nothing. No `froze false` passes C5
+// under the frozen title.
+async function stillTabRun(browser, size) {
+  const t = size.tag
+  let notFrozen
+  try {
+    notFrozen = await freezeAttempt(size, freshState({ status: 'Delivered' }))
+  } catch (e) {
+    notFrozen = String(e.message || e).split('\n')[0].slice(0, 200)
+  }
+  if (!notFrozen) return
+  console.log(`driver-release-notices: this browser did not freeze the page (${notFrozen}): C5 proves a silent tab, not a frozen one`)
+  const silent = freshState({ status: 'Delivered' })
+  const ctx = await newContext(browser, size, silent, [])
+  try {
+    const seen = await momentBesideStillTab(ctx, size, silent,
+      (session) => session.send('Emulation.setScriptExecutionDisabled', { value: true }),
+      (session) => session.send('Emulation.setScriptExecutionDisabled', { value: false }))
+    record(`C5-${t}`, `A silent tab holds the sign-out, with no answer from it. NOT a frozen tab: this browser did not freeze one (${notFrozen})`, 'no sign-out; in the app; its own timer stood still',
+      stillLine(seen), seen.held === 0 && seen.onApp && seen.aVisible && seen.ranNothing)
+    await itLeavesThenSignOut(seen, silent, t)
+  } finally {
+    await ctx.close()
+  }
+}
+
 async function twoTabsRun(browser, size) {
   const t = size.tag
   const state = freshState({ status: 'Delivered' })
@@ -934,34 +1051,7 @@ async function twoTabsRun(browser, size) {
     await ctx3.close()
   }
 
-  // A page the browser has frozen runs nothing, so nothing it could answer would ever arrive.
-  const frozen = freshState({ status: 'Delivered' })
-  const ctx4 = await newContext(browser, size, frozen, [])
-  try {
-    await ctx4.addInitScript(() => { document.addEventListener('freeze', () => { window.__madeUpFroze = true }) })
-    const [a, b] = await openTabs(ctx4, size, 2)
-    await momentPassed(frozen, 0, 2)
-    const lifecycle = await ctx4.newCDPSession(b)
-    await lifecycle.send('Page.setWebLifecycleState', { state: 'frozen' })
-    frozen.due = true
-    const before = frozen.calls.release
-    await a.bringToFront()
-    await comeBackToApp(a)
-    await momentPassed(frozen, before)
-    const held = frozen.calls.logout
-    const onApp = !onLogin(a)
-    await lifecycle.send('Page.setWebLifecycleState', { state: 'active' })
-    const froze = await b.evaluate(() => window.__madeUpFroze === true)
-    record(`C5-${t}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; the tab did freeze',
-      `sign-outs ${held}, A at ${new URL(a.url()).pathname}, froze ${froze}`, held === 0 && onApp && froze)
-    await b.goto('about:blank')
-    await a.bringToFront()
-    await comeBackToApp(a)
-    const left = await until(() => frozen.calls.logout === 1, 12000)
-    record(`C6-${t}`, 'Once that tab has left, the next moment signs them out, so the hold was its record', 'one sign-out', `sign-outs ${frozen.calls.logout}`, left)
-  } finally {
-    await ctx4.close()
-  }
+  await stillTabRun(browser, size)
 
   const dead = freshState({ due: true, status: 'Delivered' })
   const ctx5 = await newContext(browser, size, dead, [])
