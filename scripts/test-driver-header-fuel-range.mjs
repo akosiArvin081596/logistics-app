@@ -580,6 +580,13 @@ if (Header) {
       }
       ok(`§9 …every pair, in the active load's order${wrong.length ? `: ${wrong.join('; ')}` : ''}`, wrong.length === 0)
     }
+    {
+      // The order itself, Assigned last, since the active load reads it for queued loads too.
+      const { statusPriorityScore: score } = await import(pathToFileURL(path.join(CLIENT_DIR, 'src', 'lib', 'loadProgress.js')).href).catch(() => ({}))
+      const scores = score ? [...ORDER, 'Assigned', 'Something else'].map((s) => score(s)) : []
+      ok('§9 the order in one list: each status ranks after the one before, Assigned and an unknown status last',
+        scores.length === 8 && scores.every((n, i) => i === 0 || n > scores[i - 1]) && score(' in transit ') === scores[0] && score(undefined) === scores[7])
+    }
     ok('§9 the same status twice: the newer row, only as a tie-break',
       opened([qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'In Transit')]) === 'QA-9')
     ok('§9 the sort leaves the store\'s own list as it was', (() => {
