@@ -356,7 +356,15 @@ function makeWorld() {
 		});
 		// `afterPress`: what changes in the moment after the press commits, before its run.
 		const pressNow = job.button.press;
-		const wrapped = { ...job.button, press: (args) => {
+		const refreshNow = job.button.refresh;
+		const wrapped = { ...job.button, refresh: (load) => {
+			if (w.beforeRefresh) {
+				const f = w.beforeRefresh;
+				w.beforeRefresh = null;
+				f();
+			}
+			return refreshNow(load);
+		}, press: (args) => {
 			if (w.beforePress) {
 				const f = w.beforePress;
 				w.beforePress = null;
@@ -429,6 +437,8 @@ function makeWorld() {
 	};
 	w.open = () => w.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
 	w.draftRows = (id) => w.db.prepare("SELECT invoice_id, via FROM load_invoice_drafts WHERE LOWER(TRIM(load_id)) IN (?, ?) ORDER BY id").all(rules.loadKey(id), `#${rules.loadKey(id)}`);
+	// Every row of every table, to show a step wrote nothing.
+	w.dump = () => JSON.stringify(w.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((t) => [t.name, w.db.prepare(`SELECT * FROM ${t.name}`).all()]));
 	w.actions = (action) => w.audits.filter((a) => a.action === action);
 	w.seed = (id, fields) => {
 		ledger.ensureSchema(w.db);
@@ -533,7 +543,7 @@ async function backCase(label, { code, setup = null, afterPress = null, origin =
 // Each §7 and §8 path, by what a person would see.
 async function main() {
 	section("§1  the flag");
-	ok(sendButton, "§1 FAILS ON THE OLD CODE: lib/chr-send-button.js exists");
+	ok(sendButton, "§1 FAILS ON THE OLD CODE: lib/invoice-send-button.js exists");
 	if (!sendButton) return;
 	for (const [enabled, from, replica, want, label] of [
 		[undefined, FROM, false, false, "the flag unset"],
@@ -575,6 +585,7 @@ async function main() {
 		w.ready(id);
 		await w.paidOk(id);
 		const before = JSON.stringify(w.calls);
+		const dumpBefore = w.dump();
 		const tables = () => w.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name);
 		const had = tables();
 		for (const user of [SA, { id: 2, username: "made-up-dispatcher", role: "Dispatcher" }, null]) {
@@ -585,8 +596,9 @@ async function main() {
 		}
 		eq(w.limited, 0, "§1 flag off: nothing reaches the rate limiter");
 		eq([w.claim(id), JSON.stringify(w.calls) === before, w.audits.length, w.smtp.length, w.appends.length], [null, true, 0, 0, 0], "§1 flag off: no claim, no read, no search, no paid call, no audit row, no mail");
+		const readsBefore = w.calls.reads;
 		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 0 }, "§1 flag off: the paid check does nothing");
-		eq([w.calls.prepare, tables()], [0, had], "§1 ...no paid call, and no table made");
+		eq([w.calls.prepare, w.calls.reads - readsBefore, tables(), w.dump() === dumpBefore], [0, 0, had, true], "§1 ...no paid call, not even a read of the sheet, no table made, and no row of any table changed");
 		ok(!w.btn.on, "§1 ...and the store says off");
 		eq(w.job.status().button, undefined, "§1 ...and the job's status doesn't mention it");
 	}
@@ -912,6 +924,44 @@ async function main() {
 			x.ready(a);
 			await noButton(x, a, "NO_DELIVERY_DATE", line("NO_DELIVERY_DATE"), "a date reader that throws: no date");
 		}
+		// The load's own conditions on their own, as the run asks them too: each one alone says no.
+		{
+			const good = {
+				facts: { onSheet: true, completed: true, live: true, hasDeliveryDate: true, brokerDomain: "chrobinson.com", brokerDomainConfirmed: true, optedOut: false, loadId: "#900000001", factored: false, pods: 1, podsUnreadable: 0, activeAdvanceLines: 0, paymentCents: 100000, closedMonths: [] },
+				fromDay: FROM, deliveredDay: "2026-10-20", emailBlank: false, sendDomains: ["chrobinson.com"], podTimes: ["2026-10-20T13:00:00Z"], nowMs: T0,
+			};
+			eq(sendButton.loadRefusal(good), null, "§3 loadRefusal: a load with nothing against it");
+			const withFacts = (over) => ({ ...good, facts: { ...good.facts, ...over } });
+			for (const [label, load, code] of [
+				["nothing known", {}, "NOT_DELIVERED"],
+				["off the sheet", withFacts({ onSheet: false }), "NOT_DELIVERED"],
+				["not completed", withFacts({ completed: false }), "NOT_DELIVERED"],
+				["not live", withFacts({ live: false }), "NOT_DELIVERED"],
+				["no day", { ...good, deliveredDay: "" }, "NO_DELIVERY_DATE"],
+				["no delivery cell", withFacts({ hasDeliveryDate: false }), "NO_DELIVERY_DATE"],
+				["no start date", { ...good, fromDay: "" }, "BEFORE_START_DATE"],
+				["before it", { ...good, deliveredDay: "2026-09-30" }, "BEFORE_START_DATE"],
+				["a blank Email", { ...good, emailBlank: true }, "EMAIL_BLANK"],
+				["another domain", withFacts({ brokerDomain: "example-broker.test" }), "NOT_CHR_EMAIL"],
+				["a subdomain", withFacts({ brokerDomain: "loads.chrobinson.com" }), "NOT_CHR_EMAIL"],
+				["unconfirmed", withFacts({ brokerDomainConfirmed: false }), "CHR_NOT_CONFIRMED"],
+				["not listed", { ...good, sendDomains: ["example-broker.test"] }, "CHR_NOT_LISTED"],
+				["opted out", withFacts({ optedOut: true }), "CHR_OPTED_OUT"],
+				["the wrong shape", withFacts({ loadId: "LD-TEST-0001" }), "LOAD_ID_SHAPE"],
+				["factored", withFacts({ factored: true }), "FACTORED"],
+				["no POD", withFacts({ pods: 0 }), "NO_POD"],
+				["a POD unreadable", withFacts({ podsUnreadable: 1 }), "POD_UNREADABLE"],
+				["no POD time", { ...good, podTimes: [] }, "POD_TIME_UNKNOWN"],
+				["a POD time ahead", { ...good, podTimes: ["2026-10-20T14:01:00Z"] }, "POD_TIME_UNKNOWN"],
+				["advance lines", withFacts({ activeAdvanceLines: 1 }), "ADVANCE_LINES"],
+				["Payment not plain", withFacts({ paymentCents: null }), "PAYMENT_NOT_PLAIN"],
+				["Payment negative", withFacts({ paymentCents: -100 }), "PAYMENT_NOT_PLAIN"],
+				["a month unknown", withFacts({ closedMonths: null }), "MONTH_UNKNOWN"],
+				["a month closed", withFacts({ closedMonths: ["2026-09"] }), "CLOSED_MONTH"],
+			]) {
+				eq(sendButton.loadRefusal(load), code, `§3 loadRefusal: ${label}`);
+			}
+		}
 		// The answers around the conditions.
 		{
 			const x = makeWorld();
@@ -934,8 +984,10 @@ async function main() {
 		const id = newId();
 		await w.armed(id);
 		const invalidatedBefore = w.invalidated;
+		const dumpBefore = w.dump();
 		const p = await w.preview(id);
 		eq(p.status, 200, "§4 FAILS ON THE OLD CODE: the preview answers");
+		ok(w.dump() === dumpBefore, "§4 no table's row changed (the real search's own answer may refresh the saved row, and nothing else may)");
 		eq({ ...p.body, token: typeof p.body.token }, {
 			ok: true,
 			token: "string",
@@ -1127,6 +1179,17 @@ async function main() {
 		w.readFails = true;
 		const r = await w.press(id, p.body.token);
 		eq([r.status, r.body.code, w.claim(id)], [503, "SHEET_UNAVAILABLE", null], "§5 the sheet down at the press: nothing moves");
+	}
+	{
+		// After the press's last wait, the rows are read once more, with nothing awaited before the write.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		w.beforeRefresh = () => w.handDraft(id);
+		const r = await w.press(id, p.body.token);
+		eq([r.status, r.body.code, w.claim(id), w.actions("auto_invoice_button_press").length], [409, "NOT_NONE_FOUND", null, 0], "§5 a hand draft in the last moment before the press: refused, nothing moves");
 	}
 
 	section("§6  the run");
@@ -1363,6 +1426,18 @@ async function main() {
 		const p = await w.preview(id);
 		eq([p.status, w.calls.prepare, w.calls.mint, w.smtp.length], [409, 2, 1, 1], "§8 ...a preview stops there too, with no paid call of its own");
 		eq(ledger.returnToOrigin(w.db, rules.loadKey(id), { from: ["needs_attention", "working", "queued"], state: "baseline", nowIso: iso(w.now) }), 0, "§8 ...and the ledger itself refuses to put it back");
+	}
+	{
+		// A person closes a maybe-sent press with a re-issue: closed, and no word that nothing went.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		w.smtpBehaviors = ["LOST"];
+		await w.send(id, "§8 the lost answer");
+		w.handDraft(id);
+		await w.job.checkClaims(rules.loadKey(id));
+		eq([w.st(id), w.smtp.length, w.notices.filter((n) => /sent nothing/.test(n.body)).length], [["skipped", "DRAFTED_BY_HAND"], 1, 0], "§8 a person's draft closes a MAYBE_SENT press, and no notice says nothing went");
 	}
 	{
 		const w = makeWorld();
@@ -1721,6 +1796,38 @@ async function main() {
 		}
 	}
 	{
+		// R-M4, its exact shape: the abandoned attempt wakes while the second press's run is mid-way.
+		// Under one owner name the two would each commit a send.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		const first = gate();
+		const second = gate();
+		let renders = 0;
+		w.renderHook = () => {
+			renders++;
+			return renders === 1 ? first.p : renders === 3 ? second.p : null;
+		};
+		await w.press(id, p.body.token);
+		await until(() => renders === 1, "§9 R-M4: the first run is in its render");
+		ok(w.passRunLimit(), "§9 R-M4: past its limit");
+		await until(() => w.open() === 0, "§9 R-M4: the claim closes");
+		eq(w.st(id), ["baseline", ""], "§9 R-M4: back");
+		const again = await w.preview(id);
+		eq(again.status, 200, "§9 R-M4: a second preview");
+		await w.press(id, again.body.token);
+		await until(() => renders === 3, "§9 R-M4: the second run is in its render");
+		first.open();
+		for (let i = 0; i < 30; i++) await turn();
+		eq(w.smtp.length, 0, "§9 R-M4: the abandoned attempt wakes: its writes name a dead owner, and nothing goes");
+		second.open();
+		await until(() => w.open() === 0, "§9 R-M4: the second run ends");
+		for (let i = 0; i < 30; i++) await turn();
+		eq([w.smtp.length, w.st(id), w.appends.length], [1, ["drafted", ""], 0], "§9 FAILS ON THE OLD DESIGN (R-M4): an abandoned attempt, a second press, both awake: one SMTP call");
+	}
+	{
 		// Two processes on one claim: the lease lets one through.
 		const w = makeWorld();
 		await w.boot();
@@ -1911,6 +2018,83 @@ async function main() {
 		eq(w.smtp.length - smtpBefore, 0, "§10 ...and a later tick sends none of them");
 	}
 	{
+		// The sweep's own verdict can't reach a queued press first: that would land it in Needs attention.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		await w.press(id, p.body.token);
+		w.closed = () => ["2026-10"];
+		w.env = { ...w.env, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
+		const sweep = jobLib.create(w.deps({ env: { ...w.env } }));
+		await sweep.tick();
+		eq([w.st(id), w.claim(id).button_send_json, w.smtp.length, w.appends.length], [["baseline", ""], "", 0, 0], "§10 a queued press whose month has closed, at the sweep's first tick: back, not Needs attention");
+	}
+	{
+		// A press left working with a Message-ID, under the sweep: Sent Mail decides, and it's never rebuilt.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const record = JSON.stringify({ by: "made-up-admin", from: { state: "baseline", code: "" } });
+		w.seed(id, { state: "working", stage: "rendered", invoice_id: "10202026-6", invoice_date: "2026-10-20", message_id: "<kept-2@example.com>", lease_owner: "gone", lease_until: iso(w.now - MIN), sent_json: JSON.stringify({ to: BILLING, subject: `C.H. Robinson Order #${id}`, total: "$1,000.00" }), button_send_json: record });
+		w.sent.push("<kept-2@example.com>");
+		w.env = { ...w.env, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
+		const sweep = jobLib.create(w.deps({ env: { ...w.env } }));
+		await sweep.recover();
+		const c = w.claim(id);
+		eq([c.state, c.delivery, c.stage, w.smtp.length, w.actions("auto_invoice_button_back").length], ["drafted", "send", "recorded", 0, 0], "§10 under the sweep too: a press whose message is in Sent Mail is recorded, not sent back");
+	}
+	{
+		// The sheet down at a press's run, under the sweep: back, never queued for a later try.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		w.seed(id, { state: "queued", next_attempt_at: iso(w.now), button_send_json: JSON.stringify({ by: "made-up-admin", from: { state: "baseline", code: "" } }) });
+		w.env = { ...w.env, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
+		const sweep = jobLib.create(w.deps({ env: { ...w.env } }));
+		w.readFails = true;
+		await sweep.work();
+		w.readFails = false;
+		eq([w.st(id), w.smtp.length, w.appends.length], [["baseline", ""], 0, 0], "§10 a temporary failure under the sweep: back, not a retry");
+	}
+	{
+		// A run that ends with its press queued for later: no timer would come back to it.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		w.afterPress = () => {
+			w.prepareHook = async () => {
+				w.db.prepare("UPDATE auto_invoice_claims SET state = 'queued', next_attempt_at = ?, lease_owner = '' WHERE load_key = ?").run(iso(w.now + HOUR), rules.loadKey(id));
+				return null;
+			};
+		};
+		await w.press(id, p.body.token);
+		await until(() => w.open() === 0, "§10 the run's end closes it");
+		eq([w.st(id), w.smtp.length, w.appends.length], [["baseline", ""], 0, 0], "§10 R-M3: a press left queued at a run's end: back, not Needs attention");
+	}
+	{
+		// The rule on its own.
+		const at = (fields) => ({ updated_at: iso(T0), stage: "", delivery: "", ...fields });
+		const plan = (c, opts = {}) => sendButton.startUpAction(c, { on: true, first: false, nowMs: T0, ...opts });
+		eq(plan(at({ state: "queued" })), { action: "queue" }, "§10 startUpAction: a fresh press: it runs");
+		eq(plan(at({ state: "queued" }), { on: false }), { action: "back", code: "BUTTON_OFF" }, "§10 startUpAction: the flag off: back");
+		eq(plan(at({ state: "queued" }), { first: true }), { action: "back", code: "BUTTON_TOO_OLD" }, "§10 startUpAction: the trigger's first start: back");
+		eq(plan(at({ state: "queued" }), { nowMs: T0 + HOUR }), { action: "queue" }, "§10 startUpAction: an hour old: it runs");
+		eq(plan(at({ state: "queued" }), { nowMs: T0 + HOUR + 1 }), { action: "back", code: "BUTTON_TOO_OLD" }, "§10 startUpAction: over an hour: back");
+		eq(plan({ state: "queued", stage: "", delivery: "", updated_at: "not a time" }), { action: "back", code: "BUTTON_TOO_OLD" }, "§10 startUpAction: a time it can't read: back");
+		eq(plan(at({ state: "waiting" })), { action: "back", code: "BUTTON_TOO_OLD" }, "§10 startUpAction: a press left waiting: back");
+		for (const opts of [{ on: false }, { first: true }, { nowMs: T0 + 2 * HOUR }, {}]) {
+			eq(plan(at({ state: "working" }), opts), { action: "recover" }, `§10 startUpAction: working (${JSON.stringify(opts)}): recovered, which looks in Sent Mail, then back`);
+			eq(plan(at({ state: "queued", delivery: "send", stage: "appending" }), opts), { action: "recover" }, `§10 startUpAction: SEND_UNCONFIRMED (${JSON.stringify(opts)}): only searched`);
+			eq(plan(at({ state: "queued", stage: "appended", delivery: "send" }), opts), { action: "recover" }, `§10 startUpAction: past the send (${JSON.stringify(opts)}): only recorded`);
+		}
+	}
+	{
 		// A press that reaches attempt() in a process with the button off, by any way: back.
 		const w = makeWorld();
 		await w.boot();
@@ -1919,10 +2103,12 @@ async function main() {
 		w.seed(id, { state: "queued", button_send_json: JSON.stringify({ by: "made-up-admin", from: { state: "baseline", code: "" } }), next_attempt_at: iso(w.now) });
 		const p = gate();
 		w.env = { ...w.env, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
-		const sweep = jobLib.create(w.deps({ env: { ...w.env } }));
+		// The start date stays set: only the flag says no.
+		const sweep = jobLib.create(w.deps({ env: { ...w.env, CHR_SEND_BUTTON_FROM: FROM } }));
 		await sweep.work();
 		p.open();
-		eq([w.st(id), w.smtp.length, w.appends.length, w.calls.prepare], [["baseline", ""], 0, 0, 0], "§10 work() on a press with the button off: back, default-deny, no paid call");
+		eq([w.st(id), w.smtp.length, w.appends.length, w.calls.prepare, w.calls.look.length, w.actions("auto_invoice_button_back").map((a) => a.details.split(":")[0])],
+			[["baseline", ""], 0, 0, 0, 0, ["BUTTON_OFF"]], "§10 work() on a press with the button off: back, default-deny, nothing read or paid for");
 	}
 
 	section("§11 Try again on a press");
@@ -2173,6 +2359,13 @@ async function main() {
 		await w.boot();
 		const status = w.job.status();
 		eq(status.button, { on: true, from: FROM }, "§13 the status route can read it back");
+		w.sendDomains = ["chrobinson.com", "example-broker.test"];
+		await w.restart();
+		const ok1 = w.job.button.recipientOk;
+		eq([ok1(BILLING), ok1("billing@example-broker.test"), ok1("billing@loads.chrobinson.com"), ok1("")], [true, false, false, false], "§13 only chrobinson.com, even with another domain on the send list");
+		w.sendDomains = ["example-broker.test"];
+		await w.restart();
+		eq(w.job.button.recipientOk(BILLING), false, "§13 ...and only while it's on the send list");
 	}
 
 	await throughTheBlocks();
