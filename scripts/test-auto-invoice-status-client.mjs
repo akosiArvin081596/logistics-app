@@ -408,7 +408,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
     NOT_COMPLETED: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. If this line is still here a few minutes later, draft it by hand.",
     LOAD_DROPPED: 'The load was cancelled or deleted, so no invoice is made. Nothing to do.',
     SETTINGS_UNREADABLE: 'The automatic invoice settings could not be read, so nothing is made or sent. Save both lists in Automatic drafts.',
-    NO_BROKER_EMAIL: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.',
+    NO_BROKER_EMAIL: 'Job Tracking has no broker Email for this load, and the rate con gave no address already used for C.H. Robinson. Add the Email, then Try again, or draft it by hand.',
     BROKER_EMAIL_FREEMAIL: "The broker Email on Job Tracking is a free-mail address, so it can't vouch for a billing email. Put the broker's company email on Job Tracking, then Try again, or draft it by hand.",
     MONTH_UNKNOWN: "The load's month can't be told from its dates. Check its dates, then Try again, or draft it by hand.",
     OFF_GAP: 'The load was delivered while automatic invoices were off, so it may already be invoiced. Check Gmail Sent Mail, then draft it by hand if it still needs one.',
