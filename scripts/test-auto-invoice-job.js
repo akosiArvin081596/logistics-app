@@ -915,6 +915,12 @@ async function main() {
 		const noList = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-0150" } });
 		eq([noList.status, noList.body.code, noList.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, "AUTO_INVOICE_CHANGED_AGAIN", ["payment"], "payment"], "§11 FAILS ON THE OLD CODE: no list of what was shown: 409, naming the change, nothing cleared");
 		eq((await markCheck("payment")).status, 409, "§11 FAILS ON THE OLD CODE: ...a list that isn't one reads as none");
+		eq((await markCheck({ payment: true })).status, 409, "§11 FAILS ON THE OLD CODE: ...nor does a thing that can't be listed break the route");
+		// The mark stands even once the load is back as it was: nobody has been told it can go.
+		w.setRow("LD-TEST-0150", {});
+		const reverted = await markCheck([]);
+		eq([reverted.status, reverted.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, ["payment"], "payment"], "§11 FAILS ON THE OLD CODE: the load back as it was, the mark still held: 409, naming it");
+		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00" });
 		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00", "Trailer Number": "TR-9" });
 		const unseen = await markCheck(["payment"]);
 		eq([unseen.status, unseen.body.code, unseen.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, "AUTO_INVOICE_CHANGED_AGAIN", ["payment", "trailer"], "payment"], "§11 FAILS ON THE OLD CODE: a change the job's check hasn't seen yet: 409, naming it, and the load's new state isn't taken in");

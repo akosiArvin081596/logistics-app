@@ -185,6 +185,7 @@ eq(read({ claim: CHANGED_DRAFT, saved: clean }), { status: ATTENTION, code: "DRA
 eq(read({ claim: CHANGED_DRAFT, saved: mentioned }), { status: UNKNOWN, code: "MENTIONED", invoiceId: INV, changed: MARK }, "§2 rule 7: FAILS ON THE OLD CODE: ...only a mention");
 eq(read({ claim: CHANGED_DRAFT, saved: filled }), { ...FROM_PAYMENTS, invoiceId: INV, changed: MARK }, "§2 rule 7: FAILS ON THE OLD CODE: ...on the Payments Table");
 eq("changed" in read({ claim: JOB_DRAFT }), false, "§2 rule 7: no change: no mark");
+eq("changed" in read({ claim: { ...CHANGED_DRAFT, state: "skipped" }, rows: [row({ via: "auto-imap" })] }), false, "§2 rule 7: a mark on a claim no longer drafted isn't one: nothing can clear it");
 eq(read({ claim: claim({ state: "needs_attention", reason_code: "MAILBOX_HIT" }), saved: mentioned }), { status: ATTENTION, code: "MAILBOX_HIT", mentioned: true }, "§2 rule 10: ...a hit that was only a mention stays held");
 
 for (const col of ["payments_invoice_number", "payments_payment_date", "payments_status"]) {
