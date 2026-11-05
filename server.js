@@ -55950,6 +55950,8 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 	},
 	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
 	savedInvoiceEvidence: (key) => require("./lib/invoice-evidence").savedInvoice(db, key),
+	replica: Boolean(REPLICA),
+	noteSearchFailed: (key) => require("./lib/invoice-evidence").saveFailure(db, key, { nowIso: new Date().toISOString() }),
 	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
 	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
 	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
@@ -56042,6 +56044,23 @@ const invoiceEvidence = require("./lib/invoice-evidence").create({
 console.log(`[invoice-status] status ${invoiceEvidence.statusOn ? "on" : "off"}; mailbox pass ${invoiceEvidence.passOn ? "on" : "off"}`);
 if (invoiceEvidence.passOn && startsJob("invoice mailbox pass")) invoiceEvidence.start();
 // </invoice-status-wiring>
+
+// <invoice-send-button-wiring>
+// "SEND INVOICE TO C.H. ROBINSON": a Super Admin sends one load's invoice from its dialog, through the
+// job's own line and attempt() (lib/invoice-send-button.js, lib/auto-invoice-job.js). No mail is sent here.
+//   CHR_SEND_BUTTON_ENABLED  on only when exactly "true", with CHR_SEND_BUTTON_FROM set to a day, never
+//     in a replica, and only with the driver's trigger and sending on. Off, the routes answer as if
+//     they weren't there, and nothing is read or paid for.
+// scripts/test-chr-send-button.js lifts this block.
+const invoiceSendButton = require("./lib/invoice-send-button").create({ job: autoInvoice, evidence: invoiceEvidence, db, peekInvoiceNumber, logAudit, log: console });
+invoiceSendButton.mount(app, {
+	requireRole,
+	refuseCrossSite,
+	limiter: rateLimit({ windowMs: 60 * 1000, max: 6, message: { error: "Too many requests. Try again in a minute." }, standardHeaders: true, legacyHeaders: false }),
+});
+if (invoiceSendButton.on) invoiceEvidence.afterRun(() => invoiceSendButton.runPaidChecks());
+console.log(`[invoice-send-button] ${invoiceSendButton.on ? "on" : "off"}`);
+// </invoice-send-button-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
