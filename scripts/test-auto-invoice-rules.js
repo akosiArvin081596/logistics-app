@@ -339,8 +339,9 @@ for (const text of [
 section("§11 the module stays pure");
 const MOD = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-rules.js"), "utf8");
 const requires = [...MOD.matchAll(/require\(\s*["']([^"']{1,80})["']\s*\)/g)].map((m) => m[1]).sort();
-eq(requires, ["./cell-compare", "./free-mail-domains", "./pdf-shown-text", "crypto", "path"],
-	"§11 it requires only path, crypto (SHA-256), lib/cell-compare.js, lib/free-mail-domains.js and lib/pdf-shown-text.js");
+eq(requires, ["./cell-compare", "./free-mail-domains", "./pdf-shown-text", "./ratecon-drive-index", "crypto", "path"],
+	"§11 it requires only path, crypto (SHA-256), lib/cell-compare.js, lib/free-mail-domains.js, lib/pdf-shown-text.js and lib/ratecon-drive-index.js");
+ok(!/\brequire\(|process\.env|\bfetch\(/.test(fs.readFileSync(path.join(ROOT, "lib", "ratecon-drive-index.js"), "utf8")), "§11 ...and lib/ratecon-drive-index.js requires nothing and reads no environment or network, so the rules stay pure");
 ok(!/\bfs\.|process\.env|\bfetch\(|Date\.now\(\)|new Date\(\)/.test(MOD), "§11 no files, environment, network or clock");
 const READER_FILE = path.join(ROOT, "lib", "pdf-shown-text.js");
 const READER = fs.existsSync(READER_FILE) ? fs.readFileSync(READER_FILE, "utf8") : "";

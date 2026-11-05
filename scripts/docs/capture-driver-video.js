@@ -393,7 +393,7 @@ function helpers(page, state) {
 		 *
 		 * ⚠️ Do not route these through the generic text resolver. It returns the
 		 * SHORTEST text match, and on the load page "Fuel" matches the header chip
-		 * "⛽ Fuel ?" (y=17) long before the Fuel accordion (y=887) — so the tap
+		 * "⛽ Fuel range: ..." (y=17) long before the Fuel accordion (y=887) — so the tap
 		 * landed on the chip and the panel silently stayed shut.
 		 */
 		async collapseTitle(title) {

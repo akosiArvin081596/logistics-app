@@ -259,7 +259,9 @@ watch(
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 200px);
+  /* The page starts at the header's real height, so the box gives that much back, or
+     the input bar would slide down behind the tab bar on a phone. */
+  height: calc(100vh - 148px - var(--driver-header-height, 52px));
 }
 
 .chat-header {

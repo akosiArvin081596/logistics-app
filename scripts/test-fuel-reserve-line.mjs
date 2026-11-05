@@ -408,7 +408,8 @@ if (v) {
       world({ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }).plan.verdict, 'clears')
     const chipOf = (o) => v.driverFuelChip(world(o).rangeBlock)
     check('§7 (a) the chip\'s colour is the block\'s miles left (under 50 red, under 150 amber), with its figure',
-      [chipOf({}), chipOf({ pct: 30 }), chipOf({ pct: 12 })].map((c) => [c.text, c.tone]), [['225 mi', 'ok'], ['135 mi', 'warn'], ['45 mi', 'bad']])
+      [chipOf({}), chipOf({ pct: 30 }), chipOf({ pct: 12 })].map((c) => [c.text, c.tone]),
+      [['Fuel range: 225 miles left until empty', 'ok'], ['Fuel range: 135 miles left until empty', 'warn'], ['Fuel range: 45 miles left until empty', 'bad']])
     // A row with no number under 50 mi left: the top and the badge are red like the chip.
     const LOW = Object.entries(LOW_UNCOUNTED).map(([name, o]) => [name, world(o).planBlock.milesLeft, toneOf(o), v.driverFuelBadge(world(o).plan), chipOf(o).tone])
     check('§7 (a) a row the block can\'t count under 50 mi left: the top and the badge red, like the chip; 50 mi and up amber',
@@ -465,9 +466,9 @@ if (v) {
   check('§7 every number shown is one the server sent', strayNumbers, [])
   check('§7 no sentence, chip or tooltip says minus, reserve, MPG or %', working, [])
 
-  check('§7 the chip: "225 mi", "Refuel now", "Fuel ?"',
+  check('§7 the chip: the miles in a sentence, "Refuel now", "not available"',
     [{}, { pct: 3, routeMiles: 180, leg: 'to_delivery' }, { burn: NO_BURN, tankSource: 'default', tank: 200 }].map((o) => v.driverFuelChip(world(o).rangeBlock).text),
-    ['225 mi', 'Refuel now', 'Fuel ?'])
+    ['Fuel range: 225 miles left until empty', 'Refuel now', 'Fuel range: not available'])
 
   const badge = (o) => v.driverFuelBadge(world(o).plan)
   check('§7 the load badge: add to finish -> "Add 65 gal", red', badge({}), { tone: 'bad', text: 'Add 65 gal' })

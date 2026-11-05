@@ -88,7 +88,7 @@ function routeHead(method, p) {
 }
 
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange", "getJobTrackingCached", "getSheets",
-	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice", "factoringRoutes",
+	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions", "autoInvoice", "invoiceEvidence", "factoringRoutes",
 	"appendGmailDraft", "findDraftByMessageId"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"];
 const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "normalizeDriverName"];
@@ -364,6 +364,8 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
 		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// The invoice status (scripts/test-invoice-evidence.js covers it): off here.
+		invoiceEvidence: { annotateCompletedRows: ({ rows }) => rows, exportColumns: () => null },
 		// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
 		factoringRoutes: { annotateDashboard() {} },
 		getJobTrackingCached: async () => {

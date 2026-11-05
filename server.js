@@ -47461,6 +47461,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
 		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
 		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
+		// One invoice status on each completed load (`_invoiceStatus`, codes only): a Super
+		// Admin's rows, after the job's own chip (lib/invoice-evidence.js).
+		invoiceEvidence.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
 		// Factored loads (`_factoring`) and button drafts that may be in Gmail
 		// (`_draftInflight`): a Super Admin's rows, only where a row exists or
 		// marking is on for a listed account (lib/factoring-routes.js).
@@ -50757,16 +50760,25 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			}
 		}
 
+		// A driver's own Delivered starts the load's invoice (lib/auto-invoice-job.js).
+		const invoiceStart = autoInvoiceDriverStart(req, {
+			loadId,
+			oldStatus,
+			newStatus,
+			readBack: () => readJobTrackingSnapshot(sheets, rowIndex).then((reread) => (reread ? reread.row[statusIdx] || "" : null)),
+		});
+
 		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: {
 				valueInputOption: "USER_ENTERED",
 				data: updateData,
 			},
-		});
+		}).catch(invoiceStart.writeFailed);
 
 		// Notify dispatch in real-time
 		jtCacheInvalidate();
+		invoiceStart.written();
 		emitLoadEventToDispatch("status-updated", { loadId, driverName, newStatus });
 		insertDispatchNotification.run(
 			'status-updated',
@@ -51517,9 +51529,12 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 		// it. Unparseable cells pass through raw rather than silently blanking.
 		const dateCell = (r, col) => (col ? (sheetDayKey(r[col]) || oneLine(r[col])) : "");
 
+		// With INVOICE_STATUS_ENABLED off, null, and the file is as it always was.
+		const invoiceCols = invoiceEvidence.exportColumns({ headers });
 		const out = [[
 			"Load ID", "Job Status", "Driver", "Truck", "Pickup", "Drop-off",
 			"Assigned Date", "Delivery Date", "Payment",
+			...(invoiceCols ? invoiceCols.headers : []),
 		]];
 		for (const r of matched) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim() : "";
@@ -51546,6 +51561,7 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 				// Raw sheet value ("$1,800.00"), not a reformat — the export should
 				// reconcile to the sheet the invoices are billed from.
 				cell(r, paymentCol),
+				...(invoiceCols ? invoiceCols.cells(r) : []),
 			]);
 		}
 
@@ -55896,6 +55912,12 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     the broker by SMTP instead of drafted, unless sending is stopped (the Stop route,
 //     or an automatic stop; scripts/auto-invoice-send-resume.js resumes). Nothing
 //     listed sends nothing (lib/auto-invoice-send.js).
+//   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
+//     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
+//     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
+//   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
+//     chrobinson.com goes only to an address a person has already invoiced on 3 loads
+//     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -55903,6 +55925,7 @@ const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
 const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
 const autoInvoiceImap = require("./lib/imap-draft");
 const autoInvoiceSend = require("./lib/auto-invoice-send");
+const autoInvoiceLook = require("./lib/invoice-mailbox-search");
 const autoInvoice = require("./lib/auto-invoice-job").create({
 	db,
 	env: process.env,
@@ -55929,11 +55952,37 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		io.to("super-admin").emit("dispatch-notification", notice);
 	},
 	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	savedInvoiceEvidence: (key) => require("./lib/invoice-evidence").savedInvoice(db, key),
 	shadowRenders: !REPLICA && String(process.env.AUTO_INVOICE_SHADOW_RENDERS_ENABLED ?? "").trim() === "true",
 	send: autoInvoiceSend.readSettings(process.env, { replica: Boolean(REPLICA) }),
 	sendMail: autoInvoiceSend.createSmtpSender({ nodemailer }),
+	invalidateJobTracking: () => jtCacheInvalidate(),
+	// Try again's look: read-only, and only the job's own run calls it.
+	lookInMailbox: autoInvoiceLook.searchMailboxForLoad,
+	readPaymentsTable: async () => {
+		const sheets = await getSheets();
+		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
+	},
+	rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
 	log: console,
 });
+// The status route's and the document routes' one call each into the job: nothing here
+// may fail those routes (the job logs its own failures).
+const AUTO_INVOICE_NO_START = Object.freeze({ written() {}, writeFailed(e) { throw e; } });
+function autoInvoiceDriverStart(req, args) {
+	try {
+		return autoInvoice.driverDelivered({ ...args, role: req.session && req.session.user && req.session.user.role });
+	} catch {
+		return AUTO_INVOICE_NO_START;
+	}
+}
+function autoInvoicePodChanged(loadId) {
+	try {
+		autoInvoice.podChanged(loadId);
+	} catch {
+		// the next Super Admin read checks the load
+	}
+}
 if (autoInvoice.mode !== "off") {
 	autoInvoice.mount(app, {
 		requireRole,
@@ -55943,17 +55992,60 @@ if (autoInvoice.mode !== "off") {
 }
 if (autoInvoice.sending) console.log(`[auto-invoice] sending on for ${autoInvoiceSend.readSettings(process.env).domains.length} domain(s)`);
 if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
-	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
-	let autoInvoiceTicking = false;
-	setInterval(() => {
-		if (autoInvoiceTicking) return;
-		autoInvoiceTicking = true;
-		autoInvoice.tick()
-			.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
-			.finally(() => { autoInvoiceTicking = false; });
-	}, AUTO_INVOICE_TICK_MS);
+	if (autoInvoice.triggerMode) {
+		// Before the app listens; server.listen's callback runs the rest (finishStartUp()).
+		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on, no timer");
+	} else {
+		// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
+		let autoInvoiceTicking = false;
+		setInterval(() => {
+			if (autoInvoiceTicking) return;
+			autoInvoiceTicking = true;
+			autoInvoice.tick()
+				.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
+				.finally(() => { autoInvoiceTicking = false; });
+		}, AUTO_INVOICE_TICK_MS);
+	}
 }
 // </auto-invoice-wiring>
+
+// <invoice-status-wiring>
+// ONE INVOICE STATUS ON EVERY COMPLETED LOAD, for a Super Admin only: `_invoiceStatus` on
+// /api/dashboard's completed rows and three columns in the Completed Loads CSV
+// (lib/invoice-status.js, lib/invoice-evidence.js). Nothing here sends mail or writes a sheet.
+//   INVOICE_STATUS_ENABLED  a kill switch, on unless false, 0, no or off: statuses from the
+//     app's own rows, with no Gmail. A load it holds no record of reads "Couldn't check".
+//   INVOICE_MAILBOX_PASS_ENABLED  on only when exactly "true", with the status on, never in a
+//     replica: a read-only search of the company mailbox and one read of the Payments Table,
+//     at most 20 loads every 10 minutes. Only it can say "No invoice found".
+// scripts/test-invoice-evidence.js lifts this block.
+const invoiceEvidence = require("./lib/invoice-evidence").create({
+	db,
+	env: process.env,
+	replica: Boolean(REPLICA),
+	readCompletedLoads: async () => {
+		const jt = await getJobTrackingCached();
+		const headers = jt.headers || [];
+		return { headers, rows: excludeDroppedLoads(jt.data || [], headers) };
+	},
+	readPaymentsTable: async () => {
+		const sheets = await getSheets();
+		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
+	},
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	sweepOn: () => autoInvoice.mode === "on" && !autoInvoice.triggerMode,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mailbox is read
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(AUTO_INVOICE_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: AUTO_INVOICE_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	setInterval,
+	log: console,
+});
+console.log(`[invoice-status] status ${invoiceEvidence.statusOn ? "on" : "off"}; mailbox pass ${invoiceEvidence.passOn ? "on" : "off"}`);
+if (invoiceEvidence.passOn && startsJob("invoice mailbox pass")) invoiceEvidence.start();
+// </invoice-status-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
@@ -56269,6 +56361,7 @@ app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) =>
 		);
 		notifyChange("dashboard"); // _podCount on the load card just changed
 		res.json({ success: true, id, loadId, type: doc.type || "", fileName: doc.file_name || "" });
+		if (isPod) autoInvoicePodChanged(loadId);
 	} catch (err) {
 		console.error("Document soft-delete failed:", err.message);
 		res.status(500).json({ error: "Delete failed. Please try again." });
@@ -56423,7 +56516,8 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 						{ responseType: "arraybuffer" },
 					);
 					const buffer = Buffer.from(resp.data);
-					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive" });
+					// driveFileName: the whole name, since `label` is cut for the review. The automatic job's known-address check tests it.
+					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive", driveFileName: f.name || "" });
 				} catch (e) {
 					console.error("Draft invoice: rate-con Drive file fetch failed:", e.message);
 				}
@@ -59735,6 +59829,7 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 		if (req.session.user.role === "Dispatcher" && shownLoadId(req, loadId) !== loadId) driveUrl = undefined;
 		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
+		if (docType === "POD") autoInvoicePodChanged(loadId);
 
 		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
 		// get+update adds 2–3s+ and used to block the response long enough that
@@ -62893,6 +62988,25 @@ async function syncLoadRateconMiles() {
 if (startsJob("load rate-con miles sync")) {
 	setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
 	setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
+}
+
+// Daily ELD activity (lib/eld-activity-daily.js), a kill switch, so ="true" is a no-op:
+// it moves no money and calls no provider. Off, it creates no table and starts no job.
+// Stored only, with the miles rollups' resolvers and purge boundary, staggered after them.
+const ELD_ACTIVITY_DAILY_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.ELD_ACTIVITY_DAILY_ENABLED ?? "").trim());
+const eldActivityRollup = ELD_ACTIVITY_DAILY_ENABLED
+	? require("./lib/eld-activity-daily").createEldActivityRollup({
+		db,
+		deviceResolver: () => buildEldDeviceResolver(),
+		driverResolver: (truckIds) => buildDriverAtResolver(truckIds),
+		weekStartOf: (ms) => getWeekRange(ms).weekStart,
+		driverIdFor: (name) => (findDirectoryRowForDriver(name) || { id: 0 }).id,
+		boundaryMs: ELD_STATE_MILES_BOUNDARY_MS,
+	})
+	: null;
+if (eldActivityRollup && startsJob("ELD activity daily rollup")) {
+	setTimeout(() => { eldActivityRollup.run(); }, 12 * 60 * 1000);
+	setInterval(() => { eldActivityRollup.run(); }, 6 * 60 * 60 * 1000);
 }
 
 const haulLimiter = rateLimit({
@@ -73851,6 +73965,19 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 	}
 });
 
+// Driver Performance (display only): each driver's own week, and the Super Admin's board and report.
+// Routes in lib/driver-performance-routes.js, rules in lib/driver-performance.js.
+// A kill switch: it moves no money and writes nothing, so it is on unless set to false, and off,
+// every route answers 404 FEATURE_OFF (scripts/test-driver-performance.js). The board's flag is a
+// separate one, on only when exactly "true": a driver sees no ranking until someone decides he should.
+const driverPerformance = require("./lib/driver-performance-routes").mount(app, {
+	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
+	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
+	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
+});
+
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments
 // active at each point's timestamp.
@@ -76374,6 +76501,7 @@ const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 if (!IMPORT_ONLY) server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
 	if (REPLICA) REPLICA.listening(server.address());
+	autoInvoice.finishStartUp();
 	// Tripwire for the umask set at the top of this file — the create-time half
 	// of the uploads/app.db permission fix. Re-applying returns the PREVIOUS
 	// mask, so this both re-asserts and reads back the effective value without

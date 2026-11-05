@@ -31,7 +31,7 @@
         <!-- Before Delivered: the invoice goes with the POD pages on file at the tap.
              Outside the chain below, so it shows with the upload hint too. -->
         <div v-if="nextStep && nextStep.value === 'Delivered'" class="delivered-line">
-          Upload every POD page before you tap Delivered. The invoice is made soon after you tap. If anything changes later, tell dispatch or a Super Admin right away.
+          Upload every POD page before you tap Delivered. The invoice is made right after you tap. If anything changes later, tell dispatch or a Super Admin right away.
         </div>
 
         <!-- Upload gate: require POD before allowing "Delivered" -->
