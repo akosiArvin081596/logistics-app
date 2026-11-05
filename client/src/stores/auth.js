@@ -31,6 +31,7 @@ import {
   serializeSessionHint,
   serializeSignedOutNote,
 } from '../lib/sessionCheck.js'
+import { LOGIN_NOTE_KEY } from '../lib/driverReleaseNotices.js'
 
 const api = useApi()
 
@@ -380,6 +381,9 @@ export const useAuthStore = defineStore('auth', {
       this._showUser(user)
       this.isAuthenticated = true
       this._stopReconnect()
+      // Someone is signed in here now, so the login page's line about an app update is over: left
+      // behind, it would show after a logout he asks for himself.
+      removeKey('session', LOGIN_NOTE_KEY)
       // A save that fails must not leave the PREVIOUS user saved. Otherwise a reload
       // restores them, the background check answers with this user again, the page
       // reloads again, and so on for as long as the store stays full.

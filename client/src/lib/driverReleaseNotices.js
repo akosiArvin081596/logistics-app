@@ -43,8 +43,8 @@ export const TOUR_STEPS = Object.freeze([
   Object.freeze({ id: 'kit', tab: 'kit', title: 'Kit', text: "Your documents and your truck's documents are here. You can take this tour again from here any time." }),
   Object.freeze({ id: 'messages', tab: 'messages', title: 'Messages', text: 'Message dispatch here, about a load or anything else.' }),
   Object.freeze({ id: 'invoices', tab: 'invoices', title: 'Invoices', text: 'Your weekly invoices are here. You can check one and send it in.' }),
-  Object.freeze({ id: 'performance', tab: 'performance', needs: 'performance', title: 'Performance', text: "Your week is here: what counted, your target and what's required. No other driver can see it." }),
-  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "The top of the app shows how many miles you have left until empty. It's about your tank, not your load or route." }),
+  Object.freeze({ id: 'performance', tab: 'performance', needs: 'performance', title: 'Performance', text: "Your week is here: what counted, your target and, most weeks, what's required. No other driver can see it." }),
+  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "When your truck reports its fuel level, the top of the app shows how many miles you have left until empty. It's about your tank, not your load or route." }),
 ])
 export const APP_TOUR_STEP_IDS = Object.freeze(TOUR_STEPS.map((s) => s.id))
 
@@ -95,7 +95,8 @@ export function releaseFromAnswer(raw) {
 }
 
 // The lines this driver can use. An entry left with none isn't shown or marked seen, so he still
-// gets it if he has that part of the app later.
+// gets it if he has that part of the app later. One with a line left is marked seen whole, so a
+// driver who gets the rest of the app after that isn't told again.
 export function notesForScreen(entries, has) {
   if (!Array.isArray(entries)) return []
   return entries
@@ -107,11 +108,13 @@ export function notesForScreen(entries, has) {
 
 // A load he has finished, or an offer he hasn't taken, leaves him free. Anything else holds the
 // sign-out, a status this file doesn't know or a blank one too: he gets the update at his next
-// sign-in instead, within a day, whereas a wrong guess here could catch him mid-trip.
+// sign-in instead, within a day, whereas a wrong guess here could catch him mid-trip. An empty list
+// holds as well: a reply that dropped on a weak signal, a sheet column that moved and a name that
+// stopped matching all read as no loads, whatever he is really hauling.
 const FINISHED_RE = /^(delivered|completed|pod received|cancel|canceled|cancelled)$/i
 const OFFER_RE = /^dispatched$/i
 export function loadsHoldSignOut(loads, headers) {
-  if (!Array.isArray(loads) || loads.length === 0) return false
+  if (!Array.isArray(loads) || loads.length === 0) return true
   const list = Array.isArray(headers) ? headers : []
   const col = list.find((h) => /^(job[\s._-]?)?status$/i.test(h)) || list.find((h) => /status/i.test(h))
   if (!col) return true
@@ -122,25 +125,28 @@ export function loadsHoldSignOut(loads, headers) {
 }
 
 // Whether this moment may sign him out. Every input must say so, in so many words: one that's
-// missing holds the sign-out. The caller asks only when he opens the app, comes back to it or
-// comes back to the list, and straight after reading his loads and the truck afresh; never on a
-// timer or a socket push, so it can't land under his thumb.
+// missing holds the sign-out. The caller asks only when he opens the app, comes back to it or moves
+// back to the list himself, and straight after reading his loads and the truck afresh and asking
+// the other tabs; never on a timer or a socket push, so it can't land under his thumb.
+// `parked` is stricter than the note's motionAllowed: a truck with no reading may be moving, so only
+// a truck that reads as parked lets him go, and any other gets the update at his next sign-in.
 export function signOutMoment(s) {
   if (!isPlainObject(s) || s.role !== 'Driver' || s.signInDue !== true) return false
   if (s.loaded !== true || s.onboarding !== false) return false
   if (s.tab !== 'loads' || s.loadOpen !== false) return false
   if (s.welcomeOpen !== false || s.dialogOpen !== false || s.tourOpen !== false) return false
-  if (s.loadsHold !== false || s.writesBusy !== false) return false
+  if (s.loadsHold !== false || s.writesBusy !== false || s.otherTabOpen !== false) return false
   if (s.visible !== true || s.online !== true) return false
-  return s.motionAllowed === true
+  return s.parked === true
 }
 
 // Whether "What's new" or the tour offer may show now. Asked again whenever an input changes, so a
 // note held back waits instead of being skipped. A working load doesn't hold it, so a driver at a
-// shipper can read it; a moving truck, a load's page and another screen do.
+// shipper can read it; a moving truck, a load's page and another screen do. So does not yet knowing
+// whether he has the Performance tab: answered now, the note would be marked seen without those lines.
 export function noteMoment(s) {
   if (!isPlainObject(s) || s.role !== 'Driver' || s.signInDue !== false) return false
-  if (s.settled !== true || s.onboarding !== false) return false
+  if (s.settled !== true || s.onboarding !== false || s.partsKnown !== true) return false
   if (s.tab !== 'loads' || s.loadOpen !== false) return false
   if (s.welcomeOpen !== false || s.dialogOpen !== false || s.tourOpen !== false) return false
   return s.motionAllowed === true
@@ -199,7 +205,9 @@ export function rememberSignOut(storage, userId, releaseId) {
 
 // The login page's line after such a sign-out: this tab's next look at that page only. It says
 // nothing about who was signed out, so the next person on a shared phone learns nothing from it.
-const LOGIN_NOTE_KEY = 'logisx.driverRelease.loginNote.v1'
+// A session the server confirms removes it (stores/auth.js), so a logout he asks for later never
+// shows it.
+export const LOGIN_NOTE_KEY = 'logisx.driverRelease.loginNote.v1'
 export const LOGIN_NOTE_TTL_MS = 10 * 60 * 1000
 export function leaveLoginNote(storage, nowMs) {
   try {
@@ -208,8 +216,9 @@ export function leaveLoginNote(storage, nowMs) {
     /* the login page just doesn't say why */
   }
 }
-// `keep` is for a page a fresh /login is about to replace: a sign-out mounts this view on the old page
-// first, so taking the note there would leave the page he actually reads without it.
+// `keep` is for a page that has started a sign-out: this view mounts on it first, and a fresh /login
+// may be about to replace it, so taking the note there would leave the page he reads without it.
+// With no signal no fresh page comes, and he reads it here until he signs in.
 export function takeLoginNote(storage, nowMs, keep = false) {
   let raw = null
   try {

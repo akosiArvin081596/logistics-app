@@ -872,6 +872,8 @@ const HINT_KEY = 'logisx.session.lastUser.v1'
 const PENDING_KEY = 'logisx.session.pendingLogout.v1'
 const EPOCH_KEY = 'logisx.session.epoch.v1'
 const NOTE_KEY = 'logisx.session.signedOut.v1'
+// The login page's line after a sign-out the driver app starts for a release (lib/driverReleaseNotices.js).
+const LOGIN_LINE_KEY = 'logisx.driverRelease.loginNote.v1'
 
 class MemStorage {
   constructor() {
@@ -1134,6 +1136,9 @@ function makeCtx(source, expect) {
     },
     // This tab's signed-out note (the fresh /login page skips its check on it).
     note: (tabName) => tabStorage(tabName).getItem(NOTE_KEY),
+    // The login page's line about an app update, as the driver app leaves it before signing out.
+    leaveLoginLine: (tabName) => tabStorage(tabName).setItem(LOGIN_LINE_KEY, String(Date.now())),
+    loginLine: (tabName) => tabStorage(tabName).getItem(LOGIN_LINE_KEY),
     // How many times the epoch has been stamped in this scenario, by any tab.
     epochStamps: () => world.local.writes.filter((k) => k === EPOCH_KEY).length,
     advance,
@@ -1473,6 +1478,45 @@ const STORE_SCENARIOS = [
     await c.settle(p.store.login('d.jones', 'x'))
     c.expect('even the same person: the POST, then one location.replace of their home', c.log().join() === 'POST /api/auth/login,replace /driver')
     c.expect('…and that sign-in supersedes the unfinished logout', c.local(PENDING_KEY) === null && p.store.isAuthenticated)
+  }],
+  // A sign-out the driver app starts leaves a line for the login page. Left behind after he is back
+  // in, it would show on a logout he asks for himself.
+  ['the login line about an update ends with the next sign-in, when the sign-out was never confirmed', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.leaveLoginLine('A')
+    c.answer(OFFLINE)
+    await c.settle(p.store.logout())
+    c.expect('(before) no fresh page came, so this page still reads the line', c.loginLine('A') !== null && p.leaving() === true)
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(p.store.login('d.jones', 'x'))
+    c.expect('his sign-in ends it', c.loginLine('A') === null)
+  }],
+  ['the login line ends with a sign-in on the fresh /login a confirmed sign-out loaded, if the page left it', async (c) => {
+    const p = await signedIn(c, 'A')
+    c.leaveLoginLine('A')
+    c.answer(json({ success: true }))
+    await c.settle(p.store.logout())
+    c.expect('(before) the sign-out itself leaves it for the page he reads', c.loginLine('A') !== null)
+    const fresh = await c.load('A')
+    await c.settle(fresh.store.checkSession())
+    c.answer(json({ success: true, user: DRIVER }))
+    await c.settle(fresh.store.login('d.jones', 'x'))
+    c.expect('his sign-in ends it', c.loginLine('A') === null)
+  }],
+  ['the login line ends when a fresh page finds someone signed in already, as another tab may have done', async (c) => {
+    c.leaveLoginLine('A')
+    await signedIn(c, 'A')
+    c.expect('no login page ever took it, and it is gone', c.loginLine('A') === null)
+  }],
+  ['a session check with no answer leaves the login line alone', async (c) => {
+    await signedIn(c, 'A')
+    await c.advance(60_000)
+    c.leaveLoginLine('A')
+    c.answer(OFFLINE, OFFLINE)
+    const p = await c.load('A')
+    await c.settle(p.store.checkSession())
+    c.expect('(before) nobody confirmed: he is on screen from the saved copy', p.store.isReconnecting)
+    c.expect('the line stays: no server has said anyone is signed in', c.loginLine('A') !== null)
   }],
   ['a signed-out page restored from the back/forward cache reloads', async (c) => {
     const p = await signedIn(c, 'A')

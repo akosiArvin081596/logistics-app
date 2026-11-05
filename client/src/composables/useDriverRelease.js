@@ -50,8 +50,9 @@ export function useDriverRelease(o) {
   let reads = 0
   let signingOut = false
 
-  // One moment: he opened the app, came back to it, or came back to the list. DriverView calls this
-  // from those places only. A failed read leaves everything as it was: no sign-out, nothing new.
+  // One moment: he opened the app, came back to it, or moved back to the list himself. DriverView
+  // calls this from those places only. A read that fails, of this answer, his loads or the truck,
+  // leaves everything as it was: no sign-out, nothing new.
   async function check() {
     if (o.role() !== 'Driver' || o.onboarding() !== false || tour.value || signingOut) return
     const mine = ++reads
@@ -82,8 +83,13 @@ export function useDriverRelease(o) {
       return
     }
     if (!current()) return
+    const moment = (otherTabOpen) => signOutMoment({ ...o.signOutInputs(), role: o.role(), signInDue: true, tourOpen: tourOpen.value, otherTabOpen })
+    // Already held, whatever the other tabs say: no need to ask them.
+    if (!moment(false)) return
+    const otherTabOpen = await o.askOtherTabs()
+    if (!current()) return
     // No await from this check to the sign-out, so what it read is what's on screen.
-    if (!signOutMoment({ ...o.signOutInputs(), role: o.role(), signInDue: true, tourOpen: tourOpen.value })) return
+    if (!moment(otherTabOpen)) return
     if (!rememberSignOut(local, userId, next.releaseId)) return
     signingOut = true
     leaveLoginNote(session, now())

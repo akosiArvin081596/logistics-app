@@ -33238,7 +33238,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// session this request arrived with (SqliteStore runs DELETE FROM sessions
 		// WHERE sid = ?) and issues a fresh ID, so the identity below is only ever
 		// attached to an ID minted by this response, and nothing from the session
-		// the request arrived with carries over. It only ever stored `user`.
+		// the request arrived with carries over: `user`, or a Driver's release id.
 		// scripts/test-login-session-rotation.js pins this.
 		rotating = true;
 		// The live-update sockets opened on the session being replaced end with

@@ -201,7 +201,7 @@
           :phone-gps-mode-active="phoneGpsModeActive"
           :phone-gps-status="phoneGpsStatus"
           :expense-submit-handler="handleExpenseSubmit"
-          @back="detailRowIndex = null"
+          @back="handleLoadBack"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
@@ -405,7 +405,7 @@
       :unread-count="driverStore.unreadCount"
       :unread-notif-count="driverStore.unreadNotifCount"
       :show-performance="performanceTab"
-      @switch="handleTabSwitch"
+      @switch="handleNavTap"
     />
 
     <!-- The signing window, for a document asked to be signed again -->
@@ -465,8 +465,9 @@ import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
-import { showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
+import { isGoneAnswer, showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
 import { WORDS as RELEASE_WORDS, fieldInFocus, loadsHoldSignOut, overlayOnScreen } from '../lib/driverReleaseNotices'
+import { thisPageTabs } from '../lib/appTabs'
 import { writesBusy } from '../lib/writesInFlight'
 import { useDriverRelease } from '../composables/useDriverRelease'
 
@@ -856,6 +857,9 @@ function getLoadStatus(load) {
 // The Performance tab exists only after the server answers 200 for this viewer: with the kill
 // switch off, or for a driver with no week to show, the app stays as it was.
 const performanceTab = ref(false)
+// Whether the server has said yes or no yet. A failed read says neither: the note after a release
+// waits for this, or it would be read and marked seen without the Performance lines.
+const performanceKnown = ref(false)
 // The answer behind the load page's bar: here only, never the store or the browser's storage, so
 // a shared phone never shows the previous driver's week.
 const performanceWeek = ref(null)
@@ -879,6 +883,7 @@ async function checkPerformanceTab() {
   }
   if (!isMounted || mine !== performanceReads) return
   performanceTab.value = tabAfterAnswer(status, performanceTab.value)
+  if (status === 200 || isGoneAnswer(status)) performanceKnown.value = true
   performanceWeek.value = weekFromAnswer(role, status, answer)
   weekSlotWanted = tabAfterAnswer(status, weekSlotWanted)
 }
@@ -889,8 +894,18 @@ watch(performanceTab, (shown) => {
 watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list') : ''), (place) => {
   weekSlotHeld.value = weekSlotWanted
   if (place) checkPerformanceTab()
-  if (place === 'list') release.check()
 })
+
+// He left a load's page or tapped a tab himself. Only these ask about a release, not the place
+// changing: a cancel or a refetch that closes his load mustn't pick the moment for him.
+function handleLoadBack() {
+  detailRowIndex.value = null
+  release.check()
+}
+function handleNavTap(tab) {
+  handleTabSwitch(tab)
+  if (tab === 'loads' && !detailRowIndex.value) release.check()
+}
 
 // Tab switching
 function handleTabSwitch(tab) {
@@ -1125,9 +1140,10 @@ function contactsPromptLater() {
   contactsPromptAnswered.value = true
 }
 
-// After a release (composables/useDriverRelease.js). It asks the server at three moments: the app
-// opens (attemptInitialLoad), he comes back to it (onVisibilityChange), he comes back to the list
-// (the watcher on his place). Never on a timer or a socket push, so a sign-out can't land under his thumb.
+// After a release (composables/useDriverRelease.js). It asks the server when the app opens
+// (attemptInitialLoad), when he comes back to it (onVisibilityChange), and when he moves back to the
+// list himself (handleLoadBack, handleNavTap). Never on a timer or a socket push, so a sign-out can't
+// land under his thumb.
 function releaseDialogOpen() {
   return showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value
 }
@@ -1150,6 +1166,7 @@ const release = useDriverRelease({
   noteInputs: () => ({
     onboarding: isOnboarding.value,
     settled: contactsPromptReady.value,
+    partsKnown: performanceKnown.value,
     tab: currentTab.value,
     loadOpen: loadPageOpen(),
     welcomeOpen: showWelcomeModal.value,
@@ -1167,12 +1184,13 @@ const release = useDriverRelease({
     writesBusy: writesBusy(),
     visible: document.visibilityState === 'visible',
     online: navigator.onLine !== false && !auth.isReconnecting,
-    motionAllowed: voiceGate.value.allowed,
+    parked: voiceGate.value.state === 'parked',
   }),
   refreshFacts: async () => {
     await driverStore.loadData({ quiet: true })
-    await driverPos.refreshEld()
+    if (await driverPos.refreshEld() !== true) throw new Error('no fresh truck reading')
   },
+  askOtherTabs: () => thisPageTabs().ask(),
   signOut: handleLogout,
   place: () => currentTab.value,
   showStep: showTourStep,
