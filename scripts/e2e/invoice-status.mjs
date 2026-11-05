@@ -773,10 +773,12 @@ async function filterRun(browser, size) {
     const number = (s.claim(ID.SENT) || {}).invoice_id
     const sentLine = lines.find((l) => l.startsWith(`"${ID.SENT}"`)) || ''
     const wantSentLine = `"${ID.SENT}","Sent by LogisX","${number}","${TODAY}"`
+    const handLine = lines.find((l) => l.startsWith(`"${ID.HAND_ROW}"`)) || ''
+    const wantHandLine = `"${ID.HAND_ROW}","Invoiced by hand (Sent Mail not checked yet)","${NUMBER(80)}",""`
     const noStatusAsked = Boolean(url) && !/[?&][^=]*status/i.test(url)
-    record(`${tag}-csv`, 'The download takes no status; the file has the three columns and every load', `a URL with no status; header "Load ID","Invoice Status","Invoice #","Invoice Date"; ${s.rows.filter((r) => rules.isCompletedStatus(r.Status)).length} rows; ${wantSentLine}`,
-      `url "${url}" (server asks ${exportAsks.length - asksBefore}); header ${lines[0]}; rows ${lines.length - 1}; ${sentLine}`,
-      noStatusAsked && lines[0] === '"Load ID","Invoice Status","Invoice #","Invoice Date"' && lines.length - 1 === s.rows.filter((r) => rules.isCompletedStatus(r.Status)).length && sentLine === wantSentLine)
+    record(`${tag}-csv`, 'The download takes no status; the file has the three columns and every load', `a URL with no status; header "Load ID","Invoice Status","Invoice #","Invoice Date"; ${s.rows.filter((r) => rules.isCompletedStatus(r.Status)).length} rows; ${wantSentLine}; ${wantHandLine}`,
+      `url "${url}" (server asks ${exportAsks.length - asksBefore}); header ${lines[0]}; rows ${lines.length - 1}; ${sentLine}; ${handLine}`,
+      noStatusAsked && lines[0] === '"Load ID","Invoice Status","Invoice #","Invoice Date"' && lines.length - 1 === s.rows.filter((r) => rules.isCompletedStatus(r.Status)).length && sentLine === wantSentLine && handLine === wantHandLine)
 
     for (const st of STATUSES) {
       await page.selectOption(SELECT, st)
@@ -1004,6 +1006,8 @@ async function worldCheck() {
       const cols = s.evidence.exportColumns({ headers: JOB_HEADERS })
       const sentCells = cols.cells(s.row(ID.SENT))
       record('W-E-csv', 'The file\'s cells', `Sent by LogisX, ${(s.claim(ID.SENT) || {}).invoice_id}, ${TODAY}`, sentCells.join(', '), sentCells[0] === 'Sent by LogisX' && sentCells[1] === (s.claim(ID.SENT) || {}).invoice_id && sentCells[2] === TODAY)
+      const handCells = cols.cells(s.row(ID.HAND_ROW))
+      record('W-E-csv-hand', 'The file keeps what isn\'t known about a draft row', `Invoiced by hand (Sent Mail not checked yet), ${NUMBER(80)}, `, handCells.join(', '), handCells[0] === 'Invoiced by hand (Sent Mail not checked yet)' && handCells[1] === NUMBER(80) && handCells[2] === '')
       const smtpOnce = [ID.SENT, ID.CHANGED].map((id) => s.smtp.filter((m) => m.loadId === id).length).join(',')
       record('W-E-smtp', 'One SMTP call for each load the job sent, none for its draft', '1,1 and 0', `${smtpOnce} and ${s.smtp.filter((m) => m.loadId === ID.JOB_DRAFT).length}`, smtpOnce === '1,1' && !s.smtp.some((m) => m.loadId === ID.JOB_DRAFT))
     }
