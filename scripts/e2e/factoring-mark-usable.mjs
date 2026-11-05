@@ -3,11 +3,10 @@
 // lib/factoring-routes.js, FactoringControls.vue), at 1280x800, on made-up data only.
 //
 // What the page shows comes from the server's own modules: they run in this process on an
-// in-memory database. `_factoring` is annotateDashboard()'s, the switch posts to the routes' own
+// in-memory database, with a made-up sheet, engine and mailbox. `_factoring` is annotateDashboard()'s,
+// `_autoInvoice` the job's annotateCompletedRows(), the switch and Try again post to the modules' own
 // handlers, and a Draft Invoice press runs draftEarly(), the check server.js makes before anything
-// is read or minted (scripts/test-invoice-draft-factored.js runs that route as shipped). A driver's
-// tap isn't run here; scripts/test-auto-invoice-driver-trigger.js pins what it does to a marked load.
-// Steps:
+// is read or minted (scripts/test-invoice-draft-factored.js runs that route as shipped). Steps:
 //   F   a listed account, both settings on: the switch with its one line; marks with a reason (the
 //       button waits for one); one POST, one row, one audit row; the chip shows with the line, on
 //       the server's own answer after a reload too; once the load is delivered, the Draft Invoice
@@ -18,7 +17,17 @@
 //       403 and writes nothing; a confirmation answers 409 NOA_UNCONFIGURED
 //   O   as production ships, both settings unset: no switch for anyone, the marking route answers
 //       404 FEATURE_OFF; a load the lead's script marked shows the chip and is refused all the same
-//   G   the browser asked no mail host and opened no socket off this machine
+//   D   a job's Gmail draft: "Check it and send it" until a listed account marks the load (the switch
+//       asks once); then the dialog and the row chip say not to send it and to delete it, on the
+//       server's own answer after a reload and for a Super Admin not listed too
+//   T   a draft that may be in Gmail, each of the two codes: marked with no prompt, the row says not to
+//       send it; Try again finds the draft and records it, and the row still says so; nothing is
+//       sent or appended
+//   C   marked, tapped, cleared: no chip while marked; once cleared, on a reload, "No automatic
+//       invoice" with its own sentence and no Try again; the claim stays closed, nothing is sent, and
+//       the Draft Invoice button passes the check, so a person can draft it
+//   G   no TLS connection, no socket to another host or a mail port from this process; the browser
+//       asked no mail host and opened no socket off this machine
 //
 // Like driver-delivered-invoice.mjs this boots no server.js, reads no settings file or key and signs
 // nobody in. It serves the checkout's built client/dist on 127.0.0.1 (E2E_PORT, or a free port the
@@ -38,6 +47,7 @@ import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import tls from 'node:tls'
 import { createRequire } from 'node:module'
 import paths from './paths.cjs'
 
@@ -59,12 +69,45 @@ if (process.env.E2E_PORT && (!Number.isInteger(ASKED_PORT) || ASKED_PORT < 1024 
 if (ASKED_PORT === 3000 || ASKED_PORT === 5173) die(`refusing port ${ASKED_PORT}: 3000 is production's port on the VPS and 5173 is Vite's`)
 if (!fs.existsSync(path.join(DIST, 'index.html'))) die(`no ${path.join(DIST, 'index.html')}: run \`npm --prefix client run build\` first`)
 
+// ---------------------------------------------------------------- nothing leaves this process
+// Set before any lib is loaded. Every socket goes through Socket.prototype.connect (http's agent
+// keeps its own copy of net.createConnection, so patching that alone would miss it).
+const wire = { tls: [], remote: [], mailPorts: [] }
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', ''])
+const MAIL_PORTS = new Set([25, 143, 465, 587, 993])
+function targetOf(args) {
+  const a = Array.isArray(args[0]) ? args[0][0] : args[0]
+  if (a && typeof a === 'object') return a.path ? { host: '', port: 0 } : { host: String(a.host || a.hostname || ''), port: Number(a.port) || 0 }
+  if (typeof a === 'number' || /^\d+$/.test(String(a))) return { host: typeof args[1] === 'string' ? args[1] : '', port: Number(a) }
+  return { host: '', port: 0 }
+}
+tls.connect = function refusedTls(...args) {
+  wire.tls.push(targetOf(args).host || '(unnamed)')
+  throw new Error('factoring-mark-usable: TLS refused in this check')
+}
+const realConnect = net.Socket.prototype.connect
+net.Socket.prototype.connect = function guardedConnect(...args) {
+  const { host, port } = targetOf(args)
+  if (!LOOPBACK.has(host)) {
+    wire.remote.push(host)
+    throw new Error('factoring-mark-usable: only 127.0.0.1 is reachable in this check')
+  }
+  if (MAIL_PORTS.has(port)) {
+    wire.mailPorts.push(port)
+    throw new Error('factoring-mark-usable: mail ports are refused in this check')
+  }
+  return realConnect.apply(this, args)
+}
+
 // ---------------------------------------------------------------- the server's own modules
 const require = createRequire(import.meta.url)
 const Database = require(path.join(paths.REPO, 'node_modules', 'better-sqlite3'))
 const store = require(path.join(paths.REPO, 'lib', 'factoring-store.js'))
 const routesLib = require(path.join(paths.REPO, 'lib', 'factoring-routes.js'))
 const rules = require(path.join(paths.REPO, 'lib', 'auto-invoice-rules.js'))
+const jobLib = require(path.join(paths.REPO, 'lib', 'auto-invoice-job.js'))
+const ledger = require(path.join(paths.REPO, 'lib', 'auto-invoice-ledger.js'))
+const { textPdf } = require(path.join(paths.REPO, 'scripts', 'lib', 'made-up-pdf.js'))
 
 // ---------------------------------------------------------------- made-up fixtures
 const account = (id, username, fullName) => Object.freeze({ id, username, role: 'Super Admin', driverName: '', email: '', fullName, companyName: '', mustChangePassword: false })
@@ -73,7 +116,15 @@ const NOT_LISTED = account(90412, 'qa-factoring-other', 'QA Factoring Other')
 const SETTINGS_ON = Object.freeze({ TRIUMPH_FACTORING_ENABLED: 'true', TRIUMPH_FACTOR_MARK_IDS: String(LISTED.id) })
 const SETTINGS_UNSET = Object.freeze({})
 const DRIVER_NAME = 'Casey Example'
+// The columns the page shows; the job also reads the broker Email, which this list leaves off.
 const HEADERS = ['Load ID', 'Status', 'Driver', 'Truck', 'Pickup Address', 'Drop-off Address', 'Payment', 'Completion Date']
+const JOB_HEADERS = [...HEADERS, 'Email']
+// A domain the job drafts for, not one it sends to, so its invoice waits in Gmail for a person.
+const DRAFT_DOMAIN = 'draft-broker.example.test'
+const SEND_DOMAIN = 'send-broker.example.test'
+const BROKER = `ops@${DRAFT_DOMAIN}`
+const BILLING = `billing@${DRAFT_DOMAIN}`
+const PAYMENTS_HEADERS = Object.freeze([' Job ID', 'Contract ID', 'Payment Amount', 'Invoice Number', 'Payment Date', 'Payment Status'])
 const TO_MARK = 'QA-FACT-9001'
 const ACTIVE_PLAIN = 'QA-FACT-9002'
 const DONE_PLAIN = 'QA-FACT-9003'
@@ -92,14 +143,30 @@ const WORDS = {
   refused: 'This load is factored: its invoice goes through Triumph, not by email.',
   noa: "This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.",
   notListed: 'Only the accounts listed for factoring may do this.',
+  draftReady: { label: 'Draft ready in Gmail', tone: 'ok', reason: (id) => `Invoice ${id} is in Gmail Drafts. Check it and send it.` },
+  dontSend: { label: "Factored: don't send the draft, delete it", tone: 'bad', reason: (what) => `Don't send ${what}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.` },
+  cleared: { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
+  clearedDone: 'No longer factored. If it is already delivered, draft its invoice by hand.',
+  retrySearch: 'Try again looks in Gmail first for what may already have gone. Continue?',
+  oldSend: 'Check it and send it',
 }
 
-// One made-up server's worth of state, and the factoring routes on it, with the settings given.
-function freshServer(env) {
+// One made-up server's worth of state: the factoring routes with the settings given, and the job.
+async function freshServer(env) {
   const db = new Database(':memory:')
   store.ensureSchema(db)
-  const s = { db, rows: [], audits: [], refusals: [], markPosts: [], presses: [], reachedPrepare: [], mounted: {} }
-  const addLoad = (id, status) => {
+  db.exec(`
+    CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL DEFAULT '', type TEXT NOT NULL,
+      file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_at DATETIME DEFAULT NULL);
+    CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT,
+      total TEXT, broker_name TEXT, order_number TEXT, via TEXT, created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), created_by TEXT,
+      edited INTEGER DEFAULT 0, edited_fields TEXT DEFAULT '');
+    CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME, deleted_by TEXT DEFAULT '');
+    CREATE TABLE broker_invoice_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, load_key TEXT NOT NULL, voided_at TEXT);
+    CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+  `)
+  const s = { db, rows: [], audits: [], refusals: [], markPosts: [], retryPosts: [], presses: [], reachedPrepare: [], mounted: {}, jobRoutes: {}, gmail: new Set(), appends: [], smtp: [], logs: [], numbers: 0, ids: 0 }
+  s.addLoad = (id, status) => {
     s.rows.push({
       _rowIndex: s.rows.length + 2,
       _id: s.rows.length + 2,
@@ -111,15 +178,94 @@ function freshServer(env) {
       'Drop-off Address': '200 Sample Ave, Dallas, TX 75201',
       Payment: '$1,234.00',
       'Completion Date': status === 'Delivered' ? DELIVERED_ON : '',
+      Email: BROKER,
       _pickupStreet: '100 Example Rd',
       _pickupLocation: 'Memphis, TN 38118',
       _dropStreet: '200 Sample Ave',
       _dropLocation: 'Dallas, TX 75201',
     })
+    db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, datetime('now', '-60 minutes'))").run(id, `${id}_POD.pdf`, `/uploads/${id}_POD.pdf`)
   }
-  addLoad(TO_MARK, 'In Transit')
-  addLoad(ACTIVE_PLAIN, 'In Transit')
-  addLoad(DONE_PLAIN, 'Delivered')
+  s.addLoad(TO_MARK, 'In Transit')
+  s.addLoad(ACTIVE_PLAIN, 'In Transit')
+  s.addLoad(DONE_PLAIN, 'Delivered')
+  ledger.writeSettings(db, { optOutDomains: [], confirmedBrokerDomains: [DRAFT_DOMAIN, SEND_DOMAIN] }, { by: LISTED.username, nowIso: new Date().toISOString() })
+  s.job = jobLib.create({
+    db,
+    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false' },
+    readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
+    closedMonthsOf: () => [],
+    dayKeyOf: (cell) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(cell || ''))
+      return m ? `${m[3]}-${m[1]}-${m[2]}` : ''
+    },
+    uploadsRoot: path.join(path.sep, 'made-up', 'uploads'),
+    fileExists: () => true,
+    engine: {
+      async prepare({ loadId }) { return { ok: true, ctx: { loadId, to: BILLING } } },
+      async render(ctx, opts) {
+        const ref = String(ctx.loadId)
+        const [y, m, d] = String(opts.invoiceDate).split('-')
+        return {
+          to: ctx.to,
+          subject: `Example Freight Order #${ref}`,
+          html: `<p>Please see the attached documents for load number ${ref}.</p>`,
+          attachments: [
+            { filename: `Example Freight Invoice Order #${ref}.pdf`, content: textPdf(`INVOICE Invoice ID # : ${opts.invoiceId} Date: ${m}/${d}/${y} Made-up Co. Load ID# ${ref} Total $1,234.00`), contentType: 'application/pdf' },
+            { filename: `${ref}_POD.pdf`, content: Buffer.from(`%PDF-1.4 made-up POD for ${ref}`), contentType: 'application/pdf' },
+            { filename: `${ref}.pdf`, content: Buffer.from(`%PDF-1.4 made-up rate con for ${ref}`), contentType: 'application/pdf' },
+          ],
+          total: '$1,234.00',
+        }
+      },
+      async record(ctx, rendered, opts) {
+        const r = db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', ?, ?)")
+          .run(ctx.loadId, opts.invoiceId, rendered.to, opts.via, opts.actor.username)
+        return { recorded: true, draftRowId: r.lastInsertRowid }
+      },
+    },
+    nextInvoiceNumber: () => `${TM}${TD}${TY}-${++s.numbers}`,
+    appendGmailDraft: async (o) => { s.appends.push(o.to); s.gmail.add(o.messageId); return { ok: true } },
+    findDraftByMessageId: async ({ messageId, alsoLike }) => {
+      const found = s.gmail.has(messageId)
+      return { found, count: found ? 1 : 0, mailbox: found ? '[Gmail]/Drafts' : '', ...(alsoLike ? { like: { count: 0 } } : {}) }
+    },
+    newMessageId: () => `<qa-factoring-${++s.ids}.auto-invoice@example.com>`,
+    mailbox: () => ({ user: 'qa-mailbox@example.com', pass: 'made-up' }),
+    bisonRecipient: () => '',
+    logAudit: () => {},
+    notify: () => {},
+    geminiUnavailableAt: () => null,
+    log: { warn: (m) => s.logs.push(m), error: (m) => s.logs.push(m) },
+    timeZone: 'America/New_York',
+    workerId: 'qa-factoring-worker',
+    send: { enabled: true, domains: [SEND_DOMAIN], settleMinutes: 0 },
+    sendMail: async (o) => { s.smtp.push(o.to); return { ok: true } },
+    readPaymentsTable: async () => [[...PAYMENTS_HEADERS]],
+    lookInMailbox: async () => ({ verdict: 'clean', mailboxes: {} }),
+    sleep: async () => {},
+  })
+  const addJobRoute = (method) => (p, ...handlers) => { s.jobRoutes[`${method} ${p}`] = handlers }
+  s.job.mount({ get: addJobRoute('GET'), put: addJobRoute('PUT'), post: addJobRoute('POST') }, { requireRole: () => (req, res, next) => next() })
+  // The loads above are from before the switch: the first start-up leaves them to people.
+  s.job.startTrigger()
+  await s.job.finishStartUp()
+  // The lines PUT /api/driver/status adds around its write.
+  s.tap = (id) => {
+    const row = s.rows.find((r) => r['Load ID'] === id)
+    const start = s.job.driverDelivered({ role: 'Driver', loadId: id, oldStatus: row.Status, newStatus: 'Delivered', readBack: async () => row.Status })
+    row.Status = 'Delivered'
+    row['Completion Date'] = DELIVERED_ON
+    start.written()
+  }
+  s.claim = (id) => ledger.getClaim(db, rules.loadKey(id))
+  // A claim as an earlier run left it.
+  s.seedClaim = (id, fields) => {
+    ledger.insertClaim(db, { key: rules.loadKey(id), loadId: id, state: fields.state, code: fields.reason_code || '', nowIso: new Date().toISOString() })
+    const { state: _state, ...rest } = fields
+    const cols = Object.keys(rest)
+    if (cols.length) db.prepare(`UPDATE auto_invoice_claims SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE load_key = ?`).run(...cols.map((c) => rest[c]), rules.loadKey(id))
+  }
   s.routes = routesLib.create({
     db,
     env,
@@ -130,17 +276,19 @@ function freshServer(env) {
     requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: 'FORBIDDEN' })),
     refuseCrossSite: (req, res, next) => next(),
   })
-  s.call = async (route, user, params, body) => {
+  const runChain = async (handlers, user, params, body) => {
     const out = { status: 200, body: {} }
     const res = { status(c) { out.status = c; return res }, json(b) { out.body = b; return res } }
     const req = { params, body, session: { user } }
-    for (const handler of s.mounted[route] || []) {
+    for (const handler of handlers || []) {
       let goOn = false
       await handler(req, res, () => { goOn = true })
       if (!goOn) break
     }
     return out
   }
+  s.call = (route, user, params, body) => runChain(s.mounted[route], user, params, body)
+  s.callJob = (route, user, params, body) => runChain(s.jobRoutes[route], user, params, body)
   s.marker = (id) => db.prepare('SELECT factored, source, reason, set_by, set_by_id FROM load_factoring WHERE load_key = ?').get(rules.loadKey(id)) || null
   // What the lead's scripts/factoring-mark.js does, whatever the settings say.
   s.markByScript = (id) => store.mark(db, { key: rules.loadKey(id), loadId: id, reason: 'made-up: from the list', source: 'script', actor: { id: 0, username: 'factoring-mark' }, nowIso: new Date().toISOString(), audit: () => {} })
@@ -159,19 +307,23 @@ const parse = (raw) => { try { return JSON.parse(raw || 'null') } catch { return
 function dashboardBody(s, user) {
   const active = s.rows.filter((r) => !rules.isCompletedStatus(r.Status)).map((r) => ({ ...r }))
   const completed = s.rows.filter((r) => rules.isCompletedStatus(r.Status)).map((r) => ({ ...r }))
-  s.routes.annotateDashboard({ session: { user } }, { headers: HEADERS, active, completed })
+  // In the server's order: the job's status, then the mark.
+  s.job.annotateCompletedRows({ rows: completed, headers: JOB_HEADERS, isSuperAdmin: user.role === 'Super Admin' })
+  s.routes.annotateDashboard({ session: { user } }, { headers: JOB_HEADERS, active, completed })
   return {
     timestamp: new Date().toISOString(),
     kpis: { activeLoads: active.length, unassignedLoads: 0, completedThisWeek: completed.length, completedThisMonth: completed.length, fleetUtilization: { assigned: 1, total: 1 }, revenue: { total: 0, paid: 0, pending: 0 } },
     unassignedJobs: [], jobTrackingHeaders: HEADERS, completedHeaders: HEADERS, activeJobs: active, completedJobs: completed,
     fleet: [{ Driver: DRIVER_NAME, Truck: 'QA-T1', Status: 'On Load', CompletedLoads: 1, CurrentLoad: ACTIVE_PLAIN, Phone: '(512) 555-0100', QueueCount: 0, QueuedLoadIds: [] }],
     drivers: [DRIVER_NAME], driverQueues: {},
+    autoInvoice: { mode: 'on' },
   }
 }
 
 function answerGet(s, user, pathname) {
   if (pathname === '/api/auth/session') return json200({ authenticated: true, user, appTimeZone: 'America/New_York' })
   if (pathname === '/api/dashboard') return json200(dashboardBody(s, user))
+  if (pathname === '/api/auto-invoice/settings') return json200({ ...ledger.readSettings(s.db), send: { domains: [SEND_DOMAIN], stopped: ledger.getSendStop(s.db) } })
   if (pathname === '/api/dispatch-notifications') return json200({ notifications: [], unreadCount: 0 })
   if (pathname === '/api/load-ratings/averages') return json200({ averages: {} })
   if (pathname === '/api/truck-assignments') return json200({ assignments: [] })
@@ -188,8 +340,9 @@ function answerGet(s, user, pathname) {
   return null
 }
 
-// The marking route through its own handlers; a Draft Invoice press through the route's first
-// check, stopping where prepare() would start. Anything else the page writes is listed, not answered.
+// The marking route and Try again through their own handlers; a Draft Invoice press through the
+// route's first check, stopping where prepare() would start. Anything else the page writes is
+// listed, not answered.
 async function answerWrite(s, user, method, url, raw) {
   if (method !== 'POST') return null
   const body = parse(raw) || {}
@@ -198,6 +351,11 @@ async function answerWrite(s, user, method, url, raw) {
     const loadKey = decodeURIComponent(m[1])
     s.markPosts.push({ loadKey, body, by: user.username })
     return s.call('/api/factoring/loads/:loadKey', user, { loadKey }, body)
+  }
+  if ((m = url.pathname.match(/^\/api\/auto-invoice\/loads\/([^/]+)\/retry$/))) {
+    const loadKey = decodeURIComponent(m[1])
+    s.retryPosts.push(loadKey)
+    return s.callJob('POST /api/auto-invoice/loads/:loadKey/retry', user, { loadKey }, body)
   }
   if ((m = url.pathname.match(/^\/api\/loads\/([^/]+)\/draft-invoice$/))) {
     const loadId = decodeURIComponent(m[1])
@@ -276,20 +434,23 @@ async function openPage(browser, s, user) {
     return route.fulfill({ status: out.status, contentType: 'application/json', headers: { 'cache-control': 'private, no-store' }, body: JSON.stringify(out.body) })
   })
   const page = await ctx.newPage()
-  const seenDialogs = []
+  // `dialogs.plan` holds the answers to the next browser dialogs. One with no planned answer is
+  // dismissed, and `dialogs.seen` shows it, so an extra question fails its row.
+  const dialogs = { seen: [], plan: [] }
   page.on('pageerror', (e) => pageErrors.push(String(e.message || e).slice(0, 200)))
   page.on('websocket', (ws) => {
     let host = ''
     try { host = new URL(ws.url()).host } catch { host = '(unreadable)' }
     if (host !== `${HOST}:${PORT}`) offHostSockets.push(host)
   })
-  // No step here should raise a browser dialog: one is dismissed, and the row that sees it fails.
   page.on('dialog', async (d) => {
-    seenDialogs.push(d.message())
-    await d.dismiss().catch(() => {})
+    const answer = dialogs.plan.shift() || { accept: false }
+    dialogs.seen.push(d.message())
+    if (answer.accept) await d.accept().catch(() => {})
+    else await d.dismiss().catch(() => {})
   })
   await page.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' })
-  return { ctx, page, seenDialogs }
+  return { ctx, page, dialogs }
 }
 
 const locText = (loc) => loc.first().textContent({ timeout: 2000 }).then((t) => (t || '').replace(/\s+/g, ' ').trim(), () => '')
@@ -347,10 +508,39 @@ const postFromPage = (page, url, body) => page.evaluate(async ([target, payload]
 const draftUrl = (id, dry = false) => `/api/loads/${encodeURIComponent(id)}/draft-invoice${dry ? '?dryRun=1' : ''}`
 const CONFIRM = Object.freeze({ confirmFactored: true, factoredReason: 'made-up: asked for a copy' })
 
+// The job's status as the page words it: the chip on a load's row, and the line in its dialog.
+async function rowChipOf(page, id) {
+  const chip = page.locator('tbody tr', { hasText: id }).first().locator('.auto-chip')
+  const count = await chip.count()
+  if (!count) return { count: 0, label: '', tone: '', reason: '' }
+  const cls = (await chip.first().getAttribute('class')) || ''
+  return { count, label: await locText(chip), tone: (/auto-chip--(\w+)/.exec(cls) || [])[1] || '', reason: (await chip.first().getAttribute('title')) || '' }
+}
+async function dialogLineOf(page) {
+  const line = page.locator(`${DIALOG} .auto-line`).first()
+  if (!(await page.locator(`${DIALOG} .auto-line`).count())) return { count: 0, text: '', tone: '', buttons: [] }
+  const cls = (await line.getAttribute('class')) || ''
+  return { count: 1, text: await locText(line.locator('.auto-line-text')), tone: (/auto-line--(\w+)/.exec(cls) || [])[1] || '', buttons: (await line.locator('button').allTextContents()).map((t) => t.trim()) }
+}
+const dialogText = (page) => locText(page.locator(DIALOG))
+const chipIs = (c, want, reason) => c.count === 1 && c.label === want.label && c.tone === want.tone && c.reason === reason
+const lineIs = (l, want, reason) => l.count === 1 && l.text === `${want.label}. ${reason}` && l.tone === want.tone
+// The socket is aborted here, so a change on the server reaches the page by a reload.
+async function reloadCompleted(page) {
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await openTab(page, 'Completed')
+}
+async function markInDialog(page, dialogs, { answer = null } = {}) {
+  await page.locator('.fact-reason').fill(REASON)
+  if (answer) dialogs.plan.push(answer)
+  await page.locator('.fact-btn', { hasText: 'Factor with Triumph' }).click({ timeout: 5000 })
+  return appears(page, '.fact-result--ok', 8000)
+}
+
 // ---------------------------------------------------------------- F: a listed account
 async function listedRun(browser) {
-  const s = freshServer(SETTINGS_ON)
-  const { ctx, page, seenDialogs } = await openPage(browser, s, LISTED)
+  const s = await freshServer(SETTINGS_ON)
+  const { ctx, page, dialogs } = await openPage(browser, s, LISTED)
   try {
     const listed = await openTab(page, 'Active Loads')
     const opened = listed && await openLoad(page, TO_MARK)
@@ -376,10 +566,10 @@ async function listedRun(browser) {
     const row = s.marker(TO_MARK)
     const audits = s.audits.filter((a) => a.action === 'factoring_marked')
     record('F-mark', 'A listed account marks it with a reason', `one POST with the reason; "${WORDS.marked}"; one row by this account; one factoring_marked audit row with the reason; no browser dialog`,
-      `posts ${s.markPosts.length}, reason sent "${posted ? s.markPosts[0].body.reason : ''}", answer "${answer}", row ${JSON.stringify(row)}, audits ${JSON.stringify(audits)}, dialogs ${seenDialogs.length}`,
+      `posts ${s.markPosts.length}, reason sent "${posted ? s.markPosts[0].body.reason : ''}", answer "${answer}", row ${JSON.stringify(row)}, audits ${JSON.stringify(audits)}, dialogs ${dialogs.seen.length}`,
       posted && s.markPosts.length === 1 && s.markPosts[0].body.factored === true && s.markPosts[0].body.reason === REASON && answer === WORDS.marked
         && !!row && row.factored === 1 && row.source === 'person' && row.reason === REASON && row.set_by === LISTED.username && row.set_by_id === LISTED.id
-        && audits.length === 1 && audits[0].by === LISTED.username && audits[0].details.includes(REASON) && seenDialogs.length === 0)
+        && audits.length === 1 && audits[0].by === LISTED.username && audits[0].details.includes(REASON) && dialogs.seen.length === 0)
 
     const after = await controlsOf(page)
     const clearShown = await count(page, '.fact-btn:has-text("Clear factored")')
@@ -426,7 +616,7 @@ async function listedRun(browser) {
 
 // ---------------------------------------------------------------- N: a Super Admin not listed
 async function notListedRun(browser) {
-  const s = freshServer(SETTINGS_ON)
+  const s = await freshServer(SETTINGS_ON)
   s.deliver(TO_MARK)
   const premark = s.markByScript(TO_MARK)
   const { ctx, page } = await openPage(browser, s, NOT_LISTED)
@@ -465,7 +655,7 @@ async function notListedRun(browser) {
 
 // ---------------------------------------------------------------- O: as production ships
 async function settingsUnsetRun(browser) {
-  const s = freshServer(SETTINGS_UNSET)
+  const s = await freshServer(SETTINGS_UNSET)
   s.deliver(TO_MARK)
   const premark = s.markByScript(TO_MARK)
   const { ctx, page } = await openPage(browser, s, LISTED)
@@ -495,12 +685,169 @@ async function settingsUnsetRun(browser) {
   }
 }
 
+// ---------------------------------------------------------------- D: a job's draft, then marked
+async function draftRun(browser) {
+  const ID = 'QA-FACT-9101'
+  const s = await freshServer(SETTINGS_ON)
+  s.addLoad(ID, 'At Receiver')
+  s.tap(ID)
+  const drafted = await until(() => (s.claim(ID) || {}).state === 'drafted')
+  const number = (s.claim(ID) || {}).invoice_id || ''
+  const { ctx, page, dialogs } = await openPage(browser, s, LISTED)
+  try {
+    await openTab(page, 'Completed')
+    const opened = await openLoad(page, ID)
+    if (!opened) {
+      record('D-open', 'Completed Loads opens the job\'s draft', 'the load dialog', `drafted ${drafted}, opened ${opened}`, false)
+      return
+    }
+    const beforeChip = await rowChipOf(page, ID)
+    const beforeLine = await dialogLineOf(page)
+    const beforeReason = WORDS.draftReady.reason(number)
+    record('D-before', 'Before any mark, a job\'s draft says to check it and send it', `row and dialog "${WORDS.draftReady.label}": "${beforeReason}"; one append, no SMTP`,
+      `row ${JSON.stringify(beforeChip)}, dialog ${JSON.stringify(beforeLine)}, appends ${s.appends.length}, SMTP ${s.smtp.length}`,
+      drafted && chipIs(beforeChip, WORDS.draftReady, beforeReason) && lineIs(beforeLine, WORDS.draftReady, beforeReason) && s.appends.length === 1 && s.smtp.length === 0)
+
+    // A draft exists, so the switch asks once before marking.
+    const marked = await markInDialog(page, dialogs, { answer: { accept: true } })
+    const want = WORDS.dontSend.reason(`invoice ${number}`)
+    const line = await dialogLineOf(page)
+    const inDialog = await dialogText(page)
+    const lineFile = await shot(page, 'D-dialog')
+    record('D-dialog', 'Marked: the dialog says not to send it and to delete it', `one question; the line "${WORDS.dontSend.label}. ${want}", red; "${WORDS.oldSend}" nowhere in the dialog`,
+      `marked ${marked}, questions ${dialogs.seen.length}, line ${JSON.stringify(line)}, old words shown ${inDialog.includes(WORDS.oldSend)}`,
+      marked && dialogs.seen.length === 1 && lineIs(line, WORDS.dontSend, want) && !inDialog.includes(WORDS.oldSend), lineFile)
+    await closeLoad(page)
+
+    await reloadCompleted(page)
+    const reopened = await openLoad(page, ID)
+    const chip = await rowChipOf(page, ID)
+    const again = reopened ? await dialogLineOf(page) : {}
+    const chipFile = await shot(page, 'D-row')
+    record('D-row', 'On the server\'s own answer, after a reload: the row chip and the dialog', `row chip "${WORDS.dontSend.label}", red, its title the sentence; the dialog the same`,
+      `row ${JSON.stringify(chip)}, dialog ${JSON.stringify(again)}`, chipIs(chip, WORDS.dontSend, want) && lineIs(again, WORDS.dontSend, want), chipFile)
+  } finally {
+    await ctx.close()
+  }
+  // Any Super Admin reads it: `_factoring` is on a marked row for all of them.
+  const other = await openPage(browser, s, NOT_LISTED)
+  try {
+    await openTab(other.page, 'Completed')
+    const opened = await openLoad(other.page, ID)
+    const chip = await rowChipOf(other.page, ID)
+    const line = opened ? await dialogLineOf(other.page) : {}
+    const want = WORDS.dontSend.reason(`invoice ${number}`)
+    record('D-not-listed', 'A Super Admin not listed reads the same', `row chip and dialog "${WORDS.dontSend.label}"`, `row ${JSON.stringify(chip)}, dialog ${JSON.stringify(line)}`,
+      chipIs(chip, WORDS.dontSend, want) && lineIs(line, WORDS.dontSend, want))
+  } finally {
+    await other.ctx.close()
+    s.db.close()
+  }
+}
+
+// ---------------------------------------------------------------- T: may be in Gmail, then Try again
+async function tryAgainRun(browser) {
+  for (const [n, code, stage] of [[9201, 'MAYBE_IN_GMAIL', 'appending'], [9202, 'IN_GMAIL_UNRECORDED', 'appended']]) {
+    const ID = `QA-FACT-${n}`
+    const tag = `T-${code}`
+    const number = `${TM}${TD}${TY}-${n}`
+    const messageId = `<qa-factoring-${n}.auto-invoice@example.com>`
+    const s = await freshServer(SETTINGS_ON)
+    s.addLoad(ID, 'Delivered')
+    s.gmail.add(messageId)
+    s.seedClaim(ID, { state: 'needs_attention', reason_code: code, stage, delivery: '', invoice_id: number, invoice_date: TODAY, reserved_at: new Date().toISOString(), message_id: messageId,
+      sent_json: JSON.stringify({ to: BILLING, subject: `Example Freight Order #${ID}`, total: '$1,234.00' }) })
+    const { ctx, page, dialogs } = await openPage(browser, s, LISTED)
+    try {
+      await openTab(page, 'Completed')
+      const opened = await openLoad(page, ID)
+      if (!opened) {
+        record(`${tag}-open`, 'Completed Loads opens the load', 'the load dialog', `opened ${opened}`, false)
+        continue
+      }
+      const marked = await markInDialog(page, dialogs)
+      const noPrompt = dialogs.seen.length === 0
+      const shownFirst = WORDS.dontSend.reason('the invoice draft')
+      const line = await dialogLineOf(page)
+      const lineFile = await shot(page, `${tag}-marked`)
+      record(`${tag}-marked`, `${code}, marked with no question: the dialog says not to send it`, `no question; the line opens "${WORDS.dontSend.label}. ${shownFirst}"; Try again still offered`,
+        `marked ${marked}, questions ${dialogs.seen.length}, line "${line.text}", buttons ${JSON.stringify(line.buttons)}`,
+        marked && noPrompt && line.tone === WORDS.dontSend.tone && line.text.startsWith(`${WORDS.dontSend.label}. ${shownFirst}`) && line.buttons.includes('Try again'), lineFile)
+
+      dialogs.plan.push({ accept: true })
+      await page.locator(`${DIALOG} .auto-line button`, { hasText: 'Try again' }).click({ timeout: 5000 })
+      const recorded = await until(() => (s.claim(ID) || {}).state === 'drafted')
+      await closeLoad(page)
+      await reloadCompleted(page)
+      const reopened = await openLoad(page, ID)
+      const chip = await rowChipOf(page, ID)
+      const after = reopened ? await dialogLineOf(page) : {}
+      const inDialog = reopened ? await dialogText(page) : ''
+      const want = WORDS.dontSend.reason(`invoice ${number}`)
+      const afterFile = await shot(page, `${tag}-recorded`)
+      record(`${tag}-recorded`, `${code}: Try again records the draft, and the row still says not to send it`, `one POST after "${WORDS.retrySearch}"; drafted; row chip and dialog "${WORDS.dontSend.label}"; "${WORDS.oldSend}" nowhere; no SMTP, no append`,
+        `posts ${s.retryPosts.length}, question "${dialogs.seen[dialogs.seen.length - 1] || ''}", recorded ${recorded}, row ${JSON.stringify(chip)}, dialog ${JSON.stringify(after)}, old words shown ${inDialog.includes(WORDS.oldSend)}, SMTP ${s.smtp.length}, appends ${s.appends.length}`,
+        s.retryPosts.length === 1 && dialogs.seen[dialogs.seen.length - 1] === WORDS.retrySearch && recorded && chipIs(chip, WORDS.dontSend, want) && lineIs(after, WORDS.dontSend, want)
+          && !inDialog.includes(WORDS.oldSend) && s.smtp.length === 0 && s.appends.length === 0, afterFile)
+    } finally {
+      await ctx.close()
+      s.db.close()
+    }
+  }
+}
+
+// ---------------------------------------------------------------- C: marked, tapped, cleared
+async function clearedRun(browser) {
+  const ID = 'QA-FACT-9301'
+  const s = await freshServer(SETTINGS_ON)
+  s.addLoad(ID, 'At Receiver')
+  await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(ID) }, { factored: true, reason: REASON, loadId: ID })
+  s.tap(ID)
+  const stopped = await until(() => { const c = s.claim(ID); return Boolean(c && c.state === 'skipped' && c.reason_code === 'LOAD_FACTORED') })
+  const { ctx, page, dialogs } = await openPage(browser, s, LISTED)
+  try {
+    await openTab(page, 'Completed')
+    const opened = await openLoad(page, ID)
+    if (!opened) {
+      record('C-open', 'Completed Loads opens the marked load', 'the load dialog', `stopped ${stopped}, opened ${opened}`, false)
+      return
+    }
+    const whileMarked = await rowChipOf(page, ID)
+    record('C-marked', 'Marked and tapped: the run stops on the mark, and the row has no job chip', 'skipped LOAD_FACTORED; no chip; no draft, send or number',
+      `stopped ${stopped}, chips ${whileMarked.count}, appends ${s.appends.length}, SMTP ${s.smtp.length}, number "${(s.claim(ID) || {}).invoice_id || ''}"`,
+      stopped && whileMarked.count === 0 && s.appends.length === 0 && s.smtp.length === 0 && !(s.claim(ID) || {}).invoice_id)
+
+    await page.locator('.fact-reason').fill(REASON)
+    await page.locator('.fact-btn', { hasText: 'Clear factored' }).click({ timeout: 5000 })
+    const shown = await appears(page, '.fact-result--ok', 8000)
+    const answer = shown ? await locText(page.locator('.fact-result--ok')) : ''
+    await closeLoad(page)
+    await reloadCompleted(page)
+    const reopened = await openLoad(page, ID)
+    const chip = await rowChipOf(page, ID)
+    const line = reopened ? await dialogLineOf(page) : {}
+    const file = await shot(page, 'C-cleared')
+    record('C-cleared', 'Cleared: a chip of its own, with nothing to retry', `"${WORDS.clearedDone}"; row chip "${WORDS.cleared.label}", amber, its title "${WORDS.cleared.reason}"; the dialog the same, with no button on its line`,
+      `answer "${answer}", row ${JSON.stringify(chip)}, dialog ${JSON.stringify(line)}`,
+      answer === WORDS.clearedDone && chipIs(chip, WORDS.cleared, WORDS.cleared.reason) && lineIs(line, WORDS.cleared, WORDS.cleared.reason) && line.buttons.length === 0, file)
+    await pressDraftInvoice(page)
+    const claim = s.claim(ID) || {}
+    record('C-by-hand', 'No automatic send comes back, and a person can draft it', `the press passes the check and reaches prepare(), this load only; the claim stays skipped LOAD_FACTORED; no append, no SMTP, no number; no browser question`,
+      `reached prepare ${JSON.stringify(s.reachedPrepare)}, claim ${claim.state} ${claim.reason_code}, appends ${s.appends.length}, SMTP ${s.smtp.length}, number "${claim.invoice_id || ''}", questions ${dialogs.seen.length}`,
+      s.reachedPrepare.length === 1 && s.reachedPrepare[0] === ID && claim.state === 'skipped' && claim.reason_code === 'LOAD_FACTORED' && s.appends.length === 0 && s.smtp.length === 0 && !claim.invoice_id && dialogs.seen.length === 0)
+  } finally {
+    await ctx.close()
+    s.db.close()
+  }
+}
+
 // ---------------------------------------------------------------- G: nothing left this machine
 function wireStep() {
   const hosts = [...offHost].sort()
   const mailHosts = hosts.filter((h) => /mail|imap|smtp/i.test(h))
-  record('G', 'The browser stayed on this machine', 'no socket off this machine and no mail host asked (any other host it asked was aborted, and is only reported)',
-    `sockets off this machine ${offHostSockets.length}, hosts aborted ${hosts.join(',') || 'none'}`, offHostSockets.length === 0 && mailHosts.length === 0)
+  record('G', 'Nothing left this machine', 'no TLS connection, no socket to another host or a mail port; no browser socket off this machine and no mail host asked (any other host it asked was aborted, and is only reported)',
+    `TLS ${wire.tls.length}, remote ${wire.remote.length}, mail ports ${wire.mailPorts.length}, browser sockets off this machine ${offHostSockets.length}, hosts aborted ${hosts.join(',') || 'none'}`,
+    wire.tls.length === 0 && wire.remote.length === 0 && wire.mailPorts.length === 0 && offHostSockets.length === 0 && mailHosts.length === 0)
 }
 
 async function main() {
@@ -513,7 +860,7 @@ async function main() {
   console.log(`factoring-mark-usable: serving ${DIST} on ${BASE} (made-up data; no server.js, no mailbox)`)
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
-    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun]]) {
+    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun], ['D', draftRun], ['T', tryAgainRun], ['C', clearedRun]]) {
       try {
         await run(browser)
       } catch (e) {
