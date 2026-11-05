@@ -63,7 +63,17 @@ const view = read(VIEW)
 
 const scriptOf = (src) => (src.match(/<script setup>([\s\S]*?)<\/script>/) || [])[1] || ''
 const styleOf = (src) => (src.match(/<style scoped>([\s\S]*?)<\/style>/) || [])[1] || ''
-const templateOf = (src) => src.slice(0, Math.max(0, src.indexOf('<script'))).replace(/<!--[\s\S]*?-->/g, '')
+// Repeats until stable: removing one comment can join the text around it into another.
+const stripHtmlComments = (text) => {
+  let out = text
+  let before
+  do {
+    before = out
+    out = out.replace(/<!--[\s\S]*?-->/g, '')
+  } while (out !== before)
+  return out
+}
+const templateOf = (src) => stripHtmlComments(src.slice(0, Math.max(0, src.indexOf('<script'))))
 // Code with comments and quoted strings removed. Template literals stay, so arithmetic in a
 // ${...} still shows.
 const codeOf = (src) => src.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, ' ')
