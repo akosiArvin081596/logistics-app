@@ -35,6 +35,7 @@ import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { serverSource } from './lib/server-source.js'
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -478,7 +479,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
   ok(/Reload this page in \d+ minutes and open this load again\. If this line is still here, draft it by hand\.$/.test(R.NOT_COMPLETED.text), '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: a person reloads and opens the load again before judging the line')
   ok(!/a few minutes later/.test(R.NOT_COMPLETED.text), '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: waiting on an open page is no test: the line never moves there')
   // With the driver's trigger off, the sweep ticks on this timer and a slow run can skip one tick.
-  const tick = /const AUTO_INVOICE_TICK_MS = (\d+) \* 60 \* 1000;/.exec(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'))
+  const tick = /const AUTO_INVOICE_TICK_MS = (\d+) \* 60 \* 1000;/.exec(serverSource())
   eq(Number((/Reload this page in (\d+) minutes/.exec(R.NOT_COMPLETED.text) || [])[1]), tick && Number(tick[1]) * 2, '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: the wait covers the sweep\'s tick and one tick skipped behind a slow run')
   eq(R.SETTINGS_UNREADABLE && R.SETTINGS_UNREADABLE.short, 'settings unreadable', '§11 FAILS ON THE OLD CODE: SETTINGS_UNREADABLE names the settings, not one list')
   ok(!/within a few minutes/.test(R.WAITING_POD.text), '§11 WAITING_POD promises no time: nothing but the sweep could keep one')
