@@ -13,7 +13,7 @@ import './assets/shared.css'
 // a <link rel="stylesheet"> in the HTML.
 applyWebFonts()
 
-// Every page answers another tab's question from here on (lib/appTabs.js).
+// Every page counts as an open tab from here on (lib/appTabs.js).
 thisPageTabs()
 
 Locale.use('en-US', enUS)

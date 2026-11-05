@@ -49452,15 +49452,15 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
-		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
-		// truck has been stopped, from its recent clean fixes taken since the
-		// link: the last fix above the moving threshold, else the oldest one read
-		// (stopped at least since then). Null while the latest fix is moving.
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js) and the driver
+		// release sign-out: since when the truck has been stopped, from its recent
+		// clean fixes taken since the link. Null when that can't be shown, which
+		// the driver app reads as not stopped long enough.
 		// Bounded: at most 120 rows of the same index read as above.
 		let stoppedSinceMs = null;
 		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
 			const recent = db.prepare(
-				`SELECT speed, location_date_ms FROM routemate_telemetry
+				`SELECT speed, latitude, longitude, location_date_ms FROM routemate_telemetry
 				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 				  ORDER BY id DESC LIMIT 120`
 			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));

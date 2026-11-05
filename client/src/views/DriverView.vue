@@ -1182,6 +1182,7 @@ const release = useDriverRelease({
     dialogOpen: releaseDialogOpen() || !!assignedNotification.value || respondingLoadIds.size > 0 || fieldInFocus(document) || overlayOnScreen(document),
     loadsHold: loadsHoldSignOut(driverStore.loads, driverStore.headers.jobTracking),
     writesBusy: writesBusy(),
+    otherTabOpen: thisPageTabs().otherPageOpen(),
     visible: document.visibilityState === 'visible',
     online: navigator.onLine !== false && !auth.isReconnecting,
     parked: voiceGate.value.state === 'parked',
@@ -1190,7 +1191,6 @@ const release = useDriverRelease({
     await driverStore.loadData({ quiet: true })
     if (await driverPos.refreshEld() !== true) throw new Error('no fresh truck reading')
   },
-  askOtherTabs: () => thisPageTabs().ask(),
   signOut: handleLogout,
   place: () => currentTab.value,
   showStep: showTourStep,

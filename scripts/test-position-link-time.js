@@ -364,9 +364,25 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		const m = world({ fixes: [{ ago: 5 * MIN, at: NEAR }, { ago: 1 * MIN, at: NEAR, speed: 20 }] });
 		const pm = ((await m.driver()).body || {}).position || {};
 		ok("§3 stoppedSinceMs: null while the latest fix is moving", pm.stoppedSinceMs === null, pm.stoppedSinceMs);
-		const l = world({ fixes: [{ ago: 60 * MIN, at: NEAR, speed: 20 }, { ago: 5 * MIN, at: NEAR }], link: { ago: 10 * MIN, by: "admin_test" } });
+		const l = world({ fixes: [{ ago: 60 * MIN, at: NEAR, speed: 20 }, { ago: 5 * MIN, at: NEAR }, { ago: 1 * MIN, at: NEAR }], link: { ago: 10 * MIN, by: "admin_test" } });
 		const pl = ((await l.driver()).body || {}).position || {};
 		ok("§3 stoppedSinceMs: a moving fix from before the link is not counted", pl.stoppedSinceMs === l.fixMs[1], pl.stoppedSinceMs);
+		// A feed that sends no speed stores 0, which alone can't say the truck stopped: the positions must too.
+		const roadA = { lat: 30.4, lng: -95.6 };
+		const roadB = { lat: 30.41, lng: -95.6 };
+		const roadC = { lat: 30.42, lng: -95.6 };
+		const nearby = { lat: 30.4001, lng: -95.6 };
+		const stoppedSince = async (w) => (((await w.driver()).body || {}).position || {}).stoppedSinceMs;
+		const onRoad = world({ fixes: [{ ago: 3 * MIN, at: roadA }, { ago: 2 * MIN, at: roadB }, { ago: 1 * MIN, at: roadC }] });
+		ok("§3 stoppedSinceMs: fixes moving, no speed: none, on the route's own read of them", await stoppedSince(onRoad) === null);
+		const still = world({ fixes: [{ ago: 10 * MIN, at: roadA }, { ago: 5 * MIN, at: nearby }, { ago: 1 * MIN, at: roadA }] });
+		ok("§3 stoppedSinceMs: fixes still, no speed: the oldest read", await stoppedSince(still) === still.fixMs[0]);
+		const single = world({ fixes: [{ ago: 1 * MIN, at: roadA }] });
+		ok("§3 stoppedSinceMs: one fix only: none", await stoppedSince(single) === null);
+		const jump = world({ fixes: [{ ago: 3 * MIN, at: roadA }, { ago: 2 * MIN, at: AWAY }, { ago: 1 * MIN, at: roadA }] });
+		ok("§3 stoppedSinceMs: a jump from a bad fix: none", await stoppedSince(jump) === null);
+		const linked = world({ fixes: [{ ago: 60 * MIN, at: AWAY }, { ago: 5 * MIN, at: roadA }, { ago: 1 * MIN, at: roadA }], link: { ago: 10 * MIN, by: "admin_test" } });
+		ok("§3 stoppedSinceMs: a fix elsewhere from before the link is not a move", await stoppedSince(linked) === linked.fixMs[1]);
 	}
 
 	// ══ §4 GET /api/public/track/:loadId ═════════════════════════════════════

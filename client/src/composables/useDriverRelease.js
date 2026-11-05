@@ -83,13 +83,8 @@ export function useDriverRelease(o) {
       return
     }
     if (!current()) return
-    const moment = (otherTabOpen) => signOutMoment({ ...o.signOutInputs(), role: o.role(), signInDue: true, tourOpen: tourOpen.value, otherTabOpen })
-    // Already held, whatever the other tabs say: no need to ask them.
-    if (!moment(false)) return
-    const otherTabOpen = await o.askOtherTabs()
-    if (!current()) return
     // No await from this check to the sign-out, so what it read is what's on screen.
-    if (!moment(otherTabOpen)) return
+    if (!signOutMoment({ ...o.signOutInputs(), role: o.role(), signInDue: true, tourOpen: tourOpen.value })) return
     if (!rememberSignOut(local, userId, next.releaseId)) return
     signingOut = true
     leaveLoginNote(session, now())

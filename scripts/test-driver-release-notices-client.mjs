@@ -26,8 +26,9 @@
 //   §14 only the driver app and the session store read any of it
 //   §15 the real driver store and the real truck read, over a stubbed fetch: a reply whose body drops, an
 //       empty list, a truck with no reading and a failed read of it all hold the sign-out
-//   §16 lib/appTabs.js over Node's own BroadcastChannel: another page answers, a page never answers
-//       itself, the wait is bounded, and a browser that can't ask says so
+//   §16 lib/appTabs.js: each page's record in the browser's storage: another page's holds, frozen or
+//       silent too, until it leaves or a day has passed; a page's own never does; a browser that can't
+//       keep them says so; they hold no name or account and can't pile up
 //
 // No DOM, no server, no build.
 //   node scripts/test-driver-release-notices-client.mjs      # exits 1 on any failure
@@ -105,7 +106,7 @@ for (const line of allWords) {
 }
 const fuelStep = TOUR_STEPS.find((s) => s.id === 'fuel-range').text
 ok("the fuel step says what it isn't", /not your load or route/.test(fuelStep))
-ok('the fuel step says when: a truck with no reading shows no figure', /when your truck reports its fuel level/i.test(fuelStep))
+eq("the fuel step, exact: it says when, since no reading or no tank size on file shows no figure", fuelStep, "The top of the app shows your fuel range when it's known: how many miles you have left until empty. It's about your tank, not your load or route.")
 eq('the performance step says most weeks: a week of time off can have no required figure', TOUR_STEPS.find((s) => s.id === 'performance').text, "Your week is here: what counted, your target and, most weeks, what's required. No other driver can see it.")
 ok("nothing else claims what's required without saying most weeks", allWords.every((line) => !/what's required/.test(line) || /most weeks/.test(line)))
 
@@ -133,8 +134,8 @@ const HOLDS = [
   ['something being sent', { writesBusy: true }],
   ['another window has the screen', { visible: false }],
   ['no signal', { online: false }],
-  ['another tab of the app answers', { otherTabOpen: true }],
-  ["a browser that can't ask the other tabs", { otherTabOpen: null }],
+  ['another tab of the app is open', { otherTabOpen: true }],
+  ["a browser that can't tell about the other tabs", { otherTabOpen: null }],
   ['a truck that does not read as parked', { parked: false }],
   ['a truck with no reading: not moving is not enough', { parked: false, motionAllowed: true }],
 ]
@@ -226,7 +227,10 @@ eq('no card past the end', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, 
 section('7 what the browser keeps')
 function fakeStorage(init = {}) {
   const m = new Map(Object.entries(init))
-  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)) }, removeItem: (k) => { m.delete(k) }, keys: () => [...m.keys()], values: () => [...m.values()] }
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)) }, removeItem: (k) => { m.delete(k) }, keys: () => [...m.keys()], values: () => [...m.values()],
+    get length() { return m.size }, key: (i) => [...m.keys()][i] ?? null,
+  }
 }
 const brokenStorage = () => ({ getItem() { throw new Error('private mode') }, setItem() { throw new Error('private mode') }, removeItem() { throw new Error('private mode') } })
 {
@@ -341,7 +345,6 @@ function world(start = {}) {
     answer: () => ({ signInDue: false, releaseId: ID, notes: [], tourOffered: false }),
     fresh: null,
     otherTab: false,
-    duringAsk: null,
     local: fakeStorage(),
     session: fakeStorage(),
   }
@@ -359,10 +362,9 @@ function world(start = {}) {
     noteInputs: () => ({ onboarding: s.onboarding, settled: s.settled, partsKnown: s.partsKnown, tab: s.tab, loadOpen: s.loadOpen, welcomeOpen: s.welcomeOpen, dialogOpen: s.dialogOpen, motionAllowed: s.motionAllowed }),
     signOutInputs: () => ({
       loaded: s.loaded, onboarding: s.onboarding, tab: s.tab, loadOpen: s.loadOpen, welcomeOpen: s.welcomeOpen, dialogOpen: s.dialogOpen,
-      loadsHold: lib.loadsHoldSignOut(s.loads, LOAD_HEADERS), writesBusy: s.writesBusy, visible: s.visible, online: s.online, parked: s.parked, motionAllowed: s.motionAllowed,
+      loadsHold: lib.loadsHoldSignOut(s.loads, LOAD_HEADERS), writesBusy: s.writesBusy, otherTabOpen: box.otherTab, visible: s.visible, online: s.online, parked: s.parked, motionAllowed: s.motionAllowed,
     }),
-    refreshFacts: async () => { calls.facts++; if (box.fresh) await box.fresh(s) },
-    askOtherTabs: async () => { calls.asks++; if (box.duringAsk) await box.duringAsk(s); return box.otherTab },
+    refreshFacts: async () => { calls.facts++; if (box.fresh) await box.fresh(s, box) },
     signOut: () => { calls.signOuts++ },
     place: () => s.tab,
     showStep: (step) => { calls.steps.push(step.id); s.tab = step.tab },
@@ -384,7 +386,6 @@ section('10 the sign-out')
   await w.release.check()
   eq('due and safe: signed out, once', w.calls.signOuts, 1)
   eq('his loads and truck read first', w.calls.facts, 1)
-  eq('the other tabs asked first, once', w.calls.asks, 1)
   eq('the login page gets its line', lib.takeLoginNote(w.box.session, 1_800_000_000_000), true)
   eq('this browser remembers', lib.signedOutFor(w.box.local, 2, ID), true)
   await w.release.check()
@@ -455,13 +456,13 @@ for (const status of ['In Transit', 'Assigned', 'Heading to Shipper', 'At Shippe
   w.box.answer = DUE
   w.box.otherTab = true
   await w.release.check()
-  eq('another tab of the app answers: held', [w.calls.signOuts, w.calls.asks], [0, 1])
+  eq('another tab of the app is open: held', w.calls.signOuts, 0)
   eq('...and nothing is recorded, so it can happen later', lib.signedOutFor(w.box.local, 2, ID), false)
   w.box.otherTab = false
   await w.release.check()
   eq('...and once the other tab has closed, the next moment signs him out', w.calls.signOuts, 1)
 }
-for (const [label, answer] of [["a browser that can't ask", null], ['no answer at all', undefined]]) {
+for (const [label, answer] of [["a browser that can't tell", null], ['no answer at all', undefined]]) {
   const w = world()
   w.box.answer = DUE
   w.box.otherTab = answer
@@ -469,27 +470,17 @@ for (const [label, answer] of [["a browser that can't ask", null], ['no answer a
   eq(`${label}: held, as any missing input is`, w.calls.signOuts, 0)
 }
 {
-  const w = world({ dialogOpen: true })
-  w.box.answer = DUE
-  await w.release.check()
-  eq('a moment already held asks no other tab', [w.calls.signOuts, w.calls.asks], [0, 0])
-}
-for (const [label, change] of [
-  ['opens a dialog while the tabs answer', { dialogOpen: true }],
-  ['opens a load while the tabs answer', { loadOpen: true }],
-  ['taps a status while the tabs answer', { writesBusy: true }],
-  ['leaves the view while the tabs answer', { mounted: false }],
-]) {
   const w = world()
   w.box.answer = DUE
-  w.box.duringAsk = async (s) => { Object.assign(s, change) }
+  w.box.fresh = async (s, box) => { box.otherTab = true }
   await w.release.check()
-  eq(`he ${label}: the last check sees it, held`, [w.calls.signOuts, w.calls.asks], [0, 1])
+  eq('a tab opened while it read: the last check sees it, held', w.calls.signOuts, 0)
 }
 {
   const source = read('composables/useDriverRelease.js')
-  const tail = source.slice(source.indexOf('if (!moment(otherTabOpen)) return'), source.indexOf('o.signOut()'))
+  const tail = source.slice(source.indexOf('if (!signOutMoment('), source.indexOf('o.signOut()'))
   ok('no await from the last check to the sign-out', tail.length > 0 && !/\bawait\b/.test(tail), tail)
+  ok('nothing waits on another tab: the record is read in that last check', !/askOtherTabs|BroadcastChannel/.test(source))
 }
 for (const [label, change] of [
   ['opens a load while it reads', { loadOpen: true }],
@@ -944,7 +935,7 @@ ok('a socket reconnect does not ask', !/isConnected\.value[\s\S]{0,200}release\.
 ok('a working load is read from the whole list, not just workingLoads', /loadsHold: loadsHoldSignOut\(driverStore\.loads, driverStore\.headers\.jobTracking\)/.test(script))
 ok('the note and the tour, by the same gate as the contacts prompt', /motionAllowed: \(\) => voiceGate\.value\.allowed/.test(script) && /settled: contactsPromptReady\.value[\s\S]{0,300}motionAllowed: voiceGate\.value\.allowed/.test(script))
 ok('the sign-out, only by a truck that reads as parked', /parked: voiceGate\.value\.state === 'parked'/.test(script))
-ok('the other tabs are asked through the page\'s one channel', /askOtherTabs: \(\) => thisPageTabs\(\)\.ask\(\)/.test(script))
+ok("the other tabs are read from the page's one record, at each check", /signOutInputs: \(\) => \(\{[\s\S]{0,700}otherTabOpen: thisPageTabs\(\)\.otherPageOpen\(\),/.test(script))
 ok('a load opened, a window up, a new load banner, an accept in flight, a field in focus, any overlay: all hold it',
   /const loadPageOpen = \(\) => !!detailLoad\.value/.test(script) && [...script.matchAll(/loadOpen: loadPageOpen\(\)/g)].length === 2 && /dialogOpen: releaseDialogOpen\(\) \|\| !!assignedNotification\.value \|\| respondingLoadIds\.size > 0 \|\| fieldInFocus\(document\) \|\| overlayOnScreen\(document\)/.test(script))
 ok('a load that failed to read holds it', /loaded: !initialLoadFailed\.value/.test(script))
@@ -1013,7 +1004,7 @@ const cutShort = () => () => new Response('{"loads":[{"_rowIndex":2,', { status:
 const noBody = () => () => new Response('', { status: 200 })
 const truck = ({ speed = 0, age = 5000, stopped = 10 * 60 * 1000 } = {}) => () => jsonReply({
   ok: true,
-  position: { latitude: 29.7, longitude: -95.3, speed, source: 'routemate', lastPingAge: age, timestamp: new Date(Date.now() - age).toISOString(), ...(speed === 0 ? { stoppedSinceMs: Date.now() - stopped } : {}) },
+  position: { latitude: 29.7, longitude: -95.3, speed, source: 'routemate', lastPingAge: age, timestamp: new Date(Date.now() - age).toISOString(), ...(speed === 0 ? { stoppedSinceMs: stopped === null ? null : Date.now() - stopped } : {}) },
 })
 const noReading = () => () => jsonReply({ ok: true, position: null, reason: 'no_recent_fix' })
 const refusedRead = () => () => jsonReply({ error: 'x' }, 503)
@@ -1022,7 +1013,7 @@ const noSignal = () => () => { throw new TypeError('Failed to fetch') }
 const refreshFactsText = (script.match(/refreshFacts: (async \(\) => \{[\s\S]*?\n {2}\}),/) || [])[1]
 ok('(the scene) the view reads its facts in one place', !!refreshFactsText)
 
-async function realCheck({ loads, reading, before = null, holding = 'In Transit', otherTab = false }) {
+async function realCheck({ loads, reading, before = null, holding = 'In Transit', otherTab = () => false }) {
   piniaModule.setActivePinia(piniaModule.createPinia())
   const store = useDriverStore()
   store.driverName = DRIVER_NAME
@@ -1055,11 +1046,10 @@ async function realCheck({ loads, reading, before = null, holding = 'In Transit'
     noteInputs: () => ({}),
     signOutInputs: () => ({
       loaded: true, onboarding: false, tab: 'loads', loadOpen: false, welcomeOpen: false, dialogOpen: false,
-      loadsHold: lib.loadsHoldSignOut(store.loads, store.headers.jobTracking), writesBusy: false, visible: true, online: true,
+      loadsHold: lib.loadsHoldSignOut(store.loads, store.headers.jobTracking), writesBusy: false, otherTabOpen: otherTab(), visible: true, online: true,
       parked: gate().state === 'parked', motionAllowed: gate().allowed,
     }),
     refreshFacts: new Function('driverStore', 'driverPos', `return ${refreshFactsText}`)(store, pos),
-    askOtherTabs: async () => otherTab,
     signOut: () => { signOuts++ },
     place: () => 'loads',
     showStep: () => {},
@@ -1086,51 +1076,227 @@ for (const [label, reading, state] of [
   ['moving when last read, over three minutes ago', truck({ speed: 25, age: 4 * 60 * 1000 }), 'unknown'],
   ['moving', truck({ speed: 25 }), 'moving'],
   ['stopped under two minutes', truck({ stopped: 30 * 1000 }), 'stopping'],
+  ["moving on a feed that sends no speed, so the server sends no stopped time", truck({ stopped: null }), 'stopping'],
 ]) {
   const r = await realCheck({ loads: payload('Delivered'), reading })
   eq(`his loads delivered, the truck ${label}: held`, [r.state, r.signOuts], [state, 0])
+}
+{
+  const r = await realCheck({ loads: payload('Delivered'), reading: truck({ stopped: null }), before: PARKED })
+  eq('a truck that read parked and then moves with no speed: held, the earlier stop is not carried', [r.state, r.signOuts], ['stopping', 0])
 }
 for (const [label, reading] of [['refused (503)', refusedRead()], ['with no signal', noSignal()]]) {
   const r = await realCheck({ loads: payload('Delivered'), reading, before: PARKED })
   eq(`a truck read ${label}, with an earlier reading still saying parked: held, since that's no reading of now`, [r.state, r.signOuts], ['parked', 0])
 }
-eq('another tab answers: held', (await realCheck({ loads: payload('Delivered'), reading: PARKED, otherTab: true })).signOuts, 0)
 
 // ── §16 ───────────────────────────────────────────────────────────────────
 section('16 lib/appTabs.js')
 const appTabs = await load('lib/appTabs.js').catch(() => null)
 ok('the module is there', !!appTabs)
 if (appTabs) {
-  const { openAppTabs, thisPageTabs, TAB_ANSWER_WAIT_MS } = appTabs
-  const lonely = openAppTabs(BroadcastChannel, 60)
-  const started = Date.now()
-  eq('alone: no answer, after the wait', await lonely.ask(), false)
-  ok('...which is bounded', Date.now() - started < 5000)
-  lonely.close()
-  // A long wait here, cut short by the answer, so a busy machine can't read a slow answer as none.
-  const a = openAppTabs(BroadcastChannel, 5000)
-  const b = openAppTabs(BroadcastChannel, 5000)
-  eq('another page answers', await a.ask(), true)
-  eq('...and the other way round', await b.ask(), true)
-  const [first, second] = await Promise.all([a.ask(), a.ask()])
-  eq('two questions at once are both answered', [first, second], [true, true])
-  a.close()
-  b.close()
-  eq('a closed channel can no longer tell', await a.ask(), null)
-  const after = openAppTabs(BroadcastChannel, 60)
-  eq('once the others have closed, none answers', await after.ask(), false)
-  after.close()
-  eq("a browser with no BroadcastChannel can't tell", await openAppTabs(null).ask(), null)
-  class Refuses { constructor() { throw new Error('refused') } }
-  eq("a channel that won't open can't tell", await openAppTabs(Refuses).ask(), null)
-  class Mute { postMessage() { throw new Error('closing') } close() {} }
-  eq("a channel that won't post can't tell", await openAppTabs(Mute).ask(), null)
-  class Silent { postMessage() {} close() {} }
-  eq('a channel nobody answers on: no, in time', await openAppTabs(Silent, 5).ask(), false)
-  ok('the real wait is short', TAB_ANSWER_WAIT_MS > 0 && TAB_ANSWER_WAIT_MS <= 1000)
-  eq('one channel to a page', thisPageTabs(), thisPageTabs())
-  thisPageTabs().close()
-  ok('every page opens it at start', /thisPageTabs\(\)/.test(read('main.js')))
+  const { openAppTabs, thisPageTabs, RECORD_MAX_AGE_MS, RECORD_REWRITE_MS } = appTabs
+  const NOW = 1_800_000_000_000
+  const HOUR = 60 * 60 * 1000
+  const PREFIX = 'logisx.appPage.v1.'
+  // One browser's storage and clock; each page opened on it has its own window and document events.
+  function browser(init = {}) {
+    const clock = { ms: NOW }
+    const storage = fakeStorage(init)
+    // A listener's throw reaches the test here, where a real EventTarget would report it elsewhere.
+    const events = () => {
+      const on = new Map()
+      return { addEventListener: (type, fn) => on.set(type, [...(on.get(type) || []), fn]), fire: (type, event = {}) => (on.get(type) || []).forEach((fn) => fn(event)) }
+    }
+    const open = (over = storage) => {
+      const page = events()
+      const doc = Object.assign(events(), { visibilityState: 'visible' })
+      const beats = []
+      const tabs = openAppTabs(over, { now: () => clock.ms, page, doc, every: (fn) => beats.push(fn) })
+      return {
+        tabs, page, doc,
+        // Its timer coming round, for a page that's running. A frozen or dead one never gets this.
+        beat: () => beats.forEach((fn) => fn()),
+        leave: () => page.fire('pagehide'),
+        comeBackFromCache: () => page.fire('pageshow', { persisted: true }),
+        show: () => { doc.visibilityState = 'visible'; doc.fire('visibilitychange') },
+        hide: () => { doc.visibilityState = 'hidden'; doc.fire('visibilitychange') },
+      }
+    }
+    const records = () => storage.keys().filter((k) => k.startsWith(PREFIX))
+    return { clock, storage, open, records }
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    eq('alone: no other page', a.tabs.otherPageOpen(), false)
+    const other = b.open()
+    eq('another page: open', a.tabs.otherPageOpen(), true)
+    eq('...and the other way round', other.tabs.otherPageOpen(), true)
+    eq('two pages, two records', b.records().length, 2)
+    other.leave()
+    eq('it leaves: none again, with no one asked', a.tabs.otherPageOpen(), false)
+    eq('...and its record is gone', b.records().length, 1)
+    a.leave()
+    eq('the last page leaves: no records', b.records().length, 0)
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    const frozen = b.open()
+    // A frozen or busy page runs nothing at all: no handler, no timer. Its record does the holding.
+    b.clock.ms += 3 * HOUR
+    eq('another page that has run nothing for hours (frozen, or too busy to answer): still open', a.tabs.otherPageOpen(), true)
+    frozen.comeBackFromCache()
+    eq('it comes back: still open', a.tabs.otherPageOpen(), true)
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    const other = b.open()
+    other.leave()
+    eq('a page gone into the page cache has left', a.tabs.otherPageOpen(), false)
+    other.comeBackFromCache()
+    eq('...and writes itself again on the way back', a.tabs.otherPageOpen(), true)
+    eq('...under the same one record', b.records().length, 2)
+  }
+  {
+    const b = browser({ [`${PREFIX}deadtab`]: String(NOW - (RECORD_MAX_AGE_MS - 1000)) })
+    const a = b.open()
+    eq('a tab that died without saying so holds, up to a day', a.tabs.otherPageOpen(), true)
+    eq("...and starting a page leaves a record that hasn't expired", b.records().includes(`${PREFIX}deadtab`), true)
+    b.clock.ms += 1000
+    eq('...and no longer once it has been a day: exactly a day does not count', a.tabs.otherPageOpen(), false)
+    eq('...and an expired record is only ignored until a page starts', b.records().includes(`${PREFIX}deadtab`), true)
+    b.open()
+    eq('...when it goes', b.records().includes(`${PREFIX}deadtab`), false)
+  }
+  {
+    const expired = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`${PREFIX}dead${i}`, String(NOW - RECORD_MAX_AGE_MS - i)]))
+    const b = browser({ ...expired, [`${PREFIX}young`]: String(NOW - HOUR), [`${PREFIX}garbled`]: 'not a time', 'logisx.other': String(NOW - 9 * RECORD_MAX_AGE_MS), [lib.LOGIN_NOTE_KEY]: '1' })
+    b.open()
+    eq("records can't pile up: every expired or garbled one goes when a page starts, past any that came before it", b.records().length, 2)
+    eq("...the young one stays", b.records().includes(`${PREFIX}young`), true)
+    eq("...and nothing else in the browser's storage is touched", [b.storage.getItem('logisx.other'), b.storage.getItem(lib.LOGIN_NOTE_KEY)], [String(NOW - 9 * RECORD_MAX_AGE_MS), '1'])
+    const garbled = browser({ [`${PREFIX}garbled`]: 'not a time' })
+    const a = garbled.open()
+    garbled.storage.setItem(`${PREFIX}garbled`, 'not a time')
+    eq("a record that isn't a time doesn't count", a.tabs.otherPageOpen(), false)
+    const ahead = browser({ [`${PREFIX}ahead`]: String(NOW + 2 * RECORD_MAX_AGE_MS) })
+    eq('a record stamped ahead of this clock counts: a clock put back holds, and costs only the next sign-in', ahead.open().tabs.otherPageOpen(), true)
+  }
+  {
+    const b = browser({ 'logisx.other': String(NOW) })
+    const a = b.open()
+    eq('a key of something else is no other page', a.tabs.otherPageOpen(), false)
+    const key = b.records()[0]
+    ok("a record is a random page id and a time: no name, no account", /^logisx\.appPage\.v1\.[a-z0-9]+$/.test(key) && /^\d+$/.test(b.storage.getItem(key)), key)
+    eq('...the time this page wrote it', Number(b.storage.getItem(key)), NOW)
+    ok('...and two pages never share an id', b.open() && new Set(b.records()).size === 2)
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    const key = b.records()[0]
+    b.clock.ms += 25 * HOUR
+    a.hide()
+    eq('going hidden writes nothing', Number(b.storage.getItem(key)), NOW)
+    a.show()
+    eq('a tab in use again is counted again past a day: coming back writes the time', Number(b.storage.getItem(key)), b.clock.ms)
+    const other = b.open()
+    eq('...so another page sees it', other.tabs.otherPageOpen(), true)
+    b.clock.ms += RECORD_MAX_AGE_MS
+    other.comeBackFromCache()
+    eq('...and a record left to expire no longer holds', other.tabs.otherPageOpen(), false)
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    const running = b.open()
+    for (let h = 0; h < 30; h++) {
+      b.clock.ms += RECORD_REWRITE_MS
+      running.beat()
+      a.beat()
+    }
+    eq('a tab that keeps running stays counted however long it is left, hidden or not, as long as it would have answered', a.tabs.otherPageOpen(), true)
+    const b2 = browser()
+    const c = b2.open()
+    b2.open()
+    b2.clock.ms += RECORD_MAX_AGE_MS
+    c.beat()
+    eq('...and one that runs nothing, frozen or dead, ages out at a day, where it would never have answered at all', c.tabs.otherPageOpen(), false)
+    ok('its timer comes round well inside the age of a record', RECORD_REWRITE_MS * 2 < RECORD_MAX_AGE_MS)
+    const quiet = openAppTabs(fakeStorage(), { page: null, doc: null })
+    eq('the real timer starts without a window or a document, and holds nothing up', quiet.otherPageOpen(), false)
+  }
+  {
+    const b = browser()
+    const a = b.open()
+    const other = b.open()
+    b.storage.removeItem(b.records().find((k) => k !== b.records()[0]))
+    b.storage.removeItem(b.records()[0])
+    eq("its own record gone: the storage was cleared, so it can't tell this time, and holds", a.tabs.otherPageOpen(), null)
+    eq('...and has written itself again for next time', b.records().length, 1)
+    eq('...and can tell then', a.tabs.otherPageOpen(), false)
+    other.leave()
+    eq("...another page's leaving doesn't change that", a.tabs.otherPageOpen(), false)
+  }
+  const refusesWrites = () => ({ ...fakeStorage(), length: 0, key: () => null, setItem() { throw new Error('over quota') } })
+  const throwsOnRead = () => {
+    const s = fakeStorage()
+    return { setItem: s.setItem, removeItem: s.removeItem, length: 0, key: () => null, getItem() { throw new Error('denied') } }
+  }
+  const throwsOnList = () => {
+    const s = fakeStorage()
+    return { getItem: s.getItem, setItem: s.setItem, removeItem: s.removeItem, get length() { throw new Error('denied') }, key: s.key }
+  }
+  const dropsWrites = () => ({ ...fakeStorage(), length: 0, key: () => null, setItem() {} })
+  for (const [label, storage] of [
+    ['a record that can\'t be written', refusesWrites()],
+    ['a record written and not kept', dropsWrites()],
+    ['a record that can\'t be read', throwsOnRead()],
+    ['records that can\'t be listed', throwsOnList()],
+    ['no storage at all', null],
+    ['a broken storage', brokenStorage()],
+  ]) {
+    const b = browser()
+    let page = null
+    let threw = false
+    try { page = b.open(storage) } catch { threw = true }
+    ok(`${label}: starting a page never throws`, !threw)
+    eq(`${label}: can't tell, which holds`, page ? page.tabs.otherPageOpen() : 'threw', null)
+    let threwLeaving = false
+    try { page?.leave(); page?.show(); page?.comeBackFromCache() } catch { threwLeaving = true }
+    ok(`${label}: nor does leaving or coming back`, !threwLeaving)
+  }
+  ok('one record to a page', thisPageTabs() === thisPageTabs())
+  eq('with no window to read storage from, it says it cannot tell', thisPageTabs().otherPageOpen(), null)
+  ok('every page starts it', /thisPageTabs\(\)/.test(read('main.js')))
+  ok('nothing about a channel or a wait is left', !/BroadcastChannel|setTimeout/.test(read('lib/appTabs.js')))
+
+  // The real records in the real last check: a tab that holds has nothing to do with it but be open.
+  const OPEN = { loads: payload('Delivered'), reading: PARKED }
+  {
+    const b = browser()
+    const a = b.open()
+    eq('(control) this page alone, through the whole check: signed out', (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 1)
+    const frozen = b.open()
+    eq('another page frozen, or too busy to answer: held', (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 0)
+    frozen.leave()
+    eq('...and once it has left, the next check goes on', (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 1)
+  }
+  {
+    const b = browser({ [`${PREFIX}deadtab`]: String(NOW - HOUR) })
+    const a = b.open()
+    eq('a tab that died without saying so: held, so that driver gets the update at their next sign-in', (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 0)
+    b.clock.ms += RECORD_MAX_AGE_MS
+    eq('...and a day on it no longer holds', (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 1)
+  }
+  {
+    const b = browser()
+    const a = b.open(refusesWrites())
+    eq("a browser that can't keep a record: held", (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 0)
+  }
 }
 
 if (failures.length) {

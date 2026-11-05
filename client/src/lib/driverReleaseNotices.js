@@ -44,7 +44,7 @@ export const TOUR_STEPS = Object.freeze([
   Object.freeze({ id: 'messages', tab: 'messages', title: 'Messages', text: 'Message dispatch here, about a load or anything else.' }),
   Object.freeze({ id: 'invoices', tab: 'invoices', title: 'Invoices', text: 'Your weekly invoices are here. You can check one and send it in.' }),
   Object.freeze({ id: 'performance', tab: 'performance', needs: 'performance', title: 'Performance', text: "Your week is here: what counted, your target and, most weeks, what's required. No other driver can see it." }),
-  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "When your truck reports its fuel level, the top of the app shows how many miles you have left until empty. It's about your tank, not your load or route." }),
+  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "The top of the app shows your fuel range when it's known: how many miles you have left until empty. It's about your tank, not your load or route." }),
 ])
 export const APP_TOUR_STEP_IDS = Object.freeze(TOUR_STEPS.map((s) => s.id))
 
@@ -126,10 +126,11 @@ export function loadsHoldSignOut(loads, headers) {
 
 // Whether this moment may sign him out. Every input must say so, in so many words: one that's
 // missing holds the sign-out. The caller asks only when he opens the app, comes back to it or moves
-// back to the list himself, and straight after reading his loads and the truck afresh and asking
-// the other tabs; never on a timer or a socket push, so it can't land under his thumb.
+// back to the list himself, and straight after reading his loads and the truck afresh; never on a
+// timer or a socket push, so it can't land under his thumb.
 // `parked` is stricter than the note's motionAllowed: a truck with no reading may be moving, so only
 // a truck that reads as parked lets him go, and any other gets the update at his next sign-in.
+// `otherTabOpen` is lib/appTabs.js's answer, whose null (can't tell) holds as well.
 export function signOutMoment(s) {
   if (!isPlainObject(s) || s.role !== 'Driver' || s.signInDue !== true) return false
   if (s.loaded !== true || s.onboarding !== false) return false

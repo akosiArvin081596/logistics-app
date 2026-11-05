@@ -341,7 +341,7 @@ async function main() {
 	ok("the first entry covers the bar and what it opens", /\bbar\b/.test(firstText) && /Loads page/.test(firstText));
 	ok("the first entry covers the count", /pickup/.test(firstText) && /delivery/.test(firstText));
 	ok("the first entry covers the target and, most weeks, what's required: a week of time off can have no such figure", /your target and, most weeks, what's required/.test(firstText));
-	ok("the first entry covers the fuel range label, when the truck reports its fuel level: with no reading the top of the app says not available", /fuel range when your truck reports its fuel level/.test(firstText) && /miles/.test(firstText) && /until empty/.test(firstText));
+	ok("the first entry covers the fuel range label, when it's known: with no reading or no tank size on file the top of the app says not available", first.notes.includes("The top of the app now shows your fuel range when it's known: how many miles you have left until empty."));
 	ok("what's about the Performance tab goes only to a driver who has it", first.notes.filter((n) => /Performance|bar|pickup/.test(lineText(n))).every((n) => n.needs === "performance"));
 	ok("the fuel line goes to every driver", first.notes.some((n) => typeof n === "string" && /fuel range/.test(n)));
 

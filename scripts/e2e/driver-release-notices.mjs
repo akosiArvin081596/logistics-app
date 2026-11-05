@@ -18,7 +18,8 @@
 //   E   an empty load list holds: no loads at all, and a reply whose body dropped while he hauls a load
 //   V   a moving truck holds the sign-out and the note, and parking lets them through at the next
 //       moment; a tour under way closes by itself when the truck starts moving and marks nothing done;
-//       no reading, a stale reading and a failed read hold the sign-out too, and not the note
+//       no reading, a stale reading and a failed read hold the sign-out too, and not the note; a truck
+//       moving on a feed that sends no speed holds it, even after an earlier read of parked
 //   F   a failed read of the release state (503, no answer, an unreadable body): no sign-out, no note,
 //       no Kit button, and he stays in the app; a good answer later works
 //   P   the note waits for the Performance answer: a failed probe holds it, a good one lets it through
@@ -28,8 +29,10 @@
 //   U   a sign-out the server doesn't confirm: the app's own login form with its line; he signs in; a
 //       logout he asks for afterwards shows no line
 //   L   a server that keeps saying "due" after he signs back in: one sign-out, no loop
-//   C   two tabs hold each other: neither signs out; with one closed the other does; a browser with no
-//       BroadcastChannel holds too; a logout he asks for in one tab still takes the other along
+//   C   two tabs hold each other: neither signs out; with one left the other does; a logout he asks for
+//       in one tab still takes the other along; a browser that can't keep a tab's record holds; so does
+//       a tab frozen by the browser, and a tab that died without saying so (its record planted), for
+//       up to a day; a record over a day old doesn't, and is tidied away
 //   H   a shared phone: the next driver signs in, reads his own answer, and the login line is gone
 //   O   a first-time driver: the offer, Skip for now, no nagging; Take the tour walks every tab; the
 //       tour marks no message or alert read and writes only its own marks; the Kit's button runs it
@@ -108,7 +111,8 @@ const thisWeek = { id: 'this-week', start: '2026-10-31', end: '2026-11-06', cred
 const lastWeek = { id: 'last-week', start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: [] }
 
 // One browser's view of the server. `release` says how the route answers: 'ok', 'off', 'fail' or
-// 'empty'. `reading` how the truck's does: 'fix', 'none', 'stale' or 'fail'. `payload` his loads':
+// 'empty'. `reading` how the truck's does: 'fix', 'none', 'stale', 'fail', or 'moving-no-speed' for what
+// the route sends a truck whose feed sends no speed and whose fixes moved apart. `payload` his loads':
 // 'ok', or 'dropped' for headers whose body never arrives whole. `perf` his week's: a status.
 function freshState({ who = DRIVER, session = true, due = false, dueAfterLogin = false, status = '', offer = false, hasNote = false, release = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', payload = 'ok', perf = 200, logoutFails = false } = {}) {
   return {
@@ -157,6 +161,7 @@ function positionAnswer(state) {
   const stamp = new Date(Date.now() - age).toISOString()
   const fix = { latitude: 29.7, longitude: -95.3, heading: 90, source: 'routemate', lastPingAge: age, timestamp: stamp }
   if (state.moving) return { status: 200, body: { ok: true, position: { ...fix, speed: 25 } } }
+  if (state.reading === 'moving-no-speed') return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: null } } }
   return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: Date.now() - 10 * 60 * 1000 } } }
 }
 
@@ -588,7 +593,7 @@ async function uploadInFlightRun(browser, size) {
 // ---------------------------------------------------------------- V: a moving truck
 async function noReadingRun(browser, size) {
   const t = size.tag
-  for (const reading of ['none', 'stale', 'fail']) {
+  for (const reading of ['none', 'stale', 'fail', 'moving-no-speed']) {
     const state = freshState({ due: true, status: 'Delivered', reading })
     const { ctx, page } = await openPage(browser, size, state)
     try {
@@ -617,6 +622,27 @@ async function noReadingRun(browser, size) {
     record(`V5-${t}`, "No reading: What's new still shows", 'the note', `shown ${shown}`, shown)
   } finally {
     await second.ctx.close()
+  }
+  // The trap: a stop already known must not be carried past the route saying the fixes moved.
+  const parkedFirst = freshState({ status: 'Delivered' })
+  const third = await openPage(browser, size, parkedFirst)
+  try {
+    await appOpen(third.page)
+    await momentPassed(parkedFirst, 0)
+    parkedFirst.due = true
+    parkedFirst.reading = 'moving-no-speed'
+    const before = parkedFirst.calls.release
+    await comeBackToApp(third.page)
+    await momentPassed(parkedFirst, before)
+    const held = parkedFirst.calls.logout
+    const onApp = !onLogin(third.page)
+    parkedFirst.reading = 'fix'
+    await comeBackToApp(third.page)
+    const left = await until(() => parkedFirst.calls.logout === 1, 12000)
+    record(`V6-${t}`, 'A truck read as parked that then moves on a feed with no speed holds the sign-out; parked again, it goes',
+      'no sign-out, in the app; one once it reads parked', `held ${held}, on the app ${onApp}, parked ${parkedFirst.calls.logout}`, held === 0 && onApp && left)
+  } finally {
+    await third.ctx.close()
   }
 }
 
@@ -861,6 +887,8 @@ async function twoTabsRun(browser, size) {
     const bothOn = !onLogin(a) && !onLogin(b)
     record(`C1-${t}`, 'Two open tabs hold each other: a tab with something half typed is never taken along', 'no sign-out from either; both in the app',
       `sign-outs ${held}, A at ${new URL(a.url()).pathname}, B at ${new URL(b.url()).pathname}`, held === 0 && bothOn)
+    // Closing a tab from here needn't run its pagehide, as a person closing one does: leaving does.
+    await b.goto('about:blank')
     await b.close()
     await a.bringToFront()
     await comeBackToApp(a)
@@ -886,19 +914,92 @@ async function twoTabsRun(browser, size) {
     await ctx2.close()
   }
 
-  const noChannel = freshState({ due: true, status: 'Delivered' })
-  const ctx3 = await newContext(browser, size, noChannel, [])
+  const noRecord = freshState({ due: true, status: 'Delivered' })
+  const ctx3 = await newContext(browser, size, noRecord, [])
   try {
-    await ctx3.addInitScript(() => { delete window.BroadcastChannel })
+    await ctx3.addInitScript((prefix) => {
+      const realSet = Storage.prototype.setItem
+      Storage.prototype.setItem = function setItem(key, value) {
+        if (String(key).startsWith(prefix)) throw new Error('made up: this browser keeps no record')
+        return realSet.call(this, key, value)
+      }
+    }, APP_PAGE_PREFIX)
     const [page] = await openTabs(ctx3, size, 1)
-    await momentPassed(noChannel, 0)
+    await momentPassed(noRecord, 0)
     await comeBackToApp(page)
-    await momentPassed(noChannel, 1)
-    record(`C4-${t}`, "A browser that can't ask the other tabs holds too", 'no sign-out; in the app',
-      `sign-outs ${noChannel.calls.logout}, url ${new URL(page.url()).pathname}`, noChannel.calls.logout === 0 && !onLogin(page))
+    await momentPassed(noRecord, 1)
+    record(`C4-${t}`, "A browser that can't keep a tab's record holds too", 'no sign-out; in the app',
+      `sign-outs ${noRecord.calls.logout}, url ${new URL(page.url()).pathname}`, noRecord.calls.logout === 0 && !onLogin(page))
   } finally {
     await ctx3.close()
   }
+
+  // A page the browser has frozen runs nothing, so nothing it could answer would ever arrive.
+  const frozen = freshState({ status: 'Delivered' })
+  const ctx4 = await newContext(browser, size, frozen, [])
+  try {
+    await ctx4.addInitScript(() => { document.addEventListener('freeze', () => { window.__madeUpFroze = true }) })
+    const [a, b] = await openTabs(ctx4, size, 2)
+    await momentPassed(frozen, 0, 2)
+    const lifecycle = await ctx4.newCDPSession(b)
+    await lifecycle.send('Page.setWebLifecycleState', { state: 'frozen' })
+    frozen.due = true
+    const before = frozen.calls.release
+    await a.bringToFront()
+    await comeBackToApp(a)
+    await momentPassed(frozen, before)
+    const held = frozen.calls.logout
+    const onApp = !onLogin(a)
+    await lifecycle.send('Page.setWebLifecycleState', { state: 'active' })
+    const froze = await b.evaluate(() => window.__madeUpFroze === true)
+    record(`C5-${t}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; the tab did freeze',
+      `sign-outs ${held}, A at ${new URL(a.url()).pathname}, froze ${froze}`, held === 0 && onApp && froze)
+    await b.goto('about:blank')
+    await a.bringToFront()
+    await comeBackToApp(a)
+    const left = await until(() => frozen.calls.logout === 1, 12000)
+    record(`C6-${t}`, 'Once that tab has left, the next moment signs them out, so the hold was its record', 'one sign-out', `sign-outs ${frozen.calls.logout}`, left)
+  } finally {
+    await ctx4.close()
+  }
+
+  const dead = freshState({ due: true, status: 'Delivered' })
+  const ctx5 = await newContext(browser, size, dead, [])
+  try {
+    await plantRecord(ctx5, 60 * 60 * 1000)
+    const [page] = await openTabs(ctx5, size, 1)
+    await momentPassed(dead, 0)
+    const before = dead.calls.release
+    await comeBackToApp(page)
+    await momentPassed(dead, before)
+    record(`C7-${t}`, 'A tab that died without saying so, its record under a day old, holds: they get the update at their next sign-in', 'no sign-out; in the app',
+      `sign-outs ${dead.calls.logout}, url ${new URL(page.url()).pathname}`, dead.calls.logout === 0 && !onLogin(page))
+  } finally {
+    await ctx5.close()
+  }
+
+  const expired = freshState({ due: true, status: 'Delivered' })
+  const ctx6 = await newContext(browser, size, expired, [])
+  try {
+    await plantRecord(ctx6, 25 * 60 * 60 * 1000)
+    const [page] = await openTabs(ctx6, size, 1)
+    const left = await until(() => expired.calls.logout === 1, 12000)
+    await appears(page, testid('login-updated-note'), 8000)
+    const stale = await page.evaluate((key) => localStorage.getItem(key), PLANTED_RECORD)
+    record(`C8-${t}`, 'A record over a day old holds nothing and is tidied away', 'one sign-out; the record gone',
+      `sign-outs ${expired.calls.logout}, record ${stale}`, left && stale === null)
+  } finally {
+    await ctx6.close()
+  }
+}
+
+// A tab's record as lib/appTabs.js writes it, from a tab that's no longer there, before each page starts.
+const APP_PAGE_PREFIX = 'logisx.appPage.v1.'
+const PLANTED_RECORD = `${APP_PAGE_PREFIX}madeupdeadtab`
+function plantRecord(ctx, ageMs) {
+  return ctx.addInitScript(([key, age]) => {
+    try { localStorage.setItem(key, String(Date.now() - age)) } catch { /* a page with no storage has no use for it */ }
+  }, [PLANTED_RECORD, ageMs])
 }
 
 async function sharedPhoneRun(browser, size) {
