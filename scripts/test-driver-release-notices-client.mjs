@@ -219,6 +219,10 @@ const brokenStorage = () => ({ getItem() { throw new Error('private mode') }, se
   eq('the note', lib.takeLoginNote(s, T + 1000), true)
   eq('once only', lib.takeLoginNote(s, T + 2000), false)
   lib.leaveLoginNote(s, T)
+  eq('a page about to be replaced shows it', lib.takeLoginNote(s, T + 1000, true), true)
+  eq('...and leaves it for the fresh page', lib.takeLoginNote(s, T + 2000), true)
+  eq('...which takes it', lib.takeLoginNote(s, T + 3000), false)
+  lib.leaveLoginNote(s, T)
   eq('an old note is not shown', lib.takeLoginNote(s, T + lib.LOGIN_NOTE_TTL_MS + 1), false)
   eq('...and is gone', s.keys(), [])
   lib.leaveLoginNote(s, T)
@@ -764,7 +768,7 @@ for (const id of ['tour-card', 'tour-label', 'tour-next', 'tour-skip', 'tour-shi
 ok("every button is a 44 px tap", /\.tour-skip, \.tour-next, \.tour-videos \{ min-height: 44px/.test(TOUR) && /\.drn-primary \{ min-height: 44px/.test(NOTE) && /\.drn-second \{[\s\S]{0,80}min-height: 44px/.test(NOTE))
 ok('the clear layer stops a tap reaching the screen under it', /\.tour-shield \{ position: fixed; inset: 0;/.test(TOUR))
 ok('...under the new load banner, which stays tappable', /z-index: 150/.test(TOUR) && /z-index: 160/.test(TOUR))
-ok("the login page's line comes from the lib, once", /takeLoginNote\(browserStorage\('session'\), Date\.now\(\)\) \? RELEASE_WORDS\.signedOut : ''/.test(LOGIN))
+ok("the login page's line comes from the lib, once", /takeLoginNote\(browserStorage\('session'\), Date\.now\(\), isLeavingPage\(\)\) \? RELEASE_WORDS\.signedOut : ''/.test(LOGIN))
 ok('...and shows above the form', LOGIN.indexOf('data-testid="login-updated-note"') > 0 && LOGIN.indexOf('data-testid="login-updated-note"') < LOGIN.indexOf('class="login-form"', LOGIN.indexOf('LOGIN FORM')))
 
 // ── §14 ───────────────────────────────────────────────────────────────────

@@ -112,7 +112,7 @@ import { WORDS as RELEASE_WORDS, browserStorage, takeLoginNote } from '../lib/dr
 const router = useRouter()
 const auth = useAuthStore()
 // Why a driver is here, right after the app signed him out for a release (useDriverRelease.js).
-const updatedNote = ref(takeLoginNote(browserStorage('session'), Date.now()) ? RELEASE_WORDS.signedOut : '')
+const updatedNote = ref(takeLoginNote(browserStorage('session'), Date.now(), isLeavingPage()) ? RELEASE_WORDS.signedOut : '')
 
 const showSetup = ref(false)
 const showLogin = ref(false)

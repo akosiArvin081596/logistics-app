@@ -208,11 +208,13 @@ export function leaveLoginNote(storage, nowMs) {
     /* the login page just doesn't say why */
   }
 }
-export function takeLoginNote(storage, nowMs) {
+// `keep` is for a page a fresh /login is about to replace: a sign-out mounts this view on the old page
+// first, so taking the note there would leave the page he actually reads without it.
+export function takeLoginNote(storage, nowMs, keep = false) {
   let raw = null
   try {
     raw = storage.getItem(LOGIN_NOTE_KEY)
-    storage.removeItem(LOGIN_NOTE_KEY)
+    if (!keep) storage.removeItem(LOGIN_NOTE_KEY)
   } catch {
     return false
   }
