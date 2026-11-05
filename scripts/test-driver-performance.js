@@ -16,7 +16,7 @@
  * driver-at-a-truck resolver) and mounted on a real Express app on 127.0.0.1
  * port 0, over an in-memory SQLite whose tables come from server.js's own DDL.
  * Job Tracking is a stub serving made-up rows through server.js's own
- * parseSheet() and deduplicateLoads(). The session is a header the test sets.
+ * parseJobTrackingRead(). The session is a header the test sets.
  * "Today" is Wed 2026-11-11 (noon Eastern). Every name, unit and load is made up.
  *
  * §1  D's open answers are one-line constants in one place (Q-A1 weights,
@@ -78,6 +78,14 @@
  * §25 the words the server decides: whether his invoice pays days, read as the
  *     money math reads his pay type; what became of a pickup, true whichever way
  *     it was made, an older tap on a truck with no ELD included
+ * §26 a "Picked up" row stands only on its proof: a passed load, twins, a status
+ *     moved back, an errand; the credit goes to whoever made the pickup, and the
+ *     new driver of a load handed over doesn't get it; a rename loses nothing
+ * §27 a load on two sheet rows counts as the weekly invoice counts it, over every
+ *     row, never short of it and never over it
+ * §28 what the proof doesn't change: the count is still its rows, on made-up sheets
+ *     checked against the invoice's own selector; each driver's answer is his own;
+ *     the Super Admin's credits share the proof; no pay path reads it
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -176,7 +184,7 @@ const LOADS = [
 	["DP-1007", "Ada Quill", "Delivered", ""],
 	["DP-1008", "Ada Quill", "Delivered", "2026-11-05 20:15"],
 	["DP-1009", "Ada  Quill", "Delivered", "Fri, 06 Nov 2026 22:30:00 -0600"],
-	["DP-1010", "Ada Quill", "In Transit", ""],
+	["DP-1010", "Ada Quill", "At Receiver", ""],
 	["DP-1011", "Ada Quill", "At Receiver", ""],
 	["DP-1012", "Ada Quill", "Delivered", "2026-10-30 11:00"],
 	["DP-2001", "Ben Marsh", "Delivered", "2026-11-09 16:00"],
@@ -198,17 +206,17 @@ const LOADS = [
 	["DP-9001", "Lou Grant", "Delivered", "2026-11-09 09:00"],
 ];
 const DELETED = ["#DP-1006"];
-// [load, source, new status, changed_at (UTC, SQLite text)]
+// [load, source, new status, changed_at (UTC, SQLite text), actor]
 const HISTORY = [
-	["dp-1001", "geofence", "In Transit", "2026-11-08 15:00:00"],
-	["dp-1001", "manual", "In Transit", "2026-11-06 15:00:00"],
-	["dp-1003", "manual", "In Transit", "2026-11-10 14:00:00"],
-	["dp-1010", "geofence", "In Transit", "2026-11-07 05:30:00"],
-	["dp-1011", "geofence", "In Transit", "2026-11-07 04:30:00"],
-	["dp-2001", "manual", "In Transit", "2026-11-08 13:00:00"],
-	["dp-2002", "override", "In Transit", "2026-11-10 16:00:00"],
-	["dp-3001", "manual", "In Transit", "2026-11-09 17:00:00"],
-	["dp-1005", "geofence", "In Transit", "2026-11-08 12:00:00"],
+	["dp-1001", "geofence", "In Transit", "2026-11-08 15:00:00", "Ada Quill"],
+	["dp-1001", "manual", "In Transit", "2026-11-07 12:00:00", "Ada Quill"],
+	["dp-1003", "manual", "In Transit", "2026-11-10 14:00:00", "Ada Quill"],
+	["dp-1010", "geofence", "In Transit", "2026-11-07 05:30:00", "Ada Quill"],
+	["dp-1011", "geofence", "In Transit", "2026-11-07 04:30:00", "Ada Quill"],
+	["dp-2001", "manual", "In Transit", "2026-11-08 13:00:00", "Ben Marsh"],
+	["dp-2002", "override", "In Transit", "2026-11-10 16:00:00", "disp"],
+	["dp-3001", "manual", "In Transit", "2026-11-09 17:00:00", "Cal Reyes"],
+	["dp-1005", "geofence", "In Transit", "2026-11-08 12:00:00", "Ada Quill"],
 ];
 const ELD_DEPARTS = [["dp-1002", Date.parse("2026-11-09T13:00:00Z")]];
 // truck id -> days its ELD reported (eld_miles_daily rows with samples)
@@ -227,6 +235,8 @@ const USERS = {
 	kim: { id: 20, role: "Driver", username: "kim", driverName: "Kim Vale" },
 	nobody: { id: 21, role: "Driver", username: "nobody", driverName: "Ned Nobody" },
 	ivy: { id: 22, role: "Driver", username: "ivy", driverName: "Ivy Lane" },
+	nia: { id: 61, role: "Driver", username: "nia", driverName: "Nia Frost" },
+	omar: { id: 62, role: "Driver", username: "omar", driverName: "Omar Hale" },
 	admin: { id: 31, role: "Super Admin", username: "admin" },
 	admin2: { id: 32, role: "Super Admin", username: "admin2" },
 	dispatcher: { id: 41, role: "Dispatcher", username: "disp" },
@@ -240,8 +250,10 @@ function lifted() {
 	if (LIFT) return LIFT;
 	SRC = require("./lib/server-source").serverSource();
 	const { closure } = require("./lib/server-lift");
+	// parseJobTrackingRead() is named only where it exists, so the old code still runs here and fails by case.
+	const readRoot = /^function parseJobTrackingRead\(/m.test(SRC) ? ["parseJobTrackingRead"] : [];
 	LIFT = closure(SRC, {
-		roots: ["driverPerformance", "parseSheet", "deduplicateLoads", "selectInvoiceWeekLoads"],
+		roots: ["driverPerformance", "parseSheet", "deduplicateLoads", "selectInvoiceWeekLoads", "liveJobTrackingView", ...readRoot],
 		provided: ["app", "db", "getJobTrackingCached"],
 		denied: ["server", "transporter", "getDrive", "getSheets", "sendEmail"],
 	});
@@ -272,10 +284,18 @@ function sheetValues(extraLoads = []) {
 function makeDb() {
 	const Database = require("better-sqlite3");
 	const db = new Database(":memory:");
-	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability"]) db.exec(tableDdl(t));
+	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability",
+		"load_coordinates", "routemate_telemetry", "eld_device_assignments"]) db.exec(tableDdl(t));
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN status TEXT DEFAULT 'active'");
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'");
 	db.exec("ALTER TABLE trucks ADD COLUMN retired_at TEXT DEFAULT ''");
+	db.exec("ALTER TABLE trucks ADD COLUMN routemate_vehicle_id TEXT DEFAULT ''");
+	db.exec("ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''");
+	db.exec("ALTER TABLE load_status_history ADD COLUMN actor_role TEXT DEFAULT ''");
+	db.exec("ALTER TABLE load_status_history ADD COLUMN fix_ms INTEGER");
+	db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_zone TEXT DEFAULT ''");
+	db.exec("ALTER TABLE load_status_history ADD COLUMN local_tz TEXT DEFAULT ''");
+	db.exec("ALTER TABLE load_status_history ADD COLUMN other_load_hauling INTEGER");
 	db.exec(require(path.join(ROOT, "lib", "owner-operator.js")).OO_SCHEMA_SQL);
 	const dir = db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (?, ?, ?, ?, ?)");
 	for (const d of DRIVERS) dir.run(d.id, d.name, d.status, d.pay_type, d.user_id);
@@ -283,7 +303,7 @@ function makeDb() {
 	for (const t of TRUCKS) tr.run(t.id, t.unit, t.retired_at);
 	const ta = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, ?, ?)");
 	for (const a of ASSIGNMENTS) ta.run(a.truck, a.driver, a.start, a.end);
-	const lsh = db.prepare("INSERT INTO load_status_history (load_id, source, new_status, changed_at) VALUES (?, ?, ?, ?)");
+	const lsh = db.prepare("INSERT INTO load_status_history (load_id, source, new_status, changed_at, actor) VALUES (?, ?, ?, ?, ?)");
 	for (const h of HISTORY) lsh.run(...h);
 	const lem = db.prepare("INSERT INTO load_eld_miles (load_id, pickup_depart_ms) VALUES (?, ?)");
 	for (const e of ELD_DEPARTS) lem.run(...e);
@@ -322,14 +342,20 @@ async function makeWorld(env, { nowMs = NOW_MS, extraLoads = [] } = {}) {
 			world.sheetReads += 1;
 			if (world.sheetDown) throw new Error("made-up outage");
 			if (!world.jt) {
-				world.jt = world.fns.parseSheet({ values: sheetValues(extraLoads) });
-				world.jt.data = world.fns.deduplicateLoads(world.jt.data, world.jt.headers);
+				const read = { values: sheetValues(world.extraLoads) };
+				if (world.fns.parseJobTrackingRead) world.jt = world.fns.parseJobTrackingRead(read);
+				else {
+					world.jt = world.fns.parseSheet(read);
+					world.jt.data = world.fns.deduplicateLoads(world.jt.data, world.jt.headers);
+				}
 			}
 			return world.jt;
 		},
 	};
+	world.extraLoads = extraLoads;
 	const body = ['"use strict";', lift.text,
-		"return { driverPerformance, parseSheet, deduplicateLoads, selectInvoiceWeekLoads, loadKeySet, getDeletedLoadIds, getWeekRange, directoryPayStruct };"].join("\n");
+		"return { driverPerformance, parseSheet, deduplicateLoads, selectInvoiceWeekLoads, loadKeySet, getDeletedLoadIds, getWeekRange, directoryPayStruct, liveJobTrackingView,",
+		"\tparseJobTrackingRead: typeof parseJobTrackingRead === \"function\" ? parseJobTrackingRead : null };"].join("\n");
 	// The routes module logs its start-up line on the real console: keep it.
 	const realLog = console.log;
 	console.log = (...a) => world.logs.push(a.join(" "));
@@ -490,6 +516,9 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.businessDayOf(pacific), "2026-11-14", "a Pacific driver's Friday 9:30 PM is already Saturday Eastern: next week");
 		eq(p.businessDayOf(Date.parse("2026-07-11T03:30:00Z")), "2026-07-10", "summer time: 11:30 PM EDT Friday stays Friday");
 		eq(p.businessDayOf(0), "", "no instant, no day");
+		eq(p.businessDayStartMs("2026-11-09"), Date.parse("2026-11-09T05:00:00Z"), "a business day starts at Eastern midnight");
+		eq(p.businessDayStartMs("2026-07-10"), Date.parse("2026-07-10T04:00:00Z"), "in summer time too");
+		eq(p.businessDayOf(p.businessDayStartMs("2026-11-09") - 1), "2026-11-08", "and the instant before it is the day before");
 	});
 
 	// ── §8 ──────────────────────────────────────────────────────────────────
@@ -876,10 +905,12 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		// A delivery whose pickup counted in another week says so, and the list still adds up.
 		const notes = await makeWorld({}, { extraLoads: [["DP-8010", "Ben Marsh", "Delivered", "2026-11-10 09:00"], ["DP-8011", "Ben Marsh", "Delivered", "2026-11-10 10:00"], ["DP-8012", "Ben Marsh", "Delivered", "2026-11-03 10:00"]] });
 		try {
-			const addPickup = notes.db.prepare("INSERT INTO load_status_history (load_id, source, new_status, changed_at) VALUES (?, 'geofence', 'In Transit', ?)");
-			addPickup.run("dp-8010", "2026-11-05 15:00:00");
-			addPickup.run("dp-8011", "2026-10-20 15:00:00");
-			addPickup.run("dp-8012", "2026-10-20 15:00:00");
+			// Each with its arrival at the receiver, so one isn't still under way at the next one's pickup.
+			const addPickup = notes.db.prepare("INSERT INTO load_status_history (load_id, source, new_status, changed_at, actor) VALUES (?, 'geofence', ?, ?, 'Ben Marsh')");
+			for (const [load, day] of [["dp-8010", "2026-11-05"], ["dp-8011", "2026-10-20"], ["dp-8012", "2026-10-21"]]) {
+				addPickup.run(load, "In Transit", `${day} 15:00:00`);
+				addPickup.run(load, "At Receiver", `${day} 18:00:00`);
+			}
 			const ben = (await notes.get("/api/driver/me/performance", USERS.ben)).json;
 			const rowOf = (w, id) => w.loads.find((l) => l.loadId === id);
 			eq(rowOf(ben.weeks[0], "DP-8010"), { loadId: "DP-8010", pickup: { note: "last-week" }, delivery: { day: "Tue", credits: 1 } }, "its pickup counted last week");
@@ -1307,6 +1338,684 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		} finally {
 			await w.close();
 		}
+	});
+
+	// ── a small world for one case: two made-up drivers, each with his own truck and no ELD days,
+	// and nothing on record for them but what the case writes ────────────────
+	const OWN_WEEK = "/api/driver/me/performance";
+	const SUN = "2026-11-08"; const MON = "2026-11-09"; const TUE = "2026-11-10";
+	const LAST_THU = "2026-11-05"; const LAST_FRI = "2026-11-06";
+	const PICKED = (day) => ({ day, credits: 0.5 });
+	const DONE = (day) => ({ day, credits: 1 });
+	const NOT_COUNTED = { note: "not-counted" };
+	const NIA = "Nia Frost"; const OMAR = "Omar Hale";
+	async function proofWorld(setup, { nowMs } = {}) {
+		const w = await makeWorld({}, { nowMs, extraLoads: [] });
+		const dir = w.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (?, ?, 'active', 'fixed', ?)");
+		dir.run(21, NIA, 61);
+		dir.run(22, OMAR, 62);
+		const tr = w.db.prepare("INSERT INTO trucks (id, unit_number, retired_at, routemate_vehicle_id) VALUES (?, ?, '', ?)");
+		tr.run(21, "LogisX-#521", "rm-21");
+		tr.run(22, "LogisX-#522", "rm-22");
+		const ta = w.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, '2026-10-01T12:00:00.000Z', ?)");
+		w.assign = (truck, driver, end = "") => ta.run(truck, driver, end);
+		w.assign(21, NIA);
+		w.assign(22, OMAR);
+		const hist = w.db.prepare(`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, actor_role, other_load_hauling, changed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+		w.hist = (load, source, status, at, actor, { old = "", role = "", hauling = null } = {}) => {
+			hist.run(String(load).toLowerCase().replace(/^#/, ""), old, status, source, actor, role, hauling, at);
+		};
+		w.row = (id, driver, status, done = "") => w.extraLoads.push([id, driver, status, done]);
+		// A load's arrival and departure by the truck's geofence, its arrival at the receiver and the tap.
+		w.picked = (id, driver, day, actor = driver) => {
+			w.hist(id, "geofence", "At Shipper", `${day} 13:00:00`, actor);
+			w.hist(id, "geofence", "In Transit", `${day} 14:00:00`, actor);
+		};
+		w.clean = (id, driver, day, actor = driver) => {
+			w.picked(id, driver, day, actor);
+			w.hist(id, "geofence", "At Receiver", `${day} 19:00:00`, actor);
+			w.hist(id, "manual", "Delivered", `${day} 20:00:00`, actor);
+			w.row(id, driver, "Delivered", `${day} 15:00`);
+		};
+		w.depart = (load, ms, truck = 0) => w.db.prepare("INSERT INTO load_eld_miles (load_id, truck_id, pickup_depart_ms) VALUES (?, ?, ?)").run(String(load).toLowerCase().replace(/^#/, ""), truck, ms);
+		w.weeks = async (who) => {
+			const r = await w.get(OWN_WEEK, USERS[who]);
+			return r.status === 200 ? r.json.weeks : [{ credits: { value: 0, deliveries: 0, pickups: 0 }, loads: [] }, { credits: { value: 0, deliveries: 0, pickups: 0 }, loads: [] }];
+		};
+		// What the weekly invoice bills him, by its own selector over every row of the sheet.
+		w.invoiceBills = (name, start, end) => {
+			const raw = w.fns.parseSheet({ values: sheetValues(w.extraLoads) });
+			return w.fns.selectInvoiceWeekLoads(raw.data, raw.headers, name, start, end, w.fns.loadKeySet(w.fns.getDeletedLoadIds())).loads.length;
+		};
+		setup(w);
+		return w;
+	}
+	const inWorld = async (setup, check, opts) => {
+		const w = await proofWorld(setup, opts);
+		try { await check(w); } finally { await w.close(); }
+	};
+	const proofModule = () => require(path.join(ROOT, "lib", "driver-pickup-proof.js"));
+
+	await section("26 a \"Picked up\" row stands only on its proof", async () => {
+		// The control: a clean load earns what it always did.
+		await inWorld((w) => w.clean("PF-1", NIA, MON), async (w) => {
+			const nia = await w.weeks("nia");
+			eq(nia[0].credits, { value: 1.5, target: 7.5, deliveries: 1, pickups: 1 }, "a clean load: 1 for the delivery, 0.5 for its pickup");
+			eq(nia[0].loads, [{ loadId: "PF-1", pickup: PICKED("Mon"), delivery: DONE("Mon") }], "and its row shows both");
+		});
+
+		// A load the truck only passed.
+		await inWorld((w) => {
+			w.hist("PF-2", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-2", NIA, "In Transit");
+			w.picked("PF-3", NIA, MON);
+			w.row("PF-3", NIA, "In Transit");
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq(nia.loads, [{ loadId: "PF-2", pickup: PICKED("Mon"), delivery: null }], "a queued load the truck passed while hauling another: no \"Picked up\" row, and the load under way keeps its own");
+			eq(nia.credits.pickups, 1, "so one pickup, not two");
+		});
+		await inWorld((w) => {
+			w.hist("PF-2", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-2", NIA, "In Transit");
+			w.picked("PF-3", NIA, MON);
+			w.row("PF-3", NIA, "Delivered", `${TUE} 15:00`);
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq(nia.loads.find((l) => l.loadId === "PF-3"), { loadId: "PF-3", pickup: NOT_COUNTED, delivery: DONE("Tue") }, "delivered later: the delivery counts, and its row says the pickup didn't");
+			eq(nia.credits.value, 1.5, "1 for the delivery, 0.5 for the load really under way");
+		});
+		await inWorld((w) => {
+			w.hist("PF-4", "geofence", "At Shipper", `${MON} 13:00:00`, NIA, { hauling: 1 });
+			w.hist("PF-4", "geofence", "In Transit", `${MON} 14:00:00`, NIA);
+			w.row("PF-4", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "the recorder's own mark that another load was under way holds it too");
+		});
+		await inWorld((w) => {
+			w.picked("PF-5", NIA, MON);
+			w.row("PF-5", NIA, "Dispatched");
+			w.depart("PF-6", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-6", NIA, "Assigned");
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq([nia.credits.pickups, nia.loads], [0, []], "the geofence or the ELD says it left, but the sheet still has it waiting: no row, and no credit");
+		});
+
+		// Both twins of one visit.
+		await inWorld((w) => {
+			w.clean("PF-7", NIA, MON);
+			w.clean("PF-8", NIA, MON);
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq(nia.credits, { value: 2, target: 7.5, deliveries: 2, pickups: 0 }, "twins at one shipper in one visit: both deliveries stand, neither pickup is proof");
+			eq(nia.loads, [{ loadId: "PF-7", pickup: NOT_COUNTED, delivery: DONE("Mon") }, { loadId: "PF-8", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "and each row says so");
+		});
+		await inWorld((w) => {
+			w.hist("PF-9", "geofence", "At Shipper", `${MON} 13:00:00`, NIA);
+			w.hist("PF-9", "geofence", "In Transit", `${MON} 13:05:00`, NIA);
+			w.hist("PF-9", "manual", "Delivered", `${MON} 13:08:00`, NIA);
+			w.row("PF-9", NIA, "Delivered", `${MON} 15:00`);
+			w.hist("PF-10", "geofence", "At Shipper", `${MON} 13:10:00`, NIA);
+			w.hist("PF-10", "geofence", "In Transit", `${MON} 13:15:00`, NIA);
+			w.row("PF-10", NIA, "In Transit");
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq(nia.loads, [{ loadId: "PF-9", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "the first of two is held by the twin test alone, whichever row came first");
+			eq(nia.credits.pickups, 0, "and so is the second");
+		});
+		await inWorld((w) => {
+			w.clean("PF-11", NIA, MON);
+			w.clean("PF-12", NIA, TUE);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two loads at the same hour on different days are no twins");
+		});
+		const twoVisits = (w) => {
+			for (const [id, atShipper, transit] of [["PF-13", `${MON} 13:00:00`, `${MON} 13:20:00`], ["PF-14", `${MON} 14:30:00`, `${MON} 15:00:00`]]) {
+				w.hist(id, "geofence", "At Shipper", atShipper, NIA);
+				w.hist(id, "geofence", "In Transit", transit, NIA);
+				w.db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, 30, -90, 32, -90)").run(id.toLowerCase());
+			}
+			w.hist("PF-13", "geofence", "At Receiver", `${MON} 13:35:00`, NIA);
+			w.row("PF-13", NIA, "At Receiver");
+			w.row("PF-14", NIA, "In Transit");
+		};
+		await inWorld(twoVisits, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "two arrivals 90 minutes apart and no track to say otherwise: one visit, so twins");
+		});
+		await inWorld((w) => {
+			twoVisits(w);
+			const fix = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms) VALUES ('rm-21', ?, -90, 0, ?)");
+			for (const [lat, at] of [[30, "12:50"], [30, "13:10"], [30, "13:30"], [31, "13:40"], [30, "14:20"], [30, "14:40"], [31, "15:30"]]) fix.run(lat, Date.parse(`${MON}T${at}:00Z`));
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 2, "the truck's own track shows it left between them: two visits, two pickups");
+		});
+
+		// A status later moved back.
+		await inWorld((w) => {
+			w.picked("PF-15", NIA, MON);
+			w.hist("PF-15", "override", "Dispatched", `${MON} 15:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-15", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "staff moved it back to Dispatched: the departure before that no longer stands");
+		});
+		await inWorld((w) => {
+			w.picked("PF-16", NIA, MON);
+			w.hist("PF-16", "override", "At Shipper", `${MON} 15:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-16", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "moved back only as far as At Shipper: it hasn't left either");
+		});
+		await inWorld((w) => {
+			w.picked("PF-17", NIA, MON);
+			w.hist("PF-17", "override", "At Shipper", `${MON} 15:00:00`, "disp", { role: "Dispatcher" });
+			w.hist("PF-17", "geofence", "In Transit", `${TUE} 14:00:00`, NIA, { old: "At Shipper" });
+			w.row("PF-17", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-17", pickup: PICKED("Tue"), delivery: null }], "and the real departure after that counts, on its own day");
+		});
+		await inWorld((w) => {
+			w.hist("PF-18", "geofence", "In Transit", `${MON} 14:00:00`, NIA);
+			w.hist("PF-18", "geofence", "In Transit", `${TUE} 14:00:00`, NIA, { old: "At Shipper" });
+			w.row("PF-18", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-18", pickup: PICKED("Tue"), delivery: null }], "a row written from At Shipper after In Transit is a move back no row recorded: the later departure stands");
+		});
+		await inWorld((w) => {
+			w.hist("PF-19", "geofence", "In Transit", `${LAST_THU} 15:00:00`, NIA);
+			w.hist("PF-19", "override", "Dispatched", `${LAST_FRI} 15:00:00`, "disp", { role: "Dispatcher" });
+			w.clean("PF-19", NIA, MON);
+		}, async (w) => {
+			const nia = await w.weeks("nia");
+			eq(nia[0].loads, [{ loadId: "PF-19", pickup: PICKED("Mon"), delivery: DONE("Mon") }], "moved back, then picked up again this week: its credit is this week's");
+			eq([nia[1].credits.pickups, nia[1].loads], [0, []], "and none last week, so one load earns one pickup");
+		});
+		await inWorld((w) => {
+			w.hist("PF-20", "geofence", "In Transit", `${MON} 14:00:00`, NIA);
+			w.hist("PF-20", "cancel", "Cancelled", `${MON} 15:00:00`, "disp");
+			w.hist("PF-20", "dispatch", "Dispatched", `${TUE} 09:00:00`, "disp");
+			w.row("PF-20", NIA, "Dispatched");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "cancelled and dispatched again: the old row doesn't count");
+		});
+		await inWorld((w) => {
+			w.depart("PF-21", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.hist("PF-21", "override", "Dispatched", `${MON} 20:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-21", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "an ELD departure before the status went back doesn't count either");
+		});
+		await inWorld((w) => {
+			w.hist("PF-22", "dispatch", "Dispatched", `${MON} 09:00:00`, "disp");
+			w.depart("PF-22", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-22", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-22", pickup: PICKED("Mon"), delivery: null }], "an ELD departure after its dispatch does");
+		});
+		await inWorld((w) => {
+			w.depart("PF-41", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.hist("PF-41", "manual", "At Shipper", `${MON} 18:00:00`, NIA);
+			w.hist("PF-41", "manual", "In Transit", `${MON} 18:05:00`, NIA);
+			w.row("PF-41", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-41", pickup: PICKED("Mon"), delivery: null }], "and so does one with his taps coming late behind it: nothing went back, so it stands, on the truck's own time");
+			eq((await w.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers.find((x) => x.name === NIA).pickups.eld, 1, "as the ELD's, not the tap's");
+		});
+		await inWorld((w) => {
+			w.hist("PF-23", "geofence", "In Transit", `${MON} 14:00:00`, NIA);
+			w.hist("PF-23", "cancel", "Cancelled", `${MON} 15:00:00`, "disp");
+			w.depart("PF-23", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-23", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "a last row of Cancelled leaves no run for an ELD departure to stand in");
+		});
+
+		// An errand, read from the other load's own record, and what stops one reading as under way for good.
+		await inWorld((w) => {
+			w.hist("PF-24", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-24", NIA, "Delivered", `${TUE} 15:00`);
+			w.picked("PF-25", NIA, MON);
+			w.row("PF-25", NIA, "At Receiver");
+			w.clean("PF-26", NIA, TUE);
+		}, async (w) => {
+			const ids = (await w.weeks("nia"))[0].loads.filter((l) => l.pickup.credits).map((l) => l.loadId);
+			eq(ids, ["PF-24", "PF-26"], "another load completed outside the status routes: under way until the sheet's own day, so an errand the day before is held and a pickup on that day isn't");
+		});
+		for (const [how, sheetStatus, deleted] of [["cancelled on the sheet alone", "Cancelled", false], ["soft-deleted", "In Transit", true], ["moved on the sheet to At Receiver", "At Receiver", false]]) {
+			await inWorld((w) => {
+				w.hist("PF-27", "geofence", "In Transit", `${LAST_THU} 15:00:00`, NIA);
+				w.row("PF-27", NIA, sheetStatus);
+				if (deleted) w.db.prepare("INSERT INTO deleted_loads (load_id) VALUES ('pf-27')").run();
+				w.clean("PF-28", NIA, MON);
+			}, async (w) => {
+				eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-28", pickup: PICKED("Mon"), delivery: DONE("Mon") }], `another load ${how} holds no pickup after it`);
+			});
+		}
+		await inWorld((w) => {
+			w.hist("PF-29", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-29", OMAR, "In Transit");
+			w.clean("PF-30", NIA, TUE);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 2, "a load taken from her isn't under way in her hands afterwards: it holds none of her later pickups");
+		});
+		await inWorld((w) => {
+			w.hist("PF-42", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.hist("PF-42", "geofence", "At Receiver", `${MON} 20:00:00`, NIA);
+			w.row("PF-42", OMAR, "At Receiver");
+			w.picked("PF-43", NIA, MON);
+			w.row("PF-43", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-42"], "but while it was hers, her own rows say it was under way: an errand then is still one");
+		});
+		await inWorld((w) => {
+			w.hist("PF-44", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.hist("PF-44", "geofence", "At Receiver", `${MON} 13:30:00`, NIA);
+			w.row("PF-44", NIA, "At Receiver");
+			w.picked("PF-45", NIA, MON);
+			w.row("PF-45", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-44"], "under way when it reached the shipper, finished before it left: the visit is still an errand");
+		});
+		await inWorld((w) => {
+			w.hist("PF-46", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-46", NIA, "In Transit");
+			w.depart("PF-47", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-47", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-46"], "an ELD departure on an errand earns nothing either");
+		});
+		await inWorld((w) => {
+			w.depart("PF-48", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-48", NIA, "In Transit");
+			w.hist("PF-49", "geofence", "At Shipper", `${MON} 14:30:00`, NIA);
+			w.row("PF-49", NIA, "Dispatched");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "nor one with a twin at the same visit");
+		});
+		const friday = Date.parse("2026-11-14T04:30:00Z"); // Fri Nov 13, 11:30 PM Eastern
+		await inWorld((w) => {
+			w.hist("PF-56", "geofence", "In Transit", "2026-11-14 02:00:00", NIA); // Fri 9 PM Eastern, already Saturday in UTC
+			w.row("PF-56", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-56", pickup: PICKED("Fri"), delivery: null }], "a pickup late on the week's last evening is judged and counted");
+		}, { nowMs: friday });
+		await inWorld((w) => {
+			w.hist("PF-57", "geofence", "In Transit", "2026-10-31 14:00:00", NIA); // the first day of last week
+			w.row("PF-57", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[1].loads, [{ loadId: "PF-57", pickup: PICKED("Sat"), delivery: null }], "and so is one on last week's first morning");
+		});
+
+		// A handover or reassignment: the credit goes to whoever made the pickup.
+		await inWorld((w) => w.clean("PF-31", OMAR, MON, NIA), async (w) => {
+			const nia = await w.get(OWN_WEEK, USERS.nia);
+			const omar = await w.get(OWN_WEEK, USERS.omar);
+			eq(nia.json.weeks[0].credits, { value: 0.5, target: 7.5, deliveries: 0, pickups: 1 }, "reassigned after her truck picked it up: the 0.5 is hers, though the sheet names him");
+			eq(nia.json.weeks[0].loads, [{ loadId: "PF-31", pickup: PICKED("Mon"), delivery: null }], "and her list shows the row, so it still adds up");
+			eq(omar.json.weeks[0].credits, { value: 1, target: 7.5, deliveries: 1, pickups: 0 }, "the new driver gets his delivery and not her pickup");
+			eq(omar.json.weeks[0].loads, [{ loadId: "PF-31", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "and his row says the pickup didn't count for him");
+			ok(!/nia|frost/i.test(omar.text), "his answer doesn't name her");
+			ok(!/omar|hale/i.test(nia.text), "her answer doesn't name him");
+		});
+		await inWorld((w) => {
+			w.db.prepare("DELETE FROM truck_assignments WHERE truck_id IN (21, 22)").run();
+			w.assign(21, NIA, "2026-11-10T15:00:00.000Z");
+			w.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (21, ?, '2026-11-10T15:00:00.000Z', '')").run(OMAR);
+			w.depart("PF-32", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.row("PF-32", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 1, "a truck handed over: its ELD departure before the handover is whoever held the truck then");
+			eq((await w.weeks("omar"))[0].credits, { value: 1, target: 7.5, deliveries: 1, pickups: 0 }, "and not the driver holding it now");
+		});
+		await inWorld((w) => {
+			w.depart("PF-33", Date.parse(`${MON}T14:00:00Z`), 22);
+			w.row("PF-33", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 0, "an ELD departure from another driver's truck isn't hers");
+			eq((await w.weeks("omar"))[0].credits.pickups, 1, "it is that driver's");
+		});
+		await inWorld((w) => {
+			w.hist("PF-34", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-34", NIA, "In Transit");
+			w.picked("PF-35", NIA, MON);
+			w.depart("PF-35", Date.parse(`${TUE}T14:00:00Z`), 22);
+			w.row("PF-35", OMAR, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-34"], "a pass-by on her truck earns her nothing");
+			eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-35", pickup: PICKED("Tue"), delivery: null }], "and the new driver's own truck record of the load still stands");
+		});
+		await inWorld((w) => {
+			w.hist("PF-36", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.row("PF-36", OMAR, "In Transit");
+			w.picked("PF-37", OMAR, MON);
+			w.row("PF-37", OMAR, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-37", pickup: PICKED("Mon"), delivery: null }], "a load under way in her hands doesn't make his own pickup an errand");
+		});
+		await inWorld((w) => {
+			w.hist("PF-38", "accept", "Assigned", `${MON} 09:00:00`, NIA, { old: "Dispatched", role: "Driver" });
+			w.hist("PF-38", "override", "In Transit", `${MON} 14:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-38", OMAR, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 1, "a dispatcher's tap names the dispatcher: the pickup is the driver's who was on the load then");
+			eq((await w.weeks("omar"))[0].credits.pickups, 0, "not the driver the load moved to");
+		});
+		await inWorld((w) => {
+			w.hist("PF-39", "override", "In Transit", `${MON} 14:00:00`, "disp", { role: "Dispatcher" });
+			w.hist("PF-39", "manual", "At Receiver", `${MON} 20:00:00`, NIA, { role: "Driver" });
+			w.row("PF-39", OMAR, "At Receiver");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 1, "with nothing of his before it, the next row a driver wrote says who");
+		});
+		await inWorld((w) => {
+			w.hist("PF-40", "override", "In Transit", `${MON} 14:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-40", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.pickups, 1, "and with no such row at all, the sheet's own driver");
+		});
+		await inWorld((w) => {
+			w.hist("PF-58", "accept", "Assigned", `${MON} 09:00:00`, NIA, { old: "Dispatched", role: "Driver" });
+			w.hist("PF-58", "manual", "Heading to Shipper", `${MON} 11:00:00`, OMAR, { role: "Driver" });
+			w.hist("PF-58", "override", "In Transit", `${MON} 14:00:00`, "disp", { role: "Dispatcher" });
+			w.row("PF-58", OMAR, "In Transit");
+		}, async (w) => {
+			eq([(await w.weeks("nia"))[0].credits.pickups, (await w.weeks("omar"))[0].credits.pickups], [0, 1], "the last driver to write before the tap is the one on the load, not the first");
+		});
+		// A name in use today is that person's, wherever it's in use, and never the sheet's driver's old spelling.
+		for (const [where, actor, setup] of [
+			["the directory alone", "Ivy Lane", () => {}],
+			["a sheet row alone", "Lou Grant", () => {}],
+			["a truck assignment alone", "Zed Ames", (w) => {
+				w.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (30, 'LogisX-#530', '')").run();
+				w.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (30, 'Zed Ames', '2026-10-01T12:00:00.000Z', '')").run();
+			}],
+		]) {
+			await inWorld((w) => {
+				setup(w);
+				w.picked("PF-59", NIA, MON, actor);
+				w.row("PF-59", NIA, "In Transit");
+			}, async (w) => {
+				eq((await w.weeks("nia"))[0].credits.pickups, 0, `a pickup by a name found in ${where} isn't the new driver's`);
+			});
+		}
+		// With a delivered row and a copy below naming someone else, an old spelling is the delivered row's driver's.
+		await inWorld((w) => {
+			w.picked("PF-69", NIA, MON, "Nia Frosst");
+			w.row("PF-69", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("PF-69", OMAR, "Dispatched");
+		}, async (w) => {
+			eq([(await w.weeks("nia"))[0].credits.pickups, (await w.weeks("omar"))[0].credits.pickups], [1, 0], "an old spelling goes to the invoice's own row, not the copy below it");
+		});
+		// A Load ID holding contact text stays his own driver's to read: her row shows what any other driver is served.
+		await inWorld((w) => w.clean("12345 555-867-5309", OMAR, MON, NIA), async (w) => {
+			const nia = await w.get(OWN_WEEK, USERS.nia);
+			const omar = await w.get(OWN_WEEK, USERS.omar);
+			eq(nia.json.weeks[0].credits.pickups, 1, "her pickup of a load whose ID holds contact text still counts");
+			ok(!nia.text.includes("555-867-5309"), "but the ID's contact isn't hers now that the load isn't", nia.text.slice(0, 200));
+			ok(omar.text.includes("555-867-5309"), "its own driver reads the ID as stored, as his load card does");
+		});
+		await inWorld((w) => {
+			w.picked("12345 555-867-5309", NIA, MON);
+			w.row("12345 555-867-5309", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["12345 555-867-5309"], "and so does a driver with only the pickup of a load still his");
+		});
+
+		// A rename leaves the log as it was: every row still reads his old spelling.
+		await inWorld((w) => {
+			for (const [i, day] of [SUN, MON, TUE].entries()) w.clean(`PF-5${i}`, NIA, day, "Nia Frosst");
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq(nia.credits, { value: 4.5, target: 7.5, deliveries: 3, pickups: 3 }, "a rename loses none of his pickups: he held the truck, and the old spelling is nobody's now");
+		});
+		await inWorld((w) => {
+			w.hist("PF-53", "geofence", "In Transit", `${MON} 10:00:00`, "Nia Frosst");
+			w.row("PF-53", NIA, "In Transit");
+			w.picked("PF-54", NIA, MON, "Nia Frosst");
+			w.row("PF-54", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-53"], "and an errand is still an errand under the old spelling");
+		});
+		await inWorld((w) => {
+			w.clean("PF-55", "Ivy Lane", MON, "Nia Frosst");
+		}, async (w) => {
+			eq((await w.weeks("ivy"))[0].loads, [{ loadId: "PF-55", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "an old spelling on a driver who held no truck then proves nothing: no credit");
+		});
+
+		// The proof on its own, with every fact handed to it.
+		const proof = proofModule();
+		const norm = (s) => String(s || "").trim().toLowerCase();
+		const facts = {
+			normalizeName: norm,
+			isDriverName: (k) => k === "ann" || k === "bob",
+			heldTruckAt: () => true,
+			holderOf: () => "ann",
+			truckHasEldAt: () => false,
+			errandAt: () => false,
+			twinAt: () => false,
+		};
+		const row = (status, source, at, actor = "ann", more = {}) => ({ new_status: status, source, changed_at: `2026-11-09 ${at}:00`, actor, ...more });
+		const at = (t) => Date.parse(`2026-11-09T${t}:00Z`);
+		const go = [row("In Transit", "geofence", "14:00")];
+		eq(proof.qualifiedPickup({ ...facts, events: go }), { driverKey: "ann", ms: at("14:00"), source: "geofence" }, "proof: a geofence departure, its writer's");
+		eq(proof.qualifiedPickup({ ...facts, events: go, errandAt: () => true }).withheld, "errand", "proof: withheld as an errand");
+		eq(proof.qualifiedPickup({ ...facts, events: go, twinAt: () => true }).withheld, "twin", "proof: withheld as a twin");
+		eq(proof.qualifiedPickup({ ...facts, events: go, waitingOnSheet: true }).withheld, "undone", "proof: the sheet says it hasn't left");
+		eq(proof.qualifiedPickup({ ...facts, events: [...go, row("Dispatched", "override", "15:00", "disp")] }).withheld, "undone", "proof: moved back");
+		eq(proof.qualifiedPickup({ ...facts, events: [row("In Transit", "manual", "14:00")], truckHasEldAt: () => true }).withheld, "no-truck-record", "proof: a tap on a truck with a reporting ELD");
+		eq(proof.qualifiedPickup({ ...facts, events: [row("In Transit", "manual", "14:00")] }).source, "driver", "proof: a tap on one without");
+		eq(proof.qualifiedPickup({ ...facts, events: [row("In Transit", "override", "14:00", "disp")], driverNow: "bob" }).source, "dispatch", "proof: a dispatcher's tap");
+		eq(proof.qualifiedPickup({ ...facts, events: [row("In Transit", "geofence", "14:00", "gone")], driverNow: "" }).withheld, "no-driver", "proof: a spelling nobody holds, with no driver on the load");
+		eq(proof.qualifiedPickup({ ...facts, events: [], eldDepart: { ms: at("14:00"), truckId: 7 } }), { driverKey: "ann", ms: at("14:00"), source: "eld" }, "proof: an ELD departure, whoever held its truck");
+		eq(proof.qualifiedPickup({ ...facts, events: [] }), null, "proof: nothing on record, nothing to judge");
+		eq(proof.statusesStillWaiting(["Dispatched", "At Shipper", "Loading", "", "Cancelled"]), true, "the sheet: nothing past its shipper");
+		eq(proof.statusesStillWaiting(["Dispatched", "In Transit"]), false, "the sheet: one row has left");
+		eq(proof.statusesStillWaiting(["Cancelled"]), false, "the sheet: a cancelled load isn't a waiting one");
+		const src = fs.readFileSync(path.join(ROOT, "lib", "driver-pickup-proof.js"), "utf8");
+		eq([...src.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]), ["./arrival-pickup", "./fuel-pickup-arrival", "./driver-performance"], "the proof requires only the pure rules");
+		ok(!/\bdb\b|process\.env|Date\.now|new Date/.test(src.replace(/\/\/.*$/gm, "")), "and reads no database, setting or clock");
+	});
+
+	await section("27 a load on two sheet rows counts as the invoice counts it", async () => {
+		for (const [says, rows] of [
+			["one row, delivered (the control)", [["PF-60", NIA, "Delivered", `${TUE} 15:00`]]],
+			["an open row above a delivered copy", [["PF-60", NIA, "In Transit", ""], ["PF-60", NIA, "Delivered", `${TUE} 15:00`]]],
+			["delivered, with a cancelled copy below", [["PF-60", NIA, "Delivered", `${TUE} 15:00`], ["#PF-60", NIA, "Cancelled", ""]]],
+			["delivered, with an open copy below", [["PF-60", NIA, "Delivered", `${TUE} 15:00`], ["PF-60", NIA, "Dispatched", ""]]],
+			["delivered, with a copy below naming no driver yet", [["PF-60", NIA, "Delivered", `${TUE} 15:00`], ["PF-60", "", "Unassigned", ""]]],
+			["delivered by her, with a copy below naming another driver", [["PF-60", NIA, "Delivered", `${TUE} 15:00`], ["PF-60", OMAR, "Dispatched", ""]]],
+			["delivered and dated, with a delivered copy below with no date", [["PF-60", NIA, "Delivered", `${TUE} 15:00`], ["PF-60", NIA, "Delivered", ""]]],
+			["delivered with no date, with a delivered and dated copy below", [["PF-60", NIA, "Delivered", ""], ["PF-60", NIA, "Delivered", `${TUE} 15:00`]]],
+			["spelled two ways, both delivered", [["#PF-60", NIA, "Delivered", `${TUE} 15:00`], ["PF-60", NIA, "Delivered", `${TUE} 15:00`]]],
+		]) {
+			await inWorld((w) => {
+				w.picked("PF-60", NIA, MON);
+				for (const r of rows) w.row(...r);
+			}, async (w) => {
+				const nia = (await w.weeks("nia"))[0];
+				eq(nia.credits, { value: 1.5, target: 7.5, deliveries: 1, pickups: 1 }, `${says}: 1.5 of 7.5`);
+				eq([nia.loads.length, nia.loads[0] && nia.loads[0].pickup, nia.loads[0] && nia.loads[0].delivery], [1, PICKED("Mon"), DONE("Tue")], `${says}: one row, both credits`);
+				eq(nia.credits.deliveries, w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), `${says}: what her invoice bills`);
+			});
+		}
+		await inWorld((w) => {
+			w.picked("PF-61", NIA, MON);
+			w.row("PF-61", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("PF-61", OMAR, "Dispatched");
+		}, async (w) => {
+			const omar = (await w.weeks("omar"))[0];
+			eq([omar.credits.deliveries, omar.credits.pickups, omar.loads], [0, 0, []], "the driver the copy below names reads nothing for it, and his invoice bills nothing");
+			eq(w.invoiceBills(OMAR, "2026-11-07", "2026-11-13"), 0, "as his invoice says");
+		});
+		await inWorld((w) => {
+			w.picked("PF-62", NIA, LAST_THU);
+			w.row("PF-62", NIA, "Delivered", `${LAST_FRI} 15:00`);
+			w.row("PF-62", NIA, "Delivered", `${TUE} 15:00`);
+		}, async (w) => {
+			const nia = await w.weeks("nia");
+			eq(nia.map((x) => x.credits.deliveries), [w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), w.invoiceBills(NIA, "2026-10-31", "2026-11-06")], "two delivered rows in two weeks: each week as that week's invoice bills it");
+			eq(nia.map((x) => x.credits.pickups), [0, 1], "and one pickup, in the week it was made");
+		});
+		await inWorld((w) => {
+			w.picked("PF-63", NIA, MON);
+			w.row("PF-63", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("PF-63", OMAR, "Delivered", `${TUE} 16:00`);
+		}, async (w) => {
+			eq([(await w.weeks("nia"))[0].credits.deliveries, (await w.weeks("omar"))[0].credits.deliveries], [1, 1], "two delivered rows naming two drivers: each as his own invoice bills it");
+			eq([w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), w.invoiceBills(OMAR, "2026-11-07", "2026-11-13")], [1, 1], "which is what those invoices do");
+			eq([(await w.weeks("nia"))[0].credits.pickups, (await w.weeks("omar"))[0].credits.pickups], [1, 0], "and the pickup is still one driver's");
+		});
+		await inWorld((w) => {
+			w.picked("PF-64", NIA, MON);
+			w.row("PF-64", NIA, "In Transit");
+			w.row("#PF-64", NIA, "Cancelled");
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq([nia.credits.value, nia.loads], [0, []], "an open row above a cancelled copy: the load reads cancelled, as his load list has it, and earns nothing");
+			eq(w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), 0, "and his invoice bills nothing");
+		});
+		await inWorld((w) => {
+			w.picked("PF-65", NIA, MON);
+			w.row("PF-65", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("#PF-65", NIA, "Delivered", `${TUE} 15:00`);
+			w.db.prepare("INSERT INTO deleted_loads (load_id) VALUES ('pf-65')").run();
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].credits.value, 0, "soft-deleted on both rows: nothing");
+			eq(w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), 0, "and nothing on the invoice");
+		});
+		// A delivered row keeps the load live, whichever week its date reads, and a copy below doesn't undo it.
+		for (const [how, done] of [["with no date", ""], ["dated in a week long past", "2026-10-02 15:00"]]) {
+			await inWorld((w) => {
+				w.picked("PF-66", NIA, MON);
+				w.row("PF-66", NIA, "Delivered", done);
+				w.row("#PF-66", NIA, "Cancelled");
+			}, async (w) => {
+				const nia = (await w.weeks("nia"))[0];
+				eq([nia.credits.deliveries, nia.credits.pickups], [0, 1], `delivered ${how}, a cancelled copy below: no delivery this week, as his invoice has it, and the pickup stands`);
+				eq(w.invoiceBills(NIA, "2026-11-07", "2026-11-13"), 0, `delivered ${how}: nothing on this week's invoice`);
+			});
+		}
+		await inWorld((w) => {
+			w.picked("PF-67", NIA, MON);
+			w.row("#PF-67", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("PF-67", NIA, "Dispatched");
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["#PF-67"], "a row of both credits shows the ID as the invoice's row spells it");
+		});
+
+		// The one read every caller shares keeps what it was: only this route looks at the rest.
+		await inWorld(() => {}, async (w) => {
+			const read = w.fns.parseJobTrackingRead({ values: [["Load ID", "Driver"], ["PF-70", NIA], ["#PF-70", NIA], ["PF-71", OMAR]] });
+			eq(read.data.map((r) => r["Load ID"]), ["#PF-70", "PF-71"], "the shared read still keeps each load's bottom row");
+			eq(Object.keys(read).sort(), Object.keys(w.fns.parseSheet({ values: [["Load ID", "Driver"]] })).sort(), "and no new key shows on it");
+			ok(!JSON.stringify(read).includes("\"PF-70\""), "nor in its JSON");
+			const liveView = w.fns.liveJobTrackingView(read);
+			eq(liveView.data.map((r) => r["Load ID"]), ["#PF-70", "PF-71"], "and every view of it reads the same rows");
+		});
+		lifted();
+		ok(/const parsed = parseJobTrackingRead\(response\.data\);/.test(SRC), "getJobTrackingCached() reads through the same parse this runner does");
+		eq((SRC.match(/\beveryJobTrackingRow\b/g) || []).length, 2, "server.js names the kept rows' reader twice: its declaration and this route's mount");
+	});
+
+	await section("28 what the proof doesn't change", async () => {
+		// Made-up sheets, each with some of every shape above, and the rules every answer must keep.
+		let seed = 20261105;
+		const rand = (n) => {
+			seed = (seed * 1664525 + 1013904223) % 4294967296;
+			return Math.floor((seed / 4294967296) * n);
+		};
+		const pick = (list) => list[rand(list.length)];
+		const days = [`${LAST_THU}`, LAST_FRI, "2026-11-07", SUN, MON, TUE];
+		const w = await proofWorld(() => {});
+		const drivers = [[NIA, "nia"], [OMAR, "omar"]];
+		const weeksOf = [["2026-11-07", "2026-11-13"], ["2026-10-31", "2026-11-06"]];
+		const totals = { sheets: 0, weeks: 0, sumOff: 0, invoiceOff: 0, doubled: 0, wrongDriver: 0, leaked: 0, waiting: 0, keys: 0 };
+		try {
+			for (let s = 0; s < 40; s++) {
+				w.jt = null;
+				w.handle.clearCache();
+				w.extraLoads.length = 0;
+				for (const t of ["load_status_history", "load_eld_miles", "deleted_loads"]) w.db.prepare(`DELETE FROM ${t}`).run();
+				const actorsOf = new Map();
+				for (let i = 0; i < 10; i++) {
+					const id = `FZ-${s}-${i}`;
+					const [holder] = pick(drivers);
+					const [cell] = rand(4) === 0 ? pick(drivers) : [holder];
+					const day = pick(days);
+					const done = pick(days);
+					const shape = pick(["clean", "clean", "picked", "moved", "none", "tap", "dispatch", "eld", "stale"]);
+					if (shape === "clean") { w.picked(id, holder, day); w.hist(id, "manual", "Delivered", `${day} 20:00:00`, holder); }
+					if (shape === "picked") w.picked(id, holder, day);
+					if (shape === "moved") { w.picked(id, holder, day); w.hist(id, "override", pick(["Dispatched", "At Shipper"]), `${day} 15:00:00`, "disp", { role: "Dispatcher" }); }
+					if (shape === "tap") w.hist(id, "manual", "In Transit", `${day} 14:00:00`, holder);
+					if (shape === "dispatch") w.hist(id, "override", "In Transit", `${day} 14:00:00`, "disp", { role: "Dispatcher" });
+					if (shape === "eld") w.depart(id, Date.parse(`${day}T14:00:00Z`), holder === NIA ? 21 : 22);
+					if (shape === "stale") w.hist(id, "geofence", "In Transit", `${day} 14:00:00`, "Old Spelling");
+					// A dispatcher's tap and an old spelling name nobody, so the sheet's driver is theirs to read.
+					if (shape !== "dispatch" && shape !== "stale") actorsOf.set(id.toLowerCase(), holder);
+					const status = pick(["Delivered", "Delivered", "In Transit", "Dispatched", "At Receiver"]);
+					w.row(id, cell, status, status === "Delivered" && rand(5) ? `${done} 15:00` : "");
+					if (rand(3) === 0) w.row(pick([id, `#${id}`]), pick([cell, cell, "", OMAR]), pick(["Delivered", "Cancelled", "Dispatched", "In Transit"]), rand(2) ? `${pick(days)} 16:00` : "");
+					if (rand(15) === 0) w.db.prepare("INSERT OR IGNORE INTO deleted_loads (load_id) VALUES (?)").run(id.toLowerCase());
+				}
+				totals.sheets += 1;
+				const credited = new Map();
+				for (const [name, who] of drivers) {
+					const r = await w.get(OWN_WEEK, USERS[who]);
+					if (!allKeys(r.json).every((k) => /^(creditWeights|delivery|pickup|pickups|invoicePaysDays|view|weeks|credits|end|id|left|loads|newWeekNote|pace|percent|start|targetLowered|deliveries|target|value|loadId|day|note)$/.test(k))) totals.keys += 1;
+					const other = name === NIA ? OMAR : NIA;
+					if (new RegExp(other.split(" ")[0], "i").test(r.text)) totals.leaked += 1;
+					r.json.weeks.forEach((week, i) => {
+						totals.weeks += 1;
+						const sum = week.loads.reduce((t, l) => t + (l.pickup.credits || 0) + (l.delivery ? l.delivery.credits : 0), 0);
+						if (sum !== week.credits.value) totals.sumOff += 1;
+						if (week.credits.deliveries !== w.invoiceBills(name, ...weeksOf[i])) totals.invoiceOff += 1;
+						for (const l of week.loads) {
+							if (!l.pickup.credits) continue;
+							const key = l.loadId.toLowerCase().replace(/^#/, "");
+							if (credited.has(key)) totals.doubled += 1;
+							credited.set(key, name);
+							if (actorsOf.has(key) && actorsOf.get(key) !== name) totals.wrongDriver += 1;
+							const statuses = w.extraLoads.filter((row) => row[0].toLowerCase().replace(/^#/, "") === key).map((row) => row[2]);
+							if (statuses.every((st) => /^(dispatched|cancelled)$/i.test(st))) totals.waiting += 1;
+						}
+					});
+				}
+			}
+		} finally {
+			await w.close();
+		}
+		eq([totals.sheets, totals.weeks], [40, 160], "40 made-up sheets, 2 drivers, 2 weeks each");
+		eq(totals.sumOff, 0, "the count equals the sum of its rows, every week");
+		eq(totals.invoiceOff, 0, "deliveries equal the invoice's own selector over every row, never short and never over");
+		eq(totals.doubled, 0, "no load earns its pickup twice, for two drivers or in two weeks");
+		eq(totals.wrongDriver, 0, "no pickup is credited to a driver who didn't make it");
+		eq(totals.waiting, 0, "and none on a load the sheet says is still waiting");
+		eq([totals.leaked, totals.keys], [0, 0], "each driver's answer holds his own figures and no other driver's name, in the same keys");
+
+		// The Super Admin's report shares build() with the driver's own week, so its credits use the same proof.
+		await inWorld((w) => {
+			w.hist("PF-80", "geofence", "In Transit", `${MON} 10:00:00`, NIA);
+			w.hist("PF-80", "geofence", "At Receiver", `${MON} 20:00:00`, NIA);
+			w.row("PF-80", NIA, "At Receiver");
+			w.picked("PF-81", NIA, MON);
+			w.row("PF-81", NIA, "At Receiver");
+			w.clean("PF-82", OMAR, TUE, NIA);
+		}, async (w) => {
+			const report = (await w.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers;
+			const of = (name) => report.find((x) => x.name === name);
+			eq(of(NIA).pickups, { total: 2, geofence: 2, eld: 0, driver: 0, dispatch: 0 }, "the office reads the same credits: not the pass-by, and the pickup she made of a load now his");
+			eq([of(NIA).credits, of(OMAR).pickups.total, of(OMAR).credits], [1, 0, 1], "and the same sums");
+		});
+
+		// Nothing that pays reads the proof or the kept rows.
+		const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js"));
+		const readers = libFiles.filter((f) => /driver-pickup-proof/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8")));
+		eq(readers, ["driver-performance-routes.js"], "only this feature's routes require the proof");
+		lifted();
+		ok(!/driver-pickup-proof/.test(SRC), "and server.js doesn't name it");
+		eq((SRC.match(/process\.env\.DRIVER_PERFORMANCE[A-Z_]*/g) || []).sort(), ["process.env.DRIVER_PERFORMANCE_BOARD_ENABLED", "process.env.DRIVER_PERFORMANCE_ENABLED"], "no new flag: it goes live on deploy under the kill switch that's there");
 	});
 
 	if (on) await on.close();
