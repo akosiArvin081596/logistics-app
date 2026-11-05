@@ -580,6 +580,15 @@ const count = (db, sql, ...a) => db.prepare(sql).get(...a).n;
 				try { w.db.exec(sql); } catch (err) { refused = /never/.test(err.message); }
 				ok(refused, label);
 			}
+			await w.decide("Ada Quill", WEEK0, "excused", "Weather closure on the route");
+			for (const [sql, label] of [
+				["UPDATE performance_week_decisions SET verdict = 'missed'", "a recorded decision can't be rewritten"],
+				["DELETE FROM performance_week_decisions", "...or deleted"],
+			]) {
+				let refused = false;
+				try { w.db.exec(sql); } catch (err) { refused = /never/.test(err.message); }
+				ok(refused, label);
+			}
 			w.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, pay_daily, user_id) VALUES (50, 'Lou Grant', 'active', 'fixed', 300, 60)").run();
 			await w.handle.lockDue(moment + 3000000);
 			eq(count(w.db, "SELECT COUNT(*) AS n FROM performance_weeks WHERE directory_id = 50"), 0, "a driver added later joins no locked week");
@@ -592,6 +601,8 @@ const count = (db, sql, ...a) => db.prepare(sql).get(...a).n;
 			w.clock.ms = moment;
 			eq((await w.handle.lockDue(moment)).skipped, "rollup-not-covered", "a rollup that hasn't covered Friday night holds the lock");
 			eq((await w.report(WEEK0)).week.state, "held-for-rollup", "...and the report says so");
+			const asked = await w.report();
+			eq(asked.latestClosedWeek, { start: WEEK0, state: "held-for-rollup" }, "...even when that isn't the week asked for, so a held lock can't go unseen");
 			w.rollupThrough(rules.weekCloseMs(WEEK0));
 			eq((await w.handle.lockDue(moment + 60000)).locked, WEEK0, "a rollup that has covered it lets it lock on the next tick");
 			await w.close();
@@ -809,6 +820,20 @@ const count = (db, sql, ...a) => db.prepare(sql).get(...a).n;
 			w.row("Z-3", "Ada Quill", "Dispatched", "");
 		});
 		eq(withheldOf(x), [["z-3", "undone"]], "...or one from before the current run");
+		x = await week((w) => {
+			depart(w, "z-4", Date.parse(`${d(2)}T14:00:00Z`));
+			w.row("Z-4", "Ada Quill", "Dispatched", "");
+			w.hist("Z-5", "geofence", "In Transit", `${d(2)}T10:00:00Z`, "Ada Quill");
+			w.row("Z-5", "Ada Quill", "In Transit", "");
+		});
+		eq(withheldOf(x), [["z-4", "errand"]], "...or one made while another of his loads was under way");
+		x = await week((w) => {
+			depart(w, "z-6", Date.parse(`${d(2)}T14:00:00Z`));
+			w.row("Z-6", "Ada Quill", "Dispatched", "");
+			w.hist("Z-7", "geofence", "At Shipper", `${d(2)}T14:30:00Z`, "Ada Quill");
+			w.row("Z-7", "Ada Quill", "Dispatched", "");
+		});
+		eq(withheldOf(x), [["z-6", "twin"]], "...or one with a twin at the same visit");
 
 		x = await week((w) => { w.load("X-1", "Ada Quill", d(2)); w.rows[w.rows.length - 1]["Job Status"] = "Cancelled"; });
 		eq([x.row.deliveries, x.row.pickups], [0, 0], "a cancelled load earns nothing");
@@ -921,6 +946,9 @@ const count = (db, sql, ...a) => db.prepare(sql).get(...a).n;
 			eq((await w.call("POST", "/api/driver/me/performance/hos-stop", USERS.ada)).json, { marked: true, weekStart: WEEK0 }, "a second tap answers the same");
 			eq(count(w.db, "SELECT COUNT(*) AS n FROM performance_week_decisions WHERE kind = 'hos_stop'"), 1, "...and stores nothing more");
 			eq(audits(w, "performance_hos_stop").length, 1, "...and is audited once");
+			// A mark can close its 7 days before its week locks, so the office sees it from the start.
+			const seen = (await w.report()).decisionsWithoutRow;
+			eq(seen.map((x) => [x.name, x.weekStart, x.kind, x.declineOpenUntil]), [["Ada Quill", WEEK0, "hos_stop", "2026-11-17T17:00:00.000Z"]], "the report shows the mark before the week locks, with its deadline");
 			eq((await w.call("POST", "/api/driver/me/performance/hos-stop", USERS.eli)).json.code, "NOT_ELIGIBLE", "a percentage driver isn't in");
 			eq((await w.call("POST", "/api/driver/me/performance/hos-stop", USERS.nobody)).json.code, "NOT_ELIGIBLE", "...nor an account on no directory row");
 			eq((await w.call("POST", "/api/driver/me/performance/hos-stop", USERS.admin)).status, 403, "a Super Admin can't mark one");
