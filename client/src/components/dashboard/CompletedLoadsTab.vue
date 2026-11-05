@@ -21,7 +21,7 @@
           class="auto-toggle"
           :class="{ 'auto-toggle--on': autoAttentionOnly }"
           :aria-pressed="autoAttentionOnly"
-          :title="autoAttentionOnly ? 'Showing only loads whose automatic invoice draft needs attention' : 'Show only loads whose automatic invoice draft needs attention'"
+          :title="autoToggleTitle"
           @click="autoAttentionOnly = !autoAttentionOnly"
         >
           Needs attention ({{ autoAttentionCount }})
@@ -48,6 +48,16 @@
         </select>
       </div>
 
+      <!-- One invoice status on each completed load: the server's, with how many rows hold each
+           once the other filters and the search are applied. -->
+      <div v-if="invoiceStatusOn" class="cl-field">
+        <label class="cl-label" for="cl-invoice-status">Invoice status</label>
+        <select id="cl-invoice-status" v-model="invoiceStatusChoice" class="dash-select cl-control cl-invoice-status">
+          <option value="">All invoice statuses</option>
+          <option v-for="o in invoiceStatusChoices" :key="o.value" :value="o.value">{{ o.text }}</option>
+        </select>
+      </div>
+
       <!-- Labelled, because two bare mm/dd/yyyy boxes give no clue which date
            they filter on. The basis is the date AS RECORDED on the load — the
            same value the P&L, payouts and invoicing count it on — so a range
@@ -66,7 +76,7 @@
         </div>
       </div>
 
-      <button v-if="filtersActive" type="button" class="cl-clear" title="Clear the driver and date filters" @click="clearFilters">Clear</button>
+      <button v-if="filtersActive" type="button" class="cl-clear" :title="invoiceStatusOn ? 'Clear the driver, date and invoice status filters' : 'Clear the driver and date filters'" @click="clearFilters">Clear</button>
 
       <!-- Shown while automatic drafts are on or shadowing: which broker domains a
            draft may go to, and which brokers are left out. -->
@@ -83,7 +93,7 @@
       <!-- The export endpoint only understands driver + date range, so a live
            load-number search or the Needs Review toggle would make the file
            wider than the table. Say so rather than surprise them. -->
-      <p v-if="exportWiderThanTable" class="cl-note">{{ auth.isSuperAdmin && autoMode !== 'off' ? 'Search, Needs Review and Needs attention aren’t applied to the downloaded file.' : 'Search and Needs Review aren’t applied to the downloaded file.' }}</p>
+      <p v-if="exportWiderThanTable" class="cl-note">{{ exportNote }}</p>
     </div>
     <div class="overflow-x-auto">
       <Table v-if="filteredJobs.length > 0">
@@ -132,7 +142,8 @@
               <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
               <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
             </div>
-            <!-- The automatic draft's status, in lib/autoInvoiceStatus.js's words. -->
+            <!-- The load's invoice status, in lib/invoiceStatus.js's words: status, date, invoice #,
+                 why. Its buttons keep reading the automatic job's own status. -->
             <div v-if="selectedAutoChip" class="auto-line" :class="`auto-line--${selectedAutoChip.tone}`">
               <span class="auto-line-text"><strong>{{ selectedAutoChip.label }}.</strong> {{ selectedAutoChip.reason }}</span>
               <button v-if="canMarkChecked(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('checked')">Mark checked</button>
@@ -376,7 +387,8 @@ import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
+import { AUTO_INVOICE_REASONS, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
+import { invoiceStatusChip, hasInvoiceStatus, invoiceStatusOptions, filterByInvoiceStatus, statusAfterAction, exportNoteText, attentionToggleTitle } from '../../lib/invoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -402,7 +414,12 @@ const autoMode = computed(() => {
   return m === 'on' || m === 'shadow' ? m : 'off'
 })
 const autoAttentionCount = computed(() => (auth.isSuperAdmin ? props.jobs.filter(autoInvoiceNeedsAttention).length : 0))
-const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceChip(job._autoInvoice) : null)
+const autoChip = (job) => (auth.isSuperAdmin && job ? invoiceStatusChip(job) : null)
+// One invoice status on each completed load, Super Admin only: the server puts `_invoiceStatus`
+// on the rows (codes only, worded by lib/invoiceStatus.js). Without it, the chips read as before.
+const invoiceStatusOn = computed(() => auth.isSuperAdmin && props.jobs.some(hasInvoiceStatus))
+const invoiceStatusChoice = ref('') // a status, '' = all
+const autoToggleTitle = computed(() => attentionToggleTitle({ on: autoAttentionOnly.value, statusShown: invoiceStatusOn.value }))
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
@@ -488,19 +505,25 @@ const exportMatches = computed(() => {
   }
   return pool
 })
-const filtersActive = computed(() => !!(driverFilter.value || fromDate.value || toDate.value))
-function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.value = '' }
+const filtersActive = computed(() => !!(driverFilter.value || fromDate.value || toDate.value || invoiceStatusChoice.value))
+function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.value = ''; invoiceStatusChoice.value = '' }
 // PaginationBar is fed `filteredJobs.length` while the page slice is computed
 // over sortedJobs — so every predicate has to live here, not in sortedJobs, or
 // the page count silently desyncs from the rows on screen.
 // Load ID, or a reference number GET /api/dashboard attached as _refs
 // (lib/loadSearch.js); refVia() names the reference a row was found by.
-const searchResult = computed(() => {
+const poolBeforeStatus = computed(() => {
   let pool = exportMatches.value
   if (needsReviewOnly.value) pool = pool.filter(needsReview)
   if (autoAttentionOnly.value) pool = pool.filter(autoInvoiceNeedsAttention)
+  return pool
+})
+const searchResult = computed(() => {
+  const pool = filterByInvoiceStatus(poolBeforeStatus.value, invoiceStatusOn.value ? invoiceStatusChoice.value : '')
   return searchLoads(pool, searchQuery.value, loadIdCol.value)
 })
+// What picking each status would list: every other filter and the search applied, not itself.
+const invoiceStatusChoices = computed(() => invoiceStatusOptions(searchLoads(poolBeforeStatus.value, searchQuery.value, loadIdCol.value).rows))
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
 const emptyMessage = computed(() => {
@@ -560,6 +583,9 @@ const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = use
 // load needs attention its button is gone, so the filter goes with it.
 watch(autoAttentionOnly, () => goTo(1))
 watch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })
+// Likewise the invoice status: with the rows' status gone (the kill switch), so is its select.
+watch(invoiceStatusChoice, () => goTo(1))
+watch(invoiceStatusOn, (on) => { if (!on) invoiceStatusChoice.value = '' })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
@@ -570,7 +596,8 @@ watch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })
 // The button is disabled when nothing matches, which is also the case the
 // endpoint answers with a 404 JSON body an anchor couldn't intercept anyway.
 const canDownload = computed(() => exportMatches.value.length > 0)
-const exportWiderThanTable = computed(() => canDownload.value && (!!searchQuery.value.trim() || needsReviewOnly.value || autoAttentionOnly.value))
+const exportWiderThanTable = computed(() => canDownload.value && (!!searchQuery.value.trim() || needsReviewOnly.value || autoAttentionOnly.value || !!invoiceStatusChoice.value))
+const exportNote = computed(() => exportNoteText({ attention: auth.isSuperAdmin && autoMode.value !== 'off', status: invoiceStatusOn.value }))
 const downloadTitle = computed(() => {
   if (!canDownload.value) return 'No completed loads match these filters.'
   const who = driverLabel.value ? `every load ${driverLabel.value} delivered` : 'every completed load'
@@ -1006,7 +1033,7 @@ async function autoInvoiceAction(kind) {
   try {
     await api.post(`/api/auto-invoice/loads/${encodeURIComponent(loadRefValue.value)}/${kind === 'checked' ? 'checked' : 'retry'}`, {})
     if (selectedJob.value) {
-      selectedJob.value = { ...selectedJob.value, _autoInvoice: kind === 'checked' ? { ...status, changed: [] } : { state: 'queued', code: '', invoiceId: '', changed: [] } }
+      selectedJob.value = { ...selectedJob.value, _autoInvoice: kind === 'checked' ? { ...status, changed: [] } : { state: 'queued', code: '', invoiceId: '', changed: [] }, _invoiceStatus: statusAfterAction(kind, selectedJob.value._invoiceStatus) }
     }
     autoActionResult.value = { tone: 'ok', msg: kind === 'checked' ? 'Marked checked.' : tryAgainDoneText(status) }
     dashboard.refresh().catch(() => {})
@@ -1306,6 +1333,7 @@ const detailSections = computed(() => {
 }
 .cl-control:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
 .cl-driver { max-width: 200px; }
+.cl-invoice-status { max-width: 230px; }
 .cl-dates { display: flex; align-items: center; gap: 0.35rem; }
 .cl-date { width: 140px; padding: 0 0.55rem; }
 .cl-dash { color: #94a3b8; font-size: 0.8125rem; }
@@ -1338,7 +1366,7 @@ const detailSections = computed(() => {
 @media (max-width: 640px) {
   .cl-bar { gap: 0.6rem; }
   .cl-field { flex: 1 1 100%; }
-  .cl-driver, .cl-dates { width: 100%; max-width: none; }
+  .cl-driver, .cl-invoice-status, .cl-dates { width: 100%; max-width: none; }
   .cl-date { flex: 1 1 0; width: auto; min-width: 0; }
   /* Full-width action on a phone; auto-margin would strand it mid-row. */
   .cl-actions { flex: 1 1 100%; margin-left: 0; justify-content: space-between; }
