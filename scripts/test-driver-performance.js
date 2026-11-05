@@ -87,8 +87,9 @@
  *     since its last cancel: an accept from no staff session, or a tap forward with
  *     a Driver role on record. A tap with no role, a tap back, a geofence row alone, a
  *     stored ELD departure or a dispatcher's tap never moves one, and a later stored
- *     departure on a truck the first driver didn't hold keeps it as live; a moved
- *     credit's row names no one and no contact, however many numbers its ID holds
+ *     departure on a truck the first driver didn't hold, or a later In Transit row
+ *     naming someone else, keeps it as live; a moved credit's row names no one and no
+ *     contact, however many numbers its ID holds
  * §29 a status moved back: gone only where the record says so; a blank status isn't
  *     back; a tap back is the departing driver's own only with a Driver role on record;
  *     neither that nor a tap with no role moves a credit across a week
@@ -2072,6 +2073,158 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		}, async (w) => {
 			eq(await w.pickups(), [1, 0], "a departure of hers after a move back, with her word on the load: it's hers");
 			eq((await w.weeks("nia"))[0].loads[0]?.pickup, PICKED("Mon"), "on the day of that departure");
+		});
+		// A new driver's own departure on record: nothing of theirs hands the credit to the first driver.
+		const newDriversTrip = (w, id) => {
+			w.hist(id, "accept", "Assigned", `${TUE} 09:00:00`, OMAR, { old: "Dispatched", ...AS_DRIVER });
+			w.hist(id, "manual", "In Transit", `${TUE} 14:00:00`, OMAR, { old: "Assigned", ...AS_DRIVER });
+		};
+		await inWorld((w) => {
+			w.accepted("PF-Z2b", MON, NIA);
+			w.picked("PF-Z2b", MON, NIA);
+			newDriversTrip(w, "PF-Z2b");
+			w.row("PF-Z2b", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-Z2b", pickup: PICKED("Tue"), delivery: DONE("Tue") }], "the control: the new driver's accept and own tap, on a truck with no ELD: the pickup is theirs, on that tap's day");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z2", MON, NIA);
+			w.picked("PF-Z2", MON, NIA);
+			newDriversTrip(w, "PF-Z2");
+			w.hist("PF-Z2", "manual", "At Shipper", `${TUE} 14:10:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z2", "manual", "In Transit", `${TUE} 14:11:00`, OMAR, { old: "At Shipper", ...AS_DRIVER });
+			w.row("PF-Z2", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [], "the new driver's own stray tap back and forward: nothing moves to the first driver");
+			eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-Z2", pickup: PICKED("Mon"), delivery: DONE("Tue") }], "and the new driver's row reads as live");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z2c", LAST_FRI, NIA);
+			w.picked("PF-Z2c", LAST_FRI, NIA);
+			newDriversTrip(w, "PF-Z2c");
+			w.hist("PF-Z2c", "manual", "At Shipper", `${TUE} 14:10:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z2c", "manual", "In Transit", `${TUE} 14:11:00`, OMAR, { old: "At Shipper", ...AS_DRIVER });
+			w.row("PF-Z2c", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq(await w.pickups(1), [0, 1], "the same over a week: last week's credit stays with the new driver, as live, not the first driver");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z1", MON, NIA);
+			w.picked("PF-Z1", MON, NIA);
+			w.hist("PF-Z1", "override", "Dispatched", `${MON} 15:00:00`, "disp", AS_STAFF);
+			w.hist("PF-Z1", "geofence", "In Transit", `${TUE} 14:00:00`, OMAR, { old: "At Shipper" });
+			w.hist("PF-Z1", "manual", "Dispatched", `${TUE} 15:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.row("PF-Z1", OMAR, "Dispatched");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "staff's move back, the new driver's truck departs, then their own tap back: nothing moves to the first driver");
+		});
+		for (const [how, tail, sheet, delivered] of [
+			["through delivery", (w) => w.hist("PF-Z3", "manual", "In Transit", `${TUE} 15:05:00`, OMAR, { old: "Assigned" }), ["Delivered", `${TUE} 18:00`], DONE("Tue")],
+			["stopped at the late accept", () => {}, ["Assigned", ""], null],
+		]) {
+			await inWorld((w) => {
+				w.accepted("PF-Z3", MON, NIA, {});
+				w.picked("PF-Z3", MON, NIA);
+				w.hist("PF-Z3", "manual", "Dispatched", `${MON} 15:00:00`, OMAR, { old: "In Transit" });
+				w.hist("PF-Z3", "manual", "In Transit", `${TUE} 14:00:00`, OMAR, { old: "Dispatched" });
+				w.hist("PF-Z3", "accept", "Assigned", `${TUE} 15:00:00`, OMAR, { old: "Dispatched" });
+				tail(w);
+				w.row("PF-Z3", OMAR, ...sheet);
+			}, async (w) => {
+				eq((await w.weeks("nia"))[0].loads, [], `every row with no role on record, ${how}: nothing moves to the first driver`);
+				eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-Z3", pickup: PICKED("Mon"), delivery: delivered }], `every row with no role on record, ${how}: the new driver's row reads as live`);
+			});
+		}
+		await inWorld((w) => {
+			w.accepted("PF-Z3b", MON, NIA, {});
+			w.picked("PF-Z3b", MON, NIA);
+			w.picked("PF-Z3b", TUE, OMAR);
+			w.hist("PF-Z3b", "accept", "Assigned", `${TUE} 15:00:00`, OMAR, { old: "Dispatched" });
+			w.hist("PF-Z3b", "manual", "In Transit", `${TUE} 15:05:00`, OMAR, { old: "Assigned" });
+			w.row("PF-Z3b", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "a row-editor reset, the new driver's truck's whole visit and their late accept: nothing moves to the first driver");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z4", MON, NIA);
+			w.picked("PF-Z4", MON, NIA);
+			w.hist("PF-Z4", "manual", "At Shipper", `${MON} 15:00:00`, NIA, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z4", "manual", "In Transit", `${TUE} 14:00:00`, OMAR, { old: "At Shipper", ...AS_DRIVER });
+			w.row("PF-Z4", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [], "the first driver's own tap back, then the new driver's own In Transit: nothing moves to the first driver");
+			eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-Z4", pickup: PICKED("Mon"), delivery: DONE("Tue") }], "and the new driver's row reads as live");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z6", MON, NIA);
+			w.picked("PF-Z6", MON, NIA);
+			w.hist("PF-Z6", "manual", "At Receiver", `${TUE} 09:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z6", "manual", "In Transit", `${TUE} 09:05:00`, OMAR, { old: "At Receiver", ...AS_DRIVER });
+			w.row("PF-Z6", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "no status went back, and the new driver's own In Transit is on record: it stays as live");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z7", MON, NIA);
+			w.picked("PF-Z7", MON, NIA);
+			w.hist("PF-Z7", "manual", "At Receiver", `${TUE} 09:00:00`, "Ivy Lane", { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z7", "manual", "In Transit", `${TUE} 09:05:00`, "Ivy Lane", { old: "At Receiver", ...AS_DRIVER });
+			w.row("PF-Z7", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "a third driver's own In Transit on record: it stays as live too");
+		});
+		for (const [how, later] of [
+			["a dispatcher's tap", (w) => w.hist("PF-Z8", "override", "In Transit", `${TUE} 09:05:00`, "disp", { old: "At Receiver", ...AS_STAFF })],
+			["a tap with no role naming the new driver", (w) => w.hist("PF-Z8", "manual", "In Transit", `${TUE} 09:05:00`, OMAR, { old: "At Receiver" })],
+		]) {
+			await inWorld((w) => {
+				w.accepted("PF-Z8", MON, NIA);
+				w.picked("PF-Z8", MON, NIA);
+				w.hist("PF-Z8", "manual", "At Receiver", `${TUE} 09:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+				later(w);
+				w.row("PF-Z8", OMAR, "In Transit");
+			}, async (w) => {
+				eq(await w.pickups(), [0, 1], `a later In Transit by ${how}: the first driver's claim isn't certain, so it stays as live`);
+			});
+		}
+		await inWorld((w) => {
+			w.accepted("PF-Z9", MON, NIA);
+			w.picked("PF-Z9", MON, NIA);
+			w.hist("PF-Z9", "manual", "At Receiver", `${MON} 18:00:00`, NIA, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z9", "manual", "In Transit", `${MON} 18:05:00`, NIA, { old: "At Receiver", ...AS_DRIVER });
+			w.row("PF-Z9", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [1, 0], "the first driver's own later In Transit says nothing against their claim: it still moves");
+		});
+		// With no later In Transit row to settle it, each rule still has to stand alone.
+		await inWorld((w) => {
+			w.picked("PF-S7f", MON, NIA);
+			w.hist("PF-S7f", "manual", "Dispatched", `${MON} 15:00:00`, NIA, { old: "In Transit", ...AS_DRIVER });
+			w.row("PF-S7f", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "the first driver's geofence rows and their own tap back, and nothing else on the load: a tap back is no word");
+		});
+		for (const [how, back] of [
+			["their own tap back", (w) => w.hist("PF-46b", "manual", "Dispatched", `${MON} 15:00:00`, NIA, { old: "In Transit", ...AS_DRIVER })],
+			["staff's move back", (w) => w.hist("PF-46b", "override", "Dispatched", `${MON} 15:00:00`, "disp", AS_STAFF)],
+		]) {
+			await inWorld((w) => {
+				w.hist("PF-46b", "manual", "In Transit", `${MON} 14:00:00`, NIA, AS_DRIVER);
+				back(w);
+				w.row("PF-46b", OMAR, "In Transit");
+			}, async (w) => {
+				eq(await w.pickups(), [0, 1], `the first driver's own tap, then ${how}: the tap can't stand over it, so it stays as live`);
+			});
+		}
+		await inWorld((w) => {
+			w.accepted("PF-Z10", MON, NIA);
+			w.picked("PF-Z10", MON, NIA);
+			w.hist("PF-Z10", "manual", "At Receiver", `${TUE} 17:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z10", "manual", "Delivered", `${TUE} 18:00:00`, OMAR, { old: "At Receiver", ...AS_DRIVER });
+			w.row("PF-Z10", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq(await w.pickups(), [1, 0], "a relay: the new driver's At Receiver and Delivered are no departure, so the first driver's still moves");
+			eq((await w.weeks("omar"))[0].loads[0]?.pickup, NOT_COUNTED, "and the new driver's row says the pickup didn't count for them");
 		});
 		// Two weeks: the credit goes with the week she made it, and his delivery says what became of it.
 		await inWorld((w) => {
