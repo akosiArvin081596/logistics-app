@@ -464,6 +464,22 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq(refusalOf({ ...base, primary: null }), "RATECON_NAME_MISMATCH", "§3 no primary: a person");
 		eq(refusalOf({ ...base, primary: { source: "drive", driveFileName: `${ID}02.pdf` }, loadsToAddress: () => 0 }), "RATECON_NAME_MISMATCH", "§3 failing both: the name's sentence first");
 		eq(refusalOf({ ...base, checkOn: false, primary: null, loadsToAddress: () => 0 }), "RECIPIENT_CHECK_OFF", "§3 the check off comes before everything");
+
+		// The free check, with the check off: a load nobody bills by email stays what it was.
+		const open = { live: true, completed: true, brokerDomain: DOMAIN, brokerDomainConfirmed: true, closedMonths: [], hasDeliveryDate: true, pods: 1, recipientCheckOff: true };
+		eq(rules.freeVerdict(open), { state: "needs_attention", code: "RECIPIENT_CHECK_OFF" }, "§3 the check off: the free check holds a C.H. Robinson load");
+		for (const [label, over, want] of [
+			["factored", { factored: true }, { state: "skipped", code: "LOAD_FACTORED" }],
+			["drafted already", { drafts: 1 }, { state: "skipped", code: "ALREADY_DRAFTED" }],
+			["opted out", { optedOut: true }, { state: "skipped", code: "BROKER_OPTED_OUT" }],
+			["off Delivered", { completed: false }, { state: "waiting", code: "NOT_COMPLETED" }],
+			["cancelled", { live: false }, { state: "waiting", code: "LOAD_DROPPED" }],
+		]) {
+			eq(rules.freeVerdict({ ...open, ...over }), want, `§3 the check off, ${label}: it stays what it was`);
+		}
+		eq(rules.freeVerdict({ ...open, recipientCheckOff: false }), { state: "queued", code: "" }, "§3 the check on: the free check lets it on to the rule");
+		const facts = (knownAddressOn, email) => rules.loadFacts({ row: { "Load ID": ID, Email: email }, cols: rules.jobColumns(["Load ID", "Email"]), knownAddressOn }).recipientCheckOff;
+		eq([facts(false, AGENT), facts(true, AGENT), facts(undefined, AGENT), facts(false, "ops@example-broker.test"), facts(false, "")], [true, false, false, false, false], "§3 only the check switched off, and only on this broker's loads, holds a load; a reader that doesn't say is unchanged");
 	}
 
 	// ===================================================================== §4
@@ -660,18 +676,23 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		bol.ready(ID, {}, { source: "documents-bol" });
 		await deliver(bol, bolj, ID, "§6 a BOL");
 		eq([bol.state(ID), paidNothing(bol)], [["needs_attention", "RATECON_MISSING"], NOTHING], "§6 only a BOL on file: a person, as before");
+		const missing = makeWorld();
+		const mj = await missing.started();
+		missing.ready(ID, {}, null);
+		await deliver(missing, mj, ID, "§6 no rate con");
+		eq([missing.state(ID), paidNothing(missing)], [["needs_attention", "RATECON_MISSING"], NOTHING], "§6 no rate con on file: a person, as before");
 		// The engine names a source no automatic path uses: refused all the same.
 		const upload = makeWorld();
 		const uj = await upload.started();
 		upload.ready(ID, {}, { source: "upload" });
 		await deliver(upload, uj, ID, "§6 an upload");
 		eq([upload.state(ID), paidNothing(upload)], [NAME, NOTHING], "§6 a primary from a source that can't stand behind a send: a person");
-		// The file a run finds is another load's, its address known and its total equal.
-		const wrong = makeWorld();
-		const wj = await wrong.started();
-		wrong.ready("900000015", {}, { driveFileName: "Subject: Rate Confirmation 90000001502.pdf" });
-		await deliver(wrong, wj, "900000015", "§6 another load's");
-		eq([wrong.state("900000015"), paidNothing(wrong)], [NAME, NOTHING], "§6 a file for a longer number: a person, nothing sent");
+		// A file named for a longer number, its address known and its total equal.
+		const longer = makeWorld();
+		const lj = await longer.started();
+		longer.ready("900000015", {}, { driveFileName: "Subject: Rate Confirmation 90000001502.pdf" });
+		await deliver(longer, lj, "900000015", "§6 a longer number");
+		eq([longer.state("900000015"), paidNothing(longer)], [NAME, NOTHING], "§6 a file for a longer number: a person, nothing sent");
 	}
 
 	// ===================================================================== §7
@@ -901,6 +922,14 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			heldOther.ready(ID, { Email: OPS, "Job Status": "Delivered" }, { address: BILLING });
 			heldOther.seed(ID, { state: "needs_attention", code: "TOTAL_MISMATCH" });
 			eq(retryOf(heldOther, hj, ID), "draft", `§9 ${label}: Try again on another broker's held load still makes a draft`);
+			// An Email cell with no address in it stays as it is: a person, with no engine call.
+			for (const cell of ["", "see rate con"]) {
+				const blank = makeWorld({ env });
+				const blj = await blank.started();
+				blank.ready(ID, { Email: cell });
+				await deliver(blank, blj, ID, `§9 ${label}, a cell reading ${JSON.stringify(cell)}`);
+				eq([blank.state(ID), paidNothing(blank), blank.calls.prepare.length], [["needs_attention", "NO_BROKER_EMAIL"], NOTHING, 0], `§9 ${label}: an Email cell reading ${JSON.stringify(cell)} stays NO_BROKER_EMAIL, the rate con's address known or not`);
+			}
 		}
 
 		// A person's press: refused only when the job already sent; the engine in manual mode is as it was.
