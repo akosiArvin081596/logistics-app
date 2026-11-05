@@ -17,8 +17,9 @@
          so the number has to sit somewhere they cannot miss. This is that
          somewhere. It is driver-scoped server-side (no params), so it costs
          one indexed read and cannot leak another truck's state.
-         The row is there before the first answer, so a phone's page doesn't move
-         under the driver's thumb when the sentence arrives. -->
+         A hidden stand-in with the chip's own box holds the row until the first
+         answer, so a phone's page doesn't move under the driver's thumb when the
+         sentence arrives. -->
     <div v-if="auth.isDriver" class="fuel-row">
       <span
         v-if="fuelChip"
@@ -26,6 +27,7 @@
         :class="fuelChip.tone"
         :title="fuelChip.title"
       >&#9981; {{ fuelChip.text }}</span>
+      <span v-else class="status-chip fuel-held">&#9981;</span>
     </div>
     <div class="app-header-right">
       <button class="header-btn" title="Change password" @click="showPwModal = true">Password</button>
@@ -200,7 +202,6 @@ const fuelChip = computed(() => {
   grid-row: 2;
   grid-column: 1 / -1;
   min-width: 0;
-  min-height: 1.4rem;
   display: flex;
   align-items: center;
 }
@@ -233,11 +234,20 @@ const fuelChip = computed(() => {
 /* Fuel range chip. `ok` is deliberately neutral grey rather than green: this is
    a figure the driver reads, not an all-clear. Only the states that need acting
    on carry colour. */
-.status-chip.fuel-chip {
+.status-chip.fuel-chip,
+.status-chip.fuel-held {
   font-size: 0.75rem;
+}
+.status-chip.fuel-chip {
   font-variant-numeric: tabular-nums;
   /* On the narrowest screens the sentence wraps inside the chip instead of running off it. */
   white-space: normal;
+}
+/* Same font, padding and border width as the chip, so the row is the same height
+   with or without it. Every chip colour has a 1px border. */
+.status-chip.fuel-held {
+  visibility: hidden;
+  border: 1px solid transparent;
 }
 .status-chip.fuel-chip.ok {
   background: #f1f5f9;
@@ -265,7 +275,6 @@ const fuelChip = computed(() => {
   .fuel-row {
     grid-row: 1;
     grid-column: 2;
-    min-height: 0;
   }
   .app-header-right {
     grid-column: 3;

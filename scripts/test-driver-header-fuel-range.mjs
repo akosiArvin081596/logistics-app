@@ -321,13 +321,28 @@ if (Header) {
     const headerCss = descriptor.styles.map((s) => s.content).join('\n')
     const view = parse(fs.readFileSync(DRIVER_VIEW_VUE, 'utf8'), { filename: 'DriverView.vue' }).descriptor
     const viewCss = view.styles.map((s) => s.content).join('\n')
-    const rule = (css, sel) => (css.match(new RegExp(`(?:^|\\n)${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
+    // The rule for exactly this selector: the lookbehind skips one that ends a shared list.
+    const rule = (css, sel) => (css.match(new RegExp(`(?<!,\\s*)(?:^|\\n)${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
     ok('§6 the page starts below the header\'s real height, with today\'s offset only until it is known',
       /padding-top:\s*var\(--driver-header-height,\s*calc\(52px \+ env\(safe-area-inset-top, 0px\)\)\)/.test(rule(viewCss, '.driver-app')))
     ok('§6 the header is tied to the height it reports', /<header\b[^>]*\bref="headerEl"/.test(descriptor.template.content))
     ok('§6 a Driver\'s fuel row is there before the first answer, so nothing moves when it comes',
-      /<div\b[^>]*v-if="auth\.isDriver"[^>]*class="fuel-row"|<div\b[^>]*class="fuel-row"[^>]*v-if="auth\.isDriver"/.test(descriptor.template.content)
-        && /min-height:/.test(rule(headerCss, '.fuel-row')))
+      /<div\b[^>]*v-if="auth\.isDriver"[^>]*class="fuel-row"|<div\b[^>]*class="fuel-row"[^>]*v-if="auth\.isDriver"/.test(descriptor.template.content))
+    // Height comes from the stand-in being the chip's own box. A number on the row
+    // was 2.4 px short in a real browser, so no fixed height is allowed back.
+    const heldTag = (descriptor.template.content.match(/<span\b[^>]*\bv-else\b[^>]*>([^<]*)<\/span>/) || [])
+    ok('§6 …held by a stand-in chip in place of the real one, with the same glyph on its line',
+      !!heldTag[0] && /\bstatus-chip\b/.test(heldTag[0]) && /\bfuel-held\b/.test(heldTag[0]) && heldTag[1] === '&#9981;')
+    ok('§6 …which is not a .fuel-chip, so nothing that looks for the chip finds it', !!heldTag[0] && !/\bfuel-chip\b/.test(heldTag[0]))
+    ok('§6 …with the chip\'s font size, from one shared rule',
+      /\.status-chip\.fuel-chip,\s*\.status-chip\.fuel-held\s*\{[^}]*font-size:\s*0\.75rem/.test(headerCss)
+        && !/font-size/.test(rule(headerCss, '.status-chip.fuel-chip')) && !/font-size/.test(rule(headerCss, '.status-chip.fuel-held')))
+    ok('§6 …the chip\'s border width, unseen', /border:\s*1px solid transparent/.test(rule(headerCss, '.status-chip.fuel-held')))
+    ok('§6 …and hidden, so it shows nothing and takes no tap', /visibility:\s*hidden/.test(rule(headerCss, '.status-chip.fuel-held')))
+    ok('§6 …every chip colour has that same 1px border',
+      ['.status-chip.warn', '.status-chip.fuel-chip.ok', '.status-chip.fuel-chip.bad'].every((sel) => /border:\s*1px solid/.test(rule(headerCss, sel))))
+    ok('§6 …and the row has no fixed height of its own, at either width', !/min-height|[^-]height:/.test(
+      (headerCss.match(/\.fuel-row\s*\{[^}]*\}/g) || []).join('\n')))
     ok('§6 on a phone the fuel row is a whole row of its own, under the name and the buttons',
       /grid-row:\s*2/.test(rule(headerCss, '.fuel-row')) && /grid-column:\s*1 \/ -1/.test(rule(headerCss, '.fuel-row')))
     ok('§6 from the tablet width up it sits on the buttons\' row',
