@@ -238,7 +238,8 @@
           There aren't enough miles or fuel receipts on this truck yet to work out its real MPG,
           so this range assumes the fleet default of {{ mpgLabel }}. Treat it as a rough estimate.
         </p>
-        <p v-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
+        <p v-if="levelEstimateLine" class="dfp-stamp" data-testid="fuel-level-estimate">{{ levelEstimateLine }}</p>
+        <p v-else-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
       </template>
 
       <div v-else-if="rangeError" class="dfp-error">{{ rangeError }}</div>
@@ -402,6 +403,7 @@ import {
   rangeEvidenceText,
   milesText,
   pickupUnconfirmedLine,
+  fuelLevelEstimateLine,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
 import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
@@ -673,6 +675,7 @@ const unitLabel = computed(() => {
   return u ? (/^\d+$/.test(u) ? `Unit ${u}` : u) : ''
 })
 const updatedLabel = computed(() => (range.value ? ago(range.value.updatedAt) : ''))
+const levelEstimateLine = computed(() => fuelLevelEstimateLine(range.value))
 // Only say "no fuel sensor" when the server actually said so. A failed request
 // gets the error branch instead — telling a driver their sensor is dead when
 // the request merely timed out is worse than saying nothing.

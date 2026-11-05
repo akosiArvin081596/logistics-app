@@ -619,6 +619,17 @@ if (panelFactory) {
         h.includes('data-title="Miles per gallon"'), t.includes('Fuel level read 12 min ago')], [true, true, true, true, true])
     check('§8a flag off: the stops and Refresh', [t.includes('Where to fuel up'), t.includes('QA Truck Plaza Riverton'), t.includes('Refresh fuel, stops and check')], [true, true, true])
   }
+  // A carried level is worked out, not read: no "read N min ago", and the plain line in its place.
+  {
+    const dropout = textOf(offHtml['sensor dropout'])
+    const LINE = "Your fuel sensor isn't reporting. The fuel level and gallons left are estimates."
+    check('§8a flag off, a sensor dropout: the rows are called estimates, and nothing says the level was read',
+      [dropout.includes(LINE), /Fuel level read/.test(dropout), offHtml['sensor dropout'].includes('data-title="Fuel level"')], [true, false, true])
+    check('§8a flag off, a live reading: the stamp as today, and no estimate line',
+      [textOf(offHtml['in transit, clears']).includes('Fuel level read 12 min ago'), textOf(offHtml['in transit, clears']).includes(LINE)], [true, false])
+    check('§8a flag off, no reading: neither line',
+      [textOf(offHtml['ELD silent']).includes(LINE), textOf(offHtml['ELD silent']).includes('Fuel level read')], [false, false])
+  }
   check('§8a flag off: the new block appears in no world',
     Object.entries(offHtml).filter(([, h]) => h.includes('data-testid="driver-fuel"') || textOf(h).includes('miles until you run out')).map(([n]) => n), [])
   check('§8a flag off: a failed trip plan reads as today', textOf(offHtml['trip plan 400 (no code)']).includes("We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."), true)

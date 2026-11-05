@@ -154,7 +154,6 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL, latitude REAL, longitude REAL,
 			speed REAL DEFAULT 0, bearing TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, fuel_pct INTEGER,
 			geocoded_location TEXT DEFAULT '', location_date_ms INTEGER DEFAULT 0, dropped_reason TEXT DEFAULT '', source TEXT DEFAULT '');
-		CREATE TABLE routemate_fuel_daily (routemate_vehicle_id TEXT, date TEXT, mpg REAL, miles REAL, derivation_notes TEXT DEFAULT '');
 		CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, pickup_address TEXT, dropoff_address TEXT, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL);
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
 			accuracy REAL DEFAULT 0, speed REAL DEFAULT 0, heading REAL DEFAULT 0, timestamp TEXT NOT NULL, load_id TEXT DEFAULT '');

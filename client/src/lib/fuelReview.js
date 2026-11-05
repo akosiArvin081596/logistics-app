@@ -724,6 +724,14 @@ export function pickupUnconfirmedLine(plan) {
   return plan && plan.pickupUnconfirmed === true ? PICKUP_UNCONFIRMED_LINE : '';
 }
 
+// Under the driver's Fuel level and Gallons left rows when the sensor has dropped out:
+// the level is worked out from the last reading, so nothing was "read" just now.
+export const FUEL_LEVEL_ESTIMATE_LINE = "Your fuel sensor isn't reporting. The fuel level and gallons left are estimates.";
+
+export function fuelLevelEstimateLine(range) {
+  return range && range.fuelSource === 'carried' ? FUEL_LEVEL_ESTIMATE_LINE : '';
+}
+
 /**
  * Normalize the interval half of either fuel payload into ONE shape.
  *
