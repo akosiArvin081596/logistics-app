@@ -1229,16 +1229,16 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		};
 		// As a C.H. Robinson rate con reads: no billing block, so the paid read gives the total and
 		// `number`; its text prints `printed` and the address.
-		const chrRateCon = (x, id, { docs = CHR_ADDRESS, number = id, printed = number } = {}) => {
+		const chrRateCon = (x, id, { docs = CHR_ADDRESS, number = id, printed = number, orderNumber = null } = {}) => {
 			const bytes = pdfWith(`BT (Load confirmation for made-up shipment ${printed}) Tj (Send billing documents to ${docs}) Tj ET`);
-			x.reads.set(bytes.toString("base64"), { "Total Rate": "$1,500.00", Rate: null, "Load Number": number, "Order Number": null, "PO Number": null, "Documents Email": docs });
+			x.reads.set(bytes.toString("base64"), { "Total Rate": "$1,500.00", Rate: null, "Load Number": number, "Order Number": orderNumber, "PO Number": null, "Documents Email": docs });
 			return bytes;
 		};
 		// That rate con, filed in Drive under `name`.
-		const atReceiver = (x, id, { name = `Subject: Rate Confirmation ${id}.pdf`, docs = CHR_ADDRESS, number = id, printed = number, over = {} } = {}) => {
+		const atReceiver = (x, id, { name = `Subject: Rate Confirmation ${id}.pdf`, docs = CHR_ADDRESS, number = id, printed = number, orderNumber = null, over = {} } = {}) => {
 			x.setLoad(id, { "Job Status": "At Receiver", Email: CHR_AGENT, ...over });
 			x.addPod(id);
-			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: chrRateCon(x, id, { docs, number, printed }) });
+			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: chrRateCon(x, id, { docs, number, printed, orderNumber }) });
 		};
 		const settledTap = async (x, tap, id, label) => {
 			eq((await tap(DRIVER, id)).status, 200, `§14 ${label}: the driver's tap answers as before`);
@@ -1300,6 +1300,8 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			["another load's rate con, this load's number a PO in its name", "900000019", { name: "Subject: Rate Confirmation 900001502 PO 900000019.pdf", number: "900001502" }],
 			["the read gives no number", "900000020", { number: null, printed: "900000020" }],
 			["the read gives this number, and the text prints another", "900000021", { number: "900000021", printed: "900001502" }],
+			["the read's Order Number is this number, its Load Number another", "900000022", { number: "900001502", orderNumber: "900000022", printed: "900000022" }],
+			["the read's Order Number is this number, its Load Number blank", "900000023", { number: null, orderNumber: "900000023", printed: "900000023" }],
 		]) {
 			const x = await started();
 			const xTap = x.statusRoute();
@@ -1308,6 +1310,11 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			ok(x.calls.driveGet >= 1 && x.calls.gemini >= 1, `§14 ${label}: the file was found, and read`);
 			eq([x.state(id), x.smtp.length, x.gmail.length, x.calls.mint], [["needs_attention", "RATECON_NUMBER_MISMATCH"], 0, 0, 0], `§14 ${label}: Needs attention, nothing sent or drafted, no number`);
 		}
+		const ordered = await started();
+		const orderedTap = ordered.statusRoute();
+		atReceiver(ordered, "900000024", { orderNumber: "900001502" });
+		await settledTap(ordered, orderedTap, "900000024", "the read's Load Number this load's, its Order Number another");
+		eq([ordered.state("900000024"), ordered.smtp.map((m) => m.to)], [["drafted", ""], [CHR_ADDRESS]], "§14 the read's Load Number is this number, its Order Number another: one send");
 
 		// What a hold tells, through the block: a Super Admin's notice, an audit row, a log line.
 		const told = await started({ rows: 0 });
@@ -1321,12 +1328,31 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq(notices.map((n) => n.title), ["Automatic invoice held"], "§14 two holds: one notice, the Super Admin-only type");
 		ok(notices[0] && /^Load 900001411 was held \(RECIPIENT_NOT_KNOWN\): /.test(notices[0].body) && !/@|Made-up/.test(notices[0].body), "§14 ...the load's ID and the code, no address, no name");
 		eq(told.audits("auto_invoice_recipient_held").map((r) => [r.username, r.entity_id, r.details]), [["auto-invoice", "900001411", "RECIPIENT_NOT_KNOWN: nothing sent"], ["auto-invoice", "900001412", "RECIPIENT_NOT_KNOWN: nothing sent"]], "§14 an audit row on each hold");
-		eq(told.logs.filter((l) => /held by the known-address check/.test(l)).length, 2, "§14 a log line on each hold");
+		eq(told.logs.filter((l) => /held, nothing sent/.test(l)).length, 2, "§14 a log line on each hold");
 		const toldRead = (await told.call("GET", "/api/auto-invoice/settings", SA)).json || {};
 		eq(toldRead.recipientCheck, { on: true, domain: CHR, days: 7, held: { count: 2, byCode: { RECIPIENT_NOT_KNOWN: 2 } } }, "§14 the settings read says what the check has held");
 		eq((await told.call("GET", "/api/auto-invoice/settings", DISP)).status, 403, "§14 ...to a Super Admin only");
 		const notHeld = (await (await started()).call("GET", "/api/auto-invoice/settings", SA)).json || {};
 		ok(!("recipientCheck" in notHeld), "§14 nothing held: the settings read says nothing of it");
+
+		// A C.H. Robinson load stopped ahead of the check on its address or its file tells the same;
+		// another broker's load on the same code doesn't, and isn't counted.
+		const ahead = await started();
+		const aheadTap = ahead.statusRoute();
+		ahead.setLoad("900001413", { "Job Status": "At Receiver", Email: CHR_AGENT });
+		ahead.addPod("900001413");
+		await settledTap(ahead, aheadTap, "900001413", "no rate con by that number");
+		atReceiver(ahead, "900001414", { docs: "made-up.billing@example-other.test" });
+		await settledTap(ahead, aheadTap, "900001414", "an address on another domain");
+		ahead.setLoad("LD-TEST-1415", { "Job Status": "At Receiver", Email: BROKER });
+		ahead.addPod("LD-TEST-1415");
+		await settledTap(ahead, aheadTap, "LD-TEST-1415", "another broker with no rate con");
+		eq([ahead.state("900001413"), ahead.state("900001414"), ahead.state("LD-TEST-1415"), ahead.smtp.length, ahead.gmail.length], [["needs_attention", "RATECON_MISSING"], ["needs_attention", "RECIPIENT_DOMAIN_MISMATCH"], ["needs_attention", "RATECON_MISSING"], 0, 0], "§14 two stops ahead of the check and another broker's: nothing sent or drafted");
+		const aheadNotices = ahead.db.prepare("SELECT title, body FROM dispatch_notifications WHERE type = 'auto-invoice'").all();
+		eq(aheadNotices.map((n) => (/^Load (\S+) was held \((\w+)\): /.exec(n.body) || []).slice(1, 3)), [["900001413", "RATECON_MISSING"], ["900001414", "RECIPIENT_DOMAIN_MISMATCH"]], "§14 ...one notice per reason, C.H. Robinson's loads only, the load's ID and the code");
+		ok(aheadNotices.every((n) => !/@|Made-up/.test(n.body)), "§14 ...no address, no name");
+		eq(ahead.audits("auto_invoice_recipient_held").map((r) => r.entity_id), ["900001413", "900001414"], "§14 ...an audit row on each of those");
+		eq(((await ahead.call("GET", "/api/auto-invoice/settings", SA)).json || {}).recipientCheck, { on: true, domain: CHR, days: 7, held: { count: 2, byCode: { RATECON_MISSING: 1, RECIPIENT_DOMAIN_MISMATCH: 1 } } }, "§14 ...and the settings count those two");
 
 		// A failed look through the block: a tap whose write didn't land, then his next tap.
 		const looked = await started();

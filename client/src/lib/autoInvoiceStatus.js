@@ -239,6 +239,21 @@ export const AUTO_INVOICE_STOP_WORDS = Object.freeze({
 
 export const AUTO_SEND_STOP_CONFIRM = 'Stop sending invoices automatically? Invoices will be drafted in Gmail for a person to send. Only the server can turn sending back on.'
 
+// The domain the billing email check holds whole, from the settings read's `recipientCheck`: only
+// while the server says the check is off.
+const checkOffDomain = (check) => (check && typeof check === 'object' && check.on === false && typeof check.domain === 'string' ? check.domain : '')
+
+// The dialog's line about the mode. With the check off, its domain's loads get neither a send nor
+// a draft, so the line doesn't promise them either.
+export function autoModeLine(mode, { sending = false, check = null } = {}) {
+  if (mode !== 'on') return 'Shadow: it records what it would draft, and drafts nothing.'
+  const line = sending
+    ? 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
+    : 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  const off = checkOffDomain(check)
+  return off ? `${line} Except invoices to ${off}: with the billing email check off, each load stops at Needs attention for a person to draft by hand.` : line
+}
+
 // The dialog's sentence about sending, and whether Stop is offered. `check`: the settings read's
 // `recipientCheck`. With that check off, its domain's invoices stop at a person, so the sentence
 // doesn't say they are sent.
@@ -250,7 +265,7 @@ export function autoSendState(send, check = null) {
     const why = typeof stopped.reason === 'string' && Object.hasOwn(AUTO_INVOICE_STOP_WORDS, stopped.reason) ? ` ${AUTO_INVOICE_STOP_WORDS[stopped.reason]}` : ''
     return { stopped: true, canStop: false, text: `Automatic sending is stopped.${why} Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.` }
   }
-  const heldDomain = check && typeof check === 'object' && check.on === false && typeof check.domain === 'string' ? check.domain : ''
+  const heldDomain = checkOffDomain(check)
   const going = heldDomain ? domains.filter((d) => d !== heldDomain && !d.endsWith(`.${heldDomain}`)) : domains
   const heldText = heldDomain ? `Invoices to ${heldDomain} aren't sent while the billing email check is off: each load stops at Needs attention for a person to draft by hand. ` : ''
   if (heldDomain && !going.length) return { stopped: false, canStop: true, text: `${heldText}Other brokers get Gmail drafts.` }
@@ -259,23 +274,24 @@ export function autoSendState(send, check = null) {
 }
 
 // The dialog's line about the billing email check, from the settings read's `recipientCheck`, which
-// the server sends only when it is off or has held loads lately. { text }, or null for no line.
+// the server sends only when it is off or loads to its domain have been held lately, on their address or
+// their file, whether by the check itself or ahead of it. { text }, or null for no line.
 export function recipientCheckState(check) {
   if (!check || typeof check !== 'object' || Array.isArray(check)) return null
   const domain = typeof check.domain === 'string' ? check.domain : 'this broker'
   const days = Number.isInteger(check.days) ? check.days : 7
   const held = check.held && typeof check.held === 'object' ? check.held : {}
   const count = Number.isInteger(held.count) && held.count > 0 ? held.count : 0
-  const loads = count === 1 ? '1 load' : `${count} loads`
+  const heldLoads = `${count} ${domain} ${count === 1 ? 'load was' : 'loads were'} held in the last ${days} days`
   if (check.on === false) {
     const off = `The billing email check is switched off on the server, so invoices to ${domain} aren't made or sent: each load stops at Needs attention for a person to draft by hand.`
-    return { text: count ? `${off} It has held ${loads} in the last ${days} days.` : off }
+    return { text: count ? `${off} ${heldLoads}.` : off }
   }
   if (check.on !== true || !count) return null
   const reasons = Object.entries(held.byCode && typeof held.byCode === 'object' ? held.byCode : {})
     .filter(([code]) => reasonOf(code))
     .map(([code, n]) => `${n} ${reasonOf(code).short}`)
-  return { text: `The billing email check has held ${loads} in the last ${days} days, so ${count === 1 ? 'its invoice was' : 'their invoices were'} not sent${reasons.length ? ` (${reasons.join(', ')})` : ''}. If ${domain}'s billing address changed or its rate cons now read differently, every new load will stop too. See Needs attention on Completed Loads.` }
+  return { text: `${heldLoads}, so ${count === 1 ? 'its invoice was' : 'their invoices were'} not sent${reasons.length ? ` (${reasons.join(', ')})` : ''}. If ${domain}'s billing address changed, its rate cons now read differently or they're filed under other names, every new load will stop too. See Needs attention on Completed Loads.` }
 }
 
 // The automatic-draft settings dialog's Save: only once this opening's read has

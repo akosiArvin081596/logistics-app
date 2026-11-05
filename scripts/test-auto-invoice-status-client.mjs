@@ -565,11 +565,30 @@ section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
   eq(checkState(null), null, '§14 nothing from the server: no line')
   eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 0, byCode: {} } }), null, '§14 the check on, nothing held: no line')
   eq(checkState(OFF) && checkState(OFF).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand.`, '§14 the check off: the line says so plainly')
-  eq(checkState({ ...OFF, held: { count: 3, byCode: { RECIPIENT_CHECK_OFF: 3 } } }).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand. It has held 3 loads in the last 7 days.`, '§14 ...and what it has held')
-  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { RECIPIENT_NOT_KNOWN: 1 } } }).text, `The billing email check has held 1 load in the last 7 days, so its invoice was not sent (1 billing email not used before). If ${CHR}'s billing address changed or its rate cons now read differently, every new load will stop too. See Needs attention on Completed Loads.`, '§14 one load held: the line says so plainly')
-  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 3, byCode: { RATECON_NUMBER_MISMATCH: 1, RECIPIENT_NOT_KNOWN: 2 } } }).text, `The billing email check has held 3 loads in the last 7 days, so their invoices were not sent (1 rate con's number doesn't match, 2 billing email not used before). If ${CHR}'s billing address changed or its rate cons now read differently, every new load will stop too. See Needs attention on Completed Loads.`, '§14 several held: by reason')
-  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { MADE_UP_CODE: 1 } } }).text, `The billing email check has held 1 load in the last 7 days, so its invoice was not sent. If ${CHR}'s billing address changed or its rate cons now read differently, every new load will stop too. See Needs attention on Completed Loads.`, '§14 a reason this client has no words for: left out, the count stays')
+  eq(checkState({ ...OFF, held: { count: 3, byCode: { RECIPIENT_CHECK_OFF: 3 } } }).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand. 3 ${CHR} loads were held in the last 7 days.`, '§14 ...and what was held')
+  eq(checkState({ ...OFF, held: { count: 1, byCode: { RATECON_MISSING: 1 } } }).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand. 1 ${CHR} load was held in the last 7 days.`, '§14 ...one load, on a stop ahead of the check')
+  const STOP_TOO = `If ${CHR}'s billing address changed, its rate cons now read differently or they're filed under other names, every new load will stop too. See Needs attention on Completed Loads.`
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { RECIPIENT_NOT_KNOWN: 1 } } }).text, `1 ${CHR} load was held in the last 7 days, so its invoice was not sent (1 billing email not used before). ${STOP_TOO}`, '§14 one load held: the line says so plainly')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 3, byCode: { RATECON_NUMBER_MISMATCH: 1, RECIPIENT_NOT_KNOWN: 2 } } }).text, `3 ${CHR} loads were held in the last 7 days, so their invoices were not sent (1 rate con's number doesn't match, 2 billing email not used before). ${STOP_TOO}`, '§14 several held: by reason')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 4, byCode: { NO_BILLING_EMAIL: 1, RATECON_BY_CONTENT: 1, RATECON_MISSING: 1, RATECON_TOTAL_UNREAD: 1, RECIPIENT_DOMAIN_MISMATCH: 0 } } }).text, `4 ${CHR} loads were held in the last 7 days, so their invoices were not sent (1 no billing email, 1 rate con found by content, 1 no rate con, 1 rate con total couldn't be read, 0 billing email on another domain). ${STOP_TOO}`, '§14 every code the server counts has its words')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { MADE_UP_CODE: 1 } } }).text, `1 ${CHR} load was held in the last 7 days, so its invoice was not sent. ${STOP_TOO}`, '§14 a reason this client has no words for: left out, the count stays')
   for (const bad of ['off', 1, [], { on: 'false' }]) eq(checkState(bad), null, `§14 ${JSON.stringify(bad)}: no line`)
+  for (const code of rules.KNOWN_ADDRESS_HOLD_CODES) ok(Object.hasOwn(S.AUTO_INVOICE_REASONS, code), `§14 ${code}: the server counts it and this client has its words`)
+
+  // The dialog's mode line, from the same read: with the check off it doesn't promise those invoices.
+  const modeLine = fnOf('autoModeLine') || (() => '(no such function on this tree)')
+  const SEND_LINE = 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
+  const DRAFT_LINE = 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  const SHADOW_LINE = 'Shadow: it records what it would draft, and drafts nothing.'
+  const EXCEPT = ` Except invoices to ${CHR}: with the billing email check off, each load stops at Needs attention for a person to draft by hand.`
+  eq(modeLine('on', { sending: true }), SEND_LINE, '§14 the mode line, sending on: as before')
+  eq(modeLine('on', { sending: false }), DRAFT_LINE, '§14 the mode line, sending off: as before')
+  eq(modeLine('shadow', {}), SHADOW_LINE, '§14 the mode line, shadow: as before')
+  eq(modeLine('on', { sending: true, check: { on: true, domain: CHR, days: 7, held: { count: 2, byCode: {} } } }), SEND_LINE, '§14 the mode line, loads held with the check on: as before, the check has its own line')
+  eq(modeLine('on', { sending: true, check: OFF }), `${SEND_LINE}${EXCEPT}`, '§14 the mode line, the check off, sending on: it says those invoices stop')
+  eq(modeLine('on', { sending: false, check: OFF }), `${DRAFT_LINE}${EXCEPT}`, '§14 the mode line, the check off, sending off: the same')
+  eq(modeLine('shadow', { check: OFF }), SHADOW_LINE, '§14 the mode line, shadow: the check holds nothing there')
+  for (const bad of ['off', 1, [], { on: 'false' }, { on: 'false', domain: CHR }, { domain: CHR }, { on: false }, { on: false, domain: 7 }]) eq(modeLine('on', { sending: true, check: bad }), SEND_LINE, `§14 the mode line, ${JSON.stringify(bad)} from the server: no exception read into it`)
 
   // The dialog: its line, and the read it comes from.
   const DIALOG = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue'), 'utf8')
@@ -577,6 +596,7 @@ section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
   ok(DIALOG.indexOf('recipientCheckView.text') < DIALOG.indexOf('<template v-if="autoSendView">'), '§14 ...outside the sending section, so it shows with sending off too')
   ok(/const recipientCheckView = computed\(\(\) => recipientCheckState\(autoRecipientCheck\.value\)\)/.test(DIALOG), '§14 ...from the check as this opening read it')
   ok(/const autoSendView = computed\(\(\) => autoSendState\(autoSend\.value, autoRecipientCheck\.value\)\)/.test(DIALOG), '§14 the sending sentence is told the check too')
+  ok(/const autoModeText = computed\(\(\) => autoModeLine\(autoMode\.value, \{ sending: Boolean\(autoSendView\.value\), check: autoRecipientCheck\.value \}\)\)/.test(DIALOG), '§14 the mode line is told it too')
   ok(/autoRecipientCheck\.value = s && s\.recipientCheck && typeof s\.recipientCheck === 'object' \? s\.recipientCheck : null/.test(DIALOG), '§14 the read sets it')
   ok(/autoSend\.value = null; autoRecipientCheck\.value = null/.test(DIALOG), '§14 each opening starts with none, so an old read can\'t show')
 }

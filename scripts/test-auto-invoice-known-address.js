@@ -16,8 +16,9 @@
 //   §9  other brokers, the sweep, shadow mode and a person's press
 //   §10 it can't send twice
 //   §11 deploying sends nothing and moves nothing already held
-//   §12 the rate con must say it's this load's: its own read gives the number, its text prints it
-//   §13 a hold tells a person: one notice, an audit row and a log line, and the settings say so
+//   §12 the rate con must say it's this load's: its read's Load Number, and its text prints it
+//   §13 a hold on the address or the file tells a person: one notice per reason a day, an audit row
+//       and a log line, and the settings count it; another broker's on the same code doesn't
 //
 // Addresses on chrobinson.com use made-up local parts. No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-known-address.js      # exits 1 on any failure
@@ -355,6 +356,11 @@ function tryAgain(job, id) {
 	job.mount(f.app, { requireRole: f.requireRole });
 	return f.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: id } });
 }
+const settingsOf = async (job) => {
+	const f = fakeApp();
+	job.mount(f.app, { requireRole: f.requireRole });
+	return (await f.call("GET", "/api/auto-invoice/settings")).body;
+};
 const retryOf = (w, job, id) => {
 	const rows = [{ ...w.row(id) }];
 	job.annotateCompletedRows({ rows, headers: [...w.headers], isSuperAdmin: true });
@@ -1082,7 +1088,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		for (const [label, env] of [["the check on", {}], ["the check off", { AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: "false" }]]) {
 			const w = makeWorld({ env, proofs: 0 });
 			await w.started();
-			const HELD_CODES = ["NO_BROKER_EMAIL", "TOTAL_MISMATCH", "MAILBOX_HIT", "MAILBOX_UNREAD", "RECIPIENT_NOT_KNOWN", "RATECON_NAME_MISMATCH", "RECIPIENT_CHECK_OFF", "OFF_GAP", "MAYBE_SENT"];
+			const HELD_CODES = ["NO_BROKER_EMAIL", "TOTAL_MISMATCH", "MAILBOX_HIT", "MAILBOX_UNREAD", "RECIPIENT_NOT_KNOWN", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH", "RECIPIENT_CHECK_OFF",
+				"BROKER_DOMAIN_UNCONFIRMED", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_TOTAL_UNREAD", "OFF_GAP", "MAYBE_SENT"];
 			const ids = [];
 			HELD_CODES.forEach((code, i) => {
 				const id = `9000002${String(i).padStart(2, "0")}`;
@@ -1129,7 +1136,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			eq(snap(), before, `§11 ${label}: every claim stays as it was: held stays held, sent stays sent, drafted stays drafted`);
 			eq([paidNothing(w), w.calls.prepare.length - prepares, w.calls.look.length, w.calls.payments], [NOTHING, 0, 0, 0], `§11 ${label}: nothing built, numbered, looked for or sent`);
 			eq(w.claim(noClaim), null, `§11 ${label}: a completed load with no claim gets none`);
-			eq(columns(), colsBefore, `§11 ${label}: no new column`);
+			eq(columns(), colsBefore, `§11 ${label}: a restart adds no column`);
+			eq(((await settingsOf(deployed)).recipientCheck || { held: { count: 0 } }).held.count, 0, `§11 ${label}: what was already held isn't counted as this check's hold`);
 			await deployed.checkClaims();
 			eq(w.claim(sentId).state, "drafted", `§11 ${label}: a claim already sent stays sent after the claims are watched`);
 			eq([w.claim(sentId).changed_fields, ledger.getSendStop(w.db)], ["", null], `§11 ${label}: no change is read on it, and sending isn't stopped`);
@@ -1138,6 +1146,20 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			eq(Object.keys(ledger.getMeta(w.db)).filter((k) => k.startsWith("held_notice")), [], `§11 ${label}: no meta row is written at the deploy`);
 		}
 		eq(Object.keys(rules.fingerprint(rules.loadFacts({ row: { "Load ID": ID, Email: AGENT }, cols: rules.jobColumns(["Load ID", "Email"]), knownAddressOn: false }))), ["completed", "live", "paymentCents", "brokerEmail", "trailer", "podIds", "rateConIds"], "§11 a sent claim's fingerprint reads no new field, so no load reads as changed");
+		// A table from before the deploy gets the one column the settings' count reads, empty, on every
+		// claim: no claim moves, and what it already holds isn't counted.
+		const old = makeWorld();
+		ledger.ensureSchema(old.db);
+		old.ready(ID, { "Job Status": "Delivered" });
+		old.seed(ID, { state: "needs_attention", code: "NO_BILLING_EMAIL" });
+		const heldColumn = () => old.db.prepare("PRAGMA table_info(auto_invoice_claims)").all().filter((c) => c.name === "check_held_at");
+		if (heldColumn().length) old.db.exec("ALTER TABLE auto_invoice_claims DROP COLUMN check_held_at");
+		const oldBefore = old.db.prepare("SELECT state, reason_code, updated_at FROM auto_invoice_claims").all();
+		const oldJob = old.job();
+		eq(heldColumn().map((c) => [c.type, c.notnull, c.dflt_value]), [["TEXT", 1, "''"]], "§11 a table from before the deploy gets the column, empty");
+		eq(old.db.prepare("SELECT state, reason_code, updated_at FROM auto_invoice_claims").all(), oldBefore, "§11 ...and no claim moves");
+		eq("recipientCheck" in (await settingsOf(oldJob)), false, "§11 ...and what it holds isn't counted");
+		eq([old.notices, paidNothing(old)], [[], NOTHING], "§11 ...and nothing is told or sent");
 	}
 
 	// ===================================================================== §12
@@ -1171,9 +1193,11 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			["the read gives a second number beside it", { number: `${ID} / ${B}` }],
 			["the read gives a longer number", { number: `${ID}02` }],
 			["the read gives letters on it", { number: `LD${ID}` }],
-			["the read's Order Number is another, its Load Number this one", { orderNumber: B }],
-			["the read's Order Number has a suffix, its Load Number doesn't", { orderNumber: `${ID}-2` }],
 			["the read's Order Number answers None, its Load Number has a suffix", { orderNumber: "None", number: `${ID}-2` }],
+			// An Order Number is never taken in the Load Number's place, whichever number it gives.
+			["the read's Order Number is this number, its Load Number another", { orderNumber: ID, number: B, note: `${B} ${ID}` }],
+			["the read's Order Number is this number, its Load Number blank", { orderNumber: ID, number: null }],
+			["the read's Order Number is this number, its Load Number None", { orderNumber: ID, number: "None" }],
 		]) {
 			await heldAtNumber(label, rc);
 		}
@@ -1236,7 +1260,10 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			["a load spelled with a # on the sheet", `#${ID}`, { number: ID, note: ID, driveFileName: `Load ${ID}.pdf` }],
 			["a rate-con row, its read and its text giving this number", ID, { source: "documents" }],
 			["letters in the number, in another case on the read", "LD-TEST-1401", { number: "ld-test-1401", note: "LD-TEST-1401", driveFileName: "Subject: Rate Confirmation LD-TEST-1401.pdf" }],
-			["the Order Number is this number", ID, { orderNumber: ID, number: null }],
+			// The Load Number is what's compared, whatever an Order Number beside it says.
+			["the read's Order Number is another, its Load Number this one", ID, { orderNumber: B }],
+			["the read's Order Number has a suffix, its Load Number doesn't", ID, { orderNumber: `${ID}-2` }],
+			["the read's Order Number and Load Number are both this one", ID, { orderNumber: ID }],
 		]) {
 			const w = makeWorld();
 			const job = await w.started();
@@ -1244,7 +1271,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			await deliver(w, job, id, `§12 ${label}`);
 			eq([w.state(id), w.smtp.map((m) => m.to), w.appends.length], [SENT, [ADDRESS], 0], `§12 ${label}: one send`);
 		}
-		// A billing block the free scan reads whole: its Order # is the read's number.
+		// A billing block the free scan reads whole has no paid read, so no Load Number: its Order #
+		// isn't taken in its place, whichever number it gives.
 		const blockPdf = (order) => pdfWith(`BT (Billing Information: Order #: ${order} PO #: 1234567 Move #: 5501) Tj (Total Rate: $1,000.00) Tj (Email the signed POD and all billing documents to ${ADDRESS}) Tj ET`);
 		const onBlock = async (order) => {
 			const w = makeWorld();
@@ -1255,10 +1283,28 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			await deliver(w, job, ID, `§12 a block with Order # ${order}`);
 			return w;
 		};
-		const blockOk = await onBlock(ID);
-		eq([blockOk.state(ID), blockOk.smtp.length, blockOk.calls.gemini], [SENT, 1, 0], "§12 a billing block's Order # is this number: one send, with no paid read");
+		const blockSame = await onBlock(ID);
+		eq([blockSame.state(ID), paidNothing(blockSame), blockSame.calls.gemini], [NUMBER, NOTHING, 0], "§12 a billing block's Order # is this number, with no paid read: Needs attention, nothing sent");
 		const blockOther = await onBlock(B);
-		eq([blockOther.state(ID), paidNothing(blockOther)], [NUMBER, NOTHING], "§12 a billing block's Order # is another: Needs attention, nothing sent");
+		eq([blockOther.state(ID), paidNothing(blockOther), blockOther.calls.gemini], [NUMBER, NOTHING, 0], "§12 a billing block's Order # is another: the same");
+
+		// Only the primary's read counts: the address can come off an alternate, which the automatic
+		// path reads with the free scan only.
+		const withAlternate = async (primaryNumber, alternateNumber) => {
+			const x = makeWorld();
+			const xj = await x.started();
+			x.setRow(ID);
+			x.addPod(ID);
+			x.rateCon(ID, { number: primaryNumber, read: null, printed: "", note: `${B} ${ID}`, driveFileName: `Rate Confirmation ${ID}.pdf` });
+			const alternate = x.rateCon(ID, { number: alternateNumber, note: `${B} ${ID}`, driveFileName: `Re Rate Confirmation ${ID}.pdf` });
+			x.scans.set(alternate.buffer, ADDRESS);
+			await deliver(x, xj, ID, `§12 a primary's ${primaryNumber}, an alternate's ${alternateNumber}`);
+			return x;
+		};
+		const altThis = await withAlternate(B, ID);
+		eq([altThis.state(ID), paidNothing(altThis), altThis.calls.gemini], [NUMBER, NOTHING, 1], "§12 the primary's read gives another number, an alternate's this one: held, and the alternate isn't paid for");
+		const primThis = await withAlternate(ID, B);
+		eq([primThis.state(ID), primThis.smtp.map((m) => m.to), primThis.calls.gemini], [SENT, [ADDRESS], 1], "§12 the primary's read gives this number, an alternate's another: one send");
 
 		// Other brokers, and Bison, aren't read for it.
 		const BROKER_DOMAIN = "example-broker.test";
@@ -1291,29 +1337,29 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq(manual.ctx && manual.ctx.paidRead, null, "§12 ...and keeps no answer for the job: a press reads as it did");
 		const auto = await press.w.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "auto" });
 		eq(auto.ctx && auto.ctx.paidRead && auto.ctx.paidRead["Load Number"], B, "§12 in mode auto the engine keeps the paid read's own answer");
-		// What the read's number is, as it gave it.
-		const asRead = (answer, cleaned) => (typeof rules.numberAsRead === "function" ? rules.numberAsRead(answer, cleaned) : "NO_SUCH_RULE");
-		for (const [label, answer, cleaned, want] of [
-			["the Load Number", { "Load Number": ID }, ID, ID],
-			["a suffix", { "Load Number": `${ID}-2` }, ID, `${ID}-2`],
-			["a second number", { "Load Number": `${ID} / ${B}` }, ID, `${ID} / ${B}`],
-			["the Order Number comes first", { "Order Number": `${ID}-2`, "Load Number": ID }, ID, `${ID}-2`],
-			["then the Order # field", { "Order #": `${ID}-3`, "Load Number": ID }, ID, `${ID}-3`],
-			["a not-found answer is passed over", { "Order Number": "None", "Load Number": `${ID}-2` }, ID, `${ID}-2`],
-			["a blank is passed over", { "Order Number": "  ", "Load Number": ID }, ID, ID],
-			["spaces come off", { "Load Number": `  ${ID}  ` }, ID, ID],
-			["a # comes off", { "Load Number": `#${ID}` }, ID, ID],
-			["a # and a space come off", { "Load Number": `# ${ID}` }, ID, ID],
-			["no paid read: the cleaned number, a billing block's", null, ID, ID],
-			["no number at all", { "Load Number": null }, "", ""],
-			["no number given", null, undefined, ""],
-			["an answer that names nothing the cleaned number came from", { "Load Number": B }, ID, ID],
-			["a thing that isn't an answer", "made-up", ID, ID],
+		// The Load Number as the read gave it, and nothing in its place.
+		const asRead = (answer) => (typeof rules.loadNumberRead === "function" ? rules.loadNumberRead(answer) : "NO_SUCH_RULE");
+		for (const [label, answer, want] of [
+			["the Load Number", { "Load Number": ID }, ID],
+			["a suffix stays on", { "Load Number": `${ID}-2` }, `${ID}-2`],
+			["a second number stays on", { "Load Number": `${ID} / ${B}` }, `${ID} / ${B}`],
+			["an Order Number beside it changes nothing", { "Order Number": B, "Load Number": ID }, ID],
+			["an Order Number isn't taken in its place", { "Order Number": ID }, ""],
+			["nor beside a blank one", { "Order Number": ID, "Load Number": "  " }, ""],
+			["nor beside no answer", { "Order Number": ID, "Load Number": null }, ""],
+			["nor an Order # field", { "Order #": ID }, ""],
+			["nor a PO or a move number", { "PO Number": ID, "Move Number": ID }, ""],
+			["a not-found answer is what it says", { "Load Number": "None" }, "None"],
+			["spaces come off", { "Load Number": `  ${ID}  ` }, ID],
+			["a # comes off", { "Load Number": `#${ID}` }, ID],
+			["a # and a space come off", { "Load Number": `# ${ID}` }, ID],
+			["a number given as a number", { "Load Number": 900000101 }, ID],
+			["no paid read", null, ""],
+			["no answer given", undefined, ""],
+			["a thing that isn't an answer", "made-up", ""],
 		]) {
-			eq(asRead(answer, cleaned), want, `§12 as read: ${label}`);
+			eq(asRead(answer), want, `§12 as read: ${label}`);
 		}
-		const invoiceSrc = fs.readFileSync(path.join(ROOT, "lib", "broker-invoice.js"), "utf8");
-		ok(invoiceSrc.includes('orderNumber: base.orderNumber || pick(cleanNumericRef, "Order Number", "Order #", "Load Number")'), "§12 the fields, in the order the read's own number takes them");
 
 		// What already went is recorded, whatever the read says now.
 		const lost = makeWorld();
@@ -1370,7 +1416,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 	section("§13 a hold tells a person");
 	{
 		const heldRows = (w) => w.db.prepare("SELECT username, entity_id, details FROM audit_trail WHERE action = 'auto_invoice_recipient_held' ORDER BY id").all();
-		const heldLogs = (w) => w.logs.filter((l) => /held by the known-address check/.test(l));
+		const heldLogs = (w) => w.logs.filter((l) => /held, nothing sent/.test(l));
 		const noSecrets = (w, label) => {
 			const told = JSON.stringify([w.notices, heldLogs(w), heldRows(w)]);
 			ok(!/@/.test(told), `§13 ${label}: no address in the notice, the log or the audit row`);
@@ -1391,7 +1437,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq(w.notices[0] && w.notices[0].title, "Automatic invoice held", "§13 ...its title");
 		eq(w.notices[0] && w.notices[0].body, `Load ${ids[0]} was held (RECIPIENT_NOT_KNOWN): its rate con's billing email isn't one a person has already used on invoices for 3 loads, so its invoice wasn't sent. If C.H. Robinson's billing address changed or its rate cons now read differently, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.`, "§13 ...its words: the load's ID and the code, and what to do");
 		eq(heldRows(w), ids.map((id) => ({ username: "auto-invoice", entity_id: id, details: "RECIPIENT_NOT_KNOWN: nothing sent" })), "§13 an audit row on each hold, as the system, the load's ID and the code");
-		eq(heldLogs(w), ids.map((id) => `[auto-invoice] load ${id}: held by the known-address check: RECIPIENT_NOT_KNOWN`), "§13 a log line on each hold");
+		eq(heldLogs(w), ids.map((id) => `[auto-invoice] load ${id}: held, nothing sent: RECIPIENT_NOT_KNOWN`), "§13 a log line on each hold");
 		noSecrets(w, "a run of holds");
 
 		// A later day, a restart, another reason.
@@ -1412,7 +1458,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		w.ready("900000409", {}, { number: "900001502" });
 		await deliver(w, restarted, "900000409", "§13 a third reason");
 		eq(w.notices.length, 3, "§13 a third reason: its own notice");
-		eq(w.notices[2] && w.notices[2].body, "Load 900000409 was held (RATECON_NUMBER_MISMATCH): its rate con doesn't give the load's number, or gives another one, so its invoice wasn't sent. If its rate cons now read differently, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.", "§13 ...in its own words");
+		eq(w.notices[2] && w.notices[2].body, "Load 900000409 was held (RATECON_NUMBER_MISMATCH): its rate con doesn't give the load's number, or gives another one, so its invoice wasn't sent. If C.H. Robinson's rate cons now read differently, every load will stop here. Check it on Completed Loads. More held for this reason today get no notice of their own: the automatic-draft settings count them.", "§13 ...in its own words");
 		w.now += 1 * HOUR;
 		w.ready("900000410");
 		await deliver(w, restarted, "900000410", "§13 a day on");
@@ -1422,17 +1468,131 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq([w.state("900000410"), w.notices.length, heldRows(w).filter((r) => r.entity_id === "900000410").length], [NOT_KNOWN, 4, 2], "§13 ...held again: an audit row, and no second notice");
 		noSecrets(w, "every reason");
 
-		// What isn't this check's.
+		// What can stop every C.H. Robinson load as this check's own codes can: a read with no address
+		// or none on its domain, a read with no total, files named so that no lookup finds them by
+		// their number. Each tells, by reason, with what the settings count.
+		const OTHER_DOMAIN = "example-other.test";
+		const BROKER_DOMAIN = "example-broker.test";
+		const SHARED = [
+			["NO_BILLING_EMAIL", { printed: "", read: null }, "its rate con names no billing email, so its invoice wasn't sent. If C.H. Robinson's rate cons now read differently, every load will stop here. Check it on Completed Loads."],
+			["RECIPIENT_DOMAIN_MISMATCH", { address: `billing@${OTHER_DOMAIN}` }, "its rate con's billing email isn't on the broker's own domain, so its invoice wasn't sent. If C.H. Robinson's billing address changed or its rate cons now read differently, every load will stop here. Check it on Completed Loads."],
+			["RATECON_MISSING", null, "no rate con was found for it by its number, so its invoice wasn't sent. If rate cons are now filed under other names, every load will stop here. Check it on Completed Loads."],
+			["RATECON_BY_CONTENT", { source: "drive-content" }, "its rate con was found only by reading Drive files, so its invoice wasn't sent. If rate cons are now filed under other names, every load will stop like this one. Check it on Completed Loads."],
+			["RATECON_TOTAL_UNREAD", { total: null }, "its rate con's total couldn't be read, so its invoice wasn't sent. If the rate-con reader is down or C.H. Robinson's rate cons now read differently, every load will stop here. Check it on Completed Loads."],
+		];
+		for (const [code, rc, words] of SHARED) {
+			const chr = makeWorld();
+			const cj = await chr.started();
+			for (const id of ["900000431", "900000432"]) {
+				chr.ready(id, {}, rc);
+				await deliver(chr, cj, id, `§13 ${code} ${id}`);
+				eq([chr.state(id), paidNothing(chr)], [["needs_attention", code], NOTHING], `§13 ${code} on a C.H. Robinson load ${id}: held, nothing sent`);
+			}
+			eq(chr.notices.map((n) => [n.title, n.body]), [["Automatic invoice held", `Load 900000431 was held (${code}): ${words} More held for this reason today get no notice of their own: the automatic-draft settings count them.`]], `§13 ${code}: one notice for the two, in its own words`);
+			eq(heldRows(chr).map((r) => [r.entity_id, r.details]), ["900000431", "900000432"].map((id) => [id, `${code}: nothing sent`]), `§13 ${code}: an audit row on each`);
+			eq(heldLogs(chr).length, 2, `§13 ${code}: a log line on each`);
+			noSecrets(chr, code);
+			eq((await settingsOf(cj)).recipientCheck, { on: true, domain: DOMAIN, days: 7, held: { count: 2, byCode: { [code]: 2 } } }, `§13 ${code}: the settings count them, by reason`);
+			chr.ready("900000433", {}, { driveFileName: "900000433-2.pdf" });
+			await deliver(chr, cj, "900000433", `§13 ${code}, then another reason`);
+			eq(chr.notices.length, 2, `§13 ${code}: another reason the same day has its own notice`);
+			chr.now += 24 * HOUR;
+			chr.ready("900000434", {}, rc);
+			await deliver(chr, cj, "900000434", `§13 ${code}, a day on`);
+			eq(chr.notices.length, 3, `§13 ${code}: a day on, its reason tells again`);
+
+			// The same code on another broker's load, or on Bison's, isn't this check's to tell or count.
+			const other = makeWorld({ proofs: 0, confirmed: [DOMAIN, BROKER_DOMAIN] });
+			const oj = await other.started();
+			other.ready("900000435", { Email: `ops@${BROKER_DOMAIN}` }, rc && { address: `billing@${BROKER_DOMAIN}`, ...rc });
+			await deliver(other, oj, "900000435", `§13 ${code} on another broker`);
+			eq(other.state("900000435"), ["needs_attention", code], `§13 ${code} on another broker's load: held, as it was`);
+			eq([other.notices, heldRows(other), heldLogs(other)], [[], [], []], `§13 ${code} on another broker's load: nothing told`);
+			eq("recipientCheck" in (await settingsOf(oj)), false, `§13 ${code} on another broker's load: not counted`);
+		}
+		// The domain off the confirmed list stops every such load before anything is read.
+		const unlisted = makeWorld({ confirmed: [] });
+		const uj = await unlisted.started();
+		for (const id of ["900000441", "900000442"]) {
+			unlisted.ready(id);
+			await deliver(unlisted, uj, id, `§13 off the confirmed list ${id}`);
+			eq([unlisted.state(id), paidNothing(unlisted)], [["needs_attention", "BROKER_DOMAIN_UNCONFIRMED"], NOTHING], `§13 off the confirmed list ${id}: held, nothing sent`);
+		}
+		eq(unlisted.notices.filter((n) => n.title === "Automatic invoice held").map((n) => n.body), ["Load 900000441 was held (BROKER_DOMAIN_UNCONFIRMED): its broker's domain isn't on the confirmed list in the automatic-draft settings, so its invoice wasn't sent. If C.H. Robinson's domain was taken off that list, every load will stop here. Check the automatic-draft settings. More held for this reason today get no notice of their own: the automatic-draft settings count them."], "§13 off the confirmed list: one notice for the two, in its own words");
+		eq(heldRows(unlisted).map((r) => r.details), ["BROKER_DOMAIN_UNCONFIRMED: nothing sent", "BROKER_DOMAIN_UNCONFIRMED: nothing sent"], "§13 off the confirmed list: an audit row on each");
+		eq(((await settingsOf(uj)).recipientCheck || { held: {} }).held.byCode, { BROKER_DOMAIN_UNCONFIRMED: 2 }, "§13 off the confirmed list: the settings count them");
+		const unlistedOther = makeWorld({ proofs: 0, confirmed: [] });
+		const uoj = await unlistedOther.started();
+		unlistedOther.ready("900000443", { Email: `ops@${BROKER_DOMAIN}` });
+		await deliver(unlistedOther, uoj, "900000443", "§13 another broker off the confirmed list");
+		eq([unlistedOther.state("900000443"), unlistedOther.notices.filter((n) => n.title === "Automatic invoice held"), heldRows(unlistedOther), "recipientCheck" in (await settingsOf(uoj))], [["needs_attention", "BROKER_DOMAIN_UNCONFIRMED"], [], [], false], "§13 another broker off the confirmed list: its chip, as it was");
+
+		// A subdomain is held to the same check, and tells the same.
+		const sub = makeWorld({ confirmed: [`billing.${DOMAIN}`] });
+		const subJob = await sub.started();
+		sub.ready("900000436", { Email: `ops@billing.${DOMAIN}` }, null);
+		await deliver(sub, subJob, "900000436", "§13 a subdomain");
+		eq([sub.state("900000436"), sub.notices.length, heldRows(sub).length, ((await settingsOf(subJob)).recipientCheck || { held: {} }).held.count], [["needs_attention", "RATECON_MISSING"], 1, 1, 1], "§13 a load on a subdomain: told and counted");
+		const bison = makeWorld({ proofs: 0 });
+		const bisonJob = await bison.started();
+		bison.ready("900000437", { Email: "ops@bisontransport.com" }, null);
+		await deliver(bison, bisonJob, "900000437", "§13 Bison");
+		eq([bison.state("900000437"), bison.notices, heldRows(bison), "recipientCheck" in (await settingsOf(bisonJob))], [["needs_attention", "RATECON_MISSING"], [], [], false], "§13 a Bison load with no rate con: its chip, as it was");
+
+		// The sweep looks for a rate con again before a person is asked: it tells only then.
+		const sweepy = makeWorld({ env: { AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		const swj = sweepy.job();
+		await swj.tick();
+		sweepy.ready("900000438", { "Job Status": "Delivered" }, null);
+		sweepy.now += 5 * MIN;
+		await swj.tick();
+		eq([sweepy.state("900000438"), sweepy.notices.length, heldRows(sweepy).length], [["waiting", "RATECON_MISSING"], 0, 0], "§13 the sweep, no rate con yet: it looks again, and tells nothing");
+		for (let i = 0; i < 6 && sweepy.state("900000438")[0] !== "needs_attention"; i++) {
+			sweepy.now += 2 * HOUR + MIN;
+			await swj.tick();
+		}
+		eq([sweepy.state("900000438"), sweepy.notices.length, heldRows(sweepy).length, ((await settingsOf(swj)).recipientCheck || { held: {} }).held.count], [["needs_attention", "RATECON_MISSING"], 1, 1, 1], "§13 the sweep, still none after its looks: a person, told and counted");
+
+		// A load no longer C.H. Robinson's, stopped again on the same code, no longer counts.
+		const moved = makeWorld({ confirmed: [DOMAIN, BROKER_DOMAIN] });
+		const mvj = await moved.started();
+		moved.ready("900000439", {}, { printed: "", read: null });
+		await deliver(moved, mvj, "900000439", "§13 before the Email moved");
+		eq(((await settingsOf(mvj)).recipientCheck || { held: {} }).held.count, 1, "§13 held on a C.H. Robinson Email: counted");
+		moved.setRow("900000439", { Email: `ops@${BROKER_DOMAIN}` });
+		eq((await tryAgain(mvj, "900000439")).status, 200, "§13 Try again on it, its Email now another broker's");
+		await settled(moved, "§13 after the Email moved");
+		eq([moved.state("900000439"), moved.notices.length, heldRows(moved).length, "recipientCheck" in (await settingsOf(mvj))], [["needs_attention", "NO_BILLING_EMAIL"], 1, 1, false], "§13 ...stopped again on the same code: nothing more told, and no longer counted");
+
+		// The list, its words, and the rule: what the worlds above don't each reach.
+		eq(rules.KNOWN_ADDRESS_HOLD_CODES, ["BROKER_DOMAIN_UNCONFIRMED", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RECIPIENT_NOT_KNOWN", "RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH", "RATECON_TOTAL_UNREAD", "RECIPIENT_CHECK_OFF"], "§13 the codes that tell");
+		eq(Object.keys(rules.HELD_NOTICE_WORDS).sort(), [...rules.KNOWN_ADDRESS_HOLD_CODES].sort(), "§13 ...each with its words");
+		ok(rules.KNOWN_ADDRESS_HOLD_CODES.every((c) => rules.REASON_CODES.includes(c)), "§13 ...each a server code");
+		ok(!/@/.test(Object.values(rules.HELD_NOTICE_WORDS).join(" ")), "§13 ...and no address in any of the words");
+		for (const [code, domain, want] of [
+			["NO_BILLING_EMAIL", DOMAIN, true],
+			["RATECON_MISSING", `billing.${DOMAIN}`, true],
+			["RECIPIENT_NOT_KNOWN", DOMAIN, true],
+			["NO_BILLING_EMAIL", BROKER_DOMAIN, false],
+			["NO_BILLING_EMAIL", `not${DOMAIN}`, false],
+			["NO_BILLING_EMAIL", "", false],
+			["NO_BILLING_EMAIL", undefined, false],
+			["TOTAL_MISMATCH", DOMAIN, false],
+			["TRAILER_MISMATCH", DOMAIN, false],
+			["", DOMAIN, false],
+		]) {
+			eq(rules.isKnownAddressHold(code, domain), want, `§13 rule: ${code || "no code"} on ${domain}: ${want}`);
+		}
+
+		// What isn't this check's: the rate con was read, and a person's question is about this load.
 		const none = makeWorld();
 		const nj = await none.started();
 		none.ready("900000411");
 		await deliver(none, nj, "900000411", "§13 a send");
 		none.ready("900000412", { "  Payment  ": "$9,000.00" });
 		await deliver(none, nj, "900000412", "§13 a total that differs");
-		none.ready("900000413", {}, { printed: "", read: null });
-		await deliver(none, nj, "900000413", "§13 no address");
-		eq([none.state("900000411"), none.state("900000412"), none.state("900000413")], [SENT, ["needs_attention", "TOTAL_MISMATCH"], ["needs_attention", "NO_BILLING_EMAIL"]], "§13 a send, and two other holds");
-		eq([none.notices, heldRows(none), heldLogs(none)], [[], [], []], "§13 ...tell nothing here: their lines stand as they did");
+		eq([none.state("900000411"), none.state("900000412")], [SENT, ["needs_attention", "TOTAL_MISMATCH"]], "§13 a send, and a hold on the load's own total");
+		eq([none.notices, heldRows(none), heldLogs(none), "recipientCheck" in (await settingsOf(nj))], [[], [], [], false], "§13 ...tell nothing and aren't counted: its line stands as it did");
 
 		// The check off.
 		const OFF = { AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: "false" };
@@ -1458,6 +1618,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq([sweep.state("900000414"), sweep.state("900000415"), sweep.notices.length, heldRows(sweep).map((r) => r.entity_id).sort(), heldLogs(sweep).length], [CHECK_OFF, CHECK_OFF, 1, ["900000414", "900000415"], 2], "§13 the sweep, the check off: each load tells, one notice");
 		await sj.tick();
 		eq(heldRows(sweep).length, 2, "§13 ...and the next sweep tells nothing more");
+		eq((await settingsOf(sj)).recipientCheck, { on: false, domain: DOMAIN, days: 7, held: { count: 2, byCode: { RECIPIENT_CHECK_OFF: 2 } } }, "§13 ...and the settings count both, the one it found new and the one it was holding");
 
 		// Shadow mode only records.
 		const shadow = makeWorld({ env: { ...OFF, AUTO_INVOICE_DRAFTS_SHADOW: "" } });
@@ -1467,6 +1628,13 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		shadow.now += 5 * MIN;
 		await shj.tick();
 		eq([shadow.notices, heldRows(shadow), heldLogs(shadow)], [[], [], []], "§13 shadow: no notice, no audit row, no log line");
+		const shadowOn = makeWorld({ env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } });
+		const shon = shadowOn.job();
+		await shon.tick();
+		shadowOn.ready(ID, { "Job Status": "Delivered" }, null);
+		shadowOn.now += 5 * MIN;
+		await shon.tick();
+		eq([shadowOn.notices, heldRows(shadowOn), heldLogs(shadowOn)], [[], [], []], "§13 shadow, no rate con on the load: the same");
 
 		// A notice or an audit row that fails leaves the hold as it is.
 		for (const [label, extra, want] of [
@@ -1493,11 +1661,6 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq([noMeta.state(ID), noMeta.notices.length, heldRows(noMeta).length], [NOT_KNOWN, 1, 1], "§13 the notice's mark can't be written: still held, and a person is still told");
 
 		// What the settings read says.
-		const settingsOf = async (job2) => {
-			const f = fakeApp();
-			job2.mount(f.app, { requireRole: f.requireRole });
-			return (await f.call("GET", "/api/auto-invoice/settings")).body;
-		};
 		const read = makeWorld();
 		const rj = await read.started();
 		let body = await settingsOf(rj);
@@ -1525,7 +1688,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		await rj.checkClaims("900000422");
 		eq(((await settingsOf(rj)).recipientCheck || { held: {} }).held.count, 2, "§13 a person drafts one by hand: it no longer counts");
 		// Only a load held now counts, whatever code a claim in another state still carries.
-		read.seed("900000426", { state: "queued", code: "RECIPIENT_NOT_KNOWN" });
+		const markedOnce = read.db.prepare("PRAGMA table_info(auto_invoice_claims)").all().some((c) => c.name === "check_held_at") ? { check_held_at: iso(read.now) } : {};
+		read.seed("900000426", { state: "queued", code: "RECIPIENT_NOT_KNOWN", ...markedOnce });
 		eq(((await settingsOf(rj)).recipientCheck || { held: {} }).held.count, 2, "§13 a claim back in the line doesn't count as held");
 		read.db.prepare("DELETE FROM auto_invoice_claims WHERE load_key = '900000426'").run();
 		read.now += 7 * 24 * HOUR + MIN;

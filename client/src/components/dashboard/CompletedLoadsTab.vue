@@ -383,7 +383,7 @@ import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
 import { loadRef, loadIdShown } from '../../lib/loadRef'
-import { recipientCheckState } from '../../lib/autoInvoiceStatus'
+import { autoModeLine, recipientCheckState } from '../../lib/autoInvoiceStatus'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
@@ -1068,11 +1068,7 @@ const autoSendStopping = ref(false)
 const autoRecipientCheck = ref(null)
 const recipientCheckView = computed(() => recipientCheckState(autoRecipientCheck.value))
 const autoSendView = computed(() => autoSendState(autoSend.value, autoRecipientCheck.value))
-const autoModeText = computed(() => (autoMode.value === 'on'
-  ? (autoSendView.value
-    ? 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
-    : 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.')
-  : 'Shadow: it records what it would draft, and drafts nothing.'))
+const autoModeText = computed(() => autoModeLine(autoMode.value, { sending: Boolean(autoSendView.value), check: autoRecipientCheck.value }))
 async function stopAutoSend() {
   if (!auth.isSuperAdmin || !autoSendView.value || !autoSendView.value.canStop || autoSendStopping.value) return
   if (!window.confirm(AUTO_SEND_STOP_CONFIRM)) return
