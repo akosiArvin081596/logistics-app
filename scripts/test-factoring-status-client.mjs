@@ -14,6 +14,10 @@
 //      the switch's one line, word for word, only beside the switch and on no
 //      other screen; each gate removed in turn is caught
 //   §6 the four screens touched parse and compile (vue/compiler-sfc)
+//   §7 a job's draft on a marked load says not to send it and to delete it, on the
+//      row chip and in the dialog, while it may be in Gmail too; a load with no mark
+//      reads as it did, in every state; a mark cleared after the run stopped on it
+//      has its own chip, with nothing to retry
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
@@ -27,6 +31,7 @@ const LIB = path.join(ROOT, 'client', 'src', 'lib', 'factoringStatus.js')
 const DASH = path.join(ROOT, 'client', 'src', 'components', 'dashboard')
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '')
 const S = fs.existsSync(LIB) ? await import(pathToFileURL(LIB).href) : null
+const A = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'autoInvoiceStatus.js')).href)
 
 let pass = 0
 const failures = []
@@ -157,6 +162,73 @@ section('§6  the screens compile')
     }
     eq(problem, '', `§6 ${name} parses and compiles (script and template)`)
   }
+}
+
+// ---------------------------------------------------------------- §7
+section("§7  a job's draft on a marked load; a mark cleared after the run stopped on it")
+{
+  // A tree without the row's own chip reads the status alone, so these fail by name.
+  const rowChip = (row) => (A.autoInvoiceRowChip ? A.autoInvoiceRowChip(row) : A.autoInvoiceChip(row && row._autoInvoice))
+  const MARKED = Object.freeze({ factored: true, locked: false, lockedVia: '', triumphState: '', canMark: false, canRecordOutside: false })
+  const LABEL = "Factored: don't send the draft, delete it"
+  const dontSend = (what) => `Don't send ${what}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.`
+  const drafted = Object.freeze({ state: 'drafted', code: '', invoiceId: '10202026-1', changed: [] })
+
+  eq(rowChip({ _autoInvoice: drafted, _factoring: MARKED }), { label: LABEL, tone: 'bad', reason: dontSend('invoice 10202026-1') },
+    "§7 FAILS ON THE OLD CODE: a job's draft on a marked load says not to send it and to delete it")
+  eq(rowChip({ _autoInvoice: { ...drafted, invoiceId: '' }, _factoring: MARKED }), { label: LABEL, tone: 'bad', reason: dontSend('the invoice draft') },
+    '§7 FAILS ON THE OLD CODE: ...with no number on the status, the same')
+  eq(rowChip({ _autoInvoice: { ...drafted, changed: ['payment'] }, _factoring: MARKED }), { label: LABEL, tone: 'bad', reason: dontSend('invoice 10202026-1') },
+    '§7 FAILS ON THE OLD CODE: ...and a draft whose load changed since doesn\'t say to check it in Gmail')
+  eq(rowChip({ _autoInvoice: drafted, _factoring: { ...MARKED, locked: true, lockedVia: 'outside' } }), { label: LABEL, tone: 'bad', reason: dontSend('invoice 10202026-1') },
+    '§7 FAILS ON THE OLD CODE: ...a load handled in Triumph\'s process, the same')
+  for (const code of ['MAYBE_IN_GMAIL', 'IN_GMAIL_UNRECORDED']) {
+    const maybe = { state: 'needs_attention', code, invoiceId: '', changed: [], trigger: true, retry: 'search' }
+    eq(rowChip({ _autoInvoice: maybe, _factoring: MARKED }), { label: LABEL, tone: 'bad', reason: `${dontSend('the invoice draft')} ${A.AUTO_INVOICE_REASONS[code].text}` },
+      `§7 FAILS ON THE OLD CODE: ${code} on a marked load says it too, before what Try again does`)
+    eq([A.canTryAgain(maybe), A.autoInvoiceNeedsAttention({ _autoInvoice: maybe, _factoring: MARKED })], [true, true], `§7 ...${code}: Try again and the toggle as they were`)
+  }
+  for (const code of Object.keys(A.AUTO_INVOICE_REASONS)) {
+    const chip = rowChip({ _autoInvoice: { state: 'needs_attention', code }, _factoring: MARKED })
+    ok(!/send it/.test(`${chip.label} ${chip.reason}`), `§7 no sentence tells a person to send a marked load's invoice (${code})`)
+  }
+  ok(!/send it/.test(rowChip({ _autoInvoice: drafted, _factoring: MARKED }).reason), "§7 FAILS ON THE OLD CODE: the drafted chip doesn't say to send it")
+
+  // With no mark, every status reads exactly as it did.
+  const everyStatus = [
+    drafted, { ...drafted, invoiceId: '' }, { ...drafted, changed: ['payment'] }, { ...drafted, sent: true }, { ...drafted, sent: true, changed: ['payment'] },
+    { state: 'queued', code: '' }, { state: 'working', code: '' }, { state: 'waiting', code: '' },
+    ...Object.keys(A.AUTO_INVOICE_REASONS).flatMap((code) => ['waiting', 'queued', 'needs_attention'].map((state) => ({ state, code }))),
+    null, undefined, 'drafted', {},
+  ]
+  let differing = 0
+  for (const status of everyStatus) {
+    const was = A.autoInvoiceChip(status)
+    for (const factoring of [undefined, null, { factored: false }, { factored: 'true' }, {}, 'factored']) {
+      if (JSON.stringify(rowChip({ _autoInvoice: status, _factoring: factoring })) !== JSON.stringify(was)) differing++
+    }
+  }
+  eq(differing, 0, `§7 no mark: all ${everyStatus.length} statuses read as autoInvoiceChip() reads them`)
+  // A mark changes the draft's words only: what was sent stays said, and other codes are as they were.
+  eq(rowChip({ _autoInvoice: { ...drafted, sent: true }, _factoring: MARKED }), A.autoInvoiceChip({ ...drafted, sent: true }), '§7 an invoice the job sent still reads "Sent to the broker"')
+  for (const code of ['TOTAL_MISMATCH', 'MAYBE_SENT', 'NOT_BY_DRIVER']) {
+    const status = { state: 'needs_attention', code }
+    eq(rowChip({ _autoInvoice: status, _factoring: MARKED }), A.autoInvoiceChip(status), `§7 ${code} on a marked load: its own words, as before`)
+  }
+  eq([rowChip({ _factoring: MARKED }), A.autoInvoiceRowChip ? A.autoInvoiceRowChip(null) : null], [null, null], '§7 a marked load with no status, and no row: nothing')
+
+  // Both places a Super Admin reads it: the row and the dialog.
+  const TAB = read(path.join(DASH, 'CompletedLoadsTab.vue'))
+  ok(TAB.includes('const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceRowChip(job) : null)'), '§7 FAILS ON THE OLD CODE: the row chip reads the row, its mark included')
+  ok(TAB.includes('const selectedAutoChip = computed(() => autoChip(selectedJob.value))'), '§7 ...and so does the dialog, through the same function')
+  ok(!TAB.includes('autoInvoiceChip('), '§7 FAILS ON THE OLD CODE: Completed Loads never words a status without its row')
+
+  // A mark cleared after the run stopped on it.
+  const cleared = { state: 'needs_attention', code: 'FACTORED_MARK_CLEARED', invoiceId: '', changed: [], trigger: true, retry: 'none' }
+  eq(A.autoInvoiceChip(cleared), { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
+    '§7 FAILS ON THE OLD CODE: a mark cleared after the run stopped on it has its own true sentence')
+  eq(A.autoInvoiceNeedsAttention({ _autoInvoice: cleared }), true, '§7 ...the toggle counts it, so it can\'t be forgotten')
+  eq([A.canTryAgain(cleared), A.canTryAgain({ state: 'needs_attention', code: 'FACTORED_MARK_CLEARED' }), A.canMarkChecked(cleared)], [false, false, false], '§7 FAILS ON THE OLD CODE: ...nothing to retry: a person drafts it')
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)

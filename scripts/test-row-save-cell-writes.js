@@ -61,8 +61,15 @@
 //      untrimmed, a row already cancelled refused, the flag ignored, the value
 //      judged as sent rather than as stored, a cell sent back as read judged.
 //      Each must fail §5's behaviour checks.
+//   §7 A LOAD ID CHANGE ON A MARKED LOAD. The factoring mark goes by the Load ID's
+//      text (lib/factoring-store.js), so both saves refuse it for both roles, 409
+//      LOAD_ID_FACTORED, nothing written, the refusal audited. A spelling the mark's
+//      key ignores, another cell, a cleared mark or no mark save as before; a final
+//      row and a marker that can't be read refuse too. The factoring module is the
+//      shipped one, over an in-memory database.
+//   §8 MUTANTS of §7: either save without the refusal.
 //
-// No network, no database, no sheet.
+// No network, no sheet, no database file.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
 
 "use strict";
@@ -171,6 +178,25 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 // The WITHHELD LOAD KEYS helpers PUT /api/load/:loadId reads its load ID
 // through, as shipped (flag off, no key named: the ID as sent).
 const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+// The factoring rules the Load ID check asks, as shipped, every setting off as
+// production ships; nothing marked unless a section marks it.
+const Database = require(path.join(__dirname, "..", "node_modules", "better-sqlite3"));
+const factoringStore = require("../lib/factoring-store");
+const factoringRoutesLib = require("../lib/factoring-routes");
+function factoringWorld() {
+	const db = new Database(":memory:");
+	factoringStore.ensureSchema(db);
+	const by = { source: "person", reason: "made-up reason", actor: { id: 7, username: "made-up-admin" }, nowIso: "2026-11-03T15:00:00.000Z" };
+	return {
+		db,
+		routes: factoringRoutesLib.create({ db, env: {} }),
+		mark: (id) => factoringStore.mark(db, { key: id, loadId: id, ...by }),
+		clear: (id) => factoringStore.clear(db, { key: id, loadId: id, ...by }),
+		handledOutside: (id) => factoringStore.handledOutside(db, { key: id, ...by }),
+		isFactored: (id) => factoringStore.isFactored(db, id),
+	};
+}
+const NO_MARKS = factoringWorld().routes;
 // The shipped helpers, with `overrides` swapping one source for a mutant.
 // The broker contact value rule the reader and both saves apply: the shipped
 // module and kill switch, handed to the routes with the helpers.
@@ -326,7 +352,7 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) 
 // One lifted route over one fake sheet (`sheet`: one already made, shared by
 // several routes). `cancelGuard` is ROW_EDITOR_CANCEL_GUARD_ENABLED, off as on
 // a server that does not set it.
-function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false, cancelGuard = false, sheet: shared = null } = {}) {
+function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false, cancelGuard = false, sheet: shared = null, factoring = NO_MARKS } = {}) {
 	const sheet = shared || fakeSheet(stored, { batchGetFails });
 	const audits = [];
 	// What the stubbed Owner ID check and period guard were asked to judge: the
@@ -342,6 +368,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		...helpers,
 		...KEY_HELPERS,
 		normalizeLoadId,
+		factoringRoutes: factoring,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
@@ -1321,6 +1348,75 @@ function cancelWiringSection(helpers) {
 }
 
 // ---------------------------------------------------------------------------
+// §7 A LOAD ID CHANGE ON A MARKED LOAD. Load 111 on row 2, load 222 on row 3.
+// ---------------------------------------------------------------------------
+async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_PUT_SRC } = {}) {
+	const { results, t } = collector();
+	const REFUSED = "This load is marked factored, and the mark goes by its Load ID, so the Load ID can't be changed while it's marked. Whoever manages factored loads can clear the mark, change the ID, then mark the load again.";
+	// What each save sends for one edited cell, as its caller sends it: a Dispatcher's
+	// editor opens the row with the broker cells blank, and sends its baseline.
+	const data = (role, col, value) => {
+		const opened = DISPLAYED().map((v, i) => (role !== "Super Admin" && WITHHELD.includes(HEADERS[i]) ? "" : v));
+		const values = opened.slice();
+		values[IDX[col]] = value;
+		return { values, baseline: opened };
+	};
+	const SAVES = [
+		["PUT /api/data/:rowIndex", dataSrc, { rowIndex: "2" }, data],
+		["PUT /api/load/:loadId", loadSrc, { loadId: "111" }, (role, col, value) => ({ [col]: value })],
+	];
+	const save = async (route, role, col, value, prepare = () => {}) => {
+		const [, src, params, body] = SAVES.find(([name]) => name === route);
+		const f = factoringWorld();
+		prepare(f);
+		const app = mount(src, helpers, STORED(), { factoring: f.routes });
+		return { app, f, r: await app.run(role, params, body(role, col, value)) };
+	};
+	for (const [route] of SAVES) {
+		for (const role of ["Super Admin", "Dispatcher"]) {
+			const { app, f, r } = await save(route, role, "Load ID", "333", (w) => w.mark("111"));
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}, a marked load's Load ID: 409 LOAD_ID_FACTORED, saying what to do`,
+				[r.code, (r.body || {}).code, (r.body || {}).error], [409, "LOAD_ID_FACTORED", REFUSED]);
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...nothing written`, [app.calls.length, app.rows], [0, STORED()]);
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...the refusal audited, once, by its code`,
+				app.audits.map((a) => [a.action, a.code, a.entityId]), [["update_sheet_row_blocked", "LOAD_ID_FACTORED", "Job Tracking!2"]]);
+			t(`§7 ${role}, ${route}: ...and the mark is where it was`, [f.isFactored("111"), f.isFactored("333")], [true, false]);
+		}
+		// Blanking the ID leaves the mark behind just the same.
+		const blank = await save(route, "Super Admin", "Load ID", "", (w) => w.mark("111"));
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked load's Load ID blanked: refused`, [blank.r.code, (blank.r.body || {}).code, blank.app.calls.length], [409, "LOAD_ID_FACTORED", 0]);
+		// A spelling the mark's key ignores: the mark still finds the load.
+		const spelled = await save(route, "Super Admin", "Load ID", "#111", (w) => w.mark("111"));
+		t(`§7 ${route}, a marked load's Load ID respelled "#111": the same key, saved`, [spelled.r.code, spelled.app.calls.map((c) => c.ranges), spelled.f.isFactored("#111")], [200, [[R("B2")]], true]);
+		// The mark holds the ID, not the row.
+		const other = await save(route, "Dispatcher", "Details", "Frozen - 2 pallets rolled", (w) => w.mark("111"));
+		t(`§7 ${route}, another cell on a marked load: saved`, [other.r.code, other.app.calls.map((c) => c.ranges)], [200, [[R("C2")]]]);
+		// With no live mark on this load, as today.
+		for (const [label, prepare] of [
+			["no mark anywhere", () => {}],
+			["a mark cleared", (w) => { w.mark("111"); w.clear("111"); }],
+			["another load's mark", (w) => w.mark("222")],
+		]) {
+			const { app, r } = await save(route, "Super Admin", "Load ID", "333", prepare);
+			t(`§7 ${route}, ${label}: the Load ID change saves, B2 alone written`, [r.code, app.calls.map((c) => c.ranges)], [200, [[R("B2")]]]);
+		}
+		// A final row: the store's own refusal. A marker that can't be read: nothing is risked.
+		const final = await save(route, "Super Admin", "Load ID", "333", (w) => { w.mark("111"); w.handledOutside("111"); });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a load handled in Triumph's process: 409 FACTORING_LOCKED, nothing written`,
+			[final.r.code, (final.r.body || {}).code, final.app.calls.length], [409, "FACTORING_LOCKED", 0]);
+		const unread = await save(route, "Super Admin", "Load ID", "333", (w) => w.db.close());
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a marker that can't be read: 503 FACTORING_UNREADABLE, nothing written`,
+			[unread.r.code, (unread.r.body || {}).code, unread.app.calls.length], [503, "FACTORING_UNREADABLE", 0]);
+		const unreadOther = await save(route, "Super Admin", "Details", "Frozen - 2 pallets rolled", (w) => w.db.close());
+		t(`§7 ${route}, ...and no other cell asks the marker: saved`, [unreadOther.r.code, unreadOther.app.calls.map((c) => c.ranges)], [200, [[R("C2")]]]);
+		// A collision is still the collision's refusal, marked or not.
+		const taken = await save(route, "Super Admin", "Load ID", "222", (w) => w.mark("111"));
+		t(`§7 ${route}, a marked load's Load ID onto a taken one: refused, nothing written`, [taken.r.code, taken.app.calls.length], [409, 0]);
+	}
+	return results;
+}
+
+// ---------------------------------------------------------------------------
 // §4 MUTANT — back to a whole-row write: sheetRowCellWrites() answering the
 // whole row as it will be written, from column A, whatever changed (the write
 // both routes made before). Built outside the probe's try, so a mutation
@@ -1358,6 +1454,8 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 	record(await cancelSection(H));
 	console.log("§5 the cancel refusal: wiring and column rule");
 	record(cancelWiringSection(H));
+	console.log("§7 a Load ID change on a marked load");
+	record(await factoredSection(H));
 
 	console.log("§4 mutants");
 	{
@@ -1432,6 +1530,29 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 			if (caught) pass++;
 			else { fail++; failures.push(`mutant not caught: ${label} (§5 failed ${failed.length})${detail}`); }
 			console.log(`  ${caught ? "caught " : "MISSED "} ${label} — §5 failed ${failed.length} check(s)` +
+				`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
+		}
+	}
+
+	console.log("§8 mutants of the Load ID refusal");
+	{
+		// Built inside the run, as §6's are: on a tree without the refusal, a missing
+		// target fails the run as "not caught" instead of stopping it.
+		const CALL = "const markHeld = factoringRoutes.loadIdChange(lidChange.from, lidChange.to);";
+		for (const [label, build] of [
+			["M11 PUT /api/data without the refusal", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, "const markHeld = null;") })],
+			["M12 PUT /api/load without the refusal", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, "const markHeld = null;") })],
+		]) {
+			let failed = [], detail = "";
+			try {
+				failed = (await factoredSection(H, build())).filter((r) => !r.ok);
+			} catch (e) {
+				detail = ` — ${e && e.message ? e.message : e}`;
+			}
+			const caught = !detail && failed.length > 0;
+			if (caught) pass++;
+			else { fail++; failures.push(`mutant not caught: ${label} (§7 failed ${failed.length})${detail}`); }
+			console.log(`  ${caught ? "caught " : "MISSED "} ${label} — §7 failed ${failed.length} check(s)` +
 				`${failed[0] ? `, e.g. ✗ ${failed[0].name}` : ""}${detail}`.slice(0, 260));
 		}
 	}

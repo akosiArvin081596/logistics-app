@@ -54,6 +54,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   MAYBE_SENT: { short: 'may already be sent', text: "The invoice email may have been sent to the broker, but it wasn't found in Gmail Sent Mail. Check Sent Mail before drafting it again. Try again searches Sent Mail once more; it never sends." },
   DRIVER_PENDING: { short: 'about to be made', text: "The driver just marked this load Delivered, so its invoice is about to be made." },
   NOT_BY_DRIVER: { short: 'no automatic invoice', text: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." },
+  FACTORED_MARK_CLEARED: { short: 'no automatic invoice', text: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
   CAP_REACHED: { short: 'hourly or daily limit reached', text: "More invoices came due than the hourly or daily limit allows, so this one wasn't made. Try again in a while, or draft it by hand." },
   NO_MAILBOX: { short: 'no mailbox set', text: "No company mailbox is set on the server, so no invoice was made. Draft it by hand." },
   HANDED_OVER: { short: 'was in line at the change', text: "This load was in line when automatic invoices moved to the driver's Delivered, so its invoice wasn't made. Check Gmail, then Try again, or draft it by hand." },
@@ -98,6 +99,9 @@ export function changedText(status) {
   return `Changed since the draft: ${list}. Check the draft in Gmail, then Mark checked.`
 }
 
+// The codes on a completed load nothing started: a person drafts it, and there is nothing to retry.
+const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED'])
+
 // The chip for a row's `_autoInvoice`: { label, tone, reason }, or null when
 // there is nothing to show. Tones: ok, warn, bad, muted.
 export function autoInvoiceChip(status) {
@@ -126,11 +130,33 @@ export function autoInvoiceChip(status) {
       return { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' }
     case 'needs_attention':
       // Nothing failed on this load: nothing was started, so a person drafts it.
-      if (status.code === 'NOT_BY_DRIVER') return { label: 'No automatic invoice', tone: 'warn', reason: reason.text }
+      if (NOTHING_STARTED.has(status.code)) return { label: 'No automatic invoice', tone: 'warn', reason: reason.text }
       return { label: reason ? `Needs attention: ${reason.short}` : 'Needs attention', tone: 'bad', reason: reason ? (reason.attentionText || reason.text) : 'Draft it by hand.' }
     default:
       return null
   }
+}
+
+// A job's draft on a factored load carries the carrier's own payment details, so nobody sends
+// it. The codes are the two where a draft may be in Gmail with no draft row yet.
+const MAY_BE_IN_GMAIL = new Set(['MAYBE_IN_GMAIL', 'IN_GMAIL_UNRECORDED'])
+const FACTORED_DRAFT_LABEL = "Factored: don't send the draft, delete it"
+const factoredDraftText = (id) => `Don't send ${id ? `invoice ${id}` : 'the invoice draft'}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.`
+
+// The chip for a row as served: its `_autoInvoice` as autoInvoiceChip() words it, unless the
+// row's `_factoring` says factored and the job's unsent draft is, or may be, in Gmail.
+export function autoInvoiceRowChip(row) {
+  if (!row || typeof row !== 'object') return null
+  const status = row._autoInvoice
+  if (status && typeof status === 'object' && row._factoring && row._factoring.factored === true) {
+    if (status.state === 'drafted' && status.sent !== true) {
+      return { label: FACTORED_DRAFT_LABEL, tone: 'bad', reason: factoredDraftText(typeof status.invoiceId === 'string' ? status.invoiceId : '') }
+    }
+    if (status.state === 'needs_attention' && MAY_BE_IN_GMAIL.has(status.code)) {
+      return { label: FACTORED_DRAFT_LABEL, tone: 'bad', reason: `${factoredDraftText('')} ${AUTO_INVOICE_REASONS[status.code].text}` }
+    }
+  }
+  return autoInvoiceChip(status)
 }
 
 // What the "Needs attention" toggle counts: a load a person must draft, or a
@@ -143,7 +169,7 @@ export function autoInvoiceNeedsAttention(row) {
 
 // The server says what Try again would do (`retry`) while the driver's Delivered starts
 // the invoice: "none" is a load it refuses, and a load nothing started has nothing to retry.
-export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none')
+export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && !NOTHING_STARTED.has(status.code) && status.retry !== 'none')
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
 
 // The question before Try again, while it is the only retry and can send at once: "" asks

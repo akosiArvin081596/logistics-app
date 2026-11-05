@@ -44779,6 +44779,13 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 						});
 					}
 				}
+				// A factoring mark goes by the Load ID's text, so a marked load keeps its ID, for
+				// every role and whatever the settings say (lib/factoring-store.js).
+				const markHeld = factoringRoutes.loadIdChange(lidChange.from, lidChange.to);
+				if (markHeld) {
+					logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: markHeld.code }), markHeld.code), markHeld.code);
+					return res.status(markHeld.http).json(markHeld.json);
+				}
 			}
 		}
 
@@ -61418,6 +61425,12 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 						code: "DUPLICATE_LOAD",
 						conflictRowIndex: collision,
 					});
+				}
+				// As PUT /api/data/:rowIndex: a marked load keeps its ID (lib/factoring-store.js).
+				const markHeld = factoringRoutes.loadIdChange(lidChange.from, lidChange.to);
+				if (markHeld) {
+					logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: markHeld.code }), markHeld.code), markHeld.code);
+					return res.status(markHeld.http).json(markHeld.json);
 				}
 			}
 		}

@@ -23,7 +23,8 @@
 //   §12 the watching: a dashboard read at most once a minute, a POD event at once
 //   §13 going back (R-M5): the sweep's first tick after the trigger sends nothing
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
-//   §15 the "No automatic invoice" chip
+//   §15 the "No automatic invoice" chip, and its own sentence for a mark cleared after the
+//       run stopped on it; a job's draft on a marked load, through Try again too
 //   §16 the rules on their own, and the send's commit reaching the disk
 //   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
 //       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
@@ -33,6 +34,7 @@
 "use strict";
 
 const path = require("path");
+const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
 // A tree without the module fails by name, not by a stack trace.
@@ -1711,6 +1713,105 @@ async function main() {
 		eq(served(offJob, ["LD-TEST-1413"]), [{ state: "needs_attention", code: "OFF_GAP", invoiceId: "", changed: [] }], "§15 ...and a row's status as today, to the byte");
 		const shadow = makeWorld();
 		eq(served(shadow.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true" } }), ["LD-TEST-1414"]), [null], "§15 shadow: none");
+	}
+	{
+		// Marked, tapped, cleared: the run stopped on the mark and its claim stays closed, so
+		// nothing will invoice the load. The chip keeps it from being forgotten; a person drafts it.
+		const w = makeWorld();
+		const job = await w.started();
+		factoring.ensureSchema(w.db);
+		const person = { reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) };
+		const ID = "LD-TEST-1420";
+		const KEY = rules.loadKey(ID);
+		w.ready(ID);
+		factoring.mark(w.db, { key: KEY, loadId: ID, ...person });
+		tap(w, job, ID);
+		await drained(w, "§15 marked, tapped");
+		eq([w.state(ID), served(job, [ID])], [["skipped", "LOAD_FACTORED"], [null]], "§15 marked and tapped: the run stops on the mark, and no chip while it is marked");
+		factoring.clear(w.db, { key: KEY, loadId: ID, ...person });
+		const ownChip = { state: "needs_attention", code: "FACTORED_MARK_CLEARED", invoiceId: "", changed: [], trigger: true, retry: "none" };
+		eq(served(job, [ID]), [ownChip], "§15 FAILS ON THE OLD CODE: marked, tapped, cleared: a chip of its own, with nothing to retry");
+		tap(w, job, ID);
+		await drained(w, "§15 cleared, tapped again");
+		const retried = await tryAgain(job, ID);
+		eq([retried.status, retried.body && retried.body.code], [409, "AUTO_INVOICE_NOT_ATTENTION"], "§15 ...Try again still has nothing to retry");
+		eq([w.state(ID), w.smtp.length, w.appends.length, w.calls.prepare, w.calls.mint, w.draftRows(ID)], [["skipped", "LOAD_FACTORED"], 0, 0, 0, 0, []],
+			"§15 ...no automatic send comes back: after a read, a second tap and Try again the claim stays closed, with no email, append, build or number");
+		factoring.mark(w.db, { key: KEY, loadId: ID, ...person });
+		eq(served(job, [ID]), [null], "§15 ...marked again: no chip");
+		factoring.clear(w.db, { key: KEY, loadId: ID, ...person });
+		eq(served(job, [ID]), [ownChip], "§15 FAILS ON THE OLD CODE: ...cleared again: the chip again");
+		// The chip's own rules hold: a closed month, a cancelled load, a person's draft.
+		w.closed = () => ["2026-09"];
+		eq(served(job, [ID]), [null], "§15 ...not in a closed month");
+		w.closed = () => [];
+		eq(served(job, [ID], { "Job Status": "Cancelled" }), [null], "§15 ...not on a cancelled load");
+		w.handDraft(ID);
+		eq(served(job, [ID]), [null], "§15 ...and it clears when a person drafts");
+	}
+	{
+		// Every other closed claim is as it was: no chip.
+		const w = makeWorld();
+		const job = await w.started();
+		factoring.ensureSchema(w.db);
+		const putMarker = (id, factored, lockedAt = "") => w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, locked_at, locked_via, updated_at) VALUES (?, ?, ?, 'person', ?, ?, ?, ?)")
+			.run(rules.loadKey(id), id, factored, iso(w.now), lockedAt, lockedAt ? "outside" : "", iso(w.now));
+		w.seed("LD-TEST-1421", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		eq(served(job, ["LD-TEST-1421"]), [null], "§15 skipped LOAD_FACTORED with no marker row at all (never marked): no chip, as before");
+		w.seed("LD-TEST-1422", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		putMarker("LD-TEST-1422", 1);
+		eq(served(job, ["LD-TEST-1422"]), [null], "§15 ...still marked: no chip");
+		w.seed("LD-TEST-1423", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		putMarker("LD-TEST-1423", 1, iso(w.now));
+		eq(served(job, ["LD-TEST-1423"]), [null], "§15 ...marked and final: no chip");
+		w.seed("LD-TEST-1424", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		putMarker("LD-TEST-1424", 0, iso(w.now));
+		eq(served(job, ["LD-TEST-1424"]), [null], "§15 ...a final row at 0, which the Draft Invoice button refuses: no chip that says to draft it");
+		w.seed("LD-TEST-1425", { state: "skipped", reason_code: "DRAFTED_BY_HAND" });
+		putMarker("LD-TEST-1425", 0);
+		eq(served(job, ["LD-TEST-1425"]), [null], "§15 a claim skipped for another reason, its mark cleared: no chip");
+		w.seed("LD-TEST-1426", { state: "baseline" });
+		putMarker("LD-TEST-1426", 0);
+		eq(served(job, ["LD-TEST-1426"]), [null], "§15 a baseline claim, its mark cleared: no chip");
+		// The trigger off: the sweep owns the load, as it did.
+		const off = makeWorld();
+		factoring.ensureSchema(off.db);
+		off.seed("LD-TEST-1427", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		off.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-1427', 'LD-TEST-1427', 0, 'person', ?, ?)").run(iso(off.now), iso(off.now));
+		eq(served(off.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } }), ["LD-TEST-1427"]), [null], "§15 the trigger off: as today");
+	}
+	{
+		// A claim that may be in Gmail takes a mark with no prompt, and Try again records the draft. The
+		// row as the dashboard serves it says not to send it, before Try again and after.
+		const client = await import(pathToFileURL(path.join(ROOT, "client", "src", "lib", "autoInvoiceStatus.js")).href);
+		const rowChip = (row) => (client.autoInvoiceRowChip ? client.autoInvoiceRowChip(row) : client.autoInvoiceChip(row._autoInvoice));
+		const LABEL = "Factored: don't send the draft, delete it";
+		for (const [n, code, stage] of [[1430, "MAYBE_IN_GMAIL", "appending"], [1431, "IN_GMAIL_UNRECORDED", "appended"]]) {
+			const ID = `LD-TEST-${n}`;
+			const billing = "billing@example-other.test";
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready(ID, { Email: OTHER, "Job Status": "Delivered" }, billing);
+			const messageId = `<made-up-${n}@example.com>`;
+			w.gmail.push(messageId);
+			w.seed(ID, { state: "needs_attention", reason_code: code, stage, delivery: "", invoice_id: `10202026-${n}`, invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: messageId, sent_json: JSON.stringify({ to: billing, subject: `Example Broker Order #${ID}`, total: "$1,000.00" }) });
+			factoring.ensureSchema(w.db);
+			const marked = factoring.mark(w.db, { key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
+			const asServed = () => {
+				const rows = [{ "Load ID": ID, "Job Status": "Delivered", Email: OTHER, "Completion Date": "10/20/2026 9:00:00" }];
+				job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+				factoring.annotateRows(w.db, { rows, idCol: "Load ID", nowIso: iso(w.now) });
+				return rows[0];
+			};
+			const before = rowChip(asServed());
+			eq([marked.ok, before.label, /Don't send the invoice draft/.test(before.reason)], [true, LABEL, true], `§15 FAILS ON THE OLD CODE: ${code}, marked: the row says not to send it`);
+			await tryAgain(job, ID);
+			await drained(w, `§15 ${code}, Try again`);
+			const after = asServed();
+			eq([w.state(ID), after._autoInvoice.state, w.smtp.length, w.appends.length], [["drafted", ""], "drafted", 0, 0], `§15 ${code}, marked, Try again: the draft found in Gmail is recorded, nothing sent or appended`);
+			eq(rowChip(after), { label: LABEL, tone: "bad", reason: `Don't send invoice 10202026-${n}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.` },
+				`§15 FAILS ON THE OLD CODE: ${code}, marked, Try again: the row doesn't say to send it`);
+		}
 	}
 
 	section("§16 the module's own rules");
