@@ -73970,7 +73970,7 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
 	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
-	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
 });
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.

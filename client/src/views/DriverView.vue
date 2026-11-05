@@ -165,8 +165,9 @@
       <!-- LOADS TAB -->
       <section v-if="currentTab === 'loads'" class="tab-panel">
         <!-- His own week at a glance, at the top of the list and of a load's own page alike: only
-             with a good answer from the server, and with no word why otherwise. -->
-        <DriverWeekBar v-if="weekBar" :bar="weekBar" @open="handleTabSwitch('performance')" />
+             with a good answer from the server, and with no word why otherwise. The place is
+             held from the first paint, so the buttons below it never move under his thumb. -->
+        <DriverWeekBar v-if="weekSlotHeld && showsMyWeek(auth.user?.role)" :bar="weekBar" @open="handleTabSwitch('performance')" />
 
         <!-- Load Detail Page -->
         <LoadDetail
@@ -831,6 +832,10 @@ const performanceTab = ref(false)
 // a shared phone never shows the previous driver's week.
 const performanceWeek = ref(null)
 const weekBar = computed(() => (performanceTab.value ? weekBarView(performanceWeek.value) : null))
+// The bar's place on the page. It is held from the first paint, and a read only notes what it
+// should be: it changes when the page itself changes, so no answer moves a button under his thumb.
+const weekSlotHeld = ref(true)
+let weekSlotWanted = true
 let performanceReads = 0
 async function checkPerformanceTab() {
   const role = auth.user?.role
@@ -847,12 +852,14 @@ async function checkPerformanceTab() {
   if (!isMounted || mine !== performanceReads) return
   performanceTab.value = tabAfterAnswer(status, performanceTab.value)
   performanceWeek.value = weekFromAnswer(role, status, answer)
+  weekSlotWanted = tabAfterAnswer(status, weekSlotWanted)
 }
 watch(performanceTab, (shown) => {
   if (!shown && currentTab.value === 'performance') handleTabSwitch('loads')
 })
 // He moves between the list and a load's page, or comes back to the tab: the bar reads his week again.
 watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list') : ''), (place) => {
+  weekSlotHeld.value = weekSlotWanted
   if (place) checkPerformanceTab()
 })
 

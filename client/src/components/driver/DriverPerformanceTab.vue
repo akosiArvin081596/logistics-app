@@ -26,7 +26,7 @@
         <p v-if="week.newWeek" class="perf-note" data-testid="perf-new-week">{{ week.newWeek }}</p>
         <p v-if="week.closes" class="perf-note" data-testid="perf-closes">{{ week.closes }}</p>
         <p class="perf-note" data-testid="perf-rule">{{ week.rule }}</p>
-        <p class="perf-note" data-testid="perf-not-pay">{{ NOT_PAY_LINE }}</p>
+        <p class="perf-note" data-testid="perf-not-pay">{{ week.notPay }}</p>
       </section>
 
       <section class="card perf-card" :aria-label="week.title" data-testid="perf-counted">
@@ -43,6 +43,7 @@
 
       <p class="perf-note" data-testid="perf-drive-hours">{{ DRIVE_HOURS_LINE }}</p>
       <p class="perf-note" data-testid="perf-target">{{ TARGET_LINE }}</p>
+      <p v-if="week.lowered" class="perf-note" data-testid="perf-lowered">{{ week.lowered }}</p>
       <p class="perf-note" data-testid="perf-guide">{{ GUIDE_LINE }}</p>
       <p class="perf-note" data-testid="perf-private">{{ PRIVATE_LINE }}</p>
     </template>
@@ -59,7 +60,7 @@ import { computed, onUnmounted, ref } from 'vue'
 import { Tabs as VanTabs, Tab as VanTab } from 'vant'
 import { useApi } from '../../composables/useApi'
 import {
-  DRIVE_HOURS_LINE, FAILED_LINE, GUIDE_LINE, HOS_LINE, NOT_PAY_LINE, OWN_PERIODS, OWN_URL, PRIVATE_LINE, TARGET_LINE, TELL_DISPATCH_LINE,
+  DRIVE_HOURS_LINE, FAILED_LINE, GUIDE_LINE, HOS_LINE, OWN_PERIODS, OWN_URL, PRIVATE_LINE, TARGET_LINE, TELL_DISPATCH_LINE,
   isGoneAnswer, ownWeekView,
 } from '../../lib/driverPerformance'
 

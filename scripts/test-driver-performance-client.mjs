@@ -117,7 +117,9 @@ eq('§1 the target line, exact', v.TARGET_LINE, 'Target: 7.5 loads a week (1.5 a
 eq('§1 the guide line', v.GUIDE_LINE, 'Targets are a guide, not a requirement.')
 eq('§1 the privacy line, exact', v.PRIVATE_LINE, 'No other driver can see this.')
 eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
-eq('§1 counts loads, not pay', v.NOT_PAY_LINE, 'Counts loads, not pay. Your invoice pays days.')
+eq('§1 counts loads, not pay: the line every driver can read', v.NOT_PAY_LINE, 'Counts loads, not pay.')
+eq('§1 and the one for an invoice that pays days', v.NOT_PAY_DAYS_LINE, 'Counts loads, not pay. Your invoice pays days.')
+eq('§1 a lowered target, exact', v.LOWER_TARGET_LINE, 'Your target is lower this week for your approved time off.')
 eq('§1 what to do about a wrong row', v.TELL_DISPATCH_LINE, 'If something looks wrong, tell dispatch.')
 eq('§1 a week that can\'t be reached asks for nothing more', v.NEW_WEEK_LINE, 'A new week starts Saturday.')
 eq('§1 the closing line, with ET', v.WEEK_CLOSES, 'Week closes Fri 11:59 PM ET')
@@ -128,7 +130,7 @@ eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.HOS_SHORT_LINE, v.TARGET_LINE, v.GUIDE_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, v.NEW_WEEK_LINE, v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.HOS_SHORT_LINE, v.TARGET_LINE, v.LOWER_TARGET_LINE, v.GUIDE_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, v.NEW_WEEK_LINE, v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -224,34 +226,52 @@ const week = (id, over) => ({
     { loadId: 'DP-1', pickup: { day: 'Mon', credits: 0.5 }, delivery: { day: 'Tue', credits: 1 } },
     { loadId: 'DP-2', pickup: { day: 'Thu', credits: 0.5 }, delivery: null },
     { loadId: 'DP-3', pickup: { note: 'last-week' }, delivery: { day: 'Sat', credits: 1 } },
-    { loadId: 'DP-4', pickup: { note: 'not-recorded' }, delivery: { day: 'Thu', credits: 1 } },
+    { loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 1 } },
     { loadId: 'DP-5', pickup: { note: 'another-week' }, delivery: { day: 'Fri', credits: 1 } },
     { loadId: '', pickup: { day: 'Fri', credits: 0.5 }, delivery: null },
   ],
+  targetLowered: false,
   ...over,
 })
-const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 1, pickup: 0.5 }, weeks })
+const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 1, pickup: 0.5 }, invoicePaysDays: true, weeks })
 const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: null, percent: 100, pace: null, loads: [] }))
 const thisWeek = ownWeekView(both, 'this-week') || {}
 eq('§6 this week, in words', { ...thisWeek, loads: undefined }, {
   range: 'Oct 31 – Nov 6', count: '4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%',
   left: '3 loads left this week.', closes: 'Week closes Fri 11:59 PM ET', newWeek: '', rule: 'A delivered load counts 1, its pickup 0.5.',
-  title: 'What counted this week', empty: v.NO_LOADS_LINE,
+  notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted this week', empty: v.NO_LOADS_LINE,
 })
 eq('§6 each row shows both credits, or what became of the pickup', thisWeek.loads, [
   { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 1' },
   { title: 'Load DP-2', line: 'Picked up Thu 0.5' },
   { title: 'Load DP-3', line: 'Delivered Sat 1 · Pickup counted last week' },
-  { title: 'Load DP-4', line: 'Delivered Thu 1 · Pickup not recorded' },
+  { title: 'Load DP-4', line: 'Delivered Thu 1 · Pickup not counted this week' },
   { title: 'Load DP-5', line: 'Delivered Fri 1 · Pickup counted in another week' },
   { title: 'Load', line: 'Picked up Fri 0.5' },
 ])
+eq('§6 on last week\'s list the same note says last week', ownWeekView(answerOf(week('last-week', { left: null, pace: null, loads: [{ loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 1 } }] })), 'last-week')?.loads, [
+  { title: 'Load DP-4', line: 'Delivered Thu 1 · Pickup not counted last week' },
+])
+eq('§6 no screen says a pickup wasn\'t recorded', [/not recorded/i.test(libSrc), /not recorded/i.test(card)], [false, false])
 const lastWeek = ownWeekView(both, 'last-week') || {}
 eq('§6 last week: the final figure and its list, with no label and nothing left', { ...lastWeek, loads: undefined }, {
   range: 'Oct 24 – Oct 30', count: '7.5 of 7.5 loads', pace: '', paceId: '', width: '100%',
   left: '', closes: '', newWeek: '', rule: 'A delivered load counts 1, its pickup 0.5.',
-  title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
+  notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
 })
+// The server decides which sentence is true of his invoice. Anything but a plain yes reads the
+// shorter line, which is true of every driver.
+const notPayFor = (invoicePaysDays) => ownWeekView({ ...answerOf(week('this-week')), invoicePaysDays }, 'this-week')?.notPay
+eq('§6 a day-rate driver reads that his invoice pays days', notPayFor(true), 'Counts loads, not pay. Your invoice pays days.')
+eq('§6 a percentage driver reads only that it counts loads, not pay', notPayFor(false), 'Counts loads, not pay.')
+eq('§6 and so does anything but a plain yes', ['true', 1, null, undefined, {}].map(notPayFor), new Array(5).fill('Counts loads, not pay.'))
+eq('§6 on last week too', ownWeekView({ ...answerOf(week('last-week', { left: null, pace: null })), invoicePaysDays: false }, 'last-week')?.notPay, 'Counts loads, not pay.')
+// The line only when the server flags it, and only where its words are true.
+const loweredFor = (targetLowered) => ownWeekView(answerOf(week('this-week', { targetLowered })), 'this-week')?.lowered
+eq('§6 a target the server flags as lowered says why', loweredFor(true), 'Your target is lower this week for your approved time off.')
+eq('§6 no flag, no line', [false, 'true', 1, null, undefined].map(loweredFor), ['', '', '', '', ''])
+eq('§6 the app never works it out from the figures', ownWeekView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 2, pickups: 2 }, targetLowered: false })), 'this-week')?.lowered, '')
+eq('§6 its words say this week, so last week never shows it', ownWeekView(answerOf(week('last-week', { left: null, pace: null, targetLowered: true })), 'last-week')?.lowered, '')
 eq('§6 last week carries no label, even if an answer holds one', ownWeekView(answerOf(week('last-week', { pace: 'ahead', left: null })), 'last-week')?.pace, '')
 const wordsFor = (over) => ownWeekView(answerOf(week('this-week', over)), 'this-week')
 eq('§6 the three labels, as the server chose', ['ahead', 'on-track', 'needs-focus'].map((pace) => wordsFor({ pace })?.pace), ['Ahead of Pace', 'On Track', 'Needs Focus'])
@@ -275,7 +295,7 @@ const decoyAnswer = {
     loads: [{ ...DECOYS, loadId: 'DP-1', pickup: { ...DECOYS, day: 'Mon', credits: 0.5 }, delivery: { ...DECOYS, day: 'Tue', credits: 1 } }],
   }), ...DECOYS, gap: 'decoy-gap', expected: 41 }],
 }
-eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'title', 'empty', 'loads'])
+eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'notPay', 'lowered', 'title', 'empty', 'loads'])
 eq('§6 exactly two fields on a row', Object.keys(ownWeekView(decoyAnswer, 'this-week')?.loads?.[0] || {}), ['title', 'line'])
 eq('§6 no name, hours, score, tier, pay, broker, rate, rank or other driver\'s figure gets through, whatever the answer holds', showsDecoy(ownWeekView(decoyAnswer, 'this-week')), [])
 eq('§6 no answer, no card', [ownWeekView(null, 'this-week'), ownWeekView({}, 'this-week'), ownWeekView({ weeks: [] }, 'this-week'), ownWeekView(both, 'this-month')], [null, null, null, null])
@@ -291,6 +311,7 @@ const broken = {
   'a row with no credit on its delivery': { loads: [{ loadId: 'DP-1', pickup: { note: 'not-recorded' }, delivery: { day: 'Mon' } }] },
   'a row with a bad pickup credit': { loads: [{ loadId: 'DP-1', pickup: { day: 'Mon', credits: '0.5' }, delivery: null }] },
   'a row whose pickup note it doesn\'t know': { loads: [{ loadId: 'DP-1', pickup: { note: 'decoy-note' }, delivery: { day: 'Mon', credits: 1 } }] },
+  'the old note, which could be false': { loads: [{ loadId: 'DP-1', pickup: { note: 'not-recorded' }, delivery: { day: 'Mon', credits: 1 } }] },
   'a row with neither': { loads: [{ loadId: 'DP-1', pickup: null, delivery: null }] },
 }
 for (const [says, over] of Object.entries(broken)) eq(`§6 ${says}: no card, never a wrong number`, wordsFor(over), null)
@@ -346,9 +367,9 @@ const panel = (viewTemplate.match(/data-testid="perf-panel">([\s\S]*?)<\/section
 eq('§10 a Driver gets his own week and nothing else in the panel', panel.includes('<DriverPerformanceTab v-if="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />'), true)
 eq('§10 the office board is for anyone else who reaches it, a Super Admin', panel.includes('<DriverPerformanceBoard v-else @gone="performanceTab = false" />'), true)
 const barTag = (viewTemplate.match(/<DriverWeekBar[^>]*>/) || [''])[0]
-eq('§10 the bar: only with its view, given nothing else, and it opens the tab', barTag, '<DriverWeekBar v-if="weekBar" :bar="weekBar" @open="handleTabSwitch(\'performance\')" />')
+eq('§10 the bar\'s place: a Driver\'s, held from the first paint, given its view and nothing else, and it opens the tab', barTag, '<DriverWeekBar v-if="weekSlotHeld && showsMyWeek(auth.user?.role)" :bar="weekBar" @open="handleTabSwitch(\'performance\')" />')
 const barAt = viewTemplate.indexOf('<DriverWeekBar')
-const barChain = chainTo(viewTemplate, 'v-if="weekBar"') || []
+const barChain = chainTo(viewTemplate, 'v-if="weekSlotHeld') || []
 eq('§10 one bar, so the list and a load\'s page show the same component with the same answer', (viewTemplate.match(/<DriverWeekBar\b/g) || []).length, 1)
 const loadsAt = barChain.findIndex((attrs) => attrs.includes('v-if="currentTab === \'loads\'"'))
 eq('§10 it sits on the Loads tab, directly in its section, outside both the load page and the list, so it shows on each',
@@ -363,6 +384,13 @@ eq('§10 the check asks by role and never on the onboarding screen', check.inclu
 eq('§10 the answer decides the tab', check.includes('performanceTab.value = tabAfterAnswer(status, performanceTab.value)'), true)
 eq('§10 and the bar, on every answer: a failed read clears it', /^\s*performanceWeek\.value = weekFromAnswer\(role, status, answer\)$/m.test(check), true)
 eq('§10 the bar\'s answer starts empty, in a ref of the view\'s own', viewScript.includes('const performanceWeek = ref(null)'), true)
+// Nothing under his thumb moves: the place is held from the first paint, a read only notes what
+// it should be, and it changes only when the page itself changes.
+eq('§10 the bar\'s place is held from the first paint', viewScript.includes('const weekSlotHeld = ref(true)'), true)
+eq('§10 a read only notes what the place should be, failures leaving it as it was', check.includes('weekSlotWanted = tabAfterAnswer(status, weekSlotWanted)'), true)
+eq('§10 and no read ever moves it', check.includes('weekSlotHeld'), false)
+const placeWatch = (viewScript.match(/watch\(\(\) => \(currentTab\.value === 'loads' \? \(detailLoad\.value \? 'load' : 'list'\) : ''\), \(place\) => \{([\s\S]*?)\n\}\)/) || [])[1] || ''
+eq('§10 it changes only with the page', [placeWatch.includes('weekSlotHeld.value = weekSlotWanted'), (viewScript.match(/weekSlotHeld\.value =/g) || []).length], [true, 1])
 eq('§10 an older read never overwrites a newer one', check.includes('const mine = ++performanceReads') && check.includes('if (!isMounted || mine !== performanceReads) return'), true)
 const initial = (viewScript.match(/async function attemptInitialLoad\(\) \{([\s\S]*?)\n\}/) || [])[1] || ''
 const afterLoad = initial.indexOf('checkPerformanceTab()')
@@ -370,7 +398,7 @@ eq('§10 the check runs after the driver\'s data has loaded, and only then', aft
 const refetch = (viewScript.match(/function scheduleDriverRefetch\(\) \{([\s\S]*?)\n\}/) || [''])[0]
 eq('§10 a refetch of his loads reads his week again', refetch.includes('driverStore.loadData()') && refetch.includes('checkPerformanceTab()'), true)
 eq('§10 a phone coming back to the app refetches, so it asks again', (viewScript.match(/function onVisibilityChange\(\) \{([\s\S]*?)\n\}/) || [''])[0].includes('scheduleDriverRefetch()'), true)
-eq('§10 moving between the list and a load\'s page reads his week again', /watch\(\(\) => \(currentTab\.value === 'loads' \? \(detailLoad\.value \? 'load' : 'list'\) : ''\), \(place\) => \{\s*if \(place\) checkPerformanceTab\(\)/.test(viewScript), true)
+eq('§10 moving between the list and a load\'s page reads his week again', /watch\(\(\) => \(currentTab\.value === 'loads' \? \(detailLoad\.value \? 'load' : 'list'\) : ''\), \(place\) => \{[^}]*if \(place\) checkPerformanceTab\(\)/.test(viewScript), true)
 const statusFn = (viewScript.match(/async function handleStatusUpdate\(\{ newStatus, load \}\) \{([\s\S]*?)\n\}/) || [])[1] || ''
 eq('§10 a status he sets on a load\'s page moves the bar above it, only once it has saved', statusFn.indexOf('await driverStore.updateStatus') >= 0 && statusFn.indexOf('checkPerformanceTab()') > statusFn.indexOf('await driverStore.updateStatus') && statusFn.indexOf('checkPerformanceTab()') < statusFn.indexOf('} catch (err)'), true)
 eq('§10 and so does a refresh', ((viewScript.match(/async function handleRefresh\(\) \{([\s\S]*?)\n\}/) || [])[1] || '').includes('checkPerformanceTab()'), true)
@@ -384,9 +412,11 @@ const cardTemplate = templateOf(card)
 const cardScript = scriptOf(card)
 const printed = [...cardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]).sort()
 eq('§11 it prints only these, so a name or a figure can\'t be added by accident', [...new Set(printed)], [
-  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'GUIDE_LINE', 'HOS_LINE', 'NOT_PAY_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
-  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.newWeek', 'week.pace', 'week.range', 'week.rule', 'week.title',
+  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'GUIDE_LINE', 'HOS_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
+  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.notPay', 'week.pace', 'week.range', 'week.rule', 'week.title',
 ].sort())
+eq('§11 the pay line is the view\'s, so the server chooses it: neither constant is in the template', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|invoice pays/.test(card), false)
+eq('§11 the lowered-target line only when the view has one, right after the target line', /\{\{ TARGET_LINE \}\}<\/p>\s*<p v-if="week\.lowered"[^>]*>\{\{ week\.lowered \}\}<\/p>/.test(cardTemplate), true)
 eq('§11 no v-html', cardTemplate.includes('v-html'), false)
 eq('§11 it never names the board: no ranking can reach a driver\'s screen', /boardUrl|boardView|BOARD_URL|rowView|tileView|leaderboard|\.tiles|\brank\b|unitLabel|isYou|\bYOU\b|COMING_SOON|CATEGORIES|\bPERIODS\b/.test(card), false)
 eq('§11 its one read is his own week', [...cardScript.matchAll(/api\.\w+\(([^)]*)\)/g)].map((m) => m[1]), ['OWN_URL'])
@@ -419,9 +449,16 @@ console.log('§12 DriverWeekBar.vue')
 const barTemplate = templateOf(bar)
 const barScript = scriptOf(bar)
 eq('§12 it prints only the view\'s words', [...new Set([...barTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), ['bar.hos', 'bar.pace', 'bar.text'])
-eq('§12 it is given its view and reads nothing', [/bar: \{ type: Object, required: true \}/.test(barScript), /useApi|fetch\(|axios|XMLHttpRequest/.test(bar)], [true, false])
+eq('§12 it is given its view, or none, and reads nothing', [/bar: \{ type: Object, default: null \}/.test(barScript), /useApi|fetch\(|axios|XMLHttpRequest/.test(bar)], [true, false])
+// The slot holds a fixed height whatever is in it, so the bar appearing or going moves nothing.
+const slotRule = (styleOf(bar).match(/\.week-bar-slot \{([^}]*)\}/) || [])[1] || ''
+eq('§12 its place is a fixed height, with or without the bar', [/(^|\n)\s*height: 4\.75rem;/.test(slotRule), /min-height/.test(slotRule)], [true, false])
+eq('§12 the place is always there; only the button comes and goes', [/^\s*<div class="week-bar-slot" data-testid="perf-bar-slot">/m.test(barTemplate), /<button v-if="bar" type="button"/.test(barTemplate)], [true, true])
+const barRule = (styleOf(bar).match(/\.week-bar \{([^}]*)\}/) || [])[1] || ''
+eq('§12 the button fills that height and can\'t push past it', [/(^|\n)\s*height: 100%;/.test(barRule), /box-sizing: border-box;/.test(barRule), /overflow: hidden;/.test(barRule), /margin/.test(barRule)], [true, true, true, false])
+eq('§12 its top row never wraps, so a label coming or going can\'t change its height', /\.week-bar-top \{[^}]*flex-wrap: nowrap;/.test(styleOf(bar)), true)
 eq('§12 tapping it asks to open the tab', /@click="emit\('open'\)"/.test(barTemplate) && /defineEmits\(\['open'\]\)/.test(barScript), true)
-eq('§12 a real button, 44 px or more', [/<button type="button"/.test(barTemplate), /\.week-bar \{[^}]*min-height: 44px/.test(styleOf(bar))], [true, true])
+eq('§12 a real button, 44 px or more', [/<button v-if="bar" type="button"/.test(barTemplate), /\.week-bar \{[^}]*min-height: 44px/.test(styleOf(bar))], [true, true])
 eq('§12 the fill is the server\'s percent', /:style="\{ width: bar\.width \}"/.test(barTemplate), true)
 eq('§12 the short hours-of-service line is on it', barTemplate.includes('{{ bar.hos }}'), true)
 eq('§12 the label only when the view has one', /v-if="bar\.pace"/.test(barTemplate), true)
@@ -477,7 +514,11 @@ if (typeof server.personalWeek === 'function') {
       server.countedLoad({ loadId: 'DP-4', pickupDay: '2026-11-04', deliveryDay: '' }),
     ],
   })
-  const realAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, weeks: [serverWeek] }
+  const realAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [serverWeek] }
+  const offWeek = server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries: 3, pickups: 0, offDays: ['2026-11-05'], openLoad: true, loads: [] })
+  const offAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [offWeek] }
+  eq('§14 a real day off: his lower figure, and the line that says why', [ownWeekView(offAnswer, 'this-week')?.count, ownWeekView(offAnswer, 'this-week')?.lowered], ['3 of 6 loads', 'Your target is lower this week for your approved time off.'])
+  eq('§14 a real uncounted pickup, in true words', ownWeekView({ ...realAnswer, weeks: [{ ...serverWeek, loads: [server.countedLoad({ loadId: 'DP-5', pickupDay: '', deliveryDay: '2026-11-04' })] }] }, 'this-week')?.loads, [{ title: 'Load DP-5', line: 'Delivered Wed 1 · Pickup not counted this week' }])
   eq('§14 the server\'s own week, in words', [ownWeekView(realAnswer, 'this-week')?.count, ownWeekView(realAnswer, 'this-week')?.left, ownWeekView(realAnswer, 'this-week')?.pace, ownWeekView(realAnswer, 'this-week')?.width], ['3.5 of 7.5 loads', '4 loads left this week.', 'On Track', '46%'])
   eq('§14 and its rows', ownWeekView(realAnswer, 'this-week')?.loads, [
     { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 1' },

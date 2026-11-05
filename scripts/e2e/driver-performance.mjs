@@ -7,6 +7,9 @@
 //       scroll; the board never read
 //   E   the same bar at the top of a load's own page, the same answer, with its status and POD
 //       sections below it as they were; tapping it there opens the tab too
+//   Z   nothing under his thumb moves, by position: a load card across the first read arriving
+//       after the list has painted; the Accept button and a load's status buttons across a failed
+//       read and the good one after it; the kill switch going off keeps the place until he moves
 //   T   tapping it opens the Performance tab; the sixth tab fits the nav and is 44 px or more
 //   W   this week: the count, the label, what's left, the closing line, how it counts, each row
 //       with both credits, "tell dispatch", drive hours coming soon, the target, the guide, "No
@@ -23,8 +26,11 @@
 //   G   the kill switch goes off mid-session: the next read goes back to Loads with five tabs, no bar
 // And at 390x844:
 //   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
-//       starts Saturday." and no closing line; Ahead of Pace; the target reached; no label at all
-//   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar
+//       starts Saturday." and no closing line; Ahead of Pace; the target reached; no label at all;
+//       a percentage driver reads only "Counts loads, not pay."; an approved day off reads his
+//       lower figure and the one line saying why
+//   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar; the held place goes on
+//       his first move between screens
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
 //   U   the check fails (503): no tab, no bar; a phone coming back to the app asks again, and both show
 // And a made-up Super Admin on /driver at 1280x800:
@@ -86,7 +92,9 @@ const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 const GUIDE_LINE = 'Targets are a guide, not a requirement.'
 const PRIVATE_LINE = 'No other driver can see this.'
 const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
-const NOT_PAY_LINE = 'Counts loads, not pay. Your invoice pays days.'
+const NOT_PAY_LINE = 'Counts loads, not pay.'
+const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
+const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 const NEW_WEEK_LINE = 'A new week starts Saturday.'
 const RULE_LINE = 'A delivered load counts 1, its pickup 0.5.'
@@ -127,20 +135,20 @@ const THIS_LOADS = [
   { loadId: 'QA-9001', pickup: counted('Sat', 0.5), delivery: counted('Mon', 1) },
   { loadId: 'QA-9002', pickup: counted('Mon', 0.5), delivery: counted('Tue', 1) },
   { loadId: 'QA-9003', pickup: { note: 'last-week' }, delivery: counted('Sun', 1) },
-  { loadId: 'QA-9004', pickup: { note: 'not-recorded' }, delivery: counted('Tue', 1) },
+  { loadId: 'QA-9004', pickup: { note: 'not-counted' }, delivery: counted('Tue', 1) },
   { loadId: 'QA-9005', pickup: counted('Tue', 0.5), delivery: null },
 ]
 const THIS_LINES = [
   ['Load QA-9001', 'Picked up Sat 0.5 · Delivered Mon 1'],
   ['Load QA-9002', 'Picked up Mon 0.5 · Delivered Tue 1'],
   ['Load QA-9003', 'Delivered Sun 1 · Pickup counted last week'],
-  ['Load QA-9004', 'Delivered Tue 1 · Pickup not recorded'],
+  ['Load QA-9004', 'Delivered Tue 1 · Pickup not counted this week'],
   ['Load QA-9005', 'Picked up Tue 0.5'],
 ]
 const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 1) }]
 const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 1']]
-const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 5.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 2, percent: 73, pace: 'on-track', newWeekNote: false, loads: THIS_LOADS }
-const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: null, percent: 100, pace: null, newWeekNote: false, loads: LAST_LOADS }
+const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 5.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 2, percent: 73, pace: 'on-track', newWeekNote: false, targetLowered: false, loads: THIS_LOADS }
+const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: null, percent: 100, pace: null, newWeekNote: false, targetLowered: false, loads: LAST_LOADS }
 
 // What the server must never send. If it did, none of it may show.
 const DECOY_NAME = 'Decoy Peerdriver'
@@ -153,6 +161,7 @@ function ownBody(state) {
   return {
     view: 'no-hours-data',
     creditWeights: { delivery: 1, pickup: 0.5 },
+    invoicePaysDays: state.invoicePaysDays,
     weeks: [dress({ ...THIS_WEEK, ...state.thisWeek }), dress(LAST_WEEK)],
     ...decoy,
   }
@@ -182,9 +191,10 @@ function boardBody(kind) {
 }
 
 // `own` says how his route answers: 200, or a status with its code. `thisWeek` overrides his
-// figures; `withLoad` puts one made-up load in his list.
-function freshState({ own = 200, decoys = false, thisWeek = {}, withLoad = false } = {}) {
-  return { own, decoys, thisWeek, withLoad, calls: { own: 0, week: 0, month: 0 } }
+// figures; `withLoad` puts one made-up load in his list, and `withOffer` one to accept;
+// `ownDelayMs` holds his route's answer back, so the list paints first.
+function freshState({ own = 200, decoys = false, thisWeek = {}, withLoad = false, withOffer = false, ownDelayMs = 0, invoicePaysDays = true } = {}) {
+  return { own, decoys, thisWeek, withLoad, withOffer, ownDelayMs, invoicePaysDays, calls: { own: 0, week: 0, month: 0 } }
 }
 
 const REFUSALS = {
@@ -197,11 +207,12 @@ const REFUSALS = {
 const LOAD_ID = 'QA-9100'
 const LOAD_HEADERS = ['Load ID', 'Driver', 'Job Status', 'Pickup Appointment', 'Drop-off Appointment']
 const madeUpLoad = (who) => ({ _rowIndex: 2, 'Load ID': LOAD_ID, Driver: who.driverName, 'Job Status': 'In Transit', 'Pickup Appointment': THIS_START, 'Drop-off Appointment': THIS_END })
+const madeUpOffer = (who) => ({ _rowIndex: 3, 'Load ID': 'QA-9101', Driver: who.driverName, 'Job Status': 'Dispatched', 'Pickup Appointment': THIS_START, 'Drop-off Appointment': THIS_END })
 
 function driverPayload(who, state) {
   return {
-    loads: state.withLoad ? [madeUpLoad(who)] : [],
-    headers: { jobTracking: state.withLoad ? LOAD_HEADERS : [], carrierDB: [] },
+    loads: [...(state.withLoad ? [madeUpLoad(who)] : []), ...(state.withOffer ? [madeUpOffer(who)] : [])],
+    headers: { jobTracking: state.withLoad || state.withOffer ? LOAD_HEADERS : [], carrierDB: [] },
     onboarding: { user_id: who.id, status: 'fully_onboarded', onboarded_at: new Date(Date.now() - 30 * DAY).toISOString(), documents: [], totalDocs: 5 },
     driverInfo: null, truck: null, messages: [], notifications: [], expenses: [], drivers: [], invoices: [], sharedDocuments: [], truckDocuments: [],
   }
@@ -287,6 +298,7 @@ async function openPage(browser, size, who, state) {
     }
     const out = answerGet(who, state, u)
     if (out === null) unanswered.add(u.pathname)
+    if (u.pathname === '/api/driver/me/performance' && state.ownDelayMs) await new Promise((r) => setTimeout(r, state.ownDelayMs))
     return route.fulfill({ status: out ? out.status : 200, contentType: 'application/json', headers: { 'cache-control': 'private, no-store' }, body: JSON.stringify(out ? out.body : {}) })
   })
   const page = await ctx.newPage()
@@ -322,6 +334,10 @@ const tabLabels = (page) => allText(page.locator('.van-tabbar-item__text'))
 const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const comeBackToApp = (page) => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
 const barCount = (page) => page.locator(testid('perf-bar')).count()
+const slotCount = (page) => page.locator(testid('perf-bar-slot')).count()
+// Where an element sits on the page, whatever the scroll, in whole pixels.
+const pageTop = (page, selector) => page.locator(selector).first().evaluate((el) => Math.round(el.getBoundingClientRect().top + window.scrollY)).catch(() => null)
+const allSame = (list) => list.every((n) => n !== null && n === list[0])
 
 // The nav, once the driver's data has loaded and the tab's check has been answered.
 async function barSettled(page, state, wantTab) {
@@ -434,6 +450,7 @@ async function fullRun(browser, size) {
     const target = await text(page, testid('perf-target'))
     const guide = await text(page, testid('perf-guide'))
     const isPrivate = await text(page, testid('perf-private'))
+    const lowered = await page.locator(testid('perf-lowered')).count()
     const choiceHeights = await heights(page, '.perf-periods .van-tab')
     const choiceLabels = await allText(page.locator('.perf-periods .van-tab'))
     const weekWide = await page.locator(testid('perf-fill')).first().evaluate((el) => el.style.width).catch(() => '')
@@ -444,10 +461,10 @@ async function fullRun(browser, size) {
     const fits = await noSideScroll(page)
     const hidden = banned(panel).concat(['Casey Example', 'You'].filter((w) => new RegExp(`\\b${w}\\b`).test(panel)))
     record(`W-${t}`, 'This week: only his own figures',
-      `"5.5 of 7.5 loads"; On Track; fill 73%; "2 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; "${NOT_PAY_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
-      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", not-pay "${notPay}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
+      `"5.5 of 7.5 loads"; On Track; fill 73%; "2 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; "${NOT_PAY_DAYS_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
+      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", not-pay "${notPay}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
       count === '5.5 of 7.5 loads' && pace === 'On Track' && weekWide === '73%' && left === '2 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
-        && rule === RULE_LINE && notPay === NOT_PAY_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
+        && rule === RULE_LINE && notPay === NOT_PAY_DAYS_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
         && hos === HOS_LINE && hosSeen && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
       await shot(page, `W-${t}`))
 
@@ -517,6 +534,77 @@ async function loadPageRun(browser, size) {
       onList && onLoad && barAfter && loadBar === listBar && loadBar === 'This week: 5.5 of 7.5 loads' && loadPace === 'On Track' && loadHos === HOS_SHORT_LINE && bars === 1
         && above && named('Update Status') && named('Documents') && fits && opens,
       loadShot)
+  } finally {
+    await ctx.close()
+  }
+}
+
+// ---------------------------------------------------------------- Z: nothing under his thumb moves
+async function stillRun(browser, size) {
+  const t = size.tag
+  const state = freshState({ withLoad: true, withOffer: true, ownDelayMs: 1500 })
+  const { ctx, page } = await openPage(browser, size, DRIVER, state)
+  const settle = () => page.waitForTimeout(500)
+  const until503 = async () => { state.own = REFUSALS.unavailable; await comeBackToApp(page); return gone(page, testid('perf-bar'), 8000) }
+  const until200 = async () => { state.own = 200; await comeBackToApp(page); return appears(page, testid('perf-bar'), 8000) }
+  try {
+    // The list paints first, and his first read answers after it.
+    await appears(page, '.load-card', 15000)
+    const barsAtPaint = await barCount(page)
+    const slotsAtPaint = await slotCount(page)
+    const cardAtPaint = await pageTop(page, '.load-card')
+    const barCame = await appears(page, testid('perf-bar'), 8000)
+    const cardWithBar = await pageTop(page, '.load-card')
+    state.ownDelayMs = 0
+
+    await press(page.locator('.sub-tab', { hasText: 'Pending' }).first(), size)
+    await appears(page, '.action-btn.accept', 8000)
+    const acceptWith = await pageTop(page, '.action-btn.accept')
+    const acceptHidden = await until503()
+    await settle()
+    await appears(page, '.action-btn.accept', 8000)
+    const acceptFailed = await pageTop(page, '.action-btn.accept')
+    const acceptBackBar = await until200()
+    await settle()
+    await appears(page, '.action-btn.accept', 8000)
+    const acceptBack = await pageTop(page, '.action-btn.accept')
+    const firstShot = await shot(page, `Z-accept-${t}`)
+    record(`Z-list-${t}`, 'The list stays still: the first read, a failed read, and the good one after',
+      `no bar yet at the list's first paint, its place already held; the load card at the same place once the bar is in it; the Accept button at the same place with the bar, without it and with it again`,
+      `bars at paint ${barsAtPaint}, slots ${slotsAtPaint}, card ${cardAtPaint} then ${cardWithBar}, bar came ${barCame}, accept ${acceptWith} then ${acceptFailed} then ${acceptBack}, hidden ${acceptHidden}, back ${acceptBackBar}`,
+      barsAtPaint === 0 && slotsAtPaint === 1 && barCame && allSame([cardAtPaint, cardWithBar]) && acceptHidden && acceptBackBar && allSame([acceptWith, acceptFailed, acceptBack]),
+      firstShot)
+
+    await press(page.locator('.sub-tab', { hasText: 'Active' }).first(), size)
+    await appears(page, '.load-card', 8000)
+    await press(page.locator('.load-card').first(), size)
+    await appears(page, '.status-stepper-wrapper', 8000)
+    await settle()
+    const statusWith = await pageTop(page, '.status-stepper-wrapper')
+    const backWith = await pageTop(page, '.detail-topbar')
+    const statusHidden = await until503()
+    await settle()
+    const statusFailed = await pageTop(page, '.status-stepper-wrapper')
+    const backFailed = await pageTop(page, '.detail-topbar')
+    const statusBackBar = await until200()
+    await settle()
+    const statusBack = await pageTop(page, '.status-stepper-wrapper')
+    const pageShot = await shot(page, `Z-load-page-${t}`)
+    state.own = REFUSALS.off
+    await comeBackToApp(page)
+    const offHidden = await gone(page, testid('perf-bar'), 8000)
+    await settle()
+    const statusOff = await pageTop(page, '.status-stepper-wrapper')
+    const slotsOff = await slotCount(page)
+    await press(page.locator('.detail-topbar button').first(), size)
+    await appears(page, '.load-sub-tabs', 8000)
+    await settle()
+    const slotsMoved = await slotCount(page)
+    record(`Z-load-${t}`, 'A load\'s page stays still: a failed read, the good one after, and the switch going off',
+      `the status buttons and the Back row at the same place with the bar, without it and with it again; the switch going off moves nothing, and keeps the place until he moves; after he moves the place is gone`,
+      `status ${statusWith} then ${statusFailed} then ${statusBack} then ${statusOff}, back row ${backWith} then ${backFailed}, hidden ${statusHidden}, back ${statusBackBar}, off ${offHidden}, slots while off ${slotsOff} then ${slotsMoved}`,
+      statusHidden && statusBackBar && offHidden && allSame([statusWith, statusFailed, statusBack, statusOff]) && allSame([backWith, backFailed]) && slotsOff === 1 && slotsMoved === 0,
+      pageShot)
   } finally {
     await ctx.close()
   }
@@ -701,6 +789,49 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
+  const percentage = freshState({ invoicePaysDays: false })
+  {
+    const { ctx, page } = await openPage(browser, size, DRIVER, percentage)
+    try {
+      await barSettled(page, percentage, true)
+      await appears(page, testid('perf-bar'), 8000)
+      await press(page.locator(testid('perf-bar')).first(), size)
+      await appears(page, testid('perf-not-pay'), 8000)
+      const notPay = await text(page, testid('perf-not-pay'))
+      const body = squeeze(await page.locator('body').innerText())
+      record(`P-percentage-${t}`, 'A percentage driver: nothing false about his invoice', `"${NOT_PAY_LINE}" alone; "invoice pays days" nowhere on the page`,
+        `not-pay "${notPay}", pays-days on the page ${body.includes('invoice pays days')}`,
+        notPay === NOT_PAY_LINE && !body.includes('invoice pays days'), await shot(page, `P-percentage-${t}`))
+    } finally {
+      await ctx.close()
+    }
+  }
+  const dayOff = freshState({ thisWeek: { credits: { value: 3, target: 6, deliveries: 2, pickups: 2 }, left: 3, percent: 50, pace: 'on-track', targetLowered: true } })
+  {
+    const { ctx, page } = await openPage(browser, size, DRIVER, dayOff)
+    try {
+      await barSettled(page, dayOff, true)
+      await appears(page, testid('perf-bar'), 8000)
+      const barText = await text(page, testid('perf-bar-text'))
+      await press(page.locator(testid('perf-bar')).first(), size)
+      await appears(page, testid('perf-lowered'), 8000)
+      const count = await text(page, testid('perf-count'))
+      const left = await text(page, testid('perf-left'))
+      const target = await text(page, testid('perf-target'))
+      const lowered = await text(page, testid('perf-lowered'))
+      const follows = await page.locator(testid('perf-target')).first().evaluate((el) => (el.nextElementSibling || {}).dataset?.testid === 'perf-lowered').catch(() => false)
+      await choose(page, size, 'Last week')
+      await appears(page, testid('perf-counted-title'), 8000)
+      await page.waitForTimeout(150)
+      const lastWeekLine = await page.locator(testid('perf-lowered')).count()
+      record(`P-day-off-${t}`, 'An approved day off: his lower figure, and the line that says why', `"This week: 3 of 6 loads"; "3 of 6 loads"; "3 loads left this week."; "${TARGET_LINE}" then "${LOWER_TARGET_LINE}"; not on Last week, as its words say this week`,
+        `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", follows ${follows}, on last week ${lastWeekLine}`,
+        barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && follows && lastWeekLine === 0,
+        await shot(page, `P-day-off-${t}`))
+    } finally {
+      await ctx.close()
+    }
+  }
 }
 
 // ---------------------------------------------------------------- O, N: nothing new
@@ -714,9 +845,14 @@ async function nothingNewRun(browser, size, step, refusal, title) {
     const body = squeeze(await page.locator('body').innerText())
     const bars = await barCount(page)
     const words = ['Performance', 'This week:', 'Most loads', 'Not eligible', 'NOT_ELIGIBLE', 'FEATURE_OFF', HOS_LINE, HOS_SHORT_LINE].filter((w) => body.includes(w))
-    record(`${step}-${t}`, title, `labels ${JSON.stringify(BASE_TABS)}; no bar; the board never read; nothing on the page about it`,
-      `labels ${JSON.stringify(labels)}, bars ${bars}, own reads ${state.calls.own}, board reads ${state.calls.week + state.calls.month}, words ${JSON.stringify(words)}`,
-      sameList(labels, BASE_TABS) && bars === 0 && state.calls.own > 0 && state.calls.week + state.calls.month === 0 && words.length === 0, await shot(page, `${step}-${t}`))
+    const stepShot = await shot(page, `${step}-${t}`)
+    await press(page.locator('.van-tabbar-item', { hasText: 'Alerts' }).first(), size)
+    await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
+    await appears(page, '.load-sub-tabs', 4000)
+    const slotsMoved = await slotCount(page)
+    record(`${step}-${t}`, title, `labels ${JSON.stringify(BASE_TABS)}; no bar; the board never read; nothing on the page about it; after his first move, not even its held place`,
+      `labels ${JSON.stringify(labels)}, bars ${bars}, own reads ${state.calls.own}, board reads ${state.calls.week + state.calls.month}, words ${JSON.stringify(words)}, places after a move ${slotsMoved}`,
+      sameList(labels, BASE_TABS) && bars === 0 && state.calls.own > 0 && state.calls.week + state.calls.month === 0 && words.length === 0 && slotsMoved === 0, stepShot)
   } finally {
     await ctx.close()
   }
@@ -768,7 +904,7 @@ async function adminRun(browser, size) {
   const { ctx, page } = await openPage(browser, size, ADMIN, state)
   try {
     const hasTab = await barSettled(page, state, true)
-    const bars = await barCount(page)
+    const bars = await barCount(page) + await slotCount(page)
     const opened = hasTab && await openTab(page, size, 'perf-board')
     const want = expectedRows(THIS_ROWS)
     const got = opened ? await waitForRows(page, want) : []
@@ -802,6 +938,7 @@ async function main() {
     for (const size of [PHONE, DESKTOP]) {
       await fullRun(browser, size)
       await loadPageRun(browser, size)
+      await stillRun(browser, size)
       await decoyRun(browser, size)
       await failedWeekRun(browser, size)
       await failedBarRun(browser, size)

@@ -73,7 +73,11 @@
  * §23 privacy: only his rows, from the session, never another driver's load,
  *     name, unit, rank or figure; exactly three keys on a row; no broker, rate,
  *     lane or pay; two drivers asking at once never see each other's rows
- * §24 approved days off over HTTP: approved only, the flag off reads nothing
+ * §24 approved days off over HTTP: approved only, the flag off reads nothing;
+ *     the server flags a lowered target, on the open week only
+ * §25 the words the server decides: whether his invoice pays days, read as the
+ *     money math reads his pay type; what became of a pickup, true whichever way
+ *     it was made, an older tap on a truck with no ELD included
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -325,7 +329,7 @@ async function makeWorld(env, { nowMs = NOW_MS, extraLoads = [] } = {}) {
 		},
 	};
 	const body = ['"use strict";', lift.text,
-		"return { driverPerformance, parseSheet, deduplicateLoads, selectInvoiceWeekLoads, loadKeySet, getDeletedLoadIds, getWeekRange };"].join("\n");
+		"return { driverPerformance, parseSheet, deduplicateLoads, selectInvoiceWeekLoads, loadKeySet, getDeletedLoadIds, getWeekRange, directoryPayStruct };"].join("\n");
 	// The routes module logs its start-up line on the real console: keep it.
 	const realLog = console.log;
 	console.log = (...a) => world.logs.push(a.join(" "));
@@ -824,10 +828,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			weeks[who] = r.json;
 		}
 		const a = weeks.ada;
-		eq(sortedKeys(a), ["creditWeights", "view", "weeks"], "the answer's keys");
+		eq(sortedKeys(a), ["creditWeights", "invoicePaysDays", "view", "weeks"], "the answer's keys");
 		eq(a.view, "no-hours-data", "every truck gets the \"no hours data\" view");
 		eq(a.creditWeights, { delivery: 1, pickup: 0.5 }, "the weights the credits use");
-		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "pace", "percent", "start"];
+		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "pace", "percent", "start", "targetLowered"];
 		eq(a.weeks.map((w) => sortedKeys(w)), [WEEK_KEYS, WEEK_KEYS], "each week's keys");
 		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "target", "value"], ["deliveries", "pickups", "target", "value"]], "each week's credit keys");
 		const banned = /hour|rei|gap|reach|expected|rank|unit|streak|tier|bonus|earn/i;
@@ -862,11 +866,11 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			{ loadId: "DP-1010", pickup: { day: "Sat", credits: 0.5 }, delivery: null },
 			{ loadId: "DP-1001", pickup: { day: "Sun", credits: 0.5 }, delivery: { day: "Mon", credits: 1 } },
 			{ loadId: "DP-1002", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 1 } },
-			{ loadId: "DP-1004", pickup: { note: "not-recorded" }, delivery: { day: "Mon", credits: 1 } },
+			{ loadId: "DP-1004", pickup: { note: "not-counted" }, delivery: { day: "Mon", credits: 1 } },
 		], "Ada's this week: each row shows both credits, or what became of the pickup");
 		eq(a.weeks[1].loads, [
-			{ loadId: "DP-1008", pickup: { note: "not-recorded" }, delivery: { day: "Thu", credits: 1 } },
-			{ loadId: "DP-1009", pickup: { note: "not-recorded" }, delivery: { day: "Fri", credits: 1 } },
+			{ loadId: "DP-1008", pickup: { note: "not-counted" }, delivery: { day: "Thu", credits: 1 } },
+			{ loadId: "DP-1009", pickup: { note: "not-counted" }, delivery: { day: "Fri", credits: 1 } },
 			{ loadId: "DP-1011", pickup: { day: "Fri", credits: 0.5 }, delivery: null },
 		], "Ada's last week: the same list");
 		// A delivery whose pickup counted in another week says so, and the list still adds up.
@@ -1083,7 +1087,14 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.countedLoad({ loadId: " DP-1 ", pickupDay: "2026-11-09", deliveryDay: "2026-11-10" }), { loadId: "DP-1", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 1 } }, "both credits, each with its day");
 		eq(p.countedLoad({ loadId: "DP-2", pickupDay: "2026-11-07", deliveryDay: "" }), { loadId: "DP-2", pickup: { day: "Sat", credits: 0.5 }, delivery: null }, "a pickup alone");
 		eq(p.countedLoad({ loadId: "DP-3", pickupDay: "", deliveryDay: "2026-11-13", pickupNote: "last-week" }), { loadId: "DP-3", pickup: { note: "last-week" }, delivery: { day: "Fri", credits: 1 } }, "a delivery whose pickup counted last week");
-		eq(p.countedLoad({ loadId: null, pickupDay: "", deliveryDay: "2026-11-08" }), { loadId: "", pickup: { note: "not-recorded" }, delivery: { day: "Sun", credits: 1 } }, "no Load ID in the cell, and no pickup on record");
+		eq(p.countedLoad({ loadId: null, pickupDay: "", deliveryDay: "2026-11-08" }), { loadId: "", pickup: { note: "not-counted" }, delivery: { day: "Sun", credits: 1 } }, "no Load ID in the cell, and no pickup that counted");
+
+		// A lowered target is flagged, on the open week only: its one line says "this week".
+		eq(week({}).targetLowered, false, "no day off: not flagged");
+		eq(week({ offDays: ["2026-11-12"] }).targetLowered, true, "an approved day off: flagged");
+		eq(week({ offDays: ["2026-11-07", "2026-11-08", "2026-11-09"] }).targetLowered, true, "at the floor too");
+		eq(week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", offDays: ["2026-11-02"] }).targetLowered, false, "a closed week is never flagged, whatever it held");
+		eq(week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", offDays: ["2026-11-02"] }).credits.target, 6, "though its own target stays its own");
 		eq(Object.keys(p.countedLoad({ loadId: "DP-4", driverName: "Casey Example", broker: "Decoy", rate: 123 })), ["loadId", "pickup", "delivery"], "exactly three keys, whatever it is handed");
 		eq(p.personalExclusion({ status: "active", ownerOperator: false }), null, "active: in");
 		eq(p.personalExclusion({ status: "Active ", ownerOperator: false }), null, "read case- and space-blind");
@@ -1235,15 +1246,66 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			const ben = await week(w, "ben");
 			eq([ben[0].credits.target, ben[0].left, ben[0].percent, ben[0].pace], [6, 3, 50, "on-track"], "Ben's approved Thursday off: 3 of 6, and 2 working days left, so On Track");
 			eq(ben[1].credits.target, 7.5, "last week's target is its own");
+			eq([ben[0].targetLowered, ben[1].targetLowered], [true, false], "the server flags his lowered target, this week only");
 			eq((await week(w, "cal"))[0].credits.target, 7.5, "a request still waiting changes nothing");
+			eq((await week(w, "cal"))[0].targetLowered, false, "and flags nothing");
 			const ada = await week(w, "ada");
 			eq([ada[0].credits.target, ada[1].credits.target], [7.5, 4.5], "days off last week lower last week only");
+			eq([ada[0].targetLowered, ada[1].targetLowered], [false, false], "and a closed week flags nothing");
 			const hal = await week(w, "hal");
-			eq([hal[0].credits.target, hal[0].pace], [4.5, null], "three days off: 4.5, and no label");
+			eq([hal[0].credits.target, hal[0].pace, hal[0].targetLowered], [4.5, null, true], "three days off: 4.5, no label, and flagged");
 			eq((await week(offFlag, "ben"))[0].credits.target, 7.5, "with availability off, its rows stay inert");
+			eq((await week(offFlag, "ben"))[0].targetLowered, false, "and flag nothing");
 		} finally {
 			await w.close();
 			await offFlag.close();
+		}
+	});
+
+	await section("25 the words the server decides", async () => {
+		// Whether his invoice pays days: the money math's own reading of his pay type.
+		const w = await makeWorld({}, { extraLoads: [
+			["DP-8013", "Ben Marsh", "Delivered", "2026-11-10 09:00"],
+			["DP-8014", "Ada Quill", "Delivered", "2026-11-10 09:00"],
+			["DP-8015", "Ben Marsh", "Delivered", "2026-11-03 09:00"],
+			["DP-8016", "Ben Marsh", "Delivered", "2026-11-10 10:00"],
+		] });
+		try {
+			const addHistory = w.db.prepare("INSERT INTO load_status_history (load_id, source, new_status, changed_at) VALUES (?, ?, 'In Transit', ?)");
+			// Older than both weeks, on a truck with no ELD (Ben) and on one with a reporting ELD (Ada).
+			addHistory.run("dp-8013", "manual", "2026-10-20 15:00:00");
+			addHistory.run("dp-8014", "manual", "2026-10-20 15:00:00");
+			addHistory.run("dp-8015", "manual", "2026-10-20 15:00:00");
+			// A dispatcher's tap, older still: the same words, whoever tapped.
+			addHistory.run("dp-8016", "override", "2026-10-12 15:00:00");
+			const answerOf = async (who) => (await w.get("/api/driver/me/performance", USERS[who])).json;
+			const eli = await answerOf("eli");
+			const ada = await answerOf("ada");
+			const ben = await answerOf("ben");
+			eq(eli.invoicePaysDays, false, "a percentage driver's invoice doesn't pay days");
+			eq([ada.invoicePaysDays, ben.invoicePaysDays], [true, true], "a day-rate driver's does");
+			for (const [stored, want, says] of [
+				["percentage", false, "percentage"], ["Percentage", false, "in another case"], ["fixed", true, "fixed"], ["", true, "blank is the day rate"],
+				[" percentage", true, "a stray space: the money math reads it as fixed, and he is paid days"],
+			]) {
+				w.db.prepare("UPDATE drivers_directory SET pay_type = ? WHERE id = 5").run(stored);
+				eq((await answerOf("eli")).invoicePaysDays, want, `pay type ${JSON.stringify(stored)}: ${says}`);
+			}
+			eq(w.fns.directoryPayStruct({ pay_type: " percentage" }).payType, "fixed", "which is the money math's own reading");
+			const routesSrc = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
+			ok(/invoicePaysDays: d\.directoryPayStruct\(viewer\.row\)\.payType !== "percentage"/.test(routesSrc), "the route asks the money math's own function, and keeps no copy of the rule");
+
+			// What became of a pickup: true whichever way it was made.
+			const rowOf = (body, i, id) => body.weeks[i].loads.find((l) => l.loadId === id);
+			eq(rowOf(ben, 0, "DP-8013"), { loadId: "DP-8013", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "an older tap on a truck with no ELD: not counted this week");
+			eq(rowOf(ada, 0, "DP-8014"), { loadId: "DP-8014", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "an older tap on a truck with an ELD: the same");
+			eq(rowOf(ben, 1, "DP-8015"), { loadId: "DP-8015", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "and on last week's list");
+			eq(rowOf(ben, 0, "DP-8016"), { loadId: "DP-8016", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "a dispatcher's older tap: the same");
+			const all = JSON.stringify([eli, ada, ben]);
+			ok(!/not-recorded/.test(all), "no answer says a pickup wasn't recorded: the server can't know that of an older tap");
+			eq(ben.weeks[0].credits.pickups, ben.weeks[0].loads.filter((l) => l.pickup.credits).length, "and the older taps add no credit: the count stays A1's");
+		} finally {
+			await w.close();
 		}
 	});
 

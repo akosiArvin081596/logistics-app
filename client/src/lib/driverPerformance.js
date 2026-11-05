@@ -15,7 +15,11 @@ export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 export const GUIDE_LINE = 'Targets are a guide, not a requirement.'
 export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
-export const NOT_PAY_LINE = 'Counts loads, not pay. Your invoice pays days.'
+// The first is true of every driver. The second only of one whose invoice pays days, and the
+// server says which he is.
+export const NOT_PAY_LINE = 'Counts loads, not pay.'
+export const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
+export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 export const NEW_WEEK_LINE = 'A new week starts Saturday.'
 export const NO_LOADS_LINE = 'Nothing has counted yet this week.'
@@ -25,11 +29,13 @@ export const FAILED_LINE = "Performance can't be shown right now. Try again in a
 
 // The three labels the server may choose. An answer holding anything else shows no label.
 export const PACE_WORDS = Object.freeze({ ahead: 'Ahead of Pace', 'on-track': 'On Track', 'needs-focus': 'Needs Focus' })
-const PICKUP_NOTES = Object.freeze({
+// "not-counted" is said of the week on screen, so it stays true however the pickup was made.
+const pickupNoteWords = (note, current) => ({
   'last-week': 'Pickup counted last week',
   'another-week': 'Pickup counted in another week',
-  'not-recorded': 'Pickup not recorded',
+  'not-counted': current ? 'Pickup not counted this week' : 'Pickup not counted last week',
 })
+const PICKUP_NOTES = Object.freeze(['last-week', 'another-week', 'not-counted'])
 
 // The two weeks a driver can open. The answer holds both, so choosing one reads nothing.
 export const OWN_PERIODS = Object.freeze([
@@ -84,16 +90,16 @@ function weekFigures(answer, periodId) {
 }
 
 // One row's words: both credits, or what became of the pickup. null when a figure can't be trusted.
-function loadView(load) {
+function loadView(load, current) {
   if (!load || typeof load !== 'object') return null
   const counted = (part) => part && typeof part.day === 'string' && isNumber(part.credits)
-  const noted = (part) => part && Object.prototype.hasOwnProperty.call(PICKUP_NOTES, part.note)
+  const noted = (part) => part && PICKUP_NOTES.includes(part.note)
   const { pickup, delivery } = load
   if (delivery && !counted(delivery)) return null
   const delivered = delivery ? `Delivered ${delivery.day} ${delivery.credits}` : ''
   let parts = delivered ? [delivered] : []
   if (counted(pickup)) parts = [`Picked up ${pickup.day} ${pickup.credits}`, ...parts]
-  else if (noted(pickup)) parts = [...parts, PICKUP_NOTES[pickup.note]]
+  else if (noted(pickup)) parts = [...parts, pickupNoteWords(pickup.note, current)[pickup.note]]
   else if (pickup) return null
   if (!parts.length) return null
   const id = typeof load.loadId === 'string' ? load.loadId : ''
@@ -108,9 +114,9 @@ export function ownWeekView(answer, periodId) {
   if (!figures || !weights || !isNumber(weights.delivery) || !isNumber(weights.pickup)) return null
   const { week, value, target, width } = figures
   if (!Array.isArray(week.loads)) return null
-  const loads = week.loads.map(loadView)
-  if (loads.includes(null)) return null
   const current = periodId === 'this-week'
+  const loads = week.loads.map((load) => loadView(load, current))
+  if (loads.includes(null)) return null
   const left = week.left
   if (current && !isNumber(left)) return null
   const reached = current && left === 0
@@ -129,6 +135,8 @@ export function ownWeekView(answer, periodId) {
     closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
     newWeek: newWeek ? NEW_WEEK_LINE : '',
     rule: `A delivered load counts ${weights.delivery}, its pickup ${weights.pickup}.`,
+    notPay: answer.invoicePaysDays === true ? NOT_PAY_DAYS_LINE : NOT_PAY_LINE,
+    lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
     title: current ? 'What counted this week' : 'What counted last week',
     empty: current ? NO_LOADS_LINE : NO_LOADS_LAST_WEEK,
     loads,
