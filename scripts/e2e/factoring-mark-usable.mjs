@@ -308,10 +308,14 @@ async function until(check, ms = 8000) {
 
 async function openTab(page, name) {
   await page.locator('[role="tab"]', { hasText: name }).first().click({ timeout: 15000 })
-  return appears(page, 'tbody tr', 10000)
+  return true
 }
+// By the load's own row: each load is in one list at a time, whichever tabs stay mounted.
 async function openLoad(page, id) {
-  await page.locator('tbody tr', { hasText: id }).first().locator('td').first().click({ timeout: 15000 })
+  const row = page.locator('tbody tr', { hasText: id }).first()
+  const listed = await row.waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+  if (!listed) return false
+  await row.locator('td').first().click({ timeout: 8000 })
   return appears(page, DIALOG, 8000)
 }
 async function closeLoad(page) {
