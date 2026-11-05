@@ -1450,7 +1450,8 @@ onUnmounted(() => {
 <style scoped>
 .driver-app {
   min-height: 100vh;
-  padding-top: calc(52px + env(safe-area-inset-top, 0px));
+  /* DriverHeader reports its real height: the fuel row makes it taller on a phone. */
+  padding-top: var(--driver-header-height, calc(52px + env(safe-area-inset-top, 0px)));
   /* Bottom buffer lives on .app-content (see comment there) — keep this
      small so the flex math at the App-shell level doesn't double-pad. */
   padding-bottom: 0;

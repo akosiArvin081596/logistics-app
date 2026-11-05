@@ -204,18 +204,28 @@ export function driverFuelStops(b) {
   return { required: true, lead: miles !== null ? `Fuel up within ${milesText(miles)} mi.` : 'Fuel up before you finish this run.' };
 }
 
+export const FUEL_RANGE_NOT_AVAILABLE = 'Fuel range: not available';
+
 /**
- * The header chip: "225 mi", "Refuel now" or "Fuel ?", its tooltip, and its
- * colour, all from the block. `kind` as in fuelTop().
+ * The header chip's sentence, on both its paths. `miles` arrives already formatted
+ * from the server's figure, so this only picks the words.
+ */
+export function fuelRangeText(miles) {
+  return `Fuel range: ${miles} ${String(miles) === '1' ? 'mile' : 'miles'} left until empty`;
+}
+
+/**
+ * The header chip: the miles in a sentence, "Refuel now" or "not available", its
+ * tooltip, and its colour, all from the block. `kind` as in fuelTop().
  */
 export function driverFuelChip(b) {
   const top = fuelTop(b);
   const sensor = top.notes.length ? ` ${top.notes.join(' ')}` : '';
   if (top.kind === 'now') return { kind: 'now', tone: 'bad', text: 'Refuel now', title: `Refuel now. ${top.sub}${sensor}` };
   if (top.kind === 'miles') {
-    return { kind: 'miles', tone: milesTone(toNum(b.milesLeft)), text: `${top.headline} mi`, title: `About ${top.headline} miles before you run out.${sensor}` };
+    return { kind: 'miles', tone: milesTone(toNum(b.milesLeft)), text: fuelRangeText(top.headline), title: `About ${top.headline} miles before you run out.${sensor}` };
   }
-  return { kind: 'unknown', tone: 'warn', text: 'Fuel ?', title: `${top.headline}. ${top.sub}` };
+  return { kind: 'unknown', tone: 'warn', text: FUEL_RANGE_NOT_AVAILABLE, title: `${top.headline}. ${top.sub}` };
 }
 
 /**

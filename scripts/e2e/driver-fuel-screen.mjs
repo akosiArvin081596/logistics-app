@@ -4,7 +4,7 @@
 //
 //   DF1   before pickup: enough to reach the pickup, add to finish; the collapsed badge "Add 65 gal"
 //   DF2   in transit, enough            DF3  refuel now             DF4  no ELD fuel reading
-//   DF5   ELD silent 18 hrs             DF6  no tank size, and the header chip "Fuel ?"
+//   DF5   ELD silent 18 hrs             DF6  no tank size, and the header chip "Fuel range: not available"
 //   DF7   load not mapped (400 NO_ROUTE)
 //   DF8a  position 3 hrs old            DF8b no position (one whole-load row)
 //   DF9   extra stops                   DF10 a run longer than a full tank
@@ -13,6 +13,12 @@
 //   DF13  pickup not on the map: the row says only "Check your gauge", the reason, the stops lead
 //   DF14  sensor dropout, 300 mi since: the block's 185 mi everywhere, never the verdict's 319
 //   DF1d, DF6d, DF12d  the same at 1280 x 800 (the block one column, at most about 520 px wide)
+//   DFC1-DFC6 the header chip on the Loads list at 390 x 844: its sentence (flag on and off), "not
+//         available", "Refuel now", a very long name. The chip is on its own row, whole and on screen;
+//         Password and Logout are on screen and take a tap; the page starts below the header
+//   DFC7  the first fuel answer held back: the header and the page don't move when it comes
+//   DFC8  a failed read: no chip and nothing invented, the buttons as ever
+//   DFC1d, DFC3d  at 1280 x 800: the chip on the same row as the buttons
 //   DFx   no page errors, no console errors, no writes
 // At 390 x 844 every step also checks: no sideways scroll, row text at least 14 px, Refresh at least 44 px.
 //
@@ -66,6 +72,7 @@ const RESULTS = path.join(WORK, `results-${OUT_TAG}.md`)
 const fuel = require(path.join(paths.REPO, 'lib', 'fuel-model.js'))
 const DRIVER_NAME = 'Driver QA'
 const DRIVER = { id: 90031, username: 'qa-fuel-driver', role: 'Driver', driverName: DRIVER_NAME, email: '', fullName: DRIVER_NAME, companyName: '', mustChangePassword: false }
+const LONG_NAME = 'Maximiliano Bartholomew-Featherstone'
 const LOAD_ID = 'QA-FUEL-1'
 const HEADERS = ['Load ID', 'Job Status', 'Driver', 'Pickup Address', 'Drop-off Address', 'Pickup Appointment', 'Drop-off Appointment']
 const R15 = { minMiles: 15, fraction: 0 }
@@ -137,9 +144,9 @@ const ROUTES = {
   recommendedIdx: 0,
 }
 
-function driverPayload(status) {
+function driverPayload(status, name = DRIVER_NAME) {
   const load = {
-    _rowIndex: 2, 'Load ID': LOAD_ID, 'Job Status': status, Driver: DRIVER_NAME,
+    _rowIndex: 2, 'Load ID': LOAD_ID, 'Job Status': status, Driver: name,
     'Pickup Address': '100 Example Rd, Riverton, TN 38118', 'Drop-off Address': '200 Sample Ave, Lakeside, TX 75201',
     'Pickup Appointment': '2026-10-30 08:00', 'Drop-off Appointment': '2026-10-31 14:00', _accepted: true, _expenseWindow: { state: 'active' },
   }
@@ -156,7 +163,7 @@ function answersFor(scene) {
   const plan = scene.planError ? { status: 400, body: { ok: false, error: 'load has no geocoded destination', code: scene.planError } } : { status: 200, body: w.plan }
   return {
     status: w.status,
-    '/api/fuel/range': { status: 200, body: w.range },
+    '/api/fuel/range': { status: 200, body: scene.rangeRefused ? { ok: false } : w.range },
     '/api/fuel/trip-plan': plan,
     '/api/poi/fuel-stops': { status: 200, body: STOPS },
   }
@@ -165,8 +172,9 @@ function answersFor(scene) {
 function answerGet(pathname, scene, answers) {
   if (answers[pathname]) return answers[pathname]
   const ok = (body) => ({ status: 200, body })
-  if (pathname === '/api/auth/session') return ok({ authenticated: true, user: DRIVER, appTimeZone: 'America/New_York' })
-  if (pathname === `/api/driver/${encodeURIComponent(DRIVER_NAME)}`) return ok(driverPayload(answers.status))
+  const name = scene.driverName || DRIVER_NAME
+  if (pathname === '/api/auth/session') return ok({ authenticated: true, user: { ...DRIVER, driverName: name, fullName: name }, appTimeZone: 'America/New_York' })
+  if (pathname === `/api/driver/${encodeURIComponent(name)}`) return ok(driverPayload(answers.status, name))
   if (pathname === '/api/config/maps-key') return ok({ key: 'qa-fuel-no-key' })
   if (pathname === '/api/locations/latest') return ok({ locations: [] })
   if (pathname === '/api/driver/position') return ok({ ok: false, reason: 'no_position' })
@@ -233,7 +241,7 @@ function record(step, title, expected, observed, ok, shot = '') {
 const flags = (o) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' ')
 const allTrue = (o) => Object.values(o).every(Boolean)
 
-async function openScene(browser, scene, viewport) {
+async function openScene(browser, scene, viewport, { openLoad = true } = {}) {
   const answers = answersFor(scene)
   const phone = viewport === PHONE
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
@@ -253,14 +261,17 @@ async function openScene(browser, scene, viewport) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     }
     const a = answerGet(url.pathname, scene, answers)
+    if (scene.rangeDelayMs && url.pathname === '/api/fuel/range') await new Promise((r) => setTimeout(r, scene.rangeDelayMs))
     return route.fulfill({ status: a.status, contentType: 'application/json', body: JSON.stringify(a.body) })
   })
   const page = await ctx.newPage()
   page.on('pageerror', (e) => pageErrors.push(String(e.message || e).slice(0, 200)))
   page.on('console', (m) => consoleLines.push({ type: m.type(), text: m.text(), url: String((m.location() && m.location().url) || '') }))
   await page.goto(`${BASE}/driver`)
-  await page.locator('.load-card').filter({ hasText: LOAD_ID }).first().click({ timeout: 30000 })
-  await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+  if (openLoad) {
+    await page.locator('.load-card').filter({ hasText: LOAD_ID }).first().click({ timeout: 30000 })
+    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+  }
   return { ctx, page }
 }
 
@@ -314,7 +325,7 @@ const SCENES = [
   { step: 'DF3', title: 'Refuel now', world: { pct: 3, leg: 'to_delivery', routeMiles: 180 }, expect: ['Refuel now', 'Stop for fuel as soon as you can.', 'Add about 60 gal.'], absent: ['Uses about 35 gal'] },
   { step: 'DF4', title: 'No ELD fuel reading', world: { hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Fuel level unknown', "Your truck isn't sending a fuel level. Check your gauge.", 'Whole load, pickup to delivery Check your gauge.', "The truck's location isn't known, so the run to the pickup can't be counted."], absent: ['gal', '280 mi'] },
   { step: 'DF5', title: 'ELD silent 18 hrs', world: { fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }, expect: ['Fuel level unknown', 'No fuel reading for 18 hrs. Check your gauge.', 'To finish this load Check your gauge.'], absent: ['gal', '420 mi'], badge: 'Fuel unknown' },
-  { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel ?' },
+  { step: 'DF6', title: 'No tank size, and the header chip', world: { burn: NO_BURN, tankSource: 'default', tank: 200 }, expect: ['Miles left unknown', "This truck's tank size isn't on file. Check your gauge and ask dispatch to add it."], chip: 'Fuel range: not available' },
   { step: 'DF7', title: 'Load not mapped', world: {}, planError: 'NO_ROUTE', expect: ['225', "This load isn't on the map yet, so we can't work out the fuel for it."] },
   { step: 'DF8a', title: 'Position 3 hrs old', world: { positionAgeMinutes: 180, leg: 'to_delivery' }, expect: ['Worked out from where your truck was 3 hrs ago.'] },
   { step: 'DF8b', title: 'No position before pickup', world: { fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }, expect: ['Whole load, pickup to delivery Check your gauge.', "The truck's location isn't known, so the run to the pickup can't be counted."], absent: ['gal', '280 mi', 'You have enough'] },
@@ -406,6 +417,134 @@ async function desktop(browser) {
   }
 }
 
+// ---------------------------------------------------------------- the header chip
+const CHIP_MILES = 'Fuel range: 225 miles left until empty'
+const CHIP_NONE = 'Fuel range: not available'
+const NO_TANK = { burn: NO_BURN, tankSource: 'default', tank: 200 }
+const CHIP_PHONE = [
+  { step: 'DFC1', title: 'Miles, flag on', world: {}, chip: CHIP_MILES, tapChip: true },
+  { step: 'DFC2', title: 'Miles, flag off: the same figure', world: { flag: false }, chip: CHIP_MILES },
+  { step: 'DFC3', title: 'No tank size, flag on', world: NO_TANK, chip: CHIP_NONE },
+  { step: 'DFC4', title: 'No ELD, flag off', world: { flag: false, hasDevice: false, fromLivePosition: false }, chip: CHIP_NONE },
+  { step: 'DFC5', title: 'Refuel now stays the instruction', world: { pct: 3 }, chip: 'Refuel now' },
+  { step: 'DFC6', title: 'A very long name', world: {}, chip: CHIP_MILES, driverName: LONG_NAME },
+  { step: 'DFC8', title: 'A failed read', world: {}, rangeRefused: true, chip: '' },
+]
+const CHIP_DESKTOP = [
+  { step: 'DFC1d', title: 'Miles', world: {}, chip: CHIP_MILES, tapChip: true },
+  { step: 'DFC3d', title: 'No tank size', world: NO_TANK, chip: CHIP_NONE },
+]
+
+function measureHeader(page) {
+  return page.evaluate(() => {
+    const header = document.querySelector('.app-header')
+    const chip = document.querySelector('.fuel-chip')
+    const buttons = [...document.querySelectorAll('.app-header .header-btn')]
+    const content = document.querySelector('.app-content')
+    const h = header.getBoundingClientRect()
+    const c = chip ? chip.getBoundingClientRect() : null
+    const onScreen = (r) => r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= h.bottom + 0.5
+    const takesTap = (el) => {
+      const r = el.getBoundingClientRect()
+      const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2)
+      return !!hit && (hit === el || el.contains(hit))
+    }
+    const buttonRow = buttons.length ? buttons[0].getBoundingClientRect() : null
+    return {
+      text: chip ? chip.textContent.replace(/\s+/g, ' ').trim() : '',
+      name: (document.querySelector('.driver-name-label') || {}).textContent || '',
+      headerPx: Math.round(h.height),
+      chipPx: c ? [Math.round(c.width), Math.round(c.height)] : null,
+      sideways: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
+      chipOnScreen: !!c && onScreen(c),
+      chipWhole: !!chip && chip.scrollWidth <= chip.clientWidth + 1 && chip.scrollHeight <= chip.clientHeight + 1,
+      chipTakesPoint: !!chip && takesTap(chip),
+      chipBelowButtons: !!c && !!buttonRow && c.top >= buttonRow.bottom - 0.5,
+      chipBesideButtons: !!c && !!buttonRow && (c.top + c.bottom) / 2 >= buttonRow.top && (c.top + c.bottom) / 2 <= buttonRow.bottom,
+      buttonsOnScreen: buttons.length === 2 && buttons.every((b) => onScreen(b.getBoundingClientRect())),
+      buttonsTakeTap: buttons.length === 2 && buttons.every(takesTap),
+      pageBelowHeader: !!content && content.getBoundingClientRect().top >= h.bottom - 1,
+      reported: getComputedStyle(document.documentElement).getPropertyValue('--driver-header-height').trim(),
+      offsetPx: header.offsetHeight,
+    }
+  })
+}
+
+async function chipScene(browser, sc, viewport) {
+  const phone = viewport === PHONE
+  const size = `${viewport.width} x ${viewport.height}`
+  const { ctx, page } = await openScene(browser, sc, viewport, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    if (sc.chip) await page.locator('.fuel-chip').waitFor({ state: 'visible', timeout: 15000 })
+    else await page.waitForTimeout(1000)
+    const m = await measureHeader(page)
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-${viewport.width}x${viewport.height}.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    const checks = {
+      sentence: sc.chip ? m.text === `⛽ ${sc.chip}` : m.text === '',
+      ...(sc.chip ? {
+        chipOnScreen: m.chipOnScreen, chipWhole: m.chipWhole, chipTakesPoint: m.chipTakesPoint,
+        ...(phone ? { ownRow: m.chipBelowButtons } : { sameRow: m.chipBesideButtons }),
+      } : {}),
+      ...(sc.driverName ? { name: m.name === sc.driverName } : {}),
+      buttonsOnScreen: m.buttonsOnScreen,
+      buttonsTakeTap: m.buttonsTakeTap,
+      pageBelowHeader: m.pageBelowHeader,
+      heightReported: m.reported === `${m.offsetPx}px`,
+      noSideways: m.sideways <= 0,
+    }
+    if (sc.tapChip) {
+      const url = page.url()
+      const writesBefore = writes.length
+      await page.locator('.fuel-chip').click()
+      await page.waitForTimeout(400)
+      checks.tapDoesNothing = page.url() === url && writes.length === writesBefore
+        && (await page.locator('.load-detail, .pw-overlay, .driver-fuel').count()) === 0
+    }
+    record(sc.step, `Header chip: ${sc.title} at ${size}`,
+      `${sc.chip ? `"${sc.chip}"` : 'no chip'}; whole and on screen; ${phone ? 'its own row' : 'the buttons\' row'}; Password and Logout take a tap; the page starts below the header; no sideways scroll`,
+      `${flags(checks)}; "${m.text}"; header ${m.headerPx}px; chip ${m.chipPx ? m.chipPx.join(' x ') : 'none'}`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+// The answer is held back long enough to read the header without it, then with it.
+async function chipRowHeld(browser) {
+  const { ctx, page } = await openScene(browser, { world: {}, rangeDelayMs: 4000 }, PHONE, { openLoad: false })
+  try {
+    await page.locator('.app-header').waitFor({ state: 'visible', timeout: 15000 })
+    const read = () => page.evaluate(() => ({
+      chip: !!document.querySelector('.fuel-chip'),
+      header: document.querySelector('.app-header').getBoundingClientRect().height,
+      top: document.querySelector('.app-content').getBoundingClientRect().top,
+    }))
+    const before = await read()
+    await page.locator('.fuel-chip').waitFor({ state: 'visible', timeout: 15000 })
+    const after = await read()
+    const checks = {
+      noChipYet: !before.chip,
+      headerStill: Math.abs(before.header - after.header) < 1,
+      pageStill: Math.abs(before.top - after.top) < 1,
+    }
+    record('DFC7', 'Header chip: the first answer arrives at 390 x 844', 'the header and the page stay where they were',
+      `${flags(checks)}; header ${before.header} to ${after.header}; page top ${before.top} to ${after.top}`, allTrue(checks))
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function chipSteps(browser) {
+  for (const sc of CHIP_PHONE) {
+    try { await chipScene(browser, sc, PHONE) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+  try { await chipRowHeld(browser) } catch (e) { record('DFC7', 'The first answer arrives: aborted', '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  for (const sc of CHIP_DESKTOP) {
+    try { await chipScene(browser, sc, DESKTOP) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+}
+
 async function main() {
   if (await portInUse(PORT)) die(`port ${PORT} is in use`)
   const server = http.createServer(serveDist)
@@ -416,7 +555,7 @@ async function main() {
     for (const sc of SCENES) {
       try { await phoneScene(browser, sc) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop]]) {
+    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
     // DF7's trip plan answers 400 on purpose; the browser logs that one line.
