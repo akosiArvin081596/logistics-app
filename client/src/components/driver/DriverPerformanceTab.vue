@@ -43,12 +43,9 @@
       <p class="perf-note" data-testid="perf-drive-hours">{{ DRIVE_HOURS_LINE }}</p>
       <p class="perf-note" data-testid="perf-target">{{ TARGET_LINE }}</p>
       <p v-if="week.lowered" class="perf-note" data-testid="perf-lowered">{{ week.lowered }}</p>
-      <p class="perf-note" data-testid="perf-guide">{{ GUIDE_LINE }}</p>
+      <p class="perf-note" data-testid="perf-requirement">{{ REQUIREMENT_LINE }}</p>
       <p class="perf-note" data-testid="perf-private">{{ PRIVATE_LINE }}</p>
     </template>
-
-    <!-- Fixed: no close control, and outside every condition above, whatever has loaded. -->
-    <p class="perf-hos" role="note" data-testid="perf-hos">{{ HOS_LINE }}</p>
   </div>
 </template>
 
@@ -59,7 +56,7 @@ import { computed, onUnmounted, ref } from 'vue'
 import { Tabs as VanTabs, Tab as VanTab } from 'vant'
 import { useApi } from '../../composables/useApi'
 import {
-  DRIVE_HOURS_LINE, FAILED_LINE, GUIDE_LINE, HOS_LINE, OWN_PERIODS, OWN_URL, PRIVATE_LINE, TARGET_LINE, TELL_DISPATCH_LINE,
+  DRIVE_HOURS_LINE, FAILED_LINE, OWN_PERIODS, OWN_URL, PRIVATE_LINE, REQUIREMENT_LINE, TARGET_LINE, TELL_DISPATCH_LINE,
   isGoneAnswer, ownWeekView,
 } from '../../lib/driverPerformance'
 
@@ -216,15 +213,5 @@ load()
   font-size: 0.85rem;
   font-weight: 700;
   cursor: pointer;
-}
-.perf-hos {
-  margin: 0;
-  padding: 0.75rem;
-  border-left: 3px solid #0369a1;
-  border-radius: 8px;
-  background: var(--accent-dim);
-  font-size: 0.82rem;
-  line-height: 1.5;
-  color: var(--text);
 }
 </style>

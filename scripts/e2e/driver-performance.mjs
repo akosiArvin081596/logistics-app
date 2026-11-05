@@ -3,7 +3,7 @@
 //
 // As a made-up Driver ("Casey Example"), at 390x844 and 1280x800:
 //   B   the bar on the Loads list, above the load list: "This week: 3.5 of 7.5 loads", On Track, the
-//       server's percent as its fill, "Hours of service come first."; 44 px or more; no sideways
+//       server's percent as its fill; no hours-of-service line; 44 px or more; no sideways
 //       scroll; the board never read
 //   E   the same bar at the top of a load's own page, the same answer, with its status and POD
 //       sections below it as they were; tapping it there opens the tab too
@@ -12,14 +12,14 @@
 //       read and the good one after it; the kill switch going off keeps the place until he moves
 //   T   tapping it opens the Performance tab; the sixth tab fits the nav and is 44 px or more
 //   W   this week: the count, the label, what's left, the closing line, how it counts, each row
-//       with both credits, "tell dispatch", drive hours coming soon, the target, the guide, "No
-//       other driver can see this." and the full hours-of-service line; no name, rank, unit, "You",
+//       with both credits, "tell dispatch", drive hours coming soon, the target, "Target is a
+//       requirement." and "No other driver can see this."; no hours-of-service line; no name, rank, unit, "You",
 //       month, tile, hours figure or dollars
 //   L   last week: its final figure and list, no label, nothing left; no new read
 //   R   read only: the page sent no write while the tab was in use, and never read the board
 //   D   decoys: answers that wrongly carry names, another driver's figures, a rank, a unit, pay, a
 //       broker, a rate, hours and a tier show none of them
-//   F   his week fails (503) on the tab: the line, Try again and the hours-of-service line show;
+//   F   his week fails (503) on the tab: the line and Try again show;
 //       Try again brings it back
 //   H   a read that fails after a good one hides the bar, so no old number stays; the tab stays; the
 //       next good read brings the bar back
@@ -34,8 +34,8 @@
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
 //   U   the check fails (503): no tab, no bar; a phone coming back to the app asks again, and both show
 // And a made-up Super Admin on /driver at 1280x800:
-//   A   the tab and the office board as they were, no bar, no My week, no "You", his own-week route
-//       never read
+//   A   the tab and the office board, no bar, no My week, no "You", no hours-of-service line, his
+//       own-week route never read
 //
 // Like time-off-chr-draft.mjs this boots no server.js, opens no database, reads no settings file
 // or key and signs nobody in. It serves the checkout's built client/dist from its own static
@@ -86,10 +86,8 @@ if (process.env.SHOT_DIR && !path.isAbsolute(process.env.SHOT_DIR)) die('SHOT_DI
 }
 
 // ---------------------------------------------------------------- the words the screen must say
-const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
-const HOS_SHORT_LINE = 'Hours of service come first.'
 const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-const GUIDE_LINE = 'Targets are a guide, not a requirement.'
+const REQUIREMENT_LINE = 'Target is a requirement.'
 const PRIVATE_LINE = 'No other driver can see this.'
 const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
@@ -102,7 +100,7 @@ const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
 const ALL_TABS = [...BASE_TABS, 'Performance']
 const TILES = ['Most loads', 'Least fuel cost', 'Safety', 'Lowest idle']
 // None of these may ever be on a driver's screen.
-const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days']
+const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days', 'Hours of service', 'hours of service', 'Never drive past', 'a guide']
 
 // ---------------------------------------------------------------- made-up fixtures
 const DRIVER = { id: 90321, username: 'qa-performance-driver', role: 'Driver', driverName: 'Casey Example', email: '', fullName: 'Casey Example', companyName: '', mustChangePassword: false }
@@ -402,8 +400,7 @@ async function fullRun(browser, size) {
     const shown = await appears(page, testid('perf-bar'), 8000)
     const barText = await text(page, testid('perf-bar-text'))
     const barPace = await text(page, testid('perf-bar-pace'))
-    const barHos = await text(page, testid('perf-bar-hos'))
-    const fill = await page.locator(testid('perf-bar-fill')).first().evaluate((el) => el.style.width).catch(() => '')
+    const fill =await page.locator(testid('perf-bar-fill')).first().evaluate((el) => el.style.width).catch(() => '')
     const barHeight = await heights(page, testid('perf-bar'))
     const above = await page.evaluate(() => {
       const bar = document.querySelector('[data-testid="perf-bar"]')
@@ -413,9 +410,9 @@ async function fullRun(browser, size) {
     const barFits = await noSideScroll(page)
     const loadsBody = squeeze(await page.locator('body').innerText())
     record(`B-${t}`, 'The bar on the Loads list',
-      `"This week: 3.5 of 7.5 loads"; "On Track"; fill 46%; "${HOS_SHORT_LINE}"; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
-      `text "${barText}", pace "${barPace}", fill ${fill}, hos "${barHos}", height ${JSON.stringify(barHeight)}, above ${above}, fits ${barFits}, board reads ${state.calls.week + state.calls.month}, banned ${JSON.stringify(banned(loadsBody))}`,
-      shown && barText === 'This week: 3.5 of 7.5 loads' && barPace === 'On Track' && fill === '46%' && barHos === HOS_SHORT_LINE && tall(barHeight) && above && barFits
+      `"This week: 3.5 of 7.5 loads"; "On Track"; fill 46%; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
+      `text "${barText}", pace "${barPace}", fill ${fill}, height ${JSON.stringify(barHeight)}, above ${above}, fits ${barFits}, board reads ${state.calls.week + state.calls.month}, banned ${JSON.stringify(banned(loadsBody))}`,
+      shown && barText === 'This week: 3.5 of 7.5 loads' && barPace === 'On Track' && fill === '46%' && tall(barHeight) && above && barFits
         && state.calls.week + state.calls.month === 0 && banned(loadsBody).length === 0,
       await shot(page, `B-${t}`))
     if (!shown) return
@@ -445,24 +442,22 @@ async function fullRun(browser, size) {
     const tell = await text(page, testid('perf-tell-dispatch'))
     const hours = await text(page, testid('perf-drive-hours'))
     const target = await text(page, testid('perf-target'))
-    const guide = await text(page, testid('perf-guide'))
+    const requirement = await text(page, testid('perf-requirement'))
     const isPrivate = await text(page, testid('perf-private'))
     const lowered = await page.locator(testid('perf-lowered')).count()
     const choiceHeights = await heights(page, '.perf-periods .van-tab')
     const choiceLabels = await allText(page.locator('.perf-periods .van-tab'))
     const weekWide = await page.locator(testid('perf-fill')).first().evaluate((el) => el.style.width).catch(() => '')
-    await page.locator(testid('perf-hos')).scrollIntoViewIfNeeded().catch(() => {})
-    const hos = await text(page, testid('perf-hos'))
-    const hosSeen = await page.locator(testid('perf-hos')).isVisible().catch(() => false)
+    const hosLines = await page.locator(testid('perf-hos')).count()
     const panel = squeeze(await text(page, testid('perf-panel')))
     const fits = await noSideScroll(page)
     const hidden = banned(panel).concat(['Casey Example', 'You'].filter((w) => new RegExp(`\\b${w}\\b`).test(panel)))
     record(`W-${t}`, 'This week: only his own figures',
-      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
-      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
+      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${REQUIREMENT_LINE}"; "${PRIVATE_LINE}"; no hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
+      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, requirement "${requirement}", private "${isPrivate}", hours-of-service lines ${hosLines}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
       count === '3.5 of 7.5 loads' && pace === 'On Track' && weekWide === '46%' && left === '4 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
-        && rule === RULE_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
-        && hos === HOS_LINE && hosSeen && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
+        && rule === RULE_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && requirement === REQUIREMENT_LINE && isPrivate === PRIVATE_LINE
+        && hosLines === 0 && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
       await shot(page, `W-${t}`))
 
     const ownReads = state.calls.own
@@ -474,12 +469,11 @@ async function fullRun(browser, size) {
     const lastPace = await page.locator(testid('perf-pace')).count()
     const lastLeft = await page.locator(testid('perf-left')).count()
     const lastCloses = await page.locator(testid('perf-closes')).count()
-    const lastHos = await text(page, testid('perf-hos'))
     record(`L-${t}`, 'Last week: its final figure and list, no label',
-      `"7.5 of 7.5 loads"; range "${rangeText(LAST_START, LAST_END)}"; "What counted last week"; rows ${JSON.stringify(LAST_LINES)}; no label, no left line, no closing line; no new read; the hours-of-service line stays`,
-      `count "${lastCount}", range "${lastRange}", title "${lastTitle}", rows ${JSON.stringify(lastGot)}, label ${lastPace}, left ${lastLeft}, closes ${lastCloses}, reads ${ownReads} then ${state.calls.own}, hos ${lastHos === HOS_LINE}`,
+      `"7.5 of 7.5 loads"; range "${rangeText(LAST_START, LAST_END)}"; "What counted last week"; rows ${JSON.stringify(LAST_LINES)}; no label, no left line, no closing line; no new read`,
+      `count "${lastCount}", range "${lastRange}", title "${lastTitle}", rows ${JSON.stringify(lastGot)}, label ${lastPace}, left ${lastLeft}, closes ${lastCloses}, reads ${ownReads} then ${state.calls.own}`,
       lastCount === '7.5 of 7.5 loads' && lastRange === rangeText(LAST_START, LAST_END) && lastTitle === 'What counted last week' && sameList(lastGot, LAST_LINES)
-        && lastPace === 0 && lastLeft === 0 && lastCloses === 0 && state.calls.own === ownReads && lastHos === HOS_LINE,
+        && lastPace === 0 && lastLeft === 0 && lastCloses === 0 && state.calls.own === ownReads,
       await shot(page, `L-${t}`))
 
     await choose(page, size, 'This week')
@@ -508,7 +502,6 @@ async function loadPageRun(browser, size) {
     const barAfter = await appears(page, testid('perf-bar'), 8000)
     const loadBar = await text(page, testid('perf-bar-text'))
     const loadPace = await text(page, testid('perf-bar-pace'))
-    const loadHos = await text(page, testid('perf-bar-hos'))
     const bars = await barCount(page)
     const order = await page.evaluate(() => {
       const top = (selector) => { const el = document.querySelector(selector); return el ? el.getBoundingClientRect().top : null }
@@ -526,9 +519,9 @@ async function loadPageRun(browser, size) {
       opens = await appears(page, testid('perf-tab'), 8000)
     }
     record(`E-${t}`, 'The same bar at the top of a load\'s own page',
-      `the bar on the list, then one bar on the load's page with the same figure and label and the short line; above the page, above its status buttons; "Update Status" and "Documents" still on the page; no side scroll; tapping it opens the tab`,
-      `list "${listBar}", load page ${onLoad}, bar "${loadBar}" "${loadPace}" "${loadHos}", bars ${bars}, order ${JSON.stringify(order)}, sections ${JSON.stringify(sections)}, fits ${fits}, opens ${opens}`,
-      onList && onLoad && barAfter && loadBar === listBar && loadBar === 'This week: 3.5 of 7.5 loads' && loadPace === 'On Track' && loadHos === HOS_SHORT_LINE && bars === 1
+      `the bar on the list, then one bar on the load's page with the same figure and label; above the page, above its status buttons; "Update Status" and "Documents" still on the page; no side scroll; tapping it opens the tab`,
+      `list "${listBar}", load page ${onLoad}, bar "${loadBar}" "${loadPace}", bars ${bars}, order ${JSON.stringify(order)}, sections ${JSON.stringify(sections)}, fits ${fits}, opens ${opens}`,
+      onList && onLoad && barAfter && loadBar === listBar && loadBar === 'This week: 3.5 of 7.5 loads' && loadPace === 'On Track' && bars === 1
         && above && named('Update Status') && named('Documents') && fits && opens,
       loadShot)
   } finally {
@@ -646,17 +639,16 @@ async function failedWeekRun(browser, size) {
     const shown = opened && await appears(page, testid('perf-failed'), 8000)
     const line = shown ? await text(page, `${testid('perf-failed')} .perf-note`) : ''
     const retryHeight = await heights(page, testid('perf-retry'))
-    const hos = await text(page, testid('perf-hos'))
     const figure = await page.locator(testid('perf-count')).count()
     const failShot = await shot(page, `F-failed-${t}`)
     state.own = 200
     if (shown) await press(page.locator(testid('perf-retry')).first(), size)
     const got = shown ? await waitForLoads(page, THIS_LINES) : []
     const stillThere = await page.locator(testid('perf-failed')).count()
-    record(`F-${t}`, 'His week fails: the line, Try again, and the hours-of-service line; Try again brings it back',
-      `"${FAILED_LINE}"; Try again 44 px or more; the hours-of-service line; no figure; after Try again the rows and no failure line`,
-      `line "${line}", retry ${JSON.stringify(retryHeight)}, hos ${hos === HOS_LINE}, figures ${figure}, rows ${JSON.stringify(got)}, failure line left ${stillThere}`,
-      shown && line === FAILED_LINE && tall(retryHeight) && hos === HOS_LINE && figure === 0 && sameList(got, THIS_LINES) && stillThere === 0,
+    record(`F-${t}`, 'His week fails: the line and Try again; Try again brings it back',
+      `"${FAILED_LINE}"; Try again 44 px or more; no figure; after Try again the rows and no failure line`,
+      `line "${line}", retry ${JSON.stringify(retryHeight)}, figures ${figure}, rows ${JSON.stringify(got)}, failure line left ${stillThere}`,
+      shown && line === FAILED_LINE && tall(retryHeight) && figure === 0 && sameList(got, THIS_LINES) && stillThere === 0,
       failShot)
   } finally {
     await ctx.close()
@@ -841,7 +833,7 @@ async function nothingNewRun(browser, size, step, refusal, title) {
     const labels = await tabLabels(page)
     const body = squeeze(await page.locator('body').innerText())
     const bars = await barCount(page)
-    const words = ['Performance', 'This week:', 'Most loads', 'Not eligible', 'NOT_ELIGIBLE', 'FEATURE_OFF', HOS_LINE, HOS_SHORT_LINE].filter((w) => body.includes(w))
+    const words = ['Performance', 'This week:', 'Most loads', 'Not eligible', 'NOT_ELIGIBLE', 'FEATURE_OFF', 'Hours of service', 'Never drive past'].filter((w) => body.includes(w))
     const stepShot = await shot(page, `${step}-${t}`)
     await press(page.locator('.van-tabbar-item', { hasText: 'Alerts' }).first(), size)
     await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
@@ -909,13 +901,13 @@ async function adminRun(browser, size) {
     const closes = await text(page, testid('perf-closes'))
     const myWeek = await page.locator(testid('perf-week')).count()
     const you = await page.locator(testid('perf-you')).count()
-    const hos = await text(page, testid('perf-hos'))
+    const hosLines = await page.locator(testid('perf-hos')).count()
     const adminShot = await shot(page, `A-${t}`)
     await choose(page, size, 'This month')
     const monthGot = opened ? await waitForRows(page, expectedRows(MONTH_ROWS)) : []
-    record(`A-${t}`, 'A Super Admin on /driver: the office board as it was', `no bar; rows with no "You"; the four tiles; "${WEEK_CLOSES}"; This month its own rows; no My week; his own-week route never read; the hours-of-service line`,
-      `bars ${bars}, rows ${JSON.stringify(got)}, tiles ${JSON.stringify(titles)}, closes "${closes}", month ${JSON.stringify(monthGot)}, My week ${myWeek}, you ${you}, own reads ${state.calls.own}, hos ${hos === HOS_LINE}`,
-      opened && bars === 0 && sameList(got, want) && sameList(titles, TILES) && closes === WEEK_CLOSES && sameList(monthGot, expectedRows(MONTH_ROWS)) && myWeek === 0 && you === 0 && state.calls.own === 0 && hos === HOS_LINE,
+    record(`A-${t}`, 'A Super Admin on /driver: the office board', `no bar; rows with no "You"; the four tiles; "${WEEK_CLOSES}"; This month its own rows; no My week; his own-week route never read; no hours-of-service line`,
+      `bars ${bars}, rows ${JSON.stringify(got)}, tiles ${JSON.stringify(titles)}, closes "${closes}", month ${JSON.stringify(monthGot)}, My week ${myWeek}, you ${you}, own reads ${state.calls.own}, hours-of-service lines ${hosLines}`,
+      opened && bars === 0 && sameList(got, want) && sameList(titles, TILES) && closes === WEEK_CLOSES && sameList(monthGot, expectedRows(MONTH_ROWS)) && myWeek === 0 && you === 0 && state.calls.own === 0 && hosLines === 0,
       adminShot)
   } finally {
     await ctx.close()

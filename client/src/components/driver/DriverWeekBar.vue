@@ -12,7 +12,6 @@
       <span class="week-bar-track" aria-hidden="true">
         <span class="week-bar-fill" data-testid="perf-bar-fill" :style="{ width: bar.width }"></span>
       </span>
-      <span class="week-bar-hos" data-testid="perf-bar-hos">{{ bar.hos }}</span>
     </button>
   </div>
 </template>
@@ -93,10 +92,6 @@ const emit = defineEmits(['open'])
   height: 100%;
   border-radius: 999px;
   background: #0369a1;
-}
-.week-bar-hos {
-  font-size: 0.72rem;
-  color: var(--text-dim);
 }
 /* The narrowest phones still fit the figure and the label on one row. */
 @media (max-width: 359px) {

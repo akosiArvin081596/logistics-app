@@ -32,9 +32,6 @@
         <p v-else-if="!tile.comingSoon" class="perf-note" data-testid="perf-empty">{{ EMPTY_LINE }}</p>
       </section>
     </template>
-
-    <!-- Fixed: no close control, and outside every condition above, whatever has loaded. -->
-    <p class="perf-hos" role="note" data-testid="perf-hos">{{ HOS_LINE }}</p>
   </div>
 </template>
 
@@ -46,7 +43,7 @@ import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { Tabs as VanTabs, Tab as VanTab, Tag as VanTag } from 'vant'
 import { useApi } from '../../composables/useApi'
 import {
-  COMING_SOON, EMPTY_LINE, FAILED_LINE, HOS_LINE, PERIODS, YOU,
+  COMING_SOON, EMPTY_LINE, FAILED_LINE, PERIODS, YOU,
   boardUrl, boardView, isGoneAnswer, periodKind,
 } from '../../lib/driverPerformance'
 
@@ -190,15 +187,5 @@ loadBoard(kind.value)
   font-size: 0.85rem;
   font-weight: 700;
   cursor: pointer;
-}
-.perf-hos {
-  margin: 0;
-  padding: 0.75rem;
-  border-left: 3px solid #0369a1;
-  border-radius: 8px;
-  background: var(--accent-dim);
-  font-size: 0.82rem;
-  line-height: 1.5;
-  color: var(--text);
 }
 </style>

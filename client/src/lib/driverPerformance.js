@@ -9,10 +9,8 @@ import { availabilityRangeText } from './availabilityText.js'
 export const OWN_URL = '/api/driver/me/performance'
 export const BOARD_URL = '/api/driver/performance/leaderboard'
 
-export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
-export const HOS_SHORT_LINE = 'Hours of service come first.'
 export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-export const GUIDE_LINE = 'Targets are a guide, not a requirement.'
+export const REQUIREMENT_LINE = 'Target is a requirement.'
 export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
@@ -147,7 +145,6 @@ export function weekBarView(answer) {
     pace: figures.paceId ? PACE_WORDS[figures.paceId] : '',
     paceId: figures.paceId,
     width: figures.width,
-    hos: HOS_SHORT_LINE,
   }
 }
 

@@ -16,7 +16,7 @@
 //   §9  BottomNav.vue: the five tabs as they were, Performance only with its prop, no trophy
 //   §10 DriverView.vue: the bar on the Loads list, the panel behind the answer, the read's rules
 //   §11 DriverPerformanceTab.vue: his own week; never names the board; reads, never writes or
-//       stores; computes nothing; the hours-of-service line outside every condition
+//       stores; computes nothing; no hours-of-service line
 //   §12 DriverWeekBar.vue: its words, a 44 px tap, no read, no motion, no red
 //   §13 DriverPerformanceBoard.vue: the office board, its reads and rows as they were
 //   §14 the real server rules through the real views, on made-up loads
@@ -111,11 +111,11 @@ const showsDecoy = (json) => DECOY_MARKS.filter((mark) => has(json, mark))
 
 // ── §1 the words ─────────────────────────────────────────────────────────────
 console.log('§1 the fixed words')
-eq('§1 the hours-of-service line', v.HOS_LINE,
-  'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.')
-eq('§1 the bar\'s short line', v.HOS_SHORT_LINE, 'Hours of service come first.')
+eq('§1 no hours-of-service line is left', [v.HOS_LINE, v.HOS_SHORT_LINE], [undefined, undefined])
+eq('§1 nor its words, in the lib or on any of these screens', [libSrc, card, bar, board].filter((src) => /hours of service|hours-of-service|never drive past|\bHOS_|perf-hos|perf-bar-hos/i.test(src)).length, 0)
 eq('§1 the target line, exact', v.TARGET_LINE, 'Target: 7.5 loads a week (1.5 a day over 5 days)')
-eq('§1 the guide line', v.GUIDE_LINE, 'Targets are a guide, not a requirement.')
+eq('§1 the requirement line, exact', v.REQUIREMENT_LINE, 'Target is a requirement.')
+eq('§1 the old guide line is gone', v.GUIDE_LINE, undefined)
 eq('§1 the privacy line, exact', v.PRIVATE_LINE, 'No other driver can see this.')
 eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
 eq('§1 neither line about pay is left', [v.NOT_PAY_LINE, v.NOT_PAY_DAYS_LINE], [undefined, undefined])
@@ -130,7 +130,7 @@ eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.HOS_SHORT_LINE, v.TARGET_LINE, v.LOWER_TARGET_LINE, v.GUIDE_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, v.NEW_WEEK_LINE, v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, v.REQUIREMENT_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, v.NEW_WEEK_LINE, v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -319,12 +319,12 @@ eq('§6 no weights, no card', ownWeekView({ weeks: both.weeks }, 'this-week'), n
 // ── §7 the bar ───────────────────────────────────────────────────────────────
 console.log('§7 weekBarView() and weekFromAnswer()')
 const weekBarView = fn('weekBarView')
-eq('§7 the bar\'s words', weekBarView(both), { text: 'This week: 4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%', hos: 'Hours of service come first.' })
+eq('§7 the bar\'s words', weekBarView(both), { text: 'This week: 4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%' })
 eq('§7 no label, none on the bar', weekBarView(answerOf(week('this-week', { pace: null })))?.pace, '')
 eq('§7 always this week, whichever order they come in', weekBarView(answerOf(week('last-week', { credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 } }), week('this-week')))?.text, 'This week: 4.5 of 7.5 loads')
 eq('§7 a lower target reads as its own figure', weekBarView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, percent: 50 })))?.text, 'This week: 3 of 6 loads')
 eq('§7 no decoy reaches the bar', showsDecoy(weekBarView(decoyAnswer)), [])
-eq('§7 exactly five fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width', 'hos'])
+eq('§7 exactly four fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width'])
 for (const [says, over] of Object.entries(broken)) eq(`§7 ${says}: no bar, never a wrong number`, weekBarView(answerOf(week('this-week', over))), null)
 eq('§7 no answer, no bar', [weekBarView(null), weekBarView({}), weekBarView({ weeks: [] }), weekBarView(answerOf(week('last-week')))], [null, null, null, null])
 const weekFromAnswer = fn('weekFromAnswer')
@@ -411,7 +411,7 @@ const cardTemplate = templateOf(card)
 const cardScript = scriptOf(card)
 const printed = [...cardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]).sort()
 eq('§11 it prints only these, so a name or a figure can\'t be added by accident', [...new Set(printed)], [
-  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'GUIDE_LINE', 'HOS_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
+  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'PRIVATE_LINE', 'REQUIREMENT_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
   'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.rule', 'week.title',
 ].sort())
 eq('§11 no line about pay on the tab', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|notPay|perf-not-pay|invoice pays/.test(card), false)
@@ -430,12 +430,9 @@ eq('§11 the lib computes nothing', ARITHMETIC.test(codeOf(libSrc)), false)
 eq('§11 the card computes nothing', ARITHMETIC.test(codeOf(cardScript)), false)
 eq('§11 the template computes nothing', [...cardTemplate.matchAll(/\{\{([^}]*)\}\}/g)].filter((m) => /[*/%+-]/.test(m[1])).length, 0)
 eq('§11 the fill is the server\'s percent', /:style="\{ width: week\.width \}"/.test(cardTemplate), true)
-const hosChain = chainTo(cardTemplate, 'data-testid="perf-hos"')
-eq('§11 the hours-of-service line is on the screen', !!hosChain, true)
-eq('§11 it prints the fixed words', /data-testid="perf-hos">\{\{ HOS_LINE \}\}<\/p>/.test(cardTemplate), true)
-eq('§11 outside every condition, its own included, so it shows whatever has loaded', (hosChain || []).filter((attrs) => /\bv-(if|else|else-if|show)\b/.test(attrs)).length, 0)
-eq('§11 it can\'t be closed', /closeable|dismiss|\bclose\b/i.test(cardTemplate), false)
-eq('§11 the target, the guide line, drive hours and the privacy line sit together', [cardTemplate.includes('{{ TARGET_LINE }}'), cardTemplate.includes('{{ GUIDE_LINE }}'), cardTemplate.includes('{{ DRIVE_HOURS_LINE }}'), cardTemplate.includes('{{ PRIVATE_LINE }}')], [true, true, true, true])
+eq('§11 no hours-of-service line on the tab', chainTo(cardTemplate, 'data-testid="perf-hos"'), null)
+eq('§11 the target, the requirement line, drive hours and the privacy line sit together', [cardTemplate.includes('{{ TARGET_LINE }}'), cardTemplate.includes('{{ REQUIREMENT_LINE }}'), cardTemplate.includes('{{ DRIVE_HOURS_LINE }}'), cardTemplate.includes('{{ PRIVATE_LINE }}')], [true, true, true, true])
+eq('§11 the requirement line has its own place, right after the lowered-target line', /\{\{ week\.lowered \}\}<\/p>\s*<p class="perf-note" data-testid="perf-requirement">\{\{ REQUIREMENT_LINE \}\}<\/p>/.test(cardTemplate), true)
 eq('§11 the label only when the view has one', /v-if="week\.pace"/.test(cardTemplate), true)
 eq('§11 This week and Last week, both', /<van-tab v-for="period in OWN_PERIODS" /.test(cardTemplate), true)
 eq('§11 the toggle is 44 px', /--van-tabs-line-height: 44px/.test(styleOf(card)), true)
@@ -447,7 +444,7 @@ eq('§11 the server\'s "gone" hides the tab', cardScript.includes("if (isGoneAns
 console.log('§12 DriverWeekBar.vue')
 const barTemplate = templateOf(bar)
 const barScript = scriptOf(bar)
-eq('§12 it prints only the view\'s words', [...new Set([...barTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), ['bar.hos', 'bar.pace', 'bar.text'])
+eq('§12 it prints only the view\'s words', [...new Set([...barTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), ['bar.pace', 'bar.text'])
 eq('§12 it is given its view, or none, and reads nothing', [/bar: \{ type: Object, default: null \}/.test(barScript), /useApi|fetch\(|axios|XMLHttpRequest/.test(bar)], [true, false])
 // The slot holds a fixed height whatever is in it, so the bar appearing or going moves nothing.
 const slotRule = (styleOf(bar).match(/\.week-bar-slot \{([^}]*)\}/) || [])[1] || ''
@@ -459,7 +456,7 @@ eq('§12 its top row never wraps, so a label coming or going can\'t change its h
 eq('§12 tapping it asks to open the tab', /@click="emit\('open'\)"/.test(barTemplate) && /defineEmits\(\['open'\]\)/.test(barScript), true)
 eq('§12 a real button, 44 px or more', [/<button v-if="bar" type="button"/.test(barTemplate), /\.week-bar \{[^}]*min-height: 44px/.test(styleOf(bar))], [true, true])
 eq('§12 the fill is the server\'s percent', /:style="\{ width: bar\.width \}"/.test(barTemplate), true)
-eq('§12 the short hours-of-service line is on it', barTemplate.includes('{{ bar.hos }}'), true)
+eq('§12 no hours-of-service line on it', /bar\.hos|week-bar-hos/.test(bar), false)
 eq('§12 the label only when the view has one', /v-if="bar\.pace"/.test(barTemplate), true)
 eq('§12 no motion, nudge or countdown', /transition|animation|@keyframes|setTimeout|setInterval|requestAnimationFrame|countdown|\bpulse\b/i.test(bar), false)
 eq('§12 no store, name or storage', /useDriverStore|useAuthStore|driverName|localStorage|sessionStorage/.test(bar), false)
@@ -470,8 +467,8 @@ eq('§12 it computes nothing', [ARITHMETIC.test(codeOf(barScript)), [...barTempl
 console.log('§13 DriverPerformanceBoard.vue')
 const boardTemplate = templateOf(board)
 const boardScript = scriptOf(board)
-eq('§13 it prints only what it always did', [...new Set([...boardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), [
-  'COMING_SOON', 'EMPTY_LINE', 'FAILED_LINE', 'HOS_LINE', 'YOU',
+eq('§13 it prints only these',[...new Set([...boardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), [
+  'COMING_SOON', 'EMPTY_LINE', 'FAILED_LINE', 'YOU',
   'board.closes', 'board.range', 'row.figure', 'row.rank', 'row.unit', 'tile.line', 'tile.title',
 ].sort())
 eq('§13 no own week on it', /ownWeekView|OWN_URL|showMyWeek|week\./.test(board), false)
@@ -479,8 +476,7 @@ eq('§13 a period is read once, when first chosen', boardScript.includes("if (bo
 eq('§13 the views come from the lib', boardScript.includes('boardView(boards[kind.value].answer, periodId.value)'), true)
 eq('§13 read only, nothing stored', [/api\.(post|put|patch|del|request)\b|method:/.test(boardScript), /localStorage|sessionStorage/.test(board)], [false, false])
 eq('§13 it computes nothing', ARITHMETIC.test(codeOf(boardScript)), false)
-const boardHos = chainTo(boardTemplate, 'data-testid="perf-hos"')
-eq('§13 the hours-of-service line stays, outside every condition', [!!boardHos, (boardHos || []).filter((attrs) => /\bv-(if|else|else-if|show)\b/.test(attrs)).length], [true, 0])
+eq('§13 no hours-of-service line on it', chainTo(boardTemplate, 'data-testid="perf-hos"'), null)
 eq('§13 the three choices and a row are 44 px', [/--van-tabs-line-height: 44px/.test(styleOf(board)), /\.perf-row \{[^}]*min-height: 44px/.test(styleOf(board))], [true, true])
 eq('§13 the server\'s "gone" hides the tab', boardScript.includes("if (isGoneAnswer(err.status)) emit('gone')"), true)
 
@@ -525,7 +521,7 @@ if (typeof server.personalWeek === 'function') {
     { title: 'Load DP-3', line: 'Picked up Wed 0.5' },
     { title: 'Load DP-4', line: 'Picked up Wed 0.5' },
   ])
-  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%', hos: 'Hours of service come first.' })
+  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%' })
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
   // "N loads left" reads true at every half the server can send, through the view's own words.
   const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left
