@@ -15,7 +15,8 @@ export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
-export const NEW_WEEK_LINE = 'A new week starts Saturday.'
+// The date is the server's, so this file holds no calendar.
+export const newWeekLine = (day) => `A new week starts Saturday, ${day}.`
 export const NO_LOADS_LINE = 'Nothing has counted yet this week.'
 export const NO_LOADS_LAST_WEEK = 'Nothing counted last week.'
 export const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
@@ -70,6 +71,7 @@ export function weekFromAnswer(role, status, answer) {
 // ── His own week ───────────────────────────────────────────────────────────
 
 const isNumber = (n) => typeof n === 'number' && Number.isFinite(n)
+const isWeekDate = (text) => typeof text === 'string' && /^[A-Z][a-z]{2} \d{1,2}$/.test(text)
 const paceId = (pace) => (Object.prototype.hasOwnProperty.call(PACE_WORDS, pace) ? pace : '')
 
 // The figures every view of one week needs, or null when the answer doesn't hold them whole, so
@@ -114,7 +116,7 @@ export function ownWeekView(answer, periodId) {
   const left = week.left
   if (current && !isNumber(left)) return null
   const reached = current && left === 0
-  const newWeek = current && !reached && week.newWeekNote === true
+  const newWeek = current && !reached && week.newWeekNote === true && isWeekDate(week.nextWeekStarts)
   const shownPace = current ? figures.paceId : ''
   let leftWords = ''
   if (reached) leftWords = `${target} reached this week.`
@@ -127,7 +129,7 @@ export function ownWeekView(answer, periodId) {
     width,
     left: leftWords,
     closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
-    newWeek: newWeek ? NEW_WEEK_LINE : '',
+    newWeek: newWeek ? newWeekLine(week.nextWeekStarts) : '',
     rule: `Each pickup counts ${weights.pickup} and each delivery ${weights.delivery}.`,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
     title: current ? 'What counted this week' : 'What counted last week',

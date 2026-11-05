@@ -837,7 +837,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(sortedKeys(a), ["creditWeights", "invoicePaysDays", "view", "weeks"], "the answer's keys");
 		eq(a.view, "no-hours-data", "every truck gets the \"no hours data\" view");
 		eq(a.creditWeights, { delivery: 0.5, pickup: 0.5 }, "the weights the credits use");
-		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "pace", "percent", "start", "targetLowered"];
+		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "nextWeekStarts", "pace", "percent", "start", "targetLowered"];
 		eq(a.weeks.map((w) => sortedKeys(w)), [WEEK_KEYS, WEEK_KEYS], "each week's keys");
 		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "target", "value"], ["deliveries", "pickups", "target", "value"]], "each week's credit keys");
 		const banned = /hour|rei|gap|reach|expected|rank|unit|streak|tier|bonus|earn/i;
@@ -864,7 +864,22 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(shown("dee"), [0.5, 7, 6, "needs-focus", true], "Dee: 0.5 of 7.5, and 6.67% rounds down to 6");
 		for (const [who, body] of Object.entries(weeks)) {
 			const last = body.weeks[1];
-			eq([last.left, last.pace, last.newWeekNote], [null, null, false], `${who}: last week is its final figure, with nothing left and no label`);
+			eq([last.left, last.pace, last.newWeekNote, last.nextWeekStarts], [null, null, false, null], `${who}: last week is its final figure, with nothing left, no label and no coming Saturday`);
+		}
+
+		// The coming Saturday's date: the day after the bar's own Friday, on the same Eastern week rule.
+		eq(a.weeks[0].nextWeekStarts, "Nov 14", "Wed Nov 11: the coming Saturday is Nov 14");
+		for (const [nowIso, says, start, next] of [
+			["2026-11-14T04:30:00Z", "Friday 11:30 PM Eastern", "2026-11-07", "Nov 14"],
+			["2026-11-14T05:30:00Z", "Saturday 12:30 AM Eastern", "2026-11-14", "Nov 21"],
+		]) {
+			const atNight = await makeWorld({}, { nowMs: Date.parse(nowIso) });
+			try {
+				const thisWeek = (await atNight.get("/api/driver/me/performance", USERS.ada)).json.weeks[0];
+				eq([thisWeek.start, thisWeek.nextWeekStarts], [start, next], `${says}: the bar's week starts ${start}, and the coming Saturday is ${next}`);
+			} finally {
+				await atNight.close();
+			}
 		}
 
 		// What counted, in the order it counted: he can add it up himself.
@@ -1096,10 +1111,17 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(week({ today: "2026-11-13", deliveries: 12 }).newWeekNote, false, "1.5 left on Friday fits");
 		eq(week({ today: "2026-11-13", deliveries: 11 }).newWeekNote, true, "2 left on Friday doesn't");
 		eq(week({ deliveries: 18 }).newWeekNote, false, "nothing left, no note");
+		for (const today of ["2026-11-07", "2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"]) {
+			eq(week({ today }).nextWeekStarts, "Nov 14", `read on ${today}: the Saturday after this week's Friday`);
+		}
+		const startsAfter = (start, end, today) => p.personalWeek({ id: "this-week", start, end, today, deliveries: 0, pickups: 0, loads: [], offDays: [], openLoad: true }).nextWeekStarts;
+		eq(startsAfter("2026-10-31", "2026-11-06", "2026-11-05"), "Nov 7", "Thu Nov 5: Saturday, Nov 7, over the change of clocks");
+		eq(startsAfter("2026-10-24", "2026-10-30", "2026-10-28"), "Oct 31", "a week ending in the same month's last days");
+		eq(startsAfter("2026-12-26", "2027-01-01", "2026-12-30"), "Jan 2", "and across the year's end");
 
 		// Last week is its final figure.
 		const closed = week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", deliveries: 8 });
-		eq([closed.credits.value, closed.percent, closed.left, closed.pace, closed.newWeekNote], [4, 53, null, null, false], "a closed week: the figure and percent, nothing left, no label");
+		eq([closed.credits.value, closed.percent, closed.left, closed.pace, closed.newWeekNote, closed.nextWeekStarts], [4, 53, null, null, false, null], "a closed week: the figure and percent, nothing left, no label, no coming Saturday");
 
 		// One counted load.
 		eq(p.countedLoad({ loadId: " DP-1 ", pickupDay: "2026-11-09", deliveryDay: "2026-11-10" }), { loadId: "DP-1", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 0.5 } }, "both credits, each with its day");

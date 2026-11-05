@@ -26,7 +26,7 @@
 //   G   the kill switch goes off mid-session: the next read goes back to Loads with five tabs, no bar
 // And at 390x844:
 //   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
-//       starts Saturday." and no closing line; Ahead of Pace; the target reached; no label at all;
+//       starts Saturday, <the coming Saturday's date>." and no closing line; Ahead of Pace; the target reached; no label at all;
 //       a percentage driver's tab says nothing about pay, as nobody's does; an approved day off
 //       reads his lower figure and the one line saying why
 //   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar; the held place goes on
@@ -92,7 +92,6 @@ const PRIVATE_LINE = 'No other driver can see this.'
 const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
-const NEW_WEEK_LINE = 'A new week starts Saturday.'
 const RULE_LINE = 'Each pickup counts 0.5 and each delivery 0.5.'
 const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
@@ -120,6 +119,8 @@ function rangeText(from, to) {
 }
 const THIS_START = shift(TODAY, -((new Date(dayIndex(TODAY) * DAY).getUTCDay() + 1) % 7))
 const THIS_END = shift(THIS_START, 6)
+const NEXT_WEEK_STARTS = md(shift(THIS_END, 1))
+const NEW_WEEK_LINE = `A new week starts Saturday, ${NEXT_WEEK_STARTS}.`
 const LAST_START = shift(THIS_START, -7)
 const LAST_END = shift(THIS_START, -1)
 const MONTH_START = `${TODAY.slice(0, 7)}-01`
@@ -143,8 +144,8 @@ const THIS_LINES = [
 ]
 const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 0.5) }]
 const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 0.5']]
-const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, targetLowered: false, loads: THIS_LOADS }
-const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, targetLowered: false, loads: LAST_LOADS }
+const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, nextWeekStarts: NEXT_WEEK_STARTS, targetLowered: false, loads: THIS_LOADS }
+const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: LAST_LOADS }
 
 // What the server must never send. If it did, none of it may show.
 const DECOY_NAME = 'Decoy Peerdriver'

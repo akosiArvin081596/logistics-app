@@ -121,7 +121,8 @@ eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
 eq('§1 neither line about pay is left', [v.NOT_PAY_LINE, v.NOT_PAY_DAYS_LINE], [undefined, undefined])
 eq('§1 a lowered target, exact', v.LOWER_TARGET_LINE, 'Your target is lower this week for your approved time off.')
 eq('§1 what to do about a wrong row', v.TELL_DISPATCH_LINE, 'If something looks wrong, tell dispatch.')
-eq('§1 a week that can\'t be reached asks for nothing more', v.NEW_WEEK_LINE, 'A new week starts Saturday.')
+eq('§1 a week that can\'t be reached asks for nothing more, and says when the next one starts', fn('newWeekLine')('Nov 7'), 'A new week starts Saturday, Nov 7.')
+eq('§1 the undated line is gone', v.NEW_WEEK_LINE, undefined)
 eq('§1 the closing line, with ET', v.WEEK_CLOSES, 'Week closes Fri 11:59 PM ET')
 eq('§1 the three labels', v.PACE_WORDS, { ahead: 'Ahead of Pace', 'on-track': 'On Track', 'needs-focus': 'Needs Focus' })
 eq('§1 the two weeks he can open', (v.OWN_PERIODS || []).map((p) => [p.id, p.label]), [['this-week', 'This week'], ['last-week', 'Last week']])
@@ -130,7 +131,7 @@ eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, v.REQUIREMENT_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, v.NEW_WEEK_LINE, v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, v.REQUIREMENT_LINE, v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -221,7 +222,7 @@ eq('§5 each period\'s answer', v.PERIODS.map((p) => v.periodKind(p.id)), ['week
 console.log('§6 ownWeekView()')
 const ownWeekView = fn('ownWeekView')
 const week = (id, over) => ({
-  id, start: START, end: END, credits: { value: 4.5, target: 7.5, deliveries: 5, pickups: 4 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false,
+  id, start: START, end: END, credits: { value: 4.5, target: 7.5, deliveries: 5, pickups: 4 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false, nextWeekStarts: 'Nov 7',
   loads: [
     { loadId: 'DP-1', pickup: { day: 'Mon', credits: 0.5 }, delivery: { day: 'Tue', credits: 0.5 } },
     { loadId: 'DP-2', pickup: { day: 'Thu', credits: 0.5 }, delivery: null },
@@ -283,8 +284,13 @@ eq('§6 what\'s left: a figure ending in a half', wordsFor({ left: 2.5 })?.left,
 eq('§6 at the target: says so, and no closing line', [wordsFor({ left: 0 })?.left, wordsFor({ left: 0 })?.closes], ['7.5 reached this week.', ''])
 eq('§6 a lower target reads as its own figure', wordsFor({ credits: { value: 6, target: 6, deliveries: 6, pickups: 6 }, left: 0 })?.left, '6 reached this week.')
 const lowWeek = wordsFor({ left: 6, newWeekNote: true, pace: 'needs-focus' })
-eq('§6 more left than the days hold: a new week starts, and no closing line asking for more', [lowWeek?.left, lowWeek?.newWeek, lowWeek?.closes], ['6 loads left this week.', 'A new week starts Saturday.', ''])
-eq('§6 only a true note shows it', [true, 'true', 1, undefined].map((newWeekNote) => wordsFor({ newWeekNote })?.newWeek), [v.NEW_WEEK_LINE, '', '', ''])
+eq('§6 more left than the days hold: a new week starts, and no closing line asking for more', [lowWeek?.left, lowWeek?.newWeek, lowWeek?.closes], ['6 loads left this week.', 'A new week starts Saturday, Nov 7.', ''])
+eq('§6 only a true note shows it', [true, 'true', 1, undefined].map((newWeekNote) => wordsFor({ newWeekNote })?.newWeek), ['A new week starts Saturday, Nov 7.', '', '', ''])
+eq('§6 the date is the server\'s: the app never works it out', wordsFor({ newWeekNote: true, nextWeekStarts: 'Dec 25' })?.newWeek, 'A new week starts Saturday, Dec 25.')
+eq('§6 no date it can trust, no line, never a wrong one', [undefined, null, '', 7, 'decoy-date', 'Nov 7<b>', 'Nov 123'].map((nextWeekStarts) => wordsFor({ newWeekNote: true, nextWeekStarts })?.newWeek), new Array(7).fill(''))
+eq('§6 and then the closing line reads instead', wordsFor({ newWeekNote: true, nextWeekStarts: null })?.closes, v.WEEK_CLOSES)
+eq('§6 no note, no date on the screen', wordsFor({ newWeekNote: false, nextWeekStarts: 'Dec 25' })?.newWeek, '')
+eq('§6 the lib holds no calendar of its own', /\bDate\b|getDay|getUTCDay|toLocale|Intl\./.test(codeOf(libSrc)), false)
 eq('§6 the count is the server\'s figure: the app never adds it up', wordsFor({ credits: { value: 9, target: 7.5, deliveries: 1, pickups: 1 } })?.count, '9 of 7.5 loads')
 eq('§6 the width is the server\'s percent: the app never works it out', wordsFor({ credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 }, percent: 44 })?.width, '44%')
 const decoyAnswer = {
@@ -523,6 +529,7 @@ if (typeof server.personalWeek === 'function') {
   ])
   eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%' })
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
+  eq('§14 the new-week line, with the server\'s own date', [ownWeekView(realAnswer, 'this-week')?.newWeek, ownWeekView(realAnswer, 'this-week')?.closes], ['A new week starts Saturday, Nov 7.', ''])
   // "N loads left" reads true at every half the server can send, through the view's own words.
   const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left
   eq('§14 what\'s left, half credits included', [realLeft(7, 7), realLeft(7, 6), realLeft(5, 5), realLeft(1, 0), realLeft(8, 7)],
@@ -536,7 +543,7 @@ console.log('§15 no pay, invoice or payout screen reads the count')
 const CLIENT_SRC = path.join(ROOT, 'client', 'src')
 const clientFiles = fs.readdirSync(CLIENT_SRC, { recursive: true }).map(String).filter((f) => /\.(js|mjs|ts|vue)$/.test(f))
 const inClient = (re) => clientFiles.filter((f) => re.test(read(path.join(CLIENT_SRC, f)))).sort()
-eq('§15 only the driver\'s own screens import the lib', inClient(/from ['"][^'"]*lib\/driverPerformance(\.js)?['"]/), ['components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'views/DriverView.vue'])
+eq('§15 only the driver\'s own screens import the lib', inClient(/['"][^'"\n]*\/driverPerformance(\.js)?['"]/), ['components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'views/DriverView.vue'])
 eq('§15 only the lib reads the server\'s weights', inClient(/\bcreditWeights\b/), ['lib/driverPerformance.js'])
 eq('§15 only the lib names his week\'s route', inClient(/api\/driver\/me\/performance/), ['lib/driverPerformance.js'])
 
