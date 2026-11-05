@@ -363,7 +363,7 @@ function bringFuelIntoView() {
 }
 
 // Route Options, Directions, the map's rows and the instructions card land above the
-// title after the first scroll, and Safari doesn't hold a page's place when they do.
+// title after the first scroll, and not every browser holds a page's place when they do.
 // So the title comes back each time the page changes size, until the driver touches
 // the page, or until the first answers have landed or failed (useApi gives up at 20 s).
 const FIRST_ANSWERS_MS = 20000

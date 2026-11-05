@@ -595,7 +595,7 @@ if (Header) {
       if (pick) pick({ onScreen: null, underWay: list, queued: [], statusOf })
       return list.map((l) => l['Load ID']).join() === 'QA-1,QA-9'
     })())
-    ok('§9 the store\'s inProgressLoad still picks as it did for its other uses',
+    ok('§9 the store\'s inProgressLoad getter is left as it was',
       getters.inProgressLoad({ headers: { jobTracking: HEADERS }, loads: [qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Heading to Shipper')] })['Load ID'] === 'QA-9')
     const viewScript = view.scriptSetup.content
     ok('§9 one copy of that order: DriverView imports it for its own active load',
