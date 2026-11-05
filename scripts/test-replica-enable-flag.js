@@ -87,6 +87,9 @@ for (const name of ["OWNER_OPERATOR_ONBOARDING_ENABLED", "OWNER_OPERATOR_LOAD_PA
 	eq(`${name} is accepted`, refusal(name), null);
 	ok(`...and needs no --from-month`, !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, name));
 }
+// Driver Performance week rows: its own tables only, report only, and the lock never starts in a replica.
+eq("DRIVER_PERFORMANCE_WEEKS_ENABLED is accepted", refusal("DRIVER_PERFORMANCE_WEEKS_ENABLED"), null);
+ok("...and needs no --from-month", !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, "DRIVER_PERFORMANCE_WEEKS_ENABLED"));
 for (const name of ALLOWED) eq(`allowlisted ${name} is accepted`, refusal(name), null);
 // The switches that reach outside this machine, by what they reach.
 const OUTBOUND = {
