@@ -325,7 +325,7 @@ if (Header) {
     const view = parse(fs.readFileSync(DRIVER_VIEW_VUE, 'utf8'), { filename: 'DriverView.vue' }).descriptor
     const viewCss = view.styles.map((s) => s.content).join('\n')
     // The rule for exactly this selector: the lookbehind skips one that ends a shared list.
-    const rule = (css, sel) => (css.match(new RegExp(`(?<!,\\s*)(?:^|\\n)${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
+    const rule = (css, sel) => (css.match(new RegExp(`(?<!,\\s*)(?:^|\\n)${sel.replace(/[\\.]/g, '\\$&')}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
     ok('§6 the page starts below the header\'s real height, with today\'s offset only until it is known',
       /padding-top:\s*var\(--driver-header-height,\s*calc\(52px \+ env\(safe-area-inset-top, 0px\)\)\)/.test(rule(viewCss, '.driver-app')))
     ok('§6 the header is tied to the height it reports', /<header\b[^>]*\bref="headerEl"/.test(descriptor.template.content))
