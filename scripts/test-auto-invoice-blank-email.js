@@ -78,7 +78,7 @@ function pdfWith(contentStream) {
 	]);
 }
 // No billing block, as a C.H. Robinson rate con: the free scan finds nothing, so Gemini reads it.
-const plainPdf = (note) => pdfWith(`BT (Load confirmation for a made-up shipment ${note}) Tj ET`);
+const plainPdf = (note, printed) => pdfWith(`BT (Load confirmation for a made-up shipment ${note}) Tj ${printed ? `(Send billing documents to ${printed}) Tj ` : ""}ET`);
 
 const lifted = closure(SRC, {
 	roots: ["parseSheet", "deduplicateLoads", "findCol", "parseInvoiceOverrides", "latestDraftNotes", "safeAttachmentName", "sanitizeEvidenceText", "logAudit"],
@@ -213,9 +213,9 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 		return name;
 	};
 	// One rate con on file, named by `source`, whose Gemini read gives the address and the total.
-	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "documents", trailer = null, note = id, driveFileName = `Subject: Rate Confirmation ${id}.pdf` } = {}) => {
-		const bytes = plainPdf(note);
-		w.answers.set(bytes.toString("base64"), { "Total Rate": total, Rate: null, "Order Number": null, "PO Number": null, "Trailer Number": trailer, "Documents Email": address });
+	w.rateCon = (id, { address = ADDRESS, total = "$1,000.00", source = "documents", trailer = null, note = id, driveFileName = `Subject: Rate Confirmation ${id}.pdf`, number = id, printed = address } = {}) => {
+		const bytes = plainPdf(note, printed);
+		w.answers.set(bytes.toString("base64"), { "Total Rate": total, Rate: null, "Load Number": number, "Order Number": null, "PO Number": null, "Trailer Number": trailer, "Documents Email": address });
 		const cand = { buffer: bytes, source, label: source, fileName: "rc.pdf", ...(source === "drive" ? { driveFileName } : {}) };
 		w.candidates.set(rules.loadKey(id), [...(w.candidates.get(rules.loadKey(id)) || []), cand]);
 		return cand;
@@ -230,6 +230,13 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 		for (let i = 0; i < n; i++) {
 			db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', ?, 'made-up-admin')")
 				.run(`LD-PROOF-${++w.ids}`, `09012026-${w.ids}`, address, via);
+		}
+	};
+	// Rows a person made on one load, whatever the spelling of its ID.
+	w.proofOn = (loadIds, address, via = "imap") => {
+		for (const loadId of loadIds) {
+			db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', ?, 'made-up-admin')")
+				.run(loadId, `09012026-${++w.ids}`, address, via);
 		}
 	};
 	w.proof(ADDRESS, proofs);
@@ -279,6 +286,7 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 		invalidateJobTracking: () => {},
 		readPaymentsTable: async () => {
 			w.calls.payments++;
+			if (w.paymentsFail) throw new Error("made-up Sheets failure");
 			return w.payments;
 		},
 		lookInMailbox: async (o) => {
@@ -361,7 +369,7 @@ const paidNothing = (w) => [w.smtp.length, w.appends.length, w.calls.mint];
 const namesOf = (m) => ((m && m.attachments) || []).map((a) => a.filename);
 // A tree without the path fails case by case, not by a stack trace.
 const flagOf = (env) => (typeof rules.blankEmailEnabled === "function" ? rules.blankEmailEnabled(env) : null);
-const rowsTo = (db, address) => (typeof ledger.invoiceRowsTo === "function" ? ledger.invoiceRowsTo(db, address) : null);
+const loadsTo = (db, address) => (typeof ledger.invoiceLoadsTo === "function" ? ledger.invoiceLoadsTo(db, address) : null);
 const jsonOf = (text) => {
 	try {
 		return JSON.parse(text) || {};
@@ -380,7 +388,8 @@ const jsonOf = (text) => {
 		}
 		eq(flagOf(undefined), true, "§1 FAILS ON THE OLD CODE: no settings at all: on");
 		eq(rules.BLANK_EMAIL_DOMAIN, require(path.join(ROOT, "lib", "chr-events.js")).CHR_DOMAIN, "§1 FAILS ON THE OLD CODE: the one domain is the one the CHR code knows");
-		eq(rules.BLANK_EMAIL_MIN_ROWS, 3, "§1 FAILS ON THE OLD CODE: at least 3 rows");
+		eq(rules.BLANK_EMAIL_MIN_LOADS, 3, "§1 FAILS ON THE OLD CODE: at least 3 loads");
+		ok(fs.readFileSync(path.join(ROOT, "lib", "chr-events.js"), "utf8").includes(`const LOAD_NUMBER_RE = ${String(rules.BLANK_EMAIL_LOAD_NUMBER_RE)};`), "§1 FAILS ON THE OLD CODE (N1): C.H. Robinson's load-number shape is the one the CHR code reads");
 		const template = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		ok(/^# AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED=$/m.test(template) && /AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED: a kill switch, ON unless set to false/.test(template), "§1 FAILS ON THE OLD CODE: the settings template names it, unset, a kill switch");
 	}
@@ -467,7 +476,7 @@ const jsonOf = (text) => {
 		eq(rules.freeVerdict({ ...ready, brokerDomain: "example-broker.test", brokerDomainConfirmed: false }).code, "BROKER_DOMAIN_UNCONFIRMED", "§3 rules.js an unconfirmed sheet domain: still a person");
 
 		// recipientRule(): the blank path's one domain and the checks.
-		const allow = { confirmedDomains: [DOMAIN], blankEmail: { sendDomains: [DOMAIN], optOutDomains: [], primary: { primarySource: "documents", recipientFrom: -1 }, rowsToAddress: 3 } };
+		const allow = { confirmedDomains: [DOMAIN], blankEmail: { sendDomains: [DOMAIN], optOutDomains: [], primary: { primarySource: "documents", recipientFrom: -1, loadId: ID, rateConNumber: ID, addressPrinted: true }, loadsToAddress: 3 } };
 		const rr = (over = {}, blank = {}) => rules.recipientRule({ brokerEmail: "", documentsEmail: ADDRESS, ...allow, ...over, blankEmail: { ...allow.blankEmail, ...blank } });
 		eq(rr(), { ok: true, to: ADDRESS, source: "ratecon" }, "§3 rules.js recipientRule(): FAILS ON THE OLD CODE: every check holds: the rate con's address");
 		eq(rules.recipientRule({ brokerEmail: "", documentsEmail: ADDRESS, confirmedDomains: [DOMAIN] }), { ok: false, code: "NO_BROKER_EMAIL" }, "§3 recipientRule(): no blank-path argument: as before");
@@ -478,21 +487,31 @@ const jsonOf = (text) => {
 		eq(rr({ documentsEmail: `made-up.billing@${DOMAIN}.example.test` }), REFUSED, "§3 recipientRule(): a domain that starts the same");
 		eq(rr({ documentsEmail: `made-up.billing@not${DOMAIN}` }), REFUSED, "§3 recipientRule(): a domain that ends the same");
 		eq(rr({ documentsEmail: "made-up.billing@example-broker.test", confirmedDomains: ["example-broker.test", DOMAIN] }, { sendDomains: ["example-broker.test", DOMAIN] }), REFUSED, "§3 recipientRule(): a confirmed, listed domain that isn't the one");
-		eq(rr({}, { primary: { primarySource: "documents", recipientFrom: 1 } }), REFUSED, "§3 recipientRule(): an alternate file");
+		const PRIMARY = allow.blankEmail.primary;
+		eq(rr({}, { primary: { ...PRIMARY, recipientFrom: 1 } }), REFUSED, "§3 recipientRule(): an alternate file");
 		for (const source of ["drive-content", "documents-bol", "upload", "", null, undefined]) {
-			eq(rr({}, { primary: { primarySource: source, recipientFrom: -1 } }), REFUSED, `§3 recipientRule(): a primary whose source is ${JSON.stringify(source)}`);
+			eq(rr({}, { primary: { ...PRIMARY, primarySource: source } }), REFUSED, `§3 recipientRule(): a primary whose source is ${JSON.stringify(source)}`);
 		}
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf", loadId: "9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: found by file name");
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf", loadId: "#9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: ...either spelling of the load ID");
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 900001502.pdf", loadId: "9000015" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a file named for a longer number");
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, loadId: "9000015" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a Drive file with no name to test");
-		eq(rr({}, { primary: { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 9000015.pdf" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): no load ID to test it against");
-		eq(rr({}, { primary: { primarySource: "documents", recipientFrom: -1, loadId: "9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: a rate-con row needs no file name");
+		const DRIVE = { primarySource: "drive", recipientFrom: -1, primaryFileName: "Subject: Rate Confirmation 900000015.pdf", loadId: "900000015", rateConNumber: "900000015", addressPrinted: true };
+		eq(rr({}, { primary: DRIVE }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: found by file name");
+		eq(rr({}, { primary: { ...DRIVE, loadId: "#900000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: ...either spelling of the load ID");
+		eq(rr({}, { primary: { ...DRIVE, primaryFileName: "Subject: Rate Confirmation 90000001502.pdf" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a file named for a longer number");
+		eq(rr({}, { primary: { ...DRIVE, primaryFileName: undefined } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): a Drive file with no name to test");
+		eq(rr({}, { primary: { ...DRIVE, loadId: undefined } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (L6): no load ID to test it against");
+		for (const id of ["9000015", "90000015", "9000000150", "LD900000015"]) {
+			eq(rr({}, { primary: { ...DRIVE, loadId: id, rateConNumber: id, primaryFileName: `Subject: Rate Confirmation ${id}.pdf` } }), REFUSED, `§3 recipientRule(): FAILS ON THE OLD CODE (N1): a Drive primary, load ${id}: not C.H. Robinson's shape`);
+		}
+		eq(rr({}, { primary: { ...PRIMARY, loadId: "9000015", rateConNumber: "9000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: a rate-con row needs no file name and no shape: it is on the load");
+		eq(rr({}, { primary: { ...DRIVE, rateConNumber: "900001502" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (N1): the rate con says it's another load's");
+		eq(rr({}, { primary: { ...PRIMARY, rateConNumber: "900001502" } }), REFUSED, "§3 recipientRule(): FAILS ON THE OLD CODE (N1): ...on a rate-con row too");
+		for (const said of ["", null, undefined]) eq(rr({}, { primary: { ...DRIVE, rateConNumber: said } }), REFUSED, `§3 recipientRule(): FAILS ON THE OLD CODE (N1): the rate con's number wasn't read (${JSON.stringify(said)})`);
+		eq(rr({}, { primary: { ...DRIVE, rateConNumber: "#900000015" } }).ok, true, "§3 recipientRule(): FAILS ON THE OLD CODE: ...its number in either spelling");
+		for (const printed of [false, undefined, "true"]) eq(rr({}, { primary: { ...DRIVE, addressPrinted: printed } }), REFUSED, `§3 recipientRule(): FAILS ON THE OLD CODE (N6): the address isn't printed on the rate con (${JSON.stringify(printed)})`);
 		eq(rr({ confirmedDomains: [] }), REFUSED, "§3 recipientRule(): not confirmed");
 		eq(rr({}, { sendDomains: [] }), REFUSED, "§3 recipientRule(): not on the send list");
 		eq(rr({}, { optOutDomains: [DOMAIN] }), REFUSED, "§3 recipientRule(): opted out");
-		eq(rr({}, { rowsToAddress: 2 }), REFUSED, "§3 recipientRule(): 2 rows");
-		eq(rr({}, { rowsToAddress: "not a count" }), REFUSED, "§3 recipientRule(): no count");
+		eq(rr({}, { loadsToAddress: 2 }), REFUSED, "§3 recipientRule(): 2 loads");
+		eq(rr({}, { loadsToAddress: "not a count" }), REFUSED, "§3 recipientRule(): no count");
 		eq(rr({ brokerEmail: AGENT, confirmedDomains: [] }).code, "BROKER_DOMAIN_UNCONFIRMED", "§3 recipientRule(): a sheet Email never takes the blank path");
 		eq(rules.recipientRule({ brokerEmail: "made-up@bisontransport.com", bisonRecipient: "made-up-ap@example.test", documentsEmail: ADDRESS, ...allow }).source, "bison", "§3 recipientRule(): Bison stays Bison");
 
@@ -528,7 +547,7 @@ const jsonOf = (text) => {
 		eq([apart2.state(ID), apart2.smtp.length, apart2.calls.prepare[0].blankEmailDomain], [NEEDS_EMAIL, 0, undefined], "§3 draft.js: the sheet emptied between the two reads: the job didn't ask, so the engine refuses");
 
 		// The job's rule holds on its own, whatever the engine answers.
-		for (const [label, change] of [["an alternate file", (ctx) => { ctx.recipientFrom = 1; }], ["a by-content rate con", (ctx) => { ctx.primarySource = "drive-content"; }], ["no blank path at all", (ctx) => { ctx.blankEmailPath = false; }]]) {
+		for (const [label, change] of [["an alternate file", (ctx) => { ctx.blankEmailPrimary.recipientFrom = 1; }], ["a by-content rate con", (ctx) => { ctx.blankEmailPrimary.primarySource = "drive-content"; }], ["another load's rate con", (ctx) => { ctx.blankEmailPrimary.rateConNumber = "900001502"; }], ["an address it doesn't print", (ctx) => { ctx.blankEmailPrimary.addressPrinted = false; }], ["no blank path at all", (ctx) => { ctx.blankEmailPath = false; }]]) {
 			const x = makeWorld();
 			const j = await x.started();
 			x.ready(ID);
@@ -549,7 +568,7 @@ const jsonOf = (text) => {
 		const on = await auto({ blankEmailDomain: DOMAIN });
 		const onCtx = on.ctx || { invoiceTo: {} };
 		eq([on.ok, onCtx.blankEmailPath, onCtx.invoiceTo.email], [true, true, ADDRESS], "§3 draft.js FAILS ON THE OLD CODE: the job's argument: it goes on, to the rate con's address");
-		eq([onCtx.primarySource, onCtx.recipientFrom], ["documents", -1], "§3 draft.js FAILS ON THE OLD CODE: where the address came from is on the context");
+		eq(onCtx.blankEmailPrimary, { primarySource: "documents", recipientFrom: -1, loadId: ID, rateConNumber: ID, addressPrinted: true }, "§3 draft.js FAILS ON THE OLD CODE: where the address came from, and what the rate con says, are on the context");
 		const manual = await e.engine.prepare({ loadId: ID, body: { blankEmailDomain: DOMAIN }, dryRun: false, mode: "manual", ov: e.helpers.parseInvoiceOverrides({}), req: { session: { user: { id: 1, username: "made-up-admin", role: "Super Admin" } } }, blankEmailDomain: DOMAIN });
 		eq([manual.ok, manual.ctx.blankEmailPath, manual.ctx.effBrokerName], [true, false, CONTACT], "§3 draft.js the button: the argument means nothing there, and it reads as it always has");
 		eq(SRC.split("blankEmailDomain").length - 1, 0, "§3 server.js never names the argument: no request can reach it");
@@ -565,7 +584,13 @@ const jsonOf = (text) => {
 		alt.rateCon(ID, { address: null, note: "primary" });
 		alt.scans.set(alt.rateCon(ID, { source: "drive", note: "alternate" }).buffer, ADDRESS);
 		eq((await alt.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "auto", blankEmailDomain: DOMAIN })).code, "NO_BROKER_EMAIL", "§3 draft.js an alternate file's address: the engine refuses it on its own");
-		eq((await alt.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "manual", ov: alt.helpers.parseInvoiceOverrides({}), req: { session: { user: { id: 1, username: "made-up-admin", role: "Super Admin" } } } })).ctx.recipientFrom, 1, "§3 draft.js FAILS ON THE OLD CODE: the context says which file gave the address, on the button's path too");
+		eq((await alt.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "manual", ov: alt.helpers.parseInvoiceOverrides({}), req: { session: { user: { id: 1, username: "made-up-admin", role: "Super Admin" } } } })).ctx.blankEmailPath, false, "§3 draft.js the button's path reads as it did: this is the automatic path's alone");
+
+		for (const [label, rc] of [["says it's another load's", { number: "900001502" }], ["doesn't print the address", { printed: null }], ["prints another address", { printed: AGENT }]]) {
+			const own = makeWorld();
+			own.ready(ID, { "Job Status": "Delivered" }, rc);
+			eq((await own.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "auto", blankEmailDomain: DOMAIN })).code, "NO_BROKER_EMAIL", `§3 draft.js FAILS ON THE OLD CODE (N1, N6): a rate con that ${label}: the engine refuses it on its own`);
+		}
 
 		// autoRecipientRefusal(): the blank path's own rule, and the pin for every other case.
 		const norm = brokerInvoice.normalizeEmail;
@@ -588,10 +613,13 @@ const jsonOf = (text) => {
 		lw.proof(ADDRESS, 4, "triumph");
 		lw.proof(AGENT, 5);
 		lw.proof("", 5);
-		eq(rowsTo(lw.db, ADDRESS), 2, "§3 ledger.js FAILS ON THE OLD CODE (L1): only a person's rows, on the exact address");
-		eq(rowsTo(lw.db, ""), 0, "§3 ledger.js FAILS ON THE OLD CODE: no address: no rows, whatever is blank");
+		eq(loadsTo(lw.db, ADDRESS), 2, "§3 ledger.js FAILS ON THE OLD CODE (L1): only a person's rows, on the exact address");
+		eq(loadsTo(lw.db, ""), 0, "§3 ledger.js FAILS ON THE OLD CODE: no address: no rows, whatever is blank");
+		const sameLoad = makeWorld({ proofs: 0 });
+		sameLoad.proofOn(["LD-PROOF-A", "LD-PROOF-A", "ld-proof-a", "#LD-PROOF-A", " LD-PROOF-A "], ADDRESS);
+		eq(loadsTo(sameLoad.db, ADDRESS), 1, "§3 ledger.js FAILS ON THE OLD CODE (N6): five rows on one load, in any spelling of its ID, are one load");
 		const noTable = new Database(":memory:");
-		eq(rowsTo(noTable, ADDRESS), 0, "§3 ledger.js FAILS ON THE OLD CODE: no table: none");
+		eq(loadsTo(noTable, ADDRESS), 0, "§3 ledger.js FAILS ON THE OLD CODE: no table: none");
 		noTable.close();
 
 		// extractDocumentsEmail() has no agent to exclude here, and Gemini's address no anchor: the rows cover the harm.
@@ -632,33 +660,54 @@ const jsonOf = (text) => {
 		await refusedAlone("clause 1, a rate con that names no address", { rc: { address: null } });
 		// A Drive file is found by a substring of its name, so a load's number inside a longer one
 		// finds another load's rate con. With no sheet Email to anchor it, this path asks more.
-		const SHORT = "9000015";
-		const named = async (driveFileName, over = {}) => {
+		const CHR_SHAPED = "900000015";
+		const named = async (driveFileName, over = {}, rc = {}, id = CHR_SHAPED) => {
 			const w = makeWorld();
 			const job = await w.started();
-			w.ready(SHORT, over, { source: "drive", driveFileName });
-			await deliver(w, job, SHORT);
+			w.ready(id, over, { source: "drive", driveFileName, ...rc });
+			await deliver(w, job, id);
 			return w;
 		};
 		for (const [label, name] of [
-			["inside a longer number", "Subject: Rate Confirmation 900001502.pdf"],
-			["after another digit", "Subject: Rate Confirmation 19000015.pdf"],
-			["after letters", "Subject: Rate Confirmation LD9000015.pdf"],
-			["continued by a joiner and a digit", "Subject: Rate Confirmation 9000015-2.pdf"],
-			["after a digit and a joiner", "Subject: Rate Confirmation 2-9000015.pdf"],
-			["continued by a dot and a digit", "Subject: Rate Confirmation 9000015.1.pdf"],
+			["inside a longer number", `Subject: Rate Confirmation ${CHR_SHAPED}02.pdf`],
+			["after another digit", `Subject: Rate Confirmation 1${CHR_SHAPED}.pdf`],
+			["after letters", `Subject: Rate Confirmation LD${CHR_SHAPED}.pdf`],
+			["continued by a joiner and a digit", `Subject: Rate Confirmation ${CHR_SHAPED}-2.pdf`],
+			["after a digit and a joiner", `Subject: Rate Confirmation 2-${CHR_SHAPED}.pdf`],
+			["continued by a dot and a digit", `Subject: Rate Confirmation ${CHR_SHAPED}.1.pdf`],
 			["not there at all", ""],
 		]) {
 			const w = await named(name);
-			eq([w.state(SHORT), paidNothing(w)], [NEEDS_EMAIL, [0, 0, 0]], `§4 FAILS ON THE OLD CODE (L6): clause 1, a Drive file with load ${SHORT} ${label}: Needs attention, nothing sent, drafted or numbered`);
+			eq([w.state(CHR_SHAPED), paidNothing(w)], [NEEDS_EMAIL, [0, 0, 0]], `§4 FAILS ON THE OLD CODE (L6): clause 1, a Drive file with the load's number ${label}: Needs attention, nothing sent, drafted or numbered`);
 		}
-		for (const name of ["Subject: Rate Confirmation 9000015.pdf", "Subject: Order #9000015", "9000015-ratecon.pdf", "Load 9000015 Rate Con.pdf"]) {
+		for (const name of [`Subject: Rate Confirmation ${CHR_SHAPED}.pdf`, `Subject: Order #${CHR_SHAPED}`, `${CHR_SHAPED}-ratecon.pdf`, `Load ${CHR_SHAPED} Rate Con.pdf`]) {
 			const w = await named(name);
 			eq(w.smtp.map((m) => m.to), [ADDRESS], `§4 FAILS ON THE OLD CODE: clause 1, a Drive file named ${JSON.stringify(name)}: this load's own, so it goes`);
 		}
-		// The plain path has the sheet's domain to anchor it, and keeps today's test.
-		const plainNamed = await named("Subject: Rate Confirmation 900001502.pdf", { Email: AGENT });
-		eq(plainNamed.smtp.map((m) => m.to), [ADDRESS], "§4 a filled Email keeps today's file-name test: the plain path isn't changed");
+		// A load that isn't C.H. Robinson's shape, its number a whole token in a Drive file's name.
+		for (const id of ["9000015", "90000015", "9000000150", "LD900000015"]) {
+			const w = await named(`Subject: Rate Confirmation 900001502 PO ${id}.pdf`, {}, { number: id }, id);
+			eq([w.state(id), paidNothing(w)], [NEEDS_EMAIL, [0, 0, 0]], `§4 FAILS ON THE OLD CODE (N1): load ${id} isn't C.H. Robinson's shape, its number a token in a Drive file's name: no mail`);
+		}
+		// The review's case: a C.H. Robinson file for another load, with this load's number in its name.
+		{
+			const w = await named(`Subject: Rate Confirmation 900001502 PO ${CHR_SHAPED}.pdf`, {}, { number: "900001502" });
+			eq([w.state(CHR_SHAPED), paidNothing(w)], [NEEDS_EMAIL, [0, 0, 0]], "§4 FAILS ON THE OLD CODE (N1): another load's rate con, this load's number a token in its name: the rate con says whose it is: no mail");
+		}
+		await refusedAlone("clause 1 (N1): FAILS ON THE OLD CODE: a rate-con row that says it's another load's", { rc: { number: "900001502" } });
+		await refusedAlone("clause 1 (N1): FAILS ON THE OLD CODE: a rate con whose number wasn't read", { rc: { number: null } });
+		await refusedAlone("clause 1 (N6): FAILS ON THE OLD CODE: the read names an address the rate con doesn't print", { rc: { printed: null } });
+		await refusedAlone("clause 1 (N6): FAILS ON THE OLD CODE: the read names one address and the rate con prints another", { rc: { printed: AGENT } });
+		for (const [label, printed] of [["with a space in it, as text runs can", `made-up.billing@ ${DOMAIN}`], ["in capitals", ADDRESS.toUpperCase()]]) {
+			const w = makeWorld();
+			const job = await w.started();
+			w.ready(ID, {}, { printed });
+			await deliver(w, job, ID);
+			eq(w.smtp.map((m) => m.to), [ADDRESS], `§4 FAILS ON THE OLD CODE: the address printed ${label}: it goes`);
+		}
+		// The plain path has the sheet's domain to anchor it, and keeps today's tests.
+		const plainNamed = await named(`Subject: Rate Confirmation ${CHR_SHAPED}02.pdf`, { Email: AGENT }, { number: "900001502", printed: null });
+		eq(plainNamed.smtp.map((m) => m.to), [ADDRESS], "§4 a filled Email keeps today's tests: a longer number in the file's name, another number on the rate con, an address it doesn't print: the plain path isn't changed");
 		// 2. Exactly chrobinson.com, the only domain this path takes.
 		for (const [label, address] of [
 			["a subdomain", `made-up.billing@mail.${DOMAIN}`],
@@ -680,15 +729,17 @@ const jsonOf = (text) => {
 		await refusedAlone("clause 3, nothing on the send list", { opts: { domains: [] }, paid: false });
 		await refusedAlone("clause 3, opted out", { opts: { optOut: [DOMAIN] }, paid: false });
 		await refusedAlone("clause 3, sending off", { opts: { send: false }, paid: false });
-		// 4. The exact address on at least 3 rows a person made.
+		// 4. The exact address on invoices a person made for at least 3 loads.
 		await refusedAlone("clause 4, no rows", { opts: { proofs: 0 } });
+		await refusedAlone("clause 4 (N6): FAILS ON THE OLD CODE: five rows, all on one load", { opts: { proofs: 0 }, setup: (w) => w.proofOn(["LD-PROOF-A", "LD-PROOF-A", "ld-proof-a", "#LD-PROOF-A", "LD-PROOF-A"], ADDRESS) });
+		await refusedAlone("clause 4 (N6): FAILS ON THE OLD CODE: four rows on two loads", { opts: { proofs: 0 }, setup: (w) => w.proofOn(["LD-PROOF-A", "LD-PROOF-A", "LD-PROOF-B", "LD-PROOF-B"], ADDRESS) });
 		await refusedAlone("clause 4, only the job's sends: FAILS ON THE OLD CODE (L1)", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, rules.VIA_SEND) });
-		await refusedAlone("clause 4, 2 of a person's rows and the job's send: FAILS ON THE OLD CODE (L1)", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_SEND) });
-		await refusedAlone("clause 4, 2 rows", { opts: { proofs: 2 } });
+		await refusedAlone("clause 4, 2 of a person's loads and the job's send: FAILS ON THE OLD CODE (L1)", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_SEND) });
+		await refusedAlone("clause 4, 2 loads", { opts: { proofs: 2 } });
 		await refusedAlone("clause 4, the rows on another address at the domain", { opts: { proofs: 0 }, setup: (w) => w.proof(AGENT, 5) });
 		await refusedAlone("clause 4, only the job's own drafts", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, rules.VIA_DRAFT) });
 		await refusedAlone("clause 4, only Triumph's rows", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, "triumph") });
-		await refusedAlone("clause 4, 2 rows and one of the job's own drafts", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_DRAFT) });
+		await refusedAlone("clause 4, 2 loads and one of the job's own drafts", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_DRAFT) });
 		// The plain path checks the domain only, so its sends can't vouch for an address: three
 		// misreads there would otherwise earn the proof for a fourth on this path.
 		{
@@ -699,7 +750,7 @@ const jsonOf = (text) => {
 				await deliver(w, job, id);
 			}
 			eq(w.smtp.map((m) => m.to), [AGENT, AGENT, AGENT], "§4 three misreads on the plain path go out, on the domain's anchor alone, as they do today");
-			eq(rowsTo(w.db, AGENT), 0, "§4 FAILS ON THE OLD CODE (L1): ...and earn no proof");
+			eq(loadsTo(w.db, AGENT), 0, "§4 FAILS ON THE OLD CODE (L1): ...and earn no proof");
 			w.ready("LD-TEST-2004", {}, { address: AGENT });
 			await deliver(w, job, "LD-TEST-2004");
 			eq([w.state("LD-TEST-2004"), w.smtp.length], [NEEDS_EMAIL, 3], "§4 FAILS ON THE OLD CODE (L1): a fourth misread on a blank load: Needs attention, nothing sent to the agent");
@@ -758,7 +809,7 @@ const jsonOf = (text) => {
 		await deliver(stop, sj, ID);
 		eq([stop.smtp.length, stop.appends.map((a) => a.to), stop.state(ID), stop.draftRow(ID).map((r) => r.via)], [0, [ADDRESS], ["drafted", ""], [rules.VIA_DRAFT]], "§5 the Stop: FAILS ON THE OLD CODE: a Gmail draft to the address, no SMTP call");
 		// And that draft proves nothing: it doesn't add to the rows an address needs.
-		eq(rowsTo(stop.db, ADDRESS), 3, "§5 FAILS ON THE OLD CODE: ...and that draft doesn't count as a row that proves the address");
+		eq(loadsTo(stop.db, ADDRESS), 3, "§5 FAILS ON THE OLD CODE: ...and that draft doesn't count as a row that proves the address");
 
 		// Two loads tapped together run one at a time.
 		const two = makeWorld();
@@ -966,6 +1017,9 @@ const jsonOf = (text) => {
 			await drained(s.w, "§8 after a failed look");
 			await turn();
 			eq([s.w.state(ID), s.w.smtp.length], [["drafted", ""], 1], `§8 FAILS ON THE OLD CODE (L3): ${label}: ...looks again, and sends once it reads clean`);
+			s = await reArmed(over, (w) => { w.paymentsFail = true; });
+			await deliver(s.w, s.job, ID);
+			eq([s.w.state(ID), s.w.smtp.length, s.w.calls.mint], [["needs_attention", "PAYMENTS_UNREAD"], 0, 0], `§8 FAILS ON THE OLD CODE (N5): ${label}, a re-armed claim, the Payments Table can't be read: no send, no number`);
 			s = await reArmed(over, (w) => { w.payments.push([ID, "Example", "1000", "", "", "Paid"]); });
 			await deliver(s.w, s.job, ID);
 			eq([s.w.state(ID), s.w.smtp.length], [["needs_attention", "PAYMENTS_TABLE_HIT"], 0], `§8 FAILS ON THE OLD CODE (L3): ${label}, a filled Payments Table row: no send`);
@@ -1006,18 +1060,22 @@ const jsonOf = (text) => {
 			return { w, next };
 		};
 		const CAUGHT = { state: "working", lease_owner: "old-process", lease_until: iso(T0 + HOUR) };
+		const NUMBER_HELD = { invoice_id: "10202026-77", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: "<made-up-held.auto-invoice@example.com>" };
 		for (const [email, over] of [["a blank Email", {}], ["a filled Email", { Email: AGENT }]]) {
 			for (const [label, fields] of [
 				["a queued claim", { state: "queued" }],
 				["a DRIVER_PENDING record", { state: "waiting", code: "DRIVER_PENDING" }],
 				["a claim caught building", CAUGHT],
-				["a claim caught building, its number held", { ...CAUGHT, stage: "reserved", invoice_id: "10202026-77", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: "<made-up-held.auto-invoice@example.com>" }],
+				["a claim caught building, its number held", { ...CAUGHT, ...NUMBER_HELD, stage: "reserved" }],
+				["a draft in flight, absent from Gmail", { ...CAUGHT, ...NUMBER_HELD, stage: "appending", sent_json: JSON.stringify({ to: ADDRESS, subject: "Made-up", total: "$1,000.00" }) }],
 			]) {
 				const named = `§8 FAILS ON THE OLD CODE: ${email}, ${label} at a restart`;
 				let s = await atRestart(over, fields, (w) => { w.lookAnswer = { verdict: "invoice", mailboxes: {} }; });
 				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.mint, s.w.calls.look.length], [["needs_attention", "MAILBOX_HIT"], 0, 0, 0, 1], `${named}, the mailbox holds an invoice: no second invoice, no number`);
 				s = await atRestart(over, fields, (w) => { w.lookFails = true; });
 				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.mint, Boolean(s.w.claim(ID).look_first)], [["needs_attention", "MAILBOX_UNREAD"], 0, 0, 0, true], `${named}, the look fails: MAILBOX_UNREAD, no send, no number, the look still asked for`);
+				s = await atRestart(over, fields, (w) => { w.paymentsFail = true; });
+				eq([s.w.state(ID), s.w.smtp.length, s.w.appends.length, s.w.calls.mint], [["needs_attention", "PAYMENTS_UNREAD"], 0, 0, 0], `${named}, the Payments Table can't be read (N5): no send, no number`);
 				s = await atRestart(over, fields, (w) => { w.payments.push([ID, "Example", "1000", "", "", "Paid"]); });
 				eq([s.w.state(ID), s.w.smtp.length], [["needs_attention", "PAYMENTS_TABLE_HIT"], 0], `${named}, a filled Payments Table row: no send`);
 				s = await atRestart(over, fields);

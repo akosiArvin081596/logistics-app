@@ -55,7 +55,7 @@
  *  §14 a blank Email through the route, the block and the engine as shipped
  *      (AUTO_INVOICE_BLANK_EMAIL_CHR_ENABLED, named nowhere): one SMTP call to the rate
  *      con's address, the contact's name nowhere in the MIME; a malformed cell; too few
- *      rows; Try again's look; the kill switch
+ *      rows; Try again's look; the kill switch; a Drive file found that isn't this load's
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -265,9 +265,9 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		},
 	};
 	// runRateConGemini()'s own answer shape, with nothing found.
-	const runRateConGemini = async () => {
+	const runRateConGemini = async (b64) => {
 		w.calls.gemini++;
-		return w.geminiAnswer || { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
+		return (w.geminiAnswer && w.geminiAnswer(b64)) || { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 	};
 	// lib/pdf-browser.js's busy refusal carries this code.
 	const renderHtmlToPdf = async (html) => {
@@ -1218,14 +1218,21 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			const x = await world({ env });
 			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, { optOutDomains: [], confirmedBrokerDomains: [CHR] })).status, 200, "§14 chrobinson.com confirmed");
 			proofs(x, rows);
-			x.geminiAnswer = { "Total Rate": "$1,500.00", Rate: null, "Order Number": null, "PO Number": null, "Documents Email": CHR_ADDRESS };
+			x.reads = new Map();
+			x.geminiAnswer = (b64) => x.reads.get(b64) || null;
 			await x.job.finishStartUp();
 			return x;
+		};
+		// A rate con that prints the address, and what the paid read says of it.
+		const chrRateCon = (x, id, { number = id, printed = CHR_ADDRESS } = {}) => {
+			const bytes = pdfWith(`BT (Load confirmation for made-up shipment ${id}) Tj (Send billing documents to ${printed}) Tj ET`);
+			x.reads.set(bytes.toString("base64"), { "Total Rate": "$1,500.00", Rate: null, "Load Number": number, "Order Number": null, "PO Number": null, "Documents Email": CHR_ADDRESS });
+			return bytes;
 		};
 		const atReceiver = (x, id, over = {}) => {
 			x.setLoad(id, { "Job Status": "At Receiver", Email: "", "Broker Contact Name": "Madeup Q. Contactperson", ...over });
 			x.addPod(id);
-			x.fileRateCon(id, plainRateCon(CHR_ADDRESS));
+			x.fileRateCon(id, chrRateCon(x, id));
 		};
 
 		const w = await started();
@@ -1294,27 +1301,34 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const replica = await world({ env: CHR_ON, replica: { stamp: "made-up" } });
 		eq(replica.job.sending, false, "§14 a replica never sends, so this path can't run there");
 
-		// getRateConBytes() as shipped finds a Drive file by a substring of its name, so load
-		// 9000015 finds the rate con of load 900001502.
-		const named = await started();
-		const namedTap = named.statusRoute();
-		const inLonger = (x, id, over = {}) => {
+		// getRateConBytes() as shipped finds a Drive file by a substring of its name: each of these
+		// is found and read, and none may choose where a blank Email's invoice goes.
+		const onDrive = (x, id, name, { number = id, printed = CHR_ADDRESS, over = {} } = {}) => {
 			x.setLoad(id, { "Job Status": "At Receiver", Email: "", "Broker Contact Name": "Madeup Q. Contactperson", ...over });
 			x.addPod(id);
-			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name: "Subject: Rate Confirmation 900001502.pdf", bytes: plainRateCon(CHR_ADDRESS) });
+			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: chrRateCon(x, id, { number, printed }) });
 		};
-		inLonger(named, "9000015");
-		await namedTap(DRIVER, "9000015");
-		await until(() => open(named) === 0 && Boolean(named.state("9000015")), "§14 another load's Drive file");
-		await settle();
-		ok(named.calls.driveGet >= 1, "§14 ...the file was found, and read");
-		eq([named.state("9000015"), named.smtp.length, named.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], "§14 FAILS ON THE OLD CODE (L6): a blank Email: a Drive file named for a longer number names no recipient: a person, nothing sent, no number");
+		for (const [label, id, name, opts] of [
+			["a longer number in the file's name (L6)", "900000015", "Subject: Rate Confirmation 90000001502.pdf", {}],
+			["a load that isn't C.H. Robinson's shape, a token in the name (N1)", "9000015", "Subject: Rate Confirmation 900001502 PO 9000015.pdf", {}],
+			["another load's rate con, this load's number a token in its name (N1)", "900000016", "Subject: Rate Confirmation 900001502 PO 900000016.pdf", { number: "900001502" }],
+			["a read that names an address the rate con doesn't print (N6)", "900000017", "Subject: Rate Confirmation 900000017.pdf", { printed: `made-up.agent@${CHR}` }],
+		]) {
+			const x = await started();
+			const xTap = x.statusRoute();
+			onDrive(x, id, name, opts);
+			await xTap(DRIVER, id);
+			await until(() => open(x) === 0 && Boolean(x.state(id)), `§14 ${label}`);
+			await settle();
+			ok(x.calls.driveGet >= 1, `§14 ${label}: the file was found, and read`);
+			eq([x.state(id), x.smtp.length, x.calls.mint], [["needs_attention", "NO_BROKER_EMAIL"], 0, 0], `§14 FAILS ON THE OLD CODE: ${label}: a person, nothing sent, no number`);
+		}
 		const plain = await started();
 		const plainTap = plain.statusRoute();
-		inLonger(plain, "9000015", { Email: `made-up.agent@${CHR}` });
-		await plainTap(DRIVER, "9000015");
+		onDrive(plain, "900000018", "Subject: Rate Confirmation 90000001802.pdf", { number: "900001502", printed: `made-up.agent@${CHR}`, over: { Email: `made-up.agent@${CHR}` } });
+		await plainTap(DRIVER, "900000018");
 		await until(() => plain.smtp.length === 1 && open(plain) === 0, "§14 the plain path's send");
-		eq(plain.smtp.map((m) => m.to), [CHR_ADDRESS], "§14 a filled Email keeps today's file-name test: the plain path isn't changed");
+		eq(plain.smtp.map((m) => m.to), [CHR_ADDRESS], "§14 a filled Email keeps today's tests: the plain path isn't changed");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});
