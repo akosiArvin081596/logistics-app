@@ -1114,6 +1114,13 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await until(() => open(w) === 0 && w.state("LD-TEST-1208")[1] === "PAYMENTS_TABLE_HIT", "§12 the Payments Table");
 		eq(w.smtp.length, 4, "§12 FAILS ON THE OLD CODE: a filled Payments Table row, read through the block: nothing sent");
 		w.payments.pop();
+		// Saved evidence, through the block's own dep: refused before anything runs, and free again once it's gone.
+		const evidence = require(path.join(ROOT, "lib", "invoice-evidence.js"));
+		evidence.saveAnswer(w.db, "ld-test-1208", { verdict: "invoice", mailboxes: { drafts: { invoice: 1 }, sent: {} } }, { nowIso: new Date().toISOString() });
+		const refused = await w.call("POST", "/api/auto-invoice/loads/LD-TEST-1208/retry", SA, {});
+		eq([refused.status, refused.json && refused.json.code, w.state("LD-TEST-1208"), w.smtp.length], [409, "AUTO_INVOICE_RETRY_REFUSED", ["needs_attention", "PAYMENTS_TABLE_HIT"], 4],
+			"§12 saved evidence of an invoice: Try again is refused by the block's own dep, with nothing run");
+		evidence.saveAnswer(w.db, "ld-test-1208", { verdict: "clean", mailboxes: { drafts: {}, sent: {} } }, { nowIso: new Date().toISOString() });
 		await w.call("POST", "/api/auto-invoice/loads/LD-TEST-1208/retry", SA, {});
 		await until(() => w.smtp.length === 5 && open(w) === 0, "§12 the clean look");
 		eq(w.state("LD-TEST-1208"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: both clean: one send");
