@@ -295,19 +295,20 @@ section('§7  the settings dialog: Save waits for a read that worked')
   ok(openSrc && saveSrc, '§7 the page\'s openAutoSettings() and saveAutoSettings() are found')
   if (openSrc && saveSrc) {
     const NAMES = ['auth', 'autoSettingsLoading', 'autoSettingsOpen', 'autoSettingsError', 'autoSettingsProblem', 'autoSettingsRead', 'autoConfirmedText',
-      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard', 'autoSend']
+      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard', 'autoSend', 'autoRecipientCheck']
     const dialog = (getAnswer) => {
       const st = {
         auth: { isSuperAdmin: true }, autoSettingsLoading: { value: false }, autoSettingsOpen: { value: false }, autoSettingsError: { value: '' },
         autoSettingsProblem: { value: '' }, autoSettingsRead: { value: true }, autoConfirmedText: { value: 'stale-confirmed.test' },
         autoOptOutText: { value: 'stale-optout.test' }, puts: [], autoSend: { value: { domains: ['stale.test'], stopped: null } },
+        autoRecipientCheck: { value: { on: false, domain: 'stale.test', days: 7, held: { count: 9, byCode: {} } } },
       }
       const api = {
         get: async () => { const v = getAnswer(); if (v instanceof Error) throw v; return v },
         put: async (u, body) => { st.puts.push([u, body]); return body },
       }
       const deps = [st.auth, st.autoSettingsLoading, st.autoSettingsOpen, st.autoSettingsError, st.autoSettingsProblem, st.autoSettingsRead, st.autoConfirmedText,
-        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }, st.autoSend]
+        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }, st.autoSend, st.autoRecipientCheck]
       const open = new Function(...NAMES, `${openSrc}\nreturn openAutoSettings;`)(...deps)
       const save = new Function(...NAMES, `${saveSrc}\nreturn saveAutoSettings;`)(...deps)
       return { st, open, save }
@@ -317,6 +318,14 @@ section('§7  the settings dialog: Save waits for a read that worked')
     await bad.open()
     eq([bad.st.autoConfirmedText.value, bad.st.autoOptOutText.value, bad.st.autoSettingsRead.value, Boolean(bad.st.autoSettingsError.value)], ['', '', false, true],
       '§7 a failed read: both lists start empty (nothing from an earlier opening), not read, the error shown')
+    eq(bad.st.autoRecipientCheck.value, null, '§7 ...and no line about the check from an earlier opening')
+    const heldRead = { on: true, domain: 'chrobinson.com', days: 7, held: { count: 1, byCode: { RECIPIENT_NOT_KNOWN: 1 } } }
+    const readsCheck = dialog(() => ({ optOutDomains: [], confirmedBrokerDomains: [], unreadable: false, dropped: [], recipientCheck: heldRead }))
+    await readsCheck.open()
+    eq(readsCheck.st.autoRecipientCheck.value, heldRead, '§7 a read that says what the check has held: the dialog has it')
+    const readsNone = dialog(() => ({ optOutDomains: [], confirmedBrokerDomains: [], unreadable: false, dropped: [] }))
+    await readsNone.open()
+    eq(readsNone.st.autoRecipientCheck.value, null, '§7 ...one that says nothing: no line')
     bad.st.autoConfirmedText.value = 'example-new.test'
     await bad.save()
     eq(bad.st.puts, [], '§7 ...and Save sends nothing, so the stored opt-outs are never replaced by an empty list')
@@ -514,6 +523,84 @@ section('§13 the driver\'s Delivered starts the invoice: what a Super Admin rea
   ok(action && /const ask = kind === 'retry' \? tryAgainConfirmText\(status\) : ''/.test(action) && /if \(ask && !window\.confirm\(ask\)\) return/.test(action), '§13 FAILS ON THE OLD CODE: the dialog\'s Try again asks first, before anything is posted')
   ok(action && action.indexOf('window.confirm(ask)') < action.indexOf('api.post('), '§13 ...a "no" posts nothing')
   ok(action && /tryAgainDoneText\(status\)/.test(action) && !/within a few minutes/.test(action), '§13 FAILS ON THE OLD CODE: its answer comes from the status, not from a fixed sentence')
+}
+
+// ------------------------------------------------------------------ §14
+section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
+{
+  const WORDS = {
+    RECIPIENT_NOT_KNOWN: ['billing email not used before', "The rate con's billing email isn't one a person has already used on invoices for 3 loads, so nothing was sent. Check it against the rate con, then draft it by hand."],
+    RATECON_NAME_MISMATCH: ["rate con's name doesn't match", "The rate con's file name doesn't carry this load's whole number, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand."],
+    RATECON_NUMBER_MISMATCH: ["rate con's number doesn't match", "The rate con doesn't give this load's number, or gives another one, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand."],
+    RECIPIENT_CHECK_OFF: ['billing email check is off', "The billing email check is switched off on the server, so this invoice wasn't made or sent. Draft it by hand."],
+  }
+  for (const [code, [short, text]] of Object.entries(WORDS)) {
+    ok(rules.REASON_CODES.includes(code), `§14 ${code} is a server code`)
+    const chip = S.autoInvoiceChip({ state: 'needs_attention', code, invoiceId: '', changed: [], trigger: true, retry: 'send' })
+    eq(chip && [chip.label, chip.tone, chip.reason], [`Needs attention: ${short}`, 'bad', text], `§14 ${code}: a person reads what happened and what to do next`)
+    eq(S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code } }), true, `§14 ${code}: the toggle counts it`)
+  }
+  eq(S.canTryAgain({ state: 'needs_attention', code: 'RECIPIENT_NOT_KNOWN', retry: 'send' }), true, '§14 an address not yet known: Try again is offered, for once a person has invoiced it')
+  eq(S.canTryAgain({ state: 'needs_attention', code: 'RECIPIENT_CHECK_OFF', retry: 'none' }), false, '§14 the check off: no Try again, since a run can only stop here again')
+  ok(/if every check passes/.test(S.tryAgainConfirmText({ state: 'needs_attention', code: 'RECIPIENT_NOT_KNOWN', trigger: true, retry: 'send' })), '§14 the confirm on a load that could send promises nothing past the checks')
+
+  // What the settings dialog says of sending and of the check, from the settings read's own fields.
+  const sendText = fnOf('autoSendState') || (() => undefined)
+  const checkState = fnOf('recipientCheckState') || (() => ({ text: '(no such function on this tree)' }))
+  const CHR = 'chrobinson.com'
+  const OFF = { on: false, domain: CHR, days: 7, held: { count: 0, byCode: {} } }
+  const ON_LIST = { domains: [CHR], stopped: null }
+  const SENT_WORDS = `On: invoices to ${CHR} are sent to the broker automatically, with the POD and the rate con, and their copies are in Gmail Sent Mail. Other brokers get Gmail drafts.`
+  eq(sendText(ON_LIST).text, SENT_WORDS, '§14 the check on, sending on: the sentence as before')
+  eq(sendText(ON_LIST, null).text, SENT_WORDS, '§14 ...with nothing from the check')
+  eq(sendText(ON_LIST, { on: true, domain: CHR, days: 7, held: { count: 2, byCode: { RECIPIENT_NOT_KNOWN: 2 } } }).text, SENT_WORDS, '§14 ...and with loads held: the check has its own line')
+  const offSend = sendText(ON_LIST, OFF)
+  eq(offSend && offSend.text, `Invoices to ${CHR} aren't sent while the billing email check is off: each load stops at Needs attention for a person to draft by hand. Other brokers get Gmail drafts.`, '§14 the check off: it no longer says invoices are sent')
+  ok(offSend && !/are sent/.test(offSend.text), '§14 ...anywhere in the sentence')
+  eq(offSend && [offSend.stopped, offSend.canStop], [false, true], '§14 ...and Stop stays offered')
+  eq(sendText({ domains: [CHR, 'example-broker.test'], stopped: null }, OFF).text, `On: invoices to example-broker.test are sent to the broker automatically, with the POD and the rate con, and their copies are in Gmail Sent Mail. Invoices to ${CHR} aren't sent while the billing email check is off: each load stops at Needs attention for a person to draft by hand. Other brokers get Gmail drafts.`, '§14 another domain on the list keeps its sentence')
+  eq(sendText({ domains: [`billing.${CHR}`], stopped: null }, OFF).text, `Invoices to ${CHR} aren't sent while the billing email check is off: each load stops at Needs attention for a person to draft by hand. Other brokers get Gmail drafts.`, '§14 a subdomain is held with it')
+  const stoppedOff = sendText({ domains: [CHR], stopped: { at: 'x', reason: 'SMTP_REFUSED' } }, OFF)
+  ok(stoppedOff && stoppedOff.stopped === true && stoppedOff.canStop === false && /Automatic sending is stopped/.test(stoppedOff.text), '§14 stopped, with the check off: it still says stopped')
+  eq(checkState(null), null, '§14 nothing from the server: no line')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 0, byCode: {} } }), null, '§14 the check on, nothing held: no line')
+  eq(checkState(OFF) && checkState(OFF).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand.`, '§14 the check off: the line says so plainly')
+  eq(checkState({ ...OFF, held: { count: 3, byCode: { RECIPIENT_CHECK_OFF: 3 } } }).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand. 3 ${CHR} loads were held in the last 7 days.`, '§14 ...and what was held')
+  eq(checkState({ ...OFF, held: { count: 1, byCode: { RATECON_MISSING: 1 } } }).text, `The billing email check is switched off on the server, so invoices to ${CHR} aren't made or sent: each load stops at Needs attention for a person to draft by hand. 1 ${CHR} load was held in the last 7 days.`, '§14 ...one load, on a stop ahead of the check')
+  const STOP_TOO = `If ${CHR}'s billing address changed, its rate cons now read differently or they're filed under other names, every new load will stop too. See Needs attention on Completed Loads.`
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { RECIPIENT_NOT_KNOWN: 1 } } }).text, `1 ${CHR} load was held in the last 7 days, so its invoice was not sent (1 billing email not used before). ${STOP_TOO}`, '§14 one load held: the line says so plainly')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 3, byCode: { RATECON_NUMBER_MISMATCH: 1, RECIPIENT_NOT_KNOWN: 2 } } }).text, `3 ${CHR} loads were held in the last 7 days, so their invoices were not sent (1 rate con's number doesn't match, 2 billing email not used before). ${STOP_TOO}`, '§14 several held: by reason')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 4, byCode: { NO_BILLING_EMAIL: 1, RATECON_BY_CONTENT: 1, RATECON_MISSING: 1, RATECON_TOTAL_UNREAD: 1, RECIPIENT_DOMAIN_MISMATCH: 0 } } }).text, `4 ${CHR} loads were held in the last 7 days, so their invoices were not sent (1 no billing email, 1 rate con found by content, 1 no rate con, 1 rate con total couldn't be read, 0 billing email on another domain). ${STOP_TOO}`, '§14 every code the server counts has its words')
+  eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { MADE_UP_CODE: 1 } } }).text, `1 ${CHR} load was held in the last 7 days, so its invoice was not sent. ${STOP_TOO}`, '§14 a reason this client has no words for: left out, the count stays')
+  ok(/^2 C\.H\. Robinson loads were held in the last 7 days, /.test(checkState({ on: true, days: 7, held: { count: 2, byCode: {} } }).text), '§14 a read with no domain: the line still reads as a sentence')
+  for (const bad of ['off', 1, [], { on: 'false' }]) eq(checkState(bad), null, `§14 ${JSON.stringify(bad)}: no line`)
+  ok(Array.isArray(rules.KNOWN_ADDRESS_HOLD_CODES) && rules.KNOWN_ADDRESS_HOLD_CODES.length > 0, '§14 the server has a list of what it counts')
+  for (const code of rules.KNOWN_ADDRESS_HOLD_CODES || []) ok(Object.hasOwn(S.AUTO_INVOICE_REASONS, code), `§14 ${code}: the server counts it and this client has its words`)
+
+  // The dialog's mode line, from the same read: with the check off it doesn't promise those invoices.
+  const modeLine = fnOf('autoModeLine') || (() => '(no such function on this tree)')
+  const SEND_LINE = 'On: each load delivered with its POD gets its broker invoice, sent automatically where sending is on (below), else as a Gmail draft a person checks and sends.'
+  const DRAFT_LINE = 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  const SHADOW_LINE = 'Shadow: it records what it would draft, and drafts nothing.'
+  const EXCEPT = ` Except invoices to ${CHR}: with the billing email check off, each load stops at Needs attention for a person to draft by hand.`
+  eq(modeLine('on', { sending: true }), SEND_LINE, '§14 the mode line, sending on: as before')
+  eq(modeLine('on', { sending: false }), DRAFT_LINE, '§14 the mode line, sending off: as before')
+  eq(modeLine('shadow', {}), SHADOW_LINE, '§14 the mode line, shadow: as before')
+  eq(modeLine('on', { sending: true, check: { on: true, domain: CHR, days: 7, held: { count: 2, byCode: {} } } }), SEND_LINE, '§14 the mode line, loads held with the check on: as before, the check has its own line')
+  eq(modeLine('on', { sending: true, check: OFF }), `${SEND_LINE}${EXCEPT}`, '§14 the mode line, the check off, sending on: it says those invoices stop')
+  eq(modeLine('on', { sending: false, check: OFF }), `${DRAFT_LINE}${EXCEPT}`, '§14 the mode line, the check off, sending off: the same')
+  eq(modeLine('shadow', { check: OFF }), SHADOW_LINE, '§14 the mode line, shadow: the check holds nothing there')
+  for (const bad of ['off', 1, [], { on: 'false' }, { on: 'false', domain: CHR }, { domain: CHR }, { on: false }, { on: false, domain: 7 }]) eq(modeLine('on', { sending: true, check: bad }), SEND_LINE, `§14 the mode line, ${JSON.stringify(bad)} from the server: no exception read into it`)
+
+  // The dialog: its line, and the read it comes from.
+  const DIALOG = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue'), 'utf8')
+  ok(/<p v-if="recipientCheckView" class="auto-settings-problem" role="alert">\{\{ recipientCheckView\.text \}\}<\/p>/.test(DIALOG), '§14 the dialog shows the line, as a problem a person reads first')
+  ok(DIALOG.indexOf('recipientCheckView.text') < DIALOG.indexOf('<template v-if="autoSendView">'), '§14 ...outside the sending section, so it shows with sending off too')
+  ok(/const recipientCheckView = computed\(\(\) => recipientCheckState\(autoRecipientCheck\.value\)\)/.test(DIALOG), '§14 ...from the check as this opening read it')
+  ok(/const autoSendView = computed\(\(\) => autoSendState\(autoSend\.value, autoRecipientCheck\.value\)\)/.test(DIALOG), '§14 the sending sentence is told the check too')
+  ok(/const autoModeText = computed\(\(\) => autoModeLine\(autoMode\.value, \{ sending: Boolean\(autoSendView\.value\), check: autoRecipientCheck\.value \}\)\)/.test(DIALOG), '§14 the mode line is told it too')
+  ok(/autoRecipientCheck\.value = s && s\.recipientCheck && typeof s\.recipientCheck === 'object' \? s\.recipientCheck : null/.test(DIALOG), '§14 the read sets it')
+  ok(/autoSend\.value = null; autoRecipientCheck\.value = null/.test(DIALOG), '§14 each opening starts with none, so an old read can\'t show')
 }
 
 console.log(`\n${'='.repeat(64)}`)
