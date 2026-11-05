@@ -26,7 +26,6 @@
         <p v-if="week.newWeek" class="perf-note" data-testid="perf-new-week">{{ week.newWeek }}</p>
         <p v-if="week.closes" class="perf-note" data-testid="perf-closes">{{ week.closes }}</p>
         <p class="perf-note" data-testid="perf-rule">{{ week.rule }}</p>
-        <p class="perf-note" data-testid="perf-not-pay">{{ week.notPay }}</p>
       </section>
 
       <section class="card perf-card" :aria-label="week.title" data-testid="perf-counted">

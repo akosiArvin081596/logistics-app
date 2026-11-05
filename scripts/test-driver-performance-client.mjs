@@ -118,8 +118,7 @@ eq('§1 the target line, exact', v.TARGET_LINE, 'Target: 7.5 loads a week (1.5 a
 eq('§1 the guide line', v.GUIDE_LINE, 'Targets are a guide, not a requirement.')
 eq('§1 the privacy line, exact', v.PRIVATE_LINE, 'No other driver can see this.')
 eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
-eq('§1 counts loads, not pay: the line every driver can read', v.NOT_PAY_LINE, 'Counts loads, not pay.')
-eq('§1 and the one for an invoice that pays days', v.NOT_PAY_DAYS_LINE, 'Counts loads, not pay. Your invoice pays days.')
+eq('§1 neither line about pay is left', [v.NOT_PAY_LINE, v.NOT_PAY_DAYS_LINE], [undefined, undefined])
 eq('§1 a lowered target, exact', v.LOWER_TARGET_LINE, 'Your target is lower this week for your approved time off.')
 eq('§1 what to do about a wrong row', v.TELL_DISPATCH_LINE, 'If something looks wrong, tell dispatch.')
 eq('§1 a week that can\'t be reached asks for nothing more', v.NEW_WEEK_LINE, 'A new week starts Saturday.')
@@ -137,7 +136,7 @@ const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
 eq('§1 every word a driver sees is free of ranking, score, tier and dollars',
   [...DRIVER_WORDS, DRIVER_TEMPLATE_TEXT, BAR_TEMPLATE_TEXT].filter((w) => w === undefined || BANNED.test(w)), [])
-eq('§1 "pay" appears on one line only, the one saying this isn\'t it',
+eq('§1 "pay" appears on no line a driver sees',
   [...DRIVER_WORDS, DRIVER_TEMPLATE_TEXT, BAR_TEMPLATE_TEXT].filter((w) => /\bpay\b/i.test(w || '')), [])
 eq('§1 no hours figure or 8.5 target in the drive-hours line', /\d/.test(v.DRIVE_HOURS_LINE || '1'), false)
 // The mockup showed the shape only: none of its own words carry over to a driver's screen.
@@ -234,14 +233,14 @@ const week = (id, over) => ({
   targetLowered: false,
   ...over,
 })
-const COUNT_RULE = 'A pickup counts 0.5 and a drop-off counts 0.5, so each load is 1.'
+const COUNT_RULE = 'Each pickup counts 0.5 and each delivery 0.5.'
 const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 0.5, pickup: 0.5 }, invoicePaysDays: true, weeks })
 const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, loads: [] }))
 const thisWeek = ownWeekView(both, 'this-week') || {}
 eq('§6 this week, in words', { ...thisWeek, loads: undefined }, {
   range: 'Oct 31 – Nov 6', count: '4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%',
   left: '3 loads left this week.', closes: 'Week closes Fri 11:59 PM ET', newWeek: '', rule: COUNT_RULE,
-  notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted this week', empty: v.NO_LOADS_LINE,
+  lowered: '', title: 'What counted this week', empty: v.NO_LOADS_LINE,
 })
 eq('§6 each row shows both credits, or what became of the pickup', thisWeek.loads, [
   { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 0.5' },
@@ -260,15 +259,11 @@ const lastWeek = ownWeekView(both, 'last-week') || {}
 eq('§6 last week: the final figure and its list, with no label and nothing left', { ...lastWeek, loads: undefined }, {
   range: 'Oct 24 – Oct 30', count: '7.5 of 7.5 loads', pace: '', paceId: '', width: '100%',
   left: '', closes: '', newWeek: '', rule: COUNT_RULE,
-  notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
+  lowered: '', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
 })
-// The server decides which sentence is true of his invoice. Anything but a plain yes reads the
-// shorter line, which is true of every driver.
-const notPayFor = (invoicePaysDays) => ownWeekView({ ...answerOf(week('this-week')), invoicePaysDays }, 'this-week')?.notPay
-eq('§6 a day-rate driver reads that his invoice pays days', notPayFor(true), 'Counts loads, not pay. Your invoice pays days.')
-eq('§6 a percentage driver reads only that it counts loads, not pay', notPayFor(false), 'Counts loads, not pay.')
-eq('§6 and so does anything but a plain yes', ['true', 1, null, undefined, {}].map(notPayFor), new Array(5).fill('Counts loads, not pay.'))
-eq('§6 on last week too', ownWeekView({ ...answerOf(week('last-week', { left: null, pace: null })), invoicePaysDays: false }, 'last-week')?.notPay, 'Counts loads, not pay.')
+// The server may still say what his invoice pays; no screen says anything about pay.
+eq('§6 no view carries a line about pay, whatever the answer says of his invoice', [true, false, 'true', undefined].map((invoicePaysDays) => has(ownWeekView({ ...answerOf(week('this-week')), invoicePaysDays }, 'this-week'), 'not pay')), [false, false, false, false])
+eq('§6 the app doesn\'t read what his invoice pays', /invoicePaysDays/.test(libSrc), false)
 // The line only when the server flags it, and only where its words are true.
 const loweredFor = (targetLowered) => ownWeekView(answerOf(week('this-week', { targetLowered })), 'this-week')?.lowered
 eq('§6 a target the server flags as lowered says why', loweredFor(true), 'Your target is lower this week for your approved time off.')
@@ -299,7 +294,7 @@ const decoyAnswer = {
     loads: [{ ...DECOYS, loadId: 'DP-1', pickup: { ...DECOYS, day: 'Mon', credits: 0.5 }, delivery: { ...DECOYS, day: 'Tue', credits: 0.5 } }],
   }), ...DECOYS, gap: 'decoy-gap', expected: 41 }],
 }
-eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'notPay', 'lowered', 'title', 'empty', 'loads'])
+eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'lowered', 'title', 'empty', 'loads'])
 eq('§6 exactly two fields on a row', Object.keys(ownWeekView(decoyAnswer, 'this-week')?.loads?.[0] || {}), ['title', 'line'])
 eq('§6 no name, hours, score, tier, pay, broker, rate, rank or other driver\'s figure gets through, whatever the answer holds', showsDecoy(ownWeekView(decoyAnswer, 'this-week')), [])
 eq('§6 no answer, no card', [ownWeekView(null, 'this-week'), ownWeekView({}, 'this-week'), ownWeekView({ weeks: [] }, 'this-week'), ownWeekView(both, 'this-month')], [null, null, null, null])
@@ -417,9 +412,9 @@ const cardScript = scriptOf(card)
 const printed = [...cardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]).sort()
 eq('§11 it prints only these, so a name or a figure can\'t be added by accident', [...new Set(printed)], [
   'DRIVE_HOURS_LINE', 'FAILED_LINE', 'GUIDE_LINE', 'HOS_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
-  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.notPay', 'week.pace', 'week.range', 'week.rule', 'week.title',
+  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.rule', 'week.title',
 ].sort())
-eq('§11 the pay line is the view\'s, so the server chooses it: neither constant is in the template', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|invoice pays/.test(card), false)
+eq('§11 no line about pay on the tab', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|notPay|perf-not-pay|invoice pays/.test(card), false)
 eq('§11 the lowered-target line only when the view has one, right after the target line', /\{\{ TARGET_LINE \}\}<\/p>\s*<p v-if="week\.lowered"[^>]*>\{\{ week\.lowered \}\}<\/p>/.test(cardTemplate), true)
 eq('§11 no v-html', cardTemplate.includes('v-html'), false)
 eq('§11 it never names the board: no ranking can reach a driver\'s screen', /boardUrl|boardView|BOARD_URL|rowView|tileView|leaderboard|\.tiles|\brank\b|unitLabel|isYou|\bYOU\b|COMING_SOON|CATEGORIES|\bPERIODS\b/.test(card), false)
@@ -531,9 +526,7 @@ if (typeof server.personalWeek === 'function') {
     { title: 'Load DP-4', line: 'Picked up Wed 0.5' },
   ])
   eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%', hos: 'Hours of service come first.' })
-  // The line's "each load is 1" is fixed words, so the server's own sum has to stay what they say.
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
-  eq('§14 and its "each load is 1" is the server\'s own sum', [server.CREDIT_WEIGHTS.pickup + server.CREDIT_WEIGHTS.delivery, server.loadCredits(1, 1)], [1, 1])
   // "N loads left" reads true at every half the server can send, through the view's own words.
   const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left
   eq('§14 what\'s left, half credits included', [realLeft(7, 7), realLeft(7, 6), realLeft(5, 5), realLeft(1, 0), realLeft(8, 7)],

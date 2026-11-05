@@ -27,8 +27,8 @@
 // And at 390x844:
 //   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
 //       starts Saturday." and no closing line; Ahead of Pace; the target reached; no label at all;
-//       a percentage driver reads only "Counts loads, not pay."; an approved day off reads his
-//       lower figure and the one line saying why
+//       a percentage driver's tab says nothing about pay, as nobody's does; an approved day off
+//       reads his lower figure and the one line saying why
 //   O   the kill switch off (404 FEATURE_OFF): five tabs as before, no bar; the held place goes on
 //       his first move between screens
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
@@ -92,19 +92,17 @@ const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 const GUIDE_LINE = 'Targets are a guide, not a requirement.'
 const PRIVATE_LINE = 'No other driver can see this.'
 const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
-const NOT_PAY_LINE = 'Counts loads, not pay.'
-const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 const NEW_WEEK_LINE = 'A new week starts Saturday.'
-const RULE_LINE = 'A pickup counts 0.5 and a drop-off counts 0.5, so each load is 1.'
+const RULE_LINE = 'Each pickup counts 0.5 and each delivery 0.5.'
 const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
 const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
 const ALL_TABS = [...BASE_TABS, 'Performance']
 const TILES = ['Most loads', 'Least fuel cost', 'Safety', 'Lowest idle']
 // None of these may ever be on a driver's screen.
-const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$']
+const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days']
 
 // ---------------------------------------------------------------- made-up fixtures
 const DRIVER = { id: 90321, username: 'qa-performance-driver', role: 'Driver', driverName: 'Casey Example', email: '', fullName: 'Casey Example', companyName: '', mustChangePassword: false }
@@ -444,7 +442,6 @@ async function fullRun(browser, size) {
     const closes = await text(page, testid('perf-closes'))
     const range = await text(page, testid('perf-range'))
     const rule = await text(page, testid('perf-rule'))
-    const notPay = await text(page, testid('perf-not-pay'))
     const tell = await text(page, testid('perf-tell-dispatch'))
     const hours = await text(page, testid('perf-drive-hours'))
     const target = await text(page, testid('perf-target'))
@@ -461,10 +458,10 @@ async function fullRun(browser, size) {
     const fits = await noSideScroll(page)
     const hidden = banned(panel).concat(['Casey Example', 'You'].filter((w) => new RegExp(`\\b${w}\\b`).test(panel)))
     record(`W-${t}`, 'This week: only his own figures',
-      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; "${NOT_PAY_DAYS_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
-      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", not-pay "${notPay}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
+      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
+      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
       count === '3.5 of 7.5 loads' && pace === 'On Track' && weekWide === '46%' && left === '4 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
-        && rule === RULE_LINE && notPay === NOT_PAY_DAYS_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
+        && rule === RULE_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
         && hos === HOS_LINE && hosSeen && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
       await shot(page, `W-${t}`))
 
@@ -796,12 +793,12 @@ async function weekShapesRun(browser, size) {
       await barSettled(page, percentage, true)
       await appears(page, testid('perf-bar'), 8000)
       await press(page.locator(testid('perf-bar')).first(), size)
-      await appears(page, testid('perf-not-pay'), 8000)
-      const notPay = await text(page, testid('perf-not-pay'))
+      await appears(page, testid('perf-rule'), 8000)
+      const notPay = await page.locator(testid('perf-not-pay')).count()
       const body = squeeze(await page.locator('body').innerText())
-      record(`P-percentage-${t}`, 'A percentage driver: nothing false about his invoice', `"${NOT_PAY_LINE}" alone; "invoice pays days" nowhere on the page`,
-        `not-pay "${notPay}", pays-days on the page ${body.includes('invoice pays days')}`,
-        notPay === NOT_PAY_LINE && !body.includes('invoice pays days'), await shot(page, `P-percentage-${t}`))
+      record(`P-percentage-${t}`, 'A percentage driver: nothing about pay', `no not-pay line; "Counts loads" and "invoice pays days" nowhere on the page`,
+        `not-pay lines ${notPay}, counts-loads on the page ${body.includes('Counts loads')}, pays-days on the page ${body.includes('invoice pays days')}`,
+        notPay === 0 && !body.includes('Counts loads') && !body.includes('invoice pays days'), await shot(page, `P-percentage-${t}`))
     } finally {
       await ctx.close()
     }

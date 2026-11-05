@@ -15,10 +15,6 @@ export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 export const GUIDE_LINE = 'Targets are a guide, not a requirement.'
 export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
-// The first is true of every driver. The second only of one whose invoice pays days, and the
-// server says which he is.
-export const NOT_PAY_LINE = 'Counts loads, not pay.'
-export const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 export const NEW_WEEK_LINE = 'A new week starts Saturday.'
@@ -134,8 +130,7 @@ export function ownWeekView(answer, periodId) {
     left: leftWords,
     closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
     newWeek: newWeek ? NEW_WEEK_LINE : '',
-    rule: `A pickup counts ${weights.pickup} and a drop-off counts ${weights.delivery}, so each load is 1.`,
-    notPay: answer.invoicePaysDays === true ? NOT_PAY_DAYS_LINE : NOT_PAY_LINE,
+    rule: `Each pickup counts ${weights.pickup} and each delivery ${weights.delivery}.`,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
     title: current ? 'What counted this week' : 'What counted last week',
     empty: current ? NO_LOADS_LINE : NO_LOADS_LAST_WEEK,
