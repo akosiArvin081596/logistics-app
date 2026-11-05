@@ -157,6 +157,8 @@
       :driver-name="driverName"
       :socket-connected="socket.isConnected.value"
       :has-ever-connected="socket.hasEverConnected.value"
+      fuel-chip-taps
+      @fuel-tap="handleFuelTap"
       @logout="handleLogout"
     />
 
@@ -178,6 +180,7 @@
           :has-active-job="driverStore.hasActiveJob"
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
+          :open-fuel="fuelTapRow === detailLoad._rowIndex"
           :responding="isResponding(detailLoad)"
           :driver-position="driverPosition"
           :phone-gps-mode-active="phoneGpsModeActive"
@@ -189,6 +192,7 @@
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
           @enable-phone-gps="enablePhoneGps"
+          @fuel-opened="fuelTapRow = null"
         />
 
         <!-- Load List -->
@@ -435,6 +439,7 @@ import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
+import { fuelTapLoad } from '../lib/driverFuelView'
 import { expensesForLoad } from '../lib/loadId'
 import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
@@ -983,6 +988,25 @@ async function confirmDecline() {
 }
 
 function handleLoadSelect(load) {
+  detailRowIndex.value = load._rowIndex
+}
+
+// A tap on the header's fuel chip opens a load's Fuel section, so it never does nothing.
+// With no load to open, the chip's own line shows instead, for long enough to read.
+const FUEL_LINE_MS = 6000
+const fuelTapRow = ref(null)
+function handleFuelTap(title) {
+  const onScreen = currentTab.value === 'loads' ? detailLoad.value : null
+  const load = fuelTapLoad({ onScreen, inProgress: driverStore.inProgressLoad, queued: driverStore.queuedLoads })
+  if (!load) {
+    toast.show(title, 'success', FUEL_LINE_MS)
+    return
+  }
+  if (!onScreen) {
+    handleTabSwitch('loads')
+    driverStore.loadSubTab = 'active'
+  }
+  fuelTapRow.value = load._rowIndex
   detailRowIndex.value = load._rowIndex
 }
 

@@ -108,7 +108,7 @@
            verdict has to reach the header rather than wait behind a tap. -->
       <van-collapse-item name="fuel" :lazy-render="false">
         <template #title>
-          <span class="fuel-title">
+          <span ref="fuelTitleEl" class="fuel-title">
             Fuel
             <span v-if="fuelBadge" class="fuel-badge" :class="'fb-' + fuelBadge.tone">
               {{ fuelBadge.text }}
@@ -277,7 +277,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watchEffect, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, watchEffect, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
@@ -319,9 +319,12 @@ const props = defineProps({
   // caller resurrects a session-long banner on every load.
   phoneGpsModeActive: { type: Boolean, default: false },
   phoneGpsStatus: { type: String, default: '' },
+  // The header's fuel chip was tapped: open the Fuel section. DriverView clears it on
+  // `fuel-opened`, so the next tap is a new request even if the driver shut the section.
+  openFuel: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit', 'enable-phone-gps'])
+const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit', 'enable-phone-gps', 'fuel-opened'])
 
 // Status + Map open by default. Status is the primary action driver came
 // here for; Map gives context. Everything else stays collapsed to keep
@@ -335,6 +338,17 @@ const docListRef = ref(null)
 // its cue to fetch the STOPS, so the Google Places spend only happens once the
 // driver actually opens the Fuel section.
 const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
+
+// The section sits below the status and the map, so it also comes into view: opened
+// off screen, the tap would still look like nothing happened.
+const fuelTitleEl = ref(null)
+watch(() => props.openFuel, async (asked) => {
+  if (!asked) return
+  if (!fuelSectionOpen.value) openSections.value = [...openSections.value, 'fuel']
+  await nextTick()
+  fuelTitleEl.value?.scrollIntoView({ block: 'start' })
+  emit('fuel-opened')
+}, { immediate: true })
 
 // The trip-fuel verdict, surfaced on the collapsed section header.
 //
@@ -674,6 +688,8 @@ const dropoffFields = computed(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.45rem;
+  /* Scrolled to from the header's chip: it lands below the fixed header, not under it. */
+  scroll-margin-top: calc(var(--driver-header-height, 52px) + 1rem);
 }
 .fuel-badge {
   padding: 0.1rem 0.45rem;

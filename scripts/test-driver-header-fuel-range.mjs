@@ -19,17 +19,24 @@
 //      "Refuel now", "Fuel range: not available") with no working in its tooltip;
 //      with none, its colour and tooltip are exactly as before
 //   §5 the chip's sentence: the server's own figure in it, formatted as before, on
-//      both paths; the chip takes no tap
+//      both paths
 //   §6 the header's real height reaches the page below it (the header is fixed),
 //      and a Driver's fuel row is there from the first paint
 //   §7 the first row keeps one height whatever the name and Offline do, and the
 //      Messages box follows the header's height, so its input stays above the tab bar
+//   §8 the chip's tap: a real button in the normal header, plain on the two lock
+//      screens; a tap hands up the chip's own line, one figure and no working on
+//      either flag path; nothing happens with a dialog over the chip
+//   §9 where the tap goes: which load (the driver store's own getters, with the load
+//      list that runs newest first), DriverView's handler run on stand-ins, and the
+//      button's box, which must stay the plain chip's so nothing moves
 //
 // The component's own <script setup>, compiled with the client's compiler and
 // run with its I/O stubbed. No DOM, no server. §4's blocks come from the server's
-// own planDriverFuel() (lib/fuel-model.js), on made-up figures. §5 and §6 read the
-// template and styles as text for what the script can't show, and so does §7; the
-// geometry itself is scripts/e2e/driver-fuel-screen.mjs (DFC, DFO and DFM steps).
+// own planDriverFuel() (lib/fuel-model.js), on made-up figures. §8 walks what the
+// compiled template renders. §6, §7 and §9 read the styles and DriverView as text for
+// what the script can't show; the geometry itself and the real tap are
+// scripts/e2e/driver-fuel-screen.mjs (DFC, DFO, DFM and DFT steps).
 //   node scripts/test-driver-header-fuel-range.mjs
 //   DRIVER_HEADER_VUE=/tmp/base/DriverHeader.vue node scripts/test-driver-header-fuel-range.mjs   # a base copy: fails
 import fs from 'fs'
@@ -55,14 +62,14 @@ function ok(name, cond) {
 
 const clientRequire = createRequire(path.join(CLIENT_DIR, 'package.json'))
 const Vue = clientRequire('vue')
-const { parse, compileScript } = clientRequire('vue/compiler-sfc')
+const { parse, compileScript, compileTemplate } = clientRequire('vue/compiler-sfc')
 
 // ══ the harness ══════════════════════════════════════════════════════════════
 // The I/O is stand-ins: child components are stubs, useApi records each GET and
 // answers `world.answer`, the auth store reports the role a scenario sets, and
 // onMounted / onBeforeUnmount hand their callbacks to the scenario to run. The
 // client's own lib modules are the real ones (from this checkout's driver folder).
-const world = { role: 'Driver', answer: null, gets: [], mounted: [], unmounted: [], intervals: [] }
+const world = { role: 'Driver', answer: null, gets: [], mounted: [], unmounted: [], intervals: [], emits: [] }
 const STUBS = {
   '../../composables/useApi': {
     useApi: () => ({ get: async (url) => { world.gets.push(url); return world.answer || { ok: true, hasFuelData: false } } }),
@@ -75,10 +82,20 @@ const STUBS = {
     }),
   },
 }
+let renderHeader = null
 async function compileHeader() {
   const { descriptor } = parse(fs.readFileSync(HEADER_VUE, 'utf8'), { filename: 'DriverHeader.vue' })
   // Not inlined, so setup() hands back its bindings (§4 reads fuelChip).
-  let body = compileScript(descriptor, { id: 'DriverHeader.vue', inlineTemplate: false }).content
+  const compiled = compileScript(descriptor, { id: 'DriverHeader.vue', inlineTemplate: false })
+  let body = compiled.content
+  // The template on its own, so §8 can walk what it renders with those bindings.
+  const template = compileTemplate({
+    source: descriptor.template.content, filename: 'DriverHeader.vue', id: 'DriverHeader.vue',
+    compilerOptions: { bindingMetadata: compiled.bindings },
+  }).code
+    .replace(/^import\s*\{([^}]*)\}\s*from\s*"vue";?[ \t]*$/m, (_, names) => `const { ${names.replace(/\s+as\s+/g, ': ')} } = __vue;`)
+    .replace(/^export function render/m, 'return function render')
+  renderHeader = new Function('__vue', template)(Vue)
   const specs = []
   body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, names, q, spec) => {
     specs.push(spec)
@@ -119,9 +136,11 @@ const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) =
 let Header
 try { Header = await compileHeader() } catch (err) { ok(`DriverHeader.vue compiles in this harness (${err.message})`, false) }
 
-async function mountAs(role, answer = null, beforeMount = null) {
-  Object.assign(world, { role, answer, gets: [], mounted: [], unmounted: [], intervals: [] })
-  const bindings = Header.setup({ driverName: 'someone', socketConnected: true, hasEverConnected: false }, { expose() {}, emit() {}, attrs: {}, slots: {} })
+async function mountAs(role, answer = null, beforeMount = null, extraProps = {}) {
+  Object.assign(world, { role, answer, gets: [], mounted: [], unmounted: [], intervals: [], emits: [] })
+  const props = { driverName: 'someone', socketConnected: true, hasEverConnected: false, ...extraProps }
+  const emit = (name, ...args) => world.emits.push([name, ...args])
+  const bindings = Header.setup(props, { expose() {}, emit, attrs: {}, slots: {} })
   if (beforeMount) beforeMount(bindings)
   for (const fn of world.mounted) fn()
   await drain()
@@ -221,13 +240,11 @@ if (Header) {
       [live, est, noTank, now, carried, noDevice].every((c) => !!c && !WORKING_TEXT.test(c.text) && !WORKING_TITLE.test(c.title)))
 
     // The flag off: no block, so the colour and the tooltip are exactly as before.
-    const TODAY = {
-      tone: 'ok', text: SAYS(225),
-      title: 'About 225 miles before you need to refuel (48% in the tank). That is 240 miles until empty, minus a 15 mile reserve. This is the low end of the range, not the best case.',
-    }
-    ok('§4 the flag off (no block): the sentence, with the colour and tooltip exactly as before', JSON.stringify(await chip(answer(MEASURED, null))) === JSON.stringify(TODAY))
+    const FLAG_OFF = { tone: 'ok', text: SAYS(225), title: 'About 225 miles before you run out.' }
+    ok('§4 the flag off (no block): the sentence and its colour as before, its tooltip the flag-on line',
+      JSON.stringify(await chip(answer(MEASURED, null))) === JSON.stringify(FLAG_OFF))
     ok('§4 a block of a version this client doesn\'t know is ignored (as before)',
-      JSON.stringify(await chip(answer(MEASURED, { ...block(), v: 2, milesLeft: 1 }))) === JSON.stringify(TODAY))
+      JSON.stringify(await chip(answer(MEASURED, { ...block(), v: 2, milesLeft: 1 }))) === JSON.stringify(FLAG_OFF))
 
     // ══ §5 — the chip's sentence ═════════════════════════════════════════════
     // N is the figure the chip showed before, and it is the server's: nothing else
@@ -272,12 +289,122 @@ if (Header) {
     const every = [live, dropout, est, noTank, carried, noDevice, staleChip, await flagOff({ rangePlanningMiles: 240, rangeUsableMiles: 225 })]
     ok('§5 no state still reads "Fuel ?" or the bare "N mi"', every.every((c) => !!c && !/\?|\d mi$/.test(c.text)))
 
-    // A chip that takes no tap must stay one: no handler, no button, no focus stop.
-    const headerSrc = fs.readFileSync(HEADER_VUE, 'utf8')
-    const chipTag = (headerSrc.match(/<([a-z-]+)\b[^>]*\bfuel-chip\b[^>]*>/) || [])
-    ok('§5 the chip is a plain span', chipTag[1] === 'span')
-    ok('§5 …with no tap handler, role or focus stop', !!chipTag[0] && !/@click|@touch|@pointer|v-on|\brole=|tabindex/.test(chipTag[0]))
-    ok('§5 …and its colour and tooltip bindings stay', !!chipTag[0] && /:class="fuelChip\.tone"/.test(chipTag[0]) && /:title="fuelChip\.title"/.test(chipTag[0]))
+    // ══ §8 — the chip's tap ══════════════════════════════════════════════════
+    // What the compiled template renders, with the bindings setup() handed back.
+    const walk = (node, seen = []) => {
+      if (Array.isArray(node)) { node.forEach((n) => walk(n, seen)); return seen }
+      if (!node || typeof node !== 'object') return seen
+      seen.push(node)
+      if (Array.isArray(node.children)) walk(node.children, seen)
+      return seen
+    }
+    const hasClass = (name) => (node) => new RegExp(`(^|\\s)${name}(\\s|$)`).test(String((node.props && node.props.class) || ''))
+    const rendered = (bindings, props) => walk(renderHeader({}, [], { driverName: 'someone', socketConnected: true, hasEverConnected: false, ...props }, Vue.proxyRefs(bindings), {}, {}))
+    const chipNode = async (a, props = { fuelChipTaps: true }) => {
+      const { bindings } = await mountAs('Driver', a, null, props)
+      for (const fn of world.unmounted) fn()
+      return { node: rendered(bindings, props).find(hasClass('fuel-chip')) || null, bindings, props }
+    }
+    // A press on the chip: `onTop` is what the page says is at the chip's centre.
+    const box = { left: 10, top: 60, width: 200, height: 24 }
+    const inside = {}
+    const chipEl = { getBoundingClientRect: () => box, contains: (n) => n === chipEl || n === inside }
+    const press = async (a, onTop = chipEl, doc = null) => {
+      const { node } = await chipNode(a)
+      if (!node || !node.props || typeof node.props.onClick !== 'function') return null
+      const asked = []
+      const realDocument = globalThis.document
+      globalThis.document = doc || { elementFromPoint: (x, y) => { asked.push([x, y]); return onTop } }
+      try {
+        world.emits = []
+        node.props.onClick({ currentTarget: chipEl })
+      } finally {
+        globalThis.document = realDocument
+      }
+      return { lines: world.emits.filter((e) => e[0] === 'fuel-tap').map((e) => e[1]), asked }
+    }
+    const lineOf = async (a) => {
+      const p = await press(a)
+      return p && p.lines.length === 1 ? p.lines[0] : null
+    }
+    const ON = answer(MEASURED, block())
+    const OFF = answer(MEASURED, null)
+
+    const onNode = (await chipNode(ON)).node
+    const offNode = (await chipNode(OFF)).node
+    for (const [path, node] of [['flag on', onNode], ['flag off', offNode]]) {
+      ok(`§8 ${path}: in the normal header the chip is a real button`, !!node && node.type === 'button' && node.props.type === 'button')
+      ok(`§8 ${path}: …with a tap handler`, !!node && typeof node.props.onClick === 'function')
+      ok(`§8 ${path}: …and a label that starts with the words on it, so a voice command for them finds it`,
+        !!node && String(node.props['aria-label'] || '').startsWith(`${SAYS(225)}.`) && /Show details/.test(node.props['aria-label']))
+      ok(`§8 ${path}: …its colour, tooltip and sentence as the plain chip's`,
+        !!node && /\bok\b/.test(String(node.props.class)) && node.props.title === 'About 225 miles before you run out.' && String(node.children).includes(SAYS(225)))
+    }
+    for (const [what, props] of [['with no prop', {}], ['with the prop off', { fuelChipTaps: false }]]) {
+      const { node } = await chipNode(ON, props)
+      ok(`§8 ${what} (a lock screen's header): a plain span, the same sentence and colour`,
+        !!node && node.type === 'span' && String(node.children).includes(SAYS(225)) && /\bok\b/.test(String(node.props.class)))
+      ok(`§8 ${what}: …with no tap handler, role, focus stop or label`,
+        !!node && !Object.keys(node.props).some((k) => /^on[A-Z]|^role$|^tabindex$|^aria-/.test(k)))
+    }
+    // Before the first answer: the hidden stand-in, in every header, and never a button.
+    {
+      const { bindings } = await mountAs('Driver', { ok: false }, null, { fuelChipTaps: true })
+      await drain()
+      for (const fn of world.unmounted) fn()
+      const nodes = rendered(bindings, { fuelChipTaps: true })
+      const held = nodes.find(hasClass('fuel-held'))
+      ok('§8 no answer yet, in the normal header: only the hidden stand-in, a span with no handler',
+        !nodes.some(hasClass('fuel-chip')) && !!held && held.type === 'span' && !Object.keys(held.props).some((k) => /^on[A-Z]/.test(k)))
+    }
+
+    ok('§8 flag on: a tap hands up the chip\'s own line', (await lineOf(ON)) === 'About 225 miles before you run out.')
+    ok('§8 flag off: the same line, word for word', (await lineOf(OFF)) === 'About 225 miles before you run out.')
+    const CARRIED_LINE = "About 225 miles before you run out. Your fuel sensor isn't reporting. This is an estimate."
+    ok('§8 flag off, a sensor dropout: plain words, the same as the flag on\'s',
+      (await lineOf(answer({ ...MEASURED, fuelSource: 'carried' }, null))) === CARRIED_LINE)
+    ok('§8 flag on, a sensor dropout', (await lineOf(answer({ ...MEASURED, fuelSource: 'carried' }, block({ reading: reading(48, 'carried') })))) === CARRIED_LINE)
+    const NOW_LINE = 'Refuel now. Stop for fuel as soon as you can.'
+    ok('§8 flag off, 0 usable miles: the instruction, never "About 0 miles"',
+      (await lineOf(answer({ fuelPct: 3, rangePlanningMiles: 12, rangeUsableMiles: 0 }, null))) === NOW_LINE)
+    ok('§8 flag on, refuel now', (await lineOf(answer({ fuelPct: 3, rangeBasis: 'measured', rangePlanningMiles: 15, rangeUsableMiles: 0 }, block({ reading: reading(3) })))) === NOW_LINE)
+    ok('§8 flag off: one mile reads "1 mile"', (await lineOf(answer({ fuelPct: 1, rangePlanningMiles: 16, rangeUsableMiles: 1 }, null))) === 'About 1 mile before you run out.')
+    ok('§8 flag on: one mile reads "1 mile"', (await lineOf(answer(MEASURED, { ...block(), milesLeft: 1 }))) === 'About 1 mile before you run out.')
+    ok('§8 flag off, a server with no reserve: the figure the chip quotes, the same words',
+      (await lineOf(answer({ fuelPct: 48, reserveMiles: null, rangePlanningMiles: 240, rangeUsableMiles: null }, null))) === 'About 240 miles before you run out.')
+
+    // How it's worked out isn't the driver's to read: one figure, the chip's.
+    const FIGURED = {
+      'flag off, miles': OFF,
+      'flag off, a dropout': answer({ ...MEASURED, fuelSource: 'carried' }, null),
+      'flag off, no reserve': answer({ fuelPct: 48, reserveMiles: null, rangePlanningMiles: 240, rangeUsableMiles: null }, null),
+      'flag on, miles': ON,
+      'flag on, a dropout': answer({ ...MEASURED, fuelSource: 'carried' }, block({ reading: reading(48, 'carried') })),
+    }
+    for (const [name, a] of Object.entries(FIGURED)) {
+      const { node } = await chipNode(a)
+      const line = (node && node.props.title) || ''
+      const onChip = (String(node && node.children).match(/\d[\d,]*/g) || []).join()
+      ok(`§8 ${name}: the line has one figure, the chip's, and no working`,
+        !!line && (line.match(/\d[\d,]*/g) || []).join() === onChip && !WORKING_TITLE.test(line) && !/floor|low end|plan on/i.test(line))
+    }
+
+    // "not available" stays, and takes a tap too.
+    ok('§8 "not available", flag on: a tap hands up the reason',
+      (await lineOf(answer({ hasFuelData: false, fuelPct: null, rangeBasis: 'unknown', rangePlanningMiles: null, rangeUsableMiles: null }, block({ hasDevice: false, reading: null }))))
+        === "Fuel level unknown. Your truck isn't sending a fuel level. Check your gauge.")
+    ok('§8 "not available", flag off: a tap hands up the reason',
+      (await lineOf(answer(flagOffUnknown[1], null))) === "No usable fuel reading from this truck's ELD. Last known 40%. Check the gauge before you set off.")
+    ok('§8 "not available" is a button in the normal header', (await chipNode(answer(flagOffUnknown[0], null))).node?.type === 'button')
+
+    // A dialog over the chip, reached by a keyboard or a screen reader.
+    const covered = await press(ON, { tag: 'dialog-overlay' })
+    ok('§8 something else on top of the chip: the press does nothing', !!covered && covered.lines.length === 0)
+    ok('§8 …it asks about the chip\'s centre', !!covered && JSON.stringify(covered.asked) === JSON.stringify([[110, 72]]))
+    ok('§8 the chip itself on top: a tap', (await press(ON, chipEl))?.lines.length === 1)
+    ok('§8 something inside the chip on top: a tap', (await press(ON, inside))?.lines.length === 1)
+    ok('§8 nothing at that point (off the visible page): still a tap, since nothing covers it', (await press(ON, null))?.lines.length === 1)
+    ok('§8 a browser that can\'t say: still a tap', (await press(ON, null, {}))?.lines.length === 1)
   }
 
   // ══ §6 — the header's height reaches the page below it ════════════════════
@@ -333,7 +460,7 @@ if (Header) {
       /<div\b[^>]*v-if="auth\.isDriver"[^>]*class="fuel-row"|<div\b[^>]*class="fuel-row"[^>]*v-if="auth\.isDriver"/.test(descriptor.template.content))
     // Height comes from the stand-in being the chip's own box. A number on the row
     // was 2.4 px short in a real browser, so no fixed height is allowed back.
-    const heldTag = (descriptor.template.content.match(/<span\b[^>]*\bv-else\b[^>]*>([^<]*)<\/span>/) || [])
+    const heldTag = (descriptor.template.content.match(/<span\b[^>]*\bv-else(?=[\s>])[^>]*>([^<]*)<\/span>/) || [])
     ok('§6 …held by a stand-in chip in place of the real one, with the same glyph on its line',
       !!heldTag[0] && /\bstatus-chip\b/.test(heldTag[0]) && /\bfuel-held\b/.test(heldTag[0]) && heldTag[1] === '&#9981;')
     ok('§6 …which is not a .fuel-chip, so nothing that looks for the chip finds it', !!heldTag[0] && !/\bfuel-chip\b/.test(heldTag[0]))
@@ -369,6 +496,120 @@ if (Header) {
     const chatCss = parse(fs.readFileSync(CHAT_VIEW_VUE, 'utf8'), { filename: 'ChatView.vue' }).descriptor.styles.map((s) => s.content).join('\n')
     ok('§7 the Messages box takes the header\'s real height off its own, keeping the same room above the tab bar',
       /height:\s*calc\(100vh - 148px - var\(--driver-header-height, 52px\)\)/.test(rule(chatCss, '.chat-container')))
+
+    // ══ §9 — where the tap goes, and the button's box ═══════════════════════
+    // Only the third header takes the tap: the first two are the lock screens, with no loads.
+    const viewTemplate = view.template.content
+    const headerTags = viewTemplate.match(/<DriverHeader\b[^>]*>/g) || []
+    ok('§9 DriverView has its three headers', headerTags.length === 3)
+    ok('§9 the two lock screens\' headers take no tap', headerTags.slice(0, 2).every((t) => !/fuel-chip-taps|fuel-tap/.test(t)))
+    ok('§9 the normal header takes it', !!headerTags[2] && /\bfuel-chip-taps\b/.test(headerTags[2]) && /@fuel-tap="handleFuelTap"/.test(headerTags[2]))
+    ok('§9 …and it is the one after the lock screens', viewTemplate.indexOf(headerTags[2]) > viewTemplate.indexOf('NORMAL DRIVER UI'))
+    const detailTag = (viewTemplate.match(/<LoadDetail\b[^>]*>/) || [''])[0]
+    ok('§9 the load page is asked to open its Fuel section, by its own row only',
+      /:open-fuel="fuelTapRow === detailLoad\._rowIndex"/.test(detailTag) && /@fuel-opened="fuelTapRow = null"/.test(detailTag))
+
+    // The load: the store's real getters, and the list that runs newest added first.
+    const fuelView = await import(pathToFileURL(path.join(CLIENT_DIR, 'src', 'lib', 'driverFuelView.js')).href)
+    const pinned = (name) => (typeof fuelView[name] === 'function' ? fuelView[name] : null)
+    const pick = pinned('fuelTapLoad')
+    ok('§9 driverFuelView.js says which load a tap opens', !!pick)
+    const imported = []
+    const storeSrc = fs.readFileSync(path.join(CLIENT_DIR, 'src', 'stores', 'driver.js'), 'utf8')
+      .replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])[^'"]+\2;?[ \t]*$/gm, (_, names) => {
+        imported.push(...names.split(',').map((n) => n.trim().split(/\s+as\s+/).pop()).filter(Boolean))
+        return ''
+      })
+      .replace(/^export const useDriverStore/m, 'const useDriverStore')
+    // defineStore hands back its options, so the getters are the store's own functions.
+    const anything = new Proxy(function () {}, { get: () => anything, apply: () => anything })
+    const getters = new Function(...imported, `${storeSrc}\nreturn useDriverStore`)(
+      ...imported.map((n) => (n === 'defineStore' ? (id, options) => options : anything)),
+    ).getters
+    const HEADERS = ['Load ID', 'Job Status', 'Driver']
+    const qaLoad = (row, id, status, extra = {}) => ({ _rowIndex: row, 'Load ID': id, 'Job Status': status, Driver: 'Driver QA', ...extra })
+    const opened = (loads, onScreen = null) => {
+      const state = { headers: { jobTracking: HEADERS }, loads }
+      const load = pick && pick({ onScreen, inProgress: getters.inProgressLoad(state), queued: getters.queuedLoads(state) })
+      return load ? load['Load ID'] : null
+    }
+    const ROAD_AND_QUEUE = [qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Assigned', { _queuePosition: 1 })]
+    ok('§9 (the trap) the working list puts the newest load first, the one still queued',
+      getters.workingLoads({ headers: { jobTracking: HEADERS }, loads: ROAD_AND_QUEUE })[0]['Load ID'] === 'QA-9')
+    ok('§9 a load on the road and a newer one queued: the load on the road', opened(ROAD_AND_QUEUE) === 'QA-1')
+    for (const status of ['Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading']) {
+      ok(`§9 …${status} counts as past Assigned`, opened([qaLoad(2, 'QA-1', status), qaLoad(9, 'QA-9', 'Assigned')]) === 'QA-1')
+    }
+    ok('§9 only queued loads: the next in the queue, not the newest',
+      opened([qaLoad(2, 'QA-1', 'Assigned', { _queuePosition: 1 }), qaLoad(9, 'QA-9', 'Assigned', { _queuePosition: 2 })]) === 'QA-1')
+    ok('§9 …and the queue\'s order, not the sheet\'s',
+      opened([qaLoad(2, 'QA-1', 'Assigned', { _queuePosition: 2 }), qaLoad(9, 'QA-9', 'Assigned', { _queuePosition: 1 })]) === 'QA-9')
+    ok('§9 no load: none', opened([]) === null)
+    ok('§9 only an offer not yet accepted: none, so the toast', opened([qaLoad(2, 'QA-1', 'Dispatched')]) === null)
+    ok('§9 only delivered loads: none, so the toast', opened([qaLoad(2, 'QA-1', 'Delivered'), qaLoad(3, 'QA-3', 'Completed')]) === null)
+    ok('§9 a load page on screen stays, whatever else is under way', opened(ROAD_AND_QUEUE, qaLoad(9, 'QA-9', 'Assigned')) === 'QA-9')
+
+    // DriverView's handler, run on stand-ins.
+    const handlerSrc = (view.scriptSetup.content.match(/function handleFuelTap\(title\) \{[\s\S]*?\n\}/) || [''])[0]
+    ok('§9 DriverView has the handler', !!handlerSrc)
+    const runHandler = (o) => {
+      const s = { currentTab: { value: 'loads' }, detailLoad: { value: null }, fuelTapRow: { value: null }, detailRowIndex: { value: null },
+        store: { inProgressLoad: null, queuedLoads: [], loadSubTab: 'historical' }, toasts: [], tabs: [], ...o }
+      const build = new Function('currentTab', 'detailLoad', 'driverStore', 'toast', 'handleTabSwitch', 'fuelTapRow', 'detailRowIndex', 'fuelTapLoad', 'FUEL_LINE_MS',
+        `${handlerSrc}\nreturn handleFuelTap`)
+      build(s.currentTab, s.detailLoad, s.store, { show: (...a) => s.toasts.push(a) }, (t) => { s.tabs.push(t); s.currentTab.value = t }, s.fuelTapRow, s.detailRowIndex, pick, 'THE-LONG-TIME')('the chip line')
+      return s
+    }
+    if (handlerSrc && pick) {
+      const none = runHandler({})
+      ok('§9 no load: the chip\'s own line as a toast, held long enough to read', JSON.stringify(none.toasts) === JSON.stringify([['the chip line', 'success', 'THE-LONG-TIME']]))
+      ok('§9 …and the screen stays where it is', none.detailRowIndex.value === null && none.fuelTapRow.value === null && none.tabs.length === 0 && none.store.loadSubTab === 'historical')
+      const road = runHandler({ store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'historical' } })
+      ok('§9 a load under way, from the list: its page, asked to open Fuel, with no toast', road.detailRowIndex.value === 2 && road.fuelTapRow.value === 2 && road.toasts.length === 0)
+      ok('§9 …on the Loads tab\'s Active list, so Back lands where the load is', road.tabs.join() === 'loads' && road.store.loadSubTab === 'active')
+      const queued = runHandler({ store: { inProgressLoad: null, queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'active' } })
+      ok('§9 only queued: the next in the queue', queued.detailRowIndex.value === 9 && queued.fuelTapRow.value === 9)
+      const page = runHandler({ detailLoad: { value: qaLoad(9, 'QA-9', 'Assigned') }, detailRowIndex: { value: 9 }, store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [], loadSubTab: 'pending' } })
+      ok('§9 a load page on screen: it stays there and opens Fuel', page.detailRowIndex.value === 9 && page.fuelTapRow.value === 9 && page.tabs.length === 0 && page.store.loadSubTab === 'pending')
+      const left = runHandler({ currentTab: { value: 'messages' }, detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 }, store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [], loadSubTab: 'historical' } })
+      ok('§9 on another tab, with a page left open behind it: the load under way, not that page', left.detailRowIndex.value === 2 && left.fuelTapRow.value === 2 && left.tabs.join() === 'loads')
+      const stale = runHandler({ currentTab: { value: 'kit' }, detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 } })
+      ok('§9 on another tab with no load under way: the toast, even with a page left open behind it', stale.toasts.length === 1 && stale.currentTab.value === 'kit' && stale.fuelTapRow.value === null)
+    }
+    const lineMs = Number((view.scriptSetup.content.match(/const FUEL_LINE_MS = (\d+)/) || [])[1])
+    ok('§9 the longer toast is at least 5 s: its longest line is about 100 characters', lineMs >= 5000)
+
+    // useToast's third argument: every other caller keeps its 3 s.
+    {
+      const { useToast } = await import(pathToFileURL(path.join(CLIENT_DIR, 'src', 'composables', 'useToast.js')).href)
+      const realTimeout = globalThis.setTimeout
+      const asked = []
+      globalThis.setTimeout = (fn, ms) => { asked.push(ms); return 0 }
+      try {
+        useToast().show('made-up')
+        useToast().show('made-up', 'error')
+        useToast().show('made-up', 'success', 6000)
+      } finally {
+        globalThis.setTimeout = realTimeout
+      }
+      ok('§9 the toast: 3 s unless asked otherwise', asked.join() === '3000,3000,6000')
+    }
+
+    // The button keeps the plain chip's box: same padding, font size and border, from
+    // the same rules, with only a button's browser defaults undone.
+    const tapRule = rule(headerCss, '.status-chip.fuel-tap')
+    ok('§9 the button adds nothing that changes the chip\'s box', !!tapRule && !/padding|margin|border|[^-]height:|font-size|display/.test(tapRule.replace(/line-height:\s*inherit/, '')))
+    ok('§9 …it takes the line height and font of the plain chip around it', /line-height:\s*inherit/.test(tapRule) && /font-family:\s*inherit/.test(tapRule))
+    ok('§9 …left-aligned when the sentence wraps, like the plain chip', /text-align:\s*left/.test(tapRule))
+    ok('§9 …with the platform\'s button look off', /(^|\s)appearance:\s*none/.test(tapRule) && /-webkit-appearance:\s*none/.test(tapRule))
+    const hit = rule(headerCss, '.status-chip.fuel-tap::after')
+    ok('§9 the target is 44 px tall, out of the row\'s flow', /content:/.test(hit) && /position:\s*absolute/.test(hit) && /min-height:\s*44px/.test(hit))
+    ok('§9 …measured from the chip itself', /position:\s*relative/.test(tapRule))
+    const rowGap = (rule(headerCss, '.app-header').match(/gap:\s*([\d.]+)rem/) || [])[1]
+    const reach = (hit.match(/top:\s*-([\d.]+)rem/) || [])[1]
+    ok('§9 …reaching up no further than the gap between the rows, so Password and Logout keep their taps', !!rowGap && !!reach && Number(reach) <= Number(rowGap))
+    ok('§9 keyboard focus shows', /outline:\s*2px solid/.test(rule(headerCss, '.status-chip.fuel-tap:focus-visible')))
+    ok('§9 the stand-in is still no button', /<span\b[^>]*\bfuel-held\b/.test(descriptor.template.content) && !/<button\b[^>]*\bfuel-held\b/.test(descriptor.template.content))
   }
 }
 

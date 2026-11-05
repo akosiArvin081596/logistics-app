@@ -40,14 +40,16 @@
 //   §7 client/src/lib/driverFuelView.js: each state's exact sentence; numbers only
 //      as sent; no working words; the 400 codes; the chip and the badge
 //   §8 DriverFuelPanel.vue rendered (Vue's server renderer, made-up answers):
-//      flag off is today's panel; flag on shows each status (enough, add, refill
-//      on the way, check gauge, no truck, load done, the reasons); a flag-on
-//      plan older than 15 minutes is asked for again when the section opens,
-//      the stops are not, and a flag-off one never is
-//   §9 LoadDetail.vue's Fuel badge and Route Options; RouteAlternatives.vue
+//      flag off is the panel with no "until the tank is empty, minus" line; flag on
+//      shows each status (enough, add, refill on the way, check gauge, no truck, load
+//      done, the reasons); a flag-on plan older than 15 minutes is asked for again
+//      when the section opens, the stops are not, and a flag-off one never is
+//   §9 LoadDetail.vue's Fuel badge and Route Options; the header chip's request to
+//      open the Fuel section; RouteAlternatives.vue
 // The blocks come from the server's own planDriverFuel() (lib/fuel-model.js).
-// FUEL_PANEL_BASE_VUE=<a base copy of DriverFuelPanel.vue> also renders every
-// flag-off world with it and requires the same HTML (comments aside).
+// FUEL_PANEL_BASE_VUE=<a copy of DriverFuelPanel.vue from before that line went> also
+// renders every flag-off world with it and requires the same HTML once that one line
+// is taken out of the copy's (comments aside).
 //
 // No network, no sheet, no database, no DOM: §1-§7 are pure input/output, §8-§9
 // compile the components with the client's own compiler. Safe anywhere.
@@ -469,6 +471,19 @@ if (v) {
   check('§7 the chip: the miles in a sentence, "Refuel now", "not available"',
     [{}, { pct: 3, routeMiles: 180, leg: 'to_delivery' }, { burn: NO_BURN, tankSource: 'default', tank: 200 }].map((o) => v.driverFuelChip(world(o).rangeBlock).text),
     ['Fuel range: 225 miles left until empty', 'Refuel now', 'Fuel range: not available'])
+  check('§7 the chip\'s own line, which a tap with no load shows: one figure, no working',
+    [typeof v.fuelRangeTitle === 'function' && v.fuelRangeTitle('225'), typeof v.fuelRangeTitle === 'function' && v.fuelRangeTitle(1), typeof v.fuelRangeTitle === 'function' && v.fuelRangeTitle('225', true),
+      typeof v.refuelNowTitle === 'function' && v.refuelNowTitle(), typeof v.refuelNowTitle === 'function' && v.refuelNowTitle(true)],
+    ['About 225 miles before you run out.', 'About 1 mile before you run out.', "About 225 miles before you run out. Your fuel sensor isn't reporting. This is an estimate.",
+      'Refuel now. Stop for fuel as soon as you can.', "Refuel now. Stop for fuel as soon as you can. Your fuel sensor isn't reporting. This is an estimate."])
+  {
+    const pick = (o) => (typeof v.fuelTapLoad === 'function' ? v.fuelTapLoad(o) : 'no such function')
+    const A = { id: 'on screen' }; const B = { id: 'under way' }; const C = { id: 'next' }; const D = { id: 'later' }
+    check('§7 which load a tap opens: the page on screen, then the load under way, then the next in the queue, then none',
+      [pick({ onScreen: A, inProgress: B, queued: [C, D] }), pick({ onScreen: null, inProgress: B, queued: [C, D] }), pick({ onScreen: null, inProgress: null, queued: [C, D] }),
+        pick({ onScreen: null, inProgress: null, queued: [] }), pick({ onScreen: null, inProgress: null, queued: undefined })],
+      [A, B, C, null, null])
+  }
 
   const badge = (o) => v.driverFuelBadge(world(o).plan)
   check('§7 the load badge: add to finish -> "Add 65 gal", red', badge({}), { tone: 'bad', text: 'Add 65 gal' })
@@ -590,10 +605,11 @@ console.log('§8 DriverFuelPanel.vue rendered')
 let panelFactory = null
 try { panelFactory = await sfcFactory(PANEL_VUE) } catch (e) { check(`§8 DriverFuelPanel.vue compiles in this harness (${e.message})`, false, true) }
 if (panelFactory) {
-  // §8a the flag off: no block anywhere, so today's panel, part for part.
+  // §8a the flag off: no block anywhere, so today's panel, part for part, less one line.
   const OFF = {
     'before pickup, a stop needed': [world({ flag: false })],
     'in transit, clears': [world({ flag: false, leg: 'to_delivery', routeMiles: 180 })],
+    'into the reserve': [world({ flag: false, pct: 3, leg: 'to_delivery', routeMiles: 180 })],
     'sensor dropout': [world({ flag: false, fuelSource: 'carried' })],
     'ELD silent': [world({ flag: false, fuelSource: 'stale', readAge: 18 * 60 })],
     'no ELD reading': [world({ flag: false, hasDevice: false, fromLivePosition: false })],
@@ -611,9 +627,9 @@ if (panelFactory) {
   {
     const h = offHtml['before pickup, a stop needed']
     const t = textOf(h)
-    check('§8a flag off: the verdict card, the hero and the working line exactly as today',
+    check('§8a flag off: the verdict card and the hero as today, the chip\'s figure, with no sum under the hero',
       [t.includes('Not enough fuel — you need to stop'), t.includes('225 miles before you need to refuel'),
-        t.includes('That is 240 mi until the tank is empty, minus 15 mi kept back as a reserve.')], [true, true, true])
+        t.includes('until the tank is empty'), t.includes('minus'), t.includes('kept back'), h.includes('dfp-dry')], [true, true, false, false, false, false])
     check('§8a flag off: "How we know", the cells and the stamp',
       [t.includes('How we know'), h.includes('data-title="Fuel level"'), h.includes('data-title="Gallons left"'),
         h.includes('data-title="Miles per gallon"'), t.includes('Fuel level read 12 min ago')], [true, true, true, true, true])
@@ -621,6 +637,11 @@ if (panelFactory) {
   }
   check('§8a flag off: the new block appears in no world',
     Object.entries(offHtml).filter(([, h]) => h.includes('data-testid="driver-fuel"') || textOf(h).includes('miles until you run out')).map(([n]) => n), [])
+  check('§8a flag off: no world shows the sum under the hero',
+    Object.entries(offHtml).filter(([, h]) => /until the tank is empty|\bminus\b|kept back/.test(textOf(h))).map(([n]) => n), [])
+  check('§8a flag off: into the reserve, still the instruction', textOf(offHtml['into the reserve']).includes('Refuel now you are into your reserve'), true)
+  check('§8a the panel\'s source no longer has the line or its styles',
+    /until the tank is empty|kept back as a reserve|dfp-dry/.test(fs.readFileSync(PANEL_VUE, 'utf8')), false)
   check('§8a flag off: a failed trip plan reads as today', textOf(offHtml['trip plan 400 (no code)']).includes("We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."), true)
   serve(world({ flag: false }))
   await openSection(panelFactory())
@@ -629,12 +650,13 @@ if (panelFactory) {
 
   if (process.env.FUEL_PANEL_BASE_VUE) {
     const baseFactory = await sfcFactory(path.resolve(process.env.FUEL_PANEL_BASE_VUE))
+    const withoutTheLine = (html) => html.replace(/<p class="dfp-dry">[\s\S]*?<\/p>/, '')
     const differ = []
     for (const [name, [w, over, props]] of Object.entries(OFF)) {
       serve(w, over)
-      if (await openSection(baseFactory(), props) !== offHtml[name]) differ.push(name)
+      if (withoutTheLine(await openSection(baseFactory(), props)) !== offHtml[name]) differ.push(name)
     }
-    check(`§8a flag off: the same HTML as the base copy in all ${Object.keys(OFF).length} worlds (comments aside)`, differ, [])
+    check(`§8a flag off: the same HTML as the base copy, less that one line, in all ${Object.keys(OFF).length} worlds (comments aside)`, differ, [])
   } else {
     console.log('  (§8a byte-for-byte against a base copy: not run; set FUEL_PANEL_BASE_VUE)')
   }
@@ -822,15 +844,16 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
   globalThis.document ??= { addEventListener() {}, removeEventListener() {}, visibilityState: 'visible' }
   const quietHooks = { ...Vue, onMounted() {}, onBeforeUnmount() {}, onUnmounted() {} }
   const detailFactory = await sfcFactory(DETAIL_VUE, { inline: false, vue: quietHooks })
-  const detail = () => {
+  const detail = (over = {}) => {
     const scope = Vue.effectScope()
     const props = Vue.shallowReactive({
       load: { 'Load ID': 'QA-FUEL-1', 'Job Status': 'Assigned', Driver: 'Driver QA' }, headers: ['Load ID', 'Job Status', 'Driver'],
       driverName: 'Driver QA', hasActiveJob: false, driverPosition: null, truck: null, loadExpenses: [], responding: false,
-      expenseSubmitHandler: null, phoneGpsModeActive: false, phoneGpsStatus: '',
+      expenseSubmitHandler: null, phoneGpsModeActive: false, phoneGpsStatus: '', openFuel: false, ...over,
     })
-    const b = scope.run(() => detailFactory().setup(props, { expose() {}, emit() {}, attrs: {}, slots: {} }))
-    return { b, stop: () => scope.stop() }
+    const emits = []
+    const b = scope.run(() => detailFactory().setup(props, { expose() {}, emit: (name) => emits.push(name), attrs: {}, slots: {} }))
+    return { b, props, emits, stop: () => scope.stop() }
   }
   const badgeFor = (plan) => {
     const { b, stop } = detail()
@@ -861,6 +884,52 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
   }
   const src = fs.readFileSync(DETAIL_VUE, 'utf8')
   check('§9 LoadDetail hands Route Options the switch', /<RouteAlternatives[^>]*:show-fuel="routeOptionsShowFuel"/.test(src), true)
+
+  // The header chip's request. The section sits below the status and the map, so it has
+  // to come into view as well as open, and each new request has to work.
+  {
+    const scrolls = []
+    const titleEl = { scrollIntoView: (o) => scrolls.push(o) }
+    const later = detail()
+    check('§9 by default the Fuel section stays shut', [later.b.openSections.value, later.b.fuelSectionOpen.value], [['status', 'map'], false])
+    later.b.fuelTitleEl && (later.b.fuelTitleEl.value = titleEl)
+    later.props.openFuel = true
+    await settle()
+    check('§9 asked by the chip: the Fuel section opens beside what was open, and the panel is told',
+      [later.b.openSections.value, later.b.fuelSectionOpen.value], [['status', 'map', 'fuel'], true])
+    check('§9 …it comes into view, top first', scrolls, [{ block: 'start' }])
+    check('§9 …and it says so, so the next tap is a new request', later.emits.filter((n) => n === 'fuel-opened').length, 1)
+    later.props.openFuel = false
+    await settle()
+    check('§9 the request cleared: nothing more happens', [later.b.openSections.value, scrolls.length], [['status', 'map', 'fuel'], 1])
+    later.props.openFuel = true
+    await settle()
+    check('§9 asked again with the section already open: not listed twice, and it comes back into view',
+      [later.b.openSections.value, scrolls.length], [['status', 'map', 'fuel'], 2])
+    later.props.openFuel = false
+    await settle()
+    later.b.openSections.value = ['status', 'map']
+    await settle()
+    later.props.openFuel = true
+    await settle()
+    check('§9 the driver shut it, then tapped the chip: it opens again', later.b.openSections.value, ['status', 'map', 'fuel'])
+    later.stop()
+
+    const fresh = detail({ openFuel: true })
+    const freshScrolls = []
+    fresh.b.fuelTitleEl && (fresh.b.fuelTitleEl.value = { scrollIntoView: (o) => freshScrolls.push(o) })
+    check('§9 the page opened by the tap: the section is open from the first paint', fresh.b.openSections.value, ['status', 'map', 'fuel'])
+    await settle()
+    check('§9 …and comes into view once the page is there', [freshScrolls, fresh.emits.includes('fuel-opened')], [[{ block: 'start' }], true])
+    fresh.stop()
+
+    const { descriptor } = parse(src, { filename: 'LoadDetail.vue' })
+    const titleTag = (descriptor.template.content.match(/<span\b[^>]*\bfuel-title\b[^>]*>/) || [''])[0]
+    check('§9 the scroll target is the section\'s own title', /ref="fuelTitleEl"/.test(titleTag), true)
+    const css = descriptor.styles.map((s) => s.content).join('\n')
+    check('§9 …which lands below the fixed header, at the height the header reports',
+      /scroll-margin-top:\s*calc\(var\(--driver-header-height, 52px\)/.test((css.match(/\.fuel-title\s*\{[^}]*\}/) || [''])[0]), true)
+  }
 
   const altsFactory = await sfcFactory(ALTS_VUE)
   const ALTS = [{ etaMinutes: 400, distanceMiles: 420, fuelLiters: 190, tollPriceUsd: 12.5 }, { etaMinutes: 430, distanceMiles: 431, fuelLiters: null, tollPriceUsd: 0 }]
