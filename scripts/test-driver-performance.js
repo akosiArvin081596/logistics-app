@@ -79,9 +79,9 @@
  *     money math reads his pay type; what became of a pickup, true whichever way
  *     it was made, an older tap on a truck with no ELD included
  * §26 a credit is removed or moved only where the load's own record is certain,
- *     and otherwise reads as it always has: a status moved back, twins of one visit,
- *     and a handover by that record; no driver is shown a credit, load number or ID
- *     the sheet never gave him. What's left as today is pinned here as today
+ *     and otherwise reads as it always has: a status moved back, and a handover by
+ *     that record; no driver is shown a credit, load number or ID the sheet never
+ *     gave him. What's left as today is pinned here as today
  * §27 a load on two sheet rows counts as the weekly invoice counts it, over every
  *     row, never short of it and never over it
  * §28 what doesn't change: the count is still its rows, on made-up sheets checked
@@ -285,13 +285,10 @@ function sheetValues(extraLoads = []) {
 function makeDb() {
 	const Database = require("better-sqlite3");
 	const db = new Database(":memory:");
-	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability",
-		"load_coordinates", "routemate_telemetry", "eld_device_assignments"]) db.exec(tableDdl(t));
+	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability"]) db.exec(tableDdl(t));
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN status TEXT DEFAULT 'active'");
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'");
 	db.exec("ALTER TABLE trucks ADD COLUMN retired_at TEXT DEFAULT ''");
-	db.exec("ALTER TABLE trucks ADD COLUMN routemate_vehicle_id TEXT DEFAULT ''");
-	db.exec("ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''");
 	db.exec("ALTER TABLE load_status_history ADD COLUMN actor_role TEXT DEFAULT ''");
 	db.exec("ALTER TABLE load_status_history ADD COLUMN fix_ms INTEGER");
 	db.exec("ALTER TABLE load_status_history ADD COLUMN pickup_zone TEXT DEFAULT ''");
@@ -1350,9 +1347,9 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const dir = w.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (?, ?, 'active', 'fixed', ?)");
 		dir.run(21, NIA, 61);
 		dir.run(22, OMAR, 62);
-		const tr = w.db.prepare("INSERT INTO trucks (id, unit_number, retired_at, routemate_vehicle_id) VALUES (?, ?, '', ?)");
-		tr.run(21, "LogisX-#521", "rm-21");
-		tr.run(22, "LogisX-#522", "rm-22");
+		const tr = w.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (?, ?, '')");
+		tr.run(21, "LogisX-#521");
+		tr.run(22, "LogisX-#522");
 		const ta = w.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, '2026-10-01T12:00:00.000Z', ?)");
 		w.assign = (truck, driver, end = "") => ta.run(truck, driver, end);
 		w.assign(21, NIA);
@@ -1442,174 +1439,23 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			eq((await w.weeks("nia"))[0].credits.pickups, 1, "as today: an ELD record on a load with no departure status on record stands, whatever the sheet still reads");
 		});
 
-		// Both twins of one visit.
+		// Also left as today: no twin test. A stale ELD time on one load would otherwise cancel another's true one.
 		await inWorld((w) => {
 			w.clean("PF-7", NIA, MON);
 			w.clean("PF-8", NIA, MON);
 		}, async (w) => {
 			const nia = (await w.weeks("nia"))[0];
-			eq(nia.credits, { value: 2, target: 7.5, deliveries: 2, pickups: 0 }, "twins at one shipper in one visit: both deliveries stand, neither pickup is proof");
-			eq(nia.loads, [{ loadId: "PF-7", pickup: NOT_COUNTED, delivery: DONE("Mon") }, { loadId: "PF-8", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "and each row says so");
+			eq(nia.credits, { value: 3, target: 7.5, deliveries: 2, pickups: 2 }, "as today: two loads at one shipper in one visit each earn: no twin test");
+			eq(nia.loads, [{ loadId: "PF-7", pickup: PICKED("Mon"), delivery: DONE("Mon") }, { loadId: "PF-8", pickup: PICKED("Mon"), delivery: DONE("Mon") }], "and neither row is newly \"not counted\"");
 		});
 		await inWorld((w) => {
-			w.hist("PF-9", "geofence", "At Shipper", `${MON} 13:00:00`, NIA);
-			w.hist("PF-9", "geofence", "In Transit", `${MON} 13:05:00`, NIA);
-			w.hist("PF-9", "manual", "Delivered", `${MON} 13:08:00`, NIA);
-			w.row("PF-9", NIA, "Delivered", `${MON} 15:00`);
-			w.hist("PF-10", "geofence", "At Shipper", `${MON} 13:10:00`, NIA);
-			w.hist("PF-10", "geofence", "In Transit", `${MON} 13:15:00`, NIA);
-			w.row("PF-10", NIA, "In Transit");
+			const oneDeparture = Date.parse(`${MON}T14:00:00Z`);
+			w.depart("PF-9", oneDeparture, 21);
+			w.depart("PF-10", oneDeparture, 21);
+			w.row("PF-9", NIA, "Delivered", `${TUE} 15:00`);
+			w.row("PF-10", NIA, "Delivered", `${TUE} 16:00`);
 		}, async (w) => {
-			const nia = (await w.weeks("nia"))[0];
-			eq(nia.loads, [{ loadId: "PF-9", pickup: NOT_COUNTED, delivery: DONE("Mon") }], "the first of two is held by the twin test alone, whichever row came first");
-			eq(nia.credits.pickups, 0, "and so is the second");
-		});
-		await inWorld((w) => {
-			w.clean("PF-11", NIA, MON);
-			w.clean("PF-12", NIA, TUE);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two loads at the same hour on different days are no twins");
-		});
-		// Telemetry is by far the heaviest read here, so a pickup with no other arrival near it doesn't read it.
-		await inWorld((w) => {
-			w.clean("PF-68", NIA, MON);
-			w.clean("PF-16b", NIA, LAST_THU);
-		}, async (w) => {
-			const prepare = w.db.prepare.bind(w.db);
-			let trackReads = 0;
-			w.db.prepare = (sql) => {
-				if (/routemate_telemetry/.test(sql)) trackReads += 1;
-				return prepare(sql);
-			};
-			eq((await w.weeks("nia"))[0].credits.pickups, 1, "a pickup with no other arrival near it counts");
-			w.db.prepare = prepare;
-			eq(trackReads, 0, "and reads no track");
-		});
-		const twoVisits = (w) => {
-			for (const [id, atShipper, transit] of [["PF-13", `${MON} 13:00:00`, `${MON} 13:20:00`], ["PF-14", `${MON} 14:30:00`, `${MON} 15:00:00`]]) {
-				w.hist(id, "geofence", "At Shipper", atShipper, NIA);
-				w.hist(id, "geofence", "In Transit", transit, NIA);
-				w.db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, 30, -90, 32, -90)").run(id.toLowerCase());
-			}
-			w.hist("PF-13", "geofence", "At Receiver", `${MON} 13:35:00`, NIA);
-			w.row("PF-13", NIA, "At Receiver");
-			w.row("PF-14", NIA, "In Transit");
-		};
-		const track = (w, rows) => {
-			const fix = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms) VALUES ('rm-21', ?, -90, 0, ?)");
-			for (const [lat, at] of rows) fix.run(lat, Date.parse(`${MON}T${at}:00Z`));
-		};
-		await inWorld(twoVisits, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two arrivals 90 minutes apart and no track to say one visit: not certain, so both stand as today");
-		});
-		await inWorld((w) => {
-			twoVisits(w);
-			track(w, [[30, "12:50"], [30, "13:10"], [30, "13:30"], [31, "13:40"], [30, "14:20"], [30, "14:40"], [31, "15:30"]]);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "the truck's own track shows it left between them: two visits, two pickups");
-		});
-		await inWorld((w) => {
-			twoVisits(w);
-			track(w, [[30, "12:50"], [30, "13:10"], [30, "13:40"], [30, "14:20"], [30, "14:40"], [31, "15:30"]]);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 0, "the truck's own track shows it never left between them: one visit, so twins");
-		});
-		// What isn't a twin: each of these looks like one and is a real pickup.
-		await inWorld((w) => {
-			w.clean("PF-70", NIA, MON);
-			w.hist("PF-71", "geofence", "At Shipper", `${MON} 13:10:00`, NIA);
-			w.hist("PF-71", "cancel", "Cancelled", `${MON} 13:20:00`, "disp");
-			w.row("PF-71", NIA, "Cancelled");
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 1, "a copy at the same shipper that ends cancelled is nobody's twin");
-		});
-		await inWorld((w) => {
-			w.clean("PF-72", NIA, MON);
-			w.hist("PF-73", "manual", "At Shipper", `${MON} 13:30:00`, NIA);
-			w.hist("PF-73", "manual", "In Transit", `${MON} 13:31:00`, NIA);
-			w.row("PF-73", NIA, "In Transit");
-			w.db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, truck_id, miles, samples) VALUES ('rm-21', ?, 21, 100, 40)").run(MON);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["PF-72"], "his taps on a load elsewhere don't put the truck at this shipper: no twin, and a tap on his ELD truck earns nothing, as today");
-		});
-		await inWorld((w) => {
-			w.clean("PF-74", NIA, MON);
-			w.hist("PF-75", "geofence", "At Shipper", `${MON} 13:10:00`, NIA);
-			w.row("PF-75", NIA, "At Shipper");
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 1, "the other load only reached At Shipper: one departure, one credit, nothing to remove");
-		});
-		await inWorld((w) => {
-			w.clean("PF-76", NIA, MON);
-			w.hist("PF-77", "geofence", "At Shipper", `${MON} 13:10:00`, NIA);
-			w.hist("PF-77", "geofence", "In Transit", `${MON} 13:15:00`, OMAR);
-			w.row("PF-77", OMAR, "In Transit");
-		}, async (w) => {
-			eq([(await w.weeks("nia"))[0].credits.pickups, (await w.weeks("omar"))[0].credits.pickups], [1, 1], "a twin proven for another driver isn't her twin");
-		});
-		const oneDeparture = Date.parse(`${MON}T14:00:00Z`);
-		await inWorld((w) => {
-			w.depart("PF-78", oneDeparture, 21);
-			w.depart("PF-79", oneDeparture, 21);
-			w.row("PF-78", NIA, "Delivered", `${TUE} 15:00`);
-			w.row("PF-79", NIA, "Delivered", `${TUE} 16:00`);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits, { value: 2, target: 7.5, deliveries: 2, pickups: 0 }, "one truck's one recorded departure on two of her loads: twins too");
-		});
-		await inWorld((w) => {
-			w.depart("PF-80a", oneDeparture, 21);
-			w.depart("PF-80b", oneDeparture + 60000, 21);
-			w.row("PF-80a", NIA, "Delivered", `${TUE} 15:00`);
-			w.row("PF-80b", NIA, "Delivered", `${TUE} 16:00`);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two different departures aren't");
-		});
-		await inWorld((w) => {
-			w.depart("PF-80c", oneDeparture, 21);
-			w.depart("PF-80d", oneDeparture, 22);
-			w.row("PF-80c", NIA, "Delivered", `${TUE} 15:00`);
-			w.row("PF-80d", NIA, "Delivered", `${TUE} 16:00`);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "nor the same moment on two trucks");
-		});
-		await inWorld((w) => {
-			w.picked("PF-80e", NIA, MON);
-			w.row("PF-80e", NIA, "In Transit");
-			w.picked("PF-80f", OMAR, MON);
-			w.row("PF-80f", OMAR, "In Transit");
-		}, async (w) => {
-			eq([(await w.weeks("nia"))[0].credits.pickups, (await w.weeks("omar"))[0].credits.pickups], [1, 1], "two drivers arriving at the same instant aren't each other's twins");
-		});
-		await inWorld((w) => {
-			for (const [id, recorded] of [["PF-80g", "14:00"], ["PF-80h", "14:30"]]) {
-				w.depart(id, Date.parse(`${SUN}T${recorded}:00Z`), 21);
-				w.hist(id, "geofence", "At Shipper", `${MON} 13:00:00`, NIA);
-				w.hist(id, "manual", "In Transit", `${MON} 14:00:00`, NIA);
-				w.row(id, NIA, "In Transit");
-			}
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 0, "two loads credited by ELD records dated early, with the truck's arrivals together after them: still one visit");
-		});
-		await inWorld((w) => {
-			w.hist("PF-80i", "geofence", "At Shipper", `${SUN} 12:00:00`, NIA);
-			w.hist("PF-80i", "geofence", "In Transit", `${SUN} 12:10:00`, NIA);
-			w.hist("PF-80j", "geofence", "At Shipper", `${TUE} 12:00:00`, NIA);
-			w.hist("PF-80j", "geofence", "In Transit", `${TUE} 12:10:00`, NIA);
-			w.row("PF-80i", NIA, "At Receiver");
-			w.row("PF-80j", NIA, "In Transit");
-			for (const id of ["pf-80i", "pf-80j"]) w.db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, 30, -90, 32, -90)").run(id);
-			const fix = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, location_date_ms) VALUES ('rm-21', 30, -90, 0, ?)");
-			for (let h = 0; h < 48; h += 1) fix.run(Date.parse(`${SUN}T12:30:00Z`) + h * 3600000);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two days at one shipper is no one visit, however near the truck stayed");
-		});
-		await inWorld((w) => {
-			twoVisits(w);
-			w.db.prepare("DELETE FROM load_coordinates").run();
-			w.db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES ('PF-13', 30, -90, 32, -90)").run();
-			track(w, [[30, "13:10"], [30, "13:40"], [30, "14:20"]]);
-		}, async (w) => {
-			eq((await w.weeks("nia"))[0].credits.pickups, 0, "a mapped pickup stored under the sheet's own spelling of the ID is read too");
+			eq((await w.weeks("nia"))[0].credits, { value: 3, target: 7.5, deliveries: 2, pickups: 2 }, "as today: one truck's one recorded departure on two of her loads: each earns");
 		});
 
 		// A status later moved back: gone only with the status still back, on the sheet too, and not by his own tap alone.
@@ -2138,10 +1984,9 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(stated(proof.qualifiedPickup({ ...facts, events: [], driverNow: "bob", eldDepart: { ms: at("14:00"), truckId: 7 } })), ["bob", at("14:00"), "eld"], "proof: the truck's holder takes nothing with no link to the load");
 		eq(stated(proof.qualifiedPickup({ ...facts, events: [], driverNow: "bob", onSheet: () => true, eldDepart: { ms: at("14:00"), truckId: 7 } })), ["ann", at("14:00"), "eld"], "proof: and takes it with one");
 		eq(proof.qualifiedPickup({ ...facts, events: [], driverNow: "ann" }), null, "proof: nothing on record, nothing to judge");
-		eq(proof.qualifiedPickup({ ...facts, events: [row("At Shipper", "geofence", "13:00"), ...go], driverNow: "ann" }).arrival.new_status, "At Shipper", "proof: a credit carries its truck-recorded arrival, for the twin test");
-		eq(proof.qualifiedPickup({ ...facts, events: [row("At Shipper", "manual", "13:00"), ...go], driverNow: "ann" }).arrival, null, "proof: a tapped arrival isn't the truck's record");
-		eq(proof.qualifiedPickup({ ...facts, events: [row("At Shipper", "manual", "13:00", "ann", { pickup_zone: "inside" }), ...go], driverNow: "ann" }).arrival.new_status, "At Shipper", "proof: unless the recorder put the truck inside the zone");
-		eq(proof.qualifiedPickup({ ...facts, events: [row("At Shipper", "geofence", "13:00", "bob"), ...go], driverNow: "ann" }).arrival, null, "proof: another driver's arrival isn't hers");
+		const routesCode = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
+		ok(!/routemate_telemetry|load_coordinates|fuel-pickup-arrival|twinAtShipper|buildEldDeviceResolver/.test(routesCode), "no twin test: the route reads no track and no mapped pickup");
+		eq(Object.keys(proof.qualifiedPickup({ ...facts, events: go, driverNow: "ann" })), ["driverKey", "ms", "source"], "and a credit carries nothing for one");
 		eq(proof.statusesStillWaiting(["Dispatched", "At Shipper", "Loading", "", "Cancelled"]), true, "the sheet: nothing past its shipper");
 		eq(proof.statusesStillWaiting(["Dispatched", "In Transit"]), false, "the sheet: one row has left");
 		eq(proof.statusesStillWaiting(["Cancelled"]), false, "the sheet: a cancelled load isn't a waiting one");

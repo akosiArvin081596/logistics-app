@@ -73988,7 +73988,7 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
 	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
-	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, buildEldDeviceResolver, directoryPayStruct,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
 	shownLoadId, routeShownLoadIdIndex,
 });
 
