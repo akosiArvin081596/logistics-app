@@ -164,6 +164,11 @@
     <main class="app-content">
       <!-- LOADS TAB -->
       <section v-if="currentTab === 'loads'" class="tab-panel">
+        <!-- His own week at a glance, at the top of the list and of a load's own page alike: only
+             with a good answer from the server, and with no word why otherwise. The place is
+             held from the first paint, so the buttons below it never move under his thumb. -->
+        <DriverWeekBar v-if="weekSlotHeld && showsMyWeek(auth.user?.role)" :bar="weekBar" @open="handleTabSwitch('performance')" />
+
         <!-- Load Detail Page -->
         <LoadDetail
           v-if="detailLoad"
@@ -366,7 +371,8 @@
       <!-- PERFORMANCE TAB: only after the server has answered for this viewer -->
       <section v-if="currentTab === 'performance' && performanceTab" class="tab-panel" data-testid="perf-panel">
         <div class="section-header">Performance</div>
-        <DriverPerformanceTab :show-my-week="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />
+        <DriverPerformanceTab v-if="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />
+        <DriverPerformanceBoard v-else @gone="performanceTab = false" />
       </section>
     </main>
 
@@ -436,7 +442,7 @@ import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
-import { showsMyWeek, tabAfterAnswer, tabProbeUrl } from '../lib/driverPerformance'
+import { showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -459,6 +465,8 @@ import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
 import DriverPerformanceTab from '../components/driver/DriverPerformanceTab.vue'
+import DriverPerformanceBoard from '../components/driver/DriverPerformanceBoard.vue'
+import DriverWeekBar from '../components/driver/DriverWeekBar.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -818,21 +826,41 @@ function getLoadStatus(load) {
 }
 
 // The Performance tab exists only after the server answers 200 for this viewer: with the kill
-// switch off, or for a driver not on the board, the app stays as it was.
+// switch off, or for a driver with no week to show, the app stays as it was.
 const performanceTab = ref(false)
+// The answer behind the load page's bar: here only, never the store or the browser's storage, so
+// a shared phone never shows the previous driver's week.
+const performanceWeek = ref(null)
+const weekBar = computed(() => (performanceTab.value ? weekBarView(performanceWeek.value) : null))
+// The bar's place on the page. It is held from the first paint, and a read only notes what it
+// should be: it changes when the page itself changes, so no answer moves a button under his thumb.
+const weekSlotHeld = ref(true)
+let weekSlotWanted = true
+let performanceReads = 0
 async function checkPerformanceTab() {
-  const url = tabProbeUrl(auth.user?.role)
+  const role = auth.user?.role
+  const url = tabProbeUrl(role)
   if (!url || isOnboarding.value) return
+  const mine = ++performanceReads
   let status = 200
+  let answer = null
   try {
-    await api.get(url)
+    answer = await api.get(url)
   } catch (err) {
     status = err.status ?? 0
   }
-  if (isMounted) performanceTab.value = tabAfterAnswer(status, performanceTab.value)
+  if (!isMounted || mine !== performanceReads) return
+  performanceTab.value = tabAfterAnswer(status, performanceTab.value)
+  performanceWeek.value = weekFromAnswer(role, status, answer)
+  weekSlotWanted = tabAfterAnswer(status, weekSlotWanted)
 }
 watch(performanceTab, (shown) => {
   if (!shown && currentTab.value === 'performance') handleTabSwitch('loads')
+})
+// He moves between the list and a load's page, or comes back to the tab: the bar reads his week again.
+watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list') : ''), (place) => {
+  weekSlotHeld.value = weekSlotWanted
+  if (place) checkPerformanceTab()
 })
 
 // Tab switching
@@ -973,6 +1001,7 @@ async function handleRefresh() {
   try {
     await driverStore.loadData()
     toast.show('Data refreshed')
+    checkPerformanceTab()
   } catch {
     toast.show('Failed to load data', 'error')
   }
@@ -994,6 +1023,8 @@ async function handleStatusUpdate({ newStatus, load }) {
   try {
     await driverStore.updateStatus(loadId, newStatus, load._rowIndex, load)
     toast.show(`Status updated to ${newStatus}`)
+    // The bar sits right above these buttons, so its figure follows the tap.
+    checkPerformanceTab()
   } catch (err) {
     if (err && err.code === 'POD_REQUIRED') {
       // POD gate: surface the server message and keep the driver on the Loads
@@ -1081,6 +1112,7 @@ function scheduleDriverRefetch() {
   refetchTimer = setTimeout(() => {
     refetchTimer = null
     driverStore.loadData()
+    checkPerformanceTab()
   }, 250)
 }
 
@@ -1095,7 +1127,6 @@ function scheduleDriverRefetch() {
 function onVisibilityChange() {
   if (document.visibilityState === 'visible' && isMounted) {
     scheduleDriverRefetch()
-    checkPerformanceTab()
   }
 }
 
