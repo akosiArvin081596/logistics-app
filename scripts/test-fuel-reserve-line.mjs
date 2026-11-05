@@ -79,7 +79,7 @@ function check(label, actual, expected) {
   }
 }
 
-const { rangeReadout, planRangeReadout } = await import(pathToFileURL(MODULE_PATH).href)
+const { rangeReadout, planRangeReadout, milesText } = await import(pathToFileURL(MODULE_PATH).href)
 
 // The reserve the client chose. Hardcoded here on purpose: if someone changes
 // the default, this file should make them look at the cases below rather than
@@ -477,12 +477,23 @@ if (v) {
     ['About 225 miles before you run out.', 'About 1 mile before you run out.', "About 225 miles before you run out. Your fuel sensor isn't reporting. This is an estimate.",
       'Refuel now. Stop for fuel as soon as you can.', "Refuel now. Stop for fuel as soon as you can. Your fuel sensor isn't reporting. This is an estimate."])
   {
-    const pick = (o) => (typeof v.fuelTapLoad === 'function' ? v.fuelTapLoad(o) : 'no such function')
-    const A = { id: 'on screen' }; const B = { id: 'under way' }; const C = { id: 'next' }; const D = { id: 'later' }
+    const statusOf = (l) => l.status
+    const pick = (o) => (typeof v.fuelTapLoad === 'function' ? v.fuelTapLoad({ statusOf, ...o }) : 'no such function')
+    const A = { id: 'on screen', status: 'Assigned' }; const B = { id: 'under way', status: 'In Transit' }; const C = { id: 'next', status: 'Assigned' }; const D = { id: 'later', status: 'Assigned' }
     check('§7 which load a tap opens: the page on screen, then the load under way, then the next in the queue, then none',
-      [pick({ onScreen: A, inProgress: B, queued: [C, D] }), pick({ onScreen: null, inProgress: B, queued: [C, D] }), pick({ onScreen: null, inProgress: null, queued: [C, D] }),
-        pick({ onScreen: null, inProgress: null, queued: [] }), pick({ onScreen: null, inProgress: null, queued: undefined })],
+      [pick({ onScreen: A, underWay: [B], queued: [C, D] }), pick({ onScreen: null, underWay: [B], queued: [C, D] }), pick({ onScreen: null, underWay: [], queued: [C, D] }),
+        pick({ onScreen: null, underWay: [], queued: [] }), pick({ onScreen: null, underWay: undefined, queued: undefined })],
       [A, B, C, null, null])
+    const DONE = { id: 'delivered', status: 'Delivered' }
+    check('§7 a page with no road left doesn\'t count: under way, then the queue, then none',
+      [pick({ onScreen: DONE, underWay: [B], queued: [C] }), pick({ onScreen: DONE, underWay: [], queued: [C] }), pick({ onScreen: DONE, underWay: [], queued: [] })],
+      [B, C, null])
+    const HEADING = { id: 'newer', status: 'Heading to Shipper', _rowIndex: 9 }
+    const ROAD = { id: 'older', status: 'In Transit', _rowIndex: 2 }
+    const ROAD2 = { id: 'newest', status: 'In Transit', _rowIndex: 12 }
+    check('§7 two under way: the furthest along, with the row only as a tie-break',
+      [pick({ onScreen: null, underWay: [ROAD, HEADING], queued: [] }), pick({ onScreen: null, underWay: [HEADING, ROAD], queued: [] }), pick({ onScreen: null, underWay: [ROAD, HEADING, ROAD2], queued: [] })],
+      [ROAD, ROAD, ROAD2])
   }
 
   const badge = (o) => v.driverFuelBadge(world(o).plan)
@@ -605,9 +616,18 @@ console.log('§8 DriverFuelPanel.vue rendered')
 let panelFactory = null
 try { panelFactory = await sfcFactory(PANEL_VUE) } catch (e) { check(`§8 DriverFuelPanel.vue compiles in this harness (${e.message})`, false, true) }
 if (panelFactory) {
-  // §8a the flag off: no block anywhere, so today's panel, part for part, less one line.
+  // §8a the flag off: no block anywhere, so today's panel, part for part, with one range
+  // figure on the section's first screen, the chip's.
+  const noReserve = (w) => {
+    w.range.reserveMiles = null
+    w.range.rangeUsableMiles = null
+    w.plan.reserveMiles = null
+    w.plan.refuelWithinMiles = null
+    return w
+  }
   const OFF = {
     'before pickup, a stop needed': [world({ flag: false })],
+    'an older server, no reserve': [noReserve(world({ flag: false }))],
     'in transit, clears': [world({ flag: false, leg: 'to_delivery', routeMiles: 180 })],
     'into the reserve': [world({ flag: false, pct: 3, leg: 'to_delivery', routeMiles: 180 })],
     'sensor dropout': [world({ flag: false, fuelSource: 'carried' })],
@@ -642,6 +662,45 @@ if (panelFactory) {
   check('§8a flag off: into the reserve, still the instruction', textOf(offHtml['into the reserve']).includes('Refuel now you are into your reserve'), true)
   check('§8a the panel\'s source no longer has the line or its styles',
     /until the tank is empty|kept back as a reserve|dfp-dry/.test(fs.readFileSync(PANEL_VUE, 'utf8')), false)
+
+  // The section's first screen: everything but the collapsed "How we know".
+  const firstScreen = (html) => textOf(html.replace(/<div class="dfp-how-body"[\s\S]*?(?=<div class="dfp-cells")/, ''))
+  const RESERVE_WORLDS = Object.entries(OFF).filter(([name, [w]]) => name !== 'an older server, no reserve' && w.plan && w.plan.range && w.plan.range.planning != null)
+  {
+    const shown = RESERVE_WORLDS.filter(([name]) => new RegExp(`\\b${milesText(OFF[name][0].plan.range.planning)} (mi|miles)\\b`).test(firstScreen(offHtml[name]))).map(([n]) => n)
+    check('§8a flag off, with a reserve: the first screen shows no distance-to-dry figure beside the chip\'s, in any world', [RESERVE_WORLDS.length >= 4, shown], [true, []])
+    const says = RESERVE_WORLDS.filter(([name]) => /count on/.test(firstScreen(offHtml[name]).replace('Too close to count on', ''))).map(([n]) => n)
+    check('§8a flag off, with a reserve: nothing there says "you can count on", under Refuel now included', says, [])
+  }
+  {
+    const before = firstScreen(offHtml['before pickup, a stop needed'])
+    check('§8a flag off: the verdict line keeps the miles still to drive, and the hero is the one range figure',
+      [before.includes('420 mi still to drive'), before.includes('240'), before.includes('225 miles before you need to refuel')], [true, false, true])
+    const now = firstScreen(offHtml['into the reserve'])
+    check('§8a flag off, into the reserve: the miles still to drive, no figure to count on, and no "0 mi"',
+      [now.includes('180 mi still to drive'), now.includes('Refuel now'), /\b0 mi\b/.test(now)], [true, true, false])
+    const old = firstScreen(offHtml['an older server, no reserve'])
+    check('§8a flag off, an older server with no reserve: the line and the hero keep their one figure',
+      [old.includes('240 mi you can count on · 420 mi still to drive'), old.includes('240 miles you can count on')], [true, true])
+  }
+  {
+    // "How we know", one tap away: no "plan on" or "until empty" beside a chip saying 225.
+    const w = OFF['before pickup, a stop needed'][0].plan.range
+    const h = offHtml['before pickup, a stop needed']
+    const t = textOf(h)
+    const nums = [w.planning, w.typical, w.high].map(milesText)
+    check('§8a "How we know": a hard run, a typical run and the furthest, each the server\'s figure',
+      t.includes(`On this much fuel, a hard run goes about ${nums[0]} mi and a typical run about ${nums[1]} mi. The furthest this truck has ever managed is ${nums[2]} mi.`), true)
+    check('§8a …and no "plan on", "until empty" or "count on" in it',
+      [/plan on/i.test(t), /until empty/i.test(t), /count on/i.test(h.replace(/<p class="dfp-verdict-head">[^<]*<\/p>/, ''))], [false, false, false])
+    check('§8a …the bar\'s caption and its label for a screen reader say the same',
+      [h.includes(`hard run ${nums[0]}`), h.includes(`About ${nums[0]} miles on a hard run, ${nums[1]} on a typical run, ${nums[2]} at best.`)], [true, true])
+    const est = textOf(offHtml['no tank size'])
+    check('§8a …with no fill-ups on record: no figure in the sentence, and no "floor"',
+      [est.includes('Treat the miles above as the least to expect, not a forecast.'), /floor/i.test(est)], [true, false])
+  }
+  check('§8a the panel works out no range figure: every one on it is printed as the server sent it',
+    /milesText\(\s*(interval\.\w+|i\.\w+)\s*[-+*/]/.test(fs.readFileSync(PANEL_VUE, 'utf8')), false)
   check('§8a flag off: a failed trip plan reads as today', textOf(offHtml['trip plan 400 (no code)']).includes("We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."), true)
   serve(world({ flag: false }))
   await openSection(panelFactory())
@@ -650,13 +709,26 @@ if (panelFactory) {
 
   if (process.env.FUEL_PANEL_BASE_VUE) {
     const baseFactory = await sfcFactory(path.resolve(process.env.FUEL_PANEL_BASE_VUE))
-    const withoutTheLine = (html) => html.replace(/<p class="dfp-dry">[\s\S]*?<\/p>/, '')
+    // The base's HTML with only the worded changes made, each by its own pattern, so a figure
+    // or anything else that moved shows up as a difference.
+    const squeeze = (html) => html.replace(/\s+/g, ' ').replace(/> </g, '><').trim()
+    const asHead = (html, reserve) => {
+      let out = squeeze(html)
+        .replace(/<p class="dfp-dry">.*?<\/p>/, '')
+        .replace(/Plan on <strong>([\d,]+) mi<\/strong> until empty\. A typical run on this much fuel goes about ([\d,]+) mi; the furthest this truck has ever managed on this much fuel is ([\d,]+) mi\./,
+          'On this much fuel, a hard run goes about $1 mi and a typical run about $2 mi. The furthest this truck has ever managed is $3 mi.')
+        .replace(/>count on ([\d,]+)</, '>hard run $1<')
+        .replace(/Range you can count on ([\d,]+) miles, typically ([\d,]+), at best ([\d,]+) miles\./, 'About $1 miles on a hard run, $2 on a typical run, $3 at best.')
+        .replace(/Treat [\d,]+ mi as a floor, not a forecast\./, 'Treat the miles above as the least to expect, not a forecast.')
+      if (reserve) out = out.replace(/<strong>[\d,]+ mi<\/strong> you can count on · /, '')
+      return squeeze(out)
+    }
     const differ = []
     for (const [name, [w, over, props]] of Object.entries(OFF)) {
       serve(w, over)
-      if (withoutTheLine(await openSection(baseFactory(), props)) !== offHtml[name]) differ.push(name)
+      if (asHead(await openSection(baseFactory(), props), name !== 'an older server, no reserve') !== squeeze(offHtml[name])) differ.push(name)
     }
-    check(`§8a flag off: the same HTML as the base copy, less that one line, in all ${Object.keys(OFF).length} worlds (comments aside)`, differ, [])
+    check(`§8a flag off: the same HTML as the base copy, less those worded changes, in all ${Object.keys(OFF).length} worlds (comments aside)`, differ, [])
   } else {
     console.log('  (§8a byte-for-byte against a base copy: not run; set FUEL_PANEL_BASE_VUE)')
   }
@@ -835,6 +907,156 @@ if (panelFactory) {
       Date.now = realNow
     }
   }
+
+  // §8d the header chip's tap: its panel can't sit hours old beside a live chip, or stuck
+  // on a failure beside a working one. No tap asks for the billed stops again.
+  {
+    const realNow = Date.now
+    let skew = 0
+    Date.now = () => realNow() + skew
+    const TRANSIT = { leg: 'to_delivery', routeMiles: 180 }
+    const tapped = (Panel, asked) => renderToString(Vue.createSSRApp(Panel, { loadId: 'QA-FUEL-1', active: true, runnable: true, asked })).then(clean)
+    const FIGURE = { true: (n) => `${n} miles until you run out`, false: (n) => `${n} miles before you need to refuel` }
+    try {
+      for (const flag of [false, true]) {
+        const name = flag ? 'flag on' : 'flag off'
+        const says = FIGURE[flag]
+        const Panel = panelFactory()
+        serve(world({ flag, ...TRANSIT }))
+        await openSection(Panel)
+        const later = world({ flag, ...TRANSIT, pct: 30 })
+        net.answers['/api/fuel/range'] = later.range
+        net.answers['/api/fuel/trip-plan'] = later.plan
+
+        skew = 30 * 1000
+        let before = net.gets.length
+        await tapped(Panel, 1)
+        await settle()
+        check(`§8d ${name}: a repeat tap within the minute asks nothing`, net.gets.length - before, 0)
+
+        skew = 4 * 60 * 60 * 1000
+        before = net.gets.length
+        const painted = textOf(await tapped(Panel, 2))
+        const asked = net.gets.slice(before).sort()
+        check(`§8d ${name}: a repeat tap 4 hours on asks for the range and the plan, never the stops`, asked, ['/api/fuel/range', '/api/fuel/trip-plan'])
+        check(`§8d ${name}: …what's painted stays up while it asks, with no spinner over it`,
+          [painted.includes(says(225)), painted.includes('Reading your fuel level')], [true, false])
+        await settle()
+        const after = textOf(await tapped(Panel, 2))
+        check(`§8d ${name}: …and the new figure shows`, [after.includes(says(135)), after.includes(says(225))], [true, false])
+        check(`§8d ${name}: …the stops stay`, after.includes('QA Truck Plaza Riverton'), true)
+        check(`§8d ${name}: the same answer again, with no new tap, asks nothing`, await (async () => {
+          const n = net.gets.length
+          await tapped(Panel, 2)
+          await settle()
+          return net.gets.length - n
+        })(), 0)
+        skew = 0
+      }
+
+      // The first tap on a load whose plan was prefetched long ago: not that old plan.
+      for (const flag of [false, true]) {
+        const Panel = panelFactory()
+        serve(world({ flag, ...TRANSIT }))
+        await renderToString(Vue.createSSRApp(Panel, { loadId: 'QA-FUEL-1', active: false, runnable: true }))
+        await settle()
+        skew = 4 * 60 * 60 * 1000
+        const before = net.gets.length
+        await tapped(Panel, 1)
+        const asked = net.gets.slice(before).sort()
+        check(`§8d ${flag ? 'flag on' : 'flag off'}: a first tap 4 hours after the prefetch asks for a new plan too`, asked, ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops'])
+        await settle()
+        skew = 0
+      }
+
+      // A saved failure counts as expired, by a tap or a hand, however young it is.
+      const FAILS = {
+        'the range failed': { '/api/fuel/range': apiError(500) },
+        'the trip plan failed': { '/api/fuel/trip-plan': apiError(500) },
+        'the trip plan answered 400': { '/api/fuel/trip-plan': apiError(400) },
+      }
+      for (const flag of [false, true]) {
+        const says = FIGURE[flag]
+        for (const [what, over] of Object.entries(FAILS)) {
+          const Panel = panelFactory()
+          const w = world({ flag, ...TRANSIT })
+          serve(w, over)
+          await openSection(Panel)
+          await settle()
+          net.answers = { '/api/fuel/range': w.range, '/api/fuel/trip-plan': w.plan, '/api/poi/fuel-stops': STOPS }
+          let before = net.gets.length
+          await tapped(Panel, 0)
+          const asked = net.gets.slice(before).sort()
+          check(`§8d ${flag ? 'flag on' : 'flag off'}, ${what}: reopened with signal back, the figures are asked for again, never the stops`, asked, ['/api/fuel/range', '/api/fuel/trip-plan'])
+          await settle()
+          const healed = textOf(await tapped(Panel, 0))
+          check(`§8d ${flag ? 'flag on' : 'flag off'}, ${what}: …the figures show, and no failure`,
+            [healed.includes(says(225)), /Couldn't|can't check/.test(healed)], [true, false])
+          before = net.gets.length
+          await tapped(Panel, 0)
+          await settle()
+          check(`§8d ${flag ? 'flag on' : 'flag off'}, ${what}: …and once healed it stops asking`, net.gets.length - before, 0)
+        }
+      }
+      // The collapsed badge's prefetch failed, and the section is first opened with signal back.
+      {
+        const Panel = panelFactory()
+        const w = world({ flag: false, ...TRANSIT })
+        serve(w, { '/api/fuel/trip-plan': apiError(500) })
+        await renderToString(Vue.createSSRApp(Panel, { loadId: 'QA-FUEL-1', active: false, runnable: true }))
+        await settle()
+        net.answers['/api/fuel/trip-plan'] = w.plan
+        const before = net.gets.length
+        await tapped(Panel, 0)
+        check('§8d a prefetch that failed: the first open asks for the plan again, not the saved failure',
+          net.gets.slice(before).filter((u) => u === '/api/fuel/trip-plan').length, 1)
+        await settle()
+      }
+      // One panel on one page, as a driver has it: a tap counts once, and a hand reopening
+      // afterwards is the plain cached reopen it always was.
+      {
+        const instanceFactory = await sfcFactory(PANEL_VUE, { inline: false })
+        const scope = Vue.effectScope()
+        const props = Vue.shallowReactive({ loadId: 'QA-FUEL-1', active: true, runnable: true, asked: 0 })
+        serve(world({ flag: false, ...TRANSIT }))
+        scope.run(() => instanceFactory().setup(props, { expose() {}, emit() {}, attrs: {}, slots: {} }))
+        await settle()
+        const reopen = async () => {
+          props.active = false
+          await settle()
+          props.active = true
+          await settle()
+        }
+        skew = 4 * 60 * 60 * 1000
+        let before = net.gets.length
+        await reopen()
+        check('§8d one panel, flag off: reopened by hand hours later, nothing is asked', net.gets.length - before, 0)
+        before = net.gets.length
+        props.asked = 1
+        await settle()
+        check('§8d one panel: the chip\'s tap asks', net.gets.slice(before).sort(), ['/api/fuel/range', '/api/fuel/trip-plan'])
+        skew = 8 * 60 * 60 * 1000
+        before = net.gets.length
+        await reopen()
+        check('§8d one panel: that tap is spent, so a later hand reopening asks nothing', net.gets.length - before, 0)
+        scope.stop()
+        skew = 0
+      }
+      // A failed stops lookup isn't a figure, and asking again is what's billed: Refresh does that.
+      {
+        const Panel = panelFactory()
+        serve(world({ flag: false, ...TRANSIT }), { '/api/poi/fuel-stops': apiError(500) })
+        await openSection(Panel)
+        await settle()
+        const before = net.gets.length
+        await tapped(Panel, 0)
+        await settle()
+        check('§8d a failed stops lookup alone: reopening asks for nothing, so no new Places spend', net.gets.length - before, 0)
+      }
+    } finally {
+      Date.now = realNow
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -842,8 +1064,14 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
 // ---------------------------------------------------------------------------
 {
   globalThis.document ??= { addEventListener() {}, removeEventListener() {}, visibilityState: 'visible' }
-  const quietHooks = { ...Vue, onMounted() {}, onBeforeUnmount() {}, onUnmounted() {} }
+  const unmountHooks = []
+  const quietHooks = { ...Vue, onMounted() {}, onBeforeUnmount(fn) { unmountHooks.push(fn) }, onUnmounted() {} }
   const detailFactory = await sfcFactory(DETAIL_VUE, { inline: false, vue: quietHooks })
+  const noReserveFor = (w) => {
+    w.plan.reserveMiles = null
+    w.plan.refuelWithinMiles = null
+    return w
+  }
   const detail = (over = {}) => {
     const scope = Vue.effectScope()
     const props = Vue.shallowReactive({
@@ -879,8 +1107,15 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
   {
     const off = badgeFor(world({ flag: false }).plan)
     const offClears = badgeFor(world({ flag: false, leg: 'to_delivery', routeMiles: 180 }).plan)
-    check('§9 flag off: the badge as before ("Fuel stop needed"; "240 mi range" on the distance-to-dry), Route Options keep their gallons',
-      [off.badge, offClears.badge, off.showFuel !== false], [{ tone: 'bad', text: 'Fuel stop needed' }, { tone: 'plain', text: '240 mi range' }, true])
+    check('§9 flag off: the badge says "Fuel stop needed", or on a run that clears the section\'s own figure (225, not the distance-to-dry 240); Route Options keep their gallons',
+      [off.badge, offClears.badge, off.showFuel !== false], [{ tone: 'bad', text: 'Fuel stop needed' }, { tone: 'plain', text: '225 mi range' }, true])
+    const oldServer = noReserveFor(world({ flag: false, leg: 'to_delivery', routeMiles: 180 }))
+    check('§9 flag off, an older server with no reserve: the badge keeps the figure the section headlines there',
+      badgeFor(oldServer.plan).badge, { tone: 'plain', text: '240 mi range' })
+    const noneLeft = world({ flag: false, leg: 'to_delivery', routeMiles: 180 })
+    noneLeft.plan.verdict = 'clears'
+    noneLeft.plan.refuelWithinMiles = 0
+    check('§9 flag off, a clearing verdict with 0 usable miles: the instruction, never "0 mi range"', badgeFor(noneLeft.plan).badge, { tone: 'bad', text: 'Refuel now' })
   }
   const src = fs.readFileSync(DETAIL_VUE, 'utf8')
   check('§9 LoadDetail hands Route Options the switch', /<RouteAlternatives[^>]*:show-fuel="routeOptionsShowFuel"/.test(src), true)
@@ -929,6 +1164,135 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
     const css = descriptor.styles.map((s) => s.content).join('\n')
     check('§9 …which lands below the fixed header, at the height the header reports',
       /scroll-margin-top:\s*calc\(var\(--driver-header-height, 52px\)/.test((css.match(/\.fuel-title\s*\{[^}]*\}/) || [''])[0]), true)
+    check('§9 the panel is told each tap wants the figures again', /<DriverFuelPanel\b[^>]*:asked="fuelAsked"/.test(descriptor.template.content), true)
+    {
+      const count = detail()
+      const before = count.b.fuelAsked ? count.b.fuelAsked.value : null
+      count.props.openFuel = true
+      await settle()
+      count.props.openFuel = false
+      await settle()
+      count.props.openFuel = true
+      await settle()
+      check('§9 …it moves once per tap', [before, count.b.fuelAsked ? count.b.fuelAsked.value : null], [0, 2])
+      count.stop()
+    }
+
+    // Answers that land after the first scroll, above the title: on a phone with no
+    // scroll anchoring they would push it off screen.
+    {
+      const realObserver = globalThis.ResizeObserver
+      const realWindow = globalThis.window
+      const realTimeout = globalThis.setTimeout
+      const realClear = globalThis.clearTimeout
+      const made = []
+      class FakeObserver {
+        constructor(cb) { this.cb = cb; this.watched = []; this.gone = false; made.push(this) }
+        observe(el) { this.watched.push(Vue.toRaw(el)) }
+        disconnect() { this.gone = true }
+      }
+      const listening = new Map()
+      const timers = []
+      globalThis.ResizeObserver = FakeObserver
+      globalThis.window = {
+        addEventListener: (name, fn) => listening.set(name, fn),
+        removeEventListener: (name) => listening.delete(name),
+      }
+      try {
+        const start = (d, page) => {
+          const scrolls = []
+          if (d.b.pageEl) d.b.pageEl.value = page
+          if (d.b.fuelTitleEl) d.b.fuelTitleEl.value = { scrollIntoView: (o) => scrolls.push(o) }
+          return scrolls
+        }
+        // Timers are recorded only from here on, past the harness's own settling.
+        const recording = () => {
+          globalThis.setTimeout = (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t }
+          globalThis.clearTimeout = (t) => { if (t && typeof t === 'object') t.cleared = true }
+        }
+        const page = { tag: 'page' }
+        const d = detail()
+        const scrolls = start(d, page)
+        recording()
+        d.props.openFuel = true
+        await settle()
+        check('§9 after the first scroll the page is watched for what lands late', [scrolls.length, made.length, made[0] && made[0].watched[0] === page], [1, 1, true])
+        check('§9 …only until useApi\'s 20 s are up', timers.filter((t) => !t.cleared).map((t) => t.ms), [20000])
+        if (made[0]) made[0].cb()
+        check('§9 an answer lands and the page grows: the title comes back into view', scrolls.length, 2)
+        check('§9 a driver\'s touch of any kind ends it', [...listening.keys()].sort(), ['keydown', 'pointerdown', 'touchstart', 'wheel'])
+        const touch = listening.get('touchstart')
+        if (touch) touch()
+        check('§9 …the touch stops the watch, its timer and its listeners', [made[0] && made[0].gone, timers.every((t) => t.cleared), listening.size], [true, true, 0])
+
+        // Each kind of touch, and the time limit.
+        for (const name of ['pointerdown', 'wheel', 'keydown']) {
+          d.props.openFuel = false
+          await settle()
+          d.props.openFuel = true
+          await settle()
+          const last = made[made.length - 1]
+          const end = listening.get(name)
+          if (end) end()
+          check(`§9 …a ${name} too`, !!last && last.gone, true)
+        }
+        d.props.openFuel = false
+        await settle()
+        d.props.openFuel = true
+        await settle()
+        const timed = made[made.length - 1]
+        const limit = timers[timers.length - 1]
+        if (limit && limit.fn) limit.fn()
+        check('§9 past the time limit it stops by itself', [!!timed && timed.gone, listening.size], [true, 0])
+
+        // A second tap starts over, and leaves no first watch behind.
+        d.props.openFuel = false
+        await settle()
+        d.props.openFuel = true
+        await settle()
+        const firstOfTwo = made[made.length - 1]
+        d.props.openFuel = false
+        await settle()
+        d.props.openFuel = true
+        await settle()
+        const lastOfTwo = made[made.length - 1]
+        check('§9 a second tap replaces the first tap\'s watch', [!!firstOfTwo && firstOfTwo.gone, !!lastOfTwo && lastOfTwo.gone, listening.size], [true, false, 4])
+        d.stop()
+
+        // Leaving the page ends it.
+        unmountHooks.length = 0
+        const left = detail()
+        start(left, page)
+        left.props.openFuel = true
+        await settle()
+        const leftWatch = made[made.length - 1]
+        for (const fn of unmountHooks) fn()
+        check('§9 leaving the page stops the watch and its listeners', [!!leftWatch && leftWatch.gone, listening.size], [true, 0])
+        left.stop()
+
+        // A hand-opened section is never held, and a browser with no ResizeObserver still scrolls once.
+        const handMade = made.length
+        const hand = detail()
+        start(hand, page)
+        hand.b.openSections.value = ['status', 'map', 'fuel']
+        await settle()
+        check('§9 a section the driver opened by hand isn\'t held', made.length, handMade)
+        hand.stop()
+        globalThis.ResizeObserver = undefined
+        const plain = detail()
+        const plainScrolls = start(plain, page)
+        plain.props.openFuel = true
+        await settle()
+        check('§9 a browser with no ResizeObserver still gets the first scroll and the answer', [plainScrolls.length, plain.emits.includes('fuel-opened')], [1, true])
+        plain.stop()
+      } finally {
+        globalThis.ResizeObserver = realObserver
+        globalThis.window = realWindow
+        globalThis.setTimeout = realTimeout
+        globalThis.clearTimeout = realClear
+      }
+      check('§9 the page is tied to what it watches', /<div\b[^>]*\bref="pageEl"[^>]*class="load-detail"/.test(descriptor.template.content), true)
+    }
   }
 
   const altsFactory = await sfcFactory(ALTS_VUE)

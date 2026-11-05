@@ -6,6 +6,7 @@
 
 // '.js' on the import so bare Node (the runners) can load this file.
 import { toNum, milesText } from './fuelReview.js';
+import { hasRoadLeft, statusPriorityScore } from './loadProgress.js';
 
 // States in which the server withholds the miles: say why, never guess.
 const WITHHELD = new Set(['none', 'stale', 'no_tank_size', 'no_truck']);
@@ -230,13 +231,20 @@ export function refuelNowTitle(estimate = false) {
 }
 
 /**
- * Which load a tap on the chip opens: the load page on screen, else the load under
- * way, else the next in the queue, else none. `queued` is the store's queuedLoads,
- * in queue order. Not workingLoads[0]: that list runs newest added first, so it can
- * be a load still waiting behind the one on the road.
+ * Which load a tap on the chip opens: the load page on screen while it has road left,
+ * else the furthest along of the loads under way (a driver can start a second one
+ * while hauling the first, and the newest row isn't the one on the road), else the
+ * next in the queue, else none. `queued` is the store's queuedLoads, in queue order.
+ * Not workingLoads[0]: that list runs newest added first, so it can be a load still
+ * waiting behind the one on the road.
  */
-export function fuelTapLoad({ onScreen, inProgress, queued }) {
-  return onScreen || inProgress || (queued && queued[0]) || null;
+export function fuelTapLoad({ onScreen, underWay, queued, statusOf }) {
+  if (onScreen && hasRoadLeft(statusOf(onScreen))) return onScreen;
+  const furthest = [...(underWay || [])].sort((a, b) => (
+    statusPriorityScore(statusOf(a)) - statusPriorityScore(statusOf(b))
+      || (b._rowIndex || 0) - (a._rowIndex || 0)
+  ))[0];
+  return furthest || (queued && queued[0]) || null;
 }
 
 /**

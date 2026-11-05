@@ -310,7 +310,11 @@ const fuelChip = computed(() => {
   outline-offset: 2px;
 }
 
+/* Above the chip's tap target, so Password and Logout keep their whole area whatever
+   the row heights do. It moves nothing: it only decides who gets a tap on an overlap. */
 .app-header-right {
+  position: relative;
+  z-index: 1;
   grid-row: 1;
   grid-column: 2;
   display: flex;

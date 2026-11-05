@@ -61,8 +61,10 @@
       >
         <p class="dfp-verdict-head">{{ verdict.driver }}</p>
 
+        <!-- With a reserve the hero below is the one range figure on this screen, the
+             same one the header chip quotes, so this line keeps only the road left. -->
         <p v-if="interval.known && routeText" class="dfp-verdict-line">
-          <strong>{{ milesText(interval.planning) }} mi</strong> you can count on ·
+          <template v-if="!interval.hasReserve"><strong>{{ milesText(interval.planning) }} mi</strong> you can count on · </template>
           <strong>{{ routeText }} mi</strong> still to drive
         </p>
         <p v-else-if="verdictReason" class="dfp-verdict-line">{{ verdictReason }}</p>
@@ -149,7 +151,7 @@
                match its marker. -->
           <div class="dfp-bar-legend">
             <span class="lg-range">
-              <span class="lg-solid">count on {{ milesText(interval.planning) }}</span>
+              <span class="lg-solid">hard run {{ milesText(interval.planning) }}</span>
               <template v-if="interval.typical != null"> · typical {{ milesText(interval.typical) }}</template>
               · best {{ milesText(interval.high) }}
             </span>
@@ -162,16 +164,16 @@
         <!-- Same three numbers in words, for the bar's non-visual twin and for
              the estimated basis, which has no spread to draw. -->
         <p v-if="interval.hasSpread" class="dfp-spread">
-          Plan on <strong>{{ milesText(interval.planning) }} mi</strong> until empty. A typical run on this
-          much fuel goes about {{ milesText(interval.typical) }} mi; the furthest this truck has ever
-          managed on this much fuel is {{ milesText(interval.high) }} mi.
+          On this much fuel, a hard run goes about {{ milesText(interval.planning) }} mi and a typical
+          run about {{ milesText(interval.typical) }} mi. The furthest this truck has ever managed is
+          {{ milesText(interval.high) }} mi.
         </p>
         <!-- NOT a dash, and NOT the old tank x mpg figure. With no fill history
              there is no spread to report, and inventing one is how "449 mi"
              reached a driver who had about 210. -->
         <p v-else-if="interval.known" class="dfp-spread muted">
           We can't give you a typical or best case for this truck yet — it hasn't recorded enough
-          fill-ups. Treat {{ milesText(interval.planning) }} mi as a floor, not a forecast.
+          fill-ups. Treat the miles above as the least to expect, not a forecast.
         </p>
 
         <p v-if="basisText" class="dfp-basis">
@@ -421,6 +423,8 @@ const props = defineProps({
   // false alarm on a load in the history list. Defaults true so any caller that
   // doesn't know the status still gets the check.
   runnable: { type: Boolean, default: true },
+  // Moves on each tap of the header's fuel chip: that tap wants the figures again.
+  asked: { type: Number, default: 0 },
 })
 
 const range = ref(null)
@@ -584,9 +588,9 @@ function pctSpan(from, to) {
 }
 const barLabel = computed(() => {
   const i = interval.value
-  const base = `Range you can count on ${milesText(i.planning)} miles, typically ${milesText(
+  const base = `About ${milesText(i.planning)} miles on a hard run, ${milesText(
     i.typical,
-  )}, at best ${milesText(i.high)} miles.`
+  )} on a typical run, ${milesText(i.high)} at best.`
   return routeOnBar.value != null ? `${base} This run is ${routeText.value} miles.` : base
 })
 
@@ -807,13 +811,14 @@ async function fetchStops(key) {
 // it as "fine". The 400s are the routine ones — a load nobody has geocoded, or a
 // truck with no recent fix — and they are the caller's normal state, not a fault.
 //
-// `fresh`: the section is opening, so a flag-on plan past NUMBERS_MAX_AGE_MS is
-// asked for again rather than reused (the collapsed badge's prefetch reuses it).
-async function fetchPlan(key, { force = false, fresh = false } = {}) {
+// `fresh`: the section is opening, so a flag-on plan past NUMBERS_MAX_AGE_MS or a saved
+// failure is asked for again rather than reused (the collapsed badge's prefetch reuses
+// it). `again`: a chip tap, the same for a plan over AGAIN_AFTER_MS old.
+async function fetchPlan(key, { force = false, fresh = false, again = false } = {}) {
   if (!key || !props.runnable) return { plan: null, error: '' }
   if (!force) {
     const hit = planCache.get(key)
-    if (hit && !(fresh && numbersExpired(hit))) return hit
+    if (hit && !(fresh && numbersExpired(hit)) && !(again && olderThanAgain(hit))) return hit
     const pending = planInflight.get(key)
     if (pending) return pending
   }
@@ -855,13 +860,23 @@ async function requestPlan(key) {
 
 // Flag on only: numbers older than this are asked for again when the section
 // opens, so a phone left open since morning doesn't show the morning's figures at
-// noon. Flag off, nothing here expires and the cache is as it always was.
+// noon. With either flag, a saved failure is asked for again: otherwise one tap in a
+// dead zone shows that failure beside a working chip until the page reloads.
 const NUMBERS_MAX_AGE_MS = 15 * 60 * 1000
 function numbersExpired(entry) {
   if (!entry) return false
+  if (entry.rangeError || entry.planError || entry.error) return true
   const flagOn = !!(driverFuelOf(entry.plan) || driverFuelOf(entry.range)
     || flagOnProblem(entry.problem) || flagOnProblem(entry.planProblem))
   return flagOn && Date.now() - (Number(entry.at) || 0) > NUMBERS_MAX_AGE_MS
+}
+
+// A chip tap asks for the figures again unless they're under a minute old. The chip is
+// only read every 2 minutes, and the server allows a driver 30 trip plans in 15 minutes;
+// a 429 would replace a good verdict with "Checked too many times".
+const AGAIN_AFTER_MS = 60 * 1000
+function olderThanAgain(entry) {
+  return !!entry && Date.now() - (Number(entry.at) || 0) >= AGAIN_AFTER_MS
 }
 
 function apply(entry) {
@@ -880,13 +895,13 @@ function apply(entry) {
   emit('plan', entry.plan || null)
 }
 
-// `keep`: an expired flag-on entry whose stops are reused, because a Places
+// `keep`: an entry being asked for again, whose stops are reused, because a Places
 // lookup is billed and the stops along a route don't go stale in 15 minutes.
-async function fetchAll(key, { force = false, keep = null } = {}) {
+async function fetchAll(key, { force = false, keep = null, again = false } = {}) {
   const [r, s, pl] = await Promise.all([
     fetchRange(),
     keep ? { stops: keep.stops, livePriceCount: keep.livePriceCount, error: keep.stopsError } : fetchStops(key),
-    fetchPlan(key, { force: force || !!keep, fresh: true }),
+    fetchPlan(key, { force: force || !!keep, fresh: true, again }),
   ])
   return {
     range: r.range,
@@ -901,33 +916,37 @@ async function fetchAll(key, { force = false, keep = null } = {}) {
   }
 }
 
-async function load({ force = false } = {}) {
+async function load({ force = false, again = false } = {}) {
   const key = props.loadId || ''
   let keep = null
   if (!force) {
     const hit = cacheGet(key)
     // Synchronous — nothing before this line awaits, so a reopen paints the
     // cached state immediately and issues no request at all.
-    if (hit && !numbersExpired(hit)) return apply(hit)
-    // Flag on and older than 15 minutes: paint it, then ask for the numbers again.
+    if (hit && !numbersExpired(hit) && !(again && olderThanAgain(hit))) return apply(hit)
+    // Past its time, or asked for again: paint it, then ask for the numbers again.
     if (hit) {
       apply(hit)
       keep = hit
     }
   }
-  rangeLoading.value = true
-  stopsLoading.value = !keep
-  // Only spinner-over the verdict when there isn't one yet: the prefetch below
-  // usually means there is, and replacing a standing "you will not make it" with
-  // a spinner every time the section is opened is the one flicker that matters.
-  planLoading.value = !plan.value
-  rangeError.value = ''
-  if (!keep) stopsError.value = ''
-  planError.value = ''
+  // What's painted stays up until the new answer lands: no spinner over a figure or a
+  // standing "you will not make it" each time the driver taps the chip.
+  if (!keep) {
+    rangeLoading.value = true
+    stopsLoading.value = true
+    // Only spinner-over the verdict when there isn't one yet: the prefetch below
+    // usually means there is, and replacing a standing "you will not make it" with
+    // a spinner every time the section is opened is the one flicker that matters.
+    planLoading.value = !plan.value
+    rangeError.value = ''
+    stopsError.value = ''
+    planError.value = ''
+  }
 
   let p = force ? null : inflight.get(key)
   if (!p) {
-    p = fetchAll(key, { force, keep }).then((entry) => {
+    p = fetchAll(key, { force, keep, again }).then((entry) => {
       cacheSet(key, entry)
       return entry
     })
@@ -970,10 +989,14 @@ defineExpose({ refresh, load })
 
 // Fires only once `active` is true, so the BILLED Places lookup is still opt-in.
 // Re-opening re-runs this, but load() short-circuits on cache.
+let askedSeen = 0
 watch(
-  () => [props.active, props.loadId],
+  () => [props.active, props.loadId, props.asked],
   () => {
-    if (props.active) load()
+    if (!props.active) return
+    const again = props.asked !== askedSeen
+    askedSeen = props.asked
+    load({ again })
   },
   { immediate: true },
 )

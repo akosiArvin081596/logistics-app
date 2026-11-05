@@ -1,5 +1,5 @@
 <template>
-  <div class="load-detail">
+  <div ref="pageEl" class="load-detail">
     <!-- Top bar with back button -->
     <div class="detail-topbar">
       <van-button size="small" @click="$emit('back')">&#8592; Back</van-button>
@@ -119,6 +119,7 @@
           :load-id="String(loadId || '')"
           :active="fuelSectionOpen"
           :runnable="loadStillToDrive"
+          :asked="fuelAsked"
           @plan="fuelPlan = $event"
         />
       </van-collapse-item>
@@ -282,6 +283,8 @@ import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCe
 import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import { isActiveLoadStatus, liveExpenseWindow, expenseWindowCopy } from '../../lib/expenseWindow.js'
 import { driverFuelOf, driverFuelBadge } from '../../lib/driverFuelView.js'
+import { milesText, planRangeReadout } from '../../lib/fuelReview.js'
+import { hasRoadLeft } from '../../lib/loadProgress.js'
 import { pickupArrivalLine } from '../../lib/pickupArrival.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusTimeline from '../shared/StatusTimeline.vue'
@@ -340,15 +343,48 @@ const docListRef = ref(null)
 const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 
 // The section sits below the status and the map, so it also comes into view: opened
-// off screen, the tap would still look like nothing happened.
+// off screen, the tap would still look like nothing happened. `fuelAsked` tells the
+// panel a chip tap wants the figures again.
+const pageEl = ref(null)
 const fuelTitleEl = ref(null)
+const fuelAsked = ref(0)
 watch(() => props.openFuel, async (asked) => {
   if (!asked) return
   if (!fuelSectionOpen.value) openSections.value = [...openSections.value, 'fuel']
+  fuelAsked.value += 1
   await nextTick()
-  fuelTitleEl.value?.scrollIntoView({ block: 'start' })
+  bringFuelIntoView()
+  holdFuelInView()
   emit('fuel-opened')
 }, { immediate: true })
+
+function bringFuelIntoView() {
+  fuelTitleEl.value?.scrollIntoView({ block: 'start' })
+}
+
+// Route Options, Directions, the map's rows and the instructions card land above the
+// title after the first scroll, and Safari doesn't hold a page's place when they do.
+// So the title comes back each time the page changes size, until the driver touches
+// the page, or until the first answers have landed or failed (useApi gives up at 20 s).
+const FIRST_ANSWERS_MS = 20000
+const DRIVER_TOUCHES = ['touchstart', 'pointerdown', 'wheel', 'keydown']
+let stopHoldingFuel = () => {}
+function holdFuelInView() {
+  stopHoldingFuel()
+  if (typeof ResizeObserver === 'undefined' || !pageEl.value) return
+  const watcher = new ResizeObserver(bringFuelIntoView)
+  const stop = () => {
+    watcher.disconnect()
+    clearTimeout(timer)
+    for (const name of DRIVER_TOUCHES) window.removeEventListener(name, stop, true)
+    stopHoldingFuel = () => {}
+  }
+  const timer = setTimeout(stop, FIRST_ANSWERS_MS)
+  for (const name of DRIVER_TOUCHES) window.addEventListener(name, stop, { capture: true, passive: true })
+  watcher.observe(pageEl.value)
+  stopHoldingFuel = stop
+}
+onBeforeUnmount(() => stopHoldingFuel())
 
 // The trip-fuel verdict, surfaced on the collapsed section header.
 //
@@ -377,6 +413,12 @@ const fuelBadge = computed(() => {
   if (v === 'tight') return { tone: 'warn', text: 'Fuel is tight' }
   if (v === 'unknown') return { tone: 'warn', text: 'Fuel unknown' }
   if (v === 'clears') {
+    // With a reserve, the server's usable miles: the figure the section headlines and
+    // the header chip quotes, so the title doesn't show a second range beside them.
+    const i = planRangeReadout(p)
+    if (i.hasReserve) {
+      return i.mustRefuelNow ? { tone: 'bad', text: 'Refuel now' } : { tone: 'plain', text: `${milesText(i.usable)} mi range` }
+    }
     // decidedOn is the interval's LOW end — the same number the panel headlines.
     // Never substitute typical/rangeMiles here; that is the original bug.
     const mi = p.decidedOn
@@ -555,7 +597,7 @@ const showExpenseForm = computed(() =>
 // would measure from where the truck is NOW to a destination it already reached
 // and tell a driver reviewing last month's paperwork that they haven't the fuel
 // to make it. Same status set the driver store splits Active from Historical on.
-const loadStillToDrive = computed(() => !/^(delivered|completed|pod received)$/i.test(status.value))
+const loadStillToDrive = computed(() => hasRoadLeft(status.value))
 
 // See LoadCard.vue \u2014 identical reasoning. `Details` is the commodity column and
 // is only consulted for a route when it is genuinely route-shaped.

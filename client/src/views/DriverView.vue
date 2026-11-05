@@ -440,6 +440,7 @@ import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
 import { fuelTapLoad } from '../lib/driverFuelView'
+import { statusPriorityScore } from '../lib/loadProgress'
 import { expensesForLoad } from '../lib/loadId'
 import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
@@ -733,24 +734,6 @@ const detailLoadExpenses = computed(() => {
 // load they're physically moving with, not the most recently sheet-rowed one.
 // A manual override (persisted per-driver) wins when the chosen load is
 // still in workingLoads; otherwise we fall back to priority-based pick.
-const STATUS_PRIORITY = [
-  /^in transit$/i,
-  /^at receiver$/i,
-  /^unloading$/i,
-  /^at shipper$/i,
-  /^loading$/i,
-  /^heading to shipper$/i,
-  /^assigned$/i,
-]
-
-function statusPriorityScore(status) {
-  const s = (status || '').trim()
-  for (let i = 0; i < STATUS_PRIORITY.length; i++) {
-    if (STATUS_PRIORITY[i].test(s)) return i
-  }
-  return STATUS_PRIORITY.length
-}
-
 function statusLoadStorageKey() {
   return `logisx_driver_status_load_${(driverName.value || 'anon').toLowerCase()}`
 }
@@ -997,12 +980,12 @@ const FUEL_LINE_MS = 6000
 const fuelTapRow = ref(null)
 function handleFuelTap(title) {
   const onScreen = currentTab.value === 'loads' ? detailLoad.value : null
-  const load = fuelTapLoad({ onScreen, inProgress: driverStore.inProgressLoad, queued: driverStore.queuedLoads })
+  const load = fuelTapLoad({ onScreen, underWay: driverStore.inProgressLoads, queued: driverStore.queuedLoads, statusOf: getLoadStatus })
   if (!load) {
     toast.show(title, 'success', FUEL_LINE_MS)
     return
   }
-  if (!onScreen) {
+  if (load !== onScreen) {
     handleTabSwitch('loads')
     driverStore.loadSubTab = 'active'
   }

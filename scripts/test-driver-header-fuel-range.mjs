@@ -28,8 +28,10 @@
 //      screens; a tap hands up the chip's own line, one figure and no working on
 //      either flag path; nothing happens with a dialog over the chip
 //   §9 where the tap goes: which load (the driver store's own getters, with the load
-//      list that runs newest first), DriverView's handler run on stand-ins, and the
-//      button's box, which must stay the plain chip's so nothing moves
+//      list that runs newest first): a page on screen only while its load has road
+//      left, then the furthest along of the loads under way, then the queue;
+//      DriverView's handler run on stand-ins; and the button's box, which must stay
+//      the plain chip's so nothing moves, with Password and Logout above its target
 //
 // The component's own <script setup>, compiled with the client's compiler and
 // run with its I/O stubbed. No DOM, no server. §4's blocks come from the server's
@@ -528,9 +530,11 @@ if (Header) {
     ).getters
     const HEADERS = ['Load ID', 'Job Status', 'Driver']
     const qaLoad = (row, id, status, extra = {}) => ({ _rowIndex: row, 'Load ID': id, 'Job Status': status, Driver: 'Driver QA', ...extra })
+    const statusOf = (l) => l['Job Status']
     const opened = (loads, onScreen = null) => {
       const state = { headers: { jobTracking: HEADERS }, loads }
-      const load = pick && pick({ onScreen, inProgress: getters.inProgressLoad(state), queued: getters.queuedLoads(state) })
+      const underWay = getters.inProgressLoads ? getters.inProgressLoads(state) : []
+      const load = pick && pick({ onScreen, underWay, queued: getters.queuedLoads(state), statusOf })
       return load ? load['Load ID'] : null
     }
     const ROAD_AND_QUEUE = [qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Assigned', { _queuePosition: 1 })]
@@ -549,32 +553,79 @@ if (Header) {
     ok('§9 only delivered loads: none, so the toast', opened([qaLoad(2, 'QA-1', 'Delivered'), qaLoad(3, 'QA-3', 'Completed')]) === null)
     ok('§9 a load page on screen stays, whatever else is under way', opened(ROAD_AND_QUEUE, qaLoad(9, 'QA-9', 'Assigned')) === 'QA-9')
 
+    // A page stays only while its load has road left. It stays open after Delivered, so
+    // this is an everyday state, and its Fuel section would be for a road already driven.
+    for (const status of ['Delivered', 'Completed', 'POD Received', ' delivered ']) {
+      const done = qaLoad(5, 'QA-5', status)
+      ok(`§9 a "${status.trim()}" page on screen, a load on the road: the load on the road`, opened([done, ...ROAD_AND_QUEUE], done) === 'QA-1')
+      ok(`§9 …a "${status.trim()}" page, only a queued load: the next in the queue`, opened([done, qaLoad(9, 'QA-9', 'Assigned')], done) === 'QA-9')
+      ok(`§9 …a "${status.trim()}" page, no other load: none, so the toast`, opened([done], done) === null)
+    }
+    for (const status of ['Assigned', 'Dispatched', 'In Transit', 'Unloading']) {
+      ok(`§9 a page whose load is ${status} has road left, so it stays`, opened(ROAD_AND_QUEUE, qaLoad(5, 'QA-5', status)) === 'QA-5')
+    }
+    const detailSrc = fs.readFileSync(path.join(DRIVER_DIR, 'LoadDetail.vue'), 'utf8')
+    ok('§9 …the same test as the load page\'s own, one copy', /const loadStillToDrive = computed\(\(\) => hasRoadLeft\(status\.value\)\)/.test(detailSrc))
+
+    // Two loads under way is reachable with ordinary taps: the furthest along, not the newest row.
+    const ORDER = ['In Transit', 'At Receiver', 'Unloading', 'At Shipper', 'Loading', 'Heading to Shipper']
+    ok('§9 In Transit on an older row beats Heading to Shipper on a newer one',
+      opened([qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Heading to Shipper')]) === 'QA-1')
+    {
+      const wrong = []
+      for (let i = 0; i < ORDER.length; i++) {
+        for (let j = i + 1; j < ORDER.length; j++) {
+          if (opened([qaLoad(2, 'QA-1', ORDER[i]), qaLoad(9, 'QA-9', ORDER[j])]) !== 'QA-1') wrong.push(`${ORDER[i]} over ${ORDER[j]}`)
+        }
+      }
+      ok(`§9 …every pair, in the active load's order${wrong.length ? `: ${wrong.join('; ')}` : ''}`, wrong.length === 0)
+    }
+    ok('§9 the same status twice: the newer row, only as a tie-break',
+      opened([qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'In Transit')]) === 'QA-9')
+    ok('§9 the sort leaves the store\'s own list as it was', (() => {
+      const state = { headers: { jobTracking: HEADERS }, loads: [qaLoad(2, 'QA-1', 'Heading to Shipper'), qaLoad(9, 'QA-9', 'In Transit')] }
+      const list = getters.inProgressLoads ? getters.inProgressLoads(state) : []
+      if (pick) pick({ onScreen: null, underWay: list, queued: [], statusOf })
+      return list.map((l) => l['Load ID']).join() === 'QA-1,QA-9'
+    })())
+    ok('§9 the store\'s inProgressLoad still picks as it did for its other uses',
+      getters.inProgressLoad({ headers: { jobTracking: HEADERS }, loads: [qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Heading to Shipper')] })['Load ID'] === 'QA-9')
+    const viewScript = view.scriptSetup.content
+    ok('§9 one copy of that order: DriverView imports it for its own active load',
+      !/STATUS_PRIORITY/.test(viewScript) && /import \{ statusPriorityScore \} from '\.\.\/lib\/loadProgress'/.test(viewScript) && /statusPriorityScore\(getLoadStatus\(a\)\)/.test(viewScript))
+
     // DriverView's handler, run on stand-ins.
-    const handlerSrc = (view.scriptSetup.content.match(/function handleFuelTap\(title\) \{[\s\S]*?\n\}/) || [''])[0]
+    const handlerSrc = (viewScript.match(/function handleFuelTap\(title\) \{[\s\S]*?\n\}/) || [''])[0]
     ok('§9 DriverView has the handler', !!handlerSrc)
     const runHandler = (o) => {
       const s = { currentTab: { value: 'loads' }, detailLoad: { value: null }, fuelTapRow: { value: null }, detailRowIndex: { value: null },
-        store: { inProgressLoad: null, queuedLoads: [], loadSubTab: 'historical' }, toasts: [], tabs: [], ...o }
-      const build = new Function('currentTab', 'detailLoad', 'driverStore', 'toast', 'handleTabSwitch', 'fuelTapRow', 'detailRowIndex', 'fuelTapLoad', 'FUEL_LINE_MS',
+        store: { inProgressLoads: [], queuedLoads: [], loadSubTab: 'historical' }, toasts: [], tabs: [], ...o }
+      const build = new Function('currentTab', 'detailLoad', 'driverStore', 'toast', 'handleTabSwitch', 'fuelTapRow', 'detailRowIndex', 'fuelTapLoad', 'FUEL_LINE_MS', 'getLoadStatus',
         `${handlerSrc}\nreturn handleFuelTap`)
-      build(s.currentTab, s.detailLoad, s.store, { show: (...a) => s.toasts.push(a) }, (t) => { s.tabs.push(t); s.currentTab.value = t }, s.fuelTapRow, s.detailRowIndex, pick, 'THE-LONG-TIME')('the chip line')
+      build(s.currentTab, s.detailLoad, s.store, { show: (...a) => s.toasts.push(a) }, (t) => { s.tabs.push(t); s.currentTab.value = t }, s.fuelTapRow, s.detailRowIndex, pick, 'THE-LONG-TIME', statusOf)('the chip line')
       return s
     }
     if (handlerSrc && pick) {
       const none = runHandler({})
       ok('§9 no load: the chip\'s own line as a toast, held long enough to read', JSON.stringify(none.toasts) === JSON.stringify([['the chip line', 'success', 'THE-LONG-TIME']]))
       ok('§9 …and the screen stays where it is', none.detailRowIndex.value === null && none.fuelTapRow.value === null && none.tabs.length === 0 && none.store.loadSubTab === 'historical')
-      const road = runHandler({ store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'historical' } })
+      const road = runHandler({ store: { inProgressLoads: [qaLoad(2, 'QA-1', 'In Transit')], queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'historical' } })
       ok('§9 a load under way, from the list: its page, asked to open Fuel, with no toast', road.detailRowIndex.value === 2 && road.fuelTapRow.value === 2 && road.toasts.length === 0)
       ok('§9 …on the Loads tab\'s Active list, so Back lands where the load is', road.tabs.join() === 'loads' && road.store.loadSubTab === 'active')
-      const queued = runHandler({ store: { inProgressLoad: null, queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'active' } })
+      const queued = runHandler({ store: { inProgressLoads: [], queuedLoads: [qaLoad(9, 'QA-9', 'Assigned')], loadSubTab: 'active' } })
       ok('§9 only queued: the next in the queue', queued.detailRowIndex.value === 9 && queued.fuelTapRow.value === 9)
-      const page = runHandler({ detailLoad: { value: qaLoad(9, 'QA-9', 'Assigned') }, detailRowIndex: { value: 9 }, store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [], loadSubTab: 'pending' } })
+      const page = runHandler({ detailLoad: { value: qaLoad(9, 'QA-9', 'Assigned') }, detailRowIndex: { value: 9 }, store: { inProgressLoads: [qaLoad(2, 'QA-1', 'In Transit')], queuedLoads: [], loadSubTab: 'pending' } })
       ok('§9 a load page on screen: it stays there and opens Fuel', page.detailRowIndex.value === 9 && page.fuelTapRow.value === 9 && page.tabs.length === 0 && page.store.loadSubTab === 'pending')
-      const left = runHandler({ currentTab: { value: 'messages' }, detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 }, store: { inProgressLoad: qaLoad(2, 'QA-1', 'In Transit'), queuedLoads: [], loadSubTab: 'historical' } })
+      const left = runHandler({ currentTab: { value: 'messages' }, detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 }, store: { inProgressLoads: [qaLoad(2, 'QA-1', 'In Transit')], queuedLoads: [], loadSubTab: 'historical' } })
       ok('§9 on another tab, with a page left open behind it: the load under way, not that page', left.detailRowIndex.value === 2 && left.fuelTapRow.value === 2 && left.tabs.join() === 'loads')
       const stale = runHandler({ currentTab: { value: 'kit' }, detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 } })
       ok('§9 on another tab with no load under way: the toast, even with a page left open behind it', stale.toasts.length === 1 && stale.currentTab.value === 'kit' && stale.fuelTapRow.value === null)
+      const done = runHandler({ detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 }, store: { inProgressLoads: [qaLoad(2, 'QA-1', 'In Transit')], queuedLoads: [], loadSubTab: 'historical' } })
+      ok('§9 a delivered page on screen, a load on the road: on to that load, on the Active list, with Fuel asked for',
+        done.detailRowIndex.value === 2 && done.fuelTapRow.value === 2 && done.store.loadSubTab === 'active' && done.toasts.length === 0)
+      const doneAlone = runHandler({ detailLoad: { value: qaLoad(5, 'QA-5', 'Delivered') }, detailRowIndex: { value: 5 } })
+      ok('§9 a delivered page on screen, no other load: the toast, and the page stays',
+        doneAlone.toasts.length === 1 && doneAlone.detailRowIndex.value === 5 && doneAlone.fuelTapRow.value === null && doneAlone.tabs.length === 0)
     }
     const lineMs = Number((view.scriptSetup.content.match(/const FUEL_LINE_MS = (\d+)/) || [])[1])
     ok('§9 the longer toast is at least 5 s: its longest line is about 100 characters', lineMs >= 5000)
@@ -608,6 +659,11 @@ if (Header) {
     const rowGap = (rule(headerCss, '.app-header').match(/gap:\s*([\d.]+)rem/) || [])[1]
     const reach = (hit.match(/top:\s*-([\d.]+)rem/) || [])[1]
     ok('§9 …reaching up no further than the gap between the rows, so Password and Logout keep their taps', !!rowGap && !!reach && Number(reach) <= Number(rowGap))
+    const rightRule = rule(headerCss, '.app-header-right')
+    ok('§9 Password and Logout sit above the chip\'s target, whatever the row heights do',
+      /position:\s*relative/.test(rightRule) && Number((rightRule.match(/z-index:\s*(\d+)/) || [])[1]) >= 1)
+    ok('§9 …and that adds nothing that moves them', !/margin|padding|[^-]height:|top:|transform/.test(rightRule))
+    ok('§9 …while the target itself sets no z-index, so it can\'t climb back over them', !/z-index/.test(hit) && !/z-index/.test(tapRule))
     ok('§9 keyboard focus shows', /outline:\s*2px solid/.test(rule(headerCss, '.status-chip.fuel-tap:focus-visible')))
     ok('§9 the stand-in is still no button', /<span\b[^>]*\bfuel-held\b/.test(descriptor.template.content) && !/<button\b[^>]*\bfuel-held\b/.test(descriptor.template.content))
   }
