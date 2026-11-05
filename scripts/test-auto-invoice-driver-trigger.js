@@ -1114,6 +1114,23 @@ async function main() {
 		await drained(hl, "§9 hand draft in the build");
 		eq([hl.state("LD-TEST-0807"), hl.smtp.length], [["skipped", "DRAFTED_BY_HAND"], 0], "§9 ...made during the build: the same");
 
+		// Marked before the tap, by the same call the dialog's switch makes: the run stops
+		// before anything is read, built or numbered.
+		const fb = makeWorld();
+		const fbj = await fb.started();
+		fb.ready("LD-TEST-0814");
+		factoring.ensureSchema(fb.db);
+		const marked = factoring.mark(fb.db, { key: "ld-test-0814", loadId: "LD-TEST-0814", reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(fb.now) });
+		eq([marked.ok, marked.changed], [true, true], "§9 marked before the tap: the mark is taken");
+		tap(fb, fbj, "LD-TEST-0814");
+		await drained(fb, "§9 marked before the tap");
+		eq(fb.state("LD-TEST-0814"), ["skipped", "LOAD_FACTORED"], "§9 marked before the tap: the run ends skipped LOAD_FACTORED");
+		eq([fb.smtp.length, fb.appends.length, fb.calls.mint, fb.claim("LD-TEST-0814").invoice_id, fb.draftRows("LD-TEST-0814")], [0, 0, 0, "", []], "§9 ...0 SMTP, 0 appends, no number minted, no draft row");
+		eq([fb.calls.prepare, fb.calls.render, fb.actions("auto_invoice_sent")], [0, 0, []], "§9 ...nothing read or built, no send audited");
+		tap(fb, fbj, "LD-TEST-0814");
+		await drained(fb, "§9 marked before the tap, tapped again");
+		eq([fb.state("LD-TEST-0814"), fb.smtp.length, fb.appends.length, fb.calls.mint], [["skipped", "LOAD_FACTORED"], 0, 0, 0], "§9 ...and a second tap changes nothing");
+
 		// Factoring is read last: a mark made during the build.
 		const f = makeWorld();
 		const fj = await f.started();

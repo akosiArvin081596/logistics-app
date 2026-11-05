@@ -11,7 +11,8 @@
 //   §4 the approve that may have saved a draft never says "Nothing was sent"
 //   §5 every control is Super Admin only, and so is every call it makes; the
 //      draft routes' callers stay CompletedLoadsTab.vue and the preview modal;
-//      each gate removed in turn is caught
+//      the switch's one line, word for word, only beside the switch and on no
+//      other screen; each gate removed in turn is caught
 //   §6 the four screens touched parse and compile (vue/compiler-sfc)
 //
 // No network, no DOM, no database.
@@ -76,9 +77,11 @@ if (!S) {
 
 // ---------------------------------------------------------------- §5
 section('§5  Super Admin only')
+const MARK_WORDS = "Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here."
 function controlsViolations(src) {
   const v = []
   if (!/<div v-if="auth\.isSuperAdmin && \(chip \|\| mayFactor \|\| mayRecord\)"/.test(src)) v.push('FactoringControls.vue is not Super Admin only')
+  if (!src.includes(`<p v-if="mayFactor" class="fact-note">${MARK_WORDS}</p>`)) v.push("the switch's one line is not there word for word, beside the switch only")
   for (const fn of ['setFactored', 'recordOutside']) {
     if (!new RegExp(`async function ${fn}\\([^)]*\\) \\{\\n\\s*if \\(!auth\\.isSuperAdmin\\b`).test(src)) v.push(`${fn}() does not refuse a non-Super-Admin first`)
   }
@@ -121,9 +124,13 @@ eq(activeViolations(ACTIVE), [], '§5 FAILS ON THE OLD CODE: Active Loads mounts
   const rel = (f) => path.relative(ROOT, f).split(path.sep).join('/')
   eq(files.filter((f) => /\/api\/factoring\//.test(read(f))).map(rel), ['client/src/components/dashboard/FactoringControls.vue'], '§5 the factoring routes are called from FactoringControls.vue only')
   eq(files.filter((f) => /invoice-draft-inflight/.test(read(f))).map(rel), ['client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 "Check Gmail" is called from Completed Loads only')
+  eq(files.filter((f) => read(f).includes(MARK_WORDS)).map(rel), ['client/src/components/dashboard/FactoringControls.vue'], "§5 FAILS ON THE OLD CODE: the switch's one line is in FactoringControls.vue and on no other screen: a driver never sees it")
+  eq(files.filter((f) => /FactoringControls/.test(read(f))).map(rel).sort(), ['client/src/components/dashboard/ActiveLoadsTab.vue', 'client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 the controls are mounted on the two office tabs only')
 }
 for (const [name, file, src, check, from, to] of [
   ['the controls show to every role', 'FactoringControls.vue', CONTROLS, controlsViolations, '<div v-if="auth.isSuperAdmin && (chip || mayFactor || mayRecord)"', '<div v-if="chip || mayFactor || mayRecord"'],
+  ['the line shows with no switch', 'FactoringControls.vue', CONTROLS, controlsViolations, '<p v-if="mayFactor" class="fact-note">', '<p class="fact-note">'],
+  ['the line loses a word', 'FactoringControls.vue', CONTROLS, controlsViolations, 'After the invoice goes out, this', 'After the invoice goes, this'],
   ['setFactored() runs for every role', 'FactoringControls.vue', CONTROLS, controlsViolations, 'async function setFactored(next) {\n  if (!auth.isSuperAdmin || ', 'async function setFactored(next) {\n  if ('],
   ['Check Gmail runs for every role', 'CompletedLoadsTab.vue', COMPLETED, completedViolations, "async function checkGmail(answer = '') {\n  if (!auth.isSuperAdmin || ", "async function checkGmail(answer = '') {\n  if ("],
   ['the line reads for every role', 'CompletedLoadsTab.vue', COMPLETED, completedViolations, 'computed(() => (auth.isSuperAdmin && selectedJob.value ? inflightLine(', 'computed(() => (selectedJob.value ? inflightLine('],

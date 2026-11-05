@@ -5,6 +5,7 @@
   <div v-if="auth.isSuperAdmin && (chip || mayFactor || mayRecord)" class="fact-line" :class="chip ? `fact-line--${chip.tone}` : ''">
     <span v-if="chip" class="fact-text"><strong>{{ chip.label }}.</strong> {{ chip.reason }}</span>
     <span v-else class="fact-text">Not factored.</span>
+    <p v-if="mayFactor" class="fact-note">Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here.</p>
     <div v-if="mayFactor || mayRecord" class="fact-actions">
       <input v-model="reason" class="fact-reason" type="text" maxlength="200" placeholder="Reason (required)" aria-label="Reason" :disabled="busy" />
       <button v-if="mayFactor" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(!factored)">{{ factored ? 'Clear factored' : 'Factor with Triumph' }}</button>
@@ -99,6 +100,7 @@ async function recordOutside() {
 }
 .fact-line--warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
 .fact-line--muted { background: #f3f4f6; border-color: #e5e7eb; color: #4b5563; }
+.fact-note { margin: 0.25rem 0 0; font-weight: 600; }
 .fact-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; align-items: center; }
 .fact-reason { flex: 1 1 12rem; min-width: 0; font-size: 0.78rem; padding: 0.25rem 0.4rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; }
 .fact-btn { font-size: 0.75rem; font-weight: 600; padding: 0.25rem 0.6rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }

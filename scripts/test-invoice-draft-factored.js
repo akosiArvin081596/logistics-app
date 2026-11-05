@@ -5,11 +5,14 @@
 // in-memory database; Sheets, Drive, the renderer, Gmail and n8n are spies.
 //
 //   §1 a factored load: 409 LOAD_FACTORED before prepare(), nothing read,
-//      minted, drafted or posted; the confirmation works only for a listed
-//      account (never the shared login) with a reason, and is audited
-//   §2 the confirmation against a Triumph claim that works or holds a number
-//      (TRIUMPH_IN_FLIGHT) and a locked row (FACTORING_LOCKED); a locked row
-//      refuses the plain press too, even at 0; a marker that can't be read
+//      minted, drafted or posted; the confirmation is refused whoever asks (409
+//      NOA_UNCONFIGURED, nothing spent) until assignment lines exist; once they
+//      do, it works only for a listed account (never the shared login) with a
+//      reason, and is audited
+//   §2 once assignment lines exist, the confirmation against a Triumph claim that
+//      works or holds a number (TRIUMPH_IN_FLIGHT) and a locked row
+//      (FACTORING_LOCKED); a locked row refuses the plain press too, even at 0; a
+//      marker that can't be read
 //   §3 the late re-check (after the render, before the hand-off): a mark, a
 //      Triumph number or a lock that lands during the render; the minted number
 //      voided with one invoice_number_void row
@@ -136,8 +139,10 @@ const stagedError = (message, stage, answered) => Object.assign(new Error(messag
 // hand-off targets are set; `ids` is TRIUMPH_FACTOR_MARK_IDS; `off` builds it
 // with TRIUMPH_FACTORING_ENABLED and TRIUMPH_FACTOR_MARK_IDS both unset (the
 // run's MODE by default). With every switch off, loads are marked the way the
-// lead's scripts/factoring-mark.js marks them.
-function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off" } = {}) {
+// lead's scripts/factoring-mark.js marks them. `lines` builds it as if assignment
+// lines existed, which keeps the confirmation's own rules pinned; the server never
+// says so, and no other world does.
+function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off", lines = false } = {}) {
 	const db = new Database(":memory:");
 	db.exec(LIFT.createSql);
 	for (const a of LIFT.alters) db.exec(a);
@@ -223,6 +228,7 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	const routes = CUR.routesLib ? CUR.routesLib.create({
 		db: routesDb,
 		env: off ? {} : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) },
+		...(lines ? { hasAssignmentLines: true } : {}),
 		now: () => new Date(w.now || NOW),
 		logAudit: scope.logAudit,
 		logAuditRefusal: (req, action, entity, entityId, details, code) => w.seen.refusals.push({ action, code }),
@@ -311,20 +317,59 @@ async function s1() {
 		}
 		eq(w.spies(), [0, 0, 0, 0], "§1 FAILS ON THE OLD CODE: prepare, nextInvoiceNumber, IMAP and n8n spies all at 0");
 		eq(w.drafts(1), [], "§1 no draft row");
+	}
+	// As the server runs: no assignment lines. A draft would print the carrier's own
+	// bank block, so nobody may confirm one, whatever else the press says.
+	{
+		const w = world({ n8n: true });
+		w.putMarker(1);
+		const yes = await w.press(1, { body: CONFIRM });
+		eq([yes.status, yes.body && yes.body.code], [409, "NOA_UNCONFIGURED"], "§1 FAILS ON THE OLD CODE: a listed account's confirmation with a reason: 409 NOA_UNCONFIGURED, no draft");
+		eq(w.spies(), [0, 0, 0, 0], "§1 FAILS ON THE OLD CODE: ...prepare, nextInvoiceNumber, IMAP and n8n spies all at 0");
+		ok(store && store.WORDS.NOA_UNCONFIGURED && yes.body && yes.body.error === store.WORDS.NOA_UNCONFIGURED, "§1 FAILS ON THE OLD CODE: ...answered in its own words");
+		for (const [label, opts] of [
+			["the preview of that confirmation", { body: CONFIRM, dry: true }],
+			["an account not listed", { user: UNLISTED, body: CONFIRM }],
+			["the shared login", { user: SHARED, body: CONFIRM }],
+			["a listed account with no reason", { body: { confirmFactored: true, factoredReason: "  " } }],
+			["a body that says the lines exist", { body: { ...CONFIRM, hasAssignmentLines: true } }],
+		]) {
+			const r = await w.press(1, opts);
+			eq([r.status, r.body && r.body.code], [409, "NOA_UNCONFIGURED"], `§1 FAILS ON THE OLD CODE: ${label}: 409 NOA_UNCONFIGURED`);
+		}
+		eq(w.spies(), [0, 0, 0, 0], "§1 FAILS ON THE OLD CODE: ...and none of them reached prepare()");
+		eq([w.drafts(1), w.inflight(1), w.actions("invoice_draft_factored_confirmed"), w.actions("invoice_number_void")], [[], [], [], []],
+			"§1 FAILS ON THE OLD CODE: no draft row, no in-flight row, nothing audited as confirmed, no number voided");
+		const nobody = world({ ids: null });
+		nobody.putMarker(1);
+		eq((await nobody.press(1, { body: CONFIRM })).body.code, "NOA_UNCONFIGURED", "§1 FAILS ON THE OLD CODE: TRIUMPH_FACTOR_MARK_IDS unset: the same answer");
+		w.putMarker(2, { locked: NOW });
+		eq((await w.press(2, { body: CONFIRM })).body.code, "FACTORING_LOCKED", "§1 a locked row answers with the lock first");
+		const plain = world();
+		const unmarked = await plain.press(3, { body: CONFIRM });
+		eq([unmarked.status, unmarked.body && unmarked.body.via, plain.actions("invoice_draft_factored_confirmed")], [200, "imap", []], "§1 a load that isn't factored ignores the confirmation: a plain draft, nothing audited as confirmed");
+		const wiring = SRC.slice(SRC.indexOf("// <factoring-wiring>"), SRC.indexOf("// </factoring-wiring>"));
+		ok(wiring.includes('require("./lib/factoring-routes").create({') && !wiring.includes("hasAssignmentLines"), "§1 the server's wiring never says the lines exist");
+	}
+	// Once assignment lines exist, the confirmation's own rules.
+	{
+		const w = world({ n8n: true, lines: true });
+		w.putMarker(1);
+		eq((await w.press(1)).body.code, "LOAD_FACTORED", "§1 with the lines, a plain press is still refused");
 		const unlisted = await w.press(1, { user: UNLISTED, body: CONFIRM });
-		eq([unlisted.status, unlisted.body && unlisted.body.code], [403, "FACTORING_NOT_LISTED"], "§1 the confirmation from an account not listed: 403");
+		eq([unlisted.status, unlisted.body && unlisted.body.code], [403, "FACTORING_NOT_LISTED"], "§1 with the lines, the confirmation from an account not listed: 403");
 		const shared = await w.press(1, { user: SHARED, body: CONFIRM });
-		eq([shared.status, shared.body && shared.body.code], [403, "FACTORING_NOT_LISTED"], "§1 the shared login never confirms, even with its id listed");
+		eq([shared.status, shared.body && shared.body.code], [403, "FACTORING_NOT_LISTED"], "§1 with the lines, the shared login never confirms, even with its id listed");
 		const noReason = await w.press(1, { body: { confirmFactored: true, factoredReason: "  " } });
-		eq([noReason.status, noReason.body && noReason.body.code], [400, "FACTORING_REASON_REQUIRED"], "§1 the confirmation needs a reason");
+		eq([noReason.status, noReason.body && noReason.body.code], [400, "FACTORING_REASON_REQUIRED"], "§1 with the lines, the confirmation needs a reason");
 		eq(w.spies(), [0, 0, 0, 0], "§1 ...and none of them reached prepare()");
 		const yes = await w.press(1, { body: CONFIRM });
-		eq([yes.status, yes.body && yes.body.via, w.drafts(1).length], [200, "imap", 1], "§1 a listed account's confirmation with a reason drafts it");
+		eq([yes.status, yes.body && yes.body.via, w.drafts(1).length], [200, "imap", 1], "§1 with the lines, a listed account's confirmation with a reason drafts it");
 		ok(w.actions("invoice_draft_factored_confirmed").length === 1 && w.actions("invoice_draft_factored_confirmed")[0].details.includes("Triumph asked for a copy"),
 			"§1 ...audited once, with the reason");
-		const notListedAtAll = world({ ids: null });
+		const notListedAtAll = world({ ids: null, lines: true });
 		notListedAtAll.putMarker(1);
-		eq((await notListedAtAll.press(1, { body: CONFIRM })).body.code, "FACTORING_NOT_LISTED", "§1 TRIUMPH_FACTOR_MARK_IDS unset: nobody confirms");
+		eq((await notListedAtAll.press(1, { body: CONFIRM })).body.code, "FACTORING_NOT_LISTED", "§1 with the lines, TRIUMPH_FACTOR_MARK_IDS unset: nobody confirms");
 	}
 
 }
@@ -347,7 +392,7 @@ async function s1off() {
 		eq(w.spies(), [0, 0, 0, 0], "§1b FAILS ON THE OLD CODE: prepare, nextInvoiceNumber, IMAP and n8n spies all at 0");
 		eq([w.drafts(30), w.inflight(30)], [[], []], "§1b no draft row and no in-flight row");
 		const confirm = await w.press(30, { body: CONFIRM });
-		eq([confirm.status, confirm.body && confirm.body.code], [403, "FACTORING_NOT_LISTED"], "§1b with nobody listed, nobody can confirm it");
+		eq([confirm.status, confirm.body && confirm.body.code], [409, "NOA_UNCONFIGURED"], "§1b FAILS ON THE OLD CODE: nobody can confirm it");
 		w.duringRender = () => { w.duringRender = null; w.mark(31); };
 		const late = await w.press(31);
 		eq([late.status, late.body && late.body.code, w.seen.imap.length, w.seen.n8n.length, w.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
@@ -357,9 +402,9 @@ async function s1off() {
 
 // ---------------------------------------------------------------- §2
 async function s2() {
-	section("§2  the confirmation against Triumph's claims and the lock");
+	section("§2  the confirmation against Triumph's claims and the lock, once assignment lines exist");
 	{
-		const w = world();
+		const w = world({ lines: true });
 		const cases = [
 			["working", { state: "working", leaseUntil: "2026-11-03T15:10:00.000Z" }],
 			["waiting with a reserved number", { state: "waiting", stage: "reserved", invoiceId: "11032026-50" }],
@@ -391,7 +436,15 @@ async function s2() {
 async function s3() {
 	section("§3  the late re-check, after the render and before the hand-off");
 	{
-		const w = world({ n8n: true });
+		// No assignment lines: a confirmation sent while the load isn't factored yet
+		// carries no weight when a mark lands during the render.
+		const early = world({ n8n: true });
+		early.duringRender = () => { early.duringRender = null; early.putMarker(9); };
+		const sneaked = await early.press(9, { body: CONFIRM });
+		eq([sneaked.status, sneaked.body && sneaked.body.code, early.seen.imap.length, early.seen.n8n.length, early.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
+			"§3 a confirmation on a load not yet factored: marked during the render, refused at the late re-check, its number voided");
+
+		const w = world({ n8n: true, lines: true });
 		w.duringRender = (db) => { w.duringRender = null; w.putMarker(9); };
 		let r = await w.press(9);
 		eq([r.status, r.body && r.body.code], [409, "LOAD_FACTORED"], "§3 FAILS ON THE OLD CODE: marked during the render: 409 LOAD_FACTORED at the late re-check");
@@ -450,8 +503,9 @@ async function s4() {
 		await a;
 
 		// Clearing a factored load's mark while its confirmed draft is in flight (the
-		// confirmation needs a listed account, so marking is on here in both runs).
-		const w3 = world({ off: false });
+		// confirmation needs assignment lines and a listed account, so both are on here
+		// in both runs).
+		const w3 = world({ off: false, lines: true });
 		w3.putMarker(15);
 		w3.imap = ["HOLD"];
 		const c = w3.press(15, { body: CONFIRM });
@@ -621,6 +675,8 @@ async function mutants() {
 			"store.draftDrop(db, { key, invoiceId });\n\t\t\t\tvoidNumber(\"N8N_FAILED\");", s5],
 		["a refusal before n8n voids and deletes after an unanswered IMAP", "routes", "if (r.keep) return", "if (false) return", s5],
 		["settling on 'no throw' (record() answering recorded:false ignored)", "routes", "if (!(result && result.recorded)) {", "if (false) {", s4],
+		["the confirmation with no assignment lines", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: true,", s1],
+		["a body that says the lines exist is believed", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: body.hasAssignmentLines === true,", s1],
 		["the confirmation from any Super Admin", "routes", "mayConfirm: mayMark(userOf(req)),", "mayConfirm: true,", s1],
 		["the shared login counts as listed", "routes", "&& !isSharedLoginName(user.username)", "", s1],
 		["Check Gmail without the search", "routes", "const canSearch = row.path === \"imap\"", "const canSearch = false && row.path === \"imap\"", s6],
