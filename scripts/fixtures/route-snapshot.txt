@@ -9,6 +9,10 @@ GET /api/admin/cancelled-loads · requireRole("Super Admin")=anon@12b84c4b0134 �
 GET /api/admin/deleted-loads · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7949de498106
 GET /api/admin/driver-day-overrides · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d9dcec3b11da
 GET /api/admin/driver-performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@55ea26ec64dc · (lib mount)
+GET /api/admin/driver-performance/weeks · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@a3469a4234ad · (lib mount)
+POST /api/admin/driver-performance/weeks/:directoryId/:weekStart/decision · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@ff831a233ef3 · (lib mount)
+POST /api/admin/driver-performance/weeks/:directoryId/:weekStart/hos-decline · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@d516e18f0c68 · (lib mount)
+POST /api/admin/driver-performance/weeks/:directoryId/:weekStart/pickup-credit · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@55271d0f47d6 · (lib mount)
 POST /api/admin/excluded-days · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c160be1ad7b3
 DELETE /api/admin/excluded-days/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@ee2cf300ceb7
 POST /api/admin/financials/freeze-closed-months · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@dd5e64af694a
@@ -111,6 +115,7 @@ POST /api/driver-availability/:id/chr-draft · timeOffChrDraftFlagGate@489fd850e
 POST /api/driver-availability/:id/decline · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@49b69e59b4b6
 GET /api/driver-instructions/edit-locks · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 POST /api/driver-instructions/edit-locks/:userId/clear · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)
+POST /api/driver-performance/weeks/:directoryId/:weekStart/proposal · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@41cb3fba448f · (lib mount)
 GET /api/driver/:driverName · requireRole("Super Admin", "Driver")=anon@12b84c4b0134 · inline@4ed111bb4f52 | after: GET ["/api/driver/position","/api/driver/me/position"]
 GET /api/driver/loads/:loadId/instructions · driverGate@7e9b5dcc294e · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 GET /api/driver/me/availability · availabilityFlagGate@10695c42d6d5 · requireRole("Driver")=anon@12b84c4b0134 · inline@ad2caf2947da
@@ -120,6 +125,7 @@ GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 
 PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
 GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@7a8338536cd0 · (lib mount)
+POST /api/driver/me/performance/hos-stop · performanceWeeksFlagGate@1acbc1421fa1 · anon@12b84c4b0134 · anon@9392e43c4d9e · (lib mount)
 GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc0
 GET /api/driver/performance/leaderboard · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@021a4381e19a · (lib mount)
 POST /api/driver/respond · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@89982e68df5a

@@ -475,7 +475,8 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 		walk(path.join(ROOT, "client", "src"), /\.(js|mjs|ts|vue)$/);
 		const naming = files.filter((f) => f !== own && fs.readFileSync(f, "utf8").includes("eld_activity_daily")).map((f) => path.relative(ROOT, f));
 		ok("(fixture) the scan reached lib/ and client/src/", files.length > 100, files.length);
-		eq("no other lib/, routes/ or client/src/ file names eld_activity_daily", naming, []);
+		// The one reader: Driver Performance's week rows, report only and Super Admin only (scripts/test-performance-weeks.js).
+		eq("no other lib/, routes/ or client/src/ file names eld_activity_daily but the week rows' one reader", naming, [path.join("lib", "driver-performance-weeks-routes.js")]);
 		ok("server.js does not name the table", !SHIPPED.includes("eld_activity_daily"));
 		const uses = [...SHIPPED.matchAll(/\beldActivityRollup\b[^\n]*/g)].map((m) => m[0]);
 		ok("server.js uses the rollup only to start it", uses.length === 4 && uses.every((u) => /^eldActivityRollup( = ELD_ACTIVITY_DAILY_ENABLED$| && startsJob\(|\.run\(\); \}, )/.test(u)), uses);

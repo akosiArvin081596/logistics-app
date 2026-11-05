@@ -73970,6 +73970,25 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver,
 });
 
+// Driver Performance, Phase B4 (report only): locked week rows, streaks, freezes, excuses and the
+// quarterly flag. Routes in lib/driver-performance-weeks-routes.js, rules in lib/driver-performance-weeks.js.
+// On only when exactly "true". Off: no table, no timer, and each route falls through as if it weren't
+// there. No invoice, ledger, payout or investor path reads its rows (scripts/test-performance-weeks.js).
+const driverPerformanceWeeks = require("./lib/driver-performance-weeks-routes").mount(app, {
+	enabled: process.env.DRIVER_PERFORMANCE_WEEKS_ENABLED === "true",
+	goDay: process.env.DRIVER_PERFORMANCE_GO_DAY,
+	quarterlyBonus: process.env.DRIVER_PERFORMANCE_QUARTERLY_BONUS,
+	requireRole, db, logAudit, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict,
+	invoiceCompletionDay, loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey,
+	buildDriverAtResolver, buildEldDeviceResolver, driverAvailabilityByName,
+	agreedRateOn: (driverKey, payDaily, day) => driverDayRater().ownRateOn(driverKey, payDaily, day),
+	now: () => Date.now(),
+});
+if (driverPerformanceWeeks.enabled && startsJob("driver performance week lock")) {
+	setTimeout(() => { driverPerformanceWeeks.lockDue(); }, 13 * 60 * 1000);
+	setInterval(() => { driverPerformanceWeeks.lockDue(); }, 15 * 60 * 1000);
+}
+
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments
 // active at each point's timestamp.
