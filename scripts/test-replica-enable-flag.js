@@ -110,6 +110,9 @@ const OUTBOUND = {
 	INVOICE_AUTOGEN_ENABLED: /scheduled job/i,
 	FUEL_EVENTS_ENABLED: /scheduled job/i,
 	CHAT_ORPHAN_SWEEP_ENABLED: /scheduled job/i,
+	// The invoice status's mailbox pass reads the company mailbox; its name holds PASS. The status is a kill switch.
+	INVOICE_MAILBOX_PASS_ENABLED: /secret: name contains PASS/,
+	INVOICE_STATUS_ENABLED: /kill switch/i,
 	// The automatic invoice render shadow: Drive and Gemini, behind the job's timer.
 	AUTO_INVOICE_SHADOW_RENDERS_ENABLED: /render shadow reads Drive and calls Gemini/i,
 	// Automatic invoice sending: email to brokers, behind the job's timer.
