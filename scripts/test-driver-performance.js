@@ -39,7 +39,9 @@
  *     " Off "), every route is 404 FEATURE_OFF for every caller, signed out
  *     included. Every later section runs with it unset, the state a deploy gets
  * §13 roles: own week Driver only; board Driver and Super Admin; report Super
- *     Admin only; a driver not on the board is 404 NOT_ELIGIBLE
+ *     Admin only; a driver off the board by rule, or on none of its three boards
+ *     (this week, last week, this month), is the same 404 NOT_ELIGIBLE; a driver
+ *     on at least one keeps both routes, with no "you" on a board without him
  * §14 the board over HTTP: "Most loads" equals the weekly invoice's own count
  *     per driver, this week, last week and the month; keys, labels, no names,
  *     "you" per request, coming-soon categories
@@ -109,6 +111,7 @@ const DRIVERS = [
 	{ id: 8, name: "Hal Briar", status: "active", pay_type: "fixed", user_id: 18 },
 	{ id: 9, name: "Jo Tester", status: "active", pay_type: "fixed", user_id: 19 },
 	{ id: 10, name: "Kim Vale", status: "active", pay_type: "fixed", user_id: 20 },
+	{ id: 11, name: "Ivy Lane", status: "active", pay_type: "fixed", user_id: 22 },
 ];
 const ALL_NAMES = [...DRIVERS.map((d) => d.name), "Lou Grant"];
 const TRUCKS = [
@@ -193,7 +196,10 @@ const USERS = {
 	fay: { id: 16, role: "Driver", username: "fay", driverName: "Fay Owens" },
 	gus: { id: 17, role: "Driver", username: "gus", driverName: "Gus Pike" },
 	hal: { id: 18, role: "Driver", username: "hal", driverName: "Hal Briar" },
+	jo: { id: 19, role: "Driver", username: "jo", driverName: "Jo Tester" },
+	kim: { id: 20, role: "Driver", username: "kim", driverName: "Kim Vale" },
 	nobody: { id: 21, role: "Driver", username: "nobody", driverName: "Ned Nobody" },
+	ivy: { id: 22, role: "Driver", username: "ivy", driverName: "Ivy Lane" },
 	admin: { id: 31, role: "Super Admin", username: "admin" },
 	admin2: { id: 32, role: "Super Admin", username: "admin2" },
 	dispatcher: { id: 41, role: "Dispatcher", username: "disp" },
@@ -262,13 +268,15 @@ function makeDb() {
 	return db;
 }
 
-class FixedDate extends Date {
-	constructor(...args) { super(...(args.length ? args : [NOW_MS])); }
-	static now() { return NOW_MS; }
+function fixedDateAt(ms) {
+	return class FixedDate extends Date {
+		constructor(...args) { super(...(args.length ? args : [ms])); }
+		static now() { return ms; }
+	};
 }
 
 // One world: a real Express app with the lifted declaration mounted on it.
-async function makeWorld(env) {
+async function makeWorld(env, { nowMs = NOW_MS } = {}) {
 	const express = require("express");
 	const lift = lifted();
 	const app = express();
@@ -282,7 +290,7 @@ async function makeWorld(env) {
 	const quiet = { log: (...a) => world.logs.push(a.join(" ")), info() {}, warn() {}, error() {} };
 	const deps = {
 		app, db, require: createRequire(path.join(ROOT, "server.js")), console: quiet,
-		process: { env: { ...env }, argv: [], cwd: () => ROOT }, __dirname: ROOT, Date: FixedDate,
+		process: { env: { ...env }, argv: [], cwd: () => ROOT }, __dirname: ROOT, Date: fixedDateAt(nowMs),
 		getJobTrackingCached: async () => {
 			world.sheetReads += 1;
 			if (world.sheetDown) throw new Error("made-up outage");
@@ -661,6 +669,65 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 				ok(r.status === 404 && r.json.code === "NOT_ELIGIBLE", `${route} for ${who} (not on the board) is 404 NOT_ELIGIBLE`, `got ${r.status} ${r.text.slice(0, 80)}`);
 			}
 		}
+
+		// Active on a day rate, but on none of the three boards: only a test unit (jo), only a
+		// retired truck (kim), no truck at all (ivy). The answer can't tell them from a driver
+		// off the board by rule, and jo's delivered load doesn't get him in.
+		const own404 = await on.get("/api/driver/me/performance", USERS.eli);
+		const board404 = await on.get("/api/driver/performance/leaderboard", USERS.eli);
+		eq(board404.text, own404.text, "both routes refuse in the same words");
+		const driverRoutes = [
+			"/api/driver/me/performance",
+			"/api/driver/performance/leaderboard",
+			"/api/driver/performance/leaderboard?period=week",
+			"/api/driver/performance/leaderboard?period=month",
+		];
+		for (const who of ["jo", "kim", "ivy"]) {
+			for (const route of driverRoutes) {
+				const r = await on.get(route, USERS[who]);
+				ok(r.status === 404 && r.text === own404.text, `${route} for ${who} (on no board) answers exactly as for a driver off the board by rule`, `got ${r.status} ${r.text.slice(0, 80)}`);
+			}
+		}
+
+		// On at least one board he keeps both routes; a board without him has no "you" and no word why.
+		const yous = (answer) => answer.json.boards.map((b) => [b.id, b.categories[0].rows.filter((r) => r.isYou).length]);
+		const whyWords = /reason|no-truck|not-in-directory|not on the board|eligible/i;
+		const keepsBoth = async (world, user, weekYous, monthYous, label) => {
+			const ownWeek = await world.get("/api/driver/me/performance", user);
+			eq(ownWeek.status, 200, `${label}: his own week answers`);
+			const week = await world.get("/api/driver/performance/leaderboard?period=week", user);
+			const month = await world.get("/api/driver/performance/leaderboard?period=month", user);
+			eq(yous(week), weekYous, `${label}: "you" on the week boards he is on, none on the other`);
+			eq(yous(month), monthYous, `${label}: and on the month's as he is on it`);
+			ok(!whyWords.test(week.text + month.text + ownWeek.text), `${label}: no word why`);
+		};
+		await keepsBoth(on, USERS.hal, [["this-week", 1], ["last-week", 0]], [["this-month", 1]], "this week and the month, not last week");
+
+		// Two weeks on, Dee's last day on her truck is outside both weeks: only the month holds her.
+		const monthOnly = await makeWorld({}, { nowMs: Date.parse("2026-11-25T17:00:00Z") });
+		try {
+			await keepsBoth(monthOnly, USERS.dee, [["this-week", 0], ["last-week", 0]], [["this-month", 1]], "the month only");
+			// Job Tracking down says nothing either way, and shows a driver on no board nothing.
+			monthOnly.handle.clearCache();
+			monthOnly.sheetDown = true;
+			for (const route of driverRoutes) {
+				const r = await monthOnly.get(route, USERS.jo);
+				ok(r.status === 503 && r.json.code === "PERFORMANCE_UNAVAILABLE", `${route} for jo with Job Tracking down is 503`, `got ${r.status} ${r.text.slice(0, 80)}`);
+			}
+		} finally {
+			await monthOnly.close();
+		}
+
+		// Into December, a truck held until Nov 25 is on last week's board and no other.
+		const lastWeekOnly = await makeWorld({}, { nowMs: Date.parse("2026-12-01T17:00:00Z") });
+		try {
+			lastWeekOnly.db.prepare("DELETE FROM truck_assignments WHERE driver_name = ?").run("Hal Briar");
+			lastWeekOnly.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-25T15:00:00.000Z", "Dee Stone");
+			await keepsBoth(lastWeekOnly, USERS.dee, [["this-week", 0], ["last-week", 1]], [["this-month", 0]], "last week only");
+		} finally {
+			await lastWeekOnly.close();
+		}
+
 		const own = await on.get("/api/driver/me/performance", USERS.ada);
 		eq(own.headers["cache-control"], "private, no-store", "answers are never cached by a browser or proxy");
 	});
