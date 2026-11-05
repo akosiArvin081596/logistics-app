@@ -861,6 +861,13 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		searching.ready(ID, { "Job Status": "Delivered" });
 		searching.seed(ID, { state: "needs_attention", code: "MAYBE_SENT", stage: "appending", delivery: "send" });
 		eq(retryOf(searching, sj2, ID), "search", "§8 a send that may have gone: Try again still searches");
+		// A subdomain is covered too, before anything is read.
+		const sub = `billing.${DOMAIN}`;
+		const onSub = makeWorld({ env: OFF, domains: [sub], confirmed: [sub] });
+		const osj = await onSub.started();
+		onSub.ready(ID, { Email: `made-up.agent@${sub}` }, { address: `made-up.billing@${sub}` });
+		await deliver(onSub, osj, ID, "§8 a subdomain");
+		eq([onSub.state(ID), paidNothing(onSub), onSub.calls.prepare.length], [CHECK_OFF, NOTHING, 0], "§8 the check off, a subdomain's load: Needs attention, nothing read or paid for");
 	}
 
 	// ===================================================================== §9
@@ -888,6 +895,12 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			bison.answers.forEach((a) => { a["Order Number"] = "7001234"; a["PO Number"] = "12345"; });
 			await deliver(bison, bj, ID, `§9 ${label}, Bison`);
 			eq([bison.state(ID), bison.smtp.length, bison.appends.map((a) => a.to)], [SENT, 0, [process.env.BISON_INVOICE_EMAIL]], `§9 ${label}: a Bison load's draft is unchanged`);
+			// What Try again offers on another broker's held load.
+			const heldOther = makeWorld({ env, proofs: 0, confirmed: [DOMAIN, BROKER_DOMAIN] });
+			const hj = await heldOther.started();
+			heldOther.ready(ID, { Email: OPS, "Job Status": "Delivered" }, { address: BILLING });
+			heldOther.seed(ID, { state: "needs_attention", code: "TOTAL_MISMATCH" });
+			eq(retryOf(heldOther, hj, ID), "draft", `§9 ${label}: Try again on another broker's held load still makes a draft`);
 		}
 
 		// A person's press: refused only when the job already sent; the engine in manual mode is as it was.
