@@ -600,6 +600,7 @@ async function main() {
 		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 0 }, "§1 flag off: the paid check does nothing");
 		eq([w.calls.prepare, w.calls.reads - readsBefore, tables(), w.dump() === dumpBefore], [0, 0, had, true], "§1 ...no paid call, not even a read of the sheet, no table made, and no row of any table changed");
 		ok(!w.btn.on, "§1 ...and the store says off");
+		eq(w.job.button.systemRefusal(), "JOB_NOT_STARTED", "§1 ...and the job's own gate says no, started or not");
 		eq(w.job.status().button, undefined, "§1 ...and the job's status doesn't mention it");
 	}
 	{
@@ -1890,6 +1891,39 @@ async function main() {
 		await until(() => w.open() === 0, "§9 R-M4: the second run ends");
 		for (let i = 0; i < 30; i++) await turn();
 		eq([w.smtp.length, w.st(id), w.appends.length], [1, ["drafted", ""], 0], "§9 FAILS ON THE OLD DESIGN (R-M4): an abandoned attempt, a second press, both awake: one SMTP call");
+	}
+	{
+		// R-M4 again, and the abandoned attempt wakes to a failure: it may not send the second press's claim back.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		const first = gate();
+		const second = gate();
+		let renders = 0;
+		w.renderHook = async () => {
+			renders++;
+			if (renders === 1) {
+				await first.p;
+				throw new Error("made-up: the abandoned render fails");
+			}
+			if (renders === 3) await second.p;
+		};
+		await w.press(id, p.body.token);
+		await until(() => renders === 1, "§9 R-M4: the first run is in its render");
+		ok(w.passRunLimit(), "§9 R-M4: past its limit");
+		await until(() => w.open() === 0, "§9 R-M4: the claim closes");
+		const again = await w.preview(id);
+		await w.press(id, again.body.token);
+		await until(() => renders === 3, "§9 R-M4: the second run is in its render");
+		const backsBefore = w.actions("auto_invoice_button_back").length;
+		first.open();
+		for (let i = 0; i < 30; i++) await turn();
+		eq([w.st(id)[0], w.actions("auto_invoice_button_back").length - backsBefore], ["working", 0], "§9 R-M4: a dead run's failure doesn't touch the claim the second run holds");
+		second.open();
+		await until(() => w.open() === 0, "§9 R-M4: the second run ends");
+		eq([w.smtp.length, w.st(id)], [1, ["drafted", ""]], "§9 ...and the second run sends, once");
 	}
 	{
 		// Two processes on one claim: the lease lets one through.
