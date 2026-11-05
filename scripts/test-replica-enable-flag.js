@@ -87,6 +87,9 @@ for (const name of ["OWNER_OPERATOR_ONBOARDING_ENABLED", "OWNER_OPERATOR_LOAD_PA
 	eq(`${name} is accepted`, refusal(name), null);
 	ok(`...and needs no --from-month`, !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, name));
 }
+// The office's safety-event log: rows in the task's own database; nothing sent.
+eq("SAFETY_EVENT_LOG_ENABLED is accepted", refusal("SAFETY_EVENT_LOG_ENABLED"), null);
+ok("...and needs no --from-month", !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, "SAFETY_EVENT_LOG_ENABLED"));
 for (const name of ALLOWED) eq(`allowlisted ${name} is accepted`, refusal(name), null);
 // The switches that reach outside this machine, by what they reach.
 const OUTBOUND = {

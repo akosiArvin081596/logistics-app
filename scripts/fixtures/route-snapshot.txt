@@ -311,6 +311,10 @@ GET /api/routemate/fuel/summary · requireRole("Super Admin", "Dispatcher", "Inv
 GET /api/routemate/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4ee94aaf1ae6
 GET /api/routemate/vehicles · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f80783c4c1fa
 GET /api/routemate/vehicles/unlinked · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ee3516f87c05
+GET /api/safety-events · safetyEventFlagGate@8ac8662b70d4 · anon@12b84c4b0134 · limiter · anon@1da2eda5aaf8 · (lib mount)
+POST /api/safety-events · safetyEventFlagGate@8ac8662b70d4 · anon@12b84c4b0134 · limiter · anon@b65ebcb61cf7 · (lib mount)
+PUT /api/safety-events/:id · safetyEventFlagGate@8ac8662b70d4 · anon@12b84c4b0134 · limiter · anon@a0ad55a20952 · (lib mount)
+POST /api/safety-events/:id/void · safetyEventFlagGate@8ac8662b70d4 · anon@12b84c4b0134 · limiter · anon@94691085434d · (lib mount)
 GET /api/scankit/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@36a5ceb140d5
 GET /api/tabs · requireAuth@2f5c61384511 · inline@7d6ca1d57dc3
 GET /api/tracking/hos · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2d37539a64bf
