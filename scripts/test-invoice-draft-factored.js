@@ -443,8 +443,8 @@ async function s3() {
 		// carries no weight when a mark lands during the render.
 		const early = world({ n8n: true });
 		early.duringRender = () => { early.duringRender = null; early.putMarker(9); };
-		const sneaked = await early.press(9, { body: CONFIRM });
-		eq([sneaked.status, sneaked.body && sneaked.body.code, early.seen.imap.length, early.seen.n8n.length, early.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
+		const pressed = await early.press(9, { body: CONFIRM });
+		eq([pressed.status, pressed.body && pressed.body.code, early.seen.imap.length, early.seen.n8n.length, early.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
 			"§3 a confirmation on a load not yet factored: marked during the render, refused at the late re-check, its number voided");
 
 		const w = world({ n8n: true, lines: true });
