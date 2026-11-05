@@ -25,6 +25,8 @@
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip
 //   §16 the rules on their own, and the send's commit reaching the disk
+//   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
+//       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
 //
 // No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
@@ -1735,6 +1737,93 @@ async function main() {
 		noPragma.seed("LD-TEST-1502", { state: "working", stage: "rendered", lease_owner: "me", invoice_id: "10202026-95" });
 		noPragma.db.pragma = () => { throw new Error("made-up"); };
 		eq(ledger.beginSend(noPragma.db, "ld-test-1502", "me", { nowIso: iso(noPragma.now) }), { ok: true }, "§16 a setting that can't be changed never holds a send up");
+	}
+
+	section("§17 a claim that runs with no fresh decision looks first");
+	{
+		const ID = "LD-TEST-1601";
+		const HIT = { verdict: "invoice", mailboxes: {} };
+		const paid = (x) => [x.smtp.length, x.appends.length, x.calls.mint];
+		const reArmed = async (setup = null) => {
+			const x = makeWorld();
+			const j = await x.started();
+			x.ready(ID, { "Job Status": "Delivered" });
+			x.seed(ID, { state: "waiting", reason_code: "NOT_COMPLETED" });
+			if (setup) setup(x);
+			return { x, j };
+		};
+		let s = await reArmed((x) => { x.lookAnswer = HIT; });
+		tap(s.x, s.j, ID);
+		await drained(s.x, "§17 re-armed, a hit");
+		eq([s.x.state(ID), paid(s.x), s.x.calls.look.length], [["needs_attention", "MAILBOX_HIT"], [0, 0, 0], 1], "§17 a stale tap re-arms a stopped claim, the mailbox holds an invoice: nothing sent, no number");
+		s = await reArmed((x) => { x.lookFails = true; });
+		tap(s.x, s.j, ID);
+		await drained(s.x, "§17 re-armed, a failed look");
+		eq([s.x.state(ID), paid(s.x), Boolean(s.x.claim(ID).look_first)], [["needs_attention", "MAILBOX_UNREAD"], [0, 0, 0], true], "§17 ...the look fails: MAILBOX_UNREAD, nothing sent, no number, the look still asked for");
+		s.x.lookFails = false;
+		eq((await tryAgain(s.j, ID)).status, 200, "§17 ...a person's Try again");
+		await drained(s.x, "§17 after a failed look");
+		eq([s.x.state(ID), s.x.smtp.length, s.x.calls.look.length, s.x.claim(ID).look_first], [["drafted", ""], 1, 2, ""], "§17 ...looks again, and sends once it reads clean");
+		s = await reArmed();
+		tap(s.x, s.j, ID);
+		await drained(s.x, "§17 re-armed, clean");
+		eq([s.x.state(ID), s.x.smtp.length, s.x.calls.look.length, s.x.claim(ID).look_first], [["drafted", ""], 1, 1, ""], "§17 ...a clean look: one send, the look cleared");
+		// A second tap while the first write is out re-arms the record too.
+		s = await reArmed((x) => { x.lookAnswer = HIT; });
+		s.j.driverDelivered({ role: "Driver", loadId: ID, oldStatus: "Delivered", newStatus: "Delivered", readBack: async () => "Delivered" });
+		ok(s.x.claim(ID).look_first, "§17 the re-armed claim itself asks, so a restart can't lose the look");
+		// A first tap asks for none.
+		const first = makeWorld();
+		const fj = await first.started();
+		first.ready(ID);
+		first.lookFails = true;
+		tap(first, fj, ID);
+		eq(first.claim(ID).look_first, "", "§17 a first tap's record asks for no look");
+		await drained(first, "§17 a first tap");
+		eq([first.state(ID), first.smtp.length, first.calls.look.length, first.calls.payments], [["drafted", ""], 1, 0, 0], "§17 ...no look, one send");
+
+		const atRestart = async (fields, setup = null) => {
+			const x = makeWorld();
+			await x.started();
+			x.ready(ID, { "Job Status": "Delivered" });
+			x.seed(ID, { updated_at: iso(T0 - MIN), ...fields });
+			if (setup) setup(x);
+			const j = x.job({ workerId: "worker-2" });
+			j.startTrigger();
+			await j.finishStartUp();
+			await drained(x, "§17 the restart");
+			return x;
+		};
+		const CAUGHT = { state: "working", lease_owner: "old-process", lease_until: iso(T0 + HOUR) };
+		const HELD = { invoice_id: "10202026-77", invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: "<made-up-77@example.com>" };
+		for (const [label, fields] of [
+			["a queued claim", { state: "queued" }],
+			["a DRIVER_PENDING record", { state: "waiting", reason_code: "DRIVER_PENDING" }],
+			["a claim caught building", CAUGHT],
+			["a claim caught building, its number held", { ...CAUGHT, ...HELD, stage: "reserved" }],
+			["a draft in flight, absent from Gmail", { ...CAUGHT, ...HELD, stage: "appending", sent_json: JSON.stringify({ to: BILLING, subject: "Made-up", total: "$1,000.00" }) }],
+		]) {
+			let x = await atRestart(fields, (y) => { y.lookAnswer = HIT; });
+			eq([x.state(ID), paid(x), x.calls.look.length], [["needs_attention", "MAILBOX_HIT"], [0, 0, 0], 1], `§17 ${label} at a restart, the mailbox holds an invoice: nothing sent, no number`);
+			x = await atRestart(fields, (y) => { y.lookFails = true; });
+			eq([x.state(ID), paid(x), Boolean(x.claim(ID).look_first)], [["needs_attention", "MAILBOX_UNREAD"], [0, 0, 0], true], `§17 ${label} at a restart, the look fails: MAILBOX_UNREAD, nothing sent, no number`);
+			x = await atRestart(fields, (y) => { y.paymentsFail = true; });
+			eq([x.state(ID), paid(x)], [["needs_attention", "PAYMENTS_UNREAD"], [0, 0, 0]], `§17 ${label} at a restart, the Payments Table can't be read: nothing sent, no number`);
+			x = await atRestart(fields);
+			eq([x.state(ID), x.smtp.length, x.appends.length, x.calls.look.length, x.claim(ID).look_first], [["drafted", ""], 1, 0, 1, ""], `§17 ${label} at a restart, all clean: one look, one send`);
+		}
+		// A send that started is never built again: it is only searched for, with no look.
+		const sending = await atRestart({ ...CAUGHT, ...HELD, stage: "appending", delivery: "send", sent_at: iso(T0 - MIN), sent_json: JSON.stringify({ to: BILLING, subject: "Made-up", total: "$1,000.00" }) });
+		eq([sending.state(ID), sending.smtp.length, sending.appends.length, sending.calls.look.length], [["needs_attention", "MAYBE_SENT"], 0, 0, 0], "§17 a send that started, at a restart: searched for only, no look, nothing sent");
+		// The sweep's own recovery stays as it was.
+		const sweep = makeWorld();
+		const sj = sweep.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		await sj.tick();
+		sweep.ready(ID, { "Job Status": "Delivered" });
+		sweep.seed(ID, { state: "working", lease_owner: "old-process", lease_until: iso(T0 - HOUR) });
+		sweep.now += 5 * MIN;
+		await sj.tick();
+		eq([sweep.state(ID), sweep.smtp.length, sweep.calls.look.length, sweep.claim(ID).look_first], [["drafted", ""], 1, 0, ""], "§17 the sweep's recovery of a claim caught building: no look asked for");
 	}
 }
 

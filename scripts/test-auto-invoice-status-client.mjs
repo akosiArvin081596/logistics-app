@@ -516,6 +516,25 @@ section('§13 the driver\'s Delivered starts the invoice: what a Super Admin rea
   ok(action && /tryAgainDoneText\(status\)/.test(action) && !/within a few minutes/.test(action), '§13 FAILS ON THE OLD CODE: its answer comes from the status, not from a fixed sentence')
 }
 
+// ------------------------------------------------------------------ §14
+section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
+{
+  const WORDS = {
+    RECIPIENT_NOT_KNOWN: ['billing email not used before', "The rate con's billing email isn't one a person has already used on invoices for 3 loads, so nothing was sent. Check it against the rate con, then draft it by hand."],
+    RATECON_NAME_MISMATCH: ["rate con's name doesn't match", "The rate con's file name doesn't carry this load's whole number, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand."],
+    RECIPIENT_CHECK_OFF: ['billing email check is off', "The billing email check is switched off on the server, so this invoice wasn't made or sent. Draft it by hand."],
+  }
+  for (const [code, [short, text]] of Object.entries(WORDS)) {
+    ok(rules.REASON_CODES.includes(code), `§14 ${code} is a server code`)
+    const chip = S.autoInvoiceChip({ state: 'needs_attention', code, invoiceId: '', changed: [], trigger: true, retry: 'send' })
+    eq(chip && [chip.label, chip.tone, chip.reason], [`Needs attention: ${short}`, 'bad', text], `§14 ${code}: a person reads what happened and what to do next`)
+    eq(S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code } }), true, `§14 ${code}: the toggle counts it`)
+  }
+  eq(S.canTryAgain({ state: 'needs_attention', code: 'RECIPIENT_NOT_KNOWN', retry: 'send' }), true, '§14 an address not yet known: Try again is offered, for once a person has invoiced it')
+  eq(S.canTryAgain({ state: 'needs_attention', code: 'RECIPIENT_CHECK_OFF', retry: 'none' }), false, '§14 the check off: no Try again, since a run can only stop here again')
+  ok(/if every check passes/.test(S.tryAgainConfirmText({ state: 'needs_attention', code: 'RECIPIENT_NOT_KNOWN', trigger: true, retry: 'send' })), '§14 the confirm on a load that could send promises nothing past the checks')
+}
+
 console.log(`\n${'='.repeat(64)}`)
 if (failures.length) {
   console.log(`FAILURES (${failures.length}):`)

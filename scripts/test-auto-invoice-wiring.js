@@ -52,6 +52,11 @@
  *      answer; a Dispatcher's and a Super Admin's: none; a sheet write that reports failure
  *      but landed; a throw after the write; a repeat tap; a replica; Try again's look
  *  §13 only this route starts one, and server.js around it (text pins)
+ *  §14 who a C.H. Robinson invoice may go to, through the route, the block, the engine and the
+ *      Drive lookup as shipped (AUTO_INVOICE_KNOWN_ADDRESS_ENABLED, named nowhere): an address a
+ *      person has invoiced on 3 loads: one SMTP call; one they haven't, a Drive file that doesn't
+ *      carry the load's whole number, and the check off: a person, nothing sent; a typo; Try again's
+ *      look; other brokers' drafts
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -260,10 +265,10 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			},
 		},
 	};
-	// runRateConGemini()'s own answer shape, with nothing found.
-	const runRateConGemini = async () => {
+	// runRateConGemini()'s own answer shape, with nothing found unless a case says otherwise.
+	const runRateConGemini = async (b64) => {
 		w.calls.gemini++;
-		return { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
+		return (w.geminiAnswer && w.geminiAnswer(b64)) || { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 	};
 	// lib/pdf-browser.js's busy refusal carries this code.
 	const renderHtmlToPdf = async (html) => {
@@ -1080,6 +1085,8 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq((await tap(DRIVER, "LD-TEST-1206")).status, 200, "§12 ...his next tap");
 		await until(() => w.smtp.length === 3 && open(w) === 0, "§12 the later tap's send");
 		eq(w.state("LD-TEST-1206"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: ...arms it: one send");
+		eq(w.looks.map((l) => l.loadNumber), ["LD-TEST-1206"], "§12 ...after the look a press would get, by the search as the block hands it over");
+		w.looks.length = 0;
 
 		// A throw after the write (R-M1): the notification insert, with no try around it.
 		atReceiver(w, "LD-TEST-1207");
@@ -1183,6 +1190,163 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 
 		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		ok(/^# AUTO_INVOICE_DRIVER_TRIGGER_ENABLED=$/m.test(TEMPLATE) && /a kill switch, ON unless set to false/.test(TEMPLATE), "§13 FAILS ON THE OLD CODE: the settings template names it, unset, a kill switch");
+	}
+
+	// ===================================================================== §14
+	section("§14 who a C.H. Robinson invoice may go to, through the route, the block and the engine as shipped");
+	{
+		const CHR = "chrobinson.com";
+		const CHR_ADDRESS = `made-up.billing@${CHR}`;
+		const CHR_AGENT = `made-up.agent@${CHR}`;
+		const CHR_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: CHR, ...MAILBOX });
+		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
+		const until = async (cond, label) => {
+			const end = Date.now() + 30000;
+			while (Date.now() < end) {
+				if (cond()) return true;
+				await new Promise((r) => setTimeout(r, 2));
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+		const proofs = (x, n, via = "imap") => {
+			for (let i = 0; i < n; i++) {
+				x.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', ?, 'made_up_admin')")
+					.run(`LD-PROOF-${via}-${i}`, `09012026-${i}`, CHR_ADDRESS, via);
+			}
+		};
+		const started = async ({ env = CHR_ON, rows = 3 } = {}) => {
+			const x = await world({ env });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, { optOutDomains: [], confirmedBrokerDomains: [CHR, "example-broker.test"] })).status, 200, "§14 the domains confirmed");
+			proofs(x, rows);
+			await x.job.finishStartUp();
+			return x;
+		};
+		// A rate con filed in Drive under `name`, billing the address it prints.
+		const atReceiver = (x, id, { name = `Subject: Rate Confirmation ${id}.pdf`, docs = CHR_ADDRESS, over = {} } = {}) => {
+			x.setLoad(id, { "Job Status": "At Receiver", Email: CHR_AGENT, ...over });
+			x.addPod(id);
+			x.drive.push({ id: `made-up-file-${x.drive.length + 1}`, name, bytes: rateCon({ docs }) });
+		};
+		const settledTap = async (x, tap, id, label) => {
+			eq((await tap(DRIVER, id)).status, 200, `§14 ${label}: the driver's tap answers as before`);
+			await until(() => open(x) === 0 && Boolean(x.state(id)) && x.state(id)[0] !== "waiting", `§14 ${label}: settled`);
+			await settle();
+		};
+
+		// The setting named nowhere, the file found by the Drive lookup as shipped.
+		const w = await started();
+		const tap = w.statusRoute();
+		atReceiver(w, "900001401");
+		await settledTap(w, tap, "900001401", "a known address");
+		eq(w.state("900001401"), ["drafted", ""], "§14 an address a person has invoiced on 3 loads: the load goes");
+		const sent = w.smtp[0] || { envelope: {}, mime: "" };
+		eq([sent.to, sent.envelope.to, sent.subject, w.smtp.length], [CHR_ADDRESS, [CHR_ADDRESS], "C.H. Robinson Order #900001401", 1], "§14 one message to the one address");
+		eq(sent.attachments, ["C.H. Robinson Invoice Order #900001401.pdf", "900001401_POD.pdf", "900001401.pdf"], "§14 the invoice, the POD and the rate con, through the engine as shipped");
+		eq(w.drafts().filter((r) => r.load_id === "900001401").map((r) => [r.recipient, r.via]), [[CHR_ADDRESS, "auto-smtp"]], "§14 one row, the job's send");
+		eq(w.gmail.length, 0, "§14 no draft");
+
+		// An address no person has invoiced: found, read and refused.
+		atReceiver(w, "900001402", { docs: `made-up.other@${CHR}` });
+		await settledTap(w, tap, "900001402", "an unknown address");
+		eq([w.state("900001402"), w.smtp.length, w.gmail.length], [["needs_attention", "RECIPIENT_NOT_KNOWN"], 1, 0], "§14 an address no person has invoiced: Needs attention, nothing sent or drafted");
+
+		// getRateConBytes() as shipped finds each of these by the digits in its name, and reads it:
+		// the check goes by the whole name.
+		for (const [label, id, name] of [
+			["a longer number in the file's name", "900000015", "Subject: Rate Confirmation 90000001502.pdf"],
+			["a suffix on the number", "900000016", "Subject: Rate Confirmation 900000016-2.pdf"],
+			// The review's label is cut at 70 characters: a cut can't fake the end of the number.
+			["a longer number where the review's label is cut", "900000017", `Subject: ${"x".repeat(60)} 90000001702.pdf`],
+		]) {
+			const x = await started();
+			const xTap = x.statusRoute();
+			atReceiver(x, id, { name });
+			await settledTap(x, xTap, id, label);
+			ok(x.calls.driveGet >= 1, `§14 ${label}: the file was found, and read`);
+			eq([x.state(id), x.smtp.length, x.gmail.length, x.calls.mint], [["needs_attention", "RATECON_NAME_MISMATCH"], 0, 0, 0], `§14 ${label}: Needs attention, nothing sent or drafted, no number`);
+		}
+		// The whole number where the review's label would have cut it off.
+		const long = await started();
+		const longTap = long.statusRoute();
+		atReceiver(long, "900000018", { name: `Subject: ${"x".repeat(70)} 900000018.pdf` });
+		await settledTap(long, longTap, "900000018", "a long file name");
+		eq([long.state("900000018"), long.smtp.length], [["drafted", ""], 1], "§14 the number past the review's cut in a long file name: the whole name is read, one send");
+
+		// A rate-con row needs no name.
+		const stored = await started();
+		const storedTap = stored.statusRoute();
+		stored.setLoad("900001403", { "Job Status": "At Receiver", Email: CHR_AGENT });
+		stored.addPod("900001403");
+		fs.writeFileSync(path.join(stored.dir, "uploads", "made-up-rate-con.pdf"), rateCon({ docs: CHR_ADDRESS }));
+		stored.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES ('900001403', '', 'RATECON', 'made-up-rate-con.pdf', '/uploads/made-up-rate-con.pdf')").run();
+		await settledTap(stored, storedTap, "900001403", "a rate-con row");
+		eq([stored.state("900001403"), stored.smtp.length], [["drafted", ""], 1], "§14 a rate-con row on the load: no name to read, one send");
+
+		// A failed look through the block: a tap whose write didn't land, then his next tap.
+		const looked = await started();
+		const lookTap = looked.statusRoute();
+		atReceiver(looked, "900001404");
+		looked.batchFails = { landed: false };
+		eq((await lookTap(DRIVER, "900001404")).status, 500, "§14 a write refused");
+		await until(() => (looked.claim("900001404") || {}).reason_code === "NOT_COMPLETED", "§14 read back");
+		looked.lookFails = true;
+		await settledTap(looked, lookTap, "900001404", "a stale tap");
+		eq([looked.state("900001404"), looked.smtp.length, looked.calls.mint, looked.looks.length], [["needs_attention", "MAILBOX_UNREAD"], 0, 0, 1], "§14 a stale tap re-arms the claim and the look fails: MAILBOX_UNREAD, nothing sent, no number");
+		looked.lookFails = false;
+		const rows = [{ "Load ID": "900001404", "Job Status": "Delivered", Email: CHR_AGENT, "Completion Date": DELIVERED_ON }];
+		looked.job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
+		eq(rows[0]._autoInvoice.retry, "send", "§14 ...the confirm says Try again can send");
+		eq((await looked.call("POST", "/api/auto-invoice/loads/900001404/retry", SA, {})).status, 200, "§14 ...Try again");
+		await until(() => looked.smtp.length === 1 && open(looked) === 0, "§14 the clean look");
+		eq([looked.state("900001404"), looked.looks.length], [["drafted", ""], 2], "§14 ...looks again, and sends once it reads clean");
+
+		// The kill switch through the block: only an explicit off, and it fails safe.
+		for (const v of ["false", "off"]) {
+			const off = await started({ env: { ...CHR_ON, AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: v } });
+			const offTap = off.statusRoute();
+			atReceiver(off, "900001405");
+			await settledTap(off, offTap, "900001405", `the check off (${v})`);
+			eq([off.state("900001405"), off.smtp.length, off.gmail.length, off.calls.prepare, off.calls.mint], [["needs_attention", "RECIPIENT_CHECK_OFF"], 0, 0, 0, 0], `§14 AUTO_INVOICE_KNOWN_ADDRESS_ENABLED=${v}: Needs attention, nothing sent or drafted, no engine call`);
+			const offRows = [{ "Load ID": "900001405", "Job Status": "Delivered", Email: CHR_AGENT, "Completion Date": DELIVERED_ON }];
+			off.job.annotateCompletedRows({ rows: offRows, headers: HEADERS, isSuperAdmin: true });
+			eq(offRows[0]._autoInvoice.retry, "none", "§14 ...and a Super Admin's row offers no Try again");
+			atReceiver(off, "LD-TEST-1406", { name: "Subject: Rate Confirmation LDTEST1406.pdf", docs: BILLING, over: { Email: BROKER } });
+			await settledTap(off, offTap, "LD-TEST-1406", "another broker with the check off");
+			eq([off.state("LD-TEST-1406"), off.smtp.length, off.gmail.map((g) => g.to)], [["drafted", ""], 0, [BILLING]], "§14 ...another broker's draft is unchanged");
+		}
+		const typo = await started({ env: { ...CHR_ON, AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: "flase" } });
+		const typoTap = typo.statusRoute();
+		atReceiver(typo, "900001407", { docs: `made-up.other@${CHR}` });
+		await settledTap(typo, typoTap, "900001407", "a typo");
+		eq([typo.state("900001407"), typo.smtp.length], [["needs_attention", "RECIPIENT_NOT_KNOWN"], 0], "§14 a typo in the setting leaves the check on");
+
+		// The job's own rows, read through the block, prove nothing.
+		const own = await started({ rows: 0 });
+		proofs(own, 5, "auto-smtp");
+		const ownTap = own.statusRoute();
+		atReceiver(own, "900001408");
+		await settledTap(own, ownTap, "900001408", "the job's own rows");
+		eq([own.state("900001408"), own.smtp.length], [["needs_attention", "RECIPIENT_NOT_KNOWN"], 0], "§14 only the job's own rows behind an address: Needs attention, nothing sent");
+
+		// A sent load whose row wasn't written is recorded, whatever the check says now.
+		const lost = await started();
+		const lostTap = lost.statusRoute();
+		atReceiver(lost, "900001409");
+		lost.recordThrowsOnce = true;
+		await settledTap(lost, lostTap, "900001409", "a row not written");
+		eq([lost.state("900001409"), lost.smtp.length], [["needs_attention", "IN_GMAIL_UNRECORDED"], 1], "§14 sent, its row not written: a person, one SMTP call");
+		lost.db.prepare("DELETE FROM load_invoice_drafts WHERE load_id LIKE 'LD-PROOF-%'").run();
+		eq((await lost.call("POST", "/api/auto-invoice/loads/900001409/retry", SA, {})).status, 200, "§14 Try again");
+		await until(() => open(lost) === 0 && lost.state("900001409")[0] !== "working", "§14 recording");
+		await settle();
+		eq([lost.state("900001409"), lost.smtp.length, lost.gmail.length], [["drafted", ""], 1, 0], "§14 ...what already went is recorded, the address no longer passing: still one SMTP call");
+
+		const replica = await world({ env: CHR_ON, replica: { stamp: "made-up" } });
+		eq(replica.job.sending, false, "§14 a replica never sends, so this check can't run there");
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		ok(/^# AUTO_INVOICE_KNOWN_ADDRESS_ENABLED=$/m.test(TEMPLATE) && /a kill switch that fails safe, ON unless set to false/.test(TEMPLATE), "§14 the settings template names it, unset, a kill switch that fails safe");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

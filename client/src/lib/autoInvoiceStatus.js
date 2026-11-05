@@ -61,6 +61,9 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   MAILBOX_UNREAD: { short: "mailbox couldn't be searched", text: "The mailbox couldn't be searched, so nothing was sent. Try again in a while, or draft it by hand." },
   PAYMENTS_TABLE_HIT: { short: 'on the Payments Table', text: "The Payments Table already holds an invoice or payment for this load, so nothing was sent. Check it. If the load still needs an invoice, draft it by hand." },
   PAYMENTS_UNREAD: { short: "Payments Table couldn't be read", text: "The Payments Table couldn't be read, so nothing was sent. Try again in a while, or draft it by hand." },
+  RECIPIENT_NOT_KNOWN: { short: 'billing email not used before', text: "The rate con's billing email isn't one a person has already used on invoices for 3 loads, so nothing was sent. Check it against the rate con, then draft it by hand." },
+  RATECON_NAME_MISMATCH: { short: "rate con's name doesn't match", text: "The rate con's file name doesn't carry this load's whole number, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand." },
+  RECIPIENT_CHECK_OFF: { short: 'billing email check is off', text: "The billing email check is switched off on the server, so this invoice wasn't made or sent. Draft it by hand." },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
