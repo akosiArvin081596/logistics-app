@@ -258,6 +258,11 @@ async function main() {
 	eq(next({ status: STATUS.UNKNOWN, code: "SEARCH_FAILED" }, triedAgo(1, { result: "failed" })), NOW, "§2 a failed search: daily");
 	eq(next({ status: STATUS.UNKNOWN, code: "SEARCH_FAILED" }, triedAgo(1, { result: "failed" }), "2026-08-01"), NOW - DAY + 7 * DAY, "§2 ...old: weekly");
 	eq(next({ status: STATUS.UNKNOWN, code: "MENTIONED" }, triedAgo(1), ""), NOW - DAY + 7 * DAY, "§2 a load with no delivery date counts as old");
+	// A clean answer older than the draft says nothing about it, and nothing else would look again.
+	eq(next({ status: STATUS.DRAFT, whose: "job", sentUnchecked: true }, triedAgo(0.01)), 0, "§2 FAILS ON THE OLD CODE: a job's draft made after a clean search: due now");
+	eq(next({ status: STATUS.BY_HAND, found: "draft_row", sentUnchecked: true }, triedAgo(0.01)), 0, "§2 FAILS ON THE OLD CODE: a person's: due now");
+	eq(next({ status: STATUS.DRAFT, whose: "job", sentUnchecked: true }, triedAgo(1, { result: "failed" })), NOW, "§2 ...not after a failed search: daily, as any failure");
+	eq(next({ status: STATUS.DRAFT, whose: "job" }, triedAgo(0.01)), NOW - 0.01 * DAY + DAY, "§2 ...nor a draft the search found");
 	eq(next({ status: STATUS.BY_HAND, found: "sent_mail" }, triedAgo(1, { sent_invoice: 1 })), null, "§2 found in Sent Mail: never again");
 	eq(next({ status: STATUS.SENT }, null), null, "§2 sent by LogisX: never");
 	eq(next({ status: STATUS.FACTORED }, null), null, "§2 factored: never");
@@ -288,6 +293,21 @@ async function main() {
 		await w.store.runOnce();
 		eq(w.searches.length, 46, "§3 a week on, No invoice found comes round again, 20 at a time");
 		eq(w.row("900000100").searched_at, iso(NOW + 8 * DAY), "§3 ...oldest first, the saved row updated");
+	}
+	{
+		// A person drafts because the status said no invoice: the old clean answer says nothing about that.
+		const w = world({ loads: [load("900000251")] });
+		await w.store.runOnce();
+		eq(w.rowFor("900000251").status, STATUS.NONE_FOUND, "§3 a clean search: No invoice found");
+		w.clock = NOW + 60 * 60 * 1000;
+		w.addRow("900000251", { invoice_id: "11012026-7", created_at: iso(w.clock) });
+		eq(w.rowFor("900000251"), { status: STATUS.BY_HAND, invoiceId: "11012026-7", found: "draft_row", sentUnchecked: true }, "§3 FAILS ON THE OLD CODE: a person then drafts it: not searched, never in neither");
+		const before = w.searches.length;
+		await w.store.runOnce();
+		eq(w.searches.length, before + 1, "§3 FAILS ON THE OLD CODE: ...and the next run looks again, not a day or a week on");
+		eq(w.rowFor("900000251").code, "DRAFT_NOT_IN_GMAIL", "§3 ...a search after the draft that finds nothing can say in neither");
+		await w.store.runOnce();
+		eq(w.searches.length, before + 1, "§3 ...and it doesn't look again and again");
 	}
 	{
 		const w = world({ loads: [load("900000201"), load("900000202", { "Job Status": "In Transit" })] });

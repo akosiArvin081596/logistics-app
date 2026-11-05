@@ -387,8 +387,8 @@ import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
-import { AUTO_INVOICE_REASONS, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
-import { invoiceStatusChip, hasInvoiceStatus, invoiceStatusOptions, filterByInvoiceStatus, statusAfterAction, exportNoteText, attentionToggleTitle } from '../../lib/invoiceStatus'
+import { AUTO_INVOICE_REASONS, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, changedFieldsOf, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
+import { invoiceStatusChip, hasInvoiceStatus, invoiceStatusOptions, filterByInvoiceStatus, statusAfterAction, isChangedAgain, jobAfterChangedAgain, exportNoteText, attentionToggleTitle } from '../../lib/invoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -1034,13 +1034,14 @@ async function autoInvoiceAction(kind) {
   if (ask && !window.confirm(ask)) return
   autoBusy.value = true; autoActionResult.value = null
   try {
-    await api.post(`/api/auto-invoice/loads/${encodeURIComponent(loadRefValue.value)}/${kind === 'checked' ? 'checked' : 'retry'}`, {})
+    await api.post(`/api/auto-invoice/loads/${encodeURIComponent(loadRefValue.value)}/${kind === 'checked' ? 'checked' : 'retry'}`, kind === 'checked' ? { fields: changedFieldsOf(status) } : {})
     if (selectedJob.value) {
       selectedJob.value = { ...selectedJob.value, _autoInvoice: kind === 'checked' ? { ...status, changed: [] } : { state: 'queued', code: '', invoiceId: '', changed: [] }, _invoiceStatus: statusAfterAction(kind, selectedJob.value._invoiceStatus) }
     }
     autoActionResult.value = { tone: 'ok', msg: kind === 'checked' ? 'Marked checked.' : tryAgainDoneText(status) }
     dashboard.refresh().catch(() => {})
   } catch (e) {
+    if (kind === 'checked' && selectedJob.value && isChangedAgain(e)) selectedJob.value = jobAfterChangedAgain(selectedJob.value, e)
     autoActionResult.value = { tone: 'error', msg: (e && e.message) || 'That did not go through. Try again.' }
   } finally {
     autoBusy.value = false

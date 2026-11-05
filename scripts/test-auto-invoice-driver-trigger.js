@@ -1294,13 +1294,46 @@ async function main() {
 		l.db.prepare("UPDATE auto_invoice_claims SET look_first = ''").run();
 		eq(ledger.beginSend(l.db, "ld-test-0910", "me", { nowIso: iso(l.now) }), { ok: true }, "§10 ...and goes once it's clear");
 
-		// The route, with the sweep: nothing changes.
+		// The route, with the sweep: a held load's Try again is as it was.
+		const SWEEP_ENV = { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" };
 		const sw = makeWorld();
-		const swj = sw.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
-		heldForAPerson(sw, "LD-TEST-0911", "OFF_GAP");
-		eq((await tryAgain(swj, "LD-TEST-0911")).status, 200, "§10 the sweep's Try again on OFF_GAP: as today");
+		const swj = sw.job({ env: SWEEP_ENV });
+		heldForAPerson(sw, "LD-TEST-0911");
+		eq((await tryAgain(swj, "LD-TEST-0911")).status, 200, "§10 the sweep's Try again on a held load: as today");
 		eq(sw.claim("LD-TEST-0911").look_first, "", "§10 ...and it asks for no look");
 		eq(sw.invalidated, 0, "§10 ...and it leaves the cached sheet alone");
+
+		// What refuses with the trigger on refuses with it off: the sweep's retry sends with no
+		// look, so on a rollback one tap could mail a second invoice.
+		const sg = makeWorld();
+		const sgj = sg.job({ env: SWEEP_ENV });
+		heldForAPerson(sg, "LD-TEST-0921", "OFF_GAP");
+		const gapOff = await tryAgain(sgj, "LD-TEST-0921");
+		eq([gapOff.status, gapOff.body.code, sg.state("LD-TEST-0921"), sg.smtp.length], [409, "AUTO_INVOICE_RETRY_REFUSED", ["needs_attention", "OFF_GAP"], 0], "§10 FAILS ON THE OLD CODE: the sweep's Try again on OFF_GAP: 409, nothing runs");
+		const se = makeWorld();
+		const sej = se.job({ env: SWEEP_ENV, savedInvoiceEvidence: () => true });
+		heldForAPerson(se, "LD-TEST-0922");
+		const savedOff = await tryAgain(sej, "LD-TEST-0922");
+		eq([savedOff.status, savedOff.body.code, se.state("LD-TEST-0922"), se.smtp.length], [409, "AUTO_INVOICE_RETRY_REFUSED", ["needs_attention", "TOTAL_MISMATCH"], 0], "§10 FAILS ON THE OLD CODE: the sweep's Try again with an invoice saved: 409, nothing runs");
+
+		// A Draft Invoice press that may have reached Gmail: "Check Gmail" answers it, not a new draft.
+		for (const [mode, sweep] of [["the trigger on", false], ["the sweep", true]]) {
+			const p = makeWorld();
+			const pj = sweep ? p.job({ env: SWEEP_ENV }) : await p.started();
+			factoring.ensureSchema(p.db);
+			heldForAPerson(p, "LD-TEST-0923");
+			const nowIso = iso(p.now);
+			factoring.draftBegin(p.db, { key: "ld-test-0923", loadId: "LD-TEST-0923", invoiceId: "10202026-93", path: "imap", nowIso });
+			factoring.draftMaybe(p.db, { key: "ld-test-0923", invoiceId: "10202026-93", nowIso });
+			const maybe = await tryAgain(pj, "LD-TEST-0923");
+			eq([maybe.status, maybe.body.code, p.state("LD-TEST-0923"), p.appends.length], [409, "AUTO_INVOICE_RETRY_REFUSED", ["needs_attention", "TOTAL_MISMATCH"], 0], `§10 FAILS ON THE OLD CODE: ${mode}: a press that may be in Gmail: 409, nothing runs`);
+		}
+		const inFlight = makeWorld();
+		const inFlightJob = inFlight.job({ env: SWEEP_ENV });
+		factoring.ensureSchema(inFlight.db);
+		heldForAPerson(inFlight, "LD-TEST-0924");
+		factoring.draftBegin(inFlight.db, { key: "ld-test-0924", loadId: "LD-TEST-0924", invoiceId: "10202026-94", path: "imap", nowIso: iso(inFlight.now) });
+		eq((await tryAgain(inFlightJob, "LD-TEST-0924")).status, 200, "§10 a press still running isn't refused here: the run's own check waits for it");
 
 		// A sheet fix, then Try again inside the cached sheet's minute: the invoice and the
 		// fingerprint saved for it must both come from the fixed row. The stand-in keeps a copy

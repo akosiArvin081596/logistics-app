@@ -36,9 +36,10 @@ const FOUND = Object.freeze({ SENT_MAIL: 'sent_mail', PAYMENTS: 'payments_table'
 export const INVOICE_STATUS_FOUND = Object.freeze(Object.values(FOUND))
 
 // These say nothing about the load, so a job's chip that tells a person what to do stands: "No
-// automatic invoice" says to draft it by hand, and OFF_GAP to check Sent Mail first. An email
-// naming the load, or Bison's Order #, says to check Gmail first, and those keep their own words.
-const SAYS_NOTHING = new Set(['NOT_SEARCHED', 'SEARCH_FAILED', 'PAYMENTS_NOT_READ', 'EVIDENCE_UNREADABLE'])
+// automatic invoice" and OFF_GAP each say to check Sent Mail, then draft it by hand. An email
+// naming the load, or Bison's Order #, keep their own words, and so do records that can't be read:
+// they may hold an invoice, so nothing says to draft over them.
+const SAYS_NOTHING = new Set(['NOT_SEARCHED', 'SEARCH_FAILED', 'PAYMENTS_NOT_READ'])
 const STANDS_OVER_NOTHING = new Set(['NOT_BY_DRIVER', 'OFF_GAP'])
 
 const shown = (v) => (typeof v === 'string' ? v : '')
@@ -53,14 +54,20 @@ const withWord = (status, reason) => (reason ? `${INVOICE_STATUS_LABELS[status]}
 const joined = (...parts) => parts.filter(Boolean).join(' ')
 const numbered = (read) => (shown(read.invoiceId) ? `Invoice ${read.invoiceId}.` : '')
 
-// `changed`, in the chips below, is the row's `_autoInvoice` when Mark checked is offered on it. Its
-// mark outlives the status, and its sentence is the only reason given for that button: without it
-// a person sends a draft that's out of date, or clears a warning nobody read.
-function sentChip(read, changed) {
+// A change since the job's draft or send: from `_autoInvoice` where Mark checked is offered, else
+// from the status, as with the job off or in shadow, where no button can clear it. The mark
+// outlives the status, and its sentence is the only reason given for that button: without it a
+// person sends a draft that's out of date, or clears a warning nobody read.
+function changeOf(read, auto) {
+  if (canMarkChecked(auto)) return { changed: auto.changed, canCheck: true, sent: auto.sent === true }
+  return changedText({ changed: read.changed }) ? { changed: read.changed, canCheck: false, sent: false } : null
+}
+const changeWords = (change, sent) => changedText({ changed: change.changed, sent }, { canCheck: change.canCheck })
+
+function sentChip(read, change) {
   const date = fmtYmd(shown(read.date), { fallback: '' })
   const sent = `${shown(read.invoiceId) ? `Invoice ${read.invoiceId}` : 'The invoice'} was sent to the broker automatically${date ? ` on ${date}` : ''}.`
-  const words = changedText({ changed: read.changed, sent: true }) || (changed ? changedText({ changed: changed.changed, sent: true }) : '')
-  if (words) return { label: `${INVOICE_STATUS_LABELS.sent}: load changed`, tone: 'warn', reason: `${sent} ${words}` }
+  if (change) return { label: `${INVOICE_STATUS_LABELS.sent}: load changed`, tone: 'warn', reason: `${sent} ${changeWords(change, true)}` }
   return { label: INVOICE_STATUS_LABELS.sent, tone: 'ok', reason: `${sent} Its copy is in Gmail Sent Mail.` }
 }
 
@@ -78,29 +85,41 @@ function byHandWords(read) {
   return { label: INVOICE_STATUS_LABELS.by_hand, tone: 'ok', reason: joined(numbered(read), where) }
 }
 
-function byHandChip(read, changed) {
+function byHandChip(read, change) {
   const chip = byHandWords(read)
-  if (!changed) return chip
-  return { label: `${INVOICE_STATUS_LABELS.by_hand}: load changed`, tone: 'warn', reason: joined(chip.reason, changedText({ changed: changed.changed, sent: true })) }
+  if (!change) return chip
+  return { label: `${INVOICE_STATUS_LABELS.by_hand}: load changed`, tone: 'warn', reason: joined(chip.reason, changeWords(change, true)) }
 }
 
-function draftChip(read, changed) {
+function draftChip(read, change) {
   const id = shown(read.invoiceId)
   const whose = read.whose === 'job' ? 'LogisX made this draft.' : read.whose === 'person' ? 'Someone made this draft by hand.' : ''
   // With no search behind it, a person may already have sent it, so "send it" could bill twice.
-  const unchecked = read.sentUnchecked === true
-  const where = unchecked
-    ? `${id ? `Invoice ${id}` : 'The invoice'} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet.`
-    : `${id ? `Invoice ${id} is` : 'An invoice for this load is'} in Gmail Drafts.`
-  if (changed) return { label: `${INVOICE_STATUS_LABELS.draft}: load changed`, tone: 'warn', reason: joined(whose, where, changedText(changed)) }
-  if (unchecked) return { label: `${INVOICE_STATUS_LABELS.draft}: Sent Mail not checked yet`, tone: 'muted', reason: joined(whose, where, 'Look in both before sending it or drafting again.') }
-  return { label: INVOICE_STATUS_LABELS.draft, tone: 'ok', reason: joined(whose, where, 'Check it and send it.') }
+  if (read.sentUnchecked === true) {
+    const where = `${id ? `Invoice ${id}` : 'The invoice'} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet.`
+    if (change) return { label: `${INVOICE_STATUS_LABELS.draft}: load changed`, tone: 'warn', reason: joined(whose, where, changeWords(change, false)) }
+    return { label: `${INVOICE_STATUS_LABELS.draft}: Sent Mail not checked yet`, tone: 'muted', reason: joined(whose, where, 'Look in both before sending it or drafting again.') }
+  }
+  // Seen at the last search, and a person may have sent or deleted it since.
+  const when = fmtTimestamp(shown(read.searchedAt), { fallback: '' })
+  const where = `${id ? `Invoice ${id}` : 'An invoice for this load'} was in Gmail Drafts when last searched${when ? `, ${when}` : ''}. It may have been sent or deleted since: look in Drafts and Sent Mail`
+  // Why the job held it, or an email that may be the invoice: either makes sending it the wrong
+  // next step, so "send it" goes and both are said.
+  const hold = reasonOf(read.code)
+  const held = read.code ? `LogisX held this load${hold ? `: ${hold.short}` : ''}. Check that before sending it.` : ''
+  const named = read.mentioned === true && read.code !== 'MAILBOX_HIT' ? 'An email also names this load, and it may be the invoice. Check it before sending the draft.' : ''
+  if (change) return { label: `${INVOICE_STATUS_LABELS.draft}: load changed`, tone: 'warn', reason: joined(whose, `${where}.`, held, named, changeWords(change, false)) }
+  if (held || named) {
+    const short = hold ? hold.short : named ? 'an email names this load' : ''
+    return { label: short ? `${INVOICE_STATUS_LABELS.draft}: ${short}` : INVOICE_STATUS_LABELS.draft, tone: 'warn', reason: joined(whose, `${where}.`, held, named) }
+  }
+  return { label: INVOICE_STATUS_LABELS.draft, tone: 'ok', reason: joined(whose, `${where}, and send it if it still needs sending.`) }
 }
 
-// Any other status keeps its own words, then says why Mark checked is beside it.
-function withChange(chip, changed) {
-  if (!changed) return chip
-  return { ...chip, tone: chip.tone === 'bad' ? 'bad' : 'warn', reason: joined(chip.reason, changedText(changed)) }
+// Any other status keeps its own words, then says what changed and what to do.
+function withChange(chip, change) {
+  if (!change) return chip
+  return { ...chip, tone: chip.tone === 'bad' ? 'bad' : 'warn', reason: joined(chip.reason, changeWords(change, change.sent)) }
 }
 
 function waitingChip(read, auto) {
@@ -145,16 +164,16 @@ export function invoiceStatusChip(row) {
   const read = statusOf(row)
   if (!read) return autoInvoiceChip(auto)
   if (auto && STANDS_OVER_NOTHING.has(auto.code) && read.status === 'unknown' && SAYS_NOTHING.has(read.code)) return autoInvoiceChip(auto)
-  const changed = canMarkChecked(auto) ? auto : null
+  const change = changeOf(read, auto)
   switch (read.status) {
-    case 'sent': return sentChip(read, changed)
-    case 'by_hand': return byHandChip(read, changed)
-    case 'draft': return draftChip(read, changed)
-    case 'waiting': return withChange(waitingChip(read, auto), changed)
-    case 'needs_attention': return withChange(attentionChip(read), changed)
-    case 'factored': return withChange({ label: INVOICE_STATUS_LABELS.factored, tone: 'muted', reason: AUTO_INVOICE_REASONS.LOAD_FACTORED.text }, changed)
-    case 'none_found': return withChange(noneFoundChip(read), changed)
-    default: return withChange(unknownChip(read), changed)
+    case 'sent': return sentChip(read, change)
+    case 'by_hand': return byHandChip(read, change)
+    case 'draft': return draftChip(read, change)
+    case 'waiting': return withChange(waitingChip(read, auto), change)
+    case 'needs_attention': return withChange(attentionChip(read), change)
+    case 'factored': return withChange({ label: INVOICE_STATUS_LABELS.factored, tone: 'muted', reason: AUTO_INVOICE_REASONS.LOAD_FACTORED.text }, change)
+    case 'none_found': return withChange(noneFoundChip(read), change)
+    default: return withChange(unknownChip(read), change)
   }
 }
 
@@ -195,6 +214,17 @@ export function statusAfterAction(kind, read) {
   if (kind !== 'checked' || !read || typeof read !== 'object') return undefined
   const { changed: _changed, ...rest } = read
   return rest
+}
+
+// The server's refusal when the load holds more changes than the line named: Mark checked covers
+// only what a person was shown. The open line takes the server's list, so it names them, and the
+// next press has been shown them.
+export const isChangedAgain = (e) => Boolean(e && e.status === 409 && e.code === 'AUTO_INVOICE_CHANGED_AGAIN')
+
+export function jobAfterChangedAgain(job, e) {
+  const list = e && e.data && Array.isArray(e.data.changed) ? e.data.changed.filter((f) => typeof f === 'string') : []
+  if (!job || !list.length) return job
+  return { ...job, _autoInvoice: { ...job._autoInvoice, changed: list } }
 }
 
 export function exportNoteText({ attention = false, status = false } = {}) {

@@ -11,22 +11,27 @@
 //   E   every status the mailbox pass off can give: the row's chip (words, tone, title) and the load
 //       dialog's one line. An office-marked load reads "No automatic invoice", even with a clean
 //       answer saved, and OFF_GAP keeps its own words; a job's draft or a by-hand load whose load
-//       changed says so; a job's draft nobody searched for says Sent Mail isn't checked; a held load
-//       with an invoice in Drafts says that; "No invoice found" appears nowhere
+//       changed says so, never green; a job's draft nobody searched for says Sent Mail isn't
+//       checked; a draft a search found says when, and to look in Sent Mail; a held load with an
+//       invoice in Drafts keeps why it was held, and any email naming it; a press that may be in
+//       Gmail offers no Try again; "No invoice found" appears nowhere
 //   F   the filter: seven words with their counts ("No invoice found" isn't offered with the pass
 //       off), each choice lists that status's rows, a choice goes back to page 1, the counts follow
 //       the search, Clear, the note about the file, the Needs attention toggle's title and its
 //       different number; the download asks for no status and its file carries the three columns
 //       (the export route itself: test-invoice-evidence.js)
 //   A   the dialog's buttons: Try again takes the line to the job's words, then the row to Sent by
-//       LogisX; Mark checked takes the mark off, on a send and on a draft; `retry: "none"` offers no
-//       Try again; the load being built moves on once its build ends
+//       LogisX; Mark checked takes the mark off, on a send and on a draft, and is refused when the
+//       load changed again while the line was open, which then names the change; `retry: "none"`
+//       offers no Try again, and the route refuses it; the load being built moves on once its build
+//       ends
 //   P   the mailbox pass on: "No invoice found" only from the search's own answer, and offered by
 //       the filter; an office-marked load not reached yet keeps "No automatic invoice"; "in neither"
-//       reads Needs attention
-//   R   the driver's trigger off, as on a rollback: no Try again beside "Invoiced by hand"; a held
-//       load and OFF_GAP keep theirs
-//   K   the kill switch: no status on the rows, today's chips, no select, today's note and title
+//       reads Needs attention, but a draft made after the clean search reads not searched
+//   R   the driver's trigger off, as on a rollback: no Try again beside "Invoiced by hand", "Draft
+//       in Gmail" or OFF_GAP, and the route refuses each; a held load keeps its button
+//   J   the job off: a changed draft still says so, amber, with no word of a button it doesn't have
+//   K  the kill switch: no status on the rows, today's chips, no select, today's note and title
 //   D   a Dispatcher sees none of it, even if a row came with the fields
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
 //       opened no socket off this machine and asked no mail host
@@ -151,12 +156,20 @@ const ID = {
   HELD: 'QA-HELD-9011', HELD_NONE: 'QA-HELDNONE-9012', FACTORED: 'QA-FACTORED-9013', OFFICE: 'QA-OFFICE-9014', OFFICE_CLEAN: 'QA-OFFCLEAN-9015', OLD: 'QA-OLD-8000',
   DRAFT_CHANGED: 'QA-DRAFTCHG-9016', HAND_CHANGED: 'QA-HANDCHG-9017', JOB_FOUND: 'QA-JOBFOUND-9018', GAP: 'QA-GAP-9019',
   P_CLEAN: 'QA-PASSCLEAN-9101', P_UNSEARCHED: 'QA-PASSNEW-9102', P_GONE: 'QA-PASSGONE-9103', P_MENTION: 'QA-PASSNAME-9104', P_GAP: 'QA-PASSGAP-9105',
-  R_HAND: 'QA-ROLLHAND-9201', R_HELD: 'QA-ROLLHELD-9202', R_GAP: 'QA-ROLLGAP-9203',
+  R_HAND: 'QA-ROLLHAND-9201', R_HELD: 'QA-ROLLHELD-9202', R_GAP: 'QA-ROLLGAP-9203', R_DRAFT: 'QA-ROLLDRAFT-9204',
+  HELD_NAMED: 'QA-HELDNAME-9020', TWICE: 'QA-TWICE-9021', PRESS: 'QA-PRESS-9022',
+  P_LATE: 'QA-PASSLATE-9106', P_JOBLATE: 'QA-PASSJOB-9107',
+  J_DRAFT: 'QA-OFFDRAFT-9301', J_FOUND: 'QA-OFFFOUND-9302', J_HAND: 'QA-OFFHAND-9303',
 }
+// What a search saw in Drafts, with the time it saw it, which a run can't pin to the minute.
+const seen = (lead, tail) => new RegExp(`^${lead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} was in Gmail Drafts when last searched, .+ E[SD]T\\. It may have been sent or deleted since: look in Drafts and Sent Mail${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
+const HELD_WORDS = '. LogisX held this load: totals differ. Check that before sending it.'
+const NAMED_WORDS = ' An email also names this load, and it may be the invoice. Check it before sending the draft.'
+const OFF_SINCE_DRAFT = 'Changed since the draft: the Payment. Check the draft in Gmail.'
 const OLD_FILLER = 30
 
 // The screen's copy, pinned here so a changed word is a FAIL rather than a matching read.
-const NOT_STARTED = { label: 'No automatic invoice', tone: 'warn', reason: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." }
+const NOT_STARTED = { label: 'No automatic invoice', tone: 'warn', reason: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Check Gmail Sent Mail first, then draft it by hand if it still needs one." }
 const WORDS = {
   sent: (id) => ({ label: 'Sent by LogisX', tone: 'ok', reason: `Invoice ${id} was sent to the broker automatically on ${TODAY_SHOWN}. Its copy is in Gmail Sent Mail.` }),
   changed: (id) => ({ label: 'Sent by LogisX: load changed', tone: 'warn', reason: `Invoice ${id} was sent to the broker automatically on ${TODAY_SHOWN}. Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed, then Mark checked.` }),
@@ -164,12 +177,17 @@ const WORDS = {
   handRow: (id) => ({ label: 'Invoiced by hand: Sent Mail not checked yet', tone: 'muted', reason: `Someone drafted invoice ${id} by hand. Sent Mail not checked yet.` }),
   payments: { label: 'Invoiced by hand', tone: 'ok', reason: 'The Payments Table holds an invoice or payment for this load.' },
   jobDraft: (id) => ({ label: 'Draft in Gmail: Sent Mail not checked yet', tone: 'muted', reason: `LogisX made this draft. Invoice ${id} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Look in both before sending it or drafting again.` }),
-  jobFound: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: `LogisX made this draft. Invoice ${id} is in Gmail Drafts. Check it and send it.` }),
+  jobFound: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: seen(`LogisX made this draft. Invoice ${id}`, ', and send it if it still needs sending.') }),
+  heldNamed: { label: 'Draft in Gmail: totals differ', tone: 'warn', reason: seen('An invoice for this load', `${HELD_WORDS}${NAMED_WORDS}`) },
+  press: { label: 'Needs attention: may already be in Gmail', tone: 'bad', reason: 'An invoice draft for this load may already be in Gmail. Use Check Gmail on the load before drafting again.' },
+  offDraft: (id) => ({ label: 'Draft in Gmail: load changed', tone: 'warn', reason: `LogisX made this draft. Invoice ${id} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. ${OFF_SINCE_DRAFT}` }),
+  offFound: (id) => ({ label: 'Draft in Gmail: load changed', tone: 'warn', reason: seen(`LogisX made this draft. Invoice ${id}`, `. ${OFF_SINCE_DRAFT}`) }),
+  offHand: (id) => ({ label: 'Invoiced by hand: load changed', tone: 'warn', reason: `Invoice ${id} is in Gmail Sent Mail, dated ${TODAY_SHOWN}. Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed.` }),
   draftChanged: (id) => ({ label: 'Draft in Gmail: load changed', tone: 'warn', reason: `LogisX made this draft. Invoice ${id} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Changed since the draft: the Payment. Check the draft in Gmail, then Mark checked.` }),
   handChanged: (id) => ({ label: 'Invoiced by hand: load changed', tone: 'warn', reason: `Invoice ${id} is in Gmail Sent Mail, dated ${TODAY_SHOWN}. Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed, then Mark checked.` }),
-  heldInDrafts: { label: 'Draft in Gmail', tone: 'ok', reason: 'An invoice for this load is in Gmail Drafts. Check it and send it.' },
+  heldInDrafts: { label: 'Draft in Gmail: totals differ', tone: 'warn', reason: seen('An invoice for this load', HELD_WORDS) },
   offGap: { label: 'Needs attention: completed while off', tone: 'bad', reason: 'The load was delivered while automatic invoices were off, so it may already be invoiced. Check Gmail Sent Mail, then draft it by hand if it still needs one.' },
-  personDraft: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: `Someone made this draft by hand. Invoice ${id} is in Gmail Drafts. Check it and send it.` }),
+  personDraft: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: seen(`Someone made this draft by hand. Invoice ${id}`, ', and send it if it still needs sending.') }),
   working: { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' },
   queued: { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' },
   checking: { label: 'Waiting: checking Sent Mail', tone: 'warn', reason: 'The invoice email got no answer from Gmail, so it may have been sent. Sent Mail is checked again shortly. It is never sent twice.' },
@@ -317,6 +335,7 @@ async function freshServer({ user = ADMIN, env = {}, jobEnv = {}, oldLoads = 0 }
     send: { enabled: true, domains: [DOMAIN], settleMinutes: 0 },
     sendMail: async (o) => { s.smtp.push({ to: o.to, loadId: o.subject.replace(/^.*#/, '') }); return { ok: true } },
     readPaymentsTable: async () => s.payments,
+    savedInvoiceEvidence: (key) => evidenceLib.savedInvoice(db, key),
     lookInMailbox: async (o) => { s.looks.push(o.loadNumber); return { verdict: 'clean', mailboxes: {} } },
     sleep: async () => {},
   })
@@ -352,8 +371,8 @@ async function freshServer({ user = ADMIN, env = {}, jobEnv = {}, oldLoads = 0 }
   }
   s.handDraft = (id, invoiceId) => db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', ?)").run(id, invoiceId, `billing@${DOMAIN}`, ADMIN.username)
   // A mailbox answer as the search would have saved it. Counts only: no address or subject exists here.
-  s.saveAnswer = (id, { draftsInvoice = 0, sentInvoice = 0, sentMention = 0, firstSent = '', payments = false } = {}) => {
-    const nowIso = new Date().toISOString()
+  s.saveAnswer = (id, { draftsInvoice = 0, sentInvoice = 0, sentMention = 0, firstSent = '', payments = false, at = '' } = {}) => {
+    const nowIso = at || new Date().toISOString()
     const verdict = sentInvoice || draftsInvoice ? mailboxSearch.KIND.INVOICE : sentMention ? mailboxSearch.KIND.MENTION : mailboxSearch.CLEAN
     evidenceLib.saveAnswer(db, rules.loadKey(id), { verdict, mailboxes: { drafts: { invoice: draftsInvoice, mention: 0 }, sent: { invoice: sentInvoice, mention: sentMention, firstInvoiceDate: firstSent } } }, { nowIso, paymentsAt: payments ? nowIso : '' })
   }
@@ -380,7 +399,7 @@ async function driverHeld(s, id) {
   s.prepareHook = null
   return held
 }
-const markChanged = (s, id) => s.db.prepare('UPDATE auto_invoice_claims SET changed_fields = ?, changed_at = ? WHERE load_key = ?').run('payment', new Date().toISOString(), rules.loadKey(id))
+const markChanged = (s, id, fields = 'payment') => s.db.prepare('UPDATE auto_invoice_claims SET changed_fields = ?, changed_at = ? WHERE load_key = ?').run(fields, new Date().toISOString(), rules.loadKey(id))
 const noneLeftRunning = (s) => until(() => !ledger.listClaims(s.db, ['queued', 'working']).length, 15000)
 // A read's own check may still be finishing, and it mustn't meet a closed database.
 async function closeWorld(s) {
@@ -401,13 +420,22 @@ async function statusWorld() {
     await driverSends(s, ID.JOB_FOUND, { email: OTHER_BROKER }),
     await driverSends(s, ID.DRAFT_CHANGED, { email: OTHER_BROKER }),
     await driverSends(s, ID.HAND_CHANGED, { email: OTHER_BROKER }),
+    await driverSends(s, ID.TWICE, { email: OTHER_BROKER }),
     await driverHeld(s, ID.HELD),
     await driverHeld(s, ID.HELD_NONE),
+    await driverHeld(s, ID.HELD_NAMED),
+    await driverHeld(s, ID.PRESS),
   ]
   if (!ran.every(Boolean)) throw new Error(`a made-up load's run didn't finish: ${JSON.stringify(ran)}`)
   markChanged(s, ID.CHANGED)
   markChanged(s, ID.DRAFT_CHANGED)
   markChanged(s, ID.HAND_CHANGED)
+  markChanged(s, ID.TWICE)
+  s.saveAnswer(ID.HELD_NAMED, { draftsInvoice: 1, sentMention: 1 })
+  const pressedAt = new Date().toISOString()
+  const pressed = factoring.draftBegin(s.db, { key: rules.loadKey(ID.PRESS), loadId: ID.PRESS, invoiceId: NUMBER(84), path: 'imap', nowIso: pressedAt })
+  if (!pressed || !pressed.ok) throw new Error(`the made-up press was refused: ${JSON.stringify(pressed)}`)
+  factoring.draftMaybe(s.db, { key: rules.loadKey(ID.PRESS), invoiceId: NUMBER(84), nowIso: pressedAt })
   s.saveAnswer(ID.JOB_FOUND, { draftsInvoice: 1 })
   s.saveAnswer(ID.HAND_CHANGED, { sentInvoice: 1, firstSent: `${TODAY}T14:00:00.000Z` })
   s.saveAnswer(ID.HELD_NONE, { draftsInvoice: 1 })
@@ -458,10 +486,13 @@ async function statusWorld() {
     [ID.DRAFT_CHANGED, 'draft', WORDS.draftChanged(number(ID.DRAFT_CHANGED)), ['Mark checked']],
     [ID.PERSON, 'draft', WORDS.personDraft(NUMBER(81)), []],
     [ID.HELD_NONE, 'draft', WORDS.heldInDrafts, []],
+    [ID.HELD_NAMED, 'draft', WORDS.heldNamed, []],
+    [ID.TWICE, 'draft', WORDS.draftChanged(number(ID.TWICE)), ['Mark checked']],
     [ID.WORKING, 'waiting', WORDS.working, []],
     [ID.QUEUED, 'waiting', WORDS.queued, []],
     [ID.CHECKING, 'waiting', WORDS.checking, []],
     [ID.HELD, 'needs_attention', WORDS.held, ['Try again']],
+    [ID.PRESS, 'needs_attention', WORDS.press, []],
     [ID.FACTORED, 'factored', WORDS.factored, []],
     [ID.OFFICE, 'unknown', NOT_STARTED, []],
     [ID.OFFICE_CLEAN, 'unknown', NOT_STARTED, []],
@@ -488,7 +519,16 @@ async function passWorld() {
   s.addLoad(ID.P_GAP, 'Delivered')
   s.seedClaim(ID.P_GAP, { state: 'needs_attention', reason_code: 'OFF_GAP' })
   s.saveAnswer(ID.P_GAP, { payments: true })
+  // A clean search, then a draft: the old answer says nothing about the draft.
+  const anHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  s.addLoad(ID.P_LATE, 'Delivered')
+  s.saveAnswer(ID.P_LATE, { payments: true, at: anHourAgo })
+  s.handDraft(ID.P_LATE, NUMBER(85))
+  s.saveAnswer(ID.P_JOBLATE, { payments: true, at: anHourAgo })
+  if (!await driverSends(s, ID.P_JOBLATE, { email: OTHER_BROKER })) throw new Error('the made-up job draft did not finish')
   s.expected = [
+    [ID.P_LATE, 'by_hand', WORDS.handRow(NUMBER(85)), []],
+    [ID.P_JOBLATE, 'draft', WORDS.jobDraft((s.claim(ID.P_JOBLATE) || {}).invoice_id), []],
     [ID.P_CLEAN, 'none_found', WORDS.noneFound, []],
     [ID.P_GAP, 'none_found', WORDS.noneFound, []],
     [ID.P_UNSEARCHED, 'unknown', NOT_STARTED, []],
@@ -509,10 +549,36 @@ async function rollbackWorld() {
   s.seedClaim(ID.R_HELD, { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' })
   s.addLoad(ID.R_GAP, 'Delivered')
   s.seedClaim(ID.R_GAP, { state: 'needs_attention', reason_code: 'OFF_GAP' })
+  s.addLoad(ID.R_DRAFT, 'Delivered')
+  s.seedClaim(ID.R_DRAFT, { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' })
+  s.saveAnswer(ID.R_DRAFT, { draftsInvoice: 1 })
   s.expected = [
     [ID.R_HAND, 'by_hand', WORDS.mailHand, []],
     [ID.R_HELD, 'needs_attention', WORDS.held, ['Try again']],
-    [ID.R_GAP, 'unknown', WORDS.offGap, ['Try again']],
+    [ID.R_GAP, 'unknown', WORDS.offGap, []],
+    [ID.R_DRAFT, 'draft', WORDS.heldInDrafts, []],
+  ]
+  return s
+}
+
+// The job off, with claims and marks it left in the ledger: no `_autoInvoice`, and the status still on.
+async function jobOffWorld() {
+  const s = await freshServer({ jobEnv: { AUTO_INVOICE_DRAFTS_ENABLED: 'false' } })
+  ledger.ensureSchema(s.db)
+  const nowIso = new Date().toISOString()
+  const drafted = (id, invoiceId) => {
+    s.addLoad(id, 'Delivered')
+    s.seedClaim(id, { state: 'drafted', stage: 'recorded', invoice_id: invoiceId, invoice_date: TODAY, drafted_at: nowIso, changed_fields: 'payment', changed_at: nowIso })
+  }
+  drafted(ID.J_DRAFT, NUMBER(86))
+  drafted(ID.J_FOUND, NUMBER(87))
+  s.saveAnswer(ID.J_FOUND, { draftsInvoice: 1 })
+  drafted(ID.J_HAND, NUMBER(88))
+  s.saveAnswer(ID.J_HAND, { sentInvoice: 1, firstSent: `${TODAY}T14:00:00.000Z` })
+  s.expected = [
+    [ID.J_DRAFT, 'draft', WORDS.offDraft(NUMBER(86)), []],
+    [ID.J_FOUND, 'draft', WORDS.offFound(NUMBER(87)), []],
+    [ID.J_HAND, 'by_hand', WORDS.offHand(NUMBER(88)), []],
   ]
   return s
 }
@@ -545,7 +611,7 @@ function dashboardBody(s) {
     unassignedJobs: [], jobTrackingHeaders: HEADERS, completedHeaders: HEADERS, activeJobs: [],
     completedJobs: completed,
     fleet: [], drivers: [DRIVER_NAME], driverQueues: {},
-    ...(isAdmin(s) ? { autoInvoice: { mode: 'on' } } : {}),
+    ...(isAdmin(s) && s.job.mode !== 'off' ? { autoInvoice: { mode: s.job.mode } } : {}),
     // server.js's line: whether the pass is on, a Super Admin's only.
     ...(s.evidence.statusOn && isAdmin(s) ? { invoiceStatus: { mailboxPass: s.evidence.passOn } } : {}),
   }
@@ -921,6 +987,32 @@ async function actionRun(browser, size) {
     await reloadCompleted(page)
     await chipStep(page, `${tag}-draft-checked-row`, 'The row after it', ID.DRAFT_CHANGED, wantDraft)
 
+    // A second change while the line is open: Mark checked covers only what the person was shown.
+    await openLine(page, ID.TWICE)
+    const firstRead = await locText(page.locator('.auto-line-text'))
+    markChanged(s, ID.TWICE, 'payment,trailer')
+    await page.locator('.auto-line button', { hasText: 'Mark checked' }).click({ timeout: 5000 })
+    await until(() => s.checkedPosts.length === 3, 5000)
+    const refused = await appears(page, '.auto-result--error', 5000)
+    const refusedWords = refused ? await locText(page.locator('.auto-result')) : ''
+    const namedNow = await locText(page.locator('.auto-line-text'))
+    const held = (s.claim(ID.TWICE) || {}).changed_fields
+    const twiceFile = await shot(page, `${tag}-changed-again`)
+    record(`${tag}-changed-again`, 'The load changes again while the line is open: Mark checked is refused, clears nothing, and the line then names it', 'first the Payment alone; then a refusal, the mark kept, and the line naming the trailer too', `first "${firstRead.slice(-90)}"; refused ${refused} "${refusedWords}"; held "${held}"; now "${namedNow.slice(-110)}"`,
+      /the Payment\. Check the draft/.test(firstRead) && refused && held === 'payment,trailer' && /the Payment, the trailer\./.test(namedNow), twiceFile)
+    await page.locator('.auto-line button', { hasText: 'Mark checked' }).click({ timeout: 5000 })
+    await until(() => s.checkedPosts.length === 4, 5000)
+    const nowDone = await appears(page, '.auto-result:has-text("Marked checked.")', 5000)
+    record(`${tag}-changed-again-2`, 'Pressed again, having been shown both, it goes', 'the mark clears', `answered ${nowDone}, held "${(s.claim(ID.TWICE) || {}).changed_fields}"`, nowDone && (s.claim(ID.TWICE) || {}).changed_fields === '')
+    await closeLine(page)
+
+    // The route refuses what the button no longer offers: a stale dialog or a crafted request.
+    const refusedRetry = await s.callRoute('POST /api/auto-invoice/loads/:loadKey/retry', { loadKey: ID.HELD_NONE }, {})
+    record(`${tag}-retry-route`, 'Try again with an invoice saved: the route refuses it too', '409 AUTO_INVOICE_RETRY_REFUSED; still held', `${refusedRetry.status} ${refusedRetry.body && refusedRetry.body.code}; ${(s.claim(ID.HELD_NONE) || {}).state}`, refusedRetry.status === 409 && refusedRetry.body.code === 'AUTO_INVOICE_RETRY_REFUSED' && (s.claim(ID.HELD_NONE) || {}).state === 'needs_attention')
+    const refusedPress = await s.callRoute('POST /api/auto-invoice/loads/:loadKey/retry', { loadKey: ID.PRESS }, {})
+    record(`${tag}-press-route`, 'Try again with a press that may be in Gmail: the route refuses it too', '409 AUTO_INVOICE_RETRY_REFUSED', `${refusedPress.status} ${refusedPress.body && refusedPress.body.code}`, refusedPress.status === 409 && refusedPress.body.code === 'AUTO_INVOICE_RETRY_REFUSED')
+    await reloadCompleted(page)
+
     // The held build is let go: the load moves on, and the queue behind it goes too.
     await chipStep(page, `${tag}-working`, 'A load being built', ID.WORKING, WORDS.working)
     s.held.open()
@@ -1002,6 +1094,35 @@ async function rollbackRun(browser, size) {
     const tries = await page.locator('.auto-line button', { hasText: 'Try again' }).count()
     record(`${tag}-no-try-again`, 'No Try again beside "Invoiced by hand"', 'no such button', `buttons ${tries}`, tries === 0, file)
     await closeLine(page)
+    // A stale dialog or a crafted request, on the sweep: refused before anything can send.
+    for (const id of [ID.R_HAND, ID.R_DRAFT, ID.R_GAP]) {
+      const refused = await s.callRoute('POST /api/auto-invoice/loads/:loadKey/retry', { loadKey: id }, {})
+      record(`${tag}-${id}-route`, `The route on ${id}`, '409 AUTO_INVOICE_RETRY_REFUSED; still held; no mail', `${refused.status} ${refused.body && refused.body.code}; ${(s.claim(id) || {}).state}; SMTP ${s.smtp.length}, appends ${s.appends.length}`,
+        refused.status === 409 && refused.body.code === 'AUTO_INVOICE_RETRY_REFUSED' && (s.claim(id) || {}).state === 'needs_attention' && s.smtp.length === 0 && s.appends.length === 0)
+    }
+  } finally {
+    await ctx.close()
+    await closeWorld(s)
+  }
+}
+
+// ---------------------------------------------------------------- J: the job off
+async function jobOffRun(browser, size) {
+  const tag = `J-${size.tag}`
+  const s = await jobOffWorld()
+  const { ctx, page } = await openPage(browser, size, s)
+  try {
+    if (!await openCompleted(page)) {
+      record(`${tag}-list`, 'Completed Loads lists the loads', 'rows', 'not listed', false)
+      return
+    }
+    for (const [id, , want, buttons] of s.expected) {
+      await chipStep(page, `${tag}-${id}`, `The row of ${id}`, id, want)
+      await lineStep(page, `${tag}-${id}-line`, `The dialog of ${id}: amber, and no button named`, id, want, buttons)
+    }
+    const file = await shot(page, `${tag}-chips`)
+    const green = await page.locator('.auto-chip--ok').count()
+    record(`${tag}-green`, 'No changed load reads green', 'no green chip', `green chips ${green}`, green === 0, file)
   } finally {
     await ctx.close()
     await closeWorld(s)
@@ -1073,7 +1194,7 @@ function wireStep() {
 
 // ---------------------------------------------------------------- --world: no browser
 async function worldCheck() {
-  for (const [name, build] of [['E', statusWorld], ['P', passWorld], ['R', rollbackWorld], ['K', killedWorld]]) {
+  for (const [name, build] of [['E', statusWorld], ['P', passWorld], ['R', rollbackWorld], ['J', jobOffWorld], ['K', killedWorld]]) {
     const s = await build()
     const body = dashboardBody(s)
     const byId = new Map(body.completedJobs.map((r) => [r['Load ID'], r]))
@@ -1136,7 +1257,7 @@ async function main() {
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
     for (const size of [DESKTOP, PHONE]) {
-      for (const [name, run] of [['E', statusRun], ['F', filterRun], ['A', actionRun], ['P', passRun], ['R', rollbackRun], ['K', killedRun], ['D', dispatcherRun]]) {
+      for (const [name, run] of [['E', statusRun], ['F', filterRun], ['A', actionRun], ['P', passRun], ['R', rollbackRun], ['J', jobOffRun], ['K', killedRun], ['D', dispatcherRun]]) {
         try {
           await run(browser, size)
         } catch (e) {

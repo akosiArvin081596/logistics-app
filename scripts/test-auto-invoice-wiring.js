@@ -621,7 +621,9 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		};
 		eq([seen(SA), seen(DISP)], [["auto-invoice"], []], "§3 GET /api/dispatch-notifications' scope: a Super Admin sees it, a Dispatcher doesn't");
 		eq((await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0001/checked", DISP, {})).status, 403, "§3 a Dispatcher can't mark it checked");
-		const checked = await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0001/checked", SA, {});
+		const unshown = await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0001/checked", SA, {});
+		eq([unshown.status, unshown.json.code, w.claim("LD-TEST-0001").changed_fields], [409, "AUTO_INVOICE_CHANGED_AGAIN", "payment"], "§3 FAILS ON THE OLD CODE: Mark checked that names nothing it was shown: refused, nothing cleared");
+		const checked = await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0001/checked", SA, { fields: ["payment"] });
 		const after = w.claim("LD-TEST-0001");
 		eq([checked.status, after.changed_fields, after.checked_by, w.audits("auto_invoice_checked").length], [200, "", SA.username, 1],
 			"§3 a Super Admin's Mark checked clears it, audited");
