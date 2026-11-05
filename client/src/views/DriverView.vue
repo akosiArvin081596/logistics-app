@@ -126,6 +126,24 @@
     <EmergencyContactsPrompt v-if="canEditContacts" :show="showContactsPrompt" @add="contactsPromptAdd" @later="contactsPromptLater" />
     <EmergencyContactsForm v-if="canEditContacts" :show="showContactsForm" @close="showContactsForm = false" @saved="contactsRevision++" />
 
+    <!-- After a release: "What's new" or a first-time driver's tour offer (noteMoment()), and the
+         tour over the real screens. Nothing here shows with the kill switch off. -->
+    <DriverReleaseNote
+      :view="releaseNote"
+      @show-me="release.noteShowMe"
+      @got-it="release.noteGotIt"
+      @take-tour="release.offerTake"
+      @skip-offer="release.offerSkip"
+    />
+    <DriverAppTour
+      v-if="releaseTour"
+      :view="releaseTour"
+      :videos="driverStore.trainingVideos === 'kit'"
+      @next="release.tourNext"
+      @skip="release.tourSkip"
+      @videos="tourToVideos"
+    />
+
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
     <div v-if="showWelcomeModal" class="welcome-overlay" tabindex="-1" @click.self="dismissWelcome" @keydown.esc="dismissWelcome">
       <div class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
@@ -329,6 +347,11 @@
         <!-- Outside the loading swap: every refresh sets isLoading, and a playing video
              must survive it. -->
         <DriverTrainingVideos v-if="driverStore.trainingVideos === 'kit'" variant="kit" />
+        <section v-if="releaseFeatureOn" class="card tour-kit" data-testid="tour-kit-card">
+          <h3 class="tour-kit-title">{{ RELEASE_WORDS.kitTitle }}</h3>
+          <p class="tour-kit-text">{{ RELEASE_WORDS.kitText }}</p>
+          <button type="button" class="tour-kit-btn" data-testid="tour-kit-start" @click="release.startAppTour">{{ RELEASE_WORDS.kitButton }}</button>
+        </section>
 
       </section>
 
@@ -443,6 +466,9 @@ import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 import { showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
+import { WORDS as RELEASE_WORDS, fieldInFocus, loadsHoldSignOut, overlayOnScreen } from '../lib/driverReleaseNotices'
+import { writesBusy } from '../lib/writesInFlight'
+import { useDriverRelease } from '../composables/useDriverRelease'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -467,6 +493,8 @@ import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
 import DriverPerformanceTab from '../components/driver/DriverPerformanceTab.vue'
 import DriverPerformanceBoard from '../components/driver/DriverPerformanceBoard.vue'
 import DriverWeekBar from '../components/driver/DriverWeekBar.vue'
+import DriverReleaseNote from '../components/driver/DriverReleaseNote.vue'
+import DriverAppTour from '../components/driver/DriverAppTour.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -861,6 +889,7 @@ watch(performanceTab, (shown) => {
 watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list') : ''), (place) => {
   weekSlotHeld.value = weekSlotWanted
   if (place) checkPerformanceTab()
+  if (place === 'list') release.check()
 })
 
 // Tab switching
@@ -1085,7 +1114,7 @@ const showContactsPrompt = computed(() => contactsPromptDue({
   answered: contactsPromptAnswered.value,
   welcomeOpen: showWelcomeModal.value,
   loadOpen: !!detailLoad.value,
-  dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value,
+  dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || release.tourOpen.value,
   motionAllowed: voiceGate.value.allowed,
 }))
 function contactsPromptAdd() {
@@ -1096,7 +1125,74 @@ function contactsPromptLater() {
   contactsPromptAnswered.value = true
 }
 
+// After a release (composables/useDriverRelease.js). It asks the server at three moments: the app
+// opens (attemptInitialLoad), he comes back to it (onVisibilityChange), he comes back to the list
+// (the watcher on his place). Never on a timer or a socket push, so a sign-out can't land under his thumb.
+function releaseDialogOpen() {
+  return showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value
+}
+const loadPageOpen = () => !!detailLoad.value
+// Each step shows the real screen, without handleTabSwitch(): a tab he opens himself marks its
+// messages and alerts read, and walking past them isn't reading them.
+function showTourStep(step) {
+  currentTab.value = step.tab
+  const load = step.id === 'load-page' ? (currentActiveLoad.value || driverStore.historicalLoads[0]) : null
+  detailRowIndex.value = load ? load._rowIndex : null
+}
+const release = useDriverRelease({
+  api,
+  role: () => auth.user?.role,
+  userId: () => auth.user?.id,
+  onboarding: () => isOnboarding.value,
+  mounted: () => isMounted,
+  has: () => ({ performance: performanceTab.value }),
+  motionAllowed: () => voiceGate.value.allowed,
+  noteInputs: () => ({
+    onboarding: isOnboarding.value,
+    settled: contactsPromptReady.value,
+    tab: currentTab.value,
+    loadOpen: loadPageOpen(),
+    welcomeOpen: showWelcomeModal.value,
+    dialogOpen: releaseDialogOpen(),
+    motionAllowed: voiceGate.value.allowed,
+  }),
+  signOutInputs: () => ({
+    loaded: !initialLoadFailed.value,
+    onboarding: isOnboarding.value,
+    tab: currentTab.value,
+    loadOpen: loadPageOpen(),
+    welcomeOpen: showWelcomeModal.value,
+    dialogOpen: releaseDialogOpen() || !!assignedNotification.value || respondingLoadIds.size > 0 || fieldInFocus(document) || overlayOnScreen(document),
+    loadsHold: loadsHoldSignOut(driverStore.loads, driverStore.headers.jobTracking),
+    writesBusy: writesBusy(),
+    visible: document.visibilityState === 'visible',
+    online: navigator.onLine !== false && !auth.isReconnecting,
+    motionAllowed: voiceGate.value.allowed,
+  }),
+  refreshFacts: async () => {
+    await driverStore.loadData({ quiet: true })
+    await driverPos.refreshEld()
+  },
+  signOut: handleLogout,
+  place: () => currentTab.value,
+  showStep: showTourStep,
+  restorePlace: (tab) => {
+    currentTab.value = tab
+    detailRowIndex.value = null
+  },
+  toast: (text) => toast.show(text),
+})
+const releaseFeatureOn = release.featureOn
+const releaseNote = release.noteView
+const releaseTour = release.tourView
+function tourToVideos() {
+  release.tourFinish()
+  handleTabSwitch('kit')
+}
+
 function handleMarkRead(ids) {
+  // The tour passing through Messages isn't him reading them.
+  if (release.tourOpen.value) return
   driverStore.markMessagesRead(ids)
 }
 
@@ -1127,6 +1223,7 @@ function scheduleDriverRefetch() {
 function onVisibilityChange() {
   if (document.visibilityState === 'visible' && isMounted) {
     scheduleDriverRefetch()
+    release.check()
   }
 }
 
@@ -1180,6 +1277,8 @@ function viewAssignedLoad() {
   const ri = assignedNotification.value?.rowIndex
   assignedNotification.value = null
   if (ri) {
+    // A new load's banner sits above the tour: tapping it leaves the tour for the load.
+    release.closeTour()
     currentTab.value = 'loads'
     driverStore.loadSubTab = 'active'
     detailRowIndex.value = ri
@@ -1369,6 +1468,7 @@ async function attemptInitialLoad() {
     maybeShowWelcome()
     scheduleContactsPrompt()
     checkPerformanceTab()
+    release.check()
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')
@@ -1456,6 +1556,16 @@ onUnmounted(() => {
      small so the flex math at the App-shell level doesn't double-pad. */
   padding-bottom: 0;
   font-size: 0.95rem;
+}
+
+/* The Kit's way into the app tour */
+.tour-kit { margin-top: 1rem; }
+.tour-kit-title { margin: 0 0 0.25rem; font-size: 0.95rem; font-weight: 700; }
+.tour-kit-text { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--text-dim); }
+.tour-kit-btn {
+  display: flex; align-items: center; justify-content: center; width: 100%; min-height: 44px;
+  padding: 0.5rem 0.75rem; border: 1px solid var(--accent); border-radius: var(--radius, 8px);
+  background: transparent; color: #0369a1; font-family: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer;
 }
 
 /* Onboarding Lock Screen */

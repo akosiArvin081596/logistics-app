@@ -1,3 +1,6 @@
+// Explicit .js: scripts/test-session-check.mjs loads this file under plain Node.
+import { writeStarted } from '../lib/writesInFlight.js'
+
 export function useApi() {
   // request(url, { timeout, signal, ...fetchOptions })
   // Wraps fetch with an AbortController-backed timeout (default 20s) so hung
@@ -8,6 +11,8 @@ export function useApi() {
     const { timeout = 20000, signal, ...fetchOptions } = options
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout)
+    const method = String(fetchOptions.method || 'GET').toUpperCase()
+    const writeEnded = method === 'GET' || method === 'HEAD' ? null : writeStarted()
 
     // Compose an external signal: when the caller aborts, abort our controller too.
     let onExternalAbort
@@ -69,6 +74,7 @@ export function useApi() {
       throw err
     } finally {
       clearTimeout(timer)
+      if (writeEnded) writeEnded()
       if (onExternalAbort) signal.removeEventListener('abort', onExternalAbort)
     }
   }

@@ -33156,10 +33156,18 @@ const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
 const NAMED_LOGINS_ENABLED = process.env.NAMED_LOGINS_ENABLED === "true";
 const signInLib = require("./lib/sign-in");
 try { signInLib.ensureSignInNetworkTable(db); } catch (err) { console.error("sign_in_network table setup failed:", err.message); }
+// New-feature notices for drivers: the list is lib/driver-releases.js, the routes lib/driver-release-routes.js.
+// A kill switch: it moves no money and changes no one's rights, so it is on unless set to false, and off,
+// every route answers 404 FEATURE_OFF and the driver app stays as it was.
+const driverReleaseNotices = require("./lib/driver-release-routes").mount(app, {
+	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_RELEASE_NOTICES_ENABLED ?? "").trim()),
+	requireRole, db,
+});
 // The account lookup and the sign-in rows, for the login and logout routes.
 const signIn = signInLib.createSignIn({
 	db, logAudit, logAuditRefusal, networkEvidence: signerNetworkEvidence,
 	auditEnabled: SIGN_IN_AUDIT_ENABLED, uniqueEmail: NAMED_LOGINS_ENABLED,
+	onSessionStart: driverReleaseNotices.startSession,
 });
 // The 90-day limit on the sign-in IP and browser records; audit rows are kept.
 function purgeOldSignInNetwork() {
@@ -33274,6 +33282,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			companyName: current.company_name || "",
 			mustChangePassword: !!current.must_change_password,
 		};
+		// A Driver's session starts on the current release (lib/driver-release-routes.js). Never throws.
+		signIn.sessionStarted(req.session, current);
 		try {
 			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
 		} catch (saveErr) {
@@ -33504,6 +33514,9 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		// cookie (useSocket re-checks the session after a server disconnect).
 		disconnectSessionSockets(currentSid);
 
+		// A password change isn't a sign-in: the rotated session stays on the release this one
+		// had, or a driver who just changed his password would be signed out for having done so.
+		const heldRelease = req.session.driverRelease;
 		// Rotate the current session ID so a previously captured cookie
 		// (the pre-change one) no longer authenticates.
 		req.session.regenerate((regenErr) => {
@@ -33512,6 +33525,7 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 				return res.status(500).json({ error: "Password updated but session rotate failed. Please log out and back in." });
 			}
 			req.session.user = freshUser;
+			if (heldRelease) req.session.driverRelease = heldRelease;
 			req.session.save(() => res.json({ success: true }));
 		});
 	} catch (err) {

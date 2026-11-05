@@ -62,6 +62,7 @@
           <div class="form-header">
             <h2 class="form-title">Welcome back</h2>
             <p class="form-desc">Sign in to your account to continue</p>
+            <p v-if="updatedNote" class="updated-note" role="status" data-testid="login-updated-note">{{ updatedNote }}</p>
           </div>
           <form @submit.prevent="doLogin" class="login-form">
             <div class="field">
@@ -106,9 +107,12 @@ import { useRouter } from 'vue-router'
 import { Eye, EyeOff } from 'lucide-vue-next'
 import { isLeavingPage, useAuthStore } from '../stores/auth'
 import { signInTip } from '../lib/accountForms.js'
+import { WORDS as RELEASE_WORDS, browserStorage, takeLoginNote } from '../lib/driverReleaseNotices.js'
 
 const router = useRouter()
 const auth = useAuthStore()
+// Why a driver is here, right after the app signed him out for a release (useDriverRelease.js).
+const updatedNote = ref(takeLoginNote(browserStorage('session'), Date.now()) ? RELEASE_WORDS.signedOut : '')
 
 const showSetup = ref(false)
 const showLogin = ref(false)
@@ -455,6 +459,16 @@ async function doLogin() {
   font-size: 0.82rem;
   color: #dc2626;
   text-align: center;
+}
+
+.updated-note {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: #e0f2fe;
+  color: #0c4a6e;
+  font-size: 0.88rem;
+  font-weight: 600;
 }
 
 .tip-text {
