@@ -1471,6 +1471,21 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		}, async (w) => {
 			eq((await w.weeks("nia"))[0].credits.pickups, 2, "two loads at the same hour on different days are no twins");
 		});
+		// Telemetry is by far the heaviest read here, so a pickup with no other arrival near it doesn't read it.
+		await inWorld((w) => {
+			w.clean("PF-68", NIA, MON);
+			w.clean("PF-16b", NIA, "2026-10-20");
+		}, async (w) => {
+			const prepare = w.db.prepare.bind(w.db);
+			let trackReads = 0;
+			w.db.prepare = (sql) => {
+				if (/routemate_telemetry/.test(sql)) trackReads += 1;
+				return prepare(sql);
+			};
+			eq((await w.weeks("nia"))[0].credits.pickups, 1, "a pickup with no other arrival near it counts");
+			w.db.prepare = prepare;
+			eq(trackReads, 0, "and reads no track");
+		});
 		const twoVisits = (w) => {
 			for (const [id, atShipper, transit] of [["PF-13", `${MON} 13:00:00`, `${MON} 13:20:00`], ["PF-14", `${MON} 14:30:00`, `${MON} 15:00:00`]]) {
 				w.hist(id, "geofence", "At Shipper", atShipper, NIA);
@@ -1554,6 +1569,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-22", pickup: PICKED("Mon"), delivery: null }], "an ELD departure after its dispatch does");
 		});
 		await inWorld((w) => {
+			w.hist("PF-41", "dispatch", "Dispatched", `${MON} 09:00:00`, "disp");
 			w.depart("PF-41", Date.parse(`${MON}T14:00:00Z`), 21);
 			w.hist("PF-41", "manual", "At Shipper", `${MON} 18:00:00`, NIA);
 			w.hist("PF-41", "manual", "In Transit", `${MON} 18:05:00`, NIA);
@@ -1561,6 +1577,14 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		}, async (w) => {
 			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-41", pickup: PICKED("Mon"), delivery: null }], "and so does one with his taps coming late behind it: nothing went back, so it stands, on the truck's own time");
 			eq((await w.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers.find((x) => x.name === NIA).pickups.eld, 1, "as the ELD's, not the tap's");
+		});
+		await inWorld((w) => {
+			w.depart("PF-16c", Date.parse(`${MON}T14:00:00Z`), 21);
+			w.hist("PF-16c", "manual", "At Shipper", `${MON} 18:00:00`, NIA);
+			w.hist("PF-16c", "manual", "In Transit", `${MON} 18:05:00`, NIA);
+			w.row("PF-16c", NIA, "In Transit");
+		}, async (w) => {
+			eq((await w.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers.find((x) => x.name === NIA).pickups.eld, 1, "with no dispatch row on record too: a late first tap isn't the run's start");
 		});
 		await inWorld((w) => {
 			w.hist("PF-23", "geofence", "In Transit", `${MON} 14:00:00`, NIA);
@@ -1902,6 +1926,17 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			w.row("PF-67", NIA, "Dispatched");
 		}, async (w) => {
 			eq((await w.weeks("nia"))[0].loads.map((l) => l.loadId), ["#PF-67"], "a row of both credits shows the ID as the invoice's row spells it");
+		});
+		await inWorld((w) => {
+			w.picked("PF-72", NIA, MON);
+			w.row("PF-72", NIA, "Delivered", `${MON} 15:00`);
+			w.row("PF-72", NIA, "Delivered", `${TUE} 15:00`);
+		}, async (w) => {
+			const nia = (await w.weeks("nia"))[0];
+			eq([nia.credits.deliveries, nia.loads[0].delivery], [1, DONE("Tue")], "two delivered rows in one week: one delivery, on the day of the last billable row, the row the invoice bills");
+			const raw = w.fns.parseSheet({ values: sheetValues(w.extraLoads) });
+			const billed = w.fns.selectInvoiceWeekLoads(raw.data, raw.headers, NIA, "2026-11-07", "2026-11-13", w.fns.loadKeySet(w.fns.getDeletedLoadIds())).loads;
+			eq(billed.map((r) => r["Status Update Date"]), [`${TUE} 15:00`], "which is the invoice's own choice");
 		});
 
 		// The one read every caller shares keeps what it was: only this route looks at the rest.
