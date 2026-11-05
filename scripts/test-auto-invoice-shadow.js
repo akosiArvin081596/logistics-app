@@ -189,7 +189,7 @@ async function main() {
 	section("§5  the job module reaches nothing itself");
 	const SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-job.js"), "utf8");
 	const requires = [...SRC.matchAll(/require\(\s*"([^"]{1,60})"\s*\)/g)].map((m) => m[1]).sort();
-	eq(requires, ["./app-time", "./auto-invoice-ledger", "./auto-invoice-rules", "./auto-invoice-send", "./auto-invoice-trigger", "./factoring-store", "./imap-draft", "async_hooks", "crypto", "fs", "os"], "§5 it loads only its own lib modules (the factoring marker and the send rules among them) and built-ins");
+	eq(requires, ["./app-time", "./auto-invoice-ledger", "./auto-invoice-rules", "./auto-invoice-send", "./auto-invoice-trigger", "./factoring-store", "./imap-draft", "./invoice-send-button", "async_hooks", "crypto", "fs", "os"], "§5 it loads only its own lib modules (the factoring marker and the send rules among them) and built-ins");
 	ok(!/\bfetch\s*\(|googleapis|getSheets|getDrive|https?:\/\//.test(SRC), "§5 no fetch, Google client or URL: every outside call is a dependency it is given");
 	ok(/newMessageId: \(user\) => require\("\.\/imap-draft"\)\.newMessageId\(user\)/.test(SRC), "§5 lib/imap-draft.js is loaded only for a Message-ID default");
 

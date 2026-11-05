@@ -72,6 +72,9 @@ POST /api/auth/logout · inline@a546bfc2c18f
 GET /api/auth/session · inline@c685a5e5d4e9
 POST /api/auth/setup · setupLimiter=limiter · inline@b5ab1ff117ac
 GET /api/auth/setup-check · inline@9aeadec8551c
+GET /api/auto-invoice/loads/:loadKey/send-now · absentWhenOff@40b8800ffbe4 · anon@12b84c4b0134 · stateRoute@d186f19e2afd · (lib mount)
+POST /api/auto-invoice/loads/:loadKey/send-now · absentWhenOff@40b8800ffbe4 · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · limiter · sendRoute@77f301f602a4 · (lib mount)
+POST /api/auto-invoice/loads/:loadKey/send-now/preview · absentWhenOff@40b8800ffbe4 · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · limiter · previewRoute@f949d3b8cc95 · (lib mount)
 POST /api/chat/attachment · requireAuth@2f5c61384511 · chatAttachmentLimiter=limiter · inline@33f9d00b29e0
 GET /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3eda45f93d95
 POST /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e2cebafb9608
