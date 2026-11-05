@@ -1565,10 +1565,12 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq([moved.state("900000439"), moved.notices.length, heldRows(moved).length, "recipientCheck" in (await settingsOf(mvj))], [["needs_attention", "NO_BILLING_EMAIL"], 1, 1, false], "§13 ...stopped again on the same code: nothing more told, and no longer counted");
 
 		// The list, its words, and the rule: what the worlds above don't each reach.
-		eq(rules.KNOWN_ADDRESS_HOLD_CODES, ["BROKER_DOMAIN_UNCONFIRMED", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RECIPIENT_NOT_KNOWN", "RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH", "RATECON_TOTAL_UNREAD", "RECIPIENT_CHECK_OFF"], "§13 the codes that tell");
-		eq(Object.keys(rules.HELD_NOTICE_WORDS).sort(), [...rules.KNOWN_ADDRESS_HOLD_CODES].sort(), "§13 ...each with its words");
-		ok(rules.KNOWN_ADDRESS_HOLD_CODES.every((c) => rules.REASON_CODES.includes(c)), "§13 ...each a server code");
-		ok(!/@/.test(Object.values(rules.HELD_NOTICE_WORDS).join(" ")), "§13 ...and no address in any of the words");
+		const holdCodes = rules.KNOWN_ADDRESS_HOLD_CODES || [];
+		const noticeWords = rules.HELD_NOTICE_WORDS || {};
+		eq(holdCodes, ["BROKER_DOMAIN_UNCONFIRMED", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RECIPIENT_NOT_KNOWN", "RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH", "RATECON_TOTAL_UNREAD", "RECIPIENT_CHECK_OFF"], "§13 the codes that tell");
+		eq(Object.keys(noticeWords).sort(), [...holdCodes].sort(), "§13 ...each with its words");
+		ok(holdCodes.every((c) => rules.REASON_CODES.includes(c)), "§13 ...each a server code");
+		ok(!/@/.test(Object.values(noticeWords).join(" ")), "§13 ...and no address in any of the words");
 		for (const [code, domain, want] of [
 			["NO_BILLING_EMAIL", DOMAIN, true],
 			["RATECON_MISSING", `billing.${DOMAIN}`, true],
@@ -1581,7 +1583,7 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			["TRAILER_MISMATCH", DOMAIN, false],
 			["", DOMAIN, false],
 		]) {
-			eq(rules.isKnownAddressHold(code, domain), want, `§13 rule: ${code || "no code"} on ${domain}: ${want}`);
+			eq(typeof rules.isKnownAddressHold === "function" ? rules.isKnownAddressHold(code, domain) : null, want, `§13 rule: ${code || "no code"} on ${domain}: ${want}`);
 		}
 
 		// What isn't this check's: the rate con was read, and a person's question is about this load.

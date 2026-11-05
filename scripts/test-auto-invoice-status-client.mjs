@@ -574,7 +574,8 @@ section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
   eq(checkState({ on: true, domain: CHR, days: 7, held: { count: 1, byCode: { MADE_UP_CODE: 1 } } }).text, `1 ${CHR} load was held in the last 7 days, so its invoice was not sent. ${STOP_TOO}`, '§14 a reason this client has no words for: left out, the count stays')
   ok(/^2 C\.H\. Robinson loads were held in the last 7 days, /.test(checkState({ on: true, days: 7, held: { count: 2, byCode: {} } }).text), '§14 a read with no domain: the line still reads as a sentence')
   for (const bad of ['off', 1, [], { on: 'false' }]) eq(checkState(bad), null, `§14 ${JSON.stringify(bad)}: no line`)
-  for (const code of rules.KNOWN_ADDRESS_HOLD_CODES) ok(Object.hasOwn(S.AUTO_INVOICE_REASONS, code), `§14 ${code}: the server counts it and this client has its words`)
+  ok(Array.isArray(rules.KNOWN_ADDRESS_HOLD_CODES) && rules.KNOWN_ADDRESS_HOLD_CODES.length > 0, '§14 the server has a list of what it counts')
+  for (const code of rules.KNOWN_ADDRESS_HOLD_CODES || []) ok(Object.hasOwn(S.AUTO_INVOICE_REASONS, code), `§14 ${code}: the server counts it and this client has its words`)
 
   // The dialog's mode line, from the same read: with the check off it doesn't promise those invoices.
   const modeLine = fnOf('autoModeLine') || (() => '(no such function on this tree)')
