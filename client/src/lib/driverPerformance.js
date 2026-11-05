@@ -9,19 +9,18 @@ import { availabilityRangeText } from './availabilityText.js'
 export const OWN_URL = '/api/driver/me/performance'
 export const BOARD_URL = '/api/driver/performance/leaderboard'
 
+// The Super Admin's board only: no driver's screen shows it.
 export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
-export const HOS_SHORT_LINE = 'Hours of service come first.'
 export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
-export const GUIDE_LINE = 'Targets are a guide, not a requirement.'
+// Both figures are the server's, for the week on screen. It sends no required figure when time off rules it out.
+export const requirementLine = (target, required) => `${target} is the target. ${required} is required.`
+export const targetOnlyLine = (target) => `${target} is the target.`
 export const PRIVATE_LINE = 'No other driver can see this.'
 export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
-// The first is true of every driver. The second only of one whose invoice pays days, and the
-// server says which he is.
-export const NOT_PAY_LINE = 'Counts loads, not pay.'
-export const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
-export const NEW_WEEK_LINE = 'A new week starts Saturday.'
+// The date is the server's, so this file holds no calendar.
+export const newWeekLine = (day) => `A new week starts Saturday, ${day}.`
 export const NO_LOADS_LINE = 'Nothing has counted yet this week.'
 export const NO_LOADS_LAST_WEEK = 'Nothing counted last week.'
 export const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
@@ -76,6 +75,7 @@ export function weekFromAnswer(role, status, answer) {
 // ── His own week ───────────────────────────────────────────────────────────
 
 const isNumber = (n) => typeof n === 'number' && Number.isFinite(n)
+const isWeekDate = (text) => typeof text === 'string' && /^[A-Z][a-z]{2} \d{1,2}$/.test(text)
 const paceId = (pace) => (Object.prototype.hasOwnProperty.call(PACE_WORDS, pace) ? pace : '')
 
 // The figures every view of one week needs, or null when the answer doesn't hold them whole, so
@@ -120,7 +120,7 @@ export function ownWeekView(answer, periodId) {
   const left = week.left
   if (current && !isNumber(left)) return null
   const reached = current && left === 0
-  const newWeek = current && !reached && week.newWeekNote === true
+  const newWeek = current && !reached && week.newWeekNote === true && isWeekDate(week.nextWeekStarts)
   const shownPace = current ? figures.paceId : ''
   let leftWords = ''
   if (reached) leftWords = `${target} reached this week.`
@@ -133,10 +133,10 @@ export function ownWeekView(answer, periodId) {
     width,
     left: leftWords,
     closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
-    newWeek: newWeek ? NEW_WEEK_LINE : '',
-    rule: `A delivered load counts ${weights.delivery}, its pickup ${weights.pickup}.`,
-    notPay: answer.invoicePaysDays === true ? NOT_PAY_DAYS_LINE : NOT_PAY_LINE,
+    newWeek: newWeek ? newWeekLine(week.nextWeekStarts) : '',
+    rule: `Each pickup counts ${weights.pickup} and each delivery ${weights.delivery}.`,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
+    requirement: isNumber(week.credits.required) ? requirementLine(target, week.credits.required) : targetOnlyLine(target),
     title: current ? 'What counted this week' : 'What counted last week',
     empty: current ? NO_LOADS_LINE : NO_LOADS_LAST_WEEK,
     loads,
@@ -152,7 +152,6 @@ export function weekBarView(answer) {
     pace: figures.paceId ? PACE_WORDS[figures.paceId] : '',
     paceId: figures.paceId,
     width: figures.width,
-    hos: HOS_SHORT_LINE,
   }
 }
 
