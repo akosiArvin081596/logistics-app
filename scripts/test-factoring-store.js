@@ -189,8 +189,8 @@ function checkMark(S) {
 		putSentClaim(db, k, { state, stage });
 		c.eq([mark(k).r.code, mark(k, saysNotSent).r.code, marker(db, k)], ["INVOICE_ALREADY_SENT", "INVOICE_ALREADY_SENT", undefined], `§2 a send at stage ${stage}, no draft row yet: INVOICE_ALREADY_SENT, no row`);
 	}
-	x = mark("ld-test-0030", { dryRun: true });
-	c.eq([x.r.code, marker(db, "ld-test-0030")], ["INVOICE_ALREADY_SENT", undefined], "§2 ...the dry run gives the same answer");
+	c.eq([mark("ld-test-0030", { dryRun: true }).r.code, mark("ld-test-0031", { dryRun: true }).r.code, marker(db, "ld-test-0031")], ["INVOICE_ALREADY_SENT", "INVOICE_ALREADY_SENT", undefined],
+		"§2 ...the dry run gives the same answer, on the draft row and on the job's record alone");
 
 	putDraft(db, "#LD-TEST-0009", "imap");
 	x = mark("ld-test-0009");
