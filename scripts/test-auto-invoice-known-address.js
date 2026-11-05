@@ -274,6 +274,7 @@ function makeWorld({ domains = [DOMAIN], confirmed = [DOMAIN], optOut = [], proo
 			return { ok: true };
 		},
 		invalidateJobTracking: () => {},
+		rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
 		readPaymentsTable: async () => {
 			w.calls.payments++;
 			if (w.paymentsFail) throw new Error("made-up Sheets failure");
@@ -1194,6 +1195,22 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		scanned.candidates.set(rules.loadKey(ID), [{ buffer: scan, source: "drive", label: "drive", fileName: "rc.pdf", driveFileName: `${ID}.pdf` }]);
 		await deliver(scanned, sjob, ID, "§12 no text layer");
 		eq([scanned.state(ID), paidNothing(scanned)], [NUMBER, NOTHING], "§12 a rate con with no text layer: a reader miss holds, nothing sent");
+		// A job given no reader holds too, and one that throws sends nothing.
+		const noReader = makeWorld();
+		const withReader = noReader.deps;
+		noReader.deps = (extra) => {
+			const { rateConTextOf: _reader, ...rest } = withReader(extra);
+			return rest;
+		};
+		const nrj = await noReader.started();
+		noReader.ready(ID);
+		await deliver(noReader, nrj, ID, "§12 no reader");
+		eq([noReader.state(ID), paidNothing(noReader)], [NUMBER, NOTHING], "§12 a job given no reader: a person, nothing sent, no number");
+		const thrower = makeWorld();
+		const tj = await thrower.started({ rateConTextOf: () => { throw new Error("made-up: the reader failed"); } });
+		thrower.ready(ID);
+		await deliver(thrower, tj, ID, "§12 a reader that throws");
+		eq([thrower.state(ID), paidNothing(thrower)], [["needs_attention", "DRAFT_FAILED"], NOTHING], "§12 a reader that throws: a person, nothing sent, no number");
 		// A rate-con row is read the same way.
 		await heldAtNumber("a rate-con row whose read gives another number", { source: "documents", number: B, note: B });
 		await heldAtNumber("a rate-con row whose read gives none", { source: "documents", number: null });

@@ -55963,6 +55963,7 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		const sheets = await getSheets();
 		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
 	},
+	rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
 	log: console,
 });
 // The status route's and the document routes' one call each into the job: nothing here

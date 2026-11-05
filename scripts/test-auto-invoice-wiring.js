@@ -336,6 +336,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		app[verb] = (p, ...handlers) => { w.registered.push(`${verb.toUpperCase()} ${p}`); return realApp[verb](p, ...handlers); };
 	}
 	const scope = {
+		brokerInvoice,
 		require: (p) => { w.required.push(p); return p === "./lib/imap-draft" ? imapModule : p === "./lib/invoice-mailbox-search" ? searchModule : serverRequire(p); },
 		getSheets: async () => sheets,
 		SPREADSHEET_ID: "made-up-sheet",
