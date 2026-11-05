@@ -133,6 +133,7 @@ function makeWorld() {
 		rows: [],
 		files: new Set(),
 		rateCons: new Map(),
+		docs: new Map(),
 		gmail: [],
 		sent: [],
 		smtp: [],
@@ -208,7 +209,15 @@ function makeWorld() {
 			if (!w.rateCons.has(key)) return { ok: false, http: 422, code: "RATECON_MISSING" };
 			const rule = rules.recipientRule({ brokerEmail: row.Email, bisonRecipient: "", documentsEmail: w.rateCons.get(key), confirmedDomains: ledger.readSettings(w.db).confirmedBrokerDomains });
 			if (!rule.ok) return { ok: false, http: 422, code: rule.code };
-			return { ok: true, ctx: { loadId: row["Load ID"], to: rule.to } };
+			// `w.docs`: a load whose files are another load's, byte for byte, as after a retyped Load ID.
+			const docs = w.docs.get(key) || {};
+			const ref = String(row["Load ID"]).replace(/^#/, "");
+			return { ok: true, ctx: {
+				loadId: row["Load ID"],
+				to: rule.to,
+				podAttachments: [{ filename: `${ref}_POD.pdf`, content: Buffer.from(`%PDF-1.4 made-up POD for ${docs.pod || ref}`), contentType: "application/pdf" }],
+				rateconBuffer: Buffer.from(`%PDF-1.4 made-up rate con for ${docs.rateCon || ref}`),
+			} };
 		},
 		async render(ctx, opts) {
 			w.calls.render++;
@@ -223,8 +232,8 @@ function makeWorld() {
 				html: `<p>Please see the attached documents for load number ${ref}.</p>`,
 				attachments: [
 					{ filename: `C.H. Robinson Invoice Order #${ref}.pdf`, content: textPdf(printed), contentType: "application/pdf" },
-					{ filename: `${ref}_POD.pdf`, content: Buffer.from(`%PDF-1.4 made-up POD for ${ref}`), contentType: "application/pdf" },
-					{ filename: `${ref}.pdf`, content: Buffer.from(`%PDF-1.4 made-up rate con for ${ref}`), contentType: "application/pdf" },
+					...ctx.podAttachments,
+					{ filename: `${ref}.pdf`, content: ctx.rateconBuffer, contentType: "application/pdf" },
 				],
 				total: "$1,000.00",
 			};
@@ -1084,6 +1093,11 @@ async function main() {
 		const p = await w.preview(id);
 		const invalidatedBefore = w.invalidated;
 		w.timeline = [];
+		let lookAskedDuringPaidRead = "";
+		w.prepareHook = async () => {
+			lookAskedDuringPaidRead = w.claim(id).look_first;
+			return null;
+		};
 		const r = await w.press(id, p.body.token);
 		eq([r.status, r.body], [200, { ok: true, loadId: id }], "§5 FAILS ON THE OLD CODE: the press is taken");
 		eq(w.timeline, [], "§5 nothing happens before the answer: the run starts after it");
@@ -1096,11 +1110,14 @@ async function main() {
 		await until(() => w.open() === 0, "§5 the run");
 		const c = w.claim(id);
 		eq([c.state, c.reason_code, c.stage, c.delivery, c.look_first], ["drafted", "", "recorded", "send", ""], "§5 FAILS ON THE OLD CODE: sent");
-		eq(w.timeline, ["payments", "look", "prepare", "mint", "render", "smtp", "record"], "§5 the run's order: the look, the paid read, the number, the render, SMTP, the row");
+		eq(w.timeline, ["payments", "look", "prepare", "payments", "look", "mint", "render", "smtp", "record"], "§5 FAILS ON THE OLD CODE (G-M1): the run's order: the look, the paid read, the look again, the number, the render, SMTP, the row");
+		ok(lookAskedDuringPaidRead !== "", "§5 FAILS ON THE OLD CODE (G-M1): the look stays asked for through the paid read: only the second clean look clears it");
 		eq(w.smtp.map((m) => [m.to, m.attachments]), [[BILLING, [`C.H. Robinson Invoice Order #${id}.pdf`, `${id}_POD.pdf`, `${id}.pdf`]]], "§5 one SMTP call: the invoice, every POD, the rate con, to the one recipient");
 		eq([w.appends.length, w.draftRows(id).map((x) => x.via), w.actions("auto_invoice_sent").length], [0, ["auto-smtp"], 1], "§5 no Gmail draft; the job's own row and audit trail");
 		eq(c.invoice_id, "10202026-1", "§5 it carries the number the confirm showed, when nothing else took it");
 		eq([w.calls.look[1].includeTrash, w.calls.look[1].lastCheck, w.calls.look[1].quiet], [true, true, undefined], "§5 the run's own look: Trash and by subject too, and a live answer refreshes the saved row");
+		eq(w.calls.look.length, 3, "§5 FAILS ON THE OLD CODE (G-M1): the preview's look and the run's two");
+		eq(w.calls.look[2] && [w.calls.look[2].includeTrash, w.calls.look[2].lastCheck, w.calls.look[2].quiet], [true, true, undefined], "§5 FAILS ON THE OLD CODE (G-M1): the second look reads the same three mailboxes");
 		eq([w.calls.failedNotes.length, w.notices.filter((n) => n.title === "Invoice not sent").length], [0, 0], "§5 no failure to note");
 	}
 	{
@@ -1237,6 +1254,44 @@ async function main() {
 		const w = await backCase(`the run's look: ${label}`, { code, afterPress: change });
 		eq(w.timeline.filter((t) => t === "prepare").length, 1, `§6 ${label}: only the preview's paid call: the run stopped before its own`);
 		eq(w.calls.failedNotes.length, code === "MAILBOX_UNREAD" ? 1 : 0, `§6 ${label}: ${code === "MAILBOX_UNREAD" ? "a failed search is noted on the saved row" : "no failure to note"}`);
+	}
+	// G-M1: what a person does while the paid read runs is seen by a second look, before the number.
+	for (const [label, during, code] of [
+		["billed from Gmail during the paid read", (w) => { w.lookAnswer = { verdict: "invoice", mailboxes: { drafts: box(), sent: box({ invoice: 1 }) } }; }, "MAILBOX_HIT"],
+		["a mention during the paid read", (w) => { w.lookAnswer = { verdict: "mention", mailboxes: { drafts: box(), sent: box({ mention: 1 }) } }; }, "MAILBOX_HIT"],
+		["the Payments Table filled during the paid read", (w, id) => w.payments.push([id, "", "", "INV-MADE-UP", "", ""]), "PAYMENTS_TABLE_HIT"],
+		["the Payments Table unreadable after the paid read", (w) => { w.paymentsFail = true; }, "PAYMENTS_UNREAD"],
+		["the search fails after the paid read", (w) => { w.lookFails = true; }, "MAILBOX_UNREAD"],
+	]) {
+		const w = await backCase(`FAILS ON THE OLD CODE (G-M1), the second look: ${label}`, { code, afterPress: (x, id) => {
+			x.prepareHook = async () => {
+				x.prepareHook = null;
+				during(x, id);
+				return null;
+			};
+		} });
+		eq(w.timeline.filter((t) => t === "prepare").length, 2, `§6 ${label}: the preview's paid read and the run's`);
+		eq(w.timeline.filter((t) => t === "payments").length, 3, `§6 ${label}: the Payments Table read at the preview and at each of the run's two looks`);
+		eq(w.timeline.filter((t) => t === "look").length, code.startsWith("PAYMENTS") ? 2 : 3, `§6 ${label}: the mailbox searched at the preview and at the run's two looks, a Payments Table stop coming first`);
+		eq(w.calls.failedNotes.length, code === "MAILBOX_UNREAD" ? 1 : 0, `§6 ${label}: ${code === "MAILBOX_UNREAD" ? "a failed search is noted once" : "no failure to note"}`);
+	}
+	{
+		// G-M2, named for the switch-on: what's left of the window after the second look. A hand send
+		// during the render isn't seen. A third look there would void a number on every hit.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		w.afterPress = () => {
+			w.renderHook = async () => {
+				w.renderHook = null;
+				w.lookAnswer = { verdict: "invoice", mailboxes: { drafts: box(), sent: box({ invoice: 1 }) } };
+			};
+		};
+		await w.press(id, p.body.token);
+		await until(() => w.open() === 0, "§6 the run");
+		eq([w.st(id), w.smtp.length], [["drafted", ""], 1], "§6 G-M2, named: a hand send after the second look isn't seen. This window is a switch-on condition, not a code fix");
 	}
 	{
 		// A hit found by the run reads back through the real status once the search saves it.
@@ -1815,7 +1870,7 @@ async function main() {
 		const line = oldLine();
 		await until(() => w.open() === 0, "§9 start-up runs it");
 		await line;
-		eq([w.st(id), w.smtp.length, w.timeline.filter((t) => t === "look").length], [["drafted", ""], 1, 1], "§9 FAILS ON THE OLD DESIGN: two presses' worth of lines and a restart: one SMTP call, after one look");
+		eq([w.st(id), w.smtp.length, w.timeline.filter((t) => t === "look").length], [["drafted", ""], 1, 2], "§9 FAILS ON THE OLD DESIGN: two presses' worth of lines and a restart: one SMTP call, after one run's two looks");
 	}
 	{
 		const w = makeWorld();
@@ -1828,6 +1883,168 @@ async function main() {
 		await w.restart();
 		await until(() => w.open() === 0, "§9 start-up runs it");
 		eq([w.st(id), w.smtp.length], [["baseline", ""], 0], "§9 FAILS ON THE OLD DESIGN (R-H2 (b)): billed from Gmail, a restart between the press and the run: the look still stops it");
+	}
+	{
+		// G-M1's look, stuck: past its limit it's back, and the attempt waking later can't send.
+		const w = makeWorld();
+		await w.boot();
+		const id = newId();
+		await w.armed(id);
+		const p = await w.preview(id);
+		const stuck = gate();
+		let looks = 0;
+		w.lookHook = async () => {
+			looks++;
+			if (looks === 2) await stuck.p;
+		};
+		await w.press(id, p.body.token);
+		await until(() => looks === 2, "§9 G-M1: the run is in its second look");
+		eq(w.calls.mint, 0, "§9 G-M1: no number yet");
+		ok(w.passRunLimit(), "§9 G-M1: past its limit");
+		await until(() => w.open() === 0, "§9 G-M1: the claim closes");
+		eq(w.st(id), ["baseline", ""], "§9 G-M1: back");
+		stuck.open();
+		for (let i = 0; i < 30; i++) await turn();
+		eq([w.smtp.length, w.calls.mint, w.st(id)], [0, 0, ["baseline", ""]], "§9 G-M1: the abandoned look wakes clean: nothing sent, no number, the claim left alone");
+	}
+	// G-M3: one physical load under a retyped Load ID. Its documents are the same bytes under a new key.
+	const hit = (w, id) => w.smtp.filter((m) => m.subject.endsWith(id)).length;
+	{
+		// The review's own case: sent, the ID retyped, the stop resumed, a POD and rate con filed again.
+		const w = makeWorld();
+		await w.boot();
+		const a = newId();
+		const b = newId();
+		await w.armed(a);
+		await w.send(a, "§9 G-M3: load A");
+		eq(hit(w, a), 1, "§9 G-M3: load A is sent");
+		w.rows = w.rows.map((r) => (r["Load ID"] === a ? Object.freeze({ ...r, "Load ID": b }) : r));
+		w.now += 1000;
+		await w.job.checkClaims();
+		eq(ledger.getSendStop(w.db).reason, "LOAD_CHANGED_AFTER_SEND", "§9 G-M3: the retype reads as a change: the stop");
+		ledger.clearSendStop(w.db);
+		w.addPod(b);
+		w.rateCons.set(rules.loadKey(b), BILLING);
+		w.docs.set(rules.loadKey(b), { pod: a, rateCon: a });
+		w.searched(b);
+		await w.paidOk(b);
+		const p = await w.preview(b);
+		eq([p.status, p.body.code, p.body.token], [409, "SAME_DOCUMENTS", undefined], "§9 FAILS ON THE OLD CODE (G-M3): the same documents under a retyped Load ID: no confirm");
+		if (p.body.token) {
+			await w.press(b, p.body.token);
+			await until(() => w.open() === 0, "§9 G-M3: the old code's press");
+		}
+		eq([w.smtp.length, w.calls.render], [1, 2], "§9 FAILS ON THE OLD CODE (G-M3): one physical load: one SMTP call, and no render for the refused confirm");
+		eq(sendButton.lineOf("SAME_DOCUMENTS"), `Handle by hand: ${sendButton.WHY.SAME_DOCUMENTS}`, "§9 G-M3: its own words");
+		eq(sendButton.documentHashes({}), [], "§9 G-M3: no documents, nothing to compare, and never the hash of nothing");
+		const sentHashes = JSON.parse(w.claim(a).draft_digest_json).attachments.map((x) => x.sha256).filter(Boolean);
+		eq(sendButton.documentHashes({ podAttachments: [{ content: Buffer.from(`%PDF-1.4 made-up POD for ${a}`) }], rateconBuffer: Buffer.from(`%PDF-1.4 made-up rate con for ${a}`) }), sentHashes, "§9 G-M3: the hashes are the digest's own, for the same bytes");
+	}
+	{
+		// The confirm came first, and the other load's send after it: the run asks again, before the number.
+		const w = makeWorld();
+		await w.boot();
+		const a = newId();
+		const b = newId();
+		await w.armed(a);
+		await w.armed(b);
+		w.docs.set(rules.loadKey(b), { pod: a, rateCon: a });
+		const q = await w.preview(b);
+		eq(q.status, 200, "§9 G-M3: nothing sent yet: the confirm goes through");
+		await w.send(a, "§9 G-M3: load A");
+		const mintsBefore = w.calls.mint;
+		const r = await w.press(b, q.body.token);
+		eq(r.status, 200, "§9 G-M3: the press has no bytes to compare");
+		await until(() => w.open() === 0, "§9 G-M3: the run");
+		eq([w.st(b), hit(w, b), w.calls.mint - mintsBefore, w.claim(b).button_send_json], [["baseline", ""], 0, 0, ""], "§9 FAILS ON THE OLD CODE (G-M3): the run refuses, back, before any number");
+		eq(w.actions("auto_invoice_button_back").map((x) => [x.id, x.details.split(":")[0]]), [[b, "SAME_DOCUMENTS"]], "§9 G-M3: one audit row with the reason");
+	}
+	for (const [label, docs, code] of [
+		["only the rate con's bytes", (a) => ({ rateCon: a }), "SAME_DOCUMENTS"],
+		["only the POD's bytes", (a) => ({ pod: a }), "SAME_DOCUMENTS"],
+		["neither", () => ({}), null],
+	]) {
+		const w = makeWorld();
+		await w.boot();
+		const a = newId();
+		const b = newId();
+		await w.armed(a);
+		await w.send(a, "§9 G-M3: load A");
+		await w.armed(b);
+		w.docs.set(rules.loadKey(b), docs(a));
+		const p = await w.preview(b);
+		eq([p.status, p.body.code], code ? [409, code] : [200, undefined], `§9 ${code ? "FAILS ON THE OLD CODE (G-M3): " : ""}${label} match a sent load's: ${code ? "refused" : "the confirm goes through"}`);
+	}
+	{
+		// Which claims count: a send that started, whatever became of it. Not a draft, not a refused send.
+		const w = makeWorld();
+		await w.boot();
+		const a = newId();
+		await w.armed(a);
+		w.smtpBehaviors = ["LOST"];
+		await w.send(a, "§9 G-M3: load A, its answer lost");
+		ledger.clearSendStop(w.db);
+		const b = newId();
+		await w.armed(b);
+		w.docs.set(rules.loadKey(b), { rateCon: a });
+		eq((await w.preview(b)).body.code, "SAME_DOCUMENTS", "§9 FAILS ON THE OLD CODE (G-M3): MAYBE_SENT counts: it may have gone");
+
+		const c = makeWorld();
+		await c.boot();
+		const s = newId();
+		await c.armed(s);
+		c.smtpBehaviors = ["REFUSED"];
+		await c.send(s, "§9 G-M3: refused before the body");
+		ledger.clearSendStop(c.db);
+		const t = newId();
+		await c.armed(t);
+		c.docs.set(rules.loadKey(t), { pod: s, rateCon: s });
+		eq((await c.preview(t)).status, 200, "§9 G-M3: an SMTP refusal sent nothing, so it doesn't count");
+
+		const dd = makeWorld();
+		await dd.boot();
+		const x = newId();
+		const y = newId();
+		await dd.armed(x);
+		await dd.send(x, "§9 G-M3: load X");
+		const digest = dd.claim(x).draft_digest_json;
+		const drafted = newId();
+		dd.seed(drafted, { state: "drafted", stage: "recorded", delivery: "", draft_digest_json: digest, invoice_id: "10202026-77" });
+		await dd.armed(y);
+		dd.db.prepare("UPDATE auto_invoice_claims SET delivery = '' WHERE load_key = ?").run(rules.loadKey(x));
+		dd.docs.set(rules.loadKey(y), { pod: x, rateCon: x });
+		eq((await dd.preview(y)).status, 200, "§9 G-M3: a Gmail draft isn't a send: it doesn't count");
+
+		const e = makeWorld();
+		await e.boot();
+		const own = newId();
+		e.seed(own, { state: "drafted", stage: "recorded", delivery: "send", draft_digest_json: "{}", invoice_id: "10202026-78" });
+		const other = newId();
+		e.seed(other, { state: "drafted", stage: "recorded", delivery: "send", draft_digest_json: "{}", invoice_id: "10202026-79" });
+		const blank = newId();
+		e.seed(blank, { state: "drafted", stage: "recorded", delivery: "send", draft_digest_json: "", invoice_id: "10202026-80" });
+		eq(typeof ledger.sentDigests === "function" ? ledger.sentDigests(e.db, rules.loadKey(own)).map((r) => r.load_key) : "no list", [rules.loadKey(other)], "§9 FAILS ON THE OLD CODE (G-M3): the ledger's list: other loads' sends, with a digest");
+
+		const bad = makeWorld();
+		await bad.boot();
+		const u = newId();
+		await bad.armed(u);
+		bad.seed(newId(), { state: "drafted", stage: "recorded", delivery: "send", draft_digest_json: "not json", invoice_id: "10202026-81" });
+		eq((await bad.preview(u)).body.code, "SAME_DOCUMENTS", "§9 FAILS ON THE OLD CODE (G-M3): a sent digest that can't be read can't prove the documents differ");
+	}
+	{
+		// The paid check sees it too, so the dialog says why, and a changed load is asked again.
+		const w = makeWorld();
+		await w.boot();
+		const a = newId();
+		const b = newId();
+		await w.armed(a);
+		await w.send(a, "§9 G-M3: load A");
+		w.ready(b);
+		w.docs.set(rules.loadKey(b), { rateCon: a });
+		await w.btn.runPaidChecks();
+		const r = await w.state(b);
+		eq([r.body.show, r.body.code], [false, "SAME_DOCUMENTS"], "§9 FAILS ON THE OLD CODE (G-M3): the paid check saves it, and the dialog gives its line");
 	}
 	{
 		// A stuck run past its limit, then a second press: the abandoned attempt can't send.
@@ -2356,8 +2573,56 @@ async function main() {
 		const id = newId();
 		w.ready(id);
 		setup(w, id);
-		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 1 }, `§12 ${label}: temporary: nothing saved`);
-		eq([sendButton.readCheck(w.db, rules.loadKey(id)), (await w.state(id)).body.code], [null, "PAID_CHECK_PENDING"], `§12 ${label}: and asked again next run`);
+		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 1 }, `§12 ${label}: temporary`);
+		eq((await w.state(id)).body.code, "PAID_CHECK_PENDING", `§12 ${label}: no button, and no final answer`);
+		const paid = w.calls.prepare;
+		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 0 }, `§12 FAILS ON THE OLD CODE (G-M4), ${label}: the answer is saved: not asked again next run`);
+		eq(w.calls.prepare, paid, `§12 FAILS ON THE OLD CODE (G-M4), ${label}: no second paid read that day`);
+		w.now += DAY - MIN;
+		w.searched(id);
+		await w.btn.runPaidChecks();
+		eq(w.calls.prepare, paid, `§12 FAILS ON THE OLD CODE (G-M4), ${label}: nor a minute short of a day`);
+		w.now += MIN;
+		w.prepareHook = null;
+		eq(await w.btn.runPaidChecks(), { checked: 1, temporary: 0 }, `§12 ${label}: a day on, it's asked again`);
+		eq([w.calls.prepare, (await w.state(id)).body], [paid + 1, { show: true }], `§12 ${label}: ...and the read that works shows the button`);
+	}
+	{
+		// G-M4's own case: reads that stay temporary don't starve the load behind them, and a day of
+		// runs at one every 10 minutes pays for one read a load.
+		const w = makeWorld();
+		await w.boot();
+		const newest = newId();
+		const middle = newId();
+		const oldest = newId();
+		const day = (d) => ({ "Status Update Date": `10/${d}/2026 9:00:00`, "Completion Date": `10/${d}/2026 9:00:00` });
+		w.ready(newest, day(19));
+		w.ready(middle, day(15));
+		w.ready(oldest, day(10));
+		const prepared = [];
+		w.prepareHook = async (loadId) => {
+			prepared.push(loadId);
+			return loadId === oldest ? null : { ok: false, http: 500, code: "" };
+		};
+		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 2 }, "§12 G-M4: the first run's two reads stay temporary");
+		eq(await w.btn.runPaidChecks(), { checked: 1, temporary: 0 }, "§12 FAILS ON THE OLD CODE (G-M4): the next run reaches the load behind them");
+		eq(prepared, [newest, middle, oldest], "§12 FAILS ON THE OLD CODE (G-M4): each read once");
+		eq((await w.state(oldest)).body, { show: true }, "§12 FAILS ON THE OLD CODE (G-M4): and the load behind them gets its button");
+		for (let i = 0; i < 140; i++) {
+			w.now += 10 * MIN;
+			await w.btn.runPaidChecks();
+		}
+		eq(w.calls.prepare, 3, "§12 FAILS ON THE OLD CODE (G-M4): a day of runs: no paid read past the first of each");
+		w.now += 4 * HOUR;
+		w.searched(newest);
+		w.searched(middle);
+		eq(await w.btn.runPaidChecks(), { checked: 0, temporary: 2 }, "§12 G-M4: a day on, each is asked once more");
+		eq(w.calls.prepare, 5, "§12 G-M4: ...two more reads");
+		const fp = "made-up-fingerprint";
+		sendButton.saveCheck(w.db, "made-up-key", { code: sendButton.PAID_TEMPORARY, fingerprint: fp, nowIso: iso(w.now) });
+		const saved = sendButton.readCheck(w.db, "made-up-key");
+		eq(sendButton.paidCheckDue(saved, "another-fingerprint", w.now), true, "§12 G-M4: a changed load is asked again at once");
+		eq(sendButton.paidRefusal(saved, fp, w.now), "PAID_CHECK_PENDING", "§12 G-M4: a saved temporary answer reads as not checked yet, never as its own code or a pass");
 	}
 	{
 		const w = makeWorld();
@@ -2513,7 +2778,7 @@ async function throughTheBlocks() {
 		const z = zlib.deflateSync(Buffer.from(contentStream, "latin1"));
 		return Buffer.concat([Buffer.from(`%PDF-1.4\n1 0 obj<</Length ${z.length}/Filter/FlateDecode>>stream\n`, "latin1"), z, Buffer.from("\nendstream endobj\n%%EOF", "latin1")]);
 	};
-	const rateCon = () => pdfWith(`BT (Billing Information: Order #: 1001001 PO #: PO-77 Move #: 5501) Tj (Total Rate: $1,500.00) Tj (Email the signed POD and all billing documents to ${BILLING}) Tj ET`);
+	const rateCon = (po = "PO-77") => pdfWith(`BT (Billing Information: Order #: 1001001 PO #: ${po} Move #: 5501) Tj (Total Rate: $1,500.00) Tj (Email the signed POD and all billing documents to ${BILLING}) Tj ET`);
 
 	const PROVIDED = ["db", "brokerInvoice", "console", "process", "require", "getSheets", "getDrive", "SPREADSHEET_ID", "GEMINI_API_KEY",
 		"runRateConGemini", "renderHtmlToPdf", "DATA_DIR", "path", "fs", "RATECON_DRIVE_FOLDER_ID", "__dirname"];
@@ -2656,12 +2921,12 @@ async function throughTheBlocks() {
 			const row = { "Load ID": id, "Job Status": "Delivered", Email: CHR_EMAIL, "Broker Contact Name": "Made-up Agent", Driver: DRIVER_NAME, "Driver Phone": DRIVER_PHONE, "Trailer Number": "", "Completion Date": DELIVERED_ON, "  Payment  ": "1500", ...over };
 			w.sheet.push(COLS.map((h) => row[h]));
 		};
-		w.deliver = (id) => {
+		w.deliver = (id, { bytes = rateCon(), podOf = id } = {}) => {
 			w.setLoad(id);
 			const name = `${id}_POD.pdf`;
-			fs.writeFileSync(path.join(w.dir, "uploads", name), `%PDF-1.4 made-up POD for ${id}`);
+			fs.writeFileSync(path.join(w.dir, "uploads", name), `%PDF-1.4 made-up POD for ${podOf}`);
 			db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, uploaded_at) VALUES (?, 'Made-up Driver Name', 'POD', ?, ?, datetime('now', '-5 minutes'))").run(id, name, `/uploads/${name}`);
-			w.drive.push({ id: `made-up-file-${w.drive.length + 1}`, name: `Subject: Rate Confirmation ${id}.pdf`, bytes: rateCon() });
+			w.drive.push({ id: `made-up-file-${w.drive.length + 1}`, name: `Subject: Rate Confirmation ${id}.pdf`, bytes });
 			evidenceLib.saveAnswer(db, rules.loadKey(id), { verdict: "clean", mailboxes: { drafts: box(), sent: box(), trash: box() } }, { nowIso: new Date().toISOString(), paymentsAt: new Date().toISOString() });
 		};
 		w.st = (id) => {
@@ -2761,6 +3026,22 @@ async function throughTheBlocks() {
 			eq(w.audits("auto_invoice_sent").length, 1, "§14 the same audit trail: auto_invoice_sent");
 			eq(w.audits("invoice_draft_created").length, 1, "§14 ...and invoice_draft_created");
 			eq([w.audits("auto_invoice_button_back").length, w.calls.mint], [0, 1], "§14 nothing went back, one number");
+			eq(w.calls.look, 3, "§14 FAILS ON THE OLD CODE (G-M1): the preview's look and the run's two");
+
+			// G-M3 through the engine as shipped: the real context's POD and rate-con bytes against the send's real digest.
+			const sameRateCon = "900000704";
+			w.deliver(sameRateCon);
+			const samePod = "900000705";
+			w.deliver(samePod, { bytes: rateCon("PO-78"), podOf: id });
+			const neither = "900000706";
+			w.deliver(neither, { bytes: rateCon("PO-79") });
+			await w.button.runPaidChecks();
+			await w.button.runPaidChecks();
+			const codes = [];
+			for (const load of [sameRateCon, samePod, neither]) codes.push((await w.call("GET", URL_OF(load), ADMIN)).json.code || "show");
+			eq(codes, ["SAME_DOCUMENTS", "SAME_DOCUMENTS", "show"], "§14 FAILS ON THE OLD CODE (G-M3): the same rate con, or the same POD, as a sent load: no button. Neither: it shows");
+			eq((await w.call("POST", URL_OF(neither, "/preview"), ADMIN, {})).status, 200, "§14 ...and that one previews");
+			eq(w.calls.smtp, 1, "§14 ...and the one SMTP call stands");
 			const status = await w.call("GET", "/api/auto-invoice/status", ADMIN);
 			eq(status.json.button, { on: true, from: "2000-01-01" }, "§14 the status route reads it back");
 		}
