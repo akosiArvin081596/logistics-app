@@ -34,8 +34,8 @@
 //   N   a driver with no week (404 NOT_ELIGIBLE): the same, and no word about why
 //   U   the check fails (503): no tab, no bar; a phone coming back to the app asks again, and both show
 // And a made-up Super Admin on /driver at 1280x800:
-//   A   the tab and the office board, no bar, no My week, no "You", no hours-of-service line, his
-//       own-week route never read
+//   A   the tab and the office board as they were, its hours-of-service line included, no bar, no My
+//       week, no "You", his own-week route never read
 //
 // Like time-off-chr-draft.mjs this boots no server.js, opens no database, reads no settings file
 // or key and signs nobody in. It serves the checkout's built client/dist from its own static
@@ -86,6 +86,7 @@ if (process.env.SHOT_DIR && !path.isAbsolute(process.env.SHOT_DIR)) die('SHOT_DI
 }
 
 // ---------------------------------------------------------------- the words the screen must say
+const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
 const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 const REQUIREMENT_LINE = '7.5 is the target. 6 is required.'
 const PRIVATE_LINE = 'No other driver can see this.'
@@ -714,7 +715,7 @@ async function goneRun(browser, size) {
 // ---------------------------------------------------------------- P: the other weeks
 async function weekShapesRun(browser, size) {
   const t = size.tag
-  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, required: 6, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
+  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, required: null, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, low)
     try {
@@ -729,13 +730,14 @@ async function weekShapesRun(browser, size) {
       await appears(page, testid('perf-new-week'), 8000)
       const left = await text(page, testid('perf-left'))
       const note = await text(page, testid('perf-new-week'))
+      const required = await text(page, testid('perf-requirement'))
       const closes = await page.locator(testid('perf-closes')).count()
       const [chipBg, chipInk] = await colours(page, testid('perf-pace'))
       const red = [barBg, barInk, fillBg, chipBg, chipInk].filter(looksRed)
       record(`P-low-${t}`, 'A low week: no red, and no asking for more',
-        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; no closing line; no red on the bar or the chip`,
-        `bar "${barText}", pace "${barPace}", left "${left}", note "${note}", closes ${closes}, colours ${JSON.stringify([barBg, barInk, fillBg, chipBg, chipInk])}, red ${JSON.stringify(red)}`,
-        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && closes === 0 && red.length === 0,
+        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; "7.5 is the target." with no required figure, as the server sent none; no closing line; no red on the bar or the chip`,
+        `bar "${barText}", pace "${barPace}", left "${left}", note "${note}", required "${required}", closes ${closes}, colours ${JSON.stringify([barBg, barInk, fillBg, chipBg, chipInk])}, red ${JSON.stringify(red)}`,
+        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && required === '7.5 is the target.' && closes === 0 && red.length === 0,
         await shot(page, `P-low-${t}`))
     } finally {
       await ctx.close()
@@ -904,13 +906,13 @@ async function adminRun(browser, size) {
     const closes = await text(page, testid('perf-closes'))
     const myWeek = await page.locator(testid('perf-week')).count()
     const you = await page.locator(testid('perf-you')).count()
-    const hosLines = await page.locator(testid('perf-hos')).count()
-    const adminShot = await shot(page, `A-${t}`)
+    const hos = await text(page, testid('perf-hos'))
+    const adminShot =await shot(page, `A-${t}`)
     await choose(page, size, 'This month')
     const monthGot = opened ? await waitForRows(page, expectedRows(MONTH_ROWS)) : []
-    record(`A-${t}`, 'A Super Admin on /driver: the office board', `no bar; rows with no "You"; the four tiles; "${WEEK_CLOSES}"; This month its own rows; no My week; his own-week route never read; no hours-of-service line`,
-      `bars ${bars}, rows ${JSON.stringify(got)}, tiles ${JSON.stringify(titles)}, closes "${closes}", month ${JSON.stringify(monthGot)}, My week ${myWeek}, you ${you}, own reads ${state.calls.own}, hours-of-service lines ${hosLines}`,
-      opened && bars === 0 && sameList(got, want) && sameList(titles, TILES) && closes === WEEK_CLOSES && sameList(monthGot, expectedRows(MONTH_ROWS)) && myWeek === 0 && you === 0 && state.calls.own === 0 && hosLines === 0,
+    record(`A-${t}`, 'A Super Admin on /driver: the office board as it was', `no bar; rows with no "You"; the four tiles; "${WEEK_CLOSES}"; This month its own rows; no My week; his own-week route never read; the hours-of-service line`,
+      `bars ${bars}, rows ${JSON.stringify(got)}, tiles ${JSON.stringify(titles)}, closes "${closes}", month ${JSON.stringify(monthGot)}, My week ${myWeek}, you ${you}, own reads ${state.calls.own}, hos ${hos === HOS_LINE}`,
+      opened && bars === 0 && sameList(got, want) && sameList(titles, TILES) && closes === WEEK_CLOSES && sameList(monthGot, expectedRows(MONTH_ROWS)) && myWeek === 0 && you === 0 && state.calls.own === 0 && hos === HOS_LINE,
       adminShot)
   } finally {
     await ctx.close()

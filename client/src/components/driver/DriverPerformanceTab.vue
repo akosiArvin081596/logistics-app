@@ -43,7 +43,7 @@
       <p class="perf-note" data-testid="perf-drive-hours">{{ DRIVE_HOURS_LINE }}</p>
       <p class="perf-note" data-testid="perf-target">{{ TARGET_LINE }}</p>
       <p v-if="week.lowered" class="perf-note" data-testid="perf-lowered">{{ week.lowered }}</p>
-      <p v-if="week.requirement" class="perf-note" data-testid="perf-requirement">{{ week.requirement }}</p>
+      <p class="perf-note" data-testid="perf-requirement">{{ week.requirement }}</p>
       <p class="perf-note" data-testid="perf-private">{{ PRIVATE_LINE }}</p>
     </template>
   </div>
