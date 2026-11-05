@@ -1075,6 +1075,17 @@ const jsonOf = (text) => {
 		await onJob.tick();
 		eq([on.state(ID), on.calls.prepare.length], [NEEDS_EMAIL, 0], "§9 the sweep, the flag set to true: ignored");
 
+		// The sweep's own recovery stays as it was: the start-up look belongs to the driver's trigger.
+		const swept = makeWorld({ env: OFF });
+		const sweptJob = swept.job();
+		await sweptJob.tick();
+		swept.ready(ID, { Email: AGENT, "Job Status": "Delivered" });
+		ledger.insertClaim(swept.db, { key: rules.loadKey(ID), loadId: ID, state: "working", nowIso: iso(swept.now) });
+		swept.db.prepare("UPDATE auto_invoice_claims SET lease_owner = 'old-process', lease_until = ? WHERE load_key = ?").run(iso(T0 - HOUR), rules.loadKey(ID));
+		swept.now += 5 * MIN;
+		await sweptJob.tick();
+		eq([swept.state(ID), swept.smtp.length, swept.calls.look.length, swept.calls.payments, swept.claim(ID).look_first], [["drafted", ""], 1, 0, 0, ""], "§9 the sweep's recovery of a claim caught building: no look asked for, one send, as before");
+
 		// Shadow mode records what it always did.
 		const shadow = makeWorld({ env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } });
 		const sj = shadow.job();
