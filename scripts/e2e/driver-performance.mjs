@@ -2,7 +2,7 @@
 // LogisX — a driver's own week: the bar on the Loads list and the Performance tab, on made-up data only.
 //
 // As a made-up Driver ("Casey Example"), at 390x844 and 1280x800:
-//   B   the bar on the Loads list, above the load list: "This week: 5.5 of 7.5 loads", On Track, the
+//   B   the bar on the Loads list, above the load list: "This week: 3.5 of 7.5 loads", On Track, the
 //       server's percent as its fill, "Hours of service come first."; 44 px or more; no sideways
 //       scroll; the board never read
 //   E   the same bar at the top of a load's own page, the same answer, with its status and POD
@@ -97,7 +97,7 @@ const NOT_PAY_DAYS_LINE = 'Counts loads, not pay. Your invoice pays days.'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 const NEW_WEEK_LINE = 'A new week starts Saturday.'
-const RULE_LINE = 'A delivered load counts 1, its pickup 0.5.'
+const RULE_LINE = 'A pickup counts 0.5 and a drop-off counts 0.5, so each load is 1.'
 const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
 const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
@@ -132,23 +132,23 @@ const MONTH_END = new Date(Date.UTC(Number(TODAY.slice(0, 4)), Number(TODAY.slic
 // His own week, in the shape the route sends.
 const counted = (day, credits) => ({ day, credits })
 const THIS_LOADS = [
-  { loadId: 'QA-9001', pickup: counted('Sat', 0.5), delivery: counted('Mon', 1) },
-  { loadId: 'QA-9002', pickup: counted('Mon', 0.5), delivery: counted('Tue', 1) },
-  { loadId: 'QA-9003', pickup: { note: 'last-week' }, delivery: counted('Sun', 1) },
-  { loadId: 'QA-9004', pickup: { note: 'not-counted' }, delivery: counted('Tue', 1) },
+  { loadId: 'QA-9001', pickup: counted('Sat', 0.5), delivery: counted('Mon', 0.5) },
+  { loadId: 'QA-9002', pickup: counted('Mon', 0.5), delivery: counted('Tue', 0.5) },
+  { loadId: 'QA-9003', pickup: { note: 'last-week' }, delivery: counted('Sun', 0.5) },
+  { loadId: 'QA-9004', pickup: { note: 'not-counted' }, delivery: counted('Tue', 0.5) },
   { loadId: 'QA-9005', pickup: counted('Tue', 0.5), delivery: null },
 ]
 const THIS_LINES = [
-  ['Load QA-9001', 'Picked up Sat 0.5 · Delivered Mon 1'],
-  ['Load QA-9002', 'Picked up Mon 0.5 · Delivered Tue 1'],
-  ['Load QA-9003', 'Delivered Sun 1 · Pickup counted last week'],
-  ['Load QA-9004', 'Delivered Tue 1 · Pickup not counted this week'],
+  ['Load QA-9001', 'Picked up Sat 0.5 · Delivered Mon 0.5'],
+  ['Load QA-9002', 'Picked up Mon 0.5 · Delivered Tue 0.5'],
+  ['Load QA-9003', 'Delivered Sun 0.5 · Pickup counted last week'],
+  ['Load QA-9004', 'Delivered Tue 0.5 · Pickup not counted this week'],
   ['Load QA-9005', 'Picked up Tue 0.5'],
 ]
-const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 1) }]
-const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 1']]
-const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 5.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 2, percent: 73, pace: 'on-track', newWeekNote: false, targetLowered: false, loads: THIS_LOADS }
-const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: null, percent: 100, pace: null, newWeekNote: false, targetLowered: false, loads: LAST_LOADS }
+const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 0.5) }]
+const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 0.5']]
+const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, targetLowered: false, loads: THIS_LOADS }
+const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, targetLowered: false, loads: LAST_LOADS }
 
 // What the server must never send. If it did, none of it may show.
 const DECOY_NAME = 'Decoy Peerdriver'
@@ -160,7 +160,7 @@ function ownBody(state) {
   const dress = (week) => ({ ...week, credits: { ...week.credits, ...decoy }, loads: week.loads.map((l) => ({ ...l, ...decoy })), ...decoy })
   return {
     view: 'no-hours-data',
-    creditWeights: { delivery: 1, pickup: 0.5 },
+    creditWeights: { delivery: 0.5, pickup: 0.5 },
     invoicePaysDays: state.invoicePaysDays,
     weeks: [dress({ ...THIS_WEEK, ...state.thisWeek }), dress(LAST_WEEK)],
     ...decoy,
@@ -415,9 +415,9 @@ async function fullRun(browser, size) {
     const barFits = await noSideScroll(page)
     const loadsBody = squeeze(await page.locator('body').innerText())
     record(`B-${t}`, 'The bar on the Loads list',
-      `"This week: 5.5 of 7.5 loads"; "On Track"; fill 73%; "${HOS_SHORT_LINE}"; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
+      `"This week: 3.5 of 7.5 loads"; "On Track"; fill 46%; "${HOS_SHORT_LINE}"; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
       `text "${barText}", pace "${barPace}", fill ${fill}, hos "${barHos}", height ${JSON.stringify(barHeight)}, above ${above}, fits ${barFits}, board reads ${state.calls.week + state.calls.month}, banned ${JSON.stringify(banned(loadsBody))}`,
-      shown && barText === 'This week: 5.5 of 7.5 loads' && barPace === 'On Track' && fill === '73%' && barHos === HOS_SHORT_LINE && tall(barHeight) && above && barFits
+      shown && barText === 'This week: 3.5 of 7.5 loads' && barPace === 'On Track' && fill === '46%' && barHos === HOS_SHORT_LINE && tall(barHeight) && above && barFits
         && state.calls.week + state.calls.month === 0 && banned(loadsBody).length === 0,
       await shot(page, `B-${t}`))
     if (!shown) return
@@ -461,9 +461,9 @@ async function fullRun(browser, size) {
     const fits = await noSideScroll(page)
     const hidden = banned(panel).concat(['Casey Example', 'You'].filter((w) => new RegExp(`\\b${w}\\b`).test(panel)))
     record(`W-${t}`, 'This week: only his own figures',
-      `"5.5 of 7.5 loads"; On Track; fill 73%; "2 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; "${NOT_PAY_DAYS_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
+      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; "${NOT_PAY_DAYS_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${GUIDE_LINE}"; "${PRIVATE_LINE}"; the full hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
       `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", not-pay "${notPay}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, guide "${guide}", private "${isPrivate}", hos ${hos === HOS_LINE} visible ${hosSeen}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
-      count === '5.5 of 7.5 loads' && pace === 'On Track' && weekWide === '73%' && left === '2 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
+      count === '3.5 of 7.5 loads' && pace === 'On Track' && weekWide === '46%' && left === '4 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
         && rule === RULE_LINE && notPay === NOT_PAY_DAYS_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && guide === GUIDE_LINE && isPrivate === PRIVATE_LINE
         && hos === HOS_LINE && hosSeen && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
       await shot(page, `W-${t}`))
@@ -531,7 +531,7 @@ async function loadPageRun(browser, size) {
     record(`E-${t}`, 'The same bar at the top of a load\'s own page',
       `the bar on the list, then one bar on the load's page with the same figure and label and the short line; above the page, above its status buttons; "Update Status" and "Documents" still on the page; no side scroll; tapping it opens the tab`,
       `list "${listBar}", load page ${onLoad}, bar "${loadBar}" "${loadPace}" "${loadHos}", bars ${bars}, order ${JSON.stringify(order)}, sections ${JSON.stringify(sections)}, fits ${fits}, opens ${opens}`,
-      onList && onLoad && barAfter && loadBar === listBar && loadBar === 'This week: 5.5 of 7.5 loads' && loadPace === 'On Track' && loadHos === HOS_SHORT_LINE && bars === 1
+      onList && onLoad && barAfter && loadBar === listBar && loadBar === 'This week: 3.5 of 7.5 loads' && loadPace === 'On Track' && loadHos === HOS_SHORT_LINE && bars === 1
         && above && named('Update Status') && named('Documents') && fits && opens,
       loadShot)
   } finally {
@@ -630,7 +630,7 @@ async function decoyRun(browser, size) {
     record(`D-${t}`, 'Answers that wrongly carry more show none of it',
       `the bar and rows as if the extras weren't there; none of ${JSON.stringify(DECOY_TEXT)} anywhere on the page`,
       `bar "${barText}", rows ${JSON.stringify(got)}, found ${JSON.stringify(found)}`,
-      opened && barText === 'This week: 5.5 of 7.5 loads' && sameList(got, THIS_LINES) && found.length === 0,
+      opened && barText === 'This week: 3.5 of 7.5 loads' && sameList(got, THIS_LINES) && found.length === 0,
       await shot(page, `D-${t}`))
   } finally {
     await ctx.close()
@@ -684,9 +684,9 @@ async function failedBarRun(browser, size) {
     await comeBackToApp(page)
     const back = await appears(page, testid('perf-bar'), 8000)
     record(`H-${t}`, 'A read that fails hides the bar, and no old number stays',
-      `the bar first; after a 503 no bar and no "5.5 of" on the page; the tab stays; the next good read brings the bar back`,
-      `first ${first}, hidden ${hidden}, number on the page ${body.includes('5.5 of')}, labels ${JSON.stringify(labels)}, back ${back}`,
-      first && hidden && !body.includes('5.5 of') && sameList(labels, ALL_TABS) && back, hiddenShot)
+      `the bar first; after a 503 no bar and no "3.5 of" on the page; the tab stays; the next good read brings the bar back`,
+      `first ${first}, hidden ${hidden}, number on the page ${body.includes('3.5 of')}, labels ${JSON.stringify(labels)}, back ${back}`,
+      first && hidden && !body.includes('3.5 of') && sameList(labels, ALL_TABS) && back, hiddenShot)
   } finally {
     await ctx.close()
   }
@@ -724,7 +724,7 @@ async function goneRun(browser, size) {
 // ---------------------------------------------------------------- P: the other weeks
 async function weekShapesRun(browser, size) {
   const t = size.tag
-  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, deliveries: 1, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
+  const low = freshState({ thisWeek: { credits: { value: 1.5, target: 7.5, deliveries: 2, pickups: 1 }, left: 6, percent: 20, pace: 'needs-focus', newWeekNote: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, low)
     try {
@@ -751,7 +751,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: 0, percent: 100, pace: 'ahead' } })
+  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: 0, percent: 100, pace: 'ahead' } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, met)
     try {
@@ -806,7 +806,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const dayOff = freshState({ thisWeek: { credits: { value: 3, target: 6, deliveries: 2, pickups: 2 }, left: 3, percent: 50, pace: 'on-track', targetLowered: true } })
+  const dayOff = freshState({ thisWeek: { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, left: 3, percent: 50, pace: 'on-track', targetLowered: true } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, dayOff)
     try {

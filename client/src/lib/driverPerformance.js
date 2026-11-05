@@ -134,7 +134,7 @@ export function ownWeekView(answer, periodId) {
     left: leftWords,
     closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
     newWeek: newWeek ? NEW_WEEK_LINE : '',
-    rule: `A delivered load counts ${weights.delivery}, its pickup ${weights.pickup}.`,
+    rule: `A pickup counts ${weights.pickup} and a drop-off counts ${weights.delivery}, so each load is 1.`,
     notPay: answer.invoicePaysDays === true ? NOT_PAY_DAYS_LINE : NOT_PAY_LINE,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
     title: current ? 'What counted this week' : 'What counted last week',

@@ -23,9 +23,9 @@
  *     Q-A2 who's in, Q-A3 view), at the plan's defaults; the rules are pure
  * §2  periods: "week" is this week and last week (Sat-Fri, getWeekRange),
  *     "month" the calendar month; no future day counts
- * §3  load credits: a delivery 1.0, its pickup 0.5; an ELD truck's pickup
- *     needs a geofence or ELD departure, a tap counts only without a reporting
- *     ELD (14-day lookback)
+ * §3  load credits: a pickup 0.5 and a delivery 0.5, so a load is 1; an ELD
+ *     truck's pickup needs a geofence or ELD departure, a tap counts only
+ *     without a reporting ELD (14-day lookback)
  * §4  the REI: each half capped, unrounded qualifying, rounded down, never
  *     100.0 unless met, null without hours
  * §5  credited hours: 11 h a day at most; no data is null, never 0
@@ -78,6 +78,8 @@
  * §25 the words the server decides: whether his invoice pays days, read as the
  *     money math reads his pay type; what became of a pickup, true whichever way
  *     it was made, an older tap on a truck with no ELD included
+ * §26 the count's weights: which of the office's figures they move, and that no
+ *     pay, invoice, ledger or payout path reads them
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -371,10 +373,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const p = need();
 		const src = fs.readFileSync(path.join(ROOT, "lib", "driver-performance.js"), "utf8");
 		const one = (re) => (src.match(re) || []).length;
-		eq(p.CREDIT_WEIGHTS, { delivery: 1, pickup: 0.5 }, "Q-A1: a delivery earns 1.0, its pickup 0.5");
+		eq(p.CREDIT_WEIGHTS, { delivery: 0.5, pickup: 0.5 }, "Q-A1: a pickup earns 0.5 and a delivery 0.5");
 		eq(p.WHO_IS_IN, "company-day-rate", "Q-A2: company drivers on a day rate");
 		eq(p.BOARD_VIEW, "full", "Q-A3: the full list by unit");
-		ok(one(/^const CREDIT_WEIGHTS = Object\.freeze\(\{ delivery: 1\.0, pickup: 0\.5 \}\);$/gm) === 1, "Q-A1 is one line, declared once");
+		ok(one(/^const CREDIT_WEIGHTS = Object\.freeze\(\{ delivery: 0\.5, pickup: 0\.5 \}\);$/gm) === 1, "Q-A1 is one line, declared once");
 		ok(one(/^const WHO_IS_IN = "company-day-rate";$/gm) === 1 && one(/\bWHO_IS_IN =/g) === 1, "Q-A2 is one line, declared once");
 		ok(one(/^const BOARD_VIEW = "full";$/gm) === 1 && one(/\bBOARD_VIEW =/g) === 1, "Q-A3 is one line, declared once");
 		const routes = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
@@ -403,8 +405,12 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 	// ── §3 ──────────────────────────────────────────────────────────────────
 	await section("3 load credits", () => {
 		const p = need();
-		eq(p.loadCredits(5, 5), 7.5, "5 delivered and 5 picked up is the 7.5 target");
-		eq(p.loadCredits(3, 1), 3.5, "3 deliveries and 1 pickup earn 3.5");
+		eq(p.loadCredits(1, 1), 1, "one load, picked up and delivered, is 1");
+		eq([p.loadCredits(1, 0), p.loadCredits(0, 1)], [0.5, 0.5], "a delivery alone is 0.5, and so is a pickup alone");
+		eq(p.loadCredits(1, 2), p.DAILY_CREDITS_GUIDE, "a pickup, a drop-off and the next pickup are the day's 1.5");
+		eq(p.loadCredits(8, 7), p.CREDIT_TARGET, "8 delivered and 7 picked up is the 7.5 target");
+		eq(p.loadCredits(5, 5), 5, "5 loads picked up and delivered are 5, not the target");
+		eq(p.loadCredits(3, 1), 2, "3 deliveries and 1 pickup earn 2");
 		eq(p.pickupEvidence({ geofenceMs: 1000, eldDepartMs: 2000, tapMs: 500, tapSource: "driver", truckHasEld: true }), { ms: 1000, source: "geofence" },
 			"the geofence departure wins over the ELD replay and any tap");
 		eq(p.pickupEvidence({ eldDepartMs: 2000, tapMs: 500, tapSource: "driver", truckHasEld: true }), { ms: 2000, source: "eld" }, "without a geofence row, the ELD replay");
@@ -830,7 +836,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const a = weeks.ada;
 		eq(sortedKeys(a), ["creditWeights", "invoicePaysDays", "view", "weeks"], "the answer's keys");
 		eq(a.view, "no-hours-data", "every truck gets the \"no hours data\" view");
-		eq(a.creditWeights, { delivery: 1, pickup: 0.5 }, "the weights the credits use");
+		eq(a.creditWeights, { delivery: 0.5, pickup: 0.5 }, "the weights the credits use");
 		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "pace", "percent", "start", "targetLowered"];
 		eq(a.weeks.map((w) => sortedKeys(w)), [WEEK_KEYS, WEEK_KEYS], "each week's keys");
 		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "target", "value"], ["deliveries", "pickups", "target", "value"]], "each week's credit keys");
@@ -840,10 +846,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			ok(!/out of reach/i.test(JSON.stringify(body)), `${who}: no "out of reach" text`);
 		}
 		eq(a.weeks.map((w) => [w.id, w.credits.deliveries, w.credits.pickups, w.credits.value, w.credits.target]),
-			[["this-week", 3, 3, 4.5, 7.5], ["last-week", 2, 1, 2.5, 7.5]],
+			[["this-week", 3, 3, 3, 7.5], ["last-week", 2, 1, 1.5, 7.5]],
 			"Ada (ELD truck): geofence and ELD departures count, her early tap and her ELD truck's tap don't; Friday 11:30 PM ET is last week");
-		eq(weeks.ben.weeks[0].credits, { value: 3, target: 7.5, deliveries: 2, pickups: 2 }, "Ben (no ELD): his tap and dispatch's tap count");
-		eq(weeks.cal.weeks[0].credits, { value: 1.5, target: 7.5, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts");
+		eq(weeks.ben.weeks[0].credits, { value: 2, target: 7.5, deliveries: 2, pickups: 2 }, "Ben (no ELD): his tap and dispatch's tap count");
+		eq(weeks.cal.weeks[0].credits, { value: 1, target: 7.5, deliveries: 1, pickups: 1 }, "Cal (ELD silent 20 days): his tap counts");
 		eq(weeks.dee.weeks.map((w) => w.credits.deliveries), [1, 1], "Dee's deliveries, this week and last");
 		eq(weeks.hal.weeks.map((w) => w.credits.deliveries), [2, 0], "Hal's own week shows even with no truck last week");
 
@@ -852,10 +858,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			const w = weeks[who].weeks[0];
 			return [w.credits.value, w.left, w.percent, w.pace, w.newWeekNote];
 		};
-		eq(shown("ada"), [4.5, 3, 60, "ahead", false], "Ada: 4.5 of 7.5, 3 left, 60%, Ahead of Pace");
-		eq(shown("ben"), [3, 4.5, 40, "on-track", false], "Ben: 3 of 7.5, 4.5 left, 40%, On Track");
-		eq(shown("cal"), [1.5, 6, 20, "needs-focus", true], "Cal: 1.5 of 7.5, 6 left (more than 3 days hold), 20%, Needs Focus");
-		eq(shown("dee"), [1, 6.5, 13, "needs-focus", true], "Dee: 13.33% rounds down to 13");
+		eq(shown("ada"), [3, 4.5, 40, "on-track", false], "Ada: 3 of 7.5, 4.5 left, 40%, On Track");
+		eq(shown("ben"), [2, 5.5, 26, "needs-focus", true], "Ben: 2 of 7.5, 5.5 left (more than 3 days hold), 26%, Needs Focus");
+		eq(shown("cal"), [1, 6.5, 13, "needs-focus", true], "Cal: 1 of 7.5, 6.5 left, 13%, Needs Focus");
+		eq(shown("dee"), [0.5, 7, 6, "needs-focus", true], "Dee: 0.5 of 7.5, and 6.67% rounds down to 6");
 		for (const [who, body] of Object.entries(weeks)) {
 			const last = body.weeks[1];
 			eq([last.left, last.pace, last.newWeekNote], [null, null, false], `${who}: last week is its final figure, with nothing left and no label`);
@@ -864,13 +870,13 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		// What counted, in the order it counted: he can add it up himself.
 		eq(a.weeks[0].loads, [
 			{ loadId: "DP-1010", pickup: { day: "Sat", credits: 0.5 }, delivery: null },
-			{ loadId: "DP-1001", pickup: { day: "Sun", credits: 0.5 }, delivery: { day: "Mon", credits: 1 } },
-			{ loadId: "DP-1002", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 1 } },
-			{ loadId: "DP-1004", pickup: { note: "not-counted" }, delivery: { day: "Mon", credits: 1 } },
+			{ loadId: "DP-1001", pickup: { day: "Sun", credits: 0.5 }, delivery: { day: "Mon", credits: 0.5 } },
+			{ loadId: "DP-1002", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 0.5 } },
+			{ loadId: "DP-1004", pickup: { note: "not-counted" }, delivery: { day: "Mon", credits: 0.5 } },
 		], "Ada's this week: each row shows both credits, or what became of the pickup");
 		eq(a.weeks[1].loads, [
-			{ loadId: "DP-1008", pickup: { note: "not-counted" }, delivery: { day: "Thu", credits: 1 } },
-			{ loadId: "DP-1009", pickup: { note: "not-counted" }, delivery: { day: "Fri", credits: 1 } },
+			{ loadId: "DP-1008", pickup: { note: "not-counted" }, delivery: { day: "Thu", credits: 0.5 } },
+			{ loadId: "DP-1009", pickup: { note: "not-counted" }, delivery: { day: "Fri", credits: 0.5 } },
 			{ loadId: "DP-1011", pickup: { day: "Fri", credits: 0.5 }, delivery: null },
 		], "Ada's last week: the same list");
 		// A delivery whose pickup counted in another week says so, and the list still adds up.
@@ -882,10 +888,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			addPickup.run("dp-8012", "2026-10-20 15:00:00");
 			const ben = (await notes.get("/api/driver/me/performance", USERS.ben)).json;
 			const rowOf = (w, id) => w.loads.find((l) => l.loadId === id);
-			eq(rowOf(ben.weeks[0], "DP-8010"), { loadId: "DP-8010", pickup: { note: "last-week" }, delivery: { day: "Tue", credits: 1 } }, "its pickup counted last week");
-			eq(rowOf(ben.weeks[0], "DP-8011"), { loadId: "DP-8011", pickup: { note: "another-week" }, delivery: { day: "Tue", credits: 1 } }, "its pickup counted before last week");
+			eq(rowOf(ben.weeks[0], "DP-8010"), { loadId: "DP-8010", pickup: { note: "last-week" }, delivery: { day: "Tue", credits: 0.5 } }, "its pickup counted last week");
+			eq(rowOf(ben.weeks[0], "DP-8011"), { loadId: "DP-8011", pickup: { note: "another-week" }, delivery: { day: "Tue", credits: 0.5 } }, "its pickup counted before last week");
 			eq(rowOf(ben.weeks[1], "DP-8010"), { loadId: "DP-8010", pickup: { day: "Thu", credits: 0.5 }, delivery: null }, "and last week shows that pickup as its own row");
-			eq(rowOf(ben.weeks[1], "DP-8012"), { loadId: "DP-8012", pickup: { note: "another-week" }, delivery: { day: "Tue", credits: 1 } }, "last week's own delivery says the same of an older pickup");
+			eq(rowOf(ben.weeks[1], "DP-8012"), { loadId: "DP-8012", pickup: { note: "another-week" }, delivery: { day: "Tue", credits: 0.5 } }, "last week's own delivery says the same of an older pickup");
 		} finally {
 			await notes.close();
 		}
@@ -898,7 +904,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			}
 		}
 
-		// The count stays A1's: the weekly invoice's own, over the raw sheet.
+		// Only the weight changed: deliveries stay the weekly invoice's own, over the raw sheet.
 		const f = on.fns;
 		const raw = f.parseSheet({ values: sheetValues() });
 		const keys = f.loadKeySet(f.getDeletedLoadIds());
@@ -1020,7 +1026,8 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.LOADS_PACE, { creditsPerDay: 1.5, aheadBy: 1.5, targetFloor: 4.5, hideLabelAtDaysOff: 3 }, "the reading, in one constant");
 		// Today through Friday, at 1.5 a day: what he'd have by this morning to finish on 7.5.
 		const WEEK = { start: "2026-11-07", end: "2026-11-13" };
-		const paceOn = (today, credits, offDays = [], openLoad = true) => p.personalWeek({ id: "this-week", ...WEEK, today, deliveries: credits, pickups: 0, loads: [], offDays, openLoad }).pace;
+		// The table is in credits, so the deliveries that earn each figure come from the weight.
+		const paceOn = (today, credits, offDays = [], openLoad = true) => p.personalWeek({ id: "this-week", ...WEEK, today, deliveries: credits / p.CREDIT_WEIGHTS.delivery, pickups: 0, loads: [], offDays, openLoad }).pace;
 		const SAT = "2026-11-07"; const SUN = "2026-11-08"; const MON = "2026-11-09"; const TUE = "2026-11-10"; const WED = "2026-11-11"; const THU = "2026-11-12"; const FRI = "2026-11-13";
 		for (const [today, name, credits, want] of [
 			[SAT, "Sat", 0, "on-track"], [SAT, "Sat", 1, "on-track"], [SAT, "Sat", 1.5, "ahead"],
@@ -1033,12 +1040,15 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			[MON, "Mon", 7.5, "ahead"], [FRI, "Fri", 12, "ahead"],
 		]) eq(paceOn(today, credits), want, `${name} at ${credits}: ${want}`);
 		eq([SAT, SUN, MON].map((today) => paceOn(today, 0)), ["on-track", "on-track", "on-track"], "a rest weekend never reads Needs Focus");
+		const stops = (deliveries, pickups) => p.personalWeek({ id: "this-week", ...WEEK, today: WED, deliveries, pickups, loads: [], offDays: [], openLoad: true }).pace;
+		eq([stops(3, 2), stops(3, 3), stops(4, 4), stops(5, 4)], ["needs-focus", "on-track", "on-track", "ahead"], "the same table against real stops, Wed: 2.5 is below 3; 3 and 4 are on pace; 4.5 is ahead");
 		eq(p.pace({ credits: 3, hours: null, completedWorkedDays: 2, todayHours: 0, calendarDaysLeft: 3, approvedDaysOff: 0 }), null, "the combined score's pace still waits on hours, left as it was");
 	});
 
 	await section("20 his target and his week", () => {
 		const p = need();
 		eq([0, 1, 2, 3, 4, 7].map((off) => p.personalTarget(off)), [7.5, 6, 4.5, 4.5, 4.5, 4.5], "7.5, less 1.5 per approved day off, not below 4.5");
+		eq(p.personalTarget(0) - p.personalTarget(1), p.loadCredits(1, 2), "a day off takes off a day's stops, a pickup, a drop-off and a pickup: not one load");
 		const WEEK = { id: "this-week", start: "2026-11-07", end: "2026-11-13" };
 		const week = (over) => p.personalWeek({ ...WEEK, today: "2026-11-11", deliveries: 0, pickups: 0, loads: [], offDays: [], openLoad: true, ...over });
 		eq(p.offDaysInWeek([{ from_date: "2026-11-05", to_date: "2026-11-08" }, { from_date: "2026-11-08", to_date: "2026-11-08" }, { from_date: "2026-11-13", to_date: "2026-11-20" }], "2026-11-07", "2026-11-13"),
@@ -1047,47 +1057,55 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.offDaysInWeek(null, "2026-11-07", "2026-11-13"), [], "none at all");
 
 		// The bar's percent and what's left.
-		eq([3, 7, 9, 12].map((n) => week({ deliveries: n }).percent), [40, 93, 100, 100], "percent rounded down, capped at 100");
-		eq(week({ deliveries: 4, pickups: 7 }).percent, 100, "4 + 3.5 is the whole target");
-		eq(week({ deliveries: 1 }).percent, 13, "13.33 rounds down");
-		eq(week({ deliveries: 2, pickups: 3 }).percent, 46, "46.67 rounds down too, never up");
-		eq([3, 7, 7.5, 9].map((n) => week({ deliveries: n }).left), [4.5, 0.5, 0, 0], "what's left never goes below 0");
-		eq(week({ deliveries: 2, pickups: 3 }).credits, { value: 3.5, target: 7.5, deliveries: 2, pickups: 3 }, "A1's own count: a delivery 1, a pickup 0.5");
+		eq([6, 14, 18, 24].map((n) => week({ deliveries: n }).percent), [40, 93, 100, 100], "percent rounded down, capped at 100");
+		eq(week({ deliveries: 8, pickups: 7 }).percent, 100, "4 + 3.5 is the whole target");
+		eq(week({ deliveries: 2 }).percent, 13, "13.33 rounds down");
+		eq(week({ deliveries: 4, pickups: 3 }).percent, 46, "46.67 rounds down too, never up");
+		eq([6, 14, 15, 18].map((n) => week({ deliveries: n }).left), [4.5, 0.5, 0, 0], "what's left never goes below 0");
+		eq(week({ deliveries: 2, pickups: 3 }).credits, { value: 2.5, target: 7.5, deliveries: 2, pickups: 3 }, "the count: a pickup 0.5, a delivery 0.5");
+		eq(week({ deliveries: 1, pickups: 1 }).credits.value, 1, "one load, picked up and delivered, is 1");
+		eq(week({ deliveries: 5, pickups: 5 }).percent, 66, "5 loads are 66% of 7.5, not all of it");
+		// "N loads left" stays true at a half: the figure and what's left make the target, in whole stops.
+		for (const [delivered, picked] of [[0, 0], [1, 0], [0, 1], [1, 1], [3, 2], [5, 5], [7, 7], [8, 6]]) {
+			const w = week({ deliveries: delivered, pickups: picked });
+			eq(w.credits.value + w.left, 7.5, `${delivered} delivered, ${picked} picked up: the figure and what's left make the target`);
+			ok(Number.isInteger(w.left / 0.5), `${delivered} delivered, ${picked} picked up: ${w.left} left is a whole number of stops`);
+		}
 
 		// Approved days off: a lower target, and pacing over the days he can work.
-		const oneOff = week({ offDays: ["2026-11-12"], deliveries: 3 });
+		const oneOff = week({ offDays: ["2026-11-12"], deliveries: 6 });
 		eq([oneOff.credits.target, oneOff.left, oneOff.percent, oneOff.pace], [6, 3, 50, "on-track"], "Thu off, today Wed: 6, and 2 working days left, so 3 is on pace");
-		eq(week({ offDays: ["2026-11-07"], deliveries: 2 }).pace, "on-track", "Sat off, today Wed: 3 working days left of 6, so 1.5 by now, and 2 is on pace");
-		eq(week({ offDays: ["2026-11-07"], deliveries: 1 }).pace, "needs-focus", "and 1 is below it");
+		eq(week({ offDays: ["2026-11-07"], deliveries: 4 }).pace, "on-track", "Sat off, today Wed: 3 working days left of 6, so 1.5 by now, and 2 is on pace");
+		eq(week({ offDays: ["2026-11-07"], deliveries: 2 }).pace, "needs-focus", "and 1 is below it");
 		eq(week({ offDays: ["2026-11-07", "2026-11-08"], deliveries: 0 }).pace, "on-track", "two days off: 4.5, and 3 days hold it from nothing");
-		eq(week({ offDays: ["2026-11-07"], deliveries: 6 }).pace, "ahead", "the lower target met is Ahead of Pace");
-		const threeOff = week({ offDays: ["2026-11-07", "2026-11-08", "2026-11-09"], deliveries: 1 });
+		eq(week({ offDays: ["2026-11-07"], deliveries: 12 }).pace, "ahead", "the lower target met is Ahead of Pace");
+		const threeOff = week({ offDays: ["2026-11-07", "2026-11-08", "2026-11-09"], deliveries: 2 });
 		eq([threeOff.credits.target, threeOff.pace], [4.5, null], "three or more days off: not below 4.5, and no label");
 
 		// No label on a week he can't act on.
 		eq(week({ openLoad: false }).pace, null, "0 credits and no open load: no label, since loads depend on dispatch");
 		eq(week({ openLoad: true }).pace, "needs-focus", "0 credits on Wednesday with a load in his name reads Needs Focus");
 		eq(week({ openLoad: false, pickups: 1 }).pace, "needs-focus", "any credit, and the label shows");
-		const offThrough = week({ today: "2026-11-12", offDays: ["2026-11-12", "2026-11-13"], deliveries: 3 });
+		const offThrough = week({ today: "2026-11-12", offDays: ["2026-11-12", "2026-11-13"], deliveries: 6 });
 		eq([offThrough.credits.target, offThrough.pace], [4.5, null], "off through Friday, below his target: no day left to ask for, so no label");
-		eq(week({ today: "2026-11-12", offDays: ["2026-11-12", "2026-11-13"], deliveries: 5 }).pace, "ahead", "off through Friday with the target met keeps the good news");
+		eq(week({ today: "2026-11-12", offDays: ["2026-11-12", "2026-11-13"], deliveries: 10 }).pace, "ahead", "off through Friday with the target met keeps the good news");
 
 		// "A new week starts Saturday", once more is left than the days hold.
-		eq(week({ deliveries: 3 }).newWeekNote, false, "4.5 left on Wednesday fits 3 days at 1.5");
-		eq(week({ deliveries: 2.5 }).newWeekNote, true, "5 left doesn't");
-		eq(week({ today: "2026-11-13", deliveries: 6 }).newWeekNote, false, "1.5 left on Friday fits");
-		eq(week({ today: "2026-11-13", deliveries: 5.5 }).newWeekNote, true, "2 left on Friday doesn't");
-		eq(week({ deliveries: 9 }).newWeekNote, false, "nothing left, no note");
+		eq(week({ deliveries: 6 }).newWeekNote, false, "4.5 left on Wednesday fits 3 days at 1.5");
+		eq(week({ deliveries: 5 }).newWeekNote, true, "5 left doesn't");
+		eq(week({ today: "2026-11-13", deliveries: 12 }).newWeekNote, false, "1.5 left on Friday fits");
+		eq(week({ today: "2026-11-13", deliveries: 11 }).newWeekNote, true, "2 left on Friday doesn't");
+		eq(week({ deliveries: 18 }).newWeekNote, false, "nothing left, no note");
 
 		// Last week is its final figure.
-		const closed = week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", deliveries: 4 });
+		const closed = week({ id: "last-week", start: "2026-10-31", end: "2026-11-06", deliveries: 8 });
 		eq([closed.credits.value, closed.percent, closed.left, closed.pace, closed.newWeekNote], [4, 53, null, null, false], "a closed week: the figure and percent, nothing left, no label");
 
 		// One counted load.
-		eq(p.countedLoad({ loadId: " DP-1 ", pickupDay: "2026-11-09", deliveryDay: "2026-11-10" }), { loadId: "DP-1", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 1 } }, "both credits, each with its day");
+		eq(p.countedLoad({ loadId: " DP-1 ", pickupDay: "2026-11-09", deliveryDay: "2026-11-10" }), { loadId: "DP-1", pickup: { day: "Mon", credits: 0.5 }, delivery: { day: "Tue", credits: 0.5 } }, "both credits, each with its day");
 		eq(p.countedLoad({ loadId: "DP-2", pickupDay: "2026-11-07", deliveryDay: "" }), { loadId: "DP-2", pickup: { day: "Sat", credits: 0.5 }, delivery: null }, "a pickup alone");
-		eq(p.countedLoad({ loadId: "DP-3", pickupDay: "", deliveryDay: "2026-11-13", pickupNote: "last-week" }), { loadId: "DP-3", pickup: { note: "last-week" }, delivery: { day: "Fri", credits: 1 } }, "a delivery whose pickup counted last week");
-		eq(p.countedLoad({ loadId: null, pickupDay: "", deliveryDay: "2026-11-08" }), { loadId: "", pickup: { note: "not-counted" }, delivery: { day: "Sun", credits: 1 } }, "no Load ID in the cell, and no pickup that counted");
+		eq(p.countedLoad({ loadId: "DP-3", pickupDay: "", deliveryDay: "2026-11-13", pickupNote: "last-week" }), { loadId: "DP-3", pickup: { note: "last-week" }, delivery: { day: "Fri", credits: 0.5 } }, "a delivery whose pickup counted last week");
+		eq(p.countedLoad({ loadId: null, pickupDay: "", deliveryDay: "2026-11-08" }), { loadId: "", pickup: { note: "not-counted" }, delivery: { day: "Sun", credits: 0.5 } }, "no Load ID in the cell, and no pickup that counted");
 
 		// A lowered target is flagged, on the open week only: its one line says "this week".
 		eq(week({}).targetLowered, false, "no day off: not flagged");
@@ -1147,7 +1165,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		// A percentage driver gets the personal view: it counts loads and touches no pay.
 		const eli = await on.get("/api/driver/me/performance", USERS.eli);
 		eq(eli.status, 200, "a percentage driver on a truck: his own week");
-		eq(eli.json.weeks[0].credits, { value: 4, target: 7.5, deliveries: 4, pickups: 0 }, "and his count");
+		eq(eli.json.weeks[0].credits, { value: 2, target: 7.5, deliveries: 4, pickups: 0 }, "and his count");
 		// Held a countable truck, or has a counted load, this week or last.
 		for (const who of ["ada", "dee", "hal", "jo", "kim"]) eq((await on.get("/api/driver/me/performance", USERS[who])).status, 200, `${who}: yes`);
 		eq((await on.get("/api/driver/me/performance", USERS.jo)).json.weeks[0].credits.deliveries, 1, "a test unit's driver with a counted load: yes");
@@ -1244,7 +1262,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			addOff(offFlag, 2, "Ben Marsh", "2026-11-12", "2026-11-12");
 			const week = async (world, who) => (await world.get("/api/driver/me/performance", USERS[who])).json.weeks;
 			const ben = await week(w, "ben");
-			eq([ben[0].credits.target, ben[0].left, ben[0].percent, ben[0].pace], [6, 3, 50, "on-track"], "Ben's approved Thursday off: 3 of 6, and 2 working days left, so On Track");
+			eq([ben[0].credits.target, ben[0].left, ben[0].percent, ben[0].pace], [6, 4, 33, "needs-focus"], "Ben's approved Thursday off: 2 of 6, and 2 working days left, so 3 by now is on pace and 2 is below it");
 			eq(ben[1].credits.target, 7.5, "last week's target is its own");
 			eq([ben[0].targetLowered, ben[1].targetLowered], [true, false], "the server flags his lowered target, this week only");
 			eq((await week(w, "cal"))[0].credits.target, 7.5, "a request still waiting changes nothing");
@@ -1297,16 +1315,41 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 
 			// What became of a pickup: true whichever way it was made.
 			const rowOf = (body, i, id) => body.weeks[i].loads.find((l) => l.loadId === id);
-			eq(rowOf(ben, 0, "DP-8013"), { loadId: "DP-8013", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "an older tap on a truck with no ELD: not counted this week");
-			eq(rowOf(ada, 0, "DP-8014"), { loadId: "DP-8014", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "an older tap on a truck with an ELD: the same");
-			eq(rowOf(ben, 1, "DP-8015"), { loadId: "DP-8015", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "and on last week's list");
-			eq(rowOf(ben, 0, "DP-8016"), { loadId: "DP-8016", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 1 } }, "a dispatcher's older tap: the same");
+			eq(rowOf(ben, 0, "DP-8013"), { loadId: "DP-8013", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 0.5 } }, "an older tap on a truck with no ELD: not counted this week");
+			eq(rowOf(ada, 0, "DP-8014"), { loadId: "DP-8014", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 0.5 } }, "an older tap on a truck with an ELD: the same");
+			eq(rowOf(ben, 1, "DP-8015"), { loadId: "DP-8015", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 0.5 } }, "and on last week's list");
+			eq(rowOf(ben, 0, "DP-8016"), { loadId: "DP-8016", pickup: { note: "not-counted" }, delivery: { day: "Tue", credits: 0.5 } }, "a dispatcher's older tap: the same");
 			const all = JSON.stringify([eli, ada, ben]);
 			ok(!/not-recorded/.test(all), "no answer says a pickup wasn't recorded: the server can't know that of an older tap");
-			eq(ben.weeks[0].credits.pickups, ben.weeks[0].loads.filter((l) => l.pickup.credits).length, "and the older taps add no credit: the count stays A1's");
+			eq(ben.weeks[0].credits.pickups, ben.weeks[0].loads.filter((l) => l.pickup.credits).length, "and the older taps add no credit");
 		} finally {
 			await w.close();
 		}
+	});
+
+	await section("26 the count's weights: the office's figures, and no path that pays", async () => {
+		if (!on) throw new Error("no world");
+		// The office reads the same weights: its credit figure moves, and its counts and ranks don't.
+		on.handle.clearCache();
+		const report = (await on.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers.filter((x) => x.listed);
+		eq(report.map((x) => [x.name, x.loads, x.pickups.total, x.credits]), [
+			["Ada Quill", 3, 3, 3], ["Ben Marsh", 2, 2, 2], ["Hal Briar", 2, 0, 1], ["Cal Reyes", 1, 1, 1], ["Dee Stone", 1, 0, 0.5],
+		], "the report's credits are the new count; its loads and pickups are the counts they were");
+		const board = (await on.get("/api/driver/performance/leaderboard?period=week", USERS.admin2)).json.boards[0].categories[0].rows;
+		eq(board.map((r) => [r.rank, r.value, r.display]), [[1, 3, "3 loads"], [2, 2, "2 loads"], [2, 2, "2 loads"], [4, 1, "1 load"], [4, 1, "1 load"]], "the board's Most loads is delivered loads: no weight reaches its figure or rank");
+
+		// Display only: whatever pays must not be able to read the weights or a week built from them.
+		lifted();
+		const NAMES = /\b(CREDIT_WEIGHTS|creditWeights|loadCredits|countedLoad|personalWeek)\b/;
+		const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => /\.(js|cjs|mjs)$/.test(f));
+		const inLib = (re) => libFiles.filter((f) => re.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))).sort();
+		eq(inLib(/require\(\s*["'][^"']*driver-performance(\.js)?["']\s*\)/), ["driver-performance-routes.js"], "only this feature's routes require the rules module");
+		eq(inLib(NAMES), ["driver-performance-routes.js", "driver-performance.js"], "and nothing else in lib/ names the weights or the count");
+		eq(SRC.match(/require\(\s*["'][^"']*driver-performance[^"']*["']\s*\)/g), ['require("./lib/driver-performance-routes")'], "server.js requires the routes and nothing else of this feature");
+		ok(!NAMES.test(SRC), "and names neither the weights nor the count");
+		eq((SRC.match(/\bdriverPerformance\b/g) || []).length, 1, "its mount is declared and never read, so a figure leaves the routes only as their answers");
+		const { STATEMENT_TEMPLATE_FILES } = require(path.join(ROOT, "lib", "statement-template-hash.js"));
+		eq(STATEMENT_TEMPLATE_FILES.filter((f) => /driver-performance/.test(f)), [], "no stored statement's template holds this feature");
 	});
 
 	if (on) await on.close();

@@ -20,6 +20,7 @@
 //   §12 DriverWeekBar.vue: its words, a 44 px tap, no read, no motion, no red
 //   §13 DriverPerformanceBoard.vue: the office board, its reads and rows as they were
 //   §14 the real server rules through the real views, on made-up loads
+//   §15 no pay, invoice or payout screen reads the count: only these three files import the lib
 //
 // No DOM, no server, no build; scripts/e2e/driver-performance.mjs covers the page.
 //   node scripts/test-driver-performance-client.mjs      # exits 1 on any failure
@@ -221,42 +222,44 @@ eq('§5 each period\'s answer', v.PERIODS.map((p) => v.periodKind(p.id)), ['week
 console.log('§6 ownWeekView()')
 const ownWeekView = fn('ownWeekView')
 const week = (id, over) => ({
-  id, start: START, end: END, credits: { value: 4.5, target: 7.5, deliveries: 3, pickups: 3 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false,
+  id, start: START, end: END, credits: { value: 4.5, target: 7.5, deliveries: 5, pickups: 4 }, left: 3, percent: 60, pace: 'on-track', newWeekNote: false,
   loads: [
-    { loadId: 'DP-1', pickup: { day: 'Mon', credits: 0.5 }, delivery: { day: 'Tue', credits: 1 } },
+    { loadId: 'DP-1', pickup: { day: 'Mon', credits: 0.5 }, delivery: { day: 'Tue', credits: 0.5 } },
     { loadId: 'DP-2', pickup: { day: 'Thu', credits: 0.5 }, delivery: null },
-    { loadId: 'DP-3', pickup: { note: 'last-week' }, delivery: { day: 'Sat', credits: 1 } },
-    { loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 1 } },
-    { loadId: 'DP-5', pickup: { note: 'another-week' }, delivery: { day: 'Fri', credits: 1 } },
+    { loadId: 'DP-3', pickup: { note: 'last-week' }, delivery: { day: 'Sat', credits: 0.5 } },
+    { loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 0.5 } },
+    { loadId: 'DP-5', pickup: { note: 'another-week' }, delivery: { day: 'Fri', credits: 0.5 } },
     { loadId: '', pickup: { day: 'Fri', credits: 0.5 }, delivery: null },
   ],
   targetLowered: false,
   ...over,
 })
-const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 1, pickup: 0.5 }, invoicePaysDays: true, weeks })
-const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: null, percent: 100, pace: null, loads: [] }))
+const COUNT_RULE = 'A pickup counts 0.5 and a drop-off counts 0.5, so each load is 1.'
+const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 0.5, pickup: 0.5 }, invoicePaysDays: true, weeks })
+const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, loads: [] }))
 const thisWeek = ownWeekView(both, 'this-week') || {}
 eq('§6 this week, in words', { ...thisWeek, loads: undefined }, {
   range: 'Oct 31 – Nov 6', count: '4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%',
-  left: '3 loads left this week.', closes: 'Week closes Fri 11:59 PM ET', newWeek: '', rule: 'A delivered load counts 1, its pickup 0.5.',
+  left: '3 loads left this week.', closes: 'Week closes Fri 11:59 PM ET', newWeek: '', rule: COUNT_RULE,
   notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted this week', empty: v.NO_LOADS_LINE,
 })
 eq('§6 each row shows both credits, or what became of the pickup', thisWeek.loads, [
-  { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 1' },
+  { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 0.5' },
   { title: 'Load DP-2', line: 'Picked up Thu 0.5' },
-  { title: 'Load DP-3', line: 'Delivered Sat 1 · Pickup counted last week' },
-  { title: 'Load DP-4', line: 'Delivered Thu 1 · Pickup not counted this week' },
-  { title: 'Load DP-5', line: 'Delivered Fri 1 · Pickup counted in another week' },
+  { title: 'Load DP-3', line: 'Delivered Sat 0.5 · Pickup counted last week' },
+  { title: 'Load DP-4', line: 'Delivered Thu 0.5 · Pickup not counted this week' },
+  { title: 'Load DP-5', line: 'Delivered Fri 0.5 · Pickup counted in another week' },
   { title: 'Load', line: 'Picked up Fri 0.5' },
 ])
-eq('§6 on last week\'s list the same note says last week', ownWeekView(answerOf(week('last-week', { left: null, pace: null, loads: [{ loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 1 } }] })), 'last-week')?.loads, [
-  { title: 'Load DP-4', line: 'Delivered Thu 1 · Pickup not counted last week' },
+eq('§6 on last week\'s list the same note says last week', ownWeekView(answerOf(week('last-week', { left: null, pace: null, loads: [{ loadId: 'DP-4', pickup: { note: 'not-counted' }, delivery: { day: 'Thu', credits: 0.5 } }] })), 'last-week')?.loads, [
+  { title: 'Load DP-4', line: 'Delivered Thu 0.5 · Pickup not counted last week' },
 ])
 eq('§6 no screen says a pickup wasn\'t recorded', [/not recorded/i.test(libSrc), /not recorded/i.test(card)], [false, false])
+eq('§6 no screen keeps the old count\'s words', [libSrc, card, bar].filter((src) => /delivered load counts|delivery counts 1|its pickup|about 5 loads/i.test(src)).length, 0)
 const lastWeek = ownWeekView(both, 'last-week') || {}
 eq('§6 last week: the final figure and its list, with no label and nothing left', { ...lastWeek, loads: undefined }, {
   range: 'Oct 24 – Oct 30', count: '7.5 of 7.5 loads', pace: '', paceId: '', width: '100%',
-  left: '', closes: '', newWeek: '', rule: 'A delivered load counts 1, its pickup 0.5.',
+  left: '', closes: '', newWeek: '', rule: COUNT_RULE,
   notPay: 'Counts loads, not pay. Your invoice pays days.', lowered: '', title: 'What counted last week', empty: v.NO_LOADS_LAST_WEEK,
 })
 // The server decides which sentence is true of his invoice. Anything but a plain yes reads the
@@ -270,29 +273,30 @@ eq('§6 on last week too', ownWeekView({ ...answerOf(week('last-week', { left: n
 const loweredFor = (targetLowered) => ownWeekView(answerOf(week('this-week', { targetLowered })), 'this-week')?.lowered
 eq('§6 a target the server flags as lowered says why', loweredFor(true), 'Your target is lower this week for your approved time off.')
 eq('§6 no flag, no line', [false, 'true', 1, null, undefined].map(loweredFor), ['', '', '', '', ''])
-eq('§6 the app never works it out from the figures', ownWeekView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 2, pickups: 2 }, targetLowered: false })), 'this-week')?.lowered, '')
+eq('§6 the app never works it out from the figures', ownWeekView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, targetLowered: false })), 'this-week')?.lowered, '')
 eq('§6 its words say this week, so last week never shows it', ownWeekView(answerOf(week('last-week', { left: null, pace: null, targetLowered: true })), 'last-week')?.lowered, '')
 eq('§6 last week carries no label, even if an answer holds one', ownWeekView(answerOf(week('last-week', { pace: 'ahead', left: null })), 'last-week')?.pace, '')
 const wordsFor = (over) => ownWeekView(answerOf(week('this-week', over)), 'this-week')
 eq('§6 the three labels, as the server chose', ['ahead', 'on-track', 'needs-focus'].map((pace) => wordsFor({ pace })?.pace), ['Ahead of Pace', 'On Track', 'Needs Focus'])
 eq('§6 no label from the server, none here', [wordsFor({ pace: null })?.pace, wordsFor({ pace: null })?.paceId], ['', ''])
 eq('§6 a label it doesn\'t know never shows', ['out-of-reach', 'decoy-pace', 7, {}, undefined].map((pace) => wordsFor({ pace })?.pace), ['', '', '', '', ''])
-eq('§6 the app never works the label out', [wordsFor({ pace: 'needs-focus', credits: { value: 7.5, target: 7.5, deliveries: 5, pickups: 5 }, left: 0, percent: 100 })?.pace], ['Needs Focus'])
+eq('§6 the app never works the label out', [wordsFor({ pace: 'needs-focus', credits: { value: 7.5, target: 7.5, deliveries: 8, pickups: 7 }, left: 0, percent: 100 })?.pace], ['Needs Focus'])
 eq('§6 what\'s left: plural', wordsFor({ left: 2 })?.left, '2 loads left this week.')
 eq('§6 what\'s left: one load', wordsFor({ left: 1 })?.left, '1 load left this week.')
 eq('§6 what\'s left: half a load', wordsFor({ left: 0.5 })?.left, '0.5 loads left this week.')
+eq('§6 what\'s left: a figure ending in a half', wordsFor({ left: 2.5 })?.left, '2.5 loads left this week.')
 eq('§6 at the target: says so, and no closing line', [wordsFor({ left: 0 })?.left, wordsFor({ left: 0 })?.closes], ['7.5 reached this week.', ''])
-eq('§6 a lower target reads as its own figure', wordsFor({ credits: { value: 6, target: 6, deliveries: 4, pickups: 4 }, left: 0 })?.left, '6 reached this week.')
+eq('§6 a lower target reads as its own figure', wordsFor({ credits: { value: 6, target: 6, deliveries: 6, pickups: 6 }, left: 0 })?.left, '6 reached this week.')
 const lowWeek = wordsFor({ left: 6, newWeekNote: true, pace: 'needs-focus' })
 eq('§6 more left than the days hold: a new week starts, and no closing line asking for more', [lowWeek?.left, lowWeek?.newWeek, lowWeek?.closes], ['6 loads left this week.', 'A new week starts Saturday.', ''])
 eq('§6 only a true note shows it', [true, 'true', 1, undefined].map((newWeekNote) => wordsFor({ newWeekNote })?.newWeek), [v.NEW_WEEK_LINE, '', '', ''])
 eq('§6 the count is the server\'s figure: the app never adds it up', wordsFor({ credits: { value: 9, target: 7.5, deliveries: 1, pickups: 1 } })?.count, '9 of 7.5 loads')
-eq('§6 the width is the server\'s percent: the app never works it out', wordsFor({ credits: { value: 1, target: 7.5, deliveries: 1, pickups: 0 }, percent: 44 })?.width, '44%')
+eq('§6 the width is the server\'s percent: the app never works it out', wordsFor({ credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 }, percent: 44 })?.width, '44%')
 const decoyAnswer = {
-  ...DECOYS, creditWeights: { delivery: 1, pickup: 0.5 },
+  ...DECOYS, creditWeights: { delivery: 0.5, pickup: 0.5 },
   weeks: [{ ...week('this-week', {
-    credits: { value: 4.5, target: 7.5, deliveries: 3, pickups: 3, ...DECOYS },
-    loads: [{ ...DECOYS, loadId: 'DP-1', pickup: { ...DECOYS, day: 'Mon', credits: 0.5 }, delivery: { ...DECOYS, day: 'Tue', credits: 1 } }],
+    credits: { value: 4.5, target: 7.5, deliveries: 5, pickups: 4, ...DECOYS },
+    loads: [{ ...DECOYS, loadId: 'DP-1', pickup: { ...DECOYS, day: 'Mon', credits: 0.5 }, delivery: { ...DECOYS, day: 'Tue', credits: 0.5 } }],
   }), ...DECOYS, gap: 'decoy-gap', expected: 41 }],
 }
 eq('§6 exactly these fields', Object.keys(ownWeekView(decoyAnswer, 'this-week') || {}), ['range', 'count', 'pace', 'paceId', 'width', 'left', 'closes', 'newWeek', 'rule', 'notPay', 'lowered', 'title', 'empty', 'loads'])
@@ -310,8 +314,8 @@ const broken = {
   'a list that isn\'t one': { loads: 'DP-1' },
   'a row with no credit on its delivery': { loads: [{ loadId: 'DP-1', pickup: { note: 'not-recorded' }, delivery: { day: 'Mon' } }] },
   'a row with a bad pickup credit': { loads: [{ loadId: 'DP-1', pickup: { day: 'Mon', credits: '0.5' }, delivery: null }] },
-  'a row whose pickup note it doesn\'t know': { loads: [{ loadId: 'DP-1', pickup: { note: 'decoy-note' }, delivery: { day: 'Mon', credits: 1 } }] },
-  'the old note, which could be false': { loads: [{ loadId: 'DP-1', pickup: { note: 'not-recorded' }, delivery: { day: 'Mon', credits: 1 } }] },
+  'a row whose pickup note it doesn\'t know': { loads: [{ loadId: 'DP-1', pickup: { note: 'decoy-note' }, delivery: { day: 'Mon', credits: 0.5 } }] },
+  'the old note, which could be false': { loads: [{ loadId: 'DP-1', pickup: { note: 'not-recorded' }, delivery: { day: 'Mon', credits: 0.5 } }] },
   'a row with neither': { loads: [{ loadId: 'DP-1', pickup: null, delivery: null }] },
 }
 for (const [says, over] of Object.entries(broken)) eq(`§6 ${says}: no card, never a wrong number`, wordsFor(over), null)
@@ -322,8 +326,8 @@ console.log('§7 weekBarView() and weekFromAnswer()')
 const weekBarView = fn('weekBarView')
 eq('§7 the bar\'s words', weekBarView(both), { text: 'This week: 4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%', hos: 'Hours of service come first.' })
 eq('§7 no label, none on the bar', weekBarView(answerOf(week('this-week', { pace: null })))?.pace, '')
-eq('§7 always this week, whichever order they come in', weekBarView(answerOf(week('last-week', { credits: { value: 1, target: 7.5, deliveries: 1, pickups: 0 } }), week('this-week')))?.text, 'This week: 4.5 of 7.5 loads')
-eq('§7 a lower target reads as its own figure', weekBarView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 2, pickups: 2 }, percent: 50 })))?.text, 'This week: 3 of 6 loads')
+eq('§7 always this week, whichever order they come in', weekBarView(answerOf(week('last-week', { credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 } }), week('this-week')))?.text, 'This week: 4.5 of 7.5 loads')
+eq('§7 a lower target reads as its own figure', weekBarView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, percent: 50 })))?.text, 'This week: 3 of 6 loads')
 eq('§7 no decoy reaches the bar', showsDecoy(weekBarView(decoyAnswer)), [])
 eq('§7 exactly five fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width', 'hos'])
 for (const [says, over] of Object.entries(broken)) eq(`§7 ${says}: no bar, never a wrong number`, weekBarView(answerOf(week('this-week', over))), null)
@@ -517,18 +521,34 @@ if (typeof server.personalWeek === 'function') {
   const realAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [serverWeek] }
   const offWeek = server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries: 3, pickups: 0, offDays: ['2026-11-05'], openLoad: true, loads: [] })
   const offAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [offWeek] }
-  eq('§14 a real day off: his lower figure, and the line that says why', [ownWeekView(offAnswer, 'this-week')?.count, ownWeekView(offAnswer, 'this-week')?.lowered], ['3 of 6 loads', 'Your target is lower this week for your approved time off.'])
-  eq('§14 a real uncounted pickup, in true words', ownWeekView({ ...realAnswer, weeks: [{ ...serverWeek, loads: [server.countedLoad({ loadId: 'DP-5', pickupDay: '', deliveryDay: '2026-11-04' })] }] }, 'this-week')?.loads, [{ title: 'Load DP-5', line: 'Delivered Wed 1 · Pickup not counted this week' }])
-  eq('§14 the server\'s own week, in words', [ownWeekView(realAnswer, 'this-week')?.count, ownWeekView(realAnswer, 'this-week')?.left, ownWeekView(realAnswer, 'this-week')?.pace, ownWeekView(realAnswer, 'this-week')?.width], ['3.5 of 7.5 loads', '4 loads left this week.', 'On Track', '46%'])
+  eq('§14 a real day off: his lower figure, and the line that says why', [ownWeekView(offAnswer, 'this-week')?.count, ownWeekView(offAnswer, 'this-week')?.lowered], ['1.5 of 6 loads', 'Your target is lower this week for your approved time off.'])
+  eq('§14 a real uncounted pickup, in true words', ownWeekView({ ...realAnswer, weeks: [{ ...serverWeek, loads: [server.countedLoad({ loadId: 'DP-5', pickupDay: '', deliveryDay: '2026-11-04' })] }] }, 'this-week')?.loads, [{ title: 'Load DP-5', line: 'Delivered Wed 0.5 · Pickup not counted this week' }])
+  eq('§14 the server\'s own week, in words', [ownWeekView(realAnswer, 'this-week')?.count, ownWeekView(realAnswer, 'this-week')?.left, ownWeekView(realAnswer, 'this-week')?.pace, ownWeekView(realAnswer, 'this-week')?.width], ['2.5 of 7.5 loads', '5 loads left this week.', 'Needs Focus', '33%'])
   eq('§14 and its rows', ownWeekView(realAnswer, 'this-week')?.loads, [
-    { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 1' },
-    { title: 'Load DP-2', line: 'Delivered Wed 1 · Pickup counted last week' },
+    { title: 'Load DP-1', line: 'Picked up Mon 0.5 · Delivered Tue 0.5' },
+    { title: 'Load DP-2', line: 'Delivered Wed 0.5 · Pickup counted last week' },
     { title: 'Load DP-3', line: 'Picked up Wed 0.5' },
     { title: 'Load DP-4', line: 'Picked up Wed 0.5' },
   ])
-  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 3.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '46%', hos: 'Hours of service come first.' })
+  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%', hos: 'Hours of service come first.' })
+  // The line's "each load is 1" is fixed words, so the server's own sum has to stay what they say.
+  eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
+  eq('§14 and its "each load is 1" is the server\'s own sum', [server.CREDIT_WEIGHTS.pickup + server.CREDIT_WEIGHTS.delivery, server.loadCredits(1, 1)], [1, 1])
+  // "N loads left" reads true at every half the server can send, through the view's own words.
+  const realLeft = (deliveries, pickups) => ownWeekView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] }, 'this-week')?.left
+  eq('§14 what\'s left, half credits included', [realLeft(7, 7), realLeft(7, 6), realLeft(5, 5), realLeft(1, 0), realLeft(8, 7)],
+    ['0.5 loads left this week.', '1 load left this week.', '2.5 loads left this week.', '7 loads left this week.', '7.5 reached this week.'])
 } else {
   eq('§14 lib/driver-performance.js has personalWeek()', false, true)
 }
+
+// ── §15 what reads the count ─────────────────────────────────────────────────
+console.log('§15 no pay, invoice or payout screen reads the count')
+const CLIENT_SRC = path.join(ROOT, 'client', 'src')
+const clientFiles = fs.readdirSync(CLIENT_SRC, { recursive: true }).map(String).filter((f) => /\.(js|mjs|ts|vue)$/.test(f))
+const inClient = (re) => clientFiles.filter((f) => re.test(read(path.join(CLIENT_SRC, f)))).sort()
+eq('§15 only the driver\'s own screens import the lib', inClient(/from ['"][^'"]*lib\/driverPerformance(\.js)?['"]/), ['components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'views/DriverView.vue'])
+eq('§15 only the lib reads the server\'s weights', inClient(/\bcreditWeights\b/), ['lib/driverPerformance.js'])
+eq('§15 only the lib names his week\'s route', inClient(/api\/driver\/me\/performance/), ['lib/driverPerformance.js'])
 
 done()
