@@ -1172,6 +1172,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			["the read gives a longer number", { number: `${ID}02` }],
 			["the read gives letters on it", { number: `LD${ID}` }],
 			["the read's Order Number is another, its Load Number this one", { orderNumber: B }],
+			["the read's Order Number has a suffix, its Load Number doesn't", { orderNumber: `${ID}-2` }],
+			["the read's Order Number answers None, its Load Number has a suffix", { orderNumber: "None", number: `${ID}-2` }],
 		]) {
 			await heldAtNumber(label, rc);
 		}
@@ -1228,6 +1230,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			["the text prints another number beside it", ID, { note: `${ID} and ${B}` }],
 			["the number after a # in the text", ID, { note: `#${ID}` }],
 			["the read gives it after a #", ID, { number: `#${ID}` }],
+			["the read gives it after a # and a space", ID, { number: `# ${ID}` }],
+			["the read's Order Number answers None, its Load Number this number", ID, { orderNumber: "None" }],
 			["the read gives it with spaces around it", ID, { number: `  ${ID}  ` }],
 			["a load spelled with a # on the sheet", `#${ID}`, { number: ID, note: ID, driveFileName: `Load ${ID}.pdf` }],
 			["a rate-con row, its read and its text giving this number", ID, { source: "documents" }],
@@ -1284,6 +1288,32 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		eq(press.job.draftButtonCheck({ session: { user: { username: "made-up-admin" } }, body: {} }, ID), { ok: true }, "§12 a person's Draft Invoice on a held load isn't refused");
 		const manual = await press.w.engine.prepare({ loadId: ID, body: {}, dryRun: true, mode: "manual", ov: press.w.helpers.parseInvoiceOverrides({}) });
 		eq([manual.ok, manual.ctx && manual.ctx.invoiceTo.email, manual.ctx && manual.ctx.rcFields.orderNumber], [true, ADDRESS, B], "§12 ...and the engine in manual mode answers as it did, whatever the number");
+		eq(manual.ctx && manual.ctx.paidRead, null, "§12 ...and keeps no answer for the job: a press reads as it did");
+		const auto = await press.w.engine.prepare({ loadId: ID, body: {}, dryRun: false, mode: "auto" });
+		eq(auto.ctx && auto.ctx.paidRead && auto.ctx.paidRead["Load Number"], B, "§12 in mode auto the engine keeps the paid read's own answer");
+		// What the read's number is, as it gave it.
+		const asRead = (answer, cleaned) => (typeof rules.numberAsRead === "function" ? rules.numberAsRead(answer, cleaned) : "NO_SUCH_RULE");
+		for (const [label, answer, cleaned, want] of [
+			["the Load Number", { "Load Number": ID }, ID, ID],
+			["a suffix", { "Load Number": `${ID}-2` }, ID, `${ID}-2`],
+			["a second number", { "Load Number": `${ID} / ${B}` }, ID, `${ID} / ${B}`],
+			["the Order Number comes first", { "Order Number": `${ID}-2`, "Load Number": ID }, ID, `${ID}-2`],
+			["then the Order # field", { "Order #": `${ID}-3`, "Load Number": ID }, ID, `${ID}-3`],
+			["a not-found answer is passed over", { "Order Number": "None", "Load Number": `${ID}-2` }, ID, `${ID}-2`],
+			["a blank is passed over", { "Order Number": "  ", "Load Number": ID }, ID, ID],
+			["spaces come off", { "Load Number": `  ${ID}  ` }, ID, ID],
+			["a # comes off", { "Load Number": `#${ID}` }, ID, ID],
+			["a # and a space come off", { "Load Number": `# ${ID}` }, ID, ID],
+			["no paid read: the cleaned number, a billing block's", null, ID, ID],
+			["no number at all", { "Load Number": null }, "", ""],
+			["no number given", null, undefined, ""],
+			["an answer that names nothing the cleaned number came from", { "Load Number": B }, ID, ID],
+			["a thing that isn't an answer", "made-up", ID, ID],
+		]) {
+			eq(asRead(answer, cleaned), want, `§12 as read: ${label}`);
+		}
+		const invoiceSrc = fs.readFileSync(path.join(ROOT, "lib", "broker-invoice.js"), "utf8");
+		ok(invoiceSrc.includes('orderNumber: base.orderNumber || pick(cleanNumericRef, "Order Number", "Order #", "Load Number")'), "§12 the fields, in the order the read's own number takes them");
 
 		// What already went is recorded, whatever the read says now.
 		const lost = makeWorld();
