@@ -425,8 +425,7 @@ const jsonOf = (text) => {
 		for (const [label, make] of [
 			["3 of a person's rows by Gmail", (x) => x.proof(ADDRESS, 3)],
 			["3 rows by the n8n fallback", (x) => x.proof(ADDRESS, 3, "n8n")],
-			["old rows with no via", (x) => x.proof(ADDRESS, 3, "")],
-			["a person's rows, whichever way they left", (x) => { x.proof(ADDRESS, 1); x.proof(ADDRESS, 1, "n8n"); x.proof(ADDRESS, 1, ""); }],
+			["a person's rows, whichever way they left", (x) => { x.proof(ADDRESS, 2); x.proof(ADDRESS, 1, "n8n"); }],
 			["rows in another case", (x) => x.proof(ADDRESS.toUpperCase(), 3)],
 			["rows with spaces around the address", (x) => x.proof(` ${ADDRESS} `, 3)],
 		]) {
@@ -739,6 +738,8 @@ const jsonOf = (text) => {
 		await refusedAlone("clause 4, the rows on another address at the domain", { opts: { proofs: 0 }, setup: (w) => w.proof(AGENT, 5) });
 		await refusedAlone("clause 4, only the job's own drafts", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, rules.VIA_DRAFT) });
 		await refusedAlone("clause 4, only Triumph's rows", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, "triumph") });
+		await refusedAlone("clause 4 (N6): FAILS ON THE OLD CODE: only rows with no via: nothing says a person made them", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, "") });
+		await refusedAlone("clause 4, only rows with a via nothing writes", { opts: { proofs: 0 }, setup: (w) => w.proof(ADDRESS, 5, "made-up-script") });
 		await refusedAlone("clause 4, 2 loads and one of the job's own drafts", { opts: { proofs: 2 }, setup: (w) => w.proof(ADDRESS, 1, rules.VIA_DRAFT) });
 		// The plain path checks the domain only, so its sends can't vouch for an address: three
 		// misreads there would otherwise earn the proof for a fourth on this path.
