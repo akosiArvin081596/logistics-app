@@ -278,7 +278,7 @@ export function autoSendState(send, check = null) {
 // their file, whether by the check itself or ahead of it. { text }, or null for no line.
 export function recipientCheckState(check) {
   if (!check || typeof check !== 'object' || Array.isArray(check)) return null
-  const domain = typeof check.domain === 'string' ? check.domain : 'this broker'
+  const domain = typeof check.domain === 'string' ? check.domain : 'C.H. Robinson'
   const days = Number.isInteger(check.days) ? check.days : 7
   const held = check.held && typeof check.held === 'object' ? check.held : {}
   const count = Number.isInteger(held.count) && held.count > 0 ? held.count : 0
