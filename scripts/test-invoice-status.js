@@ -257,6 +257,11 @@ for (const a of everyAnswer) ok(Object.keys(a).every((k) => FIELDS.has(k)), `§7
 ok(!JSON.stringify(everyAnswer).includes("example-broker") && !JSON.stringify(everyAnswer).includes("Made-up Broker") && !JSON.stringify(everyAnswer).includes("Order #"), "§7 no address, name or subject passes through, even if handed in");
 eq(exportCells(read({ claim: SENT_CLAIM })), ["Sent by LogisX", INV, "2026-11-02"], "§7 the CSV's cells: status, number, date");
 eq(exportCells(read({ saved: inSent })), ["Invoiced by hand", "", "2026-11-02"], "§7 ...a number only if a row has one");
+eq(exportCells(read({ rows: [row()] })), ["Invoiced by hand (Sent Mail not checked yet)", INV, ""], "§7 a person's draft row the mailbox hasn't been checked for says so in the file: a draft made isn't a draft sent");
+eq(exportCells(read({ rows: [row()], saved: failed })), ["Invoiced by hand (Sent Mail not checked yet)", INV, ""], "§7 ...the search failed: the same");
+eq(exportCells(read({ rows: [row()], saved: clean, passOn: false })), ["Invoiced by hand (Sent Mail not checked yet)", INV, ""], "§7 ...the pass off: the same");
+eq(exportCells(read({ rows: [row()], saved: inSent })), ["Invoiced by hand", INV, "2026-11-02"], "§7 ...found in Sent Mail: plain, with its date");
+eq(exportCells(read({ rows: [row()], saved: filled })), ["Invoiced by hand", INV, ""], "§7 ...on the Payments Table: plain");
 eq(exportCells(read({ saved: null })), ["Couldn't check", "", ""], "§7 ...and blanks");
 eq(exportCells(null), ["Couldn't check", "", ""], "§7 no answer at all reads Couldn't check, never blank");
 

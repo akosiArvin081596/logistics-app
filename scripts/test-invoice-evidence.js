@@ -695,7 +695,7 @@ async function main() {
 		ok(!w.logs.join(" ").includes("example-broker"), "§9 ...or logged");
 
 		clearBoxes();
-		SENT.push({ subject: "Example Bison Order #7000001", date: DATE, to: "ap@bisontransport.com", names: ["Bison Invoice Order #7000001.pdf"], text: "No load number in here." });
+		SENT.push({ subject: "Example Bison Order #7000001", date: DATE, to: "ap@made-up-factoring.test", names: ["Bison Invoice Order #7000001.pdf"], text: "No load number in here." });
 		w = real({ loads: [load("900000802", { Email: "ops@bisontransport.com" })] });
 		w.addRow("900000802", { order_number: "7000001" });
 		await w.store.runOnce();
@@ -809,6 +809,12 @@ async function main() {
 			[...BASE[1], "Sent by LogisX", "11022026-1", "2026-11-02"],
 			[...BASE[2], "Couldn't check", "", ""],
 		]), "§10 the flag on: three columns after Payment");
+		const drafted = world({ env: {}, loads: [rows[1]] });
+		drafted.addRow("900000902", { invoice_id: "11012026-2" });
+		eq((await runExport(drafted.store, [rows[1]])).body, csvRows([
+			[...BASE[0], "Invoice Status", "Invoice #", "Invoice Date"],
+			[...BASE[2], "Invoiced by hand (Sent Mail not checked yet)", "11012026-2", ""],
+		]), "§10 a person's draft row with the pass off: the file says Sent Mail wasn't checked");
 		ok(!("_invoiceStatus" in rows[0]), "§10 the cached rows aren't touched");
 		ok(/requireRole\("Super Admin"\)/.test(EXPORT_HEAD), "§10 the route stays Super Admin only");
 	}
