@@ -1477,6 +1477,10 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 		read.rowFor("900000422", ADDRESS);
 		await rj.checkClaims("900000422");
 		eq(((await settingsOf(rj)).recipientCheck || { held: {} }).held.count, 2, "§13 a person drafts one by hand: it no longer counts");
+		// Only a load held now counts, whatever code a claim in another state still carries.
+		read.seed("900000426", { state: "queued", code: "RECIPIENT_NOT_KNOWN" });
+		eq(((await settingsOf(rj)).recipientCheck || { held: {} }).held.count, 2, "§13 a claim back in the line doesn't count as held");
+		read.db.prepare("DELETE FROM auto_invoice_claims WHERE load_key = '900000426'").run();
 		read.now += 7 * 24 * HOUR + MIN;
 		eq("recipientCheck" in (await settingsOf(rj)), false, "§13 more than 7 days on, nothing more held: the settings read as before");
 		const offRead = makeWorld({ env: OFF });
