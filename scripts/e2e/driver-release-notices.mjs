@@ -56,6 +56,7 @@
 // Output: PASS/FAIL lines, a final count, the screenshots and <work dir>/results-<OUT_TAG>.md.
 // Exit 0 only when every row PASSes.
 import { chromium } from 'playwright-core'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -927,48 +928,118 @@ async function itLeavesThenSignOut(seen, state, t) {
   record(`C6-${t}`, 'Once that tab has left, the next moment signs them out, so the hold was its record', 'one sign-out', `sign-outs ${state.calls.logout}${trouble}`, left)
 }
 
+const freezeTab = (session) => session.send('Page.setWebLifecycleState', { state: 'frozen' })
+const thawTab = (session) => session.send('Page.setWebLifecycleState', { state: 'active' })
+
+// One try at a real freeze in `ctx`. C5 and C6 are recorded only if the page shows it froze; if it didn't,
+// the answer is what it showed instead.
+async function freezeAttempt(ctx, size, state, stop) {
+  const seen = await momentBesideStillTab(ctx, size, state, stop, thawTab)
+  if (!(seen.froze && seen.ranNothing && seen.aVisible)) return stillLine(seen)
+  record(`C5-${size.tag}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; `freeze` fired there and its own timer stood still',
+    stillLine(seen), seen.held === 0 && seen.onApp)
+  await itLeavesThenSignOut(seen, state, size.tag)
+  return ''
+}
+
 // Playwright keeps every page it opens reading as visible (focus emulation), and a page that reads as
-// visible may not freeze. `noDefaults` turns that off, but only for a browser's default context over its
-// DevTools port, so this step has a browser of its own.
-async function freezeAttempt(size, state) {
-  const probe = net.createServer()
-  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, HOST, resolve) })
-  const port = probe.address().port
-  await new Promise((resolve) => probe.close(resolve))
-  const host = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED, args: [`--remote-debugging-port=${port}`] })
-  let connected = null
+// visible may not freeze. First try: ask for that off, over a session of this step's own.
+async function freezeInThisBrowser(browser, size) {
+  const state = freshState({ status: 'Delivered' })
+  const ctx = await newContext(browser, size, state, [])
   try {
-    connected = await chromium.connectOverCDP(`http://${HOST}:${port}`, { noDefaults: true, isLocal: true, timeout: 15000 })
-    const ctx = connected.contexts()[0]
-    await answerRequests(ctx, state, [])
-    const seen = await momentBesideStillTab(ctx, size, state,
-      (session) => session.send('Page.setWebLifecycleState', { state: 'frozen' }),
-      (session) => session.send('Page.setWebLifecycleState', { state: 'active' }))
-    if (seen.froze && seen.ranNothing && seen.aVisible) {
-      record(`C5-${size.tag}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; `freeze` fired there and its own timer stood still',
-        stillLine(seen), seen.held === 0 && seen.onApp)
-      await itLeavesThenSignOut(seen, state, size.tag)
-      return ''
-    }
-    return stillLine(seen)
+    return await freezeAttempt(ctx, size, state, async (session) => {
+      await session.send('Emulation.setFocusEmulationEnabled', { enabled: false })
+      await freezeTab(session)
+    })
   } finally {
-    await connected?.close().catch(() => {})
-    await host.close().catch(() => {})
+    await ctx.close()
   }
 }
 
-// A frozen page runs nothing, so nothing it could answer would ever arrive. Where this browser won't freeze
-// one, the step says so and proves only what's left: a tab that runs nothing. No `froze false` passes C5
-// under the frozen title.
+// A browser of this step's own, driven over a pipe, never a debugging port: DevTools messages go in on fd 3
+// and come out on fd 4, each ended by a NUL. Its flags are the ones from Playwright's own launch that matter
+// here: a throwaway profile, no keychain, no traffic of its own, nothing throttled while hidden.
+async function pipedBrowser() {
+  const profile = fs.mkdtempSync(path.join(paths.workDir(), 'release-notices-freeze-'))
+  const child = spawn(await paths.chromePath(), [
+    ...(HEADED ? [] : ['--headless', '--hide-scrollbars', '--mute-audio']),
+    '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-startup-window', '--no-sandbox', '--no-first-run', '--no-default-browser-check',
+    '--password-store=basic', '--use-mock-keychain', '--enable-automation', '--disable-background-networking',
+    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+    '--disable-back-forward-cache', '--disable-component-update', '--disable-default-apps', '--disable-extensions', '--disable-sync',
+    '--disable-search-engine-choice-screen', '--no-service-autorun', '--metrics-recording-only',
+  ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] })
+  const toBrowser = child.stdio[3]
+  const fromBrowser = child.stdio[4]
+  const gone = new Promise((resolve) => child.once('close', resolve))
+  const transport = {
+    send: (message) => { if (!toBrowser.destroyed) toBrowser.write(`${JSON.stringify(message)}\0`) },
+    close: () => { child.kill() },
+  }
+  // Unhandled, a browser that fails to start or a pipe that breaks would end the whole run.
+  child.on('error', () => transport.onclose?.('the browser did not start'))
+  toBrowser.on('error', () => {})
+  fromBrowser.on('error', () => {})
+  fromBrowser.setEncoding('utf8')
+  let partial = ''
+  fromBrowser.on('data', (text) => {
+    const messages = (partial + text).split('\0')
+    partial = messages.pop()
+    for (const message of messages) setImmediate(() => transport.onmessage?.(JSON.parse(message)))
+  })
+  child.once('close', () => transport.onclose?.())
+  return {
+    transport,
+    async close() {
+      child.kill()
+      await Promise.race([gone, new Promise((r) => setTimeout(r, 5000))])
+      try {
+        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 })
+      } catch {
+        /* a throwaway profile under the work dir: nothing depends on it going */
+      }
+    },
+  }
+}
+
+// Second try: `noDefaults` never turns focus emulation on, but only for the default context of a browser
+// Playwright attaches to, not one it launches.
+async function freezeInOwnBrowser(size) {
+  const state = freshState({ status: 'Delivered' })
+  const own = await pipedBrowser()
+  let connected = null
+  try {
+    connected = await chromium.connectOverCDP(own.transport, { noDefaults: true, isLocal: true, timeout: 15000 })
+    const ctx = connected.contexts()[0]
+    await answerRequests(ctx, state, [])
+    return await freezeAttempt(ctx, size, state, freezeTab)
+  } finally {
+    await connected?.close().catch(() => {})
+    await own.close()
+  }
+}
+
+// A frozen page runs nothing, so nothing it could answer would ever arrive. Where neither try freezes one,
+// the step says so and proves only what's left: a tab that runs nothing. No `froze false` passes C5 under
+// the frozen title.
 async function stillTabRun(browser, size) {
   const t = size.tag
-  let notFrozen
-  try {
-    notFrozen = await freezeAttempt(size, freshState({ status: 'Delivered' }))
-  } catch (e) {
-    notFrozen = String(e.message || e).split('\n')[0].slice(0, 200)
+  const tries = []
+  for (const [how, attempt] of [
+    ['focus emulation asked off', () => freezeInThisBrowser(browser, size)],
+    ['own browser, no defaults', () => freezeInOwnBrowser(size)],
+  ]) {
+    let result
+    try {
+      result = await attempt()
+    } catch (e) {
+      result = String(e.message || e).split('\n')[0].slice(0, 200)
+    }
+    if (!result) return
+    tries.push(`${how}: ${result}`)
   }
-  if (!notFrozen) return
+  const notFrozen = tries.join('; ')
   console.log(`driver-release-notices: this browser did not freeze the page (${notFrozen}): C5 proves a silent tab, not a frozen one`)
   const silent = freshState({ status: 'Delivered' })
   const ctx = await newContext(browser, size, silent, [])
