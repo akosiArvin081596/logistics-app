@@ -2354,6 +2354,15 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			eq([of(NIA).credits, of(OMAR).pickups.total, of(OMAR).credits], [1, 0, 1], "and the same sums");
 		});
 
+		// The office's unit labels check names on live rows, as they did: a name only on a cancelled row refuses none.
+		await inWorld((w) => {
+			w.db.prepare("UPDATE trucks SET unit_number = 'Wal-7' WHERE id = 21").run();
+			w.row("PF-83", "Walt Ames", "Cancelled");
+		}, async (w) => {
+			const report = (await w.get("/api/admin/driver-performance?period=week", USERS.admin2)).json.boards[0].drivers;
+			eq(report.find((x) => x.name === NIA).unitLabel, "#WAL-7", "the office's unit label doesn't change for a name on a dropped row");
+		});
+
 		// Nothing that pays reads the proof or the kept rows.
 		const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js"));
 		const readers = libFiles.filter((f) => /driver-pickup-proof/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8")));
