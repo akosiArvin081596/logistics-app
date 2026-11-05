@@ -280,6 +280,8 @@ const ALLOW_HEADS = [
 	'app.post("/api/data",',
 	'app.get("/api/dashboard",',
 	'app.get("/api/trucks",',
+	// A driver's own week lowers its target for approved days off; it is display only and no money path reads it.
+	'const driverPerformance = require("./lib/driver-performance-routes").mount(app, {',
 ];
 // The note to CHR's contact's switch, folding in the requests flag first.
 const DRAFT_DEF_RE = /^const DRIVER_TIME_OFF_CHR_DRAFT_ENABLED = DRIVER_TIME_OFF_REQUESTS_ENABLED && \/\^\(true\|1\|yes\|on\)\$\/i\.test\(String\(process\.env\.DRIVER_TIME_OFF_CHR_DRAFT_ENABLED \?\? ""\)\.trim\(\)\);$/;
