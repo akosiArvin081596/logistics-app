@@ -65005,6 +65005,20 @@ let _jtCache = null;
 let _jtInflight = null;
 let _jtEpoch = 0;
 const JT_CACHE_TTL = 60_000;
+// The rows deduplicateLoads() drops stay on the read under a symbol, so JSON and Object.keys() never
+// see them: the weekly invoice reads every row, and a caller counting as it does needs them too.
+const JT_EVERY_ROW = Symbol("jtEveryRow");
+function parseJobTrackingRead(responseData) {
+	const parsed = parseSheet(responseData);
+	const everyRow = parsed.data;
+	parsed.data = deduplicateLoads(everyRow, parsed.headers);
+	parsed[JT_EVERY_ROW] = everyRow;
+	return parsed;
+}
+// A read that kept none (a script's own) answers the rows it has.
+function everyJobTrackingRow(jt) {
+	return (jt && (jt[JT_EVERY_ROW] || jt.data)) || [];
+}
 async function getJobTrackingCached() {
 	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
 	// Join the read already in flight rather than starting a second one.
@@ -65019,8 +65033,7 @@ async function getJobTrackingCached() {
 	const attempt = (async () => {
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
-		const parsed = parseSheet(response.data);
-		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
+		const parsed = parseJobTrackingRead(response.data);
 		// The Load IDs as every role but Super Admin is served them, kept on this
 		// read before it is shared (shownLoadIdIndex()), and the latest only while
 		// no invalidation has come since the read started. Never fails the read.
@@ -73974,7 +73987,7 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
-	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
 	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
 });
 
