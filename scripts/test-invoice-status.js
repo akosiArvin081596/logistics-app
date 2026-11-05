@@ -123,8 +123,8 @@ eq(read({ presses: [{ invoice_id: INV, effective: "in_flight" }, { invoice_id: "
 
 eq(read({ claim: JOB_DRAFT, saved: inSent }), { ...BY_SENT_MAIL, invoiceId: INV }, "§2 rule 7: the job's own draft, an invoice in Sent Mail: Invoiced by hand");
 eq(read({ claim: JOB_DRAFT, saved: inDrafts }), { status: DRAFT, invoiceId: INV, whose: "job" }, "§2 rule 7: ...in Drafts: Draft in Gmail, the job's");
-eq(read({ claim: JOB_DRAFT }), { status: DRAFT, invoiceId: INV, whose: "job" }, "§2 rule 7: ...not searched yet: Draft in Gmail");
-eq(read({ claim: JOB_DRAFT, saved: failed }), { status: DRAFT, invoiceId: INV, whose: "job" }, "§2 rule 7: ...the search failed: not searched, so Draft in Gmail");
+eq(read({ claim: JOB_DRAFT }), { status: DRAFT, invoiceId: INV, whose: "job", sentUnchecked: true }, "§2 rule 7: FAILS ON THE OLD CODE: ...not searched yet: Draft in Gmail, Sent Mail not checked yet: a person may already have sent it");
+eq(read({ claim: JOB_DRAFT, saved: failed }), { status: DRAFT, invoiceId: INV, whose: "job", sentUnchecked: true }, "§2 rule 7: FAILS ON THE OLD CODE: ...the search failed: not searched, so the same");
 eq(read({ claim: JOB_DRAFT, saved: clean }), { status: ATTENTION, code: "DRAFT_NOT_IN_GMAIL", invoiceId: INV }, "§2 rule 7: ...searched, in neither: Needs attention");
 
 for (const via of ["imap", "n8n", "", null, undefined, "some-later-path"]) {
@@ -151,7 +151,12 @@ eq(read({ claim: claim({ state: "waiting", reason_code: "WAITING_POD" }), sweepO
 eq(read({ claim: HELD, saved: inSent }), BY_SENT_MAIL, "§2 rule 10: held, an invoice in Sent Mail: Invoiced by hand");
 eq(read({ claim: HELD, saved: clean }), { status: ATTENTION, code: "TOTAL_MISMATCH" }, "§2 rule 10: held, otherwise: Needs attention, why");
 eq(read({ claim: HELD }), { status: ATTENTION, code: "TOTAL_MISMATCH" }, "§2 rule 10: ...not searched yet");
-eq(read({ claim: HELD, saved: inDrafts }), { status: ATTENTION, code: "TOTAL_MISMATCH" }, "§2 rule 10: ...an invoice in Drafts only: still Needs attention");
+eq(read({ claim: HELD, saved: inDrafts }), { status: DRAFT }, "§2 rule 10: FAILS ON THE OLD CODE: ...an invoice in Drafts: Draft in Gmail, since \"draft it by hand\" would bill the load twice");
+eq(read({ claim: HELD, saved: inDrafts, passOn: false }), { status: DRAFT }, "§2 rule 10: FAILS ON THE OLD CODE: ...with the pass off too: what was found stays found");
+eq(read({ claim: HELD, saved: saved({ drafts_invoice: 1, sent_mention: 1 }) }), { status: DRAFT }, "§2 rule 10: FAILS ON THE OLD CODE: ...an invoice in Drafts over a mention");
+eq(read({ claim: HELD, saved: saved({ drafts_invoice: 1, sent_invoice: 1, first_sent_at: "2026-11-02T18:30:00.000Z" }) }), BY_SENT_MAIL, "§2 rule 10: ...in both: Sent Mail wins");
+eq(read({ claim: claim({ state: "needs_attention", reason_code: "MAILBOX_HIT" }), saved: inDrafts }), { status: DRAFT }, "§2 rule 10: FAILS ON THE OLD CODE: ...a hit from Try again that was an invoice in Drafts");
+eq(read({ claim: claim({ state: "needs_attention", reason_code: "MAILBOX_HIT" }), saved: mentioned }), { status: ATTENTION, code: "MAILBOX_HIT", mentioned: true }, "§2 rule 10: ...a hit that was only a mention stays held");
 
 for (const col of ["payments_invoice_number", "payments_payment_date", "payments_status"]) {
 	eq(read({ saved: saved({ [col]: 1 }) }), FROM_PAYMENTS, `§2 rule 11: ${col} filled: Invoiced by hand (Payments Table)`);
@@ -234,7 +239,8 @@ eq(off({ saved: null }), { status: UNKNOWN, code: "NOT_SEARCHED" }, "§6 an old 
 eq(off({ claim: claim(), saved: null }), { status: UNKNOWN, code: "NOT_SEARCHED" }, "§6 a baseline load: the same");
 eq(off({ saved: clean }), { status: UNKNOWN, code: "NOT_SEARCHED" }, "§6 a clean row saved earlier claims nothing once the pass is off");
 eq(off({ saved: clean, isBison: true }), { status: UNKNOWN, code: "NOT_SEARCHED" }, "§6 a Bison load: the same");
-eq(off({ claim: JOB_DRAFT, saved: clean }), { status: DRAFT, invoiceId: INV, whose: "job" }, "§6 rule 7: no in neither without the pass");
+eq(off({ claim: JOB_DRAFT, saved: clean }), { status: DRAFT, invoiceId: INV, whose: "job", sentUnchecked: true }, "§6 rule 7: FAILS ON THE OLD CODE: no in neither without the pass, and Sent Mail is unchecked");
+eq(off({ claim: JOB_DRAFT, saved: inDrafts }), { status: DRAFT, invoiceId: INV, whose: "job" }, "§6 rule 7: a draft found stays found, with nothing unchecked");
 eq(off({ rows: [row()], saved: clean }), { status: BY_HAND, invoiceId: INV, found: FOUND.DRAFT_ROW, sentUnchecked: true }, "§6 rule 8: no in neither without the pass");
 eq(off({ saved: inSent }), BY_SENT_MAIL, "§6 what was found stays found");
 eq(off({ saved: inDrafts }), { status: DRAFT }, "§6 ...in Drafts too");
@@ -262,6 +268,8 @@ eq(exportCells(read({ rows: [row()], saved: failed })), ["Invoiced by hand (Sent
 eq(exportCells(read({ rows: [row()], saved: clean, passOn: false })), ["Invoiced by hand (Sent Mail not checked yet)", INV, ""], "§7 ...the pass off: the same");
 eq(exportCells(read({ rows: [row()], saved: inSent })), ["Invoiced by hand", INV, "2026-11-02"], "§7 ...found in Sent Mail: plain, with its date");
 eq(exportCells(read({ rows: [row()], saved: filled })), ["Invoiced by hand", INV, ""], "§7 ...on the Payments Table: plain");
+eq(exportCells(read({ claim: JOB_DRAFT })), ["Draft in Gmail (Sent Mail not checked yet)", INV, ""], "§7 FAILS ON THE OLD CODE: the job's draft with no search behind it says so in the file too");
+eq(exportCells(read({ claim: JOB_DRAFT, saved: inDrafts })), ["Draft in Gmail", INV, ""], "§7 ...found in Drafts: plain");
 eq(exportCells(read({ saved: null })), ["Couldn't check", "", ""], "§7 ...and blanks");
 eq(exportCells(null), ["Couldn't check", "", ""], "§7 no answer at all reads Couldn't check, never blank");
 

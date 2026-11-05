@@ -3,7 +3,7 @@
 // and evidence the browser never sees; this file only words it and groups rows by it.
 // scripts/test-invoice-status-client.mjs pins the words and codes to the server's.
 
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, changedText } from './autoInvoiceStatus.js'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, canMarkChecked, changedText } from './autoInvoiceStatus.js'
 import { fmtTimestamp, fmtYmd } from '../utils/datetime.js'
 
 // The order the filter offers them.
@@ -35,10 +35,11 @@ export const INVOICE_STATUS_REASONS = Object.freeze({
 const FOUND = Object.freeze({ SENT_MAIL: 'sent_mail', PAYMENTS: 'payments_table', DRAFT_ROW: 'draft_row' })
 export const INVOICE_STATUS_FOUND = Object.freeze(Object.values(FOUND))
 
-// These say nothing about the load, so on a load nothing will invoice "No automatic invoice"
-// stands: it's the line that says to draft it by hand. An email naming the load, or Bison's
-// Order #, says to check Gmail first, and those keep their own words.
+// These say nothing about the load, so a job's chip that tells a person what to do stands: "No
+// automatic invoice" says to draft it by hand, and OFF_GAP to check Sent Mail first. An email
+// naming the load, or Bison's Order #, says to check Gmail first, and those keep their own words.
 const SAYS_NOTHING = new Set(['NOT_SEARCHED', 'SEARCH_FAILED', 'PAYMENTS_NOT_READ', 'EVIDENCE_UNREADABLE'])
+const STANDS_OVER_NOTHING = new Set(['NOT_BY_DRIVER', 'OFF_GAP'])
 
 const shown = (v) => (typeof v === 'string' ? v : '')
 
@@ -52,15 +53,18 @@ const withWord = (status, reason) => (reason ? `${INVOICE_STATUS_LABELS[status]}
 const joined = (...parts) => parts.filter(Boolean).join(' ')
 const numbered = (read) => (shown(read.invoiceId) ? `Invoice ${read.invoiceId}.` : '')
 
-function sentChip(read) {
+// `changed`, in the chips below, is the row's `_autoInvoice` when Mark checked is offered on it. Its
+// mark outlives the status, and its sentence is the only reason given for that button: without it
+// a person sends a draft that's out of date, or clears a warning nobody read.
+function sentChip(read, changed) {
   const date = fmtYmd(shown(read.date), { fallback: '' })
   const sent = `${shown(read.invoiceId) ? `Invoice ${read.invoiceId}` : 'The invoice'} was sent to the broker automatically${date ? ` on ${date}` : ''}.`
-  const changed = changedText({ changed: read.changed, sent: true })
-  if (changed) return { label: `${INVOICE_STATUS_LABELS.sent}: load changed`, tone: 'warn', reason: `${sent} ${changed}` }
+  const words = changedText({ changed: read.changed, sent: true }) || (changed ? changedText({ changed: changed.changed, sent: true }) : '')
+  if (words) return { label: `${INVOICE_STATUS_LABELS.sent}: load changed`, tone: 'warn', reason: `${sent} ${words}` }
   return { label: INVOICE_STATUS_LABELS.sent, tone: 'ok', reason: `${sent} Its copy is in Gmail Sent Mail.` }
 }
 
-function byHandChip(read) {
+function byHandWords(read) {
   const id = shown(read.invoiceId)
   if (read.found === FOUND.DRAFT_ROW || read.sentUnchecked === true) {
     // A draft row proves a draft was made, not that it went, so it says what isn't known yet.
@@ -74,11 +78,29 @@ function byHandChip(read) {
   return { label: INVOICE_STATUS_LABELS.by_hand, tone: 'ok', reason: joined(numbered(read), where) }
 }
 
-function draftChip(read) {
+function byHandChip(read, changed) {
+  const chip = byHandWords(read)
+  if (!changed) return chip
+  return { label: `${INVOICE_STATUS_LABELS.by_hand}: load changed`, tone: 'warn', reason: joined(chip.reason, changedText({ changed: changed.changed, sent: true })) }
+}
+
+function draftChip(read, changed) {
   const id = shown(read.invoiceId)
-  const where = `${id ? `Invoice ${id} is` : 'An invoice for this load is'} in Gmail Drafts. Check it and send it.`
   const whose = read.whose === 'job' ? 'LogisX made this draft.' : read.whose === 'person' ? 'Someone made this draft by hand.' : ''
-  return { label: INVOICE_STATUS_LABELS.draft, tone: 'ok', reason: joined(whose, where) }
+  // With no search behind it, a person may already have sent it, so "send it" could bill twice.
+  const unchecked = read.sentUnchecked === true
+  const where = unchecked
+    ? `${id ? `Invoice ${id}` : 'The invoice'} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet.`
+    : `${id ? `Invoice ${id} is` : 'An invoice for this load is'} in Gmail Drafts.`
+  if (changed) return { label: `${INVOICE_STATUS_LABELS.draft}: load changed`, tone: 'warn', reason: joined(whose, where, changedText(changed)) }
+  if (unchecked) return { label: `${INVOICE_STATUS_LABELS.draft}: Sent Mail not checked yet`, tone: 'muted', reason: joined(whose, where, 'Look in both before sending it or drafting again.') }
+  return { label: INVOICE_STATUS_LABELS.draft, tone: 'ok', reason: joined(whose, where, 'Check it and send it.') }
+}
+
+// Any other status keeps its own words, then says why Mark checked is beside it.
+function withChange(chip, changed) {
+  if (!changed) return chip
+  return { ...chip, tone: chip.tone === 'bad' ? 'bad' : 'warn', reason: joined(chip.reason, changedText(changed)) }
 }
 
 function waitingChip(read, auto) {
@@ -122,33 +144,37 @@ export function invoiceStatusChip(row) {
   const auto = row ? row._autoInvoice : null
   const read = statusOf(row)
   if (!read) return autoInvoiceChip(auto)
-  if (auto && auto.code === 'NOT_BY_DRIVER' && read.status === 'unknown' && SAYS_NOTHING.has(read.code)) return autoInvoiceChip(auto)
+  if (auto && STANDS_OVER_NOTHING.has(auto.code) && read.status === 'unknown' && SAYS_NOTHING.has(read.code)) return autoInvoiceChip(auto)
+  const changed = canMarkChecked(auto) ? auto : null
   switch (read.status) {
-    case 'sent': return sentChip(read)
-    case 'by_hand': return byHandChip(read)
-    case 'draft': return draftChip(read)
-    case 'waiting': return waitingChip(read, auto)
-    case 'needs_attention': return attentionChip(read)
-    case 'factored': return { label: INVOICE_STATUS_LABELS.factored, tone: 'muted', reason: AUTO_INVOICE_REASONS.LOAD_FACTORED.text }
-    case 'none_found': return noneFoundChip(read)
-    default: return unknownChip(read)
+    case 'sent': return sentChip(read, changed)
+    case 'by_hand': return byHandChip(read, changed)
+    case 'draft': return draftChip(read, changed)
+    case 'waiting': return withChange(waitingChip(read, auto), changed)
+    case 'needs_attention': return withChange(attentionChip(read), changed)
+    case 'factored': return withChange({ label: INVOICE_STATUS_LABELS.factored, tone: 'muted', reason: AUTO_INVOICE_REASONS.LOAD_FACTORED.text }, changed)
+    case 'none_found': return withChange(noneFoundChip(read), changed)
+    default: return withChange(unknownChip(read), changed)
   }
 }
 
 // --- the filter ---------------------------------------------------------------------------
 
-// The eight statuses with how many of `rows` hold each. A row with no status is in no bucket:
-// nothing here decides that a load couldn't be checked.
-export function invoiceStatusOptions(rows) {
+// The statuses with how many of `rows` hold each. A row with no status is in no bucket: nothing
+// here decides that a load couldn't be checked. `none_found` is offered only on the server's word
+// that the mailbox pass is on, since nothing else can say it.
+export function invoiceStatusOptions(rows, { mailboxPass = false } = {}) {
   const counts = new Map()
   for (const row of Array.isArray(rows) ? rows : []) {
     const read = statusOf(row)
     if (read) counts.set(read.status, (counts.get(read.status) || 0) + 1)
   }
-  return Object.entries(INVOICE_STATUS_LABELS).map(([value, label]) => {
-    const count = counts.get(value) || 0
-    return { value, label, count, text: `${label} (${count})` }
-  })
+  return Object.entries(INVOICE_STATUS_LABELS)
+    .filter(([value]) => value !== 'none_found' || mailboxPass === true)
+    .map(([value, label]) => {
+      const count = counts.get(value) || 0
+      return { value, label, count, text: `${label} (${count})` }
+    })
 }
 
 export function filterByInvoiceStatus(rows, value) {

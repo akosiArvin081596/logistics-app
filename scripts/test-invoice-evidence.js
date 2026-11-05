@@ -894,6 +894,18 @@ async function main() {
 			new Function("invoiceEvidence", "respCompleted", "jobTracking", "req", LINE)(w.store, respCompleted, { headers: HEADERS }, { session: { user: { role } } });
 			eq("_invoiceStatus" in respCompleted[0], want, `§11 that line as shipped: a ${role} ${want ? "gets a status" : "sees none"}`);
 		}
+		// The filter offers "No invoice found" only while the pass could say it, on the server's word.
+		const TOLD = '...(invoiceEvidence.statusOn && req.session.user.role === "Super Admin" ? { invoiceStatus: { mailboxPass: invoiceEvidence.passOn } } : {}),';
+		ok(dash.split(TOLD).length === 2 && dash.indexOf(TOLD) > dash.indexOf("res.json({"), "§11 FAILS ON THE OLD CODE: /api/dashboard's answer says whether the mailbox pass is on, once");
+		for (const [role, env, want] of [
+			["Super Admin", {}, { invoiceStatus: { mailboxPass: false } }],
+			["Super Admin", { INVOICE_MAILBOX_PASS_ENABLED: "true" }, { invoiceStatus: { mailboxPass: true } }],
+			["Super Admin", { INVOICE_STATUS_ENABLED: "false" }, {}],
+			["Dispatcher", { INVOICE_MAILBOX_PASS_ENABLED: "true" }, {}],
+		]) {
+			const w = world({ env, loads: [load("900000962")] });
+			eq(new Function("invoiceEvidence", "req", `return { ${TOLD} };`)(w.store, { session: { user: { role } } }), want, `§11 that line as shipped: a ${role} with ${JSON.stringify(env)} is told ${JSON.stringify(want)}`);
+		}
 		ok(/savedInvoiceEvidence: \(key\) => require\("\.\/lib\/invoice-evidence"\)\.savedInvoice\(db, key\),/.test(SRC.slice(SRC.indexOf("// <auto-invoice-wiring>"), SRC.indexOf("// </auto-invoice-wiring>"))),
 			"§11 the job's block hands Try again its saved evidence");
 

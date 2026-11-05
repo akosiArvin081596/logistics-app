@@ -10,16 +10,22 @@
 // here reads a mailbox. Steps, each at 1280x800 and 390x844:
 //   E   every status the mailbox pass off can give: the row's chip (words, tone, title) and the load
 //       dialog's one line. An office-marked load reads "No automatic invoice", even with a clean
-//       answer saved; "No invoice found" appears nowhere
-//   F   the filter: the eight words with their counts, each choice lists that status's rows, a choice
-//       goes back to page 1, the counts follow the search, Clear, the note about the file, the
-//       Needs attention toggle's title and its different number; the download asks for no status
-//       and its file carries the three columns (the export route itself: test-invoice-evidence.js)
+//       answer saved, and OFF_GAP keeps its own words; a job's draft or a by-hand load whose load
+//       changed says so; a job's draft nobody searched for says Sent Mail isn't checked; a held load
+//       with an invoice in Drafts says that; "No invoice found" appears nowhere
+//   F   the filter: seven words with their counts ("No invoice found" isn't offered with the pass
+//       off), each choice lists that status's rows, a choice goes back to page 1, the counts follow
+//       the search, Clear, the note about the file, the Needs attention toggle's title and its
+//       different number; the download asks for no status and its file carries the three columns
+//       (the export route itself: test-invoice-evidence.js)
 //   A   the dialog's buttons: Try again takes the line to the job's words, then the row to Sent by
-//       LogisX; Mark checked takes the mark off; `retry: "none"` offers no Try again; the load being
-//       built moves on once its build ends
-//   P   the mailbox pass on: "No invoice found" only from the search's own answer; an office-marked
-//       load not reached yet keeps "No automatic invoice"; "in neither" reads Needs attention
+//       LogisX; Mark checked takes the mark off, on a send and on a draft; `retry: "none"` offers no
+//       Try again; the load being built moves on once its build ends
+//   P   the mailbox pass on: "No invoice found" only from the search's own answer, and offered by
+//       the filter; an office-marked load not reached yet keeps "No automatic invoice"; "in neither"
+//       reads Needs attention
+//   R   the driver's trigger off, as on a rollback: no Try again beside "Invoiced by hand"; a held
+//       load and OFF_GAP keep theirs
 //   K   the kill switch: no status on the rows, today's chips, no select, today's note and title
 //   D   a Dispatcher sees none of it, even if a row came with the fields
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
@@ -143,7 +149,9 @@ const ID = {
   SENT: 'QA-SENT-9001', CHANGED: 'QA-CHANGED-9002', MAIL_HAND: 'QA-MAILHAND-9003', HAND_ROW: 'QA-HANDROW-9004', PAYMENTS: 'QA-PAYMENTS-9005',
   JOB_DRAFT: 'QA-JOBDRAFT-9006', PERSON: 'QA-PERSON-9007', WORKING: 'QA-WORKING-9008', QUEUED: 'QA-QUEUED-9009', CHECKING: 'QA-CHECKING-9010',
   HELD: 'QA-HELD-9011', HELD_NONE: 'QA-HELDNONE-9012', FACTORED: 'QA-FACTORED-9013', OFFICE: 'QA-OFFICE-9014', OFFICE_CLEAN: 'QA-OFFCLEAN-9015', OLD: 'QA-OLD-8000',
-  P_CLEAN: 'QA-PASSCLEAN-9101', P_UNSEARCHED: 'QA-PASSNEW-9102', P_GONE: 'QA-PASSGONE-9103', P_MENTION: 'QA-PASSNAME-9104',
+  DRAFT_CHANGED: 'QA-DRAFTCHG-9016', HAND_CHANGED: 'QA-HANDCHG-9017', JOB_FOUND: 'QA-JOBFOUND-9018', GAP: 'QA-GAP-9019',
+  P_CLEAN: 'QA-PASSCLEAN-9101', P_UNSEARCHED: 'QA-PASSNEW-9102', P_GONE: 'QA-PASSGONE-9103', P_MENTION: 'QA-PASSNAME-9104', P_GAP: 'QA-PASSGAP-9105',
+  R_HAND: 'QA-ROLLHAND-9201', R_HELD: 'QA-ROLLHELD-9202', R_GAP: 'QA-ROLLGAP-9203',
 }
 const OLD_FILLER = 30
 
@@ -155,7 +163,12 @@ const WORDS = {
   mailHand: { label: 'Invoiced by hand', tone: 'ok', reason: `An invoice for this load is in Gmail Sent Mail, dated ${TODAY_SHOWN}.` },
   handRow: (id) => ({ label: 'Invoiced by hand: Sent Mail not checked yet', tone: 'muted', reason: `Someone drafted invoice ${id} by hand. Sent Mail not checked yet.` }),
   payments: { label: 'Invoiced by hand', tone: 'ok', reason: 'The Payments Table holds an invoice or payment for this load.' },
-  jobDraft: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: `LogisX made this draft. Invoice ${id} is in Gmail Drafts. Check it and send it.` }),
+  jobDraft: (id) => ({ label: 'Draft in Gmail: Sent Mail not checked yet', tone: 'muted', reason: `LogisX made this draft. Invoice ${id} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Look in both before sending it or drafting again.` }),
+  jobFound: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: `LogisX made this draft. Invoice ${id} is in Gmail Drafts. Check it and send it.` }),
+  draftChanged: (id) => ({ label: 'Draft in Gmail: load changed', tone: 'warn', reason: `LogisX made this draft. Invoice ${id} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Changed since the draft: the Payment. Check the draft in Gmail, then Mark checked.` }),
+  handChanged: (id) => ({ label: 'Invoiced by hand: load changed', tone: 'warn', reason: `Invoice ${id} is in Gmail Sent Mail, dated ${TODAY_SHOWN}. Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed, then Mark checked.` }),
+  heldInDrafts: { label: 'Draft in Gmail', tone: 'ok', reason: 'An invoice for this load is in Gmail Drafts. Check it and send it.' },
+  offGap: { label: 'Needs attention: completed while off', tone: 'bad', reason: 'The load was delivered while automatic invoices were off, so it may already be invoiced. Check Gmail Sent Mail, then draft it by hand if it still needs one.' },
   personDraft: (id) => ({ label: 'Draft in Gmail', tone: 'ok', reason: `Someone made this draft by hand. Invoice ${id} is in Gmail Drafts. Check it and send it.` }),
   working: { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' },
   queued: { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' },
@@ -170,6 +183,8 @@ const WORDS = {
   jobSent: (id) => ({ label: 'Sent to the broker', tone: 'ok', reason: `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` }),
 }
 const EIGHT = ['Sent by LogisX', 'Invoiced by hand', 'Draft in Gmail', 'Waiting', 'Needs attention', 'Factored (Triumph)', 'No invoice found', "Couldn't check"]
+const ALL_STATUSES = ['sent', 'by_hand', 'draft', 'waiting', 'needs_attention', 'factored', 'none_found', 'unknown']
+const OFFERED_PASS_OFF = ALL_STATUSES.filter((st) => st !== 'none_found')
 const DONE_TEXT = "It's being made now."
 const NOTE_ALL = 'Search, Needs Review, Needs attention and Invoice status aren’t applied to the downloaded file.'
 const NOTE_TODAY = 'Search, Needs Review and Needs attention aren’t applied to the downloaded file.'
@@ -191,7 +206,7 @@ async function until(check, ms = 8000) {
 
 // One made-up server's worth of state, with the job and the status on it. A load's row is what Job
 // Tracking would hold.
-async function freshServer({ user = ADMIN, env = {}, oldLoads = 0 } = {}) {
+async function freshServer({ user = ADMIN, env = {}, jobEnv = {}, oldLoads = 0 } = {}) {
   const db = new Database(':memory:')
   db.exec(`
     CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL DEFAULT '', type TEXT NOT NULL,
@@ -250,7 +265,7 @@ async function freshServer({ user = ADMIN, env = {}, oldLoads = 0 } = {}) {
   }
   const job = jobLib.create({
     db,
-    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false' },
+    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false', ...jobEnv },
     readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
     closedMonthsOf: () => [],
     dayKeyOf,
@@ -306,7 +321,7 @@ async function freshServer({ user = ADMIN, env = {}, oldLoads = 0 } = {}) {
     sleep: async () => {},
   })
   s.job = job
-  s.evidence = evidenceLib.create({ db, env, replica: false, closedMonthsOf: () => [], dayKeyOf, sweepOn: () => false, timeZone: 'America/New_York', log })
+  s.evidence = evidenceLib.create({ db, env, replica: false, closedMonthsOf: () => [], dayKeyOf, sweepOn: () => job.mode === 'on' && !job.triggerMode, timeZone: 'America/New_York', log })
   const add = (method) => (p, ...handlers) => { s.routes[`${method} ${p}`] = handlers }
   job.mount({ get: add('GET'), put: add('PUT'), post: add('POST') }, { requireRole: () => (req, res, next) => next() })
   s.callRoute = async (name, params, body) => {
@@ -383,12 +398,21 @@ async function statusWorld() {
     await driverSends(s, ID.SENT),
     await driverSends(s, ID.CHANGED),
     await driverSends(s, ID.JOB_DRAFT, { email: OTHER_BROKER }),
+    await driverSends(s, ID.JOB_FOUND, { email: OTHER_BROKER }),
+    await driverSends(s, ID.DRAFT_CHANGED, { email: OTHER_BROKER }),
+    await driverSends(s, ID.HAND_CHANGED, { email: OTHER_BROKER }),
     await driverHeld(s, ID.HELD),
     await driverHeld(s, ID.HELD_NONE),
   ]
   if (!ran.every(Boolean)) throw new Error(`a made-up load's run didn't finish: ${JSON.stringify(ran)}`)
   markChanged(s, ID.CHANGED)
+  markChanged(s, ID.DRAFT_CHANGED)
+  markChanged(s, ID.HAND_CHANGED)
+  s.saveAnswer(ID.JOB_FOUND, { draftsInvoice: 1 })
+  s.saveAnswer(ID.HAND_CHANGED, { sentInvoice: 1, firstSent: `${TODAY}T14:00:00.000Z` })
   s.saveAnswer(ID.HELD_NONE, { draftsInvoice: 1 })
+  s.addLoad(ID.GAP, 'Delivered')
+  s.seedClaim(ID.GAP, { state: 'needs_attention', reason_code: 'OFF_GAP' })
 
   s.addLoad(ID.MAIL_HAND, 'Delivered')
   s.saveAnswer(ID.MAIL_HAND, { sentInvoice: 1, firstSent: `${TODAY}T14:00:00.000Z` })
@@ -428,16 +452,20 @@ async function statusWorld() {
     [ID.MAIL_HAND, 'by_hand', WORDS.mailHand, []],
     [ID.HAND_ROW, 'by_hand', WORDS.handRow(NUMBER(80)), []],
     [ID.PAYMENTS, 'by_hand', WORDS.payments, []],
+    [ID.HAND_CHANGED, 'by_hand', WORDS.handChanged(number(ID.HAND_CHANGED)), ['Mark checked']],
     [ID.JOB_DRAFT, 'draft', WORDS.jobDraft(number(ID.JOB_DRAFT)), []],
+    [ID.JOB_FOUND, 'draft', WORDS.jobFound(number(ID.JOB_FOUND)), []],
+    [ID.DRAFT_CHANGED, 'draft', WORDS.draftChanged(number(ID.DRAFT_CHANGED)), ['Mark checked']],
     [ID.PERSON, 'draft', WORDS.personDraft(NUMBER(81)), []],
+    [ID.HELD_NONE, 'draft', WORDS.heldInDrafts, []],
     [ID.WORKING, 'waiting', WORDS.working, []],
     [ID.QUEUED, 'waiting', WORDS.queued, []],
     [ID.CHECKING, 'waiting', WORDS.checking, []],
     [ID.HELD, 'needs_attention', WORDS.held, ['Try again']],
-    [ID.HELD_NONE, 'needs_attention', WORDS.held, []],
     [ID.FACTORED, 'factored', WORDS.factored, []],
     [ID.OFFICE, 'unknown', NOT_STARTED, []],
     [ID.OFFICE_CLEAN, 'unknown', NOT_STARTED, []],
+    [ID.GAP, 'unknown', WORDS.offGap, []],
     [ID.OLD, 'unknown', WORDS.notSearched, []],
   ]
   return s
@@ -457,12 +485,34 @@ async function passWorld() {
   s.addLoad(ID.P_MENTION)
   s.statusWrite(OFFICE, ID.P_MENTION)
   s.saveAnswer(ID.P_MENTION, { sentMention: 1, payments: true })
+  s.addLoad(ID.P_GAP, 'Delivered')
+  s.seedClaim(ID.P_GAP, { state: 'needs_attention', reason_code: 'OFF_GAP' })
+  s.saveAnswer(ID.P_GAP, { payments: true })
   s.expected = [
     [ID.P_CLEAN, 'none_found', WORDS.noneFound, []],
+    [ID.P_GAP, 'none_found', WORDS.noneFound, []],
     [ID.P_UNSEARCHED, 'unknown', NOT_STARTED, []],
     [ID.P_GONE, 'needs_attention', WORDS.gone(NUMBER(83)), []],
     [ID.P_MENTION, 'unknown', WORDS.mention, []],
     [ID.OLD, 'unknown', WORDS.notSearched, []],
+  ]
+  return s
+}
+
+// The driver's trigger off, as on a rollback, with the status on: its rows carry no `retry`.
+async function rollbackWorld() {
+  const s = await freshServer({ jobEnv: { AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: 'false' } })
+  s.addLoad(ID.R_HAND, 'Delivered')
+  s.seedClaim(ID.R_HAND, { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' })
+  s.saveAnswer(ID.R_HAND, { sentInvoice: 1, firstSent: `${TODAY}T14:00:00.000Z` })
+  s.addLoad(ID.R_HELD, 'Delivered')
+  s.seedClaim(ID.R_HELD, { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' })
+  s.addLoad(ID.R_GAP, 'Delivered')
+  s.seedClaim(ID.R_GAP, { state: 'needs_attention', reason_code: 'OFF_GAP' })
+  s.expected = [
+    [ID.R_HAND, 'by_hand', WORDS.mailHand, []],
+    [ID.R_HELD, 'needs_attention', WORDS.held, ['Try again']],
+    [ID.R_GAP, 'unknown', WORDS.offGap, ['Try again']],
   ]
   return s
 }
@@ -496,6 +546,8 @@ function dashboardBody(s) {
     completedJobs: completed,
     fleet: [], drivers: [DRIVER_NAME], driverQueues: {},
     ...(isAdmin(s) ? { autoInvoice: { mode: 'on' } } : {}),
+    // server.js's line: whether the pass is on, a Super Admin's only.
+    ...(s.evidence.statusOn && isAdmin(s) ? { invoiceStatus: { mailboxPass: s.evidence.passOn } } : {}),
   }
 }
 
@@ -739,11 +791,11 @@ async function filterRun(browser, size) {
       record(`${tag}-list`, 'Completed Loads lists the loads', 'rows', 'not listed', false)
       return
     }
-    const STATUSES = ['sent', 'by_hand', 'draft', 'waiting', 'needs_attention', 'factored', 'none_found', 'unknown']
+    const STATUSES = OFFERED_PASS_OFF
     const options = (await page.locator(`${SELECT} option`).allTextContents()).map((t) => t.trim())
-    const wantOptions = ['All invoice statuses', ...STATUSES.map((st, i) => `${EIGHT[i]} (${wantCount(s, st)})`)]
+    const wantOptions = ['All invoice statuses', ...STATUSES.map((st) => `${EIGHT[ALL_STATUSES.indexOf(st)]} (${wantCount(s, st)})`)]
     const barFile = await shot(page, `${tag}-bar`)
-    record(`${tag}-options`, 'The select offers all, then the eight with their counts', JSON.stringify(wantOptions), JSON.stringify(options), JSON.stringify(options) === JSON.stringify(wantOptions), barFile)
+    record(`${tag}-options`, 'With the pass off the select offers all, then seven with their counts, and no "No invoice found"', JSON.stringify(wantOptions), JSON.stringify(options), JSON.stringify(options) === JSON.stringify(wantOptions), barFile)
     const barFits = await noSideScroll(page)
     record(`${tag}-fits`, 'The bar fits with the select', 'no side scroll', `fits ${barFits}`, barFits)
 
@@ -759,7 +811,8 @@ async function filterRun(browser, size) {
     record(`${tag}-page-one`, 'A choice on page 2 goes back to page 1', `from "26-..."; lists ${wantAttention.join(', ')}`, `from "${onTwo}"; lists ${attention.join(', ')}`, /^26/.test(onTwo) && JSON.stringify(attention) === JSON.stringify(wantAttention), pickFile)
     const count = await locText(page.locator('.cl-count'))
     const note = await locText(page.locator('.cl-note'))
-    record(`${tag}-note`, 'The count, and the note names the status', `"${wantAttention.length} loads"; "${NOTE_ALL}"`, `"${count}"; "${note}"`, count === `${wantAttention.length} loads` && note === NOTE_ALL)
+    const wantLoads = `${wantAttention.length} load${wantAttention.length === 1 ? '' : 's'}`
+    record(`${tag}-note`, 'The count, and the note names the status', `"${wantLoads}"; "${NOTE_ALL}"`, `"${count}"; "${note}"`, count === wantLoads && note === NOTE_ALL)
 
     // The download asks for no status, and the file holds every load.
     const asksBefore = exportAsks.length
@@ -787,9 +840,6 @@ async function filterRun(browser, size) {
       if (st === 'unknown') {
         const info = await locText(page.locator('.pagination-info'))
         record(`${tag}-pick-${st}`, `Choosing ${st}`, `"1-25 of ${wantCount(s, st)}"`, `"${info}"`, info.replace(/\D+/g, '-') === `1-25-${wantCount(s, st)}`)
-      } else if (st === 'none_found') {
-        const said = await page.getByText('No completed loads match these filters.').count()
-        record(`${tag}-pick-${st}`, 'Choosing No invoice found, with the pass off', 'no rows, and it says so', `rows ${got.length}, said ${said}`, got.length === 0 && said === 1)
       } else {
         const want = idsOf(s, st)
         record(`${tag}-pick-${st}`, `Choosing ${st}`, want.join(', '), got.join(', '), JSON.stringify(got) === JSON.stringify(want))
@@ -856,6 +906,21 @@ async function actionRun(browser, size) {
     await reloadCompleted(page)
     await chipStep(page, `${tag}-checked-row`, 'The row after it', ID.CHANGED, wantChecked)
 
+    // The same on the job's draft: the mark goes, and what isn't known about Sent Mail stays.
+    await openLine(page, ID.DRAFT_CHANGED)
+    const draftButtons = await lineButtons(page)
+    await page.locator('.auto-line button', { hasText: 'Mark checked' }).click({ timeout: 5000 })
+    await until(() => s.checkedPosts.length === 2, 5000)
+    await appears(page, '.auto-result:has-text("Marked checked.")', 5000)
+    const draftLine = await locText(page.locator('.auto-line-text'))
+    const wantDraft = WORDS.jobDraft((s.claim(ID.DRAFT_CHANGED) || {}).invoice_id)
+    const draftFile = await shot(page, `${tag}-draft-checked`)
+    record(`${tag}-draft-checked`, 'Mark checked on a changed draft: the sentence was beside it, and the mark goes', `the button; one more POST; "${wantDraft.label}. ${wantDraft.reason}"`, `${JSON.stringify(draftButtons)}, posts ${s.checkedPosts.length}, "${draftLine}"`,
+      JSON.stringify(draftButtons) === '["Mark checked"]' && s.checkedPosts.length === 2 && draftLine === `${wantDraft.label}. ${wantDraft.reason}`, draftFile)
+    await closeLine(page)
+    await reloadCompleted(page)
+    await chipStep(page, `${tag}-draft-checked-row`, 'The row after it', ID.DRAFT_CHANGED, wantDraft)
+
     // The held build is let go: the load moves on, and the queue behind it goes too.
     await chipStep(page, `${tag}-working`, 'A load being built', ID.WORKING, WORDS.working)
     s.held.open()
@@ -909,7 +974,34 @@ async function passRun(browser, size) {
     const options = (await page.locator(`${SELECT} option`).allTextContents()).map((t) => t.trim())
     const fits = await noSideScroll(page)
     const file = await shot(page, `${tag}-chips`)
-    record(`${tag}-count`, 'The select counts the search\'s answer', '"No invoice found (1)"; no side scroll', `${options.join('; ')}; fits ${fits}`, options.includes('No invoice found (1)') && fits, file)
+    record(`${tag}-count`, 'With the pass on the select offers it, and counts the search\'s answer', '"No invoice found (2)"; no side scroll', `${options.join('; ')}; fits ${fits}`, options.includes('No invoice found (2)') && fits, file)
+  } finally {
+    await ctx.close()
+    await closeWorld(s)
+  }
+}
+
+// ---------------------------------------------------------------- R: the trigger off, as on a rollback
+async function rollbackRun(browser, size) {
+  const tag = `R-${size.tag}`
+  const s = await rollbackWorld()
+  const { ctx, page } = await openPage(browser, size, s)
+  try {
+    if (!await openCompleted(page)) {
+      record(`${tag}-list`, 'Completed Loads lists the loads', 'rows', 'not listed', false)
+      return
+    }
+    const retries = completedRows(s).filter((r) => r._autoInvoice && 'retry' in r._autoInvoice).length
+    record(`${tag}-rows`, 'No row says what Try again would do, as the sweep\'s never do', 'none', `rows with one ${retries}`, retries === 0)
+    for (const [id, , want, buttons] of s.expected) {
+      await chipStep(page, `${tag}-${id}`, `The row of ${id}`, id, want)
+      await lineStep(page, `${tag}-${id}-line`, `The dialog of ${id}, and its buttons`, id, want, buttons)
+    }
+    await openLine(page, ID.R_HAND)
+    const file = await shot(page, `${tag}-no-try-again`)
+    const tries = await page.locator('.auto-line button', { hasText: 'Try again' }).count()
+    record(`${tag}-no-try-again`, 'No Try again beside "Invoiced by hand"', 'no such button', `buttons ${tries}`, tries === 0, file)
+    await closeLine(page)
   } finally {
     await ctx.close()
     await closeWorld(s)
@@ -981,7 +1073,7 @@ function wireStep() {
 
 // ---------------------------------------------------------------- --world: no browser
 async function worldCheck() {
-  for (const [name, build] of [['E', statusWorld], ['P', passWorld], ['K', killedWorld]]) {
+  for (const [name, build] of [['E', statusWorld], ['P', passWorld], ['R', rollbackWorld], ['K', killedWorld]]) {
     const s = await build()
     const body = dashboardBody(s)
     const byId = new Map(body.completedJobs.map((r) => [r['Load ID'], r]))
@@ -990,7 +1082,7 @@ async function worldCheck() {
       const got = r ? clientStatus.invoiceStatusChip(r) : undefined
       const read = r ? r._invoiceStatus : undefined
       const auto = r ? r._autoInvoice : undefined
-      const gotButtons = [...(clientAuto.canMarkChecked(auto) ? ['Mark checked'] : []), ...(clientAuto.canTryAgain(auto) ? ['Try again'] : [])]
+      const gotButtons = [...(clientAuto.canMarkChecked(auto) ? ['Mark checked'] : []), ...(clientAuto.canTryAgain(auto, read) ? ['Try again'] : [])]
       const statusOk = status ? read && read.status === status : !read
       record(`W-${name}-${id}`, `${id}: the server's answer through the client's words`, `status ${status || '(none)'}; ${JSON.stringify(want && { ...want, reason: String(want.reason) })}; buttons ${JSON.stringify(buttons)}`,
         `status ${JSON.stringify(read)}; ${JSON.stringify(got)}; retry ${JSON.stringify(auto && auto.retry)}; buttons ${JSON.stringify(gotButtons)}`,
@@ -998,9 +1090,9 @@ async function worldCheck() {
     }
     if (name === 'E') {
       s.fillers = OLD_FILLER
-      const counts = clientStatus.invoiceStatusOptions(body.completedJobs).map((o) => `${o.value}:${o.count}`)
-      const want = ['sent', 'by_hand', 'draft', 'waiting', 'needs_attention', 'factored', 'none_found', 'unknown'].map((st) => `${st}:${wantCount(s, st)}`)
-      record('W-E-counts', 'The select\'s counts', want.join(' '), counts.join(' '), JSON.stringify(counts) === JSON.stringify(want))
+      const counts = clientStatus.invoiceStatusOptions(body.completedJobs, body.invoiceStatus).map((o) => `${o.value}:${o.count}`)
+      const want = OFFERED_PASS_OFF.map((st) => `${st}:${wantCount(s, st)}`)
+      record('W-E-counts', 'With the pass off, the select\'s seven and their counts', want.join(' '), counts.join(' '), JSON.stringify(counts) === JSON.stringify(want))
       const toggle = body.completedJobs.filter(clientAuto.autoInvoiceNeedsAttention).length
       record('W-E-toggle', 'The toggle\'s number differs from the select\'s', `not ${wantCount(s, 'needs_attention')}`, String(toggle), toggle !== wantCount(s, 'needs_attention'))
       const cols = s.evidence.exportColumns({ headers: JOB_HEADERS })
@@ -1008,8 +1100,14 @@ async function worldCheck() {
       record('W-E-csv', 'The file\'s cells', `Sent by LogisX, ${(s.claim(ID.SENT) || {}).invoice_id}, ${TODAY}`, sentCells.join(', '), sentCells[0] === 'Sent by LogisX' && sentCells[1] === (s.claim(ID.SENT) || {}).invoice_id && sentCells[2] === TODAY)
       const handCells = cols.cells(s.row(ID.HAND_ROW))
       record('W-E-csv-hand', 'The file keeps what isn\'t known about a draft row', `Invoiced by hand (Sent Mail not checked yet), ${NUMBER(80)}, `, handCells.join(', '), handCells[0] === 'Invoiced by hand (Sent Mail not checked yet)' && handCells[1] === NUMBER(80) && handCells[2] === '')
+      const draftCells = cols.cells(s.row(ID.JOB_DRAFT))
+      record('W-E-csv-draft', 'The file keeps what isn\'t known about the job\'s draft', 'Draft in Gmail (Sent Mail not checked yet)', draftCells[0], draftCells[0] === 'Draft in Gmail (Sent Mail not checked yet)')
       const smtpOnce = [ID.SENT, ID.CHANGED].map((id) => s.smtp.filter((m) => m.loadId === id).length).join(',')
       record('W-E-smtp', 'One SMTP call for each load the job sent, none for its draft', '1,1 and 0', `${smtpOnce} and ${s.smtp.filter((m) => m.loadId === ID.JOB_DRAFT).length}`, smtpOnce === '1,1' && !s.smtp.some((m) => m.loadId === ID.JOB_DRAFT))
+    }
+    if (name === 'P') {
+      const offered = clientStatus.invoiceStatusOptions(body.completedJobs, body.invoiceStatus).find((o) => o.value === 'none_found')
+      record('W-P-offered', 'With the pass on, the server\'s word brings the option back', 'none_found 2', offered ? `none_found ${offered.count}` : 'not offered', Boolean(offered) && offered.count === 2)
     }
     if (s.logs.length) console.log(`      logs in ${name}: ${s.logs.join(' | ').slice(0, 400)}`)
     await closeWorld(s)
@@ -1038,7 +1136,7 @@ async function main() {
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
     for (const size of [DESKTOP, PHONE]) {
-      for (const [name, run] of [['E', statusRun], ['F', filterRun], ['A', actionRun], ['P', passRun], ['K', killedRun], ['D', dispatcherRun]]) {
+      for (const [name, run] of [['E', statusRun], ['F', filterRun], ['A', actionRun], ['P', passRun], ['R', rollbackRun], ['K', killedRun], ['D', dispatcherRun]]) {
         try {
           await run(browser, size)
         } catch (e) {

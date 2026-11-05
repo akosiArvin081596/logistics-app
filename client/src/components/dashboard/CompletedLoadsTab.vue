@@ -147,7 +147,7 @@
             <div v-if="selectedAutoChip" class="auto-line" :class="`auto-line--${selectedAutoChip.tone}`">
               <span class="auto-line-text"><strong>{{ selectedAutoChip.label }}.</strong> {{ selectedAutoChip.reason }}</span>
               <button v-if="canMarkChecked(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('checked')">Mark checked</button>
-              <button v-if="canTryAgain(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('retry')">Try again</button>
+              <button v-if="canTryAgain(selectedJob._autoInvoice, selectedJob._invoiceStatus)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('retry')">Try again</button>
             </div>
             <div v-if="autoActionResult" class="auto-result" :class="`auto-result--${autoActionResult.tone}`" :role="autoActionResult.tone === 'error' ? 'alert' : 'status'">{{ autoActionResult.msg }}</div>
             <!-- Factored loads (Triumph), in lib/factoringStatus.js's words. -->
@@ -419,6 +419,8 @@ const autoChip = (job) => (auth.isSuperAdmin && job ? invoiceStatusChip(job) : n
 // on the rows (codes only, worded by lib/invoiceStatus.js). Without it, the chips read as before.
 const invoiceStatusOn = computed(() => auth.isSuperAdmin && props.jobs.some(hasInvoiceStatus))
 const invoiceStatusChoice = ref('') // a status, '' = all
+// The server's word, never worked out from the rows: only the pass can say a search found nothing.
+const invoiceMailboxPass = computed(() => auth.isSuperAdmin && dashboard.data?.invoiceStatus?.mailboxPass === true)
 const autoToggleTitle = computed(() => attentionToggleTitle({ on: autoAttentionOnly.value, statusShown: invoiceStatusOn.value }))
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
@@ -523,7 +525,7 @@ const searchResult = computed(() => {
   return searchLoads(pool, searchQuery.value, loadIdCol.value)
 })
 // What picking each status would list: every other filter and the search applied, not itself.
-const invoiceStatusChoices = computed(() => invoiceStatusOptions(searchLoads(poolBeforeStatus.value, searchQuery.value, loadIdCol.value).rows))
+const invoiceStatusChoices = computed(() => invoiceStatusOptions(searchLoads(poolBeforeStatus.value, searchQuery.value, loadIdCol.value).rows, { mailboxPass: invoiceMailboxPass.value }))
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
 const emptyMessage = computed(() => {
@@ -586,6 +588,7 @@ watch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })
 // Likewise the invoice status: with the rows' status gone (the kill switch), so is its select.
 watch(invoiceStatusChoice, () => goTo(1))
 watch(invoiceStatusOn, (on) => { if (!on) invoiceStatusChoice.value = '' })
+watch(invoiceMailboxPass, (on) => { if (!on && invoiceStatusChoice.value === 'none_found') invoiceStatusChoice.value = '' })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.

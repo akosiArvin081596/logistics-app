@@ -139,7 +139,10 @@ export function autoInvoiceNeedsAttention(row) {
 
 // The server says what Try again would do (`retry`) while the driver's Delivered starts
 // the invoice: "none" is a load it refuses, and a load nothing started has nothing to retry.
-export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none')
+// `invoiceStatus`, the row's `_invoiceStatus`, refuses too: a row with no `retry`, the sweep's,
+// must not offer a second invoice beside words saying the load is already invoiced.
+const SAYS_INVOICED = Object.freeze(['by_hand', 'sent'])
+export const canTryAgain = (status, invoiceStatus = null) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none' && !(invoiceStatus && SAYS_INVOICED.includes(invoiceStatus.status)))
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
 
 // The question before Try again, while it is the only retry and can send at once: "" asks

@@ -14,6 +14,11 @@
 //      Clear, the export note, the toggle's title
 //   §8 Super Admin only, on the page
 //   §9 no status is worked out here: a plain module that reads codes
+//   §10 a load changed since the job's draft or send keeps saying so, and every line beside Mark
+//       checked says why; a draft nobody has searched for says Sent Mail isn't checked
+//   §11 Try again is never offered beside a status that says the load is invoiced, in any mode
+//
+// Client words only, plus the server's own rule for §4, §10 and §11. See test-invoice-status.js.
 //
 // No network, no DOM, no database. Made-up data only.
 //   node scripts/test-invoice-status-client.mjs      # exits 1 on any failure
@@ -89,6 +94,8 @@ const CASES = [
   ['draft, the job\'s', { status: 'draft', invoiceId: ID, whose: 'job' }, { label: 'Draft in Gmail', tone: 'ok', reason: `LogisX made this draft. Invoice ${ID} is in Gmail Drafts. Check it and send it.` }],
   ['draft, a person\'s', { status: 'draft', invoiceId: ID, whose: 'person' }, { label: 'Draft in Gmail', tone: 'ok', reason: `Someone made this draft by hand. Invoice ${ID} is in Gmail Drafts. Check it and send it.` }],
   ['draft, found with no row', { status: 'draft' }, { label: 'Draft in Gmail', tone: 'ok', reason: 'An invoice for this load is in Gmail Drafts. Check it and send it.' }],
+  ['draft, the job\'s, with no search behind it', { status: 'draft', invoiceId: ID, whose: 'job', sentUnchecked: true }, { label: 'Draft in Gmail: Sent Mail not checked yet', tone: 'muted', reason: `LogisX made this draft. Invoice ${ID} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Look in both before sending it or drafting again.` }],
+  ['draft, the job\'s, no search and no number', { status: 'draft', whose: 'job', sentUnchecked: true }, { label: 'Draft in Gmail: Sent Mail not checked yet', tone: 'muted', reason: 'LogisX made this draft. The invoice may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet. Look in both before sending it or drafting again.' }],
   ['waiting, no code', { status: 'waiting' }, { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' }],
   ['waiting, a claim\'s code', { status: 'waiting', code: 'GEMINI_DOWN' }, { label: 'Waiting: rate-con reader down', tone: 'muted', reason: A.AUTO_INVOICE_REASONS.GEMINI_DOWN.text }],
   ['waiting, a driver\'s tap', { status: 'waiting', code: 'DRIVER_PENDING' }, { label: 'Waiting: about to be made', tone: 'muted', reason: A.AUTO_INVOICE_REASONS.DRIVER_PENDING.text }],
@@ -185,7 +192,22 @@ section('§4  "No automatic invoice", and "No invoice found" from the server alo
   eq(chip(row(answers({ passOn: true, saved: clean }), NOT_BY_DRIVER)).label, 'No invoice found', '§4 FAILS ON THE OLD CODE: with the pass on, the search\'s answer beats it')
   eq(chip(row(answers({ passOn: true }), NOT_BY_DRIVER)), tChip, '§4 FAILS ON THE OLD CODE: ...and until the pass reaches the load, the chip stays')
   eq(chip(row(notSearched)).label, "Couldn't check: not searched yet", '§4 FAILS ON THE OLD CODE: an old load with no such chip reads Couldn\'t check')
-  eq(chip(row(notSearched, { state: 'needs_attention', code: 'OFF_GAP', invoiceId: '', changed: [] })).label, "Couldn't check: not searched yet", '§4 FAILS ON THE OLD CODE: ...and so does OFF_GAP: only NOT_BY_DRIVER takes this path')
+  eq(chip(row(notSearched, { state: 'needs_attention', code: 'TOTAL_MISMATCH', invoiceId: '', changed: [] })).label, "Couldn't check: not searched yet", '§4 FAILS ON THE OLD CODE: ...and so does any other held code: only NOT_BY_DRIVER and OFF_GAP take this path')
+
+  // OFF_GAP: "it may already be invoiced, check Sent Mail" is what stops a second invoice, so it
+  // stands just as long, whichever mode is on.
+  const OFF_GAP = { state: 'needs_attention', code: 'OFF_GAP', invoiceId: '', changed: [] }
+  const gapClaim = { state: 'needs_attention', reason_code: 'OFF_GAP' }
+  const gapChip = A.autoInvoiceChip(OFF_GAP)
+  eq([gapChip.label, gapChip.tone], ['Needs attention: completed while off', 'bad'], '§4 OFF_GAP\'s own chip')
+  eq(chip(row(answers({ claim: gapClaim }), OFF_GAP)), gapChip, '§4 FAILS ON THE OLD CODE: OFF_GAP with the pass off keeps its own chip and sentence')
+  eq(chip(row(answers({ claim: gapClaim, saved: clean }), { ...OFF_GAP, trigger: true, retry: 'none' })), gapChip, '§4 FAILS ON THE OLD CODE: ...with a clean answer saved, the trigger on')
+  for (const code of ['NOT_SEARCHED', 'SEARCH_FAILED', 'PAYMENTS_NOT_READ', 'EVIDENCE_UNREADABLE']) {
+    eq(chip(row({ status: 'unknown', code }, OFF_GAP)), gapChip, `§4 FAILS ON THE OLD CODE: ...and ${code} doesn't hide it`)
+  }
+  eq(chip(row(answers({ claim: gapClaim, passOn: true, saved: clean }), OFF_GAP)).label, 'No invoice found', '§4 FAILS ON THE OLD CODE: an answered search still replaces it once the pass is on')
+  eq(chip(row(answers({ claim: gapClaim, saved: { ...clean, sent_invoice: 1, first_sent_at: AT } }), OFF_GAP)).label, 'Invoiced by hand', '§4 FAILS ON THE OLD CODE: ...as does an invoice found')
+  eq(chip(row(answers({ claim: gapClaim, saved: { ...clean, sent_mention: 1 } }), OFF_GAP)).label, "Couldn't check: an email names this load", '§4 FAILS ON THE OLD CODE: ...or an email naming the load')
 
   // "No invoice found" only for the server's none_found, across every other status and chip.
   const AUTOS = [undefined, NOT_BY_DRIVER, { state: 'drafted', changed: [] }, { state: 'needs_attention', code: 'OFF_GAP' }, { state: 'waiting', code: 'WAITING_POD' }, { state: 'working' }, { state: 'queued' }]
@@ -193,7 +215,11 @@ section('§4  "No automatic invoice", and "No invoice found" from the server alo
   let leaked = 0
   for (const read of READS) for (const auto of AUTOS) if (/No invoice found/.test(JSON.stringify(chip(row(read, auto)) || ''))) leaked++
   eq(leaked, 0, '§4 no other answer, with any chip beside it, ever reads "No invoice found"')
-  eq((fnOf('invoiceStatusOptions')([row({ status: 'unknown', code: 'NOT_SEARCHED' }), {}]) || []).find((o) => o.value === 'none_found')?.count, 0,'§4 FAILS ON THE OLD CODE: nor does the filter count one')
+  const offered = (opts) => (fnOf('invoiceStatusOptions')([row({ status: 'unknown', code: 'NOT_SEARCHED' }), {}], opts) || []).map((o) => o.value)
+  eq(offered().length > 0 && !offered().includes('none_found'), true, '§4 FAILS ON THE OLD CODE: the filter doesn\'t offer it unless the server says the pass is on')
+  eq(offered({ mailboxPass: false }).includes('none_found'), false, '§4 ...the server says it\'s off')
+  eq(offered({ mailboxPass: 'true' }).includes('none_found'), false, '§4 ...anything but true reads as off')
+  eq(offered({ mailboxPass: true }).includes('none_found'), true, '§4 FAILS ON THE OLD CODE: ...and offers it once the server says the pass is on')
   eq(TAB.split('No invoice found').length - 1, 0, '§4 the page names no status: the words live in one file')
   const LIB = fs.existsSync(CLIENT) ? fs.readFileSync(CLIENT, 'utf8') : ''
   eq(LIB.split('No invoice found').length - 1, 1, '§4 FAILS ON THE OLD CODE: that file has the words once, in the table the runner pins')
@@ -220,7 +246,7 @@ section('§6  Mark checked, Try again and `retry: "none"`')
 {
   const tag = (name) => (new RegExp(`<button[^>]*@click="autoInvoiceAction\\('${name}'\\)"[^>]*>`).exec(TAB) || [''])[0]
   ok(/v-if="canMarkChecked\(selectedJob\._autoInvoice\)"/.test(tag('checked')), '§6 Mark checked reads `_autoInvoice`')
-  ok(/v-if="canTryAgain\(selectedJob\._autoInvoice\)"/.test(tag('retry')), '§6 Try again reads `_autoInvoice`')
+  ok(/v-if="canTryAgain\(selectedJob\._autoInvoice, selectedJob\._invoiceStatus\)"/.test(tag('retry')), '§6 FAILS ON THE OLD CODE: Try again reads `_autoInvoice`, and the status only to refuse')
   ok(!/canTryAgain\(selectedJob\._invoiceStatus|canMarkChecked\(selectedJob\._invoiceStatus/.test(TAB), '§6 ...neither reads the status')
   // The status's line and its buttons share one line, the buttons by the job's rules.
   const lineOpen = TAB.indexOf('<div v-if="selectedAutoChip" class="auto-line"')
@@ -284,12 +310,13 @@ section('§7  the filter')
     row({ status: 'unknown', code: 'NOT_SEARCHED' }), row({ status: 'unknown', code: 'NOT_SEARCHED' }, { state: 'needs_attention', code: 'NOT_BY_DRIVER' }),
     { _autoInvoice: { state: 'drafted', changed: [] } }, {}, row({ status: 'SOMETHING_NEW' }), null,
   ]
-  const options = fnOf('invoiceStatusOptions')(rows) || []
+  const options = fnOf('invoiceStatusOptions')(rows, { mailboxPass: true }) || []
   eq(options.map((o) => [o.value, o.label, o.count, o.text]), [
     ['sent', 'Sent by LogisX', 2, 'Sent by LogisX (2)'], ['by_hand', 'Invoiced by hand', 1, 'Invoiced by hand (1)'], ['draft', 'Draft in Gmail', 1, 'Draft in Gmail (1)'],
     ['waiting', 'Waiting', 1, 'Waiting (1)'], ['needs_attention', 'Needs attention', 1, 'Needs attention (1)'], ['factored', 'Factored (Triumph)', 1, 'Factored (Triumph) (1)'],
     ['none_found', 'No invoice found', 1, 'No invoice found (1)'], ['unknown', "Couldn't check", 2, "Couldn't check (2)"],
   ], '§7 FAILS ON THE OLD CODE: the eight words with their counts: a row with no status, or one this client can\'t word, is in no bucket')
+  eq((fnOf('invoiceStatusOptions')(rows) || []).map((o) => o.value), ['sent', 'by_hand', 'draft', 'waiting', 'needs_attention', 'factored', 'unknown'], '§7 FAILS ON THE OLD CODE: the pass off: seven, with "No invoice found" left out')
   const filter = fnOf('filterByInvoiceStatus')
   eq(filter(rows, 'sent')?.length, 2, '§7 FAILS ON THE OLD CODE: the filter lists a status\'s rows')
   eq(filter(rows, 'unknown')?.length, 2, '§7 FAILS ON THE OLD CODE: a row with no status never lands in Couldn\'t check')
@@ -302,7 +329,9 @@ section('§7  the filter')
   ok(/<div v-if="invoiceStatusOn" class="cl-field">\s*<label class="cl-label" for="cl-invoice-status">Invoice status<\/label>\s*<select id="cl-invoice-status" v-model="invoiceStatusChoice" class="dash-select cl-control cl-invoice-status">/.test(bar), '§7 FAILS ON THE OLD CODE: a labelled select in the Super Admin bar, while the rows have a status')
   ok(/<option value="">All invoice statuses<\/option>\s*<option v-for="o in invoiceStatusChoices" :key="o\.value" :value="o\.value">\{\{ o\.text \}\}<\/option>/.test(bar), '§7 FAILS ON THE OLD CODE: ...offering all, then the eight with their counts')
   ok(/const searchResult = computed\(\(\) => \{\s*const pool = filterByInvoiceStatus\(poolBeforeStatus\.value, invoiceStatusOn\.value \? invoiceStatusChoice\.value : ''\)\s*return searchLoads\(pool, searchQuery\.value, loadIdCol\.value\)/.test(TAB), '§7 FAILS ON THE OLD CODE: the list applies it, and only while the select is there')
-  ok(/const invoiceStatusChoices = computed\(\(\) => invoiceStatusOptions\(searchLoads\(poolBeforeStatus\.value, searchQuery\.value, loadIdCol\.value\)\.rows\)\)/.test(TAB), '§7 FAILS ON THE OLD CODE: its counts are what picking each would list: the other filters and the search applied, not itself')
+  ok(/const invoiceStatusChoices = computed\(\(\) => invoiceStatusOptions\(searchLoads\(poolBeforeStatus\.value, searchQuery\.value, loadIdCol\.value\)\.rows, \{ mailboxPass: invoiceMailboxPass\.value \}\)\)/.test(TAB), '§7 FAILS ON THE OLD CODE: its counts are what picking each would list: the other filters and the search applied, not itself; the server says if the pass is on')
+  ok(/const invoiceMailboxPass = computed\(\(\) => auth\.isSuperAdmin && dashboard\.data\?\.invoiceStatus\?\.mailboxPass === true\)/.test(TAB), '§7 FAILS ON THE OLD CODE: whether the pass is on is the server\'s answer, never worked out from the rows')
+  ok(/watch\(invoiceMailboxPass, \(on\) => \{ if \(!on && invoiceStatusChoice\.value === 'none_found'\) invoiceStatusChoice\.value = '' \}\)/.test(TAB), '§7 FAILS ON THE OLD CODE: the pass gone, a choice of "No invoice found" goes with its option')
   ok(/watch\(invoiceStatusChoice, \(\) => goTo\(1\)\)/.test(TAB), '§7 FAILS ON THE OLD CODE: a choice goes back to page 1, like the other filters')
   ok(/watch\(invoiceStatusOn, \(on\) => \{ if \(!on\) invoiceStatusChoice\.value = '' \}\)/.test(TAB), '§7 FAILS ON THE OLD CODE: the select gone (the kill switch), the choice goes with it')
   ok(/const filtersActive = computed\(\(\) => !!\(driverFilter\.value \|\| fromDate\.value \|\| toDate\.value \|\| invoiceStatusChoice\.value\)\)/.test(TAB), '§7 FAILS ON THE OLD CODE: Clear and the count show for it')
@@ -356,6 +385,77 @@ section('§9  the browser only words it')
   ok(!/_invoiceStatus\s*:\s*\{/.test(TAB), '§9 the page never writes a status onto a row either')
   eq(fnOf('statusAfterAction')('retry', { status: 'needs_attention', code: 'TOTAL_MISMATCH' }), undefined, '§9 Try again taken: no status, rather than one the browser chose')
   eq(fnOf('statusAfterAction')('checked', { status: 'sent', invoiceId: ID, changed: ['payment'] }), { status: 'sent', invoiceId: ID }, '§9 FAILS ON THE OLD CODE: Mark checked taken: the same status, without the mark the server just cleared')
+}
+
+// The server's own answers, so these read a real load as the rule reads it.
+const ruled = (over) => server.statusOf({ claim: null, rows: [], presses: [], factored: false, triumphDone: false, saved: null, isBison: false, closedMonth: () => false, sweepOn: false, passOn: false, dayOf: () => DAY, ...over })
+const answered = (over = {}) => ({ result: 'answered', searched_at: AT, payments_checked_at: AT, ...over })
+
+// ------------------------------------------------------------------ §10
+section('§10 a load changed since the job drafted or sent it keeps saying so')
+{
+  const JOB = { state: 'drafted', delivery: '', stage: 'recorded', invoice_id: ID, invoice_date: DAY, changed_fields: 'payment' }
+  const auto = { state: 'drafted', code: '', invoiceId: ID, changed: ['payment'] }
+  const SINCE_DRAFT = 'Changed since the draft: the Payment. Check the draft in Gmail, then Mark checked.'
+  const SINCE_SEND = 'Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed, then Mark checked.'
+  const UNCHECKED = `LogisX made this draft. Invoice ${ID} may be in Gmail Drafts, or already in Sent Mail if someone sent it: neither has been checked yet.`
+
+  eq(chip(row(ruled({ claim: JOB }), auto)), { label: 'Draft in Gmail: load changed', tone: 'warn', reason: `${UNCHECKED} ${SINCE_DRAFT}` }, '§10 FAILS ON THE OLD CODE: the job\'s draft, not searched: amber, with what changed, never "send it"')
+  eq(chip(row(ruled({ claim: JOB, passOn: true, saved: answered({ drafts_invoice: 1 }) }), auto)), { label: 'Draft in Gmail: load changed', tone: 'warn', reason: `LogisX made this draft. Invoice ${ID} is in Gmail Drafts. ${SINCE_DRAFT}` }, '§10 FAILS ON THE OLD CODE: the job\'s draft, found in Drafts: the same')
+  eq(chip(row(ruled({ claim: JOB, saved: answered({ sent_invoice: 1, first_sent_at: AT }) }), auto)), { label: 'Invoiced by hand: load changed', tone: 'warn', reason: `Invoice ${ID} is in Gmail Sent Mail, dated ${SHOWN}. ${SINCE_SEND}` }, '§10 FAILS ON THE OLD CODE: a person sent the draft, then the load changed: it says the invoice went')
+  eq(chip(row(ruled({ claim: { ...JOB, changed_fields: '' }, saved: answered({ payments_status: 1 }), passOn: true }), auto)), { label: 'Invoiced by hand: load changed', tone: 'warn', reason: `Invoice ${ID}. The Payments Table holds an invoice or payment for this load. ${SINCE_SEND}` }, '§10 FAILS ON THE OLD CODE: ...and so does one on the Payments Table')
+  const SENT_CLAIM = { ...JOB, delivery: 'send', sent_at: AT }
+  eq(chip(row(ruled({ claim: SENT_CLAIM }), { ...auto, sent: true })).label, 'Sent by LogisX: load changed', '§10 a send keeps its own mark, as before')
+  eq(chip(row(ruled({ rows: [{ via: 'auto-smtp', invoice_id: ID, created_at: AT }] }), { ...auto, sent: true })).reason.endsWith(SINCE_SEND), true, '§10 FAILS ON THE OLD CODE: a sent row whose answer carries no mark still gets the sentence')
+
+  // Any line beside Mark checked says why: without it the button clears a warning nobody read.
+  const OTHERS = [
+    [{ status: 'needs_attention', code: 'DRAFT_NOT_IN_GMAIL', invoiceId: ID }, 'Needs attention: in neither Gmail mailbox', 'bad'],
+    [{ status: 'needs_attention', code: 'INVOICE_MAYBE_DRAFTED' }, 'Needs attention: may already be in Gmail', 'bad'],
+    [{ status: 'unknown', code: 'MENTIONED', invoiceId: ID }, "Couldn't check: an email names this load", 'warn'],
+    [{ status: 'unknown', code: 'BISON_ORDER_NUMBER', invoiceId: ID }, "Couldn't check: Bison Order # unknown", 'warn'],
+    [{ status: 'waiting', code: 'HAND_DRAFT_IN_FLIGHT' }, 'Waiting: being drafted by hand', 'warn'],
+    [{ status: 'factored' }, 'Factored (Triumph)', 'warn'],
+  ]
+  for (const [read, label, tone] of OTHERS) {
+    const c = chip(row(read, auto))
+    eq([c.label, c.tone, c.reason.endsWith(SINCE_DRAFT)], [label, tone, true], `§10 FAILS ON THE OLD CODE: ${read.status} ${read.code || ''}: its own words, then why Mark checked is there, and no longer grey`)
+  }
+  for (const read of [...CASES.map(([, r]) => r), ...OTHERS.map(([r]) => r)]) {
+    ok(/Mark checked\.$/.test(chip(row(read, auto)).reason), `§10 FAILS ON THE OLD CODE: ${JSON.stringify(read).slice(0, 80)}: beside Mark checked, the line ends by saying what to do`)
+  }
+
+  // Nothing changed, or the mark checked: the plain words.
+  const plain = { ...auto, changed: [] }
+  eq(chip(row(ruled({ claim: { ...JOB, changed_fields: '' } }), plain)).label, 'Draft in Gmail: Sent Mail not checked yet', '§10 FAILS ON THE OLD CODE: no change: no mark')
+  eq(chip(row(ruled({ claim: { ...JOB, changed_fields: '' }, passOn: true, saved: answered({ drafts_invoice: 1 }) }), plain)).label, 'Draft in Gmail', '§10 ...found in Drafts: plain')
+  eq(chip(row({ status: 'draft', whose: 'job' }, { ...auto, changed: ['toString'] })).label, 'Draft in Gmail', '§10 a field this client has no words for: no mark, as today')
+  eq(chip(row({ status: 'draft', whose: 'job' }, { state: 'needs_attention', code: 'TOTAL_MISMATCH', changed: ['payment'] })).label, 'Draft in Gmail', '§10 only a drafted claim has a mark to check')
+  eq(chip(row(ruled({ claim: JOB }), { ...auto, changed: [] })).label, 'Draft in Gmail: Sent Mail not checked yet', '§10 FAILS ON THE OLD CODE: Mark checked taken: the mark goes, and what isn\'t known stays')
+
+  // A held load whose invoice is in Gmail Drafts: the line says so, rather than "draft it by hand".
+  const HELD = { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' }
+  const inDrafts = chip(row(ruled({ claim: HELD, saved: answered({ drafts_invoice: 1 }) }), { state: 'needs_attention', code: 'TOTAL_MISMATCH', trigger: true, retry: 'none', changed: [] }))
+  eq(inDrafts, { label: 'Draft in Gmail', tone: 'ok', reason: 'An invoice for this load is in Gmail Drafts. Check it and send it.' }, '§10 FAILS ON THE OLD CODE: held, with an invoice in Gmail Drafts: the line says what\'s true')
+  ok(!/Try again|draft it by hand/.test(inDrafts.reason), '§10 FAILS ON THE OLD CODE: ...and names no button and no second draft')
+}
+
+// ------------------------------------------------------------------ §11
+section('§11 no Try again beside a status that says the load is invoiced')
+{
+  // The sweep's rows carry no `retry`, so only the status can refuse on a rollback.
+  const held = { state: 'needs_attention', code: 'TOTAL_MISMATCH', invoiceId: '', changed: [] }
+  for (const read of [{ status: 'by_hand', found: 'sent_mail' }, { status: 'by_hand', found: 'payments_table' }, { status: 'by_hand', found: 'draft_row', sentUnchecked: true }, { status: 'sent', invoiceId: ID }]) {
+    eq(A.canTryAgain(held, read), false, `§11 FAILS ON THE OLD CODE: ${read.status} ${read.found || ''}: no Try again, with no \`retry\` on the row`)
+    eq(A.canTryAgain({ ...held, trigger: true, retry: 'send' }, read), false, `§11 FAILS ON THE OLD CODE: ${read.status} ${read.found || ''}: ...nor when the server says it could send`)
+  }
+  for (const read of [undefined, null, {}, { status: 'needs_attention', code: 'TOTAL_MISMATCH' }, { status: 'unknown', code: 'NOT_SEARCHED' }, { status: 'draft' }, { status: 'none_found' }, { status: 'waiting' }, { status: 'factored' }]) {
+    eq(A.canTryAgain(held, read), true, `§11 ${JSON.stringify(read)}: nothing says it's invoiced: as before`)
+  }
+  eq(A.canTryAgain(held), true, '§11 no status on the row (the kill switch): as before')
+  const rolledBack = ruled({ claim: { state: 'needs_attention', reason_code: 'TOTAL_MISMATCH' }, sweepOn: true, passOn: true, saved: answered({ sent_invoice: 1, first_sent_at: AT }) })
+  eq(rolledBack.status, 'by_hand', '§11 the trigger off, the pass on, an invoice in Sent Mail: the server says Invoiced by hand')
+  eq(A.canTryAgain(held, rolledBack), false, '§11 FAILS ON THE OLD CODE: ...and no Try again beside it, so a rollback can\'t show one')
 }
 
 console.log(`\n${'='.repeat(64)}`)
