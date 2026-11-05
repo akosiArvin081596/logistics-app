@@ -55915,6 +55915,9 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
 //     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
 //     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
+//   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
+//     chrobinson.com goes only to an address a person has already invoiced on 3 loads
+//     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -55960,6 +55963,7 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		const sheets = await getSheets();
 		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
 	},
+	rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
 	log: console,
 });
 // The status route's and the document routes' one call each into the job: nothing here
@@ -56512,7 +56516,8 @@ async function getRateConBytes(loadId, body, loadCtx = null, opts = {}) {
 						{ responseType: "arraybuffer" },
 					);
 					const buffer = Buffer.from(resp.data);
-					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive" });
+					// driveFileName: the whole name, since `label` is cut for the review. The automatic job's known-address check tests it.
+					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive", driveFileName: f.name || "" });
 				} catch (e) {
 					console.error("Draft invoice: rate-con Drive file fetch failed:", e.message);
 				}
