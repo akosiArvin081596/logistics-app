@@ -63194,7 +63194,8 @@ const FUEL_RESERVE_FRACTION = (() => {
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
 
 // The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
-// An enable switch, off unless true/1/yes/on: off, both answers are as before.
+// An enable switch, off unless true/1/yes/on: off, no block, and both answers quote
+// one range instead (sharedFuelRangeFor()).
 const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
 // The lib's 10 is a floor: a bad value or one below it gives 10, so it can only add fuel.
 const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
@@ -63286,6 +63287,43 @@ function resolveCredibleFuelReading(vehicleId, rows, mpg, tank) {
 	// hasFuelSensor() does, rather than inventing a number.
 	if (!anchor) return fuelModel.resolveFuelReading({ rows: list, mpg, tankGallons: tank, ...clock });
 	return fuelModel.resolveFuelReading({ rows: [latest, anchor], mpg, tankGallons: tank, ...clock });
+}
+
+// The newest-first telemetry window the fuel answers read a truck's level from.
+function fuelReadingRows(vehicleId) {
+	return vehicleId ? db.prepare(
+		`SELECT odometer, fuel_pct, location_date_ms FROM routemate_telemetry
+		 WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 200`).all(vehicleId) : [];
+}
+
+// MPG comes from the persisted ELD rollup (routemate_fuel_daily), not an
+// on-the-fly derivation: average the recent CLEAN daily rows
+// (derivation_notes = '' means no outlier/insufficient-sample flag). This is
+// the same smoothed, per-truck economy the fuel dashboard shows. 0 when the
+// rollup has nothing for this vehicle.
+function rollupMpgForVehicle(vehicleId) {
+	if (!vehicleId) return 0;
+	const mpgRows = db.prepare(
+		`SELECT mpg FROM routemate_fuel_daily
+		 WHERE routemate_vehicle_id = ? AND derivation_notes = '' AND mpg > 0 AND miles >= 50
+		 ORDER BY date DESC LIMIT 14`).all(vehicleId);
+	if (!mpgRows.length) return 0;
+	const sum = mpgRows.reduce((s, r) => s + r.mpg, 0);
+	return Math.round((sum / mpgRows.length) * 100) / 100;
+}
+
+// With the driver gallons flag off, both fuel answers quote this one range
+// (lib/fuel-model.js sharedFuelRange()). A newest fix from before the device's link
+// was taken on another vehicle (B11), so its level counts as no reading at all.
+function sharedFuelRangeFor({ truck, rows, rollupMpg, receipt, burn }) {
+	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+	const beforeLink = rows.length > 0
+		&& eldPosition.fixPredatesLink(rows[0].location_date_ms, eldDeviceLinkedSinceMs(truck && truck.id, vehicleId));
+	return fuelModel.sharedFuelRange({
+		tankGallons: truck ? truck.fuel_tank_gallons : 0, avgMpg: truck ? truck.avg_mpg : 0,
+		rollupMpg, receiptMpg: receipt ? receipt.mpg : null, burn, reserve: FUEL_RESERVE_OPTS,
+		readingAt: (mpg, tank) => resolveCredibleFuelReading(vehicleId, beforeLink ? [] : rows, mpg, tank),
+	});
 }
 
 // --- low-fuel alert -------------------------------------------------------
@@ -63449,28 +63487,12 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// plus tankSource saying whether that number was configured or assumed —
 		// keep passing the raw 0 rather than substituting a default here, or the
 		// module loses the only signal it has to tell those two cases apart).
-		const rows = vehicleId ? db.prepare(
-			`SELECT odometer, fuel_pct, location_date_ms FROM routemate_telemetry
-			 WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 200`).all(vehicleId) : [];
+		const rows = fuelReadingRows(vehicleId);
 		const latest = rows[0] || null;
 
-		// MPG comes from the persisted ELD rollup (routemate_fuel_daily), not an
-		// on-the-fly derivation: average the recent CLEAN daily rows
-		// (derivation_notes = '' means no outlier/insufficient-sample flag). This is
-		// the same smoothed, per-truck economy the fuel dashboard shows. When the
-		// rollup has nothing for this vehicle we fall back to the truck's configured
-		// avg_mpg, then the model default.
-		let rollupMpg = 0;
-		if (vehicleId) {
-			const mpgRows = db.prepare(
-				`SELECT mpg FROM routemate_fuel_daily
-				 WHERE routemate_vehicle_id = ? AND derivation_notes = '' AND mpg > 0 AND miles >= 50
-				 ORDER BY date DESC LIMIT 14`).all(vehicleId);
-			if (mpgRows.length) {
-				const sum = mpgRows.reduce((s, r) => s + r.mpg, 0);
-				rollupMpg = Math.round((sum / mpgRows.length) * 100) / 100;
-			}
-		}
+		// When the rollup has nothing for this vehicle we fall back to the truck's
+		// configured avg_mpg, then the model default.
+		const rollupMpg = rollupMpgForVehicle(vehicleId);
 
 		// ⚠️ Resolve a CREDIBLE reading before the model sees it — `latest.fuel_pct`
 		// is a dropout roughly half the time on this fleet (see
@@ -63482,9 +63504,9 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		const preTank = truck && truck.fuel_tank_gallons > 0
 			? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
 		const preMpg = truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
-		const reading = resolveCredibleFuelReading(vehicleId, rows, preMpg, preTank);
+		let reading = resolveCredibleFuelReading(vehicleId, rows, preMpg, preTank);
 
-		const estimate = fuelModel.estimateRangeForVehicle({
+		let estimate = fuelModel.estimateRangeForVehicle({
 			fuelPct: reading.fuelPct,
 			tankGallons: truck ? truck.fuel_tank_gallons : 0,
 			avgMpg: truck ? truck.avg_mpg : 0,
@@ -63568,9 +63590,13 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// UI must render. Showing `typical` — never mind rangeMiles — is what put
 		// "449 mi" in front of a driver with 210 miles of fuel.
 		const burn = burnRateForVehicle(vehicleId);
-		const interval = fuelModel.rangeInterval({
+		let interval = fuelModel.rangeInterval({
 			fuelPct: estimate.fuelPct, burn, rangeMiles: estimate.rangeMiles,
 		});
+		// Flag off: the figures above give way to the one range the load's Fuel section
+		// quotes too, so the chip and the section can differ only by the reserve.
+		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({ truck, rows, rollupMpg, receipt: receiptMpg, burn });
+		if (shared) ({ reading, estimate, interval } = shared);
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
 		// SECURITY: the ELD vehicle id is dispatch-only and is OMITTED for the
@@ -63613,9 +63639,9 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			// 'unknown' and there is no honest figure; a 0 here renders as "0 mi to
 			// dry", which reads as an empty tank rather than as no reading.
 			reserveMiles: FUEL_RESERVE_MILES,
-			rangeUsableMiles: interval.planning == null
+			rangeUsableMiles: shared ? shared.usableMiles : (interval.planning == null
 				? null
-				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES)),
+				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES))),
 			// Provenance of the FUEL READING itself, which is a separate axis from
 			// rangeBasis (that one describes the miles-per-point evidence). 'live' =
 			// the sensor answered; 'carried' = the sensor is dropping out and this is
@@ -63970,16 +63996,23 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 
 		const burn = burnRateForVehicle(vehicleId);
 		const receipt = receiptMpgForVehicle(vehicleId);
+		// The plan's own MPG, for gallonsNeeded (a lower bound, read by the dispatch card);
+		// it stays off the range below, which can rest on a lower MPG with the flag off.
 		const mpg = receipt ? receipt.mpg
 			: (truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG);
 		const tank = truck && truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+		// Flag off: the one range the header chip quotes too, so the Fuel section's figure
+		// and its verdict can't rest on a number the chip doesn't show.
+		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({
+			truck, rows: fuelReadingRows(vehicleId), rollupMpg: rollupMpgForVehicle(vehicleId), receipt, burn,
+		});
 		// Same credible-reading resolution as /api/fuel/range — a raw latest.fuel_pct
 		// is a dropout ~47% of the time on this fleet, and this is the endpoint whose
 		// answer a driver acts on. Without it, the 2026-08-17 run-dry returns
 		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
-		const reading = resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
-		const pct = fuelModel.planningRateFuelPct({ reading, burn, tankGallons: tank, mpg });
-		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
+		const reading = shared ? shared.reading : resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
+		const pct = shared ? shared.estimate.fuelPct : fuelModel.planningRateFuelPct({ reading, burn, tankGallons: tank, mpg });
+		const shown = shared ? shared.estimate : fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
 
 		const plan = fuelModel.planTripFuel({
 			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
