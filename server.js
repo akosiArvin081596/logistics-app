@@ -73974,7 +73974,7 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 // FEATURE_OFF. Super Admin writes, Dispatcher reads; nothing reads it yet (lib/safety-event-log.js).
 const safetyEventLog = require("./lib/safety-event-log").mount(app, {
 	enabled: process.env.SAFETY_EVENT_LOG_ENABLED === "true",
-	requireRole, db, logAudit, logAuditRefusal, periodWriteLocked, periodLocksReadable, appTodayKey,
+	requireRole, db, logAudit, logAuditRefusal, auditText, periodWriteLocked, periodLocksReadable, appTodayKey,
 });
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.

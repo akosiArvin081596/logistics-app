@@ -19,8 +19,9 @@
  * §5  edit: a partial body, a reason, an audit row holding old and new; a no-op
  *     writes nothing
  * §6  void: a reason, an audit row; the row stays; no way to delete one
- * §7  closed months: create, edit (either side) and void refused, audited, nothing
- *     written; an unreadable lock table counts as closed; reads still answer
+ * §7  closed months: an event keeps its true date and is marked late; an edit or a
+ *     void still works and marks it; no closed month's lock or figure moves; locks
+ *     that can't be read hold the write, audited; reads still answer
  * §8  no driver sees any of it: the board, the driver's own week and the Super Admin
  *     report are byte-identical with and without events; no other code names the log
  * §9  nothing reaches pay: writes touch only this table and audit_trail; the module
@@ -30,6 +31,8 @@
  * §12 the rate limit: after the role gate, per account
  * §13 wiring: one declaration above the catch-all, the flag's exact read, the replica
  *     allowlist, the route snapshot's four lines
+ * §14 caller text in the audit trail: no reason, details or driver name can pose as a
+ *     system line or reach the month-end queue; a blank-looking reason is refused
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-safety-event-log.js    # exits 1 on failure
@@ -76,6 +79,8 @@ const need = () => { if (!rules) throw new Error("lib/safety-event-log.js did no
 
 const NOW_MS = Date.parse("2026-11-11T17:00:00Z");
 const TODAY = "2026-11-11";
+// Invisible characters by code point, so this file's own text holds none of them.
+const U = (...codes) => String.fromCodePoint(...codes);
 
 // ── made-up fleet ──────────────────────────────────────────────────────────
 const DRIVERS = [
@@ -108,7 +113,7 @@ const USERS = {
 	investor: { id: 51, role: "Investor", username: "inv" },
 	kpi: { id: 61, role: "KPI Viewer", username: "kpi" },
 };
-const OFFICE_VIEW_KEYS = ["id", "driverId", "driverName", "eventDate", "kind", "kindLabel", "preventable", "details", "recordReason", "createdBy", "createdAt", "updatedBy", "updatedAt", "updateReason", "voided", "voidedBy", "voidedAt", "voidReason"];
+const OFFICE_VIEW_KEYS = ["id", "driverId", "driverName", "eventDate", "late", "kind", "kindLabel", "preventable", "details", "recordReason", "createdBy", "createdAt", "updatedBy", "updatedAt", "updateReason", "voided", "voidedBy", "voidedAt", "voidReason"];
 const GOOD = Object.freeze({ driverId: 1, eventDate: "2026-11-05", kind: "accident", details: "Backed into a made-up gate.", reason: "Made-up report received" });
 const CLAIM = Object.freeze({ driverId: 2, eventDate: "2026-11-06", kind: "cargo_claim", preventable: true, details: "Made-up pallet damage.", reason: "Made-up claim filed" });
 
@@ -120,7 +125,7 @@ function lifted() {
 	SRC = require("./lib/server-source").serverSource();
 	const { closure } = require("./lib/server-lift");
 	LIFT = closure(SRC, {
-		roots: ["safetyEventLog", "driverPerformance", "parseSheet", "deduplicateLoads"],
+		roots: ["safetyEventLog", "driverPerformance", "parseSheet", "deduplicateLoads", "parsePeriodRefusalDetail"],
 		provided: ["app", "db", "getJobTrackingCached"],
 		denied: ["server", "transporter", "getDrive", "getSheets", "sendEmail"],
 	});
@@ -190,7 +195,7 @@ async function makeWorld(env, { prepare } = {}) {
 			return world.jt;
 		},
 	};
-	const body = ['"use strict";', lift.text, "return { safetyEventLog, driverPerformance, parseSheet, deduplicateLoads };"].join("\n");
+	const body = ['"use strict";', lift.text, "return { safetyEventLog, driverPerformance, parseSheet, deduplicateLoads, parsePeriodRefusalDetail };"].join("\n");
 	const realLog = console.log;
 	console.log = () => {};
 	try {
@@ -310,8 +315,22 @@ function routesFor(id) {
 		ok(r.validateCreate({ ...GOOD, details: "x".repeat(2000) }, ctx).ok, "2000 characters of details are taken");
 		ok(r.validateCreate({ ...GOOD, reason: "abc" }, ctx).ok, "a three-letter reason is taken");
 
-		eq(r.validateCreate({ ...GOOD, reason: "  Made-up\r\n\treason\u0000here  " }, ctx).value.reason, "Made-up reason here", "a reason becomes one line, with its control characters gone");
-		eq(r.validateCreate({ ...GOOD, details: "  Line one\r\nLine\u0007two  " }, ctx).value.details, "Line one\nLine two", "details keep their lines, lose other control characters and the edges' space");
+		eq(r.validateCreate({ ...GOOD, reason: `  Made-up\r\n\treason${U(0xa0)}here${U(0x202e, 0x2028)}now${U(0x85)}end  ` }, ctx).value.reason, "Made-up reason here now end", "a reason becomes one line: every kind of space and line break is one space, format characters go");
+		eq(r.validateCreate({ ...GOOD, reason: `Ma${U(0x200b)}de-${U(0)}up${U(0x9b)} ${U(0xfeff)}reason` }, ctx).value.reason, "Made-up reason", "invisible and control characters go without leaving a gap");
+		eq(r.validateCreate({ ...GOOD, reason: `Made-up${U(0x600)}` }, ctx).value.reason, "Made-up", "so does a format character that isn't drawn as nothing");
+		eq(r.validateCreate({ ...GOOD, details: `  Line one\r\nLine${U(0x202e)}two${U(0x2028)}Line\tthree${U(7)}  ` }, ctx).value.details, "Line one\nLinetwo\nLine three", "details keep their lines, lose format and control characters and the edges' space");
+		eq(r.validateCreate({ ...GOOD, details: U(0x200b, 0x202e, 0x20, 0xa0) }, ctx).value.details, "", "details that render blank are no details");
+		for (const [name, raw] of [
+			["three no-break spaces", U(0xa0, 0xa0, 0xa0)], ["three zero-width spaces", U(0x200b, 0x200b, 0x200b)], ["three ideographic spaces", U(0x3000, 0x3000, 0x3000)],
+			["three line separators", U(0x2028, 0x2028, 0x2028)], ["three right-to-left overrides", U(0x202e, 0x202e, 0x202e)], ["three soft hyphens", U(0xad, 0xad, 0xad)],
+			["three word joiners", U(0x2060, 0x2060, 0x2060)], ["three byte-order marks", U(0xfeff, 0xfeff, 0xfeff)], ["three C1 controls", U(0x85, 0x90, 0x9b)],
+			["three Hangul fillers", U(0x3164, 0x3164, 0x3164)], ["three combining marks", U(0x301, 0x301, 0x301)], ["three variation selectors", U(0xfe0f, 0xfe0f, 0xfe0f)],
+			["three tag characters", U(0xe0041, 0xe0042, 0xe0043)], ["three braille blanks", U(0x2800, 0x2800, 0x2800)], ["punctuation only", "..."],
+			["two letters padded with invisibles", `o${U(0x200b)}k${U(0x200b)}`],
+		]) ok(refusedBy(r.validateCreate({ ...GOOD, reason: raw }, ctx), "REASON_REQUIRED"), `a blank-looking reason, ${name}: refused REASON_REQUIRED`);
+		for (const fine of ["Réparé", "事故報告", "a b c", "123", "Oui!"]) ok(r.validateCreate({ ...GOOD, reason: fine }, ctx).ok, `a real reason is taken: ${fine}`);
+		ok(r.validateCreate({ ...GOOD, reason: `${"x".repeat(500)}${U(0x200b).repeat(400)}` }, ctx).ok, "a reason's length is counted after its invisible characters go");
+		ok(refusedBy(r.validateCreate({ ...GOOD, reason: `${"x".repeat(501)}${U(0x200b).repeat(400)}` }, ctx), "REASON_TOO_LONG"), "...so 501 visible characters are still too long");
 
 		eq(r.validateVoid({ reason: " Made-up " }), { ok: true, value: { reason: "Made-up" } }, "a void takes a reason");
 		ok(refusedBy(r.validateVoid({}), "REASON_REQUIRED"), "a void with no reason is refused");
@@ -432,7 +451,7 @@ function routesFor(id) {
 			eq(Object.keys(r.json.event), OFFICE_VIEW_KEYS, "the event's keys");
 			const e = r.json.event;
 			eq([e.driverId, e.driverName, e.eventDate, e.kind, e.kindLabel, e.preventable, e.details, e.recordReason], [1, "Ada Quill", "2026-11-05", "accident", "Accident", null, "Backed into a made-up gate.", "Made-up report received"], "the event as stored, its name from the directory");
-			eq([e.createdBy, e.updatedBy, e.updatedAt, e.updateReason, e.voided, e.voidedBy, e.voidedAt, e.voidReason], ["admin", null, null, null, false, null, null, null], "who recorded it; not edited, not voided");
+			eq([e.createdBy, e.updatedBy, e.updatedAt, e.updateReason, e.voided, e.voidedBy, e.voidedAt, e.voidReason, e.late], ["admin", null, null, null, false, null, null, null, false], "who recorded it; not edited, not voided, not late");
 			ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(e.createdAt), "the timestamp is ISO-8601 with a Z");
 			const row = w.rows()[0];
 			eq([row.directory_id, row.name_when_recorded, row.created_by_user_id, row.preventable], [1, "Ada Quill", 31, null], "the row: the driver's id and the name then, the account");
@@ -582,47 +601,86 @@ function routesFor(id) {
 		try {
 			lock(w.db, "2026-09");
 			const ev = (day) => ({ ...GOOD, eventDate: day });
-			const a0 = w.audit().length;
-			const refused = await w.req("POST", LIST, USERS.admin, ev("2026-09-15"));
-			eq([refused.status, refused.json.code, refused.json.month], [409, "PERIOD_FINALIZED", "2026-09"], "recording an event in a closed month: 409");
-			eq(w.rows().length, 0, "...no row");
-			eq(w.audit().length, a0 + 1, "...one refusal row");
+			const create = async (day) => (await w.req("POST", LIST, USERS.admin, ev(day))).json.event.id;
+			const stored = (id) => w.rows().find((x) => x.id === id);
+			const locks = () => JSON.stringify(w.db.prepare("SELECT * FROM period_locks ORDER BY period").all());
+			const marked = () => w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE details LIKE '%[PERIOD\\_%' ESCAPE '\\'").get().n;
+
+			// A late event: its true date, marked, and said so in the audit row.
+			const late = await w.req("POST", LIST, USERS.admin, ev("2026-09-15"));
+			eq([late.status, late.json.event.eventDate, late.json.event.late], [201, "2026-09-15", true], "an event in a closed month is taken with its true date, marked late");
+			const lateId = late.json.event.id;
+			eq(stored(lateId).recorded_late, 1, "...on the row");
 			let last = w.audit().at(-1);
-			eq([last.action, last.entity], ["safety_event_write_blocked", "safety_event"], "the refusal is audited");
-			ok(last.details.includes("[PERIOD_FINALIZED]"), "under the code the purge exempts");
-			await w.req("POST", LIST, USERS.admin, ev("2026-09-16"));
-			eq(w.audit().length, a0 + 2, "a second refusal within the minute gets its own row");
+			eq([last.action, last.entity_id], ["safety_event_create", String(lateId)], "...with its create's audit row");
+			ok(last.details.includes("recorded after 2026-09 closed"), "which says it was recorded after the month closed");
+			ok(last.details.includes("Reason: Made-up report received"), "and keeps the reason");
+
+			const onTime = await w.req("POST", LIST, USERS.admin, ev("2026-10-15"));
+			eq([onTime.status, onTime.json.event.late], [201, false], "an event in an open month isn't late");
+			const octId = onTime.json.event.id;
+			eq(stored(octId).recorded_late, 0, "...on the row");
+			ok(!w.audit().at(-1).details.includes("recorded after"), "...nor in its audit row");
+			const novId = await create("2026-11-05");
+			const novId2 = await create("2026-11-06");
+			const octId2 = await create("2026-10-16");
+			const octId3 = await create("2026-10-17");
 
 			// A month closes after its events were recorded.
-			const inOct = (await w.req("POST", LIST, USERS.admin, ev("2026-10-15"))).json.event.id;
-			const inNov = (await w.req("POST", LIST, USERS.admin, ev("2026-11-05"))).json.event.id;
-			eq(w.rows().length, 2, "(setup) open months take events");
 			lock(w.db, "2026-10");
-			const before = JSON.stringify(w.rows());
-			const n = w.audit().length;
-			const edit = await w.req("PUT", `${LIST}/${inOct}`, USERS.admin, { kind: "moving_violation", reason: "Made-up" });
-			eq([edit.status, edit.json.code, edit.json.month], [409, "PERIOD_FINALIZED", "2026-10"], "editing an event of a closed month: 409");
-			const out = await w.req("PUT", `${LIST}/${inOct}`, USERS.admin, { eventDate: "2026-11-02", reason: "Made-up" });
-			eq([out.status, out.json.code], [409, "PERIOD_FINALIZED"], "moving one out of a closed month: 409");
-			const into = await w.req("PUT", `${LIST}/${inNov}`, USERS.admin, { eventDate: "2026-10-20", reason: "Made-up" });
-			eq([into.status, into.json.code, into.json.month], [409, "PERIOD_FINALIZED", "2026-10"], "moving one into a closed month: 409");
-			const voided = await w.req("POST", `${LIST}/${inOct}/void`, USERS.admin, { reason: "Made-up" });
-			eq([voided.status, voided.json.code], [409, "PERIOD_FINALIZED"], "voiding one in a closed month: 409");
-			eq(JSON.stringify(w.rows()), before, "none of them changed a row");
-			eq(w.audit().length, n + 4, "each left a refusal row");
-			ok(w.audit().slice(-4).every((x) => x.action === "safety_event_write_blocked" && x.details.includes("[PERIOD_FINALIZED]")), "under the same action and code");
+			const closedLocks = locks();
+			eq(stored(octId).recorded_late, 0, "a month closing marks nothing by itself");
+			eq((await w.req("GET", `${LIST}?month=2026-10`, USERS.dispatcher)).json.events.map((e) => [e.id, e.late]), [[octId3, false], [octId2, false], [octId, false]], "a closed month's events can still be read");
 
-			const read = await w.req("GET", `${LIST}?month=2026-10`, USERS.dispatcher);
-			eq([read.status, read.json.events.map((e) => e.id)], [200, [inOct]], "a closed month's events can still be read");
+			const a = w.audit().length;
+			const noop = await w.req("PUT", `${LIST}/${octId}`, USERS.admin, { kind: "accident", reason: "Made-up no change" });
+			eq([noop.status, noop.json.changed, noop.json.event.late, w.audit().length], [200, false, false, a], "an edit that changes nothing marks nothing and writes nothing");
+
+			const edit = await w.req("PUT", `${LIST}/${octId}`, USERS.admin, { kind: "moving_violation", reason: "Made-up correction" });
+			eq([edit.status, edit.json.changed, edit.json.event.kind, edit.json.event.late], [200, true, "moving_violation", true], "an event of a closed month can be corrected, and is marked late");
+			last = w.audit().at(-1);
+			ok(last.action === "safety_event_edit" && last.details.includes("recorded after 2026-10 closed"), "its edit's audit row says so");
+
+			const into = await w.req("PUT", `${LIST}/${novId}`, USERS.admin, { eventDate: "2026-10-20", reason: "Made-up date fix" });
+			eq([into.status, into.json.event.eventDate, into.json.event.late], [200, "2026-10-20", true], "moving an event into a closed month: its true date, marked late");
+			ok(w.audit().at(-1).details.includes("recorded after 2026-10 closed"), "...naming the month it moved into");
+
+			const outOf = await w.req("PUT", `${LIST}/${octId2}`, USERS.admin, { eventDate: "2026-11-02", reason: "Made-up date fix" });
+			eq([outOf.status, outOf.json.event.eventDate, outOf.json.event.late], [200, "2026-11-02", true], "moving one out of a closed month also marks it: that month's log changed");
+			ok(w.audit().at(-1).details.includes("recorded after 2026-10 closed"), "...naming the month it moved out of");
+
+			const both = await w.req("PUT", `${LIST}/${lateId}`, USERS.admin, { eventDate: "2026-10-05", reason: "Made-up date fix" });
+			eq(both.status, 200, "(setup) a move between two closed months");
+			ok(w.audit().at(-1).details.includes("recorded after 2026-09 and 2026-10 closed"), "...names both");
+
+			const openEdit = await w.req("PUT", `${LIST}/${novId2}`, USERS.admin, { eventDate: "2026-11-07", reason: "Made-up date fix" });
+			eq([openEdit.status, openEdit.json.event.late], [200, false], "an edit within open months marks nothing");
+			ok(!w.audit().at(-1).details.includes("recorded after"), "...and doesn't say so");
+
+			const backOut = await w.req("PUT", `${LIST}/${octId}`, USERS.admin, { eventDate: "2026-11-01", reason: "Made-up date fix" });
+			const backOn = await w.req("PUT", `${LIST}/${octId}`, USERS.admin, { kind: "accident", reason: "Made-up kind fix" });
+			eq([backOut.json.event.late, backOn.json.event.late], [true, true], "once marked, a row stays marked");
+			ok(!w.audit().at(-1).details.includes("recorded after"), "...though that last edit, all in an open month, doesn't claim a close");
+
+			const wrong = await w.req("POST", `${LIST}/${octId3}/void`, USERS.admin, { reason: "Entered in error, made up" });
+			eq([wrong.status, wrong.json.event.voided, wrong.json.event.late, wrong.json.event.voidReason], [200, true, true, "Entered in error, made up"], "a wrong entry in a closed month can be voided, and is marked late");
+			last = w.audit().at(-1);
+			ok(last.action === "safety_event_void" && last.details.includes("recorded after 2026-10 closed") && last.details.includes("Entered in error, made up"), "its void's audit row says so, with the reason");
+
+			const stillLate = await w.req("POST", `${LIST}/${octId}/void`, USERS.admin, { reason: "Made-up void" });
+			eq([stillLate.status, stillLate.json.event.late], [200, true], "a void in an open month keeps an earlier mark");
+			ok(!w.audit().at(-1).details.includes("recorded after"), "...and claims no close of its own");
+
+			eq(locks(), closedLocks, "no write moved a month lock");
+			eq(marked(), 0, "and none of them is a refusal on the month-end queue");
+			eq(w.audit().filter((x) => x.action === "safety_event_write_blocked").length, 0, "nothing was refused");
 
 			lock(w.db, "2026-10", "reopened");
-			const reopened = await w.req("PUT", `${LIST}/${inOct}`, USERS.admin, { kind: "moving_violation", reason: "Made-up" });
-			eq([reopened.status, reopened.json.changed], [200, true], "a reopened month is open");
-			const open = await w.req("PUT", `${LIST}/${inNov}`, USERS.admin, { eventDate: "2026-11-04", reason: "Made-up" });
-			eq(open.status, 200, "an open month's event moves within open months");
+			const reopened = await w.req("POST", LIST, USERS.admin, ev("2026-10-25"));
+			eq([reopened.status, reopened.json.event.late], [201, false], "a reopened month is open");
 		} finally { await w.close(); }
 
-		// A lock table that can't be read counts as closed.
+		// Locks that can't be read: whether the write is late can't be said, so it waits.
 		const u = await on();
 		try {
 			const id = (await u.req("POST", LIST, USERS.admin, GOOD)).json.event.id;
@@ -708,12 +766,19 @@ function routesFor(id) {
 				}
 				return JSON.stringify(out);
 			};
+			lock(w.db, "2026-09");
 			const before = snapshot();
+			ok(before.includes("2026-09"), "(check) the comparison includes the month locks");
 			const id = (await w.req("POST", LIST, USERS.admin, GOOD)).json.event.id;
 			await w.req("PUT", `${LIST}/${id}`, USERS.admin, { kind: "hos_violation", reason: "Made-up" });
 			await w.req("POST", `${LIST}/${id}/void`, USERS.admin, { reason: "Made-up" });
 			await w.req("GET", LIST, USERS.dispatcher);
 			eq(snapshot(), before, "a create, an edit, a void and a read change no other table");
+			const lateEvent = (await w.req("POST", LIST, USERS.admin, { ...GOOD, eventDate: "2026-09-15" })).json.event;
+			eq(lateEvent.late, true, "(setup) an event in a closed month");
+			await w.req("PUT", `${LIST}/${lateEvent.id}`, USERS.admin, { eventDate: "2026-09-16", reason: "Made-up" });
+			await w.req("POST", `${LIST}/${lateEvent.id}/void`, USERS.admin, { reason: "Made-up" });
+			eq(snapshot(), before, "nor do they in a closed month: nothing writes to its lock or its figures");
 		} finally { await w.close(); }
 
 		const src = fs.readFileSync(path.join(ROOT, "lib", "safety-event-log.js"), "utf8");
@@ -860,7 +925,7 @@ function routesFor(id) {
 
 		const r = need();
 		const app = { get() {}, post() {}, put() {} };
-		const fullDeps = { db: { prepare() {}, exec() {} }, requireRole() {}, logAudit() {}, logAuditRefusal() {}, periodWriteLocked() {}, periodLocksReadable() {}, appTodayKey() {} };
+		const fullDeps = { db: { prepare() {}, exec() {} }, requireRole() {}, logAudit() {}, logAuditRefusal() {}, auditText() {}, periodWriteLocked() {}, periodLocksReadable() {}, appTodayKey() {} };
 		for (const missing of Object.keys(fullDeps)) {
 			const partial = { ...fullDeps };
 			delete partial[missing];
@@ -871,6 +936,95 @@ function routesFor(id) {
 		let executed = 0;
 		r.mount(app, { ...fullDeps, enabled: "true", db: { prepare() { throw new Error("no"); }, exec() { executed += 1; } } });
 		eq(executed, 0, 'mount wants the boolean true: the text "true" creates no table');
+	});
+
+	// ── §14 ─────────────────────────────────────────────────────────────────
+	await section("14 caller text in the audit trail", async () => {
+		// The month-end queue's own predicate and parser, so this grades what it would show.
+		const server = require("./lib/server-source").serverSource();
+		ok(server.includes(`const MARKED = "details LIKE '%[PERIOD\\\\_%' ESCAPE '\\\\'";`), "(check) the queue still selects by this predicate");
+		const queued = (db) => db.prepare("SELECT details FROM audit_trail WHERE details LIKE '%[PERIOD\\_%' ESCAPE '\\'").all();
+
+		const MARKERS = [
+			["the marker", "[PERIOD_FINALIZED] periods=2099-01"],
+			["the marker in lower case", "[period_finalized] periods=2099-01"],
+			["the unreadable marker", "[PERIOD_LOCK_UNREADABLE]"],
+			["the marker split by a zero-width space", `[${U(0x200b)}PERIOD_FINALIZED] periods=2099-01`],
+			["the marker split by a right-to-left override", `[${U(0x202e)}PERIOD_FINALIZED] periods=2099-01`],
+			["the marker split by a line break", "[\nPERIOD_FINALIZED] periods=2099-01"],
+		];
+		for (const [label, m] of MARKERS) {
+			const w = await on();
+			try {
+				const id = (await w.req("POST", LIST, USERS.admin, { ...GOOD, reason: `Made-up ${m}` })).json.event.id;
+				await w.req("PUT", `${LIST}/${id}`, USERS.admin, { kind: "moving_violation", reason: `Made-up ${m}` });
+				await w.req("PUT", `${LIST}/${id}`, USERS.admin, { details: `Made-up ${m}`, reason: "Made-up new text" });
+				await w.req("PUT", `${LIST}/${id}`, USERS.admin, { details: "Clean made-up text", reason: "Made-up old text" });
+				await w.req("POST", `${LIST}/${id}/void`, USERS.admin, { reason: `Made-up ${m}` });
+				w.db.prepare("UPDATE drivers_directory SET driver_name = ? WHERE id = 2").run(`Ben Marsh ${m}`);
+				const named = (await w.req("POST", LIST, USERS.admin, { ...GOOD, driverId: 2, reason: "Made-up named" })).json.event.id;
+				await w.req("POST", `${LIST}/${named}/void`, USERS.admin, { reason: "Made-up named" });
+				eq(w.audit().length, 7, `${label}: (setup) all seven writes went through`);
+				eq(queued(w.db).length, 0, `${label}: in a reason, details or a driver name, no row reaches the month-end queue`);
+				const parsed = w.audit().map((a) => w.fns.parsePeriodRefusalDetail(a.details));
+				eq([...new Set(parsed.map((p) => p.code))], [""], `${label}: the queue's parser reads no code`);
+				eq(parsed.flatMap((p) => p.periods), [], `${label}: and no month`);
+				ok(w.audit().every((a) => !/\[period_/i.test(a.details)), `${label}: nor does the text stand in any audit row`);
+			} finally { await w.close(); }
+		}
+
+		// A true refusal still gets through the same path, with its marker intact.
+		const r = await on();
+		try {
+			r.db.exec("ALTER TABLE period_locks RENAME TO period_locks_made_up");
+			const held = await r.req("POST", LIST, USERS.admin, { ...GOOD, reason: "Made-up [PERIOD_FINALIZED] periods=2099-01" });
+			eq(held.json.code, "PERIOD_LOCK_UNREADABLE", "(setup) locks unreadable");
+			const row = queued(r.db);
+			eq(row.length, 1, "a real refusal does reach the queue");
+			const p = r.fns.parsePeriodRefusalDetail(row[0].details);
+			eq([p.code, p.periods], ["PERIOD_LOCK_UNREADABLE", []], "and reads as what it is");
+			ok(!row[0].details.includes("2099-01"), "with none of the caller's words");
+		} finally { await r.close(); }
+
+		// One line, nothing that changes how the line reads, in every audit row.
+		const w = await on();
+		try {
+			const pose = `Made-up\nSYSTEM\r\nline${U(0x2028)}two${U(0x2029)}three${U(0x85)}four${U(0x202e)}eight${U(0x200b)}nine${U(0x9b)}ten${U(0x2066)}end`;
+			const id = (await w.req("POST", LIST, USERS.admin, { ...GOOD, details: pose, reason: pose })).json.event.id;
+			await w.req("PUT", `${LIST}/${id}`, USERS.admin, { details: `${pose} again`, reason: pose });
+			await w.req("POST", `${LIST}/${id}/void`, USERS.admin, { reason: pose });
+			w.db.prepare("UPDATE drivers_directory SET driver_name = ? WHERE id = 2").run(`Ben\nMarsh${U(0x202e)}`);
+			await w.req("POST", LIST, USERS.admin, { ...GOOD, driverId: 2, reason: "Made-up named" });
+			const rows = w.audit();
+			eq(rows.length, 4, "(setup) four writes");
+			ok(rows.every((a) => !/[\p{Zl}\p{Zp}\p{Cf}\p{Cc}]/u.test(a.details)), "no audit row holds a line break, a separator, a format or a control character", JSON.stringify(rows.map((a) => a.details)));
+			ok(rows[0].details.includes("Reason: Made-up SYSTEM line two three four"), "the words stay, on one line");
+			ok(rows[3].details.startsWith("Ben Marsh (driver #2)"), "a driver name typed elsewhere is cleaned too");
+			const stored = w.rows()[0];
+			ok(![stored.record_reason, stored.update_reason, stored.void_reason, stored.details].some((v) => /[^\P{Cc}\n]|[\p{Zl}\p{Zp}\p{Cf}]/u.test(v)), "and the row itself holds none of it");
+
+			// The longest edit there can be still reads to its end.
+			const long = await on();
+			try {
+				const longId = (await long.req("POST", LIST, USERS.admin, { ...GOOD, details: '"'.repeat(2000), reason: "Made-up" })).json.event.id;
+				const edited = await long.req("PUT", `${LIST}/${longId}`, USERS.admin, { details: "'".repeat(2000), reason: `Made-up ${"x".repeat(490)}` });
+				eq(edited.status, 200, "(setup) the longest edit");
+				ok(long.audit().at(-1).details.endsWith(`Reason: Made-up ${"x".repeat(490)}`), "the audit row of the longest edit keeps its reason");
+			} finally { await long.close(); }
+
+			// Refused on every write route, nothing written.
+			const before = JSON.stringify(w.rows());
+			const n = rows.length;
+			for (const raw of [U(0xa0, 0xa0, 0xa0), U(0x200b, 0x200b, 0x200b), U(0x202e, 0x202e, 0x202e), U(0x3164, 0x3164, 0x3164)]) {
+				const results = [
+					await w.req("POST", LIST, USERS.admin, { ...GOOD, reason: raw }),
+					await w.req("PUT", `${LIST}/${id + 1}`, USERS.admin, { kind: "accident", reason: raw }),
+					await w.req("POST", `${LIST}/${id + 1}/void`, USERS.admin, { reason: raw }),
+				];
+				eq(results.map((x) => [x.status, x.json.code]), Array(3).fill([400, "REASON_REQUIRED"]), `a blank-looking reason (U+${raw.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}): create, edit and void all refuse it`);
+			}
+			eq([JSON.stringify(w.rows()), w.audit().length], [before, n], "nothing written");
+		} finally { await w.close(); }
 	});
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

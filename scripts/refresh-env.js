@@ -691,6 +691,13 @@ async function main() {
 		const n = db.prepare("DELETE FROM sign_in_network").run().changes;
 		summary.push(`sign_in_network: emptied (${n}) — staff sign-in IP and browser stay on production`);
 	}
+	// The office's safety-event log (lib/safety-event-log.js): its kind, date and driver
+	// id point at a named driver, whose name stays on a copy, so a redacted row would
+	// still say who had the accident. Never on a copy.
+	if (tableExists("safety_events")) {
+		const n = db.prepare("DELETE FROM safety_events").run().changes;
+		summary.push(`safety_events: emptied (${n}) — the office's safety log stays on production`);
+	}
 	// The automatic-invoice render shadow's digests (lib/auto-invoice-job.js): a
 	// broker's billing address and attachment names beside hashes, kept on
 	// production only until the send comparison's decision. Never on a copy.
@@ -829,6 +836,9 @@ async function main() {
 	// A driver's emergency contacts are third parties' names and numbers. The
 	// relationship stays: it identifies no one alone and keeps the copy testable.
 	secrets += setCols("driver_emergency_contacts", { contact_name: "REDACTED", contact_phone: PLACEHOLDER_PHONE });
+	// A safety event's audit rows repeat its reasons and, on an edit, its old and new
+	// text. The rows stay, as the record that a write happened.
+	secrets += setCols("audit_trail", { details: "REDACTED" }, SAFETY_EVENT_AUDIT_WHERE);
 	// An owner-operator's truck is his own, so its VIN and plate go, unlike a company
 	// truck's; so do his names, staff free text about him, and a toll notice's plate,
 	// number and the OCR lines kept with it (they can carry the registered owner).
@@ -1316,7 +1326,12 @@ const MUST_BE_EMPTY_TABLES = [
 	["sessions", "session row(s) survived — each caches a user record and authenticates against the pre-refresh hash"],
 	["driver_locations", "retired phone-GPS position row(s) survived"],
 	["sign_in_network", "staff sign-in IP and browser record(s) survived"],
+	["safety_events", "safety-event row(s) survived"],
 ];
+// The audit actions whose details hold a safety event's words. A refusal's row
+// (safety_event_write_blocked) holds no caller text and keeps its marker.
+const SAFETY_EVENT_AUDIT_ACTIONS = ["safety_event_create", "safety_event_edit", "safety_event_void"];
+const SAFETY_EVENT_AUDIT_WHERE = `action IN (${SAFETY_EVENT_AUDIT_ACTIONS.map((a) => `'${a}'`).join(", ")})`;
 
 // A malformed hash (truncated, or a foreign format) makes bcryptjs throw rather
 // than answer. Nobody can sign in against one either, so it is not a match.
@@ -1365,6 +1380,13 @@ function collectLeaks(dbPath, { scan = true, priorHashes = null } = {}) {
 			try { n = check.prepare(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> '' AND ${where}`).get().c; }
 			catch (e) { leaks.push(`${label}: could not be checked (${e.message})`); continue; }
 			if (n) leaks.push(`${n} ${label}(s) survived in ${t}.${c} on an owner-operator's row`);
+		}
+		// A query that fails here refuses too, so a renamed column can't wave these through.
+		if (has_("audit_trail", "details") && has_("audit_trail", "action")) {
+			let n = 0;
+			try { n = check.prepare(`SELECT COUNT(*) c FROM audit_trail WHERE ${SAFETY_EVENT_AUDIT_WHERE} AND COALESCE(details,'') <> 'REDACTED'`).get().c; }
+			catch (e) { leaks.push(`safety-event audit details: could not be checked (${e.message})`); }
+			if (n) leaks.push(`${n} safety-event audit detail(s) survived un-replaced in audit_trail.details`);
 		}
 
 		// CREDENTIALS — asserted, not assumed, like every column above. Three
