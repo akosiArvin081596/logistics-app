@@ -362,6 +362,12 @@
         <div class="section-header">Invoices</div>
         <InvoiceTab />
       </section>
+
+      <!-- PERFORMANCE TAB: only after the server has answered for this viewer -->
+      <section v-if="currentTab === 'performance' && performanceTab" class="tab-panel" data-testid="perf-panel">
+        <div class="section-header">Performance</div>
+        <DriverPerformanceTab :show-my-week="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />
+      </section>
     </main>
 
     <!-- Bottom Navigation -->
@@ -369,6 +375,7 @@
       :current-tab="currentTab"
       :unread-count="driverStore.unreadCount"
       :unread-notif-count="driverStore.unreadNotifCount"
+      :show-performance="performanceTab"
       @switch="handleTabSwitch"
     />
 
@@ -429,6 +436,7 @@ import { recordGate } from '../lib/voiceNoteGate'
 import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
+import { showsMyWeek, tabAfterAnswer, tabProbeUrl } from '../lib/driverPerformance'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -450,6 +458,7 @@ import PassengerAuthorizationsCard from '../components/driver/PassengerAuthoriza
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import DriverTrainingVideos from '../components/driver/DriverTrainingVideos.vue'
+import DriverPerformanceTab from '../components/driver/DriverPerformanceTab.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -808,6 +817,24 @@ function getLoadStatus(load) {
   return col ? (load[col] || '').trim() : ''
 }
 
+// The Performance tab exists only after the server answers 200 for this viewer: with the kill
+// switch off, or for a driver not on the board, the app stays as it was.
+const performanceTab = ref(false)
+async function checkPerformanceTab() {
+  const url = tabProbeUrl(auth.user?.role)
+  if (!url || isOnboarding.value) return
+  let status = 200
+  try {
+    await api.get(url)
+  } catch (err) {
+    status = err.status ?? 0
+  }
+  if (isMounted) performanceTab.value = tabAfterAnswer(status, performanceTab.value)
+}
+watch(performanceTab, (shown) => {
+  if (!shown && currentTab.value === 'performance') handleTabSwitch('loads')
+})
+
 // Tab switching
 function handleTabSwitch(tab) {
   currentTab.value = tab
@@ -1068,6 +1095,7 @@ function scheduleDriverRefetch() {
 function onVisibilityChange() {
   if (document.visibilityState === 'visible' && isMounted) {
     scheduleDriverRefetch()
+    checkPerformanceTab()
   }
 }
 
@@ -1309,6 +1337,7 @@ async function attemptInitialLoad() {
     initialLoadFailed.value = false
     maybeShowWelcome()
     scheduleContactsPrompt()
+    checkPerformanceTab()
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')

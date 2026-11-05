@@ -73979,6 +73979,16 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 	}
 });
 
+// Driver Performance, Phase A (display only): the leaderboard, each driver's own week and the
+// Super Admin report. Routes in lib/driver-performance-routes.js, rules in lib/driver-performance.js.
+// A kill switch: it moves no money and writes nothing, so it is on unless set to false, and off,
+// every route answers 404 FEATURE_OFF (scripts/test-driver-performance.js).
+const driverPerformance = require("./lib/driver-performance-routes").mount(app, {
+	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver,
+});
+
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments
 // active at each point's timestamp.
