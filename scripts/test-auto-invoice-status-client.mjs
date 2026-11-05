@@ -492,11 +492,14 @@ section('§13 the driver\'s Delivered starts the invoice: what a Super Admin rea
 {
   const chip = S.autoInvoiceChip({ state: 'needs_attention', code: 'NOT_BY_DRIVER', invoiceId: '', changed: [], trigger: true, retry: 'none' })
   eq(chip && [chip.label, chip.tone], ['No automatic invoice', 'warn'], '§13 FAILS ON THE OLD CODE: a completed load nothing will invoice reads "No automatic invoice", amber, never "Needs attention: ..." in red')
-  ok(chip && /only the driver's own Delivered/.test(chip.reason) && /Draft it by hand/.test(chip.reason), '§13 FAILS ON THE OLD CODE: ...it says why and what to do')
+  ok(chip && /only the driver's own Delivered/.test(chip.reason) && /Check Gmail Sent Mail first, then draft it by hand if it still needs one\.$/.test(chip.reason), '§13 FAILS ON THE OLD CODE: ...it says why and what to do, looking first: the load may have been billed straight from Gmail')
   ok(chip && !/Someone other than the driver/.test(chip.reason), '§13 ...and doesn\'t blame the office: a failed write or a restart can leave a driver\'s own tap here too')
   eq(S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code: 'NOT_BY_DRIVER' } }), true, '§13 ...the toggle counts it, so it can\'t be forgotten')
   eq([S.canTryAgain({ state: 'needs_attention', code: 'NOT_BY_DRIVER' }), S.canMarkChecked({ state: 'needs_attention', code: 'NOT_BY_DRIVER' })], [false, false], '§13 FAILS ON THE OLD CODE: ...with no Try again: the route has no claim to retry')
-  eq([S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP', retry: 'none' }), S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP' })], [false, true], '§13 FAILS ON THE OLD CODE: OFF_GAP: no Try again when the server says so (the driver\'s trigger); the sweep\'s row keeps it')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP', retry: 'none' }), S.canTryAgain({ state: 'needs_attention', code: 'OFF_GAP' })], [false, false], '§13 FAILS ON THE OLD CODE: OFF_GAP: no Try again, in any mode: "it may already be invoiced", and the sweep\'s retry sends with no look')
+  eq(S.changedText({ changed: ['payment'] }), 'Changed since the draft: the Payment. Check the draft in Gmail, then Mark checked.', '§13 the changed sentence, with the button')
+  eq(S.changedText({ changed: ['payment'] }, { canCheck: false }), 'Changed since the draft: the Payment. Check the draft in Gmail.', '§13 FAILS ON THE OLD CODE: ...and with no button to name')
+  eq(S.changedText({ changed: ['payment'], sent: true }, { canCheck: false }), 'Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed.', '§13 FAILS ON THE OLD CODE: ...sent, with no button to name')
 
   const send = { state: 'needs_attention', code: 'RETRY_LATER', trigger: true, retry: 'send' }
   ok(/looks in the mailbox/.test(S.tryAgainConfirmText(send)) && /sends this invoice/.test(S.tryAgainConfirmText(send)), '§13 FAILS ON THE OLD CODE: the confirm says Try again looks first, then sends')

@@ -53,7 +53,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   SEND_REFUSED: { short: 'not sent: last check failed', text: "The invoice email failed its last check before sending (recipient or attachments), so nothing was sent. Draft it by hand and check it." },
   MAYBE_SENT: { short: 'may already be sent', text: "The invoice email may have been sent to the broker, but it wasn't found in Gmail Sent Mail. Check Sent Mail before drafting it again. Try again searches Sent Mail once more; it never sends." },
   DRIVER_PENDING: { short: 'about to be made', text: "The driver just marked this load Delivered, so its invoice is about to be made." },
-  NOT_BY_DRIVER: { short: 'no automatic invoice', text: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." },
+  NOT_BY_DRIVER: { short: 'no automatic invoice', text: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Check Gmail Sent Mail first, then draft it by hand if it still needs one." },
   CAP_REACHED: { short: 'hourly or daily limit reached', text: "More invoices came due than the hourly or daily limit allows, so this one wasn't made. Try again in a while, or draft it by hand." },
   NO_MAILBOX: { short: 'no mailbox set', text: "No company mailbox is set on the server, so no invoice was made. Draft it by hand." },
   HANDED_OVER: { short: 'was in line at the change', text: "This load was in line when automatic invoices moved to the driver's Delivered, so its invoice wasn't made. Check Gmail, then Try again, or draft it by hand." },
@@ -86,12 +86,17 @@ function changedOf(status) {
   return list.filter((f) => typeof f === 'string' && Object.hasOwn(AUTO_INVOICE_CHANGED_WORDS, f))
 }
 
-export function changedText(status) {
+// The fields a line names: what Mark checked says it was shown.
+export const changedFieldsOf = (status) => changedOf(status)
+
+// `canCheck` false: no Mark checked on this row (the job is off or in shadow), so none is named.
+export function changedText(status, { canCheck = true } = {}) {
   const fields = changedOf(status)
   if (!fields.length) return ''
   const list = fields.map((f) => AUTO_INVOICE_CHANGED_WORDS[f]).join(', ')
-  if (status.sent === true) return `Changed since the invoice was sent to the broker: ${list}. Check with the broker whether a corrected invoice is needed, then Mark checked.`
-  return `Changed since the draft: ${list}. Check the draft in Gmail, then Mark checked.`
+  const last = canCheck ? ', then Mark checked.' : '.'
+  if (status.sent === true) return `Changed since the invoice was sent to the broker: ${list}. Check with the broker whether a corrected invoice is needed${last}`
+  return `Changed since the draft: ${list}. Check the draft in Gmail${last}`
 }
 
 // The chip for a row's `_autoInvoice`: { label, tone, reason }, or null when
@@ -139,7 +144,12 @@ export function autoInvoiceNeedsAttention(row) {
 
 // The server says what Try again would do (`retry`) while the driver's Delivered starts
 // the invoice: "none" is a load it refuses, and a load nothing started has nothing to retry.
-export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none')
+// `invoiceStatus`, the row's `_invoiceStatus`, refuses too: a row with no `retry`, the sweep's,
+// must not offer a second invoice beside words saying an invoice exists or may. The route answers
+// the same in every mode (trigger.retryRefusal()), for a dialog left open or a crafted request.
+const SAYS_INVOICED = Object.freeze(['by_hand', 'sent', 'draft'])
+const mayBeInvoiced = (read) => Boolean(read) && (SAYS_INVOICED.includes(read.status) || read.code === 'INVOICE_MAYBE_DRAFTED')
+export const canTryAgain = (status, invoiceStatus = null) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.code !== 'OFF_GAP' && status.retry !== 'none' && !mayBeInvoiced(invoiceStatus))
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
 
 // The question before Try again, while it is the only retry and can send at once: "" asks

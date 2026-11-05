@@ -124,7 +124,7 @@ const WORDS = {
   queued: { label: 'Waiting: about to be made', tone: 'muted', reason: 'The invoice will be made shortly.' },
   working: { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' },
   sent: (id) => ({ label: 'Sent to the broker', tone: 'ok', reason: `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` }),
-  notStarted: { label: 'No automatic invoice', tone: 'warn', reason: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." },
+  notStarted: { label: 'No automatic invoice', tone: 'warn', reason: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Check Gmail Sent Mail first, then draft it by hand if it still needs one." },
   mailboxHit: { label: 'Needs attention: an email names this load', tone: 'bad', reason: 'An email already names this load, so nothing was sent. Check Gmail. If it still needs an invoice, draft it by hand.' },
   paymentsHit: { label: 'Needs attention: on the Payments Table', tone: 'bad', reason: 'The Payments Table already holds an invoice or payment for this load, so nothing was sent. Check it. If the load still needs an invoice, draft it by hand.' },
   held: { label: 'Needs attention: totals differ', tone: 'bad' },

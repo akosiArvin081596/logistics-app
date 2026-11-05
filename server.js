@@ -47501,6 +47501,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				: {}),
 			// Which automatic-draft mode is on, for a Super Admin's settings dialog; absent while off.
 			...(autoInvoice.mode !== "off" && req.session.user.role === "Super Admin" ? { autoInvoice: { mode: autoInvoice.mode } } : {}),
+			// Whether the mailbox pass is on, a Super Admin's only: only it can say "No invoice
+			// found", so the Completed Loads filter offers those words only then.
+			...(invoiceEvidence.statusOn && req.session.user.role === "Super Admin" ? { invoiceStatus: { mailboxPass: invoiceEvidence.passOn } } : {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);

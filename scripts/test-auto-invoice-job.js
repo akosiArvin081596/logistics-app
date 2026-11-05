@@ -910,8 +910,29 @@ async function main() {
 		eq([notDrafted.status, notDrafted.body.code], [409, "AUTO_INVOICE_NOT_DRAFTED"], "§11 Mark checked needs a draft");
 		const missing = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-9999" } });
 		eq([missing.status, missing.body.code], [404, "AUTO_INVOICE_NOT_FOUND"], "§11 an unknown load: 404");
-		const checked = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "#LD-TEST-0150" } });
-		eq(checked.status, 200, "§11 Mark checked ('#id', as Express decodes it, works too)");
+		// It clears the mark and takes the load as it is now, so it takes only what the person was shown.
+		const markCheck = (fields) => call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-0150" }, body: { fields } });
+		const noList = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-0150" } });
+		eq([noList.status, noList.body.code, noList.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, "AUTO_INVOICE_CHANGED_AGAIN", ["payment"], "payment"], "§11 FAILS ON THE OLD CODE: no list of what was shown: 409, naming the change, nothing cleared");
+		eq((await markCheck("payment")).status, 409, "§11 FAILS ON THE OLD CODE: ...a list that isn't one reads as none");
+		eq((await markCheck({ payment: true })).status, 409, "§11 FAILS ON THE OLD CODE: ...nor does a thing that can't be listed break the route");
+		// The mark stands even once the load is back as it was: nobody has been told it can go.
+		w.setRow("LD-TEST-0150", {});
+		const reverted = await markCheck([]);
+		eq([reverted.status, reverted.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, ["payment"], "payment"], "§11 FAILS ON THE OLD CODE: the load back as it was, the mark still held: 409, naming it");
+		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00" });
+		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00", "Trailer Number": "TR-9" });
+		const unseen = await markCheck(["payment"]);
+		eq([unseen.status, unseen.body.code, unseen.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, "AUTO_INVOICE_CHANGED_AGAIN", ["payment", "trailer"], "payment"], "§11 FAILS ON THE OLD CODE: a change the job's check hasn't seen yet: 409, naming it, and the load's new state isn't taken in");
+		await job.tick();
+		eq(w.claim("LD-TEST-0150").changed_fields, "payment,trailer", "§11 ...so the job's check still finds it");
+		const second = await markCheck(["payment"]);
+		eq([second.status, second.body.changed, w.claim("LD-TEST-0150").changed_fields], [409, ["payment", "trailer"], "payment,trailer"], "§11 FAILS ON THE OLD CODE: a second change while the line was open: 409, nothing cleared");
+		eq(w.actions("auto_invoice_checked").length, 0, "§11 ...and no refusal is audited as checked");
+		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00" });
+		await job.tick();
+		const checked = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "#LD-TEST-0150" }, body: { fields: w.claim("LD-TEST-0150").changed_fields.split(",") } });
+		eq(checked.status, 200, "§11 Mark checked ('#id', as Express decodes it, works too), naming what it was shown");
 		const cc = w.claim("LD-TEST-0150");
 		eq([cc.changed_fields, cc.changed_at, cc.checked_by], ["", "", "made-up-admin"], "§11 the flag clears");
 		await job.tick();
