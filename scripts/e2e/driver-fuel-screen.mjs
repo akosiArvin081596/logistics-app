@@ -17,8 +17,13 @@
 //         available", "Refuel now", a very long name. The chip is on its own row, whole and on screen;
 //         Password and Logout are on screen and take a tap; the page starts below the header
 //   DFC7  the first fuel answer held back: the header and the page don't move when it comes
+//         (DFC7n at 360 x 800 and DFC7s at 320 x 568, the long name on both)
 //   DFC8  a failed read: no chip and nothing invented, the buttons as ever
 //   DFC1d, DFC3d  at 1280 x 800: the chip on the same row as the buttons
+//   DFO1-DFO6  Offline shows and clears at 390, 360 and 320 wide, a two-word and a very long name:
+//         the header and the page don't move at all, and the long name's header is the short one's
+//   DFO7  the same on a load's own page at 360    DFO8  the same at 768, on one row
+//   DFM1-DFM3, DFM1d  Messages opened at 390, 320 and 1280: its input and Send stay above the tab bar
 //   DFx   no page errors, no console errors, no writes
 // At 390 x 844 every step also checks: no sideways scroll, row text at least 14 px, Refresh at least 44 px.
 //
@@ -27,7 +32,8 @@
 // refused), every /api request is answered in the browser with made-up fixtures (a made-up Driver,
 // "Driver QA", on load QA-FUEL-1, truck "Unit 901", Riverton to Lakeside), and the fuel answers' blocks
 // are built by the server's own planDriverFuel() (lib/fuel-model.js). The Google Maps script is a stub
-// that draws nothing; every other host is aborted.
+// that draws nothing; every other host is aborted. The DFO steps answer the build's real socket.io
+// client with a stand-in for the server's socket, so it connects and drops as it would in the field.
 //
 //   npm --prefix scripts/e2e ci     (once; playwright-core)
 //   npm run build:client            (the build under test)
@@ -53,7 +59,11 @@ const HEADED = process.env.HEADED === '1'
 const OUT_TAG = String(process.env.OUT_TAG || 'driver-fuel-screen').replace(/[^\w.-]/g, '')
 const DIST = path.join(paths.REPO, 'client', 'dist')
 const PHONE = { width: 390, height: 844 }
+const NARROW = { width: 360, height: 800 }
+const SMALL = { width: 320, height: 568 }
+const TABLET = { width: 768, height: 1024 }
 const DESKTOP = { width: 1280, height: 800 }
+const isPhone = (viewport) => viewport.width < 768
 
 function die(msg) {
   console.error(`driver-fuel-screen: ${msg}`)
@@ -73,6 +83,7 @@ const fuel = require(path.join(paths.REPO, 'lib', 'fuel-model.js'))
 const DRIVER_NAME = 'Driver QA'
 const DRIVER = { id: 90031, username: 'qa-fuel-driver', role: 'Driver', driverName: DRIVER_NAME, email: '', fullName: DRIVER_NAME, companyName: '', mustChangePassword: false }
 const LONG_NAME = 'Maximiliano Bartholomew-Featherstone'
+const SHORT_NAME = 'Pat Examplesson'
 const LOAD_ID = 'QA-FUEL-1'
 const HEADERS = ['Load ID', 'Job Status', 'Driver', 'Pickup Address', 'Drop-off Address', 'Pickup Appointment', 'Drop-off Appointment']
 const R15 = { minMiles: 15, fraction: 0 }
@@ -241,10 +252,42 @@ function record(step, title, expected, observed, ok, shot = '') {
 const flags = (o) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' ')
 const allTrue = (o) => Object.values(o).every(Boolean)
 
-async function openScene(browser, scene, viewport, { openLoad = true } = {}) {
+// A stand-in for the server's socket.io over one WebSocket: the open packet, then the answer to
+// the client's connect. drop() closes it as a lost signal would, and the client's next try waits,
+// unanswered, until comeBack(), so Offline stays up for as long as a step wants to read it.
+async function fakeSocket(ctx) {
+  let waiting = null
+  let down = false
+  let current = null
+  let markConnected
+  const connected = new Promise((resolve) => { markConnected = resolve })
+  const open = (ws) => ws.send('0{"sid":"qa-engine","upgrades":[],"pingInterval":600000,"pingTimeout":600000,"maxPayload":1000000}')
+  await ctx.routeWebSocket(/\/socket\.io\//, (ws) => {
+    current = ws
+    ws.onMessage((message) => {
+      if (!String(message).startsWith('40')) return
+      ws.send('40{"sid":"qa-socket"}')
+      markConnected()
+    })
+    if (down) waiting = ws
+    else open(ws)
+  })
+  return {
+    connected,
+    drop: async () => { down = true; await current.close() },
+    comeBack: () => {
+      down = false
+      if (waiting) open(waiting)
+      waiting = null
+    },
+  }
+}
+
+async function openScene(browser, scene, viewport, { openLoad = true, socket = false } = {}) {
   const answers = answersFor(scene)
-  const phone = viewport === PHONE
+  const phone = isPhone(viewport)
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
+  const sock = socket ? await fakeSocket(ctx) : null
   await ctx.route('**/*', async (route) => {
     const req = route.request()
     const url = new URL(req.url())
@@ -272,7 +315,7 @@ async function openScene(browser, scene, viewport, { openLoad = true } = {}) {
     await page.locator('.load-card').filter({ hasText: LOAD_ID }).first().click({ timeout: 30000 })
     await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
   }
-  return { ctx, page }
+  return { ctx, page, sock }
 }
 
 // The collapsed badge first (the prefetch), then the section opened and settled.
@@ -450,7 +493,11 @@ function measureHeader(page) {
       return !!hit && (hit === el || el.contains(hit))
     }
     const buttonRow = buttons.length ? buttons[0].getBoundingClientRect() : null
+    const offline = document.querySelector('.app-header-left .status-chip.warn')
+    const o = offline ? offline.getBoundingClientRect() : null
     return {
+      offlineOnScreen: !!o && onScreen(o),
+      offlineClearOfButtons: !!o && !!buttonRow && o.right <= buttonRow.left,
       text: chip ? chip.textContent.replace(/\s+/g, ' ').trim() : '',
       name: (document.querySelector('.driver-name-label') || {}).textContent || '',
       headerPx: Math.round(h.height),
@@ -471,7 +518,7 @@ function measureHeader(page) {
 }
 
 async function chipScene(browser, sc, viewport) {
-  const phone = viewport === PHONE
+  const phone = isPhone(viewport)
   const size = `${viewport.width} x ${viewport.height}`
   const { ctx, page } = await openScene(browser, sc, viewport, { openLoad: false })
   try {
@@ -511,8 +558,8 @@ async function chipScene(browser, sc, viewport) {
 }
 
 // The answer is held back long enough to read the header without it, then with it.
-async function chipRowHeld(browser) {
-  const { ctx, page } = await openScene(browser, { world: {}, rangeDelayMs: 4000 }, PHONE, { openLoad: false })
+async function chipRowHeld(browser, step, viewport, driverName) {
+  const { ctx, page } = await openScene(browser, { world: {}, rangeDelayMs: 4000, driverName }, viewport, { openLoad: false })
   try {
     await page.locator('.app-header').waitFor({ state: 'visible', timeout: 15000 })
     const read = () => page.evaluate(() => ({
@@ -528,7 +575,7 @@ async function chipRowHeld(browser) {
       headerStill: Math.abs(before.header - after.header) < 1,
       pageStill: Math.abs(before.top - after.top) < 1,
     }
-    record('DFC7', 'Header chip: the first answer arrives at 390 x 844', 'the header and the page stay where they were',
+    record(step, `Header chip: the first answer arrives at ${viewport.width} x ${viewport.height}${driverName ? ', long name' : ''}`, 'the header and the page stay where they were',
       `${flags(checks)}; header ${before.header} to ${after.header}; page top ${before.top} to ${after.top}`, allTrue(checks))
   } finally {
     await ctx.close()
@@ -539,9 +586,144 @@ async function chipSteps(browser) {
   for (const sc of CHIP_PHONE) {
     try { await chipScene(browser, sc, PHONE) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
   }
-  try { await chipRowHeld(browser) } catch (e) { record('DFC7', 'The first answer arrives: aborted', '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  for (const [step, viewport, name] of [['DFC7', PHONE, undefined], ['DFC7n', NARROW, LONG_NAME], ['DFC7s', SMALL, LONG_NAME]]) {
+    try { await chipRowHeld(browser, step, viewport, name) } catch (e) { record(step, 'The first answer arrives: aborted', '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
   for (const sc of CHIP_DESKTOP) {
     try { await chipScene(browser, sc, DESKTOP) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+}
+
+// ---------------------------------------------------------------- Offline shown and cleared
+const OFFLINE_CHIP = '.app-header-left .status-chip.warn'
+const OFFLINE_STEPS = [
+  { step: 'DFO1', viewport: PHONE, driverName: SHORT_NAME },
+  { step: 'DFO2', viewport: PHONE, driverName: LONG_NAME },
+  { step: 'DFO3', viewport: NARROW, driverName: SHORT_NAME },
+  { step: 'DFO4', viewport: NARROW, driverName: LONG_NAME },
+  { step: 'DFO5', viewport: SMALL, driverName: SHORT_NAME },
+  { step: 'DFO6', viewport: SMALL, driverName: LONG_NAME },
+  { step: 'DFO7', viewport: NARROW, driverName: LONG_NAME, openLoad: true },
+  { step: 'DFO8', viewport: TABLET, driverName: LONG_NAME },
+]
+
+// Exact, with no tolerance: nothing in the page depends on the socket, so any change is a move.
+function readStill(page) {
+  return page.evaluate(() => {
+    const first = document.querySelector('.load-detail, .load-card')
+    return {
+      header: document.querySelector('.app-header').getBoundingClientRect().height,
+      top: document.querySelector('.app-content').getBoundingClientRect().top,
+      first: first ? first.getBoundingClientRect().top : null,
+    }
+  })
+}
+const stayed = (a, b) => a.header === b.header && a.top === b.top && a.first === b.first
+
+async function offlineFlip(browser, sc, headerAtWidth) {
+  const { viewport } = sc
+  const size = `${viewport.width} x ${viewport.height}`
+  const { ctx, page, sock } = await openScene(browser, { world: {}, driverName: sc.driverName }, viewport, { openLoad: !!sc.openLoad, socket: true })
+  try {
+    await page.locator('.load-detail, .load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await page.locator('.fuel-chip').waitFor({ state: 'visible', timeout: 15000 })
+    await Promise.race([sock.connected, new Promise((_, reject) => setTimeout(() => reject(new Error('the socket never connected')), 15000))])
+    // Let the page's other first answers settle, so a move below can only be Offline's.
+    await page.waitForTimeout(800)
+    const before = await readStill(page)
+    await sock.drop()
+    await page.locator(OFFLINE_CHIP).waitFor({ state: 'visible', timeout: 15000 })
+    const during = await readStill(page)
+    const m = await measureHeader(page)
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-${viewport.width}x${viewport.height}-offline.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    sock.comeBack()
+    await page.locator(OFFLINE_CHIP).waitFor({ state: 'hidden', timeout: 30000 })
+    const after = await readStill(page)
+    if (headerAtWidth[viewport.width] === undefined) headerAtWidth[viewport.width] = before.header
+    const checks = {
+      stillOnOffline: stayed(before, during),
+      stillOnClear: stayed(before, after),
+      sameHeaderAnyName: before.header === headerAtWidth[viewport.width],
+      name: m.name === sc.driverName,
+      offlineOnScreen: m.offlineOnScreen,
+      offlineClearOfButtons: m.offlineClearOfButtons,
+      chipOnScreen: m.chipOnScreen,
+      chipWhole: m.chipWhole,
+      buttonsOnScreen: m.buttonsOnScreen,
+      buttonsTakeTap: m.buttonsTakeTap,
+      pageBelowHeader: m.pageBelowHeader,
+      noSideways: m.sideways <= 0,
+    }
+    record(sc.step, `Offline shown and cleared at ${size}, ${sc.driverName === LONG_NAME ? 'long' : 'two-word'} name${sc.openLoad ? ', on a load page' : ''}`,
+      'the header and the page don\'t move at all; Offline, the chip and the buttons whole and on screen; the same header for any name',
+      `${flags(checks)}; header ${before.header}, ${during.header}, ${after.header}; page top ${before.top}, ${during.top}, ${after.top}; first item ${before.first}, ${during.first}, ${after.first}`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function offlineSteps(browser) {
+  const headerAtWidth = {}
+  for (const sc of OFFLINE_STEPS) {
+    try { await offlineFlip(browser, sc, headerAtWidth) } catch (e) { record(sc.step, `Offline at ${sc.viewport.width}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+}
+
+// ---------------------------------------------------------------- Messages
+const MESSAGES_STEPS = [
+  { step: 'DFM1', viewport: PHONE, driverName: SHORT_NAME },
+  { step: 'DFM2', viewport: PHONE, driverName: LONG_NAME },
+  { step: 'DFM3', viewport: SMALL, driverName: LONG_NAME },
+  { step: 'DFM1d', viewport: DESKTOP, driverName: SHORT_NAME },
+]
+
+async function messagesScene(browser, sc) {
+  const { viewport } = sc
+  const size = `${viewport.width} x ${viewport.height}`
+  const { ctx, page } = await openScene(browser, { world: {}, driverName: sc.driverName }, viewport, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await page.locator('.van-tabbar-item').filter({ hasText: 'Messages' }).first().click()
+    await page.locator('.chat-input-bar').waitFor({ state: 'visible', timeout: 15000 })
+    await page.waitForTimeout(300)
+    const m = await page.evaluate(() => {
+      const takesTap = (el) => {
+        if (!el) return false
+        const r = el.getBoundingClientRect()
+        const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2)
+        return !!hit && (hit === el || el.contains(hit))
+      }
+      const bar = document.querySelector('.chat-input-bar').getBoundingClientRect()
+      const tabs = document.querySelector('.van-tabbar').getBoundingClientRect()
+      return {
+        clearPx: tabs.top - bar.bottom,
+        boxPx: document.querySelector('.chat-messages').getBoundingClientRect().height,
+        inputTakesTap: takesTap(document.querySelector('.chat-input')),
+        sendTakesTap: takesTap(document.querySelector('.send-btn')),
+        sideways: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
+      }
+    })
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-${viewport.width}x${viewport.height}-messages.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    const checks = {
+      // 86 px is the room the box had above the tab bar under the old 52 px header.
+      sameRoomAboveTabs: m.clearPx >= 85,
+      messagesHaveRoom: m.boxPx >= 100,
+      inputTakesTap: m.inputTakesTap,
+      sendTakesTap: m.sendTakesTap,
+      noSideways: m.sideways <= 0,
+    }
+    record(sc.step, `Messages at ${size}, ${sc.driverName === LONG_NAME ? 'long' : 'two-word'} name`, 'at least 85 px between the input bar and the tab bar; input and Send take a tap; the messages have room',
+      `${flags(checks)}; ${m.clearPx} px clear; messages ${m.boxPx} px`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function messagesSteps(browser) {
+  for (const sc of MESSAGES_STEPS) {
+    try { await messagesScene(browser, sc) } catch (e) { record(sc.step, `Messages at ${sc.viewport.width}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
   }
 }
 
@@ -555,7 +737,7 @@ async function main() {
     for (const sc of SCENES) {
       try { await phoneScene(browser, sc) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps]]) {
+    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
     // DF7's trip plan answers 400 on purpose; the browser logs that one line.

@@ -22,12 +22,14 @@
 //      both paths; the chip takes no tap
 //   §6 the header's real height reaches the page below it (the header is fixed),
 //      and a Driver's fuel row is there from the first paint
+//   §7 the first row keeps one height whatever the name and Offline do, and the
+//      Messages box follows the header's height, so its input stays above the tab bar
 //
 // The component's own <script setup>, compiled with the client's compiler and
 // run with its I/O stubbed. No DOM, no server. §4's blocks come from the server's
 // own planDriverFuel() (lib/fuel-model.js), on made-up figures. §5 and §6 read the
-// template and styles as text for what the script can't show; the geometry itself
-// is scripts/e2e/driver-fuel-screen.mjs (DFC steps).
+// template and styles as text for what the script can't show, and so does §7; the
+// geometry itself is scripts/e2e/driver-fuel-screen.mjs (DFC, DFO and DFM steps).
 //   node scripts/test-driver-header-fuel-range.mjs
 //   DRIVER_HEADER_VUE=/tmp/base/DriverHeader.vue node scripts/test-driver-header-fuel-range.mjs   # a base copy: fails
 import fs from 'fs'
@@ -41,6 +43,7 @@ const CLIENT_DIR = path.join(ROOT, 'client')
 const DRIVER_DIR = path.join(CLIENT_DIR, 'src', 'components', 'driver')
 const HEADER_VUE = process.env.DRIVER_HEADER_VUE || path.join(DRIVER_DIR, 'DriverHeader.vue')
 const DRIVER_VIEW_VUE = path.join(CLIENT_DIR, 'src', 'views', 'DriverView.vue')
+const CHAT_VIEW_VUE = path.join(DRIVER_DIR, 'ChatView.vue')
 
 let pass = 0
 const failures = []
@@ -349,6 +352,23 @@ if (Header) {
       /@media \(min-width: 768px\)[\s\S]*\.fuel-row\s*\{[^}]*grid-row:\s*1/.test(headerCss))
     ok('§6 the sentence can wrap inside the chip rather than run off the screen', /white-space:\s*normal/.test(rule(headerCss, '.status-chip.fuel-chip')))
     ok('§6 the left group can give way, so Password and Logout stay on screen', /min-width:\s*0/.test(rule(headerCss, '.app-header-left')))
+
+    // ══ §7 — the first row's height, and the Messages box ═══════════════════
+    // Offline comes and goes with the socket and takes its width from the name, so a
+    // name that could wrap would regrow the header, and the page follows the header.
+    const nameRule = rule(headerCss, '.driver-name-label')
+    ok('§7 the driver\'s name stays on one line', /white-space:\s*nowrap/.test(nameRule))
+    ok('§7 …cut with an ellipsis when it has no room', /overflow:\s*hidden/.test(nameRule) && /text-overflow:\s*ellipsis/.test(nameRule))
+    ok('§7 …and it is the one thing in its group that can shrink', /min-width:\s*0/.test(nameRule))
+    ok('§7 …with nothing left that breaks it onto a second line', !/overflow-wrap|word-break/.test(nameRule))
+    ok('§7 Offline itself stays on one line', /white-space:\s*nowrap/.test(rule(headerCss, '.status-chip')))
+    ok('§7 from the tablet width up, the name gives way before the fuel sentence wraps',
+      /@media \(min-width: 768px\)[\s\S]*grid-template-columns:\s*auto minmax\(max-content, 1fr\) auto/.test(headerCss))
+
+    // The box's height is what's left of the screen under the header, above the tab bar.
+    const chatCss = parse(fs.readFileSync(CHAT_VIEW_VUE, 'utf8'), { filename: 'ChatView.vue' }).descriptor.styles.map((s) => s.content).join('\n')
+    ok('§7 the Messages box takes the header\'s real height off its own, keeping the same room above the tab bar',
+      /height:\s*calc\(100vh - 148px - var\(--driver-header-height, 52px\)\)/.test(rule(chatCss, '.chat-container')))
   }
 }
 

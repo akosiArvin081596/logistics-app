@@ -1759,8 +1759,11 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 | DF12 | The flag off. | Today's panel ("How we know", the reserve line), no block, the badge "Fuel stop needed", Route Options with their gallons |
 | DF1d, DF6d, DF12d | 1280x800. | The block one column, at most 520 px wide; today's panel with the flag off; no sideways scroll |
 | DFC1-DFC6, DFC8 | 390x844 touch, the Loads list: the header chip with miles (flag on and off), no figure (flag on and off), refuel now, a very long name, a failed read. DFC1 taps the chip. | "Fuel range: 225 miles left until empty", "Fuel range: not available", "Refuel now", or no chip on a failed read; whole, on screen and on its own row; Password and Logout on screen and taking a tap; the page starts below the header at the height the header reports; the tap does nothing; no sideways scroll |
-| DFC7 | 390x844, the first fuel answer held back 4 s. | The header and the page don't move when it arrives |
+| DFC7, DFC7n, DFC7s | The first fuel answer held back 4 s: 390x844, then 360x800 and 320x568 with the long name. | The header and the page don't move when it arrives |
 | DFC1d, DFC3d | 1280x800. | The same, with the chip on the buttons' row |
+| DFO1-DFO6 | Offline shown and cleared at 390, 360 and 320 wide, with a two-word and a very long name. A stand-in for the server's socket lets the build's own socket.io client connect and drop. | The header, the page and the first item don't move at all; the long name's header is the short name's height; Offline, the chip and the buttons whole and on screen |
+| DFO7, DFO8 | The same on a load's own page at 360x800, and at 768x1024 with the long name. | The same |
+| DFM1-DFM3, DFM1d | Messages opened: 390x844 (two names), 320x568 (long name), 1280x800. | At least 85 px between the input bar and the tab bar; input and Send take a tap; the messages at least 100 px tall |
 | DFx | Page errors, console errors and writes over the run. | None, but the browser's line for DF7's 400 |
 
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in

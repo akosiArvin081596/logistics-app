@@ -215,8 +215,12 @@ const fuelChip = computed(() => {
   font-size: 0.85rem;
   color: var(--text-dim);
   font-weight: 500;
-  /* A very long name breaks rather than pushing the buttons off the screen. */
-  overflow-wrap: anywhere;
+  /* One line, whatever the length: Offline comes and goes beside the name, and a name
+     that wrapped would regrow the header and move the page under the driver's thumb. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-chip {
@@ -270,7 +274,7 @@ const fuelChip = computed(() => {
 
 @media (min-width: 768px) {
   .app-header {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(max-content, 1fr) auto;
   }
   .fuel-row {
     grid-row: 1;
