@@ -417,21 +417,21 @@ function checkLoadIdChange(S) {
 	const r = check("LD-TEST-0002");
 	c.eq([r && r.ok, r && r.http, r && r.code, r && r.error], [false, 409, "LOAD_ID_FACTORED", S.WORDS.LOAD_ID_FACTORED], "§10 a live mark on the old key: 409 LOAD_ID_FACTORED");
 	c.ok(/clear the mark, change the ID, then mark the load again/.test(S.WORDS.LOAD_ID_FACTORED || ""), "§10 ...saying what to do");
-	c.eq([check("#ld-test-0002 ").code, check("ld-test-0002", "").code, check("ld-test-0002", null).code], ["LOAD_ID_FACTORED", "LOAD_ID_FACTORED", "LOAD_ID_FACTORED"], "§10 ...either spelling of the old ID, and a new ID that's blank");
+	c.eq([check("#ld-test-0002 ")?.code, check("ld-test-0002", "")?.code, check("ld-test-0002", null)?.code], ["LOAD_ID_FACTORED", "LOAD_ID_FACTORED", "LOAD_ID_FACTORED"], "§10 ...either spelling of the old ID, and a new ID that's blank");
 	c.eq([check("LD-TEST-0002", "#ld-test-0002"), check("#LD-TEST-0002", " ld-test-0002 ")], [null, null], "§10 a spelling the key ignores: the mark still finds the load, so it passes");
 	c.eq(check("LD-TEST-0099", "LD-TEST-0002"), null, "§10 only the old key is asked: a change onto a marked key fails safe, as factored");
 	c.eq([check(""), check(null)], [null, null], "§10 a row with no ID carries no mark");
 	putMarker(db, "ld-test-0003", { factored: 0 });
 	c.eq(check("LD-TEST-0003"), null, "§10 a mark cleared: the change passes");
 	putMarker(db, "ld-test-0004", { locked: T0, via: "outside" });
-	c.eq(check("LD-TEST-0004").code, "FACTORING_LOCKED", "§10 a final row: FACTORING_LOCKED");
+	c.eq(check("LD-TEST-0004")?.code, "FACTORING_LOCKED", "§10 a final row: FACTORING_LOCKED");
 	putMarker(db, "ld-test-0005", { factored: 0, locked: T0, via: "outside" });
-	c.eq(check("LD-TEST-0005").code, "FACTORING_LOCKED", "§10 ...a final row at 0 too");
+	c.eq(check("LD-TEST-0005")?.code, "FACTORING_LOCKED", "§10 ...a final row at 0 too");
 	const closed = new Database(":memory:");
 	S.ensureSchema(closed);
 	closed.close();
 	const unread = S.loadIdChangeCheck(closed, { from: "LD-TEST-0001", to: "LD-TEST-0099" });
-	c.eq([unread.http, unread.code], [503, "FACTORING_UNREADABLE"], "§10 a marker that can't be read refuses");
+	c.eq([unread?.http, unread?.code], [503, "FACTORING_UNREADABLE"], "§10 a marker that can't be read refuses");
 	c.eq(S.loadIdChangeCheck(closed, { from: "LD-TEST-0001", to: "#ld-test-0001" }), null, "§10 ...but a respelling asks it nothing");
 	c.eq(S.loadIdChangeCheck(new Database(":memory:"), { from: "LD-TEST-0001", to: "LD-TEST-0099" }), null, "§10 a database without the table (an old copy) reads as no mark");
 	// markCleared(): a row that says not factored, and isn't final.

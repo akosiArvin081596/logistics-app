@@ -223,9 +223,11 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
   ok(TAB.includes('const selectedAutoChip = computed(() => autoChip(selectedJob.value))'), '§7 ...and so does the dialog, through the same function')
   ok(!TAB.includes('autoInvoiceChip('), '§7 FAILS ON THE OLD CODE: Completed Loads never words a status without its row')
 
-  // A mark cleared after the run stopped on it.
+  // A mark cleared after the run stopped on it. A code with no words throws in the chip's own
+  // branch, so it's read here to fail by name.
   const cleared = { state: 'needs_attention', code: 'FACTORED_MARK_CLEARED', invoiceId: '', changed: [], trigger: true, retry: 'none' }
-  eq(A.autoInvoiceChip(cleared), { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
+  const readChip = (status) => { try { return A.autoInvoiceChip(status) } catch (e) { return `threw: ${e && e.message}` } }
+  eq(readChip(cleared), { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
     '§7 FAILS ON THE OLD CODE: a mark cleared after the run stopped on it has its own true sentence')
   eq(A.autoInvoiceNeedsAttention({ _autoInvoice: cleared }), true, '§7 ...the toggle counts it, so it can\'t be forgotten')
   eq([A.canTryAgain(cleared), A.canTryAgain({ state: 'needs_attention', code: 'FACTORED_MARK_CLEARED' }), A.canMarkChecked(cleared)], [false, false, false], '§7 FAILS ON THE OLD CODE: ...nothing to retry: a person drafts it')
