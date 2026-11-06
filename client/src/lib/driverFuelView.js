@@ -247,10 +247,6 @@ export function fuelTapLoad({ onScreen, underWay, queued, statusOf }) {
   return next || (queued && queued[0]) || null;
 }
 
-// The Fuel section's two one-line states: an ask is out, and an ask that failed.
-export const FUEL_CHECKING = 'Checking for your latest fuel numbers…';
-export const FUEL_READ_FAILED = "Couldn't get your latest fuel numbers. Check your fuel gauge.";
-
 /**
  * The header chip: the miles in a sentence, "Refuel now" or "not available", its
  * tooltip, and its colour, all from the block. `kind` as in fuelTop().

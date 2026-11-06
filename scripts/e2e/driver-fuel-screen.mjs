@@ -38,23 +38,8 @@
 //   DFT15 a delivered load's page on screen, no other load: the toast, and the page stays
 //   DFT16 two loads under way: the one furthest along, not the newest row. DFT16b a load left at its
 //         receiver: the next load, the one the truck is driving to
-//   DFT17 a repeat tap straight after a read (flag off): asked again, the new figure on the chip and in
-//         the section, the stops not asked for again
-//   DFT18 a tap that failed, then a tap with signal back: the one line, then the figures
-//   DFT19 a slow answer to a repeat tap: one line and nothing else while it's out, then the new figure
-//   DFT20 a tap with no signal over a standing warning: one line and nothing else, no badge on the title
-//         then or on coming back to the load, and everything back once the signal is
-//   DFT21 reopened by hand 16 minutes on (flag off): the new figure, the stops not asked for again
-//   DFT22 a tap refused for the driver's own limit (429): fresh miles and a sentence saying why, not the
-//         failure line, and no old verdict or badge
-//   DFT23 a first tap with no signal on a load nobody has opened Fuel on, the title holding a warning:
-//         the one line, and the badge goes
-//   DFT24 a first open by hand, the title's plan just read: a new plan asked for, and the new figure on
-//         the section and the title. DFT24b the same, flag on
-//   DFT25 a tap out, Fuel shut and reopened by hand while it's out: still the one line, then the figure
-//   DFT26 the title's older plan landing after a tap got fresh figures: the fresh figures stay. DFT26b
-//         the same after a tap that failed: the one line and no badge
-//   DFT27 Refresh pressed: the stops asked for again, and the new figure
+//   DFT28 a tap shows exactly what opening the section by hand shows (flag off): the same section text
+//         and title badge, from the list and on the load's own page after shutting it, asking no more
 //   DFT1r Route Options and a tall instructions card landing after the scroll, with the browser's scroll
 //         anchoring off, as on a phone that has none: the title stays in view. DFT1t the same, after
 //         the driver has touched the page: it isn't pulled back
@@ -365,8 +350,6 @@ async function openScene(browser, scene, viewport, { openLoad = true, socket = f
   const phone = isPhone(viewport)
   const asked = {}
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
-  // Lets a step move the page's clock on, so "hours later" doesn't take hours.
-  if (scene.clockMoves) await ctx.addInitScript(() => { const real = Date.now; Date.now = () => real() + (window.qaClockAheadMs || 0) })
   const sock = socket ? await fakeSocket(ctx) : null
   await ctx.route('**/*', async (route) => {
     const req = route.request()
@@ -387,7 +370,6 @@ async function openScene(browser, scene, viewport, { openLoad = true, socket = f
     const a = answerGet(url.pathname, scene, answers)
     if (scene.rangeDelayMs && url.pathname === '/api/fuel/range') await new Promise((r) => setTimeout(r, scene.rangeDelayMs))
     if (scene.lateMs && (url.pathname === '/api/route' || /\/instructions$/.test(url.pathname))) await new Promise((r) => setTimeout(r, scene.lateMs))
-    if (scene.fuelDelayMs && (url.pathname === '/api/fuel/range' || url.pathname === '/api/fuel/trip-plan')) await new Promise((r) => setTimeout(r, scene.fuelDelayMs))
     return route.fulfill({ status: a.status, contentType: 'application/json', body: JSON.stringify(a.body) })
   })
   const page = await ctx.newPage()
@@ -1002,362 +984,60 @@ const openHistorical = (id) => async (page) => {
 
 // The Fuel section's text on its own, the way a driver would read it.
 const panelText = async (page) => (await page.locator('.driver-fuel').innerText()).replace(/\s+/g, ' ').trim()
-const READ_FAILED = "Couldn't get your latest fuel numbers. Check your fuel gauge."
-const CHECKING = 'Checking for your latest fuel numbers…'
 
-// A repeat tap straight after a read: the answers change and the new figure has to show. No clock moves.
-async function repeatTapStraightAfter(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
+// A tap opens the Fuel section as a hand does, so it shows exactly what opening it by hand shows:
+// the same section and title badge, asking nothing more. Both ways in on the same load and
+// answers: from the list, and on the load's own page after the driver shut the section.
+async function tapShowsWhatAHandOpenShows(browser) {
+  const sc = { world: { flag: false, leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD] }
+  const read = async (page, asked) => ({
+    ...(await readLanding(page)),
+    text: await panelText(page),
+    plans: asked['/api/fuel/trip-plan'] || 0,
+    stops: asked['/api/poi/fuel-stops'] || 0,
+  })
+  let byHand = null
+  let tappedHere = null
+  const hand = await openScene(browser, sc, PHONE, { openLoad: false })
   try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    const first = await readLanding(page)
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    await tapChip(page, PHONE)
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    await page.locator('.fuel-chip').filter({ hasText: 'Fuel range: 135 miles left until empty' }).waitFor({ state: 'visible', timeout: 15000 })
-    const again = await readLanding(page)
-    const checks = {
-      chipReadAgain: true,
-      firstFigure: first.panel.includes('225 miles before you need to refuel'),
-      newFigure: again.panel.includes('135 miles before you need to refuel') && !again.panel.includes('225 miles before you need to refuel'),
-      stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
-      stopsStay: again.panel.includes('QA Truck Plaza Riverton'),
-      titleInView: again.titleInView,
-    }
-    record('DFT17', 'A repeat tap straight after a read, flag off, at 390 x 844', 'the new figure on the chip and in the section, not the first tap\'s; the stops asked for once only',
-      `${flags(checks)}; stops asked ${asked['/api/poi/fuel-stops']} time(s)`, allTrue(checks))
+    await hand.page.locator('.load-card').first().click({ timeout: 30000 })
+    await hand.page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+    await chipUp(hand.page)
+    await hand.page.waitForTimeout(800)
+    await hand.page.locator('.fuel-title').first().click()
+    await waitForFuelOpen(hand.page)
+    byHand = await read(hand.page, hand.asked)
+    await hand.page.locator('.fuel-title').first().click()
+    await hand.page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'hidden', timeout: 5000 })
+    await tapChip(hand.page, PHONE)
+    await waitForFuelOpen(hand.page)
+    tappedHere = await read(hand.page, hand.asked)
   } finally {
-    await ctx.close()
+    await hand.ctx.close()
   }
-}
-
-// A tap with no signal, then one with signal back: the one line, then the figures.
-async function tapAfterAFailure(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
+  let tapped = null
+  const chip = await openScene(browser, sc, PHONE, { openLoad: false })
   try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    const good = { ...answers }
-    // After the chip has its answer, so only the panel's own read fails. 400: DFx allows that line.
-    answers['/api/fuel/range'] = { status: 400, body: { ok: false, error: 'made-up failure' } }
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
-    const failedText = await panelText(page)
-    Object.assign(answers, good)
-    await page.locator('.detail-topbar button').first().click()
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 15000 })
-    await tapChip(page, PHONE)
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('225 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    const healed = await readLanding(page)
-    const checks = {
-      oneLine: failedText === READ_FAILED,
-      figuresBack: healed.panel.includes('225 miles before you need to refuel'),
-      failureGone: !healed.panel.includes(READ_FAILED),
-      stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
-    }
-    record('DFT18', 'A tap that failed, then one with signal back, at 390 x 844', 'the one line and nothing else, then the figures; the stops asked for once only', `${flags(checks)}; section read "${failedText.slice(0, 120)}"`, allTrue(checks))
+    await chip.page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(chip.page)
+    await tapChip(chip.page, PHONE)
+    await waitForFuelOpen(chip.page)
+    tapped = await read(chip.page, chip.asked)
   } finally {
-    await ctx.close()
+    await chip.ctx.close()
   }
-}
-
-// A slow answer to a repeat tap: one line and nothing else, then the new figure.
-async function slowAnswerToATap(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const sc = { world: WORLD, loads: [ON_THE_ROAD] }
-  const { ctx, page, answers } = await openScene(browser, sc, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    sc.fuelDelayMs = 2500
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-checking"]').waitFor({ state: 'visible', timeout: 5000 })
-    const asking = await panelText(page)
-    const refreshGone = (await page.locator('.driver-fuel .dfp-refresh').count()) === 0
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    const answered = await readLanding(page)
-    const checks = {
-      oneLine: asking === CHECKING,
-      refreshGone,
-      newFigure: answered.panel.includes('135 miles before you need to refuel'),
-      lineGone: (await page.locator('[data-testid="fuel-checking"]').count()) === 0,
-      refreshBack: answered.fuelOpen,
-    }
-    record('DFT19', 'A slow answer to a repeat tap, flag off, at 390 x 844', `"${CHECKING}" and nothing else; then the new figure and no line`, `${flags(checks)}; section read "${asking.slice(0, 120)}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
+  const checks = {
+    handFigures: byHand.text.includes('225 miles before you need to refuel') && byHand.text.includes('You can make this run'),
+    sameSectionFromTheList: tapped.text === byHand.text,
+    sameBadgeFromTheList: tapped.badge === byHand.badge,
+    sameAsksFromTheList: tapped.plans === byHand.plans && tapped.stops === byHand.stops,
+    sameOnItsOwnPage: tappedHere.text === byHand.text && tappedHere.badge === byHand.badge,
+    nothingMoreAskedOnItsOwnPage: tappedHere.plans === byHand.plans && tappedHere.stops === byHand.stops,
+    inView: tapped.titleInView && tappedHere.titleInView,
   }
-}
-
-// A tap with no signal over a standing warning: one line, and nothing old on the section or the
-// title, then or on coming back. 400s stand in for no signal, since DFx allows only that line.
-async function noSignalOverAWarning(browser) {
-  const WORLD = { flag: false }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    const standing = await readLanding(page)
-    const good = { ...answers }
-    const FAILS = { status: 400, body: { ok: false, error: 'made-up failure' } }
-    answers['/api/fuel/range'] = FAILS
-    answers['/api/fuel/trip-plan'] = FAILS
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
-    const dead = await readLanding(page)
-    const deadText = await panelText(page)
-    const chipStays = (await page.locator('.fuel-chip').count()) === 1
-    const file = path.join(SHOTS, 'dft20-390x844.png')
-    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot DFT20 failed: ${e.message})`))
-
-    await page.locator('.detail-topbar button').first().click()
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 15000 })
-    await page.locator('.load-card').first().click()
-    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
-    await page.waitForTimeout(800)
-    const onReturn = await readLanding(page)
-
-    Object.assign(answers, good)
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'hidden', timeout: 15000 })
-    await waitForFuelOpen(page)
-    const healed = await readLanding(page)
-    const checks = {
-      warningFirst: standing.panel.includes('Not enough fuel — you need to stop') && standing.badge === 'Fuel stop needed',
-      oneLine: deadText === READ_FAILED,
-      noBadge: dead.badge === '',
-      noBadgeOnReturn: onReturn.badge === '',
-      chipStays,
-      healed: healed.panel.includes('Not enough fuel — you need to stop') && healed.panel.includes('225 miles before you need to refuel') && !healed.panel.includes(READ_FAILED),
-      badgeBack: healed.badge === 'Fuel stop needed',
-      stopsBack: healed.panel.includes('QA Truck Plaza Riverton'),
-      stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
-    }
-    record('DFT20', 'A tap with no signal over a standing warning, flag off, at 390 x 844', `"${READ_FAILED}" and nothing else; no badge then or on return; everything back with the signal, the stops asked for once`,
-      `${flags(checks)}; section read "${deadText.slice(0, 120)}"; badge "${dead.badge}"`, allTrue(checks), file)
-  } finally {
-    await ctx.close()
-  }
-}
-
-// A tap refused for the driver's own limit: the range still answers, so this isn't a failed read.
-async function refusedForTheLimit(browser, step, flag, words) {
-  const WORLD = { flag, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    const later = answersFor({ world: { ...WORLD, pct: 30 } })
-    answers['/api/fuel/range'] = later['/api/fuel/range']
-    answers['/api/fuel/trip-plan'] = { status: 429, body: { error: 'Too many trip-plan requests. Try again later.' } }
-    await tapChip(page, PHONE)
-    await page.waitForFunction((w) => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes(w)
-    }, words, { timeout: 15000 })
-    const m = await readLanding(page)
-    const checks = {
-      saysWhy: m.panel.includes(words),
-      noFailureLine: !m.panel.includes(READ_FAILED),
-      freshMiles: m.panel.includes(flag ? '135' : '135 miles before you need to refuel') && !m.panel.includes('225'),
-      noOldVerdict: !m.panel.includes('You can make this run'),
-      noBadge: m.badge === '',
-      stopsStay: m.panel.includes('QA Truck Plaza Riverton'),
-    }
-    record(step, `A tap refused for the driver's limit, flag ${flag ? 'on' : 'off'}, at 390 x 844`, `fresh miles and "${words}", not the failure line; no old verdict or badge`,
-      `${flags(checks)}; section read "${m.panel.slice(0, 140)}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// A load nobody has opened Fuel on, the title holding a warning: a first tap with no signal.
-async function firstTapNoSignal(browser) {
-  const { ctx, page, answers } = await openScene(browser, { world: { flag: false }, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().click({ timeout: 30000 })
-    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
-    await chipUp(page)
-    await page.waitForTimeout(800)
-    const before = await readLanding(page)
-    const FAILS = { status: 400, body: { ok: false, error: 'made-up failure' } }
-    answers['/api/fuel/range'] = FAILS
-    answers['/api/fuel/trip-plan'] = FAILS
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
-    const after = await readLanding(page)
-    const text = await panelText(page)
-    const checks = { warningFirst: before.badge === 'Fuel stop needed', oneLine: text === READ_FAILED, badgeGoes: after.badge === '' }
-    record('DFT23', 'A first tap with no signal, the title holding a warning, flag off, at 390 x 844', 'the one line and nothing else; the badge goes', `${flags(checks)}; section read "${text.slice(0, 120)}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// The usual first open: the title read its plan at the page's mount, and Fuel is opened by hand a
-// little later. The line says "latest", so that ask gets a new plan, not the title's.
-async function firstOpenByHand(browser, step, flag, figure) {
-  const WORLD = { flag, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE)
-  try {
-    await page.waitForTimeout(800)
-    const plansFirst = asked['/api/fuel/trip-plan']
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    await page.locator('.fuel-title').first().click()
-    await page.waitForFunction((f) => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes(f)
-    }, figure, { timeout: 15000 })
-    const m = await readLanding(page)
-    const checks = {
-      titleReadFirst: plansFirst === 1,
-      newPlanAsked: asked['/api/fuel/trip-plan'] === 2,
-      newFigure: m.panel.includes(figure),
-      oldFigureGone: !m.panel.includes('225') && !m.badge.includes('225'),
-      stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
-    }
-    record(step, `A first open by hand, the title's plan just read, flag ${flag ? 'on' : 'off'}, at 390 x 844`, 'a new plan asked for, and the new figure on the section and the title', `${flags(checks)}; section read "${m.panel.slice(0, 120)}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// A tap out, Fuel shut and reopened by hand while it's out: the one line, not the saved figures.
-async function reopenedWhileAsking(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const sc = { world: WORLD, loads: [ON_THE_ROAD] }
-  const { ctx, page, answers } = await openScene(browser, sc, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    sc.fuelDelayMs = 4000
-    await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-checking"]').waitFor({ state: 'visible', timeout: 5000 })
-    await page.locator('.fuel-title').first().click()
-    await page.locator('[data-testid="fuel-checking"]').waitFor({ state: 'hidden', timeout: 3000 })
-    await page.locator('.fuel-title').first().click()
-    await page.waitForTimeout(300)
-    const reopened = await panelText(page)
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    const answered = await panelText(page)
-    const checks = { oneLine: reopened === CHECKING, newFigure: answered.includes('135 miles before you need to refuel'), oldFigureGone: !answered.includes('225') }
-    record('DFT25', 'A tap out, Fuel shut and reopened by hand, flag off, at 390 x 844', `"${CHECKING}" and nothing else; then the new figure`, `${flags(checks)}; section read "${reopened.slice(0, 120)}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// The title's ask is slow and the driver taps past it, so its older answer lands last. It has
-// nothing more to say, whether the tap got fresh figures or failed. The route handler picks the
-// answer before it waits, so the title's stays the older one.
-async function lateTitleAnswer(browser, step, tapFails) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const sc = { world: WORLD, loads: [ON_THE_ROAD] }
-  const { ctx, page, answers } = await openScene(browser, sc, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    sc.fuelDelayMs = 4000
-    await page.locator('.load-card').first().click()
-    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
-    await page.waitForTimeout(300)
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    if (tapFails) answers['/api/fuel/range'] = { status: 400, body: { ok: false, error: 'made-up failure' } }
-    sc.fuelDelayMs = 0
-    await tapChip(page, PHONE)
-    await page.waitForFunction((w) => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes(w)
-    }, tapFails ? READ_FAILED : '135 miles before you need to refuel', { timeout: 15000 })
-    // Past the title's own answer, so what's read here is what it left.
-    await page.waitForTimeout(4500)
-    const m = await readLanding(page)
-    const text = await panelText(page)
-    const checks = tapFails
-      ? { oneLine: text === READ_FAILED, noBadge: m.badge === '' }
-      : { newFigure: text.includes('135 miles before you need to refuel'), oldFigureGone: !text.includes('225'), oldVerdictGone: !text.includes('You can make this run'), oldBadgeGone: !m.badge.includes('225') }
-    record(step, `The title's older plan landing after a tap that ${tapFails ? 'failed' : 'got fresh figures'}, flag off, at 390 x 844`,
-      tapFails ? 'the one line and no badge, still' : 'the fresh figures and verdict, still', `${flags(checks)}; section read "${text.slice(0, 120)}"; badge "${m.badge}"`, allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// The press itself: asks for all three, the billed stops included, and shows what comes back.
-async function pressRefresh(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    const stopsFirst = asked['/api/poi/fuel-stops']
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    await page.locator('.driver-fuel .dfp-refresh').click()
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    const text = await panelText(page)
-    const checks = { stopsAskedAgain: asked['/api/poi/fuel-stops'] === stopsFirst + 1, newFigure: text.includes('135 miles before you need to refuel'), stopsStay: text.includes('QA Truck Plaza Riverton') }
-    record('DFT27', 'Refresh pressed, flag off, at 390 x 844', 'the stops asked for again, and the new figure', flags(checks), allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
-}
-
-// Opened by hand 16 minutes on: the 15-minute limit holds with the flag off too.
-async function reopenedByHand(browser) {
-  const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD], clockMoves: true }, PHONE, { openLoad: false })
-  try {
-    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
-    await chipUp(page)
-    await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    await page.locator('.fuel-title').first().click()
-    await page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'hidden', timeout: 5000 })
-    Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    await page.evaluate(() => { window.qaClockAheadMs = 16 * 60 * 1000 })
-    await page.locator('.fuel-title').first().click()
-    await page.waitForFunction(() => {
-      const p = document.querySelector('.driver-fuel')
-      return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
-    }, null, { timeout: 15000 })
-    const m = await readLanding(page)
-    const checks = { newFigure: m.panel.includes('135 miles before you need to refuel'), stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1, stopsStay: m.panel.includes('QA Truck Plaza Riverton') }
-    record('DFT21', 'Reopened by hand 16 minutes on, flag off, at 390 x 844', 'the new figure; the stops asked for once only', flags(checks), allTrue(checks))
-  } finally {
-    await ctx.close()
-  }
+  record('DFT28', 'A tap shows exactly what opening the section by hand shows, flag off, at 390 x 844',
+    'the same section text and title badge as a hand-open, from the list and on the load\'s own page; nothing more asked',
+    `${flags(checks)}; by hand "${byHand.text.slice(0, 100)}"; plans ${byHand.plans}/${tapped.plans}/${tappedHere.plans}, stops ${byHand.stops}/${tapped.stops}/${tappedHere.stops}`, allTrue(checks))
 }
 
 // Route Options and a tall card land after the scroll. Chromium would hold the page's place by
@@ -1461,20 +1141,7 @@ async function tapSteps(browser) {
       step: 'DFT16b', title: 'a load left at its receiver, the next load heading to its shipper', world: { leg: 'to_delivery', routeMiles: 180 },
       loads: [[2, LOAD_ID, 'At Receiver'], [9, OTHER_LOAD, 'Heading to Shipper']], opens: OTHER_LOAD,
     }),
-    () => repeatTapStraightAfter(browser),
-    () => tapAfterAFailure(browser),
-    () => slowAnswerToATap(browser),
-    () => noSignalOverAWarning(browser),
-    () => reopenedByHand(browser),
-    () => refusedForTheLimit(browser, 'DFT22', false, 'Checked too many times just now — try again in a few minutes.'),
-    () => refusedForTheLimit(browser, 'DFT22b', true, 'Checked too many times just now. Try again in a few minutes.'),
-    () => firstTapNoSignal(browser),
-    () => firstOpenByHand(browser, 'DFT24', false, '135 miles before you need to refuel'),
-    () => firstOpenByHand(browser, 'DFT24b', true, '135 miles until you run out'),
-    () => reopenedWhileAsking(browser),
-    () => lateTitleAnswer(browser, 'DFT26', false),
-    () => lateTitleAnswer(browser, 'DFT26b', true),
-    () => pressRefresh(browser),
+    () => tapShowsWhatAHandOpenShows(browser),
     () => answersLandLate(browser, 'DFT1r', false),
     () => answersLandLate(browser, 'DFT1t', true),
     () => landingScene(browser, { step: 'DFT1d', title: 'a load on the road', world: { leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD] }, DESKTOP),
@@ -1631,9 +1298,9 @@ async function main() {
     for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['the chip\'s tap', tapSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    // Some steps answer 400 or DFT22's 429 on purpose; the browser logs that one line for each.
+    // Some steps answer 400 on purpose; the browser logs that one line for each.
     const consoleErrors = consoleLines.filter((l) => l.type === 'error' && !harnessLine(l))
-    const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of (400|429)/.test(l.text))
+    const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of 400/.test(l.text))
     record('DFx', 'Page errors; console errors; writes', 'no page errors; console errors only the browser\'s line for those 400s; no writes',
       `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; ${consoleErrors.length} console error line(s), ${notNetwork.length} other${notNetwork.length ? `: ${notNetwork.map((l) => l.text.slice(0, 120)).join('; ')}` : ''}; ${writes.length ? writes.join(', ') : 'no writes'}`,
       pageErrors.length === 0 && notNetwork.length === 0 && writes.length === 0)

@@ -26,8 +26,8 @@
 //      Messages box follows the header's height, so its input stays above the tab bar
 //   §8 the chip's tap: a real button in the normal header, plain on the two lock
 //      screens; a tap hands up the chip's own line, one figure and no working on
-//      either flag path, and reads the chip's range again; nothing happens with a
-//      dialog over the chip
+//      either flag path, and reads nothing itself; nothing happens with a dialog
+//      over the chip
 //   §9 where the tap goes: which load (the driver store's own getters, with the load
 //      list that runs newest first): a page on screen only while its load has road
 //      left, then the load under way with the most road ahead, then the queue;
@@ -400,10 +400,11 @@ if (Header) {
       (await lineOf(answer(flagOffUnknown[1], null))) === "No usable fuel reading from this truck's ELD. Last known 40%. Check the gauge before you set off.")
     ok('§8 "not available" is a button in the normal header', (await chipNode(answer(flagOffUnknown[0], null))).node?.type === 'button')
 
-    // The tap's section reads the range again, so the chip above it has to as well.
+    // A tap only opens the Fuel section: it reads nothing, and the chip keeps its own poll.
     {
       const { node, bindings } = await chipNode(ON)
-      const before = world.gets.filter((u) => u === '/api/fuel/range').length
+      const before = world.gets.length
+      const shown = bindings.fuelChip.value && bindings.fuelChip.value.text
       world.answer = answer({ ...MEASURED, rangePlanningMiles: 150, rangeUsableMiles: 135 }, block({ reading: reading(30) }))
       const realDocument = globalThis.document
       globalThis.document = { elementFromPoint: () => chipEl }
@@ -413,8 +414,8 @@ if (Header) {
         globalThis.document = realDocument
       }
       await drain()
-      ok('§8 a tap reads the chip\'s range again, once, with no params', world.gets.filter((u) => u === '/api/fuel/range').length === before + 1)
-      ok('§8 …and the chip shows what it read', !!bindings.fuelChip.value && bindings.fuelChip.value.text === SAYS(135))
+      ok('§8 a tap reads nothing itself', world.gets.length === before)
+      ok('§8 …and the chip keeps what its poll read', !!bindings.fuelChip.value && bindings.fuelChip.value.text === shown && shown !== SAYS(135))
     }
     {
       const { node } = await chipNode(ON)

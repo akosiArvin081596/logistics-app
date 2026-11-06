@@ -119,7 +119,6 @@
           :load-id="String(loadId || '')"
           :active="fuelSectionOpen"
           :runnable="loadStillToDrive"
-          :asked="fuelAsked"
           @plan="fuelPlan = $event"
         />
       </van-collapse-item>
@@ -343,15 +342,13 @@ const docListRef = ref(null)
 const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 
 // The section sits below the status and the map, so it also comes into view: opened
-// off screen, the tap would still look like nothing happened. `fuelAsked` tells the
-// panel a chip tap wants the figures again.
+// off screen, the tap would still look like nothing happened. It opens as a hand-open
+// does, so the panel reads exactly as it would then.
 const pageEl = ref(null)
 const fuelTitleEl = ref(null)
-const fuelAsked = ref(0)
 watch(() => props.openFuel, async (asked) => {
   if (!asked) return
   if (!fuelSectionOpen.value) openSections.value = [...openSections.value, 'fuel']
-  fuelAsked.value += 1
   await nextTick()
   bringFuelIntoView()
   holdFuelInView()
