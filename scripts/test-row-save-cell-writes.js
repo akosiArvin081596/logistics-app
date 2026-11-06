@@ -62,14 +62,13 @@
 //      judged as sent rather than as stored, a cell sent back as read judged.
 //      Each must fail §5's behaviour checks.
 //   §7 A LOAD ID CHANGE ON A MARKED LOAD. The factoring mark goes by the Load ID's
-//      text (lib/factoring-store.js), so both saves move it with the ID, for both
-//      roles, and follow what the sheet stored. A mark that lands during the save is
-//      moved, or refused if it comes through the route; a mark on a key no row holds
-//      any more is refused. What can't move refuses, 409, nothing written: a job's
-//      claim or a draft row on the old key, a blanked ID, a final row. A marker that
-//      can't be read refuses. No mark: as before, with no extra read. The factoring
-//      module is the shipped one, over an in-memory database.
-//   §8 MUTANTS of §7: either save without the move, or without its last look.
+//      text (lib/factoring-store.js), so a marked load keeps its ID on both saves, for
+//      both roles: 409, nothing written, whatever it would become, a respelling and a
+//      blank included. The way through is clear, change, mark again. A final row has
+//      its own refusal, and a marker that can't be read refuses. The switch is refused
+//      while a save runs, and on a key no row holds any more. No mark: as before, with
+//      no extra read. The factoring module is the shipped one, over an in-memory database.
+//   §8 MUTANTS of §7: either save without the check, or never saying it's done.
 //
 // No network, no sheet, no database file.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -326,11 +325,9 @@ function shown(row) {
 	return out;
 }
 const DISPLAYED = () => HEADERS.map((h, i) => display(storedRow()[i]));
-// `numbersLikeASheet`: a write USER_ENTERED turns all digits into a number, as a real sheet does
-// in a plain-format column. `writeFails`: "refused" (nothing landed) or "landed" (it landed, and
-// the answer was lost). `readCellFails`: one cell can't be read. `hooks`: what lands during a read
-// or a write, set on the sheet once it's made.
-function fakeSheet(stored, { batchGetFails = false, allowUpdate = false, numbersLikeASheet = false, writeFails = "", readCellFails = false } = {}) {
+// `writeFails`: "refused" (nothing landed) or "landed" (it landed, and the answer was lost).
+// `hooks`: what lands during a read or a write, set on the sheet once it's made.
+function fakeSheet(stored, { batchGetFails = false, allowUpdate = false, writeFails = "" } = {}) {
 	const rows = stored.map((r) => r.slice());
 	const calls = [];
 	const hooks = {};
@@ -348,7 +345,6 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false, numbers
 			const cell = /!([A-Z]+)(\d+)$/.exec(range);
 			if (cell) {
 				cellReads.push(range);
-				if (readCellFails) throw new Error("fake sheet: cell read failed");
 				const v = display((rows[Number(cell[2]) - 1] || [])[colIndex(cell[1])]);
 				return { data: v === "" ? {} : { values: [[v]] } };
 			}
@@ -380,8 +376,7 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false, numbers
 				d.values[0].forEach((v, j) => {
 					const i = colIndex(m[1]) + j;
 					while (r.length <= i) r.push("");
-					const text = v == null ? "" : String(v);
-					r[i] = numbersLikeASheet && /^\s*\d+\s*$/.test(text) ? String(Number(text)) : text;
+					r[i] = v == null ? "" : String(v);
 				});
 				cells += d.values[0].length;
 			}
@@ -1409,8 +1404,7 @@ function cancelWiringSection(helpers) {
 // ---------------------------------------------------------------------------
 async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_PUT_SRC } = {}) {
 	const { results, t } = collector();
-	const HAS_RECORDS = "This load is marked factored and already has invoice records under this Load ID, so the ID can't be changed here. Leave it as it is and tell whoever manages factored loads.";
-	const BLANK = "This load is marked factored, and the mark goes by its Load ID, so the Load ID can't be left blank. Type the right ID.";
+	const REFUSED = "This load is marked factored, so its Load ID can't be changed: whoever manages factored loads can clear the mark, change the ID, then mark the load again.";
 	const CHANGING = "This load's ID is being changed right now, so nothing was changed here. Reload the page and open the load again.";
 	const NOT_ON_SHEET = "No row on Job Tracking holds this Load ID now, so nothing was changed. Reload the page and open the load again.";
 	const SHEET_UNREAD = "Job Tracking couldn't be read to check this load, so nothing was changed. Try again in a minute.";
@@ -1442,34 +1436,41 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 	// The routes below run with a made-up sheet; the server gives the switch the real one.
 	const WIRING = SRC.slice(SRC.indexOf("// <factoring-wiring>"), SRC.indexOf("// </factoring-wiring>"));
 	t("§7 FAILS ON THE OLD CODE: the server hands the switch the sheet", WIRING.includes("readJobTracking: getJobTrackingCached,"), true);
+	// What the code's own key reads as one load. A respelling is still refused below: a save writes the
+	// text as typed, USER_ENTERED, and the sheet can store that as another key ("00123" as 123).
+	const { loadKey } = require("../lib/auto-invoice-rules");
+	t("§7 the code's own key reads these as one load", [loadKey("#111"), loadKey(" 111"), loadKey("111 "), loadKey("LD-111"), loadKey("ld-111")], ["111", "111", "111", "ld-111", "ld-111"]);
 	for (const route of SAVES) {
-		// The mark goes with the ID, whoever saves it, every setting off.
+		// A marked load keeps its ID, whoever saves it, every setting off.
 		for (const role of ["Super Admin", "Dispatcher"]) {
 			const { app, f, sheet, r } = await save(route, role, "Load ID", "333", { prepare: (w) => w.mark("111") });
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: a marked load's Load ID changes, and the mark goes with it`,
-				[r.code, ranges(app), cellOf(app), f.isFactored("333"), f.isFactored("111")], [200, [[R("B2")]], "333", true, false]);
-			const moved = f.row("333") || {};
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...who marked it and why go with it, and the old row is gone`,
-				[moved.reason, moved.set_by, moved.source, moved.load_id, f.row("111")], ["made-up reason", "made-up-admin", "person", "333", undefined]);
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...the cell read back once, both steps audited, with the save's own line`,
-				[sheet.cellReads, f.audits, app.audits.map((a) => a.action)], [[R("B2")], ["factoring_move_begun", "factoring_moved"], ["update_sheet_row"]]);
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: a marked load's Load ID change: 409 LOAD_ID_FACTORED, one sentence with the way through`,
+				[r.code, codeOf(r), (r.body || {}).error], [409, "LOAD_ID_FACTORED", REFUSED]);
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...nothing written, the mark where it was, nothing on the new ID, no read back, the refusal audited by its code`,
+				[app.calls.length, app.rows, f.isFactored("111"), f.row("333"), sheet.cellReads, f.audits, app.audits.map((a) => [a.action, a.code, a.entityId])],
+				[0, STORED(), true, undefined, [], [], [["update_sheet_row_blocked", "LOAD_ID_FACTORED", "Job Tracking!2"]]]);
 		}
-		// What can't move refuses, and says what to do.
-		for (const [label, prepare] of [
-			["a job's claim on the old key", (w) => { w.mark("111"); w.claim("111"); }],
-			["a draft row on the old key", (w) => { w.mark("111"); w.draft("111"); }],
-			["a draft row, the other spelling", (w) => { w.mark("111"); w.draft("#111"); }],
+		// A change to the cell's text is a change, though the key may read it as the same load.
+		for (const [label, from, to] of [
+			["\"#111\" for \"111\"", "111", "#111"],
+			["a leading space", "111", " 111"],
+			["a trailing space", "111", "111 "],
+			["another case", "LD-111", "ld-111"],
+			["\"00123\" for \"#00123\", which a sheet can store as 123", "#00123", "00123"],
 		]) {
-			const { app, f, r } = await save(route, "Super Admin", "Load ID", "333", { prepare });
-			t(`§7 FAILS ON THE OLD CODE: ${route}, marked, ${label}: 409 LOAD_ID_FACTORED, saying what to do`, [r.code, codeOf(r), (r.body || {}).error], [409, "LOAD_ID_FACTORED", HAS_RECORDS]);
-			t(`§7 ${route}, marked, ${label}: ...nothing written, nothing held, the mark where it was, the refusal audited by its code`,
-				[app.calls.length, app.rows, f.isFactored("111"), f.row("333"), app.audits.map((a) => [a.action, a.code, a.entityId])],
-				[0, STORED(), true, undefined, [["update_sheet_row_blocked", "LOAD_ID_FACTORED", "Job Tracking!2"]]]);
+			const { app, f, r } = await save(route, "Super Admin", "Load ID", to, { prepare: (w) => w.mark(from), stored: NUMBER_ID(from) });
+			t(`§7 FAILS ON THE OLD CODE: ${route}, a respelling of a marked ID, ${label}: refused, nothing written, the mark where it was`,
+				[r.code, codeOf(r), (r.body || {}).error, app.calls.length, cellOf(app), f.isFactored(from)], [409, "LOAD_ID_FACTORED", REFUSED, 0, from, true]);
 		}
-		const respelledWithClaim = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => { w.mark("111"); w.claim("111"); } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a respelling with a claim on the key: refused too, since the claim can't follow what the sheet stores`, [respelledWithClaim.r.code, codeOf(respelledWithClaim.r), respelledWithClaim.app.calls.length], [409, "LOAD_ID_FACTORED", 0]);
+		for (const [label, prepare] of [
+			["a job's claim on the key", (w) => { w.mark("111"); w.claim("111"); }],
+			["a draft row on the key", (w) => { w.mark("111"); w.draft("#111"); }],
+		]) {
+			const { app, r } = await save(route, "Super Admin", "Load ID", "333", { prepare });
+			t(`§7 FAILS ON THE OLD CODE: ${route}, marked, ${label}: the same refusal, nothing written`, [r.code, codeOf(r), (r.body || {}).error, app.calls.length], [409, "LOAD_ID_FACTORED", REFUSED, 0]);
+		}
 		const blank = await save(route, "Super Admin", "Load ID", "", { prepare: (w) => w.mark("111") });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked load's Load ID blanked: refused, in its own words`, [blank.r.code, codeOf(blank.r), (blank.r.body || {}).error, blank.app.calls.length], [409, "LOAD_ID_FACTORED", BLANK, 0]);
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked load's Load ID blanked: the same refusal`, [blank.r.code, codeOf(blank.r), (blank.r.body || {}).error, blank.app.calls.length], [409, "LOAD_ID_FACTORED", REFUSED, 0]);
 		const final = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => { w.mark("111"); w.handledOutside("111"); } });
 		t(`§7 ${route}, a load handled in Triumph's process: 409 FACTORING_LOCKED, nothing written`, [final.r.code, codeOf(final.r), final.app.calls.length], [409, "FACTORING_LOCKED", 0]);
 		const finalSpelled = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => { w.mark("111"); w.handledOutside("111"); } });
@@ -1484,21 +1485,13 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 		const closed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), blocker: { error: "made-up", code: "PERIOD_FINALIZED", periods: [] } });
 		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked row in a closed month: the period guard's own refusal, nothing written or held`, [closed.r.code, codeOf(closed.r), closed.app.calls.length, closed.f.row("333"), closed.f.isFactored("111")], [409, "PERIOD_FINALIZED", 0, undefined, true]);
 
-		// What the sheet stores decides, not the text sent.
-		const spelled = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => w.mark("111") });
-		t(`§7 ${route}, a respelling the key ignores, stored as sent: saved, and the mark stays`, [spelled.r.code, ranges(spelled.app), spelled.f.isFactored("#111"), spelled.f.audits], [200, [[R("B2")]], true, []]);
-		const stripped = await save(route, "Super Admin", "Load ID", "00123", { prepare: (w) => w.mark("#00123"), stored: NUMBER_ID("#00123"), sheetOptions: { numbersLikeASheet: true } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, "#00123" saved as "00123", stored as 123: the mark follows what the sheet stored`, [stripped.r.code, cellOf(stripped.app), stripped.f.isFactored("123"), stripped.f.isFactored("00123")], [200, "123", true, false]);
-		const held = await save(route, "Super Admin", "Load ID", "000123", { prepare: (w) => w.mark("00123"), stored: NUMBER_ID("00123"), sheetOptions: { numbersLikeASheet: true } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a new ID the sheet stores otherwise: the stored key is marked, and the old one isn't`, [held.r.code, held.f.isFactored("123"), held.f.isFactored("00123")], [200, true, false]);
-
-		// A mark that lands during the save. The script's way in reaches the store: the last look moves it.
-		const atWrite = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringWrite = () => { f.mark("111"); }; } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a mark landing during the write: on the new key, not the old`, [atWrite.r.code, atWrite.f.isFactored("333"), atWrite.f.isFactored("111")], [200, true, false]);
+		// A mark that lands at the last read is seen, so the change is refused.
 		const atRead = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringRowRead = () => { f.mark("111"); }; } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a mark landing at the last read: on the new key, not the old`, [atRead.r.code, atRead.f.isFactored("333"), atRead.f.isFactored("111")], [200, true, false]);
-		const withClaim = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringRowRead = () => { f.mark("111"); f.claim("111"); }; } });
-		t(`§7 ${route}, a mark and a claim landing at the last read: refused, nothing written`, [withClaim.r.code, codeOf(withClaim.r), withClaim.app.calls.length, withClaim.f.isFactored("111")], [409, "LOAD_ID_FACTORED", 0, true]);
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a mark landing at the last read: refused, nothing written or held`, [atRead.r.code, codeOf(atRead.r), atRead.app.calls.length, atRead.f.isFactored("111"), atRead.f.row("333")], [409, "LOAD_ID_FACTORED", 0, true, undefined]);
+		// A script's mark during the write can't be seen. It's the limit the switch-on report's check is for.
+		const atWrite = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringWrite = () => { f.mark("111"); }; } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a script's mark landing during the write: saved, and the mark stays on the old key, with no read back`,
+			[atWrite.r.code, cellOf(atWrite.app), atWrite.f.isFactored("111"), atWrite.f.row("333"), atWrite.sheet.cellReads, atWrite.f.audits], [200, "333", true, undefined, [], []]);
 		// The switch's way in is refused while the save runs, on either key, and works once it's done.
 		let duringOld = null;
 		let duringNew = null;
@@ -1509,9 +1502,9 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 		const afterSave = await pressed.f.press("333");
 		t(`§7 ${route}, ...and once the save is done the new key can be marked`, [afterSave.status, pressed.f.isFactored("333")], [200, true]);
 		let duringOutside = null;
-		const outsideWorld = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), prepare: (w) => w.mark("111"), land: (sheet, f) => { sheet.hooks.duringWrite = () => { duringOutside = f.pressOutside("111"); }; } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, "Handled in Triumph's process" pressed during the write: 409 LOAD_ID_CHANGING, and the mark still moves`,
-			[duringOutside?.status, duringOutside?.body?.code, outsideWorld.f.isFactored("333"), outsideWorld.f.row("111")], [409, "LOAD_ID_CHANGING", true, undefined]);
+		const outsideWorld = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), land: (sheet, f) => { sheet.hooks.duringWrite = () => { duringOutside = f.pressOutside("111"); }; } });
+		t(`§7 ${route}, "Handled in Triumph's process" pressed during the write: 409 LOAD_ID_CHANGING, and the save goes on`,
+			[duringOutside?.status, duringOutside?.body?.code, outsideWorld.r.code], [409, "LOAD_ID_CHANGING", 200]);
 
 		// The switch on a key no row holds any more: a dialog left open on the old ID.
 		let sheetNow = null;
@@ -1539,18 +1532,27 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 		t(`§7 FAILS ON THE OLD CODE: ${route}, the sheet can't be read: 503 FACTORING_SHEET_UNREADABLE, in its own words, nothing marked`,
 			[unreadSheet.status, unreadSheet.body.code, unreadSheet.body.error, noRead.row("111")], [503, "FACTORING_SHEET_UNREADABLE", SHEET_UNREAD, undefined]);
 
-		// A write that fails: the answer is as before, and the mark goes by what the sheet holds.
-		const refused = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { writeFails: "refused" } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, the write refused, the marked load: the save's 500, the hold undone, the mark where it was`,
-			[refused.r.code, cellOf(refused.app), refused.f.row("333"), refused.f.isFactored("111"), refused.f.audits], [500, "111", undefined, true, ["factoring_move_begun", "factoring_move_undone"]]);
-		const landed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { writeFails: "landed" } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, the write landed with its answer lost: the save's 500, and the mark moved`, [landed.r.code, cellOf(landed.app), landed.f.isFactored("333"), landed.f.isFactored("111")], [500, "333", true, false]);
-		t(`§7 FAILS ON THE OLD CODE: ${route}, ...and the cached sheet is dropped, so the switch can't read the old ID from it`, landed.app.invalidations(), 1);
-		const noLastLook = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), land: (sheet, f) => { sheet.hooks.duringWrite = () => { f.db.close(); }; } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, the marker gone by the last look: the write landed, so the save still answers 200`, [noLastLook.r.code, cellOf(noLastLook.app), noLastLook.sheet.cellReads], [200, "333", [R("B2")]]);
-		const unconfirmed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { readCellFails: true } });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, the cell can't be read back: saved, and both keys stay marked`,
-			[unconfirmed.r.code, unconfirmed.f.isFactored("333"), unconfirmed.f.isFactored("111"), unconfirmed.f.audits], [200, true, true, ["factoring_move_begun", "factoring_move_unconfirmed"]]);
+		// A write that fails, on a load with no mark: as it was before this PR, and the switch works again.
+		const refused = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), sheetOptions: { writeFails: "refused" } });
+		const afterRefused = await refused.f.press("111");
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the write refused: the save's 500, the cached sheet kept, and the switch works again`,
+			[refused.r.code, cellOf(refused.app), refused.app.invalidations(), afterRefused.status], [500, "111", 0, 200]);
+		const landed = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), sheetOptions: { writeFails: "landed" } });
+		const afterLanded = await landed.f.press("333");
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the write landed with its answer lost: the save's 500, the cached sheet kept, and the switch works again`,
+			[landed.r.code, cellOf(landed.app), landed.app.invalidations(), afterLanded.status], [500, "333", 0, 200]);
+
+		// The way through, end to end: refused while marked; clear the mark, change the ID, mark again.
+		const way = factoringWorld({ marking: true, readJobTracking: async () => rowsNow() });
+		sheetNow = fakeSheet(STORED());
+		const wayMark = await way.press("111");
+		const wayRefused = await save(route, "Super Admin", "Load ID", "333", { world: way });
+		const wayClear = await way.press("111", false);
+		const waySave = await save(route, "Super Admin", "Load ID", "333", { world: way, land: (sheet) => { sheetNow = sheet; } });
+		const wayAgain = await way.press("333");
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the way through: refused while marked; cleared, changed and marked again, the new ID is marked and the old row reads cleared`,
+			[wayMark.status, wayRefused.r.code, wayClear.status, waySave.r.code, wayAgain.status, way.isFactored("333"), way.isFactored("111"), way.row("111")?.factored, way.audits],
+			[200, 409, 200, 200, 200, true, false, 0, ["factoring_marked", "factoring_cleared", "factoring_marked"]]);
 
 		// The mark holds the ID, not the row.
 		const other = await save(route, "Dispatcher", "Details", "Frozen - 2 pallets rolled", { prepare: (w) => w.mark("111") });
@@ -1565,6 +1567,11 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 			t(`§7 ${route}, ${label}: the Load ID change saves, B2 alone written, no read back, nothing audited or marked`,
 				[r.code, ranges(app), sheet.cellReads, f.audits, f.row("333")], [200, [[R("B2")]], [], [], undefined]);
 		}
+		const ontoLeftover = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("333") });
+		t(`§7 ${route}, no mark on this load, a mark left on the new ID: the change saves, as before, and that mark is left alone`,
+			[ontoLeftover.r.code, ranges(ontoLeftover.app), ontoLeftover.sheet.cellReads, ontoLeftover.f.audits, ontoLeftover.f.isFactored("333")], [200, [[R("B2")]], [], [], true]);
+		const respelledNoMark = await save(route, "Super Admin", "Load ID", "#111");
+		t(`§7 ${route}, no mark, a respelling: saves, as before`, [respelledNoMark.r.code, ranges(respelledNoMark.app), respelledNoMark.sheet.cellReads], [200, [[R("B2")]], []]);
 	}
 	return results;
 }
@@ -1691,15 +1698,15 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 	{
 		// Built inside the run, as §6's are: on a tree without the move, a missing
 		// target fails the run as "not caught" instead of stopping it.
-		const CALL = "const idSave = idChange ? factoringRoutes.loadIdSave(";
-		const NO_CALL = "const idSave = false ? factoringRoutes.loadIdSave(";
-		const LOOK = "if (idSave) await idSave.finish();\n";
-		const noLook = (src) => src.split(LOOK).join("");
+		const CALL = "const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;";
+		const NO_CALL = "const idSave = null;";
+		const DONE = "if (idSave) idSave.done();\n";
+		const noDone = (src) => src.split(DONE).join("");
 		for (const [label, build] of [
-			["M11 PUT /api/data without the move", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, NO_CALL) })],
-			["M12 PUT /api/load without the move", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, NO_CALL) })],
-			["M13 PUT /api/data without its last look", () => ({ dataSrc: noLook(DATA_PUT_SRC) === DATA_PUT_SRC ? mutate(DATA_PUT_SRC, LOOK, "") : noLook(DATA_PUT_SRC) })],
-			["M14 PUT /api/load without its last look", () => ({ loadSrc: noLook(LOAD_PUT_SRC) === LOAD_PUT_SRC ? mutate(LOAD_PUT_SRC, LOOK, "") : noLook(LOAD_PUT_SRC) })],
+			["M11 PUT /api/data without the check", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, NO_CALL) })],
+			["M12 PUT /api/load without the check", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, NO_CALL) })],
+			["M13 PUT /api/data: the switch stays refused after the save", () => ({ dataSrc: noDone(DATA_PUT_SRC) === DATA_PUT_SRC ? mutate(DATA_PUT_SRC, DONE, "") : noDone(DATA_PUT_SRC) })],
+			["M14 PUT /api/load: the switch stays refused after the save", () => ({ loadSrc: noDone(LOAD_PUT_SRC) === LOAD_PUT_SRC ? mutate(LOAD_PUT_SRC, DONE, "") : noDone(LOAD_PUT_SRC) })],
 		]) {
 			let failed = [], detail = "";
 			try {
