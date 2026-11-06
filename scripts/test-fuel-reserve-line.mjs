@@ -725,6 +725,29 @@ if (panelFactory) {
     serve(server)
     check('§8a …and the same when the server carries the figure on the plan itself',
       firstScreen(await openSection(panelFactory())).includes('225 miles before you need to refuel'), true)
+    // A plan with its own figure keeps it, so the headline and the verdict stay one computation.
+    const planOwn = world({ flag: false, leg: 'to_delivery', routeMiles: 180 })
+    planOwn.range.rangeUsableMiles = 999
+    serve(planOwn)
+    check('§8a a plan with a refuel figure: the hero quotes the plan\'s, not the range answer\'s',
+      firstScreen(await openSection(panelFactory())).includes('225 miles before you need to refuel'), true)
+    const oldBoth = noReserve(world({ flag: false, leg: 'to_delivery', routeMiles: 180 }))
+    oldBoth.range.rangePlanningMiles = 999
+    serve(oldBoth)
+    check('§8a an older server, no reserve on either answer: the hero still quotes the plan\'s figure',
+      firstScreen(await openSection(panelFactory())).includes('240 miles you can count on'), true)
+  }
+  check('§8a no flag-off world says "hard run" or "furthest" anywhere in the section, or "Treat" in any wording',
+    Object.entries(offHtml).filter(([, h]) => /hard run|furthest|\bTreat\b/i.test(h)).map(([n]) => n), [])
+  check('§8a the no-fill-ups sentence only where there\'s no typical or best to show',
+    [textOf(offHtml['before pickup, a stop needed']).includes("We can't give you a typical"), textOf(offHtml['no tank size']).includes("We can't give you a typical")], [false, true])
+  {
+    // The first read of a load is the ordinary spinners, and no line says it's asking again.
+    serve(world({ flag: false }))
+    const first = clean(await renderToString(Vue.createSSRApp(panelFactory(), { loadId: 'QA-FUEL-1', active: true, runnable: true })))
+    await settle()
+    check('§8a a first read has no "checking" line: nothing is on screen to be old',
+      [first.includes('dfp-refresh-note'), textOf(first).includes('Reading your fuel level')], [false, true])
   }
   check('§8a the panel works out no range figure: every one on it is printed as the server sent it',
     /milesText\(\s*(interval\.\w+|i\.\w+)\s*[-+*/]/.test(fs.readFileSync(PANEL_VUE, 'utf8')), false)
@@ -1172,6 +1195,10 @@ if (panelFactory) {
         await settle()
         check('§8e flag off, a failure with nothing good before it: the failure, and no "couldn\'t update" line',
           [page.b.rangeError.value.startsWith("Couldn't read your fuel level"), page.b.refreshFailedLine?.value], [true, ''])
+        page.props.asked = 1
+        await settle()
+        check('§8e flag off, a failure over a failure: the failure again, still no such line',
+          [page.b.rangeError.value.startsWith("Couldn't read your fuel level"), page.b.refreshFailedLine?.value, page.b.plan.value], [true, '', null])
         page.stop()
       }
       {
@@ -1185,6 +1212,16 @@ if (panelFactory) {
         await settle()
         check('§8e flag off, Refresh pressed with no signal: the same, and under a minute old it gives no age',
           [page.b.plan.value && page.b.plan.value.verdict, page.b.refreshFailedLine?.value], ['insufficient', "Couldn't update your fuel numbers."])
+        // Young as they are, kept figures are asked for again on the next open, so it heals with the signal.
+        const w = world({ flag: false })
+        net.answers = { '/api/fuel/range': w.range, '/api/fuel/trip-plan': w.plan, '/api/poi/fuel-stops': STOPS }
+        page.props.active = false
+        await settle()
+        const before = net.gets.length
+        page.props.active = true
+        await settle()
+        check('§8e …the next open asks for the figures, under the 15 minutes too, and the line is gone',
+          [net.gets.slice(before).sort(), page.b.refreshFailedLine?.value], [['/api/fuel/range', '/api/fuel/trip-plan'], ''])
         page.stop()
         skew = 0
       }
