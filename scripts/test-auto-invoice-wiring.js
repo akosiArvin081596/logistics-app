@@ -657,6 +657,33 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq([retry.status, w.state("LD-TEST-0002"), w.audits("auto_invoice_retry").length], [200, ["queued", ""], 1], "§4 a Super Admin's Try again queues it, audited");
 	}
 
+	// ===================================================================== §4b
+	// The marking route refuses a working claim, so a mark can't land here in production:
+	// the runner writes the row, to show the engine's own read costs nothing and sends nothing.
+	section("§4b a load factored while the job builds its invoice, the engine as shipped");
+	{
+		const w = await world({ env: ON_ENV });
+		require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(w.db);
+		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§4b (fixture) the domain is confirmed");
+		await w.job.tick();
+		const before = { mint: w.calls.mint, gmail: w.gmail.length, seq: w.seq(), renderer: w.calls.renderer };
+		const prepare = w.H.brokerInvoiceDraft.prepare;
+		w.H.brokerInvoiceDraft.prepare = (args) => {
+			w.H.brokerInvoiceDraft.prepare = prepare;
+			w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
+				.run(rules.loadKey("LD-TEST-0040"), "LD-TEST-0040", "2026-11-03T15:00:00.000Z", "2026-11-03T15:00:00.000Z");
+			return prepare(args);
+		};
+		w.deliver("LD-TEST-0040", rateCon());
+		await w.job.tick();
+		eq(w.state("LD-TEST-0040"), ["queued", "RETRY_LATER"], "§4b no assignment lines to print: the engine refuses, and the job comes back to it");
+		eq([w.calls.mint - before.mint, w.gmail.length - before.gmail, w.seq(), w.calls.renderer - before.renderer], [0, 0, before.seq, 0], "§4b ...no number, no render, nothing in Gmail");
+		w.db.prepare("UPDATE auto_invoice_claims SET next_attempt_at = '' WHERE load_key = ?").run(rules.loadKey("LD-TEST-0040"));
+		await w.job.tick();
+		eq(w.state("LD-TEST-0040"), ["skipped", "LOAD_FACTORED"], "§4b ...and when it does, the free checks skip the factored load");
+		eq([w.calls.mint - before.mint, w.gmail.length - before.gmail], [0, 0], "§4b ...still no number and nothing in Gmail");
+	}
+
 	// ===================================================================== §5
 	section("§5  a rate-con total that wasn't read");
 	{

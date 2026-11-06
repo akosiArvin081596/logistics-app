@@ -343,6 +343,7 @@ async function s5() {
 	const texts = await pageTexts(b.pdf);
 	eq(texts.length, 3, "§5 three pages");
 	eq(texts.filter((t) => t.includes(batchLib.SAMPLE.stamp)).length, 3, "§5 the stamp is on each page");
+	eq(texts[0].split(batchLib.SAMPLE.stamp).length - 1, 2, "§5 ...and twice on the invoice page: on the page, and beside the block");
 	ok(texts[0].includes(LINES[3]), "§5 the block reaches the invoice page, its spaces kept");
 	const once = await batchLib.buildBatch(args());
 	ok(!shownText(once.pdf).includes(batchLib.SAMPLE.stamp), "§5 a real batch carries no stamp");

@@ -397,7 +397,8 @@ function checkButton(S) {
 	c.eq(S.draftEarlyCheck(broken, { key: "ld-test-0001", nowIso: at(1) }).code, "FACTORING_UNREADABLE", "§5 a marker that can't be read refuses (503)");
 
 	// The live preview sends nothing: the marker's checks alone, so a draft in flight doesn't refuse it.
-	const preview = (k, extra = {}) => S.previewCheck(db, { key: k, ...extra });
+	const previewOn = (d, k, extra = {}) => (S.previewCheck ? S.previewCheck(d, { key: k, ...extra }) : { code: "NO_PREVIEW_CHECK" });
+	const preview = (k, extra) => previewOn(db, k, extra);
 	c.eq(preview("ld-test-0011"), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 the preview: a draft in flight on a load that isn't factored doesn't refuse it");
 	c.eq(preview("ld-test-0012").ok, true, "§5 the preview: nor one that may be in Gmail");
 	c.eq(preview("ld-test-0002").code, "LOAD_FACTORED", "§5 the preview: a factored load is refused as a press is");
@@ -406,7 +407,7 @@ function checkButton(S) {
 	c.eq(preview("ld-test-0002", { confirm: yes, ...lines }).code, "FACTORING_NOT_LISTED", "§5 the preview: an account not listed");
 	c.eq(preview("ld-test-0002", { confirm: yes, mayConfirm: true, ...lines }), { ok: true, factored: true, confirmed: true, reason: yes.reason }, "§5 the preview: the confirmation passes where a press's does");
 	c.eq(preview("ld-test-0004", { confirm: yes, mayConfirm: true, ...lines }).code, "FACTORING_LOCKED", "§5 the preview: a locked row");
-	c.eq(S.previewCheck(broken, { key: "ld-test-0001" }).code, "FACTORING_UNREADABLE", "§5 the preview: a marker that can't be read refuses");
+	c.eq(previewOn(broken, "ld-test-0001").code, "FACTORING_UNREADABLE", "§5 the preview: a marker that can't be read refuses");
 
 	const begin =(k, extra = {}) => S.draftBegin(db, { key: k, loadId: k.toUpperCase(), invoiceId: "11032026-9", messageId: "<made-up@example.test>", path: "imap", actorId: 7, recipient: "ap@example-broker.test", total: "$2,150.00", nowIso: at(2), ...extra });
 	c.eq(begin("ld-test-0020"), { ok: true }, "§5 the late check passes and writes the in-flight row");
