@@ -160,7 +160,6 @@ function ownBody(state) {
   return {
     view: 'no-hours-data',
     creditWeights: { delivery: 0.5, pickup: 0.5 },
-    invoicePaysDays: state.invoicePaysDays,
     weeks: [dress({ ...THIS_WEEK, ...state.thisWeek }), dress(LAST_WEEK)],
     ...decoy,
   }
@@ -192,8 +191,8 @@ function boardBody(kind) {
 // `own` says how his route answers: 200, or a status with its code. `thisWeek` overrides his
 // figures; `withLoad` puts one made-up load in his list, and `withOffer` one to accept;
 // `ownDelayMs` holds his route's answer back, so the list paints first.
-function freshState({ own = 200, decoys = false, thisWeek = {}, withLoad = false, withOffer = false, ownDelayMs = 0, invoicePaysDays = true } = {}) {
-  return { own, decoys, thisWeek, withLoad, withOffer, ownDelayMs, invoicePaysDays, calls: { own: 0, week: 0, month: 0 } }
+function freshState({ own = 200, decoys = false, thisWeek = {}, withLoad = false, withOffer = false, ownDelayMs = 0 } = {}) {
+  return { own, decoys, thisWeek, withLoad, withOffer, ownDelayMs, calls: { own: 0, week: 0, month: 0 } }
 }
 
 const REFUSALS = {
@@ -782,7 +781,7 @@ async function weekShapesRun(browser, size) {
       await ctx.close()
     }
   }
-  const percentage = freshState({ invoicePaysDays: false })
+  const percentage = freshState()
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, percentage)
     try {

@@ -84,7 +84,7 @@ GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134
 GET /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7ba9d8e49ad5
 POST /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bd7b03307cdd
 DELETE /api/data/:rowIndex · requireRole("Super Admin")=anon@12b84c4b0134 · inline@162c6fef6371
-PUT /api/data/:rowIndex · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@a56cc60b1ed0
+PUT /api/data/:rowIndex · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f0958e33e6f
 ALL /api/db/download · inline@90c4873c481e
 POST /api/db/download · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOriginStrict=crossSiteGuardMiddleware@aa37960cca47 · dbAdminLimiter=limiter · inline@c65b3ee2d19a | after: ALL /api/db/download
 GET /api/db/query/:table · requireRole("Super Admin")=anon@12b84c4b0134 · dbAdminLimiter=limiter · inline@ecaed820209a
@@ -119,7 +119,7 @@ POST /api/driver/me/availability/:id/cancel · timeOffRequestsFlagGate@8e7690535
 GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · inline@c6cac740a042
 PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
-GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@b8c6be68a743 · (lib mount)
+GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@d07da87e07b2 · (lib mount)
 GET /api/driver/me/release · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@bbfff113781e · (lib mount)
 POST /api/driver/me/release/seen · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
 POST /api/driver/me/release/tour-done · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
@@ -164,8 +164,8 @@ GET /api/expenses/fuel-analytics · requireRole("Super Admin", "Dispatcher")=ano
 POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter · inline@ea8104cc4944
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
-POST /api/factoring/loads/:loadKey · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@afdf206f4fc8 · (lib mount)
-POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@9c4c8c534884 · (lib mount)
+POST /api/factoring/loads/:loadKey · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@0de31441b522 · (lib mount)
+POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@65273f8e8c37 · (lib mount)
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
 GET /api/financials/overview · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7c94116b08cc
 GET /api/financials/overview.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3bc178b2c5a0
@@ -244,7 +244,7 @@ GET /api/load-ratings/:loadId · requireRole("Super Admin", "Dispatcher")=anon@1
 PUT /api/load-ratings/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@861f1c41096d
 GET /api/load-ratings/averages · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@0ac489d76517
 GET /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e0784ab4343c
-PUT /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@17619f1ba883
+PUT /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5fd08aa21926
 DELETE /api/loads/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@210395ff3283
 GET /api/loads/:loadId/driver-instructions · gate@114647a18c99 · anon@12b84c4b0134 · anon@3dea3af8e54e · (lib mount)
 PUT /api/loads/:loadId/driver-instructions · gate@114647a18c99 · anon@12b84c4b0134 · limiter · anon@3dea3af8e54e · (lib mount)

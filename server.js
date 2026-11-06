@@ -44877,6 +44877,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		if (!cellWrites.length) {
 			return res.json({ success: true, updatedCells: 0, unchanged: true });
 		}
+		// A factoring mark goes by the Load ID's text, so a marked load keeps its ID, for every role and
+		// whatever the settings say. Last before the write, so no await comes between them.
+		const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+		const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+		if (idSave && !idSave.ok) {
+			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+			return res.status(idSave.http).json(idSave.json);
+		}
 		let response;
 		try {
 			response = await sheets.spreadsheets.values.batchUpdate({
@@ -44888,8 +44896,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			// genuinely unknown whether the row changed, and that is precisely when
 			// the before/after values are worth having.
 			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			if (idSave) idSave.done();
 			throw err;
 		}
+		if (idSave) idSave.done();
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
@@ -55888,6 +55898,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	replica: Boolean(REPLICA),
 	logAudit,
 	logAuditRefusal,
+	readJobTracking: getJobTrackingCached,
 	findDraftByMessageId: require("./lib/imap-draft").findDraftByMessageId,
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
 });
@@ -61513,6 +61524,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// audit line: there is no write to reverse.
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (cellWrites.length) {
+			// As PUT /api/data/:rowIndex: a marked load keeps its ID, last before the write.
+			const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+			const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+			if (idSave && !idSave.ok) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+				return res.status(idSave.http).json(idSave.json);
+			}
 			try {
 				await sheets.spreadsheets.values.batchUpdate({
 					spreadsheetId: SPREADSHEET_ID,
@@ -61523,8 +61541,10 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				// genuinely unknown whether the row changed, and that is precisely when the
 				// before/after values are worth having.
 				logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+				if (idSave) idSave.done();
 				throw err;
 			}
+			if (idSave) idSave.done();
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
@@ -65015,6 +65035,7 @@ let _jtCache = null;
 let _jtInflight = null;
 let _jtEpoch = 0;
 const JT_CACHE_TTL = 60_000;
+const { keepEveryRow, everyJobTrackingRow } = require("./lib/job-tracking-every-row");
 async function getJobTrackingCached() {
 	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
 	// Join the read already in flight rather than starting a second one.
@@ -65030,6 +65051,7 @@ async function getJobTrackingCached() {
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const parsed = parseSheet(response.data);
+		keepEveryRow(parsed, parsed.data);
 		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
 		// The Load IDs as every role but Super Admin is served them, kept on this
 		// read before it is shared (shownLoadIdIndex()), and the latest only while
@@ -73984,8 +74006,8 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
-	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
-	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
 });
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.

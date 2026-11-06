@@ -35,6 +35,7 @@ import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { serverSource } from './lib/server-source.js'
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -414,7 +415,7 @@ section('§11 what happened and what to do next, whichever starts the invoice')
   const R = S.AUTO_INVOICE_REASONS
   const TEXT = {
     WAITING_POD: 'Waiting for the POD. Upload it; no invoice is made until then.',
-    NOT_COMPLETED: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. If this line is still here a few minutes later, draft it by hand.",
+    NOT_COMPLETED: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. Reload this page in 10 minutes and open this load again. If this line is still here, draft it by hand.",
     LOAD_DROPPED: 'The load was cancelled or deleted, so no invoice is made. Nothing to do.',
     SETTINGS_UNREADABLE: 'The automatic invoice settings could not be read, so nothing is made or sent. Save both lists in Automatic drafts.',
     NO_BROKER_EMAIL: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.',
@@ -473,6 +474,13 @@ section('§11 what happened and what to do next, whichever starts the invoice')
     ok(!/Try again/.test(R[code].text), `§11 ${code}: its queued sentence doesn't ask for Try again`)
   }
   eq(S.autoInvoiceChip({ state: 'waiting', code: 'NOT_COMPLETED' }).label, 'Waiting: not delivered', '§11 NOT_COMPLETED keeps its chip words')
+  // The job tells no page when it moves a load, and the open dialog keeps the copy it opened
+  // with. A reload shuts the dialog, so "still here" means something only after a new look.
+  ok(/Reload this page in \d+ minutes and open this load again\. If this line is still here, draft it by hand\.$/.test(R.NOT_COMPLETED.text), '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: a person reloads and opens the load again before judging the line')
+  ok(!/a few minutes later/.test(R.NOT_COMPLETED.text), '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: waiting on an open page is no test: the line never moves there')
+  // With the driver's trigger off, the sweep ticks on this timer and a slow run can skip one tick.
+  const tick = /const AUTO_INVOICE_TICK_MS = (\d+) \* 60 \* 1000;/.exec(serverSource())
+  eq(Number((/Reload this page in (\d+) minutes/.exec(R.NOT_COMPLETED.text) || [])[1]), tick && Number(tick[1]) * 2, '§11 FAILS ON THE OLD CODE: NOT_COMPLETED: the wait covers the sweep\'s tick and one tick skipped behind a slow run')
   eq(R.SETTINGS_UNREADABLE && R.SETTINGS_UNREADABLE.short, 'settings unreadable', '§11 FAILS ON THE OLD CODE: SETTINGS_UNREADABLE names the settings, not one list')
   ok(!/within a few minutes/.test(R.WAITING_POD.text), '§11 WAITING_POD promises no time: nothing but the sweep could keep one')
   eq(rules.LOGIN_PAUSE_MAX_MS, 6 * 60 * 60 * 1000, '§11 MAILBOX_PAUSED\'s "up to 6 hours" is the job\'s longest pause')
