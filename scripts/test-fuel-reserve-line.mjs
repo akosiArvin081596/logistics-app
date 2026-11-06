@@ -1174,6 +1174,52 @@ if (panelFactory) {
         skew = 0
       }
 
+      // A title's read that failed is kept no more than the section's is.
+      {
+        const open = live()
+        const good = world({ flag: false })
+        serve(good, { '/api/fuel/trip-plan': apiError(500) })
+        const shut = open({ active: false })
+        await settle()
+        check('§8e the title\'s read failed with Fuel shut: no badge', lastPlan(shut), null)
+        shut.stop()
+        net.answers['/api/fuel/trip-plan'] = good.plan
+        const again = open({ active: false })
+        await settle()
+        check('§8e …back on the load with signal back: it asks, and the badge is there', lastPlan(again) && lastPlan(again).verdict, 'insufficient')
+        again.stop()
+        const openLater = live()
+        serve(good, { '/api/fuel/trip-plan': apiError(500) })
+        const first = openLater({ active: false })
+        await settle()
+        net.answers['/api/fuel/trip-plan'] = good.plan
+        first.props.active = true
+        await settle()
+        const t = textOf(await first.screen())
+        check('§8e …or Fuel opened by hand with signal back: the figures and the verdict, not a failed read saved from before',
+          [t.includes(FAILED), t.includes('Not enough fuel — you need to stop')], [false, true])
+        first.stop()
+      }
+      // A failed line belongs to its own load: a page switched in place doesn't carry it over.
+      {
+        const open = live()
+        const good = world({ flag: false })
+        serve(good)
+        const other = open({ loadId: 'QA-FUEL-2' })
+        await settle()
+        other.stop()
+        const page = open()
+        await settle()
+        Object.assign(net.answers, DEAD)
+        await tap(page, 1)
+        check('§8e the failed line, on this load', textOf(await page.screen()), FAILED)
+        page.props.loadId = 'QA-FUEL-2'
+        await settle()
+        const t = textOf(await page.screen())
+        check('§8e …switched in place to a load already read: its figures, and no failed line', [t.includes(FAILED), t.includes('225 miles before you need to refuel')], [false, true])
+        page.stop()
+      }
+
       // Refresh is an ask like any other, and it can't cost the stops already paid for.
       {
         const open = live()
