@@ -40,7 +40,7 @@
  *   §14 the retention sweep: report only until its date, then removes old notes
  *       and unnamed files older than an hour
  *   §15 GET /api/driver/position's stoppedSinceMs, by speed and by whether the
- *       fixes stayed put, and the moving gate's table
+ *       distinct fixes stayed put over two minutes, and the moving gate's table
  *   §16 the label: "Voice note (0:42)"
  *   §17 deleting a user unlinks his voice files
  *   §18 the conversation list (GET /api/messages): each conversation's newest
@@ -629,19 +629,40 @@ function telemetry(db, { agoMs, speed }) {
 			ok("§15 a jump from a bad fix, as the latest: no stopped time", gate.stoppedSinceMs([fix(30e3, 0, bad), fix(90e3, 0, home), fix(600e3, 0, home)]) === null);
 			ok("§15 ...and the good fix after it: still none", gate.stoppedSinceMs([fix(30e3, 0, home), fix(90e3, 0, bad), fix(150e3, 0, home), fix(600e3, 0, home)]) === null);
 			const afterBad = [fix(30e3, 0, home), fix(90e3, 0, home), fix(150e3, 0, bad), fix(600e3, 0, home)];
-			ok("§15 ...then dated from the first good fix after it, so the wait starts again", gate.stoppedSinceMs(afterBad) === now - 90e3 && g(fix(30e3, 0), gate.stoppedSinceMs(afterBad)) === "stopping");
-			ok("§15 ...and it recovers by itself two minutes on", gate.recordGate({ fix: { speed: 0, location_date_ms: now + 90e3 }, stoppedSince: gate.stoppedSinceMs(afterBad), nowMs: now + 120e3 }).state === "parked");
+			ok("§15 ...then none until the good fixes after it span two minutes, so the wait starts again", gate.stoppedSinceMs(afterBad) === null && g(fix(30e3, 0), gate.stoppedSinceMs(afterBad)) === "stopping");
+			const settled = [fix(30e3, 0, home), fix(90e3, 0, home), fix(150e3, 0, home), fix(210e3, 0, bad), fix(600e3, 0, home)];
+			ok("§15 ...and then it recovers by itself, dated from the first good fix after it", gate.stoppedSinceMs(settled) === now - 150e3 && g(fix(30e3, 0), gate.stoppedSinceMs(settled)) === "parked");
 			const atALight = [fix(10e3, 0, home), fix(70e3, 0, home), fix(130e3, 0, at(1000)), fix(190e3, 0, at(2000))];
-			ok("§15 no speed, stopped a minute at a light: dated from the first fix there, not the oldest read", gate.stoppedSinceMs(atALight) === now - 70e3 && g(fix(10e3, 0), gate.stoppedSinceMs(atALight)) === "stopping");
-			// 5 mph is about 134 m a minute: each pair of fixes is inside GPS noise, the run isn't.
-			const crawling = [fix(10e3, 0, at(402)), fix(70e3, 0, at(268)), fix(130e3, 0, at(134)), fix(190e3, 0, at(0))];
-			ok("§15 no speed, creeping at 5 mph: never reads parked, though no two fixes in a row are apart", g(fix(10e3, 0), gate.stoppedSinceMs(crawling)) === "stopping");
+			ok("§15 no speed, a minute at a light: the fixes there don't span two minutes, so no stopped time", gate.stoppedSinceMs(atALight) === null && g(fix(10e3, 0), gate.stoppedSinceMs(atALight)) === "stopping");
+			const longerStop = [fix(10e3, 0, home), fix(70e3, 0, home), fix(130e3, 0, home), fix(190e3, 0, at(1000)), fix(250e3, 0, at(2000))];
+			ok("§15 no speed, over two minutes there: dated from the first fix there, not the oldest read", gate.stoppedSinceMs(longerStop) === now - 130e3 && g(fix(10e3, 0), gate.stoppedSinceMs(longerStop)) === "parked");
+			ok("§15 the span is the fixes' own: exactly two minutes counts", gate.stoppedSinceMs([fix(10e3, 0), fix(130e3, 0)]) === now - 130e3);
+			ok("§15 ...and a moment under doesn't, whatever the age of the last fix", gate.stoppedSinceMs([fix(170e3, 0), fix(289e3, 0)]) === null);
+			// A truck a device reports on, one fix a minute, at each speed: metres between fixes.
+			const creeping = (metresPerFix) => [0, 1, 2, 3, 4, 5, 6, 7].map((i) => fix((10 + 60 * i) * 1000, 0, at(metresPerFix * (7 - i))));
+			for (const [mph, metres] of [[3, 80], [4, 107], [5, 134]]) {
+				ok(`§15 no speed, creeping at ${mph} mph: no stopped time, though no two fixes in a row are apart`, gate.stoppedSinceMs(creeping(metres)) === null);
+			}
+			ok("§15 ...and so for a truck that sends a speed under the moving line", gate.stoppedSinceMs(creeping(134).map((f) => ({ ...f, speed: 2 }))) === null);
+			ok("§15 ...while one under about 3 mph stays inside GPS noise for two minutes and reads stopped: what's left of a crawl", gate.stoppedSinceMs(creeping(54)) === now - 130e3);
+			// The poller stores a device's last fix again every minute; a device can report far less often.
+			const again = (agoMs, place, times) => Array.from({ length: times }, () => fix(agoMs, 0, place));
+			const sparse = [...again(130e3, at(9000), 3), ...again(430e3, at(0), 5)];
+			ok("§15 rows aren't fixes: a truck at 65 mph with a device every 5 minutes, its last fix 130 s old and stored again each minute: no stopped time", gate.stoppedSinceMs(sparse) === null);
+			ok("§15 ...at 175 s old too", gate.stoppedSinceMs([...again(175e3, at(9000), 3), ...again(475e3, at(0), 5)]) === null);
+			ok("§15 one fix stored again and again is still one fix: no stopped time", gate.stoppedSinceMs(again(125e3, home, 3)) === null);
+			ok("§15 ...and repeats don't make a span", gate.stoppedSinceMs([...again(10e3, home, 4), ...again(70e3, home, 4)]) === null);
+			ok("§15 a truck that sends speed, fixes minutes apart, the last two apart: none, though the moving fix is minutes old", gate.stoppedSinceMs([fix(10e3, 0, home), fix(310e3, 9, at(1000))]) === null);
+			ok("§15 ...and a single stopped fix stored again and again doesn't hide that: none, until a second one comes in at the stop", gate.stoppedSinceMs([...again(10e3, home, 3), ...again(310e3, at(1000), 2).map((f) => ({ ...f, speed: 9 }))]) === null);
+			ok("§15 ...which then dates the stop from the moving fix, as ever", gate.stoppedSinceMs([...again(10e3, home, 3), ...again(310e3, home, 3), ...again(610e3, at(1000), 2).map((f) => ({ ...f, speed: 9 }))]) === now - 610e3);
+			ok("§15 a parked truck on such a device: its distinct fixes span the stop, repeats or not", gate.stoppedSinceMs([...again(130e3, home, 3), ...again(430e3, at(12), 5), ...again(730e3, at(-9), 5)]) === now - 730e3);
 			const lostGps = { latitude: 0, longitude: 0 };
 			ok("§15 a fix with no GPS is no evidence: it doesn't read as a move", gate.stoppedSinceMs([fix(30e3, 0), fix(90e3, 0, lostGps), fix(600e3, 0)]) === now - 600e3);
 			ok("§15 ...and it doesn't hide one", gate.stoppedSinceMs([fix(30e3, 0, at(3000)), fix(90e3, 0, lostGps), fix(150e3, 0, at(0))]) === null);
 			ok("§15 a truck that sends speed keeps its date: the last moving fix, though it was also elsewhere", gate.stoppedSinceMs([fix(30e3, 0, home), fix(90e3, 0, home), fix(150e3, 9, at(1000)), fix(300e3, 0, at(1000))]) === now - 150e3);
-			ok("§15 ...and a moving fix newer than the last fix elsewhere", gate.stoppedSinceMs([fix(30e3, 0, home), fix(90e3, 9, at(20)), fix(150e3, 0, at(30)), fix(210e3, 0, at(1000))]) === now - 90e3);
-			ok("§15 ...but a no-speed fix elsewhere, newer than the last moving one, moves the date up", gate.stoppedSinceMs([fix(30e3, 0, home), fix(90e3, 0, home), fix(150e3, 0, at(1000)), fix(600e3, 9, at(5000))]) === now - 90e3);
+			ok("§15 ...and a moving fix newer than the last fix elsewhere", gate.stoppedSinceMs([fix(30e3, 0, home), fix(150e3, 9, at(20)), fix(210e3, 0, at(30)), fix(270e3, 0, at(1000))]) === now - 150e3);
+			ok("§15 ...but a no-speed fix elsewhere, newer than the last moving one, moves the date up", gate.stoppedSinceMs([fix(30e3, 0, home), fix(90e3, 0, home), fix(150e3, 0, home), fix(210e3, 0, at(1000)), fix(600e3, 9, at(5000))]) === now - 150e3);
+			ok("§15 ...and a moving fix under two minutes behind the latest gives no stopped time yet", gate.stoppedSinceMs([fix(10e3, 0), fix(70e3, 0), fix(100e3, 9, at(50))]) === null);
 
 			ok("§15 the record gate: fresh and moving = moving (blocked)", g(fix(30e3, 9), null) === "moving" && !gate.recordGate({ fix: fix(30e3, 9), stoppedSince: null, nowMs: now }).allowed);
 			ok("§15 ...stopped under 2 minutes = stopping (blocked)", g(fix(30e3, 0), now - 60e3) === "stopping");

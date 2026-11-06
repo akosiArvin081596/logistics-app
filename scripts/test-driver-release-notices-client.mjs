@@ -5,7 +5,8 @@
 // scripts/test-driver-release-notices.js; scripts/e2e/driver-release-notices.mjs covers the page.
 //   §1  the words, exact, and plain: no figure, no name, no word a driver wouldn't use; none that's
 //       false for a driver who can read it
-//   §2  signOutMoment(): every safe-moment input holds the sign-out on its own, and a missing one does
+//   §2  signOutMoment(): every safe-moment input holds the sign-out on its own, and a missing one does;
+//       parkedLongEnough(): the stretch a truck must have read as parked
 //   §3  noteMoment(): the same, except that a working load doesn't hold a note
 //   §4  loadsHoldSignOut(): In Transit and every status short of done hold it; so does one nobody knows,
 //       and so does an empty list
@@ -14,21 +15,24 @@
 //   §7  what the browser keeps: once per release per account; the login line once; no storage, no sign-out
 //   §8  overlayOnScreen() and fieldInFocus(): a dialog from any component, a field he's typing in
 //   §9  writesBusy() and useApi: a write on the wire holds the sign-out, and a moment after it
-//   §10 the sign-out through useDriverRelease: only when due and safe; never in transit or mid-action;
-//       fresh facts first; a failed read changes nothing; another tab of the app holds it; no loop; only
-//       a Driver, off the lock screen
+//   §10 the sign-out through useDriverRelease: only as the app opens, never in a page already open; only
+//       when due and safe; never in transit or mid-action; fresh facts first; a failed read changes
+//       nothing; another tab of the app holds it; no loop; only a Driver, off the lock screen
 //   §11 the note, the offer and the tour through useDriverRelease: once, what each writes, skip, motion;
 //       the note waits for the Performance answer
 //   §12 DriverView.vue: he asks by his own moves and no others: a cancel, a refetch or a tab taken away
-//       closing a page starts no check, run on the view's own statements; no timer, no socket; the tour
-//       marks nothing read
+//       closing a page starts no check, run on the view's own statements; only the first load of the
+//       first screen is the app opening, and a retry isn't; no timer, no socket; the tour marks nothing read
 //   §13 the components and LoginView.vue
 //   §14 only the driver app and the session store read any of it
 //   §15 the real driver store and the real truck read, over a stubbed fetch: a reply whose body drops, an
-//       empty list, a truck with no reading and a failed read of it all hold the sign-out
+//       empty list, a truck with no reading, a failed read of it and a truck stopped under the stretch all
+//       hold the sign-out
 //   §16 lib/appTabs.js: each page's record in the browser's storage: another page's holds, frozen or
 //       silent too, until it leaves or a day has passed; a page's own never does; a browser that can't
 //       keep them says so; they hold no name or account and can't pile up
+//   §17 lib/appOpening.js: the first screen a page shows is the app opening, and no later one, with the
+//       router's real order of events
 //
 // No DOM, no server, no build.
 //   node scripts/test-driver-release-notices-client.mjs      # exits 1 on any failure
@@ -147,6 +151,19 @@ for (const key of Object.keys(SAFE)) {
 }
 eq('held: no inputs', lib.signOutMoment(null), false)
 eq('held: a truthy word is not a yes', lib.signOutMoment({ ...SAFE, parked: 'yes' }), false)
+
+{
+  const NOW = 1_800_000_000_000
+  const MIN = 60 * 1000
+  const stretch = lib.SIGN_OUT_PARKED_MS
+  eq('the stretch is one named figure, 15 minutes: a read-only count of real stops backs it', stretch, 15 * MIN)
+  eq('parked exactly that long: long enough', lib.parkedLongEnough('parked', NOW - stretch, NOW), true)
+  eq('parked a good while longer', lib.parkedLongEnough('parked', NOW - 6 * 60 * MIN, NOW), true)
+  eq('a moment under it: not yet', lib.parkedLongEnough('parked', NOW - stretch + 1, NOW), false)
+  eq("two minutes, which is what the voice note gate calls parked: not nearly", lib.parkedLongEnough('parked', NOW - 2 * MIN, NOW), false)
+  for (const state of ['moving', 'stopping', 'unknown', undefined]) eq(`reading ${state}, however long ago it stopped: no`, lib.parkedLongEnough(state, NOW - 60 * MIN, NOW), false)
+  for (const since of [null, undefined, NaN, 'long ago']) eq(`no known start (${since}): no`, lib.parkedLongEnough('parked', since, NOW), false)
+}
 
 // ── §3 ────────────────────────────────────────────────────────────────────
 section('3 noteMoment()')
@@ -374,12 +391,39 @@ function world(start = {}) {
     sessionStorage: box.session,
     now: () => 1_800_000_000_000,
   }
-  return { s, calls, box, options, release: useDriverRelease(options) }
+  const real = useDriverRelease(options)
+  // `check()` here is the app opening, the one moment that can sign anyone out. DriverView's plain
+  // release.check(), any moment in a page already open, is `check(IN_OPEN_PAGE)`.
+  return { s, calls, box, options, release: { ...real, check: (how = APP_OPENING) => real.check(how) } }
 }
+const APP_OPENING = Object.freeze({ appOpening: true })
+const IN_OPEN_PAGE = Object.freeze({})
 const DUE = () => ({ signInDue: true, releaseId: ID, notes: [], tourOffered: false })
 
 // ── §10 ───────────────────────────────────────────────────────────────────
 section('10 the sign-out')
+{
+  const w = world()
+  w.box.answer = DUE
+  await w.release.check(IN_OPEN_PAGE)
+  await w.release.check({ appOpening: false })
+  eq('due and safe, in a page already open: nobody signed out, and no reads for it', [w.calls.signOuts, w.calls.facts, w.calls.gets], [0, 0, 2])
+  eq('...and nothing is recorded, so the next opening can do it', lib.signedOutFor(w.box.local, 2, ID), false)
+  await useDriverRelease(w.options).check()
+  eq('...nor by a plain check() with nothing handed in', [w.calls.signOuts, w.calls.facts], [0, 0])
+  await w.release.check({ appOpening: 'yes' })
+  eq('...nor by a truthy word that is not a yes', [w.calls.signOuts, w.calls.facts], [0, 0])
+  await useDriverRelease(w.options).check(new Event('click'))
+  eq('...nor by an event handed in, as a handler bound straight to a button would', [w.calls.signOuts, w.calls.facts], [0, 0])
+  await w.release.check(APP_OPENING)
+  eq('...and the app opening does it', w.calls.signOuts, 1)
+}
+{
+  const w = world({ tab: 'loads' })
+  w.box.answer = () => ({ signInDue: false, releaseId: ID, notes: [ENTRY], tourOffered: false })
+  await w.release.check(IN_OPEN_PAGE)
+  eq('a moment in an open page still reads the note', w.release.noteView.value?.mode, 'notes')
+}
 {
   const w = world()
   w.box.answer = DUE
@@ -562,29 +606,29 @@ for (const [label, fail] of [
   second.box.local = first.box.local
   second.options.localStorage = first.box.local
   const again = useDriverRelease(second.options)
-  await again.check()
-  await again.check()
+  await again.check(APP_OPENING)
+  await again.check(APP_OPENING)
   eq("the next page doesn't sign him out again: no loop", second.calls.signOuts, 0)
   eq('...nor rereads his loads for nothing', second.calls.facts, 0)
   const nextRelease = world()
   nextRelease.box.answer = () => ({ signInDue: true, releaseId: '2026-11-07-next', notes: [], tourOffered: false })
   nextRelease.options.localStorage = first.box.local
-  await useDriverRelease(nextRelease.options).check()
+  await useDriverRelease(nextRelease.options).check(APP_OPENING)
   eq('a second release the same day signs him out again', nextRelease.calls.signOuts, 1)
   const nextDriver = world({ userId: 3 })
   nextDriver.box.answer = DUE
   nextDriver.options.localStorage = first.box.local
-  await useDriverRelease(nextDriver.options).check()
+  await useDriverRelease(nextDriver.options).check(APP_OPENING)
   eq("on a shared phone the next driver's session is his own", nextDriver.calls.signOuts, 1)
 }
 {
   const w = world()
   w.box.answer = DUE
   w.options.localStorage = brokenStorage()
-  await useDriverRelease(w.options).check()
+  await useDriverRelease(w.options).check(APP_OPENING)
   eq("a browser that can't remember gets no forced sign-out", w.calls.signOuts, 0)
   w.options.localStorage = null
-  await useDriverRelease(w.options).check()
+  await useDriverRelease(w.options).check(APP_OPENING)
   eq('...no storage at all neither', w.calls.signOuts, 0)
 }
 for (const role of ['Super Admin', 'Dispatcher', 'Investor', 'KPI Viewer', undefined]) {
@@ -821,9 +865,9 @@ function fn(head) {
   if (a < 0) return ''
   return script.slice(a, script.indexOf('\n}\n', a) + 2)
 }
-const checks = [...script.matchAll(/release\.check\(\)/g)]
-eq('it asks at four places and no others', checks.length, 4)
-ok('when the app opens', /checkPerformanceTab\(\)\n\s+release\.check\(\)\n\s+\} catch/.test(fn('async function attemptInitialLoad()')))
+const checks = [...script.matchAll(/release\.check\(([^)]*)\)/g)].map((m) => m[1])
+eq('it asks at four places and no others, and only the first load can be the app opening', checks, ['', '', '', '{ appOpening: opening }'])
+ok('when the app opens', /checkPerformanceTab\(\)\n\s+release\.check\(\{ appOpening: opening \}\)\n\s+\} catch/.test(fn('async function attemptInitialLoad()')))
 ok('when he comes back to the app', /visibilityState === 'visible' && isMounted\) \{\n\s+scheduleDriverRefetch\(\)\n\s+release\.check\(\)/.test(fn('function onVisibilityChange()')))
 ok("when he leaves a load's page himself", /@back="handleLoadBack"/.test(VIEW))
 ok('when he taps a tab himself', /@switch="handleNavTap"/.test(VIEW))
@@ -906,6 +950,38 @@ try {
   ok(`the scenes of who starts a check ran: ${e.message}`, false)
 }
 
+// The view's own first load: what it tells the check, on the view's own statements.
+async function firstLoadScene({ firstScreen, failFirst = false }) {
+  const { ref } = vue
+  const told = []
+  let failing = failFirst
+  const body = [
+    'let socketSetupDone = true',
+    script.slice(script.indexOf('let appOpening = '), script.indexOf('\n', script.indexOf('let appOpening = '))),
+    fn('async function attemptInitialLoad()'),
+    'return attemptInitialLoad',
+  ].join('\n')
+  const attempt = new Function('isFirstScreen', 'driverName', 'driverStore', 'initialLoadFailed', 'maybeShowWelcome', 'scheduleContactsPrompt', 'checkPerformanceTab', 'release', 'toast', 'isMounted', body)(
+    () => firstScreen, ref(''), { loadData: async () => { if (failing) { failing = false; throw new Error('no signal') } } }, ref(false), () => {}, () => {}, () => {},
+    { check: (how) => { told.push(how) } }, { show() {} }, true)
+  return { attempt, told }
+}
+try {
+  const opening = await firstLoadScene({ firstScreen: true })
+  await opening.attempt()
+  eq("the first screen's first load is the app opening", opening.told, [{ appOpening: true }])
+  const later = await firstLoadScene({ firstScreen: false })
+  await later.attempt()
+  eq('the driver app as a later screen (after a sign-in or a forced password change) is not', later.told, [{ appOpening: false }])
+  const retried = await firstLoadScene({ firstScreen: true, failFirst: true })
+  await retried.attempt()
+  eq('a first load that fails tells it nothing', retried.told, [])
+  await retried.attempt()
+  eq('...and the retry tap is in a page already open, so it is not the app opening', retried.told, [{ appOpening: false }])
+} catch (e) {
+  ok(`the scenes of the first load ran: ${e.message}`, false)
+}
+
 // The view's own read of the Performance tab: only a yes or a no from the server makes it known.
 async function probeScene(answer) {
   const { ref } = vue
@@ -934,7 +1010,7 @@ ok('no timer asks', ![...script.matchAll(/set(?:Timeout|Interval)\([\s\S]{0,200}
 ok('a socket reconnect does not ask', !/isConnected\.value[\s\S]{0,200}release\.check/.test(script))
 ok('a working load is read from the whole list, not just workingLoads', /loadsHold: loadsHoldSignOut\(driverStore\.loads, driverStore\.headers\.jobTracking\)/.test(script))
 ok('the note and the tour, by the same gate as the contacts prompt', /motionAllowed: \(\) => voiceGate\.value\.allowed/.test(script) && /settled: contactsPromptReady\.value[\s\S]{0,300}motionAllowed: voiceGate\.value\.allowed/.test(script))
-ok('the sign-out, only by a truck that reads as parked', /parked: voiceGate\.value\.state === 'parked'/.test(script))
+ok('the sign-out, only by a truck that has read as parked for the stretch', /parked: parkedLongEnough\(voiceGate\.value\.state, driverPos\.eldMotion\.value\?\.stoppedSince, driverPos\.clock\.value\),/.test(script))
 ok("the other tabs are read from the page's one record, at each check", /signOutInputs: \(\) => \(\{[\s\S]{0,700}otherTabOpen: thisPageTabs\(\)\.otherPageOpen\(\),/.test(script))
 ok('a load opened, a window up, a new load banner, an accept in flight, a field in focus, any overlay: all hold it',
   /const loadPageOpen = \(\) => !!detailLoad\.value/.test(script) && [...script.matchAll(/loadOpen: loadPageOpen\(\)/g)].length === 2 && /dialogOpen: releaseDialogOpen\(\) \|\| !!assignedNotification\.value \|\| respondingLoadIds\.size > 0 \|\| fieldInFocus\(document\) \|\| overlayOnScreen\(document\)/.test(script))
@@ -1002,7 +1078,7 @@ const droppedBody = () => () => new Response(new ReadableStream({
 }), { status: 200, headers: { 'content-type': 'application/json' } })
 const cutShort = () => () => new Response('{"loads":[{"_rowIndex":2,', { status: 200 })
 const noBody = () => () => new Response('', { status: 200 })
-const truck = ({ speed = 0, age = 5000, stopped = 10 * 60 * 1000 } = {}) => () => jsonReply({
+const truck = ({ speed = 0, age = 5000, stopped = 20 * 60 * 1000 } = {}) => () => jsonReply({
   ok: true,
   position: { latitude: 29.7, longitude: -95.3, speed, source: 'routemate', lastPingAge: age, timestamp: new Date(Date.now() - age).toISOString(), ...(speed === 0 ? { stoppedSinceMs: stopped === null ? null : Date.now() - stopped } : {}) },
 })
@@ -1013,7 +1089,7 @@ const noSignal = () => () => { throw new TypeError('Failed to fetch') }
 const refreshFactsText = (script.match(/refreshFacts: (async \(\) => \{[\s\S]*?\n {2}\}),/) || [])[1]
 ok('(the scene) the view reads its facts in one place', !!refreshFactsText)
 
-async function realCheck({ loads, reading, before = null, holding = 'In Transit', otherTab = () => false }) {
+async function realCheck({ loads, reading, before = null, holding = 'In Transit', otherTab = () => false, how = APP_OPENING }) {
   piniaModule.setActivePinia(piniaModule.createPinia())
   const store = useDriverStore()
   store.driverName = DRIVER_NAME
@@ -1047,7 +1123,7 @@ async function realCheck({ loads, reading, before = null, holding = 'In Transit'
     signOutInputs: () => ({
       loaded: true, onboarding: false, tab: 'loads', loadOpen: false, welcomeOpen: false, dialogOpen: false,
       loadsHold: lib.loadsHoldSignOut(store.loads, store.headers.jobTracking), writesBusy: false, otherTabOpen: otherTab(), visible: true, online: true,
-      parked: gate().state === 'parked', motionAllowed: gate().allowed,
+      parked: lib.parkedLongEnough(gate().state, pos.eldMotion.value?.stoppedSince, Date.now()), motionAllowed: gate().allowed,
     }),
     refreshFacts: new Function('driverStore', 'driverPos', `return ${refreshFactsText}`)(store, pos),
     signOut: () => { signOuts++ },
@@ -1058,12 +1134,18 @@ async function realCheck({ loads, reading, before = null, holding = 'In Transit'
     localStorage: fakeStorage(),
     sessionStorage: fakeStorage(),
   })
-  await release.check()
+  await release.check(how)
   globalThis.fetch = realFetch
   return { signOuts, loads: store.loads.length, state: gate().state }
 }
 const PARKED = truck()
-eq('(control) his loads all delivered, the truck parked: signed out', (await realCheck({ loads: payload('Delivered'), reading: PARKED })).signOuts, 1)
+eq('(control) his loads all delivered, the truck parked past the stretch: signed out', (await realCheck({ loads: payload('Delivered'), reading: PARKED })).signOuts, 1)
+eq('...the same, in a page already open: held', (await realCheck({ loads: payload('Delivered'), reading: PARKED, how: IN_OPEN_PAGE })).signOuts, 0)
+for (const [label, ms] of [['ten minutes', 10 * 60 * 1000], ['just under the stretch', lib.SIGN_OUT_PARKED_MS - 15 * 1000]]) {
+  const r = await realCheck({ loads: payload('Delivered'), reading: truck({ stopped: ms }) })
+  eq(`the truck parked ${label}, which the voice note gate calls parked: held`, [r.state, r.signOuts], ['parked', 0])
+}
+eq('parked just over the stretch: signed out', (await realCheck({ loads: payload('Delivered'), reading: truck({ stopped: lib.SIGN_OUT_PARKED_MS + 1000 }) })).signOuts, 1)
 eq('In Transit, and the reply about his loads comes whole: held', (await realCheck({ loads: payload('In Transit'), reading: PARKED })).signOuts, 0)
 for (const [label, reply] of [['whose body drops part way', droppedBody()], ['cut short', cutShort()], ['with no body at all', noBody()]]) {
   const r = await realCheck({ loads: reply, reading: PARKED })
@@ -1296,6 +1378,39 @@ if (appTabs) {
     const b = browser()
     const a = b.open(refusesWrites())
     eq("a browser that can't keep a record: held", (await realCheck({ ...OPEN, otherTab: () => a.tabs.otherPageOpen() })).signOuts, 0)
+  }
+}
+
+// ── §17 ───────────────────────────────────────────────────────────────────
+section('17 lib/appOpening.js')
+const appOpening = await load('lib/appOpening.js').catch(() => null)
+ok('the module is there', !!appOpening)
+if (appOpening) {
+  const { noteScreenShown, isFirstScreen } = appOpening
+  eq('before any screen: no', isFirstScreen(), false)
+  noteScreenShown()
+  eq('the first screen a page shows: the app opening', isFirstScreen(), true)
+  eq('asking again changes nothing', isFirstScreen(), true)
+  noteScreenShown()
+  eq('any later screen: no', isFirstScreen(), false)
+  noteScreenShown()
+  eq('...and no later one ever', isFirstScreen(), false)
+  const ROUTER = read('router/index.js')
+  ok('the router counts a screen only when one was really shown', /router\.afterEach\(\(to, from, failure\) => \{\n\s+if \(!failure\) noteScreenShown\(\)\n\}\)/.test(ROUTER))
+  eq('only the driver app reads it and only the router counts', ['isFirstScreen', 'noteScreenShown'].map((name) => walk(CLIENT).filter((f) => !f.endsWith('appOpening.js') && fs.readFileSync(f, 'utf8').includes(name)).map((f) => path.relative(CLIENT, f).replaceAll(path.sep, '/'))), [['views/DriverView.vue'], ['router/index.js']])
+
+  // The router's real order: the count goes up before the new screen's setup runs, so that screen reads its own number.
+  try {
+    const { createRouter, createMemoryHistory } = await import(pathToFileURL(path.join(ROOT, 'client', 'node_modules', 'vue-router', 'dist', 'vue-router.mjs')).href)
+    const order = []
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: {} }, { path: '/driver', component: {} }] })
+    router.afterEach(() => order.push('counted'))
+    vue.watch(() => router.currentRoute.value.path, () => order.push('rendered'), { flush: 'post' })
+    await router.push('/driver')
+    await tick()
+    eq('the count goes up before the new route renders', order, ['counted', 'rendered'])
+  } catch (e) {
+    ok(`the router's real order ran: ${e.message}`, false)
   }
 }
 

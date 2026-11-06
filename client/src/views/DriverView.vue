@@ -466,7 +466,8 @@ import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 import { isGoneAnswer, showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
-import { WORDS as RELEASE_WORDS, fieldInFocus, loadsHoldSignOut, overlayOnScreen } from '../lib/driverReleaseNotices'
+import { WORDS as RELEASE_WORDS, fieldInFocus, loadsHoldSignOut, overlayOnScreen, parkedLongEnough } from '../lib/driverReleaseNotices'
+import { isFirstScreen } from '../lib/appOpening'
 import { thisPageTabs } from '../lib/appTabs'
 import { writesBusy } from '../lib/writesInFlight'
 import { useDriverRelease } from '../composables/useDriverRelease'
@@ -896,8 +897,9 @@ watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list')
   if (place) checkPerformanceTab()
 })
 
-// He left a load's page or tapped a tab himself. Only these ask about a release, not the place
-// changing: a cancel or a refetch that closes his load mustn't pick the moment for him.
+// He left a load's page or tapped a tab himself. These read the release answer for the note, in a
+// page already open, so they can never sign him out. The place changing doesn't read at all: a
+// cancel or a refetch that closes his load mustn't pick the moment for him.
 function handleLoadBack() {
   detailRowIndex.value = null
   release.check()
@@ -1185,7 +1187,7 @@ const release = useDriverRelease({
     otherTabOpen: thisPageTabs().otherPageOpen(),
     visible: document.visibilityState === 'visible',
     online: navigator.onLine !== false && !auth.isReconnecting,
-    parked: voiceGate.value.state === 'parked',
+    parked: parkedLongEnough(voiceGate.value.state, driverPos.eldMotion.value?.stoppedSince, driverPos.clock.value),
   }),
   refreshFacts: async () => {
     await driverStore.loadData({ quiet: true })
@@ -1471,7 +1473,12 @@ watch(
   }
 )
 
+// Spent by the first load: a retry after a failed one is a tap in a page already open.
+let appOpening = isFirstScreen()
+
 async function attemptInitialLoad() {
+  const opening = appOpening
+  appOpening = false
   // Kick off the socket handshake in parallel with the data fetch so the
   // "Offline" chip clears as soon as the WebSocket is up, instead of waiting
   // for the HTTP fetch to finish first. Handler registration still waits for
@@ -1486,7 +1493,7 @@ async function attemptInitialLoad() {
     maybeShowWelcome()
     scheduleContactsPrompt()
     checkPerformanceTab()
-    release.check()
+    release.check({ appOpening: opening })
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')

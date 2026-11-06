@@ -383,6 +383,29 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		ok("§3 stoppedSinceMs: a jump from a bad fix: none", await stoppedSince(jump) === null);
 		const linked = world({ fixes: [{ ago: 60 * MIN, at: AWAY }, { ago: 5 * MIN, at: roadA }, { ago: 1 * MIN, at: roadA }], link: { ago: 10 * MIN, by: "admin_test" } });
 		ok("§3 stoppedSinceMs: a fix elsewhere from before the link is not a move", await stoppedSince(linked) === linked.fixMs[1]);
+		// Through the real poller, which stores a device's last fix again on every run.
+		const liveFix = (agoMs, at) => ({
+			routemate_vehicle_id: DEVICE, vehicle_id: "901", latitude: at.lat, longitude: at.lng, speed: 0, bearing: "",
+			odometer: 0, engine_hours: 0, fuel_pct: 50, geocoded_location: "", location_date_ms: Date.now() - agoMs,
+		});
+		const sparse = world({ fixes: [{ ago: 7 * MIN, at: roadA }] });
+		const lastFix = liveFix(130 * 1000, roadC);
+		for (let i = 0; i < 3; i++) await sparse.poll([lastFix]);
+		const rowsOfLastFix = sparse.db.prepare("SELECT COUNT(*) AS n FROM routemate_telemetry WHERE location_date_ms = ?").get(lastFix.location_date_ms).n;
+		ok("§3 (the poller stores the same fix on each run)", rowsOfLastFix === 3, rowsOfLastFix);
+		ok("§3 stoppedSinceMs: a device reporting every few minutes, no speed, its fix 130 s old and stored three times: none", await stoppedSince(sparse) === null);
+		const repeatedOnce = world({});
+		const onlyFix = liveFix(125 * 1000, roadA);
+		for (let i = 0; i < 3; i++) await repeatedOnce.poll([onlyFix]);
+		ok("§3 stoppedSinceMs: one fix the poller stored three times is still one fix: none", await stoppedSince(repeatedOnce) === null);
+		const briefStop = world({ fixes: [{ ago: 7 * MIN, at: roadA, speed: 20 }] });
+		const stoppedOnce = liveFix(130 * 1000, roadC);
+		for (let i = 0; i < 3; i++) await briefStop.poll([stoppedOnce]);
+		ok("§3 stoppedSinceMs: a feed that sends speed, one stopped fix after a moving one minutes back, stored three times: none", await stoppedSince(briefStop) === null);
+		const parkedSparse = world({ fixes: [{ ago: 12 * MIN, at: roadA }, { ago: 7 * MIN, at: nearby }] });
+		const parkedFix = liveFix(2 * MIN, roadA);
+		for (let i = 0; i < 3; i++) await parkedSparse.poll([parkedFix]);
+		ok("§3 stoppedSinceMs: a parked truck on that device still reads as stopped since the oldest fix", await stoppedSince(parkedSparse) === parkedSparse.fixMs[0]);
 	}
 
 	// ══ §4 GET /api/public/track/:loadId ═════════════════════════════════════

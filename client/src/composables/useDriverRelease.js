@@ -1,6 +1,7 @@
 // The driver app's side of a release (lib/driver-releases.js): asks the server what's due, signs the
-// driver out only at a safe moment, then "What's new", the first-time offer and the tour. The rules
-// are lib/driverReleaseNotices.js; DriverView hands in what it knows about the screen as functions.
+// driver out only as the app opens and only at a safe moment, then "What's new", the first-time offer
+// and the tour. The rules are lib/driverReleaseNotices.js; DriverView hands in what it knows about the
+// screen as functions.
 // Explicit .js, so scripts/test-driver-release-notices-client.mjs can run this under plain Node.
 import { computed, ref, watch } from 'vue'
 import {
@@ -51,9 +52,11 @@ export function useDriverRelease(o) {
   let signingOut = false
 
   // One moment: he opened the app, came back to it, or moved back to the list himself. DriverView
-  // calls this from those places only. A read that fails, of this answer, his loads or the truck,
-  // leaves everything as it was: no sign-out, nothing new.
-  async function check() {
+  // calls this from those places only. Each reads the answer, for the note. Only the app opening
+  // (`appOpening`, lib/appOpening.js) can go on to sign him out, never an app already open. A read
+  // that fails, of this answer, his loads or the truck, leaves everything as it was: no sign-out,
+  // nothing new.
+  async function check({ appOpening = false } = {}) {
     if (o.role() !== 'Driver' || o.onboarding() !== false || tour.value || signingOut) return
     const mine = ++reads
     const current = () => mine === reads && o.mounted() && !signingOut
@@ -72,7 +75,7 @@ export function useDriverRelease(o) {
     if (!next) return
     featureOn.value = true
     answer.value = next
-    if (!next.signInDue) return
+    if (!next.signInDue || appOpening !== true) return
     const userId = o.userId()
     if (signedOutFor(local, userId, next.releaseId)) return
     // His loads and the truck as they are now: a list read an hour ago, before a phone slept, can

@@ -12,20 +12,24 @@
 //       on screen. Once the same load reads Delivered, the next open signs him out, so the hold was
 //       the load and not something else
 //   M1  a status tap in flight: the server has written Delivered and hasn't answered; he goes back to
-//       the list: not signed out while it's on the wire or for the quiet time after, then he is
+//       the list: not signed out while it's on the wire or after it: that page is already open. The
+//       next open does it
 //   M2  a POD upload in flight: the same, for a load already delivered
 // And at 390x844:
+//   R   only the app opening signs out: in a page already open, coming back to it and tapping around sign
+//       nobody out, and the next open does; the driver app as a later screen isn't an opening; nor is a
+//       retry after a failed first load
 //   E   an empty load list holds: no loads at all, and a reply whose body dropped while he hauls a load
 //   V   a moving truck holds the sign-out and the note, and parking lets them through at the next
 //       moment; a tour under way closes by itself when the truck starts moving and marks nothing done;
 //       no reading, a stale reading and a failed read hold the sign-out too, and not the note; a truck
-//       moving on a feed that sends no speed holds it, even after an earlier read of parked
+//       moving on a feed that sends no speed holds it; a truck parked under the stretch holds it
 //   F   a failed read of the release state (503, no answer, an unreadable body): no sign-out, no note,
-//       no Kit button, and he stays in the app; a good answer later works
+//       no Kit button, and he stays in the app; a good answer later works, at the next open
 //   P   the note waits for the Performance answer: a failed probe holds it, a good one lets it through
 //       whole; a driver with no week reads only his line
 //   K   the kill switch off (404 FEATURE_OFF): nothing new anywhere, and no sign-out
-//   N   no signal: not signed out; signal back and the next moment does it
+//   N   no signal: not signed out, and not when it's back: that page is already open; the next open does it
 //   U   a sign-out the server doesn't confirm: the app's own login form with its line; he signs in; a
 //       logout he asks for afterwards shows no line
 //   L   a server that keeps saying "due" after he signs back in: one sign-out, no loop
@@ -114,11 +118,12 @@ const lastWeek = { id: 'last-week', start: '2026-10-24', end: '2026-10-30', cred
 
 // One browser's view of the server. `release` says how the route answers: 'ok', 'off', 'fail' or
 // 'empty'. `reading` how the truck's does: 'fix', 'none', 'stale', 'fail', or 'moving-no-speed' for what
-// the route sends a truck whose feed sends no speed and whose fixes moved apart. `payload` his loads':
-// 'ok', or 'dropped' for headers whose body never arrives whole. `perf` his week's: a status.
-function freshState({ who = DRIVER, session = true, due = false, dueAfterLogin = false, status = '', offer = false, hasNote = false, release = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', payload = 'ok', perf = 200, logoutFails = false } = {}) {
+// the route sends a truck whose feed sends no speed and whose fixes moved apart. `parkedMinutes` how long
+// a 'fix' has been stopped. `payload` his loads': 'ok', 'dropped' for headers whose body never arrives
+// whole, or 'fail' for a 503. `perf` his week's: a status.
+function freshState({ who = DRIVER, session = true, due = false, dueAfterLogin = false, status = '', offer = false, hasNote = false, release = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', parkedMinutes = 20, payload = 'ok', perf = 200, logoutFails = false } = {}) {
   return {
-    who, session, due, dueAfterLogin, status, offer, hasNote, release, moving, onboarding, unread, reading, payload, perf, logoutFails,
+    who, session, due, dueAfterLogin, status, offer, hasNote, release, moving, onboarding, unread, reading, parkedMinutes, payload, perf, logoutFails,
     seen: new Set(), tourDone: new Set(),
     calls: { release: 0, logout: 0, login: 0, position: 0 },
     holds: {},
@@ -164,7 +169,7 @@ function positionAnswer(state) {
   const fix = { latitude: 29.7, longitude: -95.3, heading: 90, source: 'routemate', lastPingAge: age, timestamp: stamp }
   if (state.moving) return { status: 200, body: { ok: true, position: { ...fix, speed: 25 } } }
   if (state.reading === 'moving-no-speed') return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: null } } }
-  return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: Date.now() - 10 * 60 * 1000 } } }
+  return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: Date.now() - state.parkedMinutes * 60 * 1000 } } }
 }
 
 function answerGet(state, u) {
@@ -183,6 +188,7 @@ function answerGet(state, u) {
   if (pathname === '/api/fuel/range') return { status: 200, body: { ok: false } }
   if (/^\/api\/driver\/[^/]+$/.test(pathname)) {
     if (state.payload === 'dropped') return { status: 200, raw: '{"loads":[{"_rowIndex":2,' }
+    if (state.payload === 'fail') return { status: 503, body: { error: "That couldn't be read." } }
     return { status: 200, body: driverPayload(state) }
   }
   return null
@@ -319,6 +325,8 @@ async function press(loc, size) {
   else await loc.click()
 }
 const comeBackToApp = (page) => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+// The app opening: this page loading again from scratch. Coming back to it, above, never signs anyone out.
+const openApp = (page) => page.reload({ waitUntil: 'domcontentloaded' })
 const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const activeTab = (page) => text(page, '.van-tabbar-item--active .van-tabbar-item__text')
 const onLogin = (page) => new URL(page.url()).pathname === '/login'
@@ -435,7 +443,7 @@ async function emptyListRun(browser, size) {
   try {
     await appOpen(first.page)
     await momentPassed(none, 0)
-    await comeBackToApp(first.page)
+    await openApp(first.page)
     await momentPassed(none, 1)
     record(`E1-${t}`, 'Due, with no loads at all: held, since an empty list proves nothing', 'no sign-out; in the app',
       `sign-outs ${none.calls.logout}, url ${new URL(first.page.url()).pathname}`, none.calls.logout === 0 && !onLogin(first.page))
@@ -451,7 +459,7 @@ async function emptyListRun(browser, size) {
     dropped.due = true
     dropped.payload = 'dropped'
     const before = dropped.calls.release
-    await comeBackToApp(second.page)
+    await openApp(second.page)
     await momentPassed(dropped, before)
     const shotFile = await shot(second.page, `E2-${t}`)
     record(`E2-${t}`, "Hauling a load, on a weak signal: the reply about his loads drops after its headers, and he isn't signed out", 'no sign-out; in the app',
@@ -503,12 +511,16 @@ async function inTransitRun(browser, size) {
       openShot)
 
     state.status = 'Delivered'
+    before = state.calls.release
     await comeBackToApp(page)
+    await momentPassed(state, before)
+    const inOpenPage = state.calls.logout
+    await openApp(page)
     const left = await until(() => state.calls.logout === 1, 12000)
     const note = await appears(page, testid('login-updated-note'), 8000)
-    record(`T2-${t}`, 'The same driver, once that load reads Delivered: the next open signs him out, so the hold was the load',
-      'one sign-out; /login with its line', `sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, line ${note}`,
-      left && onLogin(page) && note)
+    record(`T2-${t}`, 'The same driver, once that load reads Delivered: coming back does nothing, and the next open signs them out, so the hold was the load',
+      'no sign-out in the open page; then one, at the next open; /login with its line', `in the open page ${inOpenPage}, sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, line ${note}`,
+      inOpenPage === 0 && left && onLogin(page) && note)
   } finally {
     await ctx.close()
   }
@@ -541,17 +553,17 @@ async function statusInFlightRun(browser, size) {
     const inFlight = state.calls.logout
     const onApp = !onLogin(page)
     state.holds.status.release()
-    await page.waitForTimeout(1000)
-    await comeBackToApp(page)
-    await page.waitForTimeout(1500)
-    const justAfter = state.calls.logout
     await page.waitForTimeout(QUIET_WAIT_MS)
+    const afterTap = state.calls.release
     await comeBackToApp(page)
+    await momentPassed(state, afterTap)
+    const afterQuiet = state.calls.logout
+    await openApp(page)
     const left = await until(() => state.calls.logout === 1, 12000)
     record(`M1-${t}`, 'A status tap in flight is not interrupted',
-      'with the tap on the wire and the list reading Delivered: no sign-out, in the app; just after it answers: still none; after the quiet time, the next moment signs him out',
-      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, just after ${justAfter}, later ${state.calls.logout}`,
-      sent && inFlight === 0 && onApp && justAfter === 0 && left)
+      'with the tap on the wire and the list reading Delivered: no sign-out, in the app; after it answers and the quiet time has passed: still none, that page being open; the next open signs them out',
+      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, after the quiet time ${afterQuiet}, at the next open ${state.calls.logout}`,
+      sent && inFlight === 0 && onApp && afterQuiet === 0 && left)
   } finally {
     await ctx.close()
   }
@@ -584,12 +596,16 @@ async function uploadInFlightRun(browser, size) {
     const shotFile = await shot(page, `M2-${t}`)
     state.holds.upload.release()
     await page.waitForTimeout(QUIET_WAIT_MS + 1000)
+    const afterUpload = state.calls.release
     await comeBackToApp(page)
+    await momentPassed(state, afterUpload)
+    const afterQuiet = state.calls.logout
+    await openApp(page)
     const left = await until(() => state.calls.logout === 1, 12000)
     record(`M2-${t}`, 'A POD upload in flight is not interrupted',
-      'with the upload on the wire: no sign-out, in the app; once it has answered and the quiet time has passed, the next moment signs him out',
-      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, later ${state.calls.logout}`,
-      sent && inFlight === 0 && onApp && left, shotFile)
+      'with the upload on the wire: no sign-out, in the app; once it has answered and the quiet time has passed: still none, that page being open; the next open signs them out',
+      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, after the quiet time ${afterQuiet}, at the next open ${state.calls.logout}`,
+      sent && inFlight === 0 && onApp && afterQuiet === 0 && left, shotFile)
   } finally {
     await ctx.close()
   }
@@ -605,12 +621,12 @@ async function noReadingRun(browser, size) {
       await appOpen(page)
       await momentPassed(state, 0)
       const before = state.calls.release
-      await comeBackToApp(page)
+      await openApp(page)
       await momentPassed(state, before)
       const held = state.calls.logout
       const onApp = !onLogin(page)
       state.reading = 'fix'
-      await comeBackToApp(page)
+      await openApp(page)
       const left = await until(() => state.calls.logout === 1, 12000)
       record(`V4-${reading}-${t}`, `A truck that doesn't read as parked (${reading}) holds the sign-out; a parked one lets it through`,
         'no sign-out, in the app; one once it reads parked', `held ${held}, on the app ${onApp}, parked ${state.calls.logout}`, held === 0 && onApp && left)
@@ -628,7 +644,6 @@ async function noReadingRun(browser, size) {
   } finally {
     await second.ctx.close()
   }
-  // The trap: a stop already known must not be carried past the route saying the fixes moved.
   const parkedFirst = freshState({ status: 'Delivered' })
   const third = await openPage(browser, size, parkedFirst)
   try {
@@ -637,17 +652,33 @@ async function noReadingRun(browser, size) {
     parkedFirst.due = true
     parkedFirst.reading = 'moving-no-speed'
     const before = parkedFirst.calls.release
-    await comeBackToApp(third.page)
+    await openApp(third.page)
     await momentPassed(parkedFirst, before)
     const held = parkedFirst.calls.logout
     const onApp = !onLogin(third.page)
     parkedFirst.reading = 'fix'
-    await comeBackToApp(third.page)
+    await openApp(third.page)
     const left = await until(() => parkedFirst.calls.logout === 1, 12000)
-    record(`V6-${t}`, 'A truck read as parked that then moves on a feed with no speed holds the sign-out; parked again, it goes',
+    record(`V6-${t}`, 'A truck read as parked that then moves on a feed with no speed holds the sign-out at the next open; parked again, it goes',
       'no sign-out, in the app; one once it reads parked', `held ${held}, on the app ${onApp}, parked ${parkedFirst.calls.logout}`, held === 0 && onApp && left)
   } finally {
     await third.ctx.close()
+  }
+  // What the voice note gate calls parked isn't enough: the stretch is the sign-out's own.
+  const shortStop = freshState({ due: true, status: 'Delivered', parkedMinutes: 10 })
+  const fourth = await openPage(browser, size, shortStop)
+  try {
+    await appOpen(fourth.page)
+    await momentPassed(shortStop, 0)
+    const held = shortStop.calls.logout
+    const onApp = !onLogin(fourth.page)
+    shortStop.parkedMinutes = 20
+    await openApp(fourth.page)
+    const left = await until(() => shortStop.calls.logout === 1, 12000)
+    record(`V7-${t}`, 'A truck parked under the stretch, 10 minutes, holds the sign-out at app open; past it, 20 minutes, the next open goes',
+      'no sign-out, in the app; one at the next open', `held ${held}, on the app ${onApp}, past it ${shortStop.calls.logout}`, held === 0 && onApp && left)
+  } finally {
+    await fourth.ctx.close()
   }
 }
 
@@ -659,13 +690,13 @@ async function movingRun(browser, size) {
     await appOpen(page)
     await momentPassed(state, 0)
     const before = state.calls.release
-    await comeBackToApp(page)
+    await openApp(page)
     await momentPassed(state, before)
     const held = state.calls.logout
     state.moving = false
-    await comeBackToApp(page)
+    await openApp(page)
     const left = await until(() => state.calls.logout === 1, 12000)
-    record(`V1-${t}`, 'A moving truck holds the sign-out; parked, the next moment lets it through',
+    record(`V1-${t}`, 'A moving truck holds the sign-out; parked, the next open lets it through',
       'no sign-out while moving; one after parking', `moving ${held}, parked ${state.calls.logout}`, held === 0 && left)
   } finally {
     await ctx.close()
@@ -695,6 +726,81 @@ async function movingRun(browser, size) {
   }
 }
 
+// ---------------------------------------------------------------- R: only the app opening signs anyone out
+async function appOpeningRun(browser, size) {
+  const t = size.tag
+  const state = freshState({ status: 'Delivered' })
+  const first = await openPage(browser, size, state)
+  try {
+    await appOpen(first.page)
+    await momentPassed(state, 0)
+    // A release lands with the page open, and everything else says yes.
+    state.due = true
+    let before = state.calls.release
+    await comeBackToApp(first.page)
+    await momentPassed(state, before)
+    const afterBack = state.calls.logout
+    await press(first.page.locator('.van-tabbar-item', { hasText: 'Kit' }).first(), size)
+    await first.page.waitForTimeout(500)
+    before = state.calls.release
+    await press(first.page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
+    await momentPassed(state, before)
+    const afterTap = state.calls.logout
+    const onApp = !onLogin(first.page)
+    await openApp(first.page)
+    const left = await until(() => state.calls.logout === 1, 15000)
+    const line = await appears(first.page, testid('login-updated-note'), 8000)
+    record(`R1-${t}`, 'A page already open is never signed out: not on coming back to it, not on a tap; the next open does it, as the first thing it does',
+      'none on coming back; none on a tap; in the app; one at the next open, with its line',
+      `coming back ${afterBack}, a tap ${afterTap}, on the app ${onApp}, at the next open ${state.calls.logout}, line ${line}`, afterBack === 0 && afterTap === 0 && onApp && left && line)
+  } finally {
+    await first.ctx.close()
+  }
+
+  const later = freshState({ due: true, status: 'Delivered' })
+  const ctx = await newContext(browser, size, later, [])
+  try {
+    const page = await ctx.newPage()
+    page.on('pageerror', (e) => pageErrors.push(`${size.tag}: ${String(e.message || e).slice(0, 200)}`))
+    await page.goto(`${BASE}/track`, { waitUntil: 'domcontentloaded' })
+    await page.waitForTimeout(800)
+    // A move inside the running page, as the router makes one: no new page loads.
+    await page.evaluate(() => {
+      window.history.pushState(null, '', '/driver')
+      window.dispatchEvent(new PopStateEvent('popstate', { state: null }))
+    })
+    const shown = await appOpen(page)
+    await momentPassed(later, 0)
+    const held = later.calls.logout
+    const onApp = !onLogin(page)
+    await openApp(page)
+    const left = await until(() => later.calls.logout === 1, 15000)
+    record(`R2-${t}`, 'The driver app as a later screen of a running page is not the app opening', 'no sign-out, in the app; one once that page loads from scratch',
+      `shown ${shown}, held ${held}, on the app ${onApp}, at the next open ${later.calls.logout}`, shown && held === 0 && onApp && left)
+  } finally {
+    await ctx.close()
+  }
+
+  const retry = freshState({ due: true, status: 'Delivered', payload: 'fail' })
+  const third = await openPage(browser, size, retry)
+  try {
+    const failed = await appears(third.page, '.loc-btn', 15000)
+    retry.payload = 'ok'
+    const before = retry.calls.release
+    await press(third.page.locator('.loc-btn').first(), size)
+    const back = await appears(third.page, '.van-tabbar', 15000)
+    await momentPassed(retry, before)
+    const held = retry.calls.logout
+    const onApp = !onLogin(third.page)
+    await openApp(third.page)
+    const left = await until(() => retry.calls.logout === 1, 15000)
+    record(`R3-${t}`, 'A first load that fails, and a retry tap that works: that tap is in a running page, not the app opening', 'no sign-out, in the app; one at the next open',
+      `failed screen ${failed}, back ${back}, held ${held}, on the app ${onApp}, at the next open ${retry.calls.logout}`, failed && back && held === 0 && onApp && left)
+  } finally {
+    await third.ctx.close()
+  }
+}
+
 // ---------------------------------------------------------------- F, K, N: a failed read, the switch, no signal
 async function failedReadRun(browser, size) {
   const t = size.tag
@@ -717,9 +823,13 @@ async function failedReadRun(browser, size) {
         `sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, note ${noted}, Kit button ${kit}, route read ${state.calls.release} times`,
         state.calls.logout === 0 && !onLogin(page) && noted === 0 && kit === 0 && state.calls.release >= 2)
       state.release = 'ok'
+      const asked = state.calls.release
       await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
+      await momentPassed(state, asked)
+      const inOpenPage = state.calls.logout
+      await openApp(page)
       const left = await until(() => state.calls.logout === 1, 12000)
-      record(`F2-${kind}-${t}`, 'A good answer later works', 'one sign-out', `sign-outs ${state.calls.logout}`, left)
+      record(`F2-${kind}-${t}`, 'A good answer later works, at the next open', 'no sign-out in the open page; one at the next open', `in the open page ${inOpenPage}, sign-outs ${state.calls.logout}`, inOpenPage === 0 && left)
     } finally {
       await ctx.close()
     }
@@ -798,10 +908,14 @@ async function offlineRun(browser, size) {
     const onApp = !onLogin(page)
     await ctx.setOffline(false)
     await page.waitForTimeout(500)
+    const back = state.calls.release
     await comeBackToApp(page)
+    await momentPassed(state, back)
+    const signalBack = state.calls.logout
+    await openApp(page)
     const left = await until(() => state.calls.logout === 1, 12000)
-    record(`N-${t}`, 'No signal: not signed out; signal back, the next moment does it', 'none offline, in the app; one once back',
-      `offline ${offline}, on the app ${onApp}, back ${state.calls.logout}`, offline === 0 && onApp && left)
+    record(`N-${t}`, 'No signal: not signed out, and not when it comes back, that page being open; the next open does it', 'none offline, in the app; none once back; one at the next open',
+      `offline ${offline}, on the app ${onApp}, signal back ${signalBack}, at the next open ${state.calls.logout}`, offline === 0 && onApp && signalBack === 0 && left)
   } finally {
     await ctx.close()
   }
@@ -851,7 +965,7 @@ async function loopRun(browser, size) {
     await signInForm(page, size, DRIVER.username)
     const back = await appOpen(page)
     await momentPassed(state, before)
-    await comeBackToApp(page)
+    await openApp(page)
     await momentPassed(state, before, 2)
     record(`L-${t}`, 'A server that keeps saying due: one sign-out, no loop', 'he stays in the app after signing back in; one sign-out',
       `app ${back}, url ${new URL(page.url()).pathname}, sign-outs ${state.calls.logout}, sign-ins ${state.calls.login}`, back && !onLogin(page) && state.calls.logout === 1 && state.calls.login === 1)
@@ -872,7 +986,7 @@ async function openTabs(ctx, size, count) {
   return pages
 }
 
-// A tab stopped from running anything, and tab A's next moment: what C5 and C6 share. `stop` and `go` act
+// A tab stopped from running anything, and tab A's next open: what C5 and C6 share. `stop` and `go` act
 // on the stopped tab's DevTools session. What the step may claim comes from that page, afterwards: whether
 // `freeze` fired there, and how long its own timer stood still against how long it was meant to.
 async function momentBesideStillTab(ctx, size, state, stop, go) {
@@ -896,7 +1010,7 @@ async function momentBesideStillTab(ctx, size, state, stop, go) {
   const stoppedAt = Date.now()
   state.due = true
   const before = state.calls.release
-  await comeBackToApp(a)
+  await openApp(a)
   await momentPassed(state, before)
   // Long enough that a running page's timer, even one held to a tick a second, can't pass for a still one.
   await new Promise((r) => setTimeout(r, 1500))
@@ -920,12 +1034,12 @@ async function itLeavesThenSignOut(seen, state, t) {
   try {
     await seen.b.goto('about:blank')
     await seen.a.bringToFront()
-    await comeBackToApp(seen.a)
+    await openApp(seen.a)
     left = await until(() => state.calls.logout === 1, 12000)
   } catch (e) {
     trouble = `, ${String(e.message || e).split('\n')[0].slice(0, 160)}`
   }
-  record(`C6-${t}`, 'Once that tab has left, the next moment signs them out, so the hold was its record', 'one sign-out', `sign-outs ${state.calls.logout}${trouble}`, left)
+  record(`C6-${t}`, 'Once that tab has left, the next open signs them out, so the hold was its record', 'one sign-out', `sign-outs ${state.calls.logout}${trouble}`, left)
 }
 
 const freezeTab = (session) => session.send('Page.setWebLifecycleState', { state: 'frozen' })
@@ -1065,24 +1179,24 @@ async function twoTabsRun(browser, size) {
     state.due = true
     let before = state.calls.release
     await a.bringToFront()
-    await comeBackToApp(a)
+    await openApp(a)
     await momentPassed(state, before)
     before = state.calls.release
     await b.bringToFront()
-    await comeBackToApp(b)
+    await openApp(b)
     await momentPassed(state, before)
     const held = state.calls.logout
     const bothOn = !onLogin(a) && !onLogin(b)
-    record(`C1-${t}`, 'Two open tabs hold each other: a tab with something half typed is never taken along', 'no sign-out from either; both in the app',
+    record(`C1-${t}`, 'Two open tabs hold each other at each open: a tab with something half typed is never taken along', 'no sign-out from either; both in the app',
       `sign-outs ${held}, A at ${new URL(a.url()).pathname}, B at ${new URL(b.url()).pathname}`, held === 0 && bothOn)
     // Closing a tab from here needn't run its pagehide, as a person closing one does: leaving does.
     await b.goto('about:blank')
     await b.close()
     await a.bringToFront()
-    await comeBackToApp(a)
+    await openApp(a)
     const left = await until(() => state.calls.logout === 1, 12000)
     const line = await appears(a, testid('login-updated-note'), 8000)
-    record(`C2-${t}`, 'With the other tab closed, the next moment signs him out', 'one sign-out; /login with its line',
+    record(`C2-${t}`, 'With the other tab closed, the next open signs them out', 'one sign-out; /login with its line',
       `sign-outs ${state.calls.logout}, A at ${new URL(a.url()).pathname}, line ${line}`, left && onLogin(a) && line)
   } finally {
     await ctx.close()
@@ -1114,7 +1228,7 @@ async function twoTabsRun(browser, size) {
     }, APP_PAGE_PREFIX)
     const [page] = await openTabs(ctx3, size, 1)
     await momentPassed(noRecord, 0)
-    await comeBackToApp(page)
+    await openApp(page)
     await momentPassed(noRecord, 1)
     record(`C4-${t}`, "A browser that can't keep a tab's record holds too", 'no sign-out; in the app',
       `sign-outs ${noRecord.calls.logout}, url ${new URL(page.url()).pathname}`, noRecord.calls.logout === 0 && !onLogin(page))
@@ -1131,7 +1245,7 @@ async function twoTabsRun(browser, size) {
     const [page] = await openTabs(ctx5, size, 1)
     await momentPassed(dead, 0)
     const before = dead.calls.release
-    await comeBackToApp(page)
+    await openApp(page)
     await momentPassed(dead, before)
     record(`C7-${t}`, 'A tab that died without saying so, its record under a day old, holds: they get the update at their next sign-in', 'no sign-out; in the app',
       `sign-outs ${dead.calls.logout}, url ${new URL(page.url()).pathname}`, dead.calls.logout === 0 && !onLogin(page))
@@ -1309,6 +1423,7 @@ async function main() {
       await statusInFlightRun(browser, size)
       await uploadInFlightRun(browser, size)
     }
+    await appOpeningRun(browser, PHONE)
     await emptyListRun(browser, PHONE)
     await movingRun(browser, PHONE)
     await noReadingRun(browser, PHONE)

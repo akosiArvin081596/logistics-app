@@ -124,12 +124,22 @@ export function loadsHoldSignOut(loads, headers) {
   })
 }
 
+// How long the truck must have read as parked before a release may sign its driver out: past a light,
+// a rail crossing or a stop in traffic, and short of a fuel stop, a break or a wait at a dock. A
+// read-only count of how long real stops last backs this figure; change it here and nowhere else.
+export const SIGN_OUT_PARKED_MS = 15 * 60 * 1000
+
+// `state` and `stoppedSince` are the truck as the voice note gate reads it (lib/voiceNoteGate.js).
+export function parkedLongEnough(state, stoppedSince, nowMs) {
+  return state === 'parked' && Number.isFinite(stoppedSince) && nowMs - stoppedSince >= SIGN_OUT_PARKED_MS
+}
+
 // Whether this moment may sign him out. Every input must say so, in so many words: one that's
-// missing holds the sign-out. The caller asks only when he opens the app, comes back to it or moves
-// back to the list himself, and straight after reading his loads and the truck afresh; never on a
-// timer or a socket push, so it can't land under his thumb.
-// `parked` is stricter than the note's motionAllowed: a truck with no reading may be moving, so only
-// a truck that reads as parked lets him go, and any other gets the update at his next sign-in.
+// missing holds the sign-out. The caller asks only as the app opens (lib/appOpening.js), straight
+// after reading his loads and the truck afresh; never in a page already open, so it can't land under
+// his thumb, and any other driver gets the update at his next sign-in.
+// `parked` is parkedLongEnough(), stricter than the note's motionAllowed: a truck with no reading may
+// be moving, and a truck stopped a short while may be at a light.
 // `otherTabOpen` is lib/appTabs.js's answer, whose null (can't tell) holds as well.
 export function signOutMoment(s) {
   if (!isPlainObject(s) || s.role !== 'Driver' || s.signInDue !== true) return false
