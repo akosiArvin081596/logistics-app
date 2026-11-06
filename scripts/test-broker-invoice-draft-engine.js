@@ -31,6 +31,10 @@
  *      holding two figures, a note or an accounting negative is TOTAL_MISMATCH
  *      (logged without its value); plain amounts prepare, render and record as
  *      before; a load already held stays held; the button is unchanged.
+ *   §8 assignmentFor(): null (or no reader) renders the plain page byte for byte;
+ *      { lines } prints them in place of the bank block; a throw is a 503 refusal
+ *      before any number, never the bank block; a note holding a bank word refuses
+ *      in prepare(); record()'s audit target.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -177,7 +181,7 @@ const ADMIN = { session: { user: { id: 1, username: "super_admin", role: "Super 
 
 // `sheet` and `ratecons` replace the fixtures for one world (a load that changed);
 // `log` is the console the engine writes to.
-function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET } = {}) {
+function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET, assignmentFor } = {}) {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_SQL);
 	for (const a of DRAFTS_ALTERS) db.exec(a);
@@ -188,7 +192,7 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 	for (const [id, file] of PODS) addPod.run(id, file);
 	if (linesTable || env.BROKER_INVOICE_LINES_ENABLED) brokerInvoice.invoiceLines.ensureSchema(db);
 	const helpers = new Function("db", "brokerInvoice", "console", `${lifted.text}\nreturn { ${lifted.names.join(", ")} };`)(db, brokerInvoice, QUIET);
-	const seen = { rateconCalls: [], gemini: 0, renders: 0 };
+	const seen = { rateconCalls: [], gemini: 0, renders: 0, pages: [] };
 	const engine = engineModule.create({
 		...helpers,
 		db,
@@ -212,13 +216,15 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 			// An answer that found nothing, in runRateConGemini()'s own shape.
 			return { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 		},
-		renderHtmlToPdf: async () => {
+		renderHtmlToPdf: async (html) => {
 			seen.renders++;
+			seen.pages.push(html);
 			if (rendererBusy) throw Object.assign(new Error("busy"), { code: "PDF_RENDERER_BUSY" });
 			return Buffer.from("%PDF-1.4 invoice");
 		},
 		env,
 		console: log,
+		...(assignmentFor === undefined ? {} : { assignmentFor }),
 	});
 	const ov = (body = {}) => helpers.parseInvoiceOverrides(body);
 	const auto = (loadId, extra = {}) => engine.prepare({ loadId, mode: "auto", ...extra });
@@ -638,6 +644,73 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			"§7 the button with no rate-con total read: it bills the sheet's figure as before, for the person to review");
 		eq(code(await unread.auto("LD-TEST-0024")), "RATECON_TOTAL_UNREAD",
 			"§7 mode \"auto\" on that load: the unread rate-con total is still the refusal it gives (checked first, as before)");
+	}
+
+	// ===================================================================== §8
+	section("8. who the invoice tells the broker to pay");
+	{
+		const ID = "LD-TEST-0001";
+		const NUMBER = { invoiceId: "10282026-7", invoiceDate: "10/28/2026" };
+		const LINES = ["MADE-UP NOTICE LINE ONE", "MADE-UP NOTICE LINE TWO", "EXAMPLE FACTOR LLC", "PO DRAWER 000, NOWHERE, ZZ  00000-0000"];
+		const pageOf = (ctx) => brokerInvoice.buildInvoiceHtml({
+			...NUMBER, brokerName: ctx.effBrokerName, invoiceTo: ctx.invoiceTo, orderNumber: ctx.orderNumber, poNumber: ctx.poNumber,
+			deliveryDate: ctx.deliveryDate, invoiceLines: ctx.lineSummary, total: ctx.total, notes: ctx.notes,
+		});
+		// An invoice that isn't factored: the renderer gets the page exactly as lib/broker-invoice.js made it.
+		for (const [label, opts] of [["no reader", {}], ["a reader answering null", { assignmentFor: () => null }]]) {
+			const w = world(opts);
+			const p = await w.manual(ID);
+			await w.engine.render(p.ctx, NUMBER);
+			eq(w.seen.pages[0] === pageOf(p.ctx), true, `§8 ${label}: the renderer gets the plain page, byte for byte`);
+			eq([p.ctx.assignment, w.seen.pages[0].includes("Payment Method")], [null, true], `§8 ${label}: no assignment, and the bank block prints`);
+		}
+		const asked = [];
+		const w = world({ assignmentFor: (id) => { asked.push(id); return { lines: LINES }; } });
+		const p = await w.manual(ID);
+		eq([code(p), asked], ["ok", [ID]], "§8 prepare() asks once, by the load's ID");
+		eq(p.ctx.assignment, { lines: LINES }, "§8 ...and hands the lines to render()");
+		const rendered = await w.engine.render(p.ctx, NUMBER);
+		const printed = w.seen.pages[0];
+		ok(LINES.every((l) => printed.includes(`>${l}</div>`)), "§8 FAILS ON THE OLD CODE: a factored invoice prints every assignment line");
+		ok(!printed.includes("Payment Method") && !printed.includes("Bank Routing") && !printed.includes("Bank Account"), "§8 FAILS ON THE OLD CODE: ...and no bank block");
+		ok(printed.startsWith(pageOf(p.ctx).slice(0, pageOf(p.ctx).indexOf('<div class="payment">'))), "§8 ...and all the rest of the page is the plain page");
+		ok(rendered.invoicePdf && rendered.attachments.length > 0, "§8 ...and the draft's attachments carry it");
+
+		// No lines, or a marker that can't be read: refused before any number.
+		for (const [label, thrown, want] of [
+			["no assignment lines", Object.assign(new Error("made-up"), { code: "NOA_UNCONFIGURED" }), "NOA_UNCONFIGURED"],
+			["a marker that can't be read", Object.assign(new Error("made-up"), { code: "FACTORING_UNREADABLE" }), "FACTORING_UNREADABLE"],
+			["any other failure", new Error("made-up"), "FACTORING_UNREADABLE"],
+			["no error at all", null, "FACTORING_UNREADABLE"],
+		]) {
+			const t = world({ assignmentFor: () => { throw thrown; } });
+			for (const [mode, run] of [["the button", () => t.manual(ID)], ["the preview", () => t.manual(ID, {}, true)], ["mode \"auto\"", () => t.auto(ID)]]) {
+				const r = await run();
+				eq([r.ok, r.http, r.code, r.json && r.json.code], [false, 503, want, want], `§8 FAILS ON THE OLD CODE: ${label}, ${mode}: a 503 refusal, ${want}`);
+				ok(r.json && !/made-up/.test(r.json.error), `§8 ...${label}, ${mode}: in the app's own words`);
+			}
+			eq(t.seen.renders, 0, `§8 ...${label}: nothing rendered`);
+		}
+		// The bank-word check runs before any number is spent, so a note can't burn one.
+		const noted = world({ assignmentFor: () => ({ lines: LINES }) });
+		const refused = await noted.manual(ID, { notes: "Payment Method: see below" });
+		eq([refused.ok, refused.http, refused.code, noted.seen.renders], [false, 409, "ASSIGNMENT_NOT_PRINTABLE", 0], "§8 a note holding a bank word on a factored invoice: refused in prepare(), nothing rendered");
+		const fine = await noted.manual(ID, { notes: "Unload at door 4" });
+		eq(code(fine), "ok", "§8 ...any other note is fine");
+		const plain = world({ assignmentFor: () => null });
+		eq(code(await plain.manual(ID, { notes: "Payment Method: see below" })), "ok", "§8 ...and on an invoice that isn't factored the note prints as it always has");
+
+		// record()'s audit target.
+		const audited = async (extra) => {
+			const a = world();
+			const c = (await a.manual(ID)).ctx;
+			a.engine.record(c, { total: c.billedTotal }, { via: "imap", actor: ADMIN, invoiceId: "10282026-7", mintedInvoiceId: "10282026-7", ...extra });
+			return a.db.prepare("SELECT details FROM audit_trail WHERE action = 'invoice_draft_created'").get();
+		};
+		const plainAudit = await audited({});
+		eq(plainAudit && plainAudit.details, `10282026-7 → ${BILLING} (imap)`, "§8 record() with no target: the audit line as it always was");
+		const named = await audited({ auditTarget: "Triumph", via: "triumph" });
+		eq(named && named.details, "10282026-7 → Triumph (triumph)", "§8 FAILS ON THE OLD CODE: with a target, the audit line names it rather than a printed address");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);

@@ -121,6 +121,8 @@ const OUTBOUND = {
 	AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: /a driver's Delivered makes the invoice.*kill switch/i,
 	// Who an automatic invoice may go to: the check on the job's sends. A kill switch.
 	AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: /who an automatic invoice may go to.*kill switch/i,
+	// Submitting factored loads: invoices to an outside party.
+	TRIUMPH_SUBMIT_ENABLED: /sends invoices to Triumph/i,
 };
 for (const [name, why] of Object.entries(OUTBOUND)) {
 	const r = refusal(name);

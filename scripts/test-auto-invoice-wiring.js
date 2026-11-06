@@ -150,7 +150,7 @@ const plainRateCon = (docs) => pdfWith(`BT (Load confirmation for a made-up ship
 // ------------------------------------------------------------------ server.js, lifted
 // The engine as server.js builds it, and the helpers the block hands the job.
 const PROVIDED = ["db", "brokerInvoice", "console", "process", "require", "getSheets", "getDrive", "SPREADSHEET_ID", "GEMINI_API_KEY",
-	"runRateConGemini", "renderHtmlToPdf", "DATA_DIR", "path", "fs", "RATECON_DRIVE_FOLDER_ID", "__dirname"];
+	"runRateConGemini", "renderHtmlToPdf", "DATA_DIR", "path", "fs", "RATECON_DRIVE_FOLDER_ID", "__dirname", "factoringRoutes"];
 const LIFT = closure(SRC, {
 	roots: ["brokerInvoiceDraft", "nextInvoiceNumber", "sheetDayKey", "integrityClosedMonthsOf", "logAudit", "requireRole",
 		"parseSheet", "deduplicateLoads", "insertDispatchNotification", "noticeTypeScope"],
@@ -280,6 +280,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	const H = new Function(...PROVIDED, `${LIFT.text}\nreturn { ${LIFT.names.join(", ")} };`)(
 		db, brokerInvoice, quiet, proc, serverRequire, async () => sheets, async () => drive, "made-up-sheet", "made-up-gemini-key",
 		runRateConGemini, renderHtmlToPdf, w.dir, path, fs, "made-up-ratecon-folder", ROOT,
+		// What the engine asks before it prints: the shipped routes over this world's database.
+		require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db }),
 	);
 	w.H = H;
 	const engine = H.brokerInvoiceDraft;

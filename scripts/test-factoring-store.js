@@ -13,8 +13,10 @@
 //      is live; it locks the marker ('outside') and every later mark or clear is
 //      refused
 //   §5 the Draft Invoice button's checks and its in-flight row: the confirmation
-//      refused whoever asks (NOA_UNCONFIGURED) until assignment lines exist, and
-//      its own rules for when they do
+//      refused whoever asks until assignment lines exist (NOA_UNCONFIGURED) and the
+//      submit mode reads live (TRIUMPH_NOT_LIVE), and its own rules for when they do;
+//      an invoice printed for a marker that has since changed (FACTORING_CHANGED);
+//      the live preview's checks
 //   §6 "Check Gmail" on a maybe-drafted row; the dashboard annotation
 //   §7 the only writer of locked_at in this PR
 //   §10 a Load ID change moves a live mark with the load; what can't move refuses;
@@ -314,8 +316,8 @@ function checkButton(S) {
 	const db = freshDb(S);
 	const early = (k, extra = {}) => S.draftEarlyCheck(db, { key: k, nowIso: at(1), ...extra });
 	const yes = { confirmFactored: true, reason: "made-up: Triumph asked for a copy" };
-	// As if assignment lines existed: the confirmation's own rules, for when they do.
-	const lines = { hasAssignmentLines: true };
+	// As if assignment lines existed and the mode read live: the confirmation's own rules, for when they do.
+	const lines = { hasAssignmentLines: true, live: true };
 	c.eq(early("ld-test-0001"), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 a load with no marker passes, unconfirmed");
 	c.eq(early("ld-test-0001", { confirm: yes, mayConfirm: true }), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 ...and a confirmation sent for it carries no weight");
 	putMarker(db, "ld-test-0002");
@@ -343,8 +345,24 @@ function checkButton(S) {
 		c.ok(/can't put Triumph's assignment on an invoice/.test(r.error), `§5 ...in its own words (${label})`);
 	}
 	for (const v of [undefined, false, "true", 1, ["made-up line"], {}, null]) {
-		c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: v }).code, "NOA_UNCONFIGURED", `§5 only a real true says the lines exist (${JSON.stringify(v)})`);
+		c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: v, live: true }).code, "NOA_UNCONFIGURED", `§5 only a real true says the lines exist (${JSON.stringify(v)})`);
 	}
+	// Setting the lines opens nothing: before Triumph is live, a draft would tell the broker to pay a party holding nothing.
+	for (const [label, extra] of [
+		["a listed account", { confirm: yes, mayConfirm: true }],
+		["an account not listed", { confirm: yes }],
+		["a listed account with no reason", { confirm: { confirmFactored: true, reason: "" }, mayConfirm: true }],
+	]) {
+		const r = early("ld-test-0002", { ...extra, hasAssignmentLines: true });
+		c.eq([r.ok, r.http, r.code], [false, 409, "TRIUMPH_NOT_LIVE"], `§5 FAILS ON THE OLD CODE: the lines set, not live, ${label}: 409 TRIUMPH_NOT_LIVE, whoever asks`);
+		c.eq(r.error, S.WORDS.TRIUMPH_NOT_LIVE, `§5 ...in its own words (${label})`);
+	}
+	c.ok(/clear the mark/.test(S.WORDS.TRIUMPH_NOT_LIVE), "§5 ...which name the way out: the clear, then the plain button");
+	for (const v of [undefined, false, "true", "live", 1, {}, null]) {
+		c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: true, live: v }).code, "TRIUMPH_NOT_LIVE", `§5 only a real true says it's live (${JSON.stringify(v)})`);
+	}
+	c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, live: true }).code, "NOA_UNCONFIGURED", "§5 live with no lines: NOA_UNCONFIGURED");
+	c.eq(early("ld-test-0001", { confirm: yes, mayConfirm: true, hasAssignmentLines: true }), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 not live, a load that isn't factored passes as it always has");
 	c.eq(early("ld-test-0002", lines).code, "LOAD_FACTORED", "§5 with the lines, a plain press is still LOAD_FACTORED");
 	c.eq(early("ld-test-0002", { confirm: yes, ...lines }).code, "FACTORING_NOT_LISTED", "§5 with the lines, the confirmation from an account not listed: FACTORING_NOT_LISTED");
 	c.eq(early("ld-test-0002", { confirm: { confirmFactored: true, reason: "" }, mayConfirm: true, ...lines }).code, "FACTORING_REASON_REQUIRED", "§5 with the lines, the confirmation without a reason is refused");
@@ -378,7 +396,19 @@ function checkButton(S) {
 	broken.close();
 	c.eq(S.draftEarlyCheck(broken, { key: "ld-test-0001", nowIso: at(1) }).code, "FACTORING_UNREADABLE", "§5 a marker that can't be read refuses (503)");
 
-	const begin = (k, extra = {}) => S.draftBegin(db, { key: k, loadId: k.toUpperCase(), invoiceId: "11032026-9", messageId: "<made-up@example.test>", path: "imap", actorId: 7, recipient: "ap@example-broker.test", total: "$2,150.00", nowIso: at(2), ...extra });
+	// The live preview sends nothing: the marker's checks alone, so a draft in flight doesn't refuse it.
+	const preview = (k, extra = {}) => S.previewCheck(db, { key: k, ...extra });
+	c.eq(preview("ld-test-0011"), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 the preview: a draft in flight on a load that isn't factored doesn't refuse it");
+	c.eq(preview("ld-test-0012").ok, true, "§5 the preview: nor one that may be in Gmail");
+	c.eq(preview("ld-test-0002").code, "LOAD_FACTORED", "§5 the preview: a factored load is refused as a press is");
+	c.eq(preview("ld-test-0002", { confirm: yes, mayConfirm: true }).code, "NOA_UNCONFIGURED", "§5 the preview: the confirmation with no lines");
+	c.eq(preview("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: true }).code, "TRIUMPH_NOT_LIVE", "§5 the preview: the confirmation before live");
+	c.eq(preview("ld-test-0002", { confirm: yes, ...lines }).code, "FACTORING_NOT_LISTED", "§5 the preview: an account not listed");
+	c.eq(preview("ld-test-0002", { confirm: yes, mayConfirm: true, ...lines }), { ok: true, factored: true, confirmed: true, reason: yes.reason }, "§5 the preview: the confirmation passes where a press's does");
+	c.eq(preview("ld-test-0004", { confirm: yes, mayConfirm: true, ...lines }).code, "FACTORING_LOCKED", "§5 the preview: a locked row");
+	c.eq(S.previewCheck(broken, { key: "ld-test-0001" }).code, "FACTORING_UNREADABLE", "§5 the preview: a marker that can't be read refuses");
+
+	const begin =(k, extra = {}) => S.draftBegin(db, { key: k, loadId: k.toUpperCase(), invoiceId: "11032026-9", messageId: "<made-up@example.test>", path: "imap", actorId: 7, recipient: "ap@example-broker.test", total: "$2,150.00", nowIso: at(2), ...extra });
 	c.eq(begin("ld-test-0020"), { ok: true }, "§5 the late check passes and writes the in-flight row");
 	const row = S.inflightRow(db, "ld-test-0020", "11032026-9", at(2));
 	c.eq([row.state, row.path, row.message_id, row.recipient, row.effective], ["in_flight", "imap", "<made-up@example.test>", "ap@example-broker.test", "in_flight"], "§5 ...state in_flight, its path, Message-ID and recipient");
@@ -395,6 +425,23 @@ function checkButton(S) {
 	putMarker(db, "ld-test-0023", { factored: 0, locked: T0, via: "outside" });
 	c.eq(begin("ld-test-0023").code, "FACTORING_LOCKED", "§5 locked during the render: refused at the late check, plain press too");
 	c.eq([S.inflightRows(db, "ld-test-0021", at(2)).length, S.inflightRows(db, "ld-test-0022", at(2)).length], [0, 0], "§5 a refused late check writes no row");
+
+	// What the invoice printed has to match the marker now, or the broker is told to pay the wrong party.
+	putMarker(db, "ld-test-0040");
+	c.eq(begin("ld-test-0040", { confirmed: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: a confirmed draft on a factored load that printed the bank block: refused");
+	c.eq(begin("ld-test-0040", { confirmed: true, printedAssignment: "true" }).code, "FACTORING_CHANGED", "§5 ...only a real true says the lines printed");
+	c.eq(begin("ld-test-0040", { confirmed: true, printedAssignment: true }), { ok: true }, "§5 a confirmed draft that printed the lines passes");
+	c.eq(begin("ld-test-0041", { printedAssignment: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: the lines printed and the load no longer factored: refused");
+	c.eq(begin("ld-test-0042", { confirmed: true, printedAssignment: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: ...with the confirmation too, its mark cleared during the render");
+	c.eq(begin("ld-test-0041", { invoiceId: "11032026-11" }), { ok: true }, "§5 the plain page on a load that isn't factored passes as ever");
+	c.eq([S.inflightRows(db, "ld-test-0042", at(2)).length], [0], "§5 a load refused for that has no row");
+	putInflight(db, "ld-test-0043", { invoiceId: "11032026-43" });
+	c.eq(S.draftBeforeN8n(db, { key: "ld-test-0043", invoiceId: "11032026-43", printedAssignment: true, nowIso: at(3) }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: before n8n, the same: the lines printed and the load no longer factored");
+	putMarker(db, "ld-test-0044");
+	putInflight(db, "ld-test-0044", { invoiceId: "11032026-44" });
+	c.eq(S.draftBeforeN8n(db, { key: "ld-test-0044", invoiceId: "11032026-44", confirmed: true, nowIso: at(3) }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: before n8n: the bank block printed on a factored load");
+	c.eq(S.draftBeforeN8n(db, { key: "ld-test-0044", invoiceId: "11032026-44", confirmed: true, printedAssignment: true, nowIso: at(3) }), { ok: true }, "§5 before n8n, a confirmed draft that printed the lines passes");
+	c.ok(S.WORDS.FACTORING_CHANGED && /Draft it again/.test(S.WORDS.FACTORING_CHANGED), "§5 its words say what to do");
 
 	c.eq(S.draftBeforeN8n(db, { key: "ld-test-0020", invoiceId: "11032026-9", nowIso: at(3) }), { ok: true }, "§5 before n8n, the press's own row is not 'another'");
 	c.eq(S.inflightRow(db, "ld-test-0020", "11032026-9", at(3)).path, "n8n", "§5 ...and its path becomes n8n");
@@ -754,14 +801,26 @@ const MUTANTS = [
 	["button: the confirmation passes with no assignment lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", "", checkButton],
 	["button: the lines taken to exist unless told otherwise", "hasAssignmentLines = false", "hasAssignmentLines = true", checkButton],
 	["button: anything truthy says the lines exist", "if (hasAssignmentLines !== true) return", "if (!hasAssignmentLines) return", checkButton],
-	["button: who asks comes before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\tif (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");",
-		"if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", checkButton],
+	["button: who asks comes before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\t// Before Triumph is live the lines send the broker to a party holding nothing.\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");\n\t\tif (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");",
+		"if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");", checkButton],
+	["button: the confirmation passes before live", "if (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");", "", checkButton],
+	["button: live taken unless told otherwise", "hasAssignmentLines = false, live = false }", "hasAssignmentLines = false, live = true }", checkButton],
+	["button: anything truthy says it's live", "if (live !== true) return", "if (!live) return", checkButton],
+	["button: live before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\t// Before Triumph is live the lines send the broker to a party holding nothing.\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");",
+		"if (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", checkButton],
+	["button: the words for not live are missing", "\tTRIUMPH_NOT_LIVE: \"This load is factored, and Triumph hasn't confirmed it is live yet, so no draft was made: the invoice would tell the broker to pay Triumph, which holds nothing for it. To invoice the load another way, clear the mark, then draft it as usual.\",\n", "", checkButton],
+	["late check: the bank block on a confirmed factored load passes", "\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n", "", checkButton],
+	["late check: the lines on a load no longer factored pass", "\t} else if (printedAssignment === true) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}", "\t}", checkButton],
+	["late check: anything truthy says the lines printed", "if (printedAssignment !== true) return", "if (!printedAssignment) return", checkButton],
+	["draftBegin: what printed not passed on", "const r = lateChecks(db, k, { confirmed, reissue, printedAssignment, nowIso });", "const r = lateChecks(db, k, { confirmed, reissue, nowIso });", checkButton],
+	["draftBeforeN8n: what printed not passed on", "const r = lateChecks(db, k, { confirmed, reissue, printedAssignment, nowIso, own: String(invoiceId) });", "const r = lateChecks(db, k, { confirmed, reissue, nowIso, own: String(invoiceId) });", checkButton],
+	["preview: a draft in flight refuses it", "return factoredCheck(db, keyOf(key), gates);", "return draftEarlyCheck(db, { key, nowIso: new Date().toISOString(), ...gates });", checkButton],
 	["button: the words for the refusal are missing", "\tNOA_UNCONFIGURED: \"This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.\",\n", "", checkButton],
 	["button: the confirmation from any account", "if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");", "", checkButton],
 	["button: the confirmation refused only while the claim is working", "if (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
-	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn { ok: true, factored, confirmed, reason };", "return { ok: true, factored, confirmed, reason };", checkButton],
-	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t}",
+	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn checked;", "return checked;", checkButton],
+	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n\t} else if (printedAssignment === true) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}",
 		"if (rowFactored(row) && !confirmed) return refusal(\"LOAD_FACTORED\");", checkButton],
 	["button: a refusal before n8n drops a maybe-drafted row", "keep: Boolean(own && own.state === \"maybe_drafted\")", "keep: false", checkButton],
 	["resolve: an in-flight row resolved early", "if (row.effective !== \"maybe_drafted\") return refusal(\"INVOICE_DRAFT_IN_FLIGHT\");", "", checkResolveAndAnnotate],
