@@ -126,8 +126,8 @@
     <EmergencyContactsPrompt v-if="canEditContacts" :show="showContactsPrompt" @add="contactsPromptAdd" @later="contactsPromptLater" />
     <EmergencyContactsForm v-if="canEditContacts" :show="showContactsForm" @close="showContactsForm = false" @saved="contactsRevision++" />
 
-    <!-- After a release: "What's new" or a first-time driver's tour offer (noteMoment()), and the
-         tour over the real screens. Nothing here shows with the kill switch off. -->
+    <!-- Right after a sign-in: "What's new" or a first-time driver's tour offer, and the tour over
+         the real screens. Nothing here shows with the kill switch off. -->
     <DriverReleaseNote
       :view="releaseNote"
       @show-me="release.noteShowMe"
@@ -201,7 +201,7 @@
           :phone-gps-mode-active="phoneGpsModeActive"
           :phone-gps-status="phoneGpsStatus"
           :expense-submit-handler="handleExpenseSubmit"
-          @back="handleLoadBack"
+          @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
@@ -405,7 +405,7 @@
       :unread-count="driverStore.unreadCount"
       :unread-notif-count="driverStore.unreadNotifCount"
       :show-performance="performanceTab"
-      @switch="handleNavTap"
+      @switch="handleTabSwitch"
     />
 
     <!-- The signing window, for a document asked to be signed again -->
@@ -467,6 +467,7 @@ import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingSte
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 import { isGoneAnswer, showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
 import { WORDS as RELEASE_WORDS } from '../lib/driverReleaseNotices'
+import { takeSignIn } from '../lib/signInMoment'
 import { useDriverRelease } from '../composables/useDriverRelease'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
@@ -855,8 +856,8 @@ function getLoadStatus(load) {
 // The Performance tab exists only after the server answers 200 for this viewer: with the kill
 // switch off, or for a driver with no week to show, the app stays as it was.
 const performanceTab = ref(false)
-// Whether the server has said yes or no yet. A failed read says neither: the note after a release
-// waits for this, or it would be read and marked seen without the Performance lines.
+// Whether the server has said yes or no yet. A failed read says neither: "What's new" can't open
+// without this, or it would be read and marked seen without the Performance lines.
 const performanceKnown = ref(false)
 // The answer behind the load page's bar: here only, never the store or the browser's storage, so
 // a shared phone never shows the previous driver's week.
@@ -893,18 +894,6 @@ watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list')
   weekSlotHeld.value = weekSlotWanted
   if (place) checkPerformanceTab()
 })
-
-// They left a load's page or tapped a tab themselves: these ask again for the note, in case an
-// earlier read failed. The place changing doesn't ask: a cancel or a refetch that closes their load
-// mustn't bring a note up over what they were doing.
-function handleLoadBack() {
-  detailRowIndex.value = null
-  release.check()
-}
-function handleNavTap(tab) {
-  handleTabSwitch(tab)
-  if (tab === 'loads' && !detailRowIndex.value) release.check()
-}
 
 // Tab switching
 function handleTabSwitch(tab) {
@@ -1128,7 +1117,7 @@ const showContactsPrompt = computed(() => contactsPromptDue({
   answered: contactsPromptAnswered.value,
   welcomeOpen: showWelcomeModal.value,
   loadOpen: !!detailLoad.value,
-  dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || release.tourOpen.value,
+  dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || release.onScreen.value,
   motionAllowed: voiceGate.value.allowed,
 }))
 function contactsPromptAdd() {
@@ -1139,15 +1128,10 @@ function contactsPromptLater() {
   contactsPromptAnswered.value = true
 }
 
-// After a release (composables/useDriverRelease.js). It asks the server when the app opens
-// (attemptInitialLoad), when they come back to it (onVisibilityChange), and when they move back to the
-// list themselves (handleLoadBack, handleNavTap). Never on a timer or a socket push. It has no way to
-// sign anyone out: handleLogout isn't handed to it.
-function releaseDialogOpen() {
-  return showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value
-}
-const loadPageOpen = () => !!detailLoad.value
-// Each step shows the real screen, without handleTabSwitch(): a tab he opens himself marks its
+// "What's new" and the tour offer, right after a sign-in (composables/useDriverRelease.js). It asks the
+// server once, as the view opens (attemptInitialLoad), and nothing on an open page asks again. It has no
+// way to sign anyone out: handleLogout isn't handed to it.
+// Each step shows the real screen, without handleTabSwitch(): a tab they open themselves marks its
 // messages and alerts read, and walking past them isn't reading them.
 function showTourStep(step) {
   currentTab.value = step.tab
@@ -1157,19 +1141,16 @@ function showTourStep(step) {
 const release = useDriverRelease({
   api,
   role: () => auth.user?.role,
-  onboarding: () => isOnboarding.value,
-  mounted: () => isMounted,
+  takeSignIn,
   has: () => ({ performance: performanceTab.value }),
   motionAllowed: () => voiceGate.value.allowed,
   noteInputs: () => ({
     onboarding: isOnboarding.value,
-    settled: contactsPromptReady.value,
     partsKnown: performanceKnown.value,
     tab: currentTab.value,
-    loadOpen: loadPageOpen(),
+    loadOpen: detailLoad.value != null,
     welcomeOpen: showWelcomeModal.value,
-    dialogOpen: releaseDialogOpen(),
-    motionAllowed: voiceGate.value.allowed,
+    dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value,
   }),
   place: () => currentTab.value,
   showStep: showTourStep,
@@ -1188,7 +1169,7 @@ function tourToVideos() {
 }
 
 function handleMarkRead(ids) {
-  // The tour passing through Messages isn't him reading them.
+  // The tour passing through Messages isn't them reading them.
   if (release.tourOpen.value) return
   driverStore.markMessagesRead(ids)
 }
@@ -1220,7 +1201,6 @@ function scheduleDriverRefetch() {
 function onVisibilityChange() {
   if (document.visibilityState === 'visible' && isMounted) {
     scheduleDriverRefetch()
-    release.check()
   }
 }
 
@@ -1464,8 +1444,8 @@ async function attemptInitialLoad() {
     initialLoadFailed.value = false
     maybeShowWelcome()
     scheduleContactsPrompt()
-    checkPerformanceTab()
-    release.check()
+    // The note's lines depend on the Performance answer, so it asks after that.
+    checkPerformanceTab().then(() => release.check())
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')

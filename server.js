@@ -33238,7 +33238,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// session this request arrived with (SqliteStore runs DELETE FROM sessions
 		// WHERE sid = ?) and issues a fresh ID, so the identity below is only ever
 		// attached to an ID minted by this response, and nothing from the session
-		// the request arrived with carries over: `user`, or a Driver's release id.
+		// the request arrived with carries over. It only ever stored `user`.
 		// scripts/test-login-session-rotation.js pins this.
 		rotating = true;
 		// The live-update sockets opened on the session being replaced end with
@@ -33282,8 +33282,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			companyName: current.company_name || "",
 			mustChangePassword: !!current.must_change_password,
 		};
-		// A Driver's session starts on the current release (lib/driver-release-routes.js). Never throws.
-		signIn.sessionStarted(req.session, current);
+		// A first-time Driver's tour offer (lib/driver-release-routes.js). Never throws.
+		signIn.sessionStarted(current);
 		try {
 			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
 		} catch (saveErr) {
@@ -33514,10 +33514,6 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		// cookie (useSocket re-checks the session after a server disconnect).
 		disconnectSessionSockets(currentSid);
 
-		// A password change isn't a sign-in: the rotated session stays on the release this one
-		// had, or a driver made to change it at their first sign-in would lose the note and the
-		// tour offer until their next one.
-		const heldRelease = req.session.driverRelease;
 		// Rotate the current session ID so a previously captured cookie
 		// (the pre-change one) no longer authenticates.
 		req.session.regenerate((regenErr) => {
@@ -33526,7 +33522,6 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 				return res.status(500).json({ error: "Password updated but session rotate failed. Please log out and back in." });
 			}
 			req.session.user = freshUser;
-			if (heldRelease) req.session.driverRelease = heldRelease;
 			req.session.save(() => res.json({ success: true }));
 		});
 	} catch (err) {
@@ -49453,10 +49448,10 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
-		// Voice notes' driver-safety gate (lib/voice-note-gate.js), which the driver
-		// app's new-feature note and tour read too: since when the truck has been
-		// stopped, from its recent clean fixes taken since the link. Null when that
-		// can't be shown, which the driver app reads as not stopped long enough.
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
+		// truck has been stopped, from its recent clean fixes taken since the link.
+		// Null when that can't be shown, which the driver app reads as not stopped
+		// long enough.
 		// Bounded: at most 120 rows of the same index read as above.
 		let stoppedSinceMs = null;
 		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {

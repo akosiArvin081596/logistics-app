@@ -1,7 +1,7 @@
-// New-feature notices for drivers: when the app may show a driver what's new, and the words of the
-// note's buttons and the tour. Pure: every input is passed in. The server keeps the list and says what's
-// unread (lib/driver-release-routes.js); this decides when, and composables/useDriverRelease.js does the
-// rest. Pinned by scripts/test-driver-release-notices-client.mjs.
+// New-feature notices for drivers: whether the app can show a driver what's new as they sign in, and the
+// words of the note's buttons and the tour. Pure: every input is passed in. The server keeps the list and
+// says what's unread (lib/driver-release-routes.js); composables/useDriverRelease.js does the rest. Pinned
+// by scripts/test-driver-release-notices-client.mjs.
 
 export const RELEASE_URL = '/api/driver/me/release'
 export const SEEN_URL = `${RELEASE_URL}/seen`
@@ -96,14 +96,13 @@ export function notesForScreen(entries, has) {
 
 // ── When ──────────────────────────────────────────────────────────────────
 
-// Whether "What's new" or the tour offer may show now. Asked again whenever an input changes, so a
-// note held back waits instead of being skipped. A working load doesn't hold it, so a driver at a
-// shipper can read it; a moving truck, a load's page and another screen do. So does not yet knowing
-// whether they have the Performance tab: answered now, the note would be marked seen without those lines.
+// Whether "What's new" or the tour offer can open, asked once, as a sign-in's answer lands. A no doesn't
+// wait: nothing gets marked, so it comes at their next sign-in, never later on this page. A working load
+// doesn't stop it, so a driver at a shipper can read it, and it doesn't read the truck: it follows a
+// password they've just typed, and it's one tap. Not knowing whether they have the Performance tab does
+// stop it: answered now, the note would be marked seen without those lines.
 export function noteMoment(s) {
-  if (!isPlainObject(s) || s.role !== 'Driver') return false
-  if (s.settled !== true || s.onboarding !== false || s.partsKnown !== true) return false
+  if (s.onboarding !== false || s.partsKnown !== true) return false
   if (s.tab !== 'loads' || s.loadOpen !== false) return false
-  if (s.welcomeOpen !== false || s.dialogOpen !== false || s.tourOpen !== false) return false
-  return s.motionAllowed === true
+  return s.welcomeOpen === false && s.dialogOpen === false
 }

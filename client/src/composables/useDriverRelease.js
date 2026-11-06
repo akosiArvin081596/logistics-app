@@ -1,9 +1,10 @@
-// The driver app's side of a release (lib/driver-releases.js): asks the server what this driver hasn't
-// read, then "What's new", the first-time offer and the tour. The rules are lib/driverReleaseNotices.js;
-// DriverView hands in what it knows about the screen as functions. It reads and marks, and has no way
-// to sign anyone out.
+// The driver app's side of a release (lib/driver-releases.js). The server says what this driver hasn't
+// read, and this shows it only as the view opens right after a sign-in, or not at all, so a page already
+// open never changes by itself, a moving truck's included. The tour starts only on their own tap. The rules
+// are lib/driverReleaseNotices.js; DriverView hands in what it knows about the screen as functions. It
+// reads and marks, and has no way to sign anyone out.
 // Explicit .js, so scripts/test-driver-release-notices-client.mjs can run this under plain Node.
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import {
   APP_TOUR_ROW,
   APP_TOUR_STEP_IDS,
@@ -22,49 +23,38 @@ export function useDriverRelease(o) {
   // Only a good answer turns this on, so with the kill switch off the app shows nothing new.
   const featureOn = ref(false)
   const answer = ref(null)
-  // Kept in the view only: a failed save brings the note back at the next app open, not sooner.
-  const notesAnswered = ref(false)
-  const offerAnswered = ref(false)
   const tour = ref(null)
 
   const tourOpen = computed(() => !!tour.value)
   const tourView = computed(() => (tour.value ? tourCardView(tour.value.steps, tour.value.index) : null))
-  const entries = computed(() => (answer.value && !notesAnswered.value ? notesForScreen(answer.value.notes, o.has()) : []))
-  const offerDue = computed(() => !!answer.value && answer.value.tourOffered && !offerAnswered.value)
+  const entries = computed(() => (answer.value ? notesForScreen(answer.value.notes, o.has()) : []))
   const noteView = computed(() => {
-    const mode = entries.value.length ? 'notes' : offerDue.value ? 'offer' : ''
+    const mode = entries.value.length ? 'notes' : answer.value?.tourOffered ? 'offer' : ''
     if (!mode) return null
-    if (!noteMoment({ ...o.noteInputs(), role: o.role(), tourOpen: tourOpen.value })) return null
     const steps = tourStepsFor(entries.value.flatMap((e) => e.tour), o.has())
     return { mode, entries: entries.value, canShowMe: steps.length > 0 }
   })
+  const onScreen = computed(() => !!noteView.value || tourOpen.value)
 
-  let reads = 0
-
-  // One moment: the app opened, or the driver came back to it or moved back to the list. DriverView
-  // calls this from those places only. A read that fails leaves everything as it was, nothing new.
+  // Once, as the view opens. The sign-in is spent here whatever comes of it: a failed read or a no from
+  // noteMoment() shows nothing and marks nothing, so what they missed comes at their next sign-in rather
+  // than later on this page. Any good answer still tells the Kit the feature is on.
   async function check() {
-    if (o.role() !== 'Driver' || o.onboarding() !== false || tour.value) return
-    const mine = ++reads
-    const current = () => mine === reads && o.mounted()
+    if (o.role() !== 'Driver') return
+    const signedIn = o.takeSignIn()
     let raw
     try {
       raw = await o.api.get(RELEASE_URL)
-    } catch (err) {
-      if (current() && err && err.status === 404) {
-        featureOn.value = false
-        answer.value = null
-      }
+    } catch {
       return
     }
-    if (!current()) return
     const next = releaseFromAnswer(raw)
     if (!next) return
     featureOn.value = true
-    answer.value = next
+    if (signedIn && noteMoment(o.noteInputs())) answer.value = next
   }
 
-  // A mark that fails holds nothing up; at worst the note comes back next time.
+  // A mark that fails holds nothing up; at worst the note comes back at their next sign-in.
   function mark(url, ids) {
     if (!ids.length) return
     Promise.resolve()
@@ -72,12 +62,17 @@ export function useDriverRelease(o) {
       .catch(() => {})
   }
 
+  // Their own tap. On a truck the app last read as moving it says when and starts nothing, and a tour
+  // under way stays up until they end it: nothing here changes the page by itself.
   function startTour(stepIds, doneIds) {
+    if (o.motionAllowed() !== true) {
+      o.toast(WORDS.whenParked)
+      return
+    }
     const steps = tourStepsFor(stepIds, o.has())
-    if (!steps.length) return false
+    if (!steps.length) return
     tour.value = { steps, index: 0, doneIds, from: o.place() }
     o.showStep(steps[0])
-    return true
   }
 
   function endTour() {
@@ -87,38 +82,32 @@ export function useDriverRelease(o) {
     o.restorePlace(from)
   }
 
+  // A first-time driver's offer can follow this in the same answer.
   function noteGotIt() {
     const shown = entries.value.map((e) => e.id)
-    notesAnswered.value = true
+    answer.value = { ...answer.value, notes: [] }
     mark(SEEN_URL, shown)
   }
 
   function noteShowMe() {
     const shown = entries.value
-    notesAnswered.value = true
+    answer.value = null
     mark(SEEN_URL, shown.map((e) => e.id))
     startTour(shown.flatMap((e) => e.tour), shown.map((e) => e.id))
   }
 
-  function offerTake() {
-    offerAnswered.value = true
+  function offerSkip() {
+    answer.value = null
     mark(SEEN_URL, [APP_TOUR_ROW])
+  }
+
+  function offerTake() {
+    offerSkip()
     startTour(APP_TOUR_STEP_IDS, [APP_TOUR_ROW])
   }
 
-  function offerSkip() {
-    offerAnswered.value = true
-    mark(SEEN_URL, [APP_TOUR_ROW])
-  }
-
-  // The Kit's button: any time, except with the truck moving.
+  // The Kit's button, any time.
   function startAppTour() {
-    if (o.motionAllowed() !== true) {
-      o.toast(WORDS.whenParked)
-      return
-    }
-    // Taking it from the Kit answers a first-time driver's offer too.
-    if (offerDue.value) offerSkip()
     startTour(APP_TOUR_STEP_IDS, [APP_TOUR_ROW])
   }
 
@@ -143,13 +132,8 @@ export function useDriverRelease(o) {
   // A skip writes nothing and asks nothing again.
   const tourSkip = endTour
 
-  // The truck starts moving: the tour closes by itself.
-  watch(() => o.motionAllowed(), (allowed) => {
-    if (allowed !== true) endTour()
-  })
-
   return {
-    featureOn, noteView, tourOpen, tourView, check,
+    featureOn, noteView, onScreen, tourOpen, tourView, check,
     noteGotIt, noteShowMe, offerTake, offerSkip, startAppTour,
     tourNext, tourSkip, tourFinish, closeTour: endTour,
   }
