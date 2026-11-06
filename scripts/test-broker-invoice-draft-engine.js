@@ -33,7 +33,7 @@
  *      before; a load already held stays held; the button is unchanged.
  *   §8 assignmentFor(): null (or no reader) renders the plain page byte for byte;
  *      { lines } prints them in place of the bank block; a throw is a 503 refusal
- *      before any number, never the bank block; a note holding a bank word refuses
+ *      before any number, never the bank block; a note holding a bank number refuses
  *      in prepare(); record()'s audit target.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
@@ -691,14 +691,21 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			}
 			eq(t.seen.renders, 0, `§8 ...${label}: nothing rendered`);
 		}
-		// The bank-word check runs before any number is spent, so a note can't burn one.
-		const noted = world({ assignmentFor: () => ({ lines: LINES }) });
-		const refused = await noted.manual(ID, { notes: "Payment Method: see below" });
-		eq([refused.ok, refused.http, refused.code, noted.seen.renders], [false, 409, "ASSIGNMENT_NOT_PRINTABLE", 0], "§8 a note holding a bank word on a factored invoice: refused in prepare(), nothing rendered");
-		const fine = await noted.manual(ID, { notes: "Unload at door 4" });
-		eq(code(fine), "ok", "§8 ...any other note is fine");
-		const plain = world({ assignmentFor: () => null });
-		eq(code(await plain.manual(ID, { notes: "Payment Method: see below" })), "ok", "§8 ...and on an invoice that isn't factored the note prints as it always has");
+		// The bank numbers' check runs before any number is spent, so a note can't burn one.
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			const noted = world({ assignmentFor: () => ({ lines: LINES }) });
+			const refused = await noted.manual(ID, { notes: "routing 000-111-222" });
+			eq([refused.ok, refused.http, refused.code, noted.seen.renders], [false, 409, "ASSIGNMENT_NOT_PRINTABLE", 0], "§8 a note holding the bank's routing number on a factored invoice: refused in prepare(), nothing rendered");
+			eq(code(await noted.manual(ID, { notes: "Unload at door 4" })), "ok", "§8 ...any other note is fine");
+			eq(code(await noted.manual(ID, { notes: "Payment Method: see below" })), "ok", "§8 FAILS ON THE OLD CODE: ...a note naming the bank block too");
+			const plain = world({ assignmentFor: () => null });
+			eq(code(await plain.manual(ID, { notes: "routing 000-111-222" })), "ok", "§8 ...and on an invoice that isn't factored the note prints as it always has");
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
 
 		// record()'s audit target.
 		const audited = async (extra) => {

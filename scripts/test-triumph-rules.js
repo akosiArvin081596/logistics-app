@@ -274,6 +274,21 @@ section("§8 the whole-number rate-con test");
 	eq(test({ rateConText: () => "" }), "RATECON_NUMBER_MISMATCH", "§8 a file its reader can't read holds");
 	eq(test({ loadId: "" }), "RATECON_NAME_MISMATCH", "§8 no load ID");
 	eq(test({ rateConNumber: "#1234567" }), "ok", "§8 the app's own spelling of a load key is the same number");
+
+	// One stop for causes the text can't tell apart: the reader can run a number the page prints
+	// whole into the next word, and that reads as another number. Its words claim neither.
+	const said = (over) => String((rules.rateConRefusal({ primary: { source: "documents" }, loadId: ID, rateConNumber: ID, rateConText: () => OWN, ...over }) || {}).error);
+	for (const [label, over] of [
+		["the text runs the number into the next word", { rateConText: () => "Load Number 1234567Pickup" }],
+		["the text holds a longer number", { rateConText: () => "Load Number 12345678" }],
+		["the text reads as nothing", { rateConText: () => "" }],
+		["the read gives another number", { rateConNumber: "7654321" }],
+	]) {
+		ok(/couldn't be read for this load's whole number, so nothing was sent/.test(said(over)), `§8 FAILS ON THE OLD CODE: ${label}: the reason given is that the file couldn't be read for the number, and nothing was sent`);
+		ok(/in a way the app can't read, or give another/.test(said(over)), `§8 FAILS ON THE OLD CODE: ${label}: ...and both causes are named, since the stop can't tell them apart`);
+		ok(!/doesn't match|another load's/.test(said(over)), `§8 ${label}: ...and neither is claimed`);
+	}
+	eq((rules.rateConRefusal({ primary: { source: "drive-content" }, loadId: ID, rateConNumber: ID, rateConText: () => OWN }) || {}).error, undefined, "§8 the file name's stop keeps its code alone");
 }
 
 // ---------------------------------------------------------------- §9

@@ -521,18 +521,13 @@ async function s1live() {
 		};
 		const ru = await u.press(7);
 		eq([ru.status, ru.body && ru.body.code, u.seen.mint, u.seen.render], [503, "FACTORING_UNREADABLE", 0, 0], "§1d FAILS ON THE OLD CODE: a marker that can't be read during the build: 503, nothing spent");
-		const noted = world({ lines: true });
-		noted.putMarker(8);
-		const rn = await noted.press(8, { body: { ...CONFIRM, notes: "Payment Method: see below" } });
-		eq([rn.status, rn.body && rn.body.code, noted.seen.mint, noted.seen.render], [409, "ASSIGNMENT_NOT_PRINTABLE", 0, 0], "§1d a note holding a bank word on a confirmed draft: refused before any number");
-		// As a person types them, through the route: nothing reaches Gmail.
+		// A note keeps printing on a factored invoice: only the bank block's two numbers are refused.
 		const bankName = brokerInvoice.PAYMENT_METHOD.bankName.toLowerCase();
 		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
 		process.env.INVOICE_BANK_ROUTING = "000111222";
 		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
 		try {
 			for (const [label, notes] of [
-				["the bank's name in ordinary case", `Remit to ${bankName}`],
 				["the routing number with hyphens", "routing 000-111-222"],
 				["only the account number, with spaces", "333 444 5556"],
 			]) {
@@ -540,15 +535,24 @@ async function s1live() {
 				typed.putMarker(8);
 				const r = await typed.press(8, { body: { ...CONFIRM, notes } });
 				eq([r.status, r.body && r.body.code, typed.seen.mint, typed.seen.render, typed.seen.imap.length, typed.drafts(8)], [409, "ASSIGNMENT_NOT_PRINTABLE", 0, 0, 0, []],
-					`§1d FAILS ON THE OLD CODE: ${label} in a note on a confirmed draft: refused, no number, nothing in Gmail`);
+					`§1d ${label} in a note on a confirmed draft: refused, no number, nothing in Gmail`);
 			}
+			for (const [label, notes] of [["the bank block's label", "Payment Method: see below"], ["the bank's name", `Remit to ${bankName}`]]) {
+				const worded = world({ lines: true });
+				worded.putMarker(8);
+				const r = await worded.press(8, { body: { ...CONFIRM, notes } });
+				const pageNow = worded.seen.pages[worded.seen.pages.length - 1] || "";
+				eq([r.status, r.body && r.body.via], [200, "imap"], `§1d FAILS ON THE OLD CODE: ${label} in a note on a confirmed draft: it's drafted`);
+				ok(pageNow.includes(">EXAMPLE FACTOR LLC</div>") && !/Bank Routing|Bank Account/.test(pageNow) && !pageNow.includes("000111222"), `§1d FAILS ON THE OLD CODE: ...the note beside the lines, and no bank block (${label})`);
+			}
+			const inherited = world({ lines: true });
+			inherited.putMarker(14);
+			const rp = await inherited.preview(14, { body: { ...CONFIRM, notes: "routing 000 111 222" } });
+			eq([rp.status, rp.body && rp.body.code], [409, "ASSIGNMENT_NOT_PRINTABLE"], "§1d the preview refuses a routing number in a note too");
+			eq((await inherited.preview(14, { body: { ...CONFIRM, notes: `Remit to ${bankName}` } })).status, 200, "§1d FAILS ON THE OLD CODE: ...and prints the bank's name");
 		} finally {
 			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
 		}
-		const inherited = world({ lines: true });
-		inherited.putMarker(14);
-		const rp = await inherited.preview(14, { body: { ...CONFIRM, notes: `Remit to ${bankName}` } });
-		eq([rp.status, rp.body && rp.body.code], [409, "ASSIGNMENT_NOT_PRINTABLE"], "§1d FAILS ON THE OLD CODE: the preview refuses it too");
 	}
 	// What printed has to match the marker at the hand-off, or nothing goes.
 	{
@@ -935,9 +939,20 @@ async function s9() {
 		approve.putMarker(1);
 		await approve.press(1, { body: CONFIRM });
 		ok(block(page) && block(page) === block(approve.seen.pages[0]), "§9 FAILS ON THE OLD CODE: ...the very block the approve prints");
-		eq(code(await w.preview(1, { body: { ...CONFIRM, notes: "Payment Method: see below" } })), [409, "ASSIGNMENT_NOT_PRINTABLE"], "§9 FAILS ON THE OLD CODE: a note holding a bank word: its own refusal, not a render failure");
-		for (let i = 0; i < 3; i++) await w.preview(1, { body: { ...CONFIRM, notes: "Payment Method: see below" } });
-		eq((await w.preview(1, { body: CONFIRM })).status, 200, "§9 ...and a refusal gives back its render slot");
+		eq((await w.preview(1, { body: { ...CONFIRM, notes: "Payment Method: see below" } })).status, 200, "§9 FAILS ON THE OLD CODE: a note naming the bank block: it renders");
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			const numbered = world({ lines: true });
+			numbered.putMarker(1);
+			const NUMBER_NOTE = { ...CONFIRM, notes: "account 333-444-5556" };
+			eq(code(await numbered.preview(1, { body: NUMBER_NOTE })), [409, "ASSIGNMENT_NOT_PRINTABLE"], "§9 FAILS ON THE OLD CODE: a note holding the account number: its own refusal, not a render failure");
+			for (let i = 0; i < 3; i++) await numbered.preview(1, { body: NUMBER_NOTE });
+			eq((await numbered.preview(1, { body: CONFIRM })).status, 200, "§9 ...and a refusal gives back its render slot");
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
 	}
 }
 
