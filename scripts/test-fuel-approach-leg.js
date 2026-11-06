@@ -1555,7 +1555,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	});
 	// Changed because a bell that rings later can come after empty: this truck's bell now rings where it did.
 	const RECEIPTS_OVER = { ...ALERT_TRUCK, avgMpg: 4.5, receipt: { mpg: 11 }, fuel: 0, anchor: { fuel: 24, agoMin: 60, odo: 99900 } };
-	check("it doesn't fire less: a dropout with receipts 11 above 4.5 on file, 24% before, 100 mi since: the bell rings as it did, and the chip's 106 being over the line, it quotes no miles", async () => {
+	check("it doesn't fire less: a dropout with receipts 11 above 4.5 on file, 24% before, 100 mi since: the bell rings as it did, and the chip's 106 being over the line, it quotes no miles", () => {
 		const [now, before, sent] = alertAt(RECEIPTS_OVER);
 		assert.deepStrictEqual([now, before], ["Low fuel. Check your fuel gauge.", `About 84 miles of fuel left${EST}. Plan a fuel stop now.`]);
 		assert.strictEqual(sent.find((s) => s.kind === "dispatch").args[2], "Driver QA (Unit 901) is low on fuel. Check the truck's fuel gauge.");

@@ -63396,7 +63396,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
 		// Flag off the words quote the chip's own figure, and its "Refuel now" at 0. Fired by
 		// the lower figure alone, the chip still reads over the line, so they quote no miles.
-		const noMiles = !!shared && planning > FUEL_LOW_ALERT_MILES;
+		const noMiles = planning > FUEL_LOW_ALERT_MILES;
 		const said = shared ? shared.usableMiles : planning;
 		const refuelNow = !!shared && said === 0;
 		const miles = shared && said === 1 ? "mile" : "miles";
