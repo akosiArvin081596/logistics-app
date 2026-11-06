@@ -63385,7 +63385,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		// The figure above alone decides when the bell rings. Flag off, only its words read
 		// the one range the chip and the load's Fuel section quote: the chip's figure, or its
 		// "Refuel now" at 0, and no miles while the chip is over the line or has no figure.
-		// Reading that range can't cost the bell: on a failure it keeps the figure above.
+		// Reading that range can't cost the bell: on a failure it still rings, in no miles.
 		let shared = null;
 		if (!DRIVER_FUEL_GALLONS_ENABLED) {
 			try {
@@ -63393,7 +63393,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 			} catch { shared = null; }
 		}
 		const chipPlanning = shared ? shared.interval.planning : planning;
-		const noMiles = chipPlanning == null || chipPlanning > FUEL_LOW_ALERT_MILES;
+		const noMiles = (!DRIVER_FUEL_GALLONS_ENABLED && !shared) || chipPlanning == null || chipPlanning > FUEL_LOW_ALERT_MILES;
 		const said = shared ? shared.usableMiles : planning;
 		const refuelNow = !!shared && said === 0;
 		const miles = shared && said === 1 ? "mile" : "miles";

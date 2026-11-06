@@ -1581,12 +1581,25 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 20, linkedAgoMin: 5 });
 		assert.deepStrictEqual([now, before], [NO_MILES, "About 100 miles of fuel left. Plan a fuel stop now."]);
 	});
-	check("a failed read of the chip's figure can't cost the bell: it rings as on main, in main's figure", () => {
-		const w = buildWorld(Database, lifted, appRequire, { ...ALERT_TRUCK, avgMpg: 6, fuel: 20 }, false);
+	// A failed read can't say what the chip shows, so it quotes no miles rather than main's figure.
+	const failedRead = (o, flagOn) => {
+		const w = buildWorld(Database, lifted, appRequire, o, flagOn);
 		w.db.exec("DROP TABLE eld_device_assignments");
 		const a = w.alert();
 		a.check();
-		assert.deepStrictEqual([alertSaid(a.sent), a.errors, a.latch().alerted], ["About 100 miles of fuel left. Plan a fuel stop now.", [], true]);
+		return a;
+	};
+	check("a failed read of the chip's figure can't cost the bell: it rings as on main, and quotes no miles, on the driver's line and dispatch's", () => {
+		for (const o of [{ ...ALERT_TRUCK, avgMpg: 6, fuel: 20 }, { ...ALERT_TRUCK, avgMpg: 6, fuel: 0, anchor: { fuel: 20, agoMin: 60, odo: 99900 } }]) {
+			const a = failedRead(o, false);
+			assert.deepStrictEqual([alertSaid(a.sent), a.errors, a.latch().alerted], [NO_MILES, [], true], JSON.stringify(o));
+			assert.strictEqual(a.sent.find((s) => s.kind === "dispatch").args[2], "Driver QA (Unit 901) is low on fuel. Check the truck's fuel gauge.");
+			assert.strictEqual(a.sent.find((s) => s.kind === "notice").notice.body, "Unit 901 — low fuel. Check the truck's fuel gauge.");
+		}
+	});
+	check("...flag on doesn't read the chip's figure, so the same table gone leaves its words as main's", () => {
+		const a = failedRead({ ...ALERT_TRUCK, avgMpg: 6, fuel: 20 }, true);
+		assert.deepStrictEqual([alertSaid(a.sent), a.errors], ["About 100 miles of fuel left. Plan a fuel stop now.", []]);
 	});
 
 	// A truck over time, sensor out from the second row on unless a fill says otherwise: a row
@@ -1721,7 +1734,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		["a typed 20, 300 gal, parked, 10% and 9% in turn", { avgMpg: 20, tank: 300, fuel: 10 }, every(48, (i) => ({ min: 15, fuel: i % 2 ? 10 : 9 })), 0],
 		["a typed 20, 80 gal, parked, 35% and 34% in turn", { avgMpg: 20, tank: 80, fuel: 35 }, every(48, (i) => ({ min: 15, fuel: i % 2 ? 35 : 34 })), 0],
 		["a typed 20, no tank size, parked, 14% and 13% in turn", { avgMpg: 20, tank: 0, fuel: 14 }, every(48, (i) => ({ min: 15, fuel: i % 2 ? 14 : 13 })), 0],
-		["no MPG on file, from 50%, sensor out, parked after 170 mi, odometer wobbling, 9 h", { avgMpg: 0, fuel: 50 }, [...leg(170, () => 0), ...every(36, (i) => ({ min: 15, fuel: 0, odo: 100165 + (i % 2) }))], 0],
+		["no MPG on file, from 50%, sensor out, parked after 170 mi, odometer wobbling, 9 h", { avgMpg: 0, fuel: 50 }, [...leg(170, () => 0), { min: 5, mi: 5, fuel: 0 }, ...every(36, (i) => ({ min: 15, fuel: 0, odo: 100170 + (i % 2) }))], 0],
 		["6 on file, from 50%, sensor out, parked after 150 mi, odometer wobbling, 9 h", { avgMpg: 6, fuel: 50 }, [...leg(150, () => 0), ...every(36, (i) => ({ min: 15, fuel: 0, odo: 100150 + (i % 2) }))], 0],
 		["receipts 11, 4.5 on file, from 50%, sensor out, parked after 270 mi, odometer wobbling, 9 h", { avgMpg: 4.5, receipt: { mpg: 11 }, fuel: 50 }, [...leg(270, () => 0), ...every(36, (i) => ({ min: 15, fuel: 0, odo: 100270 + (i % 2) }))], 1],
 		// recheck-4's M3: an odometer of 0 on every other row, where main itself rings again and again.
