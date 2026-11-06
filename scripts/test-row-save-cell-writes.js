@@ -222,6 +222,13 @@ function factoringWorld({ marking = false, readJobTracking = null } = {}) {
 			await mounted["/api/factoring/loads/:loadKey"]({ params: { loadKey }, body: { factored, reason: "made-up reason" }, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } }, res);
 			return out;
 		},
+		// "Handled in Triumph's process", as a listed account presses it.
+		pressOutside: (loadKey) => {
+			const out = { status: 200, body: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.body = b; return res; } };
+			mounted["/api/factoring/loads/:loadKey/handled-outside"]({ params: { loadKey }, body: { reason: "made-up reason" }, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } }, res);
+			return out;
+		},
 	};
 }
 const NO_MARKS = factoringWorld().routes;
@@ -1431,6 +1438,9 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 	const ranges = (app) => app.calls.map((c) => c.ranges);
 	const cellOf = (app) => app.rows[1][IDX["Load ID"]];
 	const NUMBER_ID = (id) => [HEADERS.slice(), storedRow({ "Load ID": id })];
+	// The routes below run with a made-up sheet; the server gives the switch the real one.
+	const WIRING = SRC.slice(SRC.indexOf("// <factoring-wiring>"), SRC.indexOf("// </factoring-wiring>"));
+	t("§7 FAILS ON THE OLD CODE: the server hands the switch the sheet", WIRING.includes("readJobTracking: getJobTrackingCached,"), true);
 	for (const route of SAVES) {
 		// The mark goes with the ID, whoever saves it, every setting off.
 		for (const role of ["Super Admin", "Dispatcher"]) {
@@ -1497,6 +1507,10 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 			[oldAnswer.status, oldAnswer.body.code, oldAnswer.body.error, newAnswer.status, newAnswer.body.code, pressed.f.isFactored("111"), pressed.f.isFactored("333")], [409, "LOAD_ID_CHANGING", CHANGING, 409, "LOAD_ID_CHANGING", false, false]);
 		const afterSave = await pressed.f.press("333");
 		t(`§7 ${route}, ...and once the save is done the new key can be marked`, [afterSave.status, pressed.f.isFactored("333")], [200, true]);
+		let duringOutside = null;
+		const outsideWorld = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), prepare: (w) => w.mark("111"), land: (sheet, f) => { sheet.hooks.duringWrite = () => { duringOutside = f.pressOutside("111"); }; } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, "Handled in Triumph's process" pressed during the write: 409 LOAD_ID_CHANGING, and the mark still moves`,
+			[duringOutside.status, duringOutside.body.code, outsideWorld.f.isFactored("333"), outsideWorld.f.row("111")], [409, "LOAD_ID_CHANGING", true, undefined]);
 
 		// The switch on a key no row holds any more: a dialog left open on the old ID.
 		let sheetNow = null;

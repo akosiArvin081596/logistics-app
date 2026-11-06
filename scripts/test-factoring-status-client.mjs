@@ -258,7 +258,7 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
   eq(ask('INVOICE_ALREADY_DRAFTED'), 'An invoice draft already exists for this load. Was it NOT sent to the broker? If you confirm, delete that draft in Gmail.', '§7 FAILS ON THE OLD CODE: the switch\'s question on a draft row, as it was')
   eq(ask('INVOICE_MAYBE_IN_GMAIL'), 'An invoice draft for this load may be in Gmail, or may already have been sent from there. Was it NOT sent to the broker? If you confirm, delete any draft in Gmail.', '§7 FAILS ON THE OLD CODE: the switch asks on a draft that may be in Gmail')
   eq([ask('LOAD_FACTORED'), ask(''), ask(undefined), ask('constructor')], ['', '', '', ''], '§7 ...and on nothing else')
-  ok(CONTROLS.includes('notSentQuestion(e.code)') && CONTROLS.includes('draftMayBeOut: draftMayBeOut(props.job && props.job._autoInvoice)'), '§7 FAILS ON THE OLD CODE: the switch reads the question and the row\'s status from those two')
+  ok(CONTROLS.includes("const question = next && e ? notSentQuestion(e.code) : ''") && CONTROLS.includes('draftMayBeOut: draftMayBeOut(props.job && props.job._autoInvoice)'), '§7 FAILS ON THE OLD CODE: the switch reads the question and the row\'s status from those two')
   ok(CONTROLS.includes("'Marked factored. If a draft is in Gmail Drafts, delete it.'"), '§7 FAILS ON THE OLD CODE: a mark that had to ask answers without saying it goes through Triumph')
 }
 
