@@ -630,6 +630,26 @@ if (panelFactory) {
     check('§8a flag off, no reading: neither line',
       [textOf(offHtml['ELD silent']).includes(LINE), textOf(offHtml['ELD silent']).includes('Fuel level read')], [false, false])
   }
+  // The Miles per gallon row and its note say which figure it is: 6.0 is the truck's own
+  // MPG on file, and the fleet default is 6.5.
+  {
+    const w = world({ flag: false })
+    const rowsAt = async (mpgSource, mpg) => {
+      serve(w, { '/api/fuel/range': { ...w.range, mpgSource, mpg } })
+      return textOf(await openSection(panelFactory()))
+    }
+    const says = (t) => [t.includes('on file for this truck'), t.includes('fleet default'), t.includes('rough estimate')]
+    const onFile = await rowsAt('truck', 6)
+    const fleet = await rowsAt('default', 6.5)
+    const receipts = await rowsAt('receipts', 6)
+    check('§8a flag off, an MPG on file: the row and the note call it the truck\'s own figure, and never the fleet default',
+      [says(onFile), onFile.includes('This range uses the 6 mpg on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.')], [[true, false, true], true])
+    check('§8a flag off, no MPG on file: the row and the note call it the fleet default, at 6.5',
+      [says(fleet), fleet.includes("There aren't enough miles or fuel receipts on this truck yet to work out its real MPG, so this range assumes the fleet default of 6.5 mpg. Treat it as a rough estimate.")], [[false, true, true], true])
+    check('§8a flag off, MPG from receipts: no note, and neither word', says(receipts), [false, false, false])
+    check('§8a flag off, a source the panel doesn\'t know: no badge and no note',
+      says(await rowsAt('something-new', 6)), [false, false, false])
+  }
   check('§8a flag off: the new block appears in no world',
     Object.entries(offHtml).filter(([, h]) => h.includes('data-testid="driver-fuel"') || textOf(h).includes('miles until you run out')).map(([n]) => n), [])
   check('§8a flag off: a failed trip plan reads as today', textOf(offHtml['trip plan 400 (no code)']).includes("We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."), true)

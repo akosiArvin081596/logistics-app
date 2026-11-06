@@ -63299,6 +63299,8 @@ function sharedFuelRangeFor({ truck, rows, receipt, burn }) {
 	return fuelModel.sharedFuelRange({
 		tankGallons: truck ? truck.fuel_tank_gallons : 0, avgMpg: truck ? truck.avg_mpg : 0,
 		receiptMpg: receipt ? receipt.mpg : null, burn, reserve: FUEL_RESERVE_OPTS,
+		// Flag on, the block's own cap covers it, and those answers stay as they were.
+		acceptAnyMpgOnFile: DRIVER_FUEL_GALLONS_ENABLED,
 		readingAt: (mpg, tank) => resolveCredibleFuelReading(vehicleId, beforeLink ? [] : rows, mpg, tank),
 	});
 }

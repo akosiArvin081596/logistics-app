@@ -28,8 +28,9 @@
 //
 // §12 pins one range for the header chip and a load's Fuel section with the flag
 // off (lib/fuel-model.js sharedFuelRange(), the trip plan's own chain): the two equal
-// on generated trucks, the hero and verdict as they were, a route of 0, a dropout's
-// rows, the dispatch card, and every flag-on answer byte for byte.
+// on generated trucks, the hero and verdict as they were, an MPG on file outside the
+// class-8 band read as not set, a route of 0, a dropout's rows, the dispatch card, who
+// else reads the MPG on file, and every flag-on answer byte for byte.
 //   SERVER_ROOT=<base checkout> node scripts/test-fuel-approach-leg.js
 // runs the flag-on digests on a base, which must print the same lines.
 
@@ -683,6 +684,10 @@ const RANGE_MOVES_WITH_FLAG_OFF = new Set([
 	"sensor dropout, no tank size, measured basis",
 	"in transit after a 4 h dropout from 100% (300 mi since)",
 	"before pickup, device re-linked 5 min ago (its newest fix is from before)",
+	// These three move by the MPG row's label alone: the truck's own figure, not "default".
+	"no tank size, no fill history",
+	"before pickup, no ELD device on the truck",
+	"after pickup, no ELD device on the truck",
 ]);
 const CALLS = [
 	["trip-plan, Driver", (w) => w.plan()],
@@ -936,7 +941,7 @@ async function routeSections() {
 // A deliberate change to the flag-on answers updates these two digests.
 const FLAG_ON_PINNED_WORLDS = 27;
 const FLAG_ON_WORLDS_SHA = "55a636c721ea6cf554a00e1b5596e9db1a180135e1c56618987180ce3f7d60bf";
-const FLAG_ON_GENERATED_SHA = "8bde0d0f1da23c3f63670a5c60c879260705f69466100585b000ae8b0976103e";
+const FLAG_ON_GENERATED_SHA = "d9d083de50691ebd37889b48dabb39be64335082237bb67d22070c05fe526bfd";
 const GENERATED_CASES = 2000;
 const GENTLE = { ...BURN5, p10: 12, p50: 14, p90: 16 };
 
@@ -969,7 +974,7 @@ function generatedTrucks() {
 			status: any(["In Transit", "In Transit", "At Receiver", "Assigned"]),
 			fixAt: any([FIX, FIX_SHORT, DROP]),
 			tank: any([0, 80, 150, 300]),
-			avgMpg: any([0, 4.5, 6.0, 6.125, 6.127, 9.5]),
+			avgMpg: any([0, 1.5, 2.99, 3, 4.5, 6.0, 6.125, 6.127, 9.5, 11, 11.01, 12, 16.5, 20]),
 			rollupMpg: any([null, null, 2.5, 3, 4.0, 5.55, 8.0, 11, 12.5]),
 			receipt: any([null, null, null, { mpg: 5.2 }, { mpg: 6.0 }, { mpg: 8.4 }]),
 			burn: any([null, NO_BURN, BURN5, GENTLE]),
@@ -979,6 +984,10 @@ function generatedTrucks() {
 	return out;
 }
 
+// Receipts reach a route only through a device, as buildWorld()'s stub has it.
+const receiptOf = (o) => (o.truck === false || o.device === false ? null : o.receipt);
+// An MPG on file the band doesn't believe, on a truck with no receipts to outrank it.
+const mpgOnFileOutOfBand = (o) => !receiptOf(o) && o.truck !== false && o.avgMpg > 0 && (o.avgMpg < 3 || o.avgMpg > 11);
 const figures = (range, plan) => ({
 	chip: range.body.rangeUsableMiles, hero: plan.body.refuelWithinMiles, countOn: plan.body.range.planning, verdict: plan.body.verdict,
 });
@@ -1027,6 +1036,28 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		["receipts above the MPG on file, a dropout, a 355 mi run: still 'You can make this run'; the chip rises from 305 to the hero's 405",
 			{ fixAt: FIX_SHORT, burn: GENTLE, receipt: { mpg: 8.0 }, fuel: 0, anchor: { fuel: 60, agoMin: 240, odo: 99700 } },
 			{ chip: 305, hero: 405, countOn: 420, verdict: "clears" }, { chip: 405, hero: 405, countOn: 420, verdict: "clears" }],
+		["a mistyped 20 MPG on file, rollup 8.0: not 785 on the chip; it reads as not set, 245 on both, and the run is a stop", { ...ROW1, avgMpg: 20, rollupMpg: 8.0 },
+			{ chip: 305, hero: 785, countOn: 800, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["a mistyped 16.5 MPG on file, rollup 6.0: the same", { ...ROW1, avgMpg: 16.5, rollupMpg: 6.0 },
+			{ chip: 225, hero: 645, countOn: 660, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["a mistyped 12 MPG on file, rollup 6.0: the same", { ...ROW1, avgMpg: 12, rollupMpg: 6.0 },
+			{ chip: 225, hero: 465, countOn: 480, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["a mistyped 20 MPG on file, no rollup: 785 on both becomes 245 on both", { ...ROW1, avgMpg: 20, rollupMpg: null },
+			{ chip: 785, hero: 785, countOn: 800, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["the band's top is in: 11 on file stays, 425 on both", { ...ROW1, avgMpg: 11, rollupMpg: null },
+			{ chip: 425, hero: 425, countOn: 440, verdict: "clears" }, { chip: 425, hero: 425, countOn: 440, verdict: "clears" }],
+		["...11.01 is out: 245", { ...ROW1, avgMpg: 11.01, rollupMpg: null },
+			{ chip: 426, hero: 426, countOn: 441, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["the band's foot is in: 3 on file stays, 105 on both", { ...ROW1, avgMpg: 3, rollupMpg: null },
+			{ chip: 105, hero: 105, countOn: 120, verdict: "insufficient" }, { chip: 105, hero: 105, countOn: 120, verdict: "insufficient" }],
+		["...2.99 is out: it reads as not set too, 245, which is above what it read", { ...ROW1, avgMpg: 2.99, rollupMpg: null },
+			{ chip: 104, hero: 104, countOn: 119, verdict: "insufficient" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["no MPG on file: the fleet default, 6.5, unchanged", { ...ROW1, avgMpg: 0, rollupMpg: null },
+			{ chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["receipts outrank a mistyped MPG on file: no move", { ...ROW1, avgMpg: 20, receipt: { mpg: 6.0 }, rollupMpg: null },
+			{ chip: 225, hero: 225, countOn: 240, verdict: "insufficient" }, { chip: 225, hero: 225, countOn: 240, verdict: "insufficient" }],
+		["measured legs on a live reading don't rest on the MPG on file: a mistyped one moves nothing", { status: "In Transit", avgMpg: 20, receipt: null, rollupMpg: null, fuel: 48 },
+			{ chip: 225, hero: 225, countOn: 240, verdict: "tight" }, { chip: 225, hero: 225, countOn: 240, verdict: "tight" }],
 		["at the delivery, a route of 0: the hero takes the chip's 225, never 240 'miles you can count on'", { status: "At Receiver", fuel: 48, fixAt: DROP },
 			{ chip: 225, hero: null, countOn: 240, verdict: "unknown" }, { chip: 225, hero: 225, countOn: 240, verdict: "unknown" }],
 		["at the delivery with Routes down: the same", { status: "Unloading", fuel: 48, fixAt: DROP, routesDown: true },
@@ -1091,6 +1122,20 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	check("a dropout under a low rollup: Fuel level 66.7%, Gallons left 100, never 0% and 0 / 150", () => {
 		assert.deepStrictEqual(gauge(reviewM1b.range), [66.7, 100.1, "carried"]);
 	});
+	const mistyped = named.find((n) => n.label.startsWith("a mistyped 20 MPG on file, rollup 8.0"));
+	check("a mistyped MPG on file: the answer's MPG row reads the fleet default, 6.5, with a default label; the plan's 'Uses at least N gal' stays on its own MPG, as before", () => {
+		const r = mistyped.range.body;
+		const p = mistyped.plan.body;
+		assert.deepStrictEqual([r.mpg, r.mpgSource], [6.5, "default"]);
+		assert.deepStrictEqual([p.mpg, p.mpgSource, p.gallonsNeeded], [20, "default", 15]);
+		assert.deepStrictEqual([p.mpg, p.mpgSource, p.gallonsNeeded], [mistyped.planBefore.body.mpg, mistyped.planBefore.body.mpgSource, mistyped.planBefore.body.gallonsNeeded]);
+	});
+	const mistypedDropout = await both({ ...DROPOUT, avgMpg: 20, receipt: null, burn: null });
+	check("a mistyped MPG on file on a dropout: the level burns at the fleet default, not at 20, on both figures", () => {
+		const { fuelPct } = mistypedDropout.range.body;
+		assert.deepStrictEqual([fuelPct, mistypedDropout.rangeBefore.body.fuelPct], [69.2, 90]);
+		assert.strictEqual(mistypedDropout.range.body.rangeUsableMiles, mistypedDropout.plan.body.refuelWithinMiles);
+	});
 	const liveRow = named.find((n) => n.label.startsWith("control: a live reading"));
 	check("a live reading: the rows and the plan read the one level, with nothing to call an estimate", () => {
 		assert.deepStrictEqual([...gauge(liveRow.range), liveRow.plan.body.fuelPct], [80, 120, "live", 80]);
@@ -1100,7 +1145,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	const live = appRequire("./lib/fuel-model");
 	const hasShared = typeof live.sharedFuelRange === "function";
 	check("lib/fuel-model.js exports sharedFuelRange()", () => assert.ok(hasShared));
-	check("which MPG wins: receipts, else the MPG on file, else the default; a carried level burns at it; a rollup can't reach it", () => {
+	check("which MPG wins: receipts, else an MPG on file from 3 to 11, else the fleet default; a carried level burns at it; a rollup can't reach it", () => {
 		assert.ok(hasShared);
 		const pick = (o) => {
 			let burnedAt = null;
@@ -1116,14 +1161,32 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			pick({}),
 			pick({ avgMpg: 6.125 }),
 			pick({ avgMpg: 6, rollupMpg: 3 }),
+			pick({ avgMpg: 3 }),
+			pick({ avgMpg: 2.99 }),
+			pick({ avgMpg: 11 }),
+			pick({ avgMpg: 11.01 }),
+			pick({ avgMpg: 20 }),
+			pick({ avgMpg: -6 }),
+			pick({ avgMpg: 20, receiptMpg: 8 }),
+			pick({ avgMpg: 20, acceptAnyMpgOnFile: true }),
+			pick({ avgMpg: 2, acceptAnyMpgOnFile: true }),
 		], [
-			[6, "default", 6],
+			[6, "truck", 6],
 			[8, "receipts", 8],
 			[5, "receipts", 5],
 			[5, "receipts", 5],
 			[6.5, "default", 6.5],
-			[6.125, "default", 6.125],
-			[6, "default", 6],
+			[6.125, "truck", 6.125],
+			[6, "truck", 6],
+			[3, "truck", 3],
+			[6.5, "default", 6.5],
+			[11, "truck", 11],
+			[6.5, "default", 6.5],
+			[6.5, "default", 6.5],
+			[6.5, "default", 6.5],
+			[8, "receipts", 8],
+			[20, "truck", 20],
+			[2, "truck", 2],
 		]);
 	});
 	check("a reading with no level gives no figure at all (never a 0), and a level of 0 is a figure (no 'no sensor' guess)", () => {
@@ -1191,11 +1254,21 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		assert.deepStrictEqual(read(atDelivery.planBefore.body), [false, null, 240, false]);
 		assert.deepStrictEqual(read(cardDeliveryBefore.body), [false, null, 240, false]);
 	});
-	check("the card's ring reads the burned level (66.7%), with its existing 'estimated' note, and its MPG row the plan's MPG (6.0, no rollup)", () => {
+	check("the card's ring reads the burned level (66.7%), with its existing 'estimated' note, and its MPG row the truck's own 6.0, labelled as that", () => {
 		assert.deepStrictEqual([cardRow2.range.body.fuelPct, cardRow2.range.body.hasFuelData, cardRow2.range.body.fuelSource], [66.7, true, "carried"]);
 		assert.deepStrictEqual([row2.rangeBefore.body.fuelPct, row2.planBefore.body.fuelPct], [66.7, 40]);
-		assert.deepStrictEqual([cardRow1.range.body.mpg, cardRow1.range.body.mpgSource, cardRow1.range.body.gallonsRemaining], [6, "default", 72]);
+		assert.deepStrictEqual([cardRow1.range.body.mpg, cardRow1.range.body.mpgSource, cardRow1.range.body.gallonsRemaining], [6, "truck", 72]);
 		assert.deepStrictEqual([row1.rangeBefore.body.mpg, row1.rangeBefore.body.mpgSource, row1.rangeBefore.body.gallonsRemaining], [4, "eld", 72]);
+	});
+	check("the card's hover and the driver's row say which figure it is: the truck's own on file, or the fleet default at 6.5", () => {
+		if (reviewError) assert.fail(reviewError);
+		const onFile = review.mpgSource(cardRow1.range.body.mpgSource);
+		const fleet = review.mpgSource(mistyped.range.body.mpgSource);
+		assert.deepStrictEqual([onFile.short, onFile.driver, /fleet/i.test(onFile.title), /on file/i.test(onFile.title)], ["on file", "on file for this truck", false, true]);
+		assert.deepStrictEqual([fleet.driver, /fleet-wide/.test(fleet.title), mistyped.range.body.mpg], ["fleet default", true, 6.5]);
+		assert.strictEqual(review.mpgNoteText("truck", "6 mpg"), "This range uses the 6 mpg on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.");
+		assert.ok(/assumes the fleet default of 6\.5 mpg/.test(review.mpgNoteText("default", "6.5 mpg")));
+		assert.deepStrictEqual([review.mpgNoteText("receipts", "6 mpg"), review.mpgNoteText("eld", "6 mpg"), review.mpgNoteText(undefined, "6 mpg")], ["", "", ""]);
 	});
 	check("the card's 'Uses at least N gal' stays on the plan's own MPG, a lower bound: 50 gal for 300 mi at 6.0, both flags, as do the plan's mpg fields", () => {
 		const keep = (b) => [b.gallonsNeeded, b.mpg, b.mpgSource, b.routeMiles];
@@ -1229,19 +1302,40 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 				&& r.fuelReadingAgeMinutes === p.fuelReadingAgeMinutes && r.milesSinceFuelReading === p.milesSinceFuelReading;
 		}), []);
 	});
-	check("generated: the hero and the verdict stay as they were: flag off, the trip plan's answer is flag on's less driverFuel, byte for byte, but for the hero on a route of 0", () => {
+	check("generated: the hero and the verdict stay as they were: flag off, the trip plan's answer is flag on's less driverFuel, byte for byte, but for the hero on a route of 0 and an MPG on file outside the band", () => {
 		assert.deepStrictEqual(firstBad((c) => {
+			if (mpgOnFileOutOfBand(c.o)) return true;
 			const before = omitDriverFuel(c.planBefore.body);
 			const now = c.plan.body;
 			const atZero = before.routeMiles === null && before.range.planning !== null;
 			return JSON.stringify(atZero ? { ...before, refuelWithinMiles: now.refuelWithinMiles } : before) === JSON.stringify(now);
 		}), []);
 	});
-	check("generated: the chip is exactly the section's figure before: it falls and rises to it, on both sides, and only a route of 0 needs the margin worked out", () => {
+	check("generated: the chip is exactly the section's figure before, falling or rising to it, but for an MPG on file outside the band; only a route of 0 needs the margin worked out", () => {
 		assert.deepStrictEqual(firstBad((c) => {
+			if (mpgOnFileOutOfBand(c.o)) return true;
 			const dry = c.planBefore.body.range.planning;
 			return c.range.body.rangeUsableMiles === (dry === null ? null : Math.max(0, dry - 15))
 				&& (c.planBefore.body.routeMiles === null || c.range.body.rangeUsableMiles === c.planBefore.body.refuelWithinMiles);
+		}), []);
+	});
+	const outOfBand = [];
+	for (const c of cases.filter((x) => mpgOnFileOutOfBand(x.o))) {
+		const w = buildWorld(Database, lifted, appRequire, { ...c.o, avgMpg: 0 }, false);
+		outOfBand.push({ c, unsetRange: await w.range(), unsetPlan: await w.plan() });
+	}
+	check(`generated: an MPG on file outside the band reads exactly as not set, on ${outOfBand.length} trucks: the chip's whole answer, and the plan's less its own MPG and gallons`, () => {
+		const lessOwnMpg = ({ mpg: _m, gallonsNeeded: _g, ...rest }) => JSON.stringify(rest);
+		assert.ok(outOfBand.length > 100, `${outOfBand.length}`);
+		const bad = outOfBand.filter(({ c, unsetRange, unsetPlan }) => JSON.stringify(c.range.body) !== JSON.stringify(unsetRange.body) || lessOwnMpg(c.plan.body) !== lessOwnMpg(unsetPlan.body));
+		assert.deepStrictEqual(bad.slice(0, 3).map(({ c }) => label(c)), []);
+	});
+	check("generated: only an MPG on file inside the band is called the truck's own; no answer says 'truck' without one, and 'default' never sits on a figure that isn't 6.5", () => {
+		assert.deepStrictEqual(firstBad((c) => {
+			const r = c.range.body;
+			if (r.mpgSource === "truck") return !receiptOf(c.o) && c.o.truck !== false && c.o.avgMpg >= 3 && c.o.avgMpg <= 11 && r.mpg === c.o.avgMpg;
+			if (r.mpgSource === "default") return r.mpg === 6.5;
+			return r.mpgSource === "receipts" && !!receiptOf(c.o) && r.mpg === receiptOf(c.o).mpg;
 		}), []);
 	});
 	check("generated: a dropout's Fuel level is never the planning level unless they're equal, its Gallons left follow it, and every other level is the plan's", () => {
@@ -1253,8 +1347,8 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			return r.fuelSource === "carried" ? r.fuelPct >= p.fuelPct : r.fuelPct === p.fuelPct;
 		}), []);
 	});
-	check("generated: with no receipts, a dropout's rows read as they did before, wherever the chip already had a level", () => {
-		assert.deepStrictEqual(firstBad((c) => c.o.receipt || !c.rangeBefore.body.hasFuelData || c.o.linkedAgoMin === 5
+	check("generated: with no receipts, a dropout's rows read as they did before, wherever the chip already had a level, but for an MPG on file outside the band", () => {
+		assert.deepStrictEqual(firstBad((c) => receiptOf(c.o) || mpgOnFileOutOfBand(c.o) || !c.rangeBefore.body.hasFuelData || c.o.linkedAgoMin === 5
 			|| (c.range.body.fuelPct === c.rangeBefore.body.fuelPct && c.range.body.gallonsRemaining === c.rangeBefore.body.gallonsRemaining)), []);
 	});
 	check("generated: what isn't the range stays as it was: truck, tank, reserve, evidence and time on the chip's answer; route, leg, MPG and gallons on the plan's", () => {
@@ -1268,11 +1362,11 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		assert.deepStrictEqual(firstBad((c) => c.cardRange.body.rangeUsableMiles === c.range.body.rangeUsableMiles && c.cardPlan.body.refuelWithinMiles === c.plan.body.refuelWithinMiles
 			&& c.cardPlan.body.verdict === c.plan.body.verdict && !("vehicleId" in c.range.body) && !("vehicleId" in c.plan.body) && "vehicleId" in c.cardRange.body && "vehicleId" in c.cardPlan.body), []);
 	});
-	check("generated: a chip loses its figure only when its newest fix is from before the device's link, and gains one only as 'Refuel now'", () => {
+	check("generated: a chip loses its figure only when its newest fix is from before the device's link, and gains one only where the section already had one", () => {
 		assert.deepStrictEqual(firstBad((c) => {
 			const [now, before] = [c.range.body.rangeUsableMiles, c.rangeBefore.body.rangeUsableMiles];
 			if (now === null && before !== null) return c.o.linkedAgoMin === 5;
-			if (now !== null && before === null) return now === 0;
+			if (now !== null && before === null) return c.planBefore.body.range.planning !== null;
 			return true;
 		}), []);
 	});
@@ -1306,6 +1400,10 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			carried: count((c) => c.range.body.fuelSource === "carried"),
 			clears: count((c) => c.plan.body.verdict === "clears"),
 			rollupInBand: count((c) => c.rangeBefore.body.mpgSource === "eld"),
+			mpgOnFileOutOfBand: count((c) => mpgOnFileOutOfBand(c.o)),
+			outOfBandMoved: count((c) => mpgOnFileOutOfBand(c.o) && c.plan.body.refuelWithinMiles !== c.planBefore.body.refuelWithinMiles),
+			outOfBandVerdictMoved: count((c) => mpgOnFileOutOfBand(c.o) && c.plan.body.verdict !== c.planBefore.body.verdict),
+			truckMpg: count((c) => c.range.body.mpgSource === "truck"),
 		};
 		console.log(`      generated: ${JSON.stringify(seen)}`);
 		for (const [k, v] of Object.entries(seen)) assert.ok(v >= 3, `${k}: ${v}`);
@@ -1320,6 +1418,50 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	console.log(`      flag-on answers, whole, ${GENERATED_CASES} generated trucks: ${generatedOn.length}, sha256 ${generatedSha}`);
 	check("flag on: every answer is byte for byte what it was (the worlds above, every role)", () => assert.strictEqual(worldsSha, FLAG_ON_WORLDS_SHA));
 	check("flag on: every answer is byte for byte what it was (the generated trucks)", () => assert.strictEqual(generatedSha, FLAG_ON_GENERATED_SHA));
+
+	// --- who else reads the MPG on file -----------------------------------------
+	// Each code line naming the column, by the top-level statement it sits in. A new
+	// reader fails here, so someone decides whether the band applies to it.
+	const mpgOnFileReaders = () => {
+		const seen = new Set();
+		let head = "";
+		for (const line of SRC.split("\n")) {
+			const top = /^(?:async\s+)?function\s+(\w+)|^(?:const|let)\s+(\w+)|^app\.\w+\(\s*\[?"([^"]+)"/.exec(line);
+			if (top) head = top[1] || top[2] || top[3];
+			if (/\bavg_mpg\b/.test(line.replace(/\/\/.*$/, "")) && /^\s/.test(line)) seen.add(head);
+		}
+		return [...seen].sort();
+	};
+	check("the band touches no other reader of the MPG on file: the column has only these readers, and no pay, IFTA, investor or expense code is one of them", () => {
+		assert.deepStrictEqual(mpgOnFileReaders(), [
+			"/api/fuel/range",
+			"/api/fuel/trip-plan",
+			"/api/fuel/verify",
+			"/api/trucks",
+			"/api/trucks/:id",
+			"TRUCK_AMOUNT_FIELDS",
+			"maybeAlertLowFuel",
+			"resolveTruckForDriverName",
+			"sharedFuelRangeFor",
+		].sort());
+		const libDir = path.join(path.dirname(resolveServerFile()), "lib");
+		const libReaders = fs.readdirSync(libDir).filter((f) => f.endsWith(".js"))
+			.filter((f) => /\bavg_?mpg\b/i.test(fs.readFileSync(path.join(libDir, f), "utf8")));
+		assert.deepStrictEqual(libReaders, ["fuel-model.js"]);
+	});
+	check("the low-fuel alert, /api/fuel/verify, the flag-on range and the plan's own MPG keep the MPG on file as typed; only sharedFuelRange() holds it to the band", () => {
+		const alert = declText("maybeAlertLowFuel");
+		assert.ok(alert.includes("const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;"), "the alert");
+		const verify = liftRoute(SRC, 'app.get("/api/fuel/verify", requireRole("Super Admin"), (req, res) => {');
+		assert.ok(verify.includes("(t.avg_mpg > 0 ? t.avg_mpg : fuelModel.DEFAULT_MPG)"), "/api/fuel/verify");
+		const range = liftRoute(SRC, RANGE_HEAD);
+		assert.ok(range.includes("const preMpg = truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;") && range.includes("const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;"), "the flag-on range");
+		const plan = liftRoute(SRC, PLAN_HEAD);
+		assert.ok(/const mpg = receipt \? receipt\.mpg\s+: \(truck && truck\.avg_mpg > 0 \? truck\.avg_mpg : fuelModel\.DEFAULT_MPG\);/.test(plan), "the plan's own MPG");
+		assert.ok(declText("sharedFuelRangeFor").includes("acceptAnyMpgOnFile: DRIVER_FUEL_GALLONS_ENABLED,"), "flag on, the trip plan takes it as typed");
+		assert.strictEqual(SRC.split("acceptAnyMpgOnFile").length - 1, 1, "one place says so");
+		assert.ok(!/DRIVER_FUEL_MAX_MPG|CLASS8_MIN_MPG/.test(SRC), "server.js holds no copy of the band for it");
+	});
 
 	// --- nothing else reads it --------------------------------------------------
 	check("no pay, IFTA, investor or expense path reads the one range: its helpers run only in the two routes, write nothing, and no server code asks those routes", () => {

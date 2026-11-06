@@ -611,6 +611,12 @@ const MPG_SOURCES = {
     driver: 'from your ELD',
     title: "Derived from the ELD's fuel-level readings and the recorded tank size.",
   },
+  truck: {
+    key: 'truck', rank: 0,
+    short: 'on file',
+    driver: 'on file for this truck',
+    title: "This truck's own MPG on file, entered by a person: not measured.",
+  },
   default: {
     key: 'default', rank: 0,
     short: 'est',
@@ -621,6 +627,18 @@ const MPG_SOURCES = {
 
 export function mpgSource(value) {
   return MPG_SOURCES[value] || null;
+}
+
+// The driver's note under the Miles per gallon row, for a figure nobody measured. It
+// says which figure it is: the truck's own MPG on file, or the fleet default.
+export function mpgNoteText(sourceKey, mpgText) {
+  if (sourceKey === 'truck') {
+    return `This range uses the ${mpgText} on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.`;
+  }
+  if (sourceKey === 'default') {
+    return `There aren't enough miles or fuel receipts on this truck yet to work out its real MPG, so this range assumes the fleet default of ${mpgText}. Treat it as a rough estimate.`;
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------
