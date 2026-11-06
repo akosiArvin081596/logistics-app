@@ -12,7 +12,7 @@
 // while the job comes back to it, is the sentence once a person must act.
 export const AUTO_INVOICE_REASONS = Object.freeze({
   WAITING_POD: { short: 'no POD yet', text: 'Waiting for the POD. Upload it; no invoice is made until then.', attentionText: 'No POD was found when the invoice was started. Upload it, then Try again.' },
-  NOT_COMPLETED: { short: 'not delivered', text: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. If this line is still here a few minutes later, draft it by hand." },
+  NOT_COMPLETED: { short: 'not delivered', text: "The load wasn't marked Delivered at the last check, so no invoice has been made. If it was delivered, set it back. Reload this page in 10 minutes and open this load again. If this line is still here, draft it by hand." },
   LOAD_DROPPED: { short: 'cancelled or deleted', text: 'The load was cancelled or deleted, so no invoice is made. Nothing to do.' },
   RATECON_MISSING: { short: 'no rate con', text: 'No rate con was found for this load. It is looked for again every 2 hours, three times; after that, draft it by hand.', attentionText: 'No rate con was found for this load. Add the rate con, then Try again, or draft it by hand.' },
   SEND_SETTLING: { short: 'about to send', text: 'The invoice is sent automatically once the wait after its newest POD is over, so a POD page added soon after goes with it. A new POD starts the wait again.' },
