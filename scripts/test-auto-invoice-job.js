@@ -3763,6 +3763,71 @@ const HOLD_CASES = {
 		return { chip: c.changed_fields, logged: w.actions("auto_invoice_load_change_logged").length, stop: stop && stop.reason, alerts: w.alerts.length,
 			said: w.logs.filter((l) => /no load rows/.test(l)).length };
 	},
+	// A send that answers false ten times: the waits, any try made before a wait was over (a restart
+	// on the way), then the send that goes.
+	async backoff(lib) {
+		const w = alertWorld();
+		let job = await holdStarted(lib, w);
+		await sendAll(w, job, ["LD-TEST-0850"]);
+		w.alertAnswers = Array(10).fill(false);
+		FIELD_CHANGES.payment(w, "LD-TEST-0850");
+		await job.tick();
+		await alertsSent(job);
+		const waits = [];
+		let early = 0;
+		for (let i = 0; i < 9; i++) {
+			const wait = Number(w.meta().alert_wait_ms || 0);
+			waits.push(wait / MIN);
+			if (!wait) break;
+			const tries = w.alerts.length;
+			w.now += wait - MIN;
+			if (i === 1) job = lib.create(w.holdDeps());
+			await alertsSent(job);
+			if (w.alerts.length !== tries) early++;
+			w.now += MIN;
+			await alertsSent(job);
+		}
+		const left = outbox(w).length;
+		w.now += 6 * HOUR;
+		await alertsSent(job);
+		return { waits, early, final: [left, outbox(w).length, w.meta().alert_wait_ms || "", w.alerts.length] };
+	},
+	// A full outbox: 50 held-load emails waiting, then a Super Admin's Stop and a load held; and one
+	// whose oldest entry is a stop, then a load held.
+	async fullOutbox(lib) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w);
+		await sendAll(w, job, ["LD-TEST-0857", "LD-TEST-0858"]);
+		const heldEntry = (i) => ({ id: `made-up-${i}`, kind: "held", subject: HELD_SUBJECT(`LD-TEST-${1000 + i}`), html: "<p>made-up</p>", at: isoOf(w.now) });
+		ledgerLib.setMeta(w.db, "alert_outbox", JSON.stringify(Array.from({ length: 50 }, (_, i) => heldEntry(i))));
+		ledgerLib.setMeta(w.db, "alert_retry_at", isoOf(w.now + 24 * HOUR));
+		const f = fakeApp();
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
+		await f.call("POST", "/api/auto-invoice/send/stop", { body: {} });
+		const afterStop = outbox(w);
+		FIELD_CHANGES.payment(w, "LD-TEST-0857");
+		await job.tick();
+		const afterHold = outbox(w);
+		const stopFirst = [{ id: "made-up-stop", kind: "stop", subject: STOP_SUBJECT, html: "<p>made-up</p>", at: isoOf(w.now) }, ...Array.from({ length: 49 }, (_, i) => heldEntry(100 + i))];
+		ledgerLib.setMeta(w.db, "alert_outbox", JSON.stringify(stopFirst));
+		w.now += 2 * HOUR;
+		FIELD_CHANGES.payment(w, "LD-TEST-0858");
+		await job.tick();
+		const oldestStop = outbox(w);
+		return {
+			afterStop: [afterStop.length, afterStop.filter((a) => a.kind === "stop").length, afterStop[0] && afterStop[0].id],
+			afterHold: [afterHold.length, afterHold.filter((a) => a.kind === "stop").length, afterHold[afterHold.length - 1] && afterHold[afterHold.length - 1].subject],
+			oldestStop: [oldestStop.length, oldestStop.filter((a) => a.kind === "stop").length, oldestStop[0] && oldestStop[0].id, oldestStop[oldestStop.length - 1] && oldestStop[oldestStop.length - 1].subject],
+		};
+	},
+	// The status and settings reads, with or without an alert address.
+	async reads(lib, alertTo) {
+		const w = alertWorld({ alertTo });
+		const job = await holdStarted(lib, w);
+		const f = fakeApp();
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
+		return { status: (await f.call("GET", "/api/auto-invoice/status")).body, settings: (await f.call("GET", "/api/auto-invoice/settings")).body, logs: w.logs };
+	},
 	// Chips as main left them, then Mark checked.
 	async oldChips(lib) {
 		const w = alertWorld();
@@ -4006,14 +4071,27 @@ async function holdSections() {
 	eq(old.checked, [200, "", "", "", 1], "§26 FAILS ON THE OLD CODE: Mark checked clears the chip and what was logged, from a fresh read of the sheet (the cache dropped first)");
 	eq(old.afterTick, ["", 2], "§26 FAILS ON THE OLD CODE: ...and that point is the new reference: nothing more is logged");
 
-	// The rules' own decision, removed in turn: the case that pins it must change.
+	// The rules' own decisions, removed in turn: the case that pins each must change.
 	const RULES_FILE = path.join(ROOT, "lib", "auto-invoice-rules.js");
-	const rulesMutant = mutantModule(RULES_FILE, "\t\tdefault: return false;\n\t}\n}", "\t\tdefault: return true;\n\t}\n}");
-	ok(rulesMutant, "§26 MUTANT a logged field holds: applied to lib/auto-invoice-rules.js once");
-	if (rulesMutant) {
-		const real = await HOLD_CASES.podAfterSend(jobLib);
-		const mutated = await withPatched([[rules, "sentChange", rulesMutant.sentChange]], () => HOLD_CASES.podAfterSend(jobLib));
-		ok(real.chip === "" && real.stop === null && mutated.chip === "pods", "§26 MUTANT a logged field holds: caught");
+	for (const [label, from, to, run, pinned] of [
+		["a logged field holds", "\t\tdefault: return false;\n\t}\n}", "\t\tdefault: return true;\n\t}\n}", () => HOLD_CASES.podAfterSend(jobLib), (x) => x.chip === "" && x.stop === null],
+		["any broker email change holds", "return Boolean(domain) && domain !== emailDomain(saved.brokerEmail);", "return true;",
+			() => HOLD_CASES.field(jobLib, FIELD_CHANGES.brokerSameDomain), (x) => x.chip === ""],
+		["a first rate-con row holds", "case \"rateCons\": return (saved.rateConIds || []).length > 0;", "case \"rateCons\": return true;",
+			() => HOLD_CASES.field(jobLib, FIELD_CHANGES.rateCons), (x) => x.chip === ""],
+		["a row gone compared field by field", "\tif (!facts.onSheet) return { ...out, gone: true };\n", "",
+			() => HOLD_CASES.archived(jobLib), (x) => x.stop === null && x.chips.every((c) => c === "")],
+		["a logged value logged again at each check", "const logged = split.logged.filter((name) => memory[name] !== fieldValue(name, now));", "const logged = split.logged;",
+			() => HOLD_CASES.podAfterSend(jobLib), (x) => x.logged.length === 1],
+		["an older chip's hold part ignored", "split.hold.join(\",\") !== heldPart(changedFields)", "true",
+			() => HOLD_CASES.oldChips(jobLib), (x) => x.before.held === 0],
+	]) {
+		const lib = mutantModule(RULES_FILE, from, to);
+		ok(lib, `§26 MUTANT ${label}: applied to lib/auto-invoice-rules.js once`);
+		if (!lib) continue;
+		const real = pinned(await run());
+		const mutated = pinned(await withPatched([[rules, "sentChange", lib.sentChange]], run));
+		ok(real && !mutated, `§26 MUTANT ${label}: caught`);
 	}
 	const LEDGER_FILE = path.join(ROOT, "lib", "auto-invoice-ledger.js");
 	for (const [label, from, to, steps, want] of [
@@ -4113,35 +4191,10 @@ async function holdSections() {
 	ok(cap.logs.some((l) => /LD-TEST-0845: held, not mailed/.test(l)) && !cap.logs.some((l) => /@/.test(l)), "§27 FAILS ON THE OLD CODE: the one not mailed is in the job's log, with no address");
 
 	// A send that answers false: it waits, doubling from 5 minutes to 6 hours, kept across a restart.
-	{
-		const w = alertWorld();
-		let job = await holdStarted(jobLib, w);
-		await sendAll(w, job, ["LD-TEST-0850"]);
-		w.alertAnswers = Array(10).fill(false);
-		FIELD_CHANGES.payment(w, "LD-TEST-0850");
-		await job.tick();
-		await alertsSent(job);
-		const waits = [];
-		let early = 0;
-		for (let i = 0; i < 9; i++) {
-			const wait = Number(w.meta().alert_wait_ms || 0);
-			waits.push(wait / MIN);
-			if (!wait) break;
-			const tries = w.alerts.length;
-			w.now += wait - MIN;
-			if (i === 1) job = jobLib.create(w.holdDeps());
-			await alertsSent(job);
-			if (w.alerts.length !== tries) early++;
-			w.now += MIN;
-			await alertsSent(job);
-		}
-		eq(waits, [5, 10, 20, 40, 80, 160, 320, 360, 360], "§27 FAILS ON THE OLD CODE: a send that answers false waits 5 minutes, doubling to 6 hours");
-		eq(early, 0, "§27 ...nothing is tried before the wait is over, across a restart too");
-		const left = outbox(w).length;
-		w.now += 6 * HOUR;
-		await alertsSent(job);
-		eq([left, outbox(w).length, w.meta().alert_wait_ms || "", w.alerts.length], [1, 0, "", 11], "§27 FAILS ON THE OLD CODE: ...then sent once it goes, and the wait starts over");
-	}
+	const backoff = await HOLD_CASES.backoff(jobLib);
+	eq(backoff.waits, [5, 10, 20, 40, 80, 160, 320, 360, 360], "§27 FAILS ON THE OLD CODE: a send that answers false waits 5 minutes, doubling to 6 hours");
+	eq(backoff.early, 0, "§27 ...nothing is tried before the wait is over, across a restart too");
+	eq(backoff.final, [1, 0, "", 11], "§27 FAILS ON THE OLD CODE: ...then sent once it goes, and the wait starts over");
 	{
 		const w = alertWorld();
 		const job = await holdStarted(jobLib, w);
@@ -4155,24 +4208,10 @@ async function holdSections() {
 			"§27 FAILS ON THE OLD CODE: the oldest is tried first, and nothing after it once it answers false");
 	}
 	// A full outbox: its oldest held-load email goes, never a stop.
-	{
-		const w = alertWorld();
-		const job = await holdStarted(jobLib, w);
-		await sendAll(w, job, ["LD-TEST-0857"]);
-		const full = Array.from({ length: 50 }, (_, i) => ({ id: `made-up-${i}`, kind: "held", subject: HELD_SUBJECT(`LD-TEST-${1000 + i}`), html: "<p>made-up</p>", at: isoOf(w.now) }));
-		ledgerLib.setMeta(w.db, "alert_outbox", JSON.stringify(full));
-		ledgerLib.setMeta(w.db, "alert_retry_at", isoOf(w.now + 24 * HOUR));
-		const f = fakeApp();
-		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
-		await f.call("POST", "/api/auto-invoice/send/stop", { body: {} });
-		const afterStop = outbox(w);
-		FIELD_CHANGES.payment(w, "LD-TEST-0857");
-		await job.tick();
-		const afterHold = outbox(w);
-		eq([afterStop.length, afterStop.filter((a) => a.kind === "stop").length, afterStop[0] && afterStop[0].id], [50, 1, "made-up-1"], "§27 FAILS ON THE OLD CODE: a full outbox makes room for a stop by its oldest held-load email");
-		eq([afterHold.length, afterHold.filter((a) => a.kind === "stop").length, afterHold[afterHold.length - 1] && afterHold[afterHold.length - 1].subject],
-			[50, 1, HELD_SUBJECT("LD-TEST-0857")], "§27 FAILS ON THE OLD CODE: ...and a held load after it never pushes the stop out");
-	}
+	const full = await HOLD_CASES.fullOutbox(jobLib);
+	eq(full.afterStop, [50, 1, "made-up-1"], "§27 FAILS ON THE OLD CODE: a full outbox makes room for a stop by its oldest held-load email");
+	eq(full.afterHold, [50, 1, HELD_SUBJECT("LD-TEST-0857")], "§27 FAILS ON THE OLD CODE: ...and a held load after it never pushes the stop out");
+	eq(full.oldestStop, [50, 1, "made-up-stop", HELD_SUBJECT("LD-TEST-0858")], "§27 FAILS ON THE OLD CODE: ...even when the stop is the oldest email waiting");
 	// No address set: nothing queued or sent, one log line, and the reads say alerts are off (item 118).
 	{
 		const w = alertWorld({ alertTo: "" });
@@ -4201,6 +4240,52 @@ async function holdSections() {
 		eq(replicaRules.classifySetting("AUTO_INVOICE_ALERT_TO", ALERT_TO, { readByApp: new Set(["AUTO_INVOICE_ALERT_TO"]) }).rule, "production only: names a production target",
 			"§27 FAILS ON THE OLD CODE: AUTO_INVOICE_ALERT_TO is never copied to a replica");
 	}
+	// The emails' own decisions, removed in turn: the case that pins each must change.
+	const JOB_SRC_FILE = path.join(ROOT, "lib", "auto-invoice-job.js");
+	for (const [label, from, to, run, pinned] of [
+		["no hourly cap", "if (lastHour.length >= HELD_ALERTS_PER_HOUR) {", "if (false) {", (lib) => HOLD_CASES.cap(lib), (x) => x.first.length === 6],
+		["a full outbox drops a stop", "while (box.length >= ALERT_OUTBOX_MAX && box.some(isHeldAlert)) box.splice(box.findIndex(isHeldAlert), 1);", "while (box.length >= ALERT_OUTBOX_MAX) box.shift();",
+			(lib) => HOLD_CASES.fullOutbox(lib), (x) => x.oldestStop[1] === 1],
+		["the wait never grows", "rules.alertWaitMs(Number(meta.alert_wait_ms) || 0)", "rules.alertWaitMs(0)", (lib) => HOLD_CASES.backoff(lib), (x) => x.waits[1] === 10],
+		["a try before the wait is over", "\t\t\t\t\tif (meta.alert_retry_at && meta.alert_retry_at > iso(nowDate().getTime())) return sent;\n", "",
+			(lib) => HOLD_CASES.backoff(lib), (x) => x.early === 0],
+		["no email when sending stops", "\t\tqueueAlert(\"stop\", sendRules.stopAlert(reason));\n", "", (lib) => HOLD_CASES.cap(lib), (x) => x.first.includes(STOP_SUBJECT)],
+		["no email for a Super Admin's Stop", "\t\t\t\t\tqueueAlert(\"stop\", sendRules.stopAlert(\"STOPPED_BY_ADMIN\"));\n", "", (lib) => HOLD_CASES.fullOutbox(lib), (x) => x.afterStop[1] === 1],
+		["the settings read never says alerts are off", ", ...(alertsOff() ? { alerts: { on: false } } : {}) });", " });",
+			(lib) => HOLD_CASES.reads(lib, ""), (x) => Boolean(x.settings.alerts) && x.settings.alerts.on === false],
+		["the status never says alerts are off", "\t\t\t...(alertsOff() ? { alerts: { on: false } } : {}),\n", "",
+			(lib) => HOLD_CASES.reads(lib, ""), (x) => Boolean(x.status.alerts) && x.status.alerts.on === false],
+		// An empty read checked would log every sent load as gone (and mark it so): no stop, but false rows.
+		["an empty read checked anyway", "const empty = snap.byKey.size === 0;", "const empty = false;", (lib) => HOLD_CASES.unreadable(lib, "no rows"), (x) => x.logged === 0 && x.said === 1],
+		["Mark checked keeps the cached sheet", "\t\t\td.invalidateJobTracking();\n\t\t\tlet snap;", "\t\t\tlet snap;", (lib) => HOLD_CASES.oldChips(lib), (x) => x.checked[4] === 1],
+		["Mark checked keeps what was logged", ", change_logged_json: \"\", change_logged_at: \"\",\n", ",\n", (lib) => HOLD_CASES.oldChips(lib), (x) => x.checked[2] === ""],
+	]) {
+		const lib = mutantModule(JOB_SRC_FILE, from, to);
+		ok(lib, `§27 MUTANT ${label}: applied to lib/auto-invoice-job.js once`);
+		if (!lib) continue;
+		ok(pinned(await run(jobLib)) && !pinned(await run(lib)), `§27 MUTANT ${label}: caught`);
+	}
+	const SEND_SRC_FILE = path.join(ROOT, "lib", "auto-invoice-send.js");
+	for (const [label, from, to, run, pinned] of [
+		["other loads always keep sending", "\tif (continues) sentences.push(\"Other loads keep sending.\");\n", "\tsentences.push(\"Other loads keep sending.\");\n",
+			() => HOLD_CASES.cap(jobLib), (x) => JSON.stringify(x.firstTexts.map((t) => /Other loads keep sending/.test(t))) === JSON.stringify([true, true, false, false, false, false])],
+		["a load set back from Delivered told to press Mark checked", "\tif (!undone) sentences.push(", "\tsentences.push(",
+			() => HOLD_CASES.field(jobLib, FIELD_CHANGES.status), (x) => x.texts.length === 1 && !/Mark checked/.test(x.texts[0])],
+	]) {
+		const lib = mutantModule(SEND_SRC_FILE, from, to);
+		ok(lib, `§27 MUTANT ${label}: applied to lib/auto-invoice-send.js once`);
+		if (!lib) continue;
+		const real = pinned(await run());
+		const mutated = pinned(await withPatched([[sendLib, "heldAlert", lib.heldAlert]], run));
+		ok(real && !mutated, `§27 MUTANT ${label}: caught`);
+	}
+	const replicaCopies = mutantModule(path.join(ROOT, "lib", "replica-rules.js"), "\t\"AUTO_INVOICE_ALERT_TO\",\n", "");
+	ok(replicaCopies, "§27 MUTANT AUTO_INVOICE_ALERT_TO copied to a replica: applied to lib/replica-rules.js once");
+	if (replicaCopies) {
+		ok(replicaCopies.classifySetting("AUTO_INVOICE_ALERT_TO", ALERT_TO, { readByApp: new Set(["AUTO_INVOICE_ALERT_TO"]) }).copy === true,
+			"§27 MUTANT AUTO_INVOICE_ALERT_TO copied to a replica: caught (the real rule refuses it, above)");
+	}
+
 	// Shadow mode sends none: nothing is held or stopped there.
 	{
 		const w = alertWorld();
@@ -4282,6 +4367,20 @@ async function holdSections() {
 				const [real, mutated] = [dryRunScript, counted].map((lib) => lib.run({ db: ro, values: x.values(), nowIso: isoOf(x.w.now), helpers }).wouldHold.loads);
 				ro.close();
 				ok(real === 1 && mutated === 2, "§28 MUTANT the dry run counts a load already flagged: caught");
+			} finally {
+				x.w.db.close();
+				fs.rmSync(x.TMP, { recursive: true, force: true });
+			}
+		}
+		const unheld = mutantModule(SCRIPT, "\t\tfor (const e of ledger.readHeldLoads(db)) if (e && nowMs - Date.parse(e.at) <= rules.HELD_LOADS_WINDOW_MS) heldKeys.add(e.load);\n", "\t\tledger.readHeldLoads(db);\n");
+		ok(unheld, "§28 MUTANT the dry run blind to the loads held already: applied once");
+		if (unheld) {
+			const x = await dryRunWorld({ trip: true });
+			try {
+				const ro = new Database(x.file, { readonly: true, fileMustExist: true });
+				const [real, mutated] = [dryRunScript, unheld].map((lib) => lib.run({ db: ro, values: x.values(), nowIso: isoOf(x.w.now), helpers }).breaker.wouldTrip);
+				ro.close();
+				ok(real === true && mutated === false, "§28 MUTANT the dry run blind to the loads held already: caught");
 			} finally {
 				x.w.db.close();
 				fs.rmSync(x.TMP, { recursive: true, force: true });

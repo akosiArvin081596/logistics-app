@@ -1194,6 +1194,8 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await watchedTap(DRIVER, "LD-TEST-1212");
 		await until(() => watched.smtp.length === 1 && open(watched) === 0, "§12 sent, for the watch");
 		watched.setLoad("LD-TEST-1212", { "  Payment  ": "1600" });
+		// This world runs on the real clock: a check begun in the send's own millisecond skips that load.
+		await new Promise((r) => setTimeout(r, 5));
 		eq(watched.intervals.length, 1, "§12 FAILS ON THE OLD CODE: the watch's timer");
 		if (watched.intervals[0]) watched.intervals[0].fn();
 		await until(() => (watched.claim("LD-TEST-1212") || {}).changed_fields === "payment" || !watched.intervals[0], "§12 the watch flags it");
@@ -1214,6 +1216,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await fallbackTap(DRIVER, "LD-TEST-1214");
 		await until(() => fallback.smtp.length === 1 && open(fallback) === 0, "§12 sent, no alert address");
 		fallback.setLoad("LD-TEST-1214", { "  Payment  ": "1600" });
+		await new Promise((r) => setTimeout(r, 5));
 		if (fallback.intervals[0]) fallback.intervals[0].fn();
 		await until(() => (fallback.claim("LD-TEST-1214") || {}).changed_fields === "payment" || !fallback.intervals[0], "§12 flagged, no alert address");
 		await settle();
