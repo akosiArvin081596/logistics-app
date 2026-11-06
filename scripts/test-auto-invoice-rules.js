@@ -359,6 +359,20 @@ if (typeof R.classifyChange !== "function" || typeof R.sentChange !== "function"
 	eq([gone.hold, gone.newHold, gone.logged, gone.gone, gone.words], [[], false, [], true, "row gone from the sheet"], "§9 sentChange: a row gone logs once, holds nothing");
 	eq(check({ onSheet: false, completed: false, live: false }, { logged: JSON.stringify(gone.memory) }).gone, false, "§9 ...and only once");
 	eq(check({ podIds: [1, 3, 9] }, { logged: "not json" }).logged, ["pods"], "§9 a memory that can't be read: logs again (told twice beats not told)");
+	// A row the app removed (the Data Manager, the duplicate scanner): gone from the sheet, it holds as
+	// removed; still on the sheet, the note changes nothing.
+	const ROW_GONE = { onSheet: false, completed: false, live: false, paymentCents: null, brokerEmail: "", trailer: "" };
+	eq(R.classifyChange(fp, { ...sent, ...ROW_GONE }, { removedInApp: true }), { gone: false, hold: ["removed"], logged: [] },
+		"§9 FAILS ON THE OLD CODE: a row removed in the app, gone from the sheet: holds as removed, and no other field is compared");
+	eq(R.classifyChange(fp, { ...sent, paymentCents: 130000 }, { removedInApp: true }), { gone: false, hold: ["payment"], logged: [] },
+		"§9 ...a load whose row is still on the sheet (a duplicate went) is compared as any other");
+	const removedCheck = (claim = {}) => R.sentChange({ saved: fp, facts: { ...sent, ...ROW_GONE }, changedFields: claim.changed || "", loggedJson: claim.logged || "", removedInApp: true });
+	const removedNow = removedCheck();
+	eq([removedNow.hold, removedNow.newHold, removedNow.logged, removedNow.gone], [["removed"], true, [], false], "§9 FAILS ON THE OLD CODE: sentChange: a row removed in the app is a new hold, not a row gone");
+	eq(["removed", "status,removed", "payment", "payment,pods"].map((changed) => { const s = removedCheck({ changed }); return [s.hold, s.newHold]; }),
+		[[["removed"], false], [["status", "removed"], false], [["removed", "payment"], true], [["removed", "payment"], true]],
+		"§9 FAILS ON THE OLD CODE: ...the fields it was flagged on stay, with removed: no new hold once removed is among them (a cancelled load's row cleared later), a new one with it added");
+	eq(check({ onSheet: false, completed: false, live: false }).gone, true, "§9 ...with no note, a row gone is still only gone");
 	ok(!/\d{3,}|@/.test(JSON.stringify([pod.words, pay.hold, gone.words])), "§9 the words carry no amount and no address");
 	eq(R.HOLD_FIELDS, ["status", "removed", "payment", "brokerEmail", "rateCons"], "§9 the fields that can hold, by name: pods and trailer only ever log");
 	eq([R.HELD_LOADS_STOP, R.HELD_LOADS_WINDOW_MS], [3, 24 * HOUR], "§9 the breaker: 3 different loads within 24 hours");

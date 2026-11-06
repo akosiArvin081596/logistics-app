@@ -60,6 +60,10 @@
  *      carry the load's whole number, a rate con that gives another number, and the check off: a
  *      person, nothing sent; a typo; Try again's look; other brokers' drafts; a hold's notice and
  *      audit row through the block, and what the settings read says
+ *  §15 a sent load's row removed in the app, through the Data Manager's DELETE /api/data/:rowIndex
+ *      and the duplicate scanner's POST /api/admin/remove-rows as shipped, and the block: held as
+ *      removed at once and emailed; a delete whose answer was lost but landed; one refused; a
+ *      load that keeps another row; another tab; each route's call removed in turn
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -170,6 +174,38 @@ const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatc
 const STATUS_HEAD = SRC.split("\n").find((l) => l.startsWith('app.put("/api/driver/status",'));
 const STATUS_INDEX = indexDeclarations(SRC);
 
+// A route registration as shipped, from `src` (server.js's text, or a mutant of it): every name it
+// reaches is server.js's own top-level declaration, unless `stubs` gives it (the outside world, or the
+// job). Its last handler.
+function liftedHandler(head, stubs, src = SRC) {
+	const cache = Object.create(null);
+	let proxy = null;
+	proxy = new Proxy(Object.create(null), {
+		has(_, key) {
+			if (typeof key !== "string" || key === "__scope") return false;
+			return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
+		},
+		get(_, key) {
+			if (key === Symbol.unscopables) return undefined;
+			if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
+			if (key in cache) return cache[key];
+			const decl = STATUS_INDEX.decls.get(key);
+			if (decl) {
+				cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
+				return cache[key];
+			}
+			if (key in globalThis) return globalThis[key];
+			throw new ReferenceError(`unstubbed in the lifted route: ${String(key)}`);
+		},
+		set(_, key, value) { cache[key] = value; return true; },
+	});
+	let handler = null;
+	const take = (...args) => { handler = args[args.length - 1]; };
+	stubs.app = { get: take, put: take, post: take, delete: take };
+	new Function("__scope", `with (__scope) { ${liftRoute(src, head)} }`)(proxy);
+	return handler;
+}
+
 function deepFreeze(o) {
 	if (o && typeof o === "object" && !Object.isFrozen(o)) {
 		Object.freeze(o);
@@ -237,6 +273,15 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 				}
 				return { data: { values: w.sheet.map((r) => r.slice()) } };
 			},
+			// The Data Manager's read before a delete: whole rows by number ("'Job Tracking'!5:5").
+			batchGet: async ({ ranges = [] } = {}) => {
+				w.calls.sheetsGet++;
+				return { data: { valueRanges: ranges.map((r) => {
+					const m = /!(\d+):\d+$/.exec(String(r));
+					const row = m ? w.sheet[Number(m[1]) - 1] : null;
+					return row ? { values: [row.slice()] } : {};
+				}) } };
+			},
 			// The status route's write. `w.batchFails`: it rejects, having landed or not.
 			batchUpdate: async ({ requestBody }) => {
 				if (w.batchHook) w.batchHook();
@@ -253,6 +298,19 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 				if (fails) throw new Error("made-up: no answer in 15 seconds");
 				return { data: {} };
 			},
+		},
+		// A row delete (deleteDimension), as the Data Manager and the duplicate scanner send it.
+		// `w.rowDeleteFails`: it rejects, having landed or not.
+		batchUpdate: async ({ requestBody } = {}) => {
+			const fails = w.rowDeleteFails;
+			w.rowDeleteFails = null;
+			if (fails && !fails.landed) throw new Error("made-up: the sheet refused the delete");
+			for (const req of (requestBody && requestBody.requests) || []) {
+				const range = req.deleteDimension && req.deleteDimension.range;
+				if (range && range.dimension === "ROWS" && range.sheetId === 0) w.sheet.splice(range.startIndex, range.endIndex - range.startIndex);
+			}
+			if (fails) throw new Error("made-up: no answer in 15 seconds");
+			return { data: {} };
 		} },
 	};
 	const drive = {
@@ -414,30 +472,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			getJobTrackingCached: scope.getJobTrackingCached,
 			REPLICA: replica,
 		};
-		const cache = Object.create(null);
-		let proxy = null;
-		proxy = new Proxy(Object.create(null), {
-			has(_, key) {
-				if (typeof key !== "string" || key === "__scope") return false;
-				return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
-			},
-			get(_, key) {
-				if (key === Symbol.unscopables) return undefined;
-				if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
-				if (key in cache) return cache[key];
-				const decl = STATUS_INDEX.decls.get(key);
-				if (decl) {
-					cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
-					return cache[key];
-				}
-				if (key in globalThis) return globalThis[key];
-				throw new ReferenceError(`unstubbed in the lifted route: ${String(key)}`);
-			},
-			set(_, key, value) { cache[key] = value; return true; },
-		});
-		let handler = null;
-		stubs.app = { put: (...args) => { handler = args[args.length - 1]; } };
-		new Function("__scope", `with (__scope) { ${liftRoute(SRC, STATUS_HEAD)} }`)(proxy);
+		const handler = liftedHandler(STATUS_HEAD, stubs);
 		return async (user, id, newStatus = "Delivered") => {
 			const out = { status: 200, json: null };
 			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
@@ -446,6 +481,29 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			return out;
 		};
 	};
+	// A Super Admin's row delete as shipped (the Data Manager's DELETE /api/data/:rowIndex, the duplicate
+	// scanner's POST /api/admin/remove-rows), from `src`. The month guard (tested where it lives) lets the
+	// row go; the tab named "Carrier Database" is gid 7, which the made-up Sheets never deletes from.
+	w.rowAudits = [];
+	w.rowRoute = (head, src = SRC) => {
+		const handler = liftedHandler(head, {
+			db, getSheets: scope.getSheets, SPREADSHEET_ID: scope.SPREADSHEET_ID, require: serverRequire, console: quiet, process: proc,
+			autoInvoice: w.job,
+			requireRole: () => null,
+			getSheetId: async (_sheets, name) => ({ "Job Tracking": 0, "Carrier Database": 7 })[name],
+			sheetRowDeleteBlocker: () => null,
+			recordPeriodRefusal: () => {},
+			logAudit: (req, action) => { w.rowAudits.push(action); },
+			jtCacheInvalidate: scope.jtCacheInvalidate,
+		}, src);
+		return async ({ params = {}, query = {}, body = {} } = {}) => {
+			const out = { status: 200, json: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
+			await handler({ method: "POST", query, params, headers: {}, session: { user: SA }, body }, res);
+			return out;
+		};
+	};
+	w.rowOf = (id) => w.sheet.findIndex((r, i) => i > 0 && r[0] === id) + 1;
 
 	w.server = await new Promise((resolve) => { const s = realApp.listen(0, "127.0.0.1", () => resolve(s)); });
 	const base = `http://127.0.0.1:${w.server.address().port}`;
@@ -1495,6 +1553,142 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq(replica.job.sending, false, "§14 a replica never sends, so this check can't run there");
 		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		ok(/^# AUTO_INVOICE_KNOWN_ADDRESS_ENABLED=$/m.test(TEMPLATE) && /a kill switch that fails safe, ON unless set to false/.test(TEMPLATE), "§14 the settings template names it, unset, a kill switch that fails safe");
+	}
+
+	// ===================================================================== §15
+	section("§15 a sent load's row removed in the app: the Data Manager and the duplicate scanner, as shipped, through the block");
+	{
+		const SEND_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test",
+			AUTO_INVOICE_ALERT_TO: "alerts@example.test", ...MAILBOX });
+		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
+		const DM_HEAD = SRC.split("\n").find((l) => l.startsWith('app.delete("/api/data/:rowIndex",'));
+		const SCAN_HEAD = SRC.split("\n").find((l) => l.startsWith('app.post("/api/admin/remove-rows",'));
+		const HELD = (id) => `Load ${id}: changed after sending, needs a check`;
+		const until = async (cond, label) => {
+			const end = Date.now() + 30000;
+			while (Date.now() < end) {
+				if (cond()) return true;
+				await new Promise((r) => setTimeout(r, 2));
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+		// A world past start-up, `ids` delivered by their driver and sent.
+		const sentWorld = async (ids) => {
+			const x = await world({ env: SEND_ON });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§15 the broker domain confirmed");
+			await x.job.finishStartUp();
+			const tap = x.statusRoute();
+			for (const id of ids) {
+				x.setLoad(id, { "Job Status": "At Receiver" });
+				x.addPod(id);
+				x.fileRateCon(id, rateCon());
+				await tap(DRIVER, id);
+				await until(() => (x.claim(id) || {}).delivery === "send" && open(x) === 0, `§15 ${id} sent`);
+			}
+			// The real clock: the removal's own check runs in a later millisecond than the send.
+			await new Promise((r) => setTimeout(r, 5));
+			return x;
+		};
+		const chip = (x, id) => (x.claim(id) || {}).changed_fields;
+		const noted = (x, id) => Boolean((x.claim(id) || {}).removed_in_app_at);
+		const REASON = "made-up: a duplicate row";
+
+		// The Data Manager: the load's only row deleted.
+		const dm = await sentWorld(["LD-TEST-1501"]);
+		eq(dm.smtp.length, 1, "§15 one load sent");
+		const dmDelete = dm.rowRoute(DM_HEAD);
+		const dmAnswer = await dmDelete({ params: { rowIndex: String(dm.rowOf("LD-TEST-1501")) }, body: { reason: REASON } });
+		eq([dmAnswer.status, dmAnswer.json, dm.rowOf("LD-TEST-1501"), dm.rowAudits], [200, { success: true }, 0, ["delete_sheet_row"]], "§15 the Data Manager deletes the row, as before");
+		await until(() => chip(dm, "LD-TEST-1501") === "removed", "§15 the Data Manager's delete held");
+		await until(() => dm.mails.length === 1, "§15 the Data Manager's delete emailed");
+		const dmStop = dm.db.prepare("SELECT value FROM auto_invoice_meta WHERE key = 'send_stop_reason'").get();
+		eq([chip(dm, "LD-TEST-1501"), dm.mails.map((m) => [m.to, m.subject]), dmStop ? dmStop.value : null, dm.smtp.length],
+			["removed", [["alerts@example.test", HELD("LD-TEST-1501")]], null, 1],
+			"§15 FAILS ON THE OLD CODE: a sent load's only row deleted with the Data Manager: that load held as removed at once, one email to AUTO_INVOICE_ALERT_TO, no stop, nothing sent again");
+
+		// A delete whose answer was lost, though it landed: held all the same.
+		const lost = await sentWorld(["LD-TEST-1502"]);
+		lost.rowDeleteFails = { landed: true };
+		const lostAnswer = await lost.rowRoute(DM_HEAD)({ params: { rowIndex: String(lost.rowOf("LD-TEST-1502")) }, body: { reason: REASON } });
+		eq([lostAnswer.status, lost.rowOf("LD-TEST-1502"), lost.rowAudits], [500, 0, ["delete_sheet_row_failed"]], "§15 a delete whose answer is lost: the error as before, and the row gone");
+		await until(() => chip(lost, "LD-TEST-1502") === "removed", "§15 the lost delete held");
+		eq(chip(lost, "LD-TEST-1502"), "removed", "§15 FAILS ON THE OLD CODE: ...that load held as removed all the same");
+		// One refused, the row still there: noted, then let go by the next check, nothing held.
+		const refused = await sentWorld(["LD-TEST-1503"]);
+		refused.rowDeleteFails = { landed: false };
+		eq((await refused.rowRoute(DM_HEAD)({ params: { rowIndex: String(refused.rowOf("LD-TEST-1503")) }, body: { reason: REASON } })).status, 500, "§15 a delete refused");
+		await new Promise((r) => setTimeout(r, 5));
+		if (refused.intervals[0]) refused.intervals[0].fn();
+		await until(() => !noted(refused, "LD-TEST-1503"), "§15 the refused delete's note let go");
+		await settle();
+		eq([chip(refused, "LD-TEST-1503"), noted(refused, "LD-TEST-1503"), refused.mails.length], ["", false, 0], "§15 ...the row still there: nothing held, nothing emailed, the note gone at the watch");
+
+		// The duplicate scanner: one load's only row, and another load's second row.
+		const scan = await sentWorld(["LD-TEST-1504", "LD-TEST-1505"]);
+		scan.sheet.push(scan.sheet[scan.rowOf("LD-TEST-1505") - 1].slice());
+		const dupRow = scan.sheet.length;
+		const scanAnswer = await scan.rowRoute(SCAN_HEAD)({ body: { sheet: "Job Tracking", rowIndices: [scan.rowOf("LD-TEST-1504"), dupRow], confirm: true, reason: REASON } });
+		eq([scanAnswer.status, scanAnswer.json && scanAnswer.json.deleted, scan.rowOf("LD-TEST-1504"), scan.rowOf("LD-TEST-1505") > 0, scan.rowAudits], [200, 2, 0, true, ["delete_sheet_rows"]],
+			"§15 the duplicate scanner deletes both rows, as before; the second load keeps its first row");
+		await until(() => chip(scan, "LD-TEST-1504") === "removed", "§15 the scanner's delete held");
+		await until(() => scan.mails.length === 1, "§15 the scanner's delete emailed");
+		await new Promise((r) => setTimeout(r, 5));
+		if (scan.intervals[0]) scan.intervals[0].fn();
+		await until(() => !noted(scan, "LD-TEST-1505"), "§15 the duplicate's note let go");
+		await settle();
+		eq([chip(scan, "LD-TEST-1504"), chip(scan, "LD-TEST-1505"), noted(scan, "LD-TEST-1505"), scan.mails.map((m) => m.subject)], ["removed", "", false, [HELD("LD-TEST-1504")]],
+			"§15 FAILS ON THE OLD CODE: the duplicate scanner: the load whose only row went is held as removed and emailed; the load that keeps a row isn't");
+		// A scanner delete whose answer was lost, though it landed.
+		const scanLost = await sentWorld(["LD-TEST-1506"]);
+		scanLost.rowDeleteFails = { landed: true };
+		eq((await scanLost.rowRoute(SCAN_HEAD)({ body: { sheet: "Job Tracking", rowIndices: [scanLost.rowOf("LD-TEST-1506")], confirm: true, reason: REASON } })).status, 500, "§15 a scanner delete whose answer is lost");
+		await until(() => chip(scanLost, "LD-TEST-1506") === "removed", "§15 the scanner's lost delete held");
+		eq(chip(scanLost, "LD-TEST-1506"), "removed", "§15 FAILS ON THE OLD CODE: ...held as removed all the same");
+
+		// Another tab: the job is told nothing.
+		const other = await sentWorld(["LD-TEST-1507"]);
+		const otherAnswer = await other.rowRoute(DM_HEAD)({ params: { rowIndex: String(other.rowOf("LD-TEST-1507")) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } });
+		await settle();
+		eq([otherAnswer.status, noted(other, "LD-TEST-1507"), chip(other, "LD-TEST-1507"), other.mails.length], [200, false, "", 0], "§15 a row deleted from another tab: the job is told nothing");
+
+		// Each route's call into the job, removed in turn: the case that pins it must change.
+		const callOf = (route) => `if (${route === "dm" ? "sheetName" : "sheet"} === "Job Tracking") autoInvoiceRowsRemoved(headers, ${route === "dm" ? "[row]" : "deletable.map((d) => allRows[d.rowIndex - 1] || [])"});`;
+		const mutantSrc = (from, to) => (SRC.split(from).length === 2 ? SRC.replace(from, to) : null);
+		for (const [label, from, to, head, run] of [
+			["the Data Manager's delete never tells the job", `if (guarded) jtCacheInvalidate();\n\t\t// A load whose invoice the job sent is held as removed, not read as a month archived.\n\t\t${callOf("dm")}`, "if (guarded) jtCacheInvalidate();",
+				DM_HEAD, async (route, x, id) => route({ params: { rowIndex: String(x.rowOf(id)) }, body: { reason: REASON } })],
+			["the Data Manager's lost delete never tells the job", `err.message }));\n\t\t\t// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).\n\t\t\t${callOf("dm")}`, "err.message }));",
+				DM_HEAD, async (route, x, id) => { x.rowDeleteFails = { landed: true }; return route({ params: { rowIndex: String(x.rowOf(id)) }, body: { reason: REASON } }); }],
+			["the duplicate scanner's delete never tells the job", `if (guarded) jtCacheInvalidate();\n\t\t// A load whose invoice the job sent is held as removed, not read as a month archived.\n\t\t${callOf("scan")}`, "if (guarded) jtCacheInvalidate();",
+				SCAN_HEAD, async (route, x, id) => route({ body: { sheet: "Job Tracking", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } })],
+			["the duplicate scanner's lost delete never tells the job", `err.message }));\n\t\t\t// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).\n\t\t\t${callOf("scan")}`, "err.message }));",
+				SCAN_HEAD, async (route, x, id) => { x.rowDeleteFails = { landed: true }; return route({ body: { sheet: "Job Tracking", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } }); }],
+		]) {
+			const src = mutantSrc(from, to);
+			ok(src, `§15 MUTANT ${label}: applied to server.js's text once`);
+			if (!src) continue;
+			// Each run ends at the watch's check after the delete: the load held, or its row logged as gone.
+			const results = [];
+			for (const text of [SRC, src]) {
+				const x = await sentWorld(["LD-TEST-1508"]);
+				await run(x.rowRoute(head, text), x, "LD-TEST-1508");
+				if (x.intervals[0]) x.intervals[0].fn();
+				await until(() => chip(x, "LD-TEST-1508") === "removed" || x.audits("auto_invoice_load_change_logged").length > 0, `§15 MUTANT ${label}: the check after the delete`);
+				results.push(chip(x, "LD-TEST-1508"));
+			}
+			ok(results[0] === "removed" && results[1] === "", `§15 MUTANT ${label}: caught`);
+		}
+		const otherTab = mutantSrc(`${callOf("dm")}\n\n\t\tres.json({ success: true });`, "if (true) autoInvoiceRowsRemoved(headers, [row]);\n\n\t\tres.json({ success: true });");
+		ok(otherTab, "§15 MUTANT another tab's rows reach the job: applied to server.js's text once");
+		if (otherTab) {
+			const x = await sentWorld(["LD-TEST-1509"]);
+			await x.rowRoute(DM_HEAD, otherTab)({ params: { rowIndex: String(x.rowOf("LD-TEST-1509")) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } });
+			// Read before the check it starts can let the note go (the row is still on the sheet).
+			ok(noted(x, "LD-TEST-1509"), "§15 MUTANT another tab's rows reach the job: caught (the real route tells the job nothing, above)");
+		}
+		eq([SRC.split("autoInvoiceRowsRemoved(").length - 1, SRC.split(".rowsRemoved(").length - 1], [5, 1], "§15 FAILS ON THE OLD CODE: one wrapper in the block, two calls in each route, and nothing else reaches the job's note");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

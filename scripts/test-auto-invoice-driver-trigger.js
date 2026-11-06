@@ -23,7 +23,8 @@
 //   §12 the watching: a dashboard read at most once a minute, a POD event at once, and the
 //       5-minute watch with no read (it starts no invoice); a change after a send flags that
 //       load alone or logs it (AUTO_INVOICE_HOLD_ONE_LOAD); the alert emails the watch sends
-//       too (item 120), never twice; a check begun before a Mark checked leaves that load be
+//       too, never twice; a check begun before a Mark checked leaves that load be; a sent
+//       load's row removed in the app: that load checked at once and held as removed
 //   §13 going back (R-M5): the sweep's first tick after the trigger sends nothing
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip, and its own sentence for a mark cleared after the
@@ -1654,6 +1655,31 @@ async function main() {
 		await checkingK;
 		eq([k.claim("LD-TEST-1109").changed_fields, stopReason(k), k.actions("auto_invoice_load_changed").length], ["", null, 0],
 			"§12 FAILS ON THE OLD CODE: a check that began before a Mark checked reads the sheet from before it: no false flag, no stop");
+
+		// A sent load's row removed in the app (the Data Manager, the duplicate scanner): the cache dropped,
+		// that load checked at once, with no read by anyone, and held as removed.
+		const rm = makeWorld();
+		const rmj = await rm.started({ alertTo: "alerts@example.test" });
+		rm.ready("LD-TEST-1120");
+		tap(rm, rmj, "LD-TEST-1120");
+		await drained(rm, "§12 sent for a removal");
+		rm.now += MIN;
+		const removedRow = rm.row("LD-TEST-1120");
+		rm.rows.splice(rm.rows.indexOf(removedRow), 1);
+		ok(typeof rmj.rowsRemoved === "function", "§12 FAILS ON THE OLD CODE: the job hears of rows removed in the app");
+		const [readsAt, droppedAt] = [rm.calls.reads, rm.invalidated];
+		if (typeof rmj.rowsRemoved === "function") rmj.rowsRemoved({ headers: [...HEADERS], rows: [HEADERS.map((h) => removedRow[h] ?? "")] });
+		await until(() => rm.claim("LD-TEST-1120").changed_fields === "removed" || typeof rmj.rowsRemoved !== "function", "§12 the removal checked");
+		await until(() => rm.alerts.length === 1 || typeof rmj.rowsRemoved !== "function", "§12 the removal's email");
+		eq([rm.claim("LD-TEST-1120").changed_fields, stopReason(rm), rm.invalidated - droppedAt, rm.calls.reads - readsAt, rm.alerts.map((a) => a.subject)],
+			["removed", null, 1, 1, ["Load LD-TEST-1120: changed after sending, needs a check"]],
+			"§12 FAILS ON THE OLD CODE: a sent load's row removed in the app: the cache dropped, that load checked at once (one read), held as removed and emailed, no stop");
+		// A Super Admin's read later: no second flag or email.
+		rm.now += 2 * MIN;
+		served(rmj, ["LD-TEST-1121"]);
+		await until(() => rm.calls.reads - readsAt >= 2, "§12 the read after the removal");
+		await turn();
+		eq([rm.claim("LD-TEST-1120").changed_fields, rm.alerts.length, rm.actions("auto_invoice_load_changed").length], ["removed", 1, 1], "§12 ...a later check: nothing more");
 
 		// A person's draft closes an open claim at the read.
 		const h = makeWorld();
