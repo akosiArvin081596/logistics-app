@@ -88,8 +88,9 @@
  *     a Driver role on record. A tap with no role, a tap back, a geofence row alone, a
  *     stored ELD departure or a dispatcher's tap never moves one, and a later stored
  *     departure on a truck the first driver didn't hold, or a later In Transit row
- *     naming someone else, keeps it as live; a moved credit's row names no one and no
- *     contact, however many numbers its ID holds
+ *     naming someone else and not off a later stage or a dispatcher's override, keeps
+ *     it as live; a moved credit's row names no one and no contact, however many
+ *     numbers its ID holds
  * §29 a status moved back: gone only where the record says so; a blank status isn't
  *     back; a tap back is the departing driver's own only with a Driver role on record;
  *     neither that nor a tap with no role moves a credit across a week
@@ -2162,7 +2163,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			w.hist("PF-Z6", "manual", "In Transit", `${TUE} 09:05:00`, OMAR, { old: "At Receiver", ...AS_DRIVER });
 			w.row("PF-Z6", OMAR, "In Transit");
 		}, async (w) => {
-			eq(await w.pickups(), [0, 1], "no status went back, and the new driver's own In Transit is on record: it stays as live");
+			eq(await w.pickups(), [1, 0], "the new driver's In Transit off their own At Receiver can't be a departure from the shipper: the handover moves");
 		});
 		await inWorld((w) => {
 			w.accepted("PF-Z7", MON, NIA);
@@ -2171,7 +2172,124 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			w.hist("PF-Z7", "manual", "In Transit", `${TUE} 09:05:00`, "Ivy Lane", { old: "At Receiver", ...AS_DRIVER });
 			w.row("PF-Z7", OMAR, "In Transit");
 		}, async (w) => {
-			eq(await w.pickups(), [0, 1], "a third driver's own In Transit on record: it stays as live too");
+			eq(await w.pickups(), [1, 0], "a third driver's In Transit off At Receiver: no departure from the shipper either, so the handover moves");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z7b", MON, NIA);
+			w.picked("PF-Z7b", MON, NIA);
+			w.hist("PF-Z7b", "manual", "In Transit", `${TUE} 09:05:00`, "Ivy Lane", { old: "", ...AS_DRIVER });
+			w.row("PF-Z7b", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "a third driver's own In Transit off no later stage: it stays as live");
+		});
+		// The last In Transit doesn't decide: the first driver's own later row doesn't undo another driver's.
+		await inWorld((w) => {
+			w.accepted("PF-Z11", MON, NIA);
+			w.picked("PF-Z11", MON, NIA);
+			w.hist("PF-Z11", "manual", "In Transit", `${TUE} 09:05:00`, OMAR, { old: "", ...AS_DRIVER });
+			w.hist("PF-Z11", "manual", "In Transit", `${TUE} 12:05:00`, NIA, { old: "", ...AS_DRIVER });
+			w.row("PF-Z11", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "the new driver's own In Transit, then the first driver's own later one: it stays as live");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-Z9b", MON, NIA);
+			w.picked("PF-Z9b", MON, NIA);
+			w.hist("PF-Z9b", "manual", "At Shipper", `${MON} 18:00:00`, NIA, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-Z9b", "manual", "In Transit", `${MON} 18:05:00`, NIA, { old: "At Shipper", ...AS_DRIVER });
+			w.row("PF-Z9b", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [1, 0], "the first driver's own tap back and forward says nothing against their claim: it still moves");
+		});
+		// The tap path asks the same question as the geofence path.
+		await inWorld((w) => {
+			w.hist("PF-Z12", "manual", "In Transit", `${MON} 14:00:00`, NIA, { old: "Assigned", ...AS_DRIVER });
+			w.hist("PF-Z12", "manual", "In Transit", `${TUE} 09:05:00`, OMAR, { old: "", ...AS_DRIVER });
+			w.row("PF-Z12", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [0, 1], "the first driver's own tap, then the new driver's own In Transit: it stays as live");
+		});
+		// An In Transit off a later stage, or a dispatcher's override, corrects a status: a new driver who
+		// really lifted a load under In Transit writes no In Transit at all, so it says nothing about the pickup.
+		for (const [how, stage, facts] of [
+			["At Receiver, with no role on record", "At Receiver", {}],
+			["At Receiver, from a Super Admin session", "At Receiver", { role: "Super Admin" }],
+			["Unloading", "Unloading", {}],
+			["Delivered", "Delivered", {}],
+			["Completed", "Completed", {}],
+			["POD Received", "POD Received", {}],
+		]) {
+			await inWorld((w) => {
+				w.accepted("PF-H1", MON, NIA, {});
+				w.picked("PF-H1", MON, NIA);
+				w.hist("PF-H1", "manual", stage, `${TUE} 12:00:00`, OMAR, { old: "In Transit" });
+				w.hist("PF-H1", "manual", "In Transit", `${TUE} 12:30:00`, OMAR, { old: stage, ...facts });
+				w.hist("PF-H1", "manual", "At Receiver", `${TUE} 17:00:00`, OMAR, { old: "In Transit" });
+				w.hist("PF-H1", "manual", "Delivered", `${TUE} 18:00:00`, OMAR, { old: "At Receiver" });
+				w.row("PF-H1", OMAR, "Delivered", `${TUE} 18:00`);
+			}, async (w) => {
+				eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-H1", pickup: PICKED("Mon"), delivery: null }], `the office puts In Transit back off ${how}: the handover moves`);
+				eq((await w.weeks("omar"))[0].loads, [{ loadId: "PF-H1", pickup: NOT_COUNTED, delivery: DONE("Tue") }], `off ${how}: the new driver keeps the delivery`);
+			});
+		}
+		await inWorld((w) => {
+			w.accepted("PF-H3b", MON, NIA, {});
+			w.picked("PF-H3b", MON, NIA);
+			w.hist("PF-H3b", "geofence", "At Receiver", `${MON} 18:00:00`, NIA, { old: "In Transit" });
+			w.hist("PF-H3b", "override", "In Transit", `${MON} 18:30:00`, "disp", { old: "At Receiver", ...AS_STAFF });
+			w.hist("PF-H3b", "manual", "At Receiver", `${TUE} 17:00:00`, OMAR, { old: "In Transit" });
+			w.hist("PF-H3b", "manual", "Delivered", `${TUE} 18:00:00`, OMAR, { old: "At Receiver" });
+			w.row("PF-H3b", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq(await w.pickups(), [1, 0], "the modal's correction while the first driver held the load, then the relay: the handover moves");
+		});
+		await inWorld((w) => {
+			w.accepted("PF-H6", LAST_FRI, NIA, {});
+			w.picked("PF-H6", LAST_FRI, NIA);
+			w.hist("PF-H6", "manual", "At Receiver", `${TUE} 12:00:00`, OMAR, { old: "In Transit" });
+			w.hist("PF-H6", "manual", "In Transit", `${TUE} 12:30:00`, OMAR, { old: "At Receiver" });
+			w.row("PF-H6", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq(await w.pickups(1), [1, 0], "the same correction over a week: last week's credit moves to the first driver");
+			eq((await w.weeks("omar"))[0].loads[0]?.pickup, NOT_COUNTED, "and the new driver's row this week says it didn't count for them");
+		});
+		// The tap path, recorder on: the first driver's Driver-role tap on a truck with no ELD.
+		for (const [how, reporting, omarsPickup] of [["no ELD on either truck", false, NOT_COUNTED], ["the new driver's truck reporting", true, NOT_COUNTED]]) {
+			await inWorld((w) => {
+				if (reporting) w.eldOn(22, MON);
+				w.accepted("PF-H7", MON, NIA);
+				w.hist("PF-H7", "manual", "In Transit", `${MON} 14:00:00`, NIA, { old: "Assigned", ...AS_DRIVER });
+				w.hist("PF-H7", "manual", "At Receiver", `${TUE} 12:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+				w.hist("PF-H7", "manual", "In Transit", `${TUE} 12:30:00`, OMAR, { old: "At Receiver", role: "Super Admin" });
+				w.hist("PF-H7", "manual", "Delivered", `${TUE} 18:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+				w.row("PF-H7", OMAR, "Delivered", `${TUE} 18:00`);
+			}, async (w) => {
+				eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-H7", pickup: PICKED("Mon"), delivery: null }], `the tap path, ${how}: the office's correction leaves the handover moving`);
+				eq((await w.weeks("omar"))[0].loads[0]?.pickup, omarsPickup, `the tap path, ${how}: the new driver's row says so`);
+			});
+		}
+		// A dispatcher's override names the dispatcher, off any status, so it says nothing about who left.
+		await inWorld((w) => {
+			w.accepted("PF-H9", MON, NIA);
+			w.picked("PF-H9", MON, NIA);
+			w.hist("PF-H9", "manual", "At Shipper", `${MON} 15:00:00`, NIA, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-H9", "override", "In Transit", `${MON} 15:30:00`, "disp", { old: "At Shipper", ...AS_STAFF });
+			w.row("PF-H9", OMAR, "In Transit");
+		}, async (w) => {
+			eq(await w.pickups(), [1, 0], "a dispatcher's override off At Shipper, over the first driver's own tap back: the handover moves");
+		});
+		// The Friday edge: staff's move back, the first driver's truck leaves again, then a correction.
+		await inWorld((w) => {
+			w.accepted("PF-E21", LAST_FRI, NIA);
+			w.hist("PF-E21", "geofence", "In Transit", "2026-11-07 04:50:00", NIA);
+			w.hist("PF-E21", "override", "Dispatched", "2026-11-07 04:59:59", "disp", AS_STAFF);
+			w.hist("PF-E21", "geofence", "In Transit", "2026-11-07 05:00:00", NIA, { old: "At Shipper" });
+			w.hist("PF-E21", "manual", "At Receiver", `${TUE} 12:00:00`, OMAR, { old: "In Transit", ...AS_DRIVER });
+			w.hist("PF-E21", "manual", "In Transit", `${TUE} 12:30:00`, OMAR, { old: "At Receiver" });
+			w.row("PF-E21", OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			eq((await w.weeks("nia"))[0].loads, [{ loadId: "PF-E21", pickup: PICKED("Sat"), delivery: null }], "over the Friday edge: the first driver's later departure, on its own Saturday");
+			eq((await w.weeks("omar"))[0].loads[0]?.pickup, NOT_COUNTED, "and the new driver's row says it didn't count for them");
 		});
 		for (const [how, later] of [
 			["a dispatcher's tap", (w) => w.hist("PF-Z8", "override", "In Transit", `${TUE} 09:05:00`, "disp", { old: "At Receiver", ...AS_STAFF })],
@@ -2184,7 +2302,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 				later(w);
 				w.row("PF-Z8", OMAR, "In Transit");
 			}, async (w) => {
-				eq(await w.pickups(), [0, 1], `a later In Transit by ${how}: the first driver's claim isn't certain, so it stays as live`);
+				eq(await w.pickups(), [1, 0], `an In Transit off At Receiver by ${how} corrects a status and says nothing about who left: the handover moves`);
 			});
 		}
 		await inWorld((w) => {
