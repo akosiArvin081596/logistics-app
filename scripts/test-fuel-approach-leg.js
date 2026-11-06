@@ -1565,6 +1565,10 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		const [now] = alertAt({ ...ALERT_TRUCK, avgMpg: 2.4, fuel: 8 });
 		assert.strictEqual(now, "About 1 mile of fuel left. Plan a fuel stop now.");
 	});
+	check("flag on keeps its words at the same figure: 1 before the margin is 'About 1 miles'; flag off it's under the reserve, so 'Refuel now'", () => {
+		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 1.5, fuel: 1 });
+		assert.deepStrictEqual([now, before], ["Refuel now. Stop for fuel as soon as you can.", "About 1 miles of fuel left. Plan a fuel stop now."]);
+	});
 	// The latch and the 15-minute throttle, the same on both flags: one alert per episode,
 	// cleared only by a reading well above the line.
 	const latchRun = (flagOn) => {
@@ -1579,11 +1583,11 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			a.check();
 			return alerts();
 		};
-		return [after(16, 18), after(1, 17), after(16, 17), after(16, 25), after(16, 17), after(16, 30), after(16, 18)];
+		return [after(16, 50), after(1, 17), after(16, 17), after(1, 16), after(16, 16), after(16, 25), after(16, 17), after(16, 30), after(16, 18)];
 	};
-	check("the latch and throttle: one alert for an episode; none within 15 minutes, none while it hovers under 150; a reading over 150 re-arms it; the same on both flags", () => {
-		assert.deepStrictEqual(latchRun(false), [1, 1, 1, 1, 1, 1, 2]);
-		assert.deepStrictEqual(latchRun(true), [1, 1, 1, 1, 1, 1, 2]);
+	check("the latch and throttle: no check within 15 minutes of the last, one alert for an episode, none while it hovers under 150; a reading over 150 re-arms it; the same on both flags", () => {
+		assert.deepStrictEqual(latchRun(false), [0, 0, 1, 1, 1, 1, 1, 1, 2]);
+		assert.deepStrictEqual(latchRun(true), [0, 0, 1, 1, 1, 1, 1, 1, 2]);
 	});
 	check("the ledger is the in-memory fuelLowAlertState alone: the alert writes no table of its own, and only maybeAlertLowFuel touches it", () => {
 		const text = declText("maybeAlertLowFuel");
