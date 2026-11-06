@@ -15,8 +15,9 @@
 // deduplicateLoads() (scripts/auto-invoice-shadow-report.js liftSheetHelpers()), keyed as the job
 // keys it (rules.keyedRows()).
 //
-// Prints counts only: sent loads checked; would hold, by field; would log, by field; rows gone from
-// the sheet; loads held already in the last 24 hours; whether the breaker would trip; the stop now.
+// Prints counts only: sent loads checked; would hold, by field (a row removed in the app holds as
+// removed); would log, by field; rows gone from the sheet; loads held already in the last 24 hours;
+// whether the breaker would trip; the stop now.
 // Never a load, an address or an amount. Writes nothing and sends nothing.
 // Exit 0 done; 2 refused (an argument, a database without the tables, no sheet named); 1 any other
 // failure. Required as a module (by its runner) it runs nothing and exports run().
@@ -94,9 +95,10 @@ function run({ db, values, nowIso = new Date().toISOString(), helpers = null }) 
 		} catch {
 			saved = null;
 		}
-		// The fingerprint reads only the row, the load's documents and its tombstone.
+		// The fingerprint reads only the row, the load's documents and its tombstone; a row removed in the
+		// app is noted on the claim, as the check reads it.
 		const facts = rules.loadFacts({ row: byKey.get(c.load_key) || null, cols, records: records.get(c.load_key) });
-		const s = rules.sentChange({ saved, facts, changedFields: c.changed_fields, loggedJson: c.change_logged_json });
+		const s = rules.sentChange({ saved, facts, changedFields: c.changed_fields, loggedJson: c.change_logged_json, removedInApp: Boolean(c.removed_in_app_at) });
 		if (s.newHold) {
 			out.wouldHold.loads++;
 			tally(out.wouldHold, s.hold);

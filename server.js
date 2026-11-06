@@ -43746,6 +43746,8 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 			// genuinely ambiguous about whether the rows are gone. Dropping the
 			// snapshot on that path loses it exactly when it is needed most.
 			logAudit(req, "delete_sheet_rows_failed", "sheet_row", String(sheet), auditDetails("failed", { error: err.message }));
+			// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).
+			if (sheet === "Job Tracking") autoInvoiceRowsRemoved(headers, deletable.map((d) => allRows[d.rowIndex - 1] || []));
 			throw err;
 		}
 
@@ -43757,6 +43759,8 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 		auditWithheld(true);
 		// The 60s Job Tracking cache would otherwise keep serving the deleted rows.
 		if (guarded) jtCacheInvalidate();
+		// A load whose invoice the job sent is held as removed, not read as a month archived.
+		if (sheet === "Job Tracking") autoInvoiceRowsRemoved(headers, deletable.map((d) => allRows[d.rowIndex - 1] || []));
 
 		const lockedPeriods = [...new Set(skipped.flatMap((s) => s.periods))].sort();
 		res.json({
@@ -47136,12 +47140,16 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 			// deliberately not retried on timeout, so a timeout leaves it genuinely
 			// unknown whether the row is gone. See the same note in remove-rows.
 			logAudit(req, "delete_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).
+			if (sheetName === "Job Tracking") autoInvoiceRowsRemoved(headers, [row]);
 			throw err;
 		}
 
 		logAudit(req, "delete_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("deleted"));
 		// The 60s Job Tracking cache would otherwise keep serving the deleted row.
 		if (guarded) jtCacheInvalidate();
+		// A load whose invoice the job sent is held as removed, not read as a month archived.
+		if (sheetName === "Job Tracking") autoInvoiceRowsRemoved(headers, [row]);
 
 		res.json({ success: true });
 	} catch (error) {
@@ -56001,6 +56009,15 @@ function autoInvoicePodChanged(loadId) {
 		autoInvoice.podChanged(loadId);
 	} catch {
 		// the next Super Admin read checks the load
+	}
+}
+// Job Tracking rows the Data Manager or the duplicate scanner removed (headers, then each row's cells):
+// a load whose invoice the job sent is held as removed, not read as a month moved to the archive.
+function autoInvoiceRowsRemoved(headers, rows) {
+	try {
+		autoInvoice.rowsRemoved({ headers, rows });
+	} catch {
+		// the next check reads the row as gone from the sheet
 	}
 }
 if (autoInvoice.mode !== "off") {

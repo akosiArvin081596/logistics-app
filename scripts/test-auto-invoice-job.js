@@ -3052,7 +3052,7 @@ async function sendSections() {
 			null, (lib) => SEND_CASES.changedAfterSend(lib), (x) => x.stop === null && JSON.stringify(x.next) === JSON.stringify(["drafted", ""]) && x.smtp === 2],
 		["no breaker", "\t\tif (trips) stopSending(\"TOO_MANY_HELD\", c);", "",
 			null, (lib) => HOLD_CASES.breaker(lib, BREAKER_STEPS.three), (x) => JSON.stringify(x.stops) === JSON.stringify([null, null, "TOO_MANY_HELD"])],
-		["the switch ignored", "if (holdOneLoad && sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso);", "if (sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso);",
+		["the switch ignored", "if (holdOneLoad && sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso, beganAt);", "if (sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso, beganAt);",
 			null, (lib) => HOLD_CASES.field(lib, FIELD_CHANGES.pods, { env: { AUTO_INVOICE_HOLD_ONE_LOAD: "false" } }), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND" && x.chip === "pods"],
 		["the switch off still holds one load", "\t\tif (n && sendRules.claimSent(c)) {\n\t\t\taudit(\"auto_invoice_load_changed\", c.load_id, `${c.invoice_id}: ${fields} (sent)`);",
 			"\t\tif (n && false) {\n\t\t\taudit(\"auto_invoice_load_changed\", c.load_id, `${c.invoice_id}: ${fields} (sent)`);",
@@ -4330,7 +4330,7 @@ async function holdSections() {
 		"§26 FAILS ON THE OLD CODE: a sent load's only row removed in the app: flagged as removed and emailed, counted toward the breaker, no stop, the next load sent");
 	eq([only.changed, only.notices.includes("Sent invoice: load changed"), only.logged], [["10202026-1: removed (sent)"], true, []],
 		"§26 FAILS ON THE OLD CODE: ...today's audit row and notice, and no \"row gone\" row");
-	ok(only.texts.length === 1 && /the load was cancelled or removed\. Other loads keep sending\./.test(only.texts[0]) && !/Mark checked/.test(only.texts[0]),
+	ok(only.texts.length === 1 && /the load was cancelled or removed\.<\/p>\s*<p>Other loads keep sending\.<\/p>$/.test(only.texts[0]) && !/Mark checked/.test(only.texts[0]),
 		"§26 FAILS ON THE OLD CODE: ...its email: cancelled or removed, other loads keep sending, no Mark checked line");
 	const dup = await HOLD_CASES.removedInApp(jobLib, "duplicate");
 	eq([dup.noted, dup.chip, dup.note, dup.alerts, dup.logged], [true, "", "", [], []],

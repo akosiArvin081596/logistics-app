@@ -1574,11 +1574,13 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			return false;
 		};
 		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
-		// A world past start-up, `ids` delivered by their driver and sent.
+		// A world past start-up, `ids` delivered by their driver and sent. Another load stays on the sheet
+		// (a read with no load rows at all skips the check).
 		const sentWorld = async (ids) => {
 			const x = await world({ env: SEND_ON });
 			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§15 the broker domain confirmed");
 			await x.job.finishStartUp();
+			x.setLoad("LD-TEST-1599", { "Job Status": "At Receiver" });
 			const tap = x.statusRoute();
 			for (const id of ids) {
 				x.setLoad(id, { "Job Status": "At Receiver" });

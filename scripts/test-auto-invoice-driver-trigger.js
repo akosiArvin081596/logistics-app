@@ -1663,6 +1663,8 @@ async function main() {
 		rm.ready("LD-TEST-1120");
 		tap(rm, rmj, "LD-TEST-1120");
 		await drained(rm, "§12 sent for a removal");
+		// Another load on the sheet: a read with no load rows at all skips the check.
+		rm.setRow("LD-TEST-1121");
 		rm.now += MIN;
 		const removedRow = rm.row("LD-TEST-1120");
 		rm.rows.splice(rm.rows.indexOf(removedRow), 1);
