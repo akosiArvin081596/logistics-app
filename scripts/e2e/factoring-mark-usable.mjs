@@ -21,7 +21,8 @@
 //       asks once); then the dialog and the row chip say not to send it and to delete it, on the
 //       server's own answer after a reload and for a Super Admin not listed too
 //   D2  a job's draft, marked, then cleared: no green "Draft ready" but a chip of its own that says
-//       to check Gmail Drafts; a person's own draft since: no chip keeps the old number
+//       to check Gmail, Sent Mail included; a person's draft from before the clear leaves it, and one
+//       made since takes over, so no chip keeps the old number
 //   T   a draft that may be in Gmail, each of the two codes: the mark asks first, and a no leaves it
 //       unmarked; a yes marks it, and nothing says it goes through Triumph; the row says not to send
 //       it; Try again finds the draft and records it, and the row still says so; nothing is sent or
@@ -30,10 +31,10 @@
 //       invoice" with its own sentence and no Try again; the claim stays closed, nothing is sent, and
 //       the Draft Invoice button passes the check, so a person can draft it
 //   C2  the same with the driver's trigger off, the sweep's way: the same chip
-//   M   a marked load's Load ID changes (the lines the row saves add around their write; the routes as
-//       shipped are in scripts/test-row-save-cell-writes.js): the mark goes with it, the chip shows on
-//       the new ID and the tap stops on it; a dialog left open on the old ID can't mark that key; a
-//       job's record on the old key refuses the change
+//   M   a marked load's Load ID (the lines the row saves add around their write; the routes as shipped
+//       are in scripts/test-row-save-cell-writes.js): a change is refused, a respelling too, with the way
+//       through in one sentence; clear, change, mark again works, the chip shows on the new ID and the
+//       tap stops on it; a dialog left open on the old ID can't mark that key
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
 //       asked no mail host and opened no socket off this machine
 //
@@ -155,13 +156,13 @@ const WORDS = {
   askMaybe: 'An invoice draft for this load may be in Gmail, or may already have been sent from there. Was it NOT sent to the broker? If you confirm, delete any draft in Gmail.',
   refusedMaybe: 'An invoice draft for this load may be in Gmail, or may already have been sent from there. If it was not sent, confirm that with a reason, then delete any draft in Gmail.',
   notOnSheet: 'No row on Job Tracking holds this Load ID now, so nothing was changed. Reload the page and open the load again.',
-  hasRecords: "This load is marked factored and already has invoice records under this Load ID, so the ID can't be changed here. Leave it as it is and tell whoever manages factored loads.",
+  idRefused: "This load is marked factored, so its Load ID can't be changed: whoever manages factored loads can clear the mark, change the ID, then mark the load again.",
   noa: "This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.",
   notListed: 'Only the accounts listed for factoring may do this.',
   draftReady: { label: 'Draft ready in Gmail', tone: 'ok', reason: (id) => `Invoice ${id} is in Gmail Drafts. Check it and send it.` },
   dontSend: { label: "Factored: don't send the draft, delete it", tone: 'bad', reason: (what) => `Don't send ${what}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.` },
   cleared: { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
-  clearedDraft: { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." },
+  clearedDraft: { label: 'Mark cleared: check Gmail', tone: 'warn', reason: "This load's mark was cleared. If its draft is still in Gmail Drafts, check it and send it. If it's in Sent Mail, it already went to the broker. If it's in neither, draft it by hand." },
   clearedDone: 'No longer factored. If it is already delivered, draft its invoice by hand.',
   retrySearch: 'Try again looks in Gmail first for what may already have gone. Continue?',
   oldSend: 'Check it and send it',
@@ -292,15 +293,17 @@ async function freshServer(env, { trigger = true } = {}) {
     logAuditRefusal: (req, action, entity, id, details, code) => s.refusals.push({ action, id, code, by: req.session.user.username }),
     readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
   })
-  // The lines PUT /api/data/:rowIndex adds around its write: the row as the sheet then holds it.
-  s.saveLoadId = async (from, to) => {
+  // The lines PUT /api/data/:rowIndex adds around its write.
+  s.saveLoadId = (from, to) => {
     const row = s.rows.find((r) => r['Load ID'] === from)
-    const save = s.routes.loadIdSave({ session: { user: LISTED } }, { change: { from, to }, readCell: async () => ({ data: { values: [[row['Load ID']]] } }) })
+    const save = s.routes.loadIdSave({ from, to })
     if (!save.ok) return save
     row['Load ID'] = to
-    await save.finish()
+    save.done()
     return save
   }
+  // A person's own Draft Invoice row, as the route records it.
+  s.handDraft = (id, number, stamp) => db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by, created_at) VALUES (?, ?, ?, 'ratecon', 'imap', ?, ?)").run(id, number, BILLING, LISTED.username, stamp)
   s.routes.mount({ post: (p, ...chain) => { s.mounted[p] = chain } }, {
     requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: 'FORBIDDEN' })),
     refuseCrossSite: (req, res, next) => next(),
@@ -779,11 +782,18 @@ async function draftRun(browser) {
 // ---------------------------------------------------------------- D2: a job's draft, marked, cleared
 async function clearedDraftRun(browser) {
   const ID = 'QA-FACT-9102'
+  const OLDER = 'QA-FACT-9103'
   const s = await freshServer(SETTINGS_ON)
-  s.addLoad(ID, 'At Receiver')
+  for (const id of [ID, OLDER]) s.addLoad(id, 'At Receiver')
   s.tap(ID)
-  const drafted = await until(() => (s.claim(ID) || {}).state === 'drafted')
+  s.tap(OLDER)
+  const drafted = await until(() => (s.claim(ID) || {}).state === 'drafted' && (s.claim(OLDER) || {}).state === 'drafted')
   const first = await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(ID) }, { factored: true, reason: REASON, loadId: ID, confirmNotSent: true })
+  // A person's draft too, from before the mark: confirmed not sent and told to be deleted, like the job's.
+  s.handDraft(OLDER, `${TM}${TD}${TY}-9103`, new Date(Date.now() - 60000).toISOString())
+  await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(OLDER) }, { factored: true, reason: REASON, loadId: OLDER, confirmNotSent: true })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(OLDER) }, { factored: false, reason: REASON, loadId: OLDER })
   const { ctx, page } = await openPage(browser, s, LISTED)
   try {
     await openTab(page, 'Completed')
@@ -807,12 +817,16 @@ async function clearedDraftRun(browser) {
       shown && chipIs(chip, WORDS.clearedDraft, WORDS.clearedDraft.reason) && lineIs(line, WORDS.clearedDraft, WORDS.clearedDraft.reason) && line.buttons.length === 0 && !inDialog.includes(WORDS.draftReady.label) && (s.claim(ID) || {}).state === 'drafted', file)
     if (reopened) await closeLoad(page)
 
-    s.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', ?)").run(ID, `${TM}${TD}${TY}-9102`, BILLING, LISTED.username)
+    const olderChip = await rowChipOf(page, OLDER)
+    record('D2-older', 'A person\'s draft from before the clear leaves the chip', `row chip "${WORDS.clearedDraft.label}"`, `row ${JSON.stringify(olderChip)}`, chipIs(olderChip, WORDS.clearedDraft, WORDS.clearedDraft.reason))
+
+    // Stamped ahead of the clock: a draft row's stamp is to the second, and the clear's to the millisecond.
+    s.handDraft(ID, `${TM}${TD}${TY}-9102`, new Date(Date.now() + 2000).toISOString())
     await reloadCompleted(page)
     const again = await openLoad(page, ID)
     const handChip = await rowChipOf(page, ID)
     const handLine = again ? await dialogLineOf(page) : {}
-    record('D2-hand', 'A person\'s own draft since: no chip keeps the old number', 'no row chip, no dialog line', `row ${JSON.stringify(handChip)}, dialog ${JSON.stringify(handLine)}`, again && handChip.count === 0 && handLine.count === 0)
+    record('D2-hand', 'A person\'s own draft since the clear: no chip keeps the old number', 'no row chip, no dialog line', `row ${JSON.stringify(handChip)}, dialog ${JSON.stringify(handLine)}`, again && handChip.count === 0 && handLine.count === 0)
   } finally {
     await ctx.close()
     s.db.close()
@@ -956,25 +970,31 @@ async function clearedSweepRun(browser) {
   }
 }
 
-// ---------------------------------------------------------------- M: a marked load's Load ID changes
-async function movedRun(browser) {
+// ---------------------------------------------------------------- M: a marked load's Load ID
+async function markedIdRun(browser) {
   const OLD = 'QA-FACT-9401'
   const NEW = 'QA-FACT-9402'
   const OPEN_OLD = 'QA-FACT-9403'
   const OPEN_NEW = 'QA-FACT-9404'
-  const KEPT = 'QA-FACT-9405'
   const s = await freshServer(SETTINGS_ON)
-  for (const id of [OLD, OPEN_OLD, KEPT]) s.addLoad(id, 'In Transit')
-  const markRoute = '/api/factoring/loads/:loadKey'
-  await s.call(markRoute, LISTED, { loadKey: rules.loadKey(OLD) }, { factored: true, reason: REASON, loadId: OLD })
+  for (const id of [OLD, OPEN_OLD]) s.addLoad(id, 'In Transit')
+  const press = (id, factored) => s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(id) }, { factored, reason: REASON, loadId: id })
+  await press(OLD, true)
 
-  s.audits.length = 0
-  const saved = await s.saveLoadId(OLD, NEW)
-  const moved = s.marker(NEW)
-  record('M-moved', 'The ID changes, and the mark goes with it', 'saved; the new ID marked by the same account with the same reason; no row on the old ID; both steps audited',
-    `saved ${saved.ok}, new ${JSON.stringify(moved)}, old ${JSON.stringify(s.marker(OLD))}, audits ${JSON.stringify(s.audits.map((a) => a.action))}`,
-    saved.ok === true && !!moved && moved.factored === 1 && moved.reason === REASON && moved.set_by === LISTED.username && s.marker(OLD) === null
-      && s.audits.map((a) => a.action).join() === 'factoring_move_begun,factoring_moved')
+  // While marked, a new ID and a respelling the mark's key reads as the same load both refuse.
+  const refused = s.saveLoadId(OLD, NEW)
+  const respelled = s.saveLoadId(OLD, `#${OLD}`)
+  const kept = s.rows.some((r) => r['Load ID'] === OLD)
+  record('M-refused', 'A marked load\'s Load ID can\'t change, a respelling included', `each 409 LOAD_ID_FACTORED, "${WORDS.idRefused}"; the row and the mark as they were; no row on the new ID`,
+    `${refused.http} ${refused.code}, "${(refused.json || {}).error}"; respelled ${respelled.http} ${respelled.code}; row ${kept ? 'kept' : 'changed'}, mark ${JSON.stringify(s.marker(OLD))}, new ${JSON.stringify(s.marker(NEW))}`,
+    refused.http === 409 && refused.code === 'LOAD_ID_FACTORED' && (refused.json || {}).error === WORDS.idRefused && respelled.http === 409 && respelled.code === 'LOAD_ID_FACTORED' && kept && (s.marker(OLD) || {}).factored === 1 && s.marker(NEW) === null)
+
+  const cleared = await press(OLD, false)
+  const saved = s.saveLoadId(OLD, NEW)
+  const again = await press(NEW, true)
+  record('M-way', 'The way through: clear the mark, change the ID, mark again', 'each step goes through; the new ID marked; the old row reads cleared',
+    `cleared ${cleared.status}, saved ${saved.ok}, marked ${again.status}, new ${JSON.stringify(s.marker(NEW))}, old ${JSON.stringify(s.marker(OLD))}`,
+    cleared.status === 200 && saved.ok === true && again.status === 200 && (s.marker(NEW) || {}).factored === 1 && (s.marker(OLD) || {}).factored === 0)
 
   const { ctx, page } = await openPage(browser, s, LISTED)
   try {
@@ -990,7 +1010,7 @@ async function movedRun(browser) {
     if (!openedOld) {
       record('M-stale', 'A dialog left open on the old ID', 'the load dialog', `opened ${openedOld}`, false)
     } else {
-      await s.saveLoadId(OPEN_OLD, OPEN_NEW)
+      s.saveLoadId(OPEN_OLD, OPEN_NEW)
       await page.locator('.fact-reason').fill(REASON)
       await page.locator('.fact-btn', { hasText: 'Factor with Triumph' }).click({ timeout: 5000 })
       const shown = await appears(page, '.fact-result--error', 8000)
@@ -1006,14 +1026,6 @@ async function movedRun(browser) {
   s.tap(NEW)
   const stopped = await until(() => { const c = s.claim(NEW); return Boolean(c && c.state === 'skipped' && c.reason_code === 'LOAD_FACTORED') })
   record('M-tap', 'The tap on the new ID stops on the mark', 'skipped LOAD_FACTORED; no append, no SMTP', `stopped ${stopped}, appends ${s.appends.length}, SMTP ${s.smtp.length}`, stopped && s.appends.length === 0 && s.smtp.length === 0)
-
-  await s.call(markRoute, LISTED, { loadKey: rules.loadKey(KEPT) }, { factored: true, reason: REASON, loadId: KEPT })
-  s.seedClaim(KEPT, { state: 'skipped', reason_code: 'LOAD_FACTORED' })
-  const refused = await s.saveLoadId(KEPT, 'QA-FACT-9406')
-  const row = s.rows.find((r) => r['Load ID'] === KEPT)
-  record('M-refused', 'A job\'s record on the old key refuses the change', `409 LOAD_ID_FACTORED, "${WORDS.hasRecords}"; the row and the mark as they were`,
-    `${refused.http} ${refused.code}, "${(refused.json || {}).error}", row ${row ? 'kept' : 'changed'}, mark ${JSON.stringify(s.marker(KEPT))}, new ${JSON.stringify(s.marker('QA-FACT-9406'))}`,
-    refused.http === 409 && refused.code === 'LOAD_ID_FACTORED' && (refused.json || {}).error === WORDS.hasRecords && !!row && !!s.marker(KEPT) && s.marker('QA-FACT-9406') === null)
   s.db.close()
 }
 
@@ -1036,7 +1048,7 @@ async function main() {
   console.log(`factoring-mark-usable: serving ${DIST} on ${BASE} (made-up data; no server.js, no mailbox)`)
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
-    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun], ['D', draftRun], ['D2', clearedDraftRun], ['T', tryAgainRun], ['C', clearedRun], ['C2', clearedSweepRun], ['M', movedRun]]) {
+    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun], ['D', draftRun], ['D2', clearedDraftRun], ['T', tryAgainRun], ['C', clearedRun], ['C2', clearedSweepRun], ['M', markedIdRun]]) {
       try {
         await run(browser)
       } catch (e) {

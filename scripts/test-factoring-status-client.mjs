@@ -236,7 +236,7 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
 
   // A job's draft whose mark was cleared since: it may have been deleted as the chip said.
   const clearedDraft = Object.freeze({ ...drafted, markCleared: true })
-  const CLEARED_DRAFT = { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." }
+  const CLEARED_DRAFT = { label: 'Mark cleared: check Gmail', tone: 'warn', reason: "This load's mark was cleared. If its draft is still in Gmail Drafts, check it and send it. If it's in Sent Mail, it already went to the broker. If it's in neither, draft it by hand." }
   eq(readChip(clearedDraft), CLEARED_DRAFT, '§7 FAILS ON THE OLD CODE: a draft whose mark was cleared since reads neither green nor "is in Gmail Drafts"')
   eq(readChip({ ...clearedDraft, changed: ['payment'] }), CLEARED_DRAFT, '§7 FAILS ON THE OLD CODE: ...its load changed too: the same')
   eq(readChip({ ...clearedDraft, sent: true }).label, 'Sent to the broker', '§7 ...an invoice the job sent still reads as sent')

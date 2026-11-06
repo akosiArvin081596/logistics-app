@@ -115,8 +115,8 @@ export function autoInvoiceChip(status) {
         if (changedOf(status).length) return { label: 'Sent to the broker: load changed', tone: 'warn', reason: changedText(status) }
         return { label: 'Sent to the broker', tone: 'ok', reason: id ? `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` : 'The invoice was sent to the broker automatically. Its copy is in Gmail Sent Mail.' }
       }
-      // Marked, told to delete the draft, then cleared: it may be gone, and nothing makes another.
-      if (status.markCleared === true) return { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." }
+      // Marked, told to delete the draft, then cleared: it may be gone, or sent, and nothing makes another.
+      if (status.markCleared === true) return { label: 'Mark cleared: check Gmail', tone: 'warn', reason: "This load's mark was cleared. If its draft is still in Gmail Drafts, check it and send it. If it's in Sent Mail, it already went to the broker. If it's in neither, draft it by hand." }
       if (changedOf(status).length) return { label: 'Draft ready in Gmail: load changed', tone: 'warn', reason: changedText(status) }
       return { label: 'Draft ready in Gmail', tone: 'ok', reason: id ? `Invoice ${id} is in Gmail Drafts. Check it and send it.` : 'The invoice is in Gmail Drafts. Check it and send it.' }
     }

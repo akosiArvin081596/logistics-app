@@ -25,7 +25,7 @@
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip, and its own sentence for a mark cleared after the
 //       run stopped on it, with the trigger on or off; a job's draft on a marked load, through
-//       Try again too, and once its mark is cleared; a mark that moved with a Load ID
+//       Try again too, and once its mark is cleared; a Load ID changed the one way through
 //   §16 the rules on their own, and the send's commit reaching the disk
 //   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
 //       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
@@ -1861,6 +1861,30 @@ async function main() {
 		gone.seed(SENT, { state: "drafted", invoice_id: "10202026-39", delivery: "send", stage: "recorded", drafted_at: iso(gone.now - MIN) });
 		gone.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 0, 'person', ?, ?)").run(rules.loadKey(SENT), SENT, iso(gone.now), iso(gone.now));
 		eq(served(goneJob, [SENT]), [{ state: "drafted", code: "", invoiceId: "10202026-39", changed: [], sent: true, trigger: true }], "§15 an invoice the job sent, with a row at 0: as before, with no flag");
+		// A person's draft from before the clear was confirmed not sent and told to be deleted, like the
+		// job's, so only a draft made after the clear takes over.
+		const OLDER = "LD-TEST-1442";
+		const older = makeWorld();
+		const olderJob = await older.started();
+		factoring.ensureSchema(older.db);
+		const olderBy = () => ({ key: rules.loadKey(OLDER), loadId: OLDER, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(older.now) });
+		older.ready(OLDER, { Email: OTHER }, billing);
+		tap(older, olderJob, OLDER);
+		await drained(older, "§15 a person's older draft");
+		const olderDraft = (invoiceId, stamp) => older.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by, created_at) VALUES (?, ?, ?, 'ratecon', 'imap', 'made-up-admin', ?)").run(OLDER, invoiceId, billing, stamp);
+		older.now += MIN;
+		olderDraft("10202026-97", iso(older.now));
+		older.now += MIN;
+		factoring.mark(older.db, { ...olderBy(), confirmNotSent: true });
+		older.now += MIN;
+		factoring.clear(older.db, olderBy());
+		const olderPlain = { state: "drafted", code: "", invoiceId: older.claim(OLDER).invoice_id, changed: [], trigger: true };
+		eq(served(olderJob, [OLDER]), [{ ...olderPlain, markCleared: true }], "§15 FAILS ON THE OLD CODE: a person's draft from before the clear: the row still says so");
+		olderDraft("10202026-96", "not a stamp");
+		eq(served(olderJob, [OLDER]), [{ ...olderPlain, markCleared: true }], "§15 FAILS ON THE OLD CODE: ...and a stamp that can't be read doesn't take the chip away");
+		older.now += MIN;
+		olderDraft("10202026-95", iso(older.now));
+		eq(served(olderJob, [OLDER]), [null], "§15 ...a draft made after the clear takes over: no chip");
 	}
 	{
 		// A claim that may be in Gmail asks before it takes a mark, and Try again then records the draft.
@@ -1900,22 +1924,21 @@ async function main() {
 				`§15 FAILS ON THE OLD CODE: ${code}${where}, marked, Try again: the row doesn't say to send it, and says what to do if it already went`);
 		}
 	}
-	if (!factoring.loadIdMoveBegin) {
-		ok(false, "§15 FAILS ON THE OLD CODE: a mark can move with a Load ID");
-	} else {
-		// A mark that moved with a Load ID is still honoured: the driver's tap on the new ID stops on it.
+	{
+		// The way through a Load ID change: clear, change, mark again. The tap on the new ID stops on it.
 		const w = makeWorld();
 		const job = await w.started();
 		factoring.ensureSchema(w.db);
 		const OLD = "LD-TEST-1440";
 		const NEW = "LD-TEST-1441";
+		const by = (id) => ({ key: rules.loadKey(id), loadId: id, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
 		w.ready(NEW);
-		factoring.mark(w.db, { key: rules.loadKey(OLD), loadId: OLD, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
-		const begun = factoring.loadIdMoveBegin(w.db, { from: OLD, to: NEW, nowIso: iso(w.now) });
-		factoring.loadIdMoveFinish(w.db, { from: OLD, to: NEW, held: begun.held, previous: begun.previous, stored: NEW, nowIso: iso(w.now) });
+		factoring.mark(w.db, by(OLD));
+		factoring.clear(w.db, by(OLD));
+		factoring.mark(w.db, by(NEW));
 		tap(w, job, NEW);
-		await drained(w, "§15 a mark that moved");
-		eq([w.state(NEW), w.smtp.length, w.appends.length, w.calls.mint, factoring.isFactored(w.db, OLD)], [["skipped", "LOAD_FACTORED"], 0, 0, 0, false], "§15 a mark that moved with the Load ID: the tap on the new ID stops on it, with no email or number");
+		await drained(w, "§15 the way through");
+		eq([w.state(NEW), w.smtp.length, w.appends.length, w.calls.mint, factoring.isFactored(w.db, OLD), factoring.isFactored(w.db, NEW)], [["skipped", "LOAD_FACTORED"], 0, 0, 0, false, true], "§15 cleared, the ID changed, marked again: the tap on the new ID stops on it, with no email or number");
 	}
 
 	section("§16 the module's own rules");
