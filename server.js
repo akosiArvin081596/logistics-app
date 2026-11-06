@@ -58044,7 +58044,7 @@ app.post(
 				...(linesOn ? { invoiceLines: invoiceLines.previewEcho(lineSummary) } : {}),
 			});
 		} catch (err) {
-			// A note holding bank details on a factored load: its own words, as the approve answers.
+			// A factored page that still shows a bank number: its own words, as the approve answers.
 			if (err && err.code === "ASSIGNMENT_NOT_PRINTABLE") return res.status(err.http).json({ error: err.message, code: err.code });
 			console.error("Invoice preview error:", err.message);
 			return res.status(500).json({ error: "Failed to render the invoice preview." });

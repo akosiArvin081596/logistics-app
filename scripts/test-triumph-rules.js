@@ -67,7 +67,7 @@ section("§1 submitMode()");
 	const code = (src) => src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	const readers = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && NAMES.test(code(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))));
 	eq(readers.filter((f) => f !== "replica-rules.js"), ["triumph-rules.js"], "§1 of lib/, only lib/triumph-rules.js reads them (lib/replica-rules.js only lists them)");
-	ok(!NAMES.test(code(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"))), "§1 server.js doesn't read them");
+	ok(!NAMES.test(code(require("./lib/server-source").serverSource())), "§1 server.js and the route modules it mounts don't read them");
 }
 
 // ---------------------------------------------------------------- §2
