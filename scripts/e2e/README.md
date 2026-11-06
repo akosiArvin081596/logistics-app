@@ -1775,6 +1775,10 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 | DFT21 | The section shut and reopened by hand 16 minutes on, flag off. | The new figure; the stops asked for once |
 | DFT22, DFT22b | A repeat tap with the trip plan answering 429, flag off and on. | Fresh miles and "Checked too many times…", not the failure line; no old verdict or badge; the stops stay |
 | DFT23 | A first tap with the answers failing, on a load with Fuel never opened and the title holding a warning. | The one line and nothing else; the badge goes |
+| DFT24, DFT24b | Fuel opened by hand just after the title read its plan, with the answers changed, flag off and on. | A second plan asked for; the new figure on the section and the title; the stops asked for once |
+| DFT25 | A repeat tap held back 4 s, with Fuel shut and reopened by hand while it's out. | "Checking for your latest fuel numbers…" and nothing else; then the new figure |
+| DFT26, DFT26b | The title's plan held back 4 s and a tap past it, which gets fresh figures, or fails. The title's older answer lands last. | The fresh figures and verdict stay; or the one line, with no badge |
+| DFT27 | Refresh pressed, with the answers changed. | The stops asked for again; the new figure |
 | DFT1r, DFT1t | Route Options and a tall instructions card landing 2.5 s late, with `overflow-anchor: none`; then the same after a wheel. | The title holds its place below the header; after the driver's touch, the page isn't pulled back |
 | DFT1d, DFT7d | 1280x800. | A load's Fuel section opens; with no load, the toast |
 | DFO1-DFO6 | Offline shown and cleared at 390, 360 and 320 wide, with a two-word and a very long name. A stand-in for the server's socket lets the build's own socket.io client connect and drop. | The header, the page and the first item don't move at all; the long name's header is the short name's height; Offline, the chip and the buttons whole and on screen |

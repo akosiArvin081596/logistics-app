@@ -565,6 +565,8 @@ const API_STUB = {
   useApi: () => ({
     get: async (url) => {
       net.gets.push(url.split('?')[0])
+      // A step answering each ask itself, in the order it chooses.
+      if (net.script) return JSON.parse(JSON.stringify(await net.script(url.split('?')[0])))
       if (net.held) await net.held
       const a = net.answers[url.split('?')[0]]
       if (a instanceof Error) throw a
@@ -1087,6 +1089,8 @@ if (panelFactory) {
         'only the plan': { '/api/fuel/trip-plan': apiError(500) },
         'only the range': { '/api/fuel/range': apiError(500) },
         'no answer at all (a timeout)': { '/api/fuel/range': apiError(0, 'TIMEOUT'), '/api/fuel/trip-plan': apiError(0, 'TIMEOUT') },
+        'the range turned away (401)': { '/api/fuel/range': apiError(401) },
+        'the plan turned away (403)': { '/api/fuel/trip-plan': apiError(403) },
       }
       for (const flag of [false, true]) {
         const name = flag ? 'flag on' : 'flag off'
@@ -1118,8 +1122,8 @@ if (panelFactory) {
           const shut = open({ active: false })
           await settle()
           check(`§8e ${name}, ${what}: back on the load with Fuel shut: the title asks, and nothing old is handed to it`,
-            [net.gets.filter((u) => u === '/api/fuel/trip-plan').length - askedBefore, what === 'only the range' ? 'answered' : lastPlan(shut)],
-            [1, what === 'only the range' ? 'answered' : null])
+            [net.gets.filter((u) => u === '/api/fuel/trip-plan').length - askedBefore, over['/api/fuel/trip-plan'] ? lastPlan(shut) : 'answered'],
+            [1, over['/api/fuel/trip-plan'] ? null : 'answered'])
           shut.stop()
 
           // Signal back: a tap, and everything's there, with no second Places lookup.
@@ -1220,15 +1224,402 @@ if (panelFactory) {
         page.stop()
       }
 
+      // §8h any ask that goes out gets a new plan, so "latest" is true, and a tap joining it too.
+      for (const flag of [false, true]) {
+        const name = flag ? 'flag on' : 'flag off'
+        const says = FIGURE[flag]
+        const open = live()
+        serve(world({ flag, ...TRANSIT }))
+        const page = open({ active: false })
+        await settle()
+        const later = world({ flag, ...TRANSIT, pct: 30 })
+        net.answers['/api/fuel/range'] = later.range
+        net.answers['/api/fuel/trip-plan'] = later.plan
+        skew = 14 * MIN
+        let before = net.gets.length
+        const release = holdAnswers()
+        page.props.active = true
+        await settle()
+        check(`§8h ${name}: the first open by hand, the title's plan 14 minutes old: a new plan, the range and the load's one stops lookup`,
+          net.gets.slice(before).sort(), ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops'])
+        before = net.gets.length
+        page.props.asked = 1
+        await settle()
+        check(`§8h ${name}: a tap while that's out joins it, and that ask is getting the latest`, net.gets.length - before, 0)
+        check(`§8h ${name}: …the one line meanwhile`, textOf(await page.screen()), CHECKING)
+        await release()
+        const t = textOf(await page.screen())
+        check(`§8h ${name}: …then the new figure, on the section and the title`,
+          [t.includes(says(135)), t.includes(says(225)), lastPlan(page) && lastPlan(page).fuelPct], [true, false, 30])
+        page.stop()
+        skew = 0
+      }
+
+      // §8i answers in any order: the asks a step is holding, answered oldest or newest first.
+      const scripted = () => {
+        const out = []
+        net.script = (path) => new Promise((resolve, reject) => out.push({ path, answer: (a) => (a instanceof Error ? reject(a) : resolve(a)) }))
+        const land = async (i, a) => { out.splice(i, 1)[0].answer(a); await settle() }
+        return {
+          answer: (path, a) => land(out.findIndex((o) => o.path === path), a),
+          newest: (path, a) => land(out.map((o) => o.path).lastIndexOf(path), a),
+          done: () => { net.script = null },
+        }
+      }
+      const RANGE = '/api/fuel/range'
+      const PLAN = '/api/fuel/trip-plan'
+      const STOPS_URL = '/api/poi/fuel-stops'
+      const OOPS = apiError(500)
+      for (const flag of [false, true]) {
+        const name = flag ? 'flag on' : 'flag off'
+        const says = FIGURE[flag]
+        const good = world({ flag })
+        const fresh = world({ flag, pct: 30 })
+
+        // A: the title's ask is out, a tap, the tap's range fails, the title's plan lands last.
+        {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ active: false })
+          await settle()
+          page.props.active = true
+          page.props.asked = 1
+          await settle()
+          await s.answer(RANGE, OOPS)
+          await s.answer(STOPS_URL, STOPS)
+          // The tap's own plan, the newer of the two, then the title's.
+          await s.newest(PLAN, good.plan)
+          check(`§8i ${name}: the tap's range failed: the one line, no badge`, [textOf(await page.screen()), lastPlan(page)], [FAILED, null])
+          await s.answer(PLAN, good.plan)
+          check(`§8i ${name}: …the title's plan landing last changes neither`, [textOf(await page.screen()), lastPlan(page)], [FAILED, null])
+          s.done()
+
+          // B: back on the load with no signal: nothing saved by that late answer.
+          page.stop()
+          Object.assign(net.answers, DEAD)
+          const back = open({ active: false })
+          await settle()
+          check(`§8i ${name}: …back on the load with no signal, the late answer wasn't saved: no badge`, lastPlan(back), null)
+          back.stop()
+        }
+
+        // C: the title's ask is out, a tap answered fresh, the title's older plan lands last.
+        {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ active: false })
+          await settle()
+          page.props.active = true
+          page.props.asked = 1
+          await settle()
+          await s.answer(RANGE, fresh.range)
+          await s.answer(STOPS_URL, STOPS)
+          await s.newest(PLAN, fresh.plan)
+          check(`§8i ${name}: the tap answered fresh`, [textOf(await page.screen()).includes(says(135)), lastPlan(page).fuelPct], [true, 30])
+          await s.answer(PLAN, good.plan)
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: …the title's older plan landing last doesn't bring the old figure or badge back`,
+            [t.includes(says(135)), t.includes(says(225)), lastPlan(page).fuelPct], [true, false, 30])
+          s.done()
+          page.stop()
+          // And it wasn't saved over the fresh one: a page that comes back reads the fresh plan.
+          serve(fresh)
+          const before = net.gets.length
+          const back = open({ active: false })
+          await settle()
+          check(`§8i ${name}: …nor saved over the fresh plan`, [net.gets.length - before, lastPlan(back).fuelPct], [0, 30])
+          back.stop()
+        }
+
+        // D: the title's ask is out, a tap refused, the title's ask then fails: the sentence stays.
+        for (const [why, refusal, words] of [
+          ['429', apiError(429), flag ? 'Checked too many times just now. Try again in a few minutes.' : 'Checked too many times just now — try again in a few minutes.'],
+          ['400', apiError(400), flag ? "We can't work out the fuel for this load yet." : "We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."],
+        ]) {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ active: false })
+          await settle()
+          page.props.active = true
+          page.props.asked = 1
+          await settle()
+          await s.answer(RANGE, fresh.range)
+          await s.answer(STOPS_URL, STOPS)
+          await s.newest(PLAN, refusal)
+          check(`§8i ${name}: a tap refused ${why}: fresh miles and its sentence`, [textOf(await page.screen()).includes(words), textOf(await page.screen()).includes(says(135))], [true, true])
+          await s.answer(PLAN, OOPS)
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: …the title's ask failing last leaves them, with no other failure words`,
+            [t.includes(words), t.includes(says(135)), t.includes('Tap Refresh.'), lastPlan(page)], [true, true, false, null])
+          s.done()
+          page.stop()
+        }
+
+        // E: a tap out, Back, into the load again with Fuel shut, then the ask fails.
+        {
+          const open = live()
+          serve(good)
+          const first = open()
+          await settle()
+          const s = scripted()
+          first.props.asked = 1
+          await settle()
+          first.stop()
+          const plansBefore = net.gets.filter((u) => u === '/api/fuel/trip-plan').length
+          const back = open({ active: false })
+          await settle()
+          check(`§8i ${name}: back on the load while the tap's ask is out: the title joins it, with no saved plan and no second ask`,
+            [lastPlan(back), net.gets.filter((u) => u === '/api/fuel/trip-plan').length - plansBefore], ['never told', 0])
+          await s.answer(RANGE, OOPS)
+          await s.answer(PLAN, OOPS)
+          check(`§8i ${name}: …that ask fails: no badge`, lastPlan(back), null)
+          s.done()
+          back.stop()
+        }
+
+        // F: a tap out, Fuel shut and reopened by hand while it's out: still the one line.
+        {
+          const open = live()
+          serve(good)
+          const page = open()
+          await settle()
+          net.answers['/api/fuel/range'] = fresh.range
+          net.answers['/api/fuel/trip-plan'] = fresh.plan
+          const release = holdAnswers()
+          page.props.asked = 1
+          await settle()
+          page.props.active = false
+          await settle()
+          page.props.active = true
+          await settle()
+          check(`§8i ${name}: a tap out, shut and reopened by hand: still the one line, nothing old`, textOf(await page.screen()), CHECKING)
+          await release()
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: …then the new figure`, [t.includes(says(135)), t.includes(says(225))], [true, false])
+          page.stop()
+        }
+
+        // G: the same late answers with Fuel shut before they land: the section's read still speaks.
+        for (const [what, tapRange, tapPlan, expected] of [
+          ['answered fresh', fresh.range, fresh.plan, 30],
+          ['failed', OOPS, good.plan, null],
+        ]) {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ active: false })
+          await settle()
+          page.props.active = true
+          page.props.asked = 1
+          await settle()
+          await s.answer(RANGE, tapRange)
+          await s.answer(STOPS_URL, STOPS)
+          await s.newest(PLAN, tapPlan)
+          page.props.active = false
+          await settle()
+          await s.answer(PLAN, good.plan)
+          const left = lastPlan(page)
+          check(`§8i ${name}: a tap ${what}, Fuel shut, the title's older plan lands last: the badge doesn't go back`, left && left.fuelPct, expected)
+          s.done()
+          page.stop()
+        }
+
+        // A title's read for a load no longer on screen says nothing about the one that is.
+        {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ active: false, loadId: 'QA-TITLE-A' })
+          await settle()
+          page.props.loadId = 'QA-TITLE-B'
+          await settle()
+          await s.answer(PLAN, good.plan)
+          check(`§8i ${name}: switched in place, Fuel shut: the first load's plan landing late isn't told to the title`, lastPlan(page), 'never told')
+          await s.answer(PLAN, fresh.plan)
+          check(`§8i ${name}: …the load on screen's is`, lastPlan(page).fuelPct, 30)
+          s.done()
+          page.stop()
+        }
+
+        // The section's answers belong to their own load too.
+        {
+          const open = live()
+          serve(good)
+          const s = scripted()
+          const page = open({ loadId: 'QA-SECTION-A' })
+          await settle()
+          page.props.loadId = 'QA-SECTION-B'
+          await settle()
+          await s.newest(RANGE, fresh.range)
+          await s.newest(STOPS_URL, STOPS)
+          await s.newest(PLAN, fresh.plan)
+          check(`§8i ${name}: switched in place, Fuel open: the load on screen's figures`, textOf(await page.screen()).includes(says(135)), true)
+          await s.answer(RANGE, good.range)
+          await s.answer(STOPS_URL, STOPS)
+          await s.answer(PLAN, good.plan)
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: …the first load's landing late don't land on it`, [t.includes(says(135)), t.includes(says(225)), lastPlan(page).fuelPct], [true, false, 30])
+          s.done()
+          page.stop()
+        }
+
+        // Having read one load doesn't quiet the title on another, or on that one when it's back.
+        {
+          const open = live()
+          serve(good)
+          const page = open({ loadId: 'QA-BACK-A' })
+          await settle()
+          page.props.active = false
+          await settle()
+          serve(fresh)
+          page.props.loadId = 'QA-BACK-B'
+          await settle()
+          check(`§8i ${name}: read one load, Fuel shut, switched in place: the next load's title reads`, lastPlan(page).fuelPct, 30)
+          page.props.loadId = 'QA-BACK-A'
+          await settle()
+          check(`§8i ${name}: …and back in place: the first load's title again`, lastPlan(page).fuelPct, good.plan.fuelPct)
+          page.stop()
+        }
+
+        // A load put back on the road with Fuel open gets its verdict and badge back, as today.
+        {
+          const open = live()
+          serve(good)
+          const page = open()
+          await settle()
+          const before = textOf(await page.screen())
+          page.props.runnable = false
+          await settle()
+          check(`§8i ${name}: a load with no road left: no badge`, lastPlan(page), null)
+          page.props.runnable = true
+          await settle()
+          check(`§8i ${name}: …back on the road with Fuel open: the badge and the screen as they were`,
+            [lastPlan(page) && lastPlan(page).fuelPct, textOf(await page.screen())], [good.plan.fuelPct, before])
+          page.stop()
+        }
+
+        // A plan with nothing to read (404) isn't a failed read.
+        {
+          const open = live()
+          serve(good)
+          const page = open()
+          await settle()
+          net.answers[PLAN] = apiError(404)
+          await tap(page, 1)
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: a plan with nothing to read (404): not the failure line`, [t.includes(FAILED), t.includes(says(225))], [false, true])
+          page.stop()
+        }
+
+        // Saved figures painted by hand are what the section says, with the title's own ask still
+        // out because its saved plan aged out of the cache sooner.
+        {
+          const open = live()
+          serve(good)
+          const first = open({ loadId: 'QA-SAVED' })
+          await settle()
+          first.stop()
+          for (let i = 1; i <= 8; i++) {
+            const other = open({ active: false, loadId: `QA-OTHER-${i}` })
+            await settle()
+            other.stop()
+          }
+          const s = scripted()
+          const page = open({ active: false, loadId: 'QA-SAVED' })
+          await settle()
+          page.props.active = true
+          await settle()
+          check(`§8i ${name}: saved figures painted by hand, the title's ask out`, textOf(await page.screen()).includes(says(225)), true)
+          await s.answer(PLAN, fresh.plan)
+          const t = textOf(await page.screen())
+          check(`§8i ${name}: …its answer doesn't change them under the driver`, [t.includes(says(225)), t.includes(says(135)), lastPlan(page).fuelPct], [true, false, good.plan.fuelPct])
+          s.done()
+          page.stop()
+        }
+
+        // A failed plan is known as soon as it lands, with the range still out.
+        {
+          const open = live()
+          serve(good)
+          const first = open()
+          await settle()
+          const s = scripted()
+          first.props.asked = 1
+          await settle()
+          await s.answer(PLAN, OOPS)
+          first.stop()
+          const back = open({ active: false })
+          await settle()
+          check(`§8i ${name}: the plan failed, the range still out, back on the load: the saved plan isn't handed to the title`, lastPlan(back), 'never told')
+          await s.answer(PLAN, OOPS)
+          await s.answer(RANGE, OOPS)
+          check(`§8i ${name}: …and its own ask fails too: no badge`, lastPlan(back), null)
+          s.done()
+          back.stop()
+        }
+      }
+
+      // §8j the stops live and go with their figures: no false "No diesel stops".
+      for (const flag of [false, true]) {
+        const name = flag ? 'flag on' : 'flag off'
+        const NO_STOPS_WORDS = 'No diesel stops found along this route'
+        const open = live()
+        const good = world({ flag, ...TRANSIT })
+        serve(good)
+        const read = async (loadId, over = {}) => {
+          const page = open({ loadId, ...over })
+          await settle()
+          return page
+        }
+        const stopsAsked = () => net.gets.filter((u) => u === '/api/poi/fuel-stops').length
+        ;(await read('QA-1')).stop()
+        for (let i = 2; i <= 8; i++) (await read(`QA-${i}`)).stop()
+        const one = await read('QA-1')
+        await tap(one, 1)
+        one.stop()
+        ;(await read('QA-9')).stop()
+        check(`§8j ${name}: nine loads read, one tapped along the way: one stops lookup each`, stopsAsked(), 9)
+        const again = await read('QA-1')
+        const t = textOf(await again.screen())
+        check(`§8j ${name}: …back on the tapped load: its stops, no false sentence, and no second lookup`,
+          [t.includes('QA Truck Plaza Riverton'), t.includes(NO_STOPS_WORDS), stopsAsked()], [true, false, 9])
+        again.stop()
+
+        // A failed read drops figures and keeps stops, so the two caches can come apart.
+        const split = live()
+        serve(good)
+        const readSplit = async (loadId) => { const page = split({ loadId }); await settle(); return page }
+        for (let i = 1; i <= 8; i++) (await readSplit(`QB-${i}`)).stop()
+        const failing = await readSplit('QB-1')
+        Object.assign(net.answers, DEAD)
+        await tap(failing, 1)
+        failing.stop()
+        serve(good)
+        ;(await readSplit('QB-9')).stop()
+        const before = net.gets.length
+        const evicted = await readSplit('QB-2')
+        const u = textOf(await evicted.screen())
+        check(`§8j ${name}: figures saved but their stops aged out: it asks rather than say there are none`,
+          [u.includes(NO_STOPS_WORDS), u.includes('QA Truck Plaza Riverton'), net.gets.slice(before).sort()],
+          [false, true, ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops']])
+        evicted.stop()
+      }
+
       // Refresh is an ask like any other, and it can't cost the stops already paid for.
       {
         const open = live()
         serve(world({ flag: false }))
         const page = open()
         await settle()
+        check('§8e the button is wired to Refresh', fs.readFileSync(PANEL_VUE, 'utf8').includes('class="dfp-refresh" @click="refresh"'), true)
         Object.assign(net.answers, DEAD, { '/api/poi/fuel-stops': apiError(500) })
+        const before = net.gets.length
         await page.b.refresh()
         await settle()
+        check('§8e Refresh asks for all three, the stops too', net.gets.slice(before).sort(), ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops'])
         check('§8e Refresh with no signal: the one line', textOf(await page.screen()), FAILED)
         net.answers = { '/api/fuel/range': world({ flag: false }).range, '/api/fuel/trip-plan': world({ flag: false }).plan, '/api/poi/fuel-stops': apiError(500) }
         await tap(page, 1)

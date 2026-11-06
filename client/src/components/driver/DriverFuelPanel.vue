@@ -780,17 +780,21 @@ async function fetchStops(key) {
 // driver's own limit, and it isn't a failed read either: the range still answers, so
 // they get fresh miles and a sentence that says why there's no verdict.
 //
-// `fresh`: a plan past NUMBERS_MAX_AGE_MS is asked for again rather than reused.
-async function fetchPlan(key, { force = false, fresh = false } = {}) {
+// `force`: the section's own read, which says it's getting the latest, so it never reuses
+// a saved plan. The title's read joins an ask that's out before it looks at a saved plan,
+// so a read that's about to fail can't leave the old plan on the title.
+async function fetchPlan(key, { force = false } = {}) {
   if (!key || !props.runnable) return { plan: null, error: '' }
   if (!force) {
-    const hit = planCache.get(key)
-    if (hit && !(fresh && numbersExpired(hit))) return hit
     const pending = planInflight.get(key)
     if (pending) return pending
+    const hit = planCache.get(key)
+    if (hit && !numbersExpired(hit)) return hit
   }
   const p = requestPlan(key)
   p.then((entry) => {
+    // An older ask landing after a newer one started has nothing to say to the cache.
+    if (planInflight.get(key) !== p) return
     if (entry.failed) planCache.delete(key)
     else cacheSet(planCache, key, entry)
   }).catch(() => {})
@@ -854,31 +858,37 @@ function apply(entry) {
 
 const READ_FAILED = { range: null, plan: null, planError: '', planProblem: null, failed: true }
 
-async function fetchAll(key, { force = false, tap = false } = {}) {
-  const kept = force ? null : stopsCache.get(key)
+async function fetchAll(key, { force = false } = {}) {
   const [r, s, pl] = await Promise.all([
     fetchRange(),
-    kept || fetchStops(key),
-    fetchPlan(key, { force: force || tap, fresh: true }),
+    (!force && stopsCache.get(key)) || fetchStops(key),
+    fetchPlan(key, { force: true }),
   ])
-  // A failed lookup doesn't replace stops already paid for.
-  if (!kept && !(s.error && stopsCache.has(key))) cacheSet(stopsCache, key, s)
+  // A failed lookup doesn't replace stops already paid for. Saving them again on every read
+  // keeps them from ageing out of the cache ahead of the figures they go with.
+  cacheSet(stopsCache, key, s.error && stopsCache.has(key) ? stopsCache.get(key) : s)
   if (r.failed || pl.failed) return READ_FAILED
   return { range: r.range, plan: pl.plan, planError: pl.error, planProblem: pl.problem || null, at: pl.at || Date.now() }
 }
 
+// The load this panel's section has read. From then on the section speaks for the plan,
+// open or shut since, and the title's own read is the older one.
+let sectionRead = null
+
 async function load({ force = false, tap = false } = {}) {
   const key = props.loadId || ''
+  sectionRead = key
   const hit = force || tap ? null : fuelCache.get(key)
   // Synchronous — nothing before this line awaits, so a reopen paints the
-  // cached state immediately and issues no request at all.
-  if (hit && !numbersExpired(hit)) return apply(hit)
+  // cached state immediately and issues no request at all. Not while an ask is out,
+  // or it would take the waiting line down, and not with no stops to paint beside them.
+  if (hit && !numbersExpired(hit) && !inflight.has(key) && stopsCache.has(key)) return apply(hit)
   asking.value = true
   readFailed.value = false
 
   let p = force ? null : inflight.get(key)
   if (!p) {
-    p = fetchAll(key, { force, tap }).catch(() => READ_FAILED).then((entry) => {
+    p = fetchAll(key, { force }).catch(() => READ_FAILED).then((entry) => {
       if (entry.failed) {
         fuelCache.delete(key)
         planCache.delete(key)
@@ -928,20 +938,24 @@ watch(
   () => [props.loadId, props.runnable],
   async () => {
     const key = props.loadId || ''
+    if (sectionRead !== key) sectionRead = null
     // Clear FIRST, and emit the clear: the parent keeps the last verdict it was
     // handed, so a load switched in place (rather than via Back, which unmounts)
     // would otherwise leave the previous load's badge sitting on this one's
     // header — a red "fuel stop needed" against the wrong run.
     if (!key || !props.runnable) {
+      sectionRead = null
       plan.value = null
       planError.value = ''
       planProblem.value = null
       emit('plan', null)
       return
     }
-    const entry = await fetchPlan(key, { fresh: true })
+    const entry = await fetchPlan(key)
     // A different load may have been opened while this was in flight.
     if ((props.loadId || '') !== key) return
+    // Landing late must not bring back a verdict or wipe a sentence the section's newer read left.
+    if (sectionRead === key) return
     // Never clobber a fuller state the section has already painted.
     if (plan.value && !entry.plan) return
     plan.value = entry.plan
