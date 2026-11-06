@@ -327,7 +327,7 @@ function promptSection(c, L, S) {
   c.eq('§9 the view asks the lib with each input from its own source', [
     'role: auth.user?.role,', 'counts: driverStore.emergencyContacts,', 'onboarding: isOnboarding.value,', 'loaded: contactsPromptReady.value,',
     'answered: contactsPromptAnswered.value,', 'welcomeOpen: showWelcomeModal.value,', 'loadOpen: !!detailLoad.value,',
-    'dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value,', 'motionAllowed: voiceGate.value.allowed,',
+    'dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || release.onScreen.value,', 'motionAllowed: voiceGate.value.allowed,',
   ].map((line) => wiring.includes(line)), Array(9).fill(true))
   c.eq('§9 the answer lives in this view only: a ref of the mounted view, back at the next app start (each sign-in mounts the view)', [
     /^const contactsPromptAnswered = ref\(false\)$/m.test(vs),

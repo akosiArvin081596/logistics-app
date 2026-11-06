@@ -33156,10 +33156,18 @@ const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
 const NAMED_LOGINS_ENABLED = process.env.NAMED_LOGINS_ENABLED === "true";
 const signInLib = require("./lib/sign-in");
 try { signInLib.ensureSignInNetworkTable(db); } catch (err) { console.error("sign_in_network table setup failed:", err.message); }
+// New-feature notices for drivers: the list is lib/driver-releases.js, the routes lib/driver-release-routes.js.
+// A kill switch: it moves no money and changes no one's rights, so it is on unless set to false, and off,
+// every route answers 404 FEATURE_OFF and the driver app stays as it was.
+const driverReleaseNotices = require("./lib/driver-release-routes").mount(app, {
+	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_RELEASE_NOTICES_ENABLED ?? "").trim()),
+	requireRole, db,
+});
 // The account lookup and the sign-in rows, for the login and logout routes.
 const signIn = signInLib.createSignIn({
 	db, logAudit, logAuditRefusal, networkEvidence: signerNetworkEvidence,
 	auditEnabled: SIGN_IN_AUDIT_ENABLED, uniqueEmail: NAMED_LOGINS_ENABLED,
+	onSessionStart: driverReleaseNotices.startSession,
 });
 // The 90-day limit on the sign-in IP and browser records; audit rows are kept.
 function purgeOldSignInNetwork() {
@@ -33274,6 +33282,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			companyName: current.company_name || "",
 			mustChangePassword: !!current.must_change_password,
 		};
+		// A first-time Driver's tour offer (lib/driver-release-routes.js). Never throws.
+		signIn.sessionStarted(current);
 		try {
 			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
 		} catch (saveErr) {
@@ -49449,14 +49459,14 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
 		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
-		// truck has been stopped, from its recent clean fixes taken since the
-		// link: the last fix above the moving threshold, else the oldest one read
-		// (stopped at least since then). Null while the latest fix is moving.
+		// truck has been stopped, from its recent clean fixes taken since the link.
+		// Null when that can't be shown, which the driver app reads as not stopped
+		// long enough.
 		// Bounded: at most 120 rows of the same index read as above.
 		let stoppedSinceMs = null;
 		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
 			const recent = db.prepare(
-				`SELECT speed, location_date_ms FROM routemate_telemetry
+				`SELECT speed, latitude, longitude, location_date_ms FROM routemate_telemetry
 				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 				  ORDER BY id DESC LIMIT 120`
 			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));

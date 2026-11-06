@@ -52,6 +52,8 @@ export const voiceGateNote = (gate) => (gate && gate.allowed === false ? VOICE_G
 //   server) and stoppedSinceMs (server time). The fix is dated now minus its
 //   age, and stoppedSinceMs moves by the same difference, so a phone clock that
 //   is off never makes a moving truck look stale or a parked one look fresh.
+//   Its explicit null on a fix that isn't moving says the truck's fixes don't
+//   show it stayed put, so the stop is unknown and no earlier one is carried over.
 // - The live feed (socket location-update) carries no stoppedSinceMs: a moving
 //   fix has none, a stopped one keeps the stop already known, and the first
 //   stopped fix after moving starts the stop at its own time (the 2-minute wait
@@ -66,7 +68,7 @@ export function eldMotion(raw, prev, nowMs) {
   const fixMs = raw.lastPingAge != null && Number.isFinite(age) ? nowMs - age : stamped
   if (!Number.isFinite(fixMs)) return null
   const fix = { speed, location_date_ms: fixMs }
-  if (isMoving(fix)) return { fix, stoppedSince: null }
+  if (isMoving(fix) || raw.stoppedSinceMs === null) return { fix, stoppedSince: null }
   if (raw.stoppedSinceMs != null && Number.isFinite(Number(raw.stoppedSinceMs))) {
     const shift = Number.isFinite(stamped) ? fixMs - stamped : 0
     return { fix, stoppedSince: Number(raw.stoppedSinceMs) + shift }
