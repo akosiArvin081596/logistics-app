@@ -30,27 +30,35 @@
 //     isn't in Sent Mail, and the draft, fetched, is one message whose digest and
 //     invoice number are the claim's own and which passes the job's last check on an
 //     outgoing message.
-// --dry-run opens the database read-only and writes nothing. It prints the mailbox
-//   account (the address only), the stop it matched, and per load its label, from
-//   the stop or why not, and whether the login sees its draft.
+// --dry-run opens the database read-only and writes nothing. It prints the database it
+//   opened (its absolute path), the mailbox account (the address only), the stop it
+//   matched, and per load its label, from the stop or why not, and whether the login
+//   sees its draft.
 // --apply prints the same, then sends the CLEAN loads, at most --max (3) a run, one at
-//   a time: a meta row first, so no later run sends that load again; then the draft's
-//   own To, subject, body and attachments through the job's SMTP sender
-//   (lib/auto-invoice-send.js createSmtpSender()), From the mailbox, with a fresh
-//   Message-ID. Once Sent Mail shows it, one transaction records the send as the job
-//   records one (the claim's delivery 'send', so Completed Loads reads "Sent to the
-//   broker"), with one audit row as the system actor. The first error stops the run.
-//   A draft is never edited, sent again or deleted: each sent load's old draft
-//   Message-ID is printed for a person to delete.
+//   a time. Right before each, Drafts and Sent Mail are searched again for its draft;
+//   anything changed makes it CHECK BY HAND, nothing sent. Then one transaction puts the
+//   claim in the job's own send-start state (as ledger.beginSend() does), so every guard
+//   that reads the claim sees a send under way, and then the draft's own To, subject,
+//   body and attachments go through the job's SMTP sender (lib/auto-invoice-send.js
+//   createSmtpSender()), From the mailbox, with a fresh Message-ID. Once Sent Mail shows
+//   it, the claim is recorded as the job records a send (Completed Loads reads "Sent to
+//   the broker"), with one audit row as the system actor. A send Sent Mail doesn't show
+//   is left as the job leaves its own (Needs attention, may already be sent: Try again
+//   searches Sent Mail, nothing sends it again), and if the run dies mid-send the job's
+//   own recovery takes the claim over. The first error stops the run; any unconfirmed
+//   send refuses the next. A draft is never edited, sent again or deleted: each sent
+//   load's old draft Message-ID is printed for a person to delete.
 // Exit 0 done; 2 refused (an argument, the database, the window, no mailbox login, a
-// replica); 1 any other failure (a send, its confirmation, its record).
+// send not yet confirmed, a replica); 1 any other failure (a send, its confirmation).
 //
 // Required as a module (by its runner) it runs nothing and exports run().
 
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { LEASE_MS } = require("../lib/auto-invoice-job");
 const rules = require("../lib/auto-invoice-rules");
 const ledger = require("../lib/auto-invoice-ledger");
 const sendRules = require("../lib/auto-invoice-send");
@@ -61,6 +69,8 @@ const sheetIds = require("../lib/sheet-id");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = Object.freeze({ id: 0, username: "auto-invoice-send-drafted", role: "system" });
+// The lease a send holds on its claim: each run's own token after this name.
+const OWNER = "auto-invoice-send-drafted";
 const KNOWN = { flags: new Set(["dry-run", "apply"]), values: new Set(["db", "sheet-id", "max", "stop-at"]) };
 const STOP_REASON = "LOAD_CHANGED_AFTER_SEND";
 const DRAFTS = "[Gmail]/Drafts";
@@ -423,102 +433,137 @@ async function judge(ctx, shared, c, visible) {
 
 // ── sending one load ────────────────────────────────────────────────────────
 
-// The last checks and the mark, in one transaction: the claim is still the draft that
-// was judged (`c`), no run has marked it, no person's draft or press, not stopped and,
-// read last as the job's own commit reads it, not factored. "" when marked, else the word.
-function markStarted(db, c, newId, nowIso) {
+// The last checks, the mark and the claim's send-start state, in one transaction before
+// the SMTP call. The claim takes the state ledger.beginSend() commits for the job's own
+// send (delivery 'send', stage 'appending', the new Message-ID, under this run's lease):
+// Draft Invoice, a press, a factoring mark and the label all see a send under way, and if
+// this run dies the job's own recovery takes it over, searching Sent Mail, never sending.
+// The claim must still be the draft that was judged (`c`); no mark, look, person's draft,
+// press or stop; and, read last as the job's own commit reads it, not factored.
+// "" when begun, else the word that held it.
+function beginDraftSend(db, c, { newId, owner, nowMs }) {
+	const nowIso = isoOf(nowMs);
 	return db.transaction(() => {
 		const cur = ledger.getClaim(db, c.load_key);
 		if (!cur || cur.state !== "drafted" || cur.delivery !== "" || cur.stage !== "recorded" || cur.message_id !== c.message_id
 			|| cur.invoice_id !== c.invoice_id || cur.changed_fields !== c.changed_fields || cur.fingerprint_json !== c.fingerprint_json) return "changed";
+		if (cur.look_first) return "look";
 		if (markOf(db, cur.load_key)) return "started";
 		if (ledger.otherDraftRows(db, cur).length) return "person";
 		if (factoring.inflightRows(db, cur.load_key, nowIso).length) return "press";
 		if (ledger.getSendStop(db)) return "stopped";
 		if (ledger.factoredOrUnreadable(db, cur.load_key)) return "factored";
 		ledger.setMeta(db, markKey(cur.load_key), JSON.stringify({ v: 1, state: "started", invoiceId: cur.invoice_id, oldMessageId: cur.message_id, newMessageId: newId, at: nowIso }));
+		const moved = ledger.transition(db, cur.load_key, { from: ["drafted"], nowIso, patch: {
+			state: "working", stage: "appending", delivery: "send", sent_at: nowIso, send_checks: 0, message_id: newId, lease_owner: owner, lease_until: isoOf(nowMs + LEASE_MS),
+		} });
+		if (moved !== 1) throw new Error("the claim did not move");
 		return "";
 	}).immediate();
 }
 
-// A send refused before its message left: a later run may try the load again.
-function markRefused(db, key, mark, nowIso) {
-	try {
+// A send refused before its message left: the claim goes back to the draft it was, and
+// a later run may try it again. false when the claim is no longer this run's.
+function sendRefused(db, key, { owner, mark, nowIso }) {
+	return db.transaction(() => {
+		const n = ledger.transition(db, key, { from: ["working"], owner, nowIso, patch: {
+			state: "drafted", stage: "recorded", delivery: "", sent_at: "", send_checks: 0, message_id: mark.oldMessageId, lease_owner: "", lease_until: "",
+		} });
+		if (n !== 1) return false;
 		ledger.setMeta(db, markKey(key), JSON.stringify({ ...mark, state: "refused", refusedAt: nowIso }));
-	} catch {
-		// the mark stays "started": no later run sends the load
-	}
+		return true;
+	}).immediate();
 }
 
-// The send, recorded as the job records its own: the claim's delivery 'send' and its
-// new Message-ID, one audit row, the mark closed; one transaction.
-function recordSend(db, key, mark, nowIso) {
-	db.transaction(() => {
+// Sent Mail shows the send: recorded as the job records its own, the claim drafted with
+// delivery 'send' (so it reads "Sent to the broker"), one audit row, the mark closed; one
+// transaction. false when the claim is no longer this run's (the app took it over).
+function recordSend(db, key, { owner, mark, checks, nowIso }) {
+	return db.transaction(() => {
 		const cur = ledger.getClaim(db, key);
-		if (!cur || cur.state !== "drafted" || cur.delivery !== "" || cur.message_id !== mark.oldMessageId) throw new Error("the claim is no longer this draft");
-		if (ledger.transition(db, key, { from: ["drafted"], nowIso, patch: { delivery: "send", sent_at: nowIso, message_id: mark.newMessageId } }) !== 1) throw new Error("the claim did not move");
+		if (!cur || cur.state !== "working" || cur.lease_owner !== owner || cur.delivery !== "send" || cur.message_id !== mark.newMessageId) return false;
+		ledger.transition(db, key, { from: ["working"], owner, nowIso, patch: { state: "drafted", reason_code: "", stage: "recorded", send_checks: checks, lease_owner: "", lease_until: "" } });
 		const sent = sentOf(cur) || {};
 		db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 			.run(nowIso, ACTOR.id, ACTOR.username, ACTOR.role, "auto_invoice_sent", "load", String(cur.load_id || key),
 				`${cur.invoice_id} → ${rules.emailDomain(sent.to) || "unknown domain"} (sent from its Gmail draft by scripts/auto-invoice-send-drafted.js; old draft ${mark.oldMessageId})`);
 		ledger.setMeta(db, markKey(key), JSON.stringify({ ...mark, state: "recorded", recordedAt: nowIso }));
+		return true;
 	}).immediate();
 }
 
-async function confirmSent(ctx, messageId) {
-	for (const wait of ctx.confirmWaits) {
-		if (wait > 0) await ctx.sleep(wait);
-		if ((await lookFor(ctx, messageId, sendRules.SENT_MAILBOX)) === "found") return true;
-	}
-	return false;
+// Sent Mail doesn't show it: the claim takes the state the job leaves its own lost send
+// in (Needs attention, MAYBE_SENT), where Try again searches Sent Mail and nothing sends it.
+function handToPerson(db, key, { owner, checks, nowIso }) {
+	return ledger.transition(db, key, { from: ["working"], owner, nowIso, patch: {
+		state: "needs_attention", reason_code: "MAYBE_SENT", send_checks: checks, lease_owner: "", lease_until: "",
+	} }) === 1;
 }
 
-// null when sent, confirmed and recorded; else { load, what }.
+// { found, checks }: Sent Mail searched at once, then after each wait.
+async function confirmSent(ctx, messageId) {
+	let checks = 0;
+	for (const wait of ctx.confirmWaits) {
+		if (wait > 0) await ctx.sleep(wait);
+		checks++;
+		if ((await lookFor(ctx, messageId, sendRules.SENT_MAILBOX)) === "found") return { found: true, checks };
+	}
+	return { found: false, checks };
+}
+
+// null when sent, confirmed and recorded; { skip: word } when the mailbox changed since the
+// listing (the load is CHECK BY HAND and nothing is sent for it); else { load, what }.
 async function sendOne(ctx, result, e) {
 	const { db, mb, out } = ctx;
 	const c = e.claim;
 	const newId = String(ctx.opts.newMessageId(mb.user) || "");
 	if (!imapDraft.MESSAGE_ID_RE.test(newId) || newId === c.message_id) return { load: e.load, what: "no fresh Message-ID; nothing sent" };
-	const held = markStarted(db, c, newId, isoOf(ctx.now()));
+	// The mailbox again, right before this load's send: a person may have sent its draft
+	// from Gmail since the listing, and the broker must not get it twice.
+	const inDrafts = await lookFor(ctx, c.message_id, DRAFTS);
+	if (inDrafts !== "found") return { skip: inDrafts === "unknown" ? "mailbox" : "invisible" };
+	const inSent = await lookFor(ctx, c.message_id, sendRules.SENT_MAILBOX);
+	if (inSent !== "absent") return { skip: inSent === "unknown" ? "mailbox" : "sent" };
+	const held = beginDraftSend(db, c, { newId, owner: ctx.owner, nowMs: ctx.now() });
 	if (held) return { load: e.load, what: `changed before the send (${held}); nothing sent` };
 	const mark = markOf(db, e.key);
+	const owner = ctx.owner;
 	out(`  sending ${e.load}`);
+	let why = "";
 	try {
 		await ctx.opts.sendMail({ user: mb.user, pass: mb.pass, from: `LogisX Inc. <${mb.user}>`, to: e.message.to, subject: e.message.subject, html: e.message.html,
 			attachments: e.message.attachments, messageId: newId });
 	} catch (err) {
 		if (err && (err.outcome === "login" || err.outcome === "refused")) {
-			markRefused(db, e.key, mark, isoOf(ctx.now()));
-			return { load: e.load, what: `the send was refused (${codeOf(err)}); nothing went out` };
+			const back = sendRefused(db, e.key, { owner, mark, nowIso: isoOf(ctx.now()) });
+			return { load: e.load, what: `the send was refused (${codeOf(err)}); nothing went out${back ? "" : "; the app took the load over meanwhile"}` };
 		}
-		return { load: e.load, what: `the send got no answer (${codeOf(err)}), so it may have gone out: check Sent Mail for ${newId}; no run sends this load again` };
+		// It may have gone out: Sent Mail decides, as for the job's own unanswered send.
+		why = `the send got no answer (${codeOf(err)})`;
 	}
-	if (!(await confirmSent(ctx, newId))) {
-		return { load: e.load, what: `the mail server took it, but Sent Mail doesn't show ${newId} yet: nothing recorded; the next run records it once Sent Mail shows it` };
+	const seen = await confirmSent(ctx, newId);
+	if (!seen.found) {
+		const handed = handToPerson(db, e.key, { owner, checks: seen.checks, nowIso: isoOf(ctx.now()) });
+		return { load: e.load, what: `${why || "the mail server took it"}, but Sent Mail doesn't show ${newId}: it may have gone out. ${handed
+			? "The load is Needs attention (may already be sent) on Completed Loads; Try again there searches Sent Mail again and never sends"
+			: "The app took the load over meanwhile; it searches Sent Mail itself and never sends"}` };
 	}
+	let recorded = false;
 	try {
-		recordSend(db, e.key, mark, isoOf(ctx.now()));
+		recorded = recordSend(db, e.key, { owner, mark, checks: seen.checks, nowIso: isoOf(ctx.now()) });
 	} catch (err) {
-		return { load: e.load, what: `sent and in Sent Mail as ${newId}, but the record failed (${codeOf(err)}): record it by hand` };
+		return { load: e.load, what: `sent and in Sent Mail as ${newId}, but the record failed (${codeOf(err)}): the app records it when its lease runs out` };
 	}
+	if (!recorded) return { load: e.load, what: `sent and in Sent Mail as ${newId}, but the app took the load over meanwhile: it records it itself` };
 	result.sent.push({ load: e.load, oldMessageId: c.message_id, newMessageId: newId });
 	out(`  sent ${e.load}: in Sent Mail, recorded`);
 	return null;
 }
 
-// A load an earlier run sent without seeing it in Sent Mail: recorded now if Sent Mail
-// shows it, never sent again. true when it is recorded.
-async function finishStarted(ctx, result, e) {
-	if (!e.mark || e.mark.state !== "started" || !imapDraft.MESSAGE_ID_RE.test(String(e.mark.newMessageId || ""))) return false;
-	if ((await lookFor(ctx, e.mark.newMessageId, sendRules.SENT_MAILBOX)) !== "found") return false;
-	try {
-		recordSend(ctx.db, e.key, e.mark, isoOf(ctx.now()));
-	} catch {
-		return false;
-	}
-	result.recorded.push({ load: e.load, oldMessageId: e.mark.oldMessageId, newMessageId: e.mark.newMessageId });
-	ctx.out(`  recorded ${e.load}: an earlier run's send is in Sent Mail`);
-	return true;
+// Sends started and not confirmed, the job's or a run's: the resume script's own rule.
+function unconfirmedSends(db) {
+	if (!hasColumn(db, ledger.CLAIMS, "delivery")) return 0;
+	return db.prepare(`SELECT COUNT(*) AS n FROM ${ledger.CLAIMS} WHERE delivery = 'send' AND stage = 'appending' AND state IN ('queued', 'working', 'needs_attention')`).get().n;
 }
 
 function lineOf(e) {
@@ -532,9 +577,9 @@ function lineOf(e) {
 // One run on a database the caller opened (read-only for a dry run). opts: db,
 // dryRun, max, stopAt, env (the app's settings), mailbox { user, pass }, readRange(range),
 // findDraftByMessageId, fetchMessages, newMessageId, sendMail, uploadsRoot,
-// fileExists, now(), sleep(ms), out(line), sheetLabel.
+// fileExists, now(), sleep(ms), out(line), dbLabel, sheetLabel.
 async function run(opts = {}) {
-	const { db, dryRun = true, max = MAX_DEFAULT, stopAt, sheetLabel = "" } = opts;
+	const { db, dryRun = true, max = MAX_DEFAULT, stopAt, dbLabel = "", sheetLabel = "" } = opts;
 	const env = opts.env || {};
 	const out = typeof opts.out === "function" ? opts.out : () => {};
 	if (!ledger.hasSchema(db) || !ledger.hasTable(db, "audit_trail") || !ledger.hasTable(db, "load_invoice_drafts")) {
@@ -544,8 +589,13 @@ async function run(opts = {}) {
 	const user = rules.normalizeEmail(opts.mailbox && opts.mailbox.user);
 	const pass = String((opts.mailbox && opts.mailbox.pass) || "");
 	if (!user || !pass) throw new Refusal("no mailbox login: the app's settings name no GMAIL_USER and app password");
+	// A send not yet confirmed holds every other, as an unanswered send stops the job's own.
+	const unconfirmed = unconfirmedSends(db);
+	const unconfirmedWords = `${unconfirmed} send${unconfirmed === 1 ? "" : "s"} not confirmed in Sent Mail`;
+	if (unconfirmed && !dryRun) throw new Refusal(`${unconfirmedWords}: settle each one first (Try again on Completed Loads searches Sent Mail again)`);
 	const ctx = {
 		db, env, opts, out,
+		owner: `${OWNER}:${crypto.randomBytes(4).toString("hex")}`,
 		mb: { user, pass },
 		mode: rules.readMode(env),
 		sendSettings: sendRules.readSettings(env),
@@ -556,9 +606,11 @@ async function run(opts = {}) {
 	const result = { dryRun, mailbox: user, window: { stopAt: win.stopAt, resumedAt: win.resumedAt, reason: win.reason }, loads: [], sent: [], recorded: [], failed: null };
 
 	out(dryRun ? "DRY RUN (nothing written)" : "APPLY");
+	if (dbLabel) out(`  database: ${dbLabel}`);
 	out(`  mailbox: ${user}`);
 	if (sheetLabel) out(`  sheet: ${sheetLabel}`);
 	out(`  stop: ${win.stopAt} ${win.reason}, resumed ${win.resumedAt}`);
+	if (unconfirmed) out(`  ${unconfirmedWords}: --apply refuses until each is settled`);
 	const listed = ledger.listClaims(db, ["drafted"]).filter((c) => !sendRules.claimSent(c));
 	out(`  Draft ready in Gmail: ${listed.length} load${listed.length === 1 ? "" : "s"}`);
 	const why = new Map(listed.map((c) => [c.load_key, notFromStop(db, c, win, ctx.sendSettings)]));
@@ -586,16 +638,15 @@ async function run(opts = {}) {
 		return result;
 	}
 
-	// An earlier run's send not yet seen in Sent Mail holds every other send, as an
-	// unanswered send stops the job's.
-	let unconfirmed = 0;
-	for (const e of result.loads.filter((x) => x.word === "started")) {
-		if (!(await finishStarted(ctx, result, e))) unconfirmed++;
-	}
-	if (unconfirmed) out(`  ${unconfirmed} earlier send${unconfirmed === 1 ? " isn't" : "s aren't"} in Sent Mail yet: nothing else is sent; check Sent Mail first`);
-	const toSend = unconfirmed || nothingVisible ? [] : clean.slice(0, max);
+	const toSend = nothingVisible ? [] : clean.slice(0, max);
 	for (const e of toSend) {
 		const failed = await sendOne(ctx, result, e);
+		if (failed && failed.skip) {
+			e.label = "CHECK BY HAND";
+			e.word = failed.skip;
+			out(`  ${e.load}: CHECK BY HAND (${failed.skip}) at its send: its draft moved since the listing; nothing sent`);
+			continue;
+		}
 		if (failed) {
 			result.failed = failed;
 			out(`  stopped at ${failed.load}: ${failed.what}`);
@@ -603,11 +654,10 @@ async function run(opts = {}) {
 		}
 	}
 	const later = clean.length - toSend.length;
-	if (!unconfirmed && !nothingVisible && later > 0) out(`  ${later} CLEAN load${later === 1 ? "" : "s"} left for the next run (at most ${max} a run)`);
-	const gone = [...result.sent, ...result.recorded];
-	if (gone.length) {
+	if (!nothingVisible && later > 0) out(`  ${later} CLEAN load${later === 1 ? "" : "s"} left for the next run (at most ${max} a run)`);
+	if (result.sent.length) {
 		out("Old drafts to delete by hand (load, Message-ID):");
-		for (const g of gone) out(`  ${g.load}  ${g.oldMessageId}`);
+		for (const g of result.sent) out(`  ${g.load}  ${g.oldMessageId}`);
 	}
 	return result;
 }
@@ -674,7 +724,7 @@ async function main(argv, { env = process.env, loadSettings = loadAppSettings, o
 		const db = openDb(dbPath, dryRun);
 		try {
 			const sheet = sheetTarget(args["sheet-id"]);
-			const result = await run({ ...deps({ env, sheetId: sheet.id }), db, dryRun, max: args.max, stopAt: args["stop-at"], env, sheetLabel: sheet.label,
+			const result = await run({ ...deps({ env, sheetId: sheet.id }), db, dryRun, max: args.max, stopAt: args["stop-at"], env, dbLabel: dbPath, sheetLabel: sheet.label,
 				out: (line) => stdout(`${line}\n`) });
 			if (result.failed) {
 				stderr(`failed: ${result.failed.load}: ${result.failed.what}\n`);

@@ -19,16 +19,23 @@
 //   §4  every check that holds a load: CHECK BY HAND with one word, nothing sent for it
 //   §5  the gate and the mailbox: a closed month, the sheet unread, sending off or
 //       stopped, the mailbox unread, no draft visible
-//   §6  errors: a refused send, a send with no answer, a send Sent Mail doesn't show;
-//       the run stops there, records nothing it can't prove, never sends a load twice,
-//       and a later run records a send once Sent Mail shows it
+//   §6  errors: a refused send (the claim back to its draft), a send with no answer, a
+//       send Sent Mail doesn't show (left as the job leaves its own lost send: Try again
+//       searches Sent Mail); the run stops there, never sends a load twice, and refuses
+//       while a send is unconfirmed
 //   §7  the cap (--max)
 //   §8  through the job's real SMTP sender to a stand-in server: the wire message is
 //       the draft's own
-//   §9  the command line: arguments, exit codes, the dry run's read-only open
+//   §9  the command line: arguments, exit codes, the dry run's read-only open, the
+//       database it opened printed
 //   §10 the source: the app's own mailbox code and sender only; nothing written to a
 //       mailbox
-//   §11 mutants, each applied once and each caught
+//   §11 the mailbox again right before each send: a draft a person sent from Gmail
+//       after the listing is CHECK BY HAND, never sent a second time
+//   §12 a send under way holds the job's own send-start state on the claim: Draft
+//       Invoice, a press, a factoring mark and the label see it; a run that dies mid-send
+//       is taken over by the app's own recovery, which never sends it again
+//   §13 mutants, each applied once and each caught
 // Made-up data only. No network but an SMTP stand-in on 127.0.0.1 in this process;
 // never reads app.db or a settings file.
 //   node scripts/test-auto-invoice-send-drafted.js      # exits 1 on any failure
@@ -221,9 +228,9 @@ function world({ dbFile = null } = {}) {
 			return { recorded: true, draftRowId: Number(r.lastInsertRowid) };
 		},
 	};
-	w.jobDeps = ({ sendOn = true } = {}) => ({
+	w.jobDeps = ({ sendOn = true, trigger = false } = {}) => ({
 		db: w.db,
-		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false",
+		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: trigger ? "true" : "false",
 			AUTO_INVOICE_MAX_PER_HOUR: "100", AUTO_INVOICE_MAX_PER_DAY: "1000" },
 		now: () => new Date(w.now),
 		readJobTracking: async () => ({ headers: HEADERS, data: [...w.rows] }),
@@ -261,7 +268,8 @@ function world({ dbFile = null } = {}) {
 	w.claim = (id) => w.db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(key(id)) || null;
 	// The script's run options: the fake Gmail, the made-up sender and the sheet as the
 	// world holds it. Sender behaviours, one per send: OK, NOT_FILED (taken, never in
-	// Sent Mail), REFUSED (refused before the message), LOST (no answer).
+	// Sent Mail), REFUSED (refused before the message), LOST (no answer), HANG (no answer
+	// ever: the process dies inside the send).
 	w.scriptOpts = (more = {}) => {
 		const { env: envOver = {}, ...rest } = more;
 		return {
@@ -298,6 +306,7 @@ function world({ dbFile = null } = {}) {
 				if (w.onSend) w.onSend(o);
 				w.smtp.push({ ...o, attachments: (o.attachments || []).map((a) => ({ ...a })) });
 				const b = w.smtpBehaviors.shift() || "OK";
+				if (b === "HANG") return new Promise(() => {});
 				if (b === "OK") w.sentBox.set(o.messageId, { raw: await mimeOf(o), at: w.now });
 				if (b === "OK" || b === "NOT_FILED") return { ok: true };
 				if (b === "REFUSED") throw Object.assign(new Error(`made-up refusal for ${o.to}`), { code: "EENVELOPE", outcome: "refused" });
@@ -417,30 +426,31 @@ function windowCase(lib) {
 			return e instanceof lib.Refusal ? `refused: ${e.message}` : `threw: ${(e && e.message) || e}`;
 		}
 	};
-	const S1 = "2026-10-05T01:50:12.345Z";
-	const R1 = "2026-10-06T03:57:30.000Z";
-	const S2 = "2026-10-08T09:00:00.000Z";
-	const R2 = "2026-10-08T11:00:00.000Z";
+	const S1 = "2026-09-14T17:22:08.512Z";
+	const S1_ROW = "2026-09-14T17:22:08.590Z";
+	const R1 = "2026-09-15T08:41:00.000Z";
+	const S2 = "2026-09-20T12:06:00.000Z";
+	const R2 = "2026-09-20T15:30:00.000Z";
 	const out = {};
 	let db = make();
 	out.none = read(db);
-	add(db, "2026-10-05T01:50:12.401Z", "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (10042026-3)");
+	add(db, S1_ROW, "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (09142026-7)");
 	out.noResume = read(db);
 	add(db, R1, "auto_invoice_send_resumed", `cleared the stop of ${S1} (LOAD_CHANGED_AFTER_SEND)`);
 	out.one = read(db);
-	add(db, "2026-10-08T09:00:00.050Z", "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (10082026-1)");
+	add(db, "2026-09-20T12:06:00.070Z", "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (09202026-2)");
 	add(db, R2, "auto_invoice_send_resumed", `cleared the stop of ${S2} (LOAD_CHANGED_AFTER_SEND)`);
 	out.two = read(db);
 	out.pickFirst = read(db, S1);
 	out.pickSecond = read(db, S2);
-	out.pickRowTime = read(db, "2026-10-05T01:50:12.401Z");
+	out.pickRowTime = read(db, S1_ROW);
 	db = make();
-	add(db, "2026-10-05T01:50:12.401Z", "auto_invoice_send_stopped", "SMTP_REFUSED (10042026-3)");
+	add(db, S1_ROW, "auto_invoice_send_stopped", "SMTP_REFUSED (09142026-7)");
 	add(db, R1, "auto_invoice_send_resumed", `cleared the stop of ${S1} (SMTP_REFUSED)`);
-	add(db, "2026-10-08T09:00:00.050Z", "auto_invoice_send_stopped", "STOPPED_BY_ADMIN by made-up-admin");
+	add(db, "2026-09-20T12:06:00.070Z", "auto_invoice_send_stopped", "STOPPED_BY_ADMIN by made-up-admin");
 	out.otherReasons = read(db);
 	db = make();
-	add(db, "2026-10-05T01:50:12.401Z", "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (10042026-3)");
+	add(db, S1_ROW, "auto_invoice_send_stopped", "LOAD_CHANGED_AFTER_SEND (09142026-7)");
 	add(db, R1, "auto_invoice_send_resumed", `cleared the stop of ${S1} (LOAD_CHANGED_AFTER_SEND)`);
 	add(db, R2, "auto_invoice_send_resumed", `cleared the stop of ${S1} (LOAD_CHANGED_AFTER_SEND)`);
 	out.twoResumes = read(db);
@@ -537,8 +547,10 @@ async function holdsSummary(lib) {
 			x.setRow("LD-TEST-0857", { "Job Status": "In Transit" });
 		},
 	});
+	// The dry run's labels first: what the listing says, before any re-check at a send.
+	const dry = await runSafe(lib, w.scriptOpts({ dryRun: true }));
 	const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false }));
-	return { threw, failed: result ? result.failed : "no result", labels: labels(result), sent: sentLoads(w) };
+	return { threw, failed: result ? result.failed : "no result", dryLabels: labels(dry.result), labels: labels(result), sent: sentLoads(w) };
 }
 
 // One case per hold the gate or the mailbox makes: each from-the-stop load's word.
@@ -562,36 +574,134 @@ async function gateSummary(lib) {
 	};
 }
 
+const claimShot = (w, id) => {
+	const c = w.claim(id);
+	return [c.state, c.reason_code, c.stage, c.delivery];
+};
+const buttonOf = (w, id) => {
+	const b = jobLib.create(w.jobDeps({ sendOn: true })).draftButtonCheck({ body: {} }, id);
+	return [b.ok, b.http || 0, (b.json && b.json.code) || ""];
+};
+
+// A person's Try again on Completed Loads (the job's own route), then the job's next look.
+async function tryAgainOn(w, id) {
+	const job = jobLib.create(w.jobDeps({ sendOn: true }));
+	const routes = {};
+	const add = (method) => (p, ...handlers) => { routes[`${method} ${p}`] = handlers; };
+	job.mount({ get: add("GET"), put: add("PUT"), post: add("POST") }, { requireRole: () => (req, res, next) => next() });
+	const out = { status: 0 };
+	const res = { status(code) { out.status = code; return res; }, json() { if (!out.status) out.status = 200; return res; } };
+	const req = { params: { loadKey: id }, body: {}, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } };
+	for (const h of routes["POST /api/auto-invoice/loads/:loadKey/retry"] || []) {
+		let next = false;
+		await h(req, res, () => { next = true; });
+		if (!next) break;
+	}
+	await job.tick();
+	return out.status;
+}
+
 async function refusedSummary(lib) {
 	const r = await applyCase(lib, { behaviors: ["REFUSED"] });
-	const first = { failed: r.result && r.result.failed, smtp: r.w.smtp.length, delivery: r.ids.map((id) => r.w.claim(id).delivery), marks: r.ids.map((id) => markOf(r.w, id)) };
+	const c = r.w.claim("LD-TEST-0801");
+	const first = { failed: r.result && r.result.failed, smtp: r.w.smtp.length, claim: [c.state, c.stage, c.delivery, c.message_id === r.old[0], c.lease_owner],
+		next: r.w.claim("LD-TEST-0802").delivery, marks: r.ids.map((id) => markOf(r.w, id)) };
 	const retry = await runSafe(lib, r.w.scriptOpts({ dryRun: false }));
 	return { threw: r.threw, first, retry: { threw: retry.threw, failed: retry.result && retry.result.failed, sent: sentLoads(r.w), delivery: r.ids.map((id) => r.w.claim(id).delivery) } };
 }
 
 async function lostSummary(lib) {
 	const r = await applyCase(lib, { behaviors: ["LOST"] });
-	const first = { failed: r.result && r.result.failed, smtp: r.w.smtp.length, delivery: r.ids.map((id) => r.w.claim(id).delivery), marks: r.ids.map((id) => markOf(r.w, id)) };
-	const dry = await runSafe(lib, r.w.scriptOpts({ dryRun: true }));
-	const again = await runSafe(lib, r.w.scriptOpts({ dryRun: false }));
-	return { threw: r.threw, first, dry: labels(dry.result), again: { threw: again.threw, smtp: r.w.smtp.length, lines: r.w.out.filter((l) => /earlier send/.test(l)) } };
+	const { w } = r;
+	const first = { failed: r.result && r.result.failed, smtp: w.smtp.length, claim: claimShot(w, "LD-TEST-0801"),
+		newId: w.claim("LD-TEST-0801").message_id === (w.smtp[0] || {}).messageId, next: w.claim("LD-TEST-0802").delivery,
+		label: labelOf(w, "LD-TEST-0801").label, button: buttonOf(w, "LD-TEST-0801") };
+	const dry = await runSafe(lib, w.scriptOpts({ dryRun: true }));
+	const dryLines = w.out.filter((l) => /not confirmed in Sent Mail/.test(l));
+	const again = await runSafe(lib, w.scriptOpts({ dryRun: false }));
+	const smtpAfterAgain = w.smtp.length;
+	// It did go: Gmail files it, and a person's Try again finds it in Sent Mail.
+	if (w.smtp[0]) w.sentBox.set(w.smtp[0].messageId, { raw: await mimeOf(w.smtp[0]), at: w.now });
+	const status = await tryAgainOn(w, "LD-TEST-0801");
+	return { threw: r.threw, first, dryListed: labels(dry.result), dryLines, again: again.threw, smtpAfterAgain,
+		tryAgain: [status, ...claimShot(w, "LD-TEST-0801"), w.smtp.length, labelOf(w, "LD-TEST-0801").label] };
 }
 
 async function notFiledSummary(lib) {
 	const r = await applyCase(lib, { behaviors: ["NOT_FILED"] });
 	const { w, ids } = r;
-	const first = { failed: r.result && r.result.failed, smtp: w.smtp.length, sleeps: [...w.sleeps], delivery: ids.map((id) => w.claim(id).delivery),
-		marks: ids.map((id) => markOf(w, id)), label: labelOf(w, ids[0]).label, audits: w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE username = 'auto-invoice-send-drafted'").get().n };
-	// Gmail files the message late: the next run records it and sends nothing again.
-	const filed = w.smtp[0];
-	if (filed) w.sentBox.set(filed.messageId, { raw: await mimeOf(filed), at: w.now });
+	const first = { failed: r.result && r.result.failed, smtp: w.smtp.length, sleeps: [...w.sleeps], claim: claimShot(w, "LD-TEST-0801"),
+		checks: Number(w.claim("LD-TEST-0801").send_checks), next: w.claim("LD-TEST-0802").delivery, label: labelOf(w, "LD-TEST-0801").label,
+		audits: w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE username = 'auto-invoice-send-drafted'").get().n };
+	// Gmail files it late: Try again records it without sending it again, then the next run sends the next load.
+	if (w.smtp[0]) w.sentBox.set(w.smtp[0].messageId, { raw: await mimeOf(w.smtp[0]), at: w.now });
+	const status = await tryAgainOn(w, "LD-TEST-0801");
 	const later = await runSafe(lib, w.scriptOpts({ dryRun: false }));
-	return {
-		threw: r.threw,
-		first,
-		later: { threw: later.threw, failed: later.result && later.result.failed, recorded: later.result ? later.result.recorded.map((x) => x.load) : null, sent: sentLoads(w),
-			delivery: ids.map((id) => w.claim(id).delivery), messageIds: ids.map((id, i) => w.claim(id).message_id === (w.smtp[i] || {}).messageId), labels: ids.map((id) => labelOf(w, id).label) },
+	return { threw: r.threw, first, tryAgain: [status, ...claimShot(w, "LD-TEST-0801")],
+		later: { threw: later.threw, failed: later.result && later.result.failed, sent: sentLoads(w), labels: ids.map((id) => labelOf(w, id).label) } };
+}
+
+// A person sends the second load's draft from Gmail while the run sends the first.
+async function recheckSummary(lib) {
+	const moveOut = (sentOnly) => (w) => {
+		w.onSend = () => {
+			w.onSend = null;
+			const id = w.claim("LD-TEST-0802").message_id;
+			w.sentBox.set(id, w.drafts.get(id));
+			if (!sentOnly) w.drafts.delete(id);
+		};
 	};
+	const one = async (setup) => {
+		const r = await applyCase(lib, { setup });
+		return { threw: r.threw, failed: r.result && r.result.failed, sent: sentLoads(r.w), delivery: r.ids.map((id) => r.w.claim(id).delivery),
+			label: (labels(r.result) || []).find((x) => x[0] === "LD-TEST-0802") || null, lines: r.w.out.filter((l) => /at its send/.test(l)) };
+	};
+	return { fromGmail: await one(moveOut(false)), sentKeptInDrafts: await one(moveOut(true)) };
+}
+
+// While a send is under way: what Draft Invoice, a press, a factoring mark, the label and
+// the resume script's own count see.
+async function flightSummary(lib) {
+	const r = await applyCase(lib, { setup: (w) => {
+		w.onSend = (o) => {
+			w.onSend = null;
+			const c = w.claim("LD-TEST-0801");
+			const mark = factoring.mark(w.db, { key: "LD-TEST-0801", loadId: "LD-TEST-0801", reason: "made-up: the draft was not sent", confirmNotSent: true,
+				actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
+			const press = factoring.draftBegin(w.db, { key: "LD-TEST-0801", loadId: "LD-TEST-0801", invoiceId: "10202026-77", path: "imap", nowIso: iso(w.now) });
+			w.during = {
+				claim: [c.state, c.stage, c.delivery, c.message_id === o.messageId],
+				button: buttonOf(w, "LD-TEST-0801"),
+				mark: mark.ok ? "marked" : mark.code,
+				press: press.ok ? "began" : press.code,
+				label: labelOf(w, "LD-TEST-0801").label,
+				resumeCounts: resumeScript.run({ db: w.db, dryRun: true }).unconfirmed,
+			};
+		};
+	} });
+	return { threw: r.threw, failed: r.result && r.result.failed, during: r.w.during || null, after: claimShot(r.w, "LD-TEST-0801"),
+		factored: factoring.isFactored(r.w.db, "LD-TEST-0801"), sent: sentLoads(r.w) };
+}
+
+// The process dies inside the send; the app then restarts (the driver's trigger takes
+// every working claim over at start-up) and its own recovery searches Sent Mail.
+async function crashSummary(lib) {
+	const one = async (delivered) => {
+		const w = await stopWorld({ during: ["LD-TEST-0801"] });
+		w.smtpBehaviors.push("HANG");
+		lib.run(w.scriptOpts({ dryRun: false })).catch(() => {});
+		for (let i = 0; i < 5000 && !w.smtp.length; i++) await new Promise((resolve) => setImmediate(resolve));
+		const msg = w.smtp[0] || {};
+		if (msg.messageId && delivered) w.sentBox.set(msg.messageId, { raw: await mimeOf(msg), at: w.now });
+		const c = w.claim("LD-TEST-0801");
+		const during = [c.state, c.stage, c.delivery, c.message_id === msg.messageId, Date.parse(c.lease_until) > w.now];
+		w.now += 16 * MIN;
+		const job = jobLib.create(w.jobDeps({ sendOn: true, trigger: true }));
+		job.startTrigger();
+		await job.finishStartUp();
+		return { during, after: claimShot(w, "LD-TEST-0801"), smtp: w.smtp.length, label: labelOf(w, "LD-TEST-0801").label };
+	};
+	return { delivered: await one(true), neverLeft: await one(false) };
 }
 
 async function capSummary(lib) {
@@ -651,15 +761,18 @@ const toStandIn = (port) => ({ createTransport: (opts) => realMailer.createTrans
 	host: "127.0.0.1", port, secure: false, ignoreTLS: true, auth: opts.auth, connectionTimeout: 1500, greetingTimeout: 1500, socketTimeout: 1500,
 }) });
 
-// A copy of the script with one edit, compiled beside it so its relative requires
-// resolve; null when the edit doesn't match exactly once.
-function mutantModule(file, from, to) {
-	const src = fs.readFileSync(file, "utf8");
-	if (src.split(from).length !== 2) return null;
+// A copy of the script with its edits ([from, to] pairs), compiled beside it so its
+// relative requires resolve; null when an edit doesn't match exactly once.
+function mutantModule(file, edits) {
+	let src = fs.readFileSync(file, "utf8");
+	for (const [from, to] of edits) {
+		if (src.split(from).length !== 2) return null;
+		src = src.replace(from, () => to);
+	}
 	const m = new Module(file, module);
 	m.filename = file;
 	m.paths = Module._nodeModulePaths(path.dirname(file));
-	m._compile(src.replace(from, () => to), file);
+	m._compile(src, file);
 	return m.exports;
 }
 
@@ -676,14 +789,14 @@ async function main() {
 		const s = windowCase(lib);
 		const R = "LOAD_CHANGED_AFTER_SEND";
 		eq(s.none, `refused: no ${R} stop in the audit log: nothing to send`, "§1 no stop for a changed load: refused");
-		eq(s.noResume, "refused: the stop of 2026-10-05T01:50:12.401Z has no resume in the audit log (it may still stand)", "§1 a stop with no resume: refused");
-		eq(s.one, ["2026-10-05T01:50:12.345Z", "2026-10-06T03:57:30.000Z", R], "§1 one stop: from the stop's own time, as the resume's row names it, to the resume");
-		eq(s.two, `refused: 2 ${R} stops in the audit log: name one with --stop-at (2026-10-05T01:50:12.345Z, 2026-10-08T09:00:00.000Z)`, "§1 two stops and no --stop-at: refused, naming both");
-		eq([s.pickFirst, s.pickSecond], [["2026-10-05T01:50:12.345Z", "2026-10-06T03:57:30.000Z", R], ["2026-10-08T09:00:00.000Z", "2026-10-08T11:00:00.000Z", R]],
+		eq(s.noResume, "refused: the stop of 2026-09-14T17:22:08.590Z has no resume in the audit log (it may still stand)", "§1 a stop with no resume: refused");
+		eq(s.one, ["2026-09-14T17:22:08.512Z", "2026-09-15T08:41:00.000Z", R], "§1 one stop: from the stop's own time, as the resume's row names it, to the resume");
+		eq(s.two, `refused: 2 ${R} stops in the audit log: name one with --stop-at (2026-09-14T17:22:08.512Z, 2026-09-20T12:06:00.000Z)`, "§1 two stops and no --stop-at: refused, naming both");
+		eq([s.pickFirst, s.pickSecond], [["2026-09-14T17:22:08.512Z", "2026-09-15T08:41:00.000Z", R], ["2026-09-20T12:06:00.000Z", "2026-09-20T15:30:00.000Z", R]],
 			"§1 --stop-at picks one stop, matched exactly");
-		eq(s.pickRowTime, `refused: no ${R} stop at 2026-10-05T01:50:12.401Z in the audit log`, "§1 ...the stop row's own time is not the stop's: refused");
+		eq(s.pickRowTime, `refused: no ${R} stop at 2026-09-14T17:22:08.590Z in the audit log`, "§1 ...the stop row's own time is not the stop's: refused");
 		eq(s.otherReasons, `refused: no ${R} stop in the audit log: nothing to send`, "§1 stops for other reasons only (an SMTP refusal, a Super Admin's Stop): refused");
-		eq(s.twoResumes, "refused: the stop of 2026-10-05T01:50:12.401Z matches more than one resume in the audit log", "§1 one stop, two resumes naming it: refused");
+		eq(s.twoResumes, "refused: the stop of 2026-09-14T17:22:08.590Z matches more than one resume in the audit log", "§1 one stop, two resumes naming it: refused");
 		const w = await stopWorld({ resume: false });
 		const r = await runSafe(lib, w.scriptOpts({ dryRun: false }));
 		eq([r.threw, w.smtp.length], [`refused: the stop of ${w.stopAt} has no resume in the audit log (it may still stand)`, 0], "§1 the story with the stop still standing: --apply refuses and sends nothing");
@@ -772,6 +885,7 @@ async function main() {
 		};
 		for (const [load, expected] of Object.entries(want)) eq(got[load], expected, `§4 ${load} (${explain[load]}): ${expected[0] === "CLEAN" ? "CLEAN" : `CHECK BY HAND (${expected[0]})`}`);
 		eq(Object.keys(got).sort(), Object.keys(want).sort(), "§4 every Draft ready in Gmail load listed, and only those (a load drafted by hand has no automatic draft to list)");
+		eq(s.dryLabels, s.labels, "§4 the dry run lists every load with the same label");
 		eq(s.sent, ["LD-TEST-0801", "LD-TEST-0802"], "§4 only the CLEAN loads are sent");
 	}
 
@@ -796,22 +910,26 @@ async function main() {
 	missing(6);
 	if (lib) {
 		const ref = await refusedSummary(lib);
-		eq([ref.threw, ref.first], ["", { failed: { load: "LD-TEST-0801", what: "the send was refused (EENVELOPE); nothing went out" }, smtp: 1, delivery: ["", ""], marks: ["refused", ""] }],
-			"§6 a refused send: the run stops there, the next load untouched, nothing recorded");
+		eq([ref.threw, ref.first], ["", { failed: { load: "LD-TEST-0801", what: "the send was refused (EENVELOPE); nothing went out" }, smtp: 1,
+			claim: ["drafted", "recorded", "", true, ""], next: "", marks: ["refused", ""] }],
+		"§6 a send refused before its message: the run stops there, the claim back to the draft it was, the next load untouched");
 		eq(ref.retry, { threw: "", failed: null, sent: ["LD-TEST-0801", "LD-TEST-0801", "LD-TEST-0802"], delivery: ["send", "send"] }, "§6 ...nothing went out, so a later run sends it");
 		const lost = await lostSummary(lib);
-		eq([lost.threw, lost.first.failed && lost.first.failed.load, lost.first.smtp, lost.first.delivery, lost.first.marks], ["", "LD-TEST-0801", 1, ["", ""], ["started", ""]],
-			"§6 a send with no answer: the run stops there, nothing recorded, the load marked started");
-		eq(lost.dry, [["LD-TEST-0810", "not from the stop", "outside", "found"], ["LD-TEST-0801", "started", "yes", "found"], ["LD-TEST-0802", "CLEAN", "yes", "found"],
-			["LD-TEST-0820", "not from the stop", "outside", "found"]], "§6 ...a dry run shows it CHECK BY HAND (started)");
-		eq(lost.again, { threw: "", smtp: 1, lines: ["  1 earlier send isn't in Sent Mail yet: nothing else is sent; check Sent Mail first"] },
-			"§6 ...and a later run never sends it again, nor anything else while it is unconfirmed");
+		const MAYBE = "it may have gone out. The load is Needs attention (may already be sent) on Completed Loads; Try again there searches Sent Mail again and never sends";
+		eq([lost.threw, lost.first], ["", { failed: { load: "LD-TEST-0801", what: `the send got no answer (ETIMEDOUT), but Sent Mail doesn't show <made-up-send-1@example.com>: ${MAYBE}` },
+			smtp: 1, claim: ["needs_attention", "MAYBE_SENT", "appending", "send"], newId: true, next: "", label: "Needs attention: may already be sent", button: [false, 409, "INVOICE_ALREADY_SENT"] }],
+		"§6 a send with no answer that Sent Mail doesn't show: the run stops; the load is left as the job leaves its own lost send (Needs attention, may already be sent), Draft Invoice refuses");
+		eq([lost.dryListed, lost.dryLines], [[["LD-TEST-0810", "not from the stop", "outside", "found"], ["LD-TEST-0802", "CLEAN", "yes", "found"], ["LD-TEST-0820", "not from the stop", "outside", "found"]],
+			["  1 send not confirmed in Sent Mail: --apply refuses until each is settled"]], "§6 ...a dry run says so");
+		eq([lost.again, lost.smtpAfterAgain], ["refused: 1 send not confirmed in Sent Mail: settle each one first (Try again on Completed Loads searches Sent Mail again)", 1],
+			"§6 ...and --apply refuses (exit 2) while it is unconfirmed: nothing sent");
+		eq(lost.tryAgain, [200, "drafted", "", "recorded", "send", 1, "Sent to the broker"], "§6 ...a person's Try again searches Sent Mail, finds it and records it; nothing sends it again");
 		const nf = await notFiledSummary(lib);
-		eq([nf.threw, nf.first], ["", { failed: { load: "LD-TEST-0801", what: `the mail server took it, but Sent Mail doesn't show <made-up-send-1@example.com> yet: nothing recorded; the next run records it once Sent Mail shows it` },
-			smtp: 1, sleeps: [10000, 30000, 60000], delivery: ["", ""], marks: ["started", ""], label: "Draft ready in Gmail", audits: 0 }],
-		"§6 a send Sent Mail doesn't show (searched at once, then after 10 s, 30 s and 60 s): stops, records nothing, the next load not sent");
-		eq(nf.later, { threw: "", failed: null, recorded: ["LD-TEST-0801"], sent: ["LD-TEST-0801", "LD-TEST-0802"], delivery: ["send", "send"], messageIds: [true, true],
-			labels: ["Sent to the broker", "Sent to the broker"] }, "§6 ...once Sent Mail shows it, the next run records it without sending it again, then sends the next");
+		eq([nf.threw, nf.first], ["", { failed: { load: "LD-TEST-0801", what: `the mail server took it, but Sent Mail doesn't show <made-up-send-1@example.com>: ${MAYBE}` },
+			smtp: 1, sleeps: [10000, 30000, 60000], claim: ["needs_attention", "MAYBE_SENT", "appending", "send"], checks: 4, next: "", label: "Needs attention: may already be sent", audits: 0 }],
+		"§6 a send Sent Mail doesn't show (searched at once, then after 10 s, 30 s and 60 s): stops, records nothing, the next load not sent, the load Needs attention (may already be sent)");
+		eq([nf.tryAgain, nf.later], [[200, "drafted", "", "recorded", "send"], { threw: "", failed: null, sent: ["LD-TEST-0801", "LD-TEST-0802"], labels: ["Sent to the broker", "Sent to the broker"] }],
+			"§6 ...once Sent Mail shows it, Try again records it without sending it again, and the next run sends the next load");
 		// The app records a change on the second load while the first is being sent.
 		const moved = await applyCase(lib, { setup: (w) => {
 			w.onSend = () => {
@@ -922,19 +1040,22 @@ async function main() {
 			const bytes = sha(fs.readFileSync(file));
 			const dry = await call(["--dry-run", `--db=${file}`, "--sheet-id=sheet-under-test"], { w });
 			eq([dry.code, dry.err, sha(fs.readFileSync(file)) === bytes, w.smtp.length], [0, "", true, 0], "§9 --dry-run: exit 0; the database file, opened read-only, unchanged byte for byte; nothing sent");
-			ok(dry.out.startsWith(`DRY RUN (nothing written)\n  mailbox: ${MAILBOX.user}\n  sheet: sheet-under-test\n`), "§9 ...it names the mailbox account and the sheet it read");
+			ok(dry.out.startsWith(`DRY RUN (nothing written)\n  database: ${file}\n  mailbox: ${MAILBOX.user}\n  sheet: sheet-under-test\n`),
+				"§9 ...it names the database it opened (its absolute path), the mailbox account and the sheet it read");
+			const relative = await call(["--dry-run", `--db=${path.relative(process.cwd(), file)}`, "--sheet-id=sheet-under-test"], { w });
+			ok(relative.code === 0 && relative.out.includes(`\n  database: ${file}\n`), "§9 a relative --db is printed as the absolute path it opened");
 			const prod = await call(["--dry-run", `--db=${file}`, "--sheet-id=production"], { w });
 			eq([prod.code, prod.sheetId === sheetIds.PRODUCTION_SPREADSHEET_ID, /\n {2}sheet: production\n/.test(prod.out)], [0, true, true], "§9 --sheet-id=production names production's own sheet (lib/sheet-id.js), never a default");
 			const noMailbox = await call(["--dry-run", `--db=${file}`, "--sheet-id=sheet-under-test"], { w, depsMore: { mailbox: { user: "", pass: "" } } });
 			eq([noMailbox.code, noMailbox.err], [2, "refused: no mailbox login: the app's settings name no GMAIL_USER and app password\n"], "§9 no mailbox login: exit 2");
-			const stopAt = await call(["--dry-run", `--db=${file}`, "--sheet-id=sheet-under-test", "--stop-at=2026-10-05T01:50:12.345Z"], { w });
-			eq([stopAt.code, stopAt.err], [2, "refused: no LOAD_CHANGED_AFTER_SEND stop at 2026-10-05T01:50:12.345Z in the audit log\n"], "§9 a window that can't be read: exit 2");
+			const stopAt = await call(["--dry-run", `--db=${file}`, "--sheet-id=sheet-under-test", "--stop-at=2026-09-14T17:22:08.512Z"], { w });
+			eq([stopAt.code, stopAt.err], [2, "refused: no LOAD_CHANGED_AFTER_SEND stop at 2026-09-14T17:22:08.512Z in the audit log\n"], "§9 a window that can't be read: exit 2");
 			w.smtpBehaviors.push("REFUSED");
 			const failed = await call(["--apply", `--db=${file}`, "--sheet-id=sheet-under-test"], { w });
 			eq([failed.code, failed.err], [1, "failed: LD-TEST-0801: the send was refused (EENVELOPE); nothing went out\n"], "§9 --apply, a send refused: exit 1, naming the load and what happened");
 			const applied = await call(["--apply", `--db=${file}`, "--sheet-id=sheet-under-test"], { w });
 			eq([applied.code, applied.err, sentLoads(w)], [0, "", ["LD-TEST-0801", "LD-TEST-0801", "LD-TEST-0802"]], "§9 --apply: exit 0");
-			ok(/^APPLY\n {2}mailbox: drafts@example\.com\n/.test(applied.out), "§9 ...it prints the mailbox account before it sends");
+			ok(applied.out.startsWith(`APPLY\n  database: ${file}\n  mailbox: ${MAILBOX.user}\n`), "§9 ...it prints the database and the mailbox account before it sends");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
@@ -947,8 +1068,8 @@ async function main() {
 		const src = fs.readFileSync(SCRIPT_FILE, "utf8");
 		const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 		const required = [...code.matchAll(/require\(\s*(["'`])([^"'`]+)\1\s*\)/g)].map((m) => m[2]);
-		eq([...new Set(required)].sort(), ["../lib/auto-invoice-ledger", "../lib/auto-invoice-rules", "../lib/auto-invoice-send", "../lib/factoring-store", "../lib/imap-draft",
-			"../lib/mime-read", "../lib/sheet-id", "./lib/server-lift", "./lib/server-source", "dotenv", "fs", "googleapis", "nodemailer", "path"],
+		eq([...new Set(required)].sort(), ["../lib/auto-invoice-job", "../lib/auto-invoice-ledger", "../lib/auto-invoice-rules", "../lib/auto-invoice-send", "../lib/factoring-store",
+			"../lib/imap-draft", "../lib/mime-read", "../lib/sheet-id", "./lib/server-lift", "./lib/server-source", "crypto", "dotenv", "fs", "googleapis", "nodemailer", "path"],
 		"§10 it loads the app's own modules only: no n8n, no other mailbox client");
 		eq(code.match(/\b(STORE|APPEND|COPY|MOVE|EXPUNGE|UID)\b|SELECT\s+"/g) || [], [], "§10 no IMAP command of its own; nothing that could change a mailbox");
 		eq([/appendGmailDraft/.test(code), /createTransport/.test(code), /n8n/i.test(code)], [false, false, false], "§10 it never appends a draft, opens a transport of its own or calls n8n");
@@ -959,8 +1080,38 @@ async function main() {
 	}
 
 	// ---------------------------------------------------------------- §11
-	section("§11 mutants, each applied once and each caught");
+	section("§11 the mailbox again right before each send");
 	missing(11);
+	if (lib) {
+		const s = await recheckSummary(lib);
+		eq(s.fromGmail, { threw: "", failed: null, sent: ["LD-TEST-0801"], delivery: ["send", ""], label: ["LD-TEST-0802", "invisible", "yes", "found"],
+			lines: ["  LD-TEST-0802: CHECK BY HAND (invisible) at its send: its draft moved since the listing; nothing sent"] },
+		"§11 a person sends a load's draft from Gmail after the listing: at its own send it is no longer in Drafts, so it is CHECK BY HAND and nothing is sent (no second invoice)");
+		eq(s.sentKeptInDrafts, { threw: "", failed: null, sent: ["LD-TEST-0801"], delivery: ["send", ""], label: ["LD-TEST-0802", "sent", "yes", "found"],
+			lines: ["  LD-TEST-0802: CHECK BY HAND (sent) at its send: its draft moved since the listing; nothing sent"] },
+		"§11 ...its Message-ID in Sent Mail at its own send: CHECK BY HAND (sent), nothing sent");
+	}
+
+	// ---------------------------------------------------------------- §12
+	section("§12 a send under way: what the app sees, and a run that dies mid-send");
+	missing(12);
+	if (lib) {
+		const f = await flightSummary(lib);
+		eq([f.threw, f.failed], ["", null], "§12 the run completes");
+		eq(f.during, { claim: ["working", "appending", "send", true], button: [false, 409, "INVOICE_ALREADY_SENT"], mark: "AUTO_INVOICE_IN_FLIGHT", press: "INVOICE_SENT_MEANWHILE",
+			label: "Making the invoice now", resumeCounts: 1 },
+		"§12 during the send the claim holds the job's own send-start state: Draft Invoice refuses, a factoring mark and a press are refused, the label isn't \"Draft ready in Gmail\", the resume script counts it");
+		eq([f.after, f.factored, f.sent], [["drafted", "", "recorded", "send"], false, ["LD-TEST-0801", "LD-TEST-0802"]], "§12 ...and once Sent Mail shows it, it is recorded as sent");
+		const crash = await crashSummary(lib);
+		eq(crash.delivered, { during: ["working", "appending", "send", true, true], after: ["drafted", "", "recorded", "send"], smtp: 1, label: "Sent to the broker" },
+			"§12 the run dies after its message left: the app's own recovery finds it in Sent Mail and records it; nothing sends it again");
+		eq(crash.neverLeft, { during: ["working", "appending", "send", true, true], after: ["needs_attention", "MAYBE_SENT", "appending", "send"], smtp: 1, label: "Needs attention: may already be sent" },
+			"§12 the run dies before its message left: the app's own recovery doesn't find it and leaves it as its own lost send (Needs attention, may already be sent); nothing sends it again");
+	}
+
+	// ---------------------------------------------------------------- §13
+	section("§13 mutants, each applied once and each caught");
+	missing(13);
 	if (lib) {
 		const CASES = {
 			window: async (l) => windowCase(l),
@@ -972,14 +1123,22 @@ async function main() {
 			lost: lostSummary,
 			notFiled: notFiledSummary,
 			cap: capSummary,
+			recheck: recheckSummary,
+			flight: flightSummary,
+			crash: crashSummary,
 		};
+		const IN_FLIGHT = "const moved = ledger.transition(db, cur.load_key, { from: [\"drafted\"], nowIso, patch: {";
 		const MUTANTS = [
-			["send twice (no mark before the send)", "ledger.setMeta(db, markKey(cur.load_key), JSON.stringify({ v: 1, state: \"started\",", "void (db, markKey(cur.load_key), JSON.stringify({ v: 1, state: \"started\",", "lost"],
+			["send twice (an unanswered send read as refused, so the claim goes back to a draft)", "if (err && (err.outcome === \"login\" || err.outcome === \"refused\")) {", "if (err) {", "lost"],
 			["re-render the body instead of the stored message", "\t\thtml: parsed.html,\n", "\t\thtml: `<p>Invoice ${c.invoice_id} for load ${c.load_id}.</p>`,\n", "apply"],
 			["skip the Sent Mail check", "if (inSent === \"found\") return { word: \"sent\" };", "if (inSent === \"found\" && false) return { word: \"sent\" };", "holds"],
 			["send a CHECK BY HAND load", "const clean = result.loads.filter((e) => e.label === \"CLEAN\");", "const clean = result.loads.filter((e) => e.label === \"CLEAN\" || e.fromStop === \"yes\");", "holds"],
 			["skip the Drafts check", "if (visible !== \"found\") return { word: \"invisible\" };", "if (visible !== \"found\" && false) return { word: \"invisible\" };", "holds"],
-			["record before confirming", "if (!(await confirmSent(ctx, newId))) {", "if (!(recordSend(db, e.key, mark, isoOf(ctx.now())), await confirmSent(ctx, newId))) {", "notFiled"],
+			["record before confirming", "\tconst seen = await confirmSent(ctx, newId);", "\trecordSend(db, e.key, { owner, mark, checks: 0, nowIso: isoOf(ctx.now()) });\n\tconst seen = await confirmSent(ctx, newId);", "notFiled"],
+			["no re-check of the mailbox before the send", "\tconst inDrafts = await lookFor(ctx, c.message_id, DRAFTS);\n\tif (inDrafts !== \"found\") return { skip: inDrafts === \"unknown\" ? \"mailbox\" : \"invisible\" };\n\tconst inSent = await lookFor(ctx, c.message_id, sendRules.SENT_MAILBOX);\n\tif (inSent !== \"absent\") return { skip: inSent === \"unknown\" ? \"mailbox\" : \"sent\" };\n", "", "recheck"],
+			["no in-flight mark on the claim", IN_FLIGHT, IN_FLIGHT.replace("const moved = ", "const moved = 1 || "), "flight"],
+			["the in-flight mark after the send", [[IN_FLIGHT, IN_FLIGHT.replace("const moved = ", "const moved = 1 || ")],
+				["\tconst seen = await confirmSent(ctx, newId);", "\tledger.transition(db, e.key, { from: [\"drafted\"], nowIso: isoOf(ctx.now()), patch: { state: \"working\", stage: \"appending\", delivery: \"send\", sent_at: isoOf(ctx.now()), send_checks: 0, message_id: newId, lease_owner: owner, lease_until: isoOf(ctx.now() + LEASE_MS) } });\n\tconst seen = await confirmSent(ctx, newId);"]], null, "crash"],
 			["carry on after an error", "\t\t\tout(`  stopped at ${failed.load}: ${failed.what}`);\n\t\t\tbreak;", "\t\t\tout(`  stopped at ${failed.load}: ${failed.what}`);\n\t\t\tcontinue;", "refused"],
 			["ignore the cap", "clean.slice(0, max)", "clean.slice(0)", "cap"],
 			["write on the dry run", "\tif (dryRun) {\n\t\tout(`  would send:", "\tif (dryRun && false) {\n\t\tout(`  would send:", "dry"],
@@ -997,8 +1156,8 @@ async function main() {
 		];
 		const real = {};
 		for (const [label, from, to, caseName] of MUTANTS) {
-			const m = mutantModule(SCRIPT_FILE, from, to);
-			ok(m, `§11 MUTANT ${label}: applied once`);
+			const m = mutantModule(SCRIPT_FILE, Array.isArray(from) ? from : [[from, to]]);
+			ok(m, `§13 MUTANT ${label}: applied once`);
 			if (!m) continue;
 			if (!(caseName in real)) real[caseName] = JSON.stringify(await CASES[caseName](lib));
 			let got;
@@ -1007,7 +1166,7 @@ async function main() {
 			} catch (e) {
 				got = `threw ${(e && e.message) || e}`;
 			}
-			ok(got !== real[caseName], `§11 MUTANT ${label}: caught (${caseName})`);
+			ok(got !== real[caseName], `§13 MUTANT ${label}: caught (${caseName})`);
 			console.log(`  ${got !== real[caseName] ? "caught" : "NOT CAUGHT"}: ${label} (${caseName})`);
 		}
 	}
