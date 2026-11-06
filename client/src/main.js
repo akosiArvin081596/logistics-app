@@ -5,16 +5,12 @@ import { Locale } from 'vant'
 import enUS from 'vant/es/locale/lang/en-US'
 import App from './App.vue'
 import router from './router'
-import { thisPageTabs } from './lib/appTabs'
 import './assets/shared.css'
 
 // Applies the webfont stylesheet index.html preloaded. First statement so the
 // swap is queued ahead of app boot — see lib/fonts.js for why it is not simply
 // a <link rel="stylesheet"> in the HTML.
 applyWebFonts()
-
-// Every page counts as an open tab from here on (lib/appTabs.js).
-thisPageTabs()
 
 Locale.use('en-US', enUS)
 

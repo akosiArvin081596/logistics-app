@@ -11,11 +11,12 @@
  *       hold and an empty list never); unseen notes newest first; which ids a driver may mark
  *   §3  A SIGN-IN: a Driver's session records the latest id, in the store, beside `user`; no other
  *       role gets one; GET /api/auth/session doesn't change; a hook that throws costs no sign-in
- *   §4  A DEPLOY, over a real session store: a new entry makes a live Driver session due; no new
- *       entry leaves it alone; a session from before the feature is due; a rollback is not; signing
- *       back in clears it for good, so it can't loop; another driver's sign-in clears nobody else
- *   §5  CHANGE-PASSWORD keeps the session on the release it had: not due for a new password, and
- *       still due if it was due
+ *   §4  A DEPLOY, over a real session store: a new entry leaves a live Driver session reading nothing
+ *       new until their next sign-in; no new entry leaves it alone; a session from before the feature
+ *       waits too; a rollback doesn't; signing back in brings the note; another driver's sign-in
+ *       changes nobody else's answer; nothing says a sign-in is due
+ *   §5  CHANGE-PASSWORD keeps the session on the release it had: a new password neither brings the
+ *       note early nor puts it off
  *   §6  THE KILL SWITCH: off, every route answers 404 FEATURE_OFF before any role check, nothing
  *       is written and a sign-in still works; the flag reads on unless false/0/no/off
  *   §7  WHO: only a Driver reaches the routes; every other role 403, nobody 401, a forced password
@@ -26,8 +27,7 @@
  *   §9  A FIRST-TIME DRIVER: no history, one tour offer that waits until answered and never comes
  *       back; an existing driver gets the notes and no offer
  *   §10 THE TOUR writes only its own tour_done_at, and only his; a repeat keeps the first time
- *   §11 A FAILED READ OR WRITE: no table still answers and locks nobody out; a due session stays
- *       due from the session alone; a sign-in works and isn't due afterwards
+ *   §11 A FAILED READ OR WRITE: no table still answers and locks nobody out; a sign-in works
  *   §12 THE WIRING: server.js as shipped, the routes in the snapshot, the flag in the replica rules
  *       and the settings template, parameterized SQL, and nothing in pay, invoices or brokers
  *       reading the table
@@ -281,6 +281,7 @@ const seenRows = (db, userId) => db.prepare("SELECT release_id, seen_at, tour_do
 
 const R1 = Object.freeze({ id: "2026-01-01-first", title: "First", notes: ["The first made-up note."], tour: ["loads"] });
 const R2 = Object.freeze({ id: "2026-02-01-second", title: "Second", notes: ["The second made-up note.", { text: "A made-up line for a tab.", needs: "performance" }], tour: ["performance"] });
+const NOTHING = Object.freeze({ notes: [], tourOffered: false });
 
 async function main() {
 	const clientLib = await import(pathToFileURL(path.join(ROOT, "client", "src", "lib", "driverReleaseNotices.js")).href).catch((e) => die(`client lib must exist: ${e.message}`));
@@ -396,32 +397,31 @@ async function main() {
 		let w = await startWorld({ db, list: [R1] });
 		const driver = await signIn(w, "driver-a");
 		const other = await signIn(w, "driver-b");
-		eq("on the release he signed in on, nothing is due", (await call(w, "GET", STATE, { cookie: driver })).body.signInDue, false);
+		const notesOf = async (cookie) => (await call(w, "GET", STATE, { cookie })).body.notes.map((n) => n.id);
+		eq("on the release they signed in on, they read its note", await notesOf(driver), [R1.id]);
 		await stopWorld(w);
 
 		w = await startWorld({ db, list: [R1] });
-		eq("a deploy with no new entry signs nobody out", (await call(w, "GET", STATE, { cookie: driver })).body.signInDue, false);
+		eq("a deploy with no new entry changes nothing", await notesOf(driver), [R1.id]);
 		await stopWorld(w);
 
 		w = await startWorld({ db, list: TWO });
-		const due = await call(w, "GET", STATE, { cookie: driver });
-		eq("a new entry makes a live session due, with no notes yet", [due.status, due.body], [200, { signInDue: true, releaseId: R2.id, notes: [], tourOffered: false }]);
-		eq("asking again doesn't change it or his session", [(await call(w, "GET", STATE, { cookie: driver })).body.signInDue, storedSession(db, driver).driverRelease], [true, R1.id]);
+		const behind = await call(w, "GET", STATE, { cookie: driver });
+		eq("a new entry: a live session reads nothing new, not even a note it hadn't answered, until the next sign-in", [behind.status, behind.body], [200, NOTHING]);
+		eq("asking again changes neither the answer nor their session", [(await call(w, "GET", STATE, { cookie: driver })).body, storedSession(db, driver).driverRelease], [NOTHING, R1.id]);
 		await call(w, "POST", "/api/auth/logout", { cookie: driver });
 		const again = await signIn(w, "driver-a");
-		const after = await call(w, "GET", STATE, { cookie: again });
-		eq("signing back in clears it", after.body.signInDue, false);
-		eq("...and he reads the new note", after.body.notes.map((n) => n.id), [R2.id, R1.id]);
-		for (let i = 0; i < 3; i++) eq(`...for good: it can't loop (${i + 1})`, (await call(w, "GET", STATE, { cookie: again })).body.signInDue, false);
-		eq("another driver's sign-in clears nobody else", (await call(w, "GET", STATE, { cookie: other })).body.signInDue, true);
+		eq("at the next sign-in they read the new note", await notesOf(again), [R2.id, R1.id]);
+		eq("...and it stays until answered", await notesOf(again), [R2.id, R1.id]);
+		eq("another driver's sign-in changes nobody else's answer", (await call(w, "GET", STATE, { cookie: other })).body, NOTHING);
 		await stopWorld(w);
 
 		w = await startWorld({ db, list: [R1] });
-		eq("a rollback signs out nobody who signed in on the newer release", (await call(w, "GET", STATE, { cookie: again })).body.signInDue, false);
+		eq("a rollback holds back nobody who signed in on the newer release", await notesOf(again), [R1.id]);
 		await stopWorld(w);
 
 		w = await startWorld({ db, list: [] });
-		eq("an empty list makes nobody due", (await call(w, "GET", STATE, { cookie: other })).body, { signInDue: false, releaseId: "", notes: [], tourOffered: false });
+		eq("an empty list leaves nothing to read", (await call(w, "GET", STATE, { cookie: other })).body, NOTHING);
 		await stopWorld(w);
 	}
 	{
@@ -432,7 +432,10 @@ async function main() {
 		eq("a session from before the feature holds no id", storedSession(db, before).driverRelease, undefined);
 		await stopWorld(w);
 		w = await startWorld({ db, list: [R1] });
-		eq("...and is due once it ships", (await call(w, "GET", STATE, { cookie: before })).body.signInDue, true);
+		eq("...and reads nothing new once it ships", (await call(w, "GET", STATE, { cookie: before })).body, NOTHING);
+		await call(w, "POST", "/api/auth/logout", { cookie: before });
+		const next = await signIn(w, "driver-a");
+		eq("...until the next sign-in", (await call(w, "GET", STATE, { cookie: next })).body.notes.map((n) => n.id), [R1.id]);
 		await stopWorld(w);
 	}
 
@@ -445,7 +448,7 @@ async function main() {
 		const r = await call(w, "POST", "/api/auth/change-password", { cookie: c, body: { currentPassword: PW, newPassword: NEW_PW } });
 		eq("the change works and rotates the session", [r.status, !!r.cookie && r.cookie !== c], [200, true]);
 		eq("the rotated session keeps its release", storedSession(db, r.cookie).driverRelease, R2.id);
-		eq("so a new password doesn't make him due", (await call(w, "GET", STATE, { cookie: r.cookie })).body.signInDue, false);
+		eq("so a new password doesn't put the note off", (await call(w, "GET", STATE, { cookie: r.cookie })).body.notes.map((n) => n.id), [R2.id, R1.id]);
 		await stopWorld(w);
 	}
 	{
@@ -454,10 +457,10 @@ async function main() {
 		const c = await signIn(w, "driver-a");
 		await stopWorld(w);
 		w = await startWorld({ db, list: TWO });
-		eq("a session behind before the change", (await call(w, "GET", STATE, { cookie: c })).body.signInDue, true);
+		eq("a session behind before the change reads nothing new", (await call(w, "GET", STATE, { cookie: c })).body, NOTHING);
 		const r = await call(w, "POST", "/api/auth/change-password", { cookie: c, body: { currentPassword: PW, newPassword: NEW_PW } });
 		eq("...keeps the release it had: only a sign-in moves it", storedSession(db, r.cookie).driverRelease, R1.id);
-		eq("...and is still due", (await call(w, "GET", STATE, { cookie: r.cookie })).body.signInDue, true);
+		eq("...and still reads nothing new", (await call(w, "GET", STATE, { cookie: r.cookie })).body, NOTHING);
 		await stopWorld(w);
 	}
 	{
@@ -468,8 +471,7 @@ async function main() {
 		eq("a forced password change comes first", [held.status, held.body.code], [403, "PASSWORD_CHANGE_REQUIRED"]);
 		const r = await call(w, "POST", "/api/auth/change-password", { cookie: c, body: { currentPassword: PW, newPassword: NEW_PW } });
 		const after = await call(w, "GET", STATE, { cookie: r.cookie });
-		eq("after it he isn't sent back to sign in", after.body.signInDue, false);
-		eq("...and his tour offer is waiting", after.body.tourOffered, true);
+		eq("after it their tour offer is waiting: the change doesn't put it off", after.body.tourOffered, true);
 		await stopWorld(w);
 	}
 
@@ -542,7 +544,7 @@ async function main() {
 		eq("an existing driver reads every release he hasn't seen, newest first", first8.body.notes.map((n) => n.id), [R2.id, R1.id]);
 		eq("no name of his in the answer", /Casey|driver-a|casey@/.test(first8.text), false);
 		eq("the answer is never kept", first8.headers["cache-control"], "private, no-store");
-		eq("the fields are these and no others", Object.keys(first8.body).sort(), ["notes", "releaseId", "signInDue", "tourOffered"]);
+		eq("the fields are these and no others: nothing says a sign-in is due", Object.keys(first8.body).sort(), ["notes", "tourOffered"]);
 		eq("a note's fields are these and no others", Object.keys(first8.body.notes[0]).sort(), ["id", "notes", "title", "tour"]);
 
 		const mark = await call(w, "POST", SEEN, { cookie: a, body: { ids: [R2.id] } });
@@ -591,7 +593,7 @@ async function main() {
 		const w = await startWorld({ list: TWO });
 		const c = await signIn(w, "driver-new");
 		const first9 = await call(w, "GET", STATE, { cookie: c });
-		eq("no history, and the tour offered", [first9.body.signInDue, first9.body.notes, first9.body.tourOffered], [false, [], true]);
+		eq("no history, and the tour offered", [first9.body.notes, first9.body.tourOffered], [[], true]);
 		eq("older releases are marked seen, the offer waits", seenRows(w.db, 6).map((r) => [r.release_id, r.seen_at !== null]), [
 			[R1.id, true], [R2.id, true], [releases.APP_TOUR_ROW, false],
 		]);
@@ -655,8 +657,8 @@ async function main() {
 		db.exec("DROP TABLE driver_release_seen");
 
 		const read = await call(w, "GET", STATE, { cookie: current });
-		eq("no table: the answer is still 200, with nothing to show", [read.status, read.body], [200, { signInDue: false, releaseId: R2.id, notes: [], tourOffered: false }]);
-		eq("a due session stays due from the session alone", (await call(w, "GET", STATE, { cookie: behind })).body.signInDue, true);
+		eq("no table: the answer is still 200, with nothing to show", [read.status, read.body], [200, NOTHING]);
+		eq("a session behind reads the same, from the session alone", (await call(w, "GET", STATE, { cookie: behind })).body, NOTHING);
 		const write = await call(w, "POST", SEEN, { cookie: current, body: { ids: [R1.id] } });
 		eq("a mark that can't be saved says so, with its own code", [write.status, write.body.code], [503, "RELEASE_UNAVAILABLE"]);
 		eq("...and no database text reaches him", /sqlite|no such table/i.test(write.text), false);
@@ -664,10 +666,11 @@ async function main() {
 		const newcomer = await call(w, "POST", "/api/auth/login", { body: { username: "driver-new", password: PW } });
 		eq("a first sign-in works with no table", [newcomer.status, newcomer.body.success], [200, true]);
 		const newRead = await call(w, "GET", STATE, { cookie: newcomer.cookie });
-		eq("...and he isn't due, so nothing can loop", [newRead.status, newRead.body.signInDue], [200, false]);
+		eq("...and they read an empty answer", [newRead.status, newRead.body], [200, NOTHING]);
+		eq("...and their session holds the latest id all the same: a failed write doesn't leave it behind", storedSession(db, newcomer.cookie)?.driverRelease, releases.latestReleaseId(TWO));
 		await call(w, "POST", "/api/auth/logout", { cookie: behind });
 		const back = await signIn(w, "driver-a");
-		eq("a driver signing back in with no table isn't due", (await call(w, "GET", STATE, { cookie: back })).body.signInDue, false);
+		eq("a driver signing back in with no table reads an empty answer", (await call(w, "GET", STATE, { cookie: back })).body, NOTHING);
 		await stopWorld(w);
 	}
 	{
@@ -683,7 +686,7 @@ async function main() {
 		if (w) {
 			refusing.exec = realExec;
 			const c = await signIn(w, "driver-a");
-			eq("the app starts without the table, and a driver reads an empty answer", (await call(w, "GET", STATE, { cookie: c })).body, { signInDue: false, releaseId: R1.id, notes: [], tourOffered: false });
+			eq("the app starts without the table, and a driver reads an empty answer", (await call(w, "GET", STATE, { cookie: c })).body, NOTHING);
 			await stopWorld(w);
 		}
 	}
@@ -707,6 +710,8 @@ async function main() {
 	eq("only sign-in and change-password set the session's release", naming(/\.driverRelease = /), ["the main file", "lib/driver-release-routes.js"]);
 	eq("nothing else reads it", naming(/\.driverRelease\b/), ["the main file", "lib/driver-release-routes.js"]);
 	const routesLib = stripComments(fs.readFileSync(path.join(ROOT, "lib", "driver-release-routes.js"), "utf8"));
+	ok("the routes have nothing to say about a sign-in being due, or a session to end", !/signInDue|releaseId\b|session\.destroy|session\.regenerate|\.logout\b/.test(routesLib));
+	ok("the list and its rules have nothing to say about it either", !/signInDue|sign-out|signOut/.test(stripComments(fs.readFileSync(path.join(ROOT, "lib", "driver-releases.js"), "utf8"))));
 	const sqlCalls = [...routesLib.matchAll(/\.prepare\(\s*(["'`])([\s\S]*?)\1/g)].map((m) => m[2]);
 	ok("the SQL is there to check", sqlCalls.length >= 4, sqlCalls.length);
 	ok("every statement is parameterized: nothing is built into its text", sqlCalls.every((sql) => !sql.includes("${")));
@@ -717,6 +722,7 @@ async function main() {
 	ok("...with that reason", /kill switch/.test(String(rules.ENABLE_REFUSED.DRIVER_RELEASE_NOTICES_ENABLED)));
 	const template = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 	ok("the settings template documents the switch, commented, as a kill switch", /^# DRIVER_RELEASE_NOTICES_ENABLED=false$/m.test(template) && /KILL SWITCH/.test(template.slice(template.indexOf("New-feature notices for drivers"), template.indexOf("# DRIVER_RELEASE_NOTICES_ENABLED=false"))));
+	ok("...and says it signs nobody out", /signs nobody out/.test(template.slice(template.indexOf("New-feature notices for drivers"), template.indexOf("# DRIVER_RELEASE_NOTICES_ENABLED=false"))));
 	const prTemplate = fs.readFileSync(path.join(ROOT, ".github", "pull_request_template.md"), "utf8");
 	ok("the PR template asks for an entry", prTemplate.includes("Driver-facing? Add a `lib/driver-releases.js` entry, or say why not."));
 

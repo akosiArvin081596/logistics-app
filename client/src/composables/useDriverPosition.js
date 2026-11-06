@@ -246,8 +246,6 @@ function bodyIsUnparsed(data) {
   return Object.keys(data).length === 0
 }
 
-// True when the server answered, even with no reading; false when the read failed and what's held
-// is what was known before, which a caller deciding something now shouldn't lean on.
 async function refreshEld() {
   const name = (driverNameGetter() || '').trim()
   if (!useLegacyEldEndpoint) {
@@ -262,7 +260,7 @@ async function refreshEld() {
       // a dropped connection) is transient and must NOT permanently downgrade
       // us to the legacy path.
       if (err && (err.status === 404 || err.status === 405)) downgrade = true
-      else return false
+      else return
     }
     if (!downgrade) {
       if (!bodyIsUnparsed(data)) {
@@ -276,7 +274,7 @@ async function refreshEld() {
           eldFix.value = null
           eldMotionState.value = null
         }
-        return true
+        return
       }
       // Else: a 200 this endpoint could not have produced. Same conclusion as a
       // 404, reached by the shape of the body instead of the status line.
@@ -288,7 +286,7 @@ async function refreshEld() {
     // the legacy call then failed too.
   }
   const dn = normDriver(name)
-  if (!dn) return false
+  if (!dn) return
   try {
     const data = await api.get('/api/locations/latest')
     const l = (data?.locations || []).find(
@@ -304,10 +302,8 @@ async function refreshEld() {
       eldFix.value = null
       eldMotionState.value = null
     }
-    return true
   } catch {
     // Silent — every consumer renders a no-pin state on its own.
-    return false
   }
 }
 

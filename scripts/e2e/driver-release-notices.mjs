@@ -1,49 +1,34 @@
 #!/usr/bin/env node
-// LogisX — new-feature notices for drivers: the sign-out after a release, "What's new" and the tour,
-// on made-up data only.
+// LogisX — new-feature notices for drivers: "What's new" and the tour at the next sign-in, on made-up
+// data only. There is no forced sign-out: every step counts the logout calls, and only a driver's own
+// tap on Logout makes one.
 //
 // As a made-up Driver ("Casey Example"), at 390x844 and 1280x800:
-//   S   due, nothing going on: signed out at app open; the login page says why; he signs in; the note
-//       shows the list's own words; Show me walks the release's steps on the real tabs; Done; it
-//       doesn't come back. Only the two marks are written. 44 px or more, no sideways scroll. A logout
-//       he asks for afterwards shows no line
-//   T   THE IN TRANSIT PROOF: due, with a load In Transit: not signed out at app open, on coming back
-//       to the app, or on moving between the list, a load's page and another tab; the load is still
-//       on screen. Once the same load reads Delivered, the next open signs him out, so the hold was
-//       the load and not something else
-//   M1  a status tap in flight: the server has written Delivered and hasn't answered; he goes back to
-//       the list: not signed out while it's on the wire or after it: that page is already open. The
-//       next open does it
-//   M2  a POD upload in flight: the same, for a load already delivered
+//   S   a session from before a release: nobody signed out at app open, on coming back, on a tap or on
+//       a reload, and no note. They log out themselves: the login page says nothing about an update.
+//       They sign in as usual; the note shows the list's own words; Show me walks the release's steps
+//       on the real tabs; Done; it doesn't come back. Only the two marks are written. 44 px or more,
+//       no sideways scroll
+//   T   a load In Transit, with the session behind: no sign-out anywhere; the load stays on screen
 // And at 390x844:
-//   R   only the app opening signs out: in a page already open, coming back to it and tapping around sign
-//       nobody out, and the next open does; the driver app as a later screen isn't an opening; nor is a
-//       retry after a failed first load
-//   E   an empty load list holds: no loads at all, and a reply whose body dropped while he hauls a load
-//   V   a moving truck holds the sign-out and the note, and parking lets them through at the next
-//       moment; a tour under way closes by itself when the truck starts moving and marks nothing done;
-//       no reading, a stale reading and a failed read hold the sign-out too, and not the note; a truck
-//       moving on a feed that sends no speed holds it; a truck parked under the stretch holds it
-//   F   a failed read of the release state (503, no answer, an unreadable body): no sign-out, no note,
-//       no Kit button, and he stays in the app; a good answer later works, at the next open
+//   E   a page left open past its session: this feature does nothing to it. The next load finds the
+//       login page, and the note comes after that sign-in
+//   V   a moving truck holds the note, and parking lets it through by itself; a tour under way closes
+//       by itself when the truck starts moving and marks nothing done; the same for a truck moving on a
+//       feed that sends no speed; no reading, a stale reading and a failed read don't hold the note
+//   F   a failed read of the release state (503, no answer, an unreadable body): no note, no Kit button,
+//       and they stay in the app; a good answer later works
 //   P   the note waits for the Performance answer: a failed probe holds it, a good one lets it through
-//       whole; a driver with no week reads only his line
-//   K   the kill switch off (404 FEATURE_OFF): nothing new anywhere, and no sign-out
-//   N   no signal: not signed out, and not when it's back: that page is already open; the next open does it
-//   U   a sign-out the server doesn't confirm: the app's own login form with its line; he signs in; a
-//       logout he asks for afterwards shows no line
-//   L   a server that keeps saying "due" after he signs back in: one sign-out, no loop
-//   C   two tabs hold each other: neither signs out; with one left the other does; a logout he asks for
-//       in one tab still takes the other along; a browser that can't keep a tab's record holds; so does
-//       a tab really frozen by the browser (shown by its `freeze` event and its stopped timer; where the
-//       browser won't freeze one, C5 says so and proves only a silent tab), and a tab that died without
-//       saying so (its record planted), for up to a day; a record over a day old doesn't, and is tidied away
-//   H   a shared phone: the next driver signs in, reads his own answer, and the login line is gone
+//       whole; a driver with no week reads only their line
+//   L   a load's page holds the note, and a working load doesn't: back on the list, it shows
+//   K   the kill switch off (404 FEATURE_OFF): nothing new anywhere
+//   H   a shared phone: the next driver signs in and reads their own answer; nothing of this is kept in
+//       the browser
 //   O   a first-time driver: the offer, Skip for now, no nagging; Take the tour walks every tab; the
 //       tour marks no message or alert read and writes only its own marks; the Kit's button runs it
 // And:
-//   A   a made-up Super Admin on /driver at 1280x800: the route is never read, no sign-out, no button
-//   B   a driver on the onboarding lock screen: the route is never read, no sign-out
+//   A   a made-up Super Admin on /driver at 1280x800: the route is never read, no note, no button
+//   B   a driver on the onboarding lock screen: the route is never read, nothing shown
 //
 // Like driver-performance.mjs this boots no server.js, opens no database, reads no settings file or
 // key and signs nobody real in. It serves the checkout's built client/dist from its own static server
@@ -60,7 +45,6 @@
 // Output: PASS/FAIL lines, a final count, the screenshots and <work dir>/results-<OUT_TAG>.md.
 // Exit 0 only when every row PASSes.
 import { chromium } from 'playwright-core'
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -83,8 +67,6 @@ const DIST = path.join(paths.REPO, 'client', 'dist')
 const SHOT_DIR = process.env.SHOT_DIR ? path.resolve(process.env.SHOT_DIR) : path.join(os.homedir(), 'LogisX-replica', 'screens', 'driver-release-notices')
 const PHONE = { tag: '390x844', viewport: { width: 390, height: 844 } }
 const DESKTOP = { tag: '1280x800', viewport: { width: 1280, height: 800 } }
-// Past the app's WRITE_QUIET_MS: how long after a write a sign-out still waits.
-const QUIET_WAIT_MS = 5500
 
 function die(msg) {
   console.error(`driver-release-notices: ${msg}`)
@@ -112,21 +94,21 @@ const DAY = 24 * 60 * 60 * 1000
 const LOAD_HEADERS = ['Load ID', 'Driver', 'Job Status', 'Pickup Appointment', 'Drop-off Appointment']
 const ALL_STEP_TITLES = TOUR_STEPS.map((s) => s.title)
 const RELEASE_STEP_TITLES = LATEST.tour.map((id) => TOUR_STEPS.find((s) => s.id === id).title)
+const NOTHING = { notes: [], tourOffered: false }
 
 const thisWeek = { id: 'this-week', start: '2026-10-31', end: '2026-11-06', credits: { value: 1, target: 7.5, required: 6, deliveries: 1, pickups: 1 }, left: 6.5, percent: 13, pace: 'on-track', newWeekNote: false, nextWeekStarts: 'Nov 7', targetLowered: false, loads: [] }
 const lastWeek = { id: 'last-week', start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: [] }
 
-// One browser's view of the server. `release` says how the route answers: 'ok', 'off', 'fail' or
-// 'empty'. `reading` how the truck's does: 'fix', 'none', 'stale', 'fail', or 'moving-no-speed' for what
-// the route sends a truck whose feed sends no speed and whose fixes moved apart. `parkedMinutes` how long
-// a 'fix' has been stopped. `payload` his loads': 'ok', 'dropped' for headers whose body never arrives
-// whole, or 'fail' for a 503. `perf` his week's: a status.
-function freshState({ who = DRIVER, session = true, due = false, dueAfterLogin = false, status = '', offer = false, hasNote = false, release = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', parkedMinutes = 20, payload = 'ok', perf = 200, logoutFails = false } = {}) {
+// One browser's view of the server. `behind`: this session is from before the latest entry, so the
+// route has nothing for it until a sign-in. `release` says how the route answers: 'ok', 'off', 'fail'
+// or 'empty'. `reading` how the truck's does: 'fix', 'none', 'stale', 'fail', or 'moving-no-speed' for
+// what the route sends a truck whose feed sends no speed and whose fixes moved apart. `perf` their
+// week's: a status. `calls.logout` counts every logout: a step that doesn't tap Logout must see none.
+function freshState({ who = DRIVER, session = true, behind = false, status = '', offer = false, hasNote = false, release = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', perf = 200 } = {}) {
   return {
-    who, session, due, dueAfterLogin, status, offer, hasNote, release, moving, onboarding, unread, reading, parkedMinutes, payload, perf, logoutFails,
+    who, session, behind, status, offer, hasNote, release, moving, onboarding, unread, reading, perf,
     seen: new Set(), tourDone: new Set(),
     calls: { release: 0, logout: 0, login: 0, position: 0 },
-    holds: {},
   }
 }
 const madeUpLoad = (who, status) => ({ _rowIndex: 2, 'Load ID': 'QA-9200', Driver: who.driverName, 'Job Status': status, 'Pickup Appointment': '2026-11-02', 'Drop-off Appointment': '2026-11-04' })
@@ -148,12 +130,10 @@ function releaseAnswer(state) {
   if (state.release === 'off') return { status: 404, body: { error: 'Not found', code: 'FEATURE_OFF' } }
   if (state.release === 'fail') return { status: 503, body: { error: "That couldn't be read." } }
   if (state.release === 'empty') return { status: 200, body: {} }
-  if (state.due) return { status: 200, body: { signInDue: true, releaseId: RELEASE, notes: [], tourOffered: false } }
+  if (state.behind) return { status: 200, body: NOTHING }
   return {
     status: 200,
     body: {
-      signInDue: false,
-      releaseId: RELEASE,
       notes: state.hasNote && !state.seen.has(RELEASE) ? ENTRIES : [],
       tourOffered: state.offer && !state.seen.has(APP_TOUR_ROW),
     },
@@ -169,13 +149,14 @@ function positionAnswer(state) {
   const fix = { latitude: 29.7, longitude: -95.3, heading: 90, source: 'routemate', lastPingAge: age, timestamp: stamp }
   if (state.moving) return { status: 200, body: { ok: true, position: { ...fix, speed: 25 } } }
   if (state.reading === 'moving-no-speed') return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: null } } }
-  return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: Date.now() - state.parkedMinutes * 60 * 1000 } } }
+  return { status: 200, body: { ok: true, position: { ...fix, speed: 0, stoppedSinceMs: Date.now() - 10 * 60 * 1000 } } }
 }
 
 function answerGet(state, u) {
   const pathname = u.pathname
-  if (pathname === '/api/auth/session') return { status: 200, body: state.session ? { authenticated: true, user: state.who, appTimeZone: 'America/New_York' } : { authenticated: false, appTimeZone: 'America/New_York' } }
+  if (pathname === '/api/auth/session') return { status: 200, body: state.session ? { authenticated: true, user: state.who, appTimeZone: 'America/New_York' } : { authenticated: false } }
   if (pathname === '/api/auth/setup-check') return { status: 200, body: { needsSetup: false } }
+  if (!state.session) return { status: 401, body: { error: 'Not signed in' } }
   if (pathname === '/api/driver/me/release') return releaseAnswer(state)
   if (pathname === '/api/driver/position') return positionAnswer(state)
   if (pathname === '/api/driver/me/performance') {
@@ -186,11 +167,7 @@ function answerGet(state, u) {
   }
   if (pathname === '/api/driver/performance/leaderboard') return { status: 200, body: { period: 'week', view: 'full', boards: [] } }
   if (pathname === '/api/fuel/range') return { status: 200, body: { ok: false } }
-  if (/^\/api\/driver\/[^/]+$/.test(pathname)) {
-    if (state.payload === 'dropped') return { status: 200, raw: '{"loads":[{"_rowIndex":2,' }
-    if (state.payload === 'fail') return { status: 503, body: { error: "That couldn't be read." } }
-    return { status: 200, body: driverPayload(state) }
-  }
+  if (/^\/api\/driver\/[^/]+$/.test(pathname)) return { status: 200, body: driverPayload(state) }
   return null
 }
 
@@ -243,10 +220,6 @@ async function shot(page, name) {
 async function newContext(browser, size, state, writes) {
   const phone = size.viewport.width < 640
   const ctx = await browser.newContext({ viewport: size.viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
-  await answerRequests(ctx, state, writes)
-  return ctx
-}
-async function answerRequests(ctx, state, writes) {
   await ctx.route('**/*', async (route) => {
     const req = route.request()
     const u = new URL(req.url())
@@ -260,40 +233,29 @@ async function answerRequests(ctx, state, writes) {
       }
       const out = answerGet(state, u)
       if (out === null) unanswered.add(u.pathname)
-      return route.fulfill({ status: out ? out.status : 200, contentType: 'application/json', headers: { 'cache-control': 'private, no-store' }, body: out && out.raw !== undefined ? out.raw : JSON.stringify(out ? out.body : {}) })
+      return route.fulfill({ status: out ? out.status : 200, contentType: 'application/json', headers: { 'cache-control': 'private, no-store' }, body: JSON.stringify(out ? out.body : {}) })
     }
     writes.push(`${req.method()} ${u.pathname}`)
     let body = {}
     try { body = req.postDataJSON() || {} } catch { body = {} }
     if (u.pathname === '/api/auth/logout') {
       state.calls.logout++
-      if (state.logoutFails) return route.abort()
       state.session = false
     } else if (u.pathname === '/api/auth/login') {
       state.calls.login++
       state.who = ACCOUNTS[body.username] || state.who
       state.session = true
-      state.due = state.dueAfterLogin
+      // A sign-in starts the session on the latest entry.
+      state.behind = false
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, user: state.who, appTimeZone: 'America/New_York' }) })
     } else if (u.pathname === '/api/driver/me/release/seen') {
       for (const id of body.ids || []) state.seen.add(id)
     } else if (u.pathname === '/api/driver/me/release/tour-done') {
       for (const id of body.ids || []) state.tourDone.add(id)
-    } else if (u.pathname === '/api/driver/status') {
-      // The server has written it; the answer is what's held back. It reads Delivered from here on,
-      // so nothing is left to hold the sign-out but the tap still on the wire.
-      state.status = 'Delivered'
-      if (state.holds.status) await state.holds.status.promise
-    } else if (u.pathname === '/api/documents/upload') {
-      if (state.holds.upload) await state.holds.upload.promise
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) })
   })
-}
-function holdOpen() {
-  let release
-  const promise = new Promise((resolve) => { release = resolve })
-  return { promise, release }
+  return ctx
 }
 
 async function openPage(browser, size, state, writes = []) {
@@ -325,8 +287,7 @@ async function press(loc, size) {
   else await loc.click()
 }
 const comeBackToApp = (page) => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-// The app opening: this page loading again from scratch. Coming back to it, above, never signs anyone out.
-const openApp = (page) => page.reload({ waitUntil: 'domcontentloaded' })
+const openAgain = (page) => page.reload({ waitUntil: 'domcontentloaded' })
 const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const activeTab = (page) => text(page, '.van-tabbar-item--active .van-tabbar-item__text')
 const onLogin = (page) => new URL(page.url()).pathname === '/login'
@@ -364,21 +325,42 @@ async function walkTour(page, size, titles) {
   return seen
 }
 
-// ---------------------------------------------------------------- S
-async function signOutRun(browser, size) {
+// ---------------------------------------------------------------- S: the next sign-in, and no force
+async function nextSignInRun(browser, size) {
   const t = size.tag
-  const state = freshState({ due: true, hasNote: true, status: 'Delivered' })
+  const state = freshState({ behind: true, hasNote: true, status: 'Delivered' })
   const { ctx, page, writes } = await openPage(browser, size, state)
   try {
-    const left = await until(() => state.calls.logout === 1, 15000)
-    const note = await appears(page, testid('login-updated-note'), 8000)
-    const noteText = await text(page, testid('login-updated-note'))
-    const fitsLogin = await noSideScroll(page)
-    record(`S1-${t}`, 'Due, nothing going on: signed out, and the login page says why',
-      `one sign-out; /login; "${WORDS.signedOut}"; no side scroll`,
-      `sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, note "${noteText}", fits ${fitsLogin}`,
-      left && onLogin(page) && note && noteText === WORDS.signedOut && fitsLogin,
+    const opened = await appOpen(page)
+    await momentPassed(state, 0)
+    let before = state.calls.release
+    await comeBackToApp(page)
+    await momentPassed(state, before)
+    await press(page.locator('.van-tabbar-item', { hasText: 'Kit' }).first(), size)
+    await page.waitForTimeout(500)
+    before = state.calls.release
+    await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
+    await momentPassed(state, before)
+    before = state.calls.release
+    await openAgain(page)
+    await appOpen(page)
+    await momentPassed(state, before)
+    const noteWhileBehind = await page.locator(testid('release-dialog')).count()
+    record(`S1-${t}`, 'A session from before the release, truck parked, nothing unfinished, one tab: nobody signed out, and no note until the next sign-in',
+      'no logout at app open, on coming back, on a tap or on a reload; in the app; no note; no writes',
+      `app ${opened}, logouts ${state.calls.logout}, url ${new URL(page.url()).pathname}, note ${noteWhileBehind}, writes ${JSON.stringify(writes)}, route read ${state.calls.release} times`,
+      opened && state.calls.logout === 0 && !onLogin(page) && noteWhileBehind === 0 && writes.length === 0 && state.calls.release >= 4,
       await shot(page, `S1-${t}`))
+
+    await press(page.locator('.header-btn.danger').first(), size)
+    const left = await until(() => state.calls.logout === 1, 8000)
+    await appears(page, '.submit-btn', 8000)
+    await page.waitForTimeout(500)
+    const pageText = squeeze(await page.locator('body').innerText())
+    record(`S2-${t}`, 'A logout they ask for works as ever, and the login page says nothing about an update',
+      'one logout; /login; no words about the app being updated',
+      `logouts ${state.calls.logout}, url ${new URL(page.url()).pathname}, mentions an update ${/updated|sign in again/i.test(pageText)}`,
+      left && onLogin(page) && !/updated|sign in again/i.test(pageText))
 
     await signInForm(page, size, DRIVER.username)
     const back = await appOpen(page)
@@ -389,423 +371,157 @@ async function signOutRun(browser, size) {
     const wantLines = LATEST.notes.map((n) => n.text)
     const buttons = await heights(page, `${testid('release-show-me')}, ${testid('release-got-it')}`)
     const fits = await noSideScroll(page)
-    record(`S2-${t}`, "He signs in as usual and reads What's new, the list's own words",
-      `"${WORDS.notesHeading}"; "${LATEST.title}"; lines ${JSON.stringify(wantLines)}; no digit anywhere; Show me and Got it 44 px or more; no side scroll; one sign-out still`,
-      `app ${back}, heading "${heading}", title "${title}", lines ${JSON.stringify(lines)}, heights ${JSON.stringify(buttons)}, fits ${fits}, sign-outs ${state.calls.logout}`,
-      back && shows && heading === WORDS.notesHeading && title === LATEST.title && sameList(lines, wantLines) && !/\d/.test(lines.join(' ')) && tall(buttons) && fits && state.calls.logout === 1,
-      await shot(page, `S2-${t}`))
+    record(`S3-${t}`, "They sign in as usual and read What's new, the list's own words",
+      `"${WORDS.notesHeading}"; "${LATEST.title}"; lines ${JSON.stringify(wantLines)}; no digit anywhere; Show me and Got it 44 px or more; no side scroll`,
+      `app ${back}, heading "${heading}", title "${title}", lines ${JSON.stringify(lines)}, heights ${JSON.stringify(buttons)}, fits ${fits}`,
+      back && shows && heading === WORDS.notesHeading && title === LATEST.title && sameList(lines, wantLines) && !/\d/.test(lines.join(' ')) && tall(buttons) && fits,
+      await shot(page, `S3-${t}`))
 
     const writesBefore = writes.length
     await press(page.locator(testid('release-show-me')).first(), size)
     const walked = await walkTour(page, size, RELEASE_STEP_TITLES)
     const cardHeights = await heights(page, `${testid('tour-next')}, ${testid('tour-skip')}`)
     const cardFits = await noSideScroll(page)
-    const cardShot = await shot(page, `S3-${t}`)
+    const cardShot = await shot(page, `S4-${t}`)
     const midWrites = writes.slice(writesBefore)
     await press(page.locator(testid('tour-next')).first(), size)
     const closed = await until(() => writes.includes('POST /api/driver/me/release/tour-done'), 5000)
     const cardGone = await page.locator(testid('tour-card')).count() === 0
     const tabAfter = await activeTab(page)
-    record(`S3-${t}`, "Show me walks the release's steps on the real tabs; Done closes it",
+    record(`S4-${t}`, "Show me walks the release's steps on the real tabs; Done closes it",
       `titles ${JSON.stringify(RELEASE_STEP_TITLES)}, "Step n of ${RELEASE_STEP_TITLES.length}"; the Performance step on the Performance tab; 44 px or more; only the seen mark along the way, then the tour mark; back on Loads`,
       `walked ${JSON.stringify(walked)}, heights ${JSON.stringify(cardHeights)}, fits ${cardFits}, writes along the way ${JSON.stringify(midWrites)}, tour marked ${closed}, card gone ${cardGone}, tab "${tabAfter}"`,
       sameList(walked.map((s) => s.title), RELEASE_STEP_TITLES) && walked.every((s, i) => s.label === `Step ${i + 1} of ${RELEASE_STEP_TITLES.length}`)
         && walked.find((s) => s.title === 'Performance').tab === 'Performance' && tall(cardHeights) && cardFits && sameList(midWrites, ['POST /api/driver/me/release/seen']) && closed && cardGone && tabAfter === 'Loads',
       cardShot)
 
-    const before = state.calls.release
+    before = state.calls.release
     await comeBackToApp(page)
     await momentPassed(state, before)
     const again = await page.locator(testid('release-dialog')).count()
     const allWrites = writes.filter((w) => !w.includes('/api/auth/'))
-    record(`S4-${t}`, 'It shows once, and nothing else was written',
-      `no note on the next moment; the only writes besides sign-in are the two marks; signed out once`,
-      `note ${again}, writes ${JSON.stringify(allWrites)}, sign-outs ${state.calls.logout}`,
+    record(`S5-${t}`, 'It shows once, and nothing else was written',
+      'no note on the next moment; the only writes besides signing out and in are the two marks; still the one logout they asked for',
+      `note ${again}, writes ${JSON.stringify(allWrites)}, logouts ${state.calls.logout}`,
       again === 0 && sameList(allWrites, ['POST /api/driver/me/release/seen', 'POST /api/driver/me/release/tour-done']) && state.calls.logout === 1)
-
-    await press(page.locator('.header-btn.danger').first(), size)
-    const left2 = await until(() => state.calls.logout === 2, 8000)
-    await appears(page, '.submit-btn', 8000)
-    await page.waitForTimeout(500)
-    const line = await page.locator(testid('login-updated-note')).count()
-    record(`S5-${t}`, 'A logout he asks for afterwards shows no line', 'his Logout works; /login; no line about an update',
-      `sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, line ${line}`, left2 && onLogin(page) && line === 0)
   } finally {
     await ctx.close()
   }
 }
 
-// ---------------------------------------------------------------- E: an empty list holds
-async function emptyListRun(browser, size) {
-  const t = size.tag
-  const none = freshState({ due: true })
-  const first = await openPage(browser, size, none)
-  try {
-    await appOpen(first.page)
-    await momentPassed(none, 0)
-    await openApp(first.page)
-    await momentPassed(none, 1)
-    record(`E1-${t}`, 'Due, with no loads at all: held, since an empty list proves nothing', 'no sign-out; in the app',
-      `sign-outs ${none.calls.logout}, url ${new URL(first.page.url()).pathname}`, none.calls.logout === 0 && !onLogin(first.page))
-  } finally {
-    await first.ctx.close()
-  }
-  const dropped = freshState({ status: 'In Transit' })
-  const second = await openPage(browser, size, dropped)
-  try {
-    await appOpen(second.page)
-    await appears(second.page, '.load-card', 8000)
-    await momentPassed(dropped, 0)
-    dropped.due = true
-    dropped.payload = 'dropped'
-    const before = dropped.calls.release
-    await openApp(second.page)
-    await momentPassed(dropped, before)
-    const shotFile = await shot(second.page, `E2-${t}`)
-    record(`E2-${t}`, "Hauling a load, on a weak signal: the reply about his loads drops after its headers, and he isn't signed out", 'no sign-out; in the app',
-      `sign-outs ${dropped.calls.logout}, url ${new URL(second.page.url()).pathname}`, dropped.calls.logout === 0 && !onLogin(second.page), shotFile)
-  } finally {
-    await second.ctx.close()
-  }
-}
-
-// ---------------------------------------------------------------- T: the In Transit proof
+// ---------------------------------------------------------------- T: a load In Transit
 async function inTransitRun(browser, size) {
   const t = size.tag
-  const state = freshState({ due: true, status: 'In Transit' })
+  const state = freshState({ behind: true, status: 'In Transit' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
     await appOpen(page)
     await momentPassed(state, 0)
-    await page.waitForTimeout(3500)
-    const atOpen = state.calls.logout
-    const onApp = !onLogin(page)
     const cardShown = await appears(page, '.load-card', 8000)
     const openShot = await shot(page, `T1-${t}`)
-
     let before = state.calls.release
     await comeBackToApp(page)
     await momentPassed(state, before)
-    const afterBack = state.calls.logout
-
     await press(page.locator('.load-card').first(), size)
     await appears(page, '.load-detail', 8000)
     const stepper = await appears(page, '.status-stepper-wrapper', 8000)
     before = state.calls.release
     await press(page.locator('.detail-topbar .van-button').first(), size)
     await momentPassed(state, before)
-    const afterList = state.calls.logout
-
     await press(page.locator('.van-tabbar-item', { hasText: 'Kit' }).first(), size)
     await page.waitForTimeout(500)
     before = state.calls.release
     await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
     await momentPassed(state, before)
-    const afterTab = state.calls.logout
     const stillThere = await page.locator('.load-card').count()
     const noNote = await page.locator(testid('release-dialog')).count()
-    record(`T1-${t}`, 'THE IN TRANSIT PROOF: a driver with a load In Transit is not signed out',
-      'no sign-out at app open, on coming back to the app, on leaving a load page or on coming back to the Loads tab; still in the app, the load on screen; no note while he is behind',
-      `sign-outs ${atOpen}, ${afterBack}, ${afterList}, ${afterTab}; on the app ${onApp} then ${!onLogin(page)}; load cards ${stillThere}; stepper ${stepper}; note ${noNote}; route read ${state.calls.release} times`,
-      atOpen === 0 && afterBack === 0 && afterList === 0 && afterTab === 0 && onApp && !onLogin(page) && cardShown && stepper && stillThere === 1 && noNote === 0 && state.calls.release >= 4,
+    record(`T1-${t}`, 'A driver with a load In Transit and a session from before the release: nothing happens to them',
+      "no logout at app open, on coming back, on leaving a load's page or on coming back to the Loads tab; the load on screen; no note",
+      `logouts ${state.calls.logout}, on the app ${!onLogin(page)}, load cards ${stillThere}, card at open ${cardShown}, stepper ${stepper}, note ${noNote}, route read ${state.calls.release} times`,
+      state.calls.logout === 0 && !onLogin(page) && cardShown && stepper && stillThere === 1 && noNote === 0 && state.calls.release >= 4,
       openShot)
-
-    state.status = 'Delivered'
-    before = state.calls.release
-    await comeBackToApp(page)
-    await momentPassed(state, before)
-    const inOpenPage = state.calls.logout
-    await openApp(page)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    const note = await appears(page, testid('login-updated-note'), 8000)
-    record(`T2-${t}`, 'The same driver, once that load reads Delivered: coming back does nothing, and the next open signs them out, so the hold was the load',
-      'no sign-out in the open page; then one, at the next open; /login with its line', `in the open page ${inOpenPage}, sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, line ${note}`,
-      inOpenPage === 0 && left && onLogin(page) && note)
   } finally {
     await ctx.close()
   }
 }
 
-// ---------------------------------------------------------------- M1, M2: mid-action
-async function statusInFlightRun(browser, size) {
+// ---------------------------------------------------------------- E: a page left open past its session
+async function pastItsSessionRun(browser, size) {
   const t = size.tag
-  // Loading, not At Receiver: its next tap brings up no POD reminder to get in the way of Back.
-  const state = freshState({ status: 'Loading' })
-  state.holds.status = holdOpen()
-  const { ctx, page, writes } = await openPage(browser, size, state)
-  try {
-    await appOpen(page)
-    await momentPassed(state, 0)
-    await appears(page, '.load-card', 8000)
-    await press(page.locator('.load-card').first(), size)
-    await appears(page, '.status-stepper-wrapper', 8000)
-    await press(page.locator('.status-stepper-wrapper .action-btn.primary').first(), size)
-    await appears(page, '.confirm-dialog', 5000)
-    await press(page.locator('.confirm-dialog button', { hasText: 'Confirm' }).first(), size)
-    const sent = await until(() => writes.includes('PUT /api/driver/status'), 5000)
-    // A release lands now: the list reads Delivered, and only the unanswered tap is left to hold it.
-    state.due = true
-    const before = state.calls.release
-    await press(page.locator('.detail-topbar .van-button').first(), size)
-    await momentPassed(state, before)
-    await comeBackToApp(page)
-    await momentPassed(state, before, 2)
-    const inFlight = state.calls.logout
-    const onApp = !onLogin(page)
-    state.holds.status.release()
-    await page.waitForTimeout(QUIET_WAIT_MS)
-    const afterTap = state.calls.release
-    await comeBackToApp(page)
-    await momentPassed(state, afterTap)
-    const afterQuiet = state.calls.logout
-    await openApp(page)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    record(`M1-${t}`, 'A status tap in flight is not interrupted',
-      'with the tap on the wire and the list reading Delivered: no sign-out, in the app; after it answers and the quiet time has passed: still none, that page being open; the next open signs them out',
-      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, after the quiet time ${afterQuiet}, at the next open ${state.calls.logout}`,
-      sent && inFlight === 0 && onApp && afterQuiet === 0 && left)
-  } finally {
-    await ctx.close()
-  }
-}
-
-async function uploadInFlightRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ status: 'Delivered' })
-  state.holds.upload = holdOpen()
-  const { ctx, page, writes } = await openPage(browser, size, state)
-  try {
-    await appOpen(page)
-    await momentPassed(state, 0)
-    await press(page.locator('.sub-tab', { hasText: 'Historical' }).first(), size)
-    await appears(page, '.load-card', 8000)
-    await press(page.locator('.load-card').first(), size)
-    await appears(page, '.load-detail', 8000)
-    await press(page.locator('.van-collapse-item__title', { hasText: 'Documents' }).first(), size)
-    await appears(page, '.doc-upload', 8000)
-    await page.locator('.doc-upload label.photo-btn', { hasText: 'Upload File' }).first().locator('input[type="file"]').setInputFiles({ name: 'made-up-pod.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made up') })
-    await page.waitForTimeout(300)
-    await press(page.locator('.doc-upload .btn.btn-primary').first(), size)
-    const sent = await until(() => writes.includes('POST /api/documents/upload'), 5000)
-    state.due = true
-    const before = state.calls.release
-    await press(page.locator('.detail-topbar .van-button').first(), size)
-    await momentPassed(state, before)
-    const inFlight = state.calls.logout
-    const onApp = !onLogin(page)
-    const shotFile = await shot(page, `M2-${t}`)
-    state.holds.upload.release()
-    await page.waitForTimeout(QUIET_WAIT_MS + 1000)
-    const afterUpload = state.calls.release
-    await comeBackToApp(page)
-    await momentPassed(state, afterUpload)
-    const afterQuiet = state.calls.logout
-    await openApp(page)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    record(`M2-${t}`, 'A POD upload in flight is not interrupted',
-      'with the upload on the wire: no sign-out, in the app; once it has answered and the quiet time has passed: still none, that page being open; the next open signs them out',
-      `sent ${sent}, sign-outs in flight ${inFlight}, on the app ${onApp}, after the quiet time ${afterQuiet}, at the next open ${state.calls.logout}`,
-      sent && inFlight === 0 && onApp && afterQuiet === 0 && left, shotFile)
-  } finally {
-    await ctx.close()
-  }
-}
-
-// ---------------------------------------------------------------- V: a moving truck
-async function noReadingRun(browser, size) {
-  const t = size.tag
-  for (const reading of ['none', 'stale', 'fail', 'moving-no-speed']) {
-    const state = freshState({ due: true, status: 'Delivered', reading })
-    const { ctx, page } = await openPage(browser, size, state)
-    try {
-      await appOpen(page)
-      await momentPassed(state, 0)
-      const before = state.calls.release
-      await openApp(page)
-      await momentPassed(state, before)
-      const held = state.calls.logout
-      const onApp = !onLogin(page)
-      state.reading = 'fix'
-      await openApp(page)
-      const left = await until(() => state.calls.logout === 1, 12000)
-      record(`V4-${reading}-${t}`, `A truck that doesn't read as parked (${reading}) holds the sign-out; a parked one lets it through`,
-        'no sign-out, in the app; one once it reads parked', `held ${held}, on the app ${onApp}, parked ${state.calls.logout}`, held === 0 && onApp && left)
-    } finally {
-      await ctx.close()
-    }
-  }
-  // The note keeps its own gate: a truck with no reading doesn't hold it.
-  const noteState = freshState({ hasNote: true, reading: 'none' })
-  const second = await openPage(browser, size, noteState)
-  try {
-    await appOpen(second.page)
-    const shown = await appears(second.page, testid('release-dialog'), 10000)
-    record(`V5-${t}`, "No reading: What's new still shows", 'the note', `shown ${shown}`, shown)
-  } finally {
-    await second.ctx.close()
-  }
-  const parkedFirst = freshState({ status: 'Delivered' })
-  const third = await openPage(browser, size, parkedFirst)
-  try {
-    await appOpen(third.page)
-    await momentPassed(parkedFirst, 0)
-    parkedFirst.due = true
-    parkedFirst.reading = 'moving-no-speed'
-    const before = parkedFirst.calls.release
-    await openApp(third.page)
-    await momentPassed(parkedFirst, before)
-    const held = parkedFirst.calls.logout
-    const onApp = !onLogin(third.page)
-    parkedFirst.reading = 'fix'
-    await openApp(third.page)
-    const left = await until(() => parkedFirst.calls.logout === 1, 12000)
-    record(`V6-${t}`, 'A truck read as parked that then moves on a feed with no speed holds the sign-out at the next open; parked again, it goes',
-      'no sign-out, in the app; one once it reads parked', `held ${held}, on the app ${onApp}, parked ${parkedFirst.calls.logout}`, held === 0 && onApp && left)
-  } finally {
-    await third.ctx.close()
-  }
-  // What the voice note gate calls parked isn't enough: the stretch is the sign-out's own.
-  const shortStop = freshState({ due: true, status: 'Delivered', parkedMinutes: 10 })
-  const fourth = await openPage(browser, size, shortStop)
-  try {
-    await appOpen(fourth.page)
-    await momentPassed(shortStop, 0)
-    const held = shortStop.calls.logout
-    const onApp = !onLogin(fourth.page)
-    shortStop.parkedMinutes = 20
-    await openApp(fourth.page)
-    const left = await until(() => shortStop.calls.logout === 1, 12000)
-    record(`V7-${t}`, 'A truck parked under the stretch, 10 minutes, holds the sign-out at app open; past it, 20 minutes, the next open goes',
-      'no sign-out, in the app; one at the next open', `held ${held}, on the app ${onApp}, past it ${shortStop.calls.logout}`, held === 0 && onApp && left)
-  } finally {
-    await fourth.ctx.close()
-  }
-}
-
-async function movingRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ due: true, moving: true, status: 'Delivered' })
+  const state = freshState({ behind: true, hasNote: true, status: 'Delivered' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
     await appOpen(page)
     await momentPassed(state, 0)
-    const before = state.calls.release
-    await openApp(page)
-    await momentPassed(state, before)
-    const held = state.calls.logout
-    state.moving = false
-    await openApp(page)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    record(`V1-${t}`, 'A moving truck holds the sign-out; parked, the next open lets it through',
-      'no sign-out while moving; one after parking', `moving ${held}, parked ${state.calls.logout}`, held === 0 && left)
+    // The session's 24 hours end on the server, with this page still open.
+    state.session = false
+    await comeBackToApp(page)
+    await page.waitForTimeout(3000)
+    const inOpenPage = state.calls.logout
+    const note = await page.locator(testid('release-dialog')).count()
+    record(`E1-${t}`, 'A page left open past its session: this feature does nothing to it', 'no logout from this feature; no note',
+      `logouts ${inOpenPage}, note ${note}, url ${new URL(page.url()).pathname}`, inOpenPage === 0 && note === 0)
+    await openAgain(page)
+    await signInForm(page, size, DRIVER.username)
+    const back = await appOpen(page)
+    const shows = await appears(page, testid('release-dialog'), 10000)
+    record(`E2-${t}`, "The next load finds the login page, and What's new comes after that sign-in", 'signed in; the note; no logout call anywhere',
+      `app ${back}, note ${shows}, logouts ${state.calls.logout}, sign-ins ${state.calls.login}`, back && shows && state.calls.logout === 0 && state.calls.login === 1)
   } finally {
     await ctx.close()
   }
-  const noteState = freshState({ hasNote: true, moving: true })
-  const second = await openPage(browser, size, noteState)
-  try {
-    await appOpen(second.page)
-    await second.page.waitForTimeout(4500)
-    const heldNote = await second.page.locator(testid('release-dialog')).count()
-    noteState.moving = false
-    // The ELD read comes round on its own: the note was waiting, not skipped.
-    const shown = await appears(second.page, testid('release-dialog'), 35000)
-    record(`V2-${t}`, "A moving truck holds What's new; parked, it shows by itself", 'no note while moving; the note once parked',
-      `moving ${heldNote}, parked ${shown}`, heldNote === 0 && shown)
-    await press(second.page.locator(testid('release-show-me')).first(), size)
-    const opened = await appears(second.page, testid('tour-card'), 5000)
-    noteState.moving = true
-    let closed = false
-    try { await second.page.waitForSelector(testid('tour-card'), { state: 'detached', timeout: 35000 }); closed = true } catch { closed = false }
-    const tourMarks = second.writes.filter((w) => w.includes('tour-done'))
-    const tab = await activeTab(second.page)
-    record(`V3-${t}`, 'The tour closes by itself when the truck starts moving', 'the card gone within the next ELD read; no tour mark; back on Loads',
-      `opened ${opened}, closed ${closed}, tour marks ${tourMarks.length}, tab "${tab}"`, opened && closed && tourMarks.length === 0 && tab === 'Loads')
-  } finally {
-    await second.ctx.close()
-  }
 }
 
-// ---------------------------------------------------------------- R: only the app opening signs anyone out
-async function appOpeningRun(browser, size) {
+// ---------------------------------------------------------------- V: a moving truck, and one not reporting
+async function movingRun(browser, size) {
   const t = size.tag
-  const state = freshState({ status: 'Delivered' })
-  const first = await openPage(browser, size, state)
-  try {
-    await appOpen(first.page)
-    await momentPassed(state, 0)
-    // A release lands with the page open, and everything else says yes.
-    state.due = true
-    let before = state.calls.release
-    await comeBackToApp(first.page)
-    await momentPassed(state, before)
-    const afterBack = state.calls.logout
-    await press(first.page.locator('.van-tabbar-item', { hasText: 'Kit' }).first(), size)
-    await first.page.waitForTimeout(500)
-    before = state.calls.release
-    await press(first.page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
-    await momentPassed(state, before)
-    const afterTap = state.calls.logout
-    const onApp = !onLogin(first.page)
-    await openApp(first.page)
-    const left = await until(() => state.calls.logout === 1, 15000)
-    const line = await appears(first.page, testid('login-updated-note'), 8000)
-    record(`R1-${t}`, 'A page already open is never signed out: not on coming back to it, not on a tap; the next open does it, as the first thing it does',
-      'none on coming back; none on a tap; in the app; one at the next open, with its line',
-      `coming back ${afterBack}, a tap ${afterTap}, on the app ${onApp}, at the next open ${state.calls.logout}, line ${line}`, afterBack === 0 && afterTap === 0 && onApp && left && line)
-  } finally {
-    await first.ctx.close()
+  for (const [name, startMoving, stopMoving] of [
+    ['with a speed', (s) => { s.moving = true }, (s) => { s.moving = false }],
+    ['on a feed that sends no speed', (s) => { s.reading = 'moving-no-speed' }, (s) => { s.reading = 'fix' }],
+  ]) {
+    const state = freshState({ hasNote: true })
+    startMoving(state)
+    const { ctx, page, writes } = await openPage(browser, size, state)
+    try {
+      await appOpen(page)
+      await page.waitForTimeout(4500)
+      const held = await page.locator(testid('release-dialog')).count()
+      stopMoving(state)
+      // The ELD read comes round on its own: the note was waiting, not skipped.
+      const shown = await appears(page, testid('release-dialog'), 35000)
+      record(`V1-${t} ${name}`, `A moving truck, ${name}, holds What's new; parked, it shows by itself`, 'no note while moving; the note once parked',
+        `moving ${held}, parked ${shown}`, held === 0 && shown)
+      await press(page.locator(testid('release-show-me')).first(), size)
+      const opened = await appears(page, testid('tour-card'), 5000)
+      startMoving(state)
+      let closed = false
+      try { await page.waitForSelector(testid('tour-card'), { state: 'detached', timeout: 35000 }); closed = true } catch { closed = false }
+      const tourMarks = writes.filter((w) => w.includes('tour-done'))
+      const tab = await activeTab(page)
+      record(`V2-${t} ${name}`, `The tour closes by itself when the truck starts moving, ${name}`, 'the card gone within the next ELD read; no tour mark; back on Loads',
+        `opened ${opened}, closed ${closed}, tour marks ${tourMarks.length}, tab "${tab}"`, opened && closed && tourMarks.length === 0 && tab === 'Loads')
+    } finally {
+      await ctx.close()
+    }
   }
-
-  const later = freshState({ due: true, status: 'Delivered' })
-  const ctx = await newContext(browser, size, later, [])
-  try {
-    const page = await ctx.newPage()
-    page.on('pageerror', (e) => pageErrors.push(`${size.tag}: ${String(e.message || e).slice(0, 200)}`))
-    await page.goto(`${BASE}/track`, { waitUntil: 'domcontentloaded' })
-    await page.waitForTimeout(800)
-    // A move inside the running page, as the router makes one: no new page loads.
-    await page.evaluate(() => {
-      window.history.pushState(null, '', '/driver')
-      window.dispatchEvent(new PopStateEvent('popstate', { state: null }))
-    })
-    const shown = await appOpen(page)
-    await momentPassed(later, 0)
-    const held = later.calls.logout
-    const onApp = !onLogin(page)
-    await openApp(page)
-    const left = await until(() => later.calls.logout === 1, 15000)
-    record(`R2-${t}`, 'The driver app as a later screen of a running page is not the app opening', 'no sign-out, in the app; one once that page loads from scratch',
-      `shown ${shown}, held ${held}, on the app ${onApp}, at the next open ${later.calls.logout}`, shown && held === 0 && onApp && left)
-  } finally {
-    await ctx.close()
-  }
-
-  const retry = freshState({ due: true, status: 'Delivered', payload: 'fail' })
-  const third = await openPage(browser, size, retry)
-  try {
-    const failed = await appears(third.page, '.loc-btn', 15000)
-    retry.payload = 'ok'
-    const before = retry.calls.release
-    await press(third.page.locator('.loc-btn').first(), size)
-    const back = await appears(third.page, '.van-tabbar', 15000)
-    await momentPassed(retry, before)
-    const held = retry.calls.logout
-    const onApp = !onLogin(third.page)
-    await openApp(third.page)
-    const left = await until(() => retry.calls.logout === 1, 15000)
-    record(`R3-${t}`, 'A first load that fails, and a retry tap that works: that tap is in a running page, not the app opening', 'no sign-out, in the app; one at the next open',
-      `failed screen ${failed}, back ${back}, held ${held}, on the app ${onApp}, at the next open ${retry.calls.logout}`, failed && back && held === 0 && onApp && left)
-  } finally {
-    await third.ctx.close()
+  for (const reading of ['none', 'stale', 'fail']) {
+    const state = freshState({ hasNote: true, reading })
+    const { ctx, page } = await openPage(browser, size, state)
+    try {
+      await appOpen(page)
+      const shown = await appears(page, testid('release-dialog'), 10000)
+      record(`V3-${reading}-${t}`, `A truck not reporting (${reading}) doesn't hold What's new, as it never did`, 'the note', `shown ${shown}`, shown)
+    } finally {
+      await ctx.close()
+    }
   }
 }
 
-// ---------------------------------------------------------------- F, K, N: a failed read, the switch, no signal
+// ---------------------------------------------------------------- F, K: a failed read, the switch
 async function failedReadRun(browser, size) {
   const t = size.tag
   for (const kind of ['fail', 'abort', 'empty']) {
-    const state = freshState({ due: true, hasNote: true, release: kind, status: 'Delivered' })
+    const state = freshState({ hasNote: true, release: kind, status: 'Delivered' })
     const { ctx, page } = await openPage(browser, size, state)
     try {
       await appOpen(page)
@@ -818,18 +534,14 @@ async function failedReadRun(browser, size) {
       await press(page.locator('.van-tabbar-item', { hasText: 'Kit' }).first(), size)
       await page.waitForTimeout(500)
       const kit = await page.locator(testid('tour-kit-start')).count()
-      record(`F-${kind}-${t}`, `A failed read of the release state (${kind}): he isn't locked out or sent to sign in`,
-        'no sign-out; in the app; no note; no Kit button; asked again at the next moment',
-        `sign-outs ${state.calls.logout}, url ${new URL(page.url()).pathname}, note ${noted}, Kit button ${kit}, route read ${state.calls.release} times`,
+      record(`F-${kind}-${t}`, `A failed read of the release state (${kind}): they aren't locked out or sent to sign in`,
+        'no logout; in the app; no note; no Kit button; asked again at the next moment',
+        `logouts ${state.calls.logout}, url ${new URL(page.url()).pathname}, note ${noted}, Kit button ${kit}, route read ${state.calls.release} times`,
         state.calls.logout === 0 && !onLogin(page) && noted === 0 && kit === 0 && state.calls.release >= 2)
       state.release = 'ok'
-      const asked = state.calls.release
       await press(page.locator('.van-tabbar-item', { hasText: 'Loads' }).first(), size)
-      await momentPassed(state, asked)
-      const inOpenPage = state.calls.logout
-      await openApp(page)
-      const left = await until(() => state.calls.logout === 1, 12000)
-      record(`F2-${kind}-${t}`, 'A good answer later works, at the next open', 'no sign-out in the open page; one at the next open', `in the open page ${inOpenPage}, sign-outs ${state.calls.logout}`, inOpenPage === 0 && left)
+      const shown = await appears(page, testid('release-dialog'), 12000)
+      record(`F2-${kind}-${t}`, 'A good answer later works', 'the note, and no logout', `note ${shown}, logouts ${state.calls.logout}`, shown && state.calls.logout === 0)
     } finally {
       await ctx.close()
     }
@@ -867,15 +579,39 @@ async function performanceAnswerRun(browser, size) {
     const shown = await appears(second.page, testid('release-dialog'), 10000)
     const lines = await allText(second.page.locator(testid('release-line')))
     const wantLines = LATEST.notes.filter((n) => !n.needs).map((n) => n.text)
-    record(`P2-${t}`, 'A driver with no week reads only his line', `lines ${JSON.stringify(wantLines)}`, `shown ${shown}, lines ${JSON.stringify(lines)}`, shown && sameList(lines, wantLines))
+    record(`P2-${t}`, 'A driver with no week reads only their line', `lines ${JSON.stringify(wantLines)}`, `shown ${shown}, lines ${JSON.stringify(lines)}`, shown && sameList(lines, wantLines))
   } finally {
     await second.ctx.close()
   }
 }
 
+async function loadPageRun(browser, size) {
+  const t = size.tag
+  // The read fails until a load's page is open, so the first answer comes with that page on screen.
+  const state = freshState({ hasNote: true, status: 'In Transit', release: 'fail' })
+  const { ctx, page } = await openPage(browser, size, state)
+  try {
+    await appOpen(page)
+    await momentPassed(state, 0)
+    await press(page.locator('.load-card').first(), size)
+    const opened = await appears(page, '.load-detail', 8000)
+    state.release = 'ok'
+    const before = state.calls.release
+    await comeBackToApp(page)
+    await momentPassed(state, before)
+    const held = await page.locator(testid('release-dialog')).count()
+    await press(page.locator('.detail-topbar .van-button').first(), size)
+    const shown = await appears(page, testid('release-dialog'), 10000)
+    record(`L-${t}`, "A load's page holds What's new, and a working load doesn't: back on the list, it shows", 'no note on the page; the note on the list; no logout',
+      `load's page ${opened}, note there ${held}, note on the list ${shown}, logouts ${state.calls.logout}`, opened && held === 0 && shown && state.calls.logout === 0)
+  } finally {
+    await ctx.close()
+  }
+}
+
 async function killSwitchRun(browser, size) {
   const t = size.tag
-  const state = freshState({ due: true, hasNote: true, release: 'off', status: 'Delivered' })
+  const state = freshState({ hasNote: true, release: 'off', status: 'Delivered' })
   const { ctx, page, writes } = await openPage(browser, size, state)
   try {
     await appOpen(page)
@@ -886,415 +622,32 @@ async function killSwitchRun(browser, size) {
     const kit = await page.locator(testid('tour-kit-card')).count()
     const note = await page.locator(testid('release-dialog')).count()
     const marks = writes.filter((w) => w.includes('/release/'))
-    record(`K-${t}`, 'The kill switch off: nothing new, nobody signed out', 'no sign-out; no note; no Kit card; no mark',
-      `sign-outs ${state.calls.logout}, note ${note}, Kit card ${kit}, marks ${marks.length}`, state.calls.logout === 0 && note === 0 && kit === 0 && marks.length === 0 && !onLogin(page))
+    record(`K-${t}`, 'The kill switch off: nothing new', 'no logout; no note; no Kit card; no mark',
+      `logouts ${state.calls.logout}, note ${note}, Kit card ${kit}, marks ${marks.length}`, state.calls.logout === 0 && note === 0 && kit === 0 && marks.length === 0 && !onLogin(page))
   } finally {
     await ctx.close()
   }
 }
 
-async function offlineRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ status: 'Delivered' })
-  const { ctx, page } = await openPage(browser, size, state)
-  try {
-    await appOpen(page)
-    await momentPassed(state, 0)
-    state.due = true
-    await ctx.setOffline(true)
-    await comeBackToApp(page)
-    await page.waitForTimeout(3000)
-    const offline = state.calls.logout
-    const onApp = !onLogin(page)
-    await ctx.setOffline(false)
-    await page.waitForTimeout(500)
-    const back = state.calls.release
-    await comeBackToApp(page)
-    await momentPassed(state, back)
-    const signalBack = state.calls.logout
-    await openApp(page)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    record(`N-${t}`, 'No signal: not signed out, and not when it comes back, that page being open; the next open does it', 'none offline, in the app; none once back; one at the next open',
-      `offline ${offline}, on the app ${onApp}, signal back ${signalBack}, at the next open ${state.calls.logout}`, offline === 0 && onApp && signalBack === 0 && left)
-  } finally {
-    await ctx.close()
-  }
-}
-
-// ---------------------------------------------------------------- U: a sign-out the server doesn't confirm
-async function unconfirmedRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ due: true, status: 'Delivered', logoutFails: true })
-  const { ctx, page } = await openPage(browser, size, state)
-  try {
-    const tried = await until(() => state.calls.logout === 1, 15000)
-    const lineShown = await appears(page, testid('login-updated-note'), 8000)
-    const words = await text(page, testid('login-updated-note'))
-    const onForm = await appears(page, '.submit-btn', 8000)
-    const shotFile = await shot(page, `U1-${t}`)
-    state.logoutFails = false
-    await signInForm(page, size, DRIVER.username)
-    const back = await appOpen(page)
-    const kept = await page.evaluate(() => sessionStorage.getItem('logisx.driverRelease.loginNote.v1'))
-    record(`U1-${t}`, "A sign-out the server doesn't confirm: the app's own login form says why, and his sign-in ends the line",
-      `/login with "${WORDS.signedOut}"; he signs in; nothing kept for later`,
-      `tried ${tried}, line "${words}", form ${onForm}, back ${back}, kept ${kept}`,
-      tried && lineShown && words === WORDS.signedOut && onForm && back && kept === null, shotFile)
-
-    const signOuts = state.calls.logout
-    await press(page.locator('.header-btn.danger').first(), size)
-    const left = await until(() => state.calls.logout === signOuts + 1, 8000)
-    await appears(page, '.submit-btn', 8000)
-    await page.waitForTimeout(500)
-    const line = await page.locator(testid('login-updated-note')).count()
-    record(`U2-${t}`, 'A logout he asks for after that shows no line', 'his Logout works; /login; no line about an update',
-      `left ${left}, url ${new URL(page.url()).pathname}, line ${line}`, left && onLogin(page) && line === 0)
-  } finally {
-    await ctx.close()
-  }
-}
-
-// ---------------------------------------------------------------- L, C, H: no loop, tabs, a shared phone
-async function loopRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ due: true, dueAfterLogin: true, status: 'Delivered' })
-  const { ctx, page } = await openPage(browser, size, state)
-  try {
-    await until(() => state.calls.logout === 1, 15000)
-    const before = state.calls.release
-    await signInForm(page, size, DRIVER.username)
-    const back = await appOpen(page)
-    await momentPassed(state, before)
-    await openApp(page)
-    await momentPassed(state, before, 2)
-    record(`L-${t}`, 'A server that keeps saying due: one sign-out, no loop', 'he stays in the app after signing back in; one sign-out',
-      `app ${back}, url ${new URL(page.url()).pathname}, sign-outs ${state.calls.logout}, sign-ins ${state.calls.login}`, back && !onLogin(page) && state.calls.logout === 1 && state.calls.login === 1)
-  } finally {
-    await ctx.close()
-  }
-}
-
-async function openTabs(ctx, size, count) {
-  const pages = []
-  for (let i = 0; i < count; i++) {
-    const page = await ctx.newPage()
-    page.on('pageerror', (e) => pageErrors.push(`${size.tag}: ${String(e.message || e).slice(0, 200)}`))
-    await page.goto(`${BASE}/driver`, { waitUntil: 'domcontentloaded' })
-    await appOpen(page)
-    pages.push(page)
-  }
-  return pages
-}
-
-// A tab stopped from running anything, and tab A's next open: what C5 and C6 share. `stop` and `go` act
-// on the stopped tab's DevTools session. What the step may claim comes from that page, afterwards: whether
-// `freeze` fired there, and how long its own timer stood still against how long it was meant to.
-async function momentBesideStillTab(ctx, size, state, stop, go) {
-  await ctx.addInitScript(() => {
-    let last = Date.now()
-    let longest = 0
-    setInterval(() => {
-      longest = Math.max(longest, Date.now() - last)
-      last = Date.now()
-    }, 50)
-    window.__madeUpStartWatching = () => { last = Date.now(); longest = 0 }
-    window.__madeUpLongestStill = () => Math.max(longest, Date.now() - last)
-    document.addEventListener('freeze', () => { window.__madeUpFroze = true })
-  })
-  const [a, b] = await openTabs(ctx, size, 2)
-  await momentPassed(state, 0, 2)
-  await a.bringToFront()
-  const session = await ctx.newCDPSession(b)
-  await b.evaluate(() => window.__madeUpStartWatching())
-  await stop(session)
-  const stoppedAt = Date.now()
-  state.due = true
-  const before = state.calls.release
-  await openApp(a)
-  await momentPassed(state, before)
-  // Long enough that a running page's timer, even one held to a tick a second, can't pass for a still one.
-  await new Promise((r) => setTimeout(r, 1500))
-  const meantMs = Date.now() - stoppedAt
-  const held = state.calls.logout
-  const onApp = !onLogin(a)
-  const aVisible = await a.evaluate(() => document.visibilityState === 'visible')
-  await go(session)
-  // A page that won't wake must not hang the run: it counts as a step that couldn't be done.
-  const { froze, stillMs } = await Promise.race([
-    b.evaluate(() => ({ froze: window.__madeUpFroze === true, stillMs: window.__madeUpLongestStill() })),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('the stopped tab did not wake in 15 s')), 15000)),
-  ])
-  return { a, b, held, onApp, aVisible, froze, stillMs, meantMs, ranNothing: stillMs >= meantMs - 250 }
-}
-const stillLine = (s) => `sign-outs ${s.held}, A at ${new URL(s.a.url()).pathname}, A visible ${s.aVisible}, froze ${s.froze}, timer still ${s.stillMs} ms of ${s.meantMs} ms`
-
-async function itLeavesThenSignOut(seen, state, t) {
-  let left = false
-  let trouble = ''
-  try {
-    await seen.b.goto('about:blank')
-    await seen.a.bringToFront()
-    await openApp(seen.a)
-    left = await until(() => state.calls.logout === 1, 12000)
-  } catch (e) {
-    trouble = `, ${String(e.message || e).split('\n')[0].slice(0, 160)}`
-  }
-  record(`C6-${t}`, 'Once that tab has left, the next open signs them out, so the hold was its record', 'one sign-out', `sign-outs ${state.calls.logout}${trouble}`, left)
-}
-
-const freezeTab = (session) => session.send('Page.setWebLifecycleState', { state: 'frozen' })
-const thawTab = (session) => session.send('Page.setWebLifecycleState', { state: 'active' })
-
-// One try at a real freeze in `ctx`. C5 and C6 are recorded only if the page shows it froze; if it didn't,
-// the answer is what it showed instead.
-async function freezeAttempt(ctx, size, state, stop) {
-  const seen = await momentBesideStillTab(ctx, size, state, stop, thawTab)
-  if (!(seen.froze && seen.ranNothing && seen.aVisible)) return stillLine(seen)
-  record(`C5-${size.tag}`, 'A tab the browser has frozen holds the sign-out, with no answer from it', 'no sign-out; in the app; `freeze` fired there and its own timer stood still',
-    stillLine(seen), seen.held === 0 && seen.onApp)
-  await itLeavesThenSignOut(seen, state, size.tag)
-  return ''
-}
-
-// Playwright keeps every page it opens reading as visible (focus emulation), and a page that reads as
-// visible may not freeze. First try: ask for that off, over a session of this step's own.
-async function freezeInThisBrowser(browser, size) {
-  const state = freshState({ status: 'Delivered' })
-  const ctx = await newContext(browser, size, state, [])
-  try {
-    return await freezeAttempt(ctx, size, state, async (session) => {
-      await session.send('Emulation.setFocusEmulationEnabled', { enabled: false })
-      await freezeTab(session)
-    })
-  } finally {
-    await ctx.close()
-  }
-}
-
-// A browser of this step's own, driven over a pipe, never a debugging port: DevTools messages go in on fd 3
-// and come out on fd 4, each ended by a NUL. Its flags are the ones from Playwright's own launch that matter
-// here: a throwaway profile, no keychain, no traffic of its own, nothing throttled while hidden.
-async function pipedBrowser() {
-  const profile = fs.mkdtempSync(path.join(paths.workDir(), 'release-notices-freeze-'))
-  const child = spawn(await paths.chromePath(), [
-    ...(HEADED ? [] : ['--headless', '--hide-scrollbars', '--mute-audio']),
-    '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-startup-window', '--no-sandbox', '--no-first-run', '--no-default-browser-check',
-    '--password-store=basic', '--use-mock-keychain', '--enable-automation', '--disable-background-networking',
-    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
-    '--disable-back-forward-cache', '--disable-component-update', '--disable-default-apps', '--disable-extensions', '--disable-sync',
-    '--disable-search-engine-choice-screen', '--no-service-autorun', '--metrics-recording-only',
-  ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] })
-  const toBrowser = child.stdio[3]
-  const fromBrowser = child.stdio[4]
-  const gone = new Promise((resolve) => child.once('close', resolve))
-  const transport = {
-    send: (message) => { if (!toBrowser.destroyed) toBrowser.write(`${JSON.stringify(message)}\0`) },
-    close: () => { child.kill() },
-  }
-  // Unhandled, a browser that fails to start or a pipe that breaks would end the whole run.
-  child.on('error', () => transport.onclose?.('the browser did not start'))
-  toBrowser.on('error', () => {})
-  fromBrowser.on('error', () => {})
-  fromBrowser.setEncoding('utf8')
-  let partial = ''
-  fromBrowser.on('data', (text) => {
-    const messages = (partial + text).split('\0')
-    partial = messages.pop()
-    for (const message of messages) setImmediate(() => transport.onmessage?.(JSON.parse(message)))
-  })
-  child.once('close', () => transport.onclose?.())
-  return {
-    transport,
-    async close() {
-      child.kill()
-      await Promise.race([gone, new Promise((r) => setTimeout(r, 5000))])
-      try {
-        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 })
-      } catch {
-        /* a throwaway profile under the work dir: nothing depends on it going */
-      }
-    },
-  }
-}
-
-// Second try: `noDefaults` never turns focus emulation on, but only for the default context of a browser
-// Playwright attaches to, not one it launches.
-async function freezeInOwnBrowser(size) {
-  const state = freshState({ status: 'Delivered' })
-  const own = await pipedBrowser()
-  let connected = null
-  try {
-    connected = await chromium.connectOverCDP(own.transport, { noDefaults: true, isLocal: true, timeout: 15000 })
-    const ctx = connected.contexts()[0]
-    await answerRequests(ctx, state, [])
-    return await freezeAttempt(ctx, size, state, freezeTab)
-  } finally {
-    await connected?.close().catch(() => {})
-    await own.close()
-  }
-}
-
-// A frozen page runs nothing, so nothing it could answer would ever arrive. Where neither try freezes one,
-// the step says so and proves only what's left: a tab that runs nothing. No `froze false` passes C5 under
-// the frozen title.
-async function stillTabRun(browser, size) {
-  const t = size.tag
-  const tries = []
-  for (const [how, attempt] of [
-    ['focus emulation asked off', () => freezeInThisBrowser(browser, size)],
-    ['own browser, no defaults', () => freezeInOwnBrowser(size)],
-  ]) {
-    let result
-    try {
-      result = await attempt()
-    } catch (e) {
-      result = String(e.message || e).split('\n')[0].slice(0, 200)
-    }
-    if (!result) return
-    tries.push(`${how}: ${result}`)
-  }
-  const notFrozen = tries.join('; ')
-  console.log(`driver-release-notices: this browser did not freeze the page (${notFrozen}): C5 proves a silent tab, not a frozen one`)
-  const silent = freshState({ status: 'Delivered' })
-  const ctx = await newContext(browser, size, silent, [])
-  try {
-    const seen = await momentBesideStillTab(ctx, size, silent,
-      (session) => session.send('Emulation.setScriptExecutionDisabled', { value: true }),
-      (session) => session.send('Emulation.setScriptExecutionDisabled', { value: false }))
-    record(`C5-${t}`, `A silent tab holds the sign-out, with no answer from it. NOT a frozen tab: this browser did not freeze one (${notFrozen})`, 'no sign-out; in the app; its own timer stood still',
-      stillLine(seen), seen.held === 0 && seen.onApp && seen.aVisible && seen.ranNothing)
-    await itLeavesThenSignOut(seen, silent, t)
-  } finally {
-    await ctx.close()
-  }
-}
-
-async function twoTabsRun(browser, size) {
-  const t = size.tag
-  const state = freshState({ status: 'Delivered' })
-  const ctx = await newContext(browser, size, state, [])
-  try {
-    const [a, b] = await openTabs(ctx, size, 2)
-    await momentPassed(state, 0, 2)
-    state.due = true
-    let before = state.calls.release
-    await a.bringToFront()
-    await openApp(a)
-    await momentPassed(state, before)
-    before = state.calls.release
-    await b.bringToFront()
-    await openApp(b)
-    await momentPassed(state, before)
-    const held = state.calls.logout
-    const bothOn = !onLogin(a) && !onLogin(b)
-    record(`C1-${t}`, 'Two open tabs hold each other at each open: a tab with something half typed is never taken along', 'no sign-out from either; both in the app',
-      `sign-outs ${held}, A at ${new URL(a.url()).pathname}, B at ${new URL(b.url()).pathname}`, held === 0 && bothOn)
-    // Closing a tab from here needn't run its pagehide, as a person closing one does: leaving does.
-    await b.goto('about:blank')
-    await b.close()
-    await a.bringToFront()
-    await openApp(a)
-    const left = await until(() => state.calls.logout === 1, 12000)
-    const line = await appears(a, testid('login-updated-note'), 8000)
-    record(`C2-${t}`, 'With the other tab closed, the next open signs them out', 'one sign-out; /login with its line',
-      `sign-outs ${state.calls.logout}, A at ${new URL(a.url()).pathname}, line ${line}`, left && onLogin(a) && line)
-  } finally {
-    await ctx.close()
-  }
-
-  const own = freshState({ status: 'Delivered' })
-  const ctx2 = await newContext(browser, size, own, [])
-  try {
-    const [a, b] = await openTabs(ctx2, size, 2)
-    await a.bringToFront()
-    await press(a.locator('.header-btn.danger').first(), size)
-    const aLeft = await until(() => own.calls.logout === 1, 8000)
-    const bLeft = await until(() => onLogin(b), 12000)
-    record(`C3-${t}`, 'A logout he asks for in one tab still takes the other along', 'tab A signs out; tab B follows to /login',
-      `A left ${aLeft}, B left ${bLeft}, B at ${new URL(b.url()).pathname}`, aLeft && bLeft)
-  } finally {
-    await ctx2.close()
-  }
-
-  const noRecord = freshState({ due: true, status: 'Delivered' })
-  const ctx3 = await newContext(browser, size, noRecord, [])
-  try {
-    await ctx3.addInitScript((prefix) => {
-      const realSet = Storage.prototype.setItem
-      Storage.prototype.setItem = function setItem(key, value) {
-        if (String(key).startsWith(prefix)) throw new Error('made up: this browser keeps no record')
-        return realSet.call(this, key, value)
-      }
-    }, APP_PAGE_PREFIX)
-    const [page] = await openTabs(ctx3, size, 1)
-    await momentPassed(noRecord, 0)
-    await openApp(page)
-    await momentPassed(noRecord, 1)
-    record(`C4-${t}`, "A browser that can't keep a tab's record holds too", 'no sign-out; in the app',
-      `sign-outs ${noRecord.calls.logout}, url ${new URL(page.url()).pathname}`, noRecord.calls.logout === 0 && !onLogin(page))
-  } finally {
-    await ctx3.close()
-  }
-
-  await stillTabRun(browser, size)
-
-  const dead = freshState({ due: true, status: 'Delivered' })
-  const ctx5 = await newContext(browser, size, dead, [])
-  try {
-    await plantRecord(ctx5, 60 * 60 * 1000)
-    const [page] = await openTabs(ctx5, size, 1)
-    await momentPassed(dead, 0)
-    const before = dead.calls.release
-    await openApp(page)
-    await momentPassed(dead, before)
-    record(`C7-${t}`, 'A tab that died without saying so, its record under a day old, holds: they get the update at their next sign-in', 'no sign-out; in the app',
-      `sign-outs ${dead.calls.logout}, url ${new URL(page.url()).pathname}`, dead.calls.logout === 0 && !onLogin(page))
-  } finally {
-    await ctx5.close()
-  }
-
-  const expired = freshState({ due: true, status: 'Delivered' })
-  const ctx6 = await newContext(browser, size, expired, [])
-  try {
-    await plantRecord(ctx6, 25 * 60 * 60 * 1000)
-    const [page] = await openTabs(ctx6, size, 1)
-    const left = await until(() => expired.calls.logout === 1, 12000)
-    await appears(page, testid('login-updated-note'), 8000)
-    const stale = await page.evaluate((key) => localStorage.getItem(key), PLANTED_RECORD)
-    record(`C8-${t}`, 'A record over a day old holds nothing and is tidied away', 'one sign-out; the record gone',
-      `sign-outs ${expired.calls.logout}, record ${stale}`, left && stale === null)
-  } finally {
-    await ctx6.close()
-  }
-}
-
-// A tab's record as lib/appTabs.js writes it, from a tab that's no longer there, before each page starts.
-const APP_PAGE_PREFIX = 'logisx.appPage.v1.'
-const PLANTED_RECORD = `${APP_PAGE_PREFIX}madeupdeadtab`
-function plantRecord(ctx, ageMs) {
-  return ctx.addInitScript(([key, age]) => {
-    try { localStorage.setItem(key, String(Date.now() - age)) } catch { /* a page with no storage has no use for it */ }
-  }, [PLANTED_RECORD, ageMs])
-}
-
+// ---------------------------------------------------------------- H: a shared phone
 async function sharedPhoneRun(browser, size) {
   const t = size.tag
-  const state = freshState({ due: true, hasNote: true, status: 'Delivered' })
+  const state = freshState({ hasNote: true, status: 'Delivered' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
-    await until(() => state.calls.logout === 1, 15000)
-    await appears(page, testid('login-updated-note'), 8000)
+    await appOpen(page)
+    await press(page.locator('.header-btn.danger').first(), size)
+    await until(() => state.calls.logout === 1, 8000)
     await signInForm(page, size, DRIVER_B.username)
     const back = await appOpen(page)
     const note = await appears(page, testid('release-dialog'), 10000)
     const body = squeeze(await page.locator('body').innerText())
     const named = body.includes(DRIVER.driverName)
-    const kept = await page.evaluate(() => JSON.stringify({ ...localStorage }))
-    const lineKept = await page.evaluate(() => sessionStorage.getItem('logisx.driverRelease.loginNote.v1'))
-    record(`H-${t}`, 'A shared phone: the next driver reads his own answer',
-      "B in the app with the note; nothing of the first driver on screen; what's kept holds an account id and a release id, no name; the login line is gone",
-      `app ${back}, note ${note}, first driver named ${named}, name kept ${kept.includes(DRIVER.driverName)}, line kept ${lineKept}, sign-outs ${state.calls.logout}`,
-      back && note && !named && !kept.includes(DRIVER.driverName) && lineKept === null && state.calls.logout === 1)
+    const kept = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))
+    record(`H-${t}`, 'A shared phone: the next driver reads their own answer, and this feature keeps nothing in the browser',
+      'B in the app with the note; nothing of the first driver on screen; no name kept by this; no record of a release or a tab',
+      `app ${back}, note ${note}, first driver named ${named}, kept by this ${/driverRelease|appPage/.test(kept)}, logouts ${state.calls.logout}`,
+      back && note && !named && !/driverRelease|appPage/.test(kept) && state.calls.logout === 1)
   } finally {
     await ctx.close()
   }
@@ -1318,7 +671,7 @@ async function offerRun(browser, size) {
     await comeBackToApp(first.page)
     await momentPassed(skipper, before)
     const nagged = await first.page.locator(testid('release-dialog')).count()
-    record(`O1-${t}`, 'A first-time driver is offered the tour; he can skip, and is not asked again',
+    record(`O1-${t}`, 'A first-time driver is offered the tour; they can skip, and are not asked again',
       `"${WORDS.offerHeading}"; "${WORDS.offerText}"; "${WORDS.takeTour}" and "${WORDS.skipOffer}", 44 px or more; after a skip, not on the next moment`,
       `shown ${shows}, heading "${heading}", words "${words}", heights ${JSON.stringify(sized)}, nagged ${nagged}`,
       shows && heading === WORDS.offerHeading && words.includes(WORDS.offerText) && words.includes(WORDS.takeTour) && words.includes(WORDS.skipOffer) && tall(sized) && nagged === 0,
@@ -1357,9 +710,9 @@ async function offerRun(browser, size) {
     const readMarks = second.writes.filter((w) => /\/read$/.test(w))
     const allWrites = second.writes.filter((w) => !w.includes('/api/auth/'))
     const expectTabs = ['Loads', 'Loads', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Performance', 'Loads']
-    record(`O3-${t}`, "Take the tour walks every screen, with a load In Transit, and marks nothing read: its only writes are its own",
-      `titles ${JSON.stringify(ALL_STEP_TITLES)} on tabs ${JSON.stringify(expectTabs)}; his load's own page on that step; no message or alert marked read; the badges stay; writes: the seen mark, then the tour mark; no sign-out`,
-      `titles ${JSON.stringify(walked.map((s) => s.title))}, tabs ${JSON.stringify(walked.map((s) => s.tab))}, badges ${unreadBefore} then ${unreadAfter}, read marks ${JSON.stringify(readMarks)}, writes before Done ${JSON.stringify(midWrites)}, all ${JSON.stringify(allWrites)}, sign-outs ${taker.calls.logout}`,
+    record(`O3-${t}`, 'Take the tour walks every screen, with a load In Transit, and marks nothing read: its only writes are its own',
+      `titles ${JSON.stringify(ALL_STEP_TITLES)} on tabs ${JSON.stringify(expectTabs)}; their load's own page on that step; no message or alert marked read; the badges stay; writes: the seen mark, then the tour mark; no logout`,
+      `titles ${JSON.stringify(walked.map((s) => s.title))}, tabs ${JSON.stringify(walked.map((s) => s.tab))}, badges ${unreadBefore} then ${unreadAfter}, read marks ${JSON.stringify(readMarks)}, writes before Done ${JSON.stringify(midWrites)}, all ${JSON.stringify(allWrites)}, logouts ${taker.calls.logout}`,
       sameList(walked.map((s) => s.title), ALL_STEP_TITLES) && sameList(walked.map((s) => s.tab), expectTabs) && walked.find((s) => s.title === ALL_STEP_TITLES[1]).loadPage === 1 && walked.find((s) => s.title === ALL_STEP_TITLES[0]).loadPage === 0 && readMarks.length === 0 && unreadBefore > 0 && unreadAfter === unreadBefore
         && sameList(midWrites, ['POST /api/driver/me/release/seen']) && sameList(allWrites, ['POST /api/driver/me/release/seen', 'POST /api/driver/me/release/tour-done']) && taker.calls.logout === 0,
       await shot(second.page, `O3-${t}`))
@@ -1368,10 +721,10 @@ async function offerRun(browser, size) {
   }
 }
 
-// ---------------------------------------------------------------- A, B: never another role, never the lock screen
+// ---------------------------------------------------------------- A, B: who it doesn't reach
 async function otherRoleRun(browser, size) {
   const t = size.tag
-  const state = freshState({ who: ADMIN, due: true, hasNote: true, status: 'Delivered' })
+  const state = freshState({ who: ADMIN, hasNote: true, status: 'Delivered' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
     await appOpen(page)
@@ -1382,8 +735,8 @@ async function otherRoleRun(browser, size) {
     await page.waitForTimeout(500)
     const kit = await page.locator(testid('tour-kit-card')).count()
     const note = await page.locator(testid('release-dialog')).count()
-    record(`A-${t}`, 'A Super Admin on /driver: nothing of this, ever', 'the route never read; no sign-out; no note; no Kit card',
-      `route read ${state.calls.release} times, sign-outs ${state.calls.logout}, note ${note}, Kit card ${kit}, url ${new URL(page.url()).pathname}`,
+    record(`A-${t}`, 'A Super Admin on /driver: nothing of this, ever', 'the route never read; no logout; no note; no Kit card',
+      `route read ${state.calls.release} times, logouts ${state.calls.logout}, note ${note}, Kit card ${kit}, url ${new URL(page.url()).pathname}`,
       state.calls.release === 0 && state.calls.logout === 0 && note === 0 && kit === 0 && !onLogin(page))
   } finally {
     await ctx.close()
@@ -1392,7 +745,7 @@ async function otherRoleRun(browser, size) {
 
 async function lockScreenRun(browser, size) {
   const t = size.tag
-  const state = freshState({ due: true, hasNote: true, status: 'Delivered', onboarding: 'documents_pending' })
+  const state = freshState({ hasNote: true, status: 'Delivered', onboarding: 'documents_pending' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
     const locked = await appears(page, '.onboarding-locked', 15000)
@@ -1400,8 +753,8 @@ async function lockScreenRun(browser, size) {
     await comeBackToApp(page)
     await page.waitForTimeout(1500)
     const note = await page.locator(testid('release-dialog')).count()
-    record(`B-${t}`, 'A driver on the lock screen: not signed out, nothing shown', 'the lock screen; the route never read; no sign-out; no note',
-      `locked ${locked}, route read ${state.calls.release} times, sign-outs ${state.calls.logout}, note ${note}`, locked && state.calls.release === 0 && state.calls.logout === 0 && note === 0 && !onLogin(page))
+    record(`B-${t}`, 'A driver on the lock screen: nothing shown', 'the lock screen; the route never read; no logout; no note',
+      `locked ${locked}, route read ${state.calls.release} times, logouts ${state.calls.logout}, note ${note}`, locked && state.calls.release === 0 && state.calls.logout === 0 && note === 0)
   } finally {
     await ctx.close()
   }
@@ -1418,22 +771,15 @@ async function main() {
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
     for (const size of [PHONE, DESKTOP]) {
-      await signOutRun(browser, size)
+      await nextSignInRun(browser, size)
       await inTransitRun(browser, size)
-      await statusInFlightRun(browser, size)
-      await uploadInFlightRun(browser, size)
     }
-    await appOpeningRun(browser, PHONE)
-    await emptyListRun(browser, PHONE)
+    await pastItsSessionRun(browser, PHONE)
     await movingRun(browser, PHONE)
-    await noReadingRun(browser, PHONE)
     await failedReadRun(browser, PHONE)
     await performanceAnswerRun(browser, PHONE)
+    await loadPageRun(browser, PHONE)
     await killSwitchRun(browser, PHONE)
-    await offlineRun(browser, PHONE)
-    await unconfirmedRun(browser, PHONE)
-    await loopRun(browser, PHONE)
-    await twoTabsRun(browser, PHONE)
     await sharedPhoneRun(browser, PHONE)
     await offerRun(browser, PHONE)
     await otherRoleRun(browser, DESKTOP)

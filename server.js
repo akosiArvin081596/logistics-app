@@ -33515,7 +33515,8 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		disconnectSessionSockets(currentSid);
 
 		// A password change isn't a sign-in: the rotated session stays on the release this one
-		// had, or a driver who just changed his password would be signed out for having done so.
+		// had, or a driver made to change it at their first sign-in would lose the note and the
+		// tour offer until their next one.
 		const heldRelease = req.session.driverRelease;
 		// Rotate the current session ID so a previously captured cookie
 		// (the pre-change one) no longer authenticates.
@@ -49452,10 +49453,10 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
-		// Voice notes' driver-safety gate (lib/voice-note-gate.js) and the driver
-		// release sign-out: since when the truck has been stopped, from its recent
-		// clean fixes taken since the link. Null when that can't be shown, which
-		// the driver app reads as not stopped long enough.
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js), which the driver
+		// app's new-feature note and tour read too: since when the truck has been
+		// stopped, from its recent clean fixes taken since the link. Null when that
+		// can't be shown, which the driver app reads as not stopped long enough.
 		// Bounded: at most 120 rows of the same index read as above.
 		let stoppedSinceMs = null;
 		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {

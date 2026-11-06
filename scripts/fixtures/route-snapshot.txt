@@ -120,7 +120,7 @@ GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 
 PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
 GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@b8c6be68a743 · (lib mount)
-GET /api/driver/me/release · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@47f3adbac2f7 · (lib mount)
+GET /api/driver/me/release · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@b9ce7b4509ea · (lib mount)
 POST /api/driver/me/release/seen · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
 POST /api/driver/me/release/tour-done · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
 GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc0

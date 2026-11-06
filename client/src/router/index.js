@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore, onSessionResolved, isLeavingPage } from '../stores/auth'
-import { noteScreenShown } from '../lib/appOpening'
 
 import LoginView from '../views/LoginView.vue'
 
@@ -296,11 +295,6 @@ router.beforeEach(async (to) => {
   }
 
   return true
-})
-
-// This runs in the same tick as the route changes, before the new screen's setup.
-router.afterEach((to, from, failure) => {
-  if (!failure) noteScreenShown()
 })
 
 // When the first navigation could not reach the server, the session goes on being

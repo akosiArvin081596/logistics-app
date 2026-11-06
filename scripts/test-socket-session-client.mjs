@@ -288,7 +288,6 @@ async function freshWorld({ socketSrc = USE_SOCKET_SRC, authSrc = AUTH_SRC, with
       '../composables/useApi.js': fileUrl('composables/useApi.js'),
       '../composables/useSocket.js': socketUrl,
       '../lib/sessionCheck.js': fileUrl('lib/sessionCheck.js'),
-      '../lib/driverReleaseNotices.js': fileUrl('lib/driverReleaseNotices.js'),
       '../utils/datetime.js': fileUrl('utils/datetime.js'),
     }))
     const mod = await import(authUrl)

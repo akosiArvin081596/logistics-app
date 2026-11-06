@@ -466,10 +466,7 @@ import { voiceNoteTitle } from '../lib/voiceNoteText'
 import { ONBOARDING_DOC_KEYS, contactsPromptDue, requiredSignedCount, signingStepView } from '../lib/emergencyContacts'
 import { LIVE_EVENT, NOTICE_TYPE, docAction, noticeDocKey, requestedDocs } from '../lib/resignRequest'
 import { isGoneAnswer, showsMyWeek, tabAfterAnswer, tabProbeUrl, weekBarView, weekFromAnswer } from '../lib/driverPerformance'
-import { WORDS as RELEASE_WORDS, fieldInFocus, loadsHoldSignOut, overlayOnScreen, parkedLongEnough } from '../lib/driverReleaseNotices'
-import { isFirstScreen } from '../lib/appOpening'
-import { thisPageTabs } from '../lib/appTabs'
-import { writesBusy } from '../lib/writesInFlight'
+import { WORDS as RELEASE_WORDS } from '../lib/driverReleaseNotices'
 import { useDriverRelease } from '../composables/useDriverRelease'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
@@ -897,9 +894,9 @@ watch(() => (currentTab.value === 'loads' ? (detailLoad.value ? 'load' : 'list')
   if (place) checkPerformanceTab()
 })
 
-// He left a load's page or tapped a tab himself. These read the release answer for the note, in a
-// page already open, so they can never sign him out. The place changing doesn't read at all: a
-// cancel or a refetch that closes his load mustn't pick the moment for him.
+// They left a load's page or tapped a tab themselves: these ask again for the note, in case an
+// earlier read failed. The place changing doesn't ask: a cancel or a refetch that closes their load
+// mustn't bring a note up over what they were doing.
 function handleLoadBack() {
   detailRowIndex.value = null
   release.check()
@@ -1143,9 +1140,9 @@ function contactsPromptLater() {
 }
 
 // After a release (composables/useDriverRelease.js). It asks the server when the app opens
-// (attemptInitialLoad), when he comes back to it (onVisibilityChange), and when he moves back to the
-// list himself (handleLoadBack, handleNavTap). Never on a timer or a socket push, so a sign-out can't
-// land under his thumb.
+// (attemptInitialLoad), when they come back to it (onVisibilityChange), and when they move back to the
+// list themselves (handleLoadBack, handleNavTap). Never on a timer or a socket push. It has no way to
+// sign anyone out: handleLogout isn't handed to it.
 function releaseDialogOpen() {
   return showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value
 }
@@ -1160,7 +1157,6 @@ function showTourStep(step) {
 const release = useDriverRelease({
   api,
   role: () => auth.user?.role,
-  userId: () => auth.user?.id,
   onboarding: () => isOnboarding.value,
   mounted: () => isMounted,
   has: () => ({ performance: performanceTab.value }),
@@ -1175,25 +1171,6 @@ const release = useDriverRelease({
     dialogOpen: releaseDialogOpen(),
     motionAllowed: voiceGate.value.allowed,
   }),
-  signOutInputs: () => ({
-    loaded: !initialLoadFailed.value,
-    onboarding: isOnboarding.value,
-    tab: currentTab.value,
-    loadOpen: loadPageOpen(),
-    welcomeOpen: showWelcomeModal.value,
-    dialogOpen: releaseDialogOpen() || !!assignedNotification.value || respondingLoadIds.size > 0 || fieldInFocus(document) || overlayOnScreen(document),
-    loadsHold: loadsHoldSignOut(driverStore.loads, driverStore.headers.jobTracking),
-    writesBusy: writesBusy(),
-    otherTabOpen: thisPageTabs().otherPageOpen(),
-    visible: document.visibilityState === 'visible',
-    online: navigator.onLine !== false && !auth.isReconnecting,
-    parked: parkedLongEnough(voiceGate.value.state, driverPos.eldMotion.value?.stoppedSince, driverPos.clock.value),
-  }),
-  refreshFacts: async () => {
-    await driverStore.loadData({ quiet: true })
-    if (await driverPos.refreshEld() !== true) throw new Error('no fresh truck reading')
-  },
-  signOut: handleLogout,
   place: () => currentTab.value,
   showStep: showTourStep,
   restorePlace: (tab) => {
@@ -1473,12 +1450,7 @@ watch(
   }
 )
 
-// Spent by the first load: a retry after a failed one is a tap in a page already open.
-let appOpening = isFirstScreen()
-
 async function attemptInitialLoad() {
-  const opening = appOpening
-  appOpening = false
   // Kick off the socket handshake in parallel with the data fetch so the
   // "Offline" chip clears as soon as the WebSocket is up, instead of waiting
   // for the HTTP fetch to finish first. Handler registration still waits for
@@ -1493,7 +1465,7 @@ async function attemptInitialLoad() {
     maybeShowWelcome()
     scheduleContactsPrompt()
     checkPerformanceTab()
-    release.check({ appOpening: opening })
+    release.check()
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')
