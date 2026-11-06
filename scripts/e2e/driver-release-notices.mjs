@@ -27,7 +27,8 @@
 //   H   a shared phone: the next driver signs in and reads their own answer; nothing of this is kept in
 //       the browser
 //   O   a first-time driver: the offer, Skip for now, no nagging; Take the tour walks every tab; the
-//       tour marks no message or alert read and writes only its own marks; the Kit's button runs it
+//       tour marks no message or alert read and writes only its own marks; the Kit's button runs it;
+//       a forced password change at sign-in, and the offer after it
 //   B   a sign-in that lands on the lock screen: nothing shown; the lock lifting on that page opens
 //       nothing; the next sign-in has the note
 // And:
@@ -89,7 +90,8 @@ if (process.env.SHOT_DIR && !path.isAbsolute(process.env.SHOT_DIR)) die('SHOT_DI
 const DRIVER = { id: 90421, username: 'qa-release-driver', role: 'Driver', driverName: 'Casey Example', email: '', fullName: 'Casey Example', companyName: '', mustChangePassword: false }
 const DRIVER_B = { id: 90422, username: 'qa-release-driver-b', role: 'Driver', driverName: 'Riley Sample', email: '', fullName: 'Riley Sample', companyName: '', mustChangePassword: false }
 const ADMIN = { id: 90420, username: 'qa-release-admin', role: 'Super Admin', driverName: '', email: '', fullName: 'QA Release Admin', companyName: '', mustChangePassword: false }
-const ACCOUNTS = { [DRIVER.username]: DRIVER, [DRIVER_B.username]: DRIVER_B }
+const DRIVER_TEMP = { id: 90423, username: 'qa-release-driver-temp', role: 'Driver', driverName: 'Taylor Temp', email: '', fullName: 'Taylor Temp', companyName: '', mustChangePassword: true }
+const ACCOUNTS = { [DRIVER.username]: DRIVER, [DRIVER_B.username]: DRIVER_B, [DRIVER_TEMP.username]: DRIVER_TEMP }
 const RELEASE = latestReleaseId(RELEASES)
 const ENTRIES = unseenReleases([], RELEASES)
 const LATEST = ENTRIES[0]
@@ -246,6 +248,8 @@ async function newContext(browser, size, state, writes) {
       state.who = ACCOUNTS[body.username] || state.who
       state.session = true
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, user: state.who, appTimeZone: 'America/New_York' }) })
+    } else if (u.pathname === '/api/auth/change-password') {
+      state.who = { ...state.who, mustChangePassword: false }
     } else if (u.pathname === '/api/driver/me/release/seen') {
       for (const id of body.ids || []) state.seen.add(id)
     } else if (u.pathname === '/api/driver/me/release/tour-done') {
@@ -816,6 +820,24 @@ async function offerRun(browser, size) {
       await shot(second.page, `O3-${t}`))
   } finally {
     await second.ctx.close()
+  }
+
+  // The forced change is the same page, so the sign-in's one look is still there after it.
+  const state = freshState({ session: false, offer: true })
+  const third = await openPage(browser, size, state)
+  try {
+    await signInForm(third.page, size, DRIVER_TEMP.username)
+    const forced = await appears(third.page, '.cp-submit', 8000)
+    await third.page.fill('input[autocomplete="current-password"]', 'made-up-password')
+    await third.page.locator('input[autocomplete="new-password"]').nth(0).fill('Made-Up-Pass-2!')
+    await third.page.locator('input[autocomplete="new-password"]').nth(1).fill('Made-Up-Pass-2!')
+    await press(third.page.locator('.cp-submit').first(), size)
+    const app = await appOpen(third.page)
+    const offered = await appears(third.page, testid('release-take-tour'), 10000)
+    record(`O4-${t}`, 'A first-time driver made to change a temporary password: the offer follows it, on the same page', 'the change-password page; then the app and the offer; no logout',
+      `forced ${forced}, app ${app}, offer ${offered}, logouts ${state.calls.logout}, sign-ins ${state.calls.login}`, forced && app && offered && state.calls.logout === 0 && state.calls.login === 1)
+  } finally {
+    await third.ctx.close()
   }
 }
 
