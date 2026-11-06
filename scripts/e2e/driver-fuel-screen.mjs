@@ -38,13 +38,17 @@
 //   DFT15 a delivered load's page on screen, no other load: the toast, and the page stays
 //   DFT16 two loads under way: the one furthest along, not the newest row. DFT16b a load left at its
 //         receiver: the next load, the one the truck is driving to
-//   DFT17 a repeat tap hours later (flag off): the new figure on the chip and in the section, the stops
-//         not asked for again
-//   DFT18 a tap that failed, then a tap with signal back: the figures, not the saved failure
-//   DFT19 a slow answer to a repeat tap: the old figures stay, a line says it's checking, Refresh is shut
-//   DFT20 a tap with no signal over a standing warning: the warning stays, on the screen and the title,
-//         with the figures' age, and goes back to normal once the signal does
+//   DFT17 a repeat tap straight after a read (flag off): asked again, the new figure on the chip and in
+//         the section, the stops not asked for again
+//   DFT18 a tap that failed, then a tap with signal back: the one line, then the figures
+//   DFT19 a slow answer to a repeat tap: one line and nothing else while it's out, then the new figure
+//   DFT20 a tap with no signal over a standing warning: one line and nothing else, no badge on the title
+//         then or on coming back to the load, and everything back once the signal is
 //   DFT21 reopened by hand 16 minutes on (flag off): the new figure, the stops not asked for again
+//   DFT22 a tap refused for the driver's own limit (429): fresh miles and a sentence saying why, not the
+//         failure line, and no old verdict or badge
+//   DFT23 a first tap with no signal on a load nobody has opened Fuel on, the title holding a warning:
+//         the one line, and the badge goes
 //   DFT1r Route Options and a tall instructions card landing after the scroll, with the browser's scroll
 //         anchoring off, as on a phone that has none: the title stays in view. DFT1t the same, after
 //         the driver has touched the page: it isn't pulled back
@@ -990,10 +994,15 @@ const openHistorical = (id) => async (page) => {
   await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
 }
 
-// A repeat tap: the panel's answers change, the clock moves on, and the new figure has to show.
-async function repeatTapHoursLater(browser) {
+// The Fuel section's text on its own, the way a driver would read it.
+const panelText = async (page) => (await page.locator('.driver-fuel').innerText()).replace(/\s+/g, ' ').trim()
+const READ_FAILED = "Couldn't get your latest fuel numbers. Check your fuel gauge."
+const CHECKING = 'Checking for your latest fuel numbers…'
+
+// A repeat tap straight after a read: the answers change and the new figure has to show. No clock moves.
+async function repeatTapStraightAfter(browser) {
   const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD], clockMoves: true }, PHONE, { openLoad: false })
+  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
   try {
     await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
     await chipUp(page)
@@ -1001,7 +1010,6 @@ async function repeatTapHoursLater(browser) {
     await waitForFuelOpen(page)
     const first = await readLanding(page)
     Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
-    await page.evaluate(() => { window.qaClockAheadMs = 4 * 60 * 60 * 1000 })
     await tapChip(page, PHONE)
     await page.waitForFunction(() => {
       const p = document.querySelector('.driver-fuel')
@@ -1017,14 +1025,14 @@ async function repeatTapHoursLater(browser) {
       stopsStay: again.panel.includes('QA Truck Plaza Riverton'),
       titleInView: again.titleInView,
     }
-    record('DFT17', 'A repeat tap 4 hours later, flag off, at 390 x 844', 'the new figure on the chip and in the section, not the first tap\'s; the stops asked for once only',
+    record('DFT17', 'A repeat tap straight after a read, flag off, at 390 x 844', 'the new figure on the chip and in the section, not the first tap\'s; the stops asked for once only',
       `${flags(checks)}; stops asked ${asked['/api/poi/fuel-stops']} time(s)`, allTrue(checks))
   } finally {
     await ctx.close()
   }
 }
 
-// A tap with no signal, then one with signal back: the figures, not the saved failure.
+// A tap with no signal, then one with signal back: the one line, then the figures.
 async function tapAfterAFailure(browser) {
   const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
   const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
@@ -1035,8 +1043,8 @@ async function tapAfterAFailure(browser) {
     // After the chip has its answer, so only the panel's own read fails. 400: DFx allows that line.
     answers['/api/fuel/range'] = { status: 400, body: { ok: false, error: 'made-up failure' } }
     await tapChip(page, PHONE)
-    await waitForFuelOpen(page)
-    const failed = await readLanding(page)
+    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
+    const failedText = await panelText(page)
     Object.assign(answers, good)
     await page.locator('.detail-topbar button').first().click()
     await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 15000 })
@@ -1047,21 +1055,21 @@ async function tapAfterAFailure(browser) {
     }, null, { timeout: 15000 })
     const healed = await readLanding(page)
     const checks = {
-      sawTheFailure: failed.panel.includes("Couldn't read your fuel level"),
+      oneLine: failedText === READ_FAILED,
       figuresBack: healed.panel.includes('225 miles before you need to refuel'),
-      failureGone: !healed.panel.includes("Couldn't read your fuel level"),
+      failureGone: !healed.panel.includes(READ_FAILED),
       stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
     }
-    record('DFT18', 'A tap that failed, then one with signal back, at 390 x 844', 'the figures, not the saved failure; the stops asked for once only', flags(checks), allTrue(checks))
+    record('DFT18', 'A tap that failed, then one with signal back, at 390 x 844', 'the one line and nothing else, then the figures; the stops asked for once only', `${flags(checks)}; section read "${failedText.slice(0, 120)}"`, allTrue(checks))
   } finally {
     await ctx.close()
   }
 }
 
-// A slow answer to a repeat tap: the old figures stay up, and the screen says it's checking.
+// A slow answer to a repeat tap: one line and nothing else, then the new figure.
 async function slowAnswerToATap(browser) {
   const WORLD = { flag: false, leg: 'to_delivery', routeMiles: 180 }
-  const sc = { world: WORLD, loads: [ON_THE_ROAD], clockMoves: true }
+  const sc = { world: WORLD, loads: [ON_THE_ROAD] }
   const { ctx, page, answers } = await openScene(browser, sc, PHONE, { openLoad: false })
   try {
     await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
@@ -1070,76 +1078,132 @@ async function slowAnswerToATap(browser) {
     await waitForFuelOpen(page)
     Object.assign(answers, answersFor({ world: { ...WORLD, pct: 30 } }))
     sc.fuelDelayMs = 2500
-    await page.evaluate(() => { window.qaClockAheadMs = 4 * 60 * 60 * 1000 })
     await tapChip(page, PHONE)
-    const line = page.locator('[data-testid="fuel-refreshing"]')
-    await line.waitFor({ state: 'visible', timeout: 5000 })
-    const asking = await readLanding(page)
-    const lineText = (await line.innerText()).trim()
-    const button = await page.locator('.driver-fuel .dfp-refresh').evaluate((b) => ({ text: b.textContent.trim(), shut: b.disabled }))
+    await page.locator('[data-testid="fuel-checking"]').waitFor({ state: 'visible', timeout: 5000 })
+    const asking = await panelText(page)
+    const refreshGone = (await page.locator('.driver-fuel .dfp-refresh').count()) === 0
     await page.waitForFunction(() => {
       const p = document.querySelector('.driver-fuel')
       return !!p && p.innerText.replace(/\s+/g, ' ').includes('135 miles before you need to refuel')
     }, null, { timeout: 15000 })
     const answered = await readLanding(page)
     const checks = {
-      oldFiguresStay: asking.panel.includes('225 miles before you need to refuel') && !asking.panel.includes('Reading your fuel level'),
-      saysChecking: lineText === 'Checking for your latest fuel numbers…',
-      refreshShut: button.shut && button.text === 'Refreshing…',
+      oneLine: asking === CHECKING,
+      refreshGone,
       newFigure: answered.panel.includes('135 miles before you need to refuel'),
-      lineGone: (await page.locator('[data-testid="fuel-refreshing"]').count()) === 0,
+      lineGone: (await page.locator('[data-testid="fuel-checking"]').count()) === 0,
+      refreshBack: answered.fuelOpen,
     }
-    record('DFT19', 'A slow answer to a repeat tap, flag off, at 390 x 844', 'the old figures stay; "Checking for your latest fuel numbers…"; Refresh shut; then the new figure and no line', `${flags(checks)}; line "${lineText}"`, allTrue(checks))
+    record('DFT19', 'A slow answer to a repeat tap, flag off, at 390 x 844', `"${CHECKING}" and nothing else; then the new figure and no line`, `${flags(checks)}; section read "${asking.slice(0, 120)}"`, allTrue(checks))
   } finally {
     await ctx.close()
   }
 }
 
-// A tap with no signal over a standing warning: it stays. 400s, since DFx allows only that line.
+// A tap with no signal over a standing warning: one line, and nothing old on the section or the
+// title, then or on coming back. 400s stand in for no signal, since DFx allows only that line.
 async function noSignalOverAWarning(browser) {
   const WORLD = { flag: false }
-  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD], clockMoves: true }, PHONE, { openLoad: false })
+  const { ctx, page, answers, asked } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
   try {
     await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
     await chipUp(page)
     await tapChip(page, PHONE)
     await waitForFuelOpen(page)
+    const standing = await readLanding(page)
     const good = { ...answers }
     const FAILS = { status: 400, body: { ok: false, error: 'made-up failure' } }
     answers['/api/fuel/range'] = FAILS
     answers['/api/fuel/trip-plan'] = FAILS
-    await page.evaluate(() => { window.qaClockAheadMs = 4 * 60 * 60 * 1000 })
     await tapChip(page, PHONE)
-    const line = page.locator('[data-testid="fuel-refresh-failed"]')
-    await line.waitFor({ state: 'visible', timeout: 15000 })
+    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
     const dead = await readLanding(page)
-    const lineText = (await line.innerText()).trim()
+    const deadText = await panelText(page)
+    const chipStays = (await page.locator('.fuel-chip').count()) === 1
+    const file = path.join(SHOTS, 'dft20-390x844.png')
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot DFT20 failed: ${e.message})`))
 
     await page.locator('.detail-topbar button').first().click()
     await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 15000 })
     await page.locator('.load-card').first().click()
     await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
     await page.waitForTimeout(800)
-    const shutBadge = await readLanding(page)
+    const onReturn = await readLanding(page)
 
     Object.assign(answers, good)
     await tapChip(page, PHONE)
-    await page.locator('[data-testid="fuel-refresh-failed"]').waitFor({ state: 'hidden', timeout: 15000 })
+    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'hidden', timeout: 15000 })
     await waitForFuelOpen(page)
     const healed = await readLanding(page)
     const checks = {
-      verdictStays: dead.panel.includes('Not enough fuel — you need to stop'),
-      heroStays: dead.panel.includes('225 miles before you need to refuel'),
-      stopsStayUrgent: dead.panel.includes('Where to fuel up'),
-      badgeStays: dead.badge === 'Fuel stop needed',
-      noFailureWords: !/Couldn't read your fuel level|Couldn't check whether/.test(dead.panel),
-      saysItsAge: lineText === "Couldn't update your fuel numbers. These are from 4 hours ago.",
-      badgeOnReturn: shutBadge.badge === 'Fuel stop needed',
-      healed: healed.panel.includes('225 miles before you need to refuel') && !healed.panel.includes("Couldn't update"),
+      warningFirst: standing.panel.includes('Not enough fuel — you need to stop') && standing.badge === 'Fuel stop needed',
+      oneLine: deadText === READ_FAILED,
+      noBadge: dead.badge === '',
+      noBadgeOnReturn: onReturn.badge === '',
+      chipStays,
+      healed: healed.panel.includes('Not enough fuel — you need to stop') && healed.panel.includes('225 miles before you need to refuel') && !healed.panel.includes(READ_FAILED),
+      badgeBack: healed.badge === 'Fuel stop needed',
+      stopsBack: healed.panel.includes('QA Truck Plaza Riverton'),
       stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,
     }
-    record('DFT20', 'A tap with no signal over a standing warning, flag off, at 390 x 844', 'the verdict, hero, stops heading and badge stay, with a line giving their age; back to normal with the signal',
-      `${flags(checks)}; line "${lineText}"; badge "${dead.badge}"`, allTrue(checks))
+    record('DFT20', 'A tap with no signal over a standing warning, flag off, at 390 x 844', `"${READ_FAILED}" and nothing else; no badge then or on return; everything back with the signal, the stops asked for once`,
+      `${flags(checks)}; section read "${deadText.slice(0, 120)}"; badge "${dead.badge}"`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+// A tap refused for the driver's own limit: the range still answers, so this isn't a failed read.
+async function refusedForTheLimit(browser, step, flag, words) {
+  const WORLD = { flag, leg: 'to_delivery', routeMiles: 180 }
+  const { ctx, page, answers } = await openScene(browser, { world: WORLD, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    await tapChip(page, PHONE)
+    await waitForFuelOpen(page)
+    const later = answersFor({ world: { ...WORLD, pct: 30 } })
+    answers['/api/fuel/range'] = later['/api/fuel/range']
+    answers['/api/fuel/trip-plan'] = { status: 429, body: { error: 'Too many trip-plan requests. Try again later.' } }
+    await tapChip(page, PHONE)
+    await page.waitForFunction((w) => {
+      const p = document.querySelector('.driver-fuel')
+      return !!p && p.innerText.replace(/\s+/g, ' ').includes(w)
+    }, words, { timeout: 15000 })
+    const m = await readLanding(page)
+    const checks = {
+      saysWhy: m.panel.includes(words),
+      noFailureLine: !m.panel.includes(READ_FAILED),
+      freshMiles: m.panel.includes(flag ? '135' : '135 miles before you need to refuel') && !m.panel.includes('225'),
+      noOldVerdict: !m.panel.includes('You can make this run'),
+      noBadge: m.badge === '',
+      stopsStay: m.panel.includes('QA Truck Plaza Riverton'),
+    }
+    record(step, `A tap refused for the driver's limit, flag ${flag ? 'on' : 'off'}, at 390 x 844`, `fresh miles and "${words}", not the failure line; no old verdict or badge`,
+      `${flags(checks)}; section read "${m.panel.slice(0, 140)}"`, allTrue(checks))
+  } finally {
+    await ctx.close()
+  }
+}
+
+// A load nobody has opened Fuel on, the title holding a warning: a first tap with no signal.
+async function firstTapNoSignal(browser) {
+  const { ctx, page, answers } = await openScene(browser, { world: { flag: false }, loads: [ON_THE_ROAD] }, PHONE, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().click({ timeout: 30000 })
+    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+    await chipUp(page)
+    await page.waitForTimeout(800)
+    const before = await readLanding(page)
+    const FAILS = { status: 400, body: { ok: false, error: 'made-up failure' } }
+    answers['/api/fuel/range'] = FAILS
+    answers['/api/fuel/trip-plan'] = FAILS
+    await tapChip(page, PHONE)
+    await page.locator('[data-testid="fuel-read-failed"]').waitFor({ state: 'visible', timeout: 15000 })
+    const after = await readLanding(page)
+    const text = await panelText(page)
+    const checks = { warningFirst: before.badge === 'Fuel stop needed', oneLine: text === READ_FAILED, badgeGoes: after.badge === '' }
+    record('DFT23', 'A first tap with no signal, the title holding a warning, flag off, at 390 x 844', 'the one line and nothing else; the badge goes', `${flags(checks)}; section read "${text.slice(0, 120)}"`, allTrue(checks))
   } finally {
     await ctx.close()
   }
@@ -1272,11 +1336,14 @@ async function tapSteps(browser) {
       step: 'DFT16b', title: 'a load left at its receiver, the next load heading to its shipper', world: { leg: 'to_delivery', routeMiles: 180 },
       loads: [[2, LOAD_ID, 'At Receiver'], [9, OTHER_LOAD, 'Heading to Shipper']], opens: OTHER_LOAD,
     }),
-    () => repeatTapHoursLater(browser),
+    () => repeatTapStraightAfter(browser),
     () => tapAfterAFailure(browser),
     () => slowAnswerToATap(browser),
     () => noSignalOverAWarning(browser),
     () => reopenedByHand(browser),
+    () => refusedForTheLimit(browser, 'DFT22', false, 'Checked too many times just now — try again in a few minutes.'),
+    () => refusedForTheLimit(browser, 'DFT22b', true, 'Checked too many times just now. Try again in a few minutes.'),
+    () => firstTapNoSignal(browser),
     () => answersLandLate(browser, 'DFT1r', false),
     () => answersLandLate(browser, 'DFT1t', true),
     () => landingScene(browser, { step: 'DFT1d', title: 'a load on the road', world: { leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD] }, DESKTOP),
@@ -1433,9 +1500,9 @@ async function main() {
     for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['the chip\'s tap', tapSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    // DF7's trip plan and DFT13b's first load answer 400 on purpose; the browser logs that one line.
+    // Some steps answer 400 or DFT22's 429 on purpose; the browser logs that one line for each.
     const consoleErrors = consoleLines.filter((l) => l.type === 'error' && !harnessLine(l))
-    const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of 400/.test(l.text))
+    const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of (400|429)/.test(l.text))
     record('DFx', 'Page errors; console errors; writes', 'no page errors; console errors only the browser\'s line for those 400s; no writes',
       `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; ${consoleErrors.length} console error line(s), ${notNetwork.length} other${notNetwork.length ? `: ${notNetwork.map((l) => l.text.slice(0, 120)).join('; ')}` : ''}; ${writes.length ? writes.join(', ') : 'no writes'}`,
       pageErrors.length === 0 && notNetwork.length === 0 && writes.length === 0)

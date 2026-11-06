@@ -13,12 +13,12 @@
          lie the driver can't tell apart. -->
     <div v-if="idle" class="dfp-idle">Open this section to load fuel details.</div>
 
-    <template v-else>
-      <!-- What's on screen stays up while the numbers are asked for again, so it says so,
-           and says when they couldn't be updated: old figures must not look live. -->
-      <p v-if="refreshing" class="dfp-refresh-note" role="status" data-testid="fuel-refreshing">{{ FUEL_REFRESHING }}</p>
-      <p v-else-if="refreshFailedLine" class="dfp-refresh-note" role="status" data-testid="fuel-refresh-failed">{{ refreshFailedLine }}</p>
+    <!-- One line and nothing else while an ask is out, and when it fails: an old figure
+         or verdict beside either is a driver-safety risk. -->
+    <div v-else-if="asking" class="dfp-loading" role="status" data-testid="fuel-checking">{{ FUEL_CHECKING }}</div>
+    <div v-else-if="readFailed" class="dfp-error" role="status" data-testid="fuel-read-failed">{{ FUEL_READ_FAILED }}</div>
 
+    <template v-else>
       <!-- The driver gallons flag on: the answers carry `driverFuel`, and this part
            shows only its plain figures (lib/driverFuelView.js), with no working.
            Without the block, the v-else below is the panel exactly as before. -->
@@ -41,7 +41,6 @@
           <p v-if="fuelView.rowsNote" class="dff-rows-note">{{ fuelView.rowsNote }}</p>
           <p v-for="f in fuelView.footers" :key="f" class="dff-foot">{{ f }}</p>
         </section>
-        <div v-else-if="rangeLoading || planLoading" class="dfp-loading">Reading your fuel level…</div>
         <div v-else class="dfp-error">{{ FUEL_REQUEST_FAILED }}</div>
       </template>
 
@@ -55,10 +54,8 @@
            a 348-mile point estimate against a 346.9-mile route comes back
            `insufficient`. Comparing the numbers again on this side is exactly
            how that protection would get undone. -->
-      <div v-if="planLoading" class="dfp-loading">Checking whether this run fits your fuel…</div>
-
       <section
-        v-else-if="verdict"
+        v-if="verdict"
         class="dfp-verdict"
         :class="'v-' + verdict.tone"
         role="status"
@@ -85,9 +82,7 @@
       <p v-else-if="planNote" class="dfp-plan-note">{{ planNote }}</p>
 
       <!-- ── 2. How far the tank goes ─────────────────────────────────── -->
-      <div v-if="rangeLoading" class="dfp-loading">Reading your fuel level…</div>
-
-      <template v-else-if="hasFuelData">
+      <template v-if="hasFuelData">
         <!-- The hero is the USABLE figure: how far you may go before you have
              to stop. It matches the dispatcher's Fuel & Route card and the
              header chip on purpose — three surfaces quoting one truck must
@@ -234,8 +229,6 @@
         <p v-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
       </template>
 
-      <div v-else-if="rangeError" class="dfp-error">{{ rangeError }}</div>
-
       <van-empty v-else :description="noFuelText" image="search" :image-size="60" />
       </template>
 
@@ -249,9 +242,7 @@
       </div>
       <p v-if="stopsRequired && stopsLead" class="dfp-stops-lead">{{ stopsLead }}</p>
 
-      <div v-if="stopsLoading" class="dfp-loading">Finding diesel stops along your route…</div>
-
-      <div v-else-if="stopsError" class="dfp-error">{{ stopsError }}</div>
+      <div v-if="stopsError" class="dfp-error">{{ stopsError }}</div>
 
       <template v-else-if="stops.length">
         <p class="dfp-price-note" :class="{ live: livePriceCount > 0 }">
@@ -322,12 +313,9 @@
         :image-size="60"
       />
 
-      <!-- One explicit refresh for both feeds. Everything above is cached per
-           load so opening the section again costs nothing; this is the only way
-           to spend another Places lookup, and it takes a deliberate tap. -->
-      <button type="button" class="dfp-refresh" :disabled="busy" @click="refresh">
-        {{ busy ? 'Refreshing…' : 'Refresh fuel, stops and check' }}
-      </button>
+      <!-- One explicit refresh for both feeds. This is the only way to spend
+           another Places lookup, and it takes a deliberate tap. -->
+      <button type="button" class="dfp-refresh" @click="refresh">Refresh fuel, stops and check</button>
     </template>
   </div>
 </template>
@@ -340,24 +328,23 @@
 // load list unmounts LoadDetail entirely, and coming straight back into the
 // same load must not re-bill the Google Places lookup.
 //
-// Cached per loadId: a reopen within 15 minutes (NUMBERS_MAX_AGE_MS below) is free. Fresh
-// numbers come from the panel's explicit Refresh button, a tap on the header's chip, and
-// after those 15 minutes. Those last two keep the stops, so only Refresh spends Places.
+// The figures are cached per loadId: a reopen within 15 minutes (NUMBERS_MAX_AGE_MS below)
+// paints them and asks nothing. A tap on the header's chip always asks, and so does the
+// Refresh button. A failed read keeps nothing, so nothing old can come back after it.
+// The stops are cached apart, because that lookup is billed: only Refresh asks again.
 // (This is the one behaviour deliberately NOT ported from FuelFinderPanel, whose
 // reloadAll() refetches on every prop change.)
 const CACHE_MAX = 8
 const fuelCache = new Map()
-// key -> in-flight Promise<entry>, so a remount mid-request joins the existing
-// request instead of starting a second one.
+const stopsCache = new Map()
+// key -> in-flight Promise<entry>, so a remount mid-request or a second tap joins the
+// existing request instead of starting a second one.
 const inflight = new Map()
 
-function cacheGet(key) {
-  return fuelCache.get(key) || null
-}
-function cacheSet(key, entry) {
-  if (fuelCache.has(key)) fuelCache.delete(key)
-  fuelCache.set(key, entry)
-  while (fuelCache.size > CACHE_MAX) fuelCache.delete(fuelCache.keys().next().value)
+function cacheSet(cache, key, entry) {
+  if (cache.has(key)) cache.delete(key)
+  cache.set(key, entry)
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value)
 }
 
 // The trip plan is cached SEPARATELY from the bundle above, and that separation
@@ -374,16 +361,10 @@ function cacheSet(key, entry) {
 // nobody has looked for yet.
 const planCache = new Map()
 const planInflight = new Map()
-
-function planCacheSet(key, entry) {
-  if (planCache.has(key)) planCache.delete(key)
-  planCache.set(key, entry)
-  while (planCache.size > CACHE_MAX) planCache.delete(planCache.keys().next().value)
-}
 </script>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Cell as VanCell, Empty as VanEmpty } from 'vant'
 import { useApi } from '../../composables/useApi'
 import { isZoned, isYmd, fmtYmd } from '../../utils/datetime'
@@ -397,7 +378,7 @@ import {
   pickupUnconfirmedLine,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
-import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED, FUEL_REFRESHING, fuelRefreshFailedText } from '../../lib/driverFuelView'
+import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED, FUEL_CHECKING, FUEL_READ_FAILED } from '../../lib/driverFuelView'
 
 const api = useApi()
 
@@ -422,27 +403,22 @@ const props = defineProps({
 })
 
 const range = ref(null)
-const rangeError = ref('')
-const rangeLoading = ref(false)
 const plan = ref(null)
 const planError = ref('')
-// The failed trip-plan request ({ status, code }), for the gallons rows' reason.
+// The refused trip-plan request ({ status, code }), for the gallons rows' reason.
 const planProblem = ref(null)
-const planLoading = ref(false)
 const stops = ref([])
 const stopsError = ref('')
-const stopsLoading = ref(false)
 const livePriceCount = ref(0)
 // Collapsed by default — see the block comment on .dfp-how in the template.
 const showHow = ref(false)
 // Has a fetch ever completed for the current props? Gates the idle state.
 const loaded = ref(false)
-// Asking again over what's painted, and the line for figures a failed ask left up.
-const refreshing = ref(false)
-const refreshFailedLine = ref('')
+// An ask is out; the last ask got no answer. Each is one line and nothing else.
+const asking = ref(false)
+const readFailed = ref(false)
 
-const busy = computed(() => rangeLoading.value || stopsLoading.value || planLoading.value || refreshing.value)
-const idle = computed(() => !loaded.value && !busy.value)
+const idle = computed(() => !loaded.value && !asking.value)
 
 /* ── range readout ─────────────────────────────────────────────────────── */
 
@@ -555,10 +531,7 @@ const planCaveats = computed(() => {
 // Why there is no verdict at all. Distinct from a verdict of "unknown": here we
 // never got an answer, and saying which is missing is what stops a driver
 // reading silence as "fine".
-const planNote = computed(() => {
-  if (plan.value || planLoading.value) return ''
-  return planError.value || ''
-})
+const planNote = computed(() => (plan.value ? '' : planError.value || ''))
 
 /* ── the interval bar ───────────────────────────────────────────────────── */
 
@@ -762,16 +735,10 @@ async function fetchRange() {
   try {
     // A Driver session resolves its own truck server-side — send NO params.
     const d = await api.get('/api/fuel/range')
-    if (d && d.ok !== false) return { range: d, error: '' }
-    return { range: null, error: '' }
+    return { range: d && d.ok !== false ? d : null, failed: false }
   } catch (e) {
-    return {
-      range: null,
-      error:
-        e?.status === 404
-          ? ''
-          : "Couldn't read your fuel level. Pull down to refresh once you have signal.",
-    }
+    // A 404 says there's nothing to read. Anything else is a read that failed.
+    return { range: null, failed: e?.status !== 404 }
   }
 }
 
@@ -806,28 +773,26 @@ async function fetchStops(key) {
 // reads, an order of magnitude cheaper than the billed Places fan-out beside it,
 // which is why it can ride along on the same open.
 //
-// Every failure here degrades to a SENTENCE, never to a blank space and never to
-// an error banner: a driver who sees nothing where a verdict should be will read
-// it as "fine". The 400s are the routine ones — a load nobody has geocoded, or a
-// truck with no recent fix — and they are the caller's normal state, not a fault.
+// A refusal with a reason degrades to a SENTENCE, never to a blank space and never to
+// an error banner: a driver who sees nothing where a verdict should be will read it as
+// "fine". The 400s are the routine ones — a load nobody has geocoded, or a truck with
+// no recent fix — and they are the caller's normal state, not a fault. A 429 is the
+// driver's own limit, and it isn't a failed read either: the range still answers, so
+// they get fresh miles and a sentence that says why there's no verdict.
 //
-// `fresh`: the section is opening, so a flag-on plan past NUMBERS_MAX_AGE_MS or a saved
-// failure is asked for again rather than reused (the collapsed badge's prefetch reuses
-// it). `again`: a chip tap, the same for a plan over AGAIN_AFTER_MS old.
-async function fetchPlan(key, { force = false, fresh = false, again = false } = {}) {
+// `fresh`: a plan past NUMBERS_MAX_AGE_MS is asked for again rather than reused.
+async function fetchPlan(key, { force = false, fresh = false } = {}) {
   if (!key || !props.runnable) return { plan: null, error: '' }
   if (!force) {
     const hit = planCache.get(key)
-    if (hit && !(fresh && numbersExpired(hit)) && !(again && olderThanAgain(hit))) return hit
+    if (hit && !(fresh && numbersExpired(hit))) return hit
     const pending = planInflight.get(key)
     if (pending) return pending
   }
   const p = requestPlan(key)
-  // A failed answer doesn't replace a good plan: a dead zone mustn't take a standing
-  // "fuel stop needed" off the load's title for the next time the page opens.
   p.then((entry) => {
-    const had = planCache.get(key)
-    if (!(entry.error && had && had.plan)) planCacheSet(key, entry)
+    if (entry.failed) planCache.delete(key)
+    else cacheSet(planCache, key, entry)
   }).catch(() => {})
   p.catch(() => {}).finally(() => {
     if (planInflight.get(key) === p) planInflight.delete(key)
@@ -859,147 +824,76 @@ async function requestPlan(key) {
       return { plan: null, error: 'Checked too many times just now — try again in a few minutes.', problem, at }
     }
     if (status === 404) return { plan: null, error: '', problem, at }
-    return { plan: null, error: "Couldn't check whether this run fits your fuel.", problem, at }
+    return { plan: null, error: '', problem, failed: true, at }
   }
 }
 
-// Numbers older than this are asked for again, so a phone left open since morning
-// doesn't show the morning's figures at noon, or say a sensor is out after it came back.
-// A saved failure is asked for again too: otherwise one tap in a dead zone shows that
-// failure beside a working chip until the page reloads.
+// Numbers older than this are asked for again on the next open, so a reopen in the
+// afternoon doesn't paint the morning's figures, or say a sensor is out after it came back.
 const NUMBERS_MAX_AGE_MS = 15 * 60 * 1000
-function olderThanMaxAge(entry) {
-  return Date.now() - (Number(entry.at) || 0) > NUMBERS_MAX_AGE_MS
-}
 function numbersExpired(entry) {
-  if (!entry) return false
-  return figuresFailed(entry) || !!entry.error || !!entry.refreshFailed || olderThanMaxAge(entry)
-}
-function figuresFailed(entry) {
-  return !!(entry.rangeError || entry.planError)
+  return !!entry && Date.now() - (Number(entry.at) || 0) > NUMBERS_MAX_AGE_MS
 }
 
-// An ask that failed over good figures keeps them, marked, rather than wiping a standing
-// "you need to stop" in the place signal drops. A marked entry is asked for again next time.
-function keptOverFailure(entry, last) {
-  if (!last || !(last.range || last.plan) || figuresFailed(last) || !figuresFailed(entry)) return entry
-  return { ...last, refreshFailed: true }
-}
-function refreshFailedText(entry) {
-  return fuelRefreshFailedText(Date.now() - (Number(entry.at) || Date.now()))
-}
-
-// A chip tap asks for the figures again unless they're under a minute old. The chip is
-// only read every 2 minutes, and the server allows a driver 30 trip plans in 15 minutes;
-// a 429 would replace a good verdict with "Checked too many times".
-const AGAIN_AFTER_MS = 60 * 1000
-function olderThanAgain(entry) {
-  return !!entry && Date.now() - (Number(entry.at) || 0) >= AGAIN_AFTER_MS
-}
+const NO_STOPS = { stops: [], livePriceCount: 0, error: '' }
 
 function apply(entry) {
   range.value = entry.range
-  rangeError.value = entry.rangeError
   plan.value = entry.plan
   planError.value = entry.planError
-  planProblem.value = entry.planProblem || null
-  stops.value = entry.stops
-  livePriceCount.value = entry.livePriceCount
-  stopsError.value = entry.stopsError
-  rangeLoading.value = false
-  stopsLoading.value = false
-  planLoading.value = false
-  refreshing.value = false
-  refreshFailedLine.value = entry.refreshFailed ? refreshFailedText(entry) : ''
+  planProblem.value = entry.planProblem
+  const s = stopsCache.get(props.loadId || '') || NO_STOPS
+  stops.value = s.stops
+  livePriceCount.value = s.livePriceCount
+  stopsError.value = s.error
+  asking.value = false
+  readFailed.value = entry.failed === true
   loaded.value = true
   emit('plan', entry.plan || null)
 }
 
-// `keep`: an entry being asked for again, whose stops are reused, because a Places
-// lookup is billed and the stops along a route don't go stale in 15 minutes.
-async function fetchAll(key, { force = false, keep = null, again = false } = {}) {
+const READ_FAILED = { range: null, plan: null, planError: '', planProblem: null, failed: true }
+
+async function fetchAll(key, { force = false, tap = false } = {}) {
+  const kept = force ? null : stopsCache.get(key)
   const [r, s, pl] = await Promise.all([
     fetchRange(),
-    keep ? { stops: keep.stops, livePriceCount: keep.livePriceCount, error: keep.stopsError } : fetchStops(key),
-    fetchPlan(key, { force: force || !!keep, fresh: true, again }),
+    kept || fetchStops(key),
+    fetchPlan(key, { force: force || tap, fresh: true }),
   ])
-  return {
-    range: r.range,
-    rangeError: r.error,
-    plan: pl.plan,
-    planError: pl.error,
-    planProblem: pl.problem || null,
-    stops: s.stops,
-    livePriceCount: s.livePriceCount,
-    stopsError: s.error,
-    at: pl.at || Date.now(),
-  }
+  // A failed lookup doesn't replace stops already paid for.
+  if (!kept && !(s.error && stopsCache.has(key))) cacheSet(stopsCache, key, s)
+  if (r.failed || pl.failed) return READ_FAILED
+  return { range: r.range, plan: pl.plan, planError: pl.error, planProblem: pl.problem || null, at: pl.at || Date.now() }
 }
 
-async function load({ force = false, again = false } = {}) {
+async function load({ force = false, tap = false } = {}) {
   const key = props.loadId || ''
-  let keep = null
-  const last = cacheGet(key)
-  if (!force) {
-    const hit = last
-    // Synchronous — nothing before this line awaits, so a reopen paints the
-    // cached state immediately and issues no request at all.
-    if (hit && !numbersExpired(hit) && !(again && olderThanAgain(hit))) return apply(hit)
-    // Past its time, or asked for again: paint it, then ask for the numbers again.
-    if (hit) {
-      apply(hit)
-      keep = hit
-    }
-  }
-  // What's painted stays up until the new answer lands: no spinner over a figure or a
-  // standing "you will not make it" each time the driver taps the chip. A line says
-  // it's asking, so old figures don't look live.
-  refreshing.value = !!keep
-  if (!keep) {
-    rangeLoading.value = true
-    stopsLoading.value = true
-    // Only spinner-over the verdict when there isn't one yet: the prefetch below
-    // usually means there is, and replacing a standing "you will not make it" with
-    // a spinner every time the section is opened is the one flicker that matters.
-    planLoading.value = !plan.value
-    rangeError.value = ''
-    stopsError.value = ''
-    planError.value = ''
-  }
+  const hit = force || tap ? null : fuelCache.get(key)
+  // Synchronous — nothing before this line awaits, so a reopen paints the
+  // cached state immediately and issues no request at all.
+  if (hit && !numbersExpired(hit)) return apply(hit)
+  asking.value = true
+  readFailed.value = false
 
   let p = force ? null : inflight.get(key)
   if (!p) {
-    p = fetchAll(key, { force, keep, again }).then((entry) => {
-      const settled = keptOverFailure(entry, last)
-      cacheSet(key, settled)
-      return settled
+    p = fetchAll(key, { force, tap }).catch(() => READ_FAILED).then((entry) => {
+      if (entry.failed) {
+        fuelCache.delete(key)
+        planCache.delete(key)
+      } else {
+        cacheSet(fuelCache, key, entry)
+      }
+      return entry
     })
-    // Always release the slot, success or failure, so a failed attempt can be
-    // retried from the Refresh button.
-    p.catch(() => {}).finally(() => {
+    p.finally(() => {
       if (inflight.get(key) === p) inflight.delete(key)
     })
     inflight.set(key, p)
   }
 
-  let entry
-  try {
-    entry = await p
-  } catch {
-    // fetchRange/fetchStops/fetchPlan already swallow their own failures into
-    // messages, so this only fires on something unexpected — degrade to an empty
-    // panel rather than leaving the spinners up forever.
-    entry = {
-      range: null,
-      rangeError: 'Could not load fuel details.',
-      plan: null,
-      planError: '',
-      planProblem: null,
-      stops: [],
-      livePriceCount: 0,
-      stopsError: '',
-    }
-  }
+  const entry = await p
   // The driver may have backed out to another load mid-flight; the result is
   // still valid for its own key (cached above) but must not land on screen.
   if ((props.loadId || '') === key) apply(entry)
@@ -1012,15 +906,16 @@ function refresh() {
 defineExpose({ refresh, load })
 
 // Fires only once `active` is true, so the BILLED Places lookup is still opt-in.
-// Re-opening re-runs this, but load() short-circuits on cache.
+// Re-opening re-runs this, but load() short-circuits on cache. A move of `asked` is a
+// tap on the header's chip, which always asks.
 let askedSeen = 0
 watch(
   () => [props.active, props.loadId, props.asked],
   () => {
     if (!props.active) return
-    const again = props.asked !== askedSeen
+    const tap = props.asked !== askedSeen
     askedSeen = props.asked
-    load({ again })
+    load({ tap })
   },
   { immediate: true },
 )
@@ -1029,52 +924,33 @@ watch(
 // to be opened — see the planCache note above for why that is affordable and why
 // the rest is not. It emits upward so the collapse header can carry the warning;
 // the panel's own body is not rendered until the section opens either way.
-async function readPlanForTitle() {
-  const key = props.loadId || ''
-  // Clear FIRST, and emit the clear: the parent keeps the last verdict it was
-  // handed, so a load switched in place (rather than via Back, which unmounts)
-  // would otherwise leave the previous load's badge sitting on this one's
-  // header — a red "fuel stop needed" against the wrong run.
-  if (!key || !props.runnable) {
-    plan.value = null
-    planError.value = ''
-    planProblem.value = null
-    emit('plan', null)
-    return
-  }
-  const asked = await fetchPlan(key, { fresh: true })
-  // A different load may have been opened while this was in flight.
-  if ((props.loadId || '') !== key) return
-  // A failed ask keeps the last good plan, which the cache still holds.
-  const saved = planCache.get(key)
-  const entry = !asked.plan && saved && saved.plan ? saved : asked
-  // Never clobber a fuller state the section has already painted.
-  if (plan.value && !entry.plan) return
-  plan.value = entry.plan
-  planError.value = entry.error
-  planProblem.value = entry.problem || null
-  planLoading.value = false
-  emit('plan', entry.plan || null)
-}
-watch(() => [props.loadId, props.runnable], readPlanForTitle, { immediate: true })
-
-// A page left open: the same 15 minutes, on the section and on the title's badge. Only
-// while it's on screen, since a phone in a pocket has nobody to read it. Each is one
-// cached route lookup at most, and the stops stay.
-const AGE_CHECK_MS = 60 * 1000
-let ageTimer = null
-function checkAge() {
-  if (document.visibilityState !== 'visible') return
-  if (props.active) {
-    const hit = cacheGet(props.loadId || '')
-    if (hit && olderThanMaxAge(hit)) load()
-    return
-  }
-  const held = planCache.get(props.loadId || '')
-  if (held && olderThanMaxAge(held)) readPlanForTitle()
-}
-onMounted(() => { ageTimer = setInterval(checkAge, AGE_CHECK_MS) })
-onBeforeUnmount(() => clearInterval(ageTimer))
+watch(
+  () => [props.loadId, props.runnable],
+  async () => {
+    const key = props.loadId || ''
+    // Clear FIRST, and emit the clear: the parent keeps the last verdict it was
+    // handed, so a load switched in place (rather than via Back, which unmounts)
+    // would otherwise leave the previous load's badge sitting on this one's
+    // header — a red "fuel stop needed" against the wrong run.
+    if (!key || !props.runnable) {
+      plan.value = null
+      planError.value = ''
+      planProblem.value = null
+      emit('plan', null)
+      return
+    }
+    const entry = await fetchPlan(key, { fresh: true })
+    // A different load may have been opened while this was in flight.
+    if ((props.loadId || '') !== key) return
+    // Never clobber a fuller state the section has already painted.
+    if (plan.value && !entry.plan) return
+    plan.value = entry.plan
+    planError.value = entry.error
+    planProblem.value = entry.problem || null
+    emit('plan', entry.plan || null)
+  },
+  { immediate: true },
+)
 </script>
 
 <style scoped>
@@ -1171,12 +1047,6 @@ onBeforeUnmount(() => clearInterval(ageTimer))
   color: var(--text, #1f2937);
 }
 
-.dfp-refresh-note {
-  margin: 0.25rem 0.5rem 0.5rem;
-  font-size: 0.82rem;
-  line-height: 1.4;
-  color: var(--text-dim, #6b7085);
-}
 .dfp-plan-note {
   margin: 0.25rem 0.5rem 0.75rem;
   padding: 0.6rem 0.7rem;
@@ -1737,12 +1607,8 @@ onBeforeUnmount(() => clearInterval(ageTimer))
   color: var(--text, #1f2937);
   cursor: pointer;
 }
-.dfp-refresh:active:not(:disabled) {
+.dfp-refresh:active {
   transform: scale(0.99);
   background: var(--bg, #f5f6fa);
-}
-.dfp-refresh:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 </style>

@@ -247,24 +247,9 @@ export function fuelTapLoad({ onScreen, underWay, queued, statusOf }) {
   return next || (queued && queued[0]) || null;
 }
 
-// A chip tap asks for the numbers again and keeps what's on screen meanwhile, so it says so.
-export const FUEL_REFRESHING = 'Checking for your latest fuel numbers…';
-
-// The units in full for this one line, as approved: the stamps elsewhere keep "12 min" and "3 hrs".
-const inFull = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
-function ageInFull(ageMs) {
-  const mins = Math.round(ageMs / 60000);
-  if (!(mins >= 1)) return '';
-  if (mins < 60) return inFull(mins, 'minute');
-  const hrs = Math.round(mins / 60);
-  return hrs < 24 ? inFull(hrs, 'hour') : inFull(Math.round(hrs / 24), 'day');
-}
-
-/** A refresh that failed over good figures, `ageMs` old. Under a minute, it names no age. */
-export function fuelRefreshFailedText(ageMs) {
-  const age = ageInFull(ageMs);
-  return age ? `Couldn't update your fuel numbers. These are from ${age} ago.` : "Couldn't update your fuel numbers.";
-}
+// The Fuel section's two one-line states: an ask is out, and an ask that failed.
+export const FUEL_CHECKING = 'Checking for your latest fuel numbers…';
+export const FUEL_READ_FAILED = "Couldn't get your latest fuel numbers. Check your fuel gauge.";
 
 /**
  * The header chip: the miles in a sentence, "Refuel now" or "not available", its
