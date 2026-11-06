@@ -199,6 +199,7 @@ function factoringWorld({ marking = false, readJobTracking = null } = {}) {
 	const routes = factoringRoutesLib.create({
 		db,
 		env: marking ? { TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7" } : {},
+		log: { error() {}, warn() {}, log() {} },
 		logAudit: (req, action) => audits.push(action),
 		...(readJobTracking ? { readJobTracking } : {}),
 	});
@@ -1510,7 +1511,7 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 		let duringOutside = null;
 		const outsideWorld = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), prepare: (w) => w.mark("111"), land: (sheet, f) => { sheet.hooks.duringWrite = () => { duringOutside = f.pressOutside("111"); }; } });
 		t(`§7 FAILS ON THE OLD CODE: ${route}, "Handled in Triumph's process" pressed during the write: 409 LOAD_ID_CHANGING, and the mark still moves`,
-			[duringOutside.status, duringOutside.body.code, outsideWorld.f.isFactored("333"), outsideWorld.f.row("111")], [409, "LOAD_ID_CHANGING", true, undefined]);
+			[duringOutside?.status, duringOutside?.body?.code, outsideWorld.f.isFactored("333"), outsideWorld.f.row("111")], [409, "LOAD_ID_CHANGING", true, undefined]);
 
 		// The switch on a key no row holds any more: a dialog left open on the old ID.
 		let sheetNow = null;
@@ -1545,6 +1546,8 @@ async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD
 		const landed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { writeFails: "landed" } });
 		t(`§7 FAILS ON THE OLD CODE: ${route}, the write landed with its answer lost: the save's 500, and the mark moved`, [landed.r.code, cellOf(landed.app), landed.f.isFactored("333"), landed.f.isFactored("111")], [500, "333", true, false]);
 		t(`§7 FAILS ON THE OLD CODE: ${route}, ...and the cached sheet is dropped, so the switch can't read the old ID from it`, landed.app.invalidations(), 1);
+		const noLastLook = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), land: (sheet, f) => { sheet.hooks.duringWrite = () => { f.db.close(); }; } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the marker gone by the last look: the write landed, so the save still answers 200`, [noLastLook.r.code, cellOf(noLastLook.app), noLastLook.sheet.cellReads], [200, "333", [R("B2")]]);
 		const unconfirmed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { readCellFails: true } });
 		t(`§7 FAILS ON THE OLD CODE: ${route}, the cell can't be read back: saved, and both keys stay marked`,
 			[unconfirmed.r.code, unconfirmed.f.isFactored("333"), unconfirmed.f.isFactored("111"), unconfirmed.f.audits], [200, true, true, ["factoring_move_begun", "factoring_move_unconfirmed"]]);

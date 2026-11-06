@@ -385,6 +385,10 @@ function checkButton(S) {
 	c.eq(begin("ld-test-0020", { invoiceId: "11032026-10" }).code, "INVOICE_DRAFT_IN_FLIGHT", "§5 a second press that got past the early check is refused at the late check");
 	putMarker(db, "ld-test-0021");
 	c.eq(begin("ld-test-0021").code, "LOAD_FACTORED", "§5 marked during the render: refused at the late check");
+	c.eq(begin("ld-test-0021").error, S.WORDS.LOAD_FACTORED, "§5 ...in its usual words, with no draft out");
+	putDraft(db, "ld-test-0021", "imap");
+	const lateOut = begin("ld-test-0021");
+	c.ok(lateOut.code === "LOAD_FACTORED" && lateOut.error !== S.WORDS.LOAD_FACTORED && /Gmail Drafts and Sent Mail/.test(lateOut.error), "§5 ...with a draft row: its words send a person to Gmail there too");
 	putMarker(db, "ld-test-0022");
 	putClaim(db, "ld-test-0022", { state: "waiting", stage: "reserved", invoiceId: "11032026-60" });
 	c.eq(begin("ld-test-0022", { confirmed: true }).code, "TRIUMPH_IN_FLIGHT", "§5 the late check repeats the confirmation's TRIUMPH_IN_FLIGHT");
@@ -463,7 +467,7 @@ function checkLoadIdChange(S) {
 	b = begin("LD-TEST-0010", "LD-TEST-0110");
 	c.eq([b.ok, b.held, b.previous, live("ld-test-0010"), live("ld-test-0110")], [true, "ld-test-0110", null, true, true], "§10 a live mark, before the write: on both keys, so there is no unmarked moment");
 	const held = marker(db, "ld-test-0110");
-	c.eq([held.source, held.reason, held.set_by, held.set_by_id, held.set_at, held.load_id], ["person", "made-up reason", "made-up-admin", 7, T0, "LD-TEST-0110"], "§10 ...who marked it and why go with it");
+	c.eq([held?.source, held?.reason, held?.set_by, held?.set_by_id, held?.set_at, held?.load_id], ["person", "made-up reason", "made-up-admin", 7, T0, "LD-TEST-0110"], "§10 ...who marked it and why go with it");
 	c.eq(finish("LD-TEST-0010", "LD-TEST-0110", b, "LD-TEST-0110"), { moved: true, to: "ld-test-0110" }, "§10 the sheet holds the new ID: moved");
 	c.eq([live("ld-test-0110"), marker(db, "ld-test-0010")], [true, undefined], "§10 ...the new key is marked and the old row is gone");
 	c.eq(actions(), ["factoring_move_begun", "factoring_moved"], "§10 ...audited at both steps");
@@ -501,6 +505,11 @@ function checkLoadIdChange(S) {
 	putTheMark("ld-test-0014");
 	b = begin("LD-TEST-0014", "LD-TEST-0114");
 	c.eq([finish("LD-TEST-0014", "LD-TEST-0114", b, undefined), live("ld-test-0014"), live("ld-test-0114")], [{ moved: false, unconfirmed: true }, true, true], "§10 the cell can't be read back: both keys stay marked");
+	c.eq(actions(), ["factoring_move_begun", "factoring_move_unconfirmed"], "§10 ...audited");
+	// It reads blank: a row that moved under the read, or a person's edit. The same.
+	putTheMark("ld-test-0019");
+	b = begin("LD-TEST-0019", "LD-TEST-0119");
+	c.eq([finish("LD-TEST-0019", "LD-TEST-0119", b, ""), live("ld-test-0019"), live("ld-test-0119"), marker(db, "")], [{ moved: false, unconfirmed: true }, true, true, undefined], "§10 the cell reads blank: both keys stay marked, and no row on an empty key");
 	c.eq(actions(), ["factoring_move_begun", "factoring_move_unconfirmed"], "§10 ...audited");
 
 	// A mark that landed mid-write is seen by the last look.

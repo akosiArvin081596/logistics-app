@@ -1786,6 +1786,17 @@ async function main() {
 		eq(served(offJob, ["LD-TEST-1428"]), [null], "§15 ...skipped LOAD_FACTORED with no marker row: nothing, as before");
 		off.setRow("LD-TEST-1429", { "Job Status": "Delivered" });
 		eq(served(offJob, ["LD-TEST-1429"]), [null], "§15 ...and no claim at all: nothing, as before, since the sweep finds it");
+		off.seed("LD-TEST-1437", { state: "needs_attention", reason_code: "TOTAL_MISMATCH" });
+		eq(served(offJob, ["LD-TEST-1437"]), [{ state: "needs_attention", code: "TOTAL_MISMATCH", invoiceId: "", changed: [] }], "§15 ...a claim still open, with a mark cleared on another load: as before, not as the trigger's");
+	}
+	{
+		// A marker that can't be read says no mark was cleared, and the rest of the read goes on.
+		const w = makeWorld();
+		const job = await w.started();
+		factoring.ensureSchema(w.db);
+		w.seed("LD-TEST-1438", { state: "needs_attention", reason_code: "TOTAL_MISMATCH" });
+		w.db.exec("DROP TABLE load_factoring; CREATE VIEW load_factoring AS SELECT no_such_column FROM auto_invoice_claims");
+		eq((served(job, ["LD-TEST-1438"])[0] || {}).trigger, true, "§15 a marker that can't be read: an open claim's row still reads as the trigger's");
 	}
 	{
 		// The same end to end, the sweep's way: marked, ticked, cleared, ticked again.
@@ -1842,6 +1853,14 @@ async function main() {
 		tap(early, earlyJob, ID);
 		await drained(early, "§15 cleared before the draft");
 		eq([early.state(ID), served(earlyJob, [ID])], [["drafted", ""], [{ state: "drafted", code: "", invoiceId: early.claim(ID).invoice_id, changed: [], trigger: true }]], "§15 a mark cleared before the job's draft: an ordinary draft");
+		// An invoice the job sent is in Sent Mail, so a cleared mark says nothing about a draft.
+		const SENT = "LD-TEST-1439";
+		const gone = makeWorld();
+		const goneJob = await gone.started();
+		factoring.ensureSchema(gone.db);
+		gone.seed(SENT, { state: "drafted", invoice_id: "10202026-39", delivery: "send", stage: "recorded", drafted_at: iso(gone.now - MIN) });
+		gone.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 0, 'person', ?, ?)").run(rules.loadKey(SENT), SENT, iso(gone.now), iso(gone.now));
+		eq(served(goneJob, [SENT]), [{ state: "drafted", code: "", invoiceId: "10202026-39", changed: [], sent: true, trigger: true }], "§15 an invoice the job sent, with a row at 0: as before, with no flag");
 	}
 	{
 		// A claim that may be in Gmail asks before it takes a mark, and Try again then records the draft.
