@@ -65025,6 +65025,7 @@ let _jtCache = null;
 let _jtInflight = null;
 let _jtEpoch = 0;
 const JT_CACHE_TTL = 60_000;
+const { keepEveryRow, everyJobTrackingRow } = require("./lib/job-tracking-every-row");
 async function getJobTrackingCached() {
 	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
 	// Join the read already in flight rather than starting a second one.
@@ -65040,6 +65041,7 @@ async function getJobTrackingCached() {
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const parsed = parseSheet(response.data);
+		keepEveryRow(parsed, parsed.data);
 		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
 		// The Load IDs as every role but Super Admin is served them, kept on this
 		// read before it is shared (shownLoadIdIndex()), and the latest only while
@@ -73994,8 +73996,8 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
-	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
-	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
 });
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
