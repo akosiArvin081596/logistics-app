@@ -28,8 +28,8 @@
 //
 // §12 pins one range for the header chip and a load's Fuel section with the flag
 // off (lib/fuel-model.js sharedFuelRange(), the trip plan's own chain): the two equal
-// on generated trucks, the hero and verdict as they were, an MPG on file outside the
-// class-8 band read as not set, a route of 0, a dropout's rows, the dispatch card, who
+// on generated trucks, the hero and verdict as they were, an MPG on file above the
+// class-8 ceiling read as not set, a route of 0, a dropout's rows, the dispatch card, who
 // else reads the MPG on file, and every flag-on answer byte for byte.
 //   SERVER_ROOT=<base checkout> node scripts/test-fuel-approach-leg.js
 // runs the flag-on digests on a base, which must print the same lines.
@@ -1031,10 +1031,11 @@ const receiptOf = (o) => (o.truck === false || o.device === false ? null : o.rec
 // An MPG on file above the cap, on a truck with no receipts to outrank it.
 const mpgOnFileOutOfBand = (o) => !receiptOf(o) && o.truck !== false && o.avgMpg > 11;
 const VERDICT_RANK = { unknown: 0, insufficient: 1, tight: 2, clears: 3 };
-// What the alert must say for a chip's answer: nothing above the line, or no figure; else
-// the chip's own figure, or its "Refuel now".
-const alertLine = (r) => {
-	if (r.rangePlanningMiles === null || r.rangePlanningMiles > 100) return null;
+// What the alert must say for a chip's answer. Over the line it says nothing, unless the
+// figure it has always read fired it, and then no miles; else the chip's figure, or "Refuel now".
+const alertLine = (r, ownFigureFired) => {
+	if (r.rangePlanningMiles === null) return null;
+	if (r.rangePlanningMiles > 100) return ownFigureFired ? "Low fuel. Check your fuel gauge." : null;
 	const est = r.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
 	const u = r.rangeUsableMiles;
 	return u === 0 ? `Refuel now${est}. Stop for fuel as soon as you can.` : `About ${u} ${u === 1 ? "mile" : "miles"} of fuel left${est}. Plan a fuel stop now.`;
@@ -1413,16 +1414,18 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			return p.mpg === Math.round(r.mpg * 100) / 100 && Math.abs((p.gallonsNeeded ?? -1) - (gallons ?? -1)) <= 0.1;
 		}), []);
 	});
-	check("generated: chip, hero, card and alert read one figure: the alert fires exactly when the figure before the margin is 100 or under, and says the chip's own figure", () => {
-		assert.deepStrictEqual(firstBad((c) => c.alertErrors.length === 0 && alertSaid(c.alertOff) === alertLine(c.range.body)), []);
+	// Changed because the bell now also fires on the figure it has always read, so it never rings later.
+	check("generated: chip, hero, card and alert read one figure: the alert fires on the lower of the chip's figure before the margin and the one it has always read, and says the chip's figure, or no miles over the line", () => {
+		const fired = (sent) => sent.some((s) => s.kind === "driver");
+		assert.deepStrictEqual(firstBad((c) => c.alertErrors.length === 0 && alertSaid(c.alertOff) === alertLine(c.range.body, fired(c.alertOn))), []);
 	});
-	check("generated: the alert fires later or earlier than before only where its figure moved: a dropout, or an MPG on file above the cap; a re-linked device's old level no longer counts", () => {
+	check("generated: the alert fires where it didn't only on a dropout or above the cap, and it stops firing only on a re-linked device's old level, which the ingest paths already skip", () => {
 		const fired = (sent) => sent.some((s) => s.kind === "driver");
 		const carried = (c) => c.range.body.fuelSource === "carried";
 		assert.deepStrictEqual(firstBad((c) => {
 			if (fired(c.alertOff) === fired(c.alertOn)) return true;
 			if (fired(c.alertOff)) return carried(c) || mpgOnFileOutOfBand(c.o);
-			return (carried(c) && !!receiptOf(c.o)) || c.o.linkedAgoMin === 5;
+			return c.o.linkedAgoMin === 5;
 		}), []);
 	});
 	check("generated: a dropout's Fuel level is never the planning level unless they're equal, its Gallons left follow it, and every other level is the plan's", () => {
@@ -1550,9 +1553,112 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 0, anchor: { fuel: 40, agoMin: 60, odo: 99900 } });
 		assert.deepStrictEqual([now, before], [`About 85 miles of fuel left${EST}. Plan a fuel stop now.`, null]);
 	});
-	check("it can fire LESS: a dropout with receipts 11 above 4.5 on file, 24% before, 100 mi since: the receipts' gentler burn keeps it over the line", () => {
-		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 4.5, receipt: { mpg: 11 }, fuel: 0, anchor: { fuel: 24, agoMin: 60, odo: 99900 } });
-		assert.deepStrictEqual([now, before], [null, `About 84 miles of fuel left${EST}. Plan a fuel stop now.`]);
+	// Changed because a bell that rings later can come after empty: this truck's bell now rings where it did.
+	const RECEIPTS_OVER = { ...ALERT_TRUCK, avgMpg: 4.5, receipt: { mpg: 11 }, fuel: 0, anchor: { fuel: 24, agoMin: 60, odo: 99900 } };
+	check("it doesn't fire less: a dropout with receipts 11 above 4.5 on file, 24% before, 100 mi since: the bell rings as it did, and the chip's 106 being over the line, it quotes no miles", async () => {
+		const [now, before, sent] = alertAt(RECEIPTS_OVER);
+		assert.deepStrictEqual([now, before], ["Low fuel. Check your fuel gauge.", `About 84 miles of fuel left${EST}. Plan a fuel stop now.`]);
+		assert.strictEqual(sent.find((s) => s.kind === "dispatch").args[2], "Driver QA (Unit 901) is low on fuel. Check the truck's fuel gauge.");
+		assert.strictEqual(sent.find((s) => s.kind === "notice").notice.body, "Unit 901 — low fuel. Check the truck's fuel gauge.");
+	});
+	const overChip = await buildWorld(Database, lifted, appRequire, RECEIPTS_OVER, false).range();
+	check("...that chip does read over the 85 line, so no figure in the bell could match both it and the figure that fired", () => {
+		assert.deepStrictEqual([overChip.body.rangeUsableMiles, overChip.body.rangePlanningMiles], [106, 121]);
+	});
+	check("the lower figure fires it but the chip is at or under the 85 line: the words stay as they are, in the chip's figure", () => {
+		const [now, before, sent] = alertAt({ ...RECEIPTS_OVER, anchor: { fuel: 20, agoMin: 60, odo: 99900 } });
+		assert.deepStrictEqual([now, before], [`About 69 miles of fuel left${EST}. Plan a fuel stop now.`, `About 48 miles of fuel left${EST}. Plan a fuel stop now.`]);
+		assert.strictEqual(sent.find((s) => s.kind === "dispatch").args[2], `Driver QA (Unit 901) has about 69 miles of fuel left${EST}.`);
+		assert.strictEqual(sent.find((s) => s.kind === "notice").notice.body, `Unit 901 — about 69 mi of fuel left${EST}.`);
+	});
+	check("the chip's figure fires it and the one it always read is over the line: the words stay as they are", () => {
+		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 0, anchor: { fuel: 40, agoMin: 60, odo: 99900 } });
+		assert.deepStrictEqual([now, before], [`About 85 miles of fuel left${EST}. Plan a fuel stop now.`, null]);
+	});
+	check("neither figure at the line: no bell", () => {
+		assert.deepStrictEqual(alertAt({ ...RECEIPTS_OVER, anchor: { fuel: 60, agoMin: 60, odo: 99900 } }).slice(0, 2), [null, null]);
+	});
+
+	// A truck over time, sensor out from the second row on unless a fill says otherwise: a row
+	// each `step` minutes at 60 mph, a check on each. Miles run to each bell, what's really left.
+	const drive = (o, flagOn, { from, realMpg, step = 15, fill = null, stopAtMile = 780 }) => {
+		const w = buildWorld(Database, lifted, appRequire, { ...ALERT_TRUCK, ...o, fuel: from, fixAgoMin: 0, odo: 100000 }, flagOn);
+		const clock = { now: NOW };
+		const a = w.alert(clock);
+		const row = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
+		const tank = o.tank || 150;
+		let level = from;
+		let filledAt = null;
+		const bells = [];
+		for (let mile = step; mile <= stopAtMile; mile += step) {
+			clock.now += step * 60000;
+			level -= (step * 100) / (tank * realMpg);
+			if (level <= 0) return { bells, emptyAt: mile };
+			if (fill && filledAt === null && level <= fill.at && mile % 15 === fill.afterCheckBy) {
+				level += fill.add;
+				filledAt = mile;
+			}
+			const sensorOut = fill ? filledAt === null || mile > filledAt : true;
+			const liveRow = fill && !sensorOut;
+			row.run(w.vid, FIX.lat, FIX.lng, 100000 + mile, liveRow || (fill && filledAt === null) ? Math.round(level) : 0, clock.now);
+			const had = a.sent.filter((s) => s.kind === "driver").length;
+			a.check();
+			const all = a.sent.filter((s) => s.kind === "driver");
+			if (all.length > had) bells.push({ mile, left: Math.round((level * tank * realMpg) / 100), said: all[all.length - 1].args[3] });
+		}
+		return { bells, emptyAt: null };
+	};
+	const NO_MILES = "Low fuel. Check your fuel gauge.";
+	const DRIVES = [
+		["receipts 11, 4.5 on file, from 24%, really 4.5", { avgMpg: 4.5, receipt: { mpg: 11 } }, { from: 24, realMpg: 4.5 }, 90],
+		["the same, from 42%", { avgMpg: 4.5, receipt: { mpg: 11 } }, { from: 42, realMpg: 4.5 }, 210],
+		["the same, from 50%", { avgMpg: 4.5, receipt: { mpg: 11 } }, { from: 50, realMpg: 4.5 }, 270],
+		["receipts 8, 3.5 on file, from 50%, really 3.5", { avgMpg: 3.5, receipt: { mpg: 8 } }, { from: 50, realMpg: 3.5 }, 195],
+		["the same, from 75%", { avgMpg: 3.5, receipt: { mpg: 8 } }, { from: 75, realMpg: 3.5 }, 315],
+		["measured at 12, receipts 8, 6 on file, from 40%, really 9 mi a point", { avgMpg: 6, receipt: { mpg: 8 }, burn: GENTLE }, { from: 40, realMpg: 6 }, 285],
+		["the same, from 75%, really its own 12 mi a point", { avgMpg: 6, receipt: { mpg: 8 }, burn: GENTLE }, { from: 75, realMpg: 8 }, 600],
+		["no MPG on file, measured at 8, receipts 8, 100 gal, from 75%, really 6.5", { avgMpg: 0, tank: 100, receipt: { mpg: 8 }, burn: { ...GENTLE, p10: 8, p50: 9, p90: 10 } }, { from: 75, realMpg: 6.5 }, 420],
+	];
+	for (const [label, o, plan, beforeMile] of DRIVES) {
+		check(`a truck over time, ${label}: the bell rings at ${beforeMile} mi as it did, in no miles, where it would have come later or after empty`, () => {
+			const before = drive(o, true, plan);
+			const now = drive(o, false, plan);
+			assert.strictEqual(before.bells[0].mile, beforeMile, "where it rang before");
+			assert.deepStrictEqual([now.bells[0].mile, now.bells[0].said, now.bells.length], [beforeMile, NO_MILES, 1]);
+		});
+	}
+	check("a truck over time on the fleet's usual shape, no MPG on file, receipts 5.92, really 4.72, from 75%: before no bell and empty; now a bell in miles, well before empty", () => {
+		const o = { avgMpg: 0, receipt: { mpg: 5.92 } };
+		const before = drive(o, true, { from: 75, realMpg: 4.72 });
+		const now = drive(o, false, { from: 75, realMpg: 4.72 });
+		assert.deepStrictEqual([before.bells.length, before.emptyAt !== null], [0, true]);
+		assert.ok(/^About \d+ miles of fuel left/.test(now.bells[0].said) && now.bells[0].left > 200, JSON.stringify(now.bells));
+	});
+	check("a second bell isn't lost: 6 on file, the bell at 20%, a 15-point fill just after a check, the sensor out a minute later: two bells on both flags", () => {
+		const plan = { from: 26, realMpg: 6, step: 1, fill: { at: 17.5, add: 15, afterCheckBy: 2 }, stopAtMile: 400 };
+		const before = drive({ avgMpg: 6 }, true, plan);
+		const now = drive({ avgMpg: 6 }, false, plan);
+		assert.deepStrictEqual([before.bells.length, now.bells.length], [2, 2]);
+		assert.ok(now.bells[1].mile <= before.bells[1].mile, JSON.stringify([now.bells, before.bells]));
+	});
+	check("never later than today: on 180 trucks over time, sensor out, the first bell comes no later than it did, and a single stretch gets one bell", () => {
+		const bad = [];
+		let rangBoth = 0;
+		let earlier = 0;
+		let ownFigureFired = 0;
+		for (const avgMpg of [0, 3.5, 4.5, 6, 20]) for (const receiptMpg of [null, 5.6, 8, 11]) for (const burn of [null, BURN5, GENTLE]) for (const from of [24, 50, 75]) {
+			const o = { avgMpg, receipt: receiptMpg ? { mpg: receiptMpg } : null, burn };
+			const plan = { from, realMpg: 50 };
+			const [before, now] = [drive(o, true, plan), drive(o, false, plan)];
+			if (before.bells.length && (!now.bells.length || now.bells[0].mile > before.bells[0].mile)) bad.push([o, from, before.bells[0], now.bells[0]]);
+			if (now.bells.length > 1) bad.push(["two bells", o, from, now.bells]);
+			if (before.bells.length && now.bells.length) rangBoth++;
+			if (before.bells.length && now.bells.length && now.bells[0].mile < before.bells[0].mile) earlier++;
+			if (now.bells.some((b) => b.said === NO_MILES)) ownFigureFired++;
+		}
+		console.log(`      over time: ${JSON.stringify({ rangBoth, earlier, ownFigureFired })}`);
+		assert.deepStrictEqual(bad.slice(0, 3), []);
+		assert.ok(rangBoth >= 3 && earlier >= 3 && ownFigureFired >= 3, JSON.stringify({ rangBoth, earlier, ownFigureFired }));
 	});
 	check("a live reading at the line: dispatch's line and notice quote the chip's figure; the bell's other fields keep the figure before the margin", () => {
 		const [now, , sent] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 20 });

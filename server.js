@@ -63354,11 +63354,11 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 
 		const tank = truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
 		const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
+		const receipt = receiptMpgForVehicle(vehicleId);
+		const burn = burnRateForVehicle(vehicleId);
 		// Flag off: the one range the chip and the load's Fuel section quote, so the bell
 		// can't name a figure neither of them shows.
-		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({
-			truck, rows, receipt: receiptMpgForVehicle(vehicleId), burn: burnRateForVehicle(vehicleId),
-		});
+		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({ truck, rows, receipt, burn });
 		const reading = shared ? shared.reading : resolveCredibleFuelReading(vehicleId, rows, mpgBase, tank);
 		// A stale/absent reading is NOT a low-fuel alert. We do not know the level,
 		// and crying wolf on every unlinked or offline device would train drivers
@@ -63366,40 +63366,49 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		// is the right channel for it.
 		if (reading.fuelPct == null) return;
 
-		let planning;
-		if (shared) {
-			planning = shared.interval.planning;
-		} else {
-			const receipt = receiptMpgForVehicle(vehicleId);
+		// The figure this check has always read: the level burned at the MPG on file,
+		// taken at receipts when there are any.
+		const ownFigure = (fuelPct) => {
 			const mpg = receipt ? receipt.mpg : mpgBase;
-			const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
-			const interval = fuelModel.rangeInterval({
-				fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
-			});
-			planning = interval.planning;
-		}
+			const shown = fuelModel.computeRange({ fuelPct, tankGallons: tank, mpg });
+			return fuelModel.rangeInterval({ fuelPct, burn, rangeMiles: shown.rangeMiles }).planning;
+		};
+		const planning = shared ? shared.interval.planning : ownFigure(reading.fuelPct);
 		if (planning == null) return;
+		// Flag off the one range can read above it on a dropout, so the bell fires on the
+		// lower of the two: it can come earlier than it used to, never later.
+		const ownNow = shared ? ownFigure(resolveCredibleFuelReading(vehicleId, rows, mpgBase, tank).fuelPct) : planning;
+		const lineFigure = Math.min(planning, ownNow ?? planning);
+		const armFigure = Math.max(planning, ownNow ?? planning);
 
 		// Hysteresis: clear the latch only well ABOVE the threshold, so a truck
 		// hovering at the line cannot re-alert every check. The line stays on the figure
 		// before the margin, as the chip's colours do.
-		if (planning > FUEL_LOW_ALERT_MILES * 1.5) {
+		if (armFigure > FUEL_LOW_ALERT_MILES * 1.5 && lineFigure > FUEL_LOW_ALERT_MILES) {
 			if (st.alerted) { st.alerted = false; fuelLowAlertState.set(vehicleId, st); }
 			return;
 		}
-		if (planning > FUEL_LOW_ALERT_MILES || st.alerted) return;
+		if (lineFigure > FUEL_LOW_ALERT_MILES || st.alerted) return;
 
 		st.alerted = true;
 		fuelLowAlertState.set(vehicleId, st);
 
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
-		// Flag off the words quote the chip's own figure, and its "Refuel now" at 0.
+		// Flag off the words quote the chip's own figure, and its "Refuel now" at 0. Fired by
+		// the lower figure alone, the chip still reads over the line, so they quote no miles.
+		const noMiles = !!shared && planning > FUEL_LOW_ALERT_MILES;
 		const said = shared ? shared.usableMiles : planning;
 		const refuelNow = !!shared && said === 0;
 		const miles = shared && said === 1 ? "mile" : "miles";
-		const driverMsg = refuelNow
-			? `Refuel now${est}. Stop for fuel as soon as you can.`
-			: `About ${said} ${miles} of fuel left${est}. Plan a fuel stop now.`;
+		let driverMsg = `About ${said} ${miles} of fuel left${est}. Plan a fuel stop now.`;
+		if (refuelNow) driverMsg = `Refuel now${est}. Stop for fuel as soon as you can.`;
+		if (noMiles) driverMsg = "Low fuel. Check your fuel gauge.";
+		let dispatchWords = `has about ${said} ${miles} of fuel left${est}.`;
+		if (refuelNow) dispatchWords = `needs to refuel now${est}.`;
+		if (noMiles) dispatchWords = "is low on fuel. Check the truck's fuel gauge.";
+		let noticeWords = `about ${said} mi of fuel left${est}.`;
+		if (refuelNow) noticeWords = `refuel now${est}.`;
+		if (noMiles) noticeWords = "low fuel. Check the truck's fuel gauge.";
 		// The driver's bell and room: the spelling their account holds
 		// (findDriverAccountSpelling()), else the name the ping carried.
 		const key = String(findDriverAccountSpelling(driverName) || driverName).trim().toLowerCase();
@@ -63417,14 +63426,14 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		insertDispatchNotification.run(
 			"fuel-low",
 			`${driverName}: low fuel`,
-			`${driverName} (${truck.unit || "unknown truck"}) ${refuelNow ? `needs to refuel now${est}` : `has about ${said} ${miles} of fuel left${est}`}.`,
+			`${driverName} (${truck.unit || "unknown truck"}) ${dispatchWords}`,
 			JSON.stringify({ driverName, unit: truck.unit, planningMiles: planning,
 				fuelPct: reading.fuelPct, fuelSource: reading.fuelSource })
 		);
 		emitDispatchNotice({
 			type: "fuel-low",
 			title: `${driverName}: low fuel`,
-			body: `${truck.unit || "unknown truck"} — ${refuelNow ? `refuel now${est}` : `about ${said} mi of fuel left${est}`}.`,
+			body: `${truck.unit || "unknown truck"} — ${noticeWords}`,
 		});
 		console.log(`[fuel-low] ${driverName} (${truck.unit}) ${planning} mi, ${reading.fuelPct}% [${reading.fuelSource}]`);
 	} catch (err) {
