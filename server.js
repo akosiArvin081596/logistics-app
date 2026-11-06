@@ -55924,8 +55924,15 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     or an automatic stop; scripts/auto-invoice-send-resume.js resumes). Nothing
 //     listed sends nothing (lib/auto-invoice-send.js).
 //   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
-//     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
-//     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
+//     only a Driver's own Delivered starts an invoice, at once, with no sweep (lib/auto-invoice-trigger.js).
+//     A 5-minute watch runs what a Super Admin's dashboard read runs, and starts no invoice.
+//     Set to false, the 5-minute sweep runs as described above.
+//   AUTO_INVOICE_HOLD_ONE_LOAD  a kill switch: a load changed after its invoice was sent is flagged
+//     alone when the change affects the invoice, and only logged otherwise; every other load keeps
+//     sending, and a third flagged within 24 hours stops all sending. Set to false, any change to a
+//     sent load stops all sending, as before.
+//   AUTO_INVOICE_ALERT_TO  who a flag and a stop are emailed to, through sendEmail(). No default
+//     and no fallback: unset, nothing is mailed. Never read in a replica.
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
 //     chrobinson.com goes only to an address a person has already invoiced on 3 loads
 //     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
@@ -55975,6 +55982,8 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
 	},
 	rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
+	alertTo: REPLICA ? "" : String(process.env.AUTO_INVOICE_ALERT_TO ?? "").trim(),
+	sendAlertMail: sendEmail,
 	log: console,
 });
 // The status route's and the document routes' one call each into the job: nothing here
@@ -56005,7 +56014,11 @@ if (autoInvoice.sending) console.log(`[auto-invoice] sending on for ${autoInvoic
 if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 	if (autoInvoice.triggerMode) {
 		// Before the app listens; server.listen's callback runs the rest (finishStartUp()).
-		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on, no timer");
+		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on; the watch runs every 5 minutes");
+		// The watch: what a Super Admin's dashboard read runs, so a sheet edit is seen with nobody
+		// reading, and the alert emails waiting. It starts no invoice. Started whatever startTrigger()
+		// answered: finishStartUp() tries that again, and the watch does nothing until it has.
+		setInterval(() => autoInvoice.watch(), AUTO_INVOICE_TICK_MS);
 	} else {
 		// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
 		let autoInvoiceTicking = false;

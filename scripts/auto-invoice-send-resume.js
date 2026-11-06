@@ -9,7 +9,9 @@
 // --dry-run: opens the database read-only and says whether sending is stopped,
 //   since when and why, and what --apply would do; writes nothing.
 // --apply: clears the stop and writes one audit row as the system actor
-//   "auto-invoice-send-resume" (auto_invoice_send_resumed), in one transaction.
+//   "auto-invoice-send-resume" (auto_invoice_send_resumed), in one transaction, and
+//   clears the list of loads held after their send with it, so the next hold starts a
+//   new count rather than trip the breaker at once (AUTO_INVOICE_HOLD_ONE_LOAD).
 //   Nothing stopped: nothing written (a replay changes nothing).
 // Either way it refuses while any load's send is unconfirmed (it may have gone
 // out and isn't found in Sent Mail yet, or a person must check): resolve those
@@ -67,6 +69,7 @@ function run({ db, dryRun, nowIso = new Date().toISOString() }) {
 		if (unconfirmed > 0) throw new Refusal(`${unconfirmed} send(s) not confirmed in Sent Mail: check each one (the load's Try again searches Sent Mail again) before resuming`);
 		if (!dryRun) {
 			ledger.clearSendStop(db);
+			ledger.clearHeldLoads(db);
 			db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 				.run(nowIso, ACTOR.id, ACTOR.username, ACTOR.role, "auto_invoice_send_resumed", "auto_invoice", "send", `cleared the stop of ${stop.at} (${stop.reason || "no reason"})`);
 		}
