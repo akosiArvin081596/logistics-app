@@ -119,7 +119,7 @@
         <div class="form-group">
           <label class="form-label">Avg MPG (optional)</label>
           <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.avgMpg" step="any" placeholder="6.5 (default)" />
-          <div class="field-hint">Average miles per gallon. Leave blank to auto-derive from ELD fuel + odometer.</div>
+          <div class="field-hint">Average miles per gallon. Leave blank to use this truck's fuel receipts once there are enough, otherwise the 6.5 MPG fleet default.</div>
         </div>
       </div>
       <div class="form-row">

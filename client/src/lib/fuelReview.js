@@ -630,8 +630,10 @@ export function mpgSource(value) {
 }
 
 // The driver's note under the Miles per gallon row, for a figure nobody measured. It
-// says which figure it is: the truck's own MPG on file, or the fleet default.
-export function mpgNoteText(sourceKey, mpgText) {
+// says which figure it is: the truck's own MPG on file, or the fleet default. A measured
+// range rests on miles per gauge point, not on any MPG, so it gets no note.
+export function mpgNoteText(sourceKey, mpgText, basis) {
+  if (basis === 'measured') return '';
   if (sourceKey === 'truck') {
     return `This range uses the ${mpgText} on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.`;
   }

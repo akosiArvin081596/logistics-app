@@ -40231,7 +40231,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const before = parseFloat(truck.avg_mpg) || 0;
 			const after = amount.avg_mpg;
 			if (before !== after) {
-				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (derived from ELD / receipts)");
+				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (fuel receipts, else the fleet default)");
 				logAudit(req, "update_truck_avg_mpg", "truck", String(id),
 					`Average MPG for ${unitLabel}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
 			}
@@ -63289,8 +63289,8 @@ function resolveCredibleFuelReading(vehicleId, rows, mpg, tank) {
 	return fuelModel.resolveFuelReading({ rows: [latest, anchor], mpg, tankGallons: tank, ...clock });
 }
 
-// The one range the trip plan and, with the driver gallons flag off, the chip quote
-// (lib/fuel-model.js sharedFuelRange()). A newest fix from before the device's link
+// The one range the trip plan and, with the driver gallons flag off, the chip and the
+// low-fuel alert quote (lib/fuel-model.js sharedFuelRange()). A newest fix from before the device's link
 // was taken on another vehicle (B11), so its level counts as no reading at all.
 function sharedFuelRangeFor({ truck, rows, receipt, burn }) {
 	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
@@ -63344,7 +63344,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		fuelLowAlertState.set(vehicleId, st);
 
 		const truck = db.prepare(
-			`SELECT unit_number AS unit, fuel_tank_gallons, avg_mpg
+			`SELECT id, routemate_vehicle_id, unit_number AS unit, fuel_tank_gallons, avg_mpg
 			 FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleId);
 		if (!truck) return;
 		const rows = db.prepare(
@@ -63354,24 +63354,35 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 
 		const tank = truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
 		const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
-		const reading = resolveCredibleFuelReading(vehicleId, rows, mpgBase, tank);
+		// Flag off: the one range the chip and the load's Fuel section quote, so the bell
+		// can't name a figure neither of them shows.
+		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({
+			truck, rows, receipt: receiptMpgForVehicle(vehicleId), burn: burnRateForVehicle(vehicleId),
+		});
+		const reading = shared ? shared.reading : resolveCredibleFuelReading(vehicleId, rows, mpgBase, tank);
 		// A stale/absent reading is NOT a low-fuel alert. We do not know the level,
 		// and crying wolf on every unlinked or offline device would train drivers
 		// to ignore the one alert that matters. The panel says "no reading"; that
 		// is the right channel for it.
 		if (reading.fuelPct == null) return;
 
-		const receipt = receiptMpgForVehicle(vehicleId);
-		const mpg = receipt ? receipt.mpg : mpgBase;
-		const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
-		const interval = fuelModel.rangeInterval({
-			fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
-		});
-		const planning = interval.planning;
+		let planning;
+		if (shared) {
+			planning = shared.interval.planning;
+		} else {
+			const receipt = receiptMpgForVehicle(vehicleId);
+			const mpg = receipt ? receipt.mpg : mpgBase;
+			const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
+			const interval = fuelModel.rangeInterval({
+				fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
+			});
+			planning = interval.planning;
+		}
 		if (planning == null) return;
 
 		// Hysteresis: clear the latch only well ABOVE the threshold, so a truck
-		// hovering at the line cannot re-alert every check.
+		// hovering at the line cannot re-alert every check. The line stays on the figure
+		// before the margin, as the chip's colours do.
 		if (planning > FUEL_LOW_ALERT_MILES * 1.5) {
 			if (st.alerted) { st.alerted = false; fuelLowAlertState.set(vehicleId, st); }
 			return;
@@ -63382,7 +63393,13 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		fuelLowAlertState.set(vehicleId, st);
 
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
-		const driverMsg = `About ${planning} miles of fuel left${est}. Plan a fuel stop now.`;
+		// Flag off the words quote the chip's own figure, and its "Refuel now" at 0.
+		const said = shared ? shared.usableMiles : planning;
+		const refuelNow = !!shared && said === 0;
+		const miles = shared && said === 1 ? "mile" : "miles";
+		const driverMsg = refuelNow
+			? `Refuel now${est}. Stop for fuel as soon as you can.`
+			: `About ${said} ${miles} of fuel left${est}. Plan a fuel stop now.`;
 		// The driver's bell and room: the spelling their account holds
 		// (findDriverAccountSpelling()), else the name the ping carried.
 		const key = String(findDriverAccountSpelling(driverName) || driverName).trim().toLowerCase();
@@ -63400,14 +63417,14 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		insertDispatchNotification.run(
 			"fuel-low",
 			`${driverName}: low fuel`,
-			`${driverName} (${truck.unit || "unknown truck"}) has about ${planning} miles of fuel left${est}.`,
+			`${driverName} (${truck.unit || "unknown truck"}) ${refuelNow ? `needs to refuel now${est}` : `has about ${said} ${miles} of fuel left${est}`}.`,
 			JSON.stringify({ driverName, unit: truck.unit, planningMiles: planning,
 				fuelPct: reading.fuelPct, fuelSource: reading.fuelSource })
 		);
 		emitDispatchNotice({
 			type: "fuel-low",
 			title: `${driverName}: low fuel`,
-			body: `${truck.unit || "unknown truck"} — about ${planning} mi of fuel left${est}.`,
+			body: `${truck.unit || "unknown truck"} — ${refuelNow ? `refuel now${est}` : `about ${said} mi of fuel left${est}`}.`,
 		});
 		console.log(`[fuel-low] ${driverName} (${truck.unit}) ${planning} mi, ${reading.fuelPct}% [${reading.fuelSource}]`);
 	} catch (err) {
@@ -64000,9 +64017,12 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
 		const shared = sharedFuelRangeFor({ truck, rows: latest ? [latest] : [], receipt, burn });
 		const { reading, planningPct: pct } = shared;
+		// Flag off the gallons rest on the range's own MPG, so the dispatch card's
+		// "Uses at least N gal" can't argue with the MPG row beside it.
+		const planMpg = DRIVER_FUEL_GALLONS_ENABLED ? mpg : shared.estimate.mpg;
 
 		const plan = fuelModel.planTripFuel({
-			routeMiles, fuelPct: pct, burn, rangeMiles: shared.rangeMiles, mpg,
+			routeMiles, fuelPct: pct, burn, rangeMiles: shared.rangeMiles, mpg: planMpg,
 			reserve: FUEL_RESERVE_OPTS,
 			// Before pickup, routeMiles holds the run to the shipper only when it was routed.
 			approachCounted: pickedUp || planApproach,
@@ -64042,7 +64062,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			fuelAnchorPct: reading.anchorPct,
 			fuelReadingAgeMinutes: reading.ageMinutes,
 			milesSinceFuelReading: reading.milesSinceReading,
-			mpg: Math.round(mpg * 100) / 100,
+			mpg: Math.round(planMpg * 100) / 100,
 			mpgSource: receipt ? "receipts" : "default",
 			...plan,
 			// The point estimate the old panel would have shown, kept beside the

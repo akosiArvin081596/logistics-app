@@ -665,7 +665,7 @@ const mpgLabel = computed(() => {
   const m = round1(range.value && range.value.mpg)
   return m === '—' ? '—' : `${m} mpg`
 })
-const mpgNote = computed(() => mpgNoteText(mpgSrc.value && mpgSrc.value.key, mpgLabel.value))
+const mpgNote = computed(() => mpgNoteText(mpgSrc.value && mpgSrc.value.key, mpgLabel.value, interval.value.basis))
 const unitLabel = computed(() => {
   const r = range.value
   if (!r) return ''

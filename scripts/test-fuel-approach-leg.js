@@ -535,6 +535,10 @@ const PROVIDED = ["app", "db", "requireRole", "fuelPlanLimiter", "getJobTracking
 const DRIVER = { id: 7, role: "Driver", driverName: "Driver QA", username: "driver_qa" };
 const DISPATCH = { id: 2, role: "Dispatcher", username: "dispatch_qa" };
 
+// §12's low-fuel alert: what it's handed, and its lift (set when §12 starts).
+const ALERT_PROVIDED = ["db", "io", "insertNotification", "insertDispatchNotification", "emitDispatchNotice", "findDriverAccountSpelling", "receiptMpgForVehicle", "burnRateForVehicle"];
+let alertLift = null;
+
 function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	const opt = { status: "Assigned", fuel: 48, fixAgoMin: 12, coords: true, pickupMapped: true, truck: true, tank: 150, avgMpg: 6.0,
 		burn: BURN5, receipt: { mpg: 6.0 }, rollupMpg: null, details: "Dry van, 43,764 lbs", otherLoad: null, stopPayload: null,
@@ -635,9 +639,45 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 		await handlers[route]({ query: query || {}, params: {}, body: {}, headers: {}, session: { user } }, res);
 		return { status: res.statusCode, body: res.body };
 	};
+	// §12: the low-fuel alert, lifted whole onto this world's database, recording what it
+	// sends. `clock.now` is the time it reads; the throttle and latch live with `check`.
+	const alert = (clock = { now: NOW }) => {
+		const sent = [];
+		const errors = [];
+		class ClockDate extends Date {
+			constructor(...a) { if (a.length) super(...a); else super(clock.now); }
+			static now() { return clock.now; }
+		}
+		const alertDeps = {
+			db,
+			io: { to: (room) => ({ emit: (event, payload) => sent.push({ kind: "socket", room, event, payload }) }) },
+			insertNotification: { run: (...args) => { sent.push({ kind: "driver", args }); return { lastInsertRowid: sent.length }; } },
+			insertDispatchNotification: { run: (...args) => { sent.push({ kind: "dispatch", args }); } },
+			emitDispatchNotice: (notice) => { sent.push({ kind: "notice", notice }); },
+			findDriverAccountSpelling: (name) => name,
+			receiptMpgForVehicle: deps.receiptMpgForVehicle,
+			burnRateForVehicle: deps.burnRateForVehicle,
+		};
+		const quiet = { log() {}, warn() {}, error: (...a) => errors.push(a.join(" ")) };
+		const was = process.env.DRIVER_FUEL_GALLONS_ENABLED;
+		if (flagOn) process.env.DRIVER_FUEL_GALLONS_ENABLED = "true";
+		else delete process.env.DRIVER_FUEL_GALLONS_ENABLED;
+		let fns;
+		try {
+			fns = new Function(...ALERT_PROVIDED, "Date", "require", "console", `${alertLift.text}\nreturn { maybeAlertLowFuel };`)(
+				...ALERT_PROVIDED.map((k) => alertDeps[k]), ClockDate, appRequire, quiet);
+		} finally {
+			if (was === undefined) delete process.env.DRIVER_FUEL_GALLONS_ENABLED;
+			else process.env.DRIVER_FUEL_GALLONS_ENABLED = was;
+		}
+		return { sent, errors, check: () => fns.maybeAlertLowFuel(VID, "Driver QA") };
+	};
 	return {
 		plan: (user = DRIVER, query = { loadId: "QA-FUEL-1" }) => call("/api/fuel/trip-plan", user, query),
 		range: (user = DRIVER, query = {}) => call("/api/fuel/range", user, query),
+		alert,
+		db,
+		vid: VID,
 	};
 }
 
@@ -935,13 +975,15 @@ async function routeSections() {
 // === §12 one range for the chip and the Fuel section, flag off ================
 // The chip reads /api/fuel/range, the Fuel section's hero and verdict read
 // /api/fuel/trip-plan. They must quote one figure: the trip plan's own, so the hero
-// and the verdict stay as they were and only the chip moves. The flag-on routes keep
-// the two routes' own rules, so here they are also the oracle for what each said before.
+// and the verdict stay as they were and only the chip moves. The low-fuel alert and the
+// dispatch card take the same figure. The flag-on routes keep the two routes' own rules,
+// so here they are also the oracle for what each said before.
 //
-// A deliberate change to the flag-on answers updates these two digests.
+// A deliberate change to the flag-on answers updates these digests.
 const FLAG_ON_PINNED_WORLDS = 27;
 const FLAG_ON_WORLDS_SHA = "55a636c721ea6cf554a00e1b5596e9db1a180135e1c56618987180ce3f7d60bf";
 const FLAG_ON_GENERATED_SHA = "d9d083de50691ebd37889b48dabb39be64335082237bb67d22070c05fe526bfd";
+const FLAG_ON_ALERTS_SHA = "6bd02e3519773096df2119b4b186966c3e3c98998075d9b1eda581cbc2d48339";
 const GENERATED_CASES = 2000;
 const GENTLE = { ...BURN5, p10: 12, p50: 14, p90: 16 };
 
@@ -986,14 +1028,25 @@ function generatedTrucks() {
 
 // Receipts reach a route only through a device, as buildWorld()'s stub has it.
 const receiptOf = (o) => (o.truck === false || o.device === false ? null : o.receipt);
-// An MPG on file the band doesn't believe, on a truck with no receipts to outrank it.
-const mpgOnFileOutOfBand = (o) => !receiptOf(o) && o.truck !== false && o.avgMpg > 0 && (o.avgMpg < 3 || o.avgMpg > 11);
+// An MPG on file above the cap, on a truck with no receipts to outrank it.
+const mpgOnFileOutOfBand = (o) => !receiptOf(o) && o.truck !== false && o.avgMpg > 11;
+const VERDICT_RANK = { unknown: 0, insufficient: 1, tight: 2, clears: 3 };
+// What the alert must say for a chip's answer: nothing above the line, or no figure; else
+// the chip's own figure, or its "Refuel now".
+const alertLine = (r) => {
+	if (r.rangePlanningMiles === null || r.rangePlanningMiles > 100) return null;
+	const est = r.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
+	const u = r.rangeUsableMiles;
+	return u === 0 ? `Refuel now${est}. Stop for fuel as soon as you can.` : `About ${u} ${u === 1 ? "mile" : "miles"} of fuel left${est}. Plan a fuel stop now.`;
+};
+const alertSaid = (sent) => { const d = sent.find((s) => s.kind === "driver"); return d ? d.args[3] : null; };
 const figures = (range, plan) => ({
 	chip: range.body.rangeUsableMiles, hero: plan.body.refuelWithinMiles, countOn: plan.body.range.planning, verdict: plan.body.verdict,
 });
 
 async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds) {
 	console.log("\n§12 one range for the chip and the Fuel section, flag off");
+	alertLift = closure(SRC, { roots: ["maybeAlertLowFuel"], provided: ALERT_PROVIDED, denied: ["server", "transporter", "sendEmail"] });
 	const both = async (o) => {
 		const wOff = buildWorld(Database, lifted, appRequire, o, false);
 		const wOn = buildWorld(Database, lifted, appRequire, o, true);
@@ -1044,14 +1097,20 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			{ chip: 225, hero: 465, countOn: 480, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
 		["a mistyped 20 MPG on file, no rollup: 785 on both becomes 245 on both", { ...ROW1, avgMpg: 20, rollupMpg: null },
 			{ chip: 785, hero: 785, countOn: 800, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
-		["the band's top is in: 11 on file stays, 425 on both", { ...ROW1, avgMpg: 11, rollupMpg: null },
+		["the cap's top is in: 11 on file stays, 425 on both", { ...ROW1, avgMpg: 11, rollupMpg: null },
 			{ chip: 425, hero: 425, countOn: 440, verdict: "clears" }, { chip: 425, hero: 425, countOn: 440, verdict: "clears" }],
 		["...11.01 is out: 245", { ...ROW1, avgMpg: 11.01, rollupMpg: null },
 			{ chip: 426, hero: 426, countOn: 441, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
-		["the band's foot is in: 3 on file stays, 105 on both", { ...ROW1, avgMpg: 3, rollupMpg: null },
+		["a real 11.5 on file reads low, 245, a needless stop and the safe side", { ...ROW1, avgMpg: 11.5, rollupMpg: null },
+			{ chip: 445, hero: 445, countOn: 460, verdict: "clears" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["a low MPG on file stays as typed: 3 reads 105", { ...ROW1, avgMpg: 3, rollupMpg: null },
 			{ chip: 105, hero: 105, countOn: 120, verdict: "insufficient" }, { chip: 105, hero: 105, countOn: 120, verdict: "insufficient" }],
-		["...2.99 is out: it reads as not set too, 245, which is above what it read", { ...ROW1, avgMpg: 2.99, rollupMpg: null },
-			{ chip: 104, hero: 104, countOn: 119, verdict: "insufficient" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
+		["...2.99 reads 104, never the fleet default's 245", { ...ROW1, avgMpg: 2.99, rollupMpg: null },
+			{ chip: 104, hero: 104, countOn: 119, verdict: "insufficient" }, { chip: 104, hero: 104, countOn: 119, verdict: "insufficient" }],
+		["...0.6 reads 9", { ...ROW1, avgMpg: 0.6, rollupMpg: null },
+			{ chip: 9, hero: 9, countOn: 24, verdict: "insufficient" }, { chip: 9, hero: 9, countOn: 24, verdict: "insufficient" }],
+		["...2.9 through a dropout, 100% before it, 300 mi since: 'Refuel now' on both, as the section said; the chip falls from 60", { ...DROPOUT, burn: null, receipt: null, avgMpg: 2.9 },
+			{ chip: 60, hero: 0, countOn: 0, verdict: "insufficient" }, { chip: 0, hero: 0, countOn: 0, verdict: "insufficient" }],
 		["no MPG on file: the fleet default, 6.5, unchanged", { ...ROW1, avgMpg: 0, rollupMpg: null },
 			{ chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }, { chip: 245, hero: 245, countOn: 260, verdict: "insufficient" }],
 		["receipts outrank a mistyped MPG on file: no move", { ...ROW1, avgMpg: 20, receipt: { mpg: 6.0 }, rollupMpg: null },
@@ -1123,12 +1182,12 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		assert.deepStrictEqual(gauge(reviewM1b.range), [66.7, 100.1, "carried"]);
 	});
 	const mistyped = named.find((n) => n.label.startsWith("a mistyped 20 MPG on file, rollup 8.0"));
-	check("a mistyped MPG on file: the answer's MPG row reads the fleet default, 6.5, with a default label; the plan's 'Uses at least N gal' stays on its own MPG, as before", () => {
+	check("a mistyped MPG on file: the MPG row reads the fleet default, 6.5, and the card's 'Uses at least N gal' takes it too: 47 gal, not 15, for 300 mi", () => {
 		const r = mistyped.range.body;
 		const p = mistyped.plan.body;
 		assert.deepStrictEqual([r.mpg, r.mpgSource], [6.5, "default"]);
-		assert.deepStrictEqual([p.mpg, p.mpgSource, p.gallonsNeeded], [20, "default", 15]);
-		assert.deepStrictEqual([p.mpg, p.mpgSource, p.gallonsNeeded], [mistyped.planBefore.body.mpg, mistyped.planBefore.body.mpgSource, mistyped.planBefore.body.gallonsNeeded]);
+		assert.deepStrictEqual([p.mpg, p.mpgSource, p.gallonsNeeded], [6.5, "default", 46.2]);
+		assert.deepStrictEqual([mistyped.planBefore.body.mpg, mistyped.planBefore.body.gallonsNeeded], [20, 15]);
 	});
 	const mistypedDropout = await both({ ...DROPOUT, avgMpg: 20, receipt: null, burn: null });
 	check("a mistyped MPG on file on a dropout: the level burns at the fleet default, not at 20, on both figures", () => {
@@ -1145,7 +1204,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	const live = appRequire("./lib/fuel-model");
 	const hasShared = typeof live.sharedFuelRange === "function";
 	check("lib/fuel-model.js exports sharedFuelRange()", () => assert.ok(hasShared));
-	check("which MPG wins: receipts, else an MPG on file from 3 to 11, else the fleet default; a carried level burns at it; a rollup can't reach it", () => {
+	check("which MPG wins: receipts, else an MPG on file up to 11, however low, else the fleet default; a carried level burns at it; a rollup can't reach it", () => {
 		assert.ok(hasShared);
 		const pick = (o) => {
 			let burnedAt = null;
@@ -1179,7 +1238,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			[6.125, "truck", 6.125],
 			[6, "truck", 6],
 			[3, "truck", 3],
-			[6.5, "default", 6.5],
+			[2.99, "truck", 2.99],
 			[11, "truck", 11],
 			[6.5, "default", 6.5],
 			[6.5, "default", 6.5],
@@ -1280,8 +1339,12 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	const cases = [];
 	for (const o of generatedTrucks()) {
 		const c = await both(o);
+		const [alertOff, alertOn] = [c.wOff.alert(), c.wOn.alert()];
+		alertOff.check();
+		alertOn.check();
 		cases.push({ o, range: c.range, plan: c.plan, rangeBefore: c.rangeBefore, planBefore: c.planBefore,
-			cardRange: await c.wOff.range(DISPATCH, { driver: "Driver QA" }), cardPlan: await c.wOff.plan(DISPATCH) });
+			cardRange: await c.wOff.range(DISPATCH, { driver: "Driver QA" }), cardPlan: await c.wOff.plan(DISPATCH),
+			alertOff: alertOff.sent, alertOn: alertOn.sent, alertErrors: [...alertOff.errors, ...alertOn.errors] });
 	}
 	const INTERVAL_KEYS = [["rangeLowMiles", "low"], ["rangeTypicalMiles", "typical"], ["rangeHighMiles", "high"], ["rangePlanningMiles", "planning"], ["rangeBasis", "basis"], ["milesPerFuelPoint", "milesPerPoint"]];
 	const label = (c) => JSON.stringify(c.o);
@@ -1302,7 +1365,13 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 				&& r.fuelReadingAgeMinutes === p.fuelReadingAgeMinutes && r.milesSinceFuelReading === p.milesSinceFuelReading;
 		}), []);
 	});
-	check("generated: the hero and the verdict stay as they were: flag off, the trip plan's answer is flag on's less driverFuel, byte for byte, but for the hero on a route of 0 and an MPG on file outside the band", () => {
+	check("generated: the cap can't raise anything: the hero never reads above what it did, a verdict never gets better, and a low figure stays as typed", () => {
+		assert.deepStrictEqual(firstBad((c) => {
+			const [now, before] = [c.plan.body.refuelWithinMiles, c.planBefore.body.refuelWithinMiles];
+			return (before === null || now <= before) && VERDICT_RANK[c.plan.body.verdict] <= VERDICT_RANK[c.planBefore.body.verdict];
+		}), []);
+	});
+	check("generated: the hero and the verdict stay as they were: flag off, the trip plan's answer is flag on's less driverFuel, byte for byte, but for the hero on a route of 0 and an MPG on file above the cap", () => {
 		assert.deepStrictEqual(firstBad((c) => {
 			if (mpgOnFileOutOfBand(c.o)) return true;
 			const before = omitDriverFuel(c.planBefore.body);
@@ -1311,7 +1380,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			return JSON.stringify(atZero ? { ...before, refuelWithinMiles: now.refuelWithinMiles } : before) === JSON.stringify(now);
 		}), []);
 	});
-	check("generated: the chip is exactly the section's figure before, falling or rising to it, but for an MPG on file outside the band; only a route of 0 needs the margin worked out", () => {
+	check("generated: the chip is exactly the section's figure before, falling or rising to it, but for an MPG on file above the cap; only a route of 0 needs the margin worked out", () => {
 		assert.deepStrictEqual(firstBad((c) => {
 			if (mpgOnFileOutOfBand(c.o)) return true;
 			const dry = c.planBefore.body.range.planning;
@@ -1324,18 +1393,36 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		const w = buildWorld(Database, lifted, appRequire, { ...c.o, avgMpg: 0 }, false);
 		outOfBand.push({ c, unsetRange: await w.range(), unsetPlan: await w.plan() });
 	}
-	check(`generated: an MPG on file outside the band reads exactly as not set, on ${outOfBand.length} trucks: the chip's whole answer, and the plan's less its own MPG and gallons`, () => {
-		const lessOwnMpg = ({ mpg: _m, gallonsNeeded: _g, ...rest }) => JSON.stringify(rest);
+	check(`generated: an MPG on file above the cap reads exactly as not set, on ${outOfBand.length} trucks: the chip's whole answer, and the plan's whole answer`, () => {
 		assert.ok(outOfBand.length > 100, `${outOfBand.length}`);
-		const bad = outOfBand.filter(({ c, unsetRange, unsetPlan }) => JSON.stringify(c.range.body) !== JSON.stringify(unsetRange.body) || lessOwnMpg(c.plan.body) !== lessOwnMpg(unsetPlan.body));
+		const bad = outOfBand.filter(({ c, unsetRange, unsetPlan }) => JSON.stringify(c.range.body) !== JSON.stringify(unsetRange.body) || JSON.stringify(c.plan.body) !== JSON.stringify(unsetPlan.body));
 		assert.deepStrictEqual(bad.slice(0, 3).map(({ c }) => label(c)), []);
 	});
-	check("generated: only an MPG on file inside the band is called the truck's own; no answer says 'truck' without one, and 'default' never sits on a figure that isn't 6.5", () => {
+	check("generated: only an MPG on file at or under the cap is called the truck's own; no answer says 'truck' without one, and 'default' never sits on a figure that isn't 6.5", () => {
 		assert.deepStrictEqual(firstBad((c) => {
 			const r = c.range.body;
-			if (r.mpgSource === "truck") return !receiptOf(c.o) && c.o.truck !== false && c.o.avgMpg >= 3 && c.o.avgMpg <= 11 && r.mpg === c.o.avgMpg;
+			if (r.mpgSource === "truck") return !receiptOf(c.o) && c.o.truck !== false && c.o.avgMpg > 0 && c.o.avgMpg <= 11 && r.mpg === c.o.avgMpg;
 			if (r.mpgSource === "default") return r.mpg === 6.5;
 			return r.mpgSource === "receipts" && !!receiptOf(c.o) && r.mpg === receiptOf(c.o).mpg;
+		}), []);
+	});
+	check("generated: the card's 'Uses at least N gal' rests on the MPG row beside it: the plan's MPG is the chip's, and its gallons are the route over that", () => {
+		assert.deepStrictEqual(firstBad((c) => {
+			const [r, p] = [c.cardRange.body, c.cardPlan.body];
+			const gallons = p.routeMiles === null ? null : Math.round((p.routeMiles / r.mpg) * 10) / 10;
+			return p.mpg === Math.round(r.mpg * 100) / 100 && Math.abs((p.gallonsNeeded ?? -1) - (gallons ?? -1)) <= 0.1;
+		}), []);
+	});
+	check("generated: chip, hero, card and alert read one figure: the alert fires exactly when the figure before the margin is 100 or under, and says the chip's own figure", () => {
+		assert.deepStrictEqual(firstBad((c) => c.alertErrors.length === 0 && alertSaid(c.alertOff) === alertLine(c.range.body)), []);
+	});
+	check("generated: the alert fires later or earlier than before only where its figure moved: a dropout, or an MPG on file above the cap; a re-linked device's old level no longer counts", () => {
+		const fired = (sent) => sent.some((s) => s.kind === "driver");
+		const carried = (c) => c.range.body.fuelSource === "carried";
+		assert.deepStrictEqual(firstBad((c) => {
+			if (fired(c.alertOff) === fired(c.alertOn)) return true;
+			if (fired(c.alertOff)) return carried(c) || mpgOnFileOutOfBand(c.o);
+			return (carried(c) && !!receiptOf(c.o)) || c.o.linkedAgoMin === 5;
 		}), []);
 	});
 	check("generated: a dropout's Fuel level is never the planning level unless they're equal, its Gallons left follow it, and every other level is the plan's", () => {
@@ -1347,15 +1434,15 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			return r.fuelSource === "carried" ? r.fuelPct >= p.fuelPct : r.fuelPct === p.fuelPct;
 		}), []);
 	});
-	check("generated: with no receipts, a dropout's rows read as they did before, wherever the chip already had a level, but for an MPG on file outside the band", () => {
+	check("generated: with no receipts, a dropout's rows read as they did before, wherever the chip already had a level, but for an MPG on file above the cap", () => {
 		assert.deepStrictEqual(firstBad((c) => receiptOf(c.o) || mpgOnFileOutOfBand(c.o) || !c.rangeBefore.body.hasFuelData || c.o.linkedAgoMin === 5
 			|| (c.range.body.fuelPct === c.rangeBefore.body.fuelPct && c.range.body.gallonsRemaining === c.rangeBefore.body.gallonsRemaining)), []);
 	});
-	check("generated: what isn't the range stays as it was: truck, tank, reserve, evidence and time on the chip's answer; route, leg, MPG and gallons on the plan's", () => {
+	check("generated: what isn't the range stays as it was: truck, tank, reserve, evidence and time on the chip's answer; route and leg on the plan's", () => {
 		const keep = (b, keys) => JSON.stringify(keys.map((k) => b[k]));
 		const CHIP = ["ok", "driver", "unit", "tankGallons", "tankSource", "reserveMiles", "rangeEvidence", "updatedAt"];
-		const PLAN = ["ok", "loadId", "unit", "routeSource", "fromLivePosition", "leg", "approachMiles", "laneMiles", "pickupUnconfirmed", "loadStatus", "mpg", "mpgSource",
-			"routeMiles", "reserveMiles", "requiredMiles", "gallonsNeeded", "pointsNeeded", "updatedAt"];
+		const PLAN = ["ok", "loadId", "unit", "routeSource", "fromLivePosition", "leg", "approachMiles", "laneMiles", "pickupUnconfirmed", "loadStatus", "mpgSource",
+			"routeMiles", "reserveMiles", "requiredMiles", "pointsNeeded", "updatedAt"];
 		assert.deepStrictEqual(firstBad((c) => keep(c.range.body, CHIP) === keep(c.rangeBefore.body, CHIP) && keep(c.plan.body, PLAN) === keep(c.planBefore.body, PLAN)), []);
 	});
 	check("generated: the card's answers carry the same figures as the driver's, and only the driver's leave out the device id", () => {
@@ -1404,6 +1491,10 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			outOfBandMoved: count((c) => mpgOnFileOutOfBand(c.o) && c.plan.body.refuelWithinMiles !== c.planBefore.body.refuelWithinMiles),
 			outOfBandVerdictMoved: count((c) => mpgOnFileOutOfBand(c.o) && c.plan.body.verdict !== c.planBefore.body.verdict),
 			truckMpg: count((c) => c.range.body.mpgSource === "truck"),
+			alertBoth: count((c) => alertSaid(c.alertOff) !== null && alertSaid(c.alertOn) !== null),
+			alertNowOnly: count((c) => alertSaid(c.alertOff) !== null && alertSaid(c.alertOn) === null),
+			alertBeforeOnly: count((c) => alertSaid(c.alertOff) === null && alertSaid(c.alertOn) !== null),
+			alertRefuelNow: count((c) => /^Refuel now/.test(alertSaid(c.alertOff) || "")),
 		};
 		console.log(`      generated: ${JSON.stringify(seen)}`);
 		for (const [k, v] of Object.entries(seen)) assert.ok(v >= 3, `${k}: ${v}`);
@@ -1418,6 +1509,108 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	console.log(`      flag-on answers, whole, ${GENERATED_CASES} generated trucks: ${generatedOn.length}, sha256 ${generatedSha}`);
 	check("flag on: every answer is byte for byte what it was (the worlds above, every role)", () => assert.strictEqual(worldsSha, FLAG_ON_WORLDS_SHA));
 	check("flag on: every answer is byte for byte what it was (the generated trucks)", () => assert.strictEqual(generatedSha, FLAG_ON_GENERATED_SHA));
+	const alertsSha = digestOf(cases.map((c, i) => ({ name: `${i} alert`, r: { status: 0, body: c.alertOn } })));
+	console.log(`      flag-on low-fuel alerts, whole, ${GENERATED_CASES} generated trucks: sha256 ${alertsSha}`);
+	check("flag on: every low-fuel alert is byte for byte what it was (the generated trucks)", () => assert.strictEqual(alertsSha, FLAG_ON_ALERTS_SHA));
+
+	// --- the low-fuel alert: when it fires, what it says, and its latch ----------
+	const ALERT_TRUCK = { status: "In Transit", burn: null, receipt: null, tank: 150, rollupMpg: null };
+	// The first level, coming down from a full tank, at which the alert fires.
+	const firstFire = (avgMpg, flagOn) => {
+		for (let fuel = 100; fuel >= 1; fuel--) {
+			const a = buildWorld(Database, lifted, appRequire, { ...ALERT_TRUCK, avgMpg, fuel }, flagOn).alert();
+			a.check();
+			if (a.sent.length) return [fuel, alertSaid(a.sent)];
+		}
+		return null;
+	};
+	check("when it first fires: as before at or under the cap, earlier above it, and always in the chip's figure", () => {
+		const line = (n) => `About ${n} miles of fuel left. Plan a fuel stop now.`;
+		assert.deepStrictEqual([20, 12, 6, 0, 2.9, 1.5].map((m) => [m, firstFire(m, true)]), [
+			[20, [6, line(100)]], [12, [10, line(100)]], [6, [20, line(100)]], [0, [18, line(98)]], [2.9, [41, line(99)]], [1.5, [80, line(100)]],
+		]);
+		assert.deepStrictEqual([20, 12, 6, 0, 2.9, 1.5].map((m) => [m, firstFire(m, false)]), [
+			[20, [18, line(83)]], [12, [18, line(83)]], [6, [20, line(85)]], [0, [18, line(83)]], [2.9, [41, line(84)]], [1.5, [80, line(85)]],
+		]);
+	});
+	const alertAt = (o) => {
+		const [off, on] = [buildWorld(Database, lifted, appRequire, o, false).alert(), buildWorld(Database, lifted, appRequire, o, true).alert()];
+		off.check();
+		on.check();
+		return [alertSaid(off.sent), alertSaid(on.sent), off.sent];
+	};
+	const EST = " (estimated — fuel sensor not reporting)";
+	check("a dropout on a typed 20: before, no alert while the chip said 'Refuel now'; now the bell says it too, on the driver's and dispatch's lines", () => {
+		const [now, before, sent] = alertAt({ ...ALERT_TRUCK, avgMpg: 20, fuel: 0, anchor: { fuel: 20, agoMin: 60, odo: 99900 } });
+		assert.deepStrictEqual([now, before], [`Refuel now${EST}. Stop for fuel as soon as you can.`, null]);
+		assert.strictEqual(sent.find((s) => s.kind === "dispatch").args[2], `Driver QA (Unit 901) needs to refuel now${EST}.`);
+		assert.strictEqual(sent.find((s) => s.kind === "notice").notice.body, `Unit 901 — refuel now${EST}.`);
+	});
+	check("it can fire MORE: a dropout on 6.0 on file, 40% before, 100 mi since: the planning rate takes it to the line, where the old level didn't", () => {
+		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 0, anchor: { fuel: 40, agoMin: 60, odo: 99900 } });
+		assert.deepStrictEqual([now, before], [`About 85 miles of fuel left${EST}. Plan a fuel stop now.`, null]);
+	});
+	check("it can fire LESS: a dropout with receipts 11 above 4.5 on file, 24% before, 100 mi since: the receipts' gentler burn keeps it over the line", () => {
+		const [now, before] = alertAt({ ...ALERT_TRUCK, avgMpg: 4.5, receipt: { mpg: 11 }, fuel: 0, anchor: { fuel: 24, agoMin: 60, odo: 99900 } });
+		assert.deepStrictEqual([now, before], [null, `About 84 miles of fuel left${EST}. Plan a fuel stop now.`]);
+	});
+	check("a live reading at the line: dispatch's line and notice quote the chip's figure; the bell's other fields keep the figure before the margin", () => {
+		const [now, , sent] = alertAt({ ...ALERT_TRUCK, avgMpg: 6, fuel: 20 });
+		assert.strictEqual(now, "About 85 miles of fuel left. Plan a fuel stop now.");
+		assert.strictEqual(sent.find((s) => s.kind === "dispatch").args[2], "Driver QA (Unit 901) has about 85 miles of fuel left.");
+		assert.strictEqual(sent.find((s) => s.kind === "notice").notice.body, "Unit 901 — about 85 mi of fuel left.");
+		assert.strictEqual(JSON.parse(sent.find((s) => s.kind === "driver").args[4]).planningMiles, 100);
+	});
+	check("one mile left: 'About 1 mile', flag off", () => {
+		const [now] = alertAt({ ...ALERT_TRUCK, avgMpg: 2.4, fuel: 8 });
+		assert.strictEqual(now, "About 1 mile of fuel left. Plan a fuel stop now.");
+	});
+	// The latch and the 15-minute throttle, the same on both flags: one alert per episode,
+	// cleared only by a reading well above the line.
+	const latchRun = (flagOn) => {
+		const w = buildWorld(Database, lifted, appRequire, { ...ALERT_TRUCK, avgMpg: 0, fuel: 50 }, flagOn);
+		const clock = { now: NOW };
+		const a = w.alert(clock);
+		const row = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
+		const alerts = () => a.sent.filter((s) => s.kind === "driver").length;
+		const after = (minutes, fuel) => {
+			clock.now += minutes * 60000;
+			row.run(w.vid, FIX.lat, FIX.lng, 100000, fuel, clock.now);
+			a.check();
+			return alerts();
+		};
+		return [after(16, 18), after(1, 17), after(16, 17), after(16, 25), after(16, 17), after(16, 30), after(16, 18)];
+	};
+	check("the latch and throttle: one alert for an episode; none within 15 minutes, none while it hovers under 150; a reading over 150 re-arms it; the same on both flags", () => {
+		assert.deepStrictEqual(latchRun(false), [1, 1, 1, 1, 1, 1, 2]);
+		assert.deepStrictEqual(latchRun(true), [1, 1, 1, 1, 1, 1, 2]);
+	});
+	check("the ledger is the in-memory fuelLowAlertState alone: the alert writes no table of its own, and only maybeAlertLowFuel touches it", () => {
+		const text = declText("maybeAlertLowFuel");
+		assert.ok(!/\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/.test(text), "no SQL write of its own");
+		assert.strictEqual(declText("fuelLowAlertState"), "const fuelLowAlertState = new Map(); // vehicleId -> { checkedAt, alerted }");
+		const outside = SRC.split(text).join("").split(declText("fuelLowAlertState")).join("");
+		assert.ok(!outside.includes("fuelLowAlertState"), "nothing else reads it");
+	});
+
+	// --- the sentences ----------------------------------------------------------
+	check("the truck forms say what a blank does now, and no truck screen or audit line says the ELD derives it", () => {
+		const read = (f) => fs.readFileSync(path.join(__dirname, "..", "client", "src", "components", "trucks", f), "utf8");
+		const [table, add] = [read("TruckTable.vue"), read("AddTruckForm.vue")];
+		assert.ok(table.includes("Blank uses this truck's fuel receipts once there are enough, otherwise the 6.5 MPG fleet default."), "the edit form");
+		assert.ok(add.includes("Leave blank to use this truck's fuel receipts once there are enough, otherwise the 6.5 MPG fleet default."), "the add form");
+		assert.ok(table.includes("'Fuel receipts, else 6.5 mpg (default)'"), "the truck's page");
+		assert.ok(SRC.includes('"unset (fuel receipts, else the fleet default)"'), "the audit line");
+		for (const [name, text] of [["TruckTable.vue", table], ["AddTruckForm.vue", add], ["server.js", SRC]]) {
+			assert.ok(!/auto-derive|Auto from ELD|derived from ELD \/ receipts/.test(text), name);
+		}
+		assert.strictEqual(live.DEFAULT_MPG, 6.5, "the words' 6.5 is the fleet default");
+	});
+	check("the note shows only when the figure comes from the file: never on a measured range", () => {
+		if (reviewError) assert.fail(reviewError);
+		assert.deepStrictEqual(["truck", "default"].map((k) => review.mpgNoteText(k, "6 mpg", "measured")), ["", ""]);
+		assert.ok(/on file/.test(review.mpgNoteText("truck", "6 mpg", "estimated")) && /fleet default/.test(review.mpgNoteText("default", "6.5 mpg", "estimated")));
+	});
 
 	// --- who else reads the MPG on file -----------------------------------------
 	// Each code line naming the column, by the top-level statement it sits in; the schema
@@ -1433,7 +1626,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		}
 		return [...seen].sort();
 	};
-	check("the band touches no other reader of the MPG on file: the column has only these readers, and no pay, IFTA, investor or expense code is one of them", () => {
+	check("the cap touches no other reader of the MPG on file: the column has only these readers, and no pay, IFTA, investor or expense code is one of them", () => {
 		assert.deepStrictEqual(mpgOnFileReaders(), [
 			"/api/fuel/range",
 			"/api/fuel/trip-plan",
@@ -1450,28 +1643,29 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			.filter((f) => /\bavg_?mpg\b/i.test(fs.readFileSync(path.join(libDir, f), "utf8")));
 		assert.deepStrictEqual(libReaders, ["fuel-model.js"]);
 	});
-	check("the low-fuel alert, /api/fuel/verify, the flag-on range and the plan's own MPG keep the MPG on file as typed; only sharedFuelRange() holds it to the band", () => {
+	check("/api/fuel/verify and the flag-on alert, range and plan keep the MPG on file as typed; only sharedFuelRange() holds it to the cap", () => {
 		const alert = declText("maybeAlertLowFuel");
-		assert.ok(alert.includes("const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;"), "the alert");
+		assert.ok(alert.includes("const mpgBase = truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;"), "the flag-on alert");
 		const verify = liftRoute(SRC, 'app.get("/api/fuel/verify", requireRole("Super Admin"), (req, res) => {');
 		assert.ok(verify.includes("(t.avg_mpg > 0 ? t.avg_mpg : fuelModel.DEFAULT_MPG)"), "/api/fuel/verify");
 		const range = liftRoute(SRC, RANGE_HEAD);
 		assert.ok(range.includes("const preMpg = truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;") && range.includes("const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;"), "the flag-on range");
 		const plan = liftRoute(SRC, PLAN_HEAD);
-		assert.ok(/const mpg = receipt \? receipt\.mpg\s+: \(truck && truck\.avg_mpg > 0 \? truck\.avg_mpg : fuelModel\.DEFAULT_MPG\);/.test(plan), "the plan's own MPG");
+		assert.ok(/const mpg = receipt \? receipt\.mpg\s+: \(truck && truck\.avg_mpg > 0 \? truck\.avg_mpg : fuelModel\.DEFAULT_MPG\);/.test(plan), "the flag-on plan's MPG");
+		assert.ok(plan.includes("const planMpg = DRIVER_FUEL_GALLONS_ENABLED ? mpg : shared.estimate.mpg;"), "flag off, the plan's gallons take the range's MPG");
 		assert.ok(declText("sharedFuelRangeFor").includes("acceptAnyMpgOnFile: DRIVER_FUEL_GALLONS_ENABLED,"), "flag on, the trip plan takes it as typed");
 		assert.strictEqual(SRC.split("acceptAnyMpgOnFile").length - 1, 1, "one place says so");
-		assert.ok(!/DRIVER_FUEL_MAX_MPG|CLASS8_MIN_MPG/.test(SRC), "server.js holds no copy of the band for it");
+		assert.ok(!/DRIVER_FUEL_MAX_MPG/.test(SRC), "server.js holds no copy of the cap for it");
 	});
 
 	// --- nothing else reads it --------------------------------------------------
-	check("no pay, IFTA, investor or expense path reads the one range: its helpers run only in the two routes, write nothing, and no server code asks those routes", () => {
+	check("no pay, IFTA, investor or expense path reads the one range: its helper runs only in the two routes and the low-fuel alert, writes nothing, and no server code asks those routes", () => {
 		const rangeBody = liftRoute(SRC, RANGE_HEAD);
 		const planBody = liftRoute(SRC, PLAN_HEAD);
 		const mentions = (text, needle) => text.split(needle).length - 1;
 		const needle = "sharedFuelRangeFor({";
-		assert.strictEqual(mentions(SRC, needle), 3, "its definition and the two routes");
-		assert.deepStrictEqual([mentions(rangeBody, needle), mentions(planBody, needle)], [1, 1]);
+		assert.strictEqual(mentions(SRC, needle), 4, "its definition, the two routes and the alert");
+		assert.deepStrictEqual([mentions(rangeBody, needle), mentions(planBody, needle), mentions(declText("maybeAlertLowFuel"), needle)], [1, 1, 1]);
 		assert.strictEqual(mentions(SRC, "fuelModel.sharedFuelRange("), 1, "one caller of the lib function");
 		assert.strictEqual(mentions(SRC, "fuelModel.planTripFuel("), 1, "the verdict's one caller");
 		assert.ok(!/\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/.test(declText("sharedFuelRangeFor")), "it writes nothing");
