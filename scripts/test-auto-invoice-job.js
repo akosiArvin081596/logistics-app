@@ -3836,6 +3836,8 @@ const HOLD_CASES = {
 		w.now += 1000;
 		const r = await f.call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-0875" } });
 		const atPress = [r.status, claimOf(w, "LD-TEST-0875").changed_fields, Boolean(claimOf(w, "LD-TEST-0875").checked_at)];
+		// The read answers later still: only its start tells it from a read begun after the press.
+		w.now += 1000;
 		open();
 		await ticking;
 		await alertsSent(job);
@@ -3883,6 +3885,8 @@ const HOLD_CASES = {
 			w.now += 1000;
 			noteRemoved(job, removed);
 			dropRow(w, "LD-TEST-0910");
+			// The read answers later still: only its start tells it from a read begun after the note.
+			w.now += 1000;
 			open();
 			await ticking;
 			out.afterStaleRead = [claimOf(w, "LD-TEST-0910").changed_fields, Boolean(claimOf(w, "LD-TEST-0910").removed_in_app_at)];
@@ -4566,6 +4570,10 @@ async function holdSections() {
 			(lib) => HOLD_CASES.heldWhileStopped(lib), (x) => x[2] === false],
 		["the sweep checks a load marked checked during its read", " && !(c.checked_at >= beganAt)) out.changed +=", ") out.changed +=",
 			(lib) => HOLD_CASES.checkedDuringRead(lib), (x) => x.chip === "" && x.alerts === 0],
+		["the sweep's start taken after its read (Mark checked)", "\t\tconst beganAt = iso(nowDate().getTime());\n\t\tconst snap = await snapshot();\n\t\tnoticeSettings(",
+			"\t\tconst snap = await snapshot();\n\t\tconst beganAt = iso(nowDate().getTime());\n\t\tnoticeSettings(", (lib) => HOLD_CASES.checkedDuringRead(lib), (x) => x.chip === "" && x.alerts === 0],
+		["the sweep's start taken after its read (a removal)", "\t\tconst beganAt = iso(nowDate().getTime());\n\t\tconst snap = await snapshot();\n\t\tnoticeSettings(",
+			"\t\tconst snap = await snapshot();\n\t\tconst beganAt = iso(nowDate().getTime());\n\t\tnoticeSettings(", (lib) => HOLD_CASES.removedInApp(lib, "during a read"), (x) => x.chip === "removed"],
 		["Mark checked on an empty read", "\t\t\tif (!snap.byKey.size) return res.status(503)", "\t\t\tif (false) return res.status(503)",
 			(lib) => HOLD_CASES.checkedOnEmptyRead(lib), (x) => x.press[0] === 503 && x.chip === ""],
 		["a removal in the app never noted", "if (c && c.state === \"drafted\" && sendRules.claimSent(c)) noted.push", "if (false) noted.push",

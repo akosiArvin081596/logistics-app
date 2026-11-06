@@ -1649,11 +1649,24 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await until(() => chip(scanLost, "LD-TEST-1506") === "removed", "§15 the scanner's lost delete held");
 		eq(chip(scanLost, "LD-TEST-1506"), "removed", "§15 FAILS ON THE OLD CODE: ...held as removed all the same");
 
-		// Another tab: the job is told nothing.
+		// Another tab (the made-up Sheets answers its reads with Job Tracking's rows): the job is told nothing,
+		// by either route, whether the delete answers or not.
+		const otherTab = {
+			dm: (route, x, id) => route({ params: { rowIndex: String(x.rowOf(id)) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } }),
+			scan: (route, x, id) => route({ body: { sheet: "Carrier Database", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } }),
+		};
 		const other = await sentWorld(["LD-TEST-1507"]);
-		const otherAnswer = await other.rowRoute(DM_HEAD)({ params: { rowIndex: String(other.rowOf("LD-TEST-1507")) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } });
+		const otherSeen = [];
+		for (const [route, head] of [["dm", DM_HEAD], ["scan", SCAN_HEAD]]) {
+			for (const lost of [false, true]) {
+				if (lost) other.rowDeleteFails = { landed: false };
+				const answer = await otherTab[route](other.rowRoute(head), other, "LD-TEST-1507");
+				otherSeen.push([route, lost, answer.status, noted(other, "LD-TEST-1507")]);
+			}
+		}
 		await settle();
-		eq([otherAnswer.status, noted(other, "LD-TEST-1507"), chip(other, "LD-TEST-1507"), other.mails.length], [200, false, "", 0], "§15 a row deleted from another tab: the job is told nothing");
+		eq([otherSeen, chip(other, "LD-TEST-1507"), other.mails.length], [[["dm", false, 200, false], ["dm", true, 500, false], ["scan", false, 200, false], ["scan", true, 500, false]], "", 0],
+			"§15 rows deleted from another tab, by either route, answered or not: the job is told nothing");
 
 		// Each route's call into the job, removed in turn: the case that pins it must change.
 		const callOf = (route) => `if (${route === "dm" ? "sheetName" : "sheet"} === "Job Tracking") autoInvoiceRowsRemoved(headers, ${route === "dm" ? "[row]" : "deletable.map((d) => allRows[d.rowIndex - 1] || [])"});`;
@@ -1682,13 +1695,21 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			}
 			ok(results[0] === "removed" && results[1] === "", `§15 MUTANT ${label}: caught`);
 		}
-		const otherTab = mutantSrc(`${callOf("dm")}\n\n\t\tres.json({ success: true });`, "if (true) autoInvoiceRowsRemoved(headers, [row]);\n\n\t\tres.json({ success: true });");
-		ok(otherTab, "§15 MUTANT another tab's rows reach the job: applied to server.js's text once");
-		if (otherTab) {
+		// Each call's "Job Tracking only", opened in turn: another tab's rows reach the job.
+		for (const [label, route, head, lost, from] of [
+			["the Data Manager's", "dm", DM_HEAD, false, `${callOf("dm")}\n\n\t\tres.json({ success: true });`],
+			["the Data Manager's lost", "dm", DM_HEAD, true, `${callOf("dm")}\n\t\t\tthrow err;`],
+			["the duplicate scanner's", "scan", SCAN_HEAD, false, `${callOf("scan")}\n\n\t\tconst lockedPeriods`],
+			["the duplicate scanner's lost", "scan", SCAN_HEAD, true, `${callOf("scan")}\n\t\t\tthrow err;`],
+		]) {
+			const src = mutantSrc(from, from.replace(/(sheetName|sheet) === "Job Tracking"/, "true"));
+			ok(src, `§15 MUTANT ${label} delete tells the job of another tab's rows: applied to server.js's text once`);
+			if (!src) continue;
 			const x = await sentWorld(["LD-TEST-1509"]);
-			await x.rowRoute(DM_HEAD, otherTab)({ params: { rowIndex: String(x.rowOf("LD-TEST-1509")) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } });
+			if (lost) x.rowDeleteFails = { landed: false };
+			await otherTab[route](x.rowRoute(head, src), x, "LD-TEST-1509");
 			// Read before the check it starts can let the note go (the row is still on the sheet).
-			ok(noted(x, "LD-TEST-1509"), "§15 MUTANT another tab's rows reach the job: caught (the real route tells the job nothing, above)");
+			ok(noted(x, "LD-TEST-1509"), `§15 MUTANT ${label} delete tells the job of another tab's rows: caught (the real routes tell it nothing, above)`);
 		}
 		eq([SRC.split("autoInvoiceRowsRemoved(").length - 1, SRC.split(".rowsRemoved(").length - 1], [5, 1], "§15 FAILS ON THE OLD CODE: one wrapper in the block, two calls in each route, and nothing else reaches the job's note");
 	}
