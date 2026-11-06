@@ -156,6 +156,55 @@ section("§1 the assignment block");
 	eq(refused(() => triumphInvoice.withAssignment(page({ notes: "Payment Method: see below" }), { lines: LINES })), triumphInvoice.NOT_PRINTABLE, "§1 a note naming the bank block: refused");
 	eq(refused(() => triumphInvoice.withAssignment(page({ notes: `Pay ${brokerInvoice.PAYMENT_METHOD.bankName}` }), { lines: LINES })), triumphInvoice.NOT_PRINTABLE, "§1 a note naming the bank: refused");
 	ok(triumphInvoice.withAssignment(page({ notes: "Unload at door 4" }), { lines: LINES }).includes("Unload at door 4"), "§1 any other note prints");
+
+	// Bank details as a person types them, not as the block prints them.
+	const BANK = brokerInvoice.PAYMENT_METHOD;
+	const titleCase = (s) => s.toLowerCase().replace(/\b\p{L}/gu, (c) => c.toUpperCase());
+	const withNumbers = (fn) => {
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			return fn();
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
+	};
+	const onPage = (fields) => withNumbers(() => refused(() => triumphInvoice.withAssignment(page(fields), { lines: LINES })));
+	for (const [label, notes] of [
+		["the bank's name in ordinary case", `Remit to ${titleCase(BANK.bankName)}`],
+		["the bank's name in lower case", `pay ${BANK.bankName.toLowerCase()} please`],
+		["the bank's name across two lines", BANK.bankName.replace(" ", "\n")],
+		["the routing number with hyphens", "routing 000-111-222"],
+		["the routing number with spaces", "routing 000 111 222"],
+		["the routing number with stops", "000.111.222"],
+		["only the account number, with spaces", "333 444 5556"],
+		["only the account number, with hyphens", "acct 333-444-5556"],
+		["the block's address in capitals", `Mail to ${BANK.address.toUpperCase()}`],
+		["the block's address with its stops gone", BANK.address.replace(/[.,#]/g, "")],
+		["\"bank name:\"", "bank name: see below"],
+		["\"BANK ACCOUNT:\"", "BANK ACCOUNT: see below"],
+		["\"Bank account:\"", "Bank account: see below"],
+		["\"bank routing\"", "bank routing: see below"],
+		["\"payment method\"", "payment method: see below"],
+		["all of it at once", `Remit to ${titleCase(BANK.bankName)}, routing 000-111-222, account 333 444 5556`],
+	]) {
+		eq(onPage({ notes }), triumphInvoice.NOT_PRINTABLE, `§1 FAILS ON THE OLD CODE: a note holding ${label}: refused`);
+	}
+	eq(onPage({ poNumber: "000 111 222" }), triumphInvoice.NOT_PRINTABLE, "§1 FAILS ON THE OLD CODE: the routing number typed in another field: refused");
+	eq(onPage({ brokerName: titleCase(BANK.bankName) }), triumphInvoice.NOT_PRINTABLE, "§1 FAILS ON THE OLD CODE: the bank's name typed in another field: refused");
+	for (const [label, fields] of [
+		["a number that's neither", { notes: "ref 000-111-223" }],
+		["part of the account number", { notes: "ref 333 444" }],
+		["a number split across two fields", { poNumber: "000111", orderNumber: "222" }],
+		["a number split across two cells side by side", { deliveryDate: "000-111", total: "$222.00" }],
+		["the word bank alone", { notes: "Closed for the bank holiday" }],
+		["the word account alone", { notes: "Bill to the account on file with the broker" }],
+		["the seller's own name and mail", { notes: `${BANK.name} ${BANK.email}` }],
+	]) {
+		eq(onPage(fields), "no throw", `§1 ${label}: it prints`);
+	}
+	eq(onPage({}), "no throw", "§1 the plain page: its stylesheet's words and its own numbers aren't read as a note's");
 	eq(refused(() => triumphInvoice.withAssignment("<html>no block here</html>", { lines: LINES })), triumphInvoice.NOT_PRINTABLE, "§1 a page with no block to replace: refused");
 	eq(refused(() => triumphInvoice.withAssignment(base.replace('<div class="thanks">', ""), { lines: LINES })), triumphInvoice.NOT_PRINTABLE, "§1 a page where the block's end moved: refused");
 	eq(refused(() => triumphInvoice.withAssignment(base.replace('<div class="payment">', '<div class="payment"></div><div class="payment">'), { lines: LINES })), triumphInvoice.NOT_PRINTABLE, "§1 a page with two blocks: refused");
@@ -288,6 +337,11 @@ async function s4() {
 	eq(await code({ debtorName: "Another Broker LLC" }), "DEBTOR_NAME_NOT_ON_DOC", "§4 the rate con doesn't print the debtor's name");
 	eq(await code({ debtorName: "EXAMPLE BROKER LLC" }), "DEBTOR_NAME_NOT_ON_DOC", "§4 ...in that form");
 	eq(await code({ rateCon: { buffer: await emptyTextPdf(), source: "documents" }, rateConNumber: LOAD }), "RATECON_NUMBER_MISMATCH", "§4 a rate con with no text can't say it's this load's");
+	// It prints the name, and the reader can't see inside it: stopped all the same, for the true reason.
+	const unread = Buffer.from(await (await PDFDocument.load(textPdf(RATECON_TEXT, { mode: "literal" }))).save({ useObjectStreams: true }));
+	eq(shownText(unread), "", "§4 (fixture) the name's reader sees nothing in this rate con");
+	ok(brokerInvoice.extractPdfText(unread).includes(DEBTOR), "§4 (fixture) ...though it prints the name");
+	eq(await code({ rateCon: { buffer: unread, source: "documents" } }), "DEBTOR_NAME_UNREADABLE", "§4 FAILS ON THE OLD CODE: a rate con that prints the name and reads as nothing: stopped, and not for a missing name");
 
 	eq(await code({ rateCon: { buffer: pdfOf(RATECON_TEXT), source: "drive", driveFileName: "LD-TEST-00011 rate con.pdf" } }), "RATECON_NAME_MISMATCH", "§4 the whole-number test: another load's file");
 	eq(await code({ rateConNumber: "LD-TEST-0002" }), "RATECON_NUMBER_MISMATCH", "§4 ...its read gives another number");
@@ -537,7 +591,7 @@ async function s7() {
 	eq((await look("LD-TEST-0002", "two")).refused, "DOCUMENT_UNREADABLE (pod)", "§7 a POD on file with no bytes; either spelling of the load's ID finds its rows");
 	eq((await look("LD-TEST-0003", "three")).refused, "RATECON_NUMBER_MISMATCH", "§7 the whole-number test on the rate con's text");
 	eq((await look("LD-TEST-0004", "four")).refused, "DOCUMENT_MISSING (ratecon)", "§7 no rate con");
-	eq((await look("LD-TEST-0005", "five")).refused, "DEBTOR_NAME_NOT_ON_DOC", "§7 the rate con prints another name");
+	ok(/^DEBTOR_NAME_NOT_ON_DOC: .*the text the app can read/.test(String((await look("LD-TEST-0005", "five")).refused)), "§7 FAILS ON THE OLD CODE: the rate con prints another name: the code, and what it means");
 	eq((await look("LD-TEST-0099", "nine")).refused, "LOAD_NOT_ON_SHEET", "§7 a load the sheet doesn't hold");
 	eq(sha256(fs.readFileSync(dbFile)), dbBefore, "§7 the database file is byte for byte as it was");
 	const withFile = path.join(base, "looks", "file");

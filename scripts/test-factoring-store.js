@@ -358,7 +358,8 @@ function checkButton(S) {
 		c.eq([r.ok, r.http, r.code], [false, 409, "TRIUMPH_NOT_LIVE"], `§5 FAILS ON THE OLD CODE: the lines set, not live, ${label}: 409 TRIUMPH_NOT_LIVE, whoever asks`);
 		c.eq(r.error, S.WORDS.TRIUMPH_NOT_LIVE, `§5 ...in its own words (${label})`);
 	}
-	c.ok(/clear the mark/.test(S.WORDS.TRIUMPH_NOT_LIVE), "§5 ...which name the way out: the clear, then the plain button");
+	c.ok(/whoever manages factored loads can clear the mark/.test(S.WORDS.TRIUMPH_NOT_LIVE), "§5 FAILS ON THE OLD CODE: ...which name the way out and whose it is: the switch may be off");
+	c.ok(!/confirmed|\byet\b|holds nothing/.test(S.WORDS.TRIUMPH_NOT_LIVE), "§5 FAILS ON THE OLD CODE: ...and claim nothing about Triumph that a move back to dry run makes false");
 	for (const v of [undefined, false, "true", "live", 1, {}, null]) {
 		c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: true, live: v }).code, "TRIUMPH_NOT_LIVE", `§5 only a real true says it's live (${JSON.stringify(v)})`);
 	}
@@ -435,6 +436,10 @@ function checkButton(S) {
 	c.eq(begin("ld-test-0040", { confirmed: true, printedAssignment: true }), { ok: true }, "§5 a confirmed draft that printed the lines passes");
 	c.eq(begin("ld-test-0041", { printedAssignment: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: the lines printed and the load no longer factored: refused");
 	c.eq(begin("ld-test-0042", { confirmed: true, printedAssignment: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: ...with the confirmation too, its mark cleared during the render");
+	c.eq(begin("ld-test-0045", { confirmed: true }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: a confirmed draft whose mark cleared before the page was made: refused, since nothing it was confirmed for holds");
+	c.eq(S.inflightRows(db, "ld-test-0045", at(2)).length, 0, "§5 ...with no row");
+	putInflight(db, "ld-test-0046", { invoiceId: "11032026-46" });
+	c.eq(S.draftBeforeN8n(db, { key: "ld-test-0046", invoiceId: "11032026-46", confirmed: true, nowIso: at(3) }).code, "FACTORING_CHANGED", "§5 FAILS ON THE OLD CODE: before n8n, the same");
 	c.eq(begin("ld-test-0041", { invoiceId: "11032026-11" }), { ok: true }, "§5 the plain page on a load that isn't factored passes as ever");
 	c.eq([S.inflightRows(db, "ld-test-0042", at(2)).length], [0], "§5 a load refused for that has no row");
 	putInflight(db, "ld-test-0043", { invoiceId: "11032026-43" });
@@ -720,9 +725,11 @@ const MUTANTS = [
 	["button: anything truthy says it's live", "if (live !== true) return", "if (!live) return", checkButton],
 	["button: live before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\t// Before Triumph is live the lines send the broker to a party holding nothing.\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");",
 		"if (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", checkButton],
-	["button: the words for not live are missing", "\tTRIUMPH_NOT_LIVE: \"This load is factored, and Triumph hasn't confirmed it is live yet, so no draft was made: the invoice would tell the broker to pay Triumph, which holds nothing for it. To invoice the load another way, clear the mark, then draft it as usual.\",\n", "", checkButton],
+	["button: the words for not live are missing", "\tTRIUMPH_NOT_LIVE: \"This load is factored, and the app isn't sending invoices to Triumph right now, so no draft was made. To invoice it the usual way, whoever manages factored loads can clear the mark first.\",\n", "", checkButton],
 	["late check: the bank block on a confirmed factored load passes", "\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n", "", checkButton],
-	["late check: the lines on a load no longer factored pass", "\t} else if (printedAssignment === true) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}", "\t}", checkButton],
+	["late check: nothing refused on a load no longer factored", "\t} else if (printedAssignment === true || confirmed) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}", "\t}", checkButton],
+	["late check: the lines on a load no longer factored pass", "else if (printedAssignment === true || confirmed) {", "else if (confirmed) {", checkButton],
+	["late check: a confirmation with no mark left passes", "else if (printedAssignment === true || confirmed) {", "else if (printedAssignment === true) {", checkButton],
 	["late check: anything truthy says the lines printed", "if (printedAssignment !== true) return", "if (!printedAssignment) return", checkButton],
 	["draftBegin: what printed not passed on", "const r = lateChecks(db, k, { confirmed, reissue, printedAssignment, nowIso });", "const r = lateChecks(db, k, { confirmed, reissue, nowIso });", checkButton],
 	["draftBeforeN8n: what printed not passed on", "const r = lateChecks(db, k, { confirmed, reissue, printedAssignment, nowIso, own: String(invoiceId) });", "const r = lateChecks(db, k, { confirmed, reissue, nowIso, own: String(invoiceId) });", checkButton],
@@ -732,7 +739,7 @@ const MUTANTS = [
 	["button: the confirmation refused only while the claim is working", "if (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
 	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn checked;", "return checked;", checkButton],
-	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n\t} else if (printedAssignment === true) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}",
+	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n\t} else if (printedAssignment === true || confirmed) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}",
 		"if (rowFactored(row) && !confirmed) return refusal(\"LOAD_FACTORED\");", checkButton],
 	["button: a refusal before n8n drops a maybe-drafted row", "keep: Boolean(own && own.state === \"maybe_drafted\")", "keep: false", checkButton],
 	["resolve: an in-flight row resolved early", "if (row.effective !== \"maybe_drafted\") return refusal(\"INVOICE_DRAFT_IN_FLIGHT\");", "", checkResolveAndAnnotate],

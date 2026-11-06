@@ -240,8 +240,14 @@ section("§7 the debtor");
 	ok(!rules.printsDebtorName("", "anything"), "§7 no name prints nowhere");
 	ok(has("Bill to Example Broker, LLC", "Example Broker, LLC"), "§7 a name with a comma, as printed");
 	eq(rules.debtorNameRefusal(NAME, "Example Broker LLC"), null, "§7 no refusal when it's printed");
-	eq(rules.debtorNameRefusal(NAME, "Another Broker LLC"), { ok: false, code: "DEBTOR_NAME_NOT_ON_DOC" }, "§7 DEBTOR_NAME_NOT_ON_DOC when it isn't");
-	eq(rules.debtorNameRefusal(NAME, ""), { ok: false, code: "DEBTOR_NAME_NOT_ON_DOC" }, "§7 ...and when the file reads as nothing");
+	const notOnDoc = rules.debtorNameRefusal(NAME, "Another Broker LLC");
+	eq([notOnDoc.ok, notOnDoc.code], [false, "DEBTOR_NAME_NOT_ON_DOC"], "§7 DEBTOR_NAME_NOT_ON_DOC when the text the app reads doesn't hold it");
+	ok(/wasn't found in the text the app can read/.test(String(notOnDoc.error)), "§7 FAILS ON THE OLD CODE: ...in words that claim no more than that");
+	for (const [label, shown] of [["nothing", ""], ["whitespace", " \n\t "], ["no text at all", undefined]]) {
+		const unread = rules.debtorNameRefusal(NAME, shown);
+		eq([unread.ok, unread.code], [false, "DEBTOR_NAME_UNREADABLE"], `§7 FAILS ON THE OLD CODE: a file that reads as ${label}: its own code, since the name may be on it`);
+		ok(/couldn't be read/.test(String(unread.error)), `§7 FAILS ON THE OLD CODE: ...and words that say the file couldn't be read (${label})`);
+	}
 }
 
 // ---------------------------------------------------------------- §8
@@ -335,7 +341,7 @@ section("§10 the free checks");
 	eq(say({ ...all, drafts: 0, closedMonths: [], hasDeliveryDate: true, activeAdvanceLines: 0, pods: 1 }, { hasLines: false }), "needs_attention BROKER_EMAIL_FREEMAIL", "§10 then the broker");
 	const everyCode = ["LOAD_DROPPED", "NOT_COMPLETED", "ALREADY_INVOICED", "INVOICE_DRAFT_IN_FLIGHT", "INVOICE_MAYBE_DRAFTED", "CLOSED_MONTH", "MONTH_UNKNOWN", "NO_DELIVERY_DATE", "ADVANCE_LINES", "WAITING_POD", "POD_UNREADABLE",
 		"NO_BROKER_EMAIL", "BROKER_EMAIL_FREEMAIL", "BROKER_DOMAIN_UNCONFIRMED", "DEBTOR_UNMAPPED", "NOA_UNCONFIGURED",
-		"FIELD_UNUSABLE", "PO_UNUSABLE", "PROTECTED_VALUE", "DOCUMENT_MISSING", "DOCUMENT_UNREADABLE", "MERGE_FAILED", "BATCH_TOO_LARGE", "DEBTOR_NAME_NOT_ON_DOC", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH"];
+		"FIELD_UNUSABLE", "PO_UNUSABLE", "PROTECTED_VALUE", "DOCUMENT_MISSING", "DOCUMENT_UNREADABLE", "MERGE_FAILED", "BATCH_TOO_LARGE", "DEBTOR_NAME_NOT_ON_DOC", "DEBTOR_NAME_UNREADABLE", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH"];
 	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 every code is on the list, each once");
 }
 

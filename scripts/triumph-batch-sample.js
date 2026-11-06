@@ -203,7 +203,7 @@ async function run(argv, { render, env = process.env, now = () => new Date() } =
 	const batch = args.load
 		? await buildLoadBatch(args, { lines, day, render, at })
 		: await triumphBatch.buildSampleBatch({ lines, day, render, at });
-	if (!batch.ok) throw new Refusal(`${batch.code}${batch.kinds ? ` (${batch.kinds.join(", ")})` : ""}${batch.kind ? ` (${batch.kind})` : ""}${batch.field ? ` (${batch.field})` : ""}`);
+	if (!batch.ok) throw new Refusal(`${batch.code}${batch.kinds ? ` (${batch.kinds.join(", ")})` : ""}${batch.kind ? ` (${batch.kind})` : ""}${batch.field ? ` (${batch.field})` : ""}${batch.error ? `: ${batch.error}` : ""}`);
 	writeBatch(path.resolve(args.out), batch);
 	return {
 		pdfName: batch.pdfName,

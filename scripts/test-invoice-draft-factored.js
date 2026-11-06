@@ -451,6 +451,19 @@ async function s1notLive() {
 		x.putMarker(1);
 		eq((await x.press(1, { body: CONFIRM })).body.code, "TRIUMPH_NOT_LIVE", `§1c ${label}: TRIUMPH_NOT_LIVE`);
 	}
+	// The same words whichever state isn't live, and a way out that says whose it is: the switch may be off.
+	for (const [label, settings] of [
+		["the date set and the mode dry, as a move back after go-live leaves it", { ...LIVE_SET, TRIUMPH_SUBMIT_DRY_RUN: "true" }],
+		["the date set and the mode off", { ...LIVE_SET, TRIUMPH_SUBMIT_ENABLED: "false" }],
+		["no date and the mode dry", DRY_SET],
+	]) {
+		const x = world({ settings });
+		x.putMarker(1);
+		const r = await x.press(1, { body: CONFIRM });
+		eq(r.body && r.body.code, "TRIUMPH_NOT_LIVE", `§1c ${label}: TRIUMPH_NOT_LIVE`);
+		ok(!/confirmed|\byet\b/.test(String(r.body && r.body.error)), `§1c FAILS ON THE OLD CODE: ${label}: the words claim nothing about what Triumph has confirmed`);
+		ok(/whoever manages factored loads can clear the mark/.test(String(r.body && r.body.error)), `§1c FAILS ON THE OLD CODE: ${label}: the way out says whose it is`);
+	}
 	const replica = CUR.routesLib ? CUR.routesLib.readSettings(LIVE_SET, { replica: true }) : {};
 	eq([replica.noaLines, replica.submitMode], [null, "off"], "§1c a replica has no lines and no mode, whatever its settings say");
 
@@ -512,6 +525,30 @@ async function s1live() {
 		noted.putMarker(8);
 		const rn = await noted.press(8, { body: { ...CONFIRM, notes: "Payment Method: see below" } });
 		eq([rn.status, rn.body && rn.body.code, noted.seen.mint, noted.seen.render], [409, "ASSIGNMENT_NOT_PRINTABLE", 0, 0], "§1d a note holding a bank word on a confirmed draft: refused before any number");
+		// As a person types them, through the route: nothing reaches Gmail.
+		const bankName = brokerInvoice.PAYMENT_METHOD.bankName.toLowerCase();
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			for (const [label, notes] of [
+				["the bank's name in ordinary case", `Remit to ${bankName}`],
+				["the routing number with hyphens", "routing 000-111-222"],
+				["only the account number, with spaces", "333 444 5556"],
+			]) {
+				const typed = world({ lines: true });
+				typed.putMarker(8);
+				const r = await typed.press(8, { body: { ...CONFIRM, notes } });
+				eq([r.status, r.body && r.body.code, typed.seen.mint, typed.seen.render, typed.seen.imap.length, typed.drafts(8)], [409, "ASSIGNMENT_NOT_PRINTABLE", 0, 0, 0, []],
+					`§1d FAILS ON THE OLD CODE: ${label} in a note on a confirmed draft: refused, no number, nothing in Gmail`);
+			}
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
+		const inherited = world({ lines: true });
+		inherited.putMarker(14);
+		const rp = await inherited.preview(14, { body: { ...CONFIRM, notes: `Remit to ${bankName}` } });
+		eq([rp.status, rp.body && rp.body.code], [409, "ASSIGNMENT_NOT_PRINTABLE"], "§1d FAILS ON THE OLD CODE: the preview refuses it too");
 	}
 	// What printed has to match the marker at the hand-off, or nothing goes.
 	{
@@ -521,6 +558,22 @@ async function s1live() {
 		const r = await cleared.press(9, { body: CONFIRM });
 		eq([r.status, r.body && r.body.code, cleared.seen.imap.length, cleared.seen.n8n.length], [409, "FACTORING_CHANGED", 0, 0], "§1d FAILS ON THE OLD CODE: the mark cleared during the render of a page that prints the lines: refused, nothing handed off");
 		eq([cleared.drafts(9), cleared.inflight(9), cleared.actions("invoice_number_void").length], [[], [], 1], "§1d ...no draft row, no in-flight row, its number voided");
+
+		// The mark cleared before the page was made: the bank block is right, and "drafted although
+		// factored" would be false in an audit row that can't be corrected. The press is refused.
+		const clearedEarly = world({ n8n: true, lines: true });
+		clearedEarly.putMarker(13);
+		clearedEarly.duringPrepare = () => { clearedEarly.duringPrepare = null; clearedEarly.putMarker(13, { factored: 0 }); };
+		const rc = await clearedEarly.press(13, { body: CONFIRM });
+		eq([rc.status, rc.body && rc.body.code, clearedEarly.seen.imap.length, clearedEarly.seen.n8n.length], [409, "FACTORING_CHANGED", 0, 0], "§1d FAILS ON THE OLD CODE: a confirmed press whose mark clears during the build: refused, nothing handed off");
+		eq([clearedEarly.drafts(13), clearedEarly.inflight(13), clearedEarly.actions("invoice_draft_factored_confirmed"), clearedEarly.actions("invoice_number_void").length], [[], [], [], 1],
+			"§1d FAILS ON THE OLD CODE: ...no draft row, no in-flight row, no \"drafted although factored\", its number voided");
+
+		const overN8n = world({ n8n: true, lines: true });
+		overN8n.putMarker(15);
+		overN8n.imap = ["NO"];
+		const ro = await overN8n.press(15, { body: CONFIRM });
+		eq([ro.status, ro.body && ro.body.via, overN8n.seen.n8n.length], [200, "n8n", 1], "§1d a confirmed draft whose IMAP is refused goes by n8n: the lines printed and the mark stands");
 
 		const remarked = world({ n8n: true, lines: true });
 		remarked.putMarker(10);
