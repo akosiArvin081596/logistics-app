@@ -17,7 +17,8 @@
 //      its own rules for when they do
 //   §6 "Check Gmail" on a maybe-drafted row; the dashboard annotation
 //   §7 the only writer of locked_at in this PR
-//   §10 a Load ID change on a load with a live mark, and a mark cleared since
+//   §10 a Load ID change moves a live mark with the load; what can't move refuses;
+//       the marks cleared, and when
 //   §9 the routes (lib/factoring-routes.js): the marking switch (never in a
 //      replica); only listed accounts, never the shared login; "Handled in
 //      Triumph's process" with every switch off; refusals audited with codes
@@ -193,6 +194,24 @@ function checkMark(S) {
 	c.eq([mark("ld-test-0030", { dryRun: true }).r.code, mark("ld-test-0031", { dryRun: true }).r.code, marker(db, "ld-test-0031")], ["INVOICE_ALREADY_SENT", "INVOICE_ALREADY_SENT", undefined],
 		"§2 ...the dry run gives the same answer, on the draft row and on the job's record alone");
 
+	// The job's message may be in Gmail with no draft row yet, and a person may have sent it from
+	// there: the mark asks first, as it does on a draft row.
+	for (const [n, code, stage] of [[40, "MAYBE_IN_GMAIL", "appending"], [41, "IN_GMAIL_UNRECORDED", "appended"]]) {
+		const k = `ld-test-00${n}`;
+		ledger.insertClaim(db, { key: k, loadId: k.toUpperCase(), state: "needs_attention", code, nowIso: T0 });
+		db.prepare("UPDATE auto_invoice_claims SET stage = ? WHERE load_key = ?").run(stage, k);
+		x = mark(k);
+		c.eq([x.r.ok, x.r.http, x.r.code, x.a, marker(db, k)], [false, 409, "INVOICE_MAYBE_IN_GMAIL", [], undefined], `§2 ${code}: the mark asks first, 409 INVOICE_MAYBE_IN_GMAIL, no row`);
+		c.ok(x.r.error && /may be in Gmail/.test(x.r.error) && x.r.error === S.WORDS.INVOICE_MAYBE_IN_GMAIL, `§2 ...${code}: in its own words`);
+		c.eq([mark(k, { confirmNotSent: true, reason: "  " }).r.code, mark(k, { dryRun: true }).r.code, marker(db, k)], ["INVOICE_MAYBE_IN_GMAIL", "INVOICE_MAYBE_IN_GMAIL", undefined], `§2 ...${code}: "not sent" needs a reason, and the dry run gives the same answer`);
+		x = mark(k, { confirmNotSent: true });
+		c.eq([x.r.ok, marker(db, k) && marker(db, k).factored], [true, 1], `§2 ...${code}: "not sent" with a reason marks it`);
+		c.ok(x.a[0] && x.a[0].details.includes("may be in Gmail, confirmed not sent"), `§2 ...${code}: and the audit row says so`);
+	}
+	// A claim that never reached Gmail asks nothing, and a draft row keeps its own question.
+	ledger.insertClaim(db, { key: "ld-test-0042", loadId: "LD-TEST-0042", state: "needs_attention", code: "TOTAL_MISMATCH", nowIso: T0 });
+	c.eq(mark("ld-test-0042").r.ok, true, "§2 a claim that never reached Gmail: marked with no question");
+
 	putDraft(db, "#LD-TEST-0009", "imap");
 	x = mark("ld-test-0009");
 	c.eq([x.r.code, x.r.drafts], ["INVOICE_ALREADY_DRAFTED", ["11022026-7"]], "§2 any draft row (either spelling): INVOICE_ALREADY_DRAFTED");
@@ -301,6 +320,18 @@ function checkButton(S) {
 	c.eq(early("ld-test-0001", { confirm: yes, mayConfirm: true }), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 ...and a confirmation sent for it carries no weight");
 	putMarker(db, "ld-test-0002");
 	c.eq(early("ld-test-0002").code, "LOAD_FACTORED", "§5 a factored load: LOAD_FACTORED");
+	c.eq(early("ld-test-0002").error, S.WORDS.LOAD_FACTORED, "§5 ...in its usual words, with no draft out");
+	// Where an invoice may already be out, the refusal doesn't say it goes through Triumph.
+	putMarker(db, "ld-test-0030");
+	putDraft(db, "LD-TEST-0030", "auto-imap");
+	putMarker(db, "ld-test-0031");
+	ledger.insertClaim(db, { key: "ld-test-0031", loadId: "LD-TEST-0031", state: "needs_attention", code: "MAYBE_IN_GMAIL", nowIso: T0 });
+	db.prepare("UPDATE auto_invoice_claims SET stage = 'appending' WHERE load_key = 'ld-test-0031'").run();
+	for (const [label, k] of [["a draft row", "ld-test-0030"], ["a draft that may be in Gmail", "ld-test-0031"]]) {
+		const r = early(k);
+		c.eq([r.ok, r.http, r.code], [false, 409, "LOAD_FACTORED"], `§5 a factored load with ${label}: still LOAD_FACTORED`);
+		c.ok(r.error && r.error !== S.WORDS.LOAD_FACTORED && !/through Triumph/.test(r.error) && /Gmail Drafts and Sent Mail/.test(r.error), `§5 ...${label}: its words send a person to Gmail, and don't say it goes through Triumph`);
+	}
 	c.eq(early("ld-test-0002", { confirm: { confirmFactored: "true", reason: "x" }, mayConfirm: true }).code, "LOAD_FACTORED", "§5 only a real true confirms");
 	for (const [label, extra] of [
 		["a listed account", { confirm: yes, mayConfirm: true }],
@@ -406,40 +437,145 @@ function checkResolveAndAnnotate(S) {
 // ------------------------------------------------------------------ §10
 function checkLoadIdChange(S) {
 	const c = checker();
-	if (typeof S.loadIdChangeCheck !== "function" || typeof S.markCleared !== "function") {
-		c.ok(false, "§10 FAILS ON THE OLD CODE: loadIdChangeCheck() and markCleared() exist");
+	if (typeof S.loadIdMoveBegin !== "function" || typeof S.loadIdMoveFinish !== "function" || typeof S.clearedMarks !== "function") {
+		c.ok(false, "§10 FAILS ON THE OLD CODE: loadIdMoveBegin(), loadIdMoveFinish() and clearedMarks() exist");
 		return c;
 	}
 	const db = freshDb(S);
-	const check = (from, to = "LD-TEST-0099") => S.loadIdChangeCheck(db, { from, to });
-	c.eq(check("LD-TEST-0001"), null, "§10 no marker row: the change passes");
-	putMarker(db, "ld-test-0002");
-	const r = check("LD-TEST-0002");
-	c.eq([r && r.ok, r && r.http, r && r.code, r && r.error], [false, 409, "LOAD_ID_FACTORED", S.WORDS.LOAD_ID_FACTORED], "§10 a live mark on the old key: 409 LOAD_ID_FACTORED");
-	c.ok(/clear the mark, change the ID, then mark the load again/.test(S.WORDS.LOAD_ID_FACTORED || ""), "§10 ...saying what to do");
-	c.eq([check("#ld-test-0002 ")?.code, check("ld-test-0002", "")?.code, check("ld-test-0002", null)?.code], ["LOAD_ID_FACTORED", "LOAD_ID_FACTORED", "LOAD_ID_FACTORED"], "§10 ...either spelling of the old ID, and a new ID that's blank");
-	c.eq([check("LD-TEST-0002", "#ld-test-0002"), check("#LD-TEST-0002", " ld-test-0002 ")], [null, null], "§10 a spelling the key ignores: the mark still finds the load, so it passes");
-	c.eq(check("LD-TEST-0099", "LD-TEST-0002"), null, "§10 only the old key is asked: a change onto a marked key fails safe, as factored");
-	c.eq([check(""), check(null)], [null, null], "§10 a row with no ID carries no mark");
+	const audits = auditLog();
+	const begin = (from, to, on = db) => S.loadIdMoveBegin(on, { from, to, nowIso: at(1), audit: audits });
+	const finish = (from, to, begun, stored) => S.loadIdMoveFinish(db, { from, to, held: begun.held, previous: begun.previous, stored, nowIso: at(2), audit: audits });
+	const live = (k) => S.isFactored(db, k);
+	const actions = () => audits.rows.splice(0).map((r) => r.action);
+	const putTheMark = (k) => db.prepare(`INSERT INTO load_factoring (load_key, load_id, factored, source, reason, set_at, set_by, set_by_id, updated_at) VALUES (?, ?, 1, 'person', 'made-up reason', ?, 'made-up-admin', 7, ?)`).run(k, k.toUpperCase(), T0, T0);
+
+	// No mark: nothing is written, and nothing asks to be read back.
+	let b = begin("LD-TEST-0001", "LD-TEST-0099");
+	c.eq([b.ok, b.held, b.previous, marker(db, "ld-test-0099")], [true, "", null, undefined], "§10 no marker row: the change passes, and nothing is held");
+	c.eq(finish("LD-TEST-0001", "LD-TEST-0099", b, "LD-TEST-0099"), { moved: false }, "§10 ...and nothing moves");
+	c.eq([begin("", "LD-TEST-0099").held, begin(null, "LD-TEST-0099").ok, actions()], ["", true, []], "§10 a row with no ID carries no mark; nothing audited");
 	putMarker(db, "ld-test-0003", { factored: 0 });
-	c.eq(check("LD-TEST-0003"), null, "§10 a mark cleared: the change passes");
-	putMarker(db, "ld-test-0004", { locked: T0, via: "outside" });
-	c.eq(check("LD-TEST-0004")?.code, "FACTORING_LOCKED", "§10 a final row: FACTORING_LOCKED");
-	putMarker(db, "ld-test-0005", { factored: 0, locked: T0, via: "outside" });
-	c.eq(check("LD-TEST-0005")?.code, "FACTORING_LOCKED", "§10 ...a final row at 0 too");
+	b = begin("LD-TEST-0003", "LD-TEST-0098");
+	c.eq([b.ok, b.held, marker(db, "ld-test-0098")], [true, "", undefined], "§10 a mark cleared: the change passes");
+
+	// A live mark goes with the load: on the new key before the write, off the old one once the sheet says so.
+	putTheMark("ld-test-0010");
+	b = begin("LD-TEST-0010", "LD-TEST-0110");
+	c.eq([b.ok, b.held, b.previous, live("ld-test-0010"), live("ld-test-0110")], [true, "ld-test-0110", null, true, true], "§10 a live mark, before the write: on both keys, so there is no unmarked moment");
+	const held = marker(db, "ld-test-0110");
+	c.eq([held.source, held.reason, held.set_by, held.set_by_id, held.set_at, held.load_id], ["person", "made-up reason", "made-up-admin", 7, T0, "LD-TEST-0110"], "§10 ...who marked it and why go with it");
+	c.eq(finish("LD-TEST-0010", "LD-TEST-0110", b, "LD-TEST-0110"), { moved: true, to: "ld-test-0110" }, "§10 the sheet holds the new ID: moved");
+	c.eq([live("ld-test-0110"), marker(db, "ld-test-0010")], [true, undefined], "§10 ...the new key is marked and the old row is gone");
+	c.eq(actions(), ["factoring_move_begun", "factoring_moved"], "§10 ...audited at both steps");
+
+	// What the sheet stores decides, not the text sent.
+	putTheMark("ld-test-0011");
+	b = begin("LD-TEST-0011", "00123");
+	c.eq(finish("LD-TEST-0011", "00123", b, "123"), { moved: true, to: "123" }, "§10 the sheet stored another spelling: the mark follows what it holds");
+	c.eq([live("123"), live("00123"), marker(db, "ld-test-0011")], [true, true, undefined], "§10 ...the text sent stays marked, a key no row carries, so a row that moved under the read-back can't lose its mark");
+	actions();
+
+	// A spelling the key ignores holds nothing, until the sheet says otherwise.
+	putTheMark("00456");
+	b = begin("#00456", "00456");
+	c.eq([b.ok, b.held], [true, ""], "§10 a respelling with the same key: nothing to hold");
+	c.eq([finish("#00456", "00456", b, "00456"), live("00456")], [{ moved: false }, true], "§10 ...stored as sent: the mark stays");
+	c.eq([finish("#00456", "00456", b, "456"), live("456"), live("00456")], [{ moved: true, to: "456" }, true, false], "§10 ...stored as another key: the mark follows it");
+	actions();
+
+	// The write didn't land.
+	putTheMark("ld-test-0012");
+	b = begin("LD-TEST-0012", "LD-TEST-0112");
+	c.eq([finish("LD-TEST-0012", "LD-TEST-0112", b, "LD-TEST-0012"), live("ld-test-0012"), marker(db, "ld-test-0112")], [{ moved: false }, true, undefined], "§10 the sheet still holds the old ID: the hold goes, and the mark stays");
+	c.eq(actions(), ["factoring_move_begun", "factoring_move_undone"], "§10 ...audited");
+	putTheMark("ld-test-0013");
+	putMarker(db, "ld-test-0113", { factored: 0 });
+	const before = marker(db, "ld-test-0113");
+	b = begin("LD-TEST-0013", "LD-TEST-0113");
+	c.eq([b.held, b.previous && b.previous.factored, live("ld-test-0113")], ["ld-test-0113", 0, true], "§10 a new key with a cleared row: held over it");
+	finish("LD-TEST-0013", "LD-TEST-0113", b, "LD-TEST-0013");
+	c.eq(marker(db, "ld-test-0113"), before, "§10 ...and an undo puts that row back as it was");
+	actions();
+
+	// It can't be read back: nothing is taken off, so no key reads as not factored.
+	putTheMark("ld-test-0014");
+	b = begin("LD-TEST-0014", "LD-TEST-0114");
+	c.eq([finish("LD-TEST-0014", "LD-TEST-0114", b, undefined), live("ld-test-0014"), live("ld-test-0114")], [{ moved: false, unconfirmed: true }, true, true], "§10 the cell can't be read back: both keys stay marked");
+	c.eq(actions(), ["factoring_move_begun", "factoring_move_unconfirmed"], "§10 ...audited");
+
+	// A mark that landed mid-write is seen by the last look.
+	b = begin("LD-TEST-0015", "LD-TEST-0115");
+	c.eq(b.held, "", "§10 no mark at the start");
+	putTheMark("ld-test-0015");
+	c.eq([finish("LD-TEST-0015", "LD-TEST-0115", b, "LD-TEST-0115"), live("ld-test-0115"), marker(db, "ld-test-0015")], [{ moved: true, to: "ld-test-0115" }, true, undefined], "§10 a mark that landed during the write: moved all the same");
+	b = begin("LD-TEST-0016", "LD-TEST-0116");
+	putTheMark("ld-test-0016");
+	c.eq([finish("LD-TEST-0016", "LD-TEST-0116", b, undefined), live("ld-test-0016"), live("ld-test-0116")], [{ moved: false, unconfirmed: true }, true, true], "§10 ...and with no read-back, on both keys");
+	b = begin("LD-TEST-0017", "LD-TEST-0117");
+	putTheMark("ld-test-0017");
+	c.eq([finish("LD-TEST-0017", "LD-TEST-0117", b, "LD-TEST-0017"), live("ld-test-0017"), marker(db, "ld-test-0117")], [{ moved: false }, true, undefined], "§10 ...and with the write not landed, it stays where it is");
+	// A tap's claim that arrived during the write stays on the old key, so the mark stays there too.
+	putTheMark("ld-test-0018");
+	b = begin("LD-TEST-0018", "LD-TEST-0118");
+	ledger.insertClaim(db, { key: "ld-test-0018", loadId: "LD-TEST-0018", state: "skipped", code: "LOAD_FACTORED", nowIso: T0 });
+	c.eq([finish("LD-TEST-0018", "LD-TEST-0118", b, "LD-TEST-0118"), live("ld-test-0018"), live("ld-test-0118")], [{ moved: true, to: "ld-test-0118" }, true, true], "§10 a claim that arrived during the write: both keys stay marked");
+	actions();
+
+	// What can't move refuses, and nothing is held.
+	const refused = (from, to, label, code = "LOAD_ID_FACTORED", words = S.WORDS.LOAD_ID_FACTORED) => {
+		const r = begin(from, to);
+		c.eq([r.ok, r.http, r.code, r.error, marker(db, S.cleanReason(String(to)).toLowerCase().replace(/^#/, "") || "no-such-key")], [false, 409, code, words, undefined], `§10 ${label}: 409 ${code}, nothing held`);
+	};
+	putTheMark("ld-test-0020");
+	ledger.insertClaim(db, { key: "ld-test-0020", loadId: "LD-TEST-0020", state: "skipped", code: "LOAD_FACTORED", nowIso: T0 });
+	refused("LD-TEST-0020", "LD-TEST-0120", "a job's claim on the old key");
+	refused("LD-TEST-0020", "#ld-test-0020x", "...to any new ID");
+	c.eq(begin("LD-TEST-0020", "#ld-test-0020").code, "LOAD_ID_FACTORED", "§10 ...and a respelling too: the claim can't follow what the sheet stores");
+	for (const [n, spelled] of [[21, "LD-TEST-0021"], [22, "#ld-test-0022"]]) {
+		putTheMark(`ld-test-00${n}`);
+		putDraft(db, spelled, "imap");
+		refused(`LD-TEST-00${n}`, `LD-TEST-01${n}`, `a draft row on the old key, spelled ${spelled}`);
+	}
+	putTheMark("ld-test-0023");
+	putClaim(db, "ld-test-0023", { state: "queued" });
+	refused("LD-TEST-0023", "LD-TEST-0123", "a Triumph claim on the old key");
+	putTheMark("ld-test-0024");
+	putInflight(db, "ld-test-0024", { startedAt: at(0) });
+	refused("LD-TEST-0024", "LD-TEST-0124", "a button draft in flight on the old key");
+	putTheMark("ld-test-0025");
+	refused("LD-TEST-0025", "", "a blanked Load ID", "LOAD_ID_FACTORED", S.WORDS.LOAD_ID_FACTORED_BLANK);
+	refused("LD-TEST-0025", null, "a Load ID sent as nothing", "LOAD_ID_FACTORED", S.WORDS.LOAD_ID_FACTORED_BLANK);
+	c.ok(!/clear the mark/i.test(S.WORDS.LOAD_ID_FACTORED) && /tell whoever manages factored loads/.test(S.WORDS.LOAD_ID_FACTORED), "§10 the refusal doesn't send a person through clearing the mark");
+	putMarker(db, "ld-test-0026", { locked: T0, via: "outside" });
+	refused("LD-TEST-0026", "LD-TEST-0126", "a final row", "FACTORING_LOCKED", S.WORDS.FACTORING_LOCKED);
+	c.eq(begin("LD-TEST-0026", "#ld-test-0026").code, "FACTORING_LOCKED", "§10 ...a respelling too");
+	putMarker(db, "ld-test-0027", { factored: 0, locked: T0, via: "outside" });
+	refused("LD-TEST-0027", "LD-TEST-0127", "a final row at 0", "FACTORING_LOCKED", S.WORDS.FACTORING_LOCKED);
+	putTheMark("ld-test-0028");
+	putMarker(db, "ld-test-0128", { locked: T0, via: "outside" });
+	c.eq(begin("LD-TEST-0028", "LD-TEST-0128").code, "FACTORING_LOCKED", "§10 a new key that's final: refused");
+	putTheMark("ld-test-0029");
+	putTheMark("ld-test-0129");
+	b = begin("LD-TEST-0029", "LD-TEST-0129");
+	c.eq([b.ok, b.held, finish("LD-TEST-0029", "LD-TEST-0129", b, "LD-TEST-0129"), live("ld-test-0129"), marker(db, "ld-test-0029")], [true, "", { moved: true, to: "ld-test-0129" }, true, undefined], "§10 a new key already marked: left alone, and the old row goes");
+	// A database that can't answer, and one with no table.
 	const closed = new Database(":memory:");
 	S.ensureSchema(closed);
 	closed.close();
-	const unread = S.loadIdChangeCheck(closed, { from: "LD-TEST-0001", to: "LD-TEST-0099" });
-	c.eq([unread?.http, unread?.code], [503, "FACTORING_UNREADABLE"], "§10 a marker that can't be read refuses");
-	c.eq(S.loadIdChangeCheck(closed, { from: "LD-TEST-0001", to: "#ld-test-0001" }), null, "§10 ...but a respelling asks it nothing");
-	c.eq(S.loadIdChangeCheck(new Database(":memory:"), { from: "LD-TEST-0001", to: "LD-TEST-0099" }), null, "§10 a database without the table (an old copy) reads as no mark");
-	// markCleared(): a row that says not factored, and isn't final.
-	c.eq([S.markCleared(db, "LD-TEST-0001"), S.markCleared(db, "LD-TEST-0002"), S.markCleared(db, "#ld-test-0003"), S.markCleared(db, "LD-TEST-0004"), S.markCleared(db, "LD-TEST-0005")], [false, false, true, false, false],
-		"§10 markCleared(): no row false, a live mark false, a row at 0 true, a final row false either way");
+	for (const to of ["LD-TEST-0099", "#ld-test-0001"]) {
+		const r = begin("LD-TEST-0001", to, closed);
+		c.eq([r?.ok, r?.http, r?.code], [false, 503, "FACTORING_UNREADABLE"], `§10 a marker that can't be read refuses (${to})`);
+	}
+	c.eq(begin("LD-TEST-0001", "LD-TEST-0099", new Database(":memory:")).ok, true, "§10 a database without the table (an old copy) reads as no mark");
+
+	// The marks cleared, and when.
+	const cleared = S.clearedMarks(db);
+	c.ok(cleared instanceof Map && cleared.get("ld-test-0003") === T0, "§10 clearedMarks(): a row at 0 and when it was set");
+	c.eq([cleared.has("ld-test-0110"), cleared.has("ld-test-0001"), cleared.has("ld-test-0026"), cleared.has("ld-test-0027")], [false, false, false, false], "§10 ...not a live mark, no row, or a final row either way");
+	c.eq(S.clearedMarks(new Database(":memory:")).size, 0, "§10 ...no table: none");
 	let threw = false;
-	try { S.markCleared(closed, "LD-TEST-0001"); } catch { threw = true; }
-	c.ok(threw, "§10 markCleared() on a marker that can't be read throws, never answers");
+	try { S.clearedMarks(closed); } catch { threw = true; }
+	c.ok(threw, "§10 clearedMarks() on a marker that can't be read throws, never answers");
 	return c;
 }
 
@@ -560,15 +696,17 @@ function checkRoutes(routesSrc) {
 	c.eq(seen(ME), [[true, true], [false, true], [true, true], [false, true]], "§9 marking on, a listed account: every row, each with the switch");
 	c.eq(seen(OTHER), [[true, false], null, [true, false], null], "§9 marking on, a Super Admin not listed: the marked load's chip and no switch; nothing on any other");
 	c.eq(seen(SHARED), [[true, false], null, [true, false], null], "§9 marking on, the shared login, even with its id listed: the same");
-	// The row-edit routes' question (server.js), every setting off: a mark is honoured whatever they say.
-	if (typeof off.routes.loadIdChange !== "function") {
-		c.ok(false, "§9 FAILS ON THE OLD CODE: loadIdChange() exists");
+	// The row saves' question (server.js), every setting off: a mark is honoured whatever they say.
+	if (typeof off.routes.loadIdSave !== "function") {
+		c.ok(false, "§9 FAILS ON THE OLD CODE: loadIdSave() exists");
 		return c;
 	}
 	putMarker(off.db, "ld-test-0007");
-	const held = off.routes.loadIdChange("LD-TEST-0007", "LD-TEST-0008");
-	c.eq([held && held.http, held && held.code, held && held.json], [409, "LOAD_ID_FACTORED", { error: REAL.WORDS.LOAD_ID_FACTORED, code: "LOAD_ID_FACTORED" }], "§9 a Load ID change on a marked load, every setting off: refused, as the routes answer it");
-	c.eq([off.routes.loadIdChange("LD-TEST-0008", "LD-TEST-0009"), off.routes.loadIdChange("LD-TEST-0007", "#ld-test-0007")], [null, null], "§9 ...no mark, or the same key: nothing to refuse");
+	putDraft(off.db, "LD-TEST-0007", "imap");
+	const saved = off.routes.loadIdSave({}, { change: { from: "LD-TEST-0007", to: "LD-TEST-0008" }, readCell: async () => ({}) });
+	c.eq([saved.ok, saved.http, saved.code, saved.json], [false, 409, "LOAD_ID_FACTORED", { error: REAL.WORDS.LOAD_ID_FACTORED, code: "LOAD_ID_FACTORED" }], "§9 a marked load with a draft row, every setting off: refused, as the routes answer it");
+	const noMark = off.routes.loadIdSave({}, { change: { from: "LD-TEST-0008", to: "LD-TEST-0009" }, readCell: async () => ({}) });
+	c.eq([noMark.ok, typeof noMark.finish], [true, "function"], "§9 ...no mark: the save goes on, with its finish");
 	return c;
 }
 section("§9  the routes: who may mark, the switch");
@@ -614,18 +752,29 @@ const MUTANTS = [
 	["button: the confirmation refused only while the claim is working", "if (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
 	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn { ok: true, factored, confirmed, reason };", "return { ok: true, factored, confirmed, reason };", checkButton],
-	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return refusal(\"LOAD_FACTORED\");\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t}",
+	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t}",
 		"if (rowFactored(row) && !confirmed) return refusal(\"LOAD_FACTORED\");", checkButton],
 	["button: a refusal before n8n drops a maybe-drafted row", "keep: Boolean(own && own.state === \"maybe_drafted\")", "keep: false", checkButton],
 	["resolve: an in-flight row resolved early", "if (row.effective !== \"maybe_drafted\") return refusal(\"INVOICE_DRAFT_IN_FLIGHT\");", "", checkResolveAndAnnotate],
 	["annotate: every row gets _factoring", "if (m || all) {", "if (true) {", checkResolveAndAnnotate],
-	["Load ID: a live mark doesn't hold it", "return rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\") : null;", "return null;", checkLoadIdChange],
-	["Load ID: a final row doesn't hold it", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\")", "return rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\")", checkLoadIdChange],
-	["Load ID: a respelling refused too", "if (!k || k === keyOf(to)) return null;", "if (!k) return null;", checkLoadIdChange],
-	["Load ID: a marker that can't be read passes", "\t\trow = markerFor(db, k);\n\t} catch {\n\t\treturn refusal(\"FACTORING_UNREADABLE\");\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored",
-		"\t\trow = markerFor(db, k);\n\t} catch {\n\t\treturn null;\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored", checkLoadIdChange],
-	["markCleared: a final row counts as cleared", "return Boolean(row) && !rowFactored(row) && !rowLocked(row);", "return Boolean(row) && !rowFactored(row);", checkLoadIdChange],
-	["markCleared: no row counts as cleared", "return Boolean(row) && !rowFactored(row) && !rowLocked(row);", "return !rowFactored(row) && !rowLocked(row);", checkLoadIdChange],
+	["mark: a may-be claim asks nothing", "if (mayBeInGmail && !(confirmNotSent === true && why)) return refusal(\"INVOICE_MAYBE_IN_GMAIL\");", "", checkMark],
+	["mark: 'not sent' on a may-be claim needs no reason", "if (mayBeInGmail && !(confirmNotSent === true && why))", "if (mayBeInGmail && !(confirmNotSent === true))", checkMark],
+	["button: the refusal's words ignore a draft that may be out", "if (!confirm || confirm.confirmFactored !== true) return factoredRefusal(db, k);", "if (!confirm || confirm.confirmFactored !== true) return refusal(\"LOAD_FACTORED\");", checkButton],
+	["move: a live mark isn't held on the new key", "\t\t\tcopyMarker(db, next, to, row, nowIso);\n\t\t\taudit(\"factoring_move_begun\"", "\t\t\taudit(\"factoring_move_begun\"", checkLoadIdChange],
+	["move: a final row can move", "\t\t\tconst row = markerFor(db, k);\n\t\t\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\t\t\tif (!rowFactored(row)) return { ok: true, held: \"\", previous: null };",
+		"\t\t\tconst row = markerFor(db, k);\n\t\t\tif (!rowFactored(row)) return { ok: true, held: \"\", previous: null };", checkLoadIdChange],
+	["move: a final new key can be written", "\t\t\tif (rowLocked(target)) return refusal(\"FACTORING_LOCKED\");\n", "", checkLoadIdChange],
+	["move: records on the old key don't refuse", "\t\t\tif (recordsOnKey(db, k, nowIso)) return refusal(\"LOAD_ID_FACTORED\");\n", "", checkLoadIdChange],
+	["move: a blanked ID isn't refused", "\t\t\tif (!next) return refusal(\"LOAD_ID_FACTORED\", { error: WORDS.LOAD_ID_FACTORED_BLANK });\n", "", checkLoadIdChange],
+	["move: a marker that can't be read passes", "\t} catch {\n\t\treturn refusal(\"FACTORING_UNREADABLE\");\n\t}\n}\n\n// After the write", "\t} catch {\n\t\treturn { ok: true, held: \"\", previous: null };\n\t}\n}\n\n// After the write", checkLoadIdChange],
+	["move: the old row left behind", "\t\tif (live && !recordsOnKey(db, k, nowIso)) db.prepare(`DELETE FROM ${FACTORING} WHERE load_key = ?`).run(k);\n", "", checkLoadIdChange],
+	["move: the old row goes though a claim arrived", "if (live && !recordsOnKey(db, k, nowIso)) db.prepare", "if (live) db.prepare", checkLoadIdChange],
+	["move: the sent text trusted over what the sheet holds", "\t\tconst target = holds;\n", "\t\tconst target = next;\n", checkLoadIdChange],
+	["move: a mark that landed mid-write isn't seen", "\t\tconst live = rowFactored(row) && !rowLocked(row);\n", "\t\tconst live = Boolean(held) && rowFactored(row) && !rowLocked(row);\n", checkLoadIdChange],
+	["move: an unread cell clears the old key", "\t\tif (stored === undefined) {", "\t\tif (false) {", checkLoadIdChange],
+	["move: a write that didn't land keeps the hold", "\t\tif (holds === k) {\n\t\t\tundoHold(db, held, previous, nowIso);", "\t\tif (holds === k) {", checkLoadIdChange],
+	["move: an undo drops the row it covered", "\tif (previous) {\n", "\tif (false) {\n", checkLoadIdChange],
+	["clearedMarks: a final row counts", " WHERE factored = 0 AND locked_at = ''", " WHERE factored = 0", checkLoadIdChange],
 ];
 let caught = 0;
 for (const [name, from, to, group] of MUTANTS) {

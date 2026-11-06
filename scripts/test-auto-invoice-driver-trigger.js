@@ -24,7 +24,8 @@
 //   §13 going back (R-M5): the sweep's first tick after the trigger sends nothing
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip, and its own sentence for a mark cleared after the
-//       run stopped on it; a job's draft on a marked load, through Try again too
+//       run stopped on it, with the trigger on or off; a job's draft on a marked load, through
+//       Try again too, and once its mark is cleared; a mark that moved with a Load ID
 //   §16 the rules on their own, and the send's commit reaching the disk
 //   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
 //       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
@@ -1773,30 +1774,97 @@ async function main() {
 		w.seed("LD-TEST-1426", { state: "baseline" });
 		putMarker("LD-TEST-1426", 0);
 		eq(served(job, ["LD-TEST-1426"]), [null], "§15 a baseline claim, its mark cleared: no chip");
-		// The trigger off: the sweep owns the load, as it did.
+		// The trigger off: a closed claim on a load no longer factored gets the same chip, and nothing else.
 		const off = makeWorld();
 		factoring.ensureSchema(off.db);
+		off.meta("baseline_at", iso(T0 - 24 * HOUR));
 		off.seed("LD-TEST-1427", { state: "skipped", reason_code: "LOAD_FACTORED" });
 		off.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-1427', 'LD-TEST-1427', 0, 'person', ?, ?)").run(iso(off.now), iso(off.now));
-		eq(served(off.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } }), ["LD-TEST-1427"]), [null], "§15 the trigger off: as today");
+		const offJob = off.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		eq(served(offJob, ["LD-TEST-1427"]), [{ state: "needs_attention", code: "FACTORED_MARK_CLEARED", invoiceId: "", changed: [], trigger: true, retry: "none" }], "§15 FAILS ON THE OLD CODE: the trigger off: a mark cleared after the run stopped on it has the same chip");
+		off.seed("LD-TEST-1428", { state: "skipped", reason_code: "LOAD_FACTORED" });
+		eq(served(offJob, ["LD-TEST-1428"]), [null], "§15 ...skipped LOAD_FACTORED with no marker row: nothing, as before");
+		off.setRow("LD-TEST-1429", { "Job Status": "Delivered" });
+		eq(served(offJob, ["LD-TEST-1429"]), [null], "§15 ...and no claim at all: nothing, as before, since the sweep finds it");
 	}
 	{
-		// A claim that may be in Gmail takes a mark with no prompt, and Try again records the draft. The
-		// row as the dashboard serves it says not to send it, before Try again and after.
+		// The same end to end, the sweep's way: marked, ticked, cleared, ticked again.
+		const w = makeWorld();
+		factoring.ensureSchema(w.db);
+		w.meta("baseline_at", iso(T0 - 24 * HOUR));
+		const ID = "LD-TEST-1435";
+		const person = { reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) };
+		w.ready(ID, { "Job Status": "Delivered" });
+		factoring.mark(w.db, { key: rules.loadKey(ID), loadId: ID, ...person });
+		const job = w.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } });
+		await job.tick();
+		eq([w.state(ID), served(job, [ID])], [["skipped", "LOAD_FACTORED"], [null]], "§15 the trigger off, marked: the sweep skips it, with no chip");
+		factoring.clear(w.db, { key: rules.loadKey(ID), loadId: ID, ...person });
+		await job.tick();
+		eq([w.state(ID), w.smtp.length, w.appends.length, w.calls.mint], [["skipped", "LOAD_FACTORED"], 0, 0, 0], "§15 ...cleared and ticked again: the claim stays closed, and nothing goes");
+		eq((served(job, [ID])[0] || {}).code, "FACTORED_MARK_CLEARED", "§15 FAILS ON THE OLD CODE: ...and the row says so");
+	}
+	{
+		// A job's draft whose mark was cleared since: it may have been deleted as the chip said.
+		const ID = "LD-TEST-1436";
+		const billing = "billing@example-other.test";
+		const w = makeWorld();
+		const job = await w.started();
+		factoring.ensureSchema(w.db);
+		const person = () => ({ key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
+		w.ready(ID, { Email: OTHER }, billing);
+		tap(w, job, ID);
+		await drained(w, "§15 a job's draft");
+		const number = w.claim(ID).invoice_id;
+		const plain = { state: "drafted", code: "", invoiceId: number, changed: [], trigger: true };
+		eq(served(job, [ID]), [plain], "§15 a job's draft with no mark: as before");
+		w.now += MIN;
+		factoring.mark(w.db, { ...person(), confirmNotSent: true });
+		eq(served(job, [ID]), [plain], "§15 ...marked: the server's status as before; the client words it");
+		w.now += MIN;
+		factoring.clear(w.db, person());
+		eq(served(job, [ID]), [{ ...plain, markCleared: true }], "§15 FAILS ON THE OLD CODE: ...its mark cleared since: the row says so, as a code");
+		w.now += MIN;
+		factoring.mark(w.db, { ...person(), confirmNotSent: true });
+		eq(served(job, [ID]), [plain], "§15 ...marked again: as a marked draft");
+		w.now += MIN;
+		factoring.clear(w.db, person());
+		w.handDraft(ID, "10202026-99");
+		eq(served(job, [ID]), [null], "§15 FAILS ON THE OLD CODE: ...and a person's own draft since takes over: no chip keeps the old number");
+		// A mark cleared before the job's draft was made says nothing about that draft.
+		const early = makeWorld();
+		const earlyJob = await early.started();
+		factoring.ensureSchema(early.db);
+		early.ready(ID, { Email: OTHER }, billing);
+		factoring.mark(early.db, { key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(early.now) });
+		factoring.clear(early.db, { key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(early.now) });
+		early.now += MIN;
+		tap(early, earlyJob, ID);
+		await drained(early, "§15 cleared before the draft");
+		eq([early.state(ID), served(earlyJob, [ID])], [["drafted", ""], [{ state: "drafted", code: "", invoiceId: early.claim(ID).invoice_id, changed: [], trigger: true }]], "§15 a mark cleared before the job's draft: an ordinary draft");
+	}
+	{
+		// A claim that may be in Gmail asks before it takes a mark, and Try again then records the draft.
+		// The row as the dashboard serves it says not to send it, before Try again and after, and
+		// doesn't say it goes through Triumph, in Drafts or sent from there.
 		const client = await import(pathToFileURL(path.join(ROOT, "client", "src", "lib", "autoInvoiceStatus.js")).href);
 		const rowChip = (row) => (client.autoInvoiceRowChip ? client.autoInvoiceRowChip(row) : client.autoInvoiceChip(row._autoInvoice));
 		const LABEL = "Factored: don't send the draft, delete it";
-		for (const [n, code, stage] of [[1430, "MAYBE_IN_GMAIL", "appending"], [1431, "IN_GMAIL_UNRECORDED", "appended"]]) {
+		for (const [n, code, stage, box] of [[1430, "MAYBE_IN_GMAIL", "appending", "gmail"], [1431, "IN_GMAIL_UNRECORDED", "appended", "gmail"], [1432, "MAYBE_IN_GMAIL", "appending", "sent"]]) {
 			const ID = `LD-TEST-${n}`;
+			const where = box === "sent" ? ", a person sent it from Gmail" : "";
 			const billing = "billing@example-other.test";
 			const w = makeWorld();
 			const job = await w.started();
 			w.ready(ID, { Email: OTHER, "Job Status": "Delivered" }, billing);
 			const messageId = `<made-up-${n}@example.com>`;
-			w.gmail.push(messageId);
+			w[box].push(messageId);
 			w.seed(ID, { state: "needs_attention", reason_code: code, stage, delivery: "", invoice_id: `10202026-${n}`, invoice_date: "2026-10-20", reserved_at: iso(T0 - MIN), message_id: messageId, sent_json: JSON.stringify({ to: billing, subject: `Example Broker Order #${ID}`, total: "$1,000.00" }) });
 			factoring.ensureSchema(w.db);
-			const marked = factoring.mark(w.db, { key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
+			const by = { key: rules.loadKey(ID), loadId: ID, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) };
+			const asked = factoring.mark(w.db, by);
+			eq([asked.ok, asked.code, factoring.isFactored(w.db, ID)], [false, "INVOICE_MAYBE_IN_GMAIL", false], `§15 FAILS ON THE OLD CODE: ${code}${where}: the mark asks first`);
+			const marked = factoring.mark(w.db, { ...by, confirmNotSent: true });
 			const asServed = () => {
 				const rows = [{ "Load ID": ID, "Job Status": "Delivered", Email: OTHER, "Completion Date": "10/20/2026 9:00:00" }];
 				job.annotateCompletedRows({ rows, headers: HEADERS, isSuperAdmin: true });
@@ -1804,14 +1872,31 @@ async function main() {
 				return rows[0];
 			};
 			const before = rowChip(asServed());
-			eq([marked.ok, before.label, /Don't send the invoice draft/.test(before.reason)], [true, LABEL, true], `§15 FAILS ON THE OLD CODE: ${code}, marked: the row says not to send it`);
+			eq([marked.ok, before.label, /Don't send the invoice draft/.test(before.reason), /through Triumph/.test(before.reason)], [true, LABEL, true, false], `§15 FAILS ON THE OLD CODE: ${code}${where}, marked: the row says not to send it, and not that it goes through Triumph`);
 			await tryAgain(job, ID);
-			await drained(w, `§15 ${code}, Try again`);
+			await drained(w, `§15 ${code}${where}, Try again`);
 			const after = asServed();
-			eq([w.state(ID), after._autoInvoice.state, w.smtp.length, w.appends.length], [["drafted", ""], "drafted", 0, 0], `§15 ${code}, marked, Try again: the draft found in Gmail is recorded, nothing sent or appended`);
-			eq(rowChip(after), { label: LABEL, tone: "bad", reason: `Don't send invoice 10202026-${n}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.` },
-				`§15 FAILS ON THE OLD CODE: ${code}, marked, Try again: the row doesn't say to send it`);
+			eq([w.state(ID), after._autoInvoice.state, w.smtp.length, w.appends.length], [["drafted", ""], "drafted", 0, 0], `§15 ${code}${where}, marked, Try again: what's found in Gmail is recorded, nothing sent or appended`);
+			eq(rowChip(after), { label: LABEL, tone: "bad", reason: `Don't send invoice 10202026-${n}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.` },
+				`§15 FAILS ON THE OLD CODE: ${code}${where}, marked, Try again: the row doesn't say to send it, and says what to do if it already went`);
 		}
+	}
+	if (!factoring.loadIdMoveBegin) {
+		ok(false, "§15 FAILS ON THE OLD CODE: a mark can move with a Load ID");
+	} else {
+		// A mark that moved with a Load ID is still honoured: the driver's tap on the new ID stops on it.
+		const w = makeWorld();
+		const job = await w.started();
+		factoring.ensureSchema(w.db);
+		const OLD = "LD-TEST-1440";
+		const NEW = "LD-TEST-1441";
+		w.ready(NEW);
+		factoring.mark(w.db, { key: rules.loadKey(OLD), loadId: OLD, reason: "made-up reason", source: "person", actor: { id: 7, username: "made-up-admin" }, nowIso: iso(w.now) });
+		const begun = factoring.loadIdMoveBegin(w.db, { from: OLD, to: NEW, nowIso: iso(w.now) });
+		factoring.loadIdMoveFinish(w.db, { from: OLD, to: NEW, held: begun.held, previous: begun.previous, stored: NEW, nowIso: iso(w.now) });
+		tap(w, job, NEW);
+		await drained(w, "§15 a mark that moved");
+		eq([w.state(NEW), w.smtp.length, w.appends.length, w.calls.mint, factoring.isFactored(w.db, OLD)], [["skipped", "LOAD_FACTORED"], 0, 0, 0, false], "§15 a mark that moved with the Load ID: the tap on the new ID stops on it, with no email or number");
 	}
 
 	section("§16 the module's own rules");

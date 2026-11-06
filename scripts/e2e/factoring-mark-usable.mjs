@@ -20,12 +20,20 @@
 //   D   a job's Gmail draft: "Check it and send it" until a listed account marks the load (the switch
 //       asks once); then the dialog and the row chip say not to send it and to delete it, on the
 //       server's own answer after a reload and for a Super Admin not listed too
-//   T   a draft that may be in Gmail, each of the two codes: marked with no prompt, the row says not to
-//       send it; Try again finds the draft and records it, and the row still says so; nothing is
-//       sent or appended
+//   D2  a job's draft, marked, then cleared: no green "Draft ready" but a chip of its own that says
+//       to check Gmail Drafts; a person's own draft since: no chip keeps the old number
+//   T   a draft that may be in Gmail, each of the two codes: the mark asks first, and a no leaves it
+//       unmarked; a yes marks it, and nothing says it goes through Triumph; the row says not to send
+//       it; Try again finds the draft and records it, and the row still says so; nothing is sent or
+//       appended
 //   C   marked, tapped, cleared: no chip while marked; once cleared, on a reload, "No automatic
 //       invoice" with its own sentence and no Try again; the claim stays closed, nothing is sent, and
 //       the Draft Invoice button passes the check, so a person can draft it
+//   C2  the same with the driver's trigger off, the sweep's way: the same chip
+//   M   a marked load's Load ID changes (the lines the row saves add around their write; the routes as
+//       shipped are in scripts/test-row-save-cell-writes.js): the mark goes with it, the chip shows on
+//       the new ID and the tap stops on it; a dialog left open on the old ID can't mark that key; a
+//       job's record on the old key refuses the change
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
 //       asked no mail host and opened no socket off this machine
 //
@@ -139,20 +147,29 @@ const WORDS = {
   line: "Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here.",
   notFactored: 'Not factored.',
   chip: 'Factored (Triumph). The invoice goes through Triumph, not by email. The Draft Invoice button refuses it.',
+  chipOut: 'Factored (Triumph). The app sends no invoice for it by email, and the Draft Invoice button refuses it.',
   marked: 'Marked factored: its invoice goes through Triumph.',
+  markedAsked: 'Marked factored. If a draft is in Gmail Drafts, delete it.',
   refused: 'This load is factored: its invoice goes through Triumph, not by email.',
+  refusedOut: 'This load is factored, so no invoice can be drafted here. One may already be in Gmail, so check Gmail Drafts and Sent Mail.',
+  askMaybe: 'An invoice draft for this load may be in Gmail, or may already have been sent from there. Was it NOT sent to the broker? If you confirm, delete any draft in Gmail.',
+  refusedMaybe: 'An invoice draft for this load may be in Gmail, or may already have been sent from there. If it was not sent, confirm that with a reason, then delete any draft in Gmail.',
+  notOnSheet: 'No row on Job Tracking holds this Load ID now, so nothing was changed. Reload the page and open the load again.',
+  hasRecords: "This load is marked factored and already has invoice records under this Load ID, so the ID can't be changed here. Leave it as it is and tell whoever manages factored loads.",
   noa: "This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.",
   notListed: 'Only the accounts listed for factoring may do this.',
   draftReady: { label: 'Draft ready in Gmail', tone: 'ok', reason: (id) => `Invoice ${id} is in Gmail Drafts. Check it and send it.` },
-  dontSend: { label: "Factored: don't send the draft, delete it", tone: 'bad', reason: (what) => `Don't send ${what}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.` },
+  dontSend: { label: "Factored: don't send the draft, delete it", tone: 'bad', reason: (what) => `Don't send ${what}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.` },
   cleared: { label: 'No automatic invoice', tone: 'warn', reason: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
+  clearedDraft: { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." },
   clearedDone: 'No longer factored. If it is already delivered, draft its invoice by hand.',
   retrySearch: 'Try again looks in Gmail first for what may already have gone. Continue?',
   oldSend: 'Check it and send it',
 }
 
 // One made-up server's worth of state: the factoring routes with the settings given, and the job.
-async function freshServer(env) {
+// `trigger` false: the driver's Delivered starts nothing, and the sweep finds the loads.
+async function freshServer(env, { trigger = true } = {}) {
   const db = new Database(':memory:')
   store.ensureSchema(db)
   db.exec(`
@@ -192,7 +209,7 @@ async function freshServer(env) {
   ledger.writeSettings(db, { optOutDomains: [], confirmedBrokerDomains: [DRAFT_DOMAIN, SEND_DOMAIN] }, { by: LISTED.username, nowIso: new Date().toISOString() })
   s.job = jobLib.create({
     db,
-    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false' },
+    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false', ...(trigger ? {} : { AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: 'false' }) },
     readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
     closedMonthsOf: () => [],
     dayKeyOf: (cell) => {
@@ -250,6 +267,8 @@ async function freshServer(env) {
   // The loads above are from before the switch: the first start-up leaves them to people.
   s.job.startTrigger()
   await s.job.finishStartUp()
+  // With the trigger off, the first sweep does.
+  if (!trigger) await s.job.tick()
   // The lines PUT /api/driver/status adds around its write.
   s.tap = (id) => {
     const row = s.rows.find((r) => r['Load ID'] === id)
@@ -271,7 +290,17 @@ async function freshServer(env) {
     env,
     logAudit: (req, action, entity, id, details) => s.audits.push({ action, id, details: String(details || ''), by: req.session.user.username }),
     logAuditRefusal: (req, action, entity, id, details, code) => s.refusals.push({ action, id, code, by: req.session.user.username }),
+    readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
   })
+  // The lines PUT /api/data/:rowIndex adds around its write: the row as the sheet then holds it.
+  s.saveLoadId = async (from, to) => {
+    const row = s.rows.find((r) => r['Load ID'] === from)
+    const save = s.routes.loadIdSave({ session: { user: LISTED } }, { change: { from, to }, readCell: async () => ({ data: { values: [[row['Load ID']]] } }) })
+    if (!save.ok) return save
+    row['Load ID'] = to
+    await save.finish()
+    return save
+  }
   s.routes.mount({ post: (p, ...chain) => { s.mounted[p] = chain } }, {
     requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: 'FORBIDDEN' })),
     refuseCrossSite: (req, res, next) => next(),
@@ -710,13 +739,15 @@ async function draftRun(browser) {
 
     // A draft exists, so the switch asks once before marking.
     const marked = await markInDialog(page, dialogs, { answer: { accept: true } })
+    const answer = marked ? await locText(page.locator('.fact-result--ok')) : ''
+    const factText = await locText(page.locator('.fact-text'))
     const want = WORDS.dontSend.reason(`invoice ${number}`)
     const line = await dialogLineOf(page)
     const inDialog = await dialogText(page)
     const lineFile = await shot(page, 'D-dialog')
-    record('D-dialog', 'Marked: the dialog says not to send it and to delete it', `one question; the line "${WORDS.dontSend.label}. ${want}", red; "${WORDS.oldSend}" nowhere in the dialog`,
-      `marked ${marked}, questions ${dialogs.seen.length}, line ${JSON.stringify(line)}, old words shown ${inDialog.includes(WORDS.oldSend)}`,
-      marked && dialogs.seen.length === 1 && lineIs(line, WORDS.dontSend, want) && !inDialog.includes(WORDS.oldSend), lineFile)
+    record('D-dialog', 'Marked: the dialog says not to send it and to delete it', `one question; "${WORDS.markedAsked}"; "${WORDS.chipOut}"; the line "${WORDS.dontSend.label}. ${want}", red; "${WORDS.oldSend}" nowhere in the dialog`,
+      `marked ${marked}, questions ${dialogs.seen.length}, answer "${answer}", text "${factText}", line ${JSON.stringify(line)}, old words shown ${inDialog.includes(WORDS.oldSend)}`,
+      marked && dialogs.seen.length === 1 && answer === WORDS.markedAsked && factText === WORDS.chipOut && lineIs(line, WORDS.dontSend, want) && !inDialog.includes(WORDS.oldSend), lineFile)
     await closeLoad(page)
 
     await reloadCompleted(page)
@@ -745,6 +776,49 @@ async function draftRun(browser) {
   }
 }
 
+// ---------------------------------------------------------------- D2: a job's draft, marked, cleared
+async function clearedDraftRun(browser) {
+  const ID = 'QA-FACT-9102'
+  const s = await freshServer(SETTINGS_ON)
+  s.addLoad(ID, 'At Receiver')
+  s.tap(ID)
+  const drafted = await until(() => (s.claim(ID) || {}).state === 'drafted')
+  const first = await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(ID) }, { factored: true, reason: REASON, loadId: ID, confirmNotSent: true })
+  const { ctx, page } = await openPage(browser, s, LISTED)
+  try {
+    await openTab(page, 'Completed')
+    const opened = await openLoad(page, ID)
+    if (!opened) {
+      record('D2-open', 'Completed Loads opens the marked draft', 'the load dialog', `drafted ${drafted}, marked ${first.status}, opened ${opened}`, false)
+      return
+    }
+    await page.locator('.fact-reason').fill(REASON)
+    await page.locator('.fact-btn', { hasText: 'Clear factored' }).click({ timeout: 5000 })
+    const shown = await appears(page, '.fact-result--ok', 8000)
+    await closeLoad(page)
+    await reloadCompleted(page)
+    const reopened = await openLoad(page, ID)
+    const chip = await rowChipOf(page, ID)
+    const line = reopened ? await dialogLineOf(page) : {}
+    const inDialog = reopened ? await dialogText(page) : ''
+    const file = await shot(page, 'D2-cleared')
+    record('D2-cleared', 'Cleared: no green "Draft ready", and a chip of its own', `row chip and dialog "${WORDS.clearedDraft.label}", amber: "${WORDS.clearedDraft.reason}"; no button on the line; "${WORDS.draftReady.label}" nowhere; the claim stays drafted`,
+      `cleared ${shown}, row ${JSON.stringify(chip)}, dialog ${JSON.stringify(line)}, old label shown ${inDialog.includes(WORDS.draftReady.label)}, claim ${(s.claim(ID) || {}).state}`,
+      shown && chipIs(chip, WORDS.clearedDraft, WORDS.clearedDraft.reason) && lineIs(line, WORDS.clearedDraft, WORDS.clearedDraft.reason) && line.buttons.length === 0 && !inDialog.includes(WORDS.draftReady.label) && (s.claim(ID) || {}).state === 'drafted', file)
+    if (reopened) await closeLoad(page)
+
+    s.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', ?)").run(ID, `${TM}${TD}${TY}-9102`, BILLING, LISTED.username)
+    await reloadCompleted(page)
+    const again = await openLoad(page, ID)
+    const handChip = await rowChipOf(page, ID)
+    const handLine = again ? await dialogLineOf(page) : {}
+    record('D2-hand', 'A person\'s own draft since: no chip keeps the old number', 'no row chip, no dialog line', `row ${JSON.stringify(handChip)}, dialog ${JSON.stringify(handLine)}`, again && handChip.count === 0 && handLine.count === 0)
+  } finally {
+    await ctx.close()
+    s.db.close()
+  }
+}
+
 // ---------------------------------------------------------------- T: may be in Gmail, then Try again
 async function tryAgainRun(browser) {
   for (const [n, code, stage] of [[9201, 'MAYBE_IN_GMAIL', 'appending'], [9202, 'IN_GMAIL_UNRECORDED', 'appended']]) {
@@ -765,14 +839,27 @@ async function tryAgainRun(browser) {
         record(`${tag}-open`, 'Completed Loads opens the load', 'the load dialog', `opened ${opened}`, false)
         continue
       }
-      const marked = await markInDialog(page, dialogs)
-      const noPrompt = dialogs.seen.length === 0
+      // It may already have been sent from Gmail, so the mark asks first.
+      await page.locator('.fact-reason').fill(REASON)
+      dialogs.plan.push({ accept: false })
+      await page.locator('.fact-btn', { hasText: 'Factor with Triumph' }).click({ timeout: 5000 })
+      const refusedShown = await appears(page, '.fact-result--error', 8000)
+      const refusedWords = refusedShown ? await locText(page.locator('.fact-result--error')) : ''
+      record(`${tag}-asked`, `${code}: the mark asks first, and a no leaves the load unmarked`, `one question, "${WORDS.askMaybe}"; "${WORDS.refusedMaybe}"; no row`,
+        `questions ${JSON.stringify(dialogs.seen)}, answer "${refusedWords}", row ${JSON.stringify(s.marker(ID))}`,
+        dialogs.seen.length === 1 && dialogs.seen[0] === WORDS.askMaybe && refusedWords === WORDS.refusedMaybe && s.marker(ID) === null)
+
+      const marked = await markInDialog(page, dialogs, { answer: { accept: true } })
+      const answer = marked ? await locText(page.locator('.fact-result--ok')) : ''
+      const factText = await locText(page.locator('.fact-text'))
       const shownFirst = WORDS.dontSend.reason('the invoice draft')
       const line = await dialogLineOf(page)
+      const press = await postFromPage(page, draftUrl(ID, true), {})
       const lineFile = await shot(page, `${tag}-marked`)
-      record(`${tag}-marked`, `${code}, marked with no question: the dialog says not to send it`, `no question; the line opens "${WORDS.dontSend.label}. ${shownFirst}"; Try again still offered`,
-        `marked ${marked}, questions ${dialogs.seen.length}, line "${line.text}", buttons ${JSON.stringify(line.buttons)}`,
-        marked && noPrompt && line.tone === WORDS.dontSend.tone && line.text.startsWith(`${WORDS.dontSend.label}. ${shownFirst}`) && line.buttons.includes('Try again'), lineFile)
+      record(`${tag}-marked`, `${code}, a yes marks it: the dialog says not to send it, and nothing says it goes through Triumph`, `a second question, the same; "${WORDS.markedAsked}"; "${WORDS.chipOut}"; the line opens "${WORDS.dontSend.label}. ${shownFirst}"; Try again still offered; a press answers "${WORDS.refusedOut}"`,
+        `marked ${marked}, questions ${dialogs.seen.length}, answer "${answer}", text "${factText}", line "${line.text}", buttons ${JSON.stringify(line.buttons)}, press ${press.status} "${press.body.error}"`,
+        marked && dialogs.seen.length === 2 && dialogs.seen[1] === WORDS.askMaybe && answer === WORDS.markedAsked && factText === WORDS.chipOut && line.tone === WORDS.dontSend.tone && line.text.startsWith(`${WORDS.dontSend.label}. ${shownFirst}`) && line.buttons.includes('Try again')
+          && press.status === 409 && press.body.error === WORDS.refusedOut, lineFile)
 
       dialogs.plan.push({ accept: true })
       await page.locator(`${DIALOG} .auto-line button`, { hasText: 'Try again' }).click({ timeout: 5000 })
@@ -841,6 +928,95 @@ async function clearedRun(browser) {
   }
 }
 
+// ---------------------------------------------------------------- C2: the same, the sweep's way
+async function clearedSweepRun(browser) {
+  const ID = 'QA-FACT-9302'
+  const s = await freshServer(SETTINGS_ON, { trigger: false })
+  s.addLoad(ID, 'Delivered')
+  await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(ID) }, { factored: true, reason: REASON, loadId: ID })
+  await s.job.tick()
+  const before = s.claim(ID) || {}
+  const stopped = before.state === 'skipped' && before.reason_code === 'LOAD_FACTORED'
+  await s.call('/api/factoring/loads/:loadKey', LISTED, { loadKey: rules.loadKey(ID) }, { factored: false, reason: REASON, loadId: ID })
+  await s.job.tick()
+  const { ctx, page } = await openPage(browser, s, LISTED)
+  try {
+    await openTab(page, 'Completed')
+    const opened = await openLoad(page, ID)
+    const chip = await rowChipOf(page, ID)
+    const line = opened ? await dialogLineOf(page) : {}
+    const claim = s.claim(ID) || {}
+    const file = await shot(page, 'C2-sweep')
+    record('C2-sweep', 'The driver\'s trigger off: the same chip, and the claim stays closed', `the sweep skips it while marked; row chip and dialog "${WORDS.cleared.label}", with no button on the line; another sweep changes nothing; no append, no SMTP`,
+      `stopped ${stopped}, row ${JSON.stringify(chip)}, dialog ${JSON.stringify(line)}, claim ${claim.state} ${claim.reason_code}, appends ${s.appends.length}, SMTP ${s.smtp.length}`,
+      stopped && chipIs(chip, WORDS.cleared, WORDS.cleared.reason) && lineIs(line, WORDS.cleared, WORDS.cleared.reason) && line.buttons.length === 0 && claim.state === 'skipped' && claim.reason_code === 'LOAD_FACTORED' && s.appends.length === 0 && s.smtp.length === 0, file)
+  } finally {
+    await ctx.close()
+    s.db.close()
+  }
+}
+
+// ---------------------------------------------------------------- M: a marked load's Load ID changes
+async function movedRun(browser) {
+  const OLD = 'QA-FACT-9401'
+  const NEW = 'QA-FACT-9402'
+  const OPEN_OLD = 'QA-FACT-9403'
+  const OPEN_NEW = 'QA-FACT-9404'
+  const KEPT = 'QA-FACT-9405'
+  const s = await freshServer(SETTINGS_ON)
+  for (const id of [OLD, OPEN_OLD, KEPT]) s.addLoad(id, 'In Transit')
+  const markRoute = '/api/factoring/loads/:loadKey'
+  await s.call(markRoute, LISTED, { loadKey: rules.loadKey(OLD) }, { factored: true, reason: REASON, loadId: OLD })
+
+  s.audits.length = 0
+  const saved = await s.saveLoadId(OLD, NEW)
+  const moved = s.marker(NEW)
+  record('M-moved', 'The ID changes, and the mark goes with it', 'saved; the new ID marked by the same account with the same reason; no row on the old ID; both steps audited',
+    `saved ${saved.ok}, new ${JSON.stringify(moved)}, old ${JSON.stringify(s.marker(OLD))}, audits ${JSON.stringify(s.audits.map((a) => a.action))}`,
+    saved.ok === true && !!moved && moved.factored === 1 && moved.reason === REASON && moved.set_by === LISTED.username && s.marker(OLD) === null
+      && s.audits.map((a) => a.action).join() === 'factoring_move_begun,factoring_moved')
+
+  const { ctx, page } = await openPage(browser, s, LISTED)
+  try {
+    await openTab(page, 'Active Loads')
+    const opened = await openLoad(page, NEW)
+    const shows = opened ? await controlsOf(page) : {}
+    const file = await shot(page, 'M-new-id')
+    record('M-chip', 'The new ID shows the chip', `"${WORDS.chip}"`, `opened ${opened}, text "${shows.text}"`, opened && shows.text === WORDS.chip, file)
+    if (opened) await closeLoad(page)
+
+    // A dialog left open while the ID changes elsewhere.
+    const openedOld = await openLoad(page, OPEN_OLD)
+    if (!openedOld) {
+      record('M-stale', 'A dialog left open on the old ID', 'the load dialog', `opened ${openedOld}`, false)
+    } else {
+      await s.saveLoadId(OPEN_OLD, OPEN_NEW)
+      await page.locator('.fact-reason').fill(REASON)
+      await page.locator('.fact-btn', { hasText: 'Factor with Triumph' }).click({ timeout: 5000 })
+      const shown = await appears(page, '.fact-result--error', 8000)
+      const words = shown ? await locText(page.locator('.fact-result--error')) : ''
+      const staleFile = await shot(page, 'M-stale')
+      record('M-stale', 'A dialog left open on the old ID can\'t mark that key', `"${WORDS.notOnSheet}"; no row on either ID`,
+        `answer "${words}", old ${JSON.stringify(s.marker(OPEN_OLD))}, new ${JSON.stringify(s.marker(OPEN_NEW))}`, words === WORDS.notOnSheet && s.marker(OPEN_OLD) === null && s.marker(OPEN_NEW) === null, staleFile)
+    }
+  } finally {
+    await ctx.close()
+  }
+
+  s.tap(NEW)
+  const stopped = await until(() => { const c = s.claim(NEW); return Boolean(c && c.state === 'skipped' && c.reason_code === 'LOAD_FACTORED') })
+  record('M-tap', 'The tap on the new ID stops on the mark', 'skipped LOAD_FACTORED; no append, no SMTP', `stopped ${stopped}, appends ${s.appends.length}, SMTP ${s.smtp.length}`, stopped && s.appends.length === 0 && s.smtp.length === 0)
+
+  await s.call(markRoute, LISTED, { loadKey: rules.loadKey(KEPT) }, { factored: true, reason: REASON, loadId: KEPT })
+  s.seedClaim(KEPT, { state: 'skipped', reason_code: 'LOAD_FACTORED' })
+  const refused = await s.saveLoadId(KEPT, 'QA-FACT-9406')
+  const row = s.rows.find((r) => r['Load ID'] === KEPT)
+  record('M-refused', 'A job\'s record on the old key refuses the change', `409 LOAD_ID_FACTORED, "${WORDS.hasRecords}"; the row and the mark as they were`,
+    `${refused.http} ${refused.code}, "${(refused.json || {}).error}", row ${row ? 'kept' : 'changed'}, mark ${JSON.stringify(s.marker(KEPT))}, new ${JSON.stringify(s.marker('QA-FACT-9406'))}`,
+    refused.http === 409 && refused.code === 'LOAD_ID_FACTORED' && (refused.json || {}).error === WORDS.hasRecords && !!row && !!s.marker(KEPT) && s.marker('QA-FACT-9406') === null)
+  s.db.close()
+}
+
 // ---------------------------------------------------------------- G: nothing left this machine
 function wireStep() {
   const hosts = [...offHost].sort()
@@ -860,7 +1036,7 @@ async function main() {
   console.log(`factoring-mark-usable: serving ${DIST} on ${BASE} (made-up data; no server.js, no mailbox)`)
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
   try {
-    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun], ['D', draftRun], ['T', tryAgainRun], ['C', clearedRun]]) {
+    for (const [name, run] of [['F', listedRun], ['N', notListedRun], ['O', settingsUnsetRun], ['D', draftRun], ['D2', clearedDraftRun], ['T', tryAgainRun], ['C', clearedRun], ['C2', clearedSweepRun], ['M', movedRun]]) {
       try {
         await run(browser)
       } catch (e) {

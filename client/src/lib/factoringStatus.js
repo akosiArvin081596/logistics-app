@@ -7,7 +7,9 @@
 
 // The chip for a row's `_factoring`: { label, tone, reason }, or null when the
 // load isn't factored. Tones as autoInvoiceStatus.js's: ok, warn, bad, muted.
-export function factoringChip(f) {
+// `draftMayBeOut`: an invoice may already be in Gmail, or sent from there, so the
+// line doesn't say where the invoice goes.
+export function factoringChip(f, { draftMayBeOut = false } = {}) {
   if (!f || typeof f !== 'object' || f.factored !== true) return null
   if (f.locked === true) {
     return {
@@ -18,8 +20,22 @@ export function factoringChip(f) {
         : 'Handed to Triumph. The app never invoices this load again.',
     }
   }
-  return { label: 'Factored (Triumph)', tone: 'warn', reason: 'The invoice goes through Triumph, not by email. The Draft Invoice button refuses it.' }
+  return {
+    label: 'Factored (Triumph)',
+    tone: 'warn',
+    reason: draftMayBeOut
+      ? 'The app sends no invoice for it by email, and the Draft Invoice button refuses it.'
+      : 'The invoice goes through Triumph, not by email. The Draft Invoice button refuses it.',
+  }
 }
+
+// What a person is asked before a mark the server refused because an invoice draft exists, or
+// may: "" for any other refusal.
+const NOT_SENT_QUESTIONS = Object.freeze({
+  INVOICE_ALREADY_DRAFTED: 'An invoice draft already exists for this load. Was it NOT sent to the broker? If you confirm, delete that draft in Gmail.',
+  INVOICE_MAYBE_IN_GMAIL: 'An invoice draft for this load may be in Gmail, or may already have been sent from there. Was it NOT sent to the broker? If you confirm, delete any draft in Gmail.',
+})
+export const notSentQuestion = (code) => (typeof code === 'string' && Object.hasOwn(NOT_SENT_QUESTIONS, code) ? NOT_SENT_QUESTIONS[code] : '')
 
 // May this account switch the load's factoring (the server says so: a listed
 // account, marking on, the row not locked)?

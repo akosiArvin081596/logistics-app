@@ -62,12 +62,14 @@
 //      judged as sent rather than as stored, a cell sent back as read judged.
 //      Each must fail §5's behaviour checks.
 //   §7 A LOAD ID CHANGE ON A MARKED LOAD. The factoring mark goes by the Load ID's
-//      text (lib/factoring-store.js), so both saves refuse it for both roles, 409
-//      LOAD_ID_FACTORED, nothing written, the refusal audited. A spelling the mark's
-//      key ignores, another cell, a cleared mark or no mark save as before; a final
-//      row and a marker that can't be read refuse too. The factoring module is the
-//      shipped one, over an in-memory database.
-//   §8 MUTANTS of §7: either save without the refusal.
+//      text (lib/factoring-store.js), so both saves move it with the ID, for both
+//      roles, and follow what the sheet stored. A mark that lands during the save is
+//      moved, or refused if it comes through the route; a mark on a key no row holds
+//      any more is refused. What can't move refuses, 409, nothing written: a job's
+//      claim or a draft row on the old key, a blanked ID, a final row. A marker that
+//      can't be read refuses. No mark: as before, with no extra read. The factoring
+//      module is the shipped one, over an in-memory database.
+//   §8 MUTANTS of §7: either save without the move, or without its last look.
 //
 // No network, no sheet, no database file.
 //   node scripts/test-row-save-cell-writes.js     # exits 1 on any failure
@@ -183,17 +185,43 @@ const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpe
 const Database = require(path.join(__dirname, "..", "node_modules", "better-sqlite3"));
 const factoringStore = require("../lib/factoring-store");
 const factoringRoutesLib = require("../lib/factoring-routes");
-function factoringWorld() {
+const autoInvoiceLedger = require("../lib/auto-invoice-ledger");
+// `marking`: the switch on, account 7 listed, so its routes can be pressed. `readJobTracking`:
+// what the routes read the sheet through.
+function factoringWorld({ marking = false, readJobTracking = null } = {}) {
 	const db = new Database(":memory:");
 	factoringStore.ensureSchema(db);
-	const by = { source: "person", reason: "made-up reason", actor: { id: 7, username: "made-up-admin" }, nowIso: "2026-11-03T15:00:00.000Z" };
+	autoInvoiceLedger.ensureSchema(db);
+	db.exec("CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, via TEXT)");
+	const NOW = "2026-11-03T15:00:00.000Z";
+	const by = { source: "person", reason: "made-up reason", actor: { id: 7, username: "made-up-admin" }, nowIso: NOW };
+	const audits = [];
+	const routes = factoringRoutesLib.create({
+		db,
+		env: marking ? { TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7" } : {},
+		logAudit: (req, action) => audits.push(action),
+		...(readJobTracking ? { readJobTracking } : {}),
+	});
+	const mounted = {};
+	routes.mount({ post: (p, ...chain) => { mounted[p] = chain[chain.length - 1]; } }, { requireRole: () => () => {} });
 	return {
 		db,
-		routes: factoringRoutesLib.create({ db, env: {} }),
+		routes,
+		audits,
 		mark: (id) => factoringStore.mark(db, { key: id, loadId: id, ...by }),
 		clear: (id) => factoringStore.clear(db, { key: id, loadId: id, ...by }),
 		handledOutside: (id) => factoringStore.handledOutside(db, { key: id, ...by }),
 		isFactored: (id) => factoringStore.isFactored(db, id),
+		row: (id) => factoringStore.markerFor(db, id) || undefined,
+		claim: (id) => autoInvoiceLedger.insertClaim(db, { key: id, loadId: id, state: "skipped", code: "LOAD_FACTORED", nowIso: NOW }),
+		draft: (id) => db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via) VALUES (?, 'made-up-1', 'imap')").run(id),
+		// The switch, as a listed account presses it.
+		press: async (loadKey, factored = true) => {
+			const out = { status: 200, body: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.body = b; return res; } };
+			await mounted["/api/factoring/loads/:loadKey"]({ params: { loadKey }, body: { factored, reason: "made-up reason" }, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } }, res);
+			return out;
+		},
 	};
 }
 const NO_MARKS = factoringWorld().routes;
@@ -290,15 +318,32 @@ function shown(row) {
 	return out;
 }
 const DISPLAYED = () => HEADERS.map((h, i) => display(storedRow()[i]));
-function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) {
+// `numbersLikeASheet`: a write USER_ENTERED turns all digits into a number, as a real sheet does
+// in a plain-format column. `writeFails`: "refused" (nothing landed) or "landed" (it landed, and
+// the answer was lost). `readCellFails`: one cell can't be read. `hooks`: what lands during a read
+// or a write, set on the sheet once it's made.
+function fakeSheet(stored, { batchGetFails = false, allowUpdate = false, numbersLikeASheet = false, writeFails = "", readCellFails = false } = {}) {
 	const rows = stored.map((r) => r.slice());
 	const calls = [];
+	const hooks = {};
+	const cellReads = [];
 	const rowNo = (range) => { const m = /!(\d+):\1$/.exec(range); return m ? Number(m[1]) : null; };
 	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 	const values = {
 		get: async ({ range }) => {
 			const n = rowNo(range);
-			if (n) return { data: { values: [shown(rows[n - 1])] } };
+			if (n) {
+				if (hooks.duringRowRead) await hooks.duringRowRead();
+				return { data: { values: [shown(rows[n - 1])] } };
+			}
+			// One cell ("…!B2"), as a save reads its Load ID back.
+			const cell = /!([A-Z]+)(\d+)$/.exec(range);
+			if (cell) {
+				cellReads.push(range);
+				if (readCellFails) throw new Error("fake sheet: cell read failed");
+				const v = display((rows[Number(cell[2]) - 1] || [])[colIndex(cell[1])]);
+				return { data: v === "" ? {} : { values: [[v]] } };
+			}
 			// A whole column ("…!B:B"), as the DUPLICATE_LOAD check reads it: one
 			// row per sheet row, an empty cell as [], trailing empty rows dropped.
 			const col = /!([A-Z]+):\1$/.exec(range);
@@ -317,6 +362,8 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) 
 		batchUpdate: async ({ requestBody }) => {
 			const { valueInputOption, data } = requestBody;
 			calls.push({ verb: "batchUpdate", valueInputOption, ranges: data.map((d) => d.range), values: data.map((d) => d.values) });
+			if (hooks.duringWrite) await hooks.duringWrite();
+			if (writeFails === "refused") throw new Error("fake sheet: write refused");
 			let cells = 0;
 			for (const d of data) {
 				const m = /!([A-Z]+)(\d+)$/.exec(d.range);
@@ -325,10 +372,12 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) 
 				d.values[0].forEach((v, j) => {
 					const i = colIndex(m[1]) + j;
 					while (r.length <= i) r.push("");
-					r[i] = v == null ? "" : String(v);
+					const text = v == null ? "" : String(v);
+					r[i] = numbersLikeASheet && /^\s*\d+\s*$/.test(text) ? String(Number(text)) : text;
 				});
 				cells += d.values[0].length;
 			}
+			if (writeFails === "landed") throw new Error("fake sheet: the answer was lost");
 			return { data: { totalUpdatedCells: cells } };
 		},
 		// One cell, as POST /api/dispatch/cancel writes; only a sheet made for it
@@ -346,13 +395,13 @@ function fakeSheet(stored, { batchGetFails = false, allowUpdate = false } = {}) 
 			return { data: { updatedCells: 1 } };
 		},
 	};
-	return { getSheets: async () => ({ spreadsheets: { values } }), rows, calls };
+	return { getSheets: async () => ({ spreadsheets: { values } }), rows, calls, hooks, cellReads };
 }
 
 // One lifted route over one fake sheet (`sheet`: one already made, shared by
 // several routes). `cancelGuard` is ROW_EDITOR_CANCEL_GUARD_ENABLED, off as on
-// a server that does not set it.
-function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false, cancelGuard = false, sheet: shared = null, factoring = NO_MARKS } = {}) {
+// a server that does not set it. `blocker`: what the stubbed period guard answers.
+function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Tracking", batchGetFails = false, cancelGuard = false, sheet: shared = null, factoring = NO_MARKS, blocker = null } = {}) {
 	const sheet = shared || fakeSheet(stored, { batchGetFails });
 	const audits = [];
 	// What the stubbed Owner ID check and period guard were asked to judge: the
@@ -386,7 +435,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		},
 		sheetRowUpdateBlocker: (g, hs, before, after, changes) => {
 			guardCalls.push(changes.map((c) => [c.column, c.from, c.to]));
-			return null;
+			return blocker;
 		},
 		sheetAuditWithCode: (d, code) => `${d} [${code}]`,
 		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
@@ -1352,66 +1401,153 @@ function cancelWiringSection(helpers) {
 // ---------------------------------------------------------------------------
 async function factoredSection(helpers, { dataSrc = DATA_PUT_SRC, loadSrc = LOAD_PUT_SRC } = {}) {
 	const { results, t } = collector();
-	const REFUSED = "This load is marked factored, and the mark goes by its Load ID, so the Load ID can't be changed while it's marked. Whoever manages factored loads can clear the mark, change the ID, then mark the load again.";
+	const HAS_RECORDS = "This load is marked factored and already has invoice records under this Load ID, so the ID can't be changed here. Leave it as it is and tell whoever manages factored loads.";
+	const BLANK = "This load is marked factored, and the mark goes by its Load ID, so the Load ID can't be left blank. Type the right ID.";
+	const CHANGING = "This load's ID is being changed right now, so nothing was changed here. Reload the page and open the load again.";
+	const NOT_ON_SHEET = "No row on Job Tracking holds this Load ID now, so nothing was changed. Reload the page and open the load again.";
+	const SHEET_UNREAD = "Job Tracking couldn't be read to check this load, so nothing was changed. Try again in a minute.";
+	const SAVES = ["PUT /api/data/:rowIndex", "PUT /api/load/:loadId"];
 	// What each save sends for one edited cell, as its caller sends it: a Dispatcher's
 	// editor opens the row with the broker cells blank, and sends its baseline.
-	const data = (role, col, value) => {
-		const opened = DISPLAYED().map((v, i) => (role !== "Super Admin" && WITHHELD.includes(HEADERS[i]) ? "" : v));
+	const bodyFor = (route, role, col, value, row) => {
+		if (route !== SAVES[0]) return { [col]: value };
+		const opened = HEADERS.map((h, i) => (role !== "Super Admin" && WITHHELD.includes(h) ? "" : display(row[i])));
 		const values = opened.slice();
 		values[IDX[col]] = value;
 		return { values, baseline: opened };
 	};
-	const SAVES = [
-		["PUT /api/data/:rowIndex", dataSrc, { rowIndex: "2" }, data],
-		["PUT /api/load/:loadId", loadSrc, { loadId: "111" }, (role, col, value) => ({ [col]: value })],
-	];
-	const save = async (route, role, col, value, prepare = () => {}) => {
-		const [, src, params, body] = SAVES.find(([name]) => name === route);
-		const f = factoringWorld();
+	// `world`: the factoring world to use, else a fresh one with the settings off. `land`: what
+	// lands during the save, given the sheet and the world.
+	const save = async (route, role, col, value, { prepare = () => {}, stored = STORED(), sheetOptions = {}, blocker = null, world = null, land = null } = {}) => {
+		const f = world || factoringWorld();
 		prepare(f);
-		const app = mount(src, helpers, STORED(), { factoring: f.routes });
-		return { app, f, r: await app.run(role, params, body(role, col, value)) };
+		const sheet = fakeSheet(stored, sheetOptions);
+		if (land) land(sheet, f);
+		const app = mount(route === SAVES[0] ? dataSrc : loadSrc, helpers, stored, { factoring: f.routes, sheet, blocker });
+		const params = route === SAVES[0] ? { rowIndex: "2" } : { loadId: display(stored[1][IDX["Load ID"]]) };
+		return { app, f, sheet, r: await app.run(role, params, bodyFor(route, role, col, value, stored[1])) };
 	};
-	for (const [route] of SAVES) {
+	const codeOf = (r) => (r.body || {}).code;
+	const ranges = (app) => app.calls.map((c) => c.ranges);
+	const cellOf = (app) => app.rows[1][IDX["Load ID"]];
+	const NUMBER_ID = (id) => [HEADERS.slice(), storedRow({ "Load ID": id })];
+	for (const route of SAVES) {
+		// The mark goes with the ID, whoever saves it, every setting off.
 		for (const role of ["Super Admin", "Dispatcher"]) {
-			const { app, f, r } = await save(route, role, "Load ID", "333", (w) => w.mark("111"));
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}, a marked load's Load ID: 409 LOAD_ID_FACTORED, saying what to do`,
-				[r.code, (r.body || {}).code, (r.body || {}).error], [409, "LOAD_ID_FACTORED", REFUSED]);
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...nothing written`, [app.calls.length, app.rows], [0, STORED()]);
-			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...the refusal audited, once, by its code`,
-				app.audits.map((a) => [a.action, a.code, a.entityId]), [["update_sheet_row_blocked", "LOAD_ID_FACTORED", "Job Tracking!2"]]);
-			t(`§7 ${role}, ${route}: ...and the mark is where it was`, [f.isFactored("111"), f.isFactored("333")], [true, false]);
+			const { app, f, sheet, r } = await save(route, role, "Load ID", "333", { prepare: (w) => w.mark("111") });
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: a marked load's Load ID changes, and the mark goes with it`,
+				[r.code, ranges(app), cellOf(app), f.isFactored("333"), f.isFactored("111")], [200, [[R("B2")]], "333", true, false]);
+			const moved = f.row("333") || {};
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...who marked it and why go with it, and the old row is gone`,
+				[moved.reason, moved.set_by, moved.source, moved.load_id, f.row("111")], ["made-up reason", "made-up-admin", "person", "333", undefined]);
+			t(`§7 FAILS ON THE OLD CODE: ${role}, ${route}: ...the cell read back once, both steps audited, with the save's own line`,
+				[sheet.cellReads, f.audits, app.audits.map((a) => a.action)], [[R("B2")], ["factoring_move_begun", "factoring_moved"], ["update_sheet_row"]]);
 		}
-		// Blanking the ID leaves the mark behind just the same.
-		const blank = await save(route, "Super Admin", "Load ID", "", (w) => w.mark("111"));
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked load's Load ID blanked: refused`, [blank.r.code, (blank.r.body || {}).code, blank.app.calls.length], [409, "LOAD_ID_FACTORED", 0]);
-		// A spelling the mark's key ignores: the mark still finds the load.
-		const spelled = await save(route, "Super Admin", "Load ID", "#111", (w) => w.mark("111"));
-		t(`§7 ${route}, a marked load's Load ID respelled "#111": the same key, saved`, [spelled.r.code, spelled.app.calls.map((c) => c.ranges), spelled.f.isFactored("#111")], [200, [[R("B2")]], true]);
+		// What can't move refuses, and says what to do.
+		for (const [label, prepare] of [
+			["a job's claim on the old key", (w) => { w.mark("111"); w.claim("111"); }],
+			["a draft row on the old key", (w) => { w.mark("111"); w.draft("111"); }],
+			["a draft row, the other spelling", (w) => { w.mark("111"); w.draft("#111"); }],
+		]) {
+			const { app, f, r } = await save(route, "Super Admin", "Load ID", "333", { prepare });
+			t(`§7 FAILS ON THE OLD CODE: ${route}, marked, ${label}: 409 LOAD_ID_FACTORED, saying what to do`, [r.code, codeOf(r), (r.body || {}).error], [409, "LOAD_ID_FACTORED", HAS_RECORDS]);
+			t(`§7 ${route}, marked, ${label}: ...nothing written, nothing held, the mark where it was, the refusal audited by its code`,
+				[app.calls.length, app.rows, f.isFactored("111"), f.row("333"), app.audits.map((a) => [a.action, a.code, a.entityId])],
+				[0, STORED(), true, undefined, [["update_sheet_row_blocked", "LOAD_ID_FACTORED", "Job Tracking!2"]]]);
+		}
+		const respelledWithClaim = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => { w.mark("111"); w.claim("111"); } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a respelling with a claim on the key: refused too, since the claim can't follow what the sheet stores`, [respelledWithClaim.r.code, codeOf(respelledWithClaim.r), respelledWithClaim.app.calls.length], [409, "LOAD_ID_FACTORED", 0]);
+		const blank = await save(route, "Super Admin", "Load ID", "", { prepare: (w) => w.mark("111") });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked load's Load ID blanked: refused, in its own words`, [blank.r.code, codeOf(blank.r), (blank.r.body || {}).error, blank.app.calls.length], [409, "LOAD_ID_FACTORED", BLANK, 0]);
+		const final = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => { w.mark("111"); w.handledOutside("111"); } });
+		t(`§7 ${route}, a load handled in Triumph's process: 409 FACTORING_LOCKED, nothing written`, [final.r.code, codeOf(final.r), final.app.calls.length], [409, "FACTORING_LOCKED", 0]);
+		const finalSpelled = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => { w.mark("111"); w.handledOutside("111"); } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, ...a respelling too`, [finalSpelled.r.code, codeOf(finalSpelled.r), finalSpelled.app.calls.length], [409, "FACTORING_LOCKED", 0]);
+		const unread = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.db.close() });
+		t(`§7 ${route}, a marker that can't be read: 503 FACTORING_UNREADABLE, nothing written`, [unread.r.code, codeOf(unread.r), unread.app.calls.length], [503, "FACTORING_UNREADABLE", 0]);
+		const unreadOther = await save(route, "Super Admin", "Details", "Frozen - 2 pallets rolled", { prepare: (w) => w.db.close() });
+		t(`§7 ${route}, ...and no other cell asks the marker: saved`, [unreadOther.r.code, ranges(unreadOther.app)], [200, [[R("C2")]]]);
+		// The other refusals answer first, with nothing held.
+		const taken = await save(route, "Super Admin", "Load ID", "222", { prepare: (w) => w.mark("111") });
+		t(`§7 ${route}, a marked load's Load ID onto a taken one: refused by the collision, nothing written or held`, [taken.r.code, codeOf(taken.r), taken.app.calls.length, taken.f.isFactored("222"), taken.f.isFactored("111")], [409, "DUPLICATE_LOAD", 0, false, true]);
+		const closed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), blocker: { error: "made-up", code: "PERIOD_FINALIZED", periods: [] } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a marked row in a closed month: the period guard's own refusal, nothing written or held`, [closed.r.code, codeOf(closed.r), closed.app.calls.length, closed.f.row("333"), closed.f.isFactored("111")], [409, "PERIOD_FINALIZED", 0, undefined, true]);
+
+		// What the sheet stores decides, not the text sent.
+		const spelled = await save(route, "Super Admin", "Load ID", "#111", { prepare: (w) => w.mark("111") });
+		t(`§7 ${route}, a respelling the key ignores, stored as sent: saved, and the mark stays`, [spelled.r.code, ranges(spelled.app), spelled.f.isFactored("#111"), spelled.f.audits], [200, [[R("B2")]], true, []]);
+		const stripped = await save(route, "Super Admin", "Load ID", "00123", { prepare: (w) => w.mark("#00123"), stored: NUMBER_ID("#00123"), sheetOptions: { numbersLikeASheet: true } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, "#00123" saved as "00123", stored as 123: the mark follows what the sheet stored`, [stripped.r.code, cellOf(stripped.app), stripped.f.isFactored("123"), stripped.f.isFactored("00123")], [200, "123", true, false]);
+		const held = await save(route, "Super Admin", "Load ID", "000123", { prepare: (w) => w.mark("00123"), stored: NUMBER_ID("00123"), sheetOptions: { numbersLikeASheet: true } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a new ID the sheet stores otherwise: the stored key is marked, and the old one isn't`, [held.r.code, held.f.isFactored("123"), held.f.isFactored("00123")], [200, true, false]);
+
+		// A mark that lands during the save. The script's way in reaches the store: the last look moves it.
+		const atWrite = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringWrite = () => { f.mark("111"); }; } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a mark landing during the write: on the new key, not the old`, [atWrite.r.code, atWrite.f.isFactored("333"), atWrite.f.isFactored("111")], [200, true, false]);
+		const atRead = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringRowRead = () => { f.mark("111"); }; } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a mark landing at the last read: on the new key, not the old`, [atRead.r.code, atRead.f.isFactored("333"), atRead.f.isFactored("111")], [200, true, false]);
+		const withClaim = await save(route, "Super Admin", "Load ID", "333", { land: (sheet, f) => { sheet.hooks.duringRowRead = () => { f.mark("111"); f.claim("111"); }; } });
+		t(`§7 ${route}, a mark and a claim landing at the last read: refused, nothing written`, [withClaim.r.code, codeOf(withClaim.r), withClaim.app.calls.length, withClaim.f.isFactored("111")], [409, "LOAD_ID_FACTORED", 0, true]);
+		// The switch's way in is refused while the save runs, on either key, and works once it's done.
+		let duringOld = null;
+		let duringNew = null;
+		const pressed = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true }), land: (sheet, f) => { sheet.hooks.duringWrite = () => { duringOld = f.press("111"); duringNew = f.press("333"); }; } });
+		const [oldAnswer, newAnswer] = [await duringOld, await duringNew];
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the switch pressed during the write: 409 LOAD_ID_CHANGING on both keys, in its own words, and nothing marked`,
+			[oldAnswer.status, oldAnswer.body.code, oldAnswer.body.error, newAnswer.status, newAnswer.body.code, pressed.f.isFactored("111"), pressed.f.isFactored("333")], [409, "LOAD_ID_CHANGING", CHANGING, 409, "LOAD_ID_CHANGING", false, false]);
+		const afterSave = await pressed.f.press("333");
+		t(`§7 ${route}, ...and once the save is done the new key can be marked`, [afterSave.status, pressed.f.isFactored("333")], [200, true]);
+
+		// The switch on a key no row holds any more: a dialog left open on the old ID.
+		let sheetNow = null;
+		const rowsNow = () => ({ headers: HEADERS, data: sheetNow.rows.slice(1).map((row) => Object.fromEntries(HEADERS.map((h, i) => [h, display(row[i])]))) });
+		const stale = await save(route, "Super Admin", "Load ID", "333", { world: factoringWorld({ marking: true, readJobTracking: async () => rowsNow() }), land: (sheet) => { sheetNow = sheet; } });
+		const pressedStale = await stale.f.press("111");
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the switch on a dialog left open on the old ID: 409 LOAD_NOT_ON_SHEET, in its own words, nothing marked`,
+			[pressedStale.status, pressedStale.body.code, pressedStale.body.error, stale.f.row("111")], [409, "LOAD_NOT_ON_SHEET", NOT_ON_SHEET, undefined]);
+		const clearedStale = await stale.f.press("111", false);
+		t(`§7 FAILS ON THE OLD CODE: ${route}, ...clearing from that dialog too`, [clearedStale.status, clearedStale.body.code, stale.f.row("111")], [409, "LOAD_NOT_ON_SHEET", undefined]);
+		const pressedNow = await stale.f.press("333");
+		t(`§7 ${route}, ...and a key a row holds is marked`, [pressedNow.status, stale.f.isFactored("333")], [200, true]);
+		// A read of the sheet that began before the save and answers after it can't let a mark through.
+		let holdRead = null;
+		const started = new Promise((resolve) => { holdRead = resolve; });
+		const slow = factoringWorld({ marking: true, readJobTracking: () => started });
+		const pressedSlow = slow.press("111");
+		const slowSave = await save(route, "Super Admin", "Load ID", "333", { world: slow });
+		holdRead({ headers: HEADERS, data: [Object.fromEntries(HEADERS.map((h, i) => [h, display(storedRow()[i])]))] });
+		const slowAnswer = await pressedSlow;
+		t(`§7 FAILS ON THE OLD CODE: ${route}, a read that began before the save and answered after it: 409 LOAD_ID_CHANGING, nothing marked`,
+			[slowSave.r.code, slowAnswer.status, slowAnswer.body.code, slow.row("111")], [200, 409, "LOAD_ID_CHANGING", undefined]);
+		const noRead = factoringWorld({ marking: true, readJobTracking: async () => { throw new Error("made-up"); } });
+		const unreadSheet = await noRead.press("111");
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the sheet can't be read: 503 FACTORING_SHEET_UNREADABLE, in its own words, nothing marked`,
+			[unreadSheet.status, unreadSheet.body.code, unreadSheet.body.error, noRead.row("111")], [503, "FACTORING_SHEET_UNREADABLE", SHEET_UNREAD, undefined]);
+
+		// A write that fails: the answer is as before, and the mark goes by what the sheet holds.
+		const refused = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { writeFails: "refused" } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the write refused, the marked load: the save's 500, the hold undone, the mark where it was`,
+			[refused.r.code, cellOf(refused.app), refused.f.row("333"), refused.f.isFactored("111"), refused.f.audits], [500, "111", undefined, true, ["factoring_move_begun", "factoring_move_undone"]]);
+		const landed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { writeFails: "landed" } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the write landed with its answer lost: the save's 500, and the mark moved`, [landed.r.code, cellOf(landed.app), landed.f.isFactored("333"), landed.f.isFactored("111")], [500, "333", true, false]);
+		t(`§7 FAILS ON THE OLD CODE: ${route}, ...and the cached sheet is dropped, so the switch can't read the old ID from it`, landed.app.invalidations(), 1);
+		const unconfirmed = await save(route, "Super Admin", "Load ID", "333", { prepare: (w) => w.mark("111"), sheetOptions: { readCellFails: true } });
+		t(`§7 FAILS ON THE OLD CODE: ${route}, the cell can't be read back: saved, and both keys stay marked`,
+			[unconfirmed.r.code, unconfirmed.f.isFactored("333"), unconfirmed.f.isFactored("111"), unconfirmed.f.audits], [200, true, true, ["factoring_move_begun", "factoring_move_unconfirmed"]]);
+
 		// The mark holds the ID, not the row.
-		const other = await save(route, "Dispatcher", "Details", "Frozen - 2 pallets rolled", (w) => w.mark("111"));
-		t(`§7 ${route}, another cell on a marked load: saved`, [other.r.code, other.app.calls.map((c) => c.ranges)], [200, [[R("C2")]]]);
-		// With no live mark on this load, as today.
+		const other = await save(route, "Dispatcher", "Details", "Frozen - 2 pallets rolled", { prepare: (w) => w.mark("111") });
+		t(`§7 ${route}, another cell on a marked load: saved, the mark where it was, no read back`, [other.r.code, ranges(other.app), other.f.isFactored("111"), other.sheet.cellReads], [200, [[R("C2")]], true, []]);
+		// With no live mark on this load, as before: no extra read, nothing audited, nothing marked.
 		for (const [label, prepare] of [
 			["no mark anywhere", () => {}],
-			["a mark cleared", (w) => { w.mark("111"); w.clear("111"); }],
+			["a mark cleared", (w) => { w.mark("111"); w.clear("111"); w.audits.length = 0; }],
 			["another load's mark", (w) => w.mark("222")],
 		]) {
-			const { app, r } = await save(route, "Super Admin", "Load ID", "333", prepare);
-			t(`§7 ${route}, ${label}: the Load ID change saves, B2 alone written`, [r.code, app.calls.map((c) => c.ranges)], [200, [[R("B2")]]]);
+			const { app, f, sheet, r } = await save(route, "Super Admin", "Load ID", "333", { prepare });
+			t(`§7 ${route}, ${label}: the Load ID change saves, B2 alone written, no read back, nothing audited or marked`,
+				[r.code, ranges(app), sheet.cellReads, f.audits, f.row("333")], [200, [[R("B2")]], [], [], undefined]);
 		}
-		// A final row: the store's own refusal. A marker that can't be read: nothing is risked.
-		const final = await save(route, "Super Admin", "Load ID", "333", (w) => { w.mark("111"); w.handledOutside("111"); });
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a load handled in Triumph's process: 409 FACTORING_LOCKED, nothing written`,
-			[final.r.code, (final.r.body || {}).code, final.app.calls.length], [409, "FACTORING_LOCKED", 0]);
-		const unread = await save(route, "Super Admin", "Load ID", "333", (w) => w.db.close());
-		t(`§7 FAILS ON THE OLD CODE: ${route}, a marker that can't be read: 503 FACTORING_UNREADABLE, nothing written`,
-			[unread.r.code, (unread.r.body || {}).code, unread.app.calls.length], [503, "FACTORING_UNREADABLE", 0]);
-		const unreadOther = await save(route, "Super Admin", "Details", "Frozen - 2 pallets rolled", (w) => w.db.close());
-		t(`§7 ${route}, ...and no other cell asks the marker: saved`, [unreadOther.r.code, unreadOther.app.calls.map((c) => c.ranges)], [200, [[R("C2")]]]);
-		// A collision is still the collision's refusal, marked or not.
-		const taken = await save(route, "Super Admin", "Load ID", "222", (w) => w.mark("111"));
-		t(`§7 ${route}, a marked load's Load ID onto a taken one: refused, nothing written`, [taken.r.code, taken.app.calls.length], [409, 0]);
 	}
 	return results;
 }
@@ -1534,14 +1670,19 @@ const NO_IDENTITY_SRC = mutate(DATA_PUT_SRC,
 		}
 	}
 
-	console.log("§8 mutants of the Load ID refusal");
+	console.log("§8 mutants of the Load ID move");
 	{
-		// Built inside the run, as §6's are: on a tree without the refusal, a missing
+		// Built inside the run, as §6's are: on a tree without the move, a missing
 		// target fails the run as "not caught" instead of stopping it.
-		const CALL = "const markHeld = factoringRoutes.loadIdChange(lidChange.from, lidChange.to);";
+		const CALL = "const idSave = idChange ? factoringRoutes.loadIdSave(";
+		const NO_CALL = "const idSave = false ? factoringRoutes.loadIdSave(";
+		const LOOK = "if (idSave) await idSave.finish();\n";
+		const noLook = (src) => src.split(LOOK).join("");
 		for (const [label, build] of [
-			["M11 PUT /api/data without the refusal", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, "const markHeld = null;") })],
-			["M12 PUT /api/load without the refusal", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, "const markHeld = null;") })],
+			["M11 PUT /api/data without the move", () => ({ dataSrc: mutate(DATA_PUT_SRC, CALL, NO_CALL) })],
+			["M12 PUT /api/load without the move", () => ({ loadSrc: mutate(LOAD_PUT_SRC, CALL, NO_CALL) })],
+			["M13 PUT /api/data without its last look", () => ({ dataSrc: noLook(DATA_PUT_SRC) === DATA_PUT_SRC ? mutate(DATA_PUT_SRC, LOOK, "") : noLook(DATA_PUT_SRC) })],
+			["M14 PUT /api/load without its last look", () => ({ loadSrc: noLook(LOAD_PUT_SRC) === LOAD_PUT_SRC ? mutate(LOAD_PUT_SRC, LOOK, "") : noLook(LOAD_PUT_SRC) })],
 		]) {
 			let failed = [], detail = "";
 			try {

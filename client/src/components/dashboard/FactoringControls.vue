@@ -19,7 +19,8 @@
 import { computed, ref, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
-import { factoringChip, canFactor, canRecordOutside, reasonInput } from '../../lib/factoringStatus'
+import { factoringChip, canFactor, canRecordOutside, notSentQuestion, reasonInput } from '../../lib/factoringStatus'
+import { draftMayBeOut } from '../../lib/autoInvoiceStatus'
 
 const props = defineProps({
   // The dashboard row, with the server's `_factoring`.
@@ -31,7 +32,7 @@ const api = useApi()
 const auth = useAuthStore()
 
 const status = computed(() => (props.job && props.job._factoring) || null)
-const chip = computed(() => factoringChip(status.value))
+const chip = computed(() => factoringChip(status.value, { draftMayBeOut: draftMayBeOut(props.job && props.job._autoInvoice) }))
 const factored = computed(() => Boolean(status.value && status.value.factored === true))
 const mayFactor = computed(() => canFactor(status.value))
 const mayRecord = computed(() => canRecordOutside(status.value))
@@ -47,19 +48,23 @@ async function setFactored(next) {
   if (!auth.isSuperAdmin || !props.loadId || busy.value || !reasonOk.value) return
   busy.value = true; result.value = null
   const body = { factored: next, reason: reasonInput(reason.value), loadId: props.loadId }
+  let asked = false
   try {
     try {
       await api.post(keyPath(), body)
     } catch (e) {
-      // A draft exists: marking needs a person to say it was never sent.
-      if (!(next && e && e.code === 'INVOICE_ALREADY_DRAFTED')) throw e
-      if (!window.confirm('An invoice draft already exists for this load. Was it NOT sent to the broker? If you confirm, delete that draft in Gmail.')) {
+      // A draft exists, or may: marking needs a person to say it was never sent.
+      const question = next && e ? notSentQuestion(e.code) : ''
+      if (!question) throw e
+      if (!window.confirm(question)) {
         result.value = { tone: 'error', msg: (e && e.message) || 'Not marked.' }
         return
       }
+      asked = true
       await api.post(keyPath(), { ...body, confirmNotSent: true })
     }
-    result.value = { tone: 'ok', msg: next ? 'Marked factored: its invoice goes through Triumph.' : 'No longer factored. If it is already delivered, draft its invoice by hand.' }
+    const marked = asked ? 'Marked factored. If a draft is in Gmail Drafts, delete it.' : 'Marked factored: its invoice goes through Triumph.'
+    result.value = { tone: 'ok', msg: next ? marked : 'No longer factored. If it is already delivered, draft its invoice by hand.' }
     reason.value = ''
     // The row as it now stands, until the dashboard's next read.
     const listed = Boolean(status.value && (status.value.canMark || status.value.canRecordOutside))

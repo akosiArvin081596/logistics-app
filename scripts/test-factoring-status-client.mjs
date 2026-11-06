@@ -17,7 +17,9 @@
 //   §7 a job's draft on a marked load says not to send it and to delete it, on the
 //      row chip and in the dialog, while it may be in Gmail too; a load with no mark
 //      reads as it did, in every state; a mark cleared after the run stopped on it
-//      has its own chip, with nothing to retry
+//      has its own chip, with nothing to retry; a job's draft whose mark was cleared
+//      since doesn't read as ready; where it may already be sent, no line says the
+//      invoice goes through Triumph, and the switch asks before it marks
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
@@ -171,7 +173,7 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
   const rowChip = (row) => (A.autoInvoiceRowChip ? A.autoInvoiceRowChip(row) : A.autoInvoiceChip(row && row._autoInvoice))
   const MARKED = Object.freeze({ factored: true, locked: false, lockedVia: '', triumphState: '', canMark: false, canRecordOutside: false })
   const LABEL = "Factored: don't send the draft, delete it"
-  const dontSend = (what) => `Don't send ${what}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.`
+  const dontSend = (what) => `Don't send ${what}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.`
   const drafted = Object.freeze({ state: 'drafted', code: '', invoiceId: '10202026-1', changed: [] })
 
   eq(rowChip({ _autoInvoice: drafted, _factoring: MARKED }), { label: LABEL, tone: 'bad', reason: dontSend('invoice 10202026-1') },
@@ -231,6 +233,33 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
     '§7 FAILS ON THE OLD CODE: a mark cleared after the run stopped on it has its own true sentence')
   eq(A.autoInvoiceNeedsAttention({ _autoInvoice: cleared }), true, '§7 ...the toggle counts it, so it can\'t be forgotten')
   eq([A.canTryAgain(cleared), A.canTryAgain({ state: 'needs_attention', code: 'FACTORED_MARK_CLEARED' }), A.canMarkChecked(cleared)], [false, false, false], '§7 FAILS ON THE OLD CODE: ...nothing to retry: a person drafts it')
+
+  // A job's draft whose mark was cleared since: it may have been deleted as the chip said.
+  const clearedDraft = Object.freeze({ ...drafted, markCleared: true })
+  const CLEARED_DRAFT = { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." }
+  eq(readChip(clearedDraft), CLEARED_DRAFT, '§7 FAILS ON THE OLD CODE: a draft whose mark was cleared since reads neither green nor "is in Gmail Drafts"')
+  eq(readChip({ ...clearedDraft, changed: ['payment'] }), CLEARED_DRAFT, '§7 FAILS ON THE OLD CODE: ...its load changed too: the same')
+  eq(readChip({ ...clearedDraft, sent: true }).label, 'Sent to the broker', '§7 ...an invoice the job sent still reads as sent')
+  eq([A.autoInvoiceNeedsAttention({ _autoInvoice: clearedDraft }), A.canTryAgain(clearedDraft)], [false, false], '§7 ...it counts for nothing a person could ever clear, and has no Try again')
+
+  // Where it may already be sent: no line says the invoice goes through Triumph.
+  for (const [label, status] of [['a job\'s draft', drafted], ['MAYBE_IN_GMAIL', { state: 'needs_attention', code: 'MAYBE_IN_GMAIL' }], ['IN_GMAIL_UNRECORDED', { state: 'needs_attention', code: 'IN_GMAIL_UNRECORDED' }]]) {
+    ok(!/through Triumph/.test(rowChip({ _autoInvoice: status, _factoring: MARKED }).reason), `§7 FAILS ON THE OLD CODE: ${label}, marked: the row doesn't say the invoice goes through Triumph`)
+  }
+  const mayBeOut = (status) => (A.draftMayBeOut ? A.draftMayBeOut(status) : false)
+  eq([drafted, { ...drafted, sent: true }, { state: 'needs_attention', code: 'MAYBE_IN_GMAIL' }, { state: 'needs_attention', code: 'IN_GMAIL_UNRECORDED' }].map(mayBeOut), [true, true, true, true],
+    '§7 FAILS ON THE OLD CODE: a job\'s draft, an invoice it sent and both may-be codes may already be out')
+  eq([{ state: 'needs_attention', code: 'TOTAL_MISMATCH' }, { state: 'queued', code: '' }, { state: 'waiting', code: 'MAYBE_IN_GMAIL' }, null, undefined, 'drafted'].map((s) => (A.draftMayBeOut ? A.draftMayBeOut(s) : false)), [false, false, false, false, false, false], '§7 ...nothing else is')
+  eq(S.factoringChip(MARKED, { draftMayBeOut: true }), { label: 'Factored (Triumph)', tone: 'warn', reason: 'The app sends no invoice for it by email, and the Draft Invoice button refuses it.' },
+    '§7 FAILS ON THE OLD CODE: the factoring line beside such a draft doesn\'t say it goes through Triumph')
+  eq(S.factoringChip(MARKED, { draftMayBeOut: false }).reason, S.factoringChip(MARKED).reason, '§7 ...with no draft out, its usual words')
+  eq(S.factoringChip({ ...MARKED, locked: true, lockedVia: 'outside' }, { draftMayBeOut: true }).reason, "Handled in Triumph's process. The app never invoices this load.", '§7 ...a final row, its own words')
+  const ask = (code) => (S.notSentQuestion ? S.notSentQuestion(code) : '')
+  eq(ask('INVOICE_ALREADY_DRAFTED'), 'An invoice draft already exists for this load. Was it NOT sent to the broker? If you confirm, delete that draft in Gmail.', '§7 FAILS ON THE OLD CODE: the switch\'s question on a draft row, as it was')
+  eq(ask('INVOICE_MAYBE_IN_GMAIL'), 'An invoice draft for this load may be in Gmail, or may already have been sent from there. Was it NOT sent to the broker? If you confirm, delete any draft in Gmail.', '§7 FAILS ON THE OLD CODE: the switch asks on a draft that may be in Gmail')
+  eq([ask('LOAD_FACTORED'), ask(''), ask(undefined), ask('constructor')], ['', '', '', ''], '§7 ...and on nothing else')
+  ok(CONTROLS.includes('notSentQuestion(e.code)') && CONTROLS.includes('draftMayBeOut: draftMayBeOut(props.job && props.job._autoInvoice)'), '§7 FAILS ON THE OLD CODE: the switch reads the question and the row\'s status from those two')
+  ok(CONTROLS.includes("'Marked factored. If a draft is in Gmail Drafts, delete it.'"), '§7 FAILS ON THE OLD CODE: a mark that had to ask answers without saying it goes through Triumph')
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)

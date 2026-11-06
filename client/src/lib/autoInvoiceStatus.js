@@ -27,6 +27,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   DRAFTED_BY_HAND: { short: 'drafted by hand', text: 'Someone drafted this invoice by hand.' },
   BROKER_OPTED_OUT: { short: 'broker opted out', text: 'This broker is opted out of automatic drafts.' },
   LOAD_FACTORED: { short: 'factored (Triumph)', text: 'This load is factored: its invoice goes through Triumph, not by email.' },
+  FACTORED_MARK_CLEARED: { short: 'no automatic invoice', text: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
   NO_BROKER_EMAIL: { short: 'no broker email', text: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.' },
   BROKER_EMAIL_FREEMAIL: { short: 'broker email is free mail', text: "The broker Email on Job Tracking is a free-mail address, so it can't vouch for a billing email. Put the broker's company email on Job Tracking, then Try again, or draft it by hand." },
   BROKER_DOMAIN_UNCONFIRMED: { short: 'broker domain not confirmed', text: "This broker's email domain isn't on the confirmed list. Confirm it in the automatic-draft settings, then Try again, or draft it by hand." },
@@ -54,7 +55,6 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   MAYBE_SENT: { short: 'may already be sent', text: "The invoice email may have been sent to the broker, but it wasn't found in Gmail Sent Mail. Check Sent Mail before drafting it again. Try again searches Sent Mail once more; it never sends." },
   DRIVER_PENDING: { short: 'about to be made', text: "The driver just marked this load Delivered, so its invoice is about to be made." },
   NOT_BY_DRIVER: { short: 'no automatic invoice', text: "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand." },
-  FACTORED_MARK_CLEARED: { short: 'no automatic invoice', text: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
   CAP_REACHED: { short: 'hourly or daily limit reached', text: "More invoices came due than the hourly or daily limit allows, so this one wasn't made. Try again in a while, or draft it by hand." },
   NO_MAILBOX: { short: 'no mailbox set', text: "No company mailbox is set on the server, so no invoice was made. Draft it by hand." },
   HANDED_OVER: { short: 'was in line at the change', text: "This load was in line when automatic invoices moved to the driver's Delivered, so its invoice wasn't made. Check Gmail, then Try again, or draft it by hand." },
@@ -115,6 +115,8 @@ export function autoInvoiceChip(status) {
         if (changedOf(status).length) return { label: 'Sent to the broker: load changed', tone: 'warn', reason: changedText(status) }
         return { label: 'Sent to the broker', tone: 'ok', reason: id ? `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` : 'The invoice was sent to the broker automatically. Its copy is in Gmail Sent Mail.' }
       }
+      // Marked, told to delete the draft, then cleared: it may be gone, and nothing makes another.
+      if (status.markCleared === true) return { label: 'Mark cleared: check Gmail Drafts', tone: 'warn', reason: "This load's mark was cleared. If its draft was deleted while it was marked, draft it by hand. If it's still in Gmail Drafts, check it and send it." }
       if (changedOf(status).length) return { label: 'Draft ready in Gmail: load changed', tone: 'warn', reason: changedText(status) }
       return { label: 'Draft ready in Gmail', tone: 'ok', reason: id ? `Invoice ${id} is in Gmail Drafts. Check it and send it.` : 'The invoice is in Gmail Drafts. Check it and send it.' }
     }
@@ -141,7 +143,14 @@ export function autoInvoiceChip(status) {
 // it. The codes are the two where a draft may be in Gmail with no draft row yet.
 const MAY_BE_IN_GMAIL = new Set(['MAYBE_IN_GMAIL', 'IN_GMAIL_UNRECORDED'])
 const FACTORED_DRAFT_LABEL = "Factored: don't send the draft, delete it"
-const factoredDraftText = (id) => `Don't send ${id ? `invoice ${id}` : 'the invoice draft'}: this load is factored, so its invoice goes through Triumph. If the draft is in Gmail Drafts, delete it.`
+const factoredDraftText = (id) => `Don't send ${id ? `invoice ${id}` : 'the invoice draft'}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.`
+
+// Is the job's invoice for this load in Gmail, or may it be? A person may have sent it from
+// there, so nothing may promise it goes through Triumph.
+export function draftMayBeOut(status) {
+  if (!status || typeof status !== 'object') return false
+  return status.state === 'drafted' || (status.state === 'needs_attention' && MAY_BE_IN_GMAIL.has(status.code))
+}
 
 // The chip for a row as served: its `_autoInvoice` as autoInvoiceChip() words it, unless the
 // row's `_factoring` says factored and the job's unsent draft is, or may be, in Gmail.
