@@ -1078,6 +1078,25 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await settle();
 		eq(w.smtp.length, 1, "§12 a repeat tap on the load sent: nothing more");
 
+		// The marking route refuses a working claim, so the runner writes the row: with no timer to
+		// come back, a build that finds the load factored goes to a person, and nothing is spent or sent.
+		{
+			const x = await startedWorld();
+			require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(x.db);
+			const prepare = x.H.brokerInvoiceDraft.prepare;
+			x.H.brokerInvoiceDraft.prepare = (args) => {
+				x.H.brokerInvoiceDraft.prepare = prepare;
+				x.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
+					.run(rules.loadKey("LD-TEST-1240"), "LD-TEST-1240", "2026-11-03T15:00:00.000Z", "2026-11-03T15:00:00.000Z");
+				return prepare(args);
+			};
+			atReceiver(x, "LD-TEST-1240");
+			await x.statusRoute()(DRIVER, "LD-TEST-1240");
+			await until(() => open(x) === 0 && x.state("LD-TEST-1240")[0] !== "waiting", "§12 the marked load's run");
+			eq(x.state("LD-TEST-1240"), ["needs_attention", "RETRY_LATER"], "§12 a load factored during the build, with the trigger on: to a person");
+			eq([x.calls.mint, x.smtp.length, x.gmail.length, x.calls.renderer, x.drafts().length], [0, 0, 0, 0, 0], "§12 ...no number, no render, no mail, no draft row");
+		}
+
 		// Only the driver: the same route, the same load shape, the office's roles.
 		for (const [user, id] of [[DISP, "LD-TEST-1202"], [SA, "LD-TEST-1203"]]) {
 			atReceiver(w, id);
