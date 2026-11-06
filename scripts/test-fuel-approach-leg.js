@@ -1420,15 +1420,16 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 	check("flag on: every answer is byte for byte what it was (the generated trucks)", () => assert.strictEqual(generatedSha, FLAG_ON_GENERATED_SHA));
 
 	// --- who else reads the MPG on file -----------------------------------------
-	// Each code line naming the column, by the top-level statement it sits in. A new
-	// reader fails here, so someone decides whether the band applies to it.
+	// Each code line naming the column, by the top-level statement it sits in; the schema
+	// line isn't a reader. A new reader fails here, so someone decides whether the band
+	// applies to it.
 	const mpgOnFileReaders = () => {
 		const seen = new Set();
 		let head = "";
 		for (const line of SRC.split("\n")) {
 			const top = /^(?:async\s+)?function\s+(\w+)|^(?:const|let)\s+(\w+)|^app\.\w+\(\s*\[?"([^"]+)"/.exec(line);
 			if (top) head = top[1] || top[2] || top[3];
-			if (/\bavg_mpg\b/.test(line.replace(/\/\/.*$/, "")) && /^\s/.test(line)) seen.add(head);
+			if (/\bavg_mpg\b/.test(line.replace(/\/\/.*$/, "")) && !line.includes("ALTER TABLE")) seen.add(head);
 		}
 		return [...seen].sort();
 	};
