@@ -76,8 +76,11 @@ function chipIsCovered(el) {
   return !!top && !el.contains(top)
 }
 
+// The tap's section reads the range again, so the chip above it does too: otherwise the
+// two show different miles until the next poll, right after the driver asked to compare.
 function tapFuel(event) {
   if (chipIsCovered(event.currentTarget)) return
+  loadRange()
   emit('fuel-tap', fuelChip.value.title)
 }
 

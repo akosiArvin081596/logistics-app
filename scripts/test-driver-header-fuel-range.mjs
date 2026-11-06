@@ -26,10 +26,11 @@
 //      Messages box follows the header's height, so its input stays above the tab bar
 //   §8 the chip's tap: a real button in the normal header, plain on the two lock
 //      screens; a tap hands up the chip's own line, one figure and no working on
-//      either flag path; nothing happens with a dialog over the chip
+//      either flag path, and reads the chip's range again; nothing happens with a
+//      dialog over the chip
 //   §9 where the tap goes: which load (the driver store's own getters, with the load
 //      list that runs newest first): a page on screen only while its load has road
-//      left, then the furthest along of the loads under way, then the queue;
+//      left, then the load under way with the most road ahead, then the queue;
 //      DriverView's handler run on stand-ins; and the button's box, which must stay
 //      the plain chip's so nothing moves, with Password and Logout above its target
 //
@@ -399,6 +400,36 @@ if (Header) {
       (await lineOf(answer(flagOffUnknown[1], null))) === "No usable fuel reading from this truck's ELD. Last known 40%. Check the gauge before you set off.")
     ok('§8 "not available" is a button in the normal header', (await chipNode(answer(flagOffUnknown[0], null))).node?.type === 'button')
 
+    // The tap's section reads the range again, so the chip above it has to as well.
+    {
+      const { node, bindings } = await chipNode(ON)
+      const before = world.gets.filter((u) => u === '/api/fuel/range').length
+      world.answer = answer({ ...MEASURED, rangePlanningMiles: 150, rangeUsableMiles: 135 }, block({ reading: reading(30) }))
+      const realDocument = globalThis.document
+      globalThis.document = { elementFromPoint: () => chipEl }
+      try {
+        if (node && node.props && node.props.onClick) node.props.onClick({ currentTarget: chipEl })
+      } finally {
+        globalThis.document = realDocument
+      }
+      await drain()
+      ok('§8 a tap reads the chip\'s range again, once, with no params', world.gets.filter((u) => u === '/api/fuel/range').length === before + 1)
+      ok('§8 …and the chip shows what it read', !!bindings.fuelChip.value && bindings.fuelChip.value.text === SAYS(135))
+    }
+    {
+      const { node } = await chipNode(ON)
+      const before = world.gets.length
+      const realDocument = globalThis.document
+      globalThis.document = { elementFromPoint: () => ({ tag: 'dialog-overlay' }) }
+      try {
+        if (node && node.props && node.props.onClick) node.props.onClick({ currentTarget: chipEl })
+      } finally {
+        globalThis.document = realDocument
+      }
+      await drain()
+      ok('§8 a press under a dialog reads nothing', world.gets.length === before)
+    }
+
     // A dialog over the chip, reached by a keyboard or a screen reader.
     const covered = await press(ON, { tag: 'dialog-overlay' })
     ok('§8 something else on top of the chip: the press does nothing', !!covered && covered.lines.length === 0)
@@ -567,21 +598,30 @@ if (Header) {
     const detailSrc = fs.readFileSync(path.join(DRIVER_DIR, 'LoadDetail.vue'), 'utf8')
     ok('§9 …the same test as the load page\'s own, one copy', /const loadStillToDrive = computed\(\(\) => hasRoadLeft\(status\.value\)\)/.test(detailSrc))
 
-    // Two loads under way is reachable with ordinary taps: the furthest along, not the newest row.
+    // Two loads under way is reachable with ordinary taps: the one with road ahead, not the
+    // newest row. A load left at its receiver comes after the load the truck is driving to.
     const ORDER = ['In Transit', 'At Receiver', 'Unloading', 'At Shipper', 'Loading', 'Heading to Shipper']
+    const TAP_ORDER = ['In Transit', 'At Shipper', 'Loading', 'Heading to Shipper', 'At Receiver', 'Unloading']
     ok('§9 In Transit on an older row beats Heading to Shipper on a newer one',
       opened([qaLoad(2, 'QA-1', 'In Transit'), qaLoad(9, 'QA-9', 'Heading to Shipper')]) === 'QA-1')
+    ok('§9 a load left At Receiver, the next load Heading to Shipper: the next load, whichever row is newer',
+      opened([qaLoad(2, 'QA-1', 'At Receiver'), qaLoad(9, 'QA-9', 'Heading to Shipper')]) === 'QA-9'
+        && opened([qaLoad(9, 'QA-1', 'At Receiver'), qaLoad(2, 'QA-9', 'Heading to Shipper')]) === 'QA-9')
     {
       const wrong = []
-      for (let i = 0; i < ORDER.length; i++) {
-        for (let j = i + 1; j < ORDER.length; j++) {
-          if (opened([qaLoad(2, 'QA-1', ORDER[i]), qaLoad(9, 'QA-9', ORDER[j])]) !== 'QA-1') wrong.push(`${ORDER[i]} over ${ORDER[j]}`)
+      for (let i = 0; i < TAP_ORDER.length; i++) {
+        for (let j = i + 1; j < TAP_ORDER.length; j++) {
+          if (opened([qaLoad(2, 'QA-1', TAP_ORDER[i]), qaLoad(9, 'QA-9', TAP_ORDER[j])]) !== 'QA-1') wrong.push(`${TAP_ORDER[i]} over ${TAP_ORDER[j]}`)
         }
       }
-      ok(`§9 …every pair, in the active load's order${wrong.length ? `: ${wrong.join('; ')}` : ''}`, wrong.length === 0)
+      ok(`§9 …every pair, with the loads at a receiver last${wrong.length ? `: ${wrong.join('; ')}` : ''}`, wrong.length === 0)
     }
+    ok('§9 a load At Receiver with only a queued load behind it: still that load, the one under way',
+      opened([qaLoad(2, 'QA-1', 'At Receiver'), qaLoad(9, 'QA-9', 'Assigned')]) === 'QA-1')
+    ok('§9 the fuel chip\'s order is its own: the active load\'s still puts At Receiver second',
+      !/roadAheadScore/.test(view.scriptSetup.content) && /statusPriorityScore\(getLoadStatus\(a\)\)/.test(view.scriptSetup.content))
     {
-      // The order itself, Assigned last, since the active load reads it for queued loads too.
+      // The active load's order itself, Assigned last, since it reads that for queued loads too.
       const { statusPriorityScore: score } = await import(pathToFileURL(path.join(CLIENT_DIR, 'src', 'lib', 'loadProgress.js')).href).catch(() => ({}))
       const scores = score ? [...ORDER, 'Assigned', 'Something else'].map((s) => score(s)) : []
       ok('§9 the order in one list: each status ranks after the one before, Assigned and an unknown status last',

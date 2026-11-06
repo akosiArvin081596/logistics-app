@@ -21,6 +21,15 @@ export function statusPriorityScore(status) {
   return STATUS_PRIORITY.length
 }
 
+// The same order for a tap on the fuel chip, with a load at its receiver after the loads
+// still rolling. A driver can leave a receiver with the POD still to upload and start the
+// next load, and a fuel check for the road to that receiver would be for a run nobody is on.
+const AT_THE_RECEIVER = /^(at receiver|unloading)$/i
+export function roadAheadScore(status) {
+  const score = statusPriorityScore(status)
+  return AT_THE_RECEIVER.test((status || '').trim()) ? score + STATUS_PRIORITY.length : score
+}
+
 // False once the load is delivered: nothing is left to drive on it, so a fuel check
 // or a stop along its route would be for a road already driven.
 export function hasRoadLeft(status) {

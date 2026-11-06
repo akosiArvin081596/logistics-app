@@ -6,7 +6,7 @@
 
 // '.js' on the import so bare Node (the runners) can load this file.
 import { toNum, milesText } from './fuelReview.js';
-import { hasRoadLeft, statusPriorityScore } from './loadProgress.js';
+import { hasRoadLeft, roadAheadScore } from './loadProgress.js';
 
 // States in which the server withholds the miles: say why, never guess.
 const WITHHELD = new Set(['none', 'stale', 'no_tank_size', 'no_truck']);
@@ -232,19 +232,27 @@ export function refuelNowTitle(estimate = false) {
 
 /**
  * Which load a tap on the chip opens: the load page on screen while it has road left,
- * else the furthest along of the loads under way (a driver can start a second one
- * while hauling the first, and the newest row isn't the one on the road), else the
- * next in the queue, else none. `queued` is the store's queuedLoads, in queue order.
- * Not workingLoads[0]: that list runs newest added first, so it can be a load still
- * waiting behind the one on the road.
+ * else the load under way with the most road ahead (a driver can start a second one
+ * while hauling the first, or while the first waits at its receiver, and the newest row
+ * isn't the one on the road), else the next in the queue, else none. `queued` is the
+ * store's queuedLoads, in queue order. Not workingLoads[0]: that list runs newest added
+ * first, so it can be a load still waiting behind the one on the road.
  */
 export function fuelTapLoad({ onScreen, underWay, queued, statusOf }) {
   if (onScreen && hasRoadLeft(statusOf(onScreen))) return onScreen;
-  const furthest = [...(underWay || [])].sort((a, b) => (
-    statusPriorityScore(statusOf(a)) - statusPriorityScore(statusOf(b))
+  const next = [...(underWay || [])].sort((a, b) => (
+    roadAheadScore(statusOf(a)) - roadAheadScore(statusOf(b))
       || (b._rowIndex || 0) - (a._rowIndex || 0)
   ))[0];
-  return furthest || (queued && queued[0]) || null;
+  return next || (queued && queued[0]) || null;
+}
+
+// A chip tap asks for the numbers again and keeps what's on screen meanwhile, so it says so.
+export const FUEL_REFRESHING = 'Checking for your latest fuel numbers…';
+
+/** A refresh that failed over good figures. `ago` is "4 hrs ago", or '' when it's just happened. */
+export function fuelRefreshFailedText(ago) {
+  return ago ? `Couldn't update your fuel numbers. These are from ${ago}.` : "Couldn't update your fuel numbers.";
 }
 
 /**
