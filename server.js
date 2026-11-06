@@ -44867,6 +44867,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		if (!cellWrites.length) {
 			return res.json({ success: true, updatedCells: 0, unchanged: true });
 		}
+		// A factoring mark goes by the Load ID's text, so a marked load keeps its ID, for every role and
+		// whatever the settings say. Last before the write, so no await comes between them.
+		const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+		const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+		if (idSave && !idSave.ok) {
+			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+			return res.status(idSave.http).json(idSave.json);
+		}
 		let response;
 		try {
 			response = await sheets.spreadsheets.values.batchUpdate({
@@ -44878,8 +44886,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			// genuinely unknown whether the row changed, and that is precisely when
 			// the before/after values are worth having.
 			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			if (idSave) idSave.done();
 			throw err;
 		}
+		if (idSave) idSave.done();
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
@@ -55878,6 +55888,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	replica: Boolean(REPLICA),
 	logAudit,
 	logAuditRefusal,
+	readJobTracking: getJobTrackingCached,
 	findDraftByMessageId: require("./lib/imap-draft").findDraftByMessageId,
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
 });
@@ -61503,6 +61514,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// audit line: there is no write to reverse.
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (cellWrites.length) {
+			// As PUT /api/data/:rowIndex: a marked load keeps its ID, last before the write.
+			const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+			const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+			if (idSave && !idSave.ok) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+				return res.status(idSave.http).json(idSave.json);
+			}
 			try {
 				await sheets.spreadsheets.values.batchUpdate({
 					spreadsheetId: SPREADSHEET_ID,
@@ -61513,8 +61531,10 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				// genuinely unknown whether the row changed, and that is precisely when the
 				// before/after values are worth having.
 				logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+				if (idSave) idSave.done();
 				throw err;
 			}
+			if (idSave) idSave.done();
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);

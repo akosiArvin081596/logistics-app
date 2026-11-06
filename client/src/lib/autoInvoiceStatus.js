@@ -27,6 +27,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   DRAFTED_BY_HAND: { short: 'drafted by hand', text: 'Someone drafted this invoice by hand.' },
   BROKER_OPTED_OUT: { short: 'broker opted out', text: 'This broker is opted out of automatic drafts.' },
   LOAD_FACTORED: { short: 'factored (Triumph)', text: 'This load is factored: its invoice goes through Triumph, not by email.' },
+  FACTORED_MARK_CLEARED: { short: 'no automatic invoice', text: 'This load was marked factored when its invoice came due, so no automatic invoice was made. The mark has been cleared, so draft it by hand.' },
   NO_BROKER_EMAIL: { short: 'no broker email', text: 'Job Tracking has no broker Email for this load. Add it, then Try again, or draft it by hand.' },
   BROKER_EMAIL_FREEMAIL: { short: 'broker email is free mail', text: "The broker Email on Job Tracking is a free-mail address, so it can't vouch for a billing email. Put the broker's company email on Job Tracking, then Try again, or draft it by hand." },
   BROKER_DOMAIN_UNCONFIRMED: { short: 'broker domain not confirmed', text: "This broker's email domain isn't on the confirmed list. Confirm it in the automatic-draft settings, then Try again, or draft it by hand." },
@@ -98,6 +99,9 @@ export function changedText(status) {
   return `Changed since the draft: ${list}. Check the draft in Gmail, then Mark checked.`
 }
 
+// The codes on a completed load nothing started: a person drafts it, and there is nothing to retry.
+const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED'])
+
 // The chip for a row's `_autoInvoice`: { label, tone, reason }, or null when
 // there is nothing to show. Tones: ok, warn, bad, muted.
 export function autoInvoiceChip(status) {
@@ -111,6 +115,8 @@ export function autoInvoiceChip(status) {
         if (changedOf(status).length) return { label: 'Sent to the broker: load changed', tone: 'warn', reason: changedText(status) }
         return { label: 'Sent to the broker', tone: 'ok', reason: id ? `Invoice ${id} was sent to the broker automatically. Its copy is in Gmail Sent Mail.` : 'The invoice was sent to the broker automatically. Its copy is in Gmail Sent Mail.' }
       }
+      // Marked, told to delete the draft, then cleared: it may be gone, or sent, and nothing makes another.
+      if (status.markCleared === true) return { label: 'Mark cleared: check Gmail', tone: 'warn', reason: "This load's mark was cleared. If its draft is still in Gmail Drafts, check it and send it. If it's in Sent Mail, it already went to the broker. If it's in neither, draft it by hand." }
       if (changedOf(status).length) return { label: 'Draft ready in Gmail: load changed', tone: 'warn', reason: changedText(status) }
       return { label: 'Draft ready in Gmail', tone: 'ok', reason: id ? `Invoice ${id} is in Gmail Drafts. Check it and send it.` : 'The invoice is in Gmail Drafts. Check it and send it.' }
     }
@@ -126,11 +132,40 @@ export function autoInvoiceChip(status) {
       return { label: 'Making the invoice now', tone: 'muted', reason: 'The invoice is being made. It takes a minute or two.' }
     case 'needs_attention':
       // Nothing failed on this load: nothing was started, so a person drafts it.
-      if (status.code === 'NOT_BY_DRIVER') return { label: 'No automatic invoice', tone: 'warn', reason: reason.text }
+      if (NOTHING_STARTED.has(status.code)) return { label: 'No automatic invoice', tone: 'warn', reason: reason.text }
       return { label: reason ? `Needs attention: ${reason.short}` : 'Needs attention', tone: 'bad', reason: reason ? (reason.attentionText || reason.text) : 'Draft it by hand.' }
     default:
       return null
   }
+}
+
+// A job's draft on a factored load carries the carrier's own payment details, so nobody sends
+// it. The codes are the two where a draft may be in Gmail with no draft row yet.
+const MAY_BE_IN_GMAIL = new Set(['MAYBE_IN_GMAIL', 'IN_GMAIL_UNRECORDED'])
+const FACTORED_DRAFT_LABEL = "Factored: don't send the draft, delete it"
+const factoredDraftText = (id) => `Don't send ${id ? `invoice ${id}` : 'the invoice draft'}: this load is marked factored. If its draft is in Gmail Drafts, delete it. If it's in Sent Mail, it already went to the broker, so tell whoever manages factored loads.`
+
+// Is the job's invoice for this load in Gmail, or may it be? A person may have sent it from
+// there, so nothing may promise it goes through Triumph.
+export function draftMayBeOut(status) {
+  if (!status || typeof status !== 'object') return false
+  return status.state === 'drafted' || (status.state === 'needs_attention' && MAY_BE_IN_GMAIL.has(status.code))
+}
+
+// The chip for a row as served: its `_autoInvoice` as autoInvoiceChip() words it, unless the
+// row's `_factoring` says factored and the job's unsent draft is, or may be, in Gmail.
+export function autoInvoiceRowChip(row) {
+  if (!row || typeof row !== 'object') return null
+  const status = row._autoInvoice
+  if (status && typeof status === 'object' && row._factoring && row._factoring.factored === true) {
+    if (status.state === 'drafted' && status.sent !== true) {
+      return { label: FACTORED_DRAFT_LABEL, tone: 'bad', reason: factoredDraftText(typeof status.invoiceId === 'string' ? status.invoiceId : '') }
+    }
+    if (status.state === 'needs_attention' && MAY_BE_IN_GMAIL.has(status.code)) {
+      return { label: FACTORED_DRAFT_LABEL, tone: 'bad', reason: `${factoredDraftText('')} ${AUTO_INVOICE_REASONS[status.code].text}` }
+    }
+  }
+  return autoInvoiceChip(status)
 }
 
 // What the "Needs attention" toggle counts: a load a person must draft, or a
@@ -143,7 +178,7 @@ export function autoInvoiceNeedsAttention(row) {
 
 // The server says what Try again would do (`retry`) while the driver's Delivered starts
 // the invoice: "none" is a load it refuses, and a load nothing started has nothing to retry.
-export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && status.code !== 'NOT_BY_DRIVER' && status.retry !== 'none')
+export const canTryAgain = (status) => Boolean(status && status.state === 'needs_attention' && !NOTHING_STARTED.has(status.code) && status.retry !== 'none')
 export const canMarkChecked = (status) => Boolean(status && status.state === 'drafted' && changedOf(status).length > 0)
 
 // The question before Try again, while it is the only retry and can send at once: "" asks
