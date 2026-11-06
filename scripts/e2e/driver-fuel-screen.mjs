@@ -20,6 +20,30 @@
 //         (DFC7n at 360 x 800 and DFC7s at 320 x 568, the long name on both)
 //   DFC8  a failed read: no chip and nothing invented, the buttons as ever
 //   DFC1d, DFC3d  at 1280 x 800: the chip on the same row as the buttons
+//   DFT1-DFT6  the chip's tap at 390 x 844, with a load: the load's Fuel section open and in view, below
+//         the header. DFT2 a newer load queued behind the one on the road; DFT3 only queued loads; DFT4
+//         the flag off: one range figure on the first screen, and "How we know" with no sentence of
+//         figures; DFT4b a run that clears, with its badge; DFT4c refuel now; DFT4d a route of 0; DFT4e
+//         refuel now with no fill-ups on record; DFT5 from another tab; DFT6 on a load's own page, and
+//         again after shutting it
+//   DFT7-DFT10 with no load to open: the chip's own line as a toast and the screen stays. DFT7 flag on,
+//         held for longer than an ordinary toast; DFT8 flag off, the same words; DFT9a/b "not available"
+//         with its reason, both flags; DFT10 only an offer not yet accepted
+//   DFT11 a dialog over the chip: a tap at the chip's place stays the dialog's, and a press that a
+//         keyboard or a screen reader could still send does nothing
+//   DFT12 a real button: a 44 px target with no taller row, Password and Logout keep their whole tap
+//         area, Tab reaches it with a visible ring, Enter opens the load
+//   DFT13a/b the two lock screens (onboarding, a failed first load): a plain chip that does nothing
+//   DFT14 a delivered load's page on screen, a load on the road: the load on the road
+//   DFT15 a delivered load's page on screen, no other load: the toast, and the page stays
+//   DFT16 two loads under way: the one furthest along, not the newest row. DFT16b a load left at its
+//         receiver: the next load, the one the truck is driving to
+//   DFT28 a tap shows exactly what opening the section by hand shows (flag off): the same section text
+//         and title badge, from the list and on the load's own page after shutting it, asking no more
+//   DFT1r Route Options and a tall instructions card landing after the scroll, with the browser's scroll
+//         anchoring off, as on a phone that has none: the title stays in view. DFT1t the same, after
+//         the driver has touched the page: it isn't pulled back
+//   DFT1d, DFT7d  the same at 1280 x 800
 //   DFO1-DFO6  Offline shows and clears at 390, 360 and 320 wide, a two-word and a very long name:
 //         the header and the page don't move at all, and the long name's header is the short one's
 //   DFO7  the same on a load's own page at 360    DFO8  the same at 768, on one row
@@ -155,15 +179,49 @@ const ROUTES = {
   recommendedIdx: 0,
 }
 
-function driverPayload(status, name = DRIVER_NAME) {
-  const load = {
-    _rowIndex: 2, 'Load ID': LOAD_ID, 'Job Status': status, Driver: name,
-    'Pickup Address': '100 Example Rd, Riverton, TN 38118', 'Drop-off Address': '200 Sample Ave, Lakeside, TX 75201',
-    'Pickup Appointment': '2026-10-30 08:00', 'Drop-off Appointment': '2026-10-31 14:00', _accepted: true, _expenseWindow: { state: 'active' },
-  }
+function qaLoad(row, id, status, name, extra = {}) {
   return {
-    loads: [load], driverInfo: null, truck: { unit_number: '901', make: 'QA', model: 'Example', status: 'Active' }, messages: [], notifications: [],
-    expenses: [], drivers: [], headers: { jobTracking: HEADERS, carrierDB: [] }, onboarding: null, application: null, invoices: [],
+    _rowIndex: row, 'Load ID': id, 'Job Status': status, Driver: name,
+    'Pickup Address': '100 Example Rd, Riverton, TN 38118', 'Drop-off Address': '200 Sample Ave, Lakeside, TX 75201',
+    'Pickup Appointment': '2026-10-30 08:00', 'Drop-off Appointment': '2026-10-31 14:00', _accepted: true, _expenseWindow: { state: 'active' }, ...extra,
+  }
+}
+
+// A published card long enough to push the Fuel title off a phone's screen if it lands late.
+const QA_INSTRUCTIONS = {
+  state: 'published',
+  highlights: ['high_value', 'ppe'],
+  payload: {
+    v: 1,
+    loadRequirements: [
+      { category: 'equipment', text: 'QA: dry van only, 53 ft, clean and dry floor.' },
+      { category: 'high_value', text: 'QA: high value load, never leave the trailer unattended.' },
+      { category: 'same_driver', text: 'QA: the same driver from pickup to delivery.' },
+    ],
+    stops: [
+      {
+        kind: 'pickup', facility: 'QA Test Shipper', place: 'Riverton, TN',
+        references: [{ type: 'pickup_number', label: 'Pickup #', value: 'QA-PU-1001' }, { type: 'appointment_number', label: 'Appointment #', value: 'QA-APPT-2201' }],
+        requirements: [{ category: 'ppe', text: 'QA: hard hat and safety vest at the dock.' }, { category: 'seal', text: 'QA: seal the trailer before you leave the yard.' }],
+        instructions: [{ kind: 'shipper', text: 'QA: check in at the guard shack with your CDL.' }],
+      },
+      {
+        kind: 'delivery', facility: 'QA Test Receiver', place: 'Lakeside, TX',
+        references: [{ type: 'delivery_number', label: 'Delivery #', value: 'QA-DL-2002' }],
+        requirements: [{ category: 'work_required', text: 'QA: the driver may need to count the freight.' }],
+        instructions: [{ kind: 'receiver', text: 'QA: use the south gate after noon.' }, { kind: 'hours', text: 'QA: receiving 0700-1500 on weekdays.' }],
+      },
+    ],
+    footnote: '',
+  },
+}
+
+// A scene's `loads` is [row, id, status, extra] rows; with none, the one load the fuel steps use.
+function driverPayload(status, name = DRIVER_NAME, scene = {}) {
+  const loads = scene.loads ? scene.loads.map(([row, id, st, extra]) => qaLoad(row, id, st, name, extra)) : [qaLoad(2, LOAD_ID, status, name)]
+  return {
+    loads, driverInfo: null, truck: { unit_number: '901', make: 'QA', model: 'Example', status: 'Active' }, messages: [], notifications: [],
+    expenses: [], drivers: [], headers: { jobTracking: HEADERS, carrierDB: [] }, onboarding: scene.onboarding || null, application: null, invoices: [],
     sharedDocuments: [], truckDocuments: [], profilePictureUrl: '', driverDirectoryId: 0,
   }
 }
@@ -185,11 +243,15 @@ function answerGet(pathname, scene, answers) {
   const ok = (body) => ({ status: 200, body })
   const name = scene.driverName || DRIVER_NAME
   if (pathname === '/api/auth/session') return ok({ authenticated: true, user: { ...DRIVER, driverName: name, fullName: name }, appTimeZone: 'America/New_York' })
-  if (pathname === `/api/driver/${encodeURIComponent(name)}`) return ok(driverPayload(answers.status, name))
+  if (pathname === `/api/driver/${encodeURIComponent(name)}`) {
+    // 400, not a 5xx: DFx allows the browser's line for a 400 only, and any failure here is the same lock screen.
+    return scene.driverLoadFails ? { status: 400, body: { error: 'made-up failure' } } : ok(driverPayload(answers.status, name, scene))
+  }
   if (pathname === '/api/config/maps-key') return ok({ key: 'qa-fuel-no-key' })
   if (pathname === '/api/locations/latest') return ok({ locations: [] })
   if (pathname === '/api/driver/position') return ok({ ok: false, reason: 'no_position' })
   if (pathname === '/api/route') return ok(scene.routes ? ROUTES : { routes: [], recommendedIdx: 0, fallback: true })
+  if (/^\/api\/driver\/loads\/[^/]+\/instructions$/.test(pathname)) return ok(QA_INSTRUCTIONS)
   if (pathname.startsWith('/api/documents/')) return ok({ documents: [] })
   if (pathname.startsWith('/api/geocode/load/')) return ok({ originLat: 35.05, originLng: -89.98, destLat: 32.78, destLng: -96.8 })
   return ok({})
@@ -286,6 +348,7 @@ async function fakeSocket(ctx) {
 async function openScene(browser, scene, viewport, { openLoad = true, socket = false } = {}) {
   const answers = answersFor(scene)
   const phone = isPhone(viewport)
+  const asked = {}
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
   const sock = socket ? await fakeSocket(ctx) : null
   await ctx.route('**/*', async (route) => {
@@ -303,8 +366,10 @@ async function openScene(browser, scene, viewport, { openLoad = true, socket = f
       writes.push(`${req.method()} ${url.pathname}`)
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     }
+    asked[url.pathname] = (asked[url.pathname] || 0) + 1
     const a = answerGet(url.pathname, scene, answers)
     if (scene.rangeDelayMs && url.pathname === '/api/fuel/range') await new Promise((r) => setTimeout(r, scene.rangeDelayMs))
+    if (scene.lateMs && (url.pathname === '/api/route' || /\/instructions$/.test(url.pathname))) await new Promise((r) => setTimeout(r, scene.lateMs))
     return route.fulfill({ status: a.status, contentType: 'application/json', body: JSON.stringify(a.body) })
   })
   const page = await ctx.newPage()
@@ -315,7 +380,7 @@ async function openScene(browser, scene, viewport, { openLoad = true, socket = f
     await page.locator('.load-card').filter({ hasText: LOAD_ID }).first().click({ timeout: 30000 })
     await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
   }
-  return { ctx, page, sock }
+  return { ctx, page, sock, answers, asked }
 }
 
 // The collapsed badge first (the prefetch), then the section opened and settled.
@@ -424,7 +489,7 @@ async function routeOptions(browser) {
       const checks = flag
         ? { routeOptions: hasOptions, noGallons: !altText.includes('⛽') && !/\bgal\b/.test(altText), tollStays: altText.includes('$12.50') }
         : {
-            todayPanel: panel.includes('How we know') && panel.includes('kept back as a reserve'),
+            todayPanel: panel.includes('How we know') && !panel.includes('kept back as a reserve') && !panel.includes('until the tank is empty'),
             // Today's rows, unchanged: the verdict card, the hero and the stops lead on the verdict's figure.
             todayRows: panel.includes('Not enough fuel — you need to stop') && panel.includes('225 miles before you need to refuel')
               && panel.includes('Fuel up within 225 mi.') && !panel.includes('miles until you run out') && !panel.includes('Check gauge'),
@@ -435,7 +500,7 @@ async function routeOptions(browser) {
           }
       record(step, flag ? 'Route Options with the flag on' : 'The flag off: today\'s panel', flag
         ? 'Route Options show, without Google\'s gallons; the toll stays'
-        : 'the panel as today ("How we know", the reserve line), no block, the badge "Fuel stop needed", Route Options with their gallons',
+        : 'the panel as today ("How we know"), with no sum under the hero, no block, the badge "Fuel stop needed", Route Options with their gallons',
       `${flags(checks)}; options "${altText.slice(0, 120)}"`, allTrue(checks), s)
     } finally {
       await ctx.close()
@@ -465,7 +530,7 @@ const CHIP_MILES = 'Fuel range: 225 miles left until empty'
 const CHIP_NONE = 'Fuel range: not available'
 const NO_TANK = { burn: NO_BURN, tankSource: 'default', tank: 200 }
 const CHIP_PHONE = [
-  { step: 'DFC1', title: 'Miles, flag on', world: {}, chip: CHIP_MILES, tapChip: true },
+  { step: 'DFC1', title: 'Miles, flag on', world: {}, chip: CHIP_MILES },
   { step: 'DFC2', title: 'Miles, flag off: the same figure', world: { flag: false }, chip: CHIP_MILES },
   { step: 'DFC3', title: 'No tank size, flag on', world: NO_TANK, chip: CHIP_NONE },
   { step: 'DFC4', title: 'No ELD, flag off', world: { flag: false, hasDevice: false, fromLivePosition: false }, chip: CHIP_NONE },
@@ -474,7 +539,7 @@ const CHIP_PHONE = [
   { step: 'DFC8', title: 'A failed read', world: {}, rangeRefused: true, chip: '' },
 ]
 const CHIP_DESKTOP = [
-  { step: 'DFC1d', title: 'Miles', world: {}, chip: CHIP_MILES, tapChip: true },
+  { step: 'DFC1d', title: 'Miles', world: {}, chip: CHIP_MILES },
   { step: 'DFC3d', title: 'No tank size', world: NO_TANK, chip: CHIP_NONE },
 ]
 
@@ -495,6 +560,13 @@ function measureHeader(page) {
     const buttonRow = buttons.length ? buttons[0].getBoundingClientRect() : null
     const offline = document.querySelector('.app-header-left .status-chip.warn')
     const o = offline ? offline.getBoundingClientRect() : null
+    // The text's own box: the button's taller tap target is overflow to scrollWidth and scrollHeight.
+    const textInChip = () => {
+      const range = document.createRange()
+      range.selectNodeContents(chip)
+      const t = range.getBoundingClientRect()
+      return t.left >= c.left - 1 && t.right <= c.right + 1 && t.top >= c.top - 1 && t.bottom <= c.bottom + 1
+    }
     return {
       offlineOnScreen: !!o && onScreen(o),
       offlineClearOfButtons: !!o && !!buttonRow && o.right <= buttonRow.left,
@@ -504,7 +576,7 @@ function measureHeader(page) {
       chipPx: c ? [Math.round(c.width), Math.round(c.height)] : null,
       sideways: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
       chipOnScreen: !!c && onScreen(c),
-      chipWhole: !!chip && chip.scrollWidth <= chip.clientWidth + 1 && chip.scrollHeight <= chip.clientHeight + 1,
+      chipWhole: !!chip && textInChip(),
       chipTakesPoint: !!chip && takesTap(chip),
       chipBelowButtons: !!c && !!buttonRow && c.top >= buttonRow.bottom - 0.5,
       chipBesideButtons: !!c && !!buttonRow && (c.top + c.bottom) / 2 >= buttonRow.top && (c.top + c.bottom) / 2 <= buttonRow.bottom,
@@ -540,14 +612,6 @@ async function chipScene(browser, sc, viewport) {
       pageBelowHeader: m.pageBelowHeader,
       heightReported: m.reported === `${m.offsetPx}px`,
       noSideways: m.sideways <= 0,
-    }
-    if (sc.tapChip) {
-      const url = page.url()
-      const writesBefore = writes.length
-      await page.locator('.fuel-chip').click()
-      await page.waitForTimeout(400)
-      checks.tapDoesNothing = page.url() === url && writes.length === writesBefore
-        && (await page.locator('.load-detail, .pw-overlay, .driver-fuel').count()) === 0
     }
     record(sc.step, `Header chip: ${sc.title} at ${size}`,
       `${sc.chip ? `"${sc.chip}"` : 'no chip'}; whole and on screen; ${phone ? 'its own row' : 'the buttons\' row'}; Password and Logout take a tap; the page starts below the header; no sideways scroll`,
@@ -591,6 +655,500 @@ async function chipSteps(browser) {
   }
   for (const sc of CHIP_DESKTOP) {
     try { await chipScene(browser, sc, DESKTOP) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+}
+
+// ---------------------------------------------------------------- the chip's tap
+const LINE_MILES = 'About 225 miles before you run out.'
+const OTHER_LOAD = 'QA-FUEL-9'
+const ON_THE_ROAD = [2, LOAD_ID, 'In Transit']
+
+function tapChip(page, viewport) {
+  const chip = page.locator('.fuel-chip')
+  return isPhone(viewport) ? chip.tap() : chip.click()
+}
+
+// Where the tap landed, as the driver sees it: the viewport, not the whole page.
+function readLanding(page) {
+  return page.evaluate(() => {
+    const header = document.querySelector('.app-header').getBoundingClientRect()
+    const tabs = document.querySelector('.van-tabbar')
+    const floor = tabs ? tabs.getBoundingClientRect().top : window.innerHeight
+    const title = document.querySelector('.fuel-title')
+    const t = title ? title.getBoundingClientRect() : null
+    const topbar = document.querySelector('.detail-topbar .topbar-title')
+    const refresh = document.querySelector('.driver-fuel .dfp-refresh')
+    const panel = document.querySelector('.driver-fuel')
+    const toast = document.querySelector('.toast.show')
+    const hit = t ? document.elementFromPoint(t.left + 2, (t.top + t.bottom) / 2) : null
+    const badge = document.querySelector('.fuel-badge')
+    return {
+      badge: badge ? badge.textContent.trim() : '',
+      titleTop: t ? t.top : null,
+      loadId: topbar ? topbar.textContent.trim() : '',
+      titleInView: !!t && t.top >= header.bottom - 1 && t.bottom <= floor,
+      titleNotCovered: !!t && !!hit && (hit === title || title.contains(hit) || hit.contains(title)),
+      fuelOpen: !!refresh && refresh.getClientRects().length > 0,
+      panel: panel && panel.getClientRects().length > 0 ? panel.innerText.replace(/\s+/g, ' ') : '',
+      toast: toast ? toast.textContent.trim() : '',
+      sideways: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
+    }
+  })
+}
+
+// The section open and its numbers in, then the collapse's animation over.
+async function waitForFuelOpen(page) {
+  await page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'visible', timeout: 15000 })
+  await page.waitForFunction(() => {
+    const b = document.querySelector('.driver-fuel .dfp-refresh')
+    return !!b && !b.disabled
+  }, null, { timeout: 15000 })
+  await page.waitForTimeout(500)
+}
+
+async function chipUp(page) {
+  await page.locator('.fuel-chip').waitFor({ state: 'visible', timeout: 30000 })
+  await page.waitForTimeout(300)
+}
+
+async function landingScene(browser, sc, viewport = PHONE) {
+  const size = `${viewport.width} x ${viewport.height}`
+  const { ctx, page } = await openScene(browser, sc, viewport, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    if (sc.before) await sc.before(page)
+    await tapChip(page, viewport)
+    await waitForFuelOpen(page)
+    const m = await readLanding(page)
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-${viewport.width}x${viewport.height}.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    const checks = {
+      rightLoad: m.loadId === (sc.opens || LOAD_ID),
+      fuelOpen: m.fuelOpen,
+      titleInView: m.titleInView,
+      titleNotCovered: m.titleNotCovered,
+      noToast: m.toast === '',
+      noSideways: m.sideways <= 0,
+      ...(sc.panelHas ? { panelHas: sc.panelHas.every((e) => m.panel.includes(e)) } : {}),
+      ...(sc.panelLacks ? { panelLacks: sc.panelLacks.every((e) => !m.panel.includes(e)) } : {}),
+      ...(sc.badge ? { badge: m.badge === sc.badge } : {}),
+    }
+    // "How we know", one tap away: the screenshot above is the first screen, with it shut.
+    if (sc.howHas) {
+      await page.locator('.dfp-how').click()
+      await page.waitForTimeout(150)
+      const how = (await page.locator('.dfp-how-body').innerText()).replace(/\s+/g, ' ')
+      checks.howHas = sc.howHas.every((e) => how.includes(e))
+      checks.howLacks = sc.howLacks.every((e) => !how.includes(e))
+    }
+    record(sc.step, `Tap the chip: ${sc.title} at ${size}`,
+      `${sc.opens || LOAD_ID}'s page, its Fuel section open and in view below the header; no toast; no sideways scroll${sc.panelLacks ? `; on the first screen, none of: ${sc.panelLacks.join(', ')}` : ''}`,
+      `${flags(checks)}; load "${m.loadId}"${sc.badge ? `; badge "${m.badge}"` : ''}; panel "${m.panel.slice(0, 160)}"`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function toastScene(browser, sc, viewport = PHONE) {
+  const size = `${viewport.width} x ${viewport.height}`
+  const { ctx, page } = await openScene(browser, sc, viewport, { openLoad: false })
+  try {
+    await chipUp(page)
+    if (sc.before) await sc.before(page)
+    await tapChip(page, viewport)
+    await page.locator('.toast.show').waitFor({ state: 'visible', timeout: 5000 })
+    const m = await readLanding(page)
+    const onScreen = await page.evaluate(() => {
+      const r = document.querySelector('.toast.show').getBoundingClientRect()
+      const tabs = document.querySelector('.van-tabbar')
+      return r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= (tabs ? tabs.getBoundingClientRect().top : window.innerHeight)
+    })
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-${viewport.width}x${viewport.height}.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    const checks = {
+      line: m.toast === sc.line,
+      noWorking: !/minus|reserve|low end|floor/i.test(m.toast),
+      onScreen,
+      stays: m.loadId === (sc.staysOn || '') && !m.fuelOpen,
+      noSideways: m.sideways <= 0,
+    }
+    if (sc.heldLong) {
+      await page.waitForTimeout(3600)
+      checks.stillUpAfter3s = (await page.locator('.toast.show').count()) === 1
+    }
+    record(sc.step, `Tap the chip, no load: ${sc.title} at ${size}`, `a toast "${sc.line}"; the screen stays where it is`, `${flags(checks)}; toast "${m.toast}"`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+// A load's own page: the tap stays there, and works again after the driver shuts the section.
+async function onItsOwnPage(browser) {
+  const sc = { world: {}, loads: [ON_THE_ROAD, [9, OTHER_LOAD, 'Assigned']] }
+  const { ctx, page } = await openScene(browser, sc, PHONE, { openLoad: false })
+  try {
+    await page.locator('.load-card').filter({ hasText: OTHER_LOAD }).first().click({ timeout: 30000 })
+    await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+    await chipUp(page)
+    await tapChip(page, PHONE)
+    await waitForFuelOpen(page)
+    const first = await readLanding(page)
+    await page.locator('.fuel-title').first().click()
+    await page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'hidden', timeout: 5000 })
+    await tapChip(page, PHONE)
+    await waitForFuelOpen(page)
+    const again = await readLanding(page)
+    const checks = {
+      staysOnItsPage: first.loadId === OTHER_LOAD && again.loadId === OTHER_LOAD,
+      opened: first.fuelOpen && first.titleInView,
+      opensAgain: again.fuelOpen && again.titleInView,
+    }
+    record('DFT6', 'Tap the chip on a load\'s own page at 390 x 844', 'that load\'s Fuel section opens, not the load on the road; shut, a second tap opens it again',
+      `${flags(checks)}; first "${first.loadId}", again "${again.loadId}"`, allTrue(checks))
+  } finally {
+    await ctx.close()
+  }
+}
+
+// A tap at the chip's place belongs to the dialog; a press that reaches the chip anyway does nothing.
+async function underADialog(browser) {
+  const { ctx, page } = await openScene(browser, { world: {} }, PHONE, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    const passwordBtn = page.locator('.app-header .header-btn').first()
+    const centre = await page.locator('.fuel-chip').evaluate((el) => {
+      const r = el.getBoundingClientRect()
+      return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }
+    })
+
+    await passwordBtn.tap()
+    await page.locator('.pw-overlay').waitFor({ state: 'visible', timeout: 5000 })
+    await page.touchscreen.tap(centre.x, centre.y)
+    await page.waitForTimeout(400)
+    const afterTap = await readLanding(page)
+
+    if (!(await page.locator('.pw-overlay').count())) {
+      await passwordBtn.tap()
+      await page.locator('.pw-overlay').waitFor({ state: 'visible', timeout: 5000 })
+    }
+    await page.evaluate(() => document.querySelector('.fuel-chip').click())
+    await page.waitForTimeout(400)
+    const afterPress = await readLanding(page)
+    const dialogStays = (await page.locator('.pw-overlay').count()) === 1
+
+    await page.locator('.pw-close').tap()
+    await page.locator('.pw-overlay').waitFor({ state: 'hidden', timeout: 5000 })
+    await tapChip(page, PHONE)
+    await waitForFuelOpen(page)
+    const closed = await readLanding(page)
+
+    const checks = {
+      tapStaysTheDialogs: afterTap.loadId === '' && afterTap.toast === '',
+      pressDoesNothing: afterPress.loadId === '' && afterPress.toast === '',
+      dialogStays,
+      worksOnceClosed: closed.loadId === LOAD_ID && closed.fuelOpen,
+    }
+    record('DFT11', 'A dialog over the chip at 390 x 844', 'no load opens and no toast while the dialog is up; once closed, the tap works', flags(checks), allTrue(checks))
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function aRealButton(browser) {
+  const { ctx, page } = await openScene(browser, { world: {} }, PHONE, { openLoad: false })
+  try {
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    const m = await page.evaluate(() => {
+      const chip = document.querySelector('.fuel-chip')
+      const r = chip.getBoundingClientRect()
+      const x = (r.left + r.right) / 2
+      const onChip = (y) => {
+        const el = document.elementFromPoint(x, y)
+        return !!el && (el === chip || chip.contains(el))
+      }
+      let top = r.top
+      while (top > 0 && onChip(top - 1)) top -= 1
+      let bottom = r.bottom
+      while (bottom < window.innerHeight && onChip(bottom)) bottom += 1
+      // Every point of the button's own rounded shape: a browser hit-tests a rounded corner as
+      // rounded, so the corner of its box was never the button's. A miss names what took the point.
+      const missesInShape = (b) => {
+        const br = b.getBoundingClientRect()
+        const radius = parseFloat(getComputedStyle(b).borderTopLeftRadius) || 0
+        const inShape = (px, py) => {
+          const dx = Math.max(br.left + radius - px, px - (br.right - radius), 0)
+          const dy = Math.max(br.top + radius - py, py - (br.bottom - radius), 0)
+          return dx * dx + dy * dy <= (radius - 0.5) * (radius - 0.5)
+        }
+        const rows = []
+        for (let py = br.top + 0.5; py < br.bottom; py += 2) rows.push(py)
+        rows.push(br.bottom - 0.5)
+        const misses = []
+        for (const py of rows) {
+          for (let px = br.left + 0.5; px < br.right; px += 2) {
+            if (!inShape(px, py)) continue
+            const el = document.elementFromPoint(px, py)
+            if (!el || !(el === b || b.contains(el))) misses.push(`${b.textContent.trim()} at ${Math.round(px)},${Math.round(py)} went to ${el ? el.className || el.tagName : 'nothing'}`)
+          }
+        }
+        return misses
+      }
+      const walkAt = (px) => {
+        const on = (py) => {
+          const el = document.elementFromPoint(px, py)
+          return !!el && (el === chip || chip.contains(el))
+        }
+        let up = r.top
+        while (up > 0 && on(up - 1)) up -= 1
+        let down = r.bottom
+        while (down < window.innerHeight && on(down)) down += 1
+        return down - up
+      }
+      return {
+        targetAcross: [r.left + 2, x, r.right - 2].map(walkAt),
+        buttonMisses: [...document.querySelectorAll('.app-header .header-btn')].flatMap(missesInShape),
+        tag: chip.tagName,
+        type: chip.getAttribute('type'),
+        label: chip.getAttribute('aria-label') || '',
+        declaredPx: parseFloat(getComputedStyle(chip, '::after').height),
+        targetPx: bottom - top,
+        chipPx: r.height,
+      }
+    })
+    let reached = false
+    for (let i = 0; i < 6 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await page.evaluate(() => document.activeElement === document.querySelector('.fuel-chip'))
+    }
+    const ring = reached && await page.evaluate(() => {
+      const chip = document.querySelector('.fuel-chip')
+      return chip.matches(':focus-visible') && getComputedStyle(chip).outlineStyle === 'solid'
+    })
+    await page.keyboard.press('Enter')
+    await waitForFuelOpen(page)
+    const landed = await readLanding(page)
+    const checks = {
+      button: m.tag === 'BUTTON' && m.type === 'button',
+      label: m.label === `${CHIP_MILES}. Show details`,
+      // Probed a pixel at a time from a fractional edge, so the walk can read up to 1 px short.
+      target44: m.declaredPx >= 44 && m.targetAcross.every((px) => px >= 43),
+      noTallerChip: m.chipPx < 44,
+      buttonsKeepWholeArea: m.buttonMisses.length === 0,
+      tabReachesIt: reached,
+      focusRing: ring,
+      enterOpens: landed.loadId === LOAD_ID && landed.fuelOpen,
+    }
+    record('DFT12', 'A real button at 390 x 844', 'a labelled button; a 44 px target on a shorter chip, across its width; every point of Password and Logout still theirs; Tab shows a ring; Enter opens the load',
+      `${flags(checks)}; target ${m.targetAcross.join(', ')}px on a ${m.chipPx}px chip; label "${m.label}"${m.buttonMisses.length ? `; ${m.buttonMisses.slice(0, 6).join('; ')}` : ''}`, allTrue(checks))
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function onALockScreen(browser, step, title, scene, ready) {
+  const { ctx, page } = await openScene(browser, scene, PHONE, { openLoad: false })
+  try {
+    await page.locator(ready).waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    const before = await page.evaluate(() => {
+      const chip = document.querySelector('.fuel-chip')
+      const r = chip.getBoundingClientRect()
+      const c = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2)
+      return { tag: chip.tagName, reachable: !!c && (c === chip || chip.contains(c)) }
+    })
+    await page.locator('.fuel-chip').tap()
+    await page.waitForTimeout(400)
+    const m = await readLanding(page)
+    const file = path.join(SHOTS, `${step.toLowerCase()}-390x844.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${step} failed: ${e.message})`))
+    const checks = {
+      plainChip: before.tag === 'SPAN',
+      reachable: before.reachable,
+      noLine: !m.toast.includes('before you run out'),
+      staysLocked: (await page.locator(ready).count()) === 1 && m.loadId === '',
+    }
+    record(step, `The chip on ${title} at 390 x 844`, 'a plain chip, not a button; a tap changes nothing', flags(checks), allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+const openHistorical = (id) => async (page) => {
+  await page.locator('.sub-tab').filter({ hasText: 'Historical' }).first().click({ timeout: 15000 })
+  await page.locator('.load-card').filter({ hasText: id }).first().click({ timeout: 15000 })
+  await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+}
+
+// The Fuel section's text on its own, the way a driver would read it.
+const panelText = async (page) => (await page.locator('.driver-fuel').innerText()).replace(/\s+/g, ' ').trim()
+
+// A tap opens the Fuel section as a hand does, so it shows exactly what opening it by hand shows:
+// the same section and title badge, asking nothing more. Both ways in on the same load and
+// answers: from the list, and on the load's own page after the driver shut the section.
+async function tapShowsWhatAHandOpenShows(browser) {
+  const sc = { world: { flag: false, leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD] }
+  const read = async (page, asked) => ({
+    ...(await readLanding(page)),
+    text: await panelText(page),
+    plans: asked['/api/fuel/trip-plan'] || 0,
+    stops: asked['/api/poi/fuel-stops'] || 0,
+  })
+  let byHand = null
+  let tappedHere = null
+  const hand = await openScene(browser, sc, PHONE, { openLoad: false })
+  try {
+    await hand.page.locator('.load-card').first().click({ timeout: 30000 })
+    await hand.page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
+    await chipUp(hand.page)
+    await hand.page.waitForTimeout(800)
+    await hand.page.locator('.fuel-title').first().click()
+    await waitForFuelOpen(hand.page)
+    byHand = await read(hand.page, hand.asked)
+    await hand.page.locator('.fuel-title').first().click()
+    await hand.page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'hidden', timeout: 5000 })
+    await tapChip(hand.page, PHONE)
+    await waitForFuelOpen(hand.page)
+    tappedHere = await read(hand.page, hand.asked)
+  } finally {
+    await hand.ctx.close()
+  }
+  let tapped = null
+  const chip = await openScene(browser, sc, PHONE, { openLoad: false })
+  try {
+    await chip.page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(chip.page)
+    await tapChip(chip.page, PHONE)
+    await waitForFuelOpen(chip.page)
+    tapped = await read(chip.page, chip.asked)
+  } finally {
+    await chip.ctx.close()
+  }
+  const checks = {
+    handFigures: byHand.text.includes('225 miles before you need to refuel') && byHand.text.includes('You can make this run'),
+    sameSectionFromTheList: tapped.text === byHand.text,
+    sameBadgeFromTheList: tapped.badge === byHand.badge,
+    sameAsksFromTheList: tapped.plans === byHand.plans && tapped.stops === byHand.stops,
+    sameOnItsOwnPage: tappedHere.text === byHand.text && tappedHere.badge === byHand.badge,
+    nothingMoreAskedOnItsOwnPage: tappedHere.plans === byHand.plans && tappedHere.stops === byHand.stops,
+    inView: tapped.titleInView && tappedHere.titleInView,
+  }
+  record('DFT28', 'A tap shows exactly what opening the section by hand shows, flag off, at 390 x 844',
+    'the same section text and title badge as a hand-open, from the list and on the load\'s own page; nothing more asked',
+    `${flags(checks)}; by hand "${byHand.text.slice(0, 100)}"; plans ${byHand.plans}/${tapped.plans}/${tappedHere.plans}, stops ${byHand.stops}/${tapped.stops}/${tappedHere.stops}`, allTrue(checks))
+}
+
+// Route Options and a tall card land after the scroll. Chromium would hold the page's place by
+// itself, so that's turned off here, to read as a phone with no scroll anchoring would.
+async function answersLandLate(browser, step, touched) {
+  const sc = {
+    world: { leg: 'to_delivery', routeMiles: 180 },
+    loads: [[2, LOAD_ID, 'In Transit', { _instructions: { state: 'published', highlights: ['high_value', 'ppe'] } }]],
+    routes: true,
+    lateMs: 2500,
+  }
+  const { ctx, page } = await openScene(browser, sc, PHONE, { openLoad: false })
+  try {
+    await page.addStyleTag({ content: '* { overflow-anchor: none !important; }' })
+    await page.locator('.load-card').first().waitFor({ state: 'visible', timeout: 30000 })
+    await chipUp(page)
+    await tapChip(page, PHONE)
+    await page.locator('.driver-fuel .dfp-refresh').waitFor({ state: 'visible', timeout: 15000 })
+    await page.waitForTimeout(600)
+    const before = await readLanding(page)
+    const landedAlready = (await page.locator('.load-instructions .li-title').count()) > 0
+    if (touched) await page.mouse.wheel(0, 30)
+    await page.locator('.load-instructions .li-title').waitFor({ state: 'visible', timeout: 15000 })
+    await page.locator('.van-collapse-item').filter({ hasText: 'Route Options' }).first().waitFor({ state: 'visible', timeout: 15000 })
+    await page.waitForTimeout(700)
+    const m = await readLanding(page)
+    const file = path.join(SHOTS, `${step.toLowerCase()}-390x844.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${step} failed: ${e.message})`))
+    const checks = touched
+      ? { firstLanding: before.titleInView, cardLandedLate: !landedAlready, notPulledBack: m.titleTop > before.titleTop + 100 }
+      : { firstLanding: before.titleInView, cardLandedLate: !landedAlready, titleInView: m.titleInView, titleNotCovered: m.titleNotCovered, heldItsPlace: Math.abs(m.titleTop - before.titleTop) <= 4, fuelOpen: m.fuelOpen }
+    record(step, `Late answers${touched ? ', after the driver touched the page,' : ''} with no scroll anchoring at 390 x 844`,
+      touched ? 'the page isn\'t pulled back to the title' : 'the title comes back into view, below the header, where it landed',
+      `${flags(checks)}; title top ${before.titleTop} to ${m.titleTop}`, allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function tapSteps(browser) {
+  const FLAG_OFF = { flag: false }
+  const CLEARS = { flag: false, leg: 'to_delivery', routeMiles: 180 }
+  const steps = [
+    () => landingScene(browser, { step: 'DFT1', title: 'a load on the road', world: { leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD], panelHas: ['225', 'miles until you run out'] }),
+    () => landingScene(browser, { step: 'DFT2', title: 'a newer load queued behind it', world: { leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD, [9, OTHER_LOAD, 'Assigned', { _queuePosition: 1 }]], opens: LOAD_ID }),
+    () => landingScene(browser, { step: 'DFT3', title: 'only queued loads', world: {}, loads: [[2, LOAD_ID, 'Assigned', { _queuePosition: 1 }], [9, OTHER_LOAD, 'Assigned', { _queuePosition: 2 }]], opens: LOAD_ID }),
+    () => landingScene(browser, {
+      step: 'DFT4', title: 'the flag off', world: FLAG_OFF, loads: [[2, LOAD_ID, 'Assigned']],
+      panelHas: ['225 miles before you need to refuel', '420 mi still to drive', 'How we know'],
+      panelLacks: ['until the tank is empty', 'minus', 'kept back', '240', 'count on'],
+      howHas: ['typical', 'best'],
+      howLacks: ['Plan on', 'until empty', 'count on', 'hard run', 'furthest', 'On this much fuel', '240'],
+    }),
+    () => landingScene(browser, {
+      step: 'DFT4b', title: 'the flag off, a run that clears', world: CLEARS, loads: [ON_THE_ROAD], badge: '225 mi range',
+      panelHas: ['225 miles before you need to refuel', '180 mi still to drive'], panelLacks: ['240', 'count on'],
+    }),
+    () => landingScene(browser, {
+      step: 'DFT4c', title: 'the flag off, refuel now', world: { ...CLEARS, pct: 3 }, loads: [ON_THE_ROAD],
+      panelHas: ['Refuel now', '180 mi still to drive'], panelLacks: ['count on', '15 mi'],
+    }),
+    () => landingScene(browser, {
+      step: 'DFT4d', title: 'the flag off, a route of 0', world: { flag: false, leg: 'to_delivery', routeMiles: 0 }, loads: [ON_THE_ROAD],
+      panelHas: ['225 miles before you need to refuel'], panelLacks: ['240', 'count on'],
+    }),
+    () => landingScene(browser, {
+      step: 'DFT4e', title: 'the flag off, refuel now with no fill-ups on record', world: { flag: false, burn: NO_BURN, tankSource: 'default', tank: 200, pct: 2, leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD],
+      panelHas: ['Refuel now', '180 mi still to drive'], panelLacks: ['count on'],
+      howHas: ["We can't give you a typical or best case for this truck yet"], howLacks: ['Treat', 'least to expect', 'floor'],
+    }),
+    () => landingScene(browser, {
+      step: 'DFT5', title: 'from the Messages tab', world: {}, loads: [[2, LOAD_ID, 'Assigned']],
+      before: async (page) => {
+        await page.locator('.van-tabbar-item').filter({ hasText: 'Messages' }).first().click()
+        await page.locator('.chat-input-bar').waitFor({ state: 'visible', timeout: 15000 })
+      },
+    }),
+    () => onItsOwnPage(browser),
+    () => toastScene(browser, { step: 'DFT7', title: 'flag on', world: {}, loads: [], line: LINE_MILES, heldLong: true }),
+    () => toastScene(browser, { step: 'DFT8', title: 'flag off, the same words', world: FLAG_OFF, loads: [], line: LINE_MILES }),
+    () => toastScene(browser, { step: 'DFT9a', title: '"not available", flag on', world: NO_TANK, loads: [], line: "Miles left unknown. This truck's tank size isn't on file. Check your gauge and ask dispatch to add it." }),
+    () => toastScene(browser, { step: 'DFT9b', title: '"not available", flag off', world: { flag: false, hasDevice: false, fromLivePosition: false }, loads: [], line: "No usable fuel reading from this truck's ELD. Check the gauge before you set off." }),
+    () => toastScene(browser, { step: 'DFT10', title: 'only an offer not yet accepted', world: {}, loads: [[2, LOAD_ID, 'Dispatched', { _accepted: false }]], line: LINE_MILES }),
+    () => underADialog(browser),
+    () => aRealButton(browser),
+    () => onALockScreen(browser, 'DFT13a', 'the onboarding lock screen', { world: {}, onboarding: { user_id: DRIVER.id, status: 'documents_pending', onboarded_at: null, documents: [], totalDocs: 5 } }, '.ob-welcome'),
+    () => onALockScreen(browser, 'DFT13b', 'the failed-load lock screen', { world: {}, driverLoadFails: true }, '.loc-card'),
+    () => landingScene(browser, {
+      step: 'DFT14', title: 'a delivered load\'s page on screen, a load on the road', world: { leg: 'to_delivery', routeMiles: 180 },
+      loads: [ON_THE_ROAD, [5, 'QA-FUEL-5', 'Delivered']], opens: LOAD_ID, before: openHistorical('QA-FUEL-5'),
+    }),
+    () => toastScene(browser, {
+      step: 'DFT15', title: 'a delivered load\'s page on screen, and no other', world: {}, loads: [[5, 'QA-FUEL-5', 'Delivered']],
+      line: LINE_MILES, staysOn: 'QA-FUEL-5', before: openHistorical('QA-FUEL-5'),
+    }),
+    () => landingScene(browser, {
+      step: 'DFT16', title: 'two loads under way, the newer row behind', world: { leg: 'to_delivery', routeMiles: 180 },
+      loads: [ON_THE_ROAD, [9, OTHER_LOAD, 'Heading to Shipper']], opens: LOAD_ID,
+    }),
+    () => landingScene(browser, {
+      step: 'DFT16b', title: 'a load left at its receiver, the next load heading to its shipper', world: { leg: 'to_delivery', routeMiles: 180 },
+      loads: [[2, LOAD_ID, 'At Receiver'], [9, OTHER_LOAD, 'Heading to Shipper']], opens: OTHER_LOAD,
+    }),
+    () => tapShowsWhatAHandOpenShows(browser),
+    () => answersLandLate(browser, 'DFT1r', false),
+    () => answersLandLate(browser, 'DFT1t', true),
+    () => landingScene(browser, { step: 'DFT1d', title: 'a load on the road', world: { leg: 'to_delivery', routeMiles: 180 }, loads: [ON_THE_ROAD] }, DESKTOP),
+    () => toastScene(browser, { step: 'DFT7d', title: 'flag on', world: {}, loads: [], line: LINE_MILES }, DESKTOP),
+  ]
+  for (const run of steps) {
+    try { await run() } catch (e) { record('DFT!', 'The chip\'s tap: aborted', '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
   }
 }
 
@@ -737,13 +1295,13 @@ async function main() {
     for (const sc of SCENES) {
       try { await phoneScene(browser, sc) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
+    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['the chip\'s tap', tapSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    // DF7's trip plan answers 400 on purpose; the browser logs that one line.
+    // Some steps answer 400 on purpose; the browser logs that one line for each.
     const consoleErrors = consoleLines.filter((l) => l.type === 'error' && !harnessLine(l))
     const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of 400/.test(l.text))
-    record('DFx', 'Page errors; console errors; writes', 'no page errors; console errors only the browser\'s line for DF7\'s 400; no writes',
+    record('DFx', 'Page errors; console errors; writes', 'no page errors; console errors only the browser\'s line for those 400s; no writes',
       `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; ${consoleErrors.length} console error line(s), ${notNetwork.length} other${notNetwork.length ? `: ${notNetwork.map((l) => l.text.slice(0, 120)).join('; ')}` : ''}; ${writes.length ? writes.join(', ') : 'no writes'}`,
       pageErrors.length === 0 && notNetwork.length === 0 && writes.length === 0)
   } finally {
