@@ -498,9 +498,23 @@ if (v) {
         pick({ onScreen: null, underWay: [RECEIVER, HEADING], queued: [] }), pick({ onScreen: null, underWay: [RECEIVER], queued: [C] })],
       [ROAD, ROAD, ROAD2, HEADING, RECEIVER])
   }
-  check('§7 the words for a refresh, still asking and failed',
-    [v.FUEL_REFRESHING, typeof v.fuelRefreshFailedText === 'function' && v.fuelRefreshFailedText('4 hrs ago'), typeof v.fuelRefreshFailedText === 'function' && v.fuelRefreshFailedText('')],
-    ['Checking for your latest fuel numbers…', "Couldn't update your fuel numbers. These are from 4 hrs ago.", "Couldn't update your fuel numbers."])
+  check('§7 the words while it asks', v.FUEL_REFRESHING, 'Checking for your latest fuel numbers…')
+  {
+    // This one line spells its units out, singular and plural, with no abbreviation.
+    const failed = (ms) => (typeof v.fuelRefreshFailedText === 'function' ? v.fuelRefreshFailedText(ms) : 'no such function')
+    const NO_AGE = "Couldn't update your fuel numbers."
+    const aged = (words) => `Couldn't update your fuel numbers. These are from ${words} ago.`
+    const M = 60 * 1000
+    const CASES = [
+      [0, NO_AGE], [20 * 1000, NO_AGE], [NaN, NO_AGE],
+      [M, aged('1 minute')], [2 * M, aged('2 minutes')], [59 * M, aged('59 minutes')],
+      [60 * M, aged('1 hour')], [90 * M, aged('2 hours')], [4 * 60 * M, aged('4 hours')], [23 * 60 * M, aged('23 hours')],
+      [24 * 60 * M, aged('1 day')], [72 * 60 * M, aged('3 days')],
+    ]
+    check('§7 a failed refresh gives the age in full: minutes, hours and days, one and many', CASES.map(([ms]) => failed(ms)), CASES.map(([, line]) => line))
+    check('§7 …with no abbreviation in any of them', CASES.map(([ms]) => failed(ms)).filter((l) => /\b(mins?|hrs?)\b/i.test(l)), [])
+    check('§7 …and the shared age words stay as the other lines use them', [v.ageWords(12), v.ageWords(60), v.ageWords(180)], ['12 min', '1 hr', '3 hrs'])
+  }
 
   const badge = (o) => v.driverFuelBadge(world(o).plan)
   check('§7 the load badge: add to finish -> "Add 65 gal", red', badge({}), { tone: 'bad', text: 'Add 65 gal' })
@@ -1151,11 +1165,13 @@ if (panelFactory) {
         check(`§8e ${name}: …the stops section keeps its urgency, the title its plan`,
           [page.b.stopsRequired.value, page.plans[page.plans.length - 1] && page.plans[page.plans.length - 1].verdict], [true, 'insufficient'])
         check(`§8e ${name}: …and it says it couldn't update, with their age`,
-          [page.b.refreshFailedLine?.value, page.b.refreshing?.value], ["Couldn't update your fuel numbers. These are from 4 hrs ago.", false])
+          [page.b.refreshFailedLine?.value, page.b.refreshing?.value], ["Couldn't update your fuel numbers. These are from 4 hours ago.", false])
         page.props.asked = 2
         await settle()
         check(`§8e ${name}: …a second tap, still no signal: the same, with the same age`,
-          [page.b.plan.value && page.b.plan.value.verdict, page.b.refreshFailedLine?.value], ['insufficient', "Couldn't update your fuel numbers. These are from 4 hrs ago."])
+          [page.b.plan.value && page.b.plan.value.verdict, page.b.refreshFailedLine?.value], ['insufficient', "Couldn't update your fuel numbers. These are from 4 hours ago."])
+        check(`§8e ${name}: …while the section's own stamp keeps its short words`,
+          flag ? null : page.b.updatedLabel.value, flag ? null : '4 hrs ago')
 
         // Back in signal: a page opened with Fuel shut gets its warning, not a null plan.
         const shut = instance(Comp, { active: false })
@@ -1184,7 +1200,21 @@ if (panelFactory) {
         page.props.asked = 1
         await settle()
         check(`§8e flag off, ${what} failed: the whole last answer stays, not half of each`,
-          [page.b.plan.value && page.b.plan.value.fuelPct, page.b.range.value && page.b.range.value.fuelPct, page.b.refreshFailedLine?.value], [48, 48, "Couldn't update your fuel numbers. These are from 4 hrs ago."])
+          [page.b.plan.value && page.b.plan.value.fuelPct, page.b.range.value && page.b.range.value.fuelPct, page.b.refreshFailedLine?.value], [48, 48, "Couldn't update your fuel numbers. These are from 4 hours ago."])
+        page.stop()
+        skew = 0
+      }
+      for (const [ahead, words] of [[MIN, '1 minute'], [5 * MIN, '5 minutes'], [60 * MIN, '1 hour'], [2 * 60 * MIN, '2 hours']]) {
+        const Comp = instanceFactory()
+        serve(world({ flag: false }))
+        const page = instance(Comp)
+        await settle()
+        Object.assign(net.answers, DEAD)
+        skew = ahead
+        page.props.asked = 1
+        await settle()
+        check(`§8e flag off, a tap ${words} on with no signal: the line says ${words}`,
+          page.b.refreshFailedLine?.value, `Couldn't update your fuel numbers. These are from ${words} ago.`)
         page.stop()
         skew = 0
       }

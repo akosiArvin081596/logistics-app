@@ -1133,7 +1133,7 @@ async function noSignalOverAWarning(browser) {
       stopsStayUrgent: dead.panel.includes('Where to fuel up'),
       badgeStays: dead.badge === 'Fuel stop needed',
       noFailureWords: !/Couldn't read your fuel level|Couldn't check whether/.test(dead.panel),
-      saysItsAge: lineText === "Couldn't update your fuel numbers. These are from 4 hrs ago.",
+      saysItsAge: lineText === "Couldn't update your fuel numbers. These are from 4 hours ago.",
       badgeOnReturn: shutBadge.badge === 'Fuel stop needed',
       healed: healed.panel.includes('225 miles before you need to refuel') && !healed.panel.includes("Couldn't update"),
       stopsAskedOnce: asked['/api/poi/fuel-stops'] === 1,

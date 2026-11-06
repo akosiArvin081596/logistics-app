@@ -1771,7 +1771,7 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 | DFT16, DFT16b | Two loads under way, the newer row at Heading to Shipper: the other In Transit, then the other left At Receiver. | The load In Transit; then the load heading to its shipper |
 | DFT17, DFT18 | A repeat tap 4 hours later, and a tap after one that failed. | The new figure, on the chip too; the figures, not the failure; the stops asked for once |
 | DFT19 | A repeat tap whose answers are held back 2.5 s. | The old figures stay; "Checking for your latest fuel numbers…"; Refresh shut; then the new figure and no line |
-| DFT20 | A repeat tap with the fuel answers failing, over a standing warning; Back and into the load again; then with them answering. | Verdict, hero, stops heading and badge stay, with "Couldn't update your fuel numbers. These are from 4 hrs ago."; the badge on return; back to normal with the answers |
+| DFT20 | A repeat tap with the fuel answers failing, over a standing warning; Back and into the load again; then with them answering. | Verdict, hero, stops heading and badge stay, with "Couldn't update your fuel numbers. These are from 4 hours ago."; the badge on return; back to normal with the answers |
 | DFT21 | The section shut and reopened by hand 16 minutes on, flag off. | The new figure; the stops asked for once |
 | DFT1r, DFT1t | Route Options and a tall instructions card landing 2.5 s late, with `overflow-anchor: none`; then the same after a wheel. | The title holds its place below the header; after the driver's touch, the page isn't pulled back |
 | DFT1d, DFT7d | 1280x800. | A load's Fuel section opens; with no load, the toast |

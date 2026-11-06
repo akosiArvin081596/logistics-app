@@ -886,8 +886,7 @@ function keptOverFailure(entry, last) {
   return { ...last, refreshFailed: true }
 }
 function refreshFailedText(entry) {
-  const age = ago(new Date(Number(entry.at) || Date.now()).toISOString())
-  return fuelRefreshFailedText(age === 'just now' ? '' : age)
+  return fuelRefreshFailedText(Date.now() - (Number(entry.at) || Date.now()))
 }
 
 // A chip tap asks for the figures again unless they're under a minute old. The chip is
