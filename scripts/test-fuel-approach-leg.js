@@ -1605,7 +1605,7 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 		assert.ok(add.includes("Leave blank to use this truck's fuel receipts once there are enough, otherwise the 6.5 MPG fleet default."), "the add form");
 		assert.ok(table.includes("'Fuel receipts, else 6.5 mpg (default)'"), "the truck's page");
 		assert.ok(SRC.includes('"unset (fuel receipts, else the fleet default)"'), "the audit line");
-		for (const [name, text] of [["TruckTable.vue", table], ["AddTruckForm.vue", add], ["server.js", SRC]]) {
+		for (const [name, text] of [["the truck table", table], ["the add form", add], ["the server", SRC]]) {
 			assert.ok(!/auto-derive|Auto from ELD|derived from ELD \/ receipts/.test(text), name);
 		}
 		assert.strictEqual(live.DEFAULT_MPG, 6.5, "the words' 6.5 is the fleet default");
