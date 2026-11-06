@@ -412,7 +412,7 @@ async function nextSignInRun(browser, size) {
 // ---------------------------------------------------------------- T: a load In Transit
 async function inTransitRun(browser, size) {
   const t = size.tag
-  const state = freshState({ behind: true, status: 'In Transit' })
+  const state = freshState({ behind: true, hasNote: true, status: 'In Transit' })
   const { ctx, page } = await openPage(browser, size, state)
   try {
     await appOpen(page)
