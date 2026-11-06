@@ -150,7 +150,7 @@ const plainRateCon = (docs) => pdfWith(`BT (Load confirmation for a made-up ship
 // ------------------------------------------------------------------ server.js, lifted
 // The engine as server.js builds it, and the helpers the block hands the job.
 const PROVIDED = ["db", "brokerInvoice", "console", "process", "require", "getSheets", "getDrive", "SPREADSHEET_ID", "GEMINI_API_KEY",
-	"runRateConGemini", "renderHtmlToPdf", "DATA_DIR", "path", "fs", "RATECON_DRIVE_FOLDER_ID", "__dirname"];
+	"runRateConGemini", "renderHtmlToPdf", "DATA_DIR", "path", "fs", "RATECON_DRIVE_FOLDER_ID", "__dirname", "factoringRoutes"];
 const LIFT = closure(SRC, {
 	roots: ["brokerInvoiceDraft", "nextInvoiceNumber", "sheetDayKey", "integrityClosedMonthsOf", "logAudit", "requireRole",
 		"parseSheet", "deduplicateLoads", "insertDispatchNotification", "noticeTypeScope"],
@@ -280,6 +280,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	const H = new Function(...PROVIDED, `${LIFT.text}\nreturn { ${LIFT.names.join(", ")} };`)(
 		db, brokerInvoice, quiet, proc, serverRequire, async () => sheets, async () => drive, "made-up-sheet", "made-up-gemini-key",
 		runRateConGemini, renderHtmlToPdf, w.dir, path, fs, "made-up-ratecon-folder", ROOT,
+		// What the engine asks before it prints: the shipped routes over this world's database.
+		require(path.join(ROOT, "lib", "factoring-routes.js")).create({ db }),
 	);
 	w.H = H;
 	const engine = H.brokerInvoiceDraft;
@@ -653,6 +655,33 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq((await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0002/retry", DISP, {})).status, 403, "§4 a Dispatcher can't Try again");
 		const retry = await w.call("POST", "/api/auto-invoice/loads/LD-TEST-0002/retry", SA, {});
 		eq([retry.status, w.state("LD-TEST-0002"), w.audits("auto_invoice_retry").length], [200, ["queued", ""], 1], "§4 a Super Admin's Try again queues it, audited");
+	}
+
+	// ===================================================================== §4b
+	// The marking route refuses a working claim, so a mark can't land here in production:
+	// the runner writes the row, to show the engine's own read costs nothing and sends nothing.
+	section("§4b a load factored while the job builds its invoice, the engine as shipped");
+	{
+		const w = await world({ env: ON_ENV });
+		require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(w.db);
+		eq((await w.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§4b (fixture) the domain is confirmed");
+		await w.job.tick();
+		const before = { mint: w.calls.mint, gmail: w.gmail.length, seq: w.seq(), renderer: w.calls.renderer };
+		const prepare = w.H.brokerInvoiceDraft.prepare;
+		w.H.brokerInvoiceDraft.prepare = (args) => {
+			w.H.brokerInvoiceDraft.prepare = prepare;
+			w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
+				.run(rules.loadKey("LD-TEST-0040"), "LD-TEST-0040", "2026-11-03T15:00:00.000Z", "2026-11-03T15:00:00.000Z");
+			return prepare(args);
+		};
+		w.deliver("LD-TEST-0040", rateCon());
+		await w.job.tick();
+		eq(w.state("LD-TEST-0040"), ["queued", "RETRY_LATER"], "§4b no assignment lines to print: the engine refuses, and the job comes back to it");
+		eq([w.calls.mint - before.mint, w.gmail.length - before.gmail, w.seq(), w.calls.renderer - before.renderer], [0, 0, before.seq, 0], "§4b ...no number, no render, nothing in Gmail");
+		w.db.prepare("UPDATE auto_invoice_claims SET next_attempt_at = '' WHERE load_key = ?").run(rules.loadKey("LD-TEST-0040"));
+		await w.job.tick();
+		eq(w.state("LD-TEST-0040"), ["skipped", "LOAD_FACTORED"], "§4b ...and when it does, the free checks skip the factored load");
+		eq([w.calls.mint - before.mint, w.gmail.length - before.gmail], [0, 0], "§4b ...still no number and nothing in Gmail");
 	}
 
 	// ===================================================================== §5
@@ -1048,6 +1077,25 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		await settle();
 		await settle();
 		eq(w.smtp.length, 1, "§12 a repeat tap on the load sent: nothing more");
+
+		// The marking route refuses a working claim, so the runner writes the row: with no timer to
+		// come back, a build that finds the load factored goes to a person, and nothing is spent or sent.
+		{
+			const x = await startedWorld();
+			require(path.join(ROOT, "lib", "factoring-store.js")).ensureSchema(x.db);
+			const prepare = x.H.brokerInvoiceDraft.prepare;
+			x.H.brokerInvoiceDraft.prepare = (args) => {
+				x.H.brokerInvoiceDraft.prepare = prepare;
+				x.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)")
+					.run(rules.loadKey("LD-TEST-1240"), "LD-TEST-1240", "2026-11-03T15:00:00.000Z", "2026-11-03T15:00:00.000Z");
+				return prepare(args);
+			};
+			atReceiver(x, "LD-TEST-1240");
+			await x.statusRoute()(DRIVER, "LD-TEST-1240");
+			await until(() => open(x) === 0 && x.state("LD-TEST-1240")[0] !== "waiting", "§12 the marked load's run");
+			eq(x.state("LD-TEST-1240"), ["needs_attention", "RETRY_LATER"], "§12 a load factored during the build, with the trigger on: to a person");
+			eq([x.calls.mint, x.smtp.length, x.gmail.length, x.calls.renderer, x.drafts().length], [0, 0, 0, 0, 0], "§12 ...no number, no render, no mail, no draft row");
+		}
 
 		// Only the driver: the same route, the same load shape, the office's roles.
 		for (const [user, id] of [[DISP, "LD-TEST-1202"], [SA, "LD-TEST-1203"]]) {

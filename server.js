@@ -55880,7 +55880,9 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 // rules; lib/factoring-routes.js, the routes and the Draft Invoice button's steps).
 // The tables are made here whatever the settings, empty until a mark. Settings, read
 // once at start (off in a replica): TRIUMPH_FACTORING_ENABLED (marking, exactly
-// "true") and TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody).
+// "true"), TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody), TRIUMPH_NOA_LINES
+// (what a factored invoice prints; unset refuses one) and the submit mode's settings
+// (lib/triumph-rules.js submitMode(): a factored draft can be confirmed only once live).
 require("./lib/factoring-store").ensureSchema(db);
 const factoringRoutes = require("./lib/factoring-routes").create({
 	db,
@@ -55893,7 +55895,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
 });
 factoringRoutes.mount(app, { requireRole, refuseCrossSite });
-console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}`);
+console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}; assignment lines ${factoringRoutes.noaLinesSet ? "set" : "unset"}; submit ${factoringRoutes.submitMode}`);
 // </factoring-wiring>
 
 // <auto-invoice-wiring>
@@ -57379,6 +57381,7 @@ const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
 	safeAttachmentName,
 	logAudit,
 	sanitizeEvidenceText,
+	assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),
 	env: process.env,
 });
 
@@ -57673,7 +57676,7 @@ app.post(
 				? factoringRoutes.draftHandoff(req, {
 					loadId, invoiceId, mintedInvoiceId, confirmed: factoringCheck.confirmed, reason: factoringCheck.reason,
 					path: gmailUser && gmailPass ? "imap" : "n8n", user: gmailUser, recipient: invoiceTo.email, total: rendered.total,
-					reissue: Boolean(sentCheck.reissue),
+					reissue: Boolean(sentCheck.reissue), printedAssignment: Boolean(draft.assignment),
 				})
 				: null;
 			if (handoff && !handoff.ok) return res.status(handoff.http).json(handoff.json);
@@ -57898,6 +57901,10 @@ app.post(
 		const linesOn = invoiceLines.linesEnabled(process.env);
 		const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
 		if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
+		// A factored load: refused as the approve refuses it, and with the confirmation the
+		// page prints what the approve would. Off the marker, this answers as before.
+		const factoring = factoringRoutes.previewCheck(req, loadId);
+		if (!factoring.ok) return res.status(factoring.http).json(factoring.json);
 
 		// ⚠️ 422 INVOICE_TOTAL_UNKNOWN keeps EXACTLY its existing meaning here —
 		// nothing derivable AND nothing supplied. On this route nothing is ever
@@ -57991,7 +57998,7 @@ app.post(
 				invoiceId, invoiceDate, brokerName, invoiceTo, orderNumber, poNumber, deliveryDate, total, notes,
 				invoiceLines: lineSummary,
 			});
-			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
+			const invoicePdf = await renderHtmlToPdf(factoringRoutes.withAssignment(invoiceHtml, factoring.assignment));
 
 			// Return the DERIVED STRINGS too, so the client never re-implements a
 			// server template. The Email tab shows a message box and, read-only
@@ -58037,6 +58044,8 @@ app.post(
 				...(linesOn ? { invoiceLines: invoiceLines.previewEcho(lineSummary) } : {}),
 			});
 		} catch (err) {
+			// A factored page that still shows a bank number: its own words, as the approve answers.
+			if (err && err.code === "ASSIGNMENT_NOT_PRINTABLE") return res.status(err.http).json({ error: err.message, code: err.code });
 			console.error("Invoice preview error:", err.message);
 			return res.status(500).json({ error: "Failed to render the invoice preview." });
 		} finally {

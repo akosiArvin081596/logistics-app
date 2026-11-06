@@ -134,6 +134,25 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });
 		eq(`36 the settings export skips ${n} and writes no part of its value`, [exp.copied, exp.skipped, exp.text.includes(v)], [["ROUTEMATE_ENABLED"], [{ name: n, rule: "production only: names a production target" }], false]);
 	}
+	// A factored invoice's remit lines, and the two settings that let a submission go live: production's alone.
+	for (const [n, v, rule] of [["TRIUMPH_NOA_LINES", "MADE-UP LINE ONE\nMADE-UP LINE TWO\nEXAMPLE FACTOR LLC\nPO DRAWER 000, NOWHERE, ZZ  00000-0000", "production only: names a production target"],
+		["TRIUMPH_SUBMIT_DRY_RUN", "false", "production only: lets invoices go to an outside party"], ["TRIUMPH_LIVE_CONFIRMED_ON", "2026-11-05", "production only: lets invoices go to an outside party"]]) {
+		const verdict = rules.classifySetting(n, v, { readByApp: new Set([n]) });
+		eq(`${n} is never copied, even when the app reads it`, [verdict.copy, verdict.rule], [false, rule]);
+		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });
+		eq(`the settings export skips ${n} and writes no part of its value`, [exp.copied, exp.skipped, exp.text.includes(v)], [["ROUTEMATE_ENABLED"], [{ name: n, rule }], false]);
+	}
+	{
+		// Copied or not, a replica's mode is off and its lines don't exist.
+		const triumphRules = require(path.join(ROOT, "lib", "triumph-rules.js"));
+		const { readSettings } = require(path.join(ROOT, "lib", "factoring-routes.js"));
+		const set = { TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05", TRIUMPH_NOA_LINES: "MADE-UP ONE\nMADE-UP TWO\nMADE-UP THREE\nMADE-UP FOUR" };
+		eq("a replica's submit mode reads off, whatever its settings say", triumphRules.submitMode(set, { replica: true }), "off");
+		const onReplica = readSettings(set, { replica: true });
+		eq("...the factoring routes read it so, and hold no assignment lines", [onReplica.submitMode, onReplica.noaLines], ["off", null]);
+		const offReplica = readSettings(set, { replica: false });
+		eq("...off a replica the same settings read live, with the lines", [offReplica.submitMode, offReplica.noaLines && offReplica.noaLines.length], ["live", 4]);
+	}
 	eq("proxy settings are found in any case, and NODE_USE_ENV_PROXY", rules.proxySettingsSet({ https_proxy: "x", HTTP_PROXY: "y", All_Proxy: "z", NODE_USE_ENV_PROXY: "1", NO_PROXY: "localhost", PATH: "/bin" }), ["All_Proxy", "HTTP_PROXY", "NODE_USE_ENV_PROXY", "https_proxy"]);
 	eq("outboundCredentialsSet names credentials, ignores empties and SESSION_SECRET", rules.outboundCredentialsSet({ GEMINI_API_KEY: "x", GOOGLE_MAPS_API_KEY: "", SESSION_SECRET: "s", ROUTEMATE_ENABLED: "true", FEED: "https://a:b@x.example.test" }), ["FEED (a URL carrying credentials)", "GEMINI_API_KEY"]);
 	for (const n of rules.OUTBOUND_CREDENTIALS) ok(`${n} refuses a start`, rules.outboundCredentialsSet({ [n]: "x" }).length === 1);
