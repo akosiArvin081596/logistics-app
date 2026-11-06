@@ -63364,8 +63364,11 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		const receipt = receiptMpgForVehicle(vehicleId);
 		const mpg = receipt ? receipt.mpg : mpgBase;
 		const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
+		// Read once and reused by the words below: a second read can refresh the cache at a
+		// different moment from main's, and move a later bell.
+		const burn = burnRateForVehicle(vehicleId);
 		const interval = fuelModel.rangeInterval({
-			fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
+			fuelPct: reading.fuelPct, burn, rangeMiles: shown.rangeMiles,
 		});
 		const planning = interval.planning;
 		if (planning == null) return;
@@ -63389,7 +63392,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		let shared = null;
 		if (!DRIVER_FUEL_GALLONS_ENABLED) {
 			try {
-				shared = sharedFuelRangeFor({ truck, rows, receipt, burn: burnRateForVehicle(vehicleId) });
+				shared = sharedFuelRangeFor({ truck, rows, receipt, burn });
 			} catch { shared = null; }
 		}
 		const chipPlanning = shared ? shared.interval.planning : planning;

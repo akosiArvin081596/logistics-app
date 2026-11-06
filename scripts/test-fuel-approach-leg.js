@@ -641,7 +641,7 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 	};
 	// §12: the low-fuel alert, lifted whole onto this world's database, recording what it
 	// sends. `clock.now` is the time it reads; the throttle and latch live with `check`.
-	const alert = (clock = { now: NOW }, { lift = alertLift, flag = flagOn } = {}) => {
+	const alert = (clock = { now: NOW }, { lift = alertLift, flag = flagOn, burnRate = null } = {}) => {
 		const sent = [];
 		const errors = [];
 		class ClockDate extends Date {
@@ -656,7 +656,7 @@ function buildWorld(Database, lifted, appRequire, o = {}, flagOn = false) {
 			emitDispatchNotice: (notice) => { sent.push({ kind: "notice", notice }); },
 			findDriverAccountSpelling: (name) => name,
 			receiptMpgForVehicle: deps.receiptMpgForVehicle,
-			burnRateForVehicle: deps.burnRateForVehicle,
+			burnRateForVehicle: burnRate || deps.burnRateForVehicle,
 		};
 		const quiet = { log() {}, warn() {}, error: (...a) => errors.push(a.join(" ")) };
 		const was = process.env.DRIVER_FUEL_GALLONS_ENABLED;
@@ -1649,12 +1649,49 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			assert.deepStrictEqual([now.bells[0].mile, now.bells[0].said, now.bells.length], [beforeMile, NO_MILES, 1]);
 		});
 	}
-	check("a truck over time on the fleet's usual shape, no MPG on file, receipts 5.92, really 4.72, from 75%: no bell before empty, as on main; the bell's rule isn't this change's to move", () => {
-		const o = { avgMpg: 0, receipt: { mpg: 5.92 } };
-		const before = drive(o, true, { from: 75, realMpg: 4.72 });
-		const now = drive(o, false, { from: 75, realMpg: 4.72 });
+	check("a truck whose receipts read above its real MPG, no MPG on file, receipts 6.0, really 4.5, from 75%: no bell before empty, as on main; the bell's rule isn't this change's to move", () => {
+		const o = { avgMpg: 0, receipt: { mpg: 6.0 } };
+		const before = drive(o, true, { from: 75, realMpg: 4.5 });
+		const now = drive(o, false, { from: 75, realMpg: 4.5 });
 		assert.deepStrictEqual([before.bells.length, before.emptyAt !== null, now.bells.length, now.emptyAt], [0, true, 0, before.emptyAt]);
 	});
+
+	// The burn rate's 10-minute cache, lifted whole: the alert must read it once a check, as main
+	// does, or a second read can refresh it at another moment and move a later bell.
+	const burnLift = closure(SRC, { roots: ["burnRateForVehicle"], provided: ["burnLegsForVehicle"], denied: ["server", "io", "transporter", "sendEmail"] });
+	const legsAt = (milesPerPoint) => Array.from({ length: 12 }, (_, i) => ({ label: `leg ${i}`, miles: 30 * milesPerPoint, points: 30 }));
+	const cachedBurnRun = (which) => {
+		const w = buildWorld(Database, lifted, appRequire, { ...ALERT_TRUCK, avgMpg: 6, fuel: 40, fixAgoMin: 0 }, which === "on");
+		const clock = { now: NOW };
+		const legs = { now: legsAt(10) };
+		class ClockDate extends Date {
+			constructor(...a) { if (a.length) super(...a); else super(clock.now); }
+			static now() { return clock.now; }
+		}
+		const real = new Function("burnLegsForVehicle", "Date", "require", `${burnLift.text}\nreturn burnRateForVehicle;`)(() => legs.now, ClockDate, appRequire);
+		const reads = [];
+		// Each read takes a millisecond, so the cache can turn 10 minutes old between two of them.
+		const burnRate = (vid) => { reads.push(clock.now); const b = real(vid); clock.now += 1; return b; };
+		const a = which === "main" ? w.alert(clock, { lift: mainLift, flag: false, burnRate }) : w.alert(clock, { flag: which === "on", burnRate });
+		const row = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, fuel_pct, location_date_ms) VALUES (?, ?, ?, ?, ?, ?)");
+		const at = (ms, fuel) => { clock.now = NOW + ms; if (fuel != null) row.run(w.vid, FIX.lat, FIX.lng, 100000, fuel, clock.now); };
+		const rings = [];
+		const checkAt = (label) => { const had = a.sent.length; a.check(); if (a.sent.length > had) rings.push([label, alertSaid(a.sent)]); };
+		const MIN = 60000;
+		at(1 * MIN);
+		const stamped = clock.now;
+		burnRate(w.vid);
+		at(stamped - NOW + 10 * MIN - 1, 9);
+		const ringReads = reads.length;
+		checkAt("the ring, 1 ms before the cache turns 10 minutes old");
+		const readsAtRing = reads.length - ringReads;
+		at(stamped - NOW + 16 * MIN, 16);
+		burnRate(w.vid);
+		at(stamped - NOW + 17 * MIN);
+		legs.now = legsAt(5);
+		for (const m of [25, 40, 55, 70]) { at(stamped - NOW + m * MIN, 16); checkAt(`${m - 10} min after the ring`); }
+		return { rings, readsAtRing };
+	};
 
 	// --- replaying main's own alert ----------------------------------------------
 	// main's maybeAlertLowFuel(), kept whole in a fixture, sees each row beside the branch's on
@@ -1752,6 +1789,13 @@ async function oneRangeSection(Database, lifted, appRequire, digestOf, onWorlds)
 			if (bells !== null) assert.strictEqual(r.rings.main.length, bells, JSON.stringify(r.rings.main));
 		});
 	}
+	check("the burn rate is read once a check: with the cache turning 10 minutes old during a ring's check, main's repeat bell still rings, at the same check, on both flags", () => {
+		const runs = Object.fromEntries(["main", "off", "on"].map((k) => [k, cachedBurnRun(k)]));
+		assert.deepStrictEqual(runs.main.rings.map((r) => r[0]), ["the ring, 1 ms before the cache turns 10 minutes old", "30 min after the ring"], "main's two bells");
+		assert.deepStrictEqual(runs.off.rings.map((r) => r[0]), runs.main.rings.map((r) => r[0]), "flag off");
+		assert.deepStrictEqual(runs.on.rings, runs.main.rings, "flag on, words and all");
+		assert.deepStrictEqual([runs.main.readsAtRing, runs.off.readsAtRing, runs.on.readsAtRing], [1, 1, 1]);
+	});
 	check("replay against main, generated trucks, each through dropouts, fills, silent gaps, parked wobbles and odometers of 0: no ring or re-arm missing, extra or moved, on either flag", () => {
 		const rnd = seededRandom(1101);
 		const any = (list) => list[Math.floor(rnd() * list.length)];
