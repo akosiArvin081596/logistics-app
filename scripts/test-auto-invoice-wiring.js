@@ -47,10 +47,12 @@
  *      60 minutes after its own stamp, with no engine call; the block's
  *      AUTO_INVOICE_SEND_SETTLE_MINUTES reaches the job (a whole number 0-1440, else 60)
  *  §12 the driver's Delivered through PUT /api/driver/status as shipped and the block,
- *      the engine as shipped (AUTO_INVOICE_DRIVER_TRIGGER_ENABLED, named nowhere): no
- *      timer; a Driver's tap: the record before the sheet write, one SMTP call after the
- *      answer; a Dispatcher's and a Super Admin's: none; a sheet write that reports failure
- *      but landed; a throw after the write; a repeat tap; a replica; Try again's look
+ *      the engine as shipped (AUTO_INVOICE_DRIVER_TRIGGER_ENABLED, named nowhere): the
+ *      5-minute watch, never a tick; a Driver's tap: the record before the sheet write, one
+ *      SMTP call after the answer; a Dispatcher's and a Super Admin's: none; a sheet write
+ *      that reports failure but landed; a throw after the write; a repeat tap; a replica;
+ *      Try again's look; a sheet edit after a send flags that load alone at the watch, with
+ *      one email to AUTO_INVOICE_ALERT_TO through sendEmail() (no fallback, never a replica)
  *  §13 only this route starts one, and server.js around it (text pins)
  *  §14 who a C.H. Robinson invoice may go to, through the route, the block, the engine and the
  *      Drive lookup as shipped (AUTO_INVOICE_KNOWN_ADDRESS_ENABLED, named nowhere): an address a
@@ -212,6 +214,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		looks: [],
 		lookAnswer: { verdict: "clean", mailboxes: {} },
 		batchHook: null,
+		// What server.js's sendEmail() is handed: the alert emails (AUTO_INVOICE_ALERT_TO).
+		mails: [],
 		dir: fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-wiring-")),
 	};
 	fs.mkdirSync(path.join(w.dir, "uploads"));
@@ -385,6 +389,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			},
 		},
 		rateLimit: (opts) => { w.limiters.push(opts); return (req, res, next) => { w.limited++; next(); }; },
+		// server.js's sendEmail(to, subject, html): true when handed to Gmail. Made up: kept here.
+		sendEmail: async (to, subject, html) => { w.mails.push({ to, subject, html }); return true; },
 	};
 	w.schemaBefore = schema(db);
 	const names = Object.keys(scope);
@@ -757,6 +763,12 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		ok(words.includes(`default ${caps.maxPerHour}`) && words.includes(`default ${caps.maxPerDay}`), `§7 ...the caps' defaults (${caps.maxPerHour} an hour, ${caps.maxPerDay} a day) as the rules read them`);
 		ok(/Shadow makes no Gmail drafts: it only records what it would draft/.test(words) && /in-app Super Admin notice/.test(words), "§7 ...shadow makes no Gmail drafts; its one other write is the settings notice");
 		ok(/a GET under \/api\/auto-invoice\/ reaches the app page/.test(words), "§7 ...off: a GET under /api/auto-invoice/ reaches the app page (no route is mounted)");
+		// Hold one load: its kill switch, and the alert address with no default.
+		const allWords = TEMPLATE.replace(/\n#\s?/g, " ");
+		ok(/^# AUTO_INVOICE_HOLD_ONE_LOAD=$/m.test(TEMPLATE) && /AUTO_INVOICE_HOLD_ONE_LOAD: a kill switch, ON unless set to false/.test(allWords),
+			"§7 FAILS ON THE OLD CODE: the settings template names AUTO_INVOICE_HOLD_ONE_LOAD, unset, a kill switch");
+		ok(/^# AUTO_INVOICE_ALERT_TO=$/m.test(TEMPLATE) && /AUTO_INVOICE_ALERT_TO: [^#]*No default and no fallback/.test(allWords),
+			"§7 FAILS ON THE OLD CODE: ...and AUTO_INVOICE_ALERT_TO, unset, with no default and no fallback");
 	}
 
 	// ===================================================================== §8
@@ -1025,9 +1037,22 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 
 		const w = await startedWorld();
 		eq(w.job.triggerMode, true, "§12 FAILS ON THE OLD CODE: real drafts, the setting named nowhere: the driver's Delivered starts the invoice");
-		eq([w.startsJob, w.intervals.length], [["automatic invoice drafts"], 0], "§12 FAILS ON THE OLD CODE: behind startsJob(), and no timer");
-		ok(w.out.includes("[auto-invoice] trigger on, no timer"), "§12 FAILS ON THE OLD CODE: the start-up line says so");
-		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger && (await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger.timer, false, "§12 FAILS ON THE OLD CODE: and the status route");
+		// The 5-minute watch (hold one load, plan §2.4): what a Super Admin's read runs, and no tick.
+		eq([w.startsJob, w.intervals.map((i) => i.ms)], [["automatic invoice drafts"], [300000]], "§12 FAILS ON THE OLD CODE: behind startsJob(), one timer, every 5 minutes: the watch");
+		ok(w.out.includes("[auto-invoice] trigger on; the watch runs every 5 minutes"), "§12 FAILS ON THE OLD CODE: the start-up line says so");
+		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger && (await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger.timer, true, "§12 FAILS ON THE OLD CODE: and the status route");
+		{
+			let watched = 0;
+			let ticked = 0;
+			const realWatch = w.job.watch;
+			const realTick = w.job.tick;
+			w.job.watch = () => { watched++; };
+			w.job.tick = async () => { ticked++; return {}; };
+			w.intervals[0] && w.intervals[0].fn();
+			w.job.watch = realWatch;
+			w.job.tick = realTick;
+			eq([watched, ticked], [1, 0], "§12 FAILS ON THE OLD CODE: the timer runs the watch, never a tick");
+		}
 
 		const tap = w.statusRoute();
 		atReceiver(w, "LD-TEST-1201");
@@ -1159,6 +1184,48 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		jobOff.addPod("LD-TEST-1211");
 		await jobOff.job.finishStartUp();
 		eq([(await jobOffTap(DRIVER, "LD-TEST-1211")).status, jobOff.job.triggerMode, jobOff.intervals.length, JSON.stringify(schema(jobOff.db)) === JSON.stringify(jobOff.schemaBefore)], [200, false, 0, true], "§12 the job off: the route as before, no table, no timer");
+
+		// Hold one load, through the block: the watch finds a sheet edit with no Super Admin read, flags that
+		// load alone, and emails AUTO_INVOICE_ALERT_TO (trimmed) through server.js's sendEmail().
+		const ALERTS_ON = { ...SEND_ON, AUTO_INVOICE_ALERT_TO: "  alerts@example.test ", ADMIN_NOTIFY_EMAIL: "admin@example.test" };
+		const watched = await startedWorld({ env: ALERTS_ON });
+		const watchedTap = watched.statusRoute();
+		atReceiver(watched, "LD-TEST-1212");
+		await watchedTap(DRIVER, "LD-TEST-1212");
+		await until(() => watched.smtp.length === 1 && open(watched) === 0, "§12 sent, for the watch");
+		watched.setLoad("LD-TEST-1212", { "  Payment  ": "1600" });
+		eq(watched.intervals.length, 1, "§12 FAILS ON THE OLD CODE: the watch's timer");
+		if (watched.intervals[0]) watched.intervals[0].fn();
+		await until(() => (watched.claim("LD-TEST-1212") || {}).changed_fields === "payment" || !watched.intervals[0], "§12 the watch flags it");
+		await until(() => watched.mails.length === 1 || !watched.intervals[0], "§12 the hold's email");
+		const stop = watched.db.prepare("SELECT value FROM auto_invoice_meta WHERE key = 'send_stop_reason'").get();
+		eq([watched.claim("LD-TEST-1212").changed_fields, stop ? stop.value : null, watched.smtp.length], ["payment", null, 1],
+			"§12 FAILS ON THE OLD CODE: a payment edited on the sheet after the send: the watch flags that load, sending isn't stopped, nothing is sent again");
+		eq(watched.mails.map((m) => [m.to, m.subject]), [["alerts@example.test", "Load LD-TEST-1212: changed after sending, needs a check"]],
+			"§12 FAILS ON THE OLD CODE: ...one email, to AUTO_INVOICE_ALERT_TO only (never ADMIN_NOTIFY_EMAIL), through server.js's sendEmail()");
+		atReceiver(watched, "LD-TEST-1213");
+		await watchedTap(DRIVER, "LD-TEST-1213");
+		await until(() => watched.smtp.length === 2 && open(watched) === 0, "§12 the next load, sent");
+		eq(watched.state("LD-TEST-1213"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: ...and the next driver's load is sent");
+		// No fallback: with AUTO_INVOICE_ALERT_TO unset, ADMIN_NOTIFY_EMAIL set, nothing is mailed, and the reads say so.
+		const fallback = await startedWorld({ env: { ...SEND_ON, ADMIN_NOTIFY_EMAIL: "admin@example.test" } });
+		const fallbackTap = fallback.statusRoute();
+		atReceiver(fallback, "LD-TEST-1214");
+		await fallbackTap(DRIVER, "LD-TEST-1214");
+		await until(() => fallback.smtp.length === 1 && open(fallback) === 0, "§12 sent, no alert address");
+		fallback.setLoad("LD-TEST-1214", { "  Payment  ": "1600" });
+		if (fallback.intervals[0]) fallback.intervals[0].fn();
+		await until(() => (fallback.claim("LD-TEST-1214") || {}).changed_fields === "payment" || !fallback.intervals[0], "§12 flagged, no alert address");
+		await settle();
+		eq([fallback.mails.length, (await fallback.call("GET", "/api/auto-invoice/settings", SA)).json.alerts], [0, { on: false }],
+			"§12 FAILS ON THE OLD CODE: AUTO_INVOICE_ALERT_TO unset: no fallback to ADMIN_NOTIFY_EMAIL, nothing mailed, and the settings read says alerts are off");
+		ok(fallback.logs.some((l) => /alert emails off/.test(l)) && !fallback.logs.some((l) => l.includes("@")), "§12 FAILS ON THE OLD CODE: ...one log line says so, with no address");
+		// A replica: the setting is never read there, so nothing could be mailed.
+		const replicaAlerts = await world({ env: ALERTS_ON, replica: { stamp: "made-up" } });
+		eq((await replicaAlerts.call("GET", "/api/auto-invoice/settings", SA)).json.alerts, { on: false }, "§12 FAILS ON THE OLD CODE: a replica: alerts are off, whatever the setting says");
+		eq(SRC.split("process.env.AUTO_INVOICE_ALERT_TO").length - 1, 1, "§12 FAILS ON THE OLD CODE: server.js reads AUTO_INVOICE_ALERT_TO once");
+		ok(BLOCK.includes("alertTo: REPLICA ? \"\" : String(process.env.AUTO_INVOICE_ALERT_TO ?? \"\").trim(),") && BLOCK.includes("sendAlertMail: sendEmail,"),
+			"§12 FAILS ON THE OLD CODE: ...in the block, trimmed, with no default and no fallback, never in a replica, sent through sendEmail()");
 	}
 
 	// ===================================================================== §13
@@ -1184,7 +1251,12 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const listen = SRC.slice(SRC.indexOf("server.listen(PORT, BIND_HOST"));
 		ok(listen.indexOf("autoInvoice.finishStartUp();") > 0 && listen.indexOf("autoInvoice.finishStartUp();") < listen.indexOf("process.umask(BOOT_UMASK)"), "§13 FAILS ON THE OLD CODE: start-up's second half runs when the app is listening");
 		ok(BLOCK.indexOf("autoInvoice.startTrigger()") > BLOCK.indexOf('startsJob("automatic invoice drafts")') && BLOCK.indexOf("autoInvoice.startTrigger()") < BLOCK.indexOf("setInterval("), "§13 FAILS ON THE OLD CODE: the first half runs behind startsJob(), before the app listens");
-		ok(/if \(autoInvoice\.triggerMode\) \{[\s\S]*?\} else \{[\s\S]*?setInterval\(/.test(BLOCK), "§13 FAILS ON THE OLD CODE: the sweep's timer only when the trigger is off");
+		// The trigger on: the watch's timer, started whatever startTrigger() first answers (finishStartUp() tries
+		// it again), and never a tick; the trigger off: the sweep's timer, as before.
+		const branches = /if \(autoInvoice\.triggerMode\) \{([\s\S]*?)\} else \{([\s\S]*?)\n\t\}\n\}/.exec(BLOCK);
+		ok(branches && /\n\t\tsetInterval\(\(\) => autoInvoice\.watch\(\), AUTO_INVOICE_TICK_MS\);/.test(branches[1]) && !/tick\(/.test(branches[1]) && !/if \(autoInvoice\.startTrigger\(\)\)[^\n]*\{/.test(branches[1]),
+			"§13 FAILS ON THE OLD CODE: the trigger on: the watch every 5 minutes, outside the startTrigger() answer, and no tick");
+		ok(branches && /autoInvoice\.tick\(\)/.test(branches[2]) && !/watch\(/.test(branches[2]), "§13 the sweep's timer only when the trigger is off");
 		const upload = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.post("/api/documents/upload",')));
 		ok(upload.indexOf('if (docType === "POD") autoInvoicePodChanged(loadId);') > upload.indexOf("res.json({ success: true, driveUrl });"), "§13 FAILS ON THE OLD CODE: a POD upload checks its load, after the answer");
 		const del = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.delete("/api/documents/:id",')));

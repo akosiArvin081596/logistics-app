@@ -20,7 +20,10 @@
 //   §10 Try again looks first (R-H2): a hit, a failed search, the Payments Table; a restart
 //       between the press and the run; both branches; a clean look sends once
 //   §11 a stuck run (R-M4): past its limit it can't write, send or hold the line
-//   §12 the watching: a dashboard read at most once a minute, a POD event at once
+//   §12 the watching: a dashboard read at most once a minute, a POD event at once, and the
+//       5-minute watch with no read (it starts no invoice); a change after a send flags that
+//       load alone or logs it (AUTO_INVOICE_HOLD_ONE_LOAD); the alert emails the watch sends
+//       too (item 120), never twice; a check begun before a Mark checked leaves that load be
 //   §13 going back (R-M5): the sweep's first tick after the trigger sends nothing
 //   §14 `waiting` is no dead end (R-M2): a person, Try again, or a later tap
 //   §15 the "No automatic invoice" chip, and its own sentence for a mark cleared after the
@@ -29,6 +32,7 @@
 //   §16 the rules on their own, and the send's commit reaching the disk
 //   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
 //       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
+//   §18 what the hold-one-load rules don't touch, by digest against main (ea4497a6)
 //
 // No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
@@ -121,6 +125,11 @@ function makeWorld() {
 		ids: 0,
 		invalidated: 0,
 		runLimits: [],
+		// The alert emails (AUTO_INVOICE_ALERT_TO, unset unless a case sets it): each send answers the next
+		// of alertAnswers (true once none is left), or waits for alertGate when a case sets one.
+		alerts: [],
+		alertAnswers: [],
+		alertGate: null,
 	};
 	w.db = new Database(":memory:");
 	w.db.exec(`
@@ -277,6 +286,11 @@ function makeWorld() {
 			return limit;
 		},
 		clearTimer: (limit) => { limit.live = false; },
+		sendAlertMail: async (to, subject, html) => {
+			w.alerts.push({ to, subject, html });
+			if (w.alertGate) await w.alertGate.p;
+			return w.alertAnswers.length ? w.alertAnswers.shift() : true;
+		},
 		...extra,
 	});
 	// The oldest run still going passes its limit, now.
@@ -1485,7 +1499,10 @@ async function main() {
 
 	section("§12 the watching");
 	{
-		// A change after a send, at a Super Admin's read: as today, the stop included.
+		// A change after a send, at a Super Admin's read: that load is flagged, and sending goes on
+		// (AUTO_INVOICE_HOLD_ONE_LOAD, on by default).
+		const stopReason = (x) => (ledger.getSendStop(x.db) || {}).reason || null;
+		const loggedRows = (x) => x.actions("auto_invoice_load_change_logged").map((a) => [a.id, a.details]);
 		const w = makeWorld();
 		const job = await w.started({ readCheckMs: MIN });
 		w.ready("LD-TEST-1101");
@@ -1504,10 +1521,10 @@ async function main() {
 		w.now += MIN + 1;
 		served(job, ["LD-TEST-1101"]);
 		await until(() => w.claim("LD-TEST-1101").changed_fields === "payment", "§12 changed");
-		eq([w.claim("LD-TEST-1101").changed_fields, ledger.getSendStop(w.db).reason, w.actions("auto_invoice_load_changed").length, w.smtp.length], ["payment", "LOAD_CHANGED_AFTER_SEND", 1, 1], "§12 FAILS ON THE OLD DESIGN: a change after a send, at the next read: the mark, the stop, one notice, never re-sent");
+		eq([w.claim("LD-TEST-1101").changed_fields, stopReason(w), w.actions("auto_invoice_load_changed").length, w.smtp.length], ["payment", null, 1, 1], "§12 FAILS ON THE OLD CODE: a payment change after a send, at the next read: that load flagged, no stop, one audit row, never re-sent");
 		ok(w.notices.some((n) => n.title === "Sent invoice: load changed"), "§12 ...the notice, as today");
 
-		// A POD row added: that load, at once.
+		// A POD row added: that load, at once. The 11-05 shape: logged, no flag, no stop.
 		const p = makeWorld();
 		const pj = await p.started();
 		p.ready("LD-TEST-1102");
@@ -1516,14 +1533,21 @@ async function main() {
 		p.now += MIN;
 		p.addPod("LD-TEST-1102");
 		pj.podChanged("LD-TEST-1102");
-		await until(() => p.claim("LD-TEST-1102").changed_fields === "pods", "§12 POD change");
-		eq([p.claim("LD-TEST-1102").changed_fields, ledger.getSendStop(p.db).reason, p.smtp.length], ["pods", "LOAD_CHANGED_AFTER_SEND", 1], "§12 FAILS ON THE OLD DESIGN: a POD upload checks that load at once: the stop, as today, never re-sent");
+		await until(() => loggedRows(p).length === 1 || p.claim("LD-TEST-1102").changed_fields !== "", "§12 POD change");
+		eq([p.claim("LD-TEST-1102").changed_fields, stopReason(p), p.smtp.length, loggedRows(p)], ["", null, 1, [["LD-TEST-1102", "10202026-1: pods: +1 -0"]]],
+			"§12 FAILS ON THE OLD CODE: a POD upload checks that load at once: one audit row, no flag, no stop, never re-sent");
 
-		// A stopped job still drafts the next driver's load.
+		// The next driver's load is sent: nothing stopped.
 		p.ready("LD-TEST-1103");
 		tap(p, pj, "LD-TEST-1103");
+		await drained(p, "§12 next");
+		eq([p.state("LD-TEST-1103"), p.smtp.length, p.appends.length], [["drafted", ""], 2, 0], "§12 FAILS ON THE OLD CODE: ...and the next driver's Delivered is sent");
+		// A stopped job still drafts the next driver's load (a Super Admin's Stop here).
+		ledger.setSendStop(p.db, { reason: "STOPPED_BY_ADMIN", nowIso: iso(p.now) });
+		p.ready("LD-TEST-1110");
+		tap(p, pj, "LD-TEST-1110");
 		await drained(p, "§12 stopped");
-		eq([p.state("LD-TEST-1103"), p.smtp.length, p.appends.length], [["drafted", ""], 1, 1], "§12 ...and the next driver's Delivered makes a Gmail draft");
+		eq([p.state("LD-TEST-1110"), p.smtp.length, p.appends.length], [["drafted", ""], 2, 1], "§12 ...a stopped job: the next driver's Delivered makes a Gmail draft");
 
 		// A sheet failure at the check: no throw, and the next read catches it.
 		const f = makeWorld();
@@ -1540,8 +1564,96 @@ async function main() {
 		f.readFails = false;
 		f.now += 2 * MIN;
 		served(fj, ["LD-TEST-1104"]);
-		await until(() => f.claim("LD-TEST-1104").changed_fields === "pods", "§12 caught next");
-		ok(true, "§12 ...and the next read catches the miss");
+		await until(() => loggedRows(f).length === 1 || f.claim("LD-TEST-1104").changed_fields !== "", "§12 caught next");
+		eq([loggedRows(f), f.claim("LD-TEST-1104").changed_fields], [[["LD-TEST-1104", "10202026-1: pods: +1 -0"]], ""], "§12 FAILS ON THE OLD CODE: ...and the next read catches the miss, logged");
+
+		// A sheet-only edit, with no Super Admin read: the 5-minute watch finds it.
+		const s = makeWorld();
+		const sj = await s.started({ alertTo: "alerts@example.test" });
+		s.ready("LD-TEST-1111");
+		tap(s, sj, "LD-TEST-1111");
+		await drained(s, "§12 sent for the watch");
+		s.setRow("LD-TEST-1111", { "  Payment  ": "$1,300.00" });
+		s.now += 5 * MIN;
+		ok(typeof sj.watch === "function", "§12 FAILS ON THE OLD CODE: the job has the 5-minute watch");
+		const readsBefore = s.calls.reads;
+		if (typeof sj.watch === "function") sj.watch();
+		await until(() => s.claim("LD-TEST-1111").changed_fields === "payment" || typeof sj.watch !== "function", "§12 the watch");
+		eq([s.claim("LD-TEST-1111").changed_fields, stopReason(s), s.calls.reads - readsBefore, s.smtp.length], ["payment", null, 1, 1],
+			"§12 FAILS ON THE OLD CODE: a payment edited on the sheet: the watch reads it once and flags that load, with no dashboard read; nothing is re-sent");
+		await until(() => s.alerts.length === 1 || typeof sj.watch !== "function", "§12 the watch's email");
+		eq(s.alerts.map((a) => [a.to, a.subject]), [["alerts@example.test", "Load LD-TEST-1111: changed after sending, needs a check"]], "§12 FAILS ON THE OLD CODE: ...and the hold's email goes at once");
+		const ticksBefore = s.calls.prepare;
+		s.ready("LD-TEST-1112", { "Job Status": "Delivered" });
+		s.now += 5 * MIN;
+		if (typeof sj.watch === "function") sj.watch();
+		await turn();
+		await turn();
+		eq([s.claim("LD-TEST-1112"), s.calls.prepare - ticksBefore, s.smtp.length], [null, 0, 1], "§12 the watch starts no invoice: a Delivered with no driver's tap gets no claim and no build");
+
+		// Item 120: a hold's email that couldn't go waits in line, and the watch sends it, with no tick.
+		const q = makeWorld();
+		const qj = await q.started({ alertTo: "alerts@example.test" });
+		q.ready("LD-TEST-1113");
+		tap(q, qj, "LD-TEST-1113");
+		await drained(q, "§12 sent for item 120");
+		q.alertAnswers = [false];
+		q.setRow("LD-TEST-1113", { "  Payment  ": "$1,300.00" });
+		q.now += 5 * MIN;
+		if (typeof qj.watch === "function") qj.watch();
+		await until(() => q.alerts.length === 1 || typeof qj.watch !== "function", "§12 the first try");
+		await turn();
+		q.now += 5 * MIN;
+		ok(typeof qj.tick === "function" && (await qj.tick()).trigger === true, "§12 with the trigger on, tick() does nothing");
+		if (typeof qj.watch === "function") qj.watch();
+		await until(() => q.alerts.length === 2 || typeof qj.watch !== "function", "§12 the watch's retry");
+		await turn();
+		eq([q.alerts.map((a) => a.subject), JSON.parse(ledger.getMeta(q.db).alert_outbox || "[\"(none)\"]").length],
+			[["Load LD-TEST-1113: changed after sending, needs a check", "Load LD-TEST-1113: changed after sending, needs a check"], 0],
+			"§12 FAILS ON THE OLD CODE (item 120): the email that answered false goes out on the watch's next run, five minutes on, with no tick; then the line is empty");
+		// Both paths at once: a hold's own try and the watch while that try is still out. One email.
+		const both = makeWorld();
+		const bj = await both.started({ alertTo: "alerts@example.test" });
+		both.ready("LD-TEST-1114");
+		tap(both, bj, "LD-TEST-1114");
+		await drained(both, "§12 sent for both paths");
+		both.alertGate = gate();
+		both.setRow("LD-TEST-1114", { "  Payment  ": "$1,300.00" });
+		both.now += 5 * MIN;
+		if (typeof bj.watch === "function") bj.watch();
+		await until(() => both.alerts.length === 1 || typeof bj.watch !== "function", "§12 the try in flight");
+		both.now += 5 * MIN;
+		if (typeof bj.watch === "function") bj.watch();
+		if (typeof bj.drainAlerts === "function") bj.drainAlerts();
+		both.alertGate.open();
+		if (typeof bj.drainAlerts === "function") await bj.drainAlerts();
+		await turn();
+		eq(both.alerts.length, 1, "§12 FAILS ON THE OLD CODE (item 120): the watch and a try already out: one email, never two");
+
+		// A Mark checked made while a check was reading the sheet: that check leaves the load alone.
+		const k = makeWorld();
+		const kj = await k.started();
+		k.ready("LD-TEST-1109");
+		tap(k, kj, "LD-TEST-1109");
+		await drained(k, "§12 sent for Mark checked");
+		const beforeFix = { headers: HEADERS, data: Object.freeze(k.rows.map((r) => Object.freeze({ ...r }))) };
+		k.setRow("LD-TEST-1109", { "  Payment  ": "$1,300.00" });
+		k.now += MIN;
+		const slowRead = gate();
+		const checkingK = (async () => {
+			const job2 = k.job({ workerId: "worker-4", readJobTracking: async () => { await slowRead.p; return beforeFix; } });
+			job2.startTrigger();
+			return job2.checkClaims();
+		})();
+		await turn();
+		k.now += MIN;
+		const fk = fakeApp();
+		kj.mount(fk.app, { requireRole: fk.requireRole });
+		eq((await fk.call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-1109" } })).status, 200, "§12 Mark checked on the fixed load");
+		slowRead.open();
+		await checkingK;
+		eq([k.claim("LD-TEST-1109").changed_fields, stopReason(k), k.actions("auto_invoice_load_changed").length], ["", null, 0],
+			"§12 FAILS ON THE OLD CODE: a check that began before a Mark checked reads the sheet from before it: no false flag, no stop");
 
 		// A person's draft closes an open claim at the read.
 		const h = makeWorld();
@@ -2069,6 +2181,60 @@ async function main() {
 		sweep.now += 5 * MIN;
 		await sj.tick();
 		eq([sweep.state(ID), sweep.smtp.length, sweep.calls.look.length, sweep.claim(ID).look_first], [["drafted", ""], 1, 0, ""], "§17 the sweep's recovery of a claim caught building: no look asked for");
+	}
+
+	section("§18 what the hold-one-load rules don't touch behaves as on main (ea4497a6)");
+	{
+		// The claims' own columns on main, the job's meta, the audit rows, notices, messages, draft rows and
+		// logs (but the one line this PR adds when no alert address is set).
+		const COLUMNS = ["load_key", "load_id", "state", "reason_code", "first_seen_at", "attempts", "ratecon_checks", "next_attempt_at", "lease_owner", "lease_until",
+			"stage", "invoice_id", "invoice_date", "reserved_at", "message_id", "sent_json", "draft_row_id", "drafted_at", "fingerprint_json", "changed_at", "changed_fields",
+			"checked_at", "checked_by", "number_voided_at", "updated_at", "draft_digest_json", "delivery", "sent_at", "send_checks", "look_first", "check_held_at"];
+		const digest = (x) => require("crypto").createHash("sha256").update(JSON.stringify({
+			claims: x.db.prepare(`SELECT ${COLUMNS.join(", ")} FROM auto_invoice_claims ORDER BY load_key`).all(),
+			meta: x.db.prepare("SELECT key, value FROM auto_invoice_meta ORDER BY key").all(),
+			audits: x.audits, notices: x.notices, smtp: x.smtp, appends: x.appends,
+			drafts: x.db.prepare("SELECT load_id, invoice_id, recipient, via FROM load_invoice_drafts ORDER BY id").all(),
+			logs: x.logs.filter((l) => !/alert emails off/.test(l)),
+		})).digest("hex");
+		// A load the driver delivered, sent, then read by Super Admins for a while with nothing changed.
+		const unchanged = async () => {
+			const x = makeWorld();
+			const j = await x.started();
+			x.ready("LD-TEST-1701");
+			tap(x, j, "LD-TEST-1701");
+			await drained(x, "§18 sent");
+			for (let i = 0; i < 3; i++) {
+				x.now += 5 * MIN;
+				served(j, ["LD-TEST-1701"]);
+				await until(() => x.calls.reads >= i + 2, `§18 read ${i}`);
+				await turn();
+			}
+			return digest(x);
+		};
+		// The switch off: a POD row added after the send stops all sending, and the next load is drafted.
+		const switchOff = async () => {
+			const x = makeWorld();
+			const j = await x.started({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_HOLD_ONE_LOAD: "false" } });
+			x.ready("LD-TEST-1702");
+			tap(x, j, "LD-TEST-1702");
+			await drained(x, "§18 sent, the switch off");
+			x.now += MIN;
+			x.addPod("LD-TEST-1702");
+			j.podChanged("LD-TEST-1702");
+			await until(() => x.claim("LD-TEST-1702").changed_fields !== "", "§18 the stop");
+			x.ready("LD-TEST-1703");
+			tap(x, j, "LD-TEST-1703");
+			await drained(x, "§18 the next load");
+			return digest(x);
+		};
+		// Each case's digest on main (ea4497a6), recorded by running the case there.
+		const MAIN = {
+			unchanged: "039fe3b967366676d9be9d679330aacb5cf59535c904edbc04f51741b9be5e54",
+			switchOff: "e908b07e00cd34561bf9f23963f890188cb85f81ce441ef5c01a175eea16842c",
+		};
+		eq(await unchanged(), MAIN.unchanged, "§18 a sent load nothing changed, read by Super Admins: as on main");
+		eq(await switchOff(), MAIN.switchOff, "§18 AUTO_INVOICE_HOLD_ONE_LOAD=false: a POD change after a send stops all sending, as on main");
 	}
 }
 

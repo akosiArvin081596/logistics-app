@@ -93,6 +93,18 @@
 //       drafted, never sent; drafts never wait (sending off, a domain not listed,
 //       no sender, stopped, Bison's inbox not listed), nor take the sweep's slots;
 //       the stored stamps as SQLite reads them; the setting's parse; mutants
+//   §26 a change after a send holds that load alone (AUTO_INVOICE_HOLD_ONE_LOAD): the 11-05
+//       shape (a POD row added) logged with no chip, stop or email, the next load sent; each
+//       field both ways; the switch off is today's stop on every field; the breaker (a third
+//       load in 24 hours: TOO_MANY_HELD; one load twice once; 25 hours; a resume; a count
+//       that can't be read or written); a row gone from the sheet; an empty read; chips main
+//       left; Mark checked; the resume script's list; mutants
+//   §27 the alert emails (AUTO_INVOICE_ALERT_TO): their words, once each, the hourly cap,
+//       the doubling wait kept across a restart, the first false ends a try, a full outbox
+//       keeps its stop, unset sends nothing and the reads say so (item 118)
+//   §28 the dry run before the deploy: its counts equal the first check's, and it writes
+//       nothing (the database's sha256 and the meta as they were)
+//   §29 what these rules don't touch, by digest against main (ea4497a6)
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -898,7 +910,9 @@ async function main() {
 		eq([bad.status, bad.body.code], [400, "OPT_OUT_INVALID"], "§11 a bad opt-out list is refused");
 		const put = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["Example-Factor.test"] } });
 		eq([put.status, put.body], [200, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"] }], "§11 opt-outs saved; the confirmed list left out is kept");
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false, dropped: [] }, "§11 and read back");
+		// This world sets no alert address, so the read also says alerts are off (item 118).
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false, dropped: [], alerts: { on: false } },
+			"§11 and read back (FAILS ON THE OLD CODE: with alerts off, item 118)");
 		eq(w.actions("update_auto_invoice_settings").map((a) => [a.who, a.details]),
 			[["made-up-admin", "opted out: example-factor.test (was: none); confirmed: example-broker.test (was: example-broker.test)"]], "§11 audited as the Super Admin");
 		eq((await call("PUT", "/api/auto-invoice/settings", { body: {} })).body.code, "SETTINGS_INVALID", "§11 a body with neither list is refused");
@@ -1036,7 +1050,8 @@ async function main() {
 			"§12 L6: the settings can't be read: nothing claimed or drafted (fails closed, and nothing is stuck at a verdict made without them)");
 		const { app, requireRole, call } = fakeApp();
 		job.mount(app, { requireRole });
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true, dropped: [] }, "§12 L6: the settings route says so");
+		// No alert address in this world either, so the read also says alerts are off (item 118).
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true, dropped: [], alerts: { on: false } }, "§12 L6: the settings route says so");
 		eq((await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] } })).status, 200, "§12 L6: saving the lists again");
 		await job.tick();
 		eq(w.state("LD-TEST-0167"), ["drafted", ""], "§12 L6: then it drafts");
@@ -1118,8 +1133,9 @@ async function main() {
 		const { app, requireRole, call } = fakeApp();
 		job.mount(app, { requireRole });
 		const got = (await call("GET", "/api/auto-invoice/settings")).body;
+		// alerts: no alert address in this world (item 118).
 		eq(got, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false,
-			dropped: [{ list: "confirmedBrokerDomains", domain: "comcast.net", code: "CONFIRMED_DOMAIN_FREEMAIL" }] }, "§14 GET: each list read on its own; only the refused entry is dropped, and reported");
+			dropped: [{ list: "confirmedBrokerDomains", domain: "comcast.net", code: "CONFIRMED_DOMAIN_FREEMAIL" }], alerts: { on: false } }, "§14 GET: each list read on its own; only the refused entry is dropped, and reported");
 		w.ready("LD-TEST-0180");
 		w.ready("LD-TEST-0181", { Email: "ops@example-optout.test" }, "billing@example-optout.test");
 		await job.tick();
@@ -1282,6 +1298,7 @@ async function main() {
 	await factoredSections();
 	await sendSections();
 	await settleSections();
+	await holdSections();
 }
 
 // ------------------------------------------------------------------ factored loads
@@ -2394,7 +2411,7 @@ const SEND_CASES = {
 		return { smtp: w.smtp.length, append: w.calls.append.length, state: [c.state, c.reason_code, c.delivery || ""], rows: w.draftRows("LD-TEST-0540"),
 			next: w.state("LD-TEST-0541"), stop: stop && stop.reason, stopRows: w.actions("auto_invoice_send_stopped").length, notices: w.notices.map((n) => n.title) };
 	},
-	// A load changed after its invoice was sent: a notice, and sending stops.
+	// A load's payment changed after its invoice was sent: a notice, and that load is flagged.
 	async changedAfterSend(lib) {
 		const w = sendWorld();
 		const job = await sendStarted(lib, w);
@@ -2407,7 +2424,8 @@ const SEND_CASES = {
 		w.ready("LD-TEST-0551");
 		await job.tick();
 		const stop = w.stop();
-		return { smtp: w.smtp.length, append: w.calls.append.length, stop: stop && stop.reason, notices: w.notices.map((n) => n.title), next: w.state("LD-TEST-0551") };
+		return { smtp: w.smtp.length, append: w.calls.append.length, stop: stop && stop.reason, notices: w.notices.map((n) => n.title), next: w.state("LD-TEST-0551"),
+			chip: claimOf(w, "LD-TEST-0550").changed_fields };
 	},
 	// The Stop route, the settings route beside it, and the next tick.
 	async stopRoute(lib, { send = SEND_ON } = {}) {
@@ -2746,9 +2764,10 @@ async function sendSections() {
 	eq([refused.stop, refused.stopRows], ["SMTP_REFUSED", 1], "§24 FAILS ON THE OLD CODE: ...sending stops (SMTP_REFUSED), one audit row");
 	const login = await SEND_CASES.smtpRefused(jobLib, "LOGIN");
 	eq([login.smtp, login.append, login.stop], [1, 2, "SMTP_LOGIN_REFUSED"], "§24 FAILS ON THE OLD CODE: Gmail refuses the login: drafts carry on, sending stops (SMTP_LOGIN_REFUSED)");
+	// Hold one load, not all (AUTO_INVOICE_HOLD_ONE_LOAD, on by default): §26 has the rest.
 	const changed = await SEND_CASES.changedAfterSend(jobLib);
-	eq([changed.smtp, changed.append, changed.stop, changed.next], [1, 1, "LOAD_CHANGED_AFTER_SEND", ["drafted", ""]],
-		"§24 FAILS ON THE OLD CODE: a load changed after its invoice was sent: sending stops, the next load is drafted");
+	eq([changed.smtp, changed.append, changed.stop, changed.chip, changed.next], [2, 0, null, "payment", ["drafted", ""]],
+		"§24 FAILS ON THE OLD CODE: a payment changed after its invoice was sent flags that load (payment) and stops nothing: the next load is sent");
 	ok(changed.notices.includes("Sent invoice: load changed"), "§24 FAILS ON THE OLD CODE: ...with a notice that the invoice already went");
 	const stopR = await SEND_CASES.stopRoute(jobLib);
 	eq([stopR.registered, stopR.chain, stopR.disp, stopR.limited], [true, 4, 403, ["Super Admin", "Super Admin"]],
@@ -3024,8 +3043,16 @@ async function sendSections() {
 			null, (lib) => SEND_CASES.unanswered(lib), (x) => x.states[0][1] === "SEND_UNCONFIRMED"],
 		["a refused send searched for instead of drafted", "if (outcome !== \"unknown\") {", "if (false) {",
 			null, (lib) => SEND_CASES.smtpRefused(lib, "REFUSED"), (x) => x.append === 2],
-		["no stop for a load changed after its send", "stopSending(\"LOAD_CHANGED_AFTER_SEND\", c);", "",
-			null, (lib) => SEND_CASES.changedAfterSend(lib), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND"],
+		// Hold one load, not all: the rules mutant ("a logged field holds") runs in §26.
+		["a hold stops everything", "\t\tif (trips) stopSending(\"TOO_MANY_HELD\", c);", "\t\tstopSending(\"TOO_MANY_HELD\", c);",
+			null, (lib) => SEND_CASES.changedAfterSend(lib), (x) => x.stop === null && JSON.stringify(x.next) === JSON.stringify(["drafted", ""]) && x.smtp === 2],
+		["no breaker", "\t\tif (trips) stopSending(\"TOO_MANY_HELD\", c);", "",
+			null, (lib) => HOLD_CASES.breaker(lib, BREAKER_STEPS.three), (x) => JSON.stringify(x.stops) === JSON.stringify([null, null, "TOO_MANY_HELD"])],
+		["the switch ignored", "if (holdOneLoad && sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso);", "if (sendRules.claimSent(c)) return checkSent(c, saved, facts, nowIso);",
+			null, (lib) => HOLD_CASES.field(lib, FIELD_CHANGES.pods, { env: { AUTO_INVOICE_HOLD_ONE_LOAD: "false" } }), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND" && x.chip === "pods"],
+		["the switch off still holds one load", "\t\tif (n && sendRules.claimSent(c)) {\n\t\t\taudit(\"auto_invoice_load_changed\", c.load_id, `${c.invoice_id}: ${fields} (sent)`);",
+			"\t\tif (n && false) {\n\t\t\taudit(\"auto_invoice_load_changed\", c.load_id, `${c.invoice_id}: ${fields} (sent)`);",
+			null, (lib) => HOLD_CASES.field(lib, FIELD_CHANGES.payment, { env: { AUTO_INVOICE_HOLD_ONE_LOAD: "false" } }), (x) => x.stop === "LOAD_CHANGED_AFTER_SEND"],
 		["a send recorded as a draft", "const via = c.delivery === \"send\" ? rules.VIA_SEND : rules.VIA_DRAFT;", "const via = rules.VIA_DRAFT;",
 			null, (lib) => SEND_CASES.sends(lib), (x) => JSON.stringify(x.rows) === JSON.stringify([{ invoice_id: "10202026-1", via: "auto-smtp" }])],
 		["no auto_invoice_sent row", "audit(\"auto_invoice_sent\", c.load_id, `${c.invoice_id} → ${sentDomain(c) || \"unknown domain\"} (sent by", "void (\"auto_invoice_sent\", c.load_id, `${c.invoice_id} → ${sentDomain(c) || \"unknown domain\"} (sent by",
@@ -3539,6 +3566,741 @@ async function settleSections() {
 		const mutated = pinned(await withPatched([[ledgerLib, "livePodTimes", lib.livePodTimes]], run));
 		ok(real && !mutated, `§25 MUTANT ${label}: caught`);
 	}
+}
+
+// ------------------------------------------------------------------ one load held, not all (§26-§29)
+// Absent from a tree before it: its cases fail by name instead of the run.
+const dryRunScript = optional(path.join(ROOT, "scripts", "auto-invoice-hold-dry-run.js"));
+const ALERT_TO = "alerts@example.test";
+const HELD_SUBJECT = (id) => `Load ${id}: changed after sending, needs a check`;
+const STOP_SUBJECT = "Automatic invoice sending stopped";
+const sha256Of = (data) => require("crypto").createHash("sha256").update(data).digest("hex");
+
+// A send world whose alert emails land in w.alerts ({ to, subject, html }); each send answers the
+// next of w.alertAnswers (true once none is left). `alertTo` "" is the setting unset.
+function alertWorld({ alertTo = ALERT_TO, send = SEND_ON, dbFile = null } = {}) {
+	const w = sendWorld({ send, dbFile });
+	w.alerts = [];
+	w.alertAnswers = [];
+	w.invalidated = 0;
+	w.sendAlertMail = async (to, subject, html) => {
+		w.alerts.push({ to, subject, html });
+		return w.alertAnswers.length ? w.alertAnswers.shift() : true;
+	};
+	w.holdDeps = (more = {}) => w.sendDeps({
+		alertTo,
+		sendAlertMail: w.sendAlertMail,
+		invalidateJobTracking: () => { w.invalidated++; },
+		readJobTracking: async () => (w.readOverride ? w.readOverride() : w.jt()),
+		...more,
+	});
+	w.meta = () => ledgerLib.getMeta(w.db);
+	return w;
+}
+async function holdStarted(lib, w, more = {}) {
+	const job = lib.create(w.holdDeps(more));
+	await job.tick();
+	w.now += 5 * MIN;
+	return job;
+}
+// Each load delivered and sent (two a sweep), the clock moved on after each sweep.
+async function sendAll(w, job, ids) {
+	for (const id of ids) w.ready(id);
+	for (let i = 0; i <= ids.length && ids.some((id) => claimOf(w, id).state !== "drafted"); i++) {
+		await job.tick();
+		w.now += 6 * MIN;
+	}
+}
+// The alerts waiting, sent now (a tree without them: nothing).
+const alertsSent = async (job) => {
+	if (job && typeof job.drainAlerts === "function") await job.drainAlerts();
+};
+const outbox = (w) => {
+	try {
+		return JSON.parse(w.meta().alert_outbox || "[]");
+	} catch {
+		return [];
+	}
+};
+
+// One change to a sent load, as a person or the sheet makes it.
+const pay = (amount) => (w, id) => w.setRow(id, { "  Payment  ": amount });
+const FIELD_CHANGES = Object.freeze({
+	payment: pay("$1,250.00"),
+	status: (w, id) => w.setRow(id, { "Job Status": "In Transit" }),
+	cancelled: (w, id) => w.setRow(id, { "Job Status": "Cancelled" }),
+	deletedInApp: (w, id) => w.db.prepare("INSERT INTO deleted_loads (load_id, deleted_by) VALUES (?, 'made-up-admin')").run(id),
+	brokerDomain: (w, id) => w.setRow(id, { Email: "ops@example-other.test" }),
+	brokerSameDomain: (w, id) => w.setRow(id, { Email: "ap@example-broker.test" }),
+	brokerBlank: (w, id) => w.setRow(id, { Email: "" }),
+	brokerTwo: (w, id) => w.setRow(id, { Email: "ops@example-broker.test, ap@example-broker.test" }),
+	trailer: (w, id) => w.setRow(id, { "Trailer Number": "TR-2" }),
+	pods: (w, id) => w.addPod(id),
+	rateCons: (w, id) => w.db.prepare("INSERT INTO documents (load_id, type, file_name) VALUES (?, 'RATECON', 'made-up-rc-2.pdf')").run(id),
+});
+const rateConAtSend = (w, id) => w.db.prepare("INSERT INTO documents (load_id, type, file_name) VALUES (?, 'RATECON', 'made-up-rc-1.pdf')").run(id);
+// Holds on sent loads, one step at a time: [load, hours after the step before, the change].
+const BREAKER_STEPS = Object.freeze({
+	three: [["LD-TEST-0830", 0, pay("$1,101.00")], ["LD-TEST-0831", 1, pay("$1,102.00")], ["LD-TEST-0832", 1, pay("$1,103.00")]],
+	sameLoadTwice: [["LD-TEST-0830", 0, pay("$1,101.00")], ["LD-TEST-0830", 1, FIELD_CHANGES.status], ["LD-TEST-0831", 1, pay("$1,102.00")], ["LD-TEST-0832", 1, pay("$1,103.00")]],
+	over25Hours: [["LD-TEST-0830", 0, pay("$1,101.00")], ["LD-TEST-0831", 12, pay("$1,102.00")], ["LD-TEST-0832", 13, pay("$1,103.00")]],
+	resumed: [["LD-TEST-0830", 0, pay("$1,101.00")], ["LD-TEST-0831", 1, pay("$1,102.00")], ["LD-TEST-0832", 1, pay("$1,103.00")], ["LD-TEST-0833", 1, pay("$1,104.00")]],
+	one: [["LD-TEST-0830", 0, pay("$1,101.00")]],
+});
+const AUDIT_TRAIL_SQL = "CREATE TABLE IF NOT EXISTS audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, user_id INTEGER, username TEXT, role TEXT, action TEXT, entity TEXT, entity_id TEXT, details TEXT)";
+
+const HOLD_CASES = {
+	// The 11-05 shape, made up: a sent invoice with one POD, a POD row added after it, the
+	// next driver's load after that.
+	async podAfterSend(lib, more = {}) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w, more);
+		await sendAll(w, job, ["LD-TEST-0800"]);
+		const sentFirst = [w.smtp.length, w.state("LD-TEST-0800"), claimOf(w, "LD-TEST-0800").delivery || ""];
+		w.addPod("LD-TEST-0800");
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		w.ready("LD-TEST-0801");
+		await job.tick();
+		await alertsSent(job);
+		const c = claimOf(w, "LD-TEST-0800");
+		const stop = w.stop();
+		return { sentFirst, smtp: w.smtp.length, append: w.calls.append.length, stop: stop && stop.reason, chip: c.changed_fields, changedAt: c.changed_at,
+			logged: w.actions("auto_invoice_load_change_logged").map((a) => [a.id, a.details]), changedRows: w.actions("auto_invoice_load_changed").length,
+			notices: w.notices.map((n) => n.title), alerts: w.alerts.map((a) => a.subject), next: [w.state("LD-TEST-0801"), claimOf(w, "LD-TEST-0801").delivery || ""],
+			held: w.meta().held_loads || "" };
+	},
+	// One change to a sent load, then the next driver's load.
+	async field(lib, change, { env = {}, before = null } = {}) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w, { env });
+		if (before) before(w, "LD-TEST-0820");
+		await sendAll(w, job, ["LD-TEST-0820"]);
+		change(w, "LD-TEST-0820");
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0821");
+		await job.tick();
+		await alertsSent(job);
+		const c = claimOf(w, "LD-TEST-0820");
+		const stop = w.stop();
+		return { chip: c.changed_fields, stop: stop && stop.reason, next: [w.state("LD-TEST-0821"), claimOf(w, "LD-TEST-0821").delivery || ""],
+			logged: w.actions("auto_invoice_load_change_logged").map((a) => a.details), alerts: w.alerts.map((a) => a.subject), notices: w.notices.map((n) => n.title),
+			texts: w.alerts.map((a) => a.html) };
+	},
+	// BREAKER_STEPS, with the stop's reason after each step. `resumeBefore`: the resume script runs
+	// before that step; `setup(w)`: before the first.
+	async breaker(lib, steps, { resumeBefore = -1, setup = null } = {}) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w);
+		await sendAll(w, job, [...new Set(steps.map(([id]) => id))]);
+		w.db.exec(AUDIT_TRAIL_SQL);
+		if (setup) setup(w);
+		const stops = [];
+		for (const [i, [id, hours, change]] of steps.entries()) {
+			if (i === resumeBefore && resumeScript) resumeScript.run({ db: w.db, dryRun: false, nowIso: isoOf(w.now) });
+			w.now += hours * HOUR;
+			change(w, id);
+			await job.tick();
+			const stop = w.stop();
+			stops.push(stop ? stop.reason : null);
+		}
+		await alertsSent(job);
+		return { stops, held: w.meta().held_loads || "", alerts: w.alerts.map((a) => a.subject), w, job };
+	},
+	// Six loads' payments changed in one sweep, then a seventh's over an hour later.
+	async cap(lib) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w);
+		const ids = ["LD-TEST-0840", "LD-TEST-0841", "LD-TEST-0842", "LD-TEST-0843", "LD-TEST-0844", "LD-TEST-0845", "LD-TEST-0846"];
+		await sendAll(w, job, ids);
+		for (const id of ids.slice(0, 6)) FIELD_CHANGES.payment(w, id);
+		await job.tick();
+		await alertsSent(job);
+		const first = w.alerts.map((a) => a.subject);
+		const firstTexts = w.alerts.map((a) => a.html);
+		const sixth = claimOf(w, ids[5]);
+		const sixthTold = [sixth.changed_fields, w.actions("auto_invoice_load_changed").filter((a) => a.id === ids[5]).length,
+			w.notices.filter((n) => n.title === "Sent invoice: load changed" && n.body.includes(ids[5])).length];
+		w.now += HOUR + MIN;
+		FIELD_CHANGES.payment(w, ids[6]);
+		await job.tick();
+		await alertsSent(job);
+		return { first, firstTexts, sixthTold, later: w.alerts.slice(first.length).map((a) => a.subject), every: w.alerts, logs: w.logs };
+	},
+	// A row gone from the sheet: three loads (a month moved to the archive), with another row left on it.
+	async archived(lib) {
+		const w = alertWorld();
+		let archiveReads = 0;
+		const job = await holdStarted(lib, w, { readArchive: () => { archiveReads++; return []; } });
+		const ids = ["LD-TEST-0860", "LD-TEST-0861", "LD-TEST-0862"];
+		await sendAll(w, job, ids);
+		w.setRow("LD-TEST-0869", { "Job Status": "In Transit" });
+		for (const id of ids) w.rows.splice(w.rows.findIndex((r) => r["Load ID"] === id), 1);
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		await alertsSent(job);
+		const stop = w.stop();
+		return { logged: w.actions("auto_invoice_load_change_logged").map((a) => [a.id, a.details]), chips: ids.map((id) => claimOf(w, id).changed_fields),
+			held: w.meta().held_loads || "", alerts: w.alerts.length, stop: stop && stop.reason, archiveReads, notices: w.notices.map((n) => n.title) };
+	},
+	// A read of the sheet with no load rows, or no Load ID column.
+	async unreadable(lib, how) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w);
+		await sendAll(w, job, ["LD-TEST-0865"]);
+		w.readOverride = how === "no rows"
+			? () => Object.freeze({ headers: HEADERS, data: Object.freeze([]) })
+			: () => Object.freeze({ headers: HEADERS.filter((h) => h !== "Load ID"), data: Object.freeze(w.rows.map(({ "Load ID": _id, ...rest }) => rest)) });
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		await alertsSent(job);
+		const c = claimOf(w, "LD-TEST-0865");
+		const stop = w.stop();
+		return { chip: c.changed_fields, logged: w.actions("auto_invoice_load_change_logged").length, stop: stop && stop.reason, alerts: w.alerts.length,
+			said: w.logs.filter((l) => /no load rows/.test(l)).length };
+	},
+	// Chips as main left them, then Mark checked.
+	async oldChips(lib) {
+		const w = alertWorld();
+		const job = await holdStarted(lib, w);
+		await sendAll(w, job, ["LD-TEST-0870", "LD-TEST-0871"]);
+		const at = isoOf(w.now);
+		w.addPod("LD-TEST-0870");
+		w.db.prepare("UPDATE auto_invoice_claims SET changed_at = ?, changed_fields = 'pods' WHERE load_key = 'ld-test-0870'").run(at);
+		w.addPod("LD-TEST-0871");
+		FIELD_CHANGES.payment(w, "LD-TEST-0871");
+		w.db.prepare("UPDATE auto_invoice_claims SET changed_at = ?, changed_fields = 'payment,pods' WHERE load_key = 'ld-test-0871'").run(at);
+		w.now += 5 * MIN;
+		await job.tick();
+		w.now += 5 * MIN;
+		await job.tick();
+		await alertsSent(job);
+		const view = (id) => {
+			const c = claimOf(w, id);
+			return [c.changed_fields, c.changed_at === at];
+		};
+		const before = { a: view("LD-TEST-0870"), b: view("LD-TEST-0871"), held: w.actions("auto_invoice_load_changed").length, alerts: w.alerts.length,
+			logged: w.actions("auto_invoice_load_change_logged").map((a) => [a.id, a.details]), stop: (w.stop() || {}).reason || null };
+		const f = fakeApp();
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
+		const r = await f.call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-0870" } });
+		const c = claimOf(w, "LD-TEST-0870");
+		w.now += 5 * MIN;
+		await job.tick();
+		return { before, checked: [r.status, c.changed_fields, c.change_logged_json, c.change_logged_at, w.invalidated], afterTick: [claimOf(w, "LD-TEST-0870").changed_fields, w.actions("auto_invoice_load_change_logged").length] };
+	},
+};
+
+// What a world did, as main's code can see it: the claims' own columns, the job's meta, the audit
+// rows, the notices, every message handed to SMTP or Gmail, the draft rows and the logs (but the
+// one line this PR adds when no alert address is set).
+const MAIN_CLAIM_COLUMNS = ["load_key", "load_id", "state", "reason_code", "first_seen_at", "attempts", "ratecon_checks", "next_attempt_at", "lease_owner", "lease_until",
+	"stage", "invoice_id", "invoice_date", "reserved_at", "message_id", "sent_json", "draft_row_id", "drafted_at", "fingerprint_json", "changed_at", "changed_fields",
+	"checked_at", "checked_by", "number_voided_at", "updated_at", "draft_digest_json", "delivery", "sent_at", "send_checks", "look_first", "check_held_at"];
+function mainDigest(w) {
+	return sha256Of(JSON.stringify({
+		claims: w.db.prepare(`SELECT ${MAIN_CLAIM_COLUMNS.join(", ")} FROM auto_invoice_claims ORDER BY load_key`).all(),
+		meta: w.db.prepare("SELECT key, value FROM auto_invoice_meta ORDER BY key").all(),
+		audits: w.audits,
+		notices: w.notices,
+		smtp: w.smtp || [],
+		appends: w.calls.append,
+		drafts: w.db.prepare("SELECT load_id, invoice_id, recipient, via FROM load_invoice_drafts ORDER BY id").all(),
+		logs: w.logs.filter((l) => !/alert emails off/.test(l)),
+	}));
+}
+// Paths these rules don't change, run the same way on main (ea4497a6) and here.
+const MAIN_CASES = {
+	// A filled load sent and never changed: more sweeps, and a Super Admin's rows.
+	async unchanged(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0900");
+		await job.tick();
+		for (let i = 0; i < 3; i++) {
+			w.now += 5 * MIN;
+			await job.tick();
+		}
+		job.annotateCompletedRows({ rows: w.rows.map((r) => ({ ...r })), headers: HEADERS, isSuperAdmin: true });
+		return mainDigest(w);
+	},
+	// A draft nobody sent (its domain isn't on the send list), changed field by field: every field, a
+	// chip and a notice each time, as on main. The last step takes its row off the sheet.
+	async draftChanged(lib) {
+		const w = sendWorld({ send: { enabled: true, domains: ["example-other.test"] } });
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0901");
+		await job.tick();
+		const steps = [
+			FIELD_CHANGES.payment, FIELD_CHANGES.trailer, FIELD_CHANGES.pods, FIELD_CHANGES.brokerSameDomain, FIELD_CHANGES.rateCons, FIELD_CHANGES.status, FIELD_CHANGES.deletedInApp,
+			(x, id) => { x.rows.splice(x.rows.findIndex((r) => r["Load ID"] === id), 1); x.setRow("LD-TEST-0999", { "Job Status": "In Transit" }); },
+		];
+		for (const step of steps) {
+			step(w, "LD-TEST-0901");
+			w.now += 5 * MIN;
+			await job.tick();
+		}
+		return mainDigest(w);
+	},
+	// The switch off: a payment changed after a send stops all sending, and the next load is drafted.
+	async switchOff(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w, { env: { AUTO_INVOICE_HOLD_ONE_LOAD: "false" } });
+		w.ready("LD-TEST-0902");
+		await job.tick();
+		w.now += 5 * MIN;
+		FIELD_CHANGES.payment(w, "LD-TEST-0902");
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0903");
+		await job.tick();
+		return mainDigest(w);
+	},
+	// Gmail refuses an invoice: the stop, the draft and the next load's draft.
+	async refused(lib) {
+		const w = sendWorld();
+		const job = await sendStarted(lib, w);
+		w.ready("LD-TEST-0904");
+		w.smtpBehaviors = ["REFUSED"];
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0905");
+		await job.tick();
+		return mainDigest(w);
+	},
+};
+// Each case's digest on main (ea4497a6), recorded by running the case there.
+const MAIN_DIGESTS = Object.freeze({
+	unchanged: "7b98d14aa1f49d413387e64cd47d20ae7ebaf53a5a9805d9393c313a06d0127e",
+	draftChanged: "7eb5cce96c1097e0444b8b15388fe89244c3800a6cc6133577df732d486b4e3a",
+	switchOff: "265cf7e8edb72f029ceb32bf13bd63fa35e71a144b3d459870cb9ceefd85837e",
+	refused: "20b8087aedd71d9752c7acee209dcd86f03c36e2f4771c36788a0db3d5a4621d",
+});
+
+// The dry run's world: eight loads sent; one already flagged on payment, and held an hour before; then
+// the changes the first check after the deploy finds. `trip`: one more hold, enough for the breaker.
+async function dryRunWorld({ trip }) {
+	const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-hold-dry-run-"));
+	const file = path.join(TMP, "app.db");
+	const w = alertWorld({ dbFile: file });
+	const job = await holdStarted(jobLib, w);
+	const ids = ["LD-TEST-0960", "LD-TEST-0961", "LD-TEST-0962", "LD-TEST-0963", "LD-TEST-0964", "LD-TEST-0965", "LD-TEST-0966", "LD-TEST-0967"];
+	await sendAll(w, job, ids);
+	FIELD_CHANGES.payment(w, ids[7]);
+	w.db.prepare("UPDATE auto_invoice_claims SET changed_at = ?, changed_fields = 'payment' WHERE load_key = ?").run(isoOf(w.now - HOUR), rules.loadKey(ids[7]));
+	ledgerLib.setMeta(w.db, "held_loads", JSON.stringify([{ load: rules.loadKey(ids[7]), at: isoOf(w.now - HOUR) }]));
+	FIELD_CHANGES.payment(w, ids[0]);
+	FIELD_CHANGES.pods(w, ids[1]);
+	FIELD_CHANGES.trailer(w, ids[2]);
+	w.rows.splice(w.rows.findIndex((r) => r["Load ID"] === ids[3]), 1);
+	FIELD_CHANGES.brokerSameDomain(w, ids[4]);
+	if (trip) FIELD_CHANGES.cancelled(w, ids[5]);
+	return { w, job, ids, file, TMP, values: () => [HEADERS, ...w.rows.map((r) => HEADERS.map((h) => r[h]))] };
+}
+// What the check did to each claim: new holds by field, new logged fields, rows gone, the breaker.
+function checkDid(before, after, stop) {
+	const did = { hold: {}, holdLoads: 0, log: {}, logLoads: 0, gone: 0, trips: Boolean(stop && stop.reason === "TOO_MANY_HELD") };
+	for (const c of after) {
+		const was = before.find((x) => x.load_key === c.load_key) || {};
+		if (c.changed_at !== was.changed_at) {
+			did.holdLoads++;
+			for (const f of c.changed_fields.split(",")) did.hold[f] = (did.hold[f] || 0) + 1;
+		}
+		const mem = (json) => {
+			try {
+				return JSON.parse(json || "{}");
+			} catch {
+				return {};
+			}
+		};
+		const [m0, m1] = [mem(was.change_logged_json), mem(c.change_logged_json)];
+		const fields = Object.keys(m1).filter((f) => f !== "gone" && m1[f] !== m0[f]);
+		if (fields.length) did.logLoads++;
+		for (const f of fields) did.log[f] = (did.log[f] || 0) + 1;
+		if (m1.gone && !m0.gone) did.gone++;
+	}
+	return did;
+}
+
+async function holdSections() {
+	// ---------------------------------------------------------------- §26
+	section("§26 a change after a send holds that load alone (AUTO_INVOICE_HOLD_ONE_LOAD)");
+
+	// The main case: the 11-05 shape. Logged, no chip, no stop, no other load touched, the next one sent.
+	const pod = await HOLD_CASES.podAfterSend(jobLib);
+	eq(pod.sentFirst, [1, ["drafted", ""], "send"], "§26 a load sent by SMTP");
+	eq([pod.stop, pod.chip, pod.changedAt, pod.changedRows, pod.held], [null, "", "", 0, ""],
+		"§26 FAILS ON THE OLD CODE: a POD row added after the send: no stop, no chip, nothing counted toward the breaker");
+	eq(pod.logged, [["LD-TEST-0800", "10202026-1: pods: +1 -0"]], "§26 FAILS ON THE OLD CODE: ...one audit row says what changed, once, however many sweeps see it");
+	eq([pod.notices, pod.alerts], [[], []], "§26 FAILS ON THE OLD CODE: ...no notice and no email");
+	eq([pod.next, pod.smtp, pod.append], [[["drafted", ""], "send"], 2, 0], "§26 FAILS ON THE OLD CODE: ...and the next driver's load is sent, not drafted");
+
+	// Each field, both sides of each rule (plan §2.2), with the switch on (by default).
+	const ON_CASES = [
+		["payment", FIELD_CHANGES.payment, "payment", []],
+		["Delivered undone", FIELD_CHANGES.status, "status", []],
+		["a cancelled row", FIELD_CHANGES.cancelled, "status,removed", []],
+		["deleted in the app (the row stays, with its tombstone)", FIELD_CHANGES.deletedInApp, "removed", []],
+		["the broker email's domain", FIELD_CHANGES.brokerDomain, "brokerEmail", []],
+		["the broker email, the same domain", FIELD_CHANGES.brokerSameDomain, "", ["10202026-1: brokerEmail: same domain"]],
+		["the broker email blanked", FIELD_CHANGES.brokerBlank, "", ["10202026-1: brokerEmail: blank"]],
+		["two addresses in the Email cell (read as blank)", FIELD_CHANGES.brokerTwo, "", ["10202026-1: brokerEmail: blank"]],
+		["the trailer", FIELD_CHANGES.trailer, "", ["10202026-1: trailer"]],
+		["a POD row added", FIELD_CHANGES.pods, "", ["10202026-1: pods: +1 -0"]],
+		["a first rate-con row (none at the send)", FIELD_CHANGES.rateCons, "", ["10202026-1: rateCons: +1 -0"]],
+	];
+	for (const [label, change, chip, logged] of ON_CASES) {
+		const r = await HOLD_CASES.field(jobLib, change);
+		eq([r.chip, r.stop, r.next, r.logged, r.alerts], [chip, null, [["drafted", ""], "send"], logged, chip ? [HELD_SUBJECT("LD-TEST-0820")] : []],
+			`§26 FAILS ON THE OLD CODE: ${label}: ${chip ? `that load is flagged (${chip}) and emailed` : "logged once"}, no stop, the next load sent`);
+	}
+	const replaced = await HOLD_CASES.field(jobLib, FIELD_CHANGES.rateCons, { before: rateConAtSend });
+	eq([replaced.chip, replaced.stop, replaced.next], ["rateCons", null, [["drafted", ""], "send"]], "§26 FAILS ON THE OLD CODE: a rate con replaced (one existed at the send): flagged, no stop");
+	const payText = await HOLD_CASES.field(jobLib, FIELD_CHANGES.payment);
+	ok(payText.notices.includes("Sent invoice: load changed") && !payText.notices.includes("Automatic invoice sending stopped"), "§26 FAILS ON THE OLD CODE: ...a flagged load has today's notice, and no stop's");
+
+	// The kill switch "false": today's stop on every field, the next load drafted (plan: keeps it reachable).
+	const OFF = { env: { AUTO_INVOICE_HOLD_ONE_LOAD: "false" } };
+	for (const name of ["payment", "status", "deletedInApp", "brokerDomain", "trailer", "pods", "rateCons"]) {
+		const r = await HOLD_CASES.field(jobLib, FIELD_CHANGES[name], OFF);
+		const field = { deletedInApp: "removed", brokerDomain: "brokerEmail" }[name] || name;
+		eq([r.chip, r.stop, r.next], [field, "LOAD_CHANGED_AFTER_SEND", [["drafted", ""], ""]], `§26 AUTO_INVOICE_HOLD_ONE_LOAD=false, ${field}: all sending stops, as before, and the next load is drafted`);
+	}
+	const offMail = await HOLD_CASES.field(jobLib, FIELD_CHANGES.pods, OFF);
+	eq(offMail.alerts, [HELD_SUBJECT("LD-TEST-0820"), STOP_SUBJECT], "§26 FAILS ON THE OLD CODE: ...and the emails stay on with it: the load's, then the stop's");
+	ok(offMail.texts[0] && /its PODs changed/.test(offMail.texts[0]) && !/Other loads keep sending/.test(offMail.texts[0]), "§26 FAILS ON THE OLD CODE: ...the load's never says other loads keep sending");
+
+	// The breaker: a third different load held within 24 hours stops all sending.
+	eq((await HOLD_CASES.breaker(jobLib, BREAKER_STEPS.three)).stops, [null, null, "TOO_MANY_HELD"], "§26 FAILS ON THE OLD CODE: two loads held: sending goes on; a third: TOO_MANY_HELD");
+	eq((await HOLD_CASES.breaker(jobLib, BREAKER_STEPS.sameLoadTwice)).stops, [null, null, null, "TOO_MANY_HELD"], "§26 FAILS ON THE OLD CODE: one load held twice counts once");
+	eq((await HOLD_CASES.breaker(jobLib, BREAKER_STEPS.over25Hours)).stops, [null, null, null], "§26 FAILS ON THE OLD CODE: three loads over 25 hours: no stop");
+	const resumed = await HOLD_CASES.breaker(jobLib, BREAKER_STEPS.resumed, { resumeBefore: 3 });
+	eq(resumed.stops, [null, null, "TOO_MANY_HELD", null], "§26 FAILS ON THE OLD CODE: after a resume, the count starts again");
+	eq((await HOLD_CASES.breaker(jobLib, BREAKER_STEPS.one, { setup: (w) => ledgerLib.setMeta(w.db, "held_loads", "not a list") })).stops, ["TOO_MANY_HELD"],
+		"§26 FAILS ON THE OLD CODE: a count that can't be read stops sending, by TOO_MANY_HELD");
+	const unwritable = await withPatched([[ledgerLib, "noteHold", () => { throw Object.assign(new Error("made-up: the disk is full"), { code: "SQLITE_FULL" }); }]],
+		() => HOLD_CASES.breaker(jobLib, BREAKER_STEPS.one));
+	eq(unwritable.stops, ["TOO_MANY_HELD"], "§26 FAILS ON THE OLD CODE: a count that can't be written stops sending, by TOO_MANY_HELD");
+	ok(sendLib && sendLib.STOP_REASONS.includes("LOAD_CHANGED_AFTER_SEND") && sendLib.STOP_REASONS.includes("TOO_MANY_HELD"), "§26 FAILS ON THE OLD CODE: TOO_MANY_HELD is a stop reason; LOAD_CHANGED_AFTER_SEND stays one (old rows, the switch off)");
+
+	// A row gone from the sheet: an audit row only. A cancelled row and an app delete still hold (above).
+	const gone = await HOLD_CASES.archived(jobLib);
+	eq(gone.logged, [["LD-TEST-0860", "10202026-1: row gone from the sheet"], ["LD-TEST-0861", "10202026-2: row gone from the sheet"], ["LD-TEST-0862", "10202026-3: row gone from the sheet"]],
+		"§26 FAILS ON THE OLD CODE: a month moved to the archive: one audit row a load, once");
+	eq([gone.chips, gone.held, gone.alerts, gone.stop, gone.notices], [["", "", ""], "", 0, null, []], "§26 FAILS ON THE OLD CODE: ...no chip, no count, no email, no stop, no notice");
+	eq(gone.archiveReads, 0, "§26 ...and nothing asks the archive");
+	for (const how of ["no rows", "no Load ID column"]) {
+		const r = await HOLD_CASES.unreadable(jobLib, how);
+		eq([r.chip, r.logged, r.stop, r.alerts, r.said], ["", 0, null, 0, 1], `§26 FAILS ON THE OLD CODE: a read with ${how}: the check is skipped, logged once`);
+	}
+
+	// Chips main left: an old "pods" stays until Mark checked; an old "payment,pods" doesn't re-fire.
+	const old = await HOLD_CASES.oldChips(jobLib);
+	eq([old.before.a, old.before.b, old.before.held, old.before.alerts, old.before.stop], [["pods", true], ["payment,pods", true], 0, 0, null],
+		"§26 the chips main left stay as they were: no hold again, no email, no stop");
+	eq(old.before.logged, [["LD-TEST-0870", "10202026-1: pods: +1 -0"], ["LD-TEST-0871", "10202026-2: pods: +1 -0"]], "§26 FAILS ON THE OLD CODE: ...their POD changes are logged, once");
+	eq(old.checked, [200, "", "", "", 1], "§26 FAILS ON THE OLD CODE: Mark checked clears the chip and what was logged, from a fresh read of the sheet (the cache dropped first)");
+	eq(old.afterTick, ["", 2], "§26 FAILS ON THE OLD CODE: ...and that point is the new reference: nothing more is logged");
+
+	// The rules' own decision, removed in turn: the case that pins it must change.
+	const RULES_FILE = path.join(ROOT, "lib", "auto-invoice-rules.js");
+	const rulesMutant = mutantModule(RULES_FILE, "\t\tdefault: return false;\n\t}\n}", "\t\tdefault: return true;\n\t}\n}");
+	ok(rulesMutant, "§26 MUTANT a logged field holds: applied to lib/auto-invoice-rules.js once");
+	if (rulesMutant) {
+		const real = await HOLD_CASES.podAfterSend(jobLib);
+		const mutated = await withPatched([[rules, "sentChange", rulesMutant.sentChange]], () => HOLD_CASES.podAfterSend(jobLib));
+		ok(real.chip === "" && real.stop === null && mutated.chip === "pods", "§26 MUTANT a logged field holds: caught");
+	}
+	const LEDGER_FILE = path.join(ROOT, "lib", "auto-invoice-ledger.js");
+	for (const [label, from, to, steps, want] of [
+		["one load counted twice", "e && e.load !== key && nowMs", "e && nowMs", BREAKER_STEPS.sameLoadTwice, [null, null, null, "TOO_MANY_HELD"]],
+		["old holds never dropped", " && nowMs - Date.parse(e.at) <= windowMs);", ");", BREAKER_STEPS.over25Hours, [null, null, null]],
+	]) {
+		const lib = mutantModule(LEDGER_FILE, from, to);
+		ok(lib, `§26 MUTANT ${label}: applied to lib/auto-invoice-ledger.js once`);
+		if (!lib) continue;
+		const real = (await HOLD_CASES.breaker(jobLib, steps)).stops;
+		const mutated = (await withPatched([[ledgerLib, "noteHold", lib.noteHold]], () => HOLD_CASES.breaker(jobLib, steps))).stops;
+		ok(JSON.stringify(real) === JSON.stringify(want) && JSON.stringify(mutated) !== JSON.stringify(want), `§26 MUTANT ${label}: caught`);
+	}
+
+	// The resume script: the breaker's list goes with the stop, in the same transaction, only on --apply.
+	ok(resumeScript, "§26 scripts/auto-invoice-send-resume.js exists");
+	if (resumeScript) {
+		const resumeRun = async (script) => {
+			const w = alertWorld();
+			await holdStarted(jobLib, w);
+			w.db.exec(AUDIT_TRAIL_SQL);
+			const list = JSON.stringify([{ load: "ld-test-0980", at: isoOf(w.now) }, { load: "ld-test-0981", at: isoOf(w.now) }]);
+			ledgerLib.setMeta(w.db, "held_loads", list);
+			const out = {};
+			out.nothingStopped = [script.run({ db: w.db, dryRun: false }).changed, w.meta().held_loads === list];
+			ledgerLib.setSendStop(w.db, { reason: "TOO_MANY_HELD", nowIso: "2026-10-20T14:05:00.000Z" });
+			script.run({ db: w.db, dryRun: true });
+			out.dry = w.meta().held_loads === list;
+			const applied = script.run({ db: w.db, dryRun: false, nowIso: "2026-10-20T15:00:00.000Z" });
+			out.applied = [applied.changed, w.stop(), w.meta().held_loads || "",
+				w.db.prepare("SELECT username, role, action, details FROM audit_trail").all()];
+			// A resume whose audit row can't be written clears neither.
+			ledgerLib.setMeta(w.db, "held_loads", list);
+			ledgerLib.setSendStop(w.db, { reason: "TOO_MANY_HELD", nowIso: "2026-10-20T16:00:00.000Z" });
+			w.db.exec("CREATE TRIGGER made_up_no_audit BEFORE INSERT ON audit_trail BEGIN SELECT RAISE(ABORT, 'made-up: no audit row'); END");
+			let threw = false;
+			try {
+				script.run({ db: w.db, dryRun: false });
+			} catch {
+				threw = true;
+			}
+			out.rolledBack = [threw, Boolean(w.stop()), w.meta().held_loads === list];
+			return out;
+		};
+		const r = await resumeRun(resumeScript);
+		eq(r.nothingStopped, [false, true], "§26 resume --apply with nothing stopped: nothing written, the list kept");
+		eq(r.dry, true, "§26 resume --dry-run: the list kept");
+		eq(r.applied, [true, null, "", [{ username: "auto-invoice-send-resume", role: "system", action: "auto_invoice_send_resumed", details: "cleared the stop of 2026-10-20T14:05:00.000Z (TOO_MANY_HELD)" }]],
+			"§26 FAILS ON THE OLD CODE: resume --apply: the stop and the breaker's list cleared together, one audit row as today");
+		eq(r.rolledBack, [true, true, true], "§26 ...in one transaction: an audit row that can't be written clears neither");
+		const RESUME_FILE = path.join(ROOT, "scripts", "auto-invoice-send-resume.js");
+		const keptList = mutantModule(RESUME_FILE, "\t\t\tledger.clearHeldLoads(db);\n", "");
+		ok(keptList, "§26 MUTANT the list kept on a resume: applied to the resume script once");
+		if (keptList) ok((await resumeRun(keptList)).applied[2] !== "", "§26 MUTANT the list kept on a resume: caught");
+	}
+
+	// ---------------------------------------------------------------- §27
+	section("§27 the alert emails (AUTO_INVOICE_ALERT_TO): which load, what changed, and a stop");
+	ok(sendLib && typeof sendLib.heldAlert === "function" && typeof sendLib.stopAlert === "function", "§27 FAILS ON THE OLD CODE: lib/auto-invoice-send.js words both emails");
+	if (sendLib && typeof sendLib.heldAlert === "function" && typeof sendLib.stopAlert === "function") {
+		const held = (over) => sendLib.heldAlert({ loadId: "LD-TEST-0550", invoiceId: "11062026-1", fields: ["payment"], continues: true, ...over });
+		const p = held({});
+		eq([p.subject, p.text], ["Load LD-TEST-0550: changed after sending, needs a check",
+			"Invoice 11062026-1 already went to the broker. After that, its payment changed. Other loads keep sending. Check whether the broker needs a corrected invoice, then press Mark checked on the load."],
+		"§27 a load held: plan §2.4's subject and words");
+		eq(held({ continues: false }).text, "Invoice 11062026-1 already went to the broker. After that, its payment changed. Check whether the broker needs a corrected invoice, then press Mark checked on the load.",
+			"§27 ...with sending stopped, no word that other loads keep sending");
+		eq(held({ fields: ["status"] }).text, "Invoice 11062026-1 already went to the broker. After that, the load was set back from Delivered. Other loads keep sending.",
+			"§27 Delivered undone: the load's own words, and no Mark checked sentence");
+		eq(held({ fields: ["status", "removed"] }).text, "Invoice 11062026-1 already went to the broker. After that, the load was cancelled or removed. Other loads keep sending.",
+			"§27 cancelled or deleted: the same");
+		eq(held({ fields: ["status", "payment"], continues: false }).text, "Invoice 11062026-1 already went to the broker. After that, the load was set back from Delivered and its payment changed.",
+			"§27 Delivered undone with a payment change: both, no Mark checked sentence");
+		eq(held({ fields: ["payment", "brokerEmail", "rateCons"] }).text.split(". ")[1], "After that, its payment, broker email and rate con changed",
+			"§27 several fields: named in a list");
+		eq(held({ fields: ["trailer", "pods"], continues: false }).text.split(". ")[1], "After that, its trailer and PODs changed", "§27 the switch off can name a trailer or PODs");
+		const odd = held({ loadId: "LD-<b>&\"0551", invoiceId: "1102<i>2026-1" });
+		ok(odd.html.includes("1102&lt;i&gt;2026-1") && !/<i>|<b>/.test(odd.html), "§27 the HTML escapes what it prints");
+		eq(odd.subject, "Load LD-<b>&\"0551: changed after sending, needs a check", "§27 ...the subject is plain text");
+		ok(!/<p>|&lt;/.test(odd.text), "§27 ...and the text form carries no markup");
+		const s = sendLib.stopAlert("TOO_MANY_HELD");
+		eq([s.subject, s.text], [STOP_SUBJECT,
+			"3 loads changed after their invoices were sent within a day, or that count couldn't be read, so sending stopped in case something bigger is wrong. New invoices become Gmail drafts for a person to send until sending is resumed on the server. Drafts made during the stop stay drafts afterwards."],
+		"§27 the stop: plan §2.4's subject and words, the breaker's own reason first");
+		for (const reason of sendLib.STOP_REASONS) ok(sendLib.stopAlert(reason).text.startsWith(`${sendLib.STOP_WORDS[reason]} New invoices become Gmail drafts`), `§27 the stop's email for ${reason} starts with its reason's words`);
+	}
+
+	// Each email once: the cap, the breaker's stop among them, then the cap a while later.
+	const cap = await HOLD_CASES.cap(jobLib);
+	eq(cap.first, [HELD_SUBJECT("LD-TEST-0840"), HELD_SUBJECT("LD-TEST-0841"), HELD_SUBJECT("LD-TEST-0842"), STOP_SUBJECT, HELD_SUBJECT("LD-TEST-0843"), HELD_SUBJECT("LD-TEST-0844")],
+		"§27 FAILS ON THE OLD CODE: six loads held in one sweep: five held-load emails an hour, and the breaker's stop email once");
+	eq(cap.firstTexts.map((t) => /Other loads keep sending/.test(t)), [true, true, false, false, false, false], "§27 FAILS ON THE OLD CODE: ...each says other loads keep sending only while they do");
+	eq(cap.sixthTold, ["payment", 1, 1], "§27 ...the sixth load, not mailed, still has its chip, its audit row and its notice");
+	eq(cap.later, [HELD_SUBJECT("LD-TEST-0846")], "§27 FAILS ON THE OLD CODE: over an hour later, the next held load is mailed");
+	ok(cap.every.length && cap.every.every((m) => m.to === ALERT_TO), "§27 FAILS ON THE OLD CODE: every one to AUTO_INVOICE_ALERT_TO, from the mailbox (the job's own send function)");
+	ok(cap.every.every((m) => !/\$|1,10|@|example-broker|Made-up Driver/.test(m.subject + m.html)), "§27 ...no amount, address or name in any of them");
+	ok(cap.logs.some((l) => /LD-TEST-0845: held, not mailed/.test(l)) && !cap.logs.some((l) => /@/.test(l)), "§27 FAILS ON THE OLD CODE: the one not mailed is in the job's log, with no address");
+
+	// A send that answers false: it waits, doubling from 5 minutes to 6 hours, kept across a restart.
+	{
+		const w = alertWorld();
+		let job = await holdStarted(jobLib, w);
+		await sendAll(w, job, ["LD-TEST-0850"]);
+		w.alertAnswers = Array(10).fill(false);
+		FIELD_CHANGES.payment(w, "LD-TEST-0850");
+		await job.tick();
+		await alertsSent(job);
+		const waits = [];
+		let early = 0;
+		for (let i = 0; i < 9; i++) {
+			const wait = Number(w.meta().alert_wait_ms || 0);
+			waits.push(wait / MIN);
+			if (!wait) break;
+			const tries = w.alerts.length;
+			w.now += wait - MIN;
+			if (i === 1) job = jobLib.create(w.holdDeps());
+			await alertsSent(job);
+			if (w.alerts.length !== tries) early++;
+			w.now += MIN;
+			await alertsSent(job);
+		}
+		eq(waits, [5, 10, 20, 40, 80, 160, 320, 360, 360], "§27 FAILS ON THE OLD CODE: a send that answers false waits 5 minutes, doubling to 6 hours");
+		eq(early, 0, "§27 ...nothing is tried before the wait is over, across a restart too");
+		const left = outbox(w).length;
+		w.now += 6 * HOUR;
+		await alertsSent(job);
+		eq([left, outbox(w).length, w.meta().alert_wait_ms || "", w.alerts.length], [1, 0, "", 11], "§27 FAILS ON THE OLD CODE: ...then sent once it goes, and the wait starts over");
+	}
+	{
+		const w = alertWorld();
+		const job = await holdStarted(jobLib, w);
+		await sendAll(w, job, ["LD-TEST-0855", "LD-TEST-0856"]);
+		w.alertAnswers = [false];
+		FIELD_CHANGES.payment(w, "LD-TEST-0855");
+		FIELD_CHANGES.payment(w, "LD-TEST-0856");
+		await job.tick();
+		await alertsSent(job);
+		eq([w.alerts.map((a) => a.subject), outbox(w).map((a) => a.subject)], [[HELD_SUBJECT("LD-TEST-0855")], [HELD_SUBJECT("LD-TEST-0855"), HELD_SUBJECT("LD-TEST-0856")]],
+			"§27 FAILS ON THE OLD CODE: the oldest is tried first, and nothing after it once it answers false");
+	}
+	// A full outbox: its oldest held-load email goes, never a stop.
+	{
+		const w = alertWorld();
+		const job = await holdStarted(jobLib, w);
+		await sendAll(w, job, ["LD-TEST-0857"]);
+		const full = Array.from({ length: 50 }, (_, i) => ({ id: `made-up-${i}`, kind: "held", subject: HELD_SUBJECT(`LD-TEST-${1000 + i}`), html: "<p>made-up</p>", at: isoOf(w.now) }));
+		ledgerLib.setMeta(w.db, "alert_outbox", JSON.stringify(full));
+		ledgerLib.setMeta(w.db, "alert_retry_at", isoOf(w.now + 24 * HOUR));
+		const f = fakeApp();
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
+		await f.call("POST", "/api/auto-invoice/send/stop", { body: {} });
+		const afterStop = outbox(w);
+		FIELD_CHANGES.payment(w, "LD-TEST-0857");
+		await job.tick();
+		const afterHold = outbox(w);
+		eq([afterStop.length, afterStop.filter((a) => a.kind === "stop").length, afterStop[0] && afterStop[0].id], [50, 1, "made-up-1"], "§27 FAILS ON THE OLD CODE: a full outbox makes room for a stop by its oldest held-load email");
+		eq([afterHold.length, afterHold.filter((a) => a.kind === "stop").length, afterHold[afterHold.length - 1] && afterHold[afterHold.length - 1].subject],
+			[50, 1, HELD_SUBJECT("LD-TEST-0857")], "§27 FAILS ON THE OLD CODE: ...and a held load after it never pushes the stop out");
+	}
+	// No address set: nothing queued or sent, one log line, and the reads say alerts are off (item 118).
+	{
+		const w = alertWorld({ alertTo: "" });
+		const job = await holdStarted(jobLib, w);
+		await sendAll(w, job, ["LD-TEST-0858"]);
+		FIELD_CHANGES.payment(w, "LD-TEST-0858");
+		await job.tick();
+		await alertsSent(job);
+		eq([claimOf(w, "LD-TEST-0858").changed_fields, w.alerts.length, "alert_outbox" in w.meta(), w.logs.filter((l) => /alert emails off/.test(l)).length], ["payment", 0, false, 1],
+			"§27 FAILS ON THE OLD CODE: AUTO_INVOICE_ALERT_TO unset: the load is flagged, nothing is queued or sent, and one log line says so");
+		const f = fakeApp();
+		job.mount(f.app, { requireRole: f.requireRole, refuseCrossSite: (req, res, next) => next() });
+		const st = (await f.call("GET", "/api/auto-invoice/status")).body;
+		const se = (await f.call("GET", "/api/auto-invoice/settings")).body;
+		eq([st.alerts, se.alerts, Boolean(se.send) && "alerts" in se.send], [{ on: false }, { on: false }, false],
+			"§27 FAILS ON THE OLD CODE (item 118): the status and the settings read say alerts are off, outside `send`");
+		const on = alertWorld();
+		const onJob = await holdStarted(jobLib, on);
+		const g = fakeApp();
+		onJob.mount(g.app, { requireRole: g.requireRole, refuseCrossSite: (req, res, next) => next() });
+		const reads = [(await g.call("GET", "/api/auto-invoice/status")).body, (await g.call("GET", "/api/auto-invoice/settings")).body];
+		eq(reads.map((b) => "alerts" in b), [false, false], "§27 an address set: neither read carries the line");
+		ok(reads.every((b) => !JSON.stringify(b).includes("@")), "§27 ...and neither ever carries the address");
+		ok(on.logs.every((l) => !/alert emails off/.test(l)), "§27 ...and nothing is logged about it");
+		const replicaRules = require(path.join(ROOT, "lib", "replica-rules.js"));
+		eq(replicaRules.classifySetting("AUTO_INVOICE_ALERT_TO", ALERT_TO, { readByApp: new Set(["AUTO_INVOICE_ALERT_TO"]) }).rule, "production only: names a production target",
+			"§27 FAILS ON THE OLD CODE: AUTO_INVOICE_ALERT_TO is never copied to a replica");
+	}
+	// Shadow mode sends none: nothing is held or stopped there.
+	{
+		const w = alertWorld();
+		const job = jobLib.create(w.holdDeps({ env: { AUTO_INVOICE_DRAFTS_SHADOW: "" } }));
+		await job.tick();
+		w.now += 5 * MIN;
+		w.ready("LD-TEST-0859");
+		await job.tick();
+		await alertsSent(job);
+		eq([w.alerts.length, "alert_outbox" in w.meta()], [0, false], "§27 shadow mode: no email, nothing queued");
+	}
+
+	// ---------------------------------------------------------------- §28
+	section("§28 the dry run before the deploy (scripts/auto-invoice-hold-dry-run.js): the first check's counts, nothing written");
+	ok(dryRunScript && typeof dryRunScript.run === "function", "§28 FAILS ON THE OLD CODE: scripts/auto-invoice-hold-dry-run.js exists");
+	if (dryRunScript && typeof dryRunScript.run === "function") {
+		const helpers = liftSheetHelpers();
+		for (const trip of [false, true]) {
+			const x = await dryRunWorld({ trip });
+			try {
+				const metaBefore = JSON.stringify(x.w.meta());
+				const shaBefore = sha256Of(fs.readFileSync(x.file));
+				const ro = new Database(x.file, { readonly: true, fileMustExist: true });
+				let dry = null;
+				try {
+					dry = dryRunScript.run({ db: ro, values: x.values(), nowIso: isoOf(x.w.now), helpers });
+				} finally {
+					ro.close();
+				}
+				const shaAfter = sha256Of(fs.readFileSync(x.file));
+				const sends = [x.w.smtp.length, x.w.calls.append.length, x.w.alerts.length];
+				eq([shaAfter === shaBefore, JSON.stringify(x.w.meta()) === metaBefore, fs.readdirSync(x.TMP).sort()], [true, true, ["app.db"]],
+					`§28 trip=${trip}: the dry run writes nothing: the database's sha256 and the job's meta as they were, no side file`);
+				const before = x.w.db.prepare("SELECT * FROM auto_invoice_claims").all();
+				await x.job.tick();
+				await alertsSent(x.job);
+				const after = x.w.db.prepare("SELECT * FROM auto_invoice_claims").all();
+				const did = checkDid(before, after, x.w.stop());
+				eq([dry.wouldHold.byField, dry.wouldHold.loads, dry.wouldLog.byField, dry.wouldLog.loads, dry.rowsGone, dry.breaker.wouldTrip],
+					[did.hold, did.holdLoads, did.log, did.logLoads, did.gone, did.trips], `§28 trip=${trip}: its counts equal what the first check did`);
+				eq([dry.sentLoads, dry.heldAlready, dry.breaker.stopAt, dry.breaker.wouldTrip, dry.skipped], [8, 1, 3, trip, false], `§28 trip=${trip}: eight sent loads, one held already, the breaker at 3`);
+				eq(sends, [8, 0, 0], `§28 trip=${trip}: no message is sent by the dry run (only the eight invoices before it)`);
+				const text = dryRunScript.textOf(dry);
+				ok(/^DRY RUN/.test(text) && !/LD-TEST|ld-test|@|\$/.test(text + JSON.stringify(dry)), `§28 trip=${trip}: counts only: no load, address or amount`);
+			} finally {
+				x.w.db.close();
+				fs.rmSync(x.TMP, { recursive: true, force: true });
+			}
+		}
+		// A read with no load rows: the dry run says the check would be skipped.
+		const y = await dryRunWorld({ trip: true });
+		try {
+			const ro = new Database(y.file, { readonly: true, fileMustExist: true });
+			const dry = dryRunScript.run({ db: ro, values: [HEADERS], nowIso: isoOf(y.w.now), helpers });
+			ro.close();
+			eq([dry.skipped, dry.wouldHold.loads, dry.wouldLog.loads, dry.rowsGone, dry.breaker.wouldTrip], [true, 0, 0, 0, false], "§28 a read with no load rows: skipped, as the check skips it");
+		} finally {
+			y.w.db.close();
+			fs.rmSync(y.TMP, { recursive: true, force: true });
+		}
+		eq(["--db=x", "--db=x --dry-run --apply", "--dry-run", "--db=x --dry-run --force"].map((a) => {
+			try {
+				dryRunScript.parseArgs(a.split(" "));
+				return "accepted";
+			} catch (e) {
+				return e instanceof dryRunScript.Refusal ? "refused" : "threw";
+			}
+		}), ["refused", "refused", "refused", "refused"], "§28 --db and --dry-run, both required, nothing else");
+		const SCRIPT = path.join(ROOT, "scripts", "auto-invoice-hold-dry-run.js");
+		const src = fs.readFileSync(SCRIPT, "utf8");
+		ok(/readonly: true/.test(src) && /query_only = ON/.test(src) && /spreadsheets\.readonly/.test(src) && !/\.(?:run|exec)\(/.test(src.replace(/^\s*\/\/.*$/gm, "")),
+			"§28 it opens the database read-only, query_only, and Sheets with the read-only scope; it runs no statement");
+		const counted = mutantModule(SCRIPT, "if (s.newHold) {", "if (s.hold.length) {");
+		ok(counted, "§28 MUTANT the dry run counts a load already flagged: applied once");
+		if (counted) {
+			const x = await dryRunWorld({ trip: false });
+			try {
+				const ro = new Database(x.file, { readonly: true, fileMustExist: true });
+				const [real, mutated] = [dryRunScript, counted].map((lib) => lib.run({ db: ro, values: x.values(), nowIso: isoOf(x.w.now), helpers }).wouldHold.loads);
+				ro.close();
+				ok(real === 1 && mutated === 2, "§28 MUTANT the dry run counts a load already flagged: caught");
+			} finally {
+				x.w.db.close();
+				fs.rmSync(x.TMP, { recursive: true, force: true });
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------- §29
+	section("§29 what these rules don't touch behaves as on main (ea4497a6)");
+	for (const [name, want] of Object.entries(MAIN_DIGESTS)) {
+		eq(await MAIN_CASES[name](jobLib), want, `§29 ${name}: the claims, meta, audit rows, notices, messages and logs, as on main`);
+	}
+	const onCols = alertWorld();
+	await holdStarted(jobLib, onCols);
+	await sendAll(onCols, jobLib.create(onCols.holdDeps()), ["LD-TEST-0906"]);
+	const cols = onCols.db.prepare("PRAGMA table_info(auto_invoice_claims)").all().map((c) => c.name);
+	eq(cols.filter((c) => !MAIN_CLAIM_COLUMNS.includes(c)), ["change_logged_json", "change_logged_at"], "§29 FAILS ON THE OLD CODE: the claims table gains two columns, the logged memory, and nothing else");
+	eq(cols.includes("change_logged_json") && cols.includes("change_logged_at") ? onCols.db.prepare("SELECT change_logged_json, change_logged_at FROM auto_invoice_claims").all() : "(no such columns)",
+		[{ change_logged_json: "", change_logged_at: "" }], "§29 FAILS ON THE OLD CODE: ...empty on a load nothing changed");
 }
 
 // Shadow is off for the off-gap rule: on, then shadow for 3 hours, then on.
