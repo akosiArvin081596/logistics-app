@@ -27,6 +27,7 @@
 //      the sweep or the driver's Delivered starts the invoice: a load waiting for a
 //      person never reads "tried again on its own"
 //   §12 the driver's line above Delivered: the driver app only, never the tracker
+//   §15 no alert address on the server (item 118): the settings dialog says alerts are off
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -296,20 +297,21 @@ section('§7  the settings dialog: Save waits for a read that worked')
   ok(openSrc && saveSrc, '§7 the page\'s openAutoSettings() and saveAutoSettings() are found')
   if (openSrc && saveSrc) {
     const NAMES = ['auth', 'autoSettingsLoading', 'autoSettingsOpen', 'autoSettingsError', 'autoSettingsProblem', 'autoSettingsRead', 'autoConfirmedText',
-      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard', 'autoSend', 'autoRecipientCheck']
+      'autoOptOutText', 'api', 'AUTO_INVOICE_REASONS', 'autoSettingsSaving', 'canSaveAutoSettings', 'domainList', 'toast', 'dashboard', 'autoSend', 'autoRecipientCheck', 'autoAlerts']
     const dialog = (getAnswer) => {
       const st = {
         auth: { isSuperAdmin: true }, autoSettingsLoading: { value: false }, autoSettingsOpen: { value: false }, autoSettingsError: { value: '' },
         autoSettingsProblem: { value: '' }, autoSettingsRead: { value: true }, autoConfirmedText: { value: 'stale-confirmed.test' },
         autoOptOutText: { value: 'stale-optout.test' }, puts: [], autoSend: { value: { domains: ['stale.test'], stopped: null } },
         autoRecipientCheck: { value: { on: false, domain: 'stale.test', days: 7, held: { count: 9, byCode: {} } } },
+        autoAlerts: { value: { on: false, from: 'an earlier opening' } },
       }
       const api = {
         get: async () => { const v = getAnswer(); if (v instanceof Error) throw v; return v },
         put: async (u, body) => { st.puts.push([u, body]); return body },
       }
       const deps = [st.auth, st.autoSettingsLoading, st.autoSettingsOpen, st.autoSettingsError, st.autoSettingsProblem, st.autoSettingsRead, st.autoConfirmedText,
-        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }, st.autoSend, st.autoRecipientCheck]
+        st.autoOptOutText, api, S.AUTO_INVOICE_REASONS, { value: false }, can || (() => true), (t) => String(t || '').split(/[\s,;]+/).filter(Boolean), () => {}, { refresh: async () => {} }, st.autoSend, st.autoRecipientCheck, st.autoAlerts]
       const open = new Function(...NAMES, `${openSrc}\nreturn openAutoSettings;`)(...deps)
       const save = new Function(...NAMES, `${saveSrc}\nreturn saveAutoSettings;`)(...deps)
       return { st, open, save }
@@ -327,6 +329,10 @@ section('§7  the settings dialog: Save waits for a read that worked')
     const readsNone = dialog(() => ({ optOutDomains: [], confirmedBrokerDomains: [], unreadable: false, dropped: [] }))
     await readsNone.open()
     eq(readsNone.st.autoRecipientCheck.value, null, '§7 ...one that says nothing: no line')
+    eq([bad.st.autoAlerts.value, readsNone.st.autoAlerts.value], [null, null], '§7 FAILS ON THE OLD CODE: no line about alerts from an earlier opening, after a failed read or one that says nothing (item 118)')
+    const alertsOff = dialog(() => ({ optOutDomains: [], confirmedBrokerDomains: [], unreadable: false, dropped: [], alerts: { on: false } }))
+    await alertsOff.open()
+    eq(alertsOff.st.autoAlerts.value, { on: false }, '§7 FAILS ON THE OLD CODE: ...a read that says alerts are off: the dialog has it (item 118)')
     bad.st.autoConfirmedText.value = 'example-new.test'
     await bad.save()
     eq(bad.st.puts, [], '§7 ...and Save sends nothing, so the stored opt-outs are never replaced by an empty list')
@@ -388,6 +394,11 @@ section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it
   const stopped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'SMTP_REFUSED' } })
   ok(stopped && stopped.canStop === false && /stopped/.test(stopped.text) && /refused an invoice email/.test(stopped.text) && /Only the server/.test(stopped.text),
     '§9 stopped: why, and no button (only the server resumes)')
+  // The breaker (AUTO_INVOICE_HOLD_ONE_LOAD): its own reason, on both sides.
+  ok(Object.hasOwn(S.AUTO_INVOICE_STOP_WORDS || {}, 'TOO_MANY_HELD') && Boolean(sendRules && sendRules.STOP_REASONS.includes('TOO_MANY_HELD')), '§9 FAILS ON THE OLD CODE: TOO_MANY_HELD is a stop reason on both sides')
+  const tripped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'TOO_MANY_HELD' } })
+  eq(tripped && tripped.text, "Automatic sending is stopped. 3 loads changed after their invoices were sent within a day, or that count couldn't be read, so sending stopped in case something bigger is wrong. Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.",
+    '§9 FAILS ON THE OLD CODE: the breaker\'s stop says why, in its words')
   const stopTag = (/<button[^>]*@click="stopAutoSend"[^>]*>/.exec(TAB) || [''])[0]
   ok(/v-if="autoSendView\.canStop"/.test(stopTag) && /:disabled="autoSendStopping"/.test(stopTag), '§9 FAILS ON THE OLD CODE: the dialog\'s Stop button shows only while sending can be stopped')
   const stopSrc = liftFn(TAB, 'stopAutoSend', { async: true })
@@ -609,6 +620,26 @@ section('§14 who a C.H. Robinson invoice may go to: what a Super Admin reads')
   ok(/const autoModeText = computed\(\(\) => autoModeLine\(autoMode\.value, \{ sending: Boolean\(autoSendView\.value\), check: autoRecipientCheck\.value \}\)\)/.test(DIALOG), '§14 the mode line is told it too')
   ok(/autoRecipientCheck\.value = s && s\.recipientCheck && typeof s\.recipientCheck === 'object' \? s\.recipientCheck : null/.test(DIALOG), '§14 the read sets it')
   ok(/autoSend\.value = null; autoRecipientCheck\.value = null/.test(DIALOG), '§14 each opening starts with none, so an old read can\'t show')
+}
+
+// ------------------------------------------------------------------ §15
+section('§15 no alert address on the server (item 118): the settings dialog says alerts are off')
+{
+  const alertState = fnOf('autoAlertState') || (() => ({ text: '(no such function on this tree)' }))
+  const off = alertState({ on: false })
+  eq(off && off.text, 'Alerts are off: with no address set on the server, nothing is mailed when a load is held or sending stops.',
+    '§15 FAILS ON THE OLD CODE: the read says alerts are off: one line, in the plan\'s words')
+  for (const v of [null, undefined, { on: true }, 'off', [], { on: 'false' }, {}]) eq(fnOf('autoAlertState') ? alertState(v) : 'none', fnOf('autoAlertState') ? null : 'none', `§15 ${JSON.stringify(v)}: no line`)
+  const DIALOG = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue'), 'utf8')
+  ok(/<p v-if="alertsView" class="auto-settings-problem" role="alert">\{\{ alertsView\.text \}\}<\/p>/.test(DIALOG), '§15 FAILS ON THE OLD CODE: the dialog shows it, as a problem a person reads first')
+  ok(DIALOG.indexOf('alertsView.text') > 0 && DIALOG.indexOf('alertsView.text') < DIALOG.indexOf('<template v-if="autoSendView">'), '§15 FAILS ON THE OLD CODE: ...outside the sending section, so it shows whatever sending says')
+  ok(/const alertsView = computed\(\(\) => autoAlertState\(autoAlerts\.value\)\)/.test(DIALOG), '§15 FAILS ON THE OLD CODE: ...from this opening\'s read')
+  ok(/autoAlerts\.value = s && s\.alerts && typeof s\.alerts === 'object' \? s\.alerts : null/.test(DIALOG), '§15 FAILS ON THE OLD CODE: the read sets it')
+  ok(/autoRecipientCheck\.value = null; autoAlerts\.value = null/.test(DIALOG), '§15 FAILS ON THE OLD CODE: each opening starts with none, so an old read can\'t show')
+  // Display only: nothing in the dialog sends, saves or stops on it.
+  const openSrc = liftFn(DIALOG, 'openAutoSettings', { async: true }) || ''
+  const saveSrc = liftFn(DIALOG, 'saveAutoSettings', { async: true }) || ''
+  ok(!/alert/i.test(saveSrc) && (openSrc.match(/autoAlerts/g) || []).length === 2, '§15 display only: the read sets it, nothing else touches it')
 }
 
 console.log(`\n${'='.repeat(64)}`)

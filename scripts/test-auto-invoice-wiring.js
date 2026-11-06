@@ -47,10 +47,12 @@
  *      60 minutes after its own stamp, with no engine call; the block's
  *      AUTO_INVOICE_SEND_SETTLE_MINUTES reaches the job (a whole number 0-1440, else 60)
  *  §12 the driver's Delivered through PUT /api/driver/status as shipped and the block,
- *      the engine as shipped (AUTO_INVOICE_DRIVER_TRIGGER_ENABLED, named nowhere): no
- *      timer; a Driver's tap: the record before the sheet write, one SMTP call after the
- *      answer; a Dispatcher's and a Super Admin's: none; a sheet write that reports failure
- *      but landed; a throw after the write; a repeat tap; a replica; Try again's look
+ *      the engine as shipped (AUTO_INVOICE_DRIVER_TRIGGER_ENABLED, named nowhere): the
+ *      5-minute watch, never a tick; a Driver's tap: the record before the sheet write, one
+ *      SMTP call after the answer; a Dispatcher's and a Super Admin's: none; a sheet write
+ *      that reports failure but landed; a throw after the write; a repeat tap; a replica;
+ *      Try again's look; a sheet edit after a send flags that load alone at the watch, with
+ *      one email to AUTO_INVOICE_ALERT_TO through sendEmail() (no fallback, never a replica)
  *  §13 only this route starts one, and server.js around it (text pins)
  *  §14 who a C.H. Robinson invoice may go to, through the route, the block, the engine and the
  *      Drive lookup as shipped (AUTO_INVOICE_KNOWN_ADDRESS_ENABLED, named nowhere): an address a
@@ -58,6 +60,10 @@
  *      carry the load's whole number, a rate con that gives another number, and the check off: a
  *      person, nothing sent; a typo; Try again's look; other brokers' drafts; a hold's notice and
  *      audit row through the block, and what the settings read says
+ *  §15 a sent load's row removed in the app, through the Data Manager's DELETE /api/data/:rowIndex
+ *      and the duplicate scanner's POST /api/admin/remove-rows as shipped, and the block: held as
+ *      removed at once and emailed; a delete whose answer was lost but landed; one refused; a
+ *      load that keeps another row; another tab; each route's call removed in turn
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -168,6 +174,38 @@ const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatc
 const STATUS_HEAD = SRC.split("\n").find((l) => l.startsWith('app.put("/api/driver/status",'));
 const STATUS_INDEX = indexDeclarations(SRC);
 
+// A route registration as shipped, from `src` (server.js's text, or a mutant of it): every name it
+// reaches is server.js's own top-level declaration, unless `stubs` gives it (the outside world, or the
+// job). Its last handler.
+function liftedHandler(head, stubs, src = SRC) {
+	const cache = Object.create(null);
+	let proxy = null;
+	proxy = new Proxy(Object.create(null), {
+		has(_, key) {
+			if (typeof key !== "string" || key === "__scope") return false;
+			return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
+		},
+		get(_, key) {
+			if (key === Symbol.unscopables) return undefined;
+			if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
+			if (key in cache) return cache[key];
+			const decl = STATUS_INDEX.decls.get(key);
+			if (decl) {
+				cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
+				return cache[key];
+			}
+			if (key in globalThis) return globalThis[key];
+			throw new ReferenceError(`unstubbed in the lifted route: ${String(key)}`);
+		},
+		set(_, key, value) { cache[key] = value; return true; },
+	});
+	let handler = null;
+	const take = (...args) => { handler = args[args.length - 1]; };
+	stubs.app = { get: take, put: take, post: take, delete: take };
+	new Function("__scope", `with (__scope) { ${liftRoute(src, head)} }`)(proxy);
+	return handler;
+}
+
 function deepFreeze(o) {
 	if (o && typeof o === "object" && !Object.isFrozen(o)) {
 		Object.freeze(o);
@@ -212,6 +250,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		looks: [],
 		lookAnswer: { verdict: "clean", mailboxes: {} },
 		batchHook: null,
+		// What server.js's sendEmail() is handed: the alert emails (AUTO_INVOICE_ALERT_TO).
+		mails: [],
 		dir: fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-wiring-")),
 	};
 	fs.mkdirSync(path.join(w.dir, "uploads"));
@@ -233,6 +273,15 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 				}
 				return { data: { values: w.sheet.map((r) => r.slice()) } };
 			},
+			// The Data Manager's read before a delete: whole rows by number ("'Job Tracking'!5:5").
+			batchGet: async ({ ranges = [] } = {}) => {
+				w.calls.sheetsGet++;
+				return { data: { valueRanges: ranges.map((r) => {
+					const m = /!(\d+):\d+$/.exec(String(r));
+					const row = m ? w.sheet[Number(m[1]) - 1] : null;
+					return row ? { values: [row.slice()] } : {};
+				}) } };
+			},
 			// The status route's write. `w.batchFails`: it rejects, having landed or not.
 			batchUpdate: async ({ requestBody }) => {
 				if (w.batchHook) w.batchHook();
@@ -249,6 +298,19 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 				if (fails) throw new Error("made-up: no answer in 15 seconds");
 				return { data: {} };
 			},
+		},
+		// A row delete (deleteDimension), as the Data Manager and the duplicate scanner send it.
+		// `w.rowDeleteFails`: it rejects, having landed or not.
+		batchUpdate: async ({ requestBody } = {}) => {
+			const fails = w.rowDeleteFails;
+			w.rowDeleteFails = null;
+			if (fails && !fails.landed) throw new Error("made-up: the sheet refused the delete");
+			for (const req of (requestBody && requestBody.requests) || []) {
+				const range = req.deleteDimension && req.deleteDimension.range;
+				if (range && range.dimension === "ROWS" && range.sheetId === 0) w.sheet.splice(range.startIndex, range.endIndex - range.startIndex);
+			}
+			if (fails) throw new Error("made-up: no answer in 15 seconds");
+			return { data: {} };
 		} },
 	};
 	const drive = {
@@ -385,6 +447,8 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			},
 		},
 		rateLimit: (opts) => { w.limiters.push(opts); return (req, res, next) => { w.limited++; next(); }; },
+		// server.js's sendEmail(to, subject, html): true when handed to Gmail. Made up: kept here.
+		sendEmail: async (to, subject, html) => { w.mails.push({ to, subject, html }); return true; },
 	};
 	w.schemaBefore = schema(db);
 	const names = Object.keys(scope);
@@ -408,30 +472,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			getJobTrackingCached: scope.getJobTrackingCached,
 			REPLICA: replica,
 		};
-		const cache = Object.create(null);
-		let proxy = null;
-		proxy = new Proxy(Object.create(null), {
-			has(_, key) {
-				if (typeof key !== "string" || key === "__scope") return false;
-				return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
-			},
-			get(_, key) {
-				if (key === Symbol.unscopables) return undefined;
-				if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
-				if (key in cache) return cache[key];
-				const decl = STATUS_INDEX.decls.get(key);
-				if (decl) {
-					cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
-					return cache[key];
-				}
-				if (key in globalThis) return globalThis[key];
-				throw new ReferenceError(`unstubbed in the lifted route: ${String(key)}`);
-			},
-			set(_, key, value) { cache[key] = value; return true; },
-		});
-		let handler = null;
-		stubs.app = { put: (...args) => { handler = args[args.length - 1]; } };
-		new Function("__scope", `with (__scope) { ${liftRoute(SRC, STATUS_HEAD)} }`)(proxy);
+		const handler = liftedHandler(STATUS_HEAD, stubs);
 		return async (user, id, newStatus = "Delivered") => {
 			const out = { status: 200, json: null };
 			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
@@ -440,6 +481,29 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			return out;
 		};
 	};
+	// A Super Admin's row delete as shipped (the Data Manager's DELETE /api/data/:rowIndex, the duplicate
+	// scanner's POST /api/admin/remove-rows), from `src`. The month guard (tested where it lives) lets the
+	// row go; the tab named "Carrier Database" is gid 7, which the made-up Sheets never deletes from.
+	w.rowAudits = [];
+	w.rowRoute = (head, src = SRC) => {
+		const handler = liftedHandler(head, {
+			db, getSheets: scope.getSheets, SPREADSHEET_ID: scope.SPREADSHEET_ID, require: serverRequire, console: quiet, process: proc,
+			autoInvoice: w.job,
+			requireRole: () => null,
+			getSheetId: async (_sheets, name) => ({ "Job Tracking": 0, "Carrier Database": 7 })[name],
+			sheetRowDeleteBlocker: () => null,
+			recordPeriodRefusal: () => {},
+			logAudit: (req, action) => { w.rowAudits.push(action); },
+			jtCacheInvalidate: scope.jtCacheInvalidate,
+		}, src);
+		return async ({ params = {}, query = {}, body = {} } = {}) => {
+			const out = { status: 200, json: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
+			await handler({ method: "POST", query, params, headers: {}, session: { user: SA }, body }, res);
+			return out;
+		};
+	};
+	w.rowOf = (id) => w.sheet.findIndex((r, i) => i > 0 && r[0] === id) + 1;
 
 	w.server = await new Promise((resolve) => { const s = realApp.listen(0, "127.0.0.1", () => resolve(s)); });
 	const base = `http://127.0.0.1:${w.server.address().port}`;
@@ -757,6 +821,12 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		ok(words.includes(`default ${caps.maxPerHour}`) && words.includes(`default ${caps.maxPerDay}`), `§7 ...the caps' defaults (${caps.maxPerHour} an hour, ${caps.maxPerDay} a day) as the rules read them`);
 		ok(/Shadow makes no Gmail drafts: it only records what it would draft/.test(words) && /in-app Super Admin notice/.test(words), "§7 ...shadow makes no Gmail drafts; its one other write is the settings notice");
 		ok(/a GET under \/api\/auto-invoice\/ reaches the app page/.test(words), "§7 ...off: a GET under /api/auto-invoice/ reaches the app page (no route is mounted)");
+		// Hold one load: its kill switch, and the alert address with no default.
+		const allWords = TEMPLATE.replace(/\n#\s?/g, " ");
+		ok(/^# AUTO_INVOICE_HOLD_ONE_LOAD=$/m.test(TEMPLATE) && /AUTO_INVOICE_HOLD_ONE_LOAD: a kill switch, ON unless set to false/.test(allWords),
+			"§7 FAILS ON THE OLD CODE: the settings template names AUTO_INVOICE_HOLD_ONE_LOAD, unset, a kill switch");
+		ok(/^# AUTO_INVOICE_ALERT_TO=$/m.test(TEMPLATE) && /AUTO_INVOICE_ALERT_TO: [^#]*No default and no fallback/.test(allWords),
+			"§7 FAILS ON THE OLD CODE: ...and AUTO_INVOICE_ALERT_TO, unset, with no default and no fallback");
 	}
 
 	// ===================================================================== §8
@@ -1025,9 +1095,22 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 
 		const w = await startedWorld();
 		eq(w.job.triggerMode, true, "§12 FAILS ON THE OLD CODE: real drafts, the setting named nowhere: the driver's Delivered starts the invoice");
-		eq([w.startsJob, w.intervals.length], [["automatic invoice drafts"], 0], "§12 FAILS ON THE OLD CODE: behind startsJob(), and no timer");
-		ok(w.out.includes("[auto-invoice] trigger on, no timer"), "§12 FAILS ON THE OLD CODE: the start-up line says so");
-		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger && (await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger.timer, false, "§12 FAILS ON THE OLD CODE: and the status route");
+		// The 5-minute watch (hold one load, plan §2.4): what a Super Admin's read runs, and no tick.
+		eq([w.startsJob, w.intervals.map((i) => i.ms)], [["automatic invoice drafts"], [300000]], "§12 FAILS ON THE OLD CODE: behind startsJob(), one timer, every 5 minutes: the watch");
+		ok(w.out.includes("[auto-invoice] trigger on; the watch runs every 5 minutes"), "§12 FAILS ON THE OLD CODE: the start-up line says so");
+		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger && (await w.call("GET", "/api/auto-invoice/status", SA)).json.trigger.timer, true, "§12 FAILS ON THE OLD CODE: and the status route");
+		{
+			let watched = 0;
+			let ticked = 0;
+			const realWatch = w.job.watch;
+			const realTick = w.job.tick;
+			w.job.watch = () => { watched++; };
+			w.job.tick = async () => { ticked++; return {}; };
+			w.intervals[0] && w.intervals[0].fn();
+			w.job.watch = realWatch;
+			w.job.tick = realTick;
+			eq([watched, ticked], [1, 0], "§12 FAILS ON THE OLD CODE: the timer runs the watch, never a tick");
+		}
 
 		const tap = w.statusRoute();
 		atReceiver(w, "LD-TEST-1201");
@@ -1159,6 +1242,51 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		jobOff.addPod("LD-TEST-1211");
 		await jobOff.job.finishStartUp();
 		eq([(await jobOffTap(DRIVER, "LD-TEST-1211")).status, jobOff.job.triggerMode, jobOff.intervals.length, JSON.stringify(schema(jobOff.db)) === JSON.stringify(jobOff.schemaBefore)], [200, false, 0, true], "§12 the job off: the route as before, no table, no timer");
+
+		// Hold one load, through the block: the watch finds a sheet edit with no Super Admin read, flags that
+		// load alone, and emails AUTO_INVOICE_ALERT_TO (trimmed) through server.js's sendEmail().
+		const ALERTS_ON = { ...SEND_ON, AUTO_INVOICE_ALERT_TO: "  alerts@example.test ", ADMIN_NOTIFY_EMAIL: "admin@example.test" };
+		const watched = await startedWorld({ env: ALERTS_ON });
+		const watchedTap = watched.statusRoute();
+		atReceiver(watched, "LD-TEST-1212");
+		await watchedTap(DRIVER, "LD-TEST-1212");
+		await until(() => watched.smtp.length === 1 && open(watched) === 0, "§12 sent, for the watch");
+		watched.setLoad("LD-TEST-1212", { "  Payment  ": "1600" });
+		// This world runs on the real clock: a check begun in the send's own millisecond skips that load.
+		await new Promise((r) => setTimeout(r, 5));
+		eq(watched.intervals.length, 1, "§12 FAILS ON THE OLD CODE: the watch's timer");
+		if (watched.intervals[0]) watched.intervals[0].fn();
+		await until(() => (watched.claim("LD-TEST-1212") || {}).changed_fields === "payment" || !watched.intervals[0], "§12 the watch flags it");
+		await until(() => watched.mails.length === 1 || !watched.intervals[0], "§12 the hold's email");
+		const stop = watched.db.prepare("SELECT value FROM auto_invoice_meta WHERE key = 'send_stop_reason'").get();
+		eq([watched.claim("LD-TEST-1212").changed_fields, stop ? stop.value : null, watched.smtp.length], ["payment", null, 1],
+			"§12 FAILS ON THE OLD CODE: a payment edited on the sheet after the send: the watch flags that load, sending isn't stopped, nothing is sent again");
+		eq(watched.mails.map((m) => [m.to, m.subject]), [["alerts@example.test", "Load LD-TEST-1212: changed after sending, needs a check"]],
+			"§12 FAILS ON THE OLD CODE: ...one email, to AUTO_INVOICE_ALERT_TO only (never ADMIN_NOTIFY_EMAIL), through server.js's sendEmail()");
+		atReceiver(watched, "LD-TEST-1213");
+		await watchedTap(DRIVER, "LD-TEST-1213");
+		await until(() => watched.smtp.length === 2 && open(watched) === 0, "§12 the next load, sent");
+		eq(watched.state("LD-TEST-1213"), ["drafted", ""], "§12 FAILS ON THE OLD CODE: ...and the next driver's load is sent");
+		// No fallback: with AUTO_INVOICE_ALERT_TO unset, ADMIN_NOTIFY_EMAIL set, nothing is mailed, and the reads say so.
+		const fallback = await startedWorld({ env: { ...SEND_ON, ADMIN_NOTIFY_EMAIL: "admin@example.test" } });
+		const fallbackTap = fallback.statusRoute();
+		atReceiver(fallback, "LD-TEST-1214");
+		await fallbackTap(DRIVER, "LD-TEST-1214");
+		await until(() => fallback.smtp.length === 1 && open(fallback) === 0, "§12 sent, no alert address");
+		fallback.setLoad("LD-TEST-1214", { "  Payment  ": "1600" });
+		await new Promise((r) => setTimeout(r, 5));
+		if (fallback.intervals[0]) fallback.intervals[0].fn();
+		await until(() => (fallback.claim("LD-TEST-1214") || {}).changed_fields === "payment" || !fallback.intervals[0], "§12 flagged, no alert address");
+		await settle();
+		eq([fallback.mails.length, (await fallback.call("GET", "/api/auto-invoice/settings", SA)).json.alerts], [0, { on: false }],
+			"§12 FAILS ON THE OLD CODE: AUTO_INVOICE_ALERT_TO unset: no fallback to ADMIN_NOTIFY_EMAIL, nothing mailed, and the settings read says alerts are off");
+		ok(fallback.logs.some((l) => /alert emails off/.test(l)) && !fallback.logs.some((l) => l.includes("@")), "§12 FAILS ON THE OLD CODE: ...one log line says so, with no address");
+		// A replica: the setting is never read there, so nothing could be mailed.
+		const replicaAlerts = await world({ env: ALERTS_ON, replica: { stamp: "made-up" } });
+		eq((await replicaAlerts.call("GET", "/api/auto-invoice/settings", SA)).json.alerts, { on: false }, "§12 FAILS ON THE OLD CODE: a replica: alerts are off, whatever the setting says");
+		eq(SRC.split("process.env.AUTO_INVOICE_ALERT_TO").length - 1, 1, "§12 FAILS ON THE OLD CODE: server.js reads AUTO_INVOICE_ALERT_TO once");
+		ok(BLOCK.includes("alertTo: REPLICA ? \"\" : String(process.env.AUTO_INVOICE_ALERT_TO ?? \"\").trim(),") && BLOCK.includes("sendAlertMail: sendEmail,"),
+			"§12 FAILS ON THE OLD CODE: ...in the block, trimmed, with no default and no fallback, never in a replica, sent through sendEmail()");
 	}
 
 	// ===================================================================== §13
@@ -1184,7 +1312,12 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		const listen = SRC.slice(SRC.indexOf("server.listen(PORT, BIND_HOST"));
 		ok(listen.indexOf("autoInvoice.finishStartUp();") > 0 && listen.indexOf("autoInvoice.finishStartUp();") < listen.indexOf("process.umask(BOOT_UMASK)"), "§13 FAILS ON THE OLD CODE: start-up's second half runs when the app is listening");
 		ok(BLOCK.indexOf("autoInvoice.startTrigger()") > BLOCK.indexOf('startsJob("automatic invoice drafts")') && BLOCK.indexOf("autoInvoice.startTrigger()") < BLOCK.indexOf("setInterval("), "§13 FAILS ON THE OLD CODE: the first half runs behind startsJob(), before the app listens");
-		ok(/if \(autoInvoice\.triggerMode\) \{[\s\S]*?\} else \{[\s\S]*?setInterval\(/.test(BLOCK), "§13 FAILS ON THE OLD CODE: the sweep's timer only when the trigger is off");
+		// The trigger on: the watch's timer, started whatever startTrigger() first answers (finishStartUp() tries
+		// it again), and never a tick; the trigger off: the sweep's timer, as before.
+		const branches = /if \(autoInvoice\.triggerMode\) \{([\s\S]*?)\} else \{([\s\S]*?)\n\t\}\n\}/.exec(BLOCK);
+		ok(branches && /\n\t\tsetInterval\(\(\) => autoInvoice\.watch\(\), AUTO_INVOICE_TICK_MS\);/.test(branches[1]) && !/tick\(/.test(branches[1]) && !/if \(autoInvoice\.startTrigger\(\)\)[^\n]*\{/.test(branches[1]),
+			"§13 FAILS ON THE OLD CODE: the trigger on: the watch every 5 minutes, outside the startTrigger() answer, and no tick");
+		ok(branches && /autoInvoice\.tick\(\)/.test(branches[2]) && !/watch\(/.test(branches[2]), "§13 the sweep's timer only when the trigger is off");
 		const upload = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.post("/api/documents/upload",')));
 		ok(upload.indexOf('if (docType === "POD") autoInvoicePodChanged(loadId);') > upload.indexOf("res.json({ success: true, driveUrl });"), "§13 FAILS ON THE OLD CODE: a POD upload checks its load, after the answer");
 		const del = liftRoute(SRC, SRC.split("\n").find((l) => l.startsWith('app.delete("/api/documents/:id",')));
@@ -1420,6 +1553,165 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq(replica.job.sending, false, "§14 a replica never sends, so this check can't run there");
 		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 		ok(/^# AUTO_INVOICE_KNOWN_ADDRESS_ENABLED=$/m.test(TEMPLATE) && /a kill switch that fails safe, ON unless set to false/.test(TEMPLATE), "§14 the settings template names it, unset, a kill switch that fails safe");
+	}
+
+	// ===================================================================== §15
+	section("§15 a sent load's row removed in the app: the Data Manager and the duplicate scanner, as shipped, through the block");
+	{
+		const SEND_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test",
+			AUTO_INVOICE_ALERT_TO: "alerts@example.test", ...MAILBOX });
+		const DRIVER = Object.freeze({ id: 3, username: "made_up_driver", role: "Driver", driverName: "Made-up Driver" });
+		const DM_HEAD = SRC.split("\n").find((l) => l.startsWith('app.delete("/api/data/:rowIndex",'));
+		const SCAN_HEAD = SRC.split("\n").find((l) => l.startsWith('app.post("/api/admin/remove-rows",'));
+		const HELD = (id) => `Load ${id}: changed after sending, needs a check`;
+		const until = async (cond, label) => {
+			const end = Date.now() + 30000;
+			while (Date.now() < end) {
+				if (cond()) return true;
+				await new Promise((r) => setTimeout(r, 2));
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+		// A world past start-up, `ids` delivered by their driver and sent. Another load stays on the sheet
+		// (a read with no load rows at all skips the check).
+		const sentWorld = async (ids) => {
+			const x = await world({ env: SEND_ON });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§15 the broker domain confirmed");
+			await x.job.finishStartUp();
+			x.setLoad("LD-TEST-1599", { "Job Status": "At Receiver" });
+			const tap = x.statusRoute();
+			for (const id of ids) {
+				x.setLoad(id, { "Job Status": "At Receiver" });
+				x.addPod(id);
+				x.fileRateCon(id, rateCon());
+				await tap(DRIVER, id);
+				await until(() => (x.claim(id) || {}).delivery === "send" && open(x) === 0, `§15 ${id} sent`);
+			}
+			// The real clock: the removal's own check runs in a later millisecond than the send.
+			await new Promise((r) => setTimeout(r, 5));
+			return x;
+		};
+		const chip = (x, id) => (x.claim(id) || {}).changed_fields;
+		const noted = (x, id) => Boolean((x.claim(id) || {}).removed_in_app_at);
+		const REASON = "made-up: a duplicate row";
+
+		// The Data Manager: the load's only row deleted.
+		const dm = await sentWorld(["LD-TEST-1501"]);
+		eq(dm.smtp.length, 1, "§15 one load sent");
+		const dmDelete = dm.rowRoute(DM_HEAD);
+		const dmAnswer = await dmDelete({ params: { rowIndex: String(dm.rowOf("LD-TEST-1501")) }, body: { reason: REASON } });
+		eq([dmAnswer.status, dmAnswer.json, dm.rowOf("LD-TEST-1501"), dm.rowAudits], [200, { success: true }, 0, ["delete_sheet_row"]], "§15 the Data Manager deletes the row, as before");
+		await until(() => chip(dm, "LD-TEST-1501") === "removed", "§15 the Data Manager's delete held");
+		await until(() => dm.mails.length === 1, "§15 the Data Manager's delete emailed");
+		const dmStop = dm.db.prepare("SELECT value FROM auto_invoice_meta WHERE key = 'send_stop_reason'").get();
+		eq([chip(dm, "LD-TEST-1501"), dm.mails.map((m) => [m.to, m.subject]), dmStop ? dmStop.value : null, dm.smtp.length],
+			["removed", [["alerts@example.test", HELD("LD-TEST-1501")]], null, 1],
+			"§15 FAILS ON THE OLD CODE: a sent load's only row deleted with the Data Manager: that load held as removed at once, one email to AUTO_INVOICE_ALERT_TO, no stop, nothing sent again");
+
+		// A delete whose answer was lost, though it landed: held all the same.
+		const lost = await sentWorld(["LD-TEST-1502"]);
+		lost.rowDeleteFails = { landed: true };
+		const lostAnswer = await lost.rowRoute(DM_HEAD)({ params: { rowIndex: String(lost.rowOf("LD-TEST-1502")) }, body: { reason: REASON } });
+		eq([lostAnswer.status, lost.rowOf("LD-TEST-1502"), lost.rowAudits], [500, 0, ["delete_sheet_row_failed"]], "§15 a delete whose answer is lost: the error as before, and the row gone");
+		await until(() => chip(lost, "LD-TEST-1502") === "removed", "§15 the lost delete held");
+		eq(chip(lost, "LD-TEST-1502"), "removed", "§15 FAILS ON THE OLD CODE: ...that load held as removed all the same");
+		// One refused, the row still there: noted, then let go by the next check, nothing held.
+		const refused = await sentWorld(["LD-TEST-1503"]);
+		refused.rowDeleteFails = { landed: false };
+		eq((await refused.rowRoute(DM_HEAD)({ params: { rowIndex: String(refused.rowOf("LD-TEST-1503")) }, body: { reason: REASON } })).status, 500, "§15 a delete refused");
+		await new Promise((r) => setTimeout(r, 5));
+		if (refused.intervals[0]) refused.intervals[0].fn();
+		await until(() => !noted(refused, "LD-TEST-1503"), "§15 the refused delete's note let go");
+		await settle();
+		eq([chip(refused, "LD-TEST-1503"), noted(refused, "LD-TEST-1503"), refused.mails.length], ["", false, 0], "§15 ...the row still there: nothing held, nothing emailed, the note gone at the watch");
+
+		// The duplicate scanner: one load's only row, and another load's second row.
+		const scan = await sentWorld(["LD-TEST-1504", "LD-TEST-1505"]);
+		scan.sheet.push(scan.sheet[scan.rowOf("LD-TEST-1505") - 1].slice());
+		const dupRow = scan.sheet.length;
+		const scanAnswer = await scan.rowRoute(SCAN_HEAD)({ body: { sheet: "Job Tracking", rowIndices: [scan.rowOf("LD-TEST-1504"), dupRow], confirm: true, reason: REASON } });
+		eq([scanAnswer.status, scanAnswer.json && scanAnswer.json.deleted, scan.rowOf("LD-TEST-1504"), scan.rowOf("LD-TEST-1505") > 0, scan.rowAudits], [200, 2, 0, true, ["delete_sheet_rows"]],
+			"§15 the duplicate scanner deletes both rows, as before; the second load keeps its first row");
+		await until(() => chip(scan, "LD-TEST-1504") === "removed", "§15 the scanner's delete held");
+		await until(() => scan.mails.length === 1, "§15 the scanner's delete emailed");
+		await new Promise((r) => setTimeout(r, 5));
+		if (scan.intervals[0]) scan.intervals[0].fn();
+		await until(() => !noted(scan, "LD-TEST-1505"), "§15 the duplicate's note let go");
+		await settle();
+		eq([chip(scan, "LD-TEST-1504"), chip(scan, "LD-TEST-1505"), noted(scan, "LD-TEST-1505"), scan.mails.map((m) => m.subject)], ["removed", "", false, [HELD("LD-TEST-1504")]],
+			"§15 FAILS ON THE OLD CODE: the duplicate scanner: the load whose only row went is held as removed and emailed; the load that keeps a row isn't");
+		// A scanner delete whose answer was lost, though it landed.
+		const scanLost = await sentWorld(["LD-TEST-1506"]);
+		scanLost.rowDeleteFails = { landed: true };
+		eq((await scanLost.rowRoute(SCAN_HEAD)({ body: { sheet: "Job Tracking", rowIndices: [scanLost.rowOf("LD-TEST-1506")], confirm: true, reason: REASON } })).status, 500, "§15 a scanner delete whose answer is lost");
+		await until(() => chip(scanLost, "LD-TEST-1506") === "removed", "§15 the scanner's lost delete held");
+		eq(chip(scanLost, "LD-TEST-1506"), "removed", "§15 FAILS ON THE OLD CODE: ...held as removed all the same");
+
+		// Another tab (the made-up Sheets answers its reads with Job Tracking's rows): the job is told nothing,
+		// by either route, whether the delete answers or not.
+		const otherTab = {
+			dm: (route, x, id) => route({ params: { rowIndex: String(x.rowOf(id)) }, query: { sheet: "Carrier Database" }, body: { reason: REASON } }),
+			scan: (route, x, id) => route({ body: { sheet: "Carrier Database", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } }),
+		};
+		const other = await sentWorld(["LD-TEST-1507"]);
+		const otherSeen = [];
+		for (const [route, head] of [["dm", DM_HEAD], ["scan", SCAN_HEAD]]) {
+			for (const lost of [false, true]) {
+				if (lost) other.rowDeleteFails = { landed: false };
+				const answer = await otherTab[route](other.rowRoute(head), other, "LD-TEST-1507");
+				otherSeen.push([route, lost, answer.status, noted(other, "LD-TEST-1507")]);
+			}
+		}
+		await settle();
+		eq([otherSeen, chip(other, "LD-TEST-1507"), other.mails.length], [[["dm", false, 200, false], ["dm", true, 500, false], ["scan", false, 200, false], ["scan", true, 500, false]], "", 0],
+			"§15 rows deleted from another tab, by either route, answered or not: the job is told nothing");
+
+		// Each route's call into the job, removed in turn: the case that pins it must change.
+		const callOf = (route) => `if (${route === "dm" ? "sheetName" : "sheet"} === "Job Tracking") autoInvoiceRowsRemoved(headers, ${route === "dm" ? "[row]" : "deletable.map((d) => allRows[d.rowIndex - 1] || [])"});`;
+		const mutantSrc = (from, to) => (SRC.split(from).length === 2 ? SRC.replace(from, to) : null);
+		for (const [label, from, to, head, run] of [
+			["the Data Manager's delete never tells the job", `if (guarded) jtCacheInvalidate();\n\t\t// A load whose invoice the job sent is held as removed, not read as a month archived.\n\t\t${callOf("dm")}`, "if (guarded) jtCacheInvalidate();",
+				DM_HEAD, async (route, x, id) => route({ params: { rowIndex: String(x.rowOf(id)) }, body: { reason: REASON } })],
+			["the Data Manager's lost delete never tells the job", `err.message }));\n\t\t\t// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).\n\t\t\t${callOf("dm")}`, "err.message }));",
+				DM_HEAD, async (route, x, id) => { x.rowDeleteFails = { landed: true }; return route({ params: { rowIndex: String(x.rowOf(id)) }, body: { reason: REASON } }); }],
+			["the duplicate scanner's delete never tells the job", `if (guarded) jtCacheInvalidate();\n\t\t// A load whose invoice the job sent is held as removed, not read as a month archived.\n\t\t${callOf("scan")}`, "if (guarded) jtCacheInvalidate();",
+				SCAN_HEAD, async (route, x, id) => route({ body: { sheet: "Job Tracking", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } })],
+			["the duplicate scanner's lost delete never tells the job", `err.message }));\n\t\t\t// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).\n\t\t\t${callOf("scan")}`, "err.message }));",
+				SCAN_HEAD, async (route, x, id) => { x.rowDeleteFails = { landed: true }; return route({ body: { sheet: "Job Tracking", rowIndices: [x.rowOf(id)], confirm: true, reason: REASON } }); }],
+		]) {
+			const src = mutantSrc(from, to);
+			ok(src, `§15 MUTANT ${label}: applied to server.js's text once`);
+			if (!src) continue;
+			// Each run ends at the watch's check after the delete: the load held, or its row logged as gone.
+			const results = [];
+			for (const text of [SRC, src]) {
+				const x = await sentWorld(["LD-TEST-1508"]);
+				await run(x.rowRoute(head, text), x, "LD-TEST-1508");
+				if (x.intervals[0]) x.intervals[0].fn();
+				await until(() => chip(x, "LD-TEST-1508") === "removed" || x.audits("auto_invoice_load_change_logged").length > 0, `§15 MUTANT ${label}: the check after the delete`);
+				results.push(chip(x, "LD-TEST-1508"));
+			}
+			ok(results[0] === "removed" && results[1] === "", `§15 MUTANT ${label}: caught`);
+		}
+		// Each call's "Job Tracking only", opened in turn: another tab's rows reach the job.
+		for (const [label, route, head, lost, from] of [
+			["the Data Manager's", "dm", DM_HEAD, false, `${callOf("dm")}\n\n\t\tres.json({ success: true });`],
+			["the Data Manager's lost", "dm", DM_HEAD, true, `${callOf("dm")}\n\t\t\tthrow err;`],
+			["the duplicate scanner's", "scan", SCAN_HEAD, false, `${callOf("scan")}\n\n\t\tconst lockedPeriods`],
+			["the duplicate scanner's lost", "scan", SCAN_HEAD, true, `${callOf("scan")}\n\t\t\tthrow err;`],
+		]) {
+			const src = mutantSrc(from, from.replace(/(sheetName|sheet) === "Job Tracking"/, "true"));
+			ok(src, `§15 MUTANT ${label} delete tells the job of another tab's rows: applied to server.js's text once`);
+			if (!src) continue;
+			const x = await sentWorld(["LD-TEST-1509"]);
+			if (lost) x.rowDeleteFails = { landed: false };
+			await otherTab[route](x.rowRoute(head, src), x, "LD-TEST-1509");
+			// Read before the check it starts can let the note go (the row is still on the sheet).
+			ok(noted(x, "LD-TEST-1509"), `§15 MUTANT ${label} delete tells the job of another tab's rows: caught (the real routes tell it nothing, above)`);
+		}
+		eq([SRC.split("autoInvoiceRowsRemoved(").length - 1, SRC.split(".rowsRemoved(").length - 1], [5, 1], "§15 FAILS ON THE OLD CODE: one wrapper in the block, two calls in each route, and nothing else reaches the job's note");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});
