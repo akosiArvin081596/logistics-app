@@ -107,6 +107,17 @@
       />
       <p v-if="deleteError" class="reason-error">{{ deleteError }}</p>
     </ConfirmModal>
+
+    <!-- A Load ID an old delete names: the server's choice, for a Super Admin only. -->
+    <DeletedLoadChoiceModal
+      v-if="auth.isSuperAdmin"
+      :open="deletedChoice.state.open"
+      :choice="deletedChoice.state.choice"
+      :note="deletedChoice.state.note"
+      @resolved="onDeletedLoadRestored"
+      @create-new="onDeletedLoadCreateNew"
+      @cancel="onDeletedLoadCancel"
+    />
   </div>
 </template>
 
@@ -116,17 +127,24 @@ import { useSheetsStore } from '../stores/sheets'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
+import { useDeletedLoadChoice } from '../composables/useDeletedLoadChoice'
 import { useSocket } from '../composables/useSocket'
+import { restoreDoneText, withDeletedLoadChoice } from '../lib/deletedLoadsView.js'
 import SheetTabs from '../components/data-manager/SheetTabs.vue'
 import DataTable from '../components/data-manager/DataTable.vue'
 import AddRowModal from '../components/data-manager/AddRowModal.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
+import DeletedLoadChoiceModal from '../components/shared/DeletedLoadChoiceModal.vue'
 
 const store = useSheetsStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
 const { withOffDutyConfirm } = useOffDutyConfirm()
+const deletedChoice = useDeletedLoadChoice()
+const onDeletedLoadRestored = (answer) => deletedChoice.answer({ action: 'restored', answer })
+const onDeletedLoadCreateNew = () => deletedChoice.answer({ action: 'create_new' })
+const onDeletedLoadCancel = () => deletedChoice.answer(null)
 const socket = useSocket()
 
 const showModal = ref(false)
@@ -220,8 +238,18 @@ async function handleSave(rowIndex, values) {
 
 async function handleAdd(values) {
   try {
-    const result = await withOffDutyConfirm((confirmOffDuty) => store.addRow(values, { confirmOffDuty }))
-    if (result && result.offDutyDeclined) return
+    // A Load ID an old delete names: the Super Admin restores the deleted load or adds this row as new.
+    const result = await withDeletedLoadChoice(
+      (choice) => withOffDutyConfirm((confirmOffDuty) => store.addRow(values, { confirmOffDuty, deletedLoadChoice: choice })),
+      auth.isSuperAdmin ? deletedChoice.ask : null,
+    )
+    if (result && (result.offDutyDeclined || result.deletedLoadDeclined)) return
+    if (result && result.deletedLoadRestored) {
+      showModal.value = false
+      toast(restoreDoneText(result.answer, result.loadId), 'success')
+      store.loadData()
+      return
+    }
     showModal.value = false
     if (result?.warning) {
       toast(result.warning, 'error')

@@ -79,6 +79,17 @@
           </button>
         </div>
       </div>
+
+      <!-- A Load ID an old delete names: the server's choice, for a Super Admin only. -->
+      <DeletedLoadChoiceModal
+        v-if="auth.isSuperAdmin"
+        :open="deletedChoice.state.open"
+        :choice="deletedChoice.state.choice"
+        :note="deletedChoice.state.note"
+        @resolved="onDeletedLoadRestored"
+        @create-new="onDeletedLoadCreateNew"
+        @cancel="onDeletedLoadCancel"
+      />
     </DialogContent>
   </Dialog>
 </template>
@@ -87,8 +98,12 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
+import { useToast } from '../../composables/useToast'
+import { useDeletedLoadChoice } from '../../composables/useDeletedLoadChoice'
 import { useAuthStore } from '../../stores/auth'
 import { rateConSectionsFor, BROKER_KEPT_NOTE } from '../../lib/brokerContactView'
+import { restoreDoneText, withDeletedLoadChoice } from '../../lib/deletedLoadsView.js'
+import DeletedLoadChoiceModal from './DeletedLoadChoiceModal.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -103,6 +118,11 @@ const emit = defineEmits(['update:open', 'created'])
 
 const api = useApi()
 const auth = useAuthStore()
+const { show: toast } = useToast()
+const deletedChoice = useDeletedLoadChoice()
+const onDeletedLoadRestored = (answer) => deletedChoice.answer({ action: 'restored', answer })
+const onDeletedLoadCreateNew = () => deletedChoice.answer({ action: 'create_new' })
+const onDeletedLoadCancel = () => deletedChoice.answer(null)
 
 // Sheets read + Distance Matrix + 3 tab writes + a Drive upload. The 20s
 // useApi default aborts a request that is still working.
@@ -244,11 +264,18 @@ async function submit() {
   submitting.value = true
   submitError.value = ''
   try {
-    const res = await api.post(
+    // A Load ID an old delete names: a Super Admin chooses (withDeletedLoadChoice()); anyone else gets the server's words.
+    const res = await withDeletedLoadChoice((choice) => api.post(
       '/api/loads/from-ratecon',
-      { fields: { ...form, 'Load Number': loadNumber.value }, pdfBase64: props.pdfBase64, fileName: props.fileName },
+      { fields: { ...form, 'Load Number': loadNumber.value }, pdfBase64: props.pdfBase64, fileName: props.fileName, ...(choice ? { deletedLoadChoice: choice } : {}) },
       { timeout: CREATE_TIMEOUT_MS },
-    )
+    ), auth.isSuperAdmin ? deletedChoice.ask : null)
+    if (res && res.deletedLoadDeclined) return
+    if (res && res.deletedLoadRestored) {
+      toast(restoreDoneText(res.answer, res.loadId), 'success')
+      emit('update:open', false)
+      return
+    }
     emit('created', res.loadId || loadNumber.value, res)
     emit('update:open', false)
   } catch (err) {
@@ -259,6 +286,7 @@ async function submit() {
 }
 
 function messageFor(err) {
+  if (err?.code === 'LOAD_ID_DELETED') return err.message || 'An earlier load with this Load ID was deleted. Ask a Super Admin to restore it or create it as new.'
   if (err?.code === 'DUPLICATE_LOAD' || err?.status === 409) {
     const where = err?.data?.existingRowIndex ? ` (Job Tracking row ${err.data.existingRowIndex})` : ''
     return `Load ${loadNumber.value} already exists${where}. Open it from the Job Board or Active Loads instead of creating a second copy.`
