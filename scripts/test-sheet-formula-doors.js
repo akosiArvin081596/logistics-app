@@ -366,6 +366,8 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 		app: { post: (p, gate, limiter, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
+		// The deleted-load check (scripts/test-deleted-load-restore.js covers it): inert here.
+		deletedLoadRestore: { onCreate: () => null },
 		rateConLimiter: null,
 		formulaCellRefusal: H.formulaCellRefusal,
 		RATECON_SHEET_FIELDS,

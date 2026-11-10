@@ -22,13 +22,33 @@
  *      dates can't be read, the delete record's months answer, not the readable
  *      rows' alone.
  *
+ * RESTORE (lib/deleted-load-restore.js, DELETED_LOAD_RESTORE_ENABLED):
+ *   §7  the wiring in server.js: the flag read, the mount between the list and
+ *       the dashboard, the list's field, the notice type, the delete's digests.
+ *   §8  the flag off: nothing mounted, the list answer byte-identical, every
+ *       create and dashboard call inert without touching the database.
+ *   §9  POST /api/admin/deleted-loads/:id/restore answers 403 to every role but
+ *       Super Admin (a made-up "Admin" and an unknown one included), 401 signed
+ *       out, and none of them reaches the handler or changes anything.
+ *   §10 a closed month and a month that can't be read are refused in plain
+ *       words, nothing changed.
+ *   §11 no Job Tracking row, an unknown id, a bad id or mode, an unreadable lock
+ *       table (before or after the sheet read) or sheet: refused, nothing changed.
+ *   §12 a second press is the 404 no-op; two presses at once restore once.
+ *   §13 the one audit row (restore_load, or clear_load_delete for "Create it as
+ *       new"); an audit write that fails leaves the delete in place.
+ *   §14 restored, the load counts again (excludeDroppedLoads(), the live view)
+ *       and leaves the deleted list.
+ *
  * WHAT IS REAL. The route registration, requireRole, periodLocksReadable,
  * isLocked, jobTrackingMonthCols, loadRowPeriods (and the date readers under
- * it), pickAddressColumn and resolveCityState (and the address split under it)
- * are lifted out of server.js and run as shipped; lib/deleted-loads-view.js and
- * normalizeLoadId() are required. The database is a better-sqlite3 :memory:
- * with the four tables the route reads. Stubbed: the Job Tracking read (made-up
- * rows) and tripDayLockCover() (null: the trip work-day rule is off).
+ * it), pickAddressColumn and resolveCityState (and the address split under it),
+ * lockedAmong, periodLabel and excludeDroppedLoads (and the reads under it)
+ * are lifted out of server.js and run as shipped; lib/deleted-loads-view.js,
+ * lib/deleted-load-restore.js and normalizeLoadId() are required. The database
+ * is a better-sqlite3 :memory: with the tables the routes read. Stubbed: the
+ * Job Tracking read (made-up rows), tripDayLockCover() (null: the trip
+ * work-day rule is off) and refuseCrossSite (its own runner covers it).
  *
  * Made-up loads, people and places only. No server, no port, no network.
  * Run: node scripts/test-deleted-loads-route.js
@@ -107,6 +127,23 @@ let deletedLoadsView = null;
 try { deletedLoadsView = require(path.join(ROOT, "lib", "deleted-loads-view.js")); }
 catch (e) { ok("lib/deleted-loads-view.js loads", false, e.message); }
 
+// The restore module. Missing on a checkout without it: §7-§14 then fail on
+// that, and the list sections above still run.
+let restoreLib = null;
+let restoreLibError = "";
+try { restoreLib = require(path.join(ROOT, "lib", "deleted-load-restore.js")); }
+catch (e) { restoreLibError = e.message; }
+const RESTORE_PATH = "/api/admin/deleted-loads/:id/restore";
+
+// The pieces the restore route and the "is this load live?" check run on, lifted
+// beside the ones above.
+const MORE_FNS = ["lockedAmong", "periodLabel", "excludeDroppedLoads", "getDeletedLoadIds", "loadKeySet", "liveJobTrackingView"];
+const MORE_CONSTS = ["CANCELED_STATUS_RE"];
+const liftedMore = MORE_FNS.map((n) => [n, liftFn(n)]);
+const liftedMoreConsts = MORE_CONSTS.map((n) => [n, liftConst(n)]);
+for (const [n, t] of liftedMore) if (!t) ok(`${n}() is defined once in server.js`, false);
+for (const [n, t] of liftedMoreConsts) if (!t) ok(`${n} is defined once in server.js`, false);
+
 // ---------------------------------------------------------------- fixture
 // Made-up Job Tracking, in the header-keyed shape getJobTrackingCached() hands
 // every caller (header order as on the real tab: Assigned Date before Status
@@ -152,6 +189,8 @@ function makeDb({ lockTable = true } = {}) {
 		user_id INTEGER NOT NULL, username TEXT NOT NULL, role TEXT NOT NULL, action TEXT NOT NULL,
 		entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 	db.exec(`CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, pickup_address TEXT, dropoff_address TEXT)`);
+	db.exec(`CREATE TABLE dispatch_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, title TEXT NOT NULL,
+		body TEXT DEFAULT '', metadata TEXT DEFAULT '{}', read INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 	if (lockTable) {
 		db.exec(`CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked'
 			CHECK(status IN ('locked','reopened')), finalized_at TEXT NOT NULL, finalized_by TEXT NOT NULL DEFAULT 'system',
@@ -187,7 +226,10 @@ function makeDb({ lockTable = true } = {}) {
 }
 
 // One scope per database: periodLockStmt() caches its statement on itself.
-function build(routeText, db, jobTracking) {
+// `restore` is the deleted-load-restore instance the route reads its extra
+// field from (off unless a section turns it on).
+const quiet = { log() {}, warn() {}, error() {} };
+function build(routeText, db, jobTracking, { restoreOn = false } = {}) {
 	const reads = { sheet: 0 };
 	const getJobTrackingCached = async () => {
 		reads.sheet++;
@@ -196,18 +238,80 @@ function build(routeText, db, jobTracking) {
 	};
 	let captured = null;
 	const app = { get: (p, ...chain) => { captured = chain; } };
-	const quiet = { log() {}, warn() {}, error() {} };
 	const body = [
 		...liftedConsts.map(([, t]) => t),
 		...lifted.map(([, t]) => t),
 		routeText,
 		"return { requireRole };",
 	].join("\n\n");
+	const restore = restoreLib ? restoreLib.create({ db, enabled: restoreOn }) : { listFields: () => ({}) };
 	const scope = new Function(
-		"app", "db", "getJobTrackingCached", "tripDayLockCover", "deletedLoadsView", "normalizeLoadId", "APP_TIMEZONE", "console",
+		"app", "db", "getJobTrackingCached", "tripDayLockCover", "deletedLoadsView", "normalizeLoadId", "APP_TIMEZONE", "console", "deletedLoadRestore",
 		body,
-	)(app, db, getJobTrackingCached, () => null, deletedLoadsView, normalizeLoadId, "America/New_York", quiet);
+	)(app, db, getJobTrackingCached, () => null, deletedLoadsView, normalizeLoadId, "America/New_York", quiet, restore);
 	return { chain: captured, reads, requireRole: scope.requireRole };
+}
+
+// The server's own helpers in one scope over `db`, for the restore route's mount.
+function helpersFor(db) {
+	const body = [
+		...liftedConsts.map(([, t]) => t),
+		...liftedMoreConsts.map(([, t]) => t),
+		...lifted.map(([, t]) => t),
+		...liftedMore.map(([, t]) => t),
+		"return { requireRole, periodLocksReadable, isLocked, jobTrackingMonthCols, loadRowPeriods, lockedAmong, periodLabel,",
+		"\tpickAddressColumn, excludeDroppedLoads, getDeletedLoadIds, loadKeySet, liveJobTrackingView, findCol };",
+	].join("\n\n");
+	return new Function("db", "normalizeLoadId", "console", body)(db, normalizeLoadId, quiet);
+}
+
+// The restore route as mounted by the lib, over `db` and a made-up Job Tracking
+// read. `rec` records what the route announces; `jt` may be an Error (unreadable)
+// or a function called on each read (to change the world mid-request).
+function restoreWorld({ db = makeDb(), jt = JT, enabled = true } = {}) {
+	restoreLib.ensureSchema(db);
+	const H = helpersFor(db);
+	const rec = { changes: [], invalidations: 0, notices: [], reads: 0, crossSite: 0 };
+	const routes = {};
+	const app = {
+		post: (p, ...chain) => { routes[`POST ${p}`] = chain; },
+		get: (p, ...chain) => { routes[`GET ${p}`] = chain; },
+	};
+	const getJobTrackingCached = async () => {
+		rec.reads++;
+		await null;
+		const v = typeof jt === "function" ? jt() : jt;
+		if (v instanceof Error) throw v;
+		return v;
+	};
+	const inst = restoreLib.create({ db, enabled, log: quiet });
+	inst.mount(app, {
+		requireRole: H.requireRole,
+		refuseCrossSite: (req, res, next) => { rec.crossSite++; next(); },
+		periodLocksReadable: H.periodLocksReadable,
+		getJobTrackingCached,
+		jobTrackingMonthCols: H.jobTrackingMonthCols,
+		tripDayLockCover: () => null,
+		loadRowPeriods: H.loadRowPeriods,
+		lockedAmong: H.lockedAmong,
+		periodLabel: H.periodLabel,
+		notifyChange: (d) => rec.changes.push(d),
+		jtCacheInvalidate: () => { rec.invalidations++; },
+		pickAddressColumn: H.pickAddressColumn,
+		excludeDroppedLoads: H.excludeDroppedLoads,
+		notifySuperAdmins: (n) => rec.notices.push(n),
+	});
+	return { db, inst, H, rec, routes, chain: routes[`POST ${RESTORE_PATH}`] };
+}
+
+// What a request could change: every row of the tables the restore writes.
+const FINGERPRINT_SQL = [
+	"SELECT * FROM deleted_loads ORDER BY id",
+	"SELECT * FROM audit_trail ORDER BY id",
+	"SELECT * FROM dispatch_notifications ORDER BY id",
+];
+function fingerprint(db) {
+	return JSON.stringify(FINGERPRINT_SQL.map((sql) => db.prepare(sql).all()));
 }
 
 const USERS = {
@@ -215,7 +319,40 @@ const USERS = {
 	Dispatcher: { id: 2, role: "Dispatcher", username: "dispatch_test" },
 	Driver: { id: 3, role: "Driver", username: "LogisX-9001", driverName: "Test Driver One" },
 	Investor: { id: 4, role: "Investor", username: "investor_test" },
+	// The role behind KPI_VIEWER_ENABLED, a made-up "Admin", one no list knows,
+	// and Super Admin spelled another way: every one of them is someone else.
+	"KPI Viewer": { id: 5, role: "KPI Viewer", username: "kpi_test" },
+	Admin: { id: 6, role: "Admin", username: "admin_test" },
+	"Night Auditor": { id: 7, role: "Night Auditor", username: "auditor_test" },
+	"super admin": { id: 8, role: "super admin", username: "lower_test" },
 };
+const NOT_SUPER_ADMIN = ["Dispatcher", "Driver", "Investor", "KPI Viewer", "Admin", "Night Auditor", "super admin"];
+
+// One POST to the restore route, as Express would run its chain. `csrf: false`
+// leaves out X-Requested-With.
+async function callRestore(chain, user, { id, body = {}, csrf = true } = {}) {
+	const url = `/api/admin/deleted-loads/${id}/restore`;
+	const req = {
+		method: "POST", path: url, url, originalUrl: url,
+		params: { id: String(id) }, query: {}, body, route: { path: RESTORE_PATH },
+		headers: csrf ? { "x-requested-with": "XMLHttpRequest" } : {},
+		session: user ? { user: { ...user } } : {},
+	};
+	const res = {
+		statusCode: 200, body: undefined,
+		status(c) { this.statusCode = c; return this; },
+		json(b) { this.body = b; return this; },
+		setHeader() {}, end() { return this; },
+	};
+	for (const mw of chain.slice(0, -1)) {
+		let nexted = false;
+		await mw(req, res, () => { nexted = true; });
+		if (!nexted) return { status: res.statusCode, body: res.body, reached: false };
+	}
+	await chain[chain.length - 1](req, res, (err) => { res.statusCode = 500; res.body = { error: String(err && err.message) }; });
+	return { status: res.statusCode, body: res.body, reached: true };
+}
+const tombstoneId = (db, loadId) => (db.prepare("SELECT id FROM deleted_loads WHERE load_id = ? ORDER BY id").get(loadId) || {}).id;
 async function call(chain, user) {
 	const req = {
 		method: "GET", path: ROUTE_PATH, url: ROUTE_PATH, originalUrl: ROUTE_PATH,
@@ -403,8 +540,220 @@ async function main() {
 			l8 && { months: l8.months, monthsFrom: l8.monthsFrom }, { months: [], monthsFrom: "none" });
 	}
 
+	await restoreSections();
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
+}
+
+// ================================================================ RESTORE
+async function restoreSections() {
+	console.log("\n§7 the restore wiring in server.js");
+	ok("lib/deleted-load-restore.js loads", !!restoreLib, restoreLibError);
+	if (!restoreLib) return;
+	const count = (needle) => SRC.split(needle).length - 1;
+	const DECL = '\nconst deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true" });\n';
+	eq("one instance, on only when the setting is exactly \"true\"", count(DECL), 1);
+	eq("its column is added once, at start", count('\nrequire("./lib/deleted-load-restore").ensureSchema(db);\n'), 1);
+	const MOUNT = "\ndeletedLoadRestore.mount(app, {\n";
+	eq("mounted once", count(MOUNT), 1);
+	const at = (needle) => SRC.indexOf(needle);
+	const listHead = at(`\napp.get(${JSON.stringify(ROUTE_PATH)},`);
+	const dashHead = at('\napp.get("/api/dashboard",');
+	ok("mounted after the deleted-loads list and before GET /api/dashboard (its dashboard step runs first)",
+		listHead > 0 && at(MOUNT) > listHead && dashHead > at(MOUNT), `${listHead} ${at(MOUNT)} ${dashHead}`);
+	const mountBlock = at(MOUNT) > 0 ? SRC.slice(at(MOUNT), SRC.indexOf("\n});\n", at(MOUNT)) + 5) : "";
+	ok("the mount hands over requireRole and refuseCrossSite", /\n\trequireRole, refuseCrossSite, /.test(mountBlock));
+	ok("its notices are stored as dispatch notices and sent live to the super-admin room only",
+		mountBlock.includes("insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));")
+		&& mountBlock.includes('if (io) io.to("super-admin").emit("dispatch-notification", notice);')
+		&& !/io\.(emit|to\("dispatch"\))/.test(mountBlock));
+	ok("the list answer adds the lib's fields and nothing else",
+		ROUTE.includes("res.json({ loads, count: loads.length, ...deletedLoadRestore.listFields() });"));
+	const typesLine = (SRC.match(/\nconst SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\[[^\]\n]*\]\);/) || [""])[0];
+	ok("the notice type is a Super Admin-only dispatch notice", typesLine.includes(`"${restoreLib.NOTICE_TYPE}"`) && restoreLib.NOTICE_TYPE === "load-hidden-by-delete", typesLine);
+	const del = registration("delete", "/api/loads/:loadId") || "";
+	ok("the delete keeps its tombstone's id and records the rows it hides",
+		del.includes('const tombstone = db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);')
+		&& del.includes("deletedLoadRestore.recordDigests(tombstone.lastInsertRowid, jobTracking, lid);"));
+
+	console.log("\n§8 the flag off: exactly as before");
+	{
+		const w = restoreWorld({ enabled: false });
+		eq("nothing is mounted", Object.keys(w.routes), []);
+		eq("the instance says off", w.inst.enabled, false);
+		const off = await call(build(ROUTE, makeDb(), JT).chain, USERS["Super Admin"]);
+		eq("the list answer has its two keys only", Object.keys(off.body || {}), ["loads", "count"]);
+		ok("...byte for byte", JSON.stringify(off.body) === JSON.stringify({ loads: off.body.loads, count: off.body.count }));
+		const on = await call(build(ROUTE, makeDb(), JT, { restoreOn: true }).chain, USERS["Super Admin"]);
+		eq("on, the same answer plus restore: { enabled: true }", [Object.keys(on.body || {}), on.body && on.body.restore,
+			JSON.stringify(on.body && on.body.loads) === JSON.stringify(off.body.loads)], [["loads", "count", "restore"], { enabled: true }, true]);
+		const untouchable = { prepare() { throw new Error("the database is not read with the flag off"); }, exec() { throw new Error("nor written"); }, transaction() { throw new Error("nor written"); } };
+		const offInst = restoreLib.create({ db: untouchable, enabled: false });
+		let threw = "";
+		let answers = [];
+		try {
+			answers = [
+				offInst.onCreate({ session: { user: USERS["Super Admin"] }, body: { deletedLoadChoice: { action: "create_new", id: 1 } } }, { loadId: "LX-1002", rowIndex: null }),
+				offInst.onCreate({ session: { user: USERS.Dispatcher }, body: {} }, { loadId: "LX-1002", rowIndex: 3 }),
+				offInst.hiddenLoads({ session: { user: USERS["Super Admin"] } }, JT),
+				offInst.recordDigests(1, JT, "lx-1002"),
+			];
+		} catch (e) { threw = e.message; }
+		eq("onCreate, hiddenLoads and recordDigests answer nothing and touch no database", [threw, answers], ["", [null, null, null, undefined]]);
+		eq("listFields() adds nothing", offInst.listFields(), {});
+	}
+
+	console.log("\n§9 the restore route answers 403 to every role but Super Admin");
+	{
+		const w = restoreWorld();
+		eq("three links: the role gate, the cross-site guard, the handler", w.chain && w.chain.length, 3);
+		const before = fingerprint(w.db);
+		const id = tombstoneId(w.db, "lx-1002");
+		for (const role of NOT_SUPER_ADMIN) {
+			const r = await callRestore(w.chain, USERS[role], { id });
+			ok(`${role} gets 403 and never reaches the handler`, r.status === 403 && !r.reached && !(r.body && r.body.restored), `${r.status} ${JSON.stringify(r.body)}`);
+		}
+		const anon = await callRestore(w.chain, null, { id });
+		ok("signed out gets 401 and never reaches the handler", anon.status === 401 && !anon.reached, `${anon.status}`);
+		const noHeader = await callRestore(w.chain, USERS["Super Admin"], { id, csrf: false });
+		ok("a Super Admin's POST without X-Requested-With is refused 403 too", noHeader.status === 403 && !noHeader.reached, `${noHeader.status}`);
+		eq("none of them got past the role gate or read the sheet", [w.rec.crossSite, w.rec.reads], [0, 0]);
+		eq("nothing changed", fingerprint(w.db) === before, true);
+	}
+
+	console.log("\n§10 a closed month and an unreadable month are refused, nothing changed");
+	{
+		const span = { headers: HEADERS, data: JT.data.concat([
+			// No Assigned Date: its window's days settle in April and May, both closed.
+			row(30, { "Load ID": "LX-1009", Driver: "Test Driver Eight", "Pickup Appointment": "2026-04-29", "Drop-off Appointment": "2026-05-02" }),
+		]) };
+		const db = makeDb();
+		db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_at, deleted_by) VALUES ('lx-1009', 30, '2026-10-22 10:00:00', 'super_admin')").run();
+		const w = restoreWorld({ db, jt: span });
+		const before = fingerprint(w.db);
+		const SA = USERS["Super Admin"];
+		const locked = await callRestore(w.chain, SA, { id: tombstoneId(db, "lx-1001") });
+		eq("a closed month: 409 PERIOD_FINALIZED in plain words", [locked.status, locked.body && locked.body.code, locked.body && locked.body.error, locked.body && locked.body.periods],
+			[409, "PERIOD_FINALIZED", "Load lx-1001 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.", ["2026-05"]]);
+		const two = await callRestore(w.chain, SA, { id: tombstoneId(db, "lx-1009") });
+		eq("two closed months: named, plural", [two.status, two.body && two.body.code, two.body && two.body.error],
+			[409, "PERIOD_FINALIZED", "Load lx-1009 is in closed months (April 2026, May 2026). Restoring it would change settled payouts, which is a payout question. Nothing was changed."]);
+		const unres = await callRestore(w.chain, SA, { id: tombstoneId(db, "lx-1006") });
+		eq("dates that give no month: 409 PERIOD_UNRESOLVED in plain words", [unres.status, unres.body && unres.body.code, unres.body && unres.body.error],
+			[409, "PERIOD_UNRESOLVED", "Load lx-1006's dates in Job Tracking don't give a month, so it can't be told whether restoring it would change a closed month. Correct the dates on its row, then try again. Nothing was changed."]);
+		eq("nothing changed and nothing was announced", [fingerprint(w.db) === before, w.rec.changes, w.rec.invalidations], [true, [], 0]);
+	}
+
+	console.log("\n§11 no row, no delete, a bad id or mode, an unreadable table or sheet: refused, nothing changed");
+	{
+		const SA = USERS["Super Admin"];
+		const w = restoreWorld();
+		const before = fingerprint(w.db);
+		const gone = await callRestore(w.chain, SA, { id: tombstoneId(w.db, "lx-1003") });
+		eq("no Job Tracking row: 409 NO_SHEET_ROW", [gone.status, gone.body && gone.body.code, gone.body && gone.body.error],
+			[409, "NO_SHEET_ROW", "Load lx-1003 has no row in Job Tracking any more, so restoring it would bring nothing back. Nothing was changed."]);
+		const unknown = await callRestore(w.chain, SA, { id: 999 });
+		eq("no such delete: 404 NOT_DELETED", [unknown.status, unknown.body && unknown.body.code, unknown.body && unknown.body.error],
+			[404, "NOT_DELETED", "This load isn't deleted any more; it may have been restored already. Nothing was changed."]);
+		for (const bad of ["abc", "0", "-1", "1.5", "01", "1e3", "99999999999999999999"]) {
+			const r = await callRestore(w.chain, SA, { id: bad });
+			ok(`a bad id (${bad}) is 400 DELETED_LOAD_ID_INVALID`, r.status === 400 && r.body && r.body.code === "DELETED_LOAD_ID_INVALID", `${r.status} ${JSON.stringify(r.body)}`);
+		}
+		const badMode = await callRestore(w.chain, SA, { id: tombstoneId(w.db, "lx-1002"), body: { mode: "purge" } });
+		eq("a mode that is neither restore nor create_new is 400", [badMode.status, badMode.body && badMode.body.code], [400, "RESTORE_MODE_INVALID"]);
+		eq("none of these changed anything", fingerprint(w.db) === before, true);
+
+		const noLocks = restoreWorld({ db: makeDb({ lockTable: false }) });
+		const nl = await callRestore(noLocks.chain, SA, { id: 3 });
+		eq("an unreadable lock table: 503 before the sheet is read", [nl.status, nl.body && nl.body.code, noLocks.rec.reads], [503, "PERIOD_LOCK_UNREADABLE", 0]);
+
+		const db = makeDb();
+		const midway = restoreWorld({ db, jt: () => { db.exec("DROP TABLE period_locks"); return JT; } });
+		const mBefore = JSON.stringify(db.prepare("SELECT * FROM deleted_loads ORDER BY id").all());
+		const m = await callRestore(midway.chain, SA, { id: tombstoneId(db, "lx-1002") });
+		eq("a lock table that breaks during the sheet read: 503, the delete kept", [m.status, m.body && m.body.code, JSON.stringify(db.prepare("SELECT * FROM deleted_loads ORDER BY id").all()) === mBefore],
+			[503, "PERIOD_LOCK_UNREADABLE", true]);
+
+		const noSheet = restoreWorld({ jt: new Error("made-up Sheets outage") });
+		const nsBefore = fingerprint(noSheet.db);
+		const ns = await callRestore(noSheet.chain, SA, { id: tombstoneId(noSheet.db, "lx-1002") });
+		eq("an unreadable sheet: 503 SHEET_UNREADABLE, nothing changed", [ns.status, ns.body && ns.body.code, fingerprint(noSheet.db) === nsBefore], [503, "SHEET_UNREADABLE", true]);
+	}
+
+	console.log("\n§12 a second press is a no-op; two at once restore once");
+	{
+		const SA = USERS["Super Admin"];
+		const w = restoreWorld();
+		const id = tombstoneId(w.db, "lx-1002");
+		const first = await callRestore(w.chain, SA, { id });
+		const second = await callRestore(w.chain, SA, { id });
+		eq("the first restores, the second is 404 NOT_DELETED", [first.status, second.status, second.body && second.body.code], [200, 404, "NOT_DELETED"]);
+		const restores = (lid) => w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'restore_load' AND entity_id = ?").get(lid).n;
+		eq("...and writes no second audit row", restores("lx-1002"), 1);
+		const id5 = tombstoneId(w.db, "lx-1005");
+		const both = await Promise.all([callRestore(w.chain, SA, { id: id5 }), callRestore(w.chain, SA, { id: id5 })]);
+		eq("two presses at once: one 200, one 404", both.map((r) => r.status).sort(), [200, 404]);
+		eq("...one audit row, the delete gone", [restores("lx-1005"), tombstoneId(w.db, "lx-1005")], [1, undefined]);
+	}
+
+	console.log("\n§13 the audit row");
+	{
+		const SA = USERS["Super Admin"];
+		const w = restoreWorld();
+		const id = tombstoneId(w.db, "lx-1002");
+		const r = await callRestore(w.chain, SA, { id });
+		eq("the answer: restored, its months, nothing else hiding it", r.body, { ok: true, mode: "restore", restored: { id, loadId: "lx-1002", months: ["2026-10"] }, remaining: 0 });
+		const rows = w.db.prepare("SELECT * FROM audit_trail WHERE action IN ('restore_load', 'clear_load_delete') ORDER BY id").all();
+		eq("exactly one row", rows.length, 1);
+		const a = rows[0] || {};
+		eq("the acting Super Admin, the action, the load", [a.user_id, a.username, a.role, a.action, a.entity, a.entity_id], [1, "super_admin", "Super Admin", "restore_load", "load", "lx-1002"]);
+		ok("its time is an ISO instant", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(a.timestamp || ""), a.timestamp);
+		ok("its details name the delete record, when and by whom, and the month",
+			[`deleted_loads row ${id}`, "2026-10-20T12:00:00Z", "by admin_two", "settlement month 2026-10"].every((s) => (a.details || "").includes(s)), a.details);
+		eq("announced once, the cache dropped once", [w.rec.changes, w.rec.invalidations], [["dashboard"], 1]);
+
+		const id5 = tombstoneId(w.db, "lx-1005");
+		const asNew = await callRestore(w.chain, SA, { id: id5, body: { mode: "create_new" } });
+		const clear = w.db.prepare("SELECT * FROM audit_trail WHERE entity_id = 'lx-1005' ORDER BY id").all();
+		eq("\"Create it as new\" through the same route: one clear_load_delete row, the delete gone",
+			[asNew.status, asNew.body && asNew.body.mode, clear.map((x) => x.action), tombstoneId(w.db, "lx-1005")], [200, "create_new", ["clear_load_delete"], undefined]);
+
+		const db = makeDb();
+		const failing = restoreWorld({ db });
+		db.exec("ALTER TABLE audit_trail RENAME TO audit_trail_away");
+		const before = JSON.stringify(db.prepare("SELECT * FROM deleted_loads ORDER BY id").all());
+		const f = await callRestore(failing.chain, SA, { id: tombstoneId(db, "lx-1002") });
+		db.exec("ALTER TABLE audit_trail_away RENAME TO audit_trail");
+		eq("an audit row that can't be written: 500, the delete kept, nothing announced",
+			[f.status, f.body && f.body.code, JSON.stringify(db.prepare("SELECT * FROM deleted_loads ORDER BY id").all()) === before, failing.rec.changes],
+			[500, "RESTORE_FAILED", true, []]);
+	}
+
+	console.log("\n§14 restored, the load counts again");
+	{
+		const SA = USERS["Super Admin"];
+		const db = makeDb();
+		const w = restoreWorld({ db });
+		const H = w.H;
+		const has = (rows) => rows.some((x) => x["Load ID"] === "LX-1002");
+		eq("before: excludeDroppedLoads() and the live view leave it out", [has(H.excludeDroppedLoads(JT.data, HEADERS)), has(H.liveJobTrackingView(JT).data)], [false, false]);
+		await callRestore(w.chain, SA, { id: tombstoneId(db, "lx-1002") });
+		eq("after: both count it", [has(H.excludeDroppedLoads(JT.data, HEADERS)), has(H.liveJobTrackingView(JT).data)], [true, true]);
+		const list = await call(build(ROUTE, db, JT).chain, SA);
+		eq("...and the deleted list no longer shows it", [((list.body && list.body.loads) || []).some((l) => l.loadId === "lx-1002"), list.body && list.body.count], [false, 5]);
+
+		// A load deleted twice has two delete records; each is restored on its own.
+		const twins = makeDb();
+		twins.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_at, deleted_by) VALUES ('lx-1002', 3, '2026-10-20 12:00:00', 'admin_two')").run();
+		const t = restoreWorld({ db: twins });
+		const ids = twins.prepare("SELECT id FROM deleted_loads WHERE load_id = 'lx-1002' ORDER BY id").all().map((x) => x.id);
+		const one = await callRestore(t.chain, SA, { id: ids[0] });
+		eq("one of two: restored, the answer says one more still hides it, and it still doesn't count",
+			[one.status, one.body && one.body.remaining, has(t.H.excludeDroppedLoads(JT.data, HEADERS))], [200, 1, false]);
+		const other = await callRestore(t.chain, SA, { id: ids[1] });
+		eq("the other: restored, none left, it counts", [other.status, other.body && other.body.remaining, has(t.H.excludeDroppedLoads(JT.data, HEADERS))], [200, 0, true]);
+	}
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

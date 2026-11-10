@@ -10,8 +10,25 @@
 //      the page and asks the route for N; a Dispatcher, Driver or Investor gets
 //      nothing and asks nothing.
 //   §3 wiring, from source: the page's route is Super Admin only, Active Loads
-//      shows the link only to a Super Admin, the page reads the route, and
-//      neither the page nor the link sends anything but a GET (no restore here).
+//      shows the link only to a Super Admin, the page reads the route, and its
+//      only write is the restore POST from its confirm.
+//
+// RESTORE (DELETED_LOAD_RESTORE_ENABLED; the server decides, these only show):
+//   §4 the lib's restore, choice and banner helpers, and withDeletedLoadChoice().
+//   §5 the page, mounted: every role but Super Admin gets nothing rendered and
+//      asks nothing; a Super Admin without the server's restore switch gets the
+//      list as before; with it, a Restore button on each row and card, an in-app
+//      confirm naming the load and each month, one POST at a time, the server's
+//      words on a refusal, a toast and a fresh list on success.
+//   §6 the create choice (DeletedLoadChoiceModal.vue), mounted: who deleted it and
+//      when, both choices with the reason one is off, Restore through the route,
+//      Create it as new handed back to the form (or, from the banner, through the
+//      route), one press at a time, the server's words on a refusal.
+//   §7 the dashboard banner (HiddenLoadsBanner.vue), mounted, and the dashboard
+//      (DashboardView.vue) mounted for a Super Admin and a Dispatcher.
+//   §8 wiring, from source: the rate-con modal, New Job and the Data Manager ask
+//      through withDeletedLoadChoice() and render the choice for a Super Admin
+//      only; the notice opens the dashboard; the notice type matches the server's.
 //
 // Made-up values only. No DOM, no server. Vue comes from this checkout's
 // client/node_modules; the files under test come from LOGISX_ROOT (default: this
@@ -174,7 +191,7 @@ if (linkOk) {
   ok('§2 Super Admin: the link renders, reading "Deleted loads" until N arrives', sa.txt === 'Deleted loads')
   ok('§2 Super Admin: the link points at the Deleted loads page', /data-to="[^"]*&quot;admin-deleted-loads&quot;/.test(sa.html))
   eq('§2 Super Admin: N is asked of the route', sa.calls, ['/api/admin/deleted-loads'])
-  for (const role of ['Dispatcher', 'Driver', 'Investor', null]) {
+  for (const role of ['Dispatcher', 'Driver', 'Investor', 'KPI Viewer', 'Admin', 'Night Auditor', 'super admin', null]) {
     const r = await renderLink(role)
     ok(`§2 ${role || 'no user'}: no link rendered`, r.txt === '' && !/<a\b/.test(r.html))
     eq(`§2 ${role || 'no user'}: the route is never asked`, r.calls, [])
@@ -199,14 +216,561 @@ const VIEW = read('client', 'src', 'views', 'DeletedLoadsView.vue')
 ok('§3 the page reads GET /api/admin/deleted-loads', /api\.get\('\/api\/admin\/deleted-loads'\)/.test(VIEW))
 ok('§3 the page shows every column: Load ID, Route, Driver, Date deleted, Deleted by, Month, Closed',
   ['Load ID', 'Route', 'Driver', 'Date deleted', 'Deleted by', 'Month', 'Closed'].every((h) => VIEW.includes(`<TableHead>${h}</TableHead>`)))
-ok('§3 list only: neither the page nor the link sends anything but a GET',
-  !/api\.(post|put|patch|del)\(/.test(VIEW) && !/api\.(post|put|patch|del)\(/.test(LINK_SRC) && !/fetch\(/.test(VIEW + LINK_SRC))
+ok('§3 the link sends nothing but a GET; the page a GET, and one POST, to the restore route, from its confirm',
+  !/api\.(post|put|patch|del)\(/.test(LINK_SRC) && !/api\.(put|patch|del)\(/.test(VIEW) && !/fetch\(/.test(VIEW + LINK_SRC)
+  && (VIEW.match(/api\.post\(/g) || []).length === 1 && VIEW.includes('await api.post(restoreUrl(l.id), {})'))
 ok('§3 the page has a phone layout (cards below md)', /v-else-if="isMobile"/.test(VIEW) && /useViewport\(\)/.test(VIEW))
 // Review L1 (#568): two deletes of one load in the same second share load ID,
 // time and row index; only the deleted_loads id the route sends tells them apart.
 const rowLoops = VIEW.match(/v-for="l in loads" :key="[^"]*"/g) || []
 eq('§3 the table rows and the phone cards are keyed on the deleted_loads id', rowLoops,
   ['v-for="l in loads" :key="l.id"', 'v-for="l in loads" :key="l.id"'])
+
+// =================================================================== RESTORE
+const ROLES_NOT_SA = ['Dispatcher', 'Driver', 'Investor', 'KPI Viewer', 'Admin', 'Night Auditor', 'super admin', null]
+const has = (name) => !!lib && typeof lib[name] === 'function'
+
+// ------------------------------------------------------------------ §4 lib
+ok('§4 the lib has its restore, choice and banner helpers',
+  ['canRestoreDeletedLoads', 'restoreIsOn', 'restoreUrl', 'restoreConfirm', 'restoreErrorText', 'restoreDoneText', 'deletedLoadChoiceOf',
+    'deletedLoadChoiceView', 'withDeletedLoadChoice', 'hiddenLoadsOf', 'hiddenLoadText', 'hiddenLoadChoice', 'hiddenEvidenceText'].every(has))
+if (has('withDeletedLoadChoice')) {
+  eq('§4 only a Super Admin may restore', ['Super Admin', ...ROLES_NOT_SA, undefined].map(lib.canRestoreDeletedLoads), [true, false, false, false, false, false, false, false, false, false])
+  eq('§4 Restore shows only when the server says so', [{ restore: { enabled: true } }, { restore: { enabled: 'true' } }, { restore: {} }, {}, null].map(lib.restoreIsOn), [true, false, false, false, false])
+  eq('§4 the restore URL names the delete record', [lib.restoreUrl(12), lib.restoreUrl('7')], ['/api/admin/deleted-loads/12/restore', '/api/admin/deleted-loads/7/restore'])
+  const LOAD = { id: 3, loadId: 'lx-1002', deletedBy: 'admin_two', months: [{ month: '2026-10', closed: false }, { month: '2026-05', closed: true }], monthsFrom: 'sheet' }
+  eq('§4 the confirm names the load, who deleted it and when, and each month with open or closed',
+    lib.restoreConfirm(LOAD, 'Oct 20, 2026'),
+    { title: 'Restore load lx-1002?', message: "Deleted Oct 20, 2026 by admin_two.\nOctober 2026: open\nMay 2026: closed\nRestoring puts it back on the dashboard and in its month's figures." })
+  eq('§4 ...a month from the delete record says so; no month says so',
+    [lib.restoreConfirm({ loadId: 'lx-1003', months: [{ month: '2026-05', closed: true }], monthsFrom: 'audit' }, 'Oct 5, 2026').message,
+      lib.restoreConfirm({ loadId: 'lx-1004', months: [] }, 'Oct 21, 2026').message],
+    ["Deleted Oct 5, 2026.\nMay 2026: closed (from the delete record)\nRestoring puts it back on the dashboard and in its month's figures.",
+      "Deleted Oct 21, 2026.\nMonth: not known\nRestoring puts it back on the dashboard and in its month's figures."])
+  const refused = (code, status, message) => Object.assign(new Error(message), { code, status })
+  eq('§4 a refusal reads as the server words it; anything else as a plain fallback', [
+    lib.restoreErrorText(refused('PERIOD_FINALIZED', 409, 'Load lx-1001 is in a closed month (May 2026). (made-up)')),
+    lib.restoreErrorText(refused('NO_SHEET_ROW', 409, 'Load lx-1003 has no row (made-up).')),
+    lib.restoreErrorText(refused('NOT_DELETED', 404, "This load isn't deleted any more (made-up).")),
+    lib.restoreErrorText(refused('', 403, 'Forbidden')),
+    lib.restoreErrorText(refused('TIMEOUT', 0, 'timeout')),
+    lib.restoreErrorText(refused('', 500, 'boom')),
+  ], [
+    'Load lx-1001 is in a closed month (May 2026). (made-up)',
+    'Load lx-1003 has no row (made-up).',
+    "This load isn't deleted any more (made-up).",
+    'Only a Super Admin can restore a deleted load.',
+    'No answer from the server. Reload the list to see whether the load was restored.',
+    'The load could not be restored. Try again in a moment.',
+  ])
+  eq('§4 done: restored, cleared, or one delete of two undone', [
+    lib.restoreDoneText({ mode: 'restore', restored: { loadId: 'lx-1002' }, remaining: 0 }),
+    lib.restoreDoneText({ mode: 'create_new', restored: { loadId: 'lx-1002' }, remaining: 0 }),
+    lib.restoreDoneText({ mode: 'restore', restored: { loadId: 'lx-1002' }, remaining: 1 }),
+  ], [
+    'Load lx-1002 is restored.',
+    "Load lx-1002's old delete is cleared; its row counts as a new load.",
+    'This delete of load lx-1002 is undone, but another delete of the same load still hides it. Restore that one too.',
+  ])
+  const CHOICE = { code: 'LOAD_ID_DELETED', loadId: '7101', tombstoneId: 9, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: null, canRestore: false, canCreateNew: true, deleteCount: 1 }
+  const asErr = (data, status = 409) => Object.assign(new Error(data.error || 'refused'), { status, code: data.code || '', data })
+  eq('§4 only a Super Admin\'s 409 carries a choice', [
+    !!lib.deletedLoadChoiceOf(asErr(CHOICE)),
+    lib.deletedLoadChoiceOf(asErr({ code: 'LOAD_ID_DELETED', error: 'Ask a Super Admin (made-up).' })),
+    lib.deletedLoadChoiceOf(asErr({ code: 'DUPLICATE_LOAD' })),
+    lib.deletedLoadChoiceOf(null),
+  ], [true, null, null, null])
+  const view = (c, review) => lib.deletedLoadChoiceView(c, 'Oct 1, 2026', { review })
+  eq('§4 the choice with no row: who and when; Restore off with its reason; Create it as new on', view(CHOICE), {
+    title: 'Load 7101 was deleted',
+    message: 'Deleted Oct 1, 2026 by admin_two. Choose what to do with this Load ID.',
+    why: '',
+    restoreOff: true,
+    restoreNote: "Its Job Tracking row is gone, so there's nothing to restore.",
+    createOff: false,
+    createNote: 'Clears the old delete and creates this load.',
+  })
+  const ROW = { ...CHOICE, loadId: '7003', sheetRow: 4, canRestore: true, canCreateNew: false }
+  eq('§4 ...with a row: Restore on (that row), Create it as new off with its reason', [view(ROW).restoreOff, view(ROW).restoreNote, view(ROW).createOff, view(ROW).createNote],
+    [false, 'Brings the deleted load back (row 4) and creates nothing new.', true, 'Row 4 still holds this load: restore it instead, or remove that row first.'])
+  eq('§4 ...deleted twice with no row: Create it as new off, saying why', view({ ...CHOICE, canCreateNew: false, deleteCount: 2 }).createNote,
+    "This Load ID was deleted more than once, so it can't be created as new here.")
+  const HIDDEN = { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['deleted_with_no_row', 'created_by_n8n'] }
+  eq('§4 the banner line', lib.hiddenLoadText(HIDDEN, 'Oct 1, 2026'), 'Load LX-5101 is hidden by an earlier delete (deleted by admin_two on Oct 1, 2026).')
+  eq('§4 its choice: both on, the evidence kept', lib.hiddenLoadChoice(HIDDEN),
+    { loadId: 'LX-5101', tombstoneId: 4, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, canRestore: true, canCreateNew: true, evidence: ['deleted_with_no_row', 'created_by_n8n'] })
+  eq('§4 ...reviewed: why it shows, and what each choice does there', [view(lib.hiddenLoadChoice(HIDDEN), true).why, view(lib.hiddenLoadChoice(HIDDEN), true).message,
+    view(lib.hiddenLoadChoice(HIDDEN), true).restoreNote, view(lib.hiddenLoadChoice(HIDDEN), true).createNote], [
+    'Why it shows: it was deleted when no row held its Load ID; the email workflow added this Load ID after the delete.',
+    "Deleted Oct 1, 2026 by admin_two. Its row is on the sheet, but it doesn't count while that delete stands.",
+    'Brings the deleted load back: every row with this Load ID counts again.',
+    'Clears the old delete, so the row counts as a new load.',
+  ])
+  eq('§4 the evidence, each way', ['created_by_rate_con', 'created_in_sheet_row', 'row_changed', 'nonsense'].map((e) => lib.hiddenEvidenceText([e])), [
+    'Why it shows: a rate con created this Load ID after the delete.',
+    'Why it shows: New Job or the Data Manager added this Load ID after the delete.',
+    "Why it shows: its row isn't the one that was deleted.",
+    '',
+  ])
+  eq('§4 hidden loads as the dashboard sent them; anything malformed left out', [
+    lib.hiddenLoadsOf({ hiddenLoads: [HIDDEN, { loadId: 'x' }, null] }).map((h) => h.tombstoneId), lib.hiddenLoadsOf({}), lib.hiddenLoadsOf(null)], [[4], [], []])
+
+  // withDeletedLoadChoice(send, ask): the flow every create form shares.
+  const flow = async ({ answers, fails }) => {
+    const sent = []
+    const asked = []
+    let i = 0
+    const send = async (choice) => {
+      sent.push(choice)
+      const f = fails[i++]
+      if (f) throw f
+      return { success: true }
+    }
+    const ask = async (choice, note) => { asked.push([choice.tombstoneId, note]); return answers.shift() }
+    let threw = null
+    let out = null
+    try { out = await lib.withDeletedLoadChoice(send, ask) } catch (e) { threw = e }
+    return { sent, asked, out, threw }
+  }
+  const choiceErr = () => asErr({ ...CHOICE, error: 'Load 7101 was deleted (made-up).' })
+  const a = await flow({ answers: [{ action: 'create_new' }], fails: [choiceErr()] })
+  eq('§4 Create it as new: the same create again, carrying the choice', [a.sent, a.asked, a.out], [[null, { action: 'create_new', id: 9 }], [[9, '']], { success: true }])
+  const b = await flow({ answers: [{ action: 'restored', answer: { ok: true } }], fails: [choiceErr()] })
+  eq('§4 Restore the deleted load: nothing sent again', [b.sent.length, b.out], [1, { deletedLoadRestored: true, answer: { ok: true }, loadId: '7101' }])
+  const c = await flow({ answers: [null], fails: [choiceErr()] })
+  eq('§4 Cancel: nothing sent again', [c.sent.length, c.out], [1, { deletedLoadDeclined: true }])
+  const stale = asErr({ ...CHOICE, tombstoneId: 10, stale: true, error: 'The delete record for load 7101 changed after you chose (made-up).' })
+  const d = await flow({ answers: [{ action: 'create_new' }, { action: 'create_new' }], fails: [choiceErr(), stale] })
+  eq('§4 a stale choice asks again with the server\'s words and the fresh delete', [d.asked, d.sent], [[[9, ''], [10, 'The delete record for load 7101 changed after you chose (made-up).']], [null, { action: 'create_new', id: 9 }, { action: 'create_new', id: 10 }]])
+  const e = await flow({ answers: [], fails: [asErr({ code: 'LOAD_ID_DELETED', error: 'Ask a Super Admin (made-up).' })] })
+  eq('§4 a refusal with no choice (a Dispatcher\'s) is thrown as it came', [e.asked.length, e.threw && e.threw.message], [0, 'Ask a Super Admin (made-up).'])
+  const f = await (async () => { try { await lib.withDeletedLoadChoice(async () => { throw choiceErr() }, null); return 'no throw' } catch (err) { return err.code } })()
+  eq('§4 ...and so is a choice when the form has no one to ask', f, 'LOAD_ID_DELETED')
+  const g = await flow({ answers: [{ action: 'create_new' }, { action: 'create_new' }, { action: 'create_new' }], fails: [choiceErr(), choiceErr(), choiceErr(), choiceErr()] })
+  eq('§4 it asks at most three times', [g.sent.length, g.threw && g.threw.code], [3, 'LOAD_ID_DELETED'])
+}
+
+// ---------------------------------------------------------- in-memory mount
+// No DOM: an in-memory renderer (the one scripts/test-passenger-authorization-admin-client.mjs
+// uses), with a radio's value kept where v-model reads it.
+globalThis.document = globalThis.document || { activeElement: null, addEventListener() {}, removeEventListener() {} }
+globalThis.Document = globalThis.Document || class Document {}
+globalThis.ShadowRoot = globalThis.ShadowRoot || class ShadowRoot {}
+function mountInMemory(Comp, rootProps) {
+  const node = (type, tag) => {
+    const n = {
+      type, tag, children: [], parent: null, props: {}, text: '', value: '', checked: false, listeners: {},
+      addEventListener(ev, fn) { (n.listeners[ev] = n.listeners[ev] || []).push(fn) },
+      removeEventListener(ev, fn) { n.listeners[ev] = (n.listeners[ev] || []).filter((x) => x !== fn) },
+      getRootNode() { return {} },
+      focus() {},
+    }
+    return Vue.markRaw(n)
+  }
+  const ops = {
+    insert(child, parent, anchor) {
+      if (child.parent) ops.remove(child)
+      const i = anchor ? parent.children.indexOf(anchor) : -1
+      if (i >= 0) parent.children.splice(i, 0, child); else parent.children.push(child)
+      child.parent = parent
+    },
+    remove(child) {
+      const p = child.parent
+      if (!p) return
+      const i = p.children.indexOf(child)
+      if (i >= 0) p.children.splice(i, 1)
+      child.parent = null
+    },
+    createElement: (tag) => node('el', tag),
+    createText: (t) => Object.assign(node('text'), { text: t }),
+    createComment: (t) => Object.assign(node('comment'), { text: t }),
+    setText(n, t) { n.text = t },
+    setElementText(el, t) { el.children = []; if (t) ops.insert(Object.assign(node('text'), { text: t }), el) },
+    parentNode: (n) => n.parent,
+    nextSibling(n) { const p = n.parent; if (!p) return null; return p.children[p.children.indexOf(n) + 1] || null },
+    querySelector: () => null,
+    setScopeId() {},
+    patchProp(el, key, prev, next) {
+      el.props[key] = next
+      if (key === 'value') { el.value = next; el._value = next }
+    },
+  }
+  const warnings = []
+  const root = node('el', 'root')
+  const app = Vue.createRenderer(ops).createApp(Comp, rootProps)
+  app.config.warnHandler = (msg) => warnings.push(String(msg))
+  app.mount(root)
+  const textOf = (n) => (!n ? '' : n.type === 'text' ? n.text : n.type === 'el' ? n.children.map(textOf).join(' ') : '')
+  const all = (n, pred, out = []) => {
+    if (!n) return out
+    if (n.type === 'el' && pred(n)) out.push(n)
+    for (const ch of n.children || []) all(ch, pred, out)
+    return out
+  }
+  return {
+    root, warnings,
+    findAll: (pred, from = root) => all(from, pred),
+    find: (pred, from = root) => all(from, pred)[0] || null,
+    text: (n = root) => textOf(n).replace(/\s+/g, ' ').trim(),
+    unmount: () => app.unmount(),
+  }
+}
+const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
+const evt = (el) => ({ preventDefault() {}, stopPropagation() {}, target: el, currentTarget: el })
+const isDisabled = (el) => !!el && el.props.disabled != null && el.props.disabled !== false
+async function press(el) {
+  if (!el || isDisabled(el)) return
+  const fns = Array.isArray(el.props.onClick) ? el.props.onClick : [el.props.onClick]
+  for (const fn of fns) if (typeof fn === 'function') { const r = fn(evt(el)); if (r && r.catch) r.catch(() => {}) }
+  await drain()
+}
+async function pick(el) {
+  if (!el || isDisabled(el)) return
+  el.checked = true
+  for (const fn of el.listeners.change || []) fn(evt(el))
+  await drain()
+}
+
+// A committed SFC's <script setup> + <template> as a component of its imports;
+// every import must be given, a default import as { default }.
+function factory(rel) {
+  const file = path.join(ROOT, rel)
+  if (!fs.existsSync(file)) return null
+  const { descriptor } = parse(fs.readFileSync(file, 'utf8'), { filename: path.basename(file) })
+  let body = compileScript(descriptor, { id: path.basename(file), inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } }).content
+  const specs = []
+  body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, names, q, spec) => {
+    specs.push(spec)
+    const binds = names.split(',').map((n) => n.trim()).filter(Boolean).map((n) => n.replace(/\s+as\s+/, ': '))
+    return `const { ${binds.join(', ')} } = __deps[${JSON.stringify(spec)}];`
+  })
+  body = body.replace(/^import\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, name, q, spec) => {
+    specs.push(spec)
+    return `const ${name} = __deps[${JSON.stringify(spec)}].default;`
+  })
+  body = body.replace(/^export default\s*/m, 'return ')
+  if (/^\s*(import|export)\s/m.test(body)) throw new Error(`${rel}: an import or export this harness cannot map`)
+  return (deps) => {
+    const missing = specs.filter((s) => s !== 'vue' && !Object.prototype.hasOwnProperty.call(deps, s))
+    if (missing.length) throw new Error(`${rel}: no stub for ${missing.join(', ')}`)
+    return new Function('__deps', body)({ vue: Vue, ...deps })
+  }
+}
+const stub = (tag) => Vue.defineComponent({ name: tag, inheritAttrs: false, setup: (_, { attrs, slots }) => () => Vue.h(tag, { ...attrs }, slots.default ? slots.default() : []) })
+// ConfirmModal as the page meets it: nothing while closed; its title, message,
+// slot and two buttons while open; Cancel first.
+const ConfirmStub = Vue.defineComponent({
+  name: 'ConfirmModal',
+  props: { open: Boolean, title: String, message: String, confirmText: String, cancelText: String, danger: Boolean, confirmDisabled: Boolean },
+  emits: ['confirm', 'cancel'],
+  setup(props, { emit, slots }) {
+    return () => (props.open ? Vue.h('x-confirm', {}, [
+      Vue.h('x-title', {}, props.title || ''),
+      Vue.h('x-message', {}, props.message || ''),
+      slots.default ? Vue.h('x-body', {}, slots.default()) : null,
+      Vue.h('button', { 'data-role': 'cancel', onClick: () => emit('cancel') }, props.cancelText || 'Cancel'),
+      Vue.h('button', { 'data-role': 'confirm', disabled: props.confirmDisabled, onClick: () => emit('confirm') }, props.confirmText || 'Confirm'),
+    ]) : null)
+  },
+})
+const DATETIME = { fmtAppInstant: (v) => (v ? `at ${v}` : '—'), appToday: () => '2026-10-15', appDayOf: (v) => String(v || '').slice(0, 10), shiftYmd: (d) => d }
+// A post the test answers: each stays out until resolved or rejected.
+function fakeApi(list) {
+  const api = { gets: [], posts: [] }
+  api.get = async (url) => { api.gets.push(url); return typeof list === 'function' ? list() : list }
+  api.post = (url, body) => new Promise((resolve, reject) => { api.posts.push({ url, body, resolve, reject }) })
+  return api
+}
+const DELETED = [
+  { id: 6, loadId: 'lx-1004', deletedAt: '2026-10-21T09:00:00Z', deletedBy: '', pickup: '', dropoff: '', driver: '', months: [], monthsFrom: 'none' },
+  { id: 3, loadId: 'lx-1002', deletedAt: '2026-10-20T12:00:00Z', deletedBy: 'admin_two', pickup: 'Lakeview, OH 43331', dropoff: 'Hilltop, KY 40001', driver: 'Test Driver Two', months: [{ month: '2026-10', closed: false }], monthsFrom: 'sheet' },
+  { id: 1, loadId: 'lx-1001', deletedAt: '2026-09-01T02:30:00Z', deletedBy: 'super_admin', pickup: 'Springfield, IL 62701', dropoff: 'Riverton, WY 82501', driver: 'Test Driver One', months: [{ month: '2026-05', closed: true }], monthsFrom: 'sheet' },
+]
+const listAnswer = (restoreOn) => ({ loads: DELETED.map((l) => ({ ...l })), count: DELETED.length, ...(restoreOn ? { restore: { enabled: true } } : {}) })
+
+// --------------------------------------------------------------- §5 the page
+const PAGE = factory('client/src/views/DeletedLoadsView.vue')
+async function mountPage({ role, restoreOn = false, mobile = false } = {}) {
+  const api = fakeApi(() => listAnswer(restoreOn))
+  const toasts = []
+  const isMobile = Vue.ref(mobile)
+  const Comp = PAGE({
+    '../composables/useApi': { useApi: () => api },
+    '../composables/useSocketRefresh': { useSocketRefresh: () => {} },
+    '../composables/useViewport': { useViewport: () => ({ isMobile }) },
+    '../composables/useToast': { useToast: () => ({ show: (m, t) => toasts.push([m, t]) }) },
+    '../stores/auth': { useAuthStore: () => ({ user: role ? { role } : null, isSuperAdmin: role === 'Super Admin' }) },
+    '../utils/datetime': DATETIME,
+    '../lib/deletedLoadsView.js': lib,
+    '@/components/ui/table': { Table: stub('x-table'), TableHeader: stub('x-thead'), TableBody: stub('x-tbody'), TableRow: stub('x-tr'), TableHead: stub('x-th'), TableCell: stub('x-td') },
+    '../components/shared/SkeletonLoader.vue': { default: stub('x-skeleton') },
+    '../components/shared/EmptyState.vue': { default: stub('x-empty') },
+    '../components/shared/ConfirmModal.vue': { default: ConfirmStub },
+  })
+  const m = mountInMemory(Comp)
+  await drain()
+  const p = {
+    m, api, toasts, isMobile,
+    restoreButtons: () => m.findAll((n) => n.tag === 'button' && m.text(n) === 'Restore'),
+    confirm: () => m.find((n) => n.tag === 'x-confirm'),
+    confirmButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'),
+    cancelButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'cancel'),
+  }
+  return p
+}
+let pageOk = false
+try { pageOk = !!PAGE && !!lib && !!(await mountPage({ role: 'Super Admin' })) } catch (err) { console.log(`  (the page did not mount: ${err.message})`) }
+ok('§5 DeletedLoadsView.vue mounts in this harness', pageOk)
+if (pageOk) {
+  for (const role of ROLES_NOT_SA) {
+    const p = await mountPage({ role, restoreOn: true })
+    ok(`§5 ${role || 'no user'}: nothing rendered (no page, list, button or confirm)`, p.m.text() === '' && !p.m.find((n) => n.tag !== 'root'))
+    eq(`§5 ${role || 'no user'}: the deleted-loads list is never asked for, nothing posted`, [p.api.gets, p.api.posts.length], [[], 0])
+    p.m.unmount()
+  }
+  {
+    const p = await mountPage({ role: 'Super Admin', restoreOn: false })
+    eq('§5 Super Admin, restore off: the list is read once', p.api.gets, ['/api/admin/deleted-loads'])
+    ok('§5 ...the page reads as before ("a list only")', /This page is a list only\./.test(p.m.text()) && p.m.find((n) => n.tag === 'x-table') !== null)
+    eq('§5 ...with no Restore button and no confirm', [p.restoreButtons().length, !!p.confirm()], [0, false])
+    p.isMobile.value = true
+    await drain()
+    eq('§5 ...on a phone too', p.restoreButtons().length, 0)
+    p.m.unmount()
+  }
+  {
+    const p = await mountPage({ role: 'Super Admin', restoreOn: true })
+    eq('§5 Super Admin, restore on: a Restore button on each row', p.restoreButtons().length, DELETED.length)
+    ok('§5 ...and the page says what it does', /Restore brings a load back unless its month is closed\./.test(p.m.text()) && !/This page is a list only\./.test(p.m.text()))
+    await press(p.restoreButtons()[1])
+    const c = p.confirm()
+    eq('§5 the in-app confirm names the load, who deleted it and when, and its month', [
+      p.m.text(p.m.find((n) => n.tag === 'x-title', c)), p.m.text(p.m.find((n) => n.tag === 'x-message', c)), p.m.text(p.confirmButton())],
+    ['Restore load lx-1002?', "Deleted at 2026-10-20T12:00:00Z by admin_two. October 2026: open Restoring puts it back on the dashboard and in its month's figures.", 'Restore'])
+    eq('§5 ...nothing is sent until it is confirmed', p.api.posts.length, 0)
+    await press(p.confirmButton())
+    await press(p.confirmButton())
+    eq('§5 confirmed: one POST to its delete record, a second press blocked while it is out', [p.api.posts.length, p.api.posts[0] && p.api.posts[0].url, p.api.posts[0] && p.api.posts[0].body, isDisabled(p.confirmButton())],
+      [1, '/api/admin/deleted-loads/3/restore', {}, true])
+    await press(p.restoreButtons()[2])
+    eq('§5 ...and no other row can start one meanwhile', p.api.posts.length, 1)
+    p.api.posts[0]?.resolve({ ok: true, mode: 'restore', restored: { id: 3, loadId: 'lx-1002', months: ['2026-10'] }, remaining: 0 })
+    await drain()
+    eq('§5 restored: a toast, the confirm closed, the list read again', [p.toasts, !!p.confirm(), p.api.gets.length], [[['Load lx-1002 is restored.', 'success']], false, 2])
+    p.m.unmount()
+  }
+  {
+    const p = await mountPage({ role: 'Super Admin', restoreOn: true })
+    await press(p.restoreButtons()[2])
+    await press(p.confirmButton())
+    p.api.posts[0]?.reject(Object.assign(new Error('Load lx-1001 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.'), { status: 409, code: 'PERIOD_FINALIZED' }))
+    await drain()
+    const alert = p.m.find((n) => n.props.role === 'alert', p.confirm())
+    eq('§5 refused: the server\'s words in the confirm, which stays open; no toast; the list not read again',
+      [p.m.text(alert), !!p.confirm(), p.toasts, p.api.gets.length],
+      ['Load lx-1001 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.', true, [], 1])
+    await press(p.cancelButton())
+    eq('§5 ...Cancel closes it', !!p.confirm(), false)
+    p.m.unmount()
+  }
+  {
+    const p = await mountPage({ role: 'Super Admin', restoreOn: true, mobile: true })
+    eq('§5 on a phone: a Restore button on each card', [p.restoreButtons().length, !!p.m.find((n) => n.tag === 'li')], [DELETED.length, true])
+    p.m.unmount()
+  }
+}
+
+// ------------------------------------------------------- §6 the create choice
+const CHOICE_FACTORY = factory('client/src/components/shared/DeletedLoadChoiceModal.vue')
+const choiceDeps = (api) => ({
+  '../../composables/useApi': { useApi: () => api },
+  '../../utils/datetime': DATETIME,
+  '../../lib/deletedLoadsView.js': lib,
+  './ConfirmModal.vue': { default: ConfirmStub },
+})
+async function mountChoice({ choice, review = false, note = '' }) {
+  const api = fakeApi({})
+  const Choice = CHOICE_FACTORY(choiceDeps(api))
+  const events = []
+  const state = Vue.reactive({ open: true, choice, review, note })
+  const Host = Vue.defineComponent({
+    setup: () => () => Vue.h(Choice, { ...state, onResolved: (a) => events.push(['resolved', a]), onCreateNew: () => events.push(['create-new']), onCancel: () => events.push(['cancel']) }),
+  })
+  const m = mountInMemory(Host)
+  await drain()
+  return {
+    m, api, events, state,
+    radio: (value) => m.find((n) => n.tag === 'input' && n.props.value === value),
+    confirmButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'),
+    cancelButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'cancel'),
+  }
+}
+const NO_ROW = { code: 'LOAD_ID_DELETED', loadId: '7101', tombstoneId: 9, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: null, canRestore: false, canCreateNew: true, deleteCount: 1 }
+const WITH_ROW = { ...NO_ROW, loadId: '7003', tombstoneId: 11, sheetRow: 4, canRestore: true, canCreateNew: false }
+let choiceOk = false
+try { choiceOk = !!CHOICE_FACTORY && !!lib && has('deletedLoadChoiceView') && !!(await mountChoice({ choice: NO_ROW })) } catch (err) { console.log(`  (the choice did not mount: ${err.message})`) }
+ok('§6 DeletedLoadChoiceModal.vue mounts in this harness', choiceOk)
+if (choiceOk) {
+  {
+    const c = await mountChoice({ choice: NO_ROW })
+    ok('§6 it names who deleted the load and when, and shows both choices',
+      /Load 7101 was deleted/.test(c.m.text()) && /Deleted at 2026-10-01T12:00:00Z by admin_two\./.test(c.m.text())
+      && /Restore the deleted load/.test(c.m.text()) && /Create it as new/.test(c.m.text()))
+    eq('§6 no row: Restore shown off with its reason; Create it as new picked', [isDisabled(c.radio('restore')), /Its Job Tracking row is gone, so there's nothing to restore\./.test(c.m.text()),
+      c.radio('create_new') && c.radio('create_new').checked, c.m.text(c.confirmButton())], [true, true, true, 'Create it as new'])
+    await press(c.confirmButton())
+    eq('§6 ...confirmed: handed back to the form, nothing posted', [c.events, c.api.posts.length], [[['create-new']], 0])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: WITH_ROW })
+    eq('§6 a row holds it: Create it as new off with its reason; Restore picked', [isDisabled(c.radio('create_new')),
+      /Row 4 still holds this load: restore it instead, or remove that row first\./.test(c.m.text()), c.m.text(c.confirmButton())], [true, true, 'Restore the deleted load'])
+    await press(c.confirmButton())
+    await press(c.confirmButton())
+    await press(c.cancelButton())
+    eq('§6 ...confirmed: one POST to that delete record; a second press and Cancel wait for it', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body, c.events],
+      [1, '/api/admin/deleted-loads/11/restore', {}, []])
+    c.api.posts[0]?.reject(Object.assign(new Error('Load 7003 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.'), { status: 409, code: 'PERIOD_FINALIZED' }))
+    await drain()
+    eq('§6 refused: the server\'s words, still open, nothing handed back', [c.m.text(c.m.find((n) => n.props.role === 'alert')), c.events],
+      ['Load 7003 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.', []])
+    await press(c.confirmButton())
+    c.api.posts[1]?.resolve({ ok: true, mode: 'restore', restored: { id: 11, loadId: '7003', months: ['2026-10'] }, remaining: 0 })
+    await drain()
+    eq('§6 ...tried again and restored: the answer handed back', c.events, [['resolved', { ok: true, mode: 'restore', restored: { id: 11, loadId: '7003', months: ['2026-10'] }, remaining: 0 }]])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: { ...NO_ROW, canCreateNew: false, deleteCount: 2 } })
+    eq('§6 deleted twice: both off, nothing to confirm', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), isDisabled(c.confirmButton()),
+      /This Load ID was deleted more than once, so it can't be created as new here\./.test(c.m.text())], [true, true, true, true])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: lib.hiddenLoadChoice({ tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['row_changed'] }), review: true })
+    eq('§6 from the banner: both on, neither picked, the evidence shown', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), isDisabled(c.confirmButton()),
+      /Why it shows: its row isn't the one that was deleted\./.test(c.m.text())], [false, false, true, true])
+    await pick(c.radio('create_new'))
+    await press(c.confirmButton())
+    eq('§6 ...Create it as new goes through the restore route, as a clear', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body], [1, '/api/admin/deleted-loads/4/restore', { mode: 'create_new' }])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: NO_ROW, note: 'The delete record for load 7101 changed after you chose (made-up).' })
+    eq('§6 asked again: the server\'s words lead', c.m.text(c.m.find((n) => n.props.role === 'status')), 'The delete record for load 7101 changed after you chose (made-up).')
+    c.m.unmount()
+  }
+}
+
+// ------------------------------------------------- §7 the banner and the dashboard
+const BANNER_FACTORY = factory('client/src/components/dashboard/HiddenLoadsBanner.vue')
+const HIDDEN_LIST = [
+  { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['deleted_with_no_row'] },
+  { tombstoneId: 7, loadId: 'LX-5401', deletedBy: 'super_admin', deletedAt: '2026-10-02T12:00:00Z', sheetRow: 9, evidence: ['created_by_n8n'] },
+]
+let bannerOk = false
+let banner = null
+try {
+  if (BANNER_FACTORY && CHOICE_FACTORY && lib && has('hiddenLoadText')) {
+    const api = fakeApi({})
+    const toasts = []
+    const Banner = BANNER_FACTORY({
+      '../../composables/useToast': { useToast: () => ({ show: (msg, t) => toasts.push([msg, t]) }) },
+      '../../utils/datetime': DATETIME,
+      '../../lib/deletedLoadsView.js': lib,
+      '../shared/DeletedLoadChoiceModal.vue': { default: CHOICE_FACTORY(choiceDeps(api)) },
+    })
+    const events = []
+    const m = mountInMemory(Vue.defineComponent({ setup: () => () => Vue.h(Banner, { hiddenLoads: HIDDEN_LIST, onResolved: () => events.push('resolved') }) }))
+    await drain()
+    banner = { m, api, toasts, events }
+    bannerOk = true
+  }
+} catch (err) { console.log(`  (the banner did not mount: ${err.message})`) }
+ok('§7 HiddenLoadsBanner.vue mounts in this harness', bannerOk)
+if (bannerOk) {
+  const { m, api, toasts, events } = banner
+  const lines = m.findAll((n) => (n.props.class || '').split(' ').includes('hl-line'))
+  eq('§7 one line per hidden load, each naming it, who deleted it and when, with Review', lines.map((l) => m.text(l)), [
+    'Load LX-5101 is hidden by an earlier delete (deleted by admin_two on at 2026-10-01T12:00:00Z). Review',
+    'Load LX-5401 is hidden by an earlier delete (deleted by super_admin on at 2026-10-02T12:00:00Z). Review',
+  ])
+  await press(m.find((n) => n.tag === 'button' && m.text(n) === 'Review', lines[1]))
+  ok('§7 Review opens the shared choice for that load, with why it shows', /Load LX-5401 was deleted/.test(m.text()) && /Why it shows: the email workflow added this Load ID after the delete\./.test(m.text()))
+  await pick(m.find((n) => n.tag === 'input' && n.props.value === 'restore'))
+  await press(m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'))
+  eq('§7 ...Restore posts to that delete record', [api.posts.length, api.posts[0] && api.posts[0].url, api.posts[0] && api.posts[0].body], [1, '/api/admin/deleted-loads/7/restore', {}])
+  api.posts[0]?.resolve({ ok: true, mode: 'restore', restored: { id: 7, loadId: 'lx-5401', months: ['2026-10'] }, remaining: 0 })
+  await drain()
+  eq('§7 ...restored: a toast, the dialog closed, the dashboard asked to read again', [toasts, !!m.find((n) => n.tag === 'x-confirm'), events], [[['Load lx-5401 is restored.', 'success']], false, ['resolved']])
+}
+
+const DASH = factory('client/src/views/DashboardView.vue')
+async function mountDashboard(role) {
+  const BannerStub = Vue.defineComponent({ name: 'HiddenLoadsBanner', props: { hiddenLoads: Array }, setup: (props) => () => Vue.h('x-hidden-banner', { count: (props.hiddenLoads || []).length }) })
+  const store = { data: { hiddenLoads: HIDDEN_LIST, kpis: null }, kpis: null, revenue: {}, unassignedJobs: [], activeJobs: [], completedJobs: [], fleet: [], drivers: [], offUntil: null, headers: [], completedHeaders: [], timestamp: null, refresh: async () => {} }
+  const Comp = DASH({
+    'vue-router': { useRoute: () => ({ query: {}, path: '/dashboard' }), useRouter: () => ({ replace() {}, push() {} }) },
+    '../stores/dashboard': { useDashboardStore: () => store },
+    '../composables/useSocket': { useSocket: () => ({ connect() {}, register() {}, on() {}, off() {} }) },
+    '../composables/useToast': { useToast: () => ({ show() {} }) },
+    '../composables/useSocketRefresh': { useSocketRefresh: () => {} },
+    '../utils/datetime': DATETIME,
+    '@/components/ui/card': { Card: stub('x-card'), CardContent: stub('x-card-content') },
+    '@/components/ui/tabs': { Tabs: stub('x-tabs'), TabsList: stub('x-tabs-list'), TabsTrigger: stub('x-tab'), TabsContent: stub('x-tab-content') },
+    '@/components/ui/badge': { Badge: stub('x-badge') },
+    '../stores/auth': { useAuthStore: () => ({ user: { role }, isSuperAdmin: role === 'Super Admin' }) },
+    '../lib/driverName': { normDriver: (n) => String(n || '').toLowerCase() },
+    '../lib/loadRef': { loadIdShown: () => '', loadKeyStale: () => false },
+    '../lib/availabilityText': { sortDriversForAssign: (d) => d },
+    '../composables/useOffDutyConfirm': { useOffDutyConfirm: () => ({ withOffDutyConfirm: (send) => send(false) }) },
+    '../lib/deletedLoadsView.js': lib,
+    '../components/dashboard/KpiGrid.vue': { default: stub('x-kpi') },
+    '../components/dashboard/RevenueGrid.vue': { default: stub('x-revenue') },
+    '../components/dashboard/JobBoardTab.vue': { default: stub('x-jobboard') },
+    '../components/dashboard/ActiveLoadsTab.vue': { default: stub('x-active') },
+    '../components/dashboard/FleetTab.vue': { default: stub('x-fleet') },
+    '../components/dashboard/CompletedLoadsTab.vue': { default: stub('x-completed') },
+    '../components/dashboard/HiddenLoadsBanner.vue': { default: BannerStub },
+  })
+  const m = mountInMemory(Comp)
+  await drain()
+  return m
+}
+let dashOk = false
+try { dashOk = !!DASH && !!lib && !!(await mountDashboard('Super Admin')) } catch (err) { console.log(`  (the dashboard did not mount: ${err.message})`) }
+ok('§7 DashboardView.vue mounts in this harness', dashOk)
+if (dashOk) {
+  const sa = await mountDashboard('Super Admin')
+  const bannerEl = sa.find((n) => n.tag === 'x-hidden-banner')
+  eq('§7 a Super Admin\'s dashboard: the banner, at the top, with the hidden loads', [!!bannerEl, bannerEl && bannerEl.props.count, sa.root.children[0] && sa.root.children[0].children[0] === bannerEl], [true, 2, true])
+  for (const role of ['Dispatcher', 'Driver', 'Investor', 'Admin']) {
+    const m = await mountDashboard(role)
+    eq(`§7 ${role}: no banner in the page, even with hidden loads in the answer`, !!m.find((n) => n.tag === 'x-hidden-banner'), false)
+  }
+}
+
+// ------------------------------------------------------------- §8 wiring
+const RATECON = read('client', 'src', 'components', 'shared', 'RateConReviewModal.vue')
+const NEWJOB = read('client', 'src', 'views', 'NewJobView.vue')
+const DATAMGR = read('client', 'src', 'views', 'DataManagerView.vue')
+const SHEETS = read('client', 'src', 'stores', 'sheets.js')
+const NOTIFS = read('client', 'src', 'views', 'NotificationsView.vue')
+for (const [name, src] of [['the rate-con modal', RATECON], ['New Job', NEWJOB], ['the Data Manager', DATAMGR]]) {
+  ok(`§8 ${name} asks through withDeletedLoadChoice(), with a Super Admin's ask only`, /withDeletedLoadChoice\(/.test(src) && /auth\.isSuperAdmin \? deletedChoice\.ask : null/.test(src))
+  eq(`§8 ${name} renders the choice for a Super Admin only`, (src.match(/<DeletedLoadChoiceModal\b[^>]*>/g) || []).map((t) => /v-if="auth\.isSuperAdmin"/.test(t)), [true])
+}
+ok('§8 the rate-con modal shows the server\'s words for a Load ID an old delete names, before its duplicate message',
+  /if \(err\?\.code === 'LOAD_ID_DELETED'\) return err\.message/.test(RATECON) && RATECON.indexOf("err?.code === 'LOAD_ID_DELETED'") < RATECON.indexOf("err?.code === 'DUPLICATE_LOAD'"))
+ok('§8 the rate-con create and New Job send the choice with the create', /\.\.\.\(choice \? \{ deletedLoadChoice: choice \} : \{\}\)/.test(RATECON) && /\.\.\.\(choice \? \{ deletedLoadChoice: choice \} : \{\}\)/.test(NEWJOB))
+ok('§8 the Data Manager\'s addRow() sends it too', /\.\.\.\(opts\.deletedLoadChoice \? \{ deletedLoadChoice: opts\.deletedLoadChoice \} : \{\}\)/.test(SHEETS) && /store\.addRow\(values, \{ confirmOffDuty, deletedLoadChoice: choice \}\)/.test(DATAMGR))
+ok('§8 tapping the notice opens the dashboard, where its banner is', /if \(n\.type === HIDDEN_LOAD_NOTICE_TYPE\) \{\s*router\.push\(\{ path: '\/dashboard' \}\)\s*return\s*\}/.test(NOTIFS))
+{
+  let serverType = null
+  try { serverType = createRequire(path.join(ROOT, 'package.json'))(path.join(ROOT, 'lib', 'deleted-load-restore.js')).NOTICE_TYPE } catch { serverType = null }
+  eq('§8 the client\'s notice type is the server\'s', [lib && lib.HIDDEN_LOAD_NOTICE_TYPE, serverType], ['load-hidden-by-delete', 'load-hidden-by-delete'])
+}
 
 if (failures.length) {
   console.error(`\n${pass} passed, ${failures.length} failed`)
