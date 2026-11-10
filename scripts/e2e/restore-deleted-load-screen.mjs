@@ -181,7 +181,8 @@ async function newJob(browser, viewport, tag) {
     await field.waitFor({ state: 'visible', timeout: 30000 })
     await page.waitForTimeout(500)
     await field.fill(NEW_LOAD)
-    await page.locator('button', { hasText: 'Create Job' }).click()
+    // By its exact name: the rate-con drop zone's button also carries the words "Create Job".
+    await page.getByRole('button', { name: 'Create Job', exact: true }).click()
     await page.locator('.confirm-dialog').waitFor({ state: 'visible', timeout: 10000 })
     const c = await dialogText(page)
     const restoreOff = await page.locator('.confirm-dialog input[value="restore"]').isDisabled()
