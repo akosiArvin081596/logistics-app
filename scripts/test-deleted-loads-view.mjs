@@ -219,9 +219,9 @@ const VIEW = read('client', 'src', 'views', 'DeletedLoadsView.vue')
 ok('§3 the page reads GET /api/admin/deleted-loads', /api\.get\('\/api\/admin\/deleted-loads'\)/.test(VIEW))
 ok('§3 the page shows every column: Load ID, Route, Driver, Date deleted, Deleted by, Month, Closed',
   ['Load ID', 'Route', 'Driver', 'Date deleted', 'Deleted by', 'Month', 'Closed'].every((h) => VIEW.includes(`<TableHead>${h}</TableHead>`)))
-ok('§3 the link sends nothing but a GET; the page a GET, and one POST, to the restore route, from its confirm',
+ok('§3 the link sends nothing but a GET; the page a GET, and one POST, to the restore route, from its confirm, with the reason',
   !/api\.(post|put|patch|del)\(/.test(LINK_SRC) && !/api\.(put|patch|del)\(/.test(VIEW) && !/fetch\(/.test(VIEW + LINK_SRC)
-  && (VIEW.match(/api\.post\(/g) || []).length === 1 && VIEW.includes('await api.post(restoreUrl(l.id), {})'))
+  && (VIEW.match(/api\.post\(/g) || []).length === 1 && VIEW.includes('await api.post(restoreUrl(l.id), { reason: reason.value.trim() })'))
 ok('§3 the page has a phone layout (cards below md)', /v-else-if="isMobile"/.test(VIEW) && /useViewport\(\)/.test(VIEW))
 // Review L1 (#568): two deletes of one load in the same second share load ID,
 // time and row index; only the deleted_loads id the route sends tells them apart.
