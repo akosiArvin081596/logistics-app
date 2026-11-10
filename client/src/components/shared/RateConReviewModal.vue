@@ -121,7 +121,7 @@ const auth = useAuthStore()
 const { show: toast } = useToast()
 const deletedChoice = useDeletedLoadChoice()
 const onDeletedLoadRestored = (answer) => deletedChoice.answer({ action: 'restored', answer })
-const onDeletedLoadCreateNew = () => deletedChoice.answer({ action: 'create_new' })
+const onDeletedLoadCreateNew = (reason) => deletedChoice.answer({ action: 'create_new', reason })
 const onDeletedLoadCancel = () => deletedChoice.answer(null)
 
 // Sheets read + Distance Matrix + 3 tab writes + a Drive upload. The 20s

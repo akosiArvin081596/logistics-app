@@ -143,7 +143,7 @@ const { show: toast } = useToast()
 const { withOffDutyConfirm } = useOffDutyConfirm()
 const deletedChoice = useDeletedLoadChoice()
 const onDeletedLoadRestored = (answer) => deletedChoice.answer({ action: 'restored', answer })
-const onDeletedLoadCreateNew = () => deletedChoice.answer({ action: 'create_new' })
+const onDeletedLoadCreateNew = (reason) => deletedChoice.answer({ action: 'create_new', reason })
 const onDeletedLoadCancel = () => deletedChoice.answer(null)
 const socket = useSocket()
 

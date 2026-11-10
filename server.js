@@ -44307,8 +44307,8 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			// the one window where the tab identity is least certain.
 			const ownerErr = validateOwnerIdCell("Job Tracking", hdrs, values);
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
-			// What the duplicate read found, for the deleted-load check after it.
-			const dupRead = { loadId: "", rowIndex: null, read: false };
+			// What the duplicate read found, for the deleted-load check after it; an unread header row finds no ID.
+			const dupRead = { loadId: "", rowIndex: null, read: false, headerRead: Array.isArray(hdrs) && hdrs.length > 0 };
 			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
 				// The ID as the row will store it, edge whitespace trimmed (the Load ID
@@ -44336,8 +44336,8 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 					}
 				}
 			} catch { /* non-critical: dup-check is best-effort */ }
-			// A Load ID an old delete still names is put to the Super Admin as a choice; "Create it as new" clears
-			// that delete here, before the append below (lib/deleted-load-restore.js).
+			// A Load ID an old delete still names is put to the Super Admin as a choice; "Create it as new" is checked
+			// here and cleared just before the append, after every refusal below (lib/deleted-load-restore.js).
 			const deletedLoadAnswer = deletedLoadRestore.onCreate(req, { ...dupRead, via: "POST /api/data" });
 			if (deletedLoadAnswer) return res.status(deletedLoadAnswer.status).json(deletedLoadAnswer.body);
 		}
@@ -44430,6 +44430,9 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
+		// The "Create it as new" checked at the duplicate read: the old delete goes only now, after every refusal.
+		const deletedLoadClear = deletedLoadRestore.clearBeforeAppend(req);
+		if (deletedLoadClear) return res.status(deletedLoadClear.status).json(deletedLoadClear.body);
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -46462,7 +46465,7 @@ app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res)
 // "true": the Super Admin restore route, the create routes' check for a Load ID an old delete still names, and a
 // step in front of GET /api/dashboard that tells a Super Admin of a live row such a delete hides.
 require("./lib/deleted-load-restore").ensureSchema(db);
-const deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true" });
+const deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true", auditText });
 deletedLoadRestore.mount(app, {
 	requireRole, refuseCrossSite, periodLocksReadable, getJobTrackingCached, jobTrackingMonthCols, tripDayLockCover,
 	loadRowPeriods, lockedAmong, periodLabel, notifyChange, jtCacheInvalidate, pickAddressColumn, excludeDroppedLoads,
@@ -52922,9 +52925,10 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 // sent to the super-admin room only), and a receipt page the pages-only path
 // could not take out of an invoice PDF (it names the invoice, and Dispatchers
 // are shown no invoices; sent live the same way), and a load an old delete hides
+// and a deleted load restored or its delete cleared, with the reason
 // (lib/deleted-load-restore.js, sent live the same way). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages", "load-hidden-by-delete"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages", "load-hidden-by-delete", "deleted-load-restored"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
@@ -55410,8 +55414,8 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			const shownThere = shownLoadId(req, loadId, { row: existing, own: brokerContact.rateConOwnContact(fields, BROKER_WITHHELD_RE) });
 			if (shownThere !== loadId) hiddenNew = [{ raw: loadId, shown: shownThere }];
 		}
-		// A Load ID an old delete still names is refused, or put to a Super Admin as a choice; "Create it as new"
-		// clears that delete here, before the append, so a failed append leaves nothing hidden.
+		// A Load ID an old delete still names is refused, or put to a Super Admin as a choice; "Create it as new" is
+		// checked here and cleared just before the append, after every refusal below.
 		const deletedLoadAnswer = deletedLoadRestore.onCreate(req, { loadId, rowIndex: existing ? existing._rowIndex : null, via: "POST /api/loads/from-ratecon" });
 		if (deletedLoadAnswer) return res.status(deletedLoadAnswer.status).json(deletedLoadAnswer.body);
 		if (existing) {
@@ -55509,6 +55513,10 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			}
 		}
 
+		// The "Create it as new" checked at the dedupe step: the old delete goes only now, so a failed append leaves
+		// nothing hidden and a refusal above leaves the delete as it was.
+		const deletedLoadClear = deletedLoadRestore.clearBeforeAppend(req);
+		if (deletedLoadClear) return res.status(deletedLoadClear.status).json(deletedLoadClear.body);
 		const appendResp = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Job Tracking",

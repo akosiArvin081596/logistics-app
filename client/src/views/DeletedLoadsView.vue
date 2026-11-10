@@ -91,10 +91,14 @@
       :title="confirmView.title"
       :message="confirmView.message"
       confirm-text="Restore"
-      :confirm-disabled="restoring !== null"
+      :confirm-disabled="restoring !== null || !restoreReasonReady(reason)"
       @confirm="doRestore"
       @cancel="closeRestore"
     >
+      <label class="dl-reason">
+        <span class="dl-reason-label">Reason (recorded in the audit trail and sent to the Super Admins)</span>
+        <textarea v-model="reason" class="dl-reason-input" rows="2" :maxlength="RESTORE_REASON_MAX" :disabled="restoring !== null" placeholder="e.g. deleted by mistake; the broker confirmed the load"></textarea>
+      </label>
       <p v-if="restoreError" class="dl-restore-error" role="alert">{{ restoreError }}</p>
     </ConfirmModal>
   </div>
@@ -110,7 +114,7 @@ import { useAuthStore } from '../stores/auth'
 import { fmtAppInstant } from '../utils/datetime'
 import {
   canSeeDeletedLoads, canRestoreDeletedLoads, deletedLoadRoute, deletedLoadMonths, deletedLoadMonthsNote, deletedLoadsErrorText,
-  restoreConfirm, restoreDoneText, restoreErrorText, restoreIsOn, restoreUrl,
+  RESTORE_REASON_MAX, restoreConfirm, restoreDoneText, restoreErrorText, restoreIsOn, restoreReasonReady, restoreUrl,
 } from '../lib/deletedLoadsView.js'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
@@ -136,6 +140,8 @@ const restoreOn = computed(() => canRestoreDeletedLoads(auth.user?.role) && rest
 const target = ref(null)
 const restoring = ref(null)
 const restoreError = ref('')
+// Restore needs a reason of 3+ characters, sent with it (the 10-22 Restore decision).
+const reason = ref('')
 const confirmView = computed(() => (target.value ? restoreConfirm(target.value, fmtAppInstant(target.value.deletedAt)) : { title: '', message: '' }))
 
 async function load() {
@@ -158,20 +164,22 @@ async function load() {
 function askRestore(l) {
   if (restoring.value !== null) return
   restoreError.value = ''
+  reason.value = ''
   target.value = l
 }
 function closeRestore() {
   if (restoring.value !== null) return
   target.value = null
   restoreError.value = ''
+  reason.value = ''
 }
 async function doRestore() {
   const l = target.value
-  if (!l || restoring.value !== null) return
+  if (!l || restoring.value !== null || !restoreReasonReady(reason.value)) return
   restoring.value = l.id
   restoreError.value = ''
   try {
-    const res = await api.post(restoreUrl(l.id), {})
+    const res = await api.post(restoreUrl(l.id), { reason: reason.value.trim() })
     target.value = null
     toast(restoreDoneText(res, l.loadId), 'success')
     load()
@@ -239,6 +247,22 @@ load()
 .dl-card-actions { display: flex; justify-content: flex-end; margin-top: 0.6rem; }
 .dl-actions { text-align: right; }
 .dl-restore { min-height: 2.25rem; }
+.dl-reason { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.6rem; }
+.dl-reason-label { font-size: 0.8rem; font-weight: 600; color: var(--text); }
+.dl-reason-input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  color: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.dl-reason-input:focus { outline: none; border-color: #94a3b8; }
 .dl-restore-error {
   margin: 0;
   padding: 0.5rem 0.65rem;
