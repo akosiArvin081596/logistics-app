@@ -23,7 +23,10 @@
 //   §6 the create choice (DeletedLoadChoiceModal.vue), mounted: who deleted it and
 //      when, both choices with the reason one is off, Restore through the route,
 //      Create it as new handed back to the form (or, from the banner, through the
-//      route), one press at a time, the server's words on a refusal.
+//      route), one press at a time, the server's words on a refusal. Restore and
+//      Create it as new stay off until a reason of 3+ characters is typed, here
+//      and in §5's confirm, and the reason goes with the request (the 10-22
+//      Restore decision).
 //   §7 the dashboard banner (HiddenLoadsBanner.vue), mounted, and the dashboard
 //      (DashboardView.vue) mounted for a Super Admin and a Dispatcher.
 //   §8 wiring, from source: the rate-con modal, New Job and the Data Manager ask
@@ -233,7 +236,7 @@ const has = (name) => !!lib && typeof lib[name] === 'function'
 // ------------------------------------------------------------------ §4 lib
 ok('§4 the lib has its restore, choice and banner helpers',
   ['canRestoreDeletedLoads', 'restoreIsOn', 'restoreUrl', 'restoreConfirm', 'restoreErrorText', 'restoreDoneText', 'deletedLoadChoiceOf',
-    'deletedLoadChoiceView', 'withDeletedLoadChoice', 'hiddenLoadsOf', 'hiddenLoadText', 'hiddenLoadChoice', 'hiddenEvidenceText'].every(has))
+    'deletedLoadChoiceView', 'withDeletedLoadChoice', 'hiddenLoadsOf', 'hiddenLoadText', 'hiddenLoadChoice', 'hiddenEvidenceText', 'restoreReasonReady'].every(has))
 if (has('withDeletedLoadChoice')) {
   eq('§4 only a Super Admin may restore', ['Super Admin', ...ROLES_NOT_SA, undefined].map(lib.canRestoreDeletedLoads), [true, false, false, false, false, false, false, false, false, false])
   eq('§4 Restore shows only when the server says so', [{ restore: { enabled: true } }, { restore: { enabled: 'true' } }, { restore: {} }, {}, null].map(lib.restoreIsOn), [true, false, false, false, false])
@@ -263,6 +266,15 @@ if (has('withDeletedLoadChoice')) {
     'No answer from the server. Reload the list to see whether the load was restored.',
     'The load could not be restored. Try again in a moment.',
   ])
+  eq('§4 the reason\'s own refusals, and a create as new refused for a row that may be the delete\'s own, read as the server words them', [
+    lib.restoreErrorText(refused('RESTORE_REASON_REQUIRED', 400, 'A reason of 3 to 500 characters is required (made-up).')),
+    lib.restoreErrorText(refused('CONTACT_NOT_ALLOWED', 400, "The reason can't hold an email address or a phone number (made-up).")),
+    lib.restoreErrorText(refused('DELETED_ROWS_PRESENT', 409, 'Row 2 may be load lx-1002\'s row from before its delete (made-up).')),
+  ], ['A reason of 3 to 500 characters is required (made-up).', "The reason can't hold an email address or a phone number (made-up).", 'Row 2 may be load lx-1002\'s row from before its delete (made-up).'])
+  eq('§4 a reason is ready at 3 to 500 characters once trimmed (the 10-22 Restore decision)',
+    has('restoreReasonReady') ? ['', '  ', 'ok', '  ok  ', 'abc', '  Re-booked by the broker  ', 'x'.repeat(500), 'x'.repeat(501), null, undefined, 42].map(lib.restoreReasonReady) : null,
+    [false, false, false, false, true, true, true, false, false, false, false])
+  eq('§4 ...its limits are the server\'s', [lib.RESTORE_REASON_MIN, lib.RESTORE_REASON_MAX], [3, 500])
   eq('§4 done: restored, cleared, or one delete of two undone', [
     lib.restoreDoneText({ mode: 'restore', restored: { loadId: 'lx-1002' }, remaining: 0 }),
     lib.restoreDoneText({ mode: 'create_new', restored: { loadId: 'lx-1002' }, remaining: 0 }),
@@ -287,29 +299,51 @@ if (has('withDeletedLoadChoice')) {
     why: '',
     restoreOff: true,
     restoreNote: "Its Job Tracking row is gone, so there's nothing to restore.",
+    monthLines: [],
     createOff: false,
     createNote: 'Clears the old delete and creates this load.',
   })
-  const ROW = { ...CHOICE, loadId: '7003', sheetRow: 4, canRestore: true, canCreateNew: false }
-  eq('§4 ...with a row: Restore on (that row), Create it as new off with its reason', [view(ROW).restoreOff, view(ROW).restoreNote, view(ROW).createOff, view(ROW).createNote],
-    [false, 'Brings the deleted load back (row 4) and creates nothing new.', true, 'Row 4 still holds this load: restore it instead, or remove that row first.'])
-  eq('§4 ...deleted twice with no row: Create it as new off, saying why', view({ ...CHOICE, canCreateNew: false, deleteCount: 2 }).createNote,
-    "This Load ID was deleted more than once, so it can't be created as new here.")
-  const HIDDEN = { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['deleted_with_no_row', 'created_by_n8n'] }
-  eq('§4 the banner line', lib.hiddenLoadText(HIDDEN, 'Oct 1, 2026'), 'Load LX-5101 is hidden by an earlier delete (deleted by admin_two on Oct 1, 2026).')
-  eq('§4 its choice: both on, the evidence kept', lib.hiddenLoadChoice(HIDDEN),
-    { loadId: 'LX-5101', tombstoneId: 4, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, canRestore: true, canCreateNew: true, evidence: ['deleted_with_no_row', 'created_by_n8n'] })
-  eq('§4 ...reviewed: why it shows, and what each choice does there', [view(lib.hiddenLoadChoice(HIDDEN), true).why, view(lib.hiddenLoadChoice(HIDDEN), true).message,
-    view(lib.hiddenLoadChoice(HIDDEN), true).restoreNote, view(lib.hiddenLoadChoice(HIDDEN), true).createNote], [
-    'Why it shows: it was deleted when no row held its Load ID; the email workflow added this Load ID after the delete.',
-    "Deleted Oct 1, 2026 by admin_two. Its row is on the sheet, but it doesn't count while that delete stands.",
-    'Brings the deleted load back: every row with this Load ID counts again.',
-    'Clears the old delete, so the row counts as a new load.',
+  const ROW = { ...CHOICE, loadId: '7003', sheetRow: 4, canRestore: true, canCreateNew: false, months: [{ month: '2026-10', closed: false }], monthsFrom: 'audit' }
+  eq('§4 ...with a row: Restore on (that row, its month from the delete record), Create it as new off with its reason',
+    [view(ROW).restoreOff, view(ROW).restoreNote, view(ROW).monthLines, view(ROW).createOff, view(ROW).createNote],
+    [false, 'Brings the deleted load back (row 4) and creates nothing new.', ['October 2026: open (from the delete record)'], true, 'Row 4 still holds this load: restore it instead, or remove that row first.'])
+  eq('§4 ...a month no one could name says so', view({ ...ROW, months: [], monthsFrom: 'none' }).monthLines, ['Month: not known'])
+  eq('§4 ...deleted twice with no row: Create it as new on, clearing both (M5)', [view({ ...CHOICE, deleteCount: 2 }).createOff, view({ ...CHOICE, deleteCount: 2 }).createNote],
+    [false, 'Clears all 2 old deletes of this Load ID and creates this load.'])
+  const HIDDEN = { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, rows: [4], newRows: [4], ownRows: [],
+    canRestore: true, canCreateNew: true, months: [{ month: '2026-10', closed: false }], evidence: ['deleted_with_no_row', 'created_by_n8n'] }
+  eq('§4 the banner line names the row', [lib.hiddenLoadText(HIDDEN, 'Oct 1, 2026'), lib.hiddenLoadText({ ...HIDDEN, sheetRow: null }, 'Oct 1, 2026')],
+    ['Load LX-5101, row 4, is hidden by an earlier delete (deleted by admin_two on Oct 1, 2026).', 'Load LX-5101 is hidden by an earlier delete (deleted by admin_two on Oct 1, 2026).'])
+  eq('§4 its choice: what the server sent, nothing assumed (M3)', [lib.hiddenLoadChoice(HIDDEN), lib.hiddenLoadChoice({ ...HIDDEN, canCreateNew: false, canRestore: 'yes' })], [
+    { loadId: 'LX-5101', tombstoneId: 4, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, canRestore: true, canCreateNew: true, rows: [4], newRows: [4], ownRows: [],
+      months: [{ month: '2026-10', closed: false }], evidence: ['deleted_with_no_row', 'created_by_n8n'] },
+    { loadId: 'LX-5101', tombstoneId: 4, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, canRestore: false, canCreateNew: false, rows: [4], newRows: [4], ownRows: [],
+      months: [{ month: '2026-10', closed: false }], evidence: ['deleted_with_no_row', 'created_by_n8n'] },
   ])
-  eq('§4 the evidence, each way', ['created_by_rate_con', 'created_in_sheet_row', 'row_changed', 'nonsense'].map((e) => lib.hiddenEvidenceText([e])), [
+  const reviewed = view(lib.hiddenLoadChoice(HIDDEN), true)
+  eq('§4 ...reviewed: why it shows, its row, its month, and what each choice does there', [reviewed.why, reviewed.message, reviewed.restoreNote, reviewed.monthLines, reviewed.createOff, reviewed.createNote], [
+    'Why it shows: it was deleted when no row held its Load ID; the email workflow added this Load ID after the delete.',
+    "Deleted Oct 1, 2026 by admin_two. Row 4 has this Load ID, but it doesn't count while that delete stands.",
+    'Brings the deleted load back: row 4 counts again.',
+    ['October 2026: open'],
+    false,
+    'Clears the old delete, so row 4 counts as a new load.',
+  ])
+  const OWN = { ...HIDDEN, sheetRow: 6, rows: [2, 6], newRows: [6], ownRows: [2], canCreateNew: false, evidence: ['row_changed'] }
+  const own = view(lib.hiddenLoadChoice(OWN), true)
+  eq('§4 ...with a row that may be the delete\'s own: Create it as new off, naming that row', [own.message, own.restoreNote, own.createOff, own.createNote], [
+    "Deleted Oct 1, 2026 by admin_two. Rows 2 and 6 have this Load ID, but they don't count while that delete stands.",
+    'Brings the deleted load back: rows 2 and 6 count again.',
+    true,
+    "Row 2 may be this load's row from before its delete: restore it instead, or remove that row first.",
+  ])
+  eq('§4 ...two such rows, named together', view(lib.hiddenLoadChoice({ ...OWN, rows: [2, 3, 6], ownRows: [2, 3] }), true).createNote,
+    "Rows 2 and 3 may be this load's rows from before its delete: restore it instead, or remove those rows first.")
+  eq('§4 the evidence, each way', ['created_by_rate_con', 'created_in_sheet_row', 'row_changed', 'row_in_other_month', 'nonsense'].map((e) => lib.hiddenEvidenceText([e])), [
     'Why it shows: a rate con created this Load ID after the delete.',
     'Why it shows: New Job or the Data Manager added this Load ID after the delete.',
-    "Why it shows: its row isn't the one that was deleted.",
+    'Why it shows: its row changed after the delete.',
+    "Why it shows: a row with this Load ID books into a month its delete didn't name.",
     '',
   ])
   eq('§4 hidden loads as the dashboard sent them; anything malformed left out', [
@@ -333,15 +367,25 @@ if (has('withDeletedLoadChoice')) {
     return { sent, asked, out, threw }
   }
   const choiceErr = () => asErr({ ...CHOICE, error: 'Load 7101 was deleted (made-up).' })
-  const a = await flow({ answers: [{ action: 'create_new' }], fails: [choiceErr()] })
-  eq('§4 Create it as new: the same create again, carrying the choice', [a.sent, a.asked, a.out], [[null, { action: 'create_new', id: 9 }], [[9, '']], { success: true }])
+  const a = await flow({ answers: [{ action: 'create_new', reason: 'Booked again (made-up)' }], fails: [choiceErr()] })
+  eq('§4 Create it as new: the same create again, carrying the choice, the deletes it saw and the reason', [a.sent, a.asked, a.out],
+    [[null, { action: 'create_new', id: 9, count: 1, reason: 'Booked again (made-up)' }], [[9, '']], { success: true }])
+  const reasonErr = asErr({ code: 'CONTACT_NOT_ALLOWED', field: 'reason', error: "The reason can't hold an email address or a phone number (made-up)." }, 400)
+  const ra = await flow({ answers: [{ action: 'create_new', reason: 'Call 555-010-0150' }, { action: 'create_new', reason: 'Booked again (made-up)' }], fails: [choiceErr(), reasonErr] })
+  eq('§4 a reason the server refuses: the same choice asked again with its words, then sent with the new reason', [ra.asked, ra.sent, ra.out], [
+    [[9, ''], [9, "The reason can't hold an email address or a phone number (made-up)."]],
+    [null, { action: 'create_new', id: 9, count: 1, reason: 'Call 555-010-0150' }, { action: 'create_new', id: 9, count: 1, reason: 'Booked again (made-up)' }],
+    { success: true }])
+  const plain400 = await flow({ answers: [], fails: [asErr({ code: 'CONTACT_NOT_ALLOWED', field: 'Contract ID', error: 'Contract ID holds an email (made-up).' }, 400)] })
+  eq('§4 ...another 400 before any choice is thrown as it came', [plain400.asked.length, plain400.threw && plain400.threw.message], [0, 'Contract ID holds an email (made-up).'])
   const b = await flow({ answers: [{ action: 'restored', answer: { ok: true } }], fails: [choiceErr()] })
   eq('§4 Restore the deleted load: nothing sent again', [b.sent.length, b.out], [1, { deletedLoadRestored: true, answer: { ok: true }, loadId: '7101' }])
   const c = await flow({ answers: [null], fails: [choiceErr()] })
   eq('§4 Cancel: nothing sent again', [c.sent.length, c.out], [1, { deletedLoadDeclined: true }])
-  const stale = asErr({ ...CHOICE, tombstoneId: 10, stale: true, error: 'The delete record for load 7101 changed after you chose (made-up).' })
+  const stale = asErr({ ...CHOICE, tombstoneId: 10, deleteCount: 2, stale: true, error: 'The delete record for load 7101 changed after you chose (made-up).' })
   const d = await flow({ answers: [{ action: 'create_new' }, { action: 'create_new' }], fails: [choiceErr(), stale] })
-  eq('§4 a stale choice asks again with the server\'s words and the fresh delete', [d.asked, d.sent], [[[9, ''], [10, 'The delete record for load 7101 changed after you chose (made-up).']], [null, { action: 'create_new', id: 9 }, { action: 'create_new', id: 10 }]])
+  eq('§4 a stale choice asks again with the server\'s words and the fresh delete', [d.asked, d.sent],
+    [[[9, ''], [10, 'The delete record for load 7101 changed after you chose (made-up).']], [null, { action: 'create_new', id: 9, count: 1 }, { action: 'create_new', id: 10, count: 2 }]])
   const e = await flow({ answers: [], fails: [asErr({ code: 'LOAD_ID_DELETED', error: 'Ask a Super Admin (made-up).' })] })
   eq('§4 a refusal with no choice (a Dispatcher\'s) is thrown as it came', [e.asked.length, e.threw && e.threw.message], [0, 'Ask a Super Admin (made-up).'])
   const f = await (async () => { try { await lib.withDeletedLoadChoice(async () => { throw choiceErr() }, null); return 'no throw' } catch (err) { return err.code } })()
@@ -416,6 +460,15 @@ function mountInMemory(Comp, rootProps) {
   }
 }
 const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
+// Types into a text box as a person does: its value, then its input event (v-model or an @input handler).
+async function typeInto(el, text) {
+  if (!el || isDisabled(el)) return
+  el.value = text
+  for (const fn of el.listeners.input || []) fn({ target: el, currentTarget: el })
+  const handlers = Array.isArray(el.props.onInput) ? el.props.onInput : [el.props.onInput]
+  for (const fn of handlers) if (typeof fn === 'function') fn({ target: el, currentTarget: el })
+  await drain()
+}
 const evt = (el) => ({ preventDefault() {}, stopPropagation() {}, target: el, currentTarget: el })
 const isDisabled = (el) => !!el && el.props.disabled != null && el.props.disabled !== false
 async function press(el) {
@@ -515,6 +568,7 @@ async function mountPage({ role, restoreOn = false, mobile = false } = {}) {
     confirm: () => m.find((n) => n.tag === 'x-confirm'),
     confirmButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'),
     cancelButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'cancel'),
+    reasonBox: () => m.find((n) => n.tag === 'textarea'),
   }
   return p
 }
@@ -548,10 +602,18 @@ if (pageOk) {
       p.m.text(p.m.find((n) => n.tag === 'x-title', c)), p.m.text(p.m.find((n) => n.tag === 'x-message', c)), p.m.text(p.confirmButton())],
     ['Restore load lx-1002?', "Deleted at 2026-10-20T12:00:00Z by admin_two. October 2026: open Restoring puts it back on the dashboard and in its month's figures.", 'Restore'])
     eq('§5 ...nothing is sent until it is confirmed', p.api.posts.length, 0)
+    const box = p.reasonBox()
+    eq('§5 a reason box in the confirm; Restore off while it is empty (the 10-22 Restore decision)', [!!box, box && Number(box.props.maxlength), isDisabled(p.confirmButton())], [true, 500, true])
+    await typeInto(box, '  ok  ')
+    eq('§5 ...and while it has under 3 characters once trimmed', isDisabled(p.confirmButton()), true)
+    await press(p.confirmButton())
+    eq('§5 ...a press then sends nothing', p.api.posts.length, 0)
+    await typeInto(p.reasonBox(), '  Re-booked by the broker (made-up) ')
+    eq('§5 ...on once it has 3 or more', isDisabled(p.confirmButton()), false)
     await press(p.confirmButton())
     await press(p.confirmButton())
-    eq('§5 confirmed: one POST to its delete record, a second press blocked while it is out', [p.api.posts.length, p.api.posts[0] && p.api.posts[0].url, p.api.posts[0] && p.api.posts[0].body, isDisabled(p.confirmButton())],
-      [1, '/api/admin/deleted-loads/3/restore', {}, true])
+    eq('§5 confirmed: one POST to its delete record with the reason, a second press blocked while it is out', [p.api.posts.length, p.api.posts[0] && p.api.posts[0].url, p.api.posts[0] && p.api.posts[0].body, isDisabled(p.confirmButton())],
+      [1, '/api/admin/deleted-loads/3/restore', { reason: 'Re-booked by the broker (made-up)' }, true])
     await press(p.restoreButtons()[2])
     eq('§5 ...and no other row can start one meanwhile', p.api.posts.length, 1)
     p.api.posts[0]?.resolve({ ok: true, mode: 'restore', restored: { id: 3, loadId: 'lx-1002', months: ['2026-10'] }, remaining: 0 })
@@ -562,6 +624,7 @@ if (pageOk) {
   {
     const p = await mountPage({ role: 'Super Admin', restoreOn: true })
     await press(p.restoreButtons()[2])
+    await typeInto(p.reasonBox(), 'Deleted in error (made-up)')
     await press(p.confirmButton())
     p.api.posts[0]?.reject(Object.assign(new Error('Load lx-1001 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.'), { status: 409, code: 'PERIOD_FINALIZED' }))
     await drain()
@@ -571,6 +634,8 @@ if (pageOk) {
       ['Load lx-1001 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.', true, [], 1])
     await press(p.cancelButton())
     eq('§5 ...Cancel closes it', !!p.confirm(), false)
+    await press(p.restoreButtons()[1])
+    eq('§5 ...and the next confirm starts with an empty reason, Restore off', [p.reasonBox() && p.reasonBox().value, isDisabled(p.confirmButton())], ['', true])
     p.m.unmount()
   }
   {
@@ -594,7 +659,7 @@ async function mountChoice({ choice, review = false, note = '' }) {
   const events = []
   const state = Vue.reactive({ open: true, choice, review, note })
   const Host = Vue.defineComponent({
-    setup: () => () => Vue.h(Choice, { ...state, onResolved: (a) => events.push(['resolved', a]), onCreateNew: () => events.push(['create-new']), onCancel: () => events.push(['cancel']) }),
+    setup: () => () => Vue.h(Choice, { ...state, onResolved: (a) => events.push(['resolved', a]), onCreateNew: (...a) => events.push(['create-new', ...a]), onCancel: () => events.push(['cancel']) }),
   })
   const m = mountInMemory(Host)
   await drain()
@@ -603,8 +668,10 @@ async function mountChoice({ choice, review = false, note = '' }) {
     radio: (value) => m.find((n) => n.tag === 'input' && n.props.value === value),
     confirmButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'),
     cancelButton: () => m.find((n) => n.tag === 'button' && n.props['data-role'] === 'cancel'),
+    reasonBox: () => m.find((n) => n.tag === 'textarea'),
   }
 }
+const WHY = 'Booked again by the broker (made-up)'
 const NO_ROW = { code: 'LOAD_ID_DELETED', loadId: '7101', tombstoneId: 9, deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: null, canRestore: false, canCreateNew: true, deleteCount: 1 }
 const WITH_ROW = { ...NO_ROW, loadId: '7003', tombstoneId: 11, sheetRow: 4, canRestore: true, canCreateNew: false }
 let choiceOk = false
@@ -618,19 +685,26 @@ if (choiceOk) {
       && /Restore the deleted load/.test(c.m.text()) && /Create it as new/.test(c.m.text()))
     eq('§6 no row: Restore shown off with its reason; Create it as new picked', [isDisabled(c.radio('restore')), /Its Job Tracking row is gone, so there's nothing to restore\./.test(c.m.text()),
       c.radio('create_new') && c.radio('create_new').checked, c.m.text(c.confirmButton())], [true, true, true, 'Create it as new'])
+    eq('§6 ...a reason box, and Create it as new off until it has 3 or more characters (the 10-22 Restore decision)', [!!c.reasonBox(), isDisabled(c.confirmButton())], [true, true])
+    await typeInto(c.reasonBox(), ' no ')
     await press(c.confirmButton())
-    eq('§6 ...confirmed: handed back to the form, nothing posted', [c.events, c.api.posts.length], [[['create-new']], 0])
+    eq('§6 ...under 3 once trimmed: still off, nothing handed back', [isDisabled(c.confirmButton()), c.events], [true, []])
+    await typeInto(c.reasonBox(), WHY)
+    await press(c.confirmButton())
+    eq('§6 ...confirmed: handed back to the form with the reason, nothing posted', [c.events, c.api.posts.length], [[['create-new', WHY]], 0])
     c.m.unmount()
   }
   {
     const c = await mountChoice({ choice: WITH_ROW })
     eq('§6 a row holds it: Create it as new off with its reason; Restore picked', [isDisabled(c.radio('create_new')),
       /Row 4 still holds this load: restore it instead, or remove that row first\./.test(c.m.text()), c.m.text(c.confirmButton())], [true, true, 'Restore the deleted load'])
+    eq('§6 ...Restore off until the reason is filled', isDisabled(c.confirmButton()), true)
+    await typeInto(c.reasonBox(), WHY)
     await press(c.confirmButton())
     await press(c.confirmButton())
     await press(c.cancelButton())
-    eq('§6 ...confirmed: one POST to that delete record; a second press and Cancel wait for it', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body, c.events],
-      [1, '/api/admin/deleted-loads/11/restore', {}, []])
+    eq('§6 ...confirmed: one POST to that delete record with the reason; a second press and Cancel wait for it', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body, c.events],
+      [1, '/api/admin/deleted-loads/11/restore', { reason: WHY }, []])
     c.api.posts[0]?.reject(Object.assign(new Error('Load 7003 is in a closed month (May 2026). Restoring it would change a settled payout, which is a payout question. Nothing was changed.'), { status: 409, code: 'PERIOD_FINALIZED' }))
     await drain()
     eq('§6 refused: the server\'s words, still open, nothing handed back', [c.m.text(c.m.find((n) => n.props.role === 'alert')), c.events],
@@ -642,18 +716,36 @@ if (choiceOk) {
     c.m.unmount()
   }
   {
-    const c = await mountChoice({ choice: { ...NO_ROW, canCreateNew: false, deleteCount: 2 } })
-    eq('§6 deleted twice: both off, nothing to confirm', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), isDisabled(c.confirmButton()),
-      /This Load ID was deleted more than once, so it can't be created as new here\./.test(c.m.text())], [true, true, true, true])
+    const c = await mountChoice({ choice: { ...NO_ROW, deleteCount: 2 } })
+    eq('§6 deleted twice with no row: Create it as new on and picked, clearing both (M5)', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), c.radio('create_new') && c.radio('create_new').checked,
+      /Clears all 2 old deletes of this Load ID and creates this load\./.test(c.m.text())], [true, false, true, true])
     c.m.unmount()
   }
   {
-    const c = await mountChoice({ choice: lib.hiddenLoadChoice({ tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['row_changed'] }), review: true })
-    eq('§6 from the banner: both on, neither picked, the evidence shown', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), isDisabled(c.confirmButton()),
-      /Why it shows: its row isn't the one that was deleted\./.test(c.m.text())], [false, false, true, true])
+    const c = await mountChoice({ choice: { ...WITH_ROW, months: [{ month: '2026-10', closed: false }, { month: '2026-05', closed: true }], monthsFrom: 'audit' } })
+    eq('§6 a row holds it: its months under Restore, open or closed (L1)', c.m.findAll((n) => (n.props.class || '').split(' ').includes('dlc-option-month')).map((n) => c.m.text(n)),
+      ['October 2026: open', 'May 2026: closed (from the delete record)'])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: lib.hiddenLoadChoice({ tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 7, rows: [7], newRows: [7], ownRows: [],
+      canRestore: true, canCreateNew: true, months: [{ month: '2026-10', closed: false }], evidence: ['row_changed'] }), review: true })
+    eq('§6 from the banner: both on, neither picked, the evidence, the row and its month shown', [isDisabled(c.radio('restore')), isDisabled(c.radio('create_new')), isDisabled(c.confirmButton()),
+      /Why it shows: its row changed after the delete\./.test(c.m.text()), /Row 7 has this Load ID/.test(c.m.text()), /row 7 counts as a new load\./.test(c.m.text()), /October 2026: open/.test(c.m.text())],
+    [false, false, true, true, true, true, true])
     await pick(c.radio('create_new'))
+    eq('§6 ...picked, Create it as new still off until the reason is filled', isDisabled(c.confirmButton()), true)
+    await typeInto(c.reasonBox(), WHY)
     await press(c.confirmButton())
-    eq('§6 ...Create it as new goes through the restore route, as a clear', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body], [1, '/api/admin/deleted-loads/4/restore', { mode: 'create_new' }])
+    eq('§6 ...Create it as new goes through the restore route, as a clear, with the reason', [c.api.posts.length, c.api.posts[0] && c.api.posts[0].url, c.api.posts[0] && c.api.posts[0].body],
+      [1, '/api/admin/deleted-loads/4/restore', { mode: 'create_new', reason: WHY }])
+    c.m.unmount()
+  }
+  {
+    const c = await mountChoice({ choice: lib.hiddenLoadChoice({ tombstoneId: 5, loadId: 'LX-5501', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 8, rows: [7, 8], newRows: [8], ownRows: [7],
+      canRestore: true, canCreateNew: false, months: [{ month: '2026-10', closed: false }], evidence: ['row_changed'] }), review: true })
+    eq('§6 from the banner, with a row that may be the delete\'s own: Create it as new off naming it, Restore picked (M3)', [isDisabled(c.radio('create_new')),
+      /Row 7 may be this load's row from before its delete: restore it instead, or remove that row first\./.test(c.m.text()), c.m.text(c.confirmButton())], [true, true, 'Restore the deleted load'])
     c.m.unmount()
   }
   {
@@ -666,8 +758,10 @@ if (choiceOk) {
 // ------------------------------------------------- §7 the banner and the dashboard
 const BANNER_FACTORY = factory('client/src/components/dashboard/HiddenLoadsBanner.vue')
 const HIDDEN_LIST = [
-  { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, evidence: ['deleted_with_no_row'] },
-  { tombstoneId: 7, loadId: 'LX-5401', deletedBy: 'super_admin', deletedAt: '2026-10-02T12:00:00Z', sheetRow: 9, evidence: ['created_by_n8n'] },
+  { tombstoneId: 4, loadId: 'LX-5101', deletedBy: 'admin_two', deletedAt: '2026-10-01T12:00:00Z', sheetRow: 4, rows: [4], newRows: [4], ownRows: [],
+    canRestore: true, canCreateNew: true, months: [{ month: '2026-10', closed: false }], evidence: ['deleted_with_no_row'] },
+  { tombstoneId: 7, loadId: 'LX-5401', deletedBy: 'super_admin', deletedAt: '2026-10-02T12:00:00Z', sheetRow: 9, rows: [9], newRows: [], ownRows: [9],
+    canRestore: true, canCreateNew: false, months: [{ month: '2026-10', closed: false }], evidence: ['created_by_n8n'] },
 ]
 let bannerOk = false
 let banner = null
@@ -692,15 +786,17 @@ ok('§7 HiddenLoadsBanner.vue mounts in this harness', bannerOk)
 if (bannerOk) {
   const { m, api, toasts, events } = banner
   const lines = m.findAll((n) => (n.props.class || '').split(' ').includes('hl-line'))
-  eq('§7 one line per hidden load, each naming it, who deleted it and when, with Review', lines.map((l) => m.text(l)), [
-    'Load LX-5101 is hidden by an earlier delete (deleted by admin_two on at 2026-10-01T12:00:00Z). Review',
-    'Load LX-5401 is hidden by an earlier delete (deleted by super_admin on at 2026-10-02T12:00:00Z). Review',
+  eq('§7 one line per hidden load, each naming it, its row, who deleted it and when, with Review', lines.map((l) => m.text(l)), [
+    'Load LX-5101, row 4, is hidden by an earlier delete (deleted by admin_two on at 2026-10-01T12:00:00Z). Review',
+    'Load LX-5401, row 9, is hidden by an earlier delete (deleted by super_admin on at 2026-10-02T12:00:00Z). Review',
   ])
   await press(m.find((n) => n.tag === 'button' && m.text(n) === 'Review', lines[1]))
   ok('§7 Review opens the shared choice for that load, with why it shows', /Load LX-5401 was deleted/.test(m.text()) && /Why it shows: the email workflow added this Load ID after the delete\./.test(m.text()))
   await pick(m.find((n) => n.tag === 'input' && n.props.value === 'restore'))
+  await typeInto(m.find((n) => n.tag === 'textarea'), 'The email workflow re-sent it (made-up)')
   await press(m.find((n) => n.tag === 'button' && n.props['data-role'] === 'confirm'))
-  eq('§7 ...Restore posts to that delete record', [api.posts.length, api.posts[0] && api.posts[0].url, api.posts[0] && api.posts[0].body], [1, '/api/admin/deleted-loads/7/restore', {}])
+  eq('§7 ...Restore posts to that delete record with the reason', [api.posts.length, api.posts[0] && api.posts[0].url, api.posts[0] && api.posts[0].body],
+    [1, '/api/admin/deleted-loads/7/restore', { reason: 'The email workflow re-sent it (made-up)' }])
   api.posts[0]?.resolve({ ok: true, mode: 'restore', restored: { id: 7, loadId: 'lx-5401', months: ['2026-10'] }, remaining: 0 })
   await drain()
   eq('§7 ...restored: a toast, the dialog closed, the dashboard asked to read again', [toasts, !!m.find((n) => n.tag === 'x-confirm'), events], [[['Load lx-5401 is restored.', 'success']], false, ['resolved']])
@@ -759,6 +855,7 @@ const SHEETS = read('client', 'src', 'stores', 'sheets.js')
 const NOTIFS = read('client', 'src', 'views', 'NotificationsView.vue')
 for (const [name, src] of [['the rate-con modal', RATECON], ['New Job', NEWJOB], ['the Data Manager', DATAMGR]]) {
   ok(`§8 ${name} asks through withDeletedLoadChoice(), with a Super Admin's ask only`, /withDeletedLoadChoice\(/.test(src) && /auth\.isSuperAdmin \? deletedChoice\.ask : null/.test(src))
+  ok(`§8 ${name} hands the reason typed in the choice on to the re-send`, /const onDeletedLoadCreateNew = \(reason\) => deletedChoice\.answer\(\{ action: 'create_new', reason \}\)/.test(src))
   eq(`§8 ${name} renders the choice for a Super Admin only`, (src.match(/<DeletedLoadChoiceModal\b[^>]*>/g) || []).map((t) => /v-if="auth\.isSuperAdmin"/.test(t)), [true])
 }
 ok('§8 the rate-con modal shows the server\'s words for a Load ID an old delete names, before its duplicate message',

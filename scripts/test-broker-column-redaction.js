@@ -884,7 +884,7 @@ function mountPostData(routeSrc, M, rows) {
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
 		// The deleted-load check (scripts/test-deleted-load-restore.js covers it): inert here.
-		deletedLoadRestore: { onCreate: () => null },
+		deletedLoadRestore: { onCreate: () => null, clearBeforeAppend: () => null },
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		getSheetName: () => "Job Tracking",

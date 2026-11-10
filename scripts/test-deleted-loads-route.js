@@ -36,7 +36,8 @@
  *       table (before or after the sheet read) or sheet: refused, nothing changed.
  *   §12 a second press is the 404 no-op; two presses at once restore once.
  *   §13 the one audit row (restore_load, or clear_load_delete for "Create it as
- *       new"); an audit write that fails leaves the delete in place.
+ *       new"); "Create it as new" refused while a row that may be the delete's
+ *       own is live; an audit write that fails leaves the delete in place.
  *   §14 restored, the load counts again (excludeDroppedLoads(), the live view)
  *       and leaves the deleted list.
  *
@@ -137,7 +138,7 @@ const RESTORE_PATH = "/api/admin/deleted-loads/:id/restore";
 
 // The pieces the restore route and the "is this load live?" check run on, lifted
 // beside the ones above.
-const MORE_FNS = ["lockedAmong", "periodLabel", "excludeDroppedLoads", "getDeletedLoadIds", "loadKeySet", "liveJobTrackingView"];
+const MORE_FNS = ["lockedAmong", "periodLabel", "excludeDroppedLoads", "getDeletedLoadIds", "loadKeySet", "liveJobTrackingView", "auditText", "scrubPurgeMarker"];
 const MORE_CONSTS = ["CANCELED_STATUS_RE"];
 const liftedMore = MORE_FNS.map((n) => [n, liftFn(n)]);
 const liftedMoreConsts = MORE_CONSTS.map((n) => [n, liftConst(n)]);
@@ -260,7 +261,7 @@ function helpersFor(db) {
 		...lifted.map(([, t]) => t),
 		...liftedMore.map(([, t]) => t),
 		"return { requireRole, periodLocksReadable, isLocked, jobTrackingMonthCols, loadRowPeriods, lockedAmong, periodLabel,",
-		"\tpickAddressColumn, excludeDroppedLoads, getDeletedLoadIds, loadKeySet, liveJobTrackingView, findCol };",
+		"\tpickAddressColumn, excludeDroppedLoads, getDeletedLoadIds, loadKeySet, liveJobTrackingView, findCol, auditText };",
 	].join("\n\n");
 	return new Function("db", "normalizeLoadId", "console", body)(db, normalizeLoadId, quiet);
 }
@@ -284,7 +285,7 @@ function restoreWorld({ db = makeDb(), jt = JT, enabled = true } = {}) {
 		if (v instanceof Error) throw v;
 		return v;
 	};
-	const inst = restoreLib.create({ db, enabled, log: quiet });
+	const inst = restoreLib.create({ db, enabled, log: quiet, auditText: H.auditText });
 	inst.mount(app, {
 		requireRole: H.requireRole,
 		refuseCrossSite: (req, res, next) => { rec.crossSite++; next(); },
@@ -329,12 +330,15 @@ const USERS = {
 const NOT_SUPER_ADMIN = ["Dispatcher", "Driver", "Investor", "KPI Viewer", "Admin", "Night Auditor", "super admin"];
 
 // One POST to the restore route, as Express would run its chain. `csrf: false`
-// leaves out X-Requested-With.
+// leaves out X-Requested-With. The body carries a made-up reason (the 10-22
+// Restore decision) unless it names its own.
+const REASON = "Deleted in error; the load ran (made-up)";
 async function callRestore(chain, user, { id, body = {}, csrf = true } = {}) {
 	const url = `/api/admin/deleted-loads/${id}/restore`;
+	const sent = Object.prototype.hasOwnProperty.call(body, "reason") ? body : { ...body, reason: REASON };
 	const req = {
 		method: "POST", path: url, url, originalUrl: url,
-		params: { id: String(id) }, query: {}, body, route: { path: RESTORE_PATH },
+		params: { id: String(id) }, query: {}, body: sent, route: { path: RESTORE_PATH },
 		headers: csrf ? { "x-requested-with": "XMLHttpRequest" } : {},
 		session: user ? { user: { ...user } } : {},
 	};
@@ -552,8 +556,8 @@ async function restoreSections() {
 	ok("lib/deleted-load-restore.js loads", !!restoreLib, restoreLibError);
 	if (!restoreLib) return;
 	const count = (needle) => SRC.split(needle).length - 1;
-	const DECL = '\nconst deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true" });\n';
-	eq("one instance, on only when the setting is exactly \"true\"", count(DECL), 1);
+	const DECL = '\nconst deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true", auditText });\n';
+	eq("one instance, on only when the setting is exactly \"true\", cleaning reasons the audit trail's way", count(DECL), 1);
 	eq("its column is added once, at start", count('\nrequire("./lib/deleted-load-restore").ensureSchema(db);\n'), 1);
 	const MOUNT = "\ndeletedLoadRestore.mount(app, {\n";
 	eq("mounted once", count(MOUNT), 1);
@@ -572,6 +576,7 @@ async function restoreSections() {
 		ROUTE.includes("res.json({ loads, count: loads.length, ...deletedLoadRestore.listFields() });"));
 	const typesLine = (SRC.match(/\nconst SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\[[^\]\n]*\]\);/) || [""])[0];
 	ok("the notice type is a Super Admin-only dispatch notice", typesLine.includes(`"${restoreLib.NOTICE_TYPE}"`) && restoreLib.NOTICE_TYPE === "load-hidden-by-delete", typesLine);
+	ok("...and so is the restore's notice", typesLine.includes(`"${restoreLib.RESTORED_NOTICE_TYPE}"`) && restoreLib.RESTORED_NOTICE_TYPE === "deleted-load-restored", typesLine);
 	const del = registration("delete", "/api/loads/:loadId") || "";
 	ok("the delete keeps its tombstone's id and records the rows it hides",
 		del.includes('const tombstone = db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);')
@@ -593,14 +598,18 @@ async function restoreSections() {
 		let threw = "";
 		let answers = [];
 		try {
+			const sent = { session: { user: USERS["Super Admin"] }, body: { deletedLoadChoice: { action: "create_new", id: 1, count: 1 } } };
 			answers = [
-				offInst.onCreate({ session: { user: USERS["Super Admin"] }, body: { deletedLoadChoice: { action: "create_new", id: 1 } } }, { loadId: "LX-1002", rowIndex: null }),
+				offInst.onCreate(sent, { loadId: "LX-1002", rowIndex: null }),
+				offInst.onCreate({ session: { user: USERS["Super Admin"] }, body: {} }, { loadId: "LX-1002", rowIndex: null, headerRead: false }),
+				offInst.clearBeforeAppend(sent),
 				offInst.onCreate({ session: { user: USERS.Dispatcher }, body: {} }, { loadId: "LX-1002", rowIndex: 3 }),
 				offInst.hiddenLoads({ session: { user: USERS["Super Admin"] } }, JT),
 				offInst.recordDigests(1, JT, "lx-1002"),
 			];
 		} catch (e) { threw = e.message; }
-		eq("onCreate, hiddenLoads and recordDigests answer nothing and touch no database", [threw, answers], ["", [null, null, null, undefined]]);
+		eq("onCreate (an unread header row too), clearBeforeAppend, hiddenLoads and recordDigests answer nothing and touch no database",
+			[threw, answers], ["", [null, null, null, null, null, undefined]]);
 		eq("listFields() adds nothing", offInst.listFields(), {});
 	}
 
@@ -709,15 +718,26 @@ async function restoreSections() {
 		const a = rows[0] || {};
 		eq("the acting Super Admin, the action, the load", [a.user_id, a.username, a.role, a.action, a.entity, a.entity_id], [1, "super_admin", "Super Admin", "restore_load", "load", "lx-1002"]);
 		ok("its time is an ISO instant", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(a.timestamp || ""), a.timestamp);
-		ok("its details name the delete record, when and by whom, and the month",
-			[`deleted_loads row ${id}`, "2026-10-20T12:00:00Z", "by admin_two", "settlement month 2026-10"].every((s) => (a.details || "").includes(s)), a.details);
+		ok("its details name the delete record, when and by whom, the month and the reason",
+			[`deleted_loads row ${id}`, "2026-10-20T12:00:00Z", "by admin_two", "settlement month 2026-10", `Reason: ${REASON}`].every((s) => (a.details || "").includes(s)), a.details);
 		eq("announced once, the cache dropped once", [w.rec.changes, w.rec.invalidations], [["dashboard"], 1]);
+		eq("one Super Admin notice, naming the load, who restored it and the reason", w.rec.notices.map((n) => [n.type, n.title, n.body]),
+			[["deleted-load-restored", "Load lx-1002 was restored", `Restored by super_admin. Reason: ${REASON}`]]);
 
+		// "Create it as new" through the same route, for a delete made when no row held the ID (LX-2000 is live at row 9).
+		const fresh = w.db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_at, deleted_by) VALUES ('lx-2000', 0, '2026-10-23 10:00:00', 'admin_two')").run().lastInsertRowid;
+		const asNew = await callRestore(w.chain, SA, { id: fresh, body: { mode: "create_new" } });
+		const clear = w.db.prepare("SELECT * FROM audit_trail WHERE entity_id = 'lx-2000' ORDER BY id").all();
+		eq("\"Create it as new\" through the same route: one clear_load_delete row with the reason, the delete gone, one more notice",
+			[asNew.status, asNew.body && asNew.body.mode, clear.map((x) => x.action), (clear[0] && clear[0].details || "").endsWith(`Reason: ${REASON}`), tombstoneId(w.db, "lx-2000"), w.rec.notices.length],
+			[200, "create_new", ["clear_load_delete"], true, undefined, 2]);
+		// LX-1005's delete was made over its row 4 and recorded no rows or month, so that row may be its own (M3).
 		const id5 = tombstoneId(w.db, "lx-1005");
-		const asNew = await callRestore(w.chain, SA, { id: id5, body: { mode: "create_new" } });
-		const clear = w.db.prepare("SELECT * FROM audit_trail WHERE entity_id = 'lx-1005' ORDER BY id").all();
-		eq("\"Create it as new\" through the same route: one clear_load_delete row, the delete gone",
-			[asNew.status, asNew.body && asNew.body.mode, clear.map((x) => x.action), tombstoneId(w.db, "lx-1005")], [200, "create_new", ["clear_load_delete"], undefined]);
+		const before5 = fingerprint(w.db);
+		const own = await callRestore(w.chain, SA, { id: id5, body: { mode: "create_new" } });
+		eq("...refused 409 DELETED_ROWS_PRESENT while a row that may be the delete's own is live, naming it; nothing changed",
+			[own.status, own.body && own.body.code, own.body && own.body.rows, own.body && own.body.error, fingerprint(w.db) === before5],
+			[409, "DELETED_ROWS_PRESENT", [4], "Row 4 may be load lx-1005's row from before its delete, so creating it as new could bring that row back too. Restore the deleted load instead, or remove that row first. Nothing was changed.", true]);
 
 		const db = makeDb();
 		const failing = restoreWorld({ db });

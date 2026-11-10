@@ -3026,7 +3026,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		ok(/SELECT load_id, truck_id, pickup_depart_ms/.test(routesCode), "it reads which truck a stored departure names, only to keep a credit as live");
 		// Nothing that pays reads the kept rows.
 		const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js"));
-		eq(libFiles.filter((f) => /everyJobTrackingRow/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))).sort(), ["driver-performance-routes.js", "job-tracking-every-row.js"], "only this feature's routes read the kept rows");
+		eq(libFiles.filter((f) => /everyJobTrackingRow/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))).sort(), ["deleted-load-restore.js", "driver-performance-routes.js", "job-tracking-every-row.js"], "only this feature's routes and the deleted-load restore (its month check and row match) read the kept rows");
 		eq(libFiles.filter((f) => /driver-pickup-proof/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))), ["driver-performance-routes.js"], "and only they read the proof");
 		const { STATEMENT_TEMPLATE_FILES } = require(path.join(ROOT, "lib", "statement-template-hash.js"));
 		eq(STATEMENT_TEMPLATE_FILES.filter((f) => /job-tracking-every-row|driver-pickup-proof/.test(f)), [], "no stored statement's template holds either new file");
