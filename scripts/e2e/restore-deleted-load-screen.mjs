@@ -2,6 +2,7 @@
 // LogisX — restoring a deleted load (DELETED_LOAD_RESTORE_ENABLED), on made-up data only, at 390 x 844 and 1280 x 800:
 //   RL1 the Deleted loads list with Restore     RL2 the in-app confirm         RL3 a closed month refused in the server's words
 //   RL4 New Job's choice for a Load ID an old delete names                     RL5 the dashboard banner     RL6 its Review
+//   (each dialog with its reason box, filled with a made-up reason)
 //   RLx no page errors, and at 390 no sideways scroll on any step
 // Like driver-fuel-screen.mjs: no server.js, database, settings file, key or sign-in. The checkout's built client/dist is served
 // from 127.0.0.1 (--port, default 3188; 3000, 5173 and 3901 refused), every /api request is answered in the browser with made-up
@@ -55,12 +56,16 @@ const NEW_LOAD = 'QA-7101'
 const CHOICE = {
   error: `Load ${NEW_LOAD} was deleted on 2026-10-01 by qa-admin-two. Restore the deleted load, or create it as new.`,
   code: 'LOAD_ID_DELETED', loadId: NEW_LOAD, tombstoneId: 9, deletedBy: 'qa-admin-two', deletedAt: '2026-10-01T16:00:00Z',
-  sheetRow: null, canRestore: false, canCreateNew: true, deleteCount: 1,
+  sheetRow: null, canRestore: false, canCreateNew: true, deleteCount: 1, months: [], monthsFrom: 'none',
 }
 const HIDDEN = [
-  { tombstoneId: 12, loadId: 'QA-5401', deletedBy: 'qa-admin-two', deletedAt: '2026-10-02T15:00:00Z', sheetRow: 9, evidence: ['created_by_n8n'] },
-  { tombstoneId: 11, loadId: 'QA-5101', deletedBy: 'qa-super-admin', deletedAt: '2026-10-01T14:00:00Z', sheetRow: 4, evidence: ['deleted_with_no_row', 'row_changed'] },
+  { tombstoneId: 12, loadId: 'QA-5401', deletedBy: 'qa-admin-two', deletedAt: '2026-10-02T15:00:00Z', sheetRow: 9, rows: [9], newRows: [9], ownRows: [],
+    canRestore: true, canCreateNew: true, months: [{ month: '2026-10', closed: false }], evidence: ['created_by_n8n'] },
+  { tombstoneId: 11, loadId: 'QA-5101', deletedBy: 'qa-super-admin', deletedAt: '2026-10-01T14:00:00Z', sheetRow: 4, rows: [4], newRows: [4], ownRows: [],
+    canRestore: true, canCreateNew: true, months: [{ month: '2026-10', closed: false }], evidence: ['deleted_with_no_row'] },
 ]
+// The reason every restore and "Create it as new" now needs (made up).
+const REASON = 'Deleted by mistake; the broker confirmed the load (QA)'
 const DASHBOARD = {
   timestamp: '2026-11-10T15:00:00.000Z',
   hiddenLoads: HIDDEN,
@@ -157,14 +162,20 @@ async function deletedLoads(browser, viewport, tag) {
 
     await restoreOf('qa-1002').first().click()
     await page.locator('.confirm-dialog').waitFor({ state: 'visible', timeout: 10000 })
+    const restoreButton = page.locator('.confirm-dialog .confirm-actions button', { hasText: 'Restore' })
+    const offEmpty = await restoreButton.isDisabled()
+    await page.locator('.confirm-dialog textarea').fill(REASON)
+    const onFilled = !(await restoreButton.isDisabled())
     const c = await dialogText(page)
-    record(`RL2${tag}`, 'the in-app confirm names the load, who deleted it and when, and its month', c.slice(0, 220),
-      c.includes('Restore load qa-1002?') && c.includes('by qa-admin-two') && c.includes('October 2026: open'), await shot(page, `rl2-confirm-${viewport.width}`))
+    record(`RL2${tag}`, 'the in-app confirm names the load, who deleted it and when, and its month; Restore off until a reason is typed',
+      `${c.slice(0, 220)} | off while empty ${offEmpty}, on once filled ${onFilled}`,
+      c.includes('Restore load qa-1002?') && c.includes('by qa-admin-two') && c.includes('October 2026: open') && offEmpty && onFilled, await shot(page, `rl2-confirm-${viewport.width}`))
     await page.locator('.confirm-dialog button', { hasText: 'Cancel' }).click()
     await page.locator('.confirm-dialog').waitFor({ state: 'hidden', timeout: 10000 })
 
     await restoreOf('qa-1001').first().click()
     await page.locator('.confirm-dialog').waitFor({ state: 'visible', timeout: 10000 })
+    await page.locator('.confirm-dialog textarea').fill(REASON)
     await page.locator('.confirm-dialog .confirm-actions button', { hasText: 'Restore' }).click()
     await page.locator('.confirm-dialog [role="alert"]').waitFor({ state: 'visible', timeout: 10000 })
     const words = (await page.locator('.confirm-dialog [role="alert"]').innerText()).trim()
@@ -184,12 +195,16 @@ async function newJob(browser, viewport, tag) {
     // By its exact name: the rate-con drop zone's button also carries the words "Create Job".
     await page.getByRole('button', { name: 'Create Job', exact: true }).click()
     await page.locator('.confirm-dialog').waitFor({ state: 'visible', timeout: 10000 })
-    const c = await dialogText(page)
     const restoreOff = await page.locator('.confirm-dialog input[value="restore"]').isDisabled()
     const createPicked = await page.locator('.confirm-dialog input[value="create_new"]').isChecked()
-    record(`RL4${tag}`, 'New Job: the choice names who deleted the load and when; Restore off with its reason, Create it as new picked',
-      `${c.slice(0, 200)} | restore off ${restoreOff}, create picked ${createPicked}`,
-      c.includes(`Load ${NEW_LOAD} was deleted`) && c.includes('by qa-admin-two') && c.includes("Its Job Tracking row is gone, so there's nothing to restore.") && restoreOff && createPicked,
+    const createButton = page.locator('.confirm-dialog .confirm-actions button', { hasText: 'Create it as new' })
+    const offEmpty = await createButton.isDisabled()
+    await page.locator('.confirm-dialog textarea').fill(REASON)
+    const onFilled = !(await createButton.isDisabled())
+    const c = await dialogText(page)
+    record(`RL4${tag}`, 'New Job: the choice names who deleted the load and when; Restore off with its reason, Create it as new picked and on once a reason is typed',
+      `${c.slice(0, 200)} | restore off ${restoreOff}, create picked ${createPicked}, off while empty ${offEmpty}, on once filled ${onFilled}`,
+      c.includes(`Load ${NEW_LOAD} was deleted`) && c.includes('by qa-admin-two') && c.includes("Its Job Tracking row is gone, so there's nothing to restore.") && restoreOff && createPicked && offEmpty && onFilled,
       await shot(page, `rl4-create-choice-${viewport.width}`))
   } finally {
     await ctx.close()
@@ -202,14 +217,17 @@ async function dashboard(browser, viewport, tag) {
     await page.locator('.hidden-loads').waitFor({ state: 'visible', timeout: 30000 })
     const lines = (await page.locator('.hidden-loads .hl-text').allInnerTexts()).map((t) => t.trim())
     const wide = await sideways(page)
-    record(`RL5${tag}`, 'the dashboard banner names each hidden load, who deleted it and when', `${lines.join(' | ')}; sideways ${wide} px`,
-      lines.length === 2 && lines[0].startsWith('Load QA-5401 is hidden by an earlier delete (deleted by qa-admin-two on') && wide <= 0, await shot(page, `rl5-banner-${viewport.width}`))
+    record(`RL5${tag}`, 'the dashboard banner names each hidden load, its row, who deleted it and when', `${lines.join(' | ')}; sideways ${wide} px`,
+      lines.length === 2 && lines[0].startsWith('Load QA-5401, row 9, is hidden by an earlier delete (deleted by qa-admin-two on') && wide <= 0, await shot(page, `rl5-banner-${viewport.width}`))
     await page.locator('.hidden-loads .hl-review').first().click()
     await page.locator('.confirm-dialog').waitFor({ state: 'visible', timeout: 10000 })
-    const c = await dialogText(page)
     const both = !(await page.locator('.confirm-dialog input[value="restore"]').isDisabled()) && !(await page.locator('.confirm-dialog input[value="create_new"]').isDisabled())
-    record(`RL6${tag}`, 'Review opens the shared choice, both choices on, with why it shows', `${c.slice(0, 220)} | both on ${both}`,
-      c.includes('Load QA-5401 was deleted') && c.includes('Why it shows: the email workflow added this Load ID after the delete.') && both,
+    await page.locator('.confirm-dialog input[value="restore"]').check()
+    await page.locator('.confirm-dialog textarea').fill(REASON)
+    const c = await dialogText(page)
+    record(`RL6${tag}`, 'Review opens the shared choice, both choices on, with why it shows, its row, its month and the reason box', `${c.slice(0, 260)} | both on ${both}`,
+      c.includes('Load QA-5401 was deleted') && c.includes('Why it shows: the email workflow added this Load ID after the delete.') && c.includes('Row 9 has this Load ID')
+        && c.includes('October 2026: open') && c.includes('row 9 counts as a new load') && both,
       await shot(page, `rl6-review-${viewport.width}`))
   } finally {
     await ctx.close()
