@@ -74,6 +74,13 @@
 //   signers, none of it email- or SSN-shaped. Section 18 grades the scrub on the
 //   artifact (blank stays blank), --verify on planted survivors, and mutants P1-P4.
 //
+// WHY IT GREW A SAFETY-EVENT HALF
+//
+//   The office's safety-event log (safety_events) names a driver's accident or
+//   violation in free text, and its audit rows repeat those words. Neither is
+//   email- or SSN-shaped. Section 19 grades the wipe and the audit scrub on the
+//   artifact, --verify on planted survivors, and mutants S1-S6.
+//
 // ⚠️ WHAT MAKES THIS TEST NON-VACUOUS, and what would quietly make it vacuous.
 //
 //   • collectLeaks() guards EVERY entry with has_(table, column). A column the
@@ -194,6 +201,15 @@ const FAKE = {
 	contactNameB: "Morgan Contactsample",
 	contactPhoneA: "+15125550161",
 	contactPhoneB: "+15125550162",
+};
+// The office's safety-event log (section 19): a made-up accident's words, in its rows and in
+// its audit rows. None is email- or SSN-shaped, so only the wipe and the audit scrub reach them.
+const SAFE = {
+	details: "Sample Quillmere yard collision with a passerby",
+	editedDetails: "Sample Brackenmoor gate contact, text corrected",
+	reason: "Sample report from the Quillmere police",
+	editReason: "Sample correction after the Brackenmoor call",
+	voidReason: "Sample wrong driver, entered in error",
 };
 // A passenger authorization (section 18): a minor's, countersigned and then ended.
 // None is email- or SSN-shaped, so only the column lists reach them.
@@ -403,6 +419,8 @@ const MUST_NOT_SURVIVE = [
 	PAX.rider, PAX.rider2, PAX.guardian, PAX.relationship, PAX.tripStart, PAX.tripEnd, PAX.company, PAX.reason,
 	PAX.imgPassenger, PAX.imgDriver, PAX.imgCompany, PAX.consentPassenger, PAX.consentDriver, PAX.consentCompany,
 	PAX.ipDriver, PAX.ipCompany, PAX.uaDriver, PAX.uaCompany,
+	// The safety-event log and its audit rows (section 19).
+	SAFE.details, SAFE.editedDetails, SAFE.reason, SAFE.editReason, SAFE.voidReason,
 ];
 
 // The two evidence columns refresh-env.js deliberately KEEPS. Asserted so that
@@ -495,6 +513,9 @@ function seedDatabase(dbPath) {
 		CREATE TABLE owner_operator_ledger_exits (id INTEGER PRIMARY KEY, oo_id INTEGER NOT NULL, item_kind TEXT NOT NULL, ref TEXT NOT NULL, reason TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TEXT NOT NULL);
 		CREATE TABLE passenger_authorizations (id INTEGER PRIMARY KEY AUTOINCREMENT, reference TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL UNIQUE, driver_user_id INTEGER NOT NULL, driver_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'awaiting_company', form_version TEXT NOT NULL, passenger_name TEXT NOT NULL, passenger_adult INTEGER NOT NULL, guardian_name TEXT NOT NULL DEFAULT '', guardian_relationship TEXT NOT NULL DEFAULT '', minor_attested INTEGER NOT NULL DEFAULT 0, truck_unit TEXT NOT NULL DEFAULT '', trip_start TEXT NOT NULL, trip_end TEXT NOT NULL, valid_from TEXT NOT NULL, expires_on TEXT NOT NULL, passenger_signature_text TEXT NOT NULL, passenger_signature_image TEXT NOT NULL, passenger_consent_text TEXT NOT NULL DEFAULT '', driver_signature_text TEXT NOT NULL, driver_signature_image TEXT NOT NULL, driver_consent_text TEXT NOT NULL DEFAULT '', driver_signed_at TEXT NOT NULL, driver_signed_on TEXT NOT NULL, driver_signed_ip TEXT NOT NULL DEFAULT '', driver_signed_ip_source TEXT NOT NULL DEFAULT '', driver_signed_user_agent TEXT NOT NULL DEFAULT '', driver_pdf_file TEXT NOT NULL, driver_pdf_sha256 TEXT NOT NULL, driver_pdf_bytes INTEGER NOT NULL, company_user_id INTEGER, company_account TEXT NOT NULL DEFAULT '', company_printed_name TEXT NOT NULL DEFAULT '', company_title TEXT NOT NULL DEFAULT '', company_signature_image TEXT NOT NULL DEFAULT '', company_consent_text TEXT NOT NULL DEFAULT '', company_signed_at TEXT NOT NULL DEFAULT '', company_signed_on TEXT NOT NULL DEFAULT '', company_signed_ip TEXT NOT NULL DEFAULT '', company_signed_ip_source TEXT NOT NULL DEFAULT '', company_signed_user_agent TEXT NOT NULL DEFAULT '', final_pdf_file TEXT NOT NULL DEFAULT '', final_pdf_sha256 TEXT NOT NULL DEFAULT '', final_pdf_bytes INTEGER NOT NULL DEFAULT 0, decided_reason TEXT NOT NULL DEFAULT '', decided_by TEXT NOT NULL DEFAULT '', decided_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 	`);
+
+	// The module's own table, so the fixture can't drift from what it creates (section 19).
+	db.exec(require(path.join(__dirname, "..", "lib", "safety-event-log.js")).SCHEMA_SQL);
 
 	// super_admin starts with a forced password change pending: operator access
 	// must clear it, or the operator's first sign-in is refused (section 14).
@@ -609,6 +630,17 @@ function seedDatabase(dbPath) {
 	aud.run(3, "update_sheet_row_blocked", ORIG.jsonRow, "2026-08-02");
 	aud.run(4, "note", ORIG.ssnRow, "2026-08-03");
 	aud.run(5, "note", ORIG.caseRow, "2026-08-04");
+	// Two made-up events and the audit rows their writes leave (section 19). The refusal row
+	// holds no caller text. It carries no [PERIOD_ marker only because sections 5-6 count
+	// exactly two of those; the scrub goes by action, so a marker wouldn't change its fate.
+	const se = db.prepare(`INSERT INTO safety_events (id, directory_id, name_when_recorded, event_date, kind, details, record_reason, created_by, created_by_user_id, created_at, update_reason, void_reason)
+		VALUES (?, 1, 'Sam Driver', '2026-10-14', 'accident', ?, ?, 'admin', 1, '2026-10-15T12:00:00.000Z', ?, ?)`);
+	se.run(1, SAFE.editedDetails, SAFE.reason, SAFE.editReason, null);
+	se.run(2, SAFE.details, SAFE.reason, null, SAFE.voidReason);
+	aud.run(901, "safety_event_create", `Sam Driver (driver #1): accident on 2026-10-14. Reason: ${SAFE.reason}`, "2026-10-15");
+	aud.run(902, "safety_event_edit", `details ${JSON.stringify(SAFE.details)} -> ${JSON.stringify(SAFE.editedDetails)}. Reason: ${SAFE.editReason}`, "2026-10-16");
+	aud.run(903, "safety_event_void", `Sam Driver (driver #1): accident on 2026-10-14 voided. Reason: ${SAFE.voidReason}`, "2026-10-17");
+	aud.run(904, "safety_event_write_blocked", "Void safety event #2, sample refusal", "2026-10-18");
 	// ⚠️ The NUL row. Its payload sits AFTER an embedded NUL, so SQLite's LIKE
 	// and GLOB cannot see it while JavaScript can. Until the prefilter grew its
 	// blob-length clause this row was unreachable by the scrub and fully visible
@@ -2372,6 +2404,69 @@ function extractFn(src, name) {
 		paMutant("P5", "the company-signature assertion dropped",
 			"\t[\"passenger_authorizations\", \"company_signature_image\", \"passenger authorization company signature image\"],\n", "",
 			"verify", IMAGE_RE);
+
+		// =======================================================================
+		section("19. The safety-event log — its rows and the words in its audit rows never leave");
+		let left = null;
+		let auditRows = [];
+		{
+			const db = openDb(artifactDb);
+			try {
+				left = db.prepare("SELECT COUNT(*) c FROM safety_events").get().c;
+				auditRows = db.prepare("SELECT id, action, details, created_at FROM audit_trail WHERE id BETWEEN 901 AND 904 ORDER BY id").all();
+			} catch { /* no table: the checks below fail by name */ }
+			finally { db.close(); }
+		}
+		check("the table is still there, and empty", left === 0, `${left} row(s)`);
+		const written = auditRows.filter((r) => r.action !== "safety_event_write_blocked");
+		check("each write's audit row is kept, with its action and date",
+			JSON.stringify(written.map((r) => [r.id, r.action, r.created_at])) === JSON.stringify([[901, "safety_event_create", "2026-10-15"], [902, "safety_event_edit", "2026-10-16"], [903, "safety_event_void", "2026-10-17"]]),
+			JSON.stringify(written.map((r) => [r.id, r.action, r.created_at])));
+		check("...and its words read REDACTED", written.length === 3 && written.every((r) => r.details === "REDACTED"), JSON.stringify(written.map((r) => r.id)));
+		const refusalRow = auditRows.find((r) => r.id === 904);
+		check("a refusal row, which holds no caller text, is left as it was", !!refusalRow && refusalRow.details === "Void safety event #2, sample refusal", refusalRow ? refusalRow.details : "no row");
+
+		// Every action the module writes has to be on the scrub's list, or its words walk through.
+		const moduleSrc = fs.readFileSync(path.join(__dirname, "..", "lib", "safety-event-log.js"), "utf8");
+		const moduleActions = [...new Set([...moduleSrc.matchAll(/auditOrThrow\(req, "(\w+)"/g)].map((m) => m[1]))].sort();
+		const listed = (fs.readFileSync(SCRIPT, "utf8").match(/const SAFETY_EVENT_AUDIT_ACTIONS = \[([^\]]*)\]/) || ["", ""])[1].match(/\w+/g) || [];
+		check("the scrub's action list is every action the module writes", moduleActions.length === 3 && JSON.stringify([...listed].sort()) === JSON.stringify(moduleActions),
+			`module ${JSON.stringify(moduleActions)}, list ${JSON.stringify(listed)}`);
+
+		// Planted beside section 18's survivors: the mutant helper verifies that one file.
+		{
+			const pdb = new Database(planted);
+			try {
+				pdb.prepare(`INSERT INTO safety_events (id, directory_id, name_when_recorded, event_date, kind, record_reason, created_by, created_by_user_id, created_at)
+					VALUES (7, 1, 'Sam Driver', '2026-10-14', 'accident', 'Planted reason', 'admin', 1, '2026-10-15T12:00:00.000Z')`).run();
+				pdb.prepare("UPDATE audit_trail SET details = 'Planted audit words' WHERE id IN (901, 902, 903)").run();
+			} catch { /* no table: the checks below fail by name */ }
+			finally { pdb.close(); }
+		}
+		const ROW_RE = /1 safety-event row\(s\) survived/;
+		const AUDIT_RE = /3 safety-event audit detail\(s\) survived un-replaced in audit_trail\.details/;
+		const sv = run(["--verify", planted]);
+		check("--verify refuses a planted row and planted audit words, naming each", sv.code === 1 && ROW_RE.test(sv.out) && AUDIT_RE.test(sv.out),
+			sv.code === 1 ? [ROW_RE, AUDIT_RE].map((re) => re.test(sv.out)).join(",") : `exit ${sv.code}`);
+
+		paMutant("S1", "the table's wipe dropped",
+			"const n = db.prepare(\"DELETE FROM safety_events\").run().changes;", "const n = 0;",
+			"sanitize", /safety-event row\(s\) survived/);
+		paMutant("S2", "the audit scrub dropped",
+			"secrets += setCols(\"audit_trail\", { details: \"REDACTED\" }, SAFETY_EVENT_AUDIT_WHERE);", "secrets += 0;",
+			"sanitize", /safety-event audit detail\(s\) survived un-replaced in audit_trail\.details/);
+		paMutant("S3", "the table's assertion dropped",
+			"\t[\"safety_events\", \"safety-event row(s) survived\"],\n", "",
+			"verify", ROW_RE);
+		paMutant("S4", "the audit assertion dropped",
+			"if (n) leaks.push(`${n} safety-event audit detail(s) survived un-replaced in audit_trail.details`);", "",
+			"verify", AUDIT_RE);
+		paMutant("S5", "the action list narrowed to the create",
+			"const SAFETY_EVENT_AUDIT_ACTIONS = [\"safety_event_create\", \"safety_event_edit\", \"safety_event_void\"];", "const SAFETY_EVENT_AUDIT_ACTIONS = [\"safety_event_create\"];",
+			"artifact", (db) => db.prepare("SELECT details FROM audit_trail WHERE id = 903").get().details !== "REDACTED");
+		paMutant("S6", "the audit scrub reaches every audit row",
+			"secrets += setCols(\"audit_trail\", { details: \"REDACTED\" }, SAFETY_EVENT_AUDIT_WHERE);", "secrets += setCols(\"audit_trail\", { details: \"REDACTED\" });",
+			"artifact", (db) => db.prepare("SELECT details FROM audit_trail WHERE id = 904").get().details === "REDACTED");
 	}
 
 	// =======================================================================

@@ -74162,6 +74162,13 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
 });
 
+// The office's safety-event log, off unless exactly "true": off, no table and every route 404
+// FEATURE_OFF. Super Admin writes, Dispatcher reads; nothing reads it yet (lib/safety-event-log.js).
+const safetyEventLog = require("./lib/safety-event-log").mount(app, {
+	enabled: process.env.SAFETY_EVENT_LOG_ENABLED === "true",
+	requireRole, db, logAudit, logAuditRefusal, auditText, periodWriteLocked, periodLocksReadable, appTodayKey,
+});
+
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments
 // active at each point's timestamp.
