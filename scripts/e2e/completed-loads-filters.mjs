@@ -330,7 +330,7 @@ async function emptyRun(browser, size) {
 
 function writeResults() {
   const file = path.join(SHOTS, `results-${PHASE}.md`)
-  const cell = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ')
+  const cell = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\n/g, ' ')
   const lines = [
     `# Completed Loads filters, ${PHASE}`, '',
     `Build: ${DIST}. Made-up data only. ${new Date().toISOString()}`, '',
