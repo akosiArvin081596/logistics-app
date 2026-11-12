@@ -203,7 +203,7 @@ deep(R.extractLoadNumbersFromBody("LOAD ID 666666666"), ["666666666"], "3.4 LOAD
 deep(R.extractLoadNumbersFromBody("Booked Load #: 343434343"), ["343434343"], "3.5 Booked Load #: <id>");
 
 // ⚠️ Every one of these is a false-positive shape of a wider anchor set.
-deep(R.extractLoadNumbersFromBody("BROKER ID: ABC-123456 REFERENCE ID: 1234567890 PAYOUT"), [],
+deep(R.extractLoadNumbersFromBody("BROKER ID: ABC-234567 REFERENCE ID: 1234567890 PAYOUT"), [],
 	"3.6 REFERENCE ID is not a load (0 of 4 correct, measured)");
 deep(R.extractLoadNumbersFromBody("PAT SAMPLE, 12345678901234 BOL #: 12345678"), [],
 	"3.7 BOL # is not a load (0 of 1)");
