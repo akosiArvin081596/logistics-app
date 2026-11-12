@@ -372,12 +372,13 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 			const c = w.claim();
 			eq([say(c), c.stage, c.via], ["submitted", "recorded", "triumph"], "§5 submitted: the claim recorded, via 'triumph'");
 			eq(fake.ops.filter((o) => o.op === "OPEN").map((o) => path.posix.basename(o.path)), ["11122026-1.pdf", c.csv_name], "§5 the PDF first, then the CSV, in the submissions folder");
-			ok(fake.files.get(`${SUBMIT}/${c.csv_name}`).toString().startsWith("DTR_NAME,INVOICE#,INV_DATE,PO,INVAMT\r\nExample Broker LLC,11122026-1,11/12/2026,LD-TEST-0001,2150.00\r\n"), "§5 the CSV, byte for byte");
+			ok(String(fake.files.get(`${SUBMIT}/${c.csv_name}`) || "").startsWith("DTR_NAME,INVOICE#,INV_DATE,PO,INVAMT\r\nExample Broker LLC,11122026-1,11/12/2026,LD-TEST-0001,2150.00\r\n"), "§5 the CSV, byte for byte");
 			eq(w.drafts(), [{ load_id: LOAD, invoice_id: "11122026-1", via: "triumph" }], "§5 one draft row via 'triumph', so every reader treats the load as invoiced");
-			eq([w.recordOpts.via, w.recordOpts.auditTarget], ["triumph", "Triumph"], "§5 ...the engine's own record(), its audit line naming Triumph");
+			const opts = w.recordOpts || {};
+			eq([opts.via, opts.auditTarget], ["triumph", "Triumph"], "§5 ...the engine's own record(), its audit line naming Triumph");
 			eq([w.marker().locked_via, Boolean(w.marker().locked_at)], ["upload", true], "§5 the marker locked by the upload, for good");
 			eq(w.actions().filter((a) => a.startsWith("triumph_")), ["triumph_submitted"], "§5 audited as triumph_submitted by the system actor");
-			eq(w.audits.find((a) => a.action === "triumph_submitted").who, "triumph", "§5 ...whose name is triumph");
+			eq((w.audits.find((a) => a.action === "triumph_submitted") || {}).who, "triumph", "§5 ...whose name is triumph");
 			ok(!fake.writeOps().some((o) => ["REMOVE", "RENAME", "MKDIR", "RMDIR", "SETSTAT", "FSETSTAT"].includes(o.op)), "§5 nothing on Triumph's side was removed, renamed or changed");
 
 		} finally {
