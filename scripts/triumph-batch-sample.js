@@ -102,8 +102,11 @@ function linesFrom(args, env) {
 	return parsed.lines;
 }
 
-// One real load's parts, read from a replica's copies.
-async function buildLoadBatch(args, { lines, day, render, at }) {
+// One real load's parts, read from a replica's copies. A load with advance lines stops as the submit job
+// stops it (ADVANCE_LINES) unless the run's own settings switch both on (lib/triumph-rules.js
+// advanceLinesEnabled()); then its invoice prints them as the engine's automatic invoice does, with
+// that invoice's checks, and INVAMT is the balance due it prints.
+async function buildLoadBatch(args, { lines, day, render, at, env = {} }) {
 	const brokerInvoice = require("../lib/broker-invoice");
 	const autoRules = require("../lib/auto-invoice-rules");
 	const { readValues, liftSheetHelpers } = require("./auto-invoice-shadow-report");
@@ -119,8 +122,10 @@ async function buildLoadBatch(args, { lines, day, render, at }) {
 
 	const db = openReadOnly(path.resolve(args.db));
 	let docs;
+	let hasLines = false;
 	try {
 		docs = db.prepare("SELECT id, type, file_name, drive_url, uploaded_at FROM documents WHERE LOWER(TRIM(load_id)) IN (?, ?) AND deleted_at IS NULL").all(key, `#${key}`);
+		hasLines = require("../lib/auto-invoice-ledger").activeAdvanceLines(db, key) > 0;
 	} finally {
 		db.close();
 	}
@@ -150,10 +155,26 @@ async function buildLoadBatch(args, { lines, day, render, at }) {
 	const brokerEmail = cell(cols.emailCol);
 	const brokerContactName = cell(parsed.headers.find((h) => /broker.*(contact|name)/i.test(h)));
 	const fields = rateCon && rateCon.buffer && rateCon.buffer.length ? await brokerInvoice.extractRateConFields(rateCon.buffer, { brokerEmail }) : {};
-	const total = brokerInvoice.parseMoney(fields.totalRate) > 0 ? brokerInvoice.parseMoney(fields.totalRate) : brokerInvoice.parseMoney(cell(cols.paymentCol));
+	const rcTotal = brokerInvoice.parseMoney(fields.totalRate);
+	const total = rcTotal > 0 ? rcTotal : brokerInvoice.parseMoney(cell(cols.paymentCol));
 	if (!(total > 0)) return { ok: false, code: "INVOICE_TOTAL_UNKNOWN" };
-	const billedTotal = brokerInvoice.formatMoney(total);
 	const loadRef = cell(cols.loadIdCol).replace(/^#/, "").trim();
+	let summary = null;
+	if (hasLines) {
+		if (!triumphRules.advanceLinesEnabled(env)) return { ok: false, code: "ADVANCE_LINES" };
+		const linesDb = openReadOnly(path.resolve(args.db));
+		let resolved;
+		try {
+			resolved = brokerInvoice.invoiceLines.resolveInvoiceLines(linesDb, { loadId: loadRef, selection: null, derivedLineHaul: total, lineHaulSource: rcTotal > 0 ? "ratecon" : "sheet", typedTotal: null });
+		} finally {
+			linesDb.close();
+		}
+		if (!resolved.ok) return { ok: false, code: "ADVANCE_LINES_INVALID" };
+		const typed = autoRules.advanceLineTextRefusal(resolved.summary && resolved.summary.items);
+		if (typed) return { ok: false, code: typed };
+		summary = resolved.summary;
+	}
+	const billedTotal = summary ? brokerInvoice.invoiceLines.formatCents(summary.balanceCents) : brokerInvoice.formatMoney(total);
 	const po = brokerInvoice.isBisonLoad({ email: brokerEmail }) ? fields.orderNumber || loadRef : loadRef;
 	const invoiceDate = brokerInvoice.formatDate(day);
 	const invoicePdf = await render(triumphInvoice.withAssignment(brokerInvoice.buildInvoiceHtml({
@@ -164,7 +185,8 @@ async function buildLoadBatch(args, { lines, day, render, at }) {
 		orderNumber: po,
 		poNumber: fields.poNumber || "",
 		deliveryDate: brokerInvoice.formatDate(cell(cols.deliveryDateCol)),
-		total: billedTotal,
+		invoiceLines: summary,
+		total: brokerInvoice.formatMoney(total),
 	}), { lines: [...lines, triumphBatch.SAMPLE.stamp] }));
 	return triumphBatch.buildBatch({
 		invoicePdf,
@@ -201,7 +223,7 @@ async function run(argv, { render, env = process.env, now = () => new Date() } =
 	const at = now();
 	const day = appTime.dayInZone(at, appTime.appTimeZone());
 	const batch = args.load
-		? await buildLoadBatch(args, { lines, day, render, at })
+		? await buildLoadBatch(args, { lines, day, render, at, env })
 		: await triumphBatch.buildSampleBatch({ lines, day, render, at });
 	if (!batch.ok) throw new Refusal(`${batch.code}${batch.kinds ? ` (${batch.kinds.join(", ")})` : ""}${batch.kind ? ` (${batch.kind})` : ""}${batch.field ? ` (${batch.field})` : ""}${batch.error ? `: ${batch.error}` : ""}`);
 	writeBatch(path.resolve(args.out), batch);

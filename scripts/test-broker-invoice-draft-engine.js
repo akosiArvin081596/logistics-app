@@ -43,6 +43,9 @@
  *      ADVANCE_LINES_INVALID; rule 7 on everything it composes (F2): no deny list is
  *      DENY_LIST_UNSET, a deny-list value or the driver's name is PROTECTED_VALUE; an
  *      invoice with no line is the base's, byte for byte, whatever the switches say.
+ *  §11 the Triumph package (PR B1): a factored load's automatic invoice with that advance
+ *      prints Triumph's block, the advance and the balance due, and the batch built from
+ *      its render carries INVAMT 1650.00, the balance it prints.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -74,6 +77,10 @@ const engineModule = require(ENGINE);
 const { closure } = require(path.join(__dirname, "lib", "server-lift.js"));
 // The house redactor over a made-up deny list: the runners' carrier canary.
 const { createRedactor } = require(path.join(ROOT, "lib", "chr-events.js"));
+// §11: a page's text as a PDF, and the Triumph batch built from it.
+const { textPdf } = require(path.join(__dirname, "lib", "made-up-pdf.js"));
+const autoRulesLib = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
+const triumphBatch = require(path.join(ROOT, "lib", "triumph-batch.js"));
 const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
@@ -196,7 +203,8 @@ const ADMIN = { session: { user: { id: 1, username: "super_admin", role: "Super 
 // `sheet` and `ratecons` replace the fixtures for one world (a load that changed);
 // `log` is the console the engine writes to.
 // `denyHits`: the carrier deny list's check the engine is handed (none: the list is unset).
-function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET, assignmentFor, denyHits } = {}) {
+// `readable`: the renderer writes the page's text into a PDF the way Chromium writes text.
+function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET, assignmentFor, denyHits, readable = false } = {}) {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_SQL);
 	for (const a of DRAFTS_ALTERS) db.exec(a);
@@ -235,7 +243,7 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 			seen.renders++;
 			seen.pages.push(html);
 			if (rendererBusy) throw Object.assign(new Error("busy"), { code: "PDF_RENDERER_BUSY" });
-			return Buffer.from("%PDF-1.4 invoice");
+			return readable ? textPdf(autoRulesLib.htmlToText(html)) : Buffer.from("%PDF-1.4 invoice");
 		},
 		env,
 		console: log,
@@ -911,6 +919,44 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			g.engine.record(gp.ctx, gr, { via: "auto-smtp", actor: AUTO_ACTOR, invoiceId: NUMBER.invoiceId, mintedInvoiceId: NUMBER.invoiceId, editDiffs: [] });
 			eq([actions(g), g.db.prepare("SELECT total FROM load_invoice_drafts").get().total], [["invoice_draft_created"], "$1,500.00"], `§10 no line (${label}): one audit row and the total, as before`);
 		}
+	}
+
+	// ===================================================================== §11
+	// The Triumph package (PR B1): the same made-up load and advance, factored.
+	section("11. the Triumph package — a factored automatic invoice with an advance line");
+	{
+		const ID = "LD-TEST-0030";
+		const ON = Object.freeze({ BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" });
+		const NUMBER = { invoiceId: "11122026-5", invoiceDate: "11/12/2026" };
+		const DENY = createRedactor({ denyList: "99887766" }).hits;
+		const NOA = ["MADE-UP NOTICE LINE ONE", "MADE-UP NOTICE LINE TWO", "EXAMPLE FACTOR LLC", "PO DRAWER 000, NOWHERE, ZZ  00000-0000"];
+		const w = world({ env: ON, denyHits: DENY, assignmentFor: () => ({ lines: NOA }), readable: true });
+		brokerInvoice.invoiceLines.addLine(w.db, {
+			loadId: ID, values: { kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "", note: "" }, actor: "super_admin", closedMonths: [],
+		}, { audit: () => {} });
+		const p = await w.auto(ID);
+		eq([code(p), p.ok && p.ctx.billedTotal, p.ok && Boolean(p.ctx.assignment)], ["ok", "$1,650.00", true], "§11 FAILS ON THE OLD CODE: a factored load's automatic invoice with an advance line prepares, billing the balance due");
+		const r = p.ok ? await w.engine.render(p.ctx, NUMBER) : null;
+		const page = w.seen.pages[0] || "";
+		ok(NOA.every((l) => page.includes(`>${l}</div>`)) && !page.includes("Payment Method"), "§11 FAILS ON THE OLD CODE: its page carries Triumph's block in place of the bank block");
+		ok(page.includes('<div class="subtotal"><span>LESS ADVANCES</span><span class="amt">-$500.00</span></div>') && page.includes('<span class="lbl">Balance due*</span><span class="amt">$1,650.00</span>'),
+			"§11 FAILS ON THE OLD CODE: ...and the advance and the balance due");
+		const batch = r ? await triumphBatch.buildBatch({
+			invoicePdf: r.invoicePdf,
+			rateCon: { buffer: textPdf(`RATE CON (MADE UP) Load Number ${ID} Bill to Example Broker LLC Total $2,150.00`), source: "documents" },
+			rateConNumber: ID,
+			documents: [{ id: 1, type: "POD", uploaded_at: "2026-11-11 15:00:00", buffer: textPdf(`POD OF ${ID}`) }],
+			loadId: ID,
+			debtorName: "Example Broker LLC",
+			invoiceId: NUMBER.invoiceId,
+			invoiceDate: NUMBER.invoiceDate,
+			po: p.ctx.orderNumber,
+			billedTotal: r.total,
+			at: new Date("2026-11-12T15:04:05Z"),
+			denyHits: DENY,
+		}) : { ok: false };
+		eq([batch.ok, batch.row && batch.row.INVAMT], [true, "1650.00"], "§11 FAILS ON THE OLD CODE: the batch built from its render carries INVAMT 1650.00, the balance due it prints");
+		eq(batch.ok ? triumphBatch.unprintedFields(batch.pdf, batch.row) : null, [], "§11 ...which the merged PDF's text shows, with the invoice number, the date and the PO");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);

@@ -15,6 +15,10 @@
 //   §10 the free checks, in order, each with its code
 //   §11 no remit address in the code: the lines live in a setting
 //
+//   §13 advance lines (TRIUMPH_ADVANCE_LINES_ENABLED, PR B1): on only with the automatic
+//       invoice's own switch on too; the free checks leave a factored load's lines to the
+//       engine only on facts made with the switch, and stop it (ADVANCE_LINES) otherwise
+//
 // Made-up values only. Pure: no server, port, database or network.
 //   node scripts/test-triumph-rules.js      # exits 1 on any failure
 "use strict";
@@ -401,6 +405,33 @@ section("§11 no remit address in the code");
 	const parseSrc = fs.readFileSync(RULES_FILE, "utf8");
 	ok(!/TRIUMPH_NOA_LINES\s*(\|\||\?\?)/.test(parseSrc) && !/TRIUMPH_NOA_LINES\s*=\s*["'`]/.test(parseSrc), "§11 the setting has no default in code");
 	ok(!/require\("(fs|net|http|https|tls|child_process|better-sqlite3|googleapis|ssh2)"\)/.test(parseSrc), "§11 the rules stay pure: no file, network or database");
+}
+
+// ---------------------------------------------------------------- §13
+section("§13 advance lines (TRIUMPH_ADVANCE_LINES_ENABLED)");
+if (typeof rules.advanceLinesEnabled !== "function") {
+	failures.push("§13 FAILS ON THE OLD CODE: lib/triumph-rules.js has no advanceLinesEnabled()");
+} else {
+	const BOTH = { TRIUMPH_ADVANCE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" };
+	eq([{}, BOTH, { TRIUMPH_ADVANCE_LINES_ENABLED: "true" }, { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" }, { ...BOTH, TRIUMPH_ADVANCE_LINES_ENABLED: "TRUE" },
+		{ ...BOTH, TRIUMPH_ADVANCE_LINES_ENABLED: "1" }, { ...BOTH, AUTO_INVOICE_ADVANCE_LINES_ENABLED: "yes" }, { TRIUMPH_ADVANCE_LINES_ENABLED: " true ", AUTO_INVOICE_ADVANCE_LINES_ENABLED: " true " }]
+		.map((env) => rules.advanceLinesEnabled(env)),
+	[false, true, false, false, false, false, false, true], "§13 on only when it and the automatic invoice's own switch are each exactly \"true\" (R10: one engine path)");
+	eq([rules.advanceLinesEnabled(), rules.advanceLinesEnabled(null)], [false, false], "§13 ...off with no settings at all");
+}
+{
+	const cols = autoRules.jobColumns(["Load ID", "Status", "Email", "Delivery Date", "  Payment  "]);
+	const row = { "Load ID": "LD-TEST-0001", Status: "Delivered", Email: "ap@example-broker.test", "Delivery Date": "11/02/2026", "  Payment  ": "2150" };
+	const facts = (over = {}) => autoRules.loadFacts({ row, cols, records: { pods: [{ id: 1 }], rateCons: [{ id: 2 }], drafts: [], deleted: false },
+		confirmedDomains: ["example-broker.test"], closedMonths: [], activeAdvanceLines: 1, ...over });
+	const READY = { debtorName: "Example Broker LLC", hasLines: true };
+	const say = (f) => { const v = rules.freeVerdict(f, READY); return `${v.state}${v.code ? ` ${v.code}` : ""}`; };
+	const ON = { advanceLinesOn: true, advanceLines: ["1:50000"] };
+	eq(say(facts()), "needs_attention ADVANCE_LINES", "§13 a factored load with an advance line, facts made with the switch off: ADVANCE_LINES, as before");
+	eq(say(facts(ON)), "queued", "§13 FAILS ON THE OLD CODE: facts made with the switch on: queued, the engine's checks on the lines to come before any number");
+	eq(say(facts({ ...ON, row: { ...row, "Delivery Date": "" } })), "needs_attention NO_DELIVERY_DATE", "§13 ...the checks ahead of it still answer first");
+	eq(say({ ...facts(ON), pods: 0 }), "waiting WAITING_POD", "§13 FAILS ON THE OLD CODE: ...and the POD still waits after it");
+	eq(say(facts({ advanceLinesOn: "true" })), "needs_attention ADVANCE_LINES", "§13 ...only a real true lets it through");
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`);
