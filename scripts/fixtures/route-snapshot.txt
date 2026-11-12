@@ -9,6 +9,7 @@ GET /api/admin/cancelled-loads · requireRole("Super Admin")=anon@12b84c4b0134 �
 GET /api/admin/deleted-loads · requireRole("Super Admin")=anon@12b84c4b0134 · inline@813744b05504
 GET /api/admin/driver-day-overrides · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d9dcec3b11da
 GET /api/admin/driver-performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@55ea26ec64dc · (lib mount)
+GET /api/admin/driver-performance/weeks · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@af5e748d46c6 · (lib mount)
 GET /api/admin/driver-release/acknowledgements · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@b0c8d30ec16b · (lib mount)
 POST /api/admin/excluded-days · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c160be1ad7b3
 DELETE /api/admin/excluded-days/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@ee2cf300ceb7
@@ -120,7 +121,7 @@ POST /api/driver/me/availability/:id/cancel · timeOffRequestsFlagGate@8e7690535
 GET /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · inline@c6cac740a042
 PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 · requireRole("Driver")=anon@12b84c4b0134 · emergencyContactsWriteLimiter=limiter · inline@e2479da610e3
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
-GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@e677fd9081f1 · (lib mount)
+GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@5758ae647d55 · (lib mount)
 GET /api/driver/me/release · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@bbfff113781e · (lib mount)
 POST /api/driver/me/release/acknowledge · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@1fa34ac2b6fe · (lib mount)
 POST /api/driver/me/release/seen · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@1fa34ac2b6fe · (lib mount)
