@@ -38,7 +38,10 @@
 //   §13 mutants, each applied once and each caught
 //   §14 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): a draft made with a line
 //       while sending was stopped is sent as the job would send it; once its line is voided,
-//       the facts read as the job's and it is CHECK BY HAND (changed), never sent
+//       the facts read as the job's and it is CHECK BY HAND (changed), never sent; so it is
+//       with the switch off again, and with it on for a draft made while it was off and a
+//       line added since; lines changed after the listing are read again in the send's own
+//       transaction: nothing sent
 // Made-up data only. No network but an SMTP stand-in on 127.0.0.1 in this process;
 // never reads app.db or a settings file.
 //   node scripts/test-auto-invoice-send-drafted.js      # exits 1 on any failure
@@ -361,15 +364,17 @@ const pending = (w) => w.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_clai
 //   T0+2h    the resume script clears the stop; then LD-TEST-0820, to a domain off the
 //            send list, is drafted with a refusal on record
 //   T0+40h   the script runs
-async function stopWorld({ during = ["LD-TEST-0801", "LD-TEST-0802"], duringOther = [], beforeDrafts = null, afterDrafts = null, resume = true, dbFile = null, lines = false } = {}) {
+// `advance`: the job's AUTO_INVOICE_ADVANCE_LINES_ENABLED while it drafts (on with `lines`).
+async function stopWorld({ during = ["LD-TEST-0801", "LD-TEST-0802"], duringOther = [], beforeDrafts = null, afterDrafts = null, resume = true, dbFile = null, lines = false,
+	advance = lines } = {}) {
 	const w = world({ dbFile, lines });
-	let job = jobLib.create(w.jobDeps({ sendOn: false }));
+	let job = jobLib.create(w.jobDeps({ sendOn: false, advance }));
 	await job.tick();
 	w.now += 5 * MIN;
 	w.ready("LD-TEST-0810");
 	await job.tick();
 	w.now += 5 * MIN;
-	job = jobLib.create(w.jobDeps({ sendOn: true }));
+	job = jobLib.create(w.jobDeps({ sendOn: true, advance }));
 	w.ready("LD-TEST-0800");
 	await job.tick();
 	w.now += 5 * MIN;
@@ -578,18 +583,61 @@ async function holdsSummary(lib) {
 }
 
 // PR A1: LD-TEST-0801 drafted with a made-up $500.00 advance line while sending was stopped; `voided`:
-// that line voided after the draft. The script runs with the switch on, as the app does.
+// that line voided after the draft. `on`: the switch as the script runs (the app's own setting).
+// `drafted`: the job's switch while it drafted; off, the load had no line then and `added` adds one after.
+// `afterJob`: the change comes after the job's last look, so only the script can see it.
+const advanceEnv = (on) => (on ? { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } : {});
 async function advanceSummary(lib) {
-	const one = async (voided) => {
+	const one = async ({ voided = false, on = true, drafted = true, added = false, afterJob = false } = {}) => {
+		const change = (x) => {
+			if (voided) x.voidLine("LD-TEST-0801", 1);
+			if (added) x.addLine("LD-TEST-0801");
+		};
 		const w = await stopWorld({
 			lines: true,
-			beforeDrafts: (x) => { x.addLine("LD-TEST-0801"); },
-			afterDrafts: (x) => { if (voided) x.voidLine("LD-TEST-0801", 1); },
+			advance: drafted,
+			beforeDrafts: (x) => { if (drafted) x.addLine("LD-TEST-0801"); },
+			afterDrafts: (x) => { if (!afterJob) change(x); },
 		});
-		const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false, env: { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } }));
-		return { threw, fingerprint: (JSON.parse((w.claim("LD-TEST-0801") || {}).fingerprint_json || "{}").advanceLines) || null, labels: labels(result), sent: sentLoads(w) };
+		if (afterJob) change(w);
+		const changedFields = (w.claim("LD-TEST-0801") || {}).changed_fields;
+		const dry = await runSafe(lib, w.scriptOpts({ dryRun: true, env: advanceEnv(on) }));
+		const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false, env: advanceEnv(on) }));
+		return { threw, fingerprint: (JSON.parse((w.claim("LD-TEST-0801") || {}).fingerprint_json || "{}").advanceLines) || null, changedFields, dry: labels(dry.result),
+			labels: labels(result), sent: sentLoads(w) };
 	};
-	return { kept: await one(false), voided: await one(true) };
+	return {
+		kept: await one(),
+		voided: await one({ voided: true }),
+		voidedAfterJob: await one({ voided: true, afterJob: true }),
+		// The switch off again (a rollback), the draft made with it on.
+		offVoided: await one({ on: false, voided: true, afterJob: true }),
+		offKept: await one({ on: false }),
+		// The switch on now, the draft made with it off: that draft printed no line.
+		onAfterOff: await one({ drafted: false, added: true, afterJob: true }),
+	};
+}
+
+// PR A1: LD-TEST-0802's advance lines change after the listing, at LD-TEST-0801's send (which goes
+// first), before its own: the send's own transaction reads them again. `on`: the switch as the script
+// runs; `withLine`: 0802 drafted with a made-up $500.00 line (the job's switch on while it drafted).
+async function advanceLateSummary(lib) {
+	const one = async ({ change, on = true, withLine = true }) => {
+		const w = await stopWorld({ lines: true, beforeDrafts: (x) => { if (withLine) x.addLine("LD-TEST-0802"); } });
+		w.onSend = () => {
+			w.onSend = null;
+			change(w);
+		};
+		const before = claimShot(w, "LD-TEST-0802");
+		const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false, env: advanceEnv(on) }));
+		return { threw, failed: result ? result.failed : "no result", listed: (labels(result) || []).find((l) => l[0] === "LD-TEST-0802") || null, sent: sentLoads(w),
+			claimKept: JSON.stringify(claimShot(w, "LD-TEST-0802")) === JSON.stringify(before), mark: markOf(w, "LD-TEST-0802") };
+	};
+	return {
+		voided: await one({ change: (w) => w.voidLine("LD-TEST-0802", 1) }),
+		added: await one({ change: (w) => w.addLine("LD-TEST-0802") }),
+		offAdded: await one({ on: false, withLine: false, change: (w) => w.addLine("LD-TEST-0802") }),
+	};
 }
 
 // One case per hold the gate or the mailbox makes: each from-the-stop load's word.
@@ -1166,6 +1214,7 @@ async function main() {
 			flight: flightSummary,
 			crash: crashSummary,
 			advance: advanceSummary,
+			advanceLate: advanceLateSummary,
 		};
 		const IN_FLIGHT = "const moved = ledger.transition(db, cur.load_key, { from: [\"drafted\"], nowIso, patch: {";
 		const MUTANTS = [
@@ -1194,6 +1243,9 @@ async function main() {
 			["the digest proof skipped", "if (rules.digestDifferences(jsonOf(c.draft_digest_json), rules.messageDigest(parsed)).length) return { word: \"mismatch\" };", "if (false) return { word: \"mismatch\" };", "holds"],
 			["the closed-month rule not read", "closedMonths = shared.server.integrityClosedMonthsOf(shared.sheet.headers, row);", "closedMonths = [];", "gate"],
 			["the facts without the advance lines (PR A1)", "\t\tadvanceLinesOn: rules.advanceLinesEnabled(env),\n", "", "advance"],
+			["no lines compare in the listing (PR A1)", "\tif (linesDiffer(db, key, saved, ctx.linesOn)) return { word: \"changed\" };\n", "", "advance"],
+			["no lines compare in the send's transaction (PR A1)", "\t\tif (linesDiffer(db, cur.load_key, jsonOf(cur.fingerprint_json), linesOn)) return \"changed\";\n", "", "advanceLate"],
+			["a draft made with the switch off left uncompared with it on (PR A1)", ": linesOn ? [] : null;", ": null;", "advance"],
 		];
 		const real = {};
 		for (const [label, from, to, caseName] of MUTANTS) {
@@ -1222,6 +1274,28 @@ async function main() {
 			"§14 FAILS ON THE OLD CODE: a draft made with an advance line during the stop, its line as it was: CLEAN and sent, as the job would send it");
 		eq([s.voided.threw, of(s.voided), s.voided.sent], ["", ["LD-TEST-0801", "changed", "yes", "found"], ["LD-TEST-0802"]],
 			"§14 FAILS ON THE OLD CODE: ...its line voided since: the facts read as the job's, CHECK BY HAND (changed), never sent with the old balance");
+		const ofDry = (r) => (r.dry || []).find((l) => l[0] === "LD-TEST-0801") || null;
+		const CHANGED = ["LD-TEST-0801", "changed", "yes", "found"];
+		eq([s.voidedAfterJob.changedFields, ofDry(s.voidedAfterJob), of(s.voidedAfterJob), s.voidedAfterJob.sent], ["", CHANGED, CHANGED, ["LD-TEST-0802"]],
+			"§14 ...voided after the job's last look (nothing on the claim says so): the script's own reading, CHECK BY HAND (changed) in the dry run and at --apply");
+		eq([s.offVoided.threw, s.offVoided.changedFields, ofDry(s.offVoided), of(s.offVoided), s.offVoided.sent], ["", "", CHANGED, CHANGED, ["LD-TEST-0802"]],
+			"§14 FAILS ON THE OLD CODE: the switch off again (a rollback), a draft made with a line since voided, after the job's last look: CHECK BY HAND (changed) in the dry run and at --apply, never sent with the old balance");
+		eq([s.offKept.threw, of(s.offKept), s.offKept.sent], ["", ["LD-TEST-0801", "advance", "yes", "found"], ["LD-TEST-0802"]],
+			"§14 ...its line kept: the free checks with the switch off stop it (advance), as before");
+		eq([s.onAfterOff.threw, s.onAfterOff.fingerprint, s.onAfterOff.changedFields, ofDry(s.onAfterOff), of(s.onAfterOff), s.onAfterOff.sent],
+			["", null, "", CHANGED, CHANGED, ["LD-TEST-0802"]],
+			"§14 FAILS ON THE OLD CODE: the switch on now, a draft made while it was off (no line printed) and a line added since: CHECK BY HAND (changed), never sent without the advance");
+		const late = await advanceLateSummary(lib);
+		for (const [name, label] of [
+			["voided", "its line voided"],
+			["added", "a second line added"],
+			["offAdded", "the switch off at the run, a line added to a draft made with it on and no line"],
+		]) {
+			const r = late[name];
+			eq([r.threw, r.failed, r.listed, r.sent, r.claimKept, r.mark],
+				["", { load: "LD-TEST-0802", what: "changed before the send (changed); nothing sent" }, ["LD-TEST-0802", "CLEAN", "yes", "found"], ["LD-TEST-0801"], true, ""],
+				`§14 FAILS ON THE OLD CODE: ${label} after the listing, before its own send: the send's transaction reads the lines again; nothing sent, its claim still the draft, no mark, the run stops there`);
+		}
 	}
 }
 

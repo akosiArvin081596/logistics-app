@@ -22,9 +22,11 @@
 //     domain listed, the POD settle window) and its free checks on a fresh read of
 //     Job Tracking, whose parse and closed-month rule are server.js's own, lifted at
 //     run time (scripts/lib/server-lift.js);
-//   - nothing the job watches has changed since the draft; not factored (a marker
-//     that can't be read counts), no mark cleared since the draft, no Draft Invoice
-//     press in flight, no other draft row; the recipient rule on the draft's To;
+//   - nothing the job watches has changed since the draft, and the load's advance lines
+//     are those the draft printed, whatever AUTO_INVOICE_ADVANCE_LINES_ENABLED says now
+//     (a draft made with it off printed none); not factored (a marker that can't be
+//     read counts), no mark cleared since the draft, no Draft Invoice press in flight,
+//     no other draft row; the recipient rule on the draft's To;
 //   - Delivered 36 hours ago or more, and no rate con uploaded after that;
 //   - the mailbox login sees the draft in Drafts by its Message-ID, that Message-ID
 //     isn't in Sent Mail, and the draft, fetched, is one message whose digest and
@@ -36,11 +38,12 @@
 //   sees its draft.
 // --apply prints the same, then sends the CLEAN loads, at most --max (3) a run, one at
 //   a time. Right before each, Drafts and Sent Mail are searched again for its draft;
-//   anything changed makes it CHECK BY HAND, nothing sent. Then one transaction puts the
-//   claim in the job's own send-start state (as ledger.beginSend() does), so every guard
-//   that reads the claim sees a send under way, and then the draft's own To, subject,
-//   body and attachments go through the job's SMTP sender (lib/auto-invoice-send.js
-//   createSmtpSender()), From the mailbox, with a fresh Message-ID. Once Sent Mail shows
+//   anything changed makes it CHECK BY HAND, nothing sent. Then one transaction reads its
+//   advance lines again and puts the claim in the job's own send-start state (as
+//   ledger.beginSend() does), so every guard that reads the claim sees a send under
+//   way, and then the draft's own To, subject, body and attachments go through the
+//   job's SMTP sender (lib/auto-invoice-send.js createSmtpSender()), From the
+//   mailbox, with a fresh Message-ID. Once Sent Mail shows
 //   it, the claim is recorded as the job records a send (Completed Loads reads "Sent to
 //   the broker"), with one audit row as the system actor. A send Sent Mail doesn't show
 //   is left as the job leaves its own (Needs attention, may already be sent: Try again
@@ -311,6 +314,14 @@ function factsOf(ctx, shared, key) {
 	});
 }
 
+// Do the load's active lines differ from those its draft printed (the saved fingerprint's),
+// whatever the switch says now? One saved with the switch off printed none: it compares as
+// none only while the switch is on, so with it never on nothing is read here.
+function linesDiffer(db, key, saved, linesOn) {
+	const printed = saved && Array.isArray(saved.advanceLines) ? saved.advanceLines.map(String).sort() : linesOn ? [] : null;
+	return printed !== null && printed.join(",") !== ledger.activeAdvanceLineMarks(db, key).join(",");
+}
+
 function hasColumn(db, table, column) {
 	return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
 }
@@ -417,6 +428,7 @@ async function judge(ctx, shared, c, visible) {
 	if (verdict.state !== "queued") return { word: VERDICT_WORDS[verdict.code] || "check" };
 	const saved = jsonOf(c.fingerprint_json);
 	if (!saved || c.changed_fields || rules.fingerprintDiff(saved, rules.fingerprint(facts)).length) return { word: "changed" };
+	if (linesDiffer(db, key, saved, ctx.linesOn)) return { word: "changed" };
 	if (shared.factoredUnreadable || ledger.factoredOrUnreadable(db, key)) return { word: "factored" };
 	if (shared.clearedUnreadable || String(shared.cleared.get(key) || "") > String(c.drafted_at || "")) return { word: "mark" };
 	if (factoring.inflightRows(db, key, isoOf(nowMs)).length) return { word: "press" };
@@ -442,15 +454,16 @@ async function judge(ctx, shared, c, visible) {
 // send (delivery 'send', stage 'appending', the new Message-ID, under this run's lease):
 // Draft Invoice, a press, a factoring mark and the label all see a send under way, and if
 // this run dies the job's own recovery takes it over, searching Sent Mail, never sending.
-// The claim must still be the draft that was judged (`c`); no mark, look, person's draft,
-// press or stop; and, read last as the job's own commit reads it, not factored.
-// "" when begun, else the word that held it.
-function beginDraftSend(db, c, { newId, owner, nowMs }) {
+// The claim must still be the draft that was judged (`c`), its advance lines still the
+// load's; no mark, look, person's draft, press or stop; and, read last as the job's own
+// commit reads it, not factored. "" when begun, else the word that held it.
+function beginDraftSend(db, c, { newId, owner, nowMs, linesOn }) {
 	const nowIso = isoOf(nowMs);
 	return db.transaction(() => {
 		const cur = ledger.getClaim(db, c.load_key);
 		if (!cur || cur.state !== "drafted" || cur.delivery !== "" || cur.stage !== "recorded" || cur.message_id !== c.message_id
 			|| cur.invoice_id !== c.invoice_id || cur.changed_fields !== c.changed_fields || cur.fingerprint_json !== c.fingerprint_json) return "changed";
+		if (linesDiffer(db, cur.load_key, jsonOf(cur.fingerprint_json), linesOn)) return "changed";
 		if (cur.look_first) return "look";
 		if (markOf(db, cur.load_key)) return "started";
 		if (ledger.otherDraftRows(db, cur).length) return "person";
@@ -528,7 +541,7 @@ async function sendOne(ctx, result, e) {
 	if (inDrafts !== "found") return { skip: inDrafts === "unknown" ? "mailbox" : "invisible" };
 	const inSent = await lookFor(ctx, c.message_id, sendRules.SENT_MAILBOX);
 	if (inSent !== "absent") return { skip: inSent === "unknown" ? "mailbox" : "sent" };
-	const held = beginDraftSend(db, c, { newId, owner: ctx.owner, nowMs: ctx.now() });
+	const held = beginDraftSend(db, c, { newId, owner: ctx.owner, nowMs: ctx.now(), linesOn: ctx.linesOn });
 	if (held) return { load: e.load, what: `changed before the send (${held}); nothing sent` };
 	const mark = markOf(db, e.key);
 	const owner = ctx.owner;
@@ -603,6 +616,7 @@ async function run(opts = {}) {
 		mb: { user, pass },
 		mode: rules.readMode(env),
 		sendSettings: sendRules.readSettings(env),
+		linesOn: rules.advanceLinesEnabled(env),
 		now: typeof opts.now === "function" ? opts.now : () => Date.now(),
 		sleep: typeof opts.sleep === "function" ? opts.sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		confirmWaits: Array.isArray(opts.confirmWaitsMs) ? opts.confirmWaitsMs : CONFIRM_WAITS_MS,

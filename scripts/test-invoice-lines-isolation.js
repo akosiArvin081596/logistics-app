@@ -160,7 +160,8 @@ const R = M.createRunner("B20: advance lines on a broker invoice are invoice-onl
 		const tables = settlementTables(w.db);
 		const sheet = JSON.stringify(M.sheetValues(w.rows));
 		const engine = autoEngine(w);
-		const prep = await engine.prepare({ loadId: "B202", mode: "auto" });
+		// advanceLines: the automatic job's own switch, on, as the job hands it to the engine.
+		const prep = await engine.prepare({ loadId: "B202", mode: "auto", advanceLines: true });
 		eq("FAILS ON THE OLD CODE: prepared, the balance due billed: $3,000.00 less the $650.00 advance", prep.ok ? [prep.ctx.total, prep.ctx.billedTotal] : prep.code, ["$3,000.00", "$2,350.00"]);
 		if (prep.ok) {
 			const rendered = await engine.render(prep.ctx, { invoiceId: "10162026-9", invoiceDate: "10/16/2026" });

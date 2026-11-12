@@ -36,16 +36,18 @@
  *      before any number, never the bank block; a note holding a bank number refuses
  *      in prepare(); record()'s audit target.
  *  §10 mode "auto" with advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): off,
- *      or on without the lines, a load with one is ADVANCE_LINES as before; on, a $500.00
+ *      or on without the lines, a load with one is ADVANCE_LINES as before, and so it is
+ *      on with no yes from the caller's own switch (Triumph's off among them); on, a $500.00
  *      advance on a $2,150.00 load bills $1,650.00, printed as the button prints it (the
  *      page, the email's sentence, the row, the stamp, one invoice_draft_lines audit row);
  *      a label off the closed list or a reference is ADVANCE_LINE_TEXT; no balance left is
  *      ADVANCE_LINES_INVALID; rule 7 on everything it composes (F2): no deny list is
  *      DENY_LIST_UNSET, a deny-list value or the driver's name is PROTECTED_VALUE; an
  *      invoice with no line is the base's, byte for byte, whatever the switches say.
- *  §11 the Triumph package (PR B1): a factored load's automatic invoice with that advance
- *      prints Triumph's block, the advance and the balance due, and the batch built from
- *      its render carries INVAMT 1650.00, the balance it prints.
+ *  §11 the Triumph package (PR B1): with Triumph's switch on too, a factored load's
+ *      automatic invoice with that advance prints Triumph's block, the advance and the
+ *      balance due, and the batch built from its render carries INVAMT 1650.00, the
+ *      balance it prints.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -81,6 +83,7 @@ const { createRedactor } = require(path.join(ROOT, "lib", "chr-events.js"));
 const { textPdf } = require(path.join(__dirname, "lib", "made-up-pdf.js"));
 const autoRulesLib = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
 const triumphBatch = require(path.join(ROOT, "lib", "triumph-batch.js"));
+const triumphRules = require(path.join(ROOT, "lib", "triumph-rules.js"));
 const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
@@ -495,7 +498,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		const recipientOf = (ctx, rendered) => String((rendered ? rendered.to : ctx && (ctx.to || (ctx.invoiceTo && ctx.invoiceTo.email))) || "");
 		const sentOf = (to, rendered) => ({ to: String(to || "").toLowerCase(), subject: String((rendered && rendered.subject) || ""), total: String((rendered && rendered.total) ?? "") });
 		const draftOnce = async (w, loadId, invoiceId) => {
-			const prep = await w.engine.prepare({ loadId, body: {}, dryRun: false, mode: "auto" });
+			// advanceLines: the job's own switch, off in these worlds.
+			const prep = await w.engine.prepare({ loadId, body: {}, dryRun: false, mode: "auto", advanceLines: false });
 			if (!prep.ok) return { prep };
 			const rendered = await w.engine.render(prep.ctx, { invoiceId, invoiceDate: "10/28/2026", emailBody: null });
 			return { prep, rendered, sent: sentOf(recipientOf(prep.ctx, rendered), rendered) };
@@ -763,8 +767,10 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		}, { audit: () => {} }).line;
 		const sheetWithDriver = (name) => SHEET.map((r) => (r[0] === ID ? r.map((c, i) => (HEADERS[i] === "Driver" ? name : c)) : r));
 		const actions = (w) => w.db.prepare("SELECT action FROM audit_trail ORDER BY id").all().map((a) => a.action);
+		// The automatic job's call with its own switch on: it hands the engine that yes.
+		const job = (w, loadId = ID) => w.auto(loadId, { advanceLines: true });
 
-		// Off, or on without the lines themselves: today's refusal.
+		// Off, or on without the lines themselves: today's refusal, even with the caller's yes.
 		for (const [label, env] of [
 			["its own switch off (the lines on)", { BROKER_INVOICE_LINES_ENABLED: "true" }],
 			["its own switch on, the lines off", { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" }],
@@ -773,14 +779,38 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		]) {
 			const w = world({ env, linesTable: true, denyHits: DENY });
 			addAdvance(w);
-			eq([code(await w.auto(ID)), w.seen.renders], ["ADVANCE_LINES", 0], `§10 ${label}: a load with an advance line still goes to a person (ADVANCE_LINES)`);
+			eq([code(await job(w)), w.seen.renders], ["ADVANCE_LINES", 0], `§10 ${label}: a load with an advance line still goes to a person (ADVANCE_LINES)`);
+		}
+
+		// Each caller of mode "auto" holds its own switch where the lines are read. With both of A1's
+		// settings on and Triumph's off, a line added after Triumph's free checks passed the load (they
+		// read none then) reaches only the engine, which must answer ADVANCE_LINES.
+		{
+			const TRIUMPH_OFF = ON;
+			const TRIUMPH_ON = Object.freeze({ ...ON, TRIUMPH_ADVANCE_LINES_ENABLED: "true" });
+			const before = { live: true, completed: true, drafts: 0, closedMonths: [], hasDeliveryDate: true, activeAdvanceLines: 0, pods: 1, podsUnreadable: 0,
+				brokerDomain: "example-broker.test", isBison: false, brokerEmailFreemail: false, brokerDomainConfirmed: true };
+			eq(triumphRules.freeVerdict(before, { debtorName: "Example Broker LLC", hasLines: true }).state, "queued", "§10 Triumph's free checks pass the load while it has no line");
+			for (const [label, env, extra] of [
+				["Triumph's switch off: the caller hands the engine lib/triumph-rules.js advanceLinesEnabled()", TRIUMPH_OFF, { advanceLines: triumphRules.advanceLinesEnabled(TRIUMPH_OFF) }],
+				["no switch handed at all (a caller of mode \"auto\" that names none)", TRIUMPH_ON, {}],
+				["the yes handed as the text \"true\"", TRIUMPH_ON, { advanceLines: "true" }],
+			]) {
+				const w = world({ env, denyHits: DENY });
+				addAdvance(w);
+				eq([code(await w.auto(ID, extra)), w.seen.renders], ["ADVANCE_LINES", 0], `§10 FAILS ON THE OLD CODE: both of A1's settings on, ${label}: a line added after the free checks is ADVANCE_LINES, nothing rendered`);
+			}
+			const w = world({ env: TRIUMPH_ON, denyHits: DENY });
+			addAdvance(w);
+			const p = await w.auto(ID, { advanceLines: triumphRules.advanceLinesEnabled(TRIUMPH_ON) });
+			eq([code(p), p.ok && p.ctx.billedTotal], ["ok", "$1,650.00"], "§10 ...Triumph's switch on as well: the engine prints the line and bills the balance due");
 		}
 
 		// On: the balance due, printed as the button prints it.
 		{
 			const w = world({ env: ON, denyHits: DENY });
 			addAdvance(w);
-			const p = await w.auto(ID);
+			const p = await job(w);
 			eq([code(p), p.ok && p.ctx.total, p.ok && p.ctx.billedTotal, p.ok && p.ctx.lineSummary && [p.ctx.lineSummary.lineHaulCents, p.ctx.lineSummary.advancesCents, p.ctx.lineSummary.balanceCents]],
 				["ok", "$2,150.00", "$1,650.00", [215000, 50000, 165000]],
 				"§10 FAILS ON THE OLD CODE: on, a $500.00 advance on a $2,150.00 load prepares: the line haul $2,150.00, the balance due $1,650.00");
@@ -791,7 +821,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			// The same load on a tree before PR A1 refuses (above): what follows is the prepared draft.
 			const w = world({ env: ON, denyHits: DENY });
 			const line = addAdvance(w);
-			const p = await w.auto(ID);
+			const p = await job(w);
 			if (!p.ok) failures.push(`§10 FAILS ON THE OLD CODE: the render, the row and the audit rows need a prepared draft (got ${code(p)})`);
 			const r = p.ok ? await w.engine.render(p.ctx, NUMBER) : { total: "", html: "", attachments: [] };
 			const page = w.seen.pages[0] || "";
@@ -832,7 +862,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			const w = world({ env: ON, denyHits: DENY });
 			addAdvance(w, { amountCents: 30000 });
 			addAdvance(w, { label: "Advance", amountCents: 20000, receivedOn: "" });
-			const p = await w.auto(ID);
+			const p = await job(w);
 			eq([code(p), p.ok && p.ctx.billedTotal, p.ok && p.ctx.lineSummary.items.map((i) => i.amountCents), p.ok && p.ctx.lineSummary.footnote],
 				["ok", "$1,650.00", [30000, 20000], "*$300 for fuel advance\n*$200 for advance"],
 				"§10 FAILS ON THE OLD CODE: two clean lines, $300.00 and $200.00: both print, the balance after both, one footnote line each");
@@ -850,7 +880,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		]) {
 			const w = world({ env: ON, denyHits: DENY });
 			addAdvance(w, line);
-			const got = await w.auto(ID);
+			const got = await job(w);
 			eq([code(got), w.seen.renders], [want, 0], `§10 FAILS ON THE OLD CODE: ${label}: ${want}, nothing rendered`);
 			if (want !== "ok") ok(!/Pat|EFS/.test(JSON.stringify(got.json)), `§10 ...${label}: the refusal carries none of the line's text`);
 		}
@@ -858,7 +888,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			const w = world({ env: ON, denyHits: DENY });
 			addAdvance(w, { amountCents: 30000 });
 			addAdvance(w, { label: "Fuel advance to Pat Example", amountCents: 20000 });
-			eq(code(await w.auto(ID)), "ADVANCE_LINE_TEXT", "§10 FAILS ON THE OLD CODE: one typed line among clean ones stops the load");
+			eq(code(await job(w)), "ADVANCE_LINE_TEXT", "§10 FAILS ON THE OLD CODE: one typed line among clean ones stops the load");
 		}
 		ok(!brokerInvoice.buildInvoiceHtml({ invoiceLines: { lineHaulCents: 215000, advancesCents: 50000, balanceCents: 165000, footnote: "", items: [{ id: 1, label: "Fuel advance", amountCents: 50000, note: "Pat Example" }] } }).includes("Pat Example"),
 			"§10 a line's note prints on no invoice");
@@ -867,7 +897,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		for (const [label, lines] of [["an advance equal to the total", [{ amountCents: 215000 }]], ["two advances past it", [{ amountCents: 200000 }, { label: "Advance", amountCents: 20000 }]]]) {
 			const w = world({ env: ON, denyHits: DENY });
 			for (const l of lines) addAdvance(w, l);
-			const got = await w.auto(ID);
+			const got = await job(w);
 			eq([code(got), got.http, w.seen.renders], ["ADVANCE_LINES_INVALID", 422, 0], `§10 FAILS ON THE OLD CODE: ${label}: no balance due to bill, ADVANCE_LINES_INVALID, nothing rendered`);
 		}
 
@@ -875,30 +905,30 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		{
 			const unset = world({ env: ON });
 			addAdvance(unset);
-			eq([code(await unset.auto(ID)), unset.seen.renders], ["DENY_LIST_UNSET", 0], "§10 FAILS ON THE OLD CODE (F2): no carrier deny list set: DENY_LIST_UNSET, nothing rendered");
-			eq(code(await world({ env: ON }).auto("LD-TEST-0001")), "ok", "§10 (F2) ...a load with no line is made as before, with no list set");
+			eq([code(await job(unset)), unset.seen.renders], ["DENY_LIST_UNSET", 0], "§10 FAILS ON THE OLD CODE (F2): no carrier deny list set: DENY_LIST_UNSET, nothing rendered");
+			eq(code(await job(world({ env: ON }), "LD-TEST-0001")), "ok", "§10 (F2) ...a load with no line is made as before, with no list set");
 			const carrier = world({ env: ON, denyHits: DENY, ratecons: { ...RATECONS, [ID]: [cand(rateCon({ docs: "billing99887766@example-broker.test", total: "$2,150.00" }), "documents")] } });
 			addAdvance(carrier);
-			const cr = await carrier.auto(ID);
+			const cr = await job(carrier);
 			eq([code(cr), carrier.seen.renders], ["PROTECTED_VALUE", 0], "§10 FAILS ON THE OLD CODE (F2): the carrier canary in the billing email the rate con gave: PROTECTED_VALUE, nothing rendered");
 			ok(cr.json && !/9988/.test(JSON.stringify(cr.json)), "§10 (F2) ...the refusal names no value");
 			const split = world({ env: ON, denyHits: DENY, ratecons: { ...RATECONS, [ID]: [cand(rateCon({ docs: "billing9988@example-broker.test", total: "$2,150.00" }), "documents")] } });
 			addAdvance(split, { amountCents: 77660 });
-			eq(code(await split.auto(ID)), "ok", "§10 (F2) each value is read on its own: the canary's halves in two fields are no hit");
+			eq(code(await job(split)), "ok", "§10 (F2) each value is read on its own: the canary's halves in two fields are no hit");
 			const named = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Pat Example") });
 			named.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Fuel paid to pat example at pickup')").run(ID);
 			addAdvance(named);
-			const nr = await named.auto(ID);
+			const nr = await job(named);
 			eq([code(nr), named.seen.renders], ["PROTECTED_VALUE", 0], "§10 FAILS ON THE OLD CODE (F2): the load's own driver's name, any case, in a note it would print: PROTECTED_VALUE");
 			ok(nr.json && !/pat|example/i.test(String(nr.json.error).replace(/the driver's name/, "")), "§10 (F2) ...the refusal names no value");
 			const team = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Sam Sample / Pat Example") });
 			team.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Fuel paid to Pat Example at pickup')").run(ID);
 			addAdvance(team);
-			eq(code(await team.auto(ID)), "PROTECTED_VALUE", "§10 FAILS ON THE OLD CODE (F2): one name of a team in the driver cell");
+			eq(code(await job(team)), "PROTECTED_VALUE", "§10 FAILS ON THE OLD CODE (F2): one name of a team in the driver cell");
 			const other = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Pat Example") });
 			other.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Unload at door 4')").run(ID);
 			addAdvance(other);
-			eq(code(await other.auto(ID)), "ok", "§10 (F2) a note without the name or a listed value prints");
+			eq(code(await job(other)), "ok", "§10 (F2) a note without the name or a listed value prints");
 		}
 
 		// No line: the base's (62fe51c8) invoice, byte for byte, whatever the switches say. Recorded by
@@ -912,7 +942,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 				const l = addAdvance(g, {}, "LD-TEST-0001");
 				brokerInvoice.invoiceLines.voidLine(g.db, { loadId: "LD-TEST-0001", lineId: l.id, reason: "made up", actor: "qa" }, {});
 			}
-			const gp = await g.auto("LD-TEST-0001");
+			// The job hands the engine its own switch as it reads.
+			const gp = await g.auto("LD-TEST-0001", { advanceLines: autoRulesLib.advanceLinesEnabled(env) });
 			const gr = await g.engine.render(gp.ctx, NUMBER);
 			const digest = sha256([g.seen.pages[0], gr.html, gr.subject, gr.total, gr.attachments.map((a) => a.filename).join("|")].join("\0"));
 			eq(digest, GOLDEN_NO_LINE, `§10 no line (${label}): the page, the email, the subject, the billed total and the files are the base's, byte for byte`);
@@ -926,7 +957,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 	section("11. the Triumph package — a factored automatic invoice with an advance line");
 	{
 		const ID = "LD-TEST-0030";
-		const ON = Object.freeze({ BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" });
+		const ON = Object.freeze({ BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true", TRIUMPH_ADVANCE_LINES_ENABLED: "true" });
 		const NUMBER = { invoiceId: "11122026-5", invoiceDate: "11/12/2026" };
 		const DENY = createRedactor({ denyList: "99887766" }).hits;
 		const NOA = ["MADE-UP NOTICE LINE ONE", "MADE-UP NOTICE LINE TWO", "EXAMPLE FACTOR LLC", "PO DRAWER 000, NOWHERE, ZZ  00000-0000"];
@@ -934,7 +965,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		brokerInvoice.invoiceLines.addLine(w.db, {
 			loadId: ID, values: { kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "", note: "" }, actor: "super_admin", closedMonths: [],
 		}, { audit: () => {} });
-		const p = await w.auto(ID);
+		// Triumph's caller hands the engine Triumph's own switch.
+		const p = await w.auto(ID, { advanceLines: triumphRules.advanceLinesEnabled(ON) });
 		eq([code(p), p.ok && p.ctx.billedTotal, p.ok && Boolean(p.ctx.assignment)], ["ok", "$1,650.00", true], "§11 FAILS ON THE OLD CODE: a factored load's automatic invoice with an advance line prepares, billing the balance due");
 		const r = p.ok ? await w.engine.render(p.ctx, NUMBER) : null;
 		const page = w.seen.pages[0] || "";

@@ -38,7 +38,7 @@
 //       runs it: off, a tapped load with one is ADVANCE_LINES with no engine call; on, it is sent
 //       once; a line voided between the render and the send is LINES_CHANGED, its number given up,
 //       and the run line makes it again at once with a fresh one; lines that change under every
-//       run go to a person after the line's two runs, nothing sent
+//       run go to a person after the line's two runs (LINES_CHANGED), nothing sent
 //
 // No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
@@ -2297,7 +2297,8 @@ async function main() {
 		const LINES = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
 		const ON_ENV = { env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } };
 		// The lines module's own table, and a made-up engine that prints the load's active lines in its
-		// answer (ctx.lineSummary.items), as mode "auto" does with the switch on.
+		// answer (ctx.lineSummary.items) only when the job hands it advanceLines: true, as mode "auto"
+		// does, and otherwise refuses a load with one (ADVANCE_LINES).
 		const linesWorld = () => {
 			const w = makeWorld();
 			w.db.exec("DROP TABLE broker_invoice_lines");
@@ -2307,6 +2308,7 @@ async function main() {
 				const r = await prepare(args);
 				if (r && r.ok) {
 					const items = LINES.listLines(w.db, args.loadId).filter((l) => !l.voided).map((l) => ({ id: l.id, label: l.label, amountCents: l.amountCents, reference: l.reference }));
+					if (items.length && args.advanceLines !== true) return { ok: false, http: 422, code: "ADVANCE_LINES" };
 					if (items.length) r.ctx.lineSummary = { items };
 				}
 				return r;
@@ -2358,8 +2360,8 @@ async function main() {
 		busy.renderHook = () => { busy.addLine("LD-TEST-1904", 100); };
 		tap(busy, busyJob, "LD-TEST-1904");
 		await drained(busy, "§19 busy");
-		eq([busy.state("LD-TEST-1904"), busy.smtp.length, voids(busy).length], [["needs_attention", "RETRY_LATER"], 0, 2],
-			"§19 FAILS ON THE OLD CODE: lines that change under every run: the line's two runs, each number given up, nothing sent, then a person");
+		eq([busy.state("LD-TEST-1904"), busy.smtp.length, voids(busy).length], [["needs_attention", "LINES_CHANGED"], 0, 2],
+			"§19 FAILS ON THE OLD CODE: lines that change under every run: the line's two runs, each number given up, nothing sent, then a person, under the lines' own words (LINES_CHANGED)");
 	}
 }
 

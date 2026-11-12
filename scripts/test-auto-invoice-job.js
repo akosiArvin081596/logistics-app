@@ -108,12 +108,14 @@
 //   §28 the dry run before the deploy: its counts equal the first check's, and it writes
 //       nothing (the database's sha256 and the meta as they were)
 //   §29 what these rules don't touch, by digest against main (ea4497a6)
-//   §30 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): off, a load with one is
+//   §30 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): the job hands the engine its
+//       switch (advanceLines); off, a load with one is
 //       ADVANCE_LINES with no engine call and a sent load's fingerprint is today's; on, it is
 //       sent, its fingerprint keeps the lines, and a line voided after the send holds that load
 //       alone (the alert names the advance lines; nothing re-sent); a line voided or added
 //       between the render and the send or the APPEND: LINES_CHANGED, nothing handed over, the
-//       number given up, made again with a fresh one; lines that keep changing go to a person
+//       number given up, made again with a fresh one; a line added while the engine read the
+//       load: LINES_CHANGED before any number; lines that keep changing go to a person
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -4727,6 +4729,7 @@ async function holdSections() {
 		offSent.now += 5 * MIN;
 		await job2.tick();
 		eq([claimOf(offSent, "LD-TEST-0951").changed_fields, offSent.smtp.length], ["", 1], "§30 off: a line added after the send changes nothing, as before");
+		eq([...new Set(offSent.handed)], [false], "§30 FAILS ON THE OLD CODE: off, the job hands the engine its switch, off (advanceLines: false)");
 	}
 	{
 		const w = linesWorld();
@@ -4746,6 +4749,7 @@ async function holdSections() {
 		w.now += 5 * MIN;
 		await job.tick();
 		eq([w.smtp.length, w.state("LD-TEST-0953")], [2, ["drafted", ""]], "§30 ...and the next load still sends");
+		eq([...new Set(w.handed)], [true], "§30 FAILS ON THE OLD CODE: on, the job hands the engine its switch (advanceLines: true), without which the engine refuses the line");
 	}
 	for (const [what, change, printed] of [
 		["voided", (w, id, line) => w.voidLine(id, line.id), () => []],
@@ -4776,7 +4780,7 @@ async function holdSections() {
 	}
 	{
 		// A line added after the run read the load and before the engine printed it: what printed isn't what
-		// the run read (its fingerprint's reading), so it is made again from a fresh read.
+		// the run read (its fingerprint's reading), so it is made again from a fresh read, before any number.
 		const w = linesWorld();
 		const job = await holdStarted(jobLib, w, { env: ADVANCE_ON });
 		const id = "LD-TEST-0956";
@@ -4790,9 +4794,9 @@ async function holdSections() {
 			return null;
 		};
 		await job.tick();
-		eq([w.actions("auto_invoice_number_void").map((a) => a.details), w.smtp.length, claimOf(w, id).invoice_id],
-			[["10202026-1 was reserved for this load and never used (LINES_CHANGED)"], 1, "10202026-2"],
-			"§30 FAILS ON THE OLD CODE: a line added after the run read the load, before the engine printed it: LINES_CHANGED, made again from a fresh read");
+		eq([w.actions("auto_invoice_number_void").map((a) => a.details), w.calls.mint.length, w.smtp.length, claimOf(w, id).invoice_id, w.calls.render.length],
+			[[], 1, 1, "10202026-1", 1],
+			"§30 FAILS ON THE OLD CODE: a line added after the run read the load, before the engine printed it: LINES_CHANGED before a number is reserved, made again from a fresh read under the first number");
 		eq(JSON.parse(claimOf(w, id).fingerprint_json || "{}").advanceLines, ["1:50000"], "§30 FAILS ON THE OLD CODE: ...its fingerprint keeps the line it printed");
 		w.now += 5 * MIN;
 		await job.tick();
@@ -4822,17 +4826,21 @@ async function holdSections() {
 const LINES = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
 const ADVANCE_ON = Object.freeze({ AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" });
 // An alert world whose lines table is the lines module's own, and whose made-up engine prints the
-// load's active lines in its answer (ctx.lineSummary.items, the engine's contract in mode "auto"
-// with the switch on). `addLine`, `voidLine`: a Super Admin's, through the module.
+// load's active lines in its answer (ctx.lineSummary.items) only when the job hands it its switch
+// as advanceLines: true, and otherwise refuses a load with one (ADVANCE_LINES): the engine's contract
+// in mode "auto". `handed`: each call's advanceLines. `addLine`, `voidLine`: a Super Admin's.
 function linesWorld(opts = {}) {
 	const w = alertWorld(opts);
 	w.db.exec("DROP TABLE broker_invoice_lines");
 	LINES.ensureSchema(w.db);
+	w.handed = [];
 	const prepare = w.engine.prepare;
 	w.engine.prepare = async (args) => {
+		w.handed.push(args.advanceLines === undefined ? "(none)" : args.advanceLines);
 		const r = await prepare(args);
 		if (r && r.ok) {
 			const items = LINES.listLines(w.db, args.loadId).filter((l) => !l.voided).map((l) => ({ id: l.id, label: l.label, amountCents: l.amountCents, reference: l.reference }));
+			if (items.length && args.advanceLines !== true) return { ok: false, http: 422, code: "ADVANCE_LINES" };
 			if (items.length) r.ctx.lineSummary = { items };
 		}
 		return r;
