@@ -757,6 +757,15 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 			check(`§1 scripts/*.sh: no n8n instance or workflow in code, no production value as a \${VAR:-…} default (${[...new Set(shellBad)].join(", ") || "none"})`, shellBad.length === 0);
 
+			// A factored invoice's remit lines and the date Triumph went live: settings with
+			// no default in code, so nothing can be printed or sent on a value not set here.
+			const triumphDefault = [];
+			for (const f of [...APP_FILES, ...SCRIPT_JS]) {
+				const { text, code } = lexed.get(f);
+				for (const m of code.matchAll(/\bTRIUMPH_(?:NOA_LINES|LIVE_CONFIRMED_ON)\b[)\]\s]*(?:\|\||\?\?)\s*["'`][^"'`]/g)) triumphDefault.push(`${f}:${lineOf(text, m.index)}`);
+			}
+			check(`§1 TRIUMPH_NOA_LINES and TRIUMPH_LIVE_CONFIRMED_ON have no default in code (${triumphDefault.join(", ") || "none"})`, triumphDefault.length === 0);
+
 			// The sheet by name: no --sheet-id default and no fallback to the
 			// production constant.
 			const argDefault = [];
