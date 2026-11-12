@@ -65,6 +65,21 @@
  *      named driver's; every refused caller gets nothing and asks no reader; off,
  *      no key and no reader. Mutants: the stored rows annotated instead of his
  *      view (a rate column comes back), the annotation line removed.
+ *  §10 the driver's alerts, and the Drivers page's read-only copy of them
+ *      (lib/driver-alerts-sent.js, GET /api/drivers-directory/:id/alerts-sent):
+ *      the payload's `notifications` are alertRows(), its one read. The copy is
+ *      Super Admin only (signed out 401, every other role 403, before any read),
+ *      400 / 404 for a bad or unknown row, `linked: false` for a row that names
+ *      no Driver account or two (findDriverAccountSpelling()), and otherwise
+ *      exactly what that driver's own payload carries: the same rows in the same
+ *      order, at most 100, as title, text and time only, with no other driver's
+ *      row and no metadata, and nothing written. Notifications, accounts and
+ *      Drivers page rows are a real SQLite from server.js's own CREATE TABLE
+ *      text. Mutants on the new lines: the gate widened and removed, the row's
+ *      own spelling read, every column served, the key not lowercased, the cap
+ *      and the order changed, rows served for an unlinked row, no Cache-Control,
+ *      any id taken, the payload's list cut short, the mount wired to a gate that
+ *      admits anyone.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -162,6 +177,11 @@ const heldByOtherLookup = (db) =>
 const PAY_BASES_SRC = [liftFn("invoicePayBasis"), liftFn("invoicePayBasesOf")].join("\n");
 const payBasesLookup = (db) =>
 	new Function("db", `"use strict";\n${PAY_BASES_SRC}\nreturn invoicePayBasesOf;`)(db);
+// ...and its alerts through lib/driver-alerts-sent.js's alertRows() (§10). A base from
+// before the module has no such file: §10 fails there, and §1-§9 still run, since that
+// payload never asks for it.
+const ALERTS_FILE = path.join(ROOT, "lib", "driver-alerts-sent.js");
+const ALERTS = fs.existsSync(ALERTS_FILE) ? require(ALERTS_FILE) : null;
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -233,6 +253,8 @@ function makeDeps() {
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
 		voiceNotes: require("../lib/voice-notes"),
+		// The payload's alerts (§10): the shipped read, over this recording db.
+		driverAlertsSent: ALERTS || { alertRows: () => { throw new Error("lib/driver-alerts-sent.js is missing"); } },
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),
@@ -1172,6 +1194,269 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			ok("MUTANT 12 (the route without the annotation): §9.1 flips, no key with the flag on",
 				r.status === 200 && same(phasesOf(r), [["L-100", "(no key)"]]), JSON.stringify(phasesOf(r)));
 		}
+	})();
+
+	// =========================================================================
+	console.log("\n§10  the driver's alerts, and the Drivers page's Alerts sent (lib/driver-alerts-sent.js)");
+	// =========================================================================
+	// Notifications, accounts and Drivers page rows are a real SQLite from server.js's
+	// own CREATE TABLE text; every other payload read keeps the canned fixture. The
+	// Drivers page route is the shipped module, mounted by server.js's own line over the
+	// shipped requireRole and Drivers page row lookup. What is missing on the base is a
+	// FAIL here, never a crash.
+	await (async () => {
+		const ALERTS_PATH = "/api/drivers-directory/:id/alerts-sent";
+		const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const READ = "const driverNotifications = driverAlertsSent.alertRows(db, driverName);";
+		const REQUIRE_LINE = 'const driverAlertsSent = require("./lib/driver-alerts-sent");';
+		const MOUNT_LINE = (SRC.match(/^driverAlertsSent\.mount\(app, \{[^\n]*\}\);$/m) || [null])[0];
+		ok("§10.0 lib/driver-alerts-sent.js loads, with its route's path", !!ALERTS && ALERTS.PATH === ALERTS_PATH);
+		ok("§10.0b the payload reads its alerts once, through alertRows(), with no notifications query of its own",
+			routeCode.split(READ).length === 2 && !/\bFROM notifications\b/.test(routeCode));
+		ok("§10.0c server.js requires the module once and mounts it once, each on a line of its own",
+			SRC.split(`\n${REQUIRE_LINE}\n`).length === 2 && !!MOUNT_LINE && SRC.split(MOUNT_LINE).length === 2);
+		const ddl = (table) => (SRC.match(new RegExp(`db\\.exec\\(\`\\s*CREATE TABLE IF NOT EXISTS ${table} \\([\\s\\S]*?\`\\);`)) || [null])[0];
+		const TABLES_DDL = ["notifications", "users", "drivers_directory"].map(ddl);
+		ok("§10.0d server.js has the notifications, users and drivers_directory CREATE TABLE", TABLES_DDL.every(Boolean));
+		if (!ALERTS || !MOUNT_LINE || !TABLES_DDL.every(Boolean)) return;
+
+		const adb = new Database(":memory:");
+		for (const text of TABLES_DDL) new Function("db", text)(adb);
+		const account = adb.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', ?, ?)");
+		for (const row of [
+			[1, "super_admin", "Super Admin", ""], [2, "LogisX-1001", "Driver", "Desoren King"], [3, "LogisX-1002", "Driver", "Soren King"],
+			[4, "dispatch1", "Dispatcher", ""], [8, "LogisX-1008", "Driver", "Avery Twin"], [9, "LogisX-1009", "Driver", "avery  twin"],
+		]) account.run(...row);
+		// Soren King's row is stored with a doubled space and Jordan Nobody's has no account.
+		// Row 14 names two Driver accounts, and only through spacing; row 15 equals one of
+		// them case aside.
+		const directory = adb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (?, ?)");
+		for (const row of [[11, "Desoren King"], [12, "Soren  King"], [13, "Jordan Nobody"], [14, "Avery   Twin"], [15, "AVERY TWIN"]]) directory.run(...row);
+		const alert = adb.prepare("INSERT INTO notifications (id, driver_name, type, title, body, metadata, read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+		// Desoren King's three, keyed as every writer keys a row (his name lowercased), with
+		// metadata his screen never shows.
+		alert.run(201, "desoren king", "load-assigned", "New Load Assigned: QA-7701", "Lakeview, OH → Hilltop, KY", JSON.stringify({ loadId: "QA-7701", rowIndex: 41, note: "QA-META-ONLY" }), 1, "2026-11-10 13:05:00");
+		alert.run(204, "desoren king", "message", "New message from dispatch", "Call me when you reach the yard.", JSON.stringify({ from: "dispatch", to: "Desoren King", note: "QA-META-ONLY" }), 0, "2026-11-11 15:20:00");
+		alert.run(209, "desoren king", "resign-requested", "Please sign again: Equipment Policy", "", JSON.stringify({ docKey: "equipment_policy" }), 0, "2026-11-12 19:30:00");
+		// No writer keys a row by another case or spacing: neither list holds these.
+		alert.run(210, "Desoren King", "message", "QA stray: another case", "", "{}", 0, "2026-11-12 20:00:00");
+		alert.run(500, "soren  king", "message", "QA stray: another spacing", "", "{}", 0, "2026-11-12 21:00:00");
+		// Soren King's 105 (ids 300-404), more than the payload's 100.
+		for (let i = 0; i < 105; i++) {
+			alert.run(300 + i, "soren king", "geofence", `At Shipper - Load QA-${8000 + i}`, "You have arrived at the pickup location",
+				JSON.stringify({ loadId: `QA-${8000 + i}` }), 0, `2026-11-0${1 + (i % 9)} 12:${String(i % 60).padStart(2, "0")}:00`);
+		}
+		// Jordan Nobody's, on a Drivers page row no account holds; Avery Twin's one.
+		alert.run(600, "jordan nobody", "message", "QA no account", "", "{}", 0, "2026-11-12 22:00:00");
+		alert.run(700, "avery twin", "time-off", "Time off approved: Nov 20 to Nov 22", "", JSON.stringify({ availabilityId: 3, event: "approved" }), 0, "2026-11-12 23:00:00");
+
+		// The driver's own payload, its alerts read from that SQLite.
+		const payloadOver = (src = ROUTE_SRC) => {
+			const { deps, reads } = makeDeps();
+			const canned = deps.db;
+			deps.db = { prepare(sql) { if (/\bnotifications\b/.test(sql)) { reads.push(sql); return adb.prepare(sql); } return canned.prepare(sql); } };
+			const names = Object.keys(deps);
+			let captured = null;
+			const app = { get: (p, ...chain) => { captured = { path: p, chain }; } };
+			new Function("app", ...names, `${src};`)(app, ...names.map((n) => deps[n]));
+			return { chain: captured.chain, reads };
+		};
+		// server.js's mount line over a capturing app that catches every verb, so a write
+		// route would show, with the shipped findDriverAccountSpelling(); every statement
+		// prepared is recorded.
+		const SPELLING_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverAccountSpelling")].join("\n");
+		function alertsRoute({ lib = ALERTS, mountLine = MOUNT_LINE } = {}) {
+			const reads = [];
+			const rdb = { prepare(sql) { reads.push(sql); return adb.prepare(sql); } };
+			const spelling = new Function("db", `"use strict";\n${SPELLING_SRC}\nreturn findDriverAccountSpelling;`)(rdb);
+			const registered = [];
+			const app = Object.fromEntries(["get", "post", "put", "patch", "delete", "use", "all"].map((verb) => [verb, (p, ...chain) => { registered.push({ verb, path: p, chain }); }]));
+			new Function("app", "driverAlertsSent", "requireRole", "db", "findDriverAccountSpelling", `"use strict";\n${mountLine}`)(app, lib, requireRole, rdb, spelling);
+			return { registered, reads };
+		}
+		// Run the chain the way Express does; `reads` is what this one request prepared.
+		async function ask(route, user, id) {
+			const start = route.reads.length;
+			const hit = route.registered.find((x) => x.verb === "get" && x.path === ALERTS_PATH);
+			if (!hit) return { status: 0, body: null, headers: {}, reads: [] };
+			const url = `/api/drivers-directory/${id}/alerts-sent`;
+			const req = { method: "GET", url, originalUrl: url, params: { id }, query: {}, headers: {}, route: { path: ALERTS_PATH }, session: user ? { user: { ...user } } : {} };
+			const res = {
+				statusCode: 200, body: undefined, headers: {},
+				status(c) { this.statusCode = c; return this; },
+				json(b) { this.body = b; return this; },
+				set(k, v) { this.headers[String(k).toLowerCase()] = v; return this; },
+				setHeader(k, v) { this.headers[String(k).toLowerCase()] = v; },
+			};
+			for (const mw of hit.chain) {
+				let next = false;
+				await mw(req, res, () => { next = true; });
+				if (!next) break;
+			}
+			return { status: res.statusCode, body: res.body, headers: res.headers, reads: route.reads.slice(start) };
+		}
+		const said = (x) => `${x.status} ${JSON.stringify(x.body)}`.slice(0, 200);
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+		const readsAlerts = (x) => x.reads.some((s) => /\bnotifications\b/.test(s));
+		const asSent = (rows) => rows.map((n) => ({ title: n.title, text: n.body, time: n.createdAt }));
+
+		const route = alertsRoute();
+		ok("§10.1 the module registers one route, GET /api/drivers-directory/:id/alerts-sent, and nothing else",
+			route.registered.length === 1 && route.registered[0].verb === "get" && route.registered[0].path === ALERTS_PATH,
+			JSON.stringify(route.registered.map((x) => `${x.verb} ${x.path}`)));
+
+		// The one read.
+		const rows = ALERTS.alertRows(adb, "Desoren King");
+		ok("§10.2 alertRows(): his rows newest first, with the payload's columns, times as ISO-8601 with Z",
+			same(rows.map((n) => n.id), [209, 204, 201]) && same(Object.keys(rows[0] || {}), ["id", "type", "title", "body", "metadata", "read", "createdAt"])
+			&& rows[0].createdAt === "2026-11-12T19:30:00Z", JSON.stringify(rows[0]));
+		ok("§10.3 ...keyed by his name trimmed and lowercased, as every writer keys a row: another case or edge spaces read the same rows",
+			same(ALERTS.alertRows(adb, "  DESOREN king ").map((n) => n.id), [209, 204, 201]));
+		ok("§10.4 ...never a row under another case or spacing of the key, and never another driver's",
+			!rows.some((n) => [210, 500, 600].includes(n.id) || (n.id >= 300 && n.id <= 404)));
+		const many = ALERTS.alertRows(adb, "Soren King");
+		ok("§10.5 ...at most ALERTS_LIMIT (100), the newest: 105 stored, ids 404 down to 305",
+			ALERTS.ALERTS_LIMIT === 100 && many.length === 100 && many[0].id === 404 && many[99].id === 305,
+			`${many.length} rows, ${many[0] && many[0].id} to ${many[99] && many[99].id}`);
+
+		// The gate: the shipped requireRole at the mount, before anything is read.
+		let x = await ask(route, null, "11");
+		ok("§10.6 signed out: 401 before any read", x.status === 401 && x.reads.length === 0, said(x));
+		for (const [label, user] of [["a Dispatcher", DISPATCH], ["the driver himself", DK], ["another driver", SK], ["an Investor", INVESTOR], ["a Dispatcher whose session carries his name", DISPATCH_NAMED]]) {
+			x = await ask(route, user, "11");
+			ok(`§10.7 ${label}: 403 Forbidden before any read`, forbidden(x) && x.reads.length === 0, said(x));
+		}
+		x = await ask(route, SUPER, "11");
+		ok("§10.8 a Super Admin: 200, linked", x.status === 200 && x.body && x.body.linked === true, said(x));
+		ok("§10.9 ...kept by no browser or proxy (Cache-Control private, no-store)", x.headers["cache-control"] === "private, no-store", JSON.stringify(x.headers));
+
+		// What a Super Admin is answered for each kind of row.
+		for (const bad of ["0", "abc", "-4", "1.5", "12abc", "", "99999999999"]) {
+			x = await ask(route, SUPER, bad);
+			ok(`§10.10 id "${bad}": 400 INVALID_DRIVER_ID, no alert read`, x.status === 400 && x.body.code === "INVALID_DRIVER_ID" && !readsAlerts(x), said(x));
+		}
+		x = await ask(route, SUPER, "77");
+		ok("§10.11 an id no Drivers page row has: 404 DRIVER_NOT_FOUND, no alert read", x.status === 404 && x.body.code === "DRIVER_NOT_FOUND" && !readsAlerts(x), said(x));
+		x = await ask(route, SUPER, "13");
+		ok("§10.12 a row no Driver account holds: { linked: false }, no alert read",
+			x.status === 200 && same(x.body, { linked: false }) && !readsAlerts(x), said(x));
+		x = await ask(route, SUPER, "14");
+		ok("§10.13 a row two Driver accounts match only through spacing: { linked: false }, no alert read",
+			x.status === 200 && same(x.body, { linked: false }) && !readsAlerts(x), said(x));
+		x = await ask(route, SUPER, "15");
+		const AT = { id: 8, role: "Driver", username: "LogisX-1008", driverName: "Avery Twin" };
+		const ownAT = await call(payloadOver(), AT, "Avery Twin");
+		ok("§10.13b a row equal to one of them case aside: that account's alerts, as his own payload carries them",
+			x.status === 200 && x.body.linked === true && ownAT.status === 200 && ownAT.body.notifications.length === 1
+				&& same(x.body.alerts, asSent(ownAT.body.notifications)), `${said(x)} payload ${ownAT.body && JSON.stringify(ownAT.body.notifications)}`);
+
+		// PARITY: the list is what that driver's own payload carries, row for row.
+		const own = await call(payloadOver(), DK, "Desoren King");
+		const page = await ask(route, SUPER, "11");
+		ok("§10.14 PARITY, Desoren King: the Drivers page's list is his own payload's notifications, as title, text and time, in its order",
+			own.status === 200 && page.status === 200 && own.body.notifications.length === 3 && same(page.body.alerts, asSent(own.body.notifications)),
+			`payload ${JSON.stringify(own.body && own.body.notifications && own.body.notifications.map((n) => n.id))}, page ${said(page)}`);
+		const ownSK = await call(payloadOver(), SK, "Soren King");
+		const pageSK = await ask(route, SUPER, "12");
+		ok("§10.15 PARITY, Soren King, whose Drivers page row is stored with a doubled space: his own payload's 100 newest, the same rows in the same order",
+			ownSK.status === 200 && ownSK.body.notifications.length === 100 && pageSK.status === 200 && same(pageSK.body.alerts, asSent(ownSK.body.notifications)),
+			`payload ${ownSK.body && ownSK.body.notifications && ownSK.body.notifications.length}, page ${pageSK.body && pageSK.body.alerts && pageSK.body.alerts.length}`);
+		ok("§10.16 ...and the answer names the cap the list reached, so the page can say it shows the newest 100",
+			pageSK.body.limit === 100 && pageSK.body.alerts.length === pageSK.body.limit && page.body.limit === 100, said(pageSK));
+		ok("§10.17 every alert is title, text and time and nothing else; the answer is linked, alerts and limit",
+			[...page.body.alerts, ...pageSK.body.alerts].every((a) => same(Object.keys(a), ["title", "text", "time"])) && same(Object.keys(page.body).sort(), ["alerts", "limit", "linked"]),
+			JSON.stringify(page.body.alerts[0]));
+		const pageText = JSON.stringify(page.body);
+		ok("§10.18 nothing beyond what he sees: no metadata, type, id or read mark, and no stray or other driver's row",
+			!pageText.includes("QA-META-ONLY") && !pageText.includes("rowIndex") && !pageText.includes("load-assigned") && !/"(id|type|read|metadata)"/.test(pageText)
+				&& !pageText.includes("QA stray") && !pageText.includes("QA no account") && !pageText.includes("At Shipper"),
+			pageText.slice(0, 200));
+		ok("§10.19 ...each title and text is the title and body his own Alerts tab shows for that row",
+			page.body.alerts.every((a, i) => a.title === own.body.notifications[i].title && a.text === own.body.notifications[i].body));
+
+		// Read-only.
+		const tally = () => adb.prepare("SELECT COUNT(*) AS n, SUM(read) AS r, MAX(id) AS m FROM notifications").get();
+		const before = tally();
+		const readOnly = alertsRoute();
+		for (const id of ["11", "12", "13", "14", "15"]) await ask(readOnly, SUPER, id);
+		ok("§10.20 read-only: every statement it prepares is a SELECT, and no alert is added or marked read",
+			readOnly.reads.length > 0 && readOnly.reads.every((s) => /^\s*SELECT\b/i.test(s)) && same(before, tally()),
+			JSON.stringify({ before, after: tally(), statements: readOnly.reads.length }));
+
+		// A read that fails: 500 READ_FAILED in words, logged without the driver's name.
+		const logged = [];
+		const broken = [];
+		ALERTS.mount({ get: (p, ...chain) => broken.push({ verb: "get", path: p, chain }) }, {
+			requireRole,
+			db: { prepare() { throw Object.assign(new Error("disk I/O error reading Desoren King"), { code: "SQLITE_IOERR" }); } },
+			accountSpelling: () => "Desoren King",
+			logger: { error: (...a) => logged.push(a.join(" ")), log() {}, warn() {} },
+		});
+		x = await ask({ registered: broken, reads: [] }, SUPER, "11");
+		ok("§10.21 a read that fails: 500 READ_FAILED in words; the log line names the error's code, never the driver",
+			x.status === 500 && x.body && x.body.code === "READ_FAILED" && /couldn't be loaded/.test(x.body.error) && logged.length === 1 && logged[0].includes("SQLITE_IOERR") && !logged[0].includes("Desoren"),
+			`${said(x)} ${JSON.stringify(logged)}`);
+
+		// MUTANTS on the new lines: each must flip a check above.
+		const LIB_SRC = fs.readFileSync(ALERTS_FILE, "utf8");
+		const libFrom = (src) => { const m = { exports: {} }; new Function("module", "exports", "require", src)(m, m.exports, require); return m.exports; };
+		const libMutant = (from, to) => (LIB_SRC.split(from).length === 2 ? libFrom(LIB_SRC.replace(from, to)) : null);
+		const parityHolds = async (lib, payloadSrc = ROUTE_SRC) => {
+			const a = await call(payloadOver(payloadSrc), SK, "Soren King");
+			const b = await ask(alertsRoute({ lib }), SUPER, "12");
+			const c = await call(payloadOver(payloadSrc), DK, "Desoren King");
+			const d = await ask(alertsRoute({ lib }), SUPER, "11");
+			return a.status === 200 && b.status === 200 && a.body.notifications.length === 100 && same(b.body.alerts, asSent(a.body.notifications))
+				&& c.status === 200 && d.status === 200 && c.body.notifications.length === 3 && same(d.body.alerts, asSent(c.body.notifications));
+		};
+		ok("§10.22 the parity probe holds on the shipped code", await parityHolds(ALERTS));
+		const MUTANTS = [
+			[13, "the gate opened to Dispatchers: §10.7 flips",
+				['d.requireRole("Super Admin")', 'd.requireRole("Super Admin", "Dispatcher")'],
+				async (lib) => (await ask(alertsRoute({ lib }), DISPATCH, "11")).status === 200],
+			[14, "no role gate at the mount: §10.6 flips",
+				['app.get(PATH, d.requireRole("Super Admin"), (req, res) => {', "app.get(PATH, (req, res) => {"],
+				async (lib) => (await ask(alertsRoute({ lib }), null, "11")).status !== 401],
+			[15, "the Drivers page row's own spelling read, not his account's: §10.15 flips",
+				["alertRows(d.db, spelling)", "alertRows(d.db, row.driver_name)"],
+				async (lib) => !(await parityHolds(lib))],
+			[16, "every column served: §10.17 flips",
+				["return { title: row.title, text: row.body, time: row.createdAt };", "return { ...row, text: row.body, time: row.createdAt };"],
+				async (lib) => !(await ask(alertsRoute({ lib }), SUPER, "11")).body.alerts.every((a) => same(Object.keys(a), ["title", "text", "time"]))],
+			[17, "the key not lowercased: parity flips",
+				[".trim().toLowerCase();", ".trim();"],
+				async (lib) => !(await parityHolds(lib))],
+			[18, "a cap past the payload's: parity flips",
+				[".all(key, ALERTS_LIMIT);", ".all(key, ALERTS_LIMIT + 5);"],
+				async (lib) => !(await parityHolds(lib))],
+			[19, "oldest first: parity flips",
+				["ORDER BY id DESC", "ORDER BY id ASC"],
+				async (lib) => !(await parityHolds(lib))],
+			[20, "rows served for a row with no single account: §10.12 flips",
+				["if (!spelling) return res.json({ linked: false });",
+					"if (!spelling) return res.json({ linked: false, alerts: alertRows(d.db, row.driver_name).map(sentView) });"],
+				async (lib) => !same((await ask(alertsRoute({ lib }), SUPER, "13")).body, { linked: false })],
+			[21, "no Cache-Control: §10.9 flips",
+				['res.set("Cache-Control", "private, no-store");', ""],
+				async (lib) => (await ask(alertsRoute({ lib }), SUPER, "11")).headers["cache-control"] !== "private, no-store"],
+			[24, "any id taken: §10.10 flips",
+				["if (!ROW_ID_RE.test(id))", "if (!id)"],
+				async (lib) => (await ask(alertsRoute({ lib }), SUPER, "abc")).status !== 400],
+		];
+		for (const [n, label, [from, to], flips] of MUTANTS) {
+			const lib = libMutant(from, to);
+			ok(`§10.m${n} mutant ${n} applies to lib/driver-alerts-sent.js`, !!lib);
+			if (lib) ok(`MUTANT ${n} (${label})`, await flips(lib));
+		}
+		// The payload's list cut short: parity must see it.
+		const CUT = routeCode.split(READ).length === 2 && ROUTE_SRC.split(READ).length === 2
+			? ROUTE_SRC.replace(READ, "const driverNotifications = driverAlertsSent.alertRows(db, driverName).slice(0, 50);") : null;
+		ok("§10.m22 mutant 22 applies to the payload route", !!CUT);
+		if (CUT) ok("MUTANT 22 (the payload's own list cut to 50): parity flips", !(await parityHolds(ALERTS, CUT)));
+		// The mount wired to a gate that admits anyone.
+		const OPEN = MOUNT_LINE.split("{ requireRole,").length === 2 ? MOUNT_LINE.replace("{ requireRole,", "{ requireRole: () => (req, res, next) => next(),") : null;
+		ok("§10.m23 mutant 23 applies to server.js's mount line", !!OPEN);
+		if (OPEN) ok("MUTANT 23 (the mount wired to a gate that admits anyone): §10.7 flips", (await ask(alertsRoute({ mountLine: OPEN }), DISPATCH, "11")).status === 200);
 	})();
 
 	console.log(`\n${passed} passed, ${failed} failed`);
