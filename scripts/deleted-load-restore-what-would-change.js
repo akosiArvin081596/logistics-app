@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// What DELETED_LOAD_RESTORE_ENABLED (lib/deleted-load-restore.js) would change, read only: the report hard rule 3
-// asks for before the switch-on. It runs the module's own banner code on the data it is given, with the flag on
+// What DELETED_LOAD_RESTORE_ENABLED (lib/deleted-load-restore.js) would change, read only: the check run on
+// production's data before the switch-on. It runs the module's own banner code on the data it is given, with the flag on
 // for this run only: create() and mount() on a stand-in app that registers nothing, its notices kept in memory,
 // then hiddenLoads() for a made-up Super Admin session, the app's own answer to the first Super Admin dashboard
 // read. The module's helpers are server.js's, lifted from this checkout at run time (scripts/lib/ledger-world.js
@@ -16,8 +16,8 @@
 // --dry-run is required; there is no other mode. Every target is named, none has a default:
 //   --db          the app directory's own database or a copy under the temp folder (ledger-world dbScope()). A
 //                 missing file is refused, never created. Opened readonly with fileMustExist, checked to be
-//                 read-only, then query_only = ON, so any write throws. A database without #754's row_digests
-//                 column is refused: this report never adds it.
+//                 read-only, then query_only = ON, so any write throws. A database without the row_digests
+//                 column (the module's ensureSchema() adds it when the app starts) is refused: this report never adds it.
 //   the sheet     named once: --sheet-id=<id>; --sheet-id=env, the app's own SPREADSHEET_ID; SPREADSHEET_ID in
 //                 the environment (lib/sheet-id.js scriptSpreadsheetId() refuses when there is none); or
 //                 --values-json, a saved values.get of Job Tracking, which reads no key and no network. A live
@@ -80,7 +80,7 @@ const DELETE_AUDIT_SQL = "SELECT timestamp, details FROM audit_trail WHERE entit
 const EVIDENCE = ["deleted_with_no_row", "created_by_rate_con", "created_in_sheet_row", "created_by_n8n", "row_changed", "row_in_other_month"];
 const CREATED = ["created_by_rate_con", "created_in_sheet_row", "created_by_n8n"];
 // A delete that found no row says so in its own delete_load row (the delete route's words), written within
-// moments of it; a delete from before that row was written (#211, 2026-08-08) may have lost a row's number.
+// moments of it. One without such a row may have been stored with row 0 when its sheet read failed, row or not.
 const NO_ROW_TEXT = "no matching Job Tracking row";
 const OWN_AUDIT_MS = 10 * 60 * 1000;
 const WINDOW_MS = 90 * 24 * 3600 * 1000;
@@ -216,7 +216,7 @@ function checkShape(db) {
 		const missing = cols.filter((c) => !have.includes(c));
 		if (missing.length) {
 			throw new Refusal(`the database's ${table} table has no ${missing.join(", ")} column${missing.length > 1 ? "s" : ""}` +
-				`${missing.includes("row_digests") ? ": #754's deploy adds it, and this report never does" : ""}`);
+				`${missing.includes("row_digests") ? ": the app adds it when it starts with the restore code, and this report never does" : ""}`);
 		}
 	}
 }

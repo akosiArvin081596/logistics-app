@@ -2,7 +2,7 @@
 // delete per case scripts/deleted-load-restore-what-would-change.js sorts, each answer worked out by hand below.
 // Every load, person, place, amount and reason is made up. It writes only under the folder it is given: a
 // database built from every CREATE TABLE in server.js (scripts/lib/work-days-world.js schemaDb()), with the
-// row_digests column #754 adds, a saved values.get of Job Tracking, and a settings file for the copy.
+// row_digests column lib/deleted-load-restore.js adds, a saved values.get of Job Tracking, and a settings file for the copy.
 //
 // Two variants:
 //   "base"   the day before the switch-on: the flag off, no delete with recorded rows, nothing told yet;
@@ -107,7 +107,7 @@ function deletesOf(now) {
 }
 
 // Builds the world in `dir` and answers its files. `digests: false` leaves out the row_digests column (a
-// database #754's deploy hasn't reached).
+// database the restore code's start-up hasn't reached).
 function buildWorld({ dir, now = Date.now(), variant = "base", digests = true }) {
 	if (!["base", "after"].includes(variant)) throw new Error(`no world variant ${variant}`);
 	const after = variant === "after";
