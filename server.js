@@ -74287,9 +74287,12 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 // A kill switch: it moves no money and writes nothing, so it is on unless set to false, and off,
 // every route answers 404 FEATURE_OFF (scripts/test-driver-performance.js). The board's flag is a
 // separate one, on only when exactly "true": a driver sees no ranking until someone decides he should.
+// So is the hours flag: a past week's driving hours, and the only read of the daily ELD activity
+// rollup, wait until its estimate is checked, and need the rollup itself on.
 const driverPerformance = require("./lib/driver-performance-routes").mount(app, {
 	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
+	drivingHours: process.env.DRIVER_PERFORMANCE_HOURS_ENABLED === "true" && ELD_ACTIVITY_DAILY_ENABLED ? require("./lib/eld-activity-daily").driverWeekMinutesReader(db) : null,
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
 	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
 	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
