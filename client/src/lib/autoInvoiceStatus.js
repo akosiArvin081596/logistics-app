@@ -270,7 +270,6 @@ export const AUTO_INVOICE_STOP_WORDS = Object.freeze({
   SEND_UNANSWERED: 'Gmail did not answer an invoice email, so it may have been sent.',
   MAYBE_SENT: 'An invoice email may have been sent but was not found in Sent Mail.',
   LOAD_CHANGED_AFTER_SEND: 'A load changed after its invoice was sent.',
-  TOO_MANY_HELD: "3 loads changed after their invoices were sent within a day, or that count couldn't be read, so sending stopped in case something bigger is wrong.",
 })
 
 // The settings read carries `alerts` ({ on: false }) only while no address is set on the server

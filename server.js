@@ -55978,8 +55978,8 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     Set to false, the 5-minute sweep runs as described above.
 //   AUTO_INVOICE_HOLD_ONE_LOAD  a kill switch: a load changed after its invoice was sent is flagged
 //     alone when the change affects the invoice, and only logged otherwise; every other load keeps
-//     sending, and a third flagged within 24 hours stops all sending. Set to false, any change to a
-//     sent load stops all sending, as before.
+//     sending, however many are flagged. Set to false, any change to a sent load stops all sending,
+//     as before.
 //   AUTO_INVOICE_ALERT_TO  who a flag and a stop are emailed to, through sendEmail(). No default
 //     and no fallback: unset, nothing is mailed. Never read in a replica.
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to

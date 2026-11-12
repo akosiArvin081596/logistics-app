@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // What the first change check after the hold-one-load deploy would do (AUTO_INVOICE_HOLD_ONE_LOAD),
 // read only: every load whose invoice the job sent, compared with today's Job Tracking by the
-// job's own rule (rules.sentChange(), as its check runs it), so changes nobody has seen yet can't
-// trip the breaker unannounced on the first check. Run it before the deploy.
+// job's own rule (rules.sentChange(), as its check runs it), so the loads the first check would
+// flag are known beforehand. Run it before the deploy.
 //
 //   SPREADSHEET_ID=<sheet> node scripts/auto-invoice-hold-dry-run.js --dry-run --db=<app.db> --key=<the service account's key file> [--json]
 //   node scripts/auto-invoice-hold-dry-run.js --dry-run --db=<app.db> --values-json=<file> [--json]
@@ -16,8 +16,7 @@
 // keys it (rules.keyedRows()).
 //
 // Prints counts only: sent loads checked; would hold, by field (a row removed in the app holds as
-// removed); would log, by field; rows gone from the sheet; loads held already in the last 24 hours;
-// whether the breaker would trip; the stop now.
+// removed); would log, by field; rows gone from the sheet; the stop now.
 // Never a load, an address or an amount. Writes nothing and sends nothing.
 // Exit 0 done; 2 refused (an argument, a database without the tables, no sheet named); 1 any other
 // failure. Required as a module (by its runner) it runs nothing and exports run().
@@ -52,8 +51,8 @@ function parseArgs(argv) {
 }
 
 // One dry run on a database the caller opened read-only, against Job Tracking's values (its
-// header row first), as the first check at `nowIso` would see them. Counts only.
-function run({ db, values, nowIso = new Date().toISOString(), helpers = null }) {
+// header row first), as the first check would see them. Counts only.
+function run({ db, values, helpers = null }) {
 	if (!ledger.hasSchema(db)) throw new Refusal("the database has no automatic-invoice tables");
 	const lifted = helpers || require("./auto-invoice-shadow-report").liftSheetHelpers();
 	const parsed = lifted.parseSheet({ values: Array.isArray(values) ? values : [] });
@@ -67,19 +66,8 @@ function run({ db, values, nowIso = new Date().toISOString(), helpers = null }) 
 		wouldHold: { loads: 0, byField: {} },
 		wouldLog: { loads: 0, byField: {} },
 		rowsGone: 0,
-		heldAlready: 0,
-		breaker: { stopAt: rules.HELD_LOADS_STOP, wouldTrip: false, countUnreadable: false },
 		stopped: stop ? stop.reason || "unknown" : null,
 	};
-	// The breaker's list as the first hold would read it: the loads held within the window.
-	const nowMs = Date.parse(nowIso);
-	const heldKeys = new Set();
-	try {
-		for (const e of ledger.readHeldLoads(db)) if (e && nowMs - Date.parse(e.at) <= rules.HELD_LOADS_WINDOW_MS) heldKeys.add(e.load);
-	} catch {
-		out.breaker.countUnreadable = true;
-	}
-	out.heldAlready = heldKeys.size;
 	// The check skips a read with no load rows, so the dry run says so and counts nothing.
 	if (out.skipped) return out;
 	const records = rules.indexRecords(ledger.readRecords(db));
@@ -102,7 +90,6 @@ function run({ db, values, nowIso = new Date().toISOString(), helpers = null }) 
 		if (s.newHold) {
 			out.wouldHold.loads++;
 			tally(out.wouldHold, s.hold);
-			heldKeys.add(c.load_key);
 		}
 		if (s.logged.length) {
 			out.wouldLog.loads++;
@@ -110,7 +97,6 @@ function run({ db, values, nowIso = new Date().toISOString(), helpers = null }) 
 		}
 		if (s.gone) out.rowsGone++;
 	}
-	out.breaker.wouldTrip = out.wouldHold.loads > 0 && (out.breaker.countUnreadable || heldKeys.size >= rules.HELD_LOADS_STOP);
 	return out;
 }
 
@@ -118,10 +104,7 @@ function textOf(r) {
 	const loads = (n) => `${n} load${n === 1 ? "" : "s"}`;
 	const fields = (box) => (box.loads ? `: ${Object.entries(box.byField).map(([f, n]) => `${f} ${n}`).join(", ")}` : "");
 	const head = "DRY RUN (nothing written, nothing sent): the first change check under AUTO_INVOICE_HOLD_ONE_LOAD, against today's sheet";
-	const tail = [
-		`  loads held already in the last 24 hours: ${r.breaker.countUnreadable ? "the count can't be read (the first hold would stop all sending)" : r.heldAlready}`,
-		`  sending stopped now: ${r.stopped ? `yes (${r.stopped})` : "no"}`,
-	];
+	const tail = [`  sending stopped now: ${r.stopped ? `yes (${r.stopped})` : "no"}`];
 	if (r.skipped) return [head, "  the sheet read has no load rows: the first check would skip the change check", ...tail].join("\n");
 	return [
 		head,
@@ -131,7 +114,6 @@ function textOf(r) {
 		`  would log (an audit row only): ${loads(r.wouldLog.loads)}${fields(r.wouldLog)}`,
 		`  rows gone from the sheet (an audit row only): ${r.rowsGone}`,
 		...tail,
-		`  the breaker (${r.breaker.stopAt} different loads held within 24 hours): ${r.breaker.wouldTrip ? "WOULD TRIP: all automatic sending would stop" : "would not trip"}`,
 	].join("\n");
 }
 
