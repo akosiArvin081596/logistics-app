@@ -3,10 +3,13 @@
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
+        <!-- Stays while it is on, even at (0), so a refresh that leaves no load
+             to review can't hide the filter with every load behind it. -->
         <button
-          v-if="needsReviewCount > 0"
+          v-if="needsReviewCount > 0 || needsReviewOnly"
           type="button"
           :style="reviewToggleStyle"
+          :aria-pressed="needsReviewOnly"
           :title="needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE"
           @click="needsReviewOnly = !needsReviewOnly"
         >
@@ -19,7 +22,7 @@
     </div>
 
     <div class="overflow-x-auto">
-      <EmptyState v-if="filteredJobs.length === 0">{{ needsReviewOnly ? 'No loads currently need review — every active load has a complete rate-con.' : (searchQuery ? 'No loads match your search.' : 'No active loads right now.') }}</EmptyState>
+      <EmptyState v-if="filteredJobs.length === 0">{{ emptyMessage }}</EmptyState>
       <!-- Mobile: card per active load. Tap the card body → detail modal
            (which carries the full status history, Cancel, Delete, and map).
            Inline Status + Driver selects stay because they're the two
@@ -558,6 +561,7 @@ import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { completedEmptyText } from '../../lib/completedLoadsFilters'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
 import { loadRef, loadIdShown, loadIdWithheld, loadMatches } from '../../lib/loadRef'
@@ -599,6 +603,12 @@ const searchResult = computed(() => {
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
+// The empty list names what is on. The count is over every active load,
+// searched or not, so with a search typed the line names the search as well.
+const emptyMessage = computed(() => {
+  if (searchQuery.value.trim()) return completedEmptyText({ review: needsReviewOnly.value, search: true })
+  return needsReviewOnly.value ? 'No loads currently need review — every active load has a complete rate-con.' : 'No active loads right now.'
+})
 // Every active load on one page; paging only above 50, with no size choice
 // (lib/loadboardPaging.js). The search covers every row; a new one starts at page 1.
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(filteredJobs, { fixedSize: ACTIVE_LOADS_PAGE_SIZE, resetOn: [searchQuery, needsReviewOnly] })
