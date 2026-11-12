@@ -726,19 +726,20 @@ const ownAnswerOf = (thisOver = {}, lastOver = {}, pastWeeks = PAST) => ({
 })
 const ADMIN_DECOYS = Object.freeze({ phone: '555-0199', email: 'decoy@example.test', payDaily: 987, rate: 6543, broker: 'decoy-broker', unitNumber: 'LogisX-DECOY', pickupsBySource: { geofence: 41 } })
 const ADMIN_DECOY_MARKS = ['555-0199', 'decoy@', '987', '6543', 'decoy-broker', 'LogisX-DECOY', 'geofence']
+// In the server's order, by this week's credits: not by name, so a sort here would show.
 const ADMIN_ANSWER = {
   drivers: [
+    { directoryId: 2, name: 'Riley Placeholder', unit: '', performance: ownAnswerOf({ credits: { value: 8, target: 7.5, required: 6, deliveries: 8, pickups: 8 }, left: 0, percent: 100, pace: 'ahead', barColor: 'blue' }) },
     { directoryId: 3, name: 'Avery Mock', unit: '#701', performance: ownAnswerOf() },
     { directoryId: 1, name: 'Jordan Sample', unit: '#702 (2, from Nov 3)', performance: ownAnswerOf({ credits: { value: 1.5, target: 6, required: 4.5, deliveries: 2, pickups: 1 }, left: 4.5, percent: 25, pace: 'needs-focus', barColor: 'red', targetLowered: true, loads: [] }, { loads: [], credits: { value: 0, target: 7.5, required: 6, deliveries: 0, pickups: 0 }, percent: 0 }, []) },
-    { directoryId: 2, name: 'Riley Placeholder', unit: '', performance: ownAnswerOf({ credits: { value: 8, target: 7.5, required: 6, deliveries: 8, pickups: 8 }, left: 0, percent: 100, pace: 'ahead', barColor: 'blue' }) },
   ],
   notOnBoard: [{ name: 'Morgan Test', reason: 'percentage-driver' }, { name: 'Sky Demo', reason: 'not-in-directory' }, { name: 'Quinn Mock', reason: 'decoy-reason' }, { name: '  ', reason: 'inactive' }],
 }
 const adminView = driversView(ADMIN_ANSWER) || { rows: [], notOnBoard: [] }
 const ROW_FIELDS = ['key', 'name', 'unit', 'range', 'count', 'pace', 'paceId', 'width', 'color', 'left', 'lastCount', 'thisWeek', 'lastWeek', 'past']
 eq('§17 exactly these fields on the view and on a row', [Object.keys(driversView(ADMIN_ANSWER) || {}), Object.keys(adminView.rows[0] || {})], [['weekLine', 'rows', 'notOnBoard'], ROW_FIELDS])
-eq('§17 the server\'s order stands: the app never sorts the drivers', adminView.rows.map((r) => [r.key, r.name]), [[3, 'Avery Mock'], [1, 'Jordan Sample'], [2, 'Riley Placeholder']])
-eq('§17 each row: his name and unit as sent', adminView.rows.map((r) => [r.name, r.unit]), [['Avery Mock', '#701'], ['Jordan Sample', '#702 (2, from Nov 3)'], ['Riley Placeholder', '']])
+eq('§17 the server\'s order stands: the app never sorts the drivers', adminView.rows.map((r) => [r.key, r.name]), [[2, 'Riley Placeholder'], [3, 'Avery Mock'], [1, 'Jordan Sample']])
+eq('§17 each row: his name and unit as sent', adminView.rows.map((r) => [r.name, r.unit]), [['Riley Placeholder', ''], ['Avery Mock', '#701'], ['Jordan Sample', '#702 (2, from Nov 3)']])
 {
   // The parity: every figure on a row is his own tab's view of his own answer.
   const same = ADMIN_ANSWER.drivers.map((d, i) => {
@@ -751,15 +752,15 @@ eq('§17 each row: his name and unit as sent', adminView.rows.map((r) => [r.name
   eq('§17 every figure and line on a row is what his own tab shows from the same answer: this week, last week\'s final figure, what counted, his past weeks, the bar\'s color', same, [true, true, true])
 }
 eq('§17 the words, as his own tab says them', adminView.rows.map((r) => [r.count, r.pace, r.left, r.lastCount, r.color]), [
+  ['8 of 7.5 loads', 'Ahead of Pace', '7.5 reached this week.', '6 of 7.5 loads', 'blue'],
   ['4.5 of 7.5 loads', 'On Track', '3 loads left this week.', '6 of 7.5 loads', ''],
   ['1.5 of 6 loads', 'Needs Focus', '4.5 loads left this week.', '0 of 7.5 loads', 'red'],
-  ['8 of 7.5 loads', 'Ahead of Pace', '7.5 reached this week.', '6 of 7.5 loads', 'blue'],
 ])
-eq('§17 the loads that counted, both weeks', [adminView.rows[0]?.thisWeek.loads.length, adminView.rows[0]?.thisWeek.title, adminView.rows[0]?.lastWeek.title, adminView.rows[1]?.thisWeek.loads, adminView.rows[1]?.thisWeek.empty, adminView.rows[1]?.lastWeek.empty],
+eq('§17 the loads that counted, both weeks', [adminView.rows[1]?.thisWeek.loads.length, adminView.rows[1]?.thisWeek.title, adminView.rows[1]?.lastWeek.title, adminView.rows[2]?.thisWeek.loads, adminView.rows[2]?.thisWeek.empty, adminView.rows[2]?.lastWeek.empty],
   [6, 'What counted this week', 'What counted last week', [], v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK])
-eq('§17 his past weeks, with the hours line his own tab prints: coming soon with none sent', [adminView.rows[0]?.past.rows.map((r) => r.hours), adminView.rows[0]?.past.countedFrom, adminView.rows[1]?.past.rows],
+eq('§17 his past weeks, with the hours line his own tab prints: coming soon with none sent', [adminView.rows[1]?.past.rows.map((r) => r.hours), adminView.rows[1]?.past.countedFrom, adminView.rows[2]?.past.rows],
   [[v.DRIVE_HOURS_LINE, v.DRIVE_HOURS_LINE, v.DRIVE_HOURS_LINE], "Weeks before Nov 7 weren't counted.", []])
-eq('§17 a lowered target: the office\'s own line, only when the server flags it', adminView.rows.map((r) => r.thisWeek.lowered), ['', 'Target lowered this week for approved time off.', ''])
+eq('§17 a lowered target: the office\'s own line, only when the server flags it', adminView.rows.map((r) => r.thisWeek.lowered), ['', '', 'Target lowered this week for approved time off.'])
 eq('§17 the week\'s days and its closing line, once for the tab', adminView.weekLine, 'Oct 31 – Nov 6 · Week closes Fri 11:59 PM ET')
 eq('§17 drivers off the board: each name with its reason in words; a reason it doesn\'t know shows none, a blank name no row', adminView.notOnBoard, [
   { name: 'Morgan Test', reason: 'Percentage driver' }, { name: 'Sky Demo', reason: 'Not in the Driver Database' }, { name: 'Quinn Mock', reason: '' },
