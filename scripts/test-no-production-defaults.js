@@ -757,14 +757,18 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 			check(`§1 scripts/*.sh: no n8n instance or workflow in code, no production value as a \${VAR:-…} default (${[...new Set(shellBad)].join(", ") || "none"})`, shellBad.length === 0);
 
-			// A factored invoice's remit lines and the date Triumph went live: settings with
-			// no default in code, so nothing can be printed or sent on a value not set here.
+			// A factored invoice's remit lines, the date Triumph went live, and where and how the
+			// app signs in to Triumph's SFTP drop (PR T2): settings with no default in code, so
+			// nothing can be printed or sent on a value not set here.
 			const triumphDefault = [];
 			for (const f of [...APP_FILES, ...SCRIPT_JS]) {
 				const { text, code } = lexed.get(f);
-				for (const m of code.matchAll(/\bTRIUMPH_(?:NOA_LINES|LIVE_CONFIRMED_ON)\b[)\]\s]*(?:\|\||\?\?)\s*["'`][^"'`]/g)) triumphDefault.push(`${f}:${lineOf(text, m.index)}`);
+				for (const m of code.matchAll(/\bTRIUMPH_(?:NOA_LINES|LIVE_CONFIRMED_ON|HOST|USER|KEY_FILE|HOST_FINGERPRINT|HOST_KEY_TYPE|SUBMIT_DIR|REPORTS_DIR)\b[)\]\s]*(?:\|\||\?\?)\s*["'`][^"'`]/g)) triumphDefault.push(`${f}:${lineOf(text, m.index)}`);
 			}
-			check(`§1 TRIUMPH_NOA_LINES and TRIUMPH_LIVE_CONFIRMED_ON have no default in code (${triumphDefault.join(", ") || "none"})`, triumphDefault.length === 0);
+			check(`§1 TRIUMPH_NOA_LINES, TRIUMPH_LIVE_CONFIRMED_ON and the SFTP drop's settings have no default in code (${triumphDefault.join(", ") || "none"})`, triumphDefault.length === 0);
+			// The connection's reader answers nothing at all without them: no host, folder or key.
+			const transport = require(path.join(ROOT, "lib", "triumph-rules.js")).transportSettings({});
+			check(`§1 with none of the SFTP drop's settings, nothing can connect (${transport.missing.length} missing)`, transport.ok === false && transport.settings === null && transport.missing.length === 6);
 
 			// The sheet by name: no --sheet-id default and no fallback to the
 			// production constant.
