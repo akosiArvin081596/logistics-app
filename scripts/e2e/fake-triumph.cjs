@@ -12,7 +12,9 @@
 // Files live in memory. Removing, renaming, making folders and setting attributes are
 // refused and recorded: the transport has no way to ask for them, and a runner proves it.
 // `faults` scripts a failure: { openStatus(path, flags), dropOnWrite(path, n), sizeFor(path),
-// statStatus(path) }, each answering null for "as normal".
+// statStatus(path), holdSubsystem() }, each answering null for "as normal"; holdSubsystem()
+// true signs the client in and never answers its request for the file channel.
+// fake.open() counts the connections still open.
 "use strict";
 
 const path = require("path");
@@ -54,6 +56,7 @@ function startFakeTriumph({ hostKey, clientKey, user = "made-up-user", folders =
 			client.on("session", (accept) => {
 				const session = accept();
 				session.on("sftp", (acceptSftp) => {
+					if (fault("holdSubsystem")) return;
 					const sftp = acceptSftp();
 					const handles = new Map();
 					let next = 0;
@@ -167,6 +170,7 @@ function startFakeTriumph({ hostKey, clientKey, user = "made-up-user", folders =
 				ops,
 				auth,
 				writeOps: () => ops.filter((o) => WRITE_OPS.has(o.op) || (o.op === "OPEN" && o.write)),
+				open: () => clients.size,
 				close: () => new Promise((done) => {
 					for (const c of clients) {
 						try {

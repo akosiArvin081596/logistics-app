@@ -7,8 +7,8 @@
 //      the one host-key type; a replica holds none
 //   §2 the connection: the pinned host key (a wrong one refuses, before any sign-in); only the
 //      configured key type is offered; the key alone signs in, and a password or a
-//      keyboard-interactive prompt is never answered; a replica, missing settings or an
-//      unreadable key reach nothing
+//      keyboard-interactive prompt is never answered; a file channel that never opens ends
+//      the connection; a replica, missing settings or an unreadable key reach nothing
 //   §3 read mode: list, stat and get only, and no write operation reaches the server
 //   §4 live mode: put() refuses outside the live mode, without the lock point's token, with a
 //      token whose claim isn't past the lock, for another file than the lock covers, after the
@@ -198,7 +198,23 @@ async function madeUpPdf(lines) {
 			await asks.close();
 		}
 
-		// Two host keys: the configured type picks which one is checked.
+		// A server that signs the app in and never opens the file channel: the wait ends, and so
+		// does the connection.
+		const holds = await fakeWith({ faults: { holdSubsystem: () => true } });
+		try {
+			const t = make(envFor(holds), { readyTimeoutMs: 10000, opTimeoutMs: 1000 });
+			const started = Date.now();
+			const code = await Promise.race([codeOf(() => t.openRead()), new Promise((r) => setTimeout(() => r("STILL_WAITING"), 15000))]);
+			eq(code, "SFTP_TIMEOUT", "§2 FAILS ON A CHANNEL THAT WAITS FOREVER: a server that never opens the file channel: SFTP_TIMEOUT");
+			ok(Date.now() - started < 10000, "§2 ...within the operation's time");
+			for (let i = 0; i < 40 && holds.open(); i++) await new Promise((r) => setTimeout(r, 50));
+			eq(holds.open(), 0, "§2 ...and the connection is ended");
+		} finally {
+			await holds.close();
+		}
+
+		// An RSA host key pinned with type RSA. The fake serves that one key; the type's own
+		// effect, a host with no key of it, is the wrong-type case above.
 		const both = await startFakeTriumph({ hostKey: HOST_RSA.private, clientKey: CLIENT.privateKey, folders: [SUBMIT] });
 		try {
 			const rsa = make(envFor(both, { TRIUMPH_HOST_FINGERPRINT: fingerprintOfKey(HOST_RSA.private), TRIUMPH_HOST_KEY_TYPE: "RSA" }));

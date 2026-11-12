@@ -17,9 +17,9 @@
 //      (MAYBE_SUBMITTED), a refused sign-in and a host key that doesn't match pause; the
 //      retries; live with no connection settings runs nothing
 //   §7 recovery after a restart at each stage
-//   §8 "Submit now": live only, every check again before connecting, the lock point, and a stop
-//      before the lock leaves the batch staged
-//   §9 caps and the Friday-evening window
+//   §8 "Submit now": live only, every check again before connecting, the lock point; a stop or
+//      an exception before the lock leaves the batch staged, one after it goes to a person
+//   §9 caps (each on its own) and the Friday-evening window
 //   §10 voided numbers, a load changed after its submission, the daily notices
 //   §11 rule 7 on what goes: the invoice page, and the list as it is when the batch is sent;
 //       the CSV's values found printed in the PDF
@@ -538,6 +538,9 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		const sn = stuck("built", { reason_code: ledger.SUBMIT_NOW });
 		await sn.make().recover();
 		eq(say(sn.claim()), "staged RETRY_LATER", "§7 FAILS ON A RECOVERY THAT REQUEUES IT: a restart during \"Submit now\", before the lock: back to staged, never sent by itself");
+		const snLocked = stuck("pdf_uploaded", { reason_code: ledger.SUBMIT_NOW });
+		await snLocked.make().recover();
+		eq(say(snLocked.claim()), "needs_attention SUBMIT_FAILED", "§7 FAILS ON A RECOVERY THAT REQUEUES IT: a restart during \"Submit now\", after the lock: to a person, never sent by itself");
 	}
 
 	// ---------------------------------------------------------------- §8
@@ -579,6 +582,59 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		await bounce.make().tick();
 		eq([say(bounce.claim()), bounce.spies.connect], ["staged RETRY_LATER", 1], "§8 FAILS ON A BUILD THAT REQUEUES IT: a connection that fails leaves the batch staged; a tick doesn't send it");
 		eq(await (await staged()).make().submitNow({}, "LD-TEST-0002"), { ok: false, code: "NOT_STAGED", http: 409 }, "§8 a load with no staged batch: refused");
+
+		// An exception, not a refusal, during a press: the lock point's transaction meets another
+		// process's write lock once. The batch waits for the next press; nothing rebuilds or sends it.
+		const busy = await staged();
+		busy.onConnect = () => {
+			const real = busy.db.transaction.bind(busy.db);
+			busy.db.transaction = () => {
+				busy.db.transaction = real;
+				throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			};
+		};
+		const busyAnswer = await busy.make().submitNow({}, LOAD);
+		busy.onConnect = null;
+		eq([busyAnswer.ok, say(busy.claim()), busy.claim().stage, busy.spies.puts.length], [false, "staged RETRY_LATER", "built", 0], "§8 FAILS ON A PRESS THAT FALLS BACK IN LINE: an exception before the lock leaves the batch staged");
+		busy.clock.add(16);
+		const busyRenders = busy.spies.render;
+		await busy.make().tick();
+		eq([say(busy.claim()), busy.spies.puts.length, busy.spies.render - busyRenders], ["staged RETRY_LATER", 0, 0], "§8 ...and the next tick neither rebuilds nor sends it");
+
+		// A failure after the lock: the press is a person's, so a person resumes it.
+		const cut = await staged();
+		cut.putError = (name) => (name.endsWith(".pdf") ? { code: "PUT_FAILED" } : null);
+		const cutAnswer = await cut.make().submitNow({}, LOAD);
+		cut.putError = null;
+		eq([cutAnswer.ok, say(cut.claim()), cut.claim().stage, cut.marker().locked_via], [false, "needs_attention SUBMIT_FAILED", "pdf_uploading", "upload"], "§8 FAILS ON A PRESS THAT FALLS BACK IN LINE: a failure after the lock goes to a person, still locked");
+		cut.clock.add(16);
+		const cutPuts = cut.spies.puts.length;
+		await cut.make().tick();
+		eq([say(cut.claim()), cut.spies.puts.length - cutPuts], ["needs_attention SUBMIT_FAILED", 0], "§8 ...and the next tick doesn't send it");
+		eq((await cut.make().retry({}, LOAD)).ok, true, "§8 ...a person's Try again takes it");
+		await cut.make().tick();
+		eq([say(cut.claim()), cut.spies.render], ["submitted", 1], "§8 ...and the upload resumes with the files as built");
+		const csvNo = await staged();
+		csvNo.putError = (name) => (name.endsWith(".csv") ? { code: "PUT_FAILED", nothingSent: true } : null);
+		await csvNo.make().submitNow({}, LOAD);
+		csvNo.putError = null;
+		eq([say(csvNo.claim()), csvNo.claim().stage], ["needs_attention SUBMIT_FAILED", "pdf_uploaded"], "§8 FAILS ON A PRESS THAT FALLS BACK IN LINE: a CSV refused with nothing made there goes to a person");
+		csvNo.clock.add(16);
+		const csvPuts = csvNo.spies.puts.length;
+		await csvNo.make().tick();
+		eq(csvNo.spies.puts.length - csvPuts, 0, "§8 ...and the next tick doesn't send it");
+
+		// A button draft that starts between the checks and the lock point: back to staged, its
+		// number given up there, and nothing sends it.
+		const race = await staged();
+		race.onConnect = () => race.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES (?, ?, '11122026-9', 'imap', 'in_flight', ?, ?)").run(KEY, LOAD, T0, T0);
+		await race.make().submitNow({}, LOAD);
+		race.onConnect = null;
+		eq([say(race.claim()), race.spies.puts.length], ["staged INVOICE_DRAFT_IN_FLIGHT", 0], "§8 FAILS ON A PRESS THAT WAITS IN LINE: a button draft that starts before the lock: staged, nothing sent");
+		race.db.prepare("DELETE FROM invoice_draft_inflight").run();
+		race.clock.add(16);
+		await race.make().tick();
+		eq([race.claim().state, race.spies.puts.length], ["skipped", 0], "§8 ...its number gone, the next tick gives it up and sends nothing");
 	}
 
 	// ---------------------------------------------------------------- §9
@@ -605,6 +661,18 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		for (let i = 0; i < 4; i++) capped.db.prepare("INSERT INTO triumph_submissions (load_key, load_id, state, first_seen_at, reserved_at, updated_at) VALUES (?, 'x', 'staged', ?, ?, ?)").run(`ld-made-up-${i}`, T0, "2026-11-12T14:30:00.000Z", T0);
 		const co = await capped.make().tick();
 		eq([co.work.started, say(capped.claim())], [0, "queued"], "§9 TRIUMPH_MAX_PER_HOUR reached: nothing new starts");
+		// The daily cap on its own: the last hour clear, the last day full.
+		const dayCapped = (reservedAt) => {
+			const w = world({ env: { ...DRY, TRIUMPH_MAX_PER_DAY: "4" } });
+			w.queue();
+			for (let i = 0; i < 4; i++) w.db.prepare("INSERT INTO triumph_submissions (load_key, load_id, state, first_seen_at, reserved_at, updated_at) VALUES (?, 'x', 'staged', ?, ?, ?)").run(`ld-made-up-${i}`, T0, reservedAt, T0);
+			return w;
+		};
+		const dc = dayCapped("2026-11-12T11:00:00.000Z");
+		const dco = await dc.make().tick();
+		eq([dco.work.started, say(dc.claim())], [0, "queued"], "§9 TRIUMPH_MAX_PER_DAY reached, the last hour clear: nothing new starts");
+		const dayAgo = dayCapped("2026-11-11T14:00:00.000Z");
+		eq((await dayAgo.make().tick()).work.started, 1, "§9 ...and four from more than a day ago don't count");
 
 		const fri = world({ env: DRY, at: "2026-11-13T23:30:00.000Z" });
 		fri.queue();
