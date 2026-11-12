@@ -104,19 +104,18 @@ export const useDriverStore = defineStore('driver', {
     // Returns null if none — in that case the driver app treats queuedLoads[0]
     // as the effective active load (passive promotion on delivery).
     inProgressLoad(state) {
-      const statusCol = findCol(state.headers.jobTracking, /status/i)
-      if (!statusCol) return null
-      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
-      const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
-      const matches = state.loads.filter((l) => {
-        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
-        return hasId && inProgressRe.test((l[statusCol] || '').trim())
-      })
+      const matches = loadsInProgress(state)
       if (matches.length === 0) return null
       // Degraded path: if two loads ended up in an in-progress status (legacy
       // state or manual sheet edit), pick the highest _rowIndex so the driver
       // sees the freshest one.
       return matches.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))[0]
+    },
+
+    // Every load past Assigned. More than one is possible with ordinary taps: the
+    // server's one-active-job guard only fires at At Shipper.
+    inProgressLoads(state) {
+      return loadsInProgress(state)
     },
 
     // Accepted-but-not-yet-started loads ordered by FIFO queue position.
@@ -662,4 +661,15 @@ export const useDriverStore = defineStore('driver', {
 /* helper shared across store */
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
+}
+
+function loadsInProgress(state) {
+  const statusCol = findCol(state.headers.jobTracking, /status/i)
+  if (!statusCol) return []
+  const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+  const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
+  return state.loads.filter((l) => {
+    const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+    return hasId && inProgressRe.test((l[statusCol] || '').trim())
+  })
 }

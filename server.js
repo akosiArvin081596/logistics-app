@@ -33156,10 +33156,18 @@ const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
 const NAMED_LOGINS_ENABLED = process.env.NAMED_LOGINS_ENABLED === "true";
 const signInLib = require("./lib/sign-in");
 try { signInLib.ensureSignInNetworkTable(db); } catch (err) { console.error("sign_in_network table setup failed:", err.message); }
+// New-feature notices for drivers: the list is lib/driver-releases.js, the routes lib/driver-release-routes.js.
+// A kill switch: it moves no money and changes no one's rights, so it is on unless set to false, and off,
+// every route answers 404 FEATURE_OFF and the driver app stays as it was.
+const driverReleaseNotices = require("./lib/driver-release-routes").mount(app, {
+	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_RELEASE_NOTICES_ENABLED ?? "").trim()),
+	requireRole, db,
+});
 // The account lookup and the sign-in rows, for the login and logout routes.
 const signIn = signInLib.createSignIn({
 	db, logAudit, logAuditRefusal, networkEvidence: signerNetworkEvidence,
 	auditEnabled: SIGN_IN_AUDIT_ENABLED, uniqueEmail: NAMED_LOGINS_ENABLED,
+	onSessionStart: driverReleaseNotices.startSession,
 });
 // The 90-day limit on the sign-in IP and browser records; audit rows are kept.
 function purgeOldSignInNetwork() {
@@ -33274,6 +33282,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			companyName: current.company_name || "",
 			mustChangePassword: !!current.must_change_password,
 		};
+		// A first-time Driver's tour offer (lib/driver-release-routes.js). Never throws.
+		signIn.sessionStarted(current);
 		try {
 			await new Promise((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())));
 		} catch (saveErr) {
@@ -43746,6 +43756,8 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 			// genuinely ambiguous about whether the rows are gone. Dropping the
 			// snapshot on that path loses it exactly when it is needed most.
 			logAudit(req, "delete_sheet_rows_failed", "sheet_row", String(sheet), auditDetails("failed", { error: err.message }));
+			// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).
+			if (sheet === "Job Tracking") autoInvoiceRowsRemoved(headers, deletable.map((d) => allRows[d.rowIndex - 1] || []));
 			throw err;
 		}
 
@@ -43757,6 +43769,8 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 		auditWithheld(true);
 		// The 60s Job Tracking cache would otherwise keep serving the deleted rows.
 		if (guarded) jtCacheInvalidate();
+		// A load whose invoice the job sent is held as removed, not read as a month archived.
+		if (sheet === "Job Tracking") autoInvoiceRowsRemoved(headers, deletable.map((d) => allRows[d.rowIndex - 1] || []));
 
 		const lockedPeriods = [...new Set(skipped.flatMap((s) => s.periods))].sort();
 		res.json({
@@ -47167,12 +47181,16 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 			// deliberately not retried on timeout, so a timeout leaves it genuinely
 			// unknown whether the row is gone. See the same note in remove-rows.
 			logAudit(req, "delete_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			// The delete may have landed: a sent load's row is noted all the same (the job reads the sheet).
+			if (sheetName === "Job Tracking") autoInvoiceRowsRemoved(headers, [row]);
 			throw err;
 		}
 
 		logAudit(req, "delete_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("deleted"));
 		// The 60s Job Tracking cache would otherwise keep serving the deleted row.
 		if (guarded) jtCacheInvalidate();
+		// A load whose invoice the job sent is held as removed, not read as a month archived.
+		if (sheetName === "Job Tracking") autoInvoiceRowsRemoved(headers, [row]);
 
 		res.json({ success: true });
 	} catch (error) {
@@ -49480,14 +49498,14 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
 		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
-		// truck has been stopped, from its recent clean fixes taken since the
-		// link: the last fix above the moving threshold, else the oldest one read
-		// (stopped at least since then). Null while the latest fix is moving.
+		// truck has been stopped, from its recent clean fixes taken since the link.
+		// Null when that can't be shown, which the driver app reads as not stopped
+		// long enough.
 		// Bounded: at most 120 rows of the same index read as above.
 		let stoppedSinceMs = null;
 		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
 			const recent = db.prepare(
-				`SELECT speed, location_date_ms FROM routemate_telemetry
+				`SELECT speed, latitude, longitude, location_date_ms FROM routemate_telemetry
 				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 				  ORDER BY id DESC LIMIT 120`
 			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));
@@ -55921,7 +55939,9 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 // rules; lib/factoring-routes.js, the routes and the Draft Invoice button's steps).
 // The tables are made here whatever the settings, empty until a mark. Settings, read
 // once at start (off in a replica): TRIUMPH_FACTORING_ENABLED (marking, exactly
-// "true") and TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody).
+// "true"), TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody), TRIUMPH_NOA_LINES
+// (what a factored invoice prints; unset refuses one) and the submit mode's settings
+// (lib/triumph-rules.js submitMode(): a factored draft can be confirmed only once live).
 require("./lib/factoring-store").ensureSchema(db);
 const factoringRoutes = require("./lib/factoring-routes").create({
 	db,
@@ -55934,7 +55954,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
 });
 factoringRoutes.mount(app, { requireRole, refuseCrossSite });
-console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}`);
+console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}; assignment lines ${factoringRoutes.noaLinesSet ? "set" : "unset"}; submit ${factoringRoutes.submitMode}`);
 // </factoring-wiring>
 
 // <auto-invoice-wiring>
@@ -55965,8 +55985,15 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     or an automatic stop; scripts/auto-invoice-send-resume.js resumes). Nothing
 //     listed sends nothing (lib/auto-invoice-send.js).
 //   AUTO_INVOICE_DRIVER_TRIGGER_ENABLED  a kill switch, counted only with real drafts on:
-//     only a Driver's own Delivered starts an invoice, at once, with no sweep and no timer
-//     (lib/auto-invoice-trigger.js). Set to false, the 5-minute sweep runs as described above.
+//     only a Driver's own Delivered starts an invoice, at once, with no sweep (lib/auto-invoice-trigger.js).
+//     A 5-minute watch runs what a Super Admin's dashboard read runs, and starts no invoice.
+//     Set to false, the 5-minute sweep runs as described above.
+//   AUTO_INVOICE_HOLD_ONE_LOAD  a kill switch: a load changed after its invoice was sent is flagged
+//     alone when the change affects the invoice, and only logged otherwise; every other load keeps
+//     sending, however many are flagged. Set to false, any change to a sent load stops all sending,
+//     as before.
+//   AUTO_INVOICE_ALERT_TO  who a flag and a stop are emailed to, through sendEmail(). No default
+//     and no fallback: unset, nothing is mailed. Never read in a replica.
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
 //     chrobinson.com goes only to an address a person has already invoiced on 3 loads
 //     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
@@ -56016,6 +56043,8 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 		return (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Payments Table" })).data.values || [];
 	},
 	rateConTextOf: (bytes) => brokerInvoice.extractPdfText(bytes),
+	alertTo: REPLICA ? "" : String(process.env.AUTO_INVOICE_ALERT_TO ?? "").trim(),
+	sendAlertMail: sendEmail,
 	log: console,
 });
 // The status route's and the document routes' one call each into the job: nothing here
@@ -56035,6 +56064,15 @@ function autoInvoicePodChanged(loadId) {
 		// the next Super Admin read checks the load
 	}
 }
+// Job Tracking rows the Data Manager or the duplicate scanner removed (headers, then each row's cells):
+// a load whose invoice the job sent is held as removed, not read as a month moved to the archive.
+function autoInvoiceRowsRemoved(headers, rows) {
+	try {
+		autoInvoice.rowsRemoved({ headers, rows });
+	} catch {
+		// the next check reads the row as gone from the sheet
+	}
+}
 if (autoInvoice.mode !== "off") {
 	autoInvoice.mount(app, {
 		requireRole,
@@ -56046,7 +56084,11 @@ if (autoInvoice.sending) console.log(`[auto-invoice] sending on for ${autoInvoic
 if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 	if (autoInvoice.triggerMode) {
 		// Before the app listens; server.listen's callback runs the rest (finishStartUp()).
-		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on, no timer");
+		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on; the watch runs every 5 minutes");
+		// The watch: what a Super Admin's dashboard read runs, so a sheet edit is seen with nobody
+		// reading, and the alert emails waiting. It starts no invoice. Started whatever startTrigger()
+		// answered: finishStartUp() tries that again, and the watch does nothing until it has.
+		setInterval(() => autoInvoice.watch(), AUTO_INVOICE_TICK_MS);
 	} else {
 		// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
 		let autoInvoiceTicking = false;
@@ -57420,6 +57462,7 @@ const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
 	safeAttachmentName,
 	logAudit,
 	sanitizeEvidenceText,
+	assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),
 	env: process.env,
 });
 
@@ -57714,7 +57757,7 @@ app.post(
 				? factoringRoutes.draftHandoff(req, {
 					loadId, invoiceId, mintedInvoiceId, confirmed: factoringCheck.confirmed, reason: factoringCheck.reason,
 					path: gmailUser && gmailPass ? "imap" : "n8n", user: gmailUser, recipient: invoiceTo.email, total: rendered.total,
-					reissue: Boolean(sentCheck.reissue),
+					reissue: Boolean(sentCheck.reissue), printedAssignment: Boolean(draft.assignment),
 				})
 				: null;
 			if (handoff && !handoff.ok) return res.status(handoff.http).json(handoff.json);
@@ -57939,6 +57982,10 @@ app.post(
 		const linesOn = invoiceLines.linesEnabled(process.env);
 		const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
 		if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
+		// A factored load: refused as the approve refuses it, and with the confirmation the
+		// page prints what the approve would. Off the marker, this answers as before.
+		const factoring = factoringRoutes.previewCheck(req, loadId);
+		if (!factoring.ok) return res.status(factoring.http).json(factoring.json);
 
 		// ⚠️ 422 INVOICE_TOTAL_UNKNOWN keeps EXACTLY its existing meaning here —
 		// nothing derivable AND nothing supplied. On this route nothing is ever
@@ -58032,7 +58079,7 @@ app.post(
 				invoiceId, invoiceDate, brokerName, invoiceTo, orderNumber, poNumber, deliveryDate, total, notes,
 				invoiceLines: lineSummary,
 			});
-			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
+			const invoicePdf = await renderHtmlToPdf(factoringRoutes.withAssignment(invoiceHtml, factoring.assignment));
 
 			// Return the DERIVED STRINGS too, so the client never re-implements a
 			// server template. The Email tab shows a message box and, read-only
@@ -58078,6 +58125,8 @@ app.post(
 				...(linesOn ? { invoiceLines: invoiceLines.previewEcho(lineSummary) } : {}),
 			});
 		} catch (err) {
+			// A factored page that still shows a bank number: its own words, as the approve answers.
+			if (err && err.code === "ASSIGNMENT_NOT_PRINTABLE") return res.status(err.http).json({ error: err.message, code: err.code });
 			console.error("Invoice preview error:", err.message);
 			return res.status(500).json({ error: "Failed to render the invoice preview." });
 		} finally {

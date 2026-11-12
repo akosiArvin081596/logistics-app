@@ -1,6 +1,8 @@
 ## What and why
 <!-- One paragraph. Link the issue. This repo is public: describe a security fix by its behaviour (gate, status code, error code), never by how it could be abused. -->
 
+Driver-facing? Add a `lib/driver-releases.js` entry, or say why not.
+
 ## Risk tier
 <!-- Tick one. When unsure, take the higher tier. -->
 - [ ] LOW: copy, layout, small UI, docs, or a refactor with no behaviour change

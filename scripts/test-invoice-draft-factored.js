@@ -6,9 +6,14 @@
 //
 //   §1 a factored load: 409 LOAD_FACTORED before prepare(), nothing read,
 //      minted, drafted or posted; the confirmation is refused whoever asks (409
-//      NOA_UNCONFIGURED, nothing spent) until assignment lines exist; once they
-//      do, it works only for a listed account (never the shared login) with a
-//      reason, and is audited
+//      NOA_UNCONFIGURED, nothing spent) until assignment lines exist, and then (409
+//      TRIUMPH_NOT_LIVE) until the submit mode reads live; once both hold, it works
+//      only for a listed account (never the shared login) with a reason, and is audited
+//   §1c the lines set and not live: refused, nothing spent, and the way out: the clear,
+//      then the plain button with its bank block
+//   §1d live: the invoice prints the lines and no bank block; a load that isn't factored
+//      prints the same bytes in every world; a mark, a clear or an unreadable marker
+//      around the build is refused, never printed for the wrong party
 //   §2 once assignment lines exist, the confirmation against a Triumph claim that
 //      works or holds a number (TRIUMPH_IN_FLIGHT) and a locked row
 //      (FACTORING_LOCKED); a locked row refuses the plain press too, even at 0; a
@@ -26,6 +31,8 @@
 //   §6 "Check Gmail": found, absent, unknown; a person's answer for n8n
 //   §7 nothing marked: today's answers, a Message-ID on the draft, and no row
 //      left behind
+//   §9 the live preview (POST /api/loads/:loadId/invoice-preview): refused as the
+//      approve refuses, and with the confirmation it prints what the approve prints
 //   Then §1b and §4-§7 again with every switch off (TRIUMPH_FACTORING_ENABLED and
 //   TRIUMPH_FACTOR_MARK_IDS unset, as production ships): a load the lead's
 //   scripts/factoring-mark.js marked is refused before prepare() and caught by the
@@ -103,17 +110,28 @@ const FALLBACK_DDL = `
 		path TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', actor_id INTEGER NOT NULL DEFAULT 0, recipient TEXT NOT NULL DEFAULT '',
 		total TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (load_key, invoice_id));`;
 
+// Made up: never Triumph's words.
+const NOA_LINES = Object.freeze(["MADE-UP NOTICE LINE ONE", "THIS INVOICE IS MADE UP AND PAYABLE TO, A MADE-UP FACTOR,", "EXAMPLE FACTOR LLC", "PO DRAWER 000, NOWHERE, ZZ  00000-0000"]);
+const NOA_SET = Object.freeze({ TRIUMPH_NOA_LINES: NOA_LINES.join("\n") });
+const DRY_SET = Object.freeze({ ...NOA_SET, TRIUMPH_SUBMIT_ENABLED: "true" });
+const LIVE_SET = Object.freeze({ ...NOA_SET, TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05" });
+
 // ------------------------------------------------------------------ the route
 const NEEDLE = '["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],';
+const PREVIEW_NEEDLE = '"/api/loads/:loadId/invoice-preview",';
 const LIFT = (() => {
 	const lines = SRC.split("\n");
-	let s = lines.findIndex((l) => l.includes(NEEDLE));
-	while (s > 0 && !/^app\.post\(/.test(lines[s])) s--;
-	let e = s;
-	while (e < lines.length && lines[e] !== ");") e++;
+	const liftRoute = (needle) => {
+		let s = lines.findIndex((l) => l.includes(needle));
+		while (s > 0 && !/^app\.post\(/.test(lines[s])) s--;
+		let e = s;
+		while (e < lines.length && lines[e] !== ");") e++;
+		return lines.slice(s, e + 1).join("\n");
+	};
 	const createAt = SRC.indexOf("CREATE TABLE IF NOT EXISTS load_invoice_drafts (");
 	return {
-		route: lines.slice(s, e + 1).join("\n"),
+		route: liftRoute(NEEDLE),
+		preview: liftRoute(PREVIEW_NEEDLE),
 		helpers: closure(SRC, {
 			roots: ["parseInvoiceOverrides", "parseSheet", "deduplicateLoads", "findCol", "latestDraftNotes", "invoiceIdAlreadyUsed", "safeAttachmentName", "mdyToIso", "sanitizeEvidenceText"],
 			provided: ["db", "brokerInvoice", "console"],
@@ -125,7 +143,7 @@ const LIFT = (() => {
 	};
 })();
 // What world() builds from: the shipped texts, or a mutant's (§8).
-const CUR = { route: LIFT.route, routesLib };
+const CUR = { route: LIFT.route, preview: LIFT.preview, routesLib };
 
 const deferred = () => {
 	let resolve;
@@ -139,9 +157,9 @@ const stagedError = (message, stage, answered) => Object.assign(new Error(messag
 // hand-off targets are set; `ids` is TRIUMPH_FACTOR_MARK_IDS; `off` builds it
 // with TRIUMPH_FACTORING_ENABLED and TRIUMPH_FACTOR_MARK_IDS both unset (the
 // run's MODE by default). With every switch off, loads are marked the way the
-// lead's scripts/factoring-mark.js marks them. `lines` builds it as if assignment
-// lines existed, which keeps the confirmation's own rules pinned; the server never
-// says so, and no other world does. `settings`: more of the server's settings.
+// lead's scripts/factoring-mark.js marks them. `lines`: true builds it with assignment
+// lines set and the submit mode live, where the confirmation's own rules apply; "dry"
+// with the lines set and the mode dry. `settings`: more of the server's settings.
 function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = false, off = MODE === "off", lines = false, settings = {} } = {}) {
 	const db = new Database(":memory:");
 	db.exec(LIFT.createSql);
@@ -155,11 +173,12 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	else db.exec(FALLBACK_DDL);
 	const w = {
 		db,
-		seen: { prepare: 0, render: 0, mint: 0, imap: [], n8n: [], search: [], audits: [], refusals: [] },
+		seen: { prepare: 0, render: 0, mint: 0, imap: [], n8n: [], search: [], audits: [], refusals: [], pages: [] },
 		imap: [], // behaviours, in turn: "OK", "NO", "LOST", "HOLD", "LOGIN"
 		n8n: [], // "OK", "502", "ABORT", "NETWORK"
 		holds: [],
 		search: "absent", // "found", "absent", "fail"
+		duringPrepare: null,
 		duringRender: null,
 		duringImap: null,
 	};
@@ -173,7 +192,11 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 		requireRole: () => () => {},
 		refuseCrossSite: () => {},
 		draftInvoiceLimiter: () => {},
-		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: SHEET } }) } } }),
+		invoicePreviewLimiter: () => {},
+		getSheets: async () => {
+			if (w.duringPrepare) w.duringPrepare(db);
+			return { spreadsheets: { values: { get: async () => ({ data: { values: SHEET } }) } } };
+		},
 		SPREADSHEET_ID: "sheet-under-test-factored",
 		brokerInvoice,
 		db,
@@ -185,8 +208,9 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => `11032026-${mints + 1}`,
 		nextInvoiceNumber: () => { w.seen.mint++; return `11032026-${++mints}`; },
-		renderHtmlToPdf: async () => {
+		renderHtmlToPdf: async (html) => {
 			w.seen.render++;
+			w.seen.pages.push(html);
 			if (w.duringRender) w.duringRender(db);
 			return Buffer.from("%PDF-1.4 made-up invoice");
 		},
@@ -218,7 +242,8 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 		},
 		console: QUIET,
 	};
-	const engine = draftLift.loadEngine(LIFT.engine, { ...scope, env });
+	// The server's engine reads the marker through the routes module.
+	const engine = draftLift.loadEngine(LIFT.engine, { ...scope, env, assignmentFor: (loadId) => scope.factoringRoutes.assignmentFor(loadId) });
 	scope.brokerInvoiceDraft = {
 		prepare: (...a) => { w.seen.prepare++; return engine.prepare(...a); },
 		render: (...a) => engine.render(...a),
@@ -227,8 +252,11 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	const routesDb = unreadableMarker ? (() => { const x = new Database(":memory:"); if (store) store.ensureSchema(x); x.close(); return x; })() : db;
 	const routes = CUR.routesLib ? CUR.routesLib.create({
 		db: routesDb,
-		env: off ? { ...settings } : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }), ...settings },
-		...(lines ? { hasAssignmentLines: true } : {}),
+		env: {
+			...(off ? {} : { TRIUMPH_FACTORING_ENABLED: "true", ...(ids === null ? {} : { TRIUMPH_FACTOR_MARK_IDS: ids }) }),
+			...(lines === true ? LIVE_SET : lines === "dry" ? DRY_SET : {}),
+			...settings,
+		},
 		now: () => new Date(w.now || NOW),
 		logAudit: scope.logAudit,
 		logAuditRefusal: (req, action, entity, entityId, details, code) => w.seen.refusals.push({ action, code }),
@@ -248,6 +276,9 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	const registered = [];
 	new Function("app", ...Object.keys(scope), CUR.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	const handler = registered[0][registered[0].length - 1];
+	const previewRegistered = [];
+	new Function("app", ...Object.keys(scope), `const INVOICE_PREVIEW_MAX_INFLIGHT = 2;\nlet invoicePreviewInflight = 0;\n${CUR.preview}`)({ post: (...args) => previewRegistered.push(args) }, ...Object.values(scope));
+	const previewHandler = previewRegistered[0][previewRegistered[0].length - 1];
 	const respond = () => {
 		const out = { status: 200, body: null };
 		const res = { statusCode: 200, headersSent: false, status(c) { this.statusCode = c; out.status = c; return this; }, json(b) { out.status = this.statusCode; out.body = b; this.headersSent = true; return this; } };
@@ -257,6 +288,12 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	w.press = async (n, { user = LISTED, body = {}, dry = false } = {}) => {
 		const { out, res } = respond();
 		await handler({ params: { loadId: id(n) }, query: dry ? { dryRun: "1" } : {}, body, session: { user: { ...user } }, ip: "127.0.0.1" }, res);
+		return out;
+	};
+	// The live preview, with the total it needs.
+	w.preview = async (n, { user = LISTED, body = {} } = {}) => {
+		const { out, res } = respond();
+		await previewHandler({ params: { loadId: id(n) }, query: {}, body: { total: "2150.00", ...body }, session: { user: { ...user } }, ip: "127.0.0.1" }, res);
 		return out;
 	};
 	// The factoring routes, through their own guards (Super Admin, a stub cross-site check).
@@ -343,16 +380,19 @@ async function s1() {
 		const nobody = world({ ids: null });
 		nobody.putMarker(1);
 		eq((await nobody.press(1, { body: CONFIRM })).body.code, "NOA_UNCONFIGURED", "§1 FAILS ON THE OLD CODE: TRIUMPH_FACTOR_MARK_IDS unset: the same answer");
-		const set = world({ settings: { TRIUMPH_NOA_LINES: "made-up line one" } });
+		const set = world({ settings: { ...LIVE_SET, TRIUMPH_NOA_LINES: "made-up line one" } });
 		set.putMarker(1);
-		eq((await set.press(1, { body: CONFIRM })).body.code, "NOA_UNCONFIGURED", "§1 FAILS ON THE OLD CODE: a setting named for the lines changes nothing: the invoice page can't print them yet");
+		const oneLine = await set.press(1, { body: CONFIRM });
+		eq([oneLine.status, oneLine.body && oneLine.body.code, set.spies()], [409, "NOA_UNCONFIGURED", [0, 0, 0, 0]], "§1 a setting that isn't the four lines says nothing, live or not: refused before prepare()");
 		w.putMarker(2, { locked: NOW });
 		eq((await w.press(2, { body: CONFIRM })).body.code, "FACTORING_LOCKED", "§1 a locked row answers with the lock first");
 		const plain = world();
 		const unmarked = await plain.press(3, { body: CONFIRM });
 		eq([unmarked.status, unmarked.body && unmarked.body.via, plain.actions("invoice_draft_factored_confirmed")], [200, "imap", []], "§1 a load that isn't factored ignores the confirmation: a plain draft, nothing audited as confirmed");
 		const wiring = SRC.slice(SRC.indexOf("// <factoring-wiring>"), SRC.indexOf("// </factoring-wiring>"));
-		ok(wiring.includes('require("./lib/factoring-routes").create({') && !wiring.includes("hasAssignmentLines"), "§1 the server's wiring never says the lines exist");
+		ok(wiring.includes('require("./lib/factoring-routes").create({') && !wiring.includes("hasAssignmentLines"), "§1 no wiring says the lines exist: only the setting does");
+		ok(wiring.includes("\tenv: process.env,\n"), "§1 ...and the routes read the server's own settings");
+		ok(SRC.includes("assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),"), "§1 FAILS ON THE OLD CODE: the server's engine asks the routes what to print");
 	}
 	// Once assignment lines exist, the confirmation's own rules.
 	{
@@ -377,6 +417,189 @@ async function s1() {
 
 }
 
+// ---------------------------------------------------------------- §1c
+// Setting the lines opens nothing. Before Triumph is live a Gmail draft would tell the
+// broker to pay a party holding nothing, so the exit is the clear, then the plain button.
+async function s1notLive() {
+	section("§1c the lines set, and the mode not live");
+	const w = world({ n8n: true, lines: "dry" });
+	w.putMarker(1);
+	const yes = await w.press(1, { body: CONFIRM });
+	eq([yes.status, yes.body && yes.body.code], [409, "TRIUMPH_NOT_LIVE"], "§1c FAILS ON THE OLD CODE: lines set, dry run, a listed account's confirmation with a reason: 409 TRIUMPH_NOT_LIVE");
+	ok(store && yes.body && yes.body.error === store.WORDS.TRIUMPH_NOT_LIVE, "§1c FAILS ON THE OLD CODE: ...in its own words");
+	for (const [label, opts] of [
+		["the preview of that confirmation", { body: CONFIRM, dry: true }],
+		["an account not listed", { user: UNLISTED, body: CONFIRM }],
+		["the shared login", { user: SHARED, body: CONFIRM }],
+		["a listed account with no reason", { body: { confirmFactored: true, factoredReason: "  " } }],
+		["a body that says it's live", { body: { ...CONFIRM, live: true, submitMode: "live", hasAssignmentLines: true } }],
+	]) {
+		const r = await w.press(1, opts);
+		eq([r.status, r.body && r.body.code], [409, "TRIUMPH_NOT_LIVE"], `§1c FAILS ON THE OLD CODE: ${label}: 409 TRIUMPH_NOT_LIVE`);
+	}
+	eq(w.spies(), [0, 0, 0, 0], "§1c prepare, nextInvoiceNumber, IMAP and n8n spies all at 0");
+	eq([w.drafts(1), w.inflight(1), w.actions("invoice_draft_factored_confirmed"), w.actions("invoice_number_void")], [[], [], [], []], "§1c no draft row, no in-flight row, nothing audited, no number voided");
+	eq((await w.press(1)).body.code, "LOAD_FACTORED", "§1c a plain press is refused as ever");
+
+	for (const [label, settings] of [
+		["TRIUMPH_SUBMIT_ENABLED off", { ...LIVE_SET, TRIUMPH_SUBMIT_ENABLED: "false" }],
+		["dry run not exactly false", { ...LIVE_SET, TRIUMPH_SUBMIT_DRY_RUN: "FALSE" }],
+		["no go-live date", { ...LIVE_SET, TRIUMPH_LIVE_CONFIRMED_ON: "" }],
+		["a go-live date that isn't one", { ...LIVE_SET, TRIUMPH_LIVE_CONFIRMED_ON: "soon" }],
+	]) {
+		const x = world({ settings });
+		x.putMarker(1);
+		eq((await x.press(1, { body: CONFIRM })).body.code, "TRIUMPH_NOT_LIVE", `§1c ${label}: TRIUMPH_NOT_LIVE`);
+	}
+	// The same words whichever state isn't live, and a way out that says whose it is: the switch may be off.
+	for (const [label, settings] of [
+		["the date set and the mode dry, as a move back after go-live leaves it", { ...LIVE_SET, TRIUMPH_SUBMIT_DRY_RUN: "true" }],
+		["the date set and the mode off", { ...LIVE_SET, TRIUMPH_SUBMIT_ENABLED: "false" }],
+		["no date and the mode dry", DRY_SET],
+	]) {
+		const x = world({ settings });
+		x.putMarker(1);
+		const r = await x.press(1, { body: CONFIRM });
+		eq(r.body && r.body.code, "TRIUMPH_NOT_LIVE", `§1c ${label}: TRIUMPH_NOT_LIVE`);
+		ok(!/confirmed|\byet\b/.test(String(r.body && r.body.error)), `§1c FAILS ON THE OLD CODE: ${label}: the words claim nothing about what Triumph has confirmed`);
+		ok(/whoever manages factored loads can clear the mark/.test(String(r.body && r.body.error)), `§1c FAILS ON THE OLD CODE: ${label}: the way out says whose it is`);
+	}
+	const replica = CUR.routesLib ? CUR.routesLib.readSettings(LIVE_SET, { replica: true }) : {};
+	eq([replica.noaLines, replica.submitMode], [null, "off"], "§1c a replica has no lines and no mode, whatever its settings say");
+
+	// The way out: the clear, then the plain button, whose bank block is right for an unfactored load.
+	const out = world({ lines: "dry", settings: {} });
+	out.putMarker(3);
+	eq((await out.press(3)).body.code, "LOAD_FACTORED", "§1c (fixture) marked, refused");
+	eq((await out.clear(3)).status, 200, "§1c the mark clears");
+	const after = await out.press(3);
+	eq([after.status, after.body && after.body.via, out.drafts(3).map((d) => d.via)], [200, "imap", ["imap"]], "§1c ...and the plain button drafts it");
+	const page = out.seen.pages[out.seen.pages.length - 1] || "";
+	ok(page.includes("Payment Method") && !page.includes(NOA_LINES[2]), "§1c ...with the bank block and no assignment line");
+}
+
+// ---------------------------------------------------------------- §1d
+async function s1live() {
+	section("§1d live: what the invoice tells the broker");
+	const prints = (html) => NOA_LINES.every((l) => String(html).includes(`>${l}</div>`));
+	const noBank = (html) => !/Payment Method|Bank Name|Bank Routing|Bank Account/.test(String(html));
+	{
+		const w = world({ n8n: true, lines: true });
+		w.putMarker(1);
+		const yes = await w.press(1, { body: CONFIRM });
+		eq([yes.status, yes.body && yes.body.via, w.drafts(1).length], [200, "imap", 1], "§1d a listed account's confirmation with a reason drafts it");
+		const page = w.seen.pages[0];
+		ok(prints(page), "§1d FAILS ON THE OLD CODE: the PDF prints every assignment line");
+		ok(noBank(page), "§1d FAILS ON THE OLD CODE: ...and no bank block");
+		const dry = await w.press(2, { dry: true });
+		ok(dry.status === 200 && !prints(w.seen.pages[1]), "§1d (fixture) a load that isn't factored previews with no lines");
+		w.putMarker(4);
+		const review = await w.press(4, { dry: true, body: CONFIRM });
+		eq(review.status, 200, "§1d the review of a confirmed draft answers");
+		ok(prints(w.seen.pages[2]) && noBank(w.seen.pages[2]), "§1d FAILS ON THE OLD CODE: ...and its PDF prints what the approve prints");
+	}
+	// A load that isn't factored prints the same bytes whatever the settings say.
+	{
+		const plain = world();
+		const live = world({ lines: true });
+		const dry = world({ lines: "dry" });
+		for (const x of [plain, live, dry]) await x.press(5);
+		ok(plain.seen.pages[0] && plain.seen.pages[0] === live.seen.pages[0] && plain.seen.pages[0] === dry.seen.pages[0], "§1d a load that isn't factored: the same page, byte for byte, in every world");
+		ok(plain.seen.pages[0] && plain.seen.pages[0].includes("Payment Method") && !prints(plain.seen.pages[0]), "§1d ...the bank block, no assignment line");
+	}
+	// Refused before any number, when the build finds the load factored and nothing to print.
+	{
+		const w = world({ n8n: true });
+		w.duringPrepare = () => { w.duringPrepare = null; w.putMarker(6); };
+		const r = await w.press(6);
+		eq([r.status, r.body && r.body.code], [503, "NOA_UNCONFIGURED"], "§1d FAILS ON THE OLD CODE: a mark during the build, no lines: 503 NOA_UNCONFIGURED, never the bank block");
+		eq([w.seen.mint, w.seen.render, w.seen.imap.length, w.seen.n8n.length], [0, 0, 0, 0], "§1d FAILS ON THE OLD CODE: ...before any number, render or hand-off");
+		const u = world();
+		u.duringPrepare = (db) => {
+			u.duringPrepare = null;
+			db.exec("DROP TABLE load_factoring; CREATE VIEW load_factoring AS SELECT * FROM made_up_missing_table");
+		};
+		const ru = await u.press(7);
+		eq([ru.status, ru.body && ru.body.code, u.seen.mint, u.seen.render], [503, "FACTORING_UNREADABLE", 0, 0], "§1d FAILS ON THE OLD CODE: a marker that can't be read during the build: 503, nothing spent");
+		// A note keeps printing on a factored invoice: only the bank block's two numbers are refused.
+		const bankName = brokerInvoice.PAYMENT_METHOD.bankName.toLowerCase();
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			for (const [label, notes] of [
+				["the routing number with hyphens", "routing 000-111-222"],
+				["only the account number, with spaces", "333 444 5556"],
+			]) {
+				const typed = world({ lines: true });
+				typed.putMarker(8);
+				const r = await typed.press(8, { body: { ...CONFIRM, notes } });
+				eq([r.status, r.body && r.body.code, typed.seen.mint, typed.seen.render, typed.seen.imap.length, typed.drafts(8)], [409, "ASSIGNMENT_NOT_PRINTABLE", 0, 0, 0, []],
+					`§1d ${label} in a note on a confirmed draft: refused, no number, nothing in Gmail`);
+			}
+			for (const [label, notes] of [["the bank block's label", "Payment Method: see below"], ["the bank's name", `Remit to ${bankName}`]]) {
+				const worded = world({ lines: true });
+				worded.putMarker(8);
+				const r = await worded.press(8, { body: { ...CONFIRM, notes } });
+				const pageNow = worded.seen.pages[worded.seen.pages.length - 1] || "";
+				eq([r.status, r.body && r.body.via], [200, "imap"], `§1d FAILS ON THE OLD CODE: ${label} in a note on a confirmed draft: it's drafted`);
+				ok(pageNow.includes(">EXAMPLE FACTOR LLC</div>") && !/Bank Routing|Bank Account/.test(pageNow) && !pageNow.includes("000111222"), `§1d FAILS ON THE OLD CODE: ...the note beside the lines, and no bank block (${label})`);
+			}
+			const inherited = world({ lines: true });
+			inherited.putMarker(14);
+			const rp = await inherited.preview(14, { body: { ...CONFIRM, notes: "routing 000 111 222" } });
+			eq([rp.status, rp.body && rp.body.code], [409, "ASSIGNMENT_NOT_PRINTABLE"], "§1d the preview refuses a routing number in a note too");
+			eq((await inherited.preview(14, { body: { ...CONFIRM, notes: `Remit to ${bankName}` } })).status, 200, "§1d FAILS ON THE OLD CODE: ...and prints the bank's name");
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
+	}
+	// What printed has to match the marker at the hand-off, or nothing goes.
+	{
+		const cleared = world({ n8n: true, lines: true });
+		cleared.putMarker(9);
+		cleared.duringRender = () => { cleared.duringRender = null; cleared.putMarker(9, { factored: 0 }); };
+		const r = await cleared.press(9, { body: CONFIRM });
+		eq([r.status, r.body && r.body.code, cleared.seen.imap.length, cleared.seen.n8n.length], [409, "FACTORING_CHANGED", 0, 0], "§1d FAILS ON THE OLD CODE: the mark cleared during the render of a page that prints the lines: refused, nothing handed off");
+		eq([cleared.drafts(9), cleared.inflight(9), cleared.actions("invoice_number_void").length], [[], [], 1], "§1d ...no draft row, no in-flight row, its number voided");
+
+		// The mark cleared before the page was made: the bank block is right, and "drafted although
+		// factored" would be false in an audit row that can't be corrected. The press is refused.
+		const clearedEarly = world({ n8n: true, lines: true });
+		clearedEarly.putMarker(13);
+		clearedEarly.duringPrepare = () => { clearedEarly.duringPrepare = null; clearedEarly.putMarker(13, { factored: 0 }); };
+		const rc = await clearedEarly.press(13, { body: CONFIRM });
+		eq([rc.status, rc.body && rc.body.code, clearedEarly.seen.imap.length, clearedEarly.seen.n8n.length], [409, "FACTORING_CHANGED", 0, 0], "§1d FAILS ON THE OLD CODE: a confirmed press whose mark clears during the build: refused, nothing handed off");
+		eq([clearedEarly.drafts(13), clearedEarly.inflight(13), clearedEarly.actions("invoice_draft_factored_confirmed"), clearedEarly.actions("invoice_number_void").length], [[], [], [], 1],
+			"§1d FAILS ON THE OLD CODE: ...no draft row, no in-flight row, no \"drafted although factored\", its number voided");
+
+		const overN8n = world({ n8n: true, lines: true });
+		overN8n.putMarker(15);
+		overN8n.imap = ["NO"];
+		const ro = await overN8n.press(15, { body: CONFIRM });
+		eq([ro.status, ro.body && ro.body.via, overN8n.seen.n8n.length], [200, "n8n", 1], "§1d a confirmed draft whose IMAP is refused goes by n8n: the lines printed and the mark stands");
+
+		const remarked = world({ n8n: true, lines: true });
+		remarked.putMarker(10);
+		remarked.duringPrepare = () => { remarked.duringPrepare = null; remarked.putMarker(10, { factored: 0 }); };
+		remarked.duringRender = () => { remarked.duringRender = null; remarked.putMarker(10); };
+		const rr = await remarked.press(10, { body: CONFIRM });
+		eq([rr.status, rr.body && rr.body.code, remarked.seen.imap.length], [409, "FACTORING_CHANGED", 0], "§1d FAILS ON THE OLD CODE: cleared during the build and marked again during the render: the bank block never goes");
+
+		const marked = world({ lines: true });
+		marked.duringPrepare = () => { marked.duringPrepare = null; marked.putMarker(11); };
+		const rm = await marked.press(11);
+		eq([rm.status, rm.body && rm.body.code, marked.seen.imap.length, marked.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 1], "§1d a plain press, marked during the build with the lines set: refused at the late check, its number voided");
+
+		const viaN8n = world({ n8n: true, lines: true });
+		viaN8n.putMarker(12);
+		viaN8n.imap = ["NO"];
+		viaN8n.duringImap = () => { viaN8n.duringImap = null; viaN8n.putMarker(12, { factored: 0 }); };
+		const rv = await viaN8n.press(12, { body: CONFIRM });
+		eq([rv.status, rv.body && rv.body.code, viaN8n.seen.n8n.length, viaN8n.inflight(12), viaN8n.actions("invoice_number_void").length], [409, "FACTORING_CHANGED", 0, [], 1], "§1d FAILS ON THE OLD CODE: before n8n too: cleared during a refused IMAP, no POST, its number voided");
+	}
+}
+
 // ---------------------------------------------------------------- §1b
 // As production ships: TRIUMPH_FACTORING_ENABLED and TRIUMPH_FACTOR_MARK_IDS unset.
 // The first marks come from the lead's scripts/factoring-mark.js, and the button
@@ -396,6 +619,9 @@ async function s1off() {
 		eq([w.drafts(30), w.inflight(30)], [[], []], "§1b no draft row and no in-flight row");
 		const confirm = await w.press(30, { body: CONFIRM });
 		eq([confirm.status, confirm.body && confirm.body.code], [409, "NOA_UNCONFIGURED"], "§1b FAILS ON THE OLD CODE: nobody can confirm it");
+		const set = world({ off: true, settings: NOA_SET });
+		await set.mark(30);
+		eq((await set.press(30, { body: CONFIRM })).body.code, "TRIUMPH_NOT_LIVE", "§1b FAILS ON THE OLD CODE: every switch off with the lines set: TRIUMPH_NOT_LIVE, nobody can confirm it");
 		w.duringRender = () => { w.duringRender = null; w.mark(31); };
 		const late = await w.press(31);
 		eq([late.status, late.body && late.body.code, w.seen.imap.length, w.seen.n8n.length, w.actions("invoice_number_void").length], [409, "LOAD_FACTORED", 0, 0, 1],
@@ -652,6 +878,84 @@ async function s7() {
 	}
 }
 
+// ---------------------------------------------------------------- §9
+async function s9() {
+	section("§9  the live preview");
+	const prints = (html) => NOA_LINES.every((l) => String(html).includes(`>${l}</div>`));
+	const code = (r) => [r.status, r.body && r.body.code];
+	{
+		const w = world();
+		const plain = await w.preview(1);
+		eq([plain.status, w.seen.render], [200, 1], "§9 a load that isn't factored previews as ever");
+		ok(w.seen.pages[0].includes("Payment Method") && !prints(w.seen.pages[0]), "§9 ...with the bank block");
+		const other = world({ lines: true });
+		await other.preview(1);
+		ok(other.seen.pages[0] === w.seen.pages[0], "§9 ...the same page, byte for byte, with the lines set and live");
+		w.db.prepare("INSERT INTO invoice_draft_inflight (load_key, load_id, invoice_id, path, state, started_at, updated_at) VALUES (?, ?, '11032026-1', 'imap', 'in_flight', ?, ?)").run(key(2), id(2), NOW, NOW);
+		eq((await w.preview(2)).status, 200, "§9 ...and a draft of it in flight is no reason to refuse: the preview sends nothing");
+		const renders = w.seen.render;
+		w.putMarker(3);
+		eq(code(await w.preview(3)), [409, "LOAD_FACTORED"], "§9 FAILS ON THE OLD CODE: a factored load: 409 LOAD_FACTORED");
+		eq(code(await w.preview(3, { body: CONFIRM })), [409, "NOA_UNCONFIGURED"], "§9 FAILS ON THE OLD CODE: the confirmation with no lines: 409 NOA_UNCONFIGURED");
+		eq(code(await w.preview(3, { user: UNLISTED, body: CONFIRM })), [409, "NOA_UNCONFIGURED"], "§9 FAILS ON THE OLD CODE: ...whoever asks");
+		w.putMarker(4, { locked: NOW });
+		eq(code(await w.preview(4, { body: CONFIRM })), [409, "FACTORING_LOCKED"], "§9 FAILS ON THE OLD CODE: a locked row");
+		eq(w.seen.render, renders, "§9 FAILS ON THE OLD CODE: none of them rendered, so no page with a bank block exists");
+		const u = world({ unreadableMarker: true });
+		eq(code(await u.preview(5)), [503, "FACTORING_UNREADABLE"], "§9 FAILS ON THE OLD CODE: a marker that can't be read: 503");
+		eq(u.seen.render, 0, "§9 FAILS ON THE OLD CODE: ...nothing rendered");
+		// The route calls the check outside its try: a read that throws past the marker is still an answer.
+		const broken = world();
+		broken.putMarker(6);
+		broken.db.exec("DROP TABLE load_invoice_drafts; CREATE VIEW load_invoice_drafts AS SELECT * FROM made_up_missing_table");
+		let answered;
+		try {
+			answered = code(await broken.preview(6));
+		} catch (e) {
+			answered = `threw: ${e && e.message}`;
+		}
+		eq(answered, [503, "FACTORING_UNREADABLE"], "§9 FAILS ON THE OLD CODE: a table it reads next that can't be read: 503, not a rejected handler");
+	}
+	{
+		const dry = world({ lines: "dry" });
+		dry.putMarker(1);
+		eq(code(await dry.preview(1, { body: CONFIRM })), [409, "TRIUMPH_NOT_LIVE"], "§9 FAILS ON THE OLD CODE: the lines set, not live: 409 TRIUMPH_NOT_LIVE");
+		eq(dry.seen.render, 0, "§9 FAILS ON THE OLD CODE: ...nothing rendered");
+	}
+	{
+		const w = world({ lines: true });
+		w.putMarker(1);
+		eq(code(await w.preview(1)), [409, "LOAD_FACTORED"], "§9 FAILS ON THE OLD CODE: live, with no confirmation: refused");
+		eq(code(await w.preview(1, { user: UNLISTED, body: CONFIRM })), [403, "FACTORING_NOT_LISTED"], "§9 FAILS ON THE OLD CODE: live, an account not listed: 403");
+		eq(code(await w.preview(1, { body: { confirmFactored: true } })), [400, "FACTORING_REASON_REQUIRED"], "§9 FAILS ON THE OLD CODE: live, no reason: 400");
+		const yes = await w.preview(1, { body: CONFIRM });
+		eq(yes.status, 200, "§9 live, a listed account's confirmation with a reason: it renders");
+		const page = w.seen.pages[0] || "";
+		ok(prints(page), "§9 FAILS ON THE OLD CODE: ...with every assignment line");
+		ok(!/Payment Method|Bank Name|Bank Routing|Bank Account/.test(page), "§9 FAILS ON THE OLD CODE: ...and no bank block");
+		// The same lines the approve prints.
+		const block = (html) => { const at = String(html).indexOf('<div class="payment"'); return at < 0 ? "" : String(html).slice(at, String(html).indexOf('<div class="thanks">')); };
+		const approve = world({ lines: true });
+		approve.putMarker(1);
+		await approve.press(1, { body: CONFIRM });
+		ok(block(page) && block(page) === block(approve.seen.pages[0]), "§9 FAILS ON THE OLD CODE: ...the very block the approve prints");
+		eq((await w.preview(1, { body: { ...CONFIRM, notes: "Payment Method: see below" } })).status, 200, "§9 FAILS ON THE OLD CODE: a note naming the bank block: it renders");
+		const saved = [process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT];
+		process.env.INVOICE_BANK_ROUTING = "000111222";
+		process.env.INVOICE_BANK_ACCOUNT = "3334445556";
+		try {
+			const numbered = world({ lines: true });
+			numbered.putMarker(1);
+			const NUMBER_NOTE = { ...CONFIRM, notes: "account 333-444-5556" };
+			eq(code(await numbered.preview(1, { body: NUMBER_NOTE })), [409, "ASSIGNMENT_NOT_PRINTABLE"], "§9 FAILS ON THE OLD CODE: a note holding the account number: its own refusal, not a render failure");
+			for (let i = 0; i < 3; i++) await numbered.preview(1, { body: NUMBER_NOTE });
+			eq((await numbered.preview(1, { body: CONFIRM })).status, 200, "§9 ...and a refusal gives back its render slot");
+		} finally {
+			[process.env.INVOICE_BANK_ROUTING, process.env.INVOICE_BANK_ACCOUNT] = saved;
+		}
+	}
+}
+
 // ---------------------------------------------------------------- §8
 // Each rule removed in turn (a copy of the module, or of the route's text): the
 // section that pins it must fail.
@@ -678,10 +982,28 @@ async function mutants() {
 			"store.draftDrop(db, { key, invoiceId });\n\t\t\t\tvoidNumber(\"N8N_FAILED\");", s5],
 		["a refusal before n8n voids and deletes after an unanswered IMAP", "routes", "if (r.keep) return", "if (false) return", s5],
 		["settling on 'no throw' (record() answering recorded:false ignored)", "routes", "if (!(result && result.recorded)) {", "if (false) {", s4],
-		["the confirmation with no assignment lines", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: true,", s1],
-		["a body that says the lines exist is believed", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: body.hasAssignmentLines === true,", s1],
-		["a setting says the lines exist", "routes", "hasAssignmentLines: d.hasAssignmentLines === true,", "hasAssignmentLines: Boolean(d.env && d.env.TRIUMPH_NOA_LINES),", s1],
+		["the confirmation with no assignment lines", "routes", "hasAssignmentLines: noaLines !== null,", "hasAssignmentLines: true,", s1],
+		["a body that says the lines exist is believed", "routes", "hasAssignmentLines: noaLines !== null,", "hasAssignmentLines: noaLines !== null || body.hasAssignmentLines === true,", s1],
+		["a setting that isn't the four lines says they exist", "routes", "hasAssignmentLines: noaLines !== null,", "hasAssignmentLines: Boolean(d.env && d.env.TRIUMPH_NOA_LINES),", s1],
 		["the confirmation from any Super Admin", "routes", "mayConfirm: mayMark(userOf(req)),", "mayConfirm: true,", s1],
+		["the confirmation before live", "routes", "live: submitMode === \"live\",", "live: true,", s1notLive],
+		["dry run read as live", "routes", "live: submitMode === \"live\",", "live: submitMode !== \"off\",", s1notLive],
+		["a body that says it's live is believed", "routes", "live: submitMode === \"live\",", "live: submitMode === \"live\" || body.live === true,", s1notLive],
+		["the go-live date ignored by the override", "routes", "submitMode: triumphRules.submitMode(env, { replica }),", "submitMode: String((env && env.TRIUMPH_SUBMIT_DRY_RUN) ?? \"\").trim() === \"false\" ? \"live\" : \"dry\",", s1notLive],
+		["a replica holds the lines", "routes", "noaLines: !replica && noa.ok ? Object.freeze(noa.lines) : null,", "noaLines: noa.ok ? Object.freeze(noa.lines) : null,", s1notLive],
+		["a marker that can't be read prints the bank block", "routes", "throw thrown(\"FACTORING_UNREADABLE\");", "return null;", s1live],
+		["no lines prints the bank block", "routes", "if (noaLines === null) throw thrown(\"NOA_UNCONFIGURED\");", "if (noaLines === null) return null;", s1live],
+		["a factored load answers no assignment", "routes", "return { lines: noaLines };\n\t}\n\n\t// From the render", "return null;\n\t}\n\n\t// From the render", s1live],
+		["the route says nothing printed", "route", "printedAssignment: Boolean(draft.assignment),", "printedAssignment: false,", s1live],
+		["the route says the lines always printed", "route", "printedAssignment: Boolean(draft.assignment),", "printedAssignment: true,", s1live],
+		["the hand-off forgets what printed", "routes", "confirmed, reissue, printedAssignment, actorId: userOf(req).id", "confirmed, reissue, actorId: userOf(req).id", s1live],
+		["the step before n8n forgets what printed", "routes", "store.draftBeforeN8n(db, { key, invoiceId, confirmed, reissue, printedAssignment, nowIso: nowIso() })", "store.draftBeforeN8n(db, { key, invoiceId, confirmed, reissue, nowIso: nowIso() })", s1live],
+		["no check on the preview", "preview", "if (!factoring.ok) return res.status(factoring.http).json(factoring.json);", "", s9],
+		["the preview prints the bank block", "preview", "factoringRoutes.withAssignment(invoiceHtml, factoring.assignment)", "invoiceHtml", s9],
+		["the preview's refusal answered as a render failure", "preview", "if (err && err.code === \"ASSIGNMENT_NOT_PRINTABLE\") return res.status(err.http).json({ error: err.message, code: err.code });", "", s9],
+		["the preview takes the press's in-flight check", "routes", "r = store.previewCheck(db, pressGates(req, loadId));", "r = store.draftEarlyCheck(db, { ...pressGates(req, loadId), nowIso: nowIso() });", s9],
+		["the preview's check lets a thrown read through", "routes", "\t\t} catch {\n\t\t\tr = store.refusal(\"FACTORING_UNREADABLE\");\n\t\t}", "\t\t} catch (e) {\n\t\t\tthrow e;\n\t\t}", s9],
+		["the preview's page is always the plain one", "routes", "return { ok: true, assignment: r.factored ? { lines: noaLines } : null };", "return { ok: true, assignment: null };", s9],
 		["the shared login counts as listed", "routes", "&& !isSharedLoginName(user.username)", "", s1],
 		["Check Gmail without the search", "routes", "const canSearch = row.path === \"imap\"", "const canSearch = false && row.path === \"imap\"", s6],
 		// The review's two: the button's checks, or its in-flight row and late
@@ -697,13 +1019,14 @@ async function mutants() {
 	];
 	let caught = 0;
 	for (const [label, where, from, to, sec, mode = "on"] of list) {
-		const text = where === "route" ? LIFT.route : ROUTES_SRC;
+		const text = where === "route" ? LIFT.route : where === "preview" ? LIFT.preview : ROUTES_SRC;
 		// One edit, or several ([from, to] pairs), each anchored exactly once.
 		const edits = Array.isArray(from) ? from : [[from, to]];
 		if (edits.some(([f]) => text.split(f).length - 1 !== 1)) { failures.push(`§8 mutant anchor not found once: ${label}`); continue; }
 		const mutated = edits.reduce((t, [f, r]) => t.replace(f, r), text);
 		const saved = { ...CUR };
 		if (where === "route") CUR.route = mutated;
+		else if (where === "preview") CUR.preview = mutated;
 		else CUR.routesLib = moduleFrom(ROUTES_FILE, mutated);
 		const before = sink;
 		sink = [];
@@ -732,7 +1055,7 @@ async function main() {
 	// settings: a made-up one, for this run only.
 	process.env.DEFAULT_INVOICE_EMAIL = TO;
 	delete process.env.BISON_INVOICE_EMAIL;
-	for (const s of [s1, s2, s3, s4, s5, s6, s7]) await s();
+	for (const s of [s1, s1notLive, s1live, s2, s3, s4, s5, s6, s7, s9]) await s();
 	// Again as production ships: both factoring settings unset (plan §11.5).
 	MODE = "off";
 	for (const s of [s1off, s4, s5, s6, s7]) await s();

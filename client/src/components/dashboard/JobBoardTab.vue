@@ -11,10 +11,13 @@
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
+        <!-- Stays while it is on, even at (0), so a refresh that leaves no load
+             to review can't hide the filter with every load behind it. -->
         <button
-          v-if="needsReviewCount > 0"
+          v-if="needsReviewCount > 0 || needsReviewOnly"
           type="button"
           :style="reviewToggleStyle"
+          :aria-pressed="needsReviewOnly"
           :title="needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE"
           @click="needsReviewOnly = !needsReviewOnly"
         >
@@ -27,7 +30,7 @@
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
-      <EmptyState v-else-if="filteredJobs.length === 0">{{ needsReviewOnly ? 'No unassigned loads need review.' : (searchQuery ? 'No loads match your search.' : 'All loads are assigned.') }}</EmptyState>
+      <EmptyState v-else-if="filteredJobs.length === 0">{{ emptyMessage }}</EmptyState>
       <!-- Mobile: card-per-load. Tap the card body → detail modal. Assign
            dropdown stays inline so dispatch can handle the most common
            action without opening anything. -->
@@ -291,6 +294,7 @@ import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { completedEmptyText } from '../../lib/completedLoadsFilters'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { offDutySuffix } from '../../lib/availabilityText'
 import { loadRef, loadIdShown, loadIdWithheld } from '../../lib/loadRef'
@@ -385,6 +389,12 @@ const searchResult = computed(() => {
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
+// The empty list names what is on. The count is over every unassigned load,
+// searched or not, so with a search typed the line names the search as well.
+const emptyMessage = computed(() => {
+  if (searchQuery.value.trim()) return completedEmptyText({ review: needsReviewOnly.value, search: true })
+  return needsReviewOnly.value ? 'No unassigned loads need review.' : 'All loads are assigned.'
+})
 const reviewToggleStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
   padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',

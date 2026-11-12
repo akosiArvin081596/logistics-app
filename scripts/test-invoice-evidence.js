@@ -707,6 +707,25 @@ async function main() {
 		await w.store.runOnce();
 		eq(w.rowFor("900000803"), { status: STATUS.UNKNOWN, code: "MENTIONED" }, "§9 a blank-To draft with an invoice file is doubt, so the load can't read clean");
 
+		// The automatic invoices' own alerts (AUTO_INVOICE_ALERT_TO, which may be outside the company):
+		// they name the load or its invoice, and are never an invoice, nor doubt about one.
+		clearBoxes();
+		SENT.push({ subject: "Load 900000831: changed after sending, needs a check", date: DATE, to: "alerts@example-other.test", text: "Invoice 11012026-7 already went to the broker." });
+		SENT.push({ subject: "Automatic invoice sending stopped", date: DATE, to: "alerts@example-other.test", text: "made-up: 900000831" });
+		w = real({ loads: [load("900000831")] });
+		await w.store.runOnce();
+		eq(w.rowFor("900000831"), { status: STATUS.NONE_FOUND, searchedAt: iso(NOW) }, "§9 FAILS ON THE OLD CODE: a load named only by the hold and stop emails, sent outside, doesn't read billed or doubtful");
+		const ctxOf = { ownAddress: OWN, terms: ["900000831", "11012026-7"] };
+		const kind = (hit) => lib.classifyHit(hit, ctxOf).kind;
+		const HOLD = "Load 900000831: changed after sending, needs a check";
+		const STOP = "Automatic invoice sending stopped";
+		eq([kind({ subject: HOLD, to: "alerts@example-other.test" }), kind({ subject: HOLD, to: "dispatch@example.test" }), kind({ subject: STOP, to: "alerts@example-other.test" }), kind({ subject: STOP, to: OWN })],
+			[lib.KIND.IGNORED, lib.KIND.IGNORED, lib.KIND.IGNORED, lib.KIND.IGNORED], "§9 FAILS ON THE OLD CODE: both alert subjects read Ignored with no attachment, To outside the company or in it");
+		eq([kind({ subject: HOLD, to: "alerts@example-other.test", attachmentNames: ["notes.pdf"] }), kind({ subject: `Re: ${HOLD}`, to: "alerts@example-other.test" }),
+			kind({ subject: STOP, to: "alerts@example-other.test", attachmentNames: ["notes.pdf"] }), kind({ subject: `${HOLD}!`, to: "alerts@example-other.test" })],
+		[lib.KIND.MENTION, lib.KIND.MENTION, lib.KIND.MENTION, lib.KIND.MENTION], "§9 a lookalike with an attachment, a reply, or another ending is still doubt");
+		eq(kind({ subject: HOLD, to: BROKER, attachmentNames: ["Invoice 900000831.pdf"] }), lib.KIND.INVOICE, "§9 ...and a real invoice still reads as one");
+
 		clearBoxes();
 		fake.refuse.LOGIN = "NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)";
 		w = real({ loads: [load("900000804"), load("900000805")] });

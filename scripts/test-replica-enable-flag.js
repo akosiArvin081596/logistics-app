@@ -93,6 +93,8 @@ const OUTBOUND = {
 	ROUTEMATE_ENABLED: /ELD|outside/i,
 	LINXUP_ENABLED: /ELD|outside/i,
 	SCANKIT_ENABLED: /OCR|outside/i,
+	// Submitting factored loads: invoices to an outside party.
+	TRIUMPH_SUBMIT_ENABLED: /sends invoices to Triumph/i,
 	RATECON_RECONCILE_ENABLED: /Gmail/i,
 	// The day-off note to C.H. Robinson's contact (plan B PR 5): a Gmail draft naming a driver.
 	DRIVER_TIME_OFF_CHR_DRAFT_ENABLED: /Gmail drafts naming a driver/i,
@@ -121,6 +123,8 @@ const OUTBOUND = {
 	AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: /a driver's Delivered makes the invoice.*kill switch/i,
 	// Who an automatic invoice may go to: the check on the job's sends. A kill switch.
 	AUTO_INVOICE_KNOWN_ADDRESS_ENABLED: /who an automatic invoice may go to.*kill switch/i,
+	// New-feature notices for drivers: on unless set to false, so --enable could only override production's choice.
+	DRIVER_RELEASE_NOTICES_ENABLED: /kill switch/i,
 };
 for (const [name, why] of Object.entries(OUTBOUND)) {
 	const r = refusal(name);

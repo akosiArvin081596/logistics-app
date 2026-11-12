@@ -106,6 +106,7 @@ import { useRouter } from 'vue-router'
 import { Eye, EyeOff } from 'lucide-vue-next'
 import { isLeavingPage, useAuthStore } from '../stores/auth'
 import { signInTip } from '../lib/accountForms.js'
+import { noteSignIn } from '../lib/signInMoment.js'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -195,6 +196,7 @@ async function doLogin() {
   let freshPageComing = false
   try {
     await auth.login(loginForm.username, loginForm.password)
+    noteSignIn()
     freshPageComing = isLeavingPage()
     router.push(auth.roleHome)
   } catch (err) {
