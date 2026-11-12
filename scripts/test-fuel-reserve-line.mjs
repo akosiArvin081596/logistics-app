@@ -272,6 +272,8 @@ function world(o = {}) {
     ...trip, pointEstimateMiles: rangeMiles, fuelStopsRecommended: trip.verdict === 'tight' || trip.verdict === 'insufficient',
     updatedAt, ...(s.flag ? { driverFuel: planBlock } : {}),
   }
+  // As the route does with the flag off: a plan with no refuel figure (a route of 0) takes the range's.
+  if (!s.flag && plan.refuelWithinMiles == null) plan.refuelWithinMiles = range.rangeUsableMiles
   return { range, plan, planBlock, rangeBlock }
 }
 const STOPS = {
@@ -799,17 +801,19 @@ if (panelFactory) {
       [nowText.includes('Refuel now'), nowText.includes('180 mi still to drive'), /least to expect|Treat the miles/i.test(nowText)], [true, true, false])
   }
   {
-    // A route of 0: the plan has no refuel figure, so the hero comes from the range answer's.
+    // A route of 0: the server gives the plan the range's usable figure, so the hero is the chip's.
     const zero = world({ flag: false, leg: 'to_delivery', routeMiles: 0 })
     serve(zero)
     const z = firstScreen(await openSection(panelFactory()))
-    check('§8a a route of 0 (the plan has no refuel figure): the hero is the chip\'s figure, not "you can count on"',
-      [zero.plan.refuelWithinMiles, z.includes('225 miles before you need to refuel'), /count on/.test(z), z.includes('240')], [null, true, false, false])
-    const server = world({ flag: false, leg: 'to_delivery', routeMiles: 0 })
-    server.plan.refuelWithinMiles = 225
-    serve(server)
-    check('§8a …and the same when the server carries the figure on the plan itself',
-      firstScreen(await openSection(panelFactory())).includes('225 miles before you need to refuel'), true)
+    check('§8a a route of 0 (the server fills the plan\'s refuel figure): the hero is the chip\'s figure, not "you can count on"',
+      [zero.plan.refuelWithinMiles, z.includes('225 miles before you need to refuel'), /count on/.test(z), z.includes('240')], [225, true, false, false])
+    // The panel reads the plan whenever there is one, as the dispatcher's card does, so the two
+    // can't headline different figures for the same answers.
+    const planOnly = world({ flag: false, leg: 'to_delivery', routeMiles: 0 })
+    planOnly.plan.refuelWithinMiles = null
+    serve(planOnly)
+    check('§8a a plan with no refuel figure beside a range with one: the panel reads the plan, as the card does',
+      firstScreen(await openSection(panelFactory())).includes('240 miles you can count on'), true)
     // A plan with its own figure keeps it, so the headline and the verdict stay one computation.
     const planOwn = world({ flag: false, leg: 'to_delivery', routeMiles: 180 })
     planOwn.range.rangeUsableMiles = 999

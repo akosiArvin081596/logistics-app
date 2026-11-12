@@ -160,6 +160,8 @@ function world(o = {}) {
     ...trip, pointEstimateMiles: rangeMiles, fuelStopsRecommended: trip.verdict === 'tight' || trip.verdict === 'insufficient',
     updatedAt, ...(s.flag ? { driverFuel: planBlock } : {}),
   }
+  // As the route does with the flag off: a plan with no refuel figure (a route of 0) takes the range's.
+  if (!s.flag && plan.refuelWithinMiles == null) plan.refuelWithinMiles = range.rangeUsableMiles
   return { range, plan, status: s.leg === 'to_pickup' ? 'Assigned' : 'In Transit' }
 }
 const STOPS = {

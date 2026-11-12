@@ -451,14 +451,9 @@ const fuelLow = computed(
    The trip-plan carries its own copy of the interval, so prefer it: then the
    headline figure and the verdict are guaranteed to come from one computation
    rather than two requests that could straddle a fuel-level update. */
-const interval = computed(() => {
-  const fromPlan = plan.value ? planRangeReadout(plan.value) : null
-  if (fromPlan && fromPlan.hasReserve) return fromPlan
-  // A plan with no refuel figure, such as a route of 0: the range answer still carries
-  // the server's usable miles, so the hero stays the figure the chip quotes.
-  const fromRange = rangeReadout(range.value || {})
-  return fromPlan && !fromRange.hasReserve ? fromPlan : fromRange
-})
+const interval = computed(() =>
+  plan.value ? planRangeReadout(plan.value) : rangeReadout(range.value || {}),
+)
 const verdict = computed(() => (plan.value ? tripVerdict(plan.value.verdict) : null))
 // Why the plan counts the run to the shipper on a load marked picked up; on both screens.
 const pickupLine = computed(() => pickupUnconfirmedLine(plan.value))
