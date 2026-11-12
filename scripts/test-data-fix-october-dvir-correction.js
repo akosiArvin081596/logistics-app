@@ -703,8 +703,8 @@ async function personPath(c) {
 		eq("any other folder", FIX.ownSheetId({}, "/srv/elsewhere"), "");
 	});
 	await test("§9 money as the sheet shows it", ({ eq }) => {
-		eq("read", ["$1,516.56", "1516.56", "$405.84", " 1,234 ", "$1,2345.00", "12.3.4", "", "TBD"].map(FIX.moneyCents), [151656, 151656, 40584, 123400, null, null, null, null]);
-		eq("written in the cell's own style", [FIX.moneyText(151656, "$1,481.56"), FIX.moneyText(40584, "$370.84"), FIX.moneyText(151656, "1481.56"), FIX.moneyText(151656, "1,481.56")], ["$1,516.56", "$405.84", "1516.56", "1,516.56"]);
+		eq("read", ["$1,234.56", "1234.56", "$321.09", " 1,234 ", "$1,2345.00", "12.3.4", "", "TBD"].map(FIX.moneyCents), [123456, 123456, 32109, 123400, null, null, null, null]);
+		eq("written in the cell's own style", [FIX.moneyText(123456, "$1,199.56"), FIX.moneyText(32109, "$286.09"), FIX.moneyText(123456, "1199.56"), FIX.moneyText(123456, "1,199.56")], ["$1,234.56", "$321.09", "1234.56", "1,234.56"]);
 	});
 
 	// §10 ──────────────────────────────────────────────────────────────────────

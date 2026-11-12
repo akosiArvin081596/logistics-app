@@ -181,7 +181,7 @@ function readPlanFile(p) {
 
 // ── money as the sheet shows it ─────────────────────────────────────────────
 
-// Cents of "$1,516.56", "1516.56", "1,516", "$405.84"; null for anything else.
+// Cents of "$1,234.56", "1234.56", "1,234", "$321.09"; null for anything else.
 function moneyCents(text) {
 	const m = /^\s*\$?\s*(\d{1,3}(?:,\d{3})+|\d{1,9})(?:\.(\d{1,2}))?\s*$/.exec(String(text == null ? "" : text));
 	if (!m) return null;
