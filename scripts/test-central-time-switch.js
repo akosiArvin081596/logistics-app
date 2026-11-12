@@ -351,6 +351,9 @@ function child(scenario) {
 		const brokerUnset = require(path.join(ROOT, "lib", "broker-invoice.js"));
 		const mdyEastern = (t) => { const [y, m, d] = nyDay(t).split("-"); return `${m}/${d}/${y}`; };
 		check("§9 unset: a PDF's date of an instant is its US Eastern day, as before (so the template hash's pin holds)", () => differs((t) => brokerUnset.formatDate(new Date(t)) === mdyEastern(t) && brokerUnset.formatDate(new Date(t).toISOString()) === mdyEastern(t)), 0);
+		const stampAtSrc = /\n(function stampAt\(ms, zone\) \{[\s\S]*?\n\})\n/.exec(fs.readFileSync(path.join(ROOT, "scripts", "load-phases-report.js"), "utf8"));
+		const stampAtUnset = stampAtSrc ? new Function("appTime", `${stampAtSrc[1]}\nreturn stampAt;`)(appTime) : () => "no stampAt()";
+		check("§9 unset: the load phases report's replayed stamp is server.js appStamp()'s, byte for byte", () => differs((t) => stampAtUnset(t, NY) === S.appStamp(new Date(t))), 0);
 		check("§9 unset: assignmentMonthKey() is appDay().slice(0, 7), as before", () => differs((t) => S.assignmentMonthKey(new Date(t).toISOString()) === nyDay(t).slice(0, 7)), 0);
 		check("§9 unset: kpiInstantDay(), ooStampDay() and the trip day are the Eastern day, as before", () => differs((t) => S.kpiInstantDay(sql(t), NY) === nyDay(t) && ownerOperator.ooStampDay(sql(t), NY) === nyDay(t)
 			&& (tripWorkDays.firstPickupTap([{ new_status: "At Shipper", changed_at: sql(t), source: "driver", actor: "made-up" }], { zone: NY }) || {}).day === nyDay(t)), 0);
@@ -480,6 +483,33 @@ function child(scenario) {
 			replay(SRC,/since_label: Number\.isFinite\(since\) \? personalExpense\.formatDay\((.+)\) : "",\n/, [...BASE, "since"], [...baseValues, T]),
 			replay(SRC,/\.filter\(\(r\) => (.+new Date\(r\.timestamp\).*?) === today\)/, [...BASE, "r"], [...baseValues, { timestamp: ISO }]),
 		], [EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY]);
+		// Fix round 2 (recheck-1 Med-A, Med-B and the last sweep).
+		const { stampMs } = require(path.join(ROOT, "lib", "eld-feed-health.js"));
+		check("§10 the day-off check: a fix with no longitude counts on its Eastern day, in the Eastern zone", () => {
+			const dayOfFix = statement("lib/time-off-eld-check.js", /\n(const zoneOfFix = [^\n]+\nconst dayOfFix = [^\n]+)\n/, ["eldMiles"], [eldMiles], "dayOfFix");
+			const zoneOfFix = statement("lib/time-off-eld-check.js", /\n(const zoneOfFix = [^\n]+)\n/, ["eldMiles"], [eldMiles], "zoneOfFix");
+			return [dayOfFix({ ms: T, lng: null }), zoneOfFix({ ms: T, lng: null }), zoneOfFix({ ms: T, lng: -97.5 })];
+		}, [EAST_DAY, NY, CHI]);
+		check("§10 the ELD miles backfill: a ping with no longitude on its Eastern day", () => replay("scripts/backfill-eld-miles.js", /dayOf: (\(ms, lng\) => eldMiles\.localDayInTz\(ms, eldMiles\.usTzForLongitude\(lng.*?\)\)),\n/, ["eldMiles"], [eldMiles])(T, null), EAST_DAY);
+		check("§10 the driver-rates data fix and the rate-lines report: a rate row's day, and the midnight a segment is dated at", () => [
+			statement("scripts/data-fix-driver-rates.js", /\n(const businessDayAt = [^\n]+)\n/, ["appTime"], [appTime], "businessDayAt")(new Date(T)),
+			new Function("appTime", `${liftFrom("scripts/data-fix-driver-rates.js", "midnightOf")}\n${grab("scripts/data-fix-driver-rates.js", /\n(const businessDayAt = [^\n]+)\n/)}\nreturn midnightOf("2026-11-01", businessDayAt);`)(appTime),
+			replay("scripts/driver-rate-lines-report.js", /day: isNaN\(d\) \? "" : (.+?), source: r\.source \}/, ["appTime", "api", "d"], [appTime, { APP_TIMEZONE: ZONE, appDay: S.appDay }, new Date(T)]),
+		], [EAST_DAY, "2026-11-01T04:00:00.000Z", EAST_DAY]);
+		check("§10 the time-off loads report prints an item's time on Eastern, the clock it counts it on", () =>
+			new Function("appTime", "stampMs", "zoneTextFormats", `${liftFrom("scripts/time-off-loads-report.js", "zoneText")}\nreturn zoneText;`)(appTime, stampMs, new Map())(ISO), "2026-11-01 00:30 EDT");
+		check("§10 the load phases report: an upload's hour and its printed time, on Eastern", () => {
+			const phases = "scripts/load-phases-report.js";
+			const hourIn = replay(phases, /const hourIn = (\(ms, zone\) => .+);\n/, ["appTime"], [appTime]);
+			const dayTime = new Function("appTime", `${liftFrom(phases, "appDayTime")}\nreturn appDayTime;`)(appTime);
+			return [hourIn(T, ZONE), dayTime(T, ZONE)];
+		}, [0, "2026-11-01 00:30"]);
+		check("§10 ...and the stamp a replayed upload would have written then (stampAt())", () =>
+			new Function("appTime", `${liftFrom("scripts/load-phases-report.js", "stampAt")}\nreturn stampAt;`)(appTime)(T, ZONE), "11/01/2026 0:30:00");
+		check("§10 ...which both replays use, never server.js appStamp() (the zone in force now)", () => {
+			const code = read("scripts/load-phases-report.js").replace(/^\s*\/\/.*$/gm, "");
+			return [(code.match(/stampAt\([a-zA-Z.]+, appTime\.appTimeZone\(\)\)/g) || []).length, /api\.appStamp\(/.test(code)];
+		}, [2, false]);
 		check("§10 the hand-run reports' days and times", () => [
 			replay("scripts/auto-invoice-shadow-report.js", /function stampDay\(stamp, zone\) \{\n\tconst ms = Date\.parse\(stampIso\(stamp\)\);\n\treturn Number\.isFinite\(ms\) \? (.+) : "";\n/, ["appTime", "zone", "ms"], [appTime, ZONE, T]),
 			replay("scripts/auto-invoice-send-trial-report.js", /const first = since \|\| \(meta\.shadow_renders_on_at \? (.+) : ""\);\n/, ["appTime", "zone", "meta"], [appTime, ZONE, { shadow_renders_on_at: ISO }]),
