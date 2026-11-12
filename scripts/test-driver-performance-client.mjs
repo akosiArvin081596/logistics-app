@@ -238,7 +238,7 @@ const week = (id, over) => ({
   ...over,
 })
 const COUNT_RULE = 'Each pickup counts 0.5 and each delivery 0.5.'
-const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 0.5, pickup: 0.5 }, invoicePaysDays: true, weeks })
+const answerOf = (...weeks) => ({ view: 'no-hours-data', creditWeights: { delivery: 0.5, pickup: 0.5 }, weeks })
 const both = answerOf(week('this-week'), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, loads: [] }))
 const thisWeek = ownWeekView(both, 'this-week') || {}
 eq('§6 this week, in words', { ...thisWeek, loads: undefined }, {
@@ -274,7 +274,7 @@ eq('§6 the app never works required out from the target', requiredFor(7.5, 2), 
 eq('§6 no required figure from the server: the target alone, never a wrong one', [null, '6', undefined, {}].map((required) => requiredFor(7.5, required)), new Array(4).fill('7.5 is the target.'))
 eq('§6 the target alone reads the week\'s own target', requiredFor(4.5, null), '4.5 is the target.')
 eq('§6 the app never decides whether he can earn it: a figure at nothing still prints', ownWeekView(answerOf(week('this-week', { left: 7.5, credits: { value: 0, target: 7.5, required: 6, deliveries: 0, pickups: 0 } })), 'this-week')?.requirement, '7.5 is the target. 6 is required.')
-// The server may still say what his invoice pays; no screen says anything about pay.
+// An answer read just before a deploy may still say what his invoice pays; no screen says anything about pay.
 eq('§6 no view carries a line about pay, whatever the answer says of his invoice', [true, false, 'true', undefined].map((invoicePaysDays) => has(ownWeekView({ ...answerOf(week('this-week')), invoicePaysDays }, 'this-week'), 'not pay')), [false, false, false, false])
 eq('§6 the app doesn\'t read what his invoice pays', /invoicePaysDays/.test(libSrc), false)
 // The line only when the server flags it, and only where its words are true.
@@ -532,9 +532,9 @@ if (typeof server.personalWeek === 'function') {
       server.countedLoad({ loadId: 'DP-4', pickupDay: '2026-11-04', deliveryDay: '' }),
     ],
   })
-  const realAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [serverWeek] }
+  const realAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, weeks: [serverWeek] }
   const offWeek = server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries: 3, pickups: 0, offDays: ['2026-11-05'], openLoad: true, loads: [] })
-  const offAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, invoicePaysDays: true, weeks: [offWeek] }
+  const offAnswer = { view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, weeks: [offWeek] }
   eq('§14 a real day off: his lower figure, and the line that says why', [ownWeekView(offAnswer, 'this-week')?.count, ownWeekView(offAnswer, 'this-week')?.lowered], ['1.5 of 6 loads', 'Your target is lower this week for your approved time off.'])
   eq('§14 a real uncounted pickup, in true words', ownWeekView({ ...realAnswer, weeks: [{ ...serverWeek, loads: [server.countedLoad({ loadId: 'DP-5', pickupDay: '', deliveryDay: '2026-11-04' })] }] }, 'this-week')?.loads, [{ title: 'Load DP-5', line: 'Delivered Wed 0.5 · Pickup not counted this week' }])
   eq('§14 the server\'s own week, in words', [ownWeekView(realAnswer, 'this-week')?.count, ownWeekView(realAnswer, 'this-week')?.left, ownWeekView(realAnswer, 'this-week')?.pace, ownWeekView(realAnswer, 'this-week')?.width], ['2.5 of 7.5 loads', '5 loads left this week.', 'Needs Focus', '33%'])

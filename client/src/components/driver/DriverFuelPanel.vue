@@ -218,15 +218,13 @@
 
         <!-- A driver has to know whether the range came off their own truck or
              a fleet-wide guess before they decide to run one more hour.
-             Shown ONLY for the fleet default: MPG worked out from this truck's
+             Shown ONLY for a figure nobody measured: MPG worked out from this truck's
              own fuel receipts is the most accurate figure available, so warning
              about it would be telling a driver to distrust the best number he
              has ever been given. -->
-        <p v-if="isDefaultMpg" class="dfp-note">
-          There aren't enough miles or fuel receipts on this truck yet to work out its real MPG,
-          so this range assumes the fleet default of {{ mpgLabel }}. Treat it as a rough estimate.
-        </p>
-        <p v-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
+        <p v-if="mpgNote" class="dfp-note">{{ mpgNote }}</p>
+        <p v-if="levelEstimateLine" class="dfp-stamp" data-testid="fuel-level-estimate">{{ levelEstimateLine }}</p>
+        <p v-else-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
       </template>
 
       <div v-else-if="rangeError" class="dfp-error">{{ rangeError }}</div>
@@ -390,6 +388,8 @@ import {
   rangeEvidenceText,
   milesText,
   pickupUnconfirmedLine,
+  fuelLevelEstimateLine,
+  mpgNoteText,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
 import { driverFuelOf, driverFuelView, driverFuelTone, driverFuelStops, flagOnProblem, FUEL_REQUEST_FAILED } from '../../lib/driverFuelView'
@@ -647,7 +647,6 @@ const tankKnown = computed(() => tankLabel.value !== '—')
 // convention as tankSource above; asserting a provenance we don't understand is
 // worse than staying quiet.
 const mpgSrc = computed(() => mpgSource(range.value && range.value.mpgSource))
-const isDefaultMpg = computed(() => !!mpgSrc.value && mpgSrc.value.rank === 0)
 // Receipt-derived gets its own class so it reads as BETTER than the ELD figure,
 // not merely as another thing that isn't the default.
 const mpgBadgeClass = computed(() =>
@@ -657,6 +656,7 @@ const mpgLabel = computed(() => {
   const m = round1(range.value && range.value.mpg)
   return m === '—' ? '—' : `${m} mpg`
 })
+const mpgNote = computed(() => mpgNoteText(mpgSrc.value && mpgSrc.value.key, mpgLabel.value, interval.value.basis))
 const unitLabel = computed(() => {
   const r = range.value
   if (!r) return ''
@@ -664,6 +664,7 @@ const unitLabel = computed(() => {
   return u ? (/^\d+$/.test(u) ? `Unit ${u}` : u) : ''
 })
 const updatedLabel = computed(() => (range.value ? ago(range.value.updatedAt) : ''))
+const levelEstimateLine = computed(() => fuelLevelEstimateLine(range.value))
 // Only say "no fuel sensor" when the server actually said so. A failed request
 // gets the error branch instead — telling a driver their sensor is dead when
 // the request merely timed out is worse than saying nothing.

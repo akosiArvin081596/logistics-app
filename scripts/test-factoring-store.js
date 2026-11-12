@@ -12,9 +12,13 @@
 //      isn't working (or has none); a working claim counts only while its lease
 //      is live; it locks the marker ('outside') and every later mark or clear is
 //      refused
-//   §5 the Draft Invoice button's checks and its in-flight row
+//   §5 the Draft Invoice button's checks and its in-flight row: the confirmation
+//      refused whoever asks (NOA_UNCONFIGURED) until assignment lines exist, and
+//      its own rules for when they do
 //   §6 "Check Gmail" on a maybe-drafted row; the dashboard annotation
 //   §7 the only writer of locked_at in this PR
+//   §10 a marked load keeps its Load ID, and the refusal says the way through; the
+//       marks cleared, and when
 //   §9 the routes (lib/factoring-routes.js): the marking switch (never in a
 //      replica); only listed accounts, never the shared login; "Handled in
 //      Triumph's process" with every switch off; refusals audited with codes
@@ -36,6 +40,7 @@ if (!fs.existsSync(STORE_FILE)) {
 }
 const STORE_SRC = fs.readFileSync(STORE_FILE, "utf8");
 const ledger = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
+const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 
 let pass = 0;
@@ -83,6 +88,11 @@ function putInflight(db, k, { invoiceId = "11032026-7", state = "in_flight", sta
 }
 const putDraft = (db, loadId, via, invoiceId = "11022026-7") =>
 	db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, created_at) VALUES (?, ?, ?, ?)").run(loadId, invoiceId, via, T0);
+// A claim as the automatic job's send leaves it, at the stage it reached.
+function putSentClaim(db, k, { state = "needs_attention", stage = "appending" } = {}) {
+	ledger.insertClaim(db, { key: k, loadId: k.toUpperCase(), state, nowIso: T0 });
+	db.prepare("UPDATE auto_invoice_claims SET delivery = 'send', stage = ?, sent_at = ? WHERE load_key = ?").run(stage, T0, k);
+}
 
 // Each group of checks takes a store and returns its failure lines; the real
 // store must give none, and each mutant must make its group give one.
@@ -168,6 +178,40 @@ function checkMark(S) {
 
 	putDraft(db, "LD-TEST-0008", "auto-smtp");
 	c.eq(mark("ld-test-0008", { confirmNotSent: true }).r.code, "INVOICE_ALREADY_SENT", "§2 the job sent the invoice: INVOICE_ALREADY_SENT, with no override");
+
+	// Marked after a send: the job's record alone says so, whatever the person says,
+	// at every stage of the send and on a dry run too. The mark can't undo the email.
+	const saysNotSent = { confirmNotSent: true, reason: "made-up: says it never went" };
+	putSentClaim(db, "ld-test-0030", { state: "drafted", stage: "recorded" });
+	putDraft(db, "LD-TEST-0030", "auto-smtp");
+	x = mark("ld-test-0030", saysNotSent);
+	c.eq([x.r.ok, x.r.http, x.r.code, x.r.error, x.a, marker(db, "ld-test-0030")], [false, 409, "INVOICE_ALREADY_SENT", S.WORDS.INVOICE_ALREADY_SENT, [], undefined],
+		"§2 marked after a send: 409 INVOICE_ALREADY_SENT, no row and no audit row, though the person says it never went");
+	for (const [n, stage, state] of [[31, "appending", "needs_attention"], [32, "appended", "needs_attention"], [33, "recorded", "drafted"]]) {
+		const k = `ld-test-00${n}`;
+		putSentClaim(db, k, { state, stage });
+		c.eq([mark(k).r.code, mark(k, saysNotSent).r.code, marker(db, k)], ["INVOICE_ALREADY_SENT", "INVOICE_ALREADY_SENT", undefined], `§2 a send at stage ${stage}, no draft row yet: INVOICE_ALREADY_SENT, no row`);
+	}
+	c.eq([mark("ld-test-0030", { dryRun: true }).r.code, mark("ld-test-0031", { dryRun: true }).r.code, marker(db, "ld-test-0031")], ["INVOICE_ALREADY_SENT", "INVOICE_ALREADY_SENT", undefined],
+		"§2 ...the dry run gives the same answer, on the draft row and on the job's record alone");
+
+	// The job's message may be in Gmail with no draft row yet, and a person may have sent it from
+	// there: the mark asks first, as it does on a draft row.
+	for (const [n, code, stage] of [[40, "MAYBE_IN_GMAIL", "appending"], [41, "IN_GMAIL_UNRECORDED", "appended"]]) {
+		const k = `ld-test-00${n}`;
+		ledger.insertClaim(db, { key: k, loadId: k.toUpperCase(), state: "needs_attention", code, nowIso: T0 });
+		db.prepare("UPDATE auto_invoice_claims SET stage = ? WHERE load_key = ?").run(stage, k);
+		x = mark(k);
+		c.eq([x.r.ok, x.r.http, x.r.code, x.a, marker(db, k)], [false, 409, "INVOICE_MAYBE_IN_GMAIL", [], undefined], `§2 ${code}: the mark asks first, 409 INVOICE_MAYBE_IN_GMAIL, no row`);
+		c.ok(x.r.error && /may be in Gmail/.test(x.r.error) && x.r.error === S.WORDS.INVOICE_MAYBE_IN_GMAIL, `§2 ...${code}: in its own words`);
+		c.eq([mark(k, { confirmNotSent: true, reason: "  " }).r.code, mark(k, { dryRun: true }).r.code, marker(db, k)], ["INVOICE_MAYBE_IN_GMAIL", "INVOICE_MAYBE_IN_GMAIL", undefined], `§2 ...${code}: "not sent" needs a reason, and the dry run gives the same answer`);
+		x = mark(k, { confirmNotSent: true });
+		c.eq([x.r.ok, marker(db, k) && marker(db, k).factored], [true, 1], `§2 ...${code}: "not sent" with a reason marks it`);
+		c.ok(x.a[0] && x.a[0].details.includes("may be in Gmail, confirmed not sent"), `§2 ...${code}: and the audit row says so`);
+	}
+	// A claim that never reached Gmail asks nothing, and a draft row keeps its own question.
+	ledger.insertClaim(db, { key: "ld-test-0042", loadId: "LD-TEST-0042", state: "needs_attention", code: "TOTAL_MISMATCH", nowIso: T0 });
+	c.eq(mark("ld-test-0042").r.ok, true, "§2 a claim that never reached Gmail: marked with no question");
 
 	putDraft(db, "#LD-TEST-0009", "imap");
 	x = mark("ld-test-0009");
@@ -271,17 +315,45 @@ function checkButton(S) {
 	const db = freshDb(S);
 	const early = (k, extra = {}) => S.draftEarlyCheck(db, { key: k, nowIso: at(1), ...extra });
 	const yes = { confirmFactored: true, reason: "made-up: Triumph asked for a copy" };
+	// As if assignment lines existed: the confirmation's own rules, for when they do.
+	const lines = { hasAssignmentLines: true };
 	c.eq(early("ld-test-0001"), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 a load with no marker passes, unconfirmed");
+	c.eq(early("ld-test-0001", { confirm: yes, mayConfirm: true }), { ok: true, factored: false, confirmed: false, reason: "" }, "§5 ...and a confirmation sent for it carries no weight");
 	putMarker(db, "ld-test-0002");
 	c.eq(early("ld-test-0002").code, "LOAD_FACTORED", "§5 a factored load: LOAD_FACTORED");
-	c.eq(early("ld-test-0002", { confirm: yes }).code, "FACTORING_NOT_LISTED", "§5 the confirmation from an account not listed: FACTORING_NOT_LISTED");
-	c.eq(early("ld-test-0002", { confirm: { confirmFactored: true, reason: "" }, mayConfirm: true }).code, "FACTORING_REASON_REQUIRED", "§5 the confirmation without a reason is refused");
+	c.eq(early("ld-test-0002").error, S.WORDS.LOAD_FACTORED, "§5 ...in its usual words, with no draft out");
+	// Where an invoice may already be out, the refusal doesn't say it goes through Triumph.
+	putMarker(db, "ld-test-0030");
+	putDraft(db, "LD-TEST-0030", "auto-imap");
+	putMarker(db, "ld-test-0031");
+	ledger.insertClaim(db, { key: "ld-test-0031", loadId: "LD-TEST-0031", state: "needs_attention", code: "MAYBE_IN_GMAIL", nowIso: T0 });
+	db.prepare("UPDATE auto_invoice_claims SET stage = 'appending' WHERE load_key = 'ld-test-0031'").run();
+	for (const [label, k] of [["a draft row", "ld-test-0030"], ["a draft that may be in Gmail", "ld-test-0031"]]) {
+		const r = early(k);
+		c.eq([r.ok, r.http, r.code], [false, 409, "LOAD_FACTORED"], `§5 a factored load with ${label}: still LOAD_FACTORED`);
+		c.ok(r.error && r.error !== S.WORDS.LOAD_FACTORED && !/through Triumph/.test(r.error) && /Gmail Drafts and Sent Mail/.test(r.error), `§5 ...${label}: its words send a person to Gmail, and don't say it goes through Triumph`);
+	}
 	c.eq(early("ld-test-0002", { confirm: { confirmFactored: "true", reason: "x" }, mayConfirm: true }).code, "LOAD_FACTORED", "§5 only a real true confirms");
-	c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true }), { ok: true, factored: true, confirmed: true, reason: yes.reason }, "§5 a listed account's confirmation with a reason passes");
+	for (const [label, extra] of [
+		["a listed account", { confirm: yes, mayConfirm: true }],
+		["an account not listed", { confirm: yes }],
+		["a listed account with no reason", { confirm: { confirmFactored: true, reason: "" }, mayConfirm: true }],
+	]) {
+		const r = early("ld-test-0002", extra);
+		c.eq([r.ok, r.http, r.code], [false, 409, "NOA_UNCONFIGURED"], `§5 no assignment lines, ${label}: 409 NOA_UNCONFIGURED, whoever asks`);
+		c.ok(/can't put Triumph's assignment on an invoice/.test(r.error), `§5 ...in its own words (${label})`);
+	}
+	for (const v of [undefined, false, "true", 1, ["made-up line"], {}, null]) {
+		c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, hasAssignmentLines: v }).code, "NOA_UNCONFIGURED", `§5 only a real true says the lines exist (${JSON.stringify(v)})`);
+	}
+	c.eq(early("ld-test-0002", lines).code, "LOAD_FACTORED", "§5 with the lines, a plain press is still LOAD_FACTORED");
+	c.eq(early("ld-test-0002", { confirm: yes, ...lines }).code, "FACTORING_NOT_LISTED", "§5 with the lines, the confirmation from an account not listed: FACTORING_NOT_LISTED");
+	c.eq(early("ld-test-0002", { confirm: { confirmFactored: true, reason: "" }, mayConfirm: true, ...lines }).code, "FACTORING_REASON_REQUIRED", "§5 with the lines, the confirmation without a reason is refused");
+	c.eq(early("ld-test-0002", { confirm: yes, mayConfirm: true, ...lines }), { ok: true, factored: true, confirmed: true, reason: yes.reason }, "§5 with the lines, a listed account's confirmation with a reason passes");
 	putMarker(db, "ld-test-0003", { factored: 0, locked: T0, via: "outside" });
 	c.eq(early("ld-test-0003").code, "FACTORING_LOCKED", "§5 a row locked at 0 is refused first");
 	putMarker(db, "ld-test-0004", { locked: T0, via: "outside" });
-	c.eq(early("ld-test-0004", { confirm: yes, mayConfirm: true }).code, "FACTORING_LOCKED", "§5 the confirmation on a locked row: FACTORING_LOCKED");
+	c.eq([early("ld-test-0004", { confirm: yes, mayConfirm: true }).code, early("ld-test-0004", { confirm: yes, mayConfirm: true, ...lines }).code], ["FACTORING_LOCKED", "FACTORING_LOCKED"], "§5 the confirmation on a locked row: FACTORING_LOCKED, with or without the lines");
 	let i = 5;
 	for (const [label, claim] of [
 		["working", { state: "working", leaseUntil: at(10) }],
@@ -292,11 +364,11 @@ function checkButton(S) {
 		const k = `ld-test-000${i++}`;
 		putMarker(db, k);
 		putClaim(db, k, claim);
-		c.eq(early(k, { confirm: yes, mayConfirm: true }).code, "TRIUMPH_IN_FLIGHT", `§5 the confirmation while a Triumph claim is ${label}: TRIUMPH_IN_FLIGHT`);
+		c.eq(early(k, { confirm: yes, mayConfirm: true, ...lines }).code, "TRIUMPH_IN_FLIGHT", `§5 with the lines, the confirmation while a Triumph claim is ${label}: TRIUMPH_IN_FLIGHT`);
 	}
 	putMarker(db, "ld-test-0010");
 	putClaim(db, "ld-test-0010", { state: "needs_attention", stage: "built", invoiceId: "11032026-53", voidedAt: T0 });
-	c.eq(early("ld-test-0010", { confirm: yes, mayConfirm: true }).ok, true, "§5 a claim whose number was voided holds nothing");
+	c.eq(early("ld-test-0010", { confirm: yes, mayConfirm: true, ...lines }).ok, true, "§5 with the lines, a claim whose number was voided holds nothing");
 	putInflight(db, "ld-test-0011", { startedAt: at(0) });
 	c.eq(early("ld-test-0011").code, "INVOICE_DRAFT_IN_FLIGHT", "§5 a second press while a draft is in flight: INVOICE_DRAFT_IN_FLIGHT");
 	putInflight(db, "ld-test-0012", { state: "maybe_drafted" });
@@ -314,6 +386,10 @@ function checkButton(S) {
 	c.eq(begin("ld-test-0020", { invoiceId: "11032026-10" }).code, "INVOICE_DRAFT_IN_FLIGHT", "§5 a second press that got past the early check is refused at the late check");
 	putMarker(db, "ld-test-0021");
 	c.eq(begin("ld-test-0021").code, "LOAD_FACTORED", "§5 marked during the render: refused at the late check");
+	c.eq(begin("ld-test-0021").error, S.WORDS.LOAD_FACTORED, "§5 ...in its usual words, with no draft out");
+	putDraft(db, "ld-test-0021", "imap");
+	const lateOut = begin("ld-test-0021");
+	c.ok(lateOut.code === "LOAD_FACTORED" && lateOut.error !== S.WORDS.LOAD_FACTORED && /Gmail Drafts and Sent Mail/.test(lateOut.error), "§5 ...with a draft row: its words send a person to Gmail there too");
 	putMarker(db, "ld-test-0022");
 	putClaim(db, "ld-test-0022", { state: "waiting", stage: "reserved", invoiceId: "11032026-60" });
 	c.eq(begin("ld-test-0022", { confirmed: true }).code, "TRIUMPH_IN_FLIGHT", "§5 the late check repeats the confirmation's TRIUMPH_IN_FLIGHT");
@@ -363,6 +439,60 @@ function checkResolveAndAnnotate(S) {
 	return c;
 }
 
+// ------------------------------------------------------------------ §10
+function checkLoadIdChange(S) {
+	const c = checker();
+	if (typeof S.loadIdChangeCheck !== "function" || typeof S.clearedMarks !== "function") {
+		c.ok(false, "§10 FAILS ON THE OLD CODE: loadIdChangeCheck() and clearedMarks() exist");
+		return c;
+	}
+	c.eq([S.loadIdMoveBegin, S.loadIdMoveFinish, S.WORDS.LOAD_ID_FACTORED_BLANK], [undefined, undefined, undefined], "§10 nothing is left of the move: no hold, no last look, no words of its own");
+	const db = freshDb(S);
+	const check = (from, on = db) => S.loadIdChangeCheck(on, { from });
+
+	// No mark on this load: nothing to refuse. A save asks only when the cell's text changes.
+	c.eq(check("LD-TEST-0001"), null, "§10 no marker row: no refusal");
+	c.eq([check(""), check(null)], [null, null], "§10 a row with no ID carries no mark");
+	putMarker(db, "ld-test-0003", { factored: 0 });
+	c.eq(check("LD-TEST-0003"), null, "§10 a mark cleared: no refusal, so the way through works");
+
+	// A live mark: the ID stays, whatever it would become, and the sentence gives the way through.
+	putMarker(db, "ld-test-0010");
+	const before = marker(db, "ld-test-0010");
+	const r = check("LD-TEST-0010");
+	c.eq([r?.ok, r?.http, r?.code, r?.error], [false, 409, "LOAD_ID_FACTORED", S.WORDS.LOAD_ID_FACTORED], "§10 a live mark: 409 LOAD_ID_FACTORED");
+	c.eq(check("#ld-test-0010 ")?.code, "LOAD_ID_FACTORED", "§10 ...however the cell spells the marked ID");
+	c.eq(marker(db, "ld-test-0010"), before, "§10 ...and asking writes nothing");
+	c.ok(/clear the mark, change the ID, then mark the load again\.$/.test(S.WORDS.LOAD_ID_FACTORED), "§10 FAILS ON THE OLD CODE: the refusal gives the way through");
+	c.eq((S.WORDS.LOAD_ID_FACTORED.match(/[.!?](\s|$)/g) || []).length, 1, "§10 ...in one sentence");
+	// What the code's own key reads as one load. The route refuses these too: it goes by the cell's text.
+	c.eq(["#LD-TEST-0010", " ld-test-0010 ", "LD-TEST-0010"].map(rules.loadKey), ["ld-test-0010", "ld-test-0010", "ld-test-0010"], "§10 the code's own key: case, spaces and one leading # make no difference");
+
+	// A final row: its own refusal, whichever way it's set.
+	putMarker(db, "ld-test-0026", { locked: T0, via: "outside" });
+	c.eq([check("LD-TEST-0026")?.http, check("LD-TEST-0026")?.code, check("LD-TEST-0026")?.error], [409, "FACTORING_LOCKED", S.WORDS.FACTORING_LOCKED], "§10 a final row: 409 FACTORING_LOCKED");
+	putMarker(db, "ld-test-0027", { factored: 0, locked: T0, via: "outside" });
+	c.eq(check("LD-TEST-0027")?.code, "FACTORING_LOCKED", "§10 ...at 0 too");
+
+	// A database that can't answer, and one with no table.
+	const closed = new Database(":memory:");
+	S.ensureSchema(closed);
+	closed.close();
+	const unread = check("LD-TEST-0001", closed);
+	c.eq([unread?.ok, unread?.http, unread?.code], [false, 503, "FACTORING_UNREADABLE"], "§10 a marker that can't be read refuses");
+	c.eq(check("LD-TEST-0001", new Database(":memory:")), null, "§10 a database without the table (an old copy) reads as no mark");
+
+	// The marks cleared, and when.
+	const cleared = S.clearedMarks(db);
+	c.ok(cleared instanceof Map && cleared.get("ld-test-0003") === T0, "§10 clearedMarks(): a row at 0 and when it was set");
+	c.eq([cleared.has("ld-test-0010"), cleared.has("ld-test-0001"), cleared.has("ld-test-0026"), cleared.has("ld-test-0027")], [false, false, false, false], "§10 ...not a live mark, no row, or a final row either way");
+	c.eq(S.clearedMarks(new Database(":memory:")).size, 0, "§10 ...no table: none");
+	let threw = false;
+	try { S.clearedMarks(closed); } catch { threw = true; }
+	c.ok(threw, "§10 clearedMarks() on a marker that can't be read throws, never answers");
+	return c;
+}
+
 // ------------------------------------------------------------------ §7
 function checkLockWriters() {
 	const c = checker();
@@ -383,7 +513,8 @@ function checkLockWriters() {
 }
 
 const GROUPS = [["§1  the schema", checkSchema], ["§2  marking", checkMark], ["§3  clearing", checkClear], ["§4  handled in Triumph's process", checkOutside],
-	["§5  the Draft Invoice button's checks", checkButton], ["§6  Check Gmail; the dashboard annotation", checkResolveAndAnnotate]];
+	["§5  the Draft Invoice button's checks", checkButton], ["§6  Check Gmail; the dashboard annotation", checkResolveAndAnnotate],
+	["§10 a Load ID change on a marked load; a mark cleared since", checkLoadIdChange]];
 const REAL = loadStore(STORE_SRC);
 for (const [title, fn] of GROUPS) {
 	section(title);
@@ -446,6 +577,12 @@ function checkRoutes(routesSrc) {
 	putInflight(w.db, "ld-test-0002", { startedAt: T0 });
 	c.eq([w.mark(ME, 2).status, w.refusals], [409, ["factoring_mark_blocked:INVOICE_DRAFT_IN_FLIGHT"]], "§9 a refusal answers 409 and writes a refusal audit row with its code");
 	c.eq(w.mark(ME, 1, { factored: false, reason: "made-up" }).body, { ok: true, changed: true, factored: false }, "§9 ...and clears it");
+	const sent = build(ON);
+	putDraft(sent.db, "LD-TEST-0005", "auto-smtp");
+	const late = sent.mark(ME, 5, { factored: true, reason: "made-up: says it never went", confirmNotSent: true });
+	c.eq([late.status, late.body, marker(sent.db, "ld-test-0005"), sent.audits, sent.refusals],
+		[409, { error: REAL.WORDS.INVOICE_ALREADY_SENT, code: "INVOICE_ALREADY_SENT" }, undefined, [], ["factoring_mark_blocked:INVOICE_ALREADY_SENT"]],
+		"§9 marked after a send: the switch's answer is 409 INVOICE_ALREADY_SENT in its own words; no row, and only the refusal audited");
 	const off = build({ TRIUMPH_FACTOR_MARK_IDS: "7" });
 	putMarker(off.db, "ld-test-0003");
 	const o = off.outside(ME, 3);
@@ -462,6 +599,34 @@ function checkRoutes(routesSrc) {
 	off.routes.annotateDashboard({ session: { user: OTHER } }, { headers, ...adminRows });
 	c.eq([adminRows.completed[0]._factoring && adminRows.completed[0]._factoring.factored, adminRows.completed[1]._factoring, adminRows.active[0]._factoring.canRecordOutside],
 		[true, undefined, false], "§9 a Super Admin's rows: the marked load only; an unlisted one may not record");
+	// The switch itself, with marking on: the server gives it to a listed account only.
+	const on = build(ON);
+	putMarker(on.db, "ld-test-0003");
+	const seen = (user) => {
+		const r = { active: rows(), completed: rows() };
+		on.routes.annotateDashboard({ session: { user } }, { headers, ...r });
+		return [...r.active, ...r.completed].map((x) => (x._factoring ? [x._factoring.factored, x._factoring.canMark] : null));
+	};
+	c.eq(seen(ME), [[true, true], [false, true], [true, true], [false, true]], "§9 marking on, a listed account: every row, each with the switch");
+	c.eq(seen(OTHER), [[true, false], null, [true, false], null], "§9 marking on, a Super Admin not listed: the marked load's chip and no switch; nothing on any other");
+	c.eq(seen(SHARED), [[true, false], null, [true, false], null], "§9 marking on, the shared login, even with its id listed: the same");
+	// The row saves' question (server.js), every setting off: a mark is honoured whatever they say.
+	if (typeof off.routes.loadIdSave !== "function") {
+		c.ok(false, "§9 FAILS ON THE OLD CODE: loadIdSave() exists");
+		return c;
+	}
+	putMarker(off.db, "ld-test-0007");
+	const asked = (from, to) => {
+		try {
+			return off.routes.loadIdSave({ from, to });
+		} catch (e) {
+			return { threw: String(e && e.message) };
+		}
+	};
+	const saved = asked("LD-TEST-0007", "LD-TEST-0008");
+	c.eq([saved.ok, saved.http, saved.code, saved.json], [false, 409, "LOAD_ID_FACTORED", { error: REAL.WORDS.LOAD_ID_FACTORED, code: "LOAD_ID_FACTORED" }], "§9 FAILS ON THE OLD CODE: a marked load, every setting off: refused, as the routes answer it");
+	const noMark = asked("LD-TEST-0008", "LD-TEST-0009");
+	c.eq([noMark.ok, typeof noMark.done], [true, "function"], "§9 FAILS ON THE OLD CODE: no mark: the save goes on, and says when it's done");
 	return c;
 }
 section("§9  the routes: who may mark, the switch");
@@ -483,6 +648,8 @@ const MUTANTS = [
 		"const row = markerFor(db, k);\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (autoClaimWorking", checkMark],
 	["mark: the auto job's working claim ignored", "if (autoClaimWorking(db, k)) return refusal(\"AUTO_INVOICE_IN_FLIGHT\");", "", checkMark],
 	["mark: a sent invoice not refused", "if (drafts.some((d) => SENT_VIAS.includes(d.via))) return refusal(\"INVOICE_ALREADY_SENT\");", "", checkMark],
+	["mark: a send the job's record shows not refused", "\t\tif (autoClaimSent(db, k)) return refusal(\"INVOICE_ALREADY_SENT\");\n", "", checkMark],
+	["mark: a send counts only once recorded", "[\"appending\", \"appended\", \"recorded\"].includes(c.stage)", "c.stage === \"recorded\"", checkMark],
 	["mark: 'not sent' accepted without a reason", "if (drafts.length && !(confirmNotSent === true && why))", "if (drafts.length && !(confirmNotSent === true))", checkMark],
 	["an in-flight row never goes stale", "Date.parse(nowIso) - started >= INFLIGHT_STALE_MS", "false", checkMark],
 	["clear: a working Triumph claim not refused", "if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");", "", checkClear],
@@ -495,15 +662,29 @@ const MUTANTS = [
 	["handledOutside: no lock written", "db.prepare(`UPDATE ${FACTORING} SET locked_at = ?, locked_via = 'outside', updated_at = ? WHERE load_key = ?`).run(nowIso, nowIso, k);", "", checkOutside],
 	["handledOutside: a button draft not refused", "if (inflight) return inflight;\n\t\tdb.prepare(`UPDATE ${FACTORING} SET locked_at", "db.prepare(`UPDATE ${FACTORING} SET locked_at", checkOutside],
 	["button: the lock checked only when factored", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tconst factored = rowFactored(row);", "const factored = rowFactored(row);", checkButton],
+	["button: the confirmation passes with no assignment lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", "", checkButton],
+	["button: the lines taken to exist unless told otherwise", "hasAssignmentLines = false", "hasAssignmentLines = true", checkButton],
+	["button: anything truthy says the lines exist", "if (hasAssignmentLines !== true) return", "if (!hasAssignmentLines) return", checkButton],
+	["button: who asks comes before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\tif (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");",
+		"if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", checkButton],
+	["button: the words for the refusal are missing", "\tNOA_UNCONFIGURED: \"This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.\",\n", "", checkButton],
 	["button: the confirmation from any account", "if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");", "", checkButton],
 	["button: the confirmation refused only while the claim is working", "if (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
 	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn { ok: true, factored, confirmed, reason };", "return { ok: true, factored, confirmed, reason };", checkButton],
-	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return refusal(\"LOAD_FACTORED\");\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t}",
+	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t}",
 		"if (rowFactored(row) && !confirmed) return refusal(\"LOAD_FACTORED\");", checkButton],
 	["button: a refusal before n8n drops a maybe-drafted row", "keep: Boolean(own && own.state === \"maybe_drafted\")", "keep: false", checkButton],
 	["resolve: an in-flight row resolved early", "if (row.effective !== \"maybe_drafted\") return refusal(\"INVOICE_DRAFT_IN_FLIGHT\");", "", checkResolveAndAnnotate],
 	["annotate: every row gets _factoring", "if (m || all) {", "if (true) {", checkResolveAndAnnotate],
+	["mark: a may-be claim asks nothing", "if (mayBeInGmail && !(confirmNotSent === true && why)) return refusal(\"INVOICE_MAYBE_IN_GMAIL\");", "", checkMark],
+	["mark: 'not sent' on a may-be claim needs no reason", "if (mayBeInGmail && !(confirmNotSent === true && why))", "if (mayBeInGmail && !(confirmNotSent === true))", checkMark],
+	["button: the refusal's words ignore a draft that may be out", "if (!confirm || confirm.confirmFactored !== true) return factoredRefusal(db, k);", "if (!confirm || confirm.confirmFactored !== true) return refusal(\"LOAD_FACTORED\");", checkButton],
+	["Load ID: a live mark doesn't refuse", "\treturn rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\") : null;", "\treturn null;", checkLoadIdChange],
+	["Load ID: a final row doesn't refuse", "\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\") : null;", "\treturn rowFactored(row) ? refusal(\"LOAD_ID_FACTORED\") : null;", checkLoadIdChange],
+	["Load ID: a marker that can't be read passes", "\t} catch {\n\t\treturn refusal(\"FACTORING_UNREADABLE\");\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row)", "\t} catch {\n\t\treturn null;\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row)", checkLoadIdChange],
+	["Load ID: the refusal leaves out the way through", " can clear the mark, change the ID, then mark the load again.", " can change it.", checkLoadIdChange],
+	["clearedMarks: a final row counts", " WHERE factored = 0 AND locked_at = ''", " WHERE factored = 0", checkLoadIdChange],
 ];
 let caught = 0;
 for (const [name, from, to, group] of MUTANTS) {
@@ -522,6 +703,8 @@ const ROUTE_MUTANTS = [
 	["a replica marks", "const markingOn = !replica && ", "const markingOn = "],
 	["the shared login listed", "&& !isSharedLoginName(user.username)", ""],
 	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
+	["the switch given to any Super Admin", "canMark: markingOn && listed,", "canMark: markingOn,"],
+	["every row annotated for any Super Admin", "all: markingOn && listed,", "all: markingOn,"],
 	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
 		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
 	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n",

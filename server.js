@@ -40231,7 +40231,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const before = parseFloat(truck.avg_mpg) || 0;
 			const after = amount.avg_mpg;
 			if (before !== after) {
-				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (derived from ELD / receipts)");
+				const fmtMpg = (v) => (v > 0 ? `${v} mpg` : "unset (fuel receipts, else the fleet default)");
 				logAudit(req, "update_truck_avg_mpg", "truck", String(id),
 					`Average MPG for ${unitLabel}: ${fmtMpg(before)} → ${fmtMpg(after)}`);
 			}
@@ -44307,12 +44307,15 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			// the one window where the tab identity is least certain.
 			const ownerErr = validateOwnerIdCell("Job Tracking", hdrs, values);
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+			// What the duplicate read found, for the deleted-load check after it; an unread header row finds no ID.
+			const dupRead = { loadId: "", rowIndex: null, read: false, headerRead: Array.isArray(hdrs) && hdrs.length > 0 };
 			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
 				// The ID as the row will store it, edge whitespace trimmed (the Load ID
 				// rule below trims it before the append), so the warning quotes the ID
 				// the new row carries rather than the padding it was sent with.
 				const sentLid = lidIdx >= 0 ? loadIdRule.trimLoadId(values[lidIdx]) : "";
+				dupRead.loadId = sentLid;
 				if (sentLid) {
 					const newLid = sentLid.toLowerCase().replace(/^#/, "");
 					if (newLid) {
@@ -44321,16 +44324,22 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 							range: "Job Tracking",
 						});
 						const allRows = allResp.data.values || [];
+						dupRead.read = true;
 						for (let i = 1; i < allRows.length; i++) {
 							const existing = (allRows[i][lidIdx] || "").trim().toLowerCase().replace(/^#/, "");
 							if (existing === newLid) {
 								warning = `Load ID '${sentLid}' already exists (row ${i + 1}). A duplicate entry will be created.`;
+								dupRead.rowIndex = i + 1;
 								break;
 							}
 						}
 					}
 				}
 			} catch { /* non-critical: dup-check is best-effort */ }
+			// A Load ID an old delete still names is put to the Super Admin as a choice; "Create it as new" is checked
+			// here and cleared just before the append, after every refusal below (lib/deleted-load-restore.js).
+			const deletedLoadAnswer = deletedLoadRestore.onCreate(req, { ...dupRead, via: "POST /api/data" });
+			if (deletedLoadAnswer) return res.status(deletedLoadAnswer.status).json(deletedLoadAnswer.body);
 		}
 
 		// ⚠️ AN APPEND INTO A CLOSED MONTH IS THE SAME ACCOUNTING EVENT AS AN EDIT,
@@ -44421,6 +44430,9 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
+		// The "Create it as new" checked at the duplicate read: the old delete goes only now, after every refusal.
+		const deletedLoadClear = deletedLoadRestore.clearBeforeAppend(req);
+		if (deletedLoadClear) return res.status(deletedLoadClear.status).json(deletedLoadClear.body);
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -44867,6 +44879,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		if (!cellWrites.length) {
 			return res.json({ success: true, updatedCells: 0, unchanged: true });
 		}
+		// A factoring mark goes by the Load ID's text, so a marked load keeps its ID, for every role and
+		// whatever the settings say. Last before the write, so no await comes between them.
+		const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+		const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+		if (idSave && !idSave.ok) {
+			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+			return res.status(idSave.http).json(idSave.json);
+		}
 		let response;
 		try {
 			response = await sheets.spreadsheets.values.batchUpdate({
@@ -44878,8 +44898,10 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			// genuinely unknown whether the row changed, and that is precisely when
 			// the before/after values are worth having.
 			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			if (idSave) idSave.done();
 			throw err;
 		}
+		if (idSave) idSave.done();
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
@@ -46351,7 +46373,10 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		const rowIndex = (matches[0] && matches[0]._rowIndex) || 0;
 
 		const deletedBy = req.session.user.username || req.session.user.full_name || "";
-		db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);
+		// The delete's id, and a digest of each row it hides so a later row with this ID can be told from them
+		// (nothing with the flag off).
+		const tombstone = db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);
+		deletedLoadRestore.recordDigests(tombstone.lastInsertRowid, jobTracking, lid);
 
 		// The most destructive load action in the app previously left NO audit row —
 		// only a dispatch notification, which is a feed item that ages out, not a
@@ -46429,12 +46454,28 @@ app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res)
 			isLocked,
 			timeZone: APP_TIMEZONE,
 		});
-		res.json({ loads, count: loads.length });
+		res.json({ loads, count: loads.length, ...deletedLoadRestore.listFields() });
 	} catch (error) {
 		console.error("Error listing deleted loads:", error.message);
 		res.status(500).json({ error: "The deleted loads could not be listed." });
 	}
 });
+
+// RESTORING A DELETED LOAD (lib/deleted-load-restore.js), on only when DELETED_LOAD_RESTORE_ENABLED is exactly
+// "true": the Super Admin restore route, the create routes' check for a Load ID an old delete still names, and a
+// step in front of GET /api/dashboard that tells a Super Admin of a live row such a delete hides.
+require("./lib/deleted-load-restore").ensureSchema(db);
+const deletedLoadRestore = require("./lib/deleted-load-restore").create({ db, enabled: process.env.DELETED_LOAD_RESTORE_ENABLED === "true", auditText });
+deletedLoadRestore.mount(app, {
+	requireRole, refuseCrossSite, periodLocksReadable, getJobTrackingCached, jobTrackingMonthCols, tripDayLockCover,
+	loadRowPeriods, lockedAmong, periodLabel, notifyChange, jtCacheInvalidate, pickAddressColumn, excludeDroppedLoads,
+	// Stored as a Super Admin-only dispatch notice (SUPER_ADMIN_ONLY_NOTICE_TYPES) and sent live to that room only.
+	notifySuperAdmins: (notice) => {
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));
+		if (io) io.to("super-admin").emit("dispatch-notification", notice);
+	},
+});
+console.log(`[deleted-load-restore] ${deletedLoadRestore.enabled ? "on" : "off"}`);
 
 // WHICH settlement months does one (driver, date, action) override move?
 //
@@ -52883,9 +52924,11 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 // (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
 // sent to the super-admin room only), and a receipt page the pages-only path
 // could not take out of an invoice PDF (it names the invoice, and Dispatchers
-// are shown no invoices; sent live the same way). For every other role GET
+// are shown no invoices; sent live the same way), and a load an old delete hides
+// and a deleted load restored or its delete cleared, with the reason
+// (lib/deleted-load-restore.js, sent live the same way). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages", "load-hidden-by-delete", "deleted-load-restored"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
@@ -55366,12 +55409,16 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const existing = deduplicateLoads(data, headers).find(
 			(r) => rateconLoad.normalizeLoadId(r[loadIdCol]) === loadKey,
 		);
+		// Named as the row on the sheet is shown, its own contact counting too.
+		if (existing && loadIdWithheldFor(req)) {
+			const shownThere = shownLoadId(req, loadId, { row: existing, own: brokerContact.rateConOwnContact(fields, BROKER_WITHHELD_RE) });
+			if (shownThere !== loadId) hiddenNew = [{ raw: loadId, shown: shownThere }];
+		}
+		// A Load ID an old delete still names is refused, or put to a Super Admin as a choice; "Create it as new" is
+		// checked here and cleared just before the append, after every refusal below.
+		const deletedLoadAnswer = deletedLoadRestore.onCreate(req, { loadId, rowIndex: existing ? existing._rowIndex : null, via: "POST /api/loads/from-ratecon" });
+		if (deletedLoadAnswer) return res.status(deletedLoadAnswer.status).json(deletedLoadAnswer.body);
 		if (existing) {
-			// Named as the row on the sheet is shown, its own contact counting too.
-			if (loadIdWithheldFor(req)) {
-				const shownThere = shownLoadId(req, loadId, { row: existing, own: brokerContact.rateConOwnContact(fields, BROKER_WITHHELD_RE) });
-				if (shownThere !== loadId) hiddenNew = [{ raw: loadId, shown: shownThere }];
-			}
 			// Soft-deleted loads keep their sheet row, so "already exists" would
 			// otherwise be baffling — the dispatcher can't see the load anywhere.
 			const softDeleted = getDeletedLoadIds().has(loadKey);
@@ -55466,6 +55513,10 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			}
 		}
 
+		// The "Create it as new" checked at the dedupe step: the old delete goes only now, so a failed append leaves
+		// nothing hidden and a refusal above leaves the delete as it was.
+		const deletedLoadClear = deletedLoadRestore.clearBeforeAppend(req);
+		if (deletedLoadClear) return res.status(deletedLoadClear.status).json(deletedLoadClear.body);
 		const appendResp = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Job Tracking",
@@ -55878,6 +55929,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	replica: Boolean(REPLICA),
 	logAudit,
 	logAuditRefusal,
+	readJobTracking: getJobTrackingCached,
 	findDraftByMessageId: require("./lib/imap-draft").findDraftByMessageId,
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
 });
@@ -61503,6 +61555,13 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// audit line: there is no write to reverse.
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (cellWrites.length) {
+			// As PUT /api/data/:rowIndex: a marked load keeps its ID, last before the write.
+			const idChange = guarded ? changes.find((c) => /load.?id|job.?id/i.test(c.column)) : null;
+			const idSave = idChange ? factoringRoutes.loadIdSave(idChange) : null;
+			if (idSave && !idSave.ok) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: idSave.code }), idSave.code), idSave.code);
+				return res.status(idSave.http).json(idSave.json);
+			}
 			try {
 				await sheets.spreadsheets.values.batchUpdate({
 					spreadsheetId: SPREADSHEET_ID,
@@ -61513,8 +61572,10 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				// genuinely unknown whether the row changed, and that is precisely when the
 				// before/after values are worth having.
 				logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+				if (idSave) idSave.done();
 				throw err;
 			}
+			if (idSave) idSave.done();
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
@@ -63194,7 +63255,8 @@ const FUEL_RESERVE_FRACTION = (() => {
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
 
 // The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
-// An enable switch, off unless true/1/yes/on: off, both answers are as before.
+// An enable switch, off unless true/1/yes/on: off, no block, and the range answer
+// quotes the trip plan's own range (sharedFuelRangeFor()).
 const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
 // The lib's 10 is a floor: a bad value or one below it gives 10, so it can only add fuel.
 const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
@@ -63288,6 +63350,22 @@ function resolveCredibleFuelReading(vehicleId, rows, mpg, tank) {
 	return fuelModel.resolveFuelReading({ rows: [latest, anchor], mpg, tankGallons: tank, ...clock });
 }
 
+// The one range the trip plan and, with the driver gallons flag off, the chip and the
+// low-fuel alert quote (lib/fuel-model.js sharedFuelRange()). A newest fix from before the device's link
+// was taken on another vehicle (B11), so its level counts as no reading at all.
+function sharedFuelRangeFor({ truck, rows, receipt, burn }) {
+	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+	const beforeLink = rows.length > 0
+		&& eldPosition.fixPredatesLink(rows[0].location_date_ms, eldDeviceLinkedSinceMs(truck && truck.id, vehicleId));
+	return fuelModel.sharedFuelRange({
+		tankGallons: truck ? truck.fuel_tank_gallons : 0, avgMpg: truck ? truck.avg_mpg : 0,
+		receiptMpg: receipt ? receipt.mpg : null, burn, reserve: FUEL_RESERVE_OPTS,
+		// Flag on, the block's own cap covers it, and those answers stay as they were.
+		acceptAnyMpgOnFile: DRIVER_FUEL_GALLONS_ENABLED,
+		readingAt: (mpg, tank) => resolveCredibleFuelReading(vehicleId, beforeLink ? [] : rows, mpg, tank),
+	});
+}
+
 // --- low-fuel alert -------------------------------------------------------
 // ⚠️ NOTHING WARNED A DRIVER ABOUT FUEL BEFORE THIS. Verified across the whole
 // codebase: no socket event, no driver notification, no toast. The only fuel
@@ -63327,7 +63405,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		fuelLowAlertState.set(vehicleId, st);
 
 		const truck = db.prepare(
-			`SELECT unit_number AS unit, fuel_tank_gallons, avg_mpg
+			`SELECT id, routemate_vehicle_id, unit_number AS unit, fuel_tank_gallons, avg_mpg
 			 FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleId);
 		if (!truck) return;
 		const rows = db.prepare(
@@ -63347,8 +63425,11 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		const receipt = receiptMpgForVehicle(vehicleId);
 		const mpg = receipt ? receipt.mpg : mpgBase;
 		const shown = fuelModel.computeRange({ fuelPct: reading.fuelPct, tankGallons: tank, mpg });
+		// Read once and reused by the words below: a second read can refresh the cache at a
+		// different moment from main's, and move a later bell.
+		const burn = burnRateForVehicle(vehicleId);
 		const interval = fuelModel.rangeInterval({
-			fuelPct: reading.fuelPct, burn: burnRateForVehicle(vehicleId), rangeMiles: shown.rangeMiles,
+			fuelPct: reading.fuelPct, burn, rangeMiles: shown.rangeMiles,
 		});
 		const planning = interval.planning;
 		if (planning == null) return;
@@ -63365,7 +63446,30 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		fuelLowAlertState.set(vehicleId, st);
 
 		const est = reading.fuelSource === "carried" ? " (estimated — fuel sensor not reporting)" : "";
-		const driverMsg = `About ${planning} miles of fuel left${est}. Plan a fuel stop now.`;
+		// The figure above alone decides when the bell rings. Flag off, only its words read
+		// the one range the chip and the load's Fuel section quote: the chip's figure, or its
+		// "Refuel now" at 0, and no miles while the chip is over the line or has no figure.
+		// Reading that range can't cost the bell: on a failure it still rings, in no miles.
+		let shared = null;
+		if (!DRIVER_FUEL_GALLONS_ENABLED) {
+			try {
+				shared = sharedFuelRangeFor({ truck, rows, receipt, burn });
+			} catch { shared = null; }
+		}
+		const chipPlanning = shared ? shared.interval.planning : planning;
+		const noMiles = (!DRIVER_FUEL_GALLONS_ENABLED && !shared) || chipPlanning == null || chipPlanning > FUEL_LOW_ALERT_MILES;
+		const said = shared ? shared.usableMiles : planning;
+		const refuelNow = !!shared && said === 0;
+		const miles = shared && said === 1 ? "mile" : "miles";
+		let driverMsg = `About ${said} ${miles} of fuel left${est}. Plan a fuel stop now.`;
+		if (refuelNow) driverMsg = `Refuel now${est}. Stop for fuel as soon as you can.`;
+		if (noMiles) driverMsg = "Low fuel. Check your fuel gauge.";
+		let dispatchWords = `has about ${said} ${miles} of fuel left${est}.`;
+		if (refuelNow) dispatchWords = `needs to refuel now${est}.`;
+		if (noMiles) dispatchWords = "is low on fuel. Check the truck's fuel gauge.";
+		let noticeWords = `about ${said} mi of fuel left${est}.`;
+		if (refuelNow) noticeWords = `refuel now${est}.`;
+		if (noMiles) noticeWords = "low fuel. Check the truck's fuel gauge.";
 		// The driver's bell and room: the spelling their account holds
 		// (findDriverAccountSpelling()), else the name the ping carried.
 		const key = String(findDriverAccountSpelling(driverName) || driverName).trim().toLowerCase();
@@ -63383,14 +63487,14 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 		insertDispatchNotification.run(
 			"fuel-low",
 			`${driverName}: low fuel`,
-			`${driverName} (${truck.unit || "unknown truck"}) has about ${planning} miles of fuel left${est}.`,
+			`${driverName} (${truck.unit || "unknown truck"}) ${dispatchWords}`,
 			JSON.stringify({ driverName, unit: truck.unit, planningMiles: planning,
 				fuelPct: reading.fuelPct, fuelSource: reading.fuelSource })
 		);
 		emitDispatchNotice({
 			type: "fuel-low",
 			title: `${driverName}: low fuel`,
-			body: `${truck.unit || "unknown truck"} — about ${planning} mi of fuel left${est}.`,
+			body: `${truck.unit || "unknown truck"} — ${noticeWords}`,
 		});
 		console.log(`[fuel-low] ${driverName} (${truck.unit}) ${planning} mi, ${reading.fuelPct}% [${reading.fuelSource}]`);
 	} catch (err) {
@@ -63482,9 +63586,9 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		const preTank = truck && truck.fuel_tank_gallons > 0
 			? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
 		const preMpg = truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG;
-		const reading = resolveCredibleFuelReading(vehicleId, rows, preMpg, preTank);
+		let reading = resolveCredibleFuelReading(vehicleId, rows, preMpg, preTank);
 
-		const estimate = fuelModel.estimateRangeForVehicle({
+		let estimate = fuelModel.estimateRangeForVehicle({
 			fuelPct: reading.fuelPct,
 			tankGallons: truck ? truck.fuel_tank_gallons : 0,
 			avgMpg: truck ? truck.avg_mpg : 0,
@@ -63568,9 +63672,13 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// UI must render. Showing `typical` — never mind rangeMiles — is what put
 		// "449 mi" in front of a driver with 210 miles of fuel.
 		const burn = burnRateForVehicle(vehicleId);
-		const interval = fuelModel.rangeInterval({
+		let interval = fuelModel.rangeInterval({
 			fuelPct: estimate.fuelPct, burn, rangeMiles: estimate.rangeMiles,
 		});
+		// Flag off: the figures above give way to the range the load's Fuel section quotes,
+		// so the chip and the section can differ only by the reserve.
+		const shared = DRIVER_FUEL_GALLONS_ENABLED ? null : sharedFuelRangeFor({ truck, rows, receipt: receiptMpg, burn });
+		if (shared) ({ reading, estimate, interval } = shared);
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
 		// SECURITY: the ELD vehicle id is dispatch-only and is OMITTED for the
@@ -63613,9 +63721,9 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			// 'unknown' and there is no honest figure; a 0 here renders as "0 mi to
 			// dry", which reads as an empty tank rather than as no reading.
 			reserveMiles: FUEL_RESERVE_MILES,
-			rangeUsableMiles: interval.planning == null
+			rangeUsableMiles: shared ? shared.usableMiles : (interval.planning == null
 				? null
-				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES)),
+				: Math.max(0, Math.round(interval.planning - FUEL_RESERVE_MILES))),
 			// Provenance of the FUEL READING itself, which is a separate axis from
 			// rangeBasis (that one describes the miles-per-point evidence). 'live' =
 			// the sensor answered; 'carried' = the sensor is dropping out and this is
@@ -63977,18 +64085,23 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		// is a dropout ~47% of the time on this fleet, and this is the endpoint whose
 		// answer a driver acts on. Without it, the 2026-08-17 run-dry returns
 		// verdict 'unknown' ("No verdict") instead of 'insufficient'.
-		const reading = resolveCredibleFuelReading(vehicleId, latest ? [latest] : [], mpg, tank);
-		const pct = fuelModel.planningRateFuelPct({ reading, burn, tankGallons: tank, mpg });
-		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
+		const shared = sharedFuelRangeFor({ truck, rows: latest ? [latest] : [], receipt, burn });
+		const { reading, planningPct: pct } = shared;
+		// Flag off the gallons rest on the range's own MPG, so the dispatch card's
+		// "Uses at least N gal" can't argue with the MPG row beside it.
+		const planMpg = DRIVER_FUEL_GALLONS_ENABLED ? mpg : shared.estimate.mpg;
 
 		const plan = fuelModel.planTripFuel({
-			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
+			routeMiles, fuelPct: pct, burn, rangeMiles: shared.rangeMiles, mpg: planMpg,
 			reserve: FUEL_RESERVE_OPTS,
 			// Before pickup, routeMiles holds the run to the shipper only when it was routed.
 			approachCounted: pickedUp || planApproach,
 			// Its clock reads after fixFresh's, so a live reading it trusts came with a fresh fix.
 			readingTrusted: fuelModel.tripReadingTrusted({ reading, nowMs: Date.now() }),
 		});
+		// A route of 0 gives the plan no refuel figure, but the truck still has its range.
+		// Flag off the section would fall back to the figure before the margin, beside the chip.
+		if (!DRIVER_FUEL_GALLONS_ENABLED && plan.refuelWithinMiles == null) plan.refuelWithinMiles = shared.usableMiles;
 
 		res.json({
 			ok: true,
@@ -64019,12 +64132,12 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			fuelAnchorPct: reading.anchorPct,
 			fuelReadingAgeMinutes: reading.ageMinutes,
 			milesSinceFuelReading: reading.milesSinceReading,
-			mpg: Math.round(mpg * 100) / 100,
+			mpg: Math.round(planMpg * 100) / 100,
 			mpgSource: receipt ? "receipts" : "default",
 			...plan,
 			// The point estimate the old panel would have shown, kept beside the
 			// verdict so the gap is visible rather than silently corrected.
-			pointEstimateMiles: shown.rangeMiles,
+			pointEstimateMiles: shared.rangeMiles,
 			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
 			updatedAt: latest && latest.location_date_ms
 				? new Date(latest.location_date_ms).toISOString() : null,
@@ -65005,6 +65118,7 @@ let _jtCache = null;
 let _jtInflight = null;
 let _jtEpoch = 0;
 const JT_CACHE_TTL = 60_000;
+const { keepEveryRow, everyJobTrackingRow } = require("./lib/job-tracking-every-row");
 async function getJobTrackingCached() {
 	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
 	// Join the read already in flight rather than starting a second one.
@@ -65020,6 +65134,7 @@ async function getJobTrackingCached() {
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const parsed = parseSheet(response.data);
+		keepEveryRow(parsed, parsed.data);
 		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
 		// The Load IDs as every role but Super Admin is served them, kept on this
 		// read before it is shared (shownLoadIdIndex()), and the latest only while
@@ -73974,8 +74089,8 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	enabled: !/^(false|0|no|off)$/i.test(String(process.env.DRIVER_PERFORMANCE_ENABLED ?? "").trim()),
 	boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",
 	driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED ? driverAvailabilityByName : null,
-	requireRole, db, getJobTrackingCached, liveJobTrackingView, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
-	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, directoryPayStruct,
+	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
+	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
 });
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.

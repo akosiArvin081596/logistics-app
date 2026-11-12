@@ -183,6 +183,17 @@
         @close="pickerOpen = false"
       />
 
+      <!-- A Load ID an old delete names: the server's choice, for a Super Admin only. -->
+      <DeletedLoadChoiceModal
+        v-if="auth.isSuperAdmin"
+        :open="deletedChoice.state.open"
+        :choice="deletedChoice.state.choice"
+        :note="deletedChoice.state.note"
+        @resolved="onDeletedLoadRestored"
+        @create-new="onDeletedLoadCreateNew"
+        @cancel="onDeletedLoadCancel"
+      />
+
       <!-- Details -->
       <div class="form-section">
         <div class="section-label">Additional Info</div>
@@ -212,15 +223,24 @@ import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
+import { useDeletedLoadChoice } from '../composables/useDeletedLoadChoice'
 import { useGeocode } from '../composables/useGeocode'
+import { useAuthStore } from '../stores/auth'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import RateConDropzone from '../components/shared/RateConDropzone.vue'
+import DeletedLoadChoiceModal from '../components/shared/DeletedLoadChoiceModal.vue'
 import { loadIdFieldMessage } from '../lib/loadIdRule'
+import { restoreDoneText, withDeletedLoadChoice } from '../lib/deletedLoadsView.js'
 
 const api = useApi()
 const router = useRouter()
+const auth = useAuthStore()
 const { show: toast } = useToast()
 const { withOffDutyConfirm } = useOffDutyConfirm()
+const deletedChoice = useDeletedLoadChoice()
+const onDeletedLoadRestored = (answer) => deletedChoice.answer({ action: 'restored', answer })
+const onDeletedLoadCreateNew = (reason) => deletedChoice.answer({ action: 'create_new', reason })
+const onDeletedLoadCancel = () => deletedChoice.answer(null)
 const geocode = useGeocode()
 
 const headers = ref([])
@@ -572,9 +592,17 @@ async function submit() {
       dropoffAddress: form.dropoffAddress || '',
     } : undefined
     // A driver recorded off on the load's days (R11): "Assign anyway" re-sends
-    // confirmed; "Keep as is" leaves the form as filled in.
-    const res = await withOffDutyConfirm((confirmOffDuty) => api.post('/api/data?sheet=Job%20Tracking', { values, coordinates, ...(confirmOffDuty ? { confirmOffDuty: true } : {}) }))
-    if (res && res.offDutyDeclined) return
+    // confirmed; "Keep as is" leaves the form as filled in. A Load ID an old delete
+    // names: the Super Admin restores the deleted load or creates this one as new.
+    const res = await withDeletedLoadChoice((choice) => withOffDutyConfirm((confirmOffDuty) => api.post('/api/data?sheet=Job%20Tracking', {
+      values, coordinates, ...(confirmOffDuty ? { confirmOffDuty: true } : {}), ...(choice ? { deletedLoadChoice: choice } : {}),
+    })), auth.isSuperAdmin ? deletedChoice.ask : null)
+    if (res && (res.offDutyDeclined || res.deletedLoadDeclined)) return
+    if (res && res.deletedLoadRestored) {
+      toast(restoreDoneText(res.answer, res.loadId), 'success')
+      router.push('/dashboard')
+      return
+    }
     if (res.warning) duplicateWarning.value = res.warning
 
     toast('Job created successfully', 'success')

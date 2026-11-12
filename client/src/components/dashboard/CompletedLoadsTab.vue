@@ -377,7 +377,7 @@ import { inflightLine, reasonInput } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
-import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
+import { AUTO_INVOICE_REASONS, autoInvoiceRowChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
@@ -404,7 +404,7 @@ const autoMode = computed(() => {
   return m === 'on' || m === 'shadow' ? m : 'off'
 })
 const autoAttentionCount = computed(() => (auth.isSuperAdmin ? props.jobs.filter(autoInvoiceNeedsAttention).length : 0))
-const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceChip(job._autoInvoice) : null)
+const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceRowChip(job) : null)
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
