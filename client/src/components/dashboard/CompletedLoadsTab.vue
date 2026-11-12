@@ -3,26 +3,31 @@
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
+        <!-- Needs Review and Needs attention: one on at a time, one look, and
+             each stays while it is on, even at (0), so it can be turned off. -->
         <button
-          v-if="needsReviewCount > 0"
+          v-if="needsReviewCount > 0 || needsReviewOnly"
           type="button"
-          :style="reviewToggleStyle"
+          class="quick-toggle"
+          :class="{ 'quick-toggle--on': needsReviewOnly }"
+          :aria-pressed="needsReviewOnly"
           :title="needsReviewOnly ? 'Showing only loads that need review' : REVIEW_FILTER_TITLE"
-          @click="needsReviewOnly = !needsReviewOnly"
+          @click="pressQuick('review')"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           Needs Review ({{ needsReviewCount }})
         </button>
         <!-- Automatic invoice drafts (Super Admin only): a load a person must draft,
-             or a draft whose load changed since. -->
+             or a draft whose load changed since. auto-toggle is the name the e2e
+             scripts find it by; it carries no style. -->
         <button
-          v-if="auth.isSuperAdmin && autoAttentionCount > 0"
+          v-if="auth.isSuperAdmin && (autoAttentionCount > 0 || autoAttentionOnly)"
           type="button"
-          class="auto-toggle"
-          :class="{ 'auto-toggle--on': autoAttentionOnly }"
+          class="quick-toggle auto-toggle"
+          :class="{ 'quick-toggle--on': autoAttentionOnly }"
           :aria-pressed="autoAttentionOnly"
           :title="autoAttentionOnly ? 'Showing only loads whose automatic invoice draft needs attention' : 'Show only loads whose automatic invoice draft needs attention'"
-          @click="autoAttentionOnly = !autoAttentionOnly"
+          @click="pressQuick('attention')"
         >
           Needs attention ({{ autoAttentionCount }})
         </button>
@@ -379,6 +384,7 @@ import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIE
 import { pickupArrivalLine } from '../../lib/pickupArrival'
 import { AUTO_INVOICE_REASONS, autoInvoiceRowChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain, tryAgainConfirmText, tryAgainDoneText, recheckLoadDrafts, canSaveAutoSettings, autoSendState, AUTO_SEND_STOP_CONFIRM } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { pressQuickFilter, completedEmptyText } from '../../lib/completedLoadsFilters'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
@@ -403,11 +409,9 @@ const autoMode = computed(() => {
   const m = auth.isSuperAdmin && dashboard.data && dashboard.data.autoInvoice ? dashboard.data.autoInvoice.mode : ''
   return m === 'on' || m === 'shadow' ? m : 'off'
 })
-const autoAttentionCount = computed(() => (auth.isSuperAdmin ? props.jobs.filter(autoInvoiceNeedsAttention).length : 0))
 const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceRowChip(job) : null)
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
-const needsReviewCount = computed(() => countNeedsReview(props.jobs))
 // Delivery date/time lives in "Completion Date" (stamped when a load is marked
 // delivered through the app; equals the final Status Update Date). Loads
 // delivered/imported before this tracking have it blank.
@@ -490,6 +494,16 @@ const exportMatches = computed(() => {
   }
   return pool
 })
+// Both counts over the rows the driver and date filters leave: the same rows a
+// toggle narrows, so a count is the number of rows its toggle shows.
+const needsReviewCount = computed(() => countNeedsReview(exportMatches.value))
+const autoAttentionCount = computed(() => (auth.isSuperAdmin ? exportMatches.value.filter(autoInvoiceNeedsAttention).length : 0))
+// One quick filter at a time (lib/completedLoadsFilters.js): pressing one turns the other off.
+function pressQuick(which) {
+  const next = pressQuickFilter({ review: needsReviewOnly.value, attention: autoAttentionOnly.value }, which)
+  needsReviewOnly.value = next.review
+  autoAttentionOnly.value = next.attention
+}
 const filtersActive = computed(() => !!(driverFilter.value || fromDate.value || toDate.value))
 function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.value = '' }
 // PaginationBar is fed `filteredJobs.length` while the page slice is computed
@@ -505,13 +519,14 @@ const searchResult = computed(() => {
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
-const emptyMessage = computed(() => {
-  if (needsReviewOnly.value) return 'No completed loads need review.'
-  if (autoAttentionOnly.value) return 'No automatic invoice draft needs attention.'
-  if (searchQuery.value.trim()) return 'No loads match your search.'
-  if (filtersActive.value) return 'No completed loads match these filters.'
-  return 'No completed loads.'
-})
+// The empty list names what is on: the quick filter, a search, the driver, the dates.
+const emptyMessage = computed(() => completedEmptyText({
+  review: needsReviewOnly.value,
+  attention: autoAttentionOnly.value,
+  search: !!searchQuery.value.trim(),
+  driver: !!driverFilter.value,
+  dates: !!(fromDate.value || toDate.value),
+}))
 // Order completed loads by delivery date, most recent first; loads with no
 // recorded delivery time sort to the bottom.
 const sortedJobs = computed(() => {
@@ -533,15 +548,6 @@ const sortedJobs = computed(() => {
     return kb < ka ? -1 : kb > ka ? 1 : 0
   })
 })
-const reviewToggleStyle = computed(() => ({
-  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
-  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
-  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
-  border: '1px solid ' + (needsReviewOnly.value ? '#f59e0b' : '#d1d5db'),
-  background: needsReviewOnly.value ? '#fef3c7' : '#ffffff',
-  color: needsReviewOnly.value ? '#92400e' : '#374151',
-  transition: 'all 0.15s',
-}))
 const reviewBadgeStyle = {
   display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
   marginRight: '0.4rem',
@@ -558,10 +564,9 @@ const reviewBadgeStyle = {
 // Any filter change re-slices the list, so a carried-over page number can land
 // on a blank page (filter while on page 4 → nothing): resetOn snaps back to page 1.
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(sortedJobs, { tab: 'completed', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly, driverFilter, fromDate, toDate] })
-// The Needs attention toggle re-slices the list like the filters above; once no
-// load needs attention its button is gone, so the filter goes with it.
+// The Needs attention toggle re-slices the list like the filters above. Its
+// button stays while it is on, so it is never left on out of sight.
 watch(autoAttentionOnly, () => goTo(1))
-watch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
@@ -1144,8 +1149,18 @@ const detailSections = computed(() => {
   line-height: 1.4;
   white-space: nowrap;
 }
-/* Automatic invoice drafts (Super Admin only): the row chip, the Needs attention
-   toggle, the dialog line and the settings dialog. Tones: ok, warn, bad, muted. */
+/* Needs Review and Needs attention: one look for both, "on" filled so the one
+   that is on reads at a glance (aria-pressed says it to a screen reader). */
+.quick-toggle {
+  display: inline-flex; align-items: center; white-space: nowrap;
+  padding: 0.4rem 0.75rem; font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border-radius: 6px; cursor: pointer; transition: all 0.15s;
+  border: 1px solid #d1d5db; background: #ffffff; color: #374151;
+}
+.quick-toggle--on { border-color: #0f2847; background: #0f2847; color: #fff; }
+.quick-toggle:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
+/* Automatic invoice drafts (Super Admin only): the row chip, the dialog line and
+   the settings dialog. Tones: ok, warn, bad, muted. */
 .auto-chip {
   display: block;
   width: fit-content;
@@ -1163,14 +1178,6 @@ const detailSections = computed(() => {
 .auto-chip--ok { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
 .auto-chip--warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
 .auto-chip--bad { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
-.auto-toggle {
-  display: inline-flex; align-items: center; white-space: nowrap;
-  padding: 0.4rem 0.75rem; font-size: 0.75rem; font-weight: 600; font-family: inherit;
-  border-radius: 6px; cursor: pointer; transition: all 0.15s;
-  border: 1px solid #d1d5db; background: #ffffff; color: #374151;
-}
-.auto-toggle--on { border-color: #f87171; background: #fef2f2; color: #991b1b; }
-.auto-toggle:focus-visible { outline: 2px solid #f87171; outline-offset: 1px; }
 .auto-line {
   margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   padding: 0.35rem 0.6rem; border-radius: 6px; font-size: 0.75rem; line-height: 1.4;
