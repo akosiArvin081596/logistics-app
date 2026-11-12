@@ -214,7 +214,10 @@ globalThis.fetch = refuse("fetch");
 		eq(fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [], [], "§3 …and loads no Google client, opens no connection, looks up no host");
 		const src = fs.readFileSync(SCRIPT, "utf8");
 		ok(!/require\(\s*["'`]googleapis/.test(src) && !/\bfetch\s*\(/.test(src), "§3 the script itself requires no Google client and calls no fetch");
-		ok(!/\.env\b|service-account|settings\.env/.test(src), "§3 the script names no settings or key file of its own");
+		// Its string literals, comments aside: a settings or key file named there would be one it opens itself.
+		const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+		const literals = [...code.matchAll(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g)].map((m) => m[0]);
+		ok(literals.length > 20 && !literals.some((s) => /\.env\b|service-account|settings\.env/.test(s)), "§3 the script names no settings or key file of its own");
 	});
 
 	// ── §4 ──────────────────────────────────────────────────────────────────────
@@ -240,6 +243,35 @@ globalThis.fetch = refuse("fetch");
 		eq(r.model.notices.length, 13, "§4 the module's own first read would write 13 notices");
 		eq(r.model.notices.map((n) => `${n.kind}:${n.tombstoneId}`).sort(), r.model.predictedNotices.map((n) => `${n.kind}:${n.tombstoneId}`).sort(),
 			"§4 the notices the report predicts are the module's");
+
+		// When its own reading and the module's answer differ, the report stops rather than print counts that may
+		// be wrong: here the module is wrapped to drop one banner line, then one notice.
+		const restoreLib = require("../lib/deleted-load-restore");
+		const realCreate = restoreLib.create;
+		const stopsOn = async (wrap) => {
+			restoreLib.create = (opts) => wrap(realCreate(opts));
+			try {
+				await runIn([...fileArgs(base), "--json"]);
+				return null;
+			} catch (e) {
+				return e;
+			} finally {
+				restoreLib.create = realCreate;
+			}
+		};
+		const lineDropped = await stopsOn((inst) => {
+			const real = inst.hiddenLoads;
+			inst.hiddenLoads = (...a) => (real(...a) || []).filter((x) => x.tombstoneId !== 6);
+			return inst;
+		});
+		ok(lineDropped && lineDropped.code === "CHECK_FAILED" && canon(lineDropped.records) === canon([6]), "§4 a banner line the module leaves out stops the report (CHECK_FAILED, record 6)");
+		const noticeDropped = await stopsOn((inst) => {
+			const real = inst.mount;
+			inst.mount = (app, h) => real(app, { ...h, notifySuperAdmins: (n) => (n.metadata && n.metadata.tombstoneId === 10 ? undefined : h.notifySuperAdmins(n)) });
+			return inst;
+		});
+		ok(noticeDropped && noticeDropped.code === "CHECK_FAILED" && canon(noticeDropped.records) === canon([10]), "§4 a notice the module doesn't write stops the report (CHECK_FAILED, record 10)");
+		ok(restoreLib.create === realCreate, "§4 …and the module is left as it was");
 
 		const c = cli([...fileArgs(base), "--json"]);
 		let viaCli = null;
