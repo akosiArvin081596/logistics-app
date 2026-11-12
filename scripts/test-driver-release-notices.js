@@ -6,7 +6,7 @@
  * WHAT IS ASSERTED, each a way this can silently stop being true:
  *   §1  THE LIST: ids unique, in order and well shaped; plain words with no figure, name or real
  *       data; every tour step and part of the app known to the client; the first entry covers
- *       what has shipped
+ *       what has shipped; Past Performance's names only what ships on, word for word
  *   §2  THE RULES: unseen notes newest first; which ids a driver may mark, and confirm
  *   §3  A SIGN-IN: nothing goes in the session, for any role; GET /api/auth/session doesn't change; a
  *       hook that throws costs no sign-in
@@ -322,7 +322,8 @@ async function main() {
 	// Words a driver reads. No figure in any form: a number in a note can't follow a week with time off.
 	const SPELLED = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|half|dollars?|cents?|percent)\b/i;
 	const JARGON = /\b(session|deploy|deployed|release|server|api|bug|flag|sheet|database|endpoint|cache|token|login)\b/i;
-	const APP_WORDS = new Set(["Loads", "Performance", "Alerts", "Kit", "Messages", "Invoices", "Active", "Pending", "Historical", "POD", "LogisX"]);
+	// "Past" is the first word of the tab's own name, Past Performance.
+	const APP_WORDS = new Set(["Loads", "Performance", "Past", "Alerts", "Kit", "Messages", "Invoices", "Active", "Pending", "Historical", "POD", "LogisX"]);
 	function wordProblems(text) {
 		const out = [];
 		if (typeof text !== "string" || text.trim() === "") return ["empty"];
@@ -365,6 +366,17 @@ async function main() {
 	ok("the first entry covers the fuel range label, when it's known: with no reading or no tank size on file the top of the app says not available", first.notes.includes("The top of the app now shows your fuel range when it's known: how many miles you have left until empty."));
 	ok("what's about the Performance tab goes only to a driver who has it", first.notes.filter((n) => /Performance|bar|pickup/.test(lineText(n))).every((n) => n.needs === "performance"));
 	ok("the fuel line goes to every driver", first.notes.some((n) => typeof n === "string" && /fuel range/.test(n)));
+
+	// Past Performance's note names only what ships on, word for word: the hours wait behind their switch.
+	const past = LIST.find((r) => r.id === "2026-11-12-past-performance");
+	eq("the Past Performance note's lines, word for word, each for a driver with the tab", past && past.notes.map((n) => [lineText(n), n.needs]), [
+		["The Performance tab is now Past Performance: each past week with your turns.", "performance"],
+		["The bar on Loads now changes color with your week.", "performance"],
+	]);
+	ok("...its title is plain words", !!past && past.title === "Past Performance and the bar's colors");
+	eq("...Show me walks the bar and the tab", past && past.tour, ["loads", "performance"]);
+	ok("...and nothing in it speaks of hours, which ship switched off", !!past && !/hour|driving/i.test([past.title, ...past.notes.map(lineText)].join(" ")));
+	eq("...it is the newest entry, so it's what a driver reads first", releases.latestReleaseId(LIST), "2026-11-12-past-performance");
 
 	// ── §2 ──────────────────────────────────────────────────────────────────
 	section("2 the rules");
