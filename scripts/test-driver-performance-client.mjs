@@ -36,6 +36,10 @@
 //   §19 DashboardView.vue: the tab after Fleet & Drivers, a Super Admin's only once its read answers,
 //       gone again on the server's "gone", back to the Job Board
 //   §20 the real server rules through the tab's views: the same figures and words as his own tab
+//   §21 the weekly performance page on his invoice (lib/invoice-performance-copy.js): the count, the
+//       requirement, the rule, the time-off line, the rows and the four hours lines, each the tab's own for
+//       the same answer; the page's own heading, as-of line (the business clock's zone) and title; nothing
+//       else an answer holds; no page for a week it can't trust; a week closed before it was made
 //
 // No DOM, no server, no build; scripts/e2e/driver-performance.mjs covers the page.
 //   node scripts/test-driver-performance-client.mjs      # exits 1 on any failure
@@ -884,5 +888,80 @@ if (typeof server.personalWeek === 'function' && typeof server.pastWeek === 'fun
 } else {
   eq('§20 lib/driver-performance.js has personalWeek() and pastWeek()', false, true)
 }
+
+// ── §21 the weekly performance page on his invoice ───────────────────────────
+// lib/invoice-performance-copy.js words the page the invoice keeps: the tab's own lines for the week the page
+// names ("this week"), and three of its own. A tree without the module fails each case by name.
+console.log('§21 the weekly performance page on the invoice: the tab\'s own words')
+const COPY_FILE = path.join(ROOT, 'lib', 'invoice-performance-copy.js')
+const copy = fs.existsSync(COPY_FILE) ? require(COPY_FILE) : null
+// Fri Nov 6, 7:00 PM Eastern (the Friday batch's hour), on the week of Oct 31 to Nov 6.
+const AS_OF = Date.parse('2026-11-07T00:00:00Z')
+const pageOf = (answer, hours = null, zone = 'America/New_York') => (copy && answer
+  ? copy.pageOf({ week: (answer.weeks || [])[0], weights: answer.creditWeights, hours }, { asOfMs: AS_OF, zone }) : null)
+const tabRows = (view) => (view && Array.isArray(view.loads) ? view.loads.map((l) => `${l.title}: ${l.line}`) : null)
+// The page's lines against the tab's own view of the same answer.
+function sameWords(says, answer) {
+  const page = pageOf(answer) || {}
+  const tab = ownWeekView(answer, 'this-week') || {}
+  eq(`§21 ${says}: the count, the requirement, the rule, the time-off line, the rows and the empty line, as the tab says them`,
+    [page.count, page.requirement, page.rule, page.lowered, page.rows, page.empty],
+    [tab.count, tab.requirement, tab.rule, tab.lowered, tabRows(tab), tab.loads && tab.loads.length ? '' : tab.empty])
+}
+sameWords('the made-up week', answerOf(week('this-week')))
+sameWords('a target lowered for time off', answerOf(week('this-week', { targetLowered: true, credits: { value: 3, target: 6, required: 4.5, deliveries: 3, pickups: 3 } })))
+sameWords('the target alone, time off ruling the requirement out', answerOf(week('this-week', { credits: { value: 3, target: 4.5, required: null, deliveries: 3, pickups: 3 } })))
+sameWords('nothing counted yet', answerOf(week('this-week', { loads: [], credits: { value: 0, target: 7.5, required: 6, deliveries: 0, pickups: 0 } })))
+const page21 = pageOf(answerOf(week('this-week'))) || {}
+eq('§21 the page\'s own three: its heading, the as-of line and the title over what counted', [page21.heading, page21.asOf, page21.title], ['WEEKLY PERFORMANCE', 'As of Fri Nov 6, 7:00 PM ET', 'What counted'])
+eq('§21 its week, in the invoice\'s own "to"', page21.week, 'Oct 31 to Nov 6')
+eq('§21 a week across a year end names both years', pageOf(answerOf(week('this-week', { start: '2026-12-26', end: '2027-01-01' })))?.week, 'Dec 26, 2026 to Jan 1, 2027')
+eq('§21 the as-of line names the business clock: CT on the Central clock', pageOf(answerOf(week('this-week')), null, 'America/Chicago')?.asOf, 'As of Fri Nov 6, 6:00 PM CT')
+eq('§21 exactly these lines', Object.keys(page21), ['heading', 'week', 'asOf', 'count', 'requirement', 'rule', 'lowered', 'title', 'rows', 'empty', 'hours'])
+eq('§21 no label, bar, what\'s left, closing line or new-week line, whatever the week holds',
+  [v.PACE_WORDS && Object.values(v.PACE_WORDS).some((w) => has(page21, w)), has(page21, '%'), has(page21, 'left this week'), has(page21, 'reached'), has(page21, 'Week closes'), has(page21, 'A new week')],
+  [false, false, false, false, false, false])
+// The heading is the page's own word, and "PERFORMANCE" holds one decoy mark ("CE"), so it is left out here.
+const decoyPage = pageOf(decoyAnswer)
+eq('§21 nothing else an answer holds gets through', [!!decoyPage, decoyPage ? showsDecoy({ ...decoyPage, heading: '' }) : null], [true, []])
+eq('§21 every word free of ranking, score, tier and dollars, and no "pay"',
+  copy ? [page21.heading, page21.week, page21.asOf, page21.count, page21.requirement, page21.rule, page21.title, ...(page21.rows || []), page21.hours].filter((w) => BANNED.test(w) || /\bpay\b/i.test(w)) : null, [])
+// The tab's four hours lines (#763), and coming soon for anything it can't trust: as a past week's row says them.
+const pastHours = (hours) => pastWeeksView({ ...answerOf(week('this-week')), pastWeeks: [{ start: '2026-10-24', end: '2026-10-30', credits: { value: 6, target: 7.5 }, hours }], countedFrom: 'Oct 24' })?.rows[0].hours
+for (const [says, hours] of [
+  ['no hours sent (the switch off)', null], ['coming soon, as sent', { state: 'coming-soon' }], ['an estimate', { state: 'estimate', value: 38.5 }],
+  ['no hours for this truck', { state: 'none' }], ['hours that start later', { state: 'starts', day: 'Nov 9' }],
+  ['a figure it can\'t trust', { state: 'estimate', value: '38.5' }], ['a negative figure', { state: 'estimate', value: -1 }],
+  ['a start day it can\'t trust', { state: 'starts', day: '2026-11-09' }], ['a state it doesn\'t know', { state: 'decoy' }],
+]) eq(`§21 hours, ${says}: the past week's own line`, (pageOf(answerOf(week('this-week')), hours) || {}).hours, pastHours(hours))
+eq('§21 the four lines, by name', [null, { state: 'estimate', value: 38.5 }, { state: 'none' }, { state: 'starts', day: 'Nov 9' }].map((h) => (pageOf(answerOf(week('this-week')), h) || {}).hours),
+  ['Driving hours: coming soon', 'Driving: 38.5 h (estimate)', 'No driving hours for this truck', 'Driving hours start Nov 9'])
+for (const [says, over] of Object.entries(broken).filter(([says]) => !/percent|left/.test(says))) {
+  eq(`§21 ${says}: no page, never a wrong number`, copy ? pageOf(answerOf(week('this-week', over))) : 'no module', null)
+}
+eq('§21 no weights, or no week: no page', copy ? [copy.pageOf({ week: week('this-week'), weights: null, hours: null }, { asOfMs: AS_OF, zone: 'America/New_York' }), copy.pageOf({ week: null, weights: { delivery: 0.5, pickup: 0.5 } }, { asOfMs: AS_OF, zone: 'America/New_York' }), copy.pageOf(null, { asOfMs: AS_OF, zone: 'America/New_York' })] : null, [null, null, null])
+if (typeof server.personalWeek === 'function') {
+  const realLoads = [
+    server.countedLoad({ loadId: 'DP-1', pickupDay: '2026-11-02', deliveryDay: '2026-11-03' }),
+    server.countedLoad({ loadId: 'DP-2', pickupDay: '', deliveryDay: '2026-11-04', pickupNote: 'last-week' }),
+    server.countedLoad({ loadId: 'DP-3', pickupDay: '', deliveryDay: '2026-11-04', pickupNote: 'not-counted' }),
+    server.countedLoad({ loadId: 'DP-4', pickupDay: '2026-11-04', deliveryDay: '' }),
+  ]
+  const realWeek = (today, offDays) => ({ view: 'no-hours-data', creditWeights: { ...server.CREDIT_WEIGHTS }, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today, deliveries: 3, pickups: 2, offDays, openLoad: true, loads: realLoads })] })
+  sameWords('the real rules, a day off and a pickup counted last week', realWeek('2026-11-06', ['2026-11-05']))
+  sameWords('the real rules, no time off', realWeek('2026-11-04', []))
+  // Made the Saturday after (a restart's catch-up): the week's final figure, its rows in the page's own "this week".
+  const closed = pageOf(realWeek('2026-11-07', ['2026-11-05'])) || {}
+  eq('§21 a week already closed when the invoice is made: its final figure and rows, and no time-off line (the tab shows none on a closed week)',
+    [closed.count, closed.requirement, closed.lowered, closed.rows],
+    ['2.5 of 6 loads', '6 is the target. 4.5 is required.', '', [
+      'Load DP-1: Picked up Mon 0.5 · Delivered Tue 0.5', 'Load DP-2: Delivered Wed 0.5 · Pickup counted last week',
+      'Load DP-3: Delivered Wed 0.5 · Pickup not counted this week', 'Load DP-4: Picked up Wed 0.5',
+    ]])
+} else {
+  eq('§21 lib/driver-performance.js has personalWeek()', false, true)
+}
+eq('§21 the copy\'s own module holds no calendar or clock of its own: the moment and the zone are handed in',
+  copy ? /\bDate\.now\b|new Date\(\)|process\.env/.test(codeOf(fs.readFileSync(COPY_FILE, 'utf8'))) : null, false)
 
 done()

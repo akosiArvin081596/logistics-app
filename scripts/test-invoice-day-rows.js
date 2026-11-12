@@ -44,9 +44,21 @@
  *      invoiceCountRows() is the submit email's rows (Days paid / Daily rate /
  *      Loads, Loads / Pay %, Line items). The client's copy is
  *      scripts/test-invoice-day-rows-client.mjs.
+ *   §6 THE WEEKLY PERFORMANCE PAGE (INVOICE_PERFORMANCE_COPY_ENABLED, off unless
+ *      exactly "true"). Off: no read, no page, render_data the same text (with
+ *      BASE_SERVER_JS, the base's). On: one read of his week (invoiceWeek(),
+ *      lib/driver-performance-routes.js) for the invoice's driver, week and one
+ *      Driver account; render_data is the off text plus one `performance` key,
+ *      the page lib/invoice-performance-copy.js words, with every money column,
+ *      invoiceTotalDue() and the PDF's text fields unchanged. A read that throws
+ *      or runs past its 15 s wait: the invoice is made without the page, with
+ *      one warning line. The Friday batch's in-process call with the real
+ *      invoiceWeek(): a page for an eligible driver, none for an owner-operator.
+ *      Wiring: the switch's lines, the one await before the render, the one key.
  *
  * Every case fails on the base except the §4 checks of what must not move,
- * which pass on both, and the loadBol and days checks of §3e and §3f. Made-up data only. Pure: no server, no app.db, no network,
+ * which pass on both, the loadBol and days checks of §3e and §3f, and §6a (the
+ * switch off), which passes on both. Made-up data only. Pure: no server, no app.db, no network,
  * no browser.
  * Run: node scripts/test-invoice-day-rows.js    # exits 1 on failure
  */
@@ -324,6 +336,98 @@ const SCHEDULED_DAYS = {
 const NEW_SCHEDULED = Object.fromEntries(Object.keys(BASE_LOAD_MAP).map((name) => [name,
 	Object.fromEntries(daysOf(name).map((d) => [d, (SCHEDULED_DAYS[name] || {})[d] || []]))]));
 
+// ── §6 the weekly performance page (made up) ─────────────────────────────────────
+const PERF_ON = { INVOICE_PERFORMANCE_COPY_ENABLED: "true" };
+const PERF_EXPOSE = [...EXPOSE, "invoicePerformance", "invoiceTotalDue"];
+const perfRules = require(path.join(W.ROOT, "lib", "driver-performance.js"));
+// His week as invoiceWeek() answers it, from the real rules over made-up loads.
+function madeUpAnswer(start, end, today, over = {}) {
+	const day = (n) => perfRules.addDays(start, n);
+	return {
+		week: perfRules.personalWeek({
+			id: "this-week", start, end, today, deliveries: 3, pickups: 2, offDays: [], openLoad: true,
+			loads: [
+				perfRules.countedLoad({ loadId: "L1", pickupDay: day(2), deliveryDay: day(3) }),
+				perfRules.countedLoad({ loadId: "L2", pickupDay: day(3), deliveryDay: day(4) }),
+				perfRules.countedLoad({ loadId: "L3", pickupDay: "", deliveryDay: day(5), pickupNote: "not-counted" }),
+			],
+		}),
+		weights: { ...perfRules.CREDIT_WEIGHTS },
+		hours: null,
+		...over,
+	};
+}
+const REAL_ANSWER = madeUpAnswer("2026-10-17", "2026-10-23", "2026-10-23");
+// The real week with the switch as `env` says and invoiceWeek() answered by `answer` (a value, or a
+// function of the call's arguments); world.reads keeps each call it gets.
+function perfWorld(env, answer = REAL_ANSWER) {
+	const w = world(NIA, realRows(), { env, expose: PERF_EXPOSE });
+	w.reads = [];
+	w.api.invoicePerformance.week = (args) => { w.reads.push(args); return typeof answer === "function" ? answer(args) : Promise.resolve(answer); };
+	return w;
+}
+const lastRow = (w) => w.db.prepare("SELECT * FROM invoices ORDER BY id DESC LIMIT 1").get() || {};
+// Every column of the row that a pay figure or the PDF's file is: none may move with the page.
+const MONEY_COLS = ["invoice_number", "driver", "week_start", "week_end", "loads_count", "rate_per_load", "total_earnings", "expenses_total", "status", "pdf_file_name",
+	"load_ids", "expense_ids", "adjustment", "adjustment_note", "personal_total", "personal_share_total", "correction_lines_total"];
+const pageWarnings = (g) => (g.warnings || []).filter((l) => /performance/i.test(l));
+const withoutPage = (text) => { const o = JSON.parse(text || "{}"); delete o.performance; return JSON.stringify(o); };
+// The page as lib/invoice-performance-copy.js words it, or a note that the module is missing.
+function pageFor(answer, asOfMs) {
+	try { return W.requireLib("invoice-performance-copy").pageOf(answer, { asOfMs, zone: "America/New_York" }); } catch (e) { return `no page: ${e.message}`; }
+}
+// One generate of the real week with the switch off, for §6a's comparison with a base (BASE_SERVER_JS).
+async function childPerfOff() {
+	const g = await W.generate(world(NIA, realRows(), {}), NIA, REAL_END);
+	return { status: g.status, render_data: g.invoice ? g.invoice.render_data : null, warnings: g.warnings };
+}
+
+// lib/driver-performance-routes.js mounted on a world's own database and sheet as server.js mounts it.
+const MOUNT_EXPOSE = ["liveJobTrackingView", "everyJobTrackingRow", "keepEveryRow", "invoiceWeekColumns", "invoiceWeekVerdict", "invoiceCompletionDay", "loadKeySet",
+	"getDeletedLoadIds", "getWeekRange", "appTodayKey", "buildDriverAtResolver", "shownLoadId", "routeShownLoadIdIndex", "parseSheet", "deduplicateLoads", "generateInvoiceInProcess"];
+function mountPerformance(w) {
+	const a = w.api;
+	const jt = async () => {
+		const p = a.parseSheet({ values: W.sheetValues(w.rows) });
+		a.keepEveryRow(p, p.data);
+		p.data = a.deduplicateLoads(p.data, p.headers);
+		return p;
+	};
+	return require(path.join(W.ROOT, "lib", "driver-performance-routes.js")).mount({ get() {} }, {
+		enabled: true, requireRole: () => (req, res, next) => next(), db: w.db, getJobTrackingCached: jt, logger: { log() {} },
+		liveJobTrackingView: a.liveJobTrackingView, everyJobTrackingRow: a.everyJobTrackingRow, invoiceWeekColumns: a.invoiceWeekColumns,
+		invoiceWeekVerdict: a.invoiceWeekVerdict, invoiceCompletionDay: a.invoiceCompletionDay, loadKeySet: a.loadKeySet, getDeletedLoadIds: a.getDeletedLoadIds,
+		normalizeDriverName: a.normalizeDriverName, getWeekRange: a.getWeekRange, appTodayKey: a.appTodayKey, buildDriverAtResolver: a.buildDriverAtResolver,
+		shownLoadId: a.shownLoadId, routeShownLoadIdIndex: a.routeShownLoadIdIndex,
+	});
+}
+// The Friday batch's week from the first counted week on: made-up Nia (a day-rate driver) and Omar, an
+// owner-operator by his Driver account, each with a load delivered Tue Nov 10; the batch's clock, Fri
+// Nov 13, 9 PM Eastern.
+const OMAR = "Omar Pike";
+const BATCH_END = "2026-11-13";
+const BATCH_NOW = Date.parse("2026-11-14T02:00:00Z");
+function batchWorld() {
+	const w = W.startWorld({
+		env: PERF_ON, now: BATCH_NOW, expose: [...PERF_EXPOSE, ...MOUNT_EXPOSE],
+		drivers: [{ name: NIA, payDaily: 300 }, { name: OMAR, payDaily: 300 }],
+		trucks: [{ unit: "T7", driver: NIA }, { unit: "T8", driver: OMAR }],
+		rows: [
+			loadRow({ id: "P1", driver: NIA, pickup: "2026-11-09 8:00", dropoff: "2026-11-10 10:00", assigned: "2026-11-09", done: "2026-11-10", truck: "T7" }),
+			loadRow({ id: "P2", driver: OMAR, pickup: "2026-11-09 8:00", dropoff: "2026-11-10 10:00", assigned: "2026-11-09", done: "2026-11-10", truck: "T8" }),
+		],
+	});
+	w.db.exec(require(path.join(W.ROOT, "lib", "owner-operator.js")).OO_SCHEMA_SQL);
+	const account = w.db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', 'Driver', ?)");
+	account.run(52, "nbrooks", NIA);
+	account.run(51, "opike", OMAR);
+	w.db.prepare("INSERT INTO owner_operators (user_id, status, created_at) VALUES (51, 'active', '2026-10-01T12:00:00Z')").run();
+	const mounted = mountPerformance(w);
+	w.reads = [];
+	w.api.invoicePerformance.week = (args) => { w.reads.push(args); return mounted.invoiceWeek(args); };
+	return w;
+}
+
 // ── the parent ───────────────────────────────────────────────────────────────
 const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o && o[k]]));
 const UNCHANGED = ["activeDaySet", "dayLoadMap", "dayPayMonth", "blankPickupLoads", "tripErrors"];
@@ -497,6 +601,125 @@ async function main(R) {
 		eq("percentage", w.api.invoiceCountRows(rowOf("INV-NB-PCT")), [["Loads", "3"], ["Pay %", "30%"]]);
 		eq("manual", w.api.invoiceCountRows(rowOf("INV-M-NB-01")), [["Line items", "2"]]);
 	});
+
+	// §6
+	const offRuns = {};
+	for (const value of [undefined, "", "false", "TRUE", "1", "yes", "on", " true"]) {
+		const env = value === undefined ? {} : { INVOICE_PERFORMANCE_COPY_ENABLED: value };
+		offRuns[JSON.stringify(value === undefined ? "(unset)" : value)] = await W.generate(world(NIA, realRows(), { env }), NIA, REAL_END);
+	}
+	const offBase = process.env.BASE_SERVER_JS ? spawnChild("perf-off", { SERVER_JS: process.env.BASE_SERVER_JS, SERVER_ROOT: "" }) : null;
+	await R.test(`§6a The weekly performance page's switch off (unset, "", "false", "TRUE", "1", "yes", "on", " true": off unless exactly "true"): no page and no line about one, and render_data the same text each time${offBase ? ", the base's" : ""}. Passes on the base too: that is its point`, async ({ eq, ok }) => {
+		const first = offRuns['"(unset)"'];
+		eq("(the scene) the invoice is made", [first.status, !!first.invoice], [200, true]);
+		for (const [label, g] of Object.entries(offRuns)) {
+			ok(`${label}: no page in render_data`, g.invoice && !("performance" in JSON.parse(g.invoice.render_data || "{}")));
+			ok(`${label}: none in the render`, g.data && !("performance" in g.data));
+			eq(`${label}: no line about a page`, pageWarnings(g), []);
+			eq(`${label}: render_data, the same text as unset`, g.invoice && g.invoice.render_data, first.invoice && first.invoice.render_data);
+		}
+		if (offBase) eq("the base's render_data, byte for byte", first.invoice && first.invoice.render_data, offBase.render_data);
+	});
+
+	await R.test("§6b The switch on: one read of his week for the invoice's driver and week, and render_data is the switch-off text plus one `performance` key, the page lib/invoice-performance-copy.js words, which the render and the field map see; every money column, invoiceTotalDue() and every other warning unchanged. Base: no page", async ({ eq, ok }) => {
+		const o = await W.generate(world(NIA, realRows(), { env: { INVOICE_PERFORMANCE_COPY_ENABLED: "false" } }), NIA, REAL_END);
+		const w = perfWorld(PERF_ON);
+		const g = await W.generate(w, NIA, REAL_END);
+		eq("status", g.status, 200);
+		eq("one read, for this driver and this week (no Driver account names her here)", w.reads, [{ driverName: NIA, userId: null, weekStart: "2026-10-17" }]);
+		const stored = g.invoice ? JSON.parse(g.invoice.render_data || "{}") : {};
+		eq("the page, as the copy's own module words his week as of now (Fri Oct 23, 9:00 PM ET)", stored.performance, pageFor(REAL_ANSWER, AFTER_REAL));
+		eq("one key more, and the rest byte for byte", [Object.keys(stored).filter((k) => !(k in JSON.parse(o.invoice.render_data))), withoutPage(g.invoice && g.invoice.render_data)], [["performance"], o.invoice && o.invoice.render_data]);
+		eq("the key sits where the snapshot's last fields go, before __templateName", Object.keys(stored).slice(-2), ["performance", "__templateName"]);
+		eq("the render drew from it", g.data && g.data.performance, stored.performance);
+		ok("the field map hands it to the renderer", !!(g.data && FIELD_MAPS.service_invoice(g.data).performancePage) && JSON.stringify(FIELD_MAPS.service_invoice(g.data).performancePage) === JSON.stringify(stored.performance));
+		eq("every money column", pick(lastRow(w), MONEY_COLS), pick(o.invoice, MONEY_COLS));
+		eq("the PDF's text fields, Total due included", g.data && FIELD_MAPS.service_invoice(g.data).text, o.data && FIELD_MAPS.service_invoice(o.data).text);
+		eq("invoiceTotalDue()", w.api.invoiceTotalDue(lastRow(w)), o.invoice && w.api.invoiceTotalDue({ ...o.invoice }));
+		eq("the warnings", g.warnings, o.warnings);
+	});
+
+	await R.test("§6c A read that throws, rejects or answers what can't be worded: the invoice is still made, as with the switch off, with one warning line and no page. Base: no read", async ({ eq }) => {
+		const off = await W.generate(world(NIA, realRows(), {}), NIA, REAL_END);
+		const bad = madeUpAnswer("2026-10-17", "2026-10-23", "2026-10-23");
+		bad.week.credits.value = "3";
+		for (const [says, answer] of [
+			["a read that throws", () => { throw new Error("made-up read failure"); }],
+			["a read that rejects", () => Promise.reject(new Error("made-up read failure"))],
+			["Job Tracking unreadable", () => Promise.reject(Object.assign(new Error("Job Tracking could not be read"), { unavailable: true }))],
+			["a week it can't word", bad],
+		]) {
+			const w = perfWorld(PERF_ON, answer);
+			const g = await W.generate(w, NIA, REAL_END);
+			eq(`${says}: made, with no page`, [g.status, g.invoice && withoutPage(g.invoice.render_data) === g.invoice.render_data], [200, true]);
+			eq(`${says}: render_data as with the switch off`, g.invoice && g.invoice.render_data, off.invoice && off.invoice.render_data);
+			eq(`${says}: one line about the page, and the rest as before`, [pageWarnings(g).length, (g.warnings || []).filter((l) => !/performance/i.test(l))], [1, off.warnings]);
+			eq(`${says}: every money column`, pick(lastRow(w), MONEY_COLS), pick(off.invoice, MONEY_COLS));
+		}
+	});
+
+	await R.test("§6d A read that runs past its wait: the invoice is made without the page and with one line saying so, after 15 s, as a Personal receipt's wait; a driver with no such week (null) gets no page and no line. Base: no read", async ({ eq, ok }) => {
+		const realSetTimeout = global.setTimeout;
+		const waits = [];
+		const w = perfWorld(PERF_ON, () => new Promise(() => {}));
+		global.setTimeout = (fn, ms, ...args) => { waits.push(ms); return realSetTimeout(fn, ms >= 10000 ? 0 : ms, ...args); };
+		let g = null;
+		try {
+			g = await Promise.race([W.generate(w, NIA, REAL_END), new Promise((resolve) => realSetTimeout(() => resolve(null), 8000))]);
+		} finally {
+			global.setTimeout = realSetTimeout;
+		}
+		ok("the invoice is made, never held by the read", !!(g && g.status === 200 && g.invoice), g ? JSON.stringify(g.body).slice(0, 160) : "no answer within 8 s");
+		eq("the read's wait", waits.filter((ms) => ms >= 10000), [15000]);
+		eq("no page, and one line about it", [g && g.invoice && withoutPage(g.invoice.render_data) === g.invoice.render_data, g && pageWarnings(g).length], [true, 1]);
+		const none = perfWorld(PERF_ON, null);
+		const n = await W.generate(none, NIA, REAL_END);
+		eq("no week of his: read once, no page, no line", [none.reads.length, n.invoice && withoutPage(n.invoice.render_data) === n.invoice.render_data, pageWarnings(n)], [1, true, []]);
+	});
+
+	await R.test("§6e The Friday batch's own in-process call (generateInvoiceInProcess(), the Super Admin system actor), with lib/driver-performance-routes.js's real invoiceWeek() on the world's database and sheet: Nia's invoice keeps her week as of Fri Nov 13, 9:00 PM ET; Omar, an owner-operator by his Driver account, gets none and no line. Base: no page", async ({ eq, ok }) => {
+		const w = batchWorld();
+		const nia = await w.api.generateInvoiceInProcess(NIA, BATCH_END);
+		const omar = await w.api.generateInvoiceInProcess(OMAR, BATCH_END);
+		eq("(the scene) both invoices are made", [nia.statusCode, omar.statusCode, !!(nia.body && nia.body.invoice), !!(omar.body && omar.body.invoice)], [200, 200, true, true]);
+		eq("each read names the invoice's driver, its week and the one Driver account under that name", w.reads, [
+			{ driverName: NIA, userId: 52, weekStart: "2026-11-07" }, { driverName: OMAR, userId: 51, weekStart: "2026-11-07" },
+		]);
+		const page = nia.body && nia.body.invoice ? JSON.parse(nia.body.invoice.render_data).performance : null;
+		eq("Nia's page", page && [page.heading, page.week, page.asOf, page.count, page.requirement, page.rule, page.rows, page.hours], [
+			"WEEKLY PERFORMANCE", "Nov 7 to Nov 13", "As of Fri Nov 13, 9:00 PM ET", "0.5 of 7.5 loads", "7.5 is the target. 6 is required.",
+			"Each pickup counts 0.5 and each delivery 0.5.", ["Load P1: Delivered Tue 0.5 · Pickup not counted this week"], "Driving hours: coming soon",
+		]);
+		ok("Omar's invoice: no page", !!(omar.body && omar.body.invoice) && !("performance" in JSON.parse(omar.body.invoice.render_data || "{}")));
+		eq("and no line about one on either", [pageWarnings({ warnings: nia.body && nia.body.warnings }), pageWarnings({ warnings: omar.body && omar.body.warnings })], [[], []]);
+	});
+
+	await R.test("§6f Wiring: INVOICE_PERFORMANCE_COPY_ENABLED is defined once, exactly \"true\", logged once at start and read by the copy alone (no lib/ file, renderer or field map reads it); the handler awaits the page once, before the render that stays its last await before the write, and writes it to renderData.performance only; the mount hands invoiceWeek() in. Base: none", async ({ eq, ok }) => {
+		const code = (l) => !/^\s*\/\//.test(l);
+		const lines = W.SRC.split("\n");
+		eq("the switch's lines", lines.filter((l) => code(l) && l.includes("INVOICE_PERFORMANCE_COPY_ENABLED")), [
+			"const INVOICE_PERFORMANCE_COPY_ENABLED = process.env.INVOICE_PERFORMANCE_COPY_ENABLED === \"true\";",
+			"console.log(`[invoice-performance] INVOICE_PERFORMANCE_COPY_ENABLED ${INVOICE_PERFORMANCE_COPY_ENABLED ? \"on\" : \"off\"}`);",
+			"\tif (!INVOICE_PERFORMANCE_COPY_ENABLED) return null;",
+		]);
+		const fs = require("fs");
+		const libDir = path.join(W.ROOT, "lib");
+		eq("no lib/ file reads the switch", fs.readdirSync(libDir).filter((f) => /\.(c|m)?js$/.test(f) && fs.readFileSync(path.join(libDir, f), "utf8").includes("INVOICE_PERFORMANCE_COPY_ENABLED")), []);
+		const at = W.SRC.indexOf("\nasync function generateInvoiceHandler(");
+		const handler = at < 0 ? "" : W.SRC.slice(at, W.SRC.indexOf("\n}\n", at));
+		const awaits = handler.split("\n").filter((l) => /\bawait\b/.test(l) && code(l)).map((l) => l.trim());
+		const page = awaits.findIndex((l) => l.startsWith("const performancePage = await invoicePerformanceCopy("));
+		const render = awaits.findIndex((l) => l.startsWith("const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData,"));
+		ok("one read of the page, right before the render, with no other await between", page >= 0 && render === page + 1 && awaits.filter((l) => l.includes("invoicePerformanceCopy(")).length === 1, JSON.stringify(awaits.slice(Math.max(0, page - 1), page + 3)));
+		ok("the render is still the last await before the write", render >= 0 && handler.indexOf("const result = commitInvoiceWithPdf(") > handler.indexOf(awaits[render]) && !handler.slice(handler.indexOf(awaits[render]) + awaits[render].length, handler.indexOf("const result = commitInvoiceWithPdf(")).split("\n").some((l) => code(l) && /\bawait\b/.test(l)));
+		eq("the page goes into renderData.performance and nowhere else", handler.split("\n").filter((l) => code(l) && /\bperformancePage\b|\.performance\b/.test(l)).map((l) => l.trim()), [
+			"const performancePage = await invoicePerformanceCopy({ driverName, userId: driverUser ? driverUser.id : null, weekStart }, warnings);",
+			"if (performancePage) renderData.performance = performancePage;",
+		]);
+		ok("the mount hands invoiceWeek() to the copy", W.SRC.includes("\ninvoicePerformance.week = driverPerformance.invoiceWeek;\n"));
+		const constant = (name) => (new RegExp(`^const ${name} = ([^;]*);$`, "m").exec(W.SRC) || [])[1];
+		eq("the read's wait is 15 s, a Personal receipt's", [constant("INVOICE_PERFORMANCE_WAIT_MS"), constant("PERSONAL_RECEIPT_WAIT_MS")], ["15_000", "15_000"]);
+	});
 }
 
 function labelsWorld() {
@@ -521,6 +744,8 @@ if (MODE === "dates") {
 	childDates().then((o) => { process.stdout.write(JSON.stringify(o)); W.cleanup(); }, (e) => { process.stdout.write(JSON.stringify({ error: String(e && e.message) })); });
 } else if (MODE === "paid-days") {
 	childPaidDays().then((o) => { process.stdout.write(JSON.stringify(o)); W.cleanup(); }, (e) => { process.stdout.write(JSON.stringify({ error: String(e && e.message) })); });
+} else if (MODE === "perf-off") {
+	childPerfOff().then((o) => { process.stdout.write(JSON.stringify(o)); W.cleanup(); }, (e) => { process.stdout.write(JSON.stringify({ error: String(e && e.message) })); });
 } else {
 	const R = W.createRunner("B23 / R13: each weekly invoice row prints its date and the loads it lists; the counts say what they hold");
 	main(R).then(() => R.finish(), (e) => { console.error(e && e.stack || e); process.exit(1); });

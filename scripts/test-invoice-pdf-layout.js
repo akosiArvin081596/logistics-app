@@ -27,12 +27,18 @@
  *   E1       the percentage-pay weekly invoice names its payee a "percentage
  *            driver"; "owner-operator" is kept for the new driver category.
  *            The file name and the stored template key keep their old names.
+ *   P1-P4    the weekly performance page (render_data.performance, written at
+ *            generate by lib/invoice-performance-copy.js): one hidden section in
+ *            each weekly template between the invoice body and the receipt
+ *            pages, none in the manual one; the field map hands the renderer the
+ *            stored page, checked and capped, and nothing else moves with it; the
+ *            renderer checks it again at its sink and fills it as text only.
  *
  * Issued invoices are never regenerated, and no render_data is rewritten.
  *
- * Every case fails on the base (73be100); A4 checks the three server.js call
- * sites. What the boxes look like in a real PDF is checked on the replica; this
- * runner pins the markup and the values.
+ * Every case fails on the base (73be100), except P3, which passes on both; A4
+ * checks the three server.js call sites. What the boxes look like in a real PDF
+ * is checked on the replica; this runner pins the markup and the values.
  *
  * Made-up data only. Pure: no server, no app.db, no network, no browser.
  * Run: node scripts/test-invoice-pdf-layout.js    # exits 1 on failure
@@ -366,6 +372,84 @@ test("E1 The percentage-pay weekly invoice names its payee a percentage driver: 
 	ok("the share line", html.includes('<span class="label">&times; Percentage Driver Share (<span aria-label="Pay percentage"></span>%)</span>'));
 	const left = /[^\n]*owner[\s-]?op[^\n]*/i.exec(html);
 	ok("no owner-operator wording left", !left, left ? left[0].trim() : "");
+});
+
+// ── the weekly performance page (render_data.performance) ───────────────────
+// A made-up page as lib/invoice-performance-copy.js words one, and the slots it fills, in order.
+const PAGE = Object.freeze({
+	heading: "WEEKLY PERFORMANCE", week: "Nov 7 to Nov 13", asOf: "As of Fri Nov 13, 7:00 PM ET", count: "6.5 of 7.5 loads",
+	requirement: "7.5 is the target. 6 is required.", rule: "Each pickup counts 0.5 and each delivery 0.5.", lowered: "",
+	title: "What counted", rows: ["Load 4400123: Picked up Mon 0.5 · Delivered Tue 0.5", "Load 4400124: Delivered Wed 0.5 · Pickup not counted this week"],
+	empty: "", hours: "Driving hours: coming soon",
+});
+const PAGE_SLOTS = ["heading", "week", "asOf", "count", "requirement", "rule", "lowered", "title", "empty", "hours"];
+// The <section data-performance-page> element's own markup, through its </section>; "" when absent.
+function performanceSection(html) {
+	const open = /<section\b[^>]*\bdata-performance-page\b[^>]*>/.exec(html);
+	if (!open) return "";
+	const end = html.indexOf("</section>", open.index);
+	return end < 0 ? "" : html.slice(open.index, end + "</section>".length);
+}
+const copyModule = () => {
+	const file = path.join(ROOT, "lib", "invoice-performance-copy.js");
+	if (!fs.existsSync(file)) throw new Error("lib/invoice-performance-copy.js does not exist yet (the page adds it)");
+	return require(file);
+};
+
+test("P1 (the weekly performance page) Both weekly templates hold one hidden [data-performance-page] section, after the invoice body (</main>) and before the receipt pages, that starts a page of its own: its ten line slots in order and one hidden row to clone, no aria-label (the text fill never counts it). The manual invoice has none. Base: no section", ({ eq, ok }) => {
+	for (const key of WEEKLY) {
+		const html = TEMPLATES[key];
+		eq(`${key}: one section`, (html.match(/<section\b[^>]*\bdata-performance-page\b/g) || []).length, 1);
+		const section = performanceSection(html);
+		const at = html.indexOf(section);
+		ok(`${key}: after </main> and before the receipt pages`, section !== "" && html.indexOf("</main>") < at && at < html.indexOf("data-receipt-pages"));
+		ok(`${key}: hidden until filled`, /^<section\b[^>]*\bstyle="display:none"/.test(section), section.slice(0, 120));
+		eq(`${key}: the line slots, in order`, [...section.matchAll(/\bdata-cell="([^"]+)"/g)].map((m) => m[1]), PAGE_SLOTS);
+		eq(`${key}: one hidden row to clone`, (section.match(/<li\b[^>]*\bdata-performance-row-template\b[^>]*\bstyle="display:none"[^>]*><\/li>/g) || []).length, 1);
+		ok(`${key}: no aria-label inside it`, section !== "" && !/aria-label/.test(section));
+		ok(`${key}: it starts a new page`, declares(html, ".performance-page", "break-before: page") && declares(html, ".performance-page", "page-break-before: always"));
+	}
+	eq("service_invoice_manual: no section", /data-performance-page/.test(TEMPLATES.service_invoice_manual), false);
+});
+
+test("P2 The field map hands the renderer the stored page (data.performance) on both weekly invoices, through the copy's own check: every line text within its cap, the rows text and at most its cap, nothing else; null for a snapshot without one or with anything that isn't one; the manual invoice never. Base: no page", ({ eq }) => {
+	const lib = copyModule();
+	for (const key of WEEKLY) {
+		const map = FIELD_MAPS[key];
+		eq(`${key}: the page, whole`, map({ performance: PAGE }).performancePage, { ...PAGE, rows: [...PAGE.rows] });
+		eq(`${key}: none stored, or not a page`, [{}, { performance: null }, { performance: "page" }, { performance: [PAGE] }, { performance: 7 }, { performance: { ...PAGE, heading: "" } }, { performance: { ...PAGE, heading: 3 } }].map((d) => map(d).performancePage), [null, null, null, null, null, null, null]);
+		const long = map({ performance: { ...PAGE, count: "x".repeat(lib.LINE_MAX + 50), rows: [...Array(lib.ROWS_MAX + 9)].map((_x, i) => `Load ${i}: ${"y".repeat(lib.LINE_MAX)}`) } }).performancePage;
+		eq(`${key}: each line held to ${lib.LINE_MAX} characters and the rows to ${lib.ROWS_MAX}`, long && [long.count.length, long.rows.length, Math.max(...long.rows.map((r) => r.length))], [lib.LINE_MAX, lib.ROWS_MAX, lib.LINE_MAX]);
+		const odd = map({ performance: { ...PAGE, rows: ["Load 1: Delivered Mon 0.5", 7, null, { text: "x" }, ""], lowered: 5, totalDue: 9999, days: { Monday: { total: 9999 } } } }).performancePage;
+		eq(`${key}: rows that aren't text are dropped, a line that isn't text is empty, and no other key gets through`, odd && [odd.rows, odd.lowered, Object.keys(odd).sort()], [["Load 1: Delivered Mon 0.5"], "", [...PAGE_SLOTS, "rows"].sort()]);
+	}
+	eq("service_invoice_manual: never a page", "performancePage" in FIELD_MAPS.service_invoice_manual({ performance: PAGE }), false);
+});
+
+test("P3 A page moves nothing else: on all three invoices the PDF's text fields (Total due and the adjustment included), checkboxes and day rows are the same with a stored page as without it. Passes on the base too: that is its point", ({ eq }) => {
+	const data = {
+		driverName: "Made Up", invoiceNumberSuffix: "MU-2026W46-01", totalDue: 1500, totalEarnings: 1500, adjustment: 25, adjustmentNote: "made-up",
+		days: { Monday: { date: "2026-11-09", total: 300, rate: 300, completed: true, loadBol: "L1", listed: ["L1"], scheduled: [] } },
+		lineItems: [{ date: "2026-11-09", description: "Made-up line", amount: 100 }], hasEldData: true, accountType: "checking",
+	};
+	for (const key of [...WEEKLY, "service_invoice_manual"]) {
+		const a = FIELD_MAPS[key](data);
+		const b = FIELD_MAPS[key]({ ...data, performance: PAGE });
+		eq(`${key}: text, checkboxes, day rows and table rows`, [b.text, b.checkboxesByLabel, b.dayCompletedByIndex, b.tableRows, b.loadsRows, b.expensesRows], [a.text, a.checkboxesByLabel, a.dayCompletedByIndex, a.tableRows, a.loadsRows, a.expensesRows]);
+	}
+});
+
+test("P4 The renderer checks the page again at its sink (safePerformancePage(), the copy's own check, beside safeReceiptPages()) and fills it in one step that runs only with a page: each line by textContent, one row cloned per row, the empty lines removed, the section shown; nothing from the page becomes markup, an attribute or a link. Base: no step", ({ eq, ok }) => {
+	const src = read("lib", "policy-renderer.js");
+	const renderer = require(path.join(ROOT, "lib", "policy-renderer.js"));
+	ok("the sink check, beside the receipt pages'", /fields\.receiptPages = safeReceiptPages\(fields\.receiptPages\);\n(?:\t*\/\/[^\n]*\n)*\t*fields\.performancePage = safePerformancePage\(fields\.performancePage\);/.test(src));
+	ok("it is the copy's own check", typeof renderer.safePerformancePage === "function" && renderer.safePerformancePage === copyModule().safePage);
+	ok("one fill step, only with a page", (src.match(/page\.evaluate\(fillPerformancePage, fields\.performancePage\)/g) || []).length === 1 && /if \(fields\.performancePage\) \{\n\t*await page\.evaluate\(fillPerformancePage, fields\.performancePage\);/.test(src));
+	const fill = typeof renderer.fillPerformancePage === "function" ? renderer.fillPerformancePage.toString() : "";
+	ok("the fill sets text only", /\.textContent = /.test(fill) && !/innerHTML|outerHTML|insertAdjacent|document\.write|setAttribute|\.href|\.src\b|createElement/.test(fill), fill.slice(0, 200));
+	ok("it clones the hidden row once per row and removes it", /data-performance-row-template/.test(fill) && /cloneNode\(true\)/.test(fill) && /\.remove\(\)/.test(fill));
+	ok("and shows the section", /holder\.style\.display = ''/.test(fill));
+	eq("its sink: the field map's answer, again", renderer.safePerformancePage ? [renderer.safePerformancePage(PAGE), renderer.safePerformancePage({ heading: "" }), renderer.safePerformancePage("x")] : null, [{ ...PAGE, rows: [...PAGE.rows] }, null, null]);
 });
 
 console.log(`\n${passed} passed, ${failed} failed (of ${passed + failed})`);

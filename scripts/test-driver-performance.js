@@ -118,6 +118,15 @@
  *     the unit as this week's board labels it; this week's drivers off the board
  *     with the reason, as the admin report has them; names and figures only;
  *     with the hours switch off no hours and no read of the rollup's table
+ * §34 the weekly invoice's copy of his week (invoiceWeek() on the mount, which
+ *     POST /api/invoices/generate calls; scripts/test-invoice-day-rows.js §6):
+ *     this week and last week byte for byte his own route's, a past week the
+ *     figure his Past Performance shows, for the invoice's driver by name, with
+ *     time off, an open load and a week at 0; his hours with their switch; null
+ *     for an owner-operator (by row or by account), a driver not active, one
+ *     with no truck and no counted load, a name the directory lacks, a week
+ *     before the first counted week or not one of his, and the kill switch off;
+ *     no other driver's load, and a load now another driver's as served to one
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -1460,7 +1469,11 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(inLib(NAMES), ["driver-performance-routes.js", "driver-performance.js"], "and nothing else in lib/ names the weights or the count");
 		eq(SRC.match(/require\(\s*["'][^"']*driver-performance[^"']*["']\s*\)/g), ['require("./lib/driver-performance-routes")'], "server.js requires the routes and nothing else of this feature");
 		ok(!NAMES.test(SRC), "and names neither the weights nor the count");
-		eq((SRC.match(/\bdriverPerformance\b/g) || []).length, 1, "its mount is declared and never read, so a figure leaves the routes only as their answers");
+		// The weekly invoice's performance page (display only) takes invoiceWeek() from the mount, and nothing else of it.
+		const declared = SRC.split("\n").filter((l) => l.startsWith("const driverPerformance = "));
+		const reads = SRC.split("\n").filter((l) => /\bdriverPerformance\b/.test(l) && !l.startsWith("const driverPerformance = "));
+		ok(declared.length === 1 && reads.length <= 1 && reads.every((l) => l === "invoicePerformance.week = driverPerformance.invoiceWeek;"),
+			"its mount is declared once and read at most once, for invoiceWeek() alone, so a figure leaves the routes only as their answers and the invoice's copy of his week", JSON.stringify(reads));
 		const { STATEMENT_TEMPLATE_FILES } = require(path.join(ROOT, "lib", "statement-template-hash.js"));
 		eq(STATEMENT_TEMPLATE_FILES.filter((f) => /driver-performance/.test(f)), [], "no stored statement's template holds this feature");
 	});
@@ -3448,6 +3461,197 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		} finally {
 			await gate.close();
 		}
+	});
+
+	// ── §34 ─────────────────────────────────────────────────────────────────
+	// The weekly invoice's copy of his week: invoiceWeek() on the mount, which the generate route calls
+	// for the invoice's driver by name. A tree without it answers this sentinel, so each case fails by name.
+	const NO_INVOICE_WEEK = "no invoiceWeek() on the mount";
+	const invoiceWeekIn = async (world, args) => (world && world.handle && typeof world.handle.invoiceWeek === "function" ? world.handle.invoiceWeek(args) : NO_INVOICE_WEEK);
+	const weekOf = (got) => (got && typeof got === "object" ? got.week : null);
+	const sameText = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+	const forDriver = (who, weekStart, over = {}) => ({ driverName: USERS[who].driverName, userId: USERS[who].id, weekStart, ...over });
+	const offDay = (world, directoryId, driver, from, to) => world.db.prepare(
+		`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_at, request_status)
+		 VALUES (?, ?, 'vacation', ?, ?, 'made-up', '2026-11-01T12:00:00Z', 'approved')`,
+	).run(directoryId, driver, from, to);
+	const HOURS_ROWS = [
+		["rm-1", 1, "2026-11-09", "2026-11-07", 1, 600, "gps-estimate"],
+		["rm-1", 1, "2026-11-10", "2026-11-07", 1, 650, "gps-estimate"],
+		["rm-1", 1, "2026-11-11", "2026-11-07", 1, 560, "gps-estimate"],
+		["rm-1", 1, "2026-11-12", "2026-11-07", 1, 500, "gps-estimate"],
+		["lx-1", 1, "2026-11-16", "2026-11-14", 1, null, "no-hours-data"],
+		["rm-2", 2, "2026-11-09", "2026-11-07", 2, 1200, "gps-estimate"],
+		["rm-2", 2, "2026-10-05", "2026-10-03", 2, 300, "gps-estimate"],
+	];
+	const plantHours = (db, rows) => {
+		require(path.join(ROOT, "lib", "eld-activity-daily.js")).ensureEldActivitySchema(db);
+		const add = db.prepare("INSERT INTO eld_activity_daily (routemate_vehicle_id, truck_id, local_day, week_start, driver_id, samples, driving_min, basis) VALUES (?, ?, ?, ?, ?, 40, ?, ?)");
+		for (const r of rows) add.run(...r);
+	};
+	const rowCredits = (load) => (load.pickup && load.pickup.credits ? load.pickup.credits : 0) + (load.delivery ? load.delivery.credits : 0);
+
+	await section("34 the invoice's copy of his week: this week, byte for byte his own route's, for the invoice's driver", async () => {
+		if (!on) throw new Error("no world");
+		on.handle.clearCache();
+		const before = {};
+		for (const who of ["ada", "ben", "hal"]) before[who] = (await on.get(OWN, USERS[who])).text;
+		// Wed Nov 11, the week of Nov 7: an open load in Ada's name, a percentage driver, a test unit's and a retired truck's.
+		for (const who of ["ada", "ben", "cal", "dee", "hal", "eli", "jo", "kim"]) {
+			const own = (await on.get(OWN, USERS[who])).json;
+			const got = weekOf(await invoiceWeekIn(on, forDriver(who, "2026-11-07")));
+			ok(sameText(got, own.weeks[0]), `${who}: this week, byte for byte the week his own route shows`, JSON.stringify(got).slice(0, 160));
+		}
+		const ada = await invoiceWeekIn(on, forDriver("ada", "2026-11-07"));
+		eq(sortedKeys(ada), ["hours", "week", "weights"], "the copy's keys: his week, the weights it counts by and its hours");
+		eq([ada && ada.weights, ada && ada.hours], [{ delivery: 0.5, pickup: 0.5 }, null], "the weights his own answer carries; with the hours switch off, no hours at all");
+		eq(weekOf(ada) && [weekOf(ada).credits.value, weekOf(ada).pace, weekOf(ada).loads.length], [3, "on-track", 4], "(the scene) Ada's open week: 3, On Track, four rows");
+		// By the invoice's name for him, in any spelling, with or without an account.
+		ok(sameText(weekOf(await invoiceWeekIn(on, { driverName: "  dee   STONE ", userId: null, weekStart: "2026-11-07" })), (await on.get(OWN, USERS.dee)).json.weeks[0]),
+			"any spelling of his name and no account: the same week");
+		// Asking changes nothing anyone is shown.
+		for (const who of ["ada", "ben", "hal"]) eq((await on.get(OWN, USERS[who])).text, before[who], `${who}'s own answer is the same after the invoice's reads`);
+	});
+
+	await section("34 the invoice's copy: time off, last week, a week at 0, and each past week from the first counted week", async () => {
+		const off = await makeWorld({ DRIVER_AVAILABILITY_ENABLED: "true" });
+		try {
+			offDay(off, 2, "Ben Marsh", "2026-11-12", "2026-11-12");
+			const own = (await off.get(OWN, USERS.ben)).json.weeks[0];
+			const got = weekOf(await invoiceWeekIn(off, forDriver("ben", "2026-11-07")));
+			ok(sameText(got, own), "his approved Thursday off: the week his own route shows", JSON.stringify(got).slice(0, 160));
+			eq(got && [got.credits.target, got.targetLowered], [6, true], "(the scene) a target of 6, flagged lowered");
+		} finally {
+			await off.close();
+		}
+		// Wed Nov 18: last week is the week of Nov 7, and this week holds nothing yet for Ada on her truck.
+		const nov18 = await makeWorld({}, { nowMs: Date.parse("2026-11-18T17:00:00Z") });
+		try {
+			const own = (await nov18.get(OWN, USERS.ada)).json;
+			const last = weekOf(await invoiceWeekIn(nov18, forDriver("ada", "2026-11-07")));
+			ok(sameText(last, own.weeks[1]), "last week: his own route's last week, its final figure", JSON.stringify(last).slice(0, 160));
+			eq(last && [last.id, last.credits.value, last.pace, last.left], ["last-week", 3, null, null], "(the scene) last week's final 3, no label, nothing left");
+			const zero = weekOf(await invoiceWeekIn(nov18, forDriver("ada", "2026-11-14")));
+			ok(sameText(zero, own.weeks[0]), "a week at 0 on her truck: her own route's", JSON.stringify(zero).slice(0, 160));
+			eq(zero && [zero.credits.value, zero.loads, zero.pace], [0, [], null], "(the scene) 0, no rows, no label");
+		} finally {
+			await nov18.close();
+		}
+		// Wed Dec 2: the weeks of Nov 21, 14 and 7 are past weeks.
+		const nowWeeks = (await on.get(OWN, USERS.ada)).json.weeks[0].loads;
+		const dec = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			const own = (await dec.get(OWN, USERS.ada)).json;
+			eq((pastOf(own) || []).map((w) => w.start), ["2026-11-21", "2026-11-14", "2026-11-07"], "(the scene) Ada's three past weeks");
+			for (const past of pastOf(own) || []) {
+				const got = weekOf(await invoiceWeekIn(dec, forDriver("ada", past.start)));
+				eq(got && [got.start, got.end, got.credits.value, got.credits.target], [past.start, past.end, past.credits.value, past.credits.target], `the past week of ${past.start}: the days and the figure of its own target his Past Performance shows`);
+				eq(got && [got.pace, got.left, got.barColor, got.targetLowered], [null, null, null, false], `the past week of ${past.start}: a closed week, no label, nothing left, no color`);
+			}
+			const nov7 = weekOf(await invoiceWeekIn(dec, forDriver("ada", "2026-11-07")));
+			eq(nov7 && nov7.loads, nowWeeks, "the week of Nov 7: the rows it showed while it was this week");
+			eq(nov7 && nov7.loads.reduce((s, l) => s + rowCredits(l), 0), 3, "...and they add up to its figure");
+		} finally {
+			await dec.close();
+		}
+		// A week that wasn't his: Ben with no truck from Nov 14 until Nov 22, and no load then.
+		const gap = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			gap.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-13T15:00:00.000Z", "Ben Marsh");
+			gap.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (2, 'Ben Marsh', ?, '')").run("2026-11-22T15:00:00.000Z");
+			eq(await invoiceWeekIn(gap, forDriver("ben", "2026-11-14")), null, "a past week his list leaves out: no copy");
+			const after = weekOf(await invoiceWeekIn(gap, forDriver("ben", "2026-11-21")));
+			eq(after && after.start, "2026-11-21", "and the week after it, his again, has one");
+		} finally {
+			await gap.close();
+		}
+	});
+
+	await section("34 the invoice's copy: null when his own route would refuse him, or the week isn't one of his", async () => {
+		if (!on) throw new Error("no world");
+		const refused = [
+			["an owner-operator", forDriver("fay", "2026-11-07")],
+			["a driver not yet active", forDriver("gus", "2026-11-07")],
+			["a driver with no truck and no counted load", forDriver("ivy", "2026-11-07")],
+			["a name the directory doesn't hold", forDriver("nobody", "2026-11-07")],
+			["a name only the sheet holds", { driverName: "Lou Grant", userId: null, weekStart: "2026-11-07" }],
+			["no name", { driverName: "   ", userId: null, weekStart: "2026-11-07" }],
+			["an owner-operator's account", forDriver("ada", "2026-11-07", { userId: USERS.fay.id })],
+			["last week, before the first counted week", forDriver("ada", "2026-10-31")],
+			["an older week", forDriver("ada", "2026-10-24")],
+			["next week", forDriver("ada", "2026-11-14")],
+			["a day no week starts on", forDriver("ada", "2026-11-09")],
+			["a week that isn't a day", forDriver("ada", "Nov 7")],
+			["no week", forDriver("ada", undefined)],
+		];
+		for (const [says, args] of refused) eq(await invoiceWeekIn(on, args), null, `${says}: no copy`);
+		const off = await makeWorld({ DRIVER_PERFORMANCE_ENABLED: "false" });
+		try {
+			eq(await invoiceWeekIn(off, forDriver("ada", "2026-11-07")), null, "the kill switch off: no copy");
+			eq(off.sheetReads, 0, "the kill switch off: and no Job Tracking read");
+		} finally {
+			await off.close();
+		}
+		const byAccount = await makeWorld({});
+		try {
+			byAccount.db.prepare("UPDATE drivers_directory SET user_id = 0 WHERE id = 6").run();
+			eq(await invoiceWeekIn(byAccount, { driverName: "Fay Owens", userId: null, weekStart: "2026-11-07" }), null, "an owner-operator known only by his account, none passed: no copy");
+		} finally {
+			await byAccount.close();
+		}
+		on.handle.clearCache();
+		on.sheetDown = true;
+		let down = null;
+		try { down = await invoiceWeekIn(on, forDriver("ada", "2026-11-07")); } catch (err) { down = { threw: !!(err && err.unavailable) }; } finally { on.sheetDown = false; }
+		eq(down, { threw: true }, "Job Tracking can't be read: it throws, as his own route answers 503, and the invoice decides what to do");
+	});
+
+	await section("34 the invoice's copy: his hours with their switch on, never another driver's", async () => {
+		const w = await makeWorld({ DRIVER_PERFORMANCE_HOURS_ENABLED: "true" }, { nowMs: DEC_2 });
+		try {
+			plantHours(w.db, HOURS_ROWS);
+			const own = (await w.get(OWN, USERS.ada)).json;
+			for (const past of pastOf(own) || []) {
+				const got = await invoiceWeekIn(w, forDriver("ada", past.start));
+				eq(got && got.hours, past.hours, `the past week of ${past.start}: the hours line his Past Performance shows`);
+			}
+			eq((await invoiceWeekIn(w, forDriver("ada", "2026-11-28")) || {}).hours, { state: "none" }, "this week: its hours as of now, and none named, never 0");
+			eq((await invoiceWeekIn(w, forDriver("ben", "2026-11-07")) || {}).hours, { state: "estimate", value: 20 }, "Ben's hours are his own");
+			w.db.exec("DROP TABLE eld_activity_daily");
+			const realError = console.error;
+			console.error = () => {};
+			let failedRead;
+			try { failedRead = await invoiceWeekIn(w, forDriver("ada", "2026-11-07")); } finally { console.error = realError; }
+			eq([failedRead && failedRead.hours, weekOf(failedRead) && weekOf(failedRead).credits.value], [{ state: "coming-soon" }, 3], "a read that fails: coming soon, and the week still answers");
+		} finally {
+			await w.close();
+		}
+	});
+
+	await section("34 the invoice's copy: only his own loads, and a load now another driver's as served to one", async () => {
+		if (!on) throw new Error("no world");
+		const loadsOf = (driver) => LOADS.filter((l) => l[1].replace(/\s+/g, " ") === driver).map((l) => l[0].replace(/^#/, ""));
+		const everyLoad = LOADS.map((l) => l[0].replace(/^#/, ""));
+		for (const [who, name] of [["ada", "Ada Quill"], ["ben", "Ben Marsh"], ["cal", "Cal Reyes"], ["dee", "Dee Stone"], ["hal", "Hal Briar"], ["eli", "Eli North"]]) {
+			const got = await invoiceWeekIn(on, forDriver(who, "2026-11-07"));
+			const text = JSON.stringify(got);
+			const mine = new Set(loadsOf(name));
+			const ids = (weekOf(got) && Array.isArray(weekOf(got).loads) ? weekOf(got).loads : []).map((l) => l.loadId.replace(/^#/, ""));
+			ok(ids.length > 0 && ids.every((id) => mine.has(id)), `${who}: every row is a load in his own name`, JSON.stringify(ids));
+			eq(everyLoad.filter((id) => !mine.has(id) && text.includes(id)), [], `${who}: no other driver's load`);
+			eq(ALL_NAMES.flatMap((n) => [n, ...n.split(" ")]).filter((n) => new RegExp(`\\b${n}\\b`, "i").test(text)), [], `${who}: no name at all, his own included`);
+			eq(DECOY_CELL_MARKS.filter((m) => text.includes(m)), [], `${who}: no broker, rate, pay or lane cell`);
+		}
+		await inWorld((w) => {
+			w.accepted(CONTACT_ID, MON, NIA);
+			w.picked(CONTACT_ID, MON, NIA);
+			w.row(CONTACT_ID, OMAR, "Delivered", `${TUE} 18:00`);
+		}, async (w) => {
+			const own = (await w.get(OWN_WEEK, USERS.nia)).json.weeks[0];
+			const got = weekOf(await invoiceWeekIn(w, { driverName: NIA, userId: USERS.nia.id, weekStart: "2026-11-07" }));
+			ok(sameText(got, own), "a load now another driver's: her copy is her own route's week", JSON.stringify(got).slice(0, 160));
+			ok(!JSON.stringify(got).includes(CONTACT) && !!(got && got.loads[0] && got.loads[0].loadId.startsWith("12345")), "its ID as any other driver is served it: the number, never the contact", JSON.stringify(got && got.loads));
+		});
 	});
 
 	if (on) await on.close();
