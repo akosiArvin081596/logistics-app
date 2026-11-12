@@ -50,10 +50,17 @@
 //   §9 LoadDetail.vue's Fuel badge and Route Options; the header chip's request to
 //      open the Fuel section, which hands the panel nothing a hand-open doesn't;
 //      RouteAlternatives.vue
+//   §10 FuelFinderPanel.vue, Tracking's Fuel & Route card, on the same answers: with a
+//      block it prints the driver's Fuel section line for line under "What the driver
+//      sees", from his own wording functions, read-only; a failure of the card's own ask
+//      isn't put in his mouth; without a block the card is as before
 // The blocks come from the server's own planDriverFuel() (lib/fuel-model.js).
 // FUEL_PANEL_BASE_VUE=<a copy of DriverFuelPanel.vue from before the tap> also renders
 // every flag-off world with it, and runs §8d's steps on it, and requires the same HTML
 // once the named changes of wording are made to the copy's (comments aside).
+// FUEL_CARD_VUE=<a copy of FuelFinderPanel.vue> renders that copy as the card (a copy from
+// before the driver's lines fails §10). FUEL_CARD_BASE_VUE=<such a copy> also requires the
+// card's HTML to be the copy's with no block, and the copy's plus the box with one.
 //
 // No network, no sheet, no database, no DOM: §1-§7 are pure input/output, §8-§9
 // compile the components with the client's own compiler. Safe anywhere.
@@ -214,6 +221,7 @@ const VIEW_LIB = path.join(ROOT, 'client/src/lib/driverFuelView.js')
 const PANEL_VUE = path.join(ROOT, 'client/src/components/driver/DriverFuelPanel.vue')
 const DETAIL_VUE = path.join(ROOT, 'client/src/components/driver/LoadDetail.vue')
 const ALTS_VUE = path.join(ROOT, 'client/src/components/driver/RouteAlternatives.vue')
+const CARD_VUE = process.env.FUEL_CARD_VUE ? path.resolve(process.env.FUEL_CARD_VUE) : path.join(ROOT, 'client/src/components/dashboard/FuelFinderPanel.vue')
 const DRIVER_DIR = path.dirname(PANEL_VUE)
 const fuel = createRequire(import.meta.url)(path.join(ROOT, 'lib', 'fuel-model.js'))
 
@@ -1725,6 +1733,253 @@ console.log('§9 LoadDetail.vue: the Fuel badge and Route Options')
   const hidden = await alts({ showFuel: false })
   check('§9 Route Options by default: Google\'s gallons as before, the toll', [shown.includes('⛽ 50.2 gal'), shown.includes('⛽ —'), shown.includes('$12.50'), shown.includes('Toll-free')], [true, true, true, true])
   check('§9 Route Options with showFuel off: no gallons, the toll stays', [hidden.includes('⛽'), hidden.includes('gal'), hidden.includes('$12.50'), hidden.includes('Toll-free')], [false, false, true, true])
+}
+
+// ---------------------------------------------------------------------------
+console.log('§10 FuelFinderPanel.vue: Tracking\'s Fuel & Route card and the driver\'s lines')
+// ---------------------------------------------------------------------------
+let cards = null
+try { cards = await livePanels(CARD_VUE) } catch (e) { check(`§10 FuelFinderPanel.vue compiles in this harness (${e.message})`, false, true) }
+if (cards && panelFactory) {
+  // One card as Tracking has it, the driver focused and his load open: its HTML once the answers are in.
+  const cardHtml = async (panels, w, over = {}, props = {}) => {
+    serve(w, over)
+    const page = panels()({ driver: 'Driver QA', ...props })
+    try {
+      await settle()
+      return await page.screen()
+    } finally {
+      page.stop()
+    }
+  }
+  const BOX_RE = /<section[^>]*data-testid="ff-driver-lines"[^>]*>([\s\S]*?)<\/section>/
+  const boxText = (html) => { const m = BOX_RE.exec(html); return m ? textOf(m[1]) : '' }
+  // The box's lines less its title, as blockText() reads the driver's own section.
+  const cardLines = (html) => { const m = BOX_RE.exec(html); return m ? textOf(m[1].replace(/<div class="ff-driver-title">[\s\S]*?<\/div>/, '')) : '' }
+  const withoutBox = (html) => html.replace(BOX_RE, '')
+  // The top's colour, each row's, then how many miles cells, notes, stamps, rows notes and footers are drawn.
+  const shape = (html, p) => [
+    (new RegExp(`class="${p}top tone-(\\w+)"`).exec(html) || [])[1] || null,
+    [...html.matchAll(new RegExp(`class="${p}row row-(\\w+)"`, 'g'))].map((m) => m[1]),
+    ...['row-miles', 'note', 'stamp', 'rows-note', 'foot'].map((c) => html.split(`class="${p}${c}"`).length - 1),
+  ]
+  const TOP = '225 miles until you run out Fuel level read 12 min ago'
+  const READ3 = ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops']
+  // §8b's worlds, each with the answers both screens are given.
+  const PARITY = {
+    'before pickup: enough to reach it, add to finish': [{}],
+    'in transit, enough': [{ leg: 'to_delivery', routeMiles: 180 }],
+    'refill on the way': [{ leg: 'to_delivery', routeMiles: 1040 }],
+    'refuel now': [{ pct: 3, leg: 'to_delivery', routeMiles: 180 }],
+    'sensor dropout': [{ fuelSource: 'carried', leg: 'to_delivery', routeMiles: 180 }],
+    'a 4 h dropout, 300 mi since': [{ fuelSource: 'carried', pct: 66.7, anchor: 100, milesSince: 300, leg: 'to_delivery', routeMiles: 450 }],
+    'ELD silent 18 hrs': [{ fuelSource: 'stale', readAge: 18 * 60, leg: 'to_delivery' }],
+    'no ELD reading, no position': [{ hasDevice: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280 }],
+    'no tank size': [{ burn: NO_BURN, tankSource: 'default', tank: 200 }],
+    'no truck': [{ hasTruck: false, fromLivePosition: false, leg: 'to_delivery', routeMiles: 280, tank: 200, tankSource: 'default', mpg: 6.5 }],
+    'pickup not on the map': [{ pickupUnmapped: true, leg: 'to_delivery', routeMiles: 300, pct: 70 }],
+    'the reasons under the rows': [{ positionAgeMinutes: 180, extraStops: true, afterAnotherLoad: true, routeSource: 'straight_line_estimate' }],
+    'a load that is over': [{ loadDone: true }],
+    'pickup not confirmed yet': [{}, (w) => ({ '/api/fuel/trip-plan': { ...w.plan, pickupUnconfirmed: true } })],
+    'load not mapped (400 NO_ROUTE)': [{}, () => ({ '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })],
+    'no position to plan from (400 NO_POSITION)': [{}, () => ({ '/api/fuel/trip-plan': apiError(400, 'NO_POSITION') })],
+    'no trip plan there (404)': [{}, () => ({ '/api/fuel/trip-plan': apiError(404) })],
+  }
+  const worlds = Object.entries(PARITY).map(([name, [o, overFor]]) => {
+    const w = world(o)
+    return [name, w, overFor ? overFor(w) : {}, overFor]
+  })
+  {
+    const differ = []
+    const shapes = []
+    for (const [name, w, over] of worlds) {
+      serve(w, over)
+      const driver = await openSection(panelFactory())
+      const card = await cardHtml(cards, w, over)
+      const want = blockText(driver)
+      if (!want || cardLines(card) !== want) differ.push(`${name}: the card "${cardLines(card)}", the driver "${want}"`)
+      const [a, b] = [shape(card, 'ff-driver-'), shape(driver, 'dff-')]
+      if (JSON.stringify(a) !== JSON.stringify(b)) shapes.push(`${name}: the card ${JSON.stringify(a)}, the driver ${JSON.stringify(b)}`)
+    }
+    check(`§10 the card prints the driver's own Fuel section line for line, for the same answers, in all ${worlds.length} worlds`, differ, [])
+    check('§10 …in his colours, the top and each row, with the same lines drawn (no empty miles cell, note or stamp)', shapes, [])
+  }
+  check('§10 before pickup, under "What the driver sees": the gallons he is told to add, in his words',
+    boxText(await cardHtml(cards, world({}))),
+    `What the driver sees ${TOP} To reach pickup 140 mi Uses about 30 gal. You have enough. To finish this load 420 mi Add about 65 gal.`)
+  {
+    const FAILS = [
+      ['the trip plan fails (500)', apiError(500), 'No verdict: the fuel check failed.'],
+      ['too many checks just now (429)', apiError(429), 'No verdict: too many checks just now.'],
+      ['a 400 with no code', apiError(400), 'No verdict: this load has no mapped destination, or the truck has no position to plan from.'],
+    ]
+    const got = []
+    for (const [name, err, note] of FAILS) {
+      const html = await cardHtml(cards, world({}), { '/api/fuel/trip-plan': err })
+      got.push([name, cardLines(html), textOf(html).includes(note)])
+    }
+    check('§10 a failure of the card\'s own ask isn\'t put in the driver\'s mouth: his top only, beside the card\'s own note',
+      got, FAILS.map(([name]) => [name, TOP, true]))
+  }
+  {
+    const asked = []
+    let box = null
+    for (const flag of [true, false]) {
+      serve(world({ flag }))
+      const page = cards()({ driver: 'Driver QA' })
+      await settle()
+      asked.push([...net.gets].sort())
+      if (flag) box = BOX_RE.exec(await page.screen())
+      page.stop()
+    }
+    check('§10 read-only: no button, link or field in the box', !!box && !/<(button|a|input|select|textarea)\b/.test(box[1]), true)
+    check('§10 no new ask: the range, the trip plan and the stops, once each, with the flag on or off', asked, [READ3, READ3])
+  }
+  {
+    const noBlock = (w) => {
+      const c = JSON.parse(JSON.stringify(w))
+      delete c.range.driverFuel
+      delete c.plan.driverFuel
+      return c
+    }
+    const boxes = []
+    const rest = []
+    for (const [name, w, over, overFor] of worlds) {
+      const on = await cardHtml(cards, w, over)
+      const bare = noBlock(w)
+      const off = await cardHtml(cards, bare, overFor ? overFor(bare) : {})
+      if (!BOX_RE.test(on)) boxes.push(name)
+      if (withoutBox(on) !== off || off.includes('ff-driver')) rest.push(name)
+    }
+    check('§10 with the block, the box', boxes, [])
+    check('§10 …and nothing else: less the box, the card is the same HTML as for the same answers without the block, in every world', rest, [])
+  }
+  const OFF_CARD = {
+    'before pickup, a stop needed': [world({ flag: false })],
+    'in transit, clears': [world({ flag: false, leg: 'to_delivery', routeMiles: 180 })],
+    'into the reserve': [world({ flag: false, pct: 3, leg: 'to_delivery', routeMiles: 180 })],
+    'sensor dropout': [world({ flag: false, fuelSource: 'carried' })],
+    'ELD silent': [world({ flag: false, fuelSource: 'stale', readAge: 18 * 60 })],
+    'no ELD reading': [world({ flag: false, hasDevice: false, fromLivePosition: false })],
+    'no tank size': [world({ flag: false, burn: NO_BURN, tankSource: 'default', tank: 200 })],
+    'pickup not confirmed yet': [world({ flag: false }), (w) => ({ '/api/fuel/trip-plan': { ...w.plan, pickupUnconfirmed: true } })],
+    'trip plan 400 (no code)': [world({ flag: false }), () => ({ '/api/fuel/trip-plan': apiError(400) })],
+    'trip plan 500': [world({ flag: false }), () => ({ '/api/fuel/trip-plan': apiError(500) })],
+    'range fails': [world({ flag: false }), () => ({ '/api/fuel/range': apiError(500) })],
+    'no load open': [world({ flag: false }), null, { loadId: '' }],
+  }
+  {
+    const shown = []
+    for (const [name, [w, overFor, props]] of Object.entries(OFF_CARD)) {
+      const html = await cardHtml(cards, w, overFor ? overFor(w) : {}, props)
+      if (html.includes('ff-driver') || /What the driver sees|miles until you run out|Fuel level read|Add about|You have enough/.test(textOf(html))) shown.push(name)
+    }
+    check(`§10 the flag off: no box and none of the driver's lines, in all ${Object.keys(OFF_CARD).length} worlds`, shown, [])
+  }
+  if (process.env.FUEL_CARD_BASE_VUE) {
+    const base = await livePanels(path.resolve(process.env.FUEL_CARD_BASE_VUE))
+    const off = []
+    for (const [name, [w, overFor, props]] of Object.entries(OFF_CARD)) {
+      const over = overFor ? overFor(w) : {}
+      if (await cardHtml(cards, w, over, props) !== await cardHtml(base, w, over, props)) off.push(name)
+    }
+    check(`§10 the flag off: the same HTML as the base copy in all ${Object.keys(OFF_CARD).length} worlds (comments aside)`, off, [])
+    const on = []
+    for (const [name, w, over] of worlds) {
+      if (withoutBox(await cardHtml(cards, w, over)) !== await cardHtml(base, w, over)) on.push(name)
+    }
+    check(`§10 the flag on: the base copy's HTML plus the box and nothing else, in all ${worlds.length} worlds`, on, [])
+  } else {
+    console.log('  (§10 against a base copy: not run; set FUEL_CARD_BASE_VUE)')
+  }
+  {
+    // A switch of driver, his load open and with none (then only the range is asked again):
+    // nothing of the driver before's while the card asks for the next one's.
+    const seen = []
+    for (const [from, to] of [['QA-FUEL-1', 'QA-FUEL-2'], ['', '']]) {
+      serve(world({}))
+      const page = cards()({ driver: 'Driver QA', loadId: from })
+      await settle()
+      const before = cardLines(await page.screen())
+      const next = world({ pct: 30 })
+      net.answers['/api/fuel/range?driver=Driver%20Two'] = next.range
+      net.answers['/api/fuel/trip-plan?loadId=QA-FUEL-2'] = next.plan
+      let release
+      net.held = new Promise((r) => { release = r })
+      page.props.driver = 'Driver Two'
+      page.props.loadId = to
+      await settle()
+      const asking = await page.screen()
+      net.held = null
+      release()
+      await settle()
+      const after = cardLines(await page.screen())
+      page.stop()
+      seen.push([before.startsWith('225 miles until you run out'), BOX_RE.test(asking), after.startsWith('135 miles until you run out')])
+    }
+    check('§10 a switch of driver, with a load open and with none: no box while the card asks again (never the driver before\'s lines), then the next driver\'s',
+      seen, [[true, false, true], [true, false, true]])
+  }
+  {
+    // A switch of load: the box waits for that load's plan, so his top never shows without its rows.
+    serve(world({}))
+    net.answers['/api/fuel/trip-plan?loadId=QA-FUEL-2'] = world({ leg: 'to_delivery', routeMiles: 180 }).plan
+    const page = cards()({ driver: 'Driver QA' })
+    await settle()
+    const slow = { match: 'trip-plan?loadId=QA-FUEL-2' }
+    slow.promise = new Promise((r) => { slow.release = r })
+    net.holds = [slow]
+    page.props.loadId = 'QA-FUEL-2'
+    await settle()
+    const asking = await page.screen()
+    net.holds = []
+    slow.release()
+    await settle()
+    const after = cardLines(await page.screen())
+    page.stop()
+    check('§10 a switch of load: no box while the card asks for its plan (never his top without its rows), then that load\'s lines',
+      [BOX_RE.test(asking), after], [false, `${TOP} To finish this load 180 mi Uses about 35 gal. You have enough.`])
+  }
+  {
+    // Two quick asks: the next load's plan lands first, then a late 400 for the load before.
+    serve(world({}), { '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })
+    net.answers['/api/fuel/trip-plan?loadId=QA-FUEL-2'] = world({ loadDone: true }).plan
+    const late = { match: 'loadId=QA-FUEL-1' }
+    late.promise = new Promise((r) => { late.release = r })
+    net.holds = [late]
+    const page = cards()({ driver: 'Driver QA' })
+    await settle()
+    page.props.loadId = 'QA-FUEL-2'
+    await settle()
+    net.holds = []
+    late.release()
+    await settle()
+    const lines = cardLines(await page.screen())
+    page.stop()
+    check('§10 a late 400 for the load before adds no reason to this load\'s lines', lines, TOP)
+  }
+  {
+    // The load shut on the map: the driver's top stays, and the reason for that load goes with it.
+    serve(world({}), { '/api/fuel/trip-plan': apiError(400, 'NO_ROUTE') })
+    const page = cards()({ driver: 'Driver QA' })
+    await settle()
+    const open = cardLines(await page.screen())
+    page.props.loadId = ''
+    await settle()
+    const shut = cardLines(await page.screen())
+    page.stop()
+    check('§10 the load shut on the map: his top stays, and the reason for that load goes with it',
+      [open, shut], [`${TOP} This load isn't on the map yet, so we can't work out the fuel for it.`, TOP])
+  }
+  {
+    const src = fs.readFileSync(CARD_VUE, 'utf8')
+    const m = /import\s*\{([^}]*)\}\s*from\s*'\.\.\/\.\.\/lib\/driverFuelView'/.exec(src)
+    const names = m ? m[1].split(',').map((s) => s.trim()).filter(Boolean).sort() : []
+    const theirs = ['miles until you run out', 'You have enough', 'Add about', 'Check your gauge', 'Fuel level read', 'Pickup not confirmed',
+      "isn't on the map", 'To reach pickup', 'To finish this load'].filter((s) => src.includes(s))
+    check('§10 no copied words: the lines come from the driver\'s own wording functions, and the card\'s source holds none of his sentences',
+      [names, /\bpickupUnconfirmedLine\b/.test(src), theirs], [['driverFuelOf', 'driverFuelTone', 'driverFuelView', 'flagOnProblem'], true, []])
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
