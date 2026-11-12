@@ -611,6 +611,12 @@ const MPG_SOURCES = {
     driver: 'from your ELD',
     title: "Derived from the ELD's fuel-level readings and the recorded tank size.",
   },
+  truck: {
+    key: 'truck', rank: 0,
+    short: 'on file',
+    driver: 'on file for this truck',
+    title: "This truck's own MPG on file, entered by a person: not measured.",
+  },
   default: {
     key: 'default', rank: 0,
     short: 'est',
@@ -621,6 +627,20 @@ const MPG_SOURCES = {
 
 export function mpgSource(value) {
   return MPG_SOURCES[value] || null;
+}
+
+// The driver's note under the Miles per gallon row, for a figure nobody measured. It
+// says which figure it is: the truck's own MPG on file, or the fleet default. A measured
+// range rests on miles per gauge point, not on any MPG, so it gets no note.
+export function mpgNoteText(sourceKey, mpgText, basis) {
+  if (basis === 'measured') return '';
+  if (sourceKey === 'truck') {
+    return `This range uses the ${mpgText} on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.`;
+  }
+  if (sourceKey === 'default') {
+    return `There aren't enough miles or fuel receipts on this truck yet to work out its real MPG, so this range assumes the fleet default of ${mpgText}. Treat it as a rough estimate.`;
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +742,14 @@ export const PICKUP_UNCONFIRMED_LINE = 'Pickup not confirmed yet, so this plan i
 
 export function pickupUnconfirmedLine(plan) {
   return plan && plan.pickupUnconfirmed === true ? PICKUP_UNCONFIRMED_LINE : '';
+}
+
+// Under the driver's Fuel level and Gallons left rows when the sensor has dropped out:
+// the level is worked out from the last reading, so nothing was "read" just now.
+export const FUEL_LEVEL_ESTIMATE_LINE = "Your fuel sensor isn't reporting. The fuel level and gallons left are estimates.";
+
+export function fuelLevelEstimateLine(range) {
+  return range && range.fuelSource === 'carried' ? FUEL_LEVEL_ESTIMATE_LINE : '';
 }
 
 /**

@@ -157,6 +157,8 @@
       :driver-name="driverName"
       :socket-connected="socket.isConnected.value"
       :has-ever-connected="socket.hasEverConnected.value"
+      fuel-chip-taps
+      @fuel-tap="handleFuelTap"
       @logout="handleLogout"
     />
 
@@ -178,6 +180,7 @@
           :has-active-job="driverStore.hasActiveJob"
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
+          :open-fuel="fuelTapRow === detailLoad._rowIndex"
           :responding="isResponding(detailLoad)"
           :driver-position="driverPosition"
           :phone-gps-mode-active="phoneGpsModeActive"
@@ -189,6 +192,7 @@
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
           @enable-phone-gps="enablePhoneGps"
+          @fuel-opened="fuelTapRow = null"
         />
 
         <!-- Load List -->
@@ -435,6 +439,8 @@ import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
+import { fuelTapLoad } from '../lib/driverFuelView'
+import { statusPriorityScore } from '../lib/loadProgress'
 import { expensesForLoad } from '../lib/loadId'
 import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
@@ -728,24 +734,6 @@ const detailLoadExpenses = computed(() => {
 // load they're physically moving with, not the most recently sheet-rowed one.
 // A manual override (persisted per-driver) wins when the chosen load is
 // still in workingLoads; otherwise we fall back to priority-based pick.
-const STATUS_PRIORITY = [
-  /^in transit$/i,
-  /^at receiver$/i,
-  /^unloading$/i,
-  /^at shipper$/i,
-  /^loading$/i,
-  /^heading to shipper$/i,
-  /^assigned$/i,
-]
-
-function statusPriorityScore(status) {
-  const s = (status || '').trim()
-  for (let i = 0; i < STATUS_PRIORITY.length; i++) {
-    if (STATUS_PRIORITY[i].test(s)) return i
-  }
-  return STATUS_PRIORITY.length
-}
-
 function statusLoadStorageKey() {
   return `logisx_driver_status_load_${(driverName.value || 'anon').toLowerCase()}`
 }
@@ -983,6 +971,25 @@ async function confirmDecline() {
 }
 
 function handleLoadSelect(load) {
+  detailRowIndex.value = load._rowIndex
+}
+
+// A tap on the header's fuel chip opens a load's Fuel section, so it never does nothing.
+// With no load to open, the chip's own line shows instead, for long enough to read.
+const FUEL_LINE_MS = 6000
+const fuelTapRow = ref(null)
+function handleFuelTap(title) {
+  const onScreen = currentTab.value === 'loads' ? detailLoad.value : null
+  const load = fuelTapLoad({ onScreen, underWay: driverStore.inProgressLoads, queued: driverStore.queuedLoads, statusOf: getLoadStatus })
+  if (!load) {
+    toast.show(title, 'success', FUEL_LINE_MS)
+    return
+  }
+  if (load !== onScreen) {
+    handleTabSwitch('loads')
+    driverStore.loadSubTab = 'active'
+  }
+  fuelTapRow.value = load._rowIndex
   detailRowIndex.value = load._rowIndex
 }
 

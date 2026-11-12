@@ -445,7 +445,7 @@
               <div class="edit-field">
                 <label>Avg MPG</label>
                 <input v-model.number="editForm.avgMpg" type="number" min="0" :max="AMOUNT_CAPS.avgMpg" step="any" placeholder="6.5 (default)" />
-                <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
+                <div class="field-hint">Blank uses this truck's fuel receipts once there are enough, otherwise the 6.5 MPG fleet default.</div>
               </div>
             </div>
             <div class="edit-row">
@@ -585,7 +585,7 @@
             <span v-else class="view-unset" :title="odometerHint(viewTruck)">&mdash; <span class="odo-why">{{ odometerWhy(viewTruck) }}</span></span>
           </div>
           <div class="view-row"><span class="view-label">Fuel Tank</span><span>{{ viewTruck.FuelTankGallons ? viewTruck.FuelTankGallons + ' gal' : '200 gal (default)' }}</span></div>
-          <div class="view-row"><span class="view-label">Avg MPG</span><span>{{ viewTruck.AvgMpg ? viewTruck.AvgMpg + ' mpg' : 'Auto from ELD' }}</span></div>
+          <div class="view-row"><span class="view-label">Avg MPG</span><span>{{ viewTruck.AvgMpg ? viewTruck.AvgMpg + ' mpg' : 'Fuel receipts, else 6.5 mpg (default)' }}</span></div>
         </div>
         <!-- Driver-personal files (CDL, medical, signed contracts) intentionally
              NOT shown here. They live with the driver, not the truck. Manage
