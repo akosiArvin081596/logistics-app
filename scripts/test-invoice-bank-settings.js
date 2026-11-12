@@ -21,6 +21,8 @@
  *      server, whatever the app reads, and a replica's settings file may not
  *      hold one; scripts/replica/remote/settings.js leaves both out of the
  *      exported file.
+ *   §4 a factored invoice (lib/triumph-invoice.js) prints neither slot, set or
+ *      unset, and no assignment leaves the page as it is.
  *
  * Obvious test values only (000000000 / 0000000000), so nothing here depends
  * on production's settings. The booted server's [invoice-bank] warning
@@ -203,8 +205,32 @@ function replicaSection() {
 	eq(out.skipped.filter((s) => NAMES.includes(s.name)).map((s) => s.name).sort(), [...NAMES].sort(), "§3 both are listed as skipped, by name");
 }
 
+// A factored invoice tells the broker to pay the factor: it prints neither slot, set or
+// unset, and an invoice with no assignment is the page itself.
+function factoredSection() {
+	section("§4 a factored invoice");
+	let withAssignment = null;
+	try {
+		({ withAssignment } = require(path.join(ROOT, "lib", "triumph-invoice.js")));
+	} catch {
+		// A tree before the assignment block: its cases fail by name below.
+	}
+	ok(typeof withAssignment === "function", "§4 FAILS ON THE OLD CODE: lib/triumph-invoice.js swaps the bank block for the assignment lines");
+	if (!withAssignment) return;
+	const lines = ["MADE-UP NOTICE LINE ONE", "MADE-UP NOTICE LINE TWO", "EXAMPLE FACTOR LLC", "PO DRAWER 000, NOWHERE, ZZ  00000-0000"];
+	for (const [label, values] of [["set", TEST], ["unset", {}], ["only routing", { INVOICE_BANK_ROUTING: TEST.INVOICE_BANK_ROUTING }], ["only account", { INVOICE_BANK_ACCOUNT: TEST.INVOICE_BANK_ACCOUNT }]]) {
+		const page = render(values);
+		const factored = withAssignment(page, { lines });
+		ok(!factored.includes("Bank Routing") && !factored.includes("Bank Account") && !factored.includes(NOT_SET), `§4 the bank settings ${label}: no routing or account slot`);
+		ok(!factored.includes(TEST.INVOICE_BANK_ROUTING) && !factored.includes(TEST.INVOICE_BANK_ACCOUNT), `§4 the bank settings ${label}: neither number`);
+		ok(!factored.includes("Payment Method") && !factored.includes(PM.bankName), `§4 the bank settings ${label}: no "Payment Method" and no bank name`);
+		ok(lines.every((l) => factored.includes(l)), `§4 the bank settings ${label}: every assignment line`);
+		eq(withAssignment(page, null), page, `§4 the bank settings ${label}: no assignment, and the page is unchanged`);
+	}
+}
+
 // -------------------------------------------------------------------- report
-for (const [name, run] of [["§1", renderingSection], ["§2", sourceSection], ["§3", replicaSection]]) {
+for (const [name, run] of [["§1", renderingSection], ["§2", sourceSection], ["§3", replicaSection], ["§4", factoredSection]]) {
 	try { run(); } catch (e) { failures.push(`${name} threw: ${e && e.stack}`); }
 }
 console.log(`\n${"=".repeat(64)}`);
