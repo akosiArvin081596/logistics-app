@@ -85,13 +85,13 @@ const NOT_MEASURED = [
 	"the integrity email's first-seen days and sign-in times (lib/integrity-check.js)",
 	"invoice status evidence: the day of a mailbox match (lib/invoice-evidence.js; the mailbox is not in this database)",
 	"arrival times on the pickup list (lib/arrival-pickup-display.js)",
-	"day-off ELD check days and notice lines (lib/time-off-eld-check.js; its pings with no longitude are counted under P3)",
+	"day-off ELD check days and notice lines (lib/time-off-eld-check.js; its fixes with no longitude are the pings P3 counts)",
 	"Driver Performance pickup credits placed by an ELD departure (those placed by a status tap are P4's instants)",
 	"cancelled days taken from the audit trail (those taken from the status history are P4's instants)",
 	"per-load haul windows read from zoned sheet cells (lib/load-haul.js; the stamp columns are M4z's)",
 	"counts of today's events (KPI routes and rate cons checked today, voice-note bytes today)",
 	"receipt-window refusal times (lib/expense-window.js)",
-	"hand-run reports (scripts/*-report.js), read when each is run",
+	"hand-run scripts, read when each is run: the reports (scripts/*-report.js), the data fixes and the backfills (the driver-rates fix reads P5's rows, the ELD miles backfill P3's pings)",
 ];
 
 // The Saturday-to-Friday week of a day, by its Saturday.

@@ -157,17 +157,21 @@ function liftedScope(src, db, sheetData) {
 	};
 }
 
-// An instant as the business clock shows it ("2026-10-17 10:00 EDT"), or null.
-let zoneTextFormat = null;
+// An instant as the business clock in force at it shows it ("2026-10-17 10:00
+// EDT"), or null. One formatter per zone.
+const zoneTextFormats = new Map();
 function zoneText(stamp) {
 	const ms = stampMs(stamp);
 	if (!Number.isFinite(ms)) return null;
-	zoneTextFormat = zoneTextFormat || new Intl.DateTimeFormat("en-US", {
-		timeZone: appTime.appTimeZone(), year: "numeric", month: "2-digit", day: "2-digit",
-		hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
-	});
+	const zone = appTime.businessZoneAt(ms);
+	if (!zoneTextFormats.has(zone)) {
+		zoneTextFormats.set(zone, new Intl.DateTimeFormat("en-US", {
+			timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+			hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
+		}));
+	}
 	const p = {};
-	for (const x of zoneTextFormat.formatToParts(new Date(ms))) p[x.type] = x.value;
+	for (const x of zoneTextFormats.get(zone).formatToParts(new Date(ms))) p[x.type] = x.value;
 	return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
 }
 

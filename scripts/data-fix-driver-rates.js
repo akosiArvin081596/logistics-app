@@ -106,6 +106,7 @@ const { closure } = require("./lib/server-lift");
 const { serverSource } = require("./lib/server-source");
 const { envFor, openDb } = require("./lib/ledger-world");
 const driverRateOnly = require("../lib/driver-rate-only");
+const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "system: data-fix-driver-rates";
@@ -226,8 +227,12 @@ function liftWorld(db, env) {
 	return api;
 }
 
-// The earliest instant whose business day (appDay()) is `day`, on a 15-minute
-// grid: midnight in APP_TIMEZONE.
+// A stored instant's business day on the clock in force at it, as
+// loadPayRateIndex() dates a pay_rate_history row (lib/app-time.js).
+const businessDayAt = (d) => appTime.businessDayOf(d, appTime.appTimeZone());
+
+// The earliest instant whose business day (`appDay`, businessDayAt() here) is
+// `day`, on a 15-minute grid: midnight on the clock in force that day.
 function midnightOf(day, appDay) {
 	const base = Date.parse(`${day}T00:00:00.000Z`);
 	const step = 15 * 60000;
@@ -330,7 +335,7 @@ function buildPlan(db, world, plan, { today = world.appDay(new Date()) } = {}) {
 		const segs = entry.rates;
 		const firstDay = segs[0].from;
 		const target = (day) => { let r = null; for (const s of segs) { if (s.from <= day) r = s.rate; } return r; };
-		const hist = historyOf(db, key, world.appDay);
+		const hist = historyOf(db, key, businessDayAt);
 		d.history = hist;
 
 		if (struct.payType !== "fixed") d.skips.push(`pay type is ${struct.payType}, not fixed`);
@@ -347,7 +352,7 @@ function buildPlan(db, world, plan, { today = world.appDay(new Date()) } = {}) {
 			d.writes.push({ ref: nextRef(), kind: "directory", rowId: row.id, from: entry.expect.payDaily, to: entry.payDaily, present: current === entry.payDaily });
 		}
 		for (const s of segs) {
-			const eff = midnightOf(s.from, world.appDay);
+			const eff = midnightOf(s.from, businessDayAt);
 			const present = hist.some((h) => h.source === SOURCE && h.effective_from === eff && h.rate === s.rate);
 			d.writes.push({ ref: nextRef(), kind: "segment", rate: s.rate, effective_from: eff, day: s.from, present });
 		}

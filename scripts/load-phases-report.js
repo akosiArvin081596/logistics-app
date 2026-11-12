@@ -297,7 +297,15 @@ function labeller(prefix, shown = false) {
 		return seen.get(key);
 	};
 }
-const hourIn = (ms, zone) => Number(new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "2-digit", hourCycle: "h23" }).format(new Date(ms)));
+// The hour of an instant on the business clock in force at it.
+const hourIn = (ms, zone) => Number(new Intl.DateTimeFormat("en-US", { timeZone: zone && appTime.businessZoneAt(ms, zone), hour: "2-digit", hourCycle: "h23" }).format(new Date(ms)));
+// The stamp the app wrote at `ms` (server.js appStamp()'s "MM/DD/YYYY H:MM:SS"),
+// on the clock in force then: a replayed upload stamps as it would have.
+function stampAt(ms, zone) {
+	const p = {};
+	for (const x of new Intl.DateTimeFormat("en-US", { timeZone: zone && appTime.businessZoneAt(ms, zone), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms))) p[x.type] = x.value;
+	return `${p.month}/${p.day}/${p.year} ${parseInt(p.hour, 10)}:${p.minute}:${p.second}`;
+}
 // Every count map (an object of numbers) with its keys in order, so two runs on
 // the same data print the same bytes.
 function tidy(x) {
@@ -702,10 +710,10 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	};
 }
 
-// "YYYY-MM-DD HH:MM" on the business clock.
+// "YYYY-MM-DD HH:MM" on the business clock in force at the instant.
 function appDayTime(ms, zone) {
 	const p = {};
-	for (const x of new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms))) p[x.type] = x.value;
+	for (const x of new Intl.DateTimeFormat("en-US", { timeZone: zone && appTime.businessZoneAt(ms, zone), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms))) p[x.type] = x.value;
 	return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
 }
 
@@ -755,7 +763,7 @@ function sheetSide({ api, db, env, values, driverLabel, loadLabel }) {
 		const onRow = api.normalizeDriverName(driverCol ? row[driverCol] : "");
 		if (!onRow || onRow !== api.normalizeDriverName(doc.driver)) return { outcome: "not_his_row" };
 		const before = { ...row, ...(statusCol ? { [statusCol]: "At Receiver" } : {}), ...(completionCol ? { [completionCol]: "" } : {}) };
-		const edits = { ...(statusCol ? { [statusCol]: "Delivered" } : {}), ...stampEdits(api.appStamp(new Date(doc.ms))) };
+		const edits = { ...(statusCol ? { [statusCol]: "Delivered" } : {}), ...stampEdits(stampAt(doc.ms, appTime.appTimeZone())) };
 		const blocked = api.dispatchWriteBlocker(headers, before, edits, api.tripDayLockCover(headers));
 		if (!blocked) return { outcome: "would_fire", cancelledSince };
 		if (blocked.code === "PERIOD_FINALIZED") {
@@ -824,7 +832,7 @@ function sheetSide({ api, db, env, values, driverLabel, loadLabel }) {
 			const done = liveRows(f.key).filter((r) => COMPLETED_RE.test(String(statusCol ? r[statusCol] : "").trim()));
 			if (done.length !== 1) { inc(out.notListed, done.length ? "several completed rows" : "no completed row"); continue; }
 			const row = done[0];
-			const stamp = api.appStamp(new Date(f.uploadMs));
+			const stamp = stampAt(f.uploadMs, appTime.appTimeZone());
 			const tapDay = api.invoiceCompletionDay(row, cols);
 			const uploadDay = api.invoiceCompletionDay({ ...row, ...stampEdits(stamp) }, cols);
 			const otherWeek = !!tapDay && !!uploadDay && api.getWeekRange(tapDay).weekStart !== api.getWeekRange(uploadDay).weekStart;

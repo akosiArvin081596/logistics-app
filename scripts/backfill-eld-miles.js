@@ -238,7 +238,7 @@ console.log("");
 			if (withLng.length < 2) { await new Promise((r) => setImmediate(r)); continue; }
 
 			const buckets = eldMiles.splitDeltasByDayAndDriver(withLng, {
-				dayOf: (ms, lng) => eldMiles.localDayInTz(ms, eldMiles.usTzForLongitude(lng)),
+				dayOf: (ms, lng) => eldMiles.localDayInTz(ms, eldMiles.usTzForLongitude(lng, ms)),
 				driverAt: (ms) => resolver.atInstant(t.id, ms),
 			});
 			for (const b of buckets.values()) {
