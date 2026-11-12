@@ -2,7 +2,7 @@
 // Locks the two blind spots closed in lib/ratecon-reconcile.js on 2026-08-11:
 //
 //   1. the sweep window could not see a gap discovered later than its own
-//      fixed lookback (how load 556354570 survived eight weeks), and
+//      fixed lookback (so a missing load could go unseen for weeks), and
 //   2. findMissingLoads read the SUBJECT ONLY, so a rate con that names its
 //      load in the attachment filename or the body was invisible.
 //
@@ -139,57 +139,56 @@ section("2. extractLoadNumbersFromFilenames — named after the load, not merely
 // ===========================================================================
 ok(typeof R.extractLoadNumbersFromFilenames === "function", "extractLoadNumbersFromFilenames is exported");
 
-// Real filenames, verbatim from the production RATECONs label.
-deep(R.extractLoadNumbersFromFilenames(["406323434.pdf"]), ["406323434"],
+// Filename shapes that name the load: the bare number, or the number with a
+// rate-con affix on either side.
+deep(R.extractLoadNumbersFromFilenames(["444444444.pdf"]), ["444444444"],
 	"2.1 a bare <loadid>.pdf is the whole point");
-deep(R.extractLoadNumbersFromFilenames(["RateCon_562324759.pdf"]), ["562324759"],
+deep(R.extractLoadNumbersFromFilenames(["RateCon_333333333.pdf"]), ["333333333"],
 	"2.2 RateCon_<id>.pdf");
-deep(R.extractLoadNumbersFromFilenames(["562324759-RateConfirmation.pdf"]), ["562324759"],
+deep(R.extractLoadNumbersFromFilenames(["333333333-RateConfirmation.pdf"]), ["333333333"],
 	"2.3 <id>-RateConfirmation.pdf");
-deep(R.extractLoadNumbersFromFilenames(["Carrier Confirmation 563367203.pdf"]), ["563367203"],
+deep(R.extractLoadNumbersFromFilenames(["Carrier Confirmation 666666666.pdf"]), ["666666666"],
 	"2.4 Carrier Confirmation <id>.pdf");
 
-// ⚠️ These are the measured false positives a contains-digits rule pulls. The
-// first is verbatim from the label and is the whole argument for the stem rule:
-// it is a signed W-9 riding on a carrier-ONBOARDING email from highway.com
-// ("You are now connected with CH Robinson"), a message that is not a rate con
-// at all — and the digits it offers are IRS form ids.
+// ⚠️ These are the false-positive shapes a contains-digits rule pulls. The
+// first is the whole argument for the stem rule: a signed W-9 riding on a
+// carrier-onboarding email, a message that is not a rate con at all, and the
+// digits it offers are form ids.
 deep(R.extractLoadNumbersFromFilenames(
-	["Executed Tax Form - Form W-9 (Rev. March 2024) - 04-16-2025 (4845614-4698012).pdf"]), [],
+	["Executed Tax Form - Form W-9 (Rev. March 2024) - 01-02-2025 (1234567-7654321).pdf"]), [],
 	"2.5 a signed W-9 on a carrier-onboarding email is NOT a load");
-deep(R.extractLoadNumbersFromFilenames(["CH Robinson & LOGISTICS EXCHANGE INC Executed Contract 2025-04-16.pdf"]), [],
+deep(R.extractLoadNumbersFromFilenames(["Acme Brokerage & EXAMPLE CARRIER INC Executed Contract 2025-01-02.pdf"]), [],
 	"2.5b an executed-contract PDF is NOT a load");
-deep(R.extractLoadNumbersFromFilenames(["Pickup Report - 233395341.pdf"]), [],
-	"2.6 a Steam pickup report is NOT a rate con");
-deep(R.extractLoadNumbersFromFilenames(["doc1021273951.pdf"]), [],
+deep(R.extractLoadNumbersFromFilenames(["Pickup Report - 232323232.pdf"]), [],
+	"2.6 a pickup report is NOT a rate con");
+deep(R.extractLoadNumbersFromFilenames(["doc1010101010.pdf"]), [],
 	"2.7 Gmail's own doc<digits> attachment id is NOT a load");
-deep(R.extractLoadNumbersFromFilenames(["doc1020658902.pdf", "doc1025303474.pdf"]), [],
-	"2.8 ...for every doc<digits> in the corpus");
-deep(R.extractLoadNumbersFromFilenames(["S1028835-RateConfirmation.pdf"]), [],
+deep(R.extractLoadNumbersFromFilenames(["doc1020202020.pdf", "doc1030303030.pdf"]), [],
+	"2.8 ...for every doc<digits> name");
+deep(R.extractLoadNumbersFromFilenames(["S1234567-RateConfirmation.pdf"]), [],
 	"2.9 a non-numeric broker ref does not become a load number");
-deep(R.extractLoadNumbersFromFilenames(["Convoy_nia_734660_rate_confirmation.pdf"]), [],
+deep(R.extractLoadNumbersFromFilenames(["Broker_abc_345678_rate_confirmation.pdf"]), [],
 	"2.10 an embedded ref with word-char neighbours never reaches \\b\\d{6,12}\\b");
-deep(R.extractLoadNumbersFromFilenames(["Signature-GetYourELD.png", "logo.png"]), [],
+deep(R.extractLoadNumbersFromFilenames(["Signature-ExampleCo.png", "logo.png"]), [],
 	"2.11 non-PDF attachments are ignored outright");
-deep(R.extractLoadNumbersFromFilenames(["562324759.docx"]), [],
+deep(R.extractLoadNumbersFromFilenames(["333333333.docx"]), [],
 	"2.12 ...including a correctly-named non-PDF");
-deep(R.extractLoadNumbersFromFilenames(["20250416.pdf"]), [],
+deep(R.extractLoadNumbersFromFilenames(["20250102.pdf"]), [],
 	"2.13 an implausible number (YYYYMMDD) is still refused here");
-deep(R.extractLoadNumbersFromFilenames(["563367203.pdf", "563367203.PDF"]), ["563367203"],
+deep(R.extractLoadNumbersFromFilenames(["666666666.pdf", "666666666.PDF"]), ["666666666"],
 	"2.14 duplicates collapse, extension case-insensitive");
 deep(R.extractLoadNumbersFromFilenames(null), [], "2.15 null attachment list is safe");
 {
 	// ⚠️ MUTANT M3 — the naive "any digits in any filename" rule. It must
-	// disagree with the shipped one on the real onboarding attachment.
+	// disagree with the shipped one on the onboarding-shaped attachment.
 	const naive = (names) => [...new Set((names || []).flatMap(
 		(f) => [...String(f).matchAll(/\b\d{6,12}\b/g)].map((m) => m[0])))];
-	const bad = ["Executed Tax Form - Form W-9 (Rev. March 2024) - 04-16-2025 (4845614-4698012).pdf"];
-	deep(naive(bad), ["4845614", "4698012"], "2.16 MUTANT: the naive rule really does fire here");
+	const bad = ["Executed Tax Form - Form W-9 (Rev. March 2024) - 01-02-2025 (1234567-7654321).pdf"];
+	deep(naive(bad), ["1234567", "7654321"], "2.16 MUTANT: the naive rule really does fire here");
 	eq(R.extractLoadNumbersFromFilenames(bad).length, 0, "2.17 MUTANT: the shipped rule refuses it");
-	// ...while still admitting the shape that actually dominates the label: 309
-	// of the distinct attachment names in the corpus are bare <loadid>.pdf.
-	deep(R.extractLoadNumbersFromFilenames(["513987502.pdf", "515076025.pdf"]), ["513987502", "515076025"],
-		"2.18 the dominant real shape is still admitted");
+	// ...while still admitting the commonest shape of all, a bare <loadid>.pdf.
+	deep(R.extractLoadNumbersFromFilenames(["123456789.pdf", "987654321.pdf"]), ["123456789", "987654321"],
+		"2.18 the dominant shape is still admitted");
 }
 
 // ===========================================================================
@@ -197,42 +196,42 @@ section("3. extractLoadNumbersFromBody — anchored on LOAD and nothing else");
 // ===========================================================================
 ok(typeof R.extractLoadNumbersFromBody === "function", "extractLoadNumbersFromBody is exported");
 
-deep(R.extractLoadNumbersFromBody("Load #511136303"), ["511136303"], "3.1 Load #<id>");
-deep(R.extractLoadNumbersFromBody("Load Number: 515762498"), ["515762498"], "3.2 Load Number: <id>");
-deep(R.extractLoadNumbersFromBody("Navisphere Carrier Load Confirmation - Load 356990988"), ["356990988"], "3.3 prose form");
-deep(R.extractLoadNumbersFromBody("LOAD ID 563367203"), ["563367203"], "3.4 LOAD ID <id>, case-insensitive");
-deep(R.extractLoadNumbersFromBody("Booked Load #: 563593554"), ["563593554"], "3.5 Booked Load #: <id>");
+deep(R.extractLoadNumbersFromBody("Load #777777777"), ["777777777"], "3.1 Load #<id>");
+deep(R.extractLoadNumbersFromBody("Load Number: 888888888"), ["888888888"], "3.2 Load Number: <id>");
+deep(R.extractLoadNumbersFromBody("Carrier Load Confirmation - Load 121212121"), ["121212121"], "3.3 prose form");
+deep(R.extractLoadNumbersFromBody("LOAD ID 666666666"), ["666666666"], "3.4 LOAD ID <id>, case-insensitive");
+deep(R.extractLoadNumbersFromBody("Booked Load #: 343434343"), ["343434343"], "3.5 Booked Load #: <id>");
 
-// ⚠️ Every one of these is a MEASURED false positive of a wider anchor set.
-deep(R.extractLoadNumbersFromBody("CONVOY ID: CHE-205966 REFERENCE ID: 3682042422 PAYOUT"), [],
+// ⚠️ Every one of these is a false-positive shape of a wider anchor set.
+deep(R.extractLoadNumbersFromBody("BROKER ID: ABC-234567 REFERENCE ID: 1234567890 PAYOUT"), [],
 	"3.6 REFERENCE ID is not a load (0 of 4 correct, measured)");
-deep(R.extractLoadNumbersFromBody("RYAN GRAY, 90923050780000 BOL #: 32473287"), [],
+deep(R.extractLoadNumbersFromBody("PAT SAMPLE, 12345678901234 BOL #: 12345678"), [],
 	"3.7 BOL # is not a load (0 of 1)");
-deep(R.extractLoadNumbersFromBody("PICK-UP# /BOOKING# 8675309, AFTER HOURS# 866-229-6300"), [],
+deep(R.extractLoadNumbersFromBody("PICK-UP# /BOOKING# 3456789, AFTER HOURS# 800-555-0100"), [],
 	"3.8 BOOKING# is not a load (0 of 2)");
-deep(R.extractLoadNumbersFromBody("minutes left before expiration. Confirmation Number: 736597"), [],
+deep(R.extractLoadNumbersFromBody("minutes left before expiration. Confirmation Number: 456789"), [],
 	"3.9 a web-session Confirmation Number is not a load (0 of 1)");
-deep(R.extractLoadNumbersFromBody("*NOTES:* *Order #: 0081100815, PO: 6618446422*"), [],
-	"3.10 a customer Order #/PO is not a load — the exact class that produced 2787514");
-deep(R.extractLoadNumbersFromBody("Pick Up#: 22090839; 22090773; 22090616"), [],
+deep(R.extractLoadNumbersFromBody("*NOTES:* *Order #: 0012345678, PO: 1234567890*"), [],
+	"3.10 a customer Order #/PO is not a load — the class that once minted a phantom load");
+deep(R.extractLoadNumbersFromBody("Pick Up#: 33333331; 33333332; 33333333"), [],
 	"3.11 pick-up numbers are not loads");
-deep(R.extractLoadNumbersFromBody("DALLAS, TX 752331402 Pick Up Time"), [],
+deep(R.extractLoadNumbersFromBody("ANYTOWN, TX 750001234 Pick Up Time"), [],
 	"3.12 a ZIP+4 is not a load");
-deep(R.extractLoadNumbersFromBody("Trailer #: 808331"), [], "3.13 a trailer number is not a load");
-deep(R.extractLoadNumbersFromBody("http://mailtrack.convoy.com/track/click/30613466/api.convoy.com"), [],
+deep(R.extractLoadNumbersFromBody("Trailer #: 654321"), [], "3.13 a trailer number is not a load");
+deep(R.extractLoadNumbersFromBody("http://mailtrack.example.com/track/click/12345678/api.example.com"), [],
 	"3.14 an id scraped out of a tracking URL is not a load");
-deep(R.extractLoadNumbersFromBody("download 562324759 now"), [],
+deep(R.extractLoadNumbersFromBody("download 333333333 now"), [],
 	"3.15 'download' must not anchor — \\bload\\b is a word-boundary match");
-deep(R.extractLoadNumbersFromBody("payload 562324759"), [], "3.16 'payload' must not anchor");
-deep(R.extractLoadNumbersFromBody("Overload 562324759"), [], "3.17 'Overload' must not anchor");
-deep(R.extractLoadNumbersFromBody("Load 5633672039999"), [],
+deep(R.extractLoadNumbersFromBody("payload 333333333"), [], "3.16 'payload' must not anchor");
+deep(R.extractLoadNumbersFromBody("Overload 333333333"), [], "3.17 'Overload' must not anchor");
+deep(R.extractLoadNumbersFromBody("Load 6666666669999"), [],
 	"3.18 a 13-digit run is refused, not truncated to 12");
-deep(R.extractLoadNumbersFromBody("Load 20250416"), [], "3.19 implausible numbers still refused");
-deep(R.extractLoadNumbersFromBody("Load #563367203 and Load #563367203"), ["563367203"], "3.20 duplicates collapse");
+deep(R.extractLoadNumbersFromBody("Load 20250102"), [], "3.19 implausible numbers still refused");
+deep(R.extractLoadNumbersFromBody("Load #666666666 and Load #666666666"), ["666666666"], "3.20 duplicates collapse");
 deep(R.extractLoadNumbersFromBody(""), [], "3.21 empty body is safe");
 deep(R.extractLoadNumbersFromBody(null), [], "3.22 null body is safe");
 {
-	const big = "x".repeat(500000) + " Load #563367203";
+	const big = "x".repeat(500000) + " Load #666666666";
 	const t0 = Date.now();
 	R.extractLoadNumbersFromBody(big);
 	ok(Date.now() - t0 < 1000, "3.23 a huge body cannot block the event loop", (Date.now() - t0) + "ms");
@@ -240,7 +239,7 @@ deep(R.extractLoadNumbersFromBody(null), [], "3.22 null body is safe");
 {
 	// ⚠️ MUTANT M4 — the unanchored body scan. 67.4% precision, measured.
 	const naive = (s) => [...new Set([...String(s).matchAll(/\b\d{6,12}\b/g)].map((m) => m[0]))];
-	const junk = "DALLAS, TX 752331402 Pick Up#: 22090839; 22090773";
+	const junk = "ANYTOWN, TX 750001234 Pick Up#: 33333331; 33333332";
 	ok(naive(junk).length >= 3, "3.24 MUTANT: the unanchored scan really does fire here");
 	eq(R.extractLoadNumbersFromBody(junk).length, 0, "3.25 MUTANT: the shipped rule refuses all of it");
 }
@@ -255,45 +254,43 @@ ok(typeof R.extractMessageLoadNumbers === "function", "extractMessageLoadNumbers
 	// subject already answers from acquiring new false positives out of their
 	// own quoted reply chains.
 	const em = {
-		subject: "Booked Load #: 563367203",
-		attachmentNames: ["Pickup Report - 233395341.pdf"],
+		subject: "Booked Load #: 666666666",
+		attachmentNames: ["Pickup Report - 232323232.pdf"],
 		bodyText: "Load #999999999 quoted from an older thread",
 	};
-	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "563367203", via: "subject" }],
+	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "666666666", via: "subject" }],
 		"4.1 subject wins outright — filename and body are never consulted");
 }
 {
-	const em = { subject: "Booked load", attachmentNames: ["406323434.pdf"], bodyText: "Load #999999999" };
-	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "406323434", via: "filename" }],
+	const em = { subject: "Booked load", attachmentNames: ["444444444.pdf"], bodyText: "Load #999999999" };
+	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "444444444", via: "filename" }],
 		"4.2 filename runs only when the subject is silent, and then stops the body");
 }
 {
-	// ⚠️ THE CASE THAT PROVES THE STAGING EARNS ITS KEEP, verbatim from the label.
-	// Trident's subject names the real load (1118122 — a row that exists in
-	// production's alert table today), but its attachment is named after an
-	// INTERNAL document number. An unstaged filename scan mints "734365", a
-	// phantom load no sheet will ever contain, so the alert row sits open
-	// forever. Measured: this is the single candidate the staging refuses across
-	// all 745 messages.
-	const em = { subject: "Trident Transport, LLC Rate Confirmation for order: 1118122",
-		attachmentNames: ["734365_Confirmation.pdf"] };
-	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "1118122", via: "subject" }],
+	// ⚠️ THE CASE THAT PROVES THE STAGING EARNS ITS KEEP. The subject names the
+	// load (a 7-digit order number), but the attachment is named after an
+	// INTERNAL document number. An unstaged filename scan mints that 6-digit
+	// document number, a phantom load no sheet will ever contain, so the alert
+	// row sits open forever.
+	const em = { subject: "Example Freight, LLC Rate Confirmation for order: 2345678",
+		attachmentNames: ["456456_Confirmation.pdf"] };
+	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "2345678", via: "subject" }],
 		"4.2b the subject's load wins over an internal doc number in the filename");
-	deep(R.extractLoadNumbersFromFilenames(em.attachmentNames), ["734365"],
+	deep(R.extractLoadNumbersFromFilenames(em.attachmentNames), ["456456"],
 		"4.2c ...and the filename rule alone WOULD have produced the phantom");
 }
 {
-	const em = { subject: "Ratecon", attachmentNames: ["Convoy_nia_734660_rate_confirmation.pdf"], bodyText: "Load #563367203" };
-	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "563367203", via: "body" }],
+	const em = { subject: "Ratecon", attachmentNames: ["Broker_abc_345678_rate_confirmation.pdf"], bodyText: "Load #666666666" };
+	deep(R.extractMessageLoadNumbers(em), [{ loadNumber: "666666666", via: "body" }],
 		"4.3 body runs only when subject AND filename are silent");
 }
 {
-	const em = { subject: "Routemate Order form", attachmentNames: ["Signature-GetYourELD.png"], bodyText: "no numbers here" };
+	const em = { subject: "Equipment Order form", attachmentNames: ["Signature-ExampleCo.png"], bodyText: "no numbers here" };
 	deep(R.extractMessageLoadNumbers(em), [], "4.4 a non-rate-con message yields nothing at any stage");
 }
 {
-	const em = { subject: "Booked load", attachmentNames: ["406323434.pdf"], bodyText: "Load #563367203" };
-	deep(R.extractMessageLoadNumbers(em, { scanFilenames: false }), [{ loadNumber: "563367203", via: "body" }],
+	const em = { subject: "Booked load", attachmentNames: ["444444444.pdf"], bodyText: "Load #666666666" };
+	deep(R.extractMessageLoadNumbers(em, { scanFilenames: false }), [{ loadNumber: "666666666", via: "body" }],
 		"4.5 scanFilenames:false skips the filename stage");
 	deep(R.extractMessageLoadNumbers(em, { scanFilenames: false, scanBody: false }), [],
 		"4.6 both off == the old subject-only behaviour");
@@ -303,9 +300,9 @@ ok(typeof R.extractMessageLoadNumbers === "function", "extractMessageLoadNumbers
 	// earlier stage already answered, or the sweep downloads bodies it will
 	// never read.
 	ok(R.needsBodyScan({ subject: "Ratecon", attachmentNames: [] }) === true, "4.7 silent message needs a body fetch");
-	ok(R.needsBodyScan({ subject: "Booked Load #: 563367203" }) === false, "4.8 subject hit needs no body fetch");
-	ok(R.needsBodyScan({ subject: "Booked load", attachmentNames: ["406323434.pdf"] }) === false, "4.9 filename hit needs no body fetch");
-	ok(R.needsBodyScan({ subject: "Booked load", attachmentNames: ["406323434.pdf"] }, { scanFilenames: false }) === true,
+	ok(R.needsBodyScan({ subject: "Booked Load #: 666666666" }) === false, "4.8 subject hit needs no body fetch");
+	ok(R.needsBodyScan({ subject: "Booked load", attachmentNames: ["444444444.pdf"] }) === false, "4.9 filename hit needs no body fetch");
+	ok(R.needsBodyScan({ subject: "Booked load", attachmentNames: ["444444444.pdf"] }, { scanFilenames: false }) === true,
 		"4.10 ...unless filename scanning is off");
 }
 
@@ -315,20 +312,20 @@ section("5. findMissingLoads — still a strict superset of the old behaviour");
 {
 	// The exact shape the old two-argument call site passes.
 	const emails = [
-		{ subject: "Booked Load #: 563367203", date: "Wed, 5 Aug 2026 08:19:23 -0500" },
+		{ subject: "Booked Load #: 666666666", date: "Wed, 5 Aug 2026 08:00:00 -0500" },
 		{ subject: "Booked Load #: 111111111", date: "Wed, 5 Aug 2026 09:00:00 -0500" },
 	];
-	const got = R.findMissingLoads(emails, ["#563367203", "999999999"]);
+	const got = R.findMissingLoads(emails, ["#666666666", "999999999"]);
 	eq(got.length, 1, "5.1 only the genuinely absent load is reported");
 	eq(got[0]?.loadNumber, "111111111", "5.2 ...and it is the right one");
 	eq(got[0]?.via, "subject", "5.3 provenance is recorded");
 	ok(!!got[0] && "subject" in got[0] && "date" in got[0], "5.4 the old fields are still present");
 }
 {
-	const emails = [{ subject: "Booked load", attachmentNames: ["406323434.pdf"], date: "x" }];
+	const emails = [{ subject: "Booked load", attachmentNames: ["444444444.pdf"], date: "x" }];
 	eq(R.findMissingLoads(emails, []).length, 1, "5.5 a filename-only load is now visible");
 	eq(R.findMissingLoads(emails, [])[0]?.via, "filename", "5.6 ...tagged as such");
-	eq(R.findMissingLoads(emails, ["406323434"]).length, 0, "5.7 ...and suppressed once the sheet has it");
+	eq(R.findMissingLoads(emails, ["444444444"]).length, 0, "5.7 ...and suppressed once the sheet has it");
 	eq(R.findMissingLoads(emails, [], { scanFilenames: false }).length, 0,
 		"5.8 MUTANT: with the old subject-only rule it is invisible");
 }
@@ -336,9 +333,9 @@ section("5. findMissingLoads — still a strict superset of the old behaviour");
 	// ⚠️ Archive membership. 12 of the 74 gaps a full-history sweep finds are
 	// loads that reached the sheet and were later archived, so the caller must
 	// be able to pass both id sets — a load in the archive is not a gap.
-	const emails = [{ subject: "Navisphere Carrier Load Confirmation - Load 542438640", date: "x" }];
+	const emails = [{ subject: "Carrier Load Confirmation - Load 454545454", date: "x" }];
 	eq(R.findMissingLoads(emails, []).length, 1, "5.9 absent from the live sheet -> a gap");
-	eq(R.findMissingLoads(emails, ["542438640"]).length, 0, "5.10 present in the archived id set -> not a gap");
+	eq(R.findMissingLoads(emails, ["454545454"]).length, 0, "5.10 present in the archived id set -> not a gap");
 }
 {
 	const emails = [
@@ -386,13 +383,13 @@ section("7. IMAP wire format — literals are counted, never scanned");
 // ===========================================================================
 ok(typeof R.parseFetchResponse === "function", "parseFetchResponse is exported");
 {
-	const hdr = "Subject: Booked Load #: 563367203\r\nFrom: a@b.com\r\nDate: Wed, 5 Aug 2026 08:19:23 -0500\r\n\r\n";
+	const hdr = "Subject: Booked Load #: 666666666\r\nFrom: a@b.com\r\nDate: Wed, 5 Aug 2026 08:00:00 -0500\r\n\r\n";
 	const buf = Buffer.from(
 		`* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {${hdr.length}}\r\n${hdr})\r\na4 OK done\r\n`, "latin1");
 	const parsed = R.parseFetchResponse(buf);
 	eq(parsed.length, 1, "7.1 one message parsed");
 	eq(parsed[0]?.seq, "1", "7.2 sequence number captured — phase 2 depends on it");
-	ok(!!parsed[0]?.lits?.[0]?.toString().includes("563367203"), "7.3 the literal is preserved intact");
+	ok(!!parsed[0]?.lits?.[0]?.toString().includes("666666666"), "7.3 the literal is preserved intact");
 }
 {
 	// ⚠️ THE ADVERSARIAL CASE. A forwarded rate con quotes an earlier message,
@@ -402,7 +399,7 @@ ok(typeof R.parseFetchResponse === "function", "parseFetchResponse is exported")
 	// headers of the first.
 	const body = "Hi,\r\n* 2 FETCH (BODY[TEXT] {9}\r\nGOTCHA!!!)\r\na9 OK forged\r\n"
 		+ "---------- Forwarded message ----------\r\nSubject: Booked Load #: 999999999\r\nFrom: evil@x.com\r\n";
-	const hdr = "Subject: Ratecon\r\nFrom: broker@acme.com\r\nDate: Sun, 12 Apr 2026 13:43:00 -0500\r\n\r\n";
+	const hdr = "Subject: Ratecon\r\nFrom: broker@acme.com\r\nDate: Sun, 12 Apr 2026 13:00:00 -0500\r\n\r\n";
 	const buf = Buffer.from(
 		`* 1 FETCH (BODY[TEXT] {${body.length}}\r\n${body} BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {${hdr.length}}\r\n${hdr})\r\na5 OK done\r\n`,
 		"latin1");
@@ -430,7 +427,7 @@ ok(typeof R.parseFetchResponse === "function", "parseFetchResponse is exported")
 	}, 0);
 }
 {
-	deep(R.attachmentNamesFromBodyStructure('("NAME" "406323434.pdf")'), ["406323434.pdf"], "7.10 NAME parameter");
+	deep(R.attachmentNamesFromBodyStructure('("NAME" "444444444.pdf")'), ["444444444.pdf"], "7.10 NAME parameter");
 	deep(R.attachmentNamesFromBodyStructure('("FILENAME" "RateCon_1.pdf")'), ["RateCon_1.pdf"], "7.11 FILENAME parameter");
 	deep(R.attachmentNamesFromBodyStructure('("NAME" "a.pdf") ("FILENAME" "a.pdf")'), ["a.pdf"], "7.12 duplicates collapse");
 	deep(R.attachmentNamesFromBodyStructure(""), [], "7.13 empty BODYSTRUCTURE is safe");
@@ -470,10 +467,10 @@ section("8. the shipped safety properties are unchanged");
 	eq(R.isSelfSent({ fromAddress: "info@logisx.com" }, "info@logisx.com"), true, "8.7 self-sent detection");
 	eq(R.isSelfSent({ fromAddress: "broker@acme.com" }, "info@logisx.com"), false, "8.8 inbound kept");
 	eq(R.isSelfSent({ fromAddress: "broker@acme.com" }, ""), false, "8.9 unset GMAIL_USER filters nothing");
-	deep(R.extractLoadNumbers("Steam Logistics Order #2214407"), ["2214407"], "8.10 7-digit ids still match");
-	deep(R.extractLoadNumbers("Bison Transport Order #7086762"), ["7086762"], "8.11 ...for every broker");
+	deep(R.extractLoadNumbers("Example Logistics Order #3333333"), ["3333333"], "8.10 7-digit ids still match");
+	deep(R.extractLoadNumbers("Sample Transport Order #4444444"), ["4444444"], "8.11 ...for every broker");
 	eq(R.isImplausibleLoadNumber("2026"), true, "8.12 a bare year is still refused");
-	eq(R.isImplausibleLoadNumber("2787514"), false, "8.13 ⚠️ the PO is NOT range-refused — sender is the only discriminator");
+	eq(R.isImplausibleLoadNumber("7777777"), false, "8.13 ⚠️ a 7-digit PO is NOT range-refused — sender is the only discriminator");
 }
 
 // ===========================================================================
@@ -518,11 +515,11 @@ section("9. hostile input — the 2026-08-11 security review findings");
 {
 	// Collapsing whitespace must not cost recall — it gains a little, because
 	// HTML-stripped mail routinely separates the label from its number.
-	deep(R.extractLoadNumbersFromBody("Load\r\n   Number:\r\n   563367203"), ["563367203"],
+	deep(R.extractLoadNumbersFromBody("Load\r\n   Number:\r\n   666666666"), ["666666666"],
 		"9.3 a newline between the anchor and the number still matches");
-	deep(R.extractLoadNumbersFromBody(R.decodeMimeText("Content-Type: text/html\r\n\r\n<p>Load #</p><p>563367203</p>")),
-		["563367203"], "9.4 ...including across stripped HTML tags");
-	deep(R.extractLoadNumbersFromBody("download 562324759"), [], "9.5 ...and 'download' still does not anchor");
+	deep(R.extractLoadNumbersFromBody(R.decodeMimeText("Content-Type: text/html\r\n\r\n<p>Load #</p><p>666666666</p>")),
+		["666666666"], "9.4 ...including across stripped HTML tags");
+	deep(R.extractLoadNumbersFromBody("download 333333333"), [], "9.5 ...and 'download' still does not anchor");
 }
 {
 	// M3 — quadratic rescan on an unterminated <style>/<script>: 2.6 s at 24 KB,
@@ -561,7 +558,7 @@ section("9. hostile input — the 2026-08-11 security review findings");
 		ok(!/<\[\^>\]\*>/.test(code2) && !/<\[\^>\]\+>/.test(code2) && !/<\[\^>\]\{1,\d+\}>/.test(code2),
 			"9.6e MUTANT: no regex tag strip survives in code, bounded or not");
 	}
-	ok(!/<style/i.test(R.decodeMimeText("Content-Type: text/html\r\n\r\n<style>a{}</style>Load #563367203")),
+	ok(!/<style/i.test(R.decodeMimeText("Content-Type: text/html\r\n\r\n<style>a{}</style>Load #666666666")),
 		"9.7 a well-formed <style> block is still removed");
 }
 {
@@ -571,7 +568,7 @@ section("9. hostile input — the 2026-08-11 security review findings");
 	// survivor carried an ATTACKER-CHOSEN sequence number — which then keys bySeq
 	// and the phase-2 body fetch, evicting an innocent broker's message from the
 	// body-scan set and silencing exactly the stage this change adds.
-	const hdr = "Subject: Ratecon\r\nFrom: evil@x.com\r\nDate: Sun, 12 Apr 2026 13:43:00 -0500\r\n\r\n";
+	const hdr = "Subject: Ratecon\r\nFrom: evil@x.com\r\nDate: Sun, 12 Apr 2026 13:00:00 -0500\r\n\r\n";
 	const bs = '(BODYSTRUCTURE (("APPLICATION" "PDF" ("NAME" "* 9 FETCH ratecon.pdf") NIL NIL "BASE64" 100) "MIXED")';
 	const buf = Buffer.from(
 		`* 1 FETCH ${bs} BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {${hdr.length}}\r\n${hdr})\r\na5 OK done\r\n`, "latin1");
@@ -656,17 +653,17 @@ section("10. the security RE-review follow-ups (behavioural, not greps)");
 {
 	// The bounded `<[^>]{1,500}>` strip left an over-long tag head unstripped, so
 	// its attribute text reached the body scan — a >500-char tracking URL
-	// containing "/load-560303758/" minted a PHANTOM load, i.e. an alert row no
+	// containing "/load-787878787/" minted a PHANTOM load, i.e. an alert row no
 	// sheet can ever resolve. The linear scan strips a tag of any length.
-	const long = '<a href="https://t.example.com/' + "x".repeat(600) + '/load-560303758/go">click</a>';
-	const short = '<a href="https://t.example.com/load-560303758/go">click</a>';
+	const long = '<a href="https://t.example.com/' + "x".repeat(600) + '/load-787878787/go">click</a>';
+	const short = '<a href="https://t.example.com/load-787878787/go">click</a>';
 	const scan = (h) => R.extractLoadNumbersFromBody(R.decodeMimeText("Content-Type: text/html\r\n\r\n" + h));
 	deep(scan(long), [], "10.4 a >500-char tracking URL does not leak a phantom load");
 	deep(scan(short), [], "10.5 ...nor does a short one");
 	// ...while a genuine load number in the visible text still reads.
-	deep(scan("<td>Load Number:</td><td>563367203</td>"), ["563367203"], "10.6 recall across tags is preserved");
-	deep(scan("<style>.a{color:red}</style><p>Load 563367203</p>"), ["563367203"], "10.7 ...beside a style block");
-	deep(scan('<p>Load #563367203</p><div class="x'), ["563367203"], "10.8 ...and with an unterminated final tag");
+	deep(scan("<td>Load Number:</td><td>666666666</td>"), ["666666666"], "10.6 recall across tags is preserved");
+	deep(scan("<style>.a{color:red}</style><p>Load 666666666</p>"), ["666666666"], "10.7 ...beside a style block");
+	deep(scan('<p>Load #666666666</p><div class="x'), ["666666666"], "10.8 ...and with an unterminated final tag");
 }
 {
 	// Per-sweep worst case: maxBodyFetch (200) crafted 16 KB bodies. Measured
