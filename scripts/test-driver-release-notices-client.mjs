@@ -31,11 +31,15 @@
 //   §10 only the driver app and the Drivers page read any of it
 //   §11 the Drivers page's record: the words, the three states, times on the app's clock; Super Admin
 //       only, and nothing with the switch off
+//   §12 the words on the record: each notice's lines, tagged when they need the Performance tab, its
+//       tour's steps, and the whole app tour once, are the words drivers read, from where they read them
+//       (the server's list, TOUR_STEPS), never a copy: for a driver with the tab and one without, on
+//       made-up lines and on the real list
 //
 // No DOM, no server, no build.
 //   node scripts/test-driver-release-notices-client.mjs      # exits 1 on any failure
 import fs from 'fs'
-import { registerHooks } from 'module'
+import { createRequire, registerHooks } from 'module'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -871,7 +875,7 @@ for (const [label, rel] of [['the login page', 'views/LoginView.vue'], ['the ses
 // ── §10 ───────────────────────────────────────────────────────────────────
 section('10 only the driver app and the Drivers page read any of it')
 const filesNaming = (re) => walk(CLIENT).filter((f) => /\.(vue|js)$/.test(f) && re.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(CLIENT, f).replaceAll(path.sep, '/')).sort()
-eq('the note: these files and no others', filesNaming(/driverReleaseNotices|useDriverRelease|driver\/me\/release/), ['components/driver/DriverAppTour.vue', 'components/driver/DriverReleaseNote.vue', 'composables/useDriverRelease.js', 'lib/driverReleaseNotices.js', 'views/DriverView.vue'])
+eq("the note: these files and no others, the Drivers page's record taking the tour's words from it", filesNaming(/driverReleaseNotices|useDriverRelease|driver\/me\/release/), ['components/driver/DriverAppTour.vue', 'components/driver/DriverReleaseNote.vue', 'composables/useDriverRelease.js', 'lib/driverNoticeRecord.js', 'lib/driverReleaseNotices.js', 'views/DriverView.vue'])
 eq('the one-shot: the login form notes it and the driver app takes it, and nothing else knows it', filesNaming(/signInMoment/), ['views/DriverView.vue', 'views/LoginView.vue'])
 eq('the record: the Drivers page alone', filesNaming(/driverNoticeRecord|DriverNoticesSection|driver-release\/acknowledgements/), ['components/drivers-db/DriverNoticesSection.vue', 'lib/driverNoticeRecord.js', 'views/DriversDbView.vue'])
 
@@ -883,6 +887,7 @@ if (record) {
   eq('the words', [RECORD_WORDS.heading, RECORD_WORDS.acknowledged, RECORD_WORDS.notYet, RECORD_WORDS.startedAfter], ['Driver notices', 'Acknowledged', 'Not yet', 'Started after this notice'])
   eq('...and the count', countLine(8, 10), '8 of 10 acknowledged')
   eq('...a driver with no name on file, and a record that can\'t be read', [RECORD_WORDS.noName, RECORD_WORDS.unreadable], ['No name on file', "Driver notices couldn't be loaded. Try again later."])
+  eq('...the words over a notice\'s lines and tour, the whole tour\'s, and the tag, exact', [RECORD_WORDS.lines, RECORD_WORDS.tour, RECORD_WORDS.appTour, RECORD_WORDS.appTourWhen, RECORD_WORDS.performanceOnly], ['What drivers read', 'The tour from Show me', 'The app tour', 'Offered to a first-time driver; any driver can take it from the Kit.', 'Performance drivers only'])
   const ANSWER = {
     notices: [{
       id: '2026-02-01-second', title: 'Second', date: '2026-02-01', acknowledged: 1, asked: 3,
@@ -921,6 +926,88 @@ ok('...shows nothing while it loads, and nothing with the switch off or for anot
 ok('...says so when it can\'t be read', /RECORD_WORDS\.unreadable/.test(SECTION) && /if \(!view\) \{\s*state\.value = 'unreadable'/.test(SECTION))
 ok('...prints no raw HTML and keeps nothing in the browser', !/v-html|localStorage|sessionStorage/.test(SECTION))
 ok('...shows each notice\'s title, date, count and rows', ['driver-notice-title', 'driver-notice-count', 'driver-notice-row'].every((id) => SECTION.includes(`data-testid="${id}"`)))
+ok("...each notice's lines, a tag on those some drivers don't read, and its tour's steps, title and words", ['driver-notice-lines', 'driver-notice-line', 'driver-notice-only', 'driver-notice-tour', 'driver-tour-step', 'driver-tour-step-title', 'driver-tour-step-line'].every((id) => SECTION.includes(`data-testid="${id}"`)))
+ok('...the tag only where a line has one, in each of its three lists, and never on its own', (SECTION.match(/<span v-if="line\.only" class="dn-only" data-testid="driver-notice-only">\{\{ line\.only \}\}<\/span>/g) || []).length === 3 && (SECTION.match(/class="dn-only"/g) || []).length === 3)
+ok('...the words printed as text', (SECTION.match(/<span class="dn-text">\{\{ line\.text \}\}<\/span>/g) || []).length === 3 && (SECTION.match(/\{\{ step\.title \}\}/g) || []).length === 2)
+ok('...and the whole app tour once, after the notices, only with the record shown, from the lib with no read of its own',
+  (SECTION.match(/data-testid="driver-app-tour"/g) || []).length === 1
+  && /<Card v-if="state === 'shown' && appTour\.length" class="dn-notice" data-testid="driver-app-tour">/.test(SECTION)
+  && SECTION.indexOf('data-testid="driver-app-tour"') > SECTION.indexOf('data-testid="driver-notice-row"')
+  && /const appTour = appTourView\(\)/.test(SECTION))
+
+// ── §12 ───────────────────────────────────────────────────────────────────
+section('12 the words on the record: the ones drivers read, from where they read them')
+{
+  const releases = createRequire(import.meta.url)('../lib/driver-releases.js')
+  const recordOf = (raw) => (record ? record.recordView(raw) : null) || []
+  const appTour = record && typeof record.appTourView === 'function' ? record.appTourView() : []
+  ok('the record lib lists the whole app tour', record && typeof record.appTourView === 'function')
+  const stepOf = (id) => TOUR_STEPS.find((s) => s.id === id)
+  const TAB = 'Performance drivers only'
+  const BASE = { id: '2026-02-01-second', title: 'Second', date: '2026-02-01', acknowledged: 0, asked: 0, drivers: [] }
+  // Made-up lines: one for everyone, one for the tab, one for a part no driver's app has, a blank one,
+  // one whose needs is no word, and three that are no line at all.
+  const MADE_NOTES = [
+    { text: 'A made-up line for everyone.' },
+    { text: 'A made-up line for the tab.', needs: 'performance' },
+    { text: 'A made-up line for a part nobody has.', needs: 'something-new' },
+    { text: '   ' },
+    { text: 'A made-up line whose needs is no word.', needs: 7 },
+    'a bare string', null, ['an', 'array'],
+  ]
+  const MADE_TOUR = ['fuel-range', 'loads', 'made-up', 'performance', 'loads']
+  const [made = {}] = recordOf({ notices: [{ ...BASE, notes: MADE_NOTES, tour: MADE_TOUR }] })
+  eq("a notice's lines as the driver's app reads them: for every driver untagged, for the tab tagged, a part nobody has and what's no line left out", made.lines, [
+    { text: 'A made-up line for everyone.', only: '' },
+    { text: 'A made-up line for the tab.', only: TAB },
+    { text: 'A made-up line whose needs is no word.', only: '' },
+  ])
+  const [driverEntry] = lib.releaseFromAnswer({ notes: [{ ...BASE, notes: MADE_NOTES, tour: MADE_TOUR }], tourOffered: false })?.notes || []
+  eq('...every one of them a line a driver with the tab reads, in order', (made.lines || []).map((l) => l.text), lib.notesForScreen([driverEntry], { performance: true })[0]?.lines)
+  eq('...and the untagged ones, the lines a driver without it reads', (made.lines || []).filter((l) => !l.only).map((l) => l.text), lib.notesForScreen([driverEntry], { performance: false })[0]?.lines)
+  eq("its tour: the steps by its ids, in order, each once, an unknown one left out, as the driver's tour walks them", (made.steps || []).map((s) => s.id), lib.tourStepsFor(MADE_TOUR, { performance: true }).map((s) => s.id))
+  eq('each step: its title and its own text, the sentence a driver with the tab reads after it tagged, and a step that needs the tab tagged', (made.steps || []).map((s) => [s.title, s.lines]), [
+    [stepOf('fuel-range').title, [{ text: stepOf('fuel-range').text, only: '' }]],
+    [stepOf('loads').title, [{ text: stepOf('loads').text, only: '' }, { text: stepOf('loads').withPerformance, only: TAB }]],
+    [stepOf('performance').title, [{ text: stepOf('performance').text, only: TAB }]],
+  ])
+  const [bare = {}] = recordOf({ notices: [{ ...BASE }] })
+  eq('a notice with no words on it (an older server) shows its record alone', [bare.lines, bare.steps, bare.count], [[], [], '0 of 0 acknowledged'])
+  const [odd = {}] = recordOf({ notices: [{ ...BASE, notes: 'x', tour: 'loads' }] })
+  eq('...and words that are no list show none', [odd.lines, odd.steps], [[], []])
+  for (const need of releases.NEEDS) {
+    const [one = {}] = recordOf({ notices: [{ ...BASE, notes: [{ text: 'A made-up line.', needs: need }] }] })
+    ok(`a line that needs "${need}" is tagged, not left out: the record knows every part the list may name`, one.lines?.length === 1 && one.lines[0].only !== '')
+  }
+  ok('...and every step that needs a part is listed, tagged', TOUR_STEPS.filter((s) => s.needs).every((s) => !!appTour.find((x) => x.id === s.id)?.lines[0].only))
+
+  // The real list, as the route sends it and a driver's note gets it, both over the wire.
+  const wire = (x) => JSON.parse(JSON.stringify(x))
+  const view = recordOf(wire({ notices: releases.acknowledgementRecord(releases.RELEASES, [], []) }))
+  const entries = lib.releaseFromAnswer(wire({ notes: releases.unseenReleases([], releases.RELEASES), tourOffered: false }))?.notes || []
+  eq("on the real list: one block per notice, newest first, as a driver's note lists them", view.map((n) => n.id), entries.map((e) => e.id))
+  ok('...each with its lines and its tour', view.length === releases.RELEASES.length && view.every((n) => n.lines?.length > 0 && n.steps?.length > 0))
+  for (const [who, has] of [['a driver with the tab', { performance: true }], ['a driver without it', { performance: false }]]) {
+    const reads = (line) => !line.only || has.performance === true
+    const asWalked = (steps) => (steps || []).filter((s) => reads(s.lines[0])).map((s) => [s.title, s.lines.filter(reads).map((l) => l.text).join(' ')])
+    for (const n of view) {
+      const entry = entries.find((e) => e.id === n.id)
+      eq(`${n.id}: the lines ${who} reads are the record's${has.performance ? '' : ' untagged'} lines, word for word`, (n.lines || []).filter(reads).map((l) => l.text), lib.notesForScreen([entry], has)[0]?.lines ?? [])
+      eq(`${n.id}: the steps ${who} walks from Show me are the record's, title and words`, asWalked(n.steps), lib.tourStepsFor(entry.tour, has).map((s) => [s.title, s.text]))
+    }
+    eq(`the app tour ${who} walks is the one listed once under the notices, title and words`, asWalked(appTour), lib.tourStepsFor(APP_TOUR_STEP_IDS, has).map((s) => [s.title, s.text]))
+  }
+  eq("the app tour: every step, in the tour's own order", appTour.map((s) => s.id), APP_TOUR_STEP_IDS)
+
+  // One home for the words: neither the record's lib nor the section holds a driver's sentence.
+  const theirWords = [...TOUR_STEPS.flatMap((s) => [s.text, s.withPerformance].filter(Boolean)), ...releases.RELEASES.flatMap((r) => r.notes.map((n) => (typeof n === 'string' ? n : n.text)))]
+  for (const rel of ['lib/driverNoticeRecord.js', 'components/drivers-db/DriverNoticesSection.vue']) {
+    ok(`${rel} holds none of the words drivers read: they come from their one home, never a copy`, theirWords.length > 0 && theirWords.every((w) => !read(rel).includes(w)))
+  }
+  const RECORD_LIB = read('lib/driverNoticeRecord.js')
+  ok("the record lib takes the steps from the tour's own lib, and walks them by the driver's own rule", /import \{ APP_TOUR_STEP_IDS, TOUR_STEPS, WORDS, tourStepsFor \} from '\.\/driverReleaseNotices\.js'/.test(RECORD_LIB) && /tourStepsFor\(ids, EVERY_PART\)/.test(RECORD_LIB))
+  eq("...and the tour's heading names the note's own button, from the note's words", record?.RECORD_WORDS.tour, `The tour from ${WORDS.showMe}`)
+}
 
 if (failures.length) {
   console.log(`\nFAILED: ${failures.length} of ${pass + failures.length}`)

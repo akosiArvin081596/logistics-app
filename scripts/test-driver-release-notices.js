@@ -39,7 +39,9 @@
  *   §13 THE RECORD, for a Super Admin: newest notice first; every active Driver account, and an
  *       inactive one only if they confirmed; "acknowledged" with its time, "not yet", or "started
  *       after" for a driver whose rows came from their first sign-in or who hasn't signed in; the
- *       count leaves out those never asked; names, states and times only, never kept by a cache
+ *       count leaves out those never asked; names, states and times only, never kept by a cache;
+ *       each notice's lines and tour are the ones a driver's app gets for it, from the same list,
+ *       and the record's copy of them is its own
  *
  * Runs the SHIPPED code: the session config, login, logout, session and change-password routes,
  * the guards and the purge are lifted out of server.js and wired to the real express-session and
@@ -848,7 +850,13 @@ async function main() {
 		eq("an account made before sign-ins were recorded, with none since, is asked: Quinn is not yet", (notices[0].drivers.find((x) => x.name === "Quinn Before") || {}).state, "not-yet");
 		eq("...while one made after, with none yet, starts after the notice: Sam", (notices[0].drivers.find((x) => x.name === "Sam Later") || {}).state, "started-after");
 		eq("the count leaves out those never asked", notices.map((n) => [n.acknowledged, n.asked]), [[2, 5], [1, 5]]);
-		eq("a notice holds these fields and no others", Object.keys(notices[0]).sort(), ["acknowledged", "asked", "date", "drivers", "id", "title"]);
+		eq("a notice holds these fields and no others", Object.keys(notices[0]).sort(), ["acknowledged", "asked", "date", "drivers", "id", "notes", "title", "tour"]);
+		eq("each notice carries its lines, each with the part of the app it needs, and its tour's steps, as the list holds them", notices.map((n) => [n.id, n.notes, n.tour]), [
+			[R2.id, [{ text: "The second made-up note." }, { text: "A made-up line for a tab.", needs: "performance" }], ["performance"]],
+			[R1.id, [{ text: "The first made-up note." }], ["loads"]],
+		]);
+		const riley = await call(w, "GET", STATE, { cookie: await signIn(w, "driver-b") });
+		eq("...the very lines and tour a driver's app gets for those notices, word for word", notices.map((n) => [n.id, n.notes, n.tour]), (riley.body.notes || []).map((e) => [e.id, e.notes, e.tour]));
 		eq("a driver's row holds a name, a state and a time, and nothing else", [...new Set(notices.flatMap((n) => n.drivers.map((x) => Object.keys(x).sort().join(","))))], ["at,name,state"]);
 		eq("no login, email, account id or other role in it", /@example\.test|driver-|"username"|"user_id"|"email"|Desk Example|Root Example|Backer Example|password/.test(r.text), false);
 		eq("the answer is the notices and nothing else", Object.keys(r.body || {}), ["notices"]);
@@ -864,6 +872,22 @@ async function main() {
 		eq("a row with only a tour mark is no confirmation", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R1.id, seen_at: null, acknowledged_at: null }])[0].drivers[0].state, "not-yet");
 		eq("a row with seen_at alone came from a first sign-in", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R1.id, seen_at: STAMPED, acknowledged_at: null }])[0].drivers[0].state, "started-after");
 		eq("another notice's row doesn't count", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R2.id, seen_at: STAMPED, acknowledged_at: STAMPED }])[0].drivers[0].state, "not-yet");
+		// The words: the ones a driver's app gets, from the same list, so the record can't drift from it.
+		const wordsOf = (list) => list.map((n) => [n.id, n.notes, n.tour]);
+		eq("on the real list, each notice's lines and tour are the ones a driver's app gets for it, newest first",
+			wordsOf(releases.acknowledgementRecord(releases.RELEASES, people, [])), wordsOf(releases.unseenReleases([], releases.RELEASES)));
+		const pastBlock = releases.acknowledgementRecord(releases.RELEASES, people, []).find((n) => n.id === "2026-11-12-past-performance");
+		eq("...Past Performance's block, word for word: both lines for a driver with the tab, and the bar and the tab to walk", pastBlock && [pastBlock.notes, pastBlock.tour], [[
+			{ text: "The Performance tab is now Past Performance: each past week with your turns.", needs: "performance" },
+			{ text: "The bar on Loads now changes color with your week.", needs: "performance" },
+		], ["loads", "performance"]]);
+		const handed = releases.acknowledgementRecord(TWO, people, []);
+		handed[0].notes?.push({ text: "A made-up extra line." });
+		handed[0].tour?.push("kit");
+		eq("a record's words are its own copy: changing one changes neither the list nor the next record", wordsOf(releases.acknowledgementRecord(TWO, people, [])), [
+			[R2.id, [{ text: "The second made-up note." }, { text: "A made-up line for a tab.", needs: "performance" }], ["performance"]],
+			[R1.id, [{ text: "The first made-up note." }], ["loads"]],
+		]);
 	} else {
 		ok("the record's rule is there to test", false);
 	}
