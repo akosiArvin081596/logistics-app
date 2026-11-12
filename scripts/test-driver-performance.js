@@ -3152,6 +3152,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(p.weekDrivingHours(read, "2026-11-14"), { state: "estimate", value: 38.6 }, "...rounded to the nearest tenth");
 		eq([p.weekDrivingHours(read, "2026-11-21"), p.weekDrivingHours(read, "2026-11-28")], [{ state: "none" }, { state: "none" }], "no measured minutes, or no row at all: named, never 0");
 		eq(p.weekDrivingHours({ ...read, firstDay: "2026-11-09" }, "2026-11-07"), { state: "starts", day: "Nov 9" }, "a week that starts before the rollup's first day says when hours start, never a part of the week");
+		eq(p.weekDrivingHours({ ...read, firstDay: "2026-11-07" }, "2026-11-07"), { state: "estimate", value: 38.5 }, "a week that starts on the rollup's first day is whole: its hours, not a start date");
 		eq([p.weekDrivingHours(null, "2026-11-07"), p.weekDrivingHours({ firstDay: "", weeks: [] }, "2026-11-07")], [{ state: "coming-soon" }, { state: "coming-soon" }], "no read, or a table with no day in it: coming soon");
 
 		const ELD = require(path.join(ROOT, "lib", "eld-activity-daily.js"));
