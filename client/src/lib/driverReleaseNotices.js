@@ -4,6 +4,7 @@
 // by scripts/test-driver-release-notices-client.mjs.
 
 export const RELEASE_URL = '/api/driver/me/release'
+export const ACK_URL = `${RELEASE_URL}/acknowledge`
 export const SEEN_URL = `${RELEASE_URL}/seen`
 export const TOUR_DONE_URL = `${RELEASE_URL}/tour-done`
 // lib/driver-releases.js holds the same name: a first-time driver's offer and the whole tour.
@@ -12,8 +13,10 @@ export const APP_TOUR_ROW = 'app-tour'
 export const WORDS = Object.freeze({
   notesHeading: "What's new",
   notesEncourage: 'Take a minute to see it for yourself.',
-  showMe: 'Show me',
-  gotIt: 'Got it',
+  acknowledgeLine: "Tap I acknowledge to confirm you've read and agree to what's new.",
+  acknowledge: 'I acknowledge',
+  showMeFirst: 'Show me first',
+  notSaved: "We couldn't save that. We'll ask again next time you sign in.",
   offerHeading: 'Welcome to the LogisX app',
   offerText: 'A quick tour shows you how the app works. We suggest taking it now. You can also take it later from your Kit.',
   takeTour: 'Take the tour',

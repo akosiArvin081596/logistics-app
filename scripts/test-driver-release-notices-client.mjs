@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // New-feature notices for drivers, the app's side: the rules in client/src/lib/driverReleaseNotices.js,
-// composables/useDriverRelease.js driven for real on Vue's own reactivity, and how DriverView.vue and
-// the two components use them. The server's side is scripts/test-driver-release-notices.js;
-// scripts/e2e/driver-release-notices.mjs covers the page.
+// composables/useDriverRelease.js driven for real on Vue's own reactivity, how DriverView.vue and the two
+// components use them, and the Drivers page's record (lib/driverNoticeRecord.js). The server's side is
+// scripts/test-driver-release-notices.js; scripts/e2e/driver-release-notices.mjs covers the page.
 //   §1  the words, exact, and plain: no figure, no name, no word a driver wouldn't use; none that's
 //       false for a driver who can read it, and none about being signed out
 //   §2  noteMoment(): each input stops the note, and neither a working load nor the truck does
@@ -11,14 +11,20 @@
 //   §5  no forced sign-out: an answer that says one is due, at an app opening, with a way to sign out
 //       in reach, signs nobody out; this feature has no road to handleLogout; the code for it is gone
 //   §6  only right after a sign-in: a load with no sign-in shows nothing, however much the server has;
-//       the sign-in is spent by the one read, whatever comes of it, so nothing shows later on that page;
-//       only a Driver asks
-//   §7  the note, the offer and the tour through useDriverRelease: once, what each writes, skip; a no
-//       doesn't wait; a moving truck's open page never changes; the tour starts only on their own tap
-//   §8  DriverView.vue: one read, as the view opens, and no other; the login form notes the sign-in, in
-//       memory; the tour marks nothing read
-//   §9  the components, and the app's other files, which know nothing of this
-//   §10 only the driver app reads any of it
+//       the sign-in is spent by the one read, whatever comes of it; the read starts with the
+//       Performance read and the look waits for both; the look ends however it goes, so the contacts
+//       prompt can follow; only a Driver asks
+//   §7  the note, the offer and the tour: only "I acknowledge" answers a note; it waits for the save
+//       and can't be sent twice; not saved, the note closes with a line and marks nothing; "Show me
+//       first" opens the tour over the note, which is there again after it; a moving truck's open page
+//       never changes; the tour starts only on their own tap
+//   §8  DriverView.vue: one read, as the view opens, with the Performance read; the contacts prompt
+//       waits for the look; the login form notes the sign-in, in memory; the tour marks nothing read
+//   §9  the components: only "I acknowledge" closes the note, and the button shows it's working; the
+//       app's other files know nothing of this
+//   §10 only the driver app and the Drivers page read any of it
+//   §11 the Drivers page's record: the words, the three states, times on the app's clock; Super Admin
+//       only, and nothing with the switch off
 //
 // No DOM, no server, no build.
 //   node scripts/test-driver-release-notices-client.mjs      # exits 1 on any failure
@@ -41,7 +47,8 @@ registerHooks({
   },
 })
 const load = (rel) => import(pathToFileURL(path.join(CLIENT, rel)).href)
-const read = (rel) => fs.readFileSync(path.join(CLIENT, rel), 'utf8')
+const exists = (rel) => fs.existsSync(path.join(CLIENT, rel))
+const read = (rel) => (exists(rel) ? fs.readFileSync(path.join(CLIENT, rel), 'utf8') : '')
 
 let pass = 0
 const failures = []
@@ -53,7 +60,7 @@ function ok(label, cond, detail) {
 const eq = (label, actual, expected) => ok(label, JSON.stringify(actual) === JSON.stringify(expected), { actual, expected })
 const section = (title) => console.log(`§ ${title}`)
 
-let lib, composable, vue, signInMoment
+let lib, composable, vue
 try {
   lib = await load('lib/driverReleaseNotices.js')
   composable = await load('composables/useDriverRelease.js')
@@ -63,25 +70,38 @@ try {
   console.log('\nFAILED: 1 of 1')
   process.exit(1)
 }
-try {
-  signInMoment = await load('lib/signInMoment.js')
-} catch (e) {
-  ok(`the sign-in's one-shot must load: ${e.message}`, false)
-  signInMoment = null
+const optional = async (rel) => {
+  try {
+    return await load(rel)
+  } catch (e) {
+    ok(`${rel} must load: ${e.message}`, false)
+    return null
+  }
 }
-const { WORDS, TOUR_STEPS, APP_TOUR_STEP_IDS, APP_TOUR_ROW, RELEASE_URL, SEEN_URL, TOUR_DONE_URL } = lib
+const signInMoment = await optional('lib/signInMoment.js')
+const record = await optional('lib/driverNoticeRecord.js')
+const datetime = await load('utils/datetime.js')
+const { WORDS, TOUR_STEPS, APP_TOUR_STEP_IDS, APP_TOUR_ROW, RELEASE_URL, ACK_URL, SEEN_URL, TOUR_DONE_URL } = lib
 const { useDriverRelease } = composable
 const { reactive, nextTick } = vue
 
 const tick = async () => { await new Promise((r) => setImmediate(r)); await nextTick() }
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]))
 }
 
 // ── §1 ────────────────────────────────────────────────────────────────────
 section('1 the words')
-eq('the routes', [RELEASE_URL, SEEN_URL, TOUR_DONE_URL], ['/api/driver/me/release', '/api/driver/me/release/seen', '/api/driver/me/release/tour-done'])
-eq("the note's words", [WORDS.notesHeading, WORDS.showMe, WORDS.gotIt], ["What's new", 'Show me', 'Got it'])
+eq('the routes', [RELEASE_URL, ACK_URL, SEEN_URL, TOUR_DONE_URL], ['/api/driver/me/release', '/api/driver/me/release/acknowledge', '/api/driver/me/release/seen', '/api/driver/me/release/tour-done'])
+eq("the note's words", [WORDS.notesHeading, WORDS.acknowledge, WORDS.showMeFirst], ["What's new", 'I acknowledge', 'Show me first'])
+eq('the line above the button, exact, with the owner\'s own "agree"', WORDS.acknowledgeLine, "Tap I acknowledge to confirm you've read and agree to what's new.")
+eq("a confirmation that can't be saved, exact", WORDS.notSaved, "We couldn't save that. We'll ask again next time you sign in.")
+ok('no "Got it" and no plain "Show me": only I acknowledge answers a note', !('gotIt' in WORDS) && !('showMe' in WORDS) && !Object.values(WORDS).some((w) => w === 'Got it' || w === 'Show me'))
 eq("the offer's buttons", [WORDS.takeTour, WORDS.skipOffer], ['Take the tour', 'Skip for now'])
 eq("the Kit's button", WORDS.kitButton, 'Take the app tour')
 eq("the tour's buttons", [WORDS.tourNext, WORDS.tourSkip, WORDS.tourDone], ['Next', 'Skip', 'Done'])
@@ -89,11 +109,11 @@ ok('the offer suggests the tour and says it can wait', /suggest/.test(WORDS.offe
 eq('the steps, in order', APP_TOUR_STEP_IDS, ['loads', 'load-page', 'alerts', 'kit', 'messages', 'invoices', 'performance', 'fuel-range'])
 eq('each step shows the real tab', TOUR_STEPS.map((s) => s.tab), ['loads', 'loads', 'notifications', 'kit', 'messages', 'invoices', 'performance', 'loads'])
 const allWords = [...Object.values(WORDS), ...TOUR_STEPS.flatMap((s) => [s.title, s.text, s.withPerformance].filter(Boolean))]
-const APP_WORDS = new Set(['Loads', 'Performance', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Active', 'Pending', 'Historical', 'POD', 'LogisX', 'What', 'Fuel', 'A', 'The'])
+const APP_WORDS = new Set(['Loads', 'Performance', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Active', 'Pending', 'Historical', 'POD', 'LogisX', 'What', 'Fuel', 'A', 'The', 'I'])
 for (const line of allWords) {
   ok(`no figure: "${line}"`, !/[\d$#%@]/.test(line) && !/\b(half|dollars?|percent)\b/i.test(line))
   ok(`no word they wouldn't use: "${line}"`, !/\b(session|deploy|release|server|api|bug|flag|sheet|database|endpoint|cache|token)\b/i.test(line))
-  ok(`nothing about being signed out: "${line}"`, !/\b(sign(ed|s)?[ -]?(in|out)|log(ged|s)?[ -]?(in|out)|logout|login)\b/i.test(line))
+  ok(`nothing about being signed out: "${line}"`, !/\b(sign(ed|s)?[ -]?out|log(ged|s)?[ -]?(in|out)|logout|login|sign in again)\b/i.test(line))
   for (const sentence of line.split(/(?<=[.!?:])\s+/)) {
     for (const word of sentence.split(/\s+/).slice(1)) {
       const bare = word.replace(/[^A-Za-z]/g, '')
@@ -169,17 +189,18 @@ eq('no card past the end', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, 
 // ── the world for §5 to §7 ─────────────────────────────────────────────────
 // `signedIn`: the view opens right after a sign-in. The world's server answers what's unread every time,
 // as the real one does, so anything that stays off screen here stays off by the app's own doing.
+// `box.post` answers each mark; a toast with a type is kept as [text, type].
 function world(start = {}) {
   const s = reactive({
     role: 'Driver', signedIn: true, onboarding: false, performance: true, partsKnown: true, motionAllowed: true, tab: 'loads', loadOpen: false,
     welcomeOpen: false, dialogOpen: false, ...start,
   })
   const calls = { gets: 0, posts: [], steps: [], restored: [], toasts: [] }
-  const box = { answer: NOTHING }
+  const box = { answer: NOTHING, post: async () => ({ success: true }) }
   const options = {
     api: {
       get: async (url) => { calls.gets++; eq('it reads the release route', url, RELEASE_URL); return box.answer() },
-      post: async (url, body) => { calls.posts.push([url, body]); return { success: true } },
+      post: async (url, body) => { calls.posts.push([url, body]); return box.post(url, body) },
     },
     role: () => s.role,
     takeSignIn: () => { const taken = s.signedIn; s.signedIn = false; return taken },
@@ -189,10 +210,11 @@ function world(start = {}) {
     place: () => s.tab,
     showStep: (step) => { calls.steps.push(step.id); s.tab = step.tab },
     restorePlace: (tab) => { calls.restored.push(tab); s.tab = tab },
-    toast: (text) => calls.toasts.push(text),
+    toast: (text, type) => calls.toasts.push(type ? [text, type] : text),
   }
   return { s, calls, box, options, release: useDriverRelease(options) }
 }
+const acknowledge = async (release) => { await release.noteAcknowledge?.(); await tick() }
 
 // ── §5 ────────────────────────────────────────────────────────────────────
 section('5 no forced sign-out')
@@ -221,7 +243,7 @@ section('5 no forced sign-out')
   const release = useDriverRelease(watched)
   await release.check()
   void release.noteView.value
-  release.noteGotIt()
+  await acknowledge(release)
   release.offerSkip()
   release.startAppTour()
   release.tourNext()
@@ -240,7 +262,7 @@ section('5 no forced sign-out')
   const code = read('composables/useDriverRelease.js')
   ok('the composable has no road to a sign-out of its own: no store, no logout, no page change', !/signOut|logout|useAuthStore|location\b|\/login|router|localStorage|sessionStorage/i.test(code.replace(/^\/\/.*$/gm, '')))
   for (const gone of ['lib/appOpening.js', 'lib/appTabs.js', 'lib/writesInFlight.js']) ok(`${gone} is gone`, !fs.existsSync(path.join(CLIENT, gone)))
-  const leftovers = /signInDue|signOutMoment|SIGN_OUT_PARKED_MS|parkedLongEnough|loadsHoldSignOut|rememberSignOut|signedOutFor|leaveLoginNote|takeLoginNote|LOGIN_NOTE_KEY|updatedNote|login-updated-note|The app was updated|isFirstScreen|noteScreenShown|thisPageTabs|otherPageOpen|writesBusy|writeStarted|logisx\.driverRelease|logisx\.appPage|handleLoadBack|handleNavTap|releaseDialogOpen|loadPageOpen/
+  const leftovers = /signInDue|signOutMoment|SIGN_OUT_PARKED_MS|parkedLongEnough|loadsHoldSignOut|rememberSignOut|signedOutFor|leaveLoginNote|takeLoginNote|LOGIN_NOTE_KEY|updatedNote|login-updated-note|The app was updated|isFirstScreen|noteScreenShown|thisPageTabs|otherPageOpen|writesBusy|writeStarted|logisx\.driverRelease|logisx\.appPage|handleLoadBack|handleNavTap|releaseDialogOpen|loadPageOpen|noteGotIt|release-got-it/
   eq('nothing in the app still names any part of it', walk(CLIENT).filter((f) => /\.(vue|js)$/.test(f) && leftovers.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(CLIENT, f)), [])
   ok('the truck read reports nothing: no caller decides by it', !/await driverPos\.refreshEld\(\)/.test(viewScript) && !/return (true|false)/.test(read('composables/useDriverPosition.js').slice(read('composables/useDriverPosition.js').indexOf('async function refreshEld()'), read('composables/useDriverPosition.js').indexOf('// ─── Lifecycle'))))
 }
@@ -275,6 +297,42 @@ section('6 only right after a sign-in')
   w.s.motionAllowed = true
   await tick()
   eq("nothing on an open page brings it up: the page's inputs changing shows nothing", [w.release.noteView.value, w.calls.gets], [null, 1])
+}
+{
+  // The two reads start together: the release read doesn't wait for the Performance answer, and the
+  // one look does, since the note's lines depend on it.
+  const w = world({ partsKnown: false })
+  w.box.answer = () => ({ notes: [ENTRY], tourOffered: false })
+  const parts = deferred()
+  const done = w.release.check(parts.promise)
+  await tick()
+  eq('the release read starts at once, before the Performance answer lands', w.calls.gets, 1)
+  eq('...and the look waits for that answer', [w.release.noteView.value, w.release.lookDone?.value], [null, false])
+  w.s.partsKnown = true
+  parts.resolve()
+  await done
+  eq('once it lands, the one look is made, and says yes', [w.release.noteView.value?.mode, w.release.lookDone?.value], ['notes', true])
+}
+{
+  const w = world()
+  w.box.answer = () => ({ notes: [ENTRY], tourOffered: false })
+  const failed = Promise.reject(new Error('made-up failure'))
+  failed.catch(() => {})
+  await w.release.check(failed)
+  eq('a Performance read that fails outright still lets the look happen', w.release.noteView.value?.mode, 'notes')
+}
+{
+  const w = world()
+  eq("before the look, it isn't over: the contacts prompt waits", w.release.lookDone?.value, false)
+  w.box.answer = () => { throw Object.assign(new Error('x'), { status: 503 }) }
+  await w.release.check()
+  eq('a failed read still ends the look, so the contacts prompt can come', w.release.lookDone?.value, true)
+}
+for (const [label, start] of [['no sign-in', { signedIn: false }], ['another role', { role: 'Dispatcher' }], ['a no at the look', { tab: 'kit' }], ['the lock screen', { onboarding: true }]]) {
+  const w = world(start)
+  w.box.answer = () => ({ notes: [ENTRY], tourOffered: false })
+  await w.release.check()
+  eq(`the look is over with ${label}`, w.release.lookDone?.value, true)
 }
 for (const [label, fail] of [
   ['503', Object.assign(new Error('x'), { status: 503 })],
@@ -316,7 +374,7 @@ for (const role of ['Super Admin', 'Dispatcher', 'Investor', 'KPI Viewer', undef
   w.box.answer = () => ({ notes: [ENTRY], tourOffered: true })
   await w.release.check()
   eq('a sign-in that lands on the lock screen shows nothing', w.release.noteView.value, null)
-  eq('...and marks nothing, so it comes at their next sign-in', w.calls.posts, [])
+  eq('...and marks nothing, so it comes at a later sign-in', w.calls.posts, [])
   w.s.onboarding = false
   await tick()
   eq('...and the lock lifting on this page brings up nothing', w.release.noteView.value, null)
@@ -336,7 +394,7 @@ for (const [label, start, clear] of [
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   eq(`${label}: a no shows nothing`, w.release.noteView.value, null)
-  eq(`...marks nothing, so it comes at their next sign-in (${label})`, w.calls.posts, [])
+  eq(`...marks nothing, so it comes at a later sign-in (${label})`, w.calls.posts, [])
   clear(w.s)
   await tick()
   eq(`...and doesn't wait: it stays off this page once that clears (${label})`, w.release.noteView.value, null)
@@ -360,21 +418,60 @@ for (const [label, start, clear] of [
   w.s.motionAllowed = false
   await tick()
   eq('the truck moving leaves it as it is', w.release.noteView.value?.mode, 'notes')
+  await acknowledge(w.release)
+  eq('...and I acknowledge works there: one tap', [w.release.noteView.value, w.calls.posts], [null, [[ACK_URL, { ids: [ID] }]]])
 }
 {
   const w = world()
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   const view = w.release.noteView.value
-  eq('what it says', [view.mode, view.canShowMe, view.entries[0].title, view.entries[0].lines], ['notes', true, 'A title', ['A line.', 'A tab line.']])
+  eq('what it says', [view.mode, view.canShowMe, view.saving, view.entries[0].title, view.entries[0].lines], ['notes', true, false, 'A title', ['A line.', 'A tab line.']])
   eq('it counts as on screen', w.release.onScreen?.value, true)
-  w.release.noteGotIt()
-  await tick()
-  eq('Got it: marked seen', w.calls.posts, [[SEEN_URL, { ids: [ID] }]])
-  eq('...closed', [w.release.noteView.value, w.release.onScreen?.value], [null, false])
+  await acknowledge(w.release)
+  eq('I acknowledge: confirmed, for the entries shown', w.calls.posts, [[ACK_URL, { ids: [ID] }]])
+  eq('...closed once saved', [w.release.noteView.value, w.release.onScreen?.value], [null, false])
+  eq('...with nothing more to say', w.calls.toasts, [])
   await w.release.check()
   eq('...and not back in this view, whatever the next answer says', w.release.noteView.value, null)
-  eq('Got it starts no tour', w.calls.steps, [])
+  eq('I acknowledge starts no tour', w.calls.steps, [])
+}
+{
+  // The confirmation waits for the save, and can't be sent twice.
+  const w = world()
+  w.box.answer = NOTE_ANSWER
+  const save = deferred()
+  w.box.post = () => save.promise
+  await w.release.check()
+  const pending = w.release.noteAcknowledge?.()
+  await tick()
+  eq('while it saves, the note stays up and shows it is working', [w.release.noteView.value?.mode, w.release.noteView.value?.saving], ['notes', true])
+  w.release.noteAcknowledge?.()
+  w.release.noteShowMe()
+  await tick()
+  eq('...a second tap sends nothing, and Show me first starts nothing', [w.calls.posts.length, w.release.tourOpen.value], [1, false])
+  save.resolve({ success: true })
+  await pending
+  await tick()
+  eq('saved: the note closes', [w.release.noteView.value, w.calls.toasts], [null, []])
+}
+for (const [label, failure] of [
+  ['no signal', () => Promise.reject(new TypeError('Failed to fetch'))],
+  ['a 503', () => Promise.reject(Object.assign(new Error('x'), { status: 503, code: 'RELEASE_UNAVAILABLE' }))],
+  ['a timeout', () => Promise.reject(Object.assign(new Error('x'), { status: 0, code: 'TIMEOUT' }))],
+  ["an answer that isn't a yes", async () => ({})],
+]) {
+  // A driver is never kept from their loads.
+  const w = world()
+  w.box.answer = () => ({ notes: [ENTRY], tourOffered: true })
+  w.box.post = failure
+  await w.release.check()
+  await acknowledge(w.release)
+  eq(`not saved (${label}): the note closes, so they go on to their loads`, [w.release.noteView.value, w.release.onScreen?.value], [null, false])
+  eq(`...with the line (${label})`, w.calls.toasts, [[WORDS.notSaved, 'error']])
+  eq(`...nothing else is marked, and the offer waits for a later sign-in too (${label})`, w.calls.posts.map(([url]) => url), [ACK_URL])
+  await w.release.check()
+  eq(`...and it isn't asked again on this page (${label})`, w.release.noteView.value, null)
 }
 {
   const w = world({ performance: false })
@@ -396,28 +493,31 @@ for (const [label, start, clear] of [
   const w = world()
   w.box.answer = () => ({ notes: [{ id: ID, title: 'No tour', notes: [{ text: 'Just a line.' }], tour: [] }], tourOffered: false })
   await w.release.check()
-  eq('nothing to show them: no Show me', w.release.noteView.value.canShowMe, false)
+  eq('nothing to show them: no Show me first', w.release.noteView.value.canShowMe, false)
 }
 {
+  // "Show me first": the tour runs over the note, which is there again after it.
   const w = world()
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   w.release.noteShowMe()
   await tick()
-  eq('Show me: marked seen, and only that so far', w.calls.posts, [[SEEN_URL, { ids: [ID] }]])
+  eq('Show me first marks nothing', w.calls.posts, [])
   eq("the release's steps only, on the real tab", [w.calls.steps, w.s.tab], [['loads'], 'loads'])
-  eq('the card', [w.release.tourView.value.label, w.release.tourView.value.title, w.release.tourView.value.last], ['Step 1 of 3', 'Loads', false])
-  eq('the note is out of the way', w.release.noteView.value, null)
-  eq('the tour counts as on screen', w.release.onScreen?.value, true)
+  eq('the card', [w.release.tourView.value?.label, w.release.tourView.value?.title, w.release.tourView.value?.last], ['Step 1 of 3', 'Loads', false])
+  eq('the note waits under the tour', [w.release.noteView.value, w.release.onScreen?.value], [null, true])
   w.release.tourNext()
-  eq('Next: the Performance tab', [w.calls.steps, w.s.tab, w.release.tourView.value.label], [['loads', 'performance'], 'performance', 'Step 2 of 3'])
+  eq('Next: the Performance tab', [w.calls.steps, w.s.tab, w.release.tourView.value?.label], [['loads', 'performance'], 'performance', 'Step 2 of 3'])
   w.release.tourNext()
-  eq('Next: the fuel range', [w.s.tab, w.release.tourView.value.last], ['loads', true])
-  eq('nothing written along the way', w.calls.posts.length, 1)
+  eq('Next: the fuel range', [w.s.tab, w.release.tourView.value?.last], ['loads', true])
+  eq('nothing written along the way', w.calls.posts.length, 0)
   w.release.tourNext()
   await tick()
-  eq('Done: only tour_done_at', w.calls.posts.slice(1), [[TOUR_DONE_URL, { ids: [ID] }]])
-  eq('...closed and back where they were', [w.release.tourView.value, w.release.tourOpen.value, w.release.onScreen?.value, w.calls.restored], [null, false, false, ['loads']])
+  eq('Done: only the tour mark, for this release', w.calls.posts, [[TOUR_DONE_URL, { ids: [ID] }]])
+  eq('...closed and back where they were', [w.release.tourView.value, w.release.tourOpen.value, w.calls.restored], [null, false, ['loads']])
+  eq('...and the note is there again: the tour answers nothing', [w.release.noteView.value?.mode, w.release.onScreen?.value], ['notes', true])
+  await acknowledge(w.release)
+  eq('I acknowledge after it closes it', [w.release.noteView.value, w.calls.posts.map(([url]) => url)], [null, [TOUR_DONE_URL, ACK_URL]])
 }
 {
   const w = world()
@@ -428,13 +528,12 @@ for (const [label, start, clear] of [
   w.release.tourNext()
   w.release.tourSkip()
   await tick()
-  eq('Skip: no tour_done_at', w.calls.posts, [[SEEN_URL, { ids: [ID] }]])
+  eq('Skip: nothing written', w.calls.posts, [])
   eq('...back where they were', [w.release.tourOpen.value, w.calls.restored, w.s.tab], [false, ['loads'], 'loads'])
-  await w.release.check()
-  eq('...and no nagging', [w.release.noteView.value, w.release.tourOpen.value], [null, false])
+  eq('...and the note is there again', w.release.noteView.value?.mode, 'notes')
 }
 {
-  // A moving truck's open page never changes: not the tour either.
+  // A moving truck's open page never changes: not the tour either, and not the note under it.
   const w = world()
   w.box.answer = NOTE_ANSWER
   await w.release.check()
@@ -443,11 +542,19 @@ for (const [label, start, clear] of [
   w.s.motionAllowed = false
   await tick()
   eq('the truck starts moving: the tour stays up until they end it', [w.release.tourOpen.value, w.calls.restored], [true, []])
-  eq('...and writes nothing', w.calls.posts, [[SEEN_URL, { ids: [ID] }]])
+  eq('...and writes nothing', w.calls.posts, [])
   w.release.tourNext()
   eq('...and Next still works', w.release.tourView.value?.label, 'Step 2 of 3')
   w.release.tourSkip()
-  eq('...and so does Skip', w.release.tourOpen.value, false)
+  eq('...and so does Skip, back to the note', [w.release.tourOpen.value, w.release.noteView.value?.mode], [false, 'notes'])
+}
+{
+  const w = world({ motionAllowed: false })
+  w.box.answer = NOTE_ANSWER
+  await w.release.check()
+  w.release.noteShowMe()
+  await tick()
+  eq('Show me first on a truck read as moving: it says when, starts nothing, and the note stays', [w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value?.mode, w.calls.posts], [[WORDS.whenParked], false, 'notes', []])
 }
 {
   const w = world()
@@ -467,7 +574,7 @@ for (const [label, start, clear] of [
   await w.release.check()
   w.release.offerTake()
   await tick()
-  eq('Take the tour: answered, and the whole tour', [w.calls.posts, w.release.tourView.value.label], [[[SEEN_URL, { ids: [APP_TOUR_ROW] }]], 'Step 1 of 8'])
+  eq('Take the tour: answered, and the whole tour', [w.calls.posts, w.release.tourView.value?.label], [[[SEEN_URL, { ids: [APP_TOUR_ROW] }]], 'Step 1 of 8'])
   for (let i = 0; i < 7; i++) w.release.tourNext()
   eq('every step, in order', w.calls.steps, APP_TOUR_STEP_IDS)
   w.release.tourNext()
@@ -479,7 +586,7 @@ for (const [label, start, clear] of [
   await w.release.check()
   w.release.startAppTour()
   await tick()
-  eq('the Kit runs the whole tour any time, writing nothing to start', [w.release.tourView.value.label, w.calls.posts], ['Step 1 of 8', []])
+  eq('the Kit runs the whole tour any time, writing nothing to start', [w.release.tourView.value?.label, w.calls.posts], ['Step 1 of 8', []])
   w.release.tourSkip()
   eq('...and goes back to the Kit', w.s.tab, 'kit')
   w.s.motionAllowed = false
@@ -489,35 +596,13 @@ for (const [label, start, clear] of [
 }
 {
   const w = world()
-  w.box.answer = NOTE_ANSWER
-  await w.release.check()
-  w.s.motionAllowed = false
-  await tick()
-  w.release.noteShowMe()
-  await tick()
-  eq('Show me on a truck read as moving: the note is answered, it says when, and no tour starts', [w.calls.posts, w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value], [[[SEEN_URL, { ids: [ID] }]], [WORDS.whenParked], false, null])
-}
-{
-  const w = world()
   w.box.answer = () => ({ notes: [], tourOffered: true })
   await w.release.check()
   w.s.motionAllowed = false
   await tick()
   w.release.offerTake()
   await tick()
-  eq('Take the tour on a truck read as moving: the same, and the Kit still has it', [w.calls.posts, w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value], [[[SEEN_URL, { ids: [APP_TOUR_ROW] }]], [WORDS.whenParked], false, null])
-}
-{
-  const w = world()
-  w.box.answer = NOTE_ANSWER
-  w.options.api.post = async () => { throw new Error('no signal') }
-  const release = useDriverRelease(w.options)
-  await release.check()
-  release.noteGotIt()
-  await tick()
-  eq('a mark that fails holds nothing up, and the note stays gone from this page', release.noteView.value, null)
-  await release.check()
-  eq('...not twice in this session: unmarked, it comes at their next sign-in', release.noteView.value, null)
+  eq('Take the tour on a truck read as moving: answered, it says when, and the Kit still has it', [w.calls.posts, w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value], [[[SEEN_URL, { ids: [APP_TOUR_ROW] }]], [WORDS.whenParked], false, null])
 }
 {
   // The tour's row and the notes in one answer: the notes first, then the offer.
@@ -525,8 +610,9 @@ for (const [label, start, clear] of [
   w.box.answer = () => ({ notes: [ENTRY], tourOffered: true })
   await w.release.check()
   eq('notes first', w.release.noteView.value.mode, 'notes')
-  w.release.noteGotIt()
-  eq('then the offer', w.release.noteView.value.mode, 'offer')
+  await acknowledge(w.release)
+  eq('then, once confirmed, the offer', w.release.noteView.value?.mode, 'offer')
+  eq('...with nothing left waiting on the save', w.release.noteView.value?.saving, false)
 }
 {
   const w = world()
@@ -534,11 +620,13 @@ for (const [label, start, clear] of [
   await w.release.check()
   w.release.noteShowMe()
   await tick()
-  eq('Show me leaves the offer for their next sign-in: it opens neither over the tour', w.release.noteView.value, null)
+  eq('Show me first with the offer due as well: neither opens over the tour', w.release.noteView.value, null)
   w.release.tourSkip()
   await tick()
-  eq('...nor after it', w.release.noteView.value, null)
-  eq('...and marks only the note', w.calls.posts, [[SEEN_URL, { ids: [ID] }]])
+  eq('...the note comes back after it, first', w.release.noteView.value?.mode, 'notes')
+  await acknowledge(w.release)
+  eq('...then the offer', w.release.noteView.value?.mode, 'offer')
+  eq('...and only the confirmation was written', w.calls.posts, [[ACK_URL, { ids: [ID] }]])
 }
 
 // ── §8 ────────────────────────────────────────────────────────────────────
@@ -550,12 +638,13 @@ function fn(head) {
   if (a < 0) return ''
   return script.slice(a, script.indexOf('\n}\n', a) + 2)
 }
-const checks = [...script.matchAll(/release\.check\(([^)]*)\)/g)].map((m) => m[1])
-eq('it reads at one place and no other: nothing on an open page asks, no socket, timer, tap or coming back', checks, [''])
-ok('as the view opens, after the Performance answer', /checkPerformanceTab\(\)\.then\(\(\) => release\.check\(\)\)\n\s+\} catch/.test(fn('async function attemptInitialLoad()')))
+eq('it reads at one place in the whole file and no other: nothing on an open page asks, no socket, timer, tap or coming back', [...VIEW.matchAll(/release\.check\(/g)].length, 1)
+ok('as the view opens, alongside the Performance read, whose answer the look waits for', /release\.check\(checkPerformanceTab\(\)\)\n\s+\} catch/.test(fn('async function attemptInitialLoad()')))
 ok('coming back to the app reads the loads, as it did, and asks nothing of this', /visibilityState === 'visible' && isMounted\) \{\n\s+scheduleDriverRefetch\(\)\n\s+\}/.test(fn('function onVisibilityChange()')))
 ok("a load's page goes back as it did", /@back="detailRowIndex = null"/.test(VIEW))
 ok('the tab bar switches as it did', /@switch="handleTabSwitch"/.test(VIEW))
+ok('the note answers through I acknowledge alone', /@acknowledge="release\.noteAcknowledge"/.test(VIEW) && /@show-me="release\.noteShowMe"/.test(VIEW) && !/@got-it/.test(VIEW))
+ok('the not-saved line goes out as an error', /toast: \(text, type\) => toast\.show\(text, type\)/.test(script))
 
 // The view's own read of the Performance tab: only a yes or a no from the server makes it known.
 async function probeScene(answer) {
@@ -574,15 +663,18 @@ eq('a yes from the server: known, and they have the tab', await probeScene(async
 eq('a no (the switch off, or no week to show): known, and they have none', await probeScene(refusal(404)), [true, false])
 eq('a failed probe (503): not known, so the note stays off this page', await probeScene(refusal(503)), [false, false])
 eq('no signal: not known', await probeScene(async () => { throw new TypeError('Failed to fetch') }), [false, false])
-eq('a failed probe still settles, so the read after it goes ahead and the Kit learns it is on', await probeScene(refusal(503)).then(() => 'settled'), 'settled')
+eq('a failed probe still settles, so the look goes ahead and the Kit learns it is on', await probeScene(refusal(503)).then(() => 'settled'), 'settled')
 ok('it starts unknown', /const performanceKnown = ref\(false\)/.test(script))
 const inputs = script.slice(script.indexOf('noteInputs: () => ({'), script.indexOf('place: () => currentTab.value'))
 ok('the note reads the Performance answer', /partsKnown: performanceKnown\.value/.test(inputs))
 ok("...the tab and a load's page", /tab: currentTab\.value/.test(inputs) && /loadOpen: detailLoad\.value != null/.test(inputs))
 ok('...the lock screen', /onboarding: isOnboarding\.value/.test(inputs))
 ok('...the welcome window', /welcomeOpen: showWelcomeModal\.value/.test(inputs))
-ok('...and the windows it could land on', /dialogOpen: showSignModal\.value \|\| showDeclineConfirm\.value \|\| showContactsForm\.value \|\| showContactsPrompt\.value/.test(inputs))
+ok('...and the windows it could land on', /dialogOpen: showSignModal\.value \|\| showDeclineConfirm\.value \|\| showContactsForm\.value,\n/.test(inputs))
+ok('...not the contacts prompt, which waits for the look instead', !/showContactsPrompt/.test(inputs))
 ok('...and not the truck: the gate goes to the tour alone', !/voiceGate|motion|contactsPromptReady/i.test(inputs) && /motionAllowed: \(\) => voiceGate\.value\.allowed/.test(script))
+ok("the contacts prompt waits for the note's one look", /loaded: contactsPromptReady\.value && release\.lookDone\.value,/.test(script))
+ok('...and for the note and the tour to be off the screen', /dialogOpen: showSignModal\.value \|\| showDeclineConfirm\.value \|\| showContactsForm\.value \|\| release\.onScreen\.value/.test(script))
 ok('the view hands in the one-shot', /import \{ takeSignIn \} from '\.\.\/lib\/signInMoment'/.test(script) && /\n  takeSignIn,\n/.test(script))
 const LOGIN = read('views/LoginView.vue')
 const doLogin = LOGIN.slice(LOGIN.indexOf('async function doLogin()'), LOGIN.indexOf('</script>'))
@@ -602,7 +694,6 @@ ok('a step shows the real tab', /currentTab\.value = step\.tab/.test(stepFn))
 ok('a step marks nothing read: no handleTabSwitch', stepFn !== '' && !/handleTabSwitch|markMessagesRead|markNotificationsRead/.test(stepFn))
 ok('a step leaves the store alone, so a message arriving stays unread', !/driverStore\.currentTab/.test(stepFn))
 ok('the Messages tab opening in the tour marks nothing read', /function handleMarkRead\(ids\) \{[\s\S]{0,120}if \(release\.tourOpen\.value\) return\n\s+driverStore\.markMessagesRead\(ids\)/.test(script))
-ok('the contacts prompt waits for the note and the tour', /dialogOpen: showSignModal\.value \|\| showDeclineConfirm\.value \|\| showContactsForm\.value \|\| release\.onScreen\.value/.test(script))
 ok('a new load tapped during the tour ends it', /release\.closeTour\(\)\n\s+currentTab\.value = 'loads'/.test(fn('function viewAssignedLoad()')))
 ok('the note and the tour sit in the normal app only', VIEW.indexOf('<DriverReleaseNote') > VIEW.indexOf('NORMAL DRIVER UI') && VIEW.indexOf('<DriverAppTour') > VIEW.indexOf('NORMAL DRIVER UI'))
 ok("the Kit's button only with a good answer", /<section v-if="releaseFeatureOn" class="card tour-kit"/.test(VIEW))
@@ -619,24 +710,77 @@ for (const [label, src] of [['the note', NOTE], ['the tour', TOUR]]) {
   ok(`${label} reads and writes nothing itself`, !/useApi|fetch\(|localStorage|sessionStorage/.test(src))
   ok(`${label} takes its words from the lib`, /WORDS/.test(src))
 }
-ok('the note is the same kind of window as the contacts prompt', /<van-popup/.test(NOTE) && /:close-on-click-overlay="false"/.test(NOTE))
-for (const id of ['release-show-me', 'release-got-it', 'release-take-tour', 'release-skip-offer']) ok(`the note has ${id}`, NOTE.includes(`data-testid="${id}"`))
+ok('the note is the same kind of window as the contacts prompt', /<van-popup/.test(NOTE))
+ok('nothing but I acknowledge closes it: not a tap outside it, not the popup\'s own back-step close, and it has no close mark', /:close-on-click-overlay="false"/.test(NOTE) && /:close-on-popstate="false"/.test(NOTE) && !/closeable|close-icon/.test(NOTE))
+for (const id of ['release-acknowledge', 'release-acknowledge-line', 'release-show-me', 'release-take-tour', 'release-skip-offer']) ok(`the note has ${id}`, NOTE.includes(`data-testid="${id}"`))
+ok('no Got it button any more', !/release-got-it|got-it/.test(NOTE))
+const notesPart = NOTE.slice(NOTE.indexOf("v-if=\"view.mode === 'notes'\""), NOTE.indexOf('<template v-else>'))
+const at = (needle) => notesPart.indexOf(needle)
+ok('the line sits right above I acknowledge, and Show me first comes after it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-acknowledge"') && at('data-testid="release-acknowledge"') < at('release-show-me'))
+ok('I acknowledge is always there; Show me first only with steps to show', !/v-if[^>]*release-acknowledge"/.test(notesPart) && /v-if="view\.canShowMe" type="button" class="drn-second" data-testid="release-show-me"/.test(notesPart))
+ok('while it saves, I acknowledge shows it is working and both buttons wait', /:loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(notesPart) && /:disabled="view\.saving" @click="emit\('show-me'\)"/.test(notesPart))
+eq('the note says which answer was tapped, and those only', (NOTE.match(/defineEmits\(\[([^\]]*)\]\)/) || [])[1], "'acknowledge', 'show-me', 'take-tour', 'skip-offer'")
 for (const id of ['tour-card', 'tour-label', 'tour-next', 'tour-skip', 'tour-shield']) ok(`the tour has ${id}`, TOUR.includes(`data-testid="${id}"`))
 ok("every button is a 44 px tap", /\.tour-skip, \.tour-next, \.tour-videos \{ min-height: 44px/.test(TOUR) && /\.drn-primary \{ min-height: 44px/.test(NOTE) && /\.drn-second \{[\s\S]{0,80}min-height: 44px/.test(NOTE))
 ok('the clear layer stops a tap reaching the screen under it', /\.tour-shield \{ position: fixed; inset: 0;/.test(TOUR))
 ok('...under the new load banner, which stays tappable', /z-index: 150/.test(TOUR) && /z-index: 160/.test(TOUR))
 for (const [label, rel] of [['the login page', 'views/LoginView.vue'], ['the session store', 'stores/auth.js'], ['the router', 'router/index.js'], ['the app\'s start', 'main.js'], ['useApi', 'composables/useApi.js']]) {
-  ok(`${label} knows nothing of this feature`, !/driverRelease|DriverRelease|appTabs|appOpening|writesInFlight/.test(read(rel)))
+  ok(`${label} knows nothing of this feature`, !/driverRelease|DriverRelease|appTabs|appOpening|writesInFlight|driverNoticeRecord/.test(read(rel)))
 }
 
 // ── §10 ───────────────────────────────────────────────────────────────────
-section('10 only the driver app reads any of it')
-const importers = walk(CLIENT).filter((f) => /\.(vue|js)$/.test(f) && /driverReleaseNotices|useDriverRelease|driver\/me\/release/.test(fs.readFileSync(f, 'utf8')))
-  .map((f) => path.relative(CLIENT, f).replaceAll(path.sep, '/')).sort()
-eq('these files and no others', importers, ['components/driver/DriverAppTour.vue', 'components/driver/DriverReleaseNote.vue', 'composables/useDriverRelease.js', 'lib/driverReleaseNotices.js', 'views/DriverView.vue'])
-const oneShot = walk(CLIENT).filter((f) => /\.(vue|js)$/.test(f) && /signInMoment/.test(fs.readFileSync(f, 'utf8')))
-  .map((f) => path.relative(CLIENT, f).replaceAll(path.sep, '/')).sort()
-eq('the one-shot: the login form notes it and the driver app takes it, and nothing else knows it', oneShot, ['views/DriverView.vue', 'views/LoginView.vue'])
+section('10 only the driver app and the Drivers page read any of it')
+const filesNaming = (re) => walk(CLIENT).filter((f) => /\.(vue|js)$/.test(f) && re.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(CLIENT, f).replaceAll(path.sep, '/')).sort()
+eq('the note: these files and no others', filesNaming(/driverReleaseNotices|useDriverRelease|driver\/me\/release/), ['components/driver/DriverAppTour.vue', 'components/driver/DriverReleaseNote.vue', 'composables/useDriverRelease.js', 'lib/driverReleaseNotices.js', 'views/DriverView.vue'])
+eq('the one-shot: the login form notes it and the driver app takes it, and nothing else knows it', filesNaming(/signInMoment/), ['views/DriverView.vue', 'views/LoginView.vue'])
+eq('the record: the Drivers page alone', filesNaming(/driverNoticeRecord|DriverNoticesSection|driver-release\/acknowledgements/), ['components/drivers-db/DriverNoticesSection.vue', 'lib/driverNoticeRecord.js', 'views/DriversDbView.vue'])
+
+// ── §11 ───────────────────────────────────────────────────────────────────
+section("11 the Drivers page's record")
+if (record) {
+  const { RECORD_URL, RECORD_WORDS, recordView, countLine } = record
+  eq('the route', RECORD_URL, '/api/admin/driver-release/acknowledgements')
+  eq('the words', [RECORD_WORDS.heading, RECORD_WORDS.acknowledged, RECORD_WORDS.notYet, RECORD_WORDS.startedAfter], ['Driver notices', 'Acknowledged', 'Not yet', 'Started after this notice'])
+  eq('...and the count', countLine(8, 10), '8 of 10 acknowledged')
+  eq('...a driver with no name on file, and a record that can\'t be read', [RECORD_WORDS.noName, RECORD_WORDS.unreadable], ['No name on file', "Driver notices couldn't be loaded. Try again later."])
+  const ANSWER = {
+    notices: [{
+      id: '2026-02-01-second', title: 'Second', date: '2026-02-01', acknowledged: 1, asked: 3,
+      drivers: [
+        { name: '', state: 'not-yet', at: null },
+        { name: 'Casey Example', state: 'acknowledged', at: '2026-11-12T20:04:00.000Z' },
+        { name: 'Jordan Newhire', state: 'started-after', at: null },
+        { name: 'Riley Sample', state: 'not-yet', at: null },
+        { name: 'Made Up', state: 'something-else', at: null },
+      ],
+    }, { id: 'broken', title: 'No drivers' }],
+  }
+  datetime.setAppTimeZone('America/New_York')
+  const view = recordView(ANSWER)
+  eq('one block per notice the answer holds whole: its title, date and count', view?.map((n) => [n.id, n.title, n.date, n.count]), [['2026-02-01-second', 'Second', 'Feb 1, 2026', '1 of 3 acknowledged']])
+  eq('one row per driver: the three states, a time on the app\'s clock, and a name or that there is none', view?.[0].rows.map((r) => [r.name, r.state, r.text]), [
+    ['No name on file', 'not-yet', 'Not yet'],
+    ['Casey Example', 'acknowledged', 'Acknowledged Nov 12, 2026, 3:04 PM EST'],
+    ['Jordan Newhire', 'started-after', 'Started after this notice'],
+    ['Riley Sample', 'not-yet', 'Not yet'],
+  ])
+  datetime.setAppTimeZone('America/Chicago')
+  eq('the time follows the app\'s clock, not the viewer\'s', recordView(ANSWER)?.[0].rows[1].text, 'Acknowledged Nov 12, 2026, 2:04 PM CST')
+  datetime.setAppTimeZone('America/New_York')
+  for (const [label, raw] of [['nothing', null], ['no list', {}], ['a list on its own', []], ['notices that are no list', { notices: 'x' }]]) eq(`an answer it can't read (${label}) says so`, recordView(raw), null)
+  eq('an empty list is a record with no notices', recordView({ notices: [] }), [])
+} else {
+  ok('the record lib is there to test', false)
+}
+const SECTION = read('components/drivers-db/DriverNoticesSection.vue')
+const PAGE = read('views/DriversDbView.vue')
+ok('the Drivers page shows the section to a Super Admin only', /<DriverNoticesSection v-if="auth\.isSuperAdmin" \/>/.test(PAGE) && /import DriverNoticesSection from '\.\.\/components\/drivers-db\/DriverNoticesSection\.vue'/.test(PAGE))
+ok('...whose route is Super Admin only too', /path: '\/drivers',\s*name: 'drivers-db',\s*component: \(\) => import\('\.\.\/views\/DriversDbView\.vue'\),\s*meta: \{ roles: \['Super Admin'\] \}/.test(read('router/index.js')))
+ok('the section reads the record route and nothing else', /api\.get\(RECORD_URL\)/.test(SECTION) && [...SECTION.matchAll(/api\.(get|post|put|delete)\(/g)].length === 1)
+ok('...shows nothing while it loads, and nothing with the switch off or for another role', /v-if="state === 'shown' \|\| state === 'unreadable'"/.test(SECTION) && /err\.status === 404 \|\| err\.status === 403\) \? 'off' : 'unreadable'/.test(SECTION))
+ok('...says so when it can\'t be read', /RECORD_WORDS\.unreadable/.test(SECTION) && /if \(!view\) \{\s*state\.value = 'unreadable'/.test(SECTION))
+ok('...prints no raw HTML and keeps nothing in the browser', !/v-html|localStorage|sessionStorage/.test(SECTION))
+ok('...shows each notice\'s title, date, count and rows', ['driver-notice-title', 'driver-notice-count', 'driver-notice-row'].every((id) => SECTION.includes(`data-testid="${id}"`)))
 
 if (failures.length) {
   console.log(`\nFAILED: ${failures.length} of ${pass + failures.length}`)

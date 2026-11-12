@@ -1,11 +1,13 @@
 <template>
   <!-- "What's new" after a release, and a first-time driver's tour offer. DriverView decides when
-       (noteMoment()); this only shows the words and says which answer was tapped. -->
+       (noteMoment()); this only shows the words and says which answer was tapped. Nothing but
+       "I acknowledge" closes the note: no close mark, and a tap outside it does nothing. -->
   <van-popup
     :show="!!view"
     round
     teleport="body"
     :close-on-click-overlay="false"
+    :close-on-popstate="false"
     :style="{ width: 'min(92%, 380px)' }"
   >
     <div v-if="view" class="drn" role="dialog" aria-modal="true" aria-labelledby="drn-title" data-testid="release-dialog">
@@ -17,11 +19,16 @@
             <li v-for="line in entry.lines" :key="line" data-testid="release-line">{{ line }}</li>
           </ul>
         </section>
-        <template v-if="view.canShowMe">
-          <p class="drn-text">{{ WORDS.notesEncourage }}</p>
-          <van-button round block type="primary" native-type="button" class="drn-primary" data-testid="release-show-me" @click="emit('show-me')">{{ WORDS.showMe }}</van-button>
-        </template>
-        <button type="button" class="drn-second" data-testid="release-got-it" @click="emit('got-it')">{{ WORDS.gotIt }}</button>
+        <p v-if="view.canShowMe" class="drn-text">{{ WORDS.notesEncourage }}</p>
+        <p class="drn-text drn-ack-line" data-testid="release-acknowledge-line">{{ WORDS.acknowledgeLine }}</p>
+        <van-button
+          round block type="primary" native-type="button" class="drn-primary" data-testid="release-acknowledge"
+          :loading-text="WORDS.acknowledge" :loading="view.saving" :disabled="view.saving" @click="emit('acknowledge')"
+        >{{ WORDS.acknowledge }}</van-button>
+        <button
+          v-if="view.canShowMe" type="button" class="drn-second" data-testid="release-show-me"
+          :disabled="view.saving" @click="emit('show-me')"
+        >{{ WORDS.showMeFirst }}</button>
       </template>
       <template v-else>
         <h2 id="drn-title" class="drn-title" data-testid="release-heading">{{ WORDS.offerHeading }}</h2>
@@ -40,7 +47,7 @@ import { WORDS } from '../../lib/driverReleaseNotices'
 defineProps({
   view: { type: Object, default: null },
 })
-const emit = defineEmits(['show-me', 'got-it', 'take-tour', 'skip-offer'])
+const emit = defineEmits(['acknowledge', 'show-me', 'take-tour', 'skip-offer'])
 </script>
 
 <style scoped>
@@ -58,4 +65,6 @@ const emit = defineEmits(['show-me', 'got-it', 'take-tour', 'skip-offer'])
   font-size: 0.88rem; font-weight: 600; cursor: pointer;
 }
 .drn-second:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; border-radius: 8px; }
+.drn-second:disabled { opacity: 0.5; cursor: default; }
+.drn-ack-line { color: #0f172a; font-weight: 600; }
 </style>

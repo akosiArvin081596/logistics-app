@@ -325,7 +325,7 @@ function promptSection(c, L, S) {
     /<EmergencyContactsForm v-if="canEditContacts" :show="showContactsForm" @close="showContactsForm = false" @saved="contactsRevision\+\+" \/>/.test(normal), true)
   const wiring = (vs.match(/const showContactsPrompt = computed\(\(\) => contactsPromptDue\(\{([\s\S]*?)\}\)\)/) || [])[1] || ''
   c.eq('§9 the view asks the lib with each input from its own source', [
-    'role: auth.user?.role,', 'counts: driverStore.emergencyContacts,', 'onboarding: isOnboarding.value,', 'loaded: contactsPromptReady.value,',
+    'role: auth.user?.role,', 'counts: driverStore.emergencyContacts,', 'onboarding: isOnboarding.value,', 'loaded: contactsPromptReady.value && release.lookDone.value,',
     'answered: contactsPromptAnswered.value,', 'welcomeOpen: showWelcomeModal.value,', 'loadOpen: !!detailLoad.value,',
     'dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || release.onScreen.value,', 'motionAllowed: voiceGate.value.allowed,',
   ].map((line) => wiring.includes(line)), Array(9).fill(true))

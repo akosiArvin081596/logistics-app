@@ -130,8 +130,8 @@
          the real screens. Nothing here shows with the kill switch off. -->
     <DriverReleaseNote
       :view="releaseNote"
+      @acknowledge="release.noteAcknowledge"
       @show-me="release.noteShowMe"
-      @got-it="release.noteGotIt"
       @take-tour="release.offerTake"
       @skip-offer="release.offerSkip"
     />
@@ -1097,7 +1097,8 @@ async function handleSendVoiceNote({ clip, loadId }) {
 
 // The emergency contacts prompt. The answer is kept in this view only, so it returns
 // at the next app start (each sign-in mounts the view afresh); ready waits a moment
-// after the first load so the truck's first ELD read can hold it back.
+// after the first load so the truck's first ELD read can hold it back, and for the
+// "What's new" note's one look, so a slow sign-in can't have it take that look.
 const CONTACTS_PROMPT_SETTLE_MS = 3000
 const contactsPromptAnswered = ref(false)
 const contactsPromptReady = ref(false)
@@ -1113,7 +1114,7 @@ const showContactsPrompt = computed(() => contactsPromptDue({
   role: auth.user?.role,
   counts: driverStore.emergencyContacts,
   onboarding: isOnboarding.value,
-  loaded: contactsPromptReady.value,
+  loaded: contactsPromptReady.value && release.lookDone.value,
   answered: contactsPromptAnswered.value,
   welcomeOpen: showWelcomeModal.value,
   loadOpen: !!detailLoad.value,
@@ -1150,7 +1151,7 @@ const release = useDriverRelease({
     tab: currentTab.value,
     loadOpen: detailLoad.value != null,
     welcomeOpen: showWelcomeModal.value,
-    dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value || showContactsPrompt.value,
+    dialogOpen: showSignModal.value || showDeclineConfirm.value || showContactsForm.value,
   }),
   place: () => currentTab.value,
   showStep: showTourStep,
@@ -1158,7 +1159,7 @@ const release = useDriverRelease({
     currentTab.value = tab
     detailRowIndex.value = null
   },
-  toast: (text) => toast.show(text),
+  toast: (text, type) => toast.show(text, type),
 })
 const releaseFeatureOn = release.featureOn
 const releaseNote = release.noteView
@@ -1444,8 +1445,9 @@ async function attemptInitialLoad() {
     initialLoadFailed.value = false
     maybeShowWelcome()
     scheduleContactsPrompt()
-    // The note's lines depend on the Performance answer, so it asks after that.
-    checkPerformanceTab().then(() => release.check())
+    // Both reads start together; the note's one look waits for the Performance answer as well,
+    // since its lines depend on it.
+    release.check(checkPerformanceTab())
   } catch {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')

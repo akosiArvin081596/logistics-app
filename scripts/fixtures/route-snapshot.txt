@@ -9,6 +9,7 @@ GET /api/admin/cancelled-loads · requireRole("Super Admin")=anon@12b84c4b0134 �
 GET /api/admin/deleted-loads · requireRole("Super Admin")=anon@12b84c4b0134 · inline@813744b05504
 GET /api/admin/driver-day-overrides · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d9dcec3b11da
 GET /api/admin/driver-performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@55ea26ec64dc · (lib mount)
+GET /api/admin/driver-release/acknowledgements · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@8279b812ae2a · (lib mount)
 POST /api/admin/excluded-days · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c160be1ad7b3
 DELETE /api/admin/excluded-days/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@ee2cf300ceb7
 POST /api/admin/financials/freeze-closed-months · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@dd5e64af694a
@@ -121,8 +122,9 @@ PUT /api/driver/me/emergency-contacts · emergencyContactsFlagGate@528fdc8376d6 
 GET /api/driver/me/identity-file/:fileType · requireAuth@2f5c61384511 · inline@7c5a7e4a17bd
 GET /api/driver/me/performance · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · limiter · anon@d07da87e07b2 · (lib mount)
 GET /api/driver/me/release · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@bbfff113781e · (lib mount)
-POST /api/driver/me/release/seen · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
-POST /api/driver/me/release/tour-done · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@6e6c74d0758e · (lib mount)
+POST /api/driver/me/release/acknowledge · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@1fa34ac2b6fe · (lib mount)
+POST /api/driver/me/release/seen · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@1fa34ac2b6fe · (lib mount)
+POST /api/driver/me/release/tour-done · flagGate@3fb1956b1296 · anon@12b84c4b0134 · limiter · anon@1fa34ac2b6fe · (lib mount)
 GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc0
 GET /api/driver/performance/leaderboard · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · boardForDriversGate@4344e68091c3 · limiter · anon@021a4381e19a · (lib mount)
 POST /api/driver/respond · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@89982e68df5a

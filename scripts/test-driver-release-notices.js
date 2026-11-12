@@ -7,7 +7,7 @@
  *   §1  THE LIST: ids unique, in order and well shaped; plain words with no figure, name or real
  *       data; every tour step and part of the app known to the client; the first entry covers
  *       what has shipped
- *   §2  THE RULES: unseen notes newest first; which ids a driver may mark
+ *   §2  THE RULES: unseen notes newest first; which ids a driver may mark, and confirm
  *   §3  A SIGN-IN: nothing goes in the session, for any role; GET /api/auth/session doesn't change; a
  *       hook that throws costs no sign-in
  *   §4  A READ, over a real session store: what's unanswered, every time, newest first; reading marks
@@ -16,18 +16,28 @@
  *   §5  CHANGE-PASSWORD isn't touched: a forced change comes first, and the offer is still there after
  *   §6  THE KILL SWITCH: off, every route answers 404 FEATURE_OFF before any role check, nothing
  *       is written and a sign-in still works; the flag reads on unless false/0/no/off
- *   §7  WHO: only a Driver reaches the routes; every other role 403, nobody 401, a forced password
- *       change 403; a write without the header 403; a percentage driver reads like any other
- *   §8  SEEN: a note once per release; a repeat changes nothing; unknown ids refused and never
- *       stored; another driver's rows neither read nor written, whatever the body says; the budget
- *       is per account; the answer is never kept by a cache and holds no name
+ *   §7  WHO: only a Driver reaches the driver routes and only a Super Admin the record; every other
+ *       role 403, nobody 401, a forced password change 403; a write without the header 403; a
+ *       percentage driver reads like any other
+ *   §8  THE CONFIRMATION: only "I acknowledge" answers a note; it writes acknowledged_at and seen_at
+ *       once, at the server's time, and a repeat keeps the first; unknown ids and the tour's row
+ *       refused and never stored; another driver's rows neither read nor written, whatever the body
+ *       says; /seen takes the tour offer's row alone; the budget is per account; the answer is never
+ *       kept by a cache and holds no name
  *   §9  A FIRST-TIME DRIVER: no history, one tour offer that waits until answered and never comes
- *       back; an existing driver gets the notes and no offer
- *   §10 THE TOUR writes only its own tour_done_at, and only theirs; a repeat keeps the first time
- *   §11 A FAILED READ OR WRITE: no table still answers and locks nobody out; a sign-in works
+ *       back, and nothing confirmed for them; an existing driver gets the notes and no offer
+ *   §10 THE TOUR writes only its own tour_done_at, and only theirs: a release's tour answers no
+ *       note, the whole app tour answers the offer; a repeat keeps the first time; the columns, and
+ *       a table made before the confirmation gets its column
+ *   §11 A FAILED READ OR WRITE: no table still answers and locks nobody out; a sign-in works; a
+ *       confirmation or a record that can't be read or written says so with its own code
  *   §12 THE WIRING: server.js as shipped, the routes in the snapshot, the flag in the replica rules
  *       and the settings template, parameterized SQL, and nothing in pay, invoices or brokers
  *       reading the table
+ *   §13 THE RECORD, for a Super Admin: newest notice first; every active Driver account, and an
+ *       inactive one only if they confirmed; "acknowledged" with its time, "not yet", or "started
+ *       after" for a driver whose rows came from their first sign-in or who hasn't signed in; the
+ *       count leaves out those never asked; names, states and times only, never kept by a cache
  *
  * Runs the SHIPPED code: the session config, login, logout, session and change-password routes,
  * the guards and the purge are lifted out of server.js and wired to the real express-session and
@@ -201,7 +211,7 @@ function buildSessionMiddleware(db) {
 }
 
 const worlds = [];
-async function startWorld({ db = makeDb(), enabled = true, list = releases.RELEASES, hook } = {}) {
+async function startWorld({ db = makeDb(), enabled = true, list = releases.RELEASES, hook, now } = {}) {
 	const app = express();
 	app.set("trust proxy", 1);
 	app.use(express.json());
@@ -209,7 +219,7 @@ async function startWorld({ db = makeDb(), enabled = true, list = releases.RELEA
 	app.use(new Function("db", `${CURRENT_FLAG_SRC}\n${REFRESH_FLAG_SRC}\nreturn refreshPasswordChangeFlag;`)(db));
 	const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
 	const requireAuth = new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
-	const notices = routes.mount(app, { enabled, requireRole, db, releases: list, logger: quiet });
+	const notices = routes.mount(app, { enabled, requireRole, db, releases: list, logger: quiet, now });
 	const signIn = signInLib.createSignIn({
 		db, logAudit: () => {}, logAuditRefusal: () => {}, networkEvidence: () => ({}), auditEnabled: false, uniqueEmail: false, logger: quiet,
 		onSessionStart: hook || notices.startSession,
@@ -262,8 +272,10 @@ function call(world, method, url, { cookie, body, xrw = true } = {}) {
 	});
 }
 const STATE = "/api/driver/me/release";
+const ACK = "/api/driver/me/release/acknowledge";
 const SEEN = "/api/driver/me/release/seen";
 const TOUR_DONE = "/api/driver/me/release/tour-done";
+const RECORD = "/api/admin/driver-release/acknowledgements";
 
 async function signIn(world, username, password = PW) {
 	const r = await call(world, "POST", "/api/auth/login", { body: { username, password } });
@@ -275,7 +287,9 @@ const storedSession = (db, cookie) => {
 	const row = db.prepare("SELECT sess FROM sessions WHERE sid = ?").get(sidOf(cookie));
 	return row ? JSON.parse(row.sess) : null;
 };
-const seenRows = (db, userId) => db.prepare("SELECT release_id, seen_at, tour_done_at FROM driver_release_seen WHERE user_id = ? ORDER BY release_id").all(userId);
+// Every column but the ids: a table without the confirmation's column reads it as missing, not as a crash.
+const seenRows = (db, userId) => db.prepare("SELECT * FROM driver_release_seen WHERE user_id = ? ORDER BY release_id").all(userId)
+	.map((r) => ({ release_id: r.release_id, seen_at: r.seen_at, tour_done_at: r.tour_done_at, acknowledged_at: r.acknowledged_at }));
 
 const R1 = Object.freeze({ id: "2026-01-01-first", title: "First", notes: ["The first made-up note."], tour: ["loads"] });
 const R2 = Object.freeze({ id: "2026-02-01-second", title: "Second", notes: ["The second made-up note.", { text: "A made-up line for a tab.", needs: "performance" }], tour: ["performance"] });
@@ -356,6 +370,10 @@ async function main() {
 	eq("...and the tour's row", releases.isMarkableId(releases.APP_TOUR_ROW, TWO), true);
 	eq("...and nothing they made up", releases.isMarkableId("anything-else", TWO), false);
 	eq("...not even a built-in property's name", releases.isMarkableId("__proto__", TWO), false);
+	const listed = (id, list) => (typeof releases.isListedRelease === "function" ? releases.isListedRelease(id, list) : "no rule");
+	eq("a driver confirms a listed notice", listed(R1.id, TWO), true);
+	eq("...and not the tour's row, which is no notice", listed(releases.APP_TOUR_ROW, TWO), false);
+	eq("...nor anything made up", [listed("anything-else", TWO), listed("__proto__", TWO)], [false, false]);
 
 	// ── §3 ──────────────────────────────────────────────────────────────────
 	section("3 a sign-in");
@@ -402,8 +420,8 @@ async function main() {
 
 		w = await startWorld({ db, list: TWO });
 		eq("a new entry changes what's unanswered and nothing else", await notesOf(driver), [R2.id, R1.id]);
-		await call(w, "POST", SEEN, { cookie: driver, body: { ids: [R2.id, R1.id] } });
-		eq("answered, it doesn't come back", (await call(w, "GET", STATE, { cookie: driver })).body, NOTHING);
+		await call(w, "POST", ACK, { cookie: driver, body: { ids: [R2.id, R1.id] } });
+		eq("confirmed, it doesn't come back", (await call(w, "GET", STATE, { cookie: driver })).body, NOTHING);
 		eq("...at the next sign-in either", (await call(w, "GET", STATE, { cookie: await signIn(w, "driver-a") })).body, NOTHING);
 		eq("another driver's sign-in changes nobody else's answer", await notesOf(other), [R2.id, R1.id]);
 		await stopWorld(w);
@@ -453,8 +471,11 @@ async function main() {
 		eq("off, a Driver reads 404", seenOff(await call(w, "GET", STATE, { cookie: driver })), off);
 		const root = await signIn(w, "root-a");
 		eq("off, a Super Admin reads 404, before the role check", seenOff(await call(w, "GET", STATE, { cookie: root })), off);
-		eq("off, a mark answers 404", seenOff(await call(w, "POST", SEEN, { cookie: driver, body: { ids: [R1.id] } })), off);
+		eq("off, a confirmation answers 404", seenOff(await call(w, "POST", ACK, { cookie: driver, body: { ids: [R1.id] } })), off);
+		eq("off, a mark answers 404", seenOff(await call(w, "POST", SEEN, { cookie: driver, body: { ids: [releases.APP_TOUR_ROW] } })), off);
 		eq("off, a tour mark answers 404", seenOff(await call(w, "POST", TOUR_DONE, { cookie: driver, body: { ids: [R1.id] } })), off);
+		eq("off, the record answers 404 to a Super Admin", seenOff(await call(w, "GET", RECORD, { cookie: root })), off);
+		eq("...and to anyone else, before the role check", [seenOff(await call(w, "GET", RECORD, { cookie: driver })), seenOff(await call(w, "GET", RECORD))], [off, off]);
 		eq("off, nothing was written", w.db.prepare("SELECT COUNT(*) AS n FROM driver_release_seen").get().n, 0);
 		await stopWorld(w);
 	}
@@ -475,16 +496,24 @@ async function main() {
 	{
 		const w = await startWorld({ list: [R1] });
 		eq("no session: 401", (await call(w, "GET", STATE)).status, 401);
-		eq("no session, a mark: 401", (await call(w, "POST", SEEN, { body: { ids: [R1.id] } })).status, 401);
+		eq("no session, a confirmation: 401", (await call(w, "POST", ACK, { body: { ids: [R1.id] } })).status, 401);
+		eq("no session, a mark: 401", (await call(w, "POST", SEEN, { body: { ids: [releases.APP_TOUR_ROW] } })).status, 401);
+		eq("no session, the record: 401", (await call(w, "GET", RECORD)).status, 401);
 		for (const name of ["desk-a", "root-a", "backer-a"]) {
 			const c = await signIn(w, name);
 			eq(`${name} can't read it`, (await call(w, "GET", STATE, { cookie: c })).status, 403);
-			eq(`${name} can't mark`, (await call(w, "POST", SEEN, { cookie: c, body: { ids: [R1.id] } })).status, 403);
+			eq(`${name} can't confirm`, (await call(w, "POST", ACK, { cookie: c, body: { ids: [R1.id] } })).status, 403);
+			eq(`${name} can't mark`, (await call(w, "POST", SEEN, { cookie: c, body: { ids: [releases.APP_TOUR_ROW] } })).status, 403);
 			eq(`${name} can't mark a tour`, (await call(w, "POST", TOUR_DONE, { cookie: c, body: { ids: [R1.id] } })).status, 403);
 		}
+		for (const name of ["desk-a", "backer-a", "driver-a", "driver-pct"]) {
+			const c = await signIn(w, name);
+			eq(`${name} can't read the record: Super Admin only`, (await call(w, "GET", RECORD, { cookie: c })).status, 403);
+		}
+		eq("a Super Admin reads the record", (await call(w, "GET", RECORD, { cookie: await signIn(w, "root-a") })).status, 200);
 		const driver = await signIn(w, "driver-a");
-		const noHeader = await call(w, "POST", SEEN, { cookie: driver, xrw: false, body: { ids: [R1.id] } });
-		eq("a mark without the header is refused", [noHeader.status, noHeader.body.code], [403, "CSRF_HEADER_REQUIRED"]);
+		const noHeader = await call(w, "POST", ACK, { cookie: driver, xrw: false, body: { ids: [R1.id] } });
+		eq("a confirmation without the header is refused", [noHeader.status, noHeader.body && noHeader.body.code], [403, "CSRF_HEADER_REQUIRED"]);
 		eq("...and writes nothing", seenRows(w.db, 2), []);
 		const pct = await signIn(w, "driver-pct");
 		const a = (await call(w, "GET", STATE, { cookie: driver })).body;
@@ -495,51 +524,63 @@ async function main() {
 	{
 		const lib = fs.readFileSync(path.join(ROOT, "lib", "driver-release-routes.js"), "utf8");
 		ok("the routes read nothing about pay, trucks or loads", !/pay_type|directoryPay|drivers_directory|getJobTracking|FROM trucks|FROM invoices/.test(stripComments(lib)));
-		ok("every route goes switch, then Driver only, then the budget", [...stripComments(lib).matchAll(/app\.(?:get|post)\(PATHS\.\w+, (\w+), d\.requireRole\("Driver"\), (\w+),/g)].length === 3
-			&& [...stripComments(lib).matchAll(/app\.(?:get|post)\(PATHS\.\w+, flagGate, d\.requireRole\("Driver"\), limiter,/g)].length === 3);
-		ok("no route names another role", !/requireRole\("(Super Admin|Dispatcher|Investor)/.test(stripComments(lib)));
+		ok("every driver route goes switch, then Driver only, then the budget", [...stripComments(lib).matchAll(/app\.(?:get|post)\(PATHS\.\w+, (\w+), d\.requireRole\("Driver"\), (\w+),/g)].length === 4
+			&& [...stripComments(lib).matchAll(/app\.(?:get|post)\(PATHS\.\w+, flagGate, d\.requireRole\("Driver"\), limiter,/g)].length === 4);
+		eq("the record goes switch, then Super Admin only, then the budget, and it's the one route naming another role",
+			[...stripComments(lib).matchAll(/requireRole\(([^)]*)\)/g)].map((m) => m[1]).filter((r) => r !== '"Driver"'), ['"Super Admin"']);
+		ok("...in that order", /app\.get\(PATHS\.record, flagGate, d\.requireRole\("Super Admin"\), limiter,/.test(stripComments(lib)));
 	}
 
 	// ── §8 ──────────────────────────────────────────────────────────────────
-	section("8 seen");
+	section("8 the confirmation");
 	{
-		const w = await startWorld({ list: TWO });
+		let clock = Date.parse("2026-11-12T20:04:00.000Z");
+		const w = await startWorld({ list: TWO, now: () => clock });
 		const a = await signIn(w, "driver-a");
 		const b = await signIn(w, "driver-b");
 		const first8 = await call(w, "GET", STATE, { cookie: a });
-		eq("an existing driver reads every release they haven't seen, newest first", first8.body.notes.map((n) => n.id), [R2.id, R1.id]);
+		eq("an existing driver reads every release they haven't confirmed, newest first", first8.body.notes.map((n) => n.id), [R2.id, R1.id]);
 		eq("no name of theirs in the answer", /Casey|driver-a|casey@/.test(first8.text), false);
 		eq("the answer is never kept", first8.headers["cache-control"], "private, no-store");
 		eq("the fields are these and no others: nothing says a sign-in is due", Object.keys(first8.body).sort(), ["notes", "tourOffered"]);
 		eq("a note's fields are these and no others", Object.keys(first8.body.notes[0]).sort(), ["id", "notes", "title", "tour"]);
 
-		const mark = await call(w, "POST", SEEN, { cookie: a, body: { ids: [R2.id] } });
-		eq("a mark works", [mark.status, mark.body], [200, { success: true }]);
+		const ack = await call(w, "POST", ACK, { cookie: a, body: { ids: [R2.id] } });
+		eq("I acknowledge works", [ack.status, ack.body], [200, { success: true }]);
+		eq("it writes the server's time of the tap, as acknowledged_at and seen_at", seenRows(w.db, 2), [{ release_id: R2.id, seen_at: "2026-11-12T20:04:00.000Z", tour_done_at: null, acknowledged_at: "2026-11-12T20:04:00.000Z" }]);
 		eq("that release doesn't come back", (await call(w, "GET", STATE, { cookie: a })).body.notes.map((n) => n.id), [R1.id]);
 		eq("another driver still reads it", (await call(w, "GET", STATE, { cookie: b })).body.notes.map((n) => n.id), [R2.id, R1.id]);
-		const stamped = seenRows(w.db, 2)[0];
-		await new Promise((r) => setTimeout(r, 5));
-		await call(w, "POST", SEEN, { cookie: a, body: { ids: [R2.id] } });
-		eq("a repeat changes nothing: the first time stands", seenRows(w.db, 2)[0], stamped);
+		clock += 60 * 60 * 1000;
+		await call(w, "POST", ACK, { cookie: a, body: { ids: [R2.id] } });
+		eq("a repeat changes nothing: the first confirmation stands", (seenRows(w.db, 2)[0] || {}).acknowledged_at, "2026-11-12T20:04:00.000Z");
 
-		await call(w, "POST", SEEN, { cookie: a, body: { ids: [R1.id], userId: 3, user_id: 3, driverName: "Riley Sample" } });
+		await call(w, "POST", ACK, { cookie: a, body: { ids: [R1.id], userId: 3, user_id: 3, driverName: "Riley Sample" } });
 		eq("a body naming another driver writes only their own", [seenRows(w.db, 3).length, seenRows(w.db, 2).length], [0, 2]);
 		eq("...and the other driver's notes stand", (await call(w, "GET", STATE, { cookie: b })).body.notes.length, 2);
-		eq("their own seen rows answer their own question only", (await call(w, "GET", `${STATE}?userId=2`, { cookie: b })).body.notes.length, 2);
+		eq("their own rows answer their own question only", (await call(w, "GET", `${STATE}?userId=2`, { cookie: b })).body.notes.length, 2);
 
 		for (const [label, body] of [
 			["no ids", {}],
 			["an empty list", { ids: [] }],
 			["not a list", { ids: R1.id }],
 			["an id nobody listed", { ids: ["2099-01-01-made-up"] }],
+			["the tour's row, which is no notice", { ids: [releases.APP_TOUR_ROW] }],
 			["a good id beside a bad one", { ids: [R1.id, "made-up"] }],
 			["something that isn't text", { ids: [{ id: R1.id }] }],
-			["too many", { ids: [R1.id, R2.id, releases.APP_TOUR_ROW, R1.id, R2.id] }],
+			["too many", { ids: [R1.id, R2.id, R1.id] }],
 		]) {
-			const r = await call(w, "POST", SEEN, { cookie: b, body });
-			eq(`refused: ${label}`, [r.status, r.body && r.body.code], [400, "INVALID_RELEASE"]);
+			const r = await call(w, "POST", ACK, { cookie: b, body });
+			eq(`a confirmation refused: ${label}`, [r.status, r.body && r.body.code], [400, "INVALID_RELEASE"]);
 		}
 		eq("nothing refused was stored", seenRows(w.db, 3), []);
+
+		// Only the confirmation answers a note: an older page's "Got it" can't.
+		for (const [label, body] of [["a release id", { ids: [R1.id] }], ["a release id beside the tour's row", { ids: [releases.APP_TOUR_ROW, R1.id] }], ["the tour's row twice", { ids: [releases.APP_TOUR_ROW, releases.APP_TOUR_ROW] }]]) {
+			const r = await call(w, "POST", SEEN, { cookie: b, body });
+			eq(`/seen refuses ${label}`, [r.status, r.body && r.body.code], [400, "INVALID_RELEASE"]);
+		}
+		eq("...and stores none of it", seenRows(w.db, 3), []);
+		eq("...so the note still waits for its answer", (await call(w, "GET", STATE, { cookie: b })).body.notes.map((n) => n.id), [R2.id, R1.id]);
 		await stopWorld(w);
 	}
 	{
@@ -563,12 +604,18 @@ async function main() {
 		eq("older releases are marked seen, the offer waits", seenRows(w.db, 6).map((r) => [r.release_id, r.seen_at !== null]), [
 			[R1.id, true], [R2.id, true], [releases.APP_TOUR_ROW, false],
 		]);
+		eq("...and nothing is confirmed for them: they started after those notices and aren't asked", seenRows(w.db, 6).map((r) => r.acknowledged_at), [null, null, null]);
 		eq("the sign-in stamped them as usual", typeof w.db.prepare("SELECT last_login_at FROM users WHERE id = 6").get().last_login_at, "string");
 		await call(w, "POST", "/api/auth/logout", { cookie: c });
 		const again = await signIn(w, "driver-new");
 		eq("an unanswered offer waits for the next sign-in", (await call(w, "GET", STATE, { cookie: again })).body.tourOffered, true);
-		await call(w, "POST", SEEN, { cookie: again, body: { ids: [releases.APP_TOUR_ROW] } });
+		const skipped = await call(w, "POST", SEEN, { cookie: again, body: { ids: [releases.APP_TOUR_ROW] } });
+		eq("/seen takes the tour offer's own row", [skipped.status, skipped.body], [200, { success: true }]);
 		eq("answered, it's gone", (await call(w, "GET", STATE, { cookie: again })).body.tourOffered, false);
+		const answeredAt = seenRows(w.db, 6).find((r) => r.release_id === releases.APP_TOUR_ROW).seen_at;
+		await new Promise((r) => setTimeout(r, 5));
+		await call(w, "POST", SEEN, { cookie: again, body: { ids: [releases.APP_TOUR_ROW] } });
+		eq("a repeat keeps the first answer's time", seenRows(w.db, 6).find((r) => r.release_id === releases.APP_TOUR_ROW).seen_at, answeredAt);
 		await call(w, "POST", "/api/auth/logout", { cookie: again });
 		const third = await signIn(w, "driver-new");
 		eq("...and never comes back", (await call(w, "GET", STATE, { cookie: third })).body.tourOffered, false);
@@ -592,27 +639,43 @@ async function main() {
 	{
 		const w = await startWorld({ list: TWO });
 		const a = await signIn(w, "driver-a");
-		await call(w, "POST", SEEN, { cookie: a, body: { ids: [R2.id] } });
-		const seenAt = seenRows(w.db, 2)[0].seen_at;
 		const done = await call(w, "POST", TOUR_DONE, { cookie: a, body: { ids: [R2.id], userId: 3 } });
 		eq("finishing a release's tour works", [done.status, done.body], [200, { success: true }]);
 		const row = seenRows(w.db, 2)[0];
 		ok("it writes tour_done_at", typeof row.tour_done_at === "string" && !Number.isNaN(Date.parse(row.tour_done_at)));
-		eq("...and leaves seen_at", row.seen_at, seenAt);
+		eq("...and answers no note: seen_at and acknowledged_at stay empty", [row.seen_at, row.acknowledged_at], [null, null]);
+		eq("...so the note still waits for I acknowledge", (await call(w, "GET", STATE, { cookie: a })).body.notes.map((n) => n.id), [R2.id, R1.id]);
 		eq("...and only theirs", seenRows(w.db, 3), []);
 		await new Promise((r) => setTimeout(r, 5));
 		await call(w, "POST", TOUR_DONE, { cookie: a, body: { ids: [R2.id] } });
 		eq("a repeat keeps the first time", seenRows(w.db, 2)[0].tour_done_at, row.tour_done_at);
+		await call(w, "POST", ACK, { cookie: a, body: { ids: [R2.id] } });
+		eq("I acknowledge after the tour keeps the tour's time and answers the note", [seenRows(w.db, 2)[0].tour_done_at, seenRows(w.db, 2)[0].acknowledged_at !== null, (await call(w, "GET", STATE, { cookie: a })).body.notes.map((n) => n.id)], [row.tour_done_at, true, [R1.id]]);
 		const whole = await call(w, "POST", TOUR_DONE, { cookie: a, body: { ids: [releases.APP_TOUR_ROW] } });
 		eq("the whole tour from the Kit works for an existing driver", whole.status, 200);
 		eq("...and offers them nothing afterwards", (await call(w, "GET", STATE, { cookie: a })).body.tourOffered, false);
 		eq("a made-up id is refused", (await call(w, "POST", TOUR_DONE, { cookie: a, body: { ids: ["made-up"] } })).status, 400);
-		eq("the table holds these columns and no others", w.db.prepare("PRAGMA table_info(driver_release_seen)").all().map((c) => c.name), ["user_id", "release_id", "seen_at", "tour_done_at"]);
+		eq("the table holds these columns and no others", w.db.prepare("PRAGMA table_info(driver_release_seen)").all().map((c) => c.name), ["user_id", "release_id", "seen_at", "tour_done_at", "acknowledged_at"]);
 		const newcomer = await signIn(w, "driver-new");
 		eq("(the scene) a first-time driver's offer is waiting", (await call(w, "GET", STATE, { cookie: newcomer })).body.tourOffered, true);
 		await call(w, "POST", TOUR_DONE, { cookie: newcomer, body: { ids: [releases.APP_TOUR_ROW] } });
 		eq("finishing the whole tour from the Kit answers it", (await call(w, "GET", STATE, { cookie: newcomer })).body.tourOffered, false);
 		await stopWorld(w);
+	}
+	{
+		// A table made before the confirmation: the app adds the column at start, and keeps every row.
+		const db = makeDb();
+		db.exec("CREATE TABLE driver_release_seen (user_id INTEGER NOT NULL, release_id TEXT NOT NULL, seen_at TEXT, tour_done_at TEXT, PRIMARY KEY (user_id, release_id))");
+		db.prepare("INSERT INTO driver_release_seen (user_id, release_id, seen_at) VALUES (?, ?, ?)").run(6, releases.APP_TOUR_ROW, "2026-11-01T12:00:00.000Z");
+		const w = await startWorld({ db, list: TWO });
+		eq("an older table gets the column", db.prepare("PRAGMA table_info(driver_release_seen)").all().map((c) => c.name), ["user_id", "release_id", "seen_at", "tour_done_at", "acknowledged_at"]);
+		eq("...and keeps its rows", seenRows(db, 6), [{ release_id: releases.APP_TOUR_ROW, seen_at: "2026-11-01T12:00:00.000Z", tour_done_at: null, acknowledged_at: null }]);
+		const a = await signIn(w, "driver-a");
+		eq("...and a confirmation works on it", (await call(w, "POST", ACK, { cookie: a, body: { ids: [R1.id] } })).status, 200);
+		await stopWorld(w);
+		const again = await startWorld({ db, list: TWO });
+		eq("a second start changes nothing", db.prepare("PRAGMA table_info(driver_release_seen)").all().length, 5);
+		await stopWorld(again);
 	}
 
 	// ── §11 ─────────────────────────────────────────────────────────────────
@@ -626,9 +689,14 @@ async function main() {
 
 		const read = await call(w, "GET", STATE, { cookie: current });
 		eq("no table: the answer is still 200, with nothing to show", [read.status, read.body], [200, NOTHING]);
-		const write = await call(w, "POST", SEEN, { cookie: current, body: { ids: [R1.id] } });
-		eq("a mark that can't be saved says so, with its own code", [write.status, write.body.code], [503, "RELEASE_UNAVAILABLE"]);
+		const write = await call(w, "POST", ACK, { cookie: current, body: { ids: [R1.id] } });
+		eq("a confirmation that can't be saved says so, with its own code, so the app can say it wasn't", [write.status, write.body && write.body.code, write.body && write.body.success], [503, "RELEASE_UNAVAILABLE", undefined]);
 		eq("...and no database text reaches them", /sqlite|no such table/i.test(write.text), false);
+		const skip = await call(w, "POST", SEEN, { cookie: current, body: { ids: [releases.APP_TOUR_ROW] } });
+		eq("a mark that can't be saved says so too", [skip.status, skip.body && skip.body.code], [503, "RELEASE_UNAVAILABLE"]);
+		const record = await call(w, "GET", RECORD, { cookie: await signIn(w, "root-a") });
+		eq("the record that can't be read says so, with its own code", [record.status, record.body && record.body.code], [503, "RELEASE_UNAVAILABLE"]);
+		eq("...and no database text reaches the Super Admin", /sqlite|no such table/i.test(record.text), false);
 
 		const newcomer = await call(w, "POST", "/api/auth/login", { body: { username: "driver-new", password: PW } });
 		eq("a first sign-in works with no table", [newcomer.status, newcomer.body.success], [200, true]);
@@ -679,7 +747,7 @@ async function main() {
 	ok("the SQL is there to check", sqlCalls.length >= 4, sqlCalls.length);
 	ok("every statement is parameterized: nothing is built into its text", sqlCalls.every((sql) => !sql.includes("${")));
 	const snapshot = fs.readFileSync(path.join(ROOT, "scripts", "fixtures", "route-snapshot.txt"), "utf8");
-	for (const line of ["GET /api/driver/me/release ·", "POST /api/driver/me/release/seen ·", "POST /api/driver/me/release/tour-done ·"]) ok(`the route snapshot lists ${line.split(" ·")[0]}`, snapshot.includes(line));
+	for (const line of ["GET /api/driver/me/release ·", "POST /api/driver/me/release/acknowledge ·", "POST /api/driver/me/release/seen ·", "POST /api/driver/me/release/tour-done ·", "GET /api/admin/driver-release/acknowledgements ·"]) ok(`the route snapshot lists ${line.split(" ·")[0]}`, snapshot.includes(line));
 	const rules = require("../lib/replica-rules.js");
 	eq("a replica's --enable refuses the switch as a kill switch", rules.enableRefusal("DRIVER_RELEASE_NOTICES_ENABLED"), rules.ENABLE_REFUSED.DRIVER_RELEASE_NOTICES_ENABLED);
 	ok("...with that reason", /kill switch/.test(String(rules.ENABLE_REFUSED.DRIVER_RELEASE_NOTICES_ENABLED)));
@@ -688,6 +756,66 @@ async function main() {
 	ok("...and says it signs nobody out", /signs nobody out/.test(template.slice(template.indexOf("New-feature notices for drivers"), template.indexOf("# DRIVER_RELEASE_NOTICES_ENABLED=false"))));
 	const prTemplate = fs.readFileSync(path.join(ROOT, ".github", "pull_request_template.md"), "utf8");
 	ok("the PR template asks for an entry", prTemplate.includes("Driver-facing? Add a `lib/driver-releases.js` entry, or say why not."));
+
+	// ── §13 ─────────────────────────────────────────────────────────────────
+	section("13 the record");
+	{
+		const clock = Date.parse("2026-11-12T20:04:00.000Z");
+		const AT = "2026-11-12T20:04:00.000Z";
+		const db = makeDb();
+		const add = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email, full_name, company_name, must_change_password, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, ?)");
+		add.run(10, "driver-unnamed", HASH, "Driver", "", "unnamed@example.test", "", STAMPED);
+		add.run(11, "driver-later", HASH, "Driver", "Sam Later", "sam@example.test", "Sam Later", null);
+		const w = await startWorld({ db, list: TWO, now: () => clock });
+		await call(w, "POST", ACK, { cookie: await signIn(w, "driver-a"), body: { ids: [R2.id] } });
+		await call(w, "POST", ACK, { cookie: await signIn(w, "driver-pct"), body: { ids: [R2.id, R1.id] } });
+		await signIn(w, "driver-new");
+		await call(w, "POST", TOUR_DONE, { cookie: await signIn(w, "driver-b"), body: { ids: [R2.id] } });
+		// Morgan confirmed and then left; Taylor left without confirming anything.
+		db.prepare("UPDATE users SET disabled_at = ? WHERE id IN (7, 8)").run("2026-11-12T21:00:00.000Z");
+		const r = await call(w, "GET", RECORD, { cookie: await signIn(w, "root-a") });
+		eq("a Super Admin reads it", r.status, 200);
+		eq("it's never kept by a cache", r.headers["cache-control"], "private, no-store");
+		const notices = (r.body && Array.isArray(r.body.notices) && r.body.notices.length === 2) ? r.body.notices : [{ drivers: [] }, { drivers: [] }];
+		eq("one block per notice, newest first, each with its title and date", notices.map((n) => [n.id, n.title, n.date]), [[R2.id, "Second", "2026-02-01"], [R1.id, "First", "2026-01-01"]]);
+		const rowsOf = (n) => n.drivers.map((x) => [x.name, x.state, x.at]);
+		eq("the newest notice: every active driver and Morgan, who confirmed before leaving; not Taylor", rowsOf(notices[0]), [
+			["", "not-yet", null],
+			["Casey Example", "acknowledged", AT],
+			["Jordan Newhire", "started-after", null],
+			["Morgan Percent", "acknowledged", AT],
+			["Riley Sample", "not-yet", null],
+			["Sam Later", "started-after", null],
+		]);
+		eq("...the older one, from the same rows", rowsOf(notices[1]), [
+			["", "not-yet", null],
+			["Casey Example", "not-yet", null],
+			["Jordan Newhire", "started-after", null],
+			["Morgan Percent", "acknowledged", AT],
+			["Riley Sample", "not-yet", null],
+			["Sam Later", "started-after", null],
+		]);
+		eq("a finished tour is no confirmation: Riley is not yet", (notices[0].drivers.find((x) => x.name === "Riley Sample") || {}).state, "not-yet");
+		eq("the count leaves out those never asked", notices.map((n) => [n.acknowledged, n.asked]), [[2, 4], [1, 4]]);
+		eq("a notice holds these fields and no others", Object.keys(notices[0]).sort(), ["acknowledged", "asked", "date", "drivers", "id", "title"]);
+		eq("a driver's row holds a name, a state and a time, and nothing else", [...new Set(notices.flatMap((n) => n.drivers.map((x) => Object.keys(x).sort().join(","))))], ["at,name,state"]);
+		eq("no login, email, account id or other role in it", /@example\.test|driver-|"username"|"user_id"|"email"|Desk Example|Root Example|Backer Example|password/.test(r.text), false);
+		eq("the answer is the notices and nothing else", Object.keys(r.body || {}), ["notices"]);
+		await stopWorld(w);
+	}
+	if (typeof releases.acknowledgementRecord === "function") {
+		const people = [
+			{ id: 1, driver_name: "Avery Sample", full_name: "", disabled_at: null, last_login_at: STAMPED },
+			{ id: 2, driver_name: "", full_name: "Blake Example", disabled_at: "", last_login_at: STAMPED },
+		];
+		eq("an empty list makes an empty record", releases.acknowledgementRecord([], people, []), []);
+		eq("a name comes from the driver name, else the full name", releases.acknowledgementRecord([R1], people, [])[0].drivers.map((x) => x.name), ["Avery Sample", "Blake Example"]);
+		eq("a row with only a tour mark is no confirmation", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R1.id, seen_at: null, acknowledged_at: null }])[0].drivers[0].state, "not-yet");
+		eq("a row with seen_at alone came from a first sign-in", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R1.id, seen_at: STAMPED, acknowledged_at: null }])[0].drivers[0].state, "started-after");
+		eq("another notice's row doesn't count", releases.acknowledgementRecord([R1], people, [{ user_id: 1, release_id: R2.id, seen_at: STAMPED, acknowledged_at: STAMPED }])[0].drivers[0].state, "not-yet");
+	} else {
+		ok("the record's rule is there to test", false);
+	}
 
 	for (const w of worlds) if (w.db.open) w.db.close();
 	console.error = realError;
