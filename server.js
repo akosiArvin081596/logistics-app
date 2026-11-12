@@ -624,30 +624,9 @@ db.exec(`
 	)
 `);
 
-// Migrate: rebuild users table if CHECK constraint is outdated
-try {
-	db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('__test_sa__', '__test__', 'Super Admin')").run();
-	db.prepare("DELETE FROM users WHERE username = '__test_sa__'").run();
-} catch {
-	db.exec(`
-		ALTER TABLE users RENAME TO users_old;
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			role TEXT NOT NULL CHECK(role IN ('Super Admin', 'Dispatcher', 'Driver', 'Investor')),
-			driver_name TEXT DEFAULT '',
-			email TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		INSERT INTO users SELECT id, username, password_hash,
-			CASE role WHEN 'Admin' THEN 'Super Admin' ELSE role END,
-			driver_name, email, created_at FROM users_old;
-		DROP TABLE users_old;
-	`);
-	// Clear sessions so users re-login with updated roles
-	try { db.exec("DELETE FROM sessions"); } catch {}
-}
+// The role CHECK above, checked at each start: users is rebuilt only when that CHECK refuses "Super Admin",
+// in one transaction (lib/users-table-migrate.js).
+require("./lib/users-table-migrate").startupRoleCheck(db, { log: console });
 
 // Migrate: add full_name column if not present
 try {
@@ -32928,7 +32907,7 @@ app.post("/api/invoices/:id/receipt-pages/update", requireRole("Super Admin"), r
 // ⚠️ AND DO NOT "IMPROVE" THIS WITH sqlite_sequence. `users.id` is INTEGER
 // PRIMARY KEY AUTOINCREMENT, so its high-water mark looks like an ideal durable
 // latch — it survives DELETE and reads 413 against 12 live rows in production.
-// It is a trap. The CHECK-constraint probe at the top of this file inserts and
+// It is a trap. The CHECK-constraint probe run at the top of this file inserts and
 // deletes a throwaway `__test_sa__` row on EVERY BOOT, so the sequence advances
 // once per restart whether or not a user was ever created: a brand-new database
 // reads 1 after the first boot, 2 after the second. Measured on a virgin scratch
@@ -34517,7 +34496,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		// file for `UPDATE users SET` and the only statement that can write `role`
 		// is the one below; grep for `DELETE FROM users` and the only one reachable
 		// over HTTP is DELETE /api/users/:id (the other is the boot-time
-		// CHECK-constraint probe, matched on the literal username '__test_sa__').
+		// CHECK-constraint probe in lib/users-table-migrate.js, matched on the
+		// literal username '__test_sa__').
 		// Two write paths, two guards — so "zero Super Admins" is unreachable
 		// through the API. Re-run those two greps before adding a third path.
 		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
