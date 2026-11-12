@@ -22,6 +22,13 @@
  *   §4 e2e.yml: its own workflow (ci.yml unchanged), read-only token, no
  *      pull_request_target, no secret or environment, only ci.yml's pinned actions,
  *      no artifact upload, Playwright's Chromium, ci-run.sh on a runner.temp work dir.
+ *   §5 release-note.cjs, which every part's Driver sign-in goes through: on a stand-in page
+ *      it answers What's new with I acknowledge and a first-time driver's offer with Skip
+ *      for now, and says when nothing is due or nothing showed; a confirmation that isn't
+ *      saved, a note or offer that stays up, a tap that sends nothing, a refused Skip and a
+ *      notice with neither button each fail the step by name. Every flow that signs a
+ *      Driver in through the form calls it (the release notices flow aside, which tests the
+ *      note), and CI never sets the notices' kill switch.
  *
  * Hermetic: mkdtemp folders, stub lsof/curl on PATH, no server, browser or network.
  * Run: node scripts/test-e2e-ci-gate.js    # exits 1 on failure
@@ -281,6 +288,149 @@ const fresh = () => path.join(SANDBOX, `ci-work-${++n}`);
 	const minutes = Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(code) || [])[1]);
 	ok(minutes > 0 && minutes <= 45, `the job has its own timeout (${minutes} min)`);
 	ok(!/scripts\/e2e/.test(ci.split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")).join("\n")), "ci.yml (production's gate) does not run the browser harness");
+
+	// ---------------------------------------------------------------- §5 the driver app's notice
+	console.log("§5 release-note.cjs");
+	const { answerReleaseNote } = require(path.join(E2E, "release-note.cjs"));
+	// A page as the helper sees one: the server's answer, what's on screen, and the replies to its taps.
+	// Nothing changes by itself; the note shows once the helper waits for it, unless `upFromStart`.
+	function fakePage(o = {}) {
+		const BASE = "http://127.0.0.1:39999";
+		const server = { notes: o.notes || 0, offer: !!o.offer };
+		const screen = [...(o.screen || [])];
+		const log = { reads: 0, taps: [] };
+		let waited = !!o.upFromStart;
+		let waiters = [];
+		const up = () => waited && !o.neverShows && screen.length > 0;
+		const has = (kind) => up() && screen[0] === kind;
+		const respond = (pathname, status, body) => {
+			const r = { url: () => BASE + pathname, request: () => ({ method: () => "POST" }), status: () => status, json: async () => body };
+			const hit = waiters.filter((w) => w.pred(r));
+			waiters = waiters.filter((w) => !hit.includes(w));
+			for (const w of hit) w.resolve(r);
+		};
+		const loc = (sel) => ({
+			first: () => loc(sel),
+			locator: (sub) => loc(sub),
+			isVisible: async () => sel.includes("release-dialog") && up(),
+			count: async () => (sel.includes("release-acknowledge") ? Number(has("note")) : sel.includes("release-skip-offer") ? Number(has("offer")) : 0),
+			waitFor: async ({ state }) => {
+				if (sel.includes("release-dialog") && state === "visible") waited = true;
+				const now = sel.includes("release-dialog") ? up() : sel.includes("release-acknowledge") ? has("note") : has("offer");
+				if ((state === "visible") !== now) throw new Error(`Timeout exceeded waiting for ${sel} to be ${state}`);
+			},
+			click: async () => {
+				if (sel.includes("release-acknowledge")) {
+					log.taps.push("acknowledge");
+					if (o.sendNothing) return;
+					const status = o.ackStatus || 200;
+					const body = o.ackBody || { success: true };
+					const saved = status === 200 && body.success === true;
+					if (saved) server.notes = 0;
+					if (!o.staysUp) screen.splice(0, saved ? 1 : screen.length);
+					respond("/api/driver/me/release/acknowledge", status, body);
+				} else if (sel.includes("release-skip-offer")) {
+					log.taps.push("skip");
+					server.offer = false;
+					if (!o.staysUp) screen.shift();
+					respond("/api/driver/me/release/seen", o.seenStatus || 200, { success: true });
+				}
+			},
+		});
+		return {
+			log,
+			url: () => `${BASE}/driver`,
+			locator: loc,
+			waitForTimeout: async () => {},
+			waitForResponse: (pred) => new Promise((resolve, reject) => {
+				waiters.push({ pred, resolve });
+				setTimeout(() => reject(new Error('Timeout exceeded while waiting for event "response"')), 50);
+			}),
+			context: () => ({
+				request: {
+					get: async () => {
+						log.reads++;
+						return { status: () => o.dueStatus || 200, json: async () => ({ notes: Array.from({ length: server.notes }, (_, i) => ({ id: `2026-01-0${i + 1}-made-up` })), tourOffered: server.offer }) };
+					},
+				},
+			}),
+		};
+	}
+	const answer = async (o, who = "Step T") => {
+		const page = fakePage(o);
+		try { return { got: await answerReleaseNote(page, { who, waitMs: 50 }), page }; } catch (e) { return { err: e.message, page }; }
+	};
+	{
+		const { got, page } = await answer({});
+		eq("nothing due: nothing tapped, and it says so", [got, page.log.taps], ["nothing due", []]);
+		eq("...the switch off (404) is nothing due too", (await answer({ dueStatus: 404 })).got, "nothing due");
+	}
+	{
+		const { got, page } = await answer({ notes: 2, screen: ["note"] });
+		eq("What's new: I acknowledge, saved, and the note gone", [got, page.log.taps], ["What's new acknowledged", ["acknowledge"]]);
+	}
+	{
+		const { got, page } = await answer({ offer: true, screen: ["offer"] });
+		eq("a first-time driver's tour offer: Skip for now, and the offer gone", [got, page.log.taps], ["the tour offer skipped", ["skip"]]);
+	}
+	{
+		const { got, page } = await answer({ notes: 1, offer: true, screen: ["note", "offer"] });
+		eq("the note, then the offer after it: both answered, in that order", [got, page.log.taps], ["What's new acknowledged, then the tour offer skipped", ["acknowledge", "skip"]]);
+	}
+	{
+		const { got, page } = await answer({ notes: 1, screen: ["note"], upFromStart: true });
+		eq("a note already up is answered without asking the server first", [got, page.log.reads], ["What's new acknowledged", 1]);
+	}
+	{
+		const { got, page } = await answer({ notes: 1, screen: ["note"], neverShows: true });
+		eq("due, but the app's one look said no: nothing tapped, and it says so", [got, page.log.taps], ["due, not shown on this page", []]);
+	}
+	{
+		const { err } = await answer({ notes: 1, screen: ["note"], ackStatus: 503, ackBody: { error: "That couldn't be saved. Try again later.", code: "RELEASE_UNAVAILABLE" } }, "Step 9 — Driver");
+		ok(/^Step 9 — Driver: I acknowledge .* answered 503, so the confirmation wasn't saved$/.test(err || ""), "a confirmation that isn't saved fails the step, by name", err);
+	}
+	{
+		const { err } = await answer({ notes: 1, screen: ["note"], staysUp: true });
+		ok(/^Step T: the driver app's What's new stayed up after I acknowledge was saved$/.test(err || ""), "a note that stays up after its tap fails the step", err);
+	}
+	{
+		const { err } = await answer({ notes: 1, screen: ["note"], sendNothing: true });
+		ok(/^Step T: I acknowledge on the driver app's notice sent no answer \(/.test(err || ""), "a tap that sends nothing fails the step", err);
+	}
+	{
+		const { err } = await answer({ offer: true, screen: ["offer"], seenStatus: 400 });
+		ok(/^Step T: Skip for now .* answered 400, so the answer wasn't saved$/.test(err || ""), "a Skip for now the server refuses fails the step", err);
+	}
+	{
+		const { err } = await answer({ offer: true, screen: ["offer"], staysUp: true });
+		ok(/^Step T: the driver app's tour offer stayed up after Skip for now$/.test(err || ""), "an offer that stays up after Skip for now fails the step", err);
+	}
+	{
+		const { err } = await answer({ notes: 1, screen: ["something else"], upFromStart: true });
+		ok(/neither I acknowledge nor Skip for now/.test(err || ""), "a notice with neither button fails the step", err);
+	}
+	{
+		// Every flow here that signs a Driver in through the login form answers the notice; the release
+		// notices flow is the one that tests the note itself.
+		const flows = fs.readdirSync(E2E).filter((f) => /\.mjs$/.test(f));
+		const signsInDriver = (src) => /form\.login-form|autocomplete="username"/.test(src) && /['"`]\/driver['"`]|startsWith\('\/driver'\)/.test(src);
+		const own = "driver-release-notices.mjs";
+		const srcOf = (f) => fs.readFileSync(path.join(E2E, f), "utf8");
+		eq("every flow that signs a Driver in through the form answers the driver app's notice",
+			flows.filter((f) => f !== own && signsInDriver(srcOf(f)) && !/answerReleaseNote\(/.test(srcOf(f))), []);
+		ok(signsInDriver(srcOf("e2e.mjs")) && signsInDriver(srcOf("driver-walkthrough.mjs")), "...the check finds the two that do (e2e.mjs, driver-walkthrough.mjs)");
+		ok(!/answerReleaseNote|release-note\.cjs/.test(srcOf(own)), "the release notices flow answers the note by its own steps, never through the helper");
+		const loginFn = (/async function login\(page, who, username, password, homePath\) \{[\s\S]*?\n\}/.exec(srcOf("e2e.mjs")) || [""])[0];
+		ok(/await page\.waitForURL\([^\n]*homePath[^\n]*\n[\s\S]*releaseNote\.answerReleaseNote\(page, \{ who \}\)/.test(loginFn), "e2e.mjs's login() answers it once a Driver lands on /driver");
+		const hereFn = (/async function signInHere\(page, who, username, password\) \{[\s\S]*?\n\}/.exec(srcOf("e2e.mjs")) || [""])[0];
+		ok(/username === CREDS\.driver\.username[\s\S]*releaseNote\.answerReleaseNote\(page, \{ who \}\)/.test(hereFn), "...and so does signInHere(), for the run's Driver");
+		const walk = srcOf("driver-walkthrough.mjs");
+		ok(/startsWith\('\/driver'\), \{ timeout: 45000 \}\)\n\s*await answerReleaseNote\(page, \{ who: 'the walkthrough driver' \}\)\n\s*await H\.appReady\(\)\n\s*\}/.test(walk)
+			&& /\.driver-app'\)\.waitFor\(\{ state: 'visible', timeout: 45000 \}\)\n\s*await answerReleaseNote\(page, \{ who: 'the walkthrough driver', waitMs: 5000 \}\)/.test(walk),
+			"the walkthrough answers it off camera: after its own sign-in, and when a chapter finds the driver already in the app");
+		const quiet = [CI_RUN, path.join(E2E, "boot-server.sh"), path.join(E2E, "seed-made-up.cjs"), WF].map((f) => fs.readFileSync(f, "utf8")).join("\n");
+		ok(!/DRIVER_RELEASE_NOTICES_ENABLED/.test(quiet), "CI never turns the notices' kill switch off to keep the note away");
+	}
 
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

@@ -266,6 +266,7 @@ import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
 import keychain from './keychain.cjs'
+import releaseNote from './release-note.cjs'
 
 const BASE_URL = String(process.env.BASE_URL || '').replace(/\/+$/, '')
 const PHASE = String(process.env.PHASE || 'before').toLowerCase()
@@ -658,6 +659,9 @@ function rowOf(page, unit) {
   return page.locator('table.truck-table tbody tr', { has: page.locator('td.unit-number', { hasText: exactText(unit) }) })
 }
 
+// The role a sign-in's answer names, read before the page moves on; '' when it can't be read.
+const signedInRole = (resp) => resp.json().then((j) => (j && j.user && j.user.role) || '', () => '')
+
 async function login(page, who, username, password, homePath) {
   await page.goto(`${BASE_URL}/login`)
   const form = page.locator('form.login-form')
@@ -670,7 +674,11 @@ async function login(page, who, username, password, homePath) {
     form.locator('button[type="submit"]').click(),
   ])
   if (resp.status() !== 200) throw new Error(`${who} login answered ${resp.status()}`)
+  const role = await signedInRole(resp)
   await page.waitForURL((u) => u.pathname.startsWith(homePath), { timeout: 45000 })
+  // A Driver's sign-in can bring up the driver app's notice over everything, until it's answered:
+  // answered here as the driver would, so no part's next tap meets its overlay.
+  if ((role === 'Driver' || homePath === '/driver') && new URL(page.url()).pathname.startsWith('/driver')) await releaseNote.answerReleaseNote(page, { who })
 }
 
 async function getTruck(page, id) {
@@ -2515,6 +2523,12 @@ async function signInHere(page, who, username, password) {
     form.locator('button[type="submit"]').click(),
   ])
   if (resp.status() !== 200) throw new Error(`${who} login answered ${resp.status()}`)
+  // As login(): the run's Driver answers the driver app's notice before anything else on the page. Keyed
+  // on the username, so the timed sign-ins of the other roles read nothing more.
+  if (CREDS.driver && username === CREDS.driver.username) {
+    await page.waitForURL((u) => u.pathname !== '/login', { timeout: 60000 })
+    if (new URL(page.url()).pathname.startsWith('/driver')) await releaseNote.answerReleaseNote(page, { who })
+  }
 }
 
 // Land on `pathname`, see `ready`, then leave time for a late reload to happen.
