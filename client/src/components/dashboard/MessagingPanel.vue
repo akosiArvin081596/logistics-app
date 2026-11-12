@@ -310,8 +310,8 @@ function selectConversation(c) {
   store.selectConversation(c.driver, conversationRef(c), c.loadId || '')
 }
 
-// Conversation-list "last message" time. Pinned to the app zone (APP_TIMEZONE,
-// US Eastern) with a visible zone label so the owner (US) and the developer
+// Conversation-list "last message" time. Pinned to the app zone (APP_TIMEZONE)
+// with a visible zone label so the owner (US) and the developer
 // (Manila) share one login and still read the same clock.
 function formatTime(ts) {
   return fmtAppInstant(ts, { hour: 'numeric', minute: '2-digit', fallback: '' })

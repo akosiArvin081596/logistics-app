@@ -969,9 +969,12 @@ async function main() {
 		try { values = JSON.parse(fs.readFileSync(path.resolve(args["values-json"]), "utf8")).values; } catch (err) { refuse(`--values-json: ${err.message}`); }
 		if (!Array.isArray(values) || !values.length) refuse("--values-json holds no values: save the whole values.get answer of the Job Tracking tab");
 	}
-	// The lifted code and this report read one business clock: the app's.
+	// The lifted code and this report read one business clock: the app's, with its
+	// switch moment (a zone alone is refused).
 	const zone = appTime.resolveAppTimeZone(env.APP_TIMEZONE || process.env.APP_TIMEZONE);
 	process.env.APP_TIMEZONE = zone;
+	const zoneFrom = env.APP_TIMEZONE_FROM || process.env.APP_TIMEZONE_FROM;
+	if (zoneFrom) process.env.APP_TIMEZONE_FROM = zoneFrom;
 	const db = openReadOnly(dbFile);
 	try {
 		const missing = TABLES.filter((t) => !hasTable(db, t));

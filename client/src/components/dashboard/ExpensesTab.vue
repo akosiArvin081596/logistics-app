@@ -3879,7 +3879,7 @@ const stateDetail = ref(null)
 
 // IFTA per-state day detail: first/last ELD ping of the day. The server sends
 // these as ISO-Z (new Date(location_date_ms).toISOString()) — true instants.
-// The app zone (APP_TIMEZONE, US Eastern) with a visible zone label.
+// The app zone (APP_TIMEZONE) with a visible zone label.
 function fmtHM(iso) {
   return fmtAppInstant(iso, { hour: '2-digit', minute: '2-digit' })
 }

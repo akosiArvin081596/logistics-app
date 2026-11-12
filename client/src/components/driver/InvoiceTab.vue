@@ -126,7 +126,7 @@ const selectedInvoice = ref(null)
 const weekOffset = ref(0)
 
 // The Saturday-to-Friday week `weekOffset` weeks back, as 'YYYY-MM-DD' keys,
-// counted from today in the app zone (APP_TIMEZONE, US Eastern), never the
+// counted from today in the app zone (APP_TIMEZONE), never the
 // phone's clock: weekEnd is the week POST /api/invoices/generate bills, so it
 // must be the week the server's own "now" (getWeekRange()), the Friday 6:30 PM
 // cutoff below and the Friday batch all count in, and those are app-zone days.
@@ -140,7 +140,7 @@ const isCurrentWeek = computed(() => weekOffset.value === 0)
 
 // The deadline is the week's Friday at 6:30 PM on the app zone's clock, the
 // server's isAfterDeadline() rule, whatever zone the phone is set to. Its label
-// is the zone's generic name ("ET" for US Eastern), never a fixed string. Older
+// is the zone's generic name ("ET", "CT"), never a fixed string. Older
 // phones (Safari before 15.4) refuse 'shortGeneric' outright, so they get the
 // short name ("EDT"/"EST") instead of an exception that would blank the tab.
 const pastDeadline = computed(() => isAfterAppTime(weekEnd.value, '18:30'))

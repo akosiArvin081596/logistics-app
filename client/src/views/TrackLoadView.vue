@@ -100,7 +100,7 @@
                 <div class="track-eta-label">Estimated arrival</div>
                 <div class="track-eta-value">{{ formatEta(data.eta.minutesRemaining) }}</div>
                 <!-- One clock for the ETA on this card: the receiver's when the
-                     server read it (arrivalLocal, the badge's too), else US Eastern;
+                     server read it (arrivalLocal, the badge's too), else the app zone;
                      each labelled with its zone. -->
                 <div class="track-eta-sub">~{{ data.eta.distanceMiles }} mi &middot; {{ data.eta.arrivalLocal || formatFriendlyDate(data.eta.expectedAt) }}</div>
                 <div v-if="lastSeen" class="track-eta-sub track-last-seen">{{ lastSeen }}</div>
@@ -431,7 +431,7 @@ function formatEta(minutes) {
 // precisely why fmtSheetMoment is the entire body, since it splits on the value
 // itself rather than on the caller:
 //
-//   ZONED, real instants → converted to the app zone (US Eastern) and labelled
+//   ZONED, real instants → converted to the app zone (APP_TIMEZONE) and labelled
 //     eta.expectedAt (server .toISOString()), actualPickup, actualDelivery
 //     (strftime('…Z', changed_at))
 //   BARE sheet text, no zone → printed exactly as written, unlabelled

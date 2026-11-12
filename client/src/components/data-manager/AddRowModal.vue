@@ -94,7 +94,7 @@ const pickerTarget = ref('origin')
 
 // Job Tracking specific: auto-fill defaults and hidden fields
 //
-// ⚠️ These two dates are the app zone's day (APP_TIMEZONE, US Eastern), and that
+// ⚠️ These two dates are the app zone's day (APP_TIMEZONE), and that
 // is load-bearing: a zone-less toLocaleDateString was writing wrong data into
 // the sheet.
 //

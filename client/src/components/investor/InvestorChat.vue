@@ -293,7 +293,7 @@ function isMine(msg) {
   return (msg.from || '').toLowerCase() === myName.value
 }
 
-// Pinned to the app zone (APP_TIMEZONE, US Eastern) with a visible zone label.
+// Pinned to the app zone (APP_TIMEZONE) with a visible zone label.
 // Investors are not necessarily in that zone, so the label is what keeps the
 // timestamp honest for an out-of-state reader. `msg.timestamp` is a true instant
 // (ISO-Z).

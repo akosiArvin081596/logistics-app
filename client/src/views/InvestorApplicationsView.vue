@@ -634,7 +634,7 @@ const SQLITE_UTC_STAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/
 //      "SQLite timestamps on the wire" convention). `new Date()` then reads it
 //      as LOCAL, so the same row parsed to a different instant in New York and
 //      in Manila. Normalise to UTC first.
-//   2. RENDER. In the app zone (APP_TIMEZONE, US Eastern) with a visible zone
+//   2. RENDER. In the app zone (APP_TIMEZONE) with a visible zone
 //      label, never the viewer's zone.
 //
 // If that endpoint is ever fixed to emit ISO-Z, the regex simply stops matching

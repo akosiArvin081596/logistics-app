@@ -188,11 +188,19 @@ const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
 // The 503 page every page request gets while client/dist/index.html is missing.
 const { sendAppUpdating } = require("./lib/app-updating-page");
-// The business time zone, APP_TIMEZONE (default US Eastern): every "today", month,
+// The business time zone, APP_TIMEZONE (lib/app-time.js): every "today", month,
 // invoice week, Friday cutoff and sheet stamp is on its clock, never the server's
-// own UTC clock. lib/app-time.js
+// own UTC clock. A stored instant is read on the zone in force when it happened
+// (appTime.businessZoneAt()), so a switch at APP_TIMEZONE_FROM moves nothing past.
 const appTime = require("./lib/app-time");
 const APP_TIMEZONE = appTime.appTimeZone();
+// The browser's half of the switch (client/src/utils/datetime.js setAppTimeZoneEra()):
+// every answer that hands over APP_TIMEZONE adds the zone before APP_TIMEZONE_FROM
+// and that moment. Nothing when no switch is set, so those answers are as they were.
+const APP_TIMEZONE_SWITCH = appTime.appTimeZoneSwitch();
+const APP_TIMEZONE_ERA = APP_TIMEZONE_SWITCH
+	? { appTimeZoneEra: { before: APP_TIMEZONE_SWITCH.before, from: APP_TIMEZONE_SWITCH.from } }
+	: {};
 // APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, the month-end guards' driver floor also reads
 // a truck-assignment start on its business day (appDay()), so an evening start on a month's last day
 // (already the next month in UTC from 8 PM EDT, 7 PM EST) keeps that month under the guard.
@@ -2114,8 +2122,9 @@ function investorJobRowTest(headers, investorOwnerId, investorDriverSet) {
 // the opposite of in_service_date/retired_at. A bare .slice(0,7) reads '2026-08' for
 // a moment that is 2026-07-31 22:30 Eastern, so an assignment made in the evening
 // on the last day of a month lands one month FORWARD — and that month is a money
-// boundary. They therefore go through appDay(), the business clock every other
-// settlement figure uses. Bare 'YYYY-MM-DD' input is sliced as a string and never
+// boundary. They therefore take the business day on the clock in force when they
+// were made (appTime.businessDayOf()), so a switch of APP_TIMEZONE moves no past
+// assignment to another month. Bare 'YYYY-MM-DD' input is sliced as a string and never
 // parsed, because new Date('2026-08-01') is UTC midnight = the previous day in
 // every US zone — the exact inversion documented above truckChargeFromMonth().
 //
@@ -2128,7 +2137,7 @@ function assignmentMonthKey(ts) {
 	if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(0, 7);
 	const d = new Date(s);
 	if (isNaN(d)) return "";
-	return appDay(d).slice(0, 7);
+	return appTime.businessDayOf(d, APP_TIMEZONE).slice(0, 7);
 }
 
 // Intersect two ['YYYY-MM' | "", 'YYYY-MM' | ""] month intervals.
@@ -3052,7 +3061,7 @@ try {
 // the fix BEFORE the first rise, which is stable across re-scans as long as the
 // scan window starts before it — hence the overlap in fuelEventsScanWindow().
 //
-// local_day is the BUSINESS day (APP_TIMEZONE, US Eastern), NOT the truck's local
+// local_day is the BUSINESS day (on the clock in force at the fill), NOT the truck's local
 // day. There are two day conventions in this file and they are not
 // interchangeable: getEldTravelDaysByVehicle buckets by usTzForLongitude(lng)
 // because a driver's worked day belongs where the driver was, while everything
@@ -5892,9 +5901,9 @@ function payoutRules(overrides = null) {
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
 // A truck with a blank in-service date starts its fixed costs and its lease days on the business
-// day its row was created, not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED, exactly "true",
-// with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
-const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), (msg) => console.warn(`[truck-charge] ${msg}`));
+// day its row was created (on the clock in force then), not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED,
+// exactly "true", with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
+const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appTime.businessDayOf(new Date(ms), APP_TIMEZONE), (msg) => console.warn(`[truck-charge] ${msg}`));
 
 // Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
 // one warning per month per process, not one per page load.
@@ -19842,9 +19851,8 @@ function getWeekRange(referenceDate) {
 }
 
 // Is it past the submission cutoff — Friday 6:30 PM on the business clock,
-// APP_TIMEZONE (US Eastern; per CEO policy, Central until the client's 2026-10-08
-// decision) — for the week ending `weekEndDate` ('YYYY-MM-DD', as produced by
-// getWeekRange)?
+// APP_TIMEZONE (lib/app-time.js) — for the week ending `weekEndDate`
+// ('YYYY-MM-DD', as produced by getWeekRange)?
 //
 // WHY IT LOOKS LIKE THIS. The previous form was
 //   new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }))
@@ -19895,8 +19903,9 @@ function isAfterDeadline(weekEndDate) {
 // The date of a sheet stamp is read LITERALLY everywhere on the server (see
 // sheetDayKey): the business day a stamp was written with is the day it counts
 // on, whichever clock wrote it. The one server reader that needs a stamp's true
-// INSTANT, the ELD ping window in lib/load-haul.js, reads its clock from the
-// stamp's date (closeOutStampZone(), lib/app-time.js SHEET_STAMP_APP_ZONE_FROM).
+// INSTANT, the ELD ping window in lib/load-haul.js, reads it on the clock that
+// wrote it (closeOutStampMs(): lib/app-time.js SHEET_STAMP_APP_ZONE_FROM and
+// APP_TIMEZONE_FROM).
 
 // "Now" as a sheet stamp on the business clock (APP_TIMEZONE), in the EXACT
 // legacy format: MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second,
@@ -19908,8 +19917,8 @@ function isAfterDeadline(weekEndDate) {
 // were mis-dated, which put $1,100 of June revenue into July. The date part of
 // this string is what decides a load's revenue month, invoice week, and
 // driver-pay day, so the zone here is a money question, not a display one. From
-// 2026-08-03 it was Houston's clock; from the client's 2026-10-08 decision it is
-// APP_TIMEZONE's (US Eastern). Stamps already written keep the day they carry.
+// 2026-08-03 it was Houston's clock and from 2026-10-09 US Eastern's (the client's
+// 2026-10-08 decision); it is APP_TIMEZONE's. Stamps already written keep the day they carry.
 //
 // Intl/formatToParts asks the zone database directly and is DST-safe by
 // construction; a toLocaleString -> new Date() round trip is locale-fragile and
@@ -19963,17 +19972,19 @@ function appStampDay(stamp) {
 
 // The instant that stands for a business day ("YYYY-MM-DD") when a question is
 // asked "on a day": noon on the business clock, far from both of its midnights.
-// A day before the business clock moved to APP_TIMEZONE keeps the instant it was
+// A day before the business clock moved to US Eastern keeps the instant it was
 // always read at, 17:00 UTC (noon Central daylight time), so no closed month's
 // answer moves: a truck handed over between 16:00 and 17:00 UTC that day still
-// counts for the driver who took it. NaN for anything that is not a day.
+// counts for the driver who took it. A later day takes noon on the clock in force
+// that noon (appTime.businessWallClockToMs()), so a switch at APP_TIMEZONE_FROM
+// moves no past day's holder. NaN for anything that is not a day.
 function appNoonMs(day) {
 	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
 	if (!m) return NaN;
 	const noonUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], 17, 0, 0);
 	if (new Date(noonUtc).toISOString().slice(0, 10) !== m[0]) return NaN;
 	if (m[0] < appTime.SHEET_STAMP_APP_ZONE_FROM) return noonUtc;
-	return appTime.wallClockToMs(APP_TIMEZONE, +m[1], +m[2], +m[3], 12, 0, 0);
+	return appTime.businessWallClockToMs(APP_TIMEZONE, +m[1], +m[2], +m[3], 12, 0, 0);
 }
 
 // ============================================================
@@ -20453,7 +20464,7 @@ function recordPayRateChanges() {
 }
 
 // The rates in effect on a day: { at(subject, key, day) } → the latest rate whose
-// business day (APP_TIMEZONE) is on or before `day`; a day before recording began reads the
+// business day (on the clock in force when it was saved) is on or before `day`; a day before recording began reads the
 // earliest row (the rate in force when recording started). Read-only: a rate
 // with no history yet counts for every day, and one that differs from its latest
 // row (saved by a path that did not record it) counts from today, both in memory.
@@ -20464,7 +20475,7 @@ function loadPayRateIndex() {
 		const k = `${r.subject}:${r.subject_key}`;
 		if (!idx.has(k)) idx.set(k, []);
 		const d = new Date(r.effective_from);
-		idx.get(k).push({ day: isNaN(d) ? "" : appDay(d), rate: Number(r.rate) || 0 });
+		idx.get(k).push({ day: isNaN(d) ? "" : appTime.businessDayOf(d, APP_TIMEZONE), rate: Number(r.rate) || 0 });
 		latest.set(k, Number(r.rate) || 0);
 	}
 	const today = appDay(new Date());
@@ -20484,13 +20495,13 @@ function loadPayRateIndex() {
 	};
 }
 
-// The business day (APP_TIMEZONE) a receipt was submitted on, as SQL: SQLite reads the instant (created_at when
-// timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT (7 PM EST).
-// app_day_of_epoch() is registered on first use, so a script's own handle has it too.
+// The business day a receipt was submitted on (on the clock in force then), as SQL: SQLite reads the instant
+// (created_at when timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT
+// (7 PM EST). app_day_of_epoch() is registered on first use, so a script's own handle has it too.
 function receiptSubmittedDaySql() {
 	if (!receiptSubmittedDaySql.registered) {
 		db.function("app_day_of_epoch", { deterministic: true }, (seconds) => (/^-?\d{1,12}$/.test(String(seconds))
-			? appTime.dayInZone(new Date(Number(seconds) * 1000), APP_TIMEZONE)
+			? appTime.businessDayOf(new Date(Number(seconds) * 1000), APP_TIMEZONE)
 			: null));
 		receiptSubmittedDaySql.registered = true;
 	}
@@ -20770,7 +20781,7 @@ function expenseFrom(kind) {
 // guard below is inert and the ledger is byte-identical to before.
 const PERIOD_FINALIZE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PERIOD_FINALIZE_ENABLED ?? "").trim());
 
-// 'YYYY-MM-DD' for the current business day (APP_TIMEZONE, US Eastern), not
+// 'YYYY-MM-DD' for the current business day (APP_TIMEZONE), not
 // server-local: the close deadline is shown to the client in business time, and a
 // lock that fires a day off from what the UI promised is its own support ticket.
 //
@@ -23623,7 +23634,7 @@ const INVOICE_AUTOGEN_MAX_ATTEMPTS = 3;              // retries for a week with 
 const INVOICE_AUTOGEN_RETRY_MS = 15 * 60 * 1000;     // min gap between attempts
 
 // Most recent Friday (YYYY-MM-DD, business calendar) whose 7:00 PM on the
-// business clock (APP_TIMEZONE, US Eastern) has passed. Identifies the billing
+// business clock (APP_TIMEZONE) has passed. Identifies the billing
 // week to run: on Friday >= 19:00 it's today; any other time it's the previous
 // Friday. DST-aware via Intl.
 //
@@ -25529,9 +25540,10 @@ function detectAndPersistFuelEvents({ days = FUEL_EVENTS_SCAN_DAYS, persist = tr
 				unit: t.unit_number,
 				start_ms: e.startMs,
 				end_ms: e.endMs,
-				// Business day (APP_TIMEZONE) — see the fuel_events DDL comment for why
+				// Business day, on the clock in force at the fill, so a re-scan after a
+				// switch keeps a past fill's day — see the fuel_events DDL comment for why
 				// this is NOT usTzForLongitude/truck-local.
-				local_day: appDay(new Date(e.startMs)),
+				local_day: appTime.businessDayOf(new Date(e.startMs), APP_TIMEZONE),
 				pct_before: e.pctBefore,
 				pct_after: e.pctAfter,
 				rise: e.rise,
@@ -28520,11 +28532,11 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 		const fmtMoney = (n) =>
 			"$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 		const fmtDay = (s) => (s ? String(s).slice(0, 10) : "—");
-		// `paid_at` is an ISO instant, not a bare day: its APP_TIMEZONE day, where
-		// its first ten characters would be the UTC day.
+		// `paid_at` is an ISO instant, not a bare day: its business day (on the clock
+		// in force when it was paid), where its first ten characters would be the UTC day.
 		const fmtPaidDay = (s) => {
 			const ms = Date.parse(s || "");
-			return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), APP_TIMEZONE) : fmtDay(s);
+			return Number.isFinite(ms) ? appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : fmtDay(s);
 		};
 		const dateStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 		const payeeDisplay = report.payee.toUpperCase();
@@ -33128,7 +33140,7 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 			req.session.user = userSnapshot;
 			// appTimeZone: the same APP_TIMEZONE GET /api/auth/session hands over, for
 			// a browser that signed in on a fresh page without a session check.
-			req.session.save(() => res.json({ success: true, role: "Super Admin", appTimeZone: APP_TIMEZONE }));
+			req.session.save(() => res.json({ success: true, role: "Super Admin", appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA }));
 		});
 	} catch (error) {
 		console.error("Error during setup:", error.message);
@@ -33306,6 +33318,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			// The same APP_TIMEZONE GET /api/auth/session hands over: a sign-in from
 			// a fresh /login page has not run a session check yet.
 			appTimeZone: APP_TIMEZONE,
+			...APP_TIMEZONE_ERA,
 		});
 	} catch (error) {
 		// Through refuse(), so an unexpected throw after rotation (the re-read,
@@ -33353,14 +33366,15 @@ app.post("/api/auth/logout", (req, res) => {
 });
 
 // Get current session. `appTimeZone` hands the browser the same APP_TIMEZONE the
-// server dates instants in, so a viewer's "today" never comes from their laptop.
+// server dates instants in, so a viewer's "today" never comes from their laptop;
+// `appTimeZoneEra`, once a switch is set, the clock before it (APP_TIMEZONE_ERA).
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
 		// features: what the signed-in client may offer. voiceNotes is the record
 		// button (MESSAGE_VOICE_NOTES_ENABLED); notes already sent play either way.
-		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
 	} else {
-		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
+		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA });
 	}
 });
 
@@ -74568,13 +74582,13 @@ function coverageNoteFor(r) {
 	return parts.join("; ");
 }
 
-// The IFTA routes' default From: midnight on the business clock (APP_TIMEZONE) on
-// the 1st, two business months back. The server's own month and midnight are UTC's,
-// a month ahead from 8 PM Eastern on a month's last day.
+// The IFTA routes' default From: midnight on the business clock (the clock in force
+// that midnight) on the 1st, two business months back. The server's own month and
+// midnight are UTC's, a month ahead from 8 PM Eastern on a month's last day.
 function iftaDefaultStartIso(now = new Date()) {
 	const [y, m] = appDay(now).split("-").map(Number);
 	const first = new Date(Date.UTC(y, m - 3, 1));
-	return new Date(appTime.wallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
+	return new Date(appTime.businessWallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
 }
 
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
@@ -74757,9 +74771,10 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			const midLng = (prev.longitude + curr.longitude) / 2;
 			if (getStateFromCoords(midLat, midLng) !== state) continue;
 
-			// The business day, as the screen's From/To bounds and the load dates
-			// matched below are; the UTC day is already tomorrow from 8 PM Eastern.
-			const day = appTime.dayInZone(new Date(curr.location_date_ms), APP_TIMEZONE);
+			// The business day (on the clock in force at the ping), as the screen's
+			// From/To bounds and the load dates matched below are; the UTC day is
+			// already tomorrow from 8 PM Eastern.
+			const day = appTime.businessDayOf(new Date(curr.location_date_ms), APP_TIMEZONE);
 			if (!days[day]) {
 				days[day] = { miles: 0, firstPing: curr.location_date_ms, lastPing: curr.location_date_ms };
 			}
@@ -75232,16 +75247,16 @@ function kpiSettingMonthOrDay(v) {
 	return kpiSettingDay(v) || (typeof v === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(v) && v >= "2020-01" && v <= "2100-12");
 }
 
-// The business day (APP_TIMEZONE) of a stored instant: SQLite's
-// "YYYY-MM-DD HH:MM:SS" (UTC, no zone) or an ISO string with Z or an offset.
-// null when the value is neither.
+// The business day of a stored instant, on the clock in force when it happened:
+// SQLite's "YYYY-MM-DD HH:MM:SS" (UTC, no zone) or an ISO string with Z or an
+// offset. null when the value is neither.
 function kpiInstantDay(value, timeZone) {
 	const s = String(value ?? "").trim().slice(0, 40);
 	const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?\s?(Z|[+-]\d{2}:?\d{2})?$/i);
 	if (!m) return null;
 	const zone = !m[5] ? "Z" : (/^[+-]\d{4}$/.test(m[5]) ? `${m[5].slice(0, 3)}:${m[5].slice(3)}` : m[5].toUpperCase());
 	const ms = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4] || "00"}${zone}`);
-	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), timeZone) : null;
+	return Number.isFinite(ms) ? appTime.businessDayOf(new Date(ms), timeZone) : null;
 }
 
 function kpiYield() {
@@ -75923,7 +75938,7 @@ async function runKpiSnapshot(kind) {
 }
 
 // The schedule in words, for the admin page: the business zone only ("Eastern"
-// for the default, any other zone named as itself). One wording, in
+// or "Central", any other zone named as itself). One wording, in
 // lib/kpi-schedule.js scheduleText().
 function kpiScheduleText(tz) {
 	return kpiSchedule.scheduleText(tz);

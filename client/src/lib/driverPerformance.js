@@ -5,6 +5,7 @@
 // Pinned by scripts/test-driver-performance-client.mjs.
 
 import { availabilityRangeText } from './availabilityText.js'
+import { appZoneLabel } from '../utils/datetime.js'
 
 export const OWN_URL = '/api/driver/me/performance'
 export const BOARD_URL = '/api/driver/performance/leaderboard'
@@ -23,7 +24,8 @@ export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 export const newWeekLine = (day) => `A new week starts Saturday, ${day}.`
 export const NO_LOADS_LINE = 'Nothing has counted yet this week.'
 export const NO_LOADS_LAST_WEEK = 'Nothing counted last week.'
-export const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
+// The zone is the business clock's own ("ET", "CT"), never a fixed word.
+export const weekClosesLine = () => `Week closes Fri 11:59 PM ${appZoneLabel()}`
 export const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
 
 // The three labels the server may choose. An answer holding anything else shows no label.
@@ -132,7 +134,7 @@ export function ownWeekView(answer, periodId) {
     paceId: shownPace,
     width,
     left: leftWords,
-    closes: current && !reached && !newWeek ? WEEK_CLOSES : '',
+    closes: current && !reached && !newWeek ? weekClosesLine() : '',
     newWeek: newWeek ? newWeekLine(week.nextWeekStarts) : '',
     rule: `Each pickup counts ${weights.pickup} and each delivery ${weights.delivery}.`,
     lowered: current && week.targetLowered === true ? LOWER_TARGET_LINE : '',
@@ -221,7 +223,7 @@ export function boardView(answer, periodId) {
   const answered = Array.isArray(board.categories) ? board.categories : []
   return {
     range: availabilityRangeText(board.start, board.end),
-    closes: periodId === 'this-week' ? WEEK_CLOSES : '',
+    closes: periodId === 'this-week' ? weekClosesLine() : '',
     tiles: CATEGORIES.map((c) => tileView(c, answered)),
   }
 }

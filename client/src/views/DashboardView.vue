@@ -153,7 +153,7 @@ const driverOptions = computed(() => {
 
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
-  // The app zone (APP_TIMEZONE, US Eastern), like every other time in this app.
+  // The app zone (APP_TIMEZONE), like every other time in this app.
   // A bare toLocaleTimeString() renders in the viewer's zone AND omits the
   // label, so on a shared login the same refresh read 8:05 AM to one person and
   // 9:05 PM to the other, with nothing on screen to explain the gap.

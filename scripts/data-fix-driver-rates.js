@@ -646,8 +646,10 @@ function main() {
 	let dbFile;
 	try { ({ env, file: dbFile } = envFor({ root: ROOT, dbPath: args.db || path.join(ROOT, "app.db"), envFile: args["env-file"] || null })); } catch (err) { refuse(err.message); }
 	if (!fs.existsSync(dbFile)) refuse(`no database at ${dbFile}`);
-	// lib/app-time.js reads the zone from this process: the run's own setting.
+	// lib/app-time.js reads the zone from this process: the run's own setting, with
+	// its switch moment (a zone alone is refused).
 	if (env.APP_TIMEZONE) process.env.APP_TIMEZONE = env.APP_TIMEZONE;
+	if (env.APP_TIMEZONE_FROM) process.env.APP_TIMEZONE_FROM = env.APP_TIMEZONE_FROM;
 	const db = openDb({ root: ROOT, dbFile, readonly: isDry });
 	const readonlyHandle = db.readonly;
 	const applyCommand = `cd ${ROOT} && ${process.execPath} scripts/data-fix-driver-rates.js --plan=${path.resolve(args.plan)} --approval=${plan.approval} --db=${dbFile}`;

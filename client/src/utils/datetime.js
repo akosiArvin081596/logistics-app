@@ -2,10 +2,11 @@
  * Date/time helpers.
  *
  * THE RULE, decided by the client on 2026-10-08: every date and time in LogisX
- * is US Eastern. The zone is ONE setting, APP_TIMEZONE (default
+ * is on one business clock. The zone is ONE setting, APP_TIMEZONE (default
  * America/New_York, so EST and EDT follow by themselves), which the server sends
  * (see setAppTimeZone below). It replaced the 2026-08-04 rule "all time and date
- * are Houston time".
+ * are Houston time". Once the server moves it at APP_TIMEZONE_FROM, each past
+ * instant is read on the clock in force when it happened (setAppTimeZoneEra).
  *
  *   • A value that CARRIES A ZONE (ISO '…Z', a '±HH:MM' offset) is a real
  *     INSTANT → render it in the app zone, WITH a zone label (EDT/EST).
@@ -80,6 +81,41 @@ export function setAppTimeZone(timeZone) {
 /** The zone in use: the server's APP_TIMEZONE, or America/New_York until it arrives. */
 export function appTimeZone() {
   return appZone
+}
+
+// The switch, once the server has one set: every instant before `fromMs` was
+// dated on `before`. null: every instant is read on the app zone.
+let appEra = null
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/
+
+/**
+ * Adopt the server's switch: `appTimeZoneEra`, { before, from }, on the same
+ * answers as APP_TIMEZONE (stores/auth.js) once APP_TIMEZONE_FROM is set. Each
+ * instant is then read on the clock in force at it, so a past one keeps the day
+ * and the label it had; "now" and later instants on the app zone. An answer
+ * without it (no switch, or one rolled back) ends it, and a value this browser
+ * cannot read leaves none. Never throws. Returns the era in use, or null.
+ */
+export function setAppTimeZoneEra(era) {
+  appEra = null
+  if (!era || typeof era !== 'object') return appEra
+  const before = typeof era.before === 'string' ? era.before : ''
+  const from = typeof era.from === 'string' ? era.from.trim() : ''
+  if (!APP_TIME_ZONE_RE.test(before) || !ISO_INSTANT_RE.test(from)) return appEra
+  const fromMs = Date.parse(from)
+  if (!Number.isFinite(fromMs)) return appEra
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: before })
+  } catch {
+    return appEra
+  }
+  appEra = Object.freeze({ before, fromMs })
+  return appEra
+}
+
+/** The zone an instant (epoch ms) is read on: the era's zone before its moment, else the app zone. */
+function zoneAt(ms) {
+  return appEra && ms < appEra.fromMs ? appEra.before : appZone
 }
 
 /**
@@ -196,7 +232,7 @@ const APP_INSTANT_FORMAT = Object.freeze({
 export function fmtAppInstant(v, { fallback = '—', ...format } = {}) {
   const ms = instantMs(v)
   if (Number.isNaN(ms)) return fallback
-  const options = { ...(Object.keys(format).length ? format : APP_INSTANT_FORMAT), timeZone: appZone, timeZoneName: 'short' }
+  const options = { ...(Object.keys(format).length ? format : APP_INSTANT_FORMAT), timeZone: zoneAt(ms), timeZoneName: 'short' }
   const key = JSON.stringify(options)
   let f = INSTANT_FORMATTERS.get(key)
   if (!f) {
@@ -209,7 +245,8 @@ export function fmtAppInstant(v, { fallback = '—', ...format } = {}) {
 /**
  * Resolve a bare sheet stamp to a true INSTANT, picking the era by its date:
  * before SHEET_STAMP_HOUSTON_FROM a UTC wall clock, then a Houston one, and from
- * SHEET_STAMP_APP_ZONE_FROM one in the app zone, the zone the server stamps in.
+ * SHEET_STAMP_APP_ZONE_FROM one on the clock the server stamped with then: the
+ * era's zone before the switch (setAppTimeZoneEra), the app zone from it.
  *
  * NARROW PURPOSE: genuine instant math only — ETA arithmetic, and durations.
  * Do NOT use it to derive a day, a month, or anything a figure is bucketed by:
@@ -225,14 +262,26 @@ export function parseSheetStamp(v) {
     const ymd = `${year}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     if (ymd < SHEET_STAMP_HOUSTON_FROM) {
       d = new Date(Date.UTC(+year, +mo - 1, +day, +hour, +minute, +(seconds || 0)))
+    } else if (ymd < SHEET_STAMP_APP_ZONE_FROM) {
+      d = wallClockToInstant(SHEET_STAMP_HOUSTON_ZONE, +year, +mo, +day, +hour, +minute, +(seconds || 0))
     } else {
-      const zone = ymd < SHEET_STAMP_APP_ZONE_FROM ? SHEET_STAMP_HOUSTON_ZONE : appZone
-      d = wallClockToInstant(zone, +year, +mo, +day, +hour, +minute, +(seconds || 0))
+      d = stampInstant(+year, +mo, +day, +hour, +minute, +(seconds || 0))
     }
   } else {
     d = new Date(v)
   }
   return isNaN(d.getTime()) ? null : d
+}
+
+// A stamp's wall clock on the clock that wrote it: the era's zone while that
+// reading is before its moment (the hour a move west repeats reads as its first
+// instant, as the server reads it), else the app zone.
+function stampInstant(y, mo, d, h, mi, s) {
+  if (appEra) {
+    const before = wallClockToInstant(appEra.before, y, mo, d, h, mi, s)
+    if (before.getTime() < appEra.fromMs) return before
+  }
+  return wallClockToInstant(appZone, y, mo, d, h, mi, s)
 }
 
 // NOTE: sheetStampHoustonDay() and formatDeliveredLocal() both lived here and
@@ -303,7 +352,7 @@ export function sheetSortKey(v) {
   if (isZoned(s)) {
     const ms = instantMs(s)
     if (Number.isNaN(ms)) return ''
-    const p = zonedParts(ms, appZone)
+    const p = zonedParts(ms, zoneAt(ms))
     return `${p.year}${p.month}${p.day}${p.hour}${p.minute}${p.second}`
   }
 
@@ -513,7 +562,7 @@ function utcYmd(ms) {
 export function appDayOf(v) {
   if (typeof v === 'string' && isYmd(v)) return Number.isNaN(ymdUtcMs(v)) ? '' : v.trim()
   const ms = instantMs(v)
-  return Number.isNaN(ms) ? '' : dayIn(ms, appZone)
+  return Number.isNaN(ms) ? '' : dayIn(ms, zoneAt(ms))
 }
 
 /**
@@ -550,7 +599,7 @@ export function fmtAppDate(v, { fallback = '—', ...format } = {}) {
     return Number.isNaN(ms) ? fallback : new Intl.DateTimeFormat('en-US', { ...fields, timeZone: 'UTC' }).format(new Date(ms))
   }
   const ms = instantMs(v)
-  return Number.isNaN(ms) ? fallback : new Intl.DateTimeFormat('en-US', { ...fields, timeZone: appZone }).format(new Date(ms))
+  return Number.isNaN(ms) ? fallback : new Intl.DateTimeFormat('en-US', { ...fields, timeZone: zoneAt(ms) }).format(new Date(ms))
 }
 
 /**
@@ -598,6 +647,17 @@ function dayStartMs(ymd, timeZone) {
   return dayIn(ms, timeZone) === day ? ms : utcMidnight - tzOffsetMs(utcMidnight, timeZone)
 }
 
+// The first instant of business day `ymd` on the clock in force at it: the era's
+// zone while that midnight is before its moment, else the app zone. The day of a
+// switch west is then an hour longer, and no day is skipped or repeated.
+function appDayStartMs(ymd) {
+  if (appEra) {
+    const before = dayStartMs(ymd, appEra.before)
+    if (Number.isNaN(before) || before < appEra.fromMs) return before
+  }
+  return dayStartMs(ymd, appZone)
+}
+
 /**
  * The start of calendar day `ymd` in APP_TIMEZONE, as an ISO instant:
  * appDayStartIso('2026-11-01') -> '2026-11-01T04:00:00.000Z'. '' if `ymd` is not
@@ -605,7 +665,7 @@ function dayStartMs(ymd, timeZone) {
  * every viewer asks for the same range.
  */
 export function appDayStartIso(ymd) {
-  const ms = dayStartMs(ymd, appZone)
+  const ms = appDayStartMs(ymd)
   return Number.isNaN(ms) ? '' : new Date(ms).toISOString()
 }
 
@@ -616,8 +676,20 @@ export function appDayStartIso(ymd) {
  * nothing. '' if `ymd` is not a real 'YYYY-MM-DD'.
  */
 export function appDayEndIso(ymd) {
-  const ms = dayStartMs(shiftYmd(ymd, 1), appZone)
+  const ms = appDayStartMs(shiftYmd(ymd, 1))
   return Number.isNaN(ms) ? '' : new Date(ms - 1).toISOString()
+}
+
+/**
+ * The app zone's short name for words that name it ("Week closes Fri 11:59 PM
+ * ET"): its generic name, "ET" or "CT", never a fixed string. Older phones
+ * (Safari before 15.4) refuse 'shortGeneric' and get the short name ("EDT",
+ * "EST") instead of an exception.
+ */
+export function appZoneLabel(now = Date.now()) {
+  const name = (style) => new Intl.DateTimeFormat('en-US', { timeZone: appZone, timeZoneName: style })
+    .formatToParts(new Date(now)).find((p) => p.type === 'timeZoneName')?.value || ''
+  try { return name('shortGeneric') } catch { return name('short') }
 }
 
 // --- Calendar arithmetic on date keys ---------------------------------------
