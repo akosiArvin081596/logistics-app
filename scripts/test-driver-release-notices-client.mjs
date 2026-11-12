@@ -20,8 +20,9 @@
 //       never changes; the tour starts only on their own tap
 //   §8  DriverView.vue: one read, as the view opens, with the Performance read; the contacts prompt
 //       waits for the look; the login form notes the sign-in, in memory; the tour marks nothing read
-//   §9  the components: only "I acknowledge" closes the note, and the button shows it's working; the
-//       app's other files know nothing of this
+//   §9  the components: only "I acknowledge" closes the note, and the button shows it's working; on a
+//       short phone the note's box scrolls to Show me first's line; the app's other files know nothing
+//       of this
 //   §10 only the driver app and the Drivers page read any of it
 //   §11 the Drivers page's record: the words, the three states, times on the app's clock; Super Admin
 //       only, and nothing with the switch off
@@ -740,8 +741,15 @@ const notesPart = NOTE.slice(NOTE.indexOf("v-if=\"view.mode === 'notes'\""), NOT
 const at = (needle) => notesPart.indexOf(needle)
 ok('the line sits right above I acknowledge, and Show me first comes after it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-acknowledge"') && at('data-testid="release-acknowledge"') < at('release-show-me'))
 ok('I acknowledge is always there; Show me first only with steps to show', !/v-if[^>]*release-acknowledge"/.test(notesPart) && /v-if="view\.canShowMe" type="button" class="drn-second" data-testid="release-show-me"/.test(notesPart))
-ok('while it saves, I acknowledge shows it is working and both buttons wait', /:loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(notesPart) && /:disabled="view\.saving" @click="emit\('show-me'\)"/.test(notesPart))
-ok('on a truck read as moving, the note says when in its own line, by the buttons, after Show me first', /<p v-if="view\.whenParked" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > at('release-show-me'))
+ok('while it saves, I acknowledge shows it is working and both buttons wait', /:loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(notesPart) && /:disabled="view\.saving" @click="showMe"/.test(notesPart))
+ok('on a truck read as moving, the note says when in its own line, by the buttons, after Show me first', /<p v-if="view\.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > at('release-show-me'))
+// On a short phone the note fills its box, so the line would land below the box's fold: the box scrolls to
+// it. The browser flow's V2 checks it's in sight at 390x844, 375x667 and 320x568.
+ok("...and it's the note's last, so the box's end is the line", /^\s*<\/template>\s*$/.test(notesPart.slice(notesPart.indexOf('</p>', at('release-when-parked')) + '</p>'.length)))
+ok('the box that scrolls is the note itself', /<div v-if="view" ref="scroller" class="drn" role="dialog"/.test(NOTE) && /\.drn \{[^}]*max-height: 80vh; overflow-y: auto;/.test(NOTE))
+ok('Show me first tells the view, waits for the line to be drawn, then scrolls the box to its end, only with the line up', /async function showMe\(\) \{\s*emit\('show-me'\)\s*await nextTick\(\)\s*if \(scroller\.value && parkedLine\.value\) scroller\.value\.scrollTop = scroller\.value\.scrollHeight\s*\}/.test(NOTE) && /const scroller = ref\(null\)\s*const parkedLine = ref\(null\)/.test(NOTE))
+ok('...on every tap of it, not only the first', (notesPart.match(/@click="showMe"/g) || []).length === 1 && !/watch\(/.test(NOTE))
+ok('only the note\'s own box moves: nothing scrolls the page', !/scrollIntoView|scrollTo\(|window\.scroll|document\.(documentElement|body)\.scroll/.test(NOTE))
 eq('the note says which answer was tapped, and those only', (NOTE.match(/defineEmits\(\[([^\]]*)\]\)/) || [])[1], "'acknowledge', 'show-me', 'take-tour', 'skip-offer'")
 for (const id of ['tour-card', 'tour-label', 'tour-next', 'tour-skip', 'tour-shield']) ok(`the tour has ${id}`, TOUR.includes(`data-testid="${id}"`))
 ok("every button is a 44 px tap", /\.tour-skip, \.tour-next, \.tour-videos \{ min-height: 44px/.test(TOUR) && /\.drn-primary \{ min-height: 44px/.test(NOTE) && /\.drn-second \{[\s\S]{0,80}min-height: 44px/.test(NOTE))

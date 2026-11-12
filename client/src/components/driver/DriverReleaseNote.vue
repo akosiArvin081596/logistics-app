@@ -10,7 +10,7 @@
     :close-on-popstate="false"
     :style="{ width: 'min(92%, 380px)' }"
   >
-    <div v-if="view" class="drn" role="dialog" aria-modal="true" aria-labelledby="drn-title" data-testid="release-dialog">
+    <div v-if="view" ref="scroller" class="drn" role="dialog" aria-modal="true" aria-labelledby="drn-title" data-testid="release-dialog">
       <template v-if="view.mode === 'notes'">
         <h2 id="drn-title" class="drn-title" data-testid="release-heading">{{ WORDS.notesHeading }}</h2>
         <section v-for="entry in view.entries" :key="entry.id" class="drn-entry" data-testid="release-entry">
@@ -27,9 +27,9 @@
         >{{ WORDS.acknowledge }}</van-button>
         <button
           v-if="view.canShowMe" type="button" class="drn-second" data-testid="release-show-me"
-          :disabled="view.saving" @click="emit('show-me')"
+          :disabled="view.saving" @click="showMe"
         >{{ WORDS.showMeFirst }}</button>
-        <p v-if="view.whenParked" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">{{ WORDS.whenParked }}</p>
+        <p v-if="view.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">{{ WORDS.whenParked }}</p>
       </template>
       <template v-else>
         <h2 id="drn-title" class="drn-title" data-testid="release-heading">{{ WORDS.offerHeading }}</h2>
@@ -42,6 +42,7 @@
 </template>
 
 <script setup>
+import { nextTick, ref } from 'vue'
 import { Popup as VanPopup, Button as VanButton } from 'vant'
 import { WORDS } from '../../lib/driverReleaseNotices'
 
@@ -49,6 +50,18 @@ defineProps({
   view: { type: Object, default: null },
 })
 const emit = defineEmits(['acknowledge', 'show-me', 'take-tour', 'skip-offer'])
+
+const scroller = ref(null)
+const parkedLine = ref(null)
+
+// On a short phone the note fills its box, and the line Show me first adds on a moving truck is its last:
+// once it's drawn, the box scrolls to its end, on every such tap, so the driver sees it without scrolling.
+// Only the note's own box moves.
+async function showMe() {
+  emit('show-me')
+  await nextTick()
+  if (scroller.value && parkedLine.value) scroller.value.scrollTop = scroller.value.scrollHeight
+}
 </script>
 
 <style scoped>

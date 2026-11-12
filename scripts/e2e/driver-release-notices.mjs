@@ -23,8 +23,9 @@
 //       login page. The next load finds the login page, and the note comes after that sign-in
 //   V   a moving truck's open page never changes: nothing opens as a truck stops, and a note or a tour
 //       that's up stays up as a truck moves. A sign-in on a moving truck still shows the note. On a truck
-//       read as moving, Show me first says when in the note's own line, on top of everything, and the
-//       Kit's button in the app's short message; neither starts anything, and the note stays
+//       read as moving, Show me first says when in the note's own line, in sight without a scroll and on
+//       top of everything, and the Kit's button in the app's short message; neither starts anything, and
+//       the note stays. V2 runs at 375x667 and 320x568 too, where the note fills its box
 //   F   a failed read at sign-in (503, no answer, an unreadable body): no note, no Kit button, and they
 //       stay in the app; a later load has the Kit button and nothing new; the next sign-in has the note
 //   P   a failed Performance answer at sign-in: no note and no mark; a good one later opens nothing; the
@@ -85,6 +86,9 @@ const OUT_TAG = String(process.env.OUT_TAG || 'driver-release-notices').replace(
 const DIST = path.join(paths.REPO, 'client', 'dist')
 const SHOT_DIR = process.env.SHOT_DIR ? path.resolve(process.env.SHOT_DIR) : path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'driver-release-notices', 'screens')
 const PHONE = { tag: '390x844', viewport: { width: 390, height: 844 } }
+// Short phones, where the note fills its box: V2 runs there too.
+const SHORT = { tag: '375x667', viewport: { width: 375, height: 667 } }
+const SMALLEST = { tag: '320x568', viewport: { width: 320, height: 568 } }
 const DESKTOP = { tag: '1280x800', viewport: { width: 1280, height: 800 } }
 
 function die(msg) {
@@ -361,6 +365,34 @@ const onLogin = (page) => new URL(page.url()).pathname === '/login'
 const noteUp = (page) => page.locator(testid('release-dialog')).count()
 const marksOf = (writes) => writes.filter((w) => !w.includes('/api/auth/'))
 const toastText = (page) => text(page, '.toast.show')
+// As a thumb does on a note taller than its box: scroll it only until Show me first shows at the box's
+// bottom edge, so the line that comes under it starts out of sight. Nothing at all where it already
+// shows. Returns where the box ended up.
+const reachShowMe = (page) => page.evaluate(() => {
+  const box = document.querySelector('[data-testid="release-dialog"]')
+  const button = box && box.querySelector('[data-testid="release-show-me"]')
+  if (!button) return -1
+  const below = button.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom
+  if (below > 0) box.scrollTop += Math.ceil(below)
+  return Math.round(box.scrollTop)
+})
+// Where the note's own line is, as the driver sees it, with no scroll by the test: all of it inside the
+// note's box, the box inside the window, and the line itself at its centre, so nothing is over it.
+const lineInView = (page) => page.evaluate(() => {
+  const box = document.querySelector('[data-testid="release-dialog"]')
+  const line = box && box.querySelector('[data-testid="release-when-parked"]')
+  if (!line) return { inSight: false, onTop: false, at: 'no line' }
+  const b = box.getBoundingClientRect()
+  const r = line.getBoundingClientRect()
+  const inBox = r.height > 0 && r.top >= b.top - 0.5 && r.bottom <= b.bottom + 0.5 && r.left >= b.left - 0.5 && r.right <= b.right + 0.5
+  const inWindow = b.top >= -0.5 && b.bottom <= window.innerHeight + 0.5
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+  return {
+    inSight: inBox && inWindow,
+    onTop: !!hit && (hit === line || line.contains(hit)),
+    at: `line ${Math.round(r.top)}-${Math.round(r.bottom)}, box ${Math.round(b.top)}-${Math.round(b.bottom)} scrolled ${Math.round(box.scrollTop)}, window ${window.innerHeight}`,
+  }
+})
 async function heights(page, selector) {
   const out = []
   for (const el of await page.locator(selector).all()) {
@@ -683,6 +715,43 @@ async function pastItsSessionRun(browser, size) {
 }
 
 // ---------------------------------------------------------------- V: a moving truck
+// V2's tap and its checks, at any size, on a note that's up as the truck reads moving. The line is the
+// note's own, in sight with nothing over it: the app's short message would sit under the note's overlay.
+// The test scrolls the note only to reach Show me first, never to the line.
+async function showMeWhileMoving(up, size, before) {
+  const t = size.tag
+  const reached = await reachShowMe(up.page)
+  await press(up.page.locator(testid('release-show-me')).first(), size)
+  const lineSel = `${testid('release-dialog')} ${testid('release-when-parked')}`
+  const says = await appears(up.page, lineSel, 3000)
+  const lineWords = await text(up.page, lineSel)
+  await up.page.waitForTimeout(200)
+  const seen = await lineInView(up.page)
+  const toastSays = (await toastText(up.page)) === WORDS.whenParked
+  const tours = await up.page.locator(testid('tour-card')).count()
+  const stillUp = await noteUp(up.page)
+  const { shown, read, stays } = before
+  record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me first then says when inside the note, in sight without a scroll, on top, starts nothing, and the note stays',
+    `the note through the next truck read; "${WORDS.whenParked}" as the note's own line, all of it inside the note's box and the box in the window, the element at its centre; not in the message under the note; no tour; the note still up; nothing written; no logout`,
+    `shown ${shown}, read ${read}, stays ${stays}, box at ${reached} to reach Show me first, line ${says} "${lineWords}", in sight ${seen.inSight} (${seen.at}), on top ${seen.onTop}, in the message under it ${toastSays}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(up.writes))}, logouts ${up.state.calls.logout}`,
+    shown && read && stays === 1 && reached >= 0 && says && lineWords === WORDS.whenParked && seen.inSight && seen.onTop && !toastSays && tours === 0 && stillUp === 1 && marksOf(up.writes).length === 0 && up.state.calls.logout === 0,
+    await shot(up.page, `row-V2-when-parked-${t}`))
+}
+
+// V2 alone on a short phone, where the note fills its box and the line comes under the box's fold.
+async function shortPhoneRun(browser, size) {
+  const up = await signedIn(browser, size, { hasNote: true })
+  try {
+    const shown = await appears(up.page, testid('release-dialog'), 10000)
+    up.state.moving = true
+    const read = await nextTruckRead(up.state)
+    const stays = await noteUp(up.page)
+    await showMeWhileMoving(up, size, { shown, read, stays })
+  } finally {
+    await up.ctx.close()
+  }
+}
+
 async function movingRun(browser, size) {
   const t = size.tag
   const open = freshState({ hasNote: true, moving: true })
@@ -706,26 +775,7 @@ async function movingRun(browser, size) {
     upMoving.state.moving = true
     const read = await nextTruckRead(upMoving.state)
     const stays = await noteUp(upMoving.page)
-    await press(upMoving.page.locator(testid('release-show-me')).first(), size)
-    // The line is the note's own, and nothing is drawn over it: the app's short message would sit under
-    // the note's overlay.
-    const lineSel = `${testid('release-dialog')} ${testid('release-when-parked')}`
-    const says = await appears(upMoving.page, lineSel, 3000)
-    const lineWords = await text(upMoving.page, lineSel)
-    await upMoving.page.locator(lineSel).first().scrollIntoViewIfNeeded().catch(() => {})
-    const onTop = await upMoving.page.evaluate((sel) => {
-      const el = document.querySelector(sel)
-      if (!el) return false
-      const r = el.getBoundingClientRect()
-      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
-      return !!hit && (hit === el || el.contains(hit))
-    }, lineSel)
-    const toastSays = (await toastText(upMoving.page)) === WORDS.whenParked
-    const tours = await upMoving.page.locator(testid('tour-card')).count()
-    const stillUp = await noteUp(upMoving.page)
-    record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me first then says when inside the note, on top, starts nothing, and the note stays', `the note through the next truck read; "${WORDS.whenParked}" as the note's own line, the element at its centre; not in the message under the note; no tour; the note still up; nothing written; no logout`,
-      `shown ${shown}, read ${read}, stays ${stays}, line ${says} "${lineWords}", on top ${onTop}, in the message under it ${toastSays}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(upMoving.writes))}, logouts ${upMoving.state.calls.logout}`,
-      shown && read && stays === 1 && says && lineWords === WORDS.whenParked && onTop && !toastSays && tours === 0 && stillUp === 1 && marksOf(upMoving.writes).length === 0 && upMoving.state.calls.logout === 0)
+    await showMeWhileMoving(upMoving, size, { shown, read, stays })
 
     const confirmed = await acknowledge(upMoving.page, size)
     upMoving.state.moving = false
@@ -1111,6 +1161,7 @@ async function main() {
     await unansweredRun(browser, PHONE)
     await pastItsSessionRun(browser, PHONE)
     await movingRun(browser, PHONE)
+    for (const size of [SHORT, SMALLEST]) await shortPhoneRun(browser, size)
     await failedReadRun(browser, PHONE)
     await performanceAnswerRun(browser, PHONE)
     await loadPageRun(browser, PHONE)
