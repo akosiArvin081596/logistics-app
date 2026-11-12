@@ -398,7 +398,11 @@ section("§10 the free checks");
 
 // ---------------------------------------------------------------- §12
 section("§12 the submit job's rules (PR T2)");
-{
+// A tree before PR T2 has none of these: each missing one fails by name, and the run goes on.
+const T2_RULES = ["sampleShut", "transportSettings", "readCaps", "debtorNameProblem"];
+for (const fn of T2_RULES.filter((f) => typeof rules[f] !== "function")) failures.push(`§12 FAILS ON THE OLD CODE: lib/triumph-rules.js has no ${fn}()`);
+const has = (fn) => typeof rules[fn] === "function";
+if (has("sampleShut")) {
 	// The made-up sample's gate: any value at all in the go-live date shuts it (R-L7).
 	eq(rules.sampleShut({}), null, "§12 nothing set: the sample may go");
 	eq(rules.sampleShut({ TRIUMPH_SUBMIT_ENABLED: "true" }), null, "§12 a dry run: the sample may go");
@@ -408,8 +412,10 @@ section("§12 the submit job's rules (PR T2)");
 	}
 	eq(rules.sampleShut({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05" }), "SAMPLE_AFTER_LIVE", "§12 the mode live: shut");
 	eq(rules.sampleShut({}, { replica: true }), "SAMPLE_REPLICA", "§12 a replica: shut");
-
-	// The free checks' new options, each checked only when the job passes it.
+}
+{
+	// The free checks' new options, each checked only when the job passes it. freeVerdict() is
+	// T1's, so these run on a tree before PR T2 too, and fail there by name.
 	const cols = autoRules.jobColumns(["Load ID", "Status", "Email", "Delivery Date", "  Payment  "]);
 	const facts = autoRules.loadFacts({ row: { "Load ID": "LD-TEST-0001", Status: "Delivered", Email: "ap@example-broker.test", "Delivery Date": "11/02/2026", "  Payment  ": "2150" }, cols,
 		records: { pods: [{ id: 1 }], rateCons: [], drafts: [], deleted: false }, confirmedDomains: ["example-broker.test"], closedMonths: [] });
@@ -430,6 +436,8 @@ section("§12 the submit job's rules (PR T2)");
 	for (const [label, name] of [["a double quote", "Example \"Broker\" LLC"], ["101 characters", "E".repeat(101)], ["a leading =", "=Example"], ["a leading space", " Example Broker LLC"], ["a character outside ASCII", "Exämple Broker LLC"]]) {
 		eq(say(facts, { debtorName: name }), "needs_attention FIELD_UNUSABLE", `§12 FAILS ON THE OLD CODE (R-L3): a debtor's name with ${label}: FIELD_UNUSABLE, before a number`);
 	}
+}
+if (has("debtorNameProblem")) {
 	// The free check and the CSV writer can't drift: the same answer for every printable character.
 	const row = (name) => rules.csvRow({ debtorName: name, invoiceId: "11022026-7", invoiceDate: "11/02/2026", po: "LD-TEST-0001", billedTotal: "$2,150.00" });
 	const drift = [];
@@ -441,8 +449,8 @@ section("§12 the submit job's rules (PR T2)");
 		}
 	}
 	eq(drift, [], "§12 debtorNameProblem() answers as csvRow() does on DTR_NAME, for every printable character, inside and leading");
-
-	// The caps.
+}
+if (has("readCaps")) {
 	eq(rules.readCaps({}), { maxPerHour: 12, maxPerDay: 60, perSweep: 2 }, "§12 the caps: 12 an hour, 60 a day, 2 a run");
 	eq(rules.readCaps({ TRIUMPH_MAX_PER_HOUR: "3", TRIUMPH_MAX_PER_DAY: "9" }), { maxPerHour: 3, maxPerDay: 9, perSweep: 2 }, "§12 ...each a setting");
 	for (const v of ["0", "-1", "1001", "x", "2.5"]) eq(rules.readCaps({ TRIUMPH_MAX_PER_HOUR: v }).maxPerHour, 12, `§12 an hourly cap of ${JSON.stringify(v)}: the default`);

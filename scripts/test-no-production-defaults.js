@@ -767,8 +767,10 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 			check(`§1 TRIUMPH_NOA_LINES, TRIUMPH_LIVE_CONFIRMED_ON and the SFTP drop's settings have no default in code (${triumphDefault.join(", ") || "none"})`, triumphDefault.length === 0);
 			// The connection's reader answers nothing at all without them: no host, folder or key.
-			const transport = require(path.join(ROOT, "lib", "triumph-rules.js")).transportSettings({});
-			check(`§1 with none of the SFTP drop's settings, nothing can connect (${transport.missing.length} missing)`, transport.ok === false && transport.settings === null && transport.missing.length === 6);
+			const { transportSettings } = require(path.join(ROOT, "lib", "triumph-rules.js"));
+			const transport = typeof transportSettings === "function" ? transportSettings({}) : null;
+			check(`§1 FAILS ON THE OLD CODE: with none of the SFTP drop's settings, nothing can connect (${transport ? `${transport.missing.length} missing` : "no transportSettings()"})`,
+				Boolean(transport) && transport.ok === false && transport.settings === null && transport.missing.length === 6);
 
 			// The sheet by name: no --sheet-id default and no fallback to the
 			// production constant.
