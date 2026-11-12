@@ -236,6 +236,16 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		await oj.tick();
 		eq([outside.claim(), outside.spies.connect, outside.spies.prepare], [null, 0, 0], "§1 ...and a tick builds and sends nothing for it");
 
+		// Handled in Triumph's process while it had a claim: the claim is closed, and stays so.
+		const closed = world({ env: LIVE });
+		closed.queue("queued");
+		const hr = factoring.handledOutside(closed.db, { key: KEY, reason: "made-up: sent by hand in Triumph's process", nowIso: T0, audit: () => {} });
+		const cj = closed.make();
+		cj.deliveredByDriver({ role: "Driver", loadId: LOAD, oldStatus: "At Receiver", newStatus: "Delivered" }).written();
+		await cj.tick();
+		eq([hr.ok, say(closed.claim()), closed.spies.prepare, closed.spies.connect, closed.spies.puts.length], [true, "closed_outside", 0, 0, 0],
+			"§1 FAILS WITHOUT THE LOCK CHECK: with submit live, a claim closed in Triumph's process is never worked, re-armed or uploaded");
+
 		const s = world();
 		const sj = s.make();
 		eq(sj.start({ session: { user: { username: "made-up-admin" } } }, LOAD), { ok: true }, "§1 Start on a marked load nothing started: in line");
@@ -689,6 +699,14 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		ok(/SAMPLE_AFTER_LIVE/.test(await refusedWith(["--dry-run"], { env: { ...env0, ...LIVE } })), "§12 the mode live: refused");
 		ok(/SAMPLE_REPLICA/.test(await refusedWith(["--dry-run"], { env: env0, replica: true })), "§12 a replica: refused");
 		ok(/QUIET_WINDOW/.test(await refusedWith(["--dry-run"], { env: env0, now: () => new Date("2026-11-13T23:30:00.000Z") })), "§12 a Friday evening: refused, no render");
+		ok(/NOA_UNCONFIGURED/.test(await refusedWith(["--dry-run"], { env: {} })), "§12 (L5) no assignment lines: refused, the block being the sample's point");
+		// (L5) The sample's page prints the factor's block in place of the bank block's.
+		let html = "";
+		const capture = async (h) => { html = h; return render(); };
+		await script.run(["--dry-run"], { render: capture, env: { ...env0, TRIUMPH_HOST: "made-up.example.test", TRIUMPH_USER: "made-up-user", TRIUMPH_KEY_FILE: "/made-up/not-a-real-key-file",
+			TRIUMPH_HOST_FINGERPRINT: `SHA256:${"A".repeat(43)}`, TRIUMPH_HOST_KEY_TYPE: "ED25519", TRIUMPH_SUBMIT_DIR: "/made-up/submit" }, now: () => new Date(T0), createTransport: counting });
+		ok(html && !/Payment Method/.test(html) && !/Bank (Routing|Account) #/.test(html) && NOA.every((l) => html.includes(l)) && html.includes(triumphBatch.SAMPLE.stamp),
+			"§12 (L5) the sample's page: no \"Payment Method\", no bank slot, every assignment line and the stamp beside them");
 
 		const fake = await startFakeTriumph({ hostKey: HOST.private, clientKey: CLIENT.private, folders: [SUBMIT] });
 		try {
@@ -714,6 +732,24 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 			eq(w.db.prepare("SELECT action, entity_id FROM audit_trail").all(), [{ action: "triumph_sample_uploaded", entity_id: "" }], "§12 one audit row, naming no load");
 		} finally {
 			await fake.close();
+		}
+		// (L6) The PDF went and the CSV's answer didn't come: stop, and a fresh yes before another run.
+		const cut = await startFakeTriumph({ hostKey: HOST.private, clientKey: CLIENT.private, folders: [SUBMIT], faults: { dropOnWrite: (p) => p.endsWith(".csv") } });
+		try {
+			const env = { ...env0, TRIUMPH_HOST: cut.host, TRIUMPH_PORT: String(cut.port), TRIUMPH_USER: "made-up-user", TRIUMPH_KEY_FILE: "/made-up/not-a-real-key-file",
+				TRIUMPH_HOST_FINGERPRINT: fingerprintOfKey(HOST.private), TRIUMPH_HOST_KEY_TYPE: "ED25519", TRIUMPH_SUBMIT_DIR: SUBMIT };
+			const audits = [];
+			let stopped = null;
+			try {
+				await script.run(["--upload", "--audit-db=/made-up/not-used"], { render, env, now: () => new Date(T0), writeAudit: (a, details) => audits.push({ a, details }),
+					createTransport: (o) => transfer.create({ ...o, readKeyFile: () => CLIENT.private, opTimeoutMs: 3000 }) });
+			} catch (e) {
+				stopped = e;
+			}
+			eq([stopped && stopped.exitCode, /fresh yes/.test(stopped && stopped.message)], [3, true], "§12 (L6) a CSV with no answer after the PDF went: exit 3, and the words ask for a fresh yes");
+			ok(audits.length === 1 && /had no answer/.test(audits[0].details) && /fresh yes/.test(audits[0].details), "§12 (L6) ...and the audit row says so");
+		} finally {
+			await cut.close();
 		}
 	}
 

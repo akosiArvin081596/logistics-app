@@ -235,9 +235,9 @@ async function runSend(args, { render, env, now, replica, createTransport, write
 	if (shut) throw new Refusal(`${shut}: the sample goes only before Triumph is live`);
 	const at = now();
 	// The weekly invoice batch renders on Friday evenings: the sample starts no render then.
-	if (require("../lib/auto-invoice-rules").shadowRenderQuiet(at, appTime.appTimeZone())) throw new Refusal("QUIET_WINDOW: no render on a Friday evening, the weekly invoice batch's time");
+	if (require("../lib/auto-invoice-rules").shadowRenderQuiet(at, appTime.businessZoneAt(at))) throw new Refusal("QUIET_WINDOW: no render on a Friday evening, the weekly invoice batch's time");
 	const lines = linesFrom({}, env);
-	const batch = await triumphBatch.buildSampleBatch({ lines, day: appTime.dayInZone(at, appTime.appTimeZone()), render, at });
+	const batch = await triumphBatch.buildSampleBatch({ lines, day: appTime.businessDayOf(at), render, at });
 	if (!batch.ok) throw new Refusal(`${batch.code}${batch.field ? ` (${batch.field})` : ""}`);
 	const files = { pdfName: batch.pdfName, pdf: batch.pdf, csvName: batch.csvName, csv: batch.csv };
 	const refused = triumphBatch.sampleRefusal(files);
@@ -317,6 +317,7 @@ async function run(argv, { render, env = process.env, now = () => new Date(), re
 async function main() {
 	const argv = process.argv.slice(2);
 	const pdfBrowser = require("../lib/pdf-browser");
+	const sends = argv.some((a) => a === "--dry-run" || a === "--upload");
 	let code = 0;
 	try {
 		// On the box the transport's settings are the app's own, read only once the arguments
@@ -333,7 +334,8 @@ async function main() {
 	} catch (e) {
 		if (e instanceof Refusal) console.error(`REFUSED: ${e.message}`);
 		else if (e && e.exitCode === 3) console.error(`STOPPED: ${e.message}`);
-		else console.error(`FAILED: ${(e && e.code) || "ERROR"}`);
+		// A send names its failure by its code alone; a local look keeps the whole trace.
+		else console.error(`FAILED: ${sends ? (e && e.code) || "ERROR" : e.stack || e.message}`);
 		code = e instanceof Refusal ? 2 : (e && e.exitCode) || 1;
 	}
 	await pdfBrowser.shutdownBrowser().catch(() => {});
