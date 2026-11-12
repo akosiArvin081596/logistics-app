@@ -36,6 +36,14 @@
  *   §9 settings unset: each changed reader gives the answer of the code it
  *      replaced, over a grid of instants and wall clocks around both DST changes,
  *      the seam hour and the planned switch.
+ *   §10 every other reader of a stored instant keeps a pre-switch item's day,
+ *      week or text: the driver pay fallback for a ping with no longitude (and
+ *      the rollups and activity days on it), the receipt-to-truck backfill, the
+ *      Personal-line wait, the automatic invoices' baseline, the month-end guard
+ *      floor, the ELD device link day, zoned sheet cells, the date a payout
+ *      statement or broker invoice prints, and the display, KPI and hand-run
+ *      report readers. A reader inside a larger function is replayed from its own
+ *      source line.
  *
  * Every scenario runs in its own child process (the settings are read once per
  * process) under TZ=UTC, America/Chicago and Asia/Manila; the three must agree.
@@ -113,7 +121,8 @@ function child(scenario) {
 	};
 	const NAMES = ["appDay", "appStamp", "appNoonMs", "appTodayKey", "appMonthKey", "getWeekRange", "isAfterDeadline",
 		"mostRecentInvoiceFriday", "assignmentMonthKey", "invoiceSeqDayKey", "sheetDayKey", "kpiInstantDay", "iftaDefaultStartIso",
-		"graceEndsAt", "isPastGrace", "personalSweepDueMs", "loadPayRateIndex", "receiptSubmittedDaySql"];
+		"graceEndsAt", "isPastGrace", "personalSweepDueMs", "loadPayRateIndex", "receiptSubmittedDaySql",
+		"appStampDay", "personalLeftForRegenerate"];
 	const LIFTED = NAMES.map(lift).join("\n");
 	const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 	// `zone`: server.js's APP_TIMEZONE (appTime.appTimeZone() at boot); `nowIso`: the clock.
@@ -337,6 +346,11 @@ function child(scenario) {
 		const sql = (t) => new Date(t).toISOString().slice(0, 19).replace("T", " ");
 		const differs = (fn) => instants.filter((t) => { try { return !fn(t); } catch { return true; } }).length;
 		check("§9 unset: businessZoneAt / businessDayOf are US Eastern for every instant", () => differs((t) => appTime.businessZoneAt(t) === NY && appTime.businessDayOf(new Date(t)) === nyDay(t)), 0);
+		const eldMilesUnset = require(path.join(ROOT, "lib", "eld-miles.js"));
+		check("§9 unset: a ping with no longitude falls back to US Eastern, with its instant or without, as before", () => differs((t) => eldMilesUnset.usTzForLongitude(NaN, t) === NY && eldMilesUnset.usTzForLongitude(null) === NY), 0);
+		const brokerUnset = require(path.join(ROOT, "lib", "broker-invoice.js"));
+		const mdyEastern = (t) => { const [y, m, d] = nyDay(t).split("-"); return `${m}/${d}/${y}`; };
+		check("§9 unset: a PDF's date of an instant is its US Eastern day, as before (so the template hash's pin holds)", () => differs((t) => brokerUnset.formatDate(new Date(t)) === mdyEastern(t) && brokerUnset.formatDate(new Date(t).toISOString()) === mdyEastern(t)), 0);
 		check("§9 unset: assignmentMonthKey() is appDay().slice(0, 7), as before", () => differs((t) => S.assignmentMonthKey(new Date(t).toISOString()) === nyDay(t).slice(0, 7)), 0);
 		check("§9 unset: kpiInstantDay(), ooStampDay() and the trip day are the Eastern day, as before", () => differs((t) => S.kpiInstantDay(sql(t), NY) === nyDay(t) && ownerOperator.ooStampDay(sql(t), NY) === nyDay(t)
 			&& (tripWorkDays.firstPickupTap([{ new_status: "At Shipper", changed_at: sql(t), source: "driver", actor: "made-up" }], { zone: NY }) || {}).day === nyDay(t)), 0);
@@ -359,6 +373,127 @@ function child(scenario) {
 			const [y, m, dd] = d.split("-").map(Number);
 			return [0, 1, 12, 20, 23].some((h) => appTime.businessWallClockToMs(NY, y, m, dd, h, 30, 0) !== wall(NY, y, m, dd, h, 30, 0));
 		}).length, 0);
+	}
+
+	// ── §10 every other reader of a stored instant (review-1 Med-1): with the switch
+	// set, a pre-moment item in the 11 PM-midnight CT hour keeps its Eastern day,
+	// week or text. A reader inside a larger function is replayed from its source
+	// line, as written, so the same check reads the code it replaced.
+	if (scenario === "after") {
+		// `rel` is a file under the app folder, or SRC itself (the server, through the helper).
+		const read = (rel) => (rel === SRC ? SRC : fs.readFileSync(path.join(ROOT, rel), "utf8"));
+		const grab = (rel, re) => { const m = re.exec(read(rel)); if (!m) throw new Error(`${rel === SRC ? "the server source" : rel} has no ${re}`); return m[1]; };
+		const replay = (rel, re, names, values) => evalWith(grab(rel, re), names, values);
+		const statement = (rel, re, names, values, result) => new Function(...names, `${grab(rel, re)}\nreturn ${result};`)(...values);
+		const liftFrom = (rel, name) => {
+			const text = read(rel);
+			const at = text.indexOf(`\nfunction ${name}(`);
+			if (at < 0) throw new Error(`${rel} has no function ${name}(`);
+			let i = text.indexOf("{", text.indexOf(")", at));
+			let depth = 0;
+			for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
+			return text.slice(at + 1, i + 1);
+		};
+		const eldMiles = require(path.join(ROOT, "lib", "eld-miles.js"));
+		const T = ms(OCT31_LATE);
+		const ISO = "2026-11-01T04:30:00.000Z";
+		const FRI = ms("2026-11-14T05:30:00Z"); // Fri Nov 13 11:30 PM CST = Sat Nov 14 12:30 AM EST
+		const EAST_DAY = "2026-11-01";
+		const EAST_TEXT = "Nov 1, 2026, 12:30 AM EDT";
+		const BASE = ["appTime", "APP_TIMEZONE", "appDay"];
+		const baseValues = [appTime, ZONE, S.appDay];
+
+		// Money and money-adjacent.
+		check("§10 P3 a ping with no longitude counts on its Eastern day (the driver pay fallback)", () => [eldMiles.usTzForLongitude(NaN, T), eldMiles.localDayInTz(T, eldMiles.usTzForLongitude(null, T))], [NY, EAST_DAY]);
+		check("§10 P3 ...in the pay days' travel days (getEldTravelDaysByVehicle)", () => replay(SRC,/\n\t+const day = (localDayInTz\(r\.ms, usTzForLongitude\(r\.lng.*?\)\));\n/, ["localDayInTz", "usTzForLongitude", "r"], [eldMiles.localDayInTz, eldMiles.usTzForLongitude, { ms: T, lng: null }]), EAST_DAY);
+		check("§10 P3 ...in the miles and state-miles rollups", () => [
+			replay(SRC,/const dayOf = (\(ms, lng\) => localDayInTz\(ms, usTzForLongitude\(lng.*?\)\));\n/, ["localDayInTz", "usTzForLongitude"], [eldMiles.localDayInTz, eldMiles.usTzForLongitude])(T, null),
+			replay(SRC,/const dayOf = (\(ms, lng\) => eldMiles\.localDayInTz\(ms, eldMiles\.usTzForLongitude\(lng.*?\)\));\n/, ["eldMiles"], [eldMiles])(T, null),
+		], [EAST_DAY, EAST_DAY]);
+		const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+		check("§10 P3 ...in the load pay days' fixes (lib/load-pay-days.js)", () => [
+			replay("lib/load-pay-days.js", /const localDayOf = (\(p\) => .+);\n/, ["eldMiles", "num"], [eldMiles, num])({ ms: T, lng: null }),
+			replay("lib/load-pay-days.js", /zone: last \? (.+) : null,\n/, ["eldMiles", "num", "last"], [eldMiles, num, { ms: T, lng: null }]),
+		], [EAST_DAY, NY]);
+		check("§10 P3 ...in the ELD activity rollup (lib/eld-activity-daily.js)", () => [
+			replay("lib/eld-activity-daily.js", /const zone = (eldMiles\.usTzForLongitude\(p\.lng.*?\));\n/, ["eldMiles", "p"], [eldMiles, { ms: T, lng: NaN }]),
+			replay("lib/eld-activity-daily.js", /const dayOf = (\(ms, lng\) => eldMiles\.localDayInTz\(ms, eldMiles\.usTzForLongitude\(lng === null \? NaN : lng.*?\)\));\n/, ["eldMiles"], [eldMiles])(T, null),
+		], [NY, EAST_DAY]);
+		check("§10 the receipt-to-truck backfill reads an assignment stamp on its Eastern day", () => replay(SRC,/stampDays\.set\(s, exact \? (.+) : s\.slice\(0, 10\)\);\n/, [...BASE, "ms"], [...baseValues, T]), EAST_DAY);
+		check("§10 the Personal-line wait: a weekly invoice deleted at 11:30 PM CT on Fri Nov 13 waits for its Eastern week's sweep (Sat Nov 21)", () => {
+			const db = { prepare: () => ({ get: () => ({ week_start: "2026-11-07", deleted_at: "2026-11-14T05:30:00.000Z" }), all: () => [] }) };
+			return build({ db }).personalLeftForRegenerate({ invoice_id: 1, week_start: "2026-11-07" }, ms("2026-11-18T12:00:00Z"));
+		}, true);
+		check("§10 the automatic invoices' baseline keeps its Eastern day (lib/auto-invoice-job.js)", () => replay("lib/auto-invoice-job.js", /const dayOf = \(isoText\) => \(isoText \? (.+) : ""\);\n/, ["appTime", "d", "isoText"], [appTime, { timeZone: ZONE }, ISO]), EAST_DAY);
+		check("§10 the month-end guard floor's day (appStampDay())", () => S.appStampDay(ISO), EAST_DAY);
+		check("§10 the ELD device link day (ELD_APP_DAY)", () => replay(SRC,/dayOf: ELD_APP_DAY_ENABLED \? (\(ms\) => .+) : undefined,\n/, BASE, baseValues)(T), EAST_DAY);
+		check("§10 a zoned sheet cell's day (sheetDayKey(), lib/load-haul.js)", () => [S.sheetDayKey("2026-11-01T04:30:00Z"), loadHaul.parseSheetInstant("2026-11-01T04:30:00Z").day], [EAST_DAY, EAST_DAY]);
+		const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
+		check("§10 the date a payout statement or broker invoice prints from an instant (lib/broker-invoice.js formatDate())", () => [brokerInvoice.formatDate(new Date(T)), brokerInvoice.formatDate(ISO)], ["11/01/2026", "11/01/2026"]);
+
+		// Display, reports and KPI.
+		const driverPerformance = require(path.join(ROOT, "lib", "driver-performance.js"));
+		const driverAvailability = require(path.join(ROOT, "lib", "driver-availability.js"));
+		const invoiceHeader = require(path.join(ROOT, "lib", "invoice-header.js"));
+		const kpiRatecon = require(path.join(ROOT, "lib", "kpi-ratecon-pass.js"));
+		const expenseWindow = require(path.join(ROOT, "lib", "expense-window.js"));
+		const personEditHold = require(path.join(ROOT, "lib", "person-edit-hold.js"));
+		check("§10 the performance boards' day and the ELD activity week", () => [driverPerformance.businessDayOf(T), replay(SRC,/weekStartOf: (\(ms\) => .+),\n/, [...BASE, "getWeekRange"], [...baseValues, S.getWeekRange])(FRI)], [EAST_DAY, "2026-11-14"]);
+		check("§10 a regenerated invoice's Submission Date", () => invoiceHeader.invoiceDateFromStamp(OCT31_LATE_SQL, ZONE), "Nov 1, 2026");
+		check("§10 the cancelled, deleted and restore lists' days", () => [
+			replay("lib/cancelled-loads-view.js", /cancelledDay: e \? (.+) : "",\n/, ["appTime", "e", "zone"], [appTime, { at: ISO }, ZONE]),
+			replay("lib/deleted-loads-view.js", /deletedDay: Number\.isNaN\(ms\) \? "" : (.+),\n/, ["appTime", "ms", "zone"], [appTime, T, ZONE]),
+			replay("lib/deleted-load-restore.js", /return Number\.isNaN\(ms\) \? "" : (appTime\.\w+\(new Date\(ms\), zone\));\n/, ["appTime", "ms", "zone"], [appTime, T, ZONE]),
+		], [EAST_DAY, EAST_DAY, EAST_DAY]);
+		check("§10 time off: a decision's day and a returning driver's grace start (00:00 on Eastern for Nov 17)", () => [
+			replay("lib/driver-availability.js", /const day = row\.decided_at \? (.+) : "";\n/, ["appTime", "row"], [appTime, { decided_at: ISO }]),
+			new Date(driverAvailability.returningFromMs("2026-11-16")).toISOString(),
+		], [EAST_DAY, "2026-11-17T05:00:00.000Z"]);
+		check("§10 the invoice evidence's day of a mailbox match", () => replay("lib/invoice-evidence.js", /const at = new Date\(iso\);\n\t+return Number\.isNaN\(at\.getTime\(\)\) \? "" : (.+);\n/, ["appTime", "d", "at"], [appTime, { timeZone: ZONE }, new Date(T)]), EAST_DAY);
+		check("§10 the load detail's pickup arrival: day and clock on Eastern", () => new Function("appTime", "clockFormatters", `${liftFrom("lib/arrival-pickup-display.js", "clockOf")}\nreturn clockOf;`)(appTime, new Map())(T, ZONE), { atDay: EAST_DAY, atTime: "12:30 AM EDT" });
+		check("§10 the day-off ELD check: its fallback zone at an instant, the days an interval touches, a device change's day", () => {
+			const zoneAt = statement("lib/time-off-eld-check.js", /\n\t(const zoneAt = \(t\) => \{[\s\S]*?\n\t\};)/, ["zoneFixes", "appZone", "appTime"], [[], ZONE, appTime], "zoneAt");
+			const shiftDay = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+			const touched = statement("lib/time-off-eld-check.js", /\n\t(const touched = \(fromMs, toMs, zone\) => \{[\s\S]*?\n\t\};)/,
+				["lookFromMs", "nowMs", "minDay", "maxDay", "want", "shiftDay", "appZone", "appTime"], [0, ms("2026-12-01T00:00:00Z"), "2026-10-25", "2026-11-07", new Set(["2026-10-31", EAST_DAY]), shiftDay, ZONE, appTime], "touched");
+			const line = timeOff.timeOffNoticeLine({ verdict: { day: "2026-11-03", state: "no_data", reason: "device_changed_vehicle", changeMs: T }, units: [], timeZone: ZONE });
+			return [zoneAt(T), touched(T, T, null), / since Nov 1 /.test(line)];
+		}, [NY, [EAST_DAY], true]);
+		check("§10 the integrity email's first-seen and sign-in times", () => [
+			replay("lib/integrity-check.js", /`; first seen \$\{(appTime\.dateTextInZone\(new Date\(ms\), .+?\))\}`/, ["appTime", "ms", "appZone"], [appTime, T, ZONE]),
+			replay("lib/integrity-check.js", /return Number\.isFinite\(ms\) \? (appTime\.dateTextInZone\(new Date\(ms\), .+?\}\)) : shown\(t, 30\);/, ["appTime", "ms", "appZone"], [appTime, T, ZONE]),
+		], ["Nov 1, 2026", EAST_TEXT]);
+		check("§10 the KPI passes' \"checked today\" counts", () => [
+			replay("lib/kpi-deadhead-routes.js", /if \(Number\.isFinite\(ms\) && (dayInZone\(new Date\(ms\), .+?\)) === a\.day\)/, ["dayInZone", "businessZoneAt", "a", "ms"], [appTime.dayInZone, appTime.businessZoneAt, { timeZone: ZONE }, T]),
+			kpiRatecon.checkedToday({ prepare: () => ({ all: () => [{ load_id: "LD-MADEUP-1", checked_at: ISO }] }) }, EAST_DAY, ZONE, ms("2026-11-01T12:00:00Z")),
+		], [EAST_DAY, 1]);
+		check("§10 the receipt window's shown time and an edit hold's day", () => [expenseWindow.fmtBusinessTime(T), personEditHold.reasonPart({ via: "person", row: { at: ISO, actor: "Dispatcher#1" } }, ZONE)], [EAST_TEXT, "in LogisX by a Dispatcher on Nov 1"]);
+		check("§10 server.js: the alert emails' first-seen times", () => [
+			replay(SRC,/The change was first seen \$\{escHtml\((appTime\.dateTextInZone\(new Date\(firstSeen\).*?\}\))\)\}/, ["appTime", "APP_TIMEZONE", "firstSeen"], [appTime, ZONE, ISO]),
+			replay(SRC,/listed as of \$\{escHtml\((appTime\.dateTextInZone\(new Date\(listedAt\).*?\}\))\)\}/, ["appTime", "APP_TIMEZONE", "listedAt"], [appTime, ZONE, ISO]),
+			replay(SRC,/The load was first seen \$\{escHtml\((appTime\.dateTextInZone\(firstSeenAt.*?\}\))\)\}/, ["appTime", "APP_TIMEZONE", "firstSeenAt"], [appTime, ZONE, new Date(T)]),
+		], [EAST_TEXT, EAST_TEXT, EAST_TEXT]);
+		check("§10 server.js: a drafted note's day, an adjustment's day, a Personal line's since day, a voice note's day", () => [
+			replay(SRC,/draftedOn: draft\.drafted_at \? (.+?) : "", denyHits/, [...BASE, "draft"], [...baseValues, { drafted_at: ISO }]),
+			replay(SRC,/draftedOn: draft\.drafted_at \? (.+?) : "" \}\);/, [...BASE, "draft"], [...baseValues, { drafted_at: ISO }]),
+			replay(SRC,/const adjustedAt = Number\.isFinite\(adjustedAtMs\)\n\t+\? (.+)\n/, ["appTime", "APP_TIMEZONE", "adjustedAtMs"], [appTime, ZONE, T]),
+			replay(SRC,/since_label: Number\.isFinite\(since\) \? personalExpense\.formatDay\((.+)\) : "",\n/, [...BASE, "since"], [...baseValues, T]),
+			replay(SRC,/\.filter\(\(r\) => (.+new Date\(r\.timestamp\).*?) === today\)/, [...BASE, "r"], [...baseValues, { timestamp: ISO }]),
+		], [EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY]);
+		check("§10 the hand-run reports' days and times", () => [
+			replay("scripts/auto-invoice-shadow-report.js", /function stampDay\(stamp, zone\) \{\n\tconst ms = Date\.parse\(stampIso\(stamp\)\);\n\treturn Number\.isFinite\(ms\) \? (.+) : "";\n/, ["appTime", "zone", "ms"], [appTime, ZONE, T]),
+			replay("scripts/auto-invoice-send-trial-report.js", /const first = since \|\| \(meta\.shadow_renders_on_at \? (.+) : ""\);\n/, ["appTime", "zone", "meta"], [appTime, ZONE, { shadow_renders_on_at: ISO }]),
+			replay("scripts/auto-invoice-send-trial-report.js", /const firstDay = since \|\| \(own\.length \? (.+) : ""\);\n/, ["appTime", "zone", "own"], [appTime, ZONE, [{ c: { drafted_at: ISO } }]]),
+			replay("scripts/auto-invoice-send-trial-report.js", /judged\.push\(\{ at, day: (.+), verdict, foundMs/, ["appTime", "zone", "at"], [appTime, ZONE, ISO]),
+			replay("scripts/time-off-loads-report.js", /return Number\.isFinite\(ms\) \? (appTime\.\w+\(new Date\(ms\).*?\)) : "";\n/, ["appTime", "ms"], [appTime, T]),
+			replay("scripts/person-edit-hold-report.js", /const when = (\(iso\) => appTime\.dateTextInZone\(.+\));\n/, ["appTime", "zone"], [appTime, ZONE])(ISO),
+			replay("scripts/arrival-pickup-report.js", /!== (appTime\.dayInZone\(moment, .+?\))\) out\.shipperDayNotAppDay\+\+;/, ["appTime", "appZone", "moment"], [appTime, ZONE, T]),
+			replay("scripts/load-phases-report.js", /const dayOf = (\(ms\) => tripWorkDays\.dayInZone\(ms, .+\));\n/, ["tripWorkDays", "appTime", "zone"], [tripWorkDays, appTime, ZONE])(T),
+			replay("scripts/october-flags-report.js", /const day = Number\.isFinite\(ms\) \? (tripWorkDays\.dayInZone\(ms, .+\)) : "";\n/, ["tripWorkDays", "appTime", "zone", "ms"], [tripWorkDays, appTime, ZONE, T]),
+			replay("scripts/october-flags-report.js", /const from = (tripWorkDays\.dayInZone\(heading\.ms, .+\));\n/, ["tripWorkDays", "appTime", "zone", "heading"], [tripWorkDays, appTime, ZONE, { ms: T }]),
+			replay("scripts/october-flags-report.js", /const to = (tripWorkDays\.dayInZone\(last\.ms, .+\));\n/, ["tripWorkDays", "appTime", "zone", "last"], [tripWorkDays, appTime, ZONE, { ms: T }]),
+			replay("scripts/october-flags-report.js", /const d = (tripWorkDays\.dayInZone\(Number\(f\.ms\), .+\));\n/, ["tripWorkDays", "appTime", "zone", "f"], [tripWorkDays, appTime, ZONE, { ms: T }]),
+		], [EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, "Nov 1, 2026, 12:30 AM EDT", EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY, EAST_DAY]);
 	}
 
 	process.stdout.write(JSON.stringify(out));

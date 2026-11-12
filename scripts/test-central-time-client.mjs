@@ -17,7 +17,9 @@
 //   §4 "now" is the app zone's: after the switch the 11 PM-midnight CT hour is the
 //      Central day (E4 the week the driver bills, E7 a receipt's default date),
 //      and the Friday cutoff is 6:30 PM CT.
-//   §5 labels follow the zone: appZoneLabel() "ET", then "CT".
+//   §5 labels follow the zone: appZoneLabel() "ET", then "CT"; on an engine without
+//      the generic zone name (Safari before 15.4) the driver's closing line still
+//      reads "ET" (and "CT"), as the base's fixed line did.
 //   §6 with no era every helper gives exactly its answer before (each against the
 //      formula it replaced), over a grid around both DST changes and the switch.
 //   §7 the auth store hands every answer's era over with its zone.
@@ -34,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'url'
 const HERE = fileURLToPath(import.meta.url)
 const ROOT = path.join(path.dirname(HERE), '..')
 const DT = path.join(ROOT, 'client', 'src', 'utils', 'datetime.js')
+const PERF = path.join(ROOT, 'client', 'src', 'lib', 'driverPerformance.js')
 const AUTH = path.join(ROOT, 'client', 'src', 'stores', 'auth.js')
 const NY = 'America/New_York'
 const CHI = 'America/Chicago'
@@ -92,6 +95,31 @@ async function checks() {
   check('§5 labels name the business clock: CT on Central', () => (typeof dt.appZoneLabel === 'function' ? dt.appZoneLabel(Date.parse('2026-12-01T12:00:00Z')) : 'none'), 'CT')
   dt.setAppTimeZone(NY)
   check('§5 ...ET on Eastern', () => (typeof dt.appZoneLabel === 'function' ? dt.appZoneLabel(Date.parse('2026-12-01T12:00:00Z')) : 'none'), 'ET')
+  // An engine without the generic zone name (Safari before 15.4, Chrome before 95):
+  // the driver's closing line still says what the base always said.
+  {
+    const Real = Intl.DateTimeFormat
+    function Old(locale, options) {
+      if (options && options.timeZoneName === 'shortGeneric') throw new RangeError('timeZoneName shortGeneric is not supported')
+      return new Real(locale, options)
+    }
+    Old.prototype = Real.prototype
+    Old.supportedLocalesOf = Real.supportedLocalesOf
+    const perf = await import(pathToFileURL(PERF).href)
+    const line = () => (typeof perf.weekClosesLine === 'function' ? perf.weekClosesLine() : perf.WEEK_CLOSES)
+    try {
+      Intl.DateTimeFormat = Old
+      dt.setAppTimeZone(NY)
+      check('§5 an engine without the generic zone name: "Week closes Fri 11:59 PM ET", byte for byte the base\'s line', () => line(), 'Week closes Fri 11:59 PM ET')
+      dt.setAppTimeZone(CHI)
+      check('§5 ...and "CT" on the Central clock', () => line(), 'Week closes Fri 11:59 PM CT')
+      dt.setAppTimeZone('America/Denver')
+      check('§5 ...any other zone takes its short name there', () => (typeof dt.appZoneLabel === 'function' ? dt.appZoneLabel(Date.parse('2026-12-01T12:00:00Z')) : 'none'), 'MST')
+    } finally {
+      Intl.DateTimeFormat = Real
+      dt.setAppTimeZone(NY)
+    }
+  }
 
   // §6 no era: every helper as it was
   setEra(undefined)

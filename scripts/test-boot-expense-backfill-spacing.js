@@ -117,8 +117,8 @@ const GRAPH = [
 	// The name rule.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes",
 	"logAudit",
-	// The business day of an assignment's stamp (EXPENSE_BACKFILL_APP_DAY_ENABLED).
-	"appDay",
+	// The business day of an assignment's stamp (EXPENSE_BACKFILL_APP_DAY_ENABLED)
+	// is lib/app-time.js's, handed in as server.js requires it.
 ];
 const GRAPH_SRC = Object.fromEntries(GRAPH.map((n) => [n, liftFn(n)]));
 
@@ -192,9 +192,10 @@ const LATE_DECL = [
 ].join("\n");
 
 const QUIET = { log() {}, warn() {}, error() {} };
-// The business clock appDay() reads (lib/app-time.js's default zone); §8's
-// expected days are written in it.
+// The business clock a stamp's day is read on (lib/app-time.js's default zone,
+// with no switch set); §8's expected days are written in it.
 const APP_TIMEZONE = "America/New_York";
+const appTime = require("../lib/app-time");
 // §8's flag, declared above the call in server.js and handed in here, so one run
 // boots with it both on and off. Off unless a boot asks, or flagDefault says so.
 const FLAG = "EXPENSE_BACKFILL_APP_DAY_ENABLED";
@@ -205,7 +206,7 @@ let flagDefault = false;
 function boot(db, { over = {}, cons = QUIET, appDayWindow = flagDefault } = {}) {
 	const graph = GRAPH.map((n) => (n in over ? over[n] : GRAPH_SRC[n])).join("\n");
 	const body = [graph, HEALTH_DECL, CALL_STMT, LATE_DECL, "return legacyExpenseBackfillHealth;"].join("\n");
-	return new Function("db", "console", "APP_TIMEZONE", FLAG, body)(db, cons, APP_TIMEZONE, appDayWindow);
+	return new Function("db", "console", "APP_TIMEZONE", "appTime", FLAG, body)(db, cons, APP_TIMEZONE, appTime, appDayWindow);
 }
 
 // ───────────────────────────────────────────────────────────────── fixtures
@@ -660,7 +661,7 @@ function eveningSection(over) {
 }
 // M5: the stamp's day read on the server's clock instead of the business clock.
 function serverClockMutant() {
-	return mutate(GRAPH_SRC.backfillLegacyExpenseTrucks, "appDay(new Date(ms))",
+	return mutate(GRAPH_SRC.backfillLegacyExpenseTrucks, "appTime.businessDayOf(new Date(ms), APP_TIMEZONE)",
 		'((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(ms))');
 }
 // M6: the flag-on window back on the stamps' first 10 characters, the UTC day.

@@ -192,9 +192,9 @@ const TODAY = "2026-09-25";
 // Eastern unless §6 says otherwise); `over` swaps in a mutant's source.
 function buildModule(db, { flag = false, zone = "America/New_York", over = {} } = {}) {
 	const fns = [...FUNCTIONS, ...STAMP_FNS].map((n) => (n in over ? over[n] : FN_SRC[n]));
-	return new Function("db", "appTodayKey", "periodLocksReadable", "investorPayoutBasis", "APP_DAY_STAMPS_ENABLED", "APP_TIMEZONE",
+	return new Function("db", "appTodayKey", "periodLocksReadable", "investorPayoutBasis", "APP_DAY_STAMPS_ENABLED", "APP_TIMEZONE", "appTime",
 		`"use strict";\n${CONSTS}\n${fns.join("\n")}\nreturn { ${[...FUNCTIONS, ...STAMP_FNS].join(", ")}, TRUCK_AMOUNT_FIELDS };`
-	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"), flag, zone);
+	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"), flag, zone, require("../lib/app-time"));
 }
 
 // ── fixtures: production's shape ────────────────────────────────────────────
@@ -1019,7 +1019,7 @@ const asRecorded = (results) => {
 const mutate = (src, from, to) => (src && src.includes(from) ? src.split(from).join(to) : null);
 const MUTANTS = {
 	// M1 the stamp's day read on the server's clock instead of APP_TIMEZONE.
-	"server-clock": () => ({ appStampDay: mutate(FN_SRC.appStampDay, "appDay(new Date(ms))",
+	"server-clock": () => ({ appStampDay: mutate(FN_SRC.appStampDay, "appTime.businessDayOf(new Date(ms), APP_TIMEZONE)",
 		"((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, \"0\")}-${String(d.getDate()).padStart(2, \"0\")}`)(new Date(ms))") }),
 	// M2 the flag ignored: the UTC month always (the bug).
 	"flag-ignored": () => ({ assignmentFloorMonth: mutate(FN_SRC.assignmentFloorMonth, "if (!APP_DAY_STAMPS_ENABLED) return utc;", "return utc;") }),
@@ -1040,7 +1040,7 @@ function floorLift(src) {
 		return closure(src, {
 			roots: ["driverPayLockedMonths", "driverHistoryFloorMonth"],
 			provided: ["db", "require", "console", "process", "__dirname", "fetch"], denied: SCRIPT_DENIED,
-		}).names.filter((n) => n === "APP_DAY_STAMPS_ENABLED" || ["appDay", "appStampDay", "assignmentFloorMonth"].includes(n)).sort();
+		}).names.filter((n) => n === "APP_DAY_STAMPS_ENABLED" || ["appDay", "appStampDay", "appTime", "assignmentFloorMonth"].includes(n)).sort();
 	} catch (e) {
 		return `refused: ${e.message}`;
 	}
@@ -1067,8 +1067,8 @@ function stampChecks() {
 		"§6 both floors read start_date through assignmentFloorMonth(), with no slice of their own left");
 
 	section("§6 the floors lift into a script");
-	eq(floorLift(SRC), ["APP_DAY_STAMPS_ENABLED", "appDay", "appStampDay", "assignmentFloorMonth"],
-		"§6 both floors lift through closure() with the HTTP app and the server denied, bringing the flag, appStampDay() and appDay()");
+	eq(floorLift(SRC), ["APP_DAY_STAMPS_ENABLED", "appStampDay", "appTime", "assignmentFloorMonth"],
+		"§6 both floors lift through closure() with the HTTP app and the server denied, bringing the flag, appStampDay() and lib/app-time.js");
 	// closure() reads any name as a top-level one, so a local `app` would pull in the HTTP app.
 	const localApp = FN_SRC.assignmentFloorMonth
 		? SRC.replace(FN_SRC.assignmentFloorMonth, () => FN_SRC.assignmentFloorMonth.replace(/\bbiz\b/g, "app")) : "";

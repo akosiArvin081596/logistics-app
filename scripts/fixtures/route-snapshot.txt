@@ -159,7 +159,7 @@ PUT /api/expenses/bulk-draft · requireAuth@2f5c61384511 · bulkDraftLimiter=lim
 PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4bc39f485e81
 GET /api/expenses/fuel-analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · fuelAnalyticsLimiter=limiter · inline@42166b2c8a68
 POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter · inline@ea8104cc4944
-GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
+GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@1a7294757bd7
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
 POST /api/factoring/loads/:loadKey · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@0de31441b522 · (lib mount)
 POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@65273f8e8c37 · (lib mount)

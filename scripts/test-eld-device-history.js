@@ -146,7 +146,7 @@ function freshDb() {
 // ELD_APP_DAY_ENABLED is off and APP_TIMEZONE US Eastern unless `extra` says otherwise.
 function build(db, src, expose, extra = {}) {
 	const deps = {
-		db, eldMiles, usStates: require("../lib/us-states"), Date: FakeDate,
+		db, eldMiles, appTime, usStates: require("../lib/us-states"), Date: FakeDate,
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: () => {}, error: (...a) => { throw new Error(a.join(" ")); } },
 		ELD_APP_DAY_ENABLED: false, APP_TIMEZONE: "America/New_York",
@@ -280,7 +280,7 @@ function mileageRoute(db, flag = false) {
 	let body = null;
 	const app = { get: (p, ...h) => { app.handler = h[h.length - 1]; } };
 	const routeDeps = {
-		app, db, eldMiles, Date: FakeDate, requireRole: () => null, mileageAnalyticsLimiter: null,
+		app, db, eldMiles, appTime, Date: FakeDate, requireRole: () => null, mileageAnalyticsLimiter: null,
 		APP_TIMEZONE: appTime.appTimeZone(), ELD_APP_DAY_ENABLED: flag,
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: () => {}, error: (...a) => { throw new Error(a.join(" ")); } },

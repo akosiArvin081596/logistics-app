@@ -5,9 +5,14 @@
 //   §1 what it finds: each reader's seam-hour item in an open month (11 PM-midnight
 //      CT, which is the next day on the Eastern clock) under a bare flip, nothing
 //      in a locked month or before 2026-10-09, and nothing the switch moves; the
-//      held truck at noon; the sheet's stamps and zoned cells; the switch itself
+//      held truck at noon; the sheet's stamps and zoned cells; the other readers of
+//      a stored instant (pings with no longitude, activity weeks, the backfill, the
+//      Personal wait, the auto-invoice baseline, device links, invoice and
+//      adjustment dates, deleted loads, day-off decisions and drafts, Personal
+//      corrections, edit holds); the readers it names unmeasured; the switch itself
 //      (Friday Nov 20's cutoff and batch, November's close, the app's settings).
-//   §2 what it prints: ids, days and counts, none of the copy's names.
+//   §2 what it prints: ids, days and counts, none of the copy's names; the four
+//      parts, with each unmeasured reader by name.
 //   §3 read-only: the database opens read-only, its SQL is SELECT only, its
 //      requires are pinned, and nothing in the folder changes.
 //   §4 the command line: the file run gives the in-process report; every refused
@@ -15,6 +20,8 @@
 //      switch; an unknown option; a database that isn't there or isn't a copy)
 //      exits 2 and touches nothing.
 //   §5 an item the switch itself would move is listed, and the run exits 1.
+//   §6 the PDF dates (D5): a payout's stamp and a zoned stamp cell, under a bare
+//      flip only.
 //
 // Made-up data only, in a fresh temp folder. Never reads app.db.
 //   node scripts/test-central-time-what-would-change.js      # exits 1 on any failure
@@ -63,8 +70,15 @@ function makeDb(file, extra = () => {}) {
 		CREATE TABLE pay_rate_history (id INTEGER PRIMARY KEY, subject TEXT, subject_key TEXT, rate REAL, effective_from TEXT, source TEXT);
 		CREATE TABLE expenses (id INTEGER PRIMARY KEY, date TEXT, timestamp TEXT DEFAULT '', created_at DATETIME, type TEXT, amount REAL, receipt_details TEXT DEFAULT '');
 		CREATE TABLE fuel_events (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT, start_ms INTEGER, end_ms INTEGER, local_day TEXT);
-		CREATE TABLE invoices (id INTEGER PRIMARY KEY, driver_name TEXT, paid_at TEXT);
-		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '');
+		CREATE TABLE invoices (id INTEGER PRIMARY KEY, driver_name TEXT, paid_at TEXT, created_at DATETIME, adjusted_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '', week_start TEXT DEFAULT '');
+		CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY, routemate_vehicle_id TEXT, longitude REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '');
+		CREATE TABLE auto_invoice_meta (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY, truck_id INTEGER, routemate_vehicle_id TEXT, assigned_from TEXT, assigned_until TEXT DEFAULT '');
+		CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY, load_id TEXT, deleted_at DATETIME, deleted_by TEXT DEFAULT '');
+		CREATE TABLE driver_availability (id INTEGER PRIMARY KEY, directory_id INTEGER, decided_at TEXT);
+		CREATE TABLE time_off_chr_drafts (id INTEGER PRIMARY KEY, availability_id INTEGER, drafted_at TEXT);
+		CREATE TABLE expense_personal (id INTEGER PRIMARY KEY, expense_id INTEGER, needs_correction_since TEXT DEFAULT '');
+		CREATE TABLE load_cell_writes (id INTEGER PRIMARY KEY, load_key TEXT, column_name TEXT, at TEXT);
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, created_at DATETIME, in_service_date TEXT DEFAULT '');
 		CREATE TABLE load_status_history (id INTEGER PRIMARY KEY, load_id TEXT, new_status TEXT, changed_at DATETIME, source TEXT DEFAULT '');
 		CREATE TABLE owner_operators (id INTEGER PRIMARY KEY, user_id INTEGER, business_name TEXT, created_at TEXT);
@@ -78,7 +92,8 @@ function makeDb(file, extra = () => {}) {
 	run("INSERT INTO truck_assignments VALUES (?, ?, ?, ?, ?)",
 		[1, 900, NAMES[0], "2026-11-01T04:30:00.000Z", "2026-11-16T17:30:00.000Z"], // Oct 31 11:30 PM CDT; 12:30 PM EST Nov 16
 		[2, 900, NAMES[1], "2026-11-16T17:30:00.000Z", ""],
-		[3, 901, NAMES[1], "2026-10-05T03:30:00.000Z", "2026-11-05"]); // the same day on both clocks; a bare day
+		[3, 901, NAMES[1], "2026-10-05T03:30:00.000Z", "2026-11-05"], // the same day on both clocks; a bare day
+		[4, 902, NAMES[1], "2026-11-02 05:30:00", ""]); // SQLite's text: the backfill keeps its first 10 characters
 	run("INSERT INTO carrier_driver_history VALUES (?, ?, ?, ?, ?)", [1, NAMES[2], NAMES[0], "2026-11-01 04:30:00", null]);
 	run("INSERT INTO pay_rate_history VALUES (?, ?, ?, ?, ?, ?)", [1, "driver", "made-up driver a", 300, "2026-11-10T05:30:00.000Z", "change"]);
 	run("INSERT INTO expenses VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -86,10 +101,23 @@ function makeDb(file, extra = () => {}) {
 		[2, "2026-11-05", "", "2026-11-05 15:00:00", "Tolls", 12, ""],
 		[3, "2026-10-12", "2026-10-13T04:30:00.000Z", "2026-10-13 04:30:00", "Fuel", 50, ""]); // October: locked
 	run("INSERT INTO fuel_events VALUES (?, ?, ?, ?, ?)", [1, "MADE-UP-VID-1", Date.parse("2026-11-12T05:30:00Z"), Date.parse("2026-11-12T05:40:00Z"), "2026-11-12"]);
-	run("INSERT INTO invoices VALUES (?, ?, ?)", [1, NAMES[0], "2026-11-13T05:30:00.000Z"], [2, NAMES[1], ""]);
-	run("INSERT INTO routemate_telemetry (routemate_vehicle_id, location_date_ms, dropped_reason) VALUES (?, ?, ?)",
-		...["2026-11-14T05:10:00Z", "2026-11-14T05:20:00Z", "2026-11-14T05:40:00Z", "2026-11-14T15:00:00Z"].map((t) => ["MADE-UP-VID-1", Date.parse(t), ""]),
-		["MADE-UP-VID-1", Date.parse("2026-11-14T05:50:00Z"), "jump"]);
+	run("INSERT INTO invoices (id, driver_name, paid_at, created_at, adjusted_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)",
+		[1, NAMES[0], "2026-11-13T05:30:00.000Z", "2026-11-13 05:30:00", "2026-11-13T05:30:00.000Z", ""],
+		[2, NAMES[1], "", "2026-11-05 15:00:00", "", "2026-11-14T05:30:00.000Z"], // Saturday Nov 14 on Eastern, Friday Nov 13 on Central
+		[3, NAMES[1], "", "2026-11-05 15:00:00", "", "2026-11-10T05:30:00.000Z"]); // a day earlier, the same week
+	run("INSERT INTO routemate_telemetry (routemate_vehicle_id, longitude, location_date_ms, dropped_reason) VALUES (?, ?, ?, ?)",
+		...["2026-11-14T05:10:00Z", "2026-11-14T05:20:00Z", "2026-11-14T15:00:00Z"].map((t) => ["MADE-UP-VID-1", -90.5, Date.parse(t), ""]),
+		["MADE-UP-VID-1", null, Date.parse("2026-11-14T05:40:00Z"), ""], // no longitude: the business clock's day
+		["MADE-UP-VID-1", null, Date.parse("2026-11-14T15:10:00Z"), ""],
+		["MADE-UP-VID-1", -90.5, Date.parse("2026-11-14T05:50:00Z"), "jump"],
+		["MADE-UP-VID-1", -90.5, Date.parse("2026-11-10T05:15:00Z"), ""]); // Tuesday to Monday: the same week
+	run("INSERT INTO auto_invoice_meta VALUES (?, ?)", ["baseline_at", "2026-09-20T04:30:00.000Z"], ["shadow_baseline_at", "2026-11-02T15:00:00.000Z"], ["settings_notice", "made-up"]);
+	run("INSERT INTO eld_device_assignments VALUES (?, ?, ?, ?, ?)", [1, 900, "MADE-UP-VID-1", "2026-11-03T05:30:00.000Z", ""], [2, 901, "MADE-UP-VID-2", "2026-11-04T15:00:00.000Z", "2026-11-11T05:30:00.000Z"]);
+	run("INSERT INTO deleted_loads VALUES (?, ?, ?, ?)", [1, "LD-MADEUP-5", "2026-11-08 05:30:00", "made-up"]);
+	run("INSERT INTO driver_availability VALUES (?, ?, ?)", [1, 31, "2026-11-09T05:30:00.000Z"], [2, 32, null]);
+	run("INSERT INTO time_off_chr_drafts VALUES (?, ?, ?)", [1, 1, "2026-11-09T05:45:00.000Z"], [2, 2, null]);
+	run("INSERT INTO expense_personal VALUES (?, ?, ?)", [1, 1, "2026-11-10T05:30:00.000Z"], [2, 2, ""]);
+	run("INSERT INTO load_cell_writes VALUES (?, ?, ?, ?)", [1, "ld-madeup-1", "Rate", "2026-11-11T05:30:00.000Z"]);
 	run("INSERT INTO trucks VALUES (?, ?, ?, ?)", [1, "MADE-UP-T1", "2026-11-03 05:30:00", ""], [2, "MADE-UP-T2", "2026-11-03 05:30:00", "2026-11-04"]);
 	run("INSERT INTO load_status_history VALUES (?, ?, ?, ?, ?)", [1, "LD-MADEUP-1", "At Shipper", "2026-11-06 05:30:00", "driver"], [2, "LD-MADEUP-1", "At Receiver", "2026-11-06 05:45:00", "geofence"]);
 	run("INSERT INTO owner_operators VALUES (?, ?, ?, ?)", [1, 7, NAMES[3], "2026-11-07T05:30:00.000Z"]);
@@ -134,7 +162,9 @@ section("§1  what it finds", () => {
 	eq(by(built, "C6/C9").flip && by(built, "C6/C9").flip[0].futureCheckFlips, true, "§1 ...and auto-approval's future check would flip (dated Nov 10, submitted Nov 9)");
 	eq(refs(built, "F5/F6"), ["fuel_events #1 2026-11-12->2026-11-11"], "§1 F5/F6 a fill then would move a day on a re-scan");
 	eq(refs(built, "D10"), ["invoices #1 2026-11-13->2026-11-12"], "§1 D10 a payment then would print a day early; an unpaid invoice is not read");
-	eq(by(built, "F9").flip, { "MADE-UP-VID-1 2026-11-14": 3 }, "§1 F9 three pings in the seam hour would move a day; a dropped ping and a midday one do not");
+	eq(by(built, "F9").flip, { "MADE-UP-VID-1 2026-11-14": 3, "MADE-UP-VID-1 2026-11-10": 1 }, "§1 F9 three pings in Saturday's seam hour and one in Tuesday's would move a day; a dropped ping and the midday ones do not");
+	eq(by(built, "P3").flip, { "MADE-UP-VID-1 2026-11-14": 1 }, "§1 P3 of those, the one with no longitude: its pay and mileage day falls back to the business clock (a midday one does not move)");
+	eq(by(built, "W6").flip, { "MADE-UP-VID-1 week of 2026-11-14": 3 }, "§1 W6 Saturday's three would move from Nov 14's activity week to the week before; Tuesday's stays in its week");
 	eq(refs(built, "P14"), ["trucks #1 2026-11-03->2026-11-02"], "§1 P14 a truck with no in-service date created then would start charging a day early; one with a date is not read");
 	eq(refs(built, "P4"), ["load_status_history #1 2026-11-06->2026-11-05", "load_status_history #2 2026-11-06->2026-11-05"], "§1 P4 status taps then would move their trip day");
 	eq(refs(built, "P13"), ["owner_operators #1 2026-11-07->2026-11-06"], "§1 P13 an owner-operator accepted then would move a day");
@@ -142,6 +172,18 @@ section("§1  what it finds", () => {
 		"§1 S20 the KPI series' instants, as its gatherer reads them: AI-read receipts, AI insights, geofence and At Receiver taps, every truck");
 	eq(refs(built, "M4"), ["sheet row 2 Status Update Date 2026-11-02->2026-11-03T00:05:00.000Z", "sheet row 2 Completion Date 2026-11-02->2026-11-03T00:05:00.000Z"], "§1 M4 a November stamp would be re-read an hour late (its date kept); October's and September's are left out");
 	eq(refs(built, "M4z"), ["sheet row 4 Assigned Date 2026-11-09->2026-11-08"], "§1 M4z a zoned cell in the seam hour would move a day");
+	eq(refs(built, "R1"), ["truck_assignments #1 start_date 2026-11-01->2026-10-31"], "§1 R1 the backfill's day of an assignment stamped then would move; SQLite's text and a bare day keep their first 10 characters");
+	eq(refs(built, "P7"), ["invoices #2 deleted_at 2026-11-14->2026-11-07"], "§1 P7 a Personal line's wait on an invoice deleted then would end a week early; a day earlier in the same week is not listed");
+	eq(refs(built, "I2"), ["auto_invoice_meta baseline_at 2026-09-20->2026-09-19"], "§1 I2 a baseline taken then would move a day, though September is not open (the open months' loads are compared with it)");
+	eq(refs(built, "F12"), ["eld_device_assignments #1 assigned_from 2026-11-03->2026-11-02", "eld_device_assignments #2 assigned_until 2026-11-11->2026-11-10"], "§1 F12 a device link's bounds stamped then would move a day; an open end is not read");
+	eq(refs(built, "D7"), ["invoices #1 created_at 2026-11-13->2026-11-12"], "§1 D7 a regenerated invoice created then would print a day early");
+	eq(refs(built, "D9"), ["invoices #1 adjusted_at 2026-11-13->2026-11-12"], "§1 D9 an adjustment made then would print a day early; no adjustment is not read");
+	eq(refs(built, "D16"), ["deleted_loads #1 deleted_at 2026-11-08->2026-11-07"], "§1 D16 a load deleted then would list a day early");
+	eq(refs(built, "R2"), ["driver_availability #1 decided_at 2026-11-09->2026-11-08"], "§1 R2 a day-off request decided then would move a day; an undecided one is not read");
+	eq(refs(built, "S26"), ["time_off_chr_drafts #1 drafted_at 2026-11-09->2026-11-08"], "§1 S26 a CHR draft made then would move a day; one not yet made is not read");
+	eq(refs(built, "R3"), ["expense_personal #1 needs_correction_since 2026-11-10->2026-11-09"], "§1 R3 a Personal correction waiting since then would move a day; one not waiting is not read");
+	eq(refs(built, "A14"), ["load_cell_writes #1 at 2026-11-11->2026-11-10"], "§1 A14 an edit held then would give another day");
+	eq([built.notMeasured.length, built.notMeasured.every((s) => typeof s === "string" && s.length > 20)], [11, true], "§1 the readers it does not measure are named, not counted as none");
 	eq([built.switchedTotal, built.readers.filter((r) => r.switchedCount).map((r) => r.id)], [0, []], "§1 the switch itself moves nothing: every instant here is before it");
 	const t = built.theSwitch;
 	eq([t.friday, t.cutoff, t.batch], ["2026-11-20", { before: "2026-11-20T23:30:00.000Z", after: "2026-11-21T00:30:00.000Z" }, { before: "2026-11-21T00:00:00.000Z", after: "2026-11-21T01:00:00.000Z" }],
@@ -157,7 +199,9 @@ section("§2  what it prints", () => {
 		eq(NAMES.filter((n) => s.includes(n)), [], `§2 ${what} holds none of the copy's names`);
 		ok(!/123\.45/.test(s), `§2 ${what} holds no amount`);
 	}
-	ok(/1\. What a bare flip would move/.test(text) && /2\. What the switch moves \(both settings, this code\): none/.test(text) && /3\. The switch itself/.test(text), "§2 the text has the three parts, and says the switch moves nothing");
+	ok(/1\. What a bare flip would move/.test(text) && /2\. What the switch moves \(both settings, this code\): none among the readers measured here \(11 more are named in 4\)/.test(text) && /3\. The switch itself/.test(text) && /4\. Not measured here \(11\)/.test(text),
+		"§2 the text has the four parts, and says the switch moves nothing among the readers it measures, naming the rest");
+	eq(built.notMeasured.filter((n) => !text.includes(`  - ${n}`)), [], "§2 ...each unmeasured reader printed by name");
 });
 
 // ── §3 ────────────────────────────────────────────────────────────────────────
@@ -222,6 +266,27 @@ section("§5  an item the switch itself would move", () => {
 	fs.writeFileSync(settings, "");
 	const x = cli("--dry-run", `--db=${file}`, `--env-file=${settings}`, `--values-json=${VALUES}`, `--zone=${ZONE}`, `--from=${FROM}`);
 	eq(x.status, 1, "§5 and the run exits 1");
+
+});
+
+// ── §6 ────────────────────────────────────────────────────────────────────────
+section("§6  the PDF dates (D5)", () => {
+	// A payout paid at 11:30 PM CST on Nov 9 and a zoned Completion Date cell at
+	// 11:30 PM CST on Nov 11, both before the moment.
+	eq(by(built, "D5").flip, [], "§6 D5 the first copy has no payout and no zoned stamp cell");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "central-time-report-pdf-"));
+	const file = path.join(dir, "app.db");
+	makeDb(file, (db, run) => {
+		db.exec("CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY, owner_id INTEGER, period TEXT, due_date TEXT, paid_at TEXT, finalized_at TEXT DEFAULT '', adjusted_at TEXT DEFAULT '')");
+		run("INSERT INTO investor_payouts VALUES (?, ?, ?, ?, ?, ?, ?)", [1, 5, "2026-10", "2026-11-15", "2026-11-10T05:30:00.000Z", "2026-11-03T15:00:00.000Z", ""]);
+	});
+	const zonedSheet = { values: [...SHEET.values, ["LD-MADEUP-6", "Delivered", NAMES[0], "", "", "2026-11-12T05:30:00Z"]] };
+	const db = open(file);
+	let pdf = null;
+	try { pdf = report.buildReport({ db, values: zonedSheet, env: {}, zone: ZONE, from: FROM, nowMs: NOW }); } finally { db.close(); }
+	eq(refs(pdf, "D5"), ["investor_payouts #1 paid_at 2026-11-10->2026-11-09", "sheet row 6 Completion Date 2026-11-12->2026-11-11"],
+		"§6 D5 a bare flip would print both a day early (October is locked, the payment is in November; a midday finalize does not move)");
+	eq([pdf.switchedTotal, refs(pdf, "D5", "switched")], [0, []], "§6 ...and the switch prints them as before: each is read on the clock in force at it");
 });
 
 if (failures.length) {

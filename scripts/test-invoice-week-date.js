@@ -50,14 +50,15 @@ function extractAt(needle, label) {
 const extract = (name) => extractAt(`\nfunction ${name}(`, `${name}()`);
 
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-const S = new Function("RFC2822_MONTHS", "APP_TIMEZONE", [
+const appTime = require("../lib/app-time");
+const S = new Function("RFC2822_MONTHS", "APP_TIMEZONE", "appTime", [
 	extract("appDay"),
 	extract("sheetDayKey"),
 	extract("getWeekRange"),
 	// Module level since money plan D (it was nested in generateInvoiceHandler()).
 	extract("parseInvoiceDate"),
 	"return { appDay, sheetDayKey, getWeekRange, parseInvoiceDate };",
-].join("\n"))(RFC2822_MONTHS, require("../lib/app-time").appTimeZone());
+].join("\n"))(RFC2822_MONTHS, appTime.appTimeZone(), appTime);
 const { sheetDayKey, getWeekRange, parseInvoiceDate } = S;
 
 // The formatter the invoice reads the result back through (server.js fmtLocalDate).
