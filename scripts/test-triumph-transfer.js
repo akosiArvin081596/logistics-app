@@ -430,12 +430,15 @@ async function madeUpPdf(lines) {
 			ok(!new RegExp(`\\.${call}\\(`).test(src), `§6 the wrapper never calls sftp.${call}()`);
 		}
 		eq(Object.keys(transfer.create({})).sort(), ["configured", "invalid", "missing", "openLive", "openRead", "openSample"], "§6 the wrapper's ways in: read, live and sample, and no other");
-		const files = [
-			"server.js",
-			...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => `lib/${f}`),
-			...fs.readdirSync(path.join(ROOT, "scripts")).filter((f) => /\.(js|cjs|mjs)$/.test(f) && !/^test-/.test(f)).map((f) => `scripts/${f}`),
-		];
-		const callers = (re) => files.filter((f) => re.test(code(fs.readFileSync(path.join(ROOT, f), "utf8")))).filter((f) => f !== "lib/triumph-transfer.js");
+		// The server as the scripts read it (scripts/lib/server-source.js, its route modules
+		// spliced in), then lib/ and scripts/.
+		const sources = [["the server", require("./lib/server-source").serverSource()]];
+		for (const dir of ["lib", "scripts"]) {
+			for (const f of fs.readdirSync(path.join(ROOT, dir)).filter((x) => /\.(js|cjs|mjs)$/.test(x) && !/^test-/.test(x))) {
+				sources.push([`${dir}/${f}`, fs.readFileSync(path.join(ROOT, dir, f), "utf8")]);
+			}
+		}
+		const callers = (re) => sources.filter(([f, text]) => f !== "lib/triumph-transfer.js" && re.test(code(text))).map(([f]) => f);
 		eq(callers(/\.openSample\(/), ["scripts/triumph-batch-sample.js"], "§6 only the sample script opens sample mode");
 		eq(callers(/\.putSample\(/), ["scripts/triumph-batch-sample.js"], "§6 ...and only it calls putSample()");
 		eq(callers(/\.openLive\(/), ["lib/triumph-job.js"], "§6 only the submit job opens live mode");
