@@ -682,14 +682,14 @@ export function appDayEndIso(ymd) {
 
 /**
  * The app zone's short name for words that name it ("Week closes Fri 11:59 PM
- * ET"): its generic name, "ET" or "CT", never a fixed string. Older phones
- * (Safari before 15.4) refuse 'shortGeneric' and get the short name ("EDT",
- * "EST") instead of an exception.
+ * ET"): its generic name, "ET" or "CT", never a fixed string. Older engines
+ * (Safari before 15.4) refuse 'shortGeneric': the two zones the app runs on still
+ * read "ET" and "CT" there, and any other gets its short name ("PST").
  */
 export function appZoneLabel(now = Date.now()) {
   const name = (style) => new Intl.DateTimeFormat('en-US', { timeZone: appZone, timeZoneName: style })
     .formatToParts(new Date(now)).find((p) => p.type === 'timeZoneName')?.value || ''
-  try { return name('shortGeneric') } catch { return name('short') }
+  try { return name('shortGeneric') } catch { return appZone === DEFAULT_APP_TIME_ZONE ? 'ET' : appZone === SHEET_STAMP_HOUSTON_ZONE ? 'CT' : name('short') }
 }
 
 // --- Calendar arithmetic on date keys ---------------------------------------

@@ -174,7 +174,7 @@ function zoneText(stamp) {
 // The business day an instant falls on, or "".
 function dayOf(stamp) {
 	const ms = stampMs(stamp);
-	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), appTime.appTimeZone()) : "";
+	return Number.isFinite(ms) ? appTime.businessDayOf(new Date(ms)) : "";
 }
 
 // One row's saves of its days, from its driver's create and update audit lines

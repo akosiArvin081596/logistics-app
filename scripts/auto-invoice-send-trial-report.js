@@ -278,7 +278,7 @@ function decide(counts, { nowMs, closesAtMs, failure = "" }) {
 
 async function compareShadow({ db, since, domains, zone, fetchSent, nowMs }) {
 	const meta = ledger.getMeta(db);
-	const first = since || (meta.shadow_renders_on_at ? appTime.dayInZone(new Date(meta.shadow_renders_on_at), zone) : "");
+	const first = since || (meta.shadow_renders_on_at ? appTime.dayInZone(new Date(meta.shadow_renders_on_at), zone && appTime.businessZoneAt(new Date(meta.shadow_renders_on_at), zone)) : "");
 	if (!first) throw new Refusal("the render shadow has never been on: give --since");
 	const until = addDays(first, WINDOW_DAYS - 1);
 	const fromMs = dayStartMs(first, zone);
@@ -374,7 +374,7 @@ async function compareTrial({ db, since, domains, zone, fetchSent, nowMs }) {
 		.map((c) => ({ c, digest: parseJson(c.draft_digest_json), row: ledger.ownDraftRow(db, c) }))
 		.filter((x) => x.row && x.c.drafted_at)
 		.sort((a, b) => (a.c.drafted_at < b.c.drafted_at ? -1 : a.c.drafted_at > b.c.drafted_at ? 1 : 0));
-	const firstDay = since || (own.length ? appTime.dayInZone(new Date(own[0].c.drafted_at), zone) : "");
+	const firstDay = since || (own.length ? appTime.dayInZone(new Date(own[0].c.drafted_at), zone && appTime.businessZoneAt(new Date(own[0].c.drafted_at), zone)) : "");
 	if (!firstDay) throw new Refusal("no automatic draft yet: give --since");
 	const fromMs = dayStartMs(firstDay, zone);
 	const changedAudits = ledger.hasTable(db, "audit_trail")
@@ -403,7 +403,7 @@ async function compareTrial({ db, since, domains, zone, fetchSent, nowMs }) {
 				return !laterMessage(copies, matched, x.digest.recipient);
 			},
 		});
-		judged.push({ at, day: appTime.dayInZone(new Date(at), zone), verdict, foundMs: candidates.map((y) => y.at) });
+		judged.push({ at, day: appTime.dayInZone(new Date(at), zone && appTime.businessZoneAt(new Date(at), zone)), verdict, foundMs: candidates.map((y) => y.at) });
 	}
 
 	// The window: 7 days, then a day more at a time while fewer than the minimum

@@ -313,7 +313,7 @@ function buildReport(db, { env, zone, nowMs, days, labels, sheet, names }) {
 	const normalize = names.normalizeDriverName;
 	const fromMs = nowMs - days * DAY_MS;
 	const inWindow = (ms) => ms >= fromMs && ms <= nowMs;
-	const dayOf = (ms) => tripWorkDays.dayInZone(ms, zone);
+	const dayOf = (ms) => tripWorkDays.dayInZone(ms, zone && appTime.businessZoneAt(ms, zone));
 	const radiusM = tripWorkDays.geofenceRadiusFromEnv(env);
 	const history = readHistory(db);
 	const pods = readPods(db);

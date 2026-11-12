@@ -5128,8 +5128,8 @@ function buildEldDeviceResolver() {
 	).all();
 	return eldMiles.buildDeviceTruckResolver(rows, {
 		startMs: eldDeviceHistoryStartMs(), currentLinks,
-		// Off: each bound's UTC day, as before.
-		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+		// Off: each bound's UTC day, as before. On: its business day on the clock in force then.
+		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : undefined,
 	});
 }
 
@@ -5221,7 +5221,7 @@ async function rollupEldMilesDailyRange(fromMs, toMs, nowMs) {
 			computed_at = CURRENT_TIMESTAMP
 		WHERE excluded.samples >= eld_miles_daily.samples
 	`);
-	const dayOf = (ms, lng) => localDayInTz(ms, usTzForLongitude(lng));
+	const dayOf = (ms, lng) => localDayInTz(ms, usTzForLongitude(lng, ms));
 
 	const fromDay = isoDay(fromMs);
 	const toDay = isoDay(toMs);
@@ -5381,7 +5381,7 @@ async function rollupEldStateMilesRange(fromMs, toMs, nowMs) {
 			computed_at = CURRENT_TIMESTAMP
 		WHERE excluded.samples >= eld_state_miles_daily.samples
 	`);
-	const dayOf = (ms, lng) => eldMiles.localDayInTz(ms, eldMiles.usTzForLongitude(lng));
+	const dayOf = (ms, lng) => eldMiles.localDayInTz(ms, eldMiles.usTzForLongitude(lng, ms));
 
 	const fromDay = isoDay(fromMs);
 	const toDay = isoDay(toMs);
@@ -7231,9 +7231,10 @@ function backfillLegacyExpenseTrucks(health) {
 			: `(substr(ta.start_date, 1, 10) <= ${day}
 				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`);
 
-		// The business day (appDay(), APP_TIMEZONE) an assignment stamp falls on. Only the
-		// instant the app writes (toISOString()) is converted; anything else keeps its first
-		// 10 characters, as before. Memoized: step 2 reads every assignment for each receipt.
+		// The business day an assignment stamp falls on, on the clock in force then
+		// (appTime.businessDayOf()). Only the instant the app writes (toISOString()) is converted;
+		// anything else keeps its first 10 characters, as before. Memoized: step 2 reads every
+		// assignment for each receipt.
 		const stampDays = new Map();
 		const stampDay = (v) => {
 			if (v === null || v === undefined) return null;
@@ -7241,7 +7242,7 @@ function backfillLegacyExpenseTrucks(health) {
 			if (!stampDays.has(s)) {
 				const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
 				const exact = Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19);
-				stampDays.set(s, exact ? appDay(new Date(ms)) : s.slice(0, 10));
+				stampDays.set(s, exact ? appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : s.slice(0, 10));
 			}
 			return stampDays.get(s);
 		};
@@ -9356,7 +9357,7 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 		if (toEmail.length && !capped) {
 			const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
 			const retry = firstSeen
-				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
+				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), appTime.businessZoneAt(new Date(firstSeen), APP_TIMEZONE), { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
 				: "";
 			let subject;
 			let html;
@@ -12122,7 +12123,7 @@ function timeOffChrDraftRow(availabilityId) {
 // A draft as staff see it (timeOffChrDraft.draftView()), by the server's clock and the row's current directory name.
 function timeOffChrDraftView(draft, row, today) {
 	return timeOffChrDraft.draftView(draft, { driverName: row.directory_name, todayKey: today, nowMs: Date.now(),
-		draftedOn: draft.drafted_at ? appDay(new Date(draft.drafted_at)) : "", denyHits: timeOffChrDraftDeny });
+		draftedOn: draft.drafted_at ? appTime.businessDayOf(new Date(draft.drafted_at), APP_TIMEZONE) : "", denyHits: timeOffChrDraftDeny });
 }
 
 // The staff panel's `chrDraft` on a driver-made row with a draft.
@@ -12175,7 +12176,7 @@ function queueTimeOffChrDraft(availabilityId) {
 function timeOffChrDraftChange(availabilityId, today, { moved = false } = {}) {
 	const draft = timeOffChrDraftRow(availabilityId);
 	if (!draft) return null;
-	const note = timeOffChrDraft.laterChangeNote({ state: draft.state, draftedOn: draft.drafted_at ? appDay(new Date(draft.drafted_at)) : "" });
+	const note = timeOffChrDraft.laterChangeNote({ state: draft.state, draftedOn: draft.drafted_at ? appTime.businessDayOf(new Date(draft.drafted_at), APP_TIMEZONE) : "" });
 	const row = moved ? availabilityRowWithDriver(availabilityId) : undefined;
 	return { state: draft.state, note, ...(row ? { newDays: timeOffChrDraft.chrDraftAnswer(timeOffChrDraftDecision(row, today, { staffRecorded: true })) } : {}) };
 }
@@ -19967,7 +19968,7 @@ function appStampDay(stamp) {
 	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) return null;
 	const ms = Date.parse(s);
 	if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return null;
-	return appDay(new Date(ms));
+	return appTime.businessDayOf(new Date(ms), APP_TIMEZONE);
 }
 
 // The instant that stands for a business day ("YYYY-MM-DD") when a question is
@@ -21124,7 +21125,7 @@ function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 		   AND location_date_ms >= ? AND location_date_ms < ?`
 	).all(...ids, minMs, maxMs);
 	for (const r of rows) {
-		const day = localDayInTz(r.ms, usTzForLongitude(r.lng));
+		const day = localDayInTz(r.ms, usTzForLongitude(r.lng, r.ms));
 		let e = out[r.vid];
 		if (!e) e = out[r.vid] = { travel: new Set(), coverage: new Set() };
 		e.coverage.add(day);
@@ -21325,10 +21326,11 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 	const note = winAnsiSafe(invoiceRow.adjustment_note || "");
 	const adjustedBy = winAnsiSafe(invoiceRow.adjusted_by || "");
 	// `adjusted_at` is an ISO instant, so its first ten characters are the UTC
-	// day; print the APP_TIMEZONE day (an unparseable value prints as before).
+	// day; print its business day on the clock in force then (an unparseable value
+	// prints as before).
 	const adjustedAtMs = Date.parse(invoiceRow.adjusted_at || "");
 	const adjustedAt = Number.isFinite(adjustedAtMs)
-		? appTime.dayInZone(new Date(adjustedAtMs), APP_TIMEZONE)
+		? appTime.businessDayOf(new Date(adjustedAtMs), APP_TIMEZONE)
 		: (invoiceRow.adjusted_at || "").toString().slice(0, 10);
 	const invoiceNo = winAnsiSafe(invoiceRow.invoice_number || "");
 	const money = (n) =>
@@ -24322,7 +24324,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0, emailLoads
 		const html = invoiceEmailHtml({
 			heading: "Completed Loads No Invoice Will Bill",
 			bodyHtml: `
-				${listedAt ? `<p style="margin:0 0 12px;line-height:1.6;color:#334155">This is a retry: the first try to send this digest failed. These loads were listed as of ${escHtml(appTime.dateTextInZone(new Date(listedAt), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}, and Job Tracking still lists them.</p>` : ""}
+				${listedAt ? `<p style="margin:0 0 12px;line-height:1.6;color:#334155">This is a retry: the first try to send this digest failed. These loads were listed as of ${escHtml(appTime.dateTextInZone(new Date(listedAt), appTime.businessZoneAt(new Date(listedAt), APP_TIMEZONE), { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}, and Job Tracking still lists them.</p>` : ""}
 				<p style="margin:0 0 12px;line-height:1.6;color:#334155">These loads are marked completed on Job Tracking but have no <b>Status Update Date</b> or <b>Completion Date</b>, so no weekly invoice will ever bill them${range ? ` (checked after the weekly run for ${escHtml(range.weekStart)} — ${escHtml(range.weekEnd)})` : ""}.</p>
 				<table style="border-collapse:collapse;font-size:13px;margin:0 0 12px">
 					<tr>${cell("Load", "th")}${cell("Driver", "th")}${cell("Pickup appointment", "th")}${cell("Drop-off appointment", "th")}</tr>
@@ -24759,7 +24761,7 @@ async function sendRateConExtractAlert(key, { id, unusable, fields }, { firstSee
 		.join("");
 	const firstSeenAt = firstSeen ? new Date(/[zZ]$/.test(firstSeen) ? firstSeen : `${String(firstSeen).replace(" ", "T")}Z`) : null;
 	const retry = firstSeenAt && Number.isFinite(firstSeenAt.getTime())
-		? `<p>This is a retry: the first try to send this alert failed. The load was first seen ${escHtml(appTime.dateTextInZone(firstSeenAt, APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
+		? `<p>This is a retry: the first try to send this alert failed. The load was first seen ${escHtml(appTime.dateTextInZone(firstSeenAt, appTime.businessZoneAt(firstSeenAt, APP_TIMEZONE), { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
 		: "";
 	const html =
 		`<p><b>Load ${escHtml(label)} was ingested with an address the system cannot place.</b></p>` + retry +
@@ -30508,7 +30510,7 @@ function personalLeftForRegenerate(row, nowMs) {
 	const left = db.prepare("SELECT week_start, deleted_at FROM invoices WHERE id = ?").get(row.invoice_id);
 	if (!left || !left.deleted_at || left.week_start !== row.week_start) return false;
 	const at = Date.parse(left.deleted_at);
-	return Number.isFinite(at) && nowMs < personalSweepDueMs(getWeekRange(appDay(new Date(at))).weekStart);
+	return Number.isFinite(at) && nowMs < personalSweepDueMs(getWeekRange(appTime.businessDayOf(new Date(at), APP_TIMEZONE)).weekStart);
 }
 
 // Whether a week touches a finalized month (or none can be confirmed open).
@@ -31768,7 +31770,7 @@ app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin")
 					const wait = personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r);
 					return {
 						line_id: r.id, expense_id: r.expense_id, driver: String(r.receipt_driver || "").trim(),
-						since_label: Number.isFinite(since) ? personalExpense.formatDay(appDay(new Date(since))) : "",
+						since_label: Number.isFinite(since) ? personalExpense.formatDay(appTime.businessDayOf(new Date(since), APP_TIMEZONE)) : "",
 						amount_text: personalExpense.signedMoney(personalExpense.netCents(r)),
 						reason: wait.reason, wait_text: wait.text,
 					};
@@ -51363,7 +51365,7 @@ function sheetDayKey(val) {
 		const at = new Date(`${literal}T${p2(iso[4])}:${iso[5]}:${iso[6] ? p2(iso[6]) : "00"}${tz}`);
 		// Degrade to the literal day, never to "". An unparseable oddity must not
 		// turn a dated row into an undated one on a path that pays people.
-		return Number.isNaN(at.getTime()) ? literal : appDay(at);
+		return Number.isNaN(at.getTime()) ? literal : appTime.businessDayOf(at, APP_TIMEZONE);
 	}
 
 	const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:,?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
@@ -53272,7 +53274,7 @@ function voiceNoteBytesToday(userId) {
 		`SELECT timestamp, voice_bytes FROM messages
 		  WHERE sender_user_id = ? AND client_key <> '' AND timestamp >= ?`
 	).all(userId, since)
-		.filter((r) => appDay(new Date(r.timestamp)) === today)
+		.filter((r) => appTime.businessDayOf(new Date(r.timestamp), APP_TIMEZONE) === today)
 		.reduce((n, r) => n + (Number(r.voice_bytes) || 0), 0);
 }
 
@@ -63074,7 +63076,8 @@ const eldActivityRollup = ELD_ACTIVITY_DAILY_ENABLED
 		db,
 		deviceResolver: () => buildEldDeviceResolver(),
 		driverResolver: (truckIds) => buildDriverAtResolver(truckIds),
-		weekStartOf: (ms) => getWeekRange(ms).weekStart,
+		// A ping's week is its business day's, on the clock in force at the ping.
+		weekStartOf: (ms) => getWeekRange(Number.isFinite(ms) && ms > 0 ? appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : ms).weekStart,
 		driverIdFor: (name) => (findDirectoryRowForDriver(name) || { id: 0 }).id,
 		boundaryMs: ELD_STATE_MILES_BOUNDARY_MS,
 	})

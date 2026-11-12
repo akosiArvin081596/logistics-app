@@ -344,7 +344,7 @@ function simulatedCopy(db, plan, zone) {
 				for (const s of d.rates) ins.run(key, s.rate, midnightOf(s.from, zone));
 				for (const h of seeds) {
 					const ms = Date.parse(h.effective_from);
-					const day = Number.isFinite(ms) ? tripWorkDays.dayInZone(ms, zone) : "";
+					const day = Number.isFinite(ms) ? tripWorkDays.dayInZone(ms, zone && appTime.businessZoneAt(ms, zone)) : "";
 					const want = day && day >= d.rates[0].from ? planRateOn(d.rates, day) : null;
 					if (want !== null && Number(h.rate) !== want) ins.run(key, want, h.effective_from);
 				}
@@ -539,8 +539,8 @@ async function cancelledDriveDays({ db, A, index, zone }) {
 		const earlier = events.slice(0, -1).filter(isCancel).pop();
 		const heading = events.find((e) => e.status === "heading to shipper" && e.ms <= last.ms && (!earlier || e.ms > earlier.ms));
 		if (!heading) continue;
-		const from = tripWorkDays.dayInZone(heading.ms, zone);
-		const to = tripWorkDays.dayInZone(last.ms, zone);
+		const from = tripWorkDays.dayInZone(heading.ms, zone && appTime.businessZoneAt(heading.ms, zone));
+		const to = tripWorkDays.dayInZone(last.ms, zone && appTime.businessZoneAt(last.ms, zone));
 		const row = rowOf.get(k);
 		if (!row || to < `${MONTH}-01` || from > `${MONTH}-31`) continue;
 		const key = index.norm(row[cols.driverCol] || "");
@@ -552,7 +552,7 @@ async function cancelledDriveDays({ db, A, index, zone }) {
 		const driving = new Set();
 		if (vid) {
 			for (const f of fixes.all(String(vid), Date.parse(`${from}T00:00:00Z`) - 86400000, Date.parse(`${to}T00:00:00Z`) + 2 * 86400000)) {
-				const d = tripWorkDays.dayInZone(Number(f.ms), zone);
+				const d = tripWorkDays.dayInZone(Number(f.ms), zone && appTime.businessZoneAt(Number(f.ms), zone));
 				seen.add(d);
 				if ((Number(f.speed) || 0) > tripWorkDays.DRIVING_MPS) driving.add(d);
 			}
