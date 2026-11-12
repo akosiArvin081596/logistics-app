@@ -153,7 +153,7 @@ async function checkPress(w, rec, mode, label) {
 			ok(!m.db.prepare("SELECT 1 FROM deleted_loads WHERE id = ?").get(rec.id), `${label} record ${rec.id}, ${mode}: its one delete record is gone`);
 		} else {
 			ok(got.status === 409 && got.body && got.body.code === want.code, `${label} record ${rec.id}, ${mode}: refused ${want.code}, as the report predicted (got ${said})`);
-			eq(fingerprint(m.db), before, `${label} record ${rec.id}, ${mode}: the refusal changed nothing`);
+			ok(fingerprint(m.db) === before, `${label} record ${rec.id}, ${mode}: the refusal changed nothing`);
 		}
 	} finally {
 		m.db.close();
