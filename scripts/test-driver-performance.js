@@ -3282,12 +3282,12 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			const own = await world.get(OWN, USERS[who]);
 			const id = directoryIdOf(who);
 			if (own.status !== 200) {
-				ok(!byId.has(id), `${label}: ${who}'s own route refuses him (${own.status}), and the page doesn't list him`);
+				ok(!byId.has(id), `${label}: ${who}: refused by the driver's own route (${own.status}), and not on the page`);
 				continue;
 			}
 			answered.push(id);
 			const entry = byId.get(id);
-			ok(!!entry && JSON.stringify(entry.performance) === own.text, `${label}: ${who}'s weeks on the page are byte for byte his own answer`,
+			ok(!!entry && JSON.stringify(entry.performance) === own.text, `${label}: ${who}: the page's weeks are byte for byte the driver's own answer`,
 				`page ${entry ? JSON.stringify(entry.performance).slice(0, 160) : "(none)"} | own ${own.text.slice(0, 160)}`);
 		}
 		eq([...byId.keys()].sort((a, b) => a - b), answered.sort((a, b) => a - b), `${label}: exactly the drivers whose own route answers them`);
@@ -3360,6 +3360,16 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			ok(!byId.has(4), "Dee, whose truck and loads are older than both weeks, isn't listed, as her own route refuses her");
 		} finally {
 			await later.close();
+		}
+		// Held a truck last week only: his own route answers, so the page lists him, this week at 0.
+		const lastOnly = await makeWorld({}, { nowMs: Date.parse("2026-12-01T17:00:00Z") });
+		try {
+			lastOnly.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-25T15:00:00.000Z", "Dee Stone");
+			lastOnly.db.prepare("DELETE FROM truck_assignments WHERE driver_name = ?").run("Hal Briar");
+			const { byId } = await parity(lastOnly, "Tue Dec 1, a truck last week only");
+			eq([byId.has(4), byId.has(4) && byId.get(4).performance.weeks[0].credits.value], [true, 0], "Dee, on a truck last week only, is listed with this week at 0");
+		} finally {
+			await lastOnly.close();
 		}
 		// An owner-operator known only by his account: his own route refuses him, and so does the page.
 		const byAccount = await makeWorld({});
