@@ -27,6 +27,7 @@ import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { serverSource } from './lib/server-source.js'
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SRC = path.join(ROOT, 'client', 'src')
@@ -35,7 +36,6 @@ const PANEL = path.join(CLIENT_SRC, 'components', 'drivers-db', 'DriverAlertsSen
 const TABLE = path.join(CLIENT_SRC, 'components', 'drivers-db', 'DriverTable.vue')
 const ROUTER = path.join(CLIENT_SRC, 'router', 'index.js')
 const SERVER_LIB = path.join(ROOT, 'lib', 'driver-alerts-sent.js')
-const SERVER_JS = path.join(ROOT, 'server.js')
 
 const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
 const LIB_SRC = read(LIB)
@@ -163,7 +163,7 @@ function parityChecks(c, L) {
   c.eq('§2 the server\'s answer for a driver shows his rows', L.alertsSentView(answer('QA Driver', [{ id: 1, type: 'message', title: 'QA title', body: 'QA text', metadata: '{}', read: 0, createdAt: '2026-11-12T19:30:00Z' }])),
     { note: '', rows: [{ title: 'QA title', text: 'QA text', time: 'Nov 12, 2026, 2:30 PM EST' }], newest: '' })
   c.eq('§2 ...and its answer for a row that names no single account shows that line', L.alertsSentView(answer(null, [])).note, WORDS.noAccount)
-  c.ok('§2 server.js wires the route to findDriverAccountSpelling()', read(SERVER_JS).includes('driverAlertsSent.mount(app, { requireRole, db, accountSpelling: findDriverAccountSpelling });'))
+  c.ok('§2 server.js wires the route to findDriverAccountSpelling()', serverSource().includes('driverAlertsSent.mount(app, { requireRole, db, accountSpelling: findDriverAccountSpelling });'))
 }
 
 // ── §3 the panel, mounted ────────────────────────────────────────────────────
