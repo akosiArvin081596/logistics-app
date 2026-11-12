@@ -832,7 +832,7 @@ ok('Show me is the big blue button: Vant\'s primary, full width', /\bround block
 ok('I acknowledge under it is the small one: the plain word, no primary', ackTags.length === 2 && stepsPart.includes(ackTags[0]) && /class="drn-second drn-quiet"/.test(ackTags[0]) && !/type="primary"|drn-primary|drn-big/.test(ackTags[0]))
 {
   // The size order, from the note's own rules rather than Vant's defaults, so it holds at every size.
-  const ruleOf = (selector) => ((NOTE.match(new RegExp(`(?:^|\\n)${selector.replace(/\./g, '\\.')} \\{([^}]*)\\}`)) || [])[1] || '')
+  const ruleOf = (selector) => ((NOTE.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`)) || [])[1] || '')
   const remOf = (rule, prop) => {
     const m = new RegExp(`(?:^|[\\s;])${prop}: ([\\d.]+)(rem|px);`).exec(rule)
     return m ? (m[2] === 'px' ? Number(m[1]) / 16 : Number(m[1])) : NaN
