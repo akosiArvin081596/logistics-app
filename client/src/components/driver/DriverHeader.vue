@@ -19,10 +19,21 @@
          one indexed read and cannot leak another truck's state.
          A hidden stand-in with the chip's own box holds the row until the first
          answer, so a phone's page doesn't move under the driver's thumb when the
-         sentence arrives. -->
+         sentence arrives.
+         A button only where a tap has somewhere to go: the lock screens have no
+         loads, so their chip stays plain rather than do nothing when tapped. -->
     <div v-if="auth.isDriver" class="fuel-row">
+      <button
+        v-if="fuelChip && fuelChipTaps"
+        type="button"
+        class="status-chip fuel-chip fuel-tap"
+        :class="fuelChip.tone"
+        :title="fuelChip.title"
+        :aria-label="`${fuelChip.text}. Show details`"
+        @click="tapFuel"
+      >&#9981; {{ fuelChip.text }}</button>
       <span
-        v-if="fuelChip"
+        v-else-if="fuelChip"
         class="status-chip fuel-chip"
         :class="fuelChip.tone"
         :title="fuelChip.title"
@@ -42,17 +53,35 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import ChangePasswordModal from './ChangePasswordModal.vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
-import { driverFuelOf, driverFuelChip, fuelRangeText, FUEL_RANGE_NOT_AVAILABLE } from '../../lib/driverFuelView'
+import { driverFuelOf, driverFuelChip, fuelRangeText, fuelRangeTitle, refuelNowTitle, FUEL_RANGE_NOT_AVAILABLE } from '../../lib/driverFuelView'
 
 defineProps({
   driverName: { type: String, default: '' },
   socketConnected: { type: Boolean, default: true },
   hasEverConnected: { type: Boolean, default: false },
+  fuelChipTaps: { type: Boolean, default: false },
 })
 
-defineEmits(['logout'])
+const emit = defineEmits(['logout', 'fuel-tap'])
 
 const showPwModal = ref(false)
+
+// Every dialog sits above this fixed header, so a finger can't reach the chip under
+// one, but a keyboard or a screen reader can: that press must not change the screen
+// behind the dialog. Asking what's on top covers any overlay, without a list of them.
+function chipIsCovered(el) {
+  if (typeof document.elementFromPoint !== 'function') return false
+  const box = el.getBoundingClientRect()
+  const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+  return !!top && !el.contains(top)
+}
+
+// A tap only opens the Fuel section. It reads nothing itself, so the chip keeps its own
+// poll, and the section reads as it does when opened by hand.
+function tapFuel(event) {
+  if (chipIsCovered(event.currentTarget)) return
+  emit('fuel-tap', fuelChip.value.title)
+}
 
 /* ── the header's height, for the page below it ───────────────────────────
    The header is fixed, so the page can't make room for it by itself, and its
@@ -132,9 +161,8 @@ const fuelChip = computed(() => {
   const dry = Math.round(Number(r.rangePlanningMiles))
   // The chip carries the USABLE figure — miles before a stop is mandatory —
   // so the driver's phone and the dispatcher's Fuel & Route card cannot quote
-  // two different numbers for the same truck. Distance-to-dry moves into the
-  // tooltip rather than being dropped. An older server sends no reserve, in
-  // which case this stays exactly as it was.
+  // two different numbers for the same truck. An older server sends no reserve,
+  // in which case the chip quotes the distance to dry.
   const usable = r.rangeUsableMiles == null ? null : Math.round(Number(r.rangeUsableMiles))
   const reserve = r.reserveMiles == null ? null : Math.round(Number(r.reserveMiles))
   const hasReserve = usable !== null && reserve !== null
@@ -145,26 +173,16 @@ const fuelChip = computed(() => {
   // against. The per-load verdict does that comparison; this is the "am I about
   // to be in trouble at all" signal.
   const tone = dry < 50 ? 'bad' : dry < 150 ? 'warn' : 'ok'
-  const carried = r.fuelSource === 'carried'
-    ? ' Sensor is not reporting, so this is estimated from the last reading and is a floor.'
-    : ''
-  const pct = r.fuelPct != null ? ` (${Math.round(r.fuelPct)}% in the tank)` : ''
+  const estimate = r.fuelSource === 'carried'
   if (hasReserve) {
     return {
       tone: usable === 0 ? 'bad' : tone,
       // 0 usable miles is an instruction, not a measurement.
       text: usable === 0 ? 'Refuel now' : fuelRangeText(usable),
-      title: `About ${usable} miles before you need to refuel${pct}`
-        + `. That is ${dry} miles until empty, minus a ${reserve} mile reserve.`
-        + ' This is the low end of the range, not the best case.' + carried,
+      title: usable === 0 ? refuelNowTitle(estimate) : fuelRangeTitle(usable, estimate),
     }
   }
-  return {
-    tone,
-    text: fuelRangeText(dry),
-    title: `About ${dry} miles of fuel to plan on${pct}`
-      + '. This is the low end of the range, not the best case.' + carried,
-  }
+  return { tone, text: fuelRangeText(dry), title: fuelRangeTitle(dry, estimate) }
 })
 </script>
 
@@ -263,8 +281,42 @@ const fuelChip = computed(() => {
   color: #fff;
   border: 1px solid #b91c1c;
 }
+/* The chip as a button keeps the plain chip's box, so the row and the stand-in stay
+   right and nothing moves: only what a browser gives a button by default is undone. */
+.status-chip.fuel-tap {
+  position: relative;
+  font-family: inherit;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  touch-action: manipulation;
+}
+/* A 44 px target with no taller row. Upward it reaches only into the row gap, so it
+   can't take a tap from Password or Logout above; the rest of the height goes down. */
+.status-chip.fuel-tap::after {
+  content: '';
+  position: absolute;
+  top: -0.35rem;
+  left: -1px;
+  right: -1px;
+  bottom: 0;
+  min-height: 44px;
+}
+.status-chip.fuel-tap:active {
+  opacity: 0.8;
+}
+.status-chip.fuel-tap:focus-visible {
+  outline: 2px solid #1d4ed8;
+  outline-offset: 2px;
+}
 
+/* Above the chip's tap target, so Password and Logout keep their whole area whatever
+   the row heights do. It moves nothing: it only decides who gets a tap on an overlap. */
 .app-header-right {
+  position: relative;
+  z-index: 1;
   grid-row: 1;
   grid-column: 2;
   display: flex;

@@ -409,7 +409,7 @@ function autoClientViolations(src) {
 	// The tag carries v-if="auth.isSuperAdmin…" itself, before the needle.
 	const ownGate = (at) => /\bv-if="auth\.isSuperAdmin(?:"|\s*&&)/.test(src.slice(src.lastIndexOf("<", at), at));
 	for (const [needle, what] of [
-		['@click="autoAttentionOnly = !autoAttentionOnly"', "the Needs attention toggle"],
+		["@click=\"pressQuick('attention')\"", "the Needs attention toggle"],
 		['@click="openAutoSettings"', "the settings button"],
 		['class="auto-chip"', "the row chip"],
 		[':open="autoSettingsOpen"', "the settings dialog"],
@@ -459,7 +459,7 @@ function autoClientViolations(src) {
 	ok(`the automatic drafts' routes are called only by CompletedLoadsTab.vue (${callers.join(", ")})`, callers.join() === "client/src/components/dashboard/CompletedLoadsTab.vue");
 	for (const [name, from, to] of [
 		["the row chip shows to every role", '<span v-if="auth.isSuperAdmin && autoChip(job)" class="auto-chip"', '<span v-if="autoChip(job)" class="auto-chip"'],
-		["the Needs attention toggle shows to every role", 'v-if="auth.isSuperAdmin && autoAttentionCount > 0"', 'v-if="autoAttentionCount > 0"'],
+		["the Needs attention toggle shows to every role", 'v-if="auth.isSuperAdmin && (autoAttentionCount > 0 || autoAttentionOnly)"', 'v-if="autoAttentionCount > 0 || autoAttentionOnly"'],
 		["the settings dialog mounts for every role", '<Dialog v-if="auth.isSuperAdmin" :open="autoSettingsOpen"', '<Dialog :open="autoSettingsOpen"'],
 		["Try again runs for every role", "async function autoInvoiceAction(kind) {\n  if (!auth.isSuperAdmin || ", "async function autoInvoiceAction(kind) {\n  if ("],
 		["autoChip() words every role's rows", "const autoChip = (job) => (auth.isSuperAdmin && job ? ", "const autoChip = (job) => (job ? "],

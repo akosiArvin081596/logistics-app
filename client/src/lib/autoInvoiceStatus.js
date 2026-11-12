@@ -272,6 +272,13 @@ export const AUTO_INVOICE_STOP_WORDS = Object.freeze({
   LOAD_CHANGED_AFTER_SEND: 'A load changed after its invoice was sent.',
 })
 
+// The settings read carries `alerts` ({ on: false }) only while no address is set on the server
+// for the hold and stop emails (AUTO_INVOICE_ALERT_TO). The dialog's line, or null.
+export function autoAlertState(alerts) {
+  if (!alerts || typeof alerts !== 'object' || Array.isArray(alerts) || alerts.on !== false) return null
+  return { text: 'Alerts are off: with no address set on the server, nothing is mailed when a load is held or sending stops.' }
+}
+
 export const AUTO_SEND_STOP_CONFIRM = 'Stop sending invoices automatically? Invoices will be drafted in Gmail for a person to send. Only the server can turn sending back on.'
 
 // The domain the billing email check holds whole, from the settings read's `recipientCheck`: only

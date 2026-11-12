@@ -4,12 +4,12 @@ const state = reactive({ message: '', type: 'success', visible: false })
 let timeout = null
 
 export function useToast() {
-  function show(message, type = 'success') {
+  function show(message, type = 'success', ms = 3000) {
     state.message = message
     state.type = type
     state.visible = true
     clearTimeout(timeout)
-    timeout = setTimeout(() => (state.visible = false), 3000)
+    timeout = setTimeout(() => (state.visible = false), ms)
   }
 
   return { state, show }
