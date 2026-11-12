@@ -25,6 +25,7 @@ import { createRequire } from 'node:module'
 const req = createRequire(import.meta.url)
 const paths = req('./paths.cjs')
 const keychain = req('./keychain.cjs')
+const { answerReleaseNote } = req('./release-note.cjs')
 const { DEMO, CARDS, CHAPTERS, chapterBy } = req('./walkthrough/storyboard.cjs')
 const cap = req('./walkthrough/captions.cjs')
 const { FX_SOURCE } = req('../docs/lib/video-fx.js')
@@ -542,7 +543,8 @@ function helpers(page, base, check) {
     await H.fx()
   }
   // Unfilmed: signed in as the walkthrough driver, on the driver app. Already there, the app is
-  // left on whatever the last chapter showed: a load page or another tab has no Loads list.
+  // left on whatever the last chapter showed: a load page or another tab has no Loads list. The
+  // notice a sign-in can bring up (chapter signin's included) is answered here, off camera.
   H.signedIn = async () => {
     if (!page.url().startsWith(base.origin)) await H.goto('/driver')
     const s = await H.api('GET', '/api/auth/session')
@@ -553,6 +555,7 @@ function helpers(page, base, check) {
         return
       }
       await page.locator('.driver-app').waitFor({ state: 'visible', timeout: 45000 })
+      await answerReleaseNote(page, { who: 'the walkthrough driver', waitMs: 5000 })
       await H.fx()
       return
     }
@@ -564,6 +567,7 @@ function helpers(page, base, check) {
     const [resp] = await Promise.all([H.response('/api/auth/login', 'POST'), form.locator('button[type="submit"]').click()])
     if (resp.status() !== 200) throw new Error(`the driver sign-in answered ${resp.status()}`)
     await page.waitForURL((u) => u.pathname.startsWith('/driver'), { timeout: 45000 })
+    await answerReleaseNote(page, { who: 'the walkthrough driver' })
     await H.appReady()
   }
   H.tab = (label) => page.locator('.van-tabbar-item', { hasText: label })
