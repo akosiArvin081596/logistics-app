@@ -6,12 +6,14 @@
 
 // '.js' on the import so bare Node (the runners) can load this file.
 import { toNum, milesText } from './fuelReview.js';
+import { hasRoadLeft, roadAheadScore } from './loadProgress.js';
 
 // States in which the server withholds the miles: say why, never guess.
 const WITHHELD = new Set(['none', 'stale', 'no_tank_size', 'no_truck']);
 
 const SENSOR_ESTIMATE = "Your fuel sensor isn't reporting. This is an estimate.";
 const CHECK_GAUGE = 'Check your gauge.';
+const STOP_FOR_FUEL = 'Stop for fuel as soon as you can.';
 
 export const FUEL_REQUEST_FAILED = "Couldn't load your fuel numbers. Tap Refresh.";
 
@@ -66,7 +68,7 @@ export function fuelTop(b) {
   const sensor = state === 'estimated' ? [SENSOR_ESTIMATE] : [];
   if (miles !== null && b.refuelNow === true) {
     return {
-      kind: 'now', headline: 'Refuel now', sub: 'Stop for fuel as soon as you can.',
+      kind: 'now', headline: 'Refuel now', sub: STOP_FOR_FUEL,
       notes: sensor, readAgo: state === 'live' || state === 'estimated' ? readAgoOf(b) : '',
     };
   }
@@ -206,12 +208,43 @@ export function driverFuelStops(b) {
 
 export const FUEL_RANGE_NOT_AVAILABLE = 'Fuel range: not available';
 
+const milesWord = (miles) => (String(miles) === '1' ? 'mile' : 'miles');
+
 /**
  * The header chip's sentence, on both its paths. `miles` arrives already formatted
  * from the server's figure, so this only picks the words.
  */
 export function fuelRangeText(miles) {
-  return `Fuel range: ${miles} ${String(miles) === '1' ? 'mile' : 'miles'} left until empty`;
+  return `Fuel range: ${miles} ${milesWord(miles)} left until empty`;
+}
+
+// The chip's tooltip, which a tap with no load shows as a toast. One figure and no
+// working, on both flag paths: the driver reads it beside the chip's own sentence.
+const sensorNote = (estimate) => (estimate ? ` ${SENSOR_ESTIMATE}` : '');
+
+export function fuelRangeTitle(miles, estimate = false) {
+  return `About ${miles} ${milesWord(miles)} before you run out.${sensorNote(estimate)}`;
+}
+
+export function refuelNowTitle(estimate = false) {
+  return `Refuel now. ${STOP_FOR_FUEL}${sensorNote(estimate)}`;
+}
+
+/**
+ * Which load a tap on the chip opens: the load page on screen while it has road left,
+ * else the load under way with the most road ahead (a driver can start a second one
+ * while hauling the first, or while the first waits at its receiver, and the newest row
+ * isn't the one on the road), else the next in the queue, else none. `queued` is the
+ * store's queuedLoads, in queue order. Not workingLoads[0]: that list runs newest added
+ * first, so it can be a load still waiting behind the one on the road.
+ */
+export function fuelTapLoad({ onScreen, underWay, queued, statusOf }) {
+  if (onScreen && hasRoadLeft(statusOf(onScreen))) return onScreen;
+  const next = [...(underWay || [])].sort((a, b) => (
+    roadAheadScore(statusOf(a)) - roadAheadScore(statusOf(b))
+      || (b._rowIndex || 0) - (a._rowIndex || 0)
+  ))[0];
+  return next || (queued && queued[0]) || null;
 }
 
 /**
@@ -220,10 +253,10 @@ export function fuelRangeText(miles) {
  */
 export function driverFuelChip(b) {
   const top = fuelTop(b);
-  const sensor = top.notes.length ? ` ${top.notes.join(' ')}` : '';
-  if (top.kind === 'now') return { kind: 'now', tone: 'bad', text: 'Refuel now', title: `Refuel now. ${top.sub}${sensor}` };
+  const estimate = top.notes.length > 0;
+  if (top.kind === 'now') return { kind: 'now', tone: 'bad', text: 'Refuel now', title: refuelNowTitle(estimate) };
   if (top.kind === 'miles') {
-    return { kind: 'miles', tone: milesTone(toNum(b.milesLeft)), text: fuelRangeText(top.headline), title: `About ${top.headline} miles before you run out.${sensor}` };
+    return { kind: 'miles', tone: milesTone(toNum(b.milesLeft)), text: fuelRangeText(top.headline), title: fuelRangeTitle(top.headline, estimate) };
   }
   return { kind: 'unknown', tone: 'warn', text: FUEL_RANGE_NOT_AVAILABLE, title: `${top.headline}. ${top.sub}` };
 }

@@ -1,5 +1,6 @@
 <template>
   <div class="flex flex-col">
+    <HiddenLoadsBanner v-if="auth.isSuperAdmin && hiddenLoads.length" :hidden-loads="hiddenLoads" @resolved="refresh" />
     <div class="dash-header">
       <div>
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
@@ -67,6 +68,8 @@ import { normDriver } from '../lib/driverName'
 import { loadIdShown, loadKeyStale } from '../lib/loadRef'
 import { sortDriversForAssign } from '../lib/availabilityText'
 import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
+import { hiddenLoadsOf } from '../lib/deletedLoadsView.js'
+import HiddenLoadsBanner from '../components/dashboard/HiddenLoadsBanner.vue'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
 import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
@@ -101,6 +104,9 @@ function onFocusConsumed() {
   }
 }
 useSocketRefresh('dashboard:changed', () => refresh())
+
+// Live rows an old delete hides (the server sends them to a Super Admin only, with DELETED_LOAD_RESTORE_ENABLED on).
+const hiddenLoads = computed(() => (auth.isSuperAdmin ? hiddenLoadsOf(store.data) : []))
 
 const tabs = computed(() => [
   { key: 'jobBoard', label: 'Job Board', count: store.unassignedJobs.length },

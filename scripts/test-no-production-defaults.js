@@ -70,7 +70,8 @@
  *      connection or write; with it, they go on against what was named.
  *      statement-cache-report.js (--db, --statements-dir and both hashes)
  *      exits 2 the same way before opening anything; named, it reads the
- *      named database.
+ *      named database. auto-invoice-send-drafted.js (--db, --sheet-id) exits 2
+ *      before opening anything or any Google, mail or network call.
  *   §9 the archive sheet: server.js's ARCHIVE_SPREADSHEET_ID, evaluated in
  *      each environment, is production's archive only for production's own
  *      process (lib/sheet-id.js) and nothing anywhere else (a local run, a
@@ -1335,6 +1336,33 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			const reportRun = runScript(report, ["--db", scratchDb, "--statements-dir", scratch, "--now-hash", HASH, "--after-hash", HASH], {});
 			check(`§8 statement-cache-report.js, every target named: it reads the named database and reports (exit ${reportRun.code})`,
 				reportRun.code === 0 && /stored statements:\s+0/.test(reportRun.stdout));
+
+			// auto-invoice-send-drafted.js: the database and the sheet are always named
+			// (--sheet-id=production names production's own); without them it exits 2
+			// before opening anything or reaching Google or a mailbox.
+			const drafted = path.join("scripts", "auto-invoice-send-drafted.js");
+			const draftedDir = fs.mkdtempSync(path.join(tmp, "drafted-"));
+			const draftedDb = path.join(draftedDir, "made-up.db");
+			for (const [label, args, name] of [
+				["no --db", ["--dry-run", "--sheet-id=sheet-under-test-nopd"], "--db"],
+				["a blank --db", ["--dry-run", "--db=  ", "--sheet-id=sheet-under-test-nopd"], "--db"],
+				["no --sheet-id", ["--dry-run", `--db=${draftedDb}`], "--sheet-id"],
+				["--db naming no file", ["--dry-run", `--db=${draftedDb}`, "--sheet-id=sheet-under-test-nopd"], "--db"],
+			]) {
+				const r = runScript(drafted, args, {});
+				check(`§8 auto-invoice-send-drafted.js, ${label}: exit 2 (got ${r.code}), naming ${name}`, r.code === 2 && r.stderr.includes(name));
+				check(`§8 auto-invoice-send-drafted.js, ${label}: before opening anything or any call (${r.calls.join("; ") || "none"})`,
+					!r.stdout.trim() && !fs.existsSync(draftedDb) && r.calls.length === 0);
+			}
+			{
+				const Database = require("better-sqlite3");
+				new Database(draftedDb).close();
+			}
+			const draftedRun = runScript(drafted, ["--dry-run", `--db=${draftedDb}`, "--sheet-id=sheet-under-test-nopd"], {});
+			check(`§8 auto-invoice-send-drafted.js, every target named, a database without the tables: exit 2 (got ${draftedRun.code}) before any Google, mail or network call (${draftedRun.calls.join("; ") || "none"})`,
+				draftedRun.code === 2 && /no automatic-invoice/.test(draftedRun.stderr) && draftedRun.calls.length === 0);
+			const draftedText = readSource(drafted);
+			check("§8 auto-invoice-send-drafted.js: no database file name and no sheet fallback in its code", !!draftedText && !/\.db["'`]/.test(draftedText) && !/(\|\||\?\?)\s*sheetIds\./.test(draftedText));
 		});
 
 		await section("§9 the archive sheet", async () => {
