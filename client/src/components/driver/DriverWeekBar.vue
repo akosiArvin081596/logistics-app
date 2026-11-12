@@ -1,8 +1,9 @@
 <template>
-  <!-- The load page's bar: his own week at a glance, and a tap into the Performance tab. It is
+  <!-- The load page's bar: his own week at a glance, and a tap into the Past Performance tab. It is
        handed a view of the server's figures, or none, and reads nothing itself. The place keeps
        one height with or without the button, so the bar coming or going never moves what is
-       below it under his thumb. Still by design: nothing on it moves or hurries him. -->
+       below it under his thumb. Still by design: nothing on it moves or hurries him. Its fill
+       takes the server's color for the week; its words stay, so the color is never all it says. -->
   <div class="week-bar-slot" data-testid="perf-bar-slot">
     <button v-if="bar" type="button" class="week-bar" data-testid="perf-bar" @click="emit('open')">
       <span class="week-bar-top">
@@ -10,7 +11,7 @@
         <span v-if="bar.pace" class="week-bar-pace" :data-pace="bar.paceId" data-testid="perf-bar-pace">{{ bar.pace }}</span>
       </span>
       <span class="week-bar-track" aria-hidden="true">
-        <span class="week-bar-fill" data-testid="perf-bar-fill" :style="{ width: bar.width }"></span>
+        <span class="week-bar-fill" data-testid="perf-bar-fill" :data-color="bar.color || null" :style="{ width: bar.width }"></span>
       </span>
     </button>
   </div>
@@ -93,6 +94,12 @@ const emit = defineEmits(['open'])
   border-radius: 999px;
   background: #0369a1;
 }
+/* The week's color, the server's choice by its credits (BAR_COLOR_FROM in lib/driver-performance.js).
+   Only this bar takes them; the tab's figures keep their own. */
+.week-bar-fill[data-color='red'] { background: #dc2626; }
+.week-bar-fill[data-color='orange'] { background: #ea580c; }
+.week-bar-fill[data-color='green'] { background: #16a34a; }
+.week-bar-fill[data-color='blue'] { background: #2563eb; }
 /* The narrowest phones still fit the figure and the label on one row. */
 @media (max-width: 359px) {
   .week-bar { padding-inline: 0.6rem; }

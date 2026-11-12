@@ -96,6 +96,18 @@
  * §30 what doesn't change: each as-live shape, and made-up sheets checked against
  *     the invoice's own selector; each driver's answer is his own; nothing that
  *     pays reads the kept rows; the proof on its own
+ * §31 Past Performance over HTTP: his past weeks from the first counted week
+ *     only, newest first, and only the weeks that were his; the date of the
+ *     "weren't counted" line; this week and last as before; the Loads bar's color
+ *     from the server, a case per band (3.5 red, 5.5 orange, 6 green, 8 blue);
+ *     with the hours switch off, no hours anywhere and nothing reads the daily
+ *     ELD activity rollup's table
+ * §32 driving hours with DRIVER_PERFORMANCE_HOURS_ENABLED exactly "true" (made-up
+ *     rollup rows): each past week's minutes summed into hours; a truck with no
+ *     hours data, and a week with none, named, never 0; a week from before the
+ *     rollup's first day says when it starts; another driver's rows never in his;
+ *     a failed read leaves the rest; off unless exactly "true", and with the
+ *     rollup off too
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -856,10 +868,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			weeks[who] = r.json;
 		}
 		const a = weeks.ada;
-		eq(sortedKeys(a), ["creditWeights", "view", "weeks"], "the answer's keys");
+		eq(sortedKeys(a), ["countedFrom", "creditWeights", "pastWeeks", "view", "weeks"], "the answer's keys");
 		eq(a.view, "no-hours-data", "every truck gets the \"no hours data\" view");
 		eq(a.creditWeights, { delivery: 0.5, pickup: 0.5 }, "the weights the credits use");
-		const WEEK_KEYS = ["credits", "end", "id", "left", "loads", "newWeekNote", "nextWeekStarts", "pace", "percent", "start", "targetLowered"];
+		const WEEK_KEYS = ["barColor", "credits", "end", "id", "left", "loads", "newWeekNote", "nextWeekStarts", "pace", "percent", "start", "targetLowered"];
 		eq(a.weeks.map((w) => sortedKeys(w)), [WEEK_KEYS, WEEK_KEYS], "each week's keys");
 		eq(a.weeks.map((w) => sortedKeys(w.credits)), [["deliveries", "pickups", "required", "target", "value"], ["deliveries", "pickups", "required", "target", "value"]], "each week's credit keys");
 		const banned = /hour|rei|gap|reach|expected|rank|unit|streak|tier|bonus|earn/i;
@@ -1003,13 +1015,19 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const boardDecl = LIFT.text.split("\n").filter((l) => /DRIVER_PERFORMANCE_BOARD_ENABLED/.test(l));
 		eq(boardDecl.map((l) => l.trim()), ['boardForDrivers: process.env.DRIVER_PERFORMANCE_BOARD_ENABLED === "true",'], "the board flag is read once, on only when exactly \"true\"");
 		ok(/driverAvailabilityByName: DRIVER_AVAILABILITY_ENABLED \? driverAvailabilityByName : null,/.test(LIFT.text), "approved days off are read only while their own flag is on");
+		const hoursDecl = LIFT.text.split("\n").filter((l) => /DRIVER_PERFORMANCE_HOURS_ENABLED|driverWeekMinutesReader/.test(l));
+		eq(hoursDecl.map((l) => l.trim()), ['drivingHours: process.env.DRIVER_PERFORMANCE_HOURS_ENABLED === "true" && ELD_ACTIVITY_DAILY_ENABLED ? require("./lib/eld-activity-daily").driverWeekMinutesReader(db) : null,'],
+			"the hours flag is read once, on only when exactly \"true\" and with the rollup on, and only then is the rollup's reader made");
 		const routesSrc = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
 		ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\s/.test(routesSrc.replace(/\/\/.*$/gm, "")) && !/\.run\(|\.exec\(/.test(routesSrc), "the routes module writes nothing to the database");
 		ok(!/app\.(post|put|patch|delete)\(/.test(routesSrc), "and registers no write route");
+		ok(!/eld_activity_daily|eld-activity-daily/.test(routesSrc), "the routes module never names the rollup's table or module: it reads hours only through the reader it is handed");
 		const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
 		ok(!(rules.ENABLE_ALLOWED || []).includes("DRIVER_PERFORMANCE_ENABLED"), "replica:start --enable doesn't take it: it is already on");
 		ok(/kill switch/.test(String((rules.ENABLE_REFUSED || {}).DRIVER_PERFORMANCE_ENABLED)), "the replica refuses it as a kill switch");
 		ok((rules.ENABLE_ALLOWED || []).includes("DRIVER_PERFORMANCE_BOARD_ENABLED"), "replica:start --enable takes the board flag: read only, on the task's own copy");
+		ok((rules.ENABLE_ALLOWED || []).includes("DRIVER_PERFORMANCE_HOURS_ENABLED") && !Object.prototype.hasOwnProperty.call(rules.ENABLE_REFUSED || {}, "DRIVER_PERFORMANCE_HOURS_ENABLED"),
+			"replica:start --enable takes the hours flag: read only, from the task's own rows");
 	});
 
 	await section("18 a stored unit that isn't a unit", async () => {
@@ -2947,7 +2965,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 				const credited = new Map();
 				for (const [name, who] of drivers) {
 					const r = await w.get(OWN_WEEK, USERS[who]);
-					if (!allKeys(r.json).every((k) => /^(creditWeights|delivery|pickup|pickups|view|weeks|credits|end|id|left|loads|newWeekNote|nextWeekStarts|pace|percent|required|start|targetLowered|deliveries|target|value|loadId|day|note)$/.test(k))) totals.keys += 1;
+					if (!allKeys(r.json).every((k) => /^(creditWeights|delivery|pickup|pickups|view|weeks|credits|end|id|left|loads|newWeekNote|nextWeekStarts|pace|percent|required|start|targetLowered|deliveries|target|value|loadId|day|note|barColor|pastWeeks|countedFrom)$/.test(k))) totals.keys += 1;
 					const other = name === NIA ? OMAR : NIA;
 					if (new RegExp(other.split(" ")[0], "i").test(r.text)) totals.leaked += 1;
 					r.json.weeks.forEach((week, i) => {
@@ -3031,7 +3049,194 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const { STATEMENT_TEMPLATE_FILES } = require(path.join(ROOT, "lib", "statement-template-hash.js"));
 		eq(STATEMENT_TEMPLATE_FILES.filter((f) => /job-tracking-every-row|driver-pickup-proof/.test(f)), [], "no stored statement's template holds either new file");
 		lifted();
-		eq((SRC.match(/process\.env\.DRIVER_PERFORMANCE[A-Z_]*/g) || []).sort(), ["process.env.DRIVER_PERFORMANCE_BOARD_ENABLED", "process.env.DRIVER_PERFORMANCE_ENABLED"], "no new flag: it goes live on deploy under the kill switch that's there");
+		eq((SRC.match(/process\.env\.DRIVER_PERFORMANCE[A-Z_]*/g) || []).sort(), ["process.env.DRIVER_PERFORMANCE_BOARD_ENABLED", "process.env.DRIVER_PERFORMANCE_ENABLED", "process.env.DRIVER_PERFORMANCE_HOURS_ENABLED"],
+			"no other new flag: the weeks go live on deploy under the kill switch that's there, and only the hours wait, behind their own");
+	});
+
+	// ── §31 ─────────────────────────────────────────────────────────────────
+	// Wed Dec 2: this week is Nov 28 - Dec 4, last week Nov 21-27, and the first counted week Nov 7.
+	const DEC_2 = Date.parse("2026-12-02T17:00:00Z");
+	const pastOf = (body) => (body && Array.isArray(body.pastWeeks) ? body.pastWeeks : null);
+	await section("31 Past Performance over HTTP", async () => {
+		const p = need();
+		eq(p.FIRST_COUNTED_WEEK, "2026-11-07", "the first counted week is the week of Sat Nov 7, one constant");
+		eq([p.countedFrom(), p.countedFrom("2026-11-14")], ["Nov 7", "Nov 14"], "its date as the line says it");
+		const weekRange = liftedGetWeekRange();
+		eq(p.ownPeriods("2026-12-02", weekRange).map((x) => [x.id, x.start, x.end, x.lastDay]), [
+			["this-week", "2026-11-28", "2026-12-04", "2026-12-02"],
+			["last-week", "2026-11-21", "2026-11-27", "2026-11-27"],
+			["week-2026-11-14", "2026-11-14", "2026-11-20", "2026-11-20"],
+			["week-2026-11-07", "2026-11-07", "2026-11-13", "2026-11-13"],
+		], "his own weeks: this week to today, last week, then each week back to the first counted one, newest first, none before it");
+		eq(p.ownPeriods("2026-11-11", weekRange).map((x) => x.id), ["this-week", "last-week"], "in the first counted week itself: this week and last, and nothing older");
+		eq(p.ownPeriods("2026-12-02", weekRange, "").map((x) => x.id), ["this-week", "last-week"], "no first week it can read: no older week, and no endless list");
+		eq([0, 0.5, 3, 3.5, 4, 5.5, 5.9, 6, 7.5, 7.6, 8, 12].map((v) => p.barColorFor(v)),
+			["red", "red", "red", "red", "orange", "orange", "orange", "green", "green", "blue", "blue", "blue"],
+			"the bar's colors: red below 4, 3.5 included; orange 4 to 5.5; green 6 to 7.5; blue past 7.5");
+		eq(p.BAR_COLOR_FROM, { orange: 4, green: 6, blueAbove: 7.5 }, "the bands are one constant, at D's figures");
+
+		const dec = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			const ada = (await dec.get("/api/driver/me/performance", USERS.ada)).json;
+			eq(ada.weeks.map((w) => [w.id, w.start]), [["this-week", "2026-11-28"], ["last-week", "2026-11-21"]], "this week and last, as before, for the bar");
+			eq(pastOf(ada) && pastOf(ada).map((w) => [w.start, w.end, w.credits.value, w.credits.target]), [
+				["2026-11-21", "2026-11-27", 0, 7.5],
+				["2026-11-14", "2026-11-20", 0, 7.5],
+				["2026-11-07", "2026-11-13", 3, 7.5],
+			], "Ada's past weeks, newest first, from the first counted week: the week of Nov 7 has the 3 it had as this week, and Oct 31 isn't listed");
+			eq(ada.countedFrom, "Nov 7", "the line's date: weeks before Nov 7 weren't counted");
+			eq((pastOf(ada) || []).map((w) => sortedKeys(w)), new Array(3).fill(["credits", "end", "start"]), "a past week is its days and its figure, nothing more");
+			eq((pastOf(ada) || []).map((w) => sortedKeys(w.credits)), new Array(3).fill(["target", "value"]), "...its figure of its own target");
+			ok(!allKeys(pastOf(ada) || [{ hours: 1 }]).some((k) => /hour|minute|driving|rei|rank|unit|pay/i.test(k)), "with the hours switch off, no past week carries hours, a rank or pay");
+			const ben = (await dec.get("/api/driver/me/performance", USERS.ben)).json;
+			eq((pastOf(ben) || []).map((w) => [w.start, w.credits.value]), [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 2]], "Ben's own past weeks: his own figures, never Ada's");
+			ok(!/ada|quill/i.test(JSON.stringify(ben)) && !/ben|marsh/i.test(JSON.stringify(ada)), "and neither answer names the other driver");
+		} finally {
+			await dec.close();
+		}
+
+		// A week that wasn't his isn't listed: Ben with no truck from Nov 14 until Nov 22, and no load then.
+		const gap = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			gap.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-13T15:00:00.000Z", "Ben Marsh");
+			gap.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (2, 'Ben Marsh', ?, '')").run("2026-11-22T15:00:00.000Z");
+			const ben = (await gap.get("/api/driver/me/performance", USERS.ben)).json;
+			eq((pastOf(ben) || []).map((w) => [w.start, w.credits.value]), [["2026-11-21", 0], ["2026-11-07", 2]],
+				"the week he held no truck and had no load is left out, never shown as a week that earned nothing");
+		} finally {
+			await gap.close();
+		}
+
+		// In the first counted week itself (Wed Nov 11), there is no past week yet, and last week is before it.
+		const nov = (await on.get("/api/driver/me/performance", USERS.ada)).json;
+		eq([pastOf(nov), nov.countedFrom], [[], "Nov 7"], "on Nov 11 the list is empty, and the line names the first counted week");
+		eq(nov.weeks.map((w) => w.id), ["this-week", "last-week"], "...while this week and last answer as before");
+
+		// The bar's color, from the server, through the route: a made-up week at each of D's edges.
+		eq([nov.weeks[0].credits.value, nov.weeks[0].barColor, nov.weeks[1].barColor], [3, "red", null], "Ada's open week at 3 reads red; a closed week carries no color");
+		for (const [extra, value, color] of [[1, 3.5, "red"], [5, 5.5, "orange"], [6, 6, "green"], [10, 8, "blue"]]) {
+			const loads = Array.from({ length: extra }, (_x, i) => [`DP-77${String(i).padStart(2, "0")}`, "Ada Quill", "Delivered", "2026-11-10 12:00"]);
+			const world = await makeWorld({}, { extraLoads: loads });
+			try {
+				const w = (await world.get("/api/driver/me/performance", USERS.ada)).json.weeks[0];
+				eq([w.credits.value, w.barColor], [value, color], `${value} credits this week: the bar is ${color}`);
+			} finally {
+				await world.close();
+			}
+		}
+
+		// The switch off: nothing reads the rollup's table, even with rows in it.
+		const quiet = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			require(path.join(ROOT, "lib", "eld-activity-daily.js")).ensureEldActivitySchema(quiet.db);
+			quiet.db.prepare("INSERT INTO eld_activity_daily (routemate_vehicle_id, truck_id, local_day, week_start, driver_id, samples, driving_min, basis) VALUES ('rm-1', 1, '2026-11-09', '2026-11-07', 1, 50, 600, 'gps-estimate')").run();
+			const statements = [];
+			const prepare = quiet.db.prepare.bind(quiet.db);
+			quiet.db.prepare = (sql) => { statements.push(String(sql)); return prepare(sql); };
+			const answers = [];
+			for (const who of ["ada", "ben", "cal", "hal"]) answers.push(await quiet.get("/api/driver/me/performance", USERS[who]));
+			eq(answers.map((r) => r.status), [200, 200, 200, 200], "(the scene) four drivers' answers, each with past weeks");
+			ok(statements.length > 0, "(the scene) the spy sees the route's reads", statements.length);
+			eq(statements.filter((s) => /eld_activity_daily/i.test(s)), [], "with the hours switch off, no statement reads the daily ELD activity table");
+			ok(answers.every((r) => !/"hours"|minutes|Driving/i.test(r.text)), "...and no answer says anything of hours");
+		} finally {
+			await quiet.close();
+		}
+	});
+
+	// ── §32 ─────────────────────────────────────────────────────────────────
+	await section("32 driving hours, the hours switch on", async () => {
+		const p = need();
+		const read = { firstDay: "2026-10-05", weeks: [{ week_start: "2026-11-07", minutes: 2310 }, { week_start: "2026-11-14", minutes: 2313 }, { week_start: "2026-11-21", minutes: null }] };
+		eq(p.weekDrivingHours(read, "2026-11-07"), { state: "estimate", value: 38.5 }, "a week's minutes, summed by the rollup, read as hours to one decimal");
+		eq(p.weekDrivingHours(read, "2026-11-14"), { state: "estimate", value: 38.6 }, "...rounded to the nearest tenth");
+		eq([p.weekDrivingHours(read, "2026-11-21"), p.weekDrivingHours(read, "2026-11-28")], [{ state: "none" }, { state: "none" }], "no measured minutes, or no row at all: named, never 0");
+		eq(p.weekDrivingHours({ ...read, firstDay: "2026-11-09" }, "2026-11-07"), { state: "starts", day: "Nov 9" }, "a week that starts before the rollup's first day says when hours start, never a part of the week");
+		eq(p.weekDrivingHours({ ...read, firstDay: "2026-11-07" }, "2026-11-07"), { state: "estimate", value: 38.5 }, "a week that starts on the rollup's first day is whole: its hours, not a start date");
+		eq([p.weekDrivingHours(null, "2026-11-07"), p.weekDrivingHours({ firstDay: "", weeks: [] }, "2026-11-07")], [{ state: "coming-soon" }, { state: "coming-soon" }], "no read, or a table with no day in it: coming soon");
+
+		const ELD = require(path.join(ROOT, "lib", "eld-activity-daily.js"));
+		const plant = (db, rows) => {
+			ELD.ensureEldActivitySchema(db);
+			const add = db.prepare("INSERT INTO eld_activity_daily (routemate_vehicle_id, truck_id, local_day, week_start, driver_id, samples, driving_min, basis) VALUES (?, ?, ?, ?, ?, 40, ?, ?)");
+			for (const r of rows) add.run(...r);
+		};
+		// Ada (directory row 1): four driving days in the week of Nov 7 and a day with no hours data;
+		// only a day with no hours data in the week of Nov 14 (a truck that sends none); nothing after.
+		// Ben (row 2): his own day in the week of Nov 7, and the table's first day, Oct 5.
+		const ROWS = [
+			["rm-1", 1, "2026-11-09", "2026-11-07", 1, 600, "gps-estimate"],
+			["rm-1", 1, "2026-11-10", "2026-11-07", 1, 650, "gps-estimate"],
+			["rm-1", 1, "2026-11-11", "2026-11-07", 1, 560, "gps-estimate"],
+			["rm-1", 1, "2026-11-12", "2026-11-07", 1, 500, "gps-estimate"],
+			["rm-1", 1, "2026-11-13", "2026-11-07", 1, null, "no-hours-data"],
+			["lx-1", 1, "2026-11-16", "2026-11-14", 1, null, "no-hours-data"],
+			["rm-2", 2, "2026-11-09", "2026-11-07", 2, 1200, "gps-estimate"],
+			["rm-2", 2, "2026-10-05", "2026-10-03", 2, 300, "gps-estimate"],
+		];
+		const hoursOf = (body) => (pastOf(body) || []).map((w) => [w.start, w.hours]);
+		const w = await makeWorld({ DRIVER_PERFORMANCE_HOURS_ENABLED: "true" }, { nowMs: DEC_2 });
+		try {
+			ok(w.logs.some((l) => l.includes("driving hours on")), "the start-up line says the hours are on");
+			plant(w.db, ROWS);
+			const statements = [];
+			const prepare = w.db.prepare.bind(w.db);
+			w.db.prepare = (sql) => { statements.push(String(sql)); return prepare(sql); };
+			const ada = (await w.get("/api/driver/me/performance", USERS.ada)).json;
+			w.db.prepare = prepare;
+			ok(statements.some((s) => /FROM eld_activity_daily/.test(s)), "(the spy's own check) with the switch on, the same spy sees the table read");
+			eq(hoursOf(ada), [
+				["2026-11-21", { state: "none" }],
+				["2026-11-14", { state: "none" }],
+				["2026-11-07", { state: "estimate", value: 38.5 }],
+			], "Ada: 2,310 minutes over four days are 38.5 h; the week whose truck sends no hours, and the week with none, are named, never 0");
+			const ben = (await w.get("/api/driver/me/performance", USERS.ben)).json;
+			eq(hoursOf(ben), [["2026-11-21", { state: "none" }], ["2026-11-14", { state: "none" }], ["2026-11-07", { state: "estimate", value: 20 }]],
+				"Ben: his own 1,200 minutes, and none of Ada's; hers never include his");
+			eq([ada.weeks.map((x) => x.id), sortedKeys(ada)], [["this-week", "last-week"], ["countedFrom", "creditWeights", "pastWeeks", "view", "weeks"]], "the rest of the answer is as it was");
+			ok(!allKeys(ada.weeks).some((k) => /hour/i.test(k)), "this week and last carry no hours: only past weeks do");
+			// The table gone: the weeks say coming soon, and he still has his answer.
+			w.db.exec("DROP TABLE eld_activity_daily");
+			const errors = [];
+			const realError = console.error;
+			console.error = (...a) => errors.push(a.join(" "));
+			let down;
+			try {
+				down = await w.get("/api/driver/me/performance", USERS.ada);
+			} finally {
+				console.error = realError;
+			}
+			eq([down.status, hoursOf(down.json).map(([, h]) => h.state)], [200, ["coming-soon", "coming-soon", "coming-soon"]], "a read that fails: each past week says coming soon, and the answer stands");
+			ok(errors.some((e) => /driving hours read failed/.test(e)), "...and the failure is logged");
+		} finally {
+			await w.close();
+		}
+
+		// The rollup's data starting mid-way: the weeks before its first day say when hours start.
+		const late = await makeWorld({ DRIVER_PERFORMANCE_HOURS_ENABLED: "true" }, { nowMs: DEC_2 });
+		try {
+			plant(late.db, [["rm-1", 1, "2026-11-16", "2026-11-14", 1, 400, "gps-estimate"], ["rm-1", 1, "2026-11-23", "2026-11-21", 1, 90, "gps-estimate"]]);
+			eq(hoursOf((await late.get("/api/driver/me/performance", USERS.ada)).json), [
+				["2026-11-21", { state: "estimate", value: 1.5 }],
+				["2026-11-14", { state: "starts", day: "Nov 16" }],
+				["2026-11-07", { state: "starts", day: "Nov 16" }],
+			], "a week that starts before Nov 16, the table's first day, says hours start Nov 16, even with part of a week on record");
+		} finally {
+			await late.close();
+		}
+
+		// Off unless exactly "true", and off with the rollup itself off.
+		for (const [env, says] of [[{ DRIVER_PERFORMANCE_HOURS_ENABLED: "TRUE" }, "\"TRUE\""], [{ DRIVER_PERFORMANCE_HOURS_ENABLED: "1" }, "\"1\""], [{ DRIVER_PERFORMANCE_HOURS_ENABLED: "true", ELD_ACTIVITY_DAILY_ENABLED: "false" }, "\"true\" with the rollup off"]]) {
+			const off = await makeWorld(env, { nowMs: DEC_2 });
+			try {
+				plant(off.db, ROWS);
+				const r = await off.get("/api/driver/me/performance", USERS.ada);
+				eq([r.status, (pastOf(r.json) || []).length, (pastOf(r.json) || []).filter((x) => "hours" in x).length], [200, 3, 0], `${says}: the hours stay off`);
+				ok(off.logs.some((l) => l.includes("driving hours off")), `${says}: the start-up line says so`);
+			} finally {
+				await off.close();
+			}
+		}
 	});
 
 	if (on) await on.close();

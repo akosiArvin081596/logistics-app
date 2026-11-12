@@ -1,9 +1,10 @@
 // The driver app's side of a release (lib/driver-releases.js). The server says what this driver hasn't
 // confirmed, and this shows it only as the view opens right after a sign-in, or not at all, so a page
 // already open never changes by itself, a moving truck's included. The note stays until they tap
-// "I acknowledge", and closes once that's saved, or with a line saying it wasn't. The tour starts only on
-// their own tap. The rules are lib/driverReleaseNotices.js; DriverView hands in what it knows about the
-// screen as functions. It reads and marks, and has no way to sign anyone out.
+// "I acknowledge", on the note or at the end of its tour, and closes once that's saved, or with a line
+// saying it wasn't. The tour starts only on their own tap. The rules are lib/driverReleaseNotices.js;
+// DriverView hands in what it knows about the screen as functions. It reads and marks, and has no way to
+// sign anyone out.
 // Explicit .js, so scripts/test-driver-release-notices-client.mjs can run this under plain Node.
 import { computed, ref } from 'vue'
 import {
@@ -27,17 +28,20 @@ export function useDriverRelease(o) {
   const answer = ref(null)
   const tour = ref(null)
   const saving = ref(false)
-  // "Show me first" on a truck read as moving: the note says when, inside itself, since the app's own
-  // short message sits under the note's overlay.
+  // "Show me" on a truck read as moving: the note says when, inside itself, since the app's own short
+  // message sits under the note's overlay.
   const whenParked = ref(false)
   // The one look is over, however it went. The contacts prompt waits for this, so it can't take the look.
   const lookDone = ref(false)
 
   const tourOpen = computed(() => !!tour.value)
-  const tourView = computed(() => (tour.value ? tourCardView(tour.value.steps, tour.value.index) : null))
+  const tourView = computed(() => {
+    const card = tour.value ? tourCardView(tour.value.steps, tour.value.index, tour.value.release) : null
+    return card ? { ...card, saving: saving.value } : null
+  })
   const entries = computed(() => (answer.value ? notesForScreen(answer.value.notes, o.has()) : []))
   const noteView = computed(() => {
-    // "Show me first": the tour runs over the note, which waits under it until they acknowledge.
+    // "Show me": the tour runs over the note, which waits under it until they acknowledge.
     if (tour.value) return null
     const mode = entries.value.length ? 'notes' : answer.value?.tourOffered ? 'offer' : ''
     if (!mode) return null
@@ -84,7 +88,7 @@ export function useDriverRelease(o) {
 
   // Their own tap. On a truck the app last read as moving it says when and starts nothing, and a tour
   // under way stays up until they end it: nothing here changes the page by itself. From the note, the
-  // note itself says it.
+  // note itself says it, and the tour is the release's: it ends in I acknowledge.
   function startTour(stepIds, doneIds, fromNote = false) {
     if (o.motionAllowed() !== true) {
       if (fromNote) whenParked.value = true
@@ -94,7 +98,7 @@ export function useDriverRelease(o) {
     const steps = tourStepsFor(stepIds, o.has())
     if (!steps.length) return
     whenParked.value = false
-    tour.value = { steps, index: 0, doneIds, from: o.place() }
+    tour.value = { steps, index: 0, doneIds, from: o.place(), release: fromNote }
     o.showStep(steps[0])
   }
 
@@ -105,16 +109,15 @@ export function useDriverRelease(o) {
     o.restorePlace(from)
   }
 
-  // The only answer to a note. It waits for the save and can't be sent twice. Saved, the note closes and
-  // a first-time driver's offer can follow; not saved, it closes with a line, the app marks nothing, and
-  // they go on to their loads. If the server got the tap before the answer was lost, it still counts.
-  async function noteAcknowledge() {
-    const shown = entries.value.map((e) => e.id)
-    if (saving.value || !shown.length) return
+  // The only answer to a note: I acknowledge, on the note or at the end of its tour. It waits for the
+  // save and can't be sent twice. Saved, the note closes and a first-time driver's offer can follow; not
+  // saved, it closes with a line, the app marks nothing, and they go on to their loads. If the server got
+  // the tap before the answer was lost, it still counts.
+  async function confirm(ids) {
     saving.value = true
     let saved = false
     try {
-      const reply = await o.api.post(ACK_URL, { ids: shown })
+      const reply = await o.api.post(ACK_URL, { ids })
       saved = !!reply && reply.success === true
     } catch {
       saved = false
@@ -128,11 +131,29 @@ export function useDriverRelease(o) {
     o.toast(WORDS.notSaved, 'error')
   }
 
-  // "Show me first" marks nothing: the note is there again when the tour ends.
+  // The note's own I acknowledge: the one way on a truck read as moving, where Show me starts nothing.
+  async function noteAcknowledge() {
+    const shown = entries.value.map((e) => e.id)
+    if (saving.value || !shown.length) return
+    await confirm(shown)
+  }
+
+  // "Show me" marks nothing: the tour runs over the note, so one left mid-tour, by leaving the app,
+  // comes back unanswered at a later sign-in.
   function noteShowMe() {
     if (saving.value) return
     const shown = entries.value
     startTour(shown.flatMap((e) => e.tour), shown.map((e) => e.id), true)
+  }
+
+  // The release tour's last step: I acknowledge answers the note it came from, for the entries it
+  // showed, saved before the tour and the note close. The finished tour keeps its own mark as well.
+  async function tourAcknowledge() {
+    if (!tour.value || !tour.value.release || saving.value) return
+    const { doneIds } = tour.value
+    await confirm(doneIds)
+    endTour()
+    mark(TOUR_DONE_URL, doneIds)
   }
 
   function offerSkip() {
@@ -151,16 +172,17 @@ export function useDriverRelease(o) {
   }
 
   function tourNext() {
-    if (!tour.value) return
+    if (!tour.value || saving.value) return
     if (tour.value.index >= tour.value.steps.length - 1) {
-      tourFinish()
+      if (tour.value.release) tourAcknowledge()
+      else tourFinish()
       return
     }
     tour.value = { ...tour.value, index: tour.value.index + 1 }
     o.showStep(tour.value.steps[tour.value.index])
   }
 
-  // Only finishing writes, and only the tour's own mark: a release's note still waits for its answer.
+  // The app tour's end: only the tour's own mark is written.
   function tourFinish() {
     if (!tour.value) return
     const { doneIds } = tour.value
@@ -168,8 +190,11 @@ export function useDriverRelease(o) {
     mark(TOUR_DONE_URL, doneIds)
   }
 
-  // A skip writes nothing and asks nothing again.
-  const tourSkip = endTour
+  // A skip writes nothing and asks nothing again. The release tour has none: it ends in I acknowledge.
+  function tourSkip() {
+    if (tour.value && tour.value.release) return
+    endTour()
+  }
 
   return {
     featureOn, noteView, onScreen, lookDone, tourOpen, tourView, check,
