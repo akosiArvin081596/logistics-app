@@ -619,6 +619,45 @@ if (panelFactory) {
         h.includes('data-title="Miles per gallon"'), t.includes('Fuel level read 12 min ago')], [true, true, true, true, true])
     check('§8a flag off: the stops and Refresh', [t.includes('Where to fuel up'), t.includes('QA Truck Plaza Riverton'), t.includes('Refresh fuel, stops and check')], [true, true, true])
   }
+  // A carried level is worked out, not read: no "read N min ago", and the plain line in its place.
+  {
+    const dropout = textOf(offHtml['sensor dropout'])
+    const LINE = "Your fuel sensor isn't reporting. The fuel level and gallons left are estimates."
+    check('§8a flag off, a sensor dropout: the rows are called estimates, and nothing says the level was read',
+      [dropout.includes(LINE), /Fuel level read/.test(dropout), offHtml['sensor dropout'].includes('data-title="Fuel level"')], [true, false, true])
+    check('§8a flag off, a live reading: the stamp as today, and no estimate line',
+      [textOf(offHtml['in transit, clears']).includes('Fuel level read 12 min ago'), textOf(offHtml['in transit, clears']).includes(LINE)], [true, false])
+    check('§8a flag off, no reading: neither line',
+      [textOf(offHtml['ELD silent']).includes(LINE), textOf(offHtml['ELD silent']).includes('Fuel level read')], [false, false])
+  }
+  // The Miles per gallon row and its note say which figure it is: 6.0 is the truck's own
+  // MPG on file, and the fleet default is 6.5. The note shows only where the range rests
+  // on that MPG, so a measured truck gets the row alone.
+  {
+    const estimated = world({ flag: false, burn: NO_BURN })
+    const measured = world({ flag: false })
+    const rowsAt = async (w, mpgSource, mpg) => {
+      serve(w, { '/api/fuel/range': { ...w.range, mpgSource, mpg } })
+      return textOf(await openSection(panelFactory()))
+    }
+    const says = (t) => [t.includes('on file for this truck'), t.includes('fleet default'), t.includes('rough estimate')]
+    const onFile = await rowsAt(estimated, 'truck', 6)
+    const fleet = await rowsAt(estimated, 'default', 6.5)
+    const receipts = await rowsAt(estimated, 'receipts', 6)
+    check('§8a flag off, the worlds are what they say: one estimated, one measured',
+      [estimated.plan.range.basis, measured.plan.range.basis], ['estimated', 'measured'])
+    check('§8a flag off, estimated, an MPG on file: the row and the note call it the truck\'s own figure, and never the fleet default',
+      [says(onFile), onFile.includes('This range uses the 6 mpg on file for this truck, not a figure measured from its fuel receipts. Treat it as a rough estimate.')], [[true, false, true], true])
+    check('§8a flag off, estimated, no MPG on file: the row and the note call it the fleet default, at 6.5',
+      [says(fleet), fleet.includes("There aren't enough miles or fuel receipts on this truck yet to work out its real MPG, so this range assumes the fleet default of 6.5 mpg. Treat it as a rough estimate.")], [[false, true, true], true])
+    check('§8a flag off, estimated, MPG from receipts: no note, and neither word', says(receipts), [false, false, false])
+    check('§8a flag off, a source the panel doesn\'t know: no badge and no note',
+      says(await rowsAt(estimated, 'something-new', 6)), [false, false, false])
+    check('§8a flag off, measured, an MPG on file: the row says whose it is, and no note says the range uses it',
+      says(await rowsAt(measured, 'truck', 6)), [true, false, false])
+    check('§8a flag off, measured, no MPG on file: the row says the fleet default, and no note says the range assumes it',
+      says(await rowsAt(measured, 'default', 6.5)), [false, true, false])
+  }
   check('§8a flag off: the new block appears in no world',
     Object.entries(offHtml).filter(([, h]) => h.includes('data-testid="driver-fuel"') || textOf(h).includes('miles until you run out')).map(([n]) => n), [])
   check('§8a flag off: a failed trip plan reads as today', textOf(offHtml['trip plan 400 (no code)']).includes("We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position."), true)

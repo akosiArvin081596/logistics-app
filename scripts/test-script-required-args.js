@@ -17,6 +17,9 @@
  *   §4 the docs driver-video capture has no default account either: without
  *      --user it refuses before any request, and its sign-in beats type the
  *      account it signs in as, never a driver ID or password of their own.
+ *   §5 scripts/auto-invoice-send-drafted.js takes its database and its sheet as
+ *      required arguments with no default: without one, or with a database
+ *      file that isn't there, it exits 2 before opening or making anything.
  *
  * Hermetic: each script runs in a child process in a fresh mkdtemp directory;
  * the Google client is a stub preloaded into the child, so nothing reaches the
@@ -167,6 +170,25 @@ Module._load = function (request, ...rest) { return request === "googleapis" ? {
 		const noUser = run("scripts/docs/capture-driver-video.js", ["--base=http://127.0.0.1:9"], { cwd: ROOT });
 		check(`§4 run without --user: refuses (exit ${noUser.code})`, noUser.code === 1 && /--user=/.test(noUser.out));
 		check("§4 …before writing anything: no output folder created", outDirs.filter((d) => fs.existsSync(d)).length === existed.length);
+	}
+
+	console.log("§5 scripts/auto-invoice-send-drafted.js");
+	{
+		const dir = fs.mkdtempSync(path.join(tmp, "send-drafted-"));
+		const dbFile = path.join(dir, "made-up.db");
+		for (const [label, args, says] of [
+			["no arguments", [], /give exactly one of --dry-run and --apply/],
+			["no --db", ["--dry-run", "--sheet-id=sheet-under-test"], /--db=<app\.db> is required/],
+			["a blank --db", ["--dry-run", "--db=  ", "--sheet-id=sheet-under-test"], /--db=<app\.db> is required/],
+			["no --sheet-id", ["--dry-run", `--db=${dbFile}`], /--sheet-id=<id> is required/],
+			["--db naming no file", ["--apply", `--db=${dbFile}`, "--sheet-id=sheet-under-test"], /--db names no file/],
+		]) {
+			const r = run("scripts/auto-invoice-send-drafted.js", args, { cwd: dir });
+			check(`§5 ${label}: refuses (exit ${r.code}), saying what is missing`, r.code === 2 && says.test(r.out));
+		}
+		check("§5 …and no database file is made", !fs.existsSync(dbFile));
+		const src = readSource("scripts", "auto-invoice-send-drafted.js");
+		check("§5 the database and the sheet have no default", !!src && !/\.db["'`]/.test(src) && !/(\|\||\?\?)\s*sheetIds\./.test(src));
 	}
 } finally {
 	fs.rmSync(tmp, { recursive: true, force: true });
