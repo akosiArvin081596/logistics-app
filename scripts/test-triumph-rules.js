@@ -4,7 +4,8 @@
 //   §1 submitMode(): off, dry or live, and the one reader of its three settings
 //   §2 parseNoaLines(): the assignment lines, word for word, four of them or refused
 //   §3 the CSV: exact headers and order, CRLF and no BOM, each field's limits and
-//      refusals, INVAMT from whole cents, a comma in DTR_NAME quoted and nowhere else
+//      refusals, INVAMT from whole cents, and never a quote: a comma in DTR_NAME stops
+//      the load (DEBTOR_NAME_COMMA), and csvText() throws on a value that would need one
 //   §4 the names: the PDF named for INVOICE#, the CSV unique and plain
 //   §5 the size rule: 921,599 passes, 921,600 fails; a setting can only lower it
 //   §6 rule 7: a deny-list hit in any composed value refuses, and no reader refuses
@@ -108,32 +109,57 @@ section("§3 the CSV");
 	eq(text, "DTR_NAME,INVOICE#,INV_DATE,PO,INVAMT\r\nExample Broker LLC,11022026-7,11/02/2026,LD-TEST-0001,2150.00\r\n", "§3 the file, byte for byte: one row, CRLF line endings");
 	ok(!Buffer.from(text, "utf8").subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), "§3 no BOM");
 
-	// A comma in the debtor's name: RFC 4180 quoted, read back as one field.
-	const parse = (line) => {
-		const out = [];
-		let cur = "";
-		let quoted = false;
-		for (let i = 0; i < line.length; i++) {
-			const ch = line[i];
-			if (quoted) {
-				if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') quoted = false; else cur += ch;
-			} else if (ch === '"') quoted = true;
-			else if (ch === ",") { out.push(cur); cur = ""; } else cur += ch;
+	// Triumph's CSV takes no quotes in any column, so a comma in the debtor's name stops the
+	// load under its own code, wherever it sits and whatever else is wrong with the name.
+	for (const [label, v] of [
+		["in the middle", "Example Broker, LLC"], ["with no space after it", "Example Broker,LLC"], ["at the start", ",Example Broker"],
+		["at the end", "Example Broker LLC,"], ["alone", ","], ["twice", "Example, Broker, LLC"],
+		["ending a name of 100 characters", `${"X".repeat(rules.DTR_NAME_MAX - 1)},`], ["inside a name of 100 characters", `${"X".repeat(50)},${"X".repeat(49)}`],
+		["in a name of 101 characters", `${"X".repeat(rules.DTR_NAME_MAX)},`], ["beside a double quote", 'Example "Broker", LLC'],
+		["beside a leading space", " Example, LLC"], ["beside a leading =", "=Example, LLC"], ["beside a line break", "Example,\nBroker"],
+	]) {
+		eq(code({ debtorName: v }), "DEBTOR_NAME_COMMA:DTR_NAME", `§3 FAILS ON THE OLD CODE: a comma in DTR_NAME ${label}: DEBTOR_NAME_COMMA`);
+	}
+	const commaWords = String(made({ debtorName: "Example Broker, LLC" }).error);
+	ok(/^The debtor's name holds a comma, so nothing was sent\./.test(commaWords), "§3 FAILS ON THE OLD CODE: ...with words a person can read");
+	ok(/Triumph's file takes no quotes, and without them a comma would split the name across columns\.$/.test(commaWords), "§3 FAILS ON THE OLD CODE: ...that say why");
+	// It refuses a comma on its own too, so no other caller can pass one.
+	const usable = typeof rules.debtorNameUsable === "function" ? rules.debtorNameUsable : () => "not exported";
+	eq(["Example Broker LLC", "Example Broker, LLC", 'Example "Broker"', "Example\rBroker", "Example\nBroker"].map((v) => usable(v)), [true, false, false, false, false],
+		"§3 FAILS ON THE OLD CODE: debtorNameUsable() refuses a comma, as it refuses a double quote, a CR and an LF");
+
+	// csvText() never quotes. A row that didn't come from csvRow() and holds a value that would
+	// need quoting throws, in every column, so it can't shift the columns.
+	const good = made().row;
+	const written = [];
+	const write = (row) => {
+		try {
+			written.push(rules.csvText(row));
+			return "written";
+		} catch (e) {
+			return String(e && e.message);
 		}
-		out.push(cur);
-		return out;
 	};
-	const commaRow = made({ debtorName: "Example Broker, LLC" }).row;
-	const commaText = rules.csvText(commaRow);
-	eq(commaText, "DTR_NAME,INVOICE#,INV_DATE,PO,INVAMT\r\n\"Example Broker, LLC\",11022026-7,11/02/2026,LD-TEST-0001,2150.00\r\n", "§3 a comma in DTR_NAME: that one field quoted");
-	eq(parse(commaText.split("\r\n")[1]), ["Example Broker, LLC", "11022026-7", "11/02/2026", "LD-TEST-0001", "2150.00"], "§3 ...and it reads back as five fields");
-	eq(commaRow.DTR_NAME, "Example Broker, LLC", "§3 ...the row keeps the name itself, for the rate-con check");
-	ok(!rules.csvText(made({ debtorName: "No Comma Broker Inc" }).row).includes('"'), "§3 a name with no comma has no quotes");
+	for (const h of rules.CSV_HEADERS) {
+		for (const [label, ch] of [["a comma", ","], ["a double quote", '"'], ["a CR", "\r"], ["an LF", "\n"]]) {
+			const said = write({ ...good, [h]: `${good[h].slice(0, 1)}${ch}${good[h].slice(1)}` });
+			ok(said.startsWith(`csvText: ${h} would need quotes`), `§3 FAILS ON THE OLD CODE: csvText() on a row with ${label} in ${h}: it throws, naming the column (${JSON.stringify(said)})`);
+		}
+	}
+	// Every printable character in a name: only the double quote and the comma stop it, and
+	// every name that passes is written as it is.
+	const stopped = [];
+	for (let c = 0x20; c <= 0x7e; c++) {
+		const ch = String.fromCharCode(c);
+		const r = made({ debtorName: `Example ${ch} Broker` });
+		if (r.ok) write(r.row); else stopped.push([ch, r.code]);
+	}
+	eq(stopped, [['"', "FIELD_UNUSABLE"], [",", "DEBTOR_NAME_COMMA"]], "§3 FAILS ON THE OLD CODE: of every printable character in DTR_NAME, only the double quote and the comma stop it");
+	ok(written.length >= 90 && written.every((t) => !t.includes('"')), `§3 FAILS ON THE OLD CODE: no file csvText() wrote holds a double quote (${written.length} written)`);
 
 	// DTR_NAME
 	eq(code({ debtorName: "X".repeat(rules.DTR_NAME_MAX) }), "ok", "§3 DTR_NAME at 100 characters");
 	eq(code({ debtorName: "X".repeat(rules.DTR_NAME_MAX + 1) }), "FIELD_UNUSABLE:DTR_NAME", "§3 DTR_NAME at 101: refused");
-	eq(code({ debtorName: `${"X".repeat(rules.DTR_NAME_MAX - 1)},` }), "ok", "§3 ...a comma doesn't change the limit: the name's own 100");
 	for (const [label, v] of [["empty", ""], ["null", null], ["a quote", 'Example "Broker"'], ["a CR", "Example\rBroker"], ["an LF", "Example\nBroker"], ["a tab", "Example\tBroker"],
 		["a leading tab", "\tExample"], ["a leading =", "=SUM(A1)"], ["a leading +", "+Example"], ["a leading -", "-Example"], ["a leading @", "@Example"],
 		["a non-ASCII letter", "Exámple Broker"], ["a non-printable", "Example\u0007Broker"], ["a leading space", " Example"], ["a trailing space", "Example "]]) {
@@ -356,8 +382,9 @@ section("§10 the free checks");
 	eq(say({ ...all, drafts: 0, closedMonths: [], hasDeliveryDate: true, activeAdvanceLines: 0, pods: 1 }, { hasLines: false }), "needs_attention BROKER_EMAIL_FREEMAIL", "§10 then the broker");
 	const everyCode = ["LOAD_DROPPED", "NOT_COMPLETED", "ALREADY_INVOICED", "INVOICE_DRAFT_IN_FLIGHT", "INVOICE_MAYBE_DRAFTED", "CLOSED_MONTH", "MONTH_UNKNOWN", "NO_DELIVERY_DATE", "ADVANCE_LINES", "WAITING_POD", "POD_UNREADABLE",
 		"NO_BROKER_EMAIL", "BROKER_EMAIL_FREEMAIL", "BROKER_DOMAIN_UNCONFIRMED", "DEBTOR_UNMAPPED", "NOA_UNCONFIGURED",
-		"FIELD_UNUSABLE", "PO_UNUSABLE", "PROTECTED_VALUE", "DOCUMENT_MISSING", "DOCUMENT_UNREADABLE", "MERGE_FAILED", "BATCH_TOO_LARGE", "DEBTOR_NAME_NOT_ON_DOC", "DEBTOR_NAME_UNREADABLE", "RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH"];
-	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 every code is on the list, each once");
+		"FIELD_UNUSABLE", "PO_UNUSABLE", "PROTECTED_VALUE", "DOCUMENT_MISSING", "DOCUMENT_UNREADABLE", "MERGE_FAILED", "BATCH_TOO_LARGE", "DEBTOR_NAME_COMMA", "DEBTOR_NAME_NOT_ON_DOC", "DEBTOR_NAME_UNREADABLE",
+		"RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH"];
+	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 FAILS ON THE OLD CODE: every code is on the list, each once, DEBTOR_NAME_COMMA among them");
 }
 
 // ---------------------------------------------------------------- §11

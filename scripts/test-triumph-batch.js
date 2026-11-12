@@ -317,8 +317,27 @@ async function s3() {
 	const lumper = await batchLib.buildBatch(args({ documents: [docRow(1, "POD", "POD PAGE"), docRow(2, "Lumper", "LUMPER RECEIPT"), docRow(3, "Scale Ticket", "SCALE TICKET", "2026-11-02 09:00:00"), docRow(4, "Receipt", "A FUEL RECEIPT"), docRow(5, "Other", "SOMETHING ELSE")] }));
 	eq((await pageTexts(lumper.pdf)).map((t) => t.slice(0, 5)), ["INVOI", "RATE ", "POD P", "SCALE", "LUMPE"], "§3 a lumper or scale document on file goes last, in upload order; a receipt or \"Other\" doesn't go");
 
-	const comma = await batchLib.buildBatch(args({ debtorName: "Example Broker, LLC", rateCon: { buffer: pdfOf(`Load Number ${LOAD} Bill to Example Broker, LLC`), source: "documents" } }));
-	eq(comma.csv.toString("utf8").split("\r\n")[1], `"Example Broker, LLC",11022026-7,11/02/2026,${LOAD},2150.00`, "§3 a comma in the debtor's name: quoted, and printed so on its rate con");
+	// A comma in the debtor's name stops the batch before any PDF is made, even when its rate
+	// con prints the name so: Triumph's CSV takes no quotes. PDFs are counted at the library.
+	const counted = async (a) => {
+		const create = PDFDocument.create;
+		let made = 0;
+		PDFDocument.create = function (...x) {
+			made++;
+			return create.apply(this, x);
+		};
+		try {
+			return { r: await batchLib.buildBatch(a), made };
+		} finally {
+			PDFDocument.create = create;
+		}
+	};
+	const control = await counted(args());
+	ok(control.r.ok && control.made > 0, "§3 (fixture) a batch that builds makes its PDF where it's counted");
+	const comma = await counted(args({ debtorName: "Example Broker, LLC", rateCon: { buffer: pdfOf(`Load Number ${LOAD} Bill to Example Broker, LLC`), source: "documents" } }));
+	eq([comma.r.ok, comma.r.code, comma.r.field], [false, "DEBTOR_NAME_COMMA", "DTR_NAME"], "§3 FAILS ON THE OLD CODE: a comma in the debtor's name, printed so on its rate con: DEBTOR_NAME_COMMA");
+	eq(comma.made, 0, "§3 FAILS ON THE OLD CODE: ...and no PDF was made");
+	eq(Object.keys(comma.r).filter((k) => ["pdf", "csv", "pdfName", "csvName"].includes(k)), [], "§3 FAILS ON THE OLD CODE: ...and the answer holds no part of a batch");
 	const literal = await batchLib.buildBatch(args({ rateCon: { buffer: textPdf(RATECON_TEXT, { mode: "literal" }), source: "documents" } }));
 	ok(literal.ok, "§3 a rate con written plainly reads too");
 	const onDrive = await batchLib.buildBatch(args({ rateCon: { buffer: pdfOf(RATECON_TEXT), source: "drive", driveFileName: `${LOAD} rate con.pdf` } }));
