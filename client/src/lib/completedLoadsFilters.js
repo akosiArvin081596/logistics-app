@@ -2,9 +2,11 @@
 // a time, and the line the list shows when no row is left. The tab takes both
 // counts over the rows its driver and date filters leave, the same rows a toggle
 // narrows, so with no search typed a toggle's count is the rows it shows.
+// Job Board and Active Loads take their lines for a typed search from
+// completedEmptyText too, so a search reads the same on all three tabs.
 //
 // Pure: no Vue, no imports. scripts/test-completed-loads-filters.mjs runs it and
-// the tab mounted.
+// the tab mounted; scripts/test-review-filter-tabs.mjs mounts the other two.
 
 export const QUICK_REVIEW = 'review'
 export const QUICK_ATTENTION = 'attention'
