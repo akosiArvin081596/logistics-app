@@ -7,13 +7,15 @@
 //   3. what the first run would write: day results by state and reason, and the
 //      notices (the server's own timeOffEldRunPlan(), lifted)
 //   4. --shadow: every driver-day of the last --days finished days judged as if
-//      requested, each day as its own one-day row: counts by state and reason,
-//      split by whether a load of his covers the day and whether the day has
-//      fixes or lies in a dark spell; "Confirmed (no ELD data)" on its own line;
-//      the measures behind stop points S2 (the position distance across dark
-//      stretches with a 0 mi odometer step and on return days, the share of days
-//      the 1 h engine rule keeps Requested), S4 and S4b (closed-month days left
-//      out of S4b's share)
+//      it were time off, each day as its own one-day row: counts by state and
+//      reason, split by whether a load of the driver's covers the day and whether
+//      the day has fixes or lies in a dark spell; "Confirmed (no ELD data)" on its
+//      own line; the dark stretches (the position distance across those with a
+//      0 mi odometer step and on return days; the odometer step across each, by
+//      its end fixes: a return, leaving, both moving, both still; the share of
+//      days the 1 h engine rule keeps Unclear); the no-load days with fixes, and
+//      those at 0.1-5 mi with and without moving fixes; the no-load dark-spell
+//      days' share not Confirmed, closed-month and no-ELD-data days left out
 //   5. continuity breaks and engine-hours advances across dark stretches over
 //      the retained telemetry, per device; closed-month ones counted for
 //      calibration only, never raised as a pay issue
@@ -96,9 +98,19 @@ function spread(list) {
 	const s = list.filter(Number.isFinite).sort((a, b) => a - b);
 	if (!s.length) return { count: 0 };
 	const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
-	return { count: s.length, medianKm: km(at(0.5)), p90Km: km(at(0.9)), maxKm: km(s[s.length - 1]), over1Km: s.filter((m) => m > 1000).length, overFloor: s.filter((m) => m > eldCheck.TIME_OFF_ELD_RULE.moveFloorMeters).length };
+	return { count: s.length, medianKm: km(at(0.5)), p90Km: km(at(0.9)), maxKm: km(s[s.length - 1]), over1Km: s.filter((m) => m > 1000).length, overFloor: s.filter((m) => m > eldCheck.TIME_OFF_ELD_RULE.positionFloorMeters).length };
 }
 const verdictKey = (v) => (v.noEldData ? `confirmed_no_eld_data:${v.reason}` : `${v.state}:${v.reason}`);
+// Small miles are counted apart, up to the miles walk's own floor, so yard moves that make a day off read Not
+// confirmed show as numbers.
+const SMALL_MI = eldMiles.ELD_DELTA_FLOOR_MI;
+const ENDS = ["return", "leaving", "bothMoving", "bothStill"];
+const endsOf = (st) => (st.afterMoving && st.beforeMoving ? "bothMoving" : st.afterMoving ? "return" : st.beforeMoving ? "leaving" : "bothStill");
+const stepBand = (mi) => {
+	if (mi === null || mi < 0) return "other";
+	const shown = Math.round(mi * 10) / 10;
+	return shown <= eldCheck.TIME_OFF_NO_MILES_MAX ? "zero" : shown <= SMALL_MI ? "upTo5" : "over5";
+};
 
 async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 	const server = liftFromServer(db, sheetData);
@@ -155,9 +167,12 @@ async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 		const out = {
 			days, from: first, to: yesterday, drivers: 0, driversWithNoTruck: 0, driverDays: 0,
 			byVerdict: {}, bySplit: {},
-			s2: { zeroOdometerStretches: null, returnStretches: null, engineRanDays: 0, engineRanShare: 0 },
-			s4: { noLoadDaysWithFixes: 0, notConfirmed: 0 },
-			s4b: { noLoadDarkDays: 0, closedMonthLeftOut: 0, confirmed: 0, confirmedNoEldData: 0, notConfirmed: 0, requested: 0, checking: 0, notConfirmedShare: 0 },
+			s2: {
+				zeroOdometerStretches: null, returnStretches: null, engineRanDays: 0, engineRanShare: 0,
+				silenceSteps: Object.fromEntries(ENDS.map((e) => [e, { zero: 0, upTo5: 0, over5: 0, other: 0 }])),
+			},
+			s4: { noLoadDaysWithFixes: 0, notConfirmed: 0, upTo5Mi: { movingFixes: 0, noMovingFixes: 0 } },
+			s4b: { noLoadDarkDays: 0, closedMonthLeftOut: 0, noEldDataLeftOut: 0, confirmed: 0, notConfirmed: 0, unclear: 0, checking: 0, notConfirmedShare: 0 },
 			loadsChecked: !!loadIndex, perDriver: [],
 		};
 		const zeroOdo = [];
@@ -184,22 +199,26 @@ async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 				if (v.reason === "engine_ran_while_dark") out.s2.engineRanDays += 1;
 				for (const st of v.stretches) {
 					const id = `${v.vehicleIds.join(",")}|${st.fromMs}|${st.toMs}`;
-					if (seenStretch.has(id) || !Number.isFinite(st.distanceM)) continue;
+					if (seenStretch.has(id)) continue;
 					seenStretch.add(id);
+					inc(out.s2.silenceSteps[endsOf(st)], stepBand(st.odoStepMi));
+					if (!Number.isFinite(st.distanceM)) continue;
 					if (st.odoStepMi === 0) zeroOdo.push(st.distanceM);
 					if (st.afterMoving) back.push(st.distanceM);
 				}
 				if (load === false && v.samples > 0) {
 					out.s4.noLoadDaysWithFixes += 1;
 					if (v.state === "not_confirmed") out.s4.notConfirmed += 1;
+					if (v.miles > eldCheck.TIME_OFF_NO_MILES_MAX && v.miles <= SMALL_MI) inc(out.s4.upTo5Mi, v.movingPings > 0 ? "movingFixes" : "noMovingFixes");
 				}
+				// A day with no ELD data at all is no dark spell of a reporting device: it has its own line.
 				if (load === false && v.darkSpell) {
 					if (monthClosed(day)) { out.s4b.closedMonthLeftOut += 1; continue; }
+					if (v.noEldData) { out.s4b.noEldDataLeftOut += 1; continue; }
 					out.s4b.noLoadDarkDays += 1;
-					if (v.noEldData) out.s4b.confirmedNoEldData += 1;
-					else if (v.state === "confirmed") out.s4b.confirmed += 1;
+					if (v.state === "confirmed") out.s4b.confirmed += 1;
 					else if (v.state === "not_confirmed") out.s4b.notConfirmed += 1;
-					else if (v.state === "no_data") out.s4b.requested += 1;
+					else if (v.state === "no_data") out.s4b.unclear += 1;
 					else out.s4b.checking += 1;
 				}
 				if (names) mine.push([day, verdictKey(v)]);
@@ -209,7 +228,7 @@ async function buildReport(db, { sheetData, nowMs, days, shadow, names }) {
 		out.s2.zeroOdometerStretches = spread(zeroOdo);
 		out.s2.returnStretches = spread(back);
 		out.s2.engineRanShare = out.driverDays ? Math.round((out.s2.engineRanDays / out.driverDays) * 1000) / 1000 : 0;
-		const notConfirmedB = out.s4b.noLoadDarkDays - out.s4b.confirmed - out.s4b.confirmedNoEldData;
+		const notConfirmedB = out.s4b.noLoadDarkDays - out.s4b.confirmed;
 		out.s4b.notConfirmedShare = out.s4b.noLoadDarkDays ? Math.round((notConfirmedB / out.s4b.noLoadDarkDays) * 1000) / 1000 : 0;
 		shadowOut = out;
 	}
@@ -321,9 +340,11 @@ function printText(r) {
 		for (const [split, counts] of Object.entries(s.bySplit).sort()) L.push(`   ${split}: ${pairs(counts)}`);
 		if (!s.loadsChecked) L.push("   Loads not checked (no --values-json): the load splits, S4 and S4b read \"not checked\".");
 		const sp = (x) => (x.count ? `${x.count} (median ${x.medianKm} km, 90th ${x.p90Km} km, max ${x.maxKm} km; over 1 km ${x.over1Km}, over the 5 mi floor ${x.overFloor})` : "0");
-		L.push(`   S2: dark stretches with a 0 mi odometer step: ${sp(s.s2.zeroOdometerStretches)}; ending moving (return days): ${sp(s.s2.returnStretches)}; days the 1 h engine rule keeps Requested: ${s.s2.engineRanDays} (${s.s2.engineRanShare} of driver-days).`);
-		L.push(`   S4: no-load days with fixes ${s.s4.noLoadDaysWithFixes}, of them Not confirmed ${s.s4.notConfirmed}.`);
-		L.push(`   S4b: no-load dark-spell days ${s.s4b.noLoadDarkDays} (closed-month days left out: ${s.s4b.closedMonthLeftOut}): Confirmed ${s.s4b.confirmed}; Confirmed (no ELD data) ${s.s4b.confirmedNoEldData}; Not confirmed ${s.s4b.notConfirmed}; Requested ${s.s4b.requested}; Checking ${s.s4b.checking}. Share not Confirmed: ${s.s4b.notConfirmedShare}.`);
+		const steps = ENDS.map((e) => { const b = s.s2.silenceSteps[e]; return `${e === "bothMoving" ? "both moving" : e === "bothStill" ? "both still" : e} ${b.zero}/${b.upTo5}/${b.over5}/${b.other}`; }).join("; ");
+		L.push(`   S2: dark stretches with a 0 mi odometer step: ${sp(s.s2.zeroOdometerStretches)}; ending moving (return days): ${sp(s.s2.returnStretches)}; days the 1 h engine rule keeps Unclear: ${s.s2.engineRanDays} (${s.s2.engineRanShare} of driver-days).`);
+		L.push(`   S2: the odometer step across each dark stretch by its end fixes (0 mi / 0.1-5 mi / over 5 mi / not read): ${steps}.`);
+		L.push(`   S4: no-load days with fixes ${s.s4.noLoadDaysWithFixes}, of them Not confirmed ${s.s4.notConfirmed}; at 0.1-5 mi: ${s.s4.upTo5Mi.movingFixes} with moving fixes, ${s.s4.upTo5Mi.noMovingFixes} without.`);
+		L.push(`   S4b: no-load dark-spell days ${s.s4b.noLoadDarkDays} (left out: closed-month ${s.s4b.closedMonthLeftOut}, no ELD data ${s.s4b.noEldDataLeftOut}): Confirmed ${s.s4b.confirmed}; Not confirmed ${s.s4b.notConfirmed}; Unclear ${s.s4b.unclear}; Checking ${s.s4b.checking}. Share not Confirmed: ${s.s4b.notConfirmedShare}.`);
 		for (const d of s.perDriver) L.push(`   ${d.driver}: ${d.days.map(([day, v]) => `${day} ${v}`).join(", ")}`);
 	} else {
 		L.push("4. Shadow: not run (--shadow).");
@@ -369,7 +390,7 @@ async function main() {
 	}
 }
 
-module.exports = { LIFT_ROOTS, LIFT_DENIED };
+module.exports = { LIFT_ROOTS, LIFT_DENIED, endsOf, stepBand };
 
 if (require.main === module) {
 	main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
