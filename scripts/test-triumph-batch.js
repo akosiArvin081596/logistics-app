@@ -97,7 +97,7 @@ const GOLDEN = Object.freeze({
 // spaces, so a run of them can be checked.
 const shownWords = (html) => html
 	.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<head[\s\S]*?<\/head>/g, " ").replace(/<[^>]+>/g, "\n")
-	.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+	.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
 	.split("\n").map((l) => l.trim()).filter(Boolean).join("\n");
 const renderSpy = () => {
 	const fn = async (html) => {
