@@ -406,15 +406,16 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	const requireAuth = new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
 	const passThrough = (req, res, next) => next();
 
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", sources.login)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", signIn);
+	// APP_TIMEZONE_ERA: no time zone switch set, as server.js builds it then.
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "signIn", sources.login)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", {}, signIn);
 	// The setup's reserved-name check is scripts/test-messages-staff-only.js's
 	// subject; here no name is reserved.
-	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "findDriverNameClash", sources.setup)(
-		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", () => null);
+	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "findDriverNameClash", sources.setup)(
+		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", {}, () => null);
 	new Function("app", "disconnectSessionSockets", "signIn", sources.logout)(app, helpers.disconnectSessionSockets, signIn);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
-	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
 	// Both password routes email the account afterwards (notifyPasswordChanged(),
 	// B21); that email is scripts/test-password-change-notice.js's subject, so here
 	// it is a no-op that sends nothing.

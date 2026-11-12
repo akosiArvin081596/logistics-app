@@ -323,8 +323,8 @@ async function eveningTruckChecks() {
 	const noticeCounts = [notices(ON, "2026-07"), notices(ON, "2026-06"), notices({}, "2026-07")];
 	check(JSON.stringify(noticeCounts) === JSON.stringify([1, 0, 0]),
 		"boot: one notice when FROM (2026-07) is at or before the latest closed month; none when it is later, or with the flag off", JSON.stringify(noticeCounts));
-	check(count(`${TRUCK_RULE_HEAD}investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), `) === 1,
-		"server.js declares TRUCK_CHARGE_APP_DAY_RULE once, at column 0, from the environment with appDay() as its day reader", "");
+	check(count(`${TRUCK_RULE_HEAD}investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appTime.businessDayOf(new Date(ms), APP_TIMEZONE), `) === 1,
+		"server.js declares TRUCK_CHARGE_APP_DAY_RULE once, at column 0, from the environment with the business day on the clock in force at the creation (appTime.businessDayOf()) as its day reader", "");
 	SHEET.pop();
 }
 

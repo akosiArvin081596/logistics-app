@@ -126,7 +126,15 @@ eq('§1 a lowered target, exact', v.LOWER_TARGET_LINE, 'Your target is lower thi
 eq('§1 what to do about a wrong row', v.TELL_DISPATCH_LINE, 'If something looks wrong, tell dispatch.')
 eq('§1 a week that can\'t be reached asks for nothing more, and says when the next one starts', fn('newWeekLine')('Nov 7'), 'A new week starts Saturday, Nov 7.')
 eq('§1 the undated line is gone', v.NEW_WEEK_LINE, undefined)
-eq('§1 the closing line, with ET', v.WEEK_CLOSES, 'Week closes Fri 11:59 PM ET')
+eq('§1 the closing line, with ET', fn('weekClosesLine')(), 'Week closes Fri 11:59 PM ET')
+{
+  // The zone word follows the business clock (utils/datetime.js appZoneLabel()).
+  const dt = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'utils', 'datetime.js')).href)
+  dt.setAppTimeZone('America/Chicago')
+  const central = fn('weekClosesLine')()
+  dt.setAppTimeZone('America/New_York')
+  eq('§1 the closing line names the business clock: CT on the Central clock', central, 'Week closes Fri 11:59 PM CT')
+}
 eq('§1 the three labels', v.PACE_WORDS, { ahead: 'Ahead of Pace', 'on-track': 'On Track', 'needs-focus': 'Needs Focus' })
 eq('§1 the two weeks he can open', (v.OWN_PERIODS || []).map((p) => [p.id, p.label]), [['this-week', 'This week'], ['last-week', 'Last week']])
 eq('§1 the old neutral line is gone', v.NO_HOURS_LINE, undefined)
@@ -134,7 +142,7 @@ eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, fn('requirementLine')(7.5, 6), fn('targetOnlyLine')(7.5), v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), v.WEEK_CLOSES, v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, fn('requirementLine')(7.5, 6), fn('targetOnlyLine')(7.5), v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), fn('weekClosesLine')(), v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -300,7 +308,7 @@ eq('§6 more left than the days hold: a new week starts, and no closing line ask
 eq('§6 only a true note shows it', [true, 'true', 1, undefined].map((newWeekNote) => wordsFor({ newWeekNote })?.newWeek), ['A new week starts Saturday, Nov 7.', '', '', ''])
 eq('§6 the date is the server\'s: the app never works it out', wordsFor({ newWeekNote: true, nextWeekStarts: 'Dec 25' })?.newWeek, 'A new week starts Saturday, Dec 25.')
 eq('§6 no date it can trust, no line, never a wrong one', [undefined, null, '', 7, 'decoy-date', 'Nov 7<b>', 'Nov 123'].map((nextWeekStarts) => wordsFor({ newWeekNote: true, nextWeekStarts })?.newWeek), new Array(7).fill(''))
-eq('§6 and then the closing line reads instead', wordsFor({ newWeekNote: true, nextWeekStarts: null })?.closes, v.WEEK_CLOSES)
+eq('§6 and then the closing line reads instead', wordsFor({ newWeekNote: true, nextWeekStarts: null })?.closes, fn('weekClosesLine')())
 eq('§6 no note, no date on the screen', wordsFor({ newWeekNote: false, nextWeekStarts: 'Dec 25' })?.newWeek, '')
 eq('§6 the lib holds no calendar of its own', /\bDate\b|getDay|getUTCDay|toLocale|Intl\./.test(codeOf(libSrc)), false)
 eq('§6 the count is the server\'s figure: the app never adds it up', wordsFor({ credits: { value: 9, target: 7.5, deliveries: 1, pickups: 1 } })?.count, '9 of 7.5 loads')

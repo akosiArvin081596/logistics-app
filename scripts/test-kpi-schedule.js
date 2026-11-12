@@ -21,12 +21,16 @@
  *    slot; the 6-hour catch-up limit removed; the slot computed in the
  *    server's zone. Each mutant is compiled from the module's source and run in
  *    process and in both child zones; at least one check must fail.
- * §8 scheduleText(): the KPI page's schedule words name US Eastern only
+ * §8 scheduleText(): the KPI page's schedule words name the business zone only
  *    ("Daily at 4:00 AM Eastern", "Mondays at 9:00 AM Eastern"; no Central
- *    time, 2026-10-15); another business zone is named as itself; the KPI
- *    response's default job says the same; no Central schedule time is left
- *    in lib/, client/src or docs/manual, and server.js and .env.example name
- *    no "US Central" time.
+ *    time beside them, 2026-10-15); on the Central clock "Daily at 3:00 AM
+ *    Central" and "Mondays at 8:00 AM Central", product-decisions.md's times
+ *    (the Central time plan's decision 1); another business zone is named as
+ *    itself; the KPI response's default job says the Eastern words; no Central
+ *    schedule time is written as text in lib/, client/src or docs/manual, and
+ *    server.js and .env.example name no "US Central" time.
+ *    §1, §3 and §5 also run on the Central clock: 03:00 and Monday 08:00 there,
+ *    the same moments as 04:00 and 09:00 Eastern.
  *
  * Pure: no server, no database, no network; children get the module source on
  * stdin and write nothing.
@@ -114,6 +118,16 @@ function checks(s) {
 	t(s.nextSnapshotAt(at("2026-10-31T13:00:00Z"), NY) === "2026-11-01T09:00:00.000Z", "§5 the day before clocks go back: next is 04:00 EST");
 	t(s.nextDigestAt(at("2026-10-26T14:00:00Z"), NY) === "2026-11-02T14:00:00.000Z", "§5 Monday 10:00 EDT: next digest is Monday 09:00 EST");
 	t(s.nextDigestAt(at("2026-10-12T12:00:00Z"), NY) === "2026-10-12T13:00:00.000Z", "§5 Monday 08:00: next digest is today's");
+
+	// The Central clock: product-decisions.md's 03:00 and Monday 08:00, the moments Eastern calls 04:00 and 09:00.
+	const chiWinter = s.snapshotSlot(at("2026-12-15T12:00:00Z"), CHI);
+	t(chiWinter.day === "2026-12-15" && chiWinter.slotMs === wall(CHI, 2026, 12, 15, 3) && chiWinter.slotMs === wall(NY, 2026, 12, 15, 4), "§1 on the Central clock: the slot is 03:00 CST, the moment of 04:00 EST");
+	const chiSummer = s.snapshotSlot(at("2027-07-15T12:00:00Z"), CHI);
+	t(chiSummer.slotMs === at("2027-07-15T08:00:00Z") && s.snapshotSlot(at("2027-07-15T07:59:59.999Z"), CHI).due === false, "§1 on the Central clock in summer: 03:00 CDT (08:00 UTC), not due before");
+	const chiMonday = s.digestSlot(at("2026-12-14T20:00:00Z"), CHI);
+	t(chiMonday.slotKey === "digest:2026-12-14" && chiMonday.slotMs === wall(CHI, 2026, 12, 14, 8) && chiMonday.slotMs === wall(NY, 2026, 12, 14, 9), "§3 on the Central clock: Monday 08:00 CST, the moment of 09:00 EST");
+	t(s.nextSnapshotAt(at("2026-12-15T10:00:00Z"), CHI) === new Date(wall(CHI, 2026, 12, 16, 3)).toISOString(), "§5 on the Central clock after today's slot: tomorrow 03:00 CST");
+	t(s.nextDigestAt(at("2026-12-14T15:00:00Z"), CHI) === new Date(wall(CHI, 2026, 12, 21, 8)).toISOString(), "§5 on the Central clock after Monday's digest: next Monday 08:00 CST");
 	return out;
 }
 
@@ -170,12 +184,14 @@ console.log("\n§7 MUTANTS");
 			swap(SRC, "if (nowMs - slot.slotMs > DIGEST_CATCH_UP_MS)", "if (false)")],
 		["the slot computed in the server's own zone",
 			swap(SRC, "return wallClockToMs(tz, y, m, d, hour, 0, 0);", "return new Date(y, m - 1, d, hour).getTime();")],
+		["Eastern's 04:00 and 09:00 on the Central clock (an hour late)",
+			swap(SRC, "return tz === CENTRAL_ZONE ? CENTRAL_HOURS : OTHER_HOURS;", "return OTHER_HOURS;")],
 	];
 	const r = mutants.map(([name, src]) => ({ ok: caught(src), name: `MUTANT ${name}: caught` }));
 	record(r);
 }
 
-console.log("\n§8 the schedule in words: Eastern only");
+console.log("\n§8 the schedule in words: the business zone only");
 {
 	const s = loadFrom(SRC);
 	const out = [];
@@ -188,7 +204,11 @@ console.log("\n§8 the schedule in words: Eastern only");
 		t(ny.digest === "Mondays at 9:00 AM Eastern", `§8 the digest names Eastern only (got ${JSON.stringify(ny.digest)})`);
 		t(!/central/i.test(`${ny.snapshot} ${ny.digest}`), "§8 no Central time in either");
 		const chi = s.scheduleText(CHI);
-		t(chi.snapshot === "Daily at 4:00 AM (America/Chicago)" && chi.digest === "Mondays at 9:00 AM (America/Chicago)", "§8 any other business zone is named as itself");
+		t(chi.snapshot === "Daily at 3:00 AM Central" && chi.digest === "Mondays at 8:00 AM Central",
+			`§8 on the Central clock the words name Central at product-decisions.md's 3:00 and 8:00 (got ${JSON.stringify([chi.snapshot, chi.digest])})`);
+		t(!/eastern/i.test(`${chi.snapshot} ${chi.digest}`), "§8 no Eastern time beside them");
+		const other = s.scheduleText("America/Denver");
+		t(other.snapshot === "Daily at 4:00 AM (America/Denver)" && other.digest === "Mondays at 9:00 AM (America/Denver)", "§8 any other business zone is named as itself");
 	}
 	const metrics = require(path.join(ROOT, "lib", "kpi-metrics.js"));
 	const job = metrics.buildKpiResponse({ asOfDay: "2026-10-15", snapshots: [], series: [], approvals: [] }).job;
@@ -205,7 +225,7 @@ console.log("\n§8 the schedule in words: Eastern only");
 		.flatMap((d) => scan(path.join(ROOT, d)))
 		.filter((p) => centralTime.test(fs.readFileSync(p, "utf8")))
 		.map((p) => path.relative(ROOT, p));
-	t(hits.length === 0, `§8 no Central schedule time in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
+	t(hits.length === 0, `§8 no Central schedule time written as text in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
 	// server.js and .env.example describe the same schedule; neither adds the
 	// Central hour (other server.js comments name Central for unrelated history).
 	const usCentral = ["server.js", ".env.example"].filter((f) => /US\s+Central/.test((f === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8")).replace(/\n#\s*/g, " ")));

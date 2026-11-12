@@ -29,9 +29,11 @@
  *      the Houston answers, which is also the proof the assertions discriminate
  *      (the Houston rule fails them).
  *   5. No business code names a zone: server.js and lib/ hold no America/Chicago
- *      outside comments but the truck-location bands (lib/eld-miles.js) and the
- *      reading of stamps written before the switch (lib/load-haul.js); the client
- *      reads the same switch date.
+ *      outside comments but the truck-location bands (lib/eld-miles.js), the
+ *      reading of stamps written before the switch (lib/load-haul.js) and
+ *      lib/app-time.js's own history (the Houston era, the zone's words); the
+ *      client reads the same switch date. The switch set by APP_TIMEZONE_FROM is
+ *      scripts/test-central-time-switch.js's.
  *
  * Functions are lifted out of server.js source (server.js opens SQLite and listens
  * on require); each lift asserts exactly one definition.
@@ -190,12 +192,13 @@ for (const f of fs.readdirSync(path.join(ROOT, "lib")).filter((n) => n.endsWith(
 	if (z.length) libZones[f] = z;
 }
 eq(libZones, {
-	"app-time.js": ['"America/New_York"'],
+	// The default and the era before a switch; the Houston era's zone and the zone's words.
+	"app-time.js": ['"America/New_York"', '"America/Chicago"'],
 	"eld-miles.js": ['"America/New_York"', '"America/Chicago"', '"America/Denver"', '"America/Los_Angeles"'],
 	"load-haul.js": ['"America/Chicago"'],
 	// A stop's own clock (user, 2026-10-15): the zones no longitude band holds.
 	"stop-zone.js": ['"America/Phoenix"', '"America/Anchorage"'],
-}, "lib/ names a zone only for the default, the truck-location bands, a stop's own clock and pre-switch stamps");
+}, "lib/ names a zone only for the default and its history, the truck-location bands, a stop's own clock and pre-switch stamps");
 eq(/const PRE_SWITCH_STAMP_TZ = "America\/Chicago";/.test(fs.readFileSync(path.join(ROOT, "lib", "load-haul.js"), "utf8")), true,
 	"load-haul's Houston is the reading of stamps written before the switch");
 const clientSrc = fs.readFileSync(path.join(ROOT, "client", "src", "utils", "datetime.js"), "utf8");

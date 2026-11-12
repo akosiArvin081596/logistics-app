@@ -144,7 +144,8 @@ function loadShipped(db, mutate = (s) => s) {
 		`const EXPENSE_PERIOD_EXPR = ${extractConst("EXPENSE_PERIOD_EXPR")};\n` +
 		`${TRUCK_RULE_OFF}\n`;
 	const src = mutate(`${consts}${body}\nreturn { ${FNS.join(", ")}, EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR };`);
-	return new Function("db", src)(db);
+	// appTime: lib/app-time.js, which assignmentMonthKey() reads an assignment's day through.
+	return new Function("db", "appTime", src)(db, require("../lib/app-time"));
 }
 
 // ------------------------------------------------------------------ fixtures
@@ -937,7 +938,7 @@ const MUTANTS = [
 	},
 	{
 		name: "M4 assignment stamps sliced as UTC instead of Houston-localised",
-		mutate: (s) => s.replace("return appDay(d).slice(0, 7);", "return s.slice(0, 7);"),
+		mutate: (s) => s.replace("return appTime.businessDayOf(d, APP_TIMEZONE).slice(0, 7);", "return s.slice(0, 7);"),
 		expect: (lib) => lib.assignmentMonthKey("2026-08-01T02:30:00.000Z") !== "2026-07",
 	},
 	{
