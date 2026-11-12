@@ -288,6 +288,12 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		ok(!cleared.audits.some((a) => a.action === "triumph_number_void"), "§2 ...a load that never had a number voids none");
 		const outside = await stops("a claim whose load was then handled in Triumph's process", {}, (w) => w.db.prepare("UPDATE load_factoring SET locked_at = ?, locked_via = 'outside' WHERE load_key = ?").run(T0, KEY), "skipped FACTORING_LOCKED");
 		eq(outside.spies.puts, [], "§2 FAILS WITHOUT THE JOB'S LOCK CHECK: ...never uploaded");
+		// The number's own transaction reads the marker again: a mark cleared while the engine read the load.
+		const during = world();
+		during.queue();
+		during.onPrepare = () => during.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY);
+		await during.make().tick();
+		eq([say(during.claim()), during.spies.mint, during.spies.render], ["skipped NOT_FACTORED", 0, 0], "§2 FAILS ON A NUMBER THAT DOESN'T READ THE MARKER: a mark cleared during the engine's read: no number, no render");
 	}
 
 	// ---------------------------------------------------------------- §3
@@ -449,6 +455,12 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		h.connectError = "HOST_KEY_MISMATCH";
 		await h.make().tick();
 		eq([say(h.claim()), ledger.getPause(h.db, "2099-01-01T00:00:00.000Z") && ledger.getPause(h.db, "2099-01-01T00:00:00.000Z").reason], ["queued HOST_KEY_MISMATCH", "HOST_KEY_MISMATCH"], "§6 a host key that doesn't match: paused until the resume script");
+		// Paused, live builds nothing new: each would wait for the same connection.
+		const hj = h.make();
+		h.clock.add(61);
+		const preparesPaused = h.spies.prepare;
+		await hj.tick();
+		eq([h.spies.prepare - preparesPaused, h.spies.connect], [0, 1], "§6 FAILS ON A PAUSE THAT BUILDS ANYWAY: an hour on, still paused: nothing built, nothing connected");
 		const resume = require(path.join(ROOT, "scripts", "triumph-submit-resume.js"));
 		h.db.exec("CREATE TABLE audit_trail (id INTEGER PRIMARY KEY, timestamp TEXT, user_id INTEGER, username TEXT, role TEXT, action TEXT, entity TEXT, entity_id TEXT, details TEXT)");
 		const dry = resume.run({ db: h.db, dryRun: true, nowIso: T0 });
@@ -609,6 +621,14 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		await job.tick();
 		eq([say(w.claim()), w.claim().invoice_id], ["staged", "11122026-2"], "§10 FAILS ON A BUILD THAT REUSES A VOIDED NUMBER: a fresh number");
 
+		// A claim that gives up at its own free checks gives up its number too.
+		const g = world({ env: DRY });
+		g.queue("queued", { stage: "reserved", invoice_id: "11122026-7", invoice_date: "2026-11-12", reserved_at: T0 });
+		g.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY);
+		await g.make().tick();
+		eq([say(g.claim()), Boolean(g.claim().number_voided_at), g.audits.filter((a) => a.action === "triumph_number_void").length], ["skipped NOT_FACTORED", true, 1],
+			"§10 FAILS ON A GIVE-UP THAT KEEPS ITS NUMBER: a claim holding a number whose mark went: skipped, the number voided once");
+
 		// A load changed after its submission: one notice, nothing sent again.
 		const s = world({ env: LIVE });
 		s.queue();
@@ -655,6 +675,10 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 		page.queue();
 		await page.make().tick();
 		eq(say(page.claim()), "needs_attention PROTECTED_VALUE", "§11 FAILS WITHOUT THE PAGE'S CHECK: the invoice page holding a protected value: stopped before anything is staged");
+		const far = world({ env: DRY, extraInvoiceText: [`${"made-up filler ".repeat(300)}Ref ${DENY}`] });
+		far.queue();
+		await far.make().tick();
+		eq(say(far.claim()), "needs_attention PROTECTED_VALUE", "§11 FAILS ON A CHECK THAT READS ONLY THE FIRST 4,000 CHARACTERS: a protected value far down the page: stopped");
 		const name = world({ env: DRY, debtor: `Example Broker ${DENY}` });
 		name.queue();
 		await name.make().tick();
