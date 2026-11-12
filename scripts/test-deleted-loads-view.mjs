@@ -28,7 +28,8 @@
 //      and in §5's confirm, and the reason goes with the request (the 10-22
 //      Restore decision).
 //   §7 the dashboard banner (HiddenLoadsBanner.vue), mounted, and the dashboard
-//      (DashboardView.vue) mounted for a Super Admin and a Dispatcher.
+//      (DashboardView.vue) mounted for a Super Admin and a Dispatcher; its Driver
+//      Performance tab only for a Super Admin, and only once its read answers.
 //   §8 wiring, from source: the rate-con modal, New Job and the Data Manager ask
 //      through withDeletedLoadChoice() and render the choice for a Super Admin
 //      only; the notice opens the dashboard; the notice type matches the server's.
@@ -803,9 +804,20 @@ if (bannerOk) {
 }
 
 const DASH = factory('client/src/views/DashboardView.vue')
-async function mountDashboard(role) {
+// The Driver Performance tab's libs as shipped; absent on an older tree, which doesn't import them.
+const clientLib = async (name) => (exists('client', 'src', 'lib', name) ? import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', name)).href) : {})
+const PERF_LIB = await clientLib('driverPerformance.js')
+const PERF_ADMIN_LIB = await clientLib('driverPerformanceAdmin.js')
+// probeStatus: what the Driver Performance tab's read answers (404 is its switch off).
+async function mountDashboard(role, { probeStatus = 404 } = {}) {
   const BannerStub = Vue.defineComponent({ name: 'HiddenLoadsBanner', props: { hiddenLoads: Array }, setup: (props) => () => Vue.h('x-hidden-banner', { count: (props.hiddenLoads || []).length }) })
   const store = { data: { hiddenLoads: HIDDEN_LIST, kpis: null }, kpis: null, revenue: {}, unassignedJobs: [], activeJobs: [], completedJobs: [], fleet: [], drivers: [], offUntil: null, headers: [], completedHeaders: [], timestamp: null, refresh: async () => {} }
+  const api = { gets: [] }
+  api.get = async (url) => {
+    api.gets.push(url)
+    if (probeStatus !== 200) throw Object.assign(new Error('made-up refusal'), { status: probeStatus })
+    return { drivers: [], notOnBoard: [] }
+  }
   const Comp = DASH({
     'vue-router': { useRoute: () => ({ query: {}, path: '/dashboard' }), useRouter: () => ({ replace() {}, push() {} }) },
     '../stores/dashboard': { useDashboardStore: () => store },
@@ -829,9 +841,14 @@ async function mountDashboard(role) {
     '../components/dashboard/FleetTab.vue': { default: stub('x-fleet') },
     '../components/dashboard/CompletedLoadsTab.vue': { default: stub('x-completed') },
     '../components/dashboard/HiddenLoadsBanner.vue': { default: BannerStub },
+    '../composables/useApi': { useApi: () => api },
+    '../lib/driverPerformance': PERF_LIB,
+    '../lib/driverPerformanceAdmin': PERF_ADMIN_LIB,
+    '../components/dashboard/DriverPerformanceAdminTab.vue': { default: stub('x-performance') },
   })
   const m = mountInMemory(Comp)
   await drain()
+  m.api = api
   return m
 }
 let dashOk = false
@@ -844,6 +861,27 @@ if (dashOk) {
   for (const role of ['Dispatcher', 'Driver', 'Investor', 'Admin']) {
     const m = await mountDashboard(role)
     eq(`§7 ${role}: no banner in the page, even with hidden loads in the answer`, !!m.find((n) => n.tag === 'x-hidden-banner'), false)
+  }
+  // The Driver Performance tab: a Super Admin's, shown only once its read answers.
+  const tabKeys = (m) => m.findAll((n) => n.tag === 'x-tab').map((n) => n.props.value)
+  const perfTrigger = (m) => m.find((n) => n.tag === 'x-tab' && n.props.value === 'performance')
+  {
+    const m = await mountDashboard('Super Admin', { probeStatus: 200 })
+    eq('§7 a Super Admin whose Driver Performance read answers: the tab, last, after Fleet & Drivers, with no count, and its panel',
+      [tabKeys(m), perfTrigger(m) && m.text(perfTrigger(m)), !!m.find((n) => n.tag === 'x-badge', perfTrigger(m)), !!m.find((n) => n.tag === 'x-performance'), m.api.gets],
+      [['jobBoard', 'activeLoads', 'completed', 'fleet', 'performance'], 'Driver Performance', false, true, ['/api/admin/driver-performance/weeks']])
+    const panel = m.find((n) => n.tag === 'x-performance')
+    if (panel && typeof panel.props.onGone === 'function') panel.props.onGone()
+    await drain()
+    eq('§7 ...and the server\'s "gone" from the panel takes the tab and the panel away', [tabKeys(m).includes('performance'), !!m.find((n) => n.tag === 'x-performance')], [false, false])
+  }
+  for (const [status, says] of [[404, 'its switch off (404)'], [403, 'a refusal (403)'], [503, 'a read that fails (503)']]) {
+    const m = await mountDashboard('Super Admin', { probeStatus: status })
+    eq(`§7 a Super Admin, ${says}: no Driver Performance tab and no panel`, [tabKeys(m).includes('performance'), !!m.find((n) => n.tag === 'x-performance'), m.api.gets.length], [false, false, 1])
+  }
+  for (const role of ['Dispatcher', 'Driver', 'Investor']) {
+    const m = await mountDashboard(role, { probeStatus: 200 })
+    eq(`§7 ${role}: no Driver Performance tab, and nothing asked`, [tabKeys(m).includes('performance'), m.api.gets], [false, []])
   }
 }
 
