@@ -55,3 +55,215 @@ export function deletedLoadsErrorText(err) {
   if (err?.status === 403) return 'Only a Super Admin can see deleted loads.'
   return 'The deleted loads could not be loaded. Try again in a moment.'
 }
+
+// ---------------------------------------------------------------- restoring
+// DELETED_LOAD_RESTORE_ENABLED. The server decides every restore and refuses in
+// its own words; these only show its answers. The type matches the server's
+// (lib/deleted-load-restore.js NOTICE_TYPE).
+export const HIDDEN_LOAD_NOTICE_TYPE = 'load-hidden-by-delete'
+
+// May this role restore a deleted load? The server's role gate is the real control.
+export function canRestoreDeletedLoads(role) {
+  return role === DELETED_LOADS_ROLE
+}
+
+// The list answer turns Restore on only while the server's switch is on.
+export function restoreIsOn(res) {
+  return res?.restore?.enabled === true
+}
+
+export function restoreUrl(id) {
+  return `/api/admin/deleted-loads/${encodeURIComponent(String(id))}/restore`
+}
+
+// The confirm before a restore: the load, who deleted it and when, and each
+// month with whether it is closed (the server refuses a closed one).
+export function restoreConfirm(load, deletedText) {
+  const id = String(load?.loadId || '').trim() || '—'
+  const by = String(load?.deletedBy || '').trim()
+  const months = deletedLoadMonths(load)
+  const lines = [`Deleted ${deletedText || '—'}${by ? ` by ${by}` : ''}.`]
+  if (months.length) for (const m of months) lines.push(`${m.label}: ${m.closed ? 'closed' : 'open'}`)
+  else lines.push('Month: not known')
+  if (months.length && deletedLoadMonthsNote(load)) lines[lines.length - 1] += ' (from the delete record)'
+  lines.push("Restoring puts it back on the dashboard and in its month's figures.")
+  return { title: `Restore load ${id}?`, message: lines.join('\n') }
+}
+
+// The reason a restore or a "Create it as new" needs (the 10-22 Restore decision): the server's limits, checked
+// on the trimmed text. The server cleans it and refuses an email or phone in its own words.
+export const RESTORE_REASON_MIN = 3
+export const RESTORE_REASON_MAX = 500
+export function restoreReasonReady(text) {
+  if (typeof text !== 'string') return false
+  const n = text.trim().length
+  return n >= RESTORE_REASON_MIN && n <= RESTORE_REASON_MAX
+}
+
+// The restore route's refusals, which carry their own words.
+const RESTORE_CODES = new Set(['NOT_DELETED', 'NO_SHEET_ROW', 'PERIOD_FINALIZED', 'PERIOD_UNRESOLVED', 'PERIOD_LOCK_UNREADABLE',
+  'SHEET_UNREADABLE', 'DELETED_LOAD_ID_INVALID', 'RESTORE_MODE_INVALID', 'RESTORE_FAILED', 'RESTORE_REASON_REQUIRED', 'CONTACT_NOT_ALLOWED',
+  'DELETED_ROWS_PRESENT'])
+export function restoreErrorText(err) {
+  if (RESTORE_CODES.has(err?.code || '') && err?.message) return err.message
+  if (err?.status === 403) return 'Only a Super Admin can restore a deleted load.'
+  if (err?.status === 0) return 'No answer from the server. Reload the list to see whether the load was restored.'
+  return 'The load could not be restored. Try again in a moment.'
+}
+
+// After a restore: restored, its old delete cleared, or one delete of two undone.
+export function restoreDoneText(answer, loadId) {
+  const id = answer?.restored?.loadId || loadId || ''
+  if (Number.isInteger(answer?.remaining) && answer.remaining > 0) {
+    return `This delete of load ${id} is undone, but another delete of the same load still hides it. Restore that one too.`
+  }
+  return answer?.mode === 'create_new' ? `Load ${id}'s old delete is cleared; its row counts as a new load.` : `Load ${id} is restored.`
+}
+
+// A create the server refused because an old delete names its Load ID, with the
+// choice it sends a Super Admin; null for anything else (a Dispatcher's carries none).
+export function deletedLoadChoiceOf(err) {
+  return err && err.code === 'LOAD_ID_DELETED' && err.data && Number.isInteger(err.data.tombstoneId) ? err.data : null
+}
+
+const EVIDENCE_TEXT = {
+  deleted_with_no_row: 'it was deleted when no row held its Load ID',
+  created_by_rate_con: 'a rate con created this Load ID after the delete',
+  created_in_sheet_row: 'New Job or the Data Manager added this Load ID after the delete',
+  created_by_n8n: 'the email workflow added this Load ID after the delete',
+  row_changed: 'its row changed after the delete',
+  row_in_other_month: "a row with this Load ID books into a month its delete didn't name",
+}
+export function hiddenEvidenceText(evidence) {
+  const parts = (Array.isArray(evidence) ? evidence : []).map((e) => EVIDENCE_TEXT[e]).filter(Boolean)
+  return parts.length ? `Why it shows: ${parts.join('; ')}.` : ''
+}
+
+// Sheet row numbers as the server sent them: "row 4", "rows 2 and 4", "rows 2, 4 and 6"; '' with none.
+function rowNumbers(v) {
+  return Array.isArray(v) ? v.filter((n) => Number.isInteger(n)) : []
+}
+function rowsText(rows) {
+  if (!rows.length) return ''
+  if (rows.length === 1) return `row ${rows[0]}`
+  return `rows ${rows.slice(0, -1).join(', ')} and ${rows[rows.length - 1]}`
+}
+const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1)
+
+// Each month a restore would bring back, open or closed, as the list's confirm shows them; "Month: not known" when
+// the server named none.
+function monthLinesOf(c) {
+  const months = deletedLoadMonths(c)
+  if (!months.length) return ['Month: not known']
+  const lines = months.map((m) => `${m.label}: ${m.closed ? 'closed' : 'open'}`)
+  if (deletedLoadMonthsNote(c)) lines[lines.length - 1] += ' (from the delete record)'
+  return lines
+}
+
+// The words of the choice: who deleted the load and when, what each choice does, or why it is off, and under
+// Restore the months it would change. `review`: from the dashboard banner, where the rows are named.
+export function deletedLoadChoiceView(choice, deletedText, { review = false } = {}) {
+  const c = choice || {}
+  const id = String(c.loadId || '').trim() || '—'
+  const by = String(c.deletedBy || '').trim()
+  const row = Number.isInteger(c.sheetRow) ? c.sheetRow : null
+  const rows = rowNumbers(c.rows)
+  const newRows = rowNumbers(c.newRows)
+  const ownRows = rowNumbers(c.ownRows)
+  const restoreOff = c.canRestore !== true
+  const createOff = c.canCreateNew !== true
+  const many = (list) => list.length > 1
+  let restoreNote = "Its Job Tracking row is gone, so there's nothing to restore."
+  if (!restoreOff && review) {
+    restoreNote = rows.length
+      ? `Brings the deleted load back: ${rowsText(rows)} count${many(rows) ? '' : 's'} again.`
+      : 'Brings the deleted load back: every row with this Load ID counts again.'
+  } else if (!restoreOff) {
+    restoreNote = `Brings the deleted load back${row ? ` (row ${row})` : ''} and creates nothing new.`
+  }
+  const count = Number.isInteger(c.deleteCount) ? c.deleteCount : 1
+  let createNote
+  if (review && createOff) {
+    createNote = ownRows.length
+      ? `${capital(rowsText(ownRows))} may be this load's ${many(ownRows) ? 'rows' : 'row'} from before its delete: restore it instead, or remove ${many(ownRows) ? 'those rows' : 'that row'} first.`
+      : "This load can't be created as new here."
+  } else if (review) {
+    createNote = newRows.length
+      ? `Clears the old delete, so ${rowsText(newRows)} count${many(newRows) ? '' : 's'} as a new load.`
+      : 'Clears the old delete, so its row counts as a new load.'
+  } else if (createOff) {
+    createNote = row ? `Row ${row} still holds this load: restore it instead, or remove that row first.` : "This load can't be created as new here."
+  } else {
+    createNote = count > 1 ? `Clears all ${count} old deletes of this Load ID and creates this load.` : 'Clears the old delete and creates this load.'
+  }
+  let reviewLine = "Its row is on the sheet, but it doesn't count while that delete stands."
+  if (rows.length) reviewLine = `${capital(rowsText(rows))} ${many(rows) ? 'have' : 'has'} this Load ID, but ${many(rows) ? "they don't" : "it doesn't"} count while that delete stands.`
+  return {
+    title: `Load ${id} was deleted`,
+    message: `Deleted ${deletedText || '—'}${by ? ` by ${by}` : ''}. ${review ? reviewLine : 'Choose what to do with this Load ID.'}`,
+    why: hiddenEvidenceText(c.evidence),
+    restoreOff,
+    restoreNote,
+    monthLines: restoreOff ? [] : monthLinesOf(c),
+    createOff,
+    createNote,
+  }
+}
+
+// A refusal of the reason typed in the choice (the server names the field): the choice is asked again with its words.
+function reasonRefusalOf(err) {
+  return !!err && (err.code === 'RESTORE_REASON_REQUIRED' || err.code === 'CONTACT_NOT_ALLOWED') && err.data?.field === 'reason'
+}
+
+// A create sent again as the Super Admin chooses: send(choice) performs it; ask(choice, note) shows the choice and
+// resolves { action: 'restored', answer }, { action: 'create_new', reason } or null. "Create it as new" re-sends the
+// newest delete's id, the number of deletes shown (the server clears them all) and the reason. A refusal with no
+// choice, or no one to ask, is thrown as it came; at most three sends.
+export async function withDeletedLoadChoice(send, ask) {
+  let choice = null
+  let offered = null
+  for (let round = 0; ; round++) {
+    try {
+      return await send(choice)
+    } catch (err) {
+      const fresh = deletedLoadChoiceOf(err)
+      const again = !fresh && choice && offered && reasonRefusalOf(err)
+      if ((!fresh && !again) || typeof ask !== 'function' || round >= 2) throw err
+      if (fresh) offered = fresh
+      const answer = await ask(offered, round ? err.message || '' : '')
+      if (!answer) return { deletedLoadDeclined: true }
+      if (answer.action === 'restored') return { deletedLoadRestored: true, answer: answer.answer, loadId: offered.loadId }
+      choice = { action: 'create_new', id: offered.tombstoneId, count: offered.deleteCount, reason: answer.reason }
+    }
+  }
+}
+
+// ------------------------------------------------- the dashboard banner (add-on 3)
+// GET /api/dashboard's hiddenLoads (a Super Admin's only), anything malformed left out.
+export function hiddenLoadsOf(data) {
+  return (Array.isArray(data?.hiddenLoads) ? data.hiddenLoads : []).filter((h) => h && Number.isInteger(h.tombstoneId))
+}
+
+export function hiddenLoadText(h, deletedText) {
+  const by = String(h?.deletedBy || '').trim()
+  const row = Number.isInteger(h?.sheetRow) ? `, row ${h.sheetRow},` : ''
+  return `Load ${String(h?.loadId || '').trim() || '—'}${row} is hidden by an earlier delete (deleted${by ? ` by ${by}` : ''}${deletedText ? ` on ${deletedText}` : ''}).`
+}
+
+// The banner's Review: the same choice, as the server sent it (which choices are open, the rows, the months).
+export function hiddenLoadChoice(h) {
+  return {
+    loadId: h.loadId,
+    tombstoneId: h.tombstoneId,
+    deletedBy: h.deletedBy,
+    deletedAt: h.deletedAt,
+    sheetRow: Number.isInteger(h.sheetRow) ? h.sheetRow : null,
+    canRestore: h.canRestore === true,
+    canCreateNew: h.canCreateNew === true,
+    rows: rowNumbers(h.rows),
+    newRows: rowNumbers(h.newRows),
+    ownRows: rowNumbers(h.ownRows),
+    months: Array.isArray(h.months) ? h.months : [],
+    evidence: Array.isArray(h.evidence) ? h.evidence : [],
+  }
+}

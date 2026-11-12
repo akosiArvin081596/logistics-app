@@ -71,10 +71,15 @@ export const useSheetsStore = defineStore('sheets', {
     },
 
     // `opts.confirmOffDuty`: "Assign anyway" after 409 DRIVER_OFF_DUTY (R11).
+    // `opts.deletedLoadChoice`: a Super Admin's "Create it as new" after 409 LOAD_ID_DELETED.
     async addRow(values, opts = {}) {
       const result = await api.post(
         `/api/data?sheet=${encodeURIComponent(this.currentSheet)}`,
-        { values, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) }
+        {
+          values,
+          ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}),
+          ...(opts.deletedLoadChoice ? { deletedLoadChoice: opts.deletedLoadChoice } : {}),
+        }
       )
       await this.loadData()
       return result
