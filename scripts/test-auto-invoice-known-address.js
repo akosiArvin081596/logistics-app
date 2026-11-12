@@ -1143,8 +1143,8 @@ const refusalOf = (args) => (typeof rules.knownAddressRefusal === "function" ? r
 			eq([w.claim(sentId).changed_fields, ledger.getSendStop(w.db)], ["", null], `§11 ${label}: no change is read on it, and sending isn't stopped`);
 			eq(pressed(deployed, sentId), [false, 409, "INVOICE_ALREADY_SENT"], `§11 ${label}: a person's Draft Invoice on it stays refused`);
 			eq([w.notices, w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'auto_invoice_recipient_held'").get().n], [[], 0], `§11 ${label}: nothing already held raises a notice or an audit row at the deploy`);
-			// The hold notices' marks, and (hold one load) the breaker's list and the alert emails' outbox.
-			eq(Object.keys(ledger.getMeta(w.db)).filter((k) => k.startsWith("held_notice") || k === "held_loads" || k.startsWith("alert_")), [], `§11 ${label}: no meta row is written at the deploy`);
+			// The hold notices' marks, and (hold one load) the alert emails' outbox.
+			eq(Object.keys(ledger.getMeta(w.db)).filter((k) => k.startsWith("held_notice") || k.startsWith("alert_")), [], `§11 ${label}: no meta row is written at the deploy`);
 		}
 		eq(Object.keys(rules.fingerprint(rules.loadFacts({ row: { "Load ID": ID, Email: AGENT }, cols: rules.jobColumns(["Load ID", "Email"]), knownAddressOn: false }))), ["completed", "live", "paymentCents", "brokerEmail", "trailer", "podIds", "rateConIds"], "§11 a sent claim's fingerprint reads no new field, so no load reads as changed");
 		// A table from before the deploy gets the one column the settings' count reads, empty, on every

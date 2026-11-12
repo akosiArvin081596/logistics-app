@@ -1683,6 +1683,28 @@ async function main() {
 		await turn();
 		eq([rm.claim("LD-TEST-1120").changed_fields, rm.alerts.length, rm.actions("auto_invoice_load_changed").length], ["removed", 1, 1], "§12 ...a later check: nothing more");
 
+		// Holds never stop sending: three sent loads changed, held at the watch, and the next driver's
+		// Delivered is sent as it is.
+		const mh = makeWorld();
+		const mhj = await mh.started({ alertTo: "alerts@example.test" });
+		const heldIds = ["LD-TEST-1130", "LD-TEST-1131", "LD-TEST-1132"];
+		for (const id of heldIds) {
+			mh.ready(id);
+			tap(mh, mhj, id);
+			await drained(mh, `§12 ${id} sent`);
+		}
+		for (const id of heldIds) mh.setRow(id, { "  Payment  ": "$1,300.00" });
+		mh.now += 5 * MIN;
+		if (typeof mhj.watch === "function") mhj.watch();
+		await until(() => heldIds.every((id) => mh.claim(id).changed_fields === "payment") || typeof mhj.watch !== "function", "§12 three held at the watch");
+		await turn();
+		mh.ready("LD-TEST-1133");
+		tap(mh, mhj, "LD-TEST-1133");
+		await drained(mh, "§12 the next load after three holds");
+		eq([heldIds.map((id) => mh.claim(id).changed_fields), stopReason(mh), mh.smtp.length, mh.appends.length, mh.claim("LD-TEST-1133").delivery || ""],
+			[["payment", "payment", "payment"], null, 4, 0, "send"],
+			"§12 FAILS ON THE OLD CODE: three sent loads held at the watch: each flagged on its own, no stop, and the next driver's Delivered is sent");
+
 		// A person's draft closes an open claim at the read.
 		const h = makeWorld();
 		const hj = await h.started();

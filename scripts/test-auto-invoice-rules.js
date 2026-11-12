@@ -375,7 +375,7 @@ if (typeof R.classifyChange !== "function" || typeof R.sentChange !== "function"
 	eq(check({ onSheet: false, completed: false, live: false }).gone, true, "§9 ...with no note, a row gone is still only gone");
 	ok(!/\d{3,}|@/.test(JSON.stringify([pod.words, pay.hold, gone.words])), "§9 the words carry no amount and no address");
 	eq(R.HOLD_FIELDS, ["status", "removed", "payment", "brokerEmail", "rateCons"], "§9 the fields that can hold, by name: pods and trailer only ever log");
-	eq([R.HELD_LOADS_STOP, R.HELD_LOADS_WINDOW_MS], [3, 24 * HOUR], "§9 the breaker: 3 different loads within 24 hours");
+	eq(["HELD_LOADS_STOP", "HELD_LOADS_WINDOW_MS"].filter((name) => name in R), [], "§9 FAILS ON THE OLD CODE: no count of held loads, and no window for one: holds never stop sending");
 
 	// The kill switch, read as knownAddressEnabled() reads: on unless it says off.
 	eq([undefined, "", "true", "on", "typo", " false ", "FALSE", "0", "no", "off"].map((v) => R.holdOneLoadEnabled({ AUTO_INVOICE_HOLD_ONE_LOAD: v })),

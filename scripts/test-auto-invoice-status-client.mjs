@@ -394,11 +394,12 @@ section('§9  invoices the job sent (AUTO_INVOICE_SEND_ENABLED): never "check it
   const stopped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'SMTP_REFUSED' } })
   ok(stopped && stopped.canStop === false && /stopped/.test(stopped.text) && /refused an invoice email/.test(stopped.text) && /Only the server/.test(stopped.text),
     '§9 stopped: why, and no button (only the server resumes)')
-  // The breaker (AUTO_INVOICE_HOLD_ONE_LOAD): its own reason, on both sides.
-  ok(Object.hasOwn(S.AUTO_INVOICE_STOP_WORDS || {}, 'TOO_MANY_HELD') && Boolean(sendRules && sendRules.STOP_REASONS.includes('TOO_MANY_HELD')), '§9 FAILS ON THE OLD CODE: TOO_MANY_HELD is a stop reason on both sides')
-  const tripped = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'TOO_MANY_HELD' } })
-  eq(tripped && tripped.text, "Automatic sending is stopped. 3 loads changed after their invoices were sent within a day, or that count couldn't be read, so sending stopped in case something bigger is wrong. Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.",
-    '§9 FAILS ON THE OLD CODE: the breaker\'s stop says why, in its words')
+  // Holds never stop sending (AUTO_INVOICE_HOLD_ONE_LOAD): no stop reason counts held loads, on either side.
+  ok(!Object.hasOwn(S.AUTO_INVOICE_STOP_WORDS || {}, 'TOO_MANY_HELD') && Boolean(sendRules) && !sendRules.STOP_REASONS.includes('TOO_MANY_HELD'),
+    '§9 FAILS ON THE OLD CODE: no stop reason counts held loads, on either side')
+  const unknown = sendState({ domains: ['example-broker.test'], stopped: { at: '2026-10-20T14:00:00.000Z', reason: 'TOO_MANY_HELD' } })
+  eq(unknown && unknown.text, 'Automatic sending is stopped. Invoices are drafted in Gmail for a person to send. Only the server can turn sending back on.',
+    '§9 FAILS ON THE OLD CODE: a stop whose reason has no words here reads as stopped, with no reason given')
   const stopTag = (/<button[^>]*@click="stopAutoSend"[^>]*>/.exec(TAB) || [''])[0]
   ok(/v-if="autoSendView\.canStop"/.test(stopTag) && /:disabled="autoSendStopping"/.test(stopTag), '§9 FAILS ON THE OLD CODE: the dialog\'s Stop button shows only while sending can be stopped')
   const stopSrc = liftFn(TAB, 'stopAutoSend', { async: true })
