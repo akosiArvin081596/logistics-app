@@ -191,6 +191,20 @@ if (gate) {
     ok('§4 a later stopped live fix keeps the earlier stop', !!stillStopped && stillStopped.stoppedSince === NOW - 1000 && gate.recordGate({ ...stillStopped, nowMs: NOW + 2 * MIN }).state === 'parked')
     ok('§4 no fix: no motion (unknown, allowed)', eldMotion(null, polled, NOW) === null && same(gate.recordGate({ fix: null, stoppedSince: null, nowMs: NOW }), { allowed: true, state: 'unknown' }))
     ok('§4 a phone GPS fix is never the basis', eldMotion({ speed: 30, timestamp: new Date(NOW).toISOString(), source: 'phone' }, polled, NOW) === polled)
+    // GET /api/driver/position saying, in so many words, that the fixes don't show a stop.
+    const noStop = { speed: 0, timestamp: new Date(NOW - 4000).toISOString(), lastPingAge: 4000, stoppedSinceMs: null }
+    const carried = eldMotion(noStop, polled, NOW)
+    ok('§4 a truck read as parked, then the route sends no stopped time: stopping, the earlier stop not carried', !!carried && carried.stoppedSince === null && same(gate.recordGate({ ...carried, nowMs: NOW }), { allowed: false, state: 'stopping' }))
+    const alone = eldMotion(noStop, null, NOW)
+    ok('§4 ...and the same with nothing read before', !!alone && alone.stoppedSince === null && gate.recordGate({ ...alone, nowMs: NOW }).state === 'stopping')
+    const later = eldMotion({ ...noStop, timestamp: new Date(NOW + 5 * MIN - 4000).toISOString() }, carried, NOW + 5 * MIN)
+    ok('§4 ...and however long it goes on: no wait runs out on its own', !!later && gate.recordGate({ ...later, nowMs: NOW + 5 * MIN }).state === 'stopping')
+    const settled = eldMotion({ speed: 0, timestamp: new Date(NOW + 5 * MIN - 4000).toISOString(), lastPingAge: 4000, stoppedSinceMs: NOW + 2 * MIN }, later, NOW + 5 * MIN)
+    ok('§4 ...until the route sends a stopped time again', !!settled && gate.recordGate({ ...settled, nowMs: NOW + 5 * MIN }).state === 'parked')
+    const liveAfter = eldMotion({ speed: 0, timestamp: new Date(NOW - 1000).toISOString() }, carried, NOW)
+    ok('§4 a live fix after it starts its own wait, as any first stopped fix', !!liveAfter && liveAfter.stoppedSince === NOW - 1000 && gate.recordGate({ ...liveAfter, nowMs: NOW }).state === 'stopping')
+    const movingNull = eldMotion({ speed: 20, timestamp: new Date(NOW - 4000).toISOString(), lastPingAge: 4000, stoppedSinceMs: null }, polled, NOW)
+    ok('§4 a moving fix with its usual null still reads moving', !!movingNull && gate.recordGate({ ...movingNull, nowMs: NOW }).state === 'moving')
   } else ok('§4 voiceNoteGate.js exports eldMotion()', false)
 }
 
