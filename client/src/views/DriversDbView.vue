@@ -48,6 +48,8 @@
         @availability-changed="store.load({ quiet: true })"
       />
     </template>
+
+    <DriverNoticesSection v-if="auth.isSuperAdmin" />
   </div>
 </template>
 
@@ -60,6 +62,7 @@ import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddDriverForm from '../components/drivers-db/AddDriverForm.vue'
 import DriverTable from '../components/drivers-db/DriverTable.vue'
+import DriverNoticesSection from '../components/drivers-db/DriverNoticesSection.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import { usePagination } from '../composables/usePagination'

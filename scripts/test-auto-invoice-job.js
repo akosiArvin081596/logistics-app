@@ -3125,7 +3125,7 @@ async function sendSections() {
 	for (const [label, from, to, opts, pinned] of [
 		["the press's late check blind to the job's send", "\tif (reissue !== true && autoClaimSent(db, k)) return refusal(\"INVOICE_SENT_MEANWHILE\");\n", "", {}, (x) => x.press === "INVOICE_SENT_MEANWHILE"],
 		["a confirmed re-issue refused late", "if (reissue !== true && autoClaimSent(db, k))", "if (autoClaimSent(db, k))", { reissue: true }, (x) => x.press === "ok"],
-		["draftBegin() dropping the re-issue", "const r = lateChecks(db, k, { confirmed, reissue, nowIso });", "const r = lateChecks(db, k, { confirmed, nowIso });", { reissue: true }, (x) => x.press === "ok"],
+		["draftBegin() dropping the re-issue", "const r = lateChecks(db, k, { confirmed, reissue, printedAssignment, nowIso });", "const r = lateChecks(db, k, { confirmed, printedAssignment, nowIso });", { reissue: true }, (x) => x.press === "ok"],
 	]) {
 		const lib = mutantModule(FACTORING_FILE, from, to);
 		ok(lib, `§24 MUTANT ${label}: applied to lib/factoring-store.js once`);
@@ -3135,7 +3135,7 @@ async function sendSections() {
 		ok(real && !mutated, `§24 MUTANT ${label}: caught`);
 	}
 	const ROUTES_FILE = path.join(ROOT, "lib", "factoring-routes.js");
-	const routesMutant = fs.existsSync(ROUTES_FILE) ? mutantModule(ROUTES_FILE, "path, confirmed, reissue, actorId", "path, confirmed, actorId") : null;
+	const routesMutant = fs.existsSync(ROUTES_FILE) ? mutantModule(ROUTES_FILE, "path, confirmed, reissue, printedAssignment, actorId", "path, confirmed, printedAssignment, actorId") : null;
 	ok(routesMutant, "§24 MUTANT the route's hand-off dropping the re-issue: applied to lib/factoring-routes.js once");
 	if (routesMutant && routesLibReal) {
 		const real = await SEND_CASES.jobFirst(jobLib, { reissue: true, routesLib: routesLibReal });
