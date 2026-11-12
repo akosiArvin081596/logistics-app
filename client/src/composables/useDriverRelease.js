@@ -27,6 +27,9 @@ export function useDriverRelease(o) {
   const answer = ref(null)
   const tour = ref(null)
   const saving = ref(false)
+  // "Show me first" on a truck read as moving: the note says when, inside itself, since the app's own
+  // short message sits under the note's overlay.
+  const whenParked = ref(false)
   // The one look is over, however it went. The contacts prompt waits for this, so it can't take the look.
   const lookDone = ref(false)
 
@@ -39,7 +42,7 @@ export function useDriverRelease(o) {
     const mode = entries.value.length ? 'notes' : answer.value?.tourOffered ? 'offer' : ''
     if (!mode) return null
     const steps = tourStepsFor(entries.value.flatMap((e) => e.tour), o.has())
-    return { mode, entries: entries.value, canShowMe: steps.length > 0, saving: saving.value }
+    return { mode, entries: entries.value, canShowMe: steps.length > 0, saving: saving.value, whenParked: whenParked.value }
   })
   const onScreen = computed(() => !!noteView.value || tourOpen.value)
 
@@ -80,14 +83,17 @@ export function useDriverRelease(o) {
   }
 
   // Their own tap. On a truck the app last read as moving it says when and starts nothing, and a tour
-  // under way stays up until they end it: nothing here changes the page by itself.
-  function startTour(stepIds, doneIds) {
+  // under way stays up until they end it: nothing here changes the page by itself. From the note, the
+  // note itself says it.
+  function startTour(stepIds, doneIds, fromNote = false) {
     if (o.motionAllowed() !== true) {
-      o.toast(WORDS.whenParked)
+      if (fromNote) whenParked.value = true
+      else o.toast(WORDS.whenParked)
       return
     }
     const steps = tourStepsFor(stepIds, o.has())
     if (!steps.length) return
+    whenParked.value = false
     tour.value = { steps, index: 0, doneIds, from: o.place() }
     o.showStep(steps[0])
   }
@@ -100,8 +106,8 @@ export function useDriverRelease(o) {
   }
 
   // The only answer to a note. It waits for the save and can't be sent twice. Saved, the note closes and
-  // a first-time driver's offer can follow; not saved, it closes with a line, nothing is marked, and they
-  // go on to their loads: it comes back at a later sign-in.
+  // a first-time driver's offer can follow; not saved, it closes with a line, the app marks nothing, and
+  // they go on to their loads. If the server got the tap before the answer was lost, it still counts.
   async function noteAcknowledge() {
     const shown = entries.value.map((e) => e.id)
     if (saving.value || !shown.length) return
@@ -126,7 +132,7 @@ export function useDriverRelease(o) {
   function noteShowMe() {
     if (saving.value) return
     const shown = entries.value
-    startTour(shown.flatMap((e) => e.tour), shown.map((e) => e.id))
+    startTour(shown.flatMap((e) => e.tour), shown.map((e) => e.id), true)
   }
 
   function offerSkip() {

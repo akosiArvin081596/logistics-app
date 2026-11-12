@@ -22,9 +22,9 @@
 //   E   a page left open past its session: this feature does nothing to it, and it isn't sent to the
 //       login page. The next load finds the login page, and the note comes after that sign-in
 //   V   a moving truck's open page never changes: nothing opens as a truck stops, and a note or a tour
-//       that's up stays up as a truck moves. A sign-in on a moving truck still shows the note. Show me
-//       first and the Kit's button on a truck read as moving say when and start nothing, and the note
-//       stays
+//       that's up stays up as a truck moves. A sign-in on a moving truck still shows the note. On a truck
+//       read as moving, Show me first says when in the note's own line, on top of everything, and the
+//       Kit's button in the app's short message; neither starts anything, and the note stays
 //   F   a failed read at sign-in (503, no answer, an unreadable body): no note, no Kit button, and they
 //       stay in the app; a later load has the Kit button and nothing new; the next sign-in has the note
 //   P   a failed Performance answer at sign-in: no note and no mark; a good one later opens nothing; the
@@ -707,12 +707,25 @@ async function movingRun(browser, size) {
     const read = await nextTruckRead(upMoving.state)
     const stays = await noteUp(upMoving.page)
     await press(upMoving.page.locator(testid('release-show-me')).first(), size)
-    const says = await appears(upMoving.page, `text=${WORDS.whenParked}`, 3000)
+    // The line is the note's own, and nothing is drawn over it: the app's short message would sit under
+    // the note's overlay.
+    const lineSel = `${testid('release-dialog')} ${testid('release-when-parked')}`
+    const says = await appears(upMoving.page, lineSel, 3000)
+    const lineWords = await text(upMoving.page, lineSel)
+    await upMoving.page.locator(lineSel).first().scrollIntoViewIfNeeded().catch(() => {})
+    const onTop = await upMoving.page.evaluate((sel) => {
+      const el = document.querySelector(sel)
+      if (!el) return false
+      const r = el.getBoundingClientRect()
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      return !!hit && (hit === el || el.contains(hit))
+    }, lineSel)
+    const toastSays = (await toastText(upMoving.page)) === WORDS.whenParked
     const tours = await upMoving.page.locator(testid('tour-card')).count()
     const stillUp = await noteUp(upMoving.page)
-    record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me first then says when, starts nothing, and the note stays', `the note through the next truck read; "${WORDS.whenParked}"; no tour; the note still up; nothing written; no logout`,
-      `shown ${shown}, read ${read}, stays ${stays}, says ${says}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(upMoving.writes))}, logouts ${upMoving.state.calls.logout}`,
-      shown && read && stays === 1 && says && tours === 0 && stillUp === 1 && marksOf(upMoving.writes).length === 0 && upMoving.state.calls.logout === 0)
+    record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me first then says when inside the note, on top, starts nothing, and the note stays', `the note through the next truck read; "${WORDS.whenParked}" as the note's own line, the element at its centre; not in the message under the note; no tour; the note still up; nothing written; no logout`,
+      `shown ${shown}, read ${read}, stays ${stays}, line ${says} "${lineWords}", on top ${onTop}, in the message under it ${toastSays}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(upMoving.writes))}, logouts ${upMoving.state.calls.logout}`,
+      shown && read && stays === 1 && says && lineWords === WORDS.whenParked && onTop && !toastSays && tours === 0 && stillUp === 1 && marksOf(upMoving.writes).length === 0 && upMoving.state.calls.logout === 0)
 
     const confirmed = await acknowledge(upMoving.page, size)
     upMoving.state.moving = false

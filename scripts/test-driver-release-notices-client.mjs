@@ -426,7 +426,7 @@ for (const [label, start, clear] of [
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   const view = w.release.noteView.value
-  eq('what it says', [view.mode, view.canShowMe, view.saving, view.entries[0].title, view.entries[0].lines], ['notes', true, false, 'A title', ['A line.', 'A tab line.']])
+  eq('what it says', [view.mode, view.canShowMe, view.saving, view.whenParked, view.entries[0].title, view.entries[0].lines], ['notes', true, false, false, 'A title', ['A line.', 'A tab line.']])
   eq('it counts as on screen', w.release.onScreen?.value, true)
   await acknowledge(w.release)
   eq('I acknowledge: confirmed, for the entries shown', w.calls.posts, [[ACK_URL, { ids: [ID] }]])
@@ -549,12 +549,34 @@ for (const [label, failure] of [
   eq('...and so does Skip, back to the note', [w.release.tourOpen.value, w.release.noteView.value?.mode], [false, 'notes'])
 }
 {
+  // The app's own short message sits under the note's overlay, so the note says it itself.
   const w = world({ motionAllowed: false })
   w.box.answer = NOTE_ANSWER
   await w.release.check()
+  eq('before the tap, the note says nothing about the truck', w.release.noteView.value?.whenParked, false)
   w.release.noteShowMe()
   await tick()
-  eq('Show me first on a truck read as moving: it says when, starts nothing, and the note stays', [w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value?.mode, w.calls.posts], [[WORDS.whenParked], false, 'notes', []])
+  eq('Show me first on a truck read as moving: the note itself says when, nothing goes to the message under it, no tour starts, and the note stays',
+    [w.release.noteView.value?.whenParked, w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value?.mode, w.calls.posts], [true, [], false, 'notes', []])
+  w.s.motionAllowed = true
+  await tick()
+  eq('...the line stays as it was when the truck parks: an open page changes only on a tap', w.release.noteView.value?.whenParked, true)
+  w.release.noteShowMe()
+  await tick()
+  eq('...tapped again once parked, the tour starts', [w.release.tourOpen.value, w.calls.steps], [true, ['loads']])
+  w.release.tourSkip()
+  await tick()
+  eq('...and the note after it says nothing about the truck', [w.release.noteView.value?.mode, w.release.noteView.value?.whenParked], ['notes', false])
+}
+{
+  // Only the entries on screen are confirmed: one the driver can't read waits for the app that shows it.
+  const w = world({ performance: false })
+  const TAB_ONLY = { id: '2026-02-01-tab-only', title: 'Tab only', notes: [{ text: 'Only with the tab.', needs: 'performance' }], tour: ['performance'] }
+  w.box.answer = () => ({ notes: [ENTRY, TAB_ONLY], tourOffered: false })
+  await w.release.check()
+  eq('(the scene) one entry on screen', w.release.noteView.value?.entries.map((e) => e.id), [ID])
+  await acknowledge(w.release)
+  eq('I acknowledge confirms the entries shown and no others', w.calls.posts, [[ACK_URL, { ids: [ID] }]])
 }
 {
   const w = world()
@@ -719,6 +741,7 @@ const at = (needle) => notesPart.indexOf(needle)
 ok('the line sits right above I acknowledge, and Show me first comes after it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-acknowledge"') && at('data-testid="release-acknowledge"') < at('release-show-me'))
 ok('I acknowledge is always there; Show me first only with steps to show', !/v-if[^>]*release-acknowledge"/.test(notesPart) && /v-if="view\.canShowMe" type="button" class="drn-second" data-testid="release-show-me"/.test(notesPart))
 ok('while it saves, I acknowledge shows it is working and both buttons wait', /:loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(notesPart) && /:disabled="view\.saving" @click="emit\('show-me'\)"/.test(notesPart))
+ok('on a truck read as moving, the note says when in its own line, by the buttons, after Show me first', /<p v-if="view\.whenParked" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > at('release-show-me'))
 eq('the note says which answer was tapped, and those only', (NOTE.match(/defineEmits\(\[([^\]]*)\]\)/) || [])[1], "'acknowledge', 'show-me', 'take-tour', 'skip-offer'")
 for (const id of ['tour-card', 'tour-label', 'tour-next', 'tour-skip', 'tour-shield']) ok(`the tour has ${id}`, TOUR.includes(`data-testid="${id}"`))
 ok("every button is a 44 px tap", /\.tour-skip, \.tour-next, \.tour-videos \{ min-height: 44px/.test(TOUR) && /\.drn-primary \{ min-height: 44px/.test(NOTE) && /\.drn-second \{[\s\S]{0,80}min-height: 44px/.test(NOTE))

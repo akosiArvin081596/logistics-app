@@ -24,8 +24,10 @@
  *       refused and never stored; another driver's rows neither read nor written, whatever the body
  *       says; /seen takes the tour offer's row alone; the budget is per account; the answer is never
  *       kept by a cache and holds no name
- *   §9  A FIRST-TIME DRIVER: no history, one tour offer that waits until answered and never comes
- *       back, and nothing confirmed for them; an existing driver gets the notes and no offer
+ *   §9  A FIRST-TIME DRIVER, with no sign-in on record on an account made on or after the day sign-ins
+ *       began to be recorded: no history, one tour offer that waits until answered and never comes
+ *       back, and nothing confirmed for them; an existing driver gets the notes and no offer, an older
+ *       account with no sign-in on record included, and only its own tap marks one
  *   §10 THE TOUR writes only its own tour_done_at, and only theirs: a release's tour answers no
  *       note, the whole app tour answers the offer; a repeat keeps the first time; the columns, and
  *       a table made before the confirmation gets its column
@@ -188,6 +190,11 @@ function makeDb() {
 	add.run(7, "driver-temp", HASH, "Driver", "Taylor Temp", "taylor@example.test", "Taylor Temp", 1, null);
 	add.run(8, "driver-pct", HASH, "Driver", "Morgan Percent", "morgan@example.test", "Morgan Percent", 0, STAMPED);
 	add.run(9, "desk-new", HASH, "Dispatcher", "", "desknew@example.test", "Avery Newdesk", 0, null);
+	// Made before sign-ins were recorded: '' since the column came, whether or not it was used.
+	add.run(12, "driver-old", HASH, "Driver", "Quinn Before", "quinn@example.test", "Quinn Before", 0, "");
+	db.prepare("UPDATE users SET created_at = ? WHERE id = 12").run("2026-05-04 10:00:00");
+	// The new accounts, made after it.
+	db.prepare("UPDATE users SET created_at = ? WHERE id IN (6, 7, 9)").run("2026-10-20 09:00:00");
 	return db;
 }
 
@@ -370,6 +377,20 @@ async function main() {
 	eq("...and the tour's row", releases.isMarkableId(releases.APP_TOUR_ROW, TWO), true);
 	eq("...and nothing they made up", releases.isMarkableId("anything-else", TWO), false);
 	eq("...not even a built-in property's name", releases.isMarkableId("__proto__", TWO), false);
+	const firstTime = (account) => (typeof releases.isFirstTimeDriver === "function" ? releases.isFirstTimeDriver(account) : "no rule");
+	eq("first-time is told from the day sign-ins began to be recorded", releases.SIGN_INS_RECORDED_FROM, "2026-08-14");
+	ok("...which is when server.js's migration added the column", /ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''/.test(SRC));
+	for (const [label, account, want] of [
+		["no sign-in on record, made after that day", { last_login_at: "", created_at: "2026-10-20 09:00:00" }, true],
+		["...or null, made on the day itself", { last_login_at: null, created_at: "2026-08-14 00:00:01" }, true],
+		["...or with an ISO creation stamp", { last_login_at: "", created_at: "2026-09-01T10:00:00.000Z" }, true],
+		["no sign-in on record, made the day before: it may have used the app", { last_login_at: "", created_at: "2026-08-13 23:59:59" }, false],
+		["no sign-in on record and no creation stamp: the safe side, an existing driver", { last_login_at: "", created_at: null }, false],
+		["...or an empty one", { last_login_at: "", created_at: "" }, false],
+		["...or one that isn't a date", { last_login_at: "", created_at: "yesterday" }, false],
+		["a sign-in on record", { last_login_at: STAMPED, created_at: "2026-10-20 09:00:00" }, false],
+		["no account", null, false],
+	]) eq(`first-time: ${label}`, firstTime(account), want);
 	const listed = (id, list) => (typeof releases.isListedRelease === "function" ? releases.isListedRelease(id, list) : "no rule");
 	eq("a driver confirms a listed notice", listed(R1.id, TWO), true);
 	eq("...and not the tour's row, which is no notice", listed(releases.APP_TOUR_ROW, TWO), false);
@@ -633,6 +654,18 @@ async function main() {
 		eq("with the switch off, a first sign-in writes nothing", seenRows(w.db, 6), []);
 		await stopWorld(w);
 	}
+	{
+		// An account made before sign-ins were recorded, with none on record since: it may have used the
+		// app, so it's an existing driver, asked like anyone and marked only by its own tap.
+		const w = await startWorld({ list: TWO });
+		const c = await signIn(w, "driver-old");
+		eq("an older account with no sign-in on record: its first sign-in after the deploy marks nothing", seenRows(w.db, 12), []);
+		const read = await call(w, "GET", STATE, { cookie: c });
+		eq("...it's asked every notice, and offered no first-time tour", [(read.body.notes || []).map((n) => n.id), read.body.tourOffered], [[R2.id, R1.id], false]);
+		await call(w, "POST", ACK, { cookie: c, body: { ids: [R2.id] } });
+		eq("...and only its own tap marks one", seenRows(w.db, 12).map((r) => [r.release_id, r.acknowledged_at !== null]), [[R2.id, true]]);
+		await stopWorld(w);
+	}
 
 	// ── §10 ─────────────────────────────────────────────────────────────────
 	section("10 the tour");
@@ -766,6 +799,7 @@ async function main() {
 		const add = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email, full_name, company_name, must_change_password, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, ?)");
 		add.run(10, "driver-unnamed", HASH, "Driver", "", "unnamed@example.test", "", STAMPED);
 		add.run(11, "driver-later", HASH, "Driver", "Sam Later", "sam@example.test", "Sam Later", null);
+		db.prepare("UPDATE users SET created_at = ? WHERE id = 11").run("2026-11-01 08:00:00");
 		const w = await startWorld({ db, list: TWO, now: () => clock });
 		await call(w, "POST", ACK, { cookie: await signIn(w, "driver-a"), body: { ids: [R2.id] } });
 		await call(w, "POST", ACK, { cookie: await signIn(w, "driver-pct"), body: { ids: [R2.id, R1.id] } });
@@ -784,6 +818,7 @@ async function main() {
 			["Casey Example", "acknowledged", AT],
 			["Jordan Newhire", "started-after", null],
 			["Morgan Percent", "acknowledged", AT],
+			["Quinn Before", "not-yet", null],
 			["Riley Sample", "not-yet", null],
 			["Sam Later", "started-after", null],
 		]);
@@ -792,11 +827,14 @@ async function main() {
 			["Casey Example", "not-yet", null],
 			["Jordan Newhire", "started-after", null],
 			["Morgan Percent", "acknowledged", AT],
+			["Quinn Before", "not-yet", null],
 			["Riley Sample", "not-yet", null],
 			["Sam Later", "started-after", null],
 		]);
 		eq("a finished tour is no confirmation: Riley is not yet", (notices[0].drivers.find((x) => x.name === "Riley Sample") || {}).state, "not-yet");
-		eq("the count leaves out those never asked", notices.map((n) => [n.acknowledged, n.asked]), [[2, 4], [1, 4]]);
+		eq("an account made before sign-ins were recorded, with none since, is asked: Quinn is not yet", (notices[0].drivers.find((x) => x.name === "Quinn Before") || {}).state, "not-yet");
+		eq("...while one made after, with none yet, starts after the notice: Sam", (notices[0].drivers.find((x) => x.name === "Sam Later") || {}).state, "started-after");
+		eq("the count leaves out those never asked", notices.map((n) => [n.acknowledged, n.asked]), [[2, 5], [1, 5]]);
 		eq("a notice holds these fields and no others", Object.keys(notices[0]).sort(), ["acknowledged", "asked", "date", "drivers", "id", "title"]);
 		eq("a driver's row holds a name, a state and a time, and nothing else", [...new Set(notices.flatMap((n) => n.drivers.map((x) => Object.keys(x).sort().join(","))))], ["at,name,state"]);
 		eq("no login, email, account id or other role in it", /@example\.test|driver-|"username"|"user_id"|"email"|Desk Example|Root Example|Backer Example|password/.test(r.text), false);

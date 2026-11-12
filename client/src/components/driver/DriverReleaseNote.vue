@@ -29,6 +29,7 @@
           v-if="view.canShowMe" type="button" class="drn-second" data-testid="release-show-me"
           :disabled="view.saving" @click="emit('show-me')"
         >{{ WORDS.showMeFirst }}</button>
+        <p v-if="view.whenParked" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">{{ WORDS.whenParked }}</p>
       </template>
       <template v-else>
         <h2 id="drn-title" class="drn-title" data-testid="release-heading">{{ WORDS.offerHeading }}</h2>
@@ -67,4 +68,5 @@ const emit = defineEmits(['acknowledge', 'show-me', 'take-tour', 'skip-offer'])
 .drn-second:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; border-radius: 8px; }
 .drn-second:disabled { opacity: 0.5; cursor: default; }
 .drn-ack-line { color: #0f172a; font-weight: 600; }
+.drn-when-parked { margin: 0.6rem 0 0; color: #92400e; font-weight: 600; }
 </style>
