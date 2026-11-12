@@ -104,7 +104,8 @@ const isFile = (p) => {
 const canon = (v) => JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x)
 	? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
 
-// --name or --name=value only; an argument's value is never echoed (it may be a sheet ID or a path).
+// --name or --name=value only. A refusal never echoes a sheet ID; a refused --db or --values-json
+// names the path it was given, since a person needs to see which file was wrong.
 function parseArgs(argv) {
 	const out = {};
 	for (const a of argv) {
