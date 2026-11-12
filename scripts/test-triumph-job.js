@@ -49,7 +49,16 @@ const triumphBatch = require(path.join(ROOT, "lib", "triumph-batch.js"));
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const { createRedactor } = require(path.join(ROOT, "lib", "chr-events.js"));
 const { startFakeTriumph, fingerprintOfKey } = require(path.join(ROOT, "scripts", "e2e", "fake-triumph.cjs"));
-const { utils: { generateKeyPairSync } } = require(path.join(ROOT, "node_modules", "ssh2"));
+const { utils: { generateKeyPairSync: sshKeyPair, parseKey } } = require(path.join(ROOT, "node_modules", "ssh2"));
+// ssh2's own ed25519 keys are now and then ones its parser refuses (a few in a thousand): a
+// made-up key is made again until it parses, so no run turns on that chance.
+function generateKeyPairSync(type, opts) {
+	for (let i = 0; i < 50; i++) {
+		const k = sshKeyPair(type, opts);
+		if (!(parseKey(k.private) instanceof Error)) return k;
+	}
+	throw new Error(`no usable made-up ${type} key in 50 tries`);
+}
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 const { PDFDocument, StandardFonts } = require(path.join(ROOT, "node_modules", "pdf-lib"));
 
