@@ -236,10 +236,11 @@ async function startWorld({ db = makeDb(), enabled = true, list = releases.RELEA
 	const passThrough = (req, res, next) => next();
 	const liveSessionIds = (sids) => new Set(sids.filter((sid) => db.prepare("SELECT 1 FROM sessions WHERE sid = ?").get(sid)));
 	const purgeUserSessions = new Function("db", "disconnectUserSockets", `${PURGE_SRC}\nreturn purgeUserSessions;`)(db, noSockets);
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", LOGIN_SRC)(
-		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, "America/New_York", signIn);
+	// APP_TIMEZONE_ERA is {} with no switch of the business clock set (server.js).
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "signIn", LOGIN_SRC)(
+		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, "America/New_York", {}, signIn);
 	new Function("app", "disconnectSessionSockets", "signIn", LOGOUT_SRC)(app, noSockets, signIn);
-	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets",
 		"notifyPasswordChanged", "passwordRules", CHANGE_SRC)(
 		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, () => {}, liveSessionIds, noSockets,

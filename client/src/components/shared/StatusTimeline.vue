@@ -100,7 +100,7 @@ function pillStyle(status) {
   return { color: c.fg, background: c.bg }
 }
 
-// The app zone (APP_TIMEZONE, US Eastern), always, with its label ("Aug 4,
+// The app zone (APP_TIMEZONE), always, with its label ("Aug 4,
 // 2026, 9:05 AM EDT") — never the viewer's.
 //
 // These values ARE true instants (the endpoint serves

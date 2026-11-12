@@ -3,7 +3,7 @@
 // A cell shaped like a date or a time goes through fmtSheetMoment(), so the
 // detail shows it the way the rest of the page does: a bare sheet stamp as its
 // wall clock in 12 h, never converted ("10/12/2026 0:17:10" -> "10/12/2026,
-// 12:17 AM"); a value carrying its zone in US Eastern with EDT/EST; a date-only
+// 12:17 AM"); a value carrying its zone in the app zone with its label; a date-only
 // value as the same calendar day. Two stored shapes are put into one of those
 // first: an email Date header saved in a cell ("Date: Wed, 28 Jan 2026
 // 10:52:46 -0500", an instant by its offset) and a stamp with a two-digit year

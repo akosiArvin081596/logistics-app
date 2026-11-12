@@ -326,8 +326,9 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	app.use(buildFlagRefresh(db));
 	const stampLastLogin = buildStamp(db);
 	const passThrough = (req, res, next) => next();
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", loginSrc)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", buildSignIn(db, signIn));
+	// APP_TIMEZONE_ERA: no time zone switch set, as server.js builds it then.
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "signIn", loginSrc)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", {}, buildSignIn(db, signIn));
 	// GET /api/admin/sign-ins on the real role guard, when this server.js has it.
 	if (SIGN_INS_SRC) {
 		const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
@@ -335,12 +336,12 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	}
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js) and the
 	// voice-note flag (its features).
-	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
 	if (withSetup) {
 		// The setup's reserved-name check is scripts/test-messages-staff-only.js's
 		// subject; here no name is reserved.
-		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "findDriverNameClash", SETUP_SRC)(
-			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", () => null);
+		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "findDriverNameClash", SETUP_SRC)(
+			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", {}, () => null);
 	}
 	const requireAuth = buildRequireAuth();
 	app.get("/api/whoami", requireAuth, (req, res) => res.json({ id: req.session.user.id }));

@@ -176,7 +176,7 @@ watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
 
 // `messages.timestamp` is a true instant (server writes new Date().toISOString()),
 // so left alone it renders in whatever zone the phone is set to. The carrier
-// runs on the app zone's time (APP_TIMEZONE, US Eastern), so pin to it and
+// runs on the app zone's time (APP_TIMEZONE), so pin to it and
 // ALWAYS show the zone — a driver on the road in Phoenix or Denver must be able
 // to see that "8:05 AM" is dispatch's clock, not theirs. Dropping the label is
 // what makes it a lie.

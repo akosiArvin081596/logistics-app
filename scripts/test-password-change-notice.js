@@ -322,8 +322,9 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "", limi
 	const signIn = signInLib
 		? signInLib.createSignIn({ db, logAudit, logAuditRefusal: () => 0, networkEvidence: () => ({}), auditEnabled: false, uniqueEmail: false })
 		: null;
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", SRCS.login)(
-		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, TZ, signIn);
+	// APP_TIMEZONE_ERA: no time zone switch set, as server.js builds it then.
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "signIn", SRCS.login)(
+		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, TZ, {}, signIn);
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds",
 		"disconnectSessionSockets", "notifyPasswordChanged", "passwordRules", SRCS.change)(
 		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, logAudit, liveSessionIds, noSockets, notifyPasswordChanged, passwordRules);

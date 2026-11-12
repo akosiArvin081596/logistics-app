@@ -641,7 +641,7 @@ async function fixStale(issue) {
 }
 
 // GPS ping first/last seen on the stale-location scan. `driver_locations.timestamp`
-// is a true instant (ISO-Z). The app zone (APP_TIMEZONE, US Eastern) + a visible
+// is a true instant (ISO-Z). The app zone (APP_TIMEZONE) + a visible
 // zone label, so the window an admin is about to retag is stated in business
 // time.
 function formatDate(ts) {

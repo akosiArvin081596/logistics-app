@@ -47,6 +47,7 @@ const { closure } = require("./lib/server-lift");
 const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, DatabaseRefusal } = require("./lib/app-database");
+const { zoneWords } = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "system: settlement-grace-days script";
@@ -132,7 +133,8 @@ function plan(db, api, { days }, { today = null } = {}) {
 	const todayKey = today || api.appTodayKey();
 	const current = todayKey.slice(0, 7);
 	const months = [shiftMonth(current, -1), current, shiftMonth(current, 1)].filter((m) => m === current || m > current || !api.periodWriteLocked(m));
-	const zone = api.APP_TIMEZONE === "America/New_York" ? "ET" : api.APP_TIMEZONE;
+	const words = zoneWords(api.APP_TIMEZONE);
+	const zone = words ? words.short : api.APP_TIMEZONE;
 	const closes = months.map((m) => {
 		const oldEnd = api.graceEndsAt(m, oldDays);
 		const newEnd = api.graceEndsAt(m, newDays);

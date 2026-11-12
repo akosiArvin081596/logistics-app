@@ -717,7 +717,7 @@ function exportCsv() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  // The app zone's day (APP_TIMEZONE, US Eastern): the business day rather than
+  // The app zone's day (APP_TIMEZONE): the business day rather than
   // the exporter's. toISOString() would be UTC (tomorrow's date after 8pm
   // Eastern), and the browser's own day is whoever ran it — so a file pulled at
   // 09:00 Manila was already stamped a day ahead in US terms. Two people share
@@ -741,7 +741,7 @@ function dueText(v) {
 }
 // Both of these take a true instant — submitted_at / approved_at / paid_at /
 // adjusted_at / deleted_at are all written server-side as new Date().toISOString().
-// The app zone (APP_TIMEZONE, US Eastern), never the viewer's zone.
+// The app zone (APP_TIMEZONE), never the viewer's zone.
 //
 // The pin matters MORE for the date-only formatter than for the datetime one:
 // an instant late in the Eastern evening rendered date-only in a zone ahead of

@@ -398,12 +398,13 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 			`${SRCS.signInRefusal}\n${SRCS.signInAudit}\n${SRCS.signInNotice}\nreturn disabledSignInRefusal;`)(
 			audit.logAuditRefusal, signIn, adminEmail, lib.noticeWindow(60 * 60 * 1000), lib, TZ, sendEmail, invoiceEmailHtml)
 		: () => ({ error: "server.js has no disabledSignInRefusal()" });
+	// APP_TIMEZONE_ERA: no time zone switch set, as server.js builds it then.
 	mount(SRCS.login, {
 		app, loginLimiter: passThrough, db, bcrypt: hookedBcrypt, stampLastLogin, disconnectSessionSockets: loginDisconnect,
-		APP_TIMEZONE: TZ, disabledSignInRefusal, signIn,
+		APP_TIMEZONE: TZ, APP_TIMEZONE_ERA: {}, disabledSignInRefusal, signIn,
 	});
 	mount(SRCS.logout, { app, disconnectSessionSockets: helpers.disconnectSessionSockets, signIn });
-	mount(SRCS.session, { app, APP_TIMEZONE: TZ, MESSAGE_VOICE_NOTES_ENABLED: false });
+	mount(SRCS.session, { app, APP_TIMEZONE: TZ, APP_TIMEZONE_ERA: {}, MESSAGE_VOICE_NOTES_ENABLED: false });
 	mount(SRCS.change, {
 		app, requireAuth, changePasswordLimiter: passThrough, db, bcrypt: hookedBcrypt, purgeUserSessions, logAudit: audit.logAudit,
 		liveSessionIds: helpers.liveSessionIds, disconnectSessionSockets: helpers.disconnectSessionSockets,

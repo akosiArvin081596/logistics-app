@@ -92,7 +92,7 @@ function buildReport({ dbPath, since }) {
 		};
 		const switchOnReady = counts.format === 0 && counts.review === 0;
 		const zone = appTime.appTimeZone();
-		const when = (iso) => appTime.dateTextInZone(new Date(iso), zone, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+		const when = (iso) => appTime.dateTextInZone(new Date(iso), appTime.businessZoneAt(new Date(iso), zone), { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 		const lines = [
 			`Person edit hold, shadow report since ${when(sinceIso)}${present ? "" : " (no load_cell_writes table yet)"}`,
 			`would_hold ${counts.would_hold} (to review ${counts.review}), held ${counts.held}, format ${counts.format}`,

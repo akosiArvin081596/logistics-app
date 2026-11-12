@@ -176,10 +176,11 @@ function openReadOnly(dbPath) {
 	return db;
 }
 
-// A SQLite UTC stamp ("YYYY-MM-DD HH:MM:SS", or ISO with Z) as a business day.
+// A SQLite UTC stamp ("YYYY-MM-DD HH:MM:SS", or ISO with Z) as a business day, on
+// the clock in force then.
 function stampDay(stamp, zone) {
 	const ms = Date.parse(stampIso(stamp));
-	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), zone) : "";
+	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), zone && appTime.businessZoneAt(ms, zone)) : "";
 }
 
 function suffix(id) {

@@ -294,7 +294,7 @@ function avatarClass(role) {
 
 // `user.CreatedAt` is a true instant \u2014 /api/users emits it as ISO-Z
 // (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Its day in the app zone
-// (APP_TIMEZONE, US Eastern), so the "Created" column shows the business
+// (APP_TIMEZONE), so the "Created" column shows the business
 // calendar day rather than the viewer's; a date-only value has no zone label (B14).
 function formatDate(dateStr) {
   if (!dateStr) return '\u2014'

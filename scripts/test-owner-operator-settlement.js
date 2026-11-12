@@ -801,7 +801,7 @@ function mutant(id, label, edits, run) {
 	mutant("M8", "an unpaid-charge escrow use adding a charge line", [['if (use.purpose === "deductible") {', "if (true) {"]], casesSection);
 	mutant("M9", "rounding by Math.round (half up, not away from zero)", [["const q = Math.floor((2 * Math.abs(num) + den) / (2 * den));\n\treturn num < 0 ? -q : q;", "return Math.round(num / den);"]], roundingSection);
 	mutant("M10", "a truck week charged twice", [["if (cents > 0 && !charged.has(ref))", "if (cents > 0)"]], (c, L) => { truckSection(c, L); appendixBSection(c, L); });
-	mutant("M11", "a Friday-evening stamp read on the UTC day", [["return appTime.dayInZone(new Date(ms), timeZone || appTime.appTimeZone());", "return new Date(ms).toISOString().slice(0, 10);"]], (c, L) => { daysSection(c, L); firstWeekSection(c, L); });
+	mutant("M11", "a Friday-evening stamp read on the UTC day", [["return appTime.businessDayOf(new Date(ms), timeZone || appTime.appTimeZone());", "return new Date(ms).toISOString().slice(0, 10);"]], (c, L) => { daysSection(c, L); firstWeekSection(c, L); });
 	mutant("M12", "the first week anchored on his earliest settlement's own week", [['const chain = String(earliestSettlement.firstWeekStart || "").trim();', 'const chain = String(earliestSettlement.weekStart || "").trim();']],
 		(c, L) => { firstWeekSection(c, L); chainSection(c, L); });
 	mutant("M13", "the no-pay check limited to new loads", [["l && onThis(l, settled.loads, eligibleLoad) &&", "l && !settled.loads.has(l.ref) && eligibleLoad(l) &&"]], casesSection);

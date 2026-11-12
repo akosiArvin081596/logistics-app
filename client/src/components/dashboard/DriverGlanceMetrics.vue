@@ -81,7 +81,7 @@ const fuelLow = computed(() => fuel.value != null && fuel.value <= 25)
 
 // Absolute arrival time — "Jul 25, 3:40 PM EDT". Prefer the epoch stamped when
 // the data arrived (stable) over recomputing from etaMinutes each render.
-// The app-zone rule (APP_TIMEZONE, US Eastern, zone label always shown) lives in
+// The app-zone rule (APP_TIMEZONE, zone label always shown) lives in
 // fmtArrivalClock, shared with the tracking map's info window and the route
 // map's arrival line so the three cannot drift apart. The label is load-bearing
 // here — this string is read aloud to brokers and customers, and `.glance-eta`

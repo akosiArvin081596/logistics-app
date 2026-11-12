@@ -414,7 +414,7 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 			const spy = { createEldActivityRollup: (deps) => { calls.push(deps); return real.createEldActivityRollup(deps); } };
 			const env = value === undefined ? {} : { ELD_ACTIVITY_DAILY_ENABLED: value };
 			const fn = new Function("process", "require", "db", "buildEldDeviceResolver", "buildDriverAtResolver", "getWeekRange",
-				"findDirectoryRowForDriver", "ELD_STATE_MILES_BOUNDARY_MS", "startsJob", "setTimeout", "setInterval",
+				"findDirectoryRowForDriver", "ELD_STATE_MILES_BOUNDARY_MS", "startsJob", "setTimeout", "setInterval", "appTime", "APP_TIMEZONE",
 				`${block}\nreturn { ELD_ACTIVITY_DAILY_ENABLED, eldActivityRollup };`);
 			const out = fn(
 				{ env },
@@ -422,12 +422,14 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 				db,
 				() => "device resolver",
 				(ids) => ["driver resolver", ids],
-				(ms) => ({ weekStart: `week of ${ms}` }),
+				(day) => ({ weekStart: `week of ${day}` }),
 				(name) => (name === "Pat Example" ? { id: 7, driver_name: name } : null),
 				BOUNDARY_MS,
 				(name) => { timers.push(["job", name]); return jobsStart; },
 				(f, ms) => timers.push(["timeout", ms]),
 				(f, ms) => timers.push(["interval", ms]),
+				require("../lib/app-time"),
+				"America/New_York",
 			);
 			const table = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'eld_activity_daily'").get();
 			return { out, calls, timers, table };
@@ -447,7 +449,9 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 			[true, 1, true, started]);
 		const d = on.calls[0];
 		eq("...wired to server.js's device and driver resolvers", [d.deviceResolver(), d.driverResolver([1, 2])], ["device resolver", ["driver resolver", [1, 2]]]);
-		eq("...its business week (getWeekRange) and the miles rollups' purge boundary", [d.weekStartOf(1234), d.boundaryMs], ["week of 1234", BOUNDARY_MS]);
+		// 11:30 PM EST on Friday Nov 13: the week of the ping's business day, not of its UTC day.
+		eq("...its business week (getWeekRange of the ping's business day) and the miles rollups' purge boundary",
+			[d.weekStartOf(Date.parse("2026-11-14T04:30:00Z")), d.boundaryMs], ["week of 2026-11-13", BOUNDARY_MS]);
 		eq("...and the directory row's id for a name, 0 for none", [d.driverIdFor("Pat Example"), d.driverIdFor("Nobody Here")], [7, 0]);
 		const replica = boot(undefined, false);
 		eq("in a replica (no jobs start): the table, no timer", [replica.table, replica.timers], [true, [["job", "ELD activity daily rollup"]]]);

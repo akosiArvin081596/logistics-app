@@ -216,7 +216,7 @@ function recorderHealth({ history, sinceMs, appZone, driverOf, loadsOf, points }
 			const fixMs = Number(r.fix_ms) > 0 ? Number(r.fix_ms) : null;
 			inc(out.zones, tz || "(empty)");
 			const moment = r.src === "geofence" && fixMs ? fixMs : r.ms;
-			if (tz && eldMiles.localDayInTz(moment, tz) !== appTime.dayInZone(moment, appZone)) out.shipperDayNotAppDay++;
+			if (tz && eldMiles.localDayInTz(moment, tz) !== appTime.dayInZone(moment, appZone && appTime.businessZoneAt(moment, appZone))) out.shipperDayNotAppDay++;
 			// The recorder takes the zone from the mapped point, else a fresh fix, else
 			// the app's zone: no point now and no position on the row means the last.
 			const pt = points.get(key);

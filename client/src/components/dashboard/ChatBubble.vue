@@ -52,7 +52,7 @@ const photoAlt = computed(() => chatPhotoAlt(props.msg))
 
 const isSent = computed(() => isStaffMessage(props.msg.from, props.party))
 
-// Message times render in the app zone (APP_TIMEZONE, US Eastern) with a
+// Message times render in the app zone (APP_TIMEZONE) with a
 // visible zone label, never the viewer's zone. `msg.timestamp` is a true instant
 // (ISO-Z from the server), so without the pin the same bubble reads 8:05 AM in
 // the US and 9:05 PM in Manila on one shared super_admin login.

@@ -339,6 +339,38 @@ console.log("F11: approval");
 	check(hash(db) === h, "F11 nothing written");
 }
 
+// ---------------------------------------------------------------- F13 the switch
+
+// A switch of the business clock to Central at 02:00 UTC on Oct 20: after every
+// made-up instant here and before this run's clock, so each run below is on
+// Central "now" and every rate row predates the switch.
+console.log("F13: after a switch to Central, the rows from before it read as they did");
+{
+	const switchEnv = (name) => {
+		const f = path.join(TMP, `${name}-switch.txt`);
+		fs.writeFileSync(f, "APP_TIMEZONE=America/Chicago\nAPP_TIMEZONE_FROM=2026-10-20T02:00:00Z\n");
+		return f;
+	};
+	// The planned writes, the October table and the V2 listing: every line that names a row or a day.
+	const planned = (out) => out.split("\n").filter((l) => /DRF-\d{8}-\d+|^\s*(\.\. )?2026-\d{2}-\d{2}/.test(l)).join("\n");
+	const db = buildFixture("switch");
+	const plan = planFile("switch");
+	const before = dry(db, plan, envFile("switch"));
+	const after = dry(db, plan, switchEnv("switch"));
+	check(after.code === 0, "F13 the dry run with the switch set exits 0", after.out.slice(-600));
+	check(planned(before.out).split("\n").length >= 5 && planned(after.out) === planned(before.out),
+		"F13 ...and plans the same writes, instants and days as before the switch (Oct 1 starts at 04:00 UTC, on Eastern)",
+		`before:\n${planned(before.out)}\nafter:\n${planned(after.out)}`);
+	check(new RegExp(`\\$310\\.00 from ${reEscape(OCT1_ET)} \\(2026-10-01\\)`).test(after.out), "F13 Lee's Oct 1 rate is dated 00:00 Eastern, as it was before the switch");
+	const a = applyRun(db, plan, envFile("switch-apply"));
+	check(a.code === 0, "F13 an apply before the switch exits 0", a.out.slice(-400));
+	const h = hash(db);
+	const again = dry(db, plan, switchEnv("switch-again"));
+	check(again.code === 0 && /Result: already applied\. 0 rows to write/.test(again.out) && (again.out.match(/\[already applied\]/g) || []).length === 5,
+		"F13 after the switch, a dry run reads each row written before it as already applied", again.out.slice(-600));
+	check(hash(db) === h, "F13 nothing written");
+}
+
 // ---------------------------------------------------------------- F12
 
 console.log("F12: #547's rate runners");

@@ -61,6 +61,7 @@ const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, DatabaseRefusal } = require("./lib/app-database");
 const { correctionDayLines } = require("./lib/correction-day-lines");
+const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
 const OPTIONS = ["db", "driver-id", "from", "json"];
@@ -181,8 +182,9 @@ function buildReport(db, api, { driverId, from, today = null }) {
 	const rateOn = (day) => cents(rater.ownRateOn(key, struct.payDaily, day));
 	const history = db.prepare("SELECT id, rate, effective_from, source FROM pay_rate_history WHERE subject = 'driver' AND subject_key = ? ORDER BY effective_from, id").all(key)
 		.map((r) => {
+			// Each row's day on the clock in force at it, as loadPayRateIndex() dates it.
 			const d = new Date(r.effective_from);
-			return { id: r.id, rate: cents(r.rate), day: isNaN(d) ? "" : api.appDay(d), source: r.source };
+			return { id: r.id, rate: cents(r.rate), day: isNaN(d) ? "" : appTime.businessDayOf(d, api.APP_TIMEZONE), source: r.source };
 		});
 	const closedMonths = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period").all().map((r) => r.period);
 

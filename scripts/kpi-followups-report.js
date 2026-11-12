@@ -148,7 +148,7 @@ async function weeklyPart(args) {
 			closedMonths = ["(period_locks not readable)"];
 		}
 		return {
-			part: "weekly", asOfDay, timeZone: k.APP_TIMEZONE, weekRule: kpiCatalog.WEEK_RULE, weeksFrom: from,
+			part: "weekly", asOfDay, timeZone: k.APP_TIMEZONE, weekRule: kpiCatalog.weekRuleText(kpiMetrics.weekCalendar(k.APP_TIMEZONE)), weeksFrom: from,
 			metrics, monthlyUnchanged, approvalsUnchanged,
 			rowsWritten: rows, computeMsOff: offMs, computeMsOn: onMs, computeMsAdded: onMs - offMs, runTimeBoxMs: KPI_RUN_TIME_LIMIT_MS,
 			withheld, weeksCrossingMonthEnd: [...crossing], closedMonthsTouched: closedMonths,

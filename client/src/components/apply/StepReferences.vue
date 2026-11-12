@@ -67,7 +67,7 @@ import { appToday } from '../../utils/datetime'
 import { onMounted } from 'vue'
 const props = defineProps({ form: { type: Object, required: true } })
 onMounted(() => {
-  // The app zone's day (APP_TIMEZONE, US Eastern), not toISOString()'s UTC day:
+  // The app zone's day (APP_TIMEZONE), not toISOString()'s UTC day:
   // this is a legal signature date printed on the PDF, and after 8pm Eastern the
   // UTC day is already tomorrow — a date they did not sign on.
   props.form.signature_date = appToday()
