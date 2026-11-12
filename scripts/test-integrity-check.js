@@ -177,7 +177,7 @@ async function section1() {
 	console.log("§1 checks 1 and 2 (Pickup Appointment blanked, Assigned Date changed)");
 	const db = makeDb();
 	const s0 = jt([
-		{ id: "570698749", pickup: "10/12/2026 08:00", assigned: "10/8/2026, 9:33:24 AM" },
+		{ id: "590000149", pickup: "10/12/2026 08:00", assigned: "10/8/2026, 9:33:24 AM" },
 		{ id: "#L-200", pickup: "10/13/2026", assigned: "" },
 		{ id: "300", pickup: "10/14/2026", assigned: "10/9/2026" },
 	]);
@@ -193,7 +193,7 @@ async function section1() {
 	ok("lastRunAt() reads the last run off the state table", ic.lastRunAt(db) === "2026-10-09T12:00:30.000Z", ic.lastRunAt(db));
 
 	const s1 = jt([
-		{ id: "570698749", pickup: "", assigned: "10/8/2026, 9:33:24 AM" },
+		{ id: "590000149", pickup: "", assigned: "10/8/2026, 9:33:24 AM" },
 		{ id: "#L-200", pickup: "10/13/2026", assigned: "10/9/2026, 7:00:00 AM" },
 		{ id: "300", pickup: "10/14/2026", assigned: "10/10/2026" },
 		{ id: "400", pickup: "", assigned: "" },
@@ -201,21 +201,21 @@ async function section1() {
 	const spy2 = mailSpy();
 	const second = await run(db, s1, { sendEmail: spy2 });
 	const r2 = second.result.report;
-	ok("a Pickup Appointment that went blank is reported", r2.pickupBlanked.length === 1 && r2.pickupBlanked[0].id === "570698749" && r2.pickupBlanked[0].was === "10/12/2026 08:00", r2.pickupBlanked);
+	ok("a Pickup Appointment that went blank is reported", r2.pickupBlanked.length === 1 && r2.pickupBlanked[0].id === "590000149" && r2.pickupBlanked[0].was === "10/12/2026 08:00", r2.pickupBlanked);
 	ok("an Assigned Date that changed is reported, from and to", r2.assignedChanged.length === 1 && r2.assignedChanged[0].id === "300" &&
 		r2.assignedChanged[0].was === "10/9/2026" && r2.assignedChanged[0].assigned === "10/10/2026", r2.assignedChanged);
 	ok("a first Assigned Date (blank before) is not a change", !r2.assignedChanged.some((x) => x.id === "#L-200"));
 	ok("a new load is not a finding", ![...r2.pickupBlanked, ...r2.assignedChanged].some((x) => x.id === "400"));
 	ok("one email for the run", spy2.calls.length === 1);
 	ok("the email names each load and what is wrong",
-		spy2.calls.length === 1 && /570698749/.test(spy2.calls[0].html) && /Pickup Appointment/.test(spy2.calls[0].html) && /300/.test(spy2.calls[0].html) && /10\/9\/2026/.test(spy2.calls[0].html));
+		spy2.calls.length === 1 && /590000149/.test(spy2.calls[0].html) && /Pickup Appointment/.test(spy2.calls[0].html) && /300/.test(spy2.calls[0].html) && /10\/9\/2026/.test(spy2.calls[0].html));
 	ok("first_seen_at is kept, last_seen_at moves", stateRow(db, "300").first_seen_at === "2026-10-09T12:00:30.000Z" && stateRow(db, "300").last_seen_at === "2026-10-10T12:00:30.000Z");
 
 	const s2 = jt([
 		{ id: "#L-200", pickup: "10/13/2026", assigned: "10/9/2026, 7:00:00 AM" },
 		{ id: "300", pickup: "10/14/2026", assigned: "10/10/2026" },
 		{ id: "400", pickup: "", assigned: "" },
-		{ id: "570698749", pickup: "", assigned: "10/8/2026, 9:33:24 AM" },
+		{ id: "590000149", pickup: "", assigned: "10/8/2026, 9:33:24 AM" },
 	]);
 	const spy3 = mailSpy();
 	const third = await run(db, s2, { sendEmail: spy3, now: new Date("2026-10-11T12:00:30Z") });
@@ -223,7 +223,7 @@ async function section1() {
 	const s3 = jt([{ id: "300", pickup: "10/14/2026", assigned: "10/10/2026" }]);
 	const fourth = await run(db, s3, { now: new Date("2026-10-12T12:00:30Z") });
 	ok("a load that left the sheet (archived, deleted) is not a finding", fourth.result.report.findings === 0, fourth.result.report);
-	ok("...and keeps its state row", !!stateRow(db, "570698749"));
+	ok("...and keeps its state row", !!stateRow(db, "590000149"));
 	const s4 = jt([{ id: "300", pickup: "10/14/2026", assigned: "" }]);
 	const fifth = await run(db, s4, { now: new Date("2026-10-13T12:00:30Z") });
 	ok("an Assigned Date cleared after it was set is a change", fifth.result.report.assignedChanged.length === 1 && fifth.result.report.assignedChanged[0].assigned === "", fifth.result.report.assignedChanged);
