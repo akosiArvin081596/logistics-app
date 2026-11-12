@@ -1757,15 +1757,26 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 |---|---|---|
 | DF1-DF10 | 390x844 touch: the load opened, the Fuel section opened, one world each (before pickup, in transit, refuel now, no reading, stale, no tank size, load not mapped, position old and none, extra stops, a run longer than a full tank). | Each world's plain sentences; no working (minus, reserve, MPG, %); the stops and Refresh; DF1's collapsed badge "Add 40 gal"; DF6's header chip "Fuel range: not available"; no sideways scroll; row text at least 14 px; Refresh at least 44 px |
 | DF11 | Route Options opened with the flag on. | No Google gallons; the toll stays |
-| DF12 | The flag off. | Today's panel ("How we know", the reserve line), no block, the badge "Fuel stop needed", Route Options with their gallons |
+| DF12 | The flag off. | Today's panel ("How we know"), no sum under the hero, no block, the badge "Fuel stop needed", Route Options with their gallons |
 | DF1d, DF6d, DF12d | 1280x800. | The block one column, at most 520 px wide; today's panel with the flag off; no sideways scroll |
-| DFC1-DFC6, DFC8 | 390x844 touch, the Loads list: the header chip with miles (flag on and off), no figure (flag on and off), refuel now, a very long name, a failed read. DFC1 taps the chip. | "Fuel range: 225 miles left until empty", "Fuel range: not available", "Refuel now", or no chip on a failed read; whole, on screen and on its own row; Password and Logout on screen and taking a tap; the page starts below the header at the height the header reports; the tap does nothing; no sideways scroll |
+| DFC1-DFC6, DFC8 | 390x844 touch, the Loads list: the header chip with miles (flag on and off), no figure (flag on and off), refuel now, a very long name, a failed read. | "Fuel range: 225 miles left until empty", "Fuel range: not available", "Refuel now", or no chip on a failed read; whole, on screen and on its own row; Password and Logout on screen and taking a tap; the page starts below the header at the height the header reports; no sideways scroll |
 | DFC7, DFC7n, DFC7s | The first fuel answer held back 4 s: 390x844, then 360x800 and 320x568 with the long name. | The header and the page don't move when it arrives |
 | DFC1d, DFC3d | 1280x800. | The same, with the chip on the buttons' row |
+| DFT1-DFT5 | The chip tapped with a load, 390x844 touch: on the road; a newer load queued behind it; only queued loads; the flag off (DFT4, DFT4b on a run that clears, DFT4c at refuel now, DFT4d on a route of 0, DFT4e at refuel now with no fill-ups on record); from Messages. | The right load's page, its Fuel section open and its title in view below the header; no toast; with the flag off, one range figure on the first screen, the badge's the same, and "How we know" with no sentence of figures, only typical and best on its bar |
+| DFT6 | On a load's own page, with another load on the road; then again after shutting the section. | That load's Fuel section opens, and opens again |
+| DFT7-DFT10 | The chip tapped with no load to open: flag on (held past 3 s), flag off, "not available" on both flags, only an offer not yet accepted. | The chip's own line as a toast, on screen; no working; the screen stays |
+| DFT11 | The password dialog over the chip: a tap at the chip's place, then a scripted press on the chip. | No load opens and no toast; once closed, the tap works |
+| DFT12 | The chip's geometry and keyboard. | A labelled button; a 44 px target on a shorter chip, across its width; every point of Password and Logout's rounded shape still theirs; Tab reaches it with a ring; Enter opens the load |
+| DFT13a, DFT13b | The onboarding and failed-load lock screens. | A plain chip; a tap changes nothing |
+| DFT14, DFT15 | A delivered load's page on screen, with a load on the road, then with no other load. | On to the load on the road; with no other load, the toast and the page stays |
+| DFT16, DFT16b | Two loads under way, the newer row at Heading to Shipper: the other In Transit, then the other left At Receiver. | The load In Transit; then the load heading to its shipper |
+| DFT28 | Fuel opened by hand on a load's page; shut, then the chip tapped on that page; then, in a new browser, the chip tapped from the list. Flag off. | The same section text and title badge all three ways; the taps ask no more trip plans or stops than the hand-open |
+| DFT1r, DFT1t | Route Options and a tall instructions card landing 2.5 s late, with `overflow-anchor: none`; then the same after a wheel. | The title holds its place below the header; after the driver's touch, the page isn't pulled back |
+| DFT1d, DFT7d | 1280x800. | A load's Fuel section opens; with no load, the toast |
 | DFO1-DFO6 | Offline shown and cleared at 390, 360 and 320 wide, with a two-word and a very long name. A stand-in for the server's socket lets the build's own socket.io client connect and drop. | The header, the page and the first item don't move at all; the long name's header is the short name's height; Offline, the chip and the buttons whole and on screen |
 | DFO7, DFO8 | The same on a load's own page at 360x800, and at 768x1024 with the long name. | The same |
 | DFM1-DFM3, DFM1d | Messages opened: 390x844 (two names), 320x568 (long name), 1280x800. | At least 85 px between the input bar and the tab bar; input and Send take a tap; the messages at least 100 px tall |
-| DFx | Page errors, console errors and writes over the run. | None, but the browser's line for DF7's 400 |
+| DFx | Page errors, console errors and writes over the run. | None, but the browser's line for the steps' own 400s |
 
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in
 `SHOTS_DIR` (default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Exit 0 only when every row

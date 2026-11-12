@@ -352,8 +352,9 @@ function persistenceSection() {
 			editEmailApplied: true,
 			logAudit: () => {},
 			sanitizeEvidenceText: (v) => String(v),
-			// record()'s option for the button's in-flight row: none here.
+			// record()'s options for the button's in-flight row and the audit line's target: none here.
 			settleInflight: null,
+			auditTarget: "",
 			console: { error: (...a) => persistErrors.push(a.join(" ")) },
 			...scope,
 		};

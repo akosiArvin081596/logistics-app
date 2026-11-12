@@ -259,7 +259,7 @@ POST /api/loads/:loadId/invoice-draft-inflight/resolve · anon@12b84c4b0134 · c
 GET /api/loads/:loadId/invoice-lines · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@a643e8f124cd
 POST /api/loads/:loadId/invoice-lines · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@08b9dc600f1f
 POST /api/loads/:loadId/invoice-lines/:id/void · requireRole("Super Admin")=anon@12b84c4b0134 · brokerInvoiceLinesGate@0d0c12212e84 · inline@62a6db81ae24
-POST /api/loads/:loadId/invoice-preview · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · invoicePreviewLimiter=limiter · inline@f3e8033a7225
+POST /api/loads/:loadId/invoice-preview · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · invoicePreviewLimiter=limiter · inline@b34319682658
 GET /api/loads/:loadId/ratecon.pdf · anon@12b84c4b0134 · listedViewerOnly@6ff1e735ed9c · limiter · anon@2f1af75e396d · (lib mount)
 GET /api/loads/:loadId/status-history · requireAuth@2f5c61384511 · inline@541bcb63afc9
 PUT /api/loads/:loadId/status-override · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@679862b30492
@@ -345,7 +345,7 @@ USE /uploads · requireAuth@2f5c61384511 · inline@2f3241547ecf | after: USE /up
 USE /uploads · requireAuth@2f5c61384511 · uploadMissLimiter@8f0251d68f52 · uploadsPathGuard@f27a7636ef08 | after: USE /uploads/rate-cons
 USE /uploads/rate-cons · requireRole("Super Admin")=anon@12b84c4b0134
 GET ["/api/driver/position","/api/driver/me/position"] · requireRole("Driver", "Super Admin")=anon@12b84c4b0134 · driverPositionLimiter=limiter · inline@a2ed5cbac701
-POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@48462949b651
+POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@1ce42fa36686
 
 [middleware]
 USE / · inline@0b6a9c7a9ce3 | first
