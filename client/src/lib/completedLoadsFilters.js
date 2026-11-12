@@ -1,7 +1,7 @@
 // Completed Loads' two quick filters, Needs Review and Needs attention: one on at
 // a time, and the line the list shows when no row is left. The tab takes both
 // counts over the rows its driver and date filters leave, the same rows a toggle
-// narrows, so a toggle's count is the number of rows it shows.
+// narrows, so with no search typed a toggle's count is the rows it shows.
 //
 // Pure: no Vue, no imports. scripts/test-completed-loads-filters.mjs runs it and
 // the tab mounted.

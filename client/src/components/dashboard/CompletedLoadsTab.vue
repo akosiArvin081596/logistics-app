@@ -3,8 +3,9 @@
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
-        <!-- Needs Review and Needs attention: one on at a time, one look, and
-             each stays while it is on, even at (0), so it can be turned off. -->
+        <!-- Needs Review and Needs attention: one on at a time, one look. Each
+             stays while it is on, even at (0), so it can be turned off; Needs
+             attention goes off with its button when its role gate hides it. -->
         <button
           v-if="needsReviewCount > 0 || needsReviewOnly"
           type="button"
@@ -495,7 +496,7 @@ const exportMatches = computed(() => {
   return pool
 })
 // Both counts over the rows the driver and date filters leave: the same rows a
-// toggle narrows, so a count is the number of rows its toggle shows.
+// toggle narrows, so with no search typed a count is the rows its toggle shows.
 const needsReviewCount = computed(() => countNeedsReview(exportMatches.value))
 const autoAttentionCount = computed(() => (auth.isSuperAdmin ? exportMatches.value.filter(autoInvoiceNeedsAttention).length : 0))
 // One quick filter at a time (lib/completedLoadsFilters.js): pressing one turns the other off.
@@ -564,9 +565,11 @@ const reviewBadgeStyle = {
 // Any filter change re-slices the list, so a carried-over page number can land
 // on a blank page (filter while on page 4 → nothing): resetOn snaps back to page 1.
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(sortedJobs, { tab: 'completed', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly, driverFilter, fromDate, toDate] })
-// The Needs attention toggle re-slices the list like the filters above. Its
-// button stays while it is on, so it is never left on out of sight.
+// The Needs attention toggle re-slices the list like the filters above.
 watch(autoAttentionOnly, () => goTo(1))
+// A count of 0 leaves a toggle on (its button stays). Losing Super Admin in place
+// hides Needs attention and the driver and date bar, so their filters go too.
+watch(() => auth.isSuperAdmin, (yes) => { if (!yes) { autoAttentionOnly.value = false; clearFilters() } })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.

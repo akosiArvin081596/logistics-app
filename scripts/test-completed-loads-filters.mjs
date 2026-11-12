@@ -11,7 +11,9 @@
 //   §4 both toggles show "on" the same way: the same classes, a filled style,
 //      aria-pressed.
 //   §5 a toggle stays on screen while it is on, even at (0), and the empty line
-//      names what is on; a Dispatcher gets Needs Review over every load.
+//      names what is on; a Super Admin who becomes a Dispatcher in place loses
+//      Needs attention's filter and the driver and date picks with their
+//      controls; a Dispatcher gets Needs Review over every load.
 //   §6 mutants on the changed lines, each caught.
 //
 // Made-up rows only. No DOM, no server. Vue comes from this checkout's
@@ -113,13 +115,13 @@ function pagingStub(items, { resetOn = [] } = {}) {
   return { page, pageSize, totalPages, paginatedItems, goTo, setSize() {}, sizes: [] }
 }
 
-function overrides(role, libText) {
+function overrides(role, libText, auth) {
   const o = {
     '../../composables/useLoadboardPaging': { useLoadboardPaging: pagingStub },
     '../../composables/useApi': { useApi: () => ({ get: async () => ({}), post: async () => ({}), put: async () => ({}), del: async () => ({}) }) },
     '../../composables/useToast': { useToast: () => ({ show() {} }) },
     '../../composables/useViewport': { useViewport: () => ({ isMobile: Vue.ref(false) }) },
-    '../../stores/auth': { useAuthStore: () => ({ user: { id: 7, role }, isSuperAdmin: role === 'Super Admin' }) },
+    '../../stores/auth': { useAuthStore: () => auth || ({ user: { id: 7, role }, isSuperAdmin: role === 'Super Admin' }) },
     '../../stores/dashboard': { useDashboardStore: () => ({ data: { autoInvoice: { mode: 'on' } }, refresh: async () => {} }) },
     '@/components/ui/input': stubs(['Input']),
     '@/components/ui/table': stubs(['Table', 'TableHeader', 'TableBody', 'TableRow', 'TableHead', 'TableCell']),
@@ -129,7 +131,7 @@ function overrides(role, libText) {
   return o
 }
 
-async function compileTab(src, { role, libText }) {
+async function compileTab(src, { role, libText, auth }) {
   const dir = path.dirname(path.join(ROOT, TAB_REL))
   const { descriptor } = parse(src, { filename: 'CompletedLoadsTab.vue' })
   let body = compileScript(descriptor, { id: 'CompletedLoadsTab.vue', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } }).content
@@ -145,7 +147,7 @@ async function compileTab(src, { role, libText }) {
   })
   body = body.replace(/^export default\s*/m, 'return ')
   if (/^\s*(import|export)\s/m.test(body)) throw new Error('an import/export this harness cannot map')
-  const o = overrides(role, libText)
+  const o = overrides(role, libText, auth)
   const deps = { vue: Vue }
   for (const spec of specs) {
     if (spec === 'vue') continue
@@ -240,8 +242,8 @@ const poolOf = ({ driver = '', dates = null } = {}) => ORACLE.filter((r) => (!dr
 const ids = (rows) => rows.map((r) => r.id).sort()
 
 // ══ driving the tab ══════════════════════════════════════════════════════════
-async function openTab(T, { role = 'Super Admin', jobs = JOBS } = {}) {
-  const Comp = await compileTab(T.src, { role, libText: T.libText })
+async function openTab(T, { role = 'Super Admin', jobs = JOBS, auth } = {}) {
+  const Comp = await compileTab(T.src, { role, libText: T.libText, auth })
   const m = mountInMemory(Comp, { jobs, headers: HEADERS, active: true })
   await drain()
   return m
@@ -436,6 +438,43 @@ async function tabSuite(T) {
     const m = await openTab(T, { jobs: [] })
     try { eq('§5 no completed loads at all', view(m).empty, 'No completed loads.') } catch (err) { ok(`§5 no loads: runs (${err.message})`, false) } finally { m.unmount() }
   }
+  // The same person's role changing in place (another tab): a Super Admin who
+  // becomes a Dispatcher loses Needs attention and the driver and date bar, and
+  // no filter of theirs may stay on out of sight.
+  {
+    const auth = Vue.reactive({ user: { id: 7, role: 'Super Admin' }, isSuperAdmin: true })
+    const setRole = async (role) => { auth.user.role = role; auth.isSuperAdmin = role === 'Super Admin'; await drain() }
+    const m = await openTab(T, { auth })
+    try {
+      await press(m, 'attention')
+      await setRole('Dispatcher')
+      const v = view(m)
+      eq('§5 Needs attention on, then the same person becomes a Dispatcher: its filter goes off with its button, every load listed',
+        { attention: !!v.attention, rows: v.rowIds, empty: v.empty }, { attention: false, rows: ids(poolOf()), empty: '' })
+      await setRole('Super Admin')
+      const back = view(m)
+      eq('§5 ...and back to Super Admin: Needs attention is back, off, counted over every load',
+        { count: back.attentionCount, on: back.attentionOn, rows: back.rowIds.length }, { count: poolOf().filter((r) => r.attention).length, on: false, rows: poolOf().length })
+    } catch (err) {
+      ok(`§5 a role change with Needs attention on: runs (${err.message})`, false)
+    } finally { m.unmount() }
+  }
+  {
+    const auth = Vue.reactive({ user: { id: 7, role: 'Super Admin' }, isSuperAdmin: true })
+    const m = await openTab(T, { auth })
+    try {
+      await pickDriver(m, D2)
+      await pickDates(m, NOV)
+      auth.user.role = 'Dispatcher'
+      auth.isSuperAdmin = false
+      await drain()
+      const v = view(m)
+      eq('§5 a driver and dates picked, then the same person becomes a Dispatcher: the picks go off with their bar, every load listed',
+        { bar: !!first(m.root, (n) => n.tag === 'select' && n.props.id === 'cl-driver'), rows: v.rowIds }, { bar: false, rows: ids(poolOf()) })
+    } catch (err) {
+      ok(`§5 a role change with a driver and dates picked: runs (${err.message})`, false)
+    } finally { m.unmount() }
+  }
   {
     const m = await openTab(T, { role: 'Dispatcher' })
     try {
@@ -474,6 +513,10 @@ const MUTANTS = [
   ['Needs Review "on" in its own colours', 'tab', ":class=\"{ 'quick-toggle--on': needsReviewOnly }\"", ":class=\"{ 'review-toggle--on': needsReviewOnly }\""],
   ['the "on" style not filled', 'tab', '.quick-toggle--on { border-color: #0f2847; background: #0f2847; color: #fff; }', '.quick-toggle--on { border-color: #0f2847; background: #fff; color: #0f2847; }'],
   ['Needs Review hidden while on at (0)', 'tab', 'v-if="needsReviewCount > 0 || needsReviewOnly"', 'v-if="needsReviewCount > 0"'],
+  ['Needs attention left on when the person stops being a Super Admin', 'tab', 'if (!yes) { autoAttentionOnly.value = false; clearFilters() }', 'if (!yes) { clearFilters() }'],
+  ['the driver and dates left on when the person stops being a Super Admin', 'tab', 'if (!yes) { autoAttentionOnly.value = false; clearFilters() }', 'if (!yes) { autoAttentionOnly.value = false }'],
+  ['Needs attention switched off at a count of 0 again', 'tab', 'watch(autoAttentionOnly, () => goTo(1))', 'watch(autoAttentionOnly, () => goTo(1))\nwatch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })'],
+  ['Needs attention without aria-pressed', 'tab', '\n          :aria-pressed="autoAttentionOnly"', ''],
 ]
 for (const [name, where, from, to] of MUTANTS) {
   const text = where === 'tab' ? TAB : LIB

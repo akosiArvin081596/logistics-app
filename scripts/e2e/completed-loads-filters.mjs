@@ -65,7 +65,7 @@ const D1 = 'Driver QA One'
 const D2 = 'Driver QA Two'
 const D3 = 'Driver QA Three'
 // [Load ID, driver, Completion Date as recorded, needs review (a blank Payment), needs attention (the automatic draft)].
-// No load is both, as in the reported case, so both toggles on together showed nothing.
+// No load is both, so a build that lets both toggles be on at once lists nothing then.
 const FIXTURE = [
   ['QA-1001', D1, '10/05/2026 14:00:00', true, false],
   ['QA-1002', D1, '11/03/2026 09:30:00', true, false],
