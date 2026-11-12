@@ -927,6 +927,11 @@ ok('...says so when it can\'t be read', /RECORD_WORDS\.unreadable/.test(SECTION)
 ok('...prints no raw HTML and keeps nothing in the browser', !/v-html|localStorage|sessionStorage/.test(SECTION))
 ok('...shows each notice\'s title, date, count and rows', ['driver-notice-title', 'driver-notice-count', 'driver-notice-row'].every((id) => SECTION.includes(`data-testid="${id}"`)))
 ok("...each notice's lines, a tag on those some drivers don't read, and its tour's steps, title and words", ['driver-notice-lines', 'driver-notice-line', 'driver-notice-only', 'driver-notice-tour', 'driver-tour-step', 'driver-tour-step-title', 'driver-tour-step-line'].every((id) => SECTION.includes(`data-testid="${id}"`)))
+ok('...each list from its own words, shown when it has some: the notice\'s lines, its steps, and the app tour\'s steps',
+  /<div v-if="notice\.lines\.length" class="dn-words" data-testid="driver-notice-lines">\s*<h4 class="dn-words-heading">\{\{ RECORD_WORDS\.lines \}\}<\/h4>\s*<ul class="dn-lines">\s*<li v-for="\(line, i\) in notice\.lines" :key="i" data-testid="driver-notice-line">/.test(SECTION)
+  && /<div v-if="notice\.steps\.length" class="dn-words" data-testid="driver-notice-tour">\s*<h4 class="dn-words-heading">\{\{ RECORD_WORDS\.tour \}\}<\/h4>\s*<ol class="dn-steps">\s*<li v-for="step in notice\.steps" :key="step\.id" data-testid="driver-tour-step">/.test(SECTION)
+  && /<ol class="dn-steps">\s*<li v-for="step in appTour" :key="step\.id" data-testid="driver-tour-step">/.test(SECTION)
+  && (SECTION.match(/<p v-for="\(line, i\) in step\.lines" :key="i" class="dn-step-line" data-testid="driver-tour-step-line">/g) || []).length === 2)
 ok('...the tag only where a line has one, in each of its three lists, and never on its own', (SECTION.match(/<span v-if="line\.only" class="dn-only" data-testid="driver-notice-only">\{\{ line\.only \}\}<\/span>/g) || []).length === 3 && (SECTION.match(/class="dn-only"/g) || []).length === 3)
 ok('...the words printed as text', (SECTION.match(/<span class="dn-text">\{\{ line\.text \}\}<\/span>/g) || []).length === 3 && (SECTION.match(/\{\{ step\.title \}\}/g) || []).length === 2)
 ok('...and the whole app tour once, after the notices, only with the record shown, from the lib with no read of its own',
