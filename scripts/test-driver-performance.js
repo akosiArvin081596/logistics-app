@@ -3381,6 +3381,20 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		} finally {
 			await byAccount.close();
 		}
+		// A directory driver with no account: the test needs none, so he's listed with the answer his route gives a session naming him.
+		const noAccount = await makeWorld({}, { extraLoads: [["DP-8201", "Pat Rivers", "Delivered", "2026-11-10 10:00"]] });
+		try {
+			noAccount.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (31, 'Pat Rivers', 'active', 'fixed', 0)").run();
+			noAccount.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (31, 'LogisX-#531', '')").run();
+			noAccount.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (31, 'Pat Rivers', '2026-10-01T12:00:00.000Z', '')").run();
+			eq(noAccount.db.prepare("SELECT COUNT(*) AS n FROM users WHERE driver_name = 'Pat Rivers'").get().n, 0, "(the scene) no account names Pat Rivers");
+			const pat = driversOf(await noAccount.get(ADMIN_WEEKS, USERS.admin)).find((x) => x.name === "Pat Rivers");
+			const asHim = await noAccount.get(OWN, { id: 9031, role: "Driver", username: "made-up-pat", driverName: "Pat Rivers" });
+			ok(!!pat && asHim.status === 200 && JSON.stringify(pat.performance) === asHim.text, "a driver with no account is on the page, with the answer his own route gives a session naming him");
+			eq(pat && [pat.directoryId, pat.unit, creditsOf(pat)], [31, "#531", 0.5], "...his row, his unit and his week");
+		} finally {
+			await noAccount.close();
+		}
 		// A phone or a broker's cell in a counted load's row stays out.
 		const phones = await makeWorld({}, { extraLoads: [["DP-8101", "Ada Quill", "Delivered", "2026-11-10 09:00", "555-0142"], ["DP-8102", "Ben Marsh", "Delivered", "2026-11-10 10:00", "(555) 010-0199"]] });
 		try {

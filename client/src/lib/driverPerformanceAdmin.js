@@ -1,10 +1,13 @@
-// The Super Admin's Driver Performance tab on the dashboard: its words, and what the server's answer
-// may put on the screen. Each driver's figures go through his own tab's views (./driverPerformance.js),
-// so the office reads the same figures, in the same words, as his screen shows him. Display only:
-// the server works out every figure and the order, and nothing here counts, adds or sorts.
+// The dashboard's Driver Performance tab: its words and views. Each driver's figures go through his own
+// tab's views, so the office reads what his screen shows him; nothing here counts or sorts.
 // Pinned by scripts/test-driver-performance-client.mjs.
 
-import { DRIVE_HOURS_LINE, FAILED_LINE, TARGET_LINE, THIS_WEEK_TITLE, ownWeekView, pastWeeksView, weekBarView, weekClosesLine } from './driverPerformance.js'
+import {
+  COMING_SOON, DRIVE_HOURS_LINE, EMPTY_LINE, FAILED_LINE, HOS_LINE, TARGET_LINE, THIS_WEEK_TITLE, ownWeekView, pastWeeksView, weekBarView, weekClosesLine,
+} from './driverPerformance.js'
+
+// The driver tab's own rules for the tab and the board, so the office's screens need no other lib.
+export { PERIODS as BOARD_PERIODS, boardUrl, boardView, isGoneAnswer, periodKind, tabAfterAnswer } from './driverPerformance.js'
 
 export const ADMIN_WEEKS_URL = '/api/admin/driver-performance/weeks'
 
@@ -25,6 +28,10 @@ export const WORDS = Object.freeze({
   loading: 'Loading…',
   failed: FAILED_LINE,
   retry: 'Try again',
+  // The board by unit's, as /driver shows it to a Super Admin.
+  comingSoon: COMING_SOON,
+  boardEmpty: EMPTY_LINE,
+  hos: HOS_LINE,
 })
 
 // Why a driver isn't on this week's board by unit, by the server's code. Any other code shows no reason.

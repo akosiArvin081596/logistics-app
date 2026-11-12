@@ -7,10 +7,12 @@
 //   AP2 a row opens what counted this week and last, in his own tab's words, and his past weeks with
 //       "Driving hours: coming soon" and the "weren't counted" line; its button says it is open
 //   AP3 "Not on the board" starts collapsed; opened, each name with its reason in words
-//   AP4 "Board by unit": the existing board, its four tiles and Most loads' unit rows, as /driver shows it to a Super Admin
+//   AP4 "Board by unit": the board's four tiles and Most loads' unit rows in plain markup, its three periods (Last
+//       week read when chosen) and its hours-of-service line, as /driver shows the board to a Super Admin
 //   AP5 the switch off (the tab's read answers 404 FEATURE_OFF): no tab
 //   AP6 a Dispatcher: no tab, and the drivers' weeks never asked for
 //   AP7 at 390: one card per driver, each row's button 44 px or more, no sideways scroll
+//   AP8 the dashboard keeps its own styles with the tab open: no Vant rule in any stylesheet, the body in DM Sans
 //   APx no page errors, and nothing but GETs
 // Every answer comes from the real rules (lib/driver-performance.js) over made-up figures, in the shapes the routes send,
 // with the hours switch off, and every expected word from the tab's own lib (client/src/lib/driverPerformanceAdmin.js).
@@ -31,7 +33,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import paths from './paths.cjs'
-import { REASONS, WORDS, driversView } from '../../client/src/lib/driverPerformanceAdmin.js'
+import { BOARD_PERIODS, REASONS, WORDS, boardView, driversView } from '../../client/src/lib/driverPerformanceAdmin.js'
 import { CATEGORIES as BOARD_TILES } from '../../client/src/lib/driverPerformance.js'
 
 const require = createRequire(import.meta.url)
@@ -142,7 +144,7 @@ const DASHBOARD = {
 
 // One browser's server. weeksStatus: what the tab's read answers (404 is its switch off).
 function freshState({ user = SUPER_ADMIN, weeksStatus = 200 } = {}) {
-  return { user, weeksStatus, weeksReads: 0 }
+  return { user, weeksStatus, weeksReads: 0, boardReads: [] }
 }
 function answerGet(state, u) {
   const ok = (body) => ({ status: 200, body })
@@ -154,7 +156,10 @@ function answerGet(state, u) {
     if (state.weeksStatus !== 200) return { status: state.weeksStatus, body: { error: 'Not found', code: 'FEATURE_OFF' } }
     return ok(WEEKS)
   }
-  if (p === '/api/driver/performance/leaderboard') return ok(BOARD[u.searchParams.get('period') === 'month' ? 'month' : 'week'])
+  if (p === '/api/driver/performance/leaderboard') {
+    state.boardReads.push(u.searchParams.get('period') || '')
+    return ok(BOARD[u.searchParams.get('period') === 'month' ? 'month' : 'week'])
+  }
   if (p === '/api/dashboard') return ok(DASHBOARD)
   if (p === '/api/load-ratings/averages') return ok({ averages: {} })
   if (p === '/api/truck-assignments') return ok({ assignments: [] })
@@ -330,18 +335,37 @@ async function deskRun(browser) {
       openBefore === false && summary === WORDS.notOnBoardTitle && openAfter === true && same(offRows, wantOff),
       await shot(page, size, 'AP3', 'not-on-the-board-open'))
 
-    // AP4: the board by unit.
-    const board = p.locator(testid('perf-board'))
+    // AP4: the board by unit, in plain markup.
+    const board = p.locator(testid('adb'))
     await board.first().scrollIntoViewIfNeeded()
-    await board.locator(testid('perf-tile')).first().waitFor({ state: 'visible', timeout: 8000 })
-    const tiles = await allText(board.locator(`${testid('perf-tile')} .perf-title`))
-    const units = await allText(board.locator(`${testid('perf-tile')}[data-category="most-loads"] .perf-unit`))
+    await board.locator(testid('adb-tile')).first().waitFor({ state: 'visible', timeout: 8000 })
+    const periods = await board.locator(testid('adb-period')).evaluateAll((els) => els.map((el) => [el.textContent.replace(/\s+/g, ' ').trim(), el.getAttribute('aria-pressed'), Math.round(el.getBoundingClientRect().height)]))
+    const tiles = await allText(board.locator(testid('adb-tile-title')))
+    const units = await allText(board.locator(`${testid('adb-tile')}[data-category="most-loads"] ${testid('adb-unit')}`))
+    const hos = await text(board.locator(testid('adb-hos')))
     const names = await board.evaluate((el, list) => list.filter((n) => el.textContent.includes(n)), WEEKS.drivers.map((d) => d.name))
-    record(`AP4-${size.tag}`, '"Board by unit": the existing board, its four tiles and Most loads\' units, no names',
-      `tiles ${JSON.stringify(BOARD_TILES.map((c) => c.title))}; units ${JSON.stringify(BOARD_UNITS)}; no driver's name in it`,
-      `tiles ${JSON.stringify(tiles)}, units ${JSON.stringify(units)}, names ${JSON.stringify(names)}, reads of the drivers' weeks ${state.weeksReads}`,
-      same(tiles, BOARD_TILES.map((c) => c.title)) && same(units, BOARD_UNITS) && names.length === 0,
-      await shot(page, size, 'AP4', 'board-by-unit'))
+    const boardShot = await shot(page, size, 'AP4', 'board-by-unit')
+    await board.locator(testid('adb-period')).nth(1).click()
+    await until(() => state.boardReads.length > 0, 3000)
+    await page.waitForTimeout(300)
+    const lastWeekRange = await text(board.locator(testid('adb-range')))
+    const wantPeriods = BOARD_PERIODS.map((x, i) => [x.label, i === 0 ? 'true' : 'false'])
+    const wantLastRange = boardView(BOARD.week, 'last-week').range
+    record(`AP4-${size.tag}`, '"Board by unit": its three periods, four tiles, Most loads\' units and the hours-of-service line, in plain markup, no names',
+      `periods ${JSON.stringify(wantPeriods)}, 44 px or more; tiles ${JSON.stringify(BOARD_TILES.map((c) => c.title))}; units ${JSON.stringify(BOARD_UNITS)}; "${WORDS.hos}"; no driver's name; Last week shows "${wantLastRange}" with no second read`,
+      `periods ${JSON.stringify(periods)}, tiles ${JSON.stringify(tiles)}, units ${JSON.stringify(units)}, hos "${hos}", names ${JSON.stringify(names)}, last week "${lastWeekRange}", board reads ${JSON.stringify(state.boardReads)}`,
+      same(periods.map(([label, pressed]) => [label, pressed]), wantPeriods) && periods.every(([, , h]) => h >= 44) && same(tiles, BOARD_TILES.map((c) => c.title))
+        && same(units, BOARD_UNITS) && hos === WORDS.hos && names.length === 0 && lastWeekRange === wantLastRange && same(state.boardReads, ['week']),
+      boardShot)
+
+    // AP8: the dashboard keeps its own styles with the tab and its board on screen.
+    const styles = await page.evaluate(() => {
+      const rules = [...document.styleSheets].flatMap((sheet) => { try { return [...sheet.cssRules].map((r) => r.cssText) } catch { return [] } })
+      return { vant: rules.filter((t) => /\.van-|--van-/.test(t)).length, font: getComputedStyle(document.body).fontFamily }
+    })
+    record(`AP8-${size.tag}`, 'The dashboard keeps its own styles with the tab open: no Vant rule anywhere, the body in DM Sans',
+      'no stylesheet rule naming .van- or --van-; body font-family starting "DM Sans"', `Vant rules ${styles.vant}, body font ${styles.font}`,
+      styles.vant === 0 && /^"?DM Sans"?/.test(styles.font), await shot(page, size, 'AP8', 'dashboard-styles'))
   } catch (e) {
     record(`AP1-4-${size.tag}`, 'The tab runs', 'the steps run', `stopped: ${String(e.message || e).slice(0, 200)}`, false)
   } finally {
