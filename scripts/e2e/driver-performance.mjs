@@ -3,19 +3,21 @@
 //
 // As a made-up Driver ("Casey Example"), at 390x844 and 1280x800:
 //   B   the bar on the Loads list, above the load list: "This week: 3.5 of 7.5 loads", On Track, the
-//       server's percent as its fill; no hours-of-service line; 44 px or more; no sideways
-//       scroll; the board never read
+//       server's percent as its fill, in the server's color for the week (red at 3.5); no
+//       hours-of-service line; 44 px or more; no sideways scroll; the board never read
 //   E   the same bar at the top of a load's own page, the same answer, with its status and POD
 //       sections below it as they were; tapping it there opens the tab too
 //   Z   nothing under his thumb moves, by position: a load card across the first read arriving
 //       after the list has painted; the Accept button and a load's status buttons across a failed
 //       read and the good one after it; the kill switch going off keeps the place until he moves
-//   T   tapping it opens the Performance tab; the sixth tab fits the nav and is 44 px or more
-//   W   this week: the count, the label, what's left, the closing line, how it counts, each row
-//       with both credits, "tell dispatch", drive hours coming soon, the target, "7.5 is the target.
-//       6 is required." and "No other driver can see this."; no hours-of-service line; no name, rank, unit, "You",
-//       month, tile, hours figure or dollars
-//   L   last week: its final figure and list, no label, nothing left; no new read
+//   T   tapping it opens the Past Performance tab; the sixth tab fits the nav and is 44 px or more
+//   W   this week, under its heading: the count, the label, what's left, the closing line, how it
+//       counts, each row with both credits, "tell dispatch", driving hours coming soon, the target,
+//       "7.5 is the target. 6 is required." and "No other driver can see this."; no toggle between
+//       weeks; no hours-of-service line; no name, rank, unit, "You", month, tile, hours figure or dollars
+//   L   his past weeks under this week, newest first: each one's dates, its figure of its target and
+//       "Driving hours: coming soon"; then "Weeks before <the first counted week> weren't counted.";
+//       no fill, label or color on a past week; no new read
 //   R   read only: the page sent no write while the tab was in use, and never read the board
 //   D   decoys: answers that wrongly carry names, another driver's figures, a rank, a unit, pay, a
 //       broker, a rate, hours and a tier show none of them
@@ -25,8 +27,9 @@
 //       next good read brings the bar back
 //   G   the kill switch goes off mid-session: the next read goes back to Loads with five tabs, no bar
 // And at 390x844:
-//   P   a low week and the others: Needs Focus on a pale neutral chip, never red, with "A new week
-//       starts Saturday, <the coming Saturday's date>." and no closing line; Ahead of Pace; the target reached; no label at all;
+//   P   a low week and the others: Needs Focus on a pale neutral chip, never red, while the bar's fill
+//       takes the server's red for a week under 4, with "A new week starts Saturday, <the coming
+//       Saturday's date>." and no closing line; Ahead of Pace; the target reached; no label at all;
 //       a percentage driver's tab says nothing about pay, as nobody's does; an approved day off
 //       reads his lower figure, the one line saying why and that week's required figure; time off
 //       that makes the required figure impossible reads the target alone
@@ -91,14 +94,15 @@ const HOS_LINE = 'Never drive past your hours of service to reach a target. Your
 const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 const REQUIREMENT_LINE = '7.5 is the target. 6 is required.'
 const PRIVATE_LINE = 'No other driver can see this.'
-const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
+const DRIVE_HOURS_LINE = 'Driving hours: coming soon'
 const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 const RULE_LINE = 'Each pickup counts 0.5 and each delivery 0.5.'
 const WEEK_CLOSES = 'Week closes Fri 11:59 PM ET'
 const FAILED_LINE = "Performance can't be shown right now. Try again in a minute."
 const BASE_TABS = ['Loads', 'Alerts', 'Kit', 'Messages', 'Invoices']
-const ALL_TABS = [...BASE_TABS, 'Performance']
+const TAB_NAME = 'Past Performance'
+const ALL_TABS = [...BASE_TABS, TAB_NAME]
 const TILES = ['Most loads', 'Least fuel cost', 'Safety', 'Lowest idle']
 // None of these may ever be on a driver's screen.
 const NOT_FOR_DRIVERS = ['Most loads', 'Least fuel cost', 'Lowest idle', 'Not ranked', 'This month', 'REI', 'Coming soon', 'Tier', 'Streak', 'streak', '#70', 'out of reach', '42.5', '8.5', '$', 'Counts loads', 'invoice pays days', 'Hours of service', 'hours of service', 'Never drive past', 'a guide', 'Target is a requirement']
@@ -145,9 +149,18 @@ const THIS_LINES = [
   ['Load QA-9005', 'Picked up Tue 0.5'],
 ]
 const LAST_LOADS = [{ loadId: 'QA-8001', pickup: counted('Sat', 0.5), delivery: counted('Sun', 0.5) }]
-const LAST_LINES = [['Load QA-8001', 'Picked up Sat 0.5 · Delivered Sun 0.5']]
-const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, required: 6, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, nextWeekStarts: NEXT_WEEK_STARTS, targetLowered: false, loads: THIS_LOADS }
-const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, loads: LAST_LOADS }
+// The server colors an open week by its credits: 3.5 is red.
+const THIS_WEEK = { id: 'this-week', start: THIS_START, end: THIS_END, credits: { value: 3.5, target: 7.5, required: 6, deliveries: 4, pickups: 3 }, left: 4, percent: 46, pace: 'on-track', newWeekNote: false, nextWeekStarts: NEXT_WEEK_STARTS, targetLowered: false, barColor: 'red', loads: THIS_LOADS }
+const LAST_WEEK = { id: 'last-week', start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: null, percent: 100, pace: null, newWeekNote: false, nextWeekStarts: null, targetLowered: false, barColor: null, loads: LAST_LOADS }
+// His past weeks as the route sends them with the hours switch off: newest first, figures only.
+const PAST_WEEKS = [
+  { start: LAST_START, end: LAST_END, credits: { value: 7.5, target: 7.5 } },
+  { start: shift(LAST_START, -7), end: shift(LAST_END, -7), credits: { value: 5, target: 6 } },
+  { start: shift(LAST_START, -14), end: shift(LAST_END, -14), credits: { value: 0.5, target: 7.5 } },
+]
+const COUNTED_FROM = md(shift(LAST_START, -14))
+const PAST_ROWS = PAST_WEEKS.map((w) => [rangeText(w.start, w.end), `${w.credits.value} of ${w.credits.target} loads`, DRIVE_HOURS_LINE])
+const COUNTED_FROM_LINE = `Weeks before ${COUNTED_FROM} weren't counted.`
 
 // What the server must never send. If it did, none of it may show.
 const DECOY_NAME = 'Decoy Peerdriver'
@@ -157,10 +170,13 @@ const DECOY_TEXT = [DECOY_NAME, 'Accident on file', '987', '$', '83.7', '31.25',
 function ownBody(state) {
   const decoy = state.decoys ? DECOY_FIELDS : {}
   const dress = (week) => ({ ...week, credits: { ...week.credits, ...decoy }, loads: week.loads.map((l) => ({ ...l, ...decoy })), ...decoy })
+  const dressPast = (week) => ({ ...decoy, ...week, credits: { ...decoy, ...week.credits } })
   return {
     view: 'no-hours-data',
     creditWeights: { delivery: 0.5, pickup: 0.5 },
     weeks: [dress({ ...THIS_WEEK, ...state.thisWeek }), dress(LAST_WEEK)],
+    pastWeeks: PAST_WEEKS.map(dressPast),
+    countedFrom: COUNTED_FROM,
     ...decoy,
   }
 }
@@ -351,9 +367,16 @@ async function openTab(page, size, marker = 'perf-tab') {
   return appears(page, testid(marker), 8000)
 }
 
+// The office board's period choices (a driver's own tab has none).
 async function choose(page, size, label) {
   await press(page.locator('.perf-periods .van-tab', { hasText: label }).first(), size)
 }
+
+// Each past week as [days, figure, hours], read from the screen in one go.
+const pastRows = (page) => page.locator(testid('perf-past-week')).evaluateAll((els) => els.map((el) => {
+  const pick = (id) => ((el.querySelector(`[data-testid="${id}"]`) || {}).textContent || '').replace(/\s+/g, ' ').trim()
+  return [pick('perf-past-range'), pick('perf-past-count'), pick('perf-past-hours')]
+}))
 
 // Each counted row as [title, line], read from the screen in one go.
 const loadRows = (page) => page.locator(testid('perf-load')).evaluateAll((els) => els.map((el) => {
@@ -403,6 +426,7 @@ async function fullRun(browser, size) {
     const barText = await text(page, testid('perf-bar-text'))
     const barPace = await text(page, testid('perf-bar-pace'))
     const fill =await page.locator(testid('perf-bar-fill')).first().evaluate((el) => el.style.width).catch(() => '')
+    const [fillBg] = await colours(page, testid('perf-bar-fill'))
     const barHeight = await heights(page, testid('perf-bar'))
     const above = await page.evaluate(() => {
       const bar = document.querySelector('[data-testid="perf-bar"]')
@@ -412,9 +436,9 @@ async function fullRun(browser, size) {
     const barFits = await noSideScroll(page)
     const loadsBody = squeeze(await page.locator('body').innerText())
     record(`B-${t}`, 'The bar on the Loads list',
-      `"This week: 3.5 of 7.5 loads"; "On Track"; fill 46%; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
-      `text "${barText}", pace "${barPace}", fill ${fill}, height ${JSON.stringify(barHeight)}, above ${above}, fits ${barFits}, board reads ${state.calls.week + state.calls.month}, banned ${JSON.stringify(banned(loadsBody))}`,
-      shown && barText === 'This week: 3.5 of 7.5 loads' && barPace === 'On Track' && fill === '46%' && tall(barHeight) && above && barFits
+      `"This week: 3.5 of 7.5 loads"; "On Track"; fill 46%, in the server's red for 3.5; 44 px or more; above the load list; no side scroll; the board never read; nothing of the ranking on the page`,
+      `text "${barText}", pace "${barPace}", fill ${fill} ${fillBg}, height ${JSON.stringify(barHeight)}, above ${above}, fits ${barFits}, board reads ${state.calls.week + state.calls.month}, banned ${JSON.stringify(banned(loadsBody))}`,
+      shown && barText === 'This week: 3.5 of 7.5 loads' && barPace === 'On Track' && fill === '46%' && looksRed(fillBg) && tall(barHeight) && above && barFits
         && state.calls.week + state.calls.month === 0 && banned(loadsBody).length === 0,
       await shot(page, `B-${t}`))
     if (!shown) return
@@ -427,10 +451,11 @@ async function fullRun(browser, size) {
     await press(page.locator(testid('perf-bar')).first(), size)
     const opened = await appears(page, testid('perf-tab'), 8000)
     const active = squeeze(await page.locator('.van-tabbar-item--active .van-tabbar-item__text').first().textContent({ timeout: 2000 }).catch(() => ''))
-    record(`T-${t}`, 'Tapping the bar opens the Performance tab; the sixth tab fits the nav',
-      `the tab open and active; labels ${JSON.stringify(ALL_TABS)}; each 44 px or more; no label clipped; the nav doesn't overflow`,
-      `opened ${opened}, active "${active}", labels ${JSON.stringify(labels)}, heights ${JSON.stringify(navHeights)}, clipped ${clipped}, fits ${navFits}`,
-      hasTab && opened && active === 'Performance' && sameList(labels, ALL_TABS) && tall(navHeights) && clipped === 0 && navFits,
+    const header = await text(page, `${testid('perf-panel')} .section-header`)
+    record(`T-${t}`, `Tapping the bar opens the ${TAB_NAME} tab; the sixth tab fits the nav`,
+      `the tab open and active, its header "${TAB_NAME}"; labels ${JSON.stringify(ALL_TABS)}; each 44 px or more; no label clipped; the nav doesn't overflow`,
+      `opened ${opened}, active "${active}", header "${header}", labels ${JSON.stringify(labels)}, heights ${JSON.stringify(navHeights)}, clipped ${clipped}, fits ${navFits}`,
+      hasTab && opened && active === TAB_NAME && header === TAB_NAME && sameList(labels, ALL_TABS) && tall(navHeights) && clipped === 0 && navFits,
       await shot(page, `T-${t}`))
     if (!opened) return
 
@@ -447,39 +472,37 @@ async function fullRun(browser, size) {
     const requirement = await text(page, testid('perf-requirement'))
     const isPrivate = await text(page, testid('perf-private'))
     const lowered = await page.locator(testid('perf-lowered')).count()
-    const choiceHeights = await heights(page, '.perf-periods .van-tab')
-    const choiceLabels = await allText(page.locator('.perf-periods .van-tab'))
+    const heading = await text(page, testid('perf-this-week-title'))
+    const toggles = await page.locator(`${testid('perf-tab')} .van-tabs, ${testid('perf-tab')} .van-tab`).count()
     const weekWide = await page.locator(testid('perf-fill')).first().evaluate((el) => el.style.width).catch(() => '')
     const hosLines = await page.locator(testid('perf-hos')).count()
     const panel = squeeze(await text(page, testid('perf-panel')))
     const fits = await noSideScroll(page)
     const hidden = banned(panel).concat(['Casey Example', 'You'].filter((w) => new RegExp(`\\b${w}\\b`).test(panel)))
-    record(`W-${t}`, 'This week: only his own figures',
-      `"3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${REQUIREMENT_LINE}"; "${PRIVATE_LINE}"; no hours-of-service line; This week and Last week, 44 px or more; no side scroll; nothing banned`,
-      `count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, requirement "${requirement}", private "${isPrivate}", hours-of-service lines ${hosLines}, choices ${JSON.stringify(choiceLabels)} ${JSON.stringify(choiceHeights)}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
-      count === '3.5 of 7.5 loads' && pace === 'On Track' && weekWide === '46%' && left === '4 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
+    record(`W-${t}`, 'This week, on top: only his own figures',
+      `"This week"; "3.5 of 7.5 loads"; On Track; fill 46%; "4 loads left this week."; "${WEEK_CLOSES}"; range "${rangeText(THIS_START, THIS_END)}"; "${RULE_LINE}"; rows ${JSON.stringify(THIS_LINES)}; "${TELL_DISPATCH_LINE}"; "${DRIVE_HOURS_LINE}"; "${TARGET_LINE}"; no lowered-target line; "${REQUIREMENT_LINE}"; "${PRIVATE_LINE}"; no hours-of-service line; no toggle between weeks; no side scroll; nothing banned`,
+      `heading "${heading}", count "${count}", pace "${pace}", fill ${weekWide}, left "${left}", closes "${closes}", range "${range}", rule "${rule}", rows ${JSON.stringify(got)}, tell "${tell}", hours "${hours}", target "${target}", lowered ${lowered}, requirement "${requirement}", private "${isPrivate}", hours-of-service lines ${hosLines}, toggles ${toggles}, fits ${fits}, banned ${JSON.stringify(hidden)}`,
+      heading === 'This week' && count === '3.5 of 7.5 loads' && pace === 'On Track' && weekWide === '46%' && left === '4 loads left this week.' && closes === WEEK_CLOSES && range === rangeText(THIS_START, THIS_END)
         && rule === RULE_LINE && sameList(got, THIS_LINES) && tell === TELL_DISPATCH_LINE && hours === DRIVE_HOURS_LINE && target === TARGET_LINE && lowered === 0 && requirement === REQUIREMENT_LINE && isPrivate === PRIVATE_LINE
-        && hosLines === 0 && sameList(choiceLabels, ['This week', 'Last week']) && tall(choiceHeights) && fits && hidden.length === 0,
+        && hosLines === 0 && toggles === 0 && fits && hidden.length === 0,
       await shot(page, `W-${t}`))
 
     const ownReads = state.calls.own
-    await choose(page, size, 'Last week')
-    const lastGot = await waitForLoads(page, LAST_LINES)
-    const lastCount = await text(page, testid('perf-count'))
-    const lastRange = await text(page, testid('perf-range'))
-    const lastTitle = await text(page, testid('perf-counted-title'))
-    const lastPace = await page.locator(testid('perf-pace')).count()
-    const lastLeft = await page.locator(testid('perf-left')).count()
-    const lastCloses = await page.locator(testid('perf-closes')).count()
-    record(`L-${t}`, 'Last week: its final figure and list, no label',
-      `"7.5 of 7.5 loads"; range "${rangeText(LAST_START, LAST_END)}"; "What counted last week"; rows ${JSON.stringify(LAST_LINES)}; no label, no left line, no closing line; no new read`,
-      `count "${lastCount}", range "${lastRange}", title "${lastTitle}", rows ${JSON.stringify(lastGot)}, label ${lastPace}, left ${lastLeft}, closes ${lastCloses}, reads ${ownReads} then ${state.calls.own}`,
-      lastCount === '7.5 of 7.5 loads' && lastRange === rangeText(LAST_START, LAST_END) && lastTitle === 'What counted last week' && sameList(lastGot, LAST_LINES)
-        && lastPace === 0 && lastLeft === 0 && lastCloses === 0 && state.calls.own === ownReads,
+    await page.locator(testid('perf-past')).first().scrollIntoViewIfNeeded().catch(() => {})
+    const pastTitle = await text(page, testid('perf-past-title'))
+    const past = await pastRows(page)
+    const countedFrom = await text(page, testid('perf-counted-from'))
+    const pastMarks = await page.locator(`${testid('perf-past')} [data-testid="perf-fill"], ${testid('perf-past')} [data-testid="perf-pace"], ${testid('perf-past')} [data-color]`).count()
+    const order = await page.evaluate(() => ['perf-week', 'perf-counted', 'perf-past', 'perf-private'].map((id) => {
+      const el = document.querySelector(`[data-testid="${id}"]`)
+      return el ? Math.round(el.getBoundingClientRect().top + window.scrollY) : null
+    }))
+    record(`L-${t}`, 'His past weeks under this week, newest first, each with its turns and its hours coming soon',
+      `"Past weeks"; rows ${JSON.stringify(PAST_ROWS)}; "${COUNTED_FROM_LINE}"; this week, its list, the past weeks, then the privacy line, top to bottom; no fill, label or color on a past week; no new read`,
+      `title "${pastTitle}", rows ${JSON.stringify(past)}, line "${countedFrom}", tops ${JSON.stringify(order)}, marks ${pastMarks}, reads ${ownReads} then ${state.calls.own}`,
+      pastTitle === 'Past weeks' && sameList(past, PAST_ROWS) && countedFrom === COUNTED_FROM_LINE && order.every((n, i) => n !== null && (i === 0 || n > order[i - 1])) && pastMarks === 0 && state.calls.own === ownReads,
       await shot(page, `L-${t}`))
 
-    await choose(page, size, 'This week')
-    await waitForLoads(page, THIS_LINES)
     const sent = writes.slice(writesBefore)
     record(`R-${t}`, 'Read only, and never the board', 'no write sent while the tab was in use; the board route never read',
       `writes ${JSON.stringify(sent)}, board reads ${state.calls.week + state.calls.month}, side scroll free ${await noSideScroll(page)}`,
@@ -614,15 +637,13 @@ async function decoyRun(browser, size) {
     const barText = await text(page, testid('perf-bar-text'))
     const opened = hasTab && await openTab(page, size)
     const got = opened ? await waitForLoads(page, THIS_LINES) : []
-    const firstBody = squeeze(await page.locator('body').innerText())
-    await choose(page, size, 'Last week')
-    await waitForLoads(page, LAST_LINES)
-    const secondBody = squeeze(await page.locator('body').innerText())
-    const found = DECOY_TEXT.filter((w) => barBody.includes(w) || firstBody.includes(w) || secondBody.includes(w))
+    const past = await pastRows(page)
+    const tabBody = squeeze(await page.locator('body').innerText())
+    const found = DECOY_TEXT.filter((w) => barBody.includes(w) || tabBody.includes(w))
     record(`D-${t}`, 'Answers that wrongly carry more show none of it',
-      `the bar and rows as if the extras weren't there; none of ${JSON.stringify(DECOY_TEXT)} anywhere on the page`,
-      `bar "${barText}", rows ${JSON.stringify(got)}, found ${JSON.stringify(found)}`,
-      opened && barText === 'This week: 3.5 of 7.5 loads' && sameList(got, THIS_LINES) && found.length === 0,
+      `the bar, this week's rows and the past weeks as if the extras weren't there; a past week's stray hours figure reads coming soon; none of ${JSON.stringify(DECOY_TEXT)} anywhere on the page`,
+      `bar "${barText}", rows ${JSON.stringify(got)}, past ${JSON.stringify(past)}, found ${JSON.stringify(found)}`,
+      opened && barText === 'This week: 3.5 of 7.5 loads' && sameList(got, THIS_LINES) && sameList(past, PAST_ROWS) && found.length === 0,
       await shot(page, `D-${t}`))
   } finally {
     await ctx.close()
@@ -733,17 +754,17 @@ async function weekShapesRun(browser, size) {
       const required = await text(page, testid('perf-requirement'))
       const closes = await page.locator(testid('perf-closes')).count()
       const [chipBg, chipInk] = await colours(page, testid('perf-pace'))
-      const red = [barBg, barInk, fillBg, chipBg, chipInk].filter(looksRed)
-      record(`P-low-${t}`, 'A low week: no red, and no asking for more',
-        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; "${REQUIREMENT_LINE}", behind as he is; no closing line; no red on the bar or the chip`,
-        `bar "${barText}", pace "${barPace}", left "${left}", note "${note}", required "${required}", closes ${closes}, colours ${JSON.stringify([barBg, barInk, fillBg, chipBg, chipInk])}, red ${JSON.stringify(red)}`,
-        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && required === REQUIREMENT_LINE && closes === 0 && red.length === 0,
+      const red = [barBg, barInk, chipBg, chipInk].filter(looksRed)
+      record(`P-low-${t}`, 'A low week: the bar\'s fill in the server\'s red, the label never red, and no asking for more',
+        `"This week: 1.5 of 7.5 loads"; Needs Focus; "6 loads left this week."; "${NEW_WEEK_LINE}"; "${REQUIREMENT_LINE}", behind as he is; no closing line; the fill red, and no red on the bar's label or the tab's chip`,
+        `bar "${barText}", pace "${barPace}", left "${left}", note "${note}", required "${required}", closes ${closes}, fill ${fillBg}, colours ${JSON.stringify([barBg, barInk, chipBg, chipInk])}, red ${JSON.stringify(red)}`,
+        barText === 'This week: 1.5 of 7.5 loads' && barPace === 'Needs Focus' && left === '6 loads left this week.' && note === NEW_WEEK_LINE && required === REQUIREMENT_LINE && closes === 0 && looksRed(fillBg) && red.length === 0,
         await shot(page, `P-low-${t}`))
     } finally {
       await ctx.close()
     }
   }
-  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: 0, percent: 100, pace: 'ahead' } })
+  const met = freshState({ thisWeek: { credits: { value: 7.5, target: 7.5, required: 6, deliveries: 8, pickups: 7 }, left: 0, percent: 100, pace: 'ahead', barColor: 'green' } })
   {
     const { ctx, page } = await openPage(browser, size, DRIVER, met)
     try {
@@ -813,14 +834,11 @@ async function weekShapesRun(browser, size) {
       const lowered = await text(page, testid('perf-lowered'))
       const required = await text(page, testid('perf-requirement'))
       const follows =await page.locator(testid('perf-target')).first().evaluate((el) => (el.nextElementSibling || {}).dataset?.testid === 'perf-lowered').catch(() => false)
-      await choose(page, size, 'Last week')
-      await appears(page, testid('perf-counted-title'), 8000)
-      await page.waitForTimeout(150)
-      const lastWeekLine = await page.locator(testid('perf-lowered')).count()
-      const lastRequired = await text(page, testid('perf-requirement'))
-      record(`P-day-off-${t}`, 'An approved day off: his lower figure, and the line that says why', `"This week: 3 of 6 loads"; "3 of 6 loads"; "3 loads left this week."; "${TARGET_LINE}" then "${LOWER_TARGET_LINE}"; "6 is the target. 4.5 is required."; not on Last week, as its words say this week; Last week's line is its own`,
-        `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", required "${required}", follows ${follows}, on last week ${lastWeekLine}, last week's line "${lastRequired}"`,
-        barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && required === '6 is the target. 4.5 is required.' && follows && lastWeekLine === 0 && lastRequired === REQUIREMENT_LINE,
+      const loweredLines = await page.locator(testid('perf-lowered')).count()
+      const pastLowered = await page.locator(`${testid('perf-past')} ${testid('perf-lowered')}`).count()
+      record(`P-day-off-${t}`, 'An approved day off: his lower figure, and the line that says why, for this week alone', `"This week: 3 of 6 loads"; "3 of 6 loads"; "3 loads left this week."; "${TARGET_LINE}" then "${LOWER_TARGET_LINE}"; "6 is the target. 4.5 is required."; the line once, and never on a past week, as its words say this week`,
+        `bar "${barText}", count "${count}", left "${left}", target "${target}", lowered "${lowered}", required "${required}", follows ${follows}, lowered lines ${loweredLines}, on a past week ${pastLowered}`,
+        barText === 'This week: 3 of 6 loads' && count === '3 of 6 loads' && left === '3 loads left this week.' && target === TARGET_LINE && lowered === LOWER_TARGET_LINE && required === '6 is the target. 4.5 is required.' && follows && loweredLines === 1 && pastLowered === 0,
         await shot(page, `P-day-off-${t}`))
     } finally {
       await ctx.close()
