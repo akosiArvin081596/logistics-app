@@ -36,6 +36,9 @@
 //       Invoice, a press, a factoring mark and the label see it; a run that dies mid-send
 //       is taken over by the app's own recovery, which never sends it again
 //   §13 mutants, each applied once and each caught
+//   §14 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): a draft made with a line
+//       while sending was stopped is sent as the job would send it; once its line is voided,
+//       the facts read as the job's and it is CHECK BY HAND (changed), never sent
 // Made-up data only. No network but an SMTP stand-in on 127.0.0.1 in this process;
 // never reads app.db or a settings file.
 //   node scripts/test-auto-invoice-send-drafted.js      # exits 1 on any failure
@@ -143,7 +146,9 @@ function findIn(w, messageId, boxes, { hide = false } = {}) {
 	return { found: false, count: 0, mailbox: "" };
 }
 
-function world({ dbFile = null } = {}) {
+// `lines`: the lines module's own table, and an engine that prints the load's active lines in its
+// answer (ctx.lineSummary.items), as mode "auto" does with AUTO_INVOICE_ADVANCE_LINES_ENABLED on.
+function world({ dbFile = null, lines = false } = {}) {
 	const w = {
 		now: T0,
 		rows: [],
@@ -228,12 +233,29 @@ function world({ dbFile = null } = {}) {
 			return { recorded: true, draftRowId: Number(r.lastInsertRowid) };
 		},
 	};
+	if (lines) {
+		const LINES = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
+		w.db.exec("DROP TABLE broker_invoice_lines");
+		LINES.ensureSchema(w.db);
+		const prepare = w.engine.prepare;
+		w.engine.prepare = async (args) => {
+			const r = await prepare(args);
+			if (r && r.ok) {
+				const items = LINES.listLines(w.db, args.loadId).filter((l) => !l.voided).map((l) => ({ id: l.id, label: l.label, amountCents: l.amountCents, reference: l.reference }));
+				if (items.length) r.ctx.lineSummary = { items };
+			}
+			return r;
+		};
+		w.addLine = (id) => LINES.addLine(w.db, { loadId: id, values: { kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "", reference: "", note: "" },
+			actor: "made-up-admin", closedMonths: [] }, {}).line;
+		w.voidLine = (id, lineId) => LINES.voidLine(w.db, { loadId: id, lineId, reason: "made up", actor: "made-up-admin" }, {});
+	}
 	// The stop this script sends from came under the rule where any change to a sent load stops all
-	// sending: AUTO_INVOICE_HOLD_ONE_LOAD=false is that rule.
-	w.jobDeps = ({ sendOn = true, trigger = false } = {}) => ({
+	// sending: AUTO_INVOICE_HOLD_ONE_LOAD=false is that rule. `advance`: AUTO_INVOICE_ADVANCE_LINES_ENABLED on.
+	w.jobDeps = ({ sendOn = true, trigger = false, advance = lines } = {}) => ({
 		db: w.db,
 		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: trigger ? "true" : "false",
-			AUTO_INVOICE_MAX_PER_HOUR: "100", AUTO_INVOICE_MAX_PER_DAY: "1000", AUTO_INVOICE_HOLD_ONE_LOAD: "false" },
+			AUTO_INVOICE_MAX_PER_HOUR: "100", AUTO_INVOICE_MAX_PER_DAY: "1000", AUTO_INVOICE_HOLD_ONE_LOAD: "false", ...(advance ? { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } : {}) },
 		now: () => new Date(w.now),
 		readJobTracking: async () => ({ headers: HEADERS, data: [...w.rows] }),
 		closedMonthsOf: () => [],
@@ -339,8 +361,8 @@ const pending = (w) => w.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_clai
 //   T0+2h    the resume script clears the stop; then LD-TEST-0820, to a domain off the
 //            send list, is drafted with a refusal on record
 //   T0+40h   the script runs
-async function stopWorld({ during = ["LD-TEST-0801", "LD-TEST-0802"], duringOther = [], beforeDrafts = null, afterDrafts = null, resume = true, dbFile = null } = {}) {
-	const w = world({ dbFile });
+async function stopWorld({ during = ["LD-TEST-0801", "LD-TEST-0802"], duringOther = [], beforeDrafts = null, afterDrafts = null, resume = true, dbFile = null, lines = false } = {}) {
+	const w = world({ dbFile, lines });
 	let job = jobLib.create(w.jobDeps({ sendOn: false }));
 	await job.tick();
 	w.now += 5 * MIN;
@@ -553,6 +575,21 @@ async function holdsSummary(lib) {
 	const dry = await runSafe(lib, w.scriptOpts({ dryRun: true }));
 	const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false }));
 	return { threw, failed: result ? result.failed : "no result", dryLabels: labels(dry.result), labels: labels(result), sent: sentLoads(w) };
+}
+
+// PR A1: LD-TEST-0801 drafted with a made-up $500.00 advance line while sending was stopped; `voided`:
+// that line voided after the draft. The script runs with the switch on, as the app does.
+async function advanceSummary(lib) {
+	const one = async (voided) => {
+		const w = await stopWorld({
+			lines: true,
+			beforeDrafts: (x) => { x.addLine("LD-TEST-0801"); },
+			afterDrafts: (x) => { if (voided) x.voidLine("LD-TEST-0801", 1); },
+		});
+		const { result, threw } = await runSafe(lib, w.scriptOpts({ dryRun: false, env: { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } }));
+		return { threw, fingerprint: (JSON.parse((w.claim("LD-TEST-0801") || {}).fingerprint_json || "{}").advanceLines) || null, labels: labels(result), sent: sentLoads(w) };
+	};
+	return { kept: await one(false), voided: await one(true) };
 }
 
 // One case per hold the gate or the mailbox makes: each from-the-stop load's word.
@@ -1128,6 +1165,7 @@ async function main() {
 			recheck: recheckSummary,
 			flight: flightSummary,
 			crash: crashSummary,
+			advance: advanceSummary,
 		};
 		const IN_FLIGHT = "const moved = ledger.transition(db, cur.load_key, { from: [\"drafted\"], nowIso, patch: {";
 		const MUTANTS = [
@@ -1155,6 +1193,7 @@ async function main() {
 			["a change since the draft", "if (!saved || c.changed_fields || rules.fingerprintDiff(saved, rules.fingerprint(facts)).length) return { word: \"changed\" };", "if (!saved) return { word: \"changed\" };", "holds"],
 			["the digest proof skipped", "if (rules.digestDifferences(jsonOf(c.draft_digest_json), rules.messageDigest(parsed)).length) return { word: \"mismatch\" };", "if (false) return { word: \"mismatch\" };", "holds"],
 			["the closed-month rule not read", "closedMonths = shared.server.integrityClosedMonthsOf(shared.sheet.headers, row);", "closedMonths = [];", "gate"],
+			["the facts without the advance lines (PR A1)", "\t\tadvanceLinesOn: rules.advanceLinesEnabled(env),\n", "", "advance"],
 		];
 		const real = {};
 		for (const [label, from, to, caseName] of MUTANTS) {
@@ -1171,6 +1210,18 @@ async function main() {
 			ok(got !== real[caseName], `§13 MUTANT ${label}: caught (${caseName})`);
 			console.log(`  ${got !== real[caseName] ? "caught" : "NOT CAUGHT"}: ${label} (${caseName})`);
 		}
+	}
+
+	// ---------------------------------------------------------------- §14
+	section("§14 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED)");
+	missing(14);
+	if (lib) {
+		const s = await advanceSummary(lib);
+		const of = (r) => (r.labels || []).find((l) => l[0] === "LD-TEST-0801") || null;
+		eq([s.kept.threw, s.kept.fingerprint, of(s.kept), s.kept.sent], ["", ["1:50000"], ["LD-TEST-0801", "CLEAN", "yes", "found"], ["LD-TEST-0801", "LD-TEST-0802"]],
+			"§14 FAILS ON THE OLD CODE: a draft made with an advance line during the stop, its line as it was: CLEAN and sent, as the job would send it");
+		eq([s.voided.threw, of(s.voided), s.voided.sent], ["", ["LD-TEST-0801", "changed", "yes", "found"], ["LD-TEST-0802"]],
+			"§14 FAILS ON THE OLD CODE: ...its line voided since: the facts read as the job's, CHECK BY HAND (changed), never sent with the old balance");
 	}
 }
 

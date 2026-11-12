@@ -35,6 +35,14 @@
  *      { lines } prints them in place of the bank block; a throw is a 503 refusal
  *      before any number, never the bank block; a note holding a bank number refuses
  *      in prepare(); record()'s audit target.
+ *  §10 mode "auto" with advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): off,
+ *      or on without the lines, a load with one is ADVANCE_LINES as before; on, a $500.00
+ *      advance on a $2,150.00 load bills $1,650.00, printed as the button prints it (the
+ *      page, the email's sentence, the row, the stamp, one invoice_draft_lines audit row);
+ *      a label off the closed list or a reference is ADVANCE_LINE_TEXT; no balance left is
+ *      ADVANCE_LINES_INVALID; rule 7 on everything it composes (F2): no deny list is
+ *      DENY_LIST_UNSET, a deny-list value or the driver's name is PROTECTED_VALUE; an
+ *      invoice with no line is the base's, byte for byte, whatever the switches say.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -48,6 +56,7 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const crypto = require("crypto");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
@@ -63,6 +72,8 @@ process.env.DEFAULT_INVOICE_EMAIL = DEFAULT_TO;
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const engineModule = require(ENGINE);
 const { closure } = require(path.join(__dirname, "lib", "server-lift.js"));
+// The house redactor over a made-up deny list: the runners' carrier canary.
+const { createRedactor } = require(path.join(ROOT, "lib", "chr-events.js"));
 const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
@@ -123,6 +134,8 @@ const LOADS = [
 	load("LD-TEST-0023", { email: "desk@proton.me" }),
 	load("LD-TEST-0024"),
 	load("LD-TEST-0025", { email: "qa-desk@bisontransport.com", pay: "2400" }),
+	// §10: booked at $2,150.00, for a made-up $500.00 advance.
+	load("LD-TEST-0030", { pay: "2150", done: "11/11/2026" }),
 ];
 const SHEET = [HEADERS, ...LOADS.map((l) => [l.id, l.status, l.email, l.contact, "QA Driver", l.trailer, l.done, l.pay])];
 const cand = (buffer, source) => ({ buffer, source, label: source, fileName: "rc.pdf" });
@@ -153,6 +166,7 @@ const RATECONS = {
 	// A Bison billing block with its Order # and no Total Rate: the free scan
 	// stops at the Order #, so Gemini is never asked for the total.
 	"LD-TEST-0025": [cand(rateCon({ order: "7101853", total: "" }), "drive")],
+	"LD-TEST-0030": [cand(rateCon({ docs: BILLING, total: "$2,150.00" }), "documents")],
 };
 // POD rows: [load_id as stored, file name]; the 0011 page and 0014's spelling are the cases.
 const PODS = [
@@ -181,7 +195,8 @@ const ADMIN = { session: { user: { id: 1, username: "super_admin", role: "Super 
 
 // `sheet` and `ratecons` replace the fixtures for one world (a load that changed);
 // `log` is the console the engine writes to.
-function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET, assignmentFor } = {}) {
+// `denyHits`: the carrier deny list's check the engine is handed (none: the list is unset).
+function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS, log = QUIET, assignmentFor, denyHits } = {}) {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_SQL);
 	for (const a of DRAFTS_ALTERS) db.exec(a);
@@ -225,6 +240,7 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 		env,
 		console: log,
 		...(assignmentFor === undefined ? {} : { assignmentFor }),
+		...(denyHits === undefined ? {} : { denyHits }),
 	});
 	const ov = (body = {}) => helpers.parseInvoiceOverrides(body);
 	const auto = (loadId, extra = {}) => engine.prepare({ loadId, mode: "auto", ...extra });
@@ -286,8 +302,10 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			eq(code(await lw.auto("LD-TEST-0012")), "ok", `§1 …and once the line is voided, the load prepares (flag ${label})`);
 		}
 		eq(code(await world().auto("LD-TEST-0012")), "ok", "§1 no lines table at all (the flag never on) → no ADVANCE_LINES");
-		eq([...engineModule.AUTO_REFUSAL_CODES].sort(), [...new Set(CASES.map((c) => c[1]).concat("RECIPIENT_UNCONFIGURED", "ADVANCE_LINES"))].sort(),
-			"§1 AUTO_REFUSAL_CODES lists exactly the codes exercised here");
+		// §10's own: an invoice with advance lines.
+		const ADVANCE_CODES = ["ADVANCE_LINES_INVALID", "ADVANCE_LINE_TEXT", "PROTECTED_VALUE", "DENY_LIST_UNSET"];
+		eq([...engineModule.AUTO_REFUSAL_CODES].sort(), [...new Set(CASES.map((c) => c[1]).concat("RECIPIENT_UNCONFIGURED", "ADVANCE_LINES", ...ADVANCE_CODES))].sort(),
+			"§1 AUTO_REFUSAL_CODES lists exactly the codes exercised here (§10's among them)");
 	}
 
 	// ===================================================================== §2
@@ -718,6 +736,181 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		eq(plainAudit && plainAudit.details, `10282026-7 → ${BILLING} (imap)`, "§8 record() with no target: the audit line as it always was");
 		const named = await audited({ auditTarget: "Triumph", via: "triumph" });
 		eq(named && named.details, "10282026-7 → Triumph (triumph)", "§8 FAILS ON THE OLD CODE: with a target, the audit line names it rather than a printed address");
+	}
+
+	// ===================================================================== §10
+	// AUTO_INVOICE_ADVANCE_LINES_ENABLED (PR A1). Made-up figures only: LD-TEST-0030 booked at
+	// $2,150.00, a $500.00 fuel advance, a $1,650.00 balance due; the runners' carrier canary and a
+	// made-up driver's name.
+	section("10. mode \"auto\" with advance lines — the balance due, the text gate, rule 7");
+	{
+		const ID = "LD-TEST-0030";
+		const ON = Object.freeze({ BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" });
+		const NUMBER = { invoiceId: "11122026-4", invoiceDate: "11/12/2026" };
+		const DENY = createRedactor({ denyList: "99887766" }).hits;
+		const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
+		const addAdvance = (w, over = {}, loadId = ID) => brokerInvoice.invoiceLines.addLine(w.db, {
+			loadId, values: { kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "", note: "", ...over },
+			actor: "super_admin", closedMonths: [],
+		}, { audit: () => {} }).line;
+		const sheetWithDriver = (name) => SHEET.map((r) => (r[0] === ID ? r.map((c, i) => (HEADERS[i] === "Driver" ? name : c)) : r));
+		const actions = (w) => w.db.prepare("SELECT action FROM audit_trail ORDER BY id").all().map((a) => a.action);
+
+		// Off, or on without the lines themselves: today's refusal.
+		for (const [label, env] of [
+			["its own switch off (the lines on)", { BROKER_INVOICE_LINES_ENABLED: "true" }],
+			["its own switch on, the lines off", { AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" }],
+			["its own switch \"TRUE\" (only exactly \"true\" is on)", { BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "TRUE" }],
+			["its own switch \"1\"", { BROKER_INVOICE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "1" }],
+		]) {
+			const w = world({ env, linesTable: true, denyHits: DENY });
+			addAdvance(w);
+			eq([code(await w.auto(ID)), w.seen.renders], ["ADVANCE_LINES", 0], `§10 ${label}: a load with an advance line still goes to a person (ADVANCE_LINES)`);
+		}
+
+		// On: the balance due, printed as the button prints it.
+		{
+			const w = world({ env: ON, denyHits: DENY });
+			addAdvance(w);
+			const p = await w.auto(ID);
+			eq([code(p), p.ok && p.ctx.total, p.ok && p.ctx.billedTotal, p.ok && p.ctx.lineSummary && [p.ctx.lineSummary.lineHaulCents, p.ctx.lineSummary.advancesCents, p.ctx.lineSummary.balanceCents]],
+				["ok", "$2,150.00", "$1,650.00", [215000, 50000, 165000]],
+				"§10 FAILS ON THE OLD CODE: on, a $500.00 advance on a $2,150.00 load prepares: the line haul $2,150.00, the balance due $1,650.00");
+			eq(p.ok && [p.ctx.lineSummary.footnote, p.ctx.lineSummary.footnoteDefault, p.ctx.lineSummary.lineHaulSource], ["*$500 for fuel advance", "*$500 for fuel advance", "ratecon"],
+				"§10 ...the default footnote, from the label and the amount; the line haul is the rate con's total");
+		}
+		{
+			// The same load on a tree before PR A1 refuses (above): what follows is the prepared draft.
+			const w = world({ env: ON, denyHits: DENY });
+			const line = addAdvance(w);
+			const p = await w.auto(ID);
+			if (!p.ok) failures.push(`§10 FAILS ON THE OLD CODE: the render, the row and the audit rows need a prepared draft (got ${code(p)})`);
+			const r = p.ok ? await w.engine.render(p.ctx, NUMBER) : { total: "", html: "", attachments: [] };
+			const page = w.seen.pages[0] || "";
+			eq(r.total, "$1,650.00", "§10 FAILS ON THE OLD CODE: render() answers the balance due as the billed total");
+			ok(page.includes('<div class="subtotal"><span>LINE HAUL</span><span class="amt">$2,150.00</span></div>')
+				&& page.includes('<div class="subtotal"><span>LESS ADVANCES</span><span class="amt">-$500.00</span></div>')
+				&& page.includes('<div class="pill"><span class="lbl">Balance due*</span><span class="amt">$1,650.00</span></div>'),
+			"§10 FAILS ON THE OLD CODE: the page reads LINE HAUL $2,150.00, LESS ADVANCES -$500.00, Balance due $1,650.00");
+			ok(page.includes('<div class="item-title">Fuel advance</div>') && page.includes('<div class="item-sub">Received 11/02/2026</div>') && page.includes('<div class="footnote">*$500 for fuel advance</div>'),
+				"§10 ...the advance's own row, its received date, and the footnote under the totals");
+			ok(r.html.includes("<p>Balance due $1,650.00 after the $500.00 fuel advance.</p>"), "§10 FAILS ON THE OLD CODE: the email says the balance in its own sentence");
+			eq(r.attachments.map((a) => a.filename), ["Example Broker Invoice Order #LD-TEST-0030.pdf", "LD-TEST-0030_POD.pdf", "LD-TEST-0030.pdf"],
+				"§10 ...the invoice, the POD and the rate con, as for any automatic invoice");
+			// The Draft Invoice button's page for the same load and line.
+			const m = await w.manual(ID);
+			await w.engine.render(m.ctx, NUMBER);
+			eq(w.seen.pages[1], page, "§10 FAILS ON THE OLD CODE: the page is the Draft Invoice button's own page for the same load and line, byte for byte");
+
+			const rec = p.ok ? w.engine.record(p.ctx, r, { via: "auto-smtp", actor: AUTO_ACTOR, invoiceId: NUMBER.invoiceId, mintedInvoiceId: NUMBER.invoiceId, editDiffs: [] }) : {};
+			const row = w.db.prepare("SELECT total, gross_total, lines_json, via, total_source, ratecon_total, sheet_total, edited FROM load_invoice_drafts WHERE load_id = ? AND via = 'auto-smtp'").get(ID);
+			eq([rec.recorded, row && [row.total, row.gross_total, row.via, row.total_source, row.ratecon_total, row.sheet_total, row.edited]],
+				[true, ["$1,650.00", "$2,150.00", "auto-smtp", "ratecon", "$2,150.00", "$2,150.00", 0]],
+				"§10 FAILS ON THE OLD CODE: the draft row bills the balance due and keeps the line haul, as the button's row does; unedited");
+			eq(row && JSON.parse(row.lines_json), { lineHaulCents: 215000, advancesCents: 50000, balanceCents: 165000, lineHaulSource: "ratecon", footnote: "*$500 for fuel advance",
+				lines: [{ id: line.id, kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "" }] },
+			"§10 FAILS ON THE OLD CODE: ...and its printed copy of the line");
+			eq(brokerInvoice.invoiceLines.listLines(w.db, ID).map((l) => l.invoiceId), [NUMBER.invoiceId], "§10 FAILS ON THE OLD CODE: the line is stamped with the invoice that printed it");
+			const audits = w.db.prepare("SELECT username, role, action, details FROM audit_trail ORDER BY id").all();
+			eq(audits.map((a) => a.action), ["invoice_draft_created", "invoice_draft_lines"], "§10 FAILS ON THE OLD CODE: two audit rows: the created row, then one for the lines (no edit row)");
+			eq(audits[0] && audits[0].details, `${NUMBER.invoiceId} → ${BILLING} (auto-smtp)`, "§10 ...the created row as it always was");
+			eq(audits[1] && [audits[1].username, audits[1].role, audits[1].details],
+				["auto-invoice", "system", `${NUMBER.invoiceId} load ${ID} — lines: line haul $2,150.00, less advances $500.00, balance due $1,650.00 (INVOICE ONLY — Job Tracking Payment unchanged); items: #${line.id} Fuel advance $500.00`],
+				"§10 FAILS ON THE OLD CODE: ...the lines' row, by the system actor, the figures first");
+		}
+
+		// Two clean lines: both print, the balance after both.
+		{
+			const w = world({ env: ON, denyHits: DENY });
+			addAdvance(w, { amountCents: 30000 });
+			addAdvance(w, { label: "Advance", amountCents: 20000, receivedOn: "" });
+			const p = await w.auto(ID);
+			eq([code(p), p.ok && p.ctx.billedTotal, p.ok && p.ctx.lineSummary.items.map((i) => i.amountCents), p.ok && p.ctx.lineSummary.footnote],
+				["ok", "$1,650.00", [30000, 20000], "*$300 for fuel advance\n*$200 for advance"],
+				"§10 FAILS ON THE OLD CODE: two clean lines, $300.00 and $200.00: both print, the balance after both, one footnote line each");
+		}
+
+		// Rule 7 on the lines: a label from the closed list, case aside, and no reference.
+		for (const [label, line, want] of [
+			["a label \"Fuel advance to Pat Example\" (a made-up driver's name after the list's words)", { label: "Fuel advance to Pat Example" }, "ADVANCE_LINE_TEXT"],
+			["a label \"Fuel advance EFS\"", { label: "Fuel advance EFS" }, "ADVANCE_LINE_TEXT"],
+			["a label \"Pat Example advance\"", { label: "Pat Example advance" }, "ADVANCE_LINE_TEXT"],
+			["a label \"Cash advance\"", { label: "Cash advance" }, "ADVANCE_LINE_TEXT"],
+			["the list's label with a reference", { reference: "EFS-55501" }, "ADVANCE_LINE_TEXT"],
+			["the label \"Advance\"", { label: "Advance" }, "ok"],
+			["the label \"FUEL ADVANCE\" (the list's, in capitals)", { label: "FUEL ADVANCE" }, "ok"],
+		]) {
+			const w = world({ env: ON, denyHits: DENY });
+			addAdvance(w, line);
+			const got = await w.auto(ID);
+			eq([code(got), w.seen.renders], [want, 0], `§10 FAILS ON THE OLD CODE: ${label}: ${want}, nothing rendered`);
+			if (want !== "ok") ok(!/Pat|EFS/.test(JSON.stringify(got.json)), `§10 ...${label}: the refusal carries none of the line's text`);
+		}
+		{
+			const w = world({ env: ON, denyHits: DENY });
+			addAdvance(w, { amountCents: 30000 });
+			addAdvance(w, { label: "Fuel advance to Pat Example", amountCents: 20000 });
+			eq(code(await w.auto(ID)), "ADVANCE_LINE_TEXT", "§10 FAILS ON THE OLD CODE: one typed line among clean ones stops the load");
+		}
+		ok(!brokerInvoice.buildInvoiceHtml({ invoiceLines: { lineHaulCents: 215000, advancesCents: 50000, balanceCents: 165000, footnote: "", items: [{ id: 1, label: "Fuel advance", amountCents: 50000, note: "Pat Example" }] } }).includes("Pat Example"),
+			"§10 a line's note prints on no invoice");
+
+		// No balance due left to bill: never the line haul instead.
+		for (const [label, lines] of [["an advance equal to the total", [{ amountCents: 215000 }]], ["two advances past it", [{ amountCents: 200000 }, { label: "Advance", amountCents: 20000 }]]]) {
+			const w = world({ env: ON, denyHits: DENY });
+			for (const l of lines) addAdvance(w, l);
+			const got = await w.auto(ID);
+			eq([code(got), got.http, w.seen.renders], ["ADVANCE_LINES_INVALID", 422, 0], `§10 FAILS ON THE OLD CODE: ${label}: no balance due to bill, ADVANCE_LINES_INVALID, nothing rendered`);
+		}
+
+		// F2: rule 7 on everything the invoice composes, before any number.
+		{
+			const unset = world({ env: ON });
+			addAdvance(unset);
+			eq([code(await unset.auto(ID)), unset.seen.renders], ["DENY_LIST_UNSET", 0], "§10 FAILS ON THE OLD CODE (F2): no carrier deny list set: DENY_LIST_UNSET, nothing rendered");
+			eq(code(await world({ env: ON }).auto("LD-TEST-0001")), "ok", "§10 (F2) ...a load with no line is made as before, with no list set");
+			const carrier = world({ env: ON, denyHits: DENY, ratecons: { ...RATECONS, [ID]: [cand(rateCon({ docs: "billing99887766@example-broker.test", total: "$2,150.00" }), "documents")] } });
+			addAdvance(carrier);
+			const cr = await carrier.auto(ID);
+			eq([code(cr), carrier.seen.renders], ["PROTECTED_VALUE", 0], "§10 FAILS ON THE OLD CODE (F2): the carrier canary in the billing email the rate con gave: PROTECTED_VALUE, nothing rendered");
+			ok(cr.json && !/9988/.test(JSON.stringify(cr.json)), "§10 (F2) ...the refusal names no value");
+			const split = world({ env: ON, denyHits: DENY, ratecons: { ...RATECONS, [ID]: [cand(rateCon({ docs: "billing9988@example-broker.test", total: "$2,150.00" }), "documents")] } });
+			addAdvance(split, { amountCents: 77660 });
+			eq(code(await split.auto(ID)), "ok", "§10 (F2) each value is read on its own: the canary's halves in two fields are no hit");
+			const named = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Pat Example") });
+			named.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Fuel paid to pat example at pickup')").run(ID);
+			addAdvance(named);
+			const nr = await named.auto(ID);
+			eq([code(nr), named.seen.renders], ["PROTECTED_VALUE", 0], "§10 FAILS ON THE OLD CODE (F2): the load's own driver's name, any case, in a note it would print: PROTECTED_VALUE");
+			ok(nr.json && !/pat|example/i.test(String(nr.json.error).replace(/the driver's name/, "")), "§10 (F2) ...the refusal names no value");
+			const team = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Sam Sample / Pat Example") });
+			team.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Fuel paid to Pat Example at pickup')").run(ID);
+			addAdvance(team);
+			eq(code(await team.auto(ID)), "PROTECTED_VALUE", "§10 FAILS ON THE OLD CODE (F2): one name of a team in the driver cell");
+			const other = world({ env: ON, denyHits: DENY, sheet: sheetWithDriver("Pat Example") });
+			other.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, notes) VALUES (?, '11112026-1', 'imap', 'Unload at door 4')").run(ID);
+			addAdvance(other);
+			eq(code(await other.auto(ID)), "ok", "§10 (F2) a note without the name or a listed value prints");
+		}
+
+		// No line: the base's (62fe51c8) invoice, byte for byte, whatever the switches say. Recorded by
+		// running this case on that tree.
+		const GOLDEN_NO_LINE = "c30af3c89720e501ce5145fd3b1f32c7300d4c29409e882b5ed684e253ec5277";
+		for (const [label, env, voided] of [
+			["both off", {}, false], ["the lines on", { BROKER_INVOICE_LINES_ENABLED: "true" }, false], ["both on", ON, false], ["both on, its one line voided", ON, true],
+		]) {
+			const g = world({ env, linesTable: true, denyHits: DENY });
+			if (voided) {
+				const l = addAdvance(g, {}, "LD-TEST-0001");
+				brokerInvoice.invoiceLines.voidLine(g.db, { loadId: "LD-TEST-0001", lineId: l.id, reason: "made up", actor: "qa" }, {});
+			}
+			const gp = await g.auto("LD-TEST-0001");
+			const gr = await g.engine.render(gp.ctx, NUMBER);
+			const digest = sha256([g.seen.pages[0], gr.html, gr.subject, gr.total, gr.attachments.map((a) => a.filename).join("|")].join("\0"));
+			eq(digest, GOLDEN_NO_LINE, `§10 no line (${label}): the page, the email, the subject, the billed total and the files are the base's, byte for byte`);
+			g.engine.record(gp.ctx, gr, { via: "auto-smtp", actor: AUTO_ACTOR, invoiceId: NUMBER.invoiceId, mintedInvoiceId: NUMBER.invoiceId, editDiffs: [] });
+			eq([actions(g), g.db.prepare("SELECT total FROM load_invoice_drafts").get().total], [["invoice_draft_created"], "$1,500.00"], `§10 no line (${label}): one audit row and the total, as before`);
+		}
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);

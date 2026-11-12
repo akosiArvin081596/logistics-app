@@ -304,6 +304,10 @@ function factsOf(ctx, shared, key) {
 		activeAdvanceLines: row ? ledger.activeAdvanceLines(db, key) : 0,
 		factored: shared.factored.has(key),
 		knownAddressOn: rules.knownAddressEnabled(env),
+		// The lines as the job reads them, so a draft whose printed line was voided or added to since
+		// reads as changed, never as the same invoice.
+		advanceLinesOn: rules.advanceLinesEnabled(env),
+		advanceLines: rules.advanceLinesEnabled(env) && row ? ledger.activeAdvanceLineMarks(db, key) : [],
 	});
 }
 
