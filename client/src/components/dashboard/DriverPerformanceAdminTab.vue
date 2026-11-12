@@ -154,6 +154,8 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   gap: 1.5rem;
   padding: 1.25rem;
   min-width: 0;
+  /* The layout follows the tab's own width, so the sidebar beside it can't squeeze a row. */
+  container-type: inline-size;
 }
 .adp-section {
   display: flex;
@@ -194,7 +196,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   min-width: 0;
   overflow: hidden;
 }
-/* One card on a phone: name and chevron, then this week, then last week. One row from md up. */
+/* One card when narrow: name and chevron, then this week, then last week. One row from 40rem up. */
 .adp-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 1.25rem;
@@ -214,7 +216,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   outline: 2px solid #0369a1;
   outline-offset: -2px;
 }
-@media (min-width: 768px) {
+@container (min-width: 40rem) {
   .adp-head {
     grid-template-columns: minmax(10rem, 1.2fr) minmax(14rem, 2fr) minmax(8rem, 1fr) 1.25rem;
     grid-template-areas: 'who this last chevron';
@@ -313,7 +315,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   font-size: 0.9rem;
   color: #6b7280;
 }
-@media (min-width: 768px) {
+@container (min-width: 40rem) {
   .adp-chevron { align-self: center; }
 }
 .adp-driver[data-open='true'] .adp-chevron { transform: rotate(180deg); }
@@ -324,7 +326,8 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   padding: 0.25rem 1rem 1rem;
   border-top: 1px solid #f3f4f6;
 }
-@media (min-width: 1024px) {
+/* What counted this week, last week and his past weeks side by side once the tab is wide enough. */
+@container (min-width: 52rem) {
   .adp-detail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .adp-part {

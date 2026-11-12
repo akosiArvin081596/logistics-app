@@ -823,6 +823,8 @@ eq('§18 the board by unit is the existing component, under its own heading, aft
   tabTemplate.indexOf('adp-weeks-title') < tabTemplate.indexOf('adp-board-title')], [true, true, true])
 eq('§18 no Vant of its own: the office\'s screens are plain', /<van-|from 'vant'/.test(adminTab), false)
 eq('§18 each row\'s button, the reasons\' summary and Try again are 44 px or more', ['adp-head', 'adp-off-title', 'adp-retry'].map((c) => new RegExp(`\\.${c} \\{[^}]*min-height: 44px`).test(styleOf(adminTab))), [true, true, true])
+eq('§18 a card when the tab is narrow, one row when it is wide: by the tab\'s own width, never the window\'s, so the sidebar can\'t squeeze a row',
+  [/\.adp \{[^}]*container-type: inline-size;/.test(styleOf(adminTab)), /@container \(min-width: 40rem\) \{\s*\.adp-head \{[^}]*grid-template-areas: 'who this last chevron';/.test(styleOf(adminTab)), /@media/.test(styleOf(adminTab))], [true, true, false])
 eq('§18 the bar takes the Loads bar\'s four colors, and only those', [...styleOf(adminTab).matchAll(/\.adp-fill\[data-color='(\w+)'\] \{ background: (#[0-9a-f]{6}); \}/g)].map((m) => [m[1], m[2]]), FILL_COLORS)
 eq('§18 no pay, rate, invoice, broker, phone or email word on the tab', /\$|\bpay\b|\brate\b|invoice|broker|phone|e-?mail/i.test(tabTemplate.replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')), false)
 
