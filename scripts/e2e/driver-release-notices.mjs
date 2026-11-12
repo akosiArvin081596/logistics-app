@@ -8,24 +8,27 @@
 // As a made-up Driver ("Casey Example"), at 390x844 and 1280x800:
 //   S   a page already open: nothing new at app open, on coming back, on a tap or on a reload, and no
 //       logout. They log out themselves: the login page says nothing about an update. They sign in as
-//       usual: the note shows the list's own words, the line above I acknowledge and both buttons;
-//       Show me first walks the release's steps on the real tabs; Done; the note is there again; I
-//       acknowledge shows it's working, takes one tap and closes it; a reload shows nothing; only the
-//       tour mark and the confirmation are written. 44 px or more, no sideways scroll
+//       usual: the note shows the list's own words, the line above both buttons, Show me the big blue
+//       one and I acknowledge the smaller one under it; Show me walks the release's steps on the real
+//       tabs with no Skip; the last step's I acknowledge shows it's working, takes one tap and closes
+//       the tour and the note; a reload shows nothing; only the confirmation and the tour mark are
+//       written. 44 px or more, no sideways scroll
 //   T   a load In Transit on a page already open: nothing new; the load stays on screen
 //   N   the note stays until I acknowledge: a tap outside it and Escape do nothing. A confirmation that
 //       can't be saved: the note closes with the line, they're in their loads, and the next sign-in asks
 //       again
 // And at 390x844:
 //   U   a note left unanswered: a reload shows nothing, and the next sign-in brings it back; confirmed,
-//       it doesn't come again. The tour can be skipped: nothing written, back to the note
+//       it doesn't come again. The release tour has no Skip, and Escape does nothing; left mid-tour, the
+//       note is unanswered and comes back at the next sign-in
 //   E   a page left open past its session: this feature does nothing to it, and it isn't sent to the
 //       login page. The next load finds the login page, and the note comes after that sign-in
 //   V   a moving truck's open page never changes: nothing opens as a truck stops, and a note or a tour
 //       that's up stays up as a truck moves. A sign-in on a moving truck still shows the note. On a truck
-//       read as moving, Show me first says when in the note's own line, in sight without a scroll and on
-//       top of everything, and the Kit's button in the app's short message; neither starts anything, and
-//       the note stays. V2 runs at 375x667 and 320x568 too, where the note fills its box
+//       read as moving, Show me says when in the note's own line, in sight without a scroll and on top of
+//       everything, and the Kit's button in the app's short message; neither starts anything, the note
+//       stays, and its own smaller I acknowledge answers it. V2 runs at 375x667 and 320x568 too, where
+//       the note fills its box
 //   F   a failed read at sign-in (503, no answer, an unreadable body): no note, no Kit button, and they
 //       stay in the app; a later load has the Kit button and nothing new; the next sign-in has the note
 //   P   a failed Performance answer at sign-in: no note and no mark; a good one later opens nothing; the
@@ -114,10 +117,17 @@ const ACCOUNTS = { [DRIVER.username]: DRIVER, [DRIVER_B.username]: DRIVER_B, [DR
 const RELEASE = latestReleaseId(RELEASES)
 const ENTRIES = unseenReleases([], RELEASES)
 const LATEST = ENTRIES[0]
+const ENTRY_IDS = ENTRIES.map((e) => e.id).sort()
+// A driver with the tab reads every entry's lines, newest first; one without it, only the lines for everyone.
+const ALL_LINES = ENTRIES.flatMap((e) => e.notes.map((n) => n.text))
+const LINES_WITHOUT_TAB = ENTRIES.flatMap((e) => e.notes.filter((n) => !n.needs).map((n) => n.text))
 const DAY = 24 * 60 * 60 * 1000
 const LOAD_HEADERS = ['Load ID', 'Driver', 'Job Status', 'Pickup Appointment', 'Drop-off Appointment']
 const ALL_STEP_TITLES = TOUR_STEPS.map((s) => s.title)
-const RELEASE_STEP_TITLES = LATEST.tour.map((id) => TOUR_STEPS.find((s) => s.id === id).title)
+// Show me walks every entry's steps on screen, each once, in order.
+const RELEASE_STEP_TITLES = [...new Set(ENTRIES.flatMap((e) => e.tour))].map((id) => TOUR_STEPS.find((s) => s.id === id).title)
+// The tab's name, and its step's title.
+const PERFORMANCE_TITLE = TOUR_STEPS.find((s) => s.id === 'performance').title
 const ACK_PATH = '/api/driver/me/release/acknowledge'
 const RECORD_PATH = '/api/admin/driver-release/acknowledgements'
 
@@ -365,8 +375,8 @@ const onLogin = (page) => new URL(page.url()).pathname === '/login'
 const noteUp = (page) => page.locator(testid('release-dialog')).count()
 const marksOf = (writes) => writes.filter((w) => !w.includes('/api/auth/'))
 const toastText = (page) => text(page, '.toast.show')
-// As a thumb does on a note taller than its box: scroll it only until Show me first shows at the box's
-// bottom edge, so the line that comes under it starts out of sight. Nothing at all where it already
+// As a thumb does on a note taller than its box: scroll it only until Show me shows at the box's bottom
+// edge, so the line that comes under the buttons starts out of sight. Nothing at all where it already
 // shows. Returns where the box ended up.
 const reachShowMe = (page) => page.evaluate(() => {
   const box = document.querySelector('[data-testid="release-dialog"]')
@@ -393,6 +403,19 @@ const lineInView = (page) => page.evaluate(() => {
     at: `line ${Math.round(r.top)}-${Math.round(r.bottom)}, box ${Math.round(b.top)}-${Math.round(b.bottom)} scrolled ${Math.round(box.scrollTop)}, window ${window.innerHeight}`,
   }
 })
+// The note's two buttons as the driver sees them: which is Vant's primary (the big blue one), where each
+// sits and the size of its words.
+const noteButtons = (page) => page.evaluate(() => {
+  const box = document.querySelector('[data-testid="release-dialog"]')
+  const read = (id) => {
+    const el = box && box.querySelector(`[data-testid="${id}"]`)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { primary: el.classList.contains('van-button--primary'), top: Math.round(r.top), font: parseFloat(getComputedStyle(el).fontSize), background: getComputedStyle(el).backgroundColor }
+  }
+  return { showMe: read('release-show-me'), acknowledge: read('release-acknowledge') }
+})
+const bigAndSmall = (b) => !!b.showMe && !!b.acknowledge && b.showMe.primary && !b.acknowledge.primary && b.showMe.top < b.acknowledge.top && b.acknowledge.font < b.showMe.font
 async function heights(page, selector) {
   const out = []
   for (const el of await page.locator(selector).all()) {
@@ -448,7 +471,10 @@ async function walkTour(page, size, titles) {
   for (let i = 0; i < titles.length; i++) {
     await appears(page, testid('tour-card'), 5000)
     await page.waitForTimeout(200)
-    seen.push({ label: await text(page, testid('tour-label')), title: await text(page, testid('tour-title')), tab: await activeTab(page), loadPage: await page.locator('.load-detail').count() })
+    seen.push({
+      label: await text(page, testid('tour-label')), title: await text(page, testid('tour-title')), tab: await activeTab(page), loadPage: await page.locator('.load-detail').count(),
+      skip: await page.locator(testid('tour-skip')).count(), next: await text(page, testid('tour-next')),
+    })
     if (i < titles.length - 1) await press(page.locator(testid('tour-next')).first(), size)
   }
   return seen
@@ -495,52 +521,51 @@ async function nextSignInRun(browser, size) {
     const heading = await text(page, testid('release-heading'))
     const title = await text(page, testid('release-entry-title'))
     const lines = await allText(page.locator(testid('release-line')))
-    const wantLines = LATEST.notes.map((n) => n.text)
     const ackLine = await text(page, testid('release-acknowledge-line'))
-    const buttonWords = [await text(page, testid('release-acknowledge')), await text(page, testid('release-show-me'))]
-    const buttons = await heights(page, `${testid('release-acknowledge')}, ${testid('release-show-me')}`)
+    const buttonWords = [await text(page, testid('release-show-me')), await text(page, testid('release-acknowledge'))]
+    const buttons = await heights(page, `${testid('release-show-me')}, ${testid('release-acknowledge')}`)
+    const looks = await noteButtons(page)
     const fits = await noSideScroll(page)
     const noGotIt = await page.locator('[data-testid="release-got-it"]').count() === 0
-    record(`S3-${t}`, "They sign in as usual and read What's new, the list's own words, with I acknowledge to confirm it",
-      `"${WORDS.notesHeading}"; "${LATEST.title}"; lines ${JSON.stringify(wantLines)}; no digit anywhere; the line "${WORDS.acknowledgeLine}"; buttons "${WORDS.acknowledge}" and "${WORDS.showMeFirst}", 44 px or more; no Got it; no side scroll; still the one logout they asked for`,
-      `app ${back}, heading "${heading}", title "${title}", lines ${JSON.stringify(lines)}, line "${ackLine}", buttons ${JSON.stringify(buttonWords)}, heights ${JSON.stringify(buttons)}, no Got it ${noGotIt}, fits ${fits}, logouts ${state.calls.logout}`,
-      back && shows && heading === WORDS.notesHeading && title === LATEST.title && sameList(lines, wantLines) && !/\d/.test(lines.join(' ')) && ackLine === WORDS.acknowledgeLine
-        && sameList(buttonWords, [WORDS.acknowledge, WORDS.showMeFirst]) && tall(buttons) && buttons.length === 2 && noGotIt && fits && state.calls.logout === 1,
+    record(`S3-${t}`, "They sign in as usual and read What's new, the list's own words: Show me the big blue button, and I acknowledge the smaller one under it",
+      `"${WORDS.notesHeading}"; "${LATEST.title}" first; lines ${JSON.stringify(ALL_LINES)}; no digit anywhere; the line "${WORDS.acknowledgeLine}"; "${WORDS.showMe}" primary on top, "${WORDS.acknowledge}" under it, not primary, in smaller words; both 44 px or more; no Got it; no side scroll; still the one logout they asked for`,
+      `app ${back}, heading "${heading}", title "${title}", lines ${JSON.stringify(lines)}, line "${ackLine}", buttons ${JSON.stringify(buttonWords)}, looks ${JSON.stringify(looks)}, heights ${JSON.stringify(buttons)}, no Got it ${noGotIt}, fits ${fits}, logouts ${state.calls.logout}`,
+      back && shows && heading === WORDS.notesHeading && title === LATEST.title && sameList(lines, ALL_LINES) && !/\d/.test(lines.join(' ')) && ackLine === WORDS.acknowledgeLine
+        && sameList(buttonWords, [WORDS.showMe, WORDS.acknowledge]) && bigAndSmall(looks) && tall(buttons) && buttons.length === 2 && noGotIt && fits && state.calls.logout === 1,
       await shot(page, `live-1-whats-new-note-${t}`))
 
     const writesBefore = writes.length
     await press(page.locator(testid('release-show-me')).first(), size)
     const walked = await walkTour(page, size, RELEASE_STEP_TITLES)
-    const cardHeights = await heights(page, `${testid('tour-next')}, ${testid('tour-skip')}`)
+    const cardHeights = await heights(page, testid('tour-next'))
     const cardFits = await noSideScroll(page)
-    const cardShot = await shot(page, `row-S4-show-me-first-tour-${t}`)
+    const cardShot = await shot(page, `row-S4-show-me-tour-last-step-${t}`)
     const midWrites = writes.slice(writesBefore)
-    await press(page.locator(testid('tour-next')).first(), size)
-    const marked = await until(() => writes.includes('POST /api/driver/me/release/tour-done'), 5000)
-    const cardGone = await page.locator(testid('tour-card')).count() === 0
-    const noteBack = await appears(page, testid('release-acknowledge'), 5000)
-    record(`S4-${t}`, "Show me first walks the release's steps on the real tabs; Done, and the note is there again",
-      `titles ${JSON.stringify(RELEASE_STEP_TITLES)}, "Step n of ${RELEASE_STEP_TITLES.length}"; the Performance step on the Performance tab; 44 px or more; nothing written along the way, then the tour mark; the note back with I acknowledge; still the one logout`,
-      `walked ${JSON.stringify(walked)}, heights ${JSON.stringify(cardHeights)}, fits ${cardFits}, writes along the way ${JSON.stringify(midWrites)}, tour marked ${marked}, card gone ${cardGone}, note back ${noteBack}, logouts ${state.calls.logout}`,
-      sameList(walked.map((s) => s.title), RELEASE_STEP_TITLES) && walked.every((s, i) => s.label === `Step ${i + 1} of ${RELEASE_STEP_TITLES.length}`)
-        && walked.find((s) => s.title === 'Performance').tab === 'Performance' && tall(cardHeights) && cardFits && midWrites.length === 0 && marked && cardGone && noteBack && state.calls.logout === 1,
+    const last = walked[walked.length - 1] || {}
+    record(`S4-${t}`, "Show me walks the release's steps on the real tabs, with no Skip, to a last step that ends in I acknowledge",
+      `titles ${JSON.stringify(RELEASE_STEP_TITLES)}, "Step n of ${RELEASE_STEP_TITLES.length}"; the ${PERFORMANCE_TITLE} step on its own tab; no Skip on any step; "${WORDS.tourNext}" until the last, then "${WORDS.acknowledge}"; 44 px or more; nothing written along the way; still the one logout`,
+      `walked ${JSON.stringify(walked)}, heights ${JSON.stringify(cardHeights)}, fits ${cardFits}, writes along the way ${JSON.stringify(midWrites)}, logouts ${state.calls.logout}`,
+      sameList(walked.map((s) => s.title), RELEASE_STEP_TITLES) && walked.every((s, i) => s.label === `Step ${i + 1} of ${RELEASE_STEP_TITLES.length}`) && walked.every((s) => s.skip === 0)
+        && walked.slice(0, -1).every((s) => s.next === WORDS.tourNext) && last.next === WORDS.acknowledge
+        && (walked.find((s) => s.title === PERFORMANCE_TITLE) || {}).tab === PERFORMANCE_TITLE && tall(cardHeights) && cardFits && midWrites.length === 0 && state.calls.logout === 1,
       cardShot)
 
-    // The answer is held back a moment, so the screen shows I acknowledge at work.
+    // The answer is held back a moment, so the screen shows the last step's I acknowledge at work.
     state.ackDelayMs = 2500
-    await press(page.locator(testid('release-acknowledge')).first(), size)
+    await press(page.locator(testid('tour-next')).first(), size)
     await page.waitForTimeout(500)
-    const working = await page.locator(`${testid('release-acknowledge')}.van-button--loading`).count()
-    const disabled = await page.locator(testid('release-acknowledge')).first().isDisabled().catch(() => false)
+    const disabled = await page.locator(testid('tour-next')).first().isDisabled().catch(() => false)
+    const busy = await page.locator(testid('tour-next')).first().getAttribute('aria-busy').catch(() => null)
     const workingShot = await shot(page, `live-2-acknowledge-saving-${t}`)
-    await page.locator(testid('release-acknowledge')).first().click({ force: true, timeout: 1000 }).catch(() => {})
+    await page.locator(testid('tour-next')).first().click({ force: true, timeout: 1000 }).catch(() => {})
+    const cardGone = await gone(page, testid('tour-card'), 8000)
     const closed = await gone(page, testid('release-dialog'), 8000)
     state.ackDelayMs = 0
     const tabAfter = await activeTab(page)
-    record(`S5-${t}`, 'I acknowledge shows it is working, takes one tap, and closes the note once it is saved',
-      'the button working and not tappable while it saves; one confirmation sent, for this release; the note gone after; back on Loads',
-      `working ${working}, disabled ${disabled}, confirmations ${state.calls.ack}, confirmed ${JSON.stringify([...state.acknowledged])}, closed ${closed}, tab "${tabAfter}"`,
-      working === 1 && disabled && state.calls.ack === 1 && sameList([...state.acknowledged], [RELEASE]) && closed && tabAfter === 'Loads',
+    record(`S5-${t}`, "The tour's I acknowledge shows it is working, takes one tap, and closes the tour and the note once it is saved",
+      'the button not tappable and busy while it saves; one confirmation sent, for the entries the note showed; the tour and the note gone after; back on Loads',
+      `disabled ${disabled}, busy ${busy}, confirmations ${state.calls.ack}, confirmed ${JSON.stringify([...state.acknowledged].sort())}, card gone ${cardGone}, closed ${closed}, tab "${tabAfter}"`,
+      disabled && busy === 'true' && state.calls.ack === 1 && sameList([...state.acknowledged].sort(), ENTRY_IDS) && cardGone && closed && tabAfter === 'Loads',
       workingShot)
 
     const before = state.calls.release
@@ -549,9 +574,9 @@ async function nextSignInRun(browser, size) {
     await momentPassed(state, before)
     const again = await noteUp(page)
     record(`S6-${t}`, 'A reload later in that session shows nothing new, and nothing else was written',
-      'no note; the only writes besides signing out and in are the tour mark and the confirmation; still the one logout they asked for',
+      'no note; the only writes besides signing out and in are the confirmation, then the tour mark; still the one logout they asked for',
       `note ${again}, writes ${JSON.stringify(marksOf(writes))}, logouts ${state.calls.logout}`,
-      again === 0 && sameList(marksOf(writes), ['POST /api/driver/me/release/tour-done', `POST ${ACK_PATH}`]) && state.calls.logout === 1)
+      again === 0 && sameList(marksOf(writes), [`POST ${ACK_PATH}`, 'POST /api/driver/me/release/tour-done']) && state.calls.logout === 1)
   } finally {
     await ctx.close()
   }
@@ -660,30 +685,40 @@ async function unansweredRun(browser, size) {
     await signOutAndBackIn(page, size, state)
     await momentPassed(state, readsBefore)
     const third = await noteUp(page)
-    record(`U2-${t}`, "Confirmed: it doesn't come again", 'no note at the next sign-in', `note ${third}, confirmed ${JSON.stringify([...state.acknowledged])}, logouts ${state.calls.logout}`,
-      third === 0 && sameList([...state.acknowledged], [RELEASE]) && state.calls.logout === 2)
+    record(`U2-${t}`, "Confirmed: it doesn't come again", 'no note at the next sign-in', `note ${third}, confirmed ${JSON.stringify([...state.acknowledged].sort())}, logouts ${state.calls.logout}`,
+      third === 0 && sameList([...state.acknowledged].sort(), ENTRY_IDS) && state.calls.logout === 2)
   } finally {
     await ctx.close()
   }
 
-  const skip = await signedIn(browser, size, { hasNote: true, status: 'Delivered' })
+  const mid = await signedIn(browser, size, { hasNote: true, status: 'Delivered' })
   try {
-    await appears(skip.page, testid('release-show-me'), 10000)
-    await press(skip.page.locator(testid('release-show-me')).first(), size)
-    const opened = await appears(skip.page, testid('tour-card'), 5000)
-    await press(skip.page.locator(testid('tour-next')).first(), size)
-    await skip.page.waitForTimeout(300)
-    await press(skip.page.locator(testid('tour-skip')).first(), size)
-    await skip.page.waitForTimeout(500)
-    const cardGone = await skip.page.locator(testid('tour-card')).count() === 0
-    const tab = await activeTab(skip.page)
-    const marks = marksOf(skip.writes)
-    const noteBack = await appears(skip.page, testid('release-acknowledge'), 5000)
-    record(`U3-${t}`, 'The tour can be skipped: nothing written, and the note is there again', 'the card gone, back on Loads, the note back, nothing written, no logout',
-      `opened ${opened}, gone ${cardGone}, tab "${tab}", note back ${noteBack}, writes ${JSON.stringify(marks)}, logouts ${skip.state.calls.logout}`,
-      opened && cardGone && tab === 'Loads' && noteBack && marks.length === 0 && skip.state.calls.logout === 0)
+    await appears(mid.page, testid('release-show-me'), 10000)
+    await press(mid.page.locator(testid('release-show-me')).first(), size)
+    const opened = await appears(mid.page, testid('tour-card'), 5000)
+    await press(mid.page.locator(testid('tour-next')).first(), size)
+    await mid.page.waitForTimeout(300)
+    const skips = await mid.page.locator(testid('tour-skip')).count()
+    await mid.page.keyboard.press('Escape')
+    await mid.page.waitForTimeout(500)
+    const stillUp = await mid.page.locator(testid('tour-card')).count()
+    const label = await text(mid.page, testid('tour-label'))
+    const marksMid = marksOf(mid.writes).length
+    // They leave the app mid-tour: the page opens again, and the next sign-in has the note, unanswered.
+    const before = mid.state.calls.release
+    await openAgain(mid.page)
+    await appOpen(mid.page)
+    await momentPassed(mid.state, before)
+    const onReload = await noteUp(mid.page)
+    const back = await signOutAndBackIn(mid.page, size, mid.state)
+    const next = await appears(mid.page, testid('release-dialog'), 10000)
+    record(`U3-${t}`, 'The release tour has no Skip, and Escape does nothing; left mid-tour, the note is unanswered and comes back at the next sign-in',
+      'no Skip on the step; the card still up on step 2 after Escape; nothing written; no note on the page opened again; the note at the next sign-in; the one logout they asked for',
+      `opened ${opened}, skips ${skips}, still up ${stillUp} "${label}", writes mid-tour ${marksMid}, on the page opened again ${onReload}, app ${back}, next sign-in ${next}, confirmed ${mid.state.acknowledged.size}, logouts ${mid.state.calls.logout}`,
+      opened && skips === 0 && stillUp === 1 && label === `Step 2 of ${RELEASE_STEP_TITLES.length}` && marksMid === 0 && onReload === 0 && back && next && mid.state.acknowledged.size === 0 && mid.state.calls.logout === 1,
+      await shot(mid.page, `row-U3-left-mid-tour-note-back-${t}`))
   } finally {
-    await skip.ctx.close()
+    await mid.ctx.close()
   }
 }
 
@@ -717,7 +752,7 @@ async function pastItsSessionRun(browser, size) {
 // ---------------------------------------------------------------- V: a moving truck
 // V2's tap and its checks, at any size, on a note that's up as the truck reads moving. The line is the
 // note's own, in sight with nothing over it: the app's short message would sit under the note's overlay.
-// The test scrolls the note only to reach Show me first, never to the line.
+// The test scrolls the note only to reach Show me, never to the line.
 async function showMeWhileMoving(up, size, before) {
   const t = size.tag
   const reached = await reachShowMe(up.page)
@@ -731,9 +766,9 @@ async function showMeWhileMoving(up, size, before) {
   const tours = await up.page.locator(testid('tour-card')).count()
   const stillUp = await noteUp(up.page)
   const { shown, read, stays } = before
-  record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me first then says when inside the note, in sight without a scroll, on top, starts nothing, and the note stays',
+  record(`V2-${t}`, 'The note up as the truck starts moving stays up; Show me then says when inside the note, in sight without a scroll, on top, starts nothing, and the note stays',
     `the note through the next truck read; "${WORDS.whenParked}" as the note's own line, all of it inside the note's box and the box in the window, the element at its centre; not in the message under the note; no tour; the note still up; nothing written; no logout`,
-    `shown ${shown}, read ${read}, stays ${stays}, box at ${reached} to reach Show me first, line ${says} "${lineWords}", in sight ${seen.inSight} (${seen.at}), on top ${seen.onTop}, in the message under it ${toastSays}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(up.writes))}, logouts ${up.state.calls.logout}`,
+    `shown ${shown}, read ${read}, stays ${stays}, box at ${reached} to reach Show me, line ${says} "${lineWords}", in sight ${seen.inSight} (${seen.at}), on top ${seen.onTop}, in the message under it ${toastSays}, tours ${tours}, still up ${stillUp}, writes ${JSON.stringify(marksOf(up.writes))}, logouts ${up.state.calls.logout}`,
     shown && read && stays === 1 && reached >= 0 && says && lineWords === WORDS.whenParked && seen.inSight && seen.onTop && !toastSays && tours === 0 && stillUp === 1 && marksOf(up.writes).length === 0 && up.state.calls.logout === 0,
     await shot(up.page, `row-V2-when-parked-${t}`))
 }
@@ -794,7 +829,7 @@ async function movingRun(browser, size) {
     await upMoving.page.waitForTimeout(500)
     const tab = await activeTab(upMoving.page)
     const tourMarks = upMoving.writes.filter((w) => w.includes('tour-done'))
-    record(`V3-${t}`, 'I acknowledge works on a moving truck; a tour under way stays up as the truck starts moving, until they end it', `the note confirmed while moving; the Kit's tour starts parked; the card stays through the next truck read; Next works; Skip goes back to Kit; no tour mark; no logout`,
+    record(`V3-${t}`, "The note's own, smaller I acknowledge works on a moving truck, its one way to answer; a tour under way stays up as the truck starts moving, until they end it", `the note confirmed while moving; the Kit's tour starts parked; the card stays through the next truck read; Next works; the app tour's Skip goes back to Kit; no tour mark; no logout`,
       `confirmed ${confirmed}, started ${started}, read ${read2}, tour up ${tourUp}, label "${label}", tab "${tab}", tour marks ${tourMarks.length}, logouts ${upMoving.state.calls.logout}`,
       confirmed && started && read2 && tourUp === 1 && label === `Step 2 of ${ALL_STEP_TITLES.length}` && tab === 'Kit' && tourMarks.length === 0 && upMoving.state.calls.logout === 0)
 
@@ -879,7 +914,7 @@ async function performanceAnswerRun(browser, size) {
     const back = await signOutAndBackIn(first.page, size, first.state)
     const shown = await appears(first.page, testid('release-dialog'), 10000)
     const lines = await allText(first.page.locator(testid('release-line')))
-    const wantLines = LATEST.notes.map((n) => n.text)
+    const wantLines = ALL_LINES
     record(`P1-${t}`, "A failed Performance answer at sign-in: no note and no mark; a good one later opens nothing; the next sign-in has the note whole",
       `no note; no mark; none once the tab's answer comes on that page; then every line at the next sign-in: ${JSON.stringify(wantLines)}; the one logout they asked for`,
       `held ${held}, marks ${marks.length}, later ${later}, app ${back}, shown ${shown}, lines ${JSON.stringify(lines)}, logouts ${first.state.calls.logout}`,
@@ -891,7 +926,7 @@ async function performanceAnswerRun(browser, size) {
   try {
     const shown = await appears(second.page, testid('release-dialog'), 10000)
     const lines = await allText(second.page.locator(testid('release-line')))
-    const wantLines = LATEST.notes.filter((n) => !n.needs).map((n) => n.text)
+    const wantLines = LINES_WITHOUT_TAB
     record(`P2-${t}`, 'A driver with no week reads only their line', `lines ${JSON.stringify(wantLines)}; no logout`, `shown ${shown}, lines ${JSON.stringify(lines)}, logouts ${second.state.calls.logout}`, shown && sameList(lines, wantLines) && second.state.calls.logout === 0)
   } finally {
     await second.ctx.close()
@@ -1013,7 +1048,7 @@ async function offerRun(browser, size) {
     const unreadAfter = await second.page.locator('.van-tabbar .van-badge').count()
     const readMarks = second.writes.filter((w) => /\/read$/.test(w))
     const allWrites = marksOf(second.writes)
-    const expectTabs = ['Loads', 'Loads', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Performance', 'Loads']
+    const expectTabs = ['Loads', 'Loads', 'Alerts', 'Kit', 'Messages', 'Invoices', PERFORMANCE_TITLE, 'Loads']
     record(`O3-${t}`, 'Take the tour walks every screen, with a load In Transit, and marks nothing read: its only writes are its own',
       `titles ${JSON.stringify(ALL_STEP_TITLES)} on tabs ${JSON.stringify(expectTabs)}; their load's own page on that step; no message or alert marked read; the badges stay; writes: the seen mark, then the tour mark; no logout`,
       `titles ${JSON.stringify(walked.map((s) => s.title))}, tabs ${JSON.stringify(walked.map((s) => s.tab))}, badges ${unreadBefore} then ${unreadAfter}, read marks ${JSON.stringify(readMarks)}, writes before Done ${JSON.stringify(midWrites)}, all ${JSON.stringify(allWrites)}, logouts ${second.state.calls.logout}`,
