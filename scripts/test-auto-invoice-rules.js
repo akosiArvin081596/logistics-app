@@ -310,6 +310,79 @@ eq(R.fingerprintDiff(fp, R.fingerprint({ ...facts, live: false })), ["removed"],
 eq(R.fingerprintDiff(fp, R.fingerprint({ ...facts, paymentCents: 125000 })), [], "§9 the same amount is no change");
 eq(R.fingerprintDiff(null, fp), [], "§9 no saved fingerprint: nothing to compare");
 
+// A change after the invoice was SENT (AUTO_INVOICE_HOLD_ONE_LOAD): only what the invoice billed holds
+// that load; everything else is logged once. Each table row of plan §2.2, both sides of each rule.
+if (typeof R.classifyChange !== "function" || typeof R.sentChange !== "function" || typeof R.holdOneLoadEnabled !== "function") {
+	failures.push("§9 FAILS ON THE OLD CODE: the rules carry classifyChange(), sentChange() and holdOneLoadEnabled()");
+} else {
+	const sent = { ...facts, onSheet: true };
+	const split = (over) => R.classifyChange(fp, { ...sent, ...over });
+	eq(split({}), { gone: false, hold: [], logged: [] }, "§9 classifyChange: nothing changed, nothing to say");
+	eq(split({ paymentCents: 130000 }), { gone: false, hold: ["payment"], logged: [] }, "§9 payment: holds (the invoice's amount is wrong now)");
+	eq(split({ paymentCents: null }), { gone: false, hold: ["payment"], logged: [] }, "§9 ...a Payment cell emptied holds too");
+	eq(split({ completed: false }), { gone: false, hold: ["status"], logged: [] }, "§9 status, Delivered undone: holds");
+	eq(R.classifyChange({ ...fp, completed: false }, sent), { gone: false, hold: [], logged: ["status"] }, "§9 ...Delivered again (only after Mark checked on an undone load): logged");
+	eq(split({ completed: false, live: false, status: "Cancelled" }), { gone: false, hold: ["status", "removed"], logged: [] }, "§9 removed, a cancelled row: holds");
+	eq(split({ live: false }), { gone: false, hold: ["removed"], logged: [] }, "§9 removed, deleted in the app (its row stays, with a tombstone): holds");
+	eq(R.classifyChange({ ...fp, live: false }, sent), { gone: false, hold: [], logged: ["removed"] }, "§9 ...live again: logged");
+	eq(split({ onSheet: false, completed: false, live: false, paymentCents: null, brokerEmail: "", trailer: "" }), { gone: true, hold: [], logged: [] },
+		"§9 a row gone from the sheet: gone, and no field is compared (a month moved to the archive)");
+	eq(split({ brokerEmail: "ap@example-broker.test" }), { gone: false, hold: [], logged: ["brokerEmail"] }, "§9 brokerEmail, the same domain: logged");
+	eq(split({ brokerEmail: "" }), { gone: false, hold: [], logged: ["brokerEmail"] }, "§9 brokerEmail blanked (or two addresses in the cell): logged");
+	eq(split({ brokerEmail: "ops@example-other.test" }), { gone: false, hold: ["brokerEmail"], logged: [] }, "§9 brokerEmail, another domain: holds");
+	eq(R.classifyChange({ ...fp, brokerEmail: "" }, sent), { gone: false, hold: ["brokerEmail"], logged: [] }, "§9 ...a blank Email later filled is a domain change: holds");
+	eq(R.classifyChange({ ...fp, rateConIds: [] }, { ...sent, rateConIds: [7] }), { gone: false, hold: [], logged: ["rateCons"] }, "§9 rateCons, a first row where none existed at the send: logged");
+	eq(split({ rateConIds: [5, 8] }), { gone: false, hold: ["rateCons"], logged: [] }, "§9 rateCons, one existed and the set changed: holds (replaced)");
+	eq(split({ rateConIds: [] }), { gone: false, hold: ["rateCons"], logged: [] }, "§9 ...or removed: holds");
+	eq(split({ podIds: [1, 3, 9] }), { gone: false, hold: [], logged: ["pods"] }, "§9 pods: logged (the amount and payer don't change)");
+	eq(split({ trailer: "TR002" }), { gone: false, hold: [], logged: ["trailer"] }, "§9 trailer: logged");
+	eq(split({ paymentCents: 99, podIds: [1], trailer: "X" }), { gone: false, hold: ["payment"], logged: ["trailer", "pods"] }, "§9 several at once: split, in the fingerprint's order");
+	eq([R.classifyChange(null, sent), R.classifyChange(fp, null)], [{ gone: false, hold: [], logged: [] }, { gone: false, hold: [], logged: [] }], "§9 no saved fingerprint, or no facts: nothing");
+
+	// One check of a sent load: what holds anew, what logs anew, and the memory of what was logged.
+	const check = (over, claim = {}) => R.sentChange({ saved: fp, facts: { ...sent, ...over }, changedFields: claim.changed || "", loggedJson: claim.logged || "" });
+	const pod = check({ podIds: [1, 3, 9] });
+	eq([pod.hold, pod.newHold, pod.logged, pod.gone, pod.words], [[], false, ["pods"], false, "pods: +1 -0"], "§9 sentChange: a POD added logs \"pods: +1 -0\", holds nothing");
+	eq(check({ podIds: [1, 9] }).words, "pods: +1 -1", "§9 ...a POD replaced names both counts plainly");
+	eq(check({ podIds: [1, 3, 9] }, { logged: JSON.stringify(pod.memory) }).logged, [], "§9 ...the same value again: logged once");
+	eq(check({}, { logged: JSON.stringify(pod.memory) }).logged, [], "§9 ...the value going back: nothing written");
+	eq(check({ podIds: [1, 3, 9, 10] }, { logged: JSON.stringify(pod.memory) }).words, "pods: +2 -0", "§9 ...a later new value logs");
+	eq([check({ trailer: "X" }).words, check({ brokerEmail: "ap@example-broker.test" }).words, check({ brokerEmail: "" }).words], ["trailer", "brokerEmail: same domain", "brokerEmail: blank"],
+		"§9 ...the logged words name the field, never its value");
+	const pay = check({ paymentCents: 1 });
+	eq([pay.hold, pay.newHold, pay.logged], [["payment"], true, []], "§9 sentChange: a payment change is a new hold");
+	eq(check({ paymentCents: 2 }, { changed: "payment" }).newHold, false, "§9 ...a load already flagged on payment isn't held again");
+	eq(check({ paymentCents: 2 }, { changed: "payment,pods" }).newHold, false, "§9 ...an older chip \"payment,pods\" doesn't re-fire");
+	eq([check({ podIds: [1] }, { changed: "pods" }).newHold, check({ podIds: [1] }, { changed: "pods" }).logged], [false, ["pods"]], "§9 ...an older \"pods\" chip: no hold, logged once");
+	eq(check({ paymentCents: 2, completed: false }, { changed: "payment" }).newHold, true, "§9 ...a new set of hold fields holds again");
+	const gone = check({ onSheet: false, completed: false, live: false });
+	eq([gone.hold, gone.newHold, gone.logged, gone.gone, gone.words], [[], false, [], true, "row gone from the sheet"], "§9 sentChange: a row gone logs once, holds nothing");
+	eq(check({ onSheet: false, completed: false, live: false }, { logged: JSON.stringify(gone.memory) }).gone, false, "§9 ...and only once");
+	eq(check({ podIds: [1, 3, 9] }, { logged: "not json" }).logged, ["pods"], "§9 a memory that can't be read: logs again (told twice beats not told)");
+	// A row the app removed (the Data Manager, the duplicate scanner): gone from the sheet, it holds as
+	// removed; still on the sheet, the note changes nothing.
+	const ROW_GONE = { onSheet: false, completed: false, live: false, paymentCents: null, brokerEmail: "", trailer: "" };
+	eq(R.classifyChange(fp, { ...sent, ...ROW_GONE }, { removedInApp: true }), { gone: false, hold: ["removed"], logged: [] },
+		"§9 FAILS ON THE OLD CODE: a row removed in the app, gone from the sheet: holds as removed, and no other field is compared");
+	eq(R.classifyChange(fp, { ...sent, paymentCents: 130000 }, { removedInApp: true }), { gone: false, hold: ["payment"], logged: [] },
+		"§9 ...a load whose row is still on the sheet (a duplicate went) is compared as any other");
+	const removedCheck = (claim = {}) => R.sentChange({ saved: fp, facts: { ...sent, ...ROW_GONE }, changedFields: claim.changed || "", loggedJson: claim.logged || "", removedInApp: true });
+	const removedNow = removedCheck();
+	eq([removedNow.hold, removedNow.newHold, removedNow.logged, removedNow.gone], [["removed"], true, [], false], "§9 FAILS ON THE OLD CODE: sentChange: a row removed in the app is a new hold, not a row gone");
+	eq(["removed", "status,removed", "payment", "payment,pods"].map((changed) => { const s = removedCheck({ changed }); return [s.hold, s.newHold]; }),
+		[[["removed"], false], [["status", "removed"], false], [["removed", "payment"], true], [["removed", "payment"], true]],
+		"§9 FAILS ON THE OLD CODE: ...the fields it was flagged on stay, with removed: no new hold once removed is among them (a cancelled load's row cleared later), a new one with it added");
+	eq(check({ onSheet: false, completed: false, live: false }).gone, true, "§9 ...with no note, a row gone is still only gone");
+	ok(!/\d{3,}|@/.test(JSON.stringify([pod.words, pay.hold, gone.words])), "§9 the words carry no amount and no address");
+	eq(R.HOLD_FIELDS, ["status", "removed", "payment", "brokerEmail", "rateCons"], "§9 the fields that can hold, by name: pods and trailer only ever log");
+	eq(["HELD_LOADS_STOP", "HELD_LOADS_WINDOW_MS"].filter((name) => name in R), [], "§9 FAILS ON THE OLD CODE: no count of held loads, and no window for one: holds never stop sending");
+
+	// The kill switch, read as knownAddressEnabled() reads: on unless it says off.
+	eq([undefined, "", "true", "on", "typo", " false ", "FALSE", "0", "no", "off"].map((v) => R.holdOneLoadEnabled({ AUTO_INVOICE_HOLD_ONE_LOAD: v })),
+		[true, true, true, true, true, false, false, false, false, false], "§9 AUTO_INVOICE_HOLD_ONE_LOAD: a kill switch, on unless false, 0, no or off");
+	eq(R.holdOneLoadEnabled(), true, "§9 ...on with no settings at all");
+}
+
 // ------------------------------------------------------------------ §10
 section("§10 server.js parity");
 const SRC = require("./lib/server-source").serverSource();

@@ -228,10 +228,12 @@ function world({ dbFile = null } = {}) {
 			return { recorded: true, draftRowId: Number(r.lastInsertRowid) };
 		},
 	};
+	// The stop this script sends from came under the rule where any change to a sent load stops all
+	// sending: AUTO_INVOICE_HOLD_ONE_LOAD=false is that rule.
 	w.jobDeps = ({ sendOn = true, trigger = false } = {}) => ({
 		db: w.db,
 		env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: trigger ? "true" : "false",
-			AUTO_INVOICE_MAX_PER_HOUR: "100", AUTO_INVOICE_MAX_PER_DAY: "1000" },
+			AUTO_INVOICE_MAX_PER_HOUR: "100", AUTO_INVOICE_MAX_PER_DAY: "1000", AUTO_INVOICE_HOLD_ONE_LOAD: "false" },
 		now: () => new Date(w.now),
 		readJobTracking: async () => ({ headers: HEADERS, data: [...w.rows] }),
 		closedMonthsOf: () => [],

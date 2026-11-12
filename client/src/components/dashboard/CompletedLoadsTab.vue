@@ -335,6 +335,7 @@
         <div class="auto-settings">
           <p v-if="autoSettingsProblem" class="auto-settings-problem" role="alert">{{ autoSettingsProblem }}</p>
           <p v-if="recipientCheckView" class="auto-settings-problem" role="alert">{{ recipientCheckView.text }}</p>
+          <p v-if="alertsView" class="auto-settings-problem" role="alert">{{ alertsView.text }}</p>
           <template v-if="autoSendView">
             <p class="auto-settings-label">Automatic sending</p>
             <p :class="autoSendView.stopped ? 'auto-settings-problem' : 'auto-settings-help'">{{ autoSendView.text }}</p>
@@ -390,7 +391,7 @@ import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
 import { loadRef, loadIdShown } from '../../lib/loadRef'
-import { autoModeLine, recipientCheckState } from '../../lib/autoInvoiceStatus'
+import { autoModeLine, recipientCheckState, autoAlertState } from '../../lib/autoInvoiceStatus'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
@@ -1075,6 +1076,9 @@ const autoSendStopping = ref(false)
 // The billing email check as this opening's read gave it; null when it has nothing to say.
 const autoRecipientCheck = ref(null)
 const recipientCheckView = computed(() => recipientCheckState(autoRecipientCheck.value))
+// No alert address on the server, as this opening's read said: display only.
+const autoAlerts = ref(null)
+const alertsView = computed(() => autoAlertState(autoAlerts.value))
 const autoSendView = computed(() => autoSendState(autoSend.value, autoRecipientCheck.value))
 const autoModeText = computed(() => autoModeLine(autoMode.value, { sending: Boolean(autoSendView.value), check: autoRecipientCheck.value }))
 async function stopAutoSend() {
@@ -1098,11 +1102,12 @@ async function openAutoSettings() {
   autoSettingsOpen.value = true; autoSettingsError.value = ''; autoSettingsProblem.value = ''; autoSettingsLoading.value = true
   // Nothing from an earlier opening is kept: lists saved without this read would
   // replace the stored ones (the opt-outs among them).
-  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''; autoSend.value = null; autoRecipientCheck.value = null
+  autoSettingsRead.value = false; autoConfirmedText.value = ''; autoOptOutText.value = ''; autoSend.value = null; autoRecipientCheck.value = null; autoAlerts.value = null
   try {
     const s = await api.get('/api/auto-invoice/settings')
     autoSend.value = s && s.send && typeof s.send === 'object' ? s.send : null
     autoRecipientCheck.value = s && s.recipientCheck && typeof s.recipientCheck === 'object' ? s.recipientCheck : null
+    autoAlerts.value = s && s.alerts && typeof s.alerts === 'object' ? s.alerts : null
     autoConfirmedText.value = (s.confirmedBrokerDomains || []).join('\n')
     autoOptOutText.value = (s.optOutDomains || []).join('\n')
     if (s.unreadable) autoSettingsProblem.value = AUTO_INVOICE_REASONS.SETTINGS_UNREADABLE.text
