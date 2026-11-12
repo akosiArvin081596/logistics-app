@@ -10,15 +10,18 @@
 //
 // For the open months (from 2026-10, the Eastern era's first month, to the
 // current business month, less every month period_locks holds locked) it lists:
-//   1. what a bare flip would move: each stored instant a reader of the plan's
-//      §2.2 turns into a business day, week or month whose day under APP_TIMEZONE
-//      alone (every instant re-read on --zone) differs from today's reading; the
-//      days the truck held at noon would change; each sheet stamp dated from
-//      2026-10-09 that a bare flip would re-read an hour late (its date is kept);
+//   1. what a bare flip would move: each stored instant a reader (the plan's
+//      §2.2, and the other readers of a stored instant the code has) turns into a
+//      business day, week or month whose day under APP_TIMEZONE alone (every
+//      instant re-read on --zone) differs from today's reading; the days the
+//      truck held at noon would change; each sheet stamp dated from 2026-10-09
+//      that a bare flip would re-read an hour late (its date is kept);
 //   2. what the switch moves (both settings, this code): expected none;
 //   3. the switch itself: the next Friday's cutoff and batch in UTC on each clock,
 //      the close of the switch's month on each clock, and the app's own
-//      APP_TIMEZONE and APP_TIMEZONE_FROM (their values only).
+//      APP_TIMEZONE and APP_TIMEZONE_FROM (their values only);
+//   4. by name, the readers of a past instant it does not read (section 2 does
+//      not speak for them).
 // It prints ids, days and counts: no name, amount or address.
 //
 // It writes nothing. The database is opened read-only through
@@ -62,6 +65,34 @@ function storedMs(v) {
 	if (m) return Date.parse(`${m[1]}T${m[2]}Z`);
 	return ISO_ZONED_RE.test(s) ? Date.parse(s) : NaN;
 }
+
+// A stamp in the app's own toISOString() shape as epoch ms, else NaN: the only
+// shape the receipt-to-truck backfill converts.
+function appStampMs(v) {
+	const s = String(v == null ? "" : v);
+	const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
+	return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19) ? ms : NaN;
+}
+
+// Date.parse, as the readers that take any parseable text read their column.
+const parsedMs = (v) => Date.parse(String(v == null ? "" : v));
+
+// Readers of a past instant this report does not read, by name: their instants
+// are outside this database, or are read for today alone. Section 2 does not
+// speak for them.
+const NOT_MEASURED = [
+	"retry emails' first-seen and listed-as-of times (the rate-con re-issue alert, the undated-load digest, the rate-con extract alert)",
+	"the integrity email's first-seen days and sign-in times (lib/integrity-check.js)",
+	"invoice status evidence: the day of a mailbox match (lib/invoice-evidence.js; the mailbox is not in this database)",
+	"arrival times on the pickup list (lib/arrival-pickup-display.js)",
+	"day-off ELD check days and notice lines (lib/time-off-eld-check.js; its pings with no longitude are counted under P3)",
+	"Driver Performance pickup credits placed by an ELD departure (those placed by a status tap are P4's instants)",
+	"cancelled days taken from the audit trail (those taken from the status history are P4's instants)",
+	"per-load haul windows read from zoned sheet cells (lib/load-haul.js; the stamp columns are M4z's)",
+	"counts of today's events (KPI routes and rate cons checked today, voice-note bytes today)",
+	"receipt-window refusal times (lib/expense-window.js)",
+	"hand-run reports (scripts/*-report.js), read when each is run",
+];
 
 // The Saturday-to-Friday week of a day, by its Saturday.
 function weekOf(day) {
@@ -134,12 +165,13 @@ function buildReport({ db, values, env, zone, from, nowMs = Date.now(), dbLabel 
 	const readers = [];
 	const reader = (id, what) => { const r = { id, what, flip: [], switched: [], counts: null }; readers.push(r); return r; };
 	// One stored instant of reader `r`: listed under each reading whose day (or
-	// month, `by`) differs from today's, when either day is in an open month.
-	// `extra(todayDay, otherDay)` adds fields to an item.
-	const note = (r, ref, ms, { by = "day", extra = null } = {}) => {
+	// week or month, `by`) differs from today's, when either day is in an open
+	// month. `extra(todayDay, otherDay)` adds fields to an item; `anyMonth` lists
+	// an instant of any month (one the open months' loads are compared with).
+	const note = (r, ref, ms, { by = "day", extra = null, anyMonth = false } = {}) => {
 		const d = clock.day(ms);
-		if (!isOpen(d.today.slice(0, 7)) && !isOpen(d.flip.slice(0, 7))) return;
-		const key = (day) => (by === "month" ? day.slice(0, 7) : day);
+		if (!anyMonth && !isOpen(d.today.slice(0, 7)) && !isOpen(d.flip.slice(0, 7))) return;
+		const key = (day) => (by === "month" ? day.slice(0, 7) : by === "week" ? weekOf(day) : day);
 		const item = (other, field) => ({
 			ref, at: new Date(ms).toISOString(), today: key(d.today), [field]: key(other),
 			week: weekOf(d.today) !== weekOf(other), month: d.today.slice(0, 7) !== other.slice(0, 7),
@@ -149,9 +181,19 @@ function buildReport({ db, values, env, zone, from, nowMs = Date.now(), dbLabel 
 		if (key(d.switched) !== key(d.today)) r.switched.push(item(d.switched, "switched"));
 	};
 	const has = (t, ...cols) => tables.has(t) && cols.every((c) => columnsOf(db, t).has(c));
+	// Each row of `table` whose `col` holds an instant (by `msOf`), listed by `by`.
+	const instants = (r, table, col, { by = "day", where = "", anyMonth = false, msOf = storedMs } = {}) => {
+		if (!has(table, "id", col)) return;
+		const sql = `SELECT id, "${col}" AS v FROM "${table}"${where ? ` WHERE ${where}` : ""} ORDER BY id`;
+		for (const row of db.prepare(sql).iterate()) {
+			const ms = msOf(row.v);
+			if (Number.isFinite(ms)) note(r, `${table} #${row.id} ${col}`, ms, { by, anyMonth });
+		}
+	};
 
-	// P8: the month of a truck assignment or carrier history instant (assignmentMonthKey()).
-	const p8 = reader("P8", "truck-assignment and carrier-history months (assignmentMonthKey())");
+	// P8: the month of a truck assignment or carrier history instant (assignmentMonthKey(),
+	// and a month-end guard's driver floor, assignmentFloorMonth()).
+	const p8 = reader("P8", "truck-assignment and carrier-history months (assignmentMonthKey(); assignmentFloorMonth() with APP_DAY_STAMPS_ENABLED on)");
 	if (has("truck_assignments", "id", "start_date", "end_date")) {
 		for (const a of db.prepare("SELECT id, start_date, end_date FROM truck_assignments ORDER BY id").all()) {
 			for (const col of ["start_date", "end_date"]) {
@@ -232,21 +274,33 @@ function buildReport({ db, values, env, zone, from, nowMs = Date.now(), dbLabel 
 		}
 	}
 
-	// F9: IFTA's day of each ELD ping, counted per vehicle and day (no list).
+	// F9: IFTA's day of each ELD ping, counted per vehicle and day (no list). The same
+	// pass counts P3, the pings with no longitude (their pay and mileage day falls
+	// back from the truck's band to the business clock, usTzForLongitude()), and W6,
+	// each ping's activity week.
 	const f9 = reader("F9", "IFTA days (routemate_telemetry pings, counted)");
-	f9.counts = { flip: {}, switched: {} };
+	const p3 = reader("P3", "ELD pay and mileage days of pings with no longitude (usTzForLongitude()'s fallback), counted");
+	const w6 = reader("W6", "ELD activity weeks (eld_activity_daily.week_start, each ping's business week), counted");
+	for (const r of [f9, p3, w6]) r.counts = { flip: {}, switched: {} };
+	const bump = (r, kind, key) => { r.counts[kind][key] = (r.counts[kind][key] || 0) + 1; };
 	if (has("routemate_telemetry", "routemate_vehicle_id", "location_date_ms", "dropped_reason") && openMonths.length) {
 		const [y, m] = openMonths[0].split("-").map(Number);
 		const sinceMs = appTime.wallClockToMs(clock.currentZone, y, m, 1, 0, 0, 0) - 86400000;
-		const stmt = db.prepare("SELECT routemate_vehicle_id AS vid, location_date_ms AS ms FROM routemate_telemetry WHERE location_date_ms >= ? AND dropped_reason = ''");
+		const noLng = columnsOf(db, "routemate_telemetry").has("longitude") ? "longitude IS NULL" : "0";
+		const stmt = db.prepare(`SELECT routemate_vehicle_id AS vid, location_date_ms AS ms, ${noLng} AS noLng FROM routemate_telemetry WHERE location_date_ms >= ? AND dropped_reason = ''`);
 		for (const p of stmt.iterate(sinceMs)) {
 			const ms = Number(p.ms);
 			if (!Number.isFinite(ms)) continue;
 			const d = clock.day(ms);
 			if (!isOpen(d.today.slice(0, 7)) && !isOpen(d.flip.slice(0, 7))) continue;
 			const key = `${p.vid} ${d.today}`;
-			if (d.flip !== d.today) f9.counts.flip[key] = (f9.counts.flip[key] || 0) + 1;
-			if (d.switched !== d.today) f9.counts.switched[key] = (f9.counts.switched[key] || 0) + 1;
+			for (const kind of ["flip", "switched"]) {
+				const other = d[kind];
+				if (other === d.today) continue;
+				bump(f9, kind, key);
+				if (p.noLng) bump(p3, kind, key);
+				if (weekOf(other) !== weekOf(d.today)) bump(w6, kind, `${p.vid} week of ${weekOf(d.today)}`);
+			}
 		}
 	}
 
@@ -331,6 +385,53 @@ function buildReport({ db, values, env, zone, from, nowMs = Date.now(), dbLabel 
 		}
 	}
 
+	// The other readers of a stored instant as a business day or week (the round's
+	// sweep; the plan's inventory ids where it has one).
+	const r1 = reader("R1", "receipt-to-truck backfill days (truck_assignments start_date, end_date; with EXPENSE_BACKFILL_APP_DAY_ENABLED on)");
+	instants(r1, "truck_assignments", "start_date", { msOf: appStampMs });
+	instants(r1, "truck_assignments", "end_date", { msOf: appStampMs });
+	const p7 = reader("P7", "Personal-line waits (the week of invoices.deleted_at; personalLeftForRegenerate())");
+	instants(p7, "invoices", "deleted_at", { by: "week", where: "COALESCE(deleted_at, '') <> ''", msOf: parsedMs });
+	// I2: automatic invoicing compares each load's completion day with its baseline's
+	// day, so a baseline of any month is listed.
+	const i2 = reader("I2", "automatic-invoice baseline days (auto_invoice_meta baseline_at, shadow_baseline_at)");
+	if (has("auto_invoice_meta", "key", "value")) {
+		for (const m of db.prepare("SELECT key, value FROM auto_invoice_meta WHERE key IN ('baseline_at', 'shadow_baseline_at') ORDER BY key").all()) {
+			const ms = parsedMs(m.value);
+			if (Number.isFinite(ms)) note(i2, `auto_invoice_meta ${m.key}`, ms, { anyMonth: true });
+		}
+	}
+	const f12 = reader("F12", "ELD device link days (eld_device_assignments assigned_from, assigned_until; with ELD_APP_DAY_ENABLED on)");
+	instants(f12, "eld_device_assignments", "assigned_from");
+	instants(f12, "eld_device_assignments", "assigned_until");
+	const d7 = reader("D7", "invoice dates a regenerated PDF prints (invoices.created_at; invoiceDateFromStamp())");
+	instants(d7, "invoices", "created_at");
+	const d9 = reader("D9", "invoice adjustment addendum days (invoices.adjusted_at)");
+	instants(d9, "invoices", "adjusted_at", { where: "COALESCE(adjusted_at, '') <> ''", msOf: parsedMs });
+	const d16 = reader("D16", "deleted-load days on the Super Admin list (deleted_loads.deleted_at)");
+	instants(d16, "deleted_loads", "deleted_at");
+	const r2 = reader("R2", "day-off request decision days (driver_availability.decided_at)");
+	instants(r2, "driver_availability", "decided_at", { where: "COALESCE(decided_at, '') <> ''", msOf: parsedMs });
+	const s26 = reader("S26", "CHR day-off draft days (time_off_chr_drafts.drafted_at)");
+	instants(s26, "time_off_chr_drafts", "drafted_at", { where: "COALESCE(drafted_at, '') <> ''", msOf: parsedMs });
+	const r3 = reader("R3", "Personal corrections' waiting-since days (expense_personal.needs_correction_since)");
+	instants(r3, "expense_personal", "needs_correction_since", { where: "COALESCE(needs_correction_since, '') <> ''", msOf: parsedMs });
+	const a14 = reader("A14", "edit-hold reason days (load_cell_writes.at)");
+	instants(a14, "load_cell_writes", "at", { msOf: parsedMs });
+
+	// D5: the dates a payout statement or broker-invoice PDF prints from an instant
+	// (lib/broker-invoice.js mdy()): a payout's stamps, and a zoned Status Update or
+	// Completion Date cell printed as the Delivery Date.
+	const d5 = reader("D5", "statement and broker-invoice PDF dates (investor_payouts paid_at, finalized_at, adjusted_at; zoned Status Update / Completion Date cells; mdy())");
+	for (const c of ["paid_at", "finalized_at", "adjusted_at"]) instants(d5, "investor_payouts", c);
+	for (let r = 1; r < rows.length; r++) {
+		for (const c of stampCols) {
+			const s = String((rows[r] || [])[c] == null ? "" : rows[r][c]).trim();
+			const ms = ISO_ZONED_RE.test(s) ? Date.parse(s) : NaN;
+			if (Number.isFinite(ms)) note(d5, `sheet row ${r + 1} ${headers[c]}`, ms);
+		}
+	}
+
 	// The switch itself.
 	const planned = clock.planned;
 	const switchDay = appTime.dayInZone(new Date(planned.fromMs), planned.zone);
@@ -378,6 +479,7 @@ function buildReport({ db, values, env, zone, from, nowMs = Date.now(), dbLabel 
 			switched: r.counts ? r.counts.switched : r.switched.slice(0, LIST_MAX),
 		})),
 		switchedTotal,
+		notMeasured: NOT_MEASURED,
 		theSwitch,
 	};
 }
@@ -406,11 +508,15 @@ function printText(report) {
 		}
 	};
 	section("1. What a bare flip would move (APP_TIMEZONE alone: every instant re-read on the new clock)", "flip");
-	section(`2. What the switch moves (both settings, this code): ${report.switchedTotal ? `${report.switchedTotal} item(s): look before switching on` : "none"}`, "switched");
+	const unmeasured = report.notMeasured.length;
+	section(`2. What the switch moves (both settings, this code): ${report.switchedTotal ? `${report.switchedTotal} item(s): look before switching on` : `none among the readers measured here (${unmeasured} more are named in 4)`}`, "switched");
 	say("");
 	say("3. The switch itself (UTC)");
 	say(`  Friday ${t.friday}: cutoff 6:30 PM ${t.cutoff.before} on ${t.before}, ${t.cutoff.after} on ${t.zone}; batch 7:00 PM ${t.batch.before} -> ${t.batch.after}`);
 	say(`  ${t.close.month} closes after ${t.close.lastOpenDay} (${t.close.graceDays} grace days): 00:00 ${t.close.before} on ${t.before}, ${t.close.after} on ${t.zone}`);
+	say("");
+	say(`4. Not measured here (${unmeasured}): readers of a past instant whose instants this report does not read`);
+	for (const n of report.notMeasured) say(`  - ${n}`);
 	return lines.join("\n");
 }
 
