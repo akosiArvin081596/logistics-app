@@ -3,26 +3,31 @@
 // composables/useDriverRelease.js driven for real on Vue's own reactivity, how DriverView.vue and the two
 // components use them, and the Drivers page's record (lib/driverNoticeRecord.js). The server's side is
 // scripts/test-driver-release-notices.js; scripts/e2e/driver-release-notices.mjs covers the page.
-//   §1  the words, exact, and plain: no figure, no name, no word a driver wouldn't use; none that's
-//       false for a driver who can read it, and none about being signed out
+//   §1  the words, exact, and plain: no figure, no name, no word a driver wouldn't use (the Past
+//       Performance step alone states the rule's own figures, word for word); none that's false for a
+//       driver who can read it, and none about being signed out; the Fuel range step without its last
+//       sentence; "Show me", with no "first"
 //   §2  noteMoment(): each input stops the note, and neither a working load nor the truck does
 //   §3  releaseFromAnswer(): what an answer may and may not say; an unreadable body says nothing
-//   §4  notesForScreen(), tourStepsFor(), tourCardView(): only what this driver's app has
+//   §4  notesForScreen(), tourStepsFor(), tourCardView(): only what this driver's app has; the release
+//       tour has no Skip and ends in I acknowledge, the app tour keeps Skip, Done and the videos
 //   §5  no forced sign-out: an answer that says one is due, at an app opening, with a way to sign out
 //       in reach, signs nobody out; this feature has no road to handleLogout; the code for it is gone
 //   §6  only right after a sign-in: a load with no sign-in shows nothing, however much the server has;
 //       the sign-in is spent by the one read, whatever comes of it; the read starts with the
 //       Performance read and the look waits for both; the look ends however it goes, so the contacts
 //       prompt can follow; only a Driver asks
-//   §7  the note, the offer and the tour: only "I acknowledge" answers a note; it waits for the save
-//       and can't be sent twice; not saved, the note closes with a line and marks nothing; "Show me
-//       first" opens the tour over the note, which is there again after it; a moving truck's open page
-//       never changes; the tour starts only on their own tap
+//   §7  the note, the offer and the tour: only "I acknowledge" answers a note, on the note or at the
+//       release tour's end; it waits for the save and can't be sent twice; not saved, the note closes
+//       with a line; "Show me" opens the tour over the note, Next … I acknowledge, with no Skip; a moving
+//       truck's open page never changes, and there the note's own I acknowledge still answers; the
+//       tour starts only on their own tap
 //   §8  DriverView.vue: one read, as the view opens, with the Performance read; the contacts prompt
 //       waits for the look; the login form notes the sign-in, in memory; the tour marks nothing read
-//   §9  the components: only "I acknowledge" closes the note, and the button shows it's working; on a
-//       short phone the note's box scrolls to Show me first's line; the app's other files know nothing
-//       of this
+//   §9  the components: Show me the big blue button and I acknowledge the small one under it; only
+//       "I acknowledge" closes the note, and the button shows it's working; the release tour's card has
+//       no Skip; on a short phone the note's box scrolls to Show me's line; the app's other files know
+//       nothing of this
 //   §10 only the driver app and the Drivers page read any of it
 //   §11 the Drivers page's record: the words, the three states, times on the app's clock; Super Admin
 //       only, and nothing with the switch off
@@ -99,10 +104,10 @@ function walk(dir) {
 // ── §1 ────────────────────────────────────────────────────────────────────
 section('1 the words')
 eq('the routes', [RELEASE_URL, ACK_URL, SEEN_URL, TOUR_DONE_URL], ['/api/driver/me/release', '/api/driver/me/release/acknowledge', '/api/driver/me/release/seen', '/api/driver/me/release/tour-done'])
-eq("the note's words", [WORDS.notesHeading, WORDS.acknowledge, WORDS.showMeFirst], ["What's new", 'I acknowledge', 'Show me first'])
-eq('the line above the button, exact, with the owner\'s own "agree"', WORDS.acknowledgeLine, "Tap I acknowledge to confirm you've read and agree to what's new.")
+eq("the note's words", [WORDS.notesHeading, WORDS.acknowledge, WORDS.showMe], ["What's new", 'I acknowledge', 'Show me'])
+eq('the line above the buttons, exact, with the owner\'s own "agree"', WORDS.acknowledgeLine, "Tap I acknowledge to confirm you've read and agree to what's new.")
 eq("a confirmation that can't be saved, exact", WORDS.notSaved, "We couldn't save that. We'll ask again next time you sign in.")
-ok('no "Got it" and no plain "Show me": only I acknowledge answers a note', !('gotIt' in WORDS) && !('showMe' in WORDS) && !Object.values(WORDS).some((w) => w === 'Got it' || w === 'Show me'))
+ok('"Show me", with no "first", and no "Got it": the tour it starts ends in I acknowledge, the only answer', !('gotIt' in WORDS) && !('showMeFirst' in WORDS) && !Object.values(WORDS).some((w) => w === 'Got it' || w === 'Show me first'))
 eq("the offer's buttons", [WORDS.takeTour, WORDS.skipOffer], ['Take the tour', 'Skip for now'])
 eq("the Kit's button", WORDS.kitButton, 'Take the app tour')
 eq("the tour's buttons", [WORDS.tourNext, WORDS.tourSkip, WORDS.tourDone], ['Next', 'Skip', 'Done'])
@@ -110,9 +115,13 @@ ok('the offer suggests the tour and says it can wait', /suggest/.test(WORDS.offe
 eq('the steps, in order', APP_TOUR_STEP_IDS, ['loads', 'load-page', 'alerts', 'kit', 'messages', 'invoices', 'performance', 'fuel-range'])
 eq('each step shows the real tab', TOUR_STEPS.map((s) => s.tab), ['loads', 'loads', 'notifications', 'kit', 'messages', 'invoices', 'performance', 'loads'])
 const allWords = [...Object.values(WORDS), ...TOUR_STEPS.flatMap((s) => [s.title, s.text, s.withPerformance].filter(Boolean))]
-const APP_WORDS = new Set(['Loads', 'Performance', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Active', 'Pending', 'Historical', 'POD', 'LogisX', 'What', 'Fuel', 'A', 'The', 'I'])
+// "Past" is the first word of the tab's own name, Past Performance.
+const APP_WORDS = new Set(['Loads', 'Performance', 'Past', 'Alerts', 'Kit', 'Messages', 'Invoices', 'Active', 'Pending', 'Historical', 'POD', 'LogisX', 'What', 'Fuel', 'A', 'The', 'I'])
+// The Past Performance step states the general rule in its own figures, word for word, as asked; a week
+// with time off can show a lower one on the tab. It is pinned exactly below, so no other figure creeps in.
+const PERFORMANCE_TEXT = "Here's your weekly performance. It shows your target turns and the minimum turns required. Each turn counts as .50, with the weekly requirement of 6 total turns, and a target of 7.5 weekly."
 for (const line of allWords) {
-  ok(`no figure: "${line}"`, !/[\d$#%@]/.test(line) && !/\b(half|dollars?|percent)\b/i.test(line))
+  if (line !== PERFORMANCE_TEXT) ok(`no figure: "${line}"`, !/[\d$#%@]/.test(line) && !/\b(half|dollars?|percent)\b/i.test(line))
   ok(`no word they wouldn't use: "${line}"`, !/\b(session|deploy|release|server|api|bug|flag|sheet|database|endpoint|cache|token)\b/i.test(line))
   ok(`nothing about being signed out: "${line}"`, !/\b(sign(ed|s)?[ -]?out|log(ged|s)?[ -]?(in|out)|logout|login|sign in again)\b/i.test(line))
   for (const sentence of line.split(/(?<=[.!?:])\s+/)) {
@@ -123,9 +132,12 @@ for (const line of allWords) {
   }
 }
 const fuelStep = TOUR_STEPS.find((s) => s.id === 'fuel-range').text
-ok("the fuel step says what it isn't", /not your load or route/.test(fuelStep))
-eq("the fuel step, exact: it says when, since no reading or no tank size on file shows no figure", fuelStep, "The top of the app shows your fuel range when it's known: how many miles you have left until empty. It's about your tank, not your load or route.")
-eq('the performance step says most weeks: a week of time off can have no required figure', TOUR_STEPS.find((s) => s.id === 'performance').text, "Your week is here: what counted, your target and, most weeks, what's required. No other driver can see it.")
+eq("the fuel step, exact: it says when, since no reading or no tank size on file shows no figure, and its last sentence is gone", fuelStep, "The top of the app shows your fuel range when it's known: how many miles you have left until empty.")
+ok('...nothing about the tank, the load or the route', !/tank|not your load or route/i.test(fuelStep))
+const perfStep = TOUR_STEPS.find((s) => s.id === 'performance')
+eq('the Past Performance step: the tab by its name, and the rule in the words asked for, lightly punctuated', [perfStep.title, perfStep.text], ['Past Performance', PERFORMANCE_TEXT])
+ok('..."No other driver can see it." is gone from every step', !TOUR_STEPS.some((s) => /no other driver/i.test(`${s.title} ${s.text} ${s.withPerformance || ''}`)))
+ok("the Loads step sends a driver with the bar to the tab by its new name", /Tap it to open Past Performance\.$/.test(TOUR_STEPS.find((s) => s.id === 'loads').withPerformance))
 ok("nothing else claims what's required without saying most weeks", allWords.every((line) => !/what's required/.test(line) || /most weeks/.test(line)))
 
 // ── §2 ────────────────────────────────────────────────────────────────────
@@ -186,6 +198,17 @@ eq('step words', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, { performa
 eq('not the last', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, { performance: true }), 2).last, false)
 eq('the last', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, { performance: true }), 7).last, true)
 eq('no card past the end', lib.tourCardView(lib.tourStepsFor(APP_TOUR_STEP_IDS, { performance: true }), 8), null)
+{
+  const buttons = (card) => card && { next: card.next, skip: card.skip, videos: card.videos }
+  const whole = lib.tourStepsFor(APP_TOUR_STEP_IDS, { performance: true })
+  const release = lib.tourStepsFor(['loads', 'performance', 'fuel-range'], { performance: true })
+  eq('the app tour: Next and Skip on a step; Done, Skip and the training videos at its end',
+    [buttons(lib.tourCardView(whole, 2)), buttons(lib.tourCardView(whole, 7))], [{ next: 'Next', skip: true, videos: false }, { next: 'Done', skip: true, videos: true }])
+  eq("the release tour: Next and no Skip on each step; I acknowledge at its end, with no Skip and no videos",
+    [0, 1, 2].map((i) => buttons(lib.tourCardView(release, i, true))), [{ next: 'Next', skip: false, videos: false }, { next: 'Next', skip: false, videos: false }, { next: 'I acknowledge', skip: false, videos: false }])
+  eq('a one-step release tour ends at once in I acknowledge', buttons(lib.tourCardView(release.slice(0, 1), 0, true)), { next: 'I acknowledge', skip: false, videos: false })
+  eq('only a true flag makes it the release tour', ['true', 1, {}, undefined].map((flag) => lib.tourCardView(release, 2, flag)?.next), ['Done', 'Done', 'Done', 'Done'])
+}
 
 // ── the world for §5 to §7 ─────────────────────────────────────────────────
 // `signedIn`: the view opens right after a sign-in. The world's server answers what's unread every time,
@@ -450,7 +473,7 @@ for (const [label, start, clear] of [
   w.release.noteAcknowledge?.()
   w.release.noteShowMe()
   await tick()
-  eq('...a second tap sends nothing, and Show me first starts nothing', [w.calls.posts.length, w.release.tourOpen.value], [1, false])
+  eq('...a second tap sends nothing, and Show me starts nothing', [w.calls.posts.length, w.release.tourOpen.value], [1, false])
   save.resolve({ success: true })
   await pending
   await tick()
@@ -494,44 +517,91 @@ for (const [label, failure] of [
   const w = world()
   w.box.answer = () => ({ notes: [{ id: ID, title: 'No tour', notes: [{ text: 'Just a line.' }], tour: [] }], tourOffered: false })
   await w.release.check()
-  eq('nothing to show them: no Show me first', w.release.noteView.value.canShowMe, false)
+  eq('nothing to show them: no Show me', w.release.noteView.value.canShowMe, false)
 }
 {
-  // "Show me first": the tour runs over the note, which is there again after it.
+  // "Show me": the release tour runs over the note, Next … I acknowledge, with no Skip.
   const w = world()
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   w.release.noteShowMe()
   await tick()
-  eq('Show me first marks nothing', w.calls.posts, [])
+  eq('Show me marks nothing', w.calls.posts, [])
   eq("the release's steps only, on the real tab", [w.calls.steps, w.s.tab], [['loads'], 'loads'])
-  eq('the card', [w.release.tourView.value?.label, w.release.tourView.value?.title, w.release.tourView.value?.last], ['Step 1 of 3', 'Loads', false])
+  const card = () => { const v = w.release.tourView.value; return v && [v.label, v.title, v.last, v.skip, v.next] }
+  eq('the card: no Skip, and Next', card(), ['Step 1 of 3', 'Loads', false, false, 'Next'])
   eq('the note waits under the tour', [w.release.noteView.value, w.release.onScreen?.value], [null, true])
   w.release.tourNext()
-  eq('Next: the Performance tab', [w.calls.steps, w.s.tab, w.release.tourView.value?.label], [['loads', 'performance'], 'performance', 'Step 2 of 3'])
+  eq('Next: the Past Performance tab, still with no Skip', [w.calls.steps, w.s.tab, card()], [['loads', 'performance'], 'performance', ['Step 2 of 3', 'Past Performance', false, false, 'Next']])
+  w.release.tourSkip()
+  await tick()
+  eq('a skip asked of it changes nothing: no Skip mid-tour, nothing written', [w.release.tourOpen.value, w.release.tourView.value?.label, w.calls.restored, w.calls.posts], [true, 'Step 2 of 3', [], []])
   w.release.tourNext()
-  eq('Next: the fuel range', [w.s.tab, w.release.tourView.value?.last], ['loads', true])
+  eq('Next: the fuel range, the last step, ending in I acknowledge, with no videos', [w.s.tab, card(), w.release.tourView.value?.videos], ['loads', ['Step 3 of 3', 'Fuel range', true, false, 'I acknowledge'], false])
   eq('nothing written along the way', w.calls.posts.length, 0)
   w.release.tourNext()
   await tick()
-  eq('Done: only the tour mark, for this release', w.calls.posts, [[TOUR_DONE_URL, { ids: [ID] }]])
-  eq('...closed and back where they were', [w.release.tourView.value, w.release.tourOpen.value, w.calls.restored], [null, false, ['loads']])
-  eq('...and the note is there again: the tour answers nothing', [w.release.noteView.value?.mode, w.release.onScreen?.value], ['notes', true])
-  await acknowledge(w.release)
-  eq('I acknowledge after it closes it', [w.release.noteView.value, w.calls.posts.map(([url]) => url)], [null, [TOUR_DONE_URL, ACK_URL]])
+  await tick()
+  eq("I acknowledge at its end: the confirmation, for the entries the note showed, then the tour's own mark", w.calls.posts, [[ACK_URL, { ids: [ID] }], [TOUR_DONE_URL, { ids: [ID] }]])
+  eq('...the tour closed and back where they were', [w.release.tourView.value, w.release.tourOpen.value, w.calls.restored], [null, false, ['loads']])
+  eq('...and the note answered, so it is gone too, with nothing more to say', [w.release.noteView.value, w.release.onScreen?.value, w.calls.toasts], [null, false, []])
+  await w.release.check()
+  eq('...and not back in this view', w.release.noteView.value, null)
 }
 {
+  // The last step's I acknowledge waits for the save, shows it's working, and can't be sent twice.
+  const w = world()
+  w.box.answer = NOTE_ANSWER
+  const save = deferred()
+  w.box.post = (url) => (url === ACK_URL ? save.promise : Promise.resolve({ success: true }))
+  await w.release.check()
+  w.release.noteShowMe()
+  await tick()
+  w.release.tourNext()
+  w.release.tourNext()
+  w.release.tourNext()
+  await tick()
+  eq('while it saves, the last step stays up and shows it is working', [w.release.tourOpen.value, w.release.tourView.value?.saving, w.release.tourView.value?.next, w.release.noteView.value], [true, true, 'I acknowledge', null])
+  w.release.tourNext()
+  w.release.noteAcknowledge()
+  await tick()
+  eq('...a second tap sends nothing', w.calls.posts.filter(([url]) => url === ACK_URL).length, 1)
+  save.resolve({ success: true })
+  await tick()
+  await tick()
+  eq('saved: the tour and the note close', [w.release.tourOpen.value, w.release.noteView.value, w.calls.toasts], [false, null, []])
+}
+for (const [label, failure] of [
+  ['no signal', () => Promise.reject(new TypeError('Failed to fetch'))],
+  ['a 503', () => Promise.reject(Object.assign(new Error('x'), { status: 503, code: 'RELEASE_UNAVAILABLE' }))],
+  ["an answer that isn't a yes", async () => ({})],
+]) {
+  const w = world()
+  w.box.answer = () => ({ notes: [ENTRY], tourOffered: true })
+  w.box.post = (url) => (url === ACK_URL ? failure() : Promise.resolve({ success: true }))
+  await w.release.check()
+  w.release.noteShowMe()
+  await tick()
+  eq(`(the scene, ${label}) a one-step release tour ends at once in I acknowledge`, w.release.tourView.value?.next, 'I acknowledge')
+  w.release.tourNext()
+  await tick()
+  await tick()
+  eq(`not saved at the tour's end (${label}): the tour and the note close, so they go on to their loads`, [w.release.tourOpen.value, w.release.noteView.value, w.release.onScreen?.value], [false, null, false])
+  eq(`...with the same line (${label})`, w.calls.toasts, [[WORDS.notSaved, 'error']])
+  eq(`...the confirmation tried once (${label})`, w.calls.posts.filter(([url]) => url === ACK_URL).length, 1)
+}
+{
+  // The note stays behind the tour: a way out that isn't its end (a new load's banner) leaves it unanswered.
   const w = world()
   w.box.answer = NOTE_ANSWER
   await w.release.check()
   w.release.noteShowMe()
   await tick()
   w.release.tourNext()
-  w.release.tourSkip()
+  w.release.closeTour()
   await tick()
-  eq('Skip: nothing written', w.calls.posts, [])
-  eq('...back where they were', [w.release.tourOpen.value, w.calls.restored, w.s.tab], [false, ['loads'], 'loads'])
-  eq('...and the note is there again', w.release.noteView.value?.mode, 'notes')
+  eq('left mid-tour by the banner: nothing written', w.calls.posts, [])
+  eq('...back where they were, and the note is there again, unanswered', [w.release.tourOpen.value, w.calls.restored, w.release.noteView.value?.mode], [false, ['loads'], 'notes'])
 }
 {
   // A moving truck's open page never changes: not the tour either, and not the note under it.
@@ -547,7 +617,12 @@ for (const [label, failure] of [
   w.release.tourNext()
   eq('...and Next still works', w.release.tourView.value?.label, 'Step 2 of 3')
   w.release.tourSkip()
-  eq('...and so does Skip, back to the note', [w.release.tourOpen.value, w.release.noteView.value?.mode], [false, 'notes'])
+  eq('...and there is no Skip: the tour stays', [w.release.tourOpen.value, w.release.tourView.value?.label], [true, 'Step 2 of 3'])
+  w.release.tourNext()
+  w.release.tourNext()
+  await tick()
+  await tick()
+  eq('...and its end still answers the note', [w.release.tourOpen.value, w.release.noteView.value, w.calls.posts.map(([url]) => url)], [false, null, [ACK_URL, TOUR_DONE_URL]])
 }
 {
   // The app's own short message sits under the note's overlay, so the note says it itself.
@@ -557,7 +632,7 @@ for (const [label, failure] of [
   eq('before the tap, the note says nothing about the truck', w.release.noteView.value?.whenParked, false)
   w.release.noteShowMe()
   await tick()
-  eq('Show me first on a truck read as moving: the note itself says when, nothing goes to the message under it, no tour starts, and the note stays',
+  eq('Show me on a truck read as moving: the note itself says when, nothing goes to the message under it, no tour starts, and the note stays',
     [w.release.noteView.value?.whenParked, w.calls.toasts, w.release.tourOpen.value, w.release.noteView.value?.mode, w.calls.posts], [true, [], false, 'notes', []])
   w.s.motionAllowed = true
   await tick()
@@ -565,9 +640,20 @@ for (const [label, failure] of [
   w.release.noteShowMe()
   await tick()
   eq('...tapped again once parked, the tour starts', [w.release.tourOpen.value, w.calls.steps], [true, ['loads']])
-  w.release.tourSkip()
+  w.release.closeTour()
   await tick()
   eq('...and the note after it says nothing about the truck', [w.release.noteView.value?.mode, w.release.noteView.value?.whenParked], ['notes', false])
+}
+{
+  // On a truck read as moving the note's own, smaller I acknowledge is the one way to answer, and it saves.
+  const w = world({ motionAllowed: false })
+  w.box.answer = NOTE_ANSWER
+  await w.release.check()
+  w.release.noteShowMe()
+  await tick()
+  eq('(the scene) Show me on a moving truck starts nothing', [w.release.tourOpen.value, w.release.noteView.value?.whenParked], [false, true])
+  await acknowledge(w.release)
+  eq('...and I acknowledge on the note saves and closes it', [w.calls.posts, w.release.noteView.value], [[[ACK_URL, { ids: [ID] }]], null])
 }
 {
   // Only the entries on screen are confirmed: one the driver can't read waits for the app that shows it.
@@ -643,13 +729,12 @@ for (const [label, failure] of [
   await w.release.check()
   w.release.noteShowMe()
   await tick()
-  eq('Show me first with the offer due as well: neither opens over the tour', w.release.noteView.value, null)
-  w.release.tourSkip()
+  eq('Show me with the offer due as well: neither opens over the tour', w.release.noteView.value, null)
+  w.release.tourNext()
   await tick()
-  eq('...the note comes back after it, first', w.release.noteView.value?.mode, 'notes')
-  await acknowledge(w.release)
-  eq('...then the offer', w.release.noteView.value?.mode, 'offer')
-  eq('...and only the confirmation was written', w.calls.posts, [[ACK_URL, { ids: [ID] }]])
+  await tick()
+  eq("...I acknowledge at the tour's end answers the note, and then the offer comes", w.release.noteView.value?.mode, 'offer')
+  eq("...after only the confirmation and the tour's own mark", w.calls.posts, [[ACK_URL, { ids: [ID] }], [TOUR_DONE_URL, { ids: [ID] }]])
 }
 
 // ── §8 ────────────────────────────────────────────────────────────────────
@@ -739,19 +824,43 @@ for (const id of ['release-acknowledge', 'release-acknowledge-line', 'release-sh
 ok('no Got it button any more', !/release-got-it|got-it/.test(NOTE))
 const notesPart = NOTE.slice(NOTE.indexOf("v-if=\"view.mode === 'notes'\""), NOTE.indexOf('<template v-else>'))
 const at = (needle) => notesPart.indexOf(needle)
-ok('the line sits right above I acknowledge, and Show me first comes after it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-acknowledge"') && at('data-testid="release-acknowledge"') < at('release-show-me'))
-ok('I acknowledge is always there; Show me first only with steps to show', !/v-if[^>]*release-acknowledge"/.test(notesPart) && /v-if="view\.canShowMe" type="button" class="drn-second" data-testid="release-show-me"/.test(notesPart))
-ok('while it saves, I acknowledge shows it is working and both buttons wait', /:loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(notesPart) && /:disabled="view\.saving" @click="showMe"/.test(notesPart))
-ok('on a truck read as moving, the note says when in its own line, by the buttons, after Show me first', /<p v-if="view\.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > at('release-show-me'))
+const showMeTag = (notesPart.match(/<van-button[^>]*data-testid="release-show-me"[^>]*>/) || [''])[0]
+const ackTags = notesPart.match(/<van-button[^>]*data-testid="release-acknowledge"[^>]*>/g) || []
+const stepsPart = notesPart.slice(notesPart.indexOf('<template v-if="view.canShowMe">'), notesPart.indexOf('</template>', notesPart.indexOf('<template v-if="view.canShowMe">')))
+ok('the line sits above both buttons: Show me first, I acknowledge right under it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-show-me"') && stepsPart.indexOf('data-testid="release-show-me"') >= 0 && stepsPart.indexOf('data-testid="release-show-me"') < stepsPart.indexOf('data-testid="release-acknowledge"'))
+ok('Show me is the big blue button: Vant\'s primary, full width', /\bround block type="primary" native-type="button" class="drn-primary drn-big" data-testid="release-show-me"/.test(showMeTag))
+ok('I acknowledge under it is the small one: the plain word, no primary', ackTags.length === 2 && stepsPart.includes(ackTags[0]) && /class="drn-second drn-quiet"/.test(ackTags[0]) && !/type="primary"|drn-primary|drn-big/.test(ackTags[0]))
+{
+  // The size order, from the note's own rules rather than Vant's defaults, so it holds at every size.
+  const ruleOf = (selector) => ((NOTE.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`)) || [])[1] || '')
+  const remOf = (rule, prop) => {
+    const m = new RegExp(`(?:^|[\\s;])${prop}: ([\\d.]+)(rem|px);`).exec(rule)
+    return m ? (m[2] === 'px' ? Number(m[1]) / 16 : Number(m[1])) : NaN
+  }
+  const weightOf = (rule) => Number((/font-weight: (\d+);/.exec(rule) || [])[1])
+  const big = ruleOf('.drn-big')
+  const quiet = ruleOf('.drn-second.drn-quiet')
+  const second = ruleOf('.drn-second')
+  eq("Show me's words are clearly bigger than I acknowledge's, and bolder", [remOf(big, 'font-size') - remOf(quiet, 'font-size') >= 0.125, weightOf(big) > weightOf(quiet)], [true, true])
+  eq('...Show me stands taller, and both are 44 px or more to tap', [remOf(big, 'min-height') > remOf(second, 'min-height'), remOf(big, 'min-height') * 16 >= 44, remOf(second, 'min-height') * 16 >= 44], [true, true, true])
+  ok("...and the quiet one's words are its own, set after the plain word's", NOTE.indexOf('.drn-second.drn-quiet {') > NOTE.indexOf('.drn-second {') && !Number.isNaN(remOf(quiet, 'font-size')))
+}
+ok('Show me only with steps to show; with none, I acknowledge alone is there, as the big button', /<template v-if="view\.canShowMe">/.test(notesPart) && /^<van-button\s+v-else round block type="primary" native-type="button" class="drn-primary" data-testid="release-acknowledge"/.test(ackTags[1] || ''))
+ok('while it saves, I acknowledge shows it is working and Show me waits', ackTags.length === 2 && ackTags.every((t) => /:loading-text="WORDS\.acknowledge" :loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(t)) && /:disabled="view\.saving" @click="showMe"/.test(showMeTag))
+ok('on a truck read as moving, the note says when in its own line, by the buttons, after them', /<p v-if="view\.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > notesPart.lastIndexOf('data-testid="release-acknowledge"'))
 // On a short phone the note fills its box, so the line would land below the box's fold: the box scrolls to
 // it. The browser flow's V2 checks it's in sight at 390x844, 375x667 and 320x568.
 ok("...and it's the note's last, so the box's end is the line", /^\s*<\/template>\s*$/.test(notesPart.slice(notesPart.indexOf('</p>', at('release-when-parked')) + '</p>'.length)))
 ok('the box that scrolls is the note itself', /<div v-if="view" ref="scroller" class="drn" role="dialog"/.test(NOTE) && /\.drn \{[^}]*max-height: 80vh; overflow-y: auto;/.test(NOTE))
-ok('Show me first tells the view, waits for the line to be drawn, then scrolls the box to its end, only with the line up', /async function showMe\(\) \{\s*emit\('show-me'\)\s*await nextTick\(\)\s*if \(scroller\.value && parkedLine\.value\) scroller\.value\.scrollTop = scroller\.value\.scrollHeight\s*\}/.test(NOTE) && /const scroller = ref\(null\)\s*const parkedLine = ref\(null\)/.test(NOTE))
+ok('Show me tells the view, waits for the line to be drawn, then scrolls the box to its end, only with the line up', /async function showMe\(\) \{\s*emit\('show-me'\)\s*await nextTick\(\)\s*if \(scroller\.value && parkedLine\.value\) scroller\.value\.scrollTop = scroller\.value\.scrollHeight\s*\}/.test(NOTE) && /const scroller = ref\(null\)\s*const parkedLine = ref\(null\)/.test(NOTE))
 ok('...on every tap of it, not only the first', (notesPart.match(/@click="showMe"/g) || []).length === 1 && !/watch\(/.test(NOTE))
 ok('only the note\'s own box moves: nothing scrolls the page', !/scrollIntoView|scrollTo\(|window\.scroll|document\.(documentElement|body)\.scroll/.test(NOTE))
 eq('the note says which answer was tapped, and those only', (NOTE.match(/defineEmits\(\[([^\]]*)\]\)/) || [])[1], "'acknowledge', 'show-me', 'take-tour', 'skip-offer'")
 for (const id of ['tour-card', 'tour-label', 'tour-next', 'tour-skip', 'tour-shield']) ok(`the tour has ${id}`, TOUR.includes(`data-testid="${id}"`))
+ok('Skip only on a tour that has one: the release tour has none', /<button v-if="view\.skip" type="button" class="tour-skip" data-testid="tour-skip" @click="emit\('skip'\)">/.test(TOUR) && (TOUR.match(/emit\('skip'\)/g) || []).length === 2)
+ok('...and Escape skips only there', /@keydown\.esc="view\.skip && emit\('skip'\)"/.test(TOUR))
+ok("the main button says the lib's word: Next, Done, or I acknowledge at the release tour's end, and waits while it saves", /data-testid="tour-next" :disabled="view\.saving"[^>]*@click="emit\('next'\)">\{\{ view\.next \}\}<\/button>/.test(TOUR) && !/WORDS\.tourDone|WORDS\.tourNext/.test(TOUR))
+ok('the training videos only where the lib offers them, at the app tour\'s end', /<button v-if="view\.videos && videos" type="button" class="tour-videos"/.test(TOUR))
 ok("every button is a 44 px tap", /\.tour-skip, \.tour-next, \.tour-videos \{ min-height: 44px/.test(TOUR) && /\.drn-primary \{ min-height: 44px/.test(NOTE) && /\.drn-second \{[\s\S]{0,80}min-height: 44px/.test(NOTE))
 ok('the clear layer stops a tap reaching the screen under it', /\.tour-shield \{ position: fixed; inset: 0;/.test(TOUR))
 ok('...under the new load banner, which stays tappable', /z-index: 150/.test(TOUR) && /z-index: 160/.test(TOUR))

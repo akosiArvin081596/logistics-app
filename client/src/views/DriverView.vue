@@ -397,7 +397,7 @@
 
       <!-- PERFORMANCE TAB: only after the server has answered for this viewer -->
       <section v-if="currentTab === 'performance' && performanceTab" class="tab-panel" data-testid="perf-panel">
-        <div class="section-header">Performance</div>
+        <div class="section-header">Past Performance</div>
         <DriverPerformanceTab v-if="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />
         <DriverPerformanceBoard v-else @gone="performanceTab = false" />
       </section>

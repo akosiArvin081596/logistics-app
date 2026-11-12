@@ -17,7 +17,15 @@ export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
 export const requirementLine = (target, required) => `${target} is the target. ${required} is required.`
 export const targetOnlyLine = (target) => `${target} is the target.`
 export const PRIVATE_LINE = 'No other driver can see this.'
-export const DRIVE_HOURS_LINE = 'Drive hours: coming soon'
+// This week's, and each past week's while the server sends no hours for it.
+export const DRIVE_HOURS_LINE = 'Driving hours: coming soon'
+// A past week's hours, from the server's own figure and day; what's missing is named, never a 0.
+export const drivingHoursLine = (hours) => `Driving: ${hours} h (estimate)`
+export const NO_DRIVING_HOURS_LINE = 'No driving hours for this truck'
+export const drivingHoursFromLine = (day) => `Driving hours start ${day}`
+export const THIS_WEEK_TITLE = 'This week'
+export const PAST_WEEKS_TITLE = 'Past weeks'
+export const countedFromLine = (day) => `Weeks before ${day} weren't counted.`
 export const LOWER_TARGET_LINE = 'Your target is lower this week for your approved time off.'
 export const TELL_DISPATCH_LINE = 'If something looks wrong, tell dispatch.'
 // The date is the server's, so this file holds no calendar.
@@ -30,6 +38,8 @@ export const FAILED_LINE = "Performance can't be shown right now. Try again in a
 
 // The three labels the server may choose. An answer holding anything else shows no label.
 export const PACE_WORDS = Object.freeze({ ahead: 'Ahead of Pace', 'on-track': 'On Track', 'needs-focus': 'Needs Focus' })
+// The Loads bar's colors the server may choose for this week. Anything else keeps the plain fill.
+export const BAR_COLORS = Object.freeze(['red', 'orange', 'green', 'blue'])
 // "not-counted" is said of the week on screen, so it stays true however the pickup was made.
 const pickupNoteWords = (note, current) => ({
   'last-week': 'Pickup counted last week',
@@ -37,12 +47,6 @@ const pickupNoteWords = (note, current) => ({
   'not-counted': current ? 'Pickup not counted this week' : 'Pickup not counted last week',
 })
 const PICKUP_NOTES = Object.freeze(['last-week', 'another-week', 'not-counted'])
-
-// The two weeks a driver can open. The answer holds both, so choosing one reads nothing.
-export const OWN_PERIODS = Object.freeze([
-  Object.freeze({ id: 'this-week', label: 'This week' }),
-  Object.freeze({ id: 'last-week', label: 'Last week' }),
-])
 
 // ── Who gets the tab ───────────────────────────────────────────────────────
 
@@ -145,7 +149,7 @@ export function ownWeekView(answer, periodId) {
   }
 }
 
-// The load page's bar: this week only, or null, and then it doesn't show.
+// The load page's bar: this week only, or null, and then it doesn't show. Its color is the server's.
 export function weekBarView(answer) {
   const figures = weekFigures(answer, 'this-week')
   if (!figures || ownWeekView(answer, 'this-week') === null) return null
@@ -154,7 +158,39 @@ export function weekBarView(answer) {
     pace: figures.paceId ? PACE_WORDS[figures.paceId] : '',
     paceId: figures.paceId,
     width: figures.width,
+    color: BAR_COLORS.includes(figures.week.barColor) ? figures.week.barColor : '',
   }
+}
+
+// ── His past weeks ─────────────────────────────────────────────────────────
+
+const isDay = (text) => typeof text === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(text)
+
+// One past week's hours line, from what the server sent: no hours at all (the switch off) is
+// "coming soon", and so is anything it can't trust, so a wrong figure never shows.
+function hoursLine(hours) {
+  if (!hours || typeof hours !== 'object') return DRIVE_HOURS_LINE
+  if (hours.state === 'estimate' && isNumber(hours.value) && hours.value >= 0) return drivingHoursLine(hours.value)
+  if (hours.state === 'none') return NO_DRIVING_HOURS_LINE
+  if (hours.state === 'starts' && isWeekDate(hours.day)) return drivingHoursFromLine(hours.day)
+  return DRIVE_HOURS_LINE
+}
+
+// His past weeks under this week, in the server's order (newest first): each one's days, his figure
+// of its target and its hours line, then the line naming the weeks before the first one counted.
+// null when the answer has no list it can trust whole, and then none shows.
+export function pastWeeksView(answer) {
+  const weeks = answer && Array.isArray(answer.pastWeeks) ? answer.pastWeeks : null
+  if (!weeks || !isWeekDate(answer.countedFrom)) return null
+  const rows = weeks.map((week) => {
+    const credits = week && week.credits
+    if (!credits || !isNumber(credits.value) || !isNumber(credits.target) || !isDay(week.start) || !isDay(week.end)) return null
+    const range = availabilityRangeText(week.start, week.end)
+    if (!range) return null
+    return { key: week.start, range, count: `${credits.value} of ${credits.target} loads`, hours: hoursLine(week.hours) }
+  })
+  if (rows.includes(null)) return null
+  return { title: PAST_WEEKS_TITLE, rows, countedFrom: countedFromLine(answer.countedFrom) }
 }
 
 // ── The Super Admin's board ────────────────────────────────────────────────
