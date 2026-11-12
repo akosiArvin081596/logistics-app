@@ -1202,8 +1202,8 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	// Notifications, accounts and Drivers page rows are a real SQLite from server.js's
 	// own CREATE TABLE text; every other payload read keeps the canned fixture. The
 	// Drivers page route is the shipped module, mounted by server.js's own line over the
-	// shipped requireRole and Drivers page row lookup. What is missing on the base is a
-	// FAIL here, never a crash.
+	// shipped requireRole and findDriverAccountSpelling(). What is missing on the base is
+	// a FAIL here, never a crash.
 	await (async () => {
 		const ALERTS_PATH = "/api/drivers-directory/:id/alerts-sent";
 		const routeCode = ROUTE_SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
