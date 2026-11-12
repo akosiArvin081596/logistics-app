@@ -314,7 +314,7 @@ function child(scenario) {
 	// ── §8 the browser's half
 	if (scenario === "after" || scenario === "unset") {
 		check(`§8 ${scenario}: the session answer when signed out`, () => {
-			const decl = /\n(const APP_TIMEZONE_SWITCH = [^\n]+\nconst APP_TIMEZONE_ERA = [\s\S]*?\n\t: \{\};)/.exec(SRC);
+			const decl = /\n(const APP_TIMEZONE_SWITCH = [^\n]+\nconst APP_TIMEZONE_ERA = [^\n]*(?:\n\t[^\n]*)*)\n/.exec(SRC);
 			if (!decl) throw new Error("server.js builds no APP_TIMEZONE_ERA");
 			const ERA = new Function("appTime", `${decl[1]}\nreturn APP_TIMEZONE_ERA;`)(appTime);
 			let handler = null;
