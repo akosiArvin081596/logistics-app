@@ -81,6 +81,7 @@ import { useViewport } from '../composables/useViewport'
 import { useApi } from '../composables/useApi'
 import { appDayOf, appToday, shiftYmd } from '../utils/datetime'
 import { loadIdRef } from '../lib/loadRef'
+import { HIDDEN_LOAD_NOTICE_TYPE } from '../lib/deletedLoadsView.js'
 import {
   CHR_DRAFT_COPIED, CHR_DRAFT_COPY, chrDraftOfNotice, chrDraftText, isDriverHasLoadsWarning, requestDecisionText, timeOffRequestOfNotice, withLoadsConfirmed,
 } from '../lib/availabilityText'
@@ -220,6 +221,11 @@ function formatNotificationTime(ts) {
 function handleTap(n) {
   if (!n.read) {
     store.markRead([n.id])
+  }
+  // A load an old delete hides is on no list: its banner on the dashboard is where it is reviewed.
+  if (n.type === HIDDEN_LOAD_NOTICE_TYPE) {
+    router.push({ path: '/dashboard' })
+    return
   }
   // Route to /dashboard?load=<id> when the notification carries one.
   // Every server emitter today puts loadId in metadata — see server.js
