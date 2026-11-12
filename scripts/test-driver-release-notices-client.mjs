@@ -828,8 +828,23 @@ const showMeTag = (notesPart.match(/<van-button[^>]*data-testid="release-show-me
 const ackTags = notesPart.match(/<van-button[^>]*data-testid="release-acknowledge"[^>]*>/g) || []
 const stepsPart = notesPart.slice(notesPart.indexOf('<template v-if="view.canShowMe">'), notesPart.indexOf('</template>', notesPart.indexOf('<template v-if="view.canShowMe">')))
 ok('the line sits above both buttons: Show me first, I acknowledge right under it', at('release-acknowledge-line') > 0 && at('release-acknowledge-line') < at('data-testid="release-show-me"') && stepsPart.indexOf('data-testid="release-show-me"') >= 0 && stepsPart.indexOf('data-testid="release-show-me"') < stepsPart.indexOf('data-testid="release-acknowledge"'))
-ok('Show me is the big blue button: Vant\'s primary, full width', /\bround block type="primary" native-type="button" class="drn-primary" data-testid="release-show-me"/.test(showMeTag))
-ok('I acknowledge under it is the small one: the plain word, no primary', ackTags.length === 2 && stepsPart.includes(ackTags[0]) && /class="drn-second"/.test(ackTags[0]) && !/type="primary"|drn-primary/.test(ackTags[0]))
+ok('Show me is the big blue button: Vant\'s primary, full width', /\bround block type="primary" native-type="button" class="drn-primary drn-big" data-testid="release-show-me"/.test(showMeTag))
+ok('I acknowledge under it is the small one: the plain word, no primary', ackTags.length === 2 && stepsPart.includes(ackTags[0]) && /class="drn-second drn-quiet"/.test(ackTags[0]) && !/type="primary"|drn-primary|drn-big/.test(ackTags[0]))
+{
+  // The size order, from the note's own rules rather than Vant's defaults, so it holds at every size.
+  const ruleOf = (selector) => ((NOTE.match(new RegExp(`(?:^|\\n)${selector.replace(/\./g, '\\.')} \\{([^}]*)\\}`)) || [])[1] || '')
+  const remOf = (rule, prop) => {
+    const m = new RegExp(`(?:^|[\\s;])${prop}: ([\\d.]+)(rem|px);`).exec(rule)
+    return m ? (m[2] === 'px' ? Number(m[1]) / 16 : Number(m[1])) : NaN
+  }
+  const weightOf = (rule) => Number((/font-weight: (\d+);/.exec(rule) || [])[1])
+  const big = ruleOf('.drn-big')
+  const quiet = ruleOf('.drn-second.drn-quiet')
+  const second = ruleOf('.drn-second')
+  eq("Show me's words are clearly bigger than I acknowledge's, and bolder", [remOf(big, 'font-size') - remOf(quiet, 'font-size') >= 0.125, weightOf(big) > weightOf(quiet)], [true, true])
+  eq('...Show me stands taller, and both are 44 px or more to tap', [remOf(big, 'min-height') > remOf(second, 'min-height'), remOf(big, 'min-height') * 16 >= 44, remOf(second, 'min-height') * 16 >= 44], [true, true, true])
+  ok("...and the quiet one's words are its own, set after the plain word's", NOTE.indexOf('.drn-second.drn-quiet {') > NOTE.indexOf('.drn-second {') && !Number.isNaN(remOf(quiet, 'font-size')))
+}
 ok('Show me only with steps to show; with none, I acknowledge alone is there, as the big button', /<template v-if="view\.canShowMe">/.test(notesPart) && /^<van-button\s+v-else round block type="primary" native-type="button" class="drn-primary" data-testid="release-acknowledge"/.test(ackTags[1] || ''))
 ok('while it saves, I acknowledge shows it is working and Show me waits', ackTags.length === 2 && ackTags.every((t) => /:loading-text="WORDS\.acknowledge" :loading="view\.saving" :disabled="view\.saving" @click="emit\('acknowledge'\)"/.test(t)) && /:disabled="view\.saving" @click="showMe"/.test(showMeTag))
 ok('on a truck read as moving, the note says when in its own line, by the buttons, after them', /<p v-if="view\.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">\{\{ WORDS\.whenParked \}\}<\/p>/.test(notesPart) && at('release-when-parked') > notesPart.lastIndexOf('data-testid="release-acknowledge"'))

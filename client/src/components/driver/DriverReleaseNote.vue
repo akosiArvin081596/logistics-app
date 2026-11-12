@@ -25,11 +25,11 @@
         <p class="drn-text drn-ack-line" data-testid="release-acknowledge-line">{{ WORDS.acknowledgeLine }}</p>
         <template v-if="view.canShowMe">
           <van-button
-            round block type="primary" native-type="button" class="drn-primary" data-testid="release-show-me"
+            round block type="primary" native-type="button" class="drn-primary drn-big" data-testid="release-show-me"
             :disabled="view.saving" @click="showMe"
           >{{ WORDS.showMe }}</van-button>
           <van-button
-            block native-type="button" class="drn-second" data-testid="release-acknowledge"
+            block native-type="button" class="drn-second drn-quiet" data-testid="release-acknowledge"
             :loading-text="WORDS.acknowledge" :loading="view.saving" :disabled="view.saving" @click="emit('acknowledge')"
           >{{ WORDS.acknowledge }}</van-button>
         </template>
@@ -90,6 +90,10 @@ async function showMe() {
 }
 .drn-second:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; border-radius: 8px; }
 .drn-second:disabled { opacity: 0.5; cursor: default; }
+/* Show me is the bigger of the note's two answers, and I acknowledge under it the quieter, at every size:
+   sizes set here, not left to Vant's, so the order can't flip. Both stay 44 px or more to tap. */
+.drn-big { min-height: 50px; font-size: 1rem; font-weight: 700; }
+.drn-second.drn-quiet { font-size: 0.8125rem; font-weight: 500; }
 .drn-ack-line { color: #0f172a; font-weight: 600; }
 .drn-when-parked { margin: 0.6rem 0 0; color: #92400e; font-weight: 600; }
 </style>
