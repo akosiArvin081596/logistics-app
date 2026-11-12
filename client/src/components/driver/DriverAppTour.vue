@@ -1,16 +1,17 @@
 <template>
   <!-- A card over the real screens. The clear layer behind it keeps a tap from reaching what's
-       underneath, so the tour can't change a status or send anything: only Next and Skip work. -->
+       underneath, so the tour can't change a status or send anything: only its own buttons work. The
+       release tour, from the note's Show me, has no Skip and ends in I acknowledge. -->
   <div class="tour-shield" data-testid="tour-shield"></div>
-  <div class="tour-card" role="dialog" aria-labelledby="tour-title" data-testid="tour-card" @keydown.esc="emit('skip')">
+  <div class="tour-card" role="dialog" aria-labelledby="tour-title" data-testid="tour-card" @keydown.esc="view.skip && emit('skip')">
     <div class="tour-label" data-testid="tour-label">{{ view.label }}</div>
     <h3 id="tour-title" class="tour-title" data-testid="tour-title">{{ view.title }}</h3>
     <p class="tour-text" data-testid="tour-text">{{ view.text }}</p>
     <div class="tour-actions">
-      <button type="button" class="tour-skip" data-testid="tour-skip" @click="emit('skip')">{{ WORDS.tourSkip }}</button>
-      <button ref="nextBtn" type="button" class="tour-next" data-testid="tour-next" @click="emit('next')">{{ view.last ? WORDS.tourDone : WORDS.tourNext }}</button>
+      <button v-if="view.skip" type="button" class="tour-skip" data-testid="tour-skip" @click="emit('skip')">{{ WORDS.tourSkip }}</button>
+      <button ref="nextBtn" type="button" class="tour-next" data-testid="tour-next" :disabled="view.saving" :aria-busy="view.saving ? 'true' : null" @click="emit('next')">{{ view.next }}</button>
     </div>
-    <button v-if="view.last && videos" type="button" class="tour-videos" data-testid="tour-videos" @click="emit('videos')">{{ WORDS.tourVideos }}</button>
+    <button v-if="view.videos && videos" type="button" class="tour-videos" data-testid="tour-videos" @click="emit('videos')">{{ WORDS.tourVideos }}</button>
   </div>
 </template>
 
@@ -50,4 +51,5 @@ watch(() => props.view.label, () => nextBtn.value?.focus())
 .tour-next { flex: 1; border: none; background: #0369a1; color: #fff; }
 .tour-videos { display: block; width: 100%; margin-top: 0.45rem; border: none; background: none; color: #0369a1; }
 .tour-skip:focus-visible, .tour-next:focus-visible, .tour-videos:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+.tour-next:disabled { opacity: 0.6; cursor: default; }
 </style>
