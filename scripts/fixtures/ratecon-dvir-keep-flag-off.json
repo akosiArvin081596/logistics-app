@@ -1,0 +1,411 @@
+{
+ "note": "Captured on the base's own server.js by scripts/test-ratecon-reissue-hold.js --capture; made-up data.",
+ "answers": [
+  [
+   "open, one readable DVIR line, $35 lower",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456789",
+     "storedLoadId": "123456789",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456789",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,115.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "open, no reading, $35 lower",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456790",
+     "storedLoadId": "123456790",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456790",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,115.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "open, no reading, $40 lower",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456791",
+     "storedLoadId": "123456791",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456791",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,110.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "open, no reading, $105 lower",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456792",
+     "storedLoadId": "123456792",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456792",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,045.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "open, a rise",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456793",
+     "storedLoadId": "123456793",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456793",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,200.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "another broker, one readable DVIR line",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "LD-TEST-0001",
+     "storedLoadId": "LD-TEST-0001",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "LD-TEST-0001",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "ap@example-broker.test",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,115.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "delivered, one readable DVIR line, nothing else changed",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456794",
+     "storedLoadId": "123456794",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456794",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,150.00"
+     },
+     "kept": [
+      "Assigned Date",
+      "  Payment  "
+     ],
+     "held": [
+      {
+       "column": "  Payment  ",
+       "stored": "$2,150.00",
+       "sent": "$2,115.00"
+      }
+     ],
+     "holdReason": "delivered",
+     "alsoChanged": []
+    },
+    "alerts": [
+     {
+      "loadId": "123456794",
+      "reason": "delivered",
+      "held": [
+       {
+        "column": "  Payment  ",
+        "stored": "$2,150.00",
+        "sent": "$2,115.00"
+       }
+      ],
+      "changed": []
+     }
+    ]
+   }
+  ],
+  [
+   "delivered, one readable DVIR line, a date changed",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456795",
+     "storedLoadId": "123456795",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456795",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,150.00"
+     },
+     "kept": [
+      "Pickup Appointment",
+      "Assigned Date",
+      "  Payment  "
+     ],
+     "held": [
+      {
+       "column": "Pickup Appointment",
+       "stored": "11/10/2026 08:00",
+       "sent": "11/10/2026 10:00"
+      },
+      {
+       "column": "  Payment  ",
+       "stored": "$2,150.00",
+       "sent": "$2,115.00"
+      }
+     ],
+     "holdReason": "delivered",
+     "alsoChanged": []
+    },
+    "alerts": [
+     {
+      "loadId": "123456795",
+      "reason": "delivered",
+      "held": [
+       {
+        "column": "Pickup Appointment",
+        "stored": "11/10/2026 08:00",
+        "sent": "11/10/2026 10:00"
+       },
+       {
+        "column": "  Payment  ",
+        "stored": "$2,150.00",
+        "sent": "$2,115.00"
+       }
+      ],
+      "changed": []
+     }
+    ]
+   }
+  ],
+  [
+   "closed month, one readable DVIR line",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456796",
+     "storedLoadId": "123456796",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456796",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "9/28/2026 08:00",
+      "Drop-off Appointment": "9/29/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "9/27/2026, 9:00:00 AM",
+      "  Payment  ": "$2,150.00"
+     },
+     "kept": [
+      "  Payment  "
+     ],
+     "held": [
+      {
+       "column": "  Payment  ",
+       "stored": "$2,150.00",
+       "sent": "$2,115.00"
+      }
+     ],
+     "holdReason": "in a closed month (2026-09)",
+     "alsoChanged": []
+    },
+    "alerts": [
+     {
+      "loadId": "123456796",
+      "reason": "in a closed month (2026-09)",
+      "held": [
+       {
+        "column": "  Payment  ",
+        "stored": "$2,150.00",
+        "sent": "$2,115.00"
+       }
+      ],
+      "changed": []
+     }
+    ]
+   }
+  ],
+  [
+   "revised rate con with an advance, the email's Total",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456781",
+     "storedLoadId": "123456781",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456781",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,115.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "revised rate con with an advance, the email's New Total",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456781",
+     "storedLoadId": "123456781",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456781",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$1,615.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ],
+  [
+   "open, two DVIR lines read, $35 lower",
+   {
+    "status": 200,
+    "body": {
+     "loadId": "123456797",
+     "storedLoadId": "123456797",
+     "found": true,
+     "rows": 1,
+     "values": {
+      "Load ID": "123456797",
+      "Details": "Test freight, 20,000 lbs",
+      "Pickup Appointment": "11/10/2026 08:00",
+      "Drop-off Appointment": "11/11/2026 0:00",
+      "Email": "made-up.agent@chrobinson.com",
+      "Assigned Date": "11/9/2026, 9:00:00 AM",
+      "  Payment  ": "$2,115.00"
+     },
+     "kept": [
+      "Assigned Date"
+     ],
+     "held": [],
+     "holdReason": "",
+     "alsoChanged": []
+    },
+    "alerts": []
+   }
+  ]
+ ]
+}

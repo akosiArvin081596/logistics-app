@@ -9067,6 +9067,104 @@ if (startsJob("load cell-write record purge (at boot, then daily)")) {
 	if (typeof timer.unref === "function") timer.unref();
 }
 
+// DVIR KEEP: a found C.H. Robinson load's email whose Payment is lower only by the rate
+// con's DVIR lines, or by what looks like them, keeps the stored Payment, since CHR pays
+// the full amount (lib/ratecon-dvir-keep.js). DEFAULT OFF, never in a replica; off, each
+// decision is only recorded (would_keep, would_hold) for the switch-on report.
+const rateconDvirKeep = require("./lib/ratecon-dvir-keep");
+const RATECON_DVIR_KEEP_ENABLED = !require("./lib/replica-mode").active() && /^(true|1|yes|on)$/i.test(String(process.env.RATECON_DVIR_KEEP_ENABLED ?? "").trim());
+const RATECON_DVIR_DECISIONS_KEEP_DAYS = 400;
+// Bounds the record should the route ever be called far more often than emails arrive.
+const RATECON_DVIR_DECISIONS_MAX_ROWS = 50000;
+const RATECON_DVIR_ACTOR = { session: { user: { id: 0, username: "ratecon-dvir-keep", role: "system" } } };
+
+// The decision record (created on first use): cents and codes only, keyed by load.
+function rateConDvirDecisionsTable() {
+	if (rateConDvirDecisionsTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS ratecon_dvir_decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			load_key TEXT NOT NULL,
+			at TEXT NOT NULL,
+			stored_cents INTEGER NOT NULL,
+			sent_cents INTEGER NOT NULL,
+			dvir_cents INTEGER NOT NULL,
+			dvir_count INTEGER NOT NULL,
+			reading TEXT NOT NULL CHECK (reading IN ('readable', 'unreadable', 'none')),
+			verdict TEXT NOT NULL CHECK (verdict IN ('kept', 'held', 'would_keep', 'would_hold')),
+			reason TEXT NOT NULL CHECK (reason IN ('dvir_lines', 'disagrees', 'other_money', 'unread', 'no_dvir_line')),
+			switch_on INTEGER NOT NULL CHECK (switch_on IN (0, 1)),
+			protected_load INTEGER NOT NULL CHECK (protected_load IN (0, 1))
+		)
+	`);
+	db.exec("CREATE INDEX IF NOT EXISTS idx_ratecon_dvir_decisions_load ON ratecon_dvir_decisions(load_key, id)");
+	rateConDvirDecisionsTable.ready = true;
+}
+
+// The DVIR decision on a found load's email, with the values key of its Payment column,
+// or null where the rule doesn't apply (today's rule). Never throws.
+function rateConDvirKeepCheck(loadId, headers, stored, values) {
+	try {
+		if (!rateconDvirKeep.isChrLoad(stored, headers)) return null;
+		const header = rateconDvirKeep.paymentColumn(headers);
+		if (header === null) return null;
+		const keys = Object.keys(values || {});
+		const want = String(header).trim().toLowerCase();
+		const column = keys.find((c) => c === header) ?? keys.find((c) => c.trim().toLowerCase() === want);
+		if (column === undefined) return null;
+		const storedCents = cellCompare.moneyCents(storedCellNamed(stored, column));
+		const sentCents = cellCompare.moneyCents(values[column]);
+		if (storedCents === null || sentCents === null) return null;
+		const otherMoneyChanged = keys.some((c) => c !== column && REISSUE_PAYMENT_RE.test(c.trim())
+			&& String(values[c] == null ? "" : values[c]).trim() !== "" && !reissueSameValue(c, storedCellNamed(stored, c), values[c]));
+		const d = rateconDvirKeep.decide({ storedCents, sentCents, reading: rateConDvirReading(loadId), otherMoneyChanged });
+		return d.verdict === "none" ? null : { ...d, column };
+	} catch (e) {
+		console.error(`[ratecon-dvir-keep] the DVIR check failed, so today's rule applies: ${(e && e.message) || e}`);
+		return null;
+	}
+}
+
+// One decision row, after the answer went. protectedLoad: the re-issue hold already kept
+// Payment (delivered, invoiced or status unknown). Never throws: ingestion never waits on it.
+function recordRateConDvirDecision(loadId, d, { on, protectedLoad }, at = new Date().toISOString()) {
+	try {
+		const verdict = rateconDvirKeep.recordedVerdict(d.verdict, on);
+		const key = normLoadKey(loadId).slice(0, 80);
+		if (!verdict || !key) return false;
+		rateConDvirDecisionsTable();
+		db.prepare(`INSERT INTO ratecon_dvir_decisions (load_key, at, stored_cents, sent_cents, dvir_cents, dvir_count, reading, verdict, reason, switch_on, protected_load)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(key, at, d.storedCents, d.sentCents, d.dvirCents, d.dvirCount, d.reading, verdict, d.reason, on ? 1 : 0, protectedLoad ? 1 : 0);
+		db.prepare("DELETE FROM ratecon_dvir_decisions WHERE id <= (SELECT id FROM ratecon_dvir_decisions ORDER BY id DESC LIMIT 1 OFFSET ?)").run(RATECON_DVIR_DECISIONS_MAX_ROWS);
+		return true;
+	} catch (e) {
+		console.error(`[ratecon-dvir-keep] the decision record failed (ingestion unaffected): ${(e && e.message) || e}`);
+		return false;
+	}
+}
+
+function purgeOldRateConDvirDecisions(now = new Date()) {
+	try {
+		rateConDvirDecisionsTable();
+		const before = new Date(now.getTime() - RATECON_DVIR_DECISIONS_KEEP_DAYS * 86400000).toISOString();
+		const r = db.prepare("DELETE FROM ratecon_dvir_decisions WHERE at < ?").run(before);
+		if (r.changes > 0) console.log(`[ratecon-dvir-keep] purged ${r.changes} decision row(s) older than ${RATECON_DVIR_DECISIONS_KEEP_DAYS} days`);
+		return r.changes;
+	} catch (e) {
+		console.error(`[ratecon-dvir-keep] the decision purge failed: ${(e && e.message) || e}`);
+		return 0;
+	}
+}
+if (startsJob("DVIR keep decision purge (at boot, then daily)")) {
+	purgeOldRateConDvirDecisions();
+	const timer = setInterval(() => purgeOldRateConDvirDecisions(), 24 * 60 * 60 * 1000);
+	if (typeof timer.unref === "function") timer.unref();
+}
+// The rule runs only where the re-issue hold can tell an open load from a protected one.
+if (RATECON_DVIR_KEEP_ENABLED && !RATECON_REISSUE_HOLD_ENABLED) {
+	console.warn("[ratecon-dvir-keep] RATECON_DVIR_KEEP_ENABLED is on but RATECON_REISSUE_HOLD_ENABLED is off, so no Payment is kept and no decision is recorded");
+}
+
 app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
 		n8nKeepStoredUnauthorized++;
@@ -9128,8 +9226,16 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 		}
 		const personHeld = !hold && personKeep.length ? out.held : [];
 		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held, hold.all ? hold.reasons : []) : "";
+		// DVIR KEEP: decided where no hold of every column applies and recorded whatever the
+		// switch says; on, an open load's Payment comes back as stored (a protected load's
+		// already does).
+		const dvir = match && RATECON_REISSUE_HOLD_ENABLED && !(hold && hold.all) ? rateConDvirKeepCheck(loadId, headers, stored, body.values) : null;
+		const dvirOn = dvir && RATECON_DVIR_KEEP_ENABLED ? dvir : null;
+		if (dvirOn && !hold) out = rateconDvirKeep.keepPayment(out, dvirOn.column, storedCellNamed(stored, dvirOn.column), body.values[dvirOn.column]);
+		const dvirReason = dvirOn && !hold ? rateconDvirKeep.reasonText(dvirOn.reason) : "";
+		const personReason = personHeld.length ? personEditHold.holdReason(personKeep.map((p) => ({ column: p.column, part: p.part }))) : "";
 		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ")
-			: personHeld.length ? personEditHold.holdReason(personKeep.map((p) => ({ column: p.column, part: p.part }))) : "";
+			: [personReason, dvirReason].filter(Boolean).join(" and ");
 		// storedLoadId: the stored row's Load ID cell as the sheet has it, so n8n can
 		// write to that row (its appendOrUpdate matches the exact text).
 		res.json({
@@ -9139,10 +9245,18 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 		recordKeepStoredCellWrites(key, headers, stored, body.values, out.values, person, personHeld);
 		// NEEDS CONFIRMATION PICKUPS (flag on): the pickup record (untouched when a hold kept the date)
 		recordKeepStoredPickupReading(loadId, body.values, out.values, hold, personHeld);
-		if (hold && (out.held.length || out.changed.length)) {
-			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
+		if (dvir) recordRateConDvirDecision(loadId, dvir, { on: RATECON_DVIR_KEEP_ENABLED, protectedLoad: Boolean(hold) });
+		if (dvirOn && dvirOn.verdict === "kept") logAudit(RATECON_DVIR_ACTOR, "ratecon_payment_kept_dvir", "job_tracking", loadId, rateconDvirKeep.auditDetails(dvirOn));
+		// A certain DVIR-only change is logged, not alerted: with nothing else held or
+		// changed on a protected load, there is nothing for a person to decide.
+		const dvirAlone = Boolean(hold && dvirOn && dvirOn.verdict === "kept" && !out.changed.length && out.held.length === 1 && out.held[0].column === dvirOn.column);
+		if (hold && (out.held.length || out.changed.length) && !dvirAlone) {
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed, ...(dvirOn ? { dvir: dvirOn.verdict } : {}) })).catch(() => {});
 		} else if (personHeld.length) {
-			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: personHeld, source: "person" })).catch(() => {});
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: personReason, held: personHeld, source: "person" })).catch(() => {});
+		}
+		if (dvirOn && !hold && dvirOn.verdict === "held") {
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: dvirReason, held: out.held.filter((h) => h.column === dvirOn.column), source: "dvir", dvir: "held" })).catch(() => {});
 		}
 	} catch (err) {
 		console.error("n8n keep-stored-values:", err.message);
@@ -9239,6 +9353,13 @@ function reissueHoldTable() {
 	reissueHoldTable.ready = true;
 }
 
+// A ledger row's source, which picks its wording: "person", "dvir" (DVIR KEEP: an open
+// load's Payment kept for a person to check) or "reissue" (anything else, NULL included).
+const REISSUE_SOURCE_ORDER = Object.freeze({ reissue: 0, dvir: 1, person: 2 });
+function reissueSource(s) {
+	return s === "person" || s === "dvir" ? s : "reissue";
+}
+
 // Claims a ledger row for one call (claimedAt) when it still owes a channel and
 // no live call holds it, and counts the try. Answers which channels it owes, with
 // the row's source and reason, or null.
@@ -9249,7 +9370,7 @@ function claimReissueRow(key, column, sent, claimedAt, staleBefore) {
 		RETURNING emailed_at, notified_at, email_skipped, notify_skipped, source, reason`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
 	return owed ? {
 		email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped,
-		source: owed.source === "person" ? "person" : "reissue", ledgerReason: owed.reason || "",
+		source: reissueSource(owed.source), ledgerReason: owed.reason || "",
 	} : null;
 }
 
@@ -9257,11 +9378,11 @@ function claimReissueRow(key, column, sent, claimedAt, staleBefore) {
 function reissueRowsBySource(rows) {
 	const groups = new Map();
 	for (const r of rows) {
-		const s = r.source === "person" ? "person" : "reissue";
+		const s = reissueSource(r.source);
 		if (!groups.has(s)) groups.set(s, []);
 		groups.get(s).push(r);
 	}
-	return [...groups.entries()].sort(([a], [b]) => (a === b ? 0 : a === "reissue" ? -1 : 1));
+	return [...groups.entries()].sort(([a], [b]) => REISSUE_SOURCE_ORDER[a] - REISSUE_SOURCE_ORDER[b]);
 }
 
 // Whether a ledger row's next retry slot has come at nowMs (REISSUE_RETRY_BACKOFF_MS
@@ -9281,14 +9402,16 @@ function reissueRetryDue(r, nowMs) {
 // the next sighting or retry sweep, on its own. rows: [{ column, stored, sent,
 // kind, email, inApp }]; firstSeen marks a retry, and the email says when the
 // change was first seen. note (the DVIR line, or "") goes in both channels.
-// source "person" (PERSON EDIT HOLD: the rows are dates a person set, kept) has its
-// own title, subject and text; "reissue" keeps the re-issue wording.
+// source "person" (PERSON EDIT HOLD: the rows are dates a person set, kept) and "dvir"
+// (DVIR KEEP: an open load's Payment kept, the drop unproven) each have their own title,
+// subject and text; "reissue" keeps the re-issue wording.
 async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null, source = "reissue" }) {
 	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
 	const toEmail = rows.filter((e) => e.email);
 	const toNotify = rows.filter((e) => e.inApp);
 	const byPerson = source === "person";
-	const why = String(reason || "").slice(0, 160) || (byPerson ? "a person corrected this date" : "protected");
+	const byDvir = source === "dvir";
+	const why = String(reason || "").slice(0, 160) || (byPerson ? "a person corrected this date" : byDvir ? "the Payment drop looks like a DVIR deduction" : "protected");
 	const fieldName = (e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`;
 	let capped = false;
 	let skipped = null;
@@ -9313,6 +9436,7 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 		}
 		if (toNotify.length) {
 			const title = byPerson ? `Load ${label}: corrected date kept`
+				: byDvir ? `Load ${label}: Payment kept (DVIR)`
 				: toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
 			// Each listed column with its old and new value, so a change the email cap
 			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
@@ -9332,11 +9456,11 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			};
 			const bodyOf = (view) => toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: byPerson ? `${e.column}: ${cut(view(e.stored))} kept; the rate con said ${cut(view(e.sent))}`
+				: byPerson || byDvir ? `${e.column}: ${cut(view(e.stored))} kept; the rate con said ${cut(view(e.sent))}`
 					: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
 			const body = bodyOf((v) => String(v));
 			const redactedBody = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? bodyOf((v) => brokerContact.redactNoticeValue(v)) : null;
-			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })), ...(byPerson ? { source: "person" } : {}) };
+			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })), ...(byPerson ? { source: "person" } : byDvir ? { source: "dvir" } : {}) };
 			const storedMetadata = redactedBody == null ? metadata : { ...metadata, redactedBody };
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(storedMetadata));
@@ -9373,6 +9497,16 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
 					`<tr>${th("Field")}${th("Kept")}${th("In the email")}${th("Result")}</tr>` + tableRows + "</table>" +
 					"<p style=\"margin-top:14px;\">If the email's date is right (a real reschedule), change the load in LogisX. Nothing is applied for you.</p>" +
+					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			} else if (byDvir) {
+				const th = (t) => `<th style="padding:6px 10px;border:1px solid #ddd;">${t}</th>`;
+				const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell("kept: the stored Payment")}</tr>`).join("");
+				subject = `Load ${label}: a revised rate con did not lower Payment`;
+				html =
+					`<p><b>A revised rate con for load ${escHtml(label)} carried a lower Payment. The stored Payment was kept.</b></p>` +
+					`<p>Kept because ${escHtml(why)}.</p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
+					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+					`<tr>${th("Field")}${th("Kept")}${th("In the email")}${th("Result")}</tr>` + tableRows + "</table>" +
 					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
 			} else {
 				const anyHeld = toEmail.some((e) => e.kind === "held");
@@ -9429,12 +9563,14 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 // later sighting of the same change, whatever the retry slot). Both channels also
 // carry the DVIR line (rateconDvir.dvirAlertLine(), from the reading the extract
 // route kept for this load, rateConDvirReading()), which changes nothing held or
-// written and nothing in the ledger's key. source: "reissue", or "person" for a
-// date a person set (PERSON EDIT HOLD), recorded on each new ledger row; the rows a
+// written and nothing in the ledger's key. source: "reissue", "person" for a
+// date a person set (PERSON EDIT HOLD) or "dvir" for an open load's Payment the DVIR
+// keep kept, recorded on each new ledger row; the rows a
 // call sends go out once per source, each with its own wording (a row first seen
-// under the other source keeps that source and its reason). Fire-and-forget:
-// never throws, never rejects.
-async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [], source = "reissue" }) {
+// under the other source keeps that source and its reason). dvir: the DVIR keep's
+// verdict on this email ("kept", "held"), passed only with RATECON_DVIR_KEEP_ENABLED
+// on, whose wording the DVIR line then takes. Fire-and-forget: never throws, never rejects.
+async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [], source = "reissue", dvir = "" }) {
 	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
 	try {
 		reissueHoldTable();
@@ -9446,10 +9582,10 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		const cap = (v) => String(v == null ? "" : v).slice(0, 500);
 		const entries = [...held.map((h) => ({ ...h, kind: "held" })), ...changed.map((c) => ({ ...c, kind: "changed" }))]
 			.map((e) => ({ column: cap(e.column).trim(), stored: cap(e.stored), sent: cap(e.sent), kind: e.kind }));
-		const note = cap(rateconDvir.dvirAlertLine(rateConDvirReading(raw), held));
+		const note = cap(rateconDvir.dvirAlertLine(rateConDvirReading(raw), held, RATECON_DVIR_KEEP_ENABLED ? { keep: true, held: dvir === "held" } : undefined));
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const src = source === "person" ? "person" : "reissue";
+		const src = reissueSource(source);
 		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 		const staleBefore = new Date(now.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
 		const fresh = [];
@@ -9540,7 +9676,7 @@ async function sweepRateConReissueHolds({ now = new Date(), clock = () => new Da
 		let emailFailed = false;
 		let inAppFailed = false;
 		for (const [group, rows] of reissueRowsBySource(claimed)) {
-			const own = due.filter((r) => (r.source === "person" ? "person" : "reissue") === group);
+			const own = due.filter((r) => reissueSource(r.source) === group);
 			const reason = [...new Set(own.map((r) => r.reason).filter(Boolean))].join("; ");
 			// The newest alert's DVIR line (due is in first_seen order).
 			const noted = own.filter((r) => r.note);
