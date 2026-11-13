@@ -15,7 +15,7 @@ export const WORDS = Object.freeze({
   notesEncourage: 'Take a minute to see it for yourself.',
   acknowledgeLine: "Tap I acknowledge to confirm you've read and agree to what's new.",
   acknowledge: 'I acknowledge',
-  showMeFirst: 'Show me first',
+  showMe: 'Show me',
   notSaved: "We couldn't save that. We'll ask again next time you sign in.",
   offerHeading: 'Welcome to the LogisX app',
   offerText: 'A quick tour shows you how the app works. We suggest taking it now. You can also take it later from your Kit.',
@@ -36,16 +36,17 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 // ── The tour ──────────────────────────────────────────────────────────────
 
 // Each step shows the real tab behind it. `needs` drops a step for a driver without that tab;
-// `withPerformance` is one more sentence for a driver who has it.
+// `withPerformance` is one more sentence for a driver who has it. The Past Performance step states the
+// general rule, figures and all; a week with approved time off can show a lower one on the tab.
 export const TOUR_STEPS = Object.freeze([
-  Object.freeze({ id: 'loads', tab: 'loads', title: 'Loads', text: 'This is your list of loads. Active, Pending and Historical sort them.', withPerformance: 'The bar at the top shows your loads this week. Tap it to open Performance.' }),
+  Object.freeze({ id: 'loads', tab: 'loads', title: 'Loads', text: 'This is your list of loads. Active, Pending and Historical sort them.', withPerformance: 'The bar at the top shows your loads this week. Tap it to open Past Performance.' }),
   Object.freeze({ id: 'load-page', tab: 'loads', title: "A load's page", text: "Tap a load to open its page. That's where you update your status and add your POD." }),
   Object.freeze({ id: 'alerts', tab: 'notifications', title: 'Alerts', text: 'New loads, changes and other notices show up here.' }),
   Object.freeze({ id: 'kit', tab: 'kit', title: 'Kit', text: "Your documents and your truck's documents are here. You can take this tour again from here any time." }),
   Object.freeze({ id: 'messages', tab: 'messages', title: 'Messages', text: 'Message dispatch here, about a load or anything else.' }),
   Object.freeze({ id: 'invoices', tab: 'invoices', title: 'Invoices', text: 'Your weekly invoices are here. You can check one and send it in.' }),
-  Object.freeze({ id: 'performance', tab: 'performance', needs: 'performance', title: 'Performance', text: "Your week is here: what counted, your target and, most weeks, what's required. No other driver can see it." }),
-  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "The top of the app shows your fuel range when it's known: how many miles you have left until empty. It's about your tank, not your load or route." }),
+  Object.freeze({ id: 'performance', tab: 'performance', needs: 'performance', title: 'Past Performance', text: "Here's your weekly performance. It shows your target turns and the minimum turns required. Each turn counts as .50, with the weekly requirement of 6 total turns, and a target of 7.5 weekly." }),
+  Object.freeze({ id: 'fuel-range', tab: 'loads', title: 'Fuel range', text: "The top of the app shows your fuel range when it's known: how many miles you have left until empty." }),
 ])
 export const APP_TOUR_STEP_IDS = Object.freeze(TOUR_STEPS.map((s) => s.id))
 
@@ -61,9 +62,21 @@ export function tourStepsFor(ids, has) {
     .map((s) => ({ id: s.id, tab: s.tab, title: s.title, text: s.withPerformance && hasPart('performance', has) ? `${s.text} ${s.withPerformance}` : s.text }))
 }
 
-export function tourCardView(steps, index) {
+// One step's card. The release tour, from the note's Show me, runs Next … I acknowledge with no Skip, so
+// it ends in the note's own answer; the app tour keeps Skip, Done and the training videos at its end.
+export function tourCardView(steps, index, release = false) {
   if (!Array.isArray(steps) || !steps[index]) return null
-  return { label: `Step ${index + 1} of ${steps.length}`, title: steps[index].title, text: steps[index].text, last: index === steps.length - 1 }
+  const last = index === steps.length - 1
+  const fromNote = release === true
+  return {
+    label: `Step ${index + 1} of ${steps.length}`,
+    title: steps[index].title,
+    text: steps[index].text,
+    last,
+    next: !last ? WORDS.tourNext : fromNote ? WORDS.acknowledge : WORDS.tourDone,
+    skip: !fromNote,
+    videos: last && !fromNote,
+  }
 }
 
 // ── What the server said ──────────────────────────────────────────────────

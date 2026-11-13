@@ -142,6 +142,18 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });
 		eq(`the settings export skips ${n} and writes no part of its value`, [exp.copied, exp.skipped, exp.text.includes(v)], [["ROUTEMATE_ENABLED"], [{ name: n, rule }], false]);
 	}
+	// Triumph's SFTP drop (PR T2): production's alone. The key file's path is an outbound credential,
+	// and the host key's type is secret by its name.
+	for (const [n, v, rule] of [["TRIUMPH_HOST", "made-up.example.test", "production only: names a production target"], ["TRIUMPH_USER", "made-up-user", "production only: names a production target"],
+		["TRIUMPH_HOST_FINGERPRINT", `SHA256:${"A".repeat(43)}`, "production only: names a production target"], ["TRIUMPH_SUBMIT_DIR", "/made-up/submit", "production only: names a production target"],
+		["TRIUMPH_REPORTS_DIR", "/made-up/reports", "production only: names a production target"], ["TRIUMPH_KEY_FILE", "/made-up/not-a-real-key-file", "secret: name contains KEY"],
+		["TRIUMPH_HOST_KEY_TYPE", "ED25519", "secret: name contains KEY"]]) {
+		const verdict = rules.classifySetting(n, v, { readByApp: new Set([n]) });
+		eq(`${n} is never copied, even when the app reads it`, [verdict.copy, verdict.rule], [false, rule]);
+		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });
+		eq(`the settings export skips ${n} and writes no part of its value`, [exp.copied, exp.text.includes(v)], [["ROUTEMATE_ENABLED"], false]);
+	}
+	ok("TRIUMPH_KEY_FILE is an outbound credential: set, a replica refuses to start", rules.OUTBOUND_CREDENTIALS.includes("TRIUMPH_KEY_FILE") && rules.outboundCredentialsSet({ TRIUMPH_KEY_FILE: "/made-up/x" }).includes("TRIUMPH_KEY_FILE"));
 	{
 		// Copied or not, a replica's mode is off and its lines don't exist.
 		const triumphRules = require(path.join(ROOT, "lib", "triumph-rules.js"));

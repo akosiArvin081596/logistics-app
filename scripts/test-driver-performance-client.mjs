@@ -11,16 +11,20 @@
 //   §5  boardView(), the office board: the chosen period, the server's order
 //   §6  ownWeekView(): the figures as sent, the label, what's left, each row's two credits; last
 //       week's final figure with no label; nothing else an answer carries gets through
-//   §7  weekBarView() and weekFromAnswer(): the bar's words; only a Driver's 200 gives it a figure
+//   §7  weekBarView() and weekFromAnswer(): the bar's words and the server's color; only a Driver's
+//       200 gives it a figure
 //   §8  who gets the tab: only a 200 shows it, and only a Driver or Super Admin asks
-//   §9  BottomNav.vue: the five tabs as they were, Performance only with its prop, no trophy
+//   §9  BottomNav.vue: the five tabs as they were, Past Performance only with its prop, no trophy
 //   §10 DriverView.vue: the bar on the Loads list, the panel behind the answer, the read's rules
-//   §11 DriverPerformanceTab.vue: his own week; never names the board; reads, never writes or
-//       stores; computes nothing; no hours-of-service line
-//   §12 DriverWeekBar.vue: its words, a 44 px tap, no read, no motion, no red
+//   §11 DriverPerformanceTab.vue: this week on top, then his past weeks, from one read; never names
+//       the board; reads, never writes or stores; computes nothing; no hours-of-service line
+//   §12 DriverWeekBar.vue: its words, a 44 px tap, no read, no motion; its fill in the server's four
+//       colors, and no other red
 //   §13 DriverPerformanceBoard.vue: the office board, its reads and rows as they were
-//   §14 the real server rules through the real views, on made-up loads
+//   §14 the real server rules through the real views, on made-up loads, the bar's colors at each edge
 //   §15 no pay, invoice or payout screen reads the count: only these three files import the lib
+//   §16 pastWeeksView(): each past week's days, figure and hours line, in the server's order; the
+//       "weren't counted" line; what's missing named, never 0; nothing else gets through
 //
 // No DOM, no server, no build; scripts/e2e/driver-performance.mjs covers the page.
 //   node scripts/test-driver-performance-client.mjs      # exits 1 on any failure
@@ -120,7 +124,13 @@ eq('§1 the line on what\'s required, with the week\'s own figures', [fn('requir
 eq('§1 the target alone, when the server sends no required figure', fn('targetOnlyLine')(4.5), '4.5 is the target.')
 eq('§1 the old guide line and any fixed requirement line are gone', [v.GUIDE_LINE, v.REQUIREMENT_LINE, /Target is a requirement|a guide, not/.test(libSrc + card)], [undefined, undefined, false])
 eq('§1 the privacy line, exact', v.PRIVATE_LINE, 'No other driver can see this.')
-eq('§1 drive hours', v.DRIVE_HOURS_LINE, 'Drive hours: coming soon')
+eq('§1 driving hours, this week\'s and a past week\'s while none are sent', v.DRIVE_HOURS_LINE, 'Driving hours: coming soon')
+eq('§1 the headings over this week and the past weeks', [v.THIS_WEEK_TITLE, v.PAST_WEEKS_TITLE], ['This week', 'Past weeks'])
+eq('§1 the line under the past weeks, with the server\'s date', fn('countedFromLine')('Nov 7'), "Weeks before Nov 7 weren't counted.")
+eq('§1 a past week\'s hours, in the server\'s figure', fn('drivingHoursLine')(38.5), 'Driving: 38.5 h (estimate)')
+eq('§1 a truck with no hours data, named', v.NO_DRIVING_HOURS_LINE, 'No driving hours for this truck')
+eq('§1 hours that start after a week, on the server\'s day', fn('drivingHoursFromLine')('Nov 16'), 'Driving hours start Nov 16')
+eq('§1 the bar\'s four colors', v.BAR_COLORS, ['red', 'orange', 'green', 'blue'])
 eq('§1 neither line about pay is left', [v.NOT_PAY_LINE, v.NOT_PAY_DAYS_LINE], [undefined, undefined])
 eq('§1 a lowered target, exact', v.LOWER_TARGET_LINE, 'Your target is lower this week for your approved time off.')
 eq('§1 what to do about a wrong row', v.TELL_DISPATCH_LINE, 'If something looks wrong, tell dispatch.')
@@ -136,13 +146,14 @@ eq('§1 the closing line, with ET', fn('weekClosesLine')(), 'Week closes Fri 11:
   eq('§1 the closing line names the business clock: CT on the Central clock', central, 'Week closes Fri 11:59 PM CT')
 }
 eq('§1 the three labels', v.PACE_WORDS, { ahead: 'Ahead of Pace', 'on-track': 'On Track', 'needs-focus': 'Needs Focus' })
-eq('§1 the two weeks he can open', (v.OWN_PERIODS || []).map((p) => [p.id, p.label]), [['this-week', 'This week'], ['last-week', 'Last week']])
+eq('§1 no This week and Last week toggle: this week on top, then his past weeks', v.OWN_PERIODS, undefined)
 eq('§1 the old neutral line is gone', v.NO_HOURS_LINE, undefined)
 eq('§1 the office board keeps its three periods', v.PERIODS.map((p) => [p.id, p.label, p.kind]), [['this-week', 'This week', 'week'], ['last-week', 'Last week', 'week'], ['this-month', 'This month', 'month']])
 eq('§1 the office board keeps its tiles\' words', [v.CATEGORIES.find((c) => c.id === 'safety').line, v.COMING_SOON, v.YOU], ["Safety isn't ranked yet.", 'Coming soon', 'You'])
 
 // What a driver's screen may say: no ranking, no other driver, no hours figure, no pay figure.
-const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, fn('requirementLine')(7.5, 6), fn('targetOnlyLine')(7.5), v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), fn('weekClosesLine')(), v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}), ...(v.OWN_PERIODS || []).map((p) => p.label)]
+const DRIVER_WORDS = [v.TARGET_LINE, v.LOWER_TARGET_LINE, fn('requirementLine')(7.5, 6), fn('targetOnlyLine')(7.5), v.PRIVATE_LINE, v.DRIVE_HOURS_LINE, v.TELL_DISPATCH_LINE, fn('newWeekLine')('Nov 7'), fn('weekClosesLine')(), v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK, v.FAILED_LINE, ...Object.values(v.PACE_WORDS || {}),
+  v.THIS_WEEK_TITLE, v.PAST_WEEKS_TITLE, fn('countedFromLine')('Nov 7'), fn('drivingHoursLine')(38.5), v.NO_DRIVING_HOURS_LINE, fn('drivingHoursFromLine')('Nov 16')]
 const DRIVER_TEMPLATE_TEXT = templateOf(card).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BAR_TEMPLATE_TEXT = templateOf(bar).replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')
 const BANNED = /\bREI\b|efficiency|out of reach|streak|\btier\b|bonus|prize|gained|\$|mph|\brank|leaderboard|most loads|\bunit\b|\btop\b|fuel|idle|safety|competit|behind|falling|late\b|quota/i
@@ -162,6 +173,7 @@ eq('§2 the target line says what the server\'s rules say', v.TARGET_LINE, `Targ
 eq('§2 the same categories, in the same order', v.CATEGORIES.map((c) => c.id), server.CATEGORIES.map((c) => c.id))
 eq('§2 only the categories the server calls live are live', v.CATEGORIES.filter((c) => c.live).map((c) => c.id), server.CATEGORIES.filter((c) => c.live).map((c) => c.id))
 eq('§2 the same "Not ranked"', v.NOT_RANKED, server.NOT_RANKED)
+eq('§2 the bar\'s colors are the ones the server chooses', v.BAR_COLORS, typeof server.barColorFor === 'function' ? [0, 4, 6, 8].map((credits) => server.barColorFor(credits)) : [])
 const fieldsRead = new Set()
 v.rowView(new Proxy({ rank: 1, unitLabel: '#701', value: 6, display: '6 loads', isYou: true, ...DECOYS, rank: 1, unitLabel: '#701' }, {
   get(target, key) { fieldsRead.add(String(key)); return target[key] },
@@ -345,12 +357,16 @@ eq('§6 no weights, no card', ownWeekView({ weeks: both.weeks }, 'this-week'), n
 // ── §7 the bar ───────────────────────────────────────────────────────────────
 console.log('§7 weekBarView() and weekFromAnswer()')
 const weekBarView = fn('weekBarView')
-eq('§7 the bar\'s words', weekBarView(both), { text: 'This week: 4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%' })
+eq('§7 the bar\'s words', weekBarView(both), { text: 'This week: 4.5 of 7.5 loads', pace: 'On Track', paceId: 'on-track', width: '60%', color: '' })
+eq('§7 its color is the server\'s, one of the four', ['red', 'orange', 'green', 'blue'].map((barColor) => weekBarView(answerOf(week('this-week', { barColor })))?.color), ['red', 'orange', 'green', 'blue'])
+eq('§7 a color it doesn\'t know, or none, keeps the plain fill', ['purple', 'RED', '#dc2626', null, undefined, 3].map((barColor) => weekBarView(answerOf(week('this-week', { barColor })))?.color), ['', '', '', '', '', ''])
+eq('§7 the app never works the color out from the figure', weekBarView(answerOf(week('this-week', { barColor: 'blue', credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 } })))?.color, 'blue')
+eq('§7 the bar keeps its words whatever its color, so the color is never all it says', weekBarView(answerOf(week('this-week', { barColor: 'red' })))?.text, 'This week: 4.5 of 7.5 loads')
 eq('§7 no label, none on the bar', weekBarView(answerOf(week('this-week', { pace: null })))?.pace, '')
 eq('§7 always this week, whichever order they come in', weekBarView(answerOf(week('last-week', { credits: { value: 1, target: 7.5, deliveries: 1, pickups: 1 } }), week('this-week')))?.text, 'This week: 4.5 of 7.5 loads')
 eq('§7 a lower target reads as its own figure', weekBarView(answerOf(week('this-week', { credits: { value: 3, target: 6, deliveries: 3, pickups: 3 }, percent: 50 })))?.text, 'This week: 3 of 6 loads')
 eq('§7 no decoy reaches the bar', showsDecoy(weekBarView(decoyAnswer)), [])
-eq('§7 exactly four fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width'])
+eq('§7 exactly five fields', Object.keys(weekBarView(both) || {}), ['text', 'pace', 'paceId', 'width', 'color'])
 eq('§7 what\'s required is words on the tab only: no mark on the bar', has(weekBarView(both), 'required'), false)
 eq('§7 no read of it in the bar', /required|requirement/i.test(bar), false)
 eq('§7 neither view of his week carries an hours-of-service line', [ownWeekView(both, 'this-week'), ownWeekView(both, 'last-week'), weekBarView(both)].filter((view) => /hours of service|never drive past/i.test(JSON.stringify(view))).length, 0)
@@ -381,7 +397,8 @@ eq('§9 the five tabs, in their order', [...baseTabsSrc.matchAll(/key: '(\w+)', 
   [['loads', 'Loads'], ['notifications', 'Alerts'], ['kit', 'Kit'], ['messages', 'Messages'], ['invoices', 'Invoices']])
 eq('§9 showPerformance defaults off', /showPerformance: \{ type: Boolean, default: false \}/.test(navScript), true)
 eq('§9 Performance joins only with the prop, last', navScript.includes('computed(() => (props.showPerformance ? [...baseTabs, performanceTab] : baseTabs))'), true)
-eq('§9 the tab is named Performance', /const performanceTab = \{ key: 'performance', label: 'Performance'/.test(navScript), true)
+eq('§9 the tab is named Past Performance', /const performanceTab = \{ key: 'performance', label: 'Past Performance'/.test(navScript), true)
+eq('§9 a label too long for its sixth of the bar breaks at its space, centred', /:deep\(\.van-tabbar-item__text\) \{\s*text-align: center;\s*\}/.test(styleOf(nav)), true)
 eq('§9 no trophy: this isn\'t a competition', /&#127942;|🏆/.test(nav), false)
 
 // ── §10 DriverView.vue ───────────────────────────────────────────────────────
@@ -392,6 +409,7 @@ eq('§10 the tab starts hidden', viewScript.includes('const performanceTab = ref
 eq('§10 the nav shows it only on the answer', viewTemplate.includes(':show-performance="performanceTab"'), true)
 eq('§10 the panel needs both the tab chosen and the answer', viewTemplate.includes('v-if="currentTab === \'performance\' && performanceTab"'), true)
 const panel = (viewTemplate.match(/data-testid="perf-panel">([\s\S]*?)<\/section>/) || [])[1] || ''
+eq('§10 the panel\'s header is the tab\'s name', panel.includes('<div class="section-header">Past Performance</div>'), true)
 eq('§10 a Driver gets his own week and nothing else in the panel', panel.includes('<DriverPerformanceTab v-if="showsMyWeek(auth.user?.role)" @gone="performanceTab = false" />'), true)
 eq('§10 the office board is for anyone else who reaches it, a Super Admin', panel.includes('<DriverPerformanceBoard v-else @gone="performanceTab = false" />'), true)
 const barTag = (viewTemplate.match(/<DriverWeekBar[^>]*>/) || [''])[0]
@@ -440,8 +458,9 @@ const cardTemplate = templateOf(card)
 const cardScript = scriptOf(card)
 const printed = [...cardTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]).sort()
 eq('§11 it prints only these, so a name or a figure can\'t be added by accident', [...new Set(printed)], [
-  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE',
-  'item.line', 'item.title', 'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.requirement', 'week.rule', 'week.title',
+  'DRIVE_HOURS_LINE', 'FAILED_LINE', 'PRIVATE_LINE', 'TARGET_LINE', 'TELL_DISPATCH_LINE', 'THIS_WEEK_TITLE',
+  'item.line', 'item.title', 'past.countedFrom', 'past.title', 'row.count', 'row.hours', 'row.range',
+  'week.closes', 'week.count', 'week.empty', 'week.left', 'week.lowered', 'week.newWeek', 'week.pace', 'week.range', 'week.requirement', 'week.rule', 'week.title',
 ].sort())
 eq('§11 no line about pay on the tab', /NOT_PAY_LINE|NOT_PAY_DAYS_LINE|notPay|perf-not-pay|invoice pays/.test(card), false)
 eq('§11 the lowered-target line only when the view has one, right after the target line', /\{\{ TARGET_LINE \}\}<\/p>\s*<p v-if="week\.lowered"[^>]*>\{\{ week\.lowered \}\}<\/p>/.test(cardTemplate), true)
@@ -450,7 +469,7 @@ eq('§11 it never names the board: no ranking can reach a driver\'s screen', /bo
 eq('§11 its one read is his own week', [...cardScript.matchAll(/api\.\w+\(([^)]*)\)/g)].map((m) => m[1]), ['OWN_URL'])
 eq('§11 it holds no name to show: no store, session or driver name', /useDriverStore|useAuthStore|driverStore|driverName|auth\./.test(card), false)
 eq('§11 rows go through the view: no raw answer in the template', /\.answer|\.weeks|\.credits|\.percent|\.pickup|\.delivery/.test(cardTemplate), false)
-eq('§11 the view comes from the lib', cardScript.includes('ownWeekView(answer.value, periodId.value)'), true)
+eq('§11 the views come from the lib: this week\'s and the past weeks\', from the one answer', [cardScript.includes("ownWeekView(answer.value, 'this-week')"), cardScript.includes('pastWeeksView(answer.value)')], [true, true])
 eq('§11 read only: no write of any kind', /api\.(post|put|patch|del|request)\b|method:/.test(cardScript), false)
 eq('§11 kept on the phone nowhere: no storage of any kind', /localStorage|sessionStorage|indexedDB|document\.cookie|caches\./.test(card + libSrc), false)
 eq('§11 no nudges: no timer, poll, countdown, socket or notification', /setTimeout|setInterval|requestAnimationFrame|useSocket|socket\.|Notification\b|countdown/i.test(card + libSrc), false)
@@ -463,8 +482,14 @@ eq('§11 no hours-of-service line on the tab', chainTo(cardTemplate, 'data-testi
 eq('§11 the target, the requirement line, drive hours and the privacy line sit together', [cardTemplate.includes('{{ TARGET_LINE }}'), cardTemplate.includes('{{ week.requirement }}'), cardTemplate.includes('{{ DRIVE_HOURS_LINE }}'), cardTemplate.includes('{{ PRIVATE_LINE }}')], [true, true, true, true])
 eq('§11 the requirement line has its own place, right after the lowered-target line', /\{\{ week\.lowered \}\}<\/p>\s*<p class="perf-note" data-testid="perf-requirement">\{\{ week\.requirement \}\}<\/p>/.test(cardTemplate), true)
 eq('§11 the label only when the view has one', /v-if="week\.pace"/.test(cardTemplate), true)
-eq('§11 This week and Last week, both', /<van-tab v-for="period in OWN_PERIODS" /.test(cardTemplate), true)
-eq('§11 the toggle is 44 px', /--van-tabs-line-height: 44px/.test(styleOf(card)), true)
+const placeOf = (id) => cardTemplate.indexOf(`data-testid="${id}"`)
+const order = ['perf-this-week-title', 'perf-week', 'perf-counted', 'perf-past', 'perf-past-title', 'perf-past-week', 'perf-counted-from', 'perf-private'].map(placeOf)
+eq('§11 this week on top, then the past weeks under their heading, the line naming what wasn\'t counted, and the privacy line last',
+  [order.every((at) => at > 0), order.every((at, i) => i === 0 || at > order[i - 1])], [true, true])
+eq('§11 no toggle between weeks any more', /van-tabs|van-tab\b|OWN_PERIODS|periodId/.test(card), false)
+eq('§11 the past weeks only when the view has them, a row each, keyed by the week', [/<section v-if="past" class="perf-past"/.test(cardTemplate), /<li v-for="row in past\.rows" :key="row\.key"/.test(cardTemplate)], [true, true])
+eq('§11 each past week\'s days, figure and hours line, as the view words them', /\{\{ row\.range \}\}[\s\S]*\{\{ row\.count \}\}[\s\S]*\{\{ row\.hours \}\}/.test(cardTemplate), true)
+eq('§11 no figure on a past week but its own: no fill, no label, no color', /past[\s\S]*(perf-fill|perf-pace|data-color)/.test(cardTemplate.slice(cardTemplate.indexOf('data-testid="perf-past"'))), false)
 eq('§11 Try again is 44 px', /\.perf-retry \{[^}]*min-height: 44px/.test(styleOf(card)), true)
 eq('§11 no red, on any word', /\bred\b|danger|#ef4444|#dc2626|#b91c1c|#f87171|#ee0a24/i.test(card), false)
 eq('§11 the server\'s "gone" hides the tab', cardScript.includes("if (isGoneAnswer(err.status)) emit('gone')"), true)
@@ -489,7 +514,11 @@ eq('§12 no hours-of-service line on it', /bar\.hos|week-bar-hos/.test(bar), fal
 eq('§12 the label only when the view has one', /v-if="bar\.pace"/.test(barTemplate), true)
 eq('§12 no motion, nudge or countdown', /transition|animation|@keyframes|setTimeout|setInterval|requestAnimationFrame|countdown|\bpulse\b/i.test(bar), false)
 eq('§12 no store, name or storage', /useDriverStore|useAuthStore|driverName|localStorage|sessionStorage/.test(bar), false)
-eq('§12 no red, on any word', /\bred\b|danger|#ef4444|#dc2626|#b91c1c|#f87171|#ee0a24/i.test(bar), false)
+const FILL_COLORS = [...styleOf(bar).matchAll(/\.week-bar-fill\[data-color='(\w+)'\] \{ background: (#[0-9a-f]{6}); \}/g)].map((m) => [m[1], m[2]])
+eq('§12 the fill takes the server\'s four colors, and only those', FILL_COLORS, [['red', '#dc2626'], ['orange', '#ea580c'], ['green', '#16a34a'], ['blue', '#2563eb']])
+eq('§12 the fill reads the view\'s color, or none, which keeps the plain fill', [/<span class="week-bar-fill" data-testid="perf-bar-fill" :data-color="bar\.color \|\| null" :style="\{ width: bar\.width \}"><\/span>/.test(barTemplate), /\.week-bar-fill \{[^}]*background: #0369a1;/.test(styleOf(bar))], [true, true])
+const barWithoutFill = bar.replace(/\.week-bar-fill\[data-color='\w+'\] \{ background: #[0-9a-f]{6}; \}/g, '').replace(/data-color|bar\.color/g, '')
+eq('§12 nothing else on the bar is red: its label stays a pale chip that never scolds', /\bred\b|danger|#ef4444|#dc2626|#b91c1c|#f87171|#ee0a24/i.test(barWithoutFill), false)
 eq('§12 it computes nothing', [ARITHMETIC.test(codeOf(barScript)), [...barTemplate.matchAll(/\{\{([^}]*)\}\}/g)].filter((m) => /[*/%+-]/.test(m[1])).length], [false, 0])
 
 // ── §13 DriverPerformanceBoard.vue ───────────────────────────────────────────
@@ -552,7 +581,15 @@ if (typeof server.personalWeek === 'function') {
     { title: 'Load DP-3', line: 'Picked up Wed 0.5' },
     { title: 'Load DP-4', line: 'Picked up Wed 0.5' },
   ])
-  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%' })
+  eq('§14 the bar', weekBarView(realAnswer), { text: 'This week: 2.5 of 7.5 loads', pace: 'Needs Focus', paceId: 'needs-focus', width: '33%', color: 'red' })
+  // D's bands through the real rules, at each edge: credits move in halves, so each figure has one color.
+  const realBar = (deliveries, pickups) => weekBarView({ ...realAnswer, weeks: [server.personalWeek({ id: 'this-week', start: START, end: END, today: '2026-11-04', deliveries, pickups, offDays: [], openLoad: true, loads: [] })] })
+  eq('§14 the bar\'s color from the real rules: 3.5 red, 4 orange, 5.5 orange, 6 green, 7.5 green, 8 blue',
+    [[4, 3], [4, 4], [6, 5], [6, 6], [8, 7], [8, 8]].map(([deliveries, pickups]) => [realBar(deliveries, pickups)?.text, realBar(deliveries, pickups)?.color]), [
+      ['This week: 3.5 of 7.5 loads', 'red'], ['This week: 4 of 7.5 loads', 'orange'], ['This week: 5.5 of 7.5 loads', 'orange'],
+      ['This week: 6 of 7.5 loads', 'green'], ['This week: 7.5 of 7.5 loads', 'green'], ['This week: 8 of 7.5 loads', 'blue'],
+    ])
+  eq('§14 a closed week has no color, so only the open week\'s bar is colored', server.personalWeek({ id: 'last-week', start: START, end: END, today: '2026-11-20', deliveries: 8, pickups: 8, offDays: [], openLoad: false, loads: [] }).barColor, null)
   eq('§14 the line on how it counts, from the server\'s weights', ownWeekView(realAnswer, 'this-week')?.rule, COUNT_RULE)
   eq('§14 the line on what\'s required, from the server\'s own figures', [ownWeekView(realAnswer, 'this-week')?.requirement, ownWeekView(offAnswer, 'this-week')?.requirement], ['7.5 is the target. 6 is required.', '6 is the target. 4.5 is required.'])
   // Whether time off makes it impossible comes from the real rules, through the view's own words.
@@ -579,5 +616,59 @@ const inClient = (re) => clientFiles.filter((f) => re.test(read(path.join(CLIENT
 eq('§15 only the driver\'s own screens import the lib', inClient(/['"][^'"\n]*\/driverPerformance(\.js)?['"]/), ['components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'views/DriverView.vue'])
 eq('§15 only the lib reads the server\'s weights', inClient(/\bcreditWeights\b/), ['lib/driverPerformance.js'])
 eq('§15 only the lib names his week\'s route', inClient(/api\/driver\/me\/performance/), ['lib/driverPerformance.js'])
+
+// ── §16 his past weeks ───────────────────────────────────────────────────────
+console.log('§16 pastWeeksView()')
+const pastWeeksView = fn('pastWeeksView')
+const pastAnswer = (pastWeeks, over = {}) => ({ ...answerOf(week('this-week')), pastWeeks, countedFrom: 'Nov 7', ...over })
+const PAST = [
+  { start: '2026-11-21', end: '2026-11-27', credits: { value: 6.5, target: 7.5 } },
+  { start: '2026-11-14', end: '2026-11-20', credits: { value: 3, target: 6 } },
+  { start: '2026-11-07', end: '2026-11-13', credits: { value: 0, target: 7.5 } },
+]
+const SOON = 'Driving hours: coming soon'
+eq('§16 each past week: its days, his figure of its own target, and with no hours sent, coming soon', pastWeeksView(pastAnswer(PAST)), {
+  title: 'Past weeks',
+  rows: [
+    { key: '2026-11-21', range: 'Nov 21 – Nov 27', count: '6.5 of 7.5 loads', hours: SOON },
+    { key: '2026-11-14', range: 'Nov 14 – Nov 20', count: '3 of 6 loads', hours: SOON },
+    { key: '2026-11-07', range: 'Nov 7 – Nov 13', count: '0 of 7.5 loads', hours: SOON },
+  ],
+  countedFrom: "Weeks before Nov 7 weren't counted.",
+})
+eq('§16 the server\'s order stands: the app never sorts', pastWeeksView(pastAnswer([...PAST].reverse()))?.rows.map((r) => r.key), ['2026-11-07', '2026-11-14', '2026-11-21'])
+eq('§16 no past week yet: an empty list, and the line still says what wasn\'t counted', pastWeeksView(pastAnswer([])), { title: 'Past weeks', rows: [], countedFrom: "Weeks before Nov 7 weren't counted." })
+eq('§16 the line\'s date is the server\'s', pastWeeksView(pastAnswer(PAST, { countedFrom: 'Dec 5' }))?.countedFrom, "Weeks before Dec 5 weren't counted.")
+const hoursFor = (hours) => pastWeeksView(pastAnswer([{ ...PAST[0], hours }]))?.rows[0].hours
+eq('§16 the hours, in the server\'s figure', hoursFor({ state: 'estimate', value: 38.5 }), 'Driving: 38.5 h (estimate)')
+eq('§16 a truck with no hours data: named, never 0', hoursFor({ state: 'none' }), 'No driving hours for this truck')
+eq('§16 hours that start after the week began: the server\'s day', hoursFor({ state: 'starts', day: 'Nov 16' }), 'Driving hours start Nov 16')
+eq('§16 coming soon, as sent or for anything it can\'t trust: never a wrong figure',
+  [{ state: 'coming-soon' }, { state: 'estimate', value: '38.5' }, { state: 'estimate', value: -1 }, { state: 'estimate' }, { state: 'starts', day: '2026-11-16' }, { state: 'starts' }, { state: 'decoy' }, 31.25, 'none', null, undefined].map(hoursFor),
+  new Array(11).fill(SOON))
+eq('§16 the app never works an hours figure out: it prints the server\'s', [hoursFor({ state: 'estimate', value: 0.25 }), hoursFor({ state: 'estimate', value: 0, minutes: 2310 })], ['Driving: 0.25 h (estimate)', 'Driving: 0 h (estimate)'])
+eq('§16 the count is the server\'s figure: the app never adds it up', pastWeeksView(pastAnswer([{ ...PAST[0], credits: { value: 9, target: 7.5, deliveries: 1, pickups: 1 } }]))?.rows[0].count, '9 of 7.5 loads')
+eq('§16 exactly these fields', [Object.keys(pastWeeksView(pastAnswer(PAST)) || {}), Object.keys(pastWeeksView(pastAnswer(PAST))?.rows[0] || {})], [['title', 'rows', 'countedFrom'], ['key', 'range', 'count', 'hours']])
+eq('§16 nothing else a week or its figure holds gets through', showsDecoy(pastWeeksView(pastAnswer(PAST.map((w) => ({ ...DECOYS, ...w, credits: { ...DECOYS, ...w.credits } }))))), [])
+for (const [says, row] of Object.entries({
+  'a value that isn\'t a number': { ...PAST[0], credits: { value: '6.5', target: 7.5 } },
+  'no target': { ...PAST[0], credits: { value: 6.5 } },
+  'no figure at all': { start: PAST[0].start, end: PAST[0].end },
+  'a start that isn\'t a day': { ...PAST[0], start: 'Nov 21' },
+  'an end that isn\'t a calendar day': { ...PAST[0], end: '2026-02-30' },
+  'a row that isn\'t one': 'week',
+})) eq(`§16 ${says}: no list, never a wrong week`, pastWeeksView(pastAnswer([PAST[1], row])), null)
+eq('§16 no list, or no date for the line: none shows', [pastWeeksView(null), pastWeeksView(answerOf(week('this-week'))), pastWeeksView(pastAnswer(PAST, { countedFrom: '2026-11-07' })), pastWeeksView(pastAnswer('x'))], [null, null, null, null])
+if (typeof server.pastWeek === 'function' && typeof server.weekDrivingHours === 'function') {
+  const read = { firstDay: '2026-11-09', weeks: [{ week_start: '2026-11-21', minutes: 2310 }] }
+  const real = [['2026-11-21', '2026-11-27', 7, 6, []], ['2026-11-14', '2026-11-20', 2, 2, ['2026-11-16']], ['2026-11-07', '2026-11-13', 0, 0, []]].map(([start, end, deliveries, pickups, offDays]) => ({ ...server.pastWeek({ start, end, deliveries, pickups, offDays }), hours: server.weekDrivingHours(read, start) }))
+  eq('§16 the real rules through the view: a figure each, a day off lowering that week\'s target, the hours named', pastWeeksView({ pastWeeks: real, countedFrom: server.countedFrom() })?.rows.map((r) => [r.range, r.count, r.hours]), [
+    ['Nov 21 – Nov 27', '6.5 of 7.5 loads', 'Driving: 38.5 h (estimate)'],
+    ['Nov 14 – Nov 20', '2 of 6 loads', 'No driving hours for this truck'],
+    ['Nov 7 – Nov 13', '0 of 7.5 loads', 'Driving hours start Nov 9'],
+  ])
+} else {
+  eq('§16 lib/driver-performance.js has pastWeek() and weekDrivingHours()', false, true)
+}
 
 done()
