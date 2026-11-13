@@ -34,6 +34,11 @@
 //   §17 a claim that runs with no fresh decision looks first, as a press does: a stale tap on a
 //       stopped claim, a claim queued at start-up, one caught building; a first tap doesn't
 //   §18 what the hold-one-load rules don't touch, by digest against main (ea4497a6)
+//   §19 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1), with the trigger as production
+//       runs it: off, a tapped load with one is ADVANCE_LINES with no engine call; on, it is sent
+//       once; a line voided between the render and the send is LINES_CHANGED, its number given up,
+//       and the run line makes it again at once with a fresh one; lines that change under every
+//       run go to a person after the line's two runs (LINES_CHANGED), nothing sent
 //
 // No network, no files, never reads app.db.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
@@ -2285,6 +2290,78 @@ async function main() {
 		};
 		eq(await unchanged(), MAIN.unchanged, "§18 a sent load nothing changed, read by Super Admins: as on main");
 		eq(await switchOff(), MAIN.switchOff, "§18 AUTO_INVOICE_HOLD_ONE_LOAD=false: a POD change after a send stops all sending, as on main");
+	}
+
+	section("§19 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED), the trigger on");
+	{
+		const LINES = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
+		const ON_ENV = { env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" } };
+		// The lines module's own table, and a made-up engine that prints the load's active lines in its
+		// answer (ctx.lineSummary.items) only when the job hands it advanceLines: true, as mode "auto"
+		// does, and otherwise refuses a load with one (ADVANCE_LINES).
+		const linesWorld = () => {
+			const w = makeWorld();
+			w.db.exec("DROP TABLE broker_invoice_lines");
+			LINES.ensureSchema(w.db);
+			const prepare = w.engine.prepare;
+			w.engine.prepare = async (args) => {
+				const r = await prepare(args);
+				if (r && r.ok) {
+					const items = LINES.listLines(w.db, args.loadId).filter((l) => !l.voided).map((l) => ({ id: l.id, label: l.label, amountCents: l.amountCents, reference: l.reference }));
+					if (items.length && args.advanceLines !== true) return { ok: false, http: 422, code: "ADVANCE_LINES" };
+					if (items.length) r.ctx.lineSummary = { items };
+				}
+				return r;
+			};
+			w.addLine = (id, amountCents = 50000) => LINES.addLine(w.db, { loadId: id, values: { kind: "advance", label: "Fuel advance", amountCents, receivedOn: "", reference: "", note: "" },
+				actor: "made-up-admin", closedMonths: [] }, {}).line;
+			w.voidLine = (id, lineId) => LINES.voidLine(w.db, { loadId: id, lineId, reason: "made up", actor: "made-up-admin" }, {});
+			return w;
+		};
+		const voids = (w) => w.actions("auto_invoice_number_void").map((a) => a.details);
+
+		const off = linesWorld();
+		const offJob = await off.started();
+		off.ready("LD-TEST-1901");
+		off.addLine("LD-TEST-1901");
+		tap(off, offJob, "LD-TEST-1901");
+		await drained(off, "§19 off");
+		eq([off.state("LD-TEST-1901"), off.calls.prepare, off.smtp.length], [["needs_attention", "ADVANCE_LINES"], 0, 0], "§19 off: ADVANCE_LINES, no engine call, nothing sent, as before");
+
+		const on = linesWorld();
+		const onJob = await on.started(ON_ENV);
+		on.ready("LD-TEST-1902");
+		const line = on.addLine("LD-TEST-1902");
+		tap(on, onJob, "LD-TEST-1902");
+		await drained(on, "§19 on");
+		eq([on.state("LD-TEST-1902"), on.smtp.length, JSON.parse(on.claim("LD-TEST-1902").fingerprint_json || "{}").advanceLines], [["drafted", ""], 1, [`${line.id}:50000`]],
+			"§19 FAILS ON THE OLD CODE: on, a tapped load with an advance line is sent once, its fingerprint keeping the line");
+
+		const late = linesWorld();
+		const lateJob = await late.started(ON_ENV);
+		late.ready("LD-TEST-1903");
+		const lateLine = late.addLine("LD-TEST-1903");
+		let once = true;
+		late.renderHook = () => {
+			if (!once) return;
+			once = false;
+			late.voidLine("LD-TEST-1903", lateLine.id);
+		};
+		tap(late, lateJob, "LD-TEST-1903");
+		await drained(late, "§19 late");
+		eq(voids(late), ["10202026-1 was reserved for this load and never used (LINES_CHANGED)"], "§19 FAILS ON THE OLD CODE: a line voided between the render and the send: that number given up (LINES_CHANGED)");
+		eq([late.smtp.length, late.claim("LD-TEST-1903").invoice_id, late.state("LD-TEST-1903"), late.calls.render], [1, "10202026-2", ["drafted", ""], 2],
+			"§19 FAILS ON THE OLD CODE: ...nothing went with it; the run line made it again at once with a fresh number, sent once");
+
+		const busy = linesWorld();
+		const busyJob = await busy.started(ON_ENV);
+		busy.ready("LD-TEST-1904");
+		busy.addLine("LD-TEST-1904");
+		busy.renderHook = () => { busy.addLine("LD-TEST-1904", 100); };
+		tap(busy, busyJob, "LD-TEST-1904");
+		await drained(busy, "§19 busy");
+		eq([busy.state("LD-TEST-1904"), busy.smtp.length, voids(busy).length], [["needs_attention", "LINES_CHANGED"], 0, 2],
+			"§19 FAILS ON THE OLD CODE: lines that change under every run: the line's two runs, each number given up, nothing sent, then a person, under the lines' own words (LINES_CHANGED)");
 	}
 }
 

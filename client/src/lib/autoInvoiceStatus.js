@@ -66,6 +66,11 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   RATECON_NAME_MISMATCH: { short: "rate con's name doesn't match", text: "The rate con's file name doesn't carry this load's whole number, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand." },
   RATECON_NUMBER_MISMATCH: { short: "rate con's number doesn't match", text: "The rate con doesn't give this load's number, or gives another one, so it may be another load's and nothing was sent. Check the rate con, then draft it by hand." },
   RECIPIENT_CHECK_OFF: { short: 'billing email check is off', text: "The billing email check is switched off on the server, so this invoice wasn't made or sent. Draft it by hand." },
+  ADVANCE_LINES_INVALID: { short: 'advances leave no balance', text: "The load's advance lines come to the rate con's total or more, so there is no balance due to bill. Check the advance lines and the Payment, then Try again, or draft it by hand." },
+  ADVANCE_LINE_TEXT: { short: 'advance line has typed text', text: 'An advance line has a label other than Fuel advance or Advance, or a reference, and an automatic invoice prints neither. Void it and add it again without them, then Try again, or draft it by hand.' },
+  PROTECTED_VALUE: { short: 'a protected value would print', text: "The invoice would print a value on the carrier deny list or the driver's name, so it wasn't made. Draft it by hand and check every field." },
+  DENY_LIST_UNSET: { short: 'deny list not set', text: "The carrier deny list isn't set on the server, so an invoice with advance lines can't be checked and wasn't made. Draft it by hand." },
+  LINES_CHANGED: { short: 'advance lines changed', text: 'An advance line changed while the invoice was being made, so it is made again with the lines as they are now.', attentionText: 'An advance line changed while the invoice was being made, so nothing was sent. Try again makes it with the lines as they are now, or draft it by hand.' },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
@@ -77,6 +82,7 @@ export const AUTO_INVOICE_CHANGED_WORDS = Object.freeze({
   trailer: 'the trailer',
   pods: 'its POD files',
   rateCons: 'its rate con files',
+  advanceLines: 'its advance lines',
 })
 
 // The states the server sends on a row; it never sends "baseline" or "skipped".
@@ -95,6 +101,8 @@ export function changedText(status) {
   const fields = changedOf(status)
   if (!fields.length) return ''
   const list = fields.map((f) => AUTO_INVOICE_CHANGED_WORDS[f]).join(', ')
+  // The invoice billed a balance that is no longer the load's: nothing re-sends it.
+  if (status.sent === true && fields.includes('advanceLines')) return `Changed since the invoice was sent to the broker: ${list}. An advance line changed after the invoice went. Send a corrected invoice by hand, then Mark checked.`
   if (status.sent === true) return `Changed since the invoice was sent to the broker: ${list}. Check with the broker whether a corrected invoice is needed, then Mark checked.`
   return `Changed since the draft: ${list}. Check the draft in Gmail, then Mark checked.`
 }

@@ -23,6 +23,11 @@
 //   §12 the message digest's parts: HTML as text, the invoice text masked, the
 //       invoice attachment, the digest and the comparison of two, retention and
 //       the Friday quiet window
+//   §13 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): the switch, exactly
+//       "true"; the facts carry the lines only while it's on; the free check lets a load
+//       with one through only then; the closed label list and no reference; the marks;
+//       the fingerprint holds a sent load on a line added or voided, and a fingerprint
+//       without the field (saved before the switch, or read with it off) holds nothing
 //
 // Made-up data only. No network, no database, no files written.
 //   node scripts/test-auto-invoice-rules.js      # exits 1 on any failure
@@ -374,7 +379,7 @@ if (typeof R.classifyChange !== "function" || typeof R.sentChange !== "function"
 		"§9 FAILS ON THE OLD CODE: ...the fields it was flagged on stay, with removed: no new hold once removed is among them (a cancelled load's row cleared later), a new one with it added");
 	eq(check({ onSheet: false, completed: false, live: false }).gone, true, "§9 ...with no note, a row gone is still only gone");
 	ok(!/\d{3,}|@/.test(JSON.stringify([pod.words, pay.hold, gone.words])), "§9 the words carry no amount and no address");
-	eq(R.HOLD_FIELDS, ["status", "removed", "payment", "brokerEmail", "rateCons"], "§9 the fields that can hold, by name: pods and trailer only ever log");
+	eq(R.HOLD_FIELDS, ["status", "removed", "payment", "brokerEmail", "rateCons", "advanceLines"], "§9 the fields that can hold, by name: pods and trailer only ever log (advanceLines: §13)");
 	eq(["HELD_LOADS_STOP", "HELD_LOADS_WINDOW_MS"].filter((name) => name in R), [], "§9 FAILS ON THE OLD CODE: no count of held loads, and no window for one: holds never stop sending");
 
 	// The kill switch, read as knownAddressEnabled() reads: on unless it says off.
@@ -499,6 +504,83 @@ if (typeof R.messageDigest !== "function") {
 	eq([R.shadowRenderQuiet(new Date("2026-10-23T21:59:00Z"), "America/New_York"), R.shadowRenderQuiet(new Date("2026-10-23T22:00:00Z"), "America/New_York"),
 		R.shadowRenderQuiet(new Date("2026-10-24T03:59:00Z"), "America/New_York"), R.shadowRenderQuiet(new Date("2026-10-24T04:00:00Z"), "America/New_York")],
 	[false, true, true, false], "§12 shadowRenderQuiet: Friday from 6 PM Eastern to midnight");
+}
+
+// ------------------------------------------------------------------ §13
+section("§13 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED)");
+// A tree before PR A1 has none of these: each missing one fails by name, and the run goes on.
+for (const fn of ["advanceLinesEnabled", "advanceLineTextRefusal", "advanceLineMarks"].filter((f) => typeof R[f] !== "function")) {
+	failures.push(`§13 FAILS ON THE OLD CODE: lib/auto-invoice-rules.js has no ${fn}()`);
+}
+if (typeof R.advanceLinesEnabled === "function") {
+	eq([undefined, "", "true", " true ", "TRUE", "True", "1", "yes", "on", "false"].map((val) => R.advanceLinesEnabled({ AUTO_INVOICE_ADVANCE_LINES_ENABLED: val })),
+		[false, false, true, true, false, false, false, false, false, false], "§13 the switch: on only when exactly \"true\" (trimmed), off by default");
+	eq([R.advanceLinesEnabled(), R.advanceLinesEnabled(null)], [false, false], "§13 ...off with no settings at all");
+}
+{
+	// The facts carry the lines only while the caller bills them.
+	const off = R.loadFacts({ row: ROW, cols, records: one, activeAdvanceLines: 1 });
+	ok(!("advanceLinesOn" in off) && !("advanceLines" in off), "§13 off: the facts read as they always have (no advanceLinesOn, no advanceLines)");
+	eq(JSON.stringify(R.fingerprint(off)), JSON.stringify(fp), "§13 off: the fingerprint is today's, byte for byte");
+	const on = R.loadFacts({ row: ROW, cols, records: one, activeAdvanceLines: 2, advanceLinesOn: true, advanceLines: ["7:50000", "12:20000"] });
+	eq([on.advanceLinesOn, on.advanceLines, on.activeAdvanceLines], [true, ["12:20000", "7:50000"], 2], "§13 FAILS ON THE OLD CODE: on, the facts carry the switch and the lines' marks, sorted");
+	ok(!("advanceLinesOn" in R.loadFacts({ row: ROW, cols, records: one, advanceLinesOn: "true", advanceLines: ["7:50000"] })), "§13 ...only a real true turns it on");
+	ok(!("advanceLines" in R.loadFacts({ row: ROW, cols, records: one, advanceLines: ["7:50000"] })), "§13 ...marks without the switch are left out");
+
+	// The free check: through only with the switch on; the engine checks the lines before any number.
+	eq(R.freeVerdict({ ...ready, activeAdvanceLines: 1 }), { state: "needs_attention", code: "ADVANCE_LINES" }, "§13 switch off: an advance line is a person (ADVANCE_LINES), as before");
+	eq(R.freeVerdict({ ...ready, activeAdvanceLines: 1, advanceLinesOn: true }), { state: "queued", code: "" }, "§13 FAILS ON THE OLD CODE: switch on: queued");
+	eq(R.newClaimVerdict({ ...ready, activeAdvanceLines: 1, advanceLinesOn: true }, { baselineDone: true }), { state: "queued", code: "" }, "§13 FAILS ON THE OLD CODE: ...a load seen for the first time too");
+	eq(R.freeVerdict({ ...ready, activeAdvanceLines: 1, advanceLinesOn: "true" }).code, "ADVANCE_LINES", "§13 ...only a real true lets it through");
+	eq(R.freeVerdict({ ...ready, activeAdvanceLines: 1, advanceLinesOn: true, hasDeliveryDate: false }).code, "NO_DELIVERY_DATE", "§13 ...the checks ahead of it still answer first");
+	eq(R.freeVerdict({ ...ready, activeAdvanceLines: 1, advanceLinesOn: true, pods: 0 }), { state: "waiting", code: "WAITING_POD" }, "§13 ...and the POD still waits");
+}
+if (typeof R.advanceLineTextRefusal === "function") {
+	const item = (over) => ({ id: 1, label: "Fuel advance", amountCents: 50000, reference: "", ...over });
+	eq(R.AUTO_LINE_LABELS, ["Fuel advance", "Advance"], "§13 the closed list: Fuel advance (the default label) and Advance");
+	for (const [label, items, want] of [
+		["the default label", [item()], null],
+		["Advance", [item({ label: "Advance" })], null],
+		["the list's label in another case", [item({ label: "fuel ADVANCE" })], null],
+		["no line", [], null],
+		["a made-up driver's name after the list's words", [item({ label: "Fuel advance to Pat Example" })], "ADVANCE_LINE_TEXT"],
+		["the list's words with a space after", [item({ label: "Fuel advance " })], "ADVANCE_LINE_TEXT"],
+		["another label", [item({ label: "Cash advance" })], "ADVANCE_LINE_TEXT"],
+		["a reference", [item({ reference: "EFS-1" })], "ADVANCE_LINE_TEXT"],
+		["one typed line among clean ones", [item(), item({ id: 2, label: "Pat Example" })], "ADVANCE_LINE_TEXT"],
+		["a line with no label", [item({ label: "" })], "ADVANCE_LINE_TEXT"],
+		["no line object at all", [null], "ADVANCE_LINE_TEXT"],
+	]) eq(R.advanceLineTextRefusal(items), want, `§13 the text gate, ${label}: ${want || "it prints"}`);
+}
+if (typeof R.advanceLineMarks === "function") {
+	eq(R.advanceLineMarks([{ id: 12, amountCents: 20000 }, { id: 7, amountCents: 50000 }]), ["12:20000", "7:50000"], "§13 the marks: id:cents, sorted as text");
+	eq([R.advanceLineMarks([]), R.advanceLineMarks(null)], [[], []], "§13 ...none");
+}
+{
+	// The fingerprint: a line added or voided after the send holds that load; nothing is re-sent.
+	const onFacts = (marks) => ({ ...facts, advanceLinesOn: true, advanceLines: marks });
+	const fpOn = R.fingerprint(onFacts(["7:50000"]));
+	eq(fpOn.advanceLines, ["7:50000"], "§13 FAILS ON THE OLD CODE: on, the fingerprint keeps the lines");
+	ok(!("advanceLines" in R.fingerprint(facts)), "§13 off: the fingerprint has no such field");
+	eq(R.fingerprintDiff(fpOn, R.fingerprint(onFacts(["7:50000"]))), [], "§13 the same lines: no change");
+	eq(R.fingerprintDiff(fpOn, R.fingerprint(onFacts([]))), ["advanceLines"], "§13 FAILS ON THE OLD CODE: a line voided: advanceLines");
+	eq(R.fingerprintDiff(R.fingerprint(onFacts([])), R.fingerprint(onFacts(["9:10000"]))), ["advanceLines"], "§13 FAILS ON THE OLD CODE: a line added: advanceLines");
+	const sentOn = { ...onFacts(["7:50000", "9:10000"]), onSheet: true };
+	eq(R.classifyChange(fpOn, sentOn), { gone: false, hold: ["advanceLines"], logged: [] }, "§13 FAILS ON THE OLD CODE: a sent load whose lines changed holds");
+	const s = R.sentChange({ saved: fpOn, facts: sentOn });
+	eq([s.hold, s.newHold, s.logged], [["advanceLines"], true, []], "§13 FAILS ON THE OLD CODE: ...a new hold, nothing logged");
+	eq(R.sentChange({ saved: fpOn, facts: sentOn, changedFields: "advanceLines" }).newHold, false, "§13 ...a load already flagged on it isn't held again");
+	eq(R.classifyChange(fpOn, { ...sentOn, paymentCents: 1 }).hold, ["payment", "advanceLines"], "§13 ...beside another hold, in the fingerprint's order");
+	// A fingerprint without the field compares nothing there, so the switch going on or off holds no load.
+	eq(R.classifyChange(fp, sentOn), { gone: false, hold: [], logged: [] }, "§13 a fingerprint saved before the switch and a load with lines now: nothing holds");
+	eq(R.classifyChange(fpOn, { ...facts, onSheet: true }), { gone: false, hold: [], logged: [] }, "§13 a fingerprint with the field and the switch off now: nothing holds");
+	eq(R.fingerprintDiff(fp, R.fingerprint(facts)), [], "§13 ...and neither side carrying it compares nothing");
+}
+for (const code of ["ADVANCE_LINES_INVALID", "ADVANCE_LINE_TEXT", "PROTECTED_VALUE", "DENY_LIST_UNSET", "LINES_CHANGED"]) {
+	ok(R.REASON_CODES.includes(code), `§13 FAILS ON THE OLD CODE: ${code} is a reason code`);
+}
+for (const code of ["ADVANCE_LINES_INVALID", "ADVANCE_LINE_TEXT", "PROTECTED_VALUE", "DENY_LIST_UNSET"]) {
+	eq(R.classifyRefusal({ code, http: 422 }), { kind: "attention", code, countsAttempt: false }, `§13 FAILS ON THE OLD CODE: the engine's ${code}: a person, with its own code, no attempt counted`);
 }
 
 console.log(`\n${"=".repeat(64)}`);

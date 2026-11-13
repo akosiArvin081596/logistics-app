@@ -50971,13 +50971,15 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			}
 		}
 
-		// A driver's own Delivered starts the load's invoice (lib/auto-invoice-job.js).
+		// A driver's own Delivered starts the load's invoice (lib/auto-invoice-job.js), and a
+		// factored load's Triumph submission (lib/triumph-job.js).
 		const invoiceStart = autoInvoiceDriverStart(req, {
 			loadId,
 			oldStatus,
 			newStatus,
 			readBack: () => readJobTrackingSnapshot(sheets, rowIndex).then((reread) => (reread ? reread.row[statusIdx] || "" : null)),
 		});
+		const triumphStart = triumphDriverStart(req, { loadId, oldStatus, newStatus });
 
 		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
@@ -50986,6 +50988,10 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 				data: updateData,
 			},
 		}).catch(invoiceStart.writeFailed);
+
+		// A factored load goes in line for Triumph once its Delivered is on the sheet. It never
+		// throws, and its run starts after this route has answered.
+		triumphStart.written();
 
 		// Notify dispatch in real-time
 		jtCacheInvalidate();
@@ -53096,9 +53102,10 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 // could not take out of an invoice PDF (it names the invoice, and Dispatchers
 // are shown no invoices; sent live the same way), and a load an old delete hides
 // and a deleted load restored or its delete cleared, with the reason
-// (lib/deleted-load-restore.js, sent live the same way). For every other role GET
+// (lib/deleted-load-restore.js, sent live the same way), and the Triumph submit job's
+// (TRIUMPH_NOTICE_TYPE in its wiring block, sent live the same way). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages", "load-hidden-by-delete", "deleted-load-restored"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages", "load-hidden-by-delete", "deleted-load-restored", "factoring"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
@@ -56149,6 +56156,11 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
 //     chrobinson.com goes only to an address a person has already invoiced on 3 loads
 //     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
+//   AUTO_INVOICE_ADVANCE_LINES_ENABLED  on only when exactly "true", with the advance lines
+//     themselves on: a load with advance lines is invoiced automatically for its balance due, its
+//     lines printed as the Draft Invoice button prints them (closed-list labels, no reference, rule
+//     7's check on what it composes, the lines read again right before the hand-off). Off, such a
+//     load goes to a person (ADVANCE_LINES), as before.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -56292,6 +56304,85 @@ const invoiceEvidence = require("./lib/invoice-evidence").create({
 console.log(`[invoice-status] status ${invoiceEvidence.statusOn ? "on" : "off"}; mailbox pass ${invoiceEvidence.passOn ? "on" : "off"}`);
 if (invoiceEvidence.passOn && startsJob("invoice mailbox pass")) invoiceEvidence.start();
 // </invoice-status-wiring>
+
+// <triumph-wiring>
+// FACTORED LOADS SENT TO TRIUMPH BY SFTP (lib/triumph-job.js, -ledger.js, -transfer.js). A load
+// marked factored starts only on the driver's own Delivered (the status route's
+// triumphDriverStart()), as the email invoice does; the job builds its batch with the Draft
+// Invoice button's engine and, once live, sends it to Triumph's SFTP. Nothing goes by email.
+// The settings, read once at start, all off in a replica:
+//   the submit mode, lib/triumph-rules.js submitMode() (their one reader): off unless
+//     TRIUMPH_SUBMIT_ENABLED is exactly "true" (no timer, no table); then a dry run, which
+//     stages each batch under DATA_DIR/triumph-batches and connects to nothing, unless
+//     TRIUMPH_SUBMIT_DRY_RUN is exactly "false" and TRIUMPH_LIVE_CONFIRMED_ON holds the date of
+//     Triumph's go-live email;
+//   the connection, lib/triumph-rules.js transportSettings(): TRIUMPH_HOST, TRIUMPH_PORT (22),
+//     TRIUMPH_USER, TRIUMPH_KEY_FILE, TRIUMPH_HOST_FINGERPRINT, TRIUMPH_HOST_KEY_TYPE,
+//     TRIUMPH_SUBMIT_DIR, TRIUMPH_REPORTS_DIR, with no default: unset, nothing can connect, and
+//     a start that needs them logs one warning naming them, never a value;
+//   TRIUMPH_MAX_PER_HOUR (12) and TRIUMPH_MAX_PER_DAY (60); TRIUMPH_NOA_LINES, the lines every
+//     factored invoice prints; the carrier deny list rule 7 checks every composed value against.
+// Its notices are Super Admin only (SUPER_ADMIN_ONLY_NOTICE_TYPES). A replica or an import starts
+// no timer (startsJob()). scripts/test-triumph-wiring.js lifts this block.
+const TRIUMPH_NOTICE_TYPE = "factoring";
+const triumphTransport = require("./lib/triumph-transfer").create({ db, env: process.env, replica: Boolean(REPLICA) });
+const triumphDeny = require("./lib/chr-events").createRedactor({ denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "" });
+// A load's documents for its batch, either spelling of its ID, deleted rows left out, each
+// with its bytes (null when they can't be read, which stops the batch).
+async function triumphLoadDocuments(loadId) {
+	const key = require("./lib/auto-invoice-rules").loadKey(loadId);
+	const rows = db.prepare("SELECT id, load_id, type, file_name, drive_file_id, drive_url, uploaded_at FROM documents WHERE LOWER(TRIM(load_id)) IN (?, ?) AND deleted_at IS NULL ORDER BY uploaded_at, id").all(key, `#${key}`);
+	const out = [];
+	for (const doc of rows) {
+		if (require("./lib/triumph-rules").documentKind(doc.type)) out.push({ ...doc, buffer: await fetchDocumentBytes(doc) });
+	}
+	return out;
+}
+const triumph = require("./lib/triumph-job").create({
+	db,
+	env: process.env,
+	replica: Boolean(REPLICA),
+	readJobTracking: getJobTrackingCached,
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	uploadsRoot: path.join(DATA_DIR, "uploads"),
+	batchDir: path.join(DATA_DIR, "triumph-batches"),
+	// The engine is created further down, beside the Draft Invoice route.
+	engine: {
+		prepare: (args) => brokerInvoiceDraft.prepare(args),
+		render: (ctx, opts) => brokerInvoiceDraft.render(ctx, opts),
+		record: (ctx, rendered, opts) => brokerInvoiceDraft.record(ctx, rendered, opts),
+	},
+	nextInvoiceNumber,
+	loadDocuments: triumphLoadDocuments,
+	transport: triumphTransport,
+	noaLines: require("./lib/factoring-routes").readSettings(process.env, { replica: Boolean(REPLICA) }).noaLines,
+	denyHits: triumphDeny.count > 0 ? triumphDeny.hits : null,
+	savedInvoiceEvidence: (key) => require("./lib/invoice-evidence").savedInvoice(db, key),
+	logAudit,
+	notify: ({ title, body }) => {
+		insertDispatchNotification.run(TRIUMPH_NOTICE_TYPE, title, body, "{}");
+		io.to("super-admin").emit("dispatch-notification", { type: TRIUMPH_NOTICE_TYPE, title, body, metadata: {} });
+	},
+	log: console,
+});
+// The status route's one call into the job: nothing here may fail that route.
+const TRIUMPH_NO_START = Object.freeze({ written() {}, writeFailed(e) { throw e; } });
+function triumphDriverStart(req, args) {
+	try {
+		return triumph.deliveredByDriver({ ...args, role: req.session && req.session.user && req.session.user.role });
+	} catch {
+		return TRIUMPH_NO_START;
+	}
+}
+console.log(`[triumph] submit ${triumph.mode}; connection settings ${triumphTransport.configured ? "set" : "unset"}`);
+if (triumph.mode !== "off" && !triumphTransport.configured) {
+	console.warn(`[triumph] the connection's settings are missing or invalid (${[...triumphTransport.missing, ...triumphTransport.invalid].join(", ")}): nothing can be sent to Triumph`);
+}
+if (triumph.mode !== "off" && !triumphDeny.count) console.warn("[triumph] the carrier deny list isn't set, so every batch stops for a person (DENY_LIST_UNSET)");
+// A tick every 5 minutes, one at a time (the job guards it), the first soon after start.
+if (triumph.mode !== "off" && startsJob("Triumph submissions")) triumph.startTimers({ setTimeout, setInterval });
+// </triumph-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
@@ -57615,6 +57706,12 @@ const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
 	logAudit,
 	sanitizeEvidenceText,
 	assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),
+	// Rule 7 on an automatic invoice with advance lines: the carrier deny list as the C.H. Robinson
+	// redactor reads it, through the list's one spelling; null while it's unset.
+	denyHits: (() => {
+		const deny = require("./lib/chr-events").createRedactor({ denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "" });
+		return deny.count > 0 ? deny.hits : null;
+	})(),
 	env: process.env,
 });
 
