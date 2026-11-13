@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
  * Driver Performance: lib/driver-performance.js (the rules),
- * lib/driver-performance-routes.js (three read-only routes) and the one
+ * lib/driver-performance-routes.js (four read-only routes) and the one
  * server.js declaration that mounts them, DRIVER_PERFORMANCE_ENABLED a kill
  * switch, on unless set to false. A driver sees his own week only; the board
  * stays for the Super Admin, and answers a Driver as absent unless
- * DRIVER_PERFORMANCE_BOARD_ENABLED is exactly "true". The sections on the
+ * DRIVER_PERFORMANCE_BOARD_ENABLED is exactly "true"; the Super Admin's page
+ * shows each driver his own answer, by name. The sections on the
  * board for drivers run in a world with that flag on, to keep the dormant
  * code honest; every other section runs in the state a deploy gets.
  *
@@ -108,6 +109,15 @@
  *     rollup's first day says when it starts; another driver's rows never in his;
  *     a failed read leaves the rest; off unless exactly "true", and with the
  *     rollup off too
+ * §33 the Super Admin's drivers' weeks (GET /api/admin/driver-performance/weeks):
+ *     the switch, then the role, then the limit; each driver's answer is
+ *     byte for byte the one his own route gives him (off days, an open load, a
+ *     week at 0, his past weeks, and his hours with their switch on); exactly
+ *     the drivers his own route's test lets in, an owner-operator known only by
+ *     his account left out; this week's credits, highest first, then the name;
+ *     the unit as this week's board labels it; this week's drivers off the board
+ *     with the reason, as the admin report has them; names and figures only;
+ *     with the hours switch off no hours and no read of the rollup's table
  *
  * Hermetic: :memory: SQLite, port 0, no network beyond 127.0.0.1.
  * Run: node scripts/test-driver-performance.js    # exits 1 on failure
@@ -304,7 +314,7 @@ function sheetValues(extraLoads = []) {
 function makeDb() {
 	const Database = require("better-sqlite3");
 	const db = new Database(":memory:");
-	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability"]) db.exec(tableDdl(t));
+	for (const t of ["drivers_directory", "trucks", "truck_assignments", "load_status_history", "load_eld_miles", "eld_miles_daily", "deleted_loads", "driver_availability", "users"]) db.exec(tableDdl(t));
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN status TEXT DEFAULT 'active'");
 	db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'");
 	db.exec("ALTER TABLE trucks ADD COLUMN retired_at TEXT DEFAULT ''");
@@ -325,6 +335,9 @@ function makeDb() {
 	const del = db.prepare("INSERT INTO deleted_loads (load_id) VALUES (?)");
 	for (const id of DELETED) del.run(id.toLowerCase());
 	db.prepare("INSERT INTO owner_operators (user_id, status, created_at) VALUES (16, 'active', '2026-10-01T12:00:00Z')").run();
+	// Each made-up account, as its session names its driver.
+	const acct = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name, email) VALUES (?, ?, 'made-up', ?, ?, ?)");
+	for (const u of Object.values(USERS)) acct.run(u.id, u.username, u.role, u.driverName || "", `${u.username}@example.test`);
 	return db;
 }
 
@@ -688,8 +701,8 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		for (const value of ["false", "FALSE", "0", "no", " Off "]) {
 			const label = JSON.stringify(value);
 			const w = await makeWorld({ DRIVER_PERFORMANCE_ENABLED: value });
-			for (const route of ["/api/driver/me/performance", "/api/driver/performance/leaderboard?period=week", "/api/admin/driver-performance"]) {
-				for (const who of [null, USERS.ada, USERS.admin, USERS.dispatcher]) {
+			for (const route of ["/api/driver/me/performance", "/api/driver/performance/leaderboard?period=week", "/api/admin/driver-performance", "/api/admin/driver-performance/weeks"]) {
+				for (const who of [null, USERS.ada, USERS.admin, USERS.dispatcher, USERS.investor]) {
 					const r = await w.get(route, who);
 					ok(r.status === 404 && r.json && r.json.code === "FEATURE_OFF",
 						`flag ${label}: ${route.split("?")[0]} as ${who ? who.role : "signed out"} is 404 FEATURE_OFF`, `got ${r.status} ${r.text.slice(0, 80)}`);
@@ -726,6 +739,9 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			["/api/admin/driver-performance", USERS.admin, 200], ["/api/admin/driver-performance", USERS.ada, 403],
 			["/api/admin/driver-performance", USERS.dispatcher, 403], ["/api/admin/driver-performance", USERS.investor, 403],
 			["/api/admin/driver-performance", null, 401],
+			["/api/admin/driver-performance/weeks", USERS.admin, 200], ["/api/admin/driver-performance/weeks", USERS.ada, 403],
+			["/api/admin/driver-performance/weeks", USERS.dispatcher, 403], ["/api/admin/driver-performance/weeks", USERS.investor, 403],
+			["/api/admin/driver-performance/weeks", null, 401],
 		];
 		for (const [route, who, want] of cases) {
 			const r = await on.get(route, who);
@@ -1022,6 +1038,14 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\s/.test(routesSrc.replace(/\/\/.*$/gm, "")) && !/\.run\(|\.exec\(/.test(routesSrc), "the routes module writes nothing to the database");
 		ok(!/app\.(post|put|patch|delete)\(/.test(routesSrc), "and registers no write route");
 		ok(!/eld_activity_daily|eld-activity-daily/.test(routesSrc), "the routes module never names the rollup's table or module: it reads hours only through the reader it is handed");
+		eq((routesSrc.match(/^\tapp\.get\(PATHS\.\w+, [^\n]*$/gm) || []).map((l) => l.trim()), [
+			'app.get(PATHS.own, driverPerformanceFlagGate, d.requireRole("Driver"), limiter, async (req, res) => {',
+			'app.get(PATHS.board, driverPerformanceFlagGate, d.requireRole("Super Admin", "Driver"), boardForDriversGate, limiter, async (req, res) => {',
+			'app.get(PATHS.admin, driverPerformanceFlagGate, d.requireRole("Super Admin"), limiter, async (req, res) => {',
+			'app.get(PATHS.adminWeeks, driverPerformanceFlagGate, d.requireRole("Super Admin"), limiter, async (req, res) => {',
+		], "four reads, each the switch first, then the role, then the limit; the drivers' weeks for the Super Admin alone");
+		eq(require(path.join(ROOT, "lib", "driver-performance-routes.js")).PATHS.adminWeeks, "/api/admin/driver-performance/weeks", "the drivers' weeks' path");
+		ok(/SELECT id, driver_name FROM users WHERE role = 'Driver'/.test(routesSrc) && !/SELECT[^"`]*\b(email|phone|cell|password_hash)\b/i.test(routesSrc), "of the accounts it reads an id and the driver each names, and no read anywhere takes an email, phone or password");
 		const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
 		ok(!(rules.ENABLE_ALLOWED || []).includes("DRIVER_PERFORMANCE_ENABLED"), "replica:start --enable doesn't take it: it is already on");
 		ok(/kill switch/.test(String((rules.ENABLE_REFUSED || {}).DRIVER_PERFORMANCE_ENABLED)), "the replica refuses it as a kill switch");
@@ -1251,6 +1275,8 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const routesSrc = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
 		const ownHandler = routesSrc.slice(routesSrc.indexOf("app.get(PATHS.own"), routesSrc.indexOf("app.get(PATHS.board"));
 		ok(ownHandler.length > 0 && !/onAnyBoard|rankEntries|projectCategory|\.ranked\b|\.report\b/.test(ownHandler), "the own route reads no ranking");
+		const ownBody = (routesSrc.match(/\tfunction ownAnswer\([\s\S]*?\n\t}\n/) || [""])[0];
+		ok(ownBody.length > 0 && !/onAnyBoard|rankEntries|projectCategory|\.ranked\b|\.report\b|\.rank\b/.test(ownBody), "nor does the answer it builds, which the Super Admin's page shows each driver");
 		ok(!/\.ranked\b|\.report\b|rank\b/.test(fs.readFileSync(path.join(ROOT, "lib", "driver-performance.js"), "utf8").match(/function personalWeek[\s\S]*?\n}\n/)?.[0] || "rank"), "nor does the week it answers with");
 	});
 
@@ -3236,6 +3262,215 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			} finally {
 				await off.close();
 			}
+		}
+	});
+
+	// ── §33 ─────────────────────────────────────────────────────────────────
+	// The Super Admin's page: each driver's own answer, by name, from one read.
+	const ADMIN_WEEKS = "/api/admin/driver-performance/weeks";
+	const OWN = "/api/driver/me/performance";
+	const ACCOUNTS = ["ada", "ben", "cal", "dee", "eli", "fay", "gus", "hal", "jo", "kim", "nobody", "ivy"];
+	const directoryIdOf = (who) => (DRIVERS.find((x) => x.user_id === USERS[who].id) || { id: null }).id;
+	const driversOf = (r) => (r && r.json && Array.isArray(r.json.drivers) ? r.json.drivers : []);
+	// Every account's own answer beside the Super Admin's list: the same drivers, each byte for byte.
+	async function parity(world, label) {
+		const admin = await world.get(ADMIN_WEEKS, USERS.admin);
+		eq(admin.status, 200, `${label}: the drivers' weeks answer the Super Admin`);
+		const byId = new Map(driversOf(admin).map((x) => [x.directoryId, x]));
+		const answered = [];
+		for (const who of ACCOUNTS) {
+			const own = await world.get(OWN, USERS[who]);
+			const id = directoryIdOf(who);
+			if (own.status !== 200) {
+				ok(!byId.has(id), `${label}: ${who}: refused by the driver's own route (${own.status}), and not on the page`);
+				continue;
+			}
+			answered.push(id);
+			const entry = byId.get(id);
+			ok(!!entry && JSON.stringify(entry.performance) === own.text, `${label}: ${who}: the page's weeks are byte for byte the driver's own answer`,
+				`page ${entry ? JSON.stringify(entry.performance).slice(0, 160) : "(none)"} | own ${own.text.slice(0, 160)}`);
+		}
+		eq([...byId.keys()].sort((a, b) => a - b), answered.sort((a, b) => a - b), `${label}: exactly the drivers whose own route answers them`);
+		return { admin, byId };
+	}
+	const creditsOf = (x) => x.performance.weeks[0].credits.value;
+	await section("33 the Super Admin's drivers' weeks", async () => {
+		if (!on) throw new Error("no world");
+		on.handle.clearCache();
+		const before = {};
+		for (const who of ["ada", "ben", "hal"]) before[who] = (await on.get(OWN, USERS[who])).text;
+		const { admin, byId } = await parity(on, "Wed Nov 11");
+		const body = admin.json || {};
+		eq(sortedKeys(body), ["drivers", "notOnBoard"], "the answer's keys");
+		eq(driversOf(admin).map((x) => Object.keys(x)), new Array(driversOf(admin).length).fill(["directoryId", "name", "unit", "performance"]), "each driver: his row's id, his name, his unit and his own answer, nothing more");
+		eq(driversOf(admin).map((x) => [x.name, creditsOf(x)]), [
+			["Ada Quill", 3], ["Ben Marsh", 2], ["Eli North", 2], ["Cal Reyes", 1], ["Hal Briar", 1], ["Dee Stone", 0.5], ["Jo Tester", 0.5], ["Kim Vale", 0.5],
+		], "every driver with a week of his own, this week's credits highest first, then by name: a percentage driver, a test unit's and a retired truck's included");
+		eq(driversOf(admin).map((x) => [x.name, x.unit]), [
+			["Ada Quill", "#501"], ["Ben Marsh", "#502"], ["Eli North", "#505"], ["Cal Reyes", "#503"], ["Hal Briar", "#504 (2, from Nov 10)"],
+			["Dee Stone", "#504 (1, to Nov 9)"], ["Jo Tester", ""], ["Kim Vale", ""],
+		], "each unit as this week's board labels it, with a handover's dates; none for a truck the board doesn't count");
+		ok(!["Fay Owens", "Gus Pike", "Ivy Lane", "Lou Grant"].some((n) => driversOf(admin).some((x) => x.name === n)), "no owner-operator, pending driver, driver with nothing this week or last, or name outside the directory");
+		const report = (await on.get("/api/admin/driver-performance?period=week", USERS.admin)).json.boards[0].drivers;
+		eq(body.notOnBoard, report.filter((x) => !x.listed).map((x) => ({ name: x.name, reason: x.reason })), "this week's drivers off the board, each with the reason, as the admin report has them");
+		eq((body.notOnBoard || []).map((x) => [x.name, x.reason]), [
+			["Eli North", "percentage-driver"], ["Fay Owens", "owner-operator"], ["Jo Tester", "no-truck-in-period"], ["Kim Vale", "no-truck-in-period"], ["Lou Grant", "not-in-directory"],
+		], "...by name");
+		ok(byId.has(5) && body.notOnBoard.some((x) => x.name === "Eli North"), "a percentage driver has his week, and is off the board by unit");
+		// Names and figures only.
+		ok(!/@|example\.test|password|made-up/i.test(admin.text), "no account's email or password");
+		eq(DECOY_CELL_MARKS.filter((m) => admin.text.includes(m)), [], "no broker, rate, pay or lane cell");
+		ok(!allKeys(body).some((k) => /pay|rate|email|phone|cell|broker|lane|amount|invoice|password|user_?id|unitNumber|labelRefused|geofence|^eld$|dispatch|rank|listed|status/i.test(k)), "no pay, contact, account, stored unit, pickup source or rank key");
+		ok(!/\$/.test(admin.text), "no dollar figure");
+		// The same snapshot, read: nothing of the page reaches a driver, and two reads agree.
+		for (const who of ["ada", "ben", "hal"]) eq((await on.get(OWN, USERS[who])).text, before[who], `${who}'s own answer is the same after the Super Admin's read`);
+		const twice = await Promise.all([on.get(ADMIN_WEEKS, USERS.admin), on.get(ADMIN_WEEKS, USERS.admin2)]);
+		eq(twice.map((r) => r.text), [admin.text, admin.text], "two Super Admins at once read the same page");
+		for (const q of ["?period=month", "?driver=Ada%20Quill", "?as_user_id=11", "?view=full"]) eq((await on.get(`${ADMIN_WEEKS}${q}`, USERS.admin)).text, admin.text, `${q} changes nothing`);
+		eq(admin.headers["cache-control"], "private, no-store", "never kept by a browser or proxy");
+		const routesSrc = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
+		const handler = routesSrc.slice(routesSrc.indexOf("app.get(PATHS.adminWeeks"));
+		ok(/ownAnswer\(snap, key, row\.id, offRows\.get\(key\) \|\| \[\]\)/.test(handler) && /ownAnswer\(snap, viewer\.key, viewer\.row\.id, offRowsByKey\(snap\)\.get\(viewer\.key\) \|\| \[\]\)/.test(routesSrc),
+			"one function builds the answer for his own route and for the page, from the same snapshot");
+	});
+
+	await section("33 the drivers' weeks: off days, a week at 0, an open load", async () => {
+		const addOff = (world, directoryId, driver, from, to, status = "approved") => world.db.prepare(
+			`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_at, request_status)
+			 VALUES (?, ?, 'vacation', ?, ?, 'made-up', '2026-11-01T12:00:00Z', ?)`,
+		).run(directoryId, driver, from, to, status);
+		const off = await makeWorld({ DRIVER_AVAILABILITY_ENABLED: "true" });
+		try {
+			addOff(off, 2, "Ben Marsh", "2026-11-12", "2026-11-12");
+			addOff(off, 3, "Cal Reyes", "2026-11-12", "2026-11-12", "requested");
+			addOff(off, 1, "Ada Quill", "2026-11-02", "2026-11-03");
+			addOff(off, 8, "Hal Briar", "2026-11-07", "2026-11-09");
+			const { byId } = await parity(off, "approved days off");
+			const weeksOf = (id) => byId.get(id).performance.weeks;
+			eq([weeksOf(2)[0].credits.target, weeksOf(2)[0].targetLowered, weeksOf(1)[1].credits.target, weeksOf(8)[0].credits.target, weeksOf(8)[0].pace],
+				[6, true, 4.5, 4.5, null], "Ben's Thursday off, Ada's days off last week and Hal's three days off are on the page as on their own screens");
+		} finally {
+			await off.close();
+		}
+		const later = await makeWorld({}, { nowMs: Date.parse("2026-11-25T17:00:00Z"), extraLoads: [["DP-8001", "Ben Marsh", "Assigned", ""]] });
+		try {
+			const { byId } = await parity(later, "Wed Nov 25");
+			eq([byId.get(8).performance.weeks[0].credits.value, byId.get(8).performance.weeks[0].pace], [0, null], "Hal, on a truck with no load yet: his week at 0 and no label, as he sees it");
+			eq([byId.get(2).performance.weeks[0].credits.value, byId.get(2).performance.weeks[0].pace], [0, "needs-focus"], "Ben at 0 with a load in his name: Needs Focus, as he sees it");
+			ok(!byId.has(4), "Dee, whose truck and loads are older than both weeks, isn't listed, as her own route refuses her");
+		} finally {
+			await later.close();
+		}
+		// Held a truck last week only: his own route answers, so the page lists him, this week at 0.
+		const lastOnly = await makeWorld({}, { nowMs: Date.parse("2026-12-01T17:00:00Z") });
+		try {
+			lastOnly.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-25T15:00:00.000Z", "Dee Stone");
+			lastOnly.db.prepare("DELETE FROM truck_assignments WHERE driver_name = ?").run("Hal Briar");
+			const { byId } = await parity(lastOnly, "Tue Dec 1, a truck last week only");
+			eq([byId.has(4), byId.has(4) && byId.get(4).performance.weeks[0].credits.value], [true, 0], "Dee, on a truck last week only, is listed with this week at 0");
+		} finally {
+			await lastOnly.close();
+		}
+		// An owner-operator known only by his account: his own route refuses him, and so does the page.
+		const byAccount = await makeWorld({});
+		try {
+			byAccount.db.prepare("UPDATE drivers_directory SET user_id = 0 WHERE id = 6").run();
+			eq((await byAccount.get(OWN, USERS.fay)).status, 404, "(the scene) Fay's own route refuses her: her account is an owner-operator's");
+			await parity(byAccount, "an owner-operator by account only");
+			ok(!driversOf(await byAccount.get(ADMIN_WEEKS, USERS.admin)).some((x) => x.name === "Fay Owens"), "Fay isn't on the page, though her directory row names no account");
+		} finally {
+			await byAccount.close();
+		}
+		// A directory driver with no account: the test needs none, so he's listed with the answer his route gives a session naming him.
+		const noAccount = await makeWorld({}, { extraLoads: [["DP-8201", "Pat Rivers", "Delivered", "2026-11-10 10:00"]] });
+		try {
+			noAccount.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (31, 'Pat Rivers', 'active', 'fixed', 0)").run();
+			noAccount.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (31, 'LogisX-#531', '')").run();
+			noAccount.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (31, 'Pat Rivers', '2026-10-01T12:00:00.000Z', '')").run();
+			eq(noAccount.db.prepare("SELECT COUNT(*) AS n FROM users WHERE driver_name = 'Pat Rivers'").get().n, 0, "(the scene) no account names Pat Rivers");
+			const pat = driversOf(await noAccount.get(ADMIN_WEEKS, USERS.admin)).find((x) => x.name === "Pat Rivers");
+			const asHim = await noAccount.get(OWN, { id: 9031, role: "Driver", username: "made-up-pat", driverName: "Pat Rivers" });
+			ok(!!pat && asHim.status === 200 && JSON.stringify(pat.performance) === asHim.text, "a driver with no account is on the page, with the answer his own route gives a session naming him");
+			eq(pat && [pat.directoryId, pat.unit, creditsOf(pat)], [31, "#531", 0.5], "...his row, his unit and his week");
+		} finally {
+			await noAccount.close();
+		}
+		// A phone or a broker's cell in a counted load's row stays out.
+		const phones = await makeWorld({}, { extraLoads: [["DP-8101", "Ada Quill", "Delivered", "2026-11-10 09:00", "555-0142"], ["DP-8102", "Ben Marsh", "Delivered", "2026-11-10 10:00", "(555) 010-0199"]] });
+		try {
+			const r = await phones.get(ADMIN_WEEKS, USERS.admin);
+			ok(r.text.includes("DP-8101") && !/555-0142|010-0199/.test(r.text), "the loads that counted are on the page, and no phone number with them");
+		} finally {
+			await phones.close();
+		}
+	});
+
+	await section("33 the drivers' weeks: past weeks, and their hours behind their own switch", async () => {
+		const ELD = require(path.join(ROOT, "lib", "eld-activity-daily.js"));
+		const plant = (db, rows) => {
+			ELD.ensureEldActivitySchema(db);
+			const add = db.prepare("INSERT INTO eld_activity_daily (routemate_vehicle_id, truck_id, local_day, week_start, driver_id, samples, driving_min, basis) VALUES (?, ?, ?, ?, ?, 40, ?, ?)");
+			for (const r of rows) add.run(...r);
+		};
+		const ROWS = [
+			["rm-1", 1, "2026-11-09", "2026-11-07", 1, 600, "gps-estimate"],
+			["rm-1", 1, "2026-11-10", "2026-11-07", 1, 650, "gps-estimate"],
+			["rm-1", 1, "2026-11-11", "2026-11-07", 1, 560, "gps-estimate"],
+			["rm-1", 1, "2026-11-12", "2026-11-07", 1, 500, "gps-estimate"],
+			["lx-1", 1, "2026-11-16", "2026-11-14", 1, null, "no-hours-data"],
+			["rm-2", 2, "2026-11-09", "2026-11-07", 2, 1200, "gps-estimate"],
+			["rm-2", 2, "2026-10-05", "2026-10-03", 2, 300, "gps-estimate"],
+		];
+		// The switch off: no hours on the page, and no statement reads the rollup's table, with rows in it.
+		const quiet = await makeWorld({}, { nowMs: DEC_2 });
+		try {
+			plant(quiet.db, ROWS);
+			const statements = [];
+			const prepare = quiet.db.prepare.bind(quiet.db);
+			quiet.db.prepare = (sql) => { statements.push(String(sql)); return prepare(sql); };
+			const page = await quiet.get(ADMIN_WEEKS, USERS.admin);
+			quiet.db.prepare = prepare;
+			eq(page.status, 200, "(the scene) the page answers on Wed Dec 2");
+			ok(statements.length > 0, "(the scene) the spy sees the page's reads", statements.length);
+			eq(statements.filter((s) => /eld_activity_daily/i.test(s)), [], "with the hours switch off, serving the page reads nothing of the daily ELD activity table");
+			ok(!allKeys(page.json).some((k) => /hour|minute|driving/i.test(k)) && !/"hours"|minutes/i.test(page.text), "...and no driver's past week carries hours");
+			eq(driversOf(page).map((x) => [x.name, (pastOf(x.performance) || []).map((w) => [w.start, w.credits.value])]), [
+				["Ada Quill", [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 3]]],
+				["Ben Marsh", [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 2]]],
+				["Cal Reyes", [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 1]]],
+				["Eli North", [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 2]]],
+				["Hal Briar", [["2026-11-21", 0], ["2026-11-14", 0], ["2026-11-07", 1]]],
+			], "each driver's past weeks from the first counted week, newest first, his own figures");
+			await parity(quiet, "Wed Dec 2, hours off");
+		} finally {
+			await quiet.close();
+		}
+		// The switch on: each driver's hours are his own, and the page reads them as his route does.
+		const w = await makeWorld({ DRIVER_PERFORMANCE_HOURS_ENABLED: "true" }, { nowMs: DEC_2 });
+		try {
+			plant(w.db, ROWS);
+			const { byId } = await parity(w, "Wed Dec 2, hours on");
+			const hoursOf = (id) => (pastOf(byId.get(id) && byId.get(id).performance) || []).map((x) => [x.start, x.hours]);
+			eq(hoursOf(1), [["2026-11-21", { state: "none" }], ["2026-11-14", { state: "none" }], ["2026-11-07", { state: "estimate", value: 38.5 }]], "Ada's hours, as her own Past Performance shows them");
+			eq(hoursOf(2), [["2026-11-21", { state: "none" }], ["2026-11-14", { state: "none" }], ["2026-11-07", { state: "estimate", value: 20 }]], "Ben's are his own, none of Ada's");
+			ok(!allKeys(driversOf(await w.get(ADMIN_WEEKS, USERS.admin)).map((x) => x.performance.weeks)).some((k) => /hour/i.test(k)), "this week and last carry no hours on the page either");
+		} finally {
+			await w.close();
+		}
+	});
+
+	await section("33 the drivers' weeks: the switch, the role, the limit, a sheet that can't be read", async () => {
+		const gate = await makeWorld({});
+		try {
+			let last = null;
+			for (let i = 0; i <= require(path.join(ROOT, "lib", "driver-performance-routes.js")).RATE_LIMIT; i++) last = await gate.get(ADMIN_WEEKS, USERS.dispatcher);
+			eq(last && last.status, 403, "a Dispatcher past the limit's count still gets 403, never 429: the role is checked before the limit");
+			eq(gate.sheetReads, 0, "...and no refused caller reads Job Tracking");
+			gate.sheetDown = true;
+			const down = await gate.get(ADMIN_WEEKS, USERS.admin);
+			eq([down.status, down.json && down.json.code], [503, "PERFORMANCE_UNAVAILABLE"], "Job Tracking down is 503, not an empty page");
+		} finally {
+			await gate.close();
 		}
 	});
 
