@@ -17,8 +17,10 @@
 //   §3 server.js: a kill switch, on unless false, 0, no or off (off: no table, no
 //      job); on: the table, the job every 6 hours, and server.js's own week, driver
 //      and boundary, all of which only read
-//   §4 stored only: nothing outside the module names the table, and the replica
-//      rules refuse the flag
+//   §4 one reader: nothing outside the module names the table; its one reader
+//      sums one driver's measured minutes per week, read only, and server.js
+//      makes it only while DRIVER_PERFORMANCE_HOURS_ENABLED is exactly "true"
+//      and the rollup is on; the replica rules refuse the rollup's flag
 //
 // No network, no sheet, no app.db, no server: an in-memory SQLite and made-up data.
 //
@@ -461,9 +463,9 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 		}
 	});
 
-	// ---- §4 stored only ----------------------------------------------------------------------
-	console.log("§4 stored only");
-	await test("nothing reads the table", () => {
+	// ---- §4 one reader -----------------------------------------------------------------------
+	console.log("§4 one reader");
+	await test("nothing else reads the table", () => {
 		const own = path.join(ROOT, "lib", "eld-activity-daily.js");
 		ok("the module itself creates and writes the table", fs.readFileSync(own, "utf8").includes("eld_activity_daily"));
 		const files = [];
@@ -483,9 +485,43 @@ const WED = Date.parse("2026-10-14T14:00:00Z");
 		ok("server.js does not name the table", !SHIPPED.includes("eld_activity_daily"));
 		const uses = [...SHIPPED.matchAll(/\beldActivityRollup\b[^\n]*/g)].map((m) => m[0]);
 		ok("server.js uses the rollup only to start it", uses.length === 4 && uses.every((u) => /^eldActivityRollup( = ELD_ACTIVITY_DAILY_ENABLED$| && startsJob\(|\.run\(\); \}, )/.test(u)), uses);
-		eq("the module exports no reader", Object.keys(A).sort(), ["BASIS_ESTIMATE", "BASIS_NO_HOURS", "ELD_ACTIVITY_BACKFILL_KEY", "ELD_ACTIVITY_LAST_RUN_KEY",
+		eq("the module exports one reader and nothing else to read with", Object.keys(A).sort(), ["BASIS_ESTIMATE", "BASIS_NO_HOURS", "ELD_ACTIVITY_BACKFILL_KEY", "ELD_ACTIVITY_LAST_RUN_KEY",
 			"ELD_ACTIVITY_MAX_DAYS", "ELD_ACTIVITY_MIN_DAYS", "ELD_ACTIVITY_RULE", "ELD_ACTIVITY_SCHEMA_SQL", "activityRows", "classifySteps",
-			"createEldActivityRollup", "ensureEldActivitySchema"]);
+			"createEldActivityRollup", "driverWeekMinutesReader", "ensureEldActivitySchema"]);
+		const made = [...SHIPPED.matchAll(/^[^\n]*driverWeekMinutesReader[^\n]*$/gm)].map((m) => m[0].trim());
+		eq("server.js makes the reader in one place: Driver Performance's mount, only with the hours switch exactly \"true\" and the rollup on", made,
+			['drivingHours: process.env.DRIVER_PERFORMANCE_HOURS_ENABLED === "true" && ELD_ACTIVITY_DAILY_ENABLED ? require("./lib/eld-activity-daily").driverWeekMinutesReader(db) : null,']);
+		const mountAt = SHIPPED.indexOf('const driverPerformance = require("./lib/driver-performance-routes").mount(app, {');
+		ok("...inside that mount's own options", mountAt > 0 && SHIPPED.indexOf(made[0] || "\u0000", mountAt) > mountAt && SHIPPED.indexOf(made[0] || "\u0000", mountAt) < SHIPPED.indexOf("\n});", mountAt));
+	});
+	await test("the reader", () => {
+		const db = new Database(":memory:");
+		A.ensureEldActivitySchema(db);
+		const add = db.prepare("INSERT INTO eld_activity_daily (routemate_vehicle_id, truck_id, local_day, week_start, driver_id, samples, driving_min, basis) VALUES (?, ?, ?, ?, ?, 40, ?, ?)");
+		for (const r of [
+			["V1", 1, "2026-11-09", "2026-11-07", 7, 600, A.BASIS_ESTIMATE],
+			["V1", 1, "2026-11-10", "2026-11-07", 7, 650.5, A.BASIS_ESTIMATE],
+			["V1", 1, "2026-11-11", "2026-11-07", 7, null, A.BASIS_ESTIMATE],
+			["L1", 1, "2026-11-12", "2026-11-07", 7, null, A.BASIS_NO_HOURS],
+			["V1", 1, "2026-11-16", "2026-11-14", 7, 300, A.BASIS_ESTIMATE],
+			["V1", 1, "2026-11-23", "2026-11-21", 7, 90, A.BASIS_ESTIMATE],
+			["V2", 2, "2026-11-09", "2026-11-07", 8, 1200, A.BASIS_ESTIMATE],
+			["V2", 2, "2026-10-05", "2026-10-03", 8, 30, A.BASIS_ESTIMATE],
+		]) add.run(...r);
+		const statements = [];
+		const prepare = db.prepare.bind(db);
+		db.prepare = (sql) => { statements.push(String(sql).trim()); return prepare(sql); };
+		const read = A.driverWeekMinutesReader(db);
+		eq("nothing is read until a driver's weeks are asked for", statements, []);
+		eq("one driver's measured minutes per week, from..to, and the table's first day",
+			read(7, "2026-11-07", "2026-11-14"), { firstDay: "2026-10-05", weeks: [{ week_start: "2026-11-07", minutes: 1250.5 }, { week_start: "2026-11-14", minutes: 300 }] });
+		eq("another driver's rows are his own", read(8, "2026-11-07", "2026-11-21").weeks, [{ week_start: "2026-11-07", minutes: 1200 }]);
+		eq("a driver with no rows has no weeks", read(9, "2026-11-07", "2026-11-21").weeks, []);
+		ok("it only reads", statements.length > 0 && statements.every((s) => /^SELECT\b/i.test(s)), statements);
+		const bare = new Database(":memory:");
+		let threw = false;
+		try { A.driverWeekMinutesReader(bare)(7, "2026-11-07", "2026-11-14"); } catch { threw = true; }
+		ok("with no table it throws, for its caller to catch", threw);
 	});
 	await test("the replica rules refuse the flag", () => {
 		const r = replicaRules.enableRefusal("ELD_ACTIVITY_DAILY_ENABLED");

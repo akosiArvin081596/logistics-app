@@ -36,7 +36,7 @@ const baseTabs = [
   { key: 'messages', label: 'Messages', icon: '&#128172;' },
   { key: 'invoices', label: 'Invoices', icon: '&#128179;' },
 ]
-const performanceTab = { key: 'performance', label: 'Performance', icon: '&#128200;' }
+const performanceTab = { key: 'performance', label: 'Past Performance', icon: '&#128200;' }
 
 const tabs = computed(() => (props.showPerformance ? [...baseTabs, performanceTab] : baseTabs))
 </script>
@@ -45,5 +45,9 @@ const tabs = computed(() => (props.showPerformance ? [...baseTabs, performanceTa
 .tab-icon {
   font-size: 1.2rem;
   line-height: 1;
+}
+/* A label too long for its sixth of a phone ("Past Performance") breaks at its space, centred. */
+:deep(.van-tabbar-item__text) {
+  text-align: center;
 }
 </style>

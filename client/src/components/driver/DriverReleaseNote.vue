@@ -1,7 +1,9 @@
 <template>
   <!-- "What's new" after a release, and a first-time driver's tour offer. DriverView decides when
        (noteMoment()); this only shows the words and says which answer was tapped. Nothing but
-       "I acknowledge" closes the note: no close mark, and a tap outside it does nothing. -->
+       "I acknowledge" closes the note: no close mark, and a tap outside it does nothing. Show me is the
+       big button, so the tour comes first and ends in I acknowledge; the note's own I acknowledge is
+       the small one under it, and a moving truck's only way to answer. -->
   <van-popup
     :show="!!view"
     round
@@ -21,14 +23,21 @@
         </section>
         <p v-if="view.canShowMe" class="drn-text">{{ WORDS.notesEncourage }}</p>
         <p class="drn-text drn-ack-line" data-testid="release-acknowledge-line">{{ WORDS.acknowledgeLine }}</p>
+        <template v-if="view.canShowMe">
+          <van-button
+            round block type="primary" native-type="button" class="drn-primary drn-big" data-testid="release-show-me"
+            :disabled="view.saving" @click="showMe"
+          >{{ WORDS.showMe }}</van-button>
+          <van-button
+            block native-type="button" class="drn-second drn-quiet" data-testid="release-acknowledge"
+            :loading-text="WORDS.acknowledge" :loading="view.saving" :disabled="view.saving" @click="emit('acknowledge')"
+          >{{ WORDS.acknowledge }}</van-button>
+        </template>
+        <!-- With no steps to show, I acknowledge is the only answer, so it is the big button. -->
         <van-button
-          round block type="primary" native-type="button" class="drn-primary" data-testid="release-acknowledge"
+          v-else round block type="primary" native-type="button" class="drn-primary" data-testid="release-acknowledge"
           :loading-text="WORDS.acknowledge" :loading="view.saving" :disabled="view.saving" @click="emit('acknowledge')"
         >{{ WORDS.acknowledge }}</van-button>
-        <button
-          v-if="view.canShowMe" type="button" class="drn-second" data-testid="release-show-me"
-          :disabled="view.saving" @click="showMe"
-        >{{ WORDS.showMeFirst }}</button>
         <p v-if="view.whenParked" ref="parkedLine" class="drn-text drn-when-parked" role="status" data-testid="release-when-parked">{{ WORDS.whenParked }}</p>
       </template>
       <template v-else>
@@ -54,8 +63,8 @@ const emit = defineEmits(['acknowledge', 'show-me', 'take-tour', 'skip-offer'])
 const scroller = ref(null)
 const parkedLine = ref(null)
 
-// On a short phone the note fills its box, and the line Show me first adds on a moving truck is its last:
-// once it's drawn, the box scrolls to its end, on every such tap, so the driver sees it without scrolling.
+// On a short phone the note fills its box, and the line Show me adds on a moving truck is its last: once
+// it's drawn, the box scrolls to its end, on every such tap, so the driver sees it without scrolling.
 // Only the note's own box moves.
 async function showMe() {
   emit('show-me')
@@ -73,6 +82,7 @@ async function showMe() {
 .drn-lines li { margin-bottom: 0.35rem; }
 .drn-text { margin: 0 0 0.9rem; font-size: 0.88rem; line-height: 1.5; color: #475569; text-align: center; }
 .drn-primary { min-height: 44px; }
+/* The small answer: a plain word under the big button, for the note's I acknowledge and the offer's Skip. */
 .drn-second {
   display: block; width: 100%; min-height: 44px; margin-top: 0.4rem;
   border: none; background: none; color: #475569; font-family: inherit;
@@ -80,6 +90,10 @@ async function showMe() {
 }
 .drn-second:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; border-radius: 8px; }
 .drn-second:disabled { opacity: 0.5; cursor: default; }
+/* Show me is the bigger of the note's two answers, and I acknowledge under it the quieter, at every size:
+   sizes set here, not left to Vant's, so the order can't flip. Both stay 44 px or more to tap. */
+.drn-big { min-height: 50px; font-size: 1rem; font-weight: 700; }
+.drn-second.drn-quiet { font-size: 0.8125rem; font-weight: 500; }
 .drn-ack-line { color: #0f172a; font-weight: 600; }
 .drn-when-parked { margin: 0.6rem 0 0; color: #92400e; font-weight: 600; }
 </style>
