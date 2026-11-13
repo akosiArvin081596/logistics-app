@@ -704,7 +704,11 @@ async function main(R) {
 		]);
 		const fs = require("fs");
 		const libDir = path.join(W.ROOT, "lib");
-		eq("no lib/ file reads the switch", fs.readdirSync(libDir).filter((f) => /\.(c|m)?js$/.test(f) && fs.readFileSync(path.join(libDir, f), "utf8").includes("INVOICE_PERFORMANCE_COPY_ENABLED")), []);
+		const libText = (f) => fs.readFileSync(path.join(libDir, f), "utf8");
+		const libFiles = fs.readdirSync(libDir).filter((f) => /\.(c|m)?js$/.test(f));
+		eq("no lib/ file reads the switch from the environment", libFiles.filter((f) => /process\.env\.INVOICE_PERFORMANCE_COPY_ENABLED|\[\s*["']INVOICE_PERFORMANCE_COPY_ENABLED["']\s*\]/.test(libText(f))), []);
+		eq("the only lib/ file naming it is the replica's flag list, which reads none", libFiles.filter((f) => libText(f).includes("INVOICE_PERFORMANCE_COPY_ENABLED")), ["replica-rules.js"]);
+		eq("the renderer, the field map and the page's own module never name it", ["policy-renderer.js", "policy-field-maps.js", "invoice-performance-copy.js"].filter((f) => libText(f).includes("INVOICE_PERFORMANCE_COPY_ENABLED")), []);
 		const at = W.SRC.indexOf("\nasync function generateInvoiceHandler(");
 		const handler = at < 0 ? "" : W.SRC.slice(at, W.SRC.indexOf("\n}\n", at));
 		const awaits = handler.split("\n").filter((l) => /\bawait\b/.test(l) && code(l)).map((l) => l.trim());
