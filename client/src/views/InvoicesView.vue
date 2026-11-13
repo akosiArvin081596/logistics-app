@@ -1,11 +1,11 @@
 <template>
   <div class="flex flex-col">
-    <div class="dash-header">
+    <div class="dash-header inv-header">
       <div>
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Invoices</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Review, approve, and pay driver weekly invoices and manual invoices</p>
       </div>
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-3 inv-header-actions">
         <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredInvoices.length }} {{ activeFilter || 'total' }}</span>
         <Button v-if="auth.isSuperAdmin" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-9" @click="showManualDialog = true">+ New Invoice</Button>
         <Button v-if="auth.isSuperAdmin" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="showReportDialog = true">Payment Report</Button>
@@ -1054,6 +1054,13 @@ onMounted(() => store.load())
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+/* A phone can't hold the title and every action in one row: the actions go under the title and
+   wrap, so none sits past the screen's edge. Wider screens keep the one row. */
+@media (max-width: 767px) {
+  .inv-header { flex-wrap: wrap; gap: 0.75rem; }
+  .inv-header-actions { flex-wrap: wrap; min-width: 0; }
 }
 
 @media (max-width: 900px) {

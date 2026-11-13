@@ -10,7 +10,10 @@
 //   PC4 a week wholly in closed September: the server's 400 words, no lists
 //   PC5 the month locks unreadable: the server's 503 words and Try again; readable again, Try again
 //       brings the lists back
+//   PC6a 390 x 844, Super Admin: on Invoices the link sits wholly on screen, at least 40 px tall, nothing
+//       on top of it, the header with no sideways scroll; a tap on it opens the page
 //   PC6 390 x 844, Super Admin: the same page as cards, no table, no sideways scroll
+//   PC6b 360 x 780, Super Admin: PC6a's checks on a narrower phone
 //   PC7 the switch off: no link on Invoices after the route's 404; the page itself says it is not
 //       switched on, with no week picker and no list
 //   PC8 a Dispatcher, at both sizes: Invoices and the page send him away, no link, the route never asked
@@ -52,6 +55,7 @@ const DIST = path.join(paths.REPO, 'client', 'dist')
 const SHOT_DIR = process.env.SHOT_DIR ? path.resolve(process.env.SHOT_DIR) : path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'payroll-check-page', 'screens')
 const DESKTOP = { tag: '1280x800', viewport: { width: 1280, height: 800 } }
 const PHONE = { tag: '390x844', viewport: { width: 390, height: 844 } }
+const SMALL_PHONE = { tag: '360x780', viewport: { width: 360, height: 780 } }
 
 function die(msg) {
   console.error(`payroll-check-screen: ${msg}`)
@@ -434,15 +438,46 @@ async function desktopRun(browser, w) {
   }
 }
 
+// The Invoices link on a phone: wholly on screen, tall enough for a finger, nothing over its middle,
+// and the header no wider than itself; then a tap on it opens the page. Returns whether it did.
+async function phoneLinkRow(page, size, step, shotName) {
+  const width = size.viewport.width
+  const linked = await appears(page, '[data-testid="payroll-check-link"]', 15000)
+  if (linked) await page.locator('[data-testid="payroll-check-link"]').scrollIntoViewIfNeeded().catch(() => {})
+  const fit = await page.evaluate(() => {
+    const a = document.querySelector('[data-testid="payroll-check-link"]')
+    const h = document.querySelector('.inv-header')
+    const r = a ? a.getBoundingClientRect() : null
+    const hit = r ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null
+    const one = (n) => Math.round(n * 10) / 10
+    return {
+      link: r ? { left: one(r.left), right: one(r.right), height: one(r.height) } : null,
+      onTop: !!(a && hit && (hit === a || a.contains(hit))),
+      header: h ? { scrollWidth: h.scrollWidth, clientWidth: h.clientWidth, left: one(h.getBoundingClientRect().left), right: one(h.getBoundingClientRect().right) } : null,
+    }
+  })
+  const file = await shot(page, shotName)
+  let opened = false
+  if (linked) {
+    await page.locator('[data-testid="payroll-check-link"]').tap({ timeout: 5000 }).catch(() => {})
+    opened = await page.waitForURL('**/invoices/payroll-check', { timeout: 10000 }).then(() => true, () => false)
+  }
+  record(step, `${width} x ${size.viewport.height}: on Invoices the link is wholly on screen and tappable, and the header doesn't scroll sideways`,
+    `the link inside 0..${width}, at least 40 px tall, nothing over its middle; the header's scroll width within its own width and inside 0..${width}; a tap opens /invoices/payroll-check`,
+    `link ${fit.link ? JSON.stringify(fit.link) : 'absent'}; nothing over it ${fit.onTop}; header ${JSON.stringify(fit.header)}; the tap opened the page ${opened}`,
+    linked && !!fit.link && fit.link.left >= 0 && fit.link.right <= width && fit.link.height >= 40 && fit.onTop
+      && !!fit.header && fit.header.scrollWidth <= fit.header.clientWidth + 1 && fit.header.left >= -1 && fit.header.right <= width + 1 && opened,
+    file)
+  return opened
+}
+
 async function phoneRun(browser, w) {
   const state = { checks: [] }
   const v16 = checkView((await serverAnswer(w, { weekEnd: '2026-10-16' })).body)
   const { ctx, page, issues } = await openPage(browser, PHONE, SUPER_ADMIN, w, state, '/invoices')
   try {
-    const linked = await appears(page, '[data-testid="payroll-check-link"]', 15000)
-    const box = linked ? await page.locator('[data-testid="payroll-check-link"]').boundingBox() : null
-    notJudged.push(`390 x 844 Invoices: the link is ${linked ? 'present' : 'absent'}; ${box ? `at x ${Math.round(box.x)}..${Math.round(box.x + box.width)} of 390 (${box.x >= 0 && box.x + box.width <= 390 ? 'on screen' : 'off the screen\'s width: the Invoices header does not wrap'})` : 'no box'}`)
-    await page.goto(`${BASE}/invoices/payroll-check`, { waitUntil: 'domcontentloaded' })
+    const opened = await phoneLinkRow(page, PHONE, 'PC6a', '6a-invoices-header-390')
+    if (!opened) await page.goto(`${BASE}/invoices/payroll-check`, { waitUntil: 'domcontentloaded' })
     const ready = await appears(page, '[data-testid="pc-scope"]', 15000)
     await page.waitForTimeout(300)
     const parts = ready ? await shownParts(page) : []
@@ -455,11 +490,25 @@ async function phoneRun(browser, w) {
     const full = await shot(page, '9-check-390-full', { fullPage: true })
     record('PC6', '390 x 844: the same lists as cards, no table, no sideways scroll',
       `${v16 && rowCount(expectParts(v16))} cards, each the view's cells, tag and sentence; ${v16 && v16.drivers.length} roll-up cards; no table; the page fits`,
-      `link on Invoices ${linked}; lists ${describe(parts)}; tables ${tables}; roll-up ${rollup}; scroll ${JSON.stringify(scroll)}; screens ${[top, cardsShot, full].map((f) => path.basename(f)).join(', ')}`,
-      linked && ready && !!v16 && same(parts, expectParts(v16)) && tables === 0 && rollup === v16.drivers.length && scroll.page && scroll.panel,
+      `opened by the link ${opened}; lists ${describe(parts)}; tables ${tables}; roll-up ${rollup}; scroll ${JSON.stringify(scroll)}; screens ${[top, cardsShot, full].map((f) => path.basename(f)).join(', ')}`,
+      ready && !!v16 && same(parts, expectParts(v16)) && tables === 0 && rollup === v16.drivers.length && scroll.page && scroll.panel,
       top)
   } finally {
     await judgeConsole('PCx-sa-390', issues)
+    await ctx.close()
+  }
+}
+
+async function smallPhoneRun(browser, w) {
+  const state = { checks: [] }
+  const { ctx, page, issues } = await openPage(browser, SMALL_PHONE, SUPER_ADMIN, w, state, '/invoices')
+  try {
+    if (await phoneLinkRow(page, SMALL_PHONE, 'PC6b', '6b-invoices-header-360')) {
+      await appears(page, '[data-testid="pc-scope"]', 15000)
+      await shot(page, '6c-check-360')
+    }
+  } finally {
+    await judgeConsole('PCx-sa-360', issues)
     await ctx.close()
   }
 }
@@ -536,7 +585,7 @@ async function main() {
   let browser = null
   try {
     browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
-    for (const [name, fn] of [['desktop', () => desktopRun(browser, w)], ['phone', () => phoneRun(browser, w)], ['switch-off', () => offRun(browser)],
+    for (const [name, fn] of [['desktop', () => desktopRun(browser, w)], ['phone', () => phoneRun(browser, w)], ['phone-360', () => smallPhoneRun(browser, w)], ['switch-off', () => offRun(browser)],
       ['dispatcher-1280', () => dispatcherRun(browser, w, DESKTOP)], ['dispatcher-390', () => dispatcherRun(browser, w, PHONE)]]) {
       try { await fn() } catch (e) { record(`PC!-${name}`, `${name} run aborted`, 'no abort', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }

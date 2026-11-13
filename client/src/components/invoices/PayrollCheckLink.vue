@@ -37,4 +37,8 @@ const shown = computed(() => canSeePayrollCheck(auth.user?.role) && on.value)
   background: #f9fafb;
   border-color: #cbd5e1;
 }
+/* A finger needs a taller target than a mouse. */
+@media (max-width: 767px) {
+  .payroll-check-link { height: 2.75rem; }
+}
 </style>
