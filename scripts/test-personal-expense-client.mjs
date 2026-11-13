@@ -352,6 +352,14 @@ section('§10 the Personal tab: the driver box, each line as the receipts show i
     [/\{\{ totals\.text \}\}/.test(panel), /\{\{ totals\.reversed_text \}\}/.test(panel)], [true, true])
   check('…the cards show on a phone or when its panel is narrow',
     [/v-else-if="showCards" class="pl-cards"/.test(panel), /const showCards = computed\(\(\) => isMobile\.value \|\| \(width\.value > 0 && width\.value < CARDS_BELOW\)\)/.test(panel)], [true, true])
+  const panelStyle = panel.split('<style')[1] || ''
+  const colRem = (cls) => { const m = panelStyle.match(new RegExp(`\\.pl-table col\\.${cls} \\{ width: ([\\d.]+)rem; \\}`)); return m ? Number(m[1]) : NaN }
+  const fixedCols = ['col-date', 'col-driver', 'col-amount', 'col-state'].map(colRem)
+  const cardsBelow = Number((panel.match(/const CARDS_BELOW = (\d+)/) || [])[1])
+  check('…the table: four fixed columns, and at CARDS_BELOW they leave Vendor at least 120 px',
+    [fixedCols.every((r) => Number.isFinite(r) && r > 0), Number.isFinite(cardsBelow) && fixedCols.reduce((s, r) => s + r * 16, 0) + 120 <= cardsBelow,
+      /\.pl-table \{ table-layout: fixed; width: 100%;/.test(panelStyle)],
+    [true, true, true])
   check('…it re-reads on an expenses or invoices change only while its tab is open',
     [/useSocketRefresh\('expenses:changed', refreshIfOpen\)/.test(panel), /useSocketRefresh\('invoices:changed', refreshIfOpen\)/.test(panel), /function refreshIfOpen\(\) \{\s*if \(props\.active\) load\(\{ quiet: true \}\)/.test(panel)],
     [true, true, true])

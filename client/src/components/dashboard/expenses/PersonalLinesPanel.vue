@@ -96,8 +96,9 @@ const props = defineProps({
 
 const api = useApi()
 const { isMobile } = useViewport()
-// Below this panel width the five columns are too thin to read, so cards show.
-const CARDS_BELOW = 640
+// The table's four fixed columns take 36.5rem (584 px); below this panel width
+// Vendor would be too thin to read, so the cards show instead.
+const CARDS_BELOW = 720
 const rootEl = ref(null)
 const { width } = useElementWidth(rootEl)
 const showCards = computed(() => isMobile.value || (width.value > 0 && width.value < CARDS_BELOW))
@@ -218,10 +219,10 @@ onMounted(() => load())
   border-bottom: 1px solid var(--border);
 }
 .pl-table td { padding: 0.55rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; overflow: hidden; overflow-wrap: break-word; }
-.pl-table col.col-date { width: 7.5rem; }
-.pl-table col.col-driver { width: 9rem; }
-.pl-table col.col-amount { width: 8rem; }
-.pl-table col.col-state { width: 15rem; }
+.pl-table col.col-date { width: 7rem; }
+.pl-table col.col-driver { width: 8.5rem; }
+.pl-table col.col-amount { width: 7rem; }
+.pl-table col.col-state { width: 14rem; }
 .pl-mono { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
 .pl-vendor { white-space: nowrap; text-overflow: ellipsis; }
 
