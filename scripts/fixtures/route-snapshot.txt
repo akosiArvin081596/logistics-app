@@ -129,7 +129,7 @@ GET /api/driver/me/truck-photo · requireAuth@2f5c61384511 · inline@2f2d74308cc
 GET /api/driver/performance/leaderboard · driverPerformanceFlagGate@f2c3d9ee6fd3 · anon@12b84c4b0134 · boardForDriversGate@4344e68091c3 · limiter · anon@021a4381e19a · (lib mount)
 POST /api/driver/respond · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@89982e68df5a
 GET /api/driver/shared-documents/:id/download · requireAuth@2f5c61384511 · inline@05bdd1cc1b0b
-PUT /api/driver/status · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@981f76896cd2
+PUT /api/driver/status · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@8b3ac7aee0a9
 GET /api/driver/truck-documents/:id/view · requireAuth@2f5c61384511 · truckDocViewLimiter=limiter · inline@fd3eb05a68a6
 GET /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@65f41ab129f2
 POST /api/drivers-directory · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@692400a60522
