@@ -95,6 +95,17 @@ export function personalShortText(personal) {
   return `${amount} · ${word}`
 }
 
+// The Personal tab's request (GET /api/expenses/personal/lines): the driver box
+// and the two dates, each left out when empty; '' with nothing set.
+export function personalLinesQuery({ driver = '', from = '', to = '' } = {}) {
+  const params = new URLSearchParams()
+  if (driver) params.set('driver', driver)
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
 // The driver's receipt card: the week of the invoice that carries the line when
 // the server names it (a line carried to a later week's invoice).
 export function personalDriverText(personal) {

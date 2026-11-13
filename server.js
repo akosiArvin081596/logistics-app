@@ -31071,6 +31071,12 @@ function personalFollowsCharge(row, inv) {
 	return !!charge && charge.invoice_id === inv.id;
 }
 
+// What personalLineSummary() reads: each ledger row with its invoice's number,
+// kind, state and week, and its receipt's driver.
+const PERSONAL_SUMMARY_SELECT = `SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at,
+	 i.status AS inv_status, i.week_start AS inv_week_start, i.week_end AS inv_week_end, e.driver AS receipt_driver
+	 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id LEFT JOIN expenses e ON e.id = ep.expense_id`;
+
 // Each receipt's live Personal deduction, for the screens: { [expenseId]:
 // { line_id, cents, share_cents, week_start, state, invoice_id, invoice_number,
 // in_place, cost_period } }, state one of pending, invoiced, correction,
@@ -31085,37 +31091,40 @@ function personalSummaryByExpense(ids) {
 	for (let i = 0; i < list.length; i += 500) {
 		const chunk = list.slice(i, i + 500);
 		const rows = db.prepare(
-			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at,
-			 i.status AS inv_status, i.week_start AS inv_week_start, i.week_end AS inv_week_end, e.driver AS receipt_driver
-			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id LEFT JOIN expenses e ON e.id = ep.expense_id
+			`${PERSONAL_SUMMARY_SELECT}
 			 WHERE ep.expense_id IN (${chunk.map(() => "?").join(",")}) AND ep.kind = 'deduct' AND ep.voided_at = '' ORDER BY ep.id`
 		).all(...chunk);
-		for (const r of rows) {
-			const onInvoice = r.invoice_id != null && r.inv_number != null && !r.inv_deleted_at;
-			const state = r.reversed_by_id != null ? "reversed"
-				: onInvoice ? (r.inv_is_correction ? "correction" : "invoiced")
-					: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending";
-			out[r.expense_id] = {
-				line_id: r.id, cents: r.cents, share_cents: r.share_cents, week_start: r.week_start, state,
-				invoice_id: onInvoice ? r.invoice_id : null, invoice_number: onInvoice ? r.inv_number : "",
-				in_place: r.in_place, cost_period: r.cost_period,
-				amount_text: personalExpense.formatMoney(r.cents),
-				week_label: /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || "")) ? personalWeekLabel(r.week_start, getWeekRange(r.week_start).weekEnd) : "",
-			};
-			if (PERSONAL_RECEIPT_WEEK_ENABLED) {
-				Object.assign(out[r.expense_id], {
-					wait_text: state === "carried" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || ""))
-						? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text
-						: state === "reversed" && !onInvoice ? personalReversedWait(r) : "",
-					invoice_week_label: onInvoice && r.inv_week_start && r.inv_week_end ? personalWeekLabel(r.inv_week_start, r.inv_week_end) : "",
-					final: onInvoice && state !== "reversed" && !PERSONAL_OPEN_STATUSES.has(r.inv_status),
-				});
-			}
-			// The row itself, for personalSummaryForRole()'s Undo test; not enumerable,
-			// so it never reaches a response.
-			Object.defineProperty(out[r.expense_id], "row", { value: r, enumerable: false });
-		}
+		for (const r of rows) out[r.expense_id] = personalLineSummary(r);
 	}
+	return out;
+}
+
+// One deduction row (PERSONAL_SUMMARY_SELECT) as the screens show it: the
+// summary personalSummaryByExpense() describes.
+function personalLineSummary(r) {
+	const onInvoice = r.invoice_id != null && r.inv_number != null && !r.inv_deleted_at;
+	const state = r.reversed_by_id != null ? "reversed"
+		: onInvoice ? (r.inv_is_correction ? "correction" : "invoiced")
+			: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending";
+	const out = {
+		line_id: r.id, cents: r.cents, share_cents: r.share_cents, week_start: r.week_start, state,
+		invoice_id: onInvoice ? r.invoice_id : null, invoice_number: onInvoice ? r.inv_number : "",
+		in_place: r.in_place, cost_period: r.cost_period,
+		amount_text: personalExpense.formatMoney(r.cents),
+		week_label: /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || "")) ? personalWeekLabel(r.week_start, getWeekRange(r.week_start).weekEnd) : "",
+	};
+	if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+		Object.assign(out, {
+			wait_text: state === "carried" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || ""))
+				? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text
+				: state === "reversed" && !onInvoice ? personalReversedWait(r) : "",
+			invoice_week_label: onInvoice && r.inv_week_start && r.inv_week_end ? personalWeekLabel(r.inv_week_start, r.inv_week_end) : "",
+			final: onInvoice && state !== "reversed" && !PERSONAL_OPEN_STATUSES.has(r.inv_status),
+		});
+	}
+	// The row itself, for personalSummaryForRole()'s Undo test; not enumerable,
+	// so it never reaches a response.
+	Object.defineProperty(out, "row", { value: r, enumerable: false });
 	return out;
 }
 
@@ -31652,6 +31661,18 @@ const personalListLimiter = rateLimit({
 	message: { error: "Too many requests for the Personal lines waiting for a correction. Try again in a few minutes." },
 	standardHeaders: true,
 });
+// The Personal tab's list (GET /api/expenses/personal/lines): its own read-sized
+// count, so the tab never uses up the waiting list's.
+const personalLinesLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests for the Personal lines. Try again in a few minutes." },
+	standardHeaders: true,
+});
 
 // POST /api/expenses/:id/personal { amount?, reason? } — mark all or part of a
 // receipt Personal. amount is dollars (absent = the whole receipt). A Pending
@@ -31983,6 +32004,85 @@ app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin")
 	} catch (err) {
 		console.error("Personal waiting-corrections error:", err.message);
 		res.status(500).json({ error: "Failed to list the Personal lines waiting for a correction invoice" });
+	}
+});
+
+// The most lines one read of the Personal tab takes: past it the tab asks for
+// shorter dates rather than show a cut list under a total that leaves lines out.
+const PERSONAL_LINES_MAX = 5000;
+
+// Every state but reversed counts (pending, carried, needs_correction, invoiced,
+// correction); reversed lines are summed apart, never netted into the total.
+function personalLinesTotals(summaries) {
+	let cents = 0;
+	let lines = 0;
+	let reversedCents = 0;
+	let reversedLines = 0;
+	for (const p of summaries) {
+		if (p.state === "reversed") {
+			reversedCents += Number(p.cents) || 0;
+			reversedLines++;
+		} else {
+			cents += Number(p.cents) || 0;
+			lines++;
+		}
+	}
+	return {
+		cents, text: personalExpense.formatMoney(cents), lines,
+		reversed_cents: reversedCents, reversed_text: personalExpense.formatMoney(reversedCents), reversed_lines: reversedLines,
+	};
+}
+
+// The driver box's names: one per driver as normalizeDriverName() reads it, in
+// the spelling on most of his lines, so a stray spelling never labels the box.
+function personalLineDrivers() {
+	const byKey = new Map();
+	const rows = db.prepare(`SELECT e.driver AS driver, COUNT(*) AS n FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
+		WHERE ep.kind = 'deduct' AND ep.voided_at = '' GROUP BY e.driver ORDER BY n DESC, e.driver LIMIT 1000`).all();
+	for (const r of rows) {
+		const name = String(r.driver || "").trim();
+		const key = normalizeDriverName(name);
+		if (key && !byKey.has(key)) byKey.set(key, name);
+	}
+	return [...byKey.values()].sort((a, b) => a.localeCompare(b, "en-US"));
+}
+
+// GET /api/expenses/personal/lines?driver=&from=&to= — the Personal tab, read only:
+// one row per line (not per receipt) with the summary its receipt shows, so the
+// tab's tag and sentence match the receipts'; the driver in any spelling.
+app.get("/api/expenses/personal/lines", requireRole("Super Admin"), personalLinesLimiter, (req, res) => {
+	try {
+		const { driver = "", from = "", to = "" } = req.query;
+		if (typeof driver !== "string" || driver.length > 100) {
+			return res.status(400).json({ error: "Pick one driver.", code: "INVALID_DRIVER" });
+		}
+		for (const day of [from, to]) {
+			if (typeof day !== "string" || (day !== "" && !personalExpense.formatDay(day))) {
+				return res.status(400).json({ error: "Dates must be real days written YYYY-MM-DD.", code: "INVALID_DATE" });
+			}
+		}
+		if (!personalLedgerPresent()) return res.json({ lines: [], totals: personalLinesTotals([]), drivers: [] });
+		const where = ["ep.kind = 'deduct'", "ep.voided_at = ''"];
+		const params = [];
+		if (from) { where.push("ep.receipt_date >= ?"); params.push(from); }
+		if (to) { where.push("ep.receipt_date <= ?"); params.push(to); }
+		const rows = db.prepare(`${PERSONAL_SUMMARY_SELECT} WHERE ${where.join(" AND ")} ORDER BY ep.receipt_date DESC, ep.id DESC LIMIT ?`)
+			.all(...params, PERSONAL_LINES_MAX + 1);
+		if (rows.length > PERSONAL_LINES_MAX) {
+			return res.status(422).json({
+				error: `More than ${PERSONAL_LINES_MAX.toLocaleString("en-US")} Personal lines fall in these dates. Pick a shorter date range.`,
+				code: "PERSONAL_LINES_TOO_MANY",
+			});
+		}
+		const key = normalizeDriverName(driver);
+		const lines = rows.filter((r) => !key || normalizeDriverName(r.receipt_driver || "") === key).map((r) => ({
+			line_id: r.id, expense_id: r.expense_id, driver: String(r.receipt_driver || "").trim(),
+			receipt_date: r.receipt_date, merchant: r.merchant, personal: personalLineSummary(r),
+		}));
+		res.json({ lines, totals: personalLinesTotals(lines.map((l) => l.personal)), drivers: personalLineDrivers() });
+	} catch (err) {
+		console.error("Personal lines error:", err.message);
+		res.status(500).json({ error: "Failed to list the Personal lines" });
 	}
 });
 
