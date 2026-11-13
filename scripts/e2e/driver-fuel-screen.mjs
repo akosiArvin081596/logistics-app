@@ -48,6 +48,10 @@
 //         the header and the page don't move at all, and the long name's header is the short one's
 //   DFO7  the same on a load's own page at 360    DFO8  the same at 768, on one row
 //   DFM1-DFM3, DFM1d  Messages opened at 390, 320 and 1280: its input and Send stay above the tab bar
+//   DFA1d, DFA2d  Tracking's Fuel & Route card at 1280 x 800, as a made-up Super Admin with Driver QA focused:
+//         with the block, "What the driver sees" and his own Fuel section's lines, word for word (his screen on
+//         the same answers), read-only; with none (flag off), no box and the card as before. ONLY=card runs these
+//         alone. The Tracking page's own errors go in their observed column, not the verdict, as phone-layout.mjs W2
 //   DFx   no page errors, no console errors, no writes
 // At 390 x 844 every step also checks: no sideways scroll, row text at least 14 px, Refresh at least 44 px.
 //
@@ -64,7 +68,7 @@
 //   SHOTS_DIR=~/LogisX-replica/screens/driver-fuel-gallons fnm exec --using=22.23.2 node scripts/e2e/driver-fuel-screen.mjs
 //
 // Env: E2E_PORT, OUT_TAG (default "driver-fuel-screen"), SHOTS_DIR (default <work dir>/shots/<OUT_TAG>),
-// HEADED=1, CHROME_PATH, E2E_WORK_DIR. Output: the screenshots and results-<OUT_TAG>.md in the work
+// ONLY=card, HEADED=1, CHROME_PATH, E2E_WORK_DIR. Output: the screenshots and results-<OUT_TAG>.md in the work
 // dir. Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets). Exit 0 only when
 // every row PASSes.
 import fs from 'node:fs'
@@ -96,6 +100,8 @@ function die(msg) {
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) die(`E2E_PORT must be a port number from 1024 to 65535; got "${process.env.E2E_PORT}"`)
 if (PORT === 3000 || PORT === 5173 || PORT === 3901) die(`refusing port ${PORT}: 3000 is production's port on the VPS, 5173 is Vite's and 3901 the replica's`)
 if (!fs.existsSync(path.join(DIST, 'index.html'))) die(`no ${path.join(DIST, 'index.html')}: run \`npm run build:client\` first`)
+const ONLY = String(process.env.ONLY || '').toLowerCase()
+if (ONLY && ONLY !== 'card') die(`ONLY takes "card" or nothing; got "${process.env.ONLY}"`)
 
 const WORK = paths.workDir()
 const SHOTS = process.env.SHOTS_DIR ? path.resolve(process.env.SHOTS_DIR) : path.join(WORK, 'shots', OUT_TAG)
@@ -228,6 +234,21 @@ function driverPayload(status, name = DRIVER_NAME, scene = {}) {
   }
 }
 
+// The DFA steps' made-up Super Admin, and Tracking's one location: Driver QA on QA-FUEL-1.
+const STAFF = { id: 90033, username: 'qa-fuel-admin', role: 'Super Admin', driverName: '', email: '', fullName: 'QA Fuel Admin', companyName: '', mustChangePassword: false }
+function trackingLocations(status) {
+  return {
+    locations: [{
+      driver: DRIVER_NAME, latitude: 34.2, longitude: -92.9, timestamp: new Date().toISOString(), lastPingAge: 30000, speed: 26, heading: 240,
+      fuelPct: 48, loadId: LOAD_ID, source: 'eld', assignedTruck: { unit: '901', hasEld: true },
+      activeLoads: [{
+        loadId: LOAD_ID, status, details: 'Made-up load for the driver fuel check', originLat: 35.05, originLng: -89.98, destLat: 32.78, destLng: -96.8,
+        pickupStreet: '100 Example Rd', pickupAddress: 'Riverton, TN 38118', dropoffStreet: '200 Sample Ave', dropoffAddress: 'Lakeside, TX 75201',
+      }],
+    }],
+  }
+}
+
 // One scene's answers: { status, body } per path.
 function answersFor(scene) {
   const w = world(scene.world || {})
@@ -244,7 +265,9 @@ function answerGet(pathname, scene, answers) {
   if (answers[pathname]) return answers[pathname]
   const ok = (body) => ({ status: 200, body })
   const name = scene.driverName || DRIVER_NAME
-  if (pathname === '/api/auth/session') return ok({ authenticated: true, user: { ...DRIVER, driverName: name, fullName: name }, appTimeZone: 'America/New_York' })
+  if (pathname === '/api/auth/session') return ok({ authenticated: true, user: scene.staff ? STAFF : { ...DRIVER, driverName: name, fullName: name }, appTimeZone: 'America/New_York' })
+  if (scene.staff && pathname === '/api/locations/latest') return ok(trackingLocations(answers.status))
+  if (scene.staff && pathname === '/api/tracking/hos') return ok({ available: false })
   if (pathname === `/api/driver/${encodeURIComponent(name)}`) {
     // 400, not a 5xx: DFx allows the browser's line for a 400 only, and any failure here is the same lock screen.
     return scene.driverLoadFails ? { status: 400, body: { error: 'made-up failure' } } : ok(driverPayload(answers.status, name, scene))
@@ -347,7 +370,7 @@ async function fakeSocket(ctx) {
   }
 }
 
-async function openScene(browser, scene, viewport, { openLoad = true, socket = false } = {}) {
+async function openScene(browser, scene, viewport, { openLoad = true, socket = false, at = '/driver' } = {}) {
   const answers = answersFor(scene)
   const phone = isPhone(viewport)
   const asked = {}
@@ -375,14 +398,17 @@ async function openScene(browser, scene, viewport, { openLoad = true, socket = f
     return route.fulfill({ status: a.status, contentType: 'application/json', body: JSON.stringify(a.body) })
   })
   const page = await ctx.newPage()
-  page.on('pageerror', (e) => pageErrors.push(String(e.message || e).slice(0, 200)))
-  page.on('console', (m) => consoleLines.push({ type: m.type(), text: m.text(), url: String((m.location() && m.location().url) || '') }))
-  await page.goto(`${BASE}/driver`)
+  // The Tracking page's own errors are kept apart, as phone-layout.mjs keeps them out of its verdict.
+  const errors = scene.staff ? [] : pageErrors
+  const lines = scene.staff ? [] : consoleLines
+  page.on('pageerror', (e) => errors.push(String(e.message || e).slice(0, 200)))
+  page.on('console', (m) => lines.push({ type: m.type(), text: m.text(), url: String((m.location() && m.location().url) || '') }))
+  await page.goto(`${BASE}${at}`)
   if (openLoad) {
     await page.locator('.load-card').filter({ hasText: LOAD_ID }).first().click({ timeout: 30000 })
     await page.locator('.load-detail').waitFor({ state: 'visible', timeout: 15000 })
   }
-  return { ctx, page, sock, answers, asked }
+  return { ctx, page, sock, answers, asked, errors, lines }
 }
 
 // The collapsed badge first (the prefetch), then the section opened and settled.
@@ -1287,6 +1313,84 @@ async function messagesSteps(browser) {
   }
 }
 
+// ---------------------------------------------------------------- Tracking's Fuel & Route card
+const CARD_STEPS = [
+  { step: 'DFA1d', title: 'the block present', world: {} },
+  { step: 'DFA2d', title: 'the block absent (flag off)', world: { flag: false } },
+]
+const CARD_ASKS = ['/api/fuel/range', '/api/fuel/trip-plan', '/api/poi/fuel-stops']
+
+async function cardScene(browser, sc) {
+  const flagOn = sc.world.flag !== false
+  // The driver's own Fuel section on the same answers: the lines the card has to print.
+  let driverLines = ''
+  if (flagOn) {
+    const d = await openScene(browser, sc, DESKTOP)
+    try {
+      await openFuel(d.page)
+      driverLines = await blockText(d.page)
+    } finally {
+      await d.ctx.close()
+    }
+  }
+  const { ctx, page, asked, errors, lines } = await openScene(browser, { ...sc, staff: true }, DESKTOP, { openLoad: false, at: '/tracking' })
+  try {
+    const panel = page.locator('.driver-panel')
+    await panel.waitFor({ state: 'visible', timeout: 20000 })
+    await panel.locator('.driver-item', { hasText: DRIVER_NAME }).click()
+    await page.locator('.fuel-finder').waitFor({ state: 'visible', timeout: 10000 })
+    // The card's three answers in: its trip section drawn and no loading line left.
+    await page.waitForFunction(() => {
+      const c = document.querySelector('.fuel-finder')
+      return !!c && !!c.querySelector('.ff-plan, .ff-plan-note') && !c.querySelector('.ff-loading')
+    }, null, { timeout: 15000 })
+    const box = page.locator('.fuel-finder [data-testid="ff-driver-lines"]')
+    const has = (await box.count()) > 0
+    if (has) await box.scrollIntoViewIfNeeded()
+    const m = await page.evaluate(() => {
+      const c = document.querySelector('.fuel-finder')
+      const b = c.querySelector('[data-testid="ff-driver-lines"]')
+      const title = b && b.querySelector('.ff-driver-title')
+      return {
+        lines: b ? [...b.children].filter((el) => el !== title).map((el) => el.innerText).join(' ').replace(/\s+/g, ' ').trim() : '',
+        title: title ? title.textContent.trim() : '',
+        controls: b ? b.querySelectorAll('button, a, input, select, textarea').length : 0,
+        boxOverflow: b ? b.scrollWidth - b.clientWidth : 0,
+        cardWidth: c.getBoundingClientRect().width,
+        verdict: ((c.querySelector('.ff-plan-head') || {}).textContent || '').trim(),
+        driverWords: /What the driver sees|miles until you run out/i.test(c.innerText),
+        sideways: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
+      }
+    })
+    const file = path.join(SHOTS, `${sc.step.toLowerCase()}-tracking-card-1280x800.png`)
+    await page.screenshot({ path: file }).catch((e) => console.log(`  (screenshot ${sc.step} failed: ${e.message})`))
+    const fuelAsks = Object.keys(asked).filter((p) => /^\/api\/(fuel|poi)\//.test(p)).sort()
+    const checks = {
+      ...(flagOn
+        ? { box: has, theDriversLines: !!driverLines && m.lines === driverLines, title: m.title === 'What the driver sees', readOnly: m.controls === 0, boxFits: m.boxOverflow <= 0 }
+        : { noBox: !has, noDriverWords: !m.driverWords }),
+      verdictStays: !!m.verdict,
+      card270: Math.abs(m.cardWidth - 270) < 0.5,
+      noSideways: m.sideways <= 0,
+      noNewAsk: JSON.stringify(fuelAsks) === JSON.stringify(CARD_ASKS),
+    }
+    const noise = [...errors, ...lines.filter((l) => l.type === 'error' && !harnessLine(l)).map((l) => l.text.slice(0, 120))]
+    record(sc.step, `Tracking's Fuel & Route card at 1280 x 800, ${sc.title}`, flagOn
+      ? 'under "What the driver sees", his own Fuel section\'s lines word for word (his screen on the same answers), read-only; the card\'s own verdict stays; the card 270 px wide; no sideways scroll; no new ask'
+      : 'no box and none of the driver\'s lines; the card\'s own verdict; the card 270 px wide; no sideways scroll; no new ask',
+    `${flags(checks)}; card "${m.lines}"${flagOn ? `; driver "${driverLines}"` : ''}; verdict "${m.verdict}"; card ${m.cardWidth}px; asked ${fuelAsks.join(' ')}; Tracking page errors (not in the verdict): ${noise.length ? noise.join('; ') : 'none'}`,
+    allTrue(checks), file)
+  } finally {
+    await ctx.close()
+  }
+}
+
+async function cardSteps(browser) {
+  for (const sc of CARD_STEPS) {
+    try { await cardScene(browser, sc) } catch (e) { record(sc.step, `Tracking's card, ${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
+  }
+}
+
 async function main() {
   if (await portInUse(PORT)) die(`port ${PORT} is in use`)
   const server = http.createServer(serveDist)
@@ -1294,10 +1398,11 @@ async function main() {
   let browser = null
   try {
     browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
-    for (const sc of SCENES) {
+    for (const sc of ONLY ? [] : SCENES) {
       try { await phoneScene(browser, sc) } catch (e) { record(sc.step, `${sc.title}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    for (const [name, fn] of [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['the chip\'s tap', tapSteps], ['offline', offlineSteps], ['messages', messagesSteps]]) {
+    const groups = [['route options', routeOptions], ['desktop', desktop], ['header chip', chipSteps], ['the chip\'s tap', tapSteps], ['offline', offlineSteps], ['messages', messagesSteps]]
+    for (const [name, fn] of [...(ONLY ? [] : groups), ['the Tracking card', cardSteps]]) {
       try { await fn(browser) } catch (e) { record('DF!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
     // Some steps answer 400 on purpose; the browser logs that one line for each.

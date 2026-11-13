@@ -248,7 +248,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
-| `driver-fuel-screen.mjs` | The driver app's Fuel section with the driver gallons flag (DRIVER_FUEL_GALLONS_ENABLED) at 390 x 844 and 1280 x 800, on made-up data with the same static server (see "The driver fuel check"). |
+| `driver-fuel-screen.mjs` | The driver app's Fuel section with the driver gallons flag (DRIVER_FUEL_GALLONS_ENABLED) at 390 x 844 and 1280 x 800, and the driver's lines on Tracking's Fuel & Route card at 1280 x 800, on made-up data with the same static server (see "The driver fuel check"). |
 | `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
 | `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
 | `driver-emergency-contacts.mjs` | The emergency contacts item on the driver's onboarding lock screen (`EMERGENCY_CONTACTS_ENABLED`) at 375 x 667 and 390 x 664, on made-up data with the same static server: the item and the progress it counts in, one contact refused before anything is sent, the second contact saving and moving the signing step on, Edit reading the list again, and a refusal only the server gives shown in words. The contacts PUT is judged in-process by `lib/emergency-contacts.js`, the server's own rules. |
@@ -1751,6 +1751,7 @@ figures; the flag-off steps leave the block out.
 ```bash
 npm run build:client
 SHOTS_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/driver-fuel-screen.mjs   # HEADED=1 to watch
+ONLY=card SHOTS_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/driver-fuel-screen.mjs   # the DFA steps alone
 ```
 
 Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
@@ -1778,6 +1779,7 @@ Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
 | DFO1-DFO6 | Offline shown and cleared at 390, 360 and 320 wide, with a two-word and a very long name. A stand-in for the server's socket lets the build's own socket.io client connect and drop. | The header, the page and the first item don't move at all; the long name's header is the short name's height; Offline, the chip and the buttons whole and on screen |
 | DFO7, DFO8 | The same on a load's own page at 360x800, and at 768x1024 with the long name. | The same |
 | DFM1-DFM3, DFM1d | Messages opened: 390x844 (two names), 320x568 (long name), 1280x800. | At least 85 px between the input bar and the tab bar; input and Send take a tap; the messages at least 100 px tall |
+| DFA1d, DFA2d | 1280x800: the driver's Fuel section opened on the same answers, then Tracking as a made-up Super Admin, Driver QA focused (his load opens itself), with the block and then with none (flag off). `ONLY=card` runs these alone. | With the block: under "What the driver sees", his Fuel section's lines word for word, no control in the box; without: no box and none of his lines. Both: the card's own verdict, the card 270 px wide, no sideways scroll, and only the range, trip plan and stops asked. The Tracking page's own errors are listed in the row, not in its verdict (as `phone-layout.mjs` W2) |
 | DFx | Page errors, console errors and writes over the run. | None, but the browser's line for the steps' own 400s |
 
 Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `driver-fuel-screen`), and the screenshots in
