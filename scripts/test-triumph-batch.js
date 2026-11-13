@@ -536,10 +536,13 @@ async function s6() {
 	ok(/outside this repository/.test(await refused([`--out=${path.join(link, "x")}`], { env: { TRIUMPH_NOA_LINES: NOA_SETTING } })), "§6 --out through a link into the repo: refused");
 	ok(/outside this repository/.test(await refused([`--out=${none}`, `--noa-lines-file=${path.join(ROOT, "package.json")}`])), "§6 --noa-lines-file in the repo: refused");
 
-	for (const flag of ["--dry-run", "--upload", "--dry-run=1"]) {
-		ok(/comes with the transport/.test(await refused([flag, `--out=${none}`])), `§6 ${flag}: refused: there is no transport here`);
-		ok(/comes with the transport/.test(await refused([flag, "--load=LD-TEST-0001", "--debtor=x", `--out=${none}`])), `§6 ${flag} with --load: refused before anything is read`);
+	// --dry-run and --upload (PR T2) send the made-up batch alone: a load, a folder or a file of
+	// one is refused before anything is read (scripts/test-triumph-job.js runs both).
+	for (const flag of ["--dry-run", "--upload"]) {
+		ok(/sends only the made-up batch, so --out is refused/.test(await refused([flag, `--out=${none}`])), `§6 ${flag} with --out: refused: it writes no file here`);
+		ok(/sends only the made-up batch, so --load is refused/.test(await refused([flag, "--load=LD-TEST-0001", "--debtor=x", `--out=${none}`])), `§6 ${flag} with --load: refused before anything is read`);
 	}
+	ok(/takes no value/.test(await refused(["--dry-run=1"])), "§6 --dry-run=1: refused");
 	ok(/--out=<folder> is required/.test(await refused([])), "§6 no --out");
 	ok(/unknown/.test(await refused(["--host=made-up.example.test", `--out=${none}`])), "§6 an argument it doesn't know");
 	ok(/unknown/.test(await refused(["plain", `--out=${none}`])), "§6 a word that isn't an argument");

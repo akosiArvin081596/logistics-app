@@ -14,6 +14,8 @@
 //   §9 the document rule: what goes in a batch, in what order, and what can't be missing
 //   §10 the free checks, in order, each with its code
 //   §11 no remit address in the code: the lines live in a setting
+//   §12 the submit job's rules (PR T2): the sample's gate, the job's own free checks,
+//       DTR_NAME's rules before a number (R-L3), the caps
 //
 //   §13 advance lines (TRIUMPH_ADVANCE_LINES_ENABLED, PR B1): on only with the automatic
 //       invoice's own switch on too; the free checks leave a factored load's lines to the
@@ -387,8 +389,75 @@ section("§10 the free checks");
 	const everyCode = ["LOAD_DROPPED", "NOT_COMPLETED", "ALREADY_INVOICED", "INVOICE_DRAFT_IN_FLIGHT", "INVOICE_MAYBE_DRAFTED", "CLOSED_MONTH", "MONTH_UNKNOWN", "NO_DELIVERY_DATE", "ADVANCE_LINES", "WAITING_POD", "POD_UNREADABLE",
 		"NO_BROKER_EMAIL", "BROKER_EMAIL_FREEMAIL", "BROKER_DOMAIN_UNCONFIRMED", "DEBTOR_UNMAPPED", "NOA_UNCONFIGURED",
 		"FIELD_UNUSABLE", "PO_UNUSABLE", "PROTECTED_VALUE", "DOCUMENT_MISSING", "DOCUMENT_UNREADABLE", "MERGE_FAILED", "BATCH_TOO_LARGE", "DEBTOR_NAME_COMMA", "DEBTOR_NAME_NOT_ON_DOC", "DEBTOR_NAME_UNREADABLE",
-		"RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH"];
-	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 FAILS ON THE OLD CODE: every code is on the list, each once, DEBTOR_NAME_COMMA among them");
+		"RATECON_NAME_MISMATCH", "RATECON_NUMBER_MISMATCH",
+		// PR T2's: what only the submit job reads, the engine's refusals it passes on, its waits, its sending, its lock point
+		"SETTINGS_UNREADABLE", "DENY_LIST_UNSET", "FIELD_NOT_PRINTED", "NOT_FACTORED", "FACTORING_LOCKED",
+		"RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_TOTAL_UNREAD", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RECIPIENT_UNCONFIGURED", "TOTAL_MISMATCH",
+		"POD_PAGE_UNREADABLE", "INVOICE_REFS_REQUIRED", "INVOICE_TOTAL_UNKNOWN", "TRAILER_MISMATCH", "DRAFT_REFUSED", "FACTORING_UNREADABLE", "ASSIGNMENT_NOT_PRINTABLE", "FACTORING_CHANGED",
+		"RETRY_LATER", "GEMINI_DOWN", "RENDERER_BUSY", "QUIET_WINDOW", "HOST_KEY_MISMATCH", "LOGIN_REFUSED",
+		"SUBMIT_FAILED", "MAYBE_SUBMITTED", "BATCH_FILES_CHANGED", "LOAD_CHANGED", "NOT_LIVE", "NUMBER_VOIDED", "STAGE_INVALID", "LOCK_MISSING", "SUBMIT_NOW"];
+	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 FAILS ON THE OLD CODE: every code is on the list, each once, DEBTOR_NAME_COMMA and the submit job's among them");
+	eq(new Set(rules.REASON_CODES).size, rules.REASON_CODES.length, "§10 ...no code twice");
+}
+
+// ---------------------------------------------------------------- §12
+section("§12 the submit job's rules (PR T2)");
+// A tree before PR T2 has none of these: each missing one fails by name, and the run goes on.
+const T2_RULES = ["sampleShut", "transportSettings", "readCaps", "debtorNameProblem"];
+for (const fn of T2_RULES.filter((f) => typeof rules[f] !== "function")) failures.push(`§12 FAILS ON THE OLD CODE: lib/triumph-rules.js has no ${fn}()`);
+const has = (fn) => typeof rules[fn] === "function";
+if (has("sampleShut")) {
+	// The made-up sample's gate: any value at all in the go-live date shuts it (R-L7).
+	eq(rules.sampleShut({}), null, "§12 nothing set: the sample may go");
+	eq(rules.sampleShut({ TRIUMPH_SUBMIT_ENABLED: "true" }), null, "§12 a dry run: the sample may go");
+	eq(rules.sampleShut({ TRIUMPH_LIVE_CONFIRMED_ON: "  " }), null, "§12 a date of blanks is no date");
+	for (const v of ["2026-11-20", "20/11/2026", "2026-02-30", "soon"]) {
+		eq(rules.sampleShut({ TRIUMPH_LIVE_CONFIRMED_ON: v }), "SAMPLE_AFTER_LIVE", `§12 FAILS ON THE OLD CODE (R-L7): the go-live date ${JSON.stringify(v)}, a real one or not: shut`);
+	}
+	eq(rules.sampleShut({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05" }), "SAMPLE_AFTER_LIVE", "§12 the mode live: shut");
+	eq(rules.sampleShut({}, { replica: true }), "SAMPLE_REPLICA", "§12 a replica: shut");
+}
+{
+	// The free checks' new options, each checked only when the job passes it. freeVerdict() is
+	// T1's, so these run on a tree before PR T2 too, and fail there by name.
+	const cols = autoRules.jobColumns(["Load ID", "Status", "Email", "Delivery Date", "  Payment  "]);
+	const facts = autoRules.loadFacts({ row: { "Load ID": "LD-TEST-0001", Status: "Delivered", Email: "ap@example-broker.test", "Delivery Date": "11/02/2026", "  Payment  ": "2150" }, cols,
+		records: { pods: [{ id: 1 }], rateCons: [], drafts: [], deleted: false }, confirmedDomains: ["example-broker.test"], closedMonths: [] });
+	const READY = { debtorName: "Example Broker LLC", hasLines: true };
+	const say = (f, opts) => { const v = rules.freeVerdict(f, { ...READY, ...opts }); return `${v.state}${v.code ? ` ${v.code}` : ""}`; };
+	eq(say(facts, {}), "queued", "§12 (fixture) ready");
+	eq(say({ ...facts, live: false }, { lockedOutside: true }), "skipped FACTORING_LOCKED", "§12 FAILS ON THE OLD CODE: a load handled in Triumph's process is skipped first, whatever else holds");
+	eq(say({ ...facts, live: false }, { factored: false }), "skipped NOT_FACTORED", "§12 FAILS ON THE OLD CODE: a mark cleared: skipped");
+	eq(say(facts, { factored: undefined }), "queued", "§12 ...a report that doesn't say reads as before");
+	eq(say(facts, { mailboxInvoice: true }), "needs_attention ALREADY_INVOICED", "§12 FAILS ON THE OLD CODE: saved mailbox evidence of an invoice: ALREADY_INVOICED");
+	eq(say(facts, { settingsReadable: false }), "needs_attention SETTINGS_UNREADABLE", "§12 FAILS ON THE OLD CODE: a debtor map that can't be read");
+	eq(say(facts, { denyListSet: false }), "needs_attention DENY_LIST_UNSET", "§12 FAILS ON THE OLD CODE: no carrier deny list: nothing composed could be checked");
+	eq(say(facts, { denyListSet: undefined }), "queued", "§12 ...a report that doesn't say reads as before");
+	eq(say(facts, { denyListSet: false, hasLines: false }), "needs_attention NOA_UNCONFIGURED", "§12 the lines come before the list");
+
+	// R-L3: csvRow()'s own DTR_NAME rules, before a number.
+	eq(say(facts, { debtorName: "Example Broker, LLC" }), "needs_attention DEBTOR_NAME_COMMA", "§12 FAILS ON THE OLD CODE (R-L3): a comma in the debtor's name stops the load before a number");
+	for (const [label, name] of [["a double quote", "Example \"Broker\" LLC"], ["101 characters", "E".repeat(101)], ["a leading =", "=Example"], ["a leading space", " Example Broker LLC"], ["a character outside ASCII", "Exämple Broker LLC"]]) {
+		eq(say(facts, { debtorName: name }), "needs_attention FIELD_UNUSABLE", `§12 FAILS ON THE OLD CODE (R-L3): a debtor's name with ${label}: FIELD_UNUSABLE, before a number`);
+	}
+}
+if (has("debtorNameProblem")) {
+	// The free check and the CSV writer can't drift: the same answer for every printable character.
+	const row = (name) => rules.csvRow({ debtorName: name, invoiceId: "11022026-7", invoiceDate: "11/02/2026", po: "LD-TEST-0001", billedTotal: "$2,150.00" });
+	const drift = [];
+	for (let ch = 0x20; ch <= 0x7e; ch++) {
+		for (const name of [`Example ${String.fromCharCode(ch)} LLC`, `${String.fromCharCode(ch)}Example`]) {
+			const r = row(name);
+			const fromCsv = r.ok ? null : r.code;
+			if (rules.debtorNameProblem(name) !== fromCsv) drift.push(name);
+		}
+	}
+	eq(drift, [], "§12 debtorNameProblem() answers as csvRow() does on DTR_NAME, for every printable character, inside and leading");
+}
+if (has("readCaps")) {
+	eq(rules.readCaps({}), { maxPerHour: 12, maxPerDay: 60, perSweep: 2 }, "§12 the caps: 12 an hour, 60 a day, 2 a run");
+	eq(rules.readCaps({ TRIUMPH_MAX_PER_HOUR: "3", TRIUMPH_MAX_PER_DAY: "9" }), { maxPerHour: 3, maxPerDay: 9, perSweep: 2 }, "§12 ...each a setting");
+	for (const v of ["0", "-1", "1001", "x", "2.5"]) eq(rules.readCaps({ TRIUMPH_MAX_PER_HOUR: v }).maxPerHour, 12, `§12 an hourly cap of ${JSON.stringify(v)}: the default`);
 }
 
 // ---------------------------------------------------------------- §11

@@ -1,18 +1,16 @@
 <template>
-  <!-- A driver's own week. DriverView shows this only after the server has answered for him.
-       Display only: nothing here writes, every figure is the server's, and it reads only his own
-       route. Each opening reads afresh, so nothing is kept on the phone. -->
+  <!-- A driver's own weeks: this week on top, then each past week. DriverView shows this only after
+       the server has answered for him. Display only: nothing here writes, every figure is the
+       server's, and it reads only his own route. Each opening reads afresh, so nothing is kept on
+       the phone. -->
   <div class="perf" data-testid="perf-tab">
-    <van-tabs v-model:active="periodId" class="perf-periods" color="#0369a1" title-active-color="#0369a1" data-testid="perf-periods">
-      <van-tab v-for="period in OWN_PERIODS" :key="period.id" :name="period.id" :title="period.label" />
-    </van-tabs>
-
     <p v-if="state === 'loading'" class="perf-note" data-testid="perf-loading">Loading&hellip;</p>
     <div v-else-if="!week" class="card perf-failed" role="alert" data-testid="perf-failed">
       <p class="perf-note">{{ FAILED_LINE }}</p>
       <button type="button" class="perf-retry" data-testid="perf-retry" @click="load">Try again</button>
     </div>
     <template v-else>
+      <h3 class="perf-heading" data-testid="perf-this-week-title">{{ THIS_WEEK_TITLE }}</h3>
       <section class="card perf-card" aria-label="My week" data-testid="perf-week">
         <p class="perf-range" data-testid="perf-range">{{ week.range }}</p>
         <div class="perf-head">
@@ -44,20 +42,30 @@
       <p class="perf-note" data-testid="perf-target">{{ TARGET_LINE }}</p>
       <p v-if="week.lowered" class="perf-note" data-testid="perf-lowered">{{ week.lowered }}</p>
       <p class="perf-note" data-testid="perf-requirement">{{ week.requirement }}</p>
+
+      <section v-if="past" class="perf-past" :aria-label="past.title" data-testid="perf-past">
+        <h3 class="perf-heading" data-testid="perf-past-title">{{ past.title }}</h3>
+        <ul v-if="past.rows.length" class="card perf-weeks">
+          <li v-for="row in past.rows" :key="row.key" class="perf-past-week" data-testid="perf-past-week">
+            <span class="perf-past-range" data-testid="perf-past-range">{{ row.range }}</span>
+            <span class="perf-past-count" data-testid="perf-past-count">{{ row.count }}</span>
+            <span class="perf-past-hours" data-testid="perf-past-hours">{{ row.hours }}</span>
+          </li>
+        </ul>
+        <p class="perf-note" data-testid="perf-counted-from">{{ past.countedFrom }}</p>
+      </section>
+
       <p class="perf-note" data-testid="perf-private">{{ PRIVATE_LINE }}</p>
     </template>
   </div>
 </template>
 
 <script setup>
-import 'vant/es/tabs/style'
-import 'vant/es/tab/style'
 import { computed, onUnmounted, ref } from 'vue'
-import { Tabs as VanTabs, Tab as VanTab } from 'vant'
 import { useApi } from '../../composables/useApi'
 import {
-  DRIVE_HOURS_LINE, FAILED_LINE, OWN_PERIODS, OWN_URL, PRIVATE_LINE, TARGET_LINE, TELL_DISPATCH_LINE,
-  isGoneAnswer, ownWeekView,
+  DRIVE_HOURS_LINE, FAILED_LINE, OWN_URL, PRIVATE_LINE, TARGET_LINE, TELL_DISPATCH_LINE, THIS_WEEK_TITLE,
+  isGoneAnswer, ownWeekView, pastWeeksView,
 } from '../../lib/driverPerformance'
 
 // The server says this viewer has no tab any more (the switch went off, or he has no week to show).
@@ -67,7 +75,6 @@ const api = useApi()
 let alive = true
 onUnmounted(() => { alive = false })
 
-const periodId = ref(OWN_PERIODS[0].id)
 const state = ref('idle')
 // Here only, never the store or the browser's storage: a shared phone never shows the previous driver's week.
 const answer = ref(null)
@@ -87,7 +94,9 @@ async function load() {
   }
 }
 
-const week = computed(() => ownWeekView(answer.value, periodId.value))
+const week = computed(() => ownWeekView(answer.value, 'this-week'))
+// One answer holds both: the past weeks need no read of their own.
+const past = computed(() => pastWeeksView(answer.value))
 
 load()
 </script>
@@ -102,10 +111,11 @@ load()
   margin: 0 auto;
   min-width: 0;
 }
-.perf-periods {
-  --van-tabs-line-height: 44px;
-  border-radius: 12px;
-  overflow: hidden;
+.perf-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--text);
 }
 .perf-card {
   display: flex;
@@ -194,6 +204,45 @@ load()
   font-size: 0.82rem;
   color: var(--text-dim);
   overflow-wrap: anywhere;
+}
+.perf-past {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.perf-weeks {
+  margin: 0;
+  padding: 0.15rem 1rem;
+  list-style: none;
+}
+/* One past week: its days and its figure on a line, its hours under them. */
+.perf-past-week {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.15rem 0.75rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.perf-past-week:first-child { border-top: none; }
+.perf-past-range {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.perf-past-count {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+.perf-past-hours {
+  grid-column: 1 / -1;
+  font-size: 0.82rem;
+  color: var(--text-dim);
 }
 .perf-failed {
   display: flex;
