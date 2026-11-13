@@ -16,7 +16,9 @@
  *      month, written through the module and printed on a draft: the payout
  *      ledger, the investor view, every Financials view and every settlement
  *      table are byte-identical before and after; the weekly driver invoice is
- *      the same as in a twin world with no lines
+ *      the same as in a twin world with no lines; the automatic invoice of a load
+ *      with a line (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1), drafted end to end by
+ *      the engine on the same world, moves no figure, table or Payment either
  *   §2 the same through the lifted POST …/invoice-lines route, as the server
  *      runs it: one audit row, nothing else moves
  *   §3 where server.js may name the lines at all: the draft routes, the
@@ -78,6 +80,42 @@ const ALLOWED = new Set(["broker_invoice_lines", "load_invoice_drafts", "audit_t
 const settlementTables = (db) => Object.fromEntries(Object.entries(M.tableHashes(db)).filter(([t]) => !ALLOWED.has(t)));
 const ADVANCE = { kind: "advance", label: "Fuel advance", amountCents: 65000, receivedOn: "2026-09-21", reference: "EFS-55501", note: "" };
 
+// The engine (lib/broker-invoice-draft.js) in mode "auto" on a world's database and sheet, with the
+// server's own helpers lifted, a made-up rate con and stubs for Drive, Gemini and Chromium.
+const zlib = require("zlib");
+const pdfWith = (stream) => {
+	const z = zlib.deflateSync(Buffer.from(stream, "latin1"));
+	return Buffer.concat([Buffer.from(`%PDF-1.4\n1 0 obj<</Length ${z.length}/Filter/FlateDecode>>stream\n`, "latin1"), z, Buffer.from("\nendstream endobj\n%%EOF", "latin1")]);
+};
+const RATE_CON = pdfWith("BT (Billing Information: Order #: 1001001 PO #: PO-77 Move #: 5501) Tj (Total Rate: $3,000.00) Tj (Email the signed POD and all billing documents to billing@example-broker.test) Tj ET");
+const QUIET = { log() {}, info() {}, warn() {}, error() {} };
+let HELPERS = null;
+function autoEngine(w) {
+	const brokerInvoice = M.requireLib("broker-invoice");
+	HELPERS = HELPERS || closure(SRC, {
+		roots: ["parseSheet", "deduplicateLoads", "findCol", "parseInvoiceOverrides", "latestDraftNotes", "safeAttachmentName", "sanitizeEvidenceText", "logAudit"],
+		provided: ["db", "brokerInvoice", "console"],
+		denied: ["app", "server", "io", "getSheets", "getDrive"],
+	});
+	const helpers = new Function("db", "brokerInvoice", "console", `${HELPERS.text}\nreturn { ${HELPERS.names.join(", ")} };`)(w.db, brokerInvoice, QUIET);
+	return M.requireLib("broker-invoice-draft").create({
+		...helpers,
+		db: w.db,
+		brokerInvoice,
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: M.sheetValues(w.rows) } }) } } }),
+		SPREADSHEET_ID: "made-up-sheet",
+		fetchDocumentBytes: async (d) => Buffer.from(`%PDF-1.4 ${d.file_name}`),
+		buildRateConLoadCtx: () => ({}),
+		getRateConBytes: async () => ({ buffer: RATE_CON, candidates: [{ buffer: RATE_CON, source: "documents", label: "documents", fileName: "rc.pdf" }] }),
+		GEMINI_API_KEY: "made-up-key",
+		runRateConGemini: async () => ({ "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null }),
+		renderHtmlToPdf: async () => Buffer.from("%PDF-1.4 invoice"),
+		denyHits: M.requireLib("chr-events").createRedactor({ denyList: "99887766" }).hits,
+		env: { ...ON, AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" },
+		console: QUIET,
+	});
+}
+
 const R = M.createRunner("B20: advance lines on a broker invoice are invoice-only (BROKER_INVOICE_LINES_ENABLED)");
 
 (async () => {
@@ -109,6 +147,31 @@ const R = M.createRunner("B20: advance lines on a broker invoice are invoice-onl
 		eq("status", a.status, b.status);
 		eq("the invoice's render data (days, loads, totals)", JSON.stringify(a.data), JSON.stringify(b.data));
 		eq("its total", a.invoice && a.invoice.total_earnings, b.invoice && b.invoice.total_earnings);
+	});
+
+	await R.test("§1 PR A1: the automatic invoice of a load with an advance line, drafted end to end on the same world: every figure, settlement table and Payment unchanged", async ({ eq }) => {
+		const w = await world({ lines: true });
+		// The made-up broker on the open month's load, its POD and its line, before anything is measured.
+		const at = w.rows.findIndex((r) => r["Load ID"] === "B202");
+		w.rows[at] = { ...w.rows[at], Email: "ops@example-broker.test" };
+		w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES ('B202', ?, 'POD', 'B202_POD.pdf', '2026-10-13T20:00:00Z')").run(AMY);
+		linesLib().addLine(w.db, { loadId: "B202", values: { ...ADVANCE, receivedOn: "2026-10-12", reference: "" }, actor: "super_admin", closedMonths: [] }, { audit: () => {} });
+		const before = await figures(w);
+		const tables = settlementTables(w.db);
+		const sheet = JSON.stringify(M.sheetValues(w.rows));
+		const engine = autoEngine(w);
+		// advanceLines: the automatic job's own switch, on, as the job hands it to the engine.
+		const prep = await engine.prepare({ loadId: "B202", mode: "auto", advanceLines: true });
+		eq("FAILS ON THE OLD CODE: prepared, the balance due billed: $3,000.00 less the $650.00 advance", prep.ok ? [prep.ctx.total, prep.ctx.billedTotal] : prep.code, ["$3,000.00", "$2,350.00"]);
+		if (prep.ok) {
+			const rendered = await engine.render(prep.ctx, { invoiceId: "10162026-9", invoiceDate: "10/16/2026" });
+			engine.record(prep.ctx, rendered, { via: "auto-smtp", actor: { id: 0, username: "auto-invoice", role: "system" }, invoiceId: "10162026-9", mintedInvoiceId: "10162026-9", editDiffs: [] });
+		}
+		eq("FAILS ON THE OLD CODE: the job's draft row bills the balance and keeps the line haul", w.db.prepare("SELECT total, gross_total FROM load_invoice_drafts WHERE via = 'auto-smtp'").get() || null,
+			{ total: "$2,350.00", gross_total: "$3,000.00" });
+		eq("the payout ledger, the investor view and Financials are byte-identical", await figures(w), before);
+		eq("every settlement table is as it was", settlementTables(w.db), tables);
+		eq("Job Tracking, its Payment included, is as it was", JSON.stringify(M.sheetValues(w.rows)), sheet);
 	});
 
 	// ══════════════════════════════════════════════════════════════════════════
