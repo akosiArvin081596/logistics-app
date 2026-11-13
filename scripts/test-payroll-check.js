@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * The before-payroll check (item 241, PR 1): GET /api/admin/payroll-check
- * (Super Admin, behind PAYROLL_CHECK_ENABLED) and scripts/payroll-check.js, both
- * the server's own payrollCheck(), lifted from server.js and run on a made-up
- * fleet (scripts/lib/work-days-world.js). Written before the fix: at d5bab952
- * neither the function, the route, lib/payroll-check.js nor the script exists.
+ * The before-payroll check: GET /api/admin/payroll-check (Super Admin, behind
+ * PAYROLL_CHECK_ENABLED) and scripts/payroll-check.js, both the server's own
+ * payrollCheck(), lifted from server.js and run on a made-up fleet
+ * (scripts/lib/work-days-world.js). Each case fails, naming what is missing,
+ * until the function, the route, lib/payroll-check.js and the script exist.
  *
  *   §1  the role gate: 401 signed out; Dispatcher, Driver, Investor, KPI Viewer
  *       403; nothing read for a refused caller; requireRole before the limiter
@@ -273,7 +273,7 @@ const OTHERS = [
 	{ id: 14, username: "made-up-viewer", role: "KPI Viewer" },
 ];
 
-const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and script)");
+const R = W.createRunner("The before-payroll check (route and script)");
 
 (async () => {
 	await R.test("§1 The role gate: 401 signed out; Dispatcher, Driver, Investor and KPI Viewer 403, switch on or off; the check never runs and nothing is read for them; requireRole is mounted before the limiter", async ({ eq, ok }) => {
