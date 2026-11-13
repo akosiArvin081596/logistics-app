@@ -23182,6 +23182,49 @@ function invoiceDayGrid({ days, dayLoadMap = {}, dayListed = {}, dayScheduled = 
 	return grid;
 }
 
+// THE WEEKLY PERFORMANCE PAGE (display only). With INVOICE_PERFORMANCE_COPY_ENABLED exactly "true",
+// generate keeps the driver's own Performance week for the invoice's week as one page after the
+// invoice: lib/invoice-performance-copy.js words it, render_data.performance keeps the words, and
+// every redraw prints them as they were. Off, it writes nothing and render_data is as before. Read
+// once at start. Renderers never read it: a stored page always prints, a snapshot without one never
+// does. DRIVER_PERFORMANCE_ENABLED off answers no week, so no page either.
+const INVOICE_PERFORMANCE_COPY_ENABLED = process.env.INVOICE_PERFORMANCE_COPY_ENABLED === "true";
+console.log(`[invoice-performance] INVOICE_PERFORMANCE_COPY_ENABLED ${INVOICE_PERFORMANCE_COPY_ENABLED ? "on" : "off"}`);
+// The page's read waits this long at most, as a Personal receipt's does; past it, the invoice is
+// made without the page.
+const INVOICE_PERFORMANCE_WAIT_MS = 15_000;
+// His week's read, lib/driver-performance-routes.js invoiceWeek(), handed in where those routes
+// mount below.
+const invoicePerformance = { week: null };
+const invoicePerformanceCopyLib = require("./lib/invoice-performance-copy");
+
+// The page's lines for one invoice, or null: the switch off, no such week of his (his own route
+// would refuse him, or the week isn't his), or a read that failed or ran past its wait, which adds
+// one line to `warnings`.
+async function invoicePerformanceCopy({ driverName, userId, weekStart }, warnings) {
+	if (!INVOICE_PERFORMANCE_COPY_ENABLED) return null;
+	let timer = null;
+	try {
+		const answer = await Promise.race([
+			Promise.resolve().then(() => invoicePerformance.week({ driverName, userId, weekStart })),
+			new Promise((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(`no answer within ${INVOICE_PERFORMANCE_WAIT_MS / 1000} s`)), INVOICE_PERFORMANCE_WAIT_MS);
+			}),
+		]);
+		if (!answer) return null;
+		const page = invoicePerformanceCopyLib.pageOf(answer, { asOfMs: Date.now(), zone: APP_TIMEZONE });
+		if (!page) throw new Error("the week could not be put into words");
+		return page;
+	} catch (err) {
+		const line = `The weekly performance page was left off this invoice: ${(err && err.message) || "its read failed"}.`;
+		warnings.push(line);
+		console.warn(`[invoice-performance] week of ${weekStart}: ${line}`);
+		return null;
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
 // Named (not an inline arrow) so the Friday auto-invoice batch can invoke this
@@ -23635,6 +23678,10 @@ async function generateInvoiceHandler(req, res) {
 		const correctionFit = correctionFitForGeneration(correctionPlan,
 			generationBaseCents + Math.round((personalFit.personalShareTotal - personalFit.personalTotal) * 100));
 		Object.assign(renderData, invoiceCorrections.printFields(correctionFit.fit));
+		// The driver's own Performance week for this invoice's week, as one page after the invoice
+		// (invoicePerformanceCopy(), above the route): words only, which no pay figure reads.
+		const performancePage = await invoicePerformanceCopy({ driverName, userId: driverUser ? driverUser.id : null, weekStart }, warnings);
+		if (performancePage) renderData.performance = performancePage;
 		// Their receipts join the data for the render only, never the snapshot
 		// (renderInvoiceWithReceipts(); with no Personal line it is the plain render).
 		// The LAST await. Everything below runs synchronously, so what the write
@@ -74388,6 +74435,9 @@ const driverPerformance = require("./lib/driver-performance-routes").mount(app, 
 	requireRole, db, getJobTrackingCached, liveJobTrackingView, everyJobTrackingRow, invoiceWeekColumns, invoiceWeekVerdict, invoiceCompletionDay,
 	loadKeySet, getDeletedLoadIds, normalizeDriverName, getWeekRange, appTodayKey, buildDriverAtResolver, shownLoadId, routeShownLoadIdIndex,
 });
+// The weekly invoice's performance page reads his week here (invoicePerformanceCopy(), above the
+// generate route), and nothing else of these routes.
+invoicePerformance.week = driverPerformance.invoiceWeek;
 
 // GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
 // Each truck gets its own state breakdown; drivers attributed via truck_assignments

@@ -29,6 +29,11 @@
  *   T37 a blank receipt driver or a blank invoice driver: the note, no cache read
  *   T38 the final re-check fails (an /OpenAction in the rendered invoice, or a
  *       copied page carrying /Annots): one more render, every PDF on its note
+ *   T39 the weekly performance page (render_data.performance) prints after the
+ *       invoice and before the receipt sheets, so two PDF receipts' pages land
+ *       after their own sheets by named destination and by the "last" fallback
+ *       (a page after the sheets, the control, would misplace them); an adjust
+ *       and a Personal line marked onto the open invoice redraw it as stored
  *
  * Pure apart from the receipt children and a temp folder: no server, no app.db,
  * no network.
@@ -61,18 +66,25 @@ const R3_ONLY = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
 const ON = { ...R3_ONLY, RECEIPT_PDF_PAGES_ENABLED: "true" };
 const NOTE_PDF = "PDF receipt on file";
 
-// What Chrome would hand back for the render data: an invoice page, then one
-// page per receipt sheet, each sheet's anchor a named destination.
-async function fakeChrome(templateName, data, { openAction = false } = {}) {
+// What Chrome would hand back for the render data: an invoice page, the weekly
+// performance page when the field map hands the renderer one (where the template
+// puts it, before the sheets; `performanceLast` puts it after them, a control),
+// then one page per receipt sheet, each sheet's anchor a named destination
+// (`noDests`: none, so the merge places the receipts by its "last" fallback).
+async function fakeChrome(templateName, data, { openAction = false, noDests = false, performanceLast = false } = {}) {
 	const doc = await PDFDocument.create({ updateMetadata: false });
 	const font = await doc.embedFont(StandardFonts.Helvetica);
 	doc.addPage([612, 792]).drawText(`INVOICE ${templateName}`, { x: 50, y: 700, size: 12, font });
+	const perf = maps[templateName] ? maps[templateName](data).performancePage : null;
+	const performancePage = () => { if (perf) doc.addPage([612, 792]).drawText(`PERFORMANCE ${perf.heading}`, { x: 50, y: 700, size: 12, font }); };
+	if (!performanceLast) performancePage();
 	const sheets = (data.receiptPages || []).map((p) => {
 		const page = doc.addPage([612, 792]);
 		page.drawText(`SHEET ${p.anchor}`, { x: 50, y: 700, size: 12, font });
 		return [p.anchor, doc.context.obj([page.ref, "XYZ", 0, 792, 0])];
 	});
-	if (sheets.length) doc.catalog.set(PDFName.of("Dests"), doc.context.obj(Object.fromEntries(sheets)));
+	if (performanceLast) performancePage();
+	if (sheets.length && !noDests) doc.catalog.set(PDFName.of("Dests"), doc.context.obj(Object.fromEntries(sheets)));
 	if (openAction) doc.catalog.set(PDFName.of("OpenAction"), doc.context.obj({ S: "JavaScript", JS: PDFString.of("void 0") }));
 	return Buffer.from(await doc.save({ useObjectStreams: false }));
 }
@@ -353,6 +365,54 @@ fs.promises.readFile = function readFile(file, ...rest) {
 			[Boolean(base), adj.status, t.rendered.length - before, notes(lastRender(t).data), g2.body && g2.body.invoice ? await pagesOf(storedFile(t, g2.body.invoice.id)) : null],
 			[true, 200, 2, [NOTE_PDF], ["INVOICE service_invoice"]]);
 		t.cleanup();
+	}
+
+	section("T39 the weekly performance page sits after the invoice and before the receipt sheets: each receipt's page lands after its own sheet, by named destination and by the \"last\" fallback; an adjust and a Personal attach redraw the page as stored");
+	{
+		// A made-up page as generate keeps it (scripts/test-invoice-day-rows.js §6 writes it for real).
+		const PAGE = {
+			heading: "WEEKLY PERFORMANCE", week: "Oct 10 to Oct 16", asOf: "As of Fri Oct 16, 7:00 PM ET", count: "4.5 of 7.5 loads",
+			requirement: "7.5 is the target. 6 is required.", rule: "Each pickup counts 0.5 and each delivery 0.5.", lowered: "", title: "What counted",
+			rows: ["Load L1: Picked up Mon 0.5 · Delivered Wed 0.5"], empty: "", hours: "Driving hours: coming soon",
+		};
+		const withPage = (w, id) => w.db.prepare("UPDATE invoices SET render_data = ? WHERE id = ?").run(JSON.stringify({ ...JSON.parse(w.invoice(id).render_data), performance: PAGE }), id);
+		const twoReceipts = async (chrome) => {
+			const w = world(ON, { chrome });
+			for (const id of [1, 5]) {
+				putPdf(w, id);
+				await mark(w, id);
+				await releaseAll(w, id);
+			}
+			const g = await w.generate(DRIVER_A);
+			const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+			if (id) withPage(w, id);
+			const adj = id ? await adjust(w, id, 25) : { status: 0 };
+			return { w, id, adj };
+		};
+		const IN_ORDER = ["INVOICE service_invoice", "PERFORMANCE WEEKLY PERFORMANCE", "SHEET receipt-1", "Receipt 1 of 2 - page 1 of 1", "SHEET receipt-2", "Receipt 2 of 2 - page 1 of 1"];
+		for (const [how, chrome] of [["by named destination", {}], ["by the \"last\" fallback (no named destinations)", { noDests: true }]]) {
+			const { w, id, adj } = await twoReceipts(chrome);
+			check(`T39 ${how}: the invoice, the page, then each sheet with its own receipt's page after it`, [adj.status, id ? await pagesOf(storedFile(w, id)) : null], [200, IN_ORDER]);
+			check(`T39 ${how}: the adjust drew the page as stored, and stores it unchanged`, [lastRender(w).data.performance, id ? JSON.parse(w.invoice(id).render_data).performance : null], [PAGE, PAGE]);
+			w.cleanup();
+		}
+		const control = await twoReceipts({ noDests: true, performanceLast: true });
+		check("T39 (control) a page after the sheets: the \"last\" fallback puts each receipt's page after the wrong page, which is why the page sits before them",
+			control.id ? await pagesOf(storedFile(control.w, control.id)) : null,
+			["INVOICE service_invoice", "SHEET receipt-1", "SHEET receipt-2", "Receipt 1 of 2 - page 1 of 1", "PERFORMANCE WEEKLY PERFORMANCE", "Receipt 2 of 2 - page 1 of 1"]);
+		control.w.cleanup();
+		const attach = world(ON);
+		const g = await attach.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		if (id) withPage(attach, id);
+		putPdf(attach, 1);
+		const before = attach.rendered.length;
+		const marked = await mark(attach, 1);
+		const drawn = lastRender(attach).data;
+		check("T39 a Personal line marked onto the open invoice: its redraw prints the page as stored (the field map hands it to the renderer), and the snapshot keeps it",
+			[marked.status, attach.rendered.length > before, drawn.performance, JSON.stringify(maps.service_invoice(drawn).performancePage), id ? JSON.parse(attach.invoice(id).render_data).performance : null],
+			[201, true, PAGE, JSON.stringify(PAGE), PAGE]);
+		attach.cleanup();
 	}
 
 	section("the startup self-test and the warm-up");

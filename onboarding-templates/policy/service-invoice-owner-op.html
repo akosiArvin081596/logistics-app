@@ -272,6 +272,14 @@
     .receipt-page img { display: block; max-width: 100%; max-height: 8.3in; margin: 0 auto; object-fit: contain; }
     .receipt-pdf-note { font-size: 12px; margin: 0; }
 
+    /* The weekly performance page: the driver's own week, on a page of its own after the invoice. */
+    .performance-page { break-before: page; page-break-before: always; }
+    .performance-page h2 { margin: 0 0 6px; }
+    .performance-page .performance-week { font-weight: 700; margin: 0 0 4px; }
+    .performance-page .performance-count { font-size: 18px; font-weight: 700; margin: 14px 0 8px; }
+    .performance-page .performance-rows { list-style: none; padding-left: 0; margin: 0 0 14px; }
+    .performance-page .performance-rows li { margin-bottom: 6px; break-inside: avoid; page-break-inside: avoid; }
+
     @media print {
       html, body { background: #fff; }
       .document { box-shadow: none; margin: 0; padding: 0; max-width: none; }
@@ -467,6 +475,27 @@
       <span class="fill fill-xs" aria-label="Signature date"></span>
     </div>
   </main>
+
+  <!-- The weekly performance page (render_data.performance): the driver's own Performance week for
+       this invoice's week, as it read when the invoice was made. The renderer fills each line as text,
+       clones the hidden row once per load and removes the lines left empty, then shows the section on
+       a page of its own; with no page stored, nothing prints. It sits before the receipt pages, which
+       stay the last pages. -->
+  <section class="document performance-page" data-performance-page style="display:none">
+    <h2 data-cell="heading"></h2>
+    <p class="performance-week" data-cell="week"></p>
+    <p class="italic-note" data-cell="asOf"></p>
+    <p class="performance-count" data-cell="count"></p>
+    <p data-cell="requirement"></p>
+    <p data-cell="rule"></p>
+    <p data-cell="lowered"></p>
+    <h3 data-cell="title"></h3>
+    <ul class="performance-rows">
+      <li data-performance-row-template style="display:none"></li>
+    </ul>
+    <p data-cell="empty"></p>
+    <p data-cell="hours"></p>
+  </section>
 
   <!-- Receipt pages (Personal lines): the renderer clones the hidden page once
        per receipt (its image, or for a PDF receipt the note that its pages
