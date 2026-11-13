@@ -6,8 +6,8 @@
 //   §2 marking: every refusal (locked, a button draft in flight or maybe
 //      drafted, the auto job working, an invoice already sent, a draft unless
 //      confirmed not sent with a reason); the row and one audit row
-//   §3 clearing: locked, a Triumph claim working, a button draft; a number a
-//      claim held with no byte sent is voided
+//   §3 clearing: locked, a Triumph claim working (only while its lease is live: M1),
+//      a button draft; a number a claim held with no byte sent is voided
 //   §4 "Handled in Triumph's process": allowed for any factored load whose claim
 //      isn't working (or has none); a working claim counts only while its lease
 //      is live; it locks the marker ('outside') and every later mark or clear is
@@ -16,9 +16,10 @@
 //      refused whoever asks until assignment lines exist (NOA_UNCONFIGURED) and the
 //      submit mode reads live (TRIUMPH_NOT_LIVE), and its own rules for when they do;
 //      an invoice printed for a marker that has since changed (FACTORING_CHANGED);
+//      a working claim counts, early and late, only while its lease is live (M1);
 //      the live preview's checks
 //   §6 "Check Gmail" on a maybe-drafted row; the dashboard annotation
-//   §7 the only writer of locked_at in this PR
+//   §7 locked_at's two writers: "Handled in Triumph's process" and the lock point
 //   §10 a marked load keeps its Load ID, and the refusal says the way through; the
 //       marks cleared, and when
 //   §9 the routes (lib/factoring-routes.js): the marking switch (never in a
@@ -240,6 +241,10 @@ function checkClear(S) {
 	putMarker(db, "ld-test-0003");
 	putClaim(db, "ld-test-0003", { state: "working", stage: "built", invoiceId: "11032026-3", leaseUntil: at(10) });
 	c.eq(clear("ld-test-0003").r.code, "TRIUMPH_IN_FLIGHT", "§3 a Triumph claim working: TRIUMPH_IN_FLIGHT");
+	// M1: a claim a restart left working, its lease run out, holds nobody up during a rollback.
+	putMarker(db, "ld-test-0007");
+	putClaim(db, "ld-test-0007", { state: "working", leaseUntil: at(-5) });
+	c.eq(clear("ld-test-0007").r.ok, true, "§3 FAILS ON THE OLD CODE (M1): a claim left working, its lease run out: the clear goes through");
 	putMarker(db, "ld-test-0004");
 	putInflight(db, "ld-test-0004", { startedAt: at(0) });
 	c.eq(clear("ld-test-0004").r.code, "INVOICE_DRAFT_IN_FLIGHT", "§3 a button draft in flight: refused");
@@ -428,6 +433,14 @@ function checkButton(S) {
 	putMarker(db, "ld-test-0023", { factored: 0, locked: T0, via: "outside" });
 	c.eq(begin("ld-test-0023").code, "FACTORING_LOCKED", "§5 locked during the render: refused at the late check, plain press too");
 	c.eq([S.inflightRows(db, "ld-test-0021", at(2)).length, S.inflightRows(db, "ld-test-0022", at(2)).length], [0, 0], "§5 a refused late check writes no row");
+	// M1: a claim a restart left working, its lease run out and no number held, blocks no confirmation.
+	putMarker(db, "ld-test-0050");
+	putClaim(db, "ld-test-0050", { state: "working", leaseUntil: at(-5) });
+	c.eq(early("ld-test-0050", { confirm: yes, mayConfirm: true, ...lines }).ok, true, "§5 FAILS ON THE OLD CODE (M1): the confirmation while a claim's lease has run out: passes the early check");
+	c.eq(begin("ld-test-0050", { confirmed: true, printedAssignment: true }).ok, true, "§5 FAILS ON THE OLD CODE (M1): ...and the late check");
+	putMarker(db, "ld-test-0051");
+	putClaim(db, "ld-test-0051", { state: "working", leaseUntil: at(30) });
+	c.eq(begin("ld-test-0051", { confirmed: true, printedAssignment: true }).code, "TRIUMPH_IN_FLIGHT", "§5 a claim whose lease is live: still refused at the late check");
 
 	// What the invoice printed has to match the marker now, or the broker is told to pay the wrong party.
 	putMarker(db, "ld-test-0040");
@@ -561,7 +574,7 @@ function checkLockWriters() {
 			if (n) writers.push(`${dir}/${f}:${n}`);
 		}
 	}
-	c.eq(writers, ["lib/factoring-store.js:1"], "§7 locked_at has one writer: handledOutside() (lockForUpload() joins it in PR T2)");
+	c.eq(writers, ["lib/factoring-store.js:1", "lib/triumph-ledger.js:1"], "§7 locked_at has two writers: handledOutside() and the lock point, lockForUpload()");
 	return c;
 }
 
@@ -705,13 +718,18 @@ const MUTANTS = [
 	["mark: a send counts only once recorded", "[\"appending\", \"appended\", \"recorded\"].includes(c.stage)", "c.stage === \"recorded\"", checkMark],
 	["mark: 'not sent' accepted without a reason", "if (drafts.length && !(confirmNotSent === true && why))", "if (drafts.length && !(confirmNotSent === true))", checkMark],
 	["an in-flight row never goes stale", "Date.parse(nowIso) - started >= INFLIGHT_STALE_MS", "false", checkMark],
-	["clear: a working Triumph claim not refused", "if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");", "", checkClear],
+	["clear: a working Triumph claim not refused", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))",
+		"const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))", checkClear],
+	["clear: the state check alone (M1)", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))",
+		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))", checkClear],
 	["clear: a number past pdf_uploading voided too", "if (!claim || !triumphHoldsNumber(claim) || !STAGES_BEFORE_UPLOAD.has(claim.stage)) return \"\";", "if (!claim || !triumphHoldsNumber(claim)) return \"\";", checkClear],
-	["handledOutside: the state check alone (M1)", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");", "if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");", checkOutside],
-	["handledOutside: no lease check at all", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");", "", checkOutside],
+	["handledOutside: the state check alone (M1)", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(",
+		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(", checkOutside],
+	["handledOutside: no lease check at all", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(",
+		"const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(", checkOutside],
 	["handledOutside: no marker check", "if (!rowFactored(row)) return refusal(\"NOT_FACTORED\");", "", checkOutside],
-	["handledOutside: limited to Needs attention and staged", "const claim = triumphClaim(db, k);\n\t\tif (triumphWorkingLive",
-		"const claim = triumphClaim(db, k);\n\t\tif (!claim || ![\"needs_attention\", \"staged\"].includes(claim.state)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (triumphWorkingLive", checkOutside],
+	["handledOutside: limited to Needs attention and staged", "if (!rowFactored(row)) return refusal(\"NOT_FACTORED\");\n\t\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (triumphWorkingLive",
+		"if (!rowFactored(row)) return refusal(\"NOT_FACTORED\");\n\t\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (!claim || ![\"needs_attention\", \"staged\"].includes(claim.state)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (triumphWorkingLive", checkOutside],
 	["handledOutside: no lock written", "db.prepare(`UPDATE ${FACTORING} SET locked_at = ?, locked_via = 'outside', updated_at = ? WHERE load_key = ?`).run(nowIso, nowIso, k);", "", checkOutside],
 	["handledOutside: a button draft not refused", "if (inflight) return inflight;\n\t\tdb.prepare(`UPDATE ${FACTORING} SET locked_at", "db.prepare(`UPDATE ${FACTORING} SET locked_at", checkOutside],
 	["button: the lock checked only when factored", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tconst factored = rowFactored(row);", "const factored = rowFactored(row);", checkButton],
@@ -721,7 +739,7 @@ const MUTANTS = [
 	["button: who asks comes before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\t// Before Triumph is live the lines send the broker to a party holding nothing.\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");\n\t\tif (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");",
 		"if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");", checkButton],
 	["button: the confirmation passes before live", "if (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");", "", checkButton],
-	["button: live taken unless told otherwise", "hasAssignmentLines = false, live = false }", "hasAssignmentLines = false, live = true }", checkButton],
+	["button: live taken unless told otherwise", "hasAssignmentLines = false, live = false, nowIso = \"\" }", "hasAssignmentLines = false, live = true, nowIso = \"\" }", checkButton],
 	["button: anything truthy says it's live", "if (live !== true) return", "if (!live) return", checkButton],
 	["button: live before the lines", "if (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");\n\t\t// Before Triumph is live the lines send the broker to a party holding nothing.\n\t\tif (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");",
 		"if (live !== true) return refusal(\"TRIUMPH_NOT_LIVE\");\n\t\tif (hasAssignmentLines !== true) return refusal(\"NOA_UNCONFIGURED\");", checkButton],
@@ -736,10 +754,15 @@ const MUTANTS = [
 	["preview: a draft in flight refuses it", "return factoredCheck(db, keyOf(key), gates);", "return draftEarlyCheck(db, { key, nowIso: new Date().toISOString(), ...gates });", checkButton],
 	["button: the words for the refusal are missing", "\tNOA_UNCONFIGURED: \"This load is factored, and the app can't put Triumph's assignment on an invoice yet, so no draft was made. Its invoice goes through Triumph's own process.\",\n", "", checkButton],
 	["button: the confirmation from any account", "if (!mayConfirm) return refusal(\"FACTORING_NOT_LISTED\");", "", checkButton],
-	["button: the confirmation refused only while the claim is working", "if (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
-		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
+	["button: the confirmation refused only while the claim is working", "if (triumphWorkingLive(claim, nowIso) || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
+		"if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
+	["button: the early check reads the state alone (M1)", "if (triumphWorkingLive(claim, nowIso) || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;",
+		"if ((claim && claim.state === \"working\") || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconfirmed = true;", checkButton],
+	["button: the early check given no time to judge the lease by (M1)", "const checked = factoredCheck(db, k, { ...gates, nowIso });", "const checked = factoredCheck(db, k, gates);", checkButton],
+	["late check: the state alone (M1)", "if (triumphWorkingLive(claim, nowIso) || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true)",
+		"if ((claim && claim.state === \"working\") || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true)", checkButton],
 	["button: no in-flight check before prepare()", "const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\tif (inflight) return inflight;\n\treturn checked;", "return checked;", checkButton],
-	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (claim && (claim.state === \"working\" || triumphHoldsNumber(claim))) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n\t} else if (printedAssignment === true || confirmed) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}",
+	["button: the late check on isFactored() alone", "if (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\tif (rowFactored(row)) {\n\t\tif (!confirmed) return factoredRefusal(db, k);\n\t\tconst claim = triumphClaim(db, k);\n\t\tif (triumphWorkingLive(claim, nowIso) || triumphHoldsNumber(claim)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tif (printedAssignment !== true) return refusal(\"FACTORING_CHANGED\");\n\t} else if (printedAssignment === true || confirmed) {\n\t\treturn refusal(\"FACTORING_CHANGED\");\n\t}",
 		"if (rowFactored(row) && !confirmed) return refusal(\"LOAD_FACTORED\");", checkButton],
 	["button: a refusal before n8n drops a maybe-drafted row", "keep: Boolean(own && own.state === \"maybe_drafted\")", "keep: false", checkButton],
 	["resolve: an in-flight row resolved early", "if (row.effective !== \"maybe_drafted\") return refusal(\"INVOICE_DRAFT_IN_FLIGHT\");", "", checkResolveAndAnnotate],

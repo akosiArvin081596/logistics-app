@@ -3295,12 +3295,12 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			const own = await world.get(OWN, USERS[who]);
 			const id = directoryIdOf(who);
 			if (own.status !== 200) {
-				ok(!byId.has(id), `${label}: ${who}'s own route refuses him (${own.status}), and the page doesn't list him`);
+				ok(!byId.has(id), `${label}: ${who}: refused by the driver's own route (${own.status}), and not on the page`);
 				continue;
 			}
 			answered.push(id);
 			const entry = byId.get(id);
-			ok(!!entry && JSON.stringify(entry.performance) === own.text, `${label}: ${who}'s weeks on the page are byte for byte his own answer`,
+			ok(!!entry && JSON.stringify(entry.performance) === own.text, `${label}: ${who}: the page's weeks are byte for byte the driver's own answer`,
 				`page ${entry ? JSON.stringify(entry.performance).slice(0, 160) : "(none)"} | own ${own.text.slice(0, 160)}`);
 		}
 		eq([...byId.keys()].sort((a, b) => a - b), answered.sort((a, b) => a - b), `${label}: exactly the drivers whose own route answers them`);
@@ -3374,6 +3374,16 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		} finally {
 			await later.close();
 		}
+		// Held a truck last week only: his own route answers, so the page lists him, this week at 0.
+		const lastOnly = await makeWorld({}, { nowMs: Date.parse("2026-12-01T17:00:00Z") });
+		try {
+			lastOnly.db.prepare("UPDATE truck_assignments SET end_date = ? WHERE driver_name = ?").run("2026-11-25T15:00:00.000Z", "Dee Stone");
+			lastOnly.db.prepare("DELETE FROM truck_assignments WHERE driver_name = ?").run("Hal Briar");
+			const { byId } = await parity(lastOnly, "Tue Dec 1, a truck last week only");
+			eq([byId.has(4), byId.has(4) && byId.get(4).performance.weeks[0].credits.value], [true, 0], "Dee, on a truck last week only, is listed with this week at 0");
+		} finally {
+			await lastOnly.close();
+		}
 		// An owner-operator known only by his account: his own route refuses him, and so does the page.
 		const byAccount = await makeWorld({});
 		try {
@@ -3383,6 +3393,20 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			ok(!driversOf(await byAccount.get(ADMIN_WEEKS, USERS.admin)).some((x) => x.name === "Fay Owens"), "Fay isn't on the page, though her directory row names no account");
 		} finally {
 			await byAccount.close();
+		}
+		// A directory driver with no account: the test needs none, so he's listed with the answer his route gives a session naming him.
+		const noAccount = await makeWorld({}, { extraLoads: [["DP-8201", "Pat Rivers", "Delivered", "2026-11-10 10:00"]] });
+		try {
+			noAccount.db.prepare("INSERT INTO drivers_directory (id, driver_name, status, pay_type, user_id) VALUES (31, 'Pat Rivers', 'active', 'fixed', 0)").run();
+			noAccount.db.prepare("INSERT INTO trucks (id, unit_number, retired_at) VALUES (31, 'LogisX-#531', '')").run();
+			noAccount.db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (31, 'Pat Rivers', '2026-10-01T12:00:00.000Z', '')").run();
+			eq(noAccount.db.prepare("SELECT COUNT(*) AS n FROM users WHERE driver_name = 'Pat Rivers'").get().n, 0, "(the scene) no account names Pat Rivers");
+			const pat = driversOf(await noAccount.get(ADMIN_WEEKS, USERS.admin)).find((x) => x.name === "Pat Rivers");
+			const asHim = await noAccount.get(OWN, { id: 9031, role: "Driver", username: "made-up-pat", driverName: "Pat Rivers" });
+			ok(!!pat && asHim.status === 200 && JSON.stringify(pat.performance) === asHim.text, "a driver with no account is on the page, with the answer his own route gives a session naming him");
+			eq(pat && [pat.directoryId, pat.unit, creditsOf(pat)], [31, "#531", 0.5], "...his row, his unit and his week");
+		} finally {
+			await noAccount.close();
 		}
 		// A phone or a broker's cell in a counted load's row stays out.
 		const phones = await makeWorld({}, { extraLoads: [["DP-8101", "Ada Quill", "Delivered", "2026-11-10 09:00", "555-0142"], ["DP-8102", "Ben Marsh", "Delivered", "2026-11-10 10:00", "(555) 010-0199"]] });

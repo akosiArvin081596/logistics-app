@@ -1,8 +1,6 @@
 <template>
-  <!-- The dashboard's Driver Performance tab, for a Super Admin: each driver's week as his own Past
-       Performance tab shows it, this week's drivers off the board with the reason, and the board by
-       unit as /driver shows it to a Super Admin. Display only: nothing here writes, every figure and
-       the order are the server's, and each opening reads afresh. -->
+  <!-- A Super Admin's Driver Performance tab: each driver's week as his own Past Performance shows it,
+       the drivers off the board, and the board by unit. Display only; each opening reads afresh. -->
   <div class="adp" data-testid="adp">
     <section class="adp-section" aria-labelledby="adp-weeks-title">
       <h3 id="adp-weeks-title" class="adp-heading" data-testid="adp-weeks-title">{{ WORDS.weeksTitle }}</h3>
@@ -93,7 +91,7 @@
 
     <section class="adp-section" aria-labelledby="adp-board-title">
       <h3 id="adp-board-title" class="adp-heading" data-testid="adp-board-title">{{ WORDS.boardTitle }}</h3>
-      <DriverPerformanceBoard @gone="emit('gone')" />
+      <DriverPerformanceAdminBoard @gone="emit('gone')" />
     </section>
   </div>
 </template>
@@ -101,9 +99,8 @@
 <script setup>
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
-import { isGoneAnswer } from '../../lib/driverPerformance'
-import { ADMIN_WEEKS_URL, WORDS, driversView } from '../../lib/driverPerformanceAdmin'
-import DriverPerformanceBoard from '../driver/DriverPerformanceBoard.vue'
+import { ADMIN_WEEKS_URL, WORDS, driversView, isGoneAnswer } from '../../lib/driverPerformanceAdmin'
+import DriverPerformanceAdminBoard from './DriverPerformanceAdminBoard.vue'
 
 const props = defineProps({ active: { type: Boolean, default: true } })
 // The server says this viewer has no tab any more (the switch went off, or the role changed).
@@ -154,6 +151,8 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   gap: 1.5rem;
   padding: 1.25rem;
   min-width: 0;
+  /* The layout follows the tab's own width, so the sidebar beside it can't squeeze a row. */
+  container-type: inline-size;
 }
 .adp-section {
   display: flex;
@@ -194,7 +193,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   min-width: 0;
   overflow: hidden;
 }
-/* One card on a phone: name and chevron, then this week, then last week. One row from md up. */
+/* One card when narrow: name and chevron, then this week, then last week. One row from 40rem up. */
 .adp-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 1.25rem;
@@ -214,7 +213,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   outline: 2px solid #0369a1;
   outline-offset: -2px;
 }
-@media (min-width: 768px) {
+@container (min-width: 40rem) {
   .adp-head {
     grid-template-columns: minmax(10rem, 1.2fr) minmax(14rem, 2fr) minmax(8rem, 1fr) 1.25rem;
     grid-template-areas: 'who this last chevron';
@@ -313,7 +312,7 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   font-size: 0.9rem;
   color: #6b7280;
 }
-@media (min-width: 768px) {
+@container (min-width: 40rem) {
   .adp-chevron { align-self: center; }
 }
 .adp-driver[data-open='true'] .adp-chevron { transform: rotate(180deg); }
@@ -324,7 +323,8 @@ watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })
   padding: 0.25rem 1rem 1rem;
   border-top: 1px solid #f3f4f6;
 }
-@media (min-width: 1024px) {
+/* What counted this week, last week and his past weeks side by side once the tab is wide enough. */
+@container (min-width: 52rem) {
   .adp-detail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .adp-part {

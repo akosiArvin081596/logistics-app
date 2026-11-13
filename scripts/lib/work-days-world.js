@@ -200,7 +200,7 @@ const NAMED_ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "requireAuth", "refuseCrossOrigin",
 	"notifyChange", "logAudit", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs",
-	"DATA_DIR", "fetch", "io", "sendEmail", "autoInvoice"];
+	"DATA_DIR", "fetch", "io", "sendEmail", "autoInvoice", "triumphDriverStart"];
 // One lift per set of extra routes (startWorld's `routes`, [[method, path]]): the
 // month-lock runner adds the routes its guards sit on. `extraRoots` (startWorld's
 // `expose`) are more top-level names to lift and hand back on world.api.
@@ -391,6 +391,9 @@ function startWorld(opts = {}) {
 		sendEmail: async () => undefined,
 		// The automatic invoice job (scripts/test-auto-invoice-wiring.js covers it): off here.
 		autoInvoice: { mode: "off" },
+		// The Triumph job's call in the status route (scripts/test-triumph-wiring.js covers it):
+		// nothing to start here.
+		triumphDriverStart: () => ({ written() {} }),
 	};
 	const body = [
 		'"use strict";',
