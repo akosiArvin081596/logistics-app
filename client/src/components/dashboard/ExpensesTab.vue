@@ -1355,6 +1355,12 @@
       </template>
     </div>
 
+    <!-- PERSONAL (Super Admin only): mounted the first time the tab opens, then
+         kept, so the driver and dates picked stay while another tab is shown. -->
+    <div v-if="auth.isSuperAdmin && personalTabOpened" v-show="activeSubTab === 'personal'" class="sub-panel">
+      <PersonalLinesPanel :active="activeSubTab === 'personal'" />
+    </div>
+
     <!-- ANALYTICS (Expense Intelligence) — v-if (not v-show) so the panel only
          fetches when opened; driver/truck lists are reused from this tab so the
          panel doesn't refetch them. -->
@@ -1692,6 +1698,7 @@ import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import PersonalReceiptActions from './expenses/PersonalReceiptActions.vue'
 import PersonalCorrectionsPanel from './expenses/PersonalCorrectionsPanel.vue'
+import PersonalLinesPanel from './expenses/PersonalLinesPanel.vue'
 import ReceiptPagesPanel from './expenses/ReceiptPagesPanel.vue'
 import ReceiptAutoApprovePanel from './expenses/ReceiptAutoApprovePanel.vue'
 import { personalBlocksStatus } from '../../lib/personalReceipt'
@@ -1752,6 +1759,8 @@ const showCards = computed(() => isMobile.value || (allPanelWidth.value > 0 && a
 
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
+  // Each driver's Personal lines and their total, read only (Super Admin).
+  { key: 'personal', label: 'Personal', adminOnly: true },
   // Bulk receipt upload — Super Admin + Dispatcher (both reach this route and
   // can log expenses). No adminOnly flag so Dispatchers see it too.
   { key: 'bulk', label: 'Bulk Upload' },
@@ -1767,6 +1776,8 @@ const subTabs = computed(() =>
 )
 
 const activeSubTab = ref('all')
+// The Personal tab's panel mounts on its first opening and then stays.
+const personalTabOpened = ref(false)
 
 // All expenses
 const allExpenses = ref([])
@@ -4012,6 +4023,7 @@ onMounted(() => {
 // page. Each loads once, lazily, when its tab is first shown.
 const _tabLoaded = { fuel: false, maintenance: false, ifta: false }
 watch(activeSubTab, (tab) => {
+  if (tab === 'personal') personalTabOpened.value = true
   if (tab === 'fuel' && !_tabLoaded.fuel) { _tabLoaded.fuel = true; loadFuel() }
   if (tab === 'maintenance' && !_tabLoaded.maintenance && auth.isSuperAdmin) { _tabLoaded.maintenance = true; loadMaintenance() }
   if (tab === 'ifta' && !_tabLoaded.ifta && auth.isSuperAdmin) { _tabLoaded.ifta = true; loadIfta() }
