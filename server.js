@@ -22771,27 +22771,13 @@ app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, 
 		res.status(500).json({ error: err.message });
 	}
 });
-// THE BEFORE-PAYROLL CHECK: what a person looks at before payroll, per driver
-// and week of the open months up to the last finished week. lib/payroll-check.js
-// picks each item's reason and shapes the answer, every amount in whole cents;
-// every rule it reports on is read through the function that already holds it.
+// The before-payroll check reads every rule through the function that already holds
+// it, so what it lists is what pay does; lib/payroll-check.js picks the reasons.
 const payrollCheckLib = require("./lib/payroll-check");
 
-// The check itself. Read-only: it writes, renders and claims nothing (the
-// paid-day backfill is asked with write: false). GET /api/admin/payroll-check
-// and scripts/payroll-check.js (the same function, lifted) both return it:
-//   ledgerDays        driver-days the payout ledger pays (every scope, as
-//                     computeFleetLedger() pays them; a day the books count more
-//                     than once is listed once, with each scope) that no live
-//                     invoice holds: claims, day grids, paidDays, correction day
-//                     lines, a manual invoice's dated or whole-period lines
-//   invoiceDays       days a live invoice pays that the books count in no scope
-//                     or month: kept as issued, never taken back automatically
-//   personalLines     Personal lines on no invoice: pending, carried or flagged
-//   pendingReceipts   the open weeks' receipts still Pending with no Personal line
-//   correctionDrafts  correction invoices waiting for approval (Draft, Submitted)
-//   percentageLoads   percentage drivers' completed loads no live invoice bills
-// Drivers are numbered labels ("driver 1", ...) unless `names`.
+// Read-only, so it can run before any payroll: it writes, renders and claims nothing
+// (the paid-day backfill is asked with write: false). The route and
+// scripts/payroll-check.js return this same answer.
 async function payrollCheck({ weekEnd, names = false } = {}) {
 	// The open months come from the month locks: a table that can't be read can't
 	// tell them, and the check says so rather than guess.
@@ -22862,29 +22848,50 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 			ledgerByDay.get(key).items.push({ ownerId: sc.ownerId, month: it.month, cents: it.cents, loadId: it.loadId || "", truck: it.truck || "" });
 		}
 	}
+	// A closed month's day is listed only while the books pay it in an open month: a
+	// closed month is raised only for what it does to an open one.
 	const openByDriver = new Map();
 	for (const e of ledgerByDay.values()) {
-		if (!inRange(e.day) || !e.items.some((i) => monthOpen(i.month))) continue;
+		if (!inRange(e.day) || !(monthOpen(e.day.slice(0, 7)) || e.items.some((i) => monthOpen(i.month)))) continue;
 		if (!openByDriver.has(e.nm)) openByDriver.set(e.nm, []);
 		openByDriver.get(e.nm).push(e);
 	}
-	// What a live invoice holds: its claims, the claims the backfill would write
-	// from every live invoice (asked, never written), and a manual invoice's
-	// dated or whole-period lines with the live correction day lines.
+	// Claims, and those the backfill would write from every live invoice (asked, never written).
 	const backfillHolds = new Set(backfillInvoicePaidDays({ write: false }).rows.map((r) => `${r.driverNorm}\t${r.day}`));
 	const ledgerDays = [];
 	for (const [nm, list] of openByDriver) {
 		const claims = invoicePaidDayHolders(nm, list.map((e) => e.day));
-		const cover = manualInvoiceDayCover(nm, manualsOf(nm));
-		const missing = list.filter((e) => !claims.has(e.day) && !backfillHolds.has(`${nm}\t${e.day}`) && !cover.has(e.day));
-		// A day is priced as an invoice prices it, by the month it pays in (its
-		// earliest); a week's cheapest day is what an adjustment is weighed against.
+		const unclaimed = list.filter((e) => !claims.has(e.day) && !backfillHolds.has(`${nm}\t${e.day}`));
+		// A day is priced as an invoice prices it, by the month it pays in (its earliest).
 		const payMonthOf = (e) => e.items.map((i) => i.month).sort()[0];
-		const minRate = new Map();
-		for (const e of missing) {
+		const byWeek = new Map();
+		for (const e of unclaimed) {
 			const ws = getWeekRange(e.day).weekStart;
-			minRate.set(ws, Math.min(minRate.has(ws) ? minRate.get(ws) : Infinity, raterOf(nm)(e.day, payMonthOf(e))));
+			if (!byWeek.has(ws)) byWeek.set(ws, []);
+			byWeek.get(ws).push(e);
 		}
+		// A hand-made line holds a day only as the weekly invoice's own rule holds it; one
+		// that only may pay it is named for a person instead. A week's cheapest day is what
+		// an adjustment is weighed against (lateWorkWeekBlocker()).
+		const missing = [];
+		const minRate = new Map();
+		for (const [ws, entries] of byWeek) {
+			const price = new Map(entries.map((e) => [e.day, raterOf(nm)(e.day, payMonthOf(e))]));
+			const { held } = weeklyManualInvoiceHolds({ driverNorm: nm, days: [...price.keys()], weekStart: ws, weekEnd: getWeekRange(ws).weekEnd, rateOf: (d) => price.get(d) });
+			for (const e of entries) {
+				if (held.has(e.day)) continue;
+				missing.push(e);
+				minRate.set(ws, Math.min(minRate.has(ws) ? minRate.get(ws) : Infinity, price.get(e.day)));
+			}
+		}
+		const cover = manualInvoiceDayCover(nm, manualsOf(nm));
+		const mayBePaidBy = (day) => {
+			const number = cover.get(day);
+			if (!number) return null;
+			const m = manualsOf(nm).find((x) => x.invoiceNumber === number);
+			const dated = !!m && m.lines.some((l) => String((l && l.date) || "").trim() === day);
+			return { invoiceNumber: number, why: dated ? "a line of it is dated that day, for less than a day's pay" : "a line of it names no day" };
+		};
 		for (const e of missing) {
 			const week = getWeekRange(e.day);
 			const weekly = weeklyOf(`${nm}\t${week.weekStart}`);
@@ -22914,6 +22921,8 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 			}
 			const { reason, text } = payrollCheckLib.ledgerDayReason({
 				day: e.day, weekStart: week.weekStart, weekEnd: week.weekEnd,
+				mayBePaidBy: mayBePaidBy(e.day),
+				settlesInClosedMonth: e.items.some((i) => monthOpen(i.month)) ? "" : periodLabel(payMonthOf(e)),
 				weekly: weekly.map((x) => ({ invoiceNumber: x.invoice_number })),
 				inDirectory: directory.has(nm),
 				mayBePaid: inv ? lateWorkWeekBlocker(inv, { manuals: manualsOf(nm), minRate: minRate.get(week.weekStart) }) : "",
@@ -22934,7 +22943,8 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 		}
 	}
 
-	// 2. Days a live invoice pays that the books count in no scope or month.
+	// 2. Days a live invoice pays that the books count in no scope or month; a closed
+	// month's day is left alone, as in section 1 (the books count it in no open month).
 	const invoiceDays = [];
 	for (const inv of db.prepare("SELECT * FROM invoices WHERE deleted_at = '' ORDER BY id").all()) {
 		const nm = normalizeDriverName(inv.driver || "");
@@ -22946,7 +22956,7 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 			...correctionLinesOnInvoice(inv.id).filter((l) => l.kind === "day").map((l) => ({ day: l.line_date, source: "dayLine", cents: Number(l.cents) || 0 })),
 		];
 		for (const h of held) {
-			if (!inRange(h.day) || ledgerByDay.has(`${nm}\t${h.day}`)) continue;
+			if (!inRange(h.day) || !monthOpen(h.day.slice(0, 7)) || ledgerByDay.has(`${nm}\t${h.day}`)) continue;
 			const cell = !manual && snap && snap.days ? snap.days[invoiceGridDayName(h.day)] || {} : {};
 			const loadIds = h.source === "grid" ? String(cell.loadBol || "").split(",").map((x) => x.trim()).filter(Boolean) : [];
 			const lineCents = (snap && Array.isArray(snap.lineItems) ? snap.lineItems : [])
@@ -23061,11 +23071,8 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 	});
 }
 
-// GET /api/admin/payroll-check?weekEnd=YYYY-MM-DD: the before-payroll check
-// (payrollCheck()), drivers by name. Super Admin; read-only. The role gate runs
-// first and the limiter after it, so a refused caller spends nothing; with the
-// switch off the route answers 404 FEATURE_OFF before reading anything.
-// PAYROLL_CHECK_ENABLED: off unless exactly "true" (a new read of pay).
+// Off unless exactly "true" (a new read of pay). The role gate runs before the
+// limiter and the switch, so a refused caller spends nothing and reads nothing.
 const PAYROLL_CHECK_ENABLED = process.env.PAYROLL_CHECK_ENABLED === "true";
 // One check runs every scope's ledger and every driver's weeks synchronously, so
 // a page reloading it, or a script, is held to a person's pace. Keyed on the
