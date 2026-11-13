@@ -576,5 +576,40 @@ ok('the lib turns cents into dollars with the app\'s formatMoneyCents() only, in
   libSrc.includes("import { formatMoneyCents } from './paymentTerms.js'") && (libSrc.match(/formatMoneyCents\(/g) || []).length === 1)
 ok('…and the page reads the business day, never the browser\'s', code(read(PAGE)).includes("import { appToday } from '../utils/datetime'") && !/new Date\(/.test(code(read(PAGE)) + libSrc))
 
+section('§7 on a phone the Invoices header wraps, so the link is on screen and tappable; the desktop header is as it was')
+// Each `@media (max-width: 767px)` block of a file's styles, up to its own closing brace, and the
+// styles with those blocks taken out.
+function phoneBlocks(src) {
+  const style = code(String(src).split('<style')[1] || '')
+  const blocks = []
+  let rest = ''
+  let from = 0
+  for (let at = style.indexOf('@media (max-width: 767px) {'); at !== -1; at = style.indexOf('@media (max-width: 767px) {', from)) {
+    rest += style.slice(from, at)
+    let depth = 0
+    let i = style.indexOf('{', at)
+    for (; i < style.length; i++) {
+      if (style[i] === '{') depth++
+      else if (style[i] === '}' && --depth === 0) break
+    }
+    blocks.push(style.slice(at, i + 1))
+    from = i + 1
+  }
+  return { blocks: blocks.join('\n'), rest: rest + style.slice(from) }
+}
+const rule = (css, sel) => (css.match(new RegExp(`(?:^|[\\s,}])${sel.replace(/[.\\-]/g, (c) => `\\${c}`)}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
+{
+  ok('the header and its actions carry their own classes, beside the classes they had',
+    /<div class="dash-header inv-header">/.test(INVOICES) && /<div class="flex items-center gap-3 inv-header-actions">/.test(INVOICES))
+  const inv = phoneBlocks(INVOICES)
+  ok('…on a phone the header wraps', /flex-wrap:\s*wrap/.test(rule(inv.blocks, '.inv-header')), rule(inv.blocks, '.inv-header'))
+  ok('…and its actions wrap and may be narrower than their buttons in a row', /flex-wrap:\s*wrap/.test(rule(inv.blocks, '.inv-header-actions')) && /min-width:\s*0/.test(rule(inv.blocks, '.inv-header-actions')),
+    rule(inv.blocks, '.inv-header-actions'))
+  eq('…and no rule for either outside the phone block, so the desktop header is as it was', [rule(inv.rest, '.inv-header'), rule(inv.rest, '.inv-header-actions')], ['', ''])
+  const link = phoneBlocks(read(LINK))
+  const tall = rule(link.blocks, '.payroll-check-link').match(/(?:^|[;\s])(?:min-)?height:\s*([\d.]+)rem/)
+  ok('on a phone the link is at least 40 px tall (a finger\'s tap)', !!tall && Number(tall[1]) * 16 >= 40, rule(link.blocks, '.payroll-check-link') || 'no phone rule')
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
