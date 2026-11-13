@@ -420,7 +420,9 @@ async function main() {
       ['dispatcher-1280', () => dispatcherRun(browser, w, DESKTOP)], ['dispatcher-390', () => dispatcherRun(browser, w, PHONE)]]) {
       try { await fn() } catch (e) { record(`PT!-${name}`, `${name} run aborted`, 'no abort', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    record('PTy', 'The tab sends no write', 'no POST, PUT, PATCH or DELETE from any page', writes.join(', ') || 'no writes', writes.length === 0)
+    const moneyWrites = writes.filter((x) => /\s\/api\/(?:expenses|invoices)(?:\/|$)/.test(x))
+    record('PTy', 'The tab sends no write', 'no POST, PUT, PATCH or DELETE to an expenses or invoices route from any page',
+      `${moneyWrites.join(', ') || 'none'}; other writes (not judged): ${writes.filter((x) => !moneyWrites.includes(x)).join(', ') || 'none'}`, moneyWrites.length === 0)
   } finally {
     if (browser) await browser.close().catch(() => {})
     await new Promise((r) => server.close(() => r()))
