@@ -3533,9 +3533,19 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 			eq(last && [last.id, last.credits.value, last.pace, last.left], ["last-week", 3, null, null], "(the scene) last week's final 3, no label, nothing left");
 			const zero = weekOf(await invoiceWeekIn(nov18, forDriver("ada", "2026-11-14")));
 			ok(sameText(zero, own.weeks[0]), "a week at 0 on her truck: her own route's", JSON.stringify(zero).slice(0, 160));
-			eq(zero && [zero.credits.value, zero.loads, zero.pace], [0, [], null], "(the scene) 0, no rows, no label");
+			eq(zero && [zero.credits.value, zero.loads, zero.pace], [0, [], "needs-focus"], "(the scene) 0 and no rows, with loads still in her name: Needs Focus");
 		} finally {
 			await nov18.close();
+		}
+		// Wed Nov 25: Hal on his truck with no load in his name.
+		const nov25 = await makeWorld({}, { nowMs: Date.parse("2026-11-25T17:00:00Z") });
+		try {
+			const own = (await nov25.get(OWN, USERS.hal)).json.weeks[0];
+			const got = weekOf(await invoiceWeekIn(nov25, forDriver("hal", "2026-11-21")));
+			ok(sameText(got, own), "a week at 0 with nothing in his name: his own route's", JSON.stringify(got).slice(0, 160));
+			eq(got && [got.credits.value, got.loads, got.pace], [0, [], null], "(the scene) 0, no rows and no label");
+		} finally {
+			await nov25.close();
 		}
 		// Wed Dec 2: the weeks of Nov 21, 14 and 7 are past weeks.
 		const nowWeeks = (await on.get(OWN, USERS.ada)).json.weeks[0].loads;
