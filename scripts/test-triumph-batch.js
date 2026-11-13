@@ -14,6 +14,11 @@
 //   §7 --load, on a made-up replica's copies: read-only, and the batch's own rules
 //   §8 scripts/triumph-batch-size-report.js and scripts/triumph-what-would-change.js:
 //      counts only, on made-up copies
+//   §9 advance lines (TRIUMPH_ADVANCE_LINES_ENABLED, PR B1): a factored invoice with a
+//      made-up $500.00 advance prints Triumph's block, the advance, LESS ADVANCES and the
+//      balance due; its batch's INVAMT is that balance, in the merged PDF's text; --load on
+//      a load with a line stops (ADVANCE_LINES) with the switches off, and with them on
+//      prints the line and bills the balance, under the automatic invoice's own checks
 //
 // The invoice page goes through a stand-in renderer that writes a PDF of the page's
 // words the way Chromium writes one (scripts/lib/made-up-pdf.js): no browser here. Made-up
@@ -775,8 +780,77 @@ async function s8() {
 	eq(sha256(fs.readFileSync(dbFile)), dbBefore, "§8 both reports leave the database byte for byte as it was");
 }
 
+// ---------------------------------------------------------------- §9
+async function s9() {
+	section("§9 advance lines on a factored invoice");
+	// The figures the engine resolves for one made-up $500.00 advance on a $2,150.00 load.
+	const ADVANCED = Object.freeze({
+		lineHaulCents: 215000, advancesCents: 50000, balanceCents: 165000, lineHaulSource: "ratecon",
+		items: [{ id: 1, kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "" }],
+		footnote: "*$500 for fuel advance", footnoteDefault: "*$500 for fuel advance",
+	});
+	const html = triumphInvoice.withAssignment(page({ invoiceLines: ADVANCED }), { lines: LINES });
+	ok(LINES.every((l) => html.includes(`>${l}</div>`)) && !html.includes("Payment Method") && !html.includes(ROUTING) && !html.includes(ACCOUNT),
+		"§9 Triumph's block in place of the bank block, with an advance on the invoice too");
+	ok(html.includes('<div class="item-title">Fuel advance</div>') && html.includes('<div class="subtotal"><span>LESS ADVANCES</span><span class="amt">-$500.00</span></div>')
+		&& html.includes('<div class="pill"><span class="lbl">Balance due*</span><span class="amt">$1,650.00</span></div>'), "§9 ...the advance, LESS ADVANCES and the balance due print");
+	const render = renderSpy();
+	const b = await batchLib.buildBatch(args({ invoicePdf: await render(html), billedTotal: "$1,650.00" }));
+	eq([b.ok, b.row && b.row.INVAMT], [true, "1650.00"], "§9 INVAMT is the balance due the invoice prints");
+	eq(b.ok ? batchLib.unprintedFields(b.pdf, b.row) : null, [], "§9 ...and the merged PDF's text shows it, with the invoice number, date and PO");
+	eq(b.ok && b.parts.map((p) => p.kind), ["invoice", "ratecon", "bol", "pod", "pod"], "§9 ...the invoice, the rate con, then the BOL and the PODs, as for any batch");
+
+	// --load on a made-up replica copy whose load has an advance line.
+	const script = require(path.join(ROOT, "scripts", "triumph-batch-sample.js"));
+	const LINES_LIB = brokerInvoice.invoiceLines;
+	const base = tmp();
+	const { dbFile, uploads, db, doc } = replicaCopies(base);
+	LINES_LIB.ensureSchema(db);
+	const RC = (id) => textPdf(`RATE CON (MADE UP) Load Number ${id} Bill to ${DEBTOR} Total Rate: $2,150.00`, { mode: "literal" });
+	const ids = ["LD-TEST-0901", "LD-TEST-0902", "LD-TEST-0903", "LD-TEST-0904"];
+	for (const id of ids) {
+		doc(id, "RATECON", `rc-${id}.pdf`, RC(id));
+		doc(id, "POD", `pod-${id}.pdf`, textPdf(`POD OF ${id}`));
+	}
+	const add = (loadId, over = {}) => LINES_LIB.addLine(db, { loadId, values: { kind: "advance", label: "Fuel advance", amountCents: 50000, receivedOn: "2026-11-02", reference: "", note: "", ...over },
+		actor: "made-up-admin", closedMonths: [] }, {});
+	add("LD-TEST-0901");
+	add("LD-TEST-0902", { label: "Fuel advance to Pat Example" });
+	add("LD-TEST-0903", { amountCents: 215000 });
+	db.close();
+	const values = path.join(base, "values.json");
+	fs.writeFileSync(values, JSON.stringify({ values: [HEADERS, ...ids.map((id) => made(id, "Delivered", "ap@example-broker.test", "11/02/2026"))] }));
+	const noa = path.join(base, "noa.txt");
+	fs.writeFileSync(noa, NOA_SETTING);
+	const dbBefore = sha256(fs.readFileSync(dbFile));
+	const ON = { TRIUMPH_ADVANCE_LINES_ENABLED: "true", AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" };
+	const look = async (id, env, name) => {
+		const out = path.join(base, "looks", name);
+		const spy = renderSpy();
+		try {
+			const r = await script.run([`--out=${out}`, `--load=${id}`, `--debtor=${DEBTOR}`, `--noa-lines-file=${noa}`, `--db=${dbFile}`, `--values-json=${values}`, `--uploads=${uploads}`],
+				{ render: spy, env, now: () => new Date("2026-11-06T15:04:05Z") });
+			return { r, csv: fs.readFileSync(path.join(out, r.csvName), "utf8").split("\r\n")[1], page: spy.pages[0] || "" };
+		} catch (e) {
+			return { refused: e instanceof script.Refusal ? e.message : `threw: ${e.message}` };
+		}
+	};
+	eq((await look("LD-TEST-0901", {}, "off")).refused, "ADVANCE_LINES", "§9 FAILS ON THE OLD CODE: --load, a load with an advance line, the switches off: stopped as the submit job stops it");
+	eq((await look("LD-TEST-0901", { TRIUMPH_ADVANCE_LINES_ENABLED: "true" }, "half")).refused, "ADVANCE_LINES", "§9 FAILS ON THE OLD CODE: ...and with Triumph's switch alone");
+	const on = await look("LD-TEST-0901", ON, "on");
+	eq(on.csv, `${DEBTOR},SAMPLE-0001,11/06/2026,LD-TEST-0901,1650.00`, `§9 FAILS ON THE OLD CODE: on, INVAMT is the balance due: $2,150.00 less the $500.00 advance (${on.refused || ""})`);
+	ok(on.page.includes('<span class="lbl">Balance due*</span><span class="amt">$1,650.00</span>') && on.page.includes("LESS ADVANCES") && on.page.includes(`>${LINES[0]}<`),
+		"§9 FAILS ON THE OLD CODE: ...its invoice page prints the advance, the balance due and Triumph's block");
+	eq((await look("LD-TEST-0902", ON, "typed")).refused, "ADVANCE_LINE_TEXT", "§9 FAILS ON THE OLD CODE: a line with a typed label: ADVANCE_LINE_TEXT, as the automatic invoice refuses it");
+	eq((await look("LD-TEST-0903", ON, "none-left")).refused, "ADVANCE_LINES_INVALID", "§9 FAILS ON THE OLD CODE: advances that leave no balance: ADVANCE_LINES_INVALID");
+	const plain = await look("LD-TEST-0904", ON, "plain");
+	eq(plain.csv, `${DEBTOR},SAMPLE-0001,11/06/2026,LD-TEST-0904,2150.00`, "§9 a load with no line: the batch as before, whatever the switches say");
+	ok(!plain.page.includes("LESS ADVANCES"), "§9 ...and no advance on its page");
+	eq(sha256(fs.readFileSync(dbFile)), dbBefore, "§9 the database file is byte for byte as it was");
+}
+
 (async () => {
-	for (const s of [s3, s4, s5, s6, s7, s8]) await s();
+	for (const s of [s3, s4, s5, s6, s7, s8, s9]) await s();
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);
