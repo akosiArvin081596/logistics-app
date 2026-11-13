@@ -635,7 +635,8 @@ async function seedLines(w) {
 		check("each live line carries exactly the summary its receipt shows on All Expenses (less the Undo and Reverse buttons' fields)",
 			[[1, "invoiced"], [5, "invoiced"], [50, "invoiced"], [11, "pending"], [51, "carried"]].map(([id, s]) => JSON.stringify(byLine(all, id, s).personal) === JSON.stringify(strip(rows[id] && rows[id].personal))),
 			[true, true, true, true, true]);
-		check("…and no row carries the ledger row behind it", ((all.body && all.body.lines) || []).some((l) => "row" in (l.personal || {}) || "created_by" in l), false);
+		const wire = JSON.parse(JSON.stringify(all.body || {}));
+		check("…and on the wire no row carries the ledger row behind it", (wire.lines || []).some((l) => "row" in (l.personal || {}) || "created_by" in l || "created_by" in (l.personal || {})), false);
 
 		const a = await readLines(w, { driver: "Test Driver A" });
 		check("Test Driver A: his four lines, $260.00 over 3 (the reversed $25.00 apart)",
