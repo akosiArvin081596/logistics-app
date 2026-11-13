@@ -19,7 +19,9 @@
  *     so D2's two-rate weeks run with both rules on);
  *   - PUT /api/invoices/:id/adjust re-renders from the stored render_data and
  *     keeps the added days;
- *   - an invoice without late days renders exactly as today.
+ *   - an invoice without late days renders exactly as today;
+ *   - the weekly performance page (D5, D6): a snapshot with one redraws it as
+ *     stored, on a late-day update and an adjust; one without never gains one.
  * The driver app's invoice view (plan F10) is not located, so these cases check
  * render_data, the stored row and the PDF field map (lib/policy-field-maps.js).
  *
@@ -46,9 +48,11 @@ const stored = (w, id) => JSON.parse(w.db.prepare("SELECT render_data FROM invoi
 
 // W39 pays a Mon-Tue load; a load At Shipper Thu 10/1 is delivered Mon 10/5,
 // after W39 was made, so W40's run puts Thu and Fri onto W39 (a Draft).
-async function boundaryWeek({ driver = "Rex Ames", payDaily = 260, payRates = [], env = TRIP } = {}) {
+// `expose`, `setup(w)` before W39 is made and `between(w, g39)` after: D5 and D6.
+async function boundaryWeek({ driver = "Rex Ames", payDaily = 260, payRates = [], env = TRIP, expose = [], setup = null, between = null } = {}) {
 	const w = W.startWorld({
 		env,
+		expose,
 		drivers: [{ name: driver, payDaily }],
 		payRates,
 		rows: [
@@ -58,7 +62,9 @@ async function boundaryWeek({ driver = "Rex Ames", payDaily = 260, payRates = []
 		status: [s("D101", "At Shipper", "2026-09-28 12:00:00"), s("D101", "Delivered", "2026-09-29 21:00:00"), s("D102", "At Shipper", "2026-10-01 14:00:00")],
 		now: etMs("2026-10-02 20:00"),
 	});
+	if (setup) setup(w);
 	const g39 = await W.generate(w, driver, W39);
+	if (between) between(w, g39);
 	w.addStatus([s("D102", "At Receiver", "2026-10-05 15:00:00"), s("D102", "Delivered", "2026-10-05 17:00:00")]);
 	w.setRow("D102", { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
 	w.clock.ms = etMs("2026-10-09 20:00");
@@ -143,6 +149,62 @@ const R = W.createRunner("B12 D: late days print in their own week's invoice");
 		const off = await snap({});
 		eq("today: two days at $260", [off.row, W.dayList(W.gridDays(off.data, W39))], [{ total: 520, days: 2, rate: 260 }, daysFrom("2026-09-29", "2026-09-30")]);
 		eq("flag on: identical", await snap(TRIP), off);
+	});
+
+	// The weekly performance page (INVOICE_PERFORMANCE_COPY_ENABLED): a page is the words a snapshot was
+	// made with, so every redraw prints it as stored, and a snapshot without one never gains one.
+	const PAGE_ON = { ...TRIP, INVOICE_PERFORMANCE_COPY_ENABLED: "true" };
+	const rules = require(path.join(W.ROOT, "lib", "driver-performance.js"));
+	// His week for each invoice's week, as invoiceWeek() answers it: made-up figures through the real rules.
+	const answerFor = (weekStart) => ({
+		week: rules.personalWeek({
+			id: "this-week", start: weekStart, end: rules.addDays(weekStart, 6), today: rules.addDays(weekStart, 6), deliveries: weekStart === "2026-09-26" ? 2 : 1, pickups: 1, offDays: [], openLoad: true,
+			loads: [rules.countedLoad({ loadId: weekStart === "2026-09-26" ? "D101" : "D102", pickupDay: rules.addDays(weekStart, 2), deliveryDay: rules.addDays(weekStart, 3) })],
+		}),
+		weights: { ...rules.CREDIT_WEIGHTS },
+		hours: null,
+	});
+	const withPages = (w) => { w.api.invoicePerformance.week = async ({ weekStart }) => answerFor(weekStart); };
+	const rendersOf = (w, invoice) => w.rendered.filter((r) => r.data && `INV-${r.data.invoiceNumberSuffix}` === invoice.invoice_number).map((r) => r.data);
+	const pageOf = (data) => (data && Object.prototype.hasOwnProperty.call(data, "performance") ? data.performance : "(none)");
+
+	await R.test("D5 [the weekly performance page] With its switch on, a snapshot made without the page (an invoice from before the switch) redraws with none: its late-day update and its adjust print no page, the field map gives the renderer none, and the stored snapshot never gains one. Passes on the base too", async ({ eq }) => {
+		const { w, g39 } = await boundaryWeek({
+			env: PAGE_ON,
+			expose: W.SRC.includes("\nconst invoicePerformance = ") ? ["invoicePerformance"] : [],
+			setup: (x) => { if (x.api.invoicePerformance) withPages(x); },
+			// W39 as an invoice made before the switch went on: its snapshot holds no page.
+			between: (x, g) => {
+				const row = x.db.prepare("SELECT render_data FROM invoices WHERE id = ?").get(g.invoice.id);
+				const snap = JSON.parse(row.render_data);
+				delete snap.performance;
+				x.db.prepare("UPDATE invoices SET render_data = ? WHERE id = ?").run(JSON.stringify(snap), g.invoice.id);
+			},
+		});
+		const late = rendersOf(w, g39.invoice);
+		eq("(the scene) W39 drawn twice: made, then its late days", late.length, 2);
+		eq("the late-day update draws no page", pageOf(late[1]), "(none)");
+		await W.route(w, "PUT /api/invoices/:id/adjust", { params: { id: String(g39.invoice.id) }, body: { adjustment: 25, adjustmentNote: "made-up" } });
+		const again = rendersOf(w, g39.invoice);
+		eq("and its adjust draws none", pageOf(again[again.length - 1]), "(none)");
+		eq("the field map hands the renderer no page", fieldMap(again[again.length - 1] || {}).performancePage || null, null);
+		eq("the stored snapshot gains none", pageOf(stored(w, g39.invoice.id)), "(none)");
+	});
+
+	await R.test("D6 [the weekly performance page] A snapshot with the page redraws it as stored: W39's late-day update and its adjust print the page W39 was made with (as of Fri Oct 2, 8:00 PM ET), and W40 keeps its own (Fri Oct 9). Base: no page", async ({ eq, ok }) => {
+		const { w, g, g39 } = await boundaryWeek({ env: PAGE_ON, expose: ["invoicePerformance"], setup: withPages });
+		const made = pageOf(stored(w, g39.invoice.id));
+		ok("(the scene) W39 was made with a page, as of its own generate", made && made.asOf === "As of Fri Oct 2, 8:00 PM ET", JSON.stringify(made));
+		const draws = rendersOf(w, g39.invoice);
+		eq("(the scene) W39 drawn twice: made, then its late days, Thursday and Friday added", [draws.length, W.gridDays(stored(w, g39.invoice.id), W39).length], [2, 4]);
+		eq("the late-day update draws the page as made", pageOf(draws[1]), made);
+		eq("and stores it as made", pageOf(stored(w, g39.invoice.id)), made);
+		eq("W40 keeps its own page, as of its own generate", pageOf(stored(w, g.invoice.id)).asOf, "As of Fri Oct 9, 8:00 PM ET");
+		await W.route(w, "PUT /api/invoices/:id/adjust", { params: { id: String(g39.invoice.id) }, body: { adjustment: 25, adjustmentNote: "made-up" } });
+		const again = rendersOf(w, g39.invoice);
+		eq("its adjust draws the page as made", pageOf(again[again.length - 1]), made);
+		eq("and the field map hands it to the renderer whole", JSON.stringify(fieldMap(again[again.length - 1] || {}).performancePage), JSON.stringify(made));
+		eq("the stored snapshot keeps it", pageOf(stored(w, g39.invoice.id)), made);
 	});
 
 	R.finish();

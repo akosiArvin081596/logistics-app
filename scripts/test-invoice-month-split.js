@@ -14,6 +14,8 @@
  *       period counts whole in week_end's month
  *   S7  monthInvoiceTotals(): per driver, the month's share, its adjustments and
  *       the split count; rows without the month or a driver are skipped
+ *   S8  the weekly performance page in render_data moves no share (passes on
+ *       the base too: the key is new, and nothing here reads it)
  *
  * Made-up data only. Pure: no server, no database, no network.
  * Run: node scripts/test-invoice-month-split.js    # exits 1 on failure
@@ -137,6 +139,31 @@ test("S7 monthInvoiceTotals(): the month's shares, its adjustments (week_end's m
 	eq("October", { ...oct["amy birch"] }, { count: 2, invoicedCents: 70000 + 30000, adjustmentCents: 10000, splitCount: 1 });
 	eq("no row for a blank driver, and a null-prototype result", [Object.keys(oct), Object.getPrototypeOf(oct)], [["amy birch"], null]);
 	eq("a month no invoice holds", Object.keys(S.monthInvoiceTotals([a, b], "2026-11")), []);
+});
+
+test("S8 The weekly performance page (render_data.performance) is words only: a day-rate, a percentage and a calendar invoice split the same with a stored page as without it. Passes on the base too: that is its point", (eq) => {
+	const PAGE = {
+		heading: "WEEKLY PERFORMANCE", week: "Sep 26 to Oct 2", asOf: "As of Fri Oct 2, 7:00 PM ET", count: "4 of 7.5 loads",
+		requirement: "7.5 is the target. 6 is required.", rule: "Each pickup counts 0.5 and each delivery 0.5.", lowered: "", title: "What counted",
+		rows: ["Load L1: Picked up Mon 0.5 · Delivered Tue 0.5"], empty: "", hours: "Driving hours: coming soon",
+	};
+	const snaps = [
+		{ __templateName: "service_invoice", days: {} },
+		{ __templateName: "service_invoice_owner_op", loads: [{ loadId: "L1", rate: 2000, date: "2026-09-29" }, { loadId: "L2", rate: 1000, date: "2026-10-01" }] },
+	];
+	const facts = [
+		["the paid days", { paidDays: GRID_DAYS, dayAmount: at300 }],
+		["the loads' months", { loadMonthOf: (id) => ({ L1: "2026-09", L2: "2026-10" })[id] || "" }],
+		["no facts (by calendar days)", {}],
+	];
+	for (const snap of snaps) {
+		for (const [says, opts] of facts) {
+			const inv = { ...W39, total_earnings: 1200, adjustment: -50, personal_share_total: 15 };
+			const plain = S.invoiceMonthShares({ ...inv, render_data: JSON.stringify(snap) }, opts);
+			const paged = S.invoiceMonthShares({ ...inv, render_data: JSON.stringify({ ...snap, performance: PAGE }) }, opts);
+			eq(`${snap.__templateName}, ${says}: the same shares, method, months, parts and unsplit`, paged, plain);
+		}
+	}
 });
 
 console.log(`\n${passed} passed, ${failed} failed (of ${passed + failed})`);
