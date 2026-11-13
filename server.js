@@ -22771,7 +22771,6 @@ app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, 
 		res.status(500).json({ error: err.message });
 	}
 });
-
 // THE BEFORE-PAYROLL CHECK: what a person looks at before payroll, per driver
 // and week of the open months up to the last finished week. lib/payroll-check.js
 // picks each item's reason and shapes the answer, every amount in whole cents;
