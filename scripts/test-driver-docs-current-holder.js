@@ -302,6 +302,8 @@ const driverDeps = (over = {}) => ({
 	getJobTrackingCached: async () => JT,
 	liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),
 	voiceNotes: require("../lib/voice-notes"),
+	// The payload's alerts: the shipped read (scripts/test-driver-page-role-gate.js §10).
+	driverAlertsSent: require("../lib/driver-alerts-sent"),
 	getCarrierDBFromSQLite: () => ({ headers: ["Driver"], data: [] }),
 	computeDriverQueues: () => ({}),
 	withExpenseWindows: (rows) => rows.map((x) => ({ ...x })),

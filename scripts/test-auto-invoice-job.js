@@ -108,6 +108,14 @@
 //   §28 the dry run before the deploy: its counts equal the first check's, and it writes
 //       nothing (the database's sha256 and the meta as they were)
 //   §29 what these rules don't touch, by digest against main (ea4497a6)
+//   §30 advance lines (AUTO_INVOICE_ADVANCE_LINES_ENABLED, PR A1): the job hands the engine its
+//       switch (advanceLines); off, a load with one is
+//       ADVANCE_LINES with no engine call and a sent load's fingerprint is today's; on, it is
+//       sent, its fingerprint keeps the lines, and a line voided after the send holds that load
+//       alone (the alert names the advance lines; nothing re-sent); a line voided or added
+//       between the render and the send or the APPEND: LINES_CHANGED, nothing handed over, the
+//       number given up, made again with a fresh one; a line added while the engine read the
+//       load: LINES_CHANGED before any number; lines that keep changing go to a person
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -4703,6 +4711,144 @@ async function holdSections() {
 	eq(["change_logged_json", "change_logged_at", "removed_in_app_at"].every((c) => cols.includes(c))
 		? onCols.db.prepare("SELECT change_logged_json, change_logged_at, removed_in_app_at FROM auto_invoice_claims").all() : "(no such columns)",
 	[{ change_logged_json: "", change_logged_at: "", removed_in_app_at: "" }], "§29 FAILS ON THE OLD CODE: ...empty on a load nothing changed");
+
+	// ---------------------------------------------------------------- §30
+	section("§30 advance lines on an automatic invoice (AUTO_INVOICE_ADVANCE_LINES_ENABLED)");
+	{
+		const off = linesWorld();
+		const job = await holdStarted(jobLib, off);
+		off.ready("LD-TEST-0950");
+		off.addLine("LD-TEST-0950");
+		await job.tick();
+		eq([off.state("LD-TEST-0950"), off.calls.prepare.length, off.smtp.length], [["needs_attention", "ADVANCE_LINES"], 0, 0], "§30 off: ADVANCE_LINES, no engine call, nothing sent, as before");
+		const offSent = linesWorld();
+		const job2 = await holdStarted(jobLib, offSent);
+		await sendAll(offSent, job2, ["LD-TEST-0951"]);
+		ok(!("advanceLines" in JSON.parse(claimOf(offSent, "LD-TEST-0951").fingerprint_json || "{}")), "§30 off: the saved fingerprint is today's (no advanceLines)");
+		offSent.addLine("LD-TEST-0951");
+		offSent.now += 5 * MIN;
+		await job2.tick();
+		eq([claimOf(offSent, "LD-TEST-0951").changed_fields, offSent.smtp.length], ["", 1], "§30 off: a line added after the send changes nothing, as before");
+		eq([...new Set(offSent.handed)], [false], "§30 FAILS ON THE OLD CODE: off, the job hands the engine its switch, off (advanceLines: false)");
+	}
+	{
+		const w = linesWorld();
+		const job = await holdStarted(jobLib, w, { env: ADVANCE_ON });
+		w.ready("LD-TEST-0952");
+		const line = w.addLine("LD-TEST-0952");
+		await job.tick();
+		eq([w.state("LD-TEST-0952"), w.smtp.length, claimOf(w, "LD-TEST-0952").delivery], [["drafted", ""], 1, "send"], "§30 FAILS ON THE OLD CODE: on, a load with an advance line is invoiced and sent");
+		eq(JSON.parse(claimOf(w, "LD-TEST-0952").fingerprint_json || "{}").advanceLines, [`${line.id}:50000`], "§30 FAILS ON THE OLD CODE: ...its fingerprint keeps the line it printed");
+		w.voidLine("LD-TEST-0952", line.id);
+		w.now += 5 * MIN;
+		await job.tick();
+		await alertsSent(job);
+		eq([claimOf(w, "LD-TEST-0952").changed_fields, w.smtp.length], ["advanceLines", 1], "§30 FAILS ON THE OLD CODE: the line voided after the send holds that load (advanceLines); nothing is re-sent");
+		ok(w.alerts.some((a) => a.subject === HELD_SUBJECT("LD-TEST-0952") && a.html.includes("its advance lines changed")), "§30 FAILS ON THE OLD CODE: ...the alert names the advance lines");
+		w.ready("LD-TEST-0953");
+		w.now += 5 * MIN;
+		await job.tick();
+		eq([w.smtp.length, w.state("LD-TEST-0953")], [2, ["drafted", ""]], "§30 ...and the next load still sends");
+		eq([...new Set(w.handed)], [true], "§30 FAILS ON THE OLD CODE: on, the job hands the engine its switch (advanceLines: true), without which the engine refuses the line");
+	}
+	for (const [what, change, printed] of [
+		["voided", (w, id, line) => w.voidLine(id, line.id), () => []],
+		["added", (w, id) => w.addLine(id, 20000), (line, w, id) => (typeof ledgerLib.activeAdvanceLineMarks === "function" ? ledgerLib.activeAdvanceLineMarks(w.db, rules.loadKey(id)) : ["(no reader on this tree)"])],
+	]) {
+		// The SMTP path, then a draft (the domain off the send list).
+		for (const [where, send] of [["the send", SEND_ON], ["the APPEND", { enabled: true, domains: ["example-other.test"] }]]) {
+			const w = linesWorld({ send });
+			const job = await holdStarted(jobLib, w, { env: ADVANCE_ON });
+			const id = "LD-TEST-0954";
+			w.ready(id);
+			const line = w.addLine(id);
+			let once = true;
+			w.renderHook = () => {
+				if (!once) return;
+				once = false;
+				change(w, id, line);
+			};
+			await job.tick();
+			eq(w.actions("auto_invoice_number_void").map((a) => a.details), ["10202026-1 was reserved for this load and never used (LINES_CHANGED)"],
+				`§30 FAILS ON THE OLD CODE: a line ${what} between the render and ${where}: that number given up (LINES_CHANGED)`);
+			const handed = where === "the send" ? w.smtp.length : w.calls.append.length;
+			eq([handed, claimOf(w, id).invoice_id, w.state(id)], [1, "10202026-2", ["drafted", ""]],
+				`§30 FAILS ON THE OLD CODE: ...nothing went with it, and it was made again with a fresh number, handed over once (${where})`);
+			eq(JSON.parse(claimOf(w, id).fingerprint_json || "{}").advanceLines, printed(line, w, id), `§30 ...its fingerprint keeps the lines it went with (${what}, ${where})`);
+			eq(w.calls.render.length, 2, `§30 ...two renders, one handed over (${what}, ${where})`);
+		}
+	}
+	{
+		// A line added after the run read the load and before the engine printed it: what printed isn't what
+		// the run read (its fingerprint's reading), so it is made again from a fresh read, before any number.
+		const w = linesWorld();
+		const job = await holdStarted(jobLib, w, { env: ADVANCE_ON });
+		const id = "LD-TEST-0956";
+		w.ready(id);
+		let once = true;
+		w.prepareHook = () => {
+			if (once) {
+				once = false;
+				w.addLine(id);
+			}
+			return null;
+		};
+		await job.tick();
+		eq([w.actions("auto_invoice_number_void").map((a) => a.details), w.calls.mint.length, w.smtp.length, claimOf(w, id).invoice_id, w.calls.render.length],
+			[[], 1, 1, "10202026-1", 1],
+			"§30 FAILS ON THE OLD CODE: a line added after the run read the load, before the engine printed it: LINES_CHANGED before a number is reserved, made again from a fresh read under the first number");
+		eq(JSON.parse(claimOf(w, id).fingerprint_json || "{}").advanceLines, ["1:50000"], "§30 FAILS ON THE OLD CODE: ...its fingerprint keeps the line it printed");
+		w.now += 5 * MIN;
+		await job.tick();
+		eq([claimOf(w, id).changed_fields, w.smtp.length], ["", 1], "§30 ...so the next check finds nothing changed, and nothing more is sent");
+	}
+	{
+		// Lines that change under every run: three times queued again, then a person.
+		const w = linesWorld();
+		const job = await holdStarted(jobLib, w, { env: ADVANCE_ON });
+		w.ready("LD-TEST-0955");
+		w.addLine("LD-TEST-0955");
+		w.renderHook = () => { w.addLine("LD-TEST-0955", 100); };
+		for (let i = 0; i < 4; i++) {
+			await job.tick();
+			w.now += 5 * MIN;
+			if ((w.state("LD-TEST-0955") || [])[0] === "needs_attention") break;
+		}
+		eq([w.state("LD-TEST-0955"), w.smtp.length, w.actions("auto_invoice_number_void").length], [["needs_attention", "LINES_CHANGED"], 0, 4],
+			"§30 FAILS ON THE OLD CODE: lines that change under every run: each number given up, nothing sent, then a person (LINES_CHANGED)");
+	}
+	eq(sendLib.heldAlert({ loadId: "LD-TEST-0952", invoiceId: "10202026-1", fields: ["advanceLines"] }).text,
+		"Invoice 10202026-1 already went to the broker. After that, its advance lines changed. Check whether the broker needs a corrected invoice, then press Mark checked on the load.",
+		"§30 FAILS ON THE OLD CODE: the held load's alert names the advance lines and no amount");
+}
+
+// ------------------------------------------------------------------ advance lines (§30)
+const LINES = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
+const ADVANCE_ON = Object.freeze({ AUTO_INVOICE_ADVANCE_LINES_ENABLED: "true" });
+// An alert world whose lines table is the lines module's own, and whose made-up engine prints the
+// load's active lines in its answer (ctx.lineSummary.items) only when the job hands it its switch
+// as advanceLines: true, and otherwise refuses a load with one (ADVANCE_LINES): the engine's contract
+// in mode "auto". `handed`: each call's advanceLines. `addLine`, `voidLine`: a Super Admin's.
+function linesWorld(opts = {}) {
+	const w = alertWorld(opts);
+	w.db.exec("DROP TABLE broker_invoice_lines");
+	LINES.ensureSchema(w.db);
+	w.handed = [];
+	const prepare = w.engine.prepare;
+	w.engine.prepare = async (args) => {
+		w.handed.push(args.advanceLines === undefined ? "(none)" : args.advanceLines);
+		const r = await prepare(args);
+		if (r && r.ok) {
+			const items = LINES.listLines(w.db, args.loadId).filter((l) => !l.voided).map((l) => ({ id: l.id, label: l.label, amountCents: l.amountCents, reference: l.reference }));
+			if (items.length && args.advanceLines !== true) return { ok: false, http: 422, code: "ADVANCE_LINES" };
+			if (items.length) r.ctx.lineSummary = { items };
+		}
+		return r;
+	};
+	w.addLine = (id, amountCents = 50000) => LINES.addLine(w.db, { loadId: id, values: { kind: "advance", label: "Fuel advance", amountCents, receivedOn: "", reference: "", note: "" },
+		actor: "made-up-admin", closedMonths: [] }, {}).line;
+	w.voidLine = (id, lineId) => LINES.voidLine(w.db, { loadId: id, lineId, reason: "made up", actor: "made-up-admin" }, {});
+	return w;
 }
 
 // Shadow is off for the off-gap rule: on, then shadow for 3 hours, then on.

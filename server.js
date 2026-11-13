@@ -49707,6 +49707,12 @@ const driverTrainingVideos = require("./lib/driver-training-videos");
 const DRIVER_STEPPER_GPS_PHASES_ENABLED = process.env.DRIVER_STEPPER_GPS_PHASES_ENABLED === "true";
 const driverGpsPhases = require("./lib/gps-phases").create({ enabled: DRIVER_STEPPER_GPS_PHASES_ENABLED, readers: () => gpsPhasesReaders() });
 
+// A driver's alerts (lib/driver-alerts-sent.js): the payload below reads them through
+// alertRows(), and GET /api/drivers-directory/:id/alerts-sent shows a Super Admin the same
+// rows, read-only, under the spelling his account holds (findDriverAccountSpelling()).
+const driverAlertsSent = require("./lib/driver-alerts-sent");
+driverAlertsSent.mount(app, { requireRole, db, accountSpelling: findDriverAccountSpelling });
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -49816,21 +49822,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			)
 			.all(nameLower, nameLower));
 
-		// Notifications from SQLite
-		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
-		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
-		// then looks ~N hours in the future and the UI stuck on "just now".
-		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
-		const driverNotifications = db
-			.prepare(
-				`SELECT id, type, title, body, metadata, read,
-				        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
-				 FROM notifications
-				 WHERE driver_name = ?
-				 ORDER BY id DESC
-				 LIMIT 100`,
-			)
-			.all(nameLower);
+		// His alerts, newest first: the one read, which the Drivers page's "Alerts
+		// sent" shows a Super Admin too (lib/driver-alerts-sent.js).
+		const driverNotifications = driverAlertsSent.alertRows(db, driverName);
 
 		// Expenses from SQLite. photo_data is the receipt URL (per
 		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
@@ -56156,6 +56150,11 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
 //     chrobinson.com goes only to an address a person has already invoiced on 3 loads
 //     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
+//   AUTO_INVOICE_ADVANCE_LINES_ENABLED  on only when exactly "true", with the advance lines
+//     themselves on: a load with advance lines is invoiced automatically for its balance due, its
+//     lines printed as the Draft Invoice button prints them (closed-list labels, no reference, rule
+//     7's check on what it composes, the lines read again right before the hand-off). Off, such a
+//     load goes to a person (ADVANCE_LINES), as before.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -57701,6 +57700,12 @@ const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
 	logAudit,
 	sanitizeEvidenceText,
 	assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),
+	// Rule 7 on an automatic invoice with advance lines: the carrier deny list as the C.H. Robinson
+	// redactor reads it, through the list's one spelling; null while it's unset.
+	denyHits: (() => {
+		const deny = require("./lib/chr-events").createRedactor({ denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "" });
+		return deny.count > 0 ? deny.hits : null;
+	})(),
 	env: process.env,
 });
 
