@@ -195,6 +195,9 @@
           <!-- Shared Documents — Super Admin uploads files the driver sees in their Kit tab -->
           <LegalDocumentPortal v-if="viewDrv._rowIndex" :driver-id="viewDrv._rowIndex" />
 
+          <!-- What the driver's Alerts tab lists, read-only: shown only once the server answers (Super Admin) -->
+          <DriverAlertsSentPanel v-if="viewDrv._rowIndex" :directory-id="viewDrv._rowIndex" />
+
           <div style="margin-top:1rem;text-align:right;">
             <button class="btn btn-secondary" @click="closeView">Close</button>
           </div>
@@ -366,6 +369,7 @@ import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import DriverAvailabilityPanel from './DriverAvailabilityPanel.vue'
 import EmergencyContactsPanel from './EmergencyContactsPanel.vue'
 import ResignRequestControl from './ResignRequestControl.vue'
+import DriverAlertsSentPanel from './DriverAlertsSentPanel.vue'
 import { availabilityRangeText } from '../../lib/availabilityText'
 
 const api = useApi()

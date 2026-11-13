@@ -49707,6 +49707,12 @@ const driverTrainingVideos = require("./lib/driver-training-videos");
 const DRIVER_STEPPER_GPS_PHASES_ENABLED = process.env.DRIVER_STEPPER_GPS_PHASES_ENABLED === "true";
 const driverGpsPhases = require("./lib/gps-phases").create({ enabled: DRIVER_STEPPER_GPS_PHASES_ENABLED, readers: () => gpsPhasesReaders() });
 
+// A driver's alerts (lib/driver-alerts-sent.js): the payload below reads them through
+// alertRows(), and GET /api/drivers-directory/:id/alerts-sent shows a Super Admin the same
+// rows, read-only, under the spelling his account holds (findDriverAccountSpelling()).
+const driverAlertsSent = require("./lib/driver-alerts-sent");
+driverAlertsSent.mount(app, { requireRole, db, accountSpelling: findDriverAccountSpelling });
+
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
 //
 // ⚠️ SUPER ADMIN (ANY DRIVER) OR THE NAMED DRIVER, AND NO OTHER ROLE.
@@ -49816,21 +49822,9 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			)
 			.all(nameLower, nameLower));
 
-		// Notifications from SQLite
-		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
-		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
-		// then looks ~N hours in the future and the UI stuck on "just now".
-		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
-		const driverNotifications = db
-			.prepare(
-				`SELECT id, type, title, body, metadata, read,
-				        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
-				 FROM notifications
-				 WHERE driver_name = ?
-				 ORDER BY id DESC
-				 LIMIT 100`,
-			)
-			.all(nameLower);
+		// His alerts, newest first: the one read, which the Drivers page's "Alerts
+		// sent" shows a Super Admin too (lib/driver-alerts-sent.js).
+		const driverNotifications = driverAlertsSent.alertRows(db, driverName);
 
 		// Expenses from SQLite. photo_data is the receipt URL (per
 		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
