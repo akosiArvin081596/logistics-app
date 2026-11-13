@@ -83,7 +83,7 @@ const ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
-	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter",
+	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter", "personalLinesLimiter",
 	// The PDF receipt child's self-test probes: made-up files a runner names
 	// (opts.receiptPdfProbes); without them the self-test fails and every PDF
 	// receipt keeps its note, as on a server whose probes are missing.
@@ -289,6 +289,7 @@ function buildPersonalWorld(opts = {}) {
 		personalReceiptLimiter: (req, res, next) => next(),
 		personalRouteLimiter: (req, res, next) => next(),
 		personalListLimiter: (req, res, next) => next(),
+		personalLinesLimiter: (req, res, next) => next(),
 		receiptPdfProbePaths: () => ({ ...(opts.receiptPdfProbes || { env: "", db: "" }) }),
 		...(opts.extraDeps || {}),
 	};

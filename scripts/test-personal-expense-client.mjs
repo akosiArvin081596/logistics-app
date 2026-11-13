@@ -31,6 +31,11 @@
 //      full sentence on hover; the phone card and the detail window keep the full
 //      sentence; the pill wraps; the table has fixed columns and gives way to the
 //      cards when its panel is narrower than TABLE_MIN_WIDTH.
+//   7. The Personal tab (Super Admin only), right after All Expenses: it reads
+//      GET /api/expenses/personal/lines with the driver box and the dates; each
+//      row shows the same short tag as the Expenses table (the full sentence on
+//      hover) and each phone card the full sentence; the total and the reversed
+//      line beside it are the server's text; no money is computed in it.
 //
 // No network, no DOM, no database.
 //   node scripts/test-personal-expense-client.mjs      # exits 1 on any failure
@@ -315,6 +320,44 @@ section('§9 the Expenses table fits its panel: the short tag, compact actions, 
   check('the cards\' styles are not phone-only (they show at any width the table gives way)',
     [phoneBlocks.length > 0, phoneBlocks.some((b) => /\.mobile-exp-(list|top|bottom|actions|btn) \{/.test(b)), /(^|\n)\.mobile-exp-list \{/.test(style)],
     [true, false, true])
+}
+
+section('§10 the Personal tab: the driver box, each line as the receipts show it, the server\'s total')
+{
+  const fn = personalReceiptLib.personalLinesQuery
+  const query = (f) => (typeof fn === 'function' ? fn(f) : null)
+  check('the request: nothing set, no query string', [query({ driver: '', from: '', to: '' }), query()], ['', ''])
+  check('…a driver, encoded as one value', query({ driver: 'Test Driver A&B=1', from: '', to: '' }), '?driver=Test+Driver+A%26B%3D1')
+  check('…the dates, the driver first', query({ driver: 'Test Driver A', from: '2026-10-01', to: '2026-10-31' }), '?driver=Test+Driver+A&from=2026-10-01&to=2026-10-31')
+
+  const tab = read('client/src/components/dashboard/ExpensesTab.vue')
+  check('ExpensesTab: a Personal sub-tab right after All Expenses, Super Admin only',
+    /\{ key: 'all', label: 'All Expenses' \},\n(?:\s*\/\/[^\n]*\n)*\s*\{ key: 'personal', label: 'Personal', adminOnly: true \},/.test(tab), true)
+  check('…its panel mounts for a Super Admin only, the first time the tab opens, and stays (the filters kept)',
+    [/<div v-if="auth\.isSuperAdmin && personalTabOpened" v-show="activeSubTab === 'personal'" class="sub-panel">\s*<PersonalLinesPanel :active="activeSubTab === 'personal'" \/>\s*<\/div>/.test(tab),
+      /if \(tab === 'personal'\) personalTabOpened\.value = true/.test(tab)],
+    [true, true])
+
+  const file = 'client/src/components/dashboard/expenses/PersonalLinesPanel.vue'
+  const exists = fs.existsSync(path.join(ROOT, file))
+  const panel = exists ? read(file) : ''
+  check('the panel exists', exists, true)
+  check('…it reads the list route with the driver box and the dates', panel.includes('api.get(`/api/expenses/personal/lines${personalLinesQuery(filter)}`)'), true)
+  check('…the driver box: All drivers, then each driver the server lists',
+    /<option value="">All drivers<\/option>\s*<option v-for="d in drivers" :key="d" :value="d">\{\{ d \}\}<\/option>/.test(panel), true)
+  check('…a table row: the short tag, with the full sentence as its hover text',
+    /:title="personalPillText\(l\.personal\)"[^>]*>\{\{ personalShortText\(l\.personal\) \}\}</.test(panel), true)
+  check('…a phone card: the full sentence', /class="pl-card-state[^"]*"[^>]*>\{\{ personalPillText\(l\.personal\) \}\}</.test(panel), true)
+  check('…the total and the reversed lines left out of it: the server\'s text',
+    [/\{\{ totals\.text \}\}/.test(panel), /\{\{ totals\.reversed_text \}\}/.test(panel)], [true, true])
+  check('…the cards show on a phone or when its panel is narrow',
+    [/v-else-if="showCards" class="pl-cards"/.test(panel), /const showCards = computed\(\(\) => isMobile\.value \|\| \(width\.value > 0 && width\.value < CARDS_BELOW\)\)/.test(panel)], [true, true])
+  check('…it re-reads on an expenses or invoices change only while its tab is open',
+    [/useSocketRefresh\('expenses:changed', refreshIfOpen\)/.test(panel), /useSocketRefresh\('invoices:changed', refreshIfOpen\)/.test(panel), /function refreshIfOpen\(\) \{\s*if \(props\.active\) load\(\{ quiet: true \}\)/.test(panel)],
+    [true, true, true])
+  const src = code(panel)
+  const arithmetic = src.match(/\b(?:cents|amount|share|total)\w*\s*[*/+-]\s*\d|\d\s*[*/]\s*\b(?:cents|amount|share|total)|\/\s*100\b|\*\s*100\b|\.reduce\(|toFixed\(|toLocaleString\(/g) || []
+  check('…no money computed or formatted in it', exists ? arithmetic : 'missing', [])
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

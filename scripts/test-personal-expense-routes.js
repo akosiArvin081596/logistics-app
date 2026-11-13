@@ -51,6 +51,20 @@
  *      records nothing; a person's approval during the mark's render gets no
  *      second audit row; a person's Undo during it is left as the person set it;
  *      a refused status write records nothing; never stamped unless in place
+ * The Personal tab's list (GET /api/expenses/personal/lines, read only):
+ *   §18 Super Admin only: Dispatcher, Driver and Investor 403, signed out 401,
+ *      and nothing is read before the gate refuses; its own read-sized limiter,
+ *      per user, after the gate
+ *   §19 with the receipt's week on: one row per Personal line (a receipt marked
+ *      again after a reversal lists both), newest receipt date first, each with
+ *      its driver, receipt date, merchant and the summary the receipts get
+ *      (personalSummaryByExpense()); the total counts every state but reversed;
+ *      voided lines are not listed; the driver box matches any spelling
+ *      (normalizeDriverName()); from/to on the line's receipt date
+ *   §20 refusals: a date that is not a real YYYY-MM-DD, a driver that is not one
+ *      string of at most 100 characters (400); more than 5,000 lines in the
+ *      dates (422), never a cut list with a wrong total
+ *   §21 the marks switched off, and the receipt's week off: the lines still list
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-routes.js    # exits 1 on failure
@@ -85,6 +99,52 @@ function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 4
 	const day = date || "2026-10-15";
 	w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description)
 		VALUES (?, ?, ?, ?, ?, ?, 'Approved', ?, ?, ?, ?, '')`).run(id, `${day}T15:00:00.000Z`, driver, type, amount, date, vendor, truck, owner, `${day} 15:00:00`);
+}
+
+// The Personal tab's list, lifted beside the world's routes. A build without it
+// answers "no route", so each of its checks fails instead of the runner.
+const LINES_HEAD = 'app.get("/api/expenses/personal/lines", requireRole("Super Admin"), personalLinesLimiter, (req, res) => {';
+const LINES_EXTRA = { routes: { personalLines: LINES_HEAD }, tag: "personal-lines" };
+async function readLines(w, query = {}, as = "admin") {
+	try {
+		return await w.call("GET", "/api/expenses/personal/lines", { as, query });
+	} catch (e) {
+		return { status: `no route (${e.message})`, body: null };
+	}
+}
+const listed = (r) => ((r.body && r.body.lines) || []).map((l) => [l.expense_id, l.personal && l.personal.state]);
+const totalsOf = (r) => (r.body && r.body.totals) || null;
+const totals = (cents, text, lines, reversedCents, reversedText, reversedLines) =>
+	({ cents, text, lines, reversed_cents: reversedCents, reversed_text: reversedText, reversed_lines: reversedLines });
+// A reversal as the reverse route leaves one (made-up): a 'reverse' row naming the
+// receipt's live charge, and the charge pointing back at it. Neither is on an invoice.
+function reverseByHand(w, expenseId) {
+	const d = w.lines("expense_id = ? AND kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NULL", expenseId)[0];
+	const id = Number(w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, reverses_id, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, created_at, created_by, created_by_id, created_role)
+		VALUES (?, 'reverse', ?, ?, ?, ?, ?, ?, ?, ?, ?, 't', 'super_admin', 1, 'Super Admin')`)
+		.run(expenseId, d.id, d.cents, d.receipt_cents, d.merchant, d.receipt_date, d.cost_period, d.in_place, d.book_date, d.week_start).lastInsertRowid);
+	w.db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ?").run(id, d.id);
+}
+// The tab's made-up lines, the receipt's week on (clock Thu 2026-10-15):
+//   A   R1 $200 and R5 $50 marked, then on A's Draft for the week of Oct 10;
+//       R50 $25 marked and reversed, then marked again for $10 (on the same Draft)
+//   B   R11 $30 waiting; R51 $80 dated Sep 28 (closed September), carried
+//   Op  R8 marked, then undone (voided)
+async function seedLines(w) {
+	addReceipt(w, { id: 50, type: "Food", amount: 25, date: "2026-10-12" });
+	addReceipt(w, { id: 51, driver: "Test Driver B", type: "Fuel", amount: 80, date: "2026-09-28", vendor: "EXAMPLE FUEL #12", truck: "T-3", owner: 0 });
+	const out = [];
+	out.push(await w.call("POST", "/api/expenses/1/personal", { body: {} }));
+	out.push(await w.call("POST", "/api/expenses/5/personal", { body: { amount: 50 } }));
+	out.push(await w.call("POST", "/api/expenses/50/personal", { body: {} }));
+	reverseByHand(w, 50);
+	out.push(await w.call("POST", "/api/expenses/11/personal", { body: {} }));
+	out.push(await w.call("POST", "/api/expenses/51/personal", { body: {} }));
+	out.push(await w.call("POST", "/api/expenses/8/personal", { body: {} }));
+	out.push(await w.call("DELETE", "/api/expenses/8/personal", { body: {} }));
+	const g = await w.generate("Test Driver A");
+	out.push(await w.call("POST", "/api/expenses/50/personal", { body: { amount: 10 } }));
+	return { statuses: out.map((r) => r.status), generated: g.status };
 }
 
 (async () => {
@@ -520,6 +580,131 @@ function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 4
 		check("a line not placed in place stamps nothing, even on an Approved receipt in an open month",
 			[out, stampOf(w, 1), statusOf(w, 1)], [{ approved: false, stamped: false }, EMPTY_STAMP, "Approved"]);
 		w.cleanup();
+	}
+
+	section("§18 the Personal tab's list: Super Admin only, refused before any read");
+	{
+		const w = world(WEEK_ON, { extra: LINES_EXTRA });
+		await w.call("POST", "/api/expenses/1/personal", { body: {} });
+		const seen = [];
+		const prepare = w.db.prepare.bind(w.db);
+		w.db.prepare = (sql) => { seen.push(sql); return prepare(sql); };
+		const got = [];
+		for (const as of ["dispatcher", "driverA", "investor", null]) {
+			const r = await readLines(w, {}, as);
+			got.push([r.status, r.body && r.body.lines !== undefined]);
+		}
+		w.db.prepare = prepare;
+		check("Dispatcher, Driver, Investor 403; signed out 401; none gets a list", got, [[403, false], [403, false], [403, false], [401, false]]);
+		check("…and nothing was read for them", seen, []);
+		const ok = await readLines(w);
+		check("Super Admin: 200 with the one line", [ok.status, listed(ok)], [200, [[1, "pending"]]]);
+		check("the route is mounted with requireRole(\"Super Admin\") first, then its own limiter", SRC.split(`\n${LINES_HEAD}\n`).length - 1, 1);
+		const at = SRC.indexOf("\nconst personalLinesLimiter = rateLimit({");
+		const decl = at < 0 ? "" : SRC.slice(at, SRC.indexOf("\n});", at));
+		check("…a read-sized express-rate-limit, per signed-in user (the IP only without a session), declared before the route",
+			[/windowMs: [\d* ]+,/.test(decl), Number((decl.match(/max: (\d+),/) || [])[1]) >= 600,
+				/keyGenerator: \(req\) => \{\s*const id = req\.session\?\.user\?\.id;\s*return id \? `u:\$\{id\}` : `ip:\$\{ipKeyGenerator\(req\.ip\)\}`;\s*\},/.test(decl),
+				at >= 0 && at < SRC.indexOf(`\n${LINES_HEAD}`)],
+			[true, true, true, true]);
+		w.cleanup();
+	}
+
+	section("§19 the Personal tab's list, the receipt's week on: each line, its state, and the total");
+	{
+		const w = world(WEEK_ON, { extra: LINES_EXTRA });
+		const seeded = await seedLines(w);
+		check("setup: the marks, the undo, the generation and the second mark of R50 all went through", seeded, { statuses: [201, 201, 201, 201, 201, 201, 200, 201], generated: 200 });
+		const all = await readLines(w);
+		check("all drivers: one row per line, newest receipt date first (R50's reversed line and its new one both listed; R8's voided line not)",
+			[all.status, listed(all)], [200, [[11, "pending"], [50, "invoiced"], [50, "reversed"], [1, "invoiced"], [5, "invoiced"], [51, "carried"]]]);
+		check("…the total counts every line but the reversed one: $30 + $10 + $200 + $50 + $80",
+			totalsOf(all), totals(37000, "$370.00", 5, 2500, "$25.00", 1));
+		check("…the driver box lists each driver with a line (Op's only line is voided)", all.body && all.body.drivers, ["Test Driver A", "Test Driver B"]);
+		const byLine = (r, expenseId, state) => ((r.body && r.body.lines) || []).find((l) => l.expense_id === expenseId && l.personal && l.personal.state === state) || {};
+		check("each row names the receipt's driver, its date and the line's merchant",
+			[[1, "invoiced"], [51, "carried"]].map(([id, s]) => { const l = byLine(all, id, s); return [l.driver, l.receipt_date, l.merchant]; }),
+			[["Test Driver A", "2026-10-12", "Pilot #123"], ["Test Driver B", "2026-09-28", "EXAMPLE FUEL #12"]]);
+		const carried = byLine(all, 51, "carried").personal || {};
+		check("the carried line says why, in the server's words",
+			[carried.amount_text, carried.wait_text], ["$80.00", "the week of Sep 26 - Oct 2, 2026 touches closed September; it goes on the next weekly invoice"]);
+		const onDraft = byLine(all, 1, "invoiced").personal || {};
+		check("a line on the Draft names its invoice and is not final", [/^\S+$/.test(String(onDraft.invoice_number || "")), onDraft.final], [true, false]);
+		const rows = Object.fromEntries(((await w.call("GET", "/api/expenses/all")).body.expenses || []).map((e) => [e.id, e]));
+		const strip = (p) => { if (!p) return null; const { can_undo, can_reverse, ...rest } = p; return rest; };
+		check("each live line carries exactly the summary its receipt shows on All Expenses (less the Undo and Reverse buttons' fields)",
+			[[1, "invoiced"], [5, "invoiced"], [50, "invoiced"], [11, "pending"], [51, "carried"]].map(([id, s]) => JSON.stringify(byLine(all, id, s).personal) === JSON.stringify(strip(rows[id] && rows[id].personal))),
+			[true, true, true, true, true]);
+		check("…and no row carries the ledger row behind it", ((all.body && all.body.lines) || []).some((l) => "row" in (l.personal || {}) || "created_by" in l), false);
+
+		const a = await readLines(w, { driver: "Test Driver A" });
+		check("Test Driver A: his four lines, $260.00 over 3 (the reversed $25.00 apart)",
+			[listed(a), totalsOf(a)], [[[50, "invoiced"], [50, "reversed"], [1, "invoiced"], [5, "invoiced"]], totals(26000, "$260.00", 3, 2500, "$25.00", 1)]);
+		const spelled = await readLines(w, { driver: "  test   DRIVER a " });
+		check("…any spelling of his name finds the same lines", [listed(spelled), totalsOf(spelled)], [listed(a), totalsOf(a)]);
+		const b = await readLines(w, { driver: "Test Driver B" });
+		check("Test Driver B: waiting and carried, $110.00 over 2, nothing reversed", [listed(b), totalsOf(b)], [[[11, "pending"], [51, "carried"]], totals(11000, "$110.00", 2, 0, "$0.00", 0)]);
+		const bOct = await readLines(w, { driver: "Test Driver B", from: "2026-10-01", to: "2026-10-31" });
+		check("…from Oct 1 to Oct 31 on the receipt date: R11 only, $30.00", [listed(bOct), totalsOf(bOct)], [[[11, "pending"]], totals(3000, "$30.00", 1, 0, "$0.00", 0)]);
+		const sep = await readLines(w, { to: "2026-09-30" });
+		check("all drivers to Sep 30: R51 only", [listed(sep), totalsOf(sep)], [[[51, "carried"]], totals(8000, "$80.00", 1, 0, "$0.00", 0)]);
+		const op = await readLines(w, { driver: "Test Owner Op" });
+		check("Test Owner Op (his one line undone): no rows, $0.00", [op.status, listed(op), totalsOf(op)], [200, [], totals(0, "$0.00", 0, 0, "$0.00", 0)]);
+		const before = JSON.stringify(w.db.prepare("SELECT * FROM expense_personal ORDER BY id").all());
+		const auditsBefore = w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n;
+		const n = w.notifications.length;
+		await readLines(w);
+		await readLines(w, { driver: "Test Driver A" });
+		check("reading writes nothing: the ledger, the audit trail and the notifications as they were",
+			[JSON.stringify(w.db.prepare("SELECT * FROM expense_personal ORDER BY id").all()) === before, w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n, w.notifications.length],
+			[true, auditsBefore, n]);
+		w.cleanup();
+	}
+
+	section("§20 the Personal tab's list: refusals");
+	{
+		const w = world(WEEK_ON, { extra: LINES_EXTRA });
+		await w.call("POST", "/api/expenses/1/personal", { body: {} });
+		const refused = [];
+		for (const query of [{ from: "2026-13-01" }, { to: "2026-02-30" }, { from: "10/01/2026" }, { from: ["2026-10-01", "2026-10-02"] }]) {
+			const r = await readLines(w, query);
+			refused.push([r.status, r.body && r.body.code]);
+		}
+		check("a date that is not a real YYYY-MM-DD: 400 INVALID_DATE", refused, [[400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"]]);
+		const drivers = [];
+		for (const driver of [["Test Driver A", "Test Driver B"], "x".repeat(101), { a: 1 }]) {
+			const r = await readLines(w, { driver });
+			drivers.push([r.status, r.body && r.body.code]);
+		}
+		check("a driver that is not one string of at most 100 characters: 400 INVALID_DRIVER", drivers, [[400, "INVALID_DRIVER"], [400, "INVALID_DRIVER"], [400, "INVALID_DRIVER"]]);
+		const fits = await readLines(w, { driver: "x".repeat(100) });
+		check("…100 characters is a driver with no lines", [fits.status, listed(fits)], [200, []]);
+		// 5,001 made-up reversed lines dated Jan 5 (reversed, so no live-line index stands in the way).
+		const ins = w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, reversed_by_id, created_at, created_by, created_by_id, created_role)
+			VALUES (5, 'deduct', 100, 30000, 'Pilot #123', '2026-01-05', '2026-01', 1, '2026-01-05', '2026-01-03', 999999, 't', 'super_admin', 1, 'Super Admin')`);
+		w.db.transaction(() => { for (let i = 0; i < 5001; i++) ins.run(); })();
+		const many = await readLines(w);
+		check("more than 5,000 lines in the dates: 422 PERSONAL_LINES_TOO_MANY, no list and no total",
+			[many.status, many.body && many.body.code, many.body && many.body.lines, many.body && many.body.totals], [422, "PERSONAL_LINES_TOO_MANY", undefined, undefined]);
+		const narrowed = await readLines(w, { from: "2026-10-01" });
+		check("…narrowed to October: 200, R1's line", [narrowed.status, listed(narrowed)], [200, [[1, "pending"]]]);
+		w.cleanup();
+	}
+
+	section("§21 the marks switched off, and the receipt's week off: the lines still list");
+	{
+		const w = world({}, { extra: LINES_EXTRA });
+		w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, created_at, created_by, created_by_id, created_role)
+			VALUES (1, 'deduct', 1500, 20000, 'Pilot #123', '2026-10-12', '2026-10', 1, '2026-10-12', '2026-10-10', 't', 'super_admin', 1, 'Super Admin')`).run();
+		const r = await readLines(w);
+		check("marks off: a line marked before still lists, with its total", [r.status, listed(r), totalsOf(r)], [200, [[1, "pending"]], totals(1500, "$15.00", 1, 0, "$0.00", 0)]);
+		w.cleanup();
+		const w2 = world(ON, { extra: LINES_EXTRA });
+		await w2.call("POST", "/api/expenses/1/personal", { body: {} });
+		const r2 = await readLines(w2);
+		const p = (r2.body && r2.body.lines && r2.body.lines[0] && r2.body.lines[0].personal) || {};
+		check("the receipt's week off: the line lists as the receipts show it (no wait_text or final)", [r2.status, p.state, "wait_text" in p, "final" in p], [200, "pending", false, false]);
+		w2.cleanup();
 	}
 
 	finish();
