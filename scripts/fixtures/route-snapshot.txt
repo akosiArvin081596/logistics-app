@@ -43,6 +43,7 @@ POST /api/admin/passenger-authorizations/:id/countersign · anon@12b84c4b0134 ·
 POST /api/admin/passenger-authorizations/:id/decline · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · anon@6bd7018a7dca · (lib mount)
 POST /api/admin/passenger-authorizations/:id/revoke · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · off@3f0f32b06a54 · limiter · anon@6bd7018a7dca · (lib mount)
 GET /api/admin/payout-rules/dry-run · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3fe37f15de46
+GET /api/admin/payroll-check · requireRole("Super Admin")=anon@12b84c4b0134 · payrollCheckLimiter=limiter · inline@ab9781f5c6b5
 GET /api/admin/period-lock-issues · requireRole("Super Admin")=anon@12b84c4b0134 · periodIssueLimiter=limiter · inline@e15fafdb40fb
 POST /api/admin/ratecon-index · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · rateconIndexLimiter=limiter · inline@b8e2ac71b634
 GET /api/admin/ratecon-reconcile · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · rateconReconcileLimiter=limiter · inline@5bbd5008e653
