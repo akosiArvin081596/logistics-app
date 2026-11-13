@@ -30,6 +30,12 @@
  *   §10 the script: --help, its refusals (exit 2), the route's answer with the
  *       switch off, its database file unchanged byte for byte
  *   §11 parameterized SQL only; the switch reads exactly "true"
+ *   §12 a load Assigned in a closed month, worked into the open month: its open
+ *       days are listed, naming the closed month; its closed-month day is not
+ *   §13 a hand-made invoice that only may pay a day (an undated line; a small
+ *       dated line): the day is listed as may be paid, naming the invoice
+ *   §14 a day an invoice pays in a closed month that the books no longer pay is
+ *       not listed
  *
  * Every driver, load, truck, receipt and amount is made up.
  * Run: node scripts/test-payroll-check.js    # exits 1 on failure
@@ -74,12 +80,15 @@ const MO = "Mo Reyes";
 const NED = "Ned Ruiz";
 const PAT = "Pat Voss"; // $262.37 a day
 const ORA = "Ora Lind";
+const SAL = "Sal Brook";
+const TEA = "Tea Rowe";
+const UNA = "Una Pike";
 const GIL = "Gil Varn"; // a receipt's driver no Drivers Database row names
 
 const ENV = { PAYROLL_CHECK_ENABLED: "true", PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true", PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
 const WEEK_END = "2026-10-16";
 
-const DRIVERS = [ADA, BRAM, CYD, DAX, ELI, FAY, HAL, IVO, JO, KIT, LU, MO, NED, ORA].map((name) => ({ name }))
+const DRIVERS = [ADA, BRAM, CYD, DAX, ELI, FAY, HAL, IVO, JO, KIT, LU, MO, NED, ORA, SAL, TEA, UNA].map((name) => ({ name }))
 	.concat([{ name: GUS, payType: "percentage", payPct: 30 }, { name: PAT, payDaily: 262.37 }]);
 const TRUCKS = DRIVERS.map((d, i) => ({ unit: `T${i + 1}`, driver: d.name, owner: 5, vid: null }));
 // Ivo's truck (investor 5's) reports to the ELD; Jo drives the company's own
@@ -134,6 +143,14 @@ function rows() {
 		L({ id: "PC1801", driver: PAT, pickup: "2026-10-13 8:00", dropoff: "2026-10-14 12:00", assigned: "2026-10-13", done: "2026-10-14" }),
 		// Ora: 10/13 removed when the invoice was made, the "remove" taken back after; the truck reports to no ELD.
 		L({ id: "PC1901", driver: ORA, pickup: "2026-10-12 8:00", dropoff: "2026-10-13 12:00", assigned: "2026-10-12", done: "2026-10-13" }),
+		// Sal: PC2001 Assigned in closed September, worked into October, delivered after the 10/3-10/9 invoice.
+		L({ id: "PC2000", driver: SAL, pickup: "2026-10-07 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-07", done: "2026-10-07" }),
+		L({ id: "PC2001", driver: SAL, pickup: "2026-09-30 8:00", dropoff: "2026-10-05 12:00", assigned: "2026-09-29", ...transit }),
+		// Tea and Una: cross-week, with a hand-made invoice that only may pay a day (undated; a small dated line).
+		L({ id: "PC2100", driver: TEA, pickup: "2026-10-05 8:00", dropoff: "2026-10-05 18:00", assigned: "2026-10-05", done: "2026-10-05" }),
+		L({ id: "PC2101", driver: TEA, pickup: "2026-10-08 8:00", dropoff: "2026-10-12 12:00", assigned: "2026-10-08", ...transit }),
+		L({ id: "PC2200", driver: UNA, pickup: "2026-10-05 8:00", dropoff: "2026-10-05 18:00", assigned: "2026-10-05", done: "2026-10-05" }),
+		L({ id: "PC2201", driver: UNA, pickup: "2026-10-08 8:00", dropoff: "2026-10-12 12:00", assigned: "2026-10-08", ...transit }),
 	];
 }
 
@@ -153,6 +170,13 @@ function addManualInvoice(db, { number, driver, weekStart, weekEnd, status = "Dr
 	return Number(db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name,
 		load_ids, expense_ids, render_data, is_manual, created_by, correction_of, deleted_at, deleted_by) VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?, '[]', '[]', ?, 1, 'made-up-admin', ?, ?, ?)`)
 		.run(number, driver.toLowerCase(), weekStart, weekEnd, days.length, 260 * days.length, status, `${number}.pdf`, JSON.stringify(render), correctionOf, deletedAt, deletedAt ? "made-up-admin" : "").lastInsertRowid);
+}
+// A hand-made invoice for the week of 10/3 (no paidDays, no correction): its lines only may pay a day.
+function addHandMadeInvoice(db, { number, driver, lineItems }) {
+	const total = lineItems.reduce((c, l) => c + l.amount, 0);
+	db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name,
+		load_ids, expense_ids, render_data, is_manual, created_by) VALUES (?, ?, '2026-10-03', '2026-10-09', 1, 0, ?, 0, 'Submitted', ?, '[]', '[]', ?, 1, 'made-up-admin')`)
+		.run(number, driver.toLowerCase(), total, `${number}.pdf`, JSON.stringify({ __templateName: "service_invoice_manual", lineItems, totalDue: total }));
 }
 
 // The fleet through two Friday batches, then what happened after them.
@@ -174,10 +198,14 @@ async function buildFleet(env = ENV) {
 	// The batch of Friday 10/2.
 	await gen(MO, "2026-10-02");
 	w.setRow("PC1501", delivered("2026-10-05"));
+	// 9/28 taken off the books after Mo's invoice paid it: a reverse day in what becomes closed September.
+	w.addOverrides([{ driver: MO, day: "2026-09-28", action: "remove" }]);
 	// The batch of Friday 10/9.
 	w.clock.ms = etMs("2026-10-09 20:00");
-	for (const d of [ADA, CYD, ELI, GUS, HAL, JO, KIT, LU, MO]) await gen(d, "2026-10-09");
-	for (const id of ["PC101", "PC1301", "PC1401", "PC1701"]) w.setRow(id, delivered("2026-10-12"));
+	for (const d of [ADA, CYD, ELI, GUS, HAL, JO, KIT, LU, MO, SAL, TEA, UNA]) await gen(d, "2026-10-09");
+	for (const id of ["PC101", "PC1301", "PC1401", "PC1701", "PC2001", "PC2101", "PC2201"]) w.setRow(id, delivered("2026-10-12"));
+	addHandMadeInvoice(w.db, { number: "INV-M-TR-2026W41-01", driver: TEA, lineItems: [{ description: "Made-up lumper reimbursement", amount: 40 }] });
+	addHandMadeInvoice(w.db, { number: "INV-M-UP-2026W41-01", driver: UNA, lineItems: [{ date: "2026-10-08", description: "Made-up toll", amount: 25 }] });
 	w.setRow("PC902", delivered("2026-10-09"));
 	w.addOverrides([{ driver: CYD, day: "2026-10-07", action: "add" }]);
 	w.db.prepare("UPDATE invoices SET adjustment = 300, adjustment_note = 'made-up bonus' WHERE id = ?").run(inv[`${KIT} 2026-10-09`].id);
@@ -190,7 +218,7 @@ async function buildFleet(env = ENV) {
 	w.addOverrides([{ driver: ORA, day: "2026-10-13", action: "remove" }]);
 	// The batch of Friday 10/16.
 	w.clock.ms = etMs("2026-10-16 20:00");
-	for (const d of [ADA, BRAM, FAY, HAL, IVO, KIT, LU, ORA]) await gen(d, "2026-10-16");
+	for (const d of [ADA, BRAM, FAY, HAL, IVO, KIT, LU, ORA, TEA, UNA]) await gen(d, "2026-10-16");
 	w.setRow("PC202", delivered("2026-10-16"));
 	w.addOverrides([{ driver: FAY, day: "2026-10-13", action: "remove" }]);
 	w.db.prepare("DELETE FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?").run(ORA.toLowerCase(), "2026-10-13");
@@ -346,6 +374,9 @@ const R = W.createRunner("The before-payroll check (route and script)");
 			[NED, "2026-10-06", "noWeeklyInvoice"], [NED, "2026-10-07", "noWeeklyInvoice"],
 			[ORA, "2026-10-13", "unexplained"],
 			[PAT, "2026-10-13", "noWeeklyInvoice"], [PAT, "2026-10-14", "noWeeklyInvoice"],
+			...["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"].map((d) => [SAL, d, "settlesInClosedMonth"]),
+			[TEA, "2026-10-08", "mayBePaid"], [TEA, "2026-10-09", "mayBePaid"],
+			[UNA, "2026-10-08", "mayBePaid"], [UNA, "2026-10-09", "completedAfterInvoice"],
 		];
 		eq("every listed day and its reason", triples(body.ledgerDays), triples(want.map(([driver, day, reason]) => ({ driver, day, reason }))));
 		const day = (d, k) => (body.ledgerDays || []).find((x) => x.driver === d && x.day === k) || {};
@@ -360,7 +391,8 @@ const R = W.createRunner("The before-payroll check (route and script)");
 		eq("Gus is paid by percentage: no day of his is listed", forDriver(body.ledgerDays, GUS), []);
 		eq("the scope of each day: Jo's 10/6 is investor 5's", (day(JO, "2026-10-06").scopes || []).map((s) => s.ownerId), [5]);
 		eq("summary by reason", body.summary && body.summary.ledgerDays && body.summary.ledgerDays.byReason, {
-			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 7, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 2, noWeeklyInvoice: 5, unexplained: 1,
+			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 8, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 5,
+			noWeeklyInvoice: 5, settlesInClosedMonth: 5, unexplained: 1,
 		});
 	});
 
@@ -411,7 +443,7 @@ const R = W.createRunner("The before-payroll check (route and script)");
 			s.ledgerDays && s.ledgerDays.cents, s.invoiceDays && s.invoiceDays.cents, s.personalLines && s.personalLines.cents,
 			s.pendingReceipts && s.pendingReceipts.cents, s.correctionDrafts && s.correctionDrafts.cents, s.percentageLoads && s.percentageLoads.paymentCents,
 		], [sumOf(body.ledgerDays), sumOf(body.invoiceDays), sumOf(body.personalLines), sumOf(body.pendingReceipts), sumOf(body.correctionDrafts), sumOf(body.percentageLoads, "paymentCents")]);
-		eq("the ledger days come to 20 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [22, 572474]);
+		eq("the ledger days come to 29 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [31, 806474]);
 		eq("Pat's days", forDriver(body.ledgerDays, PAT).map((x) => x.cents), [26237, 26237]);
 		const ned = forDriver(body.ledgerDays, NED);
 		eq("Ned's 10/6 once, with both scopes; 10/7 the company's", ned.map((x) => [x.day, x.overlap, (x.scopes || []).map((sc) => sc.ownerId).sort(), x.cents]),
@@ -443,7 +475,7 @@ const R = W.createRunner("The before-payroll check (route and script)");
 			const before = JSON.stringify(jt);
 			freeze(jt);
 			const out = await lw.api.payrollCheck({ weekEnd: WEEK_END, names: true });
-			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 22]);
+			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 31]);
 		} finally {
 			lw.db.close();
 		}
@@ -474,7 +506,7 @@ const R = W.createRunner("The before-payroll check (route and script)");
 		eq("the database file unchanged", W.fileHash(copy.db), fileBefore);
 		const labelled = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`, "--json"]);
 		const names = (labelled.json && labelled.json.ledgerDays || []).map((x) => x.driver);
-		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 22 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
+		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 31 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
 		const text = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`]);
 		ok("the text report names each section and says nothing was written", text.code === 0 && /Nothing was written/.test(text.stdout) && /Ledger-paid days on no invoice/.test(text.stdout), text.stdout.slice(0, 300));
 	});
@@ -489,6 +521,29 @@ const R = W.createRunner("The before-payroll check (route and script)");
 		eq("no value is written into SQL text", interpolated, []);
 		ok("PAYROLL_CHECK_ENABLED is read once, exactly \"true\"", LINES.filter((l) => /^const PAYROLL_CHECK_ENABLED = /.test(l)).length === 1
 			&& LINES.includes('const PAYROLL_CHECK_ENABLED = process.env.PAYROLL_CHECK_ENABLED === "true";'), "the switch's line");
+	});
+
+	await R.test("§12 A load Assigned in closed September, worked into October and completed after the week's invoice: its October days are listed, each naming September; its September day is not", async ({ eq, ok }) => {
+		const { body } = await fleetAndBody();
+		const sal = forDriver(body.ledgerDays, SAL);
+		eq("10/1 to 10/5, the load's October days", sal.map((x) => [x.day, x.reason, x.loadId]),
+			["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"].map((d) => [d, "settlesInClosedMonth", "PC2001"]));
+		ok("…each naming the closed month it settles in and that a person decides", sal.length === 5 && sal.every((x) => /September 2026/.test(x.text) && /a person decides/.test(x.text)), JSON.stringify(sal.map((x) => x.text)));
+		eq("…priced as the books price them, in September", sal.map((x) => [x.cents, x.payMonth]), sal.map(() => [26000, "2026-09"]));
+	});
+
+	await R.test("§13 A hand-made invoice that only may pay a day (an undated line; a line dated the day for less than a day's pay): each day listed as may be paid, naming the invoice", async ({ eq }) => {
+		const { body } = await fleetAndBody();
+		eq("an undated $40 line: 10/8 and 10/9 may be paid by it", forDriver(body.ledgerDays, TEA).map((x) => [x.day, x.reason, x.text.includes("INV-M-TR-2026W41-01")]),
+			[["2026-10-08", "mayBePaid", true], ["2026-10-09", "mayBePaid", true]]);
+		eq("a $25 line dated 10/8: 10/8 may be paid by it; 10/9 completed after the invoice", forDriver(body.ledgerDays, UNA).map((x) => [x.day, x.reason, x.text.includes("INV-M-UP-2026W41-01")]),
+			[["2026-10-08", "mayBePaid", true], ["2026-10-09", "completedAfterInvoice", false]]);
+		eq("a $260 line dated Dax's 10/7 still holds it", forDriver(body.ledgerDays, DAX).map((x) => x.day), ["2026-10-06"]);
+	});
+
+	await R.test("§14 A day invoiced in the closed part of the first open week that the books no longer pay (Mo's 9/28, removed after its invoice) is not listed: September is closed", async ({ eq }) => {
+		const { body } = await fleetAndBody();
+		eq("nothing of Mo's", forDriver(body.invoiceDays, MO).map((x) => [x.day, x.reason]), []);
 	});
 
 	R.finish();
