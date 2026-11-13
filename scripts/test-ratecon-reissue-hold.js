@@ -37,6 +37,22 @@
  *      included) still gets every value as sent, with nothing held and no alert; RATECON_REISSUE_HOLD_ENABLED=false turns the hold off;
  *      a found load's answer names its stored Load ID cell (storedLoadId); the route never
  *      writes the sheet.
+ *   §1x DVIR lines never lower Payment (RATECON_DVIR_KEEP_ENABLED, lib/ratecon-dvir-keep.js), on
+ *      made-up C.H. Robinson loads (chrobinson.com, 9-digit Load IDs) whose rate con the extract
+ *      route read (noteRateConDvir()). On: an open load's email $35 lower by one readable DVIR line
+ *      keeps Payment as stored, with one ratecon_payment_kept_dvir audit row, a "kept" decision row
+ *      and no alert; with no reading, an expired one or an unreadable PDF, one or two lines' worth is
+ *      kept and alerted (source "dvir", decision "held"); a reading that disagrees with the drop, DVIR
+ *      lines plus another amount, or readable text with no DVIR line is held too; a $40 drop, $105
+ *      unread, a rise, another broker and an 8-digit Load ID follow today's rule with no row; a
+ *      delivered load keeps today's hold, with no alert when Payment was its only change and the
+ *      alert when a date changed too; a closed month keeps every column and records nothing; with
+ *      the re-issue hold off nothing is kept or recorded. F1: a revised CHR rate con carrying an
+ *      advance and a DVIR line leaves Payment at the stored figure (never the revised Total, never
+ *      the New Total). The decision table holds cents and codes only. Off: every answer and alert
+ *      is the base's own (scripts/fixtures/ratecon-dvir-keep-flag-off.json, captured on the base
+ *      with --capture=<file>), and each decision is recorded as would_keep or would_hold;
+ *      scripts/ratecon-dvir-keep-report.js counts them read-only, with no load number.
  *   §2 alertRateConReissueHold(): once per load, column and sent value (a dedupe ledger like
  *      ratecon_extract_alerts); a new sent value alerts again; alerted_at is stamped only on a
  *      confirmed delivery (the email or the in-app notification), so a failed send retries; two
@@ -86,15 +102,18 @@
  *      (Completion Date and Status Update Date included).
  *
  * SERVER_JS=<file> runs against another copy of server.js (a mutant, to show a case fails).
+ * --capture=<file> (with SERVER_JS naming the base) writes §1x's switch-off answers there.
  * Pure: no server, no network. Run: node scripts/test-ratecon-reissue-hold.js  # exits 1 on failure
  */
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const util = require("util");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { textPdf } = require("./lib/made-up-pdf");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
@@ -186,11 +205,12 @@ const NO_STATUS_HEADERS = ["Load ID", "Details", "Pickup Appointment", "Drop-off
 const NO_STATUS_SHEET = [NO_STATUS_HEADERS, ["900000132", "Tiles", "10/12/2026 08:00", "10/13/2026 0:00", "10/11/2026, 9:00:00 AM", " $ 2,000.00 "]];
 
 // The route, lifted, on `db` (a function: the database it reads at call time), with `env`,
-// reading `sheet` as Job Tracking.
-function liftRoute({ db, env = {}, sheet = SHEET }) {
+// reading `sheet` as Job Tracking; `roots` are lifted with it and returned.
+function liftRoute({ db, env = {}, sheet = SHEET, roots = [] }) {
 	const alerts = [];
 	const lifted = closure(SRC, {
 		routes: [KHEAD],
+		roots,
 		provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"],
 		denied: ["sendEmail", "transporter", "io", "server"],
 	});
@@ -203,7 +223,7 @@ function liftRoute({ db, env = {}, sheet = SHEET }) {
 	}, batchUpdate: async () => { calls.push(["batchUpdate"]); } } };
 	const logs = [];
 	const quiet = { ...console, log: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")) };
-	new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", `"use strict";\n${lifted.text}`)(
+	const fns = new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", `"use strict";\n${lifted.text}\nreturn { ${roots.join(", ")} };`)(
 		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET, ...PERSON_HOLD_ENV, ...env } }, app, rootRequire,
 		new Proxy({}, { get: (_t, k) => { const d = db(); return typeof d[k] === "function" ? d[k].bind(d) : d[k]; } }),
 		(a) => { alerts.push(a); return Promise.resolve({ alerted: true }); },
@@ -215,7 +235,7 @@ function liftRoute({ db, env = {}, sheet = SHEET }) {
 		await new Promise((r) => setImmediate(r));
 		return out;
 	};
-	return { post, alerts, calls, logs };
+	return { post, alerts, calls, logs, ...fns };
 }
 const heldCols = (b) => ((b && b.held) || []).map((h) => h.column).sort();
 const valuesOf = (r) => (r.body && r.body.values) || {};
@@ -456,8 +476,271 @@ async function section1() {
 		&& ns.logs.some((l) => /no Job Status column/.test(l)), { reason: reasonOf(nr), alerts: ns.alerts.length, logs: ns.logs });
 }
 
+// --- §1x DVIR lines never lower Payment ----------------------------------------
+// Made-up C.H. Robinson-shaped loads (chrobinson.com, 9-digit Load IDs) and one other
+// broker's: Payment $2,150.00; the revised rate con has one DVIR line (-$35.00, Total
+// $2,115.00) and an advance of $500.00 (New Total $1,615.00).
+const DVIR_KEEP_ON = { RATECON_DVIR_KEEP_ENABLED: "true" };
+const AUDIT_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS audit_trail \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
+const DVIR_FIXTURE = path.join(__dirname, "fixtures", "ratecon-dvir-keep-flag-off.json");
+const CHR_EMAIL = "made-up.agent@chrobinson.com";
+const OTHER_EMAIL = "ap@example-broker.test";
+const DVIR_HEADERS = ["Contract ID", "Load ID", "Details", "Pickup Appointment", "Drop-off Appointment", "Job Status", "  Payment  ", "Accessorial Amount", "Email", "Assigned Date"];
+const dvirRow = (o) => DVIR_HEADERS.map((h) => (o[h] === undefined ? "" : o[h]));
+const chrLoad = (id, extra = {}) => dvirRow({ "Load ID": id, Details: "Test freight, 20,000 lbs", "Pickup Appointment": "11/10/2026 08:00", "Drop-off Appointment": "11/11/2026 0:00",
+	"Job Status": "In Transit", "  Payment  ": "$2,150.00", Email: CHR_EMAIL, "Assigned Date": "11/9/2026, 9:00:00 AM", ...extra });
+const SEPTEMBER = { "Pickup Appointment": "9/28/2026 08:00", "Drop-off Appointment": "9/29/2026 0:00", "Assigned Date": "9/27/2026, 9:00:00 AM" };
+const DVIR_SHEET = [DVIR_HEADERS,
+	...["123456789", "123456790", "123456791", "123456792", "123456793", "123456797", "123456798", "123456799", "123456780", "123456781", "123456782", "123456783"].map((id) => chrLoad(id)),
+	chrLoad("LD-TEST-0001", { Email: OTHER_EMAIL }), chrLoad("12345678"),
+	chrLoad("123456794", { "Job Status": "Delivered" }), chrLoad("123456795", { "Job Status": "Delivered" }), chrLoad("123456796", SEPTEMBER),
+];
+// What n8n sends for a rate-con email of one of those loads (the Assigned Date re-stamped).
+const chrEmail = (id, payment, extra = {}) => ({ "Load ID": id, Details: "Test freight, 20,000 lbs", "Pickup Appointment": "11/10/2026 08:00", "Drop-off Appointment": "11/11/2026 0:00",
+	Email: CHR_EMAIL, "Assigned Date": "11/12/2026, 7:00:00 AM", "  Payment  ": payment, ...extra });
+const RC_INTRO = "Carrier Rate Confirmation for a test load. Pickup at Test Shipper, delivery appointment at Test Consignee. Equipment: van; trailer as booked; weight 20,000 lbs.";
+const rcPdf = (body, mode = "literal") => textPdf(`${RC_INTRO} ${body}`, { mode }).toString("base64");
+const DVIR_LINE = "Missing Pre-Trip DVIR Inspection 1.00 -$35.00 -$35.00";
+const PDF_DVIR = rcPdf(`Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00`);
+const PDF_DVIR_ADVANCE = rcPdf(`Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00 Advanced Total: $500.00 New Total: $1,615.00`);
+const PDF_TWO_LINES = rcPdf(`Line Haul 1.00 $2,150.00 $2,150.00 Missing Post-Trip DVIR Inspection 1.00 -$35.00 -$35.00 ${DVIR_LINE} Total: $2,080.00`);
+const PDF_NO_DVIR = rcPdf("Line Haul 1.00 $2,115.00 $2,115.00 Total: $2,115.00");
+// Glyph codes only: the built-in reader finds no text.
+const PDF_GLYPHS = rcPdf(`Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00`, "skia");
+const pay = (r) => valuesOf(r)["  Payment  "];
+const heldPayment = (stored, sent) => JSON.stringify([{ column: "  Payment  ", stored, sent }]);
+const decisionsOf = (db, key) => {
+	try {
+		return db.prepare(`SELECT load_key, stored_cents, sent_cents, dvir_cents, dvir_count, reading, verdict, reason, switch_on, protected_load
+			FROM ratecon_dvir_decisions WHERE load_key = ? ORDER BY id`).all(key);
+	} catch { return []; }
+};
+const auditsOf = (db, id) => {
+	try { return db.prepare("SELECT username, role, action, entity, entity_id, details FROM audit_trail WHERE entity_id = ? ORDER BY id").all(id); } catch { return []; }
+};
+const decision = (stored, sent, dvirCents, dvirCount, reading, verdict, reason, on, protectedLoad, key) => ({
+	load_key: key, stored_cents: stored, sent_cents: sent, dvir_cents: dvirCents, dvir_count: dvirCount, reading, verdict, reason, switch_on: on ? 1 : 0, protected_load: protectedLoad ? 1 : 0,
+});
+
+// The route on its own database (audit_trail too), September closed, with noteRateConDvir().
+function dvirWorld({ env = DVIR_KEEP_ON } = {}) {
+	const db = draftsDb();
+	db.exec(AUDIT_DDL[1]);
+	lockMonth(db, "2026-09");
+	return { db, ...liftRoute({ db: () => db, env, sheet: DVIR_SHEET, roots: ["noteRateConDvir"] }) };
+}
+
+// The switch-off cases whose answers and alerts must be the base's own.
+const FLAG_OFF_CASES = [
+	["open, one readable DVIR line, $35 lower", "123456789", "$2,115.00", PDF_DVIR],
+	["open, no reading, $35 lower", "123456790", "$2,115.00", null],
+	["open, no reading, $40 lower", "123456791", "$2,110.00", null],
+	["open, no reading, $105 lower", "123456792", "$2,045.00", null],
+	["open, a rise", "123456793", "$2,200.00", null],
+	["another broker, one readable DVIR line", "LD-TEST-0001", "$2,115.00", PDF_DVIR, { Email: OTHER_EMAIL }],
+	["delivered, one readable DVIR line, nothing else changed", "123456794", "$2,115.00", PDF_DVIR],
+	["delivered, one readable DVIR line, a date changed", "123456795", "$2,115.00", PDF_DVIR, { "Pickup Appointment": "11/10/2026 10:00" }],
+	["closed month, one readable DVIR line", "123456796", "$2,115.00", PDF_DVIR, SEPTEMBER],
+	["revised rate con with an advance, the email's Total", "123456781", "$2,115.00", PDF_DVIR_ADVANCE],
+	["revised rate con with an advance, the email's New Total", "123456781", "$1,615.00", PDF_DVIR_ADVANCE],
+	["open, two DVIR lines read, $35 lower", "123456797", "$2,115.00", PDF_TWO_LINES],
+];
+async function dvirFlagOffAnswers() {
+	const world = dvirWorld({ env: {} });
+	const answers = [];
+	for (const [what, id, sent, pdf, extra] of FLAG_OFF_CASES) {
+		if (pdf) world.noteRateConDvir(id, pdf);
+		world.alerts.length = 0;
+		const r = await world.post({ loadId: id, values: chrEmail(id, sent, extra) });
+		answers.push([what, { status: r.status, body: r.body, alerts: world.alerts.slice() }]);
+	}
+	return { answers, world };
+}
+
+async function section1x() {
+	if (!AUDIT_DDL) { check("§1x audit_trail's CREATE TABLE is in server.js", false); return; }
+	const { db, post, alerts, calls, noteRateConDvir: note } = dvirWorld();
+
+	// The case this fixes: an open load's email, $35 lower by one DVIR line the rate con shows.
+	note("123456789", PDF_DVIR);
+	const k = await post({ loadId: "123456789", values: chrEmail("123456789", "$2,115.00") });
+	check("§1x open CHR load, email $35 lower by one readable DVIR line: Payment comes back as stored, \"$2,150.00\"", pay(k) === "$2,150.00", valuesOf(k));
+	check("§1x ...every other column as today (Details as sent, the stored Assigned Date kept)", valuesOf(k).Details === "Test freight, 20,000 lbs" && valuesOf(k)["Assigned Date"] === "11/9/2026, 9:00:00 AM", valuesOf(k));
+	check("§1x ...held lists Payment with both figures, kept names it, and the reason says DVIR lines",
+		JSON.stringify(k.body.held) === heldPayment("$2,150.00", "$2,115.00") && k.body.kept.includes("  Payment  ") && /lower only by its DVIR lines/.test(reasonOf(k)), k.body);
+	check("§1x ...no alert", alerts.length === 0, alerts);
+	eqCheck("§1x ...one decision row, \"kept\", in cents and codes", decisionsOf(db, "123456789"), [decision(215000, 211500, 3500, 1, "readable", "kept", "dvir_lines", true, false, "123456789")]);
+	const audit = auditsOf(db, "123456789");
+	check("§1x ...one system audit row, ratecon_payment_kept_dvir, naming the two figures, the DVIR cents and the count",
+		audit.length === 1 && audit[0].action === "ratecon_payment_kept_dvir" && audit[0].role === "system" && audit[0].username === "ratecon-dvir-keep"
+		&& audit[0].entity === "job_tracking" && /\$2,150\.00/.test(audit[0].details) && /\$2,115\.00/.test(audit[0].details) && /\(3500 cents, 1 line\)/.test(audit[0].details), audit);
+
+	// No reading: a drop of one or two DVIR lines' worth is kept, and a person looks.
+	for (const [what, id, sent, cents] of [["no reading, $35 lower", "123456790", "$2,115.00", 211500], ["no reading, $70 lower", "123456783", "$2,080.00", 208000]]) {
+		alerts.length = 0;
+		const r = await post({ loadId: id, values: chrEmail(id, sent) });
+		check(`§1x ${what}: Payment comes back as stored`, pay(r) === "$2,150.00", valuesOf(r));
+		check(`§1x ${what}: one alert, source "dvir", holding Payment with both figures, saying the text can't confirm it`,
+			alerts.length === 1 && alerts[0].source === "dvir" && alerts[0].dvir === "held" && JSON.stringify(alerts[0].held) === heldPayment("$2,150.00", sent)
+			&& /can't be read to confirm it/.test(String(alerts[0].reason)), alerts);
+		eqCheck(`§1x ${what}: one decision row, "held"`, decisionsOf(db, id), [decision(215000, cents, 0, 0, "none", "held", "unread", true, false, id)]);
+		check(`§1x ${what}: no audit row`, auditsOf(db, id).length === 0, auditsOf(db, id));
+	}
+
+	// Held too: a reading that disagrees with the drop, DVIR lines plus another amount, readable
+	// text with no DVIR line, a reading older than 10 minutes, an unreadable rate con.
+	const heldCases = [
+		["a reading of $70 (two lines) against a $35 drop", "123456797", PDF_TWO_LINES, {}, [7000, 2, "readable", "disagrees"]],
+		["one readable DVIR line and another amount changed", "123456782", PDF_DVIR, { "Accessorial Amount": "$75.00" }, [3500, 1, "readable", "other_money"]],
+		["readable text with no DVIR line, $35 lower", "123456798", PDF_NO_DVIR, {}, [0, 0, "readable", "no_dvir_line"]],
+		["a reading older than 10 minutes, $35 lower", "123456799", PDF_DVIR, {}, [0, 0, "none", "unread"], Date.now() - 11 * 60 * 1000],
+		["an unreadable rate con, $35 lower", "123456780", PDF_GLYPHS, {}, [0, 0, "unreadable", "unread"]],
+	];
+	for (const [what, id, pdf, extra, [cents, count, reading, reason], at] of heldCases) {
+		note(id, pdf, at === undefined ? Date.now() : at);
+		alerts.length = 0;
+		const r = await post({ loadId: id, values: chrEmail(id, "$2,115.00", extra) });
+		check(`§1x ${what}: Payment comes back as stored, and one "dvir" alert holds it`,
+			pay(r) === "$2,150.00" && alerts.length === 1 && alerts[0].source === "dvir" && JSON.stringify(alerts[0].held) === heldPayment("$2,150.00", "$2,115.00"), { values: valuesOf(r), alerts });
+		eqCheck(`§1x ${what}: one decision row, "held" (${reason})`, decisionsOf(db, id), [decision(215000, 211500, cents, count, reading, "held", reason, true, false, id)]);
+	}
+
+	// The rule's own bounds: today's rule, nothing held, no alert, no row.
+	note("LD-TEST-0001", PDF_DVIR);
+	note("12345678", PDF_DVIR);
+	for (const [what, id, sent, extra] of [
+		["no reading, $40 lower", "123456791", "$2,110.00", {}],
+		["no reading, $105 lower (three lines' worth, unread)", "123456792", "$2,045.00", {}],
+		["a rise", "123456793", "$2,200.00", {}],
+		["another broker's load, one readable DVIR line", "LD-TEST-0001", "$2,115.00", { Email: OTHER_EMAIL }],
+		["an 8-digit Load ID on chrobinson.com, one readable DVIR line", "12345678", "$2,115.00", {}],
+	]) {
+		alerts.length = 0;
+		const r = await post({ loadId: id, values: chrEmail(id, sent, extra) });
+		check(`§1x ${what}: Payment written as sent, nothing held, no alert, no decision row`,
+			pay(r) === sent && heldCols(r.body).length === 0 && alerts.length === 0 && decisionsOf(db, id.toLowerCase()).length === 0, { values: valuesOf(r), alerts, rows: decisionsOf(db, id.toLowerCase()) });
+	}
+
+	// F1: the revised rate con carries an advance and a DVIR line, read as its Total or as its New Total.
+	note("123456781", PDF_DVIR_ADVANCE);
+	alerts.length = 0;
+	const f1Total = await post({ loadId: "123456781", values: chrEmail("123456781", "$2,115.00") });
+	const f1New = await post({ loadId: "123456781", values: chrEmail("123456781", "$1,615.00") });
+	const f1 = [pay(f1Total), pay(f1New)];
+	check("§1x F1 a revised CHR rate con carrying an advance and a DVIR line leaves Payment at the stored figure",
+		f1.every((p) => p === "$2,150.00") && !f1.includes("$2,115.00") && !f1.includes("$1,615.00"), f1);
+	eqCheck("§1x F1 ...the Total is kept (its DVIR line), the New Total held for a person (the line is $35, the drop $535)", decisionsOf(db, "123456781"), [
+		decision(215000, 211500, 3500, 1, "readable", "kept", "dvir_lines", true, false, "123456781"),
+		decision(215000, 161500, 3500, 1, "readable", "held", "disagrees", true, false, "123456781"),
+	]);
+	check("§1x F1 ...only the New Total alerts", alerts.length === 1 && JSON.stringify(alerts[0].held) === heldPayment("$2,150.00", "$1,615.00"), alerts);
+
+	// A protected load keeps today's hold; a certain DVIR-only change there raises no alert.
+	note("123456794", PDF_DVIR);
+	alerts.length = 0;
+	const dl = await post({ loadId: "123456794", values: chrEmail("123456794", "$2,115.00") });
+	check("§1x delivered, one readable DVIR line, nothing else changed: Payment as stored, held as today, no alert",
+		pay(dl) === "$2,150.00" && JSON.stringify(dl.body.held) === heldPayment("$2,150.00", "$2,115.00") && /delivered/.test(reasonOf(dl)) && alerts.length === 0, { body: dl.body, alerts });
+	eqCheck("§1x ...its decision row is \"kept\", on a protected load", decisionsOf(db, "123456794"), [decision(215000, 211500, 3500, 1, "readable", "kept", "dvir_lines", true, true, "123456794")]);
+	check("§1x ...and its audit row", auditsOf(db, "123456794").length === 1, auditsOf(db, "123456794"));
+	note("123456795", PDF_DVIR);
+	alerts.length = 0;
+	const dd = await post({ loadId: "123456795", values: chrEmail("123456795", "$2,115.00", { "Pickup Appointment": "11/10/2026 10:00" }) });
+	check("§1x delivered, one readable DVIR line and a date changed: the date held too, and the alert goes, told the DVIR verdict",
+		pay(dd) === "$2,150.00" && valuesOf(dd)["Pickup Appointment"] === "11/10/2026 08:00" && alerts.length === 1 && alerts[0].dvir === "kept"
+		&& JSON.stringify(heldCols({ held: alerts[0].held })) === JSON.stringify(["  Payment  ", "Pickup Appointment"]) && alerts[0].source === undefined, alerts);
+	note("123456796", PDF_DVIR);
+	alerts.length = 0;
+	const cm = await post({ loadId: "123456796", values: chrEmail("123456796", "$2,115.00", SEPTEMBER) });
+	check("§1x closed month: every column comes back as stored and today's alert goes, with no DVIR verdict",
+		pay(cm) === "$2,150.00" && /in a closed month \(2026-09\)/.test(reasonOf(cm)) && alerts.length === 1 && alerts[0].dvir === undefined, { body: cm.body, alerts });
+	check("§1x closed month: no decision row and no audit row", decisionsOf(db, "123456796").length === 0 && auditsOf(db, "123456796").length === 0, decisionsOf(db, "123456796"));
+	check("§1x the route never writes the sheet", calls.every(([c]) => c === "get"), calls);
+
+	// The record: cents and codes, never text.
+	const cols = (() => { try { return db.prepare("PRAGMA table_info(ratecon_dvir_decisions)").all().map((c) => `${c.name} ${c.type}`); } catch { return []; } })();
+	eqCheck("§1x ratecon_dvir_decisions holds the load key, the time, cents, the count and codes only", cols,
+		["id INTEGER", "load_key TEXT", "at TEXT", "stored_cents INTEGER", "sent_cents INTEGER", "dvir_cents INTEGER", "dvir_count INTEGER", "reading TEXT", "verdict TEXT", "reason TEXT", "switch_on INTEGER", "protected_load INTEGER"]);
+	const refusedText = ["reading", "verdict", "reason"].filter((c) => {
+		const row = { reading: "readable", verdict: "kept", reason: "dvir_lines", [c]: "Pat Example" };
+		try {
+			db.prepare("INSERT INTO ratecon_dvir_decisions (load_key, at, stored_cents, sent_cents, dvir_cents, dvir_count, reading, verdict, reason, switch_on, protected_load) VALUES ('123456789', '2026-11-12T00:00:00.000Z', 1, 0, 0, 0, ?, ?, ?, 1, 0)")
+				.run(row.reading, row.verdict, row.reason);
+			return false;
+		} catch { return true; }
+	});
+	eqCheck("§1x ...its code columns refuse free text (a made-up name)", refusedText, ["reading", "verdict", "reason"]);
+
+	// The re-issue hold's kill switch off: nothing is kept or recorded.
+	const noHold = dvirWorld({ env: { ...DVIR_KEEP_ON, RATECON_REISSUE_HOLD_ENABLED: "false" } });
+	noHold.noteRateConDvir("123456789", PDF_DVIR);
+	const nh = await noHold.post({ loadId: "123456789", values: chrEmail("123456789", "$2,115.00") });
+	check("§1x RATECON_REISSUE_HOLD_ENABLED=false: Payment written as sent, no decision row, no alert",
+		pay(nh) === "$2,115.00" && decisionsOf(noHold.db, "123456789").length === 0 && noHold.alerts.length === 0, { values: valuesOf(nh), alerts: noHold.alerts });
+
+	// The switch: on only for true/1/yes/on, read once, and never in a replica.
+	const switchLift = (() => { try { return closure(SRC, { roots: ["RATECON_DVIR_KEEP_ENABLED"], provided: ["require", "process"] }).text; } catch { return null; } })();
+	const switchOn = (value, replica = false) => new Function("require", "process", `"use strict";\n${switchLift}\nreturn RATECON_DVIR_KEEP_ENABLED;`)(
+		(p) => (p === "./lib/replica-mode" ? { active: () => replica } : rootRequire(p)), { env: value === undefined ? {} : { RATECON_DVIR_KEEP_ENABLED: value } });
+	eqCheck("§1x RATECON_DVIR_KEEP_ENABLED: on for true, 1, yes, on (any case, spaces around); off unset, blank, false, 0, no, off or anything else; off in a replica",
+		switchLift ? [...["true", " TRUE ", "1", "yes", "on"].map((x) => switchOn(x)), ...[undefined, "", "false", "0", "no", "off", "enabled"].map((x) => switchOn(x)), switchOn("true", true)] : null,
+		[true, true, true, true, true, false, false, false, false, false, false, false, false]);
+
+	// Off: the base's own answers, and the decisions recorded as would_keep or would_hold.
+	const { answers, world: off } = await dvirFlagOffAnswers();
+	let fixture = null;
+	try { fixture = JSON.parse(fs.readFileSync(DVIR_FIXTURE, "utf8")); } catch { /* checked below */ }
+	check("§1x off: the base's answers are on file (scripts/fixtures/ratecon-dvir-keep-flag-off.json)", Boolean(fixture && Array.isArray(fixture.answers) && fixture.answers.length === answers.length), fixture && fixture.answers && fixture.answers.length);
+	if (fixture && Array.isArray(fixture.answers)) {
+		answers.forEach(([what, got], i) => eqCheck(`§1x off: "${what}" answers and alerts exactly as the base`, got, (fixture.answers[i] || [])[1]));
+	}
+	const offRows = off.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ratecon_dvir_decisions'").get()
+		? off.db.prepare("SELECT load_key, verdict, reason, switch_on, protected_load FROM ratecon_dvir_decisions ORDER BY id").all() : [];
+	eqCheck("§1x off: each decision is recorded as would_keep or would_hold, with the switch off", offRows.map((r) => [r.load_key, r.verdict, r.reason, r.switch_on, r.protected_load]), [
+		["123456789", "would_keep", "dvir_lines", 0, 0],
+		["123456790", "would_hold", "unread", 0, 0],
+		["123456794", "would_keep", "dvir_lines", 0, 1],
+		["123456795", "would_keep", "dvir_lines", 0, 1],
+		["123456781", "would_keep", "dvir_lines", 0, 0],
+		["123456781", "would_hold", "disagrees", 0, 0],
+		["123456797", "would_hold", "disagrees", 0, 0],
+	]);
+	check("§1x off: no audit row", ["123456789", "123456794", "123456781"].every((id) => auditsOf(off.db, id).length === 0));
+
+	// The switch-on report, read-only, on a copy of the switch-off decisions.
+	const reportPath = path.join(ROOT, "scripts", "ratecon-dvir-keep-report.js");
+	if (!fs.existsSync(reportPath)) { check("§1x scripts/ratecon-dvir-keep-report.js exists", false); return; }
+	const report = require(reportPath);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dvir-keep-report-"));
+	try {
+		const file = path.join(dir, "app.db");
+		fs.writeFileSync(file, off.db.serialize());
+		const out = report.buildReport({ dbPath: file, since: "2026-11-01" });
+		const s = out.summary;
+		eqCheck("§1x report: the decisions by verdict, and the holds by reading and reason",
+			[s.rows, s.loads, s.verdicts, s.holdReadings, s.holdReasons], [7, 6, { would_keep: 4, would_hold: 3 }, { none: 1, readable: 2 }, { unread: 1, disagrees: 2 }]);
+		eqCheck("§1x report: on switch-on, what Payment would keep on open loads (each change once)", s.switchOnWouldKeep,
+			{ emails: 5, loads: 4, changes: 5, dropCents: 67500, dvirCents: 17500 });
+		check("§1x report: the share of holds with no readable text (it decides a second reader)", Math.abs(s.unreadShareOfHolds - 1 / 3) < 1e-9, s.unreadShareOfHolds);
+		check("§1x report: counts and cents only, no load number", !/\b\d{8,9}\b|LD-TEST/i.test(out.text) && /\$675\.00/.test(out.text), out.text);
+		check("§1x report: it says what it can't count without the sheet", out.notCounted.length === 2 && /percentage-paid/.test(out.text) && /closed month/.test(out.text), out.notCounted);
+		const empty = path.join(dir, "empty.db");
+		new Database(empty).close();
+		const none = report.buildReport({ dbPath: empty, since: "2026-11-01" });
+		check("§1x report: a database with no decision table says nothing was recorded", none.present === false && none.summary.rows === 0 && /nothing recorded/.test(none.text), none.text);
+		let missing = "";
+		try { report.buildReport({ dbPath: path.join(dir, "none.db"), since: "2026-11-01" }); } catch (e) { missing = e.message; }
+		check("§1x report: a missing database is refused, never created", Boolean(missing) && !fs.existsSync(path.join(dir, "none.db")), missing);
+		let badSince = "";
+		try { report.buildReport({ dbPath: file, since: "last week" }); } catch (e) { badSince = e.message; }
+		check("§1x report: --since must be a date or an ISO time", /--since/.test(badSince), badSince);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
 // --- §2 the alert ledger -------------------------------------------------------
-const OLD_LEDGER_DDL = `CREATE TABLE ratecon_reissue_holds (load_id TEXT NOT NULL, column_name TEXT NOT NULL, sent_value TEXT NOT NULL,
+const OLD_LEDGER_DDL =`CREATE TABLE ratecon_reissue_holds (load_id TEXT NOT NULL, column_name TEXT NOT NULL, sent_value TEXT NOT NULL,
 	stored_value TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'held', reason TEXT NOT NULL DEFAULT '',
 	first_seen DATETIME DEFAULT CURRENT_TIMESTAMP, alerted_at DATETIME, PRIMARY KEY (load_id, column_name, sent_value))`;
 
@@ -1171,8 +1454,17 @@ function section4() {
 	check("§4 lib/cell-compare.js is pure (requires nothing)", !/\brequire\(/.test(libSrc.replace(/\/\/.*$/gm, "")));
 }
 
+const CAPTURE = (process.argv.find((a) => a.startsWith("--capture=")) || "").slice("--capture=".length);
+
 (async () => {
+	if (CAPTURE) {
+		const { answers } = await dvirFlagOffAnswers();
+		fs.writeFileSync(CAPTURE, `${JSON.stringify({ note: "Captured on the base's own server.js by scripts/test-ratecon-reissue-hold.js --capture; made-up data.", answers }, null, 1)}\n`);
+		console.log(`captured ${CAPTURE}`);
+		process.exit(0);
+	}
 	await section1();
+	await section1x();
 	await section2();
 	await section3();
 	section4();

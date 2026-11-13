@@ -33,13 +33,25 @@
  *      normLoadKey() folds), an unreadable one as not readable; the response is unchanged; a
  *      failed extraction keeps nothing; a reading older than RATECON_DVIR_TTL_MS is gone; at
  *      most RATECON_DVIR_MAX_LOADS loads are kept, the oldest dropped first; the
- *      keep-stored-values route's own code never reads it.
+ *      keep-stored-values route reads it only through the DVIR keep (rateConDvirKeepCheck()),
+ *      and never reads a PDF or keeps a reading itself.
  *   §3 alertRateConReissueHold(), lifted with the extract route's reading: the DVIR line in the
  *      email and in the in-app notice for each case of §1; no line when there is nothing to
  *      say; the held list it was given is untouched, and the ledger's rows (the dedupe key) are
  *      the same with or without a reading; the same change is not alerted twice; a retry from
  *      the sweep carries the line after the reading has expired (ledger column `note`), the
  *      newest alert's line when two are owed; a ledger made before `note` gets it.
+ *   §4 the DVIR keep (RATECON_DVIR_KEEP_ENABLED): lib/ratecon-dvir-keep.js's verdicts, pure
+ *      (kept only when a readable reading is exactly the drop and no other amount changed; held
+ *      for a reading that disagrees, another amount, readable text with no DVIR line, or one or two
+ *      lines' worth with no readable text; today's rule otherwise), what it records, the CHR-load
+ *      test, the Payment column and the answer it keeps; F1 on the reader: a revised rate con
+ *      carrying an advance and a DVIR line reads as its DVIR line only; the switch-on line, word for
+ *      word ("C.H. Robinson's revised rate con shows $35 for DVIR. Payment keeps the full amount,
+ *      which C.H. Robinson pays."), with "If the lower figure is a real rate change, change Payment
+ *      in Data Manager." when a person decides, never "dispute"; off, today's line; the alert with
+ *      source "dvir" (its email, in-app notice, ledger rows and sweep retry), a protected load's
+ *      alert in the re-issue wording with the new line, and off, today's line whatever it is passed.
  *
  * SERVER_JS=<file> runs against another copy of server.js (the base, to show a case fails).
  * Pure: no server, no network; in-memory databases. Run:
@@ -51,7 +63,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const { createRequire } = require("module");
-const { closure } = require("./lib/server-lift");
+const { closure, indexDeclarations, liftRoute: liftRouteText } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = require("./lib/server-source").serverSource();
@@ -344,13 +356,17 @@ async function section2() {
 	y.noteRateConDvir("900001001", "not base64 of a pdf", t + 600);
 	eq((y.rateConDvirReading("900001001", t + 700) || {}).readable, false, "§2 bytes that are no PDF are kept as not readable, without an error");
 
-	// The re-issue hold's own decision never reads it.
-	const route = closure(SRC, { routes: [KHEAD], provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"], denied: ["sendEmail", "transporter", "io", "server"] }).text;
-	ok("§2 the keep-stored-values route's own code never reads the DVIR reading (only the alert does)", !/rateConDvirRead|noteRateConDvir|ratecon-dvir/.test(route));
+	// The keep-stored-values route reads the reading only through the DVIR keep, and never
+	// reads a PDF or keeps a reading itself.
+	const routeLift = closure(SRC, { routes: [KHEAD], provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"], denied: ["sendEmail", "transporter", "io", "server"] });
+	const { decls } = indexDeclarations(SRC);
+	const readers = routeLift.names.filter((n) => n !== "rateConDvirReading" && /\brateConDvirReading\(/.test(decls.get(n).text));
+	eq([readers, /\brateConDvirReading\(/.test(liftRouteText(SRC, KHEAD)), routeLift.names.some((n) => /^(noteRateConDvir|noteRateConReadings|rateConPdfTextOf)$/.test(n))],
+		[["rateConDvirKeepCheck"], false, false], "§2 the keep-stored-values route reads the DVIR reading only through rateConDvirKeepCheck(), and never reads a PDF or keeps a reading");
 }
 
 // --- §3 the alert ----------------------------------------------------------------------
-function liftAlert(db, { send = async () => true } = {}) {
+function liftAlert(db, { send = async () => true, env = {} } = {}) {
 	const lifted = closure(SRC, { roots: ["alertRateConReissueHold", "sweepRateConReissueHolds", ...(KEEPS ? ["noteRateConDvir"] : [])], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "require"] });
 	const sends = [];
 	const notes = [];
@@ -359,7 +375,7 @@ function liftAlert(db, { send = async () => true } = {}) {
 		`"use strict";\n${lifted.text}\n${KEEPS ? "" : "const noteRateConDvir = () => {};"}\nreturn { alert: alertRateConReissueHold, sweep: sweepRateConReissueHolds, noteRateConDvir };`)(
 		db, async (to, subject, html) => { sends.push({ to, subject, html }); return send(to, subject, html); },
 		{ run: (...a) => { notes.push({ type: a[0], title: a[1], body: a[2] }); } }, { to: () => ({ emit: () => {} }) },
-		quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...PERSON_HOLD_ENV } }, rootRequire,
+		quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...PERSON_HOLD_ENV, ...env } }, rootRequire,
 	);
 	return { ...api, sends, notes };
 }
@@ -462,6 +478,136 @@ async function section3() {
 		oa && oa.alerted === true && odb.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().some((c) => c.name === "note") && emailHas(o.sends[0], OWNER_35), oa);
 }
 
+// --- §4 the DVIR keep: its verdicts, and its alert ---------------------------------------
+const keepLib = (() => { try { return require(path.join(ROOT, "lib", "ratecon-dvir-keep")); } catch { return null; } })();
+const KEPT_35 = "C.H. Robinson's revised rate con shows $35 for DVIR. Payment keeps the full amount, which C.H. Robinson pays.";
+const KEPT_70 = "C.H. Robinson's revised rate con shows $70 for DVIR. Payment keeps the full amount, which C.H. Robinson pays.";
+const HELD_ADD = "If the lower figure is a real rate change, change Payment in Data Manager.";
+// The made-up revised rate con: one DVIR line (Total $2,115.00) and a $500.00 advance (New Total $1,615.00).
+const PDF_REVISED = pdfWith([...INTRO_LINES, "Line Haul", "1.00", "$2,150.00", "$2,150.00", "Missing Pre-Trip DVIR Inspection", "1.00", "-$35.00", "-$35.00",
+	"Total:", "$2,115.00", "Advanced Total:", "$500.00", "New Total:", "$1,615.00"]);
+
+const REASON_DISAGREES = "the rate con's DVIR lines don't account for all of the Payment drop";
+const REASON_UNREAD = "the Payment drop is the size of a DVIR deduction, and the rate con's text can't be read to confirm it";
+
+async function section4() {
+	ok("§4 lib/ratecon-dvir-keep.js exists", Boolean(keepLib));
+	if (keepLib) section4Lib();
+	await section4Words();
+}
+
+function section4Lib() {
+	const R = (cents, count) => ({ readable: true, cents, count });
+	const v = (storedCents, sentCents, reading = null, otherMoneyChanged = false) => {
+		const d = keepLib.decide({ storedCents, sentCents, reading, otherMoneyChanged });
+		return [d.verdict, d.reason];
+	};
+	eq(v(215000, 211500, R(3500, 1)), ["kept", "dvir_lines"], "§4 a readable reading of exactly the drop ($35, one line): kept");
+	eq(v(215000, 208000, R(7000, 2)), ["kept", "dvir_lines"], "§4 two lines read, a $70 drop: kept");
+	eq(v(215000, 204500, R(10500, 3)), ["kept", "dvir_lines"], "§4 three lines read, a $105 drop: kept (the two-line cap is for a drop nothing confirms)");
+	eq(v(215000, 211500, R(7000, 2)), ["held", "disagrees"], "§4 a reading of $70 against a $35 drop: held, never kept");
+	eq(v(215000, 161500, R(3500, 1)), ["held", "disagrees"], "§4 the New Total ($535 drop) with one DVIR line read: held");
+	eq(v(215000, 211500, R(3500, 1), true), ["held", "other_money"], "§4 the DVIR lines plus another amount changed: held");
+	eq(v(215000, 211500, null), ["held", "unread"], "§4 no reading, $35: held");
+	eq(v(215000, 208000, null), ["held", "unread"], "§4 no reading, $70: held");
+	eq(v(215000, 211500, { readable: false, cents: 0, count: 0 }), ["held", "unread"], "§4 unreadable text, $35: held");
+	eq(v(215000, 211500, R(0, 0)), ["held", "no_dvir_line"], "§4 readable text with no DVIR line, $35: held");
+	eq(v(215000, 204500, null), ["none", ""], "§4 no reading, $105 (three lines' worth): today's rule");
+	eq(v(215000, 211000, null), ["none", ""], "§4 no reading, $40: today's rule");
+	eq(v(215000, 165000, R(0, 0)), ["none", ""], "§4 readable text with no DVIR line, $500: today's rule");
+	eq(v(215000, 220000, R(3500, 1)), ["none", ""], "§4 a rise: today's rule");
+	eq(v(215000, 215000, R(3500, 1)), ["none", ""], "§4 no change: today's rule");
+	eq(v(null, 211500, R(3500, 1)), ["none", ""], "§4 a figure that isn't whole cents: today's rule");
+	eq(keepLib.decide({ storedCents: 215000, sentCents: 211500, reading: { ...R(3500, 1), at: 1 } }),
+		{ verdict: "kept", reason: "dvir_lines", storedCents: 215000, sentCents: 211500, dropCents: 3500, dvirCents: 3500, dvirCount: 1, reading: "readable" }, "§4 a decision carries its cents, count and reading state");
+	eq(["kept", "held"].flatMap((d) => [keepLib.recordedVerdict(d, true), keepLib.recordedVerdict(d, false)]).concat(keepLib.recordedVerdict("none", true)),
+		["kept", "would_keep", "held", "would_hold", null], "§4 recorded: kept and held with the switch on, would_keep and would_hold off, nothing for none");
+
+	const H = ["Contract ID", "Load ID", "Email", "  Payment  "];
+	const chr = (id, email) => keepLib.isChrLoad({ "Contract ID": "", "Load ID": id, Email: email, "  Payment  ": "$2,150.00" }, H);
+	eq([chr("123456789", "made-up.agent@chrobinson.com"), chr("#123456789", "made-up.agent@chrobinson.com"), chr("123456789", "made-up.agent@loads.chrobinson.com"),
+		chr("12345678", "made-up.agent@chrobinson.com"), chr("LD-TEST-0001", "ap@example-broker.test"), chr("123456789", ""), chr("123456789", "made-up@notchrobinson.com"), keepLib.isChrLoad(null, H)],
+	[true, true, true, false, false, false, false, false], "§4 a CHR load: a chrobinson.com Email (or a subdomain) and a 9-digit Load ID, nothing else");
+	eq([keepLib.paymentColumn(["Load ID", "  Payment  "]), keepLib.paymentColumn(["Payment ($)", "Payment Terms"]), keepLib.paymentColumn(["Load ID", "Rate"]), keepLib.paymentColumn(null)],
+		["  Payment  ", "Payment ($)", null, null], "§4 the Payment column: the first header named like Payment");
+	const answer = { values: { "Load ID": "123456789", "  Payment  ": "$2,115.00", Details: "Test freight" }, kept: ["Assigned Date"], held: [], changed: [] };
+	const before = JSON.stringify(answer);
+	const kp = keepLib.keepPayment(answer, "  Payment  ", "$2,150.00", "$2,115.00");
+	eq([Object.keys(kp.values), kp.values["  Payment  "], kp.kept, kp.held, kp.changed],
+		[["Load ID", "  Payment  ", "Details"], "$2,150.00", ["Assigned Date", "  Payment  "], [{ column: "  Payment  ", stored: "$2,150.00", sent: "$2,115.00" }], []],
+		"§4 keepPayment(): Payment back as stored in its own place, named in kept and held");
+	eq(JSON.stringify(answer), before, "§4 keepPayment(): the answer it was given is untouched");
+	ok("§4 every reason has words, and an unknown one none", keepLib.REASONS.every((r) => keepLib.reasonText(r).length > 20) && keepLib.reasonText("x") === "");
+	eq([keepLib.reasonText("disagrees"), keepLib.reasonText("unread")], [REASON_DISAGREES, REASON_UNREAD], "§4 the reasons the alerts below carry");
+	eq(keepLib.auditDetails(keepLib.decide({ storedCents: 215000, sentCents: 211500, reading: R(3500, 1) })),
+		"Payment kept as stored ($2,150.00): the revised rate con's $2,115.00 is lower only by its DVIR lines (3500 cents, 1 line)", "§4 the audit row's details: both figures, the DVIR cents and the count");
+	const libSrc = fs.readFileSync(path.join(ROOT, "lib", "ratecon-dvir-keep.js"), "utf8").replace(/\/\/.*$/gm, "");
+	ok("§4 lib/ratecon-dvir-keep.js is pure (only lib/ requires, no environment)",
+		[...libSrc.matchAll(/require\("([^"]+)"\)/g)].every((m) => /^\.\/[a-z-]+$/.test(m[1])) && !/process\.|Date\.now|new Date/.test(libSrc));
+}
+
+async function section4Words() {
+	// F1 on the reader: an advance is no DVIR deduction.
+	eq(dvir.readRateConDvir(dvir.pdfText(PDF_REVISED), PDF_REVISED.length), { readable: true, cents: 3500, count: 1 },
+		"§4 F1 the revised rate con carrying an advance and a DVIR line: only the DVIR line ($35) is read, never the advance");
+
+	// The DVIR keep's wording, switch on; off, the line is today's.
+	const read = (t) => dvir.readRateConDvir(t, 1000);
+	const line = (reading, held, opts) => dvir.dvirAlertLine(reading, held, opts);
+	const pay = (stored, sent) => [{ column: "  Payment  ", stored, sent }];
+	eq(line(read(TJ_ONE), [], { keep: true }), KEPT_35, "§4 on: a readable $35 line says what the revised rate con shows and that Payment keeps the full amount, word for word");
+	eq(line(read(TJ_ONE), [], { keep: true, held: true }), `${KEPT_35} ${HELD_ADD}`, "§4 on, held: the line adds what to do with a real rate change");
+	eq(line(read(LINES_TWO), [], { keep: true }), KEPT_70, "§4 on: two lines, $70");
+	eq(line(null, pay("$2,150.00", "$2,115.00"), { keep: true, held: true }), `${DROP("$35.00")} ${HELD_ADD}`, "§4 on, held, no reading: the drop line, then the step");
+	eq(line(read(`${INTRO} Line Haul 300.00 $1.80 $540.00 Total: $540.00`), pay("$540.00", "$505.00"), { keep: true, held: true }), HELD_ADD, "§4 on, held, readable text with no DVIR line: the step alone");
+	ok("§4 on: no line says to dispute it", [line(read(TJ_ONE), [], { keep: true }), line(read(LINES_TWO), [], { keep: true, held: true })].every((l) => !/dispute/i.test(l)));
+	eq([line(read(TJ_ONE)), line(read(TJ_ONE), [], {}), line(read(TJ_ONE), [], { held: true }), line(read(LINES_TWO), [], undefined)], [OWNER_35, OWNER_35, OWNER_35, OWNER_70_TWO],
+		"§4 off (no opts, or held without keep): today's line, word for word");
+
+	// The alert, lifted with the switch on.
+	const ON = { RATECON_DVIR_KEEP_ENABLED: "true" };
+	const db = new Database(":memory:");
+	const a = liftAlert(db, { env: ON });
+	a.noteRateConDvir("123456797", b64(PDF_TWO));
+	const held = heldPay("$2,150.00", "$2,115.00");
+	const res = await a.alert({ loadId: "123456797", reason: REASON_DISAGREES, held, source: "dvir", dvir: "held" });
+	const s = a.sends.find((m) => m.subject.includes("123456797"));
+	const n = a.notes.find((m) => m.title.includes("123456797"));
+	ok("§4 the \"dvir\" alert's email: its subject, lead, reason, both figures and the line, no dispute",
+		res && res.alerted === true && !!s && s.subject === "Load 123456797: a revised rate con did not lower Payment"
+		&& s.html.includes("carried a lower Payment. The stored Payment was kept.") && s.html.includes(`Kept because ${htmlOf(REASON_DISAGREES)}.`)
+		&& s.html.includes("$2,150.00") && s.html.includes("$2,115.00") && emailHas(s, htmlOf(`${KEPT_70} ${HELD_ADD}`)) && !/dispute/i.test(s.html), s && s.html);
+	ok("§4 the \"dvir\" alert's in-app notice: its title and line", !!n && n.title === "Load 123456797: Payment kept (DVIR)" && n.body.startsWith("Payment: $2,150.00 kept; the rate con said $2,115.00") && noteHas(n, `${KEPT_70} ${HELD_ADD}`), n);
+	eq(db.prepare("SELECT DISTINCT source FROM ratecon_reissue_holds WHERE load_id = '123456797'").all().map((r) => r.source), ["dvir"], "§4 its ledger rows say source \"dvir\"");
+	a.noteRateConDvir("123456795", b64(PDF_ONE));
+	const pres = await a.alert({ loadId: "123456795", reason: "delivered", held: [...held, { column: "Pickup Appointment", stored: "11/10/2026 08:00", sent: "11/10/2026 10:00" }], dvir: "kept" });
+	const ps = a.sends.find((m) => m.subject.includes("123456795"));
+	ok("§4 a protected load's alert keeps the re-issue wording, with a certain decision's line in the new words and no step to take",
+		pres && pres.alerted === true && !!ps && /re-issued rate con was held/.test(ps.subject) && emailHas(ps, htmlOf(KEPT_35)) && !/dispute/i.test(ps.html), ps && ps.html);
+	const offDb = new Database(":memory:");
+	const off = liftAlert(offDb);
+	off.noteRateConDvir("123456798", b64(PDF_ONE));
+	await off.alert({ loadId: "123456798", reason: "delivered", held, dvir: "kept" });
+	ok("§4 off: the same alert says today's line, whatever it is passed", emailHas(off.sends[0], OWNER_35), off.sends[0] && off.sends[0].html);
+
+	// A "dvir" row is retried by the sweep in its own words.
+	const rdb = new Database(":memory:");
+	let up = false;
+	const r = liftAlert(rdb, { env: ON, send: async () => up });
+	await r.alert({ loadId: "123456790", reason: REASON_UNREAD, held, source: "dvir", dvir: "held" });
+	up = true;
+	const at = new Date(Date.now() + 16 * 60 * 1000);
+	await r.sweep({ now: at, clock: () => at });
+	const retried = r.sends.filter((m) => m.subject.includes("123456790"));
+	ok("§4 the sweep retries a \"dvir\" row in its own words, with its line", retried.length === 2 && retried[1].subject === "Load 123456790: a revised rate con did not lower Payment"
+		&& /This is a retry/.test(retried[1].html) && emailHas(retried[1], htmlOf(`${DROP("$35.00")} ${HELD_ADD}`)), retried.map((m) => m.subject));
+}
+
+// Text as the alert email writes it (server.js escHtml()).
+function htmlOf(t) {
+	return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 (async () => {
 	console.log("§1 lib/ratecon-dvir.js: reading a rate con's DVIR lines, and the alert line");
 	section1();
@@ -469,6 +615,8 @@ async function section3() {
 	await section2();
 	console.log("§3 the re-issue alert carries the line, in the email and the in-app notice");
 	await section3();
+	console.log("§4 the DVIR keep: its verdicts (lib/ratecon-dvir-keep.js), F1 on the reader, its wording and its alert");
+	await section4();
 	console.log(`test-reissue-dvir-alert: ${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log(`FAIL ${e.stack || e}`); process.exit(1); });
