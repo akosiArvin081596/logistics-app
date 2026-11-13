@@ -647,6 +647,8 @@ async function seedLines(w) {
 		check("Test Driver B: waiting and carried, $110.00 over 2, nothing reversed", [listed(b), totalsOf(b)], [[[11, "pending"], [51, "carried"]], totals(11000, "$110.00", 2, 0, "$0.00", 0)]);
 		const bOct = await readLines(w, { driver: "Test Driver B", from: "2026-10-01", to: "2026-10-31" });
 		check("…from Oct 1 to Oct 31 on the receipt date: R11 only, $30.00", [listed(bOct), totalsOf(bOct)], [[[11, "pending"]], totals(3000, "$30.00", 1, 0, "$0.00", 0)]);
+		const bEdges = await readLines(w, { driver: "Test Driver B", from: "2026-09-28", to: "2026-10-13" });
+		check("…from Sep 28 to Oct 13, the two receipt dates themselves: both lines (each end counts)", listed(bEdges), [[11, "pending"], [51, "carried"]]);
 		const sep = await readLines(w, { to: "2026-09-30" });
 		check("all drivers to Sep 30: R51 only", [listed(sep), totalsOf(sep)], [[[51, "carried"]], totals(8000, "$80.00", 1, 0, "$0.00", 0)]);
 		const op = await readLines(w, { driver: "Test Owner Op" });
@@ -680,10 +682,14 @@ async function seedLines(w) {
 		check("a driver that is not one string of at most 100 characters: 400 INVALID_DRIVER", drivers, [[400, "INVALID_DRIVER"], [400, "INVALID_DRIVER"], [400, "INVALID_DRIVER"]]);
 		const fits = await readLines(w, { driver: "x".repeat(100) });
 		check("…100 characters is a driver with no lines", [fits.status, listed(fits)], [200, []]);
-		// 5,001 made-up reversed lines dated Jan 5 (reversed, so no live-line index stands in the way).
+		// Made-up reversed $1.00 lines dated Jan 5 (reversed, so no live-line index stands in the way).
 		const ins = w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, reversed_by_id, created_at, created_by, created_by_id, created_role)
 			VALUES (5, 'deduct', 100, 30000, 'Pilot #123', '2026-01-05', '2026-01', 1, '2026-01-05', '2026-01-03', 999999, 't', 'super_admin', 1, 'Super Admin')`);
-		w.db.transaction(() => { for (let i = 0; i < 5001; i++) ins.run(); })();
+		w.db.transaction(() => { for (let i = 0; i < 4999; i++) ins.run(); })();
+		const full = await readLines(w);
+		check("exactly 5,000 lines in the dates: 200, all listed, R1's $200.00 counted and the 4,999 reversed apart",
+			[full.status, ((full.body && full.body.lines) || []).length, totalsOf(full)], [200, 5000, totals(20000, "$200.00", 1, 499900, "$4,999.00", 4999)]);
+		ins.run();
 		const many = await readLines(w);
 		check("more than 5,000 lines in the dates: 422 PERSONAL_LINES_TOO_MANY, no list and no total",
 			[many.status, many.body && many.body.code, many.body && many.body.lines, many.body && many.body.totals], [422, "PERSONAL_LINES_TOO_MANY", undefined, undefined]);
