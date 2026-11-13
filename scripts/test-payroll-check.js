@@ -207,7 +207,7 @@ const ADMIN = { session: { user: { id: 1, role: "Super Admin", username: "made-u
 async function check(w, weekEnd = WEEK_END) {
 	const h = w.routes[ROUTE_KEY];
 	if (!h) throw new Error(`${ROUTE_KEY} is not registered`);
-	return W.call(h, { ...ADMIN, query: weekEnd === undefined ? {} : { weekEnd } });
+	return W.call(h, { ...ADMIN, query: { weekEnd } });
 }
 let shared = null;
 async function fleetAndBody() {
@@ -236,7 +236,12 @@ function gateWorld(env) {
 	const payrollCheck = async (args) => { state.checks.push(args); return { weekEnd: args.weekEnd, ledgerDays: [] }; };
 	const payrollCheckLimiter = (req, res, next) => { state.limiter++; next(); };
 	const quiet = { log() {}, warn() {}, error() {} };
-	new Function(...provided, `"use strict";\n${lifted.text}`)(app, db, { env: { ...env } }, require, quiet, payrollCheck, payrollCheckLimiter);
+	// The route's own requires are the app's lib/ files, read from the repo root.
+	const libRequire = (m) => {
+		if (!/^\.\/lib\/[\w.-]+$/.test(m)) throw new Error(`the route required ${m}, which the gate test does not load`);
+		return require(path.join(W.ROOT, m));
+	};
+	new Function(...provided, `"use strict";\n${lifted.text}`)(app, db, { env: { ...env } }, libRequire, quiet, payrollCheck, payrollCheckLimiter);
 	return state;
 }
 async function gateCall(state, user, query = { weekEnd: WEEK_END }) {
@@ -299,7 +304,8 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 	await R.test("§3 The week: missing, malformed, impossible, not a Friday, not finished, or in a closed month is 400; the first finished week of an open month answers", async ({ eq }) => {
 		const { w } = await fleetAndBody();
 		const status = async (weekEnd) => { const r = await check(w, weekEnd); return [r.status, r.body && r.body.code]; };
-		eq("missing", await status(undefined), [400, "PAYROLL_CHECK_WEEK_END_INVALID"]);
+		const missing = await W.call(w.routes[ROUTE_KEY], { ...ADMIN, query: {} });
+		eq("missing", [missing.status, missing.body && missing.body.code], [400, "PAYROLL_CHECK_WEEK_END_INVALID"]);
 		eq("an array", (await W.call(w.routes[ROUTE_KEY], { ...ADMIN, query: { weekEnd: [WEEK_END, WEEK_END] } })).status, 400);
 		eq("malformed", await status("2026-10-1"), [400, "PAYROLL_CHECK_WEEK_END_INVALID"]);
 		eq("too long", await status("2026-10-16T00:00"), [400, "PAYROLL_CHECK_WEEK_END_INVALID"]);

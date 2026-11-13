@@ -22772,6 +22772,334 @@ app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, 
 	}
 });
 
+// THE BEFORE-PAYROLL CHECK: what a person looks at before payroll, per driver
+// and week of the open months up to the last finished week. lib/payroll-check.js
+// picks each item's reason and shapes the answer, every amount in whole cents;
+// every rule it reports on is read through the function that already holds it.
+const payrollCheckLib = require("./lib/payroll-check");
+
+// The check itself. Read-only: it writes, renders and claims nothing (the
+// paid-day backfill is asked with write: false). GET /api/admin/payroll-check
+// and scripts/payroll-check.js (the same function, lifted) both return it:
+//   ledgerDays        driver-days the payout ledger pays (every scope, as
+//                     computeFleetLedger() pays them; a day the books count more
+//                     than once is listed once, with each scope) that no live
+//                     invoice holds: claims, day grids, paidDays, correction day
+//                     lines, a manual invoice's dated or whole-period lines
+//   invoiceDays       days a live invoice pays that the books count in no scope
+//                     or month: kept as issued, never taken back automatically
+//   personalLines     Personal lines on no invoice: pending, carried or flagged
+//   pendingReceipts   the open weeks' receipts still Pending with no Personal line
+//   correctionDrafts  correction invoices waiting for approval (Draft, Submitted)
+//   percentageLoads   percentage drivers' completed loads no live invoice bills
+// Drivers are numbered labels ("driver 1", ...) unless `names`.
+async function payrollCheck({ weekEnd, names = false } = {}) {
+	// The open months come from the month locks: a table that can't be read can't
+	// tell them, and the check says so rather than guess.
+	if (!periodLocksReadable()) {
+		return { refused: true, status: 503, code: "PERIOD_LOCK_UNREADABLE", reason: "The month locks cannot be read, so the open months cannot be told. Try again in a moment." };
+	}
+	const scope = payrollCheckLib.checkWeekEnd({
+		weekEnd,
+		weekOf: (day) => getWeekRange(day),
+		currentWeekStart: getWeekRange().weekStart,
+		latestClosedMonth: financialsCalc.ledgerDayOnce.latestClosedMonth(db),
+	});
+	if (scope.refused) return { refused: true, status: 400, code: scope.code, reason: scope.reason };
+	const { rangeStart, weekEnd: rangeEnd, firstOpenMonth } = scope;
+	const inRange = (day) => payrollCheckLib.isDay(day) && day <= rangeEnd && (!rangeStart || day >= rangeStart);
+	const monthOpen = (month) => !firstOpenMonth || String(month || "") >= firstOpenMonth;
+
+	// The books as the payout ledger pays them, and one Job Tracking snapshot for
+	// every reading below (the shared cache: read, never written).
+	const fleet = await computeFleetLedger();
+	const jt = await getJobTrackingCached();
+	const headers = jt.headers || [];
+	const data = jt.data || [];
+	const cols = invoiceWeekColumns(headers);
+	const monthCols = jobTrackingMonthCols(headers);
+	const deletedKeys = loadKeySet(getDeletedLoadIds());
+	const payStructs = getDriverPayStructures();
+	const overrides = getAllExcludedDriverDays();
+	const directory = new Set(Object.keys(payStructs));
+	const displayOf = new Map();
+	for (const row of data) {
+		const nm = cols.driverCol ? normalizeDriverName(driverNameForTotals(row[cols.driverCol])) : "";
+		if (nm && !displayOf.has(nm)) displayOf.set(nm, String(row[cols.driverCol]).trim());
+	}
+	for (const r of db.prepare("SELECT driver_name FROM drivers_directory ORDER BY id").all()) {
+		const nm = normalizeDriverName(r.driver_name || "");
+		if (nm && !displayOf.has(nm)) displayOf.set(nm, String(r.driver_name).trim());
+	}
+	const display = (nm, fallback = "") => displayOf.get(nm) || String(fallback || "").trim() || nm;
+	const memo = (fn) => {
+		const seen = new Map();
+		return (k) => {
+			if (!seen.has(k)) seen.set(k, fn(k));
+			return seen.get(k);
+		};
+	};
+	const weeklyOf = memo((key) => liveWeeklyInvoicesForDriverWeek(key.split("\t")[0], key.split("\t")[1]));
+	const loadsOf = memo((nm) => {
+		const out = new Map();
+		for (const row of driverCompletedLiveLoads(data, headers, nm, deletedKeys)) {
+			const key = cols.loadIdCol ? normalizeLoadId(row[cols.loadIdCol]) : "";
+			if (key) out.set(key, row);
+		}
+		return out;
+	});
+	const manualsOf = memo((nm) => driverManualInvoicesForDays(nm));
+	const deletedNamedOf = memo((nm) => deletedManualInvoiceDays(nm));
+	const raterOf = memo((nm) => invoiceDayRater({ nameNorm: nm, payDaily: (payStructs[nm] || {}).payDaily || 0, truckRate: truckDailyRateCandidates(nm).slice(-1)[0] }));
+	const trucksByUnit = new Map(db.prepare("SELECT LOWER(unit_number) AS unit, owner_id, routemate_vehicle_id AS vid FROM trucks").all().map((t) => [t.unit, t]));
+
+	// 1. Ledger-paid days on no invoice: every driver-day of every scope, once.
+	const ledgerByDay = new Map();
+	for (const sc of fleet.scopes) {
+		for (const it of sc.items) {
+			if (it.kind !== "driver_pay" || !it.day || !it.driver) continue;
+			const key = `${it.driver}\t${it.day}`;
+			if (!ledgerByDay.has(key)) ledgerByDay.set(key, { nm: it.driver, day: it.day, items: [] });
+			ledgerByDay.get(key).items.push({ ownerId: sc.ownerId, month: it.month, cents: it.cents, loadId: it.loadId || "", truck: it.truck || "" });
+		}
+	}
+	const openByDriver = new Map();
+	for (const e of ledgerByDay.values()) {
+		if (!inRange(e.day) || !e.items.some((i) => monthOpen(i.month))) continue;
+		if (!openByDriver.has(e.nm)) openByDriver.set(e.nm, []);
+		openByDriver.get(e.nm).push(e);
+	}
+	// What a live invoice holds: its claims, the claims the backfill would write
+	// from every live invoice (asked, never written), and a manual invoice's
+	// dated or whole-period lines with the live correction day lines.
+	const backfillHolds = new Set(backfillInvoicePaidDays({ write: false }).rows.map((r) => `${r.driverNorm}\t${r.day}`));
+	const ledgerDays = [];
+	for (const [nm, list] of openByDriver) {
+		const claims = invoicePaidDayHolders(nm, list.map((e) => e.day));
+		const cover = manualInvoiceDayCover(nm, manualsOf(nm));
+		const missing = list.filter((e) => !claims.has(e.day) && !backfillHolds.has(`${nm}\t${e.day}`) && !cover.has(e.day));
+		// A day is priced as an invoice prices it, by the month it pays in (its
+		// earliest); a week's cheapest day is what an adjustment is weighed against.
+		const payMonthOf = (e) => e.items.map((i) => i.month).sort()[0];
+		const minRate = new Map();
+		for (const e of missing) {
+			const ws = getWeekRange(e.day).weekStart;
+			minRate.set(ws, Math.min(minRate.has(ws) ? minRate.get(ws) : Infinity, raterOf(nm)(e.day, payMonthOf(e))));
+		}
+		for (const e of missing) {
+			const week = getWeekRange(e.day);
+			const weekly = weeklyOf(`${nm}\t${week.weekStart}`);
+			const inv = weekly.length === 1 ? weekly[0] : null;
+			const first = e.items[0];
+			let load = null;
+			if (first.loadId) {
+				const key = normalizeLoadId(first.loadId);
+				const row = loadsOf(nm).get(key) || null;
+				if (!row) {
+					load = { loadId: first.loadId, found: false };
+				} else {
+					const w = invoiceLoadWindow(row, { cols, headers, monthCols });
+					let billed = false;
+					try { billed = !!inv && JSON.parse(inv.load_ids || "[]").some((id) => normalizeLoadId(id) === key); } catch { billed = false; }
+					const start = w.win ? fmtLocalDate(w.win.start) : "";
+					const end = w.win ? fmtLocalDate(w.win.end || w.win.start) : "";
+					// An investor's books read the ELD of that investor's own trucks only
+					// (gatherLedgerScopeFacts()): another owner's truck pays its whole window there.
+					const truck = trucksByUnit.get(String(first.truck || "").trim().toLowerCase());
+					load = {
+						loadId: first.loadId, found: true, blankPickup: !w.pickup && !w.win, completed: invoiceCompletionDay(row, cols), billed,
+						inWindow: !!start && e.day >= start && e.day <= end,
+						scopeNoEld: first.ownerId > 0 && truck && truck.vid && Number(truck.owner_id) !== first.ownerId ? String(first.truck).trim() : "",
+					};
+				}
+			}
+			const { reason, text } = payrollCheckLib.ledgerDayReason({
+				day: e.day, weekStart: week.weekStart, weekEnd: week.weekEnd,
+				weekly: weekly.map((x) => ({ invoiceNumber: x.invoice_number })),
+				inDirectory: directory.has(nm),
+				mayBePaid: inv ? lateWorkWeekBlocker(inv, { manuals: manualsOf(nm), minRate: minRate.get(week.weekStart) }) : "",
+				deletedDraft: deletedNamedOf(nm).get(e.day) || "",
+				closedMonth: periodWriteLocked(e.day.slice(0, 7)) ? periodLabel(e.day.slice(0, 7)) : "",
+				beforeFrom: TRIP_WORK_DAYS_FROM && payMonthOf(e) < TRIP_WORK_DAYS_FROM ? TRIP_WORK_DAYS_FROM : "",
+				added: !first.loadId,
+				load,
+			});
+			ledgerDays.push({
+				driverKey: nm, driverName: display(nm), weekStart: week.weekStart, day: e.day, payMonth: payMonthOf(e),
+				loadId: first.loadId, added: !first.loadId, loadCompleted: load && load.found ? load.completed : "",
+				scopes: e.items.map((i) => ({ ownerId: i.ownerId, month: i.month, cents: i.cents, loadId: i.loadId })),
+				overlap: e.items.length > 1, cents: first.cents,
+				invoiceNumber: inv ? inv.invoice_number : "", invoiceStatus: inv ? inv.status : "",
+				reason, text,
+			});
+		}
+	}
+
+	// 2. Days a live invoice pays that the books count in no scope or month.
+	const invoiceDays = [];
+	for (const inv of db.prepare("SELECT * FROM invoices WHERE deleted_at = '' ORDER BY id").all()) {
+		const nm = normalizeDriverName(inv.driver || "");
+		if (!nm) continue;
+		const manual = !!Number(inv.is_manual);
+		const snap = personalSnapshotOf(inv);
+		const held = [
+			...invoicePaidDaysOf(inv).map((day) => ({ day, source: manual ? "paidDays" : "grid" })),
+			...correctionLinesOnInvoice(inv.id).filter((l) => l.kind === "day").map((l) => ({ day: l.line_date, source: "dayLine", cents: Number(l.cents) || 0 })),
+		];
+		for (const h of held) {
+			if (!inRange(h.day) || ledgerByDay.has(`${nm}\t${h.day}`)) continue;
+			const cell = !manual && snap && snap.days ? snap.days[invoiceGridDayName(h.day)] || {} : {};
+			const loadIds = h.source === "grid" ? String(cell.loadBol || "").split(",").map((x) => x.trim()).filter(Boolean) : [];
+			const lineCents = (snap && Array.isArray(snap.lineItems) ? snap.lineItems : [])
+				.filter((l) => l && String(l.date || "").trim() === h.day).reduce((c, l) => c + Math.round((Number(l.amount) || 0) * 100), 0);
+			const cents = h.source === "grid" ? Math.round((Number(cell.total) || 0) * 100) : h.source === "dayLine" ? h.cents : lineCents;
+			const ovr = overrides[nm] || null;
+			const loads = loadIds.map((id) => {
+				const row = loadsOf(nm).get(normalizeLoadId(id)) || null;
+				return { loadId: id, live: !!row, blankDropoff: !!row && !invoiceLoadWindow(row, { cols, headers, monthCols }).scheduledDropoff };
+			});
+			const { reason, text } = payrollCheckLib.invoiceDayReason({
+				invoiceNumber: inv.invoice_number, removeOverride: !!ovr && ovr.remove.has(h.day),
+				addedDay: h.source === "grid" && !loadIds.length, addStill: !!ovr && ovr.add.has(h.day), loads,
+			});
+			invoiceDays.push({
+				driverKey: nm, driverName: display(nm, inv.driver), weekStart: getWeekRange(h.day).weekStart, day: h.day,
+				invoiceNumber: inv.invoice_number, status: inv.status, source: h.source, loadIds, cents, reason, text,
+			});
+		}
+	}
+
+	// 3. Personal lines on no invoice, and why (personalCarryReason()).
+	const personalLines = [];
+	if (personalLedgerPresent()) {
+		for (const r of db.prepare(`${PERSONAL_SUMMARY_SELECT} WHERE ep.kind = 'deduct' AND ep.voided_at = '' AND ep.week_start <= ? ORDER BY ep.id`).all(rangeEnd)) {
+			const state = personalLineSummary(r).state;
+			if (state !== "pending" && state !== "carried" && state !== "needs_correction") continue;
+			const receiptDriver = String(r.receipt_driver || "");
+			const nm = normalizeDriverName(receiptDriver);
+			const wait = payrollCheckLib.isDay(String(r.week_start || "")) ? personalCarryReason(personalWeekState(receiptDriver, r.week_start), r) : null;
+			const { reason, text } = payrollCheckLib.personalLineReason({ state, inDirectory: !!nm && directory.has(nm), wait });
+			personalLines.push({
+				driverKey: nm, driverName: display(nm, receiptDriver), weekStart: String(r.week_start || ""), lineId: r.id, expenseId: r.expense_id, state,
+				cents: Number(r.cents) || 0, shareCents: Number(r.share_cents) || 0, merchant: r.merchant || "", receiptDate: r.receipt_date || "", reason, text,
+			});
+		}
+	}
+
+	// 4. The open weeks' receipts still Pending with no Personal line: D decides each.
+	const pendingRows = db.prepare(
+		"SELECT id, driver, date, amount, type, load_id FROM expenses WHERE status = 'Pending' AND substr(date, 1, 10) >= ? AND substr(date, 1, 10) <= ? ORDER BY substr(date, 1, 10), id"
+	).all(rangeStart || "0000-01-01", rangeEnd);
+	const marked = personalLiveExpenseIds(pendingRows.map((e) => e.id));
+	const pendingReceipts = pendingRows.filter((e) => !marked.has(e.id)).map((e) => {
+		const nm = normalizeDriverName(String(e.driver || ""));
+		const day = String(e.date || "").slice(0, 10);
+		return {
+			driverKey: nm, driverName: display(nm, e.driver), weekStart: payrollCheckLib.isDay(day) ? getWeekRange(day).weekStart : "",
+			expenseId: e.id, date: day, type: e.type || "", loadId: e.load_id || "", cents: personalExpense.receiptCents(e.amount),
+		};
+	});
+
+	// 5. Correction invoices waiting for approval, and percentage drivers'
+	// completed loads that no live invoice bills.
+	const correctionDrafts = [];
+	for (const inv of db.prepare(
+		"SELECT * FROM invoices WHERE deleted_at = '' AND is_manual = 1 AND status IN ('Draft', 'Submitted') AND week_end >= ? AND week_start <= ? ORDER BY week_start, id"
+	).all(rangeStart || "0000-01-01", rangeEnd)) {
+		const snap = personalSnapshotOf(inv) || {};
+		const lines = Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const kind = Number(inv.is_correction) ? "personal"
+			: snap.workDayCorrection || lines.some((l) => DAY_PAY_DRAFT_LINE_RE.test(String((l && l.description) || "").trim())) ? "days"
+				: inv.correction_of != null ? "other" : "";
+		if (!kind) continue;
+		const of = inv.correction_of != null ? db.prepare("SELECT invoice_number FROM invoices WHERE id = ?").get(inv.correction_of) : null;
+		const nm = normalizeDriverName(inv.driver || "");
+		correctionDrafts.push({
+			driverKey: nm, driverName: display(nm, inv.driver), weekStart: inv.week_start, weekEnd: inv.week_end, invoiceNumber: inv.invoice_number,
+			status: inv.status, kind, correctionOf: of ? of.invoice_number : "", cents: Math.round(invoiceTotalDue(inv) * 100),
+		});
+	}
+	const billedOf = new Map();
+	for (const r of db.prepare("SELECT driver, load_ids FROM invoices WHERE deleted_at = ''").all()) {
+		const nm = normalizeDriverName(r.driver || "");
+		let ids = [];
+		try { ids = JSON.parse(r.load_ids || "[]"); } catch { ids = []; }
+		if (!billedOf.has(nm)) billedOf.set(nm, new Set());
+		for (const id of Array.isArray(ids) ? ids : []) billedOf.get(nm).add(normalizeLoadId(id));
+	}
+	// Each load's revenue as the books read its Payment.
+	const revenueOf = new Map();
+	for (const sc of fleet.scopes) {
+		for (const it of sc.items) {
+			const key = it.kind === "revenue" && it.loadId ? normalizeLoadId(it.loadId) : "";
+			if (key && !revenueOf.has(key)) revenueOf.set(key, it.cents);
+		}
+	}
+	const percentageLoads = [];
+	for (const [nm, ps] of Object.entries(payStructs)) {
+		if (ps.payType !== "percentage") continue;
+		const billed = billedOf.get(nm) || new Set();
+		for (const [key, row] of loadsOf(nm)) {
+			if (billed.has(key)) continue;
+			const completed = invoiceCompletionDay(row, cols);
+			if (completed ? !inRange(completed) : !monthOpen(loadAssignedMonthKey(row, monthCols))) continue;
+			const weekStart = completed ? getWeekRange(completed).weekStart : "";
+			const loadId = String(row[cols.loadIdCol] || "").trim();
+			const naming = loadId.length >= 4 ? manualsOf(nm).find((m) => m.text.includes(loadId.toUpperCase())) : null;
+			const { reason, text } = payrollCheckLib.percentageLoadReason({
+				completed, weekStart, weekly: weekStart ? weeklyOf(`${nm}\t${weekStart}`).map((x) => ({ invoiceNumber: x.invoice_number })) : [],
+				mayBeBilledBy: naming ? naming.invoiceNumber : "",
+			});
+			percentageLoads.push({ driverKey: nm, driverName: display(nm), weekStart, loadId, completed, paymentCents: revenueOf.has(key) ? revenueOf.get(key) : null, reason, text });
+		}
+	}
+
+	return payrollCheckLib.shapeCheck({
+		scope, names,
+		sections: { ledgerDays, invoiceDays, personalLines, pendingReceipts, correctionDrafts, percentageLoads },
+		rules: { tripWorkDaysFrom: TRIP_WORK_DAYS_FROM || "", personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED },
+		generatedAt: new Date().toISOString(),
+	});
+}
+
+// GET /api/admin/payroll-check?weekEnd=YYYY-MM-DD: the before-payroll check
+// (payrollCheck()), drivers by name. Super Admin; read-only. The role gate runs
+// first and the limiter after it, so a refused caller spends nothing; with the
+// switch off the route answers 404 FEATURE_OFF before reading anything.
+// PAYROLL_CHECK_ENABLED: off unless exactly "true" (a new read of pay).
+const PAYROLL_CHECK_ENABLED = process.env.PAYROLL_CHECK_ENABLED === "true";
+// One check runs every scope's ledger and every driver's weeks synchronously, so
+// a page reloading it, or a script, is held to a person's pace. Keyed on the
+// session user (the address only without one, which the role gate refused).
+const payrollCheckLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many payroll checks. Try again in a few minutes." },
+	standardHeaders: true,
+});
+app.get("/api/admin/payroll-check", requireRole("Super Admin"), payrollCheckLimiter, async (req, res) => {
+	if (!PAYROLL_CHECK_ENABLED) {
+		return res.status(404).json({ error: "The before-payroll check is switched off on this server.", code: "FEATURE_OFF" });
+	}
+	const weekEnd = req.query ? req.query.weekEnd : undefined;
+	if (typeof weekEnd !== "string" || weekEnd.length !== 10) {
+		return res.status(400).json({ error: "weekEnd must be a day, as YYYY-MM-DD: the Friday that ends the last week to check.", code: payrollCheckLib.WEEK_REFUSALS.invalid });
+	}
+	try {
+		const out = await payrollCheck({ weekEnd, names: true });
+		if (out.refused) return res.status(out.status).json({ error: out.reason, code: out.code });
+		res.set("Cache-Control", "no-store");
+		res.json(out);
+	} catch (err) {
+		console.error("Payroll check error:", err.message);
+		res.status(500).json({ error: "The before-payroll check failed; nothing was changed. Try again in a moment." });
+	}
+});
+
 // --- The weekly invoice's active-day algorithm for driver pay ---
 // Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
 //
