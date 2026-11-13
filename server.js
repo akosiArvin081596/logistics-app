@@ -31986,12 +31986,12 @@ function personalLinesTotals(summaries) {
 	};
 }
 
-// The driver box's names: each receipt driver with a Personal line, one
-// spelling per driver as normalizeDriverName() reads it, sorted.
+// The driver box's names: one per driver as normalizeDriverName() reads it, in
+// the spelling on most of his lines, so a stray spelling never labels the box.
 function personalLineDrivers() {
 	const byKey = new Map();
-	const rows = db.prepare(`SELECT DISTINCT e.driver AS driver FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
-		WHERE ep.kind = 'deduct' AND ep.voided_at = '' ORDER BY e.driver LIMIT 1000`).all();
+	const rows = db.prepare(`SELECT e.driver AS driver, COUNT(*) AS n FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
+		WHERE ep.kind = 'deduct' AND ep.voided_at = '' GROUP BY e.driver ORDER BY n DESC, e.driver LIMIT 1000`).all();
 	for (const r of rows) {
 		const name = String(r.driver || "").trim();
 		const key = normalizeDriverName(name);

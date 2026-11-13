@@ -65,6 +65,8 @@
  *      string of at most 100 characters (400); more than 5,000 lines in the
  *      dates (422), never a cut list with a wrong total
  *   §21 the marks switched off, and the receipt's week off: the lines still list
+ *   §22 two spellings of one driver: the box names him once (the spelling on
+ *      most of his lines) and picking him lists both spellings' lines
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-routes.js    # exits 1 on failure
@@ -669,11 +671,12 @@ async function seedLines(w) {
 		const w = world(WEEK_ON, { extra: LINES_EXTRA });
 		await w.call("POST", "/api/expenses/1/personal", { body: {} });
 		const refused = [];
-		for (const query of [{ from: "2026-13-01" }, { to: "2026-02-30" }, { from: "10/01/2026" }, { from: ["2026-10-01", "2026-10-02"] }]) {
+		for (const query of [{ from: "2026-13-01" }, { to: "2026-02-30" }, { from: "10/01/2026" }, { from: ["2026-10-01", "2026-10-02"] }, { to: ["2026-10-31"] }]) {
 			const r = await readLines(w, query);
 			refused.push([r.status, r.body && r.body.code]);
 		}
-		check("a date that is not a real YYYY-MM-DD: 400 INVALID_DATE", refused, [[400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"]]);
+		check("a date that is not one real YYYY-MM-DD (a one-item list included): 400 INVALID_DATE", refused,
+			[[400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"], [400, "INVALID_DATE"]]);
 		const drivers = [];
 		for (const driver of [["Test Driver A", "Test Driver B"], "x".repeat(101), { a: 1 }]) {
 			const r = await readLines(w, { driver });
@@ -712,6 +715,20 @@ async function seedLines(w) {
 		const p = (r2.body && r2.body.lines && r2.body.lines[0] && r2.body.lines[0].personal) || {};
 		check("the receipt's week off: the line lists as the receipts show it (no wait_text or final)", [r2.status, p.state, "wait_text" in p, "final" in p], [200, "pending", false, false]);
 		w2.cleanup();
+	}
+
+	section("§22 two spellings of one driver: one name in the box, every line under it");
+	{
+		const w = world(WEEK_ON, { extra: LINES_EXTRA });
+		addReceipt(w, { id: 60, driver: "  test driver A ", type: "Food", amount: 12, date: "2026-10-13" });
+		for (const id of [1, 5, 60]) await w.call("POST", `/api/expenses/${id}/personal`, { body: {} });
+		const all = await readLines(w);
+		check("the box names him once, in the spelling on most of his lines", all.body && all.body.drivers, ["Test Driver A"]);
+		const a = await readLines(w, { driver: "Test Driver A" });
+		check("…and picking him lists all three lines, the stray spelling's included, $512.00",
+			[listed(a), ((a.body && a.body.lines) || []).map((l) => l.driver), totalsOf(a) && totalsOf(a).text],
+			[[[60, "pending"], [1, "pending"], [5, "pending"]], ["test driver A", "Test Driver A", "Test Driver A"], "$512.00"]);
+		w.cleanup();
 	}
 
 	finish();
