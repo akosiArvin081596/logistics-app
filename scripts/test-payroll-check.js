@@ -18,7 +18,7 @@
  *       no invoice, a blank pickup, an ELD read changed after the invoice, an
  *       investor scope with no ELD for the truck, an adjustment that may pay
  *       it, a deleted correction Draft, a closed month; days a correction Draft
- *       holds are not listed
+ *       or a hand-made invoice's dated line holds are not listed
  *   §5  invoice-paid days the books no longer pay: a "remove" after the invoice
  *   §6  Personal lines on no invoice (a receipt driver no directory row names, a
  *       line waiting for its week's invoice); receipts still Pending
@@ -180,6 +180,10 @@ async function buildFleet(env = ENV) {
 	w.db.prepare("UPDATE invoices SET adjustment = 300, adjustment_note = 'made-up bonus' WHERE id = ?").run(inv[`${KIT} 2026-10-09`].id);
 	addManualInvoice(w.db, { number: "INV-M-LP-2026W41-01", driver: LU, weekStart: "2026-10-03", weekEnd: "2026-10-09", correctionOf: inv[`${LU} 2026-10-09`].id, days: ["2026-10-08"], deletedAt: "2026-10-14T15:00:00.000Z" });
 	const halDraft = addManualInvoice(w.db, { number: "INV-M-HB-2026W41-01", driver: HAL, weekStart: "2026-10-03", weekEnd: "2026-10-09", correctionOf: inv[`${HAL} 2026-10-09`].id, days: ["2026-10-08", "2026-10-09"] });
+	// A hand-made invoice for Dax with one line dated 10/7 (no paidDays, no correction): it may pay that day.
+	w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name,
+		load_ids, expense_ids, render_data, is_manual, created_by) VALUES ('INV-M-DP-2026W41-01', 'dax penn', '2026-10-03', '2026-10-09', 1, 0, 260, 0, 'Submitted', 'INV-M-DP-2026W41-01.pdf', '[]', '[]', ?, 1, 'made-up-admin')`)
+		.run(JSON.stringify({ __templateName: "service_invoice_manual", lineItems: [{ date: "2026-10-07", description: "Made-up hand invoice: an extra stop", amount: 260 }], totalDue: 260 }));
 	// The batch of Friday 10/16.
 	w.clock.ms = etMs("2026-10-16 20:00");
 	for (const d of [ADA, BRAM, FAY, HAL, IVO, KIT, LU]) await gen(d, "2026-10-16");
@@ -327,7 +331,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			[ADA, "2026-10-08", "completedAfterInvoice"], [ADA, "2026-10-09", "completedAfterInvoice"],
 			[BRAM, "2026-10-15", "completedAfterInvoice"], [BRAM, "2026-10-16", "completedAfterInvoice"],
 			[CYD, "2026-10-07", "addedAfterInvoice"],
-			[DAX, "2026-10-06", "noWeeklyInvoice"], [DAX, "2026-10-07", "noWeeklyInvoice"],
+			[DAX, "2026-10-06", "noWeeklyInvoice"],
 			[ELI, "2026-10-06", "blankPickup"], [ELI, "2026-10-07", "blankPickup"],
 			[IVO, "2026-10-13", "invoiceEldNoDriving"],
 			[JO, "2026-10-06", "investorScopeNoEld"],
@@ -345,10 +349,11 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 		ok("each item names the week's invoice when there is one", /^INV-/.test(day(ADA, "2026-10-08").invoiceNumber || "") && (day(DAX, "2026-10-06").invoiceNumber === ""), JSON.stringify([day(ADA, "2026-10-08"), day(DAX, "2026-10-06")]));
 		ok("each reason comes with its words", (body.ledgerDays || []).every((x) => typeof x.text === "string" && x.text.length > 10), JSON.stringify((body.ledgerDays || []).find((x) => !x.text)));
 		eq("Hal's 10/8 and 10/9 are held by his correction Draft", forDriver(body.ledgerDays, HAL), []);
+		eq("Dax's 10/7 is held by a hand-made invoice's line dated that day", forDriver(body.ledgerDays, DAX).map((x) => x.day), ["2026-10-06"]);
 		eq("Gus is paid by percentage: no day of his is listed", forDriver(body.ledgerDays, GUS), []);
 		eq("the scope of each day: Jo's 10/6 is investor 5's", (day(JO, "2026-10-06").scopes || []).map((s) => s.ownerId), [5]);
 		eq("summary by reason", body.summary && body.summary.ledgerDays && body.summary.ledgerDays.byReason, {
-			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 7, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 2, noWeeklyInvoice: 6,
+			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 7, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 2, noWeeklyInvoice: 5,
 		});
 	});
 
@@ -399,7 +404,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			s.ledgerDays && s.ledgerDays.cents, s.invoiceDays && s.invoiceDays.cents, s.personalLines && s.personalLines.cents,
 			s.pendingReceipts && s.pendingReceipts.cents, s.correctionDrafts && s.correctionDrafts.cents, s.percentageLoads && s.percentageLoads.paymentCents,
 		], [sumOf(body.ledgerDays), sumOf(body.invoiceDays), sumOf(body.personalLines), sumOf(body.pendingReceipts), sumOf(body.correctionDrafts), sumOf(body.percentageLoads, "paymentCents")]);
-		eq("the ledger days come to 20 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [22, 572474]);
+		eq("the ledger days come to 19 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [21, 546474]);
 		eq("Pat's days", forDriver(body.ledgerDays, PAT).map((x) => x.cents), [26237, 26237]);
 		const ned = forDriver(body.ledgerDays, NED);
 		eq("Ned's 10/6 once, with both scopes; 10/7 the company's", ned.map((x) => [x.day, x.overlap, (x.scopes || []).map((sc) => sc.ownerId).sort(), x.cents]),
@@ -431,7 +436,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			const before = JSON.stringify(jt);
 			freeze(jt);
 			const out = await lw.api.payrollCheck({ weekEnd: WEEK_END, names: true });
-			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 22]);
+			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 21]);
 		} finally {
 			lw.db.close();
 		}
@@ -462,7 +467,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 		eq("the database file unchanged", W.fileHash(copy.db), fileBefore);
 		const labelled = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`, "--json"]);
 		const names = (labelled.json && labelled.json.ledgerDays || []).map((x) => x.driver);
-		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 22 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
+		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 21 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
 		const text = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`]);
 		ok("the text report names each section and says nothing was written", text.code === 0 && /Nothing was written/.test(text.stdout) && /Ledger-paid days on no invoice/.test(text.stdout), text.stdout.slice(0, 300));
 	});
