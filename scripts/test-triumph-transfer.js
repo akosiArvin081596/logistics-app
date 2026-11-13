@@ -382,12 +382,19 @@ async function madeUpPdf(lines) {
 	{
 		const lines = ["MADE-UP FACTOR LINE ONE", "MADE-UP FACTOR LINE TWO", "MADE-UP FACTOR LLC", "MADE-UP REMIT LINE"];
 		// A stand-in renderer: the page's text as a PDF, so the stamp beside the block can be read.
-		// Tags are stripped until nothing changes, so a removal can't leave a new tag behind.
+		// A character scan, not a regex: each tag becomes a line break and a style block's text is dropped.
 		const pageText = (html) => {
-			let text = String(html);
-			for (let prev = ""; prev !== text;) {
-				prev = text;
-				text = text.replace(/<style[\s\S]*?<\/style>/g, "").replace(/<[^>]*>/g, "\n");
+			let text = "", tag = null, inStyle = false;
+			for (const ch of String(html)) {
+				if (tag === null && ch === "<") tag = "";
+				else if (tag !== null && ch === ">") {
+					const name = tag.trim().toLowerCase();
+					if (name.startsWith("style")) inStyle = true;
+					else if (name.startsWith("/style")) inStyle = false;
+					tag = null;
+					text += "\n";
+				} else if (tag !== null) tag += ch;
+				else if (!inStyle) text += ch;
 			}
 			return text;
 		};
