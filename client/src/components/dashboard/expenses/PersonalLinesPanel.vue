@@ -1,8 +1,6 @@
 <template>
-  <!-- The Personal tab (Super Admin): each driver's Personal lines and their
-       total, read only. Every amount, total and state is the server's
-       (GET /api/expenses/personal/lines); the tag and the sentence are the ones
-       the receipts show (lib/personalReceipt.js). -->
+  <!-- Read only. Every amount, total and state is the server's; the tag and the
+       sentence come from lib/personalReceipt.js, as on the receipts. -->
   <div ref="rootEl" class="personal-lines">
     <div class="pl-filters">
       <select v-model="filter.driver" class="pl-input" aria-label="Driver" @change="load()">

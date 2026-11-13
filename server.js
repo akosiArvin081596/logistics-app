@@ -31964,9 +31964,8 @@ app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin")
 // shorter dates rather than show a cut list under a total that leaves lines out.
 const PERSONAL_LINES_MAX = 5000;
 
-// The Personal tab's totals over the summaries it lists: every state but
-// reversed counts (pending, carried, needs_correction, invoiced, correction);
-// the reversed lines are summed apart, never netted in.
+// Every state but reversed counts (pending, carried, needs_correction, invoiced,
+// correction); reversed lines are summed apart, never netted into the total.
 function personalLinesTotals(summaries) {
 	let cents = 0;
 	let lines = 0;
@@ -32001,15 +32000,9 @@ function personalLineDrivers() {
 	return [...byKey.values()].sort((a, b) => a.localeCompare(b, "en-US"));
 }
 
-// GET /api/expenses/personal/lines?driver=&from=&to= — Super Admin, read only:
-// the Personal tab on Expenses. One row per Personal line (a deduction not
-// voided; a receipt marked again after a reversal has two), newest receipt date
-// first: the receipt's driver, the line's receipt date and merchant, and
-// `personal`, the summary its receipt shows (personalLineSummary(), from which
-// the tab draws the same tag and sentence). driver matches the receipt's driver
-// in any spelling (normalizeDriverName()); from/to bound the line's receipt
-// date. totals: personalLinesTotals(); a reversal's credit row is never listed.
-// drivers: personalLineDrivers(), whatever the filters.
+// GET /api/expenses/personal/lines?driver=&from=&to= — the Personal tab, read only:
+// one row per line (not per receipt) with the summary its receipt shows, so the
+// tab's tag and sentence match the receipts'; the driver in any spelling.
 app.get("/api/expenses/personal/lines", requireRole("Super Admin"), personalLinesLimiter, (req, res) => {
 	try {
 		const { driver = "", from = "", to = "" } = req.query;
