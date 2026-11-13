@@ -232,7 +232,7 @@ PUT /api/invoices/:id/revert · requireRole("Super Admin")=anon@12b84c4b0134 · 
 PUT /api/invoices/:id/submit · requireAuth@2f5c61384511 · inline@30a7a3069d71
 DELETE /api/invoices/corrections/:lineId · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · correctionRouteLimiter=limiter · inline@91ef6142171c
 GET /api/invoices/corrections/waiting · requireRole("Super Admin")=anon@12b84c4b0134 · inline@6894b51f99b3
-POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@59dd3cc4afe4
+POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@824fabdc8f1e
 POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e059be016674
 POST /api/invoices/manual/totals · requireRole("Super Admin")=anon@12b84c4b0134 · inline@19a163742032
 GET /api/invoices/payees · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4189f2fbaec6

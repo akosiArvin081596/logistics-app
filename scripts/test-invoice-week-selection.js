@@ -241,6 +241,9 @@ function buildWorld(db, opts = {}) {
 		// The closed-month invoice guard is off here (scripts/test-invoice-period-guard.js
 		// §7 runs it on).
 		INVOICE_CLOSED_MONTH_GUARD_ENABLED: false,
+		// The weekly performance page is off here, as its switch is by default
+		// (scripts/test-invoice-day-rows.js §6 runs it on): no page.
+		invoicePerformanceCopy: async () => null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },
