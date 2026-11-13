@@ -28,6 +28,8 @@
 //      person never reads "tried again on its own"
 //   §12 the driver's line above Delivered: the driver app only, never the tracker
 //   §15 no alert address on the server (item 118): the settings dialog says alerts are off
+//   §16 advance lines on an automatic invoice (PR A1): each new code's words, and a sent
+//       invoice whose advance lines changed asks for a corrected invoice by hand
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -59,8 +61,8 @@ function section(t) { console.log(`\n${t}`) }
 section('§1  parity with the server')
 eq(Object.keys(S.AUTO_INVOICE_REASONS).sort(), [...rules.REASON_CODES].sort(), '§1 the client words exactly the server reason codes')
 const everyField = rules.fingerprintDiff(
-  { completed: true, live: true, paymentCents: 1, brokerEmail: 'a', trailer: 'a', podIds: [1], rateConIds: [1] },
-  { completed: false, live: false, paymentCents: 2, brokerEmail: 'b', trailer: 'b', podIds: [2], rateConIds: [2] },
+  { completed: true, live: true, paymentCents: 1, brokerEmail: 'a', trailer: 'a', podIds: [1], rateConIds: [1], advanceLines: ['1:100'] },
+  { completed: false, live: false, paymentCents: 2, brokerEmail: 'b', trailer: 'b', podIds: [2], rateConIds: [2], advanceLines: ['2:100'] },
 )
 eq(Object.keys(S.AUTO_INVOICE_CHANGED_WORDS).sort(), [...everyField].sort(), '§1 every field the fingerprint can name has words')
 const JOB = fs.readFileSync(path.join(ROOT, 'lib', 'auto-invoice-job.js'), 'utf8')
@@ -641,6 +643,40 @@ section('§15 no alert address on the server (item 118): the settings dialog say
   const openSrc = liftFn(DIALOG, 'openAutoSettings', { async: true }) || ''
   const saveSrc = liftFn(DIALOG, 'saveAutoSettings', { async: true }) || ''
   ok(!/alert/i.test(saveSrc) && (openSrc.match(/autoAlerts/g) || []).length === 2, '§15 display only: the read sets it, nothing else touches it')
+}
+
+// ------------------------------------------------------------------ §16
+section('§16 advance lines on an automatic invoice (PR A1)')
+{
+  const R = S.AUTO_INVOICE_REASONS
+  const WORDS = {
+    ADVANCE_LINES_INVALID: ['advances leave no balance', "The load's advance lines come to the rate con's total or more, so there is no balance due to bill. Check the advance lines and the Payment, then Try again, or draft it by hand."],
+    ADVANCE_LINE_TEXT: ['advance line has typed text', 'An advance line has a label other than Fuel advance or Advance, or a reference, and an automatic invoice prints neither. Void it and add it again without them, then Try again, or draft it by hand.'],
+    PROTECTED_VALUE: ['a protected value would print', "The invoice would print a value on the carrier deny list or the driver's name, so it wasn't made. Draft it by hand and check every field."],
+    DENY_LIST_UNSET: ['deny list not set', "The carrier deny list isn't set on the server, so an invoice with advance lines can't be checked and wasn't made. Draft it by hand."],
+    LINES_CHANGED: ['advance lines changed', 'An advance line changed while the invoice was being made, so it is made again with the lines as they are now.'],
+  }
+  for (const [code, [short, text]] of Object.entries(WORDS)) {
+    ok(rules.REASON_CODES.includes(code), `§16 FAILS ON THE OLD CODE: ${code} is a server code`)
+    eq(R[code] && [R[code].short, R[code].text], [short, text], `§16 FAILS ON THE OLD CODE: ${code}: its words`)
+  }
+  eq(S.autoInvoiceChip({ state: 'queued', code: 'LINES_CHANGED' }), { label: 'Waiting: advance lines changed', tone: 'muted', reason: WORDS.LINES_CHANGED[1] },
+    '§16 FAILS ON THE OLD CODE: queued again after a line changed: it is made again, nothing for a person yet')
+  eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'LINES_CHANGED' }).reason,
+    'An advance line changed while the invoice was being made, so nothing was sent. Try again makes it with the lines as they are now, or draft it by hand.',
+    '§16 FAILS ON THE OLD CODE: ...once a person must act (the run line gave it back), its own sentence')
+  eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'ADVANCE_LINE_TEXT' }).label, 'Needs attention: advance line has typed text', '§16 FAILS ON THE OLD CODE: the chip names the stop')
+  // A sent invoice whose advance lines changed: the balance it billed is no longer the load's.
+  const sentChip = S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '11122026-4', changed: ['advanceLines'], sent: true })
+  eq(sentChip, { label: 'Sent to the broker: load changed', tone: 'warn',
+    reason: 'Changed since the invoice was sent to the broker: its advance lines. An advance line changed after the invoice went. Send a corrected invoice by hand, then Mark checked.' },
+  '§16 FAILS ON THE OLD CODE: a sent invoice whose advance lines changed asks for a corrected invoice by hand')
+  eq(S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '11122026-4', changed: ['payment'], sent: true }).reason,
+    'Changed since the invoice was sent to the broker: the Payment. Check with the broker whether a corrected invoice is needed, then Mark checked.', '§16 ...any other change reads as before')
+  eq(S.autoInvoiceChip({ state: 'drafted', code: '', invoiceId: '11122026-4', changed: ['advanceLines'] }).reason,
+    'Changed since the draft: its advance lines. Check the draft in Gmail, then Mark checked.', '§16 FAILS ON THE OLD CODE: a draft whose lines changed: check it in Gmail')
+  eq([S.canMarkChecked({ state: 'drafted', changed: ['advanceLines'] }), S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'drafted', changed: ['advanceLines'] } })], [true, true],
+    '§16 FAILS ON THE OLD CODE: ...Mark checked is offered, and the toggle counts it')
 }
 
 console.log(`\n${'='.repeat(64)}`)

@@ -56156,6 +56156,11 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //   AUTO_INVOICE_KNOWN_ADDRESS_ENABLED  a kill switch that fails safe: an automatic invoice to
 //     chrobinson.com goes only to an address a person has already invoiced on 3 loads
 //     (rules.knownAddressRefusal()). Set to false, every such load goes to a person.
+//   AUTO_INVOICE_ADVANCE_LINES_ENABLED  on only when exactly "true", with the advance lines
+//     themselves on: a load with advance lines is invoiced automatically for its balance due, its
+//     lines printed as the Draft Invoice button prints them (closed-list labels, no reference, rule
+//     7's check on what it composes, the lines read again right before the hand-off). Off, such a
+//     load goes to a person (ADVANCE_LINES), as before.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -57701,6 +57706,12 @@ const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
 	logAudit,
 	sanitizeEvidenceText,
 	assignmentFor: (loadId) => factoringRoutes.assignmentFor(loadId),
+	// Rule 7 on an automatic invoice with advance lines: the carrier deny list as the C.H. Robinson
+	// redactor reads it, through the list's one spelling; null while it's unset.
+	denyHits: (() => {
+		const deny = require("./lib/chr-events").createRedactor({ denyList: process.env[require("./lib/driver-instructions-runtime").DENY_LIST_SETTING] || "" });
+		return deny.count > 0 ? deny.hits : null;
+	})(),
 	env: process.env,
 });
 
