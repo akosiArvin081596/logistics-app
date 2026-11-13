@@ -382,7 +382,16 @@ async function madeUpPdf(lines) {
 	{
 		const lines = ["MADE-UP FACTOR LINE ONE", "MADE-UP FACTOR LINE TWO", "MADE-UP FACTOR LLC", "MADE-UP REMIT LINE"];
 		// A stand-in renderer: the page's text as a PDF, so the stamp beside the block can be read.
-		const render = async (html) => madeUpPdf(String(html).replace(/<style[\s\S]*?<\/style>/g, "").replace(/<[^>]+>/g, "\n").split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 30));
+		// Tags are stripped until nothing changes, so a removal can't leave a new tag behind.
+		const pageText = (html) => {
+			let text = String(html);
+			for (let prev = ""; prev !== text;) {
+				prev = text;
+				text = text.replace(/<style[\s\S]*?<\/style>/g, "").replace(/<[^>]*>/g, "\n");
+			}
+			return text;
+		};
+		const render = async (html) => madeUpPdf(pageText(html).split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 30));
 		const sample = await triumphBatch.buildSampleBatch({ lines, day: "2026-11-12", render, at: new Date(T0) });
 		ok(sample.ok, "§5 (fixture) the made-up batch builds");
 		const files = { pdfName: sample.pdfName, pdf: sample.pdf, csvName: sample.csvName, csv: sample.csv };
