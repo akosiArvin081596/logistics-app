@@ -46,11 +46,13 @@
 //   A   a made-up Super Admin on /driver at 1280x800: the route is never read, no note, no button
 //   R   a made-up Super Admin on the Drivers page, at 1280x800 and 390x844: "Driver notices" with the
 //       count and the three states, times on the app's clock; nothing with the switch off; a line when
-//       the record can't be read; a Driver sent away from the page, the record never read
+//       the record can't be read; a Driver sent away from the page, the record never read. At 1280x800
+//       (R4), every notice's lines, tagged when they need the Performance tab, its tour's steps, and the
+//       whole app tour once, word for word from the list and the tour's own steps, with one read
 //
 // Screens for the LIVE note (made-up data) go to SHOT_DIR, named for what each shows: 1 the note, 2 I
 // acknowledge at work, 3 the line when it can't be saved, 4 the Drivers page's record, each at both
-// sizes; the other rows' screens follow them.
+// sizes; the other rows' screens follow them, R4's two (the notices' words, the app tour) among them.
 //
 // Like driver-performance.mjs this boots no server.js, opens no database, reads no settings file or
 // key and signs nobody real in. It serves the checkout's built client/dist from its own static server
@@ -78,7 +80,7 @@ import { WORDS, TOUR_STEPS } from '../../client/src/lib/driverReleaseNotices.js'
 import { RECORD_WORDS } from '../../client/src/lib/driverNoticeRecord.js'
 
 const require = createRequire(import.meta.url)
-const { RELEASES, APP_TOUR_ROW, latestReleaseId, unseenReleases } = require('../../lib/driver-releases.js')
+const { RELEASES, APP_TOUR_ROW, latestReleaseId, unseenReleases, acknowledgementRecord } = require('../../lib/driver-releases.js')
 
 const HOST = '127.0.0.1'
 const ASKED_PORT = process.env.E2E_PORT ? Number(process.env.E2E_PORT) : 0
@@ -137,7 +139,7 @@ const lastWeek = { id: 'last-week', start: '2026-10-24', end: '2026-10-30', cred
 // The Drivers page's record, in the shape acknowledgementRecord() sends. Made-up drivers and times.
 const RECORD_ANSWER = {
   notices: [{
-    id: RELEASE, title: LATEST.title, date: RELEASE.slice(0, 10), acknowledged: 2, asked: 4,
+    id: RELEASE, title: LATEST.title, date: RELEASE.slice(0, 10), notes: LATEST.notes, tour: LATEST.tour, acknowledged: 2, asked: 4,
     drivers: [
       { name: 'Avery Sample', state: 'not-yet', at: null },
       { name: 'Casey Example', state: 'acknowledged', at: '2026-11-12T20:04:00.000Z' },
@@ -154,10 +156,30 @@ const RECORD_TEXTS = [
   ['Morgan Percent', `${RECORD_WORDS.acknowledged} Nov 12, 2026, 4:30 PM EST`],
   ['Riley Sample', RECORD_WORDS.notYet],
 ]
+// The record over the whole list, from the server's own function, on made-up drivers: R4 reads its words.
+const MADE_UP_SIGN_IN = '2026-10-01T12:00:00.000Z'
+const WORDS_ANSWER = {
+  notices: acknowledgementRecord(RELEASES, [
+    { id: 1, driver_name: 'Avery Sample', full_name: '', disabled_at: null, last_login_at: MADE_UP_SIGN_IN, created_at: '2026-05-04 10:00:00' },
+    { id: 2, driver_name: 'Casey Example', full_name: '', disabled_at: null, last_login_at: MADE_UP_SIGN_IN, created_at: '2026-05-04 10:00:00' },
+  ], [{ user_id: 2, release_id: RELEASE, seen_at: '2026-11-12T20:04:00.000Z', acknowledged_at: '2026-11-12T20:04:00.000Z' }]),
+}
+// What R4 expects each block to say, straight from the list and the tour's own steps: every line, tagged
+// when it needs the Performance tab; each step its notice's tour walks, by its title, its text and the
+// sentence a driver with the tab reads after it, tagged the same way. A block is its title, lines and
+// steps; a line is [text, tag], a step [title, lines].
+const tagFor = (need) => (need === 'performance' ? RECORD_WORDS.performanceOnly : '')
+function stepWords(id) {
+  const s = TOUR_STEPS.find((x) => x.id === id)
+  return [s.title, [[s.text, tagFor(s.needs)], ...(s.withPerformance ? [[s.withPerformance, RECORD_WORDS.performanceOnly]] : [])]]
+}
+const NOTICE_WORDS = ENTRIES.map((e) => ({ title: e.title, lines: e.notes.map((n) => [n.text, tagFor(n.needs)]), steps: [...new Set(e.tour)].map(stepWords) }))
+const APP_TOUR_WORDS = TOUR_STEPS.map((s) => stepWords(s.id))
 
 // One browser's view of the server. `release` says how the route answers: 'ok', 'off', 'fail', 'abort'
 // or 'empty'; `releaseDelayMs` holds its answer back. `ack` how the confirmation does: 'ok', 'fail' or
-// 'abort', held back `ackDelayMs`. `record` how the Drivers page's record does: 'ok', 'off' or 'fail'.
+// 'abort', held back `ackDelayMs`. `record` how the Drivers page's record does: 'ok', 'off', 'fail', or
+// 'words' (every notice on the list, as the server's own function makes it).
 // `reading` how the truck's does: 'fix', 'none', 'stale' or 'fail'. `perf` their week's: a status.
 // `calls.logout` counts every logout: a row that doesn't tap Logout must see none.
 function freshState({ who = DRIVER, session = true, status = '', offer = false, hasNote = false, release = 'ok', releaseDelayMs = 0, ack = 'ok', ackDelayMs = 0, record = 'ok', moving = false, onboarding = 'fully_onboarded', unread = false, reading = 'fix', perf = 200 } = {}) {
@@ -200,7 +222,7 @@ function recordAnswer(state) {
   if (state.release === 'off' || state.record === 'off') return { status: 404, body: { error: 'Not found', code: 'FEATURE_OFF' } }
   if (state.who.role !== 'Super Admin') return { status: 403, body: { error: 'Forbidden' } }
   if (state.record === 'fail') return { status: 503, body: { error: "That couldn't be read. Try again later.", code: 'RELEASE_UNAVAILABLE' } }
-  return { status: 200, body: RECORD_ANSWER }
+  return { status: 200, body: state.record === 'words' ? WORDS_ANSWER : RECORD_ANSWER }
 }
 
 function positionAnswer(state) {
@@ -277,6 +299,13 @@ async function shot(page, name) {
   fs.mkdirSync(SHOT_DIR, { recursive: true, mode: 0o700 })
   const file = path.join(SHOT_DIR, `${OUT_TAG}-${name}.png`)
   await page.screenshot({ path: file })
+  return file
+}
+// One part of the page, whole however tall: the Drivers page's section runs past the window.
+async function shotOf(locator, name) {
+  fs.mkdirSync(SHOT_DIR, { recursive: true, mode: 0o700 })
+  const file = path.join(SHOT_DIR, `${OUT_TAG}-${name}.png`)
+  await locator.screenshot({ path: file })
   return file
 }
 
@@ -424,6 +453,24 @@ async function heights(page, selector) {
   return out
 }
 const tall = (list) => list.length > 0 && list.every((h) => h >= 44)
+// The Drivers page's words as a Super Admin sees them, in NOTICE_WORDS' shape: each notice block, then the
+// app tour's steps and how many app tours there are.
+const wordsOnPage = (page) => page.evaluate(() => {
+  const squeeze = (t) => (t || '').replace(/\s+/g, ' ').trim()
+  const lineOf = (el) => [squeeze(el.querySelector('.dn-text')?.textContent), squeeze(el.querySelector('[data-testid="driver-notice-only"]')?.textContent)]
+  const stepsOf = (root) => [...root.querySelectorAll('[data-testid="driver-tour-step"]')]
+    .map((s) => [squeeze(s.querySelector('[data-testid="driver-tour-step-title"]')?.textContent), [...s.querySelectorAll('[data-testid="driver-tour-step-line"]')].map(lineOf)])
+  const tours = [...document.querySelectorAll('[data-testid="driver-app-tour"]')]
+  return {
+    notices: [...document.querySelectorAll('[data-testid="driver-notice"]')].map((card) => ({
+      title: squeeze(card.querySelector('[data-testid="driver-notice-title"]')?.textContent),
+      lines: [...card.querySelectorAll('[data-testid="driver-notice-line"]')].map(lineOf),
+      steps: stepsOf(card),
+    })),
+    appTour: tours.length ? stepsOf(tours[0]) : null,
+    appTours: tours.length,
+  }
+})
 
 // A read of the route has come and gone, with time for what follows it.
 async function momentPassed(state, before, n = 1) {
@@ -1132,10 +1179,11 @@ async function recordRun(browser, size) {
       await opened.page.waitForTimeout(1000)
       const sections = await opened.page.locator(testid('driver-notices')).count()
       const line = await text(opened.page, testid('driver-notices-unreadable'))
+      const tours = await opened.page.locator(testid('driver-app-tour')).count()
       record(`R2-${kind}-${t}`, kind === 'off' ? 'The switch off: no "Driver notices" on the Drivers page' : "A record that can't be read says so",
-        kind === 'off' ? 'no section' : `the section with "${RECORD_WORDS.unreadable}" and no rows`,
-        `sections ${sections}, line "${line}", rows ${await opened.page.locator(testid('driver-notice-row')).count()}`,
-        sections === want && (kind === 'off' || (line === RECORD_WORDS.unreadable && await opened.page.locator(testid('driver-notice-row')).count() === 0)))
+        kind === 'off' ? 'no section, and no app tour' : `the section with "${RECORD_WORDS.unreadable}", no rows and no app tour`,
+        `sections ${sections}, line "${line}", rows ${await opened.page.locator(testid('driver-notice-row')).count()}, app tours ${tours}`,
+        sections === want && tours === 0 && (kind === 'off' || (line === RECORD_WORDS.unreadable && await opened.page.locator(testid('driver-notice-row')).count() === 0)))
     } finally {
       await opened.ctx.close()
     }
@@ -1150,6 +1198,36 @@ async function recordRun(browser, size) {
       new URL(turned.page.url()).pathname === '/driver' && driver.calls.record === 0 && await turned.page.locator(testid('driver-notices')).count() === 0)
   } finally {
     await turned.ctx.close()
+  }
+}
+
+// R4: the words on the record, every notice on the list, from the server's own function: one read and
+// nothing written to the notices, since the app tour's words are the app's own.
+async function recordWordsRun(browser, size) {
+  const t = size.tag
+  const state = freshState({ who: ADMIN, record: 'words' })
+  const { ctx, page, writes } = await openPage(browser, size, state, [], '/drivers')
+  try {
+    const shown = await appears(page, testid('driver-app-tour'), 15000)
+    await page.waitForTimeout(300)
+    const found = await wordsOnPage(page)
+    const headings = await allText(page.locator(`${testid('driver-notices')} .dn-words-heading`))
+    const tourTitle = await text(page, testid('driver-app-tour-title'))
+    const fits = await noSideScroll(page)
+    const wordsShot = shown ? await shotOf(page.locator(testid('driver-notices')).first(), `admin-notice-words-${t}`) : ''
+    if (shown) await shotOf(page.locator(testid('driver-app-tour')).first(), `admin-app-tour-${t}`)
+    const blocksOk = sameList(found.notices, NOTICE_WORDS)
+    const tourOk = sameList(found.appTour, APP_TOUR_WORDS)
+    const headingsOk = sameList(headings, ENTRIES.flatMap(() => [RECORD_WORDS.lines, RECORD_WORDS.tour]))
+    // Writes from the page's other parts are shown, not judged.
+    const releaseWrites = writes.filter((w) => /\/api\/(driver\/me\/release|admin\/driver-release)/.test(w))
+    record(`R4-${t}`, "A Super Admin reads each notice's lines and tour as drivers read them, and the whole app tour once",
+      `${NOTICE_WORDS.length} blocks, newest first, each "${RECORD_WORDS.lines}" with the list's lines ("${RECORD_WORDS.performanceOnly}" on each that needs the tab) and "${RECORD_WORDS.tour}" with its steps' words; "${RECORD_WORDS.appTour}" once, every step; one read; nothing written to the notices; no side scroll`,
+      `shown ${shown}, blocks ${blocksOk ? `as the list (${found.notices.length})` : JSON.stringify(found.notices)}, app tour ${tourOk ? `as the tour (${found.appTour.length} steps)` : JSON.stringify(found.appTour)}, app tours ${found.appTours}, headings ${headingsOk ? 'as written' : JSON.stringify(headings)}, title "${tourTitle}", reads ${state.calls.record}, notice writes ${releaseWrites.length} (all writes ${JSON.stringify(writes)}), fits ${fits}`,
+      shown && blocksOk && tourOk && found.appTours === 1 && headingsOk && tourTitle === RECORD_WORDS.appTour && state.calls.record === 1 && releaseWrites.length === 0 && fits,
+      wordsShot)
+  } finally {
+    await ctx.close()
   }
 }
 
@@ -1204,6 +1282,7 @@ async function main() {
     await sharedPhoneRun(browser, PHONE)
     await offerRun(browser, PHONE)
     await otherRoleRun(browser, DESKTOP)
+    await recordWordsRun(browser, DESKTOP)
     await lockScreenRun(browser, PHONE)
   } finally {
     await browser.close()

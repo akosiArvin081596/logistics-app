@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // The driver's own week: the pure lib client/src/lib/driverPerformance.js, and how
-// DriverPerformanceTab.vue, DriverWeekBar.vue, BottomNav.vue and DriverView.vue use it; and the
-// Super Admin's board on /driver, DriverPerformanceBoard.vue. The server works out every figure and
+// DriverPerformanceTab.vue, DriverWeekBar.vue, BottomNav.vue and DriverView.vue use it; the
+// Super Admin's board on /driver, DriverPerformanceBoard.vue; and the Super Admin's Driver
+// Performance tab on the dashboard (client/src/lib/driverPerformanceAdmin.js,
+// DriverPerformanceAdminTab.vue, DashboardView.vue). The server works out every figure and
 // its privacy rules (scripts/test-driver-performance.js); here the app must show only what those
 // answers allow.
 //   §1  the fixed words, exact, and none of the words a driver's screen must not show
@@ -25,6 +27,18 @@
 //   §15 no pay, invoice or payout screen reads the count: only these three files import the lib
 //   §16 pastWeeksView(): each past week's days, figure and hours line, in the server's order; the
 //       "weren't counted" line; what's missing named, never 0; nothing else gets through
+//   §17 the Super Admin's tab, its lib: the words; only a Super Admin asks; each driver's row is his
+//       own tab's views of his own answer, in the server's order; this week's drivers off the
+//       board with the reason in words; nothing it can't trust shows; it computes and sorts nothing
+//   §18 DriverPerformanceAdminTab.vue: one read, never a write or storage; the row's button opens
+//       what counted and his past weeks; "Not on the board" collapsed; the board by unit is the
+//       existing component; the hours line is the driver's own
+//   §19 DashboardView.vue: the tab after Fleet & Drivers, a Super Admin's only once its read answers,
+//       gone again on the server's "gone", back to the Job Board
+//   §20 the real server rules through the tab's views: the same figures and words as his own tab
+//   §21 the dashboard reaches no Vant: nothing it can import, lazily or not, names a Vant module
+//   §22 DriverPerformanceAdminBoard.vue: the driver board's views and words in plain markup, one
+//       period read at a time, the hours-of-service line always
 //
 // No DOM, no server, no build; scripts/e2e/driver-performance.mjs covers the page.
 //   node scripts/test-driver-performance-client.mjs      # exits 1 on any failure
@@ -40,6 +54,10 @@ const BAR = path.join(ROOT, 'client', 'src', 'components', 'driver', 'DriverWeek
 const BOARD = path.join(ROOT, 'client', 'src', 'components', 'driver', 'DriverPerformanceBoard.vue')
 const NAV = path.join(ROOT, 'client', 'src', 'components', 'driver', 'BottomNav.vue')
 const VIEW = path.join(ROOT, 'client', 'src', 'views', 'DriverView.vue')
+const ADMIN_LIB = path.join(ROOT, 'client', 'src', 'lib', 'driverPerformanceAdmin.js')
+const ADMIN_TAB = path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'DriverPerformanceAdminTab.vue')
+const ADMIN_BOARD = path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'DriverPerformanceAdminBoard.vue')
+const DASHBOARD = path.join(ROOT, 'client', 'src', 'views', 'DashboardView.vue')
 
 let pass = 0
 let fail = 0
@@ -57,6 +75,8 @@ function done() {
 const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
 
 const v = await import(pathToFileURL(LIB).href)
+// The Super Admin's tab: absent on an older tree, so its sections fail by name.
+const adm = fs.existsSync(ADMIN_LIB) ? await import(pathToFileURL(ADMIN_LIB).href) : {}
 const require = createRequire(import.meta.url)
 const server = require(path.join(ROOT, 'lib', 'driver-performance.js'))
 const libSrc = read(LIB)
@@ -65,6 +85,10 @@ const bar = read(BAR)
 const board = read(BOARD)
 const nav = read(NAV)
 const view = read(VIEW)
+const adminLibSrc = read(ADMIN_LIB)
+const adminTab = read(ADMIN_TAB)
+const adminBoard = read(ADMIN_BOARD)
+const dashboard = read(DASHBOARD)
 
 const scriptOf = (src) => (src.match(/<script setup>([\s\S]*?)<\/script>/) || [])[1] || ''
 const styleOf = (src) => (src.match(/<style scoped>([\s\S]*?)<\/style>/) || [])[1] || ''
@@ -613,9 +637,14 @@ console.log('§15 no pay, invoice or payout screen reads the count')
 const CLIENT_SRC = path.join(ROOT, 'client', 'src')
 const clientFiles = fs.readdirSync(CLIENT_SRC, { recursive: true }).map(String).filter((f) => /\.(js|mjs|ts|vue)$/.test(f))
 const inClient = (re) => clientFiles.filter((f) => re.test(read(path.join(CLIENT_SRC, f)))).sort()
-eq('§15 only the driver\'s own screens import the lib', inClient(/['"][^'"\n]*\/driverPerformance(\.js)?['"]/), ['components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'views/DriverView.vue'])
+eq('§15 only the driver\'s own screens import the lib, and the office\'s tab reads it through its own', inClient(/['"][^'"\n]*\/driverPerformance(\.js)?['"]/), [
+  'components/driver/DriverPerformanceBoard.vue', 'components/driver/DriverPerformanceTab.vue', 'lib/driverPerformanceAdmin.js', 'views/DriverView.vue',
+])
+eq('§15 and only the dashboard, its tab and its board import the tab\'s own lib', inClient(/['"][^'"\n]*\/driverPerformanceAdmin(\.js)?['"]/),
+  ['components/dashboard/DriverPerformanceAdminBoard.vue', 'components/dashboard/DriverPerformanceAdminTab.vue', 'views/DashboardView.vue'])
 eq('§15 only the lib reads the server\'s weights', inClient(/\bcreditWeights\b/), ['lib/driverPerformance.js'])
 eq('§15 only the lib names his week\'s route', inClient(/api\/driver\/me\/performance/), ['lib/driverPerformance.js'])
+eq('§15 only the tab\'s lib names the drivers\' weeks route', inClient(/api\/admin\/driver-performance/), ['lib/driverPerformanceAdmin.js'])
 
 // ── §16 his past weeks ───────────────────────────────────────────────────────
 console.log('§16 pastWeeksView()')
@@ -670,5 +699,267 @@ if (typeof server.pastWeek === 'function' && typeof server.weekDrivingHours === 
 } else {
   eq('§16 lib/driver-performance.js has pastWeek() and weekDrivingHours()', false, true)
 }
+
+// ── §17 the Super Admin's tab: its lib ───────────────────────────────────────
+console.log('§17 driverPerformanceAdmin.js')
+const afn = (name) => (typeof adm[name] === 'function' ? adm[name] : () => null)
+const driversView = afn('driversView')
+const AW = adm.WORDS || {}
+eq('§17 the route', adm.ADMIN_WEEKS_URL, '/api/admin/driver-performance/weeks')
+eq('§17 every fixed word the tab shows, in one place', Object.keys(AW), ['tab', 'weeksTitle', 'boardTitle', 'notOnBoardTitle', 'thisWeek', 'lastWeek', 'target', 'driveHours', 'noDrivers', 'lowered', 'loading', 'failed', 'retry', 'comingSoon', 'boardEmpty', 'hos'])
+eq('§17 the new words: the tab, the two headings and "Not on the board"', [AW.tab, AW.weeksTitle, AW.boardTitle, AW.notOnBoardTitle], ['Driver Performance', "Drivers' weeks", 'Board by unit', 'Not on the board'])
+eq('§17 the words it shares with the driver\'s own tab and board are theirs, so one change words both',
+  [AW.thisWeek, AW.target, AW.driveHours, AW.failed, AW.comingSoon, AW.boardEmpty, AW.hos], [v.THIS_WEEK_TITLE, v.TARGET_LINE, v.DRIVE_HOURS_LINE, v.FAILED_LINE, v.COMING_SOON, v.EMPTY_LINE, v.HOS_LINE])
+eq('§17 the board\'s periods, views and the tab\'s rules are the driver lib\'s own, handed on',
+  [adm.BOARD_PERIODS === v.PERIODS, adm.boardView === v.boardView, adm.boardUrl === v.boardUrl, adm.periodKind === v.periodKind, adm.isGoneAnswer === v.isGoneAnswer, adm.tabAfterAnswer === v.tabAfterAnswer], [true, true, true, true, true, true])
+eq('§17 "Last week" is the board\'s own word for it', AW.lastWeek, (v.PERIODS.find((p) => p.id === 'last-week') || {}).label)
+eq('§17 the line with no driver to show, a lowered target in the office\'s words, loading and Try again', [AW.noDrivers, AW.lowered, AW.loading, AW.retry],
+  ['No driver has a week to show yet.', 'Target lowered this week for approved time off.', 'Loading…', 'Try again'])
+eq('§17 the words are frozen', Object.isFrozen(adm.WORDS) && Object.isFrozen(adm.REASONS), true)
+eq('§17 each reason the server names, in words', adm.REASONS, {
+  inactive: 'Not active', 'percentage-driver': 'Percentage driver', 'owner-operator': 'Owner-operator', 'no-truck-in-period': 'No truck this week', 'not-in-directory': 'Not in the Driver Database',
+})
+{
+  const routesSrc = read(path.join(ROOT, 'lib', 'driver-performance-routes.js'))
+  const codes = [server.boardExclusion({ status: 'pending' }), server.boardExclusion({ status: 'active', payType: 'percentage' }), server.boardExclusion({ status: 'active', ownerOperator: true }),
+    ...['no-truck-in-period', 'not-in-directory'].filter((c) => routesSrc.includes(`"${c}"`))]
+  eq('§17 words for every reason the server can send', Object.keys(adm.REASONS || {}).sort(), [...new Set(codes)].sort())
+}
+eq('§17 only a Super Admin asks', ['Super Admin', 'Dispatcher', 'Driver', 'Investor', 'KPI Viewer', '', undefined, null].map((role) => afn('adminTabProbeUrl')(role)),
+  ['/api/admin/driver-performance/weeks', '', '', '', '', '', '', ''])
+// Made-up drivers and their own answers, in the shape his own route sends.
+const ownAnswerOf = (thisOver = {}, lastOver = {}, pastWeeks = PAST) => ({
+  ...answerOf(week('this-week', thisOver), week('last-week', { start: '2026-10-24', end: '2026-10-30', credits: { value: 6, target: 7.5, required: 6, deliveries: 6, pickups: 6 }, left: null, percent: 80, pace: null, ...lastOver })),
+  pastWeeks, countedFrom: 'Nov 7',
+})
+const ADMIN_DECOYS = Object.freeze({ phone: '555-0199', email: 'decoy@example.test', payDaily: 987, rate: 6543, broker: 'decoy-broker', unitNumber: 'LogisX-DECOY', pickupsBySource: { geofence: 41 } })
+const ADMIN_DECOY_MARKS = ['555-0199', 'decoy@', '987', '6543', 'decoy-broker', 'LogisX-DECOY', 'geofence']
+// In the server's order, by this week's credits: not by name, so a sort here would show.
+const ADMIN_ANSWER = {
+  drivers: [
+    { directoryId: 2, name: 'Riley Placeholder', unit: '', performance: ownAnswerOf({ credits: { value: 8, target: 7.5, required: 6, deliveries: 8, pickups: 8 }, left: 0, percent: 100, pace: 'ahead', barColor: 'blue' }) },
+    { directoryId: 3, name: 'Avery Mock', unit: '#701', performance: ownAnswerOf() },
+    { directoryId: 1, name: 'Jordan Sample', unit: '#702 (2, from Nov 3)', performance: ownAnswerOf({ credits: { value: 1.5, target: 6, required: 4.5, deliveries: 2, pickups: 1 }, left: 4.5, percent: 25, pace: 'needs-focus', barColor: 'red', targetLowered: true, loads: [] }, { loads: [], credits: { value: 0, target: 7.5, required: 6, deliveries: 0, pickups: 0 }, percent: 0 }, []) },
+  ],
+  notOnBoard: [{ name: 'Morgan Test', reason: 'percentage-driver' }, { name: 'Sky Demo', reason: 'not-in-directory' }, { name: 'Quinn Mock', reason: 'decoy-reason' }, { name: '  ', reason: 'inactive' }],
+}
+const adminView = driversView(ADMIN_ANSWER) || { rows: [], notOnBoard: [] }
+const ROW_FIELDS = ['key', 'name', 'unit', 'range', 'count', 'pace', 'paceId', 'width', 'color', 'left', 'lastCount', 'thisWeek', 'lastWeek', 'past']
+eq('§17 exactly these fields on the view and on a row', [Object.keys(driversView(ADMIN_ANSWER) || {}), Object.keys(adminView.rows[0] || {})], [['weekLine', 'rows', 'notOnBoard'], ROW_FIELDS])
+eq('§17 the server\'s order stands: the app never sorts the drivers', adminView.rows.map((r) => [r.key, r.name]), [[2, 'Riley Placeholder'], [3, 'Avery Mock'], [1, 'Jordan Sample']])
+eq('§17 each row: his name and unit as sent', adminView.rows.map((r) => [r.name, r.unit]), [['Riley Placeholder', ''], ['Avery Mock', '#701'], ['Jordan Sample', '#702 (2, from Nov 3)']])
+{
+  // The parity: every figure on a row is his own tab's view of his own answer.
+  const same = ADMIN_ANSWER.drivers.map((d, i) => {
+    const row = adminView.rows[i] || {}
+    const mine = ownWeekView(d.performance, 'this-week') || {}
+    const last = ownWeekView(d.performance, 'last-week') || {}
+    return JSON.stringify([row.count, row.left, row.pace, row.paceId, row.width, row.range, row.lastCount, row.thisWeek && row.thisWeek.loads, row.thisWeek && row.thisWeek.requirement, row.thisWeek && row.thisWeek.rule, row.thisWeek && row.thisWeek.newWeek, row.lastWeek && row.lastWeek.loads, row.past, row.color])
+      === JSON.stringify([mine.count, mine.left, mine.pace, mine.paceId, mine.width, mine.range, last.count, mine.loads, mine.requirement, mine.rule, mine.newWeek, last.loads, pastWeeksView(d.performance), (weekBarView(d.performance) || {}).color])
+  })
+  eq('§17 every figure and line on a row is what his own tab shows from the same answer: this week, last week\'s final figure, what counted, his past weeks, the bar\'s color', same, [true, true, true])
+}
+eq('§17 the words, as his own tab says them', adminView.rows.map((r) => [r.count, r.pace, r.left, r.lastCount, r.color]), [
+  ['8 of 7.5 loads', 'Ahead of Pace', '7.5 reached this week.', '6 of 7.5 loads', 'blue'],
+  ['4.5 of 7.5 loads', 'On Track', '3 loads left this week.', '6 of 7.5 loads', ''],
+  ['1.5 of 6 loads', 'Needs Focus', '4.5 loads left this week.', '0 of 7.5 loads', 'red'],
+])
+eq('§17 the loads that counted, both weeks', [adminView.rows[1]?.thisWeek.loads.length, adminView.rows[1]?.thisWeek.title, adminView.rows[1]?.lastWeek.title, adminView.rows[2]?.thisWeek.loads, adminView.rows[2]?.thisWeek.empty, adminView.rows[2]?.lastWeek.empty],
+  [6, 'What counted this week', 'What counted last week', [], v.NO_LOADS_LINE, v.NO_LOADS_LAST_WEEK])
+eq('§17 his past weeks, with the hours line his own tab prints: coming soon with none sent', [adminView.rows[1]?.past.rows.map((r) => r.hours), adminView.rows[1]?.past.countedFrom, adminView.rows[2]?.past.rows],
+  [[v.DRIVE_HOURS_LINE, v.DRIVE_HOURS_LINE, v.DRIVE_HOURS_LINE], "Weeks before Nov 7 weren't counted.", []])
+eq('§17 a lowered target: the office\'s own line, only when the server flags it', adminView.rows.map((r) => r.thisWeek.lowered), ['', '', 'Target lowered this week for approved time off.'])
+eq('§17 the week\'s days and its closing line, once for the tab', adminView.weekLine, 'Oct 31 – Nov 6 · Week closes Fri 11:59 PM ET')
+eq('§17 drivers off the board: each name with its reason in words; a reason it doesn\'t know shows none, a blank name no row', adminView.notOnBoard, [
+  { name: 'Morgan Test', reason: 'Percentage driver' }, { name: 'Sky Demo', reason: 'Not in the Driver Database' }, { name: 'Quinn Mock', reason: '' },
+])
+eq('§17 none sent, none shown', [driversView({ drivers: [] }), driversView({ drivers: [], notOnBoard: 'x' })].map((x) => x && [x.rows.length, x.notOnBoard.length, x.weekLine]), [[0, 0, ''], [0, 0, '']])
+{
+  const stuffed = { ...ADMIN_DECOYS, drivers: ADMIN_ANSWER.drivers.map((d) => ({ ...ADMIN_DECOYS, ...d, performance: { ...ADMIN_DECOYS, ...d.performance } })), notOnBoard: ADMIN_ANSWER.notOnBoard.map((x) => ({ ...ADMIN_DECOYS, ...x })) }
+  eq('§17 no phone, email, pay, rate, broker, stored unit or pickup source gets through, whatever the answer holds', ADMIN_DECOY_MARKS.filter((m) => has(driversView(stuffed), m)), [])
+}
+for (const [says, broken] of Object.entries({
+  'no list': {},
+  'a list that isn\'t one': { drivers: 'x' },
+  'a driver with no answer of his own': { drivers: [{ directoryId: 1, name: 'Avery Mock', unit: '#701' }] },
+  'a driver whose week doesn\'t hold whole': { drivers: [{ directoryId: 1, name: 'Avery Mock', unit: '#701', performance: ownAnswerOf({ percent: 140 }) }] },
+  'a driver whose past weeks don\'t hold whole': { drivers: [{ directoryId: 1, name: 'Avery Mock', unit: '#701', performance: ownAnswerOf({}, {}, 'x') }] },
+  'a driver with no name': { drivers: [{ directoryId: 1, name: ' ', unit: '#701', performance: ownAnswerOf() }] },
+  'a driver with no row id': { drivers: [{ directoryId: '1', name: 'Avery Mock', unit: '#701', performance: ownAnswerOf() }] },
+  'one good driver beside a broken one': { drivers: [ADMIN_ANSWER.drivers[0], { directoryId: 9, name: 'Sky Demo', unit: '', performance: null }] },
+})) eq(`§17 ${says}: no list, never a wrong or partial one`, driversView(broken), null)
+eq('§17 the lib computes and sorts nothing', ARITHMETIC.test(codeOf(adminLibSrc)), false)
+eq('§17 it reads the driver\'s own views, and no figure of its own', [/import \{\s*COMING_SOON, DRIVE_HOURS_LINE, EMPTY_LINE, FAILED_LINE, HOS_LINE, TARGET_LINE, THIS_WEEK_TITLE, ownWeekView, pastWeeksView, weekBarView, weekClosesLine,\s*\} from '\.\/driverPerformance\.js'/.test(adminLibSrc), /\.credits\b|\.percent\b|\.barColor\b|\.hours\b/.test(codeOf(adminLibSrc))], [true, false])
+eq('§17 no storage, timer or socket', /localStorage|sessionStorage|indexedDB|document\.cookie|setTimeout|setInterval|useSocket/.test(adminLibSrc), false)
+
+// ── §18 DriverPerformanceAdminTab.vue ────────────────────────────────────────
+console.log('§18 DriverPerformanceAdminTab.vue')
+const tabTemplate = templateOf(adminTab)
+const tabScript = scriptOf(adminTab)
+eq('§18 it prints only these, so no other field can reach the screen by accident', [...new Set([...tabTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), [
+  'WORDS.boardTitle', 'WORDS.driveHours', 'WORDS.failed', 'WORDS.lastWeek', 'WORDS.loading', 'WORDS.noDrivers', 'WORDS.notOnBoardTitle', 'WORDS.retry', 'WORDS.target', 'WORDS.thisWeek', 'WORDS.weeksTitle',
+  'item.line', 'item.name', 'item.reason', 'item.title',
+  'row.count', 'row.lastCount', 'row.lastWeek.empty', 'row.lastWeek.title', 'row.left', 'row.name', 'row.pace', 'row.past.countedFrom', 'row.past.title',
+  'row.thisWeek.empty', 'row.thisWeek.lowered', 'row.thisWeek.newWeek', 'row.thisWeek.requirement', 'row.thisWeek.rule', 'row.thisWeek.title', 'row.unit',
+  'view.weekLine', 'week.count', 'week.hours', 'week.range',
+].sort())
+eq('§18 every word it prints comes from the lib: no text of its own between its tags', templateOf(adminTab).replace(/\{\{[^}]*\}\}/g, ' ').replace(/<[^>]*>/g, ' ').replace(/&#9662;/g, ' ').trim(), '')
+eq('§18 every fixed word it names is one the lib holds', [...new Set([...tabTemplate.matchAll(/WORDS\.(\w+)/g)].map((m) => m[1]))].filter((k) => !Object.prototype.hasOwnProperty.call(AW, k)), [])
+eq('§18 its one read is the drivers\' weeks', [...tabScript.matchAll(/api\.\w+\(([^)]*)\)/g)].map((m) => m[1]), ['ADMIN_WEEKS_URL'])
+eq('§18 read only: no write, and kept nowhere but the page', [/api\.(post|put|patch|del|request)\b|method:/.test(tabScript), /localStorage|sessionStorage|indexedDB|document\.cookie|caches\./.test(adminTab)], [false, false])
+eq('§18 it computes nothing', [ARITHMETIC.test(codeOf(tabScript)), [...tabTemplate.matchAll(/\{\{([^}]*)\}\}/g)].filter((m) => /[*/%+-]/.test(m[1])).length], [false, 0])
+eq('§18 no v-html, and no store or session', [tabTemplate.includes('v-html'), /useAuthStore|useDashboardStore|useDriverStore|driverName/.test(adminTab)], [false, false])
+eq('§18 the rows come from the lib\'s view of the one answer', tabScript.includes('const view = computed(() => driversView(answer.value))'), true)
+eq('§18 it reads each time it is shown, and only the newest read lands', [tabScript.includes("watch(() => props.active, (shown) => { if (shown) load() }, { immediate: true })"), /if \(!alive \|\| latest !== mine\) return/.test(tabScript)], [true, true])
+eq('§18 the server\'s "gone" hides the tab', tabScript.includes("if (isGoneAnswer(err.status)) emit('gone')"), true)
+eq('§18 a row is a button that says whether it is open', /<button type="button" class="adp-head" :aria-expanded="open\[row\.key\] \? 'true' : 'false'" data-testid="adp-toggle" @click="toggle\(row\.key\)">/.test(tabTemplate), true)
+eq('§18 what counted and his past weeks only once his row is open', /<div v-if="open\[row\.key\]" class="adp-detail" data-testid="adp-detail">/.test(tabTemplate), true)
+{
+  const head = (tabTemplate.match(/<button type="button" class="adp-head"[\s\S]*?<\/button>/) || [''])[0]
+  eq('§18 the row itself: name, unit, this week\'s figure, label, bar and what\'s left, and last week\'s final figure; no load or past week in it',
+    [/row\.name[\s\S]*row\.unit[\s\S]*row\.count[\s\S]*row\.pace[\s\S]*row\.width[\s\S]*row\.left[\s\S]*row\.lastCount/.test(head), /item\.|week\.|row\.past|row\.thisWeek|row\.lastWeek/.test(head), /<(div|p|h\d|ul|li|section)\b/.test(head)], [true, false, false])
+}
+const detail = (tabTemplate.match(/<div v-if="open\[row\.key\]" class="adp-detail"[\s\S]*?\n {12}<\/div>/) || [''])[0]
+eq('§18 open: what counted this week and last, then his past weeks with their hours lines and the "weren\'t counted" line',
+  ['row.thisWeek.title', 'row.thisWeek.loads', 'WORDS.driveHours', 'row.lastWeek.title', 'row.lastWeek.loads', 'row.past.title', 'row.past.rows', 'week.hours', 'row.past.countedFrom'].map((s) => detail.indexOf(s)).every((at, i, all) => at > 0 && (i === 0 || at > all[i - 1])), true)
+eq('§18 no hours words of its own: the lines are the driver\'s own', /\bhours?\b/i.test(tabTemplate.replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')), false)
+eq('§18 "Not on the board" starts collapsed, under the drivers, each name with its reason', [/<details v-if="view\.notOnBoard\.length" class="adp-off" data-testid="adp-not-on-board">/.test(tabTemplate), /<details[^>]*\sopen\b/.test(tabTemplate),
+  tabTemplate.indexOf('data-testid="adp-drivers"') < tabTemplate.indexOf('data-testid="adp-not-on-board"') && tabTemplate.indexOf('data-testid="adp-not-on-board"') < tabTemplate.indexOf('data-testid="adp-board-title"'),
+  /\{\{ item\.name \}\}[\s\S]*\{\{ item\.reason \}\}/.test(tabTemplate)], [true, false, true, true])
+eq('§18 the board by unit is the office\'s plain board, under its own heading, after the drivers', [/import DriverPerformanceAdminBoard from '\.\/DriverPerformanceAdminBoard\.vue'/.test(tabScript),
+  /<h3 id="adp-board-title" class="adp-heading" data-testid="adp-board-title">\{\{ WORDS\.boardTitle \}\}<\/h3>\s*<DriverPerformanceAdminBoard @gone="emit\('gone'\)" \/>/.test(tabTemplate),
+  tabTemplate.indexOf('adp-weeks-title') < tabTemplate.indexOf('adp-board-title')], [true, true, true])
+eq('§18 not the driver app\'s Vant board', /DriverPerformanceBoard\b|components\/driver\//.test(adminTab), false)
+eq('§18 no Vant of its own: the office\'s screens are plain', /<van-|from 'vant'/.test(adminTab), false)
+eq('§18 each row\'s button, the reasons\' summary and Try again are 44 px or more', ['adp-head', 'adp-off-title', 'adp-retry'].map((c) => new RegExp(`\\.${c} \\{[^}]*min-height: 44px`).test(styleOf(adminTab))), [true, true, true])
+eq('§18 a card when the tab is narrow, one row when it is wide: by the tab\'s own width, never the window\'s, so the sidebar can\'t squeeze a row',
+  [/\.adp \{[^}]*container-type: inline-size;/.test(styleOf(adminTab)), /@container \(min-width: 40rem\) \{\s*\.adp-head \{[^}]*grid-template-areas: 'who this last chevron';/.test(styleOf(adminTab)), /@media/.test(styleOf(adminTab))], [true, true, false])
+eq('§18 the bar takes the Loads bar\'s four colors, and only those', [...styleOf(adminTab).matchAll(/\.adp-fill\[data-color='(\w+)'\] \{ background: (#[0-9a-f]{6}); \}/g)].map((m) => [m[1], m[2]]), FILL_COLORS)
+eq('§18 no pay, rate, invoice, broker, phone or email word on the tab', /\$|\bpay\b|\brate\b|invoice|broker|phone|e-?mail/i.test(tabTemplate.replace(/<[^>]*>/g, ' ').replace(/\{\{[^}]*\}\}/g, ' ')), false)
+
+// ── §19 DashboardView.vue ────────────────────────────────────────────────────
+console.log('§19 DashboardView.vue')
+const dashScript = scriptOf(dashboard)
+const dashTemplate = templateOf(dashboard)
+eq('§19 the tab starts hidden', dashScript.includes('const performanceTab = ref(false)'), true)
+eq('§19 it joins the tabs last, after Fleet & Drivers, only while shown, with no count',
+  dashScript.includes("{ key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },\n  ...(performanceTab.value ? [{ key: 'performance', label: PERFORMANCE_WORDS.tab, count: null }] : []),\n])"), true)
+eq('§19 its name is the tab\'s own word, and its rules come through the tab\'s lib', [/import \{ WORDS as PERFORMANCE_WORDS, adminTabProbeUrl, tabAfterAnswer \} from '\.\.\/lib\/driverPerformanceAdmin'/.test(dashScript), /lib\/driverPerformance['"]/.test(dashScript)], [true, false])
+eq('§19 a tab with no count shows no badge', dashTemplate.includes('<Badge v-if="tab.count !== null" variant="secondary"'), true)
+const probe = (dashScript.match(/async function checkPerformanceTab\(\) \{([\s\S]*?)\n\}/) || [])[1] || ''
+eq('§19 only a Super Admin asks, and the answer decides', [probe.includes('const url = adminTabProbeUrl(auth.user?.role)'), probe.includes('if (!url) return'), probe.includes('performanceTab.value = tabAfterAnswer(status, performanceTab.value)')], [true, true, true])
+eq('§19 it asks once the dashboard is up', /onMounted\(\(\) => \{[^\n]*checkPerformanceTab\(\)/.test(dashScript), true)
+eq('§19 the panel only with the tab, told when it is shown, and the server\'s "gone" takes the tab away',
+  dashTemplate.includes('<TabsContent v-if="performanceTab" value="performance" style="margin-top:0;">\n            <DriverPerformanceAdminTab :active="activeTab === \'performance\'" @gone="performanceTab = false" />'), true)
+eq('§19 a tab taken away goes back to the Job Board', dashScript.includes("watch(performanceTab, (shown) => { if (!shown && activeTab.value === 'performance') activeTab.value = 'jobBoard' })"), true)
+eq('§19 the dashboard reads nothing of the answer: the tab does', /api\.get\(url\)/.test(probe) && !/\bdrivers\b|notOnBoard/.test(probe), true)
+
+// ── §20 the real server rules through the tab's views ────────────────────────
+console.log('§20 lib/driver-performance.js through the tab')
+if (typeof server.personalWeek === 'function' && typeof server.pastWeek === 'function') {
+  const TODAY = '2026-11-04'
+  const realOwn = ({ deliveries, pickups, offDays = [], openLoad = true, loads = [], last = [6, 6], past = [], read = null }) => ({
+    view: 'no-hours-data',
+    creditWeights: { ...server.CREDIT_WEIGHTS },
+    weeks: [
+      server.personalWeek({ id: 'this-week', start: START, end: END, today: TODAY, deliveries, pickups, offDays, openLoad, loads }),
+      server.personalWeek({ id: 'last-week', start: '2026-10-24', end: '2026-10-30', today: TODAY, deliveries: last[0], pickups: last[1], offDays: [], openLoad: false, loads: [] }),
+    ],
+    pastWeeks: past.map(([start, end, d, p]) => ({ ...server.pastWeek({ start, end, deliveries: d, pickups: p, offDays: [] }), ...(read ? { hours: server.weekDrivingHours(read, start) } : {}) })),
+    countedFrom: server.countedFrom('2026-10-24'),
+  })
+  const PAST_REAL = [['2026-10-24', '2026-10-30', 6, 6]]
+  const real = {
+    drivers: [
+      { directoryId: 7, name: 'Avery Mock', unit: '#701', performance: realOwn({ deliveries: 4, pickups: 4, loads: [server.countedLoad({ loadId: 'QA-1', pickupDay: '2026-11-02', deliveryDay: '2026-11-03' })], past: PAST_REAL }) },
+      { directoryId: 8, name: 'Jordan Sample', unit: '#702', performance: realOwn({ deliveries: 3, pickups: 0, offDays: ['2026-11-05'], past: PAST_REAL, read: { firstDay: '2026-10-01', weeks: [{ week_start: '2026-10-24', minutes: 2310 }] } }) },
+      { directoryId: 9, name: 'Riley Placeholder', unit: '', performance: realOwn({ deliveries: 0, pickups: 0, openLoad: false, past: [] }) },
+    ],
+    notOnBoard: [{ name: 'Morgan Test', reason: server.boardExclusion({ status: 'active', payType: 'percentage' }) }],
+  }
+  const rv = driversView(real) || { rows: [], notOnBoard: [] }
+  eq('§20 the real rules\' weeks, in the tab\'s words', rv.rows.map((r) => [r.name, r.count, r.pace, r.left, r.color, r.lastCount]), [
+    ['Avery Mock', '4 of 7.5 loads', 'On Track', '3.5 loads left this week.', 'orange', '6 of 7.5 loads'],
+    ['Jordan Sample', '1.5 of 6 loads', 'Needs Focus', '4.5 loads left this week.', 'red', '6 of 7.5 loads'],
+    ['Riley Placeholder', '0 of 7.5 loads', '', '7.5 loads left this week.', 'red', '6 of 7.5 loads'],
+  ])
+  eq('§20 ...the same words his own tab and bar print from the same answer', real.drivers.map((d, i) => [rv.rows[i]?.count, rv.rows[i]?.pace, rv.rows[i]?.left, rv.rows[i]?.color]),
+    real.drivers.map((d) => [ownWeekView(d.performance, 'this-week')?.count, ownWeekView(d.performance, 'this-week')?.pace, ownWeekView(d.performance, 'this-week')?.left, weekBarView(d.performance)?.color]))
+  eq('§20 a day off: the lower target, and the office\'s line saying why', [rv.rows[1]?.thisWeek.lowered, rv.rows[1]?.thisWeek.requirement], ['Target lowered this week for approved time off.', '6 is the target. 4.5 is required.'])
+  eq('§20 past weeks through the real rules: coming soon with no hours sent, the estimate once the server sends one', rv.rows.map((r) => r.past.rows.map((w) => [w.range, w.count, w.hours])), [
+    [['Oct 24 – Oct 30', '6 of 7.5 loads', 'Driving hours: coming soon']],
+    [['Oct 24 – Oct 30', '6 of 7.5 loads', 'Driving: 38.5 h (estimate)']],
+    [],
+  ])
+  eq('§20 what counted, in his own tab\'s words', rv.rows[0]?.thisWeek.loads, [{ title: 'Load QA-1', line: 'Picked up Mon 0.5 · Delivered Tue 0.5' }])
+  eq('§20 the server\'s reason code, in words', rv.notOnBoard, [{ name: 'Morgan Test', reason: 'Percentage driver' }])
+} else {
+  eq('§20 lib/driver-performance.js has personalWeek() and pastWeek()', false, true)
+}
+
+// ── §21 the dashboard reaches no Vant ────────────────────────────────────────
+// Vant's styles carry unlayered element rules (body, buttons, links, lists), so any of them on the
+// dashboard's chunk graph restyles every office page. Walked from source: every import, re-export,
+// lazy import and CSS @import the dashboard can reach inside client/src, and the packages they name.
+console.log('§21 the dashboard reaches no Vant')
+const SRC_ROOT = path.join(ROOT, 'client', 'src')
+const IMPORT_RE = /\bimport\s*(?:[\w$*{}\s,]+?\s*from\s*)?['"]([^'"\n]+)['"]|\bexport\s*[\w$*{}\s,]+?\s*from\s*['"]([^'"\n]+)['"]|\bimport\(\s*['"]([^'"\n]+)['"]\s*\)|@import\s+(?:url\()?['"]([^'"\n]+)['"]/g
+function resolveLocal(fromFile, spec) {
+  const base = spec.startsWith('@/') ? path.join(SRC_ROOT, spec.slice(2)) : spec.startsWith('.') ? path.resolve(path.dirname(fromFile), spec) : null
+  if (!base) return null
+  return [base, `${base}.js`, `${base}.mjs`, `${base}.ts`, `${base}.vue`, path.join(base, 'index.js'), path.join(base, 'index.ts')]
+    .find((p) => fs.existsSync(p) && fs.statSync(p).isFile()) || ''
+}
+function reachFrom(entry) {
+  const files = new Set()
+  const packages = new Map()
+  const unresolved = []
+  const todo = [entry]
+  while (todo.length) {
+    const file = todo.pop()
+    if (files.has(file)) continue
+    files.add(file)
+    // A template's own text can't import anything; its script and style blocks can.
+    const src = file.endsWith('.vue') ? read(file).replace(/^<template>[\s\S]*^<\/template>/m, '') : read(file)
+    for (const m of src.matchAll(IMPORT_RE)) {
+      const spec = m[1] || m[2] || m[3] || m[4]
+      const local = resolveLocal(file, spec)
+      if (local) todo.push(local)
+      else if (local === '') unresolved.push(`${path.relative(ROOT, file)} -> ${spec}`)
+      else if (!packages.has(spec)) packages.set(spec, path.relative(ROOT, file))
+    }
+  }
+  return { files, packages, unresolved }
+}
+{
+  const dash = reachFrom(DASHBOARD)
+  const reachedRel = [...dash.files].map((f) => path.relative(SRC_ROOT, f).split(path.sep).join('/'))
+  eq('§21 (the walk) it reaches the dashboard\'s tabs, the Driver Performance tab and the shared ui kit, and resolves every local import',
+    [['views/DashboardView.vue', 'components/dashboard/FleetTab.vue', 'components/dashboard/DriverPerformanceAdminTab.vue', 'lib/driverPerformanceAdmin.js', 'components/ui/tabs/TabsTrigger.vue'].every((f) => reachedRel.includes(f)), dash.unresolved], [true, []])
+  eq('§21 nothing the dashboard can reach imports Vant, its components or its styles', [...dash.packages].filter(([spec]) => /^vant(\/|$)/.test(spec)).map(([spec, from]) => `${from} -> ${spec}`), [])
+  eq('§21 nor any of the driver app\'s own screens', reachedRel.filter((f) => /^components\/driver\/(DriverPerformance(Board|Tab)|DriverWeekBar|BottomNav)\.vue$/.test(f) || f === 'views/DriverView.vue'), [])
+}
+
+// ── §22 DriverPerformanceAdminBoard.vue ──────────────────────────────────────
+console.log('§22 DriverPerformanceAdminBoard.vue')
+const adbTemplate = templateOf(adminBoard)
+const adbScript = scriptOf(adminBoard)
+eq('§22 it prints only the board\'s view and the tab\'s words', [...new Set([...adbTemplate.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]))].sort(), [
+  'WORDS.boardEmpty', 'WORDS.comingSoon', 'WORDS.failed', 'WORDS.hos', 'WORDS.loading', 'WORDS.retry',
+  'board.closes', 'board.range', 'period.label', 'row.figure', 'row.rank', 'row.unit', 'tile.line', 'tile.title',
+].sort())
+eq('§22 no text of its own between its tags', adbTemplate.replace(/\{\{[^}]*\}\}/g, ' ').replace(/<[^>]*>/g, ' ').trim(), '')
+eq('§22 every fixed word it names is one the lib holds', [...new Set([...adbTemplate.matchAll(/WORDS\.(\w+)/g)].map((m) => m[1]))].filter((k) => !Object.prototype.hasOwnProperty.call(AW, k)), [])
+eq('§22 its one read is the board, a period at a time', [...adbScript.matchAll(/api\.\w+\(([^)]*)\)/g)].map((m) => m[1]), ['boardUrl(which'])
+eq('§22 a period is read once, when first chosen', adbScript.includes("watch(kind, (which) => { if (boards[which].state === 'idle') loadBoard(which) })"), true)
+eq('§22 the view is the driver board\'s own', [adbScript.includes('const board = computed(() => boardView(boards[kind.value].answer, periodId.value))'), /import \{ BOARD_PERIODS, WORDS, boardUrl, boardView, isGoneAnswer, periodKind \} from '\.\.\/\.\.\/lib\/driverPerformanceAdmin'/.test(adbScript)], [true, true])
+eq('§22 read only, kept nowhere, and it computes nothing', [/api\.(post|put|patch|del|request)\b|method:/.test(adbScript), /localStorage|sessionStorage|indexedDB|document\.cookie/.test(adminBoard), ARITHMETIC.test(codeOf(adbScript))], [false, false, false])
+eq('§22 no Vant: plain markup, so the dashboard keeps its own styles', /<van-|from 'vant'|vant\//.test(adminBoard), false)
+eq('§22 the three periods are buttons that say which is chosen, 44 px or more', [/<button v-for="period in BOARD_PERIODS" :key="period\.id" type="button" class="adb-period" :aria-pressed="periodId === period\.id \? 'true' : 'false'"/.test(adbTemplate), /\.adb-period \{[^}]*min-height: 44px/.test(styleOf(adminBoard))], [true, true])
+eq('§22 a row and Try again are 44 px', ['adb-row', 'adb-retry'].map((c) => new RegExp(`\\.${c} \\{[^}]*min-height: 44px`).test(styleOf(adminBoard))), [true, true])
+const adbHos = chainTo(adbTemplate, 'data-testid="adb-hos"')
+eq('§22 the hours-of-service line stays, outside every condition, as on the driver board', [!!adbHos, (adbHos || []).filter((attrs) => /\bv-(if|else|else-if|show)\b/.test(attrs)).length], [true, 0])
+eq('§22 a Super Admin\'s board has no "you"', /row\.you|\bYOU\b/.test(adminBoard), false)
+eq('§22 the server\'s "gone" hides the tab', adbScript.includes("if (isGoneAnswer(err.status)) emit('gone')"), true)
 
 done()

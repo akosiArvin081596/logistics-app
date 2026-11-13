@@ -14,7 +14,8 @@
 // §7-§9 pin the driver gallons block (DRIVER_FUEL_GALLONS_ENABLED, plan R14):
 // planDriverFuel() itself, the flag in server.js, and both fuel routes lifted
 // out of server.js and run on an in-memory database with the flag off and on.
-// Made-up truck, load and places.
+// §9 also holds the dispatch card's own asks to the driver's block, byte for byte,
+// since the card prints his lines from it. Made-up truck, load and places.
 //
 // §10 pins the live verdict, whatever the flag: GET /api/fuel/trip-plan never
 // says 'clears' when the truck could run short, for the driver or for the
@@ -794,6 +795,17 @@ async function routeSections() {
 			const moves = RANGE_MOVES_WITH_FLAG_OFF.has(x.name.split(" / ")[0]) && / \/ range, /.test(x.name);
 			if (same === moves) bad.push(`${x.name}: ${moves ? "should differ" : "differs"}`);
 		});
+		assert.deepStrictEqual(bad, []);
+	});
+	// Tracking's card asks the trip plan for the load alone and the range by the driver's name.
+	check("flag on: the card's own asks carry the driver's block and 400 code byte for byte, so it can print his lines, in every world", () => {
+		const bad = [];
+		const block = (r) => JSON.stringify([r.status, r.body && r.body.driverFuel, r.body && r.body.code]);
+		for (const [wName] of WORLDS) {
+			for (const [his, card] of [["trip-plan, Driver", "trip-plan, Dispatcher"], ["range, Driver", "range, Dispatcher"]]) {
+				if (block(at(on, `${wName} / ${his}`)) !== block(at(on, `${wName} / ${card}`))) bad.push(`${wName} / ${card}`);
+			}
+		}
 		assert.deepStrictEqual(bad, []);
 	});
 	check("flag on: the 400s say NO_ROUTE (load not mapped) and NO_POSITION (no fix, no pickup); off they are as before", () => {

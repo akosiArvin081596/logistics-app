@@ -174,6 +174,28 @@
            an absent verdict must be stated, never implied by blank space. -->
       <div v-else class="ff-muted ff-plan-note">{{ noPlanReason }}</div>
 
+      <!-- The driver's own Fuel section, line for line, only when the answers carry his
+           block: read-only, so dispatch sees the gallons he is told to add. -->
+      <section v-if="driverView" class="ff-driver" data-testid="ff-driver-lines">
+        <div class="ff-driver-title">What the driver sees</div>
+        <div class="ff-driver-top" :class="'tone-' + driverView.tone">
+          <div class="ff-driver-head">{{ driverView.top.headline }}</div>
+          <div class="ff-driver-sub">{{ driverView.top.sub }}</div>
+          <div v-for="n in driverView.top.notes" :key="n" class="ff-driver-note">{{ n }}</div>
+          <div v-if="driverView.pickupLine" class="ff-driver-note">{{ driverView.pickupLine }}</div>
+          <div v-if="driverView.top.readAgo" class="ff-driver-stamp">{{ driverView.top.readAgo }}</div>
+        </div>
+        <div v-for="row in driverView.rows" :key="row.key" class="ff-driver-row" :class="'row-' + row.tone">
+          <div class="ff-driver-row-head">
+            <span>{{ row.label }}</span>
+            <span v-if="row.miles" class="ff-driver-row-miles">{{ row.miles }}</span>
+          </div>
+          <div class="ff-driver-row-line">{{ row.line }}</div>
+        </div>
+        <div v-if="driverView.rowsNote" class="ff-driver-rows-note">{{ driverView.rowsNote }}</div>
+        <div v-for="f in driverView.footers" :key="f" class="ff-driver-foot">{{ f }}</div>
+      </section>
+
       <!-- #2 map toggle + #4 cheapest-diesel list -->
       <div class="ff-stops">
         <div class="ff-stops-head">
@@ -257,9 +279,11 @@ import {
   tripVerdict,
   rangeEvidenceText,
   milesText,
+  pickupUnconfirmedLine,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex } from '../../lib/fuelStops'
 import { formatAgeMs } from '../../lib/duration'
+import { driverFuelOf, driverFuelView, driverFuelTone, flagOnProblem } from '../../lib/driverFuelView'
 
 const api = useApi()
 
@@ -278,6 +302,8 @@ const rangeLoading = ref(false)
 const plan = ref(null)
 const planLoading = ref(false)
 const planNote = ref('')
+// The failed trip-plan ask ({ status, code }), for the driver's lines below.
+const planProblem = ref(null)
 const stops = ref([])
 const stopsLoading = ref(false)
 const stopsError = ref('')
@@ -480,6 +506,23 @@ const planCaveats = computed(() => {
   return out
 })
 
+// The driver's lines (DRIVER_FUEL_GALLONS_ENABLED) through his own wording functions, so the
+// card and his screen can't disagree. Null without his block, and while either ask is out, so
+// a switch doesn't leave the driver before's lines up while the next ones load.
+const driverView = computed(() => {
+  if (rangeLoading.value || planLoading.value) return null
+  const planBlock = driverFuelOf(plan.value)
+  const block = planBlock || driverFuelOf(range.value)
+  if (!block) return null
+  // Only a reason about the load or the truck: a failure of this card's own ask isn't his.
+  const problem = planBlock || !flagOnProblem(planProblem.value) ? null : planProblem.value
+  return {
+    ...driverFuelView(block, { planProblem: problem }),
+    tone: driverFuelTone(block),
+    pickupLine: pickupUnconfirmedLine(plan.value),
+  }
+})
+
 const anyLoading = computed(() => rangeLoading.value || stopsLoading.value || planLoading.value)
 const isEmpty = computed(
   () =>
@@ -524,12 +567,14 @@ async function fetchRange() {
 async function fetchPlan() {
   plan.value = null
   planNote.value = ''
+  planProblem.value = null
   if (!props.loadId) return
   planLoading.value = true
   try {
     const d = await api.get(`/api/fuel/trip-plan?loadId=${encodeURIComponent(props.loadId)}`)
     plan.value = d && d.ok !== false ? d : null
   } catch (e) {
+    planProblem.value = { status: e?.status ?? 0, code: e?.code || '' }
     // 400 is the routine one: a load nobody has geocoded, or a truck with no
     // position to plan from. Named rather than silent — a dispatcher who sees no
     // verdict has to be able to tell "fine" from "couldn't check".
@@ -925,6 +970,91 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 .ff-src.src-eld { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
 .ff-src.src-est { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
 .ff-src.src-muted { background: #f8fafc; color: #94a3b8; border: 1px solid #e2e8f0; }
+
+/* The driver's lines: boxed apart and quieter than the card's own readout, so they
+   read as his screen rather than as a second figure for dispatch. */
+.ff-driver {
+  margin: 0 0 0.55rem;
+  padding: 0.45rem 0.55rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.ff-driver-title {
+  margin-bottom: 0.3rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+.ff-driver-head {
+  font-size: 0.95rem;
+  font-weight: 800;
+  line-height: 1.15;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+}
+.ff-driver-top.tone-warn .ff-driver-head { color: #b45309; }
+.ff-driver-top.tone-bad .ff-driver-head { color: #b91c1c; }
+.ff-driver-top.tone-unknown .ff-driver-head { color: #334155; }
+.ff-driver-sub {
+  margin-top: 0.1rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #334155;
+}
+.ff-driver-note {
+  margin-top: 0.3rem;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+}
+.ff-driver-stamp {
+  margin-top: 0.2rem;
+  font-size: 0.62rem;
+  color: #64748b;
+}
+.ff-driver-row {
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid #e2e8f0;
+}
+.ff-driver-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #334155;
+}
+.ff-driver-row-miles {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ff-driver-row-line {
+  margin-top: 0.1rem;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: #334155;
+}
+.ff-driver-row.row-ok .ff-driver-row-line { color: #166534; }
+.ff-driver-row.row-bad .ff-driver-row-line { color: #b91c1c; font-weight: 700; }
+.ff-driver-row.row-unknown .ff-driver-row-line { color: #92400e; }
+.ff-driver-rows-note,
+.ff-driver-foot {
+  margin-top: 0.3rem;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: #64748b;
+}
 
 /* #2 toggle + #4 list */
 .ff-stops-head {

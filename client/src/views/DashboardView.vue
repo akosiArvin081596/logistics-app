@@ -30,7 +30,7 @@
             class="rounded-none data-[state=active]:shadow-none data-[state=active]:bg-transparent dash-tab-trigger"
             style="padding:1rem 1.25rem;">
             <span :style="{ paddingBottom: '2px', borderBottom: activeTab === tab.key ? '2px solid hsl(199 89% 48%)' : '2px solid transparent' }">{{ tab.label }}</span>
-            <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
+            <Badge v-if="tab.count !== null" variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
           </TabsTrigger>
         </TabsList>
         <CardContent style="padding:0;">
@@ -45,6 +45,9 @@
           </TabsContent>
           <TabsContent value="fleet" style="margin-top:0;">
             <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" @availability-changed="refresh" />
+          </TabsContent>
+          <TabsContent v-if="performanceTab" value="performance" style="margin-top:0;">
+            <DriverPerformanceAdminTab :active="activeTab === 'performance'" @gone="performanceTab = false" />
           </TabsContent>
         </CardContent>
       </Tabs>
@@ -69,7 +72,10 @@ import { loadIdShown, loadKeyStale } from '../lib/loadRef'
 import { sortDriversForAssign } from '../lib/availabilityText'
 import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import { hiddenLoadsOf } from '../lib/deletedLoadsView.js'
+import { useApi } from '../composables/useApi'
+import { WORDS as PERFORMANCE_WORDS, adminTabProbeUrl, tabAfterAnswer } from '../lib/driverPerformanceAdmin'
 import HiddenLoadsBanner from '../components/dashboard/HiddenLoadsBanner.vue'
+import DriverPerformanceAdminTab from '../components/dashboard/DriverPerformanceAdminTab.vue'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
 import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
@@ -108,11 +114,24 @@ useSocketRefresh('dashboard:changed', () => refresh())
 // Live rows an old delete hides (the server sends them to a Super Admin only, with DELETED_LOAD_RESTORE_ENABLED on).
 const hiddenLoads = computed(() => (auth.isSuperAdmin ? hiddenLoadsOf(store.data) : []))
 
+// Driver Performance: a Super Admin's, shown only once its read answers (the feature's switch on).
+const api = useApi()
+const performanceTab = ref(false)
+async function checkPerformanceTab() {
+  const url = adminTabProbeUrl(auth.user?.role)
+  if (!url) return
+  let status = 200
+  try { await api.get(url) } catch (err) { status = err.status ?? 0 }
+  performanceTab.value = tabAfterAnswer(status, performanceTab.value)
+}
+watch(performanceTab, (shown) => { if (!shown && activeTab.value === 'performance') activeTab.value = 'jobBoard' })
+
 const tabs = computed(() => [
   { key: 'jobBoard', label: 'Job Board', count: store.unassignedJobs.length },
   { key: 'activeLoads', label: 'Active Loads', count: store.activeJobs.length },
   { key: 'completed', label: 'Completed', count: store.completedJobs.length },
   { key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },
+  ...(performanceTab.value ? [{ key: 'performance', label: PERFORMANCE_WORDS.tab, count: null }] : []),
 ])
 
 // Drivers currently on an active load. ActiveLoadsTab reads this list to
@@ -197,7 +216,7 @@ function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); 
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
 function onNewLoad() { toast('New load received', 'info'); refresh() }
 
-onMounted(() => { applyRouteFocus(); refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
+onMounted(() => { applyRouteFocus(); refresh(); checkPerformanceTab(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
 // Reapply when navigated into with a new ?load= while already on the page.
 watch(() => route.query.load, () => applyRouteFocus())
 onUnmounted(() => { socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
