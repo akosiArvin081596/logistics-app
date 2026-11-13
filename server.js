@@ -22907,7 +22907,7 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 					const truck = trucksByUnit.get(String(first.truck || "").trim().toLowerCase());
 					load = {
 						loadId: first.loadId, found: true, blankPickup: !w.pickup && !w.win, completed: invoiceCompletionDay(row, cols), billed,
-						inWindow: !!start && e.day >= start && e.day <= end,
+						inWindow: !!start && e.day >= start && e.day <= end, truckEld: !!(truck && truck.vid),
 						scopeNoEld: first.ownerId > 0 && truck && truck.vid && Number(truck.owner_id) !== first.ownerId ? String(first.truck).trim() : "",
 					};
 				}
@@ -22919,7 +22919,7 @@ async function payrollCheck({ weekEnd, names = false } = {}) {
 				mayBePaid: inv ? lateWorkWeekBlocker(inv, { manuals: manualsOf(nm), minRate: minRate.get(week.weekStart) }) : "",
 				deletedDraft: deletedNamedOf(nm).get(e.day) || "",
 				closedMonth: periodWriteLocked(e.day.slice(0, 7)) ? periodLabel(e.day.slice(0, 7)) : "",
-				beforeFrom: TRIP_WORK_DAYS_FROM && payMonthOf(e) < TRIP_WORK_DAYS_FROM ? TRIP_WORK_DAYS_FROM : "",
+				beforeFrom: TRIP_WORK_DAYS_FROM && first.loadId && payMonthOf(e) < TRIP_WORK_DAYS_FROM ? TRIP_WORK_DAYS_FROM : "",
 				added: !first.loadId,
 				load,
 			});

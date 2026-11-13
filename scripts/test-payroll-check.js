@@ -73,12 +73,13 @@ const LU = "Lu Penn";
 const MO = "Mo Reyes";
 const NED = "Ned Ruiz";
 const PAT = "Pat Voss"; // $262.37 a day
+const ORA = "Ora Lind";
 const GIL = "Gil Varn"; // a receipt's driver no Drivers Database row names
 
 const ENV = { PAYROLL_CHECK_ENABLED: "true", PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true", PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
 const WEEK_END = "2026-10-16";
 
-const DRIVERS = [ADA, BRAM, CYD, DAX, ELI, FAY, HAL, IVO, JO, KIT, LU, MO, NED].map((name) => ({ name }))
+const DRIVERS = [ADA, BRAM, CYD, DAX, ELI, FAY, HAL, IVO, JO, KIT, LU, MO, NED, ORA].map((name) => ({ name }))
 	.concat([{ name: GUS, payType: "percentage", payPct: 30 }, { name: PAT, payDaily: 262.37 }]);
 const TRUCKS = DRIVERS.map((d, i) => ({ unit: `T${i + 1}`, driver: d.name, owner: 5, vid: null }));
 // Ivo's truck (investor 5's) reports to the ELD; Jo drives the company's own
@@ -131,6 +132,8 @@ function rows() {
 		L({ id: "PC1602", driver: NED, pickup: "2026-10-06 8:00", dropoff: "2026-10-07 12:00", assigned: "2026-10-06", done: "2026-10-07", owner: "0" }),
 		// Pat: $262.37 a day, no invoice.
 		L({ id: "PC1801", driver: PAT, pickup: "2026-10-13 8:00", dropoff: "2026-10-14 12:00", assigned: "2026-10-13", done: "2026-10-14" }),
+		// Ora: 10/13 removed when the invoice was made, the "remove" taken back after; the truck reports to no ELD.
+		L({ id: "PC1901", driver: ORA, pickup: "2026-10-12 8:00", dropoff: "2026-10-13 12:00", assigned: "2026-10-12", done: "2026-10-13" }),
 	];
 }
 
@@ -184,11 +187,13 @@ async function buildFleet(env = ENV) {
 	w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name,
 		load_ids, expense_ids, render_data, is_manual, created_by) VALUES ('INV-M-DP-2026W41-01', 'dax penn', '2026-10-03', '2026-10-09', 1, 0, 260, 0, 'Submitted', 'INV-M-DP-2026W41-01.pdf', '[]', '[]', ?, 1, 'made-up-admin')`)
 		.run(JSON.stringify({ __templateName: "service_invoice_manual", lineItems: [{ date: "2026-10-07", description: "Made-up hand invoice: an extra stop", amount: 260 }], totalDue: 260 }));
+	w.addOverrides([{ driver: ORA, day: "2026-10-13", action: "remove" }]);
 	// The batch of Friday 10/16.
 	w.clock.ms = etMs("2026-10-16 20:00");
-	for (const d of [ADA, BRAM, FAY, HAL, IVO, KIT, LU]) await gen(d, "2026-10-16");
+	for (const d of [ADA, BRAM, FAY, HAL, IVO, KIT, LU, ORA]) await gen(d, "2026-10-16");
 	w.setRow("PC202", delivered("2026-10-16"));
 	w.addOverrides([{ driver: FAY, day: "2026-10-13", action: "remove" }]);
+	w.db.prepare("DELETE FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?").run(ORA.toLowerCase(), "2026-10-13");
 	// Pings for 10/13 that reached the server after the batch.
 	const late = feed(1300).drive("2026-10-13", { miles: 200 });
 	const tl = w.db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, location_date_ms, dropped_reason) VALUES (?, ?, ?, ?, ?, ?, '')");
@@ -339,6 +344,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			[LU, "2026-10-08", "deletedDraft"], [LU, "2026-10-09", "completedAfterInvoice"],
 			[MO, "2026-09-30", "closedMonth"], [MO, "2026-10-01", "completedAfterInvoice"], [MO, "2026-10-02", "completedAfterInvoice"],
 			[NED, "2026-10-06", "noWeeklyInvoice"], [NED, "2026-10-07", "noWeeklyInvoice"],
+			[ORA, "2026-10-13", "unexplained"],
 			[PAT, "2026-10-13", "noWeeklyInvoice"], [PAT, "2026-10-14", "noWeeklyInvoice"],
 		];
 		eq("every listed day and its reason", triples(body.ledgerDays), triples(want.map(([driver, day, reason]) => ({ driver, day, reason }))));
@@ -350,10 +356,11 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 		ok("each reason comes with its words", (body.ledgerDays || []).every((x) => typeof x.text === "string" && x.text.length > 10), JSON.stringify((body.ledgerDays || []).find((x) => !x.text)));
 		eq("Hal's 10/8 and 10/9 are held by his correction Draft", forDriver(body.ledgerDays, HAL), []);
 		eq("Dax's 10/7 is held by a hand-made invoice's line dated that day", forDriver(body.ledgerDays, DAX).map((x) => x.day), ["2026-10-06"]);
+		ok("Ora's 10/13 is not put down to an ELD read: the truck reports to no ELD", /reports to no ELD/.test(day(ORA, "2026-10-13").text || ""), day(ORA, "2026-10-13").text);
 		eq("Gus is paid by percentage: no day of his is listed", forDriver(body.ledgerDays, GUS), []);
 		eq("the scope of each day: Jo's 10/6 is investor 5's", (day(JO, "2026-10-06").scopes || []).map((s) => s.ownerId), [5]);
 		eq("summary by reason", body.summary && body.summary.ledgerDays && body.summary.ledgerDays.byReason, {
-			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 7, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 2, noWeeklyInvoice: 5,
+			addedAfterInvoice: 1, blankPickup: 2, closedMonth: 1, completedAfterInvoice: 7, deletedDraft: 1, investorScopeNoEld: 1, invoiceEldNoDriving: 1, mayBePaid: 2, noWeeklyInvoice: 5, unexplained: 1,
 		});
 	});
 
@@ -404,7 +411,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			s.ledgerDays && s.ledgerDays.cents, s.invoiceDays && s.invoiceDays.cents, s.personalLines && s.personalLines.cents,
 			s.pendingReceipts && s.pendingReceipts.cents, s.correctionDrafts && s.correctionDrafts.cents, s.percentageLoads && s.percentageLoads.paymentCents,
 		], [sumOf(body.ledgerDays), sumOf(body.invoiceDays), sumOf(body.personalLines), sumOf(body.pendingReceipts), sumOf(body.correctionDrafts), sumOf(body.percentageLoads, "paymentCents")]);
-		eq("the ledger days come to 19 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [21, 546474]);
+		eq("the ledger days come to 20 days at $260 and 2 at $262.37", [s.ledgerDays && s.ledgerDays.count, s.ledgerDays && s.ledgerDays.cents], [22, 572474]);
 		eq("Pat's days", forDriver(body.ledgerDays, PAT).map((x) => x.cents), [26237, 26237]);
 		const ned = forDriver(body.ledgerDays, NED);
 		eq("Ned's 10/6 once, with both scopes; 10/7 the company's", ned.map((x) => [x.day, x.overlap, (x.scopes || []).map((sc) => sc.ownerId).sort(), x.cents]),
@@ -436,7 +443,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 			const before = JSON.stringify(jt);
 			freeze(jt);
 			const out = await lw.api.payrollCheck({ weekEnd: WEEK_END, names: true });
-			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 21]);
+			eq("the frozen sheet snapshot is read, never written", [JSON.stringify(jt) === before, !out.refused, (out.ledgerDays || []).length], [true, true, 22]);
 		} finally {
 			lw.db.close();
 		}
@@ -467,7 +474,7 @@ const R = W.createRunner("Item 241 PR 1: the before-payroll check (route and scr
 		eq("the database file unchanged", W.fileHash(copy.db), fileBefore);
 		const labelled = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`, "--json"]);
 		const names = (labelled.json && labelled.json.ledgerDays || []).map((x) => x.driver);
-		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 21 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
+		ok("without --names, drivers are numbered labels", labelled.code === 0 && names.length === 22 && names.every((n) => /^driver \d+$/.test(n)), names.slice(0, 4).join(", "));
 		const text = W.runScript("scripts/payroll-check.js", [`--week-end=${WEEK_END}`, `--db=${copy.db}`, `--values-json=${copy.values}`, `--env-file=${copy.envFile}`]);
 		ok("the text report names each section and says nothing was written", text.code === 0 && /Nothing was written/.test(text.stdout) && /Ledger-paid days on no invoice/.test(text.stdout), text.stdout.slice(0, 300));
 	});
