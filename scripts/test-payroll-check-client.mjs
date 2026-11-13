@@ -576,15 +576,15 @@ ok('the lib turns cents into dollars with the app\'s formatMoneyCents() only, in
   libSrc.includes("import { formatMoneyCents } from './paymentTerms.js'") && (libSrc.match(/formatMoneyCents\(/g) || []).length === 1)
 ok('…and the page reads the business day, never the browser\'s', code(read(PAGE)).includes("import { appToday } from '../utils/datetime'") && !/new Date\(/.test(code(read(PAGE)) + libSrc))
 
-section('§7 on a phone the Invoices header wraps, so the link is on screen and tappable; the desktop header is as it was')
-// Each `@media (max-width: 767px)` block of a file's styles, up to its own closing brace, and the
-// styles with those blocks taken out.
-function phoneBlocks(src) {
+section('§7 the Invoices header wraps at every width: one row while it fits, the actions under the title when not; the link tall enough to tap on a phone')
+// Each block of a file's styles that starts with `head` (every @media block by default), up to its own
+// closing brace, and the styles with those blocks taken out.
+function mediaBlocks(src, head = '@media') {
   const style = code(String(src).split('<style')[1] || '')
   const blocks = []
   let rest = ''
   let from = 0
-  for (let at = style.indexOf('@media (max-width: 767px) {'); at !== -1; at = style.indexOf('@media (max-width: 767px) {', from)) {
+  for (let at = style.indexOf(head); at !== -1; at = style.indexOf(head, from)) {
     rest += style.slice(from, at)
     let depth = 0
     let i = style.indexOf('{', at)
@@ -599,16 +599,22 @@ function phoneBlocks(src) {
 }
 const rule = (css, sel) => (css.match(new RegExp(`(?:^|[\\s,}])${sel.replace(/[.\\-]/g, (c) => `\\${c}`)}\\s*\\{([^}]*)\\}`)) || [])[1] || ''
 {
-  ok('the header and its actions carry their own classes, beside the classes they had',
-    /<div class="dash-header inv-header">/.test(INVOICES) && /<div class="flex items-center gap-3 inv-header-actions">/.test(INVOICES))
-  const inv = phoneBlocks(INVOICES)
-  ok('…on a phone the header wraps', /flex-wrap:\s*wrap/.test(rule(inv.blocks, '.inv-header')), rule(inv.blocks, '.inv-header'))
-  ok('…and its actions wrap and may be narrower than their buttons in a row', /flex-wrap:\s*wrap/.test(rule(inv.blocks, '.inv-header-actions')) && /min-width:\s*0/.test(rule(inv.blocks, '.inv-header-actions')),
-    rule(inv.blocks, '.inv-header-actions'))
-  eq('…and no rule for either outside the phone block, so the desktop header is as it was', [rule(inv.rest, '.inv-header'), rule(inv.rest, '.inv-header-actions')], ['', ''])
-  const link = phoneBlocks(read(LINK))
+  ok('the header, its title and its actions carry their own classes, beside the classes they had',
+    /<div class="dash-header inv-header">/.test(INVOICES) && /<div class="inv-header-title">/.test(INVOICES) && /<div class="flex items-center gap-3 inv-header-actions">/.test(INVOICES))
+  const inv = mediaBlocks(INVOICES)
+  ok('at every width the header wraps (its rule is in no @media block)', /flex-wrap:\s*wrap/.test(rule(inv.rest, '.inv-header')), rule(inv.rest, '.inv-header') || 'no rule outside @media')
+  ok('…and its actions wrap and may be narrower than their buttons in a row', /flex-wrap:\s*wrap/.test(rule(inv.rest, '.inv-header-actions')) && /min-width:\s*0/.test(rule(inv.rest, '.inv-header-actions')),
+    rule(inv.rest, '.inv-header-actions') || 'no rule outside @media')
+  // The row breaks on the title's basis, not its full width: a basis of at most 16rem keeps the
+  // actions beside the title wherever the two fit, and the title grows into what is left.
+  const basis = rule(inv.rest, '.inv-header-title').match(/flex:\s*1\s+1\s+([\d.]+)rem/)
+  ok('…the title grows and breaks the row on a small basis (at most 16rem), and may shrink',
+    !!basis && Number(basis[1]) > 0 && Number(basis[1]) <= 16 && /min-width:\s*0/.test(rule(inv.rest, '.inv-header-title')), rule(inv.rest, '.inv-header-title') || 'no rule outside @media')
+  eq('…and no @media block touches the header, so no width is left without the wrap', inv.blocks.match(/\.inv-header[\w-]*/g) || [], [])
+  const link = mediaBlocks(read(LINK), '@media (max-width: 767px) {')
   const tall = rule(link.blocks, '.payroll-check-link').match(/(?:^|[;\s])(?:min-)?height:\s*([\d.]+)rem/)
   ok('on a phone the link is at least 40 px tall (a finger\'s tap)', !!tall && Number(tall[1]) * 16 >= 40, rule(link.blocks, '.payroll-check-link') || 'no phone rule')
+  ok('…and beside the desktop buttons it keeps their 2.25rem', /height:\s*2\.25rem/.test(rule(link.rest, '.payroll-check-link')), rule(link.rest, '.payroll-check-link'))
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
