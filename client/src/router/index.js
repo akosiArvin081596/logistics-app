@@ -65,6 +65,13 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    // GET /api/admin/payroll-check, read only, behind PAYROLL_CHECK_ENABLED. Linked from Invoices.
+    path: '/invoices/payroll-check',
+    name: 'invoices-payroll-check',
+    component: () => import('../views/PayrollCheckView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/messages',
     name: 'messages',
     component: () => import('../views/MessagesView.vue'),

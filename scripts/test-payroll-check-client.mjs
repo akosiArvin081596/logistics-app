@@ -225,9 +225,9 @@ if (VIEW) {
   eq('days an invoice paid that the books no longer count', part('invoiceDays').groups.map((g) => [g.label, g.rows.map((r) => [r.cells, r.tag])]), [
     ['Drew Pike · Oct 10 – Oct 16, 2026', [[{ day: 'Oct 13, 2026', invoice: 'INV-DP-2026W42-01 (Draft)', load: 'PX401', amount: '$260.00' }, 'Removed on overrides']]],
   ])
-  eq('Personal lines: the receipt, the amount (and a share returned), the tag', part('personalLines').groups.map((g) => [g.label, g.rows.map((r) => [r.cells, r.tag])]), [
-    ['Gray Unlisted · Oct 3 – Oct 9, 2026', [[{ date: 'Oct 7, 2026', vendor: 'Made-up Fuel Stop', amount: '$45.50' }, 'Driver not in the Drivers Database']]],
+  eq('Personal lines: the receipt, the amount (and a share returned), the tag; drivers in the server\'s order', part('personalLines').groups.map((g) => [g.label, g.rows.map((r) => [r.cells, r.tag])]), [
     ['Emery Tull · Oct 3 – Oct 9, 2026', [[{ date: 'Oct 6, 2026', vendor: 'Made-up Diner', amount: '$30.00 (share returned +$9.00)' }, 'Waiting for its invoice']]],
+    ['Gray Unlisted · Oct 3 – Oct 9, 2026', [[{ date: 'Oct 7, 2026', vendor: 'Made-up Fuel Stop', amount: '$45.50' }, 'Driver not in the Drivers Database']]],
   ])
   eq('receipts still Pending: no reason column (a person decides each)', [part('pendingReceipts').reasons, part('pendingReceipts').groups[0].rows[0].cells],
     [false, { date: 'Oct 14, 2026', type: 'Maintenance', load: '—', amount: '$61.25' }])
@@ -235,17 +235,18 @@ if (VIEW) {
     ['Finley Hart · Oct 3 – Oct 9, 2026', { invoice: 'INV-M-FH-2026W41-01', status: 'Draft', kind: 'Missed days', corrects: 'INV-FH-2026W41-01', amount: '$520.00' }],
     ['Finley Hart · Oct 10 – Oct 16, 2026', { invoice: 'INV-M-FH-2026W42-01', status: 'Submitted', kind: 'Personal', corrects: '—', amount: '-$45.50' }],
   ])
-  eq('percentage drivers\' loads: revenue as the books read it, or a dash; an undated load in no week', part('percentageLoads').groups.map((g) => [g.label, g.rows[0].cells, g.rows[0].tag]), [
-    ['Emery Tull · Oct 3 – Oct 9, 2026', { load: 'PX502', completed: 'Oct 9, 2026', amount: '$2,000.00' }, 'Completed after the invoice'],
+  eq('percentage drivers\' loads: revenue as the books read it, or a dash; an undated load in no week (first, as the server sorts it)', part('percentageLoads').groups.map((g) => [g.label, g.rows[0].cells, g.rows[0].tag]), [
     ['Emery Tull · no week', { load: 'PX503', completed: 'No date', amount: '—' }, 'Load has no date'],
+    ['Emery Tull · Oct 3 – Oct 9, 2026', { load: 'PX502', completed: 'Oct 9, 2026', amount: '$2,000.00' }, 'Completed after the invoice'],
   ])
+  // The undated load's revenue is unknown in its list (a dash) and 0 in the server's roll-up sum: each as sent.
   eq('the roll-up: one row per driver and week, the server\'s count and amount per list', VIEW.drivers.map((r) => [r.driver, r.week, r.cells.filter((c) => c.count).map((c) => `${c.key} ${c.text}`)]), [
     ['Avery Lund', 'Oct 3 – Oct 9, 2026', ['ledgerDays 2 · $520.00']],
     ['Avery Lund', 'Oct 10 – Oct 16, 2026', ['ledgerDays 1 · $260.00', 'pendingReceipts 1 · $61.25']],
     ['Blair Moss', 'Oct 3 – Oct 9, 2026', ['ledgerDays 1 · $262.37']],
     ['Casey Rowe', 'Oct 3 – Oct 9, 2026', ['ledgerDays 1 · $260.00']],
     ['Drew Pike', 'Oct 10 – Oct 16, 2026', ['invoiceDays 1 · $260.00']],
-    ['Emery Tull', 'no week', ['percentageLoads 1 · —']],
+    ['Emery Tull', 'no week', ['percentageLoads 1 · $0.00']],
     ['Emery Tull', 'Oct 3 – Oct 9, 2026', ['personalLines 1 · $30.00', 'percentageLoads 1 · $2,000.00']],
     ['Finley Hart', 'Oct 3 – Oct 9, 2026', ['correctionDrafts 1 · $520.00']],
     ['Finley Hart', 'Oct 10 – Oct 16, 2026', ['correctionDrafts 1 · -$45.50']],
@@ -407,6 +408,7 @@ if (linkOk) {
   const on = await mountLink('Super Admin', () => { throw apiError(400, 'weekEnd must be a day, as YYYY-MM-DD: the Friday that ends the last week to check.', 'PAYROLL_CHECK_WEEK_END_INVALID') })
   eq('Super Admin, switched on: the route is asked once, with no week (it refuses the missing week before reading anything)', on.api.gets, [CHECK_URL])
   eq('…the link shows, to the page, in plain words', [!!on.link(), on.link() && on.link().props['data-to'], on.m.text()], [true, JSON.stringify({ name: 'invoices-payroll-check' }), lib.WORDS.link])
+  eq('…and Vue warns of nothing', on.m.warnings, [])
   const off = await mountLink('Super Admin', () => { throw apiError(404, 'The before-payroll check is switched off on this server.', 'FEATURE_OFF') })
   eq('Super Admin, switched off (404 FEATURE_OFF): no link', [off.api.gets, off.m.text(), !!off.link()], [[CHECK_URL], '', false])
   for (const [label, err] of [['a 503', apiError(503, 'The month locks cannot be read.', 'PERIOD_LOCK_UNREADABLE')], ['a 429', apiError(429, 'Too many payroll checks.')], ['no answer', Object.assign(new Error('timed out'), { status: 0, code: 'TIMEOUT' })]]) {
@@ -489,6 +491,7 @@ if (pageOk) {
   eq('…the roll-up, one row per driver and week', p.allByTest('pc-rollup-row').map((n) => p.m.text(n)),
     VIEW ? VIEW.drivers.map((r) => [r.driver, r.week, ...r.cells.map((c) => c.text)].join(' ')) : null)
   eq('…on a desktop: tables, no cards', [p.tables().length > 0, p.cards().length], [true, 0])
+  eq('…and Vue warns of nothing', p.m.warnings, [])
 
   await choose(p.select(), '2026-10-09')
   eq('a week picked: one more request, for that week', p.api.gets, [`${CHECK_URL}?weekEnd=2026-10-16`, `${CHECK_URL}?weekEnd=2026-10-09`])
@@ -498,6 +501,8 @@ if (pageOk) {
 
   const phone = await mountPage({ mobile: true })
   eq('on a phone: cards, no table, one per item', [phone.tables().length, phone.cards().length], [0, allRows.length])
+  eq('…the roll-up as cards too, one per driver and week', phone.allByTest('pc-rollup-row').length, VIEW ? VIEW.drivers.length : null)
+  eq('…and Vue warns of nothing', phone.m.warnings, [])
   const card = phone.cards()[0]
   ok('…a card holds each field\'s label and value, the tag and the server\'s sentence', !!card && VIEW
     && [...VIEW.sections[0].parts[0].columns.map((c) => c.label), allRows[0].r.cells.day, allRows[0].r.tag, allRows[0].r.text].every((s) => phone.m.text(card).includes(s)), card ? phone.m.text(card) : 'no card')

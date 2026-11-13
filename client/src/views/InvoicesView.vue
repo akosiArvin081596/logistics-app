@@ -9,6 +9,7 @@
         <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredInvoices.length }} {{ activeFilter || 'total' }}</span>
         <Button v-if="auth.isSuperAdmin" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-9" @click="showManualDialog = true">+ New Invoice</Button>
         <Button v-if="auth.isSuperAdmin" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="showReportDialog = true">Payment Report</Button>
+        <PayrollCheckLink v-if="auth.isSuperAdmin" />
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="exportCsv">Export CSV</Button>
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="store.load()">&#8635; Refresh</Button>
       </div>
@@ -386,6 +387,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
 import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
+import PayrollCheckLink from '../components/invoices/PayrollCheckLink.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import PdfZoomViewer from '../components/shared/PdfZoomViewer.vue'
 import PersonalInvoiceLines from '../components/shared/PersonalInvoiceLines.vue'
