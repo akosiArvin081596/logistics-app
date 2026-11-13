@@ -1,14 +1,15 @@
 <template>
   <div class="flex flex-col">
-    <div class="dash-header">
-      <div>
+    <div class="dash-header inv-header">
+      <div class="inv-header-title">
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Invoices</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Review, approve, and pay driver weekly invoices and manual invoices</p>
       </div>
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-3 inv-header-actions">
         <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredInvoices.length }} {{ activeFilter || 'total' }}</span>
         <Button v-if="auth.isSuperAdmin" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-9" @click="showManualDialog = true">+ New Invoice</Button>
         <Button v-if="auth.isSuperAdmin" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="showReportDialog = true">Payment Report</Button>
+        <PayrollCheckLink v-if="auth.isSuperAdmin" />
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="exportCsv">Export CSV</Button>
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="store.load()">&#8635; Refresh</Button>
       </div>
@@ -386,6 +387,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
 import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
+import PayrollCheckLink from '../components/invoices/PayrollCheckLink.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import PdfZoomViewer from '../components/shared/PdfZoomViewer.vue'
 import PersonalInvoiceLines from '../components/shared/PersonalInvoiceLines.vue'
@@ -1053,6 +1055,12 @@ onMounted(() => store.load())
   flex-direction: column;
   gap: 0.6rem;
 }
+
+/* One row while the title (on a 12rem basis) and every action fit; narrower, the actions go under the
+   title and wrap, so none is cut off past the page's edge at any width. */
+.inv-header { flex-wrap: wrap; gap: 0.75rem; }
+.inv-header-title { flex: 1 1 12rem; min-width: 0; }
+.inv-header-actions { flex-wrap: wrap; min-width: 0; }
 
 @media (max-width: 900px) {
   /* Full-screen modal on a phone → stack to one scrollable column so the details
