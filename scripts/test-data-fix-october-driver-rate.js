@@ -25,7 +25,16 @@
  *      investor's closed-month rows
  *   §7 the lift
  *   §8 the command line and the files
- *   §9 the source
+ *   §9 a difference posted already elsewhere: another invoice of his carrying an
+ *      adjustment, a correction total, manual lines off the planned days or a
+ *      deduction, or a waiting correction line, refuses a plan that pays the
+ *      driver a difference unless the plan acknowledges it by fingerprint;
+ *      forward-only doesn't look
+ *   §10 a plan's rows (D's yes): his company-booked load moved to the investor first,
+ *      through the Data Manager's save path, then the rate's writes; refusals,
+ *      replay, a refused sheet write and a row changed after the checks
+ *   §11 the routes' own audit and history rows, required by the read back
+ *   §12 the source
  *
  * DRIVER_RATE_FIX_UNDER_TEST=<file> runs that copy of the script (a mutant) as if
  * it sat at the script's own path, so its requires resolve as the script's do.
@@ -65,6 +74,7 @@ try {
 const W = require("./lib/work-days-world");
 const { closure } = require("./lib/server-lift");
 const sheetIds = require("../lib/sheet-id");
+const { unresolvedNames } = require("./data-fix-october-dvir-correction");
 
 const { test, finish } = W.createRunner("data-fix-october-driver-rate");
 const NOW = Date.parse("2026-11-12T15:00:00Z");
@@ -92,9 +102,11 @@ const LOADS = [
 	{ id: "900205", driver: GUS, truck: "T1", pickup: "2026-10-31 8:00", dropoff: "2026-11-01 14:00", assigned: "2026-10-30", done: "2026-11-01", payment: "$1,800.00" },
 	{ id: "900206", driver: HAL, truck: "T2", pickup: "2026-10-05 8:00", dropoff: "2026-10-07 14:00", payment: "$3,300.00" },
 	{ id: "900207", driver: HAL, truck: "T2", pickup: "2026-09-14 8:00", dropoff: "2026-09-15 14:00", payment: "$2,000.00" },
+	// His haul booked to the company (Owner ID 0, no truck): the load a plan's rows move.
+	{ id: "900209", driver: GUS, truck: "", owner: "0", pickup: "2026-10-22 8:00", dropoff: "2026-10-23 14:00", payment: "$1,000.00" },
 ];
 const GUS_DAYS = ["2026-10-12", "2026-10-13", "2026-10-14", "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-31", "2026-11-01"];
-const sheetRow = (l) => W.loadRow({ id: l.id, driver: l.driver, truck: l.truck, owner: "5", payment: l.payment, pickup: l.pickup, dropoff: l.dropoff, assigned: l.assigned || l.pickup.split(" ")[0], done: l.done || l.dropoff.split(" ")[0] });
+const sheetRow = (l) => W.loadRow({ id: l.id, driver: l.driver, truck: l.truck, owner: l.owner ?? "5", payment: l.payment, pickup: l.pickup, dropoff: l.dropoff, assigned: l.assigned || l.pickup.split(" ")[0], done: l.done || l.dropoff.split(" ")[0] });
 
 const GRID = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const plus = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
@@ -119,7 +131,7 @@ function manual({ id, number, period, status, lines }) {
 const INVOICES = [
 	weekly({ id: 9101, number: "INV-GT-2026W41-01", weekStart: "2026-10-10", status: "Paid", pays: { "2026-10-12": 250, "2026-10-13": 250, "2026-10-15": 250 } }),
 	manual({ id: 9102, number: "INV-M-GT-2026W42-01", period: "2026-10-23", status: "Paid", lines: [{ date: "2026-10-14", description: "Correction for INV-GT-2026W41-01: Wednesday, October 14, 2026, $250", amount: 250 }] }),
-	weekly({ id: 9103, number: "INV-GT-2026W42-01", weekStart: "2026-10-17", status: "Paid", pays: { "2026-10-19": 250, "2026-10-20": 250, "2026-10-21": 250 } }),
+	weekly({ id: 9103, number: "INV-GT-2026W42-01", weekStart: "2026-10-17", status: "Paid", pays: { "2026-10-19": 250, "2026-10-20": 250, "2026-10-21": 250, "2026-10-22": 250 } }),
 	weekly({ id: 9104, number: "INV-GT-2026W44-01", weekStart: "2026-10-31", status: "Submitted", pays: { "2026-10-31": 300, "2026-11-01": 300, "2026-11-02": 300 } }),
 ];
 const CARRIER = 9104;
@@ -129,28 +141,38 @@ function insertInvoice(db, r) {
 	db.prepare(`INSERT INTO invoices (${cols.join(", ")}, created_at, submitted_at) VALUES (${cols.map(() => "?").join(", ")}, '2026-11-01 12:00:00', '2026-11-01T12:00:00Z')`).run(...cols.map((k) => r[k]));
 }
 
-// The oracle's figures, set once the world is built.
+// The oracle's figures, set once the world is built. MOVED: the month with 900209
+// moved to owner 5 (its revenue and his Oct 22-23, at $300).
 let BEFORE = null;
 let AT250 = null;
+let MOVED = null;
 let PAYOUT_ID = null;
+let MOVE_ROW = null;
 
-// Plan days: each of his October days, at the payout code's $300, set as the path says.
-function days(path) {
-	const paid = { "2026-10-12": [9101, 250], "2026-10-13": [9101, 250], "2026-10-14": [9102, 250], "2026-10-19": [9103, 250], "2026-10-20": [9103, 250], "2026-10-21": [9103, 250], "2026-10-31": [CARRIER, 300], "2026-11-01": [CARRIER, 300] };
-	return GUS_DAYS.map((day) => {
-		const set = path === "october-300" ? "300.00" : path === "forward-only-own" ? "250.00" : (paid[day] && paid[day][1] === 300 ? "300.00" : "250.00");
+// Plan days: each of his October days, at the payout code's $300, set as the path
+// says; a "-yes" kind adds the two days 900209 brings once moved.
+function days(kind) {
+	const yes = kind.endsWith("-yes");
+	const base = kind.replace(/-yes$/, "");
+	const paid = { "2026-10-12": [9101, 250], "2026-10-13": [9101, 250], "2026-10-14": [9102, 250], "2026-10-19": [9103, 250], "2026-10-20": [9103, 250], "2026-10-21": [9103, 250], "2026-10-31": [CARRIER, 300], "2026-11-01": [CARRIER, 300], ...(yes ? { "2026-10-22": [9103, 250] } : {}) };
+	return [...GUS_DAYS, ...(yes ? ["2026-10-22", "2026-10-23"] : [])].sort().map((day) => {
+		const set = base === "october-300" ? "300.00" : base === "forward-only-own" ? "250.00" : (paid[day] && paid[day][1] === 300 ? "300.00" : "250.00");
 		const d = { day, ledger: "300.00", set };
 		if (paid[day]) Object.assign(d, { invoice: paid[day][0], paid: `${paid[day][1]}.00` });
 		return d;
 	});
 }
-// The three plans: forward-only (the default answer, the open invoice as it is),
-// october-300, and forward-only taking the raise off the open invoice's own days.
+const moveRows = () => [{ load: "900209", row: MOVE_ROW, cells: { "Owner ID": { before: "0", after: "5" }, Truck: { before: "", after: "T1" } } }];
+// The plans: forward-only (the default answer, the open invoice as it is),
+// october-300, forward-only taking the raise off the open invoice's own days, and
+// the first two with 900209's row moved to owner 5 first (D's yes).
 function basePlan(kind = "forward-only", over = {}) {
 	const plans = {
 		"forward-only": { path: "forward-only", days: days("forward-only"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 187, note: RATE_NOTE } }, carrier: null, expectedEffective: BEFORE + 187 },
-		"october-300": { path: "october-300", days: days("october-300"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 12, note: EARLIER_NOTE } }, carrier: { id: CARRIER, before: { adjustment: "0.00", note: "" }, after: { adjustment: "300.00", note: DRIVER_NOTE_UP } }, expectedEffective: BEFORE + 12 },
-		"forward-only-own": { path: "forward-only", days: days("forward-only-own"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 237, note: RATE_NOTE } }, carrier: { id: CARRIER, before: { adjustment: "0.00", note: "" }, after: { adjustment: "-100.00", note: DRIVER_NOTE_DOWN } }, expectedEffective: BEFORE + 237 },
+		"october-300": { path: "october-300", days: days("october-300"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 12, note: EARLIER_NOTE } }, carrier: { id: CARRIER, before: { adjustment: "0.00", note: "" }, after: { adjustment: "300.00", note: DRIVER_NOTE_UP } }, acknowledged: [], expectedEffective: BEFORE + 12 },
+		"forward-only-own": { path: "forward-only", days: days("forward-only-own"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 237, note: RATE_NOTE } }, carrier: { id: CARRIER, before: { adjustment: "0.00", note: "" }, after: { adjustment: "-100.00", note: DRIVER_NOTE_DOWN } }, acknowledged: [], expectedEffective: BEFORE + 237 },
+		"forward-only-yes": { path: "forward-only", days: days("forward-only-yes"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 237, note: RATE_NOTE } }, carrier: null, rows: moveRows(), expectedEffective: MOVED + 237 },
+		"october-300-yes": { path: "october-300", days: days("october-300-yes"), payout: { id: PAYOUT_ID, before: { adjustment: 12, note: EARLIER_NOTE }, after: { adjustment: 12, note: EARLIER_NOTE } }, carrier: { id: CARRIER, before: { adjustment: "0.00", note: "" }, after: { adjustment: "350.00", note: DRIVER_NOTE_UP } }, acknowledged: [], rows: moveRows(), expectedEffective: MOVED + 12 },
 	};
 	return { kind: "october-driver-rate", period: PERIOD, ownerId: OWNER, splitPct: 50, driver: GUS_TAG, ownRate: "300.00", ...plans[kind], ...over };
 }
@@ -163,33 +185,89 @@ async function oraclePayable(world) {
 	return { payable: carry[PERIOD] ? carry[PERIOD].payable : null, led };
 }
 
-// The fake Sheets client: values.get of the tab only. `hooks.onGet(n, rows)` runs before the nth read answers.
-function fakeSheets(values, hooks = {}) {
-	const rows = values.map((r) => r.slice());
+// The fake Sheets client: one Job Tracking tab, kept as the sheet shows it; reads
+// drop trailing empty cells and rows, as the API does. `failWrite`: { nth, mode:
+// "refused" | "landed" }. `hooks`: onGet(n, rows) before the nth whole-tab read
+// answers, onBatchGet(rowNo, rows) before a row's batchGet answers.
+function fakeSheets(values, { failWrite = null, hooks = {} } = {}) {
+	const rows = values.map((r) => r.map((c) => (c == null ? "" : String(c))));
 	const calls = [];
+	const writes = [];
+	const trim = (r) => {
+		const out = (r || []).map((c) => (c == null ? "" : String(c)));
+		while (out.length && out[out.length - 1] === "") out.pop();
+		return out;
+	};
+	const own = (id) => { if (id !== SHEET_ID) throw new Error(`fake sheet: a call to ${id}`); };
+	const parse = (range) => {
+		if (range === "Job Tracking") return "";
+		const m = /^'((?:[^']|'')+)'(?:!(.+))?$/.exec(String(range));
+		if (!m || m[1].replace(/''/g, "'") !== "Job Tracking") throw new Error(`fake sheet: unknown range ${range}`);
+		return m[2] || "";
+	};
+	const rowOf = (a) => { const m = /^(\d+):\1$/.exec(a); if (!m) throw new Error(`fake sheet: unknown row range ${a}`); return Number(m[1]); };
+	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
+	let reads = 0;
+	let n = 0;
 	const client = {
 		spreadsheets: {
+			get: async ({ spreadsheetId }) => {
+				own(spreadsheetId);
+				calls.push("get");
+				return { data: { sheets: [{ properties: { title: "Job Tracking", sheetId: 1036 } }, { properties: { title: "Carrier Database", sheetId: 7 } }] } };
+			},
 			values: {
 				get: async ({ spreadsheetId, range }) => {
-					calls.push(`values.get ${spreadsheetId} ${range}`);
-					if (spreadsheetId !== SHEET_ID) throw new Error(`fake sheet: a call to ${spreadsheetId}`);
-					if (range !== "Job Tracking") throw new Error(`fake sheet: unknown range ${range}`);
-					if (hooks.onGet) hooks.onGet(calls.length, rows);
-					return { data: { values: rows.map((r) => r.slice()) } };
+					own(spreadsheetId);
+					calls.push(`values.get ${range}`);
+					const a = parse(range);
+					if (!a) {
+						reads++;
+						if (hooks.onGet) hooks.onGet(reads, rows);
+						const all = rows.map(trim);
+						while (all.length && !all[all.length - 1].length) all.pop();
+						return { data: { values: all } };
+					}
+					return { data: { values: [trim(rows[rowOf(a) - 1])] } };
 				},
-				batchUpdate: async () => { throw new Error("fake sheet: this script never writes the sheet"); },
-				update: async () => { throw new Error("fake sheet: this script never writes the sheet"); },
-				append: async () => { throw new Error("fake sheet: this script never writes the sheet"); },
+				batchGet: async ({ spreadsheetId, ranges }) => {
+					own(spreadsheetId);
+					calls.push(`values.batchGet ${ranges.join(" ")}`);
+					const nums = ranges.map((x) => rowOf(parse(x)));
+					if (hooks.onBatchGet) hooks.onBatchGet(nums[nums.length - 1], rows);
+					return { data: { valueRanges: nums.map((r) => ({ values: [trim(rows[r - 1])] })) } };
+				},
+				batchUpdate: async ({ spreadsheetId, requestBody }) => {
+					own(spreadsheetId);
+					calls.push("values.batchUpdate");
+					n++;
+					const fail = failWrite && failWrite.nth === n ? failWrite.mode : "";
+					if (fail === "refused") throw new Error("made-up write failure");
+					if (requestBody.valueInputOption !== "USER_ENTERED") throw new Error("fake sheet: not USER_ENTERED");
+					for (const d of requestBody.data) {
+						const m = /^'Job Tracking'!([A-Z]+)(\d+)$/.exec(d.range);
+						if (!m) throw new Error(`fake sheet: unknown cell ${d.range}`);
+						const row = rows[Number(m[2]) - 1];
+						const c = colIndex(m[1]);
+						while (row.length <= c) row.push("");
+						row[c] = String(d.values[0][0]);
+					}
+					writes.push(JSON.parse(JSON.stringify(requestBody)));
+					if (fail === "landed") throw new Error("made-up lost answer");
+					return { data: { totalUpdatedCells: requestBody.data.length } };
+				},
+				update: async () => { throw new Error("fake sheet: values.update is not a row save"); },
+				append: async () => { throw new Error("fake sheet: values.append is not a row save"); },
 			},
 		},
 	};
-	return { client, rows, calls };
+	return { client, rows, calls, writes };
 }
 
 // ── one case: its own database copy, plan, result, sheet and renderer ───────
 const IDX = Object.fromEntries(W.HEADERS.map((h, i) => [h, i]));
 const rowNo = (rows, id) => rows.findIndex((r) => r[IDX["Load ID"]] === id) + 1;
-function newCase({ plan = basePlan(), db = null, edit = null, hooks = {}, renderFail = false, onRender = null } = {}) {
+function newCase({ plan = basePlan(), db = null, edit = null, hooks = {}, failWrite = null, renderFail = false, onRender = null } = {}) {
 	const copy = W.saveCopy(BASE, {});
 	if (db) { const d = new W.Database(copy.db); try { db(d); } finally { d.close(); } }
 	const values = W.sheetValues(BASE.rows);
@@ -204,7 +282,7 @@ function newCase({ plan = basePlan(), db = null, edit = null, hooks = {}, render
 		if (renderFail) throw new Error("made-up render failure");
 		return Buffer.from(`%PDF-made-up ${templateName} adjustment=${data.adjustment}`);
 	};
-	return { ...copy, planFile, result, fake: fakeSheets(values, hooks), plan, renders, render };
+	return { ...copy, planFile, result, fake: fakeSheets(values, { hooks, failWrite }), plan, renders, render };
 }
 const args = (c, mode = "--apply", pathName = c.plan.path) => [`--path=${pathName}`, `--db=${c.db}`, `--sheet-id=${SHEET_ID}`, `--settings-file=${c.envFile}`, `--plan=${c.planFile}`, `--result=${c.result}`, ...(mode ? [mode] : [])];
 // `opts.onLog(line)` sees each printed line as it is printed: a hook between the checks and the writes.
@@ -279,6 +357,65 @@ async function personPath(c, kind) {
 	return answers;
 }
 
+// The Data Manager's save of one row (PUT /api/data/:rowIndex, lifted on its own,
+// as a Super Admin's screen sends it: every cell as shown, the two changed, no
+// baseline), then Payouts' adjustment, on a copy.
+const DATA_HEAD = 'app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {';
+let ROW_PERSON_LIFT = null;
+function rowPersonLift() {
+	if (ROW_PERSON_LIFT) return ROW_PERSON_LIFT;
+	const provided = ["db", "require", "console", "process", "Date", "app", "requireRole", "refuseCrossOrigin", "getSheets", "SPREADSHEET_ID",
+		"jtCacheInvalidate", "REPLICA", "factoringRoutes", "__dirname", "getJobTrackingCached"];
+	const heads = [DATA_HEAD, FIX.HEADS[0]];
+	const roots = ["recordPayoutChange"];
+	for (let round = 0; round < 6; round++) {
+		const lifted = closure(W.SRC, { roots, routes: heads, provided, denied: ["server", "io", "transporter", "getDrive", "sendEmail", "fetch"] });
+		const missing = unresolvedNames(W.SRC, lifted, provided, heads);
+		if (!missing.length) { ROW_PERSON_LIFT = { lifted, provided }; return ROW_PERSON_LIFT; }
+		roots.push(...missing);
+	}
+	throw new Error("the row person's lift did not settle");
+}
+async function rowPersonPath(c, plan) {
+	const { lifted, provided } = rowPersonLift();
+	const db = new W.Database(c.db);
+	const routes = {};
+	const register = (m) => (p, ...h) => { routes[`${m} ${p}`] = h[h.length - 1]; };
+	const pass = () => (req, res, next) => (next ? next() : undefined);
+	const appRequire = Module.createRequire(path.join(ROOT, "server.js"));
+	const deps = {
+		db,
+		require: (m) => appRequire(m),
+		console: { log() {}, info() {}, warn() {}, error() {} },
+		process: { env: {}, argv: [], cwd: () => ROOT, exit: () => { throw new Error("exit"); } },
+		Date: Clock,
+		app: { get: register("GET"), put: register("PUT"), post: register("POST"), delete: register("DELETE"), use() {} },
+		requireRole: pass,
+		refuseCrossOrigin: pass(),
+		getSheets: async () => c.fake.client,
+		SPREADSHEET_ID: SHEET_ID,
+		jtCacheInvalidate: () => {},
+		REPLICA: null,
+		factoringRoutes: { loadIdSave: () => { throw new Error("no Load ID changes here"); } },
+		__dirname: ROOT,
+		getJobTrackingCached: async () => { throw new Error("not read here"); },
+	};
+	new Function(...provided, `"use strict";\n${lifted.text}\n`)(...provided.map((k) => deps[k]));
+	const call = async (key, req) => {
+		const out = { status: 200, body: null };
+		const res = { status(x) { out.status = x; return res; }, json(b) { out.body = b; return res; } };
+		await routes[key](req, res);
+		return out;
+	};
+	const shown = c.fake.rows[MOVE_ROW - 1];
+	const values = W.HEADERS.map((h, i) => (h === "Owner ID" ? "5" : h === "Truck" ? "T1" : (shown[i] ?? "")));
+	const answers = [];
+	answers.push(await call("PUT /api/data/:rowIndex", { params: { rowIndex: String(MOVE_ROW) }, query: { sheet: "Job Tracking" }, body: { values }, session: { user: { ...ADMIN } }, headers: {} }));
+	answers.push(await call("PUT /api/investor/payouts/:id/adjust", { params: { id: String(PAYOUT_ID) }, body: { adjustment: plan.payout.after.adjustment, adjustmentNote: plan.payout.after.note }, session: { user: { ...ADMIN } }, headers: {} }));
+	db.close();
+	return answers;
+}
+
 (async () => {
 	// The world's invoices, the closed months' payout rows, the oracle, then October's row.
 	for (const r of INVOICES) insertInvoice(BASE.db, r);
@@ -291,6 +428,12 @@ async function personPath(c, kind) {
 	BASE.db.prepare("UPDATE drivers_directory SET pay_daily = 250 WHERE driver_name = ?").run(GUS);
 	AT250 = (await oraclePayable(BASE)).payable;
 	BASE.db.prepare("UPDATE drivers_directory SET pay_daily = 300 WHERE driver_name = ?").run(GUS);
+	MOVE_ROW = rowNo(W.sheetValues(BASE.rows), "900209");
+	BASE.setRow("900209", { "Owner ID": "5", Truck: "T1" });
+	const moved = await oraclePayable(BASE);
+	MOVED = moved.payable;
+	const movedDays = moved.led.pay.filter((i) => i.month === PERIOD && tag(i.driver) === GUS_TAG).map((i) => i.day).sort();
+	BASE.setRow("900209", { "Owner ID": "0", Truck: "" });
 	pay.run(OWNER, PERIOD, BEFORE, "2026-11-27", 12, EARLIER_NOTE, "made-up-admin", "2026-11-12T10:00:00.000Z", "");
 	PAYOUT_ID = BASE.db.prepare("SELECT id FROM investor_payouts WHERE owner_id = ? AND period = ?").get(OWNER, PERIOD).id;
 
@@ -298,6 +441,8 @@ async function personPath(c, kind) {
 		ok("a payable for the month", Number.isFinite(BEFORE) && BEFORE > 0, String(BEFORE));
 		eq("his October days, each once at $300", gusDays.sort(), GUS_DAYS.map((d) => [d, 30000]));
 		eq("the same days at $250 move the month by 9 x $25", AT250 - BEFORE, 225);
+		eq("900209 moved to owner 5 brings his Oct 22 and 23 into October", movedDays, [...GUS_DAYS, "2026-10-22", "2026-10-23"].sort());
+		eq("…and its $1,000 less those two days at $300, half of it", MOVED - BEFORE, 200);
 	});
 
 	// §1 ───────────────────────────────────────────────────────────────────────
@@ -309,7 +454,7 @@ async function personPath(c, kind) {
 			t.eq("exit code", r.code, 0);
 			t.eq("every table as it was", hashes(c), before);
 			t.eq("nothing rendered, no PDF written", [c.renders.length, pdfOf(c)], [0, null]);
-			t.eq("one sheet read, of the named sheet", c.fake.calls, [`values.get ${SHEET_ID} Job Tracking`]);
+			t.eq("one sheet read, of the named sheet", c.fake.calls, ["values.get Job Tracking"]);
 			t.eq("result: would write", r.result && [r.result.mode, r.result.outcome], ["dry-run", "would-write"]);
 			const plan = basePlan(kind);
 			t.eq("the payout it predicts", r.result && [r.result.ledger.recomputed, r.result.ledger.effectiveAfter, r.result.ledger.expected], [BEFORE, plan.expectedEffective, plan.expectedEffective]);
@@ -498,6 +643,17 @@ async function personPath(c, kind) {
 		plan.expectedEffective = BEFORE + 162;
 		await noOp(t, newCase({ plan }), /2026-10-12: the payout code counts it 1 time\(s\) .* though the plan says that month does not count it/);
 	});
+	for (const [label, opts, why] of [
+		["a weekly invoice of his over the plan's days whose grid can't be read", { db: (d) => d.prepare("UPDATE invoices SET render_data = '{}' WHERE id = 9103").run() }, /invoice 9103 \(2026W42-01\) covers the plan's days but has no day grid to read/],
+		["an adjustment that takes the payout row below $0", { db: (d) => d.prepare("UPDATE investor_payouts SET amount = -200 WHERE id = ?").run(PAYOUT_ID) }, /would take owner 5's 2026-10 payout below \$0/],
+		["a manual invoice named as the carrier", { plan: basePlan("october-300", { carrier: { id: 9111, before: { adjustment: "0.00", note: "" }, after: { adjustment: "300.00", note: DRIVER_NOTE_UP } } }), db: (d) => insertInvoice(d, manual({ id: 9111, number: "INV-M-GT-2026W44-02", period: "2026-11-05", status: "Submitted", lines: [{ date: "2026-11-05", description: "made-up", amount: 100 }] })) }, /the carrying invoice 9111 is a manual invoice/],
+		["a carrier with no PDF to redraw", { plan: basePlan("october-300"), db: (d) => d.prepare("UPDATE invoices SET pdf_file_name = '' WHERE id = ?").run(CARRIER) }, /the carrying invoice 9104 has no render data or no PDF to redraw/],
+		["a carrier the adjustment would take below $0", { plan: basePlan("forward-only-own"), db: (d) => d.prepare("UPDATE invoices SET total_earnings = 50 WHERE id = ?").run(CARRIER) }, /would take the carrying invoice 9104 below \$0/],
+	]) {
+		await test(`§4 ${label}: nothing written`, async (t) => {
+			await noOp(t, newCase(opts), why);
+		});
+	}
 	await test("§4 the plan's path is not --path: refused before anything is read", async (t) => {
 		const c = newCase({ plan: basePlan("october-300") });
 		const before = hashes(c);
@@ -728,7 +884,216 @@ async function personPath(c, kind) {
 	});
 
 	// §9 ───────────────────────────────────────────────────────────────────────
-	await test("§9 the source: no production sheet, no key option, no real load numbers or driver tags", ({ ok }) => {
+	// The same difference posted already, somewhere the day checks don't look.
+	const laterWeekly = () => weekly({ id: 9107, number: "INV-GT-2026W45-01", weekStart: "2026-11-07", status: "Submitted", pays: { "2026-11-09": 300 } });
+	const withLaterAdjustment = (d) => { insertInvoice(d, laterWeekly()); d.prepare("UPDATE invoices SET adjustment = 300, adjustment_note = 'made-up October rate difference' WHERE id = 9107").run(); };
+	const posted = [
+		["a later weekly invoice of his carrying an adjustment", withLaterAdjustment, /invoice 9107 \(2026W45-01, Submitted, week 2026-11-07\.\.2026-11-13\) carries adjustment \$300\.00/],
+		["a manual invoice of his dated in November", (d) => insertInvoice(d, manual({ id: 9108, number: "INV-M-GT-2026W45-01", period: "2026-11-13", status: "Draft", lines: [{ date: "2026-11-13", description: "made-up October rate difference", amount: 300 }] })), /invoice 9108 .* 1 manual line\(s\) off the planned days \(\$300\.00\)/],
+		["a later invoice of his carrying a correction total", (d) => { insertInvoice(d, laterWeekly()); d.prepare("UPDATE invoices SET correction_lines_total = 300 WHERE id = 9107").run(); }, /invoice 9107 .* correction lines \$300\.00/],
+		["a paying manual invoice with a line off the planned days", (d) => { const s = JSON.parse(d.prepare("SELECT render_data FROM invoices WHERE id = 9102").get().render_data); s.lineItems.push({ date: "2026-11-10", description: "made-up October rate difference", amount: 300 }); d.prepare("UPDATE invoices SET render_data = ? WHERE id = 9102").run(JSON.stringify(s)); }, /invoice 9102 .* 1 manual line\(s\) off the planned days \(\$300\.00\)/],
+		["a paying manual invoice with a deduction", (d) => { const s = JSON.parse(d.prepare("SELECT render_data FROM invoices WHERE id = 9102").get().render_data); s.deductions.push({ date: "2026-11-10", description: "made-up October rate difference", amount: 100 }); d.prepare("UPDATE invoices SET render_data = ? WHERE id = 9102").run(JSON.stringify(s)); }, /invoice 9102 .* 1 manual line\(s\) off the planned days \(-\$100\.00\)/],
+		["a correction line of his waiting for an invoice", (d) => d.prepare("INSERT INTO invoice_correction_lines (source_invoice_id, source_invoice_number, source_week_start, source_week_end, kind, line_date, cents, label, invoice_id, waiting_since, created_at) VALUES (9103, 'INV-GT-2026W42-01', '2026-10-17', '2026-10-23', 'amount', '2026-10-20', 30000, 'made-up', NULL, '2026-11-02T00:00:00Z', '2026-11-02T00:00:00Z')").run(), /correction line \d+ \(amount, \$300\.00, to 2026W42-01\) waits for his next invoice/],
+	];
+	for (const kind of ["october-300", "forward-only-own"]) {
+		for (const [label, db, why] of posted) {
+			await test(`§9 ${kind}: ${label}, not acknowledged: nothing written`, async (t) => {
+				await noOp(t, newCase({ plan: basePlan(kind), db }), why);
+			});
+		}
+	}
+	const fingerprintIn = (r, id) => { const m = new RegExp(`\\{ "invoice": ${id}, "fingerprint": "([0-9a-f]{16})" \\}`).exec(((r.result && r.result.problems) || []).join(" ")); return m ? m[1] : null; };
+	await test("§9 an invoice a person read and acknowledged by its fingerprint: the run goes ahead", async (t) => {
+		const r1 = await run(newCase({ plan: basePlan("october-300"), db: withLaterAdjustment }), "--dry-run");
+		const fp = fingerprintIn(r1, 9107);
+		t.ok("the dry run refuses, printing the invoice's fingerprint", r1.code === 2 && Boolean(fp), JSON.stringify(r1.result && r1.result.problems));
+		const c = newCase({ plan: basePlan("october-300", { acknowledged: [{ invoice: 9107, fingerprint: fp || "0".repeat(16) }] }), db: withLaterAdjustment });
+		const r = await run(c);
+		t.eq("acknowledged: exit code", r.code, 0);
+		t.eq("the carrying invoice written, the acknowledged one untouched", [invoiceRow(c).adjustment, invoiceRow(c, 9107).adjustment], [300, 300]);
+		t.eq("…and listed as acknowledged", r.result && r.result.others.map((o) => [o.id, o.acknowledged]), [[9107, true]]);
+	});
+	await test("§9 an acknowledged invoice that changed since: nothing written", async (t) => {
+		const fp = fingerprintIn(await run(newCase({ plan: basePlan("october-300"), db: withLaterAdjustment }), "--dry-run"), 9107);
+		const c = newCase({ plan: basePlan("october-300", { acknowledged: [{ invoice: 9107, fingerprint: fp || "0".repeat(16) }] }), db: (d) => { withLaterAdjustment(d); d.prepare("UPDATE invoices SET adjustment_note = 'made-up other note' WHERE id = 9107").run(); } });
+		await noOp(t, c, /invoice 9107 .* not what the plan acknowledged/);
+	});
+	await test("§9 acknowledging an invoice that carries nothing: nothing written", async (t) => {
+		await noOp(t, newCase({ plan: basePlan("october-300", { acknowledged: [{ invoice: 9101, fingerprint: "0123456789abcdef" }] }) }), /acknowledges invoice 9101, which carries nothing of his/);
+	});
+	await test("§9 a plan that pays the driver a difference must say what it has read: refused before anything is read", async (t) => {
+		const plan = basePlan("october-300");
+		delete plan.acknowledged;
+		const c = newCase({ plan });
+		const r = await run(c);
+		t.eq("exit code", r.code, 2);
+		t.eq("the sheet not even read", c.fake.calls.length, 0);
+		t.ok("says why", /acknowledged: a list, which may be empty/.test(r.out), r.out.slice(0, 300));
+	});
+	await test("§9 forward-only pays the driver nothing, so a later invoice's adjustment doesn't stop it", async (t) => {
+		const c = newCase({ db: withLaterAdjustment });
+		const r = await run(c);
+		t.eq("exit code", r.code, 0);
+		t.eq("the payout row written", payoutRow(c).adjustment, 187);
+	});
+	await test("§9 an invoice posted after the checks: the run stops before the carrying invoice", async (t) => {
+		const c = newCase({ plan: basePlan("october-300") });
+		let fired = false;
+		const onLog = (s) => { if (!fired && /^ {2}WRITE invoices/.test(s)) { fired = true; const d = new W.Database(c.db); withLaterAdjustment(d); d.close(); } };
+		const r = await run(c, "--apply", { onLog });
+		t.eq("exit code (incomplete)", r.code, 1);
+		t.eq("result: the invoice not written", r.result && [r.result.outcome, r.result.carrier.state], ["partial", "not-written"]);
+		t.eq("the carrying invoice as it was, nothing rendered", [invoiceRow(c).adjustment, c.renders.length], [0, 0]);
+	});
+
+	// §10 ──────────────────────────────────────────────────────────────────────
+	// D's yes: a load of his booked to the company moves to owner 5 first.
+	const OWNER_COL = W.HEADERS.indexOf("Owner ID");
+	const TRUCK_COL = W.HEADERS.indexOf("Truck");
+	const letter = (i) => String.fromCharCode(65 + i);
+	const moveCells = (c) => [c.fake.rows[MOVE_ROW - 1][OWNER_COL], c.fake.rows[MOVE_ROW - 1][TRUCK_COL]];
+	for (const kind of ["forward-only-yes", "october-300-yes"]) {
+		await test(`§10 the dry run (${kind}) reads the month with the row moved and writes nothing`, async (t) => {
+			const c = newCase({ plan: basePlan(kind) });
+			const before = hashes(c);
+			const r = await run(c, "--dry-run");
+			t.eq("exit code", r.code, 0);
+			t.eq("no sheet write, every table as it was", [c.fake.writes.length, hashes(c)], [0, before]);
+			t.eq("the row it would move", r.result && r.result.rows, [{ load: "900209", row: MOVE_ROW, before: ["0", ""], after: ["5", "T1"], state: "to-write" }]);
+			t.eq("the month with the row moved", r.result && [r.result.ledger.recomputed, r.result.ledger.effectiveAfter], [MOVED, basePlan(kind).expectedEffective]);
+			t.ok("the row's two cells in the writes it lists", ["Owner ID", "Truck"].every((col) => (r.result.writes || []).some((w) => w.table === "Job Tracking" && w.column === col)));
+		});
+	}
+	await test("§10 forward-only with the row moved: the row's two cells, then the payout row", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes") });
+		const r = await run(c);
+		t.eq("exit code", r.code, 0);
+		const cells = [[TRUCK_COL, "T1"], [OWNER_COL, "5"]].sort((a, b) => a[0] - b[0]).map(([i, v]) => [`'Job Tracking'!${letter(i)}${MOVE_ROW}`, [[v]]]);
+		t.eq("one sheet write: the row's two cells, as the sheet's own entry", c.fake.writes.map((w) => [w.valueInputOption, w.data.map((x) => [x.range, x.values])]), [["USER_ENTERED", cells]]);
+		t.eq("the row now owner 5's, on T1", moveCells(c), ["5", "T1"]);
+		t.eq("the payout row $237", payoutRow(c).adjustment, 237);
+		const a = scriptAudits(c);
+		t.eq("audit rows: the row's save, then the adjustment, as the system", a.map((x) => [x.action, x.entity, x.entity_id, x.user_id, x.role]), [["update_sheet_row", "sheet_row", `Job Tracking!${MOVE_ROW}`, 0, "system"], ["investor_payout_adjust", "investor_payout", String(PAYOUT_ID), 0, "system"]]);
+		t.eq("the row's audit keeps each cell's before and after", a[0] && JSON.parse(a[0].details).changed.map((x) => [x.column, x.from, x.to]).sort(), [["Owner ID", "0", "5"], ["Truck", "", "T1"]]);
+		t.eq("the month as planned, the row read back", r.result && [r.result.ledger.effectiveReadBack, r.result.ledger.difference, r.result.rows[0].readBack], [MOVED + 237, 0, "ok"]);
+	});
+	await test("§10 october-300 with the row moved: the row, then the carrying invoice", async (t) => {
+		const c = newCase({ plan: basePlan("october-300-yes") });
+		const r = await run(c);
+		t.eq("exit code", r.code, 0);
+		t.eq("the row moved, the invoice +$350, the payout row as it was", [...moveCells(c), invoiceRow(c).adjustment, payoutRow(c).adjustment], ["5", "T1", 350, 12]);
+		t.eq("audit rows: the row's save, then the invoice's", scriptAudits(c).map((x) => x.action), ["update_sheet_row", "adjust_invoice"]);
+		t.eq("the month as planned", r.result && r.result.ledger.effectiveReadBack, MOVED + 12);
+	});
+	await test("§10 the row's save is the Data Manager's: the same cells and audit rows through PUT /api/data/:rowIndex", async (t) => {
+		const script = newCase({ plan: basePlan("forward-only-yes") });
+		t.eq("the script's run", (await run(script)).code, 0);
+		const person = newCase({ plan: basePlan("forward-only-yes") });
+		const answers = await rowPersonPath(person, basePlan("forward-only-yes"));
+		t.ok("the routes took both edits", answers.every((x) => x.status === 200), JSON.stringify(answers.map((x) => [x.status, x.body && x.body.error])));
+		t.eq("the same sheet write", script.fake.writes, person.fake.writes);
+		const strip = (rows) => rows.map(({ action, entity, entity_id, details, timestamp }) => ({ action, entity, entity_id, details, timestamp }));
+		t.eq("the same audit rows (action, entity, details, time)", strip(scriptAudits(script)), strip(query(person, "SELECT * FROM audit_trail ORDER BY id")));
+		const pay = (x) => { const p = payoutRow(x); return [p.adjustment, p.adjustment_note, p.adjusted_at]; };
+		t.eq("the same payout row", pay(script), pay(person));
+	});
+	await test("§10 a replay writes nothing", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes") });
+		t.eq("the first run", (await run(c)).code, 0);
+		const writes = c.fake.writes.length;
+		const before = hashes(c);
+		const r = await run(c);
+		t.eq("exit code", r.code, 0);
+		t.eq("no sheet write, every table as it was", [c.fake.writes.length, hashes(c)], [writes, before]);
+		t.eq("result: already done", r.result && [r.result.outcome, r.result.rows[0].state, r.result.payout.state], ["already-done", "already-done", "already-done"]);
+	});
+	const yesRow = (v) => v[MOVE_ROW - 1];
+	for (const [label, opts, why] of [
+		["the row not at the plan's before", { edit: (v) => { yesRow(v)[OWNER_COL] = "3"; } }, /load 900209 \(row \d+\) shows Owner ID "3"/],
+		["the load on another row", { plan: basePlan("forward-only-yes", { rows: [{ ...moveRows()[0], row: 99 }] }) }, /load 900209 is on row \d+, not the plan's 99/],
+		["the load on two rows", { edit: (v) => { v.push(yesRow(v).slice()); } }, /load 900209: 2 Job Tracking rows carry it/],
+		["the row not his", { edit: (v) => { yesRow(v)[W.HEADERS.indexOf("Driver")] = HAL; } }, /load 900209 \(row \d+\) is not driver/],
+		["a truck not owner 5's", { plan: basePlan("forward-only-yes", { rows: [{ ...moveRows()[0], cells: { ...moveRows()[0].cells, Truck: { before: "", after: "T9" } } }] }) }, /truck "T9" is not one truck of owner 5/],
+		["a row in a closed month (the edit guard refuses its save)", { edit: (v) => { const r = yesRow(v); r[W.HEADERS.indexOf("Pickup Appointment")] = "9/29/2026 8:00"; r[W.HEADERS.indexOf("Assigned Date")] = "9/29/2026"; } }, /load 900209: the save would be refused \(PERIOD_/],
+	]) {
+		await test(`§10 ${label}: nothing written`, async (t) => {
+			const c = newCase({ plan: basePlan("forward-only-yes"), ...opts });
+			await noOp(t, c, why);
+			t.eq("no sheet write", c.fake.writes.length, 0);
+		});
+	}
+	await test("§10 a plan's rows that move anything but the two cells, or to another investor: refused before anything is read", async (t) => {
+		const row = moveRows()[0];
+		for (const [label, rows, why] of [
+			["a Payment cell", [{ ...row, cells: { ...row.cells, "  Payment  ": { before: "$1,000.00", after: "$1.00" } } }], /must move exactly Owner ID and Truck/],
+			["Owner ID to another investor", [{ ...row, cells: { ...row.cells, "Owner ID": { before: "0", after: "6" } } }], /Owner ID to the plan's investor, 5/],
+			["a formula", [{ ...row, cells: { ...row.cells, Truck: { before: "", after: "=T1" } } }], /not one plain cell/],
+		]) {
+			const c = newCase({ plan: basePlan("forward-only-yes", { rows }) });
+			const r = await run(c);
+			t.eq(`${label}: refused`, r.code, 2);
+			t.eq(`${label}: the sheet not even read`, c.fake.calls.length, 0);
+			t.ok(`${label}: says why`, why.test(r.out), r.out.slice(0, 300));
+		}
+	});
+	await test("§10 saved values can't take a plan's rows to the sheet: an apply refused", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes") });
+		const r = await run(c, "--apply", { argv: args(c).map((a) => (a.startsWith("--sheet-id=") ? `--values-json=${c.values}` : a)) });
+		t.eq("exit code", r.code, 2);
+		t.ok("says why", /--values-json is for a dry run/.test(r.out), r.out.slice(0, 300));
+	});
+	await test("§10 the row's write refused by the sheet: nothing else written, and a re-run finishes", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes"), failWrite: { nth: 1, mode: "refused" } });
+		const r1 = await run(c);
+		t.eq("exit code (incomplete)", r1.code, 1);
+		t.eq("result: partial, the row failed, the payout not tried", r1.result && [r1.result.outcome, r1.result.rows[0].state, r1.result.payout.state], ["partial", "failed", "to-write"]);
+		t.eq("the failed save's own audit row", scriptAudits(c).map((a) => a.action), ["update_sheet_row_failed"]);
+		t.eq("the payout row as it was", payoutRow(c).adjustment, 12);
+		const r2 = await run({ ...c, fake: fakeSheets(c.fake.rows) });
+		t.eq("the re-run: exit code", r2.code, 0);
+		t.eq("the re-run: the row and the payout written", [r2.result && r2.result.rows[0].state, payoutRow(c).adjustment], ["written", 237]);
+	});
+	await test("§10 a row that doesn't read back as written: exit 1, unconfirmed", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes"), hooks: { onGet: (n, rows) => { if (n === 2) rows[MOVE_ROW - 1][OWNER_COL] = "0"; } } });
+		const r = await run(c);
+		t.eq("exit code", r.code, 1);
+		t.eq("result: unconfirmed, naming the row", r.result && [r.result.outcome, r.result.rows[0].readBack], ["unconfirmed", "differs"]);
+		t.ok("it says so", new RegExp(`READ BACK: row ${MOVE_ROW} \\(load 900209\\) does not read back`).test(r.out), r.out.slice(-300));
+	});
+	await test("§10 a sheet whose Job Tracking tab the closed-month guard doesn't cover: nothing written", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes") });
+		c.fake.client.spreadsheets.get = async () => ({ data: { sheets: [{ properties: { title: "Carrier Database", sheetId: 7 } }] } });
+		await noOp(t, c, /no Job Tracking tab the closed-month guard covers/);
+		t.eq("no sheet write", c.fake.writes.length, 0);
+	});
+	await test("§10 the row changed after the checks: that save stops, nothing written for it", async (t) => {
+		const c = newCase({ plan: basePlan("forward-only-yes"), hooks: { onBatchGet: (r, rows) => { if (r === MOVE_ROW) rows[r - 1][W.HEADERS.indexOf("Details")] = "made-up note added meanwhile"; } } });
+		const r = await run(c);
+		t.eq("exit code (incomplete)", r.code, 1);
+		t.eq("result: the row not written, and why", r.result && [r.result.rows[0].state, r.result.rows[0].code], ["not-written", "ROW_CHANGED_SINCE_CHECK"]);
+		t.eq("no sheet write, the payout row as it was", [c.fake.writes.length, payoutRow(c).adjustment], [0, 12]);
+	});
+
+	// §11 ──────────────────────────────────────────────────────────────────────
+	// The routes record their own rows and swallow a failed insert (logging it): the
+	// read back requires them. The routes' own log lines are kept off this output.
+	const quietly = async (fn) => { const was = console.error; console.error = () => {}; try { return await fn(); } finally { console.error = was; } };
+	await test("§11 a route's audit row that didn't land: exit 1, unconfirmed", async (t) => {
+		const c = newCase({ plan: basePlan("october-300"), db: (d) => d.exec("CREATE TRIGGER made_up_no_audit BEFORE INSERT ON audit_trail BEGIN SELECT RAISE(ABORT, 'made-up audit failure'); END;") });
+		const r = await quietly(() => run(c));
+		t.eq("exit code", r.code, 1);
+		t.eq("result: unconfirmed", r.result && r.result.outcome, "unconfirmed");
+		t.ok("it says the audit rows don't read back", /audit rows read back 0, not one for each of the 1 write/.test(r.out), r.out.slice(-400));
+	});
+	await test("§11 the payout row's history row that didn't land: exit 1, unconfirmed", async (t) => {
+		const c = newCase({ db: (d) => d.exec("CREATE TRIGGER made_up_no_history BEFORE INSERT ON investor_payout_history BEGIN SELECT RAISE(ABORT, 'made-up history failure'); END;") });
+		const r = await quietly(() => run(c));
+		t.eq("exit code", r.code, 1);
+		t.ok("it says the history row doesn't read back", /history row reads back 0 time\(s\), not once/.test(r.out), r.out.slice(-400));
+	});
+
+	// §12 ──────────────────────────────────────────────────────────────────────
+	await test("§12 the source: no production sheet, no key option, no real load numbers or driver tags", ({ ok }) => {
 		const src = fs.readFileSync(process.env.DRIVER_RATE_FIX_UNDER_TEST || SCRIPT, "utf8");
 		const self = fs.readFileSync(__filename, "utf8");
 		ok("no production sheet ID", !src.includes(sheetIds.PRODUCTION_SPREADSHEET_ID) && !self.includes(sheetIds.PRODUCTION_SPREADSHEET_ID));
