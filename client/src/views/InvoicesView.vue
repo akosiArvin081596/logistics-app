@@ -1,7 +1,7 @@
 <template>
   <div class="flex flex-col">
     <div class="dash-header inv-header">
-      <div>
+      <div class="inv-header-title">
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Invoices</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Review, approve, and pay driver weekly invoices and manual invoices</p>
       </div>
@@ -1056,12 +1056,11 @@ onMounted(() => store.load())
   gap: 0.6rem;
 }
 
-/* A phone can't hold the title and every action in one row: the actions go under the title and
-   wrap, so none sits past the screen's edge. Wider screens keep the one row. */
-@media (max-width: 767px) {
-  .inv-header { flex-wrap: wrap; gap: 0.75rem; }
-  .inv-header-actions { flex-wrap: wrap; min-width: 0; }
-}
+/* One row while the title (on a 12rem basis) and every action fit; narrower, the actions go under the
+   title and wrap, so none is cut off past the page's edge at any width. */
+.inv-header { flex-wrap: wrap; gap: 0.75rem; }
+.inv-header-title { flex: 1 1 12rem; min-width: 0; }
+.inv-header-actions { flex-wrap: wrap; min-width: 0; }
 
 @media (max-width: 900px) {
   /* Full-screen modal on a phone → stack to one scrollable column so the details

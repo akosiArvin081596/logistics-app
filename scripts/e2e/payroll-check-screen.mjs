@@ -3,6 +3,11 @@
 // made-up data only, with PAYROLL_CHECK_ENABLED on in one made-up world and off in another:
 //   PC1 1280 x 800, Super Admin: Invoices shows "Before-payroll check", after one ask of the route
 //       with no week (the switch is on)
+//   PC1b 1280 x 800: the Invoices header is still one row (the five buttons share one top within 2 px,
+//       the actions beside the title), every control wholly in the header and on screen, uncovered
+//   PC1c 1000 x 800 and PC1d 820 x 900 (desktop, the sidebar as the app shows it): every header control
+//       (the count, + New Invoice, Payment Report, the link, Export CSV, Refresh) wholly inside the
+//       header's box and the window, nothing over its middle, no sideways scroll of the header or page
 //   PC2 the link opens the page: one request for the last finished week (Oct 16, the business clock's
 //       Saturday Oct 17), eight Fridays offered, the server's totals, every item under its driver and
 //       week with its tag and the server's sentence, the roll-up; tables, no sideways scroll
@@ -56,6 +61,8 @@ const SHOT_DIR = process.env.SHOT_DIR ? path.resolve(process.env.SHOT_DIR) : pat
 const DESKTOP = { tag: '1280x800', viewport: { width: 1280, height: 800 } }
 const PHONE = { tag: '390x844', viewport: { width: 390, height: 844 } }
 const SMALL_PHONE = { tag: '360x780', viewport: { width: 360, height: 780 } }
+const NARROW_DESKTOP = { tag: '1000x800', viewport: { width: 1000, height: 800 } }
+const TABLET = { tag: '820x900', viewport: { width: 820, height: 900 } }
 
 function die(msg) {
   console.error(`payroll-check-screen: ${msg}`)
@@ -499,6 +506,58 @@ async function phoneRun(browser, w) {
   }
 }
 
+// The Invoices header at one window size: each control of its actions (the count, + New Invoice, Payment
+// Report, the link, Export CSV, Refresh) wholly inside the header's box and the window with nothing over its
+// middle, and no sideways scroll of the header or the page. `oneRow` also asks for the 1280 layout: the
+// five buttons on one top within 2 px, and the actions beside the title.
+async function headerFitRun(browser, w, size, step, shotName, { oneRow = false } = {}) {
+  const state = { checks: [] }
+  const width = size.viewport.width
+  const { ctx, page, issues } = await openPage(browser, size, SUPER_ADMIN, w, state, '/invoices')
+  try {
+    const linked = await appears(page, '[data-testid="payroll-check-link"]', 15000)
+    // The sidebar's margin moves in with a transition; measure once it has settled.
+    await page.waitForTimeout(800)
+    const m = await page.evaluate(() => {
+      const one = (n) => Math.round(n * 10) / 10
+      const box = (r) => ({ left: one(r.left), right: one(r.right), top: one(r.top), bottom: one(r.bottom) })
+      const h = document.querySelector('.inv-header')
+      const title = document.querySelector('.inv-header-title')
+      const acts = document.querySelector('.inv-header-actions')
+      const doc = document.scrollingElement || document.documentElement
+      const controls = acts ? [...acts.children].map((el) => {
+        const r = el.getBoundingClientRect()
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return { text: el.textContent.replace(/\s+/g, ' ').trim(), ...box(r), uncovered: !!hit && (hit === el || el.contains(hit)) }
+      }) : []
+      return {
+        header: h ? { ...box(h.getBoundingClientRect()), scrollWidth: h.scrollWidth, clientWidth: h.clientWidth } : null,
+        title: title ? box(title.getBoundingClientRect()) : null,
+        actions: acts ? box(acts.getBoundingClientRect()) : null,
+        controls,
+        pageFits: doc.scrollWidth <= window.innerWidth + 1,
+      }
+    })
+    const file = await shot(page, shotName)
+    const hd = m.header
+    const inside = (c) => !!hd && c.left >= hd.left - 0.5 && c.right <= hd.right + 0.5 && c.left >= 0 && c.right <= width
+    const bad = m.controls.filter((c) => !inside(c) || !c.uncovered).map((c) => c.text)
+    const headerFits = !!hd && hd.scrollWidth <= hd.clientWidth + 1 && hd.left >= -1 && hd.right <= width + 1
+    const buttonTops = m.controls.slice(1).map((c) => c.top)
+    const topsSpread = buttonTops.length ? Math.max(...buttonTops) - Math.min(...buttonTops) : NaN
+    const beside = !!m.title && !!m.actions && m.actions.top < m.title.bottom
+    const rowOk = !oneRow || (topsSpread <= 2 && beside)
+    record(step, `${width} x ${size.viewport.height}: every Invoices header control wholly on screen and uncovered, no sideways scroll${oneRow ? '; still one row' : ''}`,
+      `6 controls (the count, + New Invoice, Payment Report, "${WORDS.link}", Export CSV, Refresh), each inside the header's box and 0..${width}, nothing over its middle; the header's scroll width within its own; the page no wider than the window${oneRow ? '; the five buttons\' tops within 2 px and the actions beside the title' : ''}`,
+      `controls ${JSON.stringify(m.controls.map((c) => [c.text, c.left, c.right, c.top, c.uncovered]))}; outside or covered ${JSON.stringify(bad)}; header ${JSON.stringify(hd)}; page fits ${m.pageFits}; title ${JSON.stringify(m.title)}; actions ${JSON.stringify(m.actions)}${oneRow ? `; buttons' tops spread ${topsSpread} px; beside the title ${beside}` : ''}`,
+      linked && m.controls.length === 6 && m.controls.some((c) => c.text === WORDS.link) && bad.length === 0 && headerFits && m.pageFits && rowOk,
+      file)
+  } finally {
+    await judgeConsole(`PCx-sa-${size.tag}`, issues)
+    await ctx.close()
+  }
+}
+
 async function smallPhoneRun(browser, w) {
   const state = { checks: [] }
   const { ctx, page, issues } = await openPage(browser, SMALL_PHONE, SUPER_ADMIN, w, state, '/invoices')
@@ -585,7 +644,11 @@ async function main() {
   let browser = null
   try {
     browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
-    for (const [name, fn] of [['desktop', () => desktopRun(browser, w)], ['phone', () => phoneRun(browser, w)], ['phone-360', () => smallPhoneRun(browser, w)], ['switch-off', () => offRun(browser)],
+    for (const [name, fn] of [['desktop', () => desktopRun(browser, w)],
+      ['header-1280', () => headerFitRun(browser, w, DESKTOP, 'PC1b', '1b-invoices-header-1280', { oneRow: true })],
+      ['header-1000', () => headerFitRun(browser, w, NARROW_DESKTOP, 'PC1c', '1c-invoices-header-1000')],
+      ['header-820', () => headerFitRun(browser, w, TABLET, 'PC1d', '1d-invoices-header-820')],
+      ['phone', () => phoneRun(browser, w)], ['phone-360', () => smallPhoneRun(browser, w)], ['switch-off', () => offRun(browser)],
       ['dispatcher-1280', () => dispatcherRun(browser, w, DESKTOP)], ['dispatcher-390', () => dispatcherRun(browser, w, PHONE)]]) {
       try { await fn() } catch (e) { record(`PC!-${name}`, `${name} run aborted`, 'no abort', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
