@@ -377,7 +377,7 @@ test("E1 The percentage-pay weekly invoice names its payee a percentage driver: 
 // ── the weekly performance page (render_data.performance) ───────────────────
 // A made-up page as lib/invoice-performance-copy.js words one, and the slots it fills, in order.
 const PAGE = Object.freeze({
-	heading: "WEEKLY PERFORMANCE", week: "Nov 7 to Nov 13", asOf: "As of Fri Nov 13, 7:00 PM ET", count: "6.5 of 7.5 loads",
+	heading: "WEEKLY PERFORMANCE", week: "Nov 7 to Nov 13", asOf: "As of Fri Nov 13, 7:00 PM ET", count: "6.5 of 7.5 turns",
 	requirement: "7.5 is the target. 6 is required.", rule: "Each pickup counts 0.5 and each delivery 0.5.", lowered: "",
 	title: "What counted", rows: ["Load 4400123: Picked up Mon 0.5 · Delivered Tue 0.5", "Load 4400124: Delivered Wed 0.5 · Pickup not counted this week"],
 	empty: "", hours: "Driving hours: coming soon",

@@ -1153,7 +1153,7 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		eq(week({ deliveries: 2, pickups: 3 }).credits, { value: 2.5, target: 7.5, required: 6, deliveries: 2, pickups: 3 }, "the count: a pickup 0.5, a delivery 0.5");
 		eq(week({ deliveries: 1, pickups: 1 }).credits.value, 1, "one load, picked up and delivered, is 1");
 		eq(week({ deliveries: 5, pickups: 5 }).percent, 66, "5 loads are 66% of 7.5, not all of it");
-		// "N loads left" stays true at a half: the figure and what's left make the target, in whole stops.
+		// "N turns left" stays true at a half: the figure and what's left make the target, in whole stops.
 		for (const [delivered, picked] of [[0, 0], [1, 0], [0, 1], [1, 1], [3, 2], [5, 5], [7, 7], [8, 6]]) {
 			const w = week({ deliveries: delivered, pickups: picked });
 			eq(w.credits.value + w.left, 7.5, `${delivered} delivered, ${picked} picked up: the figure and what's left make the target`);
