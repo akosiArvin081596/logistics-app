@@ -12,7 +12,7 @@ export const BOARD_URL = '/api/driver/performance/leaderboard'
 
 // The Super Admin's board only: no driver's screen shows it.
 export const HOS_LINE = 'Never drive past your hours of service to reach a target. Your 11-hour driving limit, 14-hour window and 60/70-hour limit come first. Your ELD log is what counts for your hours. If you stop to stay legal, tell dispatch.'
-export const TARGET_LINE = 'Target: 7.5 loads a week (1.5 a day over 5 days)'
+export const TARGET_LINE = 'Target: 7.5 turns a week (1.5 a day over 5 days)'
 // Both figures are the server's, for the week on screen. It sends no required figure when time off rules it out.
 export const requirementLine = (target, required) => `${target} is the target. ${required} is required.`
 export const targetOnlyLine = (target) => `${target} is the target.`
@@ -83,6 +83,8 @@ export function weekFromAnswer(role, status, answer) {
 const isNumber = (n) => typeof n === 'number' && Number.isFinite(n)
 const isWeekDate = (text) => typeof text === 'string' && /^[A-Z][a-z]{2} \d{1,2}$/.test(text)
 const paceId = (pace) => (Object.prototype.hasOwnProperty.call(PACE_WORDS, pace) ? pace : '')
+// The week's figure, its target and what's left are counted in turns; only exactly 1 reads "turn".
+const turnsOf = (n) => `${n} turn${n === 1 ? '' : 's'}`
 
 // The figures every view of one week needs, or null when the answer doesn't hold them whole, so
 // a screen shows nothing rather than a wrong number.
@@ -130,10 +132,10 @@ export function ownWeekView(answer, periodId) {
   const shownPace = current ? figures.paceId : ''
   let leftWords = ''
   if (reached) leftWords = `${target} reached this week.`
-  else if (current) leftWords = `${left} load${left === 1 ? '' : 's'} left this week.`
+  else if (current) leftWords = `${turnsOf(left)} left this week.`
   return {
     range: availabilityRangeText(week.start, week.end),
-    count: `${value} of ${target} loads`,
+    count: `${value} of ${turnsOf(target)}`,
     pace: shownPace ? PACE_WORDS[shownPace] : '',
     paceId: shownPace,
     width,
@@ -154,7 +156,7 @@ export function weekBarView(answer) {
   const figures = weekFigures(answer, 'this-week')
   if (!figures || ownWeekView(answer, 'this-week') === null) return null
   return {
-    text: `This week: ${figures.value} of ${figures.target} loads`,
+    text: `This week: ${figures.value} of ${turnsOf(figures.target)}`,
     pace: figures.paceId ? PACE_WORDS[figures.paceId] : '',
     paceId: figures.paceId,
     width: figures.width,
@@ -187,7 +189,7 @@ export function pastWeeksView(answer) {
     if (!credits || !isNumber(credits.value) || !isNumber(credits.target) || !isDay(week.start) || !isDay(week.end)) return null
     const range = availabilityRangeText(week.start, week.end)
     if (!range) return null
-    return { key: week.start, range, count: `${credits.value} of ${credits.target} loads`, hours: hoursLine(week.hours) }
+    return { key: week.start, range, count: `${credits.value} of ${turnsOf(credits.target)}`, hours: hoursLine(week.hours) }
   })
   if (rows.includes(null)) return null
   return { title: PAST_WEEKS_TITLE, rows, countedFrom: countedFromLine(answer.countedFrom) }
