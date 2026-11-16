@@ -396,7 +396,7 @@ async function tabRun(browser, size) {
     const past = await page.locator(testid('perf-past-week')).evaluateAll((els) => els.map((el) => ['perf-past-range', 'perf-past-count', 'perf-past-hours'].map((id) => ((el.querySelector(`[data-testid="${id}"]`) || {}).textContent || '').replace(/\s+/g, ' ').trim())))
     const counted = await text(page, testid('perf-counted-from'))
     const pastShot = await shot(page, '3b-tab-past-weeks')
-    const want = PAST_WEEKS.map((w) => [rangeText(w.start, w.end), `${w.credits.value} of ${w.credits.target} loads`, DRIVE_HOURS_LINE])
+    const want = PAST_WEEKS.map((w) => [rangeText(w.start, w.end), `${w.credits.value} of ${w.credits.target} turns`, DRIVE_HOURS_LINE])
     const order = await page.evaluate(() => ['perf-this-week-title', 'perf-week', 'perf-counted', 'perf-past', 'perf-private'].map((id) => {
       const el = document.querySelector(`[data-testid="${id}"]`)
       return el ? Math.round(el.getBoundingClientRect().top + window.scrollY) : null
@@ -405,7 +405,7 @@ async function tabRun(browser, size) {
       `the nav's sixth tab "${TAB_NAME}", active, 44 px or more; header "${TAB_NAME}"; "${THIS_WEEK_TITLE}" and this week's figure on top; "${PAST_WEEKS_TITLE}" rows ${JSON.stringify(want)}, newest first; "${countedFromLine(COUNTED_FROM)}"; top to bottom in that order; no side scroll`,
       `app ${app}, bar ${bar}, opened ${opened}, labels ${JSON.stringify(labels)}, active "${active}", header "${header}", this week "${thisTitle}" "${count}", past "${pastTitle}" ${JSON.stringify(past)}, line "${counted}", tops ${JSON.stringify(order)}, heights ${JSON.stringify(navHeights)}, fits ${fits}`,
       app && bar && opened && labels[labels.length - 1] === TAB_NAME && active === TAB_NAME && header === TAB_NAME && tall(navHeights)
-        && thisTitle === THIS_WEEK_TITLE && count === '3.5 of 7.5 loads' && pastTitle === PAST_WEEKS_TITLE && sameList(past, want)
+        && thisTitle === THIS_WEEK_TITLE && count === '3.5 of 7.5 turns' && pastTitle === PAST_WEEKS_TITLE && sameList(past, want)
         && counted === countedFromLine(COUNTED_FROM) && order.every((n, i) => n !== null && (i === 0 || n > order[i - 1])) && fits,
       topShot)
     rows[rows.length - 1].shot = `${path.basename(topShot)}, ${path.basename(pastShot)}`
@@ -429,9 +429,9 @@ async function barColorsRun(browser, size) {
       const pace = await text(page, testid('perf-bar-pace'))
       const server = thisWeek(band.deliveries, band.pickups).barColor
       record(`N4-${band.color}-${t}`, `${band.credits} credits: the Loads bar is ${band.color}, and keeps its words`,
-        `the server's "${band.color}"; the fill ${band.rgb}; "This week: ${band.credits} of 7.5 loads"; the label, if any, not red`,
+        `the server's "${band.color}"; the fill ${band.rgb}; "This week: ${band.credits} of 7.5 turns"; the label, if any, not red`,
         `app ${app}, bar ${bar}, server "${server}", attribute "${named}", fill ${fill}, text "${barText}", label "${pace}" ${chip}`,
-        app && bar && server === band.color && named === band.color && fill === band.rgb && barText === `This week: ${band.credits} of 7.5 loads` && !looksRed(chip),
+        app && bar && server === band.color && named === band.color && fill === band.rgb && barText === `This week: ${band.credits} of 7.5 turns` && !looksRed(chip),
         await shot(page, `4-bar-${band.color}-${String(band.credits).replace('.', '_')}`))
     } finally {
       await ctx.close()

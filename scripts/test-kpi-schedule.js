@@ -221,9 +221,16 @@ console.log("\n§8 the schedule in words: the business zone only");
 		return /\.(js|mjs|vue|md)$/.test(e.name) ? [p] : [];
 	});
 	const centralTime = /\d{1,2}:\d{2}\s?[AP]M Central|US Central\)|\(\d{1,2}:\d{2} Central\)/;
+	// The one exception: the drivers' What's new line announcing the switch, a fixed sentence about the
+	// invoice cutoff, not KPI schedule text. Only that exact line is set aside; the rest of its file is scanned.
+	const SWITCH_NOTE = { file: path.join("lib", "driver-releases.js"), line: "LogisX now runs on Central time. Your weekly invoice deadline is Friday 6:30 PM Central." };
+	const scannedText = (p) => {
+		const text = fs.readFileSync(p, "utf8");
+		return path.relative(ROOT, p) === SWITCH_NOTE.file ? text.split(SWITCH_NOTE.line).join("") : text;
+	};
 	const hits = ["lib", path.join("client", "src"), path.join("docs", "manual")]
 		.flatMap((d) => scan(path.join(ROOT, d)))
-		.filter((p) => centralTime.test(fs.readFileSync(p, "utf8")))
+		.filter((p) => centralTime.test(scannedText(p)))
 		.map((p) => path.relative(ROOT, p));
 	t(hits.length === 0, `§8 no Central schedule time written as text in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
 	// server.js and .env.example describe the same schedule; neither adds the

@@ -371,7 +371,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 	{
 		// A made-up page as generate keeps it (scripts/test-invoice-day-rows.js §6 writes it for real).
 		const PAGE = {
-			heading: "WEEKLY PERFORMANCE", week: "Oct 10 to Oct 16", asOf: "As of Fri Oct 16, 7:00 PM ET", count: "4.5 of 7.5 loads",
+			heading: "WEEKLY PERFORMANCE", week: "Oct 10 to Oct 16", asOf: "As of Fri Oct 16, 7:00 PM ET", count: "4.5 of 7.5 turns",
 			requirement: "7.5 is the target. 6 is required.", rule: "Each pickup counts 0.5 and each delivery 0.5.", lowered: "", title: "What counted",
 			rows: ["Load L1: Picked up Mon 0.5 · Delivered Wed 0.5"], empty: "", hours: "Driving hours: coming soon",
 		};
