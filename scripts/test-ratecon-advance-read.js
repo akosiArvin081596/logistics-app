@@ -185,6 +185,8 @@ function section2() {
 	check("§2 \"Subtotal:\" is not the Total", sub.problem === null && sub.totalCents === 211500, sub);
 	const total2 = R(`${REVISED} Total: $9,999.00`);
 	check("§2 a second rate Total with another figure: figure_missing", total2.problem === "figure_missing", total2);
+	const minusTotal = R(`${REVISED} Deductions Total: -$35.00`);
+	check("§2 a \"Total:\" with a minus figure (a deduction, never the rate Total) is not the rate Total", minusTotal.problem === null && minusTotal.totalCents === 211500, minusTotal);
 	check("§2 a commodity \"Total:\" with no dollar figure is not the rate Total", R(REVISED).totalCents === 211500);
 	eqCheck("§2 an ordinary rate con, no advance label: no_labels", R(PLAIN), { state: "no_labels", namesChr: true });
 	eqCheck("§2 no text at all: unreadable", [R(""), R(null), R(undefined)], [{ state: "unreadable" }, { state: "unreadable" }, { state: "unreadable" }]);
