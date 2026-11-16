@@ -142,6 +142,9 @@ const perfStep = TOUR_STEPS.find((s) => s.id === 'performance')
 eq('the Past Performance step: the tab by its name, and the rule in the words asked for, lightly punctuated', [perfStep.title, perfStep.text], ['Past Performance', PERFORMANCE_TEXT])
 ok('..."No other driver can see it." is gone from every step', !TOUR_STEPS.some((s) => /no other driver/i.test(`${s.title} ${s.text} ${s.withPerformance || ''}`)))
 ok("the Loads step sends a driver with the bar to the tab by its new name", /Tap it to open Past Performance\.$/.test(TOUR_STEPS.find((s) => s.id === 'loads').withPerformance))
+eq("the Loads step, exact: the bar counts his turns, D's word, and the list is still his loads",
+  [TOUR_STEPS.find((s) => s.id === 'loads').text, TOUR_STEPS.find((s) => s.id === 'loads').withPerformance],
+  ['This is your list of loads. Active, Pending and Historical sort them.', 'The bar at the top shows your turns this week. Tap it to open Past Performance.'])
 ok("nothing else claims what's required without saying most weeks", allWords.every((line) => !/what's required/.test(line) || /most weeks/.test(line)))
 
 // ── §2 ────────────────────────────────────────────────────────────────────

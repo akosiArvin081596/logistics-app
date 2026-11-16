@@ -39,7 +39,7 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 // `withPerformance` is one more sentence for a driver who has it. The Past Performance step states the
 // general rule, figures and all; a week with approved time off can show a lower one on the tab.
 export const TOUR_STEPS = Object.freeze([
-  Object.freeze({ id: 'loads', tab: 'loads', title: 'Loads', text: 'This is your list of loads. Active, Pending and Historical sort them.', withPerformance: 'The bar at the top shows your loads this week. Tap it to open Past Performance.' }),
+  Object.freeze({ id: 'loads', tab: 'loads', title: 'Loads', text: 'This is your list of loads. Active, Pending and Historical sort them.', withPerformance: 'The bar at the top shows your turns this week. Tap it to open Past Performance.' }),
   Object.freeze({ id: 'load-page', tab: 'loads', title: "A load's page", text: "Tap a load to open its page. That's where you update your status and add your POD." }),
   Object.freeze({ id: 'alerts', tab: 'notifications', title: 'Alerts', text: 'New loads, changes and other notices show up here.' }),
   Object.freeze({ id: 'kit', tab: 'kit', title: 'Kit', text: "Your documents and your truck's documents are here. You can take this tour again from here any time." }),

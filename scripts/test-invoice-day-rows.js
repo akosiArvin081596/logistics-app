@@ -687,7 +687,7 @@ async function main(R) {
 		]);
 		const page = nia.body && nia.body.invoice ? JSON.parse(nia.body.invoice.render_data).performance : null;
 		eq("Nia's page", page && [page.heading, page.week, page.asOf, page.count, page.requirement, page.rule, page.rows, page.hours], [
-			"WEEKLY PERFORMANCE", "Nov 7 to Nov 13", "As of Fri Nov 13, 9:00 PM ET", "0.5 of 7.5 loads", "7.5 is the target. 6 is required.",
+			"WEEKLY PERFORMANCE", "Nov 7 to Nov 13", "As of Fri Nov 13, 9:00 PM ET", "0.5 of 7.5 turns", "7.5 is the target. 6 is required.",
 			"Each pickup counts 0.5 and each delivery 0.5.", ["Load P1: Delivered Tue 0.5 · Pickup not counted this week"], "Driving hours: coming soon",
 		]);
 		ok("Omar's invoice: no page", !!(omar.body && omar.body.invoice) && !("performance" in JSON.parse(omar.body.invoice.render_data || "{}")));
