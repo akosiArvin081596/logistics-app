@@ -284,14 +284,19 @@ function section5() {
 const DRAFTS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS load_invoice_drafts \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
 const LOCKS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS period_locks \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
 const AUDIT_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS audit_trail \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
+const NOTICES_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS dispatch_notifications \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
 function freshDb({ lines = true, drafts = true } = {}) {
 	const db = new Database(":memory:");
 	if (drafts && DRAFTS_DDL) db.exec(DRAFTS_DDL[1]);
 	if (LOCKS_DDL) db.exec(LOCKS_DDL[1]);
 	if (AUDIT_DDL) db.exec(AUDIT_DDL[1]);
+	if (NOTICES_DDL) db.exec(NOTICES_DDL[1]);
 	if (lines) invoiceLines.ensureSchema(db);
 	return db;
 }
+const noticesOf = (db) => {
+	try { return db.prepare("SELECT type, title, body FROM dispatch_notifications ORDER BY id").all(); } catch { return []; }
+};
 const linesOf = (db, key) => {
 	try { return db.prepare(`SELECT load_id, load_key, kind, label, amount_cents, received_on, reference, note, created_by, voided_at FROM ${invoiceLines.TABLE} WHERE load_key = ? ORDER BY id`).all(key); } catch { return []; }
 };
@@ -448,16 +453,15 @@ function wiringWorld({ env = {}, replica = false } = {}) {
 	const db = freshDb();
 	db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-09', 'locked', '2026-10-01T00:00:00Z')").run();
 	const alerts = [];
-	const notices = [];
-	const stored = [];
 	const calls = [];
 	let lifted;
 	try {
+		// As the other keep-stored-values runners lift it: never the socket server or a mailer.
 		lifted = closure(SRC, {
 			routes: [KHEAD],
 			roots: ["noteRateConReadings"],
-			provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", "insertDispatchNotification", "io"],
-			denied: ["sendEmail", "transporter", "server"],
+			provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"],
+			denied: ["sendEmail", "transporter", "io", "server", "insertDispatchNotification"],
 		});
 	} catch (e) {
 		return { error: e.message };
@@ -471,12 +475,10 @@ function wiringWorld({ env = {}, replica = false } = {}) {
 	const logs = [];
 	const quiet = { ...console, log: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")) };
 	const req = (p) => (p === "./lib/replica-mode" ? { ...rootRequire(p), active: () => replica } : rootRequire(p));
-	const io = { to: (room) => ({ emit: (ev, n) => notices.push({ room, ev, ...n }) }) };
-	const insertDispatchNotification = { run: (...a) => stored.push(a) };
-	const fns = new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", "insertDispatchNotification", "io",
+	const fns = new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold",
 		`"use strict";\n${lifted.text}\nreturn { noteRateConReadings, store: typeof rateConAdvanceReadings === "undefined" ? null : rateConAdvanceReadings };`)(
 		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET, ...env } }, app, req, db,
-		(a) => { alerts.push(a); return Promise.resolve({ alerted: true }); }, insertDispatchNotification, io);
+		(a) => { alerts.push(a); return Promise.resolve({ alerted: true }); });
 	const post = async (body) => {
 		const out = { status: 200, body: null };
 		const res = { status(c) { out.status = c; return res; }, json(b) { out.body = b; return res; } };
@@ -489,7 +491,7 @@ function wiringWorld({ env = {}, replica = false } = {}) {
 		if (text !== null) fns.noteRateConReadings(id, pdf64(text), "");
 		return post({ loadId: id, values: chrEmail(id, payment, extra) });
 	};
-	return { db, post, email, alerts, notices, stored, calls, logs, ...fns };
+	return { db, post, email, alerts, calls, logs, notices: () => noticesOf(db), ...fns };
 }
 const ON = { RATECON_ADVANCE_READ_ENABLED: "true", BROKER_INVOICE_LINES_ENABLED: "true" };
 
@@ -517,13 +519,14 @@ async function section7() {
 	check("§7 the route only reads the sheet", [...on.calls, ...off.calls].every(([c]) => c === "get"), on.calls);
 
 	// The switch off: a decision row, nothing else.
-	check("§7 off: no line, no audit row, no notice", linesOf(off.db, "123456721").length === 0 && auditsOf(off.db, "123456721").length === 0 && off.notices.length === 0 && off.stored.length === 0);
+	check("§7 off: no line, no audit row, no notice", linesOf(off.db, "123456721").length === 0 && auditsOf(off.db, "123456721").length === 0 && off.notices().length === 0);
 	eqCheck("§7 off: the decision recorded as would_fill", readsOf(off.db, "123456721").map((x) => [x.verdict, x.switch_on]), [["would_fill", 0]]);
 
 	// Off by a cent.
 	await on.email("123456723", OFF_BY_A_CENT, "$2,115.00");
-	check("§7 off by a cent: no line, sum_off, one notice to the Super Admin room only", linesOf(on.db, "123456723").length === 0 && readsOf(on.db, "123456723")[0]?.reason === "sum_off"
-		&& on.notices.length === 1 && on.notices[0].room === "super-admin" && on.notices[0].type === "auto-invoice" && on.stored.length === 1, { reads: readsOf(on.db, "123456723"), notices: on.notices });
+	const centNotices = on.notices();
+	check("§7 off by a cent: no line, sum_off, one notice of the Super Admin-only type, naming the load and the figures", linesOf(on.db, "123456723").length === 0 && readsOf(on.db, "123456723")[0]?.reason === "sum_off"
+		&& centNotices.length === 1 && centNotices[0].type === "auto-invoice" && /123456723/.test(centNotices[0].title) && /\$1,615\.01/.test(centNotices[0].body), { reads: readsOf(on.db, "123456723"), notices: centNotices });
 	// A figure missing.
 	await on.email("123456724", AWAY, "$2,115.00");
 	check("§7 a figure away from its label: no line, figure_missing", linesOf(on.db, "123456724").length === 0 && readsOf(on.db, "123456724")[0]?.reason === "figure_missing", readsOf(on.db, "123456724"));
@@ -555,7 +558,8 @@ async function section7() {
 	addDraft(on.db, "123456727");
 	await on.email("123456727", REVISED_NO_DVIR, "$2,150.00");
 	check("§7 after the invoice went: no line, after_invoice, a notice; nothing re-sent", linesOf(on.db, "123456727").length === 0 && readsOf(on.db, "123456727")[0]?.reason === "after_invoice"
-		&& on.notices.some((n) => /123456727/.test(n.title)), readsOf(on.db, "123456727"));
+		&& on.notices().some((n) => /123456727/.test(n.title) && /nothing was re-sent/.test(n.body)), readsOf(on.db, "123456727"));
+	check("§7 no notice names the load's driver", on.notices().every((n) => !n.title.includes(DRIVER) && !n.body.includes(DRIVER)));
 	// Payment is already the New Total on a delivered load (a person typed it): nothing added.
 	await on.email("123456741", REVISED_NO_DVIR, "$2,150.00");
 	check("§7 a delivered load whose Payment is already the New Total (the answer keeps it): no line, payment_not_total", linesOf(on.db, "123456741").length === 0

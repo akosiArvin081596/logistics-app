@@ -8022,6 +8022,7 @@ const rateConPickupStash = require("./lib/broker-contact").createRateConStash();
 // Both readings of an email's rate con from one read of its text. Never throws. With no
 // Load Number neither reading is kept, so the PDF isn't read at all; a PDF whose text
 // can't be read is read once (no DVIR reading; the pickup notes are still checked).
+// The advance reading (noteRateConAdvance()) reads the PDF's shown text on its own.
 function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) {
 	if (!normLoadKey(loadNumber)) return;
 	let read = null;
@@ -8034,6 +8035,7 @@ function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) 
 	}
 	if (!failed) noteRateConDvir(loadNumber, base64, now, read);
 	if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) noteRateConPickupReading(loadNumber, read ? read.text : "", pickupNotes, now);
+	noteRateConAdvance(loadNumber, base64, now);
 }
 
 // Keeps one email rate con's pickup reading (OR-ed into the load's). Never throws.
@@ -9165,6 +9167,84 @@ if (RATECON_DVIR_KEEP_ENABLED && !RATECON_REISSUE_HOLD_ENABLED) {
 	console.warn("[ratecon-dvir-keep] RATECON_DVIR_KEEP_ENABLED is on but RATECON_REISSUE_HOLD_ENABLED is off, so no Payment is kept and no decision is recorded");
 }
 
+// ADVANCE READ: C.H. Robinson's revised rate con prints a Total, an "Advanced Total" (money CHR
+// already paid on the load) and a "New Total". On a found CHR load that no hold of every column
+// covers, the email's rate con fills the load's advance line on the broker invoice (invoice-only,
+// label "Advance", audited as the system) only when the three figures each sit beside their label,
+// Advanced Total + New Total = Total to the cent, the advance is no more than the New Total,
+// Payment is that Total (or the stored figure the DVIR keep kept for this email), the load never
+// had an advance line and no invoice was made for it; anything else adds nothing and, with the
+// switch on, tells a Super Admin (lib/ratecon-advance-read.js). It never changes the answer to
+// n8n. DEFAULT OFF, never in a replica; off, each decision is only recorded (would_fill,
+// would_person) for the switch-on report, scripts/ratecon-advance-read-report.js.
+// - The extract route reads the PDF's shown text (lib/pdf-shown-text.js) once its answer is sent
+//   (noteRateConReadings()), for a 9-digit Load Number only, and keeps the reading with the DVIR
+//   reading's TTL and cap; a restart forgets it.
+// - It writes only while the advance lines themselves are on and the re-issue hold can tell an
+//   open load; otherwise it records as if off, with one warning per start.
+const rateconAdvanceRead = require("./lib/ratecon-advance-read");
+const RATECON_ADVANCE_READ_ENABLED = !require("./lib/replica-mode").active() && rateconAdvanceRead.enabled(process.env);
+const RATECON_ADVANCE_READ_ON = rateconAdvanceRead.writesOn({ enabled: RATECON_ADVANCE_READ_ENABLED, env: process.env, holdOn: RATECON_REISSUE_HOLD_ENABLED, warn: (m) => console.warn(m) });
+const RATECON_ADVANCE_ACTOR = { session: { user: { id: 0, username: rateconAdvanceRead.ACTOR, role: "system" } } };
+const rateConAdvanceReadings = rateconAdvanceRead.createReadingStore({ ttlMs: RATECON_DVIR_TTL_MS, max: RATECON_DVIR_MAX_LOADS });
+const pdfShownText = require("./lib/pdf-shown-text").shownText;
+
+// Reads one email rate con's advance figures (base64: the PDF the extract route was sent) and
+// keeps them under its load number. A Load Number that isn't C.H. Robinson's 9 digits, or a PDF
+// over the DVIR reader's size cap, isn't read. Never throws: the extraction must not fail because
+// of it.
+function noteRateConAdvance(loadNumber, base64, now = Date.now()) {
+	try {
+		if (!RATECON_REISSUE_HOLD_ENABLED || typeof base64 !== "string") return;
+		const key = normLoadKey(loadNumber).slice(0, 80);
+		if (!/^\d{9}$/.test(key) || Math.floor(base64.length * 3 / 4) > rateconDvir.MAX_PDF_BYTES) return;
+		const text = pdfShownText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES });
+		rateConAdvanceReadings.note(key, rateconAdvanceRead.readAdvanceFigures(text), now);
+	} catch (e) {
+		console.warn(`[ratecon-advance] the rate con's advance was not read (${e && e.message}); this email adds no advance line`);
+	}
+}
+
+// The load's Payment after this email, in cents: the answer's value for the column the money math
+// reads as Payment (rateconDvirKeep.paymentColumn()), else the stored cell; null with no such
+// column or a cell that isn't one amount.
+function rateConAdvancePaymentCents(headers, stored, values) {
+	const header = rateconDvirKeep.paymentColumn(headers);
+	if (header === null) return null;
+	const keys = Object.keys(values || {});
+	const want = String(header).trim().toLowerCase();
+	const column = keys.find((c) => c === header) ?? keys.find((c) => c.trim().toLowerCase() === want);
+	return cellCompare.moneyCents(column === undefined ? storedCellNamed(stored, header) : values[column]);
+}
+
+// The advance read on a found load's email, once the answer went; the caller has checked that no
+// hold of every column applies. storedLoadId: the stored row's Load ID cell as written; values:
+// the answer's values; dvir: the DVIR keep's decision on this email, or null. Never throws:
+// ingestion never waits on it.
+function rateConAdvanceReadCheck({ loadId, storedLoadId, headers, stored, values, dvir }) {
+	try {
+		const reading = rateConAdvanceReadings.get(normLoadKey(loadId).slice(0, 80));
+		if (!reading || reading.state === "no_labels" || !rateconDvirKeep.isChrLoad(stored, headers)) return null;
+		return rateconAdvanceRead.run(db, {
+			loadId: storedLoadId,
+			reading,
+			paymentCents: rateConAdvancePaymentCents(headers, stored, values),
+			dvir,
+			on: RATECON_ADVANCE_READ_ON,
+			closedMonths: integrityClosedMonthsOf(headers, stored),
+		}, {
+			audit: (action, detail, line) => logAudit(RATECON_ADVANCE_ACTOR, action, "load", line.loadId, detail),
+			// A Super Admin's notice (AUTO_INVOICE_NOTICE_TYPE, left out for every other role by
+			// noticeTypeScope()), listed when the notifications next load. No email, and no live
+			// push: the n8n routes stay clear of the socket server, which their runners never lift.
+			notify: ({ title, body }) => db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES (?, ?, ?, ?)").run(AUTO_INVOICE_NOTICE_TYPE, title, body, "{}"),
+		});
+	} catch (e) {
+		console.error(`[ratecon-advance] the advance read failed, so nothing was added: ${(e && e.message) || e}`);
+		return null;
+	}
+}
+
 app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
 		n8nKeepStoredUnauthorized++;
@@ -9247,6 +9327,8 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 		recordKeepStoredPickupReading(loadId, body.values, out.values, hold, personHeld);
 		if (dvir) recordRateConDvirDecision(loadId, dvir, { on: RATECON_DVIR_KEEP_ENABLED, protectedLoad: Boolean(hold) });
 		if (dvirOn && dvirOn.verdict === "kept") logAudit(RATECON_DVIR_ACTOR, "ratecon_payment_kept_dvir", "job_tracking", loadId, rateconDvirKeep.auditDetails(dvirOn));
+		// ADVANCE READ: decided where the DVIR keep is, on the answer that went.
+		if (match && RATECON_REISSUE_HOLD_ENABLED && !(hold && hold.all)) rateConAdvanceReadCheck({ loadId, storedLoadId: match[idCol], headers, stored, values: out.values, dvir });
 		// A certain DVIR-only change is logged, not alerted: with nothing else held or
 		// changed on a protected load, there is nothing for a person to decide.
 		const dvirAlone = Boolean(hold && dvirOn && dvirOn.verdict === "kept" && !out.changed.length && out.held.length === 1 && out.held[0].column === dvirOn.column);
