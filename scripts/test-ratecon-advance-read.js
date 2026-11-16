@@ -365,7 +365,8 @@ function section6() {
 	go("123456704");
 	check("§6 an invoice already made (any spelling of the load): no line, after_invoice, one notice however often the email comes", linesOf(db, "123456704").length === 0
 		&& readsOf(db, "123456704").map((x) => `${x.verdict}:${x.reason}:${x.notified}`).join() === "person:after_invoice:1,person:after_invoice:0" && h.notices.length === 3, { reads: readsOf(db, "123456704"), notices: h.notices.length });
-	check("§6 ...the notice says no line was added and nothing was re-sent", /nothing was re-sent/i.test(h.notices[2].body) && /\$500\.00/.test(h.notices[2].body) && /123456704/.test(h.notices[2].title), h.notices[2]);
+	const r11 = h.notices[2] || { title: "", body: "" };
+	check("§6 ...the notice says no line was added and nothing was re-sent", /nothing was re-sent/i.test(r11.body) && /\$500\.00/.test(r11.body) && /123456704/.test(r11.title), r11);
 
 	// Off by a cent, a figure missing: a person, no line.
 	go("123456705", { reading: A.readAdvanceFigures(OFF_BY_A_CENT) });
@@ -399,6 +400,12 @@ function section6() {
 	const noDrafts = freshDb({ drafts: false });
 	const nd = A.run(noDrafts, { loadId: "123456714", reading, paymentCents: 211500, on: true, closedMonths: [] }, hooksFor(noDrafts).hooks);
 	check("§6 no drafts table: after_invoice, no line (fails closed)", nd && nd.decision.reason === "after_invoice" && linesOf(noDrafts, "123456714").length === 0, nd);
+
+	// A lines table the read can't query: as lines it can't tell, so a person decides.
+	const odd = freshDb({ lines: false });
+	odd.exec(`CREATE TABLE ${invoiceLines.TABLE} (id INTEGER PRIMARY KEY AUTOINCREMENT, load_key TEXT)`);
+	const od = A.run(odd, { loadId: "123456716", reading, paymentCents: 211500, on: true, closedMonths: [] }, hooksFor(odd).hooks);
+	check("§6 a lines table that can't be read: lines_differ, nothing added", od && od.decision.reason === "lines_differ" && odd.prepare(`SELECT COUNT(*) AS n FROM ${invoiceLines.TABLE}`).get().n === 0, od);
 
 	// A failed insert: nothing added, and a person is told.
 	const broken = freshDb();
