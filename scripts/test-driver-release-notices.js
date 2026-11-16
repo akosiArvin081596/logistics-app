@@ -324,12 +324,15 @@ async function main() {
 	// Words a driver reads. No figure in any form: a number in a note can't follow a week with time off.
 	const SPELLED = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|half|dollars?|cents?|percent)\b/i;
 	const JARGON = /\b(session|deploy|deployed|release|server|api|bug|flag|sheet|database|endpoint|cache|token|login)\b/i;
-	// "Past" is the first word of the tab's own name, Past Performance.
-	const APP_WORDS = new Set(["Loads", "Performance", "Past", "Alerts", "Kit", "Messages", "Invoices", "Active", "Pending", "Historical", "POD", "LogisX"]);
+	// "Past" is the first word of the tab's own name, Past Performance. A weekday, the app's time zone
+	// and AM or PM name a time, not a person.
+	const APP_WORDS = new Set(["Loads", "Performance", "Past", "Alerts", "Kit", "Messages", "Invoices", "Active", "Pending", "Historical", "POD", "LogisX", "Friday", "Central", "AM", "PM"]);
+	// A clock time such as 6:30 PM is the same every week, so it is the one place a digit may stand.
+	const CLOCK_TIME = /\b(1[0-2]|[1-9]):[0-5]\d (AM|PM)\b/g;
 	function wordProblems(text) {
 		const out = [];
 		if (typeof text !== "string" || text.trim() === "") return ["empty"];
-		if (/\d/.test(text)) out.push("a digit");
+		if (/\d/.test(text.replace(CLOCK_TIME, ""))) out.push("a digit");
 		if (/[$#%@]/.test(text)) out.push("a figure or address sign");
 		if (SPELLED.test(text)) out.push("a spelled-out figure");
 		if (JARGON.test(text)) out.push("a word a driver wouldn't use");
@@ -357,6 +360,9 @@ async function main() {
 	ok("the plain-words check catches a load count", wordProblems("7.5 is the target.").length > 0);
 	ok("the plain-words check catches a person's name", wordProblems("Ask Jordan about this.").length > 0);
 	ok("the plain-words check catches a spelled figure", wordProblems("Each pickup counts half a load.").length > 0);
+	eq("...lets a clock time stand", wordProblems("Send it by Friday 6:30 PM Central."), []);
+	ok("...but still catches a count beside a clock time", wordProblems("Deliver 3 loads by 6:30 PM.").length > 0);
+	ok("...and a figure shaped like a time without AM or PM", wordProblems("Your score is 7:50 now.").length > 0);
 	eq("a note's needs are parts of the app the client knows", releases.NEEDS.every((need) => clientLib.TOUR_STEPS.some((s) => s.needs === need)), true);
 
 	const first = LIST[0];
@@ -378,7 +384,15 @@ async function main() {
 	ok("...its title is plain words", !!past && past.title === "Past Performance and the bar's colors");
 	eq("...Show me walks the bar and the tab", past && past.tour, ["loads", "performance"]);
 	ok("...and nothing in it speaks of hours, which ship switched off", !!past && !/hour|driving/i.test([past.title, ...past.notes.map(lineText)].join(" ")));
-	eq("...it is the newest entry, so it's what a driver reads first", releases.latestReleaseId(LIST), "2026-11-12-past-performance");
+
+	// The Central time note: the app's clock and the weekly invoice deadline, word for word, for every driver.
+	const central = LIST.find((r) => r.id === "2026-11-18-central-time");
+	eq("the Central time note's lines, word for word, for every driver", central && central.notes, [
+		"LogisX now runs on Central time. Your weekly invoice deadline is Friday 6:30 PM Central.",
+	]);
+	ok("...its title is plain words", !!central && central.title === "LogisX now runs on Central time");
+	eq("...Show me walks the Invoices tab", central && central.tour, ["invoices"]);
+	eq("...it is the newest entry, so it's what a driver reads first", releases.latestReleaseId(LIST), "2026-11-18-central-time");
 
 	// ── §2 ──────────────────────────────────────────────────────────────────
 	section("2 the rules");
