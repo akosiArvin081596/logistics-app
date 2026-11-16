@@ -10,15 +10,17 @@
  *   §1 the switch: on only when exactly "true"; server.js reads it once, off in a replica,
  *      and writes only with the advance lines themselves on.
  *   §2 the reader, on made-up shown text: each figure right beside its label, the labels
- *      joined with no spaces, a figure away from its label, a label twice, a minus sign,
- *      three decimals, "Subtotal:" and a commodity "Total:", no labels, no text, a hostile
- *      text read fast; whether the text names C.H. Robinson.
+ *      joined with no spaces, the next item's digits joined straight on, a figure away from
+ *      its label, a label twice, a minus sign, one decimal, "Subtotal:" and a commodity
+ *      "Total:", no labels, no text, a hostile text read fast; whether the text names
+ *      C.H. Robinson.
  *   §3 the same through made-up PDFs and lib/pdf-shown-text.js (glyph codes and literal
  *      strings), and a PDF with no text.
- *   §4 decide(), each path: the sum checks; off by a cent; a figure missing; the PDF not
- *      naming CHR; no text; lines that agree (the read's own, a person's); lines that don't
- *      (another amount, a voided line, a second revised rate con with another advance); an
- *      invoice already made, or unknown; Payment not the Total; Payment kept by the DVIR keep.
+ *   §4 decide(), each path: the sum checks; off by a cent; the advance and the New Total read
+ *      the wrong way round; a figure missing; the PDF not naming CHR; no text; lines that
+ *      agree (the read's own, a person's); lines that don't (another amount, a voided line, a
+ *      second revised rate con with another advance); an invoice already made, or unknown;
+ *      Payment not the Total; Payment kept by the DVIR keep.
  *   §5 the reading store: 10 minutes, at most 200 loads, a reading with no advance label
  *      never replaces one with a label.
  *   §6 run() on an in-memory database: one line (kind advance, label "Advance", no
@@ -100,6 +102,8 @@ const NO_NAME = `${INTRO_OTHER} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 $
 const PLAIN = `${INTRO} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 Total: $2,150.00`;
 // A second advance on the same load: Advanced Total $800.00.
 const SECOND = `${INTRO} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00 Advanced Total: $800.00 New Total: $1,315.00`;
+// The two figures the sum can't tell apart, the wrong way round.
+const SWAPPED = `${INTRO} Rate Details Line Haul 1.00 $2,150.00 $2,150.00 Total: $2,150.00 Advanced Total: $1,650.00 New Total: $500.00`;
 
 const CHR_EMAIL = "made-up.agent@chrobinson.com";
 const OTHER_EMAIL = "ap@example-broker.test";
@@ -170,8 +174,9 @@ function section2() {
 	check("§2 a minus sign before the advance: figure_missing", negative.problem === "figure_missing", negative);
 	const negative2 = R(`${INTRO} Total: $2,115.00 Advanced Total: $-500.00 New Total: $1,615.00`);
 	check("§2 a minus sign after the dollar sign: figure_missing", negative2.problem === "figure_missing", negative2);
-	const decimals = R(`${INTRO} Total: $2,115.00 Advanced Total: $500.005 New Total: $1,615.00`);
-	check("§2 three decimals: figure_missing", decimals.problem === "figure_missing", decimals);
+	const joined = R(`${INTRO} Total: $2,115.001.00 Advanced Total: $500.00Line New Total: $1,615.0011/12/2026`);
+	check("§2 a figure with the next item's digits joined straight on (no space between): the figure is read",
+		joined.problem === null && joined.totalCents === 211500 && joined.advanceCents === 50000 && joined.newTotalCents === 161500, joined);
 	const cents1 = R(`${INTRO} Total: $2,115.00 Advanced Total: $500.5 New Total: $1,614.50`);
 	check("§2 one decimal: figure_missing", cents1.problem === "figure_missing", cents1);
 	const grouping = R(`${INTRO} Total: $2,1150.00 Advanced Total: $500.00 New Total: $1,615.00`);
@@ -215,6 +220,10 @@ function section4() {
 	const full = A.decide(base);
 	eqCheck("§4 ...with the figures in cents", [full.totalCents, full.advanceCents, full.newTotalCents, full.paymentCents], [211500, 50000, 161500, 211500]);
 	eqCheck("§4 off by a cent: a person (sum_off)", d({ reading: A.readAdvanceFigures(OFF_BY_A_CENT) }), ["person", "sum_off"]);
+	eqCheck("§4 the Advanced Total and New Total read the wrong way round (the advance over half the Total): a person (advance_over_half)",
+		d({ reading: A.readAdvanceFigures(SWAPPED) }), ["person", "advance_over_half"]);
+	eqCheck("§4 an advance of exactly half the Total: fill (the two figures are equal)",
+		d({ reading: A.readAdvanceFigures(`${INTRO} Total: $2,000.00 Advanced Total: $1,000.00 New Total: $1,000.00`), paymentCents: 200000 }), ["fill", "sum_checks"]);
 	eqCheck("§4 a figure missing: a person (figure_missing)", d({ reading: A.readAdvanceFigures(AWAY) }), ["person", "figure_missing"]);
 	eqCheck("§4 the PDF doesn't name C.H. Robinson: a person (not_chr_text)", d({ reading: A.readAdvanceFigures(NO_NAME) }), ["person", "not_chr_text"]);
 	eqCheck("§4 no text: unread", d({ reading: { state: "unreadable" } }), ["unread", "unreadable"]);
@@ -518,6 +527,9 @@ async function section7() {
 	// A figure missing.
 	await on.email("123456724", AWAY, "$2,115.00");
 	check("§7 a figure away from its label: no line, figure_missing", linesOf(on.db, "123456724").length === 0 && readsOf(on.db, "123456724")[0]?.reason === "figure_missing", readsOf(on.db, "123456724"));
+	// The advance and the New Total the wrong way round: the sum checks, the line doesn't go.
+	await on.email("123456733", SWAPPED, "$2,150.00");
+	check("§7 an advance over half the Total (the two figures swapped): no line, advance_over_half", linesOf(on.db, "123456733").length === 0 && readsOf(on.db, "123456733")[0]?.reason === "advance_over_half", readsOf(on.db, "123456733"));
 	// Not CHR: another broker's load, an 8-digit Load ID.
 	for (const id of ["LD-TEST-0001", "12345678"]) {
 		await on.email(id, REVISED_NO_DVIR, "$2,150.00", id === "LD-TEST-0001" ? { Email: OTHER_EMAIL } : {});
