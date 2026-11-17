@@ -15,7 +15,8 @@
 //       table and the month table, another Monday's the weekly table and the one line in place of
 //       the month table; each laid out at the window's own width (the email's viewport tag: without
 //       it a phone lays a page out at 980 px and zooms it, and nothing could scroll sideways), and
-//       neither scrolls sideways
+//       neither's scroll width goes past that layout width (never judged by the window's inner
+//       width, which a phone context widens to fit the page)
 //   KWx per page: no console error or warning, no page error; KWy: no write but KW3's one PUT
 // The answers come from lib/kpi-metrics.js computeKpis() and buildKpiResponse() over made-up loads,
 // ELD days and receipts, stored as server.js stores them, so the page shows the server's own strings.
@@ -376,25 +377,31 @@ async function emailRun(browser) {
       // (innerText, which keeps table cells apart).
       const weeklyTable = (s) => /Weekly figures (None of these weekly figures|Metric Last week)/.test(s)
       const monthTable = (s) => /Monthly figures (None of these monthly figures|Metric Figure)/.test(s)
-      const layoutWidth = () => page.evaluate(() => document.documentElement.clientWidth)
+      // A sideways scroll is the page's scroll width past its LAYOUT width (documentElement.clientWidth,
+      // 390 in the phone context), never the window's inner width, which a phone context widens to
+      // fit whatever the page needs.
+      const measure = () => page.evaluate(() => ({
+        layout: document.documentElement.clientWidth,
+        scroll: (document.scrollingElement || document.documentElement).scrollWidth,
+        inner: window.innerWidth,
+      }))
+      const widths = (m) => `layout ${m.layout}, scroll width ${m.scroll}, inner width ${m.inner}`
       // The phone's layout is exactly its width; a desktop window may keep a scrollbar's gutter (HEADED=1).
       const layoutFits = (w) => (size.viewport.width < 640 ? w === size.viewport.width : w <= size.viewport.width && w >= size.viewport.width - 20)
+      const fits = (m) => layoutFits(m.layout) && m.scroll <= m.layout
       const otherText = clean(await page.locator('body').innerText())
-      const otherWidth = await layoutWidth()
-      const otherScroll = await noSidewaysScroll(page)
+      const other = await measure()
       const otherShot = await page.screenshot({ path: path.join(SHOT_DIR, `kpi-weekly-5-email-other-${size.tag}.png`), fullPage: true }).then(() => path.join(SHOT_DIR, `kpi-weekly-5-email-other-${size.tag}.png`))
       await page.goto(`${BASE}/__email/first.html`, { waitUntil: 'domcontentloaded' })
       const firstText = clean(await page.locator('body').innerText())
-      const firstWidth = await layoutWidth()
-      const firstScroll = await noSidewaysScroll(page)
+      const first = await measure()
       await page.screenshot({ path: path.join(SHOT_DIR, `kpi-weekly-6-email-first-${size.tag}.png`), fullPage: true })
-      record(`KW5-${size.tag}`, 'The Monday email, built by lib/kpi-digest.js and never sent: the month table on the first Monday only; laid out at the window width; no sideways scroll',
-        `other Monday "${mails.other.subject}": the weekly table, the one line; first Monday "${mails.first.subject}": the weekly and the month tables; layout width ${size.viewport.width}`,
-        `other: weekly ${weeklyTable(otherText)}, the line ${otherText.includes("Monthly figures come in the first Monday's email of each month.")}, month ${monthTable(otherText)}, layout ${otherWidth}, scroll ${JSON.stringify(otherScroll)}; first: weekly ${weeklyTable(firstText)}, the line ${firstText.includes('Monthly figures come in')}, month ${monthTable(firstText)}, layout ${firstWidth}, scroll ${JSON.stringify(firstScroll)}`,
+      record(`KW5-${size.tag}`, 'The Monday email, built by lib/kpi-digest.js and never sent: the month table on the first Monday only; laid out at the window width; no scroll past that layout width',
+        `other Monday "${mails.other.subject}": the weekly table, the one line; first Monday "${mails.first.subject}": the weekly and the month tables; layout width ${size.viewport.width}, scroll width not above it`,
+        `other: weekly ${weeklyTable(otherText)}, the line ${otherText.includes("Monthly figures come in the first Monday's email of each month.")}, month ${monthTable(otherText)}, ${widths(other)}; first: weekly ${weeklyTable(firstText)}, the line ${firstText.includes('Monthly figures come in')}, month ${monthTable(firstText)}, ${widths(first)}`,
         weeklyTable(otherText) && otherText.includes("Monthly figures come in the first Monday's email of each month.") && !monthTable(otherText)
           && weeklyTable(firstText) && monthTable(firstText) && !firstText.includes('Monthly figures come in')
-          && layoutFits(otherWidth) && layoutFits(firstWidth)
-          && otherScroll.page && firstScroll.page,
+          && fits(other) && fits(first),
         otherShot)
     } finally {
       await judgeConsole(`KWx-email-${size.tag}`, issues)
