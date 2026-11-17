@@ -14,7 +14,7 @@
           <dd :class="{ 'kpi-weekly-muted': view.comparison.muted }">{{ view.comparison.display }}</dd>
         </div>
         <div v-if="view.toDate" class="kpi-weekly-pair">
-          <dt>This week so far ({{ view.toDate.label }})</dt>
+          <dt>This week: {{ view.toDate.label }}</dt>
           <dd :class="{ 'kpi-weekly-muted': view.toDate.muted }">{{ view.toDate.display }}</dd>
         </div>
       </dl>
@@ -59,10 +59,8 @@
 import { computed } from 'vue'
 import { WEEKLY_TITLE, sparkline, weeklyView } from '../../lib/kpiView.js'
 
-// One metric's weekly block from GET /api/admin/kpis (present only while weekly
-// figures are on). Every label and figure is a server string; the sparkline
-// plots each week's value, leaves a gap for a week with none and draws the
-// week to date dashed.
+// One metric's weekly block (present only while weekly figures are on). Every
+// label and figure is a server string; the sparkline only places them.
 const props = defineProps({
   weekly: { type: Object, default: null },
   label: { type: String, default: '' },
@@ -102,12 +100,14 @@ const ariaLabel = computed(() => {
   gap: 0.75rem;
 }
 .kpi-weekly-pair dt { min-width: 0; overflow-wrap: anywhere; }
+/* L3: a figure such as "$27,250" never shrinks or breaks mid-number at 375 px; the label wraps instead. */
 .kpi-weekly-pair dd {
   margin: 0;
+  flex-shrink: 0;
+  white-space: nowrap;
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
 }
 .kpi-weekly-muted { color: var(--text-dim); font-weight: 500; }
 .kpi-weekly-note,

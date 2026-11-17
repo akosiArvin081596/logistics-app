@@ -899,8 +899,15 @@ const MUTANTS = [
   ['M18 a withheld weekly comparison loses its note', mutate("note: String(c.note ?? ''),", "note: '',")],
   ['M19 the week to date not marked open', mutate("openPeriod: toDate ? toDate.label : '',", "openPeriod: '',")],
   ['M20 last week taken from the week to date', mutate('lastWeek: row(weekly.current),', 'lastWeek: row(weekly.toDate),')],
-  ['M21 a monthly-only reason replaced', mutate("if (mode !== 'weekly') return { mode, rule, reason: String(weekly.reason ?? ''),", "if (mode !== 'weekly') return { mode, rule, reason: 'No data',")],
-  ['M22 the weekly sentence dropped from the approve dialog', mutate("body: `${APPROVE_BODY}${note ? ` ${note}` : ''}`,", 'body: APPROVE_BODY,')],
+  ['M21 a monthly-only reason replaced', mutate("if (mode !== 'weekly') return { mode, rule: '', reason: String(weekly.reason ?? ''),", "if (mode !== 'weekly') return { mode, rule: '', reason: 'No data',")],
+  ['M22 the weekly sentence dropped from the approve dialog', mutate("body: `${APPROVE_BODY}${note ? ` ${note}` : ''}`,\n        action: 'Approve for public use',", "body: APPROVE_BODY,\n        action: 'Approve for public use',")],
+  // R4
+  ['M23 the weekly re-approve button on a monthly-only metric', mutate("const pending = metric?.weekly?.mode === 'weekly' && a?.approved === true && a?.coversWeekly === false", "const pending = !!metric?.weekly && a?.approved === true && a?.coversWeekly === false")],
+  ['M24 the weekly re-approve button without an approval', mutate("metric?.weekly?.mode === 'weekly' && a?.approved === true && a?.coversWeekly === false", "metric?.weekly?.mode === 'weekly' && a?.coversWeekly === false")],
+  ['M25 the weekly re-approve button while the answer says nothing (weekly off)', mutate("a?.approved === true && a?.coversWeekly === false", "a?.approved === true && a?.coversWeekly !== true")],
+  ['M26 the week rule on a monthly-only card (L4)', mutate("if (mode !== 'weekly') return { mode, rule: '', reason:", "if (mode !== 'weekly') return { mode, rule, reason:")],
+  ['M27 the weekly sentence in a monthly-only metric\'s dialog (L4)', mutate("return metric?.weekly?.mode === 'weekly' ? String(weeklyNote ?? '') : ''", "return String(weeklyNote ?? '')")],
+  ['M28 the weekly confirm not naming the metric', mutate('title: `Approve “${name}” for its weekly figures too?`,', "title: 'Approve its weekly figures too?',")],
 ]
 for (const [label, src] of MUTANTS) {
   const failed = viewChecks(await load(src)).filter((r) => !r.ok)

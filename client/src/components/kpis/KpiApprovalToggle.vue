@@ -21,6 +21,17 @@
     <p v-if="view.by || view.at" class="kpi-approval-meta">
       {{ view.approved ? 'Approved' : 'Last set' }}<template v-if="view.by"> by {{ view.by }}</template><template v-if="view.at"> on {{ fmtAppInstant(view.at) }}</template>
     </p>
+    <div v-if="weekly.pending" class="kpi-approval-weekly">
+      <p :id="weeklyId" class="kpi-approval-weekly-note" role="note">{{ weekly.note }}</p>
+      <Button
+        type="button"
+        variant="outline"
+        class="kpi-approval-weekly-btn text-[12px]"
+        :aria-describedby="weeklyId"
+        :disabled="saving"
+        @click="askWeekly"
+      >{{ weekly.action }}</Button>
+    </div>
 
     <Dialog :open="confirming" @update:open="(v) => { if (!v) confirming = false }">
       <DialogContent class="sm:max-w-[460px] rounded-[14px]">
@@ -48,7 +59,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { approvalConfirmText, approvalView } from '../../lib/kpiView.js'
+import { approvalConfirmText, approvalView, weeklyApprovalConfirmText, weeklyApprovalView } from '../../lib/kpiView.js'
 import { fmtAppInstant } from '../../utils/datetime'
 import { Button } from '@/components/ui/button'
 import {
@@ -68,16 +79,30 @@ const props = defineProps({
 const emit = defineEmits(['set'])
 
 const view = computed(() => approvalView(props.metric.approval))
+const weekly = computed(() => weeklyApprovalView(props.metric))
 const labelId = computed(() => `kpi-approval-${props.metric.key}`)
 const staleId = computed(() => `kpi-approval-stale-${props.metric.key}`)
+const weeklyId = computed(() => `kpi-approval-weekly-${props.metric.key}`)
 
 const confirming = ref(false)
 const next = ref(false)
-const confirmText = computed(() => approvalConfirmText(props.metric.label, next.value, props.weeklyNote))
+// K30: the weekly button saves the same approval again, so it covers the weekly figures.
+const forWeekly = ref(false)
+const confirmText = computed(() => (forWeekly.value
+  ? weeklyApprovalConfirmText(props.metric.label, props.weeklyNote)
+  : approvalConfirmText(props.metric.label, next.value, props.weeklyNote)))
 
 function ask() {
   if (props.saving) return
+  forWeekly.value = false
   next.value = !view.value.approved
+  confirming.value = true
+}
+
+function askWeekly() {
+  if (props.saving) return
+  forWeekly.value = true
+  next.value = true
   confirming.value = true
 }
 
@@ -124,6 +149,21 @@ function confirm() {
   font-size: 0.72rem;
   color: var(--text-dim);
   overflow-wrap: anywhere;
+}
+.kpi-approval-weekly {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+.kpi-approval-weekly-note {
+  margin: 0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #92400e;
 }
 
 /* The Financials cost-settings switch (CostSettingsDialog.vue), green when on. */
