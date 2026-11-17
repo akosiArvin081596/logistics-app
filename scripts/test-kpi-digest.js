@@ -48,13 +48,18 @@
  *    and an invalid one); the month table only on a Monday dated the 1st to
  *    the 7th, the same rows as §13's; no last week prints the month table and
  *    one line; the preview carries both sections.
- * §15 layout: tables and inline styles only, no image, link, font, script or
- *    style block, at most 640 px; figures right-aligned on alternating rows;
- *    arrows only from the server's sign; neutral colours only (lib/kpi-catalog.js
- *    gives no metric a better direction), dark text on light backgrounds at
- *    4.5:1 or more; the text body mirrors each HTML table in aligned columns.
- * §16 the footer's send time is the schedule's: lib/kpi-schedule.js sends
- *    Mondays at 8:00 AM Central, the same moment as 9:00 AM Eastern.
+ * §15 layout: the email opens with its own viewport tag; tables and inline
+ *    styles only, no image, link, font, script or style block, at most 640 px;
+ *    figures right-aligned on alternating rows, kept whole while words may
+ *    wrap; arrows only from the server's sign; neutral colours only
+ *    (lib/kpi-catalog.js gives no metric a better direction), dark text on
+ *    light backgrounds at 4.5:1 or more; the text body mirrors each HTML table
+ *    in aligned columns.
+ * §16 the footer's send time is the schedule's own words for the business
+ *    zone (job.digestSchedule from lib/kpi-schedule.js scheduleText()): 8:00 AM
+ *    Central on the Central clock, 9:00 AM Eastern on the Eastern one, the
+ *    same moment; none of its own without them; the one-time preview says it
+ *    is sent once.
  *
  * Pure: no server, no database, no network.
  *
@@ -85,7 +90,11 @@ const PREVIEW = "PREVIEW – not approved for public use";
 const SENTINELS = ["Zed Sentinel Freight", "Quinn Sentinel"];
 const XSS = "<script>alert(1)</script> & 'quotes'";
 const FOOTER_TEXT = "Aggregated figures only. Only figures marked “Public use: Yes” may be published.";
-const SEND_TEXT = "Sent automatically every Monday at 8:00 AM Central.";
+// The send time in the schedule's words for each business zone (lib/kpi-schedule.js scheduleText()).
+const EASTERN_SEND = "Sent automatically every Monday at 9:00 AM Eastern.";
+const CENTRAL_SEND = "Sent automatically every Monday at 8:00 AM Central.";
+const CENTRAL_PREVIEW_SEND = "This preview is sent once, after the first snapshot; the weekly email goes out every Monday at 8:00 AM Central.";
+const VIEWPORT_TAG = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
 const MONTH_ALL_NO = "None of these monthly figures is approved for public use yet; approve them on the KPI page.";
 const WEEKLY_ALL_NO = "None of these weekly figures is approved for public use yet; approve them on the KPI page.";
 const GREY = "#52606d";
@@ -117,7 +126,7 @@ function metric(key, label, over = {}) {
 function fixture() {
 	return {
 		asOfDay: "2026-10-09", timeZone: "America/New_York", generatedAt: "2026-10-09T12:00:00.000Z",
-		job: { enabled: { snapshot: true, digest: true }, lastRun: { id: 1, kind: "nightly", status: "ok", errors: [{ metric: null, code: "Quinn Sentinel" }] } },
+		job: { enabled: { snapshot: true, digest: true }, digestSchedule: SCHEDULE.scheduleText("America/New_York").digest, lastRun: { id: 1, kind: "nightly", status: "ok", errors: [{ metric: null, code: "Quinn Sentinel" }] } },
 		settings: { aiDispatchStart: { value: "2026-04-09", source: "derived", evidence: "Zed Sentinel Freight" }, recipients: ["quinn.sentinel@example.test"] },
 		metrics: [
 			metric("loads_delivered", "Loads delivered", { approval: { approved: true, by: "super_admin", at: "2026-10-08T00:00:00.000Z", stale: false } }),
@@ -232,8 +241,8 @@ function checks(d) {
 	const escServer = new Function(`${SERVER.match(/\nfunction escHtml\(s\) \{[\s\S]*?\n\}\n/)[0]}\nreturn escHtml;`)();
 	const samples = [XSS, `"a" <b> & 'c'`, null, undefined, 0, "plain", "–“”"];
 	t(samples.every((v) => d.escHtml(v) === escServer(v)), "§7 its escape behaves exactly like server.js escHtml()");
-	t(d.FOOTER === FOOTER_TEXT && d.SEND_TIME === SEND_TEXT && weekly.html.includes(`>${d.escHtml(FOOTER_TEXT)}<br>${d.escHtml(SEND_TEXT)}</p>`)
-		&& weekly.text.endsWith(`\n${FOOTER_TEXT}\n${SEND_TEXT}`), "§7 the footer's two lines, verbatim, last in both bodies");
+	t(d.FOOTER === FOOTER_TEXT && weekly.html.includes(`>${d.escHtml(FOOTER_TEXT)}<br>${d.escHtml(EASTERN_SEND)}</p>`)
+		&& weekly.text.endsWith(`\n${FOOTER_TEXT}\n${EASTERN_SEND}`), "§7 the footer's two lines, verbatim, last in both bodies (an Eastern business zone's words)");
 
 	// §8
 	for (const s of SENTINELS) {
@@ -426,6 +435,7 @@ function weeklyFixture(o = {}) {
 	const f = holdFixture();
 	f.asOfDay = o.asOfDay || "2026-11-23";
 	f.timeZone = "America/Chicago";
+	f.job = { ...f.job, digestSchedule: SCHEDULE.scheduleText("America/Chicago").digest };
 	f.generatedAt = o.generatedAt || `${f.asOfDay}T14:00:00.000Z`;
 	f.weekly = { weekRule: RULE, approvalNote: "This approval also covers its weekly figures.", since: "2026-11-19T22:00:00.000Z", lastWeek: LW, weekBefore: WB, ...(o.weekly || {}) };
 	const blocks = {
@@ -653,6 +663,7 @@ function layoutChecks(d) {
 		const widths = [...h.matchAll(/width="(\d+)"/g), ...h.matchAll(/width:(\d+)px/g)].map((x) => Number(x[1]));
 		t(h.includes("max-width:640px") && widths.every((w) => w <= 640), `§15 ${name}: at most 640 px wide (${widths.join(",")})`);
 		t((h.match(/<table\b/g) || []).length === (h.match(/<\/table>/g) || []).length && (h.match(/<tr\b/g) || []).length === (h.match(/<\/tr>/g) || []).length, `§15 ${name}: every table and row closed`);
+		t(h.startsWith(`${VIEWPORT_TAG}\n`), `§15 ${name}: the email itself opens with the viewport tag, so a phone lays it out at its own width`);
 	}
 	// Colours: neutral, dark text on light backgrounds, 4.5:1 or more.
 	const html = Object.values(all).map((m) => m.html).join("\n");
@@ -672,6 +683,15 @@ function layoutChecks(d) {
 	t(wt && wt.rows.every((r) => !r[3] || !/color:#(?!52606d)/i.test(r[3].html)), "§15 ...a change in neutral text, grey only for words");
 	const mt = read.htmlSection(all.first.html, "Monthly figures");
 	t(mt && mt.head.map((c) => c.align).join() === "left,right,left,left" && mt.rows.length > 2 && backOf(mt.rows[0][0]) !== backOf(mt.rows[1][0]), "§15 the month table in the same style: its figure right-aligned, alternating rows");
+	// L5: a figure never breaks from its unit; words ("No records", "No data") may wrap on a phone.
+	const isFigure = (s) => /^[+\-−]?\$?\d/.test(s);
+	const figureCells = [
+		...(wt ? wt.rows.filter((r) => r.length === 5).flatMap((r) => [r[1], r[2]]) : []),
+		...(mt ? mt.rows.filter((r) => r.length === 4 && r[1].span === 1).map((r) => r[1]) : []),
+	].map((c) => ({ text: c.text.split("\n")[0], nowrap: /white-space:nowrap/.test(c.html.split("<br>")[0]) }));
+	const words = figureCells.filter((c) => !isFigure(c.text));
+	t(words.length > 0 && figureCells.length > words.length && figureCells.every((c) => c.nowrap === isFigure(c.text)),
+		`§15 figures kept whole, words free to wrap (words: ${JSON.stringify(words.map((c) => [c.text, c.nowrap]))})`);
 	// The text body mirrors each HTML table, in aligned columns.
 	for (const [name, m, heading] of [["weekly", all.monday, "Weekly figures"], ["first Monday's month", all.first, "Monthly figures"], ["off", all.off, "Monthly figures"]]) {
 		const ht = read.htmlSection(m.html, heading);
@@ -695,17 +715,28 @@ function layoutChecks(d) {
 	return out;
 }
 
-// §16 the footer's send time is the schedule's.
+// §16 the footer's send time is the schedule's own words for the business zone.
 function sendTimeChecks(d) {
 	const out = [];
 	const t = (cond, name) => out.push({ ok: !!cond, name });
 	const central = SCHEDULE.scheduleText("America/Chicago").digest;
-	t(central === "Mondays at 8:00 AM Central" && d.SEND_TIME === `Sent automatically every Monday at ${central.slice("Mondays at ".length)}.`, `§16 the footer's time is the Central schedule's (${JSON.stringify(d.SEND_TIME)}; schedule ${JSON.stringify(central)})`);
+	const eastern = SCHEDULE.scheduleText("America/New_York").digest;
+	t(central === "Mondays at 8:00 AM Central" && eastern === "Mondays at 9:00 AM Eastern", `§16 the schedule's words (${JSON.stringify([central, eastern])})`);
+	const on = (job, preview = false) => d.buildDigest({ response: { ...weeklyFixture(), job }, preview, asOfDay: "2026-11-23" });
+	const last = (m) => m.text.split("\n").pop();
+	const c = on({ digestSchedule: central });
+	t(last(c) === CENTRAL_SEND && c.html.includes(`<br>${d.escHtml(CENTRAL_SEND)}</p>`), `§16 a Central business zone (production): "${CENTRAL_SEND}" (got ${JSON.stringify(last(c))})`);
+	const e = on({ digestSchedule: eastern });
+	t(last(e) === EASTERN_SEND && e.html.includes(`<br>${d.escHtml(EASTERN_SEND)}</p>`), `§16 an Eastern business zone: "${EASTERN_SEND}" (got ${JSON.stringify(last(e))})`);
+	t(last(on({})) === "Sent automatically every Monday.", "§16 no schedule words: no time of the email's own");
+	const pv = on({ digestSchedule: central }, true);
+	t(last(pv) === CENTRAL_PREVIEW_SEND && pv.html.includes(`<br>${d.escHtml(CENTRAL_PREVIEW_SEND)}</p>`) && !/Sent automatically/.test(pv.html + pv.text),
+		`§16 L4: the one-time preview says it is sent once, not that it went out on the Monday schedule (got ${JSON.stringify(last(pv))})`);
 	const same = ["2026-11-23T12:00:00Z", "2027-07-05T12:00:00Z"].every((iso) => {
 		const ms = Date.parse(iso);
 		return SCHEDULE.digestSlot(ms, "America/New_York").slotMs === SCHEDULE.digestSlot(ms, "America/Chicago").slotMs;
 	});
-	t(same, "§16 ...the same moment as the Eastern schedule's 9:00 AM, in winter and in summer");
+	t(same, "§16 the two zones' words name the same moment, in winter and in summer");
 	return out;
 }
 
@@ -800,8 +831,11 @@ console.log("\n§10 MUTANTS");
 		["the monthly approval on the weekly table (K29 ignored)", swap(SRC, "m.approval.approved === true && m.approval.coversWeekly === true", "m.approval.approved === true")],
 		["the arrow reversed", swap(SRC, "return m[1] === \"+\" ? ARROWS.up : m[1] ? ARROWS.down : ARROWS.flat;", "return m[1] === \"+\" ? ARROWS.down : m[1] ? ARROWS.up : ARROWS.flat;")],
 		["green on a fall, which the catalog never calls better", swap(SRC, "p.nowrap ? \"white-space:nowrap\" : \"\"]", "p.nowrap ? \"white-space:nowrap\" : \"\", p.text.startsWith(ARROWS.down) ? \"color:#15803d\" : \"\"]")],
-		["the footer's send time changed", swap(SRC, "every Monday at 8:00 AM Central.", "every Monday at 9:00 AM Central.")],
-		["the footer's figures line dropped", swap(SRC, "${escHtml(FOOTER)}<br>${escHtml(SEND_TIME)}", "${escHtml(SEND_TIME)}")],
+		["a fixed send time instead of the schedule's words", swap(SRC, "const at = (/^Mondays at (.+)$/.exec(words) || [])[1] || \"\";", "const at = \"9:00 AM Eastern\";")],
+		["the preview footer claiming the Monday schedule (L4)", swap(SRC, "if (preview) return `This preview", "if (false) return `This preview")],
+		["the footer's figures line dropped", swap(SRC, "${escHtml(FOOTER)}<br>${escHtml(send)}", "${escHtml(send)}")],
+		["words kept from wrapping like figures (L5)", swap(SRC, "textCell(f, { nowrap: FIGURE_RE.test(f) })", "textCell(f, { nowrap: true })")],
+		["the email without its viewport tag (M1)", swap(SRC, "const html = [\n\t\tVIEWPORT,\n", "const html = [\n")],
 		["no alternating rows", swap(SRC, "`background-color:${i % 2 ? ZEBRA : CARD_BG}`", "`background-color:${CARD_BG}`")],
 		["last week's figures left-aligned", swap(SRC, "{ head: [\"Last week\", short(lastWeek)].filter(Boolean), align: \"right\" },", "{ head: [\"Last week\", short(lastWeek)].filter(Boolean), align: \"left\" },")],
 		["the muted rows not muted", swap(SRC, "...quiet.map((x) => ({ quiet: true, cells: [metricCell(x.label, []), cellOf([lineOf([part(x.text)])], rest)] })),", "...quiet.map((x) => ({ quiet: false, cells: [metricCell(x.label, []), cellOf([lineOf([part(x.text)])], rest)] })),")],

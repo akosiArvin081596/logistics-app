@@ -11,9 +11,17 @@ function decode(s) {
 	return String(s).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 
-// A cell's text: lines at <br>, a note number as " [n]", tags dropped.
+// A cell's text: lines at <br>, a note number as " [n]", tags dropped. The
+// replacements repeat until the string stops changing, so no tag survives a
+// single pass; only then is it decoded, once.
 function cellText(h) {
-	return decode(h.replace(/<sup\b[^>]*>([\s\S]*?)<\/sup>/g, " [$1]").replace(/<br>/g, "\n").replace(/<[^>]*>/g, ""));
+	let s = String(h);
+	let previous;
+	do {
+		previous = s;
+		s = s.replace(/<sup\b[^>]*>([^<]*)<\/sup>/g, " [$1]").replace(/<br>/g, "\n").replace(/<[^>]*>/g, "");
+	} while (s !== previous);
+	return decode(s);
 }
 
 // Every data table: { at, end, html, head: [cell], rows: [[cell]] }, a cell being
