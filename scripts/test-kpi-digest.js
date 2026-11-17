@@ -731,6 +731,12 @@ function layoutChecks(d) {
 	const words = figureCells.filter((c) => !isFigure(c.text));
 	t(words.length > 0 && figureCells.length > words.length && figureCells.every((c) => c.nowrap === isFigure(c.text)),
 		`§15 figures kept whole, words free to wrap (words: ${JSON.stringify(words.map((c) => [c.text, c.nowrap]))})`);
+	// A change keeps only its arrow and number together; "points" wraps like any word, so the
+	// Change column is no wider on a phone than its widest figure.
+	const kept = (wt ? wt.rows.filter((r) => r.length === 5).map((r) => r[3]) : [])
+		.flatMap((c) => [...c.html.matchAll(/<span style="white-space:nowrap">([^<]*)<\/span>/g)].map((m) => read.decode(m[1])));
+	t(kept.length > 0 && kept.every((s) => /^[↑↓→] [+\-−]?[\d,.]+%?$/.test(s)) && (cellsOf(read.htmlRow(wt, N.util)) || [])[3] === "→ 0.0 points",
+		`§15 a change keeps only its arrow and number on one line (${JSON.stringify(kept.filter((s) => !/^[↑↓→] [+\-−]?[\d,.]+%?$/.test(s)))})`);
 	// The text body mirrors each HTML table, in aligned columns.
 	for (const [name, m, heading] of [["weekly", all.monday, WEEKLY], ["first Monday's month", all.first, MONTHLY], ["off", all.off, MONTHLY]]) {
 		const ht = read.htmlSection(m.html, heading);
@@ -965,6 +971,7 @@ console.log("\n§10 MUTANTS");
 		["a word mapped twice (a missing figure as No data yet)", swap(SRC, "return reason ? `${NO_DATA} — ${reason}`", "return reason ? `${plain(PLAIN_FIGURES, NO_DATA)} — ${reason}`")],
 		["a number typed into a note (the baseline mpg)", swap(SRC, "getting ${m[1]} mpg on the same miles", "getting 6.5 mpg on the same miles")],
 		["\"pts\" left in a change", swap(SRC, "return m ? `${m[1]} points` : shown;", "return shown;")],
+		["\"points\" kept on one line with its figure", swap(SRC, "const unit = words.endsWith(\" points\") ? \" points\" : \"\";", "const unit = \"\";")],
 		["the server's ELD and calendar sentence back", swap(SRC, "const plainRule = rule.startsWith(SATURDAY_RULE);", "const plainRule = false;")],
 		["a change the server could not give printed as Not available", swap(SRC, "if (shown === NOT_AVAILABLE) return NO_CHANGE;", "if (shown === NOT_AVAILABLE) return shown;")],
 		["the three-month comparison under its server label", swap(SRC, "c.kind === \"t3m_yoy\" ? THREE_MONTHS : name", "name")],
