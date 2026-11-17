@@ -176,7 +176,8 @@ function checkPress(given, src = PROCESS_SRC) {
 		eq(w.db.prepare("SELECT COUNT(*) AS n FROM load_invoice_drafts").get().n, 1, "§1 FAILS ON THE OLD CODE: no second draft row");
 		eq(w.db.prepare("SELECT invoice_id, number_voided_at FROM auto_invoice_claims").get(), { invoice_id: N, number_voided_at: "" }, "§1 ...and the broker's invoice stands, its number not voided");
 		const again = w.press(P);
-		eq([again.ok, again.code, again.error, w.audits.length], [false, "TRIUMPH_ALREADY", "This load is already with Triumph.", 2], "§1 FAILS ON THE OLD CODE: never twice: a second press is refused, nothing written");
+		eq([again.ok, again.code, w.audits.length], [false, "TRIUMPH_ALREADY", 2], "§1 FAILS ON THE OLD CODE: never twice: a second press is refused, nothing written");
+		eq(again.error, "This load is already on its way to Triumph.", "§1 FAILS ON THE OLD CODE (M1): ...in words true while it waits its turn: on its way, never \"not sent\"");
 	});
 	kase("§1 a refused arm", () => {
 		// The claim refused inside the press's own transaction (a row armed meanwhile): the mark rolls back.
@@ -211,10 +212,22 @@ function checkPress(given, src = PROCESS_SRC) {
 	refused("not C.H. Robinson's (another broker's domain)", (w) => { w.row = sheetRow({ Email: "ap@example-broker.test" }); }, "NOT_CHR", "Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.");
 	refused("not C.H. Robinson's (a Load ID that isn't 9 digits)", (w) => { w.row = sheetRow({ "Load ID": "LD-TEST-0001" }); }, "NOT_CHR", W.NOT_CHR, { press: { key: "ld-test-0001", loadId: "LD-TEST-0001" } });
 	refused("a look-alike domain", (w) => { w.row = sheetRow({ Email: "made-up@notchrobinson.com" }); }, "NOT_CHR", W.NOT_CHR);
+	// A second press is refused whatever the claim's state, in words true for where the load stands:
+	// on its way, with Triumph, marked, or back with its invoice to the broker after a stop or a clear.
+	const ALREADY = Object.freeze({
+		onItsWay: "This load is already on its way to Triumph.",
+		there: "This load is already with Triumph.",
+		marked: "This load is already marked factored: its invoice goes through Triumph.",
+		stopped: "This load was already taken for Triumph once and didn't go: its invoice to the broker stands. Its Triumph line says why.",
+	});
+	const ALREADY_BY_STATE = { waiting: "stopped", queued: "onItsWay", working: "onItsWay", staged: "there", submitted: "there", needs_attention: "stopped", skipped: "stopped", closed_outside: "there" };
+	const markIt = (w, factored) => w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, ?, 'person', ?, ?)").run(KEY, LOAD, factored, T0, T0);
 	for (const state of factoring.TRIUMPH_STATES) {
-		refused(`a Triumph claim already there (${state})`, (w) => ledger.insertClaim(w.db, { key: KEY, loadId: LOAD, state, nowIso: T0 }), "TRIUMPH_ALREADY", "This load is already with Triumph.");
+		refused(`a Triumph claim already there (${state})`, (w) => { markIt(w, 1); ledger.insertClaim(w.db, { key: KEY, loadId: LOAD, state, nowIso: T0 }); }, "TRIUMPH_ALREADY", ALREADY[ALREADY_BY_STATE[state]]);
 	}
-	refused("a mark already there", (w) => w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)").run(KEY, LOAD, T0, T0), "TRIUMPH_ALREADY", W.TRIUMPH_ALREADY);
+	refused("a claim whose mark was cleared (M1)", (w) => { markIt(w, 0); ledger.insertClaim(w.db, { key: KEY, loadId: LOAD, state: "needs_attention", code: "SUBMIT_FAILED", nowIso: T0 }); }, "TRIUMPH_ALREADY", ALREADY.stopped);
+	refused("a claim with no mark at all (M1)", (w) => ledger.insertClaim(w.db, { key: KEY, loadId: LOAD, state: "queued", nowIso: T0 }), "TRIUMPH_ALREADY", ALREADY.stopped);
+	refused("a mark already there", (w) => w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES (?, ?, 1, 'script', ?, ?)").run(KEY, LOAD, T0, T0), "TRIUMPH_ALREADY", ALREADY.marked);
 	refused("a mark that is final", (w) => w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, locked_at, locked_via, updated_at) VALUES (?, ?, 1, 'person', ?, ?, 'outside', ?)").run(KEY, LOAD, T0, T0, T0), "FACTORING_LOCKED", factoring.WORDS.FACTORING_LOCKED);
 	refused("a closed month", (w) => { w.closedMonths = ["2026-11"]; }, "MONTH_CLOSED", "This load's month is closed, so it can't go to Triumph.");
 	refused("a month that can't be told", (w) => { w.closedMonths = null; }, "MONTH_CLOSED", W.MONTH_CLOSED);
@@ -446,6 +459,15 @@ async function checkRoutes(routesLib) {
 		ledger.insertClaim(plain.db, { key: KEY, loadId: LOAD, state: "needs_attention", code: "SUBMIT_FAILED", nowIso: T0 });
 		eq((await plain.retry()).body.code, "NOT_RETRYABLE", "§5 a claim the button didn't arm: not this route's");
 	});
+	await kaseAsync("§5 Try again on a mark cleared since the page loaded", async () => {
+		const w = routesWorld(routesLib);
+		await w.press();
+		ledger.transition(w.db, KEY, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "SUBMIT_FAILED", stage: "built" } });
+		w.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY);
+		const r = await w.retry();
+		eq([r.status, r.body.code, w.claim().state], [409, "NOT_FACTORED", "needs_attention"], "§5 a cleared mark: Try again refused, nothing changed");
+		eq(r.body.error, "This load's mark was cleared, so Try again can't send it: its invoice to the broker stands.", "§5 FAILS ON THE OLD CODE (L5): ...in words that say the mark was cleared");
+	});
 	await kaseAsync("§5 the plain mark while the switch is on", async () => {
 		const w = routesWorld(routesLib);
 		w.db.exec("DELETE FROM auto_invoice_claims; DELETE FROM load_invoice_drafts");
@@ -494,7 +516,9 @@ async function checkRoutes(routesLib) {
 	const PRESS_MUTANTS = [
 		["a load that isn't C.H. Robinson's taken", "if (!rateconDvirKeep.isChrLoad(row, headers)) return refusal(\"NOT_CHR\");", ""],
 		["not delivered taken", "if (!autoRules.isCompletedStatus(status)) return refusal(\"NOT_DELIVERED\");", ""],
-		["an existing claim taken (never twice)", "if (claim || (marker && Number(marker.factored) !== 0)) return refusal(\"TRIUMPH_ALREADY\");", "if (marker && Number(marker.factored) !== 0) return refusal(\"TRIUMPH_ALREADY\");"],
+		["an existing claim taken (never twice)", "if (claim || (marker && Number(marker.factored) !== 0)) return { ...refusal(\"TRIUMPH_ALREADY\"), error: alreadyWords(claim, marker) };", "if (marker && Number(marker.factored) !== 0) return { ...refusal(\"TRIUMPH_ALREADY\"), error: alreadyWords(claim, marker) };"],
+		["a stopped or cleared load said to be with Triumph (M1)", "error: alreadyWords(claim, marker) };", "error: WORDS.TRIUMPH_ALREADY };"],
+		["a load on its way said to be stopped (M1)", "\tif (!factored || STOPPED_STATES.has(claim.state)) return ALREADY_WORDS.stopped;\n", "\tif (true) return ALREADY_WORDS.stopped;\n"],
 		["a closed month taken", "if (!Array.isArray(closedMonths) || closedMonths.length) return refusal(\"MONTH_CLOSED\");", "if (Array.isArray(closedMonths) && closedMonths.length) return refusal(\"MONTH_CLOSED\");"],
 		["the advance check skipped", "if (advanceDoubt(db, key)) return refusal(\"ADVANCE_ON_RATECON\");", ""],
 		["an \"unread\" or 0-advance read passed", "return Boolean(db.prepare(`SELECT 1 FROM ${rateconAdvanceRead.TABLE} WHERE load_key = ? LIMIT 1`).get(recordKey(key)));",

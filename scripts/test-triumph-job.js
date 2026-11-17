@@ -266,6 +266,18 @@ const chrRateCon = (text, more = "", f2 = "<< /Type /Font /Subtype /Type1 /BaseF
 	{ dict: f2 },
 ]);
 
+// L1: a rate con whose second page sits in an object stream the reader can't open, and that page
+// shows an advance: the first page alone reads like a clean rate con.
+const HIDDEN_PAGE = rawPdf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: "<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>" },
+	{ dict: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>" },
+	{ stream: `BT /F1 10 Tf 40 700 Td (${esc(CHR_TEXT)}) Tj ET` },
+	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+	{ dict: "/Type /ObjStm /N 1 /First 4", stream: "8 0 << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>" },
+	{ stream: `BT /F1 10 Tf 40 700 Td (${esc(LABELS)}) Tj ET` },
+]);
+
 function loadFrom(file, src, over = {}) {
 	const mod = { exports: {} };
 	const base = Module.createRequire(file);
@@ -413,22 +425,37 @@ async function checkButtonClaims({ lib = jobLib, led = ledger, jobSrc = JOB_SRC 
 		eq([r.ok, r.reason, minted, m.claim().invoice_id], [false, "NUMBER_VOIDED", 0, ""], "§14 FAILS ON THE OLD CODE (N-L4): ...and the number step answers NUMBER_VOIDED for it, minting nothing");
 	});
 
+	// L2: the page must carry the broker's own N and D, whatever the number step hands back. Here the
+	// ledger's guard is removed, so the step mints a number: the check after the render stops it.
+	await step("§14 (L2) a number on the page that isn't the broker's", async () => {
+		const guard = "if (isChrInvoice(claim) && (!claim.invoice_id || claim.number_voided_at)) return { ok: false, reason: \"NUMBER_VOIDED\" };";
+		ok(LEDGER_SRC.split(guard).length - 1 === 1, "§14 (L2) (fixture) the ledger's guard, removed once");
+		const unguarded = jobFrom(jobSrc, LEDGER_SRC.replace(guard, ""));
+		const w = bw({ lib: unguarded.lib, led: unguarded.led });
+		w.arm();
+		unguarded.led.transition(w.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { number_voided_at: T0 } });
+		await w.make().tick();
+		eq([say(w.claim()), w.spies.mint, w.spies.render, ...nothingSent(w)], ["needs_attention INVOICE_CHANGED", 1, 1, 0, 0],
+			"§14 FAILS ON THE OLD CODE (L2): a number the broker didn't get, rendered: INVOICE_CHANGED after the render, before any byte");
+		eq(w.auto().number_voided_at, "", "§14 (L2) ...and the broker's number stands");
+	});
+
 	// L1: after the render, the page must be the invoice the broker got.
-	for (const [label, opts, change] of [
-		["the total differs", { total: "$2,100.00" }, null],
-		["the PO differs", { po: "123456799" }, null],
-		["the recipient's domain differs", { to: "made-up@other-broker.test" }, null],
-		["Payment changed since the send", {}, (w) => { w.row["  Payment  "] = "2100"; }],
-		["the broker's email domain changed", {}, (w) => { w.row.Email = "ap@other-broker.test"; }],
-		["the automatic job flagged a change", {}, (w) => autoLedger.transition(w.db, CHR_LOAD, { from: ["drafted"], nowIso: T0, patch: { changed_fields: "payment" } })],
+	// The five after the render stop at INVOICE_CHANGED; a new broker domain stops at the free checks.
+	for (const [label, opts, change, code] of [
+		["the total differs", { total: "$2,100.00" }, null, "INVOICE_CHANGED"],
+		["the PO differs", { po: "123456799" }, null, "INVOICE_CHANGED"],
+		["the recipient's domain differs", { to: "made-up@other-broker.test" }, null, "INVOICE_CHANGED"],
+		["Payment changed since the send", {}, (w) => { w.row["  Payment  "] = "2100"; }, "INVOICE_CHANGED"],
+		["the broker's email domain changed", {}, (w) => { w.row.Email = "ap@other-broker.test"; }, "BROKER_DOMAIN_UNCONFIRMED"],
+		["the automatic job flagged a change", {}, (w) => autoLedger.transition(w.db, CHR_LOAD, { from: ["drafted"], nowIso: T0, patch: { changed_fields: "payment" } }), "INVOICE_CHANGED"],
 	]) await step(`§14 (L1) ${label}`, async () => {
 		const w = bw(opts);
 		w.arm();
 		if (change) change(w);
 		await w.make().tick();
 		const c = w.claim();
-		const stopped = ["needs_attention INVOICE_CHANGED", "needs_attention BROKER_DOMAIN_UNCONFIRMED", "needs_attention DEBTOR_UNMAPPED"].includes(say(c));
-		ok(stopped, `§14 FAILS ON THE OLD CODE (L1): ${label}: stopped (${say(c)}), not sent`);
+		eq(say(c), `needs_attention ${code}`, `§14 FAILS ON THE OLD CODE (L1, L3): ${label}: stopped at ${code} exactly, not sent`);
 		eq([...nothingSent(w), c.number_voided_at, w.auto().number_voided_at], [0, 0, "", ""], `§14 ...${label}: nothing sent, nothing voided`);
 	});
 	await step("§14 (L1) a POD added since the send", async () => {
@@ -447,6 +474,7 @@ async function checkButtonClaims({ lib = jobLib, led = ledger, jobSrc = JOB_SRC 
 		["no C.H. Robinson name", { ratecon: textPdf(CHR_TEXT.replace(/C\.H\. Robinson /g, "").replace("Made-up Robinson Debtor", "Made-up Debtor"), { mode: "literal" }) }, null, "RATECON_UNREAD"],
 		["no text at all", { ratecon: rawPdf([{ dict: "<< /Type /Catalog /Pages 2 0 R >>" }, { dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" }, { dict: "<< /Type /Page /Parent 2 0 R >>" }]) }, null, "RATECON_UNREAD"],
 		["a PDF over the reader's cap", { ratecon: Buffer.concat([textPdf(CHR_TEXT, { mode: "literal" }), Buffer.alloc(3 * 1024 * 1024)]) }, null, "RATECON_UNREAD"],
+		["a second page the reader can't resolve, its content showing an advance (L1)", { ratecon: HIDDEN_PAGE }, null, "RATECON_UNREAD"],
 		["a label font with no map beside \"Robinson\" in a mapped font (N2-L1)", { ratecon: chrRateCon(CHR_TEXT, LABELS, "<< /Type /Font /Subtype /Type0 /BaseFont /MadeUpLabels /Encoding /Identity-H >>") }, null, "RATECON_UNREAD"],
 		["a read that throws", { candidates: { slice() { throw new Error("made-up"); } } }, null, "RATECON_UNREAD"],
 		["a DVIR line", { ratecon: textPdf(`${CHR_INTRO} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00`, { mode: "literal" }) }, null, "DVIR_LINES"],
@@ -578,7 +606,8 @@ async function buttonClaims() {
 		["the DVIR read skipped", "job", "job", "\t\t\tif (dvir.count > 0) return { code: \"DVIR_LINES\", whole: shown.whole };\n", ""],
 		["rows recorded since the press not read again", "job", "job", "if (processRules.advanceDoubt(db, c.load_key)) return { code: \"ADVANCE_ON_RATECON\", whole: null };", ""],
 		["the other candidates not read", "job", "job", "if (rateconAdvanceRead.readAdvanceFigures(shownText(b, { maxInflatedBytes: RATECON_TEXT_MAX_BYTES })).state === \"labels\") return", "if (false) return"],
-		["the page not checked after the render", "job", "job", "const changed = reuse ? invoiceChanged(c, { ctx, rendered, facts }) : [];", "const changed = [];"],
+		["the page not checked after the render", "job", "job", "const changed = reuse ? invoiceChanged(c, { ctx, rendered, facts, r }) : [];", "const changed = [];"],
+		["the number on the page not compared with the broker's (L2)", "job", "job", "\t\tif (!auto || !r || String(r.invoiceId) !== String(auto.invoice_id) || String(r.invoiceDate) !== String(auto.invoice_date)) out.push(\"number\");\n", ""],
 		["the load compared field for field, not on the hold fields", "job", "job", ".filter((name) => autoRules.HOLD_FIELDS.includes(name)));", ");"],
 		["the age and payment date not read before the lock", "job", "job", "const late = processRules.lateStop(db, c.load_key, { nowIso: nowIso() });", "const late = \"\";"],
 		["no notice for a stop after the lock", "job", "job", "\t\tif (afterLock) {\n\t\t\tconst why", "\t\tif (false) {\n\t\t\tconst why"],

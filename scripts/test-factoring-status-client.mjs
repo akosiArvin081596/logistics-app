@@ -348,7 +348,7 @@ section('§9  Process with Triumph: the button, the tile, the chip')
   const serverStore = createRequire(path.join(ROOT, 'package.json'))(path.join(ROOT, 'lib', 'factoring-store.js'))
   const LIB_SRC = read(LIB)
   const has = (fn) => Boolean(S && typeof S[fn] === 'function')
-  for (const fn of ['triumphTile', 'canProcess', 'canClear', 'canMarkFactored', 'processRefusalText'].filter((f) => !has(f))) failures.push(`§9 FAILS ON THE OLD CODE: factoringStatus.js has no ${fn}()`)
+  for (const fn of ['triumphTile', 'canProcess', 'canClear', 'canMarkFactored', 'pressFailure'].filter((f) => !has(f))) failures.push(`§9 FAILS ON THE OLD CODE: factoringStatus.js has no ${fn}()`)
   const N = '11102026-4'
   const D = '2026-11-10'
   const fmt = (iso) => `at ${iso}`
@@ -397,9 +397,45 @@ section('§9  Process with Triumph: the button, the tile, the chip')
     '§9 FAILS ON THE OLD CODE (L7): a load the button took: the chip names the broker\'s invoice; "Sent to Triumph" once handed over')
   ok(S && !/not by email|never invoices/.test(JSON.stringify([chip({}), chip({ locked: true, lockedVia: 'upload' }), chip({ locked: true, lockedVia: 'outside' })])), '§9 (L7) ...and never says "not by email" or that the app never invoices it')
   eq(S ? S.factoringChip({ factored: true, locked: true, lockedVia: 'upload' }).reason : null, 'Handed to Triumph. The app never invoices this load again.', '§9 a load marked any other way: the chip as before')
-  eq(has('processRefusalText') ? [S.processRefusalText({ status: 409, code: 'NOT_CHR', message: 'Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.' }), S.processRefusalText({ status: 0, code: 'TIMEOUT', message: 'The request timed out.' })] : null,
-    ['Not sent to Triumph. Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.', "Not sent to Triumph: the answer didn't come back. Reload the load to see where it stands."],
-    '§9 FAILS ON THE OLD CODE: a refused press says "Not sent to Triumph" and the server\'s words; no answer never says nothing was marked')
+  // M1: only a refusal the press made before any write says "Not sent to Triumph". A second press,
+  // no answer, or an answer the press didn't name may follow a write: none of them says "not sent".
+  const UNCONFIRMED = "The app couldn't confirm the send: it may be on its way to Triumph. Reload the load to see where it stands."
+  const PRESS_REFUSED = [
+    { status: 409, code: 'NOT_CHR', message: 'Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.' },
+    { status: 503, code: 'SUBMIT_PAUSED', message: 'Sending to Triumph is paused right now, so nothing was marked. Try again once it resumes.' },
+    { status: 503, code: 'RECORDS_UNREADABLE', message: "This load's records couldn't be read, so nothing was marked. Try again in a minute." },
+  ]
+  const PRESS_ALREADY = [
+    { status: 409, code: 'TRIUMPH_ALREADY', message: 'This load is already on its way to Triumph.' },
+    { status: 409, code: 'FACTORING_LOCKED', message: 'This load was handed to Triumph, so its invoice is final there. Nothing can change it in the app.' },
+  ]
+  const PRESS_UNKNOWN = [
+    { status: 0, code: 'TIMEOUT', message: 'The request timed out. Please check your connection and try again.' },
+    { message: 'Failed to fetch' },
+    { status: 500, code: '', message: 'Request failed (500)' },
+    { status: 502, code: '', message: 'Request failed (502)' },
+    { status: 504, code: '', message: 'Request failed (504)' },
+    { status: 503, code: 'MADE_UP_OTHER', message: 'Made-up words the press never answers with.' },
+  ]
+  const pressViolations = (M) => {
+    if (!M || typeof M.pressFailure !== 'function') return ['no pressFailure()']
+    const v = []
+    for (const e of PRESS_REFUSED) { const o = M.pressFailure(e); if (o.kind !== 'refused' || o.tone !== 'bad' || o.text !== `Not sent to Triumph. ${e.message}`) v.push(`refused ${e.code}`) }
+    for (const e of PRESS_ALREADY) { const o = M.pressFailure(e); if (o.kind !== 'already' || o.tone === 'bad' || o.text !== e.message) v.push(`already ${e.code}`) }
+    for (const e of PRESS_UNKNOWN) { const o = M.pressFailure(e); if (o.kind !== 'unknown' || o.tone === 'bad' || o.text !== UNCONFIRMED) v.push(`unknown ${e.status}`) }
+    return v
+  }
+  eq(has('pressFailure') ? PRESS_REFUSED.map((e) => S.pressFailure(e)) : null, PRESS_REFUSED.map((e) => ({ kind: 'refused', tone: 'bad', text: `Not sent to Triumph. ${e.message}` })),
+    '§9 FAILS ON THE OLD CODE: a refusal the press made before any write: "Not sent to Triumph" and the server\'s words')
+  eq(has('pressFailure') ? PRESS_ALREADY.map((e) => S.pressFailure(e)) : null, PRESS_ALREADY.map((e) => ({ kind: 'already', tone: 'muted', text: e.message })),
+    '§9 FAILS ON THE OLD CODE (M1): a second press never says "Not sent": the server\'s words, until the load\'s own line reads')
+  eq(has('pressFailure') ? PRESS_UNKNOWN.map((e) => S.pressFailure(e)) : null, PRESS_UNKNOWN.map(() => ({ kind: 'unknown', tone: 'warn', text: UNCONFIRMED })),
+    '§9 FAILS ON THE OLD CODE (M1): no answer, or one the press didn\'t name, never says "Not sent": it may be on its way, and the load is read again')
+  ok(has('pressFailure') && ![...PRESS_ALREADY, ...PRESS_UNKNOWN].some((e) => /not sent|by hand|portal/i.test(S.pressFailure(e).text)), '§9 (M1) ...and none of those says "not sent" or asks for anything by hand')
+  // L5: plain words for each stop the review listed, never "the app stopped it (CODE)".
+  const PLAIN_STOPS = ['LOAD_DROPPED', 'NOT_COMPLETED', 'NO_DELIVERY_DATE', 'ADVANCE_LINES', 'NO_BROKER_EMAIL', 'BROKER_EMAIL_FREEMAIL', 'BROKER_DOMAIN_UNCONFIRMED', 'RATECON_TOTAL_UNREAD', 'RECIPIENT_DOMAIN_MISMATCH', 'STAGE_INVALID', 'LOCK_MISSING']
+  const unworded = (M) => PLAIN_STOPS.filter((c) => typeof M.triumphStopWords !== 'function' || /^the app stopped it \(|[A-Z]{2,}_[A-Z]/.test(M.triumphStopWords(c)))
+  eq(S ? unworded(S) : PLAIN_STOPS, [], '§9 FAILS ON THE OLD CODE (L5): plain words for each of these stops, never "the app stopped it (CODE)"')
   // The Completed tab: beside Draft Invoice Email, Super Admin only, one press with no question.
   const completedButtonViolations = (src) => {
     const v = []
@@ -430,6 +466,30 @@ section('§9  Process with Triumph: the button, the tile, the chip')
     if (COMPLETED.split(from).length - 1 !== 1) { failures.push(`§9 mutant anchor not found once in CompletedLoadsTab.vue: ${name}`); continue }
     ok(completedButtonViolations(COMPLETED.replace(from, to)).length > 0, `§9 MUTANT ${name}: caught`)
   }
+  // M1: after a second press or an unconfirmed one, the tab reads the load again, and the load's
+  // own line takes the place of the words.
+  const unconfirmedViolations = (src) => {
+    const v = []
+    const fnAt = src.indexOf('async function processWithTriumph() {')
+    const fn = fnAt >= 0 ? src.slice(fnAt, src.indexOf('\n}\n', fnAt)) : ''
+    if (!fn.includes('const out = pressFailure(e)')) v.push('a failed press is not read through pressFailure()')
+    if (!fn.includes("    if (out.kind !== 'refused') showTrueTile()\n")) v.push('after "already" or no answer, the load is not read again')
+    const tAt = src.indexOf('async function showTrueTile() {')
+    const t = tAt >= 0 ? src.slice(tAt, src.indexOf('\n}\n', tAt)) : ''
+    if (!t.includes('await dashboard.refresh()') || !t.includes('freshFactoring()')) v.push('the load is not read again')
+    if (!t.includes('  if (selectedTriumphTile.value) triumphResult.value = null\n')) v.push("the words stay over the load's own line")
+    if (src.includes('processRefusalText')) v.push('the old "Not sent" words are still used')
+    return v
+  }
+  eq(unconfirmedViolations(COMPLETED), [], '§9 FAILS ON THE OLD CODE (M1): after a second press or an unconfirmed one, the tab reads the load again and shows its own line')
+  for (const [name, from, to] of [
+    ['the load not read again after "already" or no answer (M1)', "    if (out.kind !== 'refused') showTrueTile()\n    else dashboard.refresh().catch(() => {})", '    dashboard.refresh().catch(() => {})'],
+    ["the words kept over the load's own line (M1)", '  if (selectedTriumphTile.value) triumphResult.value = null\n', ''],
+    ['every failed press read as "Not sent" (M1)', 'const out = pressFailure(e)', "const out = { kind: 'refused', tone: 'bad', text: 'Not sent to Triumph.' }"],
+  ]) {
+    if (COMPLETED.split(from).length - 1 !== 1) { failures.push(`§9 mutant anchor not found once in CompletedLoadsTab.vue: ${name}`); continue }
+    ok(unconfirmedViolations(COMPLETED.replace(from, to)).length > 0, `§9 MUTANT ${name}: caught`)
+  }
   const controlsSplitViolations = (src) => {
     const v = []
     if (!src.includes('<button v-if="mayMark" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(true)">Factor with Triumph</button>')) v.push('"Factor with Triumph" is not its own button on canMarkFactored')
@@ -454,6 +514,9 @@ section('§9  Process with Triumph: the button, the tile, the chip')
       ['a cleared mark still read as on its way', "  if (f.factored !== true) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", "  if (false) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", tileViolations],
       ['MAYBE_SUBMITTED read as a plain stop', "    if (code === 'MAYBE_SUBMITTED') return", "    if (false) return", tileViolations],
       ['Clear factored named where the server doesn\'t offer it', "const ways = [retry ? 'Try again' : '', clear ? 'Clear factored", "const ways = [retry ? 'Try again' : '', true ? 'Clear factored", tileViolations],
+      ['a second press read as "Not sent" (M1)', "const PRESS_ALREADY = Object.freeze(['TRIUMPH_ALREADY', 'FACTORING_LOCKED'])", 'const PRESS_ALREADY = Object.freeze([])', pressViolations],
+      ['no answer read as "Not sent" (M1)', "  return { kind: 'unknown', tone: 'warn', text: PRESS_UNCONFIRMED }", "  return { kind: 'refused', tone: 'bad', text: \"Not sent to Triumph: the answer didn't come back.\" }", pressViolations],
+      ['a 5xx the press didn\'t name read as "Not sent" (M1)', '(status >= 500 && PRESS_NOTHING_WRITTEN_5XX.includes(code))', '(status >= 500)', pressViolations],
     ]) {
       if (LIB_SRC.split(from).length - 1 !== 1) { failures.push(`§9 mutant anchor not found once in factoringStatus.js: ${name}`); continue }
       const file = path.join(tmp, 'lib', `factoringStatus-9-${++n}.js`)

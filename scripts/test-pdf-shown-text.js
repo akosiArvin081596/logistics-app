@@ -344,7 +344,24 @@ const LABEL_FONT_NO_MAP = pdfOf([
 	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
 	{ dict: "<< /Type /Font /Subtype /Type0 /BaseFont /MadeUpLabels /Encoding /Identity-H >>" },
 ]);
+// A page tree the reader can't follow all the way (L1): a page it can't resolve may hold text.
+// Each one also has a page that reads, so the flag alone decides (an empty read is never whole).
+const treeDoc = (pages, extra = []) => pdfOf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: pages },
+	{ dict: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>" },
+	{ stream: "BT /F1 10 Tf (Made-up C.H. Robinson Total: $1,500.00) Tj ET" },
+	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+	...extra,
+]);
+const LABELS_PAGE = { stream: "BT /F1 10 Tf (Advanced Total: $500.00 New Total: $1,000.00) Tj ET" };
+const pageInObjStm = (num) => ({ dict: "/Type /ObjStm /N 1 /First 4", stream: `${num} 0 << /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>` });
 const PARTIAL = [
+	["a page the page tree names that isn't there (L1, the review's probe)", treeDoc("<< /Type /Pages /Kids [3 0 R 9 0 R] /Count 2 >>")],
+	["a second page held only in an object stream, its content showing an advance (L1, the review's probe)", treeDoc("<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>", [pageInObjStm(8), LABELS_PAGE])],
+	["a newer page held in an object stream (L1)", treeDoc("<< /Type /Pages /Kids [3 0 R] /Count 1 >>", [pageInObjStm(3), LABELS_PAGE])],
+	["a page tree entry that isn't a reference (L1)", treeDoc("<< /Type /Pages /Kids [3 0 R 42] /Count 2 >>")],
+	["a page tree node whose /Kids doesn't resolve (L1)", treeDoc("<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>", [{ dict: "<< /Type /Pages /Parent 2 0 R /Kids 9 0 R /Count 1 >>" }])],
 	["a label font with no map beside \"Robinson\" in a mapped font (N2-L1's case)", LABEL_FONT_NO_MAP],
 	["a simple font with no map and no standard encoding", fontPage("<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+MadeUpSubset >>", "<01020304> Tj")],
 	["/Differences that move a letter to another code", fontPage("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /B] >> >>", "(Robinson) Tj")],
@@ -379,6 +396,10 @@ for (const [label, from, to] of [
 	["/Differences not checked", "return diffs === undefined || differencesKeepAscii(", "return true || differencesKeepAscii("],
 	["a filter it can't read not flagged", "if (filters.length !== 1 || filters[0] !== \"/FlateDecode\") {\n\t\twork.partial = true;", "if (filters.length !== 1 || filters[0] !== \"/FlateDecode\") {"],
 	["a stream that won't inflate not flagged", "if (!out) {\n\t\twork.partial = true;", "if (!out) {"],
+	["a page tree entry that isn't a reference not flagged (L1)", "if (!ref || ref.ref === undefined) {\n\t\t\twork.partial = true;\n\t\t\treturn;\n\t\t}", "if (!ref || ref.ref === undefined) return;"],
+	["a page that doesn't resolve not flagged (L1)", "if (!isDict(node)) {\n\t\t\twork.partial = true;\n\t\t\treturn;\n\t\t}", "if (!isDict(node)) return;"],
+	["a /Kids that doesn't resolve not flagged (L1)", "if (!Array.isArray(kids)) {\n\t\t\t\twork.partial = true;\n\t\t\t\treturn;\n\t\t\t}", "if (!Array.isArray(kids)) return;"],
+	["an object stream not flagged (L1)", "if (isDict(value) && value.Type === \"/ObjStm\") work.partial = true;", ""],
 	["a missing form not flagged", "// An object drawn that isn't found, or isn't an image: it may hold text.\n\t\t\t\t\twork.partial = true;", "// An object drawn that isn't found, or isn't an image: it may hold text."],
 ]) {
 	const read = wholeMutant(from, to);

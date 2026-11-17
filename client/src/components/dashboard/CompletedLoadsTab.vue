@@ -390,7 +390,7 @@ import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import FactoringControls from './FactoringControls.vue'
-import { inflightLine, reasonInput, canProcess, triumphTile, processRefusalText } from '../../lib/factoringStatus'
+import { inflightLine, reasonInput, canProcess, triumphTile, pressFailure } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
@@ -1087,12 +1087,26 @@ async function processWithTriumph() {
     if (selectedJob.value && r && r.factoring) selectedJob.value = { ...selectedJob.value, _factoring: r.factoring }
     followTile()
   } catch (e) {
-    triumphResult.value = { tone: 'bad', text: processRefusalText(e) }
+    const out = pressFailure(e)
+    triumphResult.value = { tone: out.tone, text: out.text }
     if (selectedJob.value && selectedJob.value._factoring) selectedJob.value = { ...selectedJob.value, _factoring: { ...selectedJob.value._factoring, canProcess: false } }
-    dashboard.refresh().catch(() => {})
+    // A second press, or one with no clear answer, may be on its way: the load's own line is read.
+    if (out.kind !== 'refused') showTrueTile()
+    else dashboard.refresh().catch(() => {})
   } finally {
     triumphPressing.value = false
   }
+}
+// After a second press or an unconfirmed one: the dashboard read again, and once the load's own
+// Triumph line reads, it takes the place of the words above (it may say "Sending to Triumph…").
+async function showTrueTile() {
+  const mine = ++triumphFollow
+  try { await dashboard.refresh() } catch { return }
+  if (mine !== triumphFollow || !selectedJob.value) return
+  freshFactoring()
+  if (selectedTriumphTile.value) triumphResult.value = null
+  const f = selectedJob.value && selectedJob.value._factoring
+  if (f && ['queued', 'working'].includes(f.triumphState)) followTile()
 }
 async function retryTriumph() {
   if (!auth.isSuperAdmin || !loadRefValue.value || triumphRetrying.value) return

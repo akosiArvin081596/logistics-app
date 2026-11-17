@@ -117,6 +117,17 @@ const STOP_WORDS = Object.freeze({
   FACTORING_LOCKED: 'its mark is final',
   FACTORING_CHANGED: 'its mark changed while it was being built',
   BATCH_FILES_CHANGED: 'its built files changed',
+  LOAD_DROPPED: 'the load was cancelled or deleted',
+  NOT_COMPLETED: "the load isn't marked delivered",
+  NO_DELIVERY_DATE: 'the load has no delivery date',
+  ADVANCE_LINES: 'its invoice has an advance line',
+  NO_BROKER_EMAIL: 'the load has no broker email',
+  BROKER_EMAIL_FREEMAIL: "the broker email is a personal address, not the broker's own",
+  BROKER_DOMAIN_UNCONFIRMED: "the broker's email domain isn't confirmed yet",
+  RATECON_TOTAL_UNREAD: "the app couldn't read the total on the rate con",
+  RECIPIENT_DOMAIN_MISMATCH: "the invoice's recipient isn't at the broker's domain",
+  STAGE_INVALID: 'the app found it at an unexpected step',
+  LOCK_MISSING: "its mark wasn't locked for the upload",
 })
 export const triumphStopWords = (code) => (typeof code === 'string' && Object.hasOwn(STOP_WORDS, code) ? STOP_WORDS[code] : `the app stopped it (${code || 'no reason given'})`)
 
@@ -158,12 +169,24 @@ export function triumphTile(f, { formatTime = (iso) => String(iso || '') } = {})
   return { text: 'Not sent to Triumph. Its invoice to the broker stands.', tone: 'muted', tryAgain: false }
 }
 
-// What the tile says when the press itself was refused: the server's own words, after "Not
-// sent to Triumph." No answer at all may still have marked it, so it says to look again.
-export function processRefusalText(e) {
-  const words = e && Number(e.status) >= 400 && e.code && typeof e.message === 'string' ? e.message : ''
-  if (!words) return "Not sent to Triumph: the answer didn't come back. Reload the load to see where it stands."
-  return `Not sent to Triumph. ${words}`
+// What the tile says when a press didn't go through: { kind, tone, text }. Only a refusal the
+// press made before writing anything says "Not sent to Triumph" ('refused'). A second press
+// ('already': on its way, with Triumph, or its mark final) and an answer that never came or that
+// the press didn't name ('unknown') may follow a write: neither says "not sent", and the tab
+// reads the load again so its own line shows.
+const PRESS_ALREADY = Object.freeze(['TRIUMPH_ALREADY', 'FACTORING_LOCKED'])
+// The press's own 503s, each answered before any write.
+const PRESS_NOTHING_WRITTEN_5XX = Object.freeze(['SUBMIT_PAUSED', 'TRANSPORT_UNCONFIGURED', 'FACTORING_UNREADABLE', 'RECORDS_UNREADABLE'])
+export const PRESS_UNCONFIRMED = "The app couldn't confirm the send: it may be on its way to Triumph. Reload the load to see where it stands."
+export function pressFailure(e) {
+  const status = Number(e && e.status)
+  const code = e && typeof e.code === 'string' ? e.code : ''
+  const words = code && typeof e.message === 'string' ? e.message : ''
+  if (words && status >= 400 && PRESS_ALREADY.includes(code)) return { kind: 'already', tone: 'muted', text: words }
+  if (words && ((status >= 400 && status < 500) || (status >= 500 && PRESS_NOTHING_WRITTEN_5XX.includes(code)))) {
+    return { kind: 'refused', tone: 'bad', text: `Not sent to Triumph. ${words}` }
+  }
+  return { kind: 'unknown', tone: 'warn', text: PRESS_UNCONFIRMED }
 }
 
 // The line for a row's `_draftInflight`: { text, canCheck, askPerson }, or null.

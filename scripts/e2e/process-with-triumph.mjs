@@ -14,8 +14,8 @@
 //   P3  the job runs: the fake receives the PDF and the CSV with the broker's own number N, date D and
 //       total T; one draft row, the broker's; no number voided; nothing on the fake removed or renamed
 //   P4  with no reload, the tile turns to "Sent to Triumph · <time>" (1280 and 390)
-//   P5  never twice: a second press while it waits its turn, 409 "This load is already with Triumph."; one
-//       once it went, 409 in FACTORING_LOCKED's words
+//   P5  never twice: a second press while it waits its turn, 409 "This load is already on its way to
+//       Triumph."; one once it went, 409 in FACTORING_LOCKED's words
 //   P6  an advance read recorded after the page opened: the press is refused in plain words (1280 and 390)
 //   P7  a load that turned out not to be C.H. Robinson's: refused in plain words (1280 and 390)
 //   P8  a stop a retry can change (no debtor name set): Try again offered; with the name set, it goes (1280)
@@ -23,7 +23,11 @@
 //       puts the load back with its invoice to the broker, the broker's number untouched (1280)
 //   W   every 390 screen is a true phone: a new context (390 x 844, isMobile, deviceScaleFactor 2) whose
 //       documentElement.clientWidth is 390 and whose scrollWidth isn't above it
-//   G   nothing left this machine; no page error; no write the check doesn't answer
+//   G   nothing left this machine: from Node no TLS, no socket off 127.0.0.1 and nothing on a mail port; from
+//       the browser no websocket off this machine, and no request to any host but the app's own asset hosts
+//       (fonts.googleapis.com and fonts.gstatic.com for its font preload, maps.googleapis.com for its Maps
+//       script, by exact name), which are aborted and listed; any other host fails the row (Triumph, a broker,
+//       production, anything); no page error; no write it doesn't answer
 //
 // It boots no server.js, reads no settings file or key, signs nobody in and sends nothing: the built
 // client/dist is served on 127.0.0.1 and every /api request is answered in the browser.
@@ -143,7 +147,7 @@ const WORDS = Object.freeze({
   button: 'Process with Triumph',
   sending: 'Sending to Triumph…',
   sentPrefix: 'Sent to Triumph · ',
-  already: 'This load is already with Triumph.',
+  already: 'This load is already on its way to Triumph.',
   locked: 'This load was handed to Triumph, so its invoice is final there. Nothing can change it in the app.',
   advance: "Not sent to Triumph. This load's rate con shows an advance, or the app couldn't rule one out: it stays with its invoice to the broker.",
   notChr: 'Not sent to Triumph. Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.',
@@ -303,7 +307,11 @@ const rows = []
 const unanswered = new Set()
 const otherWrites = []
 const pageErrors = []
+// Every host a page asked that isn't this check, aborted. Only the app's own asset hosts may be
+// among them (client/index.html's font preload, useGoogleMaps' script); any other fails row G.
 const offHost = new Set()
+const offHostSockets = []
+const APP_ASSET_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com', 'maps.googleapis.com'])
 function record(step, title, expected, observed, pass, shotFile = '') {
   rows.push({ step, title, expected, observed, verdict: pass ? 'PASS' : 'FAIL', shot: shotFile })
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${step}  ${title}: ${observed}`)
@@ -446,7 +454,7 @@ async function openPage(browser, s, { phone = false } = {}) {
   await ctx.route('**/*', async (route) => {
     const req = route.request()
     const u = new URL(req.url())
-    if (u.host !== `${HOST}:${PORT}`) { offHost.add(u.host); return route.abort() }
+    if (u.host !== `${HOST}:${PORT}`) { offHost.add(u.hostname); return route.abort() }
     if (u.pathname.startsWith('/socket.io/')) return route.abort()
     if (!u.pathname.startsWith('/api/')) return route.continue()
     const isGet = req.method() === 'GET'
@@ -461,6 +469,11 @@ async function openPage(browser, s, { phone = false } = {}) {
   const page = await ctx.newPage()
   const questions = []
   page.on('pageerror', (e) => pageErrors.push(String(e.message || e).slice(0, 200)))
+  page.on('websocket', (ws) => {
+    let host = ''
+    try { host = new URL(ws.url()).host } catch { host = '(unreadable)' }
+    if (host !== `${HOST}:${PORT}`) offHostSockets.push(host)
+  })
   page.on('dialog', async (d) => { questions.push(d.message()); await d.dismiss().catch(() => {}) })
   await page.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' })
   await page.locator('[role="tab"]', { hasText: 'Completed' }).first().click({ timeout: 15000 })
@@ -626,8 +639,12 @@ async function browserHalf(s) {
   } finally {
     await s.close()
   }
-  record('G', 'nothing left this machine', 'no TLS, no remote socket, no mail port, no other host', `tls ${wire.tls.length}, remote ${wire.remote.length}, mail ${wire.mailPorts.length}, hosts ${[...offHost].join(',') || 'none'}`,
-    !wire.tls.length && !wire.remote.length && !wire.mailPorts.length && !offHost.size)
+  const aborted = [...offHost].sort()
+  const notAppAssets = aborted.filter((h) => !APP_ASSET_HOSTS.has(h))
+  record('G', 'nothing left this machine',
+    "from Node no TLS, no socket off this machine, nothing on a mail port; from the browser no websocket off this machine and no request to any host but the app's own asset hosts (aborted, and only listed)",
+    `TLS ${wire.tls.length}, remote ${wire.remote.length}, mail ports ${wire.mailPorts.length}, browser sockets off this machine ${offHostSockets.length}, hosts aborted ${aborted.join(',') || 'none'}${notAppAssets.length ? `; not an app asset host: ${notAppAssets.join(',')}` : ''}`,
+    !wire.tls.length && !wire.remote.length && !wire.mailPorts.length && !offHostSockets.length && !notAppAssets.length)
   if (!SELF_CHECK) {
     record('G', 'no page error, and no write this check doesn\'t answer', 'none', `errors ${pageErrors.join(' | ') || 'none'}; writes ${otherWrites.join(',') || 'none'}`, !pageErrors.length && !otherWrites.length)
     fs.mkdirSync(SHOT_DIR, { recursive: true, mode: 0o700 })

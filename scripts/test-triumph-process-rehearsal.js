@@ -120,7 +120,14 @@ function world({ ratecon = RATECON_TEXT } = {}) {
 		root: ROOT, dataDir: dir, sheetData, now: () => new Date(T0),
 		getDrive: async () => { calls.drive++; return { files: { list: async () => ({ data: { files: [] } }), get: async () => { throw new Error("no Drive in this check"); } } }; },
 		fetch: async (url) => {
-			if (!String(url).includes("generativelanguage.googleapis.com")) { calls.otherFetch++; throw new Error("no network in this check"); }
+			// Gemini's own host, by its exact name; anything else is refused.
+			let host = "";
+			try {
+				host = new URL(String(url)).hostname;
+			} catch {
+				host = "";
+			}
+			if (host !== "generativelanguage.googleapis.com") { calls.otherFetch++; throw new Error("no network in this check"); }
 			calls.gemini++;
 			const answer = { "Load Number": LOAD, Rate: TOTAL, "Total Rate": TOTAL, "Documents Email": BILLING, "Order Number": null, "PO Number": null, "Trailer Number": null };
 			return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(answer) }] } }] }), text: async () => "" };
