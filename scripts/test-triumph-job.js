@@ -33,6 +33,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const Module = require("module");
 
 const ROOT = path.join(__dirname, "..");
 for (const f of ["triumph-job.js", "triumph-ledger.js", "triumph-transfer.js"]) {
@@ -64,11 +65,18 @@ const { PDFDocument, StandardFonts } = require(path.join(ROOT, "node_modules", "
 
 let pass = 0;
 const failures = [];
+// The first check a mutant failed: the one that caught it.
+const caughtBy = (list) => JSON.stringify(String(list[0]).split("\n")[0].trim().slice(0, 160));
+// A mutant's own list of failures while §14 runs on it, or null for the run's own.
+let sink = null;
 function eq(actual, expected, label) {
 	const a = JSON.stringify(actual);
 	const e = JSON.stringify(expected);
-	if (a === e) { pass++; return; }
-	failures.push(`${label}\n      expected ${e}\n      actual   ${a}`);
+	if (a === e) {
+		if (!sink) pass++;
+		return;
+	}
+	(sink || failures).push(`${label}\n      expected ${e}\n      actual   ${a}`);
 }
 const ok = (cond, label) => eq(Boolean(cond), true, label);
 const section = (t) => console.log(`\n${t}`);
@@ -203,6 +211,398 @@ function world({ env = DRY, factored = true, debtor = "Example Broker LLC", stat
 	return w;
 }
 const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` : "none");
+
+// ---------------------------------------------------------------- §14's world
+// A C.H. Robinson load whose automatic invoice the job already sent the broker, pressed with
+// Process with Triumph (lib/triumph-process.js): the claim carries that invoice.
+const autoLedger = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
+const autoRules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
+const rateconAdvanceRead = require(path.join(ROOT, "lib", "ratecon-advance-read.js"));
+const invoiceEvidence = require(path.join(ROOT, "lib", "invoice-evidence.js"));
+const { textPdf } = require(path.join(ROOT, "scripts", "lib", "made-up-pdf.js"));
+const PROCESS_FILE = path.join(ROOT, "lib", "triumph-process.js");
+const triumphProcess = fs.existsSync(PROCESS_FILE) ? require(PROCESS_FILE) : null;
+const JOB_FILE = path.join(ROOT, "lib", "triumph-job.js");
+const LEDGER_FILE = path.join(ROOT, "lib", "triumph-ledger.js");
+const JOB_SRC = fs.readFileSync(JOB_FILE, "utf8");
+const LEDGER_SRC = fs.readFileSync(LEDGER_FILE, "utf8");
+const CHR_LOAD = "123456701";
+const CHR_BROKER = "made-up.agent@chrobinson.com";
+const CHR_DEBTOR = "Made-up Robinson Debtor";
+const CHR_N = "11102026-4";
+const CHR_D = "2026-11-10";
+const CHR_TOTAL = "$2,150.00";
+const SENT_AT = "2026-11-10T16:00:00.000Z";
+const CHR_INTRO = `C.H. Robinson Booked Load # ${CHR_LOAD} Carrier Rate Confirmation for a made-up test load. Debtor: ${CHR_DEBTOR}. Pickup at Test Shipper; delivery at Test Consignee. Equipment: van. Commodity weight 20,000 lbs.`;
+const CHR_TEXT = `${CHR_INTRO} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 Total: $2,150.00`;
+const DVIR_LINE = "Missing Pre-Trip DVIR Inspection 1.00 -$35.00 -$35.00";
+const LABELS = "Advanced Total: $500.00 New Total: $1,650.00";
+
+// A PDF from objects given as text (no filter), with a valid xref: the shapes pdf-lib can't make.
+function rawPdf(objects) {
+	const parts = [Buffer.from("%PDF-1.7\n", "latin1")];
+	let at = parts[0].length;
+	const offsets = [];
+	objects.forEach((o, i) => {
+		offsets.push(at);
+		const b = o.stream !== undefined
+			? Buffer.from(`${i + 1} 0 obj\n<< ${o.dict || ""} /Length ${Buffer.byteLength(o.stream, "latin1")} >>\nstream\n${o.stream}\nendstream\nendobj\n`, "latin1")
+			: Buffer.from(`${i + 1} 0 obj\n${o.dict}\nendobj\n`, "latin1");
+		parts.push(b);
+		at += b.length;
+	});
+	parts.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${at}\n%%EOF\n`, "latin1"));
+	return Buffer.concat(parts);
+}
+const esc = (s) => s.replace(/[\\()]/g, (c) => `\\${c}`);
+const hexOf = (s) => Buffer.from(s, "latin1").toString("hex");
+// The rate con's text as literal strings, then `more` shown through font F2 as glyph codes.
+const chrRateCon = (text, more = "", f2 = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>") => rawPdf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+	{ dict: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>" },
+	{ stream: `BT /F1 10 Tf 40 700 Td (${esc(text)}) Tj ${more ? `/F2 10 Tf <${hexOf(more)}> Tj ` : ""}ET` },
+	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+	{ dict: f2 },
+]);
+
+function loadFrom(file, src, over = {}) {
+	const mod = { exports: {} };
+	const base = Module.createRequire(file);
+	const req = (p) => (Object.hasOwn(over, p) ? over[p] : base(p));
+	new Function("module", "exports", "require", "__filename", "__dirname", src)(mod, mod.exports, req, file, path.dirname(file));
+	return mod.exports;
+}
+// The job as a mutant builds it: its own text, over a ledger from its own text.
+function jobFrom(jobSrc = JOB_SRC, ledgerSrc = LEDGER_SRC) {
+	const led = ledgerSrc === LEDGER_SRC ? ledger : loadFrom(LEDGER_FILE, ledgerSrc);
+	return { lib: loadFrom(JOB_FILE, jobSrc, { "./triumph-ledger": led }), led };
+}
+
+const CHR_HEADERS = ["Load ID", "Status", "Email", "Completion Date", "  Payment  "];
+function buttonWorld({ env = LIVE, lib = jobLib, led = ledger, ratecon, candidates = null, total = CHR_TOTAL, to = CHR_BROKER, po = CHR_LOAD, processButtonOn = true, sentAt = SENT_AT } = {}) {
+	const db = new Database(":memory:");
+	db.exec(`CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT, total TEXT,
+		broker_name TEXT, order_number TEXT, via TEXT, created_by TEXT, edited INTEGER DEFAULT 0, edited_fields TEXT, overrides_json TEXT, total_source TEXT,
+		sheet_total TEXT, ratecon_total TEXT, invoice_id_minted TEXT, notes TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY, load_id TEXT, type TEXT, file_name TEXT, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at TEXT, deleted_at TEXT)");
+	db.exec("CREATE TABLE deleted_loads (load_id TEXT)");
+	db.exec("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, updated_by TEXT)");
+	factoring.ensureSchema(db);
+	autoLedger.ensureSchema(db);
+	PROCESS.ensureSchema(db);
+	db.prepare("INSERT INTO documents (id, load_id, type, file_name, drive_url, uploaded_at) VALUES (1, ?, 'POD', 'pod.pdf', '/uploads/pod.pdf', '2026-11-10 14:00:00')").run(CHR_LOAD);
+	db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)").run(JSON.stringify({ optOutDomains: [], confirmedBrokerDomains: ["chrobinson.com"] }));
+	db.prepare("INSERT INTO app_settings (key, value) VALUES ('factoring.settings', ?)").run(JSON.stringify({ debtorNames: { "chrobinson.com": CHR_DEBTOR } }));
+	const rowId = Number(db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, total, broker_name, order_number, via, created_by) VALUES (?, ?, ?, ?, 'C.H. Robinson (made up)', ?, 'auto-smtp', 'auto-invoice')")
+		.run(CHR_LOAD, CHR_N, CHR_BROKER, CHR_TOTAL, CHR_LOAD).lastInsertRowid);
+	autoLedger.insertClaim(db, { key: CHR_LOAD, loadId: CHR_LOAD, state: "drafted", nowIso: sentAt });
+	const fingerprint = autoRules.fingerprint({ completed: true, live: true, paymentCents: 215000, brokerEmail: CHR_BROKER, trailer: "", podIds: [1], rateConIds: [] });
+	autoLedger.transition(db, CHR_LOAD, { from: ["drafted"], nowIso: sentAt, patch: { delivery: "send", stage: "recorded", invoice_id: CHR_N, invoice_date: CHR_D, sent_at: sentAt, draft_row_id: rowId,
+		sent_json: JSON.stringify({ to: CHR_BROKER, subject: `C.H. Robinson Order #${CHR_LOAD}`, total: CHR_TOTAL }), fingerprint_json: JSON.stringify(fingerprint) } });
+	const w = { db, rowId, clock: clock(T0), spies: { prepare: 0, render: 0, record: 0, mint: 0, connect: 0, puts: [] }, audits: [], notices: [], batchDir: fs.mkdtempSync(path.join(os.tmpdir(), "triumph-button-")) };
+	w.row = { "Load ID": CHR_LOAD, Status: "Delivered", Email: CHR_BROKER, "Completion Date": "2026-11-11", "  Payment  ": "2150" };
+	w.readJobTracking = async () => ({ headers: CHR_HEADERS, data: [{ ...w.row }] });
+	w.ratecon = ratecon || textPdf(CHR_TEXT, { mode: "literal" });
+	w.engine = {
+		async prepare() {
+			w.spies.prepare++;
+			return { ok: true, ctx: { loadId: CHR_LOAD, loadRef: CHR_LOAD, orderNumber: po, assignment: { lines: NOA }, rateconBuffer: w.ratecon,
+				rateconCandidates: candidates || [{ source: "documents", buffer: w.ratecon }], paidRead: { "Load Number": CHR_LOAD } } };
+		},
+		async render(ctx, { invoiceId, invoiceDate }) {
+			w.spies.render++;
+			return { invoicePdf: await invoicePdfFor(invoiceId, invoiceDate, { po: CHR_LOAD }), total, to };
+		},
+		async record() {
+			w.spies.record++;
+			return { recorded: true, draftRowId: 0 };
+		},
+	};
+	w.make = (over = {}) => lib.create({
+		db, env, readJobTracking: w.readJobTracking, closedMonthsOf: () => [], dayKeyOf: (cell) => String(cell || "").slice(0, 10), engine: w.engine,
+		nextInvoiceNumber: () => { w.spies.mint++; return "11122026-99"; },
+		loadDocuments: async () => [{ id: 1, type: "POD", uploaded_at: "2026-11-10 14:00:00", buffer: POD }],
+		transport: {
+			configured: true, missing: [], invalid: [],
+			async openLive() {
+				w.spies.connect++;
+				return {
+					async put(token, file) {
+						const checked = led.tokenCheck(db, token, { nowIso: w.clock.now().toISOString(), name: file.name, sha256: crypto.createHash("sha256").update(file.bytes).digest("hex") });
+						if (!checked.ok) throw Object.assign(new Error(checked.code), { code: checked.code });
+						w.spies.puts.push(file.name);
+						if (file.name.endsWith(".csv")) w.csv = file.bytes.toString("latin1");
+						const failure = w.putError ? w.putError(file.name) : null;
+						if (failure) throw Object.assign(new Error("made-up"), failure);
+						return { ok: true };
+					},
+					close() {},
+				};
+			},
+		},
+		noaLines: NOA, denyHits: createRedactor({ denyList: DENY }).hits, savedInvoiceEvidence: () => false, batchDir: w.batchDir, processButtonOn,
+		logAudit: (req, action, entity, id, details) => w.audits.push({ action, details: String(details) }),
+		notify: (n0) => w.notices.push(n0), now: w.clock.now, timeZone: TZ, workerId: "made-up-worker", setImmediate: () => {},
+		log: { info() {}, warn() {}, error() {} }, ...over,
+	});
+	// The press, as the route makes it.
+	w.arm = () => PROCESS.processWithTriumph(db, { key: CHR_LOAD, loadId: CHR_LOAD, row: w.row, headers: CHR_HEADERS, closedMonths: [], nowIso: T0,
+		actor: { id: 7, username: "made-up-admin" }, audit: (action, details) => w.audits.push({ action, details }) });
+	w.claim = () => led.getClaim(db, CHR_LOAD);
+	w.marker = () => db.prepare("SELECT * FROM load_factoring WHERE load_key = ?").get(CHR_LOAD);
+	w.drafts = () => db.prepare("SELECT id, invoice_id, via FROM load_invoice_drafts ORDER BY id").all();
+	w.auto = () => db.prepare("SELECT invoice_id, number_voided_at FROM auto_invoice_claims WHERE load_key = ?").get(CHR_LOAD);
+	w.dump = () => Object.fromEntries(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(({ name }) => [name, db.prepare(`SELECT * FROM ${name}`).all()]));
+	if (!sink) WORLDS.push(w);
+	return w;
+}
+
+// The press, or on a tree without it a stand-in that takes nothing, so each case fails by name.
+const PROCESS = triumphProcess || Object.freeze({ ensureSchema: (db) => ledger.ensureSchema(db), processWithTriumph: () => ({ ok: false, code: "NO_PROCESS_WITH_TRIUMPH" }) });
+
+// One §14 case: a throw inside it is its own failure, under its own name.
+async function step(label, fn) {
+	try {
+		await fn();
+	} catch (e) {
+		(sink || failures).push(`${label}\n      threw ${e && e.message}`);
+	}
+}
+
+// §14's cases, on the job and ledger given (a mutant's, or the shipped ones).
+async function checkButtonClaims({ lib = jobLib, led = ledger, jobSrc = JOB_SRC } = {}) {
+	const bw = (opts = {}) => buttonWorld({ lib, led, ...opts });
+	const nothingSent = (w) => [w.spies.connect, w.spies.puts.length];
+
+	// The happy path, live: the broker's own invoice goes, and nothing new is made.
+	await step("§14 the happy path", async () => {
+		const w = bw();
+		eq(w.arm().ok, true, "§14 (fixture) the press takes the load");
+		await w.make().tick();
+		const c = w.claim();
+		eq([say(c), c.stage, c.invoice_id, c.invoice_date, c.number_voided_at], ["submitted", "recorded", CHR_N, CHR_D, ""], "§14 FAILS ON THE OLD CODE: the claim goes, under the broker invoice's own number and date");
+		eq([w.spies.mint, w.spies.record], [0, 0], "§14 FAILS ON THE OLD CODE: no number minted, and the engine records no second row");
+		eq(w.drafts(), [{ id: w.rowId, invoice_id: CHR_N, via: "auto-smtp" }], "§14 FAILS ON THE OLD CODE: one draft row: the broker invoice's own, untouched");
+		eq([c.draft_row_id, w.auto()], [w.rowId, { invoice_id: CHR_N, number_voided_at: "" }], "§14 ...the claim's row is that one, and the broker's number is never voided");
+		ok(String(w.csv || "").startsWith(`DTR_NAME,INVOICE#,INV_DATE,PO,INVAMT\r\n${CHR_DEBTOR},${CHR_N},11/10/2026,${CHR_LOAD},2150.00\r\n`), "§14 FAILS ON THE OLD CODE: the CSV: the same number N, date D and total T");
+		eq([w.marker().locked_via, w.marker().broker_invoice_id], ["upload", CHR_N], "§14 the mark locked by the upload, the broker's invoice on it");
+		const acts = w.audits.map((a) => a.action);
+		ok(!acts.includes("invoice_draft_created") && acts.includes("triumph_submitted"), "§14 no invoice_draft_created row; triumph_submitted");
+		ok((w.audits.find((a) => a.action === "triumph_submitted") || {}).details.includes(`invoice ${CHR_N} of ${CHR_D}, the one the app sent the broker`), "§14 ...which names the invoice the broker got");
+		ok(!acts.includes("triumph_number_void"), "§14 ...and no number voided anywhere");
+	});
+
+	// N-L4: a voided or missing number stops it, and nothing is minted.
+	await step("§14 (N-L4) a voided or missing number", async () => {
+		const w = bw();
+		w.arm();
+		led.transition(w.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { number_voided_at: T0 } });
+		await w.make().tick();
+		eq([say(w.claim()), w.spies.mint, w.spies.render, ...nothingSent(w)], ["needs_attention NUMBER_VOIDED", 0, 0, 0, 0], "§14 FAILS ON THE OLD CODE (N-L4): its number voided: NUMBER_VOIDED, no number minted, nothing rendered or sent");
+		// A missing number: the free checks stop it first (the broker's row is no longer its own),
+		// and the number step refuses it too, minting nothing.
+		const m = bw();
+		m.arm();
+		led.transition(m.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { invoice_id: "" } });
+		await m.make().tick();
+		eq([say(m.claim()), m.spies.mint, m.spies.render, ...nothingSent(m)], ["needs_attention ALREADY_INVOICED", 0, 0, 0, 0], "§14 its number missing: stopped at the free checks, no number minted, nothing rendered or sent");
+		led.transition(m.db, CHR_LOAD, { from: ["needs_attention"], nowIso: T0, patch: { state: "working", lease_owner: "made-up-run#1", lease_until: "2026-11-12T16:00:00.000Z", reason_code: "" } });
+		let minted = 0;
+		const r = led.reserveNumber(m.db, CHR_LOAD, "made-up-run#1", { mint: () => { minted++; return "11122026-98"; }, now: new Date(T0), dayKey: "2026-11-12", nowIso: T0 });
+		eq([r.ok, r.reason, minted, m.claim().invoice_id], [false, "NUMBER_VOIDED", 0, ""], "§14 FAILS ON THE OLD CODE (N-L4): ...and the number step answers NUMBER_VOIDED for it, minting nothing");
+	});
+
+	// L1: after the render, the page must be the invoice the broker got.
+	for (const [label, opts, change] of [
+		["the total differs", { total: "$2,100.00" }, null],
+		["the PO differs", { po: "123456799" }, null],
+		["the recipient's domain differs", { to: "made-up@other-broker.test" }, null],
+		["Payment changed since the send", {}, (w) => { w.row["  Payment  "] = "2100"; }],
+		["the broker's email domain changed", {}, (w) => { w.row.Email = "ap@other-broker.test"; }],
+		["the automatic job flagged a change", {}, (w) => autoLedger.transition(w.db, CHR_LOAD, { from: ["drafted"], nowIso: T0, patch: { changed_fields: "payment" } })],
+	]) await step(`§14 (L1) ${label}`, async () => {
+		const w = bw(opts);
+		w.arm();
+		if (change) change(w);
+		await w.make().tick();
+		const c = w.claim();
+		const stopped = ["needs_attention INVOICE_CHANGED", "needs_attention BROKER_DOMAIN_UNCONFIRMED", "needs_attention DEBTOR_UNMAPPED"].includes(say(c));
+		ok(stopped, `§14 FAILS ON THE OLD CODE (L1): ${label}: stopped (${say(c)}), not sent`);
+		eq([...nothingSent(w), c.number_voided_at, w.auto().number_voided_at], [0, 0, "", ""], `§14 ...${label}: nothing sent, nothing voided`);
+	});
+	await step("§14 (L1) a POD added since the send", async () => {
+		const w = bw();
+		w.arm();
+		w.db.prepare("INSERT INTO documents (id, load_id, type, file_name, drive_url, uploaded_at) VALUES (2, ?, 'POD', 'pod2.pdf', '/uploads/pod2.pdf', '2026-11-11 09:00:00')").run(CHR_LOAD);
+		await w.make().tick();
+		eq(say(w.claim()), "submitted", "§14 FAILS ON THE OLD CODE (L1): a POD added after the send holds nothing (the hold fields only): it goes");
+	});
+
+	// M4: the second look at the rate con fails closed, before the number, the render and any byte.
+	const SECOND_NET = [
+		["advance labels only the shown text reads (glyph codes)", { ratecon: chrRateCon(CHR_TEXT, ` ${LABELS}`) }, null, "ADVANCE_ON_RATECON"],
+		["advance labels in the rate con's own strings", { ratecon: textPdf(`${CHR_TEXT} ${LABELS}`, { mode: "literal" }) }, null, "ADVANCE_ON_RATECON"],
+		["an advance whose figures can't be read (figure_missing)", { ratecon: textPdf(`${CHR_TEXT} Advanced Total: see notes New Total: see notes`, { mode: "literal" }) }, null, "ADVANCE_ON_RATECON"],
+		["no C.H. Robinson name", { ratecon: textPdf(CHR_TEXT.replace(/C\.H\. Robinson /g, "").replace("Made-up Robinson Debtor", "Made-up Debtor"), { mode: "literal" }) }, null, "RATECON_UNREAD"],
+		["no text at all", { ratecon: rawPdf([{ dict: "<< /Type /Catalog /Pages 2 0 R >>" }, { dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" }, { dict: "<< /Type /Page /Parent 2 0 R >>" }]) }, null, "RATECON_UNREAD"],
+		["a PDF over the reader's cap", { ratecon: Buffer.concat([textPdf(CHR_TEXT, { mode: "literal" }), Buffer.alloc(3 * 1024 * 1024)]) }, null, "RATECON_UNREAD"],
+		["a label font with no map beside \"Robinson\" in a mapped font (N2-L1)", { ratecon: chrRateCon(CHR_TEXT, LABELS, "<< /Type /Font /Subtype /Type0 /BaseFont /MadeUpLabels /Encoding /Identity-H >>") }, null, "RATECON_UNREAD"],
+		["a read that throws", { candidates: { slice() { throw new Error("made-up"); } } }, null, "RATECON_UNREAD"],
+		["a DVIR line", { ratecon: textPdf(`${CHR_INTRO} Rate Detail Line Haul 1.00 $2,150.00 $2,150.00 ${DVIR_LINE} Total: $2,115.00`, { mode: "literal" }) }, null, "DVIR_LINES"],
+		["another candidate showing an advance", { candidates: [{ source: "documents", buffer: null }, { source: "drive", buffer: textPdf(`${CHR_TEXT} ${LABELS}`, { mode: "literal" }) }] }, null, "ADVANCE_ON_RATECON"],
+		["an advance read recorded after the press", {}, (w) => { rateconAdvanceRead.ensureTable(w.db); w.db.prepare(`INSERT INTO ${rateconAdvanceRead.TABLE} (load_key, at, verdict, reason, switch_on) VALUES (?, ?, 'unread', 'unreadable', 0)`).run(CHR_LOAD, T0); }, "ADVANCE_ON_RATECON"],
+		["a DVIR decision recorded after the press", {}, (w) => { w.db.exec("CREATE TABLE ratecon_dvir_decisions (id INTEGER PRIMARY KEY, load_key TEXT, dvir_count INTEGER)"); w.db.prepare("INSERT INTO ratecon_dvir_decisions (load_key, dvir_count) VALUES (?, 0)").run(CHR_LOAD); }, "DVIR_LINES"],
+	];
+	for (const [label, opts, after, code] of SECOND_NET) await step(`§14 (M4) ${label}`, async () => {
+		const w = bw(opts);
+		if (opts.candidates && Array.isArray(opts.candidates) && !opts.candidates[0].buffer) opts.candidates[0].buffer = w.ratecon;
+		eq(w.arm().ok, true, `§14 (fixture) ${label}: the press takes it`);
+		if (after) after(w);
+		const markerBefore = JSON.stringify(w.marker());
+		await w.make().tick();
+		const c = w.claim();
+		eq([say(c), w.spies.mint, w.spies.render, ...nothingSent(w), c.stage], [`needs_attention ${code}`, 0, 0, 0, 0, ""], `§14 FAILS ON THE OLD CODE (M4): ${label}: ${code}, before the number, the render and any byte`);
+		eq([c.number_voided_at, w.auto().number_voided_at, JSON.stringify(w.marker())], ["", "", markerBefore], `§14 ...${label}: nothing voided, the mark as it was (Clear factored puts it back with the broker)`);
+	});
+
+	// N-L3 and N2-L2: the age and the payment date again, right before the lock point.
+	await step("§14 (N-L3, N2-L2) the age and the payment date again", async () => {
+		const w = bw();
+		w.arm();
+		w.clock.add(29 * 24 * 60);
+		const job = w.make();
+		w.clock.add(2 * 24 * 60);
+		await job.tick();
+		eq([say(w.claim()), ...nothingSent(w).slice(1), w.marker().locked_at], ["needs_attention INVOICE_TOO_OLD", 0, ""], "§14 FAILS ON THE OLD CODE (N-L3): its invoice past 30 days when it would go: INVOICE_TOO_OLD, nothing put, the mark not locked");
+		eq(w.notices.filter((n) => n.title === "Triumph: check one load").length, 0, "§14 ...before the lock: no notice of its own (the daily one names it)");
+		const p = bw();
+		p.arm();
+		invoiceEvidence.savePayments(p.db, CHR_LOAD, { payments_payment_date: 1 }, { nowIso: T0 });
+		await p.make().tick();
+		eq([say(p.claim()), p.spies.puts.length], ["needs_attention PAID_ALREADY", 0], "§14 FAILS ON THE OLD CODE (N-L3): a payment date saved after the press: PAID_ALREADY, nothing put");
+		// A PDF upload that failed: the next go resumes after the lock, by then past the limit.
+		const r = bw();
+		r.arm();
+		let fails = 1;
+		r.putError = (name) => (name.endsWith(".pdf") && fails-- > 0 ? { code: "PUT_FAILED" } : null);
+		const rj = r.make();
+		await rj.tick();
+		eq([say(r.claim()), r.claim().stage, r.marker().locked_via], ["queued RETRY_LATER", "pdf_uploading", "upload"], "§14 (fixture) a PDF that failed: back in line, locked");
+		r.clock.add(31 * 24 * 60);
+		await rj.tick();
+		eq([say(r.claim()), r.claim().stage, r.spies.puts.filter((n) => n.endsWith(".csv")).length, r.marker().locked_via], ["needs_attention INVOICE_TOO_OLD", "pdf_uploading", 0, "upload"],
+			"§14 FAILS ON THE OLD CODE (N2-L2): past the limit after the lock: stopped before the CSV, the mark still locked");
+		eq(r.notices.filter((n) => n.title === "Triumph: check one load").length, 1, "§14 FAILS ON THE OLD CODE (N2-L2): ...and a person is told once (the daily notice skips locked marks)");
+		ok(r.notices.some((n) => /may be on Triumph's server, but nothing was triggered there/.test(n.body)), "§14 ...in the tile's own words");
+	});
+
+	// N-L5: attempt() and the practice run share one build function, and the practice run writes nothing.
+	await step("§14 (N-L5) one build function, and the practice run", async () => {
+		ok((jobSrc.match(/async function build\(/g) || []).length === 1 && /const out = await build\(c, \{ facts, snap, hooks: \{/.test(jobSrc) && /async function rehearse\([\s\S]*?await build\(c, \{ facts, snap, hooks: \{/.test(jobSrc),
+			"§14 FAILS ON THE OLD CODE (N-L5): one build(), called by attempt() and by rehearse()");
+		const w = bw({ env: {} });
+		const reuse = { invoiceId: CHR_N, invoiceDate: CHR_D, draftRowId: w.rowId, total: CHR_TOTAL };
+		const before = w.dump();
+		const job = w.make();
+		const r = await job.rehearse(CHR_LOAD, reuse);
+		eq([r.ok, r.wholeRead, r.numberMatches, r.dateMatches, r.pages > 0, w.spies.mint, w.spies.record, ...nothingSent(w)], [true, true, true, true, true, 0, 0, 0, 0],
+			"§14 FAILS ON THE OLD CODE (N-L5): the practice run builds the package: whole read, N and D match, pages counted; no number, no record, nothing sent");
+		eq(w.dump(), before, "§14 FAILS ON THE OLD CODE (N-L5): ...and writes no row");
+		eq(fs.readdirSync(w.batchDir), [], "§14 ...and keeps no file");
+		const s = bw({ env: {}, ratecon: chrRateCon(CHR_TEXT, ` ${LABELS}`) });
+		const sr = await s.make().rehearse(CHR_LOAD, { ...reuse, draftRowId: s.rowId });
+		eq([sr.ok, sr.code, sr.wholeRead], [false, "ADVANCE_ON_RATECON", true], "§14 FAILS ON THE OLD CODE (N-L5): ...and stops where attempt() would, with the same code");
+	});
+
+	// L2: the caps count the press.
+	await step("§14 (L2) the caps", async () => {
+		const w = bw({ env: { ...LIVE, TRIUMPH_MAX_PER_HOUR: "1" } });
+		w.arm();
+		eq(led.batchesSince(w.db, "2026-11-12T14:00:00.000Z"), 1, "§14 FAILS ON THE OLD CODE (L2): the press counts as a batch at once (reserved_at set)");
+		w.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-0009', 'LD-TEST-0009', 1, 'script', ?, ?)").run(T0, T0);
+		led.insertClaim(w.db, { key: "ld-test-0009", loadId: "LD-TEST-0009", state: "queued", nowIso: T0 });
+		led.transition(w.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { next_attempt_at: "2099-01-01T00:00:00.000Z" } });
+		eq((await w.make().tick()).work.started, 0, "§14 ...so with TRIUMPH_MAX_PER_HOUR 1 nothing else starts that hour");
+	});
+
+	// N-L1: the daily notice names the actions that exist, with the switch on; today's words off.
+	await step("§14 (N-L1) the daily notice", async () => {
+		const on = bw();
+		on.row["Completion Date"] = "2026-11-09";
+		on.arm();
+		led.transition(on.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "ADVANCE_ON_RATECON" } });
+		await on.make().tick();
+		ok(on.notices.some((n) => n.title === "Factored loads not sent to Triumph" && n.body.includes("Try again, Clear factored to keep it with its invoice to the broker, or \"Handled in Triumph's process\" if it went to Triumph another way.")),
+			"§14 FAILS ON THE OLD CODE (N-L1): with the switch on, the daily notice names Try again, Clear factored and \"Handled in Triumph's process\"");
+		const off = bw({ processButtonOn: false });
+		off.row["Completion Date"] = "2026-11-09";
+		off.arm();
+		led.transition(off.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "ADVANCE_ON_RATECON" } });
+		await off.make().tick();
+		ok(off.notices.some((n) => n.title === "Factored loads not sent to Triumph" && n.body.endsWith("Each needs a person: Start, Submit now, Try again, or \"Handled in Triumph's process\".")), "§14 ...with it off, today's words");
+	});
+
+	// M1: a person's way out keeps the broker's number.
+	await step("§14 (M1) a person's way out", async () => {
+		const w = bw();
+		w.arm();
+		led.transition(w.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "ADVANCE_ON_RATECON", stage: "reserved" } });
+		const audits = [];
+		const r = factoring.clear(w.db, { key: CHR_LOAD, reason: "made-up: keep it with the broker", nowIso: T0, audit: (a, dt) => audits.push(a) });
+		eq([r.ok, r.voided, w.claim().number_voided_at, audits], [true, "", "", ["factoring_cleared"]], "§14 FAILS ON THE OLD CODE (M1): Clear factored keeps the broker's number: nothing voided, no \"never sent\" row");
+		await w.make().tick();
+		eq([say(w.claim()), w.claim().number_voided_at, w.auto().number_voided_at], ["needs_attention ADVANCE_ON_RATECON", "", ""], "§14 ...and the job never voids it either");
+		const g = bw();
+		g.arm();
+		led.transition(g.db, CHR_LOAD, { from: ["queued"], nowIso: T0, patch: { stage: "reserved" } });
+		g.db.prepare("UPDATE load_factoring SET factored = 0").run();
+		await g.make().tick();
+		eq([say(g.claim()), g.claim().number_voided_at, g.audits.filter((a) => a.action === "triumph_number_void").length], ["skipped NOT_FACTORED", "", 0], "§14 FAILS ON THE OLD CODE (M1): a cleared mark: the claim gives up, its number not voided");
+	});
+}
+
+async function buttonClaims() {
+	if (!triumphProcess) failures.push("§14 FAILS ON THE OLD CODE: lib/triumph-process.js is missing: there is no Process with Triumph");
+	await checkButtonClaims();
+	const MUTANTS = [
+		["a number minted for a voided reused one (N-L4's guard removed)", "job", "ledger", "if (isChrInvoice(claim) && (!claim.invoice_id || claim.number_voided_at)) return { ok: false, reason: \"NUMBER_VOIDED\" };", ""],
+		["the broker's number voided by the ledger", "job", "ledger", "if (!claim || isChrInvoice(claim) || !claim.invoice_id", "if (!claim || !claim.invoice_id"],
+		["the broker invoice's row not the claim's own", "job", "ledger", "&& (r.via === VIA || (isChrInvoice(claim) && r.via === autoRules.VIA_SEND && Number(r.id) === Number(claim.reused_draft_id)));", "&& r.via === VIA;"],
+		["engine.record() called", "job", "job", "\t\t\tif (!reuse) {\n\t\t\t\ttry {\n\t\t\t\t\tconst answer = await engine.record(", "\t\t\tif (true) {\n\t\t\t\ttry {\n\t\t\t\t\tconst answer = await engine.record("],
+		["the second look skipped", "job", "job", "const net = reuse ? secondNet(c, ctx) : null;", "const net = null;"],
+		["the advance re-read on pdfText()", "job", "job", "const shown = shownTextRead(buf, { maxInflatedBytes: RATECON_TEXT_MAX_BYTES });", "const shown = { text: rateconDvir.pdfText(buf, { maxInflatedBytes: RATECON_TEXT_MAX_BYTES }), whole: true };"],
+		["a partial read passed (N2-L1)", "job", "job", "\t\t\tif (!shown.whole) return { code: \"RATECON_UNREAD\", whole: false };\n", ""],
+		["a missing C.H. Robinson name passed", "job", "job", "if (reading.state !== \"no_labels\" || reading.namesChr !== true) return", "if (reading.state !== \"no_labels\") return"],
+		["figure_missing passed", "job", "job", "if (reading.state === \"labels\") return { code: \"ADVANCE_ON_RATECON\", whole: true };\n\t\t\tif (reading.state !== \"no_labels\"", "if (reading.state === \"labels\" && !reading.problem) return { code: \"ADVANCE_ON_RATECON\", whole: true };\n\t\t\tif (reading.state === \"unreadable\""],
+		["the DVIR read skipped", "job", "job", "\t\t\tif (dvir.count > 0) return { code: \"DVIR_LINES\", whole: shown.whole };\n", ""],
+		["rows recorded since the press not read again", "job", "job", "if (processRules.advanceDoubt(db, c.load_key)) return { code: \"ADVANCE_ON_RATECON\", whole: null };", ""],
+		["the other candidates not read", "job", "job", "if (rateconAdvanceRead.readAdvanceFigures(shownText(b, { maxInflatedBytes: RATECON_TEXT_MAX_BYTES })).state === \"labels\") return", "if (false) return"],
+		["the page not checked after the render", "job", "job", "const changed = reuse ? invoiceChanged(c, { ctx, rendered, facts }) : [];", "const changed = [];"],
+		["the load compared field for field, not on the hold fields", "job", "job", ".filter((name) => autoRules.HOLD_FIELDS.includes(name)));", ");"],
+		["the age and payment date not read before the lock", "job", "job", "const late = processRules.lateStop(db, c.load_key, { nowIso: nowIso() });", "const late = \"\";"],
+		["no notice for a stop after the lock", "job", "job", "\t\tif (afterLock) {\n\t\t\tconst why", "\t\tif (false) {\n\t\t\tconst why"],
+		["the daily notice's words not following the switch", "job", "job", "const actions = d.processButtonOn === true", "const actions = false"],
+	];
+	let caught = 0;
+	for (const [name, , which, from, to] of MUTANTS) {
+		const src = which === "ledger" ? LEDGER_SRC : JOB_SRC;
+		if (src.split(from).length - 1 !== 1) { failures.push(`§14 mutant anchor not found once: ${name}`); continue; }
+		const mutated = src.replace(from, () => to);
+		const built = which === "ledger" ? jobFrom(JOB_SRC, mutated) : jobFrom(mutated, LEDGER_SRC);
+		const mine = [];
+		sink = mine;
+		try {
+			await checkButtonClaims({ lib: built.lib, led: built.led, jobSrc: which === "job" ? mutated : JOB_SRC });
+		} catch (e) {
+			mine.push(`threw ${e && e.message}`);
+		}
+		sink = null;
+		if (mine.length) { caught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(mine)}`); }
+		else failures.push(`§14 MUTANT ${name}: NOT caught`);
+	}
+	console.log(`  ${caught}/${MUTANTS.length} mutants caught`);
+}
 
 (async () => {
 	RATECON = await pdfOf(["RATE CONFIRMATION (MADE UP)", "Broker: Example Broker LLC", `Load Number: ${LOAD}`, "Total Rate: $2,150.00"]);
@@ -854,6 +1254,10 @@ const say = (c) => (c ? `${c.state}${c.reason_code ? ` ${c.reason_code}` : ""}` 
 			await cut.close();
 		}
 	}
+
+	// ---------------------------------------------------------------- §14
+	section("§14 a Process with Triumph claim: the broker's own invoice, never a second number");
+	await buttonClaims();
 
 	section("§13 every code a claim was left with is on the list the page words");
 	{

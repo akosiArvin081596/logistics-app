@@ -26,9 +26,13 @@
 //      replica); only listed accounts, the shared login only by its own id, with a
 //      reason, every row it writes saying so; "Handled in Triumph's process" with
 //      every switch off; refusals audited with codes
+//   §11 Process with Triumph: Clear factored and "Handled in Triumph's process" never give up
+//       the broker's invoice number (and the dry run says so); mark() still refuses a sent
+//       load, and only the press writes a mark otherwise; with the switch on each row says
+//       canClear, canRetry and the broker's invoice, and with it off reads as before
 //   §8 mutants: each rule above removed in turn, and a case catches it
 //
-// Made-up loads only (LD-TEST-*), in memory.
+// Made-up loads only (LD-TEST-*, 1234567xx), in memory.
 //   node scripts/test-factoring-store.js      # exits 1 on any failure
 "use strict";
 
@@ -49,6 +53,8 @@ const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 
 let pass = 0;
 const failures = [];
+// The first check a mutant failed: the one that caught it.
+const caughtBy = (list) => JSON.stringify(String(list[0]).split("\n")[0].trim().slice(0, 160));
 function section(t) { console.log(`\n${t}`); }
 
 // The store built from source text, so a mutant is the same text changed.
@@ -506,6 +512,83 @@ function checkResolveAndAnnotate(S) {
 	return c;
 }
 
+// ------------------------------------------------------------------ §11
+// Process with Triumph (lib/triumph-process.js): a claim carrying the invoice the automatic job
+// already sent the broker. No person's way out gives that number up, and with the button's
+// switch on each row says what its tile reads; with it off, every row reads as before.
+function checkButtonStore(S) {
+	const c = checker();
+	const db = freshDb(S);
+	// The button's columns (lib/triumph-process.js ensureSchema(), made with its switch on).
+	for (const [t, col] of [["triumph_submissions", "number_source TEXT NOT NULL DEFAULT ''"], ["triumph_submissions", "reused_draft_id INTEGER"], ["triumph_submissions", "expected_total TEXT NOT NULL DEFAULT ''"],
+		["load_factoring", "broker_invoice_id TEXT NOT NULL DEFAULT ''"], ["load_factoring", "broker_invoice_date TEXT NOT NULL DEFAULT ''"]]) db.exec(`ALTER TABLE ${t} ADD COLUMN ${col}`);
+	const buttonClaim = (k, { state = "needs_attention", stage = "reserved", code = "ADVANCE_ON_RATECON" } = {}) => {
+		putClaim(db, k, { state, stage, invoiceId: "11022026-4" });
+		db.prepare("UPDATE triumph_submissions SET number_source = 'chr_invoice', reused_draft_id = 1, expected_total = '$2,150.00', reason_code = ? WHERE load_key = ?").run(code, k);
+	};
+	const fresh = (k) => { putMarker(db, k); db.prepare("UPDATE load_factoring SET broker_invoice_id = '11022026-4', broker_invoice_date = '2026-11-02' WHERE load_key = ?").run(k); };
+
+	fresh("123456701");
+	buttonClaim("123456701");
+	const dry = S.clear(db, { key: "123456701", reason: "made-up", actor: ACTOR, nowIso: at(1), dryRun: true });
+	c.eq([dry.ok, dry.voided], [true, ""], "§11 FAILS ON THE OLD CODE (M1): Clear factored's dry run on a button claim: the broker's number is not given up");
+	let a = auditLog();
+	let r = S.clear(db, { key: "123456701", reason: "made-up: keep it with the broker", actor: ACTOR, nowIso: at(1), audit: a });
+	c.eq([r.ok, r.voided, claimRow(db, "123456701").number_voided_at, a.rows.map((x) => x.action)], [true, "", "", ["factoring_cleared"]],
+		"§11 FAILS ON THE OLD CODE (M1): Clear factored on a button claim: the mark cleared, the broker's number not voided, no \"never sent\" row");
+	fresh("123456702");
+	buttonClaim("123456702", { state: "staged", stage: "built", code: "" });
+	a = auditLog();
+	r = S.handledOutside(db, { key: "123456702", reason: "made-up: sent in Triumph's portal", actor: ACTOR, nowIso: at(2), audit: a });
+	c.eq([r.ok, r.voided, claimRow(db, "123456702").state, claimRow(db, "123456702").number_voided_at, a.rows.map((x) => x.action)], [true, "", "closed_outside", "", ["triumph_handled_outside"]],
+		"§11 FAILS ON THE OLD CODE (M1): \"Handled in Triumph's process\" on a button claim: closed, its number not voided, no \"never sent\" row");
+	// A claim the button didn't arm still gives its own held number up, as before.
+	putMarker(db, "ld-test-0090");
+	putClaim(db, "ld-test-0090", { state: "staged", stage: "built", invoiceId: "11032026-90" });
+	c.eq(S.clear(db, { key: "ld-test-0090", actor: ACTOR, nowIso: at(1), audit: () => {} }).voided, "11032026-90", "§11 a claim the button didn't arm: its own held number is still given up");
+
+	// The INVOICE_ALREADY_SENT exception lives only in the press: mark() still refuses a sent load.
+	putDraft(db, "123456703", "auto-smtp", "11022026-5");
+	c.eq(S.mark(db, { key: "123456703", loadId: "123456703", reason: "made-up", actor: ACTOR, nowIso: at(1), audit: () => {} }).code, "INVOICE_ALREADY_SENT", "§11 mark() still refuses a load whose invoice went: the press is the only way a sent load is marked");
+	const writers = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && /INSERT INTO (?:load_factoring|\$\{(?:factoring\.)?FACTORING\})/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8")));
+	c.eq(writers.sort(), ["factoring-store.js", "triumph-process.js"], "§11 FAILS ON THE OLD CODE: the marker is written only by the store and by the press");
+
+	// The rows with the switch on, and off.
+	putMarker(db, "123456704");
+	db.prepare("UPDATE load_factoring SET broker_invoice_id = '11022026-6', broker_invoice_date = '2026-11-02' WHERE load_key = '123456704'").run();
+	buttonClaim("123456704", { state: "needs_attention", stage: "reserved", code: "SUBMIT_FAILED" });
+	putMarker(db, "123456705");
+	buttonClaim("123456705", { state: "queued", stage: "", code: "" });
+	putMarker(db, "123456706", { locked: T0, via: "upload" });
+	buttonClaim("123456706", { state: "needs_attention", stage: "pdf_uploading", code: "INVOICE_TOO_OLD" });
+	putMarker(db, "ld-test-0091");
+	putClaim(db, "ld-test-0091", { state: "needs_attention", stage: "built", invoiceId: "11032026-91" });
+	const rows = () => ["123456701", "123456704", "123456705", "123456706", "ld-test-0091", "ld-test-0099"].map((id) => ({ "Load ID": id }));
+	const off = S.annotateRows(db, { rows: rows(), idCol: "Load ID", all: true, canMark: true, canRecordOutside: true, nowIso: at(1) });
+	c.eq(off.map((x) => Object.keys(x._factoring || {}).sort().join(",")), Array(6).fill("canMark,canRecordOutside,factored,locked,lockedVia,triumphState"),
+		"§11 FAILS ON THE OLD CODE: the switch off: every row carries exactly the keys it did before");
+	const on = S.annotateRows(db, { rows: rows(), idCol: "Load ID", all: true, canMark: false, canRecordOutside: true, nowIso: at(1), button: { listed: true, canClear: true, paused: "" } });
+	const f = Object.fromEntries(on.map((x) => [x["Load ID"], x._factoring]));
+	c.eq([f["123456704"].canClear, f["123456704"].canRetry, f["123456704"].byButton, f["123456704"].brokerInvoiceId, f["123456704"].brokerInvoiceDate, f["123456704"].triumphCode],
+		[true, true, true, "11022026-6", "2026-11-02", "SUBMIT_FAILED"], "§11 FAILS ON THE OLD CODE: a stop a retry can change: Clear factored and Try again, the broker's invoice on the row");
+	c.eq([f["123456705"].canClear, f["123456705"].canRetry, f["123456705"].triumphState], [false, false, "queued"], "§11 FAILS ON THE OLD CODE: on its way to Triumph: neither (the tile says Sending)");
+	c.eq([f["123456706"].canClear, f["123456706"].canRetry, f["123456706"].triumphStage], [false, false, "pdf_uploading"], "§11 FAILS ON THE OLD CODE (N2-L2): a stop after the lock: neither");
+	c.eq([f["ld-test-0091"].canClear, f["ld-test-0091"].canRetry, f["ld-test-0091"].byButton], [true, false, false], "§11 a factored load the button didn't take: Clear factored as before, no Try again");
+	c.eq([f["ld-test-0099"].canClear, f["ld-test-0099"].canProcess, f["123456701"].canClear], [false, false, false], "§11 a load not factored: no Clear factored; canProcess is the routes' alone");
+	for (const code of S.BUTTON_STOPS || []) {
+		db.prepare("UPDATE triumph_submissions SET reason_code = ? WHERE load_key = '123456704'").run(code);
+		const g = S.annotateRows(db, { rows: [{ "Load ID": "123456704" }], idCol: "Load ID", all: true, canRecordOutside: true, nowIso: at(1), button: { listed: true, canClear: true, paused: "" } })[0]._factoring;
+		c.eq([g.canRetry, g.canClear], [false, true], `§11 FAILS ON THE OLD CODE (N-L1): ${code}: no Try again (it would only repeat the stop), Clear factored kept`);
+	}
+	c.eq((S.BUTTON_STOPS || []).slice().sort(), ["ADVANCE_ON_RATECON", "DVIR_LINES", "INVOICE_CHANGED", "INVOICE_TOO_OLD", "NUMBER_VOIDED", "PAID_ALREADY", "RATECON_UNREAD", "TOTAL_MISMATCH"], "§11 the codes a retry can't change, as the plan lists them");
+	db.prepare("UPDATE triumph_submissions SET reason_code = 'SUBMIT_FAILED' WHERE load_key = '123456704'").run();
+	const unlisted = S.annotateRows(db, { rows: [{ "Load ID": "123456704" }], idCol: "Load ID", all: false, canRecordOutside: false, nowIso: at(1), button: { listed: false, canClear: false, paused: "LOGIN_REFUSED" } })[0]._factoring;
+	c.eq([unlisted.canClear, unlisted.canRetry, unlisted.paused], [false, false, "LOGIN_REFUSED"], "§11 a Super Admin not listed: neither action; the pause on the row");
+	c.eq(typeof S.brokerInvoices === "function" ? [...S.brokerInvoices(db)].map(([k, v]) => [k, v.invoiceId]).sort() : null, [["123456702", "11022026-4"], ["123456704", "11022026-6"]],
+		"§11 FAILS ON THE OLD CODE: the factored loads the button took, with the broker's invoice (a cleared one drops out)");
+	return c;
+}
+
 // ------------------------------------------------------------------ §10
 function checkLoadIdChange(S) {
 	const c = checker();
@@ -581,11 +664,17 @@ function checkLockWriters() {
 
 const GROUPS = [["§1  the schema", checkSchema], ["§2  marking", checkMark], ["§3  clearing", checkClear], ["§4  handled in Triumph's process", checkOutside],
 	["§5  the Draft Invoice button's checks", checkButton], ["§6  Check Gmail; the dashboard annotation", checkResolveAndAnnotate],
-	["§10 a Load ID change on a marked load; a mark cleared since", checkLoadIdChange]];
+	["§10 a Load ID change on a marked load; a mark cleared since", checkLoadIdChange],
+	["§11 Process with Triumph's claims and rows", checkButtonStore]];
 const REAL = loadStore(STORE_SRC);
 for (const [title, fn] of GROUPS) {
 	section(title);
-	const c = fn(REAL);
+	let c;
+	try {
+		c = fn(REAL);
+	} catch (e) {
+		c = { out: [`${title}: threw ${e && e.message}`], count: () => 1 };
+	}
 	pass += c.count() - c.out.length;
 	failures.push(...c.out);
 	console.log(`  ${c.count() - c.out.length}/${c.count()} ok`);
@@ -829,7 +918,7 @@ const MUTANTS = [
 		"const inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))", checkClear],
 	["clear: the state check alone (M1)", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tif (row && !rowFactored(row))", checkClear],
-	["clear: a number past pdf_uploading voided too", "if (!claim || !triumphHoldsNumber(claim) || !STAGES_BEFORE_UPLOAD.has(claim.stage)) return \"\";", "if (!claim || !triumphHoldsNumber(claim)) return \"\";", checkClear],
+	["clear: a number past pdf_uploading voided too", "if (!claim || reusesBrokerInvoice(claim) || !triumphHoldsNumber(claim) || !STAGES_BEFORE_UPLOAD.has(claim.stage)) return \"\";", "if (!claim || reusesBrokerInvoice(claim) || !triumphHoldsNumber(claim)) return \"\";", checkClear],
 	["handledOutside: the state check alone (M1)", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(",
 		"if (claim && claim.state === \"working\") return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(", checkOutside],
 	["handledOutside: no lease check at all", "if (triumphWorkingLive(claim, nowIso)) return refusal(\"TRIUMPH_IN_FLIGHT\");\n\t\tconst inflight = inflightRefusal(inflightRows(db, k, nowIso));\n\t\tif (inflight) return inflight;\n\t\tdb.prepare(",
@@ -882,6 +971,15 @@ const MUTANTS = [
 	["Load ID: a marker that can't be read passes", "\t} catch {\n\t\treturn refusal(\"FACTORING_UNREADABLE\");\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row)", "\t} catch {\n\t\treturn null;\n\t}\n\tif (rowLocked(row)) return refusal(\"FACTORING_LOCKED\");\n\treturn rowFactored(row)", checkLoadIdChange],
 	["Load ID: the refusal leaves out the way through", " can clear the mark, change the ID, then mark the load again.", " can change it.", checkLoadIdChange],
 	["clearedMarks: a final row counts", " WHERE factored = 0 AND locked_at = ''", " WHERE factored = 0", checkLoadIdChange],
+	// Process with Triumph (§11).
+	["the broker's number voided by Clear factored or \"Handled in Triumph's process\" (M1)", "if (!claim || reusesBrokerInvoice(claim) || !triumphHoldsNumber(claim) || !STAGES_BEFORE_UPLOAD.has(claim.stage)) return \"\";",
+		"if (!claim || !triumphHoldsNumber(claim) || !STAGES_BEFORE_UPLOAD.has(claim.stage)) return \"\";", checkButtonStore],
+	["Clear factored's dry run says it voids the broker's number (M1)", "voided: claim && !reusesBrokerInvoice(claim) && triumphHoldsNumber(claim)", "voided: claim && triumphHoldsNumber(claim)", checkButtonStore],
+	["Clear factored offered on a button claim in any state", "\t\t\t\t\t\t&& (!byButton || (claim.state === \"needs_attention\" && STAGES_BEFORE_UPLOAD.has(claim.stage))),", ",", checkButtonStore],
+	["Try again offered on a code a retry can't change (N-L1)", "claim.state === \"needs_attention\" && !BUTTON_STOPS.includes(claim.reason_code) && claim.reason_code !== \"MAYBE_SUBMITTED\"", "claim.state === \"needs_attention\"", checkButtonStore],
+	["Try again offered to an account not listed", "canRetry: button.listed === true && buttonRetryable(claim),", "canRetry: buttonRetryable(claim),", checkButtonStore],
+	["the switch-off rows given the button's keys", "\t\t\t\tif (button) {\n\t\t\t\t\tconst byButton", "\t\t\t\tif (true) {\n\t\t\t\t\tconst byButton", checkButtonStore],
+	["a cleared load still read as taken by the button", "SELECT * FROM ${FACTORING} WHERE factored <> 0`).all()\n\t\t.filter((r) => r.broker_invoice_id)", "SELECT * FROM ${FACTORING}`).all()\n\t\t.filter((r) => r.broker_invoice_id)", checkButtonStore],
 ];
 let caught = 0;
 for (const [name, from, to, group] of MUTANTS) {
@@ -892,7 +990,7 @@ for (const [name, from, to, group] of MUTANTS) {
 	} catch (e) {
 		c = { out: [`threw: ${e && e.message}`] };
 	}
-	if (c.out.length) { caught++; pass++; console.log(`  MUTANT ${name}: caught`); }
+	if (c.out.length) { caught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(c.out)}`); }
 	else failures.push(`MUTANT ${name}: NOT caught`);
 }
 const ROUTE_MUTANTS = [
@@ -913,7 +1011,7 @@ const ROUTE_MUTANTS = [
 	["the note's words changed", "const SHARED_LOGIN_NOTE = \"shared login, person not recorded\";", "const SHARED_LOGIN_NOTE = \"shared login\";"],
 	["the note on \"Check Gmail\" too", "const audit = auditFor(req, row.load_id || loadId);", "const audit = markAuditFor(req, row.load_id || loadId);"],
 	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
-	["the switch given to any Super Admin", "canMark: markingOn && listed,", "canMark: markingOn,"],
+	["the switch given to any Super Admin", "canMark: markingOn && listed && !processButtonOn,", "canMark: markingOn && !processButtonOn,"],
 	["every row annotated for any Super Admin", "all: markingOn && listed,", "all: markingOn,"],
 	["marking by any Super Admin", "if (!mayMark(userOf(req))) return notListed(res);\n\t\t\tconst key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored",
 		"const key = keyOf(req.params && req.params.loadKey);\n\t\t\tif (!key) return res.status(400).json({ error: \"Unknown load.\", code: \"LOAD_KEY_INVALID\" });\n\t\t\tconst body = bodyOf(req);\n\t\t\tif (typeof body.factored"],
@@ -925,7 +1023,7 @@ for (const [name, from, to] of ROUTE_MUTANTS) {
 	if (!ROUTES_FILE_SRC || ROUTES_FILE_SRC.split(from).length - 1 !== 1) { failures.push(`route mutant anchor not found once: ${name}`); continue; }
 	let c;
 	try { c = checkRoutes(ROUTES_FILE_SRC.replace(from, to)); } catch (e) { c = { out: [`threw: ${e && e.message}`] }; }
-	if (c.out.length) { routeCaught++; pass++; console.log(`  MUTANT ${name}: caught`); }
+	if (c.out.length) { routeCaught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(c.out)}`); }
 	else failures.push(`MUTANT ${name}: NOT caught`);
 }
 console.log(`  ${caught}/${MUTANTS.length} store mutants and ${routeCaught}/${ROUTE_MUTANTS.length} route mutants caught`);

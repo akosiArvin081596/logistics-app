@@ -102,6 +102,15 @@ eq(read({ factored: true }), { status: FACTORED }, "§2 rule 2: marked factored 
 eq(read({ rows: [row({ via: "triumph" })] }), { status: FACTORED }, "§2 rule 2: a draft row via triumph");
 eq(read({ triumphDone: true }), { status: FACTORED }, "§2 rule 2: a Triumph submission that went");
 eq(read({ factored: true, saved: inSent, claim: HELD }), { status: FACTORED }, "§2 rule 2 comes before what the mailbox and the claim say");
+// L7: a load Process with Triumph took was invoiced to the broker by the app: it keeps that
+// invoice's number and date, in the status and in the CSV.
+const TAKEN = { invoiceId: INV, invoiceDate: "2026-11-02" };
+const SENT_ROW = row({ via: "auto-smtp" });
+eq(read({ factored: true, brokerInvoice: TAKEN, claim: SENT_CLAIM, rows: [SENT_ROW] }), { status: FACTORED, invoiceId: INV, date: "2026-11-02" },
+	"§2 FAILS ON THE OLD CODE (L7): rule 2, a load Process with Triumph took: Factored, keeping the broker invoice's number and date");
+eq(exportCells(read({ factored: true, brokerInvoice: TAKEN, claim: SENT_CLAIM, rows: [SENT_ROW] })), ["Factored (Triumph)", INV, "2026-11-02"], "§2 FAILS ON THE OLD CODE (L7): ...and the CSV keeps them");
+eq(read({ factored: false, brokerInvoice: TAKEN, claim: SENT_CLAIM, rows: [SENT_ROW] }), { status: SENT, invoiceId: INV, date: "2026-11-02" }, "§2 (L7) its mark cleared: Sent by LogisX again, by the claim");
+eq(read({ factored: true, brokerInvoice: null }), { status: FACTORED }, "§2 (L7) a load marked any other way: Factored, with no number, as before");
 
 eq(read({ claim: SENT_CLAIM }), { status: SENT, invoiceId: INV, date: "2026-11-02" }, "§2 rule 3: drafted, delivery send, stage recorded: Sent by LogisX, with its date and number");
 eq(read({ claim: { ...SENT_CLAIM, stage: "appended" } }), { status: SENT, invoiceId: INV, date: "2026-11-02" }, "§2 rule 3: stage appended too");

@@ -395,7 +395,15 @@ section("§10 the free checks");
 		"RATECON_MISSING", "RATECON_BY_CONTENT", "RATECON_TOTAL_UNREAD", "NO_BILLING_EMAIL", "RECIPIENT_DOMAIN_MISMATCH", "RECIPIENT_UNCONFIGURED", "TOTAL_MISMATCH",
 		"POD_PAGE_UNREADABLE", "INVOICE_REFS_REQUIRED", "INVOICE_TOTAL_UNKNOWN", "TRAILER_MISMATCH", "DRAFT_REFUSED", "FACTORING_UNREADABLE", "ASSIGNMENT_NOT_PRINTABLE", "FACTORING_CHANGED",
 		"RETRY_LATER", "GEMINI_DOWN", "RENDERER_BUSY", "QUIET_WINDOW", "HOST_KEY_MISMATCH", "LOGIN_REFUSED",
-		"SUBMIT_FAILED", "MAYBE_SUBMITTED", "BATCH_FILES_CHANGED", "LOAD_CHANGED", "NOT_LIVE", "NUMBER_VOIDED", "STAGE_INVALID", "LOCK_MISSING", "SUBMIT_NOW"];
+		"SUBMIT_FAILED", "MAYBE_SUBMITTED", "BATCH_FILES_CHANGED", "LOAD_CHANGED", "NOT_LIVE", "NUMBER_VOIDED", "STAGE_INVALID", "LOCK_MISSING", "SUBMIT_NOW",
+		// Process with Triumph's: the press's own checks and the job's second look
+		"DVIR_LINES", "RATECON_UNREAD", "ADVANCE_ON_RATECON", "INVOICE_CHANGED", "PAID_ALREADY", "INVOICE_TOO_OLD", "NOT_CHR", "HAND_DRAFTED", "INVOICE_RECORD_MISMATCH"];
+	if (typeof rules.processButtonEnabled !== "function") failures.push("§10 FAILS ON THE OLD CODE: lib/triumph-rules.js has no processButtonEnabled()");
+	else {
+		eq([{}, { TRIUMPH_PROCESS_BUTTON_ENABLED: "TRUE" }, { TRIUMPH_PROCESS_BUTTON_ENABLED: "1" }, { TRIUMPH_PROCESS_BUTTON_ENABLED: " true " }].map((env) => rules.processButtonEnabled(env)),
+			[false, false, false, true], "§10 Process with Triumph's switch: on only when exactly \"true\" (its ends trimmed)");
+		eq(rules.processButtonEnabled({ TRIUMPH_PROCESS_BUTTON_ENABLED: "true" }, { replica: true }), false, "§10 ...and never in a replica");
+	}
 	eq([...rules.REASON_CODES].sort(), [...everyCode].sort(), "§10 FAILS ON THE OLD CODE: every code is on the list, each once, DEBTOR_NAME_COMMA and the submit job's among them");
 	eq(new Set(rules.REASON_CODES).size, rules.REASON_CODES.length, "§10 ...no code twice");
 }

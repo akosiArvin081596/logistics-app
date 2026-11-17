@@ -337,6 +337,9 @@ function world({ gmail = true, n8n = false, ids = "7,9", unreadableMarker = fals
 	w.drafts = (n) => db.prepare("SELECT invoice_id, via FROM load_invoice_drafts WHERE load_id = ?").all(id(n));
 	w.actions = (action) => w.seen.audits.filter((a) => a.action === action);
 	w.spies = () => [w.seen.prepare, w.seen.mint, w.seen.imap.length, w.seen.n8n.length];
+	// The engine itself, for the page the Triumph job renders with a number it was given.
+	w.engine = engine;
+	w.overrides = (body = {}) => helpers.parseInvoiceOverrides(body);
 	return w;
 }
 const CONFIRM = Object.freeze({ confirmFactored: true, factoredReason: "made-up: Triumph asked for a copy" });
@@ -535,6 +538,21 @@ async function s1live() {
 		const review = await w.press(4, { dry: true, body: CONFIRM });
 		eq(review.status, 200, "§1d the review of a confirmed draft answers");
 		ok(prints(w.seen.pages[2]) && noBank(w.seen.pages[2]), "§1d FAILS ON THE OLD CODE: ...and its PDF prints what the approve prints");
+	}
+	// Process with Triumph: the page the job renders for a load whose invoice already went to the
+	// broker carries that invoice's own number and date, the assignment lines in place of the bank
+	// block, and nothing else new.
+	{
+		const w = world({ lines: true });
+		w.putMarker(3);
+		const prep = await w.engine.prepare({ loadId: SHEET[3][0], body: {}, dryRun: true, mode: "manual", ov: w.overrides({}) });
+		eq(prep.ok, true, "§1d (fixture) a factored load's invoice prepared");
+		const pagesBefore = w.seen.pages.length;
+		await w.engine.render(prep.ctx, { invoiceId: "11022026-4", invoiceDate: "2026-11-02" });
+		const page = w.seen.pages[pagesBefore] || "";
+		ok(page.includes("11022026-4") && page.includes("11/02/2026"), "§1d (Process with Triumph) the factored page prints the reused invoice's own number and date");
+		ok(prints(page) && noBank(page), "§1d (Process with Triumph) ...with every assignment line and no bank block, as every factored invoice prints");
+		eq(w.seen.mint, 0, "§1d (Process with Triumph) ...and no number was minted for it");
 	}
 	// A load that isn't factored prints the same bytes whatever the settings say.
 	{

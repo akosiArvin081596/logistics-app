@@ -24,6 +24,10 @@
 //      text) reads as unreadable, never as a partial text, and a reader with that
 //      limit raised reads past it; a ToUnicode code longer than four bytes is no
 //      code, and the read finishes
+//   §7 shownTextRead(): the same text, and whole only when nothing was skipped
+//      (a filter it can't read, a stream that won't inflate, a form that isn't
+//      there), every font was found, and every glyph read through a map or a
+//      standard encoding; each of those flags removed is caught
 //
 // Made-up text only, apart from the committed documentation PDFs. No network;
 // §6 runs two reads in a child process it stops itself.
@@ -185,7 +189,7 @@ function mutant(from, to) {
 }
 for (const [label, from, to] of [
 	["a reader that ignores ToUnicode", "const cmap = tu && tu.ref !== undefined ? parseCMap(streamText(tu.ref), work) : null;", "const cmap = null;"],
-	["a reader that joins glyphs with a space", "return out.parts.join(\"\");", "return out.parts.join(\" \");"],
+	["a reader that joins glyphs with a space", "return { text: out.parts.join(\"\"), whole: !work.partial };", "return { text: out.parts.join(\" \"), whole: !work.partial };"],
 ]) {
 	const r = mutant(from, to);
 	ok(r.applied, `§5 MUTANT ${label}: applied to the shipped source once`);
@@ -296,6 +300,91 @@ const IS_CODE = "const isCode = (b) => Buffer.isBuffer(b) && b.length >= 1 && b.
 const anyLength = READER_SRC.split(IS_CODE).length === 2 ? READER_SRC.replace(IS_CODE, () => "const isCode = (b) => Buffer.isBuffer(b);") : null;
 ok(anyLength, "§6 MUTANT codes of any length: applied to the shipped source once");
 if (anyLength) eq(readInChild(anyLength, longCodes(7), 2000).finished, false, "§6 MUTANT codes of any length: caught (the read doesn't finish within 2 s; the child is stopped)");
+
+// ------------------------------------------------------------------ §7
+// shownTextRead(): the same text, and whether the read was whole. The Triumph job's advance
+// check goes on only on a whole read (Process with Triumph, recheck 2's N2-L1).
+section("§7  a whole read: nothing skipped, every font found, every glyph read");
+// A reader without it answers nothing, so each case fails by its own name.
+const shownTextRead = typeof require(READER_FILE).shownTextRead === "function" ? require(READER_FILE).shownTextRead : () => ({ text: null, whole: null });
+// A page whose first content stream reads, and whose second is the one under test.
+const twoStreams = (second) => pdfOf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+	{ dict: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 6 0 R >> /XObject << >> >> /Contents [4 0 R 5 0 R] >>" },
+	{ stream: "BT /F1 9 Tf (Made-up C.H. Robinson) Tj ET" },
+	second,
+	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+]);
+const fontPage = (fontDict, show, extra = []) => pdfOf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+	{ dict: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>" },
+	{ stream: `BT /F1 10 Tf ${show} ET` },
+	{ dict: fontDict },
+	...extra,
+]);
+const WHOLE = [
+	["Chromium's two-byte codes through a ToUnicode map", textPdf(INVOICE_TEXT)],
+	["literal strings through Helvetica with no /Encoding (a standard font's own)", textPdf("Made-up Robinson Total: $1,500.00", { mode: "literal" })],
+	["a TrueType font named WinAnsiEncoding", fontPage("<< /Type /Font /Subtype /TrueType /BaseFont /MadeUpSans /Encoding /WinAnsiEncoding >>", "(Robinson) Tj")],
+	["/Differences that keep every letter on its own code", fontPage("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [32 /space 65 /A /B 128 /bullet] >> >>", "(AB Robinson) Tj")],
+	["an image drawn before the text", image],
+	["one-byte codes with ranges and a form's own text", oneByte],
+];
+for (const [label, buf] of WHOLE) {
+	const r = shownTextRead(buf);
+	eq([r.whole, r.text], [true, shownText(buf)], `§7 FAILS ON THE OLD CODE (N2-L1): whole: ${label}, the same text as shownText()`);
+}
+const LABEL_FONT_NO_MAP = pdfOf([
+	{ dict: "<< /Type /Catalog /Pages 2 0 R >>" },
+	{ dict: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+	{ dict: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>" },
+	{ stream: "BT /F1 10 Tf (Made-up C.H. Robinson Total: $1,500.00) Tj /F2 10 Tf <0041004200430044> Tj ET" },
+	{ dict: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+	{ dict: "<< /Type /Font /Subtype /Type0 /BaseFont /MadeUpLabels /Encoding /Identity-H >>" },
+]);
+const PARTIAL = [
+	["a label font with no map beside \"Robinson\" in a mapped font (N2-L1's case)", LABEL_FONT_NO_MAP],
+	["a simple font with no map and no standard encoding", fontPage("<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+MadeUpSubset >>", "<01020304> Tj")],
+	["/Differences that move a letter to another code", fontPage("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /B] >> >>", "(Robinson) Tj")],
+	["/Differences that put a letter at a high code", fontPage("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Differences [200 /A] >> >>", "(Robinson) Tj")],
+	["a Type3 font with no map", fontPage("<< /Type /Font /Subtype /Type3 /Encoding /WinAnsiEncoding >>", "(Robinson) Tj")],
+	["a ToUnicode map named but missing", fontPage("<< /Type /Font /Subtype /TrueType /BaseFont /MadeUp /ToUnicode 9 0 R >>", "(Robinson) Tj")],
+	["a code the map lacks", fontPage("<< /Type /Font /Subtype /TrueType /BaseFont /MadeUp /ToUnicode 6 0 R >>", "<0102> Tj", [{ stream: "1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <01> <0041> endbfchar" }])],
+	["a font name the page's resources lack", fontPage("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", "(Robinson) Tj /F9 10 Tf (Advanced Total) Tj")],
+	["a second content stream with a filter it can't read", twoStreams({ dict: "/Filter /ASCII85Decode", stream: "BT /F1 9 Tf (Advanced Total) Tj ET", raw: true })],
+	["a second content stream that won't inflate", twoStreams({ dict: "/Filter /FlateDecode", stream: "not deflate data at all", raw: true })],
+	["a form drawn that isn't there", twoStreams({ stream: "/X9 Do" })],
+	["nothing readable", Buffer.from("plain text, no PDF")],
+];
+for (const [label, buf] of PARTIAL) {
+	const r = shownTextRead(buf);
+	eq([r.whole, r.text], [false, shownText(buf)], `§7 FAILS ON THE OLD CODE (N2-L1): not whole: ${label}, the same text as shownText()`);
+}
+ok(/Robinson/.test(shownText(LABEL_FONT_NO_MAP)) && !/advanced/i.test(shownText(LABEL_FONT_NO_MAP)), "§7 (N2-L1) shownText() alone reads \"Robinson\" and no label there: only the whole flag tells it apart");
+function wholeMutant(from, to) {
+	const src = fs.readFileSync(READER_FILE, "utf8");
+	if (src.split(from).length - 1 !== 1) return null;
+	const m = new Module(READER_FILE, module);
+	m.filename = READER_FILE;
+	m.paths = Module._nodeModulePaths(path.dirname(READER_FILE));
+	m._compile(src.replace(from, () => to), READER_FILE);
+	return m.exports.shownTextRead;
+}
+for (const [label, from, to] of [
+	["an unmapped code not flagged", "if (u === undefined) work.partial = true;", ""],
+	["a font with no map read as whole", "if (!font || !font.plainOk) work.partial = true;", ""],
+	["any simple font's bytes taken as its text", "const plainOk = tu === undefined && !type0 && bytesReadAsShown(dict);", "const plainOk = tu === undefined && !type0;"],
+	["/Differences not checked", "return diffs === undefined || differencesKeepAscii(", "return true || differencesKeepAscii("],
+	["a filter it can't read not flagged", "if (filters.length !== 1 || filters[0] !== \"/FlateDecode\") {\n\t\twork.partial = true;", "if (filters.length !== 1 || filters[0] !== \"/FlateDecode\") {"],
+	["a stream that won't inflate not flagged", "if (!out) {\n\t\twork.partial = true;", "if (!out) {"],
+	["a missing form not flagged", "// An object drawn that isn't found, or isn't an image: it may hold text.\n\t\t\t\t\twork.partial = true;", "// An object drawn that isn't found, or isn't an image: it may hold text."],
+]) {
+	const read = wholeMutant(from, to);
+	ok(read, `§7 MUTANT ${label}: applied to the shipped source once`);
+	if (read) ok(PARTIAL.some(([, buf]) => read(buf).whole === true), `§7 MUTANT ${label}: caught (a partial read reads as whole)`);
+}
 
 console.log(`\n${"=".repeat(64)}`);
 if (failures.length) {

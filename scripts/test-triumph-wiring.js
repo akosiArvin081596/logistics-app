@@ -12,6 +12,10 @@
 //   §5 the status route: the driver's Delivered reaches the job once, after the sheet write
 //   §6 a load's documents for its batch: the kinds that go, either spelling of the ID, no
 //      deleted row
+//   §7 Process with Triumph as server.js wires it (the <factoring-wiring> block lifted with
+//      this one): off, no column is made and the press answers 404; on, live and with the
+//      server's own re-issue hold on, its columns are made and a press reaches the job through
+//      the late reference; dry, or the hold off, 404; the start-up line says which
 //
 // Made-up loads and settings only (LD-TEST-*).
 //   node scripts/test-triumph-wiring.js      # exits 1 on any failure
@@ -181,6 +185,86 @@ function wire(env, { replica = null } = {}) {
 		eq(docs.map((d) => d.id), [2, 1, 6], "§6 its BOL, POD and scale ticket, by upload order, either spelling of the ID; no rate con (the engine gives it), receipt, deleted row or other load");
 		eq(w.fetched, [2, 1, 6], "§6 ...and only those files are read");
 		ok(docs.every((d) => Buffer.isBuffer(d.buffer)), "§6 ...each with its bytes");
+	}
+
+	// ---------------------------------------------------------------- §7
+	section("§7 Process with Triumph as server.js wires it");
+	{
+		const FSTART = "// <factoring-wiring>";
+		const FEND = "// </factoring-wiring>";
+		const FBLOCK = SRC.slice(SRC.indexOf(FSTART), SRC.indexOf(FEND) + FEND.length);
+		// Both blocks, as the server runs them: the routes made first, the job after, reached late.
+		const both = (env, { hold = true } = {}) => {
+			const db = new Database(":memory:");
+			db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY, load_id TEXT, type TEXT, file_name TEXT, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at TEXT, deleted_at TEXT)");
+			db.exec("CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, invoice_id TEXT, total TEXT, order_number TEXT, via TEXT)");
+			db.exec("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT)");
+			const out = { db, logs: [], mounted: {}, refusals: [] };
+			const quiet = { log: (m) => out.logs.push(String(m)), warn: () => {}, error: () => {}, info: () => {} };
+			const scope = {
+				db,
+				process: { env },
+				REPLICA: null,
+				require: serverRequire,
+				console: quiet,
+				path,
+				app: { post: (p, ...chain) => { out.mounted[p] = chain; } },
+				requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: "FORBIDDEN" })),
+				refuseCrossSite: (req, res, next) => next(),
+				logAudit: () => {},
+				logAuditRefusal: (req, action, entity, id, details, code) => out.refusals.push(code),
+				integrityClosedMonthsOf: () => [],
+				RATECON_REISSUE_HOLD_ENABLED: hold,
+				startsJob: () => false,
+				setInterval: () => 0,
+				setTimeout: () => 0,
+				setImmediate: () => {},
+				getJobTrackingCached: async () => ({ headers: ["Load ID", "Status", "Email"], data: [{ "Load ID": "123456701", Status: "Delivered", Email: "made-up.agent@chrobinson.com" }] }),
+				sheetDayKey: () => "",
+				DATA_DIR: "/made-up/data",
+				brokerInvoiceDraft: { prepare: async () => ({ ok: false }), render: async () => ({}), record: () => ({ recorded: false }) },
+				nextInvoiceNumber: () => "11122026-1",
+				insertDispatchNotification: { run: () => {} },
+				io: { to: () => ({ emit: () => {} }) },
+				fetchDocumentBytes: async () => Buffer.from("made-up"),
+			};
+			const names = Object.keys(scope);
+			Object.assign(out, new Function(...names, `${FBLOCK}\n${BLOCK}\nreturn { factoringRoutes, triumph };`)(...names.map((n) => scope[n])));
+			out.press = async (body = { loadId: "123456701" }) => {
+				const res = { status: 200, body: null };
+				const r = { status(s) { res.status = s; return r; }, json(b) { res.body = b; return r; } };
+				const req = { params: {}, body, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } };
+				for (const h of out.mounted["/api/factoring/process-with-triumph"] || []) {
+					let goOn = false;
+					await h(req, r, () => { goOn = true; });
+					if (!goOn) break;
+				}
+				return res;
+			};
+			out.columns = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+			return out;
+		};
+		const ON = { TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05", ...CONNECTION, [DENY_SETTING]: "998877665544",
+			TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7", TRIUMPH_PROCESS_BUTTON_ENABLED: "true" };
+		// Whether the button works, as the routes say; null on routes that can't say.
+		const works = (x) => (typeof x.factoringRoutes.buttonWorks === "function" ? x.factoringRoutes.buttonWorks() : null);
+		const off = both({ ...ON, TRIUMPH_PROCESS_BUTTON_ENABLED: "" });
+		eq([off.factoringRoutes.processButtonOn, (await off.press()).status, off.columns("triumph_submissions").includes("number_source"), off.columns("load_factoring").includes("broker_invoice_id")], [false, 404, false, false],
+			"§7 FAILS ON THE OLD CODE: the switch off: the press answers 404, and no table gains a column");
+		ok(off.logs.some((l) => l.startsWith("[factoring]") && l.endsWith("; Process with Triumph off")), "§7 FAILS ON THE OLD CODE: ...and the start-up line says off");
+		const on = both(ON);
+		eq([on.factoringRoutes.processButtonOn, works(on), on.columns("triumph_submissions").filter((c) => ["number_source", "reused_draft_id", "expected_total"].includes(c)).length, on.columns("load_factoring").includes("broker_invoice_id")],
+			[true, true, 3, true], "§7 FAILS ON THE OLD CODE: on, live, the hold on: it works, and its columns are made");
+		ok(on.logs.some((l) => l.endsWith("; Process with Triumph on")), "§7 ...the start-up line says on");
+		const pressed = await on.press();
+		eq([pressed.status, pressed.body && pressed.body.code], [409, "NO_AUTO_INVOICE"], "§7 FAILS ON THE OLD CODE: a press reaches the job through the server's late reference, and its checks (no automatic invoice here: refused)");
+		const dry = both({ ...ON, TRIUMPH_SUBMIT_DRY_RUN: "true" });
+		eq([works(dry), (await dry.press()).status], [false, 404], "§7 FAILS ON THE OLD CODE: dry: the button doesn't work (404)");
+		ok(dry.logs.some((l) => l.endsWith("; Process with Triumph on, but idle until marking is on, submit is live and the re-issue hold is on")), "§7 ...and the start-up line says why");
+		const noHold = both(ON, { hold: false });
+		eq([works(noHold), (await noHold.press()).status], [false, 404], "§7 FAILS ON THE OLD CODE: RATECON_REISSUE_HOLD_ENABLED off: the server's own value reaches the routes, and the button doesn't work (the advance check fails closed)");
+		ok(/\tclosedMonthsOf: integrityClosedMonthsOf,\n\treissueHoldOn: RATECON_REISSUE_HOLD_ENABLED,\n\ttriumphJob: \(\) => triumph,\n/.test(FBLOCK), "§7 the routes get the server's own month check, hold and job");
+		ok(/\tprocessButtonOn: require\("\.\/lib\/triumph-rules"\)\.processButtonEnabled\(process\.env, \{ replica: Boolean\(REPLICA\) \}\),\n/.test(BLOCK), "§7 the job's daily notice follows the same switch");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

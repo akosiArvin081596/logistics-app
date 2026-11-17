@@ -23,6 +23,11 @@
 //   §8 the reason box asks the shared login for "your name and why", and every other
 //      account for a reason as before; the server's rows name the shared login in the
 //      screens' own words; each rule changed in turn is caught
+//   §9 Process with Triumph: every tile row of the plan's §1.3 in order, Try again only on a
+//      stop a retry can change (the server's own list); Clear factored and "Factor with
+//      Triumph" as two buttons on the server's word, one of them where the one switch was
+//      with the switch off; the chip names the broker's invoice; the button beside Draft
+//      Invoice Email, Super Admin only, one press with no question; mutants of each
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
@@ -91,7 +96,7 @@ section('§5  Super Admin only')
 const MARK_WORDS = "Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here."
 function controlsViolations(src) {
   const v = []
-  if (!/<div v-if="auth\.isSuperAdmin && \(chip \|\| mayFactor \|\| mayRecord\)"/.test(src)) v.push('FactoringControls.vue is not Super Admin only')
+  if (!/<div v-if="auth\.isSuperAdmin && \(chip \|\| mayFactor \|\| mayClear \|\| mayRecord\)"/.test(src)) v.push('FactoringControls.vue is not Super Admin only')
   if (!src.includes(`<p v-if="mayFactor" class="fact-note">${MARK_WORDS}</p>`)) v.push("the switch's one line is not there word for word, beside the switch only")
   for (const fn of ['setFactored', 'recordOutside']) {
     if (!new RegExp(`async function ${fn}\\([^)]*\\) \\{\\n\\s*if \\(!auth\\.isSuperAdmin\\b`).test(src)) v.push(`${fn}() does not refuse a non-Super-Admin first`)
@@ -133,13 +138,15 @@ eq(activeViolations(ACTIVE), [], '§5 FAILS ON THE OLD CODE: Active Loads mounts
   })
   const files = walk(path.join(ROOT, 'client', 'src'))
   const rel = (f) => path.relative(ROOT, f).split(path.sep).join('/')
-  eq(files.filter((f) => /\/api\/factoring\//.test(read(f))).map(rel), ['client/src/components/dashboard/FactoringControls.vue'], '§5 the factoring routes are called from FactoringControls.vue only')
+  eq(files.filter((f) => /\/api\/factoring\/loads\//.test(read(f))).map(rel), ['client/src/components/dashboard/FactoringControls.vue'], '§5 the marking routes are called from FactoringControls.vue only')
+  eq(files.filter((f) => /\/api\/factoring\/(?:process-with-triumph|triumph-retry)/.test(read(f))).map(rel), ['client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 FAILS ON THE OLD CODE: Process with Triumph and its Try again are called from Completed Loads only')
+  eq(files.filter((f) => /\/api\/factoring\//.test(read(f))).map(rel).sort(), ['client/src/components/dashboard/CompletedLoadsTab.vue', 'client/src/components/dashboard/FactoringControls.vue'], '§5 ...and no other screen calls a factoring route')
   eq(files.filter((f) => /invoice-draft-inflight/.test(read(f))).map(rel), ['client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 "Check Gmail" is called from Completed Loads only')
   eq(files.filter((f) => read(f).includes(MARK_WORDS)).map(rel), ['client/src/components/dashboard/FactoringControls.vue'], "§5 FAILS ON THE OLD CODE: the switch's one line is in FactoringControls.vue and on no other screen: a driver never sees it")
   eq(files.filter((f) => /FactoringControls/.test(read(f))).map(rel).sort(), ['client/src/components/dashboard/ActiveLoadsTab.vue', 'client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 the controls are mounted on the two office tabs only')
 }
 for (const [name, file, src, check, from, to] of [
-  ['the controls show to every role', 'FactoringControls.vue', CONTROLS, controlsViolations, '<div v-if="auth.isSuperAdmin && (chip || mayFactor || mayRecord)"', '<div v-if="chip || mayFactor || mayRecord"'],
+  ['the controls show to every role', 'FactoringControls.vue', CONTROLS, controlsViolations, '<div v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord)"', '<div v-if="chip || mayFactor || mayClear || mayRecord"'],
   ['the line shows with no switch', 'FactoringControls.vue', CONTROLS, controlsViolations, '<p v-if="mayFactor" class="fact-note">', '<p class="fact-note">'],
   ['the line loses a word', 'FactoringControls.vue', CONTROLS, controlsViolations, 'After the invoice goes out, this', 'After the invoice goes, this'],
   ['setFactored() runs for every role', 'FactoringControls.vue', CONTROLS, controlsViolations, 'async function setFactored(next) {\n  if (!auth.isSuperAdmin || ', 'async function setFactored(next) {\n  if ('],
@@ -331,6 +338,140 @@ section("§8  the reason box's hint on the shared login")
   ]) {
     if (CONTROLS.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once in FactoringControls.vue: ${name}`); continue }
     ok(boxViolations(CONTROLS.replace(from, to)).length > 0, `§8 MUTANT ${name}: caught`)
+  }
+}
+
+// ---------------------------------------------------------------- §9
+section('§9  Process with Triumph: the button, the tile, the chip')
+{
+  const { createRequire } = await import('module')
+  const serverStore = createRequire(path.join(ROOT, 'package.json'))(path.join(ROOT, 'lib', 'factoring-store.js'))
+  const LIB_SRC = read(LIB)
+  const has = (fn) => Boolean(S && typeof S[fn] === 'function')
+  for (const fn of ['triumphTile', 'canProcess', 'canClear', 'canMarkFactored', 'processRefusalText'].filter((f) => !has(f))) failures.push(`§9 FAILS ON THE OLD CODE: factoringStatus.js has no ${fn}()`)
+  const N = '11102026-4'
+  const D = '2026-11-10'
+  const fmt = (iso) => `at ${iso}`
+  const base = { factored: true, locked: false, lockedVia: '', byButton: true, canClear: true, canRetry: true, triumphStage: 'reserved', triumphAt: '', brokerInvoiceId: N, brokerInvoiceDate: D, paused: '' }
+  const tileViolations = (L) => {
+    const v = []
+    if (!L || typeof L.triumphTile !== 'function') return ['no triumphTile()']
+    const t = (over) => L.triumphTile({ ...base, ...over }, { formatTime: fmt })
+    const want = (label, got, text, tryAgain) => { if (!got || got.text !== text || got.tryAgain !== tryAgain) v.push(`${label}: ${JSON.stringify(got)}`) }
+    want('the mark cleared', t({ factored: false, triumphState: 'queued' }), 'Not sent to Triumph. It stays with its invoice to the broker.', false)
+    want('queued while paused', t({ triumphState: 'queued', paused: 'LOGIN_REFUSED' }), "Paused: Triumph refused the app's sign-in. Its invoice to the broker stands.", false)
+    want('queued', t({ triumphState: 'queued' }), 'Sending to Triumph…', false)
+    want('working', t({ triumphState: 'working', paused: 'LOGIN_REFUSED' }), 'Sending to Triumph…', false)
+    want('submitted', t({ triumphState: 'submitted', locked: true, lockedVia: 'upload', triumphAt: '2026-11-12T15:30:00.000Z' }), 'Sent to Triumph · at 2026-11-12T15:30:00.000Z', false)
+    want('waiting', t({ triumphState: 'waiting', triumphCode: 'INVOICE_DRAFT_IN_FLIGHT' }), 'Waiting: an invoice draft for this load is being saved.', false)
+    want('maybe submitted', t({ triumphState: 'needs_attention', triumphCode: 'MAYBE_SUBMITTED', triumphStage: 'csv_uploading', canClear: false, canRetry: false }), "May have reached Triumph: a person checks Triumph's side.", false)
+    want('a stop after the lock', t({ triumphState: 'needs_attention', triumphCode: 'INVOICE_TOO_OLD', triumphStage: 'pdf_uploading', locked: true, lockedVia: 'upload', canClear: false, canRetry: false }),
+      "Its PDF may be on Triumph's server, but nothing was triggered there. The mark stays locked; a person checks Triumph's side.", false)
+    for (const code of L.BUTTON_STOPS || []) {
+      // Even a row that says canRetry gets no Try again on these.
+      const got = t({ triumphState: 'needs_attention', triumphCode: code })
+      if (!got || got.tryAgain !== false || !got.text.startsWith('Not sent to Triumph: ') || !got.text.endsWith('It stays with its invoice to the broker: Clear factored puts it back there alone.')) v.push(`${code}: ${JSON.stringify(got)}`)
+    }
+    want('another code', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED' }), 'Not sent to Triumph: the upload to Triumph kept failing. Its invoice to the broker stands. Try again, or Clear factored to keep it with the broker.', true)
+    want('another code, not listed', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', canClear: false, canRetry: false }), 'Not sent to Triumph: the upload to Triumph kept failing. Its invoice to the broker stands.', false)
+    want('handled outside', t({ triumphState: 'closed_outside', locked: true, lockedVia: 'outside' }), "Handled in Triumph's process. Invoiced to the broker: 11102026-4, 11/10/2026.", false)
+    want('skipped', t({ triumphState: 'skipped', triumphCode: 'FACTORING_LOCKED' }), 'Not sent to Triumph: its mark is final. Its invoice to the broker stands.', false)
+    if (L.triumphTile({ ...base, byButton: false, triumphState: 'queued' }) !== null) v.push('a claim the button did not arm has a tile')
+    if (L.triumphTile({ factored: false, canMark: true }) !== null) v.push('a row with no claim has a tile')
+    return v
+  }
+  eq(S ? tileViolations(S) : ['no module'], [], '§9 FAILS ON THE OLD CODE: every tile row of plan §1.3 in order, Try again only where it can change the stop (N-L1, N-L2, N2-L2)')
+  eq(S && S.BUTTON_STOPS ? [...S.BUTTON_STOPS].sort() : null, serverStore.BUTTON_STOPS ? [...serverStore.BUTTON_STOPS].sort() : 'none on the server', "§9 FAILS ON THE OLD CODE: the codes a retry can't change are the server's own")
+  // Clear factored on its own; "Factor with Triumph" only on a load not yet factored. With the switch
+  // off (no canClear on the row), the same one button shows as before.
+  const actions = (f) => (has('canMarkFactored') && has('canClear') ? [S.canMarkFactored(f) ? 'Factor with Triumph' : '', S.canClear(f) ? 'Clear factored' : ''].filter(Boolean) : null)
+  eq([actions({ factored: false, canMark: true }), actions({ factored: true, canMark: true }), actions({ factored: true, canMark: false }), actions({ factored: true, locked: true, canMark: false })],
+    [['Factor with Triumph'], ['Clear factored'], [], []], '§9 FAILS ON THE OLD CODE: the switch off: "Factor with Triumph" or "Clear factored", exactly where the one switch showed each')
+  eq([actions({ factored: true, canMark: false, canClear: true }), actions({ factored: true, canMark: false, canClear: false }), actions({ factored: false, canMark: false, canClear: false })],
+    [['Clear factored'], [], []], '§9 FAILS ON THE OLD CODE (N-L6): the switch on: no "Factor with Triumph" anywhere; Clear factored where the server says')
+  eq(has('canProcess') && has('canRetryTriumph') ? [S.canProcess({ canProcess: true }), S.canProcess({ canProcess: 'true' }), S.canProcess(null), S.canRetryTriumph({ canRetry: 1 })] : null, [true, false, false, false], '§9 FAILS ON THE OLD CODE: the button and Try again: the server\'s own true, nothing else')
+  // L7: the chip names the invoice the broker got, never "not by email".
+  const chip = (over) => (S ? S.factoringChip({ ...base, ...over }) : null)
+  eq([chip({}).reason, chip({ locked: true, lockedVia: 'upload' }).reason, chip({ locked: true, lockedVia: 'outside' }).reason],
+    ['Invoiced to the broker: 11102026-4, 11/10/2026. Triumph gets the same invoice. The Draft Invoice button refuses it.', 'Sent to Triumph. Invoiced to the broker: 11102026-4, 11/10/2026.', "Handled in Triumph's process. Invoiced to the broker: 11102026-4, 11/10/2026."],
+    '§9 FAILS ON THE OLD CODE (L7): a load the button took: the chip names the broker\'s invoice; "Sent to Triumph" once handed over')
+  ok(S && !/not by email|never invoices/.test(JSON.stringify([chip({}), chip({ locked: true, lockedVia: 'upload' }), chip({ locked: true, lockedVia: 'outside' })])), '§9 (L7) ...and never says "not by email" or that the app never invoices it')
+  eq(S ? S.factoringChip({ factored: true, locked: true, lockedVia: 'upload' }).reason : null, 'Handed to Triumph. The app never invoices this load again.', '§9 a load marked any other way: the chip as before')
+  eq(has('processRefusalText') ? [S.processRefusalText({ status: 409, code: 'NOT_CHR', message: 'Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.' }), S.processRefusalText({ status: 0, code: 'TIMEOUT', message: 'The request timed out.' })] : null,
+    ['Not sent to Triumph. Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.', "Not sent to Triumph: the answer didn't come back. Reload the load to see where it stands."],
+    '§9 FAILS ON THE OLD CODE: a refused press says "Not sent to Triumph" and the server\'s words; no answer never says nothing was marked')
+  // The Completed tab: beside Draft Invoice Email, Super Admin only, one press with no question.
+  const completedButtonViolations = (src) => {
+    const v = []
+    const draftAt = src.indexOf("'✉ Draft Invoice Email'")
+    const btnAt = src.indexOf('@click="processWithTriumph"')
+    const rowEnd = src.indexOf('</div>', draftAt)
+    if (!(draftAt > 0 && btnAt > draftAt && btnAt < rowEnd)) v.push('the button is not beside Draft Invoice Email')
+    if (!/<button v-if="auth\.isSuperAdmin && \(showProcessButton \|\| triumphPressing\)"/.test(src)) v.push('the button is not Super Admin only, or shows without the server\'s word')
+    if (!/const showProcessButton = computed\(\(\) => Boolean\(auth\.isSuperAdmin && selectedJob\.value && canProcess\(selectedJob\.value\._factoring\)\)\)/.test(src)) v.push('the button does not follow canProcess alone')
+    const fnAt = src.indexOf('async function processWithTriumph() {')
+    const fnEnd = src.indexOf('\n}\n', fnAt)
+    const fn = fnAt >= 0 ? src.slice(fnAt, fnEnd) : ''
+    if (!/^async function processWithTriumph\(\) \{\n {2}if \(!auth\.isSuperAdmin\b/.test(fn)) v.push('the press does not refuse a non-Super-Admin first')
+    if (/confirm\(|prompt\(|reason/i.test(fn)) v.push('the press asks a question or takes a reason')
+    if (!fn.includes("api.post('/api/factoring/process-with-triumph', { loadId: loadRefValue.value })")) v.push('the press sends more than { loadId }')
+    if (!/'Sending to Triumph…' : 'Process with Triumph'/.test(src)) v.push('the button does not say "Sending to Triumph…" while it presses')
+    if (!/<button v-if="selectedTriumphTile\.tryAgain"/.test(src)) v.push('Try again does not follow the tile')
+    if (!/const selectedTriumphTile = computed\(\(\) => \(auth\.isSuperAdmin && selectedJob\.value/.test(src)) v.push('the tile reads for every role')
+    return v
+  }
+  eq(completedButtonViolations(COMPLETED), [], '§9 FAILS ON THE OLD CODE: Process with Triumph beside Draft Invoice Email: Super Admin only, on the server\'s word, one press with no question, "Sending to Triumph…" while it goes')
+  for (const [name, from, to] of [
+    ['the press asks first', "  triumphPressing.value = true; triumphResult.value = null\n  try {\n    const r = await api.post('/api/factoring/process-with-triumph'", "  if (!window.confirm('Send to Triumph?')) return\n  triumphPressing.value = true; triumphResult.value = null\n  try {\n    const r = await api.post('/api/factoring/process-with-triumph'"],
+    ['the button shown on any delivered load', 'selectedJob.value && canProcess(selectedJob.value._factoring)', 'selectedJob.value'],
+    ['Try again shown on every tile', '<button v-if="selectedTriumphTile.tryAgain"', '<button v-if="selectedTriumphTile"'],
+    ['the press for every role', "async function processWithTriumph() {\n  if (!auth.isSuperAdmin || ", "async function processWithTriumph() {\n  if ("],
+  ]) {
+    if (COMPLETED.split(from).length - 1 !== 1) { failures.push(`§9 mutant anchor not found once in CompletedLoadsTab.vue: ${name}`); continue }
+    ok(completedButtonViolations(COMPLETED.replace(from, to)).length > 0, `§9 MUTANT ${name}: caught`)
+  }
+  const controlsSplitViolations = (src) => {
+    const v = []
+    if (!src.includes('<button v-if="mayMark" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(true)">Factor with Triumph</button>')) v.push('"Factor with Triumph" is not its own button on canMarkFactored')
+    if (!src.includes('<button v-if="mayClear" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(false)">Clear factored</button>')) v.push('"Clear factored" is not its own button on canClear')
+    if (!src.includes('const mayMark = computed(() => canMarkFactored(status.value))') || !src.includes('const mayClear = computed(() => canClear(status.value))')) v.push('the buttons do not follow the server\'s words')
+    return v
+  }
+  eq(controlsSplitViolations(CONTROLS), [], '§9 FAILS ON THE OLD CODE (N-L6): the one switch split in two: "Factor with Triumph" and "Clear factored", each on the server\'s word; Clear factored keeps its reason box')
+  ok(controlsSplitViolations(CONTROLS.replace('const mayClear = computed(() => canClear(status.value))', 'const mayClear = computed(() => factored.value)')).length > 0, '§9 MUTANT Clear factored on any factored load: caught')
+  // Mutants of the lib's own rules, each a copy run from a temp folder.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-status-9-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'lib'))
+    fs.mkdirSync(path.join(tmp, 'utils'))
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}\n')
+    fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
+    let n = 0
+    for (const [name, from, to, check] of [
+      ['Try again offered on a code a retry can\'t change (N-L1)', "    if (BUTTON_STOPS.includes(code)) {\n      return { text: `Not sent to Triumph: ${triumphStopWords(code)}. It stays", "    if (false) {\n      return { text: `Not sent to Triumph: ${triumphStopWords(code)}. It stays", tileViolations],
+      ['the stop after the lock read as one before it (N2-L2)', 'if (BUTTON_STOPS.includes(code) && UPLOAD_STAGES.includes(f.triumphStage)) {', 'if (false) {', tileViolations],
+      ['Sending before the pause', "  if (state === 'queued' && f.paused) return", "  if (false) return", tileViolations],
+      ['a cleared mark still read as on its way', "  if (f.factored !== true) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", "  if (false) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", tileViolations],
+      ['MAYBE_SUBMITTED read as a plain stop', "    if (code === 'MAYBE_SUBMITTED') return", "    if (false) return", tileViolations],
+      ['Clear factored named where the server doesn\'t offer it', "const ways = [retry ? 'Try again' : '', clear ? 'Clear factored", "const ways = [retry ? 'Try again' : '', true ? 'Clear factored", tileViolations],
+    ]) {
+      if (LIB_SRC.split(from).length - 1 !== 1) { failures.push(`§9 mutant anchor not found once in factoringStatus.js: ${name}`); continue }
+      const file = path.join(tmp, 'lib', `factoringStatus-9-${++n}.js`)
+      fs.writeFileSync(file, LIB_SRC.replace(from, to))
+      let v
+      try { v = check(await import(pathToFileURL(file).href)) } catch (e) { v = [`threw: ${e && e.message}`] }
+      ok(v.length > 0, `§9 MUTANT ${name}: caught`)
+    }
+    const canClearMutant = path.join(tmp, 'lib', 'factoringStatus-9-clear.js')
+    const clearFrom = "(f.canClear === true || (f.canClear === undefined && f.canMark === true && f.factored === true))"
+    if (LIB_SRC.split(clearFrom).length - 1 !== 1) failures.push('§9 mutant anchor not found once in factoringStatus.js: Clear factored with the switch off')
+    else {
+      fs.writeFileSync(canClearMutant, LIB_SRC.replace(clearFrom, '(f.canClear === true)'))
+      const M = await import(pathToFileURL(canClearMutant).href)
+      ok(!M.canClear({ factored: true, canMark: true }), '§9 MUTANT Clear factored gone with the switch off: caught')
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
