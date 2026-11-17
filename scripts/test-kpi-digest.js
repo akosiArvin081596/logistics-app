@@ -63,8 +63,9 @@
  * §17 the plain words: every shown metric under its plain name and no old
  *    name; the plain notes with each number read from the server's own line
  *    (made-up numbers prove it), a note with no plain form in the server's
- *    words; each cell word mapped once ("No data" -> "No data yet" while a
- *    missing figure reads "No data"); "Not available" -> "-" in the Change
+ *    words; "No data" stays "No data", past or missing; the active drivers'
+ *    and the freight figures' units in full ("drivers", "tons"), the numbers
+ *    the server's; "Not available" -> "No comparison" in the Change
  *    column only; the three-month comparison; every change keeps the
  *    server's number ("pts" spelled out); another week rule prints as
  *    written; no old word in any form.
@@ -546,9 +547,9 @@ function mondayChecks(d, lib) {
 		`§14 a change withheld for coverage: "Not shown" and the server's note under the table (${JSON.stringify(rev)})`);
 	const est = cellsOf(read.htmlRow(wt, N.freight)) || [];
 	const en = refOf(est[0], "Estimate");
-	t(JSON.stringify(est) === JSON.stringify([`${N.freight}\nEstimate [${en}]`, "120.5 t", "No records", "-", "No"])
+	t(JSON.stringify(est) === JSON.stringify([`${N.freight}\nEstimate [${en}]`, "120.5 tons", "No records", "No comparison", "No"])
 		&& wnotes[en] === `${N.freight} — Estimate: Loads with no stated weight are assumed to weigh the average of loads that state one.`,
-	`§14 "No records" as the server says it, a change it could not give as "-"; an estimate's marker and its note (${JSON.stringify(est)})`);
+	`§14 "No records" as the server says it, a change it could not give as "No comparison", freight in tons; an estimate's marker and its note (${JSON.stringify(est)})`);
 	t(est.length && !ZERO_RE.test(est.slice(1).join(" ")), "§14 ...and no week shows a 0 for a missing figure");
 	const co2 = cellsOf(read.htmlRow(wt, N.co2)) || [];
 	t(co2[3] === "↓ -6.9%" && wnotes[refOf(co2[0], "Estimate")] === `${N.co2} — Estimate: no assumption is recorded.`, `§14 a fall reads ↓; an estimate with no assumption says so (${JSON.stringify(co2)})`);
@@ -802,7 +803,7 @@ function wordChecks(d) {
 	other.metrics.find((m) => m.key === "on_time_rate").warnings = ["Computed under an earlier definition of this metric; the next snapshot uses the current one."];
 	t(Object.values(read.htmlNotes(d.buildDigest({ response: other, preview: false, asOfDay: "2026-10-14" }).html, MONTHLY)).includes(`${XSS} — Note: Computed under an earlier definition of this metric; the next snapshot uses the current one.`),
 		"§17 a note not on the list keeps the server's words");
-	// Cell words, each mapped once: a figure's "No data" becomes "No data yet"; a missing figure reads "No data".
+	// Cell words: "No data" stays "No data", whether the server wrote it or the figure is missing.
 	const w = weeklyFixture();
 	w.metrics.find((m) => m.key === "loads_delivered").weekly.previous.display = "No data";
 	w.metrics.find((m) => m.key === "co2_tonnes").weekly.previous.display = "Not available";
@@ -811,9 +812,23 @@ function wordChecks(d) {
 	const wm = d.buildDigest({ response: w, preview: true, asOfDay: "2026-11-23" });
 	const wt = read.htmlSection(wm.html, WEEKLY);
 	const mt2 = read.htmlSection(wm.html, MONTHLY);
-	t(read.htmlCell(wt, "Loads delivered", "Week before") === "No data yet" && read.htmlCell(mt2, "Loads delivered", "Number").split("\n")[0] === "No data yet", "§17 the server's \"No data\" reads \"No data yet\"");
-	t(read.htmlRow(mt2, N.savings)[1].text.startsWith("No data — ") && !/No data yet —/.test(wm.html + wm.text), "§17 ...while a missing figure reads \"No data\", never mapped twice");
-	t(read.htmlCell(wt, N.co2, "Week before") === "Not available" && read.htmlCell(wt, N.freight, "Change") === "-", "§17 \"Not available\" becomes \"-\" in the Change column only");
+	t(read.htmlCell(wt, "Loads delivered", "Week before") === "No data" && read.htmlCell(mt2, "Loads delivered", "Number").split("\n")[0] === "No data", "§17 the server's \"No data\" reads \"No data\", a past week included");
+	t(read.htmlRow(mt2, N.savings)[1].text.startsWith("No data — ") && !/No data yet/.test(wm.html + wm.text), "§17 ...as does a missing figure; \"No data yet\" appears nowhere");
+	t(read.htmlCell(wt, N.co2, "Week before") === "Not available" && read.htmlCell(wt, N.freight, "Change") === "No comparison", "§17 \"Not available\" becomes \"No comparison\" in the Change column only");
+	// Units in full for the active drivers and the two freight figures only, the number untouched.
+	const u = fixture();
+	u.metrics.push(
+		metric("active_units", "Active units (drivers with a delivered load)", { kind: "proxy", display: "9 units" }),
+		metric("freight_tons_stated", "Freight moved (stated weights)", { display: "1,953 t" }),
+		metric("zed_one_driver", "Zed one-unit metric", { display: "1 unit" }),
+	);
+	const one = u.metrics.find((m) => m.key === "zed_one_driver");
+	one.key = "active_units";
+	const um = read.htmlSection(d.buildDigest({ response: u, preview: false, asOfDay: "2026-10-14" }).html, MONTHLY);
+	const fig = (label) => (read.htmlCell(um, label, "Number") || "").split("\n")[0];
+	t(fig(N.units) === "9 drivers" && fig("Zed one-unit metric") === "1 driver" && fig("Freight hauled (loads with a listed weight)") === "1,953 tons" && fig(N.freight) === "8,270 tons" && fig(N.co2) === "122 t CO2",
+		`§17 "units" reads "drivers" (one "driver") and freight's "t" reads "tons"; CO2 keeps "t CO2" (${JSON.stringify([fig(N.units), fig("Zed one-unit metric"), fig("Freight hauled (loads with a listed weight)"), fig(N.freight), fig(N.co2)])})`);
+	t(read.htmlCell(wt, N.freight, "Last week") === "120.5 tons", "§17 ...in the weekly table too");
 	t((read.htmlCell(mt2, "Loads delivered", "Compared with") || "").includes("Last 3 months vs the same 3 months last year: ↑ +149.2%"), "§17 the three-month comparison in plain words, its figure the server's");
 	// Every change keeps the server's number: "pts" is only spelled out.
 	const server = weeklyFixture().metrics.filter((m) => m.weekly && m.weekly.mode === "weekly" && !HELD.includes(m.key)).map((m) => m.weekly.comparison);
@@ -827,7 +842,7 @@ function wordChecks(d) {
 	const om = d.buildDigest({ response: odd, preview: false, asOfDay: "2026-11-23" });
 	t(om.text.split("\n").slice(2, 4).join("|") === "Numbers as of Monday, Nov 23.|Weeks run Monday to Sunday." && !om.text.includes(WEEK_LINE_2), "§17 a week rule other than Saturday to Friday prints as the server wrote it");
 	// No old word in any form of the email.
-	const OLD = [/Public use/, /Figures as of/, /Missing data/, /Confidence:/, /\bpts\b/, /Weekly figures/, /Monthly figures/, /None of these/, /Aggregated figures/, /line up with weeks/, /Not tracked(?! yet)/, /America\//, /\bMetric\b/, /first Monday's/];
+	const OLD = [/Public use/, /Figures as of/, /Missing data/, /Confidence:/, /\bpts\b/, /Weekly figures/, /Monthly figures/, /None of these/, /Aggregated figures/, /line up with weeks/, /Not tracked(?! yet)/, /America\//, /\bMetric\b/, /first Monday's/, /No data yet/, /\d units?\b/, /\d t\b(?! CO2)/, />-</];
 	const bodies = [...Object.values(forms(d)), wm];
 	const leaks = OLD.filter((re) => bodies.some((m) => re.test(m.html) || re.test(m.text))).map(String);
 	t(leaks.length === 0, `§17 no old word in any form (${leaks.join(", ") || "none"})`);
@@ -968,7 +983,11 @@ console.log("\n§10 MUTANTS");
 		["the week before dropped from the header", swap(SRC, "return weekBefore ? `Last week", "return false ? `Last week")],
 		["an old word leaks back (Public use)", swap(SRC, "const SHARE_HEAD = \"OK to share?\";", "const SHARE_HEAD = \"Public use\";")],
 		["an old name leaks back (Gross load revenue)", swap(SRC, "\"Gross load revenue\": \"Revenue from loads\",", "\"Gross load revenue\": \"Gross load revenue\",")],
-		["a word mapped twice (a missing figure as No data yet)", swap(SRC, "return reason ? `${NO_DATA} — ${reason}`", "return reason ? `${plain(PLAIN_FIGURES, NO_DATA)} — ${reason}`")],
+		["\"No data yet\" back in a figure", swap(SRC, "const shown = (x) => unitWords(m, line(x && x.display, 80)) || NOT_AVAILABLE;", "const shown = (x) => unitWords(m, line(x && x.display, 80)).replace(/^No data$/, \"No data yet\") || NOT_AVAILABLE;")],
+		["a lone \"-\" back in the Change column", swap(SRC, "const NO_CHANGE = \"No comparison\";", "const NO_CHANGE = \"-\";")],
+		["the active drivers' \"units\" back", swap(SRC, "active_units: [/^(\\d[\\d,]*) unit(s?)$/, \"$1 driver$2\"],", "active_units: [/^(\\d[\\d,]*) unit(s?)$/, \"$1 unit$2\"],")],
+		["freight's \"t\" back (stated weights)", swap(SRC, "freight_tons_stated: [/^(\\d[\\d,]*(?:\\.\\d+)?) t$/, \"$1 tons\"],", "freight_tons_stated: [/^(\\d[\\d,]*(?:\\.\\d+)?) t$/, \"$1 t\"],")],
+		["freight's \"t\" back (all loads, estimate)", swap(SRC, "freight_tons_estimated: [/^(\\d[\\d,]*(?:\\.\\d+)?) t$/, \"$1 tons\"],", "freight_tons_estimated: [/^(\\d[\\d,]*(?:\\.\\d+)?) t$/, \"$1 t\"],")],
 		["a number typed into a note (the baseline mpg)", swap(SRC, "getting ${m[1]} mpg on the same miles", "getting 6.5 mpg on the same miles")],
 		["\"pts\" left in a change", swap(SRC, "return m ? `${m[1]} points` : shown;", "return shown;")],
 		["\"points\" kept on one line with its figure", swap(SRC, "const unit = words.endsWith(\" points\") ? \" points\" : \"\";", "const unit = \"\";")],
