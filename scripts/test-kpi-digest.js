@@ -44,7 +44,10 @@
  *    sections; every new string HTML-escaped. Its MUTANTS: a Monday-based week
  *    in the subject, the month section every Monday, the first Monday read off
  *    the UTC day, the monthly approval on a weekly line, a held metric in the
- *    weekly section, the week-before figure worked out in the email.
+ *    weekly section, the week-before figure worked out in the email, a withheld
+ *    change printed, the week in progress as last week, no month section when
+ *    last week is missing or in the preview, the week rule unescaped, the
+ *    weekly section with weekly figures off.
  *
  * Pure: no server, no database, no network.
  *
@@ -540,6 +543,27 @@ console.log("\n§10 MUTANTS");
 		["the month-to-date note dropped", swap(SRC, "if (mtd && line(mtd.label, 60)) out.push(", "if (false) out.push(")],
 	];
 	record(mutants.map(([name, src]) => ({ ok: caught(src), name: `MUTANT ${name}: caught` })));
+
+	// §14's own: each must fail a §14 or §13 check.
+	const caughtMonday = (src) => {
+		const d = loadFrom(src);
+		return [...offChecks(d), ...mondayChecks(d, LIB_METRICS)].some((x) => !x.ok);
+	};
+	const monday = [
+		["a Monday-based week in the subject", swap(SRC, "(lastWeek ? `LogisX weekly KPIs: ${line(lastWeek.label, 60)}`", "(lastWeek ? `LogisX weekly KPIs: week of ${weekOf}`")],
+		["the month section every Monday", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = true;")],
+		["the first Monday read off the UTC day", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !lastWeek || !!preview || isFirstMonday(String(r.generatedAt || \"\").slice(0, 10));")],
+		["the monthly approval on a weekly line", swap(SRC, "m.approval.approved === true && m.approval.coversWeekly === true ? \"Yes\" : \"No\"", "m.approval.approved === true ? \"Yes\" : \"No\"")],
+		["a held metric in the weekly section", swap(SRC, "const weeklyRows = lastWeek ? metrics.map(", "const weeklyRows = lastWeek ? (Array.isArray(r.metrics) ? r.metrics : []).filter((m) => m && typeof m === \"object\").map(")],
+		["the week-before figure worked out in the email", swap(SRC, "${before}: ${shown(prev)}.", "${before}: ${prev && Number.isFinite(prev.value) ? String(prev.value) : NOT_AVAILABLE}.")],
+		["a withheld change printed as a change", swap(SRC, "const change = c && c.status === \"withheld\" && line(c.note) ? line(c.note) : ", "const change = ")],
+		["the week in progress printed as last week", swap(SRC, "const cur = w.current && w.current.weekStart === lastWeek.weekStart ? w.current : null;", "const cur = w.toDate || w.current;")],
+		["no month section when last week is missing", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !!preview || isFirstMonday(day);")],
+		["the preview without the month section", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !lastWeek || isFirstMonday(day);")],
+		["the week rule not escaped", swap(SRC, "[`<p style=\"margin:0 0 16px;color:#475569\">${escHtml(rule)}</p>`]", "[`<p style=\"margin:0 0 16px;color:#475569\">${rule}</p>`]")],
+		["the weekly section with weekly figures off", swap(SRC, "\tif (!weekly) {\n", "\tif (false) {\n")],
+	];
+	record(monday.map(([name, src]) => ({ ok: caughtMonday(src), name: `MUTANT §14 ${name}: caught` })));
 }
 
 if (failures.length) {

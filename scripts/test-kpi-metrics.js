@@ -1012,12 +1012,21 @@ const MUTANTS = [
 	["the weekly coverage rule skipped", "§15", { metrics: [["if (isNum(min) && !(isNum(c.coverage) && c.coverage >= min)) {", "if (false) {"]] }],
 	["a monthly-only metric given a series", "§15", { catalog: [["\tfuel_mpg: FUEL_MONTHLY,\n", ""]] }],
 	["the flag read as any truthy value", "§15", { metrics: [["const weekly = input.weekly === true;", "const weekly = !!input.weekly;"]] }],
-	["weekly figures folded into the monthly series", "§15", { metrics: [["\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") res.weekly = weeklyBlock(unit, ctx, cell, spec);\n",
-		"\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") { res.weekly = weeklyBlock(unit, ctx, cell, spec); res.series = res.series.concat(res.weekly.rows.map((w) => ({ period: w.weekStart, value: w.value, display: w.display, coverage: w.coverage }))); }\n"]] }],
+	["weekly figures folded into the monthly series", "§15", { metrics: [["\t\tif (block) res.weekly = block;\n",
+		"\t\tif (block) { res.weekly = block; res.series = res.series.concat(block.rows.map((w) => ({ period: w.weekStart, value: w.value, display: w.display, coverage: w.coverage }))); }\n"]] }],
 	["a stored weekly row read whole", "§15", { metrics: [["\t\t\trow: { weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,", "\t\t\trow: { ...r, weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,"]] }],
 	// PR 1's review: L1's mutant C and L2's mutant A.
 	["the week before's coverage ignored (L1)", "§15", { metrics: [["baseValue: side(base.c, flag), unit,", "baseValue: side(base.c, { blocked: false }), unit,"]] }],
 	["the weekly measured window a day late (L2)", "§15", { metrics: [["c: cellOf(w.weekStart, w.to, w) }));", "c: cellOf(addDays(w.weekStart, 1), addDays(w.to, 1), w) }));"]] }],
+	// R4: the Monday email's fields, L5 and L6.
+	["stored rows served when they are not current (L5)", "§16", { metrics: [["const current = open.length > 0 && open.every((r) => r.to_day === asOfDay);", "const current = true;"]] }],
+	["an approval covers the weekly figures whenever it is valid (K29)", "§16", { metrics: [["approval.coversWeekly = valid && Number.isFinite(sinceMs) && Date.parse(approval.at) >= sinceMs;", "approval.coversWeekly = valid;"]] }],
+	["last week taken from the week to date", "§16", { metrics: [["for (const r of list) if (r.partial !== 1 && isDay(r.week_start)", "for (const r of list) if (isDay(r.week_start)"]] }],
+	["the week before taken from any older stored week", "§16", { metrics: [["if (starts.has(addDays(latest, -7))) weekBefore = week(addDays(latest, -7));", "{ const older = [...starts].sort().filter((s2) => s2 < latest).pop(); if (older) weekBefore = week(older); }"]] }],
+	["previous taken from the series' second-to-last row", "§16", { metrics: [["previous: before ? before.row : null,", "previous: weeks.length > 2 ? weeks[weeks.length - 3].row : null,"]] }],
+	["a weekly failure blanks the monthly figure (L6)", "§16", { metrics: [["\t\tctx.weeklyFailed.add(key);\n\t\treturn weeklyShellSafe(key, ctx);", "\t\tthrow _e;"]] }],
+	["the empty weeks unguarded (L6)", "§16", { metrics: [["\t\tfor (const m of metrics) if (!m.weekly) m.weekly = weeklyShellSafe(m.key, ctx);", "\t\tfor (const m of metrics) if (!m.weekly) m.weekly = weeklyShell(m.key, ctx);"]] }],
+	["a weekly failure left out of the run's codes (L6)", "§16", { metrics: [["\t\tfor (const key of ctx.weeklyFailed) errors.push({ metric: key, code: WEEKLY_FAILED });\n", ""]] }],
 ];
 for (const [name, section, edits] of MUTANTS) {
 	let catalogSrc = SOURCES.catalog;

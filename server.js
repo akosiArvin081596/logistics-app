@@ -75927,11 +75927,9 @@ db.exec(`
 		PRIMARY KEY (metric_key, period)
 	)
 `);
-// The weekly series (KPI_WEEKLY_ENABLED; lib/kpi-metrics.js): per weekly metric,
-// the 13 complete Saturday-to-Friday weeks before the run's week and that week to
-// date (partial 1); each complete week holds its comparison with the week before
-// (vs_*), worked out by the run. Replaced by every run with the flag on, never
-// read or written with it off. Created whatever the flag.
+// The weekly series (KPI_WEEKLY_ENABLED; lib/kpi-metrics.js): 13 complete weeks,
+// each with its comparison (vs_*), and the week to date (partial 1). Created
+// whatever the flag; replaced by each run with it on, never touched with it off.
 db.exec(`
 	CREATE TABLE IF NOT EXISTS kpi_series_weekly (
 		metric_key TEXT NOT NULL,
@@ -76019,7 +76017,7 @@ const KPI_DEADHEAD_ROUTES_ENABLED = kpiDeadheadRoutes.routesEnabled(process.env.
 // answer is as it was before weekly figures existed.
 const KPI_WEEKLY_ENABLED = process.env.KPI_WEEKLY_ENABLED === "true";
 const KPI_WEEKLY_SINCE_KEY = "kpi.weekly_since";
-const KPI_WEEKLY_VS_STATUSES = ["ok", "missing", "withheld"];
+const KPI_WEEKLY_VS_STATUSES = kpiCatalog.WEEK_COMPARE_STATUSES;
 console.log(`[kpi] weekly figures ${KPI_WEEKLY_ENABLED ? "on" : "off"} (KPI_WEEKLY_ENABLED)`);
 // The first start with weekly figures on records when they began, once, so an
 // approval given before weekly figures existed can be told from one given after.
@@ -76843,6 +76841,8 @@ function kpiEnforceApprovals(response, approvals, settings) {
 		const valid = Boolean(row) && kpiCatalog.approvalIsValid(row, m.key, settings);
 		if (!m.approval || typeof m.approval !== "object") m.approval = { approved: false, by: null, at: null, stale: false };
 		else if (!valid && m.approval.approved !== false) m.approval = { ...m.approval, approved: false };
+		// K29: a weekly approval rests on a valid monthly one.
+		if (!valid && "coversWeekly" in m.approval && m.approval.coversWeekly !== false) m.approval = { ...m.approval, coversWeekly: false };
 	}
 	if (response && response.settings && typeof response.settings === "object") {
 		response.settings.defaultRecipientConfigured = Boolean(ADMIN_NOTIFY_EMAIL);
@@ -76864,7 +76864,12 @@ function kpiResponse(nowMs) {
 	// R16: the stored weekly rows, only with the flag on; off, the builder gets
 	// exactly the arguments it got before weekly figures existed.
 	const weeklyArgs = KPI_WEEKLY_ENABLED
-		? { weekly: true, weeklyRows: db.prepare("SELECT metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status FROM kpi_series_weekly ORDER BY metric_key, week_start").all() }
+		? {
+			weekly: true,
+			weeklyRows: db.prepare("SELECT metric_key, week_start, week_end, to_day, partial, label, value, display, coverage, vs_label, vs_display, vs_status FROM kpi_series_weekly ORDER BY metric_key, week_start").all(),
+			// K29: only an approval given after weekly figures began covers them.
+			weeklySince: (db.prepare("SELECT value FROM server_state WHERE key = ?").get(KPI_WEEKLY_SINCE_KEY) || {}).value || null,
+		}
 		: {};
 	const response = kpiMetrics.buildKpiResponse({
 		asOfDay: latestDay || appTime.dayInZone(new Date(nowMs), APP_TIMEZONE),

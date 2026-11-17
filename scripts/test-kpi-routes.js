@@ -666,6 +666,10 @@ const failed = (results) => results.some((x) => !x.ok);
 		() => getSection(swap(BLOCK, "const valid = Boolean(row) && kpiCatalog.approvalIsValid(row, m.key, settings);", "const valid = !row || kpiCatalog.approvalIsValid(row, m.key, settings);"))]);
 	mutants.push(["the stored weekly rows read with KPI_WEEKLY_ENABLED off",
 		() => weeklyGetSection(swap(BLOCK, "const weeklyArgs = KPI_WEEKLY_ENABLED\n", "const weeklyArgs = true\n"))]);
+	mutants.push(["kpi.weekly_since never passed to the builder (R4, K29)",
+		() => weeklyGetSection(swap(BLOCK, "weeklySince: (db.prepare(\"SELECT value FROM server_state WHERE key = ?\").get(KPI_WEEKLY_SINCE_KEY) || {}).value || null,", "weeklySince: null,"))]);
+	mutants.push(["weekly figures left covered without a valid approval row (K29)",
+		() => weeklyGetSection(swap(BLOCK, "if (!valid && \"coversWeekly\" in m.approval && m.approval.coversWeekly !== false) m.approval = { ...m.approval, coversWeekly: false };", ""))]);
 	mutants.push(["the KPI block moved below app.get(\"*\")", async () => {
 		const catchAll = SRC.indexOf('\napp.get("*"');
 		const catchAllEnd = SRC.indexOf("\n});\n", catchAll) + "\n});\n".length;
