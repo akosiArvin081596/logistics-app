@@ -7,7 +7,7 @@
     <span v-else class="fact-text">Not factored.</span>
     <p v-if="mayFactor" class="fact-note">Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here.</p>
     <div v-if="mayFactor || mayRecord" class="fact-actions">
-      <input v-model="reason" class="fact-reason" type="text" maxlength="200" placeholder="Reason (required)" aria-label="Reason" :disabled="busy" />
+      <input v-model="reason" class="fact-reason" type="text" maxlength="200" :placeholder="hint" aria-label="Reason" :disabled="busy" />
       <button v-if="mayFactor" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(!factored)">{{ factored ? 'Clear factored' : 'Factor with Triumph' }}</button>
       <button v-if="mayRecord" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="recordOutside">Handled in Triumph's process</button>
     </div>
@@ -19,7 +19,7 @@
 import { computed, ref, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
-import { factoringChip, canFactor, canRecordOutside, notSentQuestion, reasonInput } from '../../lib/factoringStatus'
+import { factoringChip, canFactor, canRecordOutside, notSentQuestion, reasonInput, reasonHint } from '../../lib/factoringStatus'
 import { draftMayBeOut } from '../../lib/autoInvoiceStatus'
 
 const props = defineProps({
@@ -38,6 +38,7 @@ const mayFactor = computed(() => canFactor(status.value))
 const mayRecord = computed(() => canRecordOutside(status.value))
 const reason = ref('')
 const reasonOk = computed(() => reasonInput(reason.value).length > 0)
+const hint = computed(() => reasonHint(auth.user?.username))
 const busy = ref(false)
 const result = ref(null)
 watch(() => props.loadId, () => { reason.value = ''; result.value = null })

@@ -20,11 +20,15 @@
 //      has its own chip, with nothing to retry; a job's draft whose mark was cleared
 //      since doesn't read as ready; where it may already be sent, no line says the
 //      invoice goes through Triumph, and the switch asks before it marks
+//   §8 the reason box asks the shared login for "your name and why", and every other
+//      account for a reason as before; the server's rows name the shared login in the
+//      screens' own words; each rule changed in turn is caught
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -260,6 +264,74 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
   eq([ask('LOAD_FACTORED'), ask(''), ask(undefined), ask('constructor')], ['', '', '', ''], '§7 ...and on nothing else')
   ok(CONTROLS.includes("const question = next && e ? notSentQuestion(e.code) : ''") && CONTROLS.includes('draftMayBeOut: draftMayBeOut(props.job && props.job._autoInvoice)'), '§7 FAILS ON THE OLD CODE: the switch reads the question and the row\'s status from those two')
   ok(CONTROLS.includes("'Marked factored. If a draft is in Gmail Drafts, delete it.'"), '§7 FAILS ON THE OLD CODE: a mark that had to ask answers without saying it goes through Triumph')
+}
+
+// ---------------------------------------------------------------- §8
+section("§8  the reason box's hint on the shared login")
+{
+  const SL = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js')).href)
+  const HINT_SHARED = 'Your name and why (required)'
+  const HINT = 'Reason (required)'
+  // The hint for each account: the shared login's rows name the login, not a person, so it is asked for a name.
+  const hintViolations = (mod) => {
+    if (!mod || typeof mod.reasonHint !== 'function') return ['reasonHint() is missing']
+    const v = []
+    for (const name of ['super_admin', ' Super_Admin ']) if (mod.reasonHint(name) !== HINT_SHARED) v.push(`the shared login (${JSON.stringify(name)}) is not asked for its name and why`)
+    for (const name of ['made-up-admin', '', null, undefined]) if (mod.reasonHint(name) !== HINT) v.push(`${JSON.stringify(name)} is not asked for a reason as before`)
+    return v
+  }
+  const BOX = '<input v-model="reason" class="fact-reason" type="text" maxlength="200" :placeholder="hint" aria-label="Reason" :disabled="busy" />'
+  const HINT_LINE = 'const hint = computed(() => reasonHint(auth.user?.username))'
+  const boxViolations = (src) => {
+    const v = []
+    if (!src.includes(BOX)) v.push('the reason box does not show the hint')
+    if (!src.includes(HINT_LINE)) v.push("the hint is not the signed-in account's")
+    if (src.includes('placeholder="Reason (required)"')) v.push('a fixed placeholder is left')
+    return v
+  }
+  eq(hintViolations(S), [], '§8 FAILS ON THE OLD CODE: "Your name and why (required)" on the shared login, however spelled; "Reason (required)" for any other account')
+  eq(boxViolations(CONTROLS), [], "§8 FAILS ON THE OLD CODE: the reason box shows the signed-in account's hint, and no fixed one")
+  ok(read(path.join(ROOT, 'lib', 'factoring-routes.js')).includes(`const SHARED_LOGIN_NOTE = "${SL.SHARED_LOGIN_NOTE}";`),
+    "§8 FAILS ON THE OLD CODE: the server's factoring rows name the shared login in the screens' own words")
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = path.join(dir, e.name)
+    if (e.isDirectory()) return e.name === 'node_modules' || e.name === 'dist' ? [] : walk(p)
+    return /\.(vue|js|ts)$/.test(e.name) ? [p] : []
+  })
+  eq(walk(path.join(ROOT, 'client', 'src')).filter((f) => read(f).includes(HINT_SHARED)).map((f) => path.relative(ROOT, f).split(path.sep).join('/')), ['client/src/lib/factoringStatus.js'],
+    '§8 FAILS ON THE OLD CODE: the hint is worded in one place')
+
+  // Each rule changed in turn: the module's in a temp copy beside its import, the box's as text.
+  const LIB_SRC = read(LIB)
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-hint-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'lib'))
+    fs.mkdirSync(path.join(tmp, 'utils'))
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}\n')
+    fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
+    let n = 0
+    for (const [name, from, to] of [
+      ['the hint asks everyone for a name', "(isSharedLogin(username) ? 'Your name and why (required)'", "(true ? 'Your name and why (required)'"],
+      ['the hint asks no one for a name', "(isSharedLogin(username) ? 'Your name and why (required)'", "(false ? 'Your name and why (required)'"],
+      ['the hint loses its words', "'Your name and why (required)'", "'Your name (required)'"],
+    ]) {
+      if (LIB_SRC.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once in factoringStatus.js: ${name}`); continue }
+      const file = path.join(tmp, 'lib', `factoringStatus-${++n}.js`)
+      fs.writeFileSync(file, LIB_SRC.replace(from, to))
+      let v
+      try { v = hintViolations(await import(pathToFileURL(file).href)) } catch (e) { v = [`threw: ${e && e.message}`] }
+      ok(v.length > 0, `§8 MUTANT ${name}: caught`)
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+  for (const [name, from, to] of [
+    ['the box keeps a fixed placeholder', ':placeholder="hint"', 'placeholder="Reason (required)"'],
+    ['the hint read from the role, not the account', 'reasonHint(auth.user?.username)', 'reasonHint(auth.user?.role)'],
+  ]) {
+    if (CONTROLS.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once in FactoringControls.vue: ${name}`); continue }
+    ok(boxViolations(CONTROLS.replace(from, to)).length > 0, `§8 MUTANT ${name}: caught`)
+  }
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)

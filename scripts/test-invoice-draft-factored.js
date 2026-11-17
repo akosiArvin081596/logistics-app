@@ -8,7 +8,8 @@
 //      minted, drafted or posted; the confirmation is refused whoever asks (409
 //      NOA_UNCONFIGURED, nothing spent) until assignment lines exist, and then (409
 //      TRIUMPH_NOT_LIVE) until the submit mode reads live; once both hold, it works
-//      only for a listed account (never the shared login) with a reason, and is audited
+//      only for a listed account (the shared login only by its own id) with a reason,
+//      and is audited (on the shared login, every row of it says so)
 //   §1c the lines set and not live: refused, nothing spent, and the way out: the clear,
 //      then the plain button with its bank block
 //   §1d live: the invoice prints the lines and no bank block; a load that isn't factored
@@ -401,8 +402,10 @@ async function s1() {
 		eq((await w.press(1)).body.code, "LOAD_FACTORED", "§1 with the lines, a plain press is still refused");
 		const unlisted = await w.press(1, { user: UNLISTED, body: CONFIRM });
 		eq([unlisted.status, unlisted.body && unlisted.body.code], [403, "FACTORING_NOT_LISTED"], "§1 with the lines, the confirmation from an account not listed: 403");
-		const shared = await w.press(1, { user: SHARED, body: CONFIRM });
-		eq([shared.status, shared.body && shared.body.code], [403, "FACTORING_NOT_LISTED"], "§1 with the lines, the shared login never confirms, even with its id listed");
+		const sharedOut = world({ n8n: true, lines: true, ids: "7" });
+		sharedOut.putMarker(1);
+		const shared = await sharedOut.press(1, { user: SHARED, body: CONFIRM });
+		eq([shared.status, shared.body && shared.body.code, sharedOut.spies()], [403, "FACTORING_NOT_LISTED", [0, 0, 0, 0]], "§1 with the lines, the shared login with its own id not listed: 403, nothing spent, as before");
 		const noReason = await w.press(1, { body: { confirmFactored: true, factoredReason: "  " } });
 		eq([noReason.status, noReason.body && noReason.body.code], [400, "FACTORING_REASON_REQUIRED"], "§1 with the lines, the confirmation needs a reason");
 		eq(w.spies(), [0, 0, 0, 0], "§1 ...and none of them reached prepare()");
@@ -413,6 +416,41 @@ async function s1() {
 		const notListedAtAll = world({ ids: null, lines: true });
 		notListedAtAll.putMarker(1);
 		eq((await notListedAtAll.press(1, { body: CONFIRM })).body.code, "FACTORING_NOT_LISTED", "§1 with the lines, TRIUMPH_FACTOR_MARK_IDS unset: nobody confirms");
+	}
+	// The shared login with its own id listed confirms as a listed account does, with a reason,
+	// and each row of that draft says plainly it was the shared login. A plain draft of its own is
+	// no factoring action: its rows stay as they were.
+	{
+		const NOTE = "; by super_admin · shared login, person not recorded";
+		const SHARED_CONFIRM = { confirmFactored: true, factoredReason: "made-up: Made-up Person, Triumph asked for a copy" };
+		const w = world({ n8n: true, lines: true });
+		w.putMarker(1);
+		const blank = await w.press(1, { user: SHARED, body: { confirmFactored: true, factoredReason: " \t " } });
+		eq([blank.status, blank.body && blank.body.code, w.spies()], [400, "FACTORING_REASON_REQUIRED", [0, 0, 0, 0]], "§1 FAILS ON THE OLD CODE: the shared login, its own id listed, with no reason: 400, nothing spent");
+		const yes = await w.press(1, { user: SHARED, body: SHARED_CONFIRM });
+		eq([yes.status, yes.body && yes.body.via, w.drafts(1).length], [200, "imap", 1], "§1 FAILS ON THE OLD CODE: the shared login, its own id listed, confirms with a reason: drafted");
+		const rows = w.actions("invoice_draft_factored_confirmed").map((a) => a.details);
+		ok(rows.length === 1 && /^11032026-\d+: drafted although factored: /.test(rows[0]) && rows[0].endsWith(`: drafted although factored: made-up: Made-up Person, Triumph asked for a copy${NOTE}`),
+			"§1 FAILS ON THE OLD CODE: ...audited once, with its reason, the row saying plainly it was the shared login");
+		const named = world({ n8n: true, lines: true });
+		named.putMarker(1);
+		await named.press(1, { body: CONFIRM });
+		ok(named.actions("invoice_draft_factored_confirmed").map((a) => a.details).every((d) => !d.includes("shared login")), "§1 ...a listed named account's row as before, with no note");
+
+		const changed = world({ n8n: true, lines: true });
+		changed.putMarker(9);
+		changed.duringRender = () => { changed.duringRender = null; changed.putMarker(9, { factored: 0 }); };
+		const late = await changed.press(9, { user: SHARED, body: SHARED_CONFIRM });
+		const voids = changed.actions("invoice_number_void").map((a) => a.details);
+		ok(late.status === 409 && late.body && late.body.code === "FACTORING_CHANGED" && voids.length === 1 && voids[0].endsWith(`(FACTORING_CHANGED)${NOTE}`),
+			"§1 FAILS ON THE OLD CODE: the shared login's confirmed draft refused late (the mark cleared during the render): its void row says so too");
+
+		const plain = world({ n8n: true, lines: true });
+		plain.duringRender = () => { plain.duringRender = null; plain.putMarker(9); };
+		const plainLate = await plain.press(9, { user: SHARED });
+		const plainVoids = plain.actions("invoice_number_void").map((a) => a.details);
+		ok(plainLate.status === 409 && plainLate.body && plainLate.body.code === "LOAD_FACTORED" && plainVoids.length === 1 && plainVoids[0].endsWith("(LOAD_FACTORED)"),
+			"§1 the shared login's plain press, marked during the render: its void row as before, with no note");
 	}
 
 }
@@ -1004,7 +1042,10 @@ async function mutants() {
 		["the preview takes the press's in-flight check", "routes", "r = store.previewCheck(db, pressGates(req, loadId));", "r = store.draftEarlyCheck(db, { ...pressGates(req, loadId), nowIso: nowIso() });", s9],
 		["the preview's check lets a thrown read through", "routes", "\t\t} catch {\n\t\t\tr = store.refusal(\"FACTORING_UNREADABLE\");\n\t\t}", "\t\t} catch (e) {\n\t\t\tthrow e;\n\t\t}", s9],
 		["the preview's page is always the plain one", "routes", "return { ok: true, assignment: r.factored ? { lines: noaLines } : null };", "return { ok: true, assignment: null };", s9],
-		["the shared login counts as listed", "routes", "&& !isSharedLoginName(user.username)", "", s1],
+		["the shared login refused as before, whatever the list", "routes", "return Boolean(user) && markIds.verdict(user) === \"listed\";", "return Boolean(user) && markIds.verdict(user) === \"listed\" && !isSharedLoginName(user.username);", s1],
+		["the shared login confirms whatever the list says", "routes", "return Boolean(user) && markIds.verdict(user) === \"listed\";", "return Boolean(user) && (markIds.verdict(user) === \"listed\" || isSharedLoginName(user.username));", s1],
+		["the note left off a confirmed draft's rows", "routes", "const audit = confirmed ? markAuditFor(req, loadId) : auditFor(req, loadId);", "const audit = auditFor(req, loadId);", s1],
+		["the note on a plain draft's rows too", "routes", "const audit = confirmed ? markAuditFor(req, loadId) : auditFor(req, loadId);", "const audit = markAuditFor(req, loadId);", s1],
 		["Check Gmail without the search", "routes", "const canSearch = row.path === \"imap\"", "const canSearch = false && row.path === \"imap\"", s6],
 		// The review's two: the button's checks, or its in-flight row and late
 		// re-check, made to follow the marking switch. Caught with every switch off.

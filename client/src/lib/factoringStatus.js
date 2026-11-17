@@ -5,6 +5,8 @@
 //                    draft is being saved, or may be in Gmail
 // Display only, with no network: scripts/test-factoring-status-client.mjs pins it.
 
+import { isSharedLogin } from '../utils/sharedLogin.js'
+
 // The chip for a row's `_factoring`: { label, tone, reason }, or null when the
 // load isn't factored. Tones as autoInvoiceStatus.js's: ok, warn, bad, muted.
 // `draftMayBeOut`: an invoice may already be in Gmail, or sent from there, so the
@@ -65,3 +67,7 @@ export const isMaybeSaved = (e) => Boolean(e && e.code === 'DRAFT_MAYBE_SAVED')
 export function reasonInput(s) {
   return Array.from(String(s ?? '').replace(/\s+/g, ' ').trim()).slice(0, 200).join('')
 }
+
+// The reason box's hint for the signed-in account. A row the shared login writes names the
+// login, not a person, so on it the reason is where the person's name goes.
+export const reasonHint = (username) => (isSharedLogin(username) ? 'Your name and why (required)' : 'Reason (required)')
