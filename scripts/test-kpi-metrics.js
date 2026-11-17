@@ -855,6 +855,8 @@ function battery(mods, srcs = SOURCES) {
 		const top = resp.weekly || {};
 		t(same(Object.keys(top), ["weekRule", "approvalNote", "since", "lastWeek", "weekBefore"]) && top.since === SINCE,
 			"§16 the answer's weekly fields: the week rule, the approve sentence, kpi.weekly_since, last week and the week before", JSON.stringify(Object.keys(top)));
+		t(/^Weeks run Saturday to Friday, the same week as the drivers' turns and their invoices\. Load dates use the US Central calendar; /.test(top.weekRule || ""),
+			"§16 the week rule's first sentence names the drivers' turns and their invoices, then the business calendar", top.weekRule);
 		t(same(top.lastWeek, { weekStart: "2026-09-26", weekEnd: "2026-10-02", label: "Sep 26-Oct 2, 2026", shortLabel: "Sep 26-Oct 2" }),
 			"§16 last week is the last complete stored week, labelled by the server", JSON.stringify(top.lastWeek));
 		t(same(top.weekBefore, { weekStart: "2026-09-19", weekEnd: "2026-09-25", label: "Sep 19-25, 2026", shortLabel: "Sep 19-25" }),
