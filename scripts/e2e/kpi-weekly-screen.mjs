@@ -11,8 +11,12 @@
 //   KW4 390 x 844: the same block and button; each weekly figure on one line inside its card, the
 //       button wholly on screen, no sideways scroll
 //   KW5 the Monday email lib/kpi-digest.js builds from the same kind of answer, written to files in
-//       the work dir (never sent) and rendered at 1280 and 390: a first Monday's has the month
-//       section, another Monday's has the one line in its place
+//       the work dir (never sent) and rendered at 1280 and 390: a first Monday's has the weekly
+//       table and the month table, another Monday's the weekly table and the one line in place of
+//       the month table; each laid out at the window's own width (the email's viewport tag: without
+//       it a phone lays a page out at 980 px and zooms it, and nothing could scroll sideways), and
+//       neither's scroll width goes past that layout width (never judged by the window's inner
+//       width, which a phone context widens to fit the page)
 //   KWx per page: no console error or warning, no page error; KWy: no write but KW3's one PUT
 // The answers come from lib/kpi-metrics.js computeKpis() and buildKpiResponse() over made-up loads,
 // ELD days and receipts, stored as server.js stores them, so the page shows the server's own strings.
@@ -369,16 +373,35 @@ async function emailRun(browser) {
   for (const size of [DESKTOP, PHONE]) {
     const { ctx, page, issues } = await openPage(browser, size, '/__email/other.html')
     try {
-      const otherText = clean(await page.locator('body').textContent())
+      // The weekly table's heading and head; the month table's heading, then its sentence or its head
+      // (innerText, which keeps table cells apart).
+      const weeklyTable = (s) => /Weekly numbers (These numbers are for internal use|What we measure Last week)/.test(s)
+      const monthTable = (s) => /Monthly numbers (These numbers are for internal use|What we measure Number)/.test(s)
+      // A sideways scroll is the page's scroll width past its LAYOUT width (documentElement.clientWidth,
+      // 390 in the phone context), never the window's inner width, which a phone context widens to
+      // fit whatever the page needs.
+      const measure = () => page.evaluate(() => ({
+        layout: document.documentElement.clientWidth,
+        scroll: (document.scrollingElement || document.documentElement).scrollWidth,
+        inner: window.innerWidth,
+      }))
+      const widths = (m) => `layout ${m.layout}, scroll width ${m.scroll}, inner width ${m.inner}`
+      // The phone's layout is exactly its width; a desktop window may keep a scrollbar's gutter (HEADED=1).
+      const layoutFits = (w) => (size.viewport.width < 640 ? w === size.viewport.width : w <= size.viewport.width && w >= size.viewport.width - 20)
+      const fits = (m) => layoutFits(m.layout) && m.scroll <= m.layout
+      const otherText = clean(await page.locator('body').innerText())
+      const other = await measure()
       const otherShot = await page.screenshot({ path: path.join(SHOT_DIR, `kpi-weekly-5-email-other-${size.tag}.png`), fullPage: true }).then(() => path.join(SHOT_DIR, `kpi-weekly-5-email-other-${size.tag}.png`))
       await page.goto(`${BASE}/__email/first.html`, { waitUntil: 'domcontentloaded' })
-      const firstText = clean(await page.locator('body').textContent())
+      const firstText = clean(await page.locator('body').innerText())
+      const first = await measure()
       await page.screenshot({ path: path.join(SHOT_DIR, `kpi-weekly-6-email-first-${size.tag}.png`), fullPage: true })
-      record(`KW5-${size.tag}`, 'The Monday email, built by lib/kpi-digest.js and never sent: the month section on the first Monday only',
-        `other Monday "${mails.other.subject}": last week, the one line; first Monday "${mails.first.subject}": last week and "Month"`,
-        `other has "Last week (": ${otherText.includes('Last week (')}, the line: ${otherText.includes("Monthly figures come in the first Monday's email of each month.")}, Month: ${/\bMonth Freight/.test(otherText)}; first has the line: ${firstText.includes('Monthly figures come in')}, Month: ${/\bMonth Freight/.test(firstText)}`,
-        otherText.includes('Last week (') && otherText.includes("Monthly figures come in the first Monday's email of each month.") && !/\bMonth Freight/.test(otherText)
-          && firstText.includes('Last week (') && /\bMonth Freight/.test(firstText) && !firstText.includes('Monthly figures come in'),
+      record(`KW5-${size.tag}`, 'The Monday email, built by lib/kpi-digest.js and never sent: the month table on the first Monday only; laid out at the window width; no scroll past that layout width',
+        `other Monday "${mails.other.subject}": the weekly table, the one line; first Monday "${mails.first.subject}": the weekly and the month tables; layout width ${size.viewport.width}, scroll width not above it`,
+        `other: weekly ${weeklyTable(otherText)}, the line ${otherText.includes("Monthly numbers come in the first Monday email of each month.")}, month ${monthTable(otherText)}, ${widths(other)}; first: weekly ${weeklyTable(firstText)}, the line ${firstText.includes('Monthly numbers come in')}, month ${monthTable(firstText)}, ${widths(first)}`,
+        weeklyTable(otherText) && otherText.includes("Monthly numbers come in the first Monday email of each month.") && !monthTable(otherText)
+          && weeklyTable(firstText) && monthTable(firstText) && !firstText.includes('Monthly numbers come in')
+          && fits(other) && fits(first),
         otherShot)
     } finally {
       await judgeConsole(`KWx-email-${size.tag}`, issues)
