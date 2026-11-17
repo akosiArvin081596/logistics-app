@@ -36,7 +36,15 @@
  *     and their reasons; weekly only for exactly true, nothing monthly changed,
  *     the weekly-off output pinned to the base's bytes; buildKpiResponse()'s
  *     weekly block from stored rows only. Set KPI_BASE_LIB=<a base checkout's
- *     lib/> to also compare against that base directly.
+ *     lib/> to also compare against that base directly. A comparison withheld
+ *     when only the week before is thin (L1); a Saturday and a Friday load
+ *     counted in their own week (L2, loads and revenue).
+ * §16 R4, the Monday email's fields: last week, the week before and each
+ *     metric's previous week from stored rows only (a year end, a week with no
+ *     figure, a week with no stored row); kpi.weekly_since passed through and
+ *     approval.coversWeekly at its boundaries (K29); stored weekly rows served
+ *     only when their week to date runs to the answer's day (L5); a weekly
+ *     failure leaves the metric's monthly figure and never fails the run (L6).
  *
  * Fixtures are fake ("Zed Sentinel" names, sentinel ids). Pure: no server, no
  * database, no files written.
@@ -273,8 +281,19 @@ function weekdaysIn(from, to) {
 }
 const close = (a, b, eps) => typeof a === "number" && Math.abs(a - b) <= (eps == null ? 1e-9 : eps);
 
+// The weekly rows as server.js kpiStoreResult() stores them, newest metric last.
+function storedWeekly(o) {
+	return o.metrics.flatMap((m) => (m.weekly && m.weekly.mode === "weekly" ? m.weekly.rows : []).map((x) => ({
+		metric_key: m.key, week_start: x.weekStart, week_end: x.weekEnd, to_day: x.to, partial: x.partial ? 1 : 0, label: x.label, value: x.value,
+		display: x.display, coverage: x.coverage, vs_label: x.vs ? x.vs.label : null, vs_display: x.vs ? x.vs.display : null,
+		vs_status: x.vs ? x.vs.status : null, computed_at: "2026-10-09T08:00:00.000Z",
+	})));
+}
+
 // ── the battery ──────────────────────────────────────────────────────────────
-function battery(mods) {
+// `srcs` are the sources `mods` were compiled from, for the cases that compile
+// them again over a catalog that throws (§16 L6).
+function battery(mods, srcs = SOURCES) {
 	const r = [];
 	const t = (cond, name, detail) => r.push({ ok: !!cond, name: detail === undefined ? name : `${name} (${detail})` });
 	const M = mods.metrics;
@@ -726,6 +745,27 @@ function battery(mods) {
 			"§15 a comparison is withheld when a week's revenue coverage is under 90%", JSON.stringify(thin[12]));
 		const ldThin = rowsOf(thinOut, "loads_delivered");
 		t(ldThin[12] && ldThin[12].vs && ldThin[12].vs.status === "ok", "§15 ...while a metric without the coverage rule still compares");
+		// L1: only the week before is thin (Sep 19-25, one of its two loads unpaid).
+		const thinBase = rowsOf(M.computeKpis(W({ unpaid: "2026-09-21" })), "revenue");
+		t(thinBase[11] && thinBase[11].coverage === 0.5 && thinBase[12] && thinBase[12].coverage === 1 && thinBase[12].vs && thinBase[12].vs.status === "withheld" && thinBase[12].vs.deltaPct === null,
+			"§15 L1: a comparison is withheld when only the week before is under 90%", JSON.stringify(thinBase[12] && thinBase[12].vs));
+
+		// L2: a load on a week's Saturday and one on its Friday count in that week.
+		const edge = W();
+		edge.loads.push(load("2026-09-19", "Delivered", { id: "LOAD-SENTINEL-SAT", driver: DRIVER("c"), revenue: 1111 }), load("2026-09-25", "Delivered", { id: "LOAD-SENTINEL-FRI", driver: DRIVER("d"), revenue: 2222 }));
+		const edgeOut = M.computeKpis(edge);
+		const edgeLive = edge.loads.filter((l) => !/^(cancel|canceled|cancelled)$/i.test(String(l.status).trim()) && l.day);
+		const edgeLd = (w) => { const rows = edgeLive.filter((l) => l.day >= w.weekStart && l.day <= w.to); return rows.length ? rows.filter(isDel).length : null; };
+		const edgeRv = (w) => {
+			const d = edgeLive.filter((l) => isDel(l) && l.day >= w.weekStart && l.day <= w.to && l.revenue > 0);
+			return d.length ? Math.round(d.reduce((s, l) => s + l.revenue, 0) * 100) / 100 : null;
+		};
+		const eLd = rowsOf(edgeOut, "loads_delivered");
+		const eRv = rowsOf(edgeOut, "revenue");
+		t(eLd.length === 14 && eLd.every((x) => x.value === edgeLd(x)) && eLd[11].value === 4,
+			"§15 L2: a Saturday load and a Friday load count in their own week (loads)", JSON.stringify(eLd.slice(10, 13).map((x) => [x.weekStart, x.value, edgeLd(x)])));
+		t(eRv.length === 14 && eRv.every((x) => (x.value === null ? edgeRv(x) === null : close(x.value, edgeRv(x), 0.001))) && close(eRv[11].value, edgeRv(eRv[11]), 0.001),
+			"§15 L2: ...and their Payment in that week's revenue", JSON.stringify(eRv.slice(10, 13).map((x) => [x.weekStart, x.value, edgeRv(x)])));
 
 		// Trucks in fleet: each week's Friday count; this week's is today's.
 		const ft = rowsOf(wk, "fleet_trucks");
@@ -788,6 +828,118 @@ function battery(mods) {
 		const nw = ((none.metrics || []).find((m) => m.key === "loads_delivered") || {}).weekly || {};
 		t(nw.mode === "weekly" && Array.isArray(nw.series) && nw.series.length === 0 && nw.current === null && nw.toDate === null && nw.comparison === null,
 			"§15 before the first weekly run: an empty block, nothing computed", JSON.stringify(nw));
+	}
+
+	// §16 R4: the Monday email's fields, L5 and L6.
+	{
+		const W = (o) => ({ ...world(o), weekly: true });
+		const SINCE = "2026-10-05T12:00:00.000Z";
+		let wk;
+		let wkYear;
+		let wkGap;
+		try {
+			wk = M.computeKpis(W());
+			wkYear = M.computeKpis(W({ asOfDay: "2027-01-08" }));
+			wkGap = M.computeKpis(W({ asOfDay: "2026-01-09" }));
+		} catch (e) {
+			t(false, "§16 computeKpis runs with weekly: true", e && e.message);
+			return r;
+		}
+		const baseArgs = { asOfDay: AS_OF, timeZone: "America/Chicago", settings: { recipients: [] }, derived: wk.derived, snapshots: [], series: [], approvals: [], generatedAt: "2026-10-09T13:00:00Z" };
+		const on = (over) => M.buildKpiResponse({ ...baseArgs, weekly: true, weeklyRows: storedWeekly(wk), weeklySince: SINCE, ...(over || {}) });
+		const wOf = (resp, key) => (((resp.metrics || []).find((m) => m.key === key) || {}).weekly) || {};
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+		// Last week and the week before, from the stored rows.
+		const resp = on();
+		const top = resp.weekly || {};
+		t(same(Object.keys(top), ["weekRule", "approvalNote", "since", "lastWeek", "weekBefore"]) && top.since === SINCE,
+			"§16 the answer's weekly fields: the week rule, the approve sentence, kpi.weekly_since, last week and the week before", JSON.stringify(Object.keys(top)));
+		t(same(top.lastWeek, { weekStart: "2026-09-26", weekEnd: "2026-10-02", label: "Sep 26-Oct 2, 2026", shortLabel: "Sep 26-Oct 2" }),
+			"§16 last week is the last complete stored week, labelled by the server", JSON.stringify(top.lastWeek));
+		t(same(top.weekBefore, { weekStart: "2026-09-19", weekEnd: "2026-09-25", label: "Sep 19-25, 2026", shortLabel: "Sep 19-25" }),
+			"§16 the week before is the stored week just before it", JSON.stringify(top.weekBefore));
+		const lw = wOf(resp, "loads_delivered");
+		t(same(Object.keys(lw), ["mode", "weekRule", "series", "current", "previous", "toDate", "comparison"]) && lw.previous && same(lw.previous, lw.series[11]) && same(lw.current, lw.series[12])
+			&& lw.previous.partial === false, "§16 each weekly metric's previous is its stored row of the week before, next to current", JSON.stringify(lw.previous));
+		t("previous" in lw && !("previous" in wOf(resp, "fuel_mpg")) && !("previous" in wOf(resp, "dispatch_calls")), "§16 a monthly-only or not-tracked block has no previous");
+		const ye = M.buildKpiResponse({ ...baseArgs, asOfDay: "2027-01-08", weekly: true, weeklyRows: storedWeekly(wkYear), weeklySince: SINCE });
+		t(ye.weekly && same(ye.weekly.lastWeek, { weekStart: "2026-12-26", weekEnd: "2027-01-01", label: "Dec 26, 2026-Jan 1, 2027", shortLabel: "Dec 26-Jan 1" })
+			&& same(ye.weekly.weekBefore, { weekStart: "2026-12-19", weekEnd: "2026-12-25", label: "Dec 19-25, 2026", shortLabel: "Dec 19-25" })
+			&& wOf(ye, "loads_delivered").previous && wOf(ye, "loads_delivered").previous.weekStart === "2026-12-19",
+		"§16 a last week across the year end", JSON.stringify(ye.weekly && ye.weekly.lastWeek));
+		const gap = M.buildKpiResponse({ ...baseArgs, asOfDay: "2026-01-09", weekly: true, weeklyRows: storedWeekly(wkGap), weeklySince: SINCE });
+		const gp = wOf(gap, "loads_delivered").previous || {};
+		t(gap.weekly && gap.weekly.lastWeek && gap.weekly.lastWeek.weekStart === "2025-12-27" && gp.weekStart === "2025-12-20" && gp.value === null && gp.display === "No records",
+			"§16 a week with no figure is the week before as stored: \"No records\", never 0", JSON.stringify(gp));
+		const noLd = on({ weeklyRows: storedWeekly(wk).filter((x) => !(x.metric_key === "loads_delivered" && x.week_start === "2026-09-19")) });
+		t(wOf(noLd, "loads_delivered").previous === null && noLd.weekly.weekBefore && wOf(noLd, "revenue").previous && wOf(noLd, "revenue").previous.weekStart === "2026-09-19",
+			"§16 a metric with no stored row for the week before has previous null; the others keep theirs");
+		const noWb = on({ weeklyRows: storedWeekly(wk).filter((x) => x.week_start !== "2026-09-19") });
+		t(noWb.weekly.weekBefore === null && noWb.weekly.lastWeek && noWb.weekly.lastWeek.weekStart === "2026-09-26" && wOf(noWb, "revenue").previous === null,
+			"§16 no stored week before at all: weekBefore null, and no previous is taken from an older week");
+
+		// K29: an approval covers the weekly figures only when given at or after kpi.weekly_since.
+		const ap = (key, at, extra) => ({ metric_key: key, approved: 1, definition_version: C.metricByKey(key).definitionVersion, settings_hash: "", approved_by: "super_admin", approved_at: at, ...(extra || {}) });
+		const approvals = [
+			ap("loads_delivered", SINCE), ap("revenue", "2026-10-05T11:59:59.999Z"), ap("miles_driven", "2026-10-06T08:00:00.000Z"),
+			ap("on_time_rate", "2026-10-05 12:00:00"), ap("active_units", "2026-10-05 11:59:59"),
+			ap("co2_tonnes", "2026-10-07T08:00:00.000Z", { definition_version: 0 }), ap("ai_tasks", "2026-10-07T08:00:00.000Z", { approved: 0 }),
+		];
+		const k = on({ approvals });
+		const cov = (resp2, key) => ((resp2.metrics || []).find((m) => m.key === key) || {}).approval || {};
+		t(cov(k, "loads_delivered").approved === true && cov(k, "loads_delivered").coversWeekly === true, "§16 K29: an approval given at kpi.weekly_since covers the weekly figures");
+		t(cov(k, "revenue").approved === true && cov(k, "revenue").coversWeekly === false, "§16 K29: one given a millisecond before it does not; the monthly approval stands");
+		t(cov(k, "miles_driven").coversWeekly === true, "§16 K29: one given after it does");
+		t(cov(k, "on_time_rate").coversWeekly === true && cov(k, "active_units").coversWeekly === false, "§16 K29: a stored SQLite stamp is read as UTC, at and before");
+		t(cov(k, "co2_tonnes").approved === false && cov(k, "co2_tonnes").coversWeekly === false && cov(k, "ai_tasks").coversWeekly === false && cov(k, "fleet_trucks").coversWeekly === false,
+			"§16 K29: an invalid, unapproved or absent approval covers nothing");
+		t((k.metrics || []).every((m) => typeof m.approval.coversWeekly === "boolean") && same(Object.keys(cov(k, "revenue")), ["approved", "by", "at", "stale", "coversWeekly"]),
+			"§16 every metric's approval says whether it covers the weekly figures");
+		const noSince = on({ approvals, weeklySince: null });
+		const badSince = on({ approvals, weeklySince: "soon" });
+		t((noSince.metrics || []).every((m) => m.approval.coversWeekly === false) && (badSince.metrics || []).every((m) => m.approval.coversWeekly === false)
+			&& noSince.weekly.since === null && cov(noSince, "loads_delivered").approved === true, "§16 K29: no readable kpi.weekly_since, nothing covers the weekly figures");
+		const off = M.buildKpiResponse({ ...baseArgs, approvals, weeklySince: SINCE, weeklyRows: storedWeekly(wk) });
+		t(!("weekly" in off) && (off.metrics || []).every((m) => !("coversWeekly" in m.approval) && !("weekly" in m)), "§16 weekly off: no new field, whatever is passed");
+
+		// L5: the stored rows are served only when their week to date runs to the answer's day.
+		const later = on({ asOfDay: "2026-10-10" });
+		const lb = wOf(later, "loads_delivered");
+		t(later.weekly && later.weekly.lastWeek === null && later.weekly.weekBefore === null && later.weekly.since === SINCE
+			&& C.METRIC_KEYS.filter((key) => wOf(later, key).mode === "weekly").every((key) => {
+				const b = wOf(later, key);
+				return b.series.length === 0 && b.current === null && b.previous === null && b.toDate === null && b.comparison === null;
+			}), "§16 L5: rows from an earlier day's run are never served: every weekly block empty, no last week", JSON.stringify(lb));
+		const mixed = storedWeekly(wk).map((x) => (x.metric_key === "revenue" && x.partial === 1 ? { ...x, to_day: "2026-10-08" } : x));
+		t(on({ weeklyRows: mixed }).weekly.lastWeek === null, "§16 L5: one week to date from another day is enough to hold them all back");
+		t(!!on().weekly.lastWeek && on().weekly.lastWeek.weekStart === "2026-09-26" && wOf(on(), "loads_delivered").series.length === 14, "§16 L5: rows from the answer's own day are served");
+
+		// L6: a weekly failure leaves the metric's monthly figure and never fails the run.
+		const strip = (m) => { const { weekly: _w, ...rest } = m || {}; return rest; };
+		const throwing = (key, always) => {
+			let calls = 0;
+			return { ...C, weeklyModeOf: (k2) => { if (k2 === key && (always || calls++ === 0)) throw new Error("weekly failure under test"); return C.weeklyModeOf(k2); } };
+		};
+		const runOver = (cat) => {
+			try {
+				return compileLib("kpi-metrics.js", srcs.metrics, { "./kpi-catalog": cat }).computeKpis(W());
+			} catch (e) {
+				return { threw: e && e.message };
+			}
+		};
+		const once = runOver(throwing("revenue", false));
+		const onceRv = once.metrics ? get(once, "revenue") : null;
+		t(onceRv && same(strip(onceRv), strip(get(wk, "revenue"))) && same(once.errors, [{ metric: "revenue", code: "KPI_WEEKLY_FAILED" }]),
+			"§16 L6: a weekly failure leaves the monthly figure as it was and records a code", JSON.stringify(once.threw || once.errors));
+		t(onceRv && onceRv.status !== "missing" && onceRv.weekly && onceRv.weekly.mode === "weekly" && onceRv.weekly.rows.length === 14 && onceRv.weekly.rows.every((x) => x.value === null && x.display === "Not available")
+			&& same(get(once, "loads_delivered").weekly, get(wk, "loads_delivered").weekly), "§16 L6: ...its weeks read Not available, and every other metric's weeks are unchanged");
+		const always = runOver(throwing("revenue", true));
+		t(always.metrics && same(strip(get(always, "revenue")), strip(get(wk, "revenue"))) && same(get(always, "revenue").weekly, { mode: "weekly", rows: [] }),
+			"§16 L6: a failure in the empty weeks too never fails the run", JSON.stringify(always.threw || (always.metrics && get(always, "revenue").weekly)));
+		const shell = runOver(throwing("dispatch_calls", true));
+		t(shell.metrics && same(strip(get(shell, "dispatch_calls")), strip(get(wk, "dispatch_calls"))) && same(shell.errors, [{ metric: "dispatch_calls", code: "KPI_WEEKLY_FAILED" }]),
+			"§16 L6: a metric whose weekly block is only its reason fails safe too", JSON.stringify(shell.threw || shell.errors));
 	}
 	return r;
 }
@@ -863,6 +1015,9 @@ const MUTANTS = [
 	["weekly figures folded into the monthly series", "§15", { metrics: [["\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") res.weekly = weeklyBlock(unit, ctx, cell, spec);\n",
 		"\tif (ctx.weekly && catalog.weeklyModeOf(key).mode === \"weekly\") { res.weekly = weeklyBlock(unit, ctx, cell, spec); res.series = res.series.concat(res.weekly.rows.map((w) => ({ period: w.weekStart, value: w.value, display: w.display, coverage: w.coverage }))); }\n"]] }],
 	["a stored weekly row read whole", "§15", { metrics: [["\t\t\trow: { weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,", "\t\t\trow: { ...r, weekStart: r.week_start, weekEnd: r.week_end, to: r.to_day,"]] }],
+	// PR 1's review: L1's mutant C and L2's mutant A.
+	["the week before's coverage ignored (L1)", "§15", { metrics: [["baseValue: side(base.c, flag), unit,", "baseValue: side(base.c, { blocked: false }), unit,"]] }],
+	["the weekly measured window a day late (L2)", "§15", { metrics: [["c: cellOf(w.weekStart, w.to, w) }));", "c: cellOf(addDays(w.weekStart, 1), addDays(w.to, 1), w) }));"]] }],
 ];
 for (const [name, section, edits] of MUTANTS) {
 	let catalogSrc = SOURCES.catalog;
@@ -873,7 +1028,7 @@ for (const [name, section, edits] of MUTANTS) {
 	try {
 		const cat = compileLib("kpi-catalog.js", catalogSrc);
 		const met = compileLib("kpi-metrics.js", metricsSrc, { "./kpi-catalog": cat });
-		results = battery({ metrics: met, catalog: cat });
+		results = battery({ metrics: met, catalog: cat }, { metrics: metricsSrc, catalog: catalogSrc });
 	} catch (e) {
 		results = [{ ok: false, name: `${section} the mutant threw: ${e && e.message}` }];
 	}

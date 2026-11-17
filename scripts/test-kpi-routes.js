@@ -46,8 +46,9 @@
  *
  * §9 R16 weekly figures: with KPI_WEEKLY_ENABLED off, rows stored in
  *    kpi_series_weekly change nothing in GET's answer and the builder gets the
- *    base arguments; on, GET carries the stored rows, computes nothing, reads no
- *    sheet and stays Super Admin only.
+ *    base arguments; on, GET carries the stored rows and kpi.weekly_since (R4),
+ *    computes nothing, reads no sheet, covers no weekly figure without a valid
+ *    approval row and stays Super Admin only.
  *
  * Hermetic: :memory: SQLite, 127.0.0.1 port 0, no network beyond it, nothing
  * written to disk.
@@ -162,7 +163,7 @@ function fakeLibs(log) {
 	const metricByKey = (k) => METRICS.find((m) => m.key === k) || null;
 	const settingsHashFor = (k, s) => { const m = metricByKey(k); return m && m.settingsUsed.length ? JSON.stringify(m.settingsUsed.map((u) => s[u] ?? null)) : ""; };
 	const catalog = {
-		METRICS, METRIC_KEYS, metricByKey, settingsHashFor, KPI_SERIES_START: "2025-04",
+		METRICS, METRIC_KEYS, metricByKey, settingsHashFor, KPI_SERIES_START: "2025-04", WEEK_COMPARE_STATUSES: ["ok", "missing", "withheld"],
 		approvalIsValid: (row, k, s) => !!row && row.approved === 1 && row.definition_version === metricByKey(k).definitionVersion && row.settings_hash === settingsHashFor(k, s),
 	};
 	const metrics = {
@@ -190,7 +191,7 @@ function fakeLibs(log) {
 					baselineMpg: args.settings.baselineMpg, recipients: args.settings.recipients, defaultRecipientConfigured: args.defaultRecipientConfigured,
 				},
 				metrics: METRICS.map((m) => ({
-					key: m.key, label: m.label, kind: m.kind, status: "ok", display: "1", approval: { approved: true, by: null, at: null, stale: false },
+					key: m.key, label: m.label, kind: m.kind, status: "ok", display: "1", approval: { approved: true, by: null, at: null, stale: false, ...(args.weekly === true ? { coversWeekly: true } : {}) },
 					// R16: the stored weekly rows' displays, only when the server says weekly is on.
 					...(args.weekly === true ? { weekly: (args.weeklyRows || []).filter((r) => r.metric_key === m.key).map((r) => r.display) } : {}),
 				})),
@@ -600,6 +601,11 @@ async function weeklyGetSection(block) {
 			`§9 flag on: GET carries the stored weekly rows (${JSON.stringify(ld && ld.weekly)})`);
 		t(on.log.computes === 0 && on.log.sheetReads === 0, "§9 flag on: GET computed nothing and read no sheet");
 		t(g.body.metrics.every((m) => m.approval.approved === false), "§9 flag on: no metric shown approved without a valid row");
+		// R4 (K29): when weekly figures began goes to the builder, read from server_state.
+		const since = on.db.prepare("SELECT value FROM server_state WHERE key = 'kpi.weekly_since'").get();
+		t(since && typeof since.value === "string" && on.log.lastBuild.weeklySince === since.value,
+			`§9 flag on: the builder gets kpi.weekly_since (${JSON.stringify(on.log.lastBuild.weeklySince)})`);
+		t(g.body.metrics.every((m) => m.approval.coversWeekly === false), "§9 flag on: no metric covers its weekly figures without a valid row");
 		const d = await on.call("GET", "/api/admin/kpis", { user: USERS.Dispatcher });
 		t(d.status === 403, "§9 flag on: still Super Admin only (a Dispatcher gets 403)");
 	} catch (e) {

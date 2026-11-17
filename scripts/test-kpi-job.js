@@ -69,7 +69,8 @@
  *    replaced (DELETE, then INSERT) in the run's one transaction (a failed insert
  *    leaves the old rows, series and snapshots), rows only for weekly metrics
  *    and real weeks, the snapshot rows and monthly series exactly the flag-off
- *    run's, and the response builder gets the rows' named columns.
+ *    run's, and the response builder gets the rows' named columns and
+ *    kpi.weekly_since (R4, K29).
  * §11 MUTANTS: claim-before-send dropped; the preview latch set although the
  *    send failed; the preview sent to the page's recipients; no first-start
  *    digest marker; a 41st Drive load; the not-found cache ignored; the time
@@ -263,7 +264,7 @@ function fakeLibs(log) {
 	const metricByKey = (k) => METRICS.find((m) => m.key === k) || null;
 	const settingsHashFor = (k, s) => { const m = metricByKey(k); return m && m.settingsUsed.length ? JSON.stringify(m.settingsUsed.map((u) => s[u] ?? null)) : ""; };
 	const approvalIsValid = (r, k, s) => !!r && r.approved === 1 && r.definition_version === metricByKey(k).definitionVersion && r.settings_hash === settingsHashFor(k, s);
-	const catalog = { METRICS, METRIC_KEYS, metricByKey, settingsHashFor, approvalIsValid, KPI_SERIES_START: "2025-04" };
+	const catalog = { METRICS, METRIC_KEYS, metricByKey, settingsHashFor, approvalIsValid, KPI_SERIES_START: "2025-04", WEEK_COMPARE_STATUSES: ["ok", "missing", "withheld"] };
 	const metrics = {
 		computeKpis(inputs) {
 			log.inputs.push(inputs);
@@ -659,6 +660,8 @@ const weeklySection = section(async (t, block = BLOCK) => {
 	const onArgs = on.log.builds[on.log.builds.length - 1] || {};
 	t(onArgs.weekly === true && Array.isArray(onArgs.weeklyRows) && onArgs.weeklyRows.length === 30 && Object.keys(onArgs.weeklyRows[0] || {}).join() === WEEKLY_COLUMNS,
 		"§13 flag on: the response builder gets weekly: true and the stored rows' named columns");
+	t(Object.keys(onArgs).join() === "asOfDay,timeZone,generatedAt,job,settings,approvalSettings,defaultRecipientConfigured,derived,snapshots,series,approvals,weekly,weeklyRows,weeklySince"
+		&& onArgs.weeklySince === "2026-10-09T08:30:00.000Z", `§13 flag on: ...and when weekly figures began, kpi.weekly_since (R4, K29) (${JSON.stringify(onArgs.weeklySince)})`);
 
 	// A failed weekly write rolls the whole store back.
 	on.db.exec("CREATE TRIGGER zed_refuse_weekly BEFORE INSERT ON kpi_series_weekly BEGIN SELECT RAISE(ABORT, 'refused'); END");

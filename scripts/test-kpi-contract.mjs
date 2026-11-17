@@ -27,6 +27,10 @@
 //   to date, last week never the week to date, a withheld comparison says why),
 //   weeklyView() passing the server's strings through and plotting a missing
 //   week as a gap, and the approve dialog's weekly sentence.
+//   R4: last week, the week before, kpi.weekly_since and each metric's previous
+//   week and coversWeekly in the shape; the week rule and the weekly sentence on
+//   weekly-mode metrics only (L4); "Approve weekly figures too" only where a
+//   valid approval predates weekly figures (K30); the week-to-date row (L3).
 //
 // The figures in the fixture are FAKE. No network, no server, no database, no Vue.
 //
@@ -112,14 +116,14 @@ const nextMonth = (ym) => {
 // monthly-only or not-tracked one holds its reason and no weeks.
 const WEEK_ROW_FIELDS = ['weekStart', 'weekEnd', 'to', 'label', 'value', 'display', 'coverage', 'partial']
 const dayPlus = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10) + n, 12)).toISOString().slice(0, 10)
-function weeklyErrors(w, where, need, exactKeys, figure) {
+function weeklyErrors(w, where, need, exactKeys, figure, top) {
   const mode = w && typeof w === 'object' ? w.mode : undefined
   need(['weekly', 'monthly_only', 'not_tracked'].includes(mode), `${where}.mode`, `"${mode}" not allowed`)
   if (mode !== 'weekly') {
     if (exactKeys(w, ['mode', 'weekRule', 'reason'], where)) need(isStr(w.weekRule) && isStr(w.reason) && w.reason.length > 0, where, 'a block with no weeks must say why')
     return
   }
-  if (!exactKeys(w, ['mode', 'weekRule', 'series', 'current', 'toDate', 'comparison'], where)) return
+  if (!exactKeys(w, ['mode', 'weekRule', 'series', 'current', 'previous', 'toDate', 'comparison'], where)) return
   need(isStr(w.weekRule) && w.weekRule.length > 0, `${where}.weekRule`, 'not a sentence')
   const row = (x, at) => {
     if (!exactKeys(x, WEEK_ROW_FIELDS, at)) return false
@@ -144,6 +148,14 @@ function weeklyErrors(w, where, need, exactKeys, figure) {
   }
   if (w.toDate !== null && row(w.toDate, `${where}.toDate`)) {
     need(w.toDate.partial === true && JSON.stringify(w.toDate) === JSON.stringify(series[series.length - 1]), `${where}.toDate`, 'not the series\' week to date')
+  }
+  // R4: last week is the answer's last week, and previous the stored week just before it.
+  const lastWeek = top && typeof top === 'object' ? top.lastWeek : null
+  const weekBefore = top && typeof top === 'object' ? top.weekBefore : null
+  if (w.current !== null) need(!!lastWeek && w.current.weekStart === lastWeek.weekStart, `${where}.current`, 'not the answer\'s last week')
+  if (w.previous !== null && row(w.previous, `${where}.previous`)) {
+    need(w.previous.partial === false && !!weekBefore && w.previous.weekStart === weekBefore.weekStart, `${where}.previous`, 'not the answer\'s week before, complete')
+    need(series.some((x) => JSON.stringify(x) === JSON.stringify(w.previous)), `${where}.previous`, 'not one of the stored weeks')
   }
   if (w.comparison !== null && exactKeys(w.comparison, ['kind', 'label', 'display', 'status', 'note'], `${where}.comparison`)) {
     const c = w.comparison
@@ -172,8 +184,20 @@ function shapeErrors(r) {
   // R16: `weekly` (top level and per metric) is there only while KPI_WEEKLY_ENABLED is on.
   const hasWeekly = !!r && typeof r === 'object' && Object.prototype.hasOwnProperty.call(r, 'weekly')
   if (!exactKeys(r, ['asOfDay', 'timeZone', 'generatedAt', 'job', 'settings', 'metrics', ...(hasWeekly ? ['weekly'] : [])], 'response')) return errors
-  if (hasWeekly && exactKeys(r.weekly, ['weekRule', 'approvalNote'], 'weekly')) {
+  if (hasWeekly && exactKeys(r.weekly, ['weekRule', 'approvalNote', 'since', 'lastWeek', 'weekBefore'], 'weekly')) {
     need(isStr(r.weekly.weekRule) && r.weekly.weekRule.length > 0 && isStr(r.weekly.approvalNote) && r.weekly.approvalNote.length > 0, 'weekly', 'weekRule/approvalNote not sentences')
+    // R4: when weekly figures began, and the two complete weeks the Monday email compares.
+    need(r.weekly.since === null || isIso(r.weekly.since), 'weekly.since', 'not an ISO instant or null')
+    const week = (x, at) => {
+      if (!exactKeys(x, ['weekStart', 'weekEnd', 'label', 'shortLabel'], at)) return
+      need(isYmd(x.weekStart) && new Date(`${x.weekStart}T12:00:00Z`).getUTCDay() === 6 && x.weekEnd === dayPlus(x.weekStart, 6), at, 'not a Saturday-to-Friday week')
+      need(isStr(x.label) && x.label.length > 0 && isStr(x.shortLabel) && x.shortLabel.length > 0, at, 'label/shortLabel not strings')
+    }
+    if (r.weekly.lastWeek !== null) week(r.weekly.lastWeek, 'weekly.lastWeek')
+    if (r.weekly.weekBefore !== null) {
+      week(r.weekly.weekBefore, 'weekly.weekBefore')
+      need(!!r.weekly.lastWeek && r.weekly.weekBefore.weekStart === dayPlus(r.weekly.lastWeek.weekStart, -7), 'weekly.weekBefore', 'not the week just before last week')
+    }
   }
   need(isYmd(r.asOfDay), 'asOfDay', 'not YYYY-MM-DD')
   need(isStr(r.timeZone) && r.timeZone.length > 0, 'timeZone', 'not a string')
@@ -234,7 +258,7 @@ function shapeErrors(r) {
     const metricWeekly = !!m && typeof m === 'object' && Object.prototype.hasOwnProperty.call(m, 'weekly')
     need(!metricWeekly || hasWeekly, at, 'a weekly block without the answer\'s weekly rule')
     if (!exactKeys(m, metricWeekly ? [...METRIC_FIELDS, 'weekly'] : METRIC_FIELDS, at)) continue
-    if (metricWeekly) weeklyErrors(m.weekly, `${at}.weekly`, need, exactKeys, figure)
+    if (metricWeekly) weeklyErrors(m.weekly, `${at}.weekly`, need, exactKeys, figure, r.weekly)
     need(isStr(m.key) && isStr(m.label) && isStr(m.group) && isStr(m.definition), at, 'key/label/group/definition not strings')
     need(ENUM.kind.includes(m.kind), `${at}.kind`, `"${m.kind}" not allowed`)
     need(ENUM.unit.includes(m.unit), `${at}.unit`, `"${m.unit}" not allowed`)
@@ -352,11 +376,13 @@ function shapeErrors(r) {
       }
     }
     need(m.computedDay === null || isYmd(m.computedDay), `${at}.computedDay`, 'not YYYY-MM-DD or null')
-    if (exactKeys(m.approval, ['approved', 'by', 'at', 'stale'], `${at}.approval`)) {
+    if (exactKeys(m.approval, ['approved', 'by', 'at', 'stale', ...(hasWeekly ? ['coversWeekly'] : [])], `${at}.approval`)) {
       const a = m.approval
       need(isBool(a.approved) && isBool(a.stale), `${at}.approval`, 'approved/stale not booleans')
       need((a.by === null || isStr(a.by)) && (a.at === null || isIso(a.at)), `${at}.approval`, 'by/at')
       need(!(a.stale && a.approved), `${at}.approval`, 'a stale approval reads as approved')
+      // R4 (K29): only a valid approval can cover the weekly figures.
+      if (hasWeekly) need(isBool(a.coversWeekly) && !(a.coversWeekly && !a.approved), `${at}.approval.coversWeekly`, 'not a boolean, or covers weekly figures without an approval')
     }
   }
   return errors
@@ -393,6 +419,17 @@ function shapeErrors(r) {
     ['a monthly-only metric with a series', (r) => { r.metrics[8].weekly.series = [] }],
     ['a weekly block with no week rule on the answer', (r) => { delete r.weekly }],
     ['a weekly figure sent as text', (r) => { r.metrics[2].weekly.series[4].value = '12' }],
+    // R4
+    ['a previous week that is the week to date', (r) => { r.metrics[2].weekly.previous = clone(r.metrics[2].weekly.toDate) }],
+    ['a previous week two weeks back', (r) => { r.metrics[2].weekly.previous = clone(r.metrics[2].weekly.series[10]) }],
+    ['a weekly block without its previous week', (r) => { delete r.metrics[3].weekly.previous }],
+    ['last week starting on a Sunday', (r) => { r.weekly.lastWeek.weekStart = '2026-09-27' }],
+    ['the week before not the week before last week', (r) => { r.weekly.weekBefore = { weekStart: '2026-09-12', weekEnd: '2026-09-18', label: 'Sep 12-18, 2026', shortLabel: 'Sep 12-18' } }],
+    ['a weekly answer without when weekly figures began', (r) => { delete r.weekly.since }],
+    ['a weekly answer without its short label', (r) => { delete r.weekly.lastWeek.shortLabel }],
+    ['weekly figures covered without an approval', (r) => { r.metrics[6].approval.coversWeekly = true }],
+    ['an approval that does not say whether it covers weekly figures', (r) => { delete r.metrics[0].approval.coversWeekly }],
+    ['a metric\'s last week other than the answer\'s', (r) => { r.weekly.lastWeek = { weekStart: '2026-09-19', weekEnd: '2026-09-25', label: 'Sep 19-25, 2026', shortLabel: 'Sep 19-25' }; r.weekly.weekBefore = null }],
   ]
   for (const [name, breakIt] of broken) {
     const copy = clone(FIXTURE)
@@ -452,12 +489,25 @@ function shapeErrors(r) {
     value: Number.isFinite(x.value) ? x.value : null, display: x.display, coverage: Number.isFinite(x.coverage) ? x.coverage : null,
     vs_label: x.vs ? x.vs.label : null, vs_display: x.vs ? x.vs.display : null, vs_status: x.vs ? x.vs.status : null,
   })))
+  // R4: two approvals either side of when weekly figures began (K29).
+  const since = '2026-10-09T08:30:00.000Z'
+  const approvals = [
+    { metric_key: 'loads_delivered', approved: 1, definition_version: 1, settings_hash: '', approved_by: 'fixture-admin', approved_at: '2026-10-09T09:00:00.000Z' },
+    { metric_key: 'revenue', approved: 1, definition_version: 1, settings_hash: '', approved_by: 'fixture-admin', approved_at: '2026-10-08T09:00:00.000Z' },
+  ]
   const responseW = M.buildKpiResponse({ asOfDay: day, timeZone: 'America/New_York', generatedAt: computedAt, job,
     settings: { aiDispatchStart: null, dedicatedStart: null, baselineMpg: null, recipients: [] }, defaultRecipientConfigured: true,
-    derived: outW.derived, snapshots, series, approvals: [], weekly: true, weeklyRows })
+    derived: outW.derived, snapshots, series, approvals, weekly: true, weeklyRows, weeklySince: since })
   const errorsW = shapeErrors(JSON.parse(JSON.stringify(responseW)))
   check('§6 weekly on: the server-built answer has the contract shape', errorsW.length === 0, errorsW.slice(0, 8).join('\n        '))
   check('§6 weekly on: every metric has a weekly block, 15 of them weeks', responseW.metrics.every((m) => m.weekly) && responseW.metrics.filter((m) => m.weekly.mode === 'weekly').length === 15)
+  const byKeyW = (k) => responseW.metrics.find((m) => m.key === k)
+  check('§6 weekly on: last week, the week before and when weekly figures began come from the server',
+    responseW.weekly?.lastWeek?.weekStart === '2026-09-26' && responseW.weekly?.weekBefore?.weekStart === '2026-09-19' && responseW.weekly?.since === since
+      && byKeyW('loads_delivered').weekly.previous?.weekStart === '2026-09-19', JSON.stringify(responseW.weekly))
+  check('§6 weekly on: an approval after kpi.weekly_since covers the weekly figures, one before does not (K29)',
+    byKeyW('loads_delivered').approval.coversWeekly === true && byKeyW('revenue').approval.approved === true && byKeyW('revenue').approval.coversWeekly === false,
+    JSON.stringify([byKeyW('loads_delivered').approval, byKeyW('revenue').approval]))
   check('§6 weekly on: no load id or driver key in the answer', !/T-\d|zed sentinel/.test(JSON.stringify(responseW)))
   report(results)
 }
@@ -493,6 +543,11 @@ function shapeErrors(r) {
   }))
   check('fixture has a withheld and an ok weekly comparison', ms.some((m) => m.weekly?.comparison?.status === 'withheld') && ms.some((m) => m.weekly?.comparison?.status === 'ok'))
   check('fixture has a metric with no weekly block', ms.some((m) => !m.weekly))
+  // R4 (K30): each case the "Approve weekly figures too" button is decided on.
+  check('fixture has a weekly metric approved before weekly figures began', ms.some((m) => m.weekly?.mode === 'weekly' && m.approval.approved && !m.approval.coversWeekly))
+  check('fixture has a weekly metric whose approval covers its weekly figures', ms.some((m) => m.weekly?.mode === 'weekly' && m.approval.coversWeekly))
+  check('fixture has a monthly-only metric approved before weekly figures began', ms.some((m) => m.weekly?.mode === 'monthly_only' && m.approval.approved && !m.approval.coversWeekly))
+  check('fixture has an approved metric with no weekly block', ms.some((m) => !m.weekly && m.approval.approved))
   report(results)
 }
 
@@ -672,6 +727,32 @@ function viewChecks(v) {
     check('approve dialog adds the server\'s weekly sentence', withNote.body.endsWith(' This approval also covers its weekly figures.') && withNote.body.startsWith('Social posts'))
     same('approve dialog without weekly figures is as before', v.approvalConfirmText('Loads delivered', true, '').body, v.approvalConfirmText('Loads delivered', true).body)
     check('withdraw dialog never gains the weekly sentence', !v.approvalConfirmText('Loads delivered', false, FIXTURE.weekly.approvalNote).body.includes('weekly'))
+
+    // L4: the week rule and the approve dialog's weekly sentence only on a weekly-mode metric.
+    same('L4: no week rule on a monthly-only or not-tracked card', [mo.rule, v.weeklyView(byKey('dispatch_calls').weekly).rule], ['', ''])
+    const note = FIXTURE.weekly.approvalNote
+    same('L4: the weekly sentence goes to a weekly metric\'s dialog only',
+      ['loads_delivered', 'fuel_mpg', 'dispatch_calls', 'miles_driven'].map((k) => v.approvalWeeklyNote(byKey(k), note)), [note, '', '', ''])
+    same('L4: no sentence while weekly figures are off', v.approvalWeeklyNote(byKey('loads_delivered'), ''), '')
+
+    // K30: "Approve weekly figures too", only where a valid approval predates weekly figures.
+    for (const m of FIXTURE.metrics) {
+      const expected = m.weekly?.mode === 'weekly' && m.approval.approved === true && m.approval.coversWeekly === false
+      check(`K30: ${m.key}: the weekly re-approve button ${expected ? 'shows' : 'stays hidden'}`, v.weeklyApprovalView(m).pending === expected)
+    }
+    const wk = (approval, mode = 'weekly') => v.weeklyApprovalView({ key: 'x', weekly: { mode }, approval }).pending
+    same('K30: shown for a weekly metric approved before weekly figures began, and only then', [
+      wk({ approved: true, coversWeekly: false }), wk({ approved: true, coversWeekly: true }), wk({ approved: false, coversWeekly: false }),
+      wk({ approved: true }), wk({ approved: true, coversWeekly: false }, 'monthly_only'), wk({ approved: true, coversWeekly: false }, 'not_tracked'),
+      v.weeklyApprovalView({ key: 'x', approval: { approved: true, coversWeekly: false } }).pending, wk({ approved: 'true', coversWeekly: false }),
+    ], [true, false, false, false, false, false, false, false])
+    const pending = v.weeklyApprovalView(byKey('revenue'))
+    same('K30: the card says why and names the action', [pending.note, pending.action], ['Weekly figures not approved yet', 'Approve weekly figures too'])
+    const again = v.weeklyApprovalConfirmText('Gross load revenue', note)
+    check('K30: the confirm names the metric and says it covers the weekly figures',
+      again.title.includes('“Gross load revenue”') && again.body.startsWith('Social posts and the investor data room may use this figure.') && again.body.endsWith(` ${note}`)
+        && again.action === 'Approve weekly figures too', JSON.stringify(again))
+    check('K30: a metric with no label is still named', v.weeklyApprovalConfirmText('', note).title.includes('this metric'))
   })
 
   guard('job', () => {
@@ -765,6 +846,14 @@ report(viewChecks(shipped))
   const card = read('components/kpis/KpiMetricCard.vue')
   check('the source link opens safely', /target="_blank" rel="noopener noreferrer"/.test(card))
   check('the card shows the weekly block only when the answer carries one', /<KpiWeeklyBlock v-if="metric\.weekly"/.test(card))
+  // R4: L4's sentence per metric, K30's button and confirm from kpiView.js, L3's week-to-date row.
+  check('L4: the card passes the weekly sentence through approvalWeeklyNote()', /:weekly-note="approvalWeeklyNote\(metric, weeklyNote\)"/.test(card))
+  const toggle = read('components/kpis/KpiApprovalToggle.vue')
+  check('K30: the toggle decides the button and words its confirm in kpiView.js', toggle.includes('weeklyApprovalView(props.metric)') && toggle.includes('weeklyApprovalConfirmText('))
+  const weeklyBlock = read('components/kpis/KpiWeeklyBlock.vue')
+  const ddRule = (weeklyBlock.match(/\.kpi-weekly-pair dd \{[^}]*\}/) || [''])[0]
+  check('L3: the week to date says "to date" once, without nested brackets', !/This week so far \(\{\{ view\.toDate\.label \}\}\)/.test(weeklyBlock) && /<dt>This week: \{\{ view\.toDate\.label \}\}<\/dt>/.test(weeklyBlock))
+  check('L3: a weekly figure never shrinks or wraps mid-number', /flex-shrink: 0;/.test(ddRule) && /white-space: nowrap;/.test(ddRule) && !/overflow-wrap: anywhere/.test(ddRule))
   const router = read('router/index.js')
   const route = /\{\s*path: '\/admin\/kpis',\s*name: 'kpis',\s*component: \(\) => import\('\.\.\/views\/KpisView\.vue'\),\s*meta: \{ roles: \['Super Admin'\] \},\s*\}/.test(router)
   check('route /admin/kpis is Super Admin only', route)
