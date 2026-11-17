@@ -10,12 +10,12 @@
  *    for the next Monday, last week against the week before and the one line
  *    in place of the month table; for a first Monday, the month table too;
  *    with kpi.weekly_since unset (a first switch-on) no weekly figure reads
- *    Yes, so the one sentence stands in for the Public use column.
+ *    Yes, so the one sentence stands in for the OK to share? column.
  * §3 (b) the metrics approved now, each with its approval day, and which of
  *    them K29 asks to approve again (weekly ones only); a stale approval is not
  *    listed.
  * §4 with kpi.weekly_since before an approval, that metric reads Yes in the
- *    weekly table's Public use column and it needs no re-approval.
+ *    weekly table's OK to share? column and it needs no re-approval.
  * §5 no name, load id or email address in the JSON or the text output; the
  *    weekly compute time is a signed figure (PR 1 review, L7).
  * §6 no send path is reachable: the lift denies the mailer and the email
@@ -171,17 +171,17 @@ t(email.builtFrom === "2026-11-19" && next.day === "2026-11-23" && first.day ===
 t(next.subject === "LogisX weekly KPIs: Nov 7-13, 2026" && first.subject === next.subject, `§2 the subject names the last complete week as of the run (${JSON.stringify(next.subject)})`);
 const nextText = String(next.text || "");
 const firstText = String(first.text || "");
-const nextWeekly = read.textSection(nextText, "Weekly figures");
-t(nextText.split("\n")[2] === "Nov 7-13 vs Oct 31-Nov 6, 2026" && nextWeekly && nextWeekly.head.join("\n").includes("Last week") && nextWeekly.head.join("\n").includes("Oct 31-Nov 6"),
-	`§2 last week against the week before (${JSON.stringify(nextText.split("\n")[2])})`);
+const nextWeekly = read.textSection(nextText, "Weekly numbers");
+t(nextText.split("\n")[1] === "Last week (Nov 7-13) compared with the week before (Oct 31-Nov 6)" && nextWeekly && nextWeekly.head.join("\n").includes("Last week"),
+	`§2 last week against the week before (${JSON.stringify(nextText.split("\n")[1])})`);
 const loadsRow = read.textRow(nextWeekly, "Loads delivered");
 t(loadsRow && JSON.stringify(loadsRow.cols) === JSON.stringify(["Loads delivered", "3", "2", "↑ +50.0%"]),
 	`§2 loads delivered: the run's own figures, the Saturday and the Friday in their week, the cancelled load out (${JSON.stringify(loadsRow && loadsRow.cols)})`);
-t(nextText.includes("\nMonthly figures come in the first Monday's email of each month.\n") && !nextText.split("\n").includes("Monthly figures"), "§2 the next Monday (the 23rd): no month table, the one line");
-t(read.textSection(firstText, "Monthly figures") && !firstText.includes("Monthly figures come in"), "§2 a first Monday: the month table");
-t(nextWeekly && nextText.includes("\nWeekly figures\n\nNone of these weekly figures is approved for public use yet; approve them on the KPI page.\n") && !nextWeekly.head[0].includes("Public use"),
-	"§2 kpi.weekly_since unset: no weekly figure reads Yes, so the one sentence and no Public use column");
-t(read.textCell(read.textSection(firstText, "Monthly figures"), "Loads delivered", "Public use") === "Yes",
+t(nextText.includes("\nMonthly numbers come in the first Monday email of each month.\n") && !nextText.split("\n").includes("Monthly numbers"), "§2 the next Monday (the 23rd): no month table, the one line");
+t(read.textSection(firstText, "Monthly numbers") && !firstText.includes("Monthly numbers come in"), "§2 a first Monday: the month table");
+t(nextWeekly && nextText.includes("\nWeekly numbers\n\nThese numbers are for internal use. Approve them on the KPI page before sharing them outside the company.\n") && !nextWeekly.head[0].includes("OK to share?"),
+	"§2 kpi.weekly_since unset: no weekly figure reads Yes, so the one sentence and no OK to share? column");
+t(read.textCell(read.textSection(firstText, "Monthly numbers"), "Loads delivered", "OK to share?") === "Yes",
 	"§2 ...while the month table keeps the monthly approval");
 t(nextWeekly && !/Nov 14-19/.test(nextText) && !nextText.includes("$1,500"), "§2 the week in progress is not in the email");
 
@@ -204,8 +204,8 @@ let s = null;
 try { s = JSON.parse(sinceRun.out); } catch { s = null; }
 const sinceText = String((s && s.email && s.email.nextMonday && s.email.nextMonday.text) || "");
 t(sinceRun.status === 0 && sha1(dbFile) === sinceBefore, "§4 the report exits 0 and writes nothing");
-const sinceWeekly = read.textSection(sinceText, "Weekly figures");
-t(read.textCell(sinceWeekly, "Loads delivered", "Public use") === "Yes" && read.textCell(sinceWeekly, "Gross load revenue", "Public use") === "No",
+const sinceWeekly = read.textSection(sinceText, "Weekly numbers");
+t(read.textCell(sinceWeekly, "Loads delivered", "OK to share?") === "Yes" && read.textCell(sinceWeekly, "Revenue from loads", "OK to share?") === "No",
 	"§4 an approval after kpi.weekly_since covers the weekly figures; none other does");
 t(s && Array.isArray(s.approvedNow) && s.approvedNow.length === 2 && s.approvedNow.every((x) => x.reapprove === false), "§4 ...and nothing is left to approve again");
 

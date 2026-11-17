@@ -375,8 +375,8 @@ async function emailRun(browser) {
     try {
       // The weekly table's heading and head; the month table's heading, then its sentence or its head
       // (innerText, which keeps table cells apart).
-      const weeklyTable = (s) => /Weekly figures (None of these weekly figures|Metric Last week)/.test(s)
-      const monthTable = (s) => /Monthly figures (None of these monthly figures|Metric Figure)/.test(s)
+      const weeklyTable = (s) => /Weekly numbers (These numbers are for internal use|What we measure Last week)/.test(s)
+      const monthTable = (s) => /Monthly numbers (These numbers are for internal use|What we measure Number)/.test(s)
       // A sideways scroll is the page's scroll width past its LAYOUT width (documentElement.clientWidth,
       // 390 in the phone context), never the window's inner width, which a phone context widens to
       // fit whatever the page needs.
@@ -398,9 +398,9 @@ async function emailRun(browser) {
       await page.screenshot({ path: path.join(SHOT_DIR, `kpi-weekly-6-email-first-${size.tag}.png`), fullPage: true })
       record(`KW5-${size.tag}`, 'The Monday email, built by lib/kpi-digest.js and never sent: the month table on the first Monday only; laid out at the window width; no scroll past that layout width',
         `other Monday "${mails.other.subject}": the weekly table, the one line; first Monday "${mails.first.subject}": the weekly and the month tables; layout width ${size.viewport.width}, scroll width not above it`,
-        `other: weekly ${weeklyTable(otherText)}, the line ${otherText.includes("Monthly figures come in the first Monday's email of each month.")}, month ${monthTable(otherText)}, ${widths(other)}; first: weekly ${weeklyTable(firstText)}, the line ${firstText.includes('Monthly figures come in')}, month ${monthTable(firstText)}, ${widths(first)}`,
-        weeklyTable(otherText) && otherText.includes("Monthly figures come in the first Monday's email of each month.") && !monthTable(otherText)
-          && weeklyTable(firstText) && monthTable(firstText) && !firstText.includes('Monthly figures come in')
+        `other: weekly ${weeklyTable(otherText)}, the line ${otherText.includes("Monthly numbers come in the first Monday email of each month.")}, month ${monthTable(otherText)}, ${widths(other)}; first: weekly ${weeklyTable(firstText)}, the line ${firstText.includes('Monthly numbers come in')}, month ${monthTable(firstText)}, ${widths(first)}`,
+        weeklyTable(otherText) && otherText.includes("Monthly numbers come in the first Monday email of each month.") && !monthTable(otherText)
+          && weeklyTable(firstText) && monthTable(firstText) && !firstText.includes('Monthly numbers come in')
           && fits(other) && fits(first),
         otherShot)
     } finally {
