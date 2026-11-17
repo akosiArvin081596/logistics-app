@@ -30,9 +30,24 @@
  *    contract-month label or the two exact-date rows) and the month-to-date
  *    note, after the comparisons; an equal-window entry prints none; no
  *    coverage line or count.
- * §13 R16: with a weekly block on every metric and the answer's weekly rule
- *    (KPI_WEEKLY_ENABLED on), the subject, the HTML and the text are byte for
- *    byte the ones without; no weekly label, comparison or rule is printed.
+ * §13 with no weekly fields on the answer (KPI_WEEKLY_ENABLED off), the
+ *    subject, the HTML and the text are byte for byte a693dbe2's (pinned).
+ * §14 R4, the weekly Monday email (the answer's weekly fields present):
+ *    the subject names last week's dates; last week against the week before,
+ *    each figure, label and change the server's string, a withheld change
+ *    replaced by its note, "No records" never a 0; monthly-only and not-tracked
+ *    lines; the held metrics in neither section; K29's weekly approval line
+ *    (through the real buildKpiResponse(): an approval at, before and after
+ *    kpi.weekly_since, and an invalid one); the month section, byte for byte
+ *    today's rows, only on a Monday dated the 1st to the 7th; no last week
+ *    prints the month section and one line; the preview carries both
+ *    sections; every new string HTML-escaped. Its MUTANTS: a Monday-based week
+ *    in the subject, the month section every Monday, the first Monday read off
+ *    the UTC day, the monthly approval on a weekly line, a held metric in the
+ *    weekly section, the week-before figure worked out in the email, a withheld
+ *    change printed, the week in progress as last week, no month section when
+ *    last week is missing or in the preview, the week rule unescaped, the
+ *    weekly section with weekly figures off.
  *
  * Pure: no server, no database, no network.
  *
@@ -40,6 +55,7 @@
  */
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const Module = require("module");
@@ -259,37 +275,246 @@ function record(results) {
 console.log("\n§1–§8 buildDigest()");
 record(checks(loadFrom(SRC)));
 
-// §13 R16: the digest reads no weekly field. With weekly blocks on every metric
-// and the answer's weekly rule (KPI_WEEKLY_ENABLED on), the subject, the HTML and
-// the text are byte for byte the ones without.
-function weeklyChecks(d) {
-	const plainResponse = fixture();
-	const weeklyResponse = fixture();
-	weeklyResponse.weekly = { weekRule: "Weeks run Saturday to Friday, as driver invoices do.", approvalNote: "This approval also covers its weekly figures." };
-	const row = (weekStart, weekEnd, to, label, partial) => ({ weekStart, weekEnd, to, label, value: 14, display: "14 Quinn Sentinel", coverage: 1, partial });
-	for (const m of weeklyResponse.metrics) {
-		m.weekly = m.key === "fuel_savings"
-			? { mode: "monthly_only", weekRule: "r", reason: "Monthly only: fuel receipts don't line up with weeks." }
-			: {
-				mode: "weekly", weekRule: "r",
-				series: [row("2026-09-26", "2026-10-02", "2026-10-02", "Sep 26-Oct 2, 2026", false), row("2026-10-03", "2026-10-09", "2026-10-09", "Oct 3-9, 2026 (to date)", true)],
-				current: row("2026-09-26", "2026-10-02", "2026-10-02", "Sep 26-Oct 2, 2026", false),
-				toDate: row("2026-10-03", "2026-10-09", "2026-10-09", "Oct 3-9, 2026 (to date)", true),
-				comparison: { kind: "wow", label: "vs Sep 19-25", display: "+16.7%", status: "ok", note: "" },
-			};
+// §13 With no weekly fields on the answer (KPI_WEEKLY_ENABLED off) the email is
+// a693dbe2's, byte for byte: sha256 of its subjects, HTML and text on these
+// fixtures, taken from that commit's lib/kpi-digest.js. Weekly blocks on the
+// metrics without the answer's weekly fields change nothing either.
+const OFF_DIGEST = "1aca0cf61000abe88f618c5b302ba1874a544cbfe72fd3603d7fbfa91806c601";
+function offChecks(d) {
+	const outs = [];
+	for (const f of [fixture(), holdFixture()]) {
+		for (const preview of [false, true]) {
+			for (const asOfDay of ["2026-10-14", "2027-02-01", "2026-12-07"]) outs.push(d.buildDigest({ response: f, preview, asOfDay }));
+		}
 	}
+	const sha = crypto.createHash("sha256").update(JSON.stringify(outs)).digest("hex");
+	const blocksOnly = weeklyFixture();
+	delete blocksOnly.weekly;
+	const bare = JSON.parse(JSON.stringify(blocksOnly));
+	for (const m of bare.metrics) delete m.weekly;
+	const a = d.buildDigest({ response: bare, preview: false, asOfDay: "2026-11-23" });
+	const b = d.buildDigest({ response: blocksOnly, preview: false, asOfDay: "2026-11-23" });
+	return [
+		{ ok: sha === OFF_DIGEST, name: `§13 weekly off: subject, HTML and text are a693dbe2's, byte for byte (${sha})` },
+		{ ok: a.subject === b.subject && a.html === b.html && a.text === b.text && b.subject === "LogisX weekly KPIs: week of Nov 23, 2026",
+			name: "§13 weekly blocks without the answer's weekly fields: today's email, no weekly section" },
+	];
+}
+
+// §14 R4: the Monday email with weekly figures on.
+const RULE = "Weeks run Saturday to Friday, the same week as the drivers' turns and their invoices. Load dates use the US Central calendar <b>&</b> ELD miles use each truck's local day.";
+const WEEK_NOTE = "A weekly comparison is shown only where at least 90% of each week's loads have the figure; last week or the week before falls short, so it is not shown.";
+const LW = { weekStart: "2026-11-14", weekEnd: "2026-11-20", label: "Nov 14-20, 2026", shortLabel: "Nov 14-20" };
+const WB = { weekStart: "2026-11-07", weekEnd: "2026-11-13", label: "Nov 7-13, 2026", shortLabel: "Nov 7-13" };
+const WEEK_HEAD = "Last week (Nov 14-20) against the week before (Nov 7-13)";
+const MONTHLY_LATER = "Monthly figures come in the first Monday's email of each month.";
+const NOT_AVAILABLE_LINE = "Weekly figures are not available this week.";
+// The week in progress: never printed; the email compares complete weeks only.
+const TO_DATE = "99,991 Zed to date";
+function weekRow(w, value, display) {
+	return { weekStart: w.weekStart, weekEnd: w.weekEnd, to: w.weekEnd, label: w.label, value, display, coverage: 1, partial: false };
+}
+function weeklyOf(cur, prev, comparison, weeks = { lw: LW, wb: WB }) {
+	const current = cur ? weekRow(weeks.lw, cur[0], cur[1]) : null;
+	const previous = prev ? weekRow(weeks.wb, prev[0], prev[1]) : null;
+	const toDate = { weekStart: "2026-11-21", weekEnd: "2026-11-27", to: "2026-11-23", label: "Nov 21-23, 2026 (to date)", value: 99991, display: TO_DATE, coverage: null, partial: true };
+	return { mode: "weekly", weekRule: RULE, series: [previous, current, toDate].filter(Boolean), current, previous, toDate, comparison };
+}
+const ok = (display) => ({ kind: "wow", label: "vs Nov 7-13", display, status: "ok", note: "" });
+function weeklyFixture(o = {}) {
+	const f = holdFixture();
+	f.asOfDay = o.asOfDay || "2026-11-23";
+	f.timeZone = "America/Chicago";
+	f.generatedAt = o.generatedAt || `${f.asOfDay}T14:00:00.000Z`;
+	f.weekly = { weekRule: RULE, approvalNote: "This approval also covers its weekly figures.", since: "2026-11-19T22:00:00.000Z", lastWeek: LW, weekBefore: WB, ...(o.weekly || {}) };
+	const blocks = {
+		loads_delivered: weeklyOf([14, "14"], [12, "12"], ok("+16.7%")),
+		revenue: weeklyOf([27250, "$27,250"], [21000, "$21,000"], { kind: "wow", label: "vs Nov 7-13", display: "Not available", status: "withheld", note: WEEK_NOTE }),
+		fuel_savings: { mode: "monthly_only", weekRule: RULE, reason: "Monthly only: fuel receipts don't line up with weeks." },
+		dispatch_calls: { mode: "not_tracked", weekRule: RULE, reason: "Not tracked, so there are no weekly figures." },
+		freight_tons_estimated: weeklyOf([120.5, "120.5 t"], [null, "No records"], { kind: "wow", label: "vs Nov 7-13", display: "Not available", status: "missing", note: "" }),
+		co2_tonnes: weeklyOf([3.1, "3.1 t CO2"], [2.9, "2.9 t CO2"], ok("+6.9%")),
+		on_time_rate: weeklyOf([80, "<i>80.0%</i>"], [74, "74.0% & up"], ok("+6.0 pts")),
+		truck_utilization: weeklyOf([71, "71.4%"], [65, "65.2%"], ok("+6.2 pts")),
+		loaded_miles: weeklyOf([1, "17,164 mi"], [1, "16,001 mi"], ok("+7.3%")),
+		paid_miles: weeklyOf([1, "20,669 mi"], [1, "19,002 mi"], ok("+8.8%")),
+		deadhead_miles: weeklyOf([1, "3,505 mi"], [1, "3,003 mi"], ok("+16.7%")),
+		paid_mile_share: { mode: "monthly_only", weekRule: RULE, reason: "Monthly only: Zed held reason." },
+		unloaded_miles: { mode: "monthly_only", weekRule: RULE, reason: "Monthly only: Zed held reason." },
+	};
+	for (const m of f.metrics) {
+		m.weekly = blocks[m.key];
+		m.approval = { ...m.approval, coversWeekly: false };
+	}
+	const by = (k) => f.metrics.find((m) => m.key === k);
+	by("loads_delivered").approval = { approved: true, by: "super_admin", at: "2026-11-20T00:00:00.000Z", stale: false, coversWeekly: true };
+	// Approved for its monthly figure before weekly figures began: weekly reads No.
+	by("truck_utilization").approval = { approved: true, by: "super_admin", at: "2026-11-01T00:00:00.000Z", stale: false, coversWeekly: false };
+	// A malformed answer: covers weekly without a monthly approval reads No.
+	by("co2_tonnes").approval = { approved: false, by: null, at: null, stale: false, coversWeekly: true };
+	return f;
+}
+// The block of lines under `label` inside `part` (a section of the text body).
+function blockOf(part, label) {
+	const lines = part.split("\n");
+	const i = lines.indexOf(label);
+	if (i < 0) return "";
+	const j = lines.indexOf("", i);
+	return lines.slice(i, j < 0 ? undefined : j).join("\n");
+}
+// The text body cut into its parts: head, weekly section, month section.
+function partsOf(text) {
+	const w = text.indexOf(`\n${WEEK_HEAD}\n`);
+	const m = text.indexOf("\nMonth\n");
+	const f = text.indexOf(`\n${FOOTER_TEXT}`);
+	const end = (from) => [m, f].filter((x) => x > from).sort((a, b) => a - b)[0];
+	return {
+		weekly: w >= 0 ? text.slice(w + 1, end(w)) : "",
+		month: m >= 0 ? text.slice(m + 1, f) : "",
+	};
+}
+const FOOTER_TEXT = "Aggregated figures only. Do not publish a metric marked “Approved for public use: No”.";
+// Today's rows (§1-§12's email) for the same metrics: the month section's body.
+function todaysRows(d, response) {
+	const plain = JSON.parse(JSON.stringify(response));
+	delete plain.weekly;
+	const today = d.buildDigest({ response: plain, preview: false, asOfDay: "2026-10-14" });
+	const lines = today.text.split("\n");
+	const from = lines.indexOf("", lines.findIndex((l) => l.startsWith("Figures as of") || l.startsWith("No snapshot"))) + 1;
+	return { text: lines.slice(from, lines.lastIndexOf(FOOTER_TEXT)).join("\n"), trs: today.html.split("\n").filter((l) => l.startsWith("<tr>")) };
+}
+function monthTrs(html) {
+	const at = html.indexOf(">Month</h3>");
+	return at < 0 ? [] : html.slice(at).split("\n").filter((l) => l.startsWith("<tr>"));
+}
+
+function mondayChecks(d, lib) {
 	const out = [];
-	for (const preview of [false, true]) {
-		const a = d.buildDigest({ response: plainResponse, preview, asOfDay: "2026-10-14" });
-		const b = d.buildDigest({ response: weeklyResponse, preview, asOfDay: "2026-10-14" });
-		const which = preview ? "the preview" : "the weekly digest";
-		out.push({ ok: a.subject === b.subject && a.html === b.html && a.text === b.text, name: `§13 ${which}: subject, HTML and text unchanged with weekly blocks present` });
-		out.push({ ok: !/Sep 26-Oct 2|vs Sep 19-25|Saturday to Friday|weekly figures/.test(`${b.subject}${b.html}${b.text}`), name: `§13 ${which}: no weekly label, comparison or rule printed` });
+	const t = (cond, name) => out.push({ ok: !!cond, name });
+	const f = weeklyFixture();
+	const mail = d.buildDigest({ response: f, preview: false, asOfDay: "2026-11-23" });
+	const p = partsOf(mail.text);
+
+	// The subject and the head.
+	t(mail.subject === "LogisX weekly KPIs: Nov 14-20, 2026", `§14 the subject names last week as the server labels it (got ${JSON.stringify(mail.subject)})`);
+	const yearEnd = weeklyFixture({ asOfDay: "2027-01-04", weekly: { lastWeek: { weekStart: "2026-12-26", weekEnd: "2027-01-01", label: "Dec 26, 2026-Jan 1, 2027", shortLabel: "Dec 26-Jan 1" }, weekBefore: { weekStart: "2026-12-19", weekEnd: "2026-12-25", label: "Dec 19-25, 2026", shortLabel: "Dec 19-25" } } });
+	const ye = d.buildDigest({ response: yearEnd, preview: false, asOfDay: "2027-01-04" });
+	t(ye.subject === "LogisX weekly KPIs: Dec 26, 2026-Jan 1, 2027" && ye.text.includes("\nLast week (Dec 26-Jan 1) against the week before (Dec 19-25)\n"),
+		`§14 a week across the year end, in the subject and the section (got ${JSON.stringify(ye.subject)})`);
+	t(!/week of/.test(mail.subject + mail.text + mail.html), "§14 the Monday-to-Sunday \"week of\" wording is gone");
+	const pv = d.buildDigest({ response: f, preview: true, asOfDay: "2026-11-23" });
+	t(pv.subject === `${PREVIEW}: LogisX weekly KPIs: Nov 14-20, 2026`, "§14 the preview mark and the \"LogisX weekly KPIs: \" start stay");
+	const head = mail.text.split("\n");
+	t(head[0] === "LogisX weekly KPIs: Nov 14-20, 2026" && head[1] === "Figures as of Nov 23, 2026 (America/Chicago)." && head[2] === RULE,
+		`§14 title, as-of line, then the server's week rule (${JSON.stringify(head.slice(0, 3))})`);
+	t(mail.text.includes(`\n${WEEK_HEAD}\n`) && mail.html.includes(`>${WEEK_HEAD}</h3>`), "§14 the section names last week and the week before, from the answer");
+
+	// Each weekly row, the server's strings only.
+	t(blockOf(p.weekly, "Loads delivered") === "Loads delivered\n  Last week (Nov 14-20): 14. Week before (Nov 7-13): 12. Change: +16.7%.\n  Measured.\n  Approved for public use (weekly figures): Yes",
+		`§14 a weekly row: the three figures and the change, the kind, the weekly approval (${JSON.stringify(blockOf(p.weekly, "Loads delivered"))})`);
+	t(blockOf(p.weekly, "Gross load revenue") === `Gross load revenue\n  Last week (Nov 14-20): $27,250. Week before (Nov 7-13): $21,000. ${WEEK_NOTE}\n  Measured.\n  Approved for public use (weekly figures): No`,
+		"§14 a change withheld for coverage prints the server's note in its place");
+	const est = blockOf(p.weekly, "Freight moved (estimated, all loads)");
+	t(est === "Freight moved (estimated, all loads)\n  Last week (Nov 14-20): 120.5 t. Week before (Nov 7-13): No records. Change: Not available.\n  Estimate — Loads with no stated weight are assumed to weigh the average of loads that state one.\n  Approved for public use (weekly figures): No",
+		`§14 "No records" prints as the server says, an estimate carries its assumption (${JSON.stringify(est)})`);
+	t(est && !/(^|[^0-9.,])0([^0-9.,%]|$)/.test(est.replace(/Approved for public use \(weekly figures\): (Yes|No)/, "")), "§14 ...and no week shows a 0 for a missing figure");
+	t(blockOf(p.weekly, "Carbon output (tailpipe CO2)").includes("\n  Estimate — no assumption is recorded.\n"), "§14 an estimate with no assumption says so");
+	t(p.weekly && !/Confidence:/.test(p.weekly), "§14 the weekly section carries no confidence line");
+	t(blockOf(p.weekly, "Diesel dollars saved vs baseline") === "Diesel dollars saved vs baseline\n  Monthly only: fuel receipts don't line up with weeks.",
+		"§14 a monthly-only metric: the server's reason, nothing else");
+	t(blockOf(p.weekly, "Dispatch calls handled by AI") === "Dispatch calls handled by AI\n  Not tracked", "§14 a not-tracked metric: Not tracked");
+	t(p.weekly && !(mail.subject + mail.text + mail.html).includes(TO_DATE) && !/Nov 21-23/.test(mail.text), "§14 the week in progress is never printed");
+	t(blockOf(p.weekly, "Truck utilization (active days)").endsWith("\n  Approved for public use (weekly figures): No"),
+		"§14 K29: a monthly approval given before weekly figures began reads No on the weekly line");
+	t(blockOf(p.weekly, "Carbon output (tailpipe CO2)").endsWith("\n  Approved for public use (weekly figures): No"), "§14 K29: weekly Yes needs the monthly approval too");
+	const at = f.metrics.filter((m) => !["loaded_miles", "paid_miles", "deadhead_miles", "unloaded_miles", "paid_mile_share"].includes(m.key))
+		.map((m) => p.weekly.indexOf(`\n${m.label}\n`));
+	t(at.length === 8 && at.every((x, i) => x > 0 && (i === 0 || x > at[i - 1])), `§14 one weekly row per metric not on hold, in today's order (${at.join()})`);
+
+	// The hold.
+	const held = ["Loaded miles", "Paid miles (rate confirmations)", "Deadhead miles", "Unloaded miles", "Paid-mile share", "17,164", "20,669", "3,505", "Zed held reason"];
+	t(p.weekly && held.every((s) => !mail.text.includes(s) && !mail.html.includes(s)), "§14 the five held metrics are in neither section");
+	const firstMon = d.buildDigest({ response: weeklyFixture({ asOfDay: "2027-02-01" }), preview: false, asOfDay: "2027-02-01" });
+	t(partsOf(firstMon.text).weekly && held.every((s) => !firstMon.text.includes(s) && !firstMon.html.includes(s)), "§14 ...on a first Monday too");
+
+	// The month section: only on the first Monday of a month.
+	t(!p.month && mail.text.includes(`\n${MONTHLY_LATER}\n`) && !mail.html.includes(">Month</h3>"), "§14 Monday the 23rd: no month section, one line in its place");
+	const today = todaysRows(d, f);
+	for (const [day, gen] of [["2027-02-01", "2027-02-02T03:00:00.000Z"], ["2026-12-07", "2026-12-08T04:00:00.000Z"]]) {
+		const g = d.buildDigest({ response: weeklyFixture({ asOfDay: day, generatedAt: gen }), preview: false, asOfDay: day });
+		const gp = partsOf(g.text);
+		t(gp.weekly && gp.month === `Month\n\n${today.text}` && !g.text.includes(MONTHLY_LATER), `§14 Monday ${day}: the month section, byte for byte today's rows`);
+		t(JSON.stringify(monthTrs(g.html)) === JSON.stringify(today.trs) && today.trs.length === 8, `§14 Monday ${day}: the HTML month rows are today's`);
+	}
+	for (const [day, why] of [["2027-02-08", "the 8th"], ["2026-12-01", "a Tuesday the 1st"]]) {
+		const g = d.buildDigest({ response: weeklyFixture({ asOfDay: day, generatedAt: `${day}T14:00:00.000Z` }), preview: false, asOfDay: day });
+		t(!partsOf(g.text).month && g.text.includes(MONTHLY_LATER), `§14 ${why} (${day}): no month section`);
+	}
+	const lateUtc = d.buildDigest({ response: weeklyFixture({ asOfDay: "2027-02-08", generatedAt: "2027-02-01T23:00:00.000Z" }), preview: false, asOfDay: "2027-02-08" });
+	t(partsOf(lateUtc.text).weekly && !partsOf(lateUtc.text).month, "§14 the first Monday is the business day passed in, never another clock's day");
+
+	// No current weekly figures.
+	const stale = weeklyFixture({ weekly: { lastWeek: null, weekBefore: null } });
+	const sm = d.buildDigest({ response: stale, preview: false, asOfDay: "2026-11-23" });
+	const sp = partsOf(sm.text);
+	t(sm.subject === "LogisX weekly KPIs: weekly figures not available" && sm.text.includes(`\n${NOT_AVAILABLE_LINE}\n`) && sp.month === `Month\n\n${today.text}`
+		&& !sm.text.includes("Last week (") && !sm.text.includes(MONTHLY_LATER), "§14 no current weekly figures: the month section and one line, never an empty Monday");
+
+	// The preview carries both sections.
+	const pp = partsOf(pv.text);
+	t(pp.weekly && pp.month === `Month\n\n${today.text}` && pv.text.split("\n")[0].startsWith(PREVIEW), "§14 the preview carries both sections");
+
+	// HTML escaping of every new string.
+	const xss = weeklyFixture({ weekly: { lastWeek: { ...LW, label: "Nov 14-20, 2026 <s>", shortLabel: "Nov 14-20 <s>" } } });
+	xss.metrics.find((m) => m.key === "fuel_savings").weekly.reason = "Monthly only: <script>x</script>";
+	xss.metrics.find((m) => m.key === "revenue").weekly.comparison.note = "Held <b>back</b> & 'why'";
+	const xm = d.buildDigest({ response: xss, preview: true, asOfDay: "2026-11-23" });
+	const lowerHtml = xm.html.toLowerCase();
+	t(!["<script", "<s>", "<b>", "<i>"].some((tag) => lowerHtml.includes(tag)) && xm.html.includes("&lt;script&gt;x&lt;/script&gt;") && xm.html.includes("Held &lt;b&gt;back&lt;/b&gt; &amp; &#39;why&#39;")
+		&& xm.html.includes("&lt;i&gt;80.0%&lt;/i&gt;") && xm.html.includes("74.0% &amp; up") && xm.html.includes("Nov 14-20 &lt;s&gt;") && xm.html.includes("&lt;b&gt;&amp;&lt;/b&gt;"),
+	"§14 every new string is HTML-escaped (the week rule, labels, figures, reasons, notes)");
+
+	// K29 end to end: the real buildKpiResponse() over stored rows and approvals.
+	if (lib) {
+		const since = "2026-11-19T22:00:00.000Z";
+		const rows = [];
+		const keys = ["loads_delivered", "revenue", "miles_driven", "active_units"];
+		for (const key of keys) {
+			const base = { metric_key: key, coverage: 1, vs_label: null, vs_display: null, vs_status: null, computed_at: "2026-11-23T09:00:00.000Z" };
+			rows.push({ ...base, week_start: "2026-11-07", week_end: "2026-11-13", to_day: "2026-11-13", partial: 0, label: "Nov 7-13, 2026", value: 5, display: "5" });
+			// Revenue's change is held back for coverage: the server's own note stands in for it.
+			const vs = key === "revenue" ? { vs_display: "Not available", vs_status: "withheld" } : { vs_display: "+20.0%", vs_status: "ok" };
+			rows.push({ ...base, week_start: "2026-11-14", week_end: "2026-11-20", to_day: "2026-11-20", partial: 0, label: "Nov 14-20, 2026", value: 6, display: "6", vs_label: "vs Nov 7-13", ...vs });
+			rows.push({ ...base, week_start: "2026-11-21", week_end: "2026-11-27", to_day: "2026-11-23", partial: 1, label: "Nov 21-23, 2026 (to date)", value: 1, display: "1" });
+		}
+		const approval = (key, at, version = 1) => ({ metric_key: key, approved: 1, definition_version: version, settings_hash: "", approved_by: "super_admin", approved_at: at });
+		const answer = lib.buildKpiResponse({
+			asOfDay: "2026-11-23", timeZone: "America/Chicago", generatedAt: "2026-11-23T14:00:00.000Z", settings: { recipients: [] }, snapshots: [], series: [],
+			approvals: [approval("loads_delivered", since), approval("revenue", "2026-11-19T21:59:59.000Z"), approval("miles_driven", "2026-11-20T15:00:00.000Z"), approval("active_units", "2026-11-21T15:00:00.000Z", 0)],
+			weekly: true, weeklyRows: rows, weeklySince: since,
+		});
+		const k = d.buildDigest({ response: answer, preview: false, asOfDay: "2026-11-23" });
+		const kp = partsOf(k.text);
+		const weeklyYes = (label) => blockOf(kp.weekly, label).endsWith("Approved for public use (weekly figures): Yes");
+		t(k.subject === "LogisX weekly KPIs: Nov 14-20, 2026" && blockOf(kp.weekly, "Loads delivered").includes("Last week (Nov 14-20): 6. Week before (Nov 7-13): 5. Change: +20.0%."),
+			`§14 through the real answer: last week and the week before from the stored rows (${JSON.stringify(k.subject)})`);
+		t(weeklyYes("Loads delivered"), "§14 K29: an approval given at kpi.weekly_since covers the weekly figures");
+		t(!weeklyYes("Gross load revenue") && blockOf(kp.weekly, "Gross load revenue").endsWith(": No"), "§14 K29: an approval given before kpi.weekly_since reads No");
+		t(weeklyYes("Miles driven (ELD)"), "§14 K29: an approval given after kpi.weekly_since reads Yes");
+		t(blockOf(kp.weekly, "Active units (drivers with a delivered load)").endsWith("Approved for public use (weekly figures): No"), "§14 K29: an invalid approval (an earlier definition) reads No");
+		// The email compares last week with the week before, so the note names those two weeks.
+		const held = blockOf(kp.weekly, "Gross load revenue");
+		t(held.includes("Last week (Nov 14-20): 6. Week before (Nov 7-13): 5. A weekly comparison is shown only where at least 90% of each week's loads have the figure; last week or the week before falls short, so it is not shown.")
+			&& !held.toLowerCase().includes("this week"), `§14 the server's held-back note names last week and the week before, never "this week" (${JSON.stringify(held.split("\n")[1] || "")})`);
 	}
 	return out;
 }
-console.log("\n§13 R16 weekly blocks present");
-record(weeklyChecks(loadFrom(SRC)));
+
+console.log("\n§13 weekly off");
+record(offChecks(loadFrom(SRC)));
+console.log("\n§14 R4 the Monday email");
+const LIB_METRICS = require(path.join(ROOT, "lib", "kpi-metrics.js"));
+record(mondayChecks(loadFrom(SRC), LIB_METRICS));
 
 console.log("\n§9 purity");
 {
@@ -325,6 +550,27 @@ console.log("\n§10 MUTANTS");
 		["the month-to-date note dropped", swap(SRC, "if (mtd && line(mtd.label, 60)) out.push(", "if (false) out.push(")],
 	];
 	record(mutants.map(([name, src]) => ({ ok: caught(src), name: `MUTANT ${name}: caught` })));
+
+	// §14's own: each must fail a §14 or §13 check.
+	const caughtMonday = (src) => {
+		const d = loadFrom(src);
+		return [...offChecks(d), ...mondayChecks(d, LIB_METRICS)].some((x) => !x.ok);
+	};
+	const monday = [
+		["a Monday-based week in the subject", swap(SRC, "(lastWeek ? `LogisX weekly KPIs: ${line(lastWeek.label, 60)}`", "(lastWeek ? `LogisX weekly KPIs: week of ${weekOf}`")],
+		["the month section every Monday", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = true;")],
+		["the first Monday read off the UTC day", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !lastWeek || !!preview || isFirstMonday(String(r.generatedAt || \"\").slice(0, 10));")],
+		["the monthly approval on a weekly line", swap(SRC, "m.approval.approved === true && m.approval.coversWeekly === true ? \"Yes\" : \"No\"", "m.approval.approved === true ? \"Yes\" : \"No\"")],
+		["a held metric in the weekly section", swap(SRC, "const weeklyRows = lastWeek ? metrics.map(", "const weeklyRows = lastWeek ? (Array.isArray(r.metrics) ? r.metrics : []).filter((m) => m && typeof m === \"object\").map(")],
+		["the week-before figure worked out in the email", swap(SRC, "${before}: ${shown(prev)}.", "${before}: ${prev && Number.isFinite(prev.value) ? String(prev.value) : NOT_AVAILABLE}.")],
+		["a withheld change printed as a change", swap(SRC, "const change = c && c.status === \"withheld\" && line(c.note) ? line(c.note) : ", "const change = ")],
+		["the week in progress printed as last week", swap(SRC, "const cur = w.current && w.current.weekStart === lastWeek.weekStart ? w.current : null;", "const cur = w.toDate || w.current;")],
+		["no month section when last week is missing", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !!preview || isFirstMonday(day);")],
+		["the preview without the month section", swap(SRC, "const showMonth = !lastWeek || !!preview || isFirstMonday(day);", "const showMonth = !lastWeek || isFirstMonday(day);")],
+		["the week rule not escaped", swap(SRC, "[`<p style=\"margin:0 0 16px;color:#475569\">${escHtml(rule)}</p>`]", "[`<p style=\"margin:0 0 16px;color:#475569\">${rule}</p>`]")],
+		["the weekly section with weekly figures off", swap(SRC, "\tif (!weekly) {\n", "\tif (false) {\n")],
+	];
+	record(monday.map(([name, src]) => ({ ok: caughtMonday(src), name: `MUTANT §14 ${name}: caught` })));
 }
 
 if (failures.length) {

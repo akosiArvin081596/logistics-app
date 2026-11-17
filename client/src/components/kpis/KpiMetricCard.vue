@@ -109,7 +109,7 @@
         </ul>
       </section>
 
-      <KpiApprovalToggle :metric="metric" :saving="saving" :weekly-note="weeklyNote" @set="(e) => emit('set-approval', e)" />
+      <KpiApprovalToggle :metric="metric" :saving="saving" :weekly-note="approvalWeeklyNote(metric, weeklyNote)" @set="(e) => emit('set-approval', e)" />
 
       <details class="kpi-details">
         <summary>Definition, source and monthly figures</summary>
@@ -160,7 +160,7 @@ import KpiSparkline from './KpiSparkline.vue'
 import KpiApprovalToggle from './KpiApprovalToggle.vue'
 import KpiWeeklyBlock from './KpiWeeklyBlock.vue'
 import {
-  PARTIAL_BADGE, beforeAfterRow, comparisonRow, confidenceBadge, coverageText, fmtSettingDate as settingDate, kindBadge,
+  PARTIAL_BADGE, approvalWeeklyNote, beforeAfterRow, comparisonRow, confidenceBadge, coverageText, fmtSettingDate as settingDate, kindBadge,
 } from '../../lib/kpiView.js'
 import { monthLabel } from '../../lib/monthLabel.js'
 import { fmtYmd } from '../../utils/datetime'

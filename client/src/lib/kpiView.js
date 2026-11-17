@@ -333,11 +333,8 @@ export function approvalConfirmText(label, approve, weeklyNote = '') {
 }
 
 // ── Weekly (R16) ───────────────────────────────────────────────────────────────
-// A metric's weekly block as the server sent it: last week, its comparison with
-// the week before, this week so far and the weeks for the sparkline, every label
-// and figure a server string; or the reason a metric has no weekly figures. Each
-// week is plotted under its own label; a week with no figure is a gap, and the
-// week to date (the last one) is drawn dashed, as the open month is.
+// A metric's weekly block as the server sent it, every label and figure a server
+// string; a week with no figure is a gap, the week to date drawn dashed.
 
 export const WEEKLY_TITLE = 'Weekly (Sat-Fri)'
 
@@ -346,7 +343,8 @@ export function weeklyView(weekly) {
   if (!weekly || typeof weekly !== 'object') return null
   const mode = String(weekly.mode ?? '')
   const rule = String(weekly.weekRule ?? '')
-  if (mode !== 'weekly') return { mode, rule, reason: String(weekly.reason ?? ''), lastWeek: null, comparison: null, toDate: null, points: [], openPeriod: '' }
+  // L4: the week rule explains weeks, so only a card with weeks shows it.
+  if (mode !== 'weekly') return { mode, rule: '', reason: String(weekly.reason ?? ''), lastWeek: null, comparison: null, toDate: null, points: [], openPeriod: '' }
   const row = (r) => (r && typeof r === 'object'
     ? { label: String(r.label ?? ''), display: String(r.display ?? ''), muted: !isPlotted(r.value) }
     : null)
@@ -372,6 +370,36 @@ export function weeklyView(weekly) {
       display: String(r?.display ?? ''),
     })),
     openPeriod: toDate ? toDate.label : '',
+  }
+}
+
+/** L4: the approve dialog's weekly sentence, for a metric that has weekly figures only. */
+export function approvalWeeklyNote(metric, weeklyNote) {
+  return metric?.weekly?.mode === 'weekly' ? String(weeklyNote ?? '') : ''
+}
+
+export const WEEKLY_NOT_APPROVED = 'Weekly figures not approved yet'
+export const WEEKLY_APPROVE_ACTION = 'Approve weekly figures too'
+
+/**
+ * K30: a weekly metric approved before weekly figures began (the server's
+ * coversWeekly is false) shows one button that approves it again, weekly
+ * figures included. Absent coversWeekly (weekly figures off) shows nothing.
+ */
+export function weeklyApprovalView(metric) {
+  const a = metric?.approval
+  const pending = metric?.weekly?.mode === 'weekly' && a?.approved === true && a?.coversWeekly === false
+  return { pending, note: pending ? WEEKLY_NOT_APPROVED : '', action: WEEKLY_APPROVE_ACTION }
+}
+
+/** K30's confirm: it names the metric, as the switch's does, and gives the server's weekly sentence. */
+export function weeklyApprovalConfirmText(label, weeklyNote = '') {
+  const name = String(label ?? '').trim() || 'this metric'
+  const note = String(weeklyNote ?? '').trim()
+  return {
+    title: `Approve “${name}” for its weekly figures too?`,
+    body: `${APPROVE_BODY}${note ? ` ${note}` : ''}`,
+    action: WEEKLY_APPROVE_ACTION,
   }
 }
 
