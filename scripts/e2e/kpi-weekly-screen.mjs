@@ -121,10 +121,13 @@ function answerOn(asOfDay, approvals) {
   })
 }
 const PAGE_DAY = '2026-11-23'
+// The stub's own clock: a re-save is stamped on the page's made-up day, after SINCE as
+// on the server (where the save is always later than the switch-on), whatever day it runs.
+const RESAVED_AT = `${PAGE_DAY}T14:00:00.000Z`
 const world = {
   approvals: [approvalRow('loads_delivered', '2026-11-20T15:00:00.000Z'), approvalRow('revenue', '2026-11-02T15:00:00.000Z'), approvalRow('fuel_mpg', '2026-11-03T15:00:00.000Z')],
   answer: null,
-  puts: [],
+  kpiGets: 0,
 }
 world.answer = answerOn(PAGE_DAY, world.approvals)
 const metricOf = (key) => world.answer.metrics.find((m) => m.key === key)
@@ -136,14 +139,17 @@ function fixtureGet(pathname) {
   if (pathname === '/api/auth/session') return ok({ authenticated: true, user: SUPER_ADMIN, appTimeZone: 'America/Chicago' })
   if (pathname === '/api/auth/setup-check') return ok({ needsSetup: false })
   if (pathname === '/api/dispatch-notifications') return ok({ notifications: [], unreadCount: 0 })
-  if (pathname === '/api/admin/kpis') return ok(world.answer)
+  if (pathname === '/api/admin/kpis') {
+    world.kpiGets++
+    return ok(world.answer)
+  }
   return null
 }
 // The approval route as the server answers it; the next GET carries the new approval.
 function fixturePut(pathname, body) {
   const m = pathname.match(/^\/api\/admin\/kpis\/approvals\/([a-z_]+)$/)
   if (!m) return null
-  const at = new Date().toISOString()
+  const at = RESAVED_AT
   world.approvals = world.approvals.filter((r) => r.metric_key !== m[1]).concat([{ ...approvalRow(m[1], at), approved: body.approved ? 1 : 0 }])
   world.answer = answerOn(PAGE_DAY, world.approvals)
   return { status: 200, body: { key: m[1], approval: { approved: body.approved, by: 'super_admin', at, stale: false } } }
@@ -293,14 +299,26 @@ async function desktopRun(browser) {
     const want = weeklyApprovalConfirmText('Gross load revenue', world.answer.weekly.approvalNote)
     const title = clean(await dialog.getByRole('heading').first().textContent({ timeout: 2000 }).catch(() => ''))
     const dialogShot = await shot(page, '3-confirm-1280')
+    const getsAtConfirm = world.kpiGets
     await dialog.getByRole('button', { name: want.action }).click({ timeout: 5000 })
     const gone = await card(page, 'revenue').locator('.kpi-approval-weekly-btn').waitFor({ state: 'detached', timeout: 8000 }).then(() => true, () => false)
+    // The PUT's answer alone hides the button; only the reloaded answer names the stored row
+    // (qa_kpi_admin, the re-save's day), so the button must stay gone after it too.
+    let reloaded = false
+    for (let i = 0; i < 80 && !reloaded; i++) {
+      reloaded = world.kpiGets > getsAtConfirm
+      if (!reloaded) await page.waitForTimeout(100)
+    }
+    const metaReloaded = await card(page, 'revenue').locator('.kpi-approval-meta', { hasText: 'qa_kpi_admin on Nov 23, 2026' })
+      .waitFor({ state: 'visible', timeout: 8000 }).then(() => true, () => false)
+    const buttonAfter = await card(page, 'revenue').locator('.kpi-approval-weekly-btn').count()
+    const meta = clean(await card(page, 'revenue').locator('.kpi-approval-meta').textContent({ timeout: 2000 }).catch(() => ''))
     const sent = writes.slice(before)
-    record('KW3', 'Two clicks: the confirm names the metric; confirming sends one approval PUT and the button goes',
-      `title "${want.title}"; one PUT /api/admin/kpis/approvals/revenue { approved: true, definitionVersion: 1 }; no button after the reload`,
-      `opened ${opened}; title "${title}"; writes ${JSON.stringify(sent)}; button gone ${gone}`,
+    record('KW3', 'Two clicks: the confirm names the metric; confirming sends one approval PUT; after the reload the button stays gone',
+      `title "${want.title}"; one PUT /api/admin/kpis/approvals/revenue { approved: true, definitionVersion: 1 }; a GET after it; the meta from the reloaded row; no button`,
+      `opened ${opened}; title "${title}"; writes ${JSON.stringify(sent)}; hidden at once ${gone}; reloaded ${reloaded}; meta "${meta}"; buttons after the reload ${buttonAfter}`,
       opened && title === want.title && sent.length === 1 && sent[0].method === 'PUT' && sent[0].path === '/api/admin/kpis/approvals/revenue'
-        && sent[0].body.approved === true && sent[0].body.definitionVersion === 1 && gone,
+        && sent[0].body.approved === true && sent[0].body.definitionVersion === 1 && gone && reloaded && metaReloaded && buttonAfter === 0,
       dialogShot)
     await shot(card(page, 'revenue'), '3b-revenue-after-1280')
     const scroll = await noSidewaysScroll(page)

@@ -32,7 +32,7 @@
  *    coverage line or count.
  * §13 with no weekly fields on the answer (KPI_WEEKLY_ENABLED off), the
  *    subject, the HTML and the text are byte for byte a693dbe2's (pinned).
- * §14 R4, the Monday email as D said (the answer's weekly fields present):
+ * §14 R4, the weekly Monday email (the answer's weekly fields present):
  *    the subject names last week's dates; last week against the week before,
  *    each figure, label and change the server's string, a withheld change
  *    replaced by its note, "No records" never a 0; monthly-only and not-tracked
@@ -301,15 +301,15 @@ function offChecks(d) {
 	];
 }
 
-// §14 R4: the Monday email as D said.
+// §14 R4: the Monday email with weekly figures on.
 const RULE = "Weeks run Saturday to Friday, the same week as the drivers' turns and their invoices. Load dates use the US Central calendar <b>&</b> ELD miles use each truck's local day.";
-const WEEK_NOTE = "A weekly comparison is shown only where at least 90% of each week's loads have the figure; this week or the week before falls short, so it is not shown.";
+const WEEK_NOTE = "A weekly comparison is shown only where at least 90% of each week's loads have the figure; last week or the week before falls short, so it is not shown.";
 const LW = { weekStart: "2026-11-14", weekEnd: "2026-11-20", label: "Nov 14-20, 2026", shortLabel: "Nov 14-20" };
 const WB = { weekStart: "2026-11-07", weekEnd: "2026-11-13", label: "Nov 7-13, 2026", shortLabel: "Nov 7-13" };
 const WEEK_HEAD = "Last week (Nov 14-20) against the week before (Nov 7-13)";
 const MONTHLY_LATER = "Monthly figures come in the first Monday's email of each month.";
 const NOT_AVAILABLE_LINE = "Weekly figures are not available this week.";
-// The week in progress: never printed (D: last week against the week before).
+// The week in progress: never printed; the email compares complete weeks only.
 const TO_DATE = "99,991 Zed to date";
 function weekRow(w, value, display) {
 	return { weekStart: w.weekStart, weekEnd: w.weekEnd, to: w.weekEnd, label: w.label, value, display, coverage: 1, partial: false };
@@ -469,7 +469,8 @@ function mondayChecks(d, lib) {
 	xss.metrics.find((m) => m.key === "fuel_savings").weekly.reason = "Monthly only: <script>x</script>";
 	xss.metrics.find((m) => m.key === "revenue").weekly.comparison.note = "Held <b>back</b> & 'why'";
 	const xm = d.buildDigest({ response: xss, preview: true, asOfDay: "2026-11-23" });
-	t(!/<script>|<s>|<b>|<i>/.test(xm.html) && xm.html.includes("&lt;script&gt;x&lt;/script&gt;") && xm.html.includes("Held &lt;b&gt;back&lt;/b&gt; &amp; &#39;why&#39;")
+	const lowerHtml = xm.html.toLowerCase();
+	t(!["<script", "<s>", "<b>", "<i>"].some((tag) => lowerHtml.includes(tag)) && xm.html.includes("&lt;script&gt;x&lt;/script&gt;") && xm.html.includes("Held &lt;b&gt;back&lt;/b&gt; &amp; &#39;why&#39;")
 		&& xm.html.includes("&lt;i&gt;80.0%&lt;/i&gt;") && xm.html.includes("74.0% &amp; up") && xm.html.includes("Nov 14-20 &lt;s&gt;") && xm.html.includes("&lt;b&gt;&amp;&lt;/b&gt;"),
 	"§14 every new string is HTML-escaped (the week rule, labels, figures, reasons, notes)");
 
@@ -481,7 +482,9 @@ function mondayChecks(d, lib) {
 		for (const key of keys) {
 			const base = { metric_key: key, coverage: 1, vs_label: null, vs_display: null, vs_status: null, computed_at: "2026-11-23T09:00:00.000Z" };
 			rows.push({ ...base, week_start: "2026-11-07", week_end: "2026-11-13", to_day: "2026-11-13", partial: 0, label: "Nov 7-13, 2026", value: 5, display: "5" });
-			rows.push({ ...base, week_start: "2026-11-14", week_end: "2026-11-20", to_day: "2026-11-20", partial: 0, label: "Nov 14-20, 2026", value: 6, display: "6", vs_label: "vs Nov 7-13", vs_display: "+20.0%", vs_status: "ok" });
+			// Revenue's change is held back for coverage: the server's own note stands in for it.
+			const vs = key === "revenue" ? { vs_display: "Not available", vs_status: "withheld" } : { vs_display: "+20.0%", vs_status: "ok" };
+			rows.push({ ...base, week_start: "2026-11-14", week_end: "2026-11-20", to_day: "2026-11-20", partial: 0, label: "Nov 14-20, 2026", value: 6, display: "6", vs_label: "vs Nov 7-13", ...vs });
 			rows.push({ ...base, week_start: "2026-11-21", week_end: "2026-11-27", to_day: "2026-11-23", partial: 1, label: "Nov 21-23, 2026 (to date)", value: 1, display: "1" });
 		}
 		const approval = (key, at, version = 1) => ({ metric_key: key, approved: 1, definition_version: version, settings_hash: "", approved_by: "super_admin", approved_at: at });
@@ -499,6 +502,10 @@ function mondayChecks(d, lib) {
 		t(!weeklyYes("Gross load revenue") && blockOf(kp.weekly, "Gross load revenue").endsWith(": No"), "§14 K29: an approval given before kpi.weekly_since reads No");
 		t(weeklyYes("Miles driven (ELD)"), "§14 K29: an approval given after kpi.weekly_since reads Yes");
 		t(blockOf(kp.weekly, "Active units (drivers with a delivered load)").endsWith("Approved for public use (weekly figures): No"), "§14 K29: an invalid approval (an earlier definition) reads No");
+		// The email compares last week with the week before, so the note names those two weeks.
+		const held = blockOf(kp.weekly, "Gross load revenue");
+		t(held.includes("Last week (Nov 14-20): 6. Week before (Nov 7-13): 5. A weekly comparison is shown only where at least 90% of each week's loads have the figure; last week or the week before falls short, so it is not shown.")
+			&& !held.toLowerCase().includes("this week"), `§14 the server's held-back note names last week and the week before, never "this week" (${JSON.stringify(held.split("\n")[1] || "")})`);
 	}
 	return out;
 }

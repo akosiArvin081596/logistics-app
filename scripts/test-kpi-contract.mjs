@@ -30,7 +30,8 @@
 //   R4: last week, the week before, kpi.weekly_since and each metric's previous
 //   week and coversWeekly in the shape; the week rule and the weekly sentence on
 //   weekly-mode metrics only (L4); "Approve weekly figures too" only where a
-//   valid approval predates weekly figures (K30); the week-to-date row (L3).
+//   valid approval predates weekly figures (K30), and it only ever approves,
+//   through the same set event as the switch; the week-to-date row (L3).
 //
 // The figures in the fixture are FAKE. No network, no server, no database, no Vue.
 //
@@ -820,6 +821,29 @@ function viewChecks(v) {
 const shipped = await import(pathToFileURL(LIB_PATH).href)
 report(viewChecks(shipped))
 
+// K30 (review L2): "Approve weekly figures too" may only ever approve. The button
+// opens askWeekly(), which sets the confirm to approve; confirm() sends that choice
+// through the same set event, and so the existing PUT, as the switch does.
+function fnBody(src, head) {
+  const at = src.indexOf(`\nfunction ${head} {\n`)
+  if (at < 0) return ''
+  const end = src.indexOf('\n}\n', at + 1)
+  return end < 0 ? '' : src.slice(at + 1, end + 2)
+}
+function weeklyButtonChecks(src) {
+  const ask = fnBody(src, 'ask()')
+  const askWeekly = fnBody(src, 'askWeekly()')
+  const confirm = fnBody(src, 'confirm()')
+  const sets = (body) => body.split('\n').filter((l) => l.includes('next.value =')).map((l) => l.trim())
+  const button = src.slice(src.indexOf('class="kpi-approval-weekly"'), src.indexOf('</div>', src.indexOf('class="kpi-approval-weekly"')))
+  return [
+    { name: 'K30: the weekly button opens askWeekly()', ok: button.includes('@click="askWeekly"') && !button.includes('@click="ask"'), detail: button.slice(0, 200) },
+    { name: 'K30: askWeekly() sets the confirm to approve, and nothing else for next', ok: askWeekly.includes('forWeekly.value = true') && JSON.stringify(sets(askWeekly)) === JSON.stringify(['next.value = true']), detail: askWeekly },
+    { name: 'K30: the switch\'s ask() clears the weekly confirm', ok: ask.includes('forWeekly.value = false'), detail: ask },
+    { name: 'K30: confirm() sends the confirmed choice through the set event (the existing PUT)', ok: confirm.includes("emit('set', { key: props.metric.key, approved: next.value, definitionVersion: props.metric.definitionVersion })"), detail: confirm },
+  ].map((r) => ({ ...r, detail: r.ok ? '' : r.detail }))
+}
+
 // ══ 4. The page's own files ═══════════════════════════════════════════════════
 {
   const { results, check } = collector()
@@ -850,6 +874,7 @@ report(viewChecks(shipped))
   check('L4: the card passes the weekly sentence through approvalWeeklyNote()', /:weekly-note="approvalWeeklyNote\(metric, weeklyNote\)"/.test(card))
   const toggle = read('components/kpis/KpiApprovalToggle.vue')
   check('K30: the toggle decides the button and words its confirm in kpiView.js', toggle.includes('weeklyApprovalView(props.metric)') && toggle.includes('weeklyApprovalConfirmText('))
+  for (const r of weeklyButtonChecks(toggle)) check(r.name, r.ok, r.detail)
   const weeklyBlock = read('components/kpis/KpiWeeklyBlock.vue')
   const ddRule = (weeklyBlock.match(/\.kpi-weekly-pair dd \{[^}]*\}/) || [''])[0]
   check('L3: the week to date says "to date" once, without nested brackets', !/This week so far \(\{\{ view\.toDate\.label \}\}\)/.test(weeklyBlock) && /<dt>This week: \{\{ view\.toDate\.label \}\}<\/dt>/.test(weeklyBlock))
@@ -917,6 +942,30 @@ for (const [label, src] of MUTANTS) {
     console.error(`FAIL  mutant not caught: ${label}`)
   }
   console.log(`  ${failed.length ? 'caught ' : 'MISSED '} ${label}${failed[0] ? ` — ${failed.length} check(s), e.g. ✗ ${failed[0].name}` : ''}`)
+}
+
+// The toggle's own mutants (review L2): each must fail weeklyButtonChecks().
+{
+  const TOGGLE_SRC = fs.readFileSync(path.join(CLIENT_SRC, 'components', 'kpis', 'KpiApprovalToggle.vue'), 'utf8')
+  const mutateToggle = (from, to) => {
+    const n = TOGGLE_SRC.split(from).length - 1
+    if (n !== 1) throw new Error(`toggle mutant anchor not found exactly once (${n}x): ${from.slice(0, 80)}`)
+    return TOGGLE_SRC.replace(from, () => to)
+  }
+  const TOGGLE_MUTANTS = [
+    ['T1 the weekly button confirms the switch\'s state (a withdrawal of a valid approval)', mutateToggle('  forWeekly.value = true\n  next.value = true\n', '  forWeekly.value = true\n  next.value = !view.value.approved\n')],
+    ['T2 confirm() flips the weekly choice', mutateToggle("emit('set', { key: props.metric.key, approved: next.value, definitionVersion: props.metric.definitionVersion })", "emit('set', { key: props.metric.key, approved: forWeekly.value ? !view.value.approved : next.value, definitionVersion: props.metric.definitionVersion })")],
+    ['T3 the weekly button opens the switch\'s ask()', mutateToggle('@click="askWeekly"', '@click="ask"')],
+  ]
+  for (const [label, src] of TOGGLE_MUTANTS) {
+    const failed = weeklyButtonChecks(src).filter((r) => !r.ok)
+    if (failed.length) pass++
+    else {
+      fail++
+      console.error(`FAIL  mutant not caught: ${label}`)
+    }
+    console.log(`  ${failed.length ? 'caught ' : 'MISSED '} ${label}${failed[0] ? ` — ✗ ${failed[0].name}` : ''}`)
+  }
 }
 
 console.log(`\nkpi-contract: ${pass} passed, ${fail} failed`)
