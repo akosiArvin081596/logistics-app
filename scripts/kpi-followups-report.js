@@ -17,10 +17,14 @@
 //   3. approvalsUnchanged: every metric's approval, as GET /api/admin/kpis would
 //      show it from the stored approvals, is the same with weekly figures on;
 //   4. the kpi_series_weekly rows a run would write, and the compute time the
-//      weekly rows add against the run's 4-minute box;
+//      weekly rows add (the median of warm runs, signed) against the 4-minute box;
 //   5. the comparisons withheld for coverage;
 //   6. the weeks that cross a month end, and the closed months (period_locks)
-//      the weeks touch, read only.
+//      the weeks touch, read only;
+//   (a) R4: the Monday email as lib/kpi-digest.js builds it from this run's own
+//      answer, for the next Monday and for a first Monday, never sent;
+//   (b) the metrics approved now, each with its approval day, and those K29
+//      asks to approve again for their weekly figures.
 // Exit codes: 0 done, 1 a proof failed (2 or 3) or an error, 2 refused.
 //
 // Usage:
@@ -40,7 +44,8 @@ const { serverSource } = require("./lib/server-source");
 
 const ROOT = path.join(__dirname, "..");
 const KPI_RUN_TIME_LIMIT_MS = 4 * 60 * 1000;
-const ROOTS = ["kpiSheetLoads", "kpiGatherDbInputs", "kpiAssembleInputs", "kpiReadSettings", "kpiApprovalSettings", "parseSheet", "deduplicateLoads", "liveJobTrackingView", "APP_TIMEZONE"];
+const ROOTS = ["kpiSheetLoads", "kpiGatherDbInputs", "kpiAssembleInputs", "kpiReadSettings", "kpiApprovalSettings", "parseSheet", "deduplicateLoads", "liveJobTrackingView", "APP_TIMEZONE",
+	"kpiPayload", "kpiWeeklyRowsOf", "kpiEnforceApprovals", "KPI_SNAPSHOT_STATUSES", "KPI_CONFIDENCES"];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "fetch"];
 // What the report must never lift: the KPI job's writers and sender, the HTTP
 // server, sockets, the Sheets writer, the mailer, Drive.
@@ -63,13 +68,42 @@ function liftKpi(db, env) {
 	};
 	const noFetch = () => { throw new Error("lifted code called fetch(); this report makes no network calls"); };
 	const quiet = { log() {}, warn() {}, error: (...a) => console.error(...a) };
-	const body = `"use strict";\n${lifted.text}\nreturn { kpiSheetLoads, kpiGatherDbInputs, kpiAssembleInputs, kpiReadSettings, kpiApprovalSettings, parseSheet, deduplicateLoads, liveJobTrackingView, APP_TIMEZONE };`;
+	const body = `"use strict";\n${lifted.text}\nreturn { kpiSheetLoads, kpiGatherDbInputs, kpiAssembleInputs, kpiReadSettings, kpiApprovalSettings, parseSheet, deduplicateLoads, liveJobTrackingView, APP_TIMEZONE, kpiPayload, kpiWeeklyRowsOf, kpiEnforceApprovals, KPI_SNAPSHOT_STATUSES, KPI_CONFIDENCES };`;
 	return new Function("db", "require", "console", "process", "__dirname", "fetch", body)(
 		db, liftedRequire, quiet, { env: { ...env }, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } }, ROOT, noFetch,
 	);
 }
 
 const stripWeekly = (result) => ({ ...result, metrics: result.metrics.map((m) => { const { weekly: _w, ...rest } = m; return rest; }) });
+
+// (a): the rows one run stores, as kpiStoreResult() maps them with the lifted
+// kpiPayload() and kpiWeeklyRowsOf(), so the email reads what the server would.
+const WEEKLY_COLUMNS = ["week_start", "week_end", "to_day", "partial", "label", "value", "display", "coverage", "vs_label", "vs_display", "vs_status"];
+function storedRows(result, day, k, kpiCatalog) {
+	const snapshots = result.metrics.map((m) => ({
+		day, metric_key: m.key, value: Number.isFinite(m.value) ? m.value : null,
+		display: typeof m.display === "string" ? m.display.slice(0, 120) : "",
+		status: k.KPI_SNAPSHOT_STATUSES.includes(m.status) ? m.status : "missing",
+		confidence: k.KPI_CONFIDENCES.includes(m.confidence) ? m.confidence : "none",
+		definition_version: Number(kpiCatalog.metricByKey(m.key).definitionVersion) || 1,
+		payload: k.kpiPayload(m, () => {}),
+	}));
+	const series = result.metrics.flatMap((m) => (Array.isArray(m.series) ? m.series : [])
+		.filter((s) => s && /^\d{4}-\d{2}$/.test(String(s.period || "")))
+		.map((s) => ({ metric_key: m.key, period: s.period, value: Number.isFinite(s.value) ? s.value : null, display: typeof s.display === "string" ? s.display.slice(0, 60) : "", coverage: Number.isFinite(s.coverage) ? s.coverage : null })));
+	const weeklyRows = result.metrics.flatMap((m) => k.kpiWeeklyRowsOf(m).map((w) => Object.fromEntries([["metric_key", m.key], ...WEEKLY_COLUMNS.map((c, i) => [c, w[i]])])));
+	return { snapshots, series, weeklyRows };
+}
+
+// The Monday on or after `day`, and the first Monday dated the 1st to the 7th from it.
+function mondaysFrom(day) {
+	const plus = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+	let next = day;
+	while (new Date(`${next}T12:00:00Z`).getUTCDay() !== 1) next = plus(next, 1);
+	let first = next;
+	while (+first.slice(8, 10) > 7) first = plus(first, 7);
+	return { next, first };
+}
 
 async function weeklyPart(args) {
 	const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
@@ -85,6 +119,7 @@ async function weeklyPart(args) {
 	const kpiMetrics = appRequire("./lib/kpi-metrics");
 	const kpiCatalog = appRequire("./lib/kpi-catalog");
 	const appTime = appRequire("./lib/app-time");
+	const kpiDigest = appRequire("./lib/kpi-digest");
 	try {
 		const k = liftKpi(db, env);
 		const asOfDay = typeof args["as-of"] === "string" ? args["as-of"] : appTime.dayInZone(new Date(), k.APP_TIMEZONE);
@@ -99,12 +134,24 @@ async function weeklyPart(args) {
 		const offInputs = { ...base };
 		delete offInputs.weekly;
 
-		let t0 = Date.now();
-		const off = kpiMetrics.computeKpis(offInputs);
-		const offMs = Date.now() - t0;
-		t0 = Date.now();
-		const on = kpiMetrics.computeKpis({ ...offInputs, weekly: true });
-		const onMs = Date.now() - t0;
+		// L7: a warm-up of each mode, then the median of a few alternating runs.
+		const RUNS = 3;
+		kpiMetrics.computeKpis(offInputs);
+		kpiMetrics.computeKpis({ ...offInputs, weekly: true });
+		const times = { off: [], on: [] };
+		let off;
+		let on;
+		for (let i = 0; i < RUNS; i++) {
+			let t0 = Date.now();
+			off = kpiMetrics.computeKpis(offInputs);
+			times.off.push(Date.now() - t0);
+			t0 = Date.now();
+			on = kpiMetrics.computeKpis({ ...offInputs, weekly: true });
+			times.on.push(Date.now() - t0);
+		}
+		const median = (list) => [...list].sort((x, y) => x - y)[Math.floor(list.length / 2)];
+		const offMs = median(times.off);
+		const onMs = median(times.on);
 
 		const monthlyUnchanged = JSON.stringify(stripWeekly(on)) === JSON.stringify(off);
 		const approvals = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals").all();
@@ -147,11 +194,37 @@ async function weeklyPart(args) {
 		} catch {
 			closedMonths = ["(period_locks not readable)"];
 		}
+
+		// (a) and (b): this run's answer as GET would serve it with weekly figures
+		// on; kpi.weekly_since is absent before the first switch-on.
+		let sinceRow = null;
+		try {
+			sinceRow = db.prepare("SELECT value FROM server_state WHERE key = 'kpi.weekly_since'").get();
+		} catch {
+			sinceRow = null;
+		}
+		const stored = storedRows(on, asOfDay, k, kpiCatalog);
+		const answer = k.kpiEnforceApprovals(kpiMetrics.buildKpiResponse({
+			asOfDay, timeZone: k.APP_TIMEZONE, generatedAt: new Date().toISOString(), settings, approvalSettings, approvals, derived: on.derived,
+			snapshots: stored.snapshots, series: stored.series, weekly: true, weeklyRows: stored.weeklyRows, weeklySince: sinceRow ? String(sinceRow.value) : null,
+		}), approvals, approvalSettings);
+		const mondays = mondaysFrom(asOfDay);
+		const digestOn = (day) => {
+			const d = kpiDigest.buildDigest({ response: answer, preview: false, asOfDay: day });
+			return { day, subject: d.subject, text: d.text };
+		};
+		const email = { builtFrom: asOfDay, nextMonday: digestOn(mondays.next), firstMonday: digestOn(mondays.first) };
+		const approvedNow = answer.metrics.filter((m) => m.approval && m.approval.approved === true).map((m) => {
+			const mode = (kpiCatalog.weeklyModeOf(m.key) || {}).mode || "none";
+			return { key: m.key, day: m.approval.at ? appTime.dayInZone(new Date(m.approval.at), k.APP_TIMEZONE) : null, mode, reapprove: mode === "weekly" && m.approval.coversWeekly !== true };
+		});
+
 		return {
 			part: "weekly", asOfDay, timeZone: k.APP_TIMEZONE, weekRule: kpiCatalog.weekRuleText(kpiMetrics.weekCalendar(k.APP_TIMEZONE)), weeksFrom: from,
 			metrics, monthlyUnchanged, approvalsUnchanged,
-			rowsWritten: rows, computeMsOff: offMs, computeMsOn: onMs, computeMsAdded: onMs - offMs, runTimeBoxMs: KPI_RUN_TIME_LIMIT_MS,
+			rowsWritten: rows, computeMsOff: offMs, computeMsOn: onMs, computeMsAdded: onMs - offMs, computeRuns: RUNS, runTimeBoxMs: KPI_RUN_TIME_LIMIT_MS,
 			withheld, weeksCrossingMonthEnd: [...crossing], closedMonthsTouched: closedMonths,
+			email, approvedNow,
 		};
 	} finally {
 		db.close();
@@ -167,9 +240,14 @@ function printText(r) {
 	}
 	lines.push("", `2. monthlyUnchanged: ${r.monthlyUnchanged ? "yes" : "NO"}`);
 	lines.push(`3. approvalsUnchanged: ${r.approvalsUnchanged ? "yes" : "NO"}`);
-	lines.push(`4. kpi_series_weekly rows a run would write: ${r.rowsWritten}. Compute: ${r.computeMsOff} ms off, ${r.computeMsOn} ms on (+${r.computeMsAdded} ms) of a ${r.runTimeBoxMs} ms run box.`);
+	const added = `${r.computeMsAdded < 0 ? "-" : "+"}${Math.abs(r.computeMsAdded)}`;
+	lines.push(`4. kpi_series_weekly rows a run would write: ${r.rowsWritten}. Compute, the median of ${r.computeRuns} warm runs: ${r.computeMsOff} ms off, ${r.computeMsOn} ms on (${added} ms) of a ${r.runTimeBoxMs} ms run box.`);
 	lines.push(`5. Comparisons withheld for coverage: ${r.withheld.length ? r.withheld.map((w) => `${w.key} ${w.week}`).join("; ") : "none"}`);
 	lines.push(`6. Weeks crossing a month end: ${r.weeksCrossingMonthEnd.join("; ") || "none"}. Closed months the weeks touch (read only): ${r.closedMonthsTouched.join(", ") || "none"}.`);
+	lines.push("", `(a) The Monday email from this run's figures (as of ${r.email.builtFrom}), built as the server builds it and never sent. On the day, the email reads that Monday morning's run.`);
+	for (const [what, e] of [["the next Monday", r.email.nextMonday], ["a first Monday", r.email.firstMonday]]) lines.push("", `--- ${what}, ${e.day}. Subject: ${e.subject}`, e.text);
+	const why = (x) => (x.mode !== "weekly" ? `${x.mode.replace("_", " ")}, nothing to approve again` : (x.reapprove ? "approve again for its weekly figures (K29)" : "its weekly figures are covered"));
+	lines.push("", `(b) Approved now: ${r.approvedNow.length ? r.approvedNow.map((x) => `${x.key} (approved ${x.day}; ${why(x)})`).join("; ") : "none"}.`);
 	console.log(lines.join("\n"));
 }
 
