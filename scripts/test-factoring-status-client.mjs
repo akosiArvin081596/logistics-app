@@ -96,7 +96,7 @@ section('§5  Super Admin only')
 const MARK_WORDS = "Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here."
 function controlsViolations(src) {
   const v = []
-  if (!/<div v-if="auth\.isSuperAdmin && \(chip \|\| mayFactor \|\| mayClear \|\| mayRecord\)"/.test(src)) v.push('FactoringControls.vue is not Super Admin only')
+  if (!/<div v-if="auth\.isSuperAdmin && \(chip \|\| mayFactor \|\| mayClear \|\| mayRecord \|\| result\)"/.test(src)) v.push('FactoringControls.vue is not Super Admin only')
   if (!src.includes(`<p v-if="mayFactor" class="fact-note">${MARK_WORDS}</p>`)) v.push("the switch's one line is not there word for word, beside the switch only")
   for (const fn of ['setFactored', 'recordOutside']) {
     if (!new RegExp(`async function ${fn}\\([^)]*\\) \\{\\n\\s*if \\(!auth\\.isSuperAdmin\\b`).test(src)) v.push(`${fn}() does not refuse a non-Super-Admin first`)
@@ -146,7 +146,7 @@ eq(activeViolations(ACTIVE), [], '§5 FAILS ON THE OLD CODE: Active Loads mounts
   eq(files.filter((f) => /FactoringControls/.test(read(f))).map(rel).sort(), ['client/src/components/dashboard/ActiveLoadsTab.vue', 'client/src/components/dashboard/CompletedLoadsTab.vue'], '§5 the controls are mounted on the two office tabs only')
 }
 for (const [name, file, src, check, from, to] of [
-  ['the controls show to every role', 'FactoringControls.vue', CONTROLS, controlsViolations, '<div v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord)"', '<div v-if="chip || mayFactor || mayClear || mayRecord"'],
+  ['the controls show to every role', 'FactoringControls.vue', CONTROLS, controlsViolations, '<div v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord || result)"', '<div v-if="chip || mayFactor || mayClear || mayRecord || result"'],
   ['the line shows with no switch', 'FactoringControls.vue', CONTROLS, controlsViolations, '<p v-if="mayFactor" class="fact-note">', '<p class="fact-note">'],
   ['the line loses a word', 'FactoringControls.vue', CONTROLS, controlsViolations, 'After the invoice goes out, this', 'After the invoice goes, this'],
   ['setFactored() runs for every role', 'FactoringControls.vue', CONTROLS, controlsViolations, 'async function setFactored(next) {\n  if (!auth.isSuperAdmin || ', 'async function setFactored(next) {\n  if ('],
@@ -499,6 +499,13 @@ section('§9  Process with Triumph: the button, the tile, the chip')
   }
   eq(controlsSplitViolations(CONTROLS), [], '§9 FAILS ON THE OLD CODE (N-L6): the one switch split in two: "Factor with Triumph" and "Clear factored", each on the server\'s word; Clear factored keeps its reason box')
   ok(controlsSplitViolations(CONTROLS.replace('const mayClear = computed(() => canClear(status.value))', 'const mayClear = computed(() => factored.value)')).length > 0, '§9 MUTANT Clear factored on any factored load: caught')
+  // With the switch on, a cleared load has no chip and nothing left to press: the box must stay
+  // while it has its own words to show ("No longer factored: it stays with its invoice to the broker.").
+  const SHOWS_RESULT = 'v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord || result)"'
+  const hidesResult = (src) => !src.includes(SHOWS_RESULT)
+  ok(!hidesResult(CONTROLS), "§9 FAILS ON THE OLD CODE: Clear factored's own words stay on screen after the clear, though nothing is left to press")
+  ok(CONTROLS.split(SHOWS_RESULT).length - 1 === 1 && hidesResult(CONTROLS.replace(SHOWS_RESULT, 'v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord)"')),
+    "§9 MUTANT a clear's words hidden with the box once nothing is left to press: caught")
   // Mutants of the lib's own rules, each a copy run from a temp folder.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-status-9-'))
   try {

@@ -4,7 +4,7 @@
        (canMark, canClear, canRecordOutside); a Super Admin who isn't listed sees the chip
        only. With Process with Triumph on, a load goes to Triumph only through its button,
        so the server gives no canMark, and Clear factored stays on its own. -->
-  <div v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord)" class="fact-line" :class="chip ? `fact-line--${chip.tone}` : ''">
+  <div v-if="auth.isSuperAdmin && (chip || mayFactor || mayClear || mayRecord || result)" class="fact-line" :class="chip ? `fact-line--${chip.tone}` : ''">
     <span v-if="chip" class="fact-text"><strong>{{ chip.label }}.</strong> {{ chip.reason }}</span>
     <span v-else class="fact-text">Not factored.</span>
     <p v-if="mayFactor" class="fact-note">Mark before the driver taps Delivered. After the invoice goes out, this can't be undone here.</p>
