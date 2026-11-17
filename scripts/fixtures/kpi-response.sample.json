@@ -279,7 +279,7 @@
         "current": { "weekStart": "2026-09-26", "weekEnd": "2026-10-02", "to": "2026-10-02", "label": "Sep 26-Oct 2, 2026", "value": 27250, "display": "$27,250", "coverage": 0.8571, "partial": false },
         "previous": { "weekStart": "2026-09-19", "weekEnd": "2026-09-25", "to": "2026-09-25", "label": "Sep 19-25, 2026", "value": 31500, "display": "$31,500", "coverage": 1, "partial": false },
         "toDate": { "weekStart": "2026-10-03", "weekEnd": "2026-10-09", "to": "2026-10-09", "label": "Oct 3-9, 2026 (to date)", "value": 6000, "display": "$6,000", "coverage": 1, "partial": true },
-        "comparison": { "kind": "wow", "label": "vs Sep 19-25", "display": "Not available", "status": "withheld", "note": "A weekly comparison is shown only where at least 90% of each week's loads have the figure; this week or the week before falls short, so it is not shown." }
+        "comparison": { "kind": "wow", "label": "vs Sep 19-25", "display": "Not available", "status": "withheld", "note": "A weekly comparison is shown only where at least 90% of each week's loads have the figure; last week or the week before falls short, so it is not shown." }
       }
     },
     {
