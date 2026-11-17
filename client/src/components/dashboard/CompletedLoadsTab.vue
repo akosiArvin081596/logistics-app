@@ -128,6 +128,8 @@
             <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
                  draft route answers anyone else 403. -->
             <button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
+            <!-- Process with Triumph: one press, no question; the server says when it shows. -->
+            <button v-if="auth.isSuperAdmin && (showProcessButton || triumphPressing)" type="button" class="triumph-btn" :disabled="triumphPressing" title="Hands this load's invoice, the one already sent to the broker, to Triumph." @click="processWithTriumph">{{ triumphPressing ? 'Sending to Triumph…' : 'Process with Triumph' }}</button>
           </div>
           <template v-if="auth.isSuperAdmin">
             <div v-if="draftResult" class="draft-result" :style="draftMsgStyle" :role="draftResult.tone === 'error' ? 'alert' : 'status'">
@@ -145,6 +147,14 @@
               <button v-if="canTryAgain(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('retry')">Try again</button>
             </div>
             <div v-if="autoActionResult" class="auto-result" :class="`auto-result--${autoActionResult.tone}`" :role="autoActionResult.tone === 'error' ? 'alert' : 'status'">{{ autoActionResult.msg }}</div>
+            <!-- Process with Triumph: where the load stands, in lib/factoringStatus.js's words. -->
+            <div v-if="triumphResult" class="auto-line triumph-line" :class="`auto-line--${triumphResult.tone}`" :role="triumphResult.tone === 'bad' ? 'alert' : 'status'">
+              <span class="auto-line-text">{{ triumphResult.text }}</span>
+            </div>
+            <div v-else-if="selectedTriumphTile" class="auto-line triumph-line" :class="`auto-line--${selectedTriumphTile.tone}`" role="status">
+              <span class="auto-line-text">{{ selectedTriumphTile.text }}</span>
+              <button v-if="selectedTriumphTile.tryAgain" type="button" class="auto-line-btn" :disabled="triumphRetrying" @click="retryTriumph">{{ triumphRetrying ? 'Trying again…' : 'Try again' }}</button>
+            </div>
             <!-- Factored loads (Triumph), in lib/factoringStatus.js's words. -->
             <FactoringControls :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
             <!-- A Draft Invoice press whose Gmail draft may be there: "Check Gmail"
@@ -380,7 +390,7 @@ import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import FactoringControls from './FactoringControls.vue'
-import { inflightLine, reasonInput } from '../../lib/factoringStatus'
+import { inflightLine, reasonInput, canProcess, triumphTile, pressFailure } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
@@ -758,6 +768,7 @@ const plannedLane = ref({ status: 'loading' })
 function onPlannedLane(lane) { plannedLane.value = lane }
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null; autoActionResult.value = null
+  triumphResult.value = null; triumphFollow += 1
   plannedLane.value = { status: 'loading' }
   docError.value = ''; deletingDocId.value = null; docsWithheldNote.value = ''
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
@@ -1031,7 +1042,84 @@ async function autoInvoiceAction(kind) {
 // Factored loads (Triumph): the row's `_factoring` after a change, then a refresh.
 function onFactoringChanged(patch) {
   if (selectedJob.value && patch) selectedJob.value = { ...selectedJob.value, _factoring: patch }
+  triumphResult.value = null
   dashboard.refresh().catch(() => {})
+}
+
+// Process with Triumph (Super Admin): the button beside Draft Invoice Email shows only where the
+// server says the press would take the load (`_factoring.canProcess`). One press, no question;
+// the tile line then says where the load stands. Try again only where the server offers it.
+const triumphPressing = ref(false)
+const triumphRetrying = ref(false)
+// A press's or a Try again's own refusal, in the server's words, until the load is opened again.
+const triumphResult = ref(null)
+// Bumped on each load opened, so a follow-up read for another load stops.
+let triumphFollow = 0
+const showProcessButton = computed(() => Boolean(auth.isSuperAdmin && selectedJob.value && canProcess(selectedJob.value._factoring)))
+const selectedTriumphTile = computed(() => (auth.isSuperAdmin && selectedJob.value
+  ? triumphTile(selectedJob.value._factoring, { formatTime: (t) => fmtDraftDate(t) })
+  : null))
+// The open load's `_factoring` as the dashboard now reads it.
+function freshFactoring() {
+  const key = loadRefValue.value
+  const row = key ? props.jobs.find((j) => loadRef(j, loadIdCol.value) === key) : null
+  if (row && row._factoring && selectedJob.value) selectedJob.value = { ...selectedJob.value, _factoring: row._factoring }
+}
+// While the tile says "Sending to Triumph…", the dashboard is read again a few times, so it can
+// say "Sent to Triumph" with no reload. It stops once the load or the tile changes.
+async function followTile() {
+  const mine = ++triumphFollow
+  for (const ms of [8000, 20000, 45000, 90000]) {
+    await new Promise((resolve) => setTimeout(resolve, ms))
+    if (mine !== triumphFollow || !selectedJob.value) return
+    try { await dashboard.refresh() } catch { /* the next read catches up */ }
+    if (mine !== triumphFollow || !selectedJob.value) return
+    freshFactoring()
+    const f = selectedJob.value && selectedJob.value._factoring
+    if (!f || !['queued', 'working'].includes(f.triumphState)) return
+  }
+}
+async function processWithTriumph() {
+  if (!auth.isSuperAdmin || !loadRefValue.value || triumphPressing.value) return
+  triumphPressing.value = true; triumphResult.value = null
+  try {
+    const r = await api.post('/api/factoring/process-with-triumph', { loadId: loadRefValue.value })
+    if (selectedJob.value && r && r.factoring) selectedJob.value = { ...selectedJob.value, _factoring: r.factoring }
+    followTile()
+  } catch (e) {
+    const out = pressFailure(e)
+    triumphResult.value = { tone: out.tone, text: out.text }
+    if (selectedJob.value && selectedJob.value._factoring) selectedJob.value = { ...selectedJob.value, _factoring: { ...selectedJob.value._factoring, canProcess: false } }
+    // A second press, or one with no clear answer, may be on its way: the load's own line is read.
+    if (out.kind !== 'refused') showTrueTile()
+    else dashboard.refresh().catch(() => {})
+  } finally {
+    triumphPressing.value = false
+  }
+}
+// After a second press or an unconfirmed one: the dashboard read again, and once the load's own
+// Triumph line reads, it takes the place of the words above (it may say "Sending to Triumph…").
+async function showTrueTile() {
+  const mine = ++triumphFollow
+  try { await dashboard.refresh() } catch { return }
+  if (mine !== triumphFollow || !selectedJob.value) return
+  freshFactoring()
+  if (selectedTriumphTile.value) triumphResult.value = null
+  const f = selectedJob.value && selectedJob.value._factoring
+  if (f && ['queued', 'working'].includes(f.triumphState)) followTile()
+}
+async function retryTriumph() {
+  if (!auth.isSuperAdmin || !loadRefValue.value || triumphRetrying.value) return
+  triumphRetrying.value = true; triumphResult.value = null
+  try {
+    const r = await api.post('/api/factoring/triumph-retry', { loadId: loadRefValue.value })
+    if (selectedJob.value && r && r.factoring) selectedJob.value = { ...selectedJob.value, _factoring: r.factoring }
+    followTile()
+  } catch (e) {
+    triumphResult.value = { tone: 'bad', text: (e && Number(e.status) >= 400 && e.message) || "Try again didn't get an answer. Reload the load to see where it stands." }
+  } finally {
+    triumphRetrying.value = false
+  }
 }
 
 // A Draft Invoice press whose Gmail draft may be there (`_draftInflight`).
@@ -1202,6 +1290,17 @@ const detailSections = computed(() => {
 }
 .auto-line-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .auto-line-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+/* Process with Triumph, beside Draft Invoice Email: the same size, outlined, so the draft stays
+   the first action and this one reads as the other way to invoice the load. */
+.triumph-btn {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.4rem 0.8rem; font-size: 0.78rem; font-weight: 700; font-family: inherit;
+  border-radius: 6px; border: 1px solid #0f2847; background: #fff; color: #0f2847;
+  white-space: nowrap; cursor: pointer; transition: all 0.15s;
+}
+.triumph-btn:hover:not(:disabled) { background: #f1f5f9; }
+.triumph-btn:disabled { opacity: 0.75; cursor: progress; }
+.triumph-btn:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
 .inflight-reason { flex: 1 1 10rem; min-width: 0; font-size: 0.78rem; padding: 0.2rem 0.4rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #111827; }
 .auto-result { margin-top: 0.35rem; font-size: 0.75rem; font-weight: 600; color: #166534; }
 .auto-result--error { color: #991b1b; }

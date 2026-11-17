@@ -509,9 +509,11 @@ function factoringGateViolations(src) {
 	ok("lib/factoring-routes.js exists (FAILS ON THE OLD CODE)", FACTORING_SRC.length > 0);
 	const routes = FACTORING_SRC ? factoringRoutes(FACTORING_SRC) : [];
 	const fPaths = routes.map((r) => `${r.verb.toUpperCase()} ${r.paths[0]}`).sort();
-	ok(`the factoring routes are exactly the known three (${fPaths.join(", ")})`, fPaths.join() === [
+	ok(`the factoring routes are exactly the known five, Process with Triumph's two among them (${fPaths.join(", ")})`, fPaths.join() === [
 		"POST /api/factoring/loads/:loadKey",
 		"POST /api/factoring/loads/:loadKey/handled-outside",
+		"POST /api/factoring/process-with-triumph",
+		"POST /api/factoring/triumph-retry",
 		"POST /api/loads/:loadId/invoice-draft-inflight/resolve",
 	].join());
 	const fv = FACTORING_SRC ? factoringGateViolations(FACTORING_SRC) : ["no module"];
@@ -523,10 +525,10 @@ function factoringGateViolations(src) {
 		block.split("factoringRoutes.mount(").length === 2 && /factoringRoutes\.mount\(app, \{ requireRole, refuseCrossSite \}\);/.test(block) &&
 		SRC.split("factoringRoutes.mount(").length === 2 && !/["']\/api\/factoring\//.test(SRC) && !/invoice-draft-inflight/.test(SRC));
 	const from = 'requireRole("Super Admin")';
-	if (FACTORING_SRC.split(from).length - 1 !== 3) ok("factoring mutant anchor found on each of the three routes", false);
+	if (FACTORING_SRC.split(from).length - 1 !== 5) ok("factoring mutant anchor found on each of the five routes", false);
 	else {
 		const v = factoringGateViolations(FACTORING_SRC.split(from).join('requireRole("Super Admin", "Dispatcher")'));
-		ok(`MUTANT Dispatcher re-admitted to the factoring routes: caught (${v.length} violation(s))`, v.filter((s) => s.includes("Dispatcher gets the handler")).length === 3);
+		ok(`MUTANT Dispatcher re-admitted to the factoring routes: caught (${v.length} violation(s))`, v.filter((s) => s.includes("Dispatcher gets the handler")).length === 5);
 	}
 	const xs = "const crossSite = refuseCrossSite ? [refuseCrossSite] : [];";
 	if (FACTORING_SRC.split(xs).length - 1 !== 1) ok("factoring cross-site mutant anchor found once", false);

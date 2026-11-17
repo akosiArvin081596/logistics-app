@@ -56658,6 +56658,10 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 // "true"), TRIUMPH_FACTOR_MARK_IDS (who may mark; unset means nobody), TRIUMPH_NOA_LINES
 // (what a factored invoice prints; unset refuses one) and the submit mode's settings
 // (lib/triumph-rules.js submitMode(): a factored draft can be confirmed only once live).
+// TRIUMPH_PROCESS_BUTTON_ENABLED (exactly "true"): Process with Triumph on a delivered C.H.
+// Robinson load whose automatic invoice went to the broker (lib/triumph-process.js); it works
+// only with marking on, submit live and RATECON_REISSUE_HOLD_ENABLED on, and while it is on the
+// plain mark is off. Its claims go through the Triumph job below (`triumph`, made later).
 require("./lib/factoring-store").ensureSchema(db);
 const factoringRoutes = require("./lib/factoring-routes").create({
 	db,
@@ -56668,9 +56672,12 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	readJobTracking: getJobTrackingCached,
 	findDraftByMessageId: require("./lib/imap-draft").findDraftByMessageId,
 	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
+	closedMonthsOf: integrityClosedMonthsOf,
+	reissueHoldOn: RATECON_REISSUE_HOLD_ENABLED,
+	triumphJob: () => triumph,
 });
 factoringRoutes.mount(app, { requireRole, refuseCrossSite });
-console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}; assignment lines ${factoringRoutes.noaLinesSet ? "set" : "unset"}; submit ${factoringRoutes.submitMode}`);
+console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}; assignment lines ${factoringRoutes.noaLinesSet ? "set" : "unset"}; submit ${factoringRoutes.submitMode}; Process with Triumph ${factoringRoutes.processButtonOn ? (factoringRoutes.buttonWorks() ? "on" : "on, but idle until marking is on, submit is live and the re-issue hold is on") : "off"}`);
 // </factoring-wiring>
 
 // <auto-invoice-wiring>
@@ -56916,6 +56923,7 @@ const triumph = require("./lib/triumph-job").create({
 	noaLines: require("./lib/factoring-routes").readSettings(process.env, { replica: Boolean(REPLICA) }).noaLines,
 	denyHits: triumphDeny.count > 0 ? triumphDeny.hits : null,
 	savedInvoiceEvidence: (key) => require("./lib/invoice-evidence").savedInvoice(db, key),
+	processButtonOn: require("./lib/triumph-rules").processButtonEnabled(process.env, { replica: Boolean(REPLICA) }),
 	logAudit,
 	notify: ({ title, body }) => {
 		insertDispatchNotification.run(TRIUMPH_NOTICE_TYPE, title, body, "{}");
@@ -56923,6 +56931,9 @@ const triumph = require("./lib/triumph-job").create({
 	},
 	log: console,
 });
+// Process with Triumph's columns (the broker invoice's number and date on the mark, where a claim's
+// number came from): made only with its switch on and the job on, so a deploy with it off changes no table.
+if (triumph.mode !== "off" && require("./lib/triumph-rules").processButtonEnabled(process.env, { replica: Boolean(REPLICA) })) require("./lib/triumph-process").ensureSchema(db);
 // The status route's one call into the job: nothing here may fail that route.
 const TRIUMPH_NO_START = Object.freeze({ written() {}, writeFailed(e) { throw e; } });
 function triumphDriverStart(req, args) {
