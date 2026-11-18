@@ -152,9 +152,12 @@ async function handleUpdateTruck(id, data) {
 // API calls are made inside TruckTable, which emits only once one succeeded;
 // we just refresh the table so the "Linked" badge appears (or disappears) on
 // the affected row. Like a save, the confirmation does not wait for the
-// reload, and a failed reload shows on the page (store.loadError).
-function handleLinkageChanged() {
-  toast('Routemate link updated')
+// reload, and a failed reload shows on the page (store.loadError). Under the
+// forward-only link rule the server's answer says from when the change counts,
+// two sentences, so it stays long enough to read.
+function handleLinkageChanged(change) {
+  if (change?.message) toast(change.message, 'success', 8000)
+  else toast('Routemate link updated')
   store.refreshList()
 }
 

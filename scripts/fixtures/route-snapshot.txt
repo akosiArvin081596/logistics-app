@@ -79,8 +79,8 @@ POST /api/chat/attachment · requireAuth@2f5c61384511 · chatAttachmentLimiter=l
 GET /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3eda45f93d95
 POST /api/compliance/fees · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e2cebafb9608
 PUT /api/compliance/fees/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4bef62e2466c
-GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@93ae17e0f553
-GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3df10f335b79
+GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5943ecbbe90b
+GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@d4cf881b8db6
 GET /api/config/maintenance · inline@52e452699466
 GET /api/config/maps-key · mapsKeyLimiter=limiter · inline@65cbbd301ebe
 GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@215a49f7fc3e
@@ -146,7 +146,7 @@ PUT /api/drivers-directory/:id/emergency-contacts · emergencyContactsFlagGate@5
 POST /api/drivers-directory/:id/profile-picture · requireAuth@2f5c61384511 · inline@b6b0cff59df2
 GET /api/eld/linxup/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@8ea0ac5be492
 POST /api/eld/linxup/webhook · inline@82555ec16ec3
-POST /api/expenses · requireAuth@2f5c61384511 · driverWriteLimiter=limiter · inline@c4573b014106
+POST /api/expenses · requireAuth@2f5c61384511 · driverWriteLimiter=limiter · inline@1e5e03158550
 POST /api/expenses/:id/extract-details · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseOcrLimiter=limiter · inline@937a224600bf
 PATCH /api/expenses/:id/location · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@59a266c035f1
 DELETE /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@137ee876c16b
@@ -191,7 +191,7 @@ GET /api/geocode/load/:loadId · requireAuth@2f5c61384511 · inline@2fd74a8afd18
 GET /api/geocode/search · geocodeLimiter=limiter · inline@ff67e8d9f80c
 USE /api/integrations/chr · anon@12b84c4b0134 · anon@3fd8e742e943 · (lib mount) | after: GET /api/integrations/chr/status
 GET /api/integrations/chr/status · anon@12b84c4b0134 · anon@22f9089ae793 · (lib mount)
-GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@a6fa53525d07
+GET /api/investor · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@8117ec11a7d9
 GET /api/investor-applications · requireRole("Super Admin")=anon@12b84c4b0134 · inline@72c9057ae964
 DELETE /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@f6357c8c538e
 GET /api/investor-applications/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4044527e9ca5
@@ -334,8 +334,8 @@ GET /api/trucks · requireRole("Super Admin", "Dispatcher", "Investor")=anon@12b
 POST /api/trucks · requireRole("Super Admin", "Dispatcher", "Investor")=anon@12b84c4b0134 · inline@49b17fb2fb57
 DELETE /api/trucks/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@998b513c5bd5
 PUT /api/trucks/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f63b42808fc7
-DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b793c4400242
-POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b3f9ec796fd0
+DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d30155a95bd2
+POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2fe8116b6be9
 GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c9395146e033
 POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2aa9a5c0afb8
