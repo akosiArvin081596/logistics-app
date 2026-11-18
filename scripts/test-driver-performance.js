@@ -3081,9 +3081,10 @@ const sortedKeys = (o) => Object.keys(o || {}).sort();
 		const routesCode = fs.readFileSync(path.join(ROOT, "lib", "driver-performance-routes.js"), "utf8");
 		ok(!/routemate_telemetry|load_coordinates|fuel-pickup-arrival|twinAtShipper|buildEldDeviceResolver|other_load_hauling|pickup_zone/.test(routesCode), "no twin, errand or other-load test: the route reads no track, mapped pickup or recorder mark");
 		ok(/SELECT load_id, truck_id, pickup_depart_ms/.test(routesCode), "it reads which truck a stored departure names, only to keep a credit as live");
-		// Nothing that pays reads the kept rows.
+		// Nothing that pays reads the kept rows. The office Delivered list reads them only to refuse: a load
+		// completed on any of its rows starts no office invoice (test-auto-invoice-driver-trigger.js §24 pins that).
 		const libFiles = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js"));
-		eq(libFiles.filter((f) => /everyJobTrackingRow/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))).sort(), ["deleted-load-restore.js", "driver-performance-routes.js", "job-tracking-every-row.js"], "only this feature's routes and the deleted-load restore (its month check and row match) read the kept rows");
+		eq(libFiles.filter((f) => /everyJobTrackingRow/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))).sort(), ["auto-invoice-office.js", "deleted-load-restore.js", "driver-performance-routes.js", "job-tracking-every-row.js"], "only this feature's routes, the deleted-load restore (its month check and row match) and the office Delivered list (a refusal only) read the kept rows");
 		eq(libFiles.filter((f) => /driver-pickup-proof/.test(fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))), ["driver-performance-routes.js"], "and only they read the proof");
 		const { STATEMENT_TEMPLATE_FILES } = require(path.join(ROOT, "lib", "statement-template-hash.js"));
 		eq(STATEMENT_TEMPLATE_FILES.filter((f) => /job-tracking-every-row|driver-pickup-proof/.test(f)), [], "no stored statement's template holds either new file");

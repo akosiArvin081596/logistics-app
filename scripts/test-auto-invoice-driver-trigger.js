@@ -2679,6 +2679,23 @@ const OFFICE_GROUPS = {
 			t.eq([twin && twin.reason_code, w.sentFor("LD-TEST-2307")], ["OFFICE_PENDING", 1], "§24 FAILS ON THE OLD CODE (N2): ...a load on one row, never completed: one send");
 		}
 		{
+			// The kept rows only ever refuse (test-driver-performance.js lets this one module read them): what
+			// completedKeys() finds goes to the list alone, and the list is read once, as a reason to start nothing.
+			const code = (name) => { try { return fs.readFileSync(path.join(ROOT, "lib", name), "utf8").replace(/\/\/.*$/gm, ""); } catch { return ""; } };
+			const [officeSrc, jobSrc, triggerSrc] = ["auto-invoice-office.js", "auto-invoice-job.js", "auto-invoice-trigger.js"].map(code);
+			const body = (src, head, end) => { const at = src.indexOf(head); return at === -1 ? "" : src.slice(at, src.indexOf(end, at)); };
+			const keysFn = body(officeSrc, "function completedKeys(", "\n}\n");
+			const listFn = body(jobSrc, "async function listCompleted(", "\n\t}\n");
+			const count = (src, re) => (src.match(re) || []).length;
+			t.ok(count(officeSrc, /\beveryJobTrackingRow\b/g) === 2 && /everyJobTrackingRow\(jt\)/.test(keysFn),
+				"§24 FAILS ON THE OLD CODE (N2): the office module reads the kept rows in completedKeys() alone");
+			t.ok(!/everyJobTrackingRow|keepEveryRow/.test(jobSrc + triggerSrc) && count(jobSrc, /\bcompletedKeys\(/g) === 1 && /office\.completedKeys\(/.test(listFn)
+				&& /office\.addCompleted\(db, keys, /.test(listFn) && !/ledger\.|insertClaim|transition|attempt|wake\(|notify|audit/.test(listFn),
+				"§24 FAILS ON THE OLD CODE (N2): ...and what it finds goes to the list alone, never to a claim, a run or a row");
+			t.ok(count(jobSrc, /office\.listed\(/g) === 1 && count(triggerSrc, /\blisted\b/g) === 1 && /past\.listed === false\)/.test(triggerSrc),
+				"§24 FAILS ON THE OLD CODE (N2): ...and the list is read once, by officeClear(), as a reason to start nothing");
+		}
+		{
 			const w = officeWorld(L);
 			w.ready("LD-TEST-2308");
 			w.ready("LD-TEST-2309");
