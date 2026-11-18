@@ -12,6 +12,7 @@
 //   §6 with the mailbox pass off nothing claims "No invoice found" or "in neither", and
 //      what was found stays found
 //   §7 an answer holds codes, numbers and a day: never an address or a subject
+//   §8 an office user's Delivered (OFFICE_PENDING) reads Waiting, as the driver's does
 //
 // Made-up data only, no database, no network. Fails on a tree without the module.
 //   node scripts/test-invoice-status.js      # exits 1 on any failure
@@ -273,5 +274,12 @@ eq(exportCells(read({ rows: [row()], saved: inSent })), ["Invoiced by hand", INV
 eq(exportCells(read({ rows: [row()], saved: filled })), ["Invoiced by hand", INV, ""], "§7 ...on the Payments Table: plain");
 eq(exportCells(read({ saved: null })), ["Couldn't check", "", ""], "§7 ...and blanks");
 eq(exportCells(null), ["Couldn't check", "", ""], "§7 no answer at all reads Couldn't check, never blank");
+
+// ===================================================================== §8
+section("§8  an office user's Delivered: its record reads as the driver's");
+const OFFICE_PENDING = claim({ state: "waiting", reason_code: "OFFICE_PENDING" });
+eq(read({ claim: OFFICE_PENDING }), { status: WAITING, code: "OFFICE_PENDING" }, "§8 FAILS ON THE OLD CODE: an office Delivered's record, its status on its way to the sheet: Waiting, as a driver's is");
+eq(read({ claim: OFFICE_PENDING, saved: clean }), { status: WAITING, code: "OFFICE_PENDING" }, "§8 FAILS ON THE OLD CODE: ...whatever the mailbox says: the run looks there itself before any send");
+eq(read({ claim: claim({ state: "waiting", reason_code: "DRIVER_PENDING" }), saved: clean }), { status: WAITING, code: "DRIVER_PENDING" }, "§8 ...the driver's, as before");
 
 finish();

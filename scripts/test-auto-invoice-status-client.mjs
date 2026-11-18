@@ -30,6 +30,8 @@
 //   §15 no alert address on the server (item 118): the settings dialog says alerts are off
 //   §16 advance lines on an automatic invoice (PR A1): each new code's words, and a sent
 //       invoice whose advance lines changed asks for a corrected invoice by hand
+//   §17 an office user's Delivered: OFFICE_PENDING's words, and NOT_STARTED read as nothing
+//       started (amber, no Try again), with a mutant; NOT_BY_DRIVER as before
 //
 // No network, no DOM, no database.
 //   node scripts/test-auto-invoice-status-client.mjs      # exits 1 on any failure
@@ -677,6 +679,32 @@ section('§16 advance lines on an automatic invoice (PR A1)')
     'Changed since the draft: its advance lines. Check the draft in Gmail, then Mark checked.', '§16 FAILS ON THE OLD CODE: a draft whose lines changed: check it in Gmail')
   eq([S.canMarkChecked({ state: 'drafted', changed: ['advanceLines'] }), S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'drafted', changed: ['advanceLines'] } })], [true, true],
     '§16 FAILS ON THE OLD CODE: ...Mark checked is offered, and the toggle counts it')
+}
+
+// ------------------------------------------------------------------ §17
+section('§17 an office user\'s Delivered (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED): what a Super Admin reads')
+{
+  const R = S.AUTO_INVOICE_REASONS
+  const PENDING = 'This load was just marked Delivered in the office. The automatic invoice starts once the status is on the sheet.'
+  eq(R.OFFICE_PENDING && [R.OFFICE_PENDING.short, R.OFFICE_PENDING.text], ['about to be made', PENDING], '§17 FAILS ON THE OLD CODE: OFFICE_PENDING has its own words')
+  eq(S.autoInvoiceChip({ state: 'waiting', code: 'OFFICE_PENDING' }), { label: 'Waiting: about to be made', tone: 'muted', reason: PENDING }, '§17 FAILS ON THE OLD CODE: ...the chip while its status goes on the sheet')
+  const NOT_STARTED = 'No automatic invoice was started for this load: it was marked Delivered another way, or before office Deliveries started one. Check Gmail Sent Mail first, then draft it by hand.'
+  eq(S.autoInvoiceChip({ state: 'needs_attention', code: 'NOT_STARTED', invoiceId: '', changed: [], trigger: true, retry: 'none' }), { label: 'No automatic invoice', tone: 'warn', reason: NOT_STARTED },
+    '§17 FAILS ON THE OLD CODE: NOT_STARTED (the switch on): "No automatic invoice" in amber, never "Needs attention" in red, with its own words and the Sent Mail advice')
+  eq([S.canTryAgain({ state: 'needs_attention', code: 'NOT_STARTED' }), S.canTryAgain({ state: 'needs_attention', code: 'NOT_STARTED', retry: 'send' }), S.autoInvoiceNeedsAttention({ _autoInvoice: { state: 'needs_attention', code: 'NOT_STARTED' } })],
+    [false, false, true], '§17 FAILS ON THE OLD CODE: ...no Try again, whatever the row says, and the toggle counts it')
+  ok(!/only the driver/.test(NOT_STARTED), '§17 ...and it doesn\'t say only the driver\'s Delivered starts one')
+  eq(R.NOT_BY_DRIVER.text, "No automatic invoice was started for this load: only the driver's own Delivered starts one. Draft it by hand.", '§17 the switch off: NOT_BY_DRIVER, word for word as before')
+  // The one change that would put the chip back in red with a Try again: NOT_STARTED left out of NOTHING_STARTED.
+  const SRC17 = fs.readFileSync(CLIENT, 'utf8')
+  const SET = "const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED', 'NOT_STARTED'])"
+  ok(SRC17.split(SET).length === 2, '§17 MUTANT NOT_STARTED left out of NOTHING_STARTED: applied to the client\'s text once')
+  if (SRC17.split(SET).length === 2) {
+    const mutant = SRC17.replace(SET, () => "const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED'])")
+    const M = await import(`data:text/javascript;base64,${Buffer.from(mutant).toString('base64')}`)
+    const m = M.autoInvoiceChip({ state: 'needs_attention', code: 'NOT_STARTED', retry: 'none' })
+    ok(m.tone !== 'warn' && M.canTryAgain({ state: 'needs_attention', code: 'NOT_STARTED' }), `§17 MUTANT NOT_STARTED left out of NOTHING_STARTED: caught ("${m.label}", ${m.tone}, Try again offered)`)
+  }
 }
 
 console.log(`\n${'='.repeat(64)}`)

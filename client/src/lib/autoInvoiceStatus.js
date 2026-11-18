@@ -71,6 +71,10 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   PROTECTED_VALUE: { short: 'a protected value would print', text: "The invoice would print a value on the carrier deny list or the driver's name, so it wasn't made. Draft it by hand and check every field." },
   DENY_LIST_UNSET: { short: 'deny list not set', text: "The carrier deny list isn't set on the server, so an invoice with advance lines can't be checked and wasn't made. Draft it by hand." },
   LINES_CHANGED: { short: 'advance lines changed', text: 'An advance line changed while the invoice was being made, so it is made again with the lines as they are now.', attentionText: 'An advance line changed while the invoice was being made, so nothing was sent. Try again makes it with the lines as they are now, or draft it by hand.' },
+  // An office user's Delivered (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED): its record, and, while the
+  // switch is on, the chip on a completed load nothing started.
+  OFFICE_PENDING: { short: 'about to be made', text: 'This load was just marked Delivered in the office. The automatic invoice starts once the status is on the sheet.' },
+  NOT_STARTED: { short: 'no automatic invoice', text: 'No automatic invoice was started for this load: it was marked Delivered another way, or before office Deliveries started one. Check Gmail Sent Mail first, then draft it by hand.' },
 })
 
 // The fields the server compares after a draft (rules.fingerprintDiff()).
@@ -108,7 +112,7 @@ export function changedText(status) {
 }
 
 // The codes on a completed load nothing started: a person drafts it, and there is nothing to retry.
-const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED'])
+const NOTHING_STARTED = new Set(['NOT_BY_DRIVER', 'FACTORED_MARK_CLEARED', 'NOT_STARTED'])
 
 // The chip for a row's `_autoInvoice`: { label, tone, reason }, or null when
 // there is nothing to show. Tones: ok, warn, bad, muted.
