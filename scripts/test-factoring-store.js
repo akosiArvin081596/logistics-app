@@ -690,10 +690,14 @@ section("§7  locked_at's writers");
 // lib/factoring-routes.js: who may mark, clear and record; the switch; the
 // answers. The handlers run on a capturing app (the role gate is its own runner's,
 // scripts/test-invoice-draft-admin-only.js §6).
-function checkRoutes(routesSrc) {
+// `signInSrc`: lib/sign-in.js's text (a mutant of the shared login's words) for the routes to read.
+function checkRoutes(routesSrc, { signInSrc = null } = {}) {
 	const c = checker();
 	const ROUTES_FILE = path.join(ROOT, "lib", "factoring-routes.js");
-	const lib = (() => { const mod = { exports: {} }; new Function("module", "exports", "require", routesSrc)(mod, mod.exports, Module.createRequire(ROUTES_FILE)); return mod.exports; })();
+	const load = (src, file, req) => { const mod = { exports: {} }; new Function("module", "exports", "require", src)(mod, mod.exports, req); return mod.exports; };
+	const base = Module.createRequire(ROUTES_FILE);
+	const signIn = signInSrc ? load(signInSrc, path.join(ROOT, "lib", "sign-in.js"), Module.createRequire(path.join(ROOT, "lib", "sign-in.js"))) : null;
+	const lib = load(routesSrc, ROUTES_FILE, signIn ? Object.assign((p) => (p === "./sign-in" ? signIn : base(p)), base) : base);
 	const build = (env, { replica = false } = {}) => {
 		const db = freshDb(REAL);
 		const refusals = [];
@@ -1007,8 +1011,6 @@ const ROUTE_MUTANTS = [
 	["the note left off a mark's and a clear's rows", "audit: markAuditFor(req, loadId) };\n\t\t\tconst r = body.factored", "audit: auditFor(req, loadId) };\n\t\t\tconst r = body.factored"],
 	["the note left off \"Handled in Triumph's process\"", "audit: markAuditFor(req, loadId) });", "audit: auditFor(req, loadId) });"],
 	["the note left off the refusals", "`${r.code}${sharedLoginNote(userOf(req))}`", "`${r.code}`"],
-	["the note on every account's rows", "return user && isSharedLoginName(user.username) ? `; by", "return user ? `; by"],
-	["the note's words changed", "const SHARED_LOGIN_NOTE = \"shared login, person not recorded\";", "const SHARED_LOGIN_NOTE = \"shared login\";"],
 	["the note on \"Check Gmail\" too", "const audit = auditFor(req, row.load_id || loadId);", "const audit = markAuditFor(req, row.load_id || loadId);"],
 	["the dashboard annotated for every role", "if (user.role !== \"Super Admin\") return;", ""],
 	["the switch given to any Super Admin", "canMark: markingOn && listed && !processButtonOn,", "canMark: markingOn && !processButtonOn,"],
@@ -1018,15 +1020,24 @@ const ROUTE_MUTANTS = [
 	["\"Handled in Triumph's process\" gated on the marking switch", "app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n",
 		"app.post(\"/api/factoring/loads/:loadKey/handled-outside\", requireRole(\"Super Admin\"), ...crossSite, (req, res) => {\n\t\t\tif (!markingOn) return res.status(404).json({ code: \"FEATURE_OFF\" });\n"],
 ];
+// The shared login's words, which the routes read from lib/sign-in.js (sharedLoginNote()).
+const SIGN_IN_FILE_SRC = fs.readFileSync(path.join(ROOT, "lib", "sign-in.js"), "utf8");
+const SIGN_IN_MUTANTS = [
+	["the note on every account's rows", "return user && isSharedLoginName(user.username) ? `; by", "return user ? `; by"],
+	["the note's words changed", "const SHARED_LOGIN_NOTE = \"shared login, person not recorded\";", "const SHARED_LOGIN_NOTE = \"shared login\";"],
+];
 let routeCaught = 0;
-for (const [name, from, to] of ROUTE_MUTANTS) {
-	if (!ROUTES_FILE_SRC || ROUTES_FILE_SRC.split(from).length - 1 !== 1) { failures.push(`route mutant anchor not found once: ${name}`); continue; }
+for (const [name, from, to, file] of [...ROUTE_MUTANTS, ...SIGN_IN_MUTANTS.map((m) => [...m, "sign-in"])]) {
+	const src = file === "sign-in" ? SIGN_IN_FILE_SRC : ROUTES_FILE_SRC;
+	if (!src || src.split(from).length - 1 !== 1) { failures.push(`route mutant anchor not found once: ${name}`); continue; }
 	let c;
-	try { c = checkRoutes(ROUTES_FILE_SRC.replace(from, to)); } catch (e) { c = { out: [`threw: ${e && e.message}`] }; }
+	try {
+		c = file === "sign-in" ? checkRoutes(ROUTES_FILE_SRC, { signInSrc: src.replace(from, to) }) : checkRoutes(src.replace(from, to));
+	} catch (e) { c = { out: [`threw: ${e && e.message}`] }; }
 	if (c.out.length) { routeCaught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(c.out)}`); }
 	else failures.push(`MUTANT ${name}: NOT caught`);
 }
-console.log(`  ${caught}/${MUTANTS.length} store mutants and ${routeCaught}/${ROUTE_MUTANTS.length} route mutants caught`);
+console.log(`  ${caught}/${MUTANTS.length} store mutants and ${routeCaught}/${ROUTE_MUTANTS.length + SIGN_IN_MUTANTS.length} route mutants caught`);
 
 console.log(`\n${pass} passed, ${failures.length} failed`);
 for (const f of failures) console.log(`FAIL  ${f}`);

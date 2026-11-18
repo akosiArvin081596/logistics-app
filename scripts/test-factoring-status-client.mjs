@@ -298,8 +298,8 @@ section("§8  the reason box's hint on the shared login")
   }
   eq(hintViolations(S), [], '§8 FAILS ON THE OLD CODE: "Your name and why (required)" on the shared login, however spelled; "Reason (required)" for any other account')
   eq(boxViolations(CONTROLS), [], "§8 FAILS ON THE OLD CODE: the reason box shows the signed-in account's hint, and no fixed one")
-  ok(read(path.join(ROOT, 'lib', 'factoring-routes.js')).includes(`const SHARED_LOGIN_NOTE = "${SL.SHARED_LOGIN_NOTE}";`),
-    "§8 FAILS ON THE OLD CODE: the server's factoring rows name the shared login in the screens' own words")
+  ok(read(path.join(ROOT, 'lib', 'sign-in.js')).includes(`const SHARED_LOGIN_NOTE = "${SL.SHARED_LOGIN_NOTE}";`),
+    "§8 FAILS ON THE OLD CODE: the server's rows (factoring, an automatic invoice's start) name the shared login in the screens' own words, kept beside isSharedLoginName()")
   const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const p = path.join(dir, e.name)
     if (e.isDirectory()) return e.name === 'node_modules' || e.name === 'dist' ? [] : walk(p)
