@@ -141,8 +141,10 @@ const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEY
 	// Driver availability (R11): read off the env this world has, i.e. off.
 	"DRIVER_AVAILABILITY_ENABLED",
 	// GET /api/financials reads the report (buildFinancialsReport()).
-	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart"];
+	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR",
+	// The forward-only ELD link rule the totals and the fuel recovery read (lib/eld-link-forward.js), as shipped: off here.
+	"ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "eldLinkForwardDecided", "eldLinkForwardReportFromMs"];
 const FNS = [
 	// Under test.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
@@ -169,6 +171,7 @@ const FNS = [
 	"eldLatestCleanFixByVehicle", "eldDeviceStatus", "findTruckForDriver",
 	// The per-load miles both handlers read, shipped as is.
 	"getLoadMilesIndex",
+	"eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "buildEldDeviceResolver", "eldDeviceHistoryStartMs", "fuelEventUnits",
 ];
 const ROUTES = {
 	investor: 'app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {',
@@ -325,6 +328,8 @@ const DDL = `
 	CREATE TABLE financials_ledger_freezes (freeze_id TEXT PRIMARY KEY, period TEXT, source TEXT, frozen_at TEXT, frozen_by TEXT DEFAULT 'system', item_count INTEGER DEFAULT 0, summary TEXT DEFAULT '', settings TEXT DEFAULT '', released_at TEXT NOT NULL DEFAULT '');
 	CREATE TABLE financials_ledger_items (id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, owner_id INTEGER, kind TEXT, adjusts TEXT DEFAULT '', day TEXT DEFAULT '', cents INTEGER, load_id TEXT DEFAULT '', driver TEXT DEFAULT '', truck TEXT DEFAULT '', expense_id INTEGER, source_id INTEGER, expense_type TEXT DEFAULT '', pay_type TEXT DEFAULT '', pickup_state TEXT DEFAULT '', delivery_state TEXT DEFAULT '', freeze_id TEXT, frozen_at TEXT);
 	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, geocoded_location TEXT DEFAULT '', source TEXT DEFAULT '');
+	CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER NOT NULL, routemate_vehicle_id TEXT NOT NULL, assigned_from TEXT NOT NULL, assigned_until TEXT NOT NULL DEFAULT '', assigned_by TEXT NOT NULL DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 `;
 
 // NAMED keeps a named row as it is, BLANK blanks its driver name, NONE drops it.
@@ -456,6 +461,7 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		...KEY_HELPERS,
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, app, geolib, fuelModel, normalizeLoadId, loadMilesLib, financialsReport: require("../lib/financials-report"), invoiceMonthSplit: require("../lib/invoice-month-split"), Date: FixedDate,
+		eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js"),
 		requireRole: () => passthrough, requireAuth: passthrough, fuelAnalyticsLimiter: passthrough,
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: rows.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getDeletedLoadIds: () => new Set(),

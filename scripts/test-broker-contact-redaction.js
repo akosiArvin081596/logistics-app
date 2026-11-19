@@ -212,6 +212,10 @@ function makeScope(stubs) {
 // A stub given as SHIPPED is dropped, so that name resolves to server.js's own
 // top-level definition (a section overriding a shared stub list).
 const SHIPPED = Symbol("the shipped definition");
+const eldLinkForwardLib = require(path.join(ROOT, "lib", "eld-link-forward.js"));
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+	setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 function lift(head, stubs) {
 	const src = extractRoute(head);
 	let handler = null;
@@ -225,7 +229,11 @@ function lift(head, stubs) {
 	const invoiceEvidence = { annotateCompletedRows: ({ rows }) => rows, exportColumns: () => null };
 	// Factored loads (scripts/test-factoring-store.js covers them): nothing marked here.
 	const factoringRoutes = { annotateDashboard() {} };
-	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, autoInvoice, invoiceEvidence, factoringRoutes, ...kept });
+	// The forward-only ELD link rule (scripts/test-eld-link-forward.js covers it): server.js's two lets as a boot with
+	// the switch off leaves them, decided by the shipped lib, so every ELD reader takes today's path.
+	const eldLinkForwardDecided = ELD_LINK_FORWARD_OFF, eldLinkForwardReportFromMs = null;
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, autoInvoice, invoiceEvidence, factoringRoutes,
+		eldLinkForwardDecided, eldLinkForwardReportFromMs, ...kept });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {

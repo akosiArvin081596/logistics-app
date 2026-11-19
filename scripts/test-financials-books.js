@@ -106,8 +106,10 @@ const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN 
 
 const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
-	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
+	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS",
+	// The forward-only ELD link rule the ledger's facts read (lib/eld-link-forward.js), as shipped: off here.
+	"ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch", "eldLinkForwardDecided", "eldLinkForwardReportFromMs"];
 // The truck charge rule as server.js declares it, read off each world's stubbed
 // environment. A server.js from before the rule gets null, so the flag-on worlds
 // below show the UTC month there.
@@ -133,6 +135,7 @@ const FNS = [
 	"closingFingerprint", "closedMonthFreezePlan", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 	// GET /api/financials and the report it reads.
 	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex", "liveJobTrackingView", "correctionLinesTablePresent",
+	"eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "buildEldDeviceResolver", "eldDeviceHistoryStartMs",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
@@ -169,6 +172,8 @@ const DDL = [
 	tableDdl("invoices"), ...alters("invoices"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
+	// What the forward-only ELD link rule reads when it decides (nothing recorded: it stays off).
+	tableDdl("server_state"), tableDdl("eld_device_assignments"),
 ];
 
 // ── the clock: `new Date()` and Date.now() read NOW_MS ───────────────────────
@@ -217,6 +222,7 @@ function buildWorld({ onSheetRead = null, env = {} } = {}) {
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, invoiceMonthSplit: require("../lib/invoice-month-split.js"), loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
+		eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js"),
 		app: {
 			post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; },
 			put: (p, ...h) => { routes[`PUT ${p}`] = h[h.length - 1]; },

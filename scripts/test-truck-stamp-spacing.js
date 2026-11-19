@@ -301,6 +301,11 @@ const EXPENSE_DATE = "2026-09-10";
 // The WITHHELD LOAD KEYS helper the route reads its load ID through, as shipped
 // (flag off, no key named: the ID as sent).
 const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+// The forward-only ELD link rule as a boot with its switch off leaves it, decided by the shipped lib.
+const eldLinkForwardLib = require("../lib/eld-link-forward.js");
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+	setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 function mountExpense(db, routeSrc, helperOver) {
 	const helpers = buildHelpers(db, helperOver);
 	const audits = [];
@@ -332,6 +337,9 @@ function mountExpense(db, routeSrc, helperOver) {
 		appMonthKey: () => "2026-09",
 		// The 2026-10 payout rules, as they ship: off.
 		payoutRules: () => ({ datedAttribution: false, datedRates: false, futureReceipts: false, frozenCarry: false }),
+		// The forward-only ELD link rule, as it ships: off, so the truck's linked device places the receipt.
+		eldLinkForwardRule: () => ELD_LINK_FORWARD_OFF,
+		eldPayLink: () => null,
 		appTodayKey: () => "2026-09-15",
 		periodLocksReadable: () => true,
 		periodWriteLocked: () => false,

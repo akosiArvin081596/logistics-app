@@ -81,8 +81,10 @@ function liftDecl(kind, name) {
 	return SRC.slice(start, end);
 }
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE",
-	"RFC2822_MONTHS", "BROKER_WITHHELD_RE"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart"];
+	"RFC2822_MONTHS", "BROKER_WITHHELD_RE",
+	// The forward-only ELD link rule the route reads (lib/eld-link-forward.js), as shipped: off here.
+	"ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "eldLinkForwardDecided", "eldLinkForwardReportFromMs"];
 const FNS = [
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
 	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
@@ -94,6 +96,7 @@ const FNS = [
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "sanitizeDetails", "getLoadMilesIndex",
 	"periodLockStmt", "isLocked",
+	"eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "buildEldDeviceResolver", "eldDeviceHistoryStartMs",
 ];
 const ROUTE = liftBetween('\napp.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {', "\n});\n", "GET /api/investor");
 const MODULE = [
@@ -142,6 +145,8 @@ const DDL = `
 	CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked', finalized_at TEXT DEFAULT '');
 	CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
 	CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT, latitude REAL, longitude REAL, speed REAL, bearing TEXT, fuel_pct REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '', odometer REAL DEFAULT 0, engine_hours REAL DEFAULT 0, geocoded_location TEXT DEFAULT '', source TEXT DEFAULT '');
+	CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE eld_device_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER NOT NULL, routemate_vehicle_id TEXT NOT NULL, assigned_from TEXT NOT NULL, assigned_until TEXT NOT NULL DEFAULT '', assigned_by TEXT NOT NULL DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 `;
 
 function seed(db) {
@@ -178,6 +183,7 @@ async function investorView(rows = ROWS, opts = {}) {
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, geolib, fuelModel, normalizeLoadId, loadMilesLib: require("../lib/load-miles"), Date: FixedDate,
+		eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js"),
 		app: { get: (p, ...h) => { handler = h[h.length - 1]; } },
 		requireRole: () => passthrough,
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: rows.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),

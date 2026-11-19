@@ -429,7 +429,7 @@ function child(scenario) {
 		}, true);
 		check("§10 the automatic invoices' baseline keeps its Eastern day (lib/auto-invoice-job.js)", () => replay("lib/auto-invoice-job.js", /const dayOf = \(isoText\) => \(isoText \? (.+) : ""\);\n/, ["appTime", "d", "isoText"], [appTime, { timeZone: ZONE }, ISO]), EAST_DAY);
 		check("§10 the month-end guard floor's day (appStampDay())", () => S.appStampDay(ISO), EAST_DAY);
-		check("§10 the ELD device link day (ELD_APP_DAY)", () => replay(SRC,/dayOf: ELD_APP_DAY_ENABLED \? (\(ms\) => .+) : undefined,\n/, BASE, baseValues)(T), EAST_DAY);
+		check("§10 the ELD device link day (ELD_APP_DAY, and the forward-only link rule's resolver)", () => replay(SRC,/dayOf: frozen \|\| ELD_APP_DAY_ENABLED \? (\(ms\) => .+) : undefined,\n/, BASE, baseValues)(T), EAST_DAY);
 		check("§10 a zoned sheet cell's day (sheetDayKey(), lib/load-haul.js)", () => [S.sheetDayKey("2026-11-01T04:30:00Z"), loadHaul.parseSheetInstant("2026-11-01T04:30:00Z").day], [EAST_DAY, EAST_DAY]);
 		const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 		check("§10 the date a payout statement or broker invoice prints from an instant (lib/broker-invoice.js formatDate())", () => [brokerInvoice.formatDate(new Date(T)), brokerInvoice.formatDate(ISO)], ["11/01/2026", "11/01/2026"]);
