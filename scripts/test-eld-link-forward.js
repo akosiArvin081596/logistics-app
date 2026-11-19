@@ -8,11 +8,14 @@
  *
  *   §1 new cases (each fails on a build without the rule): H1, N2 (b) window rule, M2, N5 with R2, R4, R1, N4; and
  *      review 2's M1 (a swap's minutes with no device take no day the devices showed: window rule, trip rule, and a
- *      western truck's business-clock day), each failing on the first build of the rule (636335cc)
+ *      western truck's business-clock day), each failing on the first build of the rule (636335cc); and decision 55's
+ *      bound (only a gap of at most 30 minutes between two device runs gives its days up: the link and unlink cases,
+ *      the bound's edges, the history's ends) and the recheck's L2 (a reporting device's fixes after an unlink)
  *   §2 pins (they pass on such a build too; each names the mutant it catches): M1, N2 (a), N2 (b) trip rule, N3,
  *      N8, no FROM, switch off, N1 at the stop
  *   §3 the link routes under the rule: L3, the narrowed stop and its passing twin, the link line; review 2's H1 (a rename
- *      after an unlink refused while the truck has device history) and its switch-off pin
+ *      after an unlink refused while the truck has device history, in check (5)'s words) and its switch-off pin; the
+ *      recheck's L1 (a delete after an unlink refused the same way) and its switch-off pin
  *
  * Pure: no server, no app.db, no network. Run: node scripts/test-eld-link-forward.js   # exits 1 on failure
  */
@@ -235,14 +238,17 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 	});
 
 	// ---- M1 (review 2): a three-call swap leaves the truck a minute or two with no device ------------------------------
-	// T-101 is parked all of Nov 18 inside its load's window: 15:00Z D-9 unlinked, 15:02Z D-7 linked, and both devices
-	// report it parked. D-9 drove Nov 16-17; D-7 drives Nov 19-20.
-	const gapWorld = ({ trip = false } = {}) => world({
+	// T-101 is parked all of Nov 18 inside its load's window: 15:00Z D-9 unlinked, `linkAt` (15:02Z) D-7 linked (D-9 again
+	// with `sameDevice`), and the devices report it parked. D-9 drove Nov 16-17; the device linked drives Nov 19-20.
+	const gapWorld = ({ trip = false, linkAt = "2026-11-18T15:02:00.000Z", sameDevice = false } = {}) => world({
 		env: { ...ON(), ...(trip ? TRIP : {}) }, recorded: FROM,
-		trucks: [{ unit: "T-101", driver: PAT, vid: "D-7" }],
-		history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z"), linkRow(1, "D-7", "2026-11-18T15:02:00.000Z")],
+		trucks: [{ unit: "T-101", driver: PAT, vid: sameDevice ? "D-9" : "D-7" }],
+		history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z"), linkRow(1, sameDevice ? "D-9" : "D-7", linkAt)],
 		rows: [W.loadRow({ id: "L-G", driver: PAT, pickup: "2026-11-16", dropoff: "2026-11-20", assigned: "2026-11-16", done: "2026-11-20", truck: "T-101" })],
-		pings: {
+		pings: sameDevice ? {
+			"D-9": [...driveDay("2026-11-16", { odo: 100000 }), ...driveDay("2026-11-17", { odo: 100200 }), ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 }),
+				...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 100400 }), ...driveDay("2026-11-19", { odo: 100400 }), ...driveDay("2026-11-20", { odo: 100600 })],
+		} : {
 			"D-9": [...driveDay("2026-11-16", { odo: 100000 }), ...driveDay("2026-11-17", { odo: 100200 }), ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 })],
 			"D-7": [...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 500000 }), ...driveDay("2026-11-19", { odo: 500000 }), ...driveDay("2026-11-20", { odo: 500200 })],
 		},
@@ -279,6 +285,95 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 			now: Date.parse("2026-11-23T17:00:00Z"),
 		});
 		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), ["2026-11-17", "2026-11-18", "2026-11-20"]);
+	});
+
+	// ---- Decision 55 (recheck 1): only a three-call swap's gap, at most 30 minutes between two device runs, gives its days
+	// up; any other stretch with no device keeps them, as a truck with no feed. T-101 is on a Nov 16-20 load (L-K).
+	const d55World = ({ trip = false, history, pings, vid = "", expose = [] }) => world({
+		env: { ...ON(), ...(trip ? TRIP : {}) }, recorded: FROM, expose,
+		trucks: [{ unit: "T-101", driver: PAT, vid }],
+		history,
+		rows: [W.loadRow({ id: "L-K", driver: PAT, pickup: "2026-11-16", dropoff: "2026-11-20", assigned: "2026-11-16", done: "2026-11-20", truck: "T-101" })],
+		pings,
+		status: trip ? [
+			["L-K", "At Shipper", "manual", utc("2026-11-16T15:00:00Z")], ["L-K", "Loading", "manual", utc("2026-11-16T15:30:00Z")],
+			["L-K", "In Transit", "manual", utc("2026-11-16T17:00:00Z")], ["L-K", "At Receiver", "manual", utc("2026-11-20T16:00:00Z")],
+			["L-K", "Delivered", "manual", utc("2026-11-20T19:00:00Z")],
+		] : [],
+		now: Date.parse("2026-11-23T17:00:00Z"),
+	});
+	const LOAD_DAYS = days("2026-11-16", "2026-11-20");
+	// The recheck's link case: no device since Nov 10, driving Nov 18 with none; D-7, linked at 22:00 CT, shows T-101 parked
+	// to midnight and driving Nov 19-20.
+	const linkCase = (opts = {}) => d55World({
+		vid: "D-7",
+		history: [seed(1, "D-9", "2026-11-10T15:00:00.000Z"), linkRow(1, "D-7", "2026-11-19T04:00:00.000Z")],
+		pings: { "D-7": [...track("2026-11-19T04:00:00Z", "2026-11-19T06:00:00Z", { odo: 500000 }), ...driveDay("2026-11-19", { odo: 500000 }), ...driveDay("2026-11-20", { odo: 500200 })] },
+		...opts,
+	});
+	const D9_BEFORE = [...driveDay("2026-11-16", { odo: 100000 }), ...driveDay("2026-11-17", { odo: 100200 })];
+
+	await test("decision 55, the recheck's link case: a link at 22:00 CT ends eight days with no device, which keep the link day, so Nov 18 pays on the three paths", async ({ eq }) => {
+		samePaths(eq, await threePaths(linkCase(), PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+	});
+
+	await test("decision 55, the link case under TRIP_WORK_DAYS: Nov 18 pays as a no-ELD day", async ({ eq }) => {
+		const w = linkCase({ trip: true, expose: ["tripDayResolver", "eldPayLink", "eldPayScope"] });
+		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+		const t = w.api.tripDayResolver().trip("L-K", { truck: w.api.eldPayScope(w.api.eldPayLink()).truckFor("T-101"), window: { start: "2026-11-16", end: "2026-11-20", pickup: "2026-11-16", assigned: "2026-11-16" } });
+		eq("Nov 18's reason", t.reasons && t.reasons["2026-11-18"], "noEld");
+	});
+
+	await test("decision 55, the unlink case: D-9 unlinked at 00:30 CT, then a day with no device: Nov 18 pays as a truck with no feed", async ({ eq }) => {
+		const w = d55World({
+			history: [seed(1, "D-9", "2026-11-18T06:30:00.000Z")],
+			pings: { "D-9": [...D9_BEFORE, ...track("2026-11-18T06:00:00Z", "2026-11-18T06:30:00Z", { odo: 100400 })] },
+		});
+		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+	});
+
+	await test("decision 55, the bound: a gap of exactly 30 minutes between two devices gives the parked swap day up, and so does the same device relinked", async ({ eq }) => {
+		samePaths(eq, await threePaths(gapWorld({ linkAt: "2026-11-18T15:30:00.000Z" }), PAT, "2026-11-20", WEEK_47), GAP_PAID, "30 minutes: ");
+		samePaths(eq, await threePaths(gapWorld({ linkAt: "2026-11-18T15:05:00.000Z", sameDevice: true }), PAT, "2026-11-20", WEEK_47), GAP_PAID, "D-9 relinked: ");
+	});
+
+	await test("decision 55, the bound: a gap of 31 minutes keeps its day, so the swap day pays as a truck with no feed", async ({ eq }) => {
+		samePaths(eq, await threePaths(gapWorld({ linkAt: "2026-11-18T15:31:00.000Z" }), PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+	});
+
+	await test("decision 55, the edges: a stretch with no device at the start of a truck's history (first linked 15:10Z) or at its end (unlinked 15:00Z, no relink) keeps its day: Nov 18 pays", async ({ eq }) => {
+		const start = d55World({
+			vid: "D-7", history: [linkRow(1, "D-7", "2026-11-18T15:10:00.000Z")],
+			pings: { "D-7": [...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 500000 }), ...driveDay("2026-11-19", { odo: 500000 }), ...driveDay("2026-11-20", { odo: 500200 })] },
+		});
+		samePaths(eq, await threePaths(start, PAT, "2026-11-20", WEEK_47), LOAD_DAYS, "start: ");
+		const end = d55World({
+			history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z")],
+			pings: { "D-9": [...D9_BEFORE, ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 })] },
+		});
+		samePaths(eq, await threePaths(end, PAT, "2026-11-20", WEEK_47), LOAD_DAYS, "end: ");
+	});
+
+	// The swap-gap test at the lib, on run lists the resolver itself never makes (a finite stretch at a list's edge): the
+	// decision's "a device run directly before and after" is pinned here, as no route-level case can reach it.
+	await test("decision 55, the lib's swap-gap test: no device, at most 30 minutes, and a device run directly before and after it (one side only never yields)", async ({ eq }) => {
+		const lib = require("../lib/eld-link-forward");
+		const MIN = 60000;
+		const run = (a, b, vid) => ({ fromMs: a, toMs: b, vid, row: null });
+		const gapOf = (runs, i) => lib.createPayLink({ db: null, resolver: { truckRuns: () => runs }, fromMs: 0 }).truck(1).swapGap(runs[i]);
+		eq("between two devices, 30 minutes", gapOf([run(-Infinity, 0, "D-9"), run(0, 30 * MIN, ""), run(30 * MIN, Infinity, "D-7")], 1), true);
+		eq("between two devices, 31 minutes", gapOf([run(-Infinity, 0, "D-9"), run(0, 31 * MIN, ""), run(31 * MIN, Infinity, "D-7")], 1), false);
+		eq("a device after it only", gapOf([run(0, 10 * MIN, ""), run(10 * MIN, Infinity, "D-7")], 0), false);
+		eq("a device before it only", gapOf([run(-Infinity, 0, "D-9"), run(0, 10 * MIN, "")], 1), false);
+	});
+
+	await test("L2 (recheck): a load across an unlink with no relink while the device keeps reporting: its fixes after the unlink never count for the truck (Nov 18-20 pay as no feed)", async ({ eq }) => {
+		const w = d55World({
+			history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z")],
+			pings: { "D-9": [...D9_BEFORE, ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 }),
+				...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 100400 }), ...parkDay("2026-11-19", { odo: 100400 }), ...parkDay("2026-11-20", { odo: 100400 })] },
+		});
+		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
 	});
 
 	await test("R1: a history row opened between FROM and the start keeps the rule off, names the row, and records nothing", async ({ eq, ok }) => {
@@ -487,6 +582,8 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const r = await rename(w, 1, "T-101A");
 		eq("the rename is refused over October, by check (5)", [r.status, r.body && r.body.code, r.body && r.body.periods, ((r.body && r.body.blockers) || []).map((b) => b.field)],
 			[409, "PERIOD_FINALIZED", ["2026-10"], ["unit_number"]]);
+		eq("in check (5)'s words", r.body && r.body.error,
+			"Cannot apply this change to T-101: renaming T-101 → T-101A breaks the ELD link every past load row resolves through, which re-derives driver pay in 1 finalized month. October 2026 is finalized. Nothing was changed. Closed months stay as recorded, so undo the field named above (unit_number) and save the rest of the edit, which is not blocked.");
 		eq("nothing changed", unitOf(w, 1), "T-101");
 		const t = await rename(w, 2, "T-303A");
 		eq("T-303, never linked, renames freely", [t.status, unitOf(w, 2)], [200, "T-303A"]);
@@ -505,6 +602,45 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const w = renameWorld({ env: {}, recorded: null, vid: "", history: [seed(1, "D-7", "2026-11-16T15:00:00.000Z")] });
 		const r = await rename(w, 1, "T-101A");
 		eq("200, renamed", [r.status, unitOf(w, 1)], [200, "T-101A"]);
+	});
+
+	// L1 (recheck): deleting a truck under the rule takes check (5)'s ELD leg, so an unlink then a delete cannot leave
+	// October's T-101 rows on no truck. Neither truck has assignment history, so a delete reaches the closed-month guard.
+	const DELETE_ROUTES = [...ROUTES, ["delete", "/api/trucks/:id"]];
+	const del = (w, id) => W.route(w, "DELETE /api/trucks/:id", { params: { id: String(id) } });
+	const deleteWorld = ({ env = ON(), recorded = FROM, vid = "D-7", history = [seed(1, "D-7")] } = {}) => {
+		const w = world({
+			env, recorded, routes: DELETE_ROUTES, locks: ["2026-10"], vehicles: ["D-7"],
+			trucks: [{ unit: "T-101", driver: "", vid }, { unit: "T-303", driver: "", vid: "" }],
+			history,
+			rows: [W.loadRow({ id: "L-OCT1", driver: PAT, pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck: "T-101" })],
+			now: Date.parse("2026-11-25T16:00:00Z"),
+		});
+		w.db.prepare("DELETE FROM truck_assignments").run();
+		return w;
+	};
+	const truckGone = (w, id) => !w.db.prepare("SELECT 1 FROM trucks WHERE id = ?").get(id);
+
+	await test("L1 (recheck): under the rule, an unlink and then a delete of the truck is refused in check (5)'s words and audited as a blocked delete; a never-linked truck deletes as before", async ({ eq, ok }) => {
+		const w = deleteWorld();
+		eq("the unlink passes", (await unlink(w, 1)).status, 200);
+		const r = await del(w, 1);
+		eq("409 PERIOD_FINALIZED over October", [r.status, r.body && r.body.code, r.body && r.body.periods], [409, "PERIOD_FINALIZED", ["2026-10"]]);
+		eq("in check (5)'s words", r.body && r.body.error,
+			"Cannot delete T-101: deleting T-101 breaks the ELD link every past load row resolves through, which re-derives driver pay in 1 finalized month. October 2026 is finalized. Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. To take it out of service, give it a retirement date in an open month. Nothing was changed.");
+		ok("audited as a blocked delete of truck 1", w.audits.some((a) => a.action === "delete_truck_blocked" && a.entityId === "1"), JSON.stringify(w.audits.map((a) => [a.action, a.entityId])));
+		ok("T-101 is still there", !truckGone(w, 1));
+		const t = await del(w, 2);
+		eq("T-303, never linked, deletes", [t.status, truckGone(w, 2)], [200, true]);
+	});
+
+	await test("delete pin (mutant: the delete leg reading with the rule off): switch off, a linked truck's delete gets today's open-month ELD hold, and an unlinked one with history deletes", async ({ eq }) => {
+		const w = deleteWorld({ env: {}, recorded: null });
+		const r = await del(w, 1);
+		eq("T-101, linked: today's OPEN_MONTH_TRUCK_FIGURES", [r.status, r.body && r.body.code], [409, "OPEN_MONTH_TRUCK_FIGURES"]);
+		const v = deleteWorld({ env: {}, recorded: null, vid: "", history: [seed(1, "D-7", "2026-11-16T15:00:00.000Z")] });
+		const s = await del(v, 1);
+		eq("T-101, unlinked with history: deletes", [s.status, truckGone(v, 1)], [200, true]);
 	});
 
 	console.log("\n§4 IFTA and fuel events under the rule");

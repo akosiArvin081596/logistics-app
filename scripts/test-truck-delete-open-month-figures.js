@@ -154,8 +154,14 @@ const MODULE_SRC = [
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "normalizeDriverName",
 	"getDriverPayStructures", "driverPayLockedMonths", "resolveDailyRate", "investorsHoldingDriver",
 	"assignmentMonthKey", "intersectMonthWindow", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
-	"expenseFrom", "personalLedgerPresent",
+	"expenseFrom", "personalLedgerPresent", "eldLinkHistoryHeld",
 ].map((n) => liftFn(n)).join("\n");
+// The guard's ELD leg reads the forward-only link rule, here as a boot with its switch off leaves it (decided by the
+// shipped lib), so the leg reads nothing (scripts/test-eld-link-forward.js runs it on).
+const eldLinkForwardLib = require(path.join(ROOT, "lib", "eld-link-forward.js"));
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+	setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 function liftConst(name) {
 	const m = SRC.match(new RegExp(`^const ${name} =([\\s\\S]*?);$`, "m"));
 	if (!m) fatal(`const ${name} not found in server.js`);
@@ -263,10 +269,10 @@ function world(opts = {}) {
 function buildModule(w, holdsSrc) {
 	const holds = holdsSrc || "function truckDeleteOpenMonthHolds() { throw new Error(\"truckDeleteOpenMonthHolds() is not in server.js\"); }";
 	return new Function(
-		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console",
+		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console", "eldLinkForwardRule",
 		`let lastPayStructShadowWarnMs = 0;\nconst TRUCK_CHARGE_APP_DAY_RULE = null;\n${CONSTS_SRC}\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
 	)(w.db, () => w.readable, investorPayoutBasis, () => false, FixedDate, "America/New_York", LEASE_SETTINGS,
-		{ log() {}, warn() {}, error() {} });
+		{ log() {}, warn() {}, error() {} }, () => ELD_LINK_FORWARD_OFF);
 }
 
 function deleteRoute(w, rec, { routeSrc = DELETE_SRC, holdsSrc = HOLDS } = {}) {

@@ -39388,6 +39388,16 @@ function truckDeleteLockBlockers(truck) {
 		}
 	}
 
+	// (6) check (5)'s ELD leg, while the forward-only link rule is in force: a past load finds its truck by the truck's
+	// unit, linked now or not, and reads its device history, so deleting a truck linked now or with any history row
+	// (eldLinkHistoryHeld(), fail closed) re-reads every finalized month. With the rule not in force, nothing here.
+	if (eldLinkForwardRule().inForce && (String(truck.routemate_vehicle_id || "").trim() !== "" || eldLinkHistoryHeld(truck.id))) {
+		blockers.push({
+			table: "trucks.routemate_vehicle_id", rows: 1, periods: locked.slice().sort(),
+			detail: `deleting ${truck.unit_number} breaks the ELD link every past load row resolves through, which re-derives driver pay in ${locked.length} finalized month${locked.length === 1 ? "" : "s"}`,
+		});
+	}
+
 	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
