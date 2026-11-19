@@ -64,6 +64,14 @@
  *      and the duplicate scanner's POST /api/admin/remove-rows as shipped, and the block: held as
  *      removed at once and emailed; a delete whose answer was lost but landed; one refused; a
  *      load that keeps another row; another tab; each route's call removed in turn
+ *  §16 an office user's Delivered (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED) through PUT /api/driver/status
+ *      and the Override as shipped, the block and the engine: the switch off changes nothing (the
+ *      routes' answers, no record, the chip, no table, the start-up line); on, each route's Delivered
+ *      sends once with the row naming who set it; the Override's start sits after every refusal and
+ *      before the write, written() right after the cache is dropped; its read-back reads the sheet
+ *      again (landed: queued; not landed: NOT_COMPLETED); a month refusal starts nothing; a POD-less
+ *      Override stops for a person; the routes' own history rows refuse a revival; the row editors
+ *      still start nothing; the settings template; the routes' mutants
  *
  * Made-up loads only (LD-TEST-…, example-broker.test). No network beyond the
  * loopback listener; never reads app.db. Fails on a tree without the block.
@@ -168,28 +176,30 @@ const createSql = (name) => {
 	if (at < 0) throw new Error(`server.js creates no ${name} table`);
 	return SRC.slice(at, SRC.indexOf("`", at));
 };
-const TABLES = ["audit_trail", "documents", "deleted_loads", "load_invoice_drafts", "bison_invoice_seq", "dispatch_notifications", "app_settings", "period_locks"];
-const ALTERS = [...SRC.matchAll(/db\.exec\("(ALTER TABLE (?:documents|load_invoice_drafts) ADD COLUMN [^"]+)"\)/g)].map((m) => m[1]);
+const TABLES = ["audit_trail", "documents", "deleted_loads", "load_invoice_drafts", "bison_invoice_seq", "dispatch_notifications", "app_settings", "period_locks", "load_status_history"];
+const ALTERS = [...SRC.matchAll(/db\.exec\("(ALTER TABLE (?:documents|load_invoice_drafts|load_status_history) ADD COLUMN [^"]+)"\)/g)].map((m) => m[1]);
 const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {';
 const STATUS_HEAD = SRC.split("\n").find((l) => l.startsWith('app.put("/api/driver/status",'));
+const OVERRIDE_HEAD = SRC.split("\n").find((l) => l.startsWith('app.put("/api/loads/:loadId/status-override",'));
 const STATUS_INDEX = indexDeclarations(SRC);
 
 // A route registration as shipped, from `src` (server.js's text, or a mutant of it): every name it
 // reaches is server.js's own top-level declaration, unless `stubs` gives it (the outside world, or the
-// job). Its last handler.
-function liftedHandler(head, stubs, src = SRC) {
+// job). Its last handler. `reindex`: the declarations come from `src` too (a mutant outside the route).
+function liftedHandler(head, stubs, src = SRC, { reindex = false } = {}) {
+	const index = reindex ? indexDeclarations(src) : STATUS_INDEX;
 	const cache = Object.create(null);
 	let proxy = null;
 	proxy = new Proxy(Object.create(null), {
 		has(_, key) {
 			if (typeof key !== "string" || key === "__scope") return false;
-			return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || STATUS_INDEX.decls.has(key) || !(key in globalThis);
+			return Object.prototype.hasOwnProperty.call(stubs, key) || key in cache || index.decls.has(key) || !(key in globalThis);
 		},
 		get(_, key) {
 			if (key === Symbol.unscopables) return undefined;
 			if (Object.prototype.hasOwnProperty.call(stubs, key)) return stubs[key];
 			if (key in cache) return cache[key];
-			const decl = STATUS_INDEX.decls.get(key);
+			const decl = index.decls.get(key);
 			if (decl) {
 				cache[key] = new Function("__scope", `with (__scope) { ${decl.text}\nreturn ${key}; }`)(proxy);
 				return cache[key];
@@ -458,8 +468,9 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	w.job = new Function(...names, "__geminiAt", `${block}\nreturn autoInvoice;`)(...names.map((n) => scope[n]), () => w.geminiAt);
 
 	// PUT /api/driver/status as shipped: every name it reaches is server.js's own top-level
-	// declaration, unless it's the outside world (stubbed here) or the job above.
-	w.statusRoute = ({ notificationThrows = false } = {}) => {
+	// declaration, unless it's the outside world (stubbed here) or the job above. `history`: the
+	// route's own recordStatusChange(), over this world's status history table (§16).
+	w.statusRoute = ({ notificationThrows = false, history = false, src = SRC, reindex = false } = {}) => {
 		const stubs = {
 			app: {}, db, getSheets: scope.getSheets, SPREADSHEET_ID: scope.SPREADSHEET_ID, require: serverRequire, console: quiet, process: proc,
 			autoInvoice: w.job,
@@ -469,12 +480,12 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked && blocked.code }),
 			jtCacheInvalidate: scope.jtCacheInvalidate, notifyChange: () => {}, emitLoadEventToDispatch: () => {}, emitDispatchNotice: () => {},
 			insertDispatchNotification: { run: () => { if (notificationThrows) throw new Error("made-up: the notification insert failed"); return {}; } },
-			recordStatusChange: () => {}, arrivalRecorder: { positionFacts: () => ({}) }, arrivalRecorderReaders: {}, ARRIVAL_PICKUP_RECORDER_ENABLED: false,
+			...(history ? {} : { recordStatusChange: () => {} }), arrivalRecorder: { positionFacts: () => ({}) }, arrivalRecorderReaders: {}, ARRIVAL_PICKUP_RECORDER_ENABLED: false,
 			io: { to: () => ({ emit() {}, except() { return { emit() {} }; } }) },
 			getJobTrackingCached: scope.getJobTrackingCached,
 			REPLICA: replica,
 		};
-		const handler = liftedHandler(STATUS_HEAD, stubs);
+		const handler = liftedHandler(STATUS_HEAD, stubs, src, { reindex });
 		return async (user, id, newStatus = "Delivered") => {
 			const out = { status: 200, json: null };
 			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
@@ -483,6 +494,32 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 			return out;
 		};
 	};
+	// PUT /api/loads/:loadId/status-override as shipped (or `src`, a mutant), the same way. The month
+	// guard (tested where it lives) lets the write through unless a case sets `w.overrideBlocker`, and
+	// the route writes its own audit and status history rows.
+	w.overrideRoute = ({ src = SRC, reindex = false } = {}) => {
+		const handler = liftedHandler(OVERRIDE_HEAD, {
+			app: {}, db, getSheets: scope.getSheets, SPREADSHEET_ID: scope.SPREADSHEET_ID, require: serverRequire, console: quiet, process: proc,
+			autoInvoice: w.job,
+			requireRole: () => null, logAudit: H.logAudit, logAuditRefusal: () => {}, WITHHELD_LOAD_REFS_ENABLED: false,
+			periodLocksReadable: () => true, tripDayLockCover: () => null,
+			statusOverrideBlocker: (headers, rows) => (w.overrideBlocker ? w.overrideBlocker(rows) : null),
+			sendPeriodRefusal: (req, res, kind) => res.status(409).json({ code: `PERIOD_${String(kind).toUpperCase()}` }),
+			jtCacheInvalidate: scope.jtCacheInvalidate, emitLoadEventToDispatch: () => {}, emitDispatchNotice: () => {},
+			insertDispatchNotification: { run: () => ({}) },
+			arrivalRecorder: { positionFacts: () => ({}) }, arrivalRecorderReaders: {}, ARRIVAL_PICKUP_RECORDER_ENABLED: false,
+			io: { to: () => ({ emit() {}, except() { return { emit() {} }; } }) },
+			getJobTrackingCached: scope.getJobTrackingCached,
+			REPLICA: replica,
+		}, src, { reindex });
+		return async (user, id, newStatus = "Delivered", reason = "made-up: the tap didn't take") => {
+			const out = { status: 200, json: null };
+			const res = { status(c) { out.status = c; return res; }, json(b) { out.json = b; return res; } };
+			await handler({ method: "PUT", query: {}, params: { loadId: id }, headers: {}, session: { user }, body: { newStatus, reason } }, res);
+			return out;
+		};
+	};
+	w.history = (id) => db.prepare("SELECT old_status, new_status, source, actor FROM load_status_history WHERE load_id = ? ORDER BY id").all(rules.loadKey(id)).map((r) => [r.old_status, r.new_status, r.source, r.actor]);
 	// A Super Admin's row delete as shipped (the Data Manager's DELETE /api/data/:rowIndex, the duplicate
 	// scanner's POST /api/admin/remove-rows), from `src`. The month guard (tested where it lives) lets the
 	// row go; the tab named "Carrier Database" is gid 7, which the made-up Sheets never deletes from.
@@ -1341,11 +1378,10 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 	section("§13 only this route starts one, and server.js around it");
 	{
 		const STATUS = liftRoute(SRC, STATUS_HEAD);
-		eq(SRC.split("autoInvoiceDriverStart(").length - 1, 2, "§13 FAILS ON THE OLD CODE: one definition, one call");
+		eq(SRC.split("autoInvoiceDriverStart(").length - 1, 3, "§13 FAILS ON THE OLD CODE: one definition, two calls (the status route's and the Override's, §16)");
 		ok(STATUS.includes("const invoiceStart = autoInvoiceDriverStart(req, {"), "§13 FAILS ON THE OLD CODE: the call is PUT /api/driver/status's");
 		eq(SRC.split(".driverDelivered(").length - 1, 1, "§13 nothing else reaches the job's record");
 		for (const head of [
-			SRC.split("\n").find((l) => l.startsWith('app.put("/api/loads/:loadId/status-override",')),
 			SRC.split("\n").find((l) => l.startsWith('app.put("/api/data/:rowIndex",')),
 			SRC.split("\n").find((l) => l.startsWith('app.put("/api/load/:loadId",')),
 			SRC.split("\n").find((l) => l.startsWith('app.post("/api/data",')),
@@ -1760,6 +1796,186 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 			ok(noted(x, "LD-TEST-1509"), `§15 MUTANT ${label} delete tells the job of another tab's rows: caught (the real routes tell it nothing, above)`);
 		}
 		eq([SRC.split("autoInvoiceRowsRemoved(").length - 1, SRC.split(".rowsRemoved(").length - 1], [5, 1], "§15 FAILS ON THE OLD CODE: one wrapper in the block, two calls in each route, and nothing else reaches the job's note");
+	}
+
+	// ===================================================================== §16
+	section("§16 an office user's Delivered, through the Status dropdown, the Override and the block (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED)");
+	{
+		const SEND_ON = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_SEND_ENABLED: "true", AUTO_INVOICE_SEND_DOMAINS: "example-broker.test", ...MAILBOX });
+		const OFFICE_ON = Object.freeze({ ...SEND_ON, AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: "true" });
+		const STARTED = (user, route) => `the automatic invoice was started by ${user.username}'s Delivered (${user.role}, the ${route})`;
+		const until = async (cond, label) => {
+			const end = Date.now() + 30000;
+			while (Date.now() < end) {
+				if (cond()) return true;
+				await new Promise((r) => setTimeout(r, 2));
+			}
+			failures.push(`${label}: the condition was never met`);
+			return false;
+		};
+		const open = (x) => x.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE state IN ('queued', 'working')").get().n;
+		// Past start-up, with a load in transit on the sheet: a start that reads no loads opens nothing.
+		const startedWorld = async (env) => {
+			const x = await world({ env });
+			eq((await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§16 the broker domain confirmed");
+			x.setLoad("LD-TEST-1699", { "Job Status": "In Transit" });
+			await x.job.finishStartUp();
+			return x;
+		};
+		const atReceiver = (x, id, { pod = true } = {}) => {
+			x.setLoad(id, { "Job Status": "At Receiver" });
+			if (pod) x.addPod(id);
+			x.fileRateCon(id, rateCon());
+		};
+		const started = (x, id) => x.audits("auto_invoice_started").filter((r) => r.entity_id === id).map((r) => [r.username, r.role, r.details]);
+
+		// The switch unset: every answer, record, row and table as before.
+		const off = await startedWorld(SEND_ON);
+		ok(off.out.includes("[auto-invoice] office Delivered off"), "§16 FAILS ON THE OLD CODE: the switch unset: the start-up line says the office path is off");
+		const offTap = off.statusRoute({ history: true });
+		const offOverride = off.overrideRoute();
+		atReceiver(off, "LD-TEST-1601");
+		atReceiver(off, "LD-TEST-1602");
+		const viaDropdown = await offTap(DISP, "LD-TEST-1601");
+		const viaOverride = await offOverride(SA, "LD-TEST-1602");
+		await settle();
+		await settle();
+		eq([viaDropdown.status, viaDropdown.json, viaOverride.status, viaOverride.json], [200, { success: true }, 200, { success: true, oldStatus: "At Receiver", newStatus: "Delivered" }], "§16 the switch unset: the Status dropdown and the Override answer as before");
+		eq([off.claim("LD-TEST-1601"), off.claim("LD-TEST-1602"), off.smtp.length, off.audits("auto_invoice_started").length], [null, null, 0, 0], "§16 ...no record from either route, nothing sent, no row");
+		const offRows = [{ "Load ID": "LD-TEST-1602", "Job Status": "Delivered", Email: BROKER, "Completion Date": DELIVERED_ON }];
+		off.job.annotateCompletedRows({ rows: offRows, headers: HEADERS, isSuperAdmin: true });
+		eq([offRows[0]._autoInvoice.code, (await off.call("GET", "/api/auto-invoice/status", SA)).json.office, off.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'auto_invoice_office_before'").get().n],
+			["NOT_BY_DRIVER", undefined, 0], "§16 ...the row reads NOT_BY_DRIVER as before, the status names no office path, and no list table is made");
+		atReceiver(off, "LD-TEST-1603");
+		off.batchFails = { landed: false };
+		const offFailed = await offOverride(SA, "LD-TEST-1603");
+		eq([offFailed.status, offFailed.json && offFailed.json.error, off.claim("LD-TEST-1603")], [500, "made-up: the sheet refused the write", null], "§16 ...and an Override whose write the sheet refused answers the same 500, with no record");
+
+		// The switch on.
+		const w = await startedWorld(OFFICE_ON);
+		ok(w.out.includes("[auto-invoice] office Delivered on"), "§16 FAILS ON THE OLD CODE: the switch on: the start-up line says so");
+		eq((await w.call("GET", "/api/auto-invoice/status", SA)).json.office, { on: true, ready: true }, "§16 FAILS ON THE OLD CODE: ...and the status: on, its list written at the start");
+		const tap = w.statusRoute({ history: true });
+		const override = w.overrideRoute();
+		atReceiver(w, "LD-TEST-1611");
+		let atWrite = null;
+		w.batchHook = () => { atWrite = w.state("LD-TEST-1611"); };
+		const dropped = await tap(DISP, "LD-TEST-1611");
+		w.batchHook = null;
+		eq([dropped.status, dropped.json, atWrite], [200, { success: true }, ["waiting", "OFFICE_PENDING"]], "§16 FAILS ON THE OLD CODE: a Dispatcher's Delivered from the Status dropdown: the answer as before, the record there when the write starts");
+		await until(() => w.smtp.length === 1 && open(w) === 0, "§16 the dropdown's send");
+		eq([w.state("LD-TEST-1611"), w.smtp.map((m) => m.to), w.looks.map((l) => l.loadNumber)], [["drafted", ""], [BILLING], ["LD-TEST-1611"]], "§16 FAILS ON THE OLD CODE: ...one SMTP call through the engine as shipped, after the look through the block's own search");
+		eq(started(w, "LD-TEST-1611"), [[DISP.username, DISP.role, STARTED(DISP, "Status dropdown")]], "§16 FAILS ON THE OLD CODE: ...one row naming the Dispatcher, under that account");
+
+		atReceiver(w, "LD-TEST-1612");
+		atWrite = null;
+		w.batchHook = () => { atWrite = w.state("LD-TEST-1612"); };
+		const overridden = await override(SA, "LD-TEST-1612");
+		w.batchHook = null;
+		eq([overridden.status, overridden.json, atWrite], [200, { success: true, oldStatus: "At Receiver", newStatus: "Delivered" }, ["waiting", "OFFICE_PENDING"]], "§16 FAILS ON THE OLD CODE: a Super Admin's Override to Delivered: the answer as before, the record there when the write starts");
+		await until(() => w.smtp.length === 2 && open(w) === 0, "§16 the Override's send");
+		eq([w.state("LD-TEST-1612"), started(w, "LD-TEST-1612"), w.audits("status_override").length, w.history("LD-TEST-1612")],
+			[["drafted", ""], [[SA.username, SA.role, STARTED(SA, "Override")]], 1, [["At Receiver", "Delivered", "override", SA.username]]],
+			"§16 FAILS ON THE OLD CODE: ...one send, one row naming the Super Admin and the Override, and the route's own audit and history rows as before");
+
+		atReceiver(w, "LD-TEST-1613");
+		w.overrideBlocker = () => ({ code: "AMBIGUOUS_LOAD", periods: [] });
+		const blocked = await override(SA, "LD-TEST-1613");
+		w.overrideBlocker = null;
+		eq([blocked.status, blocked.json && blocked.json.code, w.claim("LD-TEST-1613")], [409, "AMBIGUOUS_LOAD", null], "§16 an Override its own guard refuses (a closed month, a duplicate row): no record");
+		const unblocked = await override(SA, "LD-TEST-1613");
+		await until(() => w.smtp.length === 3 && open(w) === 0, "§16 the unblocked Override's send");
+		eq([unblocked.status, w.state("LD-TEST-1613")], [200, ["drafted", ""]], "§16 FAILS ON THE OLD CODE: ...the same load once nothing refuses it: one send");
+
+		atReceiver(w, "LD-TEST-1614");
+		w.batchFails = { landed: true };
+		const lost = await override(SA, "LD-TEST-1614");
+		eq([lost.status, lost.json && lost.json.error], [500, "made-up: no answer in 15 seconds"], "§16 an Override whose write reports failure: the route's 500, as before");
+		await until(() => w.smtp.length === 4 && open(w) === 0, "§16 the landed Override's send");
+		eq([w.state("LD-TEST-1614"), started(w, "LD-TEST-1614").length], [["drafted", ""], 1], "§16 FAILS ON THE OLD CODE: ...it landed: Job Tracking read again, Delivered: one send, and its row then");
+		atReceiver(w, "LD-TEST-1615");
+		w.batchFails = { landed: false };
+		await override(SA, "LD-TEST-1615");
+		await until(() => (w.claim("LD-TEST-1615") || {}).reason_code === "NOT_COMPLETED", "§16 the Override's write that didn't land, read back");
+		eq([w.state("LD-TEST-1615"), w.smtp.length, started(w, "LD-TEST-1615")], [["waiting", "NOT_COMPLETED"], 4, []], "§16 FAILS ON THE OLD CODE: ...it didn't land: read again, At Receiver: nothing sent, no row, the record says so");
+
+		const minted = w.calls.mint;
+		atReceiver(w, "LD-TEST-1616", { pod: false });
+		const noPod = await override(DISP, "LD-TEST-1616");
+		await until(() => open(w) === 0 && (w.state("LD-TEST-1616") || [])[0] === "needs_attention", "§16 the POD-less Override");
+		eq([noPod.status, w.state("LD-TEST-1616"), w.smtp.length, w.calls.mint - minted], [200, ["needs_attention", "WAITING_POD"], 4, 0],
+			"§16 FAILS ON THE OLD CODE: a Dispatcher's Override to Delivered with no POD (it has no POD gate, by design): the job's own check stops it for a person, nothing sent, no number");
+
+		atReceiver(w, "LD-TEST-1617");
+		w.setLoad("LD-TEST-1617", { "Job Status": "Cancelled" });
+		await override(SA, "LD-TEST-1617", "At Receiver");
+		const revived = await tap(SA, "LD-TEST-1617");
+		await settle();
+		await settle();
+		eq([revived.status, w.history("LD-TEST-1617"), w.claim("LD-TEST-1617"), w.smtp.length], [200, [["Cancelled", "At Receiver", "override", SA.username], ["At Receiver", "Delivered", "manual", "Made-up Driver"]], null, 4],
+			"§16 a load cancelled, moved to At Receiver by the Override, then set Delivered from the dropdown: the routes' own history rows, as the job reads them, start nothing");
+		atReceiver(w, "LD-TEST-1618");
+		w.setLoad("LD-TEST-1618", { "Job Status": "In Transit" });
+		await override(SA, "LD-TEST-1618", "At Receiver");
+		await tap(SA, "LD-TEST-1618");
+		await until(() => w.smtp.length === 5 && open(w) === 0, "§16 the revival's twin");
+		eq(w.state("LD-TEST-1618"), ["drafted", ""], "§16 FAILS ON THE OLD CODE: ...its twin, never cancelled, the same two steps: one send");
+
+		// The Override's place in the route, as text.
+		const OVERRIDE = liftRoute(SRC, OVERRIDE_HEAD);
+		const at = (needle) => OVERRIDE.indexOf(needle);
+		ok(at("statusOverrideBlocker(") > 0 && at("statusOverrideBlocker(") < at("autoInvoiceDriverStart(") && at("autoInvoiceDriverStart(") < at("spreadsheets.values.batchUpdate(") && /\}\)\.catch\(invoiceStart\.writeFailed\);/.test(OVERRIDE),
+			"§16 FAILS ON THE OLD CODE: the Override's start comes after every refusal and before the write, whose failure it hears");
+		ok(/jtCacheInvalidate\(\);\n\t\tinvoiceStart\.written\(\);\n/.test(OVERRIDE), "§16 FAILS ON THE OLD CODE: ...written() right after the cache is dropped, before anything that can throw");
+		ok(/readBack: \(\) => statusOverrideReadBack\(sheets, targetLid\),/.test(OVERRIDE), "§16 FAILS ON THE OLD CODE: ...its read-back reads Job Tracking again, never the row read before the write");
+		ok(!/POD_REQUIRED/.test(OVERRIDE), "§16 ...and it still has no POD gate");
+		const TEMPLATE = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
+		const words = TEMPLATE.replace(/\n#\s?/g, " ");
+		ok(/^# AUTO_INVOICE_OFFICE_DELIVERED_ENABLED=$/m.test(TEMPLATE) && /AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: on only when exactly "true"/.test(words) && /DEFAULT OFF/.test(words.slice(words.indexOf("AUTO_INVOICE_OFFICE_DELIVERED_ENABLED:"))),
+			"§16 FAILS ON THE OLD CODE: the settings template names it, unset, on only when exactly \"true\", default off");
+
+		// Each one change to server.js's text, run on its route: the case that pins it must change.
+		const mutantSrc = (from, to) => (SRC.split(from).length === 2 ? SRC.replace(from, () => to) : null);
+		const START = "const invoiceStart = autoInvoiceDriverStart(req, {\n\t\t\tloadId,\n\t\t\toldStatus,\n\t\t\tnewStatus: canonicalStatus,\n\t\t\troute: \"Override\",\n\t\t\treadBack: () => statusOverrideReadBack(sheets, targetLid),\n\t\t});\n\n";
+		const WRITE = "await sheets.spreadsheets.values.batchUpdate({\n\t\t\tspreadsheetId: SPREADSHEET_ID,\n\t\t\trequestBody: { valueInputOption: \"USER_ENTERED\", data: updateData },\n\t\t})";
+		// A mutant may leave the claim waiting for good: the wait ends by itself and lands in no failure.
+		const settledBy = async (cond, ms = 8000) => {
+			const end = Date.now() + ms;
+			while (Date.now() < end && !cond()) await new Promise((r) => setTimeout(r, 2));
+		};
+		const done = (x, id) => open(x) === 0 && Boolean(x.state(id)) && (x.state(id)[0] !== "waiting" || x.state(id)[1] === "NOT_COMPLETED");
+		const overrideOnce = async (x, src, reindex, { landed = null } = {}) => {
+			atReceiver(x, "LD-TEST-1690");
+			let seen = null;
+			x.batchHook = () => { seen = x.state("LD-TEST-1690"); };
+			if (landed) x.batchFails = { landed: true };
+			await x.overrideRoute({ src, reindex })(SA, "LD-TEST-1690");
+			x.batchHook = null;
+			await settledBy(() => done(x, "LD-TEST-1690"));
+			await settle();
+			return [seen, x.state("LD-TEST-1690"), x.smtp.length, started(x, "LD-TEST-1690")];
+		};
+		const dropdownOnce = async (x, src, reindex) => {
+			atReceiver(x, "LD-TEST-1690");
+			await x.statusRoute({ src, reindex })(DISP, "LD-TEST-1690");
+			await settledBy(() => done(x, "LD-TEST-1690"));
+			await settle();
+			return [x.state("LD-TEST-1690"), x.smtp.length, started(x, "LD-TEST-1690")];
+		};
+		for (const [label, from, to, run, reindex] of [
+			["the Override's start after the write", `${START}\t\t${WRITE}.catch(invoiceStart.writeFailed);`, `${WRITE};\n\t\t${START}`, overrideOnce, false],
+			["the Override's read-back reusing the row read before the write", "readBack: () => statusOverrideReadBack(sheets, targetLid),", "readBack: async () => oldStatus,", (x, src, re) => overrideOnce(x, src, re, { landed: true }), false],
+			["the Override's written() left out", "jtCacheInvalidate();\n\t\tinvoiceStart.written();\n\t\tconst overrideUser", "jtCacheInvalidate();\n\t\tconst overrideUser", overrideOnce, false],
+			["the Override named as the Status dropdown", "\t\t\troute: \"Override\",\n", "\t\t\troute: \"Status dropdown\",\n", overrideOnce, false],
+			["the wrapper names nobody", "by: { id: user.id, username: user.username, route: args.route }, req", "by: null, req", dropdownOnce, true],
+		]) {
+			const src = mutantSrc(from, to);
+			ok(src, `§16 MUTANT ${label}: applied to server.js's text once`);
+			if (!src) continue;
+			const results = [];
+			for (const text of [SRC, src]) results.push(JSON.stringify(await run(await startedWorld(OFFICE_ON), text, text === SRC ? false : reindex)));
+			ok(results[0] !== results[1], `§16 MUTANT ${label}: caught (${results[1]})`);
+		}
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(async () => {
 	for (const w of openWorlds) await w.close().catch(() => {});

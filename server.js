@@ -51804,11 +51804,13 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		}
 
 		// A driver's own Delivered starts the load's invoice (lib/auto-invoice-job.js), and a
-		// factored load's Triumph submission (lib/triumph-job.js).
+		// factored load's Triumph submission (lib/triumph-job.js). With the office switch on, an
+		// office user's Delivered starts the invoice too.
 		const invoiceStart = autoInvoiceDriverStart(req, {
 			loadId,
 			oldStatus,
 			newStatus,
+			route: "Status dropdown",
 			readBack: () => readJobTrackingSnapshot(sheets, rowIndex).then((reread) => (reread ? reread.row[statusIdx] || "" : null)),
 		});
 		const triumphStart = triumphDriverStart(req, { loadId, oldStatus, newStatus });
@@ -51930,6 +51932,20 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 	if (rows.length > 1) return { code: "AMBIGUOUS_LOAD", periods: [] };
 
 	return null;
+}
+
+// The Override's read after a write that reported failure: Job Tracking read again, and the status
+// on the load's one row (null for no row or several). The row read before the write still holds the
+// old status, so it is never reused here.
+async function statusOverrideReadBack(sheets, loadKey) {
+	const reread = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+	const values = (reread && reread.data && reread.data.values) || [];
+	const headers = values[0] || [];
+	const statusIdx = headers.findIndex((h) => /status/i.test(h));
+	const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+	if (statusIdx === -1 || loadIdIdx === -1) return null;
+	const rows = values.slice(1).filter((r) => String((r || [])[loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "") === loadKey);
+	return rows.length === 1 ? rows[0][statusIdx] || "" : null;
 }
 
 // PUT /api/loads/:loadId/status-override — Admin status reversion
@@ -52120,12 +52136,24 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			});
 		}
 
+		// With the office switch on, an override to Delivered starts the load's invoice as the
+		// status route does (lib/auto-invoice-job.js): after every refusal, right before the write,
+		// whose failure it hears. No POD gate here: the job's own check stops a load with no POD.
+		const invoiceStart = autoInvoiceDriverStart(req, {
+			loadId,
+			oldStatus,
+			newStatus: canonicalStatus,
+			route: "Override",
+			readBack: () => statusOverrideReadBack(sheets, targetLid),
+		});
+
 		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: { valueInputOption: "USER_ENTERED", data: updateData },
-		});
+		}).catch(invoiceStart.writeFailed);
 
 		jtCacheInvalidate();
+		invoiceStart.written();
 		const overrideUser = req.session?.user?.username || "admin";
 		// canonicalStatus, never the raw `newStatus`: the socket event, the dispatch
 		// feed, the status history and the audit line must all say what actually
@@ -57013,6 +57041,10 @@ console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; li
 //     lines printed as the Draft Invoice button prints them (closed-list labels, no reference, rule
 //     7's check on what it composes, the lines read again right before the hand-off). Off, such a
 //     load goes to a person (ADVANCE_LINES), as before.
+//   AUTO_INVOICE_OFFICE_DELIVERED_ENABLED  on only when exactly "true", counted only with the driver's
+//     trigger on: a Super Admin's or a Dispatcher's Delivered, from the Status dropdown or the
+//     Override, starts the same invoice, with every check, and looks in the mailbox first; never on a
+//     load once cancelled or completed before (lib/auto-invoice-office.js). Off, as before.
 // Real drafts also need GMAIL_USER and its app password (without them the job pauses
 // and logs it once). A replica or an import starts no timer (startsJob()).
 // scripts/test-auto-invoice-wiring.js lifts this block.
@@ -57063,12 +57095,14 @@ const autoInvoice = require("./lib/auto-invoice-job").create({
 	sendAlertMail: sendEmail,
 	log: console,
 });
-// The status route's and the document routes' one call each into the job: nothing here
-// may fail those routes (the job logs its own failures).
+// The status routes' and the document routes' calls into the job: nothing here may fail
+// those routes (the job logs its own failures). A status write names its account, from the
+// session, and its route, for the row an office user's Delivered writes.
 const AUTO_INVOICE_NO_START = Object.freeze({ written() {}, writeFailed(e) { throw e; } });
 function autoInvoiceDriverStart(req, args) {
 	try {
-		return autoInvoice.driverDelivered({ ...args, role: req.session && req.session.user && req.session.user.role });
+		const user = (req.session && req.session.user) || {};
+		return autoInvoice.driverDelivered({ ...args, role: user.role, by: { id: user.id, username: user.username, route: args.route }, req });
 	} catch {
 		return AUTO_INVOICE_NO_START;
 	}
@@ -57101,6 +57135,7 @@ if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
 	if (autoInvoice.triggerMode) {
 		// Before the app listens; server.listen's callback runs the rest (finishStartUp()).
 		if (autoInvoice.startTrigger()) console.log("[auto-invoice] trigger on; the watch runs every 5 minutes");
+		console.log(`[auto-invoice] office Delivered ${autoInvoice.status().office ? "on" : "off"}`);
 		// The watch: what a Super Admin's dashboard read runs, so a sheet edit is seen with nobody
 		// reading, and the alert emails waiting. It starts no invoice. Started whatever startTrigger()
 		// answered: finishStartUp() tries that again, and the watch does nothing until it has.
@@ -57232,6 +57267,8 @@ function triumphDriverStart(req, args) {
 	}
 }
 console.log(`[triumph] submit ${triumph.mode}; connection settings ${triumphTransport.configured ? "set" : "unset"}`);
+// TRIUMPH_BATCH_DEDUPE_ENABLED (exactly "true", lib/triumph-rules.js batchDedupeEnabled()): said only while the job runs.
+if (triumph.mode !== "off" && require("./lib/triumph-rules").batchDedupeEnabled(process.env)) console.log("[triumph] a batch sends each identical BOL or POD once");
 if (triumph.mode !== "off" && !triumphTransport.configured) {
 	console.warn(`[triumph] the connection's settings are missing or invalid (${[...triumphTransport.missing, ...triumphTransport.invalid].join(", ")}): nothing can be sent to Triumph`);
 }

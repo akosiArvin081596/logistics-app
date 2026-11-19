@@ -24,6 +24,9 @@
 //   §11 rule 7 on what goes: the invoice page, and the list as it is when the batch is sent;
 //       the CSV's values found printed in the PDF
 //   §12 the sample's --dry-run and --upload: made up only, nothing of a load touched
+//   §15 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): the switch in the job's
+//       settings reaches the build; files_json and both audit rows say what was left out, the
+//       submitted row from the batch's own record; off, the batch, record and words as before
 //
 // Made-up loads only (LD-TEST-*), in memory and under the system temp folder.
 //   node scripts/test-triumph-job.js      # exits 1 on any failure
@@ -631,6 +634,53 @@ async function buttonClaims() {
 		else failures.push(`§14 MUTANT ${name}: NOT caught`);
 	}
 	console.log(`  ${caught}/${MUTANTS.length} mutants caught`);
+}
+
+// ---------------------------------------------------------------- §15
+async function dedupeClaims() {
+	section("§15 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED)");
+	const ON = Object.freeze({ TRIUMPH_BATCH_DEDUPE_ENABLED: "true" });
+	// The load's POD stored twice, byte for byte.
+	const twice = async () => [{ id: 1, type: "POD", uploaded_at: "2026-11-10 14:00:00", buffer: POD }, { id: 2, type: "POD", uploaded_at: "2026-11-10 15:00:00", buffer: Buffer.from(POD) }];
+	const LEFT_OUT = [{ kind: "pod", sha256: crypto.createHash("sha256").update(POD).digest("hex"), bytes: POD.length, keptAs: "pod" }];
+	const WORDS = `1 identical document sent once (${POD.length} bytes)`;
+	const record = (w) => {
+		try {
+			return JSON.parse(w.claim().files_json);
+		} catch {
+			return {};
+		}
+	};
+	const words = (w, action) => (w.audits.find((a) => a.action === action) || {}).details || "";
+
+	const on = world({ env: { ...DRY, ...ON } });
+	on.queue();
+	await on.make({ loadDocuments: twice }).tick();
+	eq([say(on.claim()), (record(on).parts || []).map((p) => p.kind)], ["staged", ["invoice", "ratecon", "pod"]],
+		"§15 FAILS ON THE OLD CODE: the switch passes through from the job's settings: the POD stored twice goes in once");
+	eq(record(on).dropped, LEFT_OUT, "§15 FAILS ON THE OLD CODE: files_json carries the copy left out: its kind, hash and bytes, and the kind kept");
+	ok(words(on, "triumph_batch_staged").endsWith(` bytes; ${WORDS}; nothing was sent`), "§15 FAILS ON THE OLD CODE: the staged row, the one a person reads before Submit now, says it");
+
+	const off = world({ env: DRY });
+	off.queue();
+	await off.make({ loadDocuments: twice }).tick();
+	eq([say(off.claim()), (record(off).parts || []).map((p) => p.kind), Object.keys(record(off))], ["staged", ["invoice", "ratecon", "pod", "pod"], ["pdf", "csv", "invoicePage", "parts", "row"]],
+		"§15 the switch off: every row goes in, and the record holds what it always held (mutant: the dedupe on with the switch off)");
+	ok(/^11122026-1: 11122026-1\.pdf and logisx_\d{8}T\d{6}Z_11122026-1\.csv, \d+ bytes; nothing was sent$/.test(words(off, "triumph_batch_staged")), "§15 ...and the staged row's words as they were");
+
+	const live = world({ env: { ...LIVE, ...ON } });
+	live.queue();
+	await live.make({ loadDocuments: twice }).tick();
+	eq([say(live.claim()), live.spies.puts.length], ["submitted", 2], "§15 (fixture) live, the switch on: submitted, the PDF and the CSV put");
+	ok(words(live, "triumph_submitted").endsWith(` bytes; ${WORDS}`), "§15 FAILS ON THE OLD CODE: the triumph_submitted row says it too");
+
+	const later = world({ env: { ...DRY, ...ON } });
+	later.queue();
+	await later.make({ loadDocuments: twice }).tick();
+	later.envBase = LIVE;
+	const sent = await later.make({ loadDocuments: twice }).submitNow({}, LOAD);
+	eq([sent.ok, say(later.claim())], [true, "submitted"], "§15 (fixture) staged with the switch on, then Submit now with it off");
+	ok(words(later, "triumph_submitted").endsWith(` bytes; ${WORDS}`), "§15 FAILS ON THE OLD CODE: ...the submitted row still says what was left out: its words come from the batch's own record");
 }
 
 (async () => {
@@ -1287,6 +1337,8 @@ async function buttonClaims() {
 	// ---------------------------------------------------------------- §14
 	section("§14 a Process with Triumph claim: the broker's own invoice, never a second number");
 	await buttonClaims();
+
+	await dedupeClaims();
 
 	section("§13 every code a claim was left with is on the list the page words");
 	{

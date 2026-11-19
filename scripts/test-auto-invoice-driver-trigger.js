@@ -39,11 +39,24 @@
 //       once; a line voided between the render and the send is LINES_CHANGED, its number given up,
 //       and the run line makes it again at once with a fresh one; lines that change under every
 //       run go to a person after the line's two runs (LINES_CHANGED), nothing sent
+//   §20-§29 an office user's Delivered (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED, lib/auto-invoice-office.js),
+//       each stop beside its twin, the same load without it, which sends once: §20 the switch; §21 a
+//       Super Admin, a Dispatcher and the shared login each arm and send once, after the look, with
+//       one row naming them, and nothing with the switch off; §22 a revival in one step or two, a load
+//       the history or the list says was completed, a history or list that can't be read; §23 the
+//       review's two sequences (M1); §24 the list: a start with a baseline set writes it, an empty or
+//       failed read keeps the path closed (N1), any row of a load counts (N2), the watch tops it up
+//       (N3); §25 never a second invoice (office then driver, driver then office, two office users, a
+//       double tap); §26 a restart (L2, N4); §27 a failed write, landed or not; §28 the chip; §29 the
+//       rules on their own
+//   §30 the office path's mutants, each one change to the shipped lib/ text, each caught by a check above
 //
-// No network, no files, never reads app.db.
+// No network, never reads app.db; reads lib/'s own sources for §30's mutants.
 //   node scripts/test-auto-invoice-driver-trigger.js      # exits 1 on any failure
 "use strict";
 
+const fs = require("fs");
+const Module = require("module");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
@@ -307,7 +320,8 @@ function makeWorld() {
 		limit.fn();
 		return true;
 	};
-	w.job = (extra = {}) => jobLib.create(w.deps(extra));
+	// `w.lib`: the job module this world runs (a mutant's, in §30); the one as shipped otherwise.
+	w.job = (extra = {}) => (w.lib || jobLib).create(w.deps(extra));
 	w.claim = (id) => w.db.prepare("SELECT * FROM auto_invoice_claims WHERE load_key = ?").get(rules.loadKey(id)) || null;
 	w.state = (id) => {
 		const c = w.claim(id);
@@ -2363,6 +2377,550 @@ async function main() {
 		eq([busy.state("LD-TEST-1904"), busy.smtp.length, voids(busy).length], [["needs_attention", "LINES_CHANGED"], 0, 2],
 			"§19 FAILS ON THE OLD CODE: lines that change under every run: the line's two runs, each number given up, nothing sent, then a person, under the lines' own words (LINES_CHANGED)");
 	}
+
+	section("§20 an office user's Delivered: the switch (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED)");
+	ok(officeLib, "§20 FAILS ON THE OLD CODE: lib/auto-invoice-office.js exists");
+	for (const [v, want] of [[undefined, false], ["", false], ["true", true], [" true ", true], ["TRUE", false], ["1", false], ["yes", false], ["on", false], ["false", false]]) {
+		eq(officeLib ? officeLib.enabled({ AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: v }) : null, want, `§20 FAILS ON THE OLD CODE: AUTO_INVOICE_OFFICE_DELIVERED_ENABLED=${JSON.stringify(v)}: ${want ? "on" : "off"} (on only when exactly "true")`);
+	}
+	for (const [n, title, group] of [
+		[21, "each office role arms and sends once", "roles"],
+		[22, "the office path's own stops, each beside its twin", "stops"],
+		[23, "the review's two sequences (M1)", "sequences"],
+		[24, "the list of loads already completed (N1, N2, N3)", "list"],
+		[25, "never a second invoice", "twice"],
+		[26, "a restart (L2, N4)", "restart"],
+		[27, "the row naming who set Delivered, and a failed write", "rows"],
+		[28, "the chip on a completed load nothing started", "chip"],
+		[29, "the rules on their own", "rules"],
+	]) {
+		section(`§${n} an office user's Delivered: ${title}`);
+		await OFFICE_GROUPS[group](SHIPPED, { eq, ok });
+	}
+
+	section("§30 the office path's mutants: one change each to lib/'s shipped text, each caught by its group above");
+	await officeMutants();
+}
+
+// ===================================================================== the office path (§20-§30)
+// An office user's Delivered. Each group runs once on the modules as shipped, then on every mutant
+// in OFFICE_MUTANTS, which one of its checks must catch. `L`: { job, trigger, office }, the modules
+// to run; `t`: { eq, ok }, where its checks land.
+const officeLib = optional(path.join(ROOT, "lib", "auto-invoice-office.js"));
+const SHIPPED = Object.freeze({ job: jobLib, trigger, office: officeLib });
+const OFFICE_ENV = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false", AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: "true" });
+const SWITCH_UNSET = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_DRAFTS_SHADOW: "false" });
+const SUPER = Object.freeze({ id: 7, username: "made-up-admin", role: "Super Admin" });
+const DISPATCH = Object.freeze({ id: 8, username: "made-up-dispatcher", role: "Dispatcher" });
+const SHARED = Object.freeze({ id: 1, username: "super_admin", role: "Super Admin" });
+const STARTED_BY = (user, route) => `the automatic invoice was started by ${user.username}'s Delivered (${user.role}, the ${route})${user.username === "super_admin" ? "; by super_admin · shared login, person not recorded" : ""}`;
+
+// A world with server.js's status history table, which its status routes write, keyed as normLoadKey(),
+// and a load in transit, as Job Tracking always has: a start that reads no loads opens nothing (§24).
+function officeWorld(L) {
+	const w = makeWorld();
+	w.lib = L.job;
+	w.setRow("LD-TEST-1999", { "Job Status": "In Transit" });
+	w.db.exec(`CREATE TABLE load_status_history (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, old_status TEXT DEFAULT '', new_status TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'manual', actor TEXT DEFAULT '', changed_at DATETIME DEFAULT CURRENT_TIMESTAMP, reason TEXT DEFAULT '')`);
+	// One transition as recordStatusChange() writes it: none for a status written over itself.
+	w.history = (id, oldStatus, newStatus) => {
+		if (String(oldStatus || "").trim().toLowerCase() === String(newStatus).trim().toLowerCase()) return;
+		w.db.prepare("INSERT INTO load_status_history (load_id, old_status, new_status, source, actor) VALUES (?, ?, ?, 'manual', 'made-up')").run(rules.loadKey(id), oldStatus || "", newStatus);
+	};
+	// On the list: true or false, or null while it has no table.
+	w.listed = (id) => {
+		try {
+			return Boolean(w.db.prepare("SELECT 1 FROM auto_invoice_office_before WHERE load_key = ?").get(rules.loadKey(id)));
+		} catch {
+			return null;
+		}
+	};
+	w.sentFor = (id) => w.smtp.filter((m) => m.subject.endsWith(`#${id}`)).length;
+	w.startedRows = (id = null) => w.actions("auto_invoice_started").filter((a) => id === null || a.id === id).map((a) => [a.who, a.id, a.details]);
+	// A table moved out of the way and back, so a read of it fails meanwhile. false when it isn't there.
+	w.moveTable = (from, to) => {
+		try {
+			w.db.exec(`ALTER TABLE ${from} RENAME TO ${to}`);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	return w;
+}
+
+// An office user's status write as PUT /api/driver/status or the Override makes it, through server.js's
+// wrapper (the session's role and account, the route's own name), then the route's history row.
+function officeTap(w, job, id, { user = SUPER, route = "Status dropdown", newStatus = "Delivered", oldStatus = null, fails = false, landed = false, history = true } = {}) {
+	const row = w.row(id);
+	const before = oldStatus !== null ? oldStatus : row ? row["Job Status"] : "";
+	const start = job.driverDelivered({
+		role: user.role, loadId: id, oldStatus: before, newStatus, by: { id: user.id, username: user.username, route }, req: { session: { user: { ...user } } },
+		readBack: async () => {
+			w.calls.readBack++;
+			const r = w.row(id);
+			return r ? r["Job Status"] : "";
+		},
+	});
+	const atWrite = w.claim(id);
+	if (fails) {
+		if (landed) w.setRow(id, { "Job Status": newStatus });
+		let thrown = null;
+		try {
+			start.writeFailed(new Error("made-up: no answer in 15 seconds"));
+		} catch (e) {
+			thrown = e;
+		}
+		return { atWrite, thrown };
+	}
+	w.setRow(id, { "Job Status": newStatus });
+	start.written();
+	if (history) w.history(id, before, newStatus);
+	return { atWrite };
+}
+
+// By turns of the event loop, as until() above, answering whether it held: a mutant's run never
+// lands in this runner's own failures.
+async function held(cond, turns = 3000) {
+	for (let i = 0; i < turns; i++) {
+		if (cond()) return true;
+		await turn();
+	}
+	return cond();
+}
+const quiet = (w) => held(() => w.open() === 0);
+// A later start of the same database (a restart), with `env`.
+async function restartWith(w, env, workerId = "worker-2") {
+	const j = w.job({ env, workerId });
+	j.startTrigger();
+	await j.finishStartUp();
+	return j;
+}
+const asSession = (user, route) => ({ role: user.role, by: { id: user.id, username: user.username, route }, req: { session: { user: { ...user } } } });
+
+const OFFICE_GROUPS = {
+	async roles(L, t) {
+		const ID = "LD-TEST-2001";
+		for (const [user, route] of [[SUPER, "Status dropdown"], [DISPATCH, "Override"], [SHARED, "Status dropdown"]]) {
+			const label = `${user === SHARED ? "the shared login" : `a ${user.role}`}'s Delivered (the ${route})`;
+			const w = officeWorld(L);
+			const job = await w.started({ env: OFFICE_ENV });
+			w.ready(ID);
+			const { atWrite } = officeTap(w, job, ID, { user, route });
+			t.eq(atWrite && [atWrite.state, atWrite.reason_code, Boolean(atWrite.look_first)], ["waiting", "OFFICE_PENDING", true], `§21 FAILS ON THE OLD CODE: ${label}: the record is there before the sheet write, and asks for the look`);
+			await quiet(w);
+			t.eq([w.state(ID), w.smtp.length, w.calls.payments, w.calls.look.length], [["drafted", ""], 1, 1, 1], `§21 FAILS ON THE OLD CODE: ${label}: the Payments Table and the mailbox read first, then one SMTP call`);
+			t.eq(w.startedRows(), [[user.username, ID, STARTED_BY(user, route)]], `§21 FAILS ON THE OLD CODE: ${label}: one row naming who set Delivered, under that account`);
+		}
+		{
+			const w = officeWorld(L);
+			const job = await w.started({ env: OFFICE_ENV });
+			w.lookAnswer = { verdict: "invoice", mailboxes: {} };
+			w.ready(ID);
+			officeTap(w, job, ID);
+			await quiet(w);
+			t.eq([w.state(ID), w.smtp.length, w.calls.mint], [["needs_attention", "MAILBOX_HIT"], 0, 0], "§21 FAILS ON THE OLD CODE: ...a load billed by hand from Gmail, its invoice in the mailbox: Needs attention, nothing sent, no number");
+		}
+		for (const [label, env] of [["the switch unset", SWITCH_UNSET], ["the switch set to TRUE (only exactly \"true\")", { ...OFFICE_ENV, AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: "TRUE" }]]) {
+			const w = officeWorld(L);
+			const job = await w.started({ env });
+			w.ready(ID);
+			for (const user of [SUPER, DISPATCH]) t.eq(officeTap(w, job, ID, { user, oldStatus: "At Receiver" }).atWrite, null, `§21 ${label}: a ${user.role}'s Delivered: no record, as before`);
+			await turn();
+			await job.runLine();
+			t.eq([w.smtp.length, w.calls.prepare, w.startedRows(), w.listed(ID), job.status().office], [0, 0, [], null, undefined], `§21 ${label}: nothing sent or built, no row, no list table, and the status names no office path`);
+		}
+		{
+			const w = officeWorld(L);
+			const job = await w.started({ env: OFFICE_ENV });
+			w.ready(ID);
+			const { atWrite } = tap(w, job, ID);
+			await quiet(w);
+			t.eq([atWrite && atWrite.reason_code, atWrite && atWrite.look_first, w.smtp.length, w.calls.look.length, w.startedRows()], ["DRIVER_PENDING", "", 1, 0, []], "§21 the switch on, the driver's own tap: as before (DRIVER_PENDING, no look on a first tap, one send, no row)");
+			const x = officeWorld(L);
+			t.eq([x.job({ env: OFFICE_ENV }).status().office, x.job({ env: { ...OFFICE_ENV, AUTO_INVOICE_DRIVER_TRIGGER_ENABLED: "false" } }).status().office, x.job({ env: { AUTO_INVOICE_DRAFTS_ENABLED: "true", AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: "true" } }).status().office],
+				[{ on: true, ready: false }, undefined, undefined], "§21 FAILS ON THE OLD CODE: it counts with the driver's trigger only (not with the sweep, nor in shadow), closed until a start writes its list");
+		}
+	},
+
+	async stops(L, t) {
+		const w = officeWorld(L);
+		// Completed by a row edit before the start (no history, no claim): the start lists it.
+		w.ready("LD-TEST-2107", { "Job Status": "Delivered" });
+		w.ready("LD-TEST-2108");
+		const job = await w.started({ env: OFFICE_ENV });
+		const arm = (id, opts) => officeTap(w, job, id, opts).atWrite;
+		const pairs = [];
+		w.ready("LD-TEST-2101", { "Job Status": "Cancelled" });
+		w.ready("LD-TEST-2102");
+		pairs.push(["a one-step revival (Cancelled, then Delivered)", "LD-TEST-2101", arm("LD-TEST-2101"), "LD-TEST-2102", arm("LD-TEST-2102")]);
+		w.ready("LD-TEST-2103", { "Job Status": "Cancelled" });
+		w.history("LD-TEST-2103", "In Transit", "Cancelled");
+		arm("LD-TEST-2103", { newStatus: "At Receiver" });
+		w.ready("LD-TEST-2104", { "Job Status": "In Transit" });
+		arm("LD-TEST-2104", { newStatus: "At Receiver" });
+		pairs.push(["a two-step revival (cancelled in the app, At Receiver, then Delivered)", "LD-TEST-2103", arm("LD-TEST-2103"), "LD-TEST-2104", arm("LD-TEST-2104")]);
+		w.ready("LD-TEST-2105");
+		w.history("LD-TEST-2105", "In Transit", "Delivered");
+		w.history("LD-TEST-2105", "Delivered", "At Receiver");
+		w.ready("LD-TEST-2106");
+		w.history("LD-TEST-2106", "In Transit", "At Receiver");
+		pairs.push(["a load the app recorded Delivered before, then back to At Receiver (its history)", "LD-TEST-2105", arm("LD-TEST-2105"), "LD-TEST-2106", arm("LD-TEST-2106")]);
+		w.setRow("LD-TEST-2107", { "Job Status": "At Receiver" });
+		pairs.push(["a load completed by a row edit before the start, then moved back in the sheet (the list)", "LD-TEST-2107", arm("LD-TEST-2107"), "LD-TEST-2108", arm("LD-TEST-2108")]);
+		w.ready("LD-TEST-2109");
+		const historyAway = w.moveTable("load_status_history", "lsh_made_up_away");
+		const noHistory = arm("LD-TEST-2109", { history: false });
+		if (historyAway) w.moveTable("lsh_made_up_away", "load_status_history");
+		w.history("LD-TEST-2109", "At Receiver", "Delivered");
+		w.ready("LD-TEST-2110");
+		pairs.push(["its status history can't be read", "LD-TEST-2109", noHistory, "LD-TEST-2110", arm("LD-TEST-2110")]);
+		w.ready("LD-TEST-2111");
+		const listAway = w.moveTable("auto_invoice_office_before", "list_made_up_away");
+		const noList = arm("LD-TEST-2111");
+		if (listAway) w.moveTable("list_made_up_away", "auto_invoice_office_before");
+		w.ready("LD-TEST-2112");
+		pairs.push(["the list can't be read", "LD-TEST-2111", noList, "LD-TEST-2112", arm("LD-TEST-2112")]);
+		await quiet(w);
+		for (const [label, stopId, stopAt, twinId, twinAt] of pairs) {
+			t.eq([stopAt, w.state(stopId), w.sentFor(stopId)], [null, null, 0], `§22 ${label}: no record, nothing sent: it keeps "Draft it by hand"`);
+			t.eq([twinAt && twinAt.reason_code, w.state(twinId), w.sentFor(twinId)], ["OFFICE_PENDING", ["drafted", ""], 1], `§22 FAILS ON THE OLD CODE: ...${label}: its twin without that stop sends once`);
+		}
+		t.ok(w.logs.some((l) => /load ld-test-2109: its status history couldn't be read/.test(l)) && w.logs.some((l) => /load ld-test-2111: the list of loads already completed couldn't be read/.test(l)),
+			"§22 FAILS ON THE OLD CODE: ...a history or a list that can't be read is logged, by the load's ID and the code");
+	},
+
+	async sequences(L, t) {
+		{
+			const w = officeWorld(L);
+			await w.started();
+			w.ready("LD-TEST-2201", { "Job Status": "Delivered" });
+			w.ready("LD-TEST-2202", { "Job Status": "In Transit" });
+			const job = await restartWith(w, OFFICE_ENV);
+			officeTap(w, job, "LD-TEST-2201", { newStatus: "At Receiver" });
+			const stop = officeTap(w, job, "LD-TEST-2201").atWrite;
+			officeTap(w, job, "LD-TEST-2202", { newStatus: "At Receiver" });
+			const twin = officeTap(w, job, "LD-TEST-2202").atWrite;
+			await quiet(w);
+			t.eq([stop, w.state("LD-TEST-2201"), w.sentFor("LD-TEST-2201")], [null, null, 0], "§23 (M1) completed by a row edit before the switch-on, then At Receiver and Delivered from the dropdown: no record, nothing sent");
+			t.eq([twin && twin.reason_code, w.sentFor("LD-TEST-2202")], ["OFFICE_PENDING", 1], "§23 FAILS ON THE OLD CODE: ...a load never completed, the same two steps: one send");
+		}
+		{
+			const w = officeWorld(L);
+			await w.started({ env: OFFICE_ENV });
+			const off = await restartWith(w, SWITCH_UNSET);
+			w.ready("LD-TEST-2203");
+			officeTap(w, off, "LD-TEST-2203");
+			w.ready("LD-TEST-2204");
+			const on = await restartWith(w, OFFICE_ENV, "worker-3");
+			officeTap(w, on, "LD-TEST-2203", { newStatus: "At Receiver" });
+			const stop = officeTap(w, on, "LD-TEST-2203").atWrite;
+			const twin = officeTap(w, on, "LD-TEST-2204").atWrite;
+			await quiet(w);
+			t.eq([stop, w.state("LD-TEST-2203"), w.sentFor("LD-TEST-2203")], [null, null, 0], "§23 (M1) the switch on, off and on again, an office Delivered made while it was off, then At Receiver and Delivered: no record, nothing sent");
+			t.eq([twin && twin.reason_code, w.sentFor("LD-TEST-2204")], ["OFFICE_PENDING", 1], "§23 FAILS ON THE OLD CODE: ...an office Delivered with the switch on again: one send");
+		}
+	},
+
+	async list(L, t) {
+		{
+			const w = officeWorld(L);
+			w.ready("LD-TEST-2301", { "Job Status": "Delivered" });
+			w.ready("LD-TEST-2302");
+			w.ready("LD-TEST-2303", { "Job Status": "Delivered" });
+			w.seed("LD-TEST-2303", { state: "drafted", stage: "recorded", delivery: "send", invoice_id: "10202026-88" });
+			const job = await w.started({ env: OFFICE_ENV });
+			t.eq([w.listed("LD-TEST-2301"), w.listed("LD-TEST-2302"), w.listed("LD-TEST-2303"), job.status().office], [true, false, false, { on: true, ready: true }],
+				"§24 FAILS ON THE OLD CODE (N1): a start with the baseline already set, as production's: the list holds the completed load with no claim, not one in transit or one with a claim, and the path is open");
+		}
+		for (const [label, hide, show] of [
+			["a read with no load rows", (w) => { w.hidden = w.rows.splice(0); }, (w) => { w.rows.push(...w.hidden); }],
+			["a read that fails", (w) => { w.readFails = true; }, (w) => { w.readFails = false; }],
+		]) {
+			// A start that wrote its list, then a restart whose own read can't: the list is there, but
+			// this process wrote nothing, so a load completed since could be missing from it.
+			const w = officeWorld(L);
+			w.ready("LD-TEST-2304");
+			await w.started({ env: OFFICE_ENV });
+			hide(w);
+			const job = await restartWith(w, OFFICE_ENV);
+			show(w);
+			const closed = job.status().office;
+			const stop = officeTap(w, job, "LD-TEST-2304").atWrite;
+			w.ready("LD-TEST-2305");
+			const again = await restartWith(w, OFFICE_ENV, "worker-3");
+			const twin = officeTap(w, again, "LD-TEST-2305").atWrite;
+			await quiet(w);
+			t.eq([closed, stop, w.sentFor("LD-TEST-2304")], [{ on: true, ready: false }, null, 0], `§24 (N1) ${label} at a restart: the path stays closed, and an office Delivered makes no record`);
+			t.ok(w.logs.some((l) => /^\[auto-invoice\] office Delivered: (Job Tracking read no loads|the list of loads already completed wasn't written)/.test(l)), `§24 FAILS ON THE OLD CODE (N1): ...${label}: logged`);
+			t.eq([twin && twin.reason_code, w.sentFor("LD-TEST-2305")], ["OFFICE_PENDING", 1], `§24 FAILS ON THE OLD CODE (N1): ...${label}, then a start that reads the loads: open, one send`);
+		}
+		{
+			const { keepEveryRow } = require(path.join(ROOT, "lib", "job-tracking-every-row.js"));
+			const w = officeWorld(L);
+			// As getJobTrackingCached() keeps a read: the last row of each Load ID, every row beside it.
+			const readAsCached = async () => {
+				w.calls.reads++;
+				const all = [...w.rows];
+				const last = new Map(all.map((r, i) => [rules.loadKey(r["Load ID"]), i]));
+				const read = { headers: HEADERS, data: all.filter((r, i) => last.get(rules.loadKey(r["Load ID"])) === i) };
+				keepEveryRow(read, all);
+				return read;
+			};
+			w.ready("LD-TEST-2306", { "Job Status": "Delivered" });
+			w.rows.push(Object.freeze({ ...w.row("LD-TEST-2306"), "Job Status": "At Receiver" }));
+			w.ready("LD-TEST-2307");
+			const job = await w.started({ env: OFFICE_ENV, readJobTracking: readAsCached });
+			const stop = officeTap(w, job, "LD-TEST-2306", { oldStatus: "At Receiver" }).atWrite;
+			const twin = officeTap(w, job, "LD-TEST-2307").atWrite;
+			await quiet(w);
+			t.eq([w.listed("LD-TEST-2306"), stop, w.sentFor("LD-TEST-2306")], [true, null, 0], "§24 (N2) a load on two rows, the earlier one Delivered by a row edit: listed by any of its rows, so an office Delivered on the later one makes no record");
+			t.eq([twin && twin.reason_code, w.sentFor("LD-TEST-2307")], ["OFFICE_PENDING", 1], "§24 FAILS ON THE OLD CODE (N2): ...a load on one row, never completed: one send");
+		}
+		{
+			// The kept rows only ever refuse (test-driver-performance.js lets this one module read them): what
+			// completedKeys() finds goes to the list alone, and the list is read once, as a reason to start nothing.
+			const code = (name) => { try { return fs.readFileSync(path.join(ROOT, "lib", name), "utf8").replace(/\/\/.*$/gm, ""); } catch { return ""; } };
+			const [officeSrc, jobSrc, triggerSrc] = ["auto-invoice-office.js", "auto-invoice-job.js", "auto-invoice-trigger.js"].map(code);
+			const body = (src, head, end) => { const at = src.indexOf(head); return at === -1 ? "" : src.slice(at, src.indexOf(end, at)); };
+			const keysFn = body(officeSrc, "function completedKeys(", "\n}\n");
+			const listFn = body(jobSrc, "async function listCompleted(", "\n\t}\n");
+			const count = (src, re) => (src.match(re) || []).length;
+			t.ok(count(officeSrc, /\beveryJobTrackingRow\b/g) === 2 && /everyJobTrackingRow\(jt\)/.test(keysFn),
+				"§24 FAILS ON THE OLD CODE (N2): the office module reads the kept rows in completedKeys() alone");
+			t.ok(!/everyJobTrackingRow|keepEveryRow/.test(jobSrc + triggerSrc) && count(jobSrc, /\bcompletedKeys\(/g) === 1 && /office\.completedKeys\(/.test(listFn)
+				&& /office\.addCompleted\(db, keys, /.test(listFn) && !/ledger\.|insertClaim|transition|attempt|wake\(|notify|audit/.test(listFn),
+				"§24 FAILS ON THE OLD CODE (N2): ...and what it finds goes to the list alone, never to a claim, a run or a row");
+			t.ok(count(jobSrc, /office\.listed\(/g) === 1 && count(triggerSrc, /\blisted\b/g) === 1 && /past\.listed === false\)/.test(triggerSrc),
+				"§24 FAILS ON THE OLD CODE (N2): ...and the list is read once, by officeClear(), as a reason to start nothing");
+		}
+		{
+			const w = officeWorld(L);
+			w.ready("LD-TEST-2308");
+			w.ready("LD-TEST-2309");
+			const job = await w.started({ env: OFFICE_ENV, readCheckMs: 0 });
+			w.setRow("LD-TEST-2308", { "Job Status": "Delivered" });
+			job.watch();
+			const watched = await held(() => w.listed("LD-TEST-2308") === true);
+			w.setRow("LD-TEST-2308", { "Job Status": "At Receiver" });
+			const stop = officeTap(w, job, "LD-TEST-2308").atWrite;
+			w.setRow("LD-TEST-2309", { "Job Status": "Delivered" });
+			w.setRow("LD-TEST-2309", { "Job Status": "At Receiver" });
+			const gap = officeTap(w, job, "LD-TEST-2309").atWrite;
+			await quiet(w);
+			t.eq([watched, stop, w.sentFor("LD-TEST-2308")], [true, null, 0], "§24 (N3) a load completed by a sheet edit after the start joins the list at the 5-minute watch: moved back and marked Delivered in the office, it makes no record");
+			t.eq([gap && gap.reason_code, w.calls.look.length, w.sentFor("LD-TEST-2309")], ["OFFICE_PENDING", 1, 1], "§24 FAILS ON THE OLD CODE (N3): ...moved back before the watch read it (the gap §9 leaves to the look): it arms, the mailbox is looked in first, one send");
+		}
+	},
+
+	async twice(L, t) {
+		const w = officeWorld(L);
+		const job = await w.started({ env: OFFICE_ENV });
+		w.ready("LD-TEST-2401");
+		officeTap(w, job, "LD-TEST-2401");
+		await quiet(w);
+		tap(w, job, "LD-TEST-2401", { oldStatus: "Delivered" });
+		await turn();
+		await quiet(w);
+		t.eq([w.state("LD-TEST-2401"), w.sentFor("LD-TEST-2401")], [["drafted", ""], 1], "§25 FAILS ON THE OLD CODE: an office Delivered, then the driver's tap: one send (his tap isn't a crossing)");
+		w.ready("LD-TEST-2402");
+		tap(w, job, "LD-TEST-2402");
+		await quiet(w);
+		const after = officeTap(w, job, "LD-TEST-2402", { oldStatus: "Delivered" }).atWrite;
+		officeTap(w, job, "LD-TEST-2402", { newStatus: "At Receiver" });
+		officeTap(w, job, "LD-TEST-2402");
+		await turn();
+		await quiet(w);
+		t.eq([after && after.state, w.state("LD-TEST-2402"), w.sentFor("LD-TEST-2402"), w.startedRows("LD-TEST-2402")], ["drafted", ["drafted", ""], 1, []], "§25 the driver's send, then an office Delivered, and At Receiver then Delivered: the claim isn't waiting, so one send and no row");
+		w.ready("LD-TEST-2403");
+		tap(w, job, "LD-TEST-2403", { fails: true });
+		await held(() => (w.claim("LD-TEST-2403") || {}).reason_code === "NOT_COMPLETED");
+		const rearmed = officeTap(w, job, "LD-TEST-2403").atWrite;
+		await quiet(w);
+		t.eq([rearmed && [rearmed.state, rearmed.reason_code, Boolean(rearmed.look_first)], w.state("LD-TEST-2403"), w.sentFor("LD-TEST-2403")], [["waiting", "OFFICE_PENDING", true], ["drafted", ""], 1],
+			"§25 FAILS ON THE OLD CODE: ...a driver's claim still waiting (his write didn't land): an office Delivered re-arms it in place, with the look: one send");
+		w.ready("LD-TEST-2404");
+		const first = job.driverDelivered({ ...asSession(SUPER, "Status dropdown"), loadId: "LD-TEST-2404", oldStatus: "At Receiver", newStatus: "Delivered" });
+		const second = job.driverDelivered({ ...asSession(DISPATCH, "Override"), loadId: "LD-TEST-2404", oldStatus: "At Receiver", newStatus: "Delivered" });
+		w.setRow("LD-TEST-2404", { "Job Status": "Delivered" });
+		first.written();
+		second.written();
+		await quiet(w);
+		t.eq([w.state("LD-TEST-2404"), w.sentFor("LD-TEST-2404"), w.startedRows("LD-TEST-2404")], [["drafted", ""], 1, [[SUPER.username, "LD-TEST-2404", STARTED_BY(SUPER, "Status dropdown")]]],
+			"§25 FAILS ON THE OLD CODE: two office users at once: one record, one SMTP call, one row (the Delivered whose move landed)");
+		w.ready("LD-TEST-2405");
+		const a = job.driverDelivered({ ...asSession(SUPER, "Status dropdown"), loadId: "LD-TEST-2405", oldStatus: "At Receiver", newStatus: "Delivered" });
+		const b = job.driverDelivered({ ...asSession(SUPER, "Status dropdown"), loadId: "#ld-test-2405", oldStatus: "At Receiver", newStatus: "Delivered" });
+		w.setRow("LD-TEST-2405", { "Job Status": "Delivered" });
+		a.written();
+		b.written();
+		await quiet(w);
+		t.eq([w.state("LD-TEST-2405"), w.sentFor("LD-TEST-2405"), w.db.prepare("SELECT COUNT(*) AS n FROM auto_invoice_claims WHERE load_key = 'ld-test-2405'").get().n, w.startedRows("LD-TEST-2405").length], [["drafted", ""], 1, 1, 1],
+			"§25 FAILS ON THE OLD CODE: a double tap in the office, either spelling of the ID: one record, one SMTP call, one row");
+		t.eq([w.smtp.length, w.calls.mint], [5, 5], "§25 FAILS ON THE OLD CODE: five loads, five SMTP calls and five numbers in all");
+	},
+
+	async restart(L, t) {
+		const ID = "LD-TEST-2501";
+		const atRestart = async (env, fields) => {
+			const w = officeWorld(L);
+			w.meta("baseline_at", iso(T0 - 24 * HOUR));
+			w.meta("trigger_on_at", iso(T0 - HOUR));
+			w.ready(ID, { "Job Status": "Delivered" });
+			w.seed(ID, { state: "waiting", reason_code: "OFFICE_PENDING", ...fields });
+			await restartWith(w, env);
+			await quiet(w);
+			return w;
+		};
+		const NOBODY = [["auto-invoice", ID, "an office Delivered; the person is not recorded"]];
+		for (const [label, env] of [["the switch on", OFFICE_ENV], ["the switch since set off", SWITCH_UNSET]]) {
+			const w = await atRestart(env, { updated_at: iso(T0 - MIN) });
+			t.eq([w.state(ID), w.sentFor(ID), w.calls.look.length, w.startedRows()], [["drafted", ""], 1, 1, NOBODY],
+				`§26 FAILS ON THE OLD CODE (L2, N4): an office record still waiting at a restart, ${label}: queued with the look, as a driver's is: one send, and one system row saying the person isn't recorded`);
+		}
+		const stale = await atRestart(OFFICE_ENV, { updated_at: iso(T0 - 2 * HOUR) });
+		t.eq([stale.state(ID), stale.sentFor(ID), stale.startedRows()], [["needs_attention", "RETRY_LATER"], 0, []], "§26 FAILS ON THE OLD CODE (L2): ...over an hour old: a person (RETRY_LATER), as a driver's is; nothing sent, no row");
+	},
+
+	async rows(L, t) {
+		const w = officeWorld(L);
+		const job = await w.started({ env: OFFICE_ENV });
+		w.ready("LD-TEST-2601");
+		const lost = officeTap(w, job, "LD-TEST-2601", { fails: true });
+		await held(() => (w.claim("LD-TEST-2601") || {}).reason_code === "NOT_COMPLETED");
+		t.eq([lost.thrown && lost.thrown.message, w.state("LD-TEST-2601"), w.sentFor("LD-TEST-2601"), w.startedRows("LD-TEST-2601")], ["made-up: no answer in 15 seconds", ["waiting", "NOT_COMPLETED"], 0, []],
+			"§27 an office Delivered whose write failed and didn't land: the route's error as before, read back: nothing sent, no row");
+		w.ready("LD-TEST-2602");
+		officeTap(w, job, "LD-TEST-2602", { user: DISPATCH, route: "Override", fails: true, landed: true });
+		await held(() => w.sentFor("LD-TEST-2602") === 1);
+		await quiet(w);
+		t.eq([w.state("LD-TEST-2602"), w.sentFor("LD-TEST-2602"), w.startedRows("LD-TEST-2602")], [["drafted", ""], 1, [[DISPATCH.username, "LD-TEST-2602", STARTED_BY(DISPATCH, "Override")]]],
+			"§27 FAILS ON THE OLD CODE: ...one that failed but landed: read back Delivered, one send, and the row then");
+		w.ready("LD-TEST-2603");
+		tap(w, job, "LD-TEST-2603");
+		await quiet(w);
+		t.eq([w.sentFor("LD-TEST-2603"), w.startedRows("LD-TEST-2603")], [1, []], "§27 the driver's own tap: one send, and no row of this kind, as before");
+	},
+
+	async chip(L, t) {
+		for (const [label, env, code] of [["the switch on", OFFICE_ENV, "NOT_STARTED"], ["the switch unset", SWITCH_UNSET, "NOT_BY_DRIVER"]]) {
+			const w = officeWorld(L);
+			const job = await w.started({ env });
+			w.setRow("LD-TEST-2701", { "Job Status": "Delivered" });
+			t.eq(served(job, ["LD-TEST-2701"]), [{ state: "needs_attention", code, invoiceId: "", changed: [], trigger: true, retry: "none" }],
+				`§28 ${code === "NOT_STARTED" ? "FAILS ON THE OLD CODE: " : ""}${label}: a completed load nothing started reads ${code}, with nothing to retry`);
+		}
+	},
+
+	rules(L, t) {
+		const T = L.trigger;
+		const CLEAN = { history: { completed: false, cancelled: false }, listed: false };
+		const A = (o) => T.arms({ role: "Super Admin", oldStatus: "At Receiver", newStatus: "Delivered", claim: null, office: true, past: CLEAN, ...o });
+		const WAITING = { state: "waiting" };
+		t.eq([
+			A({}), A({ role: "Dispatcher" }), A({ role: "Investor" }), A({ role: "" }), A({ office: false }), A({ office: "true" }),
+			A({ oldStatus: "Cancelled" }), A({ oldStatus: "Delivered" }), A({ newStatus: "In Transit" }),
+			A({ past: { history: { completed: true, cancelled: false }, listed: false } }), A({ past: { history: { completed: false, cancelled: true }, listed: false } }), A({ past: { ...CLEAN, listed: true } }),
+			A({ past: null }), A({ past: { history: null, listed: false } }), A({ past: { ...CLEAN, listed: null } }),
+			A({ claim: WAITING, past: { history: { completed: true, cancelled: false }, listed: true } }), A({ claim: WAITING, past: { history: { completed: false, cancelled: true }, listed: false } }),
+			A({ claim: WAITING, oldStatus: "Cancelled" }), A({ claim: WAITING, past: { history: null, listed: false } }), A({ claim: { state: "drafted" } }), A({ claim: { state: "baseline" } }),
+		], [
+			true, true, false, false, false, false,
+			false, false, false,
+			false, false, false,
+			false, false, false,
+			true, false,
+			false, false, false, false,
+		], "§29 FAILS ON THE OLD CODE: who arms it, the office path open: a Super Admin or a Dispatcher, crossing into Delivered, never a revival or a load completed before, anything unread a no; a waiting claim re-arms unless the load was ever cancelled; any other claim is left alone");
+		t.eq([T.arms({ role: "Driver", oldStatus: "At Receiver", newStatus: "Delivered", claim: null }), T.arms({ role: "Driver", oldStatus: "Cancelled", newStatus: "Delivered", claim: null, office: true, past: null })], [true, true],
+			"§29 the driver's own rule as before: the office path's stops aren't his (his route refuses a cancelled row itself)");
+		t.eq([T.startUpAction({ state: "waiting", reason_code: "OFFICE_PENDING", updated_at: iso(T0) }, { first: true, nowMs: T0 }), T.startUpAction({ state: "queued", reason_code: "OFFICE_PENDING", updated_at: iso(T0) }, { first: true, nowMs: T0 })],
+			[{ action: "person", code: "HANDED_OVER" }, { action: "person", code: "HANDED_OVER" }], "§29 FAILS ON THE OLD CODE: on a trigger's first start-up an office record is the sweep's to hand over, as a driver's (HANDED_OVER)");
+	},
+};
+
+// Each a one-change copy of lib/'s text, run through the group named: it must fail a check there.
+const OFFICE_MUTANTS = [
+	["the switch ignored", "auto-invoice-job.js", "const officeSwitch = triggerMode && office.enabled(d.env || {});", "const officeSwitch = triggerMode;", "roles"],
+	["the list never written at the start (the path never opens)", "auto-invoice-job.js", "const listing = officeSwitch ? listCompleted({ opens: true }) : null;", "const listing = null;", "roles"],
+	["the office record without the look", "auto-invoice-job.js", "lookFirst: fromOffice ? nowIso : \"\"", "lookFirst: \"\"", "roles"],
+	["the office record under the driver's code", "auto-invoice-job.js", "const code = fromOffice ? \"OFFICE_PENDING\" : \"DRIVER_PENDING\";", "const code = \"DRIVER_PENDING\";", "roles"],
+	["the list written empty, the path opened anyway", "auto-invoice-job.js", "office.addCompleted(db, keys, {", "office.addCompleted(db, [], {", "stops"],
+	["the path open before its list is written (N1's gate)", "auto-invoice-job.js", "const officeOpen = officeSwitch && officeReady && ", "const officeOpen = officeSwitch && ", "list"],
+	["the watch doesn't top the list up (N3)", "auto-invoice-job.js", "if (!onlyKey && officeSwitch) await listCompleted();", "", "list"],
+	["the row written at the arm, before the write", "auto-invoice-job.js", "const onQueued = fromOffice ? () => officeStarted(req, by, role, loadId) : null;", "const onQueued = null;\n\t\t\tif (fromOffice) officeStarted(req, by, role, loadId);", "rows"],
+	["the row written on every written(), moved or not", "auto-invoice-job.js", "if (queueTapped(key) && onQueued) onQueued();\n\t\t\t\t},", "queueTapped(key);\n\t\t\t\t\tif (onQueued) onQueued();\n\t\t\t\t},", "twice"],
+	["a landed write's row left out", "auto-invoice-job.js", "if (queueTapped(key) && onQueued) onQueued();\n\t\t\t\treturn;", "queueTapped(key);\n\t\t\t\treturn;", "rows"],
+	["the row written for the driver's tap too", "auto-invoice-job.js", "const onQueued = fromOffice ? () => officeStarted(req, by, role, loadId) : null;", "const onQueued = () => officeStarted(req, by, role, loadId);", "rows"],
+	["a restart's office record queued with no row (N4)", "auto-invoice-job.js", "if (n && plan.action === \"queue\" && c.reason_code === \"OFFICE_PENDING\") audit(", "if (false) audit(", "restart"],
+	["NOT_STARTED never shown", "auto-invoice-job.js", "const notStarted = officeSwitch ? \"NOT_STARTED\" : \"NOT_BY_DRIVER\";", "const notStarted = \"NOT_BY_DRIVER\";", "chip"],
+	["an empty read opens the path (N1)", "auto-invoice-office.js", "return loads ? keys : null;", "return keys;", "list"],
+	["the list reads only the row the job keeps (N2)", "auto-invoice-office.js", "for (const row of everyJobTrackingRow(jt))", "for (const row of (jt && jt.data) || [])", "list"],
+	["a load with a claim listed too", "auto-invoice-office.js", "SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM ${ledger.CLAIMS} WHERE load_key = ?)`);\n\t\tlet n = 0;\n\t\tfor (const key of keys) n += add.run(key, nowIso, key).changes;",
+		"SELECT ?, ?`);\n\t\tlet n = 0;\n\t\tfor (const key of keys) n += add.run(key, nowIso).changes;", "list"],
+	["a one-step revival let through", "auto-invoice-trigger.js", "if (rules.isCancelledStatus(oldStatus) || !history || history.cancelled) return false;", "if (!history || history.cancelled) return false;", "stops"],
+	["a two-step revival let through (the history's Cancelled half)", "auto-invoice-trigger.js", "if (rules.isCancelledStatus(oldStatus) || !history || history.cancelled) return false;", "if (rules.isCancelledStatus(oldStatus) || !history) return false;", "stops"],
+	["the history rule dropped", "auto-invoice-trigger.js", "(!history.completed && past.listed === false)", "(past.listed === false)", "stops"],
+	["the list dropped", "auto-invoice-trigger.js", "(!history.completed && past.listed === false)", "(!history.completed)", "stops"],
+	["a history that can't be read read as none", "auto-invoice-trigger.js", "const history = past && past.history;", "const history = (past && past.history) || { completed: false, cancelled: false };", "stops"],
+	["a list that can't be read read as not listed", "auto-invoice-trigger.js", "past.listed === false", "past.listed !== true", "stops"],
+	["a second claim: a claim that isn't waiting armed again", "auto-invoice-trigger.js", "if (claim) return claim.state === \"waiting\";", "if (claim) return claim.state !== \"skipped\";", "rules"],
+	["the office path without its switch in the rule", "auto-invoice-trigger.js", "!(office === true && OFFICE_ROLES.includes(role) && ", "!(OFFICE_ROLES.includes(role) && ", "rules"],
+	["the Dispatcher left out", "auto-invoice-trigger.js", "const OFFICE_ROLES = Object.freeze([\"Super Admin\", \"Dispatcher\"]);", "const OFFICE_ROLES = Object.freeze([\"Super Admin\"]);", "roles"],
+	["an office record not queued at a restart (L2)", "auto-invoice-trigger.js", "if (c.reason_code !== \"DRIVER_PENDING\" && c.reason_code !== \"OFFICE_PENDING\") return person(ownCode(c));", "if (c.reason_code !== \"DRIVER_PENDING\") return person(ownCode(c));", "restart"],
+	["an office record handed over under its own code on a first start", "auto-invoice-trigger.js", "\"DRIVER_PENDING\", \"OFFICE_PENDING\"].includes(code)", "\"DRIVER_PENDING\"].includes(code)", "rules"],
+];
+
+// The three modules from text (as shipped, or with one mutant), each in a fresh module; everything
+// else in lib/ is required as usual.
+function officeModules(texts) {
+	const built = {};
+	const load = (name) => {
+		if (built[name]) return built[name];
+		const file = path.join(ROOT, "lib", name);
+		const mod = { exports: {} };
+		const base = Module.createRequire(file);
+		const req = Object.assign((p) => (p === "./auto-invoice-trigger" ? load("auto-invoice-trigger.js") : p === "./auto-invoice-office" ? load("auto-invoice-office.js") : base(p)), base);
+		new Function("module", "exports", "require", "__filename", "__dirname", texts[name])(mod, mod.exports, req, file, path.dirname(file));
+		built[name] = mod.exports;
+		return mod.exports;
+	};
+	return { job: load("auto-invoice-job.js"), trigger: load("auto-invoice-trigger.js"), office: load("auto-invoice-office.js") };
+}
+
+async function officeMutants() {
+	const texts = {};
+	for (const name of ["auto-invoice-job.js", "auto-invoice-trigger.js", "auto-invoice-office.js"]) {
+		try {
+			texts[name] = fs.readFileSync(path.join(ROOT, "lib", name), "utf8");
+		} catch {
+			texts[name] = "";
+		}
+	}
+	let caught = 0;
+	for (const [label, file, from, to, group] of OFFICE_MUTANTS) {
+		if (texts[file].split(from).length !== 2) {
+			failures.push(`§30 MUTANT ${label}: its anchor isn't in lib/${file} exactly once`);
+			continue;
+		}
+		const out = [];
+		const c = {
+			eq: (actual, expected, l) => { if (JSON.stringify(actual) !== JSON.stringify(expected)) out.push(l); },
+			ok: (cond, l) => { if (!cond) out.push(l); },
+		};
+		try {
+			await OFFICE_GROUPS[group](officeModules({ ...texts, [file]: texts[file].replace(from, () => to) }), c);
+		} catch (e) {
+			out.push(`threw: ${e && e.message}`);
+		}
+		if (out.length) {
+			caught++;
+			pass++;
+			console.log(`  MUTANT ${label}: caught by "${out[0]}"`);
+		} else failures.push(`§30 MUTANT ${label}: NOT caught by the ${group} group`);
+	}
+	console.log(`  ${caught}/${OFFICE_MUTANTS.length} office mutants caught`);
 }
 
 main().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {

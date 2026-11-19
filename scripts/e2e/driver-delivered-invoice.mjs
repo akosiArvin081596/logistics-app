@@ -18,6 +18,15 @@
 //       nothing; OK posts once, answers "It's being made now.", looks first, one SMTP call); a hit in
 //       the mailbox and a filled Payments Table row send nothing; "looks in Gmail" on MAYBE_SENT, which
 //       never sends; "a Gmail draft" while sending is stopped; no Try again on OFF_GAP
+//   N   step O's twin with the office switch on (AUTO_INVOICE_OFFICE_DELIVERED_ENABLED), at a true 1280 and a
+//       true 390 (a new context, 390 x 844, isMobile, deviceScaleFactor 2): the office user picks Delivered in
+//       a load's Status list on Active Loads, Go, OK: one record, the mailbox and the Payments Table looked in
+//       first, one SMTP call, one row naming that user, and the load reads "Sent to the broker"; a load
+//       Delivered before the switch went on reads "No automatic invoice" and stays so through At Receiver and
+//       Delivered again; an Override to Delivered on a load with no POD stops for a person; with the switch
+//       off, the office's Delivered starts nothing and reads as before. W: every 390 screen's
+//       documentElement.clientWidth is 390 and its scrollWidth isn't above it; no 1280 screen scrolls sideways.
+//       Its screens and results go to NOTE_SHOT_DIR (the owner's note)
 //   G   no TLS connection, no socket to another host or a mail port from this process; the browser
 //       opened no socket off this machine and asked no mail host. Any other host it asks (its web
 //       fonts) is aborted, and only reported, as in time-off-chr-draft.mjs
@@ -30,10 +39,13 @@
 //   npm --prefix scripts/e2e ci     (once; playwright-core)
 //   npm --prefix client run build   (the build under test)
 //   node scripts/e2e/driver-delivered-invoice.mjs
+//   E2E_SELF_CHECK=1 node scripts/e2e/driver-delivered-invoice.mjs   (step N's server half alone: no browser, no build)
 //
-// Env: E2E_PORT (3000 and 5173 are refused, and so is a port in use), HEADED=1, CHROME_PATH, E2E_WORK_DIR.
+// Env: E2E_PORT (3000 and 5173 are refused, and so is a port in use), HEADED=1, CHROME_PATH, E2E_WORK_DIR,
+// NOTE_SHOT_DIR (default ~/LogisX-replica/reports/cc/work/admin-delivered-invoice/pr-a/screens).
 // Output: PASS/FAIL lines, a final count, <work dir>/results-driver-delivered-invoice.md and screenshots
-// in ~/LogisX-replica/screens/chr-invoice/. Exit 0 only when every row PASSes.
+// in ~/LogisX-replica/screens/chr-invoice/; step N's screens and results-office-delivered.md in
+// NOTE_SHOT_DIR. Exit 0 only when every row PASSes.
 import { chromium } from 'playwright-core'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -53,6 +65,10 @@ const DIST = path.join(paths.REPO, 'client', 'dist')
 const SHOT_DIR = path.join(os.homedir(), 'LogisX-replica', 'screens', 'chr-invoice')
 const PHONE = { tag: '375x812', viewport: { width: 375, height: 812 } }
 const DESKTOP = { tag: '1280x800', viewport: { width: 1280, height: 800 } }
+// Step N's screens, for the owner's note: a true 1280, and a true phone through Playwright's own emulation.
+const NOTE_DIR = process.env.NOTE_SHOT_DIR || path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'admin-delivered-invoice', 'pr-a', 'screens')
+const NOTE_DESK = Object.freeze({ tag: '1280', phone: false, viewport: { width: 1280, height: 800 }, context: { deviceScaleFactor: 1 } })
+const NOTE_PHONE = Object.freeze({ tag: '390', phone: true, viewport: { width: 390, height: 844 }, context: { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } })
 
 function die(msg) {
   console.error(`driver-delivered-invoice: ${msg}`)
@@ -61,7 +77,8 @@ function die(msg) {
 
 if (process.env.E2E_PORT && (!Number.isInteger(ASKED_PORT) || ASKED_PORT < 1024 || ASKED_PORT > 65535)) die(`E2E_PORT must be a port number from 1024 to 65535; got "${process.env.E2E_PORT}"`)
 if (ASKED_PORT === 3000 || ASKED_PORT === 5173) die(`refusing port ${ASKED_PORT}: 3000 is production's port on the VPS and 5173 is Vite's`)
-if (!fs.existsSync(path.join(DIST, 'index.html'))) die(`no ${path.join(DIST, 'index.html')}: run \`npm --prefix client run build\` first`)
+const SELF_CHECK = process.env.E2E_SELF_CHECK === '1'
+if (!SELF_CHECK && !fs.existsSync(path.join(DIST, 'index.html'))) die(`no ${path.join(DIST, 'index.html')}: run \`npm --prefix client run build\` first`)
 
 // ---------------------------------------------------------------- nothing leaves this process
 // Set before any lib is loaded. Every socket goes through Socket.prototype.connect (http's agent
@@ -143,7 +160,9 @@ function gate() {
 }
 
 // One made-up server's worth of state and the job on it. A load's row is what Job Tracking would hold.
-async function freshServer() {
+// `office`: a restart after the first start, with the office switch on; `beforeSwitch`: loads a row edit
+// marks Delivered between the two (the switch went on after they were completed).
+async function freshServer({ office = false, beforeSwitch = [] } = {}) {
   const db = new Database(':memory:')
   db.exec(`
     CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL DEFAULT '', type TEXT NOT NULL,
@@ -154,6 +173,8 @@ async function freshServer() {
     CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME, deleted_by TEXT DEFAULT '');
     CREATE TABLE broker_invoice_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, load_key TEXT NOT NULL, voided_at TEXT);
     CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
+    CREATE TABLE load_status_history (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, old_status TEXT DEFAULT '', new_status TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual', actor TEXT DEFAULT '', changed_at DATETIME DEFAULT CURRENT_TIMESTAMP, reason TEXT DEFAULT '');
   `)
   const s = {
     db,
@@ -171,9 +192,11 @@ async function freshServer() {
     numbers: 0,
     ids: 0,
     routes: {},
+    audits: [],
+    statusPuts: [],
   }
   s.row = (id) => s.rows.find((r) => rules.loadKey(r['Load ID']) === rules.loadKey(id)) || null
-  s.addLoad = (id, status = 'At Receiver') => {
+  s.addLoad = (id, status = 'At Receiver', { pod = true } = {}) => {
     s.rows.push({
       _rowIndex: s.rows.length + 2,
       'Load ID': id,
@@ -190,12 +213,18 @@ async function freshServer() {
       _dropStreet: '200 Sample Ave',
       _dropLocation: 'Dallas, TX 75201',
     })
-    db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, datetime('now', '-60 minutes'))").run(id, `${id}_POD.pdf`, `/uploads/${id}_POD.pdf`)
+    if (pod) db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, datetime('now', '-60 minutes'))").run(id, `${id}_POD.pdf`, `/uploads/${id}_POD.pdf`)
+  }
+  // One status transition as server.js's recordStatusChange() writes it: none for a status written over itself.
+  s.history = (id, oldStatus, newStatus, source = 'manual', actor = DRIVER_NAME) => {
+    if (String(oldStatus || '').trim().toLowerCase() === String(newStatus).trim().toLowerCase()) return
+    db.prepare('INSERT INTO load_status_history (load_id, old_status, new_status, source, actor) VALUES (?, ?, ?, ?, ?)').run(rules.loadKey(id), oldStatus || '', newStatus, source, actor)
   }
   ledger.writeSettings(db, { optOutDomains: [], confirmedBrokerDomains: [DOMAIN] }, { by: ADMIN.username, nowIso: new Date().toISOString() })
-  const job = jobLib.create({
+  const OFF = Object.freeze({ AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false' })
+  const makeJob = (env) => jobLib.create({
     db,
-    env: { AUTO_INVOICE_DRAFTS_ENABLED: 'true', AUTO_INVOICE_DRAFTS_SHADOW: 'false' },
+    env,
     readJobTracking: async () => ({ headers: JOB_HEADERS, data: s.rows.map((r) => ({ ...r })) }),
     closedMonthsOf: () => [],
     dayKeyOf: (cell) => {
@@ -240,7 +269,7 @@ async function freshServer() {
     newMessageId: () => `<qa-delivered-${++s.ids}.auto-invoice@example.com>`,
     mailbox: () => ({ user: 'qa-mailbox@example.com', pass: 'made-up' }),
     bisonRecipient: () => '',
-    logAudit: () => {},
+    logAudit: (req, action, entity, id, details) => { s.audits.push({ who: req.session.user.username, action, id, details }) },
     notify: () => {},
     geminiUnavailableAt: () => null,
     log: { warn: (m) => s.logs.push(m), error: (m) => s.logs.push(m) },
@@ -252,9 +281,16 @@ async function freshServer() {
     lookInMailbox: async (o) => { s.looks.push(o.loadNumber); return s.lookAnswer },
     sleep: async () => {},
   })
-  s.job = job
   const add = (method) => (p, ...handlers) => { s.routes[`${method} ${p}`] = handlers }
-  job.mount({ get: add('GET'), put: add('PUT'), post: add('POST') }, { requireRole: () => (req, res, next) => next() })
+  // A start of the job on this database, its routes taken over by it: the server's own start-up.
+  const startJob = async (env) => {
+    const job = makeJob(env)
+    s.job = job
+    s.routes = {}
+    job.mount({ get: add('GET'), put: add('PUT'), post: add('POST') }, { requireRole: () => (req, res, next) => next() })
+    job.startTrigger()
+    await job.finishStartUp()
+  }
   s.callRoute = async (name, params, body) => {
     const out = { status: 200, body: {} }
     const res = { status(c) { out.status = c; return res }, json(b) { out.body = b; return res } }
@@ -266,13 +302,16 @@ async function freshServer() {
     }
     return out
   }
-  // The three lines PUT /api/driver/status adds, around the write they guard.
-  s.statusWrite = (who, id, newStatus = 'Delivered') => {
+  // The three lines PUT /api/driver/status (or the Override, `route`) adds around the write they guard,
+  // through server.js's wrapper (the session's role and account), then the route's history row.
+  s.statusWrite = (who, id, newStatus = 'Delivered', route = 'Status dropdown') => {
     const row = s.row(id)
-    const start = job.driverDelivered({ role: who.role, loadId: id, oldStatus: row.Status, newStatus, readBack: async () => s.row(id).Status })
+    const before = row.Status
+    const start = s.job.driverDelivered({ role: who.role, loadId: id, oldStatus: before, newStatus, by: { id: who.id, username: who.username, route }, req: { session: { user: who } }, readBack: async () => s.row(id).Status })
     row.Status = newStatus
     if (rules.isCompletedStatus(newStatus)) row['Completion Date'] = DELIVERED_ON
     start.written()
+    s.history(id, before, newStatus, route === 'Override' ? 'override' : 'manual', route === 'Override' ? who.username : DRIVER_NAME)
   }
   s.claim = (id) => ledger.getClaim(db, rules.loadKey(id))
   // A claim as an earlier run left it.
@@ -285,18 +324,23 @@ async function freshServer() {
   s.handDraft = (id) => db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', 'imap', ?)").run(id, `${TM}${TD}${TY}-90`, BILLING, ADMIN.username)
   // A load delivered before the switch: the first start-up leaves it to people.
   s.addLoad('QA-OLD-8000', 'Delivered')
-  job.startTrigger()
-  await job.finishStartUp()
+  await startJob(OFF)
+  if (office) {
+    for (const id of beforeSwitch) s.addLoad(id, 'Delivered')
+    await startJob({ ...OFF, AUTO_INVOICE_OFFICE_DELIVERED_ENABLED: 'true' })
+  }
   return s
 }
 
 function dashboardBody(s) {
   const completed = s.rows.filter((r) => rules.isCompletedStatus(r.Status)).map((r) => ({ ...r }))
   s.job.annotateCompletedRows({ rows: completed, headers: JOB_HEADERS, isSuperAdmin: true })
+  // Step N works its loads from Active Loads; the other steps show none there.
+  const active = s.showActive ? s.rows.filter((r) => !rules.isCompletedStatus(r.Status) && !rules.isCancelledStatus(r.Status)).map((r) => ({ ...r })) : []
   return {
     timestamp: new Date().toISOString(),
     kpis: { activeLoads: 0, unassignedLoads: 0, completedThisWeek: completed.length, completedThisMonth: completed.length, fleetUtilization: { assigned: 0, total: 1 }, revenue: { total: 0, paid: 0, pending: 0 } },
-    unassignedJobs: [], jobTrackingHeaders: HEADERS, completedHeaders: HEADERS, activeJobs: [],
+    unassignedJobs: [], jobTrackingHeaders: HEADERS, completedHeaders: HEADERS, activeJobs: active,
     completedJobs: completed,
     fleet: [], drivers: [DRIVER_NAME], driverQueues: {},
     autoInvoice: { mode: 'on' },
@@ -337,6 +381,14 @@ async function answerWrite(s, method, pathname, raw) {
     const loadKey = decodeURIComponent(m[1])
     s.retryPosts.push(loadKey)
     return s.callRoute('POST /api/auto-invoice/loads/:loadKey/retry', { loadKey }, parse(raw) || {})
+  }
+  // Step N: the Status list's Go, as PUT /api/driver/status does it for the signed-in office user.
+  if (method === 'PUT' && pathname === '/api/driver/status' && s.answersStatus) {
+    const body = parse(raw) || {}
+    s.statusPuts.push(body)
+    if (!s.row(body.loadId) || !/^(at receiver|delivered)$/i.test(String(body.newStatus || ''))) return { status: 409, body: { error: 'Not a status this check writes.', code: 'MADE_UP_REFUSAL' } }
+    s.statusWrite(ADMIN, body.loadId, body.newStatus, 'Status dropdown')
+    return json200({ success: true })
   }
   return null
 }
@@ -389,7 +441,10 @@ async function shot(page, name) {
 // dismissed, and `dialogs.seen` shows it, so an extra question fails its row.
 async function openPage(browser, size, s) {
   const phone = size.viewport.width < 640
-  const ctx = await browser.newContext({ viewport: size.viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
+  // Step N's views name their own emulation (a true 390 phone: isMobile, deviceScaleFactor 2).
+  const ctx = await browser.newContext(size.context
+    ? { viewport: size.viewport, ...size.context, serviceWorkers: 'block' }
+    : { viewport: size.viewport, deviceScaleFactor: phone ? 3 : 1, isMobile: phone, hasTouch: phone, serviceWorkers: 'block' })
   await ctx.route('**/*', async (route) => {
     const req = route.request()
     const u = new URL(req.url())
@@ -694,6 +749,190 @@ async function tryAgainRun(browser, size) {
   }
 }
 
+// ---------------------------------------------------------------- N: the office's Delivered, the switch on
+// Step O's twin with AUTO_INVOICE_OFFICE_DELIVERED_ENABLED on, and the screens for the owner's note. The words
+// of the two codes the switch brings (client/src/lib/autoInvoiceStatus.js), pinned as WORDS are above.
+const OFFICE_WORDS = {
+  notStarted: { label: 'No automatic invoice', tone: 'warn', reason: 'No automatic invoice was started for this load: it was marked Delivered another way, or before office Deliveries started one. Check Gmail Sent Mail first, then draft it by hand.' },
+  noPod: { label: 'Needs attention: no POD yet', tone: 'bad', reason: 'No POD was found when the invoice was started. Upload it, then Try again.' },
+}
+const STARTED_BY_ADMIN = `the automatic invoice was started by ${ADMIN.username}'s Delivered (Super Admin, the Status dropdown)`
+
+// One screen for the owner's note and its width: at 390 the page is exactly as wide as the phone; at 1280
+// the window is 1280 and nothing scrolls sideways.
+async function noteShot(page, view, step, name) {
+  fs.mkdirSync(NOTE_DIR, { recursive: true, mode: 0o700 })
+  const file = path.join(NOTE_DIR, `${name}-${view.tag}.png`)
+  await page.screenshot({ path: file })
+  const l = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, inner: window.innerWidth }))
+  if (view.phone) {
+    record(`W-${step}`, `${name} at a true 390`, 'clientWidth 390, scrollWidth at most 390', `clientWidth ${l.client}, scrollWidth ${l.scroll}`, l.client === view.viewport.width && l.scroll <= view.viewport.width, file)
+  } else {
+    record(`W-${step}`, `${name} at a true 1280`, 'a 1280 window, nothing scrolling sideways', `innerWidth ${l.inner}, clientWidth ${l.client}, scrollWidth ${l.scroll}`, l.inner === view.viewport.width && l.scroll <= l.client, file)
+  }
+  return file
+}
+
+// Active Loads, and the load's row there (a card on a phone).
+const activeRow = (page, view, id) => page.locator(view.phone ? '.mobile-load-card' : 'tbody tr', { hasText: id }).first()
+async function openActive(page, view, id) {
+  await page.locator('[role="tab"]', { hasText: 'Active Loads' }).first().click({ timeout: 15000 })
+  try {
+    await activeRow(page, view, id).waitFor({ state: 'visible', timeout: 10000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// The load dialog's line, read and shot.
+async function lineShot(page, view, step, id, name) {
+  const opened = await openLine(page, id).catch(() => false)
+  const text = opened ? await locText(page.locator('.auto-line')) : ''
+  const file = await noteShot(page, view, step, name)
+  if (opened) await closeLine(page)
+  return { text, file }
+}
+
+async function noteRun(browser, view) {
+  const tag = `N-${view.tag}`
+  const DROPDOWN = 'QA-NOTE-8301'
+  const BEFORE = 'QA-NOTE-8302'
+  const NO_POD = 'QA-NOTE-8303'
+  // BEFORE: a row edit marked it Delivered after the first start, then the switch went on (a restart).
+  const s = await freshServer({ office: true, beforeSwitch: [BEFORE] })
+  s.addLoad(DROPDOWN)
+  s.addLoad(NO_POD, 'At Receiver', { pod: false })
+  s.showActive = true
+  s.answersStatus = true
+  const { ctx, page, dialogs } = await openPage(browser, view, s)
+  try {
+    const listed = await openActive(page, view, DROPDOWN)
+    record(`${tag}-active`, 'Active Loads lists the made-up load, At Receiver', 'its row', `listed ${listed}`, listed)
+    if (!listed) return
+    const select = activeRow(page, view, DROPDOWN).locator('select').first()
+    await select.selectOption('Delivered')
+    const picked = await select.inputValue().catch(() => '')
+    const go = activeRow(page, view, DROPDOWN).locator('button', { hasText: 'Go' }).first()
+    const goShown = await go.isVisible().catch(() => false)
+    const pickFile = await noteShot(page, view, `${tag}-pick`, 'n1-office-marks-delivered')
+    record(`${tag}-pick`, 'The office user picks Delivered in the load\'s Status list', '"Delivered" picked, Go shown', `picked "${picked}", Go ${goShown}`, picked === 'Delivered' && goShown, pickFile)
+
+    dialogs.plan.push({ accept: true })
+    const seenBefore = dialogs.seen.length
+    await go.click({ timeout: 5000 })
+    const asked = await until(() => dialogs.seen.length > seenBefore, 5000)
+    const sent = await until(() => s.smtp.length === 1 && (s.claim(DROPDOWN) || {}).state === 'drafted', 15000)
+    const c = s.claim(DROPDOWN) || {}
+    const startedRows = s.audits.filter((a) => a.action === 'auto_invoice_started')
+    const question = (dialogs.seen[seenBefore] || {}).message || ''
+    record(`${tag}-go`, 'Go, then OK: the status write, and the automatic invoice it starts',
+      `"Update to "Delivered"?", one PUT; the Payments Table and the mailbox read first; one SMTP call to the billing address; one row naming ${ADMIN.username}`,
+      `"${question}", PUTs ${s.statusPuts.length}, claim ${c.state || 'none'}, table reads ${s.paymentsReads}, looks ${s.looks.join(',') || 'none'}, SMTP ${s.smtp.length} to ${(s.smtp[0] || {}).to || ''}, rows ${JSON.stringify(startedRows.map((r) => [r.who, r.details]))}`,
+      asked && sent && question === 'Update to "Delivered"?' && s.statusPuts.length === 1 && s.paymentsReads === 1 && s.looks.length === 1 && s.looks[0] === DROPDOWN &&
+        (s.smtp[0] || {}).to === BILLING && startedRows.length === 1 && startedRows[0].who === ADMIN.username && startedRows[0].details === STARTED_BY_ADMIN)
+
+    await reloadCompleted(page)
+    await chipStep(page, `${tag}-sent`, 'Completed Loads: the load the office marked Delivered', DROPDOWN, WORDS.sent(c.invoice_id))
+    await noteShot(page, view, `${tag}-sent`, 'n2-sent')
+    const sentLine = await lineShot(page, view, `${tag}-sent-line`, DROPDOWN, 'n2-sent-line')
+    const wantSent = `${WORDS.sent(c.invoice_id).label}. ${WORDS.sent(c.invoice_id).reason}`
+    record(`${tag}-sent-line`, 'Its line in the load dialog', `"${wantSent}"`, `"${sentLine.text}"`, sentLine.text === wantSent, sentLine.file)
+
+    // Delivered before the switch went on: nothing starts, then or after a back-and-forth in the office.
+    await chipStep(page, `${tag}-before`, 'A load Delivered before the switch went on', BEFORE, OFFICE_WORDS.notStarted)
+    s.statusWrite(ADMIN, BEFORE, 'At Receiver')
+    s.statusWrite(ADMIN, BEFORE, 'Delivered')
+    await new Promise((r) => setTimeout(r, 300))
+    record(`${tag}-before-again`, 'The office moves it to At Receiver and back to Delivered', 'no record, nothing sent: it keeps "Draft it by hand"',
+      `claim ${JSON.stringify(s.claim(BEFORE))}, SMTP ${s.smtp.length}`, !s.claim(BEFORE) && s.smtp.length === 1)
+    await reloadCompleted(page)
+    const beforeLine = await lineShot(page, view, `${tag}-before-line`, BEFORE, 'n3-delivered-before-switch-on')
+    const wantBefore = `${OFFICE_WORDS.notStarted.label}. ${OFFICE_WORDS.notStarted.reason}`
+    record(`${tag}-before-line`, 'Its line in the load dialog', `"${wantBefore}"`, `"${beforeLine.text}"`, beforeLine.text === wantBefore, beforeLine.file)
+
+    // The Override to Delivered on a load with no POD (the Override has no POD gate): a person, nothing sent.
+    s.statusWrite(ADMIN, NO_POD, 'Delivered', 'Override')
+    const stopped = await until(() => (s.claim(NO_POD) || {}).state === 'needs_attention', 8000)
+    const np = s.claim(NO_POD) || {}
+    record(`${tag}-no-pod`, 'An Override to Delivered on a load with no POD', 'Needs attention (WAITING_POD), nothing sent, no number', `${np.state || 'none'} ${np.reason_code || ''}, SMTP ${s.smtp.length}, numbers ${s.numbers}`,
+      stopped && np.reason_code === 'WAITING_POD' && s.smtp.length === 1 && s.numbers === 1)
+    await reloadCompleted(page)
+    await chipStep(page, `${tag}-no-pod-chip`, 'Its chip', NO_POD, OFFICE_WORDS.noPod)
+    const noPodLine = await lineShot(page, view, `${tag}-no-pod-line`, NO_POD, 'n4-no-pod')
+    const wantNoPod = `${OFFICE_WORDS.noPod.label}. ${OFFICE_WORDS.noPod.reason}`
+    record(`${tag}-no-pod-line`, 'Its line asks for the POD, then Try again', `starts "${wantNoPod}"`, `"${noPodLine.text}"`, noPodLine.text.startsWith(wantNoPod), noPodLine.file)
+  } finally {
+    await ctx.close()
+    s.db.close()
+  }
+
+  // The switch off: an office Delivered starts nothing and reads as it always has.
+  const off = await freshServer()
+  const OFF_LOAD = 'QA-NOTE-8305'
+  off.addLoad(OFF_LOAD)
+  off.statusWrite(ADMIN, OFF_LOAD)
+  await new Promise((r) => setTimeout(r, 300))
+  const shown = await openPage(browser, view, off)
+  try {
+    record(`${tag}-off`, 'The switch off: the office marks a load Delivered', 'no record, nothing sent', `claim ${JSON.stringify(off.claim(OFF_LOAD))}, SMTP ${off.smtp.length}`, !off.claim(OFF_LOAD) && off.smtp.length === 0)
+    if (!(await openCompleted(shown.page))) {
+      record(`${tag}-off-list`, 'Completed Loads lists it', 'a row', 'not listed', false)
+      return
+    }
+    await chipStep(shown.page, `${tag}-off-chip`, 'Its chip, as before', OFF_LOAD, WORDS.notStarted)
+    const offLine = await lineShot(shown.page, view, `${tag}-off-line`, OFF_LOAD, 'n5-switch-off-old-banner')
+    const wantOff = `${WORDS.notStarted.label}. ${WORDS.notStarted.reason}`
+    record(`${tag}-off-line`, 'Its line, as before', `"${wantOff}"`, `"${offLine.text}"`, offLine.text === wantOff, offLine.file)
+  } finally {
+    await shown.ctx.close()
+    off.db.close()
+  }
+}
+
+// Step N's server half with no browser (E2E_SELF_CHECK=1): the same server, the page's Go as answerWrite()
+// takes it, and the rows as /api/dashboard serves them.
+async function noteServerHalf() {
+  const s = await freshServer({ office: true, beforeSwitch: ['QA-NOTE-8302'] })
+  s.addLoad('QA-NOTE-8301')
+  s.addLoad('QA-NOTE-8303', 'At Receiver', { pod: false })
+  s.answersStatus = true
+  const chipOf = (x, id) => (dashboardBody(x).completedJobs.find((r) => r['Load ID'] === id) || {})._autoInvoice || null
+  try {
+    const put = await answerWrite(s, 'PUT', '/api/driver/status', JSON.stringify({ rowIndex: 3, driverName: DRIVER_NAME, loadId: 'QA-NOTE-8301', newStatus: 'Delivered' }))
+    const sent = await until(() => s.smtp.length === 1 && (s.claim('QA-NOTE-8301') || {}).state === 'drafted', 15000)
+    const rowsOf = s.audits.filter((a) => a.action === 'auto_invoice_started').map((a) => [a.who, a.details])
+    record('N-server-go', 'The Status list\'s Go for the office user, the switch on', `200; looks first; one SMTP call to the billing address; one row naming ${ADMIN.username}`,
+      `${put && put.status}, looks ${s.looks.join(',')}, table reads ${s.paymentsReads}, SMTP ${s.smtp.length}, rows ${JSON.stringify(rowsOf)}`,
+      Boolean(put) && put.status === 200 && sent && s.looks.length === 1 && s.paymentsReads === 1 && (s.smtp[0] || {}).to === BILLING && JSON.stringify(rowsOf) === JSON.stringify([[ADMIN.username, STARTED_BY_ADMIN]]))
+    const sentChip = chipOf(s, 'QA-NOTE-8301')
+    record('N-server-sent', '...its row as served', 'drafted, sent', JSON.stringify(sentChip), Boolean(sentChip) && sentChip.state === 'drafted' && sentChip.sent === true)
+    const before = chipOf(s, 'QA-NOTE-8302')
+    s.statusWrite(ADMIN, 'QA-NOTE-8302', 'At Receiver')
+    s.statusWrite(ADMIN, 'QA-NOTE-8302', 'Delivered')
+    await new Promise((r) => setTimeout(r, 300))
+    record('N-server-before', 'A load Delivered before the switch went on, then At Receiver and Delivered in the office', 'NOT_STARTED; no record; one SMTP call in all',
+      `${JSON.stringify(before)}, claim ${JSON.stringify(s.claim('QA-NOTE-8302'))}, SMTP ${s.smtp.length}`, Boolean(before) && before.code === 'NOT_STARTED' && !s.claim('QA-NOTE-8302') && s.smtp.length === 1)
+    s.statusWrite(ADMIN, 'QA-NOTE-8303', 'Delivered', 'Override')
+    const stopped = await until(() => (s.claim('QA-NOTE-8303') || {}).state === 'needs_attention', 8000)
+    record('N-server-no-pod', 'An Override to Delivered on a load with no POD', 'needs_attention WAITING_POD; one SMTP call in all', `${JSON.stringify(chipOf(s, 'QA-NOTE-8303'))}, SMTP ${s.smtp.length}`,
+      stopped && (s.claim('QA-NOTE-8303') || {}).reason_code === 'WAITING_POD' && s.smtp.length === 1)
+  } finally {
+    s.db.close()
+  }
+  const off = await freshServer()
+  try {
+    off.addLoad('QA-NOTE-8305')
+    off.statusWrite(ADMIN, 'QA-NOTE-8305')
+    await new Promise((r) => setTimeout(r, 300))
+    const chip = chipOf(off, 'QA-NOTE-8305')
+    record('N-server-off', 'The switch off: the office marks a load Delivered', 'no record, nothing sent, NOT_BY_DRIVER', `claim ${JSON.stringify(off.claim('QA-NOTE-8305'))}, SMTP ${off.smtp.length}, ${JSON.stringify(chip)}`,
+      !off.claim('QA-NOTE-8305') && off.smtp.length === 0 && Boolean(chip) && chip.code === 'NOT_BY_DRIVER')
+  } finally {
+    off.db.close()
+  }
+}
+
 // ---------------------------------------------------------------- G: nothing left
 function wireStep() {
   // A page request to another host (its web fonts) is aborted in openPage(), so it's only reported.
@@ -706,6 +945,13 @@ function wireStep() {
 }
 
 async function main() {
+  if (SELF_CHECK) {
+    await noteServerHalf()
+    wireStep()
+    const ok = rows.filter((r) => r.verdict === 'PASS').length
+    console.log(`driver-delivered-invoice (step N's server half): ${ok}/${rows.length} PASS`)
+    process.exit(ok === rows.length ? 0 : 1)
+  }
   if (ASKED_PORT && await portInUse(ASKED_PORT)) die(`port ${ASKED_PORT} is in use (another e2e server?): set E2E_PORT to a free one`)
   const server = http.createServer(serveDist)
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(ASKED_PORT, HOST, resolve) })
@@ -722,6 +968,13 @@ async function main() {
         } catch (e) {
           record(`${name}-${size.tag}`, 'The part ran to its end', 'no error', String(e && e.message).slice(0, 300), false)
         }
+      }
+    }
+    for (const view of [NOTE_DESK, NOTE_PHONE]) {
+      try {
+        await noteRun(browser, view)
+      } catch (e) {
+        record(`N-${view.tag}`, 'The part ran to its end', 'no error', String(e && e.message).slice(0, 300), false)
       }
     }
   } finally {
@@ -742,6 +995,15 @@ async function main() {
     '', `Page errors (not part of the verdict): ${pageErrors.length ? pageErrors.join('; ') : 'none'}`, '',
   ].join('\n')
   fs.writeFileSync(resultsFile, out, { mode: 0o600 })
+  // Step N's rows beside its screens, for the owner's note (made-up data only).
+  const noteRows = rows.filter((r) => /^(N|W)-/.test(r.step))
+  fs.mkdirSync(NOTE_DIR, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(NOTE_DIR, 'results-office-delivered.md'), [
+    '# An office user\'s Delivered, the switch on: step N', '',
+    `Build: ${DIST}. Made-up data only. ${new Date().toISOString()}`, '',
+    '| Step | Check | Expected | Observed | Verdict | Screenshot |', '|---|---|---|---|---|---|',
+    ...noteRows.map((r) => `| ${r.step} | ${esc(r.title)} | ${esc(r.expected)} | ${esc(r.observed)} | ${r.verdict} | ${r.shot ? path.basename(r.shot) : ''} |`), '',
+  ].join('\n'), { mode: 0o600 })
   const passed = rows.filter((r) => r.verdict === 'PASS').length
   console.log(`driver-delivered-invoice: ${passed}/${rows.length} PASS, ${rows.length - passed} FAIL; results ${resultsFile}; screenshots ${SHOT_DIR}`)
   if (pageErrors.length) console.log(`driver-delivered-invoice: page errors: ${pageErrors.join(' | ')}`)

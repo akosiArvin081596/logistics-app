@@ -16,6 +16,8 @@
 //      this one): off, no column is made and the press answers 404; on, live and with the
 //      server's own re-issue hold on, its columns are made and a press reaches the job through
 //      the late reference; dry, or the hold off, 404; the start-up line says which
+//   §8 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): with the job on and the
+//      switch exactly "true", one start-up line says so; otherwise the lines are as before
 //
 // Made-up loads and settings only (LD-TEST-*).
 //   node scripts/test-triumph-wiring.js      # exits 1 on any failure
@@ -265,6 +267,17 @@ function wire(env, { replica = null } = {}) {
 		eq([works(noHold), (await noHold.press()).status], [false, 404], "§7 FAILS ON THE OLD CODE: RATECON_REISSUE_HOLD_ENABLED off: the server's own value reaches the routes, and the button doesn't work (the advance check fails closed)");
 		ok(/\tclosedMonthsOf: integrityClosedMonthsOf,\n\treissueHoldOn: RATECON_REISSUE_HOLD_ENABLED,\n\ttriumphJob: \(\) => triumph,\n/.test(FBLOCK), "§7 the routes get the server's own month check, hold and job");
 		ok(/\tprocessButtonOn: require\("\.\/lib\/triumph-rules"\)\.processButtonEnabled\(process\.env, \{ replica: Boolean\(REPLICA\) \}\),\n/.test(BLOCK), "§7 the job's daily notice follows the same switch");
+	}
+
+	// ---------------------------------------------------------------- §8
+	section("§8 each identical BOL or POD once: the start-up line");
+	{
+		const lines = (env) => wire(env).logs.filter((l) => l.startsWith("[triumph]"));
+		const DEDUPE = { TRIUMPH_BATCH_DEDUPE_ENABLED: "true" };
+		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", ...DEDUPE }), ["[triumph] submit dry; connection settings unset", "[triumph] a batch sends each identical BOL or POD once"],
+			"§8 FAILS ON THE OLD CODE: the job on and the switch on: one more start-up line, saying so");
+		eq(lines(DEDUPE), ["[triumph] submit off; connection settings unset"], "§8 ...the job off: no line, since it builds nothing");
+		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_BATCH_DEDUPE_ENABLED: "TRUE" }), ["[triumph] submit dry; connection settings unset"], "§8 ...and anything but \"true\" is off: no line");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
