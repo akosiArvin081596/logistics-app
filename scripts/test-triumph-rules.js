@@ -20,6 +20,8 @@
 //   §13 advance lines (TRIUMPH_ADVANCE_LINES_ENABLED, PR B1): on only with the automatic
 //       invoice's own switch on too; the free checks leave a factored load's lines to the
 //       engine only on facts made with the switch, and stop it (ADVANCE_LINES) otherwise
+//   §14 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): on only when exactly
+//       "true", off by default
 //
 // Made-up values only. Pure: no server, port, database or network.
 //   node scripts/test-triumph-rules.js      # exits 1 on any failure
@@ -509,6 +511,17 @@ if (typeof rules.advanceLinesEnabled !== "function") {
 	eq(say(facts({ ...ON, row: { ...row, "Delivery Date": "" } })), "needs_attention NO_DELIVERY_DATE", "§13 ...the checks ahead of it still answer first");
 	eq(say({ ...facts(ON), pods: 0 }), "waiting WAITING_POD", "§13 FAILS ON THE OLD CODE: ...and the POD still waits after it");
 	eq(say(facts({ advanceLinesOn: "true" })), "needs_attention ADVANCE_LINES", "§13 ...only a real true lets it through");
+}
+
+// ---------------------------------------------------------------- §14
+section("§14 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED)");
+if (typeof rules.batchDedupeEnabled !== "function") {
+	failures.push("§14 FAILS ON THE OLD CODE: lib/triumph-rules.js has no batchDedupeEnabled()");
+} else {
+	const on = (v) => rules.batchDedupeEnabled({ TRIUMPH_BATCH_DEDUPE_ENABLED: v });
+	eq(["true", " true ", "TRUE", "True", "1", "yes", "on", "false", "", undefined].map(on), [true, true, false, false, false, false, false, false, false, false],
+		"§14 on only when exactly \"true\" (its ends trimmed, as every Triumph switch reads)");
+	eq([rules.batchDedupeEnabled(), rules.batchDedupeEnabled(null), rules.batchDedupeEnabled({})], [false, false, false], "§14 ...off by default, and with no settings at all");
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`);

@@ -13,6 +13,10 @@
 //   §4 it builds from the server's own code: every lifted declaration is server.js's text, the
 //      script holds no copy, nothing it lifts is a writer, the sheet or the mailer, and a root
 //      that is one is refused
+//   §5 the batch as the live press would build it (batch-size plan M1, N2): the job gets
+//      TRIUMPH_BATCH_DEDUPE_ENABLED and TRIUMPH_BATCH_MAX_BYTES from the settings file and
+//      nothing else, so its mode stays off; the run counts the copies left out, when it stops
+//      too; a lowered limit stops it; the process's own environment is never read
 //
 // Made-up data only (load 123456701, made-up.agent@chrobinson.com).
 //   node scripts/test-triumph-process-rehearsal.js      # exits 1 on any failure
@@ -80,15 +84,18 @@ async function renderStandIn(html) {
 }
 
 // The made-up world: a database under the temp folder (a copy, as the script allows), the uploads
-// beside it, the settings file, the sheet and the stand-in clients.
-function world({ ratecon = RATECON_TEXT } = {}) {
+// beside it, the settings file, the sheet and the stand-in clients. `settings`: more lines for the
+// settings file; `podCopies`: the POD stored that many more times, byte for byte.
+function world({ ratecon = RATECON_TEXT, settings: more = [], podCopies = 0 } = {}) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "triumph-practice-test-"));
 	fs.mkdirSync(path.join(dir, "uploads"));
 	fs.writeFileSync(path.join(dir, "uploads", "ratecon-made-up.pdf"), textPdf(ratecon, { mode: "literal" }));
-	fs.writeFileSync(path.join(dir, "uploads", "pod-made-up.pdf"), textPdf(`PROOF OF DELIVERY (MADE UP) Load ${LOAD}`, { mode: "literal" }));
+	const pod = textPdf(`PROOF OF DELIVERY (MADE UP) Load ${LOAD}`, { mode: "literal" });
+	fs.writeFileSync(path.join(dir, "uploads", "pod-made-up.pdf"), pod);
+	for (let i = 1; i <= podCopies; i++) fs.writeFileSync(path.join(dir, "uploads", `pod-made-up-again-${i}.pdf`), pod);
 	const settings = path.join(dir, "practice-settings.conf");
 	const denySetting = require(path.join(ROOT, "lib", "driver-instructions-runtime.js")).DENY_LIST_SETTING;
-	fs.writeFileSync(settings, [`TRIUMPH_NOA_LINES="${NOA.join("\\n")}"`, "GEMINI_API_KEY=made-up-key", `${denySetting}=998877665544`].join("\n"));
+	fs.writeFileSync(settings, [`TRIUMPH_NOA_LINES="${NOA.join("\\n")}"`, "GEMINI_API_KEY=made-up-key", `${denySetting}=998877665544`, ...more].join("\n"));
 	const file = path.join(dir, "app.db");
 	const db = new Database(file);
 	db.exec(`CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT, total TEXT,
@@ -104,6 +111,9 @@ function world({ ratecon = RATECON_TEXT } = {}) {
 	autoLedger.ensureSchema(db);
 	db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'RATECON', 'ratecon-made-up.pdf', '/uploads/ratecon-made-up.pdf', '2026-11-08 12:00:00')").run(LOAD);
 	db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', 'pod-made-up.pdf', '/uploads/pod-made-up.pdf', '2026-11-10 14:00:00')").run(LOAD);
+	for (let i = 1; i <= podCopies; i++) {
+		db.prepare("INSERT INTO documents (load_id, type, file_name, drive_url, uploaded_at) VALUES (?, 'POD', ?, ?, ?)").run(LOAD, `pod-made-up-again-${i}.pdf`, `/uploads/pod-made-up-again-${i}.pdf`, `2026-11-10 15:0${i}:00`);
+	}
 	db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)").run(JSON.stringify({ optOutDomains: [], confirmedBrokerDomains: ["chrobinson.com"] }));
 	db.prepare("INSERT INTO app_settings (key, value) VALUES ('factoring.settings', ?)").run(JSON.stringify({ debtorNames: { "chrobinson.com": DEBTOR } }));
 	const rowId = Number(db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, total, broker_name, order_number, via, created_by) VALUES (?, ?, ?, ?, 'Made-up Agent', ?, 'auto-smtp', 'auto-invoice')")
@@ -234,6 +244,64 @@ const runIt = (opts) => rehearsal.run(opts).catch((e) => ({ code: "threw", lines
 		let hosts = "";
 		try { await rehearsal.geminiOnlyFetch(async () => ({ ok: true }))("https://example.test/upload", {}); } catch (e) { hosts = String(e.message); }
 		ok(/nothing but the rate con's read/.test(hosts), "§4 the practice run's fetch reaches Gemini's endpoint only");
+	}
+
+	section("§5 the batch as the live press would build it");
+	{
+		const ON = "TRIUMPH_BATCH_DEDUPE_ENABLED=true";
+		const counts = (r) => r.lines.filter((l) => /identical documents sent once/.test(l));
+		const w = world({ podCopies: 1, settings: [ON] });
+		const before = w.hashOf();
+		const r = await runIt({ argv: w.argv(), deps: w.deps });
+		eq([r.code, r.lines[r.lines.length - 1]], [0, "verdict: it would go"], "§5 (fixture) the POD stored twice, the switch on in the settings file: it would go");
+		ok(r.lines.includes("the batch: 3 pages (invoice, ratecon, pod)"), "§5 FAILS ON THE OLD CODE (M1): the switch in the settings file reaches the practice run's build: the POD goes in once");
+		eq(counts(r), ["identical documents sent once: 1"], "§5 FAILS ON THE OLD CODE (M1): ...and the run prints how many copies it left out, a count and nothing else");
+		eq([w.hashOf(), w.calls.otherFetch], [before, 0], "§5 ...writing no row and reaching nothing else");
+
+		// The switch set in this process's environment and not in the settings file: off.
+		const p = world({ podCopies: 1 });
+		const had = Object.hasOwn(process.env, "TRIUMPH_BATCH_DEDUPE_ENABLED");
+		const was = process.env.TRIUMPH_BATCH_DEDUPE_ENABLED;
+		process.env.TRIUMPH_BATCH_DEDUPE_ENABLED = "true";
+		let pr;
+		try {
+			pr = await runIt({ argv: p.argv(), deps: p.deps });
+		} finally {
+			if (had) process.env.TRIUMPH_BATCH_DEDUPE_ENABLED = was;
+			else delete process.env.TRIUMPH_BATCH_DEDUPE_ENABLED;
+		}
+		eq([pr.code, pr.lines.includes("the batch: 4 pages (invoice, ratecon, pod, pod)"), counts(pr)], [0, true, []],
+			"§5 the switch set only in this process's environment: off, every row goes in and no count (mutant: the switch read from the process's environment)");
+
+		// A lowered limit in the settings file reaches the build, as the live press reads it.
+		const small = world({ settings: ["TRIUMPH_BATCH_MAX_BYTES=2000"] });
+		const sr = await runIt({ argv: small.argv(), deps: small.deps });
+		eq([sr.code, sr.lines[sr.lines.length - 1]], [2, "the build: would stop at build (BATCH_TOO_LARGE)"],
+			"§5 FAILS ON THE OLD CODE (N2): a lowered TRIUMPH_BATCH_MAX_BYTES in the settings file stops the practice run at BATCH_TOO_LARGE, as it stops the live press");
+		const both = world({ podCopies: 1, settings: [ON, "TRIUMPH_BATCH_MAX_BYTES=2000"] });
+		const br = await runIt({ argv: both.argv(), deps: both.deps });
+		eq([br.code, br.lines[br.lines.length - 1]], [2, "the build: would stop at build (BATCH_TOO_LARGE); identical documents sent once: 1"],
+			"§5 FAILS ON THE OLD CODE (N2): ...and with the switch on too, the stop says how many copies were left out");
+
+		// The job gets the batch's two settings and nothing else, so its submit mode stays off.
+		const live = world({ podCopies: 1, settings: [ON, "TRIUMPH_BATCH_MAX_BYTES=900000", "TRIUMPH_SUBMIT_ENABLED=true", "TRIUMPH_SUBMIT_DRY_RUN=false", "TRIUMPH_LIVE_CONFIRMED_ON=2026-11-05"] });
+		const jobLib = require(path.join(ROOT, "lib", "triumph-job.js"));
+		const create = jobLib.create;
+		const made = [];
+		jobLib.create = (deps) => {
+			const job = create(deps);
+			made.push({ env: { ...deps.env }, mode: job.mode });
+			return job;
+		};
+		let lr;
+		try {
+			lr = await runIt({ argv: live.argv(), deps: live.deps });
+		} finally {
+			jobLib.create = create;
+		}
+		eq(made, [{ env: { TRIUMPH_BATCH_DEDUPE_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: "900000" }, mode: "off" }],
+			"§5 FAILS ON THE OLD CODE (M1): the job gets only the batch's two settings from the file, so its submit mode reads off whatever the file says");
+		eq([lr.code, lr.lines[lr.lines.length - 1], counts(lr)], [0, "verdict: it would go", ["identical documents sent once: 1"]], "§5 FAILS ON THE OLD CODE: ...and the run goes on to its verdict, counting the copy left out");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

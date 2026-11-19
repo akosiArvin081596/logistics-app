@@ -19,6 +19,11 @@
 //      balance due; its batch's INVAMT is that balance, in the merged PDF's text; --load on
 //      a load with a line stops (ADVANCE_LINES) with the switches off, and with them on
 //      prints the line and bills the balance, under the automatic invoice's own checks
+//   §10 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED, way 2): on, a BOL or
+//      POD identical byte for byte to one before it in the batch goes in once, the first
+//      kept and each copy left out recorded; a file a byte apart, a lumper, scale or pallet
+//      row and the rate con always go; off, every row goes as before; the missing and
+//      unreadable checks and the size limit answer as they did
 //
 // The invoice page goes through a stand-in renderer that writes a PDF of the page's
 // words the way Chromium writes one (scripts/lib/made-up-pdf.js): no browser here. Made-up
@@ -849,8 +854,68 @@ async function s9() {
 	eq(sha256(fs.readFileSync(dbFile)), dbBefore, "§9 the database file is byte for byte as it was");
 }
 
+// ---------------------------------------------------------------- §10
+async function s10() {
+	section("§10 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED)");
+	const ON = Object.freeze({ dedupe: true });
+	const at = (h) => `2026-11-02 ${String(h).padStart(2, "0")}:00:00`;
+	const row = (id, type, buffer, h, file_name = `made-up-${id}.pdf`) => ({ id, type, uploaded_at: at(h), file_name, buffer });
+	const kinds = (b) => (b.ok ? b.parts.map((p) => p.kind) : [b.code, ...[].concat(b.kinds || b.kind || [])].join(":"));
+	// A throw reads as the job reads one (lib/triumph-job.js: MERGE_FAILED).
+	const build = (over) => batchLib.buildBatch(args(over)).catch(() => ({ ok: false, code: "MERGE_FAILED" }));
+	const copy = (b) => Buffer.from(b);
+	const SAME = pdfOf("PROOF OF DELIVERY (MADE UP), ONE FILE STORED TWICE");
+
+	// These need the new behaviour or its record, so each fails on the old code.
+	const twice = await build({ ...ON, documents: [row(1, "POD", SAME, 10), row(2, "POD", copy(SAME), 11), docRow(3, "BOL", "BOL PAGE", at(12))] });
+	eq(kinds(twice), ["invoice", "ratecon", "bol", "pod"], "§10 FAILS ON THE OLD CODE: two identical POD rows go in once");
+	eq(twice.dropped, [{ kind: "pod", sha256: sha256(SAME), bytes: SAME.length, keptAs: "pod" }],
+		"§10 FAILS ON THE OLD CODE: ...and the copy left out is recorded: its kind, hash and bytes, and the kind of the copy kept");
+	eq(twice.ok ? (await PDFDocument.load(twice.pdf)).getPageCount() : 0, 4, "§10 FAILS ON THE OLD CODE: ...four pages in all");
+	eq(twice.ok ? batchLib.unprintedFields(twice.pdf, twice.row) : null, [], "§10 ...and the merged PDF still prints the CSV's values");
+	const thrice = await build({ ...ON, documents: [1, 2, 3].map((i) => row(i, "POD", copy(SAME), 9 + i)) });
+	eq([kinds(thrice), (thrice.dropped || []).map((d) => d.keptAs)], [["invoice", "ratecon", "pod"], ["pod", "pod"]],
+		"§10 FAILS ON THE OLD CODE: three identical POD rows: one goes, and one entry for each copy left out");
+	const both = await build({ ...ON, documents: [row(1, "POD", SAME, 9), row(2, "BOL", copy(SAME), 12)] });
+	eq(kinds(both), ["invoice", "ratecon", "bol"], "§10 FAILS ON THE OLD CODE: one file filed as a BOL and as a POD goes in once, as the BOL, which comes first in the batch");
+	eq(both.dropped, [{ kind: "pod", sha256: sha256(SAME), bytes: SAME.length, keptAs: "bol" }], "§10 FAILS ON THE OLD CODE: ...the POD's copy recorded, kept as the BOL");
+	const BIG = textPdf("X".repeat(24000), { compress: false });
+	const bigRows = [row(1, "POD", BIG, 10), row(2, "POD", copy(BIG), 11)];
+	eq(kinds(await build({ documents: bigRows })), "BATCH_TOO_LARGE", "§10 (fixture) a made-up POD stored twice: with both copies the batch is past Triumph's limit");
+	const fits = await build({ ...ON, documents: bigRows });
+	eq([kinds(fits), fits.batchBytes <= rules.BATCH_MAX_BYTES], [["invoice", "ratecon", "pod"], true], "§10 FAILS ON THE OLD CODE: a batch over the limit only because of a duplicate goes, with the switch on");
+
+	// These pass on the old code by design: each pins a mutant.
+	const A = textPdf("PROOF OF DELIVERY 1 (MADE UP)", { mode: "literal", compress: false });
+	const B = textPdf("PROOF OF DELIVERY 2 (MADE UP)", { mode: "literal", compress: false });
+	eq([A.length, A.filter((byte, i) => byte !== B[i]).length], [B.length, 1], "§10 (fixture) two made-up POD files of the same size, one byte apart");
+	eq(kinds(await build({ ...ON, documents: [row(1, "POD", A, 10, "pod.pdf"), row(2, "POD", B, 11, "pod.pdf")] })), ["invoice", "ratecon", "pod", "pod"],
+		"§10 two POD rows of the same size and name, one byte apart: both go in (mutant: matching by size or name)");
+	const LUMPER = pdfOf("LUMPER RECEIPT (MADE UP)");
+	eq(kinds(await build({ ...ON, documents: [row(1, "POD", SAME, 9), row(2, "Lumper", LUMPER, 10), row(3, "Lumper", copy(LUMPER), 11), row(4, "Lumper Receipt", copy(SAME), 12)] })),
+		["invoice", "ratecon", "pod", "other", "other", "other"], "§10 an identical lumper pair both go in, and so does a lumper row identical to a POD (mutant: \"other\" deduped)");
+	eq(kinds(await build({ ...ON, documents: [row(1, "BOL", copy(args().rateCon.buffer), 9), row(2, "POD", SAME, 10)] })), ["invoice", "ratecon", "bol", "pod"],
+		"§10 a BOL identical to the rate con still goes in: the invoice and the rate con are never matched (mutant: the rate con deduped)");
+	const OLD_KEYS = ["batchBytes", "csv", "csvName", "csvSha256", "ok", "parts", "pdf", "pdfName", "pdfSha256", "row"];
+	const offs = [];
+	for (const dedupe of [undefined, false, "true", 1]) {
+		const r = await build({ dedupe, documents: [row(1, "POD", SAME, 10), row(2, "POD", copy(SAME), 11)] });
+		offs.push([kinds(r), Object.keys(r).sort()]);
+	}
+	eq(offs, Array(4).fill([["invoice", "ratecon", "pod", "pod"], OLD_KEYS]),
+		"§10 with the switch off (no option, false, or anything but true), every row goes in and the answer is the one it always was (mutant: the dedupe on with the switch off)");
+	eq(kinds(await build({ ...ON, documents: [row(1, "POD", SAME, 9), row(2, "POD", copy(SAME), 10), row(3, "POD", null, 11)] })), "DOCUMENT_UNREADABLE:pod",
+		"§10 an unreadable row beside identical copies still stops the batch at DOCUMENT_UNREADABLE (mutant: the dedupe before the unreadable check)");
+	eq(kinds(await build({ ...ON, documents: [row(1, "Lumper", null, 9)] })), "DOCUMENT_MISSING:pod",
+		"§10 no BOL or POD and an unreadable lumper receipt: DOCUMENT_MISSING (pod) still answers first (mutant: the missing check moved below the dedupe)");
+	const lowered = await build({ ...ON, maxBytes: 300000, documents: bigRows });
+	eq([lowered.code, lowered.maxBytes], ["BATCH_TOO_LARGE", 300000],
+		"§10 with TRIUMPH_BATCH_MAX_BYTES lowered, a deduped batch over the lowered limit stops at BATCH_TOO_LARGE (mutant: the limit skipped after the dedupe)");
+	eq((lowered.dropped || []).length, 1, "§10 FAILS ON THE OLD CODE: ...and the stop says how many copies it left out, for the practice run to print");
+}
+
 (async () => {
-	for (const s of [s3, s4, s5, s6, s7, s8, s9]) await s();
+	for (const s of [s3, s4, s5, s6, s7, s8, s9, s10]) await s();
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);
