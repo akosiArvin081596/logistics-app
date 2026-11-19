@@ -5226,6 +5226,16 @@ function eldPayScope(link, ownerId = null) {
 	return eldLinkForward.scope(link, map);
 }
 
+// A rename's ELD leg (truckEditLockBlockers() check (5)) while the rule is in force: a past load finds its truck by the
+// truck's unit, linked now or not (eldPayScope()), and reads its device history, so any history row counts as a link.
+// Unreadable counts as one.
+function eldLinkHistoryHeld(truckId) {
+	if (!eldLinkForwardRule().inForce) return false;
+	try {
+		return !!db.prepare("SELECT 1 FROM eld_device_assignments WHERE truck_id = ? LIMIT 1").get(truckId);
+	} catch { return true; }
+}
+
 // After every table exists (server_state is created further down this file).
 if (startsJob("ELD device-history reconcile (at boot)")) setImmediate(() => {
 	try {
@@ -39094,7 +39104,8 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	//       with no pings falls back to the FULL scheduled window. Renaming a
 	//       linked truck therefore silently RAISES driver pay in every closed month.
 	// A case-only rename is a no-op for both (both sides are LOWER()ed) and is not
-	// blocked. A truck with no ELD link and no fee rows can be renamed freely.
+	// blocked. A truck with no ELD link and no fee rows can be renamed freely; under
+	// the forward-only link rule any device history counts as a link (eldLinkHistoryHeld()).
 	//
 	// ⚠️ The ELD leg is measured over ALL locked months, NOT over `fixedMonths`.
 	// fixedMonths is "months this truck's FIXED COSTS are billed in", i.e. gated on
@@ -39108,7 +39119,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	if (has("unit_number")) {
 		const fees = truckFeeLockedRows(truck.unit_number, locked);
 		const feeRows = [...fees.maintenance, ...fees.compliance];
-		const eldLinked = String(truck.routemate_vehicle_id || "").trim() !== "";
+		const eldLinked = String(truck.routemate_vehicle_id || "").trim() !== "" || eldLinkHistoryHeld(truck.id);
 		const months = [...feeRows.map((r) => r.m), ...(eldLinked ? locked : [])];
 		if (months.length) blockers.push({
 			field: "unit_number", from: truck.unit_number, to: changed.unit_number,

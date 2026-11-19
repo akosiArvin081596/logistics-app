@@ -6,10 +6,13 @@
  * as the server runs them (scripts/lib/work-days-world.js), on made-up trucks T-101, T-202 and T-303 and devices D-7,
  * D-9 and D-11.
  *
- *   §1 new cases (each fails on a build without the rule): H1, N2 (b) window rule, M2, N5 with R2, R4, R1, N4
+ *   §1 new cases (each fails on a build without the rule): H1, N2 (b) window rule, M2, N5 with R2, R4, R1, N4; and
+ *      review 2's M1 (a swap's minutes with no device take no day the devices showed: window rule, trip rule, and a
+ *      western truck's business-clock day), each failing on the first build of the rule (636335cc)
  *   §2 pins (they pass on such a build too; each names the mutant it catches): M1, N2 (a), N2 (b) trip rule, N3,
  *      N8, no FROM, switch off, N1 at the stop
- *   §3 the link routes under the rule: L3, the narrowed stop and its passing twin, the link line
+ *   §3 the link routes under the rule: L3, the narrowed stop and its passing twin, the link line; review 2's H1 (a rename
+ *      after an unlink refused while the truck has device history) and its switch-off pin
  *
  * Pure: no server, no app.db, no network. Run: node scripts/test-eld-link-forward.js   # exits 1 on failure
  */
@@ -231,6 +234,53 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		samePaths(eq, await threePaths(w, PAT, "2026-11-27", days("2026-11-24", "2026-11-27")), ["2026-11-24", "2026-11-25", "2026-11-27"]);
 	});
 
+	// ---- M1 (review 2): a three-call swap leaves the truck a minute or two with no device ------------------------------
+	// T-101 is parked all of Nov 18 inside its load's window: 15:00Z D-9 unlinked, 15:02Z D-7 linked, and both devices
+	// report it parked. D-9 drove Nov 16-17; D-7 drives Nov 19-20.
+	const gapWorld = ({ trip = false } = {}) => world({
+		env: { ...ON(), ...(trip ? TRIP : {}) }, recorded: FROM,
+		trucks: [{ unit: "T-101", driver: PAT, vid: "D-7" }],
+		history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z"), linkRow(1, "D-7", "2026-11-18T15:02:00.000Z")],
+		rows: [W.loadRow({ id: "L-G", driver: PAT, pickup: "2026-11-16", dropoff: "2026-11-20", assigned: "2026-11-16", done: "2026-11-20", truck: "T-101" })],
+		pings: {
+			"D-9": [...driveDay("2026-11-16", { odo: 100000 }), ...driveDay("2026-11-17", { odo: 100200 }), ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 })],
+			"D-7": [...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 500000 }), ...driveDay("2026-11-19", { odo: 500000 }), ...driveDay("2026-11-20", { odo: 500200 })],
+		},
+		status: trip ? [
+			["L-G", "At Shipper", "manual", utc("2026-11-16T15:00:00Z")], ["L-G", "Loading", "manual", utc("2026-11-16T15:30:00Z")],
+			["L-G", "In Transit", "manual", utc("2026-11-16T17:00:00Z")], ["L-G", "At Receiver", "manual", utc("2026-11-20T16:00:00Z")],
+			["L-G", "Delivered", "manual", utc("2026-11-20T19:00:00Z")],
+		] : [],
+		now: Date.parse("2026-11-23T17:00:00Z"),
+	});
+	const GAP_PAID = ["2026-11-16", "2026-11-17", "2026-11-19", "2026-11-20"];
+
+	await test("M1 (review 2) window rule: the swap's minutes with no device take no day the devices showed, so the parked swap day is not paid", async ({ eq }) => {
+		samePaths(eq, await threePaths(gapWorld(), PAT, "2026-11-20", WEEK_47), GAP_PAID);
+	});
+
+	await test("M1 (review 2) trip rule: the same swap day is the rest day the devices showed, not a no-ELD day", async ({ eq }) => {
+		samePaths(eq, await threePaths(gapWorld({ trip: true }), PAT, "2026-11-20", WEEK_47), GAP_PAID);
+	});
+
+	// A western truck (Los Angeles, the Pacific band): 05:00Z Nov 19 D-9 unlinked and 05:02Z D-7 linked, 9 PM on the truck's
+	// own Nov 18 but already Nov 19 on the business clock. D-9 drove Nov 17-18; D-7 has it parked Nov 19 and driving Nov 20.
+	const LA = { lat: 34.05, lng: -118.24 };
+	await test("M1 (review 2) the business-clock touch: the swap's minutes take no western truck's next day either (Nov 19 parked, not paid)", async ({ eq }) => {
+		const w = world({
+			env: ON(), recorded: FROM,
+			trucks: [{ unit: "T-101", driver: PAT, vid: "D-7" }],
+			history: [seed(1, "D-9", "2026-11-19T05:00:00.000Z"), linkRow(1, "D-7", "2026-11-19T05:02:00.000Z")],
+			rows: [W.loadRow({ id: "L-W", driver: PAT, pickup: "2026-11-17", dropoff: "2026-11-20", assigned: "2026-11-17", done: "2026-11-20", truck: "T-101" })],
+			pings: {
+				"D-9": [...driveDay("2026-11-17", { odo: 100000, at: LA }), ...driveDay("2026-11-18", { odo: 100200, at: LA })],
+				"D-7": [...parkDay("2026-11-19", { odo: 500000, at: LA }), ...driveDay("2026-11-20", { odo: 500000, at: LA })],
+			},
+			now: Date.parse("2026-11-23T17:00:00Z"),
+		});
+		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), ["2026-11-17", "2026-11-18", "2026-11-20"]);
+	});
+
 	await test("R1: a history row opened between FROM and the start keeps the rule off, names the row, and records nothing", async ({ eq, ok }) => {
 		const w = world({
 			env: ON(), recorded: null, expose: ["eldLinkForwardRule"],
@@ -416,6 +466,45 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const r = await unlink(w, 1);
 		eq("409 with check (5b)'s words", [r.status, r.body && r.body.error], [409,
 			"Cannot unlink the ELD device on T-101: unlinking the ELD device changes which days count as travelled for T-101, re-deriving driver pay across 1 finalized month that carry its loads. October 2026 is finalized. Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed."]);
+	});
+
+	// H1 (review 2): under the rule a past load finds its truck by the truck's unit, linked now or not, so a rename after an
+	// unlink would leave October's T-101 rows on no truck, read as no ELD.
+	const RENAME_ROUTES = [...ROUTES, ["put", "/api/trucks/:id"]];
+	const rename = (w, id, unitNumber) => W.route(w, "PUT /api/trucks/:id", { params: { id: String(id) }, body: { unitNumber } });
+	const renameWorld = ({ env = ON(), recorded = FROM, vid = "D-7", history = [seed(1, "D-7")] } = {}) => world({
+		env, recorded, routes: RENAME_ROUTES, locks: ["2026-10"], vehicles: ["D-7"],
+		trucks: [{ unit: "T-101", driver: PAT, vid }, { unit: "T-303", driver: LEE, vid: "" }],
+		history,
+		rows: [W.loadRow({ id: "L-OCT1", driver: PAT, pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck: "T-101" })],
+		now: Date.parse("2026-11-25T16:00:00Z"),
+	});
+	const unitOf = (w, id) => w.db.prepare("SELECT unit_number AS u FROM trucks WHERE id = ?").get(id).u;
+
+	await test("H1 (review 2): an unlink passes, then renaming the truck is refused while it has device history; a truck with none renames freely", async ({ eq }) => {
+		const w = renameWorld();
+		eq("the unlink passes", (await unlink(w, 1)).status, 200);
+		const r = await rename(w, 1, "T-101A");
+		eq("the rename is refused over October, by check (5)", [r.status, r.body && r.body.code, r.body && r.body.periods, ((r.body && r.body.blockers) || []).map((b) => b.field)],
+			[409, "PERIOD_FINALIZED", ["2026-10"], ["unit_number"]]);
+		eq("nothing changed", unitOf(w, 1), "T-101");
+		const t = await rename(w, 2, "T-303A");
+		eq("T-303, never linked, renames freely", [t.status, unitOf(w, 2)], [200, "T-303A"]);
+	});
+
+	await test("H1 fail-closed (review 2): with the device history unreadable, a rename is refused, even of a truck never linked", async ({ eq }) => {
+		const w = renameWorld();
+		// The unlink makes the rule's decision, as the boot call does; the history then becomes unreadable.
+		eq("the unlink passes", (await unlink(w, 1)).status, 200);
+		w.db.exec("DROP TABLE eld_device_assignments");
+		const t = await rename(w, 2, "T-303A");
+		eq("T-303's rename is refused over October", [t.status, t.body && t.body.code, unitOf(w, 2)], [409, "PERIOD_FINALIZED", "T-303"]);
+	});
+
+	await test("rename pin (mutant: the history check run with the rule off): switch off, an unlinked truck with device history renames as today", async ({ eq }) => {
+		const w = renameWorld({ env: {}, recorded: null, vid: "", history: [seed(1, "D-7", "2026-11-16T15:00:00.000Z")] });
+		const r = await rename(w, 1, "T-101A");
+		eq("200, renamed", [r.status, unitOf(w, 1)], [200, "T-101A"]);
 	});
 
 	console.log("\n§4 IFTA and fuel events under the rule");
