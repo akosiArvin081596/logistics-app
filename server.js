@@ -56979,6 +56979,8 @@ function triumphDriverStart(req, args) {
 	}
 }
 console.log(`[triumph] submit ${triumph.mode}; connection settings ${triumphTransport.configured ? "set" : "unset"}`);
+// TRIUMPH_BATCH_DEDUPE_ENABLED (exactly "true", lib/triumph-rules.js batchDedupeEnabled()): said only while the job runs.
+if (triumph.mode !== "off" && require("./lib/triumph-rules").batchDedupeEnabled(process.env)) console.log("[triumph] a batch sends each identical BOL or POD once");
 if (triumph.mode !== "off" && !triumphTransport.configured) {
 	console.warn(`[triumph] the connection's settings are missing or invalid (${[...triumphTransport.missing, ...triumphTransport.invalid].join(", ")}): nothing can be sent to Triumph`);
 }
