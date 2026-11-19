@@ -1145,12 +1145,13 @@ async function submitLink(body) {
   // answer arrives.
   if (!body.confirmSilent) silentPrompt.value = null
   try {
-    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, body)
+    const answer = await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, body)
     showLinkRm.value = false
     // Reload-only signal: the parent should refetch trucks so the row's
     // RoutemateVehicleId flips to "Linked". Distinct from `saveHandler` (the
-    // PUT to /api/trucks behind the Edit dialog's field edits).
-    emit('linkage-changed', { id: linkTruck.value.id })
+    // PUT to /api/trucks behind the Edit dialog's field edits). The server's
+    // line, when it sends one, says from when the link counts.
+    emit('linkage-changed', { id: linkTruck.value.id, message: answer?.message || '' })
   } catch (err) {
     silentPrompt.value = null
     if (err?.code === 'ELD_DEVICE_SILENT' && !body.confirmSilent) {
@@ -1200,8 +1201,8 @@ async function handleUnlink(truck) {
   // No confirm modal — unlink is reversible (admin can re-link any time).
   unlinkError.value = null
   try {
-    await api.del(`/api/trucks/${truck.id}/link-routemate`)
-    emit('linkage-changed', { id: truck.id })
+    const answer = await api.del(`/api/trucks/${truck.id}/link-routemate`)
+    emit('linkage-changed', { id: truck.id, message: answer?.message || '' })
   } catch (err) {
     unlinkError.value = {
       truckId: truck.id,

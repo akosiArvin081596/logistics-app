@@ -84,10 +84,13 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
+// The forward-only ELD link rule (lib/eld-link-forward.js), which the ledger's facts read, where the build has it.
+const FORWARD = defined("eldPayLink");
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED",
-	"TRUCK_CHARGE_APP_DAY_RULE"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart"];
+	"TRUCK_CHARGE_APP_DAY_RULE",
+	...(FORWARD ? ["ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"] : [])];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", ...(FORWARD ? ["eldLinkForwardDecided", "eldLinkForwardReportFromMs"] : [])];
 const FNS = [
 	"computeInvestorMonthlyEarnings",
 	"assignDriverToTruck", "syncOpenCarrierPairing", "getInvestorDriverSet", "driverNameHeldByOtherSpelling",
@@ -100,6 +103,7 @@ const FNS = [
 	"truckMonthlyFixed", "resolveInvestorSplitPct", "payoutBasisContext", "getCarrierDBFromSQLite",
 	// The ledger's own helpers once it moved onto lib/financials-calc.js.
 	...["gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows"].filter(defined),
+	...(FORWARD ? ["eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "buildEldDeviceResolver", "eldDeviceHistoryStartMs"] : []),
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
@@ -120,6 +124,7 @@ const DDL = [
 	tableDdl("investor_payouts"), ...alters("investor_payouts"),
 	tableDdl("investor_payout_basis"),
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
+	...(FORWARD ? [tableDdl("server_state"), tableDdl("eld_device_assignments")] : []),
 ];
 
 // ── the clock ───────────────────────────────────────────────────────────────
@@ -165,7 +170,7 @@ const SHEET = [
 	load("L15", ANN, "10/1/2026", "10/2/2026 8:00", "10/3/2026 10:00", "Delivered", "$2,500.00", "T5A", "5"),
 ];
 
-function buildWorld() {
+function buildWorld(env = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) die(`DDL failed: ${e.message}\n${sql.slice(0, 120)}`); }
@@ -174,12 +179,13 @@ function buildWorld() {
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, Date: Clock,
+		...(FORWARD ? { eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js") } : {}),
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getEldTravelDaysByVehicleCached: () => ({
 			v1: { travel: new Set(["2026-09-15", "2026-09-17"]), coverage: new Set(["2026-09-15", "2026-09-16", "2026-09-17"]) },
 		}),
 		resolveCityState: (r, which, lid) => `${which}:${lid}`,
-		process: { env: {} },
+		process: { env },
 		console: { log() {}, warn() {}, error: (...a) => errors.push(a.map(String).join(" ")) },
 	};
 	let api;
@@ -191,8 +197,9 @@ function buildWorld() {
 
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 
-(async () => {
-	const { db, api, errors } = buildWorld();
+// The fixture's records, the clock left at `clockIso`. With `history` (the forward-only link rule's pin), the device
+// history holds today's links: T5A's v1, from history.startIso.
+function seedWorld(db, api, clockIso, history = null) {
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "");
 	user.run(5, "inv5", "Investor", "Acme Carrier");
@@ -237,8 +244,13 @@ const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 	api.assignDriverToTruck(3, CAT);
 	setClock("2026-05-15T17:00:00Z");
 	api.assignDriverToTruck(2, BOB);
+	if (history) {
+		db.prepare("INSERT INTO server_state (key, value, updated_at) VALUES ('eld_device_history_started', ?, CURRENT_TIMESTAMP)")
+			.run(JSON.stringify({ at: history.startIso, atMs: Date.parse(history.startIso), links: 1 }));
+		db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (1, 'v1', ?, '', 'system:seed')").run(history.startIso);
+	}
 
-	setClock("2026-10-05T17:00:00Z");
+	setClock(clockIso);
 	const carrierDB = api.getCarrierDBFromSQLite();
 	const setOf = (owner) => api.getInvestorDriverSet(owner, carrierDB.data, "Driver", "Carrier Name");
 	const cfg = (owner) => {
@@ -248,6 +260,12 @@ const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 		return c;
 	};
 	const run = (args) => api.computeInvestorMonthlyEarnings(args);
+	return { setOf, cfg, run };
+}
+
+(async () => {
+	const { db, api, errors } = buildWorld();
+	const { setOf, cfg, run } = seedWorld(db, api, "2026-10-05T17:00:00Z");
 	const out = {
 		owner5: await run({ user: { ...SUPER, id: 5 }, isSuperAdmin: false, investorDriverSet: setOf(5), investorOwnerId: 5, config: cfg(5), detailForMonth: "2026-06" }),
 		owner6: await run({ user: { ...SUPER, id: 6 }, isSuperAdmin: false, investorDriverSet: setOf(6), investorOwnerId: 6, config: cfg(6), detailForMonth: "2026-04" }),
@@ -323,6 +341,29 @@ const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 	for (const id of pendingIds) setStatus.run("Pending", id);
 
 	check(errors.length === 0, "the lifted code logged no error", errors.join(" | "));
+
+	// Pin (mutant: the dated readers differing from today's with no link change): the forward-only link rule in force,
+	// its history holding today's links, gives every scope's figures and items byte for byte as the rule off does.
+	if (FORWARD) {
+		const at = "2026-10-12T17:00:00Z";
+		const scopesOf = async (env, history) => {
+			const w = buildWorld(env);
+			const c = seedWorld(w.db, w.api, at, history);
+			const one = (a) => c.run(a);
+			const o = {
+				owner5: await one({ user: { ...SUPER, id: 5 }, isSuperAdmin: false, investorDriverSet: c.setOf(5), investorOwnerId: 5, config: c.cfg(5), detailForMonth: "2026-06" }),
+				owner6: await one({ user: { ...SUPER, id: 6 }, isSuperAdmin: false, investorDriverSet: c.setOf(6), investorOwnerId: 6, config: c.cfg(6), detailForMonth: "2026-04" }),
+				fleet: await one({ user: SUPER, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, config: c.cfg(0), detailForMonth: "2026-07" }),
+			};
+			const inForce = w.db.prepare("SELECT COUNT(*) AS n FROM server_state WHERE key = 'eld_link_forward_from'").get().n === 1;
+			return { figs: JSON.stringify(o), errors: w.errors, inForce };
+		};
+		const off = await scopesOf({}, null);
+		const on = await scopesOf({ ELD_LINK_FORWARD_ONLY_ENABLED: "true", ELD_LINK_FORWARD_ONLY_FROM: "2026-10-10T15:00:00Z" }, { startIso: "2026-10-09T12:00:00.000Z" });
+		check(on.inForce && !off.inForce, "(fixture) the forward-only link rule came into force in the second world only", JSON.stringify([on.inForce, off.inForce]));
+		check(on.figs === off.figs, "forward-only link rule on with no link change: every scope's figures and items byte-identical to it off", `on ${on.figs.slice(0, 300)} | off ${off.figs.slice(0, 300)}`);
+		check(on.errors.length === 0 && off.errors.length === 0, "...and the lifted code logged no error", [...on.errors, ...off.errors].join(" | "));
+	}
 
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

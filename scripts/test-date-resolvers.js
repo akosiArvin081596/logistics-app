@@ -1433,6 +1433,9 @@ if (!process.env.TZ_CHILD) {
 		db: iftaDb(pings), Date: pinnedDate(now),
 		geolib: { getDistance: () => 8046.72 }, // 5 miles a hop
 		getStateFromCoords: () => "OH",
+		// The forward-only ELD link rule off, as it ships: no link context, so the routes' own telemetry reads
+		// (scripts/test-eld-link-forward.js runs them with it on).
+		eldPayLink: () => null,
 	});
 
 	// No From or To: midnight Eastern on the 1st, two business months back.

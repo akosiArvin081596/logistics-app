@@ -65,6 +65,9 @@ function routeBody(verb, route) {
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
+// The forward-only link rule's stop (check (5b')), where the build has it: Part 5 runs its new cases only then.
+const FORWARD_FNS = ["eldLinkRowReach", "eldLinkForwardStop", "eldLinkForwardBlocker"];
+const hasForward = FORWARD_FNS.every((n) => new RegExp(`^function ${n}\\s*\\(`, "m").test(src));
 let harness = [
   extractConstLine("ELD_LINK_TRUCK_COL_RE"),
   extractFunction("eldLinkUnitKey"),
@@ -74,6 +77,7 @@ let harness = [
   extractFunction("sheetCellDate"),
   extractFunction("loadRowAccountingMonths"),
   extractFunction("truckEditLockBlockers"),
+  ...(hasForward ? FORWARD_FNS.map((n) => extractFunction(n)) : []),
 ].join("\n");
 // sheetCellMonths reads RFC 2822 month names from a const in server.js.
 for (const c of ["RFC_MONTHS"]) {
@@ -83,7 +87,7 @@ for (const c of ["RFC_MONTHS"]) {
   }
 }
 harness += `
-return { ELD_LINK_TRUCK_COL_RE, eldLinkUnitKey, eldLinkRowMonths, eldLinkPreflight, loadRowAccountingMonths, truckEditLockBlockers };`;
+return { ELD_LINK_TRUCK_COL_RE, eldLinkUnitKey, eldLinkRowMonths, eldLinkPreflight, loadRowAccountingMonths, truckEditLockBlockers${hasForward ? ", " + FORWARD_FNS.join(", ") : ""} };`;
 
 // Stubs — each is a DB or sheet read. Mutable so each case sets its own state.
 const S = {
@@ -94,6 +98,11 @@ const S = {
   sheetThrows: false,
   sheetCalls: 0,
   onSheetRead: null,       // runs during the await (simulates a concurrent write)
+  forward: false,          // the forward-only link rule in force (eldLinkForwardRule())
+  nowMs: Date.parse("2026-11-18T16:00:00Z"),
+  taps: {},                // load id (lower case) -> last Delivered changed_at, for the trip rule's 36-hour reach
+  tapsThrow: false,
+  tripFrom: null,          // TRIP_WORK_DAYS_FROM
 };
 const stubs = {
   periodLocksReadable: () => S.readable,
@@ -109,18 +118,24 @@ const stubs = {
   TRUCK_AMOUNT_FIELDS: [],
   // The fleet rule the guard reads (any status but Inactive), the real module.
   investorPayoutBasis: require("../lib/investor-payout-basis"),
-  eldLinkLoadMonths: async () => {
+  eldLinkLoadMonths: async (unit, opts) => {
     S.sheetCalls++;
     await Promise.resolve();
     if (S.onSheetRead) S.onSheetRead();
     if (S.sheetThrows) throw new Error("sheets down");
-    return S.sheetMonths;
+    return opts && opts.reach ? { months: S.sheetMonths, reach: S.sheetReach } : S.sheetMonths;
   },
+  eldLinkForwardRule: () => ({ inForce: S.forward }),
+  eldLinkForward: fs.existsSync(path.join(__dirname, "..", "lib", "eld-link-forward.js")) ? require("../lib/eld-link-forward") : null,
+  TRIP_WORK_DAYS_FROM: null,
+  periodLabel: (p) => new Date(`${p}-15T12:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }),
+  Date: class extends Date { constructor(...a) { if (a.length) super(...a); else super(S.nowMs); } static now() { return S.nowMs; } },
   db: {
     prepare: (sql) => ({
       get: (id) => {
         if (/FROM trucks WHERE id = \?/.test(sql)) return S.trucks[id] ? { ...S.trucks[id] } : undefined;
         if (/COUNT\(\*\)/.test(sql)) return { n: 0 };
+        if (/FROM load_status_history/.test(sql)) { if (S.tapsThrow) throw new Error("history unreadable"); return { at: S.taps[id] || null }; }
         throw new Error(`unstubbed query: ${sql}`);
       },
     }),
@@ -128,7 +143,10 @@ const stubs = {
   console: { warn: () => {}, log: console.log, error: console.error },
 };
 const names = Object.keys(stubs);
-const G = new Function(...names, harness)(...names.map((n) => stubs[n]));
+const build = (extra = {}) => new Function(...names, harness)(...names.map((n) => (n in extra ? extra[n] : stubs[n])));
+const G = build();
+// The same code with the trip work-day rule on (TRIP_WORK_DAYS_FROM), for check (5b')'s 36-hour reach.
+const GT = build({ TRIP_WORK_DAYS_FROM: "2026-10" });
 
 console.log("Extracted the ELD-link guard, its row scanner and preflight from server.js\n");
 
@@ -251,12 +269,88 @@ console.log("Part 3 — preflight");
     ok(/requireRole\("Super Admin"\), async \(req, res\)/.test(body), `${label}: handler is async`);
     eq(awaits.length, 1, `${label}: exactly one await in the handler`);
     ok(pre > 0 && pre < guard && guard < write, `${label}: preflight → guard → write, in that order`);
-    ok(/truckEditLockBlockers\(truck, \{ routemate_vehicle_id: [^}]+\}, \{ eldLinkMonths \}\)/.test(body), `${label}: the guard is fed the preflight's months`);
+    ok(/truckEditLockBlockers\(truck, \{ routemate_vehicle_id: [^}]+\}, \{ eldLinkMonths(?:, eldLinkForward: forwardStop)? \}\)/.test(body), `${label}: the guard is fed the preflight's months`);
     ok(!/SELECT \* FROM trucks WHERE id = \?"\)\.get\(truckId\);\s*\n[^]*?const truck = db/.test(body.slice(pre)), `${label}: nothing re-reads the truck after the preflight but the preflight`);
   }
   const linkBody = routeBody("post", "/api/trucks/:truckId/link-routemate");
   ok(linkBody.indexOf("await eldLinkPreflight(") < linkBody.indexOf("Already linked to truck"),
     "link: the already-linked-elsewhere check runs after the await, on fresh state");
+
+  // -------------------------------------------------------------------------
+  // Part 5 — check (5b'), the forward-only link rule's stop (made-up trucks T-101 and T-202)
+  // -------------------------------------------------------------------------
+  // New cases need the rule's functions and fail without them; the pins (fail-closed, the 36-hour reach) pass on a
+  // build without the rule too, whose check (5b) refuses every one of them.
+  console.log("Part 5 — the narrowed stop (5b')");
+  const OCT = ["2026-10"];
+  const T101 = { id: 1, unit_number: "T-101", status: "Active", routemate_vehicle_id: "D-7" };
+  const T202 = { id: 2, unit_number: "T-202", status: "Active", routemate_vehicle_id: "D-9" };
+  const SWITCH_MS = Date.parse("2026-11-18T16:00:00Z"); // Wed Nov 18, 11:00 Eastern
+  // The stop as eldLinkForwardStop() hands it to the guard, built by hand.
+  const stopOf = (rows, extra = {}) => ({ atMs: SWITCH_MS, at: new Date(SWITCH_MS).toISOString(), day: "2026-11-18", rows, tripTail: false, unreadable: false, ...extra });
+  const guard5 = (truck, changed, stop, months = OCT, g = G) => g.truckEditLockBlockers(truck, changed, { eldLinkMonths: months, eldLinkForward: stop });
+  const ended = { months: OCT, lastDay: "2026-10-28", loadId: "L-OCT1" };
+  const running = { months: OCT, lastDay: "", loadId: "L-OCT2" };
+  const WORDS = "its load assigned in October 2026 runs on or after Wed Nov 18, so this would change pay in a finalized month";
+  const newCase = (label, fn) => { if (!hasForward) { ok(false, `${label} (this build has no check (5b'))`); return; } fn(); };
+  S.locked = OCT; S.readable = true;
+
+  // The pair (L3): one world, October finalized; T-101's October load ended Oct 28, T-202's is still running.
+  eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf([ended])).blockers, [], "L3 / the pair: unlinking T-101, whose finalized-month load ended before the change, passes");
+  eq(guard5(T101, { routemate_vehicle_id: "D-11" }, stopOf([ended])).blockers, [], "the pair: re-pointing T-101 passes too");
+  eq(guard5(T202, { routemate_vehicle_id: "" }, stopOf([running])).blockers.map((x) => [x.periods, x.detail, x.forward]), [[OCT, WORDS, true]],
+    "L3 / the pair: unlinking T-202, whose finalized-month load is still running, refuses over October in the narrowed words");
+  eq(guard5(T202, { routemate_vehicle_id: "D-7" }, stopOf([running])).blockers.map((x) => x.detail), [WORDS], "the pair: re-pointing T-202 refuses in the same words");
+  eq(guard5(T202, { routemate_vehicle_id: "" }, stopOf([running, { ...running, loadId: "L-OCT9", lastDay: "2026-11-20" }])).blockers.map((x) => x.detail),
+    ["its 2 loads assigned in October 2026 run on or after Wed Nov 18, so this would change pay in a finalized month"], "two loads are counted");
+  newCase("the row reach (eldLinkRowReach): each row's last date, \"\" with no end date, null for an unreadable date", () => {
+    const H = ["Load ID", "Driver", "Truck", "Assigned Date", "Pickup Appointment", "Drop-off Appointment", "Status Update Date", "Status"];
+    const rows = [
+      ["L-OCT1", "Pat", "T-101", "10/26/2026", "10/26/2026 8:00", "10/28/2026 14:00", "10/28/2026", "Delivered"],
+      ["L-OCT2", "Pat", "T-101", "10/30/2026", "10/30/2026 8:00", "", "", "In Transit"],
+      ["L-OTHER", "Sam", "T-202", "10/30/2026", "10/30/2026", "", "", "In Transit"],
+    ];
+    eq(G.eldLinkRowReach(H, rows, "T-101"), [{ months: OCT, lastDay: "2026-10-28", loadId: "L-OCT1" }, { months: OCT, lastDay: "", loadId: "L-OCT2" }], "T-101's two rows");
+    eq(G.eldLinkRowReach(H, [["L-X", "Pat", "T-101", "not a date", "", "", "", "Delivered"]], "T-101"), null, "an unreadable date → null");
+    eq(G.eldLinkRowReach(H, rows, "T-303"), [], "a unit no row carries → no row");
+  });
+  if (!hasForward) ok(false, "the preflight hands the guard the stop while the rule is in force (this build has no check (5b'))");
+  else {
+    S.trucks = { 1: { ...T101 } }; S.sheetMonths = OCT; S.sheetReach = [ended]; S.sheetThrows = false; S.onSheetRead = null; S.forward = true;
+    const r5 = await G.eldLinkPreflight(1, S.trucks[1]);
+    eq([r5.eldLinkMonths, r5.eldLinkForward && r5.eldLinkForward.rows, r5.eldLinkForward && r5.eldLinkForward.day, r5.eldLinkForward && r5.eldLinkForward.at],
+      [OCT, [ended], "2026-11-18", "2026-11-18T16:00:00.000Z"], "in force: the months, the rows, the switch day and its instant");
+    S.forward = false;
+    const r6 = await G.eldLinkPreflight(1, S.trucks[1]);
+    eq(Object.keys(r6).sort(), ["eldLinkMonths", "truck"], "not in force: the preflight's answer is as before");
+    S.forward = true; S.tripFrom = null;
+    S.taps = { "l-oct1": "2026-11-17 02:00:00" };
+    const st = GT.eldLinkForwardStop([ended]);
+    eq([st.tripTail, st.rows.map((r) => r.tapMs)], [true, [Date.parse("2026-11-17T02:00:00Z")]], "with the trip rule on, each row carries its last Delivered tap");
+    S.tapsThrow = true;
+    eq(GT.eldLinkForwardStop([ended]).unreadable, true, "a tap read that fails marks the stop unreadable");
+    S.tapsThrow = false; S.taps = {}; S.forward = false;
+  }
+  const oldTap = { ...ended, lastDay: "2026-11-14", tapMs: Date.parse("2026-11-14T02:00:00Z"), noLoadId: false };
+  eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf([oldTap], { tripTail: true, atMs: Date.parse("2026-11-16T13:00:00Z"), day: "2026-11-16" }), OCT, GT).blockers, [],
+    "N7's twin: with the trip rule on, a finalized-month load delivered 3 days before the change passes");
+
+  // Pins: each passes on a build without the rule, and names the mutant it catches.
+  const S_LOCKED2 = ["2026-09", "2026-10"];
+  S.locked = S_LOCKED2;
+  eq(guard5(T202, { routemate_vehicle_id: "" }, stopOf([running])).blockers.map((x) => x.periods), [OCT],
+    "pin (mutant: the stop failing open): a finalized-month load with no end date refuses");
+  eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf(null), null).blockers.map((x) => x.periods), [S_LOCKED2],
+    "pin (mutant: the stop failing open): an unreadable date holds every finalized month");
+  eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf([ended], { unreadable: true }), null).blockers.map((x) => x.periods), [S_LOCKED2],
+    "pin (mutant: the stop failing open): a Delivered tap read that failed holds every finalized month");
+  S.readable = false;
+  ok(guard5(T101, { routemate_vehicle_id: "" }, stopOf([ended])).unreadable === true, "pin (mutant: the stop failing open): unreadable locks still fail closed");
+  S.readable = true;
+  S.locked = OCT;
+  const lateTap = { ...ended, lastDay: "2026-11-14", tapMs: Date.parse("2026-11-15T02:00:00Z"), noLoadId: false };
+  eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf([lateTap], { tripTail: true, atMs: Date.parse("2026-11-16T13:00:00Z"), day: "2026-11-16" }), OCT, GT).blockers.map((x) => x.periods), [OCT],
+    "pin N7 (mutant: the 36-hour reach missing): a load tapped Delivered at 21:00 two days before a swap at 08:00 refuses");
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

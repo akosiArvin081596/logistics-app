@@ -535,7 +535,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 	{
 		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
 			"summarizeReportPayout", "reportPayoutNote", "periodLabel", "findCol", "pickAddressColumn", "moneySheetDate",
-			"appDay", "appMonthStart", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
+			"appDay", "appMonthStart", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct", "eldPayScope"];
 		const ME = Object.fromEntries(ME_NAMES.map((n) => [n, extractFn(n)]));
 		const JT = {
 			headers: ["Load ID", "Driver", "Job Status", "  Payment  ", "Assigned Date", "Owner ID", "Truck"],
@@ -568,6 +568,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				getAllExcludedDriverDays: () => ({}),
 				// The pre-dispatch pay-day rule, off as it ships.
 				preDispatchPayDayFilter: () => null,
+				// The forward-only ELD link rule, off as it ships: no link context, so today's ELD readers.
+				eldPayLink: () => null,
 				getDriverPayStructures: () => ({}),
 				getDeductibleExpensesByDriverMonth: () => ({}),
 				resolveDailyRate: (perDriver, perTruck) => perDriver || perTruck || 250,

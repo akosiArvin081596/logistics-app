@@ -154,8 +154,14 @@ const MODULE_SRC = [
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "normalizeDriverName",
 	"getDriverPayStructures", "driverPayLockedMonths", "resolveDailyRate", "investorsHoldingDriver",
 	"assignmentMonthKey", "intersectMonthWindow", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
-	"expenseFrom", "personalLedgerPresent",
+	"expenseFrom", "personalLedgerPresent", "eldLinkHistoryHeld",
 ].map((n) => liftFn(n)).join("\n");
+// The guard's ELD leg reads the forward-only link rule, here as a boot with its switch off leaves it (decided by the
+// shipped lib), so the leg reads nothing (scripts/test-eld-link-forward.js runs it on).
+const eldLinkForwardLib = require(path.join(ROOT, "lib", "eld-link-forward.js"));
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+	setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 function liftConst(name) {
 	const m = SRC.match(new RegExp(`^const ${name} =([\\s\\S]*?);$`, "m"));
 	if (!m) fatal(`const ${name} not found in server.js`);
@@ -263,10 +269,10 @@ function world(opts = {}) {
 function buildModule(w, holdsSrc) {
 	const holds = holdsSrc || "function truckDeleteOpenMonthHolds() { throw new Error(\"truckDeleteOpenMonthHolds() is not in server.js\"); }";
 	return new Function(
-		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console",
+		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console", "eldLinkForwardRule",
 		`let lastPayStructShadowWarnMs = 0;\nconst TRUCK_CHARGE_APP_DAY_RULE = null;\n${CONSTS_SRC}\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
 	)(w.db, () => w.readable, investorPayoutBasis, () => false, FixedDate, "America/New_York", LEASE_SETTINGS,
-		{ log() {}, warn() {}, error() {} });
+		{ log() {}, warn() {}, error() {} }, () => ELD_LINK_FORWARD_OFF);
 }
 
 function deleteRoute(w, rec, { routeSrc = DELETE_SRC, holdsSrc = HOLDS } = {}) {
@@ -286,6 +292,8 @@ function deleteRoute(w, rec, { routeSrc = DELETE_SRC, holdsSrc = HOLDS } = {}) {
 		db: w.db,
 		truckDeleteLockBlockers: mod.truckDeleteLockBlockers,
 		truckDeleteOpenMonthHolds: mod.truckDeleteOpenMonthHolds,
+		// The route's open-month remedy reads the forward-only link rule too: off, as a switch-off boot leaves it.
+		eldLinkForwardRule: () => ELD_LINK_FORWARD_OFF,
 		auditText,
 		periodBlockedResponse: responses.periodBlockedResponse,
 		periodLockUnreadableResponse: responses.periodLockUnreadableResponse,
@@ -770,7 +778,7 @@ function mutate(src, from, to, label) {
 			{ locked: ["2026-09"], truck: { owner_id: INVESTOR_ID, assigned_driver: DRIVER }, history: [{ carrier: CARRIER, driver: DRIVER, started: "2026-08-01", ended: "2026-09-30" }] }],
 		["driver (3d)", "const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;", "const driver = 0;",
 			{ truck: { assigned_driver: DRIVER }, directory: [{ name: DRIVER, payType: "percentage", pct: 30 }] }],
-		["ELD link", "const eld_link = String(truck.routemate_vehicle_id || \"\").trim() ? 1 : 0;", "const eld_link = 0;",
+		["ELD link", "const eld_link = String(truck.routemate_vehicle_id || \"\").trim() || eldLinkHistoryHeld(truck.id) ? 1 : 0;", "const eld_link = 0;",
 			{ truck: { routemate_vehicle_id: "made-up-vid-1" } }],
 		["reserve (6a)", "const financials_line_months = inFleet && financialsLine ? charged.length : 0;", "const financials_line_months = 0;",
 			{ truck: { maintenance_fund_monthly: 200 } }],

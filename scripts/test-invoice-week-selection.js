@@ -130,6 +130,8 @@ const SHARED_FNS = [
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
 	// The week's days and their pricing, out of the handler since money plan D.
 	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceLoadWindow", "invoiceWeekPaidDays", "invoiceDayPricing",
+	// The forward-only ELD link rule's reader scope (with no link context, none).
+	"eldPayScope",
 	// The dated day grid and the loads each day lists (B23).
 	"invoiceDayGrid", "dayKeyPlus", "invoiceGridDayName", "moneySheetDate",
 	// The days a live manual invoice already pays, left off the weekly invoice.
@@ -230,6 +232,9 @@ function buildWorld(db, opts = {}) {
 		invoiceCorrections: require("../lib/invoice-corrections"),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
+		// The forward-only ELD link rule is off here, as its switch is by default (scripts/test-eld-link-forward.js
+		// runs the pay paths with it on): no link context, so today's ELD readers.
+		eldPayLink: () => null,
 		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;
 		// scripts/test-driver-rate-only.js runs the handler with it on).
 		DRIVER_RATE_ONLY_FROM: null,

@@ -115,6 +115,56 @@ console.log("§1 buildDeviceTruckResolver()");
 }
 
 // ===========================================================================
+// §1b frozenBefore: the forward-only link rule's pay resolver (lib/eld-link-forward.js), made-up trucks T-101 (1),
+// T-202 (2), T-303 (3) and devices D-7, D-9, D-11. The pins (§1b.9, §1b.10) pass on a build without the option too.
+// ===========================================================================
+console.log("§1b buildDeviceTruckResolver() with frozenBefore");
+try {
+	const iso = (ms) => new Date(ms).toISOString();
+	const START = Date.parse("2026-10-03T03:00:00Z");
+	const FROM = Date.parse("2026-11-02T15:00:00Z");
+	const SWAP = Date.parse("2026-11-18T15:00:00Z");
+	// T-101 held D-7 from the start until the swap; T-202 held D-9 until an unlink on FROM's morning, then D-7 from a
+	// minute after the swap; T-303 is linked to D-11 with no row (a link the history never saw).
+	const rows = [
+		{ truck_id: 1, routemate_vehicle_id: "D-7", assigned_from: iso(START), assigned_until: iso(SWAP), assigned_by: "system:seed" },
+		{ truck_id: 2, routemate_vehicle_id: "D-9", assigned_from: iso(START), assigned_until: "2026-11-02T13:00:00.000Z", assigned_by: "system:seed" },
+		{ truck_id: 2, routemate_vehicle_id: "D-7", assigned_from: iso(SWAP + 60000), assigned_until: "", assigned_by: "qa-admin" },
+	];
+	const current = [{ id: 2, routemate_vehicle_id: "D-7" }, { id: 3, routemate_vehicle_id: "D-11" }];
+	const dayOf = (ms) => appTime.businessDayOf(new Date(ms), "America/New_York");
+	const frozen = eldMiles.buildDeviceTruckResolver(rows, { startMs: START, currentLinks: current, dayOf, frozenBefore: FROM });
+	const plain = eldMiles.buildDeviceTruckResolver(rows, { startMs: START, currentLinks: current, dayOf });
+	const bare = eldMiles.buildDeviceTruckResolver(rows.map(({ assigned_by, ...r }) => r), { startMs: START, currentLinks: current, dayOf });
+	check("§1b.1 N3: before FROM, the link at FROM from the covering rows only: T-303's link with no row reads none", frozen.vehicleForTruckAt(3, FROM - DAY), "");
+	check("§1b.2 N3: ...and a device with no row is on no truck", frozen.truckForVehicleAt("D-11", FROM - DAY), null);
+	check("§1b.3 N3: an unlink on FROM's morning does not come back on FROM's day", frozen.vehicleForTruckOnDay(2, "2026-11-02"), "");
+	check("§1b.4 before FROM, T-101 keeps D-7 and T-202 none, whatever came later", [frozen.vehicleForTruckAt(1, FROM - 10 * DAY), frozen.vehicleForTruckAt(2, FROM - 10 * DAY)], ["D-7", ""]);
+	check("§1b.5 from FROM on, the history: D-7 on T-101 until the swap, on no truck for the minute between, then on T-202",
+		[frozen.truckForVehicleAt("D-7", SWAP - 1), frozen.truckForVehicleAt("D-7", SWAP + 30000), frozen.truckForVehicleAt("D-7", SWAP + 120000)], [1, null, 2]);
+	check("§1b.8 vehiclesBetween: before FROM the links at FROM; from FROM on the rows overlapping",
+		[[...frozen.vehiclesBetween(FROM - 5 * DAY, FROM - DAY)].sort(), [...frozen.vehiclesBetween(SWAP, SWAP + DAY)].sort()], [["D-7"], ["D-7"]]);
+	if (typeof frozen.truckRuns !== "function") { fail++; console.error("FAIL  §1b.6-§1b.7 truckRuns() does not exist on this build"); } else {
+		check("§1b.6 truckRuns: T-101's device over a window, split at the swap, each run with its row",
+			frozen.truckRuns(1, Date.parse("2026-11-14T00:00:00Z"), Date.parse("2026-11-21T00:00:00Z")).map((r) => [r.fromMs, r.toMs, r.vid, r.row && r.row.by]),
+			[[-Infinity, SWAP, "D-7", "system:seed"], [SWAP, Infinity, "", null]]);
+		check("§1b.7 truckRuns: one run across FROM when nothing changed there", frozen.truckRuns(1, FROM - DAY, FROM + DAY).length, 1);
+	}
+	check("§1b.9 pin (mutant: frozenBefore applied by default): without it every answer is as before (the time-off check builds this resolver)",
+		[plain.vehicleForTruckAt(3, FROM - DAY), plain.vehicleForTruckOnDay(2, "2026-11-02"), plain.vehicleForTruckAt(2, FROM - 10 * DAY), plain.truckForVehicleAt("D-11", FROM - DAY),
+			[...plain.vehiclesBetween(SWAP, SWAP + DAY)].sort()],
+		["D-11", "D-9", "D-9", 3, ["D-11", "D-7"]]);
+	check("§1b.9 ...and the rows' assigned_by changes no answer",
+		[plain.vehicleForTruckAt(1, SWAP - 1), plain.truckForVehicleOnDay("D-7", "2026-11-18"), plain.vehicleForTruckOnDay(1, "2026-11-18")],
+		[bare.vehicleForTruckAt(1, SWAP - 1), bare.truckForVehicleOnDay("D-7", "2026-11-18"), bare.vehicleForTruckOnDay(1, "2026-11-18")]);
+	check("§1b.10 pin (mutant: the last day dropped): a truck that only loses its device keeps it on that day for the miles, none from the next",
+		[plain.vehicleForTruckOnDay(1, "2026-11-18"), plain.vehicleForTruckOnDay(1, "2026-11-19")], ["D-7", ""]);
+} catch (err) {
+	fail++;
+	console.error(`FAIL  §1b threw: ${String((err && err.message) || err).split("\n")[0]}`);
+}
+
+// ===========================================================================
 // §2 the writer, the seed and the boot reconcile, as shipped
 // ===========================================================================
 console.log("§2 recordEldDeviceAssignment() / seed / reconcile");

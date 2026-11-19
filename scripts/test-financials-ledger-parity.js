@@ -96,11 +96,14 @@ function trucksDdl() {
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
 const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {';
+// The forward-only ELD link rule (lib/eld-link-forward.js), which the ledger's facts read, where the build has it.
+const FORWARD = count("\nfunction eldPayLink(") === 1;
 const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"TRUCK_CHARGE_APP_DAY_RULE",
-	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
+	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS",
+	...(FORWARD ? ["ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"] : [])];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch", ...(FORWARD ? ["eldLinkForwardDecided", "eldLinkForwardReportFromMs"] : [])];
 const FNS = [
 	// Under test.
 	"computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "reconcileInvestorPayouts", "finalizePeriods",
@@ -119,13 +122,14 @@ const FNS = [
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
 	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
 	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex", "correctionLinesTablePresent",
+	...(FORWARD ? ["eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "setEldLinkForwardReportFrom", "buildEldDeviceResolver", "eldDeviceHistoryStartMs"] : []),
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
 	...LETS.map((c) => liftDecl("let", c)),
 	...FNS.map(liftFn),
 	liftRoute(FINANCIALS_HEAD),
-	"return { computeInvestorMonthlyEarnings, reconcileInvestorPayouts, finalizePeriods, assignDriverToTruck, getInvestorDriverSet, getCarrierDBFromSQLite, installPeriodLockTriggers };",
+	`return { computeInvestorMonthlyEarnings, reconcileInvestorPayouts, finalizePeriods, assignDriverToTruck, getInvestorDriverSet, getCarrierDBFromSQLite, installPeriodLockTriggers${FORWARD ? ", setEldLinkForwardReportFrom" : ""} };`,
 ].join("\n");
 
 const DDL = [
@@ -145,6 +149,7 @@ const DDL = [
 	tableDdl("audit_trail"), tableDdl("financials_ledger_items"), tableDdl("financials_ledger_freezes"), tableDdl("app_settings"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
+	...(FORWARD ? [tableDdl("server_state"), tableDdl("eld_device_assignments")] : []),
 ];
 
 // ── the clock: `new Date()` and Date.now() read NOW_MS ───────────────────────
@@ -183,6 +188,7 @@ function buildWorld() {
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, invoiceMonthSplit: require("../lib/invoice-month-split.js"), loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
+		...(FORWARD ? { eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js") } : {}),
 		app: { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; } },
 		requireRole: () => (req, res, next) => next && next(),
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
@@ -218,8 +224,16 @@ function diff(label, a, labelB, b) {
 		.map((f) => `${f}: ${label} ${cents(a[f])}¢, ${labelB} ${cents(b[f])}¢`);
 }
 
-(async () => {
+// The scenario, as written. With `reportFrom` (the forward-only link rule's pin) the dated readers run from that FROM,
+// set through the switch-on report's own entry point (setEldLinkForwardReportFrom()), the device history begun before it.
+async function scenario({ reportFrom = null } = {}) {
+	SHEET[0]["  Payment  "] = "$6,000.00";
 	const { db, api, financials, errors } = buildWorld();
+	if (reportFrom !== null) {
+		db.prepare("INSERT INTO server_state (key, value, updated_at) VALUES ('eld_device_history_started', ?, CURRENT_TIMESTAMP)")
+			.run(JSON.stringify({ at: "2026-04-30T12:00:00.000Z", atMs: Date.parse("2026-04-30T12:00:00.000Z"), links: 0 }));
+		api.setEldLinkForwardReportFrom(reportFrom);
+	}
 
 	// The fleet is owner 5's: truck T1, in service from May 2026, $2,700 a month
 	// of fixed costs, $250 a day for its driver, Dave Driver.
@@ -255,11 +269,17 @@ function diff(label, a, labelB, b) {
 	// 2026-10-05: read both sides.
 	setClock("2026-10-05T17:00:00Z");
 	const fin = await financials();
-	const finByMonth = Object.fromEntries(fin.monthlyPerformance.map((m) => [m.month, m]));
 	const set = api.getInvestorDriverSet(5, carrierDB.data, "Driver", "Carrier Name");
 	const config = { investor_split_pct: "50" };
 	const inv = await api.computeInvestorMonthlyEarnings({ user: { ...SUPER, id: 5 }, isSuperAdmin: false, investorDriverSet: set, investorOwnerId: 5, config });
 	const fleet = await api.computeInvestorMonthlyEarnings({ user: SUPER, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, config });
+	const sep = await financials("2026-09");
+	return { db, fin, inv, fleet, frozen, sep, errors };
+}
+
+(async () => {
+	const { db, fin, inv, fleet, frozen, sep, errors } = await scenario();
+	const finByMonth = Object.fromEntries(fin.monthlyPerformance.map((m) => [m.month, m]));
 	const invByMonth = Object.fromEntries(inv.monthlyEarnings.map((m) => [m.month, m.exact]));
 	const fleetByMonth = Object.fromEntries(fleet.monthlyEarnings.map((m) => [m.month, m.exact]));
 
@@ -286,7 +306,6 @@ function diff(label, a, labelB, b) {
 
 	// The month drill-down reconciles with its headline: September's load runs
 	// 09-29 to 10-02 and is paid in September, all four days.
-	const sep = await financials("2026-09");
 	const md = sep.monthDetail || {};
 	const driverPaySum = (md.drivers || []).reduce((a, d) => a + Math.round(d.pay * 100), 0);
 	check(md.summary && cents(md.summary.driverPay) === 100000 && driverPaySum === 100000 && (md.drivers || [])[0].activeDays === 4,
@@ -295,6 +314,17 @@ function diff(label, a, labelB, b) {
 	check(md.loads && md.loads.count === 1 && Math.round(shares) === 100, "…its loads are the month's revenue items, its category shares come from the server", JSON.stringify({ loads: md.loads, shares: md.expenseCategoryShares }));
 
 	check(errors.length === 0, "the lifted code logged no error", errors.join(" | "));
+
+	// Pin (mutant: the dated readers differing from today's with no link change): the same scenario with the dated readers
+	// run from a planned FROM gives every figure the scenario gives today.
+	if (FORWARD) {
+		const dated = await scenario({ reportFrom: Date.parse("2026-05-01T12:00:00.000Z") });
+		const view = (s) => JSON.stringify({ fin: s.fin, inv: s.inv, fleet: s.fleet, frozen: s.frozen, sep: s.sep });
+		check(view(dated) === view({ fin, inv, fleet, frozen, sep }),
+			"pin: the dated readers from a planned FROM (setEldLinkForwardReportFrom()) give Financials, the payout math, the close's frozen rows and the drill-down byte for byte as today's",
+			`dated ${view(dated).slice(0, 300)}`);
+		check(dated.errors.length === 0, "...and the lifted code logged no error there", dated.errors.join(" | "));
+	}
 
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

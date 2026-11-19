@@ -122,6 +122,7 @@ const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
 const eldFeedHealth = require("./lib/eld-feed-health");
 const eldPosition = require("./lib/eld-position");
+const eldLinkForward = require("./lib/eld-link-forward");
 const driverAvailability = require("./lib/driver-availability");
 const timeOffEldCheck = require("./lib/time-off-eld-check");
 const scankit = require("./lib/scankit-client");
@@ -5119,18 +5120,120 @@ function eldDeviceLinkedSinceMs(truckId, vid) {
 // day (already tomorrow from 8 PM EDT, 7 PM EST), so an evening re-point day goes to the newer truck.
 const ELD_APP_DAY_ENABLED = process.env.ELD_APP_DAY_ENABLED === "true";
 
-function buildEldDeviceResolver() {
+// With opts.frozenBefore (FROM), the forward-only link rule's pay resolver, on business days; without it, as before.
+function buildEldDeviceResolver(opts = {}) {
 	const rows = db.prepare(
-		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments`
+		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by FROM eld_device_assignments`
 	).all();
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
+	const frozen = !!opts && opts.frozenBefore !== undefined && opts.frozenBefore !== null;
 	return eldMiles.buildDeviceTruckResolver(rows, {
 		startMs: eldDeviceHistoryStartMs(), currentLinks,
 		// Off: each bound's UTC day, as before. On: its business day on the clock in force then.
-		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : undefined,
+		dayOf: frozen || ELD_APP_DAY_ENABLED ? (ms) => appTime.businessDayOf(new Date(ms), APP_TIMEZONE) : undefined,
+		...(frozen ? { frozenBefore: opts.frozenBefore } : {}),
 	});
+}
+
+// THE FORWARD-ONLY LINK RULE (lib/eld-link-forward.js): ELD_LINK_FORWARD_ONLY_ENABLED, on only when exactly "true", with
+// ELD_LINK_FORWARD_ONLY_FROM, in force only in a process started at or after FROM. Then the pay paths, IFTA and fuel read
+// each instant's ELD through the device the truck held then, and a link change passes the narrowed stop (5b').
+const ELD_LINK_FORWARD_SETTING = eldLinkForward.settingFromEnv(process.env);
+let eldLinkForwardDecided = null;
+let eldLinkForwardReportFromMs = null;
+
+// The rule as this process runs it: decided once, at boot (the call below server_state's table), and kept.
+function eldLinkForwardRule() {
+	if (eldLinkForwardReportFromMs !== null) return { inForce: true, fromMs: eldLinkForwardReportFromMs, report: true, lines: [] };
+	if (!eldLinkForwardDecided) eldLinkForwardDecided = decideEldLinkForward();
+	return eldLinkForwardDecided;
+}
+
+// The start-up decision: FROM is recorded at the first start in force, and only when no history row was opened or
+// closed between FROM and this start (a link the narrowed stop never saw); anything unreadable keeps the rule off.
+function decideEldLinkForward() {
+	const startMs = Date.now();
+	// On standard error, so a script's own output stays its own.
+	const say = (lines) => {
+		for (const l of lines) (l.level === "error" ? console.error : console.warn)(`[eld-link-forward] ${l.text}`);
+	};
+	let recordedFromMs = null;
+	let events;
+	try {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(eldLinkForward.RECORD_KEY);
+		const v = row ? JSON.parse(row.value) : null;
+		recordedFromMs = v && Number.isFinite(v.fromMs) ? v.fromMs : null;
+		events = [];
+		for (const r of db.prepare("SELECT id, truck_id, assigned_from, assigned_until FROM eld_device_assignments").all()) {
+			for (const at of [r.assigned_from, r.assigned_until]) {
+				const ms = at ? Date.parse(at) : NaN;
+				if (Number.isFinite(ms)) events.push({ id: r.id, truckId: r.truck_id, ms, at });
+			}
+		}
+	} catch (err) {
+		const off = { inForce: false, fromMs: null, record: false, lines: [{ level: "error", text: `the rule's start-up reads failed (${err.message}); it stays off: today's ELD readers and check (5b).` }] };
+		say(off.lines);
+		return off;
+	}
+	const decision = eldLinkForward.decide({
+		setting: ELD_LINK_FORWARD_SETTING, recordedFromMs, historyStartMs: eldDeviceHistoryStartMs(), startMs,
+		rowsBetween: (a, b) => events.filter((e) => e.ms >= a && e.ms < b),
+		changedAfter: (ms) => events.filter((e) => e.ms > ms).length,
+	});
+	if (decision.record) {
+		try {
+			db.prepare("INSERT OR IGNORE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+				.run(eldLinkForward.RECORD_KEY, JSON.stringify({ from: new Date(decision.fromMs).toISOString(), fromMs: decision.fromMs, recordedAt: new Date(startMs).toISOString() }));
+		} catch (err) {
+			const off = { inForce: false, fromMs: null, record: false, lines: [...decision.lines.filter((l) => l.level !== "log"), { level: "error", text: `FROM could not be recorded (${err.message}); the rule stays off.` }] };
+			say(off.lines);
+			return off;
+		}
+	}
+	say(decision.lines);
+	return decision;
+}
+
+// For the switch-on's two-way report only (a script importing this file, never a route): the dated readers run with
+// `fromMs` as FROM, past the start-time check, until it is set back to null.
+function setEldLinkForwardReportFrom(fromMs) {
+	if (fromMs === null) { eldLinkForwardReportFromMs = null; return null; }
+	const ms = Number(fromMs);
+	const start = eldDeviceHistoryStartMs();
+	if (!Number.isFinite(ms) || start === null || ms < start) throw new Error("setEldLinkForwardReportFrom takes an instant (epoch ms) on or after the ELD device history's start");
+	eldLinkForwardReportFromMs = ms;
+	return ms;
+}
+
+// One request's link context while the rule is in force, else null: every reader of it builds one.
+function eldPayLink() {
+	const rule = eldLinkForwardRule();
+	if (!rule.inForce) return null;
+	return eldLinkForward.createPayLink({ db, resolver: buildEldDeviceResolver({ frozenBefore: rule.fromMs }), fromMs: rule.fromMs });
+}
+
+// A reader's trucks for the link context, by lower-case unit: every truck, or one owner's (an investor's scope), linked
+// now or not. null with no link context.
+function eldPayScope(link, ownerId = null) {
+	if (!link) return null;
+	const map = Object.create(null);
+	const trucks = ownerId === null
+		? db.prepare("SELECT id, LOWER(unit_number) AS u FROM trucks").all()
+		: db.prepare("SELECT id, LOWER(unit_number) AS u FROM trucks WHERE owner_id = ?").all(ownerId);
+	for (const t of trucks) if (t.u) map[t.u] = t.id;
+	return eldLinkForward.scope(link, map);
+}
+
+// A rename's ELD leg (truckEditLockBlockers() check (5)) while the rule is in force: a past load finds its truck by the
+// truck's unit, linked now or not (eldPayScope()), and reads its device history, so any history row counts as a link.
+// Unreadable counts as one.
+function eldLinkHistoryHeld(truckId) {
+	if (!eldLinkForwardRule().inForce) return false;
+	try {
+		return !!db.prepare("SELECT 1 FROM eld_device_assignments WHERE truck_id = ? LIMIT 1").get(truckId);
+	} catch { return true; }
 }
 
 // After every table exists (server_state is created further down this file).
@@ -21410,7 +21513,9 @@ function getEldTravelDaysByVehicleCached(vehicleIds, minMs, maxMs) {
 // entry is already fresh; when idle the refresh block hits no waiting user.
 function warmEldTravelMemo() {
 	try {
-		const vids = db.prepare(
+		// Under the forward-only link rule, every device the fleet held in the history (eldPayScope()), as the readers ask.
+		const payScope = eldPayScope(eldPayLink());
+		const vids = payScope ? payScope.devices(0, Date.now() + 86400000) : db.prepare(
 			"SELECT DISTINCT routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''"
 		).all().map((r) => r.vid).filter(Boolean);
 		if (vids.length) getEldTravelDaysByVehicleCached(vids, 0, Date.now() + 86400000);
@@ -21934,6 +22039,19 @@ function invoiceTruckVidReader(headers) {
 	};
 }
 
+// (row) -> what the trip rule reads for the truck the row names: { vid } (invoiceTruckVidReader()), or under the
+// forward-only link rule { vid: null, truck } (eldPayScope(), the fleet), so its callers read the same truck.
+function invoiceTruckEldReader(headers) {
+	const vidOf = invoiceTruckVidReader(headers);
+	const truckCol = (headers || []).find((h) => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
+	let payScope;
+	return (row) => {
+		if (payScope === undefined) payScope = eldPayScope(eldPayLink());
+		if (!payScope) return { vid: vidOf(row) };
+		return { vid: null, truck: payScope.truckFor(truckCol ? row[truckCol] : "") };
+	};
+}
+
 // The other completed loads whose trip days fall in the week (see the header):
 // [{ key, loadId, days }], days inside weekStart..weekEnd, only loads with some.
 // Each load's trip is read with its own invoice window (invoiceLoadWindow()). A
@@ -21944,7 +22062,7 @@ function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, w
 	const keyOf = (row) => (cols.loadIdCol && normalizeLoadId(row[cols.loadIdCol])) || `_row_${row._rowIndex}`;
 	const billedKeys = new Set((billed || []).map(keyOf));
 	const monthCols = jobTrackingMonthCols(headers);
-	const vidOf = invoiceTruckVidReader(headers);
+	const eldOf = invoiceTruckEldReader(headers);
 	const out = [];
 	for (const row of driverCompletedLiveLoads(data, headers, driverName, deletedKeys)) {
 		const key = keyOf(row);
@@ -21952,7 +22070,7 @@ function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, w
 		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 		if (!loadId) continue;
 		const { assignedMonth: month, tripWindow } = invoiceLoadWindow(row, { cols, headers, monthCols });
-		const answer = resolver.forLoad({ loadId, settleMonth: month, range: { start: weekStart, end: weekEnd }, vid: vidOf(row), window: tripWindow });
+		const answer = resolver.forLoad({ loadId, settleMonth: month, range: { start: weekStart, end: weekEnd }, ...eldOf(row), window: tripWindow });
 		if (answer && answer.error) { if (errors) errors.push({ loadId, error: answer.error }); continue; }
 		const days = tripWorkDays.tripDaysOrNull(answer);
 		if (days && days.length) out.push({ key, loadId, days, month });
@@ -22183,7 +22301,7 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 	const nameNorm = normalizeDriverName(driverName);
 	const cols = invoiceWeekColumns(headers);
 	const monthCols = jobTrackingMonthCols(headers);
-	const vidOf = invoiceTruckVidReader(headers);
+	const eldOf = invoiceTruckEldReader(headers);
 	const ovr = getAllExcludedDriverDays()[nameNorm] || null;
 	const removed = ovr && ovr.remove ? ovr.remove : new Set();
 	const payable = new Map();
@@ -22192,12 +22310,12 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 	for (const row of driverCompletedLiveLoads(data, headers, driverName, loadKeySet(getDeletedLoadIds()))) {
 		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 		if (!loadId) continue;
-		const vid = vidOf(row);
+		const eld = eldOf(row);
 		const { assignedMonth, tripWindow } = invoiceLoadWindow(row, { cols, headers, monthCols });
-		const t = resolver.trip(loadId, { vid, window: tripWindow });
+		const t = resolver.trip(loadId, { ...eld, window: tripWindow });
 		if (t.basis === "error") { tripErrors.push({ loadId, error: t.error }); continue; }
 		if (t.basis !== "trip" && t.basis !== "appointments") continue;
-		const follows = Array.isArray(resolver.forLoad({ loadId, settleMonth: assignedMonth, vid, window: tripWindow }));
+		const follows = Array.isArray(resolver.forLoad({ loadId, settleMonth: assignedMonth, ...eld, window: tripWindow }));
 		for (const day of t.days) {
 			if (day > lastDay || removed.has(day)) continue;
 			candidates.push({ day, loadId, follows, month: assignedMonth || day.slice(0, 7) });
@@ -22665,7 +22783,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 	const data = jt.data || [];
 	const cols = invoiceWeekColumns(headers);
 	const monthCols = jobTrackingMonthCols(headers);
-	const vidOf = invoiceTruckVidReader(headers);
+	const eldOf = invoiceTruckEldReader(headers);
 	const payStructs = getDriverPayStructures();
 	const deletedKeys = loadKeySet(getDeletedLoadIds());
 	const drivers = new Map();
@@ -22731,7 +22849,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		const tripWindowOf = (row) => invoiceLoadWindow(row, { cols, headers, monthCols }).tripWindow;
 		const follows = (loadId) => {
 			const row = loads.get(normalizeLoadId(loadId));
-			return !!row && Array.isArray(resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), vid: vidOf(row), window: tripWindowOf(row) }));
+			return !!row && Array.isArray(resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), ...eldOf(row), window: tripWindowOf(row) }));
 		};
 		const current = invoicePaidDaysOf(inv);
 		const gridOf = (day) => snap.days[invoiceGridDayName(day)] || {};
@@ -22743,7 +22861,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		for (const [, row] of loads) {
 			const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 			const assignedMonth = loadAssignedMonthKey(row, monthCols);
-			const days = loadId ? tripWorkDays.tripDaysOrNull(resolver.forLoad({ loadId, settleMonth: assignedMonth, range: { start: inv.week_start, end: inv.week_end }, vid: vidOf(row), window: tripWindowOf(row) })) : null;
+			const days = loadId ? tripWorkDays.tripDaysOrNull(resolver.forLoad({ loadId, settleMonth: assignedMonth, range: { start: inv.week_start, end: inv.week_end }, ...eldOf(row), window: tripWindowOf(row) })) : null;
 			for (const d of days || []) {
 				ruleDays.add(d);
 				// A load with no Assigned Date pays in the day's own month.
@@ -23344,7 +23462,9 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	// evening. Pings outside the week land on days nothing counts.
 	const weekStartMs = Date.parse(weekStart + "T00:00:00Z");
 	const weekEndMs = Date.parse(computedWeekEnd + "T00:00:00Z") + 36 * 3600 * 1000;
-	const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
+	// Under the forward-only link rule: every device the fleet held over the week, and each load read through its truck.
+	const payScope = eldPayScope(eldPayLink());
+	const eldByVid = getEldTravelDaysByVehicle(payScope ? payScope.devices(weekStartMs, weekEndMs) : Object.values(unitToVid), weekStartMs, weekEndMs);
 	// The pre-dispatch rule (off unless enabled) and the month each load's days
 	// settle in, read as the ledger reads it (the load's Assigned month).
 	const preDispatch = preDispatchPayDayFilter();
@@ -23394,7 +23514,10 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		if (weekRule) {
 			const ruleLid = String(loadIdCol ? (load[loadIdCol] || "") : "").trim();
 			const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
-			const answer = weekRule.forLoad({ loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null, window: tripWindow });
+			const answer = weekRule.forLoad({
+				loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd },
+				vid: ruleUnit && !payScope ? unitToVid[ruleUnit] : null, truck: payScope ? payScope.truckFor(ruleUnit) : null, window: tripWindow,
+			});
 			if (answer && answer.error) tripErrors.push({ loadId: ruleLid, error: answer.error });
 			else if (answer && answer.fallback) tripErrors.push({ loadId: ruleLid, error: answer.fallback, fallback: true });
 			const trip = tripWorkDays.tripDaysOrNull(answer);
@@ -23454,14 +23577,13 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		// lib/load-pay-days.js payDaysForLoad() is the copy the investor view and
 		// the ledger share, the pre-dispatch rule included.
 		const truckUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
-		const vid = truckUnit ? unitToVid[truckUnit] : null;
+		const vid = truckUnit && !payScope ? unitToVid[truckUnit] : null;
 		const eld = vid ? eldByVid[vid] : null;
-		const { days: countedDays } = loadPayDays.payDaysForLoad(
-			loadWindowDays, eld,
-			// loadWindowDays is clipped to the week; the rule reads the whole window.
-			{ loadId: String(lid).trim(), vid, settleMonth: assignedMonth, windowStart: fmtLocalDate(start), windowEnd: ruleWindowEnd },
-			preDispatch,
-		);
+		// loadWindowDays is clipped to the week; the rule reads the whole window.
+		const ruleLoad = { loadId: String(lid).trim(), vid, settleMonth: assignedMonth, windowStart: fmtLocalDate(start), windowEnd: ruleWindowEnd };
+		const { days: countedDays } = payScope
+			? payScope.link.windowPaidDays({ windowDays: loadWindowDays, truckId: payScope.truckIdOf(truckUnit), eldByVid, load: ruleLoad, preDispatch })
+			: loadPayDays.payDaysForLoad(loadWindowDays, eld, ruleLoad, preDispatch);
 		for (const ds of countedDays) {
 			activeDaySet.add(ds);
 			if (fallbackKey) (fallbackPayers[ds] || (fallbackPayers[ds] = [])).push(fallbackKey);
@@ -26115,14 +26237,33 @@ function fuelEventsScanWindow(days) {
 	return { fromMs: now - (days * 24 * 60 * 60 * 1000) - (60 * 60 * 1000), toMs: now + 60 * 1000 };
 }
 
+// The truck a fuel event's device was on, under the forward-only link rule: { link, unitAt(vid, ms) -> unit or "" }
+// from the history at the event's instant; { link: null } while the rule is not in force (today's link, by SQL join).
+function fuelEventUnits() {
+	const link = eldPayLink();
+	if (!link) return { link: null };
+	const unitById = new Map(db.prepare("SELECT id, unit_number FROM trucks").all().map((t) => [t.id, t.unit_number]));
+	return {
+		link,
+		unitAt: (vid, ms) => {
+			const id = link.resolver.truckForVehicleAt(vid, Number(ms));
+			return id === null ? "" : unitById.get(id) || "";
+		},
+	};
+}
+
 // Detect + persist episodes for every ELD-linked truck.
 // Returns { detected, pruned } — the episodes for this window, and how many
 // stale rows the re-detect removed (see the prune below).
 function detectAndPersistFuelEvents({ days = FUEL_EVENTS_SCAN_DAYS, persist = true } = {}) {
 	const { fromMs, toMs } = fuelEventsScanWindow(days);
-	const linked = db.prepare(
-		`SELECT unit_number, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''`
-	).all();
+	// Under the forward-only link rule: every device the fleet held in the window, each event on its truck at its instant.
+	const units = fuelEventUnits();
+	const linked = units.link
+		? eldPayScope(units.link).devices(fromMs, toMs).map((vid) => ({ vid, unit_number: null }))
+		: db.prepare(
+			`SELECT unit_number, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''`
+		).all();
 	const detected = [];
 	// The span each vehicle's telemetry ACTUALLY covers in this scan — not the
 	// requested window. This is what bounds the prune; see there for why.
@@ -26138,7 +26279,7 @@ function detectAndPersistFuelEvents({ days = FUEL_EVENTS_SCAN_DAYS, persist = tr
 				// positive, so the two can never collide.
 				id: -(detected.length + 1),
 				routemate_vehicle_id: t.vid,
-				unit: t.unit_number,
+				unit: units.link ? units.unitAt(t.vid, e.startMs) : t.unit_number,
 				start_ms: e.startMs,
 				end_ms: e.endMs,
 				// Business day, on the clock in force at the fill, so a re-scan after a
@@ -26318,18 +26459,28 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 	const sinceDay = shiftDayKey(appDay(), -days);
 	const receiptSinceDay = shiftDayKey(sinceDay, -1);
 
+	const units = providedEvents ? { link: null } : fuelEventUnits();
 	const events = providedEvents
 		? providedEvents.filter((e) => e.local_day >= sinceDay)
 			.map((e) => ({ ...e, rise: e.rise != null ? e.rise : (e.pct_after - e.pct_before) }))
-		: db.prepare(`
-			SELECT fe.id, fe.routemate_vehicle_id, fe.start_ms, fe.end_ms, fe.local_day,
-			       fe.pct_before, fe.pct_after, fe.odometer, fe.odo_span, fe.latitude, fe.longitude,
-			       (fe.pct_after - fe.pct_before) AS rise, t.unit_number AS unit
-			FROM fuel_events fe
-			JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
-			WHERE fe.local_day >= ?
-			ORDER BY fe.start_ms ASC
-		`).all(sinceDay);
+		: units.link
+			? db.prepare(`
+				SELECT fe.id, fe.routemate_vehicle_id, fe.start_ms, fe.end_ms, fe.local_day,
+				       fe.pct_before, fe.pct_after, fe.odometer, fe.odo_span, fe.latitude, fe.longitude,
+				       (fe.pct_after - fe.pct_before) AS rise
+				FROM fuel_events fe
+				WHERE fe.local_day >= ?
+				ORDER BY fe.start_ms ASC
+			`).all(sinceDay).map((e) => ({ ...e, unit: units.unitAt(e.routemate_vehicle_id, e.start_ms) })).filter((e) => e.unit)
+			: db.prepare(`
+				SELECT fe.id, fe.routemate_vehicle_id, fe.start_ms, fe.end_ms, fe.local_day,
+				       fe.pct_before, fe.pct_after, fe.odometer, fe.odo_span, fe.latitude, fe.longitude,
+				       (fe.pct_after - fe.pct_before) AS rise, t.unit_number AS unit
+				FROM fuel_events fe
+				JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+				WHERE fe.local_day >= ?
+				ORDER BY fe.start_ms ASC
+			`).all(sinceDay);
 
 	// truck_unit is compared case-insensitively: trucks.unit_number holds both
 	// 'LogisX-#33' and 'Logisx-#91' (lowercase x), and expenses.truck_unit is a
@@ -26533,16 +26684,28 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 	// below needs the tank's absolute LEVEL at both ends of the leg, not only how
 	// far the closing fill moved the needle. `rise` stays because the calibration
 	// filter reads it.
-	const rows = db.prepare(`
-		SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
-		       fe.pct_before, fe.pct_after,
-		       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
-		       fe.match_distance_km, t.unit_number AS unit
-		FROM fuel_events fe
-		JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
-		WHERE fe.start_ms >= ? AND fe.expense_id IS NOT NULL AND fe.matched_gallons > 0
-		ORDER BY fe.routemate_vehicle_id, fe.start_ms ASC
-	`).all(sinceMs);
+	// Under the forward-only link rule each fill's truck is the one its device was on then (fuelEventUnits()).
+	const units = fuelEventUnits();
+	const rows = units.link
+		? db.prepare(`
+			SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
+			       fe.pct_before, fe.pct_after,
+			       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
+			       fe.match_distance_km
+			FROM fuel_events fe
+			WHERE fe.start_ms >= ? AND fe.expense_id IS NOT NULL AND fe.matched_gallons > 0
+			ORDER BY fe.routemate_vehicle_id, fe.start_ms ASC
+		`).all(sinceMs).map((r) => ({ ...r, unit: units.unitAt(r.routemate_vehicle_id, r.start_ms) })).filter((r) => r.unit)
+		: db.prepare(`
+			SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
+			       fe.pct_before, fe.pct_after,
+			       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
+			       fe.match_distance_km, t.unit_number AS unit
+			FROM fuel_events fe
+			JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+			WHERE fe.start_ms >= ? AND fe.expense_id IS NOT NULL AND fe.matched_gallons > 0
+			ORDER BY fe.routemate_vehicle_id, fe.start_ms ASC
+		`).all(sinceMs);
 
 	// Every sizeable fill in the window, matched or not — needed to know whether a
 	// tank-to-tank leg has an unaccounted fill inside it (see below).
@@ -26580,6 +26743,8 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 		const legs = [];
 		for (let i = 1; i < seq.length; i++) {
 			const a = seq[i - 1], b = seq[i];
+			// Two fills on two trucks (a device moved between them) measure no leg.
+			if (a.unit !== b.unit) continue;
 			const miles = b.odometer - a.odometer;
 			if (!(miles > 0) || miles > 3000) continue;
 			const gap = fills.some((f) => f.start_ms > a.start_ms && f.start_ms < b.start_ms && !f.expense_id);
@@ -26600,7 +26765,7 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 			});
 		}
 		out[vid] = {
-			unit: seq[0].unit,
+			unit: seq[seq.length - 1].unit,
 			matchedFills: seq.length,
 			calibration: fuelModel.summarizeCalibration(calVals),
 			mpg: fuelModel.receiptDerivedMpg(legs),
@@ -38602,26 +38767,115 @@ function eldLinkRowMonths(headers, rows, unitNumber) {
 	}
 	return [...months].sort();
 }
-async function eldLinkLoadMonths(unitNumber) {
+// The narrowed stop's rows (check (5b')): each row carrying the unit, as { months, lastDay, loadId }. lastDay is the
+// latest day any of its date cells holds, "" when it has no end date (no drop-off, completion or status date: still
+// running). null when one of its date cells can't be read, as eldLinkRowMonths() answers.
+function eldLinkRowReach(headers, rows, unitNumber) {
+	const key = eldLinkUnitKey(unitNumber);
+	if (!key) return [];
+	const hs = Array.isArray(headers) ? headers : [];
+	const cols = [];
+	hs.forEach((h, i) => { if (ELD_LINK_TRUCK_COL_RE.test(String(h || ""))) cols.push(i); });
+	if (!cols.length) return [];
+	const loadIdCol = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h || "")));
+	const out = [];
+	for (const row of rows || []) {
+		const vs = Array.isArray(row) ? row : [];
+		if (!cols.some((i) => eldLinkUnitKey(vs[i]) === key)) continue;
+		const months = loadRowAccountingMonths(hs, vs);
+		if (!months || !months.length) return null;
+		let lastDay = "";
+		let ends = false;
+		for (let i = 0; i < hs.length; i++) {
+			const h = String(hs[i] || "");
+			if (!/date|appo|appt/i.test(h) || !String(vs[i] == null ? "" : vs[i]).trim()) continue;
+			const d = sheetCellDate(vs[i]);
+			if (!d) return null;
+			const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+			if (day > lastDay) lastDay = day;
+			if (/drop.?off|delivery|completion|status.*update/i.test(h)) ends = true;
+		}
+		out.push({ months, lastDay: ends ? lastDay : "", loadId: loadIdCol >= 0 ? String(vs[loadIdCol] || "").trim() : "" });
+	}
+	return out;
+}
+// With `reach` (the narrowed stop), { months, reach }: the rows behind the months too.
+async function eldLinkLoadMonths(unitNumber, { reach = false } = {}) {
 	const sheets = await getSheets();
 	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 	const values = (response && response.data && response.data.values) || [];
-	return eldLinkRowMonths(values[0] || [], values.slice(1), unitNumber);
+	const months = eldLinkRowMonths(values[0] || [], values.slice(1), unitNumber);
+	if (!reach) return months;
+	return { months, reach: months === null ? null : eldLinkRowReach(values[0] || [], values.slice(1), unitNumber) };
 }
 
 // The link/unlink routes' one await, run ABOVE every check they make (house rule:
 // no await between a check and its write). Returns the truck row re-read AFTER
 // the await, and eldLinkMonths = null — every finalized month — when the tab
-// could not be read or the unit was renamed while it was being read.
+// could not be read or the unit was renamed while it was being read. Under the
+// forward-only link rule also eldLinkForward (eldLinkForwardStop()).
 async function eldLinkPreflight(truckId, truck) {
+	const forward = eldLinkForwardRule().inForce;
 	let eldLinkMonths = null;
+	let reach = null;
 	if (periodLocksReadable() && lockedPeriodsDesc().length) {
-		try { eldLinkMonths = await eldLinkLoadMonths(truck.unit_number); }
+		try {
+			const read = await eldLinkLoadMonths(truck.unit_number, { reach: forward });
+			if (forward) ({ months: eldLinkMonths, reach } = read || {});
+			else eldLinkMonths = read;
+		}
 		catch (e) { console.warn(`ELD link guard: Job Tracking unreadable (${e.message}); guarding every finalized month`); }
 	}
 	const fresh = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
-	if (fresh && eldLinkUnitKey(fresh.unit_number) !== eldLinkUnitKey(truck.unit_number)) eldLinkMonths = null;
-	return { truck: fresh, eldLinkMonths };
+	if (fresh && eldLinkUnitKey(fresh.unit_number) !== eldLinkUnitKey(truck.unit_number)) { eldLinkMonths = null; reach = null; }
+	return forward ? { truck: fresh, eldLinkMonths, eldLinkForward: eldLinkForwardStop(reach) } : { truck: fresh, eldLinkMonths };
+}
+
+// What check (5b') reads, after the preflight's await: the instant the link changes (the route writes its history row
+// at it), its earliest US local day, the rows, and with the trip work-day rule on each row's last Delivered tap, whose
+// 36-hour receiver-exit read can reach past the load's own days. A tap read that fails holds every finalized month.
+function eldLinkForwardStop(reach) {
+	const atMs = Date.now();
+	const stop = { atMs, at: new Date(atMs).toISOString(), day: eldLinkForward.earliestLocalDay(atMs), rows: reach, tripTail: !!TRIP_WORK_DAYS_FROM, unreadable: false };
+	if (!stop.tripTail || !Array.isArray(reach)) return stop;
+	try {
+		const tap = db.prepare("SELECT MAX(changed_at) AS at FROM load_status_history WHERE load_id = ? AND LOWER(TRIM(new_status)) = 'delivered'");
+		stop.rows = reach.map((r) => {
+			const key = String(r.loadId || "").trim().toLowerCase().replace(/^#/, "");
+			const at = key ? tap.get(key).at : null;
+			const ms = at ? Date.parse(String(at).trim().replace(" ", "T") + "Z") : null;
+			return { ...r, tapMs: Number.isFinite(ms) ? ms : null, noLoadId: !key };
+		});
+	} catch (err) {
+		console.warn(`ELD link guard: the Delivered taps could not be read (${err.message}); guarding every finalized month`);
+		stop.unreadable = true;
+	}
+	return stop;
+}
+
+// Check (5b'), the forward-only link rule's stop: a link change counts from its instant on, so only a finalized
+// month's load still running at it (or, with the trip rule, delivered in the 36 hours before it) can change. A row
+// that can't be read, or a tap read that failed, holds every finalized month, in (5b)'s own words.
+function eldLinkForwardBlocker(truck, was, now, locked, stop) {
+	const head = { field: "routemate_vehicle_id", from: was || "(unlinked)", to: now || "(unlinked)" };
+	const verb = was && now ? "re-pointing" : now ? "linking" : "unlinking";
+	if (!Array.isArray(stop.rows) || stop.unreadable) {
+		return { ...head, periods: locked.slice().sort(), detail: `${verb} the ELD device changes which days count as travelled for ${truck.unit_number}, re-deriving driver pay across ${locked.length} finalized month${locked.length === 1 ? "" : "s"}` };
+	}
+	const isLocked = new Set(locked);
+	const byDay = (r) => r.lastDay === "" || r.lastDay >= stop.day;
+	const byTail = (r) => stop.tripTail && (r.noLoadId || (r.tapMs !== null && r.tapMs + 36 * 3600 * 1000 >= stop.atMs));
+	const reaching = stop.rows.filter((r) => r.months.some((m) => isLocked.has(m)) && (byDay(r) || byTail(r)));
+	if (!reaching.length) return null;
+	const months = [...new Set(reaching.flatMap((r) => r.months.filter((m) => isLocked.has(m))))].sort();
+	const many = reaching.length > 1;
+	const when = reaching.some(byDay)
+		? `${many ? "run" : "runs"} on or after ${eldLinkForward.dayLabel(stop.day)}`
+		: `${many ? "were" : "was"} delivered less than 36 hours before this change`;
+	return {
+		...head, periods: months, forward: true,
+		detail: `its ${many ? `${reaching.length} loads` : "load"} assigned in ${months.map(periodLabel).join(" and ")} ${when}, so this would change pay in a finalized month`,
+	};
 }
 
 // Everything a PUT /api/trucks/:id would restate inside a finalized month.
@@ -38850,7 +39104,8 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	//       with no pings falls back to the FULL scheduled window. Renaming a
 	//       linked truck therefore silently RAISES driver pay in every closed month.
 	// A case-only rename is a no-op for both (both sides are LOWER()ed) and is not
-	// blocked. A truck with no ELD link and no fee rows can be renamed freely.
+	// blocked. A truck with no ELD link and no fee rows can be renamed freely; under
+	// the forward-only link rule any device history counts as a link (eldLinkHistoryHeld()).
 	//
 	// ⚠️ The ELD leg is measured over ALL locked months, NOT over `fixedMonths`.
 	// fixedMonths is "months this truck's FIXED COSTS are billed in", i.e. gated on
@@ -38864,7 +39119,7 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	if (has("unit_number")) {
 		const fees = truckFeeLockedRows(truck.unit_number, locked);
 		const feeRows = [...fees.maintenance, ...fees.compliance];
-		const eldLinked = String(truck.routemate_vehicle_id || "").trim() !== "";
+		const eldLinked = String(truck.routemate_vehicle_id || "").trim() !== "" || eldLinkHistoryHeld(truck.id);
 		const months = [...feeRows.map((r) => r.m), ...(eldLinked ? locked : [])];
 		if (months.length) blockers.push({
 			field: "unit_number", from: truck.unit_number, to: changed.unit_number,
@@ -38892,7 +39147,12 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 	// Scoped to the finalized months this truck's own loads reach when the caller
 	// measured them (opts.eldLinkMonths, see eldLinkRowMonths()); a truck with no
 	// load in any closed month links freely.
-	if (has("routemate_vehicle_id")) {
+	// Under the forward-only link rule the link routes pass opts.eldLinkForward (eldLinkPreflight()), and (5b') runs in
+	// place of (5b): eldLinkForwardBlocker().
+	if (has("routemate_vehicle_id") && opts.eldLinkForward) {
+		const b = eldLinkForwardBlocker(truck, String(truck.routemate_vehicle_id || "").trim(), String(changed.routemate_vehicle_id || "").trim(), locked, opts.eldLinkForward);
+		if (b) blockers.push(b);
+	} else if (has("routemate_vehicle_id")) {
 		const was = String(truck.routemate_vehicle_id || "").trim();
 		const now = String(changed.routemate_vehicle_id || "").trim();
 		const scoped = Array.isArray(opts.eldLinkMonths);
@@ -39128,6 +39388,16 @@ function truckDeleteLockBlockers(truck) {
 		}
 	}
 
+	// (6) check (5)'s ELD leg, while the forward-only link rule is in force: a past load finds its truck by the truck's
+	// unit, linked now or not, and reads its device history, so deleting a truck linked now or with any history row
+	// (eldLinkHistoryHeld(), fail closed) re-reads every finalized month. With the rule not in force, nothing here.
+	if (eldLinkForwardRule().inForce && (String(truck.routemate_vehicle_id || "").trim() !== "" || eldLinkHistoryHeld(truck.id))) {
+		blockers.push({
+			table: "trucks.routemate_vehicle_id", rows: 1, periods: locked.slice().sort(),
+			detail: `deleting ${truck.unit_number} breaks the ELD link every past load row resolves through, which re-derives driver pay in ${locked.length} finalized month${locked.length === 1 ? "" : "s"}`,
+		});
+	}
+
 	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
@@ -39150,7 +39420,9 @@ function truckDeleteLockBlockers(truck) {
 //                           both read it;
 //   eld_link                1 while an ELD device is linked: the loads naming the
 //                           unit pay their ELD days, and the whole scheduled
-//                           window without the link. No sheet read (TD8-2 (a));
+//                           window without the link. No sheet read (TD8-2 (a)).
+//                           Under the forward-only link rule, also 1 while the
+//                           truck has any device history row;
 //   financials_line_months  the open months its maintenance reserve or purchase
 //                           price is a Financials line in (financialsExtraItems():
 //                           in the fleet, charged that month), counted even
@@ -39209,7 +39481,9 @@ function truckDeleteOpenMonthHolds(truck) {
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
 	const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;
-	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
+	// Under the forward-only link rule a truck's loads read its device history by its unit, linked now or not, so any
+	// history row holds too (eldLinkHistoryHeld(), fail closed). With the rule not in force it reads nothing.
+	const eld_link = String(truck.routemate_vehicle_id || "").trim() || eldLinkHistoryHeld(truck.id) ? 1 : 0;
 	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
 	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
 	let last_truck_receipt_months = 0;
@@ -41165,7 +41439,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
 			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
 			[holds.driver, "clear its driver"],
-			[holds.eld_link, "unlink its ELD device"],
+			// Under the forward-only link rule the device history holds after an unlink too, so unlinking clears nothing.
+			[eldLinkForwardRule().inForce ? 0 : holds.eld_link, "unlink its ELD device"],
 			[holds.lease_months, "set its owner to the company"],
 			[trailerRows, "detach its trailer"],
 		].filter(([n]) => n > 0).map(([, step]) => step);
@@ -49408,14 +49683,14 @@ function tripDayLockCover(headers) {
 	if (!resolver) return null;
 	const invoiceCols = invoiceWeekColumns(headers);
 	const monthCols = jobTrackingMonthCols(headers);
-	const vidOf = invoiceTruckVidReader(headers);
+	const eldOf = invoiceTruckEldReader(headers);
 	const completionCol = findCol(headers || [], /completion.*date|status.*update.*date/i);
 	return {
 		daysFor(row) {
 			const loadId = monthCols.loadIdCol ? String(row[monthCols.loadIdCol] || "").trim() : "";
 			if (!loadId) return { days: [] };
 			const settleMonth = loadAssignedMonthKey(row, monthCols);
-			const vid = vidOf(row);
+			const eld = eldOf(row);
 			// The ledger's window, read as ledgerLoadRows() and computeLedgerScope() read it.
 			const assigned = monthCols.dateCol && row[monthCols.dateCol] ? moneySheetDate(row[monthCols.dateCol]) : null;
 			const pickup = moneySheetDate(monthCols.pickupDateCol ? row[monthCols.pickupDateCol] : null);
@@ -49430,7 +49705,7 @@ function tripDayLockCover(headers) {
 			];
 			const days = new Set();
 			for (const window of windows) {
-				const answer = resolver.forLoad({ loadId, settleMonth, vid, window });
+				const answer = resolver.forLoad({ loadId, settleMonth, ...eld, window });
 				if (answer && answer.error) return { days: [], error: answer.error };
 				for (const d of tripWorkDays.tripDaysOrNull(answer) || []) days.add(d);
 			}
@@ -52983,7 +53258,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		if (!found) return res.status(404).json({ error: "Truck not found" });
 		// Which finalized months this truck's loads reach — the handler's only
 		// await, above every check; `truck` is the row re-read after it.
-		const { truck, eldLinkMonths } = await eldLinkPreflight(truckId, found);
+		const { truck, eldLinkMonths, eldLinkForward: forwardStop = null } = await eldLinkPreflight(truckId, found);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		let target = (req.body && req.body.routemateVehicleId) || "";
@@ -53079,7 +53354,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 		// the truck PUT runs, so re-pointing a device cannot do what editing the
 		// unit number is refused for. See check (5b).
 		if (changing) {
-			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target }, { eldLinkMonths });
+			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: target }, { eldLinkMonths, eldLinkForward: forwardStop });
 			// Mirrors the `routemate_link` success line. BOTH device ids are recorded:
 			// the link is the map historical loads resolve through to get their travel
 			// days, so which device it was moved FROM is as much of the story as which
@@ -53094,22 +53369,27 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 				return periodBlockedResponse(req, res,
 					`Cannot ${truck.routemate_vehicle_id ? "re-point" : "link"} the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
+					lock.blockers.every((b) => b.forward) ? "Nothing was changed."
+						: "Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
 					linkAudit);
 			}
 		}
 
 		// The link and its dated record land together (eld_device_assignments): the
 		// device's past miles stay on the truck it was on when it drove them. The
-		// seed runs first so the link this replaces is on record.
+		// seed runs first so the link this replaces is on record. Under the
+		// forward-only link rule the row starts at the instant (5b') judged.
 		db.transaction(() => {
 			ensureEldDeviceHistorySeeded();
 			db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(target, truckId);
-			recordEldDeviceAssignment(truckId, target, (req.session && req.session.user && req.session.user.username) || "");
+			recordEldDeviceAssignment(truckId, target, (req.session && req.session.user && req.session.user.username) || "", forwardStop ? forwardStop.at : undefined);
 		})();
 		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${auditText(truck.unit_number, 100)} → Routemate ${target}`
 			+ (confirmedSilent ? ` (confirmed silent device: ${eldLastFixPhrase(targetStatus.last_fix_ms, Date.now())})` : ""));
-		res.json({ success: true, truckId, routemateVehicleId: target });
+		res.json({
+			success: true, truckId, routemateVehicleId: target,
+			...(forwardStop && changing ? eldLinkForward.linkAnswer({ kind: "link", atMs: forwardStop.atMs, unit: truck.unit_number || `truck #${truckId}`, device: target }) : {}),
+		});
 	} catch (err) {
 		console.error("routemate link error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -53127,7 +53407,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 		const found = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
 		if (!found) return res.status(404).json({ error: "Truck not found" });
 		// Same preflight as the link route: the only await, above every check.
-		const { truck, eldLinkMonths } = await eldLinkPreflight(truckId, found);
+		const { truck, eldLinkMonths, eldLinkForward: forwardStop = null } = await eldLinkPreflight(truckId, found);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 		const prev = truck.routemate_vehicle_id || "";
 		// Unlinking is the sharpest version of this whole class of bug: it removes
@@ -53136,7 +53416,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 		// the FULL scheduled window instead of the days actually travelled. One
 		// call, driver pay up across every closed month. See check (5b).
 		if (prev) {
-			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: "" }, { eldLinkMonths });
+			const lock = truckEditLockBlockers(truck, { routemate_vehicle_id: "" }, { eldLinkMonths, eldLinkForward: forwardStop });
 			// Mirrors the `routemate_unlink` success line, and records the device id
 			// being detached — after a successful unlink the column is empty, so on a
 			// refusal this is the only place the intended target survives.
@@ -53149,7 +53429,8 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 				return periodBlockedResponse(req, res,
 					`Cannot unlink the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
+					lock.blockers.every((b) => b.forward) ? "Nothing was changed."
+						: "Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
 					unlinkAudit);
 			}
 		}
@@ -53157,10 +53438,13 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 		db.transaction(() => {
 			ensureEldDeviceHistorySeeded();
 			db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ?").run(truckId);
-			recordEldDeviceAssignment(truckId, "", (req.session && req.session.user && req.session.user.username) || "");
+			recordEldDeviceAssignment(truckId, "", (req.session && req.session.user && req.session.user.username) || "", forwardStop ? forwardStop.at : undefined);
 		})();
 		logAudit(req, 'routemate_unlink', 'truck', String(truckId), `Unlinked truck ${auditText(truck.unit_number, 100)} (was ${prev || 'none'})`);
-		res.json({ success: true, truckId });
+		res.json({
+			success: true, truckId,
+			...(forwardStop && prev ? eldLinkForward.linkAnswer({ kind: "unlink", atMs: forwardStop.atMs, unit: truck.unit_number || `truck #${truckId}` }) : {}),
+		});
 	} catch (err) {
 		console.error("routemate unlink error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -54995,17 +55279,21 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			if (safeCity && safeState && GEOCODE_CITY_RE.test(safeCity) && spendGeocodeBudget()) {
 				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
 				if (g) { locLat = g.lat; locLng = g.lng; locSource = "geocode"; }
-			} else if (!safeState && driverTruck?.routemate_vehicle_id) {
+			} else if (!safeState && (driverTruck?.routemate_vehicle_id || (driverTruck && eldLinkForwardRule().inForce))) {
 				// Window = user-entered day: [00:00Z − 6h, 00:00Z + 30h] covers the
 				// full local day in every US zone; pick the ping closest to 18:00Z
 				// (midday across the continental US zones) as the "midday" position.
+				// Under the forward-only link rule the device is the one the truck
+				// held at that midday, not today's link.
 				const dayMs = Date.parse(`${date}T00:00:00Z`);
-				if (Number.isFinite(dayMs)) {
+				const stateLink = eldPayLink();
+				const stateVid = stateLink && Number.isFinite(dayMs) ? stateLink.resolver.vehicleForTruckAt(driverTruck.id, dayMs + 18 * 3600e3) : driverTruck.routemate_vehicle_id;
+				if (Number.isFinite(dayMs) && stateVid) {
 					const pings = db.prepare(
 						`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
 						 WHERE routemate_vehicle_id = ? AND dropped_reason = ''
 						   AND location_date_ms BETWEEN ? AND ?`
-					).all(driverTruck.routemate_vehicle_id, dayMs - 6 * 3600e3, dayMs + 30 * 3600e3);
+					).all(stateVid, dayMs - 6 * 3600e3, dayMs + 30 * 3600e3);
 					const targetMs = Date.parse(`${date}T18:00:00Z`);
 					let best = null;
 					for (const p of pings) {
@@ -62863,6 +63151,8 @@ db.exec(`
 		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+// The forward-only link rule decides here, at boot, once server_state exists (decideEldLinkForward()).
+eldLinkForwardRule();
 function loadRouteCacheSnapshot() {
 	try {
 		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get("route_cache_snapshot");
@@ -66414,7 +66704,9 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 			: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
 		db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 	}
-	const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
+	// Under the forward-only link rule, the scope's trucks read through the history (an investor's own trucks only).
+	const eldLink = eldPayScope(eldPayLink(), investorDriverSet ? user.id : null);
+	const eldByVid = getEldTravelDaysByVehicleCached(eldLink ? eldLink.devices(0, Date.now() + 86400000) : Object.values(unitToVid), 0, Date.now() + 86400000);
 
 	const trucksByDriver = truckRatesByDriver(investorDriverSet ? user.id : null);
 
@@ -66529,6 +66821,7 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		rows,
 		unitToVid,
 		eldByVid,
+		eldLink,
 		// The pre-dispatch rule (off unless enabled), the filter GET /api/investor
 		// and the weekly invoice pass to payDaysForLoad() too.
 		preDispatch: preDispatchPayDayFilter(),
@@ -68199,7 +68492,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
 			db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 		}
-		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
+		// Under the forward-only link rule, the scope's trucks read through the history, as the ledger reads them.
+		const eldLink = eldPayScope(eldPayLink(), investorDriverSet ? user.id : null);
+		const eldByVid = getEldTravelDaysByVehicleCached(eldLink ? eldLink.devices(0, Date.now() + 86400000) : Object.values(unitToVid), 0, Date.now() + 86400000);
 		// The pre-dispatch rule (off unless enabled), shared with the ledger and
 		// the weekly invoice through payDaysForLoad().
 		const preDispatch = preDispatchPayDayFilter();
@@ -68319,12 +68614,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				});
 				// The trip work-day rule first, before the pickup gate (null when off,
 				// and for a load whose history or ELD it could not read).
-				const vid = truckUnit ? unitToVid[truckUnit] : null;
+				const vid = truckUnit && !eldLink ? unitToVid[truckUnit] : null;
 				const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 				// Daily-rate drivers only: a percentage driver's pay reads revenue, not days.
 				const trip = tripDays && (tripPayStructures[driver] || {}).payType !== "percentage"
 					? tripWorkDays.tripDaysOrNull(tripDays.forLoad({
-						loadId: lid, settleMonth: assignedMonthKey || "", vid,
+						loadId: lid, settleMonth: assignedMonthKey || "", vid, truck: eldLink ? eldLink.truckFor(truckUnit) : null,
 						window: loadPayDays.tripWindowOf(window, {
 							pickup: moneySheetDate(pickupDateCol ? r[pickupDateCol] : null),
 							assigned: jtDateCol && r[jtDateCol] ? moneySheetDate(r[jtDateCol]) : null,
@@ -68351,9 +68646,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					// isn't zeroed; a covered-but-parked window stays 0. The rule is
 					// lib/load-pay-days.js paidDaysForLoad(), shared with the ledger and
 					// the weekly invoice, the pre-dispatch and trip rules included.
-					const { covered, days: eldCounted, basis } = loadPayDays.paidDaysForLoad({
-						windowDays, eld, load: { loadId: lid, vid, settleMonth: assignedMonthKey || "" }, preDispatch, tripDays: trip,
-					});
+					const { covered, days: eldCounted, basis } = eldLink
+						? eldLink.paidDaysForLoad({ windowDays, unit: truckUnit, eldByVid, load: { loadId: lid, settleMonth: assignedMonthKey || "" }, preDispatch, tripDays: trip })
+						: loadPayDays.paidDaysForLoad({
+							windowDays, eld, load: { loadId: lid, vid, settleMonth: assignedMonthKey || "" }, preDispatch, tripDays: trip,
+						});
 					// Drop admin-removed days last. The ELD/estimated source flag
 					// still reflects the underlying day source — an override is a
 					// manual adjustment, not a change to how the day was originally
@@ -75487,6 +75784,26 @@ function iftaDefaultStartIso(now = new Date()) {
 	return new Date(appTime.businessWallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
 }
 
+// IFTA's points under the forward-only link rule: each truck's own fixes in [startMs, endMs], from the device it held at
+// each instant (eldPayLink()), in time order per truck, each with its device so no hop joins two devices.
+function iftaTruckPoints(link, truckIds, startMs, endMs) {
+	const stmt = db.prepare(
+		`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
+		 WHERE routemate_vehicle_id = ? AND location_date_ms >= ? AND location_date_ms <= ? AND dropped_reason = ''
+		 ORDER BY location_date_ms ASC`
+	);
+	const out = [];
+	for (const id of truckIds) {
+		for (const run of link.resolver.truckRuns(id, startMs, endMs + 1)) {
+			const lo = Math.max(run.fromMs, startMs);
+			const hi = Math.min(run.toMs - 1, endMs);
+			if (!run.vid || hi < lo) continue;
+			for (const p of stmt.all(run.vid, lo, hi)) out.push({ ...p, truck_id: id, vid: run.vid });
+		}
+	}
+	return out;
+}
+
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
@@ -75499,16 +75816,22 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 		const MAX_HOP_MILES = 50;
 		const M_TO_MI = 0.000621371;
 
-		const eldRows = db.prepare(
-			`SELECT rt.latitude, rt.longitude, rt.location_date_ms,
-			        t.id AS truck_id, t.unit_number
-			 FROM routemate_telemetry rt
-			 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
-			 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
-			   AND t.routemate_vehicle_id != ''
-			   AND rt.dropped_reason = ''
-			 ORDER BY t.id, rt.location_date_ms ASC`
-		).all(startMs, endMs);
+		// Under the forward-only link rule, every truck's own points through the device history (iftaTruckPoints()).
+		const iftaLink = eldPayLink();
+		const iftaTrucks = iftaLink ? db.prepare("SELECT id, unit_number FROM trucks ORDER BY id").all() : null;
+		const iftaUnits = iftaLink ? new Map(iftaTrucks.map((t) => [t.id, t.unit_number])) : null;
+		const eldRows = iftaLink
+			? iftaTruckPoints(iftaLink, iftaTrucks.map((t) => t.id), startMs, endMs).map((p) => ({ ...p, unit_number: iftaUnits.get(p.truck_id) }))
+			: db.prepare(
+				`SELECT rt.latitude, rt.longitude, rt.location_date_ms,
+				        t.id AS truck_id, t.unit_number
+				 FROM routemate_telemetry rt
+				 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
+				 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
+				   AND t.routemate_vehicle_id != ''
+				   AND rt.dropped_reason = ''
+				 ORDER BY t.id, rt.location_date_ms ASC`
+			).all(startMs, endMs);
 
 		let driverAt = () => null;
 		if (eldRows.length > 0) {
@@ -75568,6 +75891,8 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				const prev = pts[i - 1];
 				const curr = pts[i];
 				if (curr.location_date_ms - prev.location_date_ms > GAP_MS) continue;
+				// Two devices' points never make a hop (a swap mid-window).
+				if (curr.vid !== prev.vid) continue;
 				const distMeters = geolib.getDistance(
 					{ latitude: prev.latitude, longitude: prev.longitude },
 					{ latitude: curr.latitude, longitude: curr.longitude }
@@ -75629,7 +75954,9 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 		const truck = db.prepare(
 			"SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE id = ?"
 		).get(truckId);
-		if (!truck || !truck.routemate_vehicle_id) {
+		// Under the forward-only link rule a truck unlinked now is served for a window it held a device in.
+		const iftaLink = truck ? eldPayLink() : null;
+		if (!truck || (!iftaLink && !truck.routemate_vehicle_id)) {
 			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
 		}
 
@@ -75637,19 +75964,24 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 		const endDate = req.query.end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
+		if (iftaLink && !iftaLink.resolver.truckRuns(truckId, startMs, endMs + 1).some((run) => run.vid)) {
+			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
+		}
 
 		const GAP_MS = 30 * 60 * 1000;
 		const MAX_HOP_MILES = 50;
 		const M_TO_MI = 0.000621371;
 
-		const rows = db.prepare(
-			`SELECT latitude, longitude, location_date_ms
-			 FROM routemate_telemetry
-			 WHERE routemate_vehicle_id = ?
-			   AND location_date_ms >= ? AND location_date_ms <= ?
-			   AND dropped_reason = ''
-			 ORDER BY location_date_ms ASC`
-		).all(truck.routemate_vehicle_id, startMs, endMs);
+		const rows = iftaLink
+			? iftaTruckPoints(iftaLink, [truckId], startMs, endMs)
+			: db.prepare(
+				`SELECT latitude, longitude, location_date_ms
+				 FROM routemate_telemetry
+				 WHERE routemate_vehicle_id = ?
+				   AND location_date_ms >= ? AND location_date_ms <= ?
+				   AND dropped_reason = ''
+				 ORDER BY location_date_ms ASC`
+			).all(truck.routemate_vehicle_id, startMs, endMs);
 
 		const days = {};
 		let totalMiles = 0;
@@ -75657,6 +75989,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			const prev = rows[i - 1];
 			const curr = rows[i];
 			if (curr.location_date_ms - prev.location_date_ms > GAP_MS) continue;
+			if (curr.vid !== prev.vid) continue;
 			const distMeters = geolib.getDistance(
 				{ latitude: prev.latitude, longitude: prev.longitude },
 				{ latitude: curr.latitude, longitude: curr.longitude }

@@ -109,8 +109,10 @@ const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN 
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"TRUCK_CHARGE_APP_DAY_RULE",
-	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
-const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
+	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory",
+	// The forward-only ELD link rule the ledger's facts read (lib/eld-link-forward.js), as shipped: off here.
+	"ELD_DEVICE_HISTORY_START_KEY", "ELD_APP_DAY_ENABLED", "ELD_LINK_FORWARD_SETTING"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch", "eldLinkForwardDecided", "eldLinkForwardReportFromMs"];
 const FNS = [
 	"requireRole",
 	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "getInvestorDriverSet", "assignDriverToTruck",
@@ -129,6 +131,7 @@ const FNS = [
 	"closingFingerprint", "closedMonthFreezePlan", "financialsReportQuery", "buildFinancialsReport", "pendingReceiptsInPeriod", "getLoadMilesIndex", "buildHaulTruckResolver", "auditText", "scrubPurgeMarker", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 	// What the payout rules read once PAYOUT_RULES_V2 is on (§10).
 	"futureAwarePeriodExpr", "receiptSubmittedDaySql", "stampFutureReceipts", "loadPayRateIndex", "currentPayRates", "recordPayRateChanges",
+	"eldPayScope", "eldPayLink", "eldLinkForwardRule", "decideEldLinkForward", "buildEldDeviceResolver", "eldDeviceHistoryStartMs",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
@@ -176,6 +179,8 @@ const DDL = [
 	tableDdl("pay_rate_history"),
 	// The migrated shape (the CREATE is the pre-owner one; a migration rebuilds it).
 	"CREATE TABLE investor_config (owner_id INTEGER DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id, key))",
+	// What the forward-only ELD link rule reads when it decides (nothing recorded: it stays off).
+	tableDdl("server_state"), tableDdl("eld_device_assignments"),
 ];
 
 // ── the clock: `new Date()` and Date.now() read NOW_MS ───────────────────────
@@ -234,6 +239,7 @@ function buildWorld({ env = {}, sheet = baseSheet() } = {}) {
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, financialsOverview, Date: Clock,
+		eldLinkForward: require("../lib/eld-link-forward.js"), eldMiles: require("../lib/eld-miles.js"),
 		app: { post: register("POST"), put: register("PUT"), get: register("GET") },
 		// expenseFrom() reads lib/personal-expense.js once a Personal line exists.
 		require: (p) => require(String(p).startsWith("./") ? path.join(ROOT, p) : p),

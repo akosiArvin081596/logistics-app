@@ -121,7 +121,13 @@ function createTable(name) {
 
 const DELETE_SRC = routeSource("delete", "/api/trucks/:id");
 const GUARD = liftFn("truckDeleteLockBlockers");
-const HELPERS_SRC = ["lockedPeriodsDesc", "truckFeeLockedRows"].map((n) => liftFn(n)).join("\n");
+// The guard's ELD leg reads the forward-only link rule, here as a boot with its switch off leaves it (decided by the
+// shipped lib), so the leg reads nothing (scripts/test-eld-link-forward.js runs it on).
+const HELPERS_SRC = ["lockedPeriodsDesc", "truckFeeLockedRows", "eldLinkHistoryHeld"].map((n) => liftFn(n)).join("\n");
+const eldLinkForwardLib = require(path.join(ROOT, "lib", "eld-link-forward.js"));
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+	setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 const RESPONSES_SRC = ["periodLabel", "periodBlockedResponse", "periodLockUnreadableResponse"].map((n) => liftFn(n)).join("\n");
 const auditText = (v, max) => String(v == null ? "" : v).slice(0, max);
 // The real formatter, so the stand-in below records the detail the audit row
@@ -180,10 +186,10 @@ function world(opts = {}) {
 function deleteRoute(w, rec, guardSrc = GUARD) {
 	const guard = new Function(
 		"db", "periodLocksReadable", "investorPayoutBasis", "truckFixedCostLockedMonths", "truckMonthlyFixed",
-		"normalizeDriverName", "getDriverPayStructures", "driverPayLockedMonths", "resolveDailyRate", "investorsHoldingDriver",
+		"normalizeDriverName", "getDriverPayStructures", "driverPayLockedMonths", "resolveDailyRate", "investorsHoldingDriver", "eldLinkForwardRule",
 		`${HELPERS_SRC}\n${guardSrc}\nreturn truckDeleteLockBlockers;`,
 	)(w.db, () => w.readable, { truckInFleet: () => true }, () => [], () => ({ total: 0 }),
-		(s) => String(s || "").trim().toLowerCase(), () => ({}), () => [], () => 0, () => new Set());
+		(s) => String(s || "").trim().toLowerCase(), () => ({}), () => [], () => 0, () => new Set(), () => ELD_LINK_FORWARD_OFF);
 	const AUDITED_UPSTREAM = Symbol("test");
 	const recordPeriodRefusal = (audit, code, periods, subjectFallback) => {
 		const a = audit || {};

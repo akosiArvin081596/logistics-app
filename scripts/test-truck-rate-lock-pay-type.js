@@ -137,9 +137,16 @@ const cdHarness = [
   extractFunction("driverRateOnlyStartRecord"),
   extractFunction("driverRateOnlyApplies"),
   extractFunction("resolveDailyRate"),
+  extractFunction("eldLinkHistoryHeld"),
   extractFunction("truckCreateLockBlockers"),
   extractFunction("truckDeleteLockBlockers"),
 ].join("\n") + "\nreturn { truckCreateLockBlockers, truckDeleteLockBlockers };";
+// The delete guard's ELD leg reads the forward-only link rule, here as a boot with its switch off leaves it (decided by
+// the shipped lib), so the leg reads nothing (scripts/test-eld-link-forward.js runs it on).
+const eldLinkForwardLib = require(path.join(__dirname, "..", "lib", "eld-link-forward.js"));
+const ELD_LINK_FORWARD_OFF = eldLinkForwardLib.decide({
+  setting: eldLinkForwardLib.settingFromEnv({}), recordedFromMs: null, historyStartMs: null, startMs: 0, rowsBetween: () => [], changedAfter: () => 0,
+});
 S.truckRates = {};  // normalized driver → the daily rates of the trucks naming them
 const cdStubs = {
   ...stubs,
@@ -148,6 +155,7 @@ const cdStubs = {
   // No investor owns these trucks, so the driver-set checks find nothing to move.
   investorsHoldingDriver: () => new Set(),
   db: { prepare: () => ({ all: () => [] }) },
+  eldLinkForwardRule: () => ELD_LINK_FORWARD_OFF,
 };
 const cdNames = Object.keys(cdStubs);
 const CD = new Function(...cdNames, cdHarness)(...cdNames.map((n) => cdStubs[n]));

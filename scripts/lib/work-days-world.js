@@ -318,6 +318,8 @@ function startWorld(opts = {}) {
 	const world = {
 		db, L, rows: rows.map((r) => ({ ...r })), clock: { ms: now }, routes: {}, warnings: [], rendered: [], sheetWrites: [],
 		renderHook: null, fsFail: { rename: false },
+		// What the lifted code audits (logAudit()'s action and entity), for a case that checks a refusal's audit row.
+		audits: [],
 	};
 	world.addStatus = (list) => {
 		const st = db.prepare("INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, changed_at) VALUES (?, '', ?, ?, ?, ?)");
@@ -368,7 +370,7 @@ function startWorld(opts = {}) {
 		requireAuth: pass(),
 		refuseCrossOrigin: pass(),
 		notifyChange: () => {},
-		logAudit: () => {},
+		logAudit: (req, action, entity, entityId, details) => { world.audits.push({ action, entity, entityId: String(entityId), details: String(details || "") }); },
 		getJobTrackingCached: null,
 		// A write is recorded in world.sheetWrites, never applied to the rows.
 		getSheets: async () => ({ spreadsheets: { values: {
