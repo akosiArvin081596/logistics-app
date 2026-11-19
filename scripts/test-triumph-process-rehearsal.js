@@ -17,6 +17,13 @@
 //      TRIUMPH_BATCH_DEDUPE_ENABLED and TRIUMPH_BATCH_MAX_BYTES from the settings file and
 //      nothing else, so its mode stays off; the run counts the copies left out, when it stops
 //      too; a lowered limit stops it; the process's own environment is never read
+//   §6 way 1's photo re-compress: TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED from the settings file
+//      reaches the build and the run prints the step and the bytes, or that it stopped at the
+//      floor; set only in the process's environment it is off; the job still gets the batch's
+//      settings alone, so its mode stays off
+//   §7 Part A's look (scripts/triumph-batch-recompress-look.js): on the practice run's own build,
+//      whatever the switch says, the batch as built today and the step it would fit at, or the
+//      floor, in counts only; it writes nothing and keeps nothing
 //
 // Made-up data only (load 123456701, made-up.agent@chrobinson.com).
 //   node scripts/test-triumph-process-rehearsal.js      # exits 1 on any failure
@@ -85,12 +92,13 @@ async function renderStandIn(html) {
 
 // The made-up world: a database under the temp folder (a copy, as the script allows), the uploads
 // beside it, the settings file, the sheet and the stand-in clients. `settings`: more lines for the
-// settings file; `podCopies`: the POD stored that many more times, byte for byte.
-function world({ ratecon = RATECON_TEXT, settings: more = [], podCopies = 0 } = {}) {
+// settings file; `podCopies`: the POD stored that many more times, byte for byte; `podPdf`: the
+// POD's own bytes in place of a page of text.
+function world({ ratecon = RATECON_TEXT, settings: more = [], podCopies = 0, podPdf = null } = {}) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "triumph-practice-test-"));
 	fs.mkdirSync(path.join(dir, "uploads"));
 	fs.writeFileSync(path.join(dir, "uploads", "ratecon-made-up.pdf"), textPdf(ratecon, { mode: "literal" }));
-	const pod = textPdf(`PROOF OF DELIVERY (MADE UP) Load ${LOAD}`, { mode: "literal" });
+	const pod = podPdf || textPdf(`PROOF OF DELIVERY (MADE UP) Load ${LOAD}`, { mode: "literal" });
 	fs.writeFileSync(path.join(dir, "uploads", "pod-made-up.pdf"), pod);
 	for (let i = 1; i <= podCopies; i++) fs.writeFileSync(path.join(dir, "uploads", `pod-made-up-again-${i}.pdf`), pod);
 	const settings = path.join(dir, "practice-settings.conf");
@@ -302,6 +310,110 @@ const runIt = (opts) => rehearsal.run(opts).catch((e) => ({ code: "threw", lines
 		eq(made, [{ env: { TRIUMPH_BATCH_DEDUPE_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: "900000" }, mode: "off" }],
 			"§5 FAILS ON THE OLD CODE (M1): the job gets only the batch's two settings from the file, so its submit mode reads off whatever the file says");
 		eq([lr.code, lr.lines[lr.lines.length - 1], counts(lr)], [0, "verdict: it would go", ["identical documents sent once: 1"]], "§5 FAILS ON THE OLD CODE: ...and the run goes on to its verdict, counting the copy left out");
+	}
+
+	// A POD of one made-up camera photo (scripts/lib/made-up-jpeg.js): about 388 KB, and the rest of
+	// the batch a few KB. Over a limit of its photo's bytes less 1,000 by a few KB, it fits at 70;
+	// over a limit of 60,000 by less than the photo's bytes, it is still over at 50.
+	const jpegs = require(path.join(ROOT, "scripts", "lib", "made-up-jpeg.js"));
+	const PHOTO = jpegs.jpeg({ seed: 1 });
+	const PHOTO_POD = await jpegs.imagePdf([{ text: [`PROOF OF DELIVERY (MADE UP) Load ${LOAD}`], images: [{ bytes: PHOTO, width: 820, height: 620 }] }]);
+	const FITS = `TRIUMPH_BATCH_MAX_BYTES=${PHOTO.length - 1000}`;
+	const FLOOR = "TRIUMPH_BATCH_MAX_BYTES=60000";
+	const SWITCH = "TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED=true";
+	const photoLines = (r) => r.lines.filter((l) => /page images?/.test(l));
+
+	section("§6 way 1's photo re-compress in the practice run");
+	{
+		const w = world({ podPdf: PHOTO_POD, settings: [SWITCH, FITS] });
+		const before = w.hashOf();
+		const r = await runIt({ argv: w.argv(), deps: w.deps });
+		eq([r.code, r.lines[r.lines.length - 1]], [0, "verdict: it would go"], "§6 FAILS ON THE OLD CODE: the switch in the settings file reaches the practice run's build: over the lowered limit, the photo POD fits once re-compressed");
+		const said = photoLines(r);
+		ok(said.length === 1 && new RegExp(`^page images re-compressed: 1 at quality 70 \\(${PHOTO_POD.length} → \\d+ bytes\\)$`).test(said[0]) && Number(/→ (\d+) bytes/.exec(said[0])[1]) < PHOTO_POD.length,
+			`§6 FAILS ON THE OLD CODE: ...and the run prints how many page images, at what quality, and the POD's bytes before and after (${said.join(" | ")})`);
+		eq([w.hashOf(), w.calls.otherFetch], [before, 0], "§6 ...writing no row and reaching nothing else");
+
+		const f = world({ podPdf: PHOTO_POD, settings: [SWITCH, FLOOR] });
+		const fr = await runIt({ argv: f.argv(), deps: f.deps });
+		eq([fr.code, fr.lines[fr.lines.length - 1]], [2, "the build: would stop at build (BATCH_TOO_LARGE); page images: stopped at the floor"],
+			"§6 FAILS ON THE OLD CODE: still over at 50: the stop line says the floor was reached");
+
+		// Set only in this process's environment, and not in the settings file: off.
+		const p = world({ podPdf: PHOTO_POD, settings: [FITS] });
+		const had = Object.hasOwn(process.env, "TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED");
+		const was = process.env.TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED;
+		process.env.TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED = "true";
+		let pr;
+		try {
+			pr = await runIt({ argv: p.argv(), deps: p.deps });
+		} finally {
+			if (had) process.env.TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED = was;
+			else delete process.env.TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED;
+		}
+		eq([pr.code, pr.lines[pr.lines.length - 1], photoLines(pr)], [2, "the build: would stop at build (BATCH_TOO_LARGE)", []],
+			"§6 the switch set only in this process's environment: off, the stop as it always was (mutant: the switch read from the process's environment)");
+
+		// The job gets the batch's three settings from the file and nothing else: its mode reads off.
+		const live = world({ podPdf: PHOTO_POD, settings: [SWITCH, FITS, "TRIUMPH_BATCH_DEDUPE_ENABLED=true", "TRIUMPH_SUBMIT_ENABLED=true", "TRIUMPH_SUBMIT_DRY_RUN=false", "TRIUMPH_LIVE_CONFIRMED_ON=2026-11-05"] });
+		const jobLib = require(path.join(ROOT, "lib", "triumph-job.js"));
+		const create = jobLib.create;
+		const made = [];
+		jobLib.create = (deps) => {
+			const job = create(deps);
+			made.push({ env: { ...deps.env }, mode: job.mode });
+			return job;
+		};
+		let lr;
+		try {
+			lr = await runIt({ argv: live.argv(), deps: live.deps });
+		} finally {
+			jobLib.create = create;
+		}
+		eq(made, [{ env: { TRIUMPH_BATCH_DEDUPE_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: String(PHOTO.length - 1000), TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true" }, mode: "off" }],
+			"§6 FAILS ON THE OLD CODE: the job gets the batch's three settings from the file and nothing else, so its submit mode reads off whatever the file says");
+		eq([lr.code, lr.lines[lr.lines.length - 1], photoLines(lr).length], [0, "verdict: it would go", 1], "§6 FAILS ON THE OLD CODE: ...and the run goes on to its verdict, the photo re-compressed");
+	}
+
+	section("§7 Part A's look (scripts/triumph-batch-recompress-look.js)");
+	{
+		const LOOK = path.join(ROOT, "scripts", "triumph-batch-recompress-look.js");
+		const look = fs.existsSync(LOOK) ? require(LOOK) : { run: async () => { throw new Error("scripts/triumph-batch-recompress-look.js is missing: Part A has no tool"); } };
+		const lookIt = (opts) => look.run(opts).catch((e) => ({ code: "threw", lines: [String(e && e.message)] }));
+		const line = (r, head) => r.lines.find((l) => l.startsWith(head)) || "";
+		// The switch is not in the settings file: Part A measures whatever it says.
+		const w = world({ podPdf: PHOTO_POD, settings: [FITS] });
+		const before = w.hashOf();
+		const filesBefore = w.files();
+		const tmpBefore = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith("triumph-practice-")).length;
+		const r = await lookIt({ argv: w.argv(), deps: w.deps });
+		eq(r.code, 0, `§7 FAILS ON THE OLD CODE (L4): Part A measures a load through the practice run's own build (${r.lines.join(" | ").slice(0, 300)})`);
+		ok(/^the base: the job's own build in the practice run, measured by the batch builder itself: the batch as built today with the switch off, then each step merged again with it on$/.test(line(r, "the base:")),
+			"§7 FAILS ON THE OLD CODE (N4): it says its source: the real parts the job's build handed the builder, merged by the builder at each step, never an estimate");
+		ok(/^the batch as built today: \d+ bytes, over the limit of \d+ by \d+ bytes$/.test(line(r, "the batch as built today:")), "§7 FAILS ON THE OLD CODE: ...the batch as built today, in bytes, against the limit");
+		eq(line(r, "the photos the steps would take:"), `the photos the steps would take: 1 of 1 page image on the BOL and POD pages (${PHOTO.length} bytes)`, "§7 FAILS ON THE OLD CODE: ...how many photos the whitelist takes, and their bytes");
+		ok(/^re-compressed: fits at quality 70: \d+ → \d+ bytes, within the limit \(\d+ to spare\); 1 page image re-compressed, 0 left; the BOL and POD parts \d+ → \d+ bytes$/.test(line(r, "re-compressed:")),
+			`§7 FAILS ON THE OLD CODE: ...and the step it would fit at, with the bytes before and after (${line(r, "re-compressed:")})`);
+		eq(line(r, "the practice run:"), "the practice run: the build: would stop at build (BATCH_TOO_LARGE) (code 2)", "§7 FAILS ON THE OLD CODE: ...beside the practice run's own verdict, the switch off in its settings file");
+		const said = r.lines.join("\n");
+		eq([SECRETS.filter((s) => said.includes(s)), /\$\d/.test(said), /@/.test(said), said.includes(LOAD)], [[], false, false, false], "§7 counts only: no amount, address, name, invoice number or load number");
+		eq([w.hashOf(), w.files(), fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith("triumph-practice-")).length], [before, filesBefore, tmpBefore], "§7 ...no row written, no file kept beside the database or in the temp folder");
+
+		const f = world({ podPdf: PHOTO_POD, settings: [FLOOR] });
+		const fr = await lookIt({ argv: f.argv(), deps: f.deps });
+		ok(fr.code === 0 && /^re-compressed: stops at the floor \(quality 50\): \d+ → \d+ bytes, over the limit by \d+ bytes; 1 page image re-compressed, 0 left; the BOL and POD parts \d+ → \d+ bytes$/.test(line(fr, "re-compressed:")),
+			`§7 FAILS ON THE OLD CODE: still over at 50: "stops at the floor", with the floor's bytes (${line(fr, "re-compressed:")})`);
+		const t = world({ settings: ["TRIUMPH_BATCH_MAX_BYTES=2000"] });
+		const tr = await lookIt({ argv: t.argv(), deps: t.deps });
+		ok(tr.code === 0 && line(tr, "the photos the steps would take:") === "the photos the steps would take: 0 of 0 page images on the BOL and POD pages (0 bytes)"
+			&& line(tr, "re-compressed:") === "re-compressed: not tried: the batch is over by at least its photos' bytes, so no step can fit", "§7 FAILS ON THE OLD CODE: a POD of text over the limit: no photo, so no step is tried, and it says so");
+		const u = world({ podPdf: PHOTO_POD });
+		const ur = await lookIt({ argv: u.argv(), deps: u.deps });
+		ok(ur.code === 0 && /^the batch as built today: \d+ bytes, within the limit of \d+ \(\d+ to spare\)$/.test(line(ur, "the batch as built today:")) && line(ur, "re-compressed:") === "re-compressed: not needed: the batch is within the limit as built today",
+			"§7 FAILS ON THE OLD CODE: a batch within the limit: nothing to re-compress, and it says so");
+		const a = world({ ratecon: `${RATECON_TEXT} Advanced Total: $500.00 New Total: $1,650.00` });
+		const ar = await lookIt({ argv: a.argv(), deps: a.deps });
+		eq([ar.code, line(ar, "not measured:")], [2, "not measured: the build stopped before the batch was put together (ADVANCE_ON_RATECON)"], "§7 FAILS ON THE OLD CODE: a load the build stops first: not measured, with the code");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

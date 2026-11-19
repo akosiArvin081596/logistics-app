@@ -24,6 +24,13 @@
 //      kept and each copy left out recorded; a file a byte apart, a lumper, scale or pallet
 //      row and the rate con always go; off, every row goes as before; the missing and
 //      unreadable checks and the size limit answer as they did
+//   §11 way 1 (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED): on, a batch over the limit re-compresses
+//      the whitelisted JPEG photos on its BOL and POD pages at the same pixel size, 70, 60, then 50,
+//      and takes the first step that fits, with its record; at the floor it stops at
+//      BATCH_TOO_LARGE with the floor's record; every other image, part and page goes byte for
+//      byte; a copy that isn't smaller, a child error or a child past its deadline leaves its
+//      image; the skip rule, the 40-photo cap and the 5-minute budget stop it as today; off, or
+//      under the limit, the batch is byte for byte the base's (221ff323)
 //
 // The invoice page goes through a stand-in renderer that writes a PDF of the page's
 // words the way Chromium writes one (scripts/lib/made-up-pdf.js): no browser here. Made-up
@@ -914,8 +921,250 @@ async function s10() {
 	eq((lowered.dropped || []).length, 1, "§10 FAILS ON THE OLD CODE: ...and the stop says how many copies it left out, for the practice run to print");
 }
 
+// ---------------------------------------------------------------- §11
+// The made-up photos are written byte by byte (scripts/lib/made-up-jpeg.js), so the fit cases prove
+// the mechanism only: how far jimp's writer shrinks ScanKit's own pages is Part A's to measure (M1).
+const recompressLib = optional(path.join(ROOT, "lib", "triumph-batch-recompress.js"));
+const jpegs = require(path.join(ROOT, "scripts", "lib", "made-up-jpeg.js"));
+// The batch with the clock held still, so the merged PDF's own dates are the same on every run.
+async function frozen(fn) {
+	const Real = Date;
+	const FIXED = Real.parse("2026-11-02T15:04:05Z");
+	global.Date = class extends Real {
+		constructor(...a) { super(...(a.length ? a : [FIXED])); }
+		static now() { return FIXED; }
+	};
+	try {
+		return await fn();
+	} finally {
+		global.Date = Real;
+	}
+}
+// The base's (221ff323) batch and stop for §11's two camera photos, with the switch off: the PDF's and
+// the CSV's sha256 and the batch's bytes, and the stop over a limit 1,000 bytes under it.
+const GOLDEN_OFF = Object.freeze({
+	batch: ["c716edf0cc60f8b52308efa3b0809da06537a14823a265d798eb97337da4e5e1", "e07c21ed853682b95279dfcc96ef1f7eaaf9c6f2d8a1b20b4683a68ec3a2c94e", 786290],
+	stop: JSON.stringify({ ok: false, code: "BATCH_TOO_LARGE", pdfBytes: 786189, csvBytes: 101, maxBytes: 785290 }),
+});
+async function s11() {
+	section("§11 way 1: a batch over the limit re-compresses its POD and BOL photos (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED)");
+	const ON = Object.freeze({ recompress: true });
+	const W = 820;
+	const H = 620;
+	const PHOTO_A = jpegs.jpeg({ seed: 1 });
+	const PHOTO_B = jpegs.jpeg({ seed: 2 });
+	// A near-blank page: half a megapixel in few bytes, which a step would still shrink (N1).
+	const blank = (seed, over = {}) => jpegs.jpeg({ blank: true, quality: 90, seed, ...over });
+	const photo = (bytes, over = {}) => ({ bytes, width: W, height: H, ...over });
+	const page = (images, text = ["PROOF OF DELIVERY (MADE UP)"]) => ({ text, images });
+	const row = async (id, pages, type = "POD") => ({ id, type, uploaded_at: `2026-11-02 1${id}:00:00`, file_name: `made-up-${id}.pdf`, buffer: await jpegs.imagePdf(pages) });
+	// Text PDFs written plainly, so no byte of the batch below depends on zlib.
+	const plainArgs = { invoicePdf: textPdf(INVOICE_TEXT, { compress: false }), rateCon: { buffer: textPdf(RATECON_TEXT, { compress: false }), source: "documents" } };
+	const build = (over) => batchLib.buildBatch(args({ ...plainArgs, ...over })).catch((e) => ({ ok: false, code: "THREW", error: String(e && e.message) }));
+	const total = (b) => (b.ok ? b.batchBytes : b.pdfBytes + b.csvBytes);
+	const imagesOf = async (b) => (b.ok ? jpegs.imagesIn(b.pdf) : []);
+	const sameBytes = (found, bytes) => found.some((f) => f.bytes.equals(bytes));
+	const recordOf = (b, kind = "pod") => (b.ok ? ((b.parts || []).find((p) => p.kind === kind) || {}).recompressed : undefined);
+	const lib = recompressLib || {};
+
+	// These need the new behaviour or its record, so each fails on the old code.
+	const two = [await row(1, [page([photo(PHOTO_A), photo(PHOTO_B)])])];
+	const base = await build({ documents: two });
+	ok(base.ok && base.batchBytes < rules.BATCH_MAX_BYTES, "§11 (fixture) a made-up POD of two camera photos (820 x 620, quality 95): as built today, under Triumph's own limit");
+	const T0 = total(base);
+	const uploaded = await jpegs.imagesIn(two[0].buffer);
+	const photoBytes = uploaded.reduce((s, im) => s + im.bytes.length, 0);
+	const fit = await build({ ...ON, documents: two, maxBytes: T0 - 1000 });
+	eq([fit.ok, fit.code], [true, undefined], "§11 FAILS ON THE OLD CODE: a batch over the limit only by its photos fits at a step (the mechanism only; Part A measures the real pages, M1)");
+	const rec = recordOf(fit);
+	eq(rec && [rec.quality, rec.images, rec.left, rec.bytesBefore, rec.sourceSha256], [70, 2, 0, two[0].buffer.length, sha256(two[0].buffer)],
+		"§11 FAILS ON THE OLD CODE: ...at the first step, 70: the POD's record names the step, its two photos, none left, and the part's own bytes and hash as uploaded");
+	const sentPod = fit.ok ? fit.parts.find((p) => p.kind === "pod") : null;
+	ok(rec && sentPod && rec.bytesAfter === sentPod.bytes && sentPod.sha256 !== rec.sourceSha256 && rec.bytesAfter < rec.bytesBefore, "§11 FAILS ON THE OLD CODE: ...the part sent: its own bytes and hash, smaller than the upload");
+	ok(fit.ok && fit.batchBytes <= T0 - 1000 && fit.pdf.length + fit.csv.length === fit.batchBytes, "§11 FAILS ON THE OLD CODE: ...within the lowered limit");
+	const fitImages = (await imagesOf(fit)).filter((f) => f.pages.includes(2));
+	for (const im of uploaded) {
+		const now = fitImages.find((f) => f.name === im.name);
+		const frame = now ? jpegs.frameOf(now.bytes) : null;
+		eq(now && [now.width, now.height, frame && frame.marker, frame && frame.width, frame && frame.height, frame && frame.components], [W, H, 0xc0, W, H, 3],
+			`§11 FAILS ON THE OLD CODE: photo ${uploaded.indexOf(im) + 1}: the same pixel size, in its dictionary and in the new baseline JPEG's frame`);
+		ok(now && now.bytes.length < im.bytes.length, `§11 FAILS ON THE OLD CODE: photo ${uploaded.indexOf(im) + 1}: a smaller stream`);
+	}
+	eq(fit.ok && fit.parts.map((p) => [p.kind, p.pages]), base.parts.map((p) => [p.kind, p.pages]), "§11 FAILS ON THE OLD CODE: the page count of each part is unchanged (L2)");
+	eq(fit.ok && fit.parts.filter((p) => p.kind !== "pod").map((p) => [p.kind, p.sha256, "recompressed" in p]), base.parts.filter((p) => p.kind !== "pod").map((p) => [p.kind, p.sha256, false]),
+		"§11 FAILS ON THE OLD CODE: ...and the invoice and the rate con go as they came, with no record");
+
+	// At the floor and still over: over by less than the photos' bytes, so the steps run.
+	const floorLimit = T0 - photoBytes + 1000;
+	const floor = await build({ ...ON, documents: two, maxBytes: floorLimit });
+	eq([floor.ok, floor.code, floor.floorReached], [false, "BATCH_TOO_LARGE", true], "§11 FAILS ON THE OLD CODE: a batch still over at 50, the floor, stops at BATCH_TOO_LARGE and says the floor was reached");
+	eq((floor.recompressed || []).map((r) => [r.kind, r.quality, r.images, r.left, r.bytesBefore, r.sourceSha256]), [["pod", 50, 2, 0, two[0].buffer.length, sha256(two[0].buffer)]],
+		"§11 FAILS ON THE OLD CODE: ...with the floor's record: the POD's two photos at 50");
+	ok(floor.pdfBytes + floor.csvBytes > floorLimit && floor.pdfBytes < base.pdf.length, "§11 FAILS ON THE OLD CODE: ...its sizes are the floor's merge, still over the limit");
+	eq(Object.keys(floor).filter((k) => ["pdf", "csv", "pdfName", "csvName", "parts"].includes(k)), [], "§11 ...and the stop holds no part of a batch");
+
+	// /DeviceGray goes under /DeviceRGB (P3).
+	const GRAY = jpegs.jpeg({ components: 1, seed: 3 });
+	const gray = [await row(1, [page([photo(GRAY, { colorSpace: "DeviceGray" })])])];
+	const g0 = total(await build({ documents: gray }));
+	const g = await build({ ...ON, documents: gray, maxBytes: g0 - 1000 });
+	const gi = (await imagesOf(g)).find((f) => f.pages.includes(2));
+	const gf = gi ? jpegs.frameOf(gi.bytes) : null;
+	eq([g.ok, gi && gi.colorSpace, gf && gf.components, gi && gi.width, gi && gi.height, gi && gi.bytes.length < GRAY.length], [true, "DeviceRGB", 3, W, H, true],
+		"§11 FAILS ON THE OLD CODE: a /DeviceGray JPEG is re-compressed under /DeviceRGB: jimp writes three channels, which draw the same grey (P3)");
+
+	// One image drawn on two pages.
+	const shared = [await row(1, [page([photo(PHOTO_A, { share: "one" })]), page([photo(PHOTO_A, { share: "one" })], ["PROOF OF DELIVERY, PAGE 2 (MADE UP)"])])];
+	const s0 = await build({ documents: shared });
+	const s = await build({ ...ON, documents: shared, maxBytes: total(s0) - 1000 });
+	const onPod = (await imagesOf(s)).filter((f) => f.pages.some((p) => p >= 2));
+	eq([s.ok, onPod.length, onPod[0] && onPod[0].pages, recordOf(s) && recordOf(s).images], [true, 1, [2, 3], 1],
+		"§11 FAILS ON THE OLD CODE: an image drawn on two pages is replaced once: one object on both pages, counted once");
+	ok(onPod[0] && onPod[0].bytes.length < PHOTO_A.length, "§11 FAILS ON THE OLD CODE: ...and both pages draw the smaller copy");
+	eq(s.ok && s.parts.map((p) => p.pages), s0.parts.map((p) => p.pages), "§11 FAILS ON THE OLD CODE: ...the POD still two pages (L2)");
+
+	// The parts case (L2): a whitelisted JPEG in the invoice, the rate con and a lumper receipt.
+	const IN_INVOICE = blank(41);
+	const IN_RATECON = blank(42);
+	const IN_LUMPER = blank(43);
+	const invoicePdf = await jpegs.imagePdf([page([photo(IN_INVOICE)], [INVOICE_TEXT])]);
+	const rateConPdf = await jpegs.imagePdf([page([photo(IN_RATECON)], ["RATE CON (MADE UP)", `Load Number ${LOAD}`, `Bill to ${DEBTOR}`, "Total $2,150.00"])]);
+	const partsDocs = [await row(1, [page([photo(PHOTO_A)])]), await row(7, [page([photo(IN_LUMPER)], ["LUMPER RECEIPT (MADE UP)"])], "Lumper")];
+	const partsArgs = { invoicePdf, rateCon: { buffer: rateConPdf, source: "documents" }, documents: partsDocs };
+	const p0 = await build(partsArgs);
+	ok(p0.ok, "§11 (fixture) the invoice, the rate con, a POD and a lumper receipt, each holding a JPEG, build today");
+	const p = await build({ ...ON, ...partsArgs, maxBytes: total(p0) - 1000 });
+	eq(p.ok && p.parts.map((x) => [x.kind, x.sha256 === (p0.parts.find((y) => y.kind === x.kind) || {}).sha256, Boolean(x.recompressed)]),
+		[["invoice", true, false], ["ratecon", true, false], ["pod", false, true], ["other", true, false]],
+		"§11 FAILS ON THE OLD CODE: the parts case (L2): the invoice, the rate con and the lumper receipt go byte for byte; only the POD's photo is re-compressed");
+	const pi = await imagesOf(p);
+	eq([IN_INVOICE, IN_RATECON, IN_LUMPER].map((b) => sameBytes(pi, b)), [true, true, true], "§11 FAILS ON THE OLD CODE: ...their photos in the batch byte for byte (mutant: every part re-compressed)");
+
+	// The whitelist case: beside an RGB JPEG that is re-compressed, each of these stays byte for byte.
+	// Each is half a megapixel or more, decodable, and shrinks at 70 (N1), so only its own rule leaves it.
+	const zlib = require("zlib");
+	const fixtures = [
+		["a CMYK JPEG with a Decode array", photo(blank(61, { components: 4, adobe: { transform: 0, at: "before" } }), { colorSpace: "DeviceCMYK", dict: { Decode: [1, 0, 1, 0, 1, 0, 1, 0] } }), "the colour-space rule, the component count and the Decode rule removed together"],
+		["an RGB JPEG with a Decode array", photo(blank(62), { dict: { Decode: [1, 0, 1, 0, 1, 0] } }), "a Decode array taken"],
+		["an SMask", photo(blank(63), { dict: { SMask: jpegs.softMask(W, H) } }), "a soft mask taken"],
+		["a colour-key Mask", photo(blank(64), { dict: { Mask: [0, 10, 0, 10, 0, 10] } }), "a Mask taken"],
+		["a /DecodeParms", photo(blank(65), { dict: { DecodeParms: { ColorTransform: 0 } } }), "DecodeParms taken"],
+		["EXIF orientation 6", photo(blank(66, { orientation: 6 })), "the orientation rule skipped (here the size check after decoding leaves it too)"],
+		["EXIF orientation 3", photo(blank(67, { orientation: 3 })), "the orientation rule skipped: a 180-degree turn keeps the size"],
+		["an Adobe transform-0 segment before the frame header", photo(blank(68, { adobe: { transform: 0, at: "before" } })), "the Adobe rule skipped"],
+		["an Adobe transform-0 segment after the frame header", photo(blank(69, { adobe: { transform: 0, at: "after" } })), "a header walk that stops at the frame (N2)"],
+		["R, G, B component IDs", photo(blank(70, { ids: [0x52, 0x47, 0x42] })), "the component IDs not read"],
+		["a progressive JPEG", photo(blank(71, { progressive: true })), "a frame other than baseline taken"],
+		["an ICCBased /N 1 JPEG", photo(blank(72, { components: 1 }), { colorSpace: ["ICCBased", { n: 1 }] }), "ICCBased /N 1 taken (L5)"],
+		["a JPEG under 0.5 MP", { bytes: blank(73, { width: 600, height: 400 }), width: 600, height: 400 }, "the 0.5 MP floor skipped (L5)"],
+		["a Flate image", { bytes: zlib.deflateSync(Buffer.alloc(W * H * 3, 0xe8)), width: W, height: H, filter: "FlateDecode" }, "the filter rule removed; the header walk leaves it too, so the next case is the rule's own"],
+		["a JPEG's bytes under /Filter [/FlateDecode /DCTDecode]", photo(blank(75), { filter: ["FlateDecode", "DCTDecode"] }), "a filter list taken that isn't DCTDecode alone"],
+		["a JPEG lib/image-metadata.js can't walk to its end", photo(jpegs.unwalkable(blank(74))), "the original bytes decoded when the strip fails (N2)"],
+	];
+	for (const [half, eligible] of [[fixtures.slice(0, 7), blank(51)], [fixtures.slice(7), blank(52)]]) {
+		const docs = [await row(1, [page([photo(eligible), ...half.map(([, im]) => im)])])];
+		const w0 = await build({ documents: docs });
+		const w = await build({ ...ON, documents: docs, maxBytes: total(w0) - 1000 });
+		const found = await imagesOf(w);
+		eq([w.ok, recordOf(w) && recordOf(w).images, recordOf(w) && recordOf(w).left, sameBytes(found, eligible)], [true, 1, half.length, false],
+			`§11 FAILS ON THE OLD CODE: the whitelist case: the RGB photo beside ${half.length} others is re-compressed, and they are left`);
+		for (const [label, im, mutant] of half) {
+			ok(sameBytes(found, im.bytes), `§11 FAILS ON THE OLD CODE: the whitelist case: ${label} stays byte for byte (mutant: ${mutant})`);
+		}
+	}
+
+	// A copy that isn't smaller is not kept (L2).
+	const LOWQ = jpegs.jpeg({ quality: 20, smooth: true, seed: 5 });
+	const lowq = [await row(1, [page([photo(LOWQ), photo(PHOTO_A)])])];
+	const l0 = total(await build({ documents: lowq }));
+	const l = await build({ ...ON, documents: lowq, maxBytes: l0 - 1000 });
+	eq([l.ok, recordOf(l) && recordOf(l).images, recordOf(l) && recordOf(l).left, sameBytes(await imagesOf(l), LOWQ)], [true, 1, 1, true],
+		"§11 FAILS ON THE OLD CODE: a photo whose copy would be bigger (quality 20) stays as it was, beside one re-compressed (L2; mutant: a bigger copy kept)");
+
+	// The child: an error, and one past its deadline, each leave their image (§4); and the batch's
+	// time budget (N8). Each needs a stand-in encoder or clock made by the new module.
+	const CHILD_CASES = [
+		"§11 FAILS ON THE OLD CODE: a child error leaves its image as it was, and the batch still builds when it fits",
+		"§11 FAILS ON THE OLD CODE: a child past its deadline leaves its image as it was, and the batch still builds when it fits",
+		"§11 FAILS ON THE OLD CODE: past the batch's 5-minute budget the steps stop, and the batch stops at BATCH_TOO_LARGE as today (N8; mutant: the budget ignored)",
+		"§11 FAILS ON THE OLD CODE: a child's copy that fails the parent's check (not the dictionary's size) is never used, so the batch reaches the floor untouched (N5; mutant: the parent's check skipped)",
+	];
+	if (!recompressLib) {
+		for (const label of CHILD_CASES) failures.push(`${label}\n      lib/triumph-batch-recompress.js is missing: no steps, no child, no budget`);
+	} else {
+		const real = recompressLib.createEncoder();
+		let calls = 0;
+		const failing = recompressLib.create({ encode: (img, q) => (calls++ === 0 ? Promise.resolve({ error: "a made-up child error" }) : real(img, q)) });
+		const e = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: failing });
+		eq([e.ok, recordOf(e) && recordOf(e).images, recordOf(e) && recordOf(e).left, sameBytes(await imagesOf(e), PHOTO_A)], [true, 1, 1, true], CHILD_CASES[0]);
+		const dir = tmp();
+		const pidFile = path.join(dir, "pid.txt");
+		const hangFile = path.join(dir, "made-up-hanging-child.js");
+		fs.writeFileSync(hangFile, `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nprocess.once("message", () => {});\nprocess.on("disconnect", () => process.exit(0));\nsetInterval(() => {}, 1000);\n`);
+		const hanging = recompressLib.createEncoder({ childPath: hangFile, timeoutMs: 400 });
+		let n2 = 0;
+		const timed = recompressLib.create({ encode: (img, q) => (n2++ === 0 ? hanging(img, q) : real(img, q)) });
+		const t = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: timed });
+		eq([t.ok, recordOf(t) && recordOf(t).images, recordOf(t) && recordOf(t).left, sameBytes(await imagesOf(t), PHOTO_A)], [true, 1, 1, true], CHILD_CASES[1]);
+		let alive = true;
+		const pid = fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8")) : 0;
+		for (let i = 0; i < 40 && alive; i++) {
+			try {
+				process.kill(pid, 0);
+				await new Promise((r) => setTimeout(r, 50));
+			} catch {
+				alive = false;
+			}
+		}
+		eq([pid > 0, alive], [true, false], "§11 ...the child is killed at its deadline (it was the one this run started)");
+		const answer = await hanging(PHOTO_A, 70);
+		ok(answer && answer.error && /timed out/.test(answer.error) && !answer.jpeg, "§11 ...and its answer is an error, never a JPEG");
+		let ticks = 0;
+		const late = recompressLib.create({ now: () => (ticks++ === 0 ? 0 : recompressLib.BATCH_BUDGET_MS + 1) });
+		const out = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: late });
+		eq([out.code, out.floorReached, out.recompressSkipped, out.pdfBytes], ["BATCH_TOO_LARGE", undefined, "OUT_OF_TIME", base.pdf.length], CHILD_CASES[2]);
+		const wrongSize = jpegs.jpeg({ width: 600, height: 400, quality: 50, seed: 9 });
+		const odd = recompressLib.create({ encode: async () => ({ jpeg: wrongSize }) });
+		const o = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: odd });
+		eq([o.ok, o.code, o.floorReached, (o.recompressed || []).length, o.pdfBytes], [false, "BATCH_TOO_LARGE", true, 0, base.pdf.length], CHILD_CASES[3]);
+	}
+	eq(lib.STEPS && [lib.STEPS, lib.MAX_IMAGES, lib.MIN_PIXELS, lib.MAX_PIXELS, lib.IMAGE_TIMEOUT_MS, lib.BATCH_BUDGET_MS], [[70, 60, 50], 40, 500000, 25000000, 20000, 300000],
+		"§11 FAILS ON THE OLD CODE: the steps 70, 60 and 50 in one constant (P1), at most 40 photos a batch, 0.5 to 25 MP, 20 s an image and 5 minutes a batch (N8)");
+
+	// These pass on the old code by design: each pins a mutant.
+	const under = await build({ ...ON, documents: two });
+	const ui = await imagesOf(under);
+	eq([under.ok, under.ok && under.parts.some((x) => "recompressed" in x), sameBytes(ui, PHOTO_A), sameBytes(ui, PHOTO_B)], [true, false, true, true],
+		"§11 a batch under the limit is untouched: no record, every photo byte for byte (mutant: re-compress always)");
+	eq(under.ok && under.parts.map((x) => x.sha256), base.parts.map((x) => x.sha256), "§11 ...each part's hash as built today");
+	const offs = [];
+	for (const recompress of [undefined, false, "true", 1]) {
+		const r = await build({ recompress, documents: two, maxBytes: T0 - 1000 });
+		offs.push([r.code, Object.keys(r).sort(), r.pdfBytes]);
+	}
+	eq(offs, Array(4).fill(["BATCH_TOO_LARGE", ["code", "csvBytes", "maxBytes", "ok", "pdfBytes"], base.pdf.length]),
+		"§11 with the switch off (no option, false, or anything but true), a batch over the limit stops as it always did, with the same answer (mutant: on with the switch off)");
+	const gold = await frozen(() => build({ documents: two }));
+	const goldStop = await build({ recompress: false, documents: two, maxBytes: T0 - 1000 });
+	eq({ batch: [gold.pdfSha256, gold.csvSha256, gold.batchBytes], stop: JSON.stringify(goldStop) }, GOLDEN_OFF,
+		"§11 with the switch off, the batch of two camera photos is byte for byte the base's (221ff323), and so is its stop over a lowered limit (mutant: any change to the switch-off path)");
+	eq([floor.code, floor.maxBytes], ["BATCH_TOO_LARGE", floorLimit],
+		"§11 a lowered TRIUMPH_BATCH_MAX_BYTES still applies at each step: under Triumph's own limit at 70, the batch still stops at the lowered one (mutant: the limit skipped at the steps)");
+	const unreachable = await build({ ...ON, documents: two, maxBytes: T0 - photoBytes - 1 });
+	eq([unreachable.code, unreachable.floorReached, unreachable.pdfBytes], ["BATCH_TOO_LARGE", undefined, base.pdf.length],
+		"§11 a batch over by at least its photos' bytes: no step can fit, so it stops as today (mutant: the skip rule removed)");
+	eq(unreachable.recompressSkipped, "UNREACHABLE", "§11 FAILS ON THE OLD CODE: ...and the stop says why no step ran");
+	const MANY = blank(80);
+	const many = [await row(1, [page(Array.from({ length: 41 }, () => photo(MANY)))])];
+	const m0 = await build({ documents: many });
+	const capped = await build({ ...ON, documents: many });
+	eq([m0.code, capped.code, capped.floorReached, capped.pdfBytes], ["BATCH_TOO_LARGE", "BATCH_TOO_LARGE", undefined, m0.pdfBytes],
+		"§11 more than 40 photos in a batch: it stops as today, and no step runs (mutant: no cap)");
+	eq(capped.recompressSkipped, "TOO_MANY", "§11 FAILS ON THE OLD CODE: ...and the stop says why no step ran");
+}
+
 (async () => {
-	for (const s of [s3, s4, s5, s6, s7, s8, s9, s10]) await s();
+	for (const s of [s3, s4, s5, s6, s7, s8, s9, s10, s11]) await s();
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);

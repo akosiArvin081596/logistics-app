@@ -6,8 +6,9 @@
 // con, render(), the documents, the batch in memory, rule 7's and the printed-field checks), all
 // on a read-only handle of app.db. It marks nothing, arms no claim, takes no number, uploads
 // nothing, sends no notice and keeps no file. It prints verdicts and matches only, never a value.
-// The job's build reads the batch's own two settings from the settings file, as the live press
-// reads them, and with the dedupe on the run counts the identical copies it left out.
+// The job's build reads the batch's own three settings from the settings file, as the live press
+// reads them: with the dedupe on the run counts the identical copies it left out, and with the photo
+// re-compress on it prints the step and the bytes, or that the batch stopped at the floor.
 //
 // The engine and the job read through this checkout's own server.js code, lifted at run time
 // (scripts/lib/server-lift.js) onto the read-only handle, as scripts/payout-rules-dry-run.js runs
@@ -51,7 +52,7 @@ const LIFTED_REQUIRE_OK = (m) => ["crypto", "fs", "path", "zlib"].includes(m) ||
 const EXTEND_MAX_LINES = 400;
 // The only settings the job is handed, from the parsed settings file: what the live press's
 // build reads (lib/triumph-job.js), and none of the submit mode's, so the job stays off.
-const BATCH_SETTINGS = Object.freeze(["TRIUMPH_BATCH_DEDUPE_ENABLED", "TRIUMPH_BATCH_MAX_BYTES"]);
+const BATCH_SETTINGS = Object.freeze(["TRIUMPH_BATCH_DEDUPE_ENABLED", "TRIUMPH_BATCH_MAX_BYTES", "TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED"]);
 
 // Every top-level declaration `roots` reach, closed over as scripts/lib/server-lift.js closure()
 // walks it, in source order. A piece that doesn't parse alone is read on until it does.
@@ -264,7 +265,7 @@ async function run({ argv = [], deps = {} } = {}) {
 			// A count only where the dedupe ran: the switch on, and the batch built or stopped after it.
 			const sentOnce = Number.isInteger(r.copiesLeftOut) ? `identical documents sent once: ${r.copiesLeftOut}` : "";
 			if (!r.ok) {
-				lines.push(`the build: would stop at ${r.step} (${r.code || r.state})${sentOnce ? `; ${sentOnce}` : ""}`);
+				lines.push(`the build: would stop at ${r.step} (${r.code || r.state})${sentOnce ? `; ${sentOnce}` : ""}${r.floorReached === true ? "; page images: stopped at the floor" : ""}`);
 				if (Array.isArray(r.changed) && r.changed.length) lines.push(`what differs from the broker's invoice: ${r.changed.join(", ")}`);
 				return { code: 2, lines };
 			}
@@ -274,6 +275,7 @@ async function run({ argv = [], deps = {} } = {}) {
 			lines.push(`the hold fields since the send: ${r.holdFieldsUnchanged ? "unchanged" : "changed"}`);
 			lines.push(`the batch: ${r.pages} page${r.pages === 1 ? "" : "s"} (${r.parts.join(", ")})`);
 			if (sentOnce) lines.push(sentOnce);
+			if (r.recompressed) lines.push(`page images re-compressed: ${r.recompressed.images} at quality ${r.recompressed.quality} (${r.recompressed.bytesBefore} → ${r.recompressed.bytesAfter} bytes)`);
 			lines.push(`writes attempted: ${writes.logAudit + writes.rememberRateConMatch}`);
 			lines.push("verdict: it would go");
 			return { code: 0, lines };
