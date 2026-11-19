@@ -39420,7 +39420,9 @@ function truckDeleteLockBlockers(truck) {
 //                           both read it;
 //   eld_link                1 while an ELD device is linked: the loads naming the
 //                           unit pay their ELD days, and the whole scheduled
-//                           window without the link. No sheet read (TD8-2 (a));
+//                           window without the link. No sheet read (TD8-2 (a)).
+//                           Under the forward-only link rule, also 1 while the
+//                           truck has any device history row;
 //   financials_line_months  the open months its maintenance reserve or purchase
 //                           price is a Financials line in (financialsExtraItems():
 //                           in the fleet, charged that month), counted even
@@ -39479,7 +39481,9 @@ function truckDeleteOpenMonthHolds(truck) {
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
 	const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;
-	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
+	// Under the forward-only link rule a truck's loads read its device history by its unit, linked now or not, so any
+	// history row holds too (eldLinkHistoryHeld(), fail closed). With the rule not in force it reads nothing.
+	const eld_link = String(truck.routemate_vehicle_id || "").trim() || eldLinkHistoryHeld(truck.id) ? 1 : 0;
 	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
 	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
 	let last_truck_receipt_months = 0;
@@ -41435,7 +41439,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
 			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
 			[holds.driver, "clear its driver"],
-			[holds.eld_link, "unlink its ELD device"],
+			// Under the forward-only link rule the device history holds after an unlink too, so unlinking clears nothing.
+			[eldLinkForwardRule().inForce ? 0 : holds.eld_link, "unlink its ELD device"],
 			[holds.lease_months, "set its owner to the company"],
 			[trailerRows, "detach its trailer"],
 		].filter(([n]) => n > 0).map(([, step]) => step);

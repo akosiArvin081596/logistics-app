@@ -10,12 +10,14 @@
  *      review 2's M1 (a swap's minutes with no device take no day the devices showed: window rule, trip rule, and a
  *      western truck's business-clock day), each failing on the first build of the rule (636335cc); and decision 55's
  *      bound (only a gap of at most 30 minutes between two device runs gives its days up: the link and unlink cases,
- *      the bound's edges, the history's ends) and the recheck's L2 (a reporting device's fixes after an unlink)
+ *      the bound's edges, the history's ends) and the recheck's L2 (a reporting device's fixes after an unlink, under
+ *      the window rule and the trip rule)
  *   §2 pins (they pass on such a build too; each names the mutant it catches): M1, N2 (a), N2 (b) trip rule, N3,
  *      N8, no FROM, switch off, N1 at the stop
  *   §3 the link routes under the rule: L3, the narrowed stop and its passing twin, the link line; review 2's H1 (a rename
  *      after an unlink refused while the truck has device history, in check (5)'s words) and its switch-off pin; the
- *      recheck's L1 (a delete after an unlink refused the same way) and its switch-off pin
+ *      recheck's L1 (a delete after an unlink refused the same way) and its switch-off pin; and, with no month locked,
+ *      the open-month ELD hold counting the history (recheck 2's L2) and its switch-off pin
  *
  * Pure: no server, no app.db, no network. Run: node scripts/test-eld-link-forward.js   # exits 1 on failure
  */
@@ -365,15 +367,24 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		eq("between two devices, 31 minutes", gapOf([run(-Infinity, 0, "D-9"), run(0, 31 * MIN, ""), run(31 * MIN, Infinity, "D-7")], 1), false);
 		eq("a device after it only", gapOf([run(0, 10 * MIN, ""), run(10 * MIN, Infinity, "D-7")], 0), false);
 		eq("a device before it only", gapOf([run(-Infinity, 0, "D-9"), run(0, 10 * MIN, "")], 1), false);
+		eq("a neighbour with no device before it", gapOf([run(-Infinity, 0, ""), run(0, 10 * MIN, ""), run(10 * MIN, Infinity, "D-7")], 1), false);
+	});
+
+	// D-9 unlinked from T-101 at 15:00Z Nov 18 with no relink, and reporting it parked after: Nov 18 afternoon, Nov 19-20.
+	const reportingWorld = (trip = false) => d55World({
+		trip,
+		history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z")],
+		pings: { "D-9": [...D9_BEFORE, ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 }),
+			...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 100400 }), ...parkDay("2026-11-19", { odo: 100400 }), ...parkDay("2026-11-20", { odo: 100400 })] },
 	});
 
 	await test("L2 (recheck): a load across an unlink with no relink while the device keeps reporting: its fixes after the unlink never count for the truck (Nov 18-20 pay as no feed)", async ({ eq }) => {
-		const w = d55World({
-			history: [seed(1, "D-9", "2026-11-18T15:00:00.000Z")],
-			pings: { "D-9": [...D9_BEFORE, ...track("2026-11-18T13:00:00Z", "2026-11-18T14:45:00Z", { odo: 100400 }),
-				...track("2026-11-18T16:00:00Z", "2026-11-18T22:00:00Z", { odo: 100400 }), ...parkDay("2026-11-19", { odo: 100400 }), ...parkDay("2026-11-20", { odo: 100400 })] },
-		});
-		samePaths(eq, await threePaths(w, PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+		samePaths(eq, await threePaths(reportingWorld(), PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
+	});
+
+	// Only the trip rule can see those fixes: a no-device run pays with no ELD under the window rule, whatever its fixes.
+	await test("M1 (recheck 2): the same load under TRIP_WORK_DAYS: D-9's fixes after the unlink never count for T-101, so Nov 18-19 stay no-ELD days and pay", async ({ eq }) => {
+		samePaths(eq, await threePaths(reportingWorld(true), PAT, "2026-11-20", WEEK_47), LOAD_DAYS);
 	});
 
 	await test("R1: a history row opened between FROM and the start keeps the rule off, names the row, and records nothing", async ({ eq, ok }) => {
@@ -608,9 +619,9 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 	// October's T-101 rows on no truck. Neither truck has assignment history, so a delete reaches the closed-month guard.
 	const DELETE_ROUTES = [...ROUTES, ["delete", "/api/trucks/:id"]];
 	const del = (w, id) => W.route(w, "DELETE /api/trucks/:id", { params: { id: String(id) } });
-	const deleteWorld = ({ env = ON(), recorded = FROM, vid = "D-7", history = [seed(1, "D-7")] } = {}) => {
+	const deleteWorld = ({ env = ON(), recorded = FROM, vid = "D-7", history = [seed(1, "D-7")], locks = ["2026-10"] } = {}) => {
 		const w = world({
-			env, recorded, routes: DELETE_ROUTES, locks: ["2026-10"], vehicles: ["D-7"],
+			env, recorded, routes: DELETE_ROUTES, locks, vehicles: ["D-7"],
 			trucks: [{ unit: "T-101", driver: "", vid }, { unit: "T-303", driver: "", vid: "" }],
 			history,
 			rows: [W.loadRow({ id: "L-OCT1", driver: PAT, pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck: "T-101" })],
@@ -641,6 +652,33 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const v = deleteWorld({ env: {}, recorded: null, vid: "", history: [seed(1, "D-7", "2026-11-16T15:00:00.000Z")] });
 		const s = await del(v, 1);
 		eq("T-101, unlinked with history: deletes", [s.status, truckGone(v, 1)], [200, true]);
+	});
+
+	// L2 (recheck 2): with no month locked the delete guard's leg (6) never runs, so the open-month ELD hold is what keeps a
+	// truck's history; under the rule it counts that history, and its words leave out an unlink, which no longer clears it.
+	const UNLINKED = { vid: "", history: [seed(1, "D-7", "2026-11-16T15:00:00.000Z")] };
+	await test("L2 (recheck 2): under the rule with no month locked, a truck unlinked now with device history is held by the open-month ELD hold, in its words with no unlink step, audited as today; a never-linked truck deletes", async ({ eq, ok }) => {
+		const w = deleteWorld({ locks: [], ...UNLINKED });
+		const r = await del(w, 1);
+		eq("409 OPEN_MONTH_TRUCK_FIGURES, the ELD link held", [r.status, r.body && r.body.code, r.body && r.body.counts && r.body.counts.eld_link], [409, "OPEN_MONTH_TRUCK_FIGURES", 1]);
+		eq("in the hold's words, with no unlink step", r.body && r.body.error,
+			"Cannot delete T-101: its ELD device sets the paid days of the loads that name it. Deleting the truck would change an open month's figures, so it stays in place. To take it out of service, give it a retirement date in an open month. Nothing was changed.");
+		ok("audited as a blocked delete under OPEN_MONTH_TRUCK_FIGURES, holding the ELD link",
+			w.audits.some((a) => a.action === "delete_truck_blocked" && a.entityId === "1" && a.details.includes("OPEN_MONTH_TRUCK_FIGURES") && a.details.includes("holds: ELD link")),
+			JSON.stringify(w.audits));
+		ok("T-101 is still there", !truckGone(w, 1));
+		const t = await del(w, 2);
+		eq("T-303, never linked, deletes", [t.status, truckGone(w, 2)], [200, true]);
+	});
+
+	await test("open-month hold pin (the rule off reads nothing new): switch off, no month locked, an unlinked truck with history deletes and a linked one gets today's words, unlink step included", async ({ eq }) => {
+		const v = deleteWorld({ env: {}, recorded: null, locks: [], ...UNLINKED });
+		const s = await del(v, 1);
+		eq("T-101, unlinked with history: deletes", [s.status, truckGone(v, 1)], [200, true]);
+		const w = deleteWorld({ env: {}, recorded: null, locks: [] });
+		const r = await del(w, 1);
+		eq("T-101, linked: today's refusal", [r.status, r.body && r.body.code, r.body && r.body.error], [409, "OPEN_MONTH_TRUCK_FIGURES",
+			"Cannot delete T-101: its ELD device sets the paid days of the loads that name it. Deleting the truck would change an open month's figures, so it stays in place. To take it out of service, give it a retirement date in an open month. If it was added by mistake, do these first, then delete it: unlink its ELD device. Nothing was changed."]);
 	});
 
 	console.log("\n§4 IFTA and fuel events under the rule");

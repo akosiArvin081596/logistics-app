@@ -292,6 +292,8 @@ function deleteRoute(w, rec, { routeSrc = DELETE_SRC, holdsSrc = HOLDS } = {}) {
 		db: w.db,
 		truckDeleteLockBlockers: mod.truckDeleteLockBlockers,
 		truckDeleteOpenMonthHolds: mod.truckDeleteOpenMonthHolds,
+		// The route's open-month remedy reads the forward-only link rule too: off, as a switch-off boot leaves it.
+		eldLinkForwardRule: () => ELD_LINK_FORWARD_OFF,
 		auditText,
 		periodBlockedResponse: responses.periodBlockedResponse,
 		periodLockUnreadableResponse: responses.periodLockUnreadableResponse,
@@ -776,7 +778,7 @@ function mutate(src, from, to, label) {
 			{ locked: ["2026-09"], truck: { owner_id: INVESTOR_ID, assigned_driver: DRIVER }, history: [{ carrier: CARRIER, driver: DRIVER, started: "2026-08-01", ended: "2026-09-30" }] }],
 		["driver (3d)", "const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;", "const driver = 0;",
 			{ truck: { assigned_driver: DRIVER }, directory: [{ name: DRIVER, payType: "percentage", pct: 30 }] }],
-		["ELD link", "const eld_link = String(truck.routemate_vehicle_id || \"\").trim() ? 1 : 0;", "const eld_link = 0;",
+		["ELD link", "const eld_link = String(truck.routemate_vehicle_id || \"\").trim() || eldLinkHistoryHeld(truck.id) ? 1 : 0;", "const eld_link = 0;",
 			{ truck: { routemate_vehicle_id: "made-up-vid-1" } }],
 		["reserve (6a)", "const financials_line_months = inFleet && financialsLine ? charged.length : 0;", "const financials_line_months = 0;",
 			{ truck: { maintenance_fund_monthly: 200 } }],
