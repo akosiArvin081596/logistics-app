@@ -31,7 +31,7 @@
   },
   "//engines": "A FLOOR, deliberately not a ceiling. Both the VPS environments now run Node 22.23.2 via pm2's `interpreter` (see ecosystem.config.js); the SYSTEM node on that box is still 20.20.1 and belongs to ~23 other clients' processes. 22.12 is puppeteer 25's hard floor \u2014 below it the PDF pipeline will not install. The exact version is pinned where it matters: `.nvmrc` and `node-version` in .github/workflows/ci.yml, so a green pipeline means 'passes on the runtime production actually uses'.",
   "dependencies": {
-    "archiver": "^7.0.1",
+    "archiver": "^8.0.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "better-sqlite3-session-store": "^0.1.0",
