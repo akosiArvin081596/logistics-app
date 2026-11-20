@@ -779,7 +779,9 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 			pings: pings || live(now, ["D-4", "D-7", "D-9", "D-11"]),
 		});
 	}
-	const move = (w, truckId, vid, extra = {}) => W.route(w, "POST /api/trucks/:truckId/move-eld", { params: { truckId: String(truckId) }, body: { routemateVehicleId: vid, ...extra } });
+	// The truck the dialog shows the device on: its holder at the press, unless the case says otherwise.
+	const holderOf = (w, vid) => (w.db.prepare("SELECT id FROM trucks WHERE routemate_vehicle_id = ? ORDER BY id").get(vid) || {}).id;
+	const move = (w, truckId, vid, extra = {}) => W.route(w, "POST /api/trucks/:truckId/move-eld", { params: { truckId: String(truckId) }, body: { routemateVehicleId: vid, fromTruckId: holderOf(w, vid), ...extra } });
 	const linkOf = (w, id) => w.db.prepare("SELECT routemate_vehicle_id AS v FROM trucks WHERE id = ?").get(id).v || "";
 	const historyOf = (w) => w.db.prepare("SELECT truck_id AS t, routemate_vehicle_id AS v, assigned_from AS f, assigned_until AS u FROM eld_device_assignments ORDER BY id").all()
 		.map((r) => [r.t, r.v, r.f === HISTORY_START ? "start" : r.f, r.u || "open"]);
@@ -883,7 +885,9 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		eq("the try-again line", [r.status, r.body && r.body.error, r.body && r.body.lead], [409, "Job Tracking couldn't be read just now. Try again in a minute. Nothing was changed.", ""]);
 		eq("nothing written", snapshot(w), before);
 		ok("audited, October held", (auditsOf(w, "routemate_move_blocked")[0] || { details: "" }).details.includes("periods=2026-10"), JSON.stringify(w.audits));
-		const t = moveWorld({ env: MOVE_ON(TRIP) });
+		// T-100 has a load running through Sat Nov 21, so only the stop's own `unreadable` mark (not an empty row list) can
+		// give the try-again line here (review-1 M3).
+		const t = moveWorld({ env: MOVE_ON(TRIP), rows: [OCT_ENDED, OCT_RUNS_TO("2026-11-21")] });
 		t.db.exec("DROP TABLE load_status_history");
 		eq("a tap read that fails: the same line", (await move(t, 2, "D-7")).body.error, "Job Tracking couldn't be read just now. Try again in a minute. Nothing was changed.");
 	});
@@ -899,6 +903,35 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const r = await move(w, 2, "D-7");
 		eq("409 ELD_MOVE_CHANGED", [r.status, r.body && r.body.code, r.body && r.body.error], [409, "ELD_MOVE_CHANGED", "T-100 or T-200 changed while this was checked. Nothing was changed. Try again."]);
 		eq("nothing written", [linkOf(w, 1), linkOf(w, 2), historyOf(w).length, auditsOf(w, "routemate_move").length], ["D-7", "", 2, 0]);
+	});
+
+	// Review-1 M1: the confirm names the truck the dialog showed the device on, so the move takes it off that truck or
+	// is refused. D-7 goes from T-100 to T-300 (4) behind the dialog's back.
+	const MOVED_TO_T300 = "UPDATE trucks SET routemate_vehicle_id = CASE id WHEN 1 THEN '' WHEN 4 THEN 'D-7' ELSE routemate_vehicle_id END";
+	await test("M1 (review-1): D-7 moved to T-300 after the dialog showed it on T-100, before the press: refused in plain words naming the truck it is on now; nothing written, Job Tracking never read (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld();
+		const shownOn = holderOf(w, "D-7");
+		w.db.prepare(MOVED_TO_T300).run();
+		const rows = w.rows;
+		let reads = 0;
+		Object.defineProperty(w, "rows", { configurable: true, get: () => { reads++; return rows; } });
+		const before = snapshot(w);
+		const r = await move(w, 2, "D-7", { fromTruckId: shownOn });
+		eq("409 ELD_MOVE_CHANGED", [r.status, r.body && r.body.code, r.body && r.body.error], [409, "ELD_MOVE_CHANGED", "D-7 is on T-300 now, not on T-100. Nothing was changed."]);
+		eq("nothing written, and Job Tracking never read", [snapshot(w) === before, reads], [true, 0]);
+	});
+
+	await test("M1 (review-1): D-7 moved to T-300 while Job Tracking was read: refused after the await in the same words; T-300 keeps it and nothing is written by the move (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld();
+		const rows = w.rows;
+		let once = true;
+		Object.defineProperty(w, "rows", { configurable: true, get: () => {
+			if (once) { once = false; w.db.prepare(MOVED_TO_T300).run(); }
+			return rows;
+		} });
+		const r = await move(w, 2, "D-7", { fromTruckId: 1 });
+		eq("409 ELD_MOVE_CHANGED", [r.status, r.body && r.body.code, r.body && r.body.error], [409, "ELD_MOVE_CHANGED", "D-7 is on T-300 now, not on T-100. Nothing was changed."]);
+		eq("nothing written by the move", [linkOf(w, 4), linkOf(w, 2), historyOf(w).length, auditsOf(w, "routemate_move").length], ["D-7", "", 2, 0]);
 	});
 
 	await test("N8: with the trip rule on, a row with no Load ID is named by its sheet row and pickup day, then the data-fix line; with the rule off, so is one with no end date (FAILS ON THE OLD CODE)", async ({ eq }) => {
@@ -930,9 +963,11 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		const rows = w.rows;
 		let reads = 0;
 		Object.defineProperty(w, "rows", { configurable: true, get: () => { reads++; return rows; } });
-		const missing = await move(w, 2, "D-404");
+		const unshown = await move(w, 2, "D-7", { fromTruckId: undefined });
+		eq("no truck the dialog showed it on (review-1 M1): 400", [unshown.status, unshown.body && unshown.body.error], [400, "fromTruckId required"]);
+		const missing = await move(w, 2, "D-404", { fromTruckId: 1 });
 		eq("a device not in the mirror: 404, in the link route's words", [missing.status, missing.body && missing.body.error], [404, "Routemate vehicle not found in mirror — run sync-now first"]);
-		const free = await move(w, 2, "D-4");
+		const free = await move(w, 2, "D-4", { fromTruckId: 1 });
 		eq("a free device", [free.status, free.body && free.body.code, free.body && free.body.error], [409, "ELD_MOVE_FREE_DEVICE", "This device is free: use Link Selected."]);
 		const same = await move(w, 1, "D-7");
 		eq("the device this truck holds", [same.status, same.body && same.body.code, same.body && same.body.error], [409, "ELD_MOVE_SAME_TRUCK", "D-7 is already on T-100. Nothing was changed."]);
@@ -952,6 +987,17 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		eq("409 PERIOD_LOCK_UNREADABLE", [r.status, r.body && r.body.code], [409, "PERIOD_LOCK_UNREADABLE"]);
 		eq("nothing written", snapshot(w), before);
 		ok("audited as a blocked move", auditsOf(w, "routemate_move_blocked").some((a) => a.details.includes("[PERIOD_LOCK_UNREADABLE]")), JSON.stringify(w.audits));
+	});
+
+	await test("L1 (review-1): the start-up line, in fixed words: none with the switch off; with it on, whether the forward-only rule lets the move work; logged at boot right after the rule's own decision (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
+		const line = (env, recorded = FROM) => world({ env, recorded, expose: ["eldMoveDeviceStartLine"], trucks: [{ unit: "T-100", driver: PAT, vid: "D-7" }], history: [seed(1, "D-7")], now: Date.parse(MOVE_NOW) })
+			.api.eldMoveDeviceStartLine();
+		eq("the switch off: no line", line(ON()), null);
+		eq("on, with the rule in force", line(MOVE_ON()),
+			{ level: "log", text: "ELD_MOVE_DEVICE_ENABLED is on: Move device can take an ELD device off one truck and put it on another at one instant." });
+		eq("on, with the rule not in force", line(MOVE_ON({ ELD_LINK_FORWARD_ONLY_FROM: "2026-11-25T15:00:00Z" }), null),
+			{ level: "warn", text: "ELD_MOVE_DEVICE_ENABLED is on but does nothing: the forward-only link rule is not in force, so every move is refused and the Link dialog offers none." });
+		ok("at boot, logged right after the rule's decision", /\neldLinkForwardRule\(\);\nlogEldMoveDeviceStart\(\);\n/.test(W.SRC));
 	});
 
 	await test("switched off, the route answers 404 FEATURE_OFF; on, but with the forward-only rule not in force, 409 MOVE_NEEDS_FORWARD_ONLY; nothing written either way (FAILS ON THE OLD CODE)", async ({ eq }) => {

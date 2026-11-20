@@ -550,7 +550,7 @@ function routeWorld(db, verb, route, deps = {}) {
 				},
 			});
 			const res = mockRes();
-			await routes[MOVE]({ query: {}, params: { truckId: "5" }, body: { routemateVehicleId: RM_33 }, session: { user: { username: "qa-admin", role: "Super Admin" } } }, res);
+			await routes[MOVE]({ query: {}, params: { truckId: "5" }, body: { routemateVehicleId: RM_33, fromTruckId: 2 }, session: { user: { username: "qa-admin", role: "Super Admin" } } }, res);
 			const links = Object.fromEntries(real.prepare("SELECT id, routemate_vehicle_id AS v FROM trucks").all().map((t) => [t.id, t.v]));
 			const history = real.prepare("SELECT truck_id AS t, routemate_vehicle_id AS v, assigned_until AS u FROM eld_device_assignments ORDER BY id").all().map((r) => [r.t, r.v, r.u ? "closed" : "open"]);
 			const seeded = !!real.prepare("SELECT 1 FROM server_state WHERE key = 'eld_device_history_started'").get();
@@ -565,8 +565,8 @@ function routeWorld(db, verb, route, deps = {}) {
 
 		await moveCase("§10.2 the device's truck changing during the await", async () => {
 			const m = await moveWith({ during: (db) => db.exec(`UPDATE trucks SET routemate_vehicle_id = '' WHERE id = 2; UPDATE trucks SET routemate_vehicle_id = '${RM_33}' WHERE id = 13`) });
-			eq([m.res.statusCode, m.res.body.code, m.res.body.error], [409, "ELD_MOVE_CHANGED", "33 changed trucks while this was checked. Nothing was changed."],
-				"§10.2 the device moved to another truck during the await: 409, in its own words (FAILS ON THE OLD CODE)");
+			eq([m.res.statusCode, m.res.body.code, m.res.body.error], [409, "ELD_MOVE_CHANGED", "33 is on LogisX-#356 now, not on LogisX-#33. Nothing was changed."],
+				"§10.2 the device moved to another truck during the await: 409, naming the truck it is on now (FAILS ON THE OLD CODE)");
 			eq([m.links[5], m.links[13], m.history, m.audits.length], ["", RM_33, [], 0], "§10.2a nothing written by the move (FAILS ON THE OLD CODE)");
 		});
 
@@ -586,13 +586,16 @@ function routeWorld(db, verb, route, deps = {}) {
 			const body = routeBody("post", MOVE).replace(/^\s*\/\/.*$/gm, "");
 			eq((body.match(/\bawait\b/g) || []).length, 1, "§10.4 exactly one await (FAILS ON THE OLD CODE)");
 			const awaitAt = body.indexOf("await eldMovePreflight(");
-			const pre = ["ELD_MOVE_DEVICE_ENABLED", "eldLinkForwardRule()", "eldMoveDeviceCheck("].map((s) => body.indexOf(s));
-			ok(pre.every((x, i) => x > 0 && x < awaitAt && (i === 0 || x > pre[i - 1])), "§10.5 before the await, in order: the switch, the rule, the device checks (FAILS ON THE OLD CODE)");
+			const pre = ["ELD_MOVE_DEVICE_ENABLED", "eldLinkForwardRule()", "fromTruckId required", "eldMoveDeviceCheck("].map((s) => body.indexOf(s));
+			ok(pre.every((x, i) => x > 0 && x < awaitAt && (i === 0 || x > pre[i - 1])), "§10.5 before the await, in order: the switch, the rule, the truck the dialog showed, the device checks (FAILS ON THE OLD CODE)");
 			const after = body.slice(awaitAt);
-			const order = ["eldMoveDeviceCheck(", "source.id !== judged.source.id", "eldLinkUnitKey(source.unit_number)", "truckEditLockBlockers(source,", "truckEditLockBlockers(target,",
+			// The device checks hold the device to the truck the dialog showed (review-1 M1), so the device's truck after
+			// the await is the judged one whenever they pass.
+			const order = ["eldMoveDeviceCheck(truckId, device, fromTruckId, req.body)", "eldLinkUnitKey(source.unit_number)", "truckEditLockBlockers(source,", "truckEditLockBlockers(target,",
 				"UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ? AND routemate_vehicle_id = ?", "recordEldDeviceAssignment("].map((s) => after.indexOf(s));
 			ok(awaitAt > 0 && order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1])),
-				`§10.6 after it, in order: the device checks again, the device's truck and both units, both stops, the write (FAILS ON THE OLD CODE) (${order.join(", ")})`);
+				`§10.6 after it, in order: the device checks again (still on the truck the dialog showed), both units, both stops, the write (FAILS ON THE OLD CODE) (${order.join(", ")})`);
+			eq((body.match(/eldMoveDeviceCheck\(truckId, device, fromTruckId, req\.body\)/g) || []).length, 2, "§10.6b both device checks, before and after the await, hold it to that truck (FAILS ON THE OLD CODE)");
 			eq((after.match(/recordEldDeviceAssignment\(/g) || []).length, 1, "§10.6a one history call for both trucks (FAILS ON THE OLD CODE)");
 		});
 	}

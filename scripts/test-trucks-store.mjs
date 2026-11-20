@@ -659,6 +659,15 @@ if (piniaModule) {
     src.includes("'Move anyway'") && /<p v-for="\(line, i\) in moveRefusal\.rest" :key="i">\{\{ line \}\}<\/p>/.test(src) && /@click="closeLinkModal">Close<\/button>/.test(src))
   ok('4.14 pin: today\'s words are still there (the empty list, Link Selected, Link anyway)',
     src.includes('No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.') && src.includes("'Link Selected'") && src.includes("'Link anyway'"))
+  // Review-1 M1: the move names the truck the dialog showed the device on, so the server moves it off that truck or refuses.
+  {
+    const file = path.join(CLIENT_SRC, 'lib', 'eldMove.js')
+    const M = fs.existsSync(file) ? await import(pathToFileURL(file).href) : {}
+    eq('4.15 the move\'s request carries the device and the truck the dialog showed it on (FAILS ON THE OLD CODE)',
+      typeof M.moveRequestBody === 'function' ? M.moveRequestBody({ id: 'rm-7', label: 'D-7', unit: 'T-100', truckId: 1 }) : null,
+      { routemateVehicleId: 'rm-7', fromTruckId: 1 })
+    ok('4.16 Move device sends that request (FAILS ON THE OLD CODE)', /return submitMove\(moveRequestBody\(pickedMove\.value\)\)/.test(src))
+  }
 }
 
 console.log(`\ntrucks-store: ${pass} passed, ${fail} failed`)

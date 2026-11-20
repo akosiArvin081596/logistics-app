@@ -689,7 +689,7 @@ import { formatAgeMs } from '../../lib/duration'
 import { fmtTimestamp, fmtYmd } from '../../utils/datetime'
 import { availabilityRangeText } from '../../lib/availabilityText'
 import { truckPayRuleNote } from '../../lib/driverPay'
-import { MOVE_FREE_EMPTY, loadLinkChoices, moveConfirmWords, moveRefusalView } from '../../lib/eldMove'
+import { MOVE_FREE_EMPTY, loadLinkChoices, moveConfirmWords, moveRefusalView, moveRequestBody } from '../../lib/eldMove'
 
 const api = useApi()
 
@@ -1286,7 +1286,7 @@ async function submitMove(body) {
 
 function handleMove() {
   if (!pickedMove.value) return
-  return submitMove({ routemateVehicleId: pickedMove.value.id })
+  return submitMove(moveRequestBody(pickedMove.value))
 }
 
 function handleMoveAnyway() {

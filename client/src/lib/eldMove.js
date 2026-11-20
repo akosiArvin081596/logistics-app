@@ -37,6 +37,12 @@ export async function loadLinkChoices(api, truck) {
   return out
 }
 
+// The move's request: the device, and the truck the dialog showed it on, so the server takes it off that truck or
+// refuses (it may have moved since the list was loaded).
+export function moveRequestBody(pick) {
+  return { routemateVehicleId: pick.id, fromTruckId: pick.truckId }
+}
+
 // With Move device offered and no free device, the free group says where to look instead.
 export const MOVE_FREE_EMPTY = 'No free devices. Pick one under On another truck to move it here.'
 

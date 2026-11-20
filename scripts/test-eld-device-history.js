@@ -541,7 +541,7 @@ function inZone(zone) {
 			const row = w.db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (?, ?, ?, '', 'system:seed')");
 			row.run(1, "D-7", START); row.run(2, "D-11", START);
 			for (const v of ["D-7", "D-11"]) w.db.prepare("INSERT INTO routemate_vehicles (routemate_vehicle_id, vehicle_id) VALUES (?, ?)").run(v, v);
-			const r = await W.route(w, "POST /api/trucks/:truckId/move-eld", { params: { truckId: "2" }, body: { routemateVehicleId: "D-7" } });
+			const r = await W.route(w, "POST /api/trucks/:truckId/move-eld", { params: { truckId: "2" }, body: { routemateVehicleId: "D-7", fromTruckId: 1 } });
 			check("§5.2 the move passes (FAILS ON THE OLD CODE)", r.status, 200);
 			const res = w.api.buildEldDeviceResolver({ frozenBefore: Date.parse(FROM) });
 			const runs = (id) => res.truckRuns(id, Date.parse("2026-11-19T00:00:00Z"), Date.parse("2026-11-22T00:00:00Z"))

@@ -5145,6 +5145,19 @@ const ELD_LINK_FORWARD_SETTING = eldLinkForward.settingFromEnv(process.env);
 // at one instant. It works only while the forward-only rule is in force, whose stop judges both trucks.
 const ELD_MOVE_DEVICE_ENABLED = process.env.ELD_MOVE_DEVICE_ENABLED === "true";
 let eldLinkForwardDecided = null;
+
+// Move device's start-up line, in fixed words: nothing with the switch off; with it on, whether the forward-only rule
+// lets it work (it refuses every move otherwise). Logged at boot, right after the rule's own decision.
+function eldMoveDeviceStartLine() {
+	if (!ELD_MOVE_DEVICE_ENABLED) return null;
+	return eldLinkForwardRule().inForce
+		? { level: "log", text: "ELD_MOVE_DEVICE_ENABLED is on: Move device can take an ELD device off one truck and put it on another at one instant." }
+		: { level: "warn", text: "ELD_MOVE_DEVICE_ENABLED is on but does nothing: the forward-only link rule is not in force, so every move is refused and the Link dialog offers none." };
+}
+function logEldMoveDeviceStart() {
+	const line = eldMoveDeviceStartLine();
+	if (line) (line.level === "warn" ? console.warn : console.log)(`[eld-move-device] ${line.text}`);
+}
 let eldLinkForwardReportFromMs = null;
 
 // The rule as this process runs it: decided once, at boot (the call below server_state's table), and kept.
@@ -53538,10 +53551,10 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 	}
 });
 
-// Move device's checks of the device and both trucks, run before the move route's one await and again after it: the
-// truck exists, the device is in the mirror, exactly one OTHER truck holds it, and a device that has stopped reporting is
-// confirmed as the link route asks. { refusal: { status, body } }, or { target, source, rv, label, status, confirmedSilent }.
-function eldMoveDeviceCheck(truckId, device, body) {
+// Move device's checks, before the route's one await and again after it: the truck exists, the device is in the mirror,
+// exactly one OTHER truck holds it and it is `fromTruckId` (the truck the dialog showed), and a silent device is
+// confirmed. { refusal: { status, body } }, or { target, source, rv, label, status, confirmedSilent }.
+function eldMoveDeviceCheck(truckId, device, fromTruckId, body) {
 	const refuse = (status, out) => ({ refusal: { status, body: out } });
 	const unitOf = (t) => t.unit_number || `truck #${t.id}`;
 	const target = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
@@ -53559,6 +53572,10 @@ function eldMoveDeviceCheck(truckId, device, body) {
 		return refuse(409, { error: words.text, code: "ELD_MOVE_SHARED_DEVICE", lead: words.lead, paragraphs: words.paragraphs });
 	}
 	if (holders[0].id === target.id) return refuse(409, { error: eldLinkForward.moveWords.sameTruck(label, unitOf(target)), code: "ELD_MOVE_SAME_TRUCK" });
+	if (holders[0].id !== fromTruckId) {
+		const shown = db.prepare("SELECT id, unit_number FROM trucks WHERE id = ?").get(fromTruckId);
+		return refuse(409, { error: eldLinkForward.moveWords.movedSince(label, unitOf(holders[0]), shown ? unitOf(shown) : `truck #${fromTruckId}`), code: "ELD_MOVE_CHANGED" });
+	}
 	const status = eldDeviceStatus(eldLatestCleanFixByVehicle([device])[device], Date.now());
 	const confirmedSilent = !!(status.silent && body && body.confirmSilent === true);
 	if (status.silent && !confirmedSilent) {
@@ -53588,18 +53605,20 @@ app.post("/api/trucks/:truckId/move-eld", requireRole("Super Admin"), async (req
 		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
 		const device = String((req.body && req.body.routemateVehicleId) || "");
 		if (!device) return res.status(400).json({ error: "routemateVehicleId required" });
+		// The truck the dialog showed the device on: the move takes it off that truck or not at all.
+		const fromTruckId = parseInt(req.body && req.body.fromTruckId, 10);
+		if (!fromTruckId) return res.status(400).json({ error: "fromTruckId required" });
 		// Refused here, before Job Tracking is read, when nothing could pass anyway.
-		const judged = eldMoveDeviceCheck(truckId, device, req.body);
+		const judged = eldMoveDeviceCheck(truckId, device, fromTruckId, req.body);
 		if (judged.refusal) return res.status(judged.refusal.status).json(judged.refusal.body);
 		// The handler's only await: both trucks' reach from one Job Tracking read, and the one instant of both stops.
 		const pre = await eldMovePreflight(judged.source, judged.target);
-		// Synchronous from here to the write, in order: the device checks again, the device's truck and both units as
+		// Synchronous from here to the write, in order: the device checks again (still on fromTruckId), both units as
 		// judged, both stops, the write.
-		const now = eldMoveDeviceCheck(truckId, device, req.body);
+		const now = eldMoveDeviceCheck(truckId, device, fromTruckId, req.body);
 		if (now.refusal) return res.status(now.refusal.status).json(now.refusal.body);
 		const { source, target, label } = now;
 		const unitOf = (t) => t.unit_number || `truck #${t.id}`;
-		if (source.id !== judged.source.id) return res.status(409).json({ error: eldLinkForward.moveWords.changedTrucks(label), code: "ELD_MOVE_CHANGED" });
 		if (eldLinkUnitKey(source.unit_number) !== eldLinkUnitKey(judged.source.unit_number) || eldLinkUnitKey(target.unit_number) !== eldLinkUnitKey(judged.target.unit_number)) {
 			return res.status(409).json({ error: eldLinkForward.moveWords.renamed(unitOf(judged.source), unitOf(judged.target)), code: "ELD_MOVE_CHANGED" });
 		}
@@ -63357,8 +63376,10 @@ db.exec(`
 		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-// The forward-only link rule decides here, at boot, once server_state exists (decideEldLinkForward()).
+// The forward-only link rule decides here, at boot, once server_state exists (decideEldLinkForward()); Move device's
+// start-up line follows it, since the move works only while the rule is in force.
 eldLinkForwardRule();
+logEldMoveDeviceStart();
 function loadRouteCacheSnapshot() {
 	try {
 		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get("route_cache_snapshot");
