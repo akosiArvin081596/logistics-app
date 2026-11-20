@@ -22,6 +22,8 @@
 //      switch is on and Clear factored kept; canProcess only where the press would take it;
 //      with the switch off every row and route reads as before
 //   §6 mutants: each money rule removed in turn, and a case catches it
+//   §7 the press and Try again, each that landed, tell every open dashboard once (dashboard:changed);
+//      a refused one tells none; mutants of each
 //
 // Made-up loads and people only (123456701..., made-up.agent@chrobinson.com), in memory.
 //   node scripts/test-triumph-process.js      # exits 1 on any failure
@@ -344,7 +346,7 @@ function checkPress(given, src = PROCESS_SRC) {
 const LIVE = { TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05" };
 const ON = { ...LIVE, TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7,9", TRIUMPH_PROCESS_BUTTON_ENABLED: "true" };
 
-function routesWorld(routesLib, { env = ON, hold = true, transport = true, replica = false } = {}) {
+function routesWorld(routesLib, { env = ON, hold = true, transport = true, replica = false, notifyChange = () => {} } = {}) {
 	const w = makeWorld();
 	w.sheet = { headers: HEADERS, data: [w.row] };
 	w.refusals = [];
@@ -361,7 +363,8 @@ function routesWorld(routesLib, { env = ON, hold = true, transport = true, repli
 		readJobTracking: async () => w.sheet,
 		closedMonthsOf: () => w.closedMonths,
 		reissueHoldOn: hold,
-		triumphJob: () => w.job });
+		triumphJob: () => w.job,
+		notifyChange });
 	w.mounted = {};
 	w.routes.mount({ post: (p, ...chain) => { w.mounted[p] = chain; } }, {
 		requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: "FORBIDDEN" })),
@@ -578,6 +581,47 @@ async function checkRoutes(routesLib) {
 		else failures.push(`MUTANT ${name}: NOT caught`);
 	}
 	console.log(`  ${caught}/${PRESS_MUTANTS.length} press mutants and ${routeCaught}/${ROUTE_MUTANTS.length} route mutants caught`);
+
+	// §7 (the Triumph status plan, N9): a press and a Try again that landed each tell every open dashboard
+	// once; one refused tells none.
+	section("§7 the press and Try again: dashboard:changed");
+	async function checkNotices(lib) {
+		await kaseAsync("§7 the press and Try again", async () => {
+			const told = [];
+			const w = routesWorld(lib, { notifyChange: (domain) => told.push(domain) });
+			// What one step told: the notices since `from`.
+			let from = told.length;
+			eq([(await w.press()).status, told.slice(from)], [200, ["dashboard"]], "§7 FAILS ON THE OLD CODE (N9): a press that landed: one dashboard:changed");
+			from = told.length;
+			eq([(await w.press()).status, told.length - from], [409, 0], "§7 a second press, refused: none");
+			ledger.transition(w.db, KEY, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "SUBMIT_FAILED", stage: "built" } });
+			from = told.length;
+			eq([(await w.retry()).status, told.slice(from)], [200, ["dashboard"]], "§7 FAILS ON THE OLD CODE (N9): a Try again that landed: one");
+			ledger.transition(w.db, KEY, { from: ["queued"], nowIso: T0, patch: { state: "needs_attention", reason_code: "ADVANCE_ON_RATECON" } });
+			from = told.length;
+			eq([(await w.retry()).status, told.length - from], [409, 0], "§7 a Try again refused: none");
+		});
+	}
+	await checkNotices(routesLib);
+	let noticeCaught = 0;
+	const NOTICE_MUTANTS = [
+		["no notice after a press", "\t\t\tif (!r.ok) return refuseButton(req, res, loadId, r);\n\t\t\tdashboardChanged();\n", "\t\t\tif (!r.ok) return refuseButton(req, res, loadId, r);\n"],
+		["no notice after Try again", "\t\t\tdashboardChanged();\n\t\t\treturn res.json({ ok: true, factoring: tileFor(user, gate.key) });\n\t\t});", "\t\t\treturn res.json({ ok: true, factoring: tileFor(user, gate.key) });\n\t\t});"],
+	];
+	for (const [name, from, to] of NOTICE_MUTANTS) {
+		if (ROUTES_SRC.split(from).length - 1 !== 1) { failures.push(`§7 mutant anchor not found once: ${name}`); continue; }
+		const mine = [];
+		sink = mine;
+		try {
+			await checkNotices(loadFrom(ROUTES_FILE, ROUTES_SRC.replace(from, () => to)));
+		} catch (e) {
+			mine.push(`threw ${e && e.message}`);
+		}
+		sink = failures;
+		if (mine.length) { noticeCaught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(mine)}`); }
+		else failures.push(`§7 MUTANT ${name}: NOT caught`);
+	}
+	console.log(`  ${noticeCaught}/${NOTICE_MUTANTS.length} mutants caught`);
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);

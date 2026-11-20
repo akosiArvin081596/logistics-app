@@ -155,6 +155,13 @@
               <span class="auto-line-text">{{ selectedTriumphTile.text }}</span>
               <button v-if="selectedTriumphTile.tryAgain" type="button" class="auto-line-btn" :disabled="triumphRetrying" @click="retryTriumph">{{ triumphRetrying ? 'Trying again…' : 'Try again' }}</button>
             </div>
+            <!-- Each step of the load's way to Triumph, from the server's own facts. -->
+            <ol v-if="!triumphResult && selectedTriumphSteps.length" class="triumph-steps" aria-label="Where this load stands with Triumph">
+              <li v-for="step in selectedTriumphSteps" :key="step.key" class="triumph-step" :class="{ 'triumph-step--done': step.done }">
+                <span class="triumph-step-mark" aria-hidden="true">{{ step.done ? '✓' : '○' }}</span>
+                <span>{{ step.text }}</span>
+              </li>
+            </ol>
             <!-- Factored loads (Triumph), in lib/factoringStatus.js's words. -->
             <FactoringControls :job="selectedJob" :load-id="loadRefValue" @changed="onFactoringChanged" />
             <!-- A Draft Invoice press whose Gmail draft may be there: "Check Gmail"
@@ -390,7 +397,7 @@ import ChrSendBadge from '../integrations/ChrSendBadge.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import FactoringControls from './FactoringControls.vue'
-import { inflightLine, reasonInput, canProcess, triumphTile, pressFailure } from '../../lib/factoringStatus'
+import { inflightLine, reasonInput, canProcess, triumphTile, triumphSteps, pressFailure } from '../../lib/factoringStatus'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText, REVIEW_FILTER_TITLE, pickupReview, pickupReviewText, canMarkPickupConfirmed, pickupConfirmTitle, pickupConfirmLabel, runPickupConfirm, pickupConfirmedToast, pickupConfirmErrorText, pickupChanged, withoutPickupReview, freshReview, freshPane } from '../../lib/loadReview'
 import { pickupArrivalLine } from '../../lib/pickupArrival'
@@ -768,7 +775,7 @@ const plannedLane = ref({ status: 'loading' })
 function onPlannedLane(lane) { plannedLane.value = lane }
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null; autoActionResult.value = null
-  triumphResult.value = null; triumphFollow += 1
+  triumphResult.value = null; triumphFollow += 1; triumphLate.value = false
   plannedLane.value = { status: 'loading' }
   docError.value = ''; deletingDocId.value = null; docsWithheldNote.value = ''
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
@@ -1055,20 +1062,29 @@ const triumphRetrying = ref(false)
 const triumphResult = ref(null)
 // Bumped on each load opened, so a follow-up read for another load stops.
 let triumphFollow = 0
+// The last follow-up read found the load still on its way: its line says so until it moves.
+const triumphLate = ref(false)
 const showProcessButton = computed(() => Boolean(auth.isSuperAdmin && selectedJob.value && canProcess(selectedJob.value._factoring)))
 const selectedTriumphTile = computed(() => (auth.isSuperAdmin && selectedJob.value
-  ? triumphTile(selectedJob.value._factoring, { formatTime: (t) => fmtDraftDate(t) })
+  ? triumphTile(selectedJob.value._factoring, { formatTime: (t) => fmtDraftDate(t), late: triumphLate.value })
   : null))
+const selectedTriumphSteps = computed(() => (auth.isSuperAdmin && selectedJob.value
+  ? triumphSteps(selectedJob.value._factoring, { formatTime: (t) => fmtDraftDate(t) })
+  : []))
 // The open load's `_factoring` as the dashboard now reads it.
 function freshFactoring() {
   const key = loadRefValue.value
   const row = key ? props.jobs.find((j) => loadRef(j, loadIdCol.value) === key) : null
   if (row && row._factoring && selectedJob.value) selectedJob.value = { ...selectedJob.value, _factoring: row._factoring }
 }
+// Every read of the dashboard (this tab's, another pane's write, the Triumph job's own word): the
+// open load's Triumph line and factoring box take the fresh row, so they follow by themselves.
+watch(() => props.jobs, () => freshFactoring())
 // While the tile says "Sending to Triumph…", the dashboard is read again a few times, so it can
 // say "Sent to Triumph" with no reload. It stops once the load or the tile changes.
 async function followTile() {
   const mine = ++triumphFollow
+  triumphLate.value = false
   for (const ms of [8000, 20000, 45000, 90000]) {
     await new Promise((resolve) => setTimeout(resolve, ms))
     if (mine !== triumphFollow || !selectedJob.value) return
@@ -1078,6 +1094,7 @@ async function followTile() {
     const f = selectedJob.value && selectedJob.value._factoring
     if (!f || !['queued', 'working'].includes(f.triumphState)) return
   }
+  if (mine === triumphFollow) triumphLate.value = true
 }
 async function processWithTriumph() {
   if (!auth.isSuperAdmin || !loadRefValue.value || triumphPressing.value) return
@@ -1301,6 +1318,11 @@ const detailSections = computed(() => {
 .triumph-btn:hover:not(:disabled) { background: #f1f5f9; }
 .triumph-btn:disabled { opacity: 0.75; cursor: progress; }
 .triumph-btn:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
+/* The load's steps to Triumph, under its line: plain, with each step done marked. */
+.triumph-steps { margin: 0.35rem 0 0; padding: 0 0.6rem; list-style: none; font-size: 0.72rem; line-height: 1.45; color: #64748b; }
+.triumph-step { display: flex; gap: 0.4rem; }
+.triumph-step--done { color: #166534; }
+.triumph-step-mark { flex: 0 0 auto; width: 0.9rem; text-align: center; }
 .inflight-reason { flex: 1 1 10rem; min-width: 0; font-size: 0.78rem; padding: 0.2rem 0.4rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; color: #111827; }
 .auto-result { margin-top: 0.35rem; font-size: 0.75rem; font-weight: 600; color: #166534; }
 .auto-result--error { color: #991b1b; }
