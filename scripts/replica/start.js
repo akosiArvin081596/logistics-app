@@ -34,6 +34,8 @@
 // environment. Production's non-secret settings come from
 // ~/LogisX-replica/settings.env, which the server reads itself; it never reads
 // a .env file. Prints the URL and the PID; stop it with npm run replica:clean.
+// When settings.env's APP_TIMEZONE names a zone that no usable APP_TIMEZONE_FROM
+// switches to, the server runs US Eastern, and a WARNING line says so.
 "use strict";
 
 const crypto = require("crypto");
@@ -210,7 +212,10 @@ async function main() {
 	const logFile = path.join(C.paths.logs, `server-${task}-${stamp}.log`);
 	const guardLog = path.join(C.paths.logs, `outbound-${task}-${stamp}.log`);
 	fs.writeFileSync(guardLog, "", { mode: 0o600 });
-	const tz = (fs.readFileSync(C.paths.settings, "utf8").match(/^TZ=['"`]?([^'"`\n]+)/m) || [])[1] || manifest.production.timeZone;
+	const settingsText = fs.readFileSync(C.paths.settings, "utf8");
+	const tz = (settingsText.match(/^TZ=['"`]?([^'"`\n]+)/m) || [])[1] || manifest.production.timeZone;
+	// Judged before the spawn: a lib/app-time.js that cannot load stops the start here.
+	const clock = C.clockWarningFor(codeDir, settingsText);
 	const env = {
 		PATH: process.env.PATH,
 		HOME: process.env.HOME,
@@ -254,6 +259,7 @@ async function main() {
 		C.fail(err.message);
 	}
 	console.log(`replica: LOCAL COPY OF PRODUCTION (task ${task}) is serving at http://127.0.0.1:${port}  pid ${child.pid}`);
+	if (clock) console.log(`replica: ${clock}`);
 	if (enabled.length) console.log(`replica: enabled for this task: ${enabled.join(", ")} (set to true for this start only; settings.env is unchanged)`);
 	if (fromText) console.log(`replica: first month for this task: ${fromText} (this start only; settings.env is unchanged)`);
 	console.log(`replica: outbound guard log ${guardLog} (empty = nothing was attempted)`);
