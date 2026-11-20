@@ -206,6 +206,30 @@ function replicaSheetIds(sheetsJsonPath) {
 	return ids;
 }
 
+// A warning when APP_TIMEZONE names a zone other than US Eastern that no usable
+// APP_TIMEZONE_FROM switches to, judged by the server's own lib/app-time.js
+// (`appTime`), so it stays on US Eastern. Null otherwise, and for code with no switch.
+function clockWarning(settings, appTime) {
+	if (!appTime || typeof appTime.resolveAppTimeZoneSwitch !== "function") return null;
+	const s = { APP_TIMEZONE: (settings || {}).APP_TIMEZONE, APP_TIMEZONE_FROM: (settings || {}).APP_TIMEZONE_FROM };
+	const zone = appTime.resolveAppTimeZone(s.APP_TIMEZONE);
+	if (zone === appTime.EASTERN_ERA_ZONE || appTime.resolveAppTimeZoneSwitch(s)) return null;
+	return `WARNING, BUSINESS CLOCK: settings.env sets APP_TIMEZONE ${zone} with no usable APP_TIMEZONE_FROM, so this replica dates every day, ` +
+		`week and time on ${appTime.EASTERN_ERA_ZONE} (the server log says why). Production runs ${zone} once its own APP_TIMEZONE_FROM is set: ` +
+		"run npm run replica:pull, which copies it, then start the task again.";
+}
+
+// clockWarning() for the code in `codeDir`, on the settings file's text parsed as
+// the server parses it (dotenv, lib/replica-mode.js). Code without lib/app-time.js
+// or dotenv has no server that can boot, so it gets no line.
+function clockWarningFor(codeDir, settingsText) {
+	const appTimeFile = path.join(codeDir, "lib", "app-time.js");
+	if (!fs.existsSync(appTimeFile)) return null;
+	let dotenv;
+	try { dotenv = require(require.resolve("dotenv", { paths: [codeDir] })); } catch { return null; }
+	return clockWarning(dotenv.parse(settingsText), require(appTimeFile));
+}
+
 module.exports = {
 	ROOT,
 	DATA_FOLDERS,
@@ -228,4 +252,6 @@ module.exports = {
 	dirStats,
 	mib,
 	replicaSheetIds,
+	clockWarning,
+	clockWarningFor,
 };
