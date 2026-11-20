@@ -151,7 +151,7 @@ function callSites(name) {
 // the shape that passes. AUDITED_UPSTREAM is spelled out at the call site so a
 // deliberate skip is legible as one.
 const AUDITED = (args) => /\baction:\s*["'`a-zA-Z]/.test(args) || /AUDITED_UPSTREAM/.test(args)
-	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit|accountRowAudit|companyAudit)\b/.test(args);
+	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|moveAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit|accountRowAudit|companyAudit)\b/.test(args);
 
 let totalSites = 0;
 for (const h of HELPERS) {
@@ -605,6 +605,9 @@ const MUST_NOT_BE_PURGEABLE = [
 	"add_driver_day_blocked", "exclude_driver_day_blocked",
 	"restore_driver_day_blocked", "restore_added_driver_day_blocked",
 	"delete_sheet_row_blocked", "routemate_link_blocked", "routemate_unlink_blocked",
+	// Move device's refusal over a finalized month (FAILS ON THE OLD CODE, which has no such action): the same
+	// settlement evidence as the link's and the unlink's, so kept forever too.
+	"routemate_move_blocked",
 	"maintenance_fund_blocked", "create_compliance_fee_blocked", "pay_compliance_fee_blocked",
 	"period_refusal_blocked",
 	// The invoice write guard. `adjust_invoice_blocked` refuses a ±$10,000 signed
