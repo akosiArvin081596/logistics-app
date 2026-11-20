@@ -658,9 +658,8 @@ const props = defineProps({
   // True when an official draft already exists for this load (opened via
   // "Review"); re-approving mints a second draft, so gate it behind a confirm.
   alreadyDrafted: { type: Boolean, default: false },
-  // The page's check at Approve, before anything is made (while automatic drafts
-  // are on): resolves { go, asked }. go false stops; asked means it already put a
-  // question, so the confirm above isn't asked as well.
+  // The page's check at Approve (while automatic drafts are on), run after the
+  // questions and right before the save: resolves { go }, and go false stops.
   beforeApprove: { type: Function, default: null },
 })
 
@@ -1539,29 +1538,27 @@ function totalChangeConfirm() {
 
 async function approve() {
   if (approving.value || !canApprove.value) return
-  // The page's check first, when it gives one. Approve stays held while it reads,
-  // so a second click makes nothing.
-  let check = null
-  if (props.beforeApprove) {
-    approving.value = true
-    try {
-      check = await props.beforeApprove()
-    } catch {
-      approveError.value = "Could not check this load's drafts. Nothing was sent — try again."
-    } finally {
-      approving.value = false
-    }
-    if (!check || !check.go) return
-  }
   // Re-approving an already-drafted load mints a SECOND draft + invoice number
   // (the first is not removed), so require an explicit confirm first.
-  if (props.alreadyDrafted && !(check && check.asked) && !window.confirm(DUPLICATE_APPROVE_MSG)) return
+  if (props.alreadyDrafted && !window.confirm(DUPLICATE_APPROVE_MSG)) return
   // Second confirm, and only for the total: it is the one edit that makes the
   // invoice disagree with the books on purpose.
   if (edited.value.total && !window.confirm(totalChangeConfirm())) return
   approving.value = true
   approveError.value = ''
   try {
+    // The page's check last, right before the save, so a draft made while a
+    // question above was open is still seen. Approve stays held while it reads.
+    if (props.beforeApprove) {
+      let check = null
+      try {
+        check = await props.beforeApprove()
+      } catch {
+        approveError.value = "Could not check this load's drafts. Nothing was sent — try again."
+        return
+      }
+      if (!check || !check.go) return
+    }
     // The SAME body the preview rendered — one builder, so what was reviewed is
     // what is sent. The recipient is pinned for the reason it always was: approve
     // re-runs the whole extraction pipeline (fresh Gemini), so sending the exact
