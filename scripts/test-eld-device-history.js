@@ -503,6 +503,56 @@ function inZone(zone) {
 	}
 	check("§4 ...and every zone found the same values", new Set(verdicts.map(([, v]) => v.digest)).size, 1);
 
+	// ===========================================================================
+	// §5 Move device's handover (POST /api/trucks/:truckId/move-eld), made-up trucks T-100 (1) and T-200 (2), devices D-7
+	// and D-11. §5.1 is a pin (it passes on a build without the route); §5.2 FAILS ON THE OLD CODE.
+	// ===========================================================================
+	console.log("§5 Move device's handover");
+	if (/function recordEldDeviceAssignment/.test(HISTORY_SRC)) {
+		const db = freshDb();
+		const t = db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id) VALUES (?, ?, ?)");
+		t.run(1, "T-100", "D-7"); t.run(2, "T-200", "D-11");
+		const w = build(db, HISTORY_SRC, ["ensureEldDeviceHistorySeeded", "recordEldDeviceAssignment"]);
+		w.ensureEldDeviceHistorySeeded();
+		const at = new Date(NOW + DAY).toISOString();
+		db.prepare("UPDATE trucks SET routemate_vehicle_id = CASE id WHEN 1 THEN '' ELSE 'D-7' END").run();
+		w.recordEldDeviceAssignment(2, "D-7", "qa-admin", at);
+		check("§5.1 pin (mutant: the writer closing one side only): one call closes D-7 on T-100 and D-11 on T-200 at the instant and opens D-7 on T-200 at it",
+			hist(db), [[1, "D-7", "now", at, "system:seed"], [2, "D-11", "now", at, "system:seed"], [2, "D-7", at, "open", "qa-admin"]]);
+	}
+	{
+		const W = require("./lib/work-days-world");
+		if (!W.SRC.split("\n").some((l) => l.startsWith('app.post("/api/trucks/:truckId/move-eld",'))) {
+			fail++;
+			console.error("FAIL  §5.2 POST /api/trucks/:truckId/move-eld does not exist on this build (FAILS ON THE OLD CODE)");
+		} else {
+			const START = "2026-10-03T03:00:00.000Z";
+			const FROM = "2026-11-02T15:00:00.000Z";
+			const T = "2026-11-20T14:41:00.000Z";
+			const w = W.startWorld({
+				env: { ELD_LINK_FORWARD_ONLY_ENABLED: "true", ELD_LINK_FORWARD_ONLY_FROM: FROM, ELD_MOVE_DEVICE_ENABLED: "true" },
+				drivers: [{ name: "Pat Example" }, { name: "Sam Sample" }],
+				trucks: [{ unit: "T-100", driver: "Pat Example", vid: "D-7" }, { unit: "T-200", driver: "Sam Sample", vid: "D-11" }],
+				pings: { "D-7": [{ ms: Date.parse(T) - 300000, lat: W.DALLAS.lat, lng: W.DALLAS.lng, odo: 100000, speed: 0 }] },
+				now: Date.parse(T), routes: [["post", "/api/trucks/:truckId/move-eld"]], expose: ["buildEldDeviceResolver"],
+			});
+			w.db.prepare("INSERT INTO server_state (key, value, updated_at) VALUES ('eld_device_history_started', ?, CURRENT_TIMESTAMP)").run(JSON.stringify({ at: START, atMs: Date.parse(START), links: 2 }));
+			w.db.prepare("INSERT INTO server_state (key, value, updated_at) VALUES ('eld_link_forward_from', ?, CURRENT_TIMESTAMP)").run(JSON.stringify({ from: FROM, fromMs: Date.parse(FROM), recordedAt: FROM }));
+			const row = w.db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (?, ?, ?, '', 'system:seed')");
+			row.run(1, "D-7", START); row.run(2, "D-11", START);
+			for (const v of ["D-7", "D-11"]) w.db.prepare("INSERT INTO routemate_vehicles (routemate_vehicle_id, vehicle_id) VALUES (?, ?)").run(v, v);
+			const r = await W.route(w, "POST /api/trucks/:truckId/move-eld", { params: { truckId: "2" }, body: { routemateVehicleId: "D-7" } });
+			check("§5.2 the move passes (FAILS ON THE OLD CODE)", r.status, 200);
+			const res = w.api.buildEldDeviceResolver({ frozenBefore: Date.parse(FROM) });
+			const runs = (id) => res.truckRuns(id, Date.parse("2026-11-19T00:00:00Z"), Date.parse("2026-11-22T00:00:00Z"))
+				.map((x) => [x.fromMs === -Infinity ? "-" : new Date(x.fromMs).toISOString(), x.toMs === Infinity ? "+" : new Date(x.toMs).toISOString(), x.vid]);
+			check("§5.2a T-100: D-7 up to the instant, no device from it (FAILS ON THE OLD CODE)", runs(1), [["-", T, "D-7"], [T, "+", ""]]);
+			check("§5.2b T-200: D-11 up to the instant and D-7 from it, with no gap between (FAILS ON THE OLD CODE)", runs(2), [["-", T, "D-11"], [T, "+", "D-7"]]);
+			check("§5.2c D-7 is T-100's a millisecond before the instant and T-200's at it (FAILS ON THE OLD CODE)",
+				[res.truckForVehicleAt("D-7", Date.parse(T) - 1), res.truckForVehicleAt("D-7", Date.parse(T))], [1, 2]);
+		}
+	}
+
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((err) => {

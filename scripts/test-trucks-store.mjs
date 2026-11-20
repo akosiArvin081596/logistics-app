@@ -20,6 +20,8 @@
 // mutants, each a plausible regression, and every one must fail a scenario.
 // Section 1 also pins the fixed-cost badge's tooltip: the instruction to add the
 // costs via Edit goes only to a user who can edit trucks, not to an investor.
+// Section 4 runs Move device's helpers for the Link dialog (client/src/lib/eldMove.js)
+// and pins how TruckTable.vue uses them.
 //
 // No DOM, no server. Section 2 loads Pinia from client/node_modules (installed by
 // `npm ci` at the repo root) and stubs fetch; nothing waits on a real timer.
@@ -575,6 +577,88 @@ if (piniaModule) {
     const results = await quiet(() => runStoreScenarios(source))
     ok(`store mutant survived: ${name} — no store scenario noticed it`, results.some((r) => !r.ok))
   }
+}
+
+// ══ 4. Move device in the Link dialog (client/src/lib/eldMove.js) ═════════════
+// Made-up trucks and devices. Each check FAILS ON THE OLD CODE (no lib/eldMove.js, no move in the dialog) unless its
+// label says pin.
+{
+  const file = path.join(CLIENT_SRC, 'lib', 'eldMove.js')
+  if (!fs.existsSync(file)) ok('4.0 client/src/lib/eldMove.js exists (FAILS ON THE OLD CODE)', false)
+  else {
+    const M = await import(pathToFileURL(file).href)
+    // GET /api/routemate/vehicles: a free device, devices on three other trucks, and this truck's (T-200, id 2).
+    const ALL = [
+      { routemate_vehicle_id: 'rm-4', vehicle_id: 'D-4', linked_truck_id: null, linked_truck_unit: null },
+      { routemate_vehicle_id: 'rm-9', vehicle_id: 'D-9', linked_truck_id: 3, linked_truck_unit: 'T-150' },
+      { routemate_vehicle_id: 'rm-7', vehicle_id: ' D-7 ', linked_truck_id: 1, linked_truck_unit: 'T-100' },
+      { routemate_vehicle_id: 'rm-2', vehicle_id: 'D-2', linked_truck_id: 2, linked_truck_unit: 'T-200' },
+      { routemate_vehicle_id: '18000000001', vehicle_id: '', linked_truck_id: 11, linked_truck_unit: 'T-1000' },
+    ]
+    eq('4.1 the second group: devices on another truck (this truck\'s and the free ones left out), by truck unit, named as the picker names them (FAILS ON THE OLD CODE)',
+      M.devicesOnOtherTrucks(ALL, 2), [
+        { id: 'rm-7', label: 'D-7', unit: 'T-100', truckId: 1 },
+        { id: 'rm-9', label: 'D-9', unit: 'T-150', truckId: 3 },
+        { id: '18000000001', label: '18000000001', unit: 'T-1000', truckId: 11 },
+      ])
+    // An api whose answers the case sets, recording what was asked.
+    const scripted = (answers) => {
+      const asked = []
+      return { asked, api: { get: async (url) => { asked.push(url); const a = answers[url]; if (a instanceof Error) throw a; return a } } }
+    }
+    const UNLINKED = '/api/routemate/vehicles/unlinked?truckId=2'
+    {
+      const s = scripted({ [UNLINKED]: { vehicles: [{ routemate_vehicle_id: 'rm-4' }], suggested: { routemate_vehicle_id: 'rm-4' } } })
+      const r = await M.loadLinkChoices(s.api, { id: 2 })
+      eq('4.2 the switch off (no moveDevice in the answer): one read, the one the dialog always made, and no second group (FAILS ON THE OLD CODE)',
+        [s.asked, r.move, r.others, r.vehicles.length, r.suggested.routemate_vehicle_id], [[UNLINKED], false, [], 1, 'rm-4'])
+    }
+    {
+      const s = scripted({ [UNLINKED]: { vehicles: [], moveDevice: true }, '/api/routemate/vehicles': { vehicles: ALL } })
+      const r = await M.loadLinkChoices(s.api, { id: 2 })
+      eq('4.3 offered: the second read, and the group from it (FAILS ON THE OLD CODE)', [s.asked, r.move, r.others.map((d) => d.label)],
+        [[UNLINKED, '/api/routemate/vehicles'], true, ['D-7', 'D-9', '18000000001']])
+    }
+    {
+      const s = scripted({ [UNLINKED]: { vehicles: [{ routemate_vehicle_id: 'rm-4' }], moveDevice: true }, '/api/routemate/vehicles': Object.assign(new Error('Request failed (500)'), { status: 500 }) })
+      const r = await M.loadLinkChoices(s.api, { id: 2 })
+      eq('4.4 the second read failing keeps the free devices and says why (FAILS ON THE OLD CODE)', [r.vehicles.length, r.others, r.othersError], [1, [], 'Request failed (500)'])
+    }
+    {
+      const s = scripted({ [UNLINKED]: { vehicles: [], moveDevice: 'true' } })
+      const r = await M.loadLinkChoices(s.api, { id: 2 })
+      eq('4.5 only moveDevice === true offers it (FAILS ON THE OLD CODE)', [r.move, s.asked.length], [false, 1])
+    }
+    eq('4.6 the confirm\'s words (FAILS ON THE OLD CODE)', M.moveConfirmWords({ device: 'D-7', from: 'T-100', to: 'T-200' }), {
+      title: 'Move D-7 from T-100 to T-200?',
+      body: 'From now on D-7 counts for T-200. T-100 will have no ELD device until you link one. Earlier days stay as they were.',
+    })
+    eq('4.7 the empty free group\'s words while devices sit on other trucks (FAILS ON THE OLD CODE)', M.MOVE_FREE_EMPTY, 'No free devices. Pick one under On another truck to move it here.')
+    // A refusal as useApi hands it over: the server's error, status, code and body.
+    const DATA_FIX = 'This needs a data fix. Send a screenshot of this message to the LogisX team. Nothing was changed.'
+    const BAD_CELL = 'Cannot move D-9. Load L-1001 on T-150 has "14:00" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can\'t be moved off T-150.'
+    const refused = Object.assign(new Error(`${BAD_CELL} ${DATA_FIX}`), { status: 409, code: 'ELD_MOVE_BLOCKED', data: { lead: 'Cannot move D-9.', paragraphs: [BAD_CELL, DATA_FIX] } })
+    eq('4.8 a refusal: the lead (bold), the rest of its paragraph, then the data-fix line (FAILS ON THE OLD CODE)', M.moveRefusalView(refused), {
+      lead: 'Cannot move D-9.', first: BAD_CELL.slice('Cannot move D-9.'.length), rest: [DATA_FIX],
+    })
+    const READ = 'Job Tracking couldn\'t be read just now. Try again in a minute. Nothing was changed.'
+    eq('4.9 the try-again line has no lead; an answer with no paragraphs (a 404) shows its message; a lead that does not open its paragraph is not cut from it (FAILS ON THE OLD CODE)',
+      [M.moveRefusalView(Object.assign(new Error(READ), { status: 409, data: { lead: '', paragraphs: [READ] } })), M.moveRefusalView(Object.assign(new Error('Truck not found'), { status: 404, data: { error: 'Truck not found' } })),
+        M.moveRefusalView(Object.assign(new Error(READ), { status: 409, data: { lead: 'Cannot move D-7.', paragraphs: [READ] } }))],
+      [{ lead: '', first: READ, rest: [] }, { lead: '', first: 'Truck not found', rest: [] }, { lead: '', first: READ, rest: [] }])
+  }
+  const src = fs.readFileSync(path.join(CLIENT_SRC, 'components/trucks/TruckTable.vue'), 'utf8')
+  ok('4.10 TruckTable.vue loads the dialog\'s choices through loadLinkChoices (FAILS ON THE OLD CODE)', /const r = await loadLinkChoices\(api, truck\)/.test(src))
+  ok('4.11 a move goes to the move route only, after the confirm (FAILS ON THE OLD CODE)',
+    (src.match(/\/move-eld`/g) || []).length === 1 && /api\.post\(`\/api\/trucks\/\$\{linkTruck\.value\.id\}\/move-eld`, body\)/.test(src)
+      && /@click="pickedMove \? startMove\(\) : handleLink\(\)"/.test(src) && /@click="handleMove"/.test(src))
+  ok('4.12 the two groups\' headings and Move here appear only while the move is offered (FAILS ON THE OLD CODE)',
+    /<div v-if="moveOn" class="rm-group-label">Free devices<\/div>/.test(src) && /<template v-if="moveOn">\s*<div class="rm-group-label">On another truck<\/div>/.test(src)
+      && src.includes("(pickedMove ? 'Move here' : 'Link Selected')") && src.includes("const pickedMove = computed(() => (moveOn.value ?"))
+  ok('4.13 a silent device on a move is asked about with Move anyway, and a refusal shows its paragraphs with Close (FAILS ON THE OLD CODE)',
+    src.includes("'Move anyway'") && /<p v-for="\(line, i\) in moveRefusal\.rest" :key="i">\{\{ line \}\}<\/p>/.test(src) && /@click="closeLinkModal">Close<\/button>/.test(src))
+  ok('4.14 pin: today\'s words are still there (the empty list, Link Selected, Link anyway)',
+    src.includes('No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.') && src.includes("'Link Selected'") && src.includes("'Link anyway'"))
 }
 
 console.log(`\ntrucks-store: ${pass} passed, ${fail} failed`)

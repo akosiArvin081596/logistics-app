@@ -146,6 +146,7 @@
 			"GET /api/routemate/vehicles/unlinked",
 			"POST /api/trucks/:truckId/link-routemate",
 			"DELETE /api/trucks/:truckId/link-routemate",
+			"POST /api/trucks/:truckId/move-eld",
 			"GET /api/admin/fleet-health",
 			"GET /api/routemate/fuel/summary",
 			"GET /api/routemate/fault-codes",
