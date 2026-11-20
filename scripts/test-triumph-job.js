@@ -27,6 +27,12 @@
 //   §15 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): the switch in the job's
 //       settings reaches the build; files_json and both audit rows say what was left out, the
 //       submitted row from the batch's own record; off, the batch, record and words as before
+//   §16 way 1's photo re-compress (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED): the switch in the job's
+//       settings reaches the build; files_json carries the POD's record, both audit rows say how
+//       many page images were re-compressed and the bytes before and after, the submitted row from
+//       the record; the practice run's answers carry it, built or stopped at the floor or with the
+//       steps skipped; a claim stopped after the steps gets one counts-only audit row saying they
+//       ran, or why not; off, the record, the words, the answers and the rows as before
 //
 // Made-up loads only (LD-TEST-*), in memory and under the system temp folder.
 //   node scripts/test-triumph-job.js      # exits 1 on any failure
@@ -681,6 +687,130 @@ async function dedupeClaims() {
 	const sent = await later.make({ loadDocuments: twice }).submitNow({}, LOAD);
 	eq([sent.ok, say(later.claim())], [true, "submitted"], "§15 (fixture) staged with the switch on, then Submit now with it off");
 	ok(words(later, "triumph_submitted").endsWith(` bytes; ${WORDS}`), "§15 FAILS ON THE OLD CODE: ...the submitted row still says what was left out: its words come from the batch's own record");
+}
+
+// ---------------------------------------------------------------- §16
+async function recompressClaims() {
+	section("§16 way 1's photo re-compress (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED)");
+	const jpegs = require(path.join(ROOT, "scripts", "lib", "made-up-jpeg.js"));
+	const PHOTO = jpegs.jpeg({ seed: 1 });
+	const PHOTO_POD = await jpegs.imagePdf([{ text: ["PROOF OF DELIVERY (MADE UP)"], images: [{ bytes: PHOTO, width: 820, height: 620 }] }]);
+	const photoDocs = async () => [{ id: 1, type: "POD", uploaded_at: "2026-11-10 14:00:00", buffer: PHOTO_POD }];
+	const record = (w) => {
+		try {
+			return JSON.parse(w.claim().files_json);
+		} catch {
+			return {};
+		}
+	};
+	const words = (w, action) => (w.audits.find((a) => a.action === action) || {}).details || "";
+	const podOf = (files) => (files.parts || []).find((p) => p.kind === "pod") || {};
+
+	// The batch as built today, for its size: a dry run with the switch off.
+	const off = world({ env: DRY });
+	off.queue();
+	await off.make({ loadDocuments: photoDocs }).tick();
+	const T0 = off.claim().batch_bytes;
+	ok(say(off.claim()) === "staged" && T0 > PHOTO.length && T0 < 921599, "§16 (fixture) the switch off: a POD of one made-up camera photo, staged under Triumph's own limit");
+	const SWITCH = { TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: String(T0 - 1000) };
+
+	const on = world({ env: { ...DRY, ...SWITCH } });
+	on.queue();
+	await on.make({ loadDocuments: photoDocs }).tick();
+	const r = podOf(record(on)).recompressed;
+	eq([say(on.claim()), r && r.quality, r && r.images, r && r.left, r && r.bytesBefore, r && r.sourceSha256], ["staged", 70, 1, 0, PHOTO_POD.length, crypto.createHash("sha256").update(PHOTO_POD).digest("hex")],
+		"§16 FAILS ON THE OLD CODE: the switch passes through from the job's settings: over the lowered limit, the POD's photo is re-compressed at 70 and the batch is staged");
+	ok(Boolean(r) && r.bytesAfter === podOf(record(on)).bytes && r.bytesAfter < r.bytesBefore, "§16 FAILS ON THE OLD CODE: files_json's POD part carries its record: the bytes sent beside the bytes uploaded");
+	const WORDS = r ? `1 page image re-compressed at quality 70: ${r.bytesBefore} → ${r.bytesAfter} bytes` : "(no record)";
+	ok(words(on, "triumph_batch_staged").endsWith(` bytes; ${WORDS}; nothing was sent`), "§16 FAILS ON THE OLD CODE: the staged row, the one a person reads before Submit now, says how many page images were re-compressed, at what quality, and the bytes");
+
+	const live = world({ env: { ...LIVE, ...SWITCH } });
+	live.queue();
+	await live.make({ loadDocuments: photoDocs }).tick();
+	eq([say(live.claim()), live.spies.puts.length], ["submitted", 2], "§16 FAILS ON THE OLD CODE (fixture): live, the switch on: over the lowered limit, re-compressed and submitted, the PDF and the CSV put");
+	ok(words(live, "triumph_submitted").endsWith(` bytes; ${WORDS}`), "§16 FAILS ON THE OLD CODE: the triumph_submitted row says it too");
+
+	const later = world({ env: { ...DRY, ...SWITCH } });
+	later.queue();
+	await later.make({ loadDocuments: photoDocs }).tick();
+	later.envBase = LIVE;
+	const sent = await later.make({ loadDocuments: photoDocs }).submitNow({}, LOAD);
+	eq([sent.ok, say(later.claim())], [true, "submitted"], "§16 FAILS ON THE OLD CODE (fixture): staged with the switch on, then Submit now with it off");
+	ok(words(later, "triumph_submitted").endsWith(` bytes; ${WORDS}`), "§16 FAILS ON THE OLD CODE: ...the submitted row still says it: its words come from the batch's own record");
+
+	// The practice run's two answers (rehearse()), on a Process with Triumph claim.
+	const probe = buttonWorld();
+	probe.arm();
+	await probe.make({ loadDocuments: photoDocs }).tick();
+	const B0 = probe.claim().batch_bytes;
+	ok(say(probe.claim()) === "submitted" && B0 > PHOTO.length, "§16 (fixture) the press's batch with the photo POD, switch off: submitted, its size read");
+	const reuseOf = (w) => ({ invoiceId: CHR_N, invoiceDate: CHR_D, draftRowId: w.rowId, total: CHR_TOTAL });
+	const fitW = buttonWorld({ env: { TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: String(B0 - 1000) } });
+	const fitR = await fitW.make({ loadDocuments: photoDocs }).rehearse(CHR_LOAD, reuseOf(fitW));
+	eq([fitR.ok, fitR.recompressed && fitR.recompressed.images, fitR.recompressed && fitR.recompressed.quality, fitR.recompressed && fitR.recompressed.bytesBefore], [true, 1, 70, PHOTO_POD.length],
+		"§16 FAILS ON THE OLD CODE (N6): the practice run's built answer carries the record: images, quality, and the touched parts' bytes before and after");
+	ok(fitR.recompressed && fitR.recompressed.bytesAfter < fitR.recompressed.bytesBefore && !("sourceSha256" in fitR.recompressed), "§16 FAILS ON THE OLD CODE: ...counts only, no hash");
+	// The photo's bytes less 1,000: over by less than them, so the steps run, and still over at 50.
+	const floorW = buttonWorld({ env: { TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: String(B0 - PHOTO.length + 1000) } });
+	const floorR = await floorW.make({ loadDocuments: photoDocs }).rehearse(CHR_LOAD, reuseOf(floorW));
+	eq([floorR.ok, floorR.code, floorR.floorReached, floorR.recompressed && floorR.recompressed.quality, floorR.recompressed && floorR.recompressed.images], [false, "BATCH_TOO_LARGE", true, 50, 1],
+		"§16 FAILS ON THE OLD CODE (L3): a build stopped at the floor passes its record on: the practice run's stop answer says the floor was reached, with the floor's counts");
+
+	// A claim stopped after the photo steps: one counts-only audit row says they ran, or why they
+	// didn't, so the stop reads apart from one with the switch off (review L2).
+	const photoRows = (w) => w.audits.filter((a) => a.action === "triumph_batch_photo_steps").map((a) => a.details);
+	const floorJ = world({ env: { ...DRY, TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: String(T0 - PHOTO.length + 1000) } });
+	floorJ.queue();
+	await floorJ.make({ loadDocuments: photoDocs }).tick();
+	const floorRows = photoRows(floorJ);
+	eq([say(floorJ.claim()), floorRows.length], ["needs_attention BATCH_TOO_LARGE", 1], "§16 FAILS ON THE OLD CODE (L2): a batch still over at the floor stops as before, and one audit row says the photo steps ran");
+	ok(/^BATCH_TOO_LARGE after the photo steps \(quality 70, 60, 50\): still over the limit at the floor; 1 page image re-compressed at quality 50: \d+ → \d+ bytes$/.test(floorRows[0] || ""),
+		`§16 FAILS ON THE OLD CODE (L2): ...its words: the steps, the floor, the image and the bytes before and after, counts only (${floorRows[0] || "no row"})`);
+	const skipJ = world({ env: { ...DRY, TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: "1000" } });
+	skipJ.queue();
+	await skipJ.make({ loadDocuments: photoDocs }).tick();
+	eq([say(skipJ.claim()), photoRows(skipJ)], ["needs_attention BATCH_TOO_LARGE", ["BATCH_TOO_LARGE; the photo steps did not run: the batch is over by at least its photos' bytes (UNREACHABLE)"]],
+		"§16 FAILS ON THE OLD CODE (L2): over by at least its photos' bytes: the row says the steps didn't run, and why");
+	const skipW = buttonWorld({ env: { TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true", TRIUMPH_BATCH_MAX_BYTES: "1000" } });
+	const skipR = await skipW.make({ loadDocuments: photoDocs }).rehearse(CHR_LOAD, reuseOf(skipW));
+	eq([skipR.ok, skipR.code, skipR.recompressSkipped, skipR.floorReached], [false, "BATCH_TOO_LARGE", "UNREACHABLE", undefined],
+		"§16 FAILS ON THE OLD CODE (L2): ...and the practice run's stop answer carries the skip code");
+	// The row's words, every branch: the floor with copies kept and with none, each skip code, and no
+	// row for any other stop (an unknown code, an inherited name, or none).
+	const stepWords = typeof jobLib.photoStepWords === "function" ? jobLib.photoStepWords : () => "not exported";
+	const kept = [{ quality: 60, images: 2, left: 1, bytesBefore: 9000, bytesAfter: 7000 }, { quality: 60, images: 1, left: 0, bytesBefore: 3000, bytesAfter: 2500 }];
+	eq([
+		stepWords({ floorReached: true, recompressed: kept }),
+		stepWords({ floorReached: true, recompressed: [] }),
+		...["UNREACHABLE", "TOO_MANY", "OUT_OF_TIME", "MERGE_FAILED"].map((code) => stepWords({ recompressSkipped: code })),
+		stepWords({ recompressSkipped: "MADE_UP_CODE" }), stepWords({ recompressSkipped: "toString" }), stepWords({}),
+	], [
+		"BATCH_TOO_LARGE after the photo steps (quality 70, 60, 50): still over the limit at the floor; 3 page images re-compressed at quality 60: 12000 → 9500 bytes",
+		"BATCH_TOO_LARGE after the photo steps (quality 70, 60, 50): still over the limit at the floor; no copy was smaller at any step",
+		"BATCH_TOO_LARGE; the photo steps did not run: the batch is over by at least its photos' bytes (UNREACHABLE)",
+		"BATCH_TOO_LARGE; the photo steps did not run: more photos than the steps take (TOO_MANY)",
+		"BATCH_TOO_LARGE; the photo steps stopped: the batch's time budget ran out (OUT_OF_TIME)",
+		"BATCH_TOO_LARGE; the photo steps stopped: a step's merge failed (MERGE_FAILED)",
+		"", "", "",
+	], "§16 FAILS ON THE OLD CODE (L2): the row's words, counts and codes only: the floor with copies kept and with none, each skip code, and none for any other stop (mutant: any branch's words, or a row for any code)");
+
+	// These pass on the old code by design.
+	const offJ = world({ env: { ...DRY, TRIUMPH_BATCH_MAX_BYTES: String(T0 - 1000) } });
+	offJ.queue();
+	await offJ.make({ loadDocuments: photoDocs }).tick();
+	eq([say(offJ.claim()), photoRows(offJ)], ["needs_attention BATCH_TOO_LARGE", []], "§16 the switch off and over the limit: no photo-steps row (mutant: the row written for every batch over the limit)");
+	const offFiles = record(off);
+	eq([Object.keys(offFiles), (offFiles.parts || []).map((p) => Object.keys(p))], [["pdf", "csv", "invoicePage", "parts", "row"], [["kind", "sha256", "bytes", "pages"], ["kind", "sha256", "bytes", "pages"], ["kind", "sha256", "bytes", "pages"]]],
+		"§16 the switch off: files_json holds what it always held, each part its four fields (mutant: on with the switch off)");
+	ok(/^11122026-1: 11122026-1\.pdf and logisx_\d{8}T\d{6}Z_11122026-1\.csv, \d+ bytes; nothing was sent$/.test(words(off, "triumph_batch_staged")), "§16 ...and the staged row's words as they were");
+	const offW = buttonWorld({ env: { TRIUMPH_BATCH_MAX_BYTES: String(B0 - 1000) } });
+	const offR = await offW.make({ loadDocuments: photoDocs }).rehearse(CHR_LOAD, reuseOf(offW));
+	eq([offR.ok, offR.code, Object.keys(offR).sort()], [false, "BATCH_TOO_LARGE", ["changed", "code", "copiesLeftOut", "ok", "step", "wholeRead"]],
+		"§16 the switch off and over the limit: the practice run's stop answer as it always was");
+	const okW = buttonWorld({ env: {} });
+	const okR = await okW.make({ loadDocuments: photoDocs }).rehearse(CHR_LOAD, reuseOf(okW));
+	eq([okR.ok, Object.keys(okR).sort()], [true, ["copiesLeftOut", "dateMatches", "holdFieldsUnchanged", "numberMatches", "ok", "pages", "parts", "totalMatches", "wholeRead"]],
+		"§16 ...and its built answer as it always was");
 }
 
 (async () => {
@@ -1339,6 +1469,8 @@ async function dedupeClaims() {
 	await buttonClaims();
 
 	await dedupeClaims();
+
+	await recompressClaims();
 
 	section("§13 every code a claim was left with is on the list the page words");
 	{

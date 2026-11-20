@@ -18,6 +18,7 @@
 //      the late reference; dry, or the hold off, 404; the start-up line says which
 //   §8 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): with the job on and the
 //      switch exactly "true", one start-up line says so; otherwise the lines are as before
+//   §9 way 1's photo re-compress (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED): the same, its own line
 //
 // Made-up loads and settings only (LD-TEST-*).
 //   node scripts/test-triumph-wiring.js      # exits 1 on any failure
@@ -278,6 +279,22 @@ function wire(env, { replica = null } = {}) {
 			"§8 FAILS ON THE OLD CODE: the job on and the switch on: one more start-up line, saying so");
 		eq(lines(DEDUPE), ["[triumph] submit off; connection settings unset"], "§8 ...the job off: no line, since it builds nothing");
 		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_BATCH_DEDUPE_ENABLED: "TRUE" }), ["[triumph] submit dry; connection settings unset"], "§8 ...and anything but \"true\" is off: no line");
+	}
+
+	// ---------------------------------------------------------------- §9
+	section("§9 way 1's photo re-compress: the start-up line");
+	{
+		const lines = (env) => wire(env).logs.filter((l) => l.startsWith("[triumph]"));
+		const RECOMPRESS = { TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "true" };
+		const SAID = "[triumph] a batch over the limit re-compresses its POD and BOL photos at the same size";
+		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", ...RECOMPRESS }), ["[triumph] submit dry; connection settings unset", SAID],
+			"§9 FAILS ON THE OLD CODE: the job on and the switch on: one more start-up line, saying so");
+		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_BATCH_DEDUPE_ENABLED: "true", ...RECOMPRESS }), ["[triumph] submit dry; connection settings unset", "[triumph] a batch sends each identical BOL or POD once", SAID],
+			"§9 FAILS ON THE OLD CODE: ...after the dedupe's line when both are on");
+		eq(lines(RECOMPRESS), ["[triumph] submit off; connection settings unset"], "§9 ...the job off: no line, since it builds nothing");
+		eq(lines({ TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED: "TRUE" }), ["[triumph] submit dry; connection settings unset"], "§9 ...and anything but \"true\" is off: no line");
+		ok(lines({ TRIUMPH_SUBMIT_ENABLED: "true", ...RECOMPRESS }).every((l) => !l.startsWith("[triumph] submit ") || l === "[triumph] submit dry; connection settings unset"),
+			"§9 ...its line doesn't start with \"[triumph] submit \", so the start lines the switch-on set reads are the same");
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
