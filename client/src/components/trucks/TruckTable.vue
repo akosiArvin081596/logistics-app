@@ -193,6 +193,45 @@
         <div class="confirm-dialog" style="max-width:560px;">
           <h3 v-if="repointing">Change ELD device for {{ linkTruck.UnitNumber || 'this truck' }}</h3>
           <h3 v-else>Link Truck {{ linkTruck?.UnitNumber || '' }} to an ELD device</h3>
+
+          <!-- Move device: the confirm before a move is sent, and a refused move in the server's words, each alone in
+               the dialog. Both focus their panel, not a button, so a second Enter cannot send. -->
+          <template v-if="moveStep === 'confirm'">
+            <div ref="moveConfirmEl" class="rm-move-confirm" tabindex="-1" role="group" aria-labelledby="rm-move-title">
+              <div id="rm-move-title" class="rm-move-title">{{ moveWords.title }}</div>
+              <div>{{ moveWords.body }}</div>
+            </div>
+            <div
+              v-if="silentPrompt"
+              ref="silentPromptEl"
+              class="rm-silent-prompt rm-move-gap"
+              role="alert"
+              tabindex="-1"
+            >
+              <div>{{ silentPrompt.error }}</div>
+              <button
+                type="button"
+                class="btn-link-anyway"
+                :disabled="linkBusy"
+                @click="handleMoveAnyway"
+              >{{ linkBusy ? 'Moving...' : 'Move anyway' }}</button>
+            </div>
+            <div v-if="moveError" class="rm-pick-error rm-move-gap" role="alert">{{ moveError }}</div>
+            <div class="confirm-actions">
+              <button class="btn btn-secondary" :disabled="linkBusy" @click="cancelMove">Cancel</button>
+              <button class="btn btn-primary" :disabled="linkBusy" @click="handleMove">{{ linkBusy ? 'Moving...' : 'Move device' }}</button>
+            </div>
+          </template>
+          <template v-else-if="moveStep === 'refused'">
+            <div ref="moveRefusalEl" class="rm-move-refusal" role="alert" tabindex="-1">
+              <p><b v-if="moveRefusal.lead">{{ moveRefusal.lead }}</b>{{ moveRefusal.first }}</p>
+              <p v-for="(line, i) in moveRefusal.rest" :key="i">{{ line }}</p>
+            </div>
+            <div class="confirm-actions">
+              <button class="btn btn-secondary" @click="closeLinkModal">Close</button>
+            </div>
+          </template>
+          <template v-else>
           <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.85rem;">
             Pick a device from the company inventory. After linking, live GPS,
             fault codes, and fuel data flow against this truck.
@@ -235,8 +274,13 @@
 
           <div v-if="linkLoading" class="rm-pick-empty">Loading Routemate vehicles...</div>
           <div v-else-if="linkError" class="rm-pick-error">{{ linkError }}</div>
-          <div v-else-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
-            No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.
+          <template v-else>
+          <!-- With Move device offered, the free devices are one group and the devices on other trucks a second;
+               without it, the list is the one it always was. -->
+          <div v-if="moveOn" class="rm-group-label">Free devices</div>
+          <div v-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
+            <template v-if="moveOn && otherDevices.length">{{ MOVE_FREE_EMPTY }}</template>
+            <template v-else>No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.</template>
           </div>
           <!-- Served order, never re-sorted here: the server puts devices that
                are reporting first, newest fix first, so a dead device cannot
@@ -244,7 +288,7 @@
                from many, so each item is a label over a visually hidden radio:
                Tab reaches the group, the arrow keys move the pick. Spans
                inside, as a label may only hold phrasing content. -->
-          <div v-else class="rm-pick-list" role="radiogroup" aria-label="Devices">
+          <div v-else class="rm-pick-list" role="radiogroup" :aria-label="moveOn ? 'Free devices' : 'Devices'">
             <label
               v-for="rv in unlinkedVehicles"
               :key="rv.routemate_vehicle_id"
@@ -283,6 +327,32 @@
               </span>
             </label>
           </div>
+          <template v-if="moveOn">
+            <div class="rm-group-label">On another truck</div>
+            <div v-if="othersError" class="rm-pick-error">{{ othersError }}</div>
+            <div v-else-if="otherDevices.length === 0" class="rm-pick-empty">No device is on another truck.</div>
+            <div v-else class="rm-pick-list" role="radiogroup" aria-label="Devices on another truck">
+              <label
+                v-for="d in otherDevices"
+                :key="`move-${d.id}`"
+                :class="['rm-pick-item', 'rm-move-item', { selected: pickedRoutemateId === d.id }]"
+              >
+                <input
+                  type="radio"
+                  name="rm-pick"
+                  class="rm-pick-radio"
+                  :value="d.id"
+                  :checked="pickedRoutemateId === d.id"
+                  @change="pickDevice(d.id)"
+                />
+                <span class="rm-pick-line1 rm-move-line">
+                  <span class="rm-pick-id">{{ d.label }}</span>
+                  <span class="rm-move-on">on {{ d.unit }}</span>
+                </span>
+              </label>
+            </div>
+          </template>
+          </template>
 
           <!-- The server refuses a device that has stopped reporting until the
                admin says so (409 ELD_DEVICE_SILENT); its own words go here, with
@@ -309,9 +379,10 @@
             <button
               class="btn btn-primary"
               :disabled="!pickedRoutemateId || linkBusy"
-              @click="handleLink"
-            >{{ linkBusy ? 'Linking...' : 'Link Selected' }}</button>
+              @click="pickedMove ? startMove() : handleLink()"
+            >{{ linkBusy ? 'Linking...' : (pickedMove ? 'Move here' : 'Link Selected') }}</button>
           </div>
+          </template>
         </div>
       </div>
     </Teleport>
@@ -618,6 +689,7 @@ import { formatAgeMs } from '../../lib/duration'
 import { fmtTimestamp, fmtYmd } from '../../utils/datetime'
 import { availabilityRangeText } from '../../lib/availabilityText'
 import { truckPayRuleNote } from '../../lib/driverPay'
+import { MOVE_FREE_EMPTY, loadLinkChoices, moveConfirmWords, moveRefusalView, moveRequestBody } from '../../lib/eldMove'
 
 const api = useApi()
 
@@ -1004,6 +1076,23 @@ const silentPromptEl = ref(null)
 // POST, which re-points the link, so a wrong link is fixed without unlinking.
 const repointing = computed(() => !!linkTruck.value?.RoutemateVehicleId)
 
+// Move device, offered only when the server says so (lib/eldMove.js): the devices
+// on other trucks, the step the dialog is on (null: the picker; 'confirm';
+// 'refused') and what a refused move said.
+const moveOn = ref(false)
+const otherDevices = ref([])
+const othersError = ref('')
+const moveStep = ref(null)
+const moveRefusal = ref(null)
+const moveError = ref('')
+const moveConfirmEl = ref(null)
+const moveRefusalEl = ref(null)
+// The pick, when it is a device on another truck: the button then reads Move here.
+const pickedMove = computed(() => (moveOn.value ? otherDevices.value.find((d) => d.id === pickedRoutemateId.value) || null : null))
+const moveWords = computed(() => (pickedMove.value
+  ? moveConfirmWords({ device: pickedMove.value.label, from: pickedMove.value.unit, to: linkTruck.value?.UnitNumber || 'this truck' })
+  : { title: '', body: '' }))
+
 const PROVIDER_LABELS = { routemate: 'Routemate', linxup: 'Linxup' }
 
 function providerKey(p) {
@@ -1096,14 +1185,19 @@ async function openLinkModal(truck) {
   linkError.value = ''
   autoError.value = ''
   silentPrompt.value = null
+  resetMove()
   showLinkRm.value = true
   linkLoading.value = true
   try {
     // ?truckId lets the server suggest the likely device by unit number
     // (Routemate's vehicleId "91" ↔ our "Logisx-#91"). The rule lives server-side
     // so it cannot drift from the auto-match branch that uses the same helper.
-    const r = await api.get(`/api/routemate/vehicles/unlinked?truckId=${encodeURIComponent(truck.id)}`)
-    unlinkedVehicles.value = r.vehicles || []
+    // The same answer says whether Move device is offered.
+    const r = await loadLinkChoices(api, truck)
+    unlinkedVehicles.value = r.vehicles
+    moveOn.value = r.move
+    otherDevices.value = r.others
+    othersError.value = r.othersError
     if (r.suggested?.routemate_vehicle_id) {
       suggestedId.value = r.suggested.routemate_vehicle_id
       // Pre-select, never auto-submit: the admin still confirms with
@@ -1128,6 +1222,76 @@ function closeLinkModal() {
   linkError.value = ''
   autoError.value = ''
   silentPrompt.value = null
+  resetMove()
+}
+
+// Move device's state, as the dialog opens: not offered until the server says so.
+function resetMove() {
+  moveOn.value = false
+  otherDevices.value = []
+  othersError.value = ''
+  moveStep.value = null
+  moveRefusal.value = null
+  moveError.value = ''
+}
+
+// Move here: the confirm, in the dialog, before anything is sent.
+async function startMove() {
+  if (!pickedMove.value || !linkTruck.value) return
+  silentPrompt.value = null
+  moveError.value = ''
+  moveStep.value = 'confirm'
+  await nextTick()
+  moveConfirmEl.value?.focus()
+}
+
+// Cancel on the confirm goes back to the picker, the pick kept.
+function cancelMove() {
+  if (linkBusy.value) return
+  silentPrompt.value = null
+  moveError.value = ''
+  moveStep.value = null
+}
+
+// One POST for a move and its Move anyway (confirmSilent). A refusal in the
+// server's words takes the dialog's place; a failure with no answer (a timeout,
+// the connection) stays on the confirm, so it can be sent again.
+async function submitMove(body) {
+  if (!linkTruck.value) return
+  linkBusy.value = true
+  moveError.value = ''
+  if (!body.confirmSilent) silentPrompt.value = null
+  try {
+    const answer = await api.post(`/api/trucks/${linkTruck.value.id}/move-eld`, body)
+    showLinkRm.value = false
+    emit('linkage-changed', { id: linkTruck.value.id, message: answer?.message || '' })
+  } catch (err) {
+    silentPrompt.value = null
+    if (err?.code === 'ELD_DEVICE_SILENT' && !body.confirmSilent) {
+      silentPrompt.value = { body, error: err.message }
+      await nextTick()
+      silentPromptEl.value?.focus()
+    } else if (err?.status >= 400 && err?.status < 500) {
+      moveRefusal.value = moveRefusalView(err)
+      moveStep.value = 'refused'
+      await nextTick()
+      moveRefusalEl.value?.focus()
+    } else {
+      moveError.value = err?.message || 'Could not move the device.'
+    }
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+function handleMove() {
+  if (!pickedMove.value) return
+  return submitMove(moveRequestBody(pickedMove.value))
+}
+
+function handleMoveAnyway() {
+  if (!silentPrompt.value) return
+  return submitMove({ ...silentPrompt.value.body, confirmSilent: true })
 }
 
 // One POST for every way of linking: Link Selected ({ routemateVehicleId }),
@@ -1534,4 +1698,29 @@ async function handleUnlink(truck) {
   display: block;
   margin-top: 0.3rem; font-size: 0.68rem; font-weight: 600; color: #15803d;
 }
+/* Move device: the dialog's two groups, the truck a device is on, the confirm
+   (the same blue as a selected pick) and a refused move (the error red). */
+.rm-group-label {
+  font-size: 0.66rem; font-weight: 700; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.06em; margin: 0.25rem 0 0.4rem;
+}
+.rm-pick-list + .rm-group-label,
+.rm-pick-empty + .rm-group-label { margin-top: 0.9rem; }
+.rm-move-line { justify-content: space-between; margin-bottom: 0; }
+.rm-move-on { font-size: 0.72rem; font-weight: 600; color: #b45309; overflow-wrap: anywhere; }
+.rm-move-confirm {
+  padding: 0.8rem 0.9rem; font-size: 0.8rem; line-height: 1.45; color: var(--text);
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; overflow-wrap: anywhere;
+}
+.rm-move-confirm:focus { outline: 2px solid #3b82f6; outline-offset: 1px; }
+.rm-move-title { font-weight: 700; font-size: 0.9rem; margin-bottom: 0.35rem; }
+.rm-move-refusal {
+  padding: 0.8rem 0.9rem; font-size: 0.8rem; line-height: 1.45; color: #7f1d1d;
+  background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; overflow-wrap: anywhere;
+}
+.rm-move-refusal:focus { outline: 2px solid #f87171; outline-offset: 1px; }
+.rm-move-refusal b { color: #b91c1c; }
+.rm-move-refusal p { margin: 0; }
+.rm-move-refusal p + p { margin-top: 0.65rem; }
+.rm-move-gap { margin-top: 0.6rem; }
 </style>

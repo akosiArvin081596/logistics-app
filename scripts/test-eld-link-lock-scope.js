@@ -352,6 +352,94 @@ console.log("Part 3 — preflight");
   eq(guard5(T101, { routemate_vehicle_id: "" }, stopOf([lateTap], { tripTail: true, atMs: Date.parse("2026-11-16T13:00:00Z"), day: "2026-11-16" }), OCT, GT).blockers.map((x) => x.periods), [OCT],
     "pin N7 (mutant: the 36-hour reach missing): a load tapped Delivered at 21:00 two days before a swap at 08:00 refuses");
 
+  // -------------------------------------------------------------------------
+  // Part 6 — Move device's one read for two trucks (made-up T-101 and T-202)
+  // -------------------------------------------------------------------------
+  // Each case FAILS ON THE OLD CODE: eldLinkLoadReaches(), eldMovePreflight() and eldLinkBadCell() do not exist there.
+  console.log("Part 6 — Move device's preflight");
+  const moveCase = async (label, fn) => {
+    try { await fn(); } catch (e) { ok(false, `${label} (threw: ${String(e.message).split("\n")[0]})`); }
+  };
+  const MH = ["Load ID", "Driver", "Truck", "Assigned Date", "Pickup Appointment", "Drop-off Appointment", "Status Update Date", "Status"];
+  const MROWS = [
+    ["L-OCT1", "Pat", "T-101", "10/26/2026", "10/26/2026 8:00", "10/28/2026 14:00", "10/28/2026", "Delivered"],
+    ["L-OCT2", "Sam", "T-202", "10/30/2026", "10/30/2026 8:00", "", "", "In Transit"],
+    ["", "Sam", "T-202", "10/29/2026", "10/29/2026", "11/02/2026", "11/02/2026", "Delivered"],
+  ];
+  // The move's functions over the same stubs, with a sheet that counts its reads and a clock that can tick.
+  const M = { reads: 0, values: null, throws: false, onRead: null, tick: 0 };
+  const moveHarness = () => {
+    const pieces = ["eldLinkRowWhere", "eldLinkBadCell"].map((n) => extractFunction(n))
+      .concat(["eldLinkLoadReaches", "eldMovePreflight"].map((n) => extractFunction(n, "async function")));
+    const src = harness.replace(/\nreturn \{[^}]*\};\s*$/, "\n") + pieces.join("\n") + "\nreturn { eldLinkLoadReaches, eldMovePreflight, eldLinkBadCell, eldLinkRowReach };";
+    const extra = {
+      getSheets: async () => ({ spreadsheets: { values: { get: async () => {
+        M.reads++;
+        await Promise.resolve();
+        if (M.onRead) M.onRead();
+        if (M.throws) throw new Error("sheets down");
+        return { data: { values: M.values } };
+      } } } }),
+      SPREADSHEET_ID: "test-sheet",
+      Date: class extends Date { constructor(...a) { if (a.length) super(...a); else super(S.nowMs + M.tick); } static now() { M.tick += M.ticking ? 5 : 0; return S.nowMs + M.tick; } },
+    };
+    const allNames = [...names, ...Object.keys(extra).filter((n) => !names.includes(n))];
+    return new Function(...allNames, src)(...allNames.map((n) => (n in extra ? extra[n] : stubs[n])));
+  };
+  S.locked = OCT; S.readable = true; S.forward = true;
+  S.trucks = { 1: { ...T101 }, 2: { ...T202 } };
+
+  await moveCase("Part 6.1", async () => {
+    const MV = moveHarness();
+    M.reads = 0; M.values = [MH, ...MROWS];
+    const [a, b] = await MV.eldLinkLoadReaches(["T-101", "T-202"]);
+    eq(M.reads, 1, "6.1 both units' reach comes from ONE Job Tracking read (FAILS ON THE OLD CODE)");
+    eq(a.reach, [{ months: OCT, lastDay: "2026-10-28", loadId: "L-OCT1", sheetRow: 2, pickupDay: "2026-10-26" }], "6.1a T-101's row with its sheet row and pickup day (FAILS ON THE OLD CODE)");
+    eq(b.reach.map((r) => [r.loadId, r.lastDay, r.sheetRow, r.pickupDay]), [["L-OCT2", "", 3, "2026-10-30"], ["", "2026-11-02", 4, "2026-10-29"]], "6.1b T-202's two rows from the same values (FAILS ON THE OLD CODE)");
+    eq([a.cell, b.cell], [null, null], "6.1c every row readable: no cell named (FAILS ON THE OLD CODE)");
+  });
+
+  await moveCase("Part 6.2", async () => {
+    const MV = moveHarness();
+    M.reads = 0; M.values = [MH, ...MROWS]; M.ticking = true; M.tick = 0;
+    const pre = await MV.eldMovePreflight(S.trucks[1], S.trucks[2]);
+    M.ticking = false;
+    eq([M.reads, pre.sides[0].stop.atMs === pre.atMs, pre.sides[1].stop.atMs === pre.atMs, pre.sides[0].stop.day, pre.sides[1].stop.day],
+      [1, true, true, "2026-11-18", "2026-11-18"], "6.2 one read, and both stops built from the one instant though the clock ticks (FAILS ON THE OLD CODE)");
+    eq([pre.sides.map((s) => s.why), pre.sides[1].stop.rows.length, pre.source.unit_number, pre.target.unit_number], [[null, null], 2, "T-101", "T-202"],
+      "6.2a both rows known; the trucks re-read after the await (FAILS ON THE OLD CODE)");
+  });
+
+  await moveCase("Part 6.3", async () => {
+    const MV = moveHarness();
+    M.values = [MH, ...MROWS];
+    M.onRead = () => { S.trucks[2].unit_number = "T-202B"; };
+    const pre = await MV.eldMovePreflight({ ...T101 }, { ...T202 });
+    M.onRead = null; S.trucks[2] = { ...T202 };
+    eq([pre.sides[0].why, pre.sides[1].why, pre.sides[1].stop.rows, pre.sides[0].stop.rows.length], [null, "read", null, 1],
+      "6.3 a unit renamed during the read: that side unknown (\"read\"), the other kept (FAILS ON THE OLD CODE)");
+    M.throws = true;
+    const down = await MV.eldMovePreflight({ ...T101 }, { ...T202 });
+    M.throws = false;
+    eq(down.sides.map((s) => [s.why, s.stop.rows]), [["read", null], ["read", null]], "6.3a a read that fails: both sides \"read\" (FAILS ON THE OLD CODE)");
+    S.locked = [];
+    M.reads = 0;
+    const open = await MV.eldMovePreflight({ ...T101 }, { ...T202 });
+    S.locked = OCT;
+    eq([M.reads, open.sides.map((s) => s.why)], [0, [null, null]], "6.3b no finalized month: the sheet is not read (FAILS ON THE OLD CODE)");
+  });
+
+  await moveCase("Part 6.4", async () => {
+    const MV = moveHarness();
+    const bad = ["L-1001", "Lee", "T-150", "10/26/2026", "14:00", "10/28/2026", "10/28/2026", "Delivered"];
+    M.values = [MH, ...MROWS, bad];
+    const [, , c] = await MV.eldLinkLoadReaches(["T-101", "T-202", "T-150"]);
+    eq([c.months, c.reach, c.cell], [null, null, { loadId: "L-1001", sheetRow: 5, pickupDay: "", header: "Pickup Appointment", value: "14:00" }],
+      "6.4 a cell the server can't read is named as sheetRowUpdateBlocker names it, with the row's Load ID and sheet row (FAILS ON THE OLD CODE)");
+    eq(MV.eldLinkBadCell(MH, [["", "Lee", "T-150", "", "", "", "", "Delivered"]], "T-150", 2), { loadId: "", sheetRow: 2, pickupDay: "", header: "", value: "" },
+      "6.4a a row of the unit with no date at all: no header (FAILS ON THE OLD CODE)");
+  });
+
   console.log(`\n${pass} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

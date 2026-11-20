@@ -321,7 +321,7 @@ GET /api/routemate/fault-codes/summary · requireRole("Super Admin", "Dispatcher
 GET /api/routemate/fuel/summary · requireRole("Super Admin", "Dispatcher", "Investor")=anon@12b84c4b0134 · inline@88c2409b5eb6
 GET /api/routemate/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4ee94aaf1ae6
 GET /api/routemate/vehicles · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f80783c4c1fa
-GET /api/routemate/vehicles/unlinked · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@ee3516f87c05
+GET /api/routemate/vehicles/unlinked · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@7cd7b6ba6d2d
 GET /api/scankit/health · requireRole("Super Admin")=anon@12b84c4b0134 · inline@36a5ceb140d5
 GET /api/tabs · requireAuth@2f5c61384511 · inline@7d6ca1d57dc3
 GET /api/tracking/hos · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2d37539a64bf
@@ -336,6 +336,7 @@ DELETE /api/trucks/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline
 PUT /api/trucks/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f63b42808fc7
 DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d30155a95bd2
 POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2fe8116b6be9
+POST /api/trucks/:truckId/move-eld · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5735a8a7a83d
 GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c9395146e033
 POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2aa9a5c0afb8

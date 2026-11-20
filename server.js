@@ -1389,7 +1389,7 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //     `add_driver_day_blocked`, `exclude_driver_day_blocked`,
 //     `restore_driver_day_blocked`, `restore_added_driver_day_blocked`,
 //     `delete_sheet_row_blocked`, `routemate_link_blocked`,
-//     `routemate_unlink_blocked`, `maintenance_fund_blocked`,
+//     `routemate_unlink_blocked`, `routemate_move_blocked`, `maintenance_fund_blocked`,
 //     `create_compliance_fee_blocked`, `pay_compliance_fee_blocked`,
 //     `adjust_invoice_blocked`, `pay_invoice_blocked`,
 //     `update_payout_basis_blocked` and the
@@ -5141,7 +5141,23 @@ function buildEldDeviceResolver(opts = {}) {
 // ELD_LINK_FORWARD_ONLY_FROM, in force only in a process started at or after FROM. Then the pay paths, IFTA and fuel read
 // each instant's ELD through the device the truck held then, and a link change passes the narrowed stop (5b').
 const ELD_LINK_FORWARD_SETTING = eldLinkForward.settingFromEnv(process.env);
+// Move device (POST /api/trucks/:truckId/move-eld), off unless exactly "true": one device off one truck and onto another
+// at one instant. It works only while the forward-only rule is in force, whose stop judges both trucks.
+const ELD_MOVE_DEVICE_ENABLED = process.env.ELD_MOVE_DEVICE_ENABLED === "true";
 let eldLinkForwardDecided = null;
+
+// Move device's start-up line, in fixed words: nothing with the switch off; with it on, whether the forward-only rule
+// lets it work (it refuses every move otherwise). Logged at boot, right after the rule's own decision.
+function eldMoveDeviceStartLine() {
+	if (!ELD_MOVE_DEVICE_ENABLED) return null;
+	return eldLinkForwardRule().inForce
+		? { level: "log", text: "ELD_MOVE_DEVICE_ENABLED is on: Move device can take an ELD device off one truck and put it on another at one instant." }
+		: { level: "warn", text: "ELD_MOVE_DEVICE_ENABLED is on but does nothing: the forward-only link rule is not in force, so every move is refused and the Link dialog offers none." };
+}
+function logEldMoveDeviceStart() {
+	const line = eldMoveDeviceStartLine();
+	if (line) (line.level === "warn" ? console.warn : console.log)(`[eld-move-device] ${line.text}`);
+}
 let eldLinkForwardReportFromMs = null;
 
 // The rule as this process runs it: decided once, at boot (the call below server_state's table), and kept.
@@ -38767,10 +38783,10 @@ function eldLinkRowMonths(headers, rows, unitNumber) {
 	}
 	return [...months].sort();
 }
-// The narrowed stop's rows (check (5b')): each row carrying the unit, as { months, lastDay, loadId }. lastDay is the
-// latest day any of its date cells holds, "" when it has no end date (no drop-off, completion or status date: still
-// running). null when one of its date cells can't be read, as eldLinkRowMonths() answers.
-function eldLinkRowReach(headers, rows, unitNumber) {
+// The narrowed stop's rows (check (5b')): each row carrying the unit, as { months, lastDay, loadId } (with
+// `firstSheetRow`, rows[0]'s sheet row, also sheetRow and pickupDay). lastDay is the latest day a date cell holds, "" with
+// no end date (still running); null when a date cell can't be read, as eldLinkRowMonths() answers.
+function eldLinkRowReach(headers, rows, unitNumber, { firstSheetRow = 0 } = {}) {
 	const key = eldLinkUnitKey(unitNumber);
 	if (!key) return [];
 	const hs = Array.isArray(headers) ? headers : [];
@@ -38778,9 +38794,10 @@ function eldLinkRowReach(headers, rows, unitNumber) {
 	hs.forEach((h, i) => { if (ELD_LINK_TRUCK_COL_RE.test(String(h || ""))) cols.push(i); });
 	if (!cols.length) return [];
 	const loadIdCol = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h || "")));
+	const list = rows || [];
 	const out = [];
-	for (const row of rows || []) {
-		const vs = Array.isArray(row) ? row : [];
+	for (let n = 0; n < list.length; n++) {
+		const vs = Array.isArray(list[n]) ? list[n] : [];
 		if (!cols.some((i) => eldLinkUnitKey(vs[i]) === key)) continue;
 		const months = loadRowAccountingMonths(hs, vs);
 		if (!months || !months.length) return null;
@@ -38795,9 +38812,53 @@ function eldLinkRowReach(headers, rows, unitNumber) {
 			if (day > lastDay) lastDay = day;
 			if (/drop.?off|delivery|completion|status.*update/i.test(h)) ends = true;
 		}
-		out.push({ months, lastDay: ends ? lastDay : "", loadId: loadIdCol >= 0 ? String(vs[loadIdCol] || "").trim() : "" });
+		out.push({
+			months, lastDay: ends ? lastDay : "", loadId: loadIdCol >= 0 ? String(vs[loadIdCol] || "").trim() : "",
+			...(firstSheetRow ? eldLinkRowWhere(hs, vs, firstSheetRow + n) : {}),
+		});
 	}
 	return out;
+}
+
+// Where a Job Tracking row is, for words that must name a row with no Load ID: its sheet row and its pickup day ("" when
+// the pickup cell is blank or can't be read).
+function eldLinkRowWhere(headers, row, sheetRow) {
+	const col = headers.findIndex((h) => /pickup.*appo|pickup.*date/i.test(String(h || "")));
+	const d = col >= 0 && String(row[col] == null ? "" : row[col]).trim() ? sheetCellDate(row[col]) : null;
+	return { sheetRow, pickupDay: d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "" };
+}
+
+// The cell that makes eldLinkRowReach() answer null for this unit, in the order it reads: the first row of the unit whose
+// date cell can't be read, named as sheetRowUpdateBlocker() names one (its trimmed header and the cell as written), with
+// the row's Load ID, sheet row and pickup day. header "" when the row has no date at all. null when every row reads.
+function eldLinkBadCell(headers, rows, unitNumber, firstSheetRow) {
+	const key = eldLinkUnitKey(unitNumber);
+	if (!key) return null;
+	const hs = Array.isArray(headers) ? headers : [];
+	const cols = [];
+	hs.forEach((h, i) => { if (ELD_LINK_TRUCK_COL_RE.test(String(h || ""))) cols.push(i); });
+	if (!cols.length) return null;
+	const loadIdCol = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h || "")));
+	const dateCols = [];
+	hs.forEach((h, i) => { if (/date|appo|appt/i.test(String(h || ""))) dateCols.push(i); });
+	const list = rows || [];
+	for (let n = 0; n < list.length; n++) {
+		const vs = Array.isArray(list[n]) ? list[n] : [];
+		if (!cols.some((i) => eldLinkUnitKey(vs[i]) === key)) continue;
+		const named = (i) => ({
+			loadId: loadIdCol >= 0 ? String(vs[loadIdCol] || "").trim() : "", ...eldLinkRowWhere(hs, vs, firstSheetRow + n),
+			header: i === null ? "" : String(hs[i]).trim(), value: i === null ? "" : String(vs[i] == null ? "" : vs[i]),
+		});
+		const months = loadRowAccountingMonths(hs, vs);
+		if (months === null) {
+			const i = dateCols.find((c) => sheetCellMonths(vs[c]) === null);
+			return named(i === undefined ? null : i);
+		}
+		if (!months.length) return named(null);
+		const i = dateCols.find((c) => String(vs[c] == null ? "" : vs[c]).trim() && !sheetCellDate(vs[c]));
+		if (i !== undefined) return named(i);
+	}
+	return null;
 }
 // With `reach` (the narrowed stop), { months, reach }: the rows behind the months too.
 async function eldLinkLoadMonths(unitNumber, { reach = false } = {}) {
@@ -38831,11 +38892,49 @@ async function eldLinkPreflight(truckId, truck) {
 	return forward ? { truck: fresh, eldLinkMonths, eldLinkForward: eldLinkForwardStop(reach) } : { truck: fresh, eldLinkMonths };
 }
 
-// What check (5b') reads, after the preflight's await: the instant the link changes (the route writes its history row
-// at it), its earliest US local day, the rows, and with the trip work-day rule on each row's last Delivered tap, whose
-// 36-hour receiver-exit read can reach past the load's own days. A tap read that fails holds every finalized month.
-function eldLinkForwardStop(reach) {
+// Several units' reach from ONE Job Tracking read, so the two trucks of a move are judged on the same values: for each
+// unit { months, reach, cell } as eldLinkLoadMonths() answers with `reach`, each row with its sheet row and pickup day,
+// and `cell` naming the date that can't be read when reach is null (eldLinkBadCell()).
+async function eldLinkLoadReaches(units) {
+	const sheets = await getSheets();
+	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+	const values = (response && response.data && response.data.values) || [];
+	const headers = values[0] || [];
+	const rows = values.slice(1);
+	return units.map((unit) => {
+		const months = eldLinkRowMonths(headers, rows, unit);
+		const reach = months === null ? null : eldLinkRowReach(headers, rows, unit, { firstSheetRow: 2 });
+		return { months, reach, cell: reach === null ? eldLinkBadCell(headers, rows, unit, 2) : null };
+	});
+}
+
+// Move device's one await: both units' reach from one read, both trucks re-read after it, one instant for both stops.
+// A side's `why` is "read" (the tab unreadable, or the unit renamed during the read), "row" (a date that can't be read,
+// named by `cell`), or null (rows known, or no finalized month to read them for).
+async function eldMovePreflight(source, target) {
+	const sides = [source, target].map(() => ({ months: null, reach: null, why: null, cell: null }));
+	if (periodLocksReadable() && lockedPeriodsDesc().length) {
+		try {
+			const read = await eldLinkLoadReaches([source.unit_number, target.unit_number]);
+			read.forEach((r, i) => { sides[i] = { months: r.months, reach: r.reach, why: r.reach === null ? "row" : null, cell: r.cell }; });
+		} catch (e) {
+			console.warn(`ELD move guard: Job Tracking unreadable (${e.message}); guarding every finalized month`);
+			sides.forEach((s) => { s.why = "read"; });
+		}
+	}
+	const fresh = [source, target].map((t) => db.prepare("SELECT * FROM trucks WHERE id = ?").get(t.id));
+	fresh.forEach((f, i) => {
+		const judged = i === 0 ? source : target;
+		if (f && eldLinkUnitKey(f.unit_number) !== eldLinkUnitKey(judged.unit_number)) sides[i] = { months: null, reach: null, why: "read", cell: null };
+	});
 	const atMs = Date.now();
+	return { source: fresh[0], target: fresh[1], atMs, sides: sides.map((s) => ({ ...s, stop: eldLinkForwardStop(s.reach, atMs) })) };
+}
+
+// What check (5b') reads, after the preflight's await: the instant the link changes (the route writes its history row
+// at it; a move hands both its stops one), its earliest US local day, the rows, and with the trip rule on each row's
+// last Delivered tap, whose 36-hour read can reach past the load's own days; a failed tap read holds every finalized month.
+function eldLinkForwardStop(reach, atMs = Date.now()) {
 	const stop = { atMs, at: new Date(atMs).toISOString(), day: eldLinkForward.earliestLocalDay(atMs), rows: reach, tripTail: !!TRIP_WORK_DAYS_FROM, unreadable: false };
 	if (!stop.tripTail || !Array.isArray(reach)) return stop;
 	try {
@@ -38863,13 +38962,11 @@ function eldLinkForwardBlocker(truck, was, now, locked, stop) {
 		return { ...head, periods: locked.slice().sort(), detail: `${verb} the ELD device changes which days count as travelled for ${truck.unit_number}, re-deriving driver pay across ${locked.length} finalized month${locked.length === 1 ? "" : "s"}` };
 	}
 	const isLocked = new Set(locked);
-	const byDay = (r) => r.lastDay === "" || r.lastDay >= stop.day;
-	const byTail = (r) => stop.tripTail && (r.noLoadId || (r.tapMs !== null && r.tapMs + 36 * 3600 * 1000 >= stop.atMs));
-	const reaching = stop.rows.filter((r) => r.months.some((m) => isLocked.has(m)) && (byDay(r) || byTail(r)));
+	const reaching = eldLinkForward.reachingRows(stop, locked);
 	if (!reaching.length) return null;
-	const months = [...new Set(reaching.flatMap((r) => r.months.filter((m) => isLocked.has(m))))].sort();
+	const months = [...new Set(reaching.flatMap(({ row }) => row.months.filter((m) => isLocked.has(m))))].sort();
 	const many = reaching.length > 1;
-	const when = reaching.some(byDay)
+	const when = reaching.some((r) => r.byDay)
 		? `${many ? "run" : "runs"} on or after ${eldLinkForward.dayLabel(stop.day)}`
 		: `${many ? "were" : "was"} delivered less than 36 hours before this change`;
 	return {
@@ -53235,6 +53332,9 @@ app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatch
 				// its status comes out of the same lookup.
 				const suggested = suggestRoutemateVehicleForTruck(truck);
 				if (suggested) body.suggested = withStatus(suggested);
+				// The dialog offers Move device only when the move route would take it: the switch on, the forward-only
+				// rule in force and a Super Admin. Otherwise absent, so the body is as before.
+				if (ELD_MOVE_DEVICE_ENABLED && eldLinkForwardRule().inForce && req.session && req.session.user && req.session.user.role === "Super Admin") body.moveDevice = true;
 			}
 		}
 		res.json(body);
@@ -53447,6 +53547,131 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 		});
 	} catch (err) {
 		console.error("routemate unlink error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Move device's checks, before the route's one await and again after it: the truck exists, the device is in the mirror,
+// exactly one OTHER truck holds it and it is `fromTruckId` (the truck the dialog showed), and a silent device is
+// confirmed. { refusal: { status, body } }, or { target, source, rv, label, status, confirmedSilent }.
+function eldMoveDeviceCheck(truckId, device, fromTruckId, body) {
+	const refuse = (status, out) => ({ refusal: { status, body: out } });
+	const unitOf = (t) => t.unit_number || `truck #${t.id}`;
+	const target = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
+	if (!target) return refuse(404, { error: "Truck not found" });
+	const rv = db.prepare(
+		"SELECT routemate_vehicle_id, vehicle_id, make, model, year FROM routemate_vehicles WHERE routemate_vehicle_id = ?"
+	).get(device);
+	if (!rv) return refuse(404, { error: "Routemate vehicle not found in mirror — run sync-now first" });
+	// The name the picker shows the device by.
+	const label = String(rv.vehicle_id || "").trim() || device;
+	const holders = db.prepare("SELECT * FROM trucks WHERE routemate_vehicle_id = ? ORDER BY id").all(device);
+	if (!holders.length) return refuse(409, { error: eldLinkForward.moveWords.free, code: "ELD_MOVE_FREE_DEVICE" });
+	if (holders.length > 1) {
+		const words = eldLinkForward.moveWords.shared(label, holders.map(unitOf));
+		return refuse(409, { error: words.text, code: "ELD_MOVE_SHARED_DEVICE", lead: words.lead, paragraphs: words.paragraphs });
+	}
+	if (holders[0].id === target.id) return refuse(409, { error: eldLinkForward.moveWords.sameTruck(label, unitOf(target)), code: "ELD_MOVE_SAME_TRUCK" });
+	if (holders[0].id !== fromTruckId) {
+		const shown = db.prepare("SELECT id, unit_number FROM trucks WHERE id = ?").get(fromTruckId);
+		return refuse(409, { error: eldLinkForward.moveWords.movedSince(label, unitOf(holders[0]), shown ? unitOf(shown) : `truck #${fromTruckId}`), code: "ELD_MOVE_CHANGED" });
+	}
+	const status = eldDeviceStatus(eldLatestCleanFixByVehicle([device])[device], Date.now());
+	const confirmedSilent = !!(status.silent && body && body.confirmSilent === true);
+	if (status.silent && !confirmedSilent) {
+		return refuse(409, {
+			code: "ELD_DEVICE_SILENT",
+			error: `ELD ${eldFeedHealth.describeEldDevice(rv)} ${eldLastFixPhrase(status.last_fix_ms, Date.now())}.`
+				+ ` Linking it leaves ${unitOf(target)} with no live position.`
+				+ ` Confirm to link it anyway.`,
+			routemateVehicleId: device,
+			provider: status.provider,
+			lastFixMs: status.last_fix_ms,
+		});
+	}
+	return { target, source: holders[0], rv, label, status, confirmedSilent };
+}
+
+// POST /api/trucks/:truckId/move-eld — Move device: takes the device off the truck that holds it and puts it on this one
+// in one step, at one instant (ELD_MOVE_DEVICE_ENABLED, and only while the forward-only link rule is in force). Body:
+// { routemateVehicleId, confirmSilent }. Super Admin only, as linking is.
+app.post("/api/trucks/:truckId/move-eld", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!ELD_MOVE_DEVICE_ENABLED) return res.status(404).json({ error: eldLinkForward.moveWords.switchedOff, code: "FEATURE_OFF" });
+		// Without the rule, check (5b) judges each truck over every finalized month its loads reach, and the move's one
+		// instant would not keep each earlier day on the device it had.
+		if (!eldLinkForwardRule().inForce) return res.status(409).json({ error: eldLinkForward.moveWords.needsForwardOnly, code: "MOVE_NEEDS_FORWARD_ONLY" });
+		const truckId = parseInt(req.params.truckId, 10);
+		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
+		const device = String((req.body && req.body.routemateVehicleId) || "");
+		if (!device) return res.status(400).json({ error: "routemateVehicleId required" });
+		// The truck the dialog showed the device on: the move takes it off that truck or not at all.
+		const fromTruckId = parseInt(req.body && req.body.fromTruckId, 10);
+		if (!fromTruckId) return res.status(400).json({ error: "fromTruckId required" });
+		// Refused here, before Job Tracking is read, when nothing could pass anyway.
+		const judged = eldMoveDeviceCheck(truckId, device, fromTruckId, req.body);
+		if (judged.refusal) return res.status(judged.refusal.status).json(judged.refusal.body);
+		// The handler's only await: both trucks' reach from one Job Tracking read, and the one instant of both stops.
+		const pre = await eldMovePreflight(judged.source, judged.target);
+		// Synchronous from here to the write, in order: the device checks again (still on fromTruckId), both units as
+		// judged, both stops, the write.
+		const now = eldMoveDeviceCheck(truckId, device, fromTruckId, req.body);
+		if (now.refusal) return res.status(now.refusal.status).json(now.refusal.body);
+		const { source, target, label } = now;
+		const unitOf = (t) => t.unit_number || `truck #${t.id}`;
+		if (eldLinkUnitKey(source.unit_number) !== eldLinkUnitKey(judged.source.unit_number) || eldLinkUnitKey(target.unit_number) !== eldLinkUnitKey(judged.target.unit_number)) {
+			return res.status(409).json({ error: eldLinkForward.moveWords.renamed(unitOf(judged.source), unitOf(judged.target)), code: "ELD_MOVE_CHANGED" });
+		}
+		const at = new Date(pre.atMs).toISOString();
+		const had = String(target.routemate_vehicle_id || "").trim();
+		const [off, onto] = pre.sides;
+		// The device's truck is judged as an unlink and this one as a link (a re-point when it holds a device), both at the
+		// one instant, so the move is refused or written whole.
+		const sourceLock = truckEditLockBlockers(source, { routemate_vehicle_id: "" }, { eldLinkMonths: off.months, eldLinkForward: off.stop });
+		const targetLock = truckEditLockBlockers(target, { routemate_vehicle_id: device }, { eldLinkMonths: onto.months, eldLinkForward: onto.stop });
+		const moveAudit = {
+			action: "routemate_move_blocked", entity: "truck", entityId: String(truckId),
+			subject: `move ELD ${auditText(device, 100)} from ${auditText(unitOf(source), 100)} to ${auditText(unitOf(target), 100)}`
+				+ ` (${auditText(unitOf(target), 100)} had ${auditText(had, 100) || "none"}) at ${at}`,
+		};
+		if (sourceLock.unreadable || targetLock.unreadable) return periodLockUnreadableResponse(req, res, "Moving an ELD device", moveAudit);
+		const held = [[sourceLock, off, "off", source], [targetLock, onto, "onto", target]].filter(([lock]) => lock.blockers.length);
+		if (held.length) {
+			const locked = lockedPeriodsDesc();
+			const words = eldLinkForward.moveRefusal({
+				device: label,
+				sides: held.map(([, side, dir, truck]) => ({ dir, unit: unitOf(truck), stop: side.stop, locked, why: side.why, cell: side.cell })),
+			});
+			const periods = [...new Set(held.flatMap(([lock]) => lock.blockers.flatMap((b) => b.periods)))].filter(Boolean).sort();
+			recordPeriodRefusal({ req, ...moveAudit, tail: `${words.audit.slice(0, 170)}; nothing was written` }, "PERIOD_FINALIZED", periods, moveAudit.subject);
+			return res.status(409).json({ error: words.text, code: "ELD_MOVE_BLOCKED", lead: words.lead, paragraphs: words.paragraphs });
+		}
+		// One transaction at the one instant: the device's truck cleared only where it still holds the device, this truck
+		// set, and ONE history call, which closes this truck's old device and the device's row on the other truck at the
+		// instant and opens this truck's row from it, so neither truck has a gap and no earlier day moves.
+		let raced = false;
+		try {
+			db.transaction(() => {
+				ensureEldDeviceHistorySeeded();
+				const cleared = db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ? AND routemate_vehicle_id = ?").run(source.id, device);
+				if (cleared.changes !== 1) { raced = true; throw new Error("the device's truck changed before the move was written"); }
+				db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(device, truckId);
+				recordEldDeviceAssignment(truckId, device, (req.session && req.session.user && req.session.user.username) || "", at);
+			})();
+		} catch (err) {
+			if (!raced) throw err;
+			return res.status(409).json({ error: eldLinkForward.moveWords.changedTrucks(label), code: "ELD_MOVE_CHANGED" });
+		}
+		logAudit(req, "routemate_move", "truck", String(truckId),
+			`Moved Routemate ${auditText(device, 100)} from truck ${auditText(unitOf(source), 100)} to truck ${auditText(unitOf(target), 100)} at ${at}`
+			+ ` (${auditText(unitOf(target), 100)} had ${auditText(had, 100) || "none"})`
+			+ (now.confirmedSilent ? ` (confirmed silent device: ${eldLastFixPhrase(now.status.last_fix_ms, pre.atMs)})` : ""));
+		res.json({
+			success: true, truckId, routemateVehicleId: device, fromTruckId: source.id,
+			...eldLinkForward.linkAnswer({ kind: "move", atMs: pre.atMs, unit: unitOf(target), device: label, from: unitOf(source) }),
+		});
+	} catch (err) {
+		console.error("routemate move error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -63157,8 +63382,10 @@ db.exec(`
 		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-// The forward-only link rule decides here, at boot, once server_state exists (decideEldLinkForward()).
+// The forward-only link rule decides here, at boot, once server_state exists (decideEldLinkForward()); Move device's
+// start-up line follows it, since the move works only while the rule is in force.
 eldLinkForwardRule();
+logEldMoveDeviceStart();
 function loadRouteCacheSnapshot() {
 	try {
 		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get("route_cache_snapshot");

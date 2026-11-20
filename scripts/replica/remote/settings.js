@@ -16,7 +16,8 @@
 // and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
 // allowlist too: only names the running app reads in <app dir>/server.js,
 // routes/ and lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
-// handed, and the names a helper reads through a table) are copied, so a name
+// handed, the names a helper reads through a table, and the reviewed READ_OFF_ALIAS
+// names a helper reads off its own alias of the env) are copied, so a name
 // nothing reads, whatever it holds, stays on the server. The rest is written, file mode 600, and only
 // names are printed: the copied keys, and each skipped key with the rule that
 // skipped it. No value is ever printed.
