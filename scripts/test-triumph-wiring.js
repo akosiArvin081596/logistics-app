@@ -16,6 +16,8 @@
 //      this one): off, no column is made and the press answers 404; on, live and with the
 //      server's own re-issue hold on, its columns are made and a press reaches the job through
 //      the late reference; dry, or the hold off, 404; the start-up line says which
+//   §10 every open dashboard follows (the Triumph status plan, N9): a claim the job moves, and a write
+//      through the factoring routes, each reach the server's own notifyChange("dashboard")
 //   §8 each identical BOL or POD once (TRIUMPH_BATCH_DEDUPE_ENABLED): with the job on and the
 //      switch exactly "true", one start-up line says so; otherwise the lines are as before
 //   §9 way 1's photo re-compress (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED): the same, its own line
@@ -268,6 +270,68 @@ function wire(env, { replica = null } = {}) {
 		eq([works(noHold), (await noHold.press()).status], [false, 404], "§7 FAILS ON THE OLD CODE: RATECON_REISSUE_HOLD_ENABLED off: the server's own value reaches the routes, and the button doesn't work (the advance check fails closed)");
 		ok(/\tclosedMonthsOf: integrityClosedMonthsOf,\n\treissueHoldOn: RATECON_REISSUE_HOLD_ENABLED,\n\ttriumphJob: \(\) => triumph,\n/.test(FBLOCK), "§7 the routes get the server's own month check, hold and job");
 		ok(/\tprocessButtonOn: require\("\.\/lib\/triumph-rules"\)\.processButtonEnabled\(process\.env, \{ replica: Boolean\(REPLICA\) \}\),\n/.test(BLOCK), "§7 the job's daily notice follows the same switch");
+	}
+
+	// ---------------------------------------------------------------- §10
+	section("§10 every open dashboard follows: the server's notifyChange");
+	{
+		const FSTART = "// <factoring-wiring>";
+		const FEND = "// </factoring-wiring>";
+		const FBLOCK = SRC.slice(SRC.indexOf(FSTART), SRC.indexOf(FEND) + FEND.length);
+		const db = new Database(":memory:");
+		db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY, load_id TEXT, type TEXT, file_name TEXT, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at TEXT, deleted_at TEXT)");
+		db.exec(`CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT, total TEXT,
+			broker_name TEXT, order_number TEXT, via TEXT, created_by TEXT, edited INTEGER DEFAULT 0, edited_fields TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+		db.exec("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT)");
+		const told = [];
+		const mounted = {};
+		const quiet = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
+		const scope = {
+			db,
+			process: { env: { TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7" } },
+			REPLICA: null,
+			require: serverRequire,
+			console: quiet,
+			path,
+			app: { post: (p, ...chain) => { mounted[p] = chain; } },
+			requireRole: (role) => (req, res, next) => (req.session.user.role === role ? next() : res.status(403).json({ code: "FORBIDDEN" })),
+			refuseCrossSite: (req, res, next) => next(),
+			logAudit: () => {},
+			logAuditRefusal: () => {},
+			integrityClosedMonthsOf: () => [],
+			RATECON_REISSUE_HOLD_ENABLED: true,
+			startsJob: () => false,
+			setInterval: () => 0,
+			setTimeout: () => 0,
+			setImmediate: () => {},
+			// A factored load not delivered yet: the job's run moves its claim to Waiting.
+			getJobTrackingCached: async () => ({ headers: ["Load ID", "Status", "Email"], data: [{ "Load ID": "LD-TEST-0001", Status: "In Transit", Email: "ap@example-broker.test" }] }),
+			sheetDayKey: () => "",
+			DATA_DIR: "/made-up/data",
+			brokerInvoiceDraft: { prepare: async () => ({ ok: false }), render: async () => ({}), record: () => ({ recorded: false }) },
+			nextInvoiceNumber: () => "11122026-1",
+			insertDispatchNotification: { run: () => {} },
+			io: { to: () => ({ emit: () => {} }) },
+			fetchDocumentBytes: async () => Buffer.from("made-up"),
+			notifyChange: (domain) => told.push(domain),
+		};
+		const names = Object.keys(scope);
+		const out = new Function(...names, `${FBLOCK}\n${BLOCK}\nreturn { factoringRoutes, triumph };`)(...names.map((n) => scope[n]));
+		db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-0001', 'LD-TEST-0001', 1, 'script', 'x', 'x')").run();
+		db.prepare("INSERT INTO triumph_submissions (load_key, load_id, state, first_seen_at, next_attempt_at, updated_at) VALUES ('ld-test-0001', 'LD-TEST-0001', 'queued', ?, ?, ?)").run("2026-11-12T15:00:00.000Z", "2026-11-12T15:00:00.000Z", "2026-11-12T15:00:00.000Z");
+		await out.triumph.tick();
+		const claim = db.prepare("SELECT state, reason_code FROM triumph_submissions").get();
+		eq([claim.state, claim.reason_code, told], ["waiting", "NOT_COMPLETED", ["dashboard"]], "§10 FAILS ON THE OLD CODE: a claim the job moved reaches the server's notifyChange(\"dashboard\")");
+		told.length = 0;
+		const res = { status: 200, body: null };
+		const r = { status(s) { res.status = s; return r; }, json(b) { res.body = b; return r; } };
+		const req = { params: { loadKey: "LD-TEST-0001" }, body: { reason: "made-up: handled in Triumph's portal" }, session: { user: { id: 7, username: "made-up-admin", role: "Super Admin" } } };
+		for (const h of mounted["/api/factoring/loads/:loadKey/handled-outside"] || []) {
+			let goOn = false;
+			await h(req, r, () => { goOn = true; });
+			if (!goOn) break;
+		}
+		eq([res.status, told], [200, ["dashboard"]], "§10 FAILS ON THE OLD CODE: a write through the factoring routes reaches it too");
 	}
 
 	// ---------------------------------------------------------------- §8

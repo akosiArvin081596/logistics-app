@@ -57216,6 +57216,7 @@ const factoringRoutes = require("./lib/factoring-routes").create({
 	closedMonthsOf: integrityClosedMonthsOf,
 	reissueHoldOn: RATECON_REISSUE_HOLD_ENABLED,
 	triumphJob: () => triumph,
+	notifyChange: (domain) => notifyChange(domain),
 });
 factoringRoutes.mount(app, { requireRole, refuseCrossSite });
 console.log(`[factoring] marking ${factoringRoutes.markingOn ? "on" : "off"}; listed accounts: ${factoringRoutes.markIds.state}; assignment lines ${factoringRoutes.noaLinesSet ? "set" : "unset"}; submit ${factoringRoutes.submitMode}; Process with Triumph ${factoringRoutes.processButtonOn ? (factoringRoutes.buttonWorks() ? "on" : "on, but idle until marking is on, submit is live and the re-issue hold is on") : "off"}`);
@@ -57433,8 +57434,11 @@ if (invoiceEvidence.passOn && startsJob("invoice mailbox pass")) invoiceEvidence
 //     TRIUMPH_SUBMIT_DIR, TRIUMPH_REPORTS_DIR, with no default: unset, nothing can connect, and
 //     a start that needs them logs one warning naming them, never a value;
 //   TRIUMPH_MAX_PER_HOUR (12) and TRIUMPH_MAX_PER_DAY (60); TRIUMPH_NOA_LINES, the lines every
-//     factored invoice prints; the carrier deny list rule 7 checks every composed value against.
-// Its notices are Super Admin only (SUPER_ADMIN_ONLY_NOTICE_TYPES). A replica or an import starts
+//     factored invoice prints; the carrier deny list rule 7 checks every composed value against;
+//   TRIUMPH_STOP_RECORD_ENABLED (exactly "true"): a stop for a person recorded (its row, its notice
+//     and a size stop's numbers), read by the job itself.
+// Its notices are Super Admin only (SUPER_ADMIN_ONLY_NOTICE_TYPES). A claim that moves sends
+// dashboard:changed, so every open dashboard follows by itself. A replica or an import starts
 // no timer (startsJob()). scripts/test-triumph-wiring.js lifts this block.
 const TRIUMPH_NOTICE_TYPE = "factoring";
 const triumphTransport = require("./lib/triumph-transfer").create({ db, env: process.env, replica: Boolean(REPLICA) });
@@ -57477,6 +57481,8 @@ const triumph = require("./lib/triumph-job").create({
 		insertDispatchNotification.run(TRIUMPH_NOTICE_TYPE, title, body, "{}");
 		io.to("super-admin").emit("dispatch-notification", { type: TRIUMPH_NOTICE_TYPE, title, body, metadata: {} });
 	},
+	// A claim that moved: every open dashboard reads it again (no payload).
+	changed: () => notifyChange("dashboard"),
 	log: console,
 });
 // Process with Triumph's columns (the broker invoice's number and date on the mark, where a claim's

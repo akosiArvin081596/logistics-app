@@ -171,9 +171,9 @@ GET /api/expenses/personal/lines · requireRole("Super Admin")=anon@12b84c4b0134
 GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@1a7294757bd7
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
 POST /api/factoring/loads/:loadKey · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@0de31441b522 · (lib mount)
-POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@86f770a688c9 · (lib mount)
+POST /api/factoring/loads/:loadKey/handled-outside · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@89ffb89678b8 · (lib mount)
 POST /api/factoring/process-with-triumph · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@6a161b0c76de · (lib mount)
-POST /api/factoring/triumph-retry · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@faa0169119f4 · (lib mount)
+POST /api/factoring/triumph-retry · anon@12b84c4b0134 · crossSiteGuardMiddleware@aa37960cca47 · anon@cc1f64d5bd3c · (lib mount)
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
 GET /api/financials/overview · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7c94116b08cc
 GET /api/financials/overview.csv · requireRole("Super Admin")=anon@12b84c4b0134 · inline@3bc178b2c5a0

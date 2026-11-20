@@ -20,14 +20,22 @@
 //      has its own chip, with nothing to retry; a job's draft whose mark was cleared
 //      since doesn't read as ready; where it may already be sent, no line says the
 //      invoice goes through Triumph, and the switch asks before it marks
-//   §8 the reason box asks the shared login for "your name and why", and every other
-//      account for a reason as before; the server's rows name the shared login in the
-//      screens' own words; each rule changed in turn is caught
+//   §8 the note box, labelled "Note (required)", asks the shared login for its name and why
+//      (saying why it asks), and every other account why; the server's rows name the shared
+//      login in the screens' own words; each rule changed in turn is caught
 //   §9 Process with Triumph: every tile row of the plan's §1.3 in order, Try again only on a
 //      stop a retry can change (the server's own list); Clear factored and "Factor with
 //      Triumph" as two buttons on the server's word, one of them where the one switch was
 //      with the switch off; the chip names the broker's invoice; the button beside Draft
 //      Invoice Email, Super Admin only, one press with no question; mutants of each
+//   §10-§15 the Triumph status plan, Part 1: the step line (§10); the calm line, the wait words
+//      and the retry's try count (§11); the chip by the tile's own table (§12); the too-large
+//      words with the server's numbers, and "under Other options" (§13); Other options, folded
+//      and shown on the server's word, each help line beside its own button (§14); the open load
+//      taking the fresh row on every read of the dashboard, and the step line on it (§15);
+//      mutants of each
+//   §16 the stop words: the server's copy (its stop notice says why for a load with no Triumph
+//      line) is the client's, word for word; a mutant of either side
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
@@ -277,8 +285,10 @@ section("§7  a job's draft on a marked load; a mark cleared after the run stopp
 section("§8  the reason box's hint on the shared login")
 {
   const SL = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js')).href)
-  const HINT_SHARED = 'Your name and why (required)'
-  const HINT = 'Reason (required)'
+  // The Triumph status plan, 3e: the box is labelled "Note (required)"; its hint asks why, and the
+  // shared login also for a name, saying why it asks.
+  const HINT_SHARED = 'Your name and why: this login is shared, so the app asks who you are'
+  const HINT = 'Why'
   // The hint for each account: the shared login's rows name the login, not a person, so it is asked for a name.
   const hintViolations = (mod) => {
     if (!mod || typeof mod.reasonHint !== 'function') return ['reasonHint() is missing']
@@ -287,17 +297,20 @@ section("§8  the reason box's hint on the shared login")
     for (const name of ['made-up-admin', '', null, undefined]) if (mod.reasonHint(name) !== HINT) v.push(`${JSON.stringify(name)} is not asked for a reason as before`)
     return v
   }
-  const BOX = '<input v-model="reason" class="fact-reason" type="text" maxlength="200" :placeholder="hint" aria-label="Reason" :disabled="busy" />'
+  const BOX = '<input :id="noteId" v-model="reason" class="fact-reason" type="text" maxlength="200" :placeholder="hint" :disabled="busy" />'
+  const LABEL = '<label class="fact-label" :for="noteId">{{ NOTE_LABEL }}</label>'
   const HINT_LINE = 'const hint = computed(() => reasonHint(auth.user?.username))'
   const boxViolations = (src) => {
     const v = []
-    if (!src.includes(BOX)) v.push('the reason box does not show the hint')
+    if (!src.includes(BOX)) v.push('the note box does not show the hint')
+    if (!src.includes(LABEL) || !src.includes('const noteId = useId()')) v.push('the note box has no label of its own')
     if (!src.includes(HINT_LINE)) v.push("the hint is not the signed-in account's")
     if (src.includes('placeholder="Reason (required)"')) v.push('a fixed placeholder is left')
     return v
   }
-  eq(hintViolations(S), [], '§8 FAILS ON THE OLD CODE: "Your name and why (required)" on the shared login, however spelled; "Reason (required)" for any other account')
-  eq(boxViolations(CONTROLS), [], "§8 FAILS ON THE OLD CODE: the reason box shows the signed-in account's hint, and no fixed one")
+  eq(hintViolations(S), [], `§8 FAILS ON THE OLD CODE (3e): "${HINT_SHARED}" on the shared login, however spelled; "${HINT}" for any other account`)
+  eq(S && S.NOTE_LABEL, 'Note (required)', '§8 FAILS ON THE OLD CODE (3e): the box is labelled "Note (required)"')
+  eq(boxViolations(CONTROLS), [], "§8 FAILS ON THE OLD CODE (3e): the note box is labelled and shows the signed-in account's hint, and no fixed one")
   ok(read(path.join(ROOT, 'lib', 'sign-in.js')).includes(`const SHARED_LOGIN_NOTE = "${SL.SHARED_LOGIN_NOTE}";`),
     "§8 FAILS ON THE OLD CODE: the server's rows (factoring, an automatic invoice's start) name the shared login in the screens' own words, kept beside isSharedLoginName()")
   const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -318,9 +331,9 @@ section("§8  the reason box's hint on the shared login")
     fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
     let n = 0
     for (const [name, from, to] of [
-      ['the hint asks everyone for a name', "(isSharedLogin(username) ? 'Your name and why (required)'", "(true ? 'Your name and why (required)'"],
-      ['the hint asks no one for a name', "(isSharedLogin(username) ? 'Your name and why (required)'", "(false ? 'Your name and why (required)'"],
-      ['the hint loses its words', "'Your name and why (required)'", "'Your name (required)'"],
+      ['the hint asks everyone for a name', `(isSharedLogin(username) ? '${HINT_SHARED}'`, `(true ? '${HINT_SHARED}'`],
+      ['the hint asks no one for a name', `(isSharedLogin(username) ? '${HINT_SHARED}'`, `(false ? '${HINT_SHARED}'`],
+      ['the hint loses its words', `'${HINT_SHARED}'`, "'Your name and why'"],
     ]) {
       if (LIB_SRC.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once in factoringStatus.js: ${name}`); continue }
       const file = path.join(tmp, 'lib', `factoringStatus-${++n}.js`)
@@ -335,6 +348,7 @@ section("§8  the reason box's hint on the shared login")
   for (const [name, from, to] of [
     ['the box keeps a fixed placeholder', ':placeholder="hint"', 'placeholder="Reason (required)"'],
     ['the hint read from the role, not the account', 'reasonHint(auth.user?.username)', 'reasonHint(auth.user?.role)'],
+    ['the box without its label (3e)', LABEL, ''],
   ]) {
     if (CONTROLS.split(from).length - 1 !== 1) { failures.push(`§8 mutant anchor not found once in FactoringControls.vue: ${name}`); continue }
     ok(boxViolations(CONTROLS.replace(from, to)).length > 0, `§8 MUTANT ${name}: caught`)
@@ -358,8 +372,8 @@ section('§9  Process with Triumph: the button, the tile, the chip')
     if (!L || typeof L.triumphTile !== 'function') return ['no triumphTile()']
     const t = (over) => L.triumphTile({ ...base, ...over }, { formatTime: fmt })
     const want = (label, got, text, tryAgain) => { if (!got || got.text !== text || got.tryAgain !== tryAgain) v.push(`${label}: ${JSON.stringify(got)}`) }
-    want('the mark cleared', t({ factored: false, triumphState: 'queued' }), 'Not sent to Triumph. It stays with its invoice to the broker.', false)
-    want('queued while paused', t({ triumphState: 'queued', paused: 'LOGIN_REFUSED' }), "Paused: Triumph refused the app's sign-in. Its invoice to the broker stands.", false)
+    want('the mark cleared', t({ factored: false, triumphState: 'queued' }), "Not sent to Triumph. The broker's invoice already went out as usual.", false)
+    want('queued while paused', t({ triumphState: 'queued', paused: 'LOGIN_REFUSED' }), "Paused: Triumph refused the app's sign-in. The broker's invoice already went out as usual.", false)
     want('queued', t({ triumphState: 'queued' }), 'Sending to Triumph…', false)
     want('working', t({ triumphState: 'working', paused: 'LOGIN_REFUSED' }), 'Sending to Triumph…', false)
     want('submitted', t({ triumphState: 'submitted', locked: true, lockedVia: 'upload', triumphAt: '2026-11-12T15:30:00.000Z' }), 'Sent to Triumph · at 2026-11-12T15:30:00.000Z', false)
@@ -370,12 +384,12 @@ section('§9  Process with Triumph: the button, the tile, the chip')
     for (const code of L.BUTTON_STOPS || []) {
       // Even a row that says canRetry gets no Try again on these.
       const got = t({ triumphState: 'needs_attention', triumphCode: code })
-      if (!got || got.tryAgain !== false || !got.text.startsWith('Not sent to Triumph: ') || !got.text.endsWith('It stays with its invoice to the broker: Clear factored puts it back there alone.')) v.push(`${code}: ${JSON.stringify(got)}`)
+      if (!got || got.tryAgain !== false || !got.text.startsWith('Not sent to Triumph: ') || !got.text.endsWith("The broker's invoice already went out as usual. To keep it with the broker only, press Clear factored under Other options.")) v.push(`${code}: ${JSON.stringify(got)}`)
     }
-    want('another code', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED' }), 'Not sent to Triumph: the upload to Triumph kept failing. Its invoice to the broker stands. Try again, or Clear factored to keep it with the broker.', true)
-    want('another code, not listed', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', canClear: false, canRetry: false }), 'Not sent to Triumph: the upload to Triumph kept failing. Its invoice to the broker stands.', false)
+    want('another code', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED' }), "Not sent to Triumph: the upload to Triumph kept failing. The broker's invoice already went out as usual. Press Try again, or Clear factored under Other options to keep it with the broker only.", true)
+    want('another code, not listed', t({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', canClear: false, canRetry: false }), "Not sent to Triumph: the upload to Triumph kept failing. The broker's invoice already went out as usual.", false)
     want('handled outside', t({ triumphState: 'closed_outside', locked: true, lockedVia: 'outside' }), "Handled in Triumph's process. Invoiced to the broker: 11102026-4, 11/10/2026.", false)
-    want('skipped', t({ triumphState: 'skipped', triumphCode: 'FACTORING_LOCKED' }), 'Not sent to Triumph: its mark is final. Its invoice to the broker stands.', false)
+    want('skipped', t({ triumphState: 'skipped', triumphCode: 'FACTORING_LOCKED' }), "Not sent to Triumph: its mark is final. The broker's invoice already went out as usual.", false)
     if (L.triumphTile({ ...base, byButton: false, triumphState: 'queued' }) !== null) v.push('a claim the button did not arm has a tile')
     if (L.triumphTile({ factored: false, canMark: true }) !== null) v.push('a row with no claim has a tile')
     return v
@@ -393,8 +407,8 @@ section('§9  Process with Triumph: the button, the tile, the chip')
   // L7: the chip names the invoice the broker got, never "not by email".
   const chip = (over) => (S ? S.factoringChip({ ...base, ...over }) : null)
   eq([chip({}).reason, chip({ locked: true, lockedVia: 'upload' }).reason, chip({ locked: true, lockedVia: 'outside' }).reason],
-    ['Invoiced to the broker: 11102026-4, 11/10/2026. Triumph gets the same invoice. The Draft Invoice button refuses it.', 'Sent to Triumph. Invoiced to the broker: 11102026-4, 11/10/2026.', "Handled in Triumph's process. Invoiced to the broker: 11102026-4, 11/10/2026."],
-    '§9 FAILS ON THE OLD CODE (L7): a load the button took: the chip names the broker\'s invoice; "Sent to Triumph" once handed over')
+    ['Invoiced to the broker: 11102026-4, 11/10/2026. The Draft Invoice button refuses it.', 'Sent to Triumph. Invoiced to the broker: 11102026-4, 11/10/2026.', "Handled in Triumph's process. Invoiced to the broker: 11102026-4, 11/10/2026."],
+    '§9 FAILS ON THE OLD CODE (L7, M2): a load the button took: the chip names the broker\'s invoice, never "Triumph gets the same invoice"; "Sent to Triumph" once handed over')
   ok(S && !/not by email|never invoices/.test(JSON.stringify([chip({}), chip({ locked: true, lockedVia: 'upload' }), chip({ locked: true, lockedVia: 'outside' })])), '§9 (L7) ...and never says "not by email" or that the app never invoices it')
   eq(S ? S.factoringChip({ factored: true, locked: true, lockedVia: 'upload' }).reason : null, 'Handed to Triumph. The app never invoices this load again.', '§9 a load marked any other way: the chip as before')
   // M1: only a refusal the press made before any write says "Not sent to Triumph". A second press,
@@ -515,12 +529,12 @@ section('§9  Process with Triumph: the button, the tile, the chip')
     fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
     let n = 0
     for (const [name, from, to, check] of [
-      ['Try again offered on a code a retry can\'t change (N-L1)', "    if (BUTTON_STOPS.includes(code)) {\n      return { text: `Not sent to Triumph: ${triumphStopWords(code)}. It stays", "    if (false) {\n      return { text: `Not sent to Triumph: ${triumphStopWords(code)}. It stays", tileViolations],
-      ['the stop after the lock read as one before it (N2-L2)', 'if (BUTTON_STOPS.includes(code) && UPLOAD_STAGES.includes(f.triumphStage)) {', 'if (false) {', tileViolations],
-      ['Sending before the pause', "  if (state === 'queued' && f.paused) return", "  if (false) return", tileViolations],
-      ['a cleared mark still read as on its way', "  if (f.factored !== true) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", "  if (false) return { text: 'Not sent to Triumph. It stays with its invoice to the broker.'", tileViolations],
-      ['MAYBE_SUBMITTED read as a plain stop', "    if (code === 'MAYBE_SUBMITTED') return", "    if (false) return", tileViolations],
-      ['Clear factored named where the server doesn\'t offer it', "const ways = [retry ? 'Try again' : '', clear ? 'Clear factored", "const ways = [retry ? 'Try again' : '', true ? 'Clear factored", tileViolations],
+      ['Try again offered on a code a retry can\'t change (N-L1)', "    if (BUTTON_STOPS.includes(code)) return { text: `Not sent to Triumph: ${triumphStopWords(code)}. ${BROKER_WENT}", "    if (false) return { text: `Not sent to Triumph: ${triumphStopWords(code)}. ${BROKER_WENT}", tileViolations],
+      ['the stop after the lock read as one before it (N2-L2)', '    if (UPLOAD_STAGES.includes(stage)) {', '    if (false) {', tileViolations],
+      ['Sending before the pause', "  if (state === 'queued' && f.paused) return { text:", "  if (false) return { text:", tileViolations],
+      ['a cleared mark still read as on its way', "  if (f.factored !== true) return { text: `Not sent to Triumph. ${BROKER_WENT}`", "  if (false) return { text: `Not sent to Triumph. ${BROKER_WENT}`", tileViolations],
+      ['MAYBE_SUBMITTED read as a plain stop', "    if (code === 'MAYBE_SUBMITTED' || AFTER_CSV_STAGES.includes(stage)) return", "    if (false) return", tileViolations],
+      ['Clear factored named where the server doesn\'t offer it', "  return clear ? ` ${KEEP_WITH_BROKER}` : ''", "  return true ? ` ${KEEP_WITH_BROKER}` : ''", tileViolations],
       ['a second press read as "Not sent" (M1)', "const PRESS_ALREADY = Object.freeze(['TRIUMPH_ALREADY', 'FACTORING_LOCKED'])", 'const PRESS_ALREADY = Object.freeze([])', pressViolations],
       ['no answer read as "Not sent" (M1)', "  return { kind: 'unknown', tone: 'warn', text: PRESS_UNCONFIRMED }", "  return { kind: 'refused', tone: 'bad', text: \"Not sent to Triumph: the answer didn't come back.\" }", pressViolations],
       ['a 5xx the press didn\'t name read as "Not sent" (M1)', '(status >= 500 && PRESS_NOTHING_WRITTEN_5XX.includes(code))', '(status >= 500)', pressViolations],
@@ -539,6 +553,301 @@ section('§9  Process with Triumph: the button, the tile, the chip')
       fs.writeFileSync(canClearMutant, LIB_SRC.replace(clearFrom, '(f.canClear === true)'))
       const M = await import(pathToFileURL(canClearMutant).href)
       ok(!M.canClear({ factored: true, canMark: true }), '§9 MUTANT Clear factored gone with the switch off: caught')
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------- §10-§15
+// The Triumph status plan, Part 1. Each check runs on the shipped files, then on each mutant: the
+// lib's from a temp copy beside its import, the screens' as text.
+{
+  const LIB_SRC = read(LIB)
+  const has = (M, fn) => Boolean(M && typeof M[fn] === 'function')
+  const fmt = (iso) => `<${iso}>`
+  const P = '2026-11-19T03:26:00.000Z'
+  const base = Object.freeze({ factored: true, locked: false, lockedVia: '', byButton: true, canClear: true, canRetry: true, canRecordOutside: true, triumphStage: '', triumphAt: '', triumphCode: '',
+    brokerInvoiceId: '11102026-4', brokerInvoiceDate: '2026-11-10', paused: '', triumphPressedAt: P, triumphPages: null, triumphAttempts: 0, triumphTryLimit: 4, triumphNextAt: '', triumphTooLarge: null, otherOptions: true })
+  const MY = 'Not shown in the app yet. Look for it in MyTriumph.'
+  const WENT = "The broker's invoice already went out as usual."
+  const INV = 'Invoiced to the broker: 11102026-4, 11/10/2026.'
+
+  // §10 the step line (3b, N4): each step from the server's own facts.
+  const stepsViolations = (M) => {
+    if (!has(M, 'triumphSteps')) return ['no triumphSteps()']
+    const v = []
+    const lines = (over) => M.triumphSteps({ ...base, ...over }, { formatTime: fmt }).map((s) => `${s.done ? '✓' : '○'} ${s.text}`)
+    const want = (label, got, exp) => { if (JSON.stringify(got) !== JSON.stringify(exp)) v.push(`${label}: ${JSON.stringify(got)}`) }
+    const theirs = (sent) => ['Received by Triumph', 'Accepted, purchased', 'Funded'].map((l) => `○ ${sent ? `${l}: ${MY}` : l}`)
+    want('a fresh press', lines({ triumphState: 'queued' }), [`✓ Pressed <${P}>`, '○ Documents checked', '○ Uploaded to Triumph', ...theirs(false)])
+    want('built', lines({ triumphState: 'working', triumphStage: 'built', triumphPages: 6 }), [`✓ Pressed <${P}>`, '✓ Documents checked: 6 pages', '○ Uploaded to Triumph', ...theirs(false)])
+    want('one page', lines({ triumphState: 'working', triumphStage: 'pdf_uploaded', triumphPages: 1 })[1], '✓ Documents checked: 1 page')
+    want('sent', lines({ triumphState: 'submitted', triumphStage: 'recorded', triumphPages: 6, triumphAt: '2026-11-19T03:31:00.000Z', locked: true, lockedVia: 'upload' }),
+      [`✓ Pressed <${P}>`, '✓ Documents checked: 6 pages', "✓ Uploaded to Triumph <2026-11-19T03:31:00.000Z>. The file sizes on Triumph's server matched what the app sent.", ...theirs(true)])
+    want('a stop after the lock', lines({ triumphState: 'needs_attention', triumphStage: 'pdf_uploading', triumphCode: 'SUBMIT_FAILED', triumphPages: 6, locked: true, lockedVia: 'upload' }),
+      [`✓ Pressed <${P}>`, '✓ Documents checked: 6 pages', '○ Uploaded to Triumph', ...theirs(false)])
+    want('a size stop, never built', lines({ triumphState: 'needs_attention', triumphStage: 'rendered', triumphCode: 'BATCH_TOO_LARGE', triumphPages: 6 })[1], '○ Documents checked')
+    for (const [label, over] of [["handled in Triumph's process", { triumphState: 'closed_outside', locked: true, lockedVia: 'outside' }], ['given up', { triumphState: 'skipped', triumphCode: 'NOT_FACTORED' }],
+      ['a cleared mark', { factored: false, triumphState: 'queued' }], ["a claim the button didn't arm", { byButton: false, triumphState: 'queued' }], ['no claim', { triumphState: '' }]]) {
+      if (M.triumphSteps({ ...base, ...over }).length) v.push(`${label}: a step line`)
+    }
+    return v
+  }
+
+  // §11 the calm line (3a, L6), the wait words (N3) and the retry's try count (L5): never amber while it goes.
+  const waitViolations = (M) => {
+    if (!has(M, 'triumphTile')) return ['no triumphTile()']
+    const v = []
+    const t = (over, opts = {}) => M.triumphTile({ ...base, ...over }, { formatTime: fmt, ...opts })
+    const want = (label, got, text, tone = 'muted') => { if (!got || got.text !== text || got.tone !== tone || got.tryAgain !== false) v.push(`${label}: ${JSON.stringify(got)}`) }
+    want('a fresh press', t({ triumphState: 'queued' }), `Sending to Triumph… Taken at <${P}>.`)
+    want('being worked', t({ triumphState: 'working' }), `Sending to Triumph… Taken at <${P}>.`)
+    want('still on its way after the last read', t({ triumphState: 'queued' }, { late: true }), 'Still on its way. Reload to see where it stands.')
+    want('Friday evening', t({ triumphState: 'queued', triumphCode: 'QUIET_WINDOW', triumphNextAt: '2026-11-14T00:30:00.000Z' }), "Waiting: Friday evening is the app's weekly invoice run; it goes after.")
+    for (const code of ['RENDERER_BUSY', 'GEMINI_DOWN']) want(code, t({ triumphState: 'queued', triumphCode: code, triumphAttempts: 1 }), "Waiting: the app's invoice maker or document reader isn't available; it tries again by itself.")
+    want("a pause's code left after it ended", t({ triumphState: 'queued', triumphCode: 'LOGIN_REFUSED' }), 'Waiting: sending was paused; it tries again by itself.')
+    want('paused now (N7)', t({ triumphState: 'queued', triumphCode: 'LOGIN_REFUSED', paused: 'LOGIN_REFUSED' }), `Paused: Triumph refused the app's sign-in. ${WENT}`, 'warn')
+    want('a retry', t({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 1, triumphNextAt: '2026-11-19T03:41:00.000Z' }), "Waiting to retry: a step didn't go through. Next try about <2026-11-19T03:41:00.000Z> (try 2 of 4).")
+    want('the last retry', t({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 3, triumphNextAt: '2026-11-19T07:41:00.000Z' }), "Waiting to retry: a step didn't go through. Next try about <2026-11-19T07:41:00.000Z> (try 4 of 4).")
+    want('a wait that cost no try', t({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 0, triumphNextAt: '2026-11-19T03:31:00.000Z' }), "Waiting to retry: a step didn't go through. Next try about <2026-11-19T03:31:00.000Z>.")
+    want('the mark unreadable', t({ triumphState: 'queued', triumphCode: 'FACTORING_UNREADABLE', triumphAttempts: 2, triumphNextAt: '2026-11-19T04:26:00.000Z' }), "Waiting to retry: the factoring mark couldn't be read. Next try about <2026-11-19T04:26:00.000Z> (try 3 of 4).")
+    const noLimit = t({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 1, triumphTryLimit: undefined, triumphNextAt: '2026-11-19T03:41:00.000Z' })
+    if (!noLimit || /try \d of/.test(noLimit.text)) v.push('a try count with no limit from the server')
+    return v
+  }
+
+  // §12 the chip by the tile's own table (3c, N7, M2); "Handled in Triumph's process" read first.
+  const chipViolations = (M) => {
+    if (!M || typeof M.factoringChip !== 'function') return ['no factoringChip()']
+    const v = []
+    const c = (over) => M.factoringChip({ ...base, ...over })
+    const want = (label, got, text, tone, reason = '') => { if (!got || got.label !== text || got.tone !== tone || got.reason !== reason) v.push(`${label}: ${JSON.stringify(got)}`) }
+    want('queued', c({ triumphState: 'queued' }), 'Factored (Triumph): sending', 'muted')
+    want('working', c({ triumphState: 'working' }), 'Factored (Triumph): sending', 'muted')
+    want('a retry wait', c({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 1 }), 'Factored (Triumph): sending', 'muted')
+    want('a resumed upload, locked', c({ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphStage: 'pdf_uploading', locked: true, lockedVia: 'upload' }), 'Factored (Triumph): sending', 'muted')
+    want('paused', c({ triumphState: 'queued', paused: 'LOGIN_REFUSED' }), 'Factored (Triumph): paused', 'warn')
+    want('submitted', c({ triumphState: 'submitted', triumphStage: 'recorded', locked: true, lockedVia: 'upload' }), 'Factored (Triumph): final', 'muted', `Sent to Triumph. ${INV}`)
+    want('MAYBE_SUBMITTED', c({ triumphState: 'needs_attention', triumphCode: 'MAYBE_SUBMITTED', triumphStage: 'csv_uploading', locked: true, lockedVia: 'upload' }), 'Factored (Triumph): may have reached Triumph', 'bad', 'A person checks.')
+    want('csv_uploaded', c({ triumphState: 'needs_attention', triumphCode: 'STAGE_INVALID', triumphStage: 'csv_uploaded', locked: true, lockedVia: 'upload' }), 'Factored (Triumph): may have reached Triumph', 'bad', 'A person checks.')
+    for (const stage of ['pdf_uploading', 'pdf_uploaded']) want(`a stop at ${stage}`, c({ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', triumphStage: stage, locked: true, lockedVia: 'upload' }), 'Factored (Triumph): nothing triggered at Triumph', 'bad', 'A person checks.')
+    for (const stage of ['', 'reserved', 'rendered', 'built']) want(`a stop at "${stage}"`, c({ triumphState: 'needs_attention', triumphCode: 'BATCH_TOO_LARGE', triumphStage: stage }), 'Factored (Triumph): not sent', 'warn')
+    want('given up', c({ triumphState: 'skipped', triumphCode: 'LOAD_DROPPED' }), 'Factored (Triumph): not sent', 'warn')
+    want('waiting', c({ triumphState: 'waiting', triumphCode: 'INVOICE_DRAFT_IN_FLIGHT' }), 'Factored (Triumph): waiting', 'warn')
+    want('staged', c({ triumphState: 'staged', triumphStage: 'built' }), 'Factored (Triumph): waiting', 'warn')
+    want('handled outside, read first', c({ triumphState: 'needs_attention', triumphCode: 'BATCH_TOO_LARGE', triumphStage: 'rendered', locked: true, lockedVia: 'outside' }), 'Factored (Triumph): final', 'muted', `Handled in Triumph's process. ${INV}`)
+    return v
+  }
+  // The chip and the line beside it say the same thing, state by state (M2).
+  const agreeViolations = (M) => {
+    if (!M || typeof M.factoringChip !== 'function' || typeof M.triumphTile !== 'function') return ['no chip or no tile']
+    const v = []
+    for (const [over, word, line] of [
+      [{ triumphState: 'queued' }, 'sending', /^Sending to Triumph…/],
+      [{ triumphState: 'queued', triumphCode: 'RETRY_LATER', triumphAttempts: 1 }, 'sending', /^Waiting to retry: /],
+      [{ triumphState: 'queued', triumphCode: 'QUIET_WINDOW' }, 'sending', /^Waiting: /],
+      [{ triumphState: 'queued', paused: 'LOGIN_REFUSED' }, 'paused', /^Paused: /],
+      [{ triumphState: 'waiting', triumphCode: 'NOT_COMPLETED' }, 'waiting', /^Waiting: /],
+      [{ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', triumphStage: 'built' }, 'not sent', /^Not sent to Triumph: /],
+      [{ triumphState: 'needs_attention', triumphCode: 'BATCH_TOO_LARGE', triumphStage: 'rendered' }, 'not sent', /^Too large for Triumph: /],
+      [{ triumphState: 'needs_attention', triumphCode: 'SUBMIT_FAILED', triumphStage: 'pdf_uploading', locked: true, lockedVia: 'upload' }, 'nothing triggered at Triumph', /^Its PDF may be on Triumph's server, but nothing was triggered there/],
+      [{ triumphState: 'needs_attention', triumphCode: 'MAYBE_SUBMITTED', triumphStage: 'csv_uploading', locked: true, lockedVia: 'upload' }, 'may have reached Triumph', /^May have reached Triumph/],
+      [{ triumphState: 'submitted', triumphStage: 'recorded', locked: true, lockedVia: 'upload', triumphAt: P }, 'final', /^Sent to Triumph · /],
+    ]) {
+      const chip = M.factoringChip({ ...base, ...over })
+      const tile = M.triumphTile({ ...base, ...over }, { formatTime: fmt })
+      if (!chip || chip.label !== `Factored (Triumph): ${word}` || !tile || !line.test(tile.text)) v.push(`${JSON.stringify(over)}: "${chip && chip.label}" beside "${tile && tile.text}"`)
+    }
+    return v
+  }
+
+  // §13 the too-large words (N5, L3, L4): the server's numbers when it kept them, each way out only where offered.
+  const N5 = "Too large for Triumph: the invoice, rate con and delivery papers come to 1,011,000 bytes; the app sends at most 921,599. Nothing was sent, and the broker's invoice already went out as usual. To fix it: delete a duplicate BOL or POD, or replace a very large scan with a smaller copy, then press Try again. Or send it in MyTriumph, then under Other options press Handled in Triumph's process, or Clear factored to keep it with the broker only."
+  const tooLargeViolations = (M) => {
+    if (!has(M, 'triumphTile')) return ['no triumphTile()']
+    const v = []
+    const t = (over) => M.triumphTile({ ...base, triumphState: 'needs_attention', triumphCode: 'BATCH_TOO_LARGE', triumphStage: 'rendered', ...over }, { formatTime: fmt })
+    const want = (label, got, text, tryAgain) => { if (!got || got.text !== text || got.tryAgain !== tryAgain) v.push(`${label}: ${JSON.stringify(got)}`) }
+    const unsized = N5.replace('come to 1,011,000 bytes; the app sends at most 921,599.', 'come to more than the app sends.')
+    const head = unsized.slice(0, unsized.indexOf(' To fix it'))
+    want('the kept size', t({ triumphTooLarge: { bytes: 1011000, limit: 921599 } }), N5, true)
+    want('no kept size (the switch off)', t({}), unsized, true)
+    want('a size that is not a number', t({ triumphTooLarge: { bytes: '1011000', limit: 921599 } }), unsized, true)
+    want('an account not listed: no way out named', t({ canRetry: false, canClear: false, canRecordOutside: false }), head, false)
+    want('Handled only', t({ canClear: false }), `${head} To fix it: delete a duplicate BOL or POD, or replace a very large scan with a smaller copy, then press Try again. Or send it in MyTriumph, then under Other options press Handled in Triumph's process.`, true)
+    want('Clear factored only, no Try again', t({ canRetry: false, canRecordOutside: false }), `${head} Under Other options, press Clear factored to keep it with the broker only.`, false)
+    const other = M.triumphTile({ ...base, triumphState: 'needs_attention', triumphCode: 'MERGE_FAILED', triumphStage: 'rendered', triumphTooLarge: { bytes: 1011000, limit: 921599 } }, { formatTime: fmt })
+    if (!other || /bytes|1,011,000/.test(other.text)) v.push(`another code shows a size: ${JSON.stringify(other)}`)
+    return v
+  }
+  // Every line the tile can say: "Its invoice to the broker stands" is gone (3d), and a line that names a
+  // manual button says it is under Other options (N5).
+  const everyLineViolations = (M) => {
+    if (!has(M, 'triumphTile')) return ['no triumphTile()']
+    const v = []
+    const codes = [...(M.BUTTON_STOPS || []), 'SUBMIT_FAILED', 'BATCH_TOO_LARGE', 'DEBTOR_UNMAPPED', 'MAYBE_SUBMITTED', 'NOT_FACTORED', 'RETRY_LATER', 'QUIET_WINDOW', 'LOGIN_REFUSED', '']
+    for (const state of ['queued', 'working', 'submitted', 'waiting', 'needs_attention', 'closed_outside', 'skipped', 'staged']) {
+      for (const code of codes) for (const stage of ['', 'rendered', 'pdf_uploading', 'csv_uploading']) for (const factored of [true, false]) {
+        const got = M.triumphTile({ ...base, triumphState: state, triumphCode: code, triumphStage: stage, factored, locked: stage.endsWith('uploading'), lockedVia: stage.endsWith('uploading') ? 'upload' : '' }, { formatTime: fmt })
+        if (!got) continue
+        if (/invoice to the broker stands|Triumph gets the same invoice|stays with its invoice/.test(got.text)) v.push(`${state} ${code} ${stage}: ${got.text}`)
+        if (/press (Clear factored|Handled in Triumph's process)|, or Clear factored/.test(got.text) && !/under Other options/i.test(got.text)) v.push(`${state} ${code} ${stage}: a manual button named without "under Other options"`)
+      }
+    }
+    return v
+  }
+
+  // §14 Other options (3e, N8): folded on the server's word, never open by default, each help line beside its button.
+  const MANUAL_WORDS = Object.freeze({ link: 'Other options', heading: "If this load won't go through the app", handled: "Handled in Triumph's process: you sent it to Triumph another way, for example in MyTriumph.",
+    clear: 'Clear factored: takes the load off Triumph; an invoice the broker already got stands; if none went, invoice it the usual way.', both: 'Either one needs a short note.', one: 'It needs a short note.' })
+  const manualViolations = (M) => {
+    if (!has(M, 'manualControls') || !M.OTHER_OPTIONS) return ['no manualControls() or OTHER_OPTIONS']
+    const v = []
+    const got = [undefined, null, {}, { otherOptions: 'true' }, { otherOptions: true }, { otherOptions: false }].map((f) => M.manualControls(f))
+    if (JSON.stringify(got) !== JSON.stringify(['today', 'today', 'today', 'today', 'folded', 'hidden'])) v.push(`manualControls: ${JSON.stringify(got)}`)
+    for (const [k, words] of Object.entries(MANUAL_WORDS)) if (M.OTHER_OPTIONS[k] !== words) v.push(`OTHER_OPTIONS.${k}: ${JSON.stringify(M.OTHER_OPTIONS[k])}`)
+    return v
+  }
+  const CLEAR_BTN = '<button v-if="mayClear" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="setFactored(false)">Clear factored</button>'
+  const HANDLED_BTN = '<button v-if="mayRecord" type="button" class="fact-btn" :disabled="busy || !reasonOk" @click="recordOutside">Handled in Triumph\'s process</button>'
+  const LINK = '<button v-if="folded && (mayClear || mayRecord)" type="button" class="fact-more" :aria-expanded="open ? \'true\' : \'false\'" @click="open = !open">{{ OTHER_OPTIONS.link }}</button>'
+  const SHOWN = /const actionsShown = computed\(\(\) => \(manual\.value === 'today'\n\s+\? mayMark\.value \|\| mayClear\.value \|\| mayRecord\.value\n\s+: folded\.value && open\.value && \(mayClear\.value \|\| mayRecord\.value\)\)\)/
+  const foldViolations = (src) => {
+    const v = []
+    if (!src.includes(LINK)) v.push('no plain "Other options" link, or one shown with no fold')
+    if (!src.includes('const open = ref(false)')) v.push('Other options open by default')
+    if (!src.includes('const manual = computed(() => manualControls(status.value))') || !src.includes("const folded = computed(() => manual.value === 'folded')")) v.push("the fold not on the server's word")
+    if (!SHOWN.test(src)) v.push('the actions not as before with no flag, or not only once opened with it')
+    if (!src.includes(`${CLEAR_BTN}\n      <span v-if="folded && mayClear" class="fact-help">{{ OTHER_OPTIONS.clear }}</span>`)) v.push("Clear factored's help line not beside it (N8)")
+    if (!src.includes(`${HANDLED_BTN}\n      <span v-if="folded && mayRecord" class="fact-help">{{ OTHER_OPTIONS.handled }}</span>`)) v.push("Handled in Triumph's process's help line not beside it (N8)")
+    if (!src.includes('<p v-if="folded" class="fact-heading">{{ OTHER_OPTIONS.heading }}</p>')) v.push('no heading')
+    if (!/\.fact-actions--folded \{[^}]*background: #fff;/.test(src)) v.push('the folded panel not plain')
+    if (!src.includes("watch(() => props.loadId, () => { reason.value = ''; result.value = null; open.value = false })")) v.push('Other options left open on another load')
+    return v
+  }
+
+  // §15 the open load follows every read of the dashboard (3f), says "Still on its way" after the last
+  // follow-up read (L6), and shows its step line.
+  const followViolations = (src) => {
+    const v = []
+    if (!src.includes('watch(() => props.jobs, () => freshFactoring())')) v.push('the open load keeps its own copy after a read of the dashboard')
+    const at = src.indexOf('async function followTile() {')
+    const body = at >= 0 ? src.slice(at, src.indexOf('\n}\n', at)) : ''
+    if (!body.includes('  triumphLate.value = false\n') || !body.endsWith('\n  if (mine === triumphFollow) triumphLate.value = true')) v.push('"Still on its way" not set after the last read, or not reset at the next')
+    if (!src.includes('triumphTile(selectedJob.value._factoring, { formatTime: (t) => fmtDraftDate(t), late: triumphLate.value })')) v.push('the line not told the load is late')
+    if (!src.includes('triumphResult.value = null; triumphFollow += 1; triumphLate.value = false')) v.push('"Still on its way" kept on another load')
+    if (!/const selectedTriumphSteps = computed\(\(\) => \(auth\.isSuperAdmin && selectedJob\.value\n\s+\? triumphSteps\(selectedJob\.value\._factoring/.test(src)) v.push("the step line not a Super Admin's, or not the server's row")
+    if (!src.includes('<ol v-if="!triumphResult && selectedTriumphSteps.length" class="triumph-steps"')) v.push('no step line under the Triumph line')
+    return v
+  }
+
+  const LIB_CHECKS = [['§10', stepsViolations, '§10 FAILS ON THE OLD CODE (3b, N4): Pressed, Documents checked and Uploaded from the server\'s own facts, then Triumph\'s three, which say to look in MyTriumph once it went'],
+    ['§11', waitViolations, '§11 FAILS ON THE OLD CODE (3a, N3, L5, L6): a calm line while it goes, the wait words, the server\'s try count, "Still on its way" after the last read; never amber'],
+    ['§12', chipViolations, '§12 FAILS ON THE OLD CODE (3c, N7): the chip by the claim\'s own table, Handled in Triumph\'s process read first'],
+    ['§12', agreeViolations, '§12 FAILS ON THE OLD CODE (M2): the chip and the line beside it agree, state by state'],
+    ['§13', tooLargeViolations, '§13 FAILS ON THE OLD CODE (N5, L3, L4): the too-large words with the server\'s numbers, or without them; each way out only where offered'],
+    ['§13', everyLineViolations, '§13 FAILS ON THE OLD CODE (3d, N5): no line says "Its invoice to the broker stands", and a line naming a manual button says "under Other options"'],
+    ['§14', manualViolations, '§14 FAILS ON THE OLD CODE (3e): the manual actions as before with no flag, folded or hidden on the server\'s word; the words under Other options']]
+  for (const [sec, check, label] of LIB_CHECKS) {
+    if (sec === '§10' || sec === '§13') section(`${sec}  the Triumph status plan, Part 1`)
+    eq(S ? check(S) : ['no module'], [], label)
+  }
+  eq(foldViolations(CONTROLS), [], '§14 FAILS ON THE OLD CODE (3e, N8): a plain "Other options" link, never open by default; the heading, the note box and each help line beside its own button')
+  eq(followViolations(COMPLETED), [], '§15 FAILS ON THE OLD CODE (3f, L6): the open load takes the fresh row on every read of the dashboard; "Still on its way" after the last follow-up read; the step line under the Triumph line')
+
+  // Mutants of the lib's new rules, each a copy run from a temp folder.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-status-10-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'lib'))
+    fs.mkdirSync(path.join(tmp, 'utils'))
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}\n')
+    fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
+    let n = 0
+    for (const [name, from, to, check] of [
+      ["Triumph's three said before the upload went", "text: sent ? `${label}: ${MYTRIUMPH}` : label })", "text: `${label}: ${MYTRIUMPH}` })", stepsViolations],
+      ['pages shown before the batch is built', 'text: built && pages ?', 'text: pages ?', stepsViolations],
+      ['Uploaded done before it went', "{ key: 'uploaded', done: sent,", "{ key: 'uploaded', done: built,", stepsViolations],
+      ["a step line for a load handled in Triumph's process", "  if (f.triumphState === 'closed_outside' || f.triumphState === 'skipped') return []", '  if (false) return []', stepsViolations],
+      ['a wait that costs no try read as a retry', "  if (state === 'queued' && Object.hasOwn(FREE_WAIT_WORDS, code)) return", '  if (false) return', waitViolations],
+      ["a pause's code read as a retry", "  if (state === 'queued' && PAUSE_CODES.includes(code)) return", '  if (false) return', waitViolations],
+      ['the try count off by one', 'try ${f.triumphAttempts + 1} of', 'try ${f.triumphAttempts} of', waitViolations],
+      ['a count for a wait that cost no try', 'f.triumphAttempts > 0 && f.triumphAttempts < f.triumphTryLimit', 'f.triumphAttempts >= 0 && f.triumphAttempts < f.triumphTryLimit', waitViolations],
+      ['never "Still on its way"', '    if (late) return', '    if (false) return', waitViolations],
+      ['no "Taken at"', "${f.triumphPressedAt ? ` Taken at ${formatTime(f.triumphPressedAt)}.` : ''}", '', waitViolations],
+      ['the chip blind to the claim', 'const followed = f.byButton === true ? buttonChip(f, invoiced) : null', 'const followed = null', chipViolations],
+      ["Handled in Triumph's process not read first", "  if (f.locked === true && f.lockedVia === 'outside') {", '  if (false) {', chipViolations],
+      ['a stop after the lock read as one before it', "    if (UPLOAD_STAGES.includes(stage)) return chip('nothing triggered at Triumph'", "    if (false) return chip('nothing triggered at Triumph'", chipViolations],
+      ["the CSV's stages read as after the lock alone", "    if (f.triumphCode === 'MAYBE_SUBMITTED' || AFTER_CSV_STAGES.includes(stage)) return chip(", "    if (f.triumphCode === 'MAYBE_SUBMITTED') return chip(", chipViolations],
+      ['a pause read as sending', "  if (state === 'queued' && f.paused) return chip('paused', 'warn')", "  if (false) return chip('paused', 'warn')", chipViolations],
+      ['staged read as the old chip', "  if (state === 'waiting' || state === 'staged') return chip(", "  if (state === 'waiting') return chip(", chipViolations],
+      ['the kept size ignored', 'const size = f.triumphTooLarge && typeof f.triumphTooLarge', 'const size = null && f.triumphTooLarge && typeof f.triumphTooLarge', tooLargeViolations],
+      ['Try again named where not offered', "  if (retry) parts.push('To fix it:", "  if (true) parts.push('To fix it:", tooLargeViolations],
+      ['Handled and Clear named where not offered', 'const other = record && clear ?', 'const other = true ?', tooLargeViolations],
+      ['a size stop in the plain stop words', "    if (code === 'BATCH_TOO_LARGE') return { text: tooLargeText(", "    if (false) return { text: tooLargeText(", tooLargeViolations],
+      ['"Its invoice to the broker stands" kept', "const BROKER_WENT = \"The broker's invoice already went out as usual.\"", "const BROKER_WENT = 'Its invoice to the broker stands.'", everyLineViolations],
+      ['Clear factored named without "under Other options"', "const KEEP_WITH_BROKER = 'To keep it with the broker only, press Clear factored under Other options.'", "const KEEP_WITH_BROKER = 'To keep it with the broker only, press Clear factored.'", everyLineViolations],
+      ['hidden read as before', "f.otherOptions ? 'folded' : 'hidden'", "f.otherOptions ? 'folded' : 'today'", manualViolations],
+      ['a flag that is not the server\'s boolean trusted', "typeof f.otherOptions !== 'boolean' ? 'today'", "f.otherOptions === undefined ? 'today'", manualViolations],
+    ]) {
+      if (LIB_SRC.split(from).length - 1 !== 1) { failures.push(`§10-§14 mutant anchor not found once in factoringStatus.js: ${name}`); continue }
+      const file = path.join(tmp, 'lib', `factoringStatus-10-${++n}.js`)
+      fs.writeFileSync(file, LIB_SRC.replace(from, () => to))
+      let v
+      try { v = check(await import(pathToFileURL(file).href)) } catch (e) { v = [`threw: ${e && e.message}`] }
+      ok(v.length > 0, `§10-§14 MUTANT ${name}: caught`)
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+  // Mutants of the screens, as text.
+  for (const [name, file, src, check, from, to] of [
+    ['the link shown with no fold', 'FactoringControls.vue', CONTROLS, foldViolations, '<button v-if="folded && (mayClear || mayRecord)" ', '<button v-if="mayClear || mayRecord" '],
+    ['Other options open by default', 'FactoringControls.vue', CONTROLS, foldViolations, 'const open = ref(false)', 'const open = ref(true)'],
+    ["Clear factored's help line gone", 'FactoringControls.vue', CONTROLS, foldViolations, '\n      <span v-if="folded && mayClear" class="fact-help">{{ OTHER_OPTIONS.clear }}</span>', ''],
+    ['the folded actions shown unopened', 'FactoringControls.vue', CONTROLS, foldViolations, ': folded.value && open.value && (', ': folded.value && ('],
+    ['the folded panel amber', 'FactoringControls.vue', CONTROLS, foldViolations, '  border-radius: 6px;\n  background: #fff;\n  color: #374151;\n}', '  border-radius: 6px;\n  background: #fffbeb;\n  color: #374151;\n}'],
+    ['the open load keeps its own copy', 'CompletedLoadsTab.vue', COMPLETED, followViolations, 'watch(() => props.jobs, () => freshFactoring())\n', ''],
+    ['"Still on its way" never set', 'CompletedLoadsTab.vue', COMPLETED, followViolations, '  if (mine === triumphFollow) triumphLate.value = true\n', ''],
+    ['the step line for every role', 'CompletedLoadsTab.vue', COMPLETED, followViolations, 'const selectedTriumphSteps = computed(() => (auth.isSuperAdmin && selectedJob.value', 'const selectedTriumphSteps = computed(() => (selectedJob.value'],
+  ]) {
+    if (src.split(from).length - 1 !== 1) { failures.push(`§14-§15 mutant anchor not found once in ${file}: ${name}`); continue }
+    ok(check(src.replace(from, () => to)).length > 0, `§14-§15 MUTANT ${name}: caught`)
+  }
+}
+
+// ---------------------------------------------------------------- §16
+// The server's stop notice says why in the load line's own words for a load whose pane has no Triumph
+// line (review 1, L2): its copy of the stop words is the client's, word for word.
+section('§16  the stop words: one wording, the server\'s copy pinned to the client\'s')
+{
+  const { createRequire } = await import('module')
+  const serverStore = createRequire(path.join(ROOT, 'package.json'))(path.join(ROOT, 'lib', 'factoring-store.js'))
+  const wordsViolations = (M) => {
+    if (!M || !M.STOP_WORDS || !serverStore.STOP_WORDS || typeof serverStore.stopWords !== 'function') return ['no STOP_WORDS on one side']
+    const v = []
+    const client = Object.entries(M.STOP_WORDS).sort()
+    const server = Object.entries(serverStore.STOP_WORDS).sort()
+    if (JSON.stringify(client) !== JSON.stringify(server)) v.push('the two copies differ')
+    for (const code of ['DEBTOR_UNMAPPED', 'MADE_UP_CODE', '']) if (serverStore.stopWords(code) !== M.triumphStopWords(code)) v.push(`${JSON.stringify(code)}: the server says "${serverStore.stopWords(code)}"`)
+    return v
+  }
+  eq(S ? wordsViolations(S) : ['no module'], [], '§16 FAILS ON THE OLD CODE (L2): the server\'s stop words are the client\'s, word for word, the unknown code\'s too')
+  const LIB_SRC = read(LIB)
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-status-16-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'lib'))
+    fs.mkdirSync(path.join(tmp, 'utils'))
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}\n')
+    fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
+    const from = "  SUBMIT_FAILED: 'the upload to Triumph kept failing',"
+    if (LIB_SRC.split(from).length - 1 !== 1) failures.push('§16 mutant anchor not found once in factoringStatus.js: one word changed on one side')
+    else {
+      const file = path.join(tmp, 'lib', 'factoringStatus-16.js')
+      fs.writeFileSync(file, LIB_SRC.replace(from, () => "  SUBMIT_FAILED: 'the upload to Triumph failed',"))
+      let v
+      try { v = wordsViolations(await import(pathToFileURL(file).href)) } catch (e) { v = [`threw: ${e && e.message}`] }
+      ok(v.length > 0, '§16 MUTANT one word changed on one side: caught')
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })

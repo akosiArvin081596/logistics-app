@@ -31,6 +31,12 @@
 //       load, and only the press writes a mark otherwise; with the switch on each row says
 //       canClear, canRetry and the broker's invoice, and with it off reads as before
 //   §8 mutants: each rule above removed in turn, and a case catches it
+//   §12 the Triumph status plan, Part 1: each row's step facts (pressed, pages, tries and the
+//       limit, the next try, a size stop's kept numbers; never the files' record) and "Other
+//       options" in N1's order; mutants of each
+//   §13 the routes: one dashboard:changed after each write that landed, none after a refusal or
+//       a write that changed nothing; the job off (not live, or no connection) shows Other
+//       options; mutants of each
 //
 // Made-up loads only (LD-TEST-*, 1234567xx), in memory.
 //   node scripts/test-factoring-store.js      # exits 1 on any failure
@@ -1038,6 +1044,216 @@ for (const [name, from, to, file] of [...ROUTE_MUTANTS, ...SIGN_IN_MUTANTS.map((
 	else failures.push(`MUTANT ${name}: NOT caught`);
 }
 console.log(`  ${caught}/${MUTANTS.length} store mutants and ${routeCaught}/${ROUTE_MUTANTS.length + SIGN_IN_MUTANTS.length} route mutants caught`);
+
+// ------------------------------------------------------------------ §12
+// The Triumph status plan, Part 1, with Process with Triumph's switch on: each row's step facts (the
+// server's own, never the files' record) and "Other options" in N1's order.
+function checkStepsAndOptions(S) {
+	const c = checker();
+	if (typeof S.stepFacts !== "function" || typeof S.otherOptionsShown !== "function") {
+		c.ok(false, "§12 FAILS ON THE OLD CODE: stepFacts() and otherOptionsShown() exist");
+		return c;
+	}
+	const db = freshDb(S);
+	for (const [t, col] of [["triumph_submissions", "number_source TEXT NOT NULL DEFAULT ''"], ["triumph_submissions", "reused_draft_id INTEGER"], ["triumph_submissions", "expected_total TEXT NOT NULL DEFAULT ''"],
+		["triumph_submissions", "refused_size_json TEXT NOT NULL DEFAULT ''"], ["load_factoring", "broker_invoice_id TEXT NOT NULL DEFAULT ''"], ["load_factoring", "broker_invoice_date TEXT NOT NULL DEFAULT ''"]]) db.exec(`ALTER TABLE ${t} ADD COLUMN ${col}`);
+	const BUTTON = Object.freeze({ listed: true, canClear: true, paused: "", jobOff: false });
+	const set = (k, patch) => { for (const [col, v] of Object.entries(patch)) db.prepare(`UPDATE triumph_submissions SET ${col} = ? WHERE load_key = ?`).run(v, k); };
+	// A load the button took: its mark, its claim carrying the broker's invoice, then `patch`.
+	const pressed = (k, patch = {}) => {
+		putMarker(db, k);
+		putClaim(db, k, { state: "queued", invoiceId: "11022026-4" });
+		set(k, { number_source: "chr_invoice", reused_draft_id: 1, expected_total: "$2,150.00", next_attempt_at: T0, ...patch });
+	};
+	const row = (k, { button = BUTTON, canRecordOutside = true } = {}) => S.annotateRows(db, { rows: [{ "Load ID": k }], idCol: "Load ID", all: true, canRecordOutside, nowIso: at(1), button })[0]._factoring;
+	const BUILT = JSON.stringify({ pdf: { name: "a.pdf", sha256: "a".repeat(64), bytes: 9 }, csv: { name: "b.csv", sha256: "b".repeat(64), bytes: 9 },
+		parts: [{ kind: "invoice", sha256: "c".repeat(64), bytes: 3, pages: 1 }, { kind: "ratecon", sha256: "d".repeat(64), bytes: 3, pages: 2 }, { kind: "pod", sha256: "e".repeat(64), bytes: 3, pages: 3 }] });
+
+	pressed("123456721");
+	const fresh = row("123456721");
+	c.eq([fresh.triumphPressedAt, fresh.triumphPages, fresh.triumphAttempts, fresh.triumphTryLimit, fresh.triumphNextAt, fresh.triumphTooLarge], [T0, null, 0, 4, T0, null],
+		"§12 FAILS ON THE OLD CODE (L5): a fresh press: when it was pressed, no pages yet, no try, the try limit, when it goes");
+	c.eq([S.TRY_LIMIT, rules.RETRY_DELAYS_MS.length + 1], [4, 4], "§12 ...the limit is the first try and one after each retry wait");
+	pressed("123456722", { stage: "built", state: "staged", files_json: BUILT });
+	pressed("123456723", { stage: "rendered", state: "needs_attention", reason_code: "MERGE_FAILED", files_json: BUILT });
+	pressed("123456724", { stage: "recorded", state: "submitted", files_json: BUILT, submitted_at: at(5) });
+	c.eq([row("123456722").triumphPages, row("123456723").triumphPages, row("123456724").triumphPages], [6, null, 6],
+		"§12 FAILS ON THE OLD CODE (L5): the pages of the batch as built, summed by the server; none before it is built, whatever an older record says");
+	const rows = [fresh, row("123456722"), row("123456724")];
+	c.ok(rows.every((f) => !Object.keys(f).some((k) => /files|sha/i.test(k)) && !JSON.stringify(f).includes("sha256") && !JSON.stringify(f).includes("\"parts\"")),
+		"§12 FAILS ON THE OLD CODE (L5): never the files' record itself, nor a hash");
+	pressed("123456725", { attempts: 1, reason_code: "RETRY_LATER", next_attempt_at: at(15) });
+	c.eq([row("123456725").triumphAttempts, row("123456725").triumphNextAt], [1, at(15)], "§12 FAILS ON THE OLD CODE (L5): a retry wait: the server's own try count, and when the next try goes");
+	pressed("123456726", { state: "needs_attention", reason_code: "SUBMIT_FAILED", next_attempt_at: at(15) });
+	c.eq(row("123456726").triumphNextAt, "", "§12 ...a claim not in line has no next try");
+	const SIZE = JSON.stringify({ bytes: 1011000, limit: 921599 });
+	pressed("123456727", { state: "needs_attention", reason_code: "BATCH_TOO_LARGE", stage: "rendered", refused_size_json: SIZE });
+	c.eq(row("123456727").triumphTooLarge, { bytes: 1011000, limit: 921599 }, "§12 FAILS ON THE OLD CODE (N6, L4): a size stop: the kept size and limit");
+	pressed("123456728", { state: "needs_attention", reason_code: "MERGE_FAILED", stage: "rendered", refused_size_json: SIZE });
+	pressed("123456729", { state: "queued", reason_code: "", stage: "rendered", refused_size_json: "" });
+	pressed("123456730", { state: "needs_attention", reason_code: "BATCH_TOO_LARGE", stage: "rendered", refused_size_json: "" });
+	pressed("123456731", { state: "needs_attention", reason_code: "BATCH_TOO_LARGE", stage: "rendered", refused_size_json: JSON.stringify({ bytes: 0, limit: 921599 }) });
+	c.eq([row("123456728").triumphTooLarge, row("123456729").triumphTooLarge, row("123456730").triumphTooLarge, row("123456731").triumphTooLarge], [null, null, null, null],
+		"§12 (L4) ...only with BATCH_TOO_LARGE; none once Try again cleared it, none never kept (the switch off), none that isn't a size");
+
+	// "Other options" (N1): a pause or the job off first, then never for a fresh press nor a claim being worked.
+	const flag = (k, opts) => row(k, opts).otherOptions;
+	c.eq([flag("123456721"), flag("123456721", { button: { ...BUTTON, paused: "LOGIN_REFUSED" } }), flag("123456721", { button: { ...BUTTON, jobOff: true } })], [false, true, true],
+		"§12 FAILS ON THE OLD CODE (M1, N1): a fresh press: no Other options; a fresh press while paused, or with the job off: shown");
+	pressed("123456732", { state: "working", lease_owner: "made-up-worker", lease_until: at(30) });
+	pressed("123456733", { state: "working", lease_owner: "made-up-worker", lease_until: at(-1) });
+	c.eq([flag("123456732"), flag("123456733")], [false, true], "§12 FAILS ON THE OLD CODE (M1): a claim being worked (a live lease): none; one a restart left (its lease out): shown");
+	pressed("123456734", { state: "queued", reason_code: "QUIET_WINDOW" });
+	pressed("123456735", { state: "waiting", reason_code: "INVOICE_DRAFT_IN_FLIGHT" });
+	putMarker(db, "123456736");
+	c.eq([flag("123456725"), flag("123456734"), flag("123456735"), flag("123456726"), flag("123456722"), flag("123456736")], [true, true, true, true, true, true],
+		"§12 FAILS ON THE OLD CODE (M1): a retry wait, a wait with a code, Waiting, a stop, staged, and a factored load with no claim: shown");
+	putMarker(db, "123456737", { locked: T0, via: "upload" });
+	putClaim(db, "123456737", { state: "queued", stage: "pdf_uploading", invoiceId: "11022026-4" });
+	set("123456737", { number_source: "chr_invoice", reused_draft_id: 1, reason_code: "RETRY_LATER", attempts: 1 });
+	c.eq([flag("123456737"), flag("123456726", { button: { ...BUTTON, listed: false, canClear: false }, canRecordOutside: false })], [false, false],
+		"§12 FAILS ON THE OLD CODE (N1): a locked retry wait, and an account not listed: neither action can act, so none");
+	const all = ["123456721", "123456722", "123456724", "123456725", "123456726", "123456732", "123456733", "123456734", "123456735", "123456736", "123456737"].map((k) => row(k));
+	c.ok(all.every((f) => f.otherOptions !== true || f.canRecordOutside === true || f.canClear === true), "§12 (N1) the flag is true only where canRecordOutside or canClear is");
+	const off = S.annotateRows(db, { rows: [{ "Load ID": "123456721" }], idCol: "Load ID", all: true, canRecordOutside: true, nowIso: at(1) })[0]._factoring;
+	c.eq(["otherOptions", "triumphPressedAt", "triumphPages", "triumphTooLarge"].filter((k) => k in off), [], "§12 the switch off: none of these keys, so the controls show as today");
+	return c;
+}
+section("§12 the step line's facts and Other options");
+{
+	let c;
+	try {
+		c = checkStepsAndOptions(REAL);
+	} catch (e) {
+		c = { out: [`§12 threw ${e && e.message}`], count: () => 1 };
+	}
+	pass += c.count() - c.out.length;
+	failures.push(...c.out);
+	console.log(`  ${c.count() - c.out.length}/${c.count()} ok`);
+}
+const STEP_MUTANTS = [
+	["pages read before the batch is built", "if (!claim || !STAGES_BUILT.has(claim.stage)) return null;", "if (!claim) return null;"],
+	["the pages not summed", "parts.reduce((sum, p) => sum + (Number(p && p.pages) || 0), 0)", "parts.length"],
+	["the try limit without the first try", "const TRY_LIMIT = rules.RETRY_DELAYS_MS.length + 1;", "const TRY_LIMIT = rules.RETRY_DELAYS_MS.length;"],
+	["a next try for a claim not in line", "triumphNextAt: claim && claim.state === \"queued\" ? String(claim.next_attempt_at || \"\") : \"\",", "triumphNextAt: claim ? String(claim.next_attempt_at || \"\") : \"\","],
+	["the kept size with any code (L4)", "claim && claim.state === \"needs_attention\" && claim.reason_code === \"BATCH_TOO_LARGE\" ? refusedSizeOf(claim) : null", "claim ? refusedSizeOf(claim) : null"],
+	["a size of nothing kept", "s.bytes > 0 && s.limit > 0 ? { bytes: s.bytes, limit: s.limit } : null", "s ? { bytes: s.bytes, limit: s.limit } : null"],
+	["Other options where neither action can act", "\tif (!acts) return false;\n", ""],
+	["the fresh press before the pause (N1's order)", "\tif (paused || jobOff) return true;\n\tif (!claim) return true;\n\tif (claim.state === \"queued\" && !claim.reason_code && !(Number(claim.attempts) > 0)) return false;\n",
+		"\tif (claim && claim.state === \"queued\" && !claim.reason_code && !(Number(claim.attempts) > 0)) return false;\n\tif (paused || jobOff) return true;\n\tif (!claim) return true;\n"],
+	["the job off read as on", "if (paused || jobOff) return true;", "if (paused) return true;"],
+	["Other options for a fresh press", "\tif (claim.state === \"queued\" && !claim.reason_code && !(Number(claim.attempts) > 0)) return false;\n", ""],
+	["Other options while a claim is worked", "return !triumphWorkingLive(claim, nowIso);", "return true;"],
+	["none for a load with no claim", "\tif (!claim) return true;\n\tif (claim.state", "\tif (!claim) return false;\n\tif (claim.state"],
+];
+let stepCaught = 0;
+for (const [name, from, to] of STEP_MUTANTS) {
+	if (STORE_SRC.split(from).length - 1 !== 1) { failures.push(`§12 mutant anchor not found once: ${name}`); continue; }
+	let c;
+	try {
+		c = checkStepsAndOptions(loadStore(STORE_SRC.replace(from, () => to)));
+	} catch (e) {
+		c = { out: [`threw: ${e && e.message}`] };
+	}
+	if (c.out.length) { stepCaught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(c.out)}`); }
+	else failures.push(`§12 MUTANT ${name}: NOT caught`);
+}
+console.log(`  ${stepCaught}/${STEP_MUTANTS.length} mutants caught`);
+
+// ------------------------------------------------------------------ §13
+// The routes (N9, N1): every write that landed tells each open dashboard once (a refusal and a write
+// that changed nothing tell none, and a notice that can't go fails no route); with Process with Triumph's
+// switch on, a row says the job is off when it isn't live or its connection is unset.
+function checkRouteNotices(routesSrc) {
+	const c = checker();
+	const ROUTES_FILE = path.join(ROOT, "lib", "factoring-routes.js");
+	const mod = { exports: {} };
+	new Function("module", "exports", "require", routesSrc)(mod, mod.exports, Module.createRequire(ROUTES_FILE));
+	const lib = mod.exports;
+	const ME = { id: 7, username: "made-up-admin", role: "Super Admin" };
+	const build = (env, { job = null, notifyChange = null } = {}) => {
+		const db = freshDb(REAL);
+		const told = [];
+		const routes = lib.create({ db, env, now: () => new Date(T0), logAudit: () => {}, logAuditRefusal: () => {}, triumphJob: () => job, log: { info() {}, warn() {}, error() {} },
+			notifyChange: notifyChange || ((domain) => told.push(domain)) });
+		const mounted = {};
+		routes.mount({ post: (p, ...chain) => { mounted[p] = chain[chain.length - 1]; } }, { requireRole: () => () => {} });
+		const post = (p, params, body) => {
+			const out = { status: 200, body: null, error: null };
+			mounted[p]({ params, body, session: { user: ME } }, { status(s) { out.status = s; return this; }, json(b) { out.body = b; return this; } }, (e) => { out.error = e; });
+			return out;
+		};
+		return { db, routes, told,
+			mark: (n, body = { factored: true, reason: "made-up" }) => post("/api/factoring/loads/:loadKey", { loadKey: `ld-test-000${n}` }, body),
+			outside: (n) => post("/api/factoring/loads/:loadKey/handled-outside", { loadKey: `ld-test-000${n}` }, { reason: "made-up: handled in Triumph's portal" }) };
+	};
+	const ON = { TRIUMPH_FACTORING_ENABLED: "true", TRIUMPH_FACTOR_MARK_IDS: "7" };
+	const w = build(ON);
+	// What one step told: the notices since `from`.
+	const since = (from) => w.told.length - from;
+	let at0 = w.told.length;
+	c.eq([w.mark(1).status, since(at0)], [200, 1], "§13 FAILS ON THE OLD CODE (N9): a mark that landed: one dashboard:changed");
+	at0 = w.told.length;
+	c.eq([w.mark(1).body.changed, since(at0)], [false, 0], "§13 marking a marked load again changes nothing, and tells nothing");
+	at0 = w.told.length;
+	c.eq([w.mark(1, { factored: false, reason: "made-up" }).status, since(at0)], [200, 1], "§13 FAILS ON THE OLD CODE (N9): Clear factored that landed: one");
+	putMarker(w.db, "ld-test-0003");
+	at0 = w.told.length;
+	c.eq([w.outside(3).status, since(at0)], [200, 1], "§13 FAILS ON THE OLD CODE (N9): Handled in Triumph's process that landed: one");
+	putInflight(w.db, "ld-test-0002", { startedAt: T0 });
+	at0 = w.told.length;
+	c.eq([w.outside(3).status, w.mark(2).status, since(at0)], [409, 409, 0], "§13 a refused write tells nothing");
+	c.ok(w.told.every((domain) => domain === "dashboard"), "§13 ...and each notice is dashboard:changed");
+	const loud = build(ON, { notifyChange: () => { throw new Error("made-up"); } });
+	const loudMark = loud.mark(1);
+	c.eq([loudMark.status, loudMark.body, loudMark.error], [200, { ok: true, changed: true, factored: true }, null], "§13 a notice that can't go fails no route: the write landed, and the route answers it");
+	// The job off, as the rows read it with Process with Triumph's switch on (a fresh claim: Other options only then).
+	const BTN = { ...ON, TRIUMPH_PROCESS_BUTTON_ENABLED: "true", TRIUMPH_SUBMIT_ENABLED: "true", TRIUMPH_SUBMIT_DRY_RUN: "false", TRIUMPH_LIVE_CONFIRMED_ON: "2026-11-05" };
+	const flag = (env, job) => {
+		const x = build(env, { job });
+		putMarker(x.db, "ld-test-0005");
+		putClaim(x.db, "ld-test-0005", { state: "queued" });
+		const r = { active: [], completed: [{ "Load ID": "LD-TEST-0005" }] };
+		x.routes.annotateDashboard({ session: { user: ME } }, { headers: ["Load ID"], ...r });
+		return r.completed[0]._factoring && r.completed[0]._factoring.otherOptions;
+	};
+	c.eq([flag(BTN, { transportReady: true }), flag(BTN, { transportReady: false }), flag(BTN, null), flag({ ...BTN, TRIUMPH_SUBMIT_DRY_RUN: "true" }, { transportReady: true })], [false, true, true, true],
+		"§13 FAILS ON THE OLD CODE (N1): a fresh claim: no Other options while the job can send; the connection unset, no job, or not live: the job is off, so shown");
+	return c;
+}
+section("§13 the routes: dashboard:changed after a write, and the job off");
+const ROUTE_NOTICE_MUTANTS = [
+	["no notice after a mark or a clear", "\t\t\tif (r.changed) dashboardChanged();\n", ""],
+	["a notice for a write that changed nothing", "if (r.changed) dashboardChanged();", "dashboardChanged();"],
+	["no notice after Handled in Triumph's process", "\t\t\tif (!r.ok) return refuse(req, res, loadId, r);\n\t\t\tdashboardChanged();\n\t\t\tres.json({ ok: true, locked: true });", "\t\t\tif (!r.ok) return refuse(req, res, loadId, r);\n\t\t\tres.json({ ok: true, locked: true });"],
+	["a notice that can't go fails the route", "\t\ttry {\n\t\t\td.notifyChange(\"dashboard\");\n\t\t} catch (e) {\n\t\t\td.log.error(`[factoring] the open dashboards weren't told: ${(e && e.code) || \"ERROR\"}`);\n\t\t}", "\t\td.notifyChange(\"dashboard\");"],
+	["the job on with no connection", "jobOff: submitMode !== \"live\" || !job || job.transportReady !== true", "jobOff: submitMode !== \"live\""],
+	["the job on while dry", "jobOff: submitMode !== \"live\" || !job || job.transportReady !== true", "jobOff: !job || job.transportReady !== true"],
+];
+{
+	let c;
+	try {
+		c = checkRouteNotices(ROUTES_FILE_SRC);
+	} catch (e) {
+		c = { out: [`§13 threw ${e && e.message}`], count: () => 1 };
+	}
+	pass += c.count() - c.out.length;
+	failures.push(...c.out);
+	console.log(`  ${c.count() - c.out.length}/${c.count()} ok`);
+	let noticeCaught = 0;
+	for (const [name, from, to] of ROUTE_NOTICE_MUTANTS) {
+		if (ROUTES_FILE_SRC.split(from).length - 1 !== 1) { failures.push(`§13 mutant anchor not found once: ${name}`); continue; }
+		let m;
+		try {
+			m = checkRouteNotices(ROUTES_FILE_SRC.replace(from, () => to));
+		} catch (e) {
+			m = { out: [`threw: ${e && e.message}`] };
+		}
+		if (m.out.length) { noticeCaught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(m.out)}`); }
+		else failures.push(`§13 MUTANT ${name}: NOT caught`);
+	}
+	console.log(`  ${noticeCaught}/${ROUTE_NOTICE_MUTANTS.length} mutants caught`);
+}
 
 console.log(`\n${pass} passed, ${failures.length} failed`);
 for (const f of failures) console.log(`FAIL  ${f}`);

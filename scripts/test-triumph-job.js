@@ -34,6 +34,15 @@
 //       steps skipped; a claim stopped after the steps gets one counts-only audit row saying they
 //       ran, or why not; off, the record, the words, the answers and the rows as before
 //
+//   §17 a stop recorded (TRIUMPH_STOP_RECORD_ENABLED): one triumph_stopped row and one notice for each
+//       run that moves a claim to Needs attention on a path with no row of its own, their words and
+//       title by how far it got (before the lock, after it, after the CSV started), the stop's own
+//       words for a load with no Triumph line; a size stop keeps sizeRefusal()'s numbers until Try
+//       again; waits, Waiting and a give-up write nothing; off, the job writes what 221ff323 writes;
+//       mutants of each
+//   §18 every open pane follows by itself: one dashboard:changed for each step that moves a claim's
+//       state, code, stage or attempts, none for one that moves nothing; mutants of each
+//
 // Made-up loads only (LD-TEST-*), in memory and under the system temp folder.
 //   node scripts/test-triumph-job.js      # exits 1 on any failure
 "use strict";
@@ -1483,6 +1492,413 @@ async function recompressClaims() {
 		ok(seen.size >= 20, `§13 (fixture) the runs left many codes (${seen.size})`);
 		eq([...seen].filter((code) => !triumphRules.REASON_CODES.includes(code)).sort(), [], "§13 none missing from lib/triumph-rules.js REASON_CODES");
 	}
+
+	// ---------------------------------------------------------------- §17 and §18
+	// The Triumph status plan, Part 1 (each check run on the shipped job, then on each mutant).
+	const RULES_FILE = path.join(ROOT, "lib", "triumph-rules.js");
+	const RULES_SRC = fs.readFileSync(RULES_FILE, "utf8");
+	// The job, ledger and rules from their text (a mutant's), with `batch` standing in for the batch module.
+	function libsFor({ jobSrc = JOB_SRC, ledgerSrc = LEDGER_SRC, rulesSrc = RULES_SRC, batch = null } = {}) {
+		const led = ledgerSrc === LEDGER_SRC ? ledger : loadFrom(LEDGER_FILE, ledgerSrc);
+		const over = { "./triumph-ledger": led };
+		if (rulesSrc !== RULES_SRC) over["./triumph-rules"] = loadFrom(RULES_FILE, rulesSrc);
+		if (batch) over["./triumph-batch"] = batch;
+		return { lib: loadFrom(JOB_FILE, jobSrc, over), led };
+	}
+	// world()'s own job, built from the library given.
+	const makeWith = (lib, w, over = {}) => lib.create({
+		db: w.db, env: w.envBase, readJobTracking: w.readJobTracking, closedMonthsOf: () => (w.closed === undefined ? [] : w.closed),
+		dayKeyOf: (cell) => String(cell || "").slice(0, 10), engine: w.engine, nextInvoiceNumber: () => { w.spies.mint++; return w.nextInvoiceNumber(); },
+		loadDocuments: async () => [{ id: 1, type: "POD", uploaded_at: "2026-11-10 14:00:00", buffer: POD }], transport: w.stubTransport, noaLines: NOA,
+		denyHits: w.denyHits, savedInvoiceEvidence: () => w.mailbox === true, batchDir: w.batchDir,
+		logAudit: (req, action, entity, id, details) => w.audits.push({ who: req && req.session && req.session.user && req.session.user.username, action, id, details }),
+		notify: (n0) => w.notices.push(n0), now: w.clock.now, timeZone: TZ, workerId: "made-up-worker", setImmediate: () => {},
+		log: { info() {}, warn() {}, error() {} }, ...over,
+	});
+	// The mutants of one check: each its own sources, the check run on it, caught when it fails at least once.
+	async function runMutants(label, mutants, check) {
+		let caught = 0;
+		for (const [name, which, from, to] of mutants) {
+			const src = { job: JOB_SRC, ledger: LEDGER_SRC, rules: RULES_SRC }[which];
+			if (src.split(from).length - 1 !== 1) { failures.push(`${label} mutant anchor not found once: ${name}`); continue; }
+			const mutated = src.replace(from, () => to);
+			const mine = [];
+			sink = mine;
+			try {
+				await check({ jobSrc: which === "job" ? mutated : JOB_SRC, ledgerSrc: which === "ledger" ? mutated : LEDGER_SRC, rulesSrc: which === "rules" ? mutated : RULES_SRC });
+			} catch (e) {
+				mine.push(`threw ${e && e.message}`);
+			}
+			sink = null;
+			if (mine.length) { caught++; pass++; console.log(`  MUTANT ${name}: caught by ${caughtBy(mine)}`); }
+			else failures.push(`${label} MUTANT ${name}: NOT caught`);
+		}
+		console.log(`  ${caught}/${mutants.length} mutants caught`);
+	}
+
+	// §17: with TRIUMPH_STOP_RECORD_ENABLED on, a run that moves a claim to Needs attention on a path that
+	// writes no row of its own writes one triumph_stopped row and one notice, and a size stop keeps its numbers.
+	section("§17 a stop recorded (TRIUMPH_STOP_RECORD_ENABLED)");
+	const STOP_ON = Object.freeze({ TRIUMPH_STOP_RECORD_ENABLED: "true" });
+	const NOT_SENT = "Triumph: a load was not sent";
+	const AFTER_LOCK = "Triumph: a load stopped after its PDF went up. Nothing was triggered there; check Triumph's side.";
+	const MAY_HAVE_REACHED = "Triumph: a load may have reached Triumph. Check Triumph's side; the app won't send it again.";
+	const BEFORE_WORDS = "stopped before anything went to Triumph";
+	const AFTER_WORDS = "stopped after the lock, before the CSV; its PDF may be on Triumph's server, and nothing was triggered there";
+	const CSV_WORDS = "stopped after its CSV started; it may have reached Triumph, and the app won't send it again";
+	const OPEN_IT = "Open the load to see what to do.";
+	const stopRows = (w) => w.audits.filter((a) => a.action === "triumph_stopped");
+	// The stop record's own notices (the daily and keep-alive notices are the job's others).
+	const stopNotices = (w) => w.notices.filter((n) => [NOT_SENT, AFTER_LOCK, MAY_HAVE_REACHED].includes(n.title));
+	const claimColumns = (db) => db.prepare("PRAGMA table_info(triumph_submissions)").all().map((col) => col.name);
+	async function checkStopRecord({ jobSrc = JOB_SRC, ledgerSrc = LEDGER_SRC, rulesSrc = RULES_SRC } = {}) {
+		const { lib, led } = libsFor({ jobSrc, ledgerSrc, rulesSrc });
+		const kept = (c) => (typeof led.refusedSize === "function" ? led.refusedSize(c) : null);
+		// The batch module's own answer to a batch over the limit, as the job built it: sizeRefusal()'s numbers.
+		const refusals = [];
+		const batchSpy = { ...triumphBatch, async buildBatch(args) { const b = await triumphBatch.buildBatch(args); if (b && b.code === "BATCH_TOO_LARGE") refusals.push(b); return b; } };
+		const spied = libsFor({ jobSrc, ledgerSrc, rulesSrc, batch: batchSpy }).lib;
+
+		await step("§17 a stop before the lock", async () => {
+			const w = world({ env: { ...DRY, ...STOP_ON }, debtor: null });
+			w.queue();
+			await makeWith(lib, w).tick();
+			eq(say(w.claim()), "needs_attention DEBTOR_UNMAPPED", "§17 (fixture) a free check stops it before the lock");
+			eq(stopRows(w).map((r) => [r.who, r.id, r.details]), [["triumph", LOAD, `DEBTOR_UNMAPPED: ${BEFORE_WORDS}`]], "§17 FAILS ON THE OLD CODE: one triumph_stopped row, by the system actor, with its code");
+			eq(w.notices, [{ title: NOT_SENT, body: `Load ${LOAD} ${BEFORE_WORDS}: no debtor name is set for this broker in Triumph's settings.` }],
+				"§17 FAILS ON THE OLD CODE (N2, L2): ...and one Super Admin notice, \"Triumph: a load was not sent\"; a load with no Triumph line in its pane gets the stop's own words, not \"Open the load\"");
+		});
+
+		await step("§17 a Process with Triumph claim's stop before the lock", async () => {
+			const w = buttonWorld({ lib, led, env: { ...LIVE, ...STOP_ON }, ratecon: chrRateCon(CHR_TEXT, ` ${LABELS}`) });
+			w.arm();
+			await w.make().tick();
+			eq(say(w.claim()), "needs_attention ADVANCE_ON_RATECON", "§17 (fixture) the job's second look stops it");
+			eq(w.notices.filter((n) => n.title === NOT_SENT).map((n) => n.body),
+				[`Load ${CHR_LOAD} ${BEFORE_WORDS}: the rate con shows an advance, or the app couldn't rule one out. The broker's invoice already went out as usual. ${OPEN_IT}`],
+				"§17 FAILS ON THE OLD CODE: its notice says why, that the broker's invoice already went out as usual, and to open the load (its pane has the Triumph line)");
+		});
+
+		await step("§17 a size stop keeps sizeRefusal()'s numbers, and Try again clears them", async () => {
+			refusals.length = 0;
+			const w = world({ env: { ...DRY, ...STOP_ON, TRIUMPH_BATCH_MAX_BYTES: "1000" } });
+			w.queue();
+			const job = makeWith(spied, w);
+			await job.tick();
+			const c = w.claim();
+			const r = refusals[0] || {};
+			const want = { bytes: Number(r.pdfBytes) + Number(r.csvBytes), limit: Number(r.maxBytes) };
+			eq([say(c), refusals.length, want.limit, want.bytes > 1000], ["needs_attention BATCH_TOO_LARGE", 1, 1000, true], "§17 (fixture) a batch over a made-up limit of 1,000 bytes");
+			eq([kept(c), c.batch_bytes], [want, 0], "§17 FAILS ON THE OLD CODE (N6, L3): its own column keeps the batch's bytes and the limit checked, sizeRefusal()'s own; batch_bytes stays the built batch's (none here)");
+			eq(stopRows(w).map((x) => x.details), [`BATCH_TOO_LARGE: ${BEFORE_WORDS}; ${want.bytes} bytes, over the limit of 1000`], "§17 FAILS ON THE OLD CODE: the row names the bytes and the limit");
+			eq(w.notices.map((n) => n.body), [`Load ${LOAD} ${BEFORE_WORDS}: its documents came to ${want.bytes.toLocaleString("en-US")} bytes, and the app sends at most 1,000.`],
+				"§17 FAILS ON THE OLD CODE: ...and so does the notice");
+			eq((await job.retry({}, LOAD)).ok, true, "§17 (fixture) Try again");
+			eq([w.claim().refused_size_json, kept(w.claim())], ["", null], "§17 FAILS ON THE OLD CODE (N6, L4): Try again clears the kept size");
+		});
+
+		await step("§17 a stop after the lock", async () => {
+			const w = world({ env: { ...DRY, ...STOP_ON } });
+			w.queue();
+			await makeWith(lib, w).tick();
+			w.envBase = { ...LIVE, ...STOP_ON };
+			w.putError = (name) => (name.endsWith(".pdf") ? { code: "PUT_FAILED" } : null);
+			await makeWith(lib, w).submitNow({}, LOAD);
+			eq([say(w.claim()), w.claim().stage], ["needs_attention SUBMIT_FAILED", "pdf_uploading"], "§17 (fixture) Submit now's PDF fails after the lock");
+			eq(stopRows(w).map((r) => r.details), [`SUBMIT_FAILED: ${AFTER_WORDS}`], "§17 FAILS ON THE OLD CODE (L7): a stop after the lock gets its row too (the daily notice skips a locked mark)");
+			eq(w.notices.map((n) => [n.title, n.body]), [[AFTER_LOCK,
+				`Load ${LOAD}: invoice 11122026-1's PDF may be on Triumph's server, but it stopped before the CSV that asks Triumph to process it (the upload to Triumph kept failing), so nothing was triggered there. The mark stays locked.`]],
+			"§17 FAILS ON THE OLD CODE (N2, L1, L2): ...its notice's title follows the lock; its body says the PDF may be on Triumph's server (its put failed here), and why");
+		});
+
+		// M1 (review 1): a stop once the CSV started, at csv_uploaded: both files are on Triumph's server and
+		// the record step throws (a full or busy database) on the claim's fourth counted try.
+		await step("§17 a stop after the CSV started", async () => {
+			const w = world({ env: { ...LIVE, ...STOP_ON } });
+			w.queue("queued", { attempts: 3, reason_code: "RETRY_LATER" });
+			const real = w.db.transaction.bind(w.db);
+			w.putError = (name) => {
+				if (name.endsWith(".csv")) {
+					w.db.transaction = () => {
+						w.db.transaction = real;
+						throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+					};
+				}
+				return null;
+			};
+			await makeWith(lib, w).tick();
+			const c = w.claim();
+			eq([say(c), c.stage, c.attempts, w.spies.puts.map((n) => n.slice(-4))], ["needs_attention SUBMIT_FAILED", "csv_uploaded", 4, [".pdf", ".csv"]],
+				"§17 (fixture) both files went up, then the record step threw on the fourth counted try");
+			eq(stopRows(w).map((r) => r.details), [`SUBMIT_FAILED: ${CSV_WORDS}`], "§17 FAILS ON THE OLD CODE (M1, N7): its row says it may have reached Triumph, never that nothing went");
+			eq(stopNotices(w).map((n) => [n.title, n.body]), [[MAY_HAVE_REACHED,
+				`Load ${LOAD}: invoice 11122026-1's files may have reached Triumph's server: it stopped after the CSV that asks Triumph to process it began. Check Triumph's side for it. The app won't send it again, and the mark stays locked.`]],
+			"§17 FAILS ON THE OLD CODE (M1, N7): its notice says it may have reached Triumph, to check Triumph's side, and that the app won't send it again");
+			ok(!/not sent/i.test(stopNotices(w).map((n) => n.title).join(" ")), "§17 FAILS ON THE OLD CODE (M1): no title says \"not sent\"");
+			eq(ledger.retryClaim(w.db, { key: KEY, nowIso: T0 }).code, "MAYBE_SUBMITTED", "§17 ...and Try again refuses it, as the notice says");
+		});
+
+		await step("§17 a path that writes its own row writes no second", async () => {
+			const m = world({ env: { ...LIVE, ...STOP_ON } });
+			m.queue();
+			m.putError = (name) => (name.endsWith(".csv") ? { code: "PUT_FAILED", nothingSent: false } : null);
+			await makeWith(lib, m).tick();
+			eq([say(m.claim()), stopRows(m).length, m.notices.map((n) => n.title)], ["needs_attention MAYBE_SUBMITTED", 0, ["Triumph: check one submission"]], "§17 MAYBE_SUBMITTED keeps its own row and notice, and no second");
+			const l = world({ env: { ...LIVE, ...STOP_ON } });
+			l.queue();
+			l.onConnect = () => l.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via) VALUES (?, '11112026-3', 'n8n')").run(LOAD);
+			await makeWith(lib, l).tick();
+			eq([say(l.claim()), l.actions().filter((a) => a === "triumph_submit_refused").length, stopRows(l).length, l.notices.length], ["needs_attention ALREADY_INVOICED", 1, 0, 0],
+				"§17 ...a refusal at the lock point keeps its own row, and no second");
+			const b = buttonWorld({ lib, led, env: { ...LIVE, ...STOP_ON } });
+			b.arm();
+			b.clock.add(31 * 24 * 60);
+			await b.make().tick();
+			eq([say(b.claim()), b.audits.filter((a) => a.action === "triumph_submit_refused").length, b.audits.filter((a) => a.action === "triumph_stopped").length], ["needs_attention INVOICE_TOO_OLD", 1, 0],
+				"§17 ...a late stop before the lock keeps its own row, and no second");
+			const a = buttonWorld({ lib, led, env: { ...LIVE, ...STOP_ON } });
+			a.arm();
+			let fails = 1;
+			a.putError = (name) => (name.endsWith(".pdf") && fails-- > 0 ? { code: "PUT_FAILED" } : null);
+			const aj = a.make();
+			await aj.tick();
+			a.clock.add(31 * 24 * 60);
+			await aj.tick();
+			eq([say(a.claim()), a.claim().stage, a.audits.filter((x) => x.action === "triumph_stopped").length, a.notices.filter((n) => n.title === "Triumph: check one load").length, stopNotices(a).length],
+				["needs_attention INVOICE_TOO_OLD", "pdf_uploading", 0, 1, 0], "§17 ...after the lock too: its own row and notice, and no second");
+			// A press resumed after the lock whose connection is refused: the refusal's own row and notice.
+			for (const [code, title] of [["HOST_KEY_MISMATCH", "Triumph: submitting stopped"], ["LOGIN_REFUSED", "Triumph: sign-in refused"]]) {
+				const h = world({ env: { ...DRY, ...STOP_ON } });
+				h.queue();
+				await makeWith(lib, h).tick();
+				h.envBase = { ...LIVE, ...STOP_ON };
+				ledger.transition(h.db, KEY, { from: ["staged"], nowIso: T0, patch: { state: "working", reason_code: ledger.SUBMIT_NOW, lease_owner: "made-up-run#9", lease_until: "2099-01-01T00:00:00.000Z", stage: "pdf_uploaded" } });
+				h.db.prepare("UPDATE load_factoring SET locked_at = ?, locked_via = 'upload' WHERE load_key = ?").run(T0, KEY);
+				h.connectError = code;
+				await makeWith(lib, h).attempt(KEY, "made-up-run#9", { fromStaged: true });
+				eq([say(h.claim()), h.actions().filter((x) => x === "triumph_paused").length, stopRows(h).length, h.notices.map((n) => n.title)], ["needs_attention SUBMIT_FAILED", 1, 0, [title]],
+					`§17 ...${code} on a press after the lock: its own row and notice, and no second`);
+			}
+		});
+
+		await step("§17 waits, Waiting and a give-up write nothing new", async () => {
+			for (const [label, opts, set, want] of [
+				["a wait that costs no try (Friday evening)", { env: { ...DRY, ...STOP_ON }, at: "2026-11-13T23:30:00.000Z" }, null, "queued QUIET_WINDOW"],
+				["a try that failed, back in line", { env: { ...LIVE, ...STOP_ON } }, (w) => { w.connectError = "CONNECT_FAILED"; }, "queued RETRY_LATER"],
+				["Waiting", { env: { ...DRY, ...STOP_ON }, status: "In Transit" }, null, "waiting NOT_COMPLETED"],
+				["a give-up (the mark cleared)", { env: { ...DRY, ...STOP_ON } }, (w) => w.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY), "skipped NOT_FACTORED"],
+			]) {
+				const w = world(opts);
+				if (set) set(w);
+				w.queue();
+				await makeWith(lib, w).tick();
+				eq([say(w.claim()), stopRows(w).length, stopNotices(w).length], [want, 0, 0], `§17 ${label}: no row, no notice`);
+			}
+			const r = world({ env: { ...DRY, ...STOP_ON }, status: "In Transit", debtor: null });
+			r.queue();
+			const rj = makeWith(lib, r);
+			await rj.tick();
+			r.sheet.status = "Delivered";
+			await rj.tick();
+			eq([say(r.claim()), stopRows(r).length, stopNotices(r).length], ["needs_attention DEBTOR_UNMAPPED", 0, 0], "§17 Waiting moved to Needs attention by the tick's free re-read (not a run): silent until the daily notice");
+		});
+
+		await step("§17 one row a run, so one a Try again", async () => {
+			const w = world({ env: { ...DRY, ...STOP_ON }, debtor: null });
+			w.queue();
+			const job = makeWith(lib, w);
+			await job.tick();
+			await job.tick();
+			eq([stopRows(w).length, w.notices.length], [1, 1], "§17 FAILS ON THE OLD CODE: a stopped claim the next tick leaves alone: still one row and one notice");
+			eq((await job.retry({}, LOAD)).ok, true, "§17 (fixture) Try again");
+			await job.tick();
+			eq([say(w.claim()), stopRows(w).length, w.notices.length], ["needs_attention DEBTOR_UNMAPPED", 2, 2], "§17 FAILS ON THE OLD CODE: ...Try again's own run stops again: one more of each");
+		});
+
+		await step("§17 the switch reads exactly \"true\"", async () => {
+			const rows = async (value) => {
+				const w = world({ env: { ...DRY, TRIUMPH_STOP_RECORD_ENABLED: value }, debtor: null });
+				w.queue();
+				await makeWith(lib, w).tick();
+				return stopRows(w).length;
+			};
+			eq([await rows("true"), await rows(" true "), await rows("TRUE"), await rows("1"), await rows("yes"), await rows("")], [1, 1, 0, 0, 0, 0],
+				"§17 FAILS ON THE OLD CODE: on only when exactly \"true\" (its ends trimmed), as the other Triumph switches read");
+		});
+
+		await step("§17 the switch off: what 221ff323 writes", async () => {
+			const BASE_COLUMNS = ["load_key", "load_id", "state", "reason_code", "first_seen_at", "attempts", "next_attempt_at", "lease_owner", "lease_until", "stage", "invoice_id", "invoice_date",
+				"reserved_at", "number_voided_at", "pdf_name", "csv_name", "batch_bytes", "compacted", "files_json", "fingerprint_json", "draft_row_id", "submitted_at", "via", "updated_at", "changed_at", "changed_fields"];
+			const view = (w) => { const c = w.claim(); return [c.state, c.reason_code, c.stage, c.attempts, c.invoice_id, Boolean(c.number_voided_at), c.batch_bytes > 0]; };
+			const a = world({ env: DRY, debtor: null });
+			a.queue();
+			await makeWith(lib, a).tick();
+			const b = world({ env: { ...DRY, TRIUMPH_BATCH_MAX_BYTES: "1000" } });
+			b.queue();
+			const bj = makeWith(lib, b);
+			await bj.tick();
+			const bStopped = view(b);
+			await bj.retry({}, LOAD);
+			const c = world({ env: DRY });
+			c.queue();
+			await makeWith(lib, c).tick();
+			c.envBase = LIVE;
+			c.putError = (name) => (name.endsWith(".pdf") ? { code: "PUT_FAILED" } : null);
+			await makeWith(lib, c).submitNow({}, LOAD);
+			eq([claimColumns(a.db), claimColumns(b.db), claimColumns(c.db)], [BASE_COLUMNS, BASE_COLUMNS, BASE_COLUMNS], "§17 the switch off: the claims table as 221ff323 makes it, no column of its own");
+			eq([view(a), bStopped, view(b), view(c)], [
+				["needs_attention", "DEBTOR_UNMAPPED", "", 0, "", false, false],
+				["needs_attention", "BATCH_TOO_LARGE", "rendered", 0, "11122026-1", false, false],
+				["queued", "", "rendered", 0, "11122026-1", false, false],
+				["needs_attention", "SUBMIT_FAILED", "pdf_uploading", 0, "11122026-1", false, true],
+			], "§17 ...each claim as 221ff323 leaves it");
+			eq([a.actions(), b.actions(), c.actions()], [[], ["triumph_retry"], ["triumph_batch_staged", "triumph_submit_now"]], "§17 ...the same audit rows, and no triumph_stopped");
+			eq([a.notices, b.notices, c.notices], [[], [], []], "§17 ...and no notice");
+		});
+	}
+	await checkStopRecord();
+	await runMutants("§17", [
+		["the row and notice whatever the switch says", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && state === \"needs_attention\" && !ownRow) recordStop("],
+		["a second row beside a path's own", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && stopRecordOn && state === \"needs_attention\") recordStop("],
+		["a row for a wait, Waiting or a give-up", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && stopRecordOn && !ownRow) recordStop("],
+		["the notice's title blind to the lock (N2)", "job", "\t\tif (UPLOAD_STAGES.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\"", "\t\tif (false) {\n\t\t\taudit(\"triumph_stopped\""],
+		["the size left out of the row", "job", "${size ? `; ${size.bytes} bytes, over the limit of ${size.limit}` : \"\"}`);", "`);"],
+		["the broker's invoice left out of a button claim's notice", "job", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \"\"}", "${chr ? \" Open the load to see what to do.\" : \"\"}"],
+		// Review 1's fix round: M1 (the stages), L1 (the PDF words), L2 (a load with no Triumph line).
+		["before the lock read as anything outside the lock (M1)", "job", "if (ledger.BEFORE_UPLOAD.has(c.stage)) {", "if (!UPLOAD_STAGES.has(c.stage)) {"],
+		["the CSV's stages read as after the lock (M1)", "job", "\t\tif (UPLOAD_STAGES.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\"", "\t\tif (!ledger.BEFORE_UPLOAD.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\""],
+		["a CSV stop's title says not sent (M1)", "job", "notify(\"Triumph: a load may have reached Triumph. Check Triumph's side; the app won't send it again.\",", "notify(\"Triumph: a load was not sent\","],
+		["the PDF said to have gone up (L1)", "job", "'s PDF may be on Triumph's server, but it stopped before the CSV", "'s PDF went up to Triumph's server, then it stopped before the CSV"],
+		["Open the load on a load with no Triumph line (L2)", "job", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \"\"}", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \" Open the load to see what to do.\"}"],
+		["the stop's words left out before the lock (L2)", "job", ": factoring.stopWords(code);", ": \"\";"],
+		["the stop's words left out after the lock (L2)", "job", " (${factoring.stopWords(code)}), so nothing", ", so nothing"],
+		["the column made whatever the switch says", "job", "if (mode !== \"off\" && stopRecordOn) ledger.ensureRefusedSize(db);", "if (mode !== \"off\") ledger.ensureRefusedSize(db);"],
+		["the size kept whatever the switch says", "job", "if (!stopRecordOn || !stop.size) return {};", "if (!stop.size) return {};"],
+		["the size not kept by the stop", "job", "return release(c, owner, stop.state, stop.code, keptSize(stop));", "return release(c, owner, stop.state, stop.code);"],
+		["the build's stop without the size", "job", "code: batch.code || \"MERGE_FAILED\", ...sizeOf(batch) }", "code: batch.code || \"MERGE_FAILED\" }"],
+		["the PDF's bytes alone kept", "job", "const bytes = Number(batch.pdfBytes) + Number(batch.csvBytes);", "const bytes = Number(batch.pdfBytes);"],
+		["Triumph's own limit kept, not the one checked (L3)", "job", "const limit = Number(batch.maxBytes);", "const limit = 921599;"],
+		["MAYBE_SUBMITTED's own row not its own", "job", "release(c, owner, \"needs_attention\", \"MAYBE_SUBMITTED\", {}, OWN_ROW);", "release(c, owner, \"needs_attention\", \"MAYBE_SUBMITTED\");"],
+		["a late stop's own row not its own", "job", "const n = release(c, owner, \"needs_attention\", code, {}, OWN_ROW);", "const n = release(c, owner, \"needs_attention\", code);"],
+		["a lock refusal's own row not its own", "job", "\t\treturn release(c, owner, \"needs_attention\", code, {}, OWN_ROW);\n\t}", "\t\treturn release(c, owner, \"needs_attention\", code);\n\t}"],
+		["a host key's own row not its own", "job", "{ code, counts: false, waitMs: HOUR_MS, ownRow: true }", "{ code, counts: false, waitMs: HOUR_MS }"],
+		["a refused sign-in's own row not its own", "job", "{ code, counts: false, waitMs: ms, ownRow: true }", "{ code, counts: false, waitMs: ms }"],
+		["notNow() dropping a path's own row", "job", "{ ownRow: opts.ownRow === true }", "{}"],
+		["Try again keeping the size", "ledger", "const sizeGone = columnsOf(db, CLAIMS).has(REFUSED_SIZE) ? { [REFUSED_SIZE]: \"\" } : {};", "const sizeGone = {};"],
+		["the switch's ends not trimmed", "rules", "return String((env && env.TRIUMPH_STOP_RECORD_ENABLED) ?? \"\").trim() === \"true\";", "return String((env && env.TRIUMPH_STOP_RECORD_ENABLED) ?? \"\") === \"true\";"],
+		["the switch on for any value", "rules", "return String((env && env.TRIUMPH_STOP_RECORD_ENABLED) ?? \"\").trim() === \"true\";", "return Boolean(env && env.TRIUMPH_STOP_RECORD_ENABLED);"],
+	], checkStopRecord);
+
+	// §18: a step that moves a claim's state, code, stage or attempts sends one dashboard:changed (N9); one that
+	// moves none sends none. With TRIUMPH_STOP_RECORD_ENABLED off: the emit ships without it (N11).
+	section("§18 every open pane follows by itself: dashboard:changed");
+	async function checkPanes({ jobSrc = JOB_SRC, ledgerSrc = LEDGER_SRC, rulesSrc = RULES_SRC } = {}) {
+		const { lib, led } = libsFor({ jobSrc, ledgerSrc, rulesSrc });
+		const counting = (w) => { w.told = 0; return { changed: () => { w.told++; } }; };
+		await step("§18 one for each claim that moved; none for a tick that moved none", async () => {
+			const s = world({ env: LIVE });
+			s.queue();
+			const sj = makeWith(lib, s, counting(s));
+			await sj.tick();
+			eq([say(s.claim()), s.told], ["submitted", 1], "§18 FAILS ON THE OLD CODE: submitted: one dashboard:changed");
+			await sj.tick();
+			eq(s.told, 1, "§18 FAILS ON THE OLD CODE (N9): ...and the next tick, which moves nothing, sends none");
+			for (const [label, opts, set, want] of [
+				["Needs attention", { env: DRY, debtor: null }, null, "needs_attention DEBTOR_UNMAPPED"],
+				["Waiting", { env: DRY, status: "In Transit" }, null, "waiting NOT_COMPLETED"],
+				["a retry wait", { env: LIVE }, (w) => { w.connectError = "CONNECT_FAILED"; }, "queued RETRY_LATER"],
+				["paused (a refused sign-in)", { env: LIVE }, (w) => { w.connectError = "LOGIN_REFUSED"; }, "queued LOGIN_REFUSED"],
+				["skipped", { env: DRY }, (w) => w.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY), "skipped NOT_FACTORED"],
+				["staged (a dry run)", { env: DRY }, null, "staged"],
+			]) {
+				const w = world(opts);
+				if (set) set(w);
+				w.queue();
+				await makeWith(lib, w, counting(w)).tick();
+				eq([say(w.claim()), w.told], [want, 1], `§18 FAILS ON THE OLD CODE: ${label}: one dashboard:changed`);
+			}
+		});
+		await step("§18 a wait that moves nothing a pane reads sends nothing", async () => {
+			const f = world({ env: DRY, at: "2026-11-13T23:30:00.000Z" });
+			f.queue();
+			const fj = makeWith(lib, f, counting(f));
+			await fj.tick();
+			f.clock.add(61);
+			await fj.tick();
+			eq([say(f.claim()), f.told], ["queued QUIET_WINDOW", 1], "§18 FAILS ON THE OLD CODE (N9): Friday evening: one for the wait, none when the next hour's run waits again (only next_attempt_at moved)");
+			const r = world({ env: LIVE });
+			r.queue();
+			r.connectError = "CONNECT_FAILED";
+			const rj = makeWith(lib, r, counting(r));
+			await rj.tick();
+			r.clock.add(16);
+			await rj.tick();
+			eq([say(r.claim()), r.claim().attempts, r.told], ["queued RETRY_LATER", 2, 2], "§18 FAILS ON THE OLD CODE: a second failed try, where only attempts moved: its own one");
+		});
+		await step("§18 two runs in one tick, the tick's re-read, a restart, Submit now", async () => {
+			const two = world({ env: DRY });
+			ledger.ensureSchema(two.db);
+			two.sheet.rows.push({ "Load ID": "LD-TEST-0002", Status: "Delivered", Email: "ap@example-broker.test", "Completion Date": "2026-11-10", "  Payment  ": "2150" });
+			two.db.prepare("INSERT INTO load_factoring (load_key, load_id, factored, source, set_at, updated_at) VALUES ('ld-test-0002', 'LD-TEST-0002', 1, 'script', ?, ?)").run(T0, T0);
+			two.db.prepare("INSERT INTO documents (id, load_id, type, file_name, drive_url, uploaded_at) VALUES (12, 'LD-TEST-0002', 'POD', 'p.pdf', '/uploads/p.pdf', '2026-11-10 14:00:00')").run();
+			two.queue();
+			ledger.insertClaim(two.db, { key: "ld-test-0002", loadId: "LD-TEST-0002", state: "queued", nowIso: T0 });
+			const out = await makeWith(lib, two, counting(two)).tick();
+			eq([out.work.started, two.told], [2, 2], "§18 FAILS ON THE OLD CODE: two runs in one tick: one at the end of each");
+			const g = world({ env: DRY });
+			g.queue();
+			const gj = makeWith(lib, g, counting(g));
+			await gj.tick();
+			g.db.prepare("UPDATE load_factoring SET factored = 0 WHERE load_key = ?").run(KEY);
+			g.told = 0;
+			await gj.tick();
+			eq([say(g.claim()), g.told], ["skipped NOT_FACTORED", 1], "§18 FAILS ON THE OLD CODE: a staged batch given up at the tick's free re-read (no run): one");
+			const rs = world({ env: DRY });
+			rs.queue("working", { lease_owner: "dead-worker#1", lease_until: "2026-11-12T14:00:00.000Z" });
+			await makeWith(lib, rs, counting(rs)).tick();
+			eq([say(rs.claim()), rs.told], ["staged", 2], "§18 FAILS ON THE OLD CODE: a claim a restart left: one when the tick takes it back, one when its run ends");
+			const st = world({ env: DRY });
+			st.queue();
+			await makeWith(lib, st).tick();
+			st.envBase = LIVE;
+			const now = makeWith(lib, st, counting(st));
+			await now.submitNow({}, LOAD);
+			eq([say(st.claim()), st.told], ["submitted", 1], "§18 FAILS ON THE OLD CODE: Submit now: one");
+		});
+		await step("§18 a pane that can't be told doesn't stop the job", async () => {
+			const t = world({ env: LIVE });
+			t.queue();
+			const out = await makeWith(lib, t, { changed: () => { throw new Error("made-up"); } }).tick();
+			eq([say(t.claim()), out.error], ["submitted", undefined], "§18 a dashboard:changed that throws: the tick goes on, and the claim is submitted");
+		});
+		await step("§18 what a pane reads of a claim", async () => {
+			const w = world({ env: DRY });
+			w.queue();
+			makeWith(lib, w);
+			const shown = () => (typeof led.claimsShown === "function" ? led.claimsShown(w.db).get(KEY) : undefined);
+			const after = (sql) => { w.db.prepare(sql).run(KEY); return shown(); };
+			const s0 = shown();
+			const s1 = after("UPDATE triumph_submissions SET next_attempt_at = '2099-01-01T00:00:00.000Z', lease_until = '2099-01-01T00:00:00.000Z', updated_at = '2099-01-01T00:00:00.000Z' WHERE load_key = ?");
+			const s2 = after("UPDATE triumph_submissions SET attempts = 1 WHERE load_key = ?");
+			const s3 = after("UPDATE triumph_submissions SET stage = 'reserved' WHERE load_key = ?");
+			const s4 = after("UPDATE triumph_submissions SET reason_code = 'RETRY_LATER' WHERE load_key = ?");
+			const s5 = after("UPDATE triumph_submissions SET state = 'waiting' WHERE load_key = ?");
+			eq([typeof s0, s1 === s0, s2 !== s1, s3 !== s2, s4 !== s3, s5 !== s4], ["string", true, true, true, true, true],
+				"§18 FAILS ON THE OLD CODE (N9): a pane reads a claim's state, code, stage and attempts; its wait's end, lease and update time move nothing");
+		});
+	}
+	await checkPanes();
+	await runMutants("§18", [
+		["no emit at a run's end", "job", "\t\t\tawait runClaim(next.load_key, token);\n\t\t\t// Each run's end, not the pass's: a pane needn't wait for the next claim's run.\n\t\t\tshown = panesFollow(shown);", "\t\t\tawait runClaim(next.load_key, token);"],
+		["no emit after the tick's re-read", "job", "\t\t\t\tpanesFollow(shown);\n\t\t\t\tout.work = await work();", "\t\t\t\tout.work = await work();"],
+		["no emit after Submit now", "job", "\t\tawait runClaim(key, token, { fromStaged: true });\n\t\tpanesFollow(shown);", "\t\tawait runClaim(key, token, { fromStaged: true });"],
+		["an emit whatever moved", "job", "if ([...now].some(([key, seen]) => before.get(key) !== seen)) {", "if (true) {"],
+		["a pane that can't be told stops the run", "job", "\t\t\ttry {\n\t\t\t\td.changed();\n\t\t\t} catch (e) {\n\t\t\t\td.log.error(`[triumph] the open panes weren't told: ${codeOf(e)}`);\n\t\t\t}", "\t\t\td.changed();"],
+		["attempts not read", "ledger", "`${r.state}|${r.reason_code}|${r.stage}|${r.attempts}`", "`${r.state}|${r.reason_code}|${r.stage}`"],
+		["the stage not read", "ledger", "`${r.state}|${r.reason_code}|${r.stage}|${r.attempts}`", "`${r.state}|${r.reason_code}|${r.attempts}`"],
+		["the code not read", "ledger", "`${r.state}|${r.reason_code}|${r.stage}|${r.attempts}`", "`${r.state}|${r.stage}|${r.attempts}`"],
+		["the state not read", "ledger", "`${r.state}|${r.reason_code}|${r.stage}|${r.attempts}`", "`${r.reason_code}|${r.stage}|${r.attempts}`"],
+	], checkPanes);
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);

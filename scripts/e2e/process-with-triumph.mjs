@@ -36,9 +36,16 @@
 //   npm --prefix client run build   (the build under test)
 //   node scripts/e2e/process-with-triumph.mjs
 //   E2E_SELF_CHECK=1 node scripts/e2e/process-with-triumph.mjs   (the server half alone: no browser, no build)
+//   STATUS_SCREENS=1 node scripts/e2e/process-with-triumph.mjs   (from a worktree only: the Triumph
+//     status screens alone, at a true 1280, with TRIUMPH_STOP_RECORD_ENABLED on:
+//       S1 sending: "Sending to Triumph… Taken at <time>." and the step line
+//       S2 sent: "Sent to Triumph · <time>", the upload's step done, Triumph's own three on MyTriumph
+//       S3 too large (a made-up limit of 1,000 bytes): the too-large words with the kept size
+//       S4 Other options open on that load: the heading, the note box and both actions)
 //
 // Env: E2E_PORT (3000 and 5173 are refused), HEADED=1, SHOT_DIR (default
-// ~/LogisX-replica/reports/cc/work/process-with-triumph/pr1/screens). Output: PASS/FAIL lines, a count,
+// ~/LogisX-replica/reports/cc/work/process-with-triumph/pr1/screens, and with STATUS_SCREENS
+// ~/LogisX-replica/reports/cc/work/triumph-status/part1/screens). Output: PASS/FAIL lines, a count,
 // <SHOT_DIR>/results-process-with-triumph.md and the screens. Exit 0 only when every row passes.
 import fs from 'node:fs'
 import http from 'node:http'
@@ -55,8 +62,11 @@ let PORT = ASKED_PORT
 let BASE = ''
 const HEADED = process.env.HEADED === '1'
 const SELF_CHECK = process.env.E2E_SELF_CHECK === '1'
+const STATUS_SCREENS = process.env.STATUS_SCREENS === '1'
 const DIST = path.join(paths.REPO, 'client', 'dist')
-const SHOT_DIR = process.env.SHOT_DIR || path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'process-with-triumph', 'pr1', 'screens')
+const SHOT_DIR = process.env.SHOT_DIR || (STATUS_SCREENS
+  ? path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'triumph-status', 'part1', 'screens')
+  : path.join(os.homedir(), 'LogisX-replica', 'reports', 'cc', 'work', 'process-with-triumph', 'pr1', 'screens'))
 const DESK = Object.freeze({ width: 1280, height: 800 })
 const PHONE = Object.freeze({ width: 390, height: 844 })
 
@@ -67,6 +77,7 @@ function die(msg) {
 if (process.env.E2E_PORT && (!Number.isInteger(ASKED_PORT) || ASKED_PORT < 1024 || ASKED_PORT > 65535)) die(`E2E_PORT must be a port number from 1024 to 65535; got "${process.env.E2E_PORT}"`)
 if (ASKED_PORT === 3000 || ASKED_PORT === 5173) die(`refusing port ${ASKED_PORT}: 3000 is production's port on the VPS and 5173 is Vite's`)
 if (!SELF_CHECK && !fs.existsSync(path.join(DIST, 'index.html'))) die(`no ${path.join(DIST, 'index.html')}: run \`npm --prefix client run build\` first`)
+if (STATUS_SCREENS && (SELF_CHECK || path.resolve(paths.REPO) === path.resolve(paths.mainCheckout()))) die('STATUS_SCREENS runs alone, and only from a worktree (the build under review)')
 
 // ---------------------------------------------------------------- nothing leaves this process
 // Set before any lib is loaded. Every socket goes through Socket.prototype.connect.
@@ -145,16 +156,24 @@ const REASON = 'made-up: keep it with its invoice to the broker'
 // The screen's words, pinned here so a changed word is a FAIL rather than a matching read.
 const WORDS = Object.freeze({
   button: 'Process with Triumph',
+  // The line while it goes: "Sending to Triumph… Taken at <time>."
   sending: 'Sending to Triumph…',
   sentPrefix: 'Sent to Triumph · ',
   already: 'This load is already on its way to Triumph.',
   locked: 'This load was handed to Triumph, so its invoice is final there. Nothing can change it in the app.',
   advance: "Not sent to Triumph. This load's rate con shows an advance, or the app couldn't rule one out: it stays with its invoice to the broker.",
   notChr: 'Not sent to Triumph. Only C.H. Robinson loads can go to Triumph from this button for now. Invoice this one the usual way.',
-  retryStop: "Not sent to Triumph: no debtor name is set for this broker in Triumph's settings. Its invoice to the broker stands. Try again",
-  netStop: "Not sent to Triumph: the rate con shows an advance, or the app couldn't rule one out. It stays with its invoice to the broker: Clear factored puts it back there alone.",
-  cleared: 'No longer factored: it stays with its invoice to the broker.',
-  clearedTile: 'Not sent to Triumph. It stays with its invoice to the broker.',
+  retryStop: "Not sent to Triumph: no debtor name is set for this broker in Triumph's settings. The broker's invoice already went out as usual. Press Try again",
+  netStop: "Not sent to Triumph: the rate con shows an advance, or the app couldn't rule one out. The broker's invoice already went out as usual. To keep it with the broker only, press Clear factored under Other options.",
+  cleared: "No longer factored. The broker's invoice already went out as usual.",
+  clearedTile: "Not sent to Triumph. The broker's invoice already went out as usual.",
+  // STATUS_SCREENS: a made-up limit of 1,000 bytes, and the size the server kept.
+  tooLarge: 'Too large for Triumph: the invoice, rate con and delivery papers come to ',
+  tooLargeEnd: "bytes; the app sends at most 1,000. Nothing was sent, and the broker's invoice already went out as usual. To fix it: delete a duplicate BOL or POD, or replace a very large scan with a smaller copy, then press Try again. Or send it in MyTriumph, then under Other options press Handled in Triumph's process, or Clear factored to keep it with the broker only.",
+  myTriumph: 'Not shown in the app yet. Look for it in MyTriumph.',
+  otherOptions: 'Other options',
+  heading: "If this load won't go through the app",
+  note: 'Note (required)',
 })
 
 function keyPair() {
@@ -172,8 +191,9 @@ async function pdfOf(lines) {
   return Buffer.from(await doc.save({ useObjectStreams: false }))
 }
 
-// One made-up server's state: the database, the fake Triumph, the routes and the job.
-async function freshServer() {
+// One made-up server's state: the database, the fake Triumph, the routes and the job. `extra`: more
+// made-up settings (STATUS_SCREENS: the stop record on, and a low batch limit).
+async function freshServer(extra = {}) {
   const hostKey = keyPair()
   const clientKey = keyPair()
   const fake = await startFakeTriumph({ hostKey: hostKey.private, clientKey: clientKey.private, folders: [SUBMIT] })
@@ -182,6 +202,7 @@ async function freshServer() {
     TRIUMPH_HOST: fake.host, TRIUMPH_PORT: String(fake.port), TRIUMPH_USER: 'made-up-user', TRIUMPH_KEY_FILE: '/made-up/not-a-real-key-file',
     TRIUMPH_HOST_FINGERPRINT: fingerprintOfKey(hostKey.private), TRIUMPH_HOST_KEY_TYPE: 'ED25519', TRIUMPH_SUBMIT_DIR: SUBMIT,
     TRIUMPH_FACTORING_ENABLED: 'true', TRIUMPH_FACTOR_MARK_IDS: String(LISTED.id), TRIUMPH_PROCESS_BUTTON_ENABLED: 'true', TRIUMPH_NOA_LINES: NOA.join('\n'),
+    ...extra,
   })
   const db = new Database(':memory:')
   db.exec(`CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT, total TEXT,
@@ -543,9 +564,9 @@ async function browserHalf(s) {
       const view = await openPage(browser, s, { phone })
       await openLoad(view, LOADS[name])
       await processButton(view).click({ timeout: 8000 })
-      const sending = await tileUntil(view, (t) => t === WORDS.sending, 8000)
-      record(tag(view, 'P2'), `one press, no question: load ${name}'s tile`, `${WORDS.sending}; no question asked`, `${sending}; questions ${view.questions.length}`,
-        sending === WORDS.sending && view.questions.length === 0, await screen(view, 'tile-sending', 'P2'))
+      const sending = await tileUntil(view, (t) => t.startsWith(WORDS.sending), 8000)
+      record(tag(view, 'P2'), `one press, no question: load ${name}'s tile`, `${WORDS.sending} Taken at <time>.; no question asked`, `${sending}; questions ${view.questions.length}`,
+        sending.startsWith(WORDS.sending) && view.questions.length === 0, await screen(view, 'tile-sending', 'P2'))
       if (!phone) {
         const r = await pressFromPage(view, LOADS[name])
         record('P5', 'a second press while it waits its turn', `409 ${WORDS.already}`, `${r.status} ${r.body.error}`, r.status === 409 && r.body.error === WORDS.already)
@@ -590,7 +611,7 @@ async function browserHalf(s) {
       const view = await openPage(browser, s)
       await openLoad(view, LOADS.F)
       await processButton(view).click({ timeout: 8000 })
-      await tileUntil(view, (t) => t === WORDS.sending, 8000)
+      await tileUntil(view, (t) => t.startsWith(WORDS.sending), 8000)
       await s.job.tick()
       const stop = await tileUntil(view, (t) => t.startsWith(WORDS.retryStop), 15000)
       const tryAgain = view.page.locator(`${DIALOG} .triumph-line button`, { hasText: 'Try again' })
@@ -599,7 +620,7 @@ async function browserHalf(s) {
         stop.startsWith(WORDS.retryStop) && offered, await screen(view, 'tile-try-again', 'P8'))
       s.setDebtor(true)
       if (offered) await tryAgain.click({ timeout: 8000 })
-      await tileUntil(view, (t) => t === WORDS.sending, 8000)
+      await tileUntil(view, (t) => t.startsWith(WORDS.sending), 8000)
       await s.job.tick()
       const sent = await tileUntil(view, (t) => t.startsWith(WORDS.sentPrefix), 15000)
       record('P8', 'Try again with the name set: it goes', `${WORDS.sentPrefix}<time>`, sent, sent.startsWith(WORDS.sentPrefix), await screen(view, 'tile-sent-after-try-again', 'P8'))
@@ -611,10 +632,12 @@ async function browserHalf(s) {
       const view = await openPage(browser, s)
       await openLoad(view, LOADS.D)
       await processButton(view).click({ timeout: 8000 })
-      await tileUntil(view, (t) => t === WORDS.sending, 8000)
+      await tileUntil(view, (t) => t.startsWith(WORDS.sending), 8000)
       await s.job.tick()
       const stop = await tileUntil(view, (t) => t === WORDS.netStop, 15000)
       record('P9', 'the second look stops on an advance: the tile names Clear factored', WORDS.netStop, stop, stop === WORDS.netStop, await screen(view, 'tile-second-look-stop', 'P9'))
+      // Clear factored is under Other options, folded until a person opens it.
+      await view.page.locator(`${DIALOG} .fact-more`, { hasText: WORDS.otherOptions }).click({ timeout: 8000 })
       await view.page.locator(`${DIALOG} .fact-reason`).fill(REASON)
       await view.page.locator(`${DIALOG} .fact-btn`, { hasText: 'Clear factored' }).click({ timeout: 8000 })
       const said = await view.page.waitForSelector(`${DIALOG} .fact-result`, { timeout: 8000 }).then(() => locText(view.page.locator(`${DIALOG} .fact-result`)), () => '')
@@ -631,10 +654,76 @@ async function browserHalf(s) {
   }
 }
 
+// STATUS_SCREENS: the Triumph status plan's four screens (Part 1), at a true 1280, for the reviewer.
+// Each step as "<mark> <words>": the mark (done or not) and its words are two spans.
+const stepsText = (view) => view.page.locator(`${DIALOG} .triumph-steps li`).allTextContents()
+  .then((all) => all.map((t) => t.replace(/\s+/g, ' ').trim().replace(/^([✓○])\s*/, '$1 ')), () => [])
+async function statusScreens(s) {
+  const small = await freshServer({ TRIUMPH_STOP_RECORD_ENABLED: 'true', TRIUMPH_BATCH_MAX_BYTES: '1000' })
+  const { chromium } = await import('playwright-core')
+  const server = http.createServer(serveDist)
+  await new Promise((resolve) => server.listen(PORT, HOST, resolve))
+  PORT = server.address().port
+  BASE = `http://${HOST}:${PORT}`
+  const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED })
+  try {
+    // S1 and S2: one press; the calm line and the step line; the job's turn; sent, with no reload.
+    {
+      const view = await openPage(browser, s)
+      await openLoad(view, LOADS.E)
+      await processButton(view).click({ timeout: 8000 })
+      const sending = await tileUntil(view, (t) => t.startsWith(`${WORDS.sending} Taken at `), 8000)
+      const steps = await stepsText(view)
+      const box = await locText(view.page.locator(`${DIALOG} .fact-line`))
+      record('S1', 'sending: a calm line, the step line, and a factoring box with no note box or buttons', `"${WORDS.sending} Taken at <time>."; 6 steps, Pressed done; "Factored (Triumph): sending."; no .fact-reason`,
+        `"${sending}"; ${steps.length} steps (${steps[0] || '-'}); "${box}"; note boxes ${await view.page.locator(`${DIALOG} .fact-reason`).count()}`,
+        sending.startsWith(`${WORDS.sending} Taken at `) && steps.length === 6 && steps[0].startsWith('✓ Pressed ') && box.startsWith('Factored (Triumph): sending.') && (await view.page.locator(`${DIALOG} .fact-reason`).count()) === 0,
+        await screen(view, 'status-sending', 'S1'))
+      await s.job.tick()
+      const sent = await tileUntil(view, (t) => t.startsWith(WORDS.sentPrefix), 15000)
+      const after = await stepsText(view)
+      record('S2', 'sent: the upload step done, and Triumph\'s own three point to MyTriumph', `${WORDS.sentPrefix}<time>; Uploaded done; three steps end "${WORDS.myTriumph}"`,
+        `"${sent}"; ${JSON.stringify(after)}`,
+        sent.startsWith(WORDS.sentPrefix) && after.length === 6 && after[2].startsWith('✓ Uploaded to Triumph ') && after.slice(3).every((t) => t.endsWith(WORDS.myTriumph)),
+        await screen(view, 'status-sent', 'S2'))
+      await view.ctx.close()
+    }
+    // S3 and S4: a batch over a made-up limit of 1,000 bytes; then Other options opened.
+    {
+      const view = await openPage(browser, small)
+      await openLoad(view, LOADS.A)
+      await processButton(view).click({ timeout: 8000 })
+      await tileUntil(view, (t) => t.startsWith(WORDS.sending), 8000)
+      await small.job.tick()
+      const big = await tileUntil(view, (t) => t.startsWith(WORDS.tooLarge), 15000)
+      const kept = ledger.refusedSize(small.claim(LOADS.A))
+      record('S3', 'too large: the words a dispatcher reads, with the size the server kept', `"${WORDS.tooLarge}<bytes> ${WORDS.tooLargeEnd}"; one triumph_stopped row`,
+        `"${big}"; kept ${JSON.stringify(kept)}; rows ${small.audits.filter((a) => a.action === 'triumph_stopped').length}`,
+        big.startsWith(WORDS.tooLarge) && big.endsWith(WORDS.tooLargeEnd) && Boolean(kept) && kept.limit === 1000 && big.includes(`${kept.bytes.toLocaleString('en-US')} bytes;`)
+          && small.audits.filter((a) => a.action === 'triumph_stopped').length === 1,
+        await screen(view, 'status-too-large', 'S3'))
+      const folded = (await view.page.locator(`${DIALOG} .fact-reason`).count()) === 0
+      await view.page.locator(`${DIALOG} .fact-more`, { hasText: WORDS.otherOptions }).click({ timeout: 8000 })
+      const panel = await locText(view.page.locator(`${DIALOG} .fact-actions--folded`))
+      const buttons = await view.page.locator(`${DIALOG} .fact-actions--folded .fact-btn`).allTextContents().catch(() => [])
+      record('S4', 'Other options: folded until opened, then the heading, the note box and both actions', `folded first; "${WORDS.heading}", "${WORDS.note}"; Clear factored and Handled in Triumph's process`,
+        `folded ${folded}; "${panel.slice(0, 120)}"; ${JSON.stringify(buttons)}`,
+        folded && panel.startsWith(WORDS.heading) && panel.includes(WORDS.note) && buttons.includes('Clear factored') && buttons.includes("Handled in Triumph's process"),
+        await screen(view, 'status-other-options', 'S4'))
+      await view.ctx.close()
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    server.close()
+    await small.close()
+  }
+}
+
 ;(async () => {
-  const s = await freshServer()
+  const s = await freshServer(STATUS_SCREENS ? { TRIUMPH_STOP_RECORD_ENABLED: 'true' } : {})
   try {
     if (SELF_CHECK) await serverHalf(s)
+    else if (STATUS_SCREENS) await statusScreens(s)
     else await browserHalf(s)
   } finally {
     await s.close()
