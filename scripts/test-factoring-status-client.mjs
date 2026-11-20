@@ -34,6 +34,8 @@
 //      and shown on the server's word, each help line beside its own button (§14); the open load
 //      taking the fresh row on every read of the dashboard, and the step line on it (§15);
 //      mutants of each
+//   §16 the stop words: the server's copy (its stop notice says why for a load with no Triumph
+//      line) is the client's, word for word; a mutant of either side
 //
 // No network, no DOM, no database.
 //   node scripts/test-factoring-status-client.mjs      # exits 1 on any failure
@@ -811,6 +813,44 @@ section('§9  Process with Triumph: the button, the tile, the chip')
   ]) {
     if (src.split(from).length - 1 !== 1) { failures.push(`§14-§15 mutant anchor not found once in ${file}: ${name}`); continue }
     ok(check(src.replace(from, () => to)).length > 0, `§14-§15 MUTANT ${name}: caught`)
+  }
+}
+
+// ---------------------------------------------------------------- §16
+// The server's stop notice says why in the load line's own words for a load whose pane has no Triumph
+// line (review 1, L2): its copy of the stop words is the client's, word for word.
+section('§16  the stop words: one wording, the server\'s copy pinned to the client\'s')
+{
+  const { createRequire } = await import('module')
+  const serverStore = createRequire(path.join(ROOT, 'package.json'))(path.join(ROOT, 'lib', 'factoring-store.js'))
+  const wordsViolations = (M) => {
+    if (!M || !M.STOP_WORDS || !serverStore.STOP_WORDS || typeof serverStore.stopWords !== 'function') return ['no STOP_WORDS on one side']
+    const v = []
+    const client = Object.entries(M.STOP_WORDS).sort()
+    const server = Object.entries(serverStore.STOP_WORDS).sort()
+    if (JSON.stringify(client) !== JSON.stringify(server)) v.push('the two copies differ')
+    for (const code of ['DEBTOR_UNMAPPED', 'MADE_UP_CODE', '']) if (serverStore.stopWords(code) !== M.triumphStopWords(code)) v.push(`${JSON.stringify(code)}: the server says "${serverStore.stopWords(code)}"`)
+    return v
+  }
+  eq(S ? wordsViolations(S) : ['no module'], [], '§16 FAILS ON THE OLD CODE (L2): the server\'s stop words are the client\'s, word for word, the unknown code\'s too')
+  const LIB_SRC = read(LIB)
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factoring-status-16-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'lib'))
+    fs.mkdirSync(path.join(tmp, 'utils'))
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}\n')
+    fs.copyFileSync(path.join(ROOT, 'client', 'src', 'utils', 'sharedLogin.js'), path.join(tmp, 'utils', 'sharedLogin.js'))
+    const from = "  SUBMIT_FAILED: 'the upload to Triumph kept failing',"
+    if (LIB_SRC.split(from).length - 1 !== 1) failures.push('§16 mutant anchor not found once in factoringStatus.js: one word changed on one side')
+    else {
+      const file = path.join(tmp, 'lib', 'factoringStatus-16.js')
+      fs.writeFileSync(file, LIB_SRC.replace(from, () => "  SUBMIT_FAILED: 'the upload to Triumph failed',"))
+      let v
+      try { v = wordsViolations(await import(pathToFileURL(file).href)) } catch (e) { v = [`threw: ${e && e.message}`] }
+      ok(v.length > 0, '§16 MUTANT one word changed on one side: caught')
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 

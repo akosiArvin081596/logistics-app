@@ -29,9 +29,11 @@
 //       submitted row from the batch's own record; off, the batch, record and words as before
 //
 //   §17 a stop recorded (TRIUMPH_STOP_RECORD_ENABLED): one triumph_stopped row and one notice for each
-//       run that moves a claim to Needs attention on a path with no row of its own, the notice's title
-//       by the lock; a size stop keeps sizeRefusal()'s numbers until Try again; waits, Waiting and a
-//       give-up write nothing; off, the job writes what 221ff323 writes; mutants of each
+//       run that moves a claim to Needs attention on a path with no row of its own, their words and
+//       title by how far it got (before the lock, after it, after the CSV started), the stop's own
+//       words for a load with no Triumph line; a size stop keeps sizeRefusal()'s numbers until Try
+//       again; waits, Waiting and a give-up write nothing; off, the job writes what 221ff323 writes;
+//       mutants of each
 //   §18 every open pane follows by itself: one dashboard:changed for each step that moves a claim's
 //       state, code, stage or attempts, none for one that moves nothing; mutants of each
 //
@@ -1408,12 +1410,14 @@ async function dedupeClaims() {
 	const STOP_ON = Object.freeze({ TRIUMPH_STOP_RECORD_ENABLED: "true" });
 	const NOT_SENT = "Triumph: a load was not sent";
 	const AFTER_LOCK = "Triumph: a load stopped after its PDF went up. Nothing was triggered there; check Triumph's side.";
+	const MAY_HAVE_REACHED = "Triumph: a load may have reached Triumph. Check Triumph's side; the app won't send it again.";
 	const BEFORE_WORDS = "stopped before anything went to Triumph";
-	const AFTER_WORDS = "stopped after its PDF went up, before the CSV; nothing was triggered at Triumph";
-	const OPEN_IT = "Open the load to see why and what to do.";
+	const AFTER_WORDS = "stopped after the lock, before the CSV; its PDF may be on Triumph's server, and nothing was triggered there";
+	const CSV_WORDS = "stopped after its CSV started; it may have reached Triumph, and the app won't send it again";
+	const OPEN_IT = "Open the load to see what to do.";
 	const stopRows = (w) => w.audits.filter((a) => a.action === "triumph_stopped");
 	// The stop record's own notices (the daily and keep-alive notices are the job's others).
-	const stopNotices = (w) => w.notices.filter((n) => n.title === NOT_SENT || n.title === AFTER_LOCK);
+	const stopNotices = (w) => w.notices.filter((n) => [NOT_SENT, AFTER_LOCK, MAY_HAVE_REACHED].includes(n.title));
 	const claimColumns = (db) => db.prepare("PRAGMA table_info(triumph_submissions)").all().map((col) => col.name);
 	async function checkStopRecord({ jobSrc = JOB_SRC, ledgerSrc = LEDGER_SRC, rulesSrc = RULES_SRC } = {}) {
 		const { lib, led } = libsFor({ jobSrc, ledgerSrc, rulesSrc });
@@ -1429,7 +1433,8 @@ async function dedupeClaims() {
 			await makeWith(lib, w).tick();
 			eq(say(w.claim()), "needs_attention DEBTOR_UNMAPPED", "§17 (fixture) a free check stops it before the lock");
 			eq(stopRows(w).map((r) => [r.who, r.id, r.details]), [["triumph", LOAD, `DEBTOR_UNMAPPED: ${BEFORE_WORDS}`]], "§17 FAILS ON THE OLD CODE: one triumph_stopped row, by the system actor, with its code");
-			eq(w.notices, [{ title: NOT_SENT, body: `Load ${LOAD} ${BEFORE_WORDS}. ${OPEN_IT}` }], "§17 FAILS ON THE OLD CODE (N2): ...and one Super Admin notice, \"Triumph: a load was not sent\"");
+			eq(w.notices, [{ title: NOT_SENT, body: `Load ${LOAD} ${BEFORE_WORDS}: no debtor name is set for this broker in Triumph's settings.` }],
+				"§17 FAILS ON THE OLD CODE (N2, L2): ...and one Super Admin notice, \"Triumph: a load was not sent\"; a load with no Triumph line in its pane gets the stop's own words, not \"Open the load\"");
 		});
 
 		await step("§17 a Process with Triumph claim's stop before the lock", async () => {
@@ -1437,8 +1442,9 @@ async function dedupeClaims() {
 			w.arm();
 			await w.make().tick();
 			eq(say(w.claim()), "needs_attention ADVANCE_ON_RATECON", "§17 (fixture) the job's second look stops it");
-			eq(w.notices.filter((n) => n.title === NOT_SENT).map((n) => n.body), [`Load ${CHR_LOAD} ${BEFORE_WORDS}. The broker's invoice already went out as usual. ${OPEN_IT}`],
-				"§17 FAILS ON THE OLD CODE: its notice says the broker's invoice already went out as usual");
+			eq(w.notices.filter((n) => n.title === NOT_SENT).map((n) => n.body),
+				[`Load ${CHR_LOAD} ${BEFORE_WORDS}: the rate con shows an advance, or the app couldn't rule one out. The broker's invoice already went out as usual. ${OPEN_IT}`],
+				"§17 FAILS ON THE OLD CODE: its notice says why, that the broker's invoice already went out as usual, and to open the load (its pane has the Triumph line)");
 		});
 
 		await step("§17 a size stop keeps sizeRefusal()'s numbers, and Try again clears them", async () => {
@@ -1453,7 +1459,7 @@ async function dedupeClaims() {
 			eq([say(c), refusals.length, want.limit, want.bytes > 1000], ["needs_attention BATCH_TOO_LARGE", 1, 1000, true], "§17 (fixture) a batch over a made-up limit of 1,000 bytes");
 			eq([kept(c), c.batch_bytes], [want, 0], "§17 FAILS ON THE OLD CODE (N6, L3): its own column keeps the batch's bytes and the limit checked, sizeRefusal()'s own; batch_bytes stays the built batch's (none here)");
 			eq(stopRows(w).map((x) => x.details), [`BATCH_TOO_LARGE: ${BEFORE_WORDS}; ${want.bytes} bytes, over the limit of 1000`], "§17 FAILS ON THE OLD CODE: the row names the bytes and the limit");
-			eq(w.notices.map((n) => n.body), [`Load ${LOAD} ${BEFORE_WORDS}: its documents came to ${want.bytes.toLocaleString("en-US")} bytes, and the app sends at most 1,000. ${OPEN_IT}`],
+			eq(w.notices.map((n) => n.body), [`Load ${LOAD} ${BEFORE_WORDS}: its documents came to ${want.bytes.toLocaleString("en-US")} bytes, and the app sends at most 1,000.`],
 				"§17 FAILS ON THE OLD CODE: ...and so does the notice");
 			eq((await job.retry({}, LOAD)).ok, true, "§17 (fixture) Try again");
 			eq([w.claim().refused_size_json, kept(w.claim())], ["", null], "§17 FAILS ON THE OLD CODE (N6, L4): Try again clears the kept size");
@@ -1468,8 +1474,36 @@ async function dedupeClaims() {
 			await makeWith(lib, w).submitNow({}, LOAD);
 			eq([say(w.claim()), w.claim().stage], ["needs_attention SUBMIT_FAILED", "pdf_uploading"], "§17 (fixture) Submit now's PDF fails after the lock");
 			eq(stopRows(w).map((r) => r.details), [`SUBMIT_FAILED: ${AFTER_WORDS}`], "§17 FAILS ON THE OLD CODE (L7): a stop after the lock gets its row too (the daily notice skips a locked mark)");
-			eq(w.notices.map((n) => [n.title, n.body]), [[AFTER_LOCK, `Load ${LOAD}: invoice 11122026-1's PDF went up to Triumph's server, then it stopped before the CSV that asks Triumph to process it. The mark stays locked. ${OPEN_IT}`]],
-				"§17 FAILS ON THE OLD CODE (N2): ...and its notice's title follows the lock");
+			eq(w.notices.map((n) => [n.title, n.body]), [[AFTER_LOCK,
+				`Load ${LOAD}: invoice 11122026-1's PDF may be on Triumph's server, but it stopped before the CSV that asks Triumph to process it (the upload to Triumph kept failing), so nothing was triggered there. The mark stays locked.`]],
+			"§17 FAILS ON THE OLD CODE (N2, L1, L2): ...its notice's title follows the lock; its body says the PDF may be on Triumph's server (its put failed here), and why");
+		});
+
+		// M1 (review 1): a stop once the CSV started, at csv_uploaded: both files are on Triumph's server and
+		// the record step throws (a full or busy database) on the claim's fourth counted try.
+		await step("§17 a stop after the CSV started", async () => {
+			const w = world({ env: { ...LIVE, ...STOP_ON } });
+			w.queue("queued", { attempts: 3, reason_code: "RETRY_LATER" });
+			const real = w.db.transaction.bind(w.db);
+			w.putError = (name) => {
+				if (name.endsWith(".csv")) {
+					w.db.transaction = () => {
+						w.db.transaction = real;
+						throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+					};
+				}
+				return null;
+			};
+			await makeWith(lib, w).tick();
+			const c = w.claim();
+			eq([say(c), c.stage, c.attempts, w.spies.puts.map((n) => n.slice(-4))], ["needs_attention SUBMIT_FAILED", "csv_uploaded", 4, [".pdf", ".csv"]],
+				"§17 (fixture) both files went up, then the record step threw on the fourth counted try");
+			eq(stopRows(w).map((r) => r.details), [`SUBMIT_FAILED: ${CSV_WORDS}`], "§17 FAILS ON THE OLD CODE (M1, N7): its row says it may have reached Triumph, never that nothing went");
+			eq(stopNotices(w).map((n) => [n.title, n.body]), [[MAY_HAVE_REACHED,
+				`Load ${LOAD}: invoice 11122026-1's files may have reached Triumph's server: it stopped after the CSV that asks Triumph to process it began. Check Triumph's side for it. The app won't send it again, and the mark stays locked.`]],
+			"§17 FAILS ON THE OLD CODE (M1, N7): its notice says it may have reached Triumph, to check Triumph's side, and that the app won't send it again");
+			ok(!/not sent/i.test(stopNotices(w).map((n) => n.title).join(" ")), "§17 FAILS ON THE OLD CODE (M1): no title says \"not sent\"");
+			eq(ledger.retryClaim(w.db, { key: KEY, nowIso: T0 }).code, "MAYBE_SUBMITTED", "§17 ...and Try again refuses it, as the notice says");
 		});
 
 		await step("§17 a path that writes its own row writes no second", async () => {
@@ -1595,9 +1629,17 @@ async function dedupeClaims() {
 		["the row and notice whatever the switch says", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && state === \"needs_attention\" && !ownRow) recordStop("],
 		["a second row beside a path's own", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && stopRecordOn && state === \"needs_attention\") recordStop("],
 		["a row for a wait, Waiting or a give-up", "job", "if (n && stopRecordOn && state === \"needs_attention\" && !ownRow) recordStop(", "if (n && stopRecordOn && !ownRow) recordStop("],
-		["the notice's title blind to the lock (N2)", "job", "const afterLock = UPLOAD_STAGES.has(c.stage);\n\t\tconst size = ledger.refusedSize(c);", "const afterLock = false;\n\t\tconst size = ledger.refusedSize(c);"],
+		["the notice's title blind to the lock (N2)", "job", "\t\tif (UPLOAD_STAGES.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\"", "\t\tif (false) {\n\t\t\taudit(\"triumph_stopped\""],
 		["the size left out of the row", "job", "${size ? `; ${size.bytes} bytes, over the limit of ${size.limit}` : \"\"}`);", "`);"],
-		["the broker's invoice left out of a button claim's notice", "job", "${ledger.isChrInvoice(c) ? \" The broker's invoice already went out as usual.\" : \"\"}", ""],
+		["the broker's invoice left out of a button claim's notice", "job", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \"\"}", "${chr ? \" Open the load to see what to do.\" : \"\"}"],
+		// Review 1's fix round: M1 (the stages), L1 (the PDF words), L2 (a load with no Triumph line).
+		["before the lock read as anything outside the lock (M1)", "job", "if (ledger.BEFORE_UPLOAD.has(c.stage)) {", "if (!UPLOAD_STAGES.has(c.stage)) {"],
+		["the CSV's stages read as after the lock (M1)", "job", "\t\tif (UPLOAD_STAGES.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\"", "\t\tif (!ledger.BEFORE_UPLOAD.has(c.stage)) {\n\t\t\taudit(\"triumph_stopped\""],
+		["a CSV stop's title says not sent (M1)", "job", "notify(\"Triumph: a load may have reached Triumph. Check Triumph's side; the app won't send it again.\",", "notify(\"Triumph: a load was not sent\","],
+		["the PDF said to have gone up (L1)", "job", "'s PDF may be on Triumph's server, but it stopped before the CSV", "'s PDF went up to Triumph's server, then it stopped before the CSV"],
+		["Open the load on a load with no Triumph line (L2)", "job", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \"\"}", "${chr ? \" The broker's invoice already went out as usual. Open the load to see what to do.\" : \" Open the load to see what to do.\"}"],
+		["the stop's words left out before the lock (L2)", "job", ": factoring.stopWords(code);", ": \"\";"],
+		["the stop's words left out after the lock (L2)", "job", " (${factoring.stopWords(code)}), so nothing", ", so nothing"],
 		["the column made whatever the switch says", "job", "if (mode !== \"off\" && stopRecordOn) ledger.ensureRefusedSize(db);", "if (mode !== \"off\") ledger.ensureRefusedSize(db);"],
 		["the size kept whatever the switch says", "job", "if (!stopRecordOn || !stop.size) return {};", "if (!stop.size) return {};"],
 		["the size not kept by the stop", "job", "return release(c, owner, stop.state, stop.code, keptSize(stop));", "return release(c, owner, stop.state, stop.code);"],

@@ -103,8 +103,10 @@ const UPLOAD_STAGES = Object.freeze(['pdf_uploading', 'pdf_uploaded'])
 const AFTER_CSV_STAGES = Object.freeze(['csv_uploading', 'csv_uploaded', 'recorded'])
 const BUILT_STAGES = Object.freeze(['built', ...UPLOAD_STAGES, ...AFTER_CSV_STAGES])
 
-// Why a button claim stopped, in words that follow "Not sent to Triumph: ".
-const STOP_WORDS = Object.freeze({
+// Why a button claim stopped, in words that follow "Not sent to Triumph: ". The server's notice for a
+// stop uses its own copy (lib/factoring-store.js STOP_WORDS), pinned equal by
+// scripts/test-factoring-status-client.mjs.
+export const STOP_WORDS = Object.freeze({
   ADVANCE_ON_RATECON: "the rate con shows an advance, or the app couldn't rule one out",
   RATECON_UNREAD: "the app couldn't read the rate con well enough to rule out an advance",
   DVIR_LINES: 'the rate con shows a DVIR deduction, or was re-issued for less',
