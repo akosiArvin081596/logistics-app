@@ -5,10 +5,13 @@
 // build), keeps the parts the job hands the batch builder (lib/triumph-batch.js buildBatch(), whose own answer
 // goes back to the job unchanged), and measures them with the builder itself: the batch as built today with
 // the photo re-compress off, then the steps with it on, whatever the switch says. So the fit is judged on the
-// load's measured batch, never on an estimate.
-// It prints counts and codes only: bytes, images, the step and the practice run's own verdict line, never a
-// load number, a name, an amount, a file name or a settings value. It writes and keeps nothing beyond what
-// the practice run itself keeps (nothing).
+// load's measured batch, never on an estimate. A load already pressed, whose own Process with Triumph claim
+// stopped at BATCH_TOO_LARGE, is measured with that claim's own invoice, as its Try again would build it; a
+// load the press's checks refuse otherwise is not measured, and the line says so with their code.
+// It prints counts and codes only: bytes, images, the step, the limit the build was held to (when one is
+// set, a lowered TRIUMPH_BATCH_MAX_BYTES from the settings file) and the practice run's own verdict line;
+// never a load number, a name, an amount, a file name or any other settings value. It writes and keeps
+// nothing beyond what the practice run itself keeps (nothing).
 //
 // Usage: the practice run's own arguments, run the same way (on the server, from the app directory, with the
 // Node pm2 runs it with):
@@ -31,6 +34,7 @@ const recompressLib = require(path.join(ROOT, "lib", "triumph-batch-recompress.j
 
 const HEADER = "Part A, way 1's look: read-only; nothing is marked, armed, numbered, uploaded or kept.";
 const BASE = "the base: the job's own build in the practice run, measured by the batch builder itself: the batch as built today with the switch off, then each step merged again with it on";
+const CLAIM_SOURCE = "the source: the load's own Process with Triumph claim, stopped at BATCH_TOO_LARGE: its build rehearsed with that claim's own invoice, as its Try again would build it, read-only";
 const word = (v) => (/^[A-Z][A-Z0-9_]{0,39}$/.test(String(v)) ? String(v) : "OTHER");
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
@@ -73,7 +77,10 @@ function stepsLine(on, before, limit) {
 	if (on.floorReached === true) {
 		const s = summed(on.recompressed);
 		const floor = recompressLib.STEPS[recompressLib.STEPS.length - 1];
-		return `re-compressed: stops at the floor (quality ${floor}): ${before} → ${after} bytes, over the limit by ${after - limit} bytes; ${tail(s)}`;
+		if (!s.images) return `re-compressed: stops at the floor (quality ${floor}): no copy was smaller at any step; the batch stays at ${before} bytes, over the limit by ${before - limit} bytes`;
+		// The record is the last step that kept a copy, which a failing child can leave above the floor.
+		const kept = s.quality === floor ? "" : ` (copies last kept at quality ${s.quality})`;
+		return `re-compressed: stops at the floor (quality ${floor}): ${before} → ${after} bytes, over the limit by ${after - limit} bytes; ${tail(s)}${kept}`;
 	}
 	const why = {
 		UNREACHABLE: "re-compressed: not tried: the batch is over by at least its photos' bytes, so no step can fit",
@@ -93,7 +100,8 @@ async function run({ argv = [], deps = {} } = {}) {
 	};
 	let practice;
 	try {
-		practice = await rehearsal.run({ argv, deps });
+		// A load already pressed is measured only when its own claim stopped at BATCH_TOO_LARGE.
+		practice = await rehearsal.run({ argv, deps: { ...deps, stoppedClaim: true } });
 	} finally {
 		batchLib.buildBatch = real;
 	}
@@ -102,9 +110,11 @@ async function run({ argv = [], deps = {} } = {}) {
 	// A refusal's own words can name a path, so only the fact is said.
 	if (/^REFUSED:/.test(last)) return { code: 2, lines: [HEADER, `the practice run: refused (code ${Number(practice.code)})`, "not measured: the practice run refused the run"] };
 	const lines = [HEADER, `the practice run: ${last} (code ${Number(practice.code)})`];
+	if (practice.fromClaim === true) lines.push(CLAIM_SOURCE);
 	if (!handed) {
+		const pressed = /^the press's checks: would refuse it \(([A-Z][A-Z0-9_]{0,39})\)$/.exec(last);
 		const m = /\(([A-Z][A-Z0-9_]{0,39})\)$/.exec(last);
-		lines.push(`not measured: the build stopped before the batch was put together (${m ? m[1] : "no code"})`);
+		lines.push(pressed ? `not measured: the press's checks refused it (${pressed[1]})` : `not measured: the build stopped before the batch was put together (${m ? m[1] : "no code"})`);
 		return { code: 2, lines };
 	}
 	const a = { ...handed, recompressor: null };
@@ -127,7 +137,7 @@ async function run({ argv = [], deps = {} } = {}) {
 	return { code: 0, lines };
 }
 
-module.exports = { run, summed };
+module.exports = { run, summed, stepsLine };
 
 if (require.main === module) {
 	run({ argv: process.argv.slice(2) })

@@ -27,10 +27,12 @@
 //   §11 way 1 (TRIUMPH_BATCH_IMAGE_RECOMPRESS_ENABLED): on, a batch over the limit re-compresses
 //      the whitelisted JPEG photos on its BOL and POD pages at the same pixel size, 70, 60, then 50,
 //      and takes the first step that fits, with its record; at the floor it stops at
-//      BATCH_TOO_LARGE with the floor's record; every other image, part and page goes byte for
-//      byte; a copy that isn't smaller, a child error or a child past its deadline leaves its
-//      image; the skip rule, the 40-photo cap and the 5-minute budget stop it as today; off, or
-//      under the limit, the batch is byte for byte the base's (221ff323)
+//      BATCH_TOO_LARGE with the record of the last step that kept a copy; every other image,
+//      part and page goes byte for byte (an Adobe segment counts wherever it sits); a copy that
+//      isn't smaller, fails the parent's check, or comes from a child that errs or passes its
+//      deadline leaves its image; the 25 MP bound; the skip rule, the 40-photo cap and the
+//      5-minute budget stop it as today; off, or under the limit, the batch is byte for byte the
+//      base's (221ff323)
 //
 // The invoice page goes through a stand-in renderer that writes a PDF of the page's
 // words the way Chromium writes one (scripts/lib/made-up-pdf.js): no browser here. Made-up
@@ -1052,7 +1054,9 @@ async function s11() {
 		["EXIF orientation 6", photo(blank(66, { orientation: 6 })), "the orientation rule skipped (here the size check after decoding leaves it too)"],
 		["EXIF orientation 3", photo(blank(67, { orientation: 3 })), "the orientation rule skipped: a 180-degree turn keeps the size"],
 		["an Adobe transform-0 segment before the frame header", photo(blank(68, { adobe: { transform: 0, at: "before" } })), "the Adobe rule skipped"],
-		["an Adobe transform-0 segment after the frame header", photo(blank(69, { adobe: { transform: 0, at: "after" } })), "a header walk that stops at the frame (N2)"],
+		["an Adobe transform-0 segment after the frame header", photo(blank(69, { adobe: { transform: 0, at: "after" } })), "the Adobe search stops at the frame header (N2)"],
+		["an Adobe transform-0 segment after the scan", photo(blank(76, { adobe: { transform: 0, at: "afterScan" } })), "the Adobe search stops at the first scan (L3)"],
+		["an Adobe segment too short to hold its transform, after the scan", photo(blank(77, { adobe: { transform: null, at: "afterScan" } })), "a too-short segment read as no segment (L3)"],
 		["R, G, B component IDs", photo(blank(70, { ids: [0x52, 0x47, 0x42] })), "the component IDs not read"],
 		["a progressive JPEG", photo(blank(71, { progressive: true })), "a frame other than baseline taken"],
 		["an ICCBased /N 1 JPEG", photo(blank(72, { components: 1 }), { colorSpace: ["ICCBased", { n: 1 }] }), "ICCBased /N 1 taken (L5)"],
@@ -1073,6 +1077,21 @@ async function s11() {
 		}
 	}
 
+	// The walk to the end marker over a scan's data (L3): a stuffed zero, a restart and a fill byte are
+	// data, and the Adobe segment after them is found; the walk to the first scan stops before it.
+	const seg = (marker, body) => Buffer.concat([Buffer.from([0xff, marker, (body.length + 2) >> 8, (body.length + 2) & 0xff]), body]);
+	const walked = Buffer.concat([
+		Buffer.from([0xff, 0xd8]),
+		seg(0xc0, Buffer.from([8, 0, 16, 0, 16, 1, 1, 0x11, 0])),
+		seg(0xda, Buffer.from([1, 1, 0, 0, 63, 0])),
+		Buffer.from([0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56, 0xff, 0xff, 0xd1, 0x78]),
+		seg(0xee, Buffer.concat([Buffer.from("Adobe", "latin1"), Buffer.from([0, 100, 0, 0, 0, 0, 0])])),
+		Buffer.from([0xff, 0xd9]),
+	]);
+	const walk = recompressLib && typeof recompressLib.jpegWalk === "function" ? recompressLib.jpegWalk : () => null;
+	eq([(walk(walked, { toEnd: true }) || {}).adobe, (walk(walked) || {}).adobe], [[0], []],
+		"§11 FAILS ON THE OLD CODE (L3): the walk to the end marker passes a scan's stuffed zero, restart and fill byte, and finds the Adobe segment after them; the walk to the first scan stops before it (mutant: any of the three read as a marker)");
+
 	// A copy that isn't smaller is not kept (L2).
 	const LOWQ = jpegs.jpeg({ quality: 20, smooth: true, seed: 5 });
 	const lowq = [await row(1, [page([photo(LOWQ), photo(PHOTO_A)])])];
@@ -1088,6 +1107,7 @@ async function s11() {
 		"§11 FAILS ON THE OLD CODE: a child past its deadline leaves its image as it was, and the batch still builds when it fits",
 		"§11 FAILS ON THE OLD CODE: past the batch's 5-minute budget the steps stop, and the batch stops at BATCH_TOO_LARGE as today (N8; mutant: the budget ignored)",
 		"§11 FAILS ON THE OLD CODE: a child's copy that fails the parent's check (not the dictionary's size) is never used, so the batch reaches the floor untouched (N5; mutant: the parent's check skipped)",
+		"§11 FAILS ON THE OLD CODE: a child that fails at the floor leaves the record of the last step that kept copies, 60, with its sizes (L1; mutant: a step that keeps no copy resets the record)",
 	];
 	if (!recompressLib) {
 		for (const label of CHILD_CASES) failures.push(`${label}\n      lib/triumph-batch-recompress.js is missing: no steps, no child, no budget`);
@@ -1127,6 +1147,35 @@ async function s11() {
 		const odd = recompressLib.create({ encode: async () => ({ jpeg: wrongSize }) });
 		const o = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: odd });
 		eq([o.ok, o.code, o.floorReached, (o.recompressed || []).length, o.pdfBytes], [false, "BATCH_TOO_LARGE", true, 0, base.pdf.length], CHILD_CASES[3]);
+		const at50Fails = recompressLib.create({ encode: (img, q) => (q === 50 ? Promise.resolve({ error: "a made-up child error at the floor" }) : real(img, q)) });
+		const f50 = await build({ ...ON, documents: two, maxBytes: floorLimit, recompressor: at50Fails });
+		eq([f50.code, f50.floorReached, (f50.recompressed || []).map((r) => [r.kind, r.quality, r.images, r.left]), f50.pdfBytes < base.pdf.length], ["BATCH_TOO_LARGE", true, [["pod", 60, 2, 0]], true], CHILD_CASES[4]);
+		// These pass on the code they were added to by design (L5: the cases were missing), each naming
+		// its mutant. A child's copy of the right size is still refused when it isn't one baseline frame of
+		// three components ending in an end marker; and the 25 MP bound is read before any decode.
+		const noEnd = jpegs.jpeg({ quality: 50, seed: 33 });
+		for (const [label, bytes, mutant] of [
+			["progressive", jpegs.jpeg({ progressive: true, quality: 50, seed: 31 }), "the parent's check takes any frame"],
+			["of one component", jpegs.jpeg({ components: 1, quality: 50, seed: 32 }), "the parent's check takes any component count"],
+			["with no end marker", noEnd.subarray(0, noEnd.length - 2), "the parent's check reads no end marker"],
+		]) {
+			ok(bytes.length < PHOTO_A.length && jpegs.frameOf(bytes) && jpegs.frameOf(bytes).width === W && jpegs.frameOf(bytes).height === H, `§11 (fixture) a stand-in copy ${label}: the dictionary's size, and smaller`);
+			const stand = recompressLib.create({ encode: async () => ({ jpeg: Buffer.from(bytes) }) });
+			const s5 = await build({ ...ON, documents: two, maxBytes: T0 - 1000, recompressor: stand });
+			eq([s5.ok, s5.code, s5.floorReached, (s5.recompressed || []).length], [false, "BATCH_TOO_LARGE", true, 0], `§11 a child's copy at the right size but ${label} is refused by the parent's check (L5; mutant: ${mutant})`);
+		}
+		const { PDFDocument: Doc, PDFRawStream: Raw } = require(path.join(ROOT, "node_modules", "pdf-lib"));
+		const holder = await Doc.create();
+		// A small JPEG whose frame header says n x n, under a dictionary of the same size: never decoded here.
+		const claimedSize = (n) => {
+			const b = Buffer.from(jpegs.jpeg({ width: 16, height: 16, quality: 90, blank: true, seed: 90 }));
+			const at = b.indexOf(Buffer.from([0xff, 0xc0]));
+			b.writeUInt16BE(n, at + 5);
+			b.writeUInt16BE(n, at + 7);
+			return Raw.of(holder.context.obj({ Type: "XObject", Subtype: "Image", Width: n, Height: n, BitsPerComponent: 8, ColorSpace: "DeviceRGB", Filter: "DCTDecode" }), b);
+		};
+		eq([recompressLib.imageVerdict(claimedSize(5001)).take, recompressLib.imageVerdict(claimedSize(5000)).take], [false, true],
+			"§11 the 25 MP bound, read before any decode: 5001 x 5001 is left, 5000 x 5000 (25 MP) is taken (L5; mutant: the bound skipped, or 25 MP itself left)");
 	}
 	eq(lib.STEPS && [lib.STEPS, lib.MAX_IMAGES, lib.MIN_PIXELS, lib.MAX_PIXELS, lib.IMAGE_TIMEOUT_MS, lib.BATCH_BUDGET_MS], [[70, 60, 50], 40, 500000, 25000000, 20000, 300000],
 		"§11 FAILS ON THE OLD CODE: the steps 70, 60 and 50 in one constant (P1), at most 40 photos a batch, 0.5 to 25 MP, 20 s an image and 5 minutes a batch (N8)");

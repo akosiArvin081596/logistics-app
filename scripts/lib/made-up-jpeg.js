@@ -150,7 +150,8 @@ function segment(marker, payload) {
 	head.writeUInt16BE(payload.length + 2, 2);
 	return Buffer.concat([head, payload]);
 }
-const adobeSegment = (transform) => segment(0xee, Buffer.concat([Buffer.from("Adobe", "latin1"), Buffer.from([0, 100, 0, 0, 0, 0, transform])]));
+// A transform of null writes the segment one byte short, with no room for one.
+const adobeSegment = (transform) => segment(0xee, Buffer.concat([Buffer.from("Adobe", "latin1"), Buffer.from(transform === null ? [0, 100, 0, 0, 0, 0] : [0, 100, 0, 0, 0, 0, transform])]));
 // An EXIF block holding one field: the orientation.
 function exifSegment(orientation) {
 	const t = Buffer.alloc(26);
@@ -222,9 +223,11 @@ function photoPixels(width, height, { seed = 1, smooth = false, blank = false } 
 }
 
 // A JPEG of made-up pixels. components: 3 (YCbCr from RGB), 1 (grey) or 4 (CMYK, never decoded
-// here). `ids`: the frame's component IDs (and the scans'); `adobe`: { transform, at: "before" |
-// "after" } the frame header; `orientation`: an EXIF block right after SOI; `progressive`: a DC scan
-// then one AC scan per component (spectral selection only). Every component is sampled 1x1.
+// here). `ids`: the frame's component IDs (and the scans'); `adobe`: { transform (null: a segment
+// too short to hold one), at: "before" | "after" the frame header, or "afterScan": after the last
+// scan, before the end marker };
+// `orientation`: an EXIF block right after SOI; `progressive`: a DC scan then one AC scan per
+// component (spectral selection only). Every component is sampled 1x1.
 function jpeg({ width = 820, height = 620, quality = 95, components = 3, progressive = false, ids = null, adobe = null, orientation = null, seed = 1, smooth = false, blank = false } = {}) {
 	const px = photoPixels(width, height, { seed, smooth, blank });
 	let planes;
@@ -287,11 +290,13 @@ function jpeg({ width = 820, height = 620, quality = 95, components = 3, progres
 	const front = [];
 	if (orientation) front.push(exifSegment(orientation));
 	else if (!adobe && components !== 4) front.push(jfif);
-	if (adobe && adobe.at !== "after") front.push(adobeSegment(adobe.transform));
+	if (adobe && adobe.at !== "after" && adobe.at !== "afterScan") front.push(adobeSegment(adobe.transform));
 	return Buffer.concat([
 		Buffer.from([0xff, 0xd8]), ...front, segment(0xdb, dqt), segment(progressive ? 0xc2 : 0xc0, sof),
 		...(adobe && adobe.at === "after" ? [adobeSegment(adobe.transform)] : []),
-		segment(0xc4, dht), ...scans, Buffer.from([0xff, 0xd9]),
+		segment(0xc4, dht), ...scans,
+		...(adobe && adobe.at === "afterScan" ? [adobeSegment(adobe.transform)] : []),
+		Buffer.from([0xff, 0xd9]),
 	]);
 }
 

@@ -8,7 +8,9 @@
 // nothing, sends no notice and keeps no file. It prints verdicts and matches only, never a value.
 // The job's build reads the batch's own three settings from the settings file, as the live press
 // reads them: with the dedupe on the run counts the identical copies it left out, and with the photo
-// re-compress on it prints the step and the bytes, or that the batch stopped at the floor.
+// re-compress on it prints the step and the bytes, that the batch stopped at the floor, or why the
+// steps didn't run. Asked by Part A alone (deps.stoppedClaim), a load already pressed whose own claim
+// stopped at BATCH_TOO_LARGE is rehearsed with that claim's own invoice, as its Try again builds.
 //
 // The engine and the job read through this checkout's own server.js code, lifted at run time
 // (scripts/lib/server-lift.js) onto the read-only handle, as scripts/payout-rules-dry-run.js runs
@@ -178,8 +180,26 @@ function readOnlyDrive({ keyFile }) {
 
 const yesNo = (v) => (v === true ? "yes" : v === false ? "no" : "not read");
 
+// The load's own Process with Triumph claim, read-only, when it stopped at BATCH_TOO_LARGE on a load
+// still marked and not locked: the reuse its press armed it with (the broker invoice's number, date,
+// draft row and total), with which its Try again builds. null for any other claim, or none.
+function stoppedClaimReuse(db, key) {
+	const ledger = require(path.join(ROOT, "lib", "triumph-ledger.js"));
+	let claim = null;
+	let marker = "";
+	try {
+		claim = ledger.hasTable(db, ledger.CLAIMS) ? ledger.getClaim(db, key) : null;
+		marker = ledger.markerState(db, key).state;
+	} catch {
+		return null;
+	}
+	if (!claim || marker !== "factored" || claim.number_source !== ledger.CHR_INVOICE || claim.state !== "needs_attention" || claim.reason_code !== "BATCH_TOO_LARGE") return null;
+	if (!claim.invoice_id || !claim.invoice_date || !(Number(claim.reused_draft_id) > 0) || !claim.expected_total) return null;
+	return { invoiceId: String(claim.invoice_id), invoiceDate: String(claim.invoice_date), draftRowId: Number(claim.reused_draft_id), total: String(claim.expected_total) };
+}
+
 // The run itself, for the command line and the runner. Answers { code, lines }: lines to print,
-// verdicts only.
+// verdicts only; with `fromClaim` when it ran on a stopped claim's own invoice (`deps.stoppedClaim`).
 async function run({ argv = [], deps = {} } = {}) {
 	const args = ledgerWorld.parseArgs(argv);
 	if (!args.db || args.db === true) return { code: 2, lines: ["REFUSED: --db is required"] };
@@ -231,7 +251,12 @@ async function run({ argv = [], deps = {} } = {}) {
 		const loadId = String(row[autoRules.jobColumns(parsed.headers).loadIdCol] || args.load).trim();
 		const press = processLib.processWithTriumph(db, { key, loadId, row, headers: parsed.headers, closedMonths, nowIso, dryRun: true, audit: neverWrites("audit") });
 		lines.push(`the press's checks: ${press.ok ? "would take it" : `would refuse it (${press.code})`}`);
-		if (!press.ok) return { code: 2, lines };
+		// Only when its caller asks (Part A, scripts/triumph-batch-recompress-look.js): a load already
+		// pressed whose own claim stopped at BATCH_TOO_LARGE is rehearsed as its Try again would build it.
+		const claimReuse = !press.ok && press.code === "TRIUMPH_ALREADY" && deps.stoppedClaim === true ? stoppedClaimReuse(db, key) : null;
+		if (!press.ok && !claimReuse) return { code: 2, lines };
+		// Part A prints where the build's invoice came from, from this.
+		const asked = claimReuse ? { fromClaim: true } : {};
 
 		const settings = routesLib.readSettings(env);
 		const noaLines = settings.noaLines || [];
@@ -260,14 +285,15 @@ async function run({ argv = [], deps = {} } = {}) {
 				savedInvoiceEvidence: () => false, logAudit: neverWrites("logAudit"), notify: neverWrites("notify"), now: deps.now || (() => new Date()),
 				log: { info() {}, warn() {}, error() {} },
 			});
-			const r = await job.rehearse(loadId, press.reuse);
+			const r = await job.rehearse(loadId, claimReuse || press.reuse);
 			lines.push(`the rate con: whole read: ${yesNo(r.wholeRead)}`);
 			// A count only where the dedupe ran: the switch on, and the batch built or stopped after it.
 			const sentOnce = Number.isInteger(r.copiesLeftOut) ? `identical documents sent once: ${r.copiesLeftOut}` : "";
 			if (!r.ok) {
-				lines.push(`the build: would stop at ${r.step} (${r.code || r.state})${sentOnce ? `; ${sentOnce}` : ""}${r.floorReached === true ? "; page images: stopped at the floor" : ""}`);
+				const photos = r.floorReached === true ? "; page images: stopped at the floor" : r.recompressSkipped ? `; page images: not re-compressed (${r.recompressSkipped})` : "";
+				lines.push(`the build: would stop at ${r.step} (${r.code || r.state})${sentOnce ? `; ${sentOnce}` : ""}${photos}`);
 				if (Array.isArray(r.changed) && r.changed.length) lines.push(`what differs from the broker's invoice: ${r.changed.join(", ")}`);
-				return { code: 2, lines };
+				return { code: 2, lines, ...asked };
 			}
 			lines.push(`the invoice's number matches the broker's: ${yesNo(r.numberMatches)}`);
 			lines.push(`its date matches: ${yesNo(r.dateMatches)}`);
@@ -278,7 +304,7 @@ async function run({ argv = [], deps = {} } = {}) {
 			if (r.recompressed) lines.push(`page images re-compressed: ${r.recompressed.images} at quality ${r.recompressed.quality} (${r.recompressed.bytesBefore} → ${r.recompressed.bytesAfter} bytes)`);
 			lines.push(`writes attempted: ${writes.logAudit + writes.rememberRateConMatch}`);
 			lines.push("verdict: it would go");
-			return { code: 0, lines };
+			return { code: 0, lines, ...asked };
 		} finally {
 			fs.rmSync(scratch, { recursive: true, force: true });
 		}
