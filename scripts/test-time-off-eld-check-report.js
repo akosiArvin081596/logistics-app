@@ -11,13 +11,17 @@
 //      ones, engine-hours advances), the unlinked drivers, the fingerprint; no
 //      initials; a copy from before the request columns is refused
 //   §3 --shadow: per-verdict counts, "Confirmed (no ELD data)" on its own line,
-//      the S2 measures (0 mi odometer stretches, return days, the 1 h engine
-//      rule's share), S4 and S4b with the loads read from a saved values.get,
-//      and "not checked" without it
+//      the dark stretches (0 mi odometer steps, return days, the 1 h engine
+//      rule's share, the odometer step by end fixes), the no-load days with
+//      fixes (those at 0.1-5 mi with and without moving fixes) and the no-load
+//      dark-spell days (no-ELD-data days left out of the share) with the loads
+//      read from a saved values.get, and "not checked" without it
 //   §4 --names: initials and units only, never a full name
 //   §5 read-only: the database file's bytes and its folder unchanged
 //   §6 the lift reaches no writer: the run's write, the purge, the audit and
 //      the notices are denied
+//   §7 the dark-stretch bands at their edges: the odometer step (0.0, 0.1,
+//      5.0, 5.1 mi, a step back, none read) and the end fixes' four classes
 // Run: node scripts/test-time-off-eld-check-report.js
 
 "use strict";
@@ -76,14 +80,23 @@ function seed(db) {
 	assign.run(22, "Soren King");
 	const tel = db.prepare(`INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, engine_hours, location_date_ms, dropped_reason, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, '', 'routemate')`);
-	const pings = (vid, fromMs, toMs, o) => { for (let ms = fromMs; ms <= toMs; ms += 30 * MIN) tel.run(vid, o.lat ?? YARD.lat, YARD.lng, o.speed ?? 0, 100000, o.eh, ms); };
-	// T1: parked to Oct 8 18:00; dark until Oct 11 07:00, back 1.2 km on and moving
-	// (0 mi odometer step); parked; dark Oct 12 20:00 - Oct 13 06:00 with the
-	// engine 1.5 h on; parked to the run.
-	pings("vid-t1", at("2026-10-01"), at("2026-10-08", 18), { eh: 5000 });
-	tel.run("vid-t1", north(1200), YARD.lng, 12, 100000, 5000.2, at("2026-10-11", 7));
-	pings("vid-t1", at("2026-10-11", 7, 30), at("2026-10-12", 20), { lat: north(1200), eh: 5000.2 });
-	pings("vid-t1", at("2026-10-13", 6), at("2026-10-15", 10, 30), { lat: north(1200), eh: 5001.7 });
+	const pings = (vid, fromMs, toMs, o) => { for (let ms = fromMs; ms <= toMs; ms += 30 * MIN) tel.run(vid, o.lat ?? YARD.lat, YARD.lng, o.speed ?? 0, o.odo ?? 100000, o.eh, ms); };
+	// T1: parked, but for yard moves with no moving fix (2 mi on Oct 2, 1 mi on
+	// Oct 4) and one with three (1 mi on Oct 3); dark Oct 8 18:00 to Oct 11
+	// 07:00, back 1.2 km on and moving (0 mi odometer step); parked; dark Oct 12
+	// 20:00 to Oct 13 06:00 with the engine 1.5 h on; parked; leaving at noon on
+	// Oct 13 (moving), dark to Oct 15 06:00, back where it was with 3 mi more.
+	pings("vid-t1", at("2026-10-01"), at("2026-10-02", 10), { eh: 5000 });
+	pings("vid-t1", at("2026-10-02", 10, 30), at("2026-10-03", 9), { eh: 5000, odo: 100002 });
+	pings("vid-t1", at("2026-10-03", 9, 30), at("2026-10-03", 9, 30), { eh: 5000, odo: 100002, speed: 12 });
+	pings("vid-t1", at("2026-10-03", 10), at("2026-10-03", 10, 30), { eh: 5000, odo: 100003, speed: 12 });
+	pings("vid-t1", at("2026-10-03", 11), at("2026-10-04", 12), { eh: 5000, odo: 100003 });
+	pings("vid-t1", at("2026-10-04", 12, 30), at("2026-10-08", 18), { eh: 5000, odo: 100004 });
+	tel.run("vid-t1", north(1200), YARD.lng, 12, 100004, 5000.2, at("2026-10-11", 7));
+	pings("vid-t1", at("2026-10-11", 7, 30), at("2026-10-12", 20), { lat: north(1200), eh: 5000.2, odo: 100004 });
+	pings("vid-t1", at("2026-10-13", 6), at("2026-10-13", 11, 30), { lat: north(1200), eh: 5001.7, odo: 100004 });
+	tel.run("vid-t1", north(1200), YARD.lng, 12, 100004, 5001.7, at("2026-10-13", 12));
+	pings("vid-t1", at("2026-10-15", 6), at("2026-10-15", 10, 30), { lat: north(1200), eh: 5001.8, odo: 100007 });
 	// T3: engine hours 1,000 -> 20,000 in a normal step on Sep 20 (a closed month),
 	// then down to 900 on Oct 2.
 	pings("vid-t3", at("2026-09-20", 6), at("2026-09-20", 8), { eh: 1000 });
@@ -179,21 +192,34 @@ section("§3 the shadow (S2, S4, S4b)");
 	eq("§3.0 exit 0", [r.status, r.stderr.slice(0, 300)], [0, ""]);
 	const s = (r.json && r.json.shadow) || {};
 	eq("§3.1 Oct 1-14: Hollis and Soren held a truck, Tamsin none; 28 driver-days", [s.from, s.to, s.drivers, s.driversWithNoTruck, s.driverDays], ["2026-10-01", "2026-10-14", 2, 1, 28]);
-	eq("§3.2 by verdict, \"Confirmed (no ELD data)\" counted apart", s.byVerdict, {
-		"confirmed:parked": 9, "not_confirmed:app_activity": 1, "confirmed:dark_parked": 2, "no_data:engine_ran_while_dark": 2, "confirmed_no_eld_data:no_device": 14,
+	eq("§3.2 by verdict, \"Confirmed (no ELD data)\" counted apart; the yard moves of Oct 2, 3 and 4 and the 3 mi silence of Oct 13-14 read Not confirmed (no miles on a day off)", s.byVerdict, {
+		"confirmed:parked": 5, "not_confirmed:truck_moved": 3, "not_confirmed:app_activity": 1, "confirmed:dark_parked": 2, "no_data:engine_ran_while_dark": 1,
+		"not_confirmed:moved_while_dark": 2, "confirmed_no_eld_data:no_device": 14,
 	});
-	eq("§3.3 S2: dark stretches with a 0 mi odometer step (1.2 km, 0 km), one ending moving, the 1 h engine rule's days and share", s.s2,
-		{ zeroOdometerStretches: { count: 2, medianKm: 1.2, p90Km: 1.2, maxKm: 1.2, over1Km: 1, overFloor: 0 }, returnStretches: { count: 1, medianKm: 1.2, p90Km: 1.2, maxKm: 1.2, over1Km: 1, overFloor: 0 }, engineRanDays: 2, engineRanShare: 0.071 });
-	eq("§3.4 S4: his 11 no-load days with fixes, none Not confirmed", s.s4, { noLoadDaysWithFixes: 11, notConfirmed: 0 });
-	eq("§3.5 S4b: no-load dark-spell days, Confirmed (no ELD data) counted apart", s.s4b,
-		{ noLoadDarkDays: 16, closedMonthLeftOut: 0, confirmed: 2, confirmedNoEldData: 14, notConfirmed: 0, requested: 0, checking: 0, notConfirmedShare: 0 });
+	eq("§3.3 the dark stretches: those with a 0 mi odometer step (1.2 km, 0 km), one ending moving, the 1 h engine rule's days and share", [s.s2.zeroOdometerStretches, s.s2.returnStretches, s.s2.engineRanDays, s.s2.engineRanShare],
+		[{ count: 2, medianKm: 1.2, p90Km: 1.2, maxKm: 1.2, over1Km: 1, overFloor: 0 }, { count: 1, medianKm: 1.2, p90Km: 1.2, maxKm: 1.2, over1Km: 1, overFloor: 0 }, 1, 0.036]);
+	eq("§3.3b ...and the odometer step across each, by its end fixes: a return at 0 mi, leaving at 3 mi, both still at 0 mi", s.s2.silenceSteps, {
+		return: { zero: 1, upTo5: 0, over5: 0, other: 0 }, leaving: { zero: 0, upTo5: 1, over5: 0, other: 0 },
+		bothMoving: { zero: 0, upTo5: 0, over5: 0, other: 0 }, bothStill: { zero: 1, upTo5: 0, over5: 0, other: 0 },
+	});
+	eq("§3.4 his 10 no-load days with fixes, 4 Not confirmed; at 0.1-5 mi one with moving fixes (Oct 3) and two without (Oct 2 and 4)", s.s4,
+		{ noLoadDaysWithFixes: 10, notConfirmed: 4, upTo5Mi: { movingFixes: 1, noMovingFixes: 2 } });
+	eq("§3.5 no-load dark-spell days: the share not Confirmed leaves out the days with no ELD data (counted apart) as it leaves out closed months", s.s4b,
+		{ noLoadDarkDays: 3, closedMonthLeftOut: 0, noEldDataLeftOut: 14, confirmed: 2, notConfirmed: 1, unclear: 0, checking: 0, notConfirmedShare: 0.333 });
 	eq("§3.6 with the loads read, the first run explains Oct 6 by his load", r.json && r.json.firstRun.byVerdict, { "confirmed:parked": 2, "not_confirmed:app_activity": 1 });
 	const none = run([`--db=${DB_FILE}`, `--now=${NOW}`, "--json", "--shadow", "--days=14"]);
 	const n = (none.json && none.json.shadow) || {};
-	eq("§3.7 without a saved Job Tracking: the loads are not checked, so S4 and S4b count nothing", [n.loadsChecked, n.s4, n.s4b && n.s4b.noLoadDarkDays, Object.keys(n.bySplit || {}).every((k) => k.startsWith("loads_not_checked|"))],
-		[false, { noLoadDaysWithFixes: 0, notConfirmed: 0 }, 0, true]);
+	eq("§3.7 without a saved Job Tracking: the loads are not checked, so the no-load measures count nothing", [n.loadsChecked, n.s4, n.s4b && n.s4b.noLoadDarkDays, Object.keys(n.bySplit || {}).every((k) => k.startsWith("loads_not_checked|"))],
+		[false, { noLoadDaysWithFixes: 0, notConfirmed: 0, upTo5Mi: { movingFixes: 0, noMovingFixes: 0 } }, 0, true]);
 	const text = run([`--db=${DB_FILE}`, `--now=${NOW}`, "--shadow", "--days=14", `--values-json=${VALUES}`]).stdout;
 	ok("§3.8 the text names \"Confirmed (no ELD data)\" on its own line, and S2, S4 and S4b", /^ {3}"Confirmed \(no ELD data\)": 14 driver-day\(s\)\.$/m.test(text) && /S2: /.test(text) && /S4: /.test(text) && /S4b: /.test(text), text.slice(0, 600));
+	const has = (line) => text.split("\n").includes(line);
+	ok("§3.9 the text's new lines: the odometer step across dark stretches by their end fixes, the 0.1-5 mi days, the days left out",
+		has("   S2: the odometer step across each dark stretch by its end fixes (0 mi / 0.1-5 mi / over 5 mi / not read): return 1/0/0/0; leaving 0/1/0/0; both moving 0/0/0/0; both still 1/0/0/0.")
+		&& has("   S4: no-load days with fixes 10, of them Not confirmed 4; at 0.1-5 mi: 1 with moving fixes, 2 without.")
+		&& has("   S4b: no-load dark-spell days 3 (left out: closed-month 0, no ELD data 14): Confirmed 2; Not confirmed 1; Unclear 0; Checking 0. Share not Confirmed: 0.333."),
+		text.split("\n").filter((l) => /^ {3}S[24]/.test(l)).join(" | "));
+	ok("§3.10 ...the rule version is 2, and no line says \"Requested\" for an ELD result", /Rule version 2\./.test(text) && !/Requested/.test(text), text.slice(0, 300));
 }
 
 section("§4 --names");
@@ -220,6 +246,17 @@ section("§6 the lift reaches no writer");
 	ok("§6.2 ...and none of them is a root", !LIFT_ROOTS.some((n) => LIFT_DENIED.includes(n)));
 	const src = fs.readFileSync(REPORT, "utf8");
 	ok("§6.3 the report's own SQL only reads", !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE)\b\s/.test(src.replace(/\/\/.*$/gm, "")));
+}
+
+section("§7 the dark-stretch bands");
+{
+	const { endsOf, stepBand } = require("./time-off-eld-check-report");
+	const band = (mi) => (typeof stepBand === "function" ? stepBand(mi) : null);
+	eq("§7.1 the odometer step across a dark stretch: 0 and 0.04 (shown 0.0) are 0 mi; 0.1 and 5.0 up to 5 mi; 5.1 over; a step back or none read is other",
+		[0, 0.04, 0.1, 5, 5.1, -3, null].map(band), ["zero", "zero", "upTo5", "upTo5", "over5", "other", "other"]);
+	const ends = (beforeMoving, afterMoving) => (typeof endsOf === "function" ? endsOf({ beforeMoving, afterMoving }) : null);
+	eq("§7.2 ...and its end fixes: moving after only a return, before only leaving, both, neither",
+		[ends(false, true), ends(true, false), ends(true, true), ends(false, false)], ["return", "leaving", "bothMoving", "bothStill"]);
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

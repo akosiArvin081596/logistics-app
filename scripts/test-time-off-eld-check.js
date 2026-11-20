@@ -1,36 +1,47 @@
 #!/usr/bin/env node
-// The time-off ELD check's rule (lib/time-off-eld-check.js, rule version 1), run
+// The time-off ELD check's rule (lib/time-off-eld-check.js, rule version 2), run
 // pure on made-up data: driver "Hollis Renner" (another, "Soren King"), trucks
 // T1 (id 11, device vid-t1) and T2 (id 12, device vid-t2), a yard at 29.70,
 // -95.40 (Central time).
 //
-//   §1  the constants: a dark stretch is a silence over 30 minutes; movement
-//       across one is an odometer or position step beyond the 5 mi floor; the
-//       engine rule is 1 h; ELD_MAX_GAP_MS stays 6 h for the miles walk
+//   §1  the constants: a day off has no miles, one constant (0.0 mi as shown to
+//       0.1 mi) on a reporting day and across a silence; positions keep the
+//       5 mi floor; a dark stretch is a silence over 30 minutes; the engine rule
+//       is 1 h; ELD_MAX_GAP_MS stays 6 h for the miles walk
 //   §2  his holding and device intervals: a handover, a relief driver, a team
-//       truck, a device re-linked
-//   §3  the rule's rows: parked; 4.9 against 5.1 mi; the speed-only fallback; the
-//       days with no ELD data at all, each Confirmed as "Confirmed (no ELD
-//       data)" (no truck held, no device linked, a device that never reported,
-//       no reading before or after the silence; the owner's correction of
-//       2026-10-31); ELD data that conflicts stays Requested (the truck changed
-//       hands); a handover day; a relief driver; a team truck; a Central
-//       midnight; a DST day; the rule version
+//       truck, a device re-linked; whether he held a truck throughout
+//   §3  the rule's rows: parked; 1.0, 0.9 and 0.1 mi against 0.0 mi; the
+//       speed-only fallback; the days with no ELD data at all, each "Confirmed
+//       (no ELD data)" (no truck held, no device linked, a device that never
+//       reported, no reading before or after the silence); ELD data that
+//       conflicts reads Unclear (the truck changed hands); a silence across
+//       his device being linked to his truck again while he held it is judged
+//       by its two ends as one link would be (no miles, 190 mi, 3 mi, still
+//       dark), its continuity too (an odometer or engine hours lower after it,
+//       a break in the first link, a before-fix older than the lookback: Unclear),
+//       and reads Unclear when the device sat on another truck or left
+//       again; a relief or a gap in holding inside it still changes hands, and
+//       a takeover reaches no day before it; a handover day; a relief driver; a
+//       team truck; a Central midnight; a DST day; the rule version
 //   §4  dark stretches: a 7 h stretch carrying 200 mi; the lead-in step; a 0 mi
 //       odometer step with the ends 200 km apart; 0 mi, 0.3 km and +4 engine
 //       hours; a moving dark tail; a 5 h unplugged drive; 40 against 25 minutes;
-//       engine hours only when both ends read over 0; both floors
+//       engine hours only when both ends read over 0; the odometer step at
+//       0.0 mi and positions at 5 mi; a return (moving after-fix) at 0, 4, 6 mi
 //   §5  continuity: the swap shape, a decrease, an odometer reset and rate, the
 //       7-day window, the steps out of d
-//   §6  long dark spells: a 21-day vacation waits, then confirms with the first
-//       fix after 1.5 km away while moving; one that moved; a 40-day-old fix
+//   §6  long dark spells: a 21-day vacation waits, then confirms when the first
+//       fix after is 1.5 km away while moving with the odometer unchanged, and
+//       reads Not confirmed when it moved 0.9 mi; one that moved; a 40-day-old fix
 //   §7  his own app activity, the account check skipped, a late-evening tap, which
 //       account is his (one Driver account; none for an ambiguous name)
 //   §8  the Not-confirmed explanation
 //   §9  the freeze and the 06:00 schedule
 //   §10 notices (one, plus at most one follow-up) and what counts as a change
-//   §11 the notice and audit text
+//   §11 the notice and audit text; the labels (Unclear, Upcoming)
 //   §12 the staff view: closed months, kept-90-days text, load ids, summary
+//   §13 the comments of the rule, its report and this runner: why in at most 3
+//       lines in the rule, and no dates, history or plan names
 // Run: node scripts/test-time-off-eld-check.js
 
 "use strict";
@@ -112,12 +123,14 @@ const judge = (days, o = {}) => T.judgeTimeOffDays({
 const sr = (map, day) => { const x = map.get(day); return x ? [x.state, x.reason] : null; };
 const range = (from, to) => { const out = []; for (let d = from; d <= to; d = shiftAvailabilityDay(d, 1)) out.push(d); return out; };
 
-section("§1 the constants (B1)");
+section("§1 the constants");
 {
 	const R = T.TIME_OFF_ELD_RULE;
-	eq("§1.1 rule version 1", R.version, 1);
+	eq("§1.1 rule version 2", R.version, 2);
 	eq("§1.2 a dark stretch is a silence over 30 minutes", R.darkStretchMs, 30 * MIN);
-	eq("§1.3 the floor is the miles walk's own 5 mi, for the odometer and for positions (no 1 km test)", [R.moveFloorMi, eldMiles.ELD_DELTA_FLOOR_MI, Math.round(R.moveFloorMeters)], [5, 5, 8047]);
+	eq("§1.3 a day off has no miles: one constant, 0.0 mi, the rule's own", [T.TIME_OFF_NO_MILES_MAX, R.noMilesMax], [0, 0]);
+	eq("§1.3b positions keep the miles walk's 5 mi floor (no 1 km test)", [eldMiles.ELD_DELTA_FLOOR_MI, Math.round(R.positionFloorMeters)], [5, 8047]);
+	ok("§1.3c no other mile floor is left in the rule", !("moveFloorMi" in R) && !("moveFloorMeters" in R));
 	eq("§1.4 engine hours over 1 h", R.engineRanHours, 1);
 	eq("§1.5 ELD_MAX_GAP_MS stays 6 h for the miles walk", eldMiles.ELD_MAX_GAP_MS, 6 * HOUR);
 	eq("§1.6 the speed-only fallback: 3 fixes over 2.235 m/s spanning 5 minutes", [R.speedOnlyPings, R.movingSpeedMps, R.speedOnlySpanMs], [3, 2.235, 5 * MIN]);
@@ -152,6 +165,11 @@ section("§2 his holding and device intervals");
 		],
 		currentLinks: [{ id: 11, routemate_vehicle_id: "vid-t9" }],
 	}), [[11, "vid-t1", at("2026-09-01"), relink], [11, "vid-t9", relink, Infinity]]);
+	const held = T.timeOffDriverContexts({ driverKey: HOLLIS, normalize, assignments: [HIS_T1, asg(11, "Soren King", "2026-10-04T14:00:00.000Z", "2026-10-10T14:00:00.000Z")],
+		currentLinks: [{ id: 11, routemate_vehicle_id: "vid-t1" }], fromMs: at("2026-09-01") }).heldThroughout;
+	const span = (truckId, from, to) => (typeof held === "function" ? held(truckId, Date.parse(from), Date.parse(to)) : null);
+	eq("§2.7 whether he held a truck throughout: before the relief yes, from before it to after it no, a truck never his no",
+		[span(11, "2026-10-01T00:00:00Z", "2026-10-04T13:00:00Z"), span(11, "2026-10-03T00:00:00Z", "2026-10-11T00:00:00Z"), span(12, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")], [true, false, false]);
 }
 
 section("§3 the rule's rows");
@@ -162,14 +180,16 @@ section("§3 the rule's rows");
 	eq("§3.1 parked with pings: Confirmed (parked) both days", [sr(r1, "2026-10-05"), sr(r1, "2026-10-06")], [["confirmed", "parked"], ["confirmed", "parked"]]);
 	eq("§3.1b ...with no miles, its samples counted", [r1.get("2026-10-05").miles, r1.get("2026-10-05").samples], [0, 96]);
 
-	// 4.9 against 5.1 accepted miles on the day.
+	// Accepted odometer miles on a day the ELD reports: a day off has none.
 	const drive = (stepMi, steps) => bracketed(pings(at("2026-10-05", 8), at("2026-10-05", 8) + steps * 10 * MIN, 10, (ms, i) => ({ odo: 100000 + i * stepMi })));
-	const r49 = judge(["2026-10-05"], { fixes: drive(0.7, 7) });
-	const r51 = judge(["2026-10-05"], { fixes: drive(0.85, 6) });
-	eq("§3.2 4.9 mi on the day: Confirmed", [sr(r49, "2026-10-05"), r49.get("2026-10-05").miles], [["confirmed", "parked"], 4.9]);
-	eq("§3.3 5.1 mi on the day: Not confirmed (truck_moved)", [sr(r51, "2026-10-05"), r51.get("2026-10-05").miles], [["not_confirmed", "truck_moved"], 5.1]);
-	const r504 = judge(["2026-10-05"], { fixes: drive(0.84, 6) });
-	eq("§3.3b 5.04 mi, shown as 5.0: Confirmed", [sr(r504, "2026-10-05"), r504.get("2026-10-05").miles], [["confirmed", "parked"], 5]);
+	const day5 = (fixes) => { const v = judge(["2026-10-05"], { fixes }).get("2026-10-05"); return [v.state, v.reason, v.miles]; };
+	const v10 = judge(["2026-10-05"], { fixes: drive(0.5, 2) }).get("2026-10-05");
+	eq("§3.2 a reporting day with 1.0 accepted odometer miles reads Not confirmed (truck_moved), rule version 2", [v10.state, v10.reason, v10.miles, v10.ruleVersion], ["not_confirmed", "truck_moved", 1, 2]);
+	eq("§3.3 0.9 mi on the day: Not confirmed (truck_moved)", day5(drive(0.3, 3)), ["not_confirmed", "truck_moved", 0.9]);
+	eq("§3.3b 0.1 mi on the day: Not confirmed (truck_moved)", day5(drive(0.1, 1)), ["not_confirmed", "truck_moved", 0.1]);
+	eq("§3.3c 0.0 mi on the day: Confirmed (parked)", day5(drive(0, 6)), ["confirmed", "parked", 0]);
+	eq("§3.3d 0.04 mi, shown as 0.0: Confirmed (parked)", day5(drive(0.02, 2)), ["confirmed", "parked", 0]);
+	eq("§3.3e 5.1 mi on the day: Not confirmed (truck_moved)", day5(drive(0.85, 6)), ["not_confirmed", "truck_moved", 5.1]);
 
 	// No odometer: the speed-only fallback.
 	const speedy = (moving) => bracketed(pings(at("2026-10-05", 8), at("2026-10-05", 9), 3, (ms, i) => ({ odo: 0, speed: moving(i) ? 12 : 0 })));
@@ -204,14 +224,81 @@ section("§3 the rule's rows");
 	});
 	eq("§3.9c the device moved to another truck before it reported again: Confirmed (no ELD data), no_fix_after; then no device",
 		[noData(rmv, "2026-10-05"), noData(rmv, "2026-10-07")], [["confirmed", "no_fix_after", true, "Confirmed (no ELD data)"], ["confirmed", "no_device", true, "Confirmed (no ELD data)"]]);
-	// ELD data that conflicts stays Requested: he takes over T1 while it is dark,
+	// ELD data that conflicts reads Unclear: he takes over T1 while it is dark,
 	// after Soren had it, so its silence can't be put on him alone.
 	const takeover = [asg(11, "Soren King", "2026-01-05T15:00:00.000Z", "2026-10-05T15:00:00.000Z"), asg(11, "Hollis Renner", "2026-10-05T15:00:00.000Z")];
 	const rto = judge(["2026-10-05"], { assignments: takeover, fixes: [fix(at("2026-10-04", 18)), fix(at("2026-10-06", 8))] });
-	eq("§3.9d the truck changed hands while its ELD was dark: Requested (shared_truck), not the no-data label", noData(rto, "2026-10-05"), ["no_data", "shared_truck", false, "Requested"]);
+	eq("§3.9d the truck changed hands while its ELD was dark: Unclear (shared_truck), not the no-data label", noData(rto, "2026-10-05"), ["no_data", "shared_truck", false, "Unclear"]);
 	// Part of the day judged parked and part with no reading before: Confirmed on what was read.
 	const partly = judge(["2026-10-07"], { fixes: [...firstEver, fix(at("2026-10-08", 9), { lat: north(300000) })] });
 	eq("§3.9e a day with readings and a part with none before them: Confirmed (parked), the ordinary label", noData(partly, "2026-10-07"), ["confirmed", "parked", false, "Confirmed"]);
+	// T1 parked on Oct 4 until 18:00, then dark; its device unlinked at the start of Oct 6 (UTC) and linked to T1
+	// again that noon (Central); the device reports again from Oct 7 08:00. He holds T1 throughout unless a case says.
+	const link = (truckId, from, until = "") => ({ truck_id: truckId, routemate_vehicle_id: "vid-t1", assigned_from: from, assigned_until: until });
+	const relinkRows = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z")];
+	const oct4 = pings(at("2026-10-04", 8), at("2026-10-04", 18), 15);
+	const back = (o = {}) => pings(at("2026-10-07", 8), at("2026-10-09", 8), 15, () => ({ lat: o.lat ?? YARD.lat, odo: o.odo ?? 100000, eh: o.eh ?? 5000 }));
+	const DAYS = range("2026-10-04", "2026-10-07");
+	const across = ({ assignments = [HIS_T1], deviceRows = relinkRows, fixes = [...oct4, ...back()], days = DAYS, nowMs } = {}) => {
+		const r = judge(days, { assignments, deviceStartMs: Date.parse("2026-01-01T00:00:00.000Z"), deviceRows, fixes, ...(nowMs ? { nowMs } : {}) });
+		return days.map((d) => noData(r, d));
+	};
+	const oneLink = (fixes, days = DAYS, nowMs) => { const r = judge(days, { fixes, ...(nowMs ? { nowMs } : {}) }); return days.map((d) => noData(r, d)); };
+	const each = (n, v) => Array.from({ length: n }, () => v);
+	const parkedAcross = across();
+	eq("§3.9f a device linked to his truck again while he held it and it was dark, back where it was with no miles: judged by its two ends (Confirmed, dark_parked inside the silence), not \"no ELD data\" and no change of hands",
+		parkedAcross, [["confirmed", "parked", false, "Confirmed"], ["confirmed", "dark_parked", false, "Confirmed"], ["confirmed", "dark_parked", false, "Confirmed"], ["confirmed", "parked", false, "Confirmed"]]);
+	ok("§3.9f2 ...as one unbroken link reads the same readings", JSON.stringify(parkedAcross) === JSON.stringify(oneLink([...oct4, ...back()])), JSON.stringify(oneLink([...oct4, ...back()])));
+	const far = [...oct4, ...back({ lat: north(300000), odo: 100190 })];
+	const movedAcross = across({ fixes: far });
+	eq("§3.9f3 ...back 300 km on with 190 more odometer miles: every day of the silence Not confirmed (moved_while_dark), as one link reads it",
+		[movedAcross, JSON.stringify(movedAcross) === JSON.stringify(oneLink(far))], [each(4, ["not_confirmed", "moved_while_dark", false, "Not confirmed"]), true]);
+	eq("§3.9f4 ...back where it was with 3 more odometer miles: every day Not confirmed (moved_while_dark)",
+		across({ fixes: [...oct4, ...back({ odo: 100003 })] }), each(4, ["not_confirmed", "moved_while_dark", false, "Not confirmed"]));
+	const stillDays = range("2026-10-05", "2026-10-08");
+	const stillDark = across({ fixes: oct4, days: stillDays, nowMs: at("2026-10-12", 12) });
+	eq("§3.9f5 ...still dark on Oct 12: every day of the silence Checking (dark_waiting), so none is final, as one link reads it",
+		[stillDark, JSON.stringify(stillDark) === JSON.stringify(oneLink(oct4, stillDays, at("2026-10-12", 12)))], [each(4, ["pending", "dark_waiting", false, "Checking"]), true]);
+	const viaT2 = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(12, "2026-10-06T00:00:00.000Z", "2026-10-06T17:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z")];
+	eq("§3.9f6 ...the device on T2 in between: its two ends can't be compared, so every day of the silence reads Unclear (device_relinked)",
+		across({ deviceRows: viaT2 }), each(4, ["no_data", "device_relinked", false, "Unclear"]));
+	const leftAgain = [link(11, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T17:00:00.000Z", "2026-10-08T00:00:00.000Z")];
+	const threeDays = range("2026-10-05", "2026-10-07");
+	eq("§3.9f7 ...linked to T1 again, then unlinked again with no reading: Unclear (device_relinked) on every day, never no data",
+		across({ deviceRows: leftAgain, fixes: oct4, days: threeDays }), each(3, ["no_data", "device_relinked", false, "Unclear"]));
+	eq("§3.9f8 ...and the same with its next reading taken while unlinked: Unclear (device_relinked)",
+		across({ deviceRows: leftAgain, fixes: [...oct4, ...pings(at("2026-10-09", 8), at("2026-10-09", 12), 15)], days: threeDays }), each(3, ["no_data", "device_relinked", false, "Unclear"]));
+	const reliefInside = [HIS_T1, asg(11, "Soren King", "2026-10-05T12:00:00.000Z", "2026-10-06T12:00:00.000Z")];
+	eq("§3.9g ...but with a relief driver holding T1 inside the same silence: shared_truck once he holds it again",
+		across({ assignments: reliefInside })[3].slice(0, 2), ["no_data", "shared_truck"]);
+	const holdGap = [asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-05T12:00:00.000Z"), asg(11, "Hollis Renner", "2026-10-06T12:00:00.000Z")];
+	eq("§3.9h ...and with no one holding T1 for part of it: shared_truck, only his own unbroken hold clears it",
+		across({ assignments: holdGap })[3].slice(0, 2), ["no_data", "shared_truck"]);
+	const rto2 = judge(["2026-10-04", "2026-10-05"], { assignments: takeover, fixes: [fix(at("2026-10-04", 18)), fix(at("2026-10-06", 8))] });
+	eq("§3.9i a takeover while dark reaches no day before he held the truck: Oct 4 no truck held, Oct 5 Unclear (shared_truck)",
+		[noData(rto2, "2026-10-04"), noData(rto2, "2026-10-05")], [["confirmed", "no_truck", true, "Confirmed (no ELD data)"], ["no_data", "shared_truck", false, "Unclear"]]);
+	const handedOn = [asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-07T00:00:00.000Z"), asg(11, "Soren King", "2026-10-07T00:00:00.000Z")];
+	eq("§3.9j a re-link, then T1 handed to Soren before the device reports: his days Unclear (shared_truck), the far end not his",
+		across({ assignments: handedOn, fixes: [...oct4, ...pings(at("2026-10-08", 8), at("2026-10-09", 8), 15)], days: ["2026-10-05", "2026-10-06"] }).map((x) => x.slice(0, 2)),
+		[["no_data", "shared_truck"], ["no_data", "shared_truck"]]);
+	const fromT2 = [link(12, "2026-01-01T00:00:00.000Z", "2026-10-06T00:00:00.000Z"), link(11, "2026-10-06T00:00:00.000Z")];
+	eq("§3.9k a device moved onto his truck from another while dark: no reading on his truck before, so Confirmed (no ELD data), then parked",
+		across({ deviceRows: fromT2, days: ["2026-10-05", "2026-10-06", "2026-10-07"] }).map((x) => x.slice(0, 3)),
+		[["confirmed", "no_device", true], ["confirmed", "no_fix_before", true], ["confirmed", "parked", false]]);
+	// Readings across the re-link that one link reads as a break: each day Unclear, the same as its one-link twin.
+	const twins = (fixes) => [across({ fixes }), oneLink(fixes)];
+	const unclear4 = each(4, ["no_data", "device_changed_vehicle", false, "Unclear"]);
+	eq("§3.9l across the re-link, the odometer 1,000 mi lower after: every day Unclear (device_changed_vehicle), as one link reads it",
+		twins([...oct4, ...back({ odo: 99000 })]), [unclear4, unclear4]);
+	eq("§3.9m ...the odometer 0.3 mi lower: the same, as one link", twins([...oct4, ...back({ odo: 99999.7 })]), [unclear4, unclear4]);
+	eq("§3.9n ...the engine hours 1,000 h lower: the same, as one link", twins([...oct4, ...back({ eh: 4000 })]), [unclear4, unclear4]);
+	const breakOct1 = [...pings(at("2026-10-01", 6), at("2026-10-01", 7), 15, () => ({ eh: 1000 })), ...pings(at("2026-10-01", 8), at("2026-10-04", 18), 30), ...back()];
+	eq("§3.9o ...an engine-hours break in the first link on Oct 1, inside the 7-day window: the same, as one link", twins(breakOct1), [unclear4, unclear4]);
+	// The same step from a before-fix older than the 100-day lookback, against a lookback that reaches it.
+	const oldBefore = [fix(at("2026-07-01", 12)), ...back({ odo: 99000 })];
+	const lookback = (lookFromMs) => { const r = T.judgeTimeOffDays({ days: ["2026-10-05", "2026-10-06"], anchorOf: () => "2026-10-05", driverKey: HOLLIS, normalize, evidence: { ...evidence({ fixes: oldBefore }), ...(lookFromMs ? { lookFromMs } : {}) }, nowMs: at("2026-10-20", 12) }); return ["2026-10-05", "2026-10-06"].map((d) => noData(r, d)); };
+	eq("§3.9p ...and from a before-fix older than the lookback, the odometer lower after: Unclear, as a lookback that reaches it reads",
+		[lookback(null), lookback(at("2026-06-01"))], [each(2, ["no_data", "device_changed_vehicle", false, "Unclear"]), each(2, ["no_data", "device_changed_vehicle", false, "Unclear"])]);
 
 	// A handover at noon on Oct 5: his morning parked, Soren drives the afternoon.
 	const handover = asg(11, "Hollis Renner", "2026-01-05T15:00:00.000Z", "2026-10-05T17:00:00.000Z");
@@ -237,10 +324,10 @@ section("§3 the rule's rows");
 	const dstDark = [fix(at("2026-10-31", 22)), fix(at("2026-11-02", 6), { lat: north(200000) })];
 	const rdd = judge(["2026-10-31", "2026-11-01", "2026-11-02"], { fixes: dstDark, nowMs: at("2026-11-20", 12) });
 	eq("§3.16 a dark stretch across the DST day that moved: all three days moved_while_dark", ["2026-10-31", "2026-11-01", "2026-11-02"].map((d) => sr(rdd, d)), [["not_confirmed", "moved_while_dark"], ["not_confirmed", "moved_while_dark"], ["not_confirmed", "moved_while_dark"]]);
-	eq("§3.17 the rule version is on every verdict", r1.get("2026-10-05").ruleVersion, 1);
+	eq("§3.17 the rule version is on every verdict", r1.get("2026-10-05").ruleVersion, 2);
 }
 
-section("§4 dark stretches (M2, B1)");
+section("§4 dark stretches");
 {
 	// Pings Oct 5 morning, dark 10:00-17:00 carrying 200 odometer miles, pings after.
 	const sevenHours = [
@@ -255,33 +342,44 @@ section("§4 dark stretches (M2, B1)");
 	const odoStill = [...pings(at("2026-10-05", 6), at("2026-10-05", 8), 10), ...pings(at("2026-10-05", 18), at("2026-10-05", 22), 10, () => ({ lat: north(200000) }))];
 	eq("§4.3 a 0 mi odometer step with the ends 200 km apart (a device-kept odometer): moved_while_dark", sr(judge(["2026-10-05"], { fixes: bracketed(odoStill) }), "2026-10-05"), ["not_confirmed", "moved_while_dark"]);
 	const idled = [...pings(at("2026-10-05", 6), at("2026-10-05", 8), 10), ...pings(at("2026-10-05", 18), at("2026-10-05", 22), 10, () => ({ lat: north(300), eh: 5004 }))];
-	eq("§4.4 0 mi, 0.3 km and engine hours +4 h: Requested (engine_ran_while_dark)", sr(judge(["2026-10-05"], { fixes: bracketed(idled) }), "2026-10-05"), ["no_data", "engine_ran_while_dark"]);
+	eq("§4.4 0 mi, 0.3 km and engine hours +4 h: Unclear (engine_ran_while_dark)", sr(judge(["2026-10-05"], { fixes: bracketed(idled) }), "2026-10-05"), ["no_data", "engine_ran_while_dark"]);
 	// A dark tail: last fix Oct 5 10:00, next fix Oct 9 08:00 300 km away.
 	const tail = [...pings(at("2026-10-05", 6), at("2026-10-05", 10), 10), ...pings(at("2026-10-09", 8), at("2026-10-09", 12), 10, () => ({ lat: north(300000), odo: 100190 }))];
 	const rt = judge(range("2026-10-05", "2026-10-09"), { fixes: bracketed(tail) });
 	eq("§4.5 a dark tail whose stretch moved: that day and every later day it touches moved_while_dark", range("2026-10-05", "2026-10-09").map((d) => sr(rt, d)), range("2026-10-05", "2026-10-09").map(() => ["not_confirmed", "moved_while_dark"]));
-	// B1: a 5 h unplugged drive: 0 mi odometer step, ends far apart, engine hours +5 h.
+	// A 5 h unplugged drive: 0 mi odometer step, ends far apart, engine hours +5 h.
 	const unplugged = [...pings(at("2026-10-05", 6), at("2026-10-05", 8), 10), ...pings(at("2026-10-05", 13, 10), at("2026-10-05", 20), 10, () => ({ lat: north(300000), eh: 5005 }))];
 	const ru = judge(["2026-10-05"], { fixes: bracketed(unplugged) });
-	eq("§4.6 B1: a 5 h unplugged drive (0 mi odometer step, ends far apart, engine hours +5 h): Not confirmed", sr(ru, "2026-10-05"), ["not_confirmed", "moved_while_dark"]);
+	eq("§4.6 a 5 h unplugged drive (0 mi odometer step, ends far apart, engine hours +5 h): Not confirmed", sr(ru, "2026-10-05"), ["not_confirmed", "moved_while_dark"]);
 	ok("§4.6b ...and no continuity break (+5 h over 5 h 10 min is possible)", ru.get("2026-10-05").changeMs === null);
-	// B1: 40 minutes is a dark stretch; 25 minutes is a normal step, judged by the odometer.
+	// 40 minutes is a dark stretch; 25 minutes is a normal step, judged by the odometer.
 	const jump = (gapMin) => bracketed([fix(at("2026-10-05", 9)), fix(at("2026-10-05", 9) + gapMin * MIN, { lat: north(20000) }), ...pings(at("2026-10-05", 10), at("2026-10-05", 12), 10, () => ({ lat: north(20000) }))]);
-	eq("§4.7 B1: a 40-minute silence is a dark stretch: 20 km apart moved_while_dark", sr(judge(["2026-10-05"], { fixes: jump(40) }), "2026-10-05"), ["not_confirmed", "moved_while_dark"]);
+	eq("§4.7 a 40-minute silence is a dark stretch: 20 km apart moved_while_dark", sr(judge(["2026-10-05"], { fixes: jump(40) }), "2026-10-05"), ["not_confirmed", "moved_while_dark"]);
 	eq("§4.8 ...a 25-minute step is a normal step: the odometer (0 mi) decides, Confirmed", sr(judge(["2026-10-05"], { fixes: jump(25) }), "2026-10-05"), ["confirmed", "parked"]);
-	// N-L4: engine hours read 0 at one end.
+	// Engine hours read 0 at one end.
 	const zeroEnd = [fix(at("2026-10-05", 6), { eh: 0 }), fix(at("2026-10-05", 20), { eh: 900 })];
-	eq("§4.9 N-L4: an engine-hours reading of 0 at one end is not an advance", sr(judge(["2026-10-05"], { fixes: bracketed(zeroEnd) }), "2026-10-05"), ["confirmed", "parked"]);
+	eq("§4.9 an engine-hours reading of 0 at one end is not an advance", sr(judge(["2026-10-05"], { fixes: bracketed(zeroEnd) }), "2026-10-05"), ["confirmed", "parked"]);
 	const dark = (b) => bracketed([fix(at("2026-10-05", 6)), fix(at("2026-10-05", 20), b)]);
-	eq("§4.10 positions 7.9 km apart: parked; 8.1 km: moved", [sr(judge(["2026-10-05"], { fixes: dark({ lat: north(7900) }) }), "2026-10-05"), sr(judge(["2026-10-05"], { fixes: dark({ lat: north(8100) }) }), "2026-10-05")], [["confirmed", "parked"], ["not_confirmed", "moved_while_dark"]]);
-	eq("§4.11 an odometer step of 5.0 mi: parked; 5.1: moved", [sr(judge(["2026-10-05"], { fixes: dark({ odo: 100005 }) }), "2026-10-05"), sr(judge(["2026-10-05"], { fixes: dark({ odo: 100005.1 }) }), "2026-10-05")], [["confirmed", "parked"], ["not_confirmed", "moved_while_dark"]]);
+	const darkDay = (b) => sr(judge(["2026-10-05"], { fixes: dark(b) }), "2026-10-05");
+	eq("§4.10 positions 7.9 km apart: parked; 8.1 km: moved", [darkDay({ lat: north(7900) }), darkDay({ lat: north(8100) })], [["confirmed", "parked"], ["not_confirmed", "moved_while_dark"]]);
+	eq("§4.11 an odometer step across a silence of 0.0 mi, or 0.04 shown as 0.0: parked; 0.1 mi: moved",
+		[darkDay({ odo: 100000 }), darkDay({ odo: 100000.04 }), darkDay({ odo: 100000.1 })], [["confirmed", "parked"], ["confirmed", "parked"], ["not_confirmed", "moved_while_dark"]]);
 	eq("§4.12 engine hours +0.9: parked; +1.1: engine_ran_while_dark", [sr(judge(["2026-10-05"], { fixes: dark({ eh: 5000.9 }) }), "2026-10-05"), sr(judge(["2026-10-05"], { fixes: dark({ eh: 5001.1 }) }), "2026-10-05")], [["confirmed", "parked"], ["no_data", "engine_ran_while_dark"]]);
 	const st = judge(["2026-10-05"], { fixes: dark({ lat: north(1500), odo: 100000.9, eh: 5000.2, speed: 12 }) }).get("2026-10-05").stretches;
-	ok("§4.13 a stretch's measures are kept for the report (odometer step, distance, engine advance, moving at the after-fix)",
-		st.some((s) => Math.abs(s.odoStepMi - 0.9) < 1e-6 && Math.abs(s.distanceM - 1500) < 5 && Math.abs(s.engineAdvanceH - 0.2) < 1e-6 && s.afterMoving === true), JSON.stringify(st));
+	ok("§4.13 a stretch's measures are kept for the report (odometer step, distance, engine advance, moving at each end)",
+		st.some((s) => Math.abs(s.odoStepMi - 0.9) < 1e-6 && Math.abs(s.distanceM - 1500) < 5 && Math.abs(s.engineAdvanceH - 0.2) < 1e-6 && s.beforeMoving === false && s.afterMoving === true), JSON.stringify(st));
+	const leaving = T.judgeDarkStretch(fix(1000, { speed: 12 }), fix(1000 + 5 * HOUR));
+	eq("§4.13b ...a stretch whose before-fix is moving and after-fix still", [leaving.beforeMoving, leaving.afterMoving], [true, false]);
+	// A return: parked on the evening of Oct 4, dark all Oct 5, the first fix after already moving on Oct 6, 1.5 km on.
+	const returned = (stepMi) => sr(judge(["2026-10-05"], { fixes: [
+		fix(at("2026-10-04", 18)), fix(at("2026-10-06", 8), { odo: 100000 + stepMi, lat: north(1500), speed: 12 }), fix(at("2026-10-07", 8), { odo: 100000 + stepMi, lat: north(1500) }),
+	] }), "2026-10-05");
+	eq("§4.14 a silence whose after-fix is moving reads dark_parked (Confirmed) with a 0 mi step", returned(0), ["confirmed", "dark_parked"]);
+	eq("§4.15 ...moved_while_dark (Not confirmed) with a 4 mi step: a day off has no miles across a silence too", returned(4), ["not_confirmed", "moved_while_dark"]);
+	eq("§4.16 ...and moved_while_dark with a 6 mi step", returned(6), ["not_confirmed", "moved_while_dark"]);
 }
 
-section("§5 continuity (3b2)");
+section("§5 continuity");
 {
 	// The swap shape on T1: engine hours 1,000 h, a 5 h gap at the yard, then
 	// 20,000 h; the odometer continues exactly. Oct 4, inside the 7 days.
@@ -290,7 +388,7 @@ section("§5 continuity (3b2)");
 		...pings(at("2026-10-04", 15), at("2026-10-06", 8), 10, (ms) => ({ eh: 20000, odo: 100000 + 3 * Math.min(36, Math.max(0, (ms - at("2026-10-06", 0)) / (10 * MIN))) })),
 	];
 	const rs = judge(range("2026-10-05", "2026-10-06"), { fixes: bracketed(swap), anchorOf: () => "2026-10-05" });
-	eq("§5.1 the swap shape: every day Requested (device_changed_vehicle)", [sr(rs, "2026-10-05"), sr(rs, "2026-10-06")], [["no_data", "device_changed_vehicle"], ["no_data", "device_changed_vehicle"]]);
+	eq("§5.1 the swap shape: every day Unclear (device_changed_vehicle)", [sr(rs, "2026-10-05"), sr(rs, "2026-10-06")], [["no_data", "device_changed_vehicle"], ["no_data", "device_changed_vehicle"]]);
 	eq("§5.2 ...its change instant is the first reading after the gap", rs.get("2026-10-05").changeMs, at("2026-10-04", 15));
 	ok("§5.3 ...and it beats the 100 mi Oct 6 would read as truck_moved", rs.get("2026-10-06").miles >= 100, String(rs.get("2026-10-06").miles));
 	const down = bracketed([...pings(at("2026-10-05", 6), at("2026-10-05", 7), 10), ...pings(at("2026-10-05", 7, 10), at("2026-10-05", 9), 10, () => ({ eh: 4990 }))]);
@@ -323,17 +421,19 @@ section("§5 continuity (3b2)");
 	eq("§5.11 continuityBreaks() names the break", brk.map((b) => [b.kind, b.ms]), [["engine_hours", 1000 + 5 * HOUR]]);
 }
 
-section("§6 long dark spells (M3, B1)");
+section("§6 long dark spells");
 {
 	const days = range("2026-06-01", "2026-06-21");
 	const before = fix(at("2026-05-31", 19));
 	const waiting = judge(range("2026-06-01", "2026-06-14"), { fixes: [before], nowMs: at("2026-06-15", 6) });
 	eq("§6.1 a 21-day dark vacation reads Checking (dark_waiting) until the ELD reports again", range("2026-06-01", "2026-06-14").every((d) => JSON.stringify(sr(waiting, d)) === JSON.stringify(["pending", "dark_waiting"])), true);
-	// B1: the first fix after is 1.5 km away, moving, 0.9 odometer miles and 0.1 engine hours on.
-	const back = fix(at("2026-06-22", 7, 30), { lat: north(1500), odo: 100000.9, eh: 5000.1, speed: 12 });
-	const done = judge(days, { fixes: [before, back], nowMs: at("2026-06-23", 6) });
-	eq("§6.2 B1: the first fix after 1.5 km away while moving: all 21 days Confirmed (dark_parked)", days.map((d) => sr(done, d)), days.map(() => ["confirmed", "dark_parked"]));
+	// The first fix after is 1.5 km away, moving, 0.1 engine hours on: positions alone don't make it movement.
+	const back = (odo) => fix(at("2026-06-22", 7, 30), { lat: north(1500), odo, eh: 5000.1, speed: 12 });
+	const done = judge(days, { fixes: [before, back(100000)], nowMs: at("2026-06-23", 6) });
+	eq("§6.2 the first fix after 1.5 km away while moving, the odometer unchanged: all 21 days Confirmed (dark_parked)", days.map((d) => sr(done, d)), days.map(() => ["confirmed", "dark_parked"]));
 	ok("§6.2b ...each a dark-spell day (no fix on it)", days.every((d) => done.get(d).darkSpell === true));
+	const crept = judge(days, { fixes: [before, back(100000.9)], nowMs: at("2026-06-23", 6) });
+	eq("§6.2c ...and with 0.9 odometer miles across the silence: all 21 days Not confirmed (moved_while_dark)", days.map((d) => sr(crept, d)), days.map(() => ["not_confirmed", "moved_while_dark"]));
 	const moved = judge(days, { fixes: [before, fix(at("2026-06-22", 7, 30), { lat: north(300000), odo: 100190 })], nowMs: at("2026-06-23", 6) });
 	eq("§6.3 ...reporting 300 km away instead: all 21 days Not confirmed (moved_while_dark)", days.map((d) => sr(moved, d)), days.map(() => ["not_confirmed", "moved_while_dark"]));
 	const old = judge(["2026-06-10", "2026-06-11"], { fixes: [fix(at("2026-05-01", 19)), fix(at("2026-06-12", 7))], nowMs: at("2026-06-13", 6) });
@@ -395,22 +495,22 @@ section("§9 the freeze and the schedule");
 	eq("§9.4 06:00 follows daylight time (EST on Nov 2)", [due(5, 59, "2026-11-01", "2026-11-02").due, due(6, 0, "2026-11-01", "2026-11-02").due], [false, true]);
 }
 
-section("§10 notices and changes (L3, L10)");
+section("§10 notices and changes");
 {
 	const nd = (old, next) => T.timeOffNoticeDecision({ old, next });
 	const nc = (o) => ({ state: "not_confirmed", reason: "truck_moved", explanation: "own_load", ...o });
 	eq("§10.1 newly Not confirmed: one notice; with confirmed_load: none", [nd(null, nc()), nd(null, nc({ explanation: "confirmed_load" }))], [{ first: true, followup: false }, { first: false, followup: false }]);
-	eq("§10.2 newly Requested because the device changed vehicle: one notice; any other Requested reason, Checking or a Confirmed day (no ELD data too): none",
+	eq("§10.2 newly Unclear because the device changed vehicle: one notice; any other Unclear reason, Checking or a Confirmed day (no ELD data too): none",
 		[nd(null, { state: "no_data", reason: "device_changed_vehicle" }), nd(null, { state: "no_data", reason: "shared_truck" }), nd(null, { state: "no_data", reason: "engine_ran_while_dark" }),
 			nd(null, { state: "pending", reason: "dark_waiting" }), nd(null, { state: "confirmed", reason: "parked" }), nd(null, { state: "confirmed", reason: "no_truck" })],
 		[{ first: true, followup: false }, { first: false, followup: false }, { first: false, followup: false }, { first: false, followup: false }, { first: false, followup: false }, { first: false, followup: false }]);
 	const told = { state: "not_confirmed", notified_at: "2026-10-08T10:00:00.000Z", notified_state: "not_confirmed", followup_at: null };
-	eq("§10.3 a notified Not-confirmed day that becomes Requested (a late break): one follow-up", nd(told, { state: "no_data", reason: "device_changed_vehicle" }), { first: false, followup: true });
+	eq("§10.3 a notified Not-confirmed day that becomes Unclear (a late break): one follow-up", nd(told, { state: "no_data", reason: "device_changed_vehicle" }), { first: false, followup: true });
 	eq("§10.4 ...or no truck held after a staff fix (Confirmed, no ELD data): one follow-up", nd(told, { state: "confirmed", reason: "no_truck" }), { first: false, followup: true });
 	eq("§10.5 never a third", nd({ ...told, state: "no_data", followup_at: "2026-10-09T10:00:00.000Z" }, nc()), { first: false, followup: false });
 	eq("§10.6 unchanged after a notice: nothing", nd(told, nc()), { first: false, followup: false });
 	const row = { state: "confirmed", reason: "parked", explanation: "", final_at: null, notified_at: null, notified_state: null, followup_at: null, evaluated_at: "a", evaluations: 1 };
-	eq("§10.7 L10: evaluated_at and evaluations alone are no change; state, reason, explanation, final_at, notified_at and notified_state are",
+	eq("§10.7 evaluated_at and evaluations alone are no change; state, reason, explanation, final_at, notified_at and notified_state are",
 		[T.timeOffDayChanged(row, { ...row, evaluated_at: "b", evaluations: 2 }), T.timeOffDayChanged(row, { ...row, state: "pending" }), T.timeOffDayChanged(row, { ...row, reason: "dark_parked" }),
 			T.timeOffDayChanged(row, { ...row, explanation: "no_load" }), T.timeOffDayChanged(row, { ...row, final_at: "x" }), T.timeOffDayChanged(row, { ...row, notified_at: "x" }),
 			T.timeOffDayChanged(row, { ...row, notified_state: "confirmed" }), T.timeOffDayChanged(null, row)],
@@ -445,12 +545,14 @@ section("§11 the notice and audit text");
 		{ day: "2026-10-20", state: "confirmed", reason: "no_device", explanation: "", final: true },
 	] });
 	eq("§11.5 the audit line: each changed day's verdict, never miles, times or the time off's reason",
-		audit, "off 2026-10-17..2026-10-21: 2026-10-17 not confirmed (app activity, own load), notified; 2026-10-18 requested (device changed vehicle), final, follow-up sent; 2026-10-19 confirmed (parked; app activity not checked: no driver account); 2026-10-20 confirmed with no ELD data (no device), final");
-	eq("§11.6 labels", ["confirmed", "no_eld_data", "not_confirmed", "no_data", "pending", "upcoming", "not_checked", "purged"].map((s) => T.TIME_OFF_ELD_LABELS[s]),
-		["Confirmed", "Confirmed (no ELD data)", "Not confirmed", "Requested", "Checking", "Requested", "Not checked (month closed)", "ELD results are kept 90 days"]);
+		audit, "off 2026-10-17..2026-10-21: 2026-10-17 not confirmed (app activity, own load), notified; 2026-10-18 unclear (device changed vehicle), final, follow-up sent; 2026-10-19 confirmed (parked; app activity not checked: no driver account); 2026-10-20 confirmed with no ELD data (no device), final");
+	eq("§11.6 no_data is labelled Unclear, and a day not over yet Upcoming", [T.TIME_OFF_ELD_LABELS.no_data, T.TIME_OFF_ELD_LABELS.upcoming], ["Unclear", "Upcoming"]);
+	eq("§11.6b every label", ["confirmed", "no_eld_data", "not_confirmed", "no_data", "pending", "upcoming", "not_checked", "purged"].map((s) => T.TIME_OFF_ELD_LABELS[s]),
+		["Confirmed", "Confirmed (no ELD data)", "Not confirmed", "Unclear", "Checking", "Upcoming", "Not checked (month closed)", "ELD results are kept 90 days"]);
+	ok("§11.6c no label says \"Requested\", which now names a driver's request", !Object.values(T.TIME_OFF_ELD_LABELS).some((l) => /request/i.test(l)));
 	eq("§11.7 the label of a stored day: each no-data shape reads \"Confirmed (no ELD data)\"; parked, a conflict and a waiting day their own",
 		[...T.TIME_OFF_NO_ELD_DATA.map((r) => T.timeOffDayLabel("confirmed", r)), T.timeOffDayLabel("confirmed", "dark_parked"), T.timeOffDayLabel("no_data", "shared_truck"), T.timeOffDayLabel("pending", "dark_waiting")],
-		["Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed", "Requested", "Checking"]);
+		["Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed (no ELD data)", "Confirmed", "Unclear", "Checking"]);
 	eq("§11.8 the no-data shapes are exactly these five", T.TIME_OFF_NO_ELD_DATA, ["no_truck", "no_device", "device_never_reported", "no_fix_before", "no_fix_after"]);
 }
 
@@ -474,12 +576,12 @@ section("§12 the staff view");
 		["2026-09-30", "purged", "ELD results are kept 90 days"],
 		["2026-10-01", "not_confirmed", "Not confirmed"],
 		["2026-10-02", "confirmed", "Confirmed (no ELD data)"],
-		["2026-10-03", "upcoming", "Requested"],
-		["2026-10-04", "upcoming", "Requested"],
+		["2026-10-03", "upcoming", "Upcoming"],
+		["2026-10-04", "upcoming", "Upcoming"],
 	]);
 	eq("§12.1b a no-data day says so", [v.eldDays[5].noEldData, v.eldDays[5].reason, v.eldDays[5].reasonText], [true, "no_device", "his truck has no ELD linked"]);
 	const purged = v.eldDays.find((d) => d.day === "2026-09-30");
-	eq("§12.2 D18: a purged day carries the kept text and nothing else", Object.keys(purged).sort(), ["day", "label", "state"]);
+	eq("§12.2 a purged day carries the kept text and nothing else", Object.keys(purged).sort(), ["day", "label", "state"]);
 	const judged = v.eldDays.find((d) => d.day === "2026-10-01");
 	eq("§12.3 a judged day: reason, unit, miles, times, load ids as the viewer is shown them", [judged.reason, judged.explanation, judged.units, judged.miles, judged.firstMoveMs, judged.lastMoveMs, judged.loadIds, judged.final],
 		["truck_moved", "own_load", ["T1"], 212.4, 1, 2, ["shown:7001"], false]);
@@ -489,6 +591,34 @@ section("§12 the staff view");
 	eq("§12.6 the summary, the no-data days counted apart", [v.eldSummary.days, v.eldSummary.confirmed, v.eldSummary.confirmedNoEldData, v.eldSummary.notConfirmed, v.eldSummary.notChecked, v.eldSummary.kept, v.eldSummary.upcoming, v.eldSummary.text],
 		[8, 1, 1, 1, 3, 1, 2, "ELD: 1 of 8 days confirmed (1 with no ELD data) · 1 not confirmed · 3 not checked · 1 kept 90 days"]);
 	eq("§12.7 a cancelled row: only its stored days", view({ cancelled: true }).eldDays.map((d) => [d.day, d.state]), [["2026-09-28", "not_checked"], ["2026-09-30", "purged"], ["2026-10-01", "not_confirmed"], ["2026-10-02", "confirmed"]]);
+	const unclearDay = new Map([["2026-10-01", { day: "2026-10-01", state: "no_data", reason: "shared_truck", explanation: "", final_at: null, purged_at: null, truck_ids: "[11]", load_ids: "[]", miles: 0, samples: 0, moving_pings: 0, activity_note: "", rule_version: 2 }]]);
+	const vu = T.timeOffEldDaysView({ from: "2026-10-01", to: "2026-10-02", cancelled: false, todayKey: "2026-10-02", stored: unclearDay, monthClosed: () => false, units: new Map([[11, "T1"]]), showLoadId: (x) => x });
+	eq("§12.8 an Unclear day and a day not over yet as staff see them; the summary counts it as unclear",
+		[vu.eldDays.map((d) => [d.state, d.label]), vu.eldSummary.unclear, "requested" in vu.eldSummary, vu.eldSummary.text],
+		[[["no_data", "Unclear"], ["upcoming", "Upcoming"]], 1, false, "ELD: 0 of 2 days confirmed · 1 unclear"]);
+}
+
+section("§13 the comments");
+{
+	const fs = require("fs");
+	const path = require("path");
+	// Each run of whole-line // comments in a file, as its trimmed lines.
+	const blocks = (rel) => {
+		const out = [];
+		let run = [];
+		for (const line of fs.readFileSync(path.join(__dirname, "..", rel), "utf8").split("\n")) {
+			const t = line.trim();
+			if (t.startsWith("//")) run.push(t);
+			else if (run.length) { out.push(run); run = []; }
+		}
+		if (run.length) out.push(run);
+		return out;
+	};
+	const rule = blocks("lib/time-off-eld-check.js");
+	eq("§13.1 every comment in the rule says why in at most 3 lines", rule.filter((b) => b.length > 3).map((b) => b[0].slice(0, 60)), []);
+	const history = /\b20\d\d-\d\d-\d\d\b|\bowner\b|\bthe user\b|\b(?:B1|N-L\d+|D18|L10|S2|S4b?|M[23]|3b2)\b/;
+	const lines = [...rule, ...blocks("scripts/time-off-eld-check-report.js"), ...blocks("scripts/test-time-off-eld-check.js")].flat();
+	eq("§13.2 no dates, owner words or plan names in the comments of the rule, its report or this runner", lines.filter((l) => history.test(l)), []);
 }
 
 console.log(`\ntest-time-off-eld-check: ${passed} passed, ${failures.length} failed`);
