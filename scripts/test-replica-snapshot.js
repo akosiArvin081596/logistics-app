@@ -21,7 +21,11 @@
 //      server.js and lib/, every flag, first month and lease setting the app
 //      reads (process.env.NAME, env.NAME in a lib/ helper, or a name table) is
 //      copied, and the bank settings, secrets and production targets are not;
-//      a name only a route module (routes/) reads counts as read
+//      a name only a route module (routes/) reads counts as read; the clock
+//      switch's APP_TIMEZONE_FROM, read off lib/app-time.js's own alias of the
+//      env, is copied with APP_TIMEZONE, while a secret-named and a
+//      production-target name read the same way stay skipped, and so does any
+//      other name read that way (the reviewed list holds that one name)
 //   §4 the stamp (unique per run) and task rules; the pull scripts keep the
 //      production host out of the repository, fail when the server's folder
 //      cannot be confirmed gone, sweep stale folders (over an hour old), and
@@ -33,12 +37,18 @@
 //      compressed files included, on success, on a failed step and when the
 //      pull is interrupted; the progress filter never shows or logs a file
 //      name; pull.sh downloads whole, with progress, and checks before the swap
+//   §6 replica:start's clock line: when settings.env's APP_TIMEZONE names a
+//      zone other than US Eastern and no usable APP_TIMEZONE_FROM switches to
+//      it, replica:start prints a WARNING line naming both zones; with a usable
+//      one, US Eastern, no zone or one the server doesn't know, it prints none
 //
-// Standalone: node scripts/test-replica-snapshot.js. No server, no network.
+// Standalone: node scripts/test-replica-snapshot.js. No network; §6 starts a
+// stand-in server on 127.0.0.1 that answers once and exits by itself.
 "use strict";
 
 const crypto = require("crypto");
 const fs = require("fs");
+const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
@@ -282,6 +292,8 @@ console.log("§3 the settings export copies business settings only");
 		INVESTOR_LEASE_DOWNTIME: "unpaid", INVESTOR_LEASE_PRORATE: "daily", INVESTOR_LEASE_RETIREMENT: "stop",
 		// read as process.env.NAME
 		PAYOUT_RULES_V2_ENABLED: "false", MARK_PAID_CLOSED_MONTH_ENABLED: "true",
+		// the business clock's switch: APP_TIMEZONE_FROM is read off lib/app-time.js's own alias of the env
+		APP_TIMEZONE: "America/Chicago", APP_TIMEZONE_FROM: "2030-01-01T06:00:00Z",
 	};
 	const withheld = {
 		INVOICE_BANK_ROUTING: "000000000", INVOICE_BANK_ACCOUNT: "000000000000",
@@ -344,6 +356,36 @@ console.log("§3 the settings export copies business settings only");
 	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
 	ok("a name only a route module reads is copied; one nothing reads is still skipped", r.status === 0 && cli.copied.includes("ALPHA_REPORT_ENABLED")
 		&& cli.copied.includes("ROUTEMATE_ENABLED") && rule("NOT_READ_SETTING") === "not read by the app", { status: r.status, copied: cli.copied, stderr: r.stderr });
+}
+{
+	// The clock switch's second line, read off a helper's own alias of the env as
+	// lib/app-time.js reads it, with a secret-named name, a production target and
+	// one more name read the same way beside it. Made-up names and values.
+	const app = tmp("replica-settings-clock-");
+	const out = tmp("replica-settings-clock-out-");
+	fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(app, "node_modules"));
+	fs.writeFileSync(path.join(app, "server.js"), "const r = process.env.ROUTEMATE_ENABLED;\n");
+	fs.mkdirSync(path.join(app, "lib"));
+	const src = "module.exports = (env) => { const e = env || {}; return [e.APP_TIMEZONE_FROM, e.CLOCK_FEED_TOKEN, e.SPREADSHEET_ID, e.CLOCK_REGION]; };\n";
+	fs.writeFileSync(path.join(app, "lib", "clock.js"), src);
+	const made = { ROUTEMATE_ENABLED: "true", APP_TIMEZONE_FROM: "2030-01-01T06:00:00Z", CLOCK_FEED_TOKEN: "made-up-clock-token", SPREADSHEET_ID: "made-up-sheet-id", CLOCK_REGION: "made-up-region" };
+	fs.writeFileSync(path.join(app, ".env"), Object.entries(made).map(([k, v]) => `${k}="${v}"`).join("\n"));
+	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
+	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
+	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
+	const written = r.status === 0 ? dotenv.parse(fs.readFileSync(path.join(out, "settings.env"))) : {};
+	eq("namesReadBy finds APP_TIMEZONE_FROM read off an alias of the env, and no other name read that way", [...rules.namesReadBy([src])], ["APP_TIMEZONE_FROM"]);
+	ok("settings.js copies APP_TIMEZONE_FROM read that way, with its value exactly", r.status === 0 && cli.copied.includes("APP_TIMEZONE_FROM") && written.APP_TIMEZONE_FROM === made.APP_TIMEZONE_FROM, { status: r.status, rule: rule("APP_TIMEZONE_FROM") });
+	eq("...skips the secret-named name read beside it as a secret", rule("CLOCK_FEED_TOKEN"), "secret: name contains TOKEN");
+	eq("...and the production target read beside it as one", rule("SPREADSHEET_ID"), "production only: names a production target");
+	eq("...and any other name read that way as not read by the app", rule("CLOCK_REGION"), "not read by the app");
+	eq("...so it copies exactly those two names", cli.copied, ["APP_TIMEZONE_FROM", "ROUTEMATE_ENABLED"]);
+	ok("...and writes and prints neither withheld value", r.status === 0 && ["made-up-clock-token", "made-up-sheet-id"].every((v) => !fs.readFileSync(path.join(out, "settings.env"), "utf8").includes(v) && !r.stdout.includes(v)));
+	const asIfRead = exportSettings(made, { readByApp: new Set(Object.keys(made)) });
+	const ruleIfRead = (n) => (asIfRead.skipped.find((x) => x.name === n) || {}).rule;
+	eq("counted as read, the secret-named name and the production target are still skipped by their own rules", [ruleIfRead("CLOCK_FEED_TOKEN"), ruleIfRead("SPREADSHEET_ID")], ["secret: name contains TOKEN", "production only: names a production target"]);
+	eq("the reviewed list of names read off an alias holds that one name", rules.READ_OFF_ALIAS, ["APP_TIMEZONE_FROM"]);
+	eq("...and a mention in a comment, a bare word or a longer name read that way is no read of it", [...rules.namesReadBy(["// see APP_TIMEZONE_FROM", "const x = APP_TIMEZONE_FROM;", "y.APP_TIMEZONE_FROM_EXTRA;"])], []);
 }
 
 // ---- §4 rules and the pull scripts ------------------------------------------------------------
@@ -694,6 +736,60 @@ console.log("§4 stamps, tasks and the pull scripts");
 		ok("off a terminal a status line is printed at most every 30 s, plus the last one", lines.length >= 2 && lines.length < 6 && !/\r/.test(quiet.out), lines);
 		const gnu = run(false, ["      32,768   0%    0.00kB/s    0:00:00\r 65,536,000 100%   10.00MB/s    0:00:06 (xfr#1, to-chk=0/1)\n"]).out;
 		ok("...and reads GNU rsync's commas", /download: 62\.5 MiB so far, 10\.00MB\/s\n/.test(gnu), gnu);
+	}
+
+	// ---- §6 replica:start's clock line ------------------------------------------------------------
+	console.log("§6 replica:start warns when the business clock can't follow APP_TIMEZONE");
+	{
+		const C = require(path.join(ROOT, "scripts", "replica", "common.js"));
+		const appTime = require(path.join(ROOT, "lib", "app-time.js"));
+		const warn = (settings) => (typeof C.clockWarning === "function" ? C.clockWarning(settings, appTime) : "clockWarning() is missing");
+		const LINE = /^WARNING, BUSINESS CLOCK: settings\.env sets APP_TIMEZONE America\/Chicago with no usable APP_TIMEZONE_FROM, so this replica dates every day, week and time on America\/New_York /;
+		const FROM = "2030-01-01T06:00:00Z";
+		ok("Central with no APP_TIMEZONE_FROM: the warning, naming both zones", LINE.test(warn({ APP_TIMEZONE: "America/Chicago" }) || ""), warn({ APP_TIMEZONE: "America/Chicago" }));
+		ok("...and with one that is no instant, a day that does not exist, or before the Eastern era", ["next week", "2030-02-30T06:00:00Z", "2026-10-01T00:00:00Z"].every((f) => LINE.test(warn({ APP_TIMEZONE: "America/Chicago", APP_TIMEZONE_FROM: f }) || "")));
+		eq("with a usable APP_TIMEZONE_FROM: none", warn({ APP_TIMEZONE: "America/Chicago", APP_TIMEZONE_FROM: FROM }), null);
+		eq("US Eastern, no zone, or a zone the server doesn't know (it runs US Eastern, as named): none", [{ APP_TIMEZONE: "America/New_York" }, {}, { APP_TIMEZONE: "Not/AZone" }].map(warn), [null, null, null]);
+
+		// replica:start itself, from a throwaway folder holding this checkout's start.js, common.js,
+		// lib/replica-rules.js and lib/app-time.js, with HOME a temporary folder and a stand-in
+		// server.js that answers the readiness check once and exits (at 10 s by itself at the latest).
+		const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
+		const start = async (settingsText) => {
+			const code = tmp("replica-clock-code-");
+			fs.mkdirSync(path.join(code, "scripts", "replica"), { recursive: true });
+			for (const f of ["start.js", "common.js"]) fs.copyFileSync(path.join(ROOT, "scripts", "replica", f), path.join(code, "scripts", "replica", f));
+			fs.mkdirSync(path.join(code, "lib"));
+			for (const f of ["replica-rules.js", "app-time.js"]) fs.copyFileSync(path.join(ROOT, "lib", f), path.join(code, "lib", f));
+			fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(code, "node_modules"));
+			fs.mkdirSync(path.join(code, "client", "dist"), { recursive: true });
+			fs.writeFileSync(path.join(code, "client", "dist", "index.html"), "<!doctype html>\n");
+			fs.writeFileSync(path.join(code, "server.js"), [
+				'const s = require("http").createServer((req, res) => { res.end("{}"); s.close(); setTimeout(() => process.exit(0), 50); });',
+				"s.listen(Number(process.env.PORT), process.env.BIND_HOST);",
+				"setTimeout(() => process.exit(0), 10000);",
+			].join("\n"));
+			const home = tmp("replica-clock-home-");
+			const root = path.join(home, "LogisX-replica");
+			fs.mkdirSync(path.join(root, "clean"), { recursive: true });
+			for (const d of ["uploads", "storage", "evidence-archive"]) fs.mkdirSync(path.join(root, d));
+			fs.writeFileSync(path.join(root, "clean", "app.db"), "");
+			fs.writeFileSync(path.join(root, "clean", "sheets.json"), JSON.stringify({ format: 1, spreadsheets: { "made-up-main": { role: "main" } } }));
+			fs.writeFileSync(path.join(root, "clean", "manifest.json"), JSON.stringify({ snapshotAt: "2030-01-01T00:00:00Z", production: { node: process.version, commit: "0".repeat(40), timeZone: "UTC" } }));
+			fs.writeFileSync(path.join(root, "settings.env"), settingsText, { mode: 0o600 });
+			const port = await freePort();
+			return spawnSync(process.execPath, [path.join(code, "scripts", "replica", "start.js"), "--task", "clock", "--port", String(port)], {
+				encoding: "utf8", timeout: 60000, env: { PATH: process.env.PATH, HOME: home, LANG: "en_US.UTF-8", TMPDIR: os.tmpdir() },
+			});
+		};
+		const without = await start("ROUTEMATE_ENABLED='true'\nAPP_TIMEZONE='America/Chicago'\n");
+		const lines = without.stdout.split("\n");
+		const serving = lines.findIndex((l) => /is serving at http:\/\/127\.0\.0\.1:/.test(l));
+		const warned = lines.findIndex((l) => l.startsWith("replica: WARNING, BUSINESS CLOCK: "));
+		ok("replica:start on Central with no APP_TIMEZONE_FROM serves and prints the warning once, after the serving line", without.status === 0 && serving >= 0 && warned > serving
+			&& LINE.test(lines[warned].slice("replica: ".length)) && lines.filter((l) => /BUSINESS CLOCK/.test(l)).length === 1, { status: without.status, out: without.stdout.slice(-600), err: without.stderr.slice(-300) });
+		const withFrom = await start(`ROUTEMATE_ENABLED='true'\nAPP_TIMEZONE='America/Chicago'\nAPP_TIMEZONE_FROM='${FROM}'\n`);
+		ok("...and with a usable APP_TIMEZONE_FROM it serves with no such line", withFrom.status === 0 && /is serving at/.test(withFrom.stdout) && !/BUSINESS CLOCK/.test(withFrom.stdout + withFrom.stderr), { status: withFrom.status, out: withFrom.stdout.slice(-600), err: withFrom.stderr.slice(-300) });
 	}
 
 	console.log(failures ? `\n${failures} FAILED` : "\nall passed");
