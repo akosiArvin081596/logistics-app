@@ -84,10 +84,13 @@ const USERS_ALTERS = [...SRC.matchAll(/db\.exec\("(ALTER TABLE users ADD COLUMN 
 const CHILDREN = ["driver_emergency_contacts", "driver_onboarding", "driver_payment_info", "onboarding_documents"];
 const CHILD_DDL = CHILDREN.map((t) => lift(new RegExp(`CREATE TABLE IF NOT EXISTS ${t} \\([\\s\\S]*?\\n\\t\\)`), `the ${t} CREATE`));
 const AUDIT_DDL = lift(/CREATE TABLE IF NOT EXISTS audit_trail \([\s\S]*?\n\t\)/, "the audit_trail CREATE");
-// The probe row server.js inserts and deletes at every start (one id used per start).
-const PROBE_INSERT = (/db\.prepare\("(INSERT INTO users \(username, password_hash, role\) VALUES \('__test_sa__'[^"]*)"\)/.exec(SRC) || [])[1];
-const PROBE_DELETE = (/db\.prepare\("(DELETE FROM users WHERE username = '__test_sa__')"\)/.exec(SRC) || [])[1];
-ok("(fixture) server.js has the start-up probe", !!PROBE_INSERT && !!PROBE_DELETE);
+// The probe row the start-up check inserts and deletes at every start (one id used per start), read from
+// lib/users-table-migrate.js, or from server.js in a base that has no such lib.
+const PROBE_LIB = path.join(BASE, "lib", "users-table-migrate.js");
+const PROBE_SRC = `${SRC}\n${fs.existsSync(PROBE_LIB) ? fs.readFileSync(PROBE_LIB, "utf8") : ""}`;
+const PROBE_INSERT = (/"(INSERT INTO users \(username, password_hash, role\) VALUES \('__test_sa__'[^"]*)"/.exec(PROBE_SRC) || [])[1];
+const PROBE_DELETE = (/"(DELETE FROM users WHERE username = '__test_sa__')"/.exec(PROBE_SRC) || [])[1];
+ok("(fixture) the start-up probe is found", !!PROBE_INSERT && !!PROBE_DELETE);
 // better-sqlite3-session-store's table and its expiry sweep (src/index.js).
 const SESSIONS_DDL = "CREATE TABLE IF NOT EXISTS sessions (sid TEXT NOT NULL PRIMARY KEY, sess JSON NOT NULL, expire TEXT NOT NULL)";
 const SESSION_SWEEP = "DELETE FROM sessions WHERE datetime('now') > datetime(expire)";
