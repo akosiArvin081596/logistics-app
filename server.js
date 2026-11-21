@@ -38702,7 +38702,8 @@ function recordPeriodRefusal(audit, code, periods, subjectFallback) {
 // present, the same ranking dispatchWriteBlocker() and statusOverrideBlocker()
 // already use: "this would restate June" is the answer an operator can act on.
 //
-// `finalizedMessage` is optional (only PUT /api/invoices/:id/adjust passes it).
+// `finalizedMessage` is optional: PUT /api/invoices/:id/adjust passes it, and so do
+// the link routes for a date cell the stop can't read (eldLinkBlockedResponse()).
 // When the blockers name finalized months and nothing unresolved, it gets those
 // months' labels and returns the whole `error`. The rest of the body and the
 // audit row are the same either way.
@@ -38783,6 +38784,12 @@ function eldLinkRowMonths(headers, rows, unitNumber) {
 	}
 	return [...months].sort();
 }
+// Job Tracking as the narrowed stop (check (5b')) reads it: a date cell holding only a time of day is blank, as the pay
+// paths read it (lib/eld-link-forward.js blankTimeOnlyCells()); every other cell as written. Check (5b) and every other
+// reader of these cells read them as written.
+function eldLinkStopRows(headers, rows) {
+	return eldLinkForward.blankTimeOnlyCells(headers, rows);
+}
 // The narrowed stop's rows (check (5b')): each row carrying the unit, as { months, lastDay, loadId } (with
 // `firstSheetRow`, rows[0]'s sheet row, also sheetRow and pickupDay). lastDay is the latest day a date cell holds, "" with
 // no end date (still running); null when a date cell can't be read, as eldLinkRowMonths() answers.
@@ -38860,52 +38867,56 @@ function eldLinkBadCell(headers, rows, unitNumber, firstSheetRow) {
 	}
 	return null;
 }
-// With `reach` (the narrowed stop), { months, reach }: the rows behind the months too.
+// One unit's rows as the narrowed stop reads them (`rows` through eldLinkStopRows()): { months, reach, cell }, each row
+// with its sheet row and pickup day, and `cell` naming the date that can't be read when reach is null.
+function eldLinkUnitReach(headers, rows, unit) {
+	const months = eldLinkRowMonths(headers, rows, unit);
+	const reach = months === null ? null : eldLinkRowReach(headers, rows, unit, { firstSheetRow: 2 });
+	return { months, reach, cell: reach === null ? eldLinkBadCell(headers, rows, unit, 2) : null };
+}
+// With `reach` (the narrowed stop), { months, reach, cell } as eldLinkUnitReach() reads them; without it, check (5b)'s
+// months from the cells as written.
 async function eldLinkLoadMonths(unitNumber, { reach = false } = {}) {
 	const sheets = await getSheets();
 	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 	const values = (response && response.data && response.data.values) || [];
-	const months = eldLinkRowMonths(values[0] || [], values.slice(1), unitNumber);
-	if (!reach) return months;
-	return { months, reach: months === null ? null : eldLinkRowReach(values[0] || [], values.slice(1), unitNumber) };
+	if (!reach) return eldLinkRowMonths(values[0] || [], values.slice(1), unitNumber);
+	return eldLinkUnitReach(values[0] || [], eldLinkStopRows(values[0] || [], values.slice(1)), unitNumber);
 }
 
 // The link/unlink routes' one await, run ABOVE every check they make (house rule:
 // no await between a check and its write). Returns the truck row re-read AFTER
 // the await, and eldLinkMonths = null — every finalized month — when the tab
 // could not be read or the unit was renamed while it was being read. Under the
-// forward-only link rule also eldLinkForward (eldLinkForwardStop()).
+// forward-only link rule also eldLinkForward (eldLinkForwardStop()), carrying the
+// `cell` that keeps its rows unknown (eldLinkBadCell()), or null.
 async function eldLinkPreflight(truckId, truck) {
 	const forward = eldLinkForwardRule().inForce;
 	let eldLinkMonths = null;
 	let reach = null;
+	let cell = null;
 	if (periodLocksReadable() && lockedPeriodsDesc().length) {
 		try {
 			const read = await eldLinkLoadMonths(truck.unit_number, { reach: forward });
-			if (forward) ({ months: eldLinkMonths, reach } = read || {});
+			if (forward) ({ months: eldLinkMonths, reach, cell = null } = read || {});
 			else eldLinkMonths = read;
 		}
 		catch (e) { console.warn(`ELD link guard: Job Tracking unreadable (${e.message}); guarding every finalized month`); }
 	}
 	const fresh = db.prepare("SELECT * FROM trucks WHERE id = ?").get(truckId);
-	if (fresh && eldLinkUnitKey(fresh.unit_number) !== eldLinkUnitKey(truck.unit_number)) { eldLinkMonths = null; reach = null; }
-	return forward ? { truck: fresh, eldLinkMonths, eldLinkForward: eldLinkForwardStop(reach) } : { truck: fresh, eldLinkMonths };
+	if (fresh && eldLinkUnitKey(fresh.unit_number) !== eldLinkUnitKey(truck.unit_number)) { eldLinkMonths = null; reach = null; cell = null; }
+	return forward ? { truck: fresh, eldLinkMonths, eldLinkForward: { ...eldLinkForwardStop(reach), cell } } : { truck: fresh, eldLinkMonths };
 }
 
 // Several units' reach from ONE Job Tracking read, so the two trucks of a move are judged on the same values: for each
-// unit { months, reach, cell } as eldLinkLoadMonths() answers with `reach`, each row with its sheet row and pickup day,
-// and `cell` naming the date that can't be read when reach is null (eldLinkBadCell()).
+// unit { months, reach, cell } as eldLinkUnitReach() reads them, through the stop's view (eldLinkStopRows()).
 async function eldLinkLoadReaches(units) {
 	const sheets = await getSheets();
 	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 	const values = (response && response.data && response.data.values) || [];
 	const headers = values[0] || [];
-	const rows = values.slice(1);
-	return units.map((unit) => {
-		const months = eldLinkRowMonths(headers, rows, unit);
-		const reach = months === null ? null : eldLinkRowReach(headers, rows, unit, { firstSheetRow: 2 });
-		return { months, reach, cell: reach === null ? eldLinkBadCell(headers, rows, unit, 2) : null };
-	});
+	const rows = eldLinkStopRows(headers, values.slice(1));
+	return units.map((unit) => eldLinkUnitReach(headers, rows, unit));
 }
 
 // Move device's one await: both units' reach from one read, both trucks re-read after it, one instant for both stops.
@@ -38973,6 +38984,20 @@ function eldLinkForwardBlocker(truck, was, now, locked, stop) {
 		...head, periods: months, forward: true,
 		detail: `its ${many ? `${reaching.length} loads` : "load"} assigned in ${months.map(periodLabel).join(" and ")} ${when}, so this would change pay in a finalized month`,
 	};
+}
+
+// The link and unlink routes' refusal (`kind`: "link", "re-point" or "unlink"; `audit`, the route's audit descriptor).
+// When the stop's rows are unknown because of a date cell (stop.cell), the error alone is Move device's words for it
+// (lib/eld-link-forward.js linkCellRefusal()); the code, the periods, the blockers, the audit row and every other
+// refusal's words are as before.
+function eldLinkBlockedResponse(req, res, { kind, unit, blockers, stop, audit: linkAudit }) {
+	const what = `Cannot ${kind} the ELD device on ${unit}`;
+	const remedy = blockers.every((b) => b.forward) ? "Nothing was changed."
+		: "Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.";
+	const cell = stop && stop.cell && !Array.isArray(stop.rows) ? stop.cell : null;
+	if (!cell) return periodBlockedResponse(req, res, what, blockers, remedy, linkAudit);
+	const words = eldLinkForward.linkCellRefusal({ kind, unit, cell });
+	return periodBlockedResponse(req, res, what, blockers, remedy, linkAudit, () => words.text);
 }
 
 // Everything a PUT /api/trucks/:id would restate inside a finalized month.
@@ -53466,12 +53491,10 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 			};
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Linking an ELD device", linkAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(req, res,
-					`Cannot ${truck.routemate_vehicle_id ? "re-point" : "link"} the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
-					lock.blockers,
-					lock.blockers.every((b) => b.forward) ? "Nothing was changed."
-						: "Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
-					linkAudit);
+				return eldLinkBlockedResponse(req, res, {
+					kind: truck.routemate_vehicle_id ? "re-point" : "link", unit: truck.unit_number || `truck #${truckId}`,
+					blockers: lock.blockers, stop: forwardStop, audit: linkAudit,
+				});
 			}
 		}
 
@@ -53526,12 +53549,9 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 			};
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Unlinking an ELD device", unlinkAudit);
 			if (lock.blockers.length) {
-				return periodBlockedResponse(req, res,
-					`Cannot unlink the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
-					lock.blockers,
-					lock.blockers.every((b) => b.forward) ? "Nothing was changed."
-						: "Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
-					unlinkAudit);
+				return eldLinkBlockedResponse(req, res, {
+					kind: "unlink", unit: truck.unit_number || `truck #${truckId}`, blockers: lock.blockers, stop: forwardStop, audit: unlinkAudit,
+				});
 			}
 		}
 		// Same pairing as the link route: the unlink closes the device's dated record.

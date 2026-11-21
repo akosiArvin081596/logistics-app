@@ -6,8 +6,9 @@
 //       picking D-7 makes the button Move here
 //   EM2 Move here: the confirm, "Move D-7 from T-100 to T-200?" and its line
 //   EM3 Move device: the toast says from when T-200 reads D-7 and T-100 has none; T-200 reads Linked, T-100 offers Link
-//   EM4 T-300 moving D-9 off T-150, whose October load has "14:00" under Pickup Appointment: the refusal in the
+//   EM4 T-300 moving D-9 off T-150, whose October load has "TBD" under Pickup Appointment: the refusal in the
 //       dialog, its lead in bold, then the data-fix line, and only Close
+//   EM5 the same row with "14:00" there, a time alone, which the stop reads as blank: D-9 moves off T-150 onto T-300
 //   EMw per step: the page is exactly the viewport wide (clientWidth) and never wider (scrollWidth)
 //   EMx no page error; the only writes are the move route's, none with the switch off
 // Every answer for GET /api/trucks, GET /api/routemate/vehicles/unlinked, GET /api/routemate/vehicles and POST
@@ -85,13 +86,14 @@ const WORDS = {
   confirmBody: 'From now on D-7 counts for T-200. T-100 will have no ELD device until you link one. Earlier days stay as they were.',
   moved: "Moved. From Fri Nov 20 09:41 (Eastern), T-200's ELD readings come from D-7, and T-100 has no ELD device. Earlier days stay as they were.",
   refusalLead: 'Cannot move D-9.',
-  refusal: 'Cannot move D-9. Load L-1001 on T-150 has "14:00" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can\'t be moved off T-150.',
+  refusal: 'Cannot move D-9. Load L-1001 on T-150 has "TBD" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can\'t be moved off T-150.',
   dataFix: 'This needs a data fix. Send a screenshot of this message to the LogisX team. Nothing was changed.',
+  movedOffT150: "Moved. From Fri Nov 20 09:41 (Eastern), T-300's ELD readings come from D-9, and T-150 has no ELD device. Earlier days stay as they were.",
 }
 
 function makeWorld({ move }) {
-  // T-150's October load carries a time with no date under Pickup Appointment: the N1 bad cell.
-  const badCell = { ...W.loadRow({ id: 'L-1001', driver: LEE, pickup: '2026-10-26', dropoff: '2026-10-28', assigned: '2026-10-26', done: '2026-10-28', truck: 'T-150' }), 'Pickup Appointment': '14:00' }
+  // T-150's October load carries text that is no date under Pickup Appointment: the N1 bad cell.
+  const badCell = { ...W.loadRow({ id: 'L-1001', driver: LEE, pickup: '2026-10-26', dropoff: '2026-10-28', assigned: '2026-10-26', done: '2026-10-28', truck: 'T-150' }), 'Pickup Appointment': 'TBD' }
   const w = W.startWorld({
     env: { ELD_LINK_FORWARD_ONLY_ENABLED: 'true', ELD_LINK_FORWARD_ONLY_FROM: FROM, ...(move ? { ELD_MOVE_DEVICE_ENABLED: 'true' } : {}) },
     drivers: [{ name: PAT }, { name: SAM }, { name: LEE }, { name: KIM }],
@@ -330,6 +332,22 @@ async function runSize(browser, size) {
       `lead "${lead}"; ${JSON.stringify(paragraphs)}; buttons ${JSON.stringify(closeOnly)}; T-150 still Linked: ${stillOn}; ${w.text}`,
       lead === WORDS.refusalLead && JSON.stringify(paragraphs) === JSON.stringify([WORDS.refusal, WORDS.dataFix]) && JSON.stringify(closeOnly) === '["Close"]' && stillOn && w.ok,
       await shot(page, `refusal-${size.tag}`))
+
+    // EM5: the same row with a time alone under Pickup Appointment, which the stop reads as blank: the move passes.
+    await modal.getByRole('button', { name: 'Close' }).click()
+    await modal.waitFor({ state: 'hidden', timeout: 15000 })
+    world.setRow('L-1001', { 'Pickup Appointment': '14:00' })
+    modal = await openLink(page, 'T-300')
+    await modal.locator('.rm-move-item', { hasText: 'on T-150' }).click()
+    await modal.getByRole('button', { name: 'Move here' }).click()
+    await modal.getByRole('button', { name: 'Move device' }).click()
+    const movedOff = await toastText(page)
+    const onT300 = await rowOf(page, 'T-300').locator('.rm-linked').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+    const offT150 = await rowOf(page, 'T-150').locator('button.btn-link-rm').waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+    w = await widths(page, size)
+    record(`EM5 ${size.tag}`, 'the same row with "14:00" under Pickup Appointment: D-9 moves off T-150 onto T-300',
+      `"${movedOff}"; T-300 Linked: ${onT300}; T-150 Link: ${offT150}; ${w.text}`, movedOff === WORDS.movedOffT150 && onT300 && offT150 && w.ok,
+      await shot(page, `moved-time-only-${size.tag}`))
   } finally {
     await ctx.close()
     world.db.close()
@@ -349,9 +367,9 @@ async function main() {
       try { await runSize(browser, size) } catch (e) { record(`EM! ${size.tag}`, 'aborted', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
     const moveWrites = writes.filter((x) => / POST \/api\/trucks\/\d+\/move-eld$/.test(x))
-    record('EMx', 'no page error; the only writes are the move route, two per size (the move and the refusal)',
+    record('EMx', 'no page error; the only writes are the move route, three per size (the move, the refusal and the move off the time-only row)',
       `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; writes: ${writes.join(', ') || 'none'}; unanswered GETs (fixtures {}): ${[...unanswered].join(', ') || 'none'}`,
-      pageErrors.length === 0 && moveWrites.length === writes.length && writes.length === 2 * SIZES.length)
+      pageErrors.length === 0 && moveWrites.length === writes.length && writes.length === 3 * SIZES.length)
   } finally {
     if (browser) await browser.close().catch(() => {})
     await new Promise((r) => server.close(() => r()))
