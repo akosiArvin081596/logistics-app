@@ -334,9 +334,9 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 		const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
 		new Function("app", "requireRole", "signInLib", "db", "console", SIGN_INS_SRC)(app, requireRole, signInLib, db, console);
 	}
-	// The route also hands the browser APP_TIMEZONE (lib/app-time.js) and the
-	// voice-note flag (its features).
-	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
+	// The route also hands the browser APP_TIMEZONE (lib/app-time.js), the
+	// voice-note flag and the upload card's switches (its features; none named here).
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", "POD_UPLOAD_FEATURES", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false, {});
 	if (withSetup) {
 		// The setup's reserved-name check is scripts/test-messages-staff-only.js's
 		// subject; here no name is reserved.

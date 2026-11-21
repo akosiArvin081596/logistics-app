@@ -9,8 +9,9 @@
 //      every _ENABLED name server.js or lib/ reads is classified exactly once
 //      (a new flag fails this runner until someone decides), every allowed
 //      name is read by the app, and every line that reads it has a
-//      default-off shape (=== "true", !== "true", the true|1|yes|on test, or
-//      toLowerCase() === "true"); a made-up default-on read is caught
+//      default-off shape (=== "true", !== "true", the true|1|yes|on test,
+//      toLowerCase() === "true", or a handed env's trimmed value === "true");
+//      a made-up default-on read is caught
 //   §2 replica:start with two allowed flags: exits 0, its banner says
 //      "enabled for this task: ..." with both names, the server's environment
 //      holds exactly those two _ENABLED names set to "true", the record lists
@@ -167,22 +168,27 @@ function readsDefaultOff(name, srcs) {
 		// process.env, or an `env` a lib function is handed (lib/trip-work-days.js ruleFromEnv()).
 		new RegExp(`/\\^\\(true\\|1\\|yes\\|on\\)\\$/i\\.test\\(String\\((?:process\\.)?env\\.${n} \\?\\? ""\\)\\.trim\\(\\)\\)`),
 		new RegExp(`String\\(process\\.env\\.${n} \\|\\| ""\\)\\.toLowerCase\\(\\) === "true"`),
+		// A lib reader handed the environment, on only for exactly "true" after a trim (the Triumph
+		// switches' shape, lib/triumph-rules.js batchRecompressEnabled()).
+		new RegExp(`String\\(\\(env && env\\.${n}\\) \\?\\? ""\\)\\.trim\\(\\) === "true"`),
 	];
 	const reads = srcs.flatMap((src) => src.split("\n")).filter((l) => new RegExp(`env\\.${n}\\b`).test(l));
 	return reads.length > 0 && reads.every((l) => shapes.some((rx) => rx.test(l)));
 }
 eq("every allowed name defaults off on every line that reads it", ALLOWED.filter((n) => !readsDefaultOff(n, sources)), []);
-eq("(check) a made-up default-on read is caught: !== \"false\", the false|0|no|off kill switch, a bare truthy read, no read",
+eq("(check) a made-up default-on read is caught: !== \"false\", the false|0|no|off kill switch, a bare truthy read, no read, the Triumph switches' trimmed shape with !== \"false\"",
 	["const A = process.env.A_ENABLED !== \"false\";",
 		"const A = !/^(false|0|no|off)$/i.test(String(process.env.A_ENABLED ?? \"\").trim());",
 		"if (process.env.A_ENABLED) on();",
-		"const B = 1;"].map((l) => readsDefaultOff("A_ENABLED", [l])),
-	[false, false, false, false]);
+		"const B = 1;",
+		"return String((env && env.A_ENABLED) ?? \"\").trim() !== \"false\";"].map((l) => readsDefaultOff("A_ENABLED", [l])),
+	[false, false, false, false, false]);
 eq("(check) the default-off shapes pass",
 	["const A = process.env.A_ENABLED === \"true\";", "if (!env || env.A_ENABLED !== \"true\") return null;",
 		"const A = /^(true|1|yes|on)$/i.test(String(process.env.A_ENABLED ?? \"\").trim());",
-		"const A = String(process.env.A_ENABLED || \"\").toLowerCase() === \"true\";"].map((l) => readsDefaultOff("A_ENABLED", [l])),
-	[true, true, true, true]);
+		"const A = String(process.env.A_ENABLED || \"\").toLowerCase() === \"true\";",
+		"return String((env && env.A_ENABLED) ?? \"\").trim() === \"true\";"].map((l) => readsDefaultOff("A_ENABLED", [l])),
+	[true, true, true, true, true]);
 
 // ---- §2-§5 replica:start ---------------------------------------------------------------------
 const STAND_IN_SERVER = `"use strict";

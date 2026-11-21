@@ -187,7 +187,10 @@ function makeDb() {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL,
 			file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '',
 			uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '',
-			deleted_at DATETIME DEFAULT NULL, deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT ''
+			deleted_at DATETIME DEFAULT NULL, deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '',
+			upload_pages INTEGER DEFAULT NULL, upload_page_sources TEXT DEFAULT NULL, upload_pages_scanned INTEGER DEFAULT NULL,
+			upload_pages_not_scanned INTEGER DEFAULT NULL, upload_pages_recompressed INTEGER DEFAULT NULL,
+			upload_bytes_before INTEGER DEFAULT NULL, upload_bytes_after INTEGER DEFAULT NULL, upload_pages_left_large INTEGER DEFAULT NULL
 		);
 		CREATE INDEX idx_documents_file_name ON documents(file_name);
 		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, company_name TEXT DEFAULT '');

@@ -31,6 +31,15 @@
  *      Super Admin still does.
  *   §5 the callers the document gates were sized against.
  *   §6 DISCRIMINATION: one mutant per document gate, each required to flip.
+ *   §7 POD and BOL photos shaped at upload (POD_UPLOAD_NORMALIZE_ENABLED,
+ *      lib/pod-upload-shape.js) through the shipped upload route: guards that
+ *      pass on the base by design (switch off, the file is byte for byte what
+ *      the base's imageToPdf() writes; with it on, a PDF, a Receipt and an Other
+ *      image as before, a CMYK or orientation-6 photo as it came, no stored file
+ *      rewritten, the withheld list as it was, the session says nothing is on),
+ *      the new behaviour (Letter pages under the budget, the row's counts and
+ *      "unknown", one audit row, the list's count columns, the session's
+ *      features), and one mutant per check.
  *
  * Pure: no server, no port, no app.db, no network, no fixtures on disk.
  *
@@ -196,7 +205,10 @@ docDb.exec(`
 		load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL,
 		drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '',
 		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL,
-		uploaded_by_user_id INTEGER DEFAULT NULL, uploaded_by_role TEXT DEFAULT NULL
+		uploaded_by_user_id INTEGER DEFAULT NULL, uploaded_by_role TEXT DEFAULT NULL,
+		upload_pages INTEGER DEFAULT NULL, upload_page_sources TEXT DEFAULT NULL, upload_pages_scanned INTEGER DEFAULT NULL,
+		upload_pages_not_scanned INTEGER DEFAULT NULL, upload_pages_recompressed INTEGER DEFAULT NULL,
+		upload_bytes_before INTEGER DEFAULT NULL, upload_bytes_after INTEGER DEFAULT NULL, upload_pages_left_large INTEGER DEFAULT NULL
 	);
 	INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES
 		('L-100', 'Desoren King', 'POD', 'L-100_POD_1.pdf', '/uploads/L-100_POD_1.pdf'),
@@ -604,9 +616,293 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	ok("MUTANT 2 (type list applied to nobody): the §2 Driver RATECON assertion flips",
 		r.status === 200 && docRowCount() - beforeM2 === 1 && lastDoc().type === "RATECON", brief(r));
 
+	// =========================================================================
+	console.log("\n§7  POD and BOL photos shaped at upload (POD_UPLOAD_NORMALIZE_ENABLED)");
+	// =========================================================================
+	await shapedUploads();
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })().catch((err) => {
 	console.error("FAIL  runner crashed:", err && err.stack ? err.stack : err);
 	process.exit(1);
 });
+
+// §7: the shipped upload route, list route and session route, run with the real lib/pod-upload-shape.js
+// (its child included) and made-up photos (scripts/lib/made-up-jpeg.js). Each check is a function of the
+// route it runs, so its mutant runs the same check on a route built from a source with one edit.
+async function shapedUploads() {
+	const Module = require("module");
+	const jpegs = require("./lib/made-up-jpeg");
+	const PDFKit = require("pdfkit");
+	const { PDFDocument } = require("pdf-lib");
+	const imageLimits = require("../lib/image-size");
+	const tryRequire = (rel) => { try { return require(rel); } catch { return null; } };
+	const shapeLib = tryRequire("../lib/pod-upload-shape");
+	const slotsLib = tryRequire("../lib/image-child-slots");
+	const BUDGET = 200 * 1024;
+	const FIXED = new Date("2026-11-02T15:04:05Z");
+	class FixedPDF extends PDFKit {
+		constructor(o = {}) { super({ ...o, info: { CreationDate: FIXED } }); }
+	}
+	// The base's imageToPdf() (c4d54380), word for word: what every photo upload stored before.
+	const BASE_IMAGE_TO_PDF = [
+		"function imageToPdf(imageBuffers) {",
+		"	const buffers = Array.isArray(imageBuffers) ? imageBuffers : [imageBuffers];",
+		"	return new Promise((resolve, reject) => {",
+		"		for (const buf of buffers) {",
+		"			const verdict = imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO);",
+		"			if (!verdict.ok) return reject(imageLimits.refusalError(verdict, \"photo\"));",
+		"		}",
+		"		const doc = new PDFDocument({ autoFirstPage: false });",
+		"		const chunks = [];",
+		"		doc.on(\"data\", (chunk) => chunks.push(chunk));",
+		"		doc.on(\"end\", () => resolve(Buffer.concat(chunks)));",
+		"		doc.on(\"error\", reject);",
+		"		for (const buf of buffers) {",
+		"			const img = doc.openImage(buf);",
+		"			doc.addPage({ size: [img.width, img.height] });",
+		"			doc.image(img, 0, 0);",
+		"		}",
+		"		doc.end();",
+		"	});",
+		"}",
+	].join("\n");
+	const baseImageToPdf = new Function("PDFDocument", "imageLimits", `${BASE_IMAGE_TO_PDF}\nreturn imageToPdf;`)(FixedPDF, imageLimits);
+	const shippedImageToPdf = new Function("PDFDocument", "imageLimits", `${liftFn("imageToPdf")}\nreturn imageToPdf;`)(FixedPDF, imageLimits);
+	ok("§7 (fixture) the shipped imageToPdf() is the base's, word for word", liftFn("imageToPdf").trim() === BASE_IMAGE_TO_PDF);
+
+	const P = {
+		big: jpegs.jpeg({ width: 1200, height: 900, quality: 100, seed: 3, blank: true }),
+		small: jpegs.jpeg({ width: 820, height: 620, quality: 76, seed: 5 }),
+		small2: jpegs.jpeg({ width: 820, height: 620, quality: 70, seed: 21 }),
+		// Near-blank, so a step would shrink each: only the whitelist keeps them as they came. The CMYK
+		// one carries Adobe's segment, as a CMYK photo does, so the decoder can read it.
+		cmyk: jpegs.jpeg({ width: 820, height: 620, quality: 100, components: 4, seed: 8, blank: true, adobe: { transform: 0, at: "before" } }),
+		turned: jpegs.jpeg({ width: 1280, height: 960, quality: 100, seed: 9, orientation: 6, blank: true }),
+	};
+	const uri = (b) => `data:image/jpeg;base64,${b.toString("base64")}`;
+	const written = [];
+	const audits = [];
+	const fsRecorder = {
+		existsSync: () => true,
+		mkdirSync: () => {},
+		writeFileSync: (p, bytes) => { counters.files.push(p); written.push({ p, bytes: Buffer.from(bytes) }); },
+	};
+	const shaperOf = (lib) => (lib && slotsLib ? lib.createShaper({ encode: lib.createEncoder({ slots: slotsLib.createUploadSlots() }), info: { CreationDate: FIXED } }) : null);
+	const shapeDeps = (on, lib = shapeLib) => documentDeps({
+		imageToPdf: shippedImageToPdf,
+		imageLimits,
+		isValidImageMagic: (b) => Buffer.isBuffer(b) && b[0] === 0xff && b[1] === 0xd8,
+		fs: fsRecorder,
+		POD_UPLOAD_NORMALIZE_ENABLED: on,
+		podUploadShape: lib,
+		podUploadShaper: shaperOf(lib),
+		logAudit: (req, action, entity, entityId, details) => audits.push({ action, entity, entityId: String(entityId), details }),
+	});
+	const UPLOAD = routeSource("post", "/api/documents/upload");
+	const LIST = routeSource("get", "/api/documents/:loadId");
+	const SESSION = routeSource("get", "/api/auth/session");
+	const edit = (src, from, to) => (src.split(from).length - 1 === 1 ? src.replace(from, to) : null);
+	const upRoute = (on, src = UPLOAD, lib = shapeLib) => (src ? buildRoute("post", "/api/documents/upload", shapeDeps(on, lib), src) : null);
+	// A copy of lib/pod-upload-shape.js with one exact edit, or null.
+	const libWith = (from, to) => {
+		try {
+			const file = path.join(ROOT, "lib", "pod-upload-shape.js");
+			const src = fs.readFileSync(file, "utf8");
+			if (src.split(from).length - 1 !== 1) return null;
+			const m = new Module(file, module);
+			m.filename = file;
+			m.paths = Module._nodeModulePaths(path.dirname(file));
+			m._compile(src.replace(from, to), file);
+			return m.exports;
+		} catch {
+			return null;
+		}
+	};
+	const imageBody = (loadId, docType, photos, extra = {}) => ({
+		loadId, rowIndex: 2, docType, photoData: photos.length === 1 ? uri(photos[0]) : photos.map(uri), fileType: "image", ...extra,
+	});
+	const send = async (rt, user, body) => {
+		resetCounters();
+		written.length = 0;
+		audits.length = 0;
+		const res = await call(rt, { user, method: "POST", body });
+		return { ...res, file: written.length === 1 ? written[0].bytes : null, writes: written.length, row: lastDoc(), audits: audits.slice() };
+	};
+	const COUNT_KEYS = ["upload_pages", "upload_page_sources", "upload_pages_scanned", "upload_pages_not_scanned", "upload_pages_recompressed",
+		"upload_bytes_before", "upload_bytes_after", "upload_pages_left_large"];
+	const counted = (row) => COUNT_KEYS.map((k) => row[k]);
+	const noCounts = (row) => counted(row).every((v) => v === null);
+	const pagesOf = async (pdf) => (await PDFDocument.load(pdf)).getPages().map((p) => { const s = p.getSize(); return [Math.round(s.width), Math.round(s.height)]; });
+	const run = async (check, rt) => { if (!rt) return null; try { return await check(rt); } catch { return null; } };
+	const mutants = [];
+	const mutant = (label, check, control, build) => mutants.push({ label, check, control, build });
+
+	// ---- guards: each passes on the base by design ----
+	const offSame = async (rt) => {
+		const r = await send(rt, DK, imageBody("L-100", "POD", [P.small, P.small2]));
+		return r.status === 200 && r.file && r.file.equals(await baseImageToPdf([P.small, P.small2])) && noCounts(r.row) && r.audits.length === 0;
+	};
+	const g1 = await run(offSame, upRoute(false));
+	ok("§7 (guard) switch off: a POD of two photos is stored byte for byte as the base's imageToPdf() writes it (a fixed clock), with no counts and no audit row", g1 === true);
+	mutant("shaped whatever the switch says: the switch-off guard flips", offSame, g1,
+		() => upRoute(false, edit(UPLOAD, "if (POD_UPLOAD_NORMALIZE_ENABLED && podUploadShape.shapedType(docType)) {", "if (podUploadShape.shapedType(docType)) {")));
+
+	const PDF_BYTES = Buffer.from("%PDF-1.4\n% a made-up proof of delivery\n%%EOF\n");
+	const pdfSame = async (rt) => {
+		const r = await send(rt, DK, { loadId: "L-100", rowIndex: 2, docType: "POD", photoData: `data:application/pdf;base64,${PDF_BYTES.toString("base64")}`, fileType: "document", fileName: "pod.pdf" });
+		return r.status === 200 && r.file && r.file.equals(PDF_BYTES) && noCounts(r.row) && r.audits.length === 0;
+	};
+	const g2 = await run(pdfSame, upRoute(true));
+	ok("§7 (guard) switch on: a POD PDF is stored byte for byte as sent, with no counts and no audit row", g2 === true);
+	mutant("a PDF sent down the photo path: the PDF guard flips", pdfSame, g2, () => upRoute(true, edit(UPLOAD, "if (fileType === 'document') {", "if (fileType === 'never') {")));
+
+	const othersSame = async (rt) => {
+		const out = [];
+		for (const t of ["Receipt", "Other"]) {
+			const r = await send(rt, DK, imageBody("L-100", t, [P.small]));
+			out.push(r.status === 200 && r.row.type === t && r.file && r.file.equals(await baseImageToPdf([P.small])) && noCounts(r.row) && r.audits.length === 0);
+		}
+		return out.every(Boolean);
+	};
+	const g3 = await run(othersSame, upRoute(true));
+	ok("§7 (guard) switch on: a Receipt image and an Other image are stored as the base's imageToPdf() writes them, with no counts", g3 === true);
+	mutant("every type shaped: the Receipt and Other guard flips", othersSame, g3,
+		() => upRoute(true, edit(UPLOAD, "if (POD_UPLOAD_NORMALIZE_ENABLED && podUploadShape.shapedType(docType)) {", "if (POD_UPLOAD_NORMALIZE_ENABLED) {")));
+
+	const leftAsCame = async (rt) => {
+		const r = await send(rt, DK, imageBody("L-100", "POD", [P.cmyk, P.turned]));
+		const ims = r.file ? await jpegs.imagesIn(r.file) : [];
+		return r.status === 200 && P.cmyk.length > BUDGET && P.turned.length > BUDGET && ims.length === 2 && ims[0].bytes.equals(P.cmyk) && ims[1].bytes.equals(P.turned);
+	};
+	const g5 = await run(leftAsCame, upRoute(true));
+	ok("§7 (guard) switch on: a CMYK and an orientation-6 photo over the budget go as they came: their streams in the stored PDF are the uploads byte for byte", g5 === true);
+	// An orientation-6 photo is kept twice over (the whitelist, then the parent's size check on a copy the
+	// decode turned), so the mutant drops the one rule that alone keeps the CMYK photo.
+	mutant("the whitelist's component rule dropped: the CMYK guard flips", leftAsCame, g5,
+		() => { const lib = libWith('if (n !== 1 && n !== 3) return left("components");', ""); return lib ? upRoute(true, UPLOAD, lib) : null; });
+
+	const neverRewritten = async (rt) => {
+		const r = await send(rt, DK, imageBody("L-100", "POD", [P.small]));
+		const earlier = docDb.prepare("SELECT file_name FROM documents WHERE id < ?").all(r.row.id).map((x) => x.file_name);
+		const name = written[0] ? path.basename(written[0].p) : "";
+		return r.status === 200 && r.writes === 1 && name === r.row.file_name && !earlier.includes(name);
+	};
+	const g6 = await run(neverRewritten, upRoute(true));
+	ok("§7 (guard) switch on: a shaped upload writes one new file of its own; no stored file is written again", g6 === true);
+	mutant("the shaped file written over a stored one: the guard flips", neverRewritten, g6,
+		() => upRoute(true, edit(UPLOAD, "fileName = `${safeLoadId}_${safeDocType}_${timestamp}.pdf`;", "fileName = \"L-100_POD_1.pdf\";")));
+
+	const withheld = async (src) => {
+		const rt = buildRoute("get", "/api/documents/:loadId", documentDeps({ loadIdWithheldFor: () => true, shownLoadId: () => "QA-[contact withheld]", routeShownLoadIdIndex: () => null }), src);
+		resetCounters();
+		const r = await call(rt, { user: DISPATCH, params: { loadId: "L-100" } });
+		const docs = (r.body && r.body.documents) || [];
+		return r.status === 200 && r.body.documentsWithheld === true && docs.length > 0 && docs.every((d) => JSON.stringify(Object.keys(d).sort()) === '["id","type","uploaded_at"]');
+	};
+	const gw = await run(withheld, LIST);
+	ok("§7 (guard) the withheld list still names each document by type and upload time only: no file, link or count", gw === true);
+	mutant("the withheld list sends whole rows: the guard flips", withheld, gw,
+		() => edit(LIST, "docs.map((d) => ({ id: d.id, type: d.type, uploaded_at: d.uploaded_at }))", "docs.map((d) => ({ ...d }))"));
+
+	const sessionFeatures = (src, features) => {
+		let handler = null;
+		new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", "POD_UPLOAD_FEATURES", `${src};`)(
+			{ get: (p, h) => { handler = h; } }, "America/New_York", {}, false, features);
+		let body = null;
+		handler({ session: { user: { id: 2, role: "Driver", username: "LogisX-1001" } } }, { json: (b) => { body = b; } });
+		return body && body.features;
+	};
+	const featOff = async (src) => {
+		const f = sessionFeatures(src, Object.freeze({ podUploadNormalize: false, podUploadScanAll: false }));
+		return Boolean(f) && f.voiceNotes === false && f.podUploadNormalize !== true && f.podUploadScanAll !== true;
+	};
+	const gs = await run(featOff, SESSION);
+	ok("§7 (guard) with both switches off, the session tells the card neither is on", gs === true);
+	mutant("the session says on whatever the switch: the guard flips", featOff, gs, () => edit(SESSION, "...POD_UPLOAD_FEATURES", "podUploadNormalize: true"));
+
+	// ---- the new behaviour: each fails on the old code ----
+	const shapedPod = async (rt) => {
+		const r = await send(rt, DK, imageBody("L-100", "POD", [P.big, P.small], { pageSources: ["scanned", "not_routed"] }));
+		const ims = r.file ? await jpegs.imagesIn(r.file) : [];
+		const f = ims[0] && jpegs.frameOf(ims[0].bytes);
+		const after = ims.reduce((n, im) => n + im.bytes.length, 0);
+		return {
+			letter: r.status === 200 && Boolean(r.file) && JSON.stringify(await pagesOf(r.file)) === "[[792,612],[792,612]]" && ims.length === 2
+				&& ims[0].bytes.length <= BUDGET && Boolean(f) && f.width === 1200 && f.height === 900 && ims[1].bytes.equals(P.small),
+			counts: JSON.stringify(counted(r.row)) === JSON.stringify([2, "scanned,not_routed", 1, 1, 1, P.big.length + P.small.length, after, 0]),
+			audit: Boolean(shapeLib) && r.audits.length === 1 && r.audits[0].action === "document_upload_shaped" && r.audits[0].entity === "documents"
+				&& r.audits[0].entityId === String(r.row.id) && r.audits[0].details === shapeLib.auditText("POD", { pages: 2, scanned: 1, notScanned: 1, recompressed: 1, bytesBefore: P.big.length + P.small.length, bytesAfter: after, leftLarge: 0, reasons: {} }),
+		};
+	};
+	const s1 = (await run(shapedPod, upRoute(true))) || {};
+	ok("§7 FAILS ON THE OLD CODE: switch on, a Driver's POD of a 469 KB and a 175 KB photo: two landscape Letter pages, the first under 200 KB at its own 1200 x 900, the second as it came", s1.letter === true);
+	ok("§7 FAILS ON THE OLD CODE: ...its row keeps the counts: 2 pages, the card's sources, 1 scanned and 1 not, 1 re-compressed, the photos' bytes before and after, none left over", s1.counts === true);
+	ok("§7 FAILS ON THE OLD CODE: ...and one audit row, counts and fixed words only, on the new document", s1.audit === true);
+	const part = (key) => async (rt) => ((await shapedPod(rt)) || {})[key] === true;
+	mutant("never shaped: the Letter pages case flips", part("letter"), s1.letter,
+		() => upRoute(true, edit(UPLOAD, "if (POD_UPLOAD_NORMALIZE_ENABLED && podUploadShape.shapedType(docType)) {", "if (false) {")));
+	mutant("the counts never stored: the row case flips", part("counts"), s1.counts,
+		() => upRoute(true, edit(UPLOAD, ").run(c.pages, c.sources, c.scanned, c.notScanned, c.recompressed, c.bytesBefore, c.bytesAfter, c.leftLarge, documentId);", ").run(null, null, null, null, null, null, null, null, documentId);")));
+	mutant("no audit row: the audit case flips", part("audit"), s1.audit,
+		() => upRoute(true, edit(UPLOAD, "\t\t\tlogAudit(req, \"document_upload_shaped\"", "\t\t\tif (false) logAudit(req, \"document_upload_shaped\"")));
+
+	const unknownSources = async (rt) => {
+		const r = await send(rt, DK, imageBody("L-100", "BOL", [P.small]));
+		return r.status === 200 && JSON.stringify(counted(r.row)) === JSON.stringify([1, "unknown", null, null, 0, P.small.length, P.small.length, 0]);
+	};
+	const s4 = await run(unknownSources, upRoute(true));
+	ok("§7 FAILS ON THE OLD CODE: a client that sends no page sources (an old one) is stored as \"unknown\"", s4 === true);
+	mutant("the route makes up a page source: the unknown case flips", unknownSources, s4,
+		() => upRoute(true, edit(UPLOAD, "{ sources: req.body.pageSources }", "{ sources: [\"scanned\"] }")));
+
+	const lowerCase = async (rt) => {
+		const r = await send(rt, SUPER, imageBody("L-200", "bol", [P.small], { driverName: "Soren King" }));
+		return r.status === 200 && r.row.type === "bol" && Boolean(r.file) && JSON.stringify(await pagesOf(r.file)) === "[[792,612]]" && r.row.upload_pages === 1;
+	};
+	const s5 = await run(lowerCase, upRoute(true));
+	ok("§7 FAILS ON THE OLD CODE: a Super Admin's \"bol\" (stored as sent) is shaped too: POD and BOL are matched without regard to case", s5 === true);
+	mutant("POD and BOL matched by case: the lower-case case flips", lowerCase, s5,
+		() => upRoute(true, edit(UPLOAD, "if (POD_UPLOAD_NORMALIZE_ENABLED && podUploadShape.shapedType(docType)) {", "if (POD_UPLOAD_NORMALIZE_ENABLED && (docType === \"POD\" || docType === \"BOL\")) {")));
+
+	const listed = async (src) => {
+		const rt = buildRoute("get", "/api/documents/:loadId", documentDeps(), src);
+		resetCounters();
+		const r = await call(rt, { user: SUPER, params: { loadId: "L-100" } });
+		const docs = (r.body && r.body.documents) || [];
+		const shaped = docs.find((d) => d.upload_page_sources === "scanned,not_routed");
+		const plain = docs.find((d) => d.file_name === "L-100_POD_1.pdf");
+		return r.status === 200 && Boolean(shaped) && shaped.upload_pages === 2 && shaped.upload_pages_recompressed === 1 && shaped.upload_pages_left_large === 0
+			&& Boolean(plain) && COUNT_KEYS.every((k) => k in plain && plain[k] === null);
+	};
+	const s6 = await run(listed, LIST);
+	ok("§7 FAILS ON THE OLD CODE: GET /api/documents/:loadId lists a shaped upload's counts, and null on every other row", s6 === true);
+	mutant("a count left out of the list: the list case flips", listed, s6, () => edit(LIST, "upload_pages_recompressed,", ""));
+
+	const featOn = async (src) => {
+		const f = sessionFeatures(src, Object.freeze({ podUploadNormalize: true, podUploadScanAll: false }));
+		const g = sessionFeatures(src, Object.freeze({ podUploadNormalize: false, podUploadScanAll: true }));
+		return Boolean(f && g) && f.voiceNotes === false && f.podUploadNormalize === true && f.podUploadScanAll === false && g.podUploadNormalize === false && g.podUploadScanAll === true;
+	};
+	const s7 = await run(featOn, SESSION);
+	ok("§7 FAILS ON THE OLD CODE: GET /api/auth/session hands the card each switch in `features`, beside voiceNotes", s7 === true);
+	mutant("the switches left out of the session: the features case flips", featOn, s7, () => edit(SESSION, ", ...POD_UPLOAD_FEATURES", ""));
+
+	const wired = (src) => /\nconst POD_UPLOAD_NORMALIZE_ENABLED = podUploadShape\.normalizeEnabled\(process\.env\);\n/.test(src)
+		&& /\nconst POD_UPLOAD_SCAN_ALL_ENABLED = podUploadShape\.scanAllEnabled\(process\.env\);\n/.test(src)
+		&& /\nconst POD_UPLOAD_FEATURES = Object\.freeze\(\{ podUploadNormalize: POD_UPLOAD_NORMALIZE_ENABLED, podUploadScanAll: POD_UPLOAD_SCAN_ALL_ENABLED \}\);\n/.test(src)
+		&& /\nif \(POD_UPLOAD_NORMALIZE_ENABLED\) console\.log\(/.test(src) && /\nif \(POD_UPLOAD_SCAN_ALL_ENABLED\) console\.log\(/.test(src)
+		&& /try \{ db\.exec\("ALTER TABLE documents ADD COLUMN upload_page_sources TEXT DEFAULT NULL"\); \} catch \{\}/.test(src);
+	const s8 = wired(SRC);
+	ok("§7 FAILS ON THE OLD CODE: server.js reads each switch once at start through its lib reader, hands both to the session, says each at start when it is on, and adds the row's columns the try/ALTER way", s8 === true);
+	mutant("a switch said nowhere at start: the wiring case flips", async (src) => wired(src), s8, () => edit(SRC, "if (POD_UPLOAD_NORMALIZE_ENABLED) console.log(", "if (false) console.log("));
+
+	// ---- one mutant per check, each against its passing control ----
+	for (const m of mutants) {
+		let built = null;
+		try { built = m.build(); } catch { built = null; }
+		const result = built ? await run(m.check, built) : null;
+		ok(`§7 MUTANT ${m.label}`, m.control === true && built !== null && result !== true, `control ${m.control}, built ${built !== null}, mutant ${result}`);
+	}
+}

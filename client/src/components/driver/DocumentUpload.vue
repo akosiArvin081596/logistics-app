@@ -138,6 +138,9 @@
       @change="handleScanFiles"
     />
 
+    <!-- Office users only, with POD_UPLOAD_NORMALIZE_ENABLED on: the PDF still goes as it is. -->
+    <p v-if="largePdfNote" class="doc-warn">{{ largePdfNote }}</p>
+
     <button
       class="btn btn-primary"
       :disabled="files.length === 0 || uploading || scanning"
@@ -151,6 +154,9 @@
       <div v-if="previewSrc" class="dup-preview-overlay" @click="closePreview">
         <iframe v-if="previewIsPdf" :src="previewSrc" class="dup-preview-frame" title="Document preview" @click.stop></iframe>
         <img v-else :src="previewSrc" class="dup-preview-img" alt="Document preview" @click.stop />
+        <!-- A page the scan routed from Upload File, "+" or a drop (POD_UPLOAD_SCAN_ALL_ENABLED):
+             the photo as it was instead of the scan, and back. -->
+        <button v-if="originalChoice" type="button" class="dup-preview-choice" @click.stop="toggleOriginal">{{ originalChoice }}</button>
         <button class="dup-preview-close" aria-label="Close preview" @click="closePreview">&times;</button>
       </div>
     </Teleport>
@@ -166,6 +172,13 @@ import { useFileDrop } from '../../composables/useFileDrop'
 import { compressImage, isDecodedImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
 import { runPool } from '../../lib/asyncPool'
 import { uploadFailureToast } from '../../lib/uploadFailure'
+import { useApi } from '../../composables/useApi'
+import { usePodUploadFeatures } from '../../composables/usePodUploadFeatures'
+import { useAuthStore } from '../../stores/auth'
+import {
+  chooseOriginal, decodeThenScan, jpegLongEdge, largePdfWarning, originalChoiceWords,
+  pageSourcesFor, routesToScan, scanOptions, uploadTimeoutFor,
+} from '../../lib/podScanRouting'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -183,6 +196,9 @@ const emit = defineEmits(['uploaded'])
 const toast = useToast()
 const { scanDocument } = useDocumentScan()
 const { uploadDocuments, uploading, progress } = useUpload()
+// The two POD and BOL switches (lib/podScanRouting.js); both off until the server says otherwise.
+const podSwitches = usePodUploadFeatures(useApi())
+const auth = useAuthStore()
 
 const docTypes = [
   { value: 'POD', label: 'Proof of Delivery' },
@@ -206,6 +222,12 @@ const files = ref([]) // see makeEntry for the shape
 // `status`: 'queued' | 'scanning' -> 'done'. Only a 'done' entry carries bytes.
 // Anything that arrives already complete (a plain upload, a drop) is born
 // 'done'. Mirrors BulkReceiptScan's OCR_PENDING / scanFinished pair.
+//
+// `source`: what the server's row counts the page as (lib/podScanRouting.js
+// pageSourceOf()): set by the scan step, '' for a page it never saw. `routed`: a
+// picture from Upload File, "+" or a drop that went through the scan
+// (POD_UPLOAD_SCAN_ALL_ENABLED); it keeps `original` and `scanned` so the
+// preview can switch between them. `size`: a file's bytes, for the office note.
 let entrySeq = 0
 function makeEntry(fields) {
   return {
@@ -216,6 +238,11 @@ function makeEntry(fields) {
     isImage: true,
     status: 'done',
     outcome: '',   // '' | 'scanned' | 'raw' | 'unreadable' | 'cancelled'
+    source: '',
+    routed: false,
+    original: '',
+    scanned: '',
+    size: 0,
     _file: null,
     ...fields,
   }
@@ -318,10 +345,20 @@ const SCAN_OFF_REASON = {
 // Tap-to-enlarge preview of a thumbnail (image, or an uploaded PDF).
 const previewSrc = ref(null)
 const previewIsPdf = ref(false)
+// The page the preview shows, for its "Use the original photo" choice.
+const previewEntry = ref(null)
+const originalChoice = computed(() => originalChoiceWords(previewEntry.value))
 
 const isScanDocType = computed(() =>
   selectedType.value === 'POD' || selectedType.value === 'BOL'
 )
+
+const largePdfNote = computed(() => largePdfWarning({
+  normalize: podSwitches.normalize.value,
+  role: auth.user?.role,
+  docType: selectedType.value,
+  files: files.value,
+}))
 
 watch(() => props.docType, (val) => {
   if (val) selectedType.value = val
@@ -362,7 +399,24 @@ async function handleFiles(selected) {
   if (!list.length) return
 
   const refused = []
+  // POD_UPLOAD_SCAN_ALL_ENABLED: a POD or BOL picture goes through the scan, as the
+  // camera's does. Its tile goes on in pick order now; the scan fills it in below.
+  const routed = []
+  let trimmed = 0
   for (const file of list) {
+    if (routesToScan({ scanAll: podSwitches.scanAll.value, docType: selectedType.value, isImage: file.type.startsWith('image/') })) {
+      if (files.value.length >= MAX_SCAN_PAGES) {
+        trimmed++
+        continue
+      }
+      // The breaker is reset as handleScanFiles resets it, right before the first
+      // tile: only when nothing else is in flight, so this pick can't un-trip one
+      // an earlier pick earned.
+      if (!routed.length && !scanning.value) scanOffStatus = 0
+      files.value.push(makeEntry({ name: file.name || 'page', status: 'queued', routed: true, _file: file }))
+      routed.push(files.value[files.value.length - 1]) // the reactive proxy, as handleScanFiles re-reads it
+      continue
+    }
     if (file.type.startsWith('image/')) {
       const data = await compressImage(file)
       // compressImage falls back to the RAW bytes when it cannot decode a file,
@@ -384,7 +438,7 @@ async function handleFiles(selected) {
         refused.push(file.name || 'file')
         continue
       }
-      files.value.push(makeEntry({ data, name: file.name, type: file.type, isImage: false }))
+      files.value.push(makeEntry({ data, name: file.name, type: file.type, isImage: false, size: file.size }))
     }
   }
 
@@ -394,6 +448,12 @@ async function handleFiles(selected) {
     const what = refused.length > 1 ? 'those' : 'it'
     toast.show(`Couldn't read ${refused.join(', ')} — try photographing ${what} with the camera instead.`, 'error')
   }
+
+  if (!routed.length && !trimmed) return
+  // One decode at a time (each holds a full photo in the phone's memory); only the
+  // ScanKit round trips run side by side, SCAN_CONCURRENCY at most.
+  await decodeThenScan(routed, { decode: decodeForScan, scan: finishScan, concurrency: SCAN_CONCURRENCY })
+  summarizeScan(routed, trimmed)
 }
 
 // Splices in place rather than reassigning files.value, so nothing holding a
@@ -418,6 +478,7 @@ function openPreview(f) {
   if (f.isImage) {
     previewSrc.value = f.data
     previewIsPdf.value = false
+    previewEntry.value = f
     return
   }
   // PDFs: a data: URI is unreliable inside <iframe> (some browsers block it),
@@ -438,10 +499,22 @@ function openPreview(f) {
 
 function closePreview() {
   previewSrc.value = null
+  previewEntry.value = null
   if (previewBlobUrl) {
     URL.revokeObjectURL(previewBlobUrl)
     previewBlobUrl = ''
   }
+}
+
+// "Use the original photo" on a routed page, and back to the scan: what the
+// upload sends for that page, and the source the server's row counts.
+function toggleOriginal() {
+  const f = previewEntry.value
+  const next = chooseOriginal(f, f && f.source !== 'original')
+  if (!next) return
+  f.data = next.data
+  f.source = next.source
+  previewSrc.value = f.data
 }
 
 onBeforeUnmount(closePreview)
@@ -480,29 +553,41 @@ function attachRaw(entry, dataUrl) {
   entry.name = `photo-${Date.now()}-${entry.key}.jpg`
   entry.type = 'image/jpeg'
   entry.outcome = 'raw'
+  entry.source = 'fallback'
 }
 
-// Fill one placeholder. NEVER THROWS — see the contract on runPool. Owns the
-// entry's terminal status and its outcome bucket, and pushes NOTHING: the tile
-// already exists, so a tile removed mid-flight stays removed instead of
-// reappearing when its scan lands.
-async function scanOne(entry) {
-  let raw = ''
+// The decode half of a scan: the photo ScanKit is sent. null when the tile was
+// removed while it sat in the queue, '' when the file can't be read. Never throws.
+async function decodeForScan(entry) {
+  // The tile may have been removed while it sat in the queue. Continuing is
+  // harmless (we'd mutate a detached object) but spends a ScanKit credit and
+  // a 30s pool slot on a page nobody wants.
+  if (!files.value.includes(entry)) return null
+  entry.status = 'scanning'
+
+  // Send a higher-res input than plain uploads so ScanKit detects edges well.
   try {
-    // The tile may have been removed while it sat in the queue. Continuing is
-    // harmless (we'd mutate a detached object) but spends a ScanKit credit and
-    // a 30s pool slot on a page nobody wants.
-    if (!files.value.includes(entry)) {
+    return await compressImage(entry._file, SCAN_MAX_EDGE)
+  } catch {
+    return ''
+  }
+}
+
+// The camera's Scan Document (and its desktop picker): each page decoded and then
+// scanned in one pool slot, as before.
+async function scanOne(entry) {
+  return finishScan(entry, await decodeForScan(entry))
+}
+
+// The scan half: fill one placeholder from its decoded photo. NEVER THROWS — see
+// the contract on runPool. Owns the entry's terminal status and its outcome
+// bucket, and pushes NOTHING: the tile already exists, so a tile removed
+// mid-flight stays removed instead of reappearing when its scan lands.
+async function finishScan(entry, raw) {
+  try {
+    if (raw === null) {
       entry.outcome = 'cancelled'
       return
-    }
-    entry.status = 'scanning'
-
-    // Send a higher-res input than plain uploads so ScanKit detects edges well.
-    try {
-      raw = await compressImage(entry._file, SCAN_MAX_EDGE)
-    } catch {
-      raw = ''
     }
     // Covers both an empty result and compressImage's raw-bytes fallback. The
     // reasoning is unchanged and costs MORE in a batch, not less: the server
@@ -513,6 +598,8 @@ async function scanOne(entry) {
       removeFile(entry)
       return
     }
+    // A routed page keeps the photo for "Use the original photo".
+    if (entry.routed) entry.original = raw
 
     // Breaker already tripped by an earlier page in this batch — skip the round
     // trip entirely and take the fallback straight away.
@@ -522,7 +609,8 @@ async function scanOne(entry) {
     }
 
     // Clean-document filter, image output — the server turns it into a PDF on upload.
-    const res = await scanDocument(raw, { filter: 'white' })
+    // With POD_UPLOAD_NORMALIZE_ENABLED on, at the photo's long edge (lib/podScanRouting.js).
+    const res = await scanDocument(raw, scanOptions({ normalize: podSwitches.normalize.value, longEdge: jpegLongEdge(raw) }))
     // ⚠️ Not in the old single-file version, and it matters more here. If
     // ScanKit ever answers with a PDF (or anything an <img> can't draw), the
     // entry is still flagged isImage and rides in handleUpload's photoData
@@ -534,9 +622,11 @@ async function scanOne(entry) {
       return
     }
     entry.data = res.data
+    if (entry.routed) entry.scanned = res.data
     entry.name = `scan-${Date.now()}-${entry.key}.jpg`
     entry.type = res.contentType || 'image/jpeg'
     entry.outcome = 'scanned'
+    entry.source = 'scanned'
   } catch (err) {
     const s = err?.status
     if (SCAN_OFF_STATUS.has(s)) scanOffStatus = s
@@ -654,6 +744,9 @@ async function handleUpload() {
   const tasks = []
   const taskSrc = []
   if (images.length) {
+    // With POD_UPLOAD_NORMALIZE_ENABLED on: each page's source, for the server's
+    // counts, and the server's steps added to the wait (lib/podScanRouting.js).
+    const normalize = podSwitches.normalize.value
     tasks.push({
       label: imageLabel,
       body: {
@@ -663,7 +756,9 @@ async function handleUpload() {
         photoData: images.length === 1 ? images[0].data : images.map(f => f.data),
         driverName: props.driverName,
         fileType: 'image',
+        ...(normalize ? { pageSources: pageSourcesFor(images) } : {}),
       },
+      timeoutMs: uploadTimeoutFor({ normalize, docType: selectedType.value }),
     })
     taskSrc.push(images)
   }
@@ -980,6 +1075,31 @@ button.photo-add:disabled {
   border-radius: 6px;
   background: #fff;
 }
+/* "Use the original photo" on a routed page: below the picture, clear of it. */
+.dup-preview-choice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  min-height: 44px;
+  padding: 0.6rem 1.1rem;
+  border: none;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The office note on a large POD or BOL PDF. */
+.doc-warn {
+  font-size: 0.8rem;
+  color: var(--amber);
+  margin: 0 0 0.75rem;
+}
+
 .dup-preview-close {
   position: fixed;
   top: calc(1rem + env(safe-area-inset-top, 0px));

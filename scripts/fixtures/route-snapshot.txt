@@ -72,7 +72,7 @@ GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@
 POST /api/auth/change-password · requireAuth@2f5c61384511 · changePasswordLimiter=limiter · inline@954e6b84e47d
 POST /api/auth/login · loginLimiter=limiter · inline@9fbb1e5e2e47
 POST /api/auth/logout · inline@a546bfc2c18f
-GET /api/auth/session · inline@ba7705acf912
+GET /api/auth/session · inline@b3316a70cb9c
 POST /api/auth/setup · setupLimiter=limiter · inline@de5cadc2d66f
 GET /api/auth/setup-check · inline@9aeadec8551c
 POST /api/chat/attachment · requireAuth@2f5c61384511 · chatAttachmentLimiter=limiter · inline@33f9d00b29e0
@@ -103,9 +103,9 @@ PUT /api/dispatch-notifications/read · requireRole("Super Admin", "Dispatcher")
 POST /api/dispatch/cancel · requireRole("Super Admin")=anon@12b84c4b0134 · inline@0217915c1306
 POST /api/dispatch/reassign · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@54d99c8474bc
 DELETE /api/documents/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@facb6c0af85f
-GET /api/documents/:loadId · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · inline@d60b0fb3f8bf
+GET /api/documents/:loadId · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · inline@efac259bc3cd
 POST /api/documents/scan · requireAuth@2f5c61384511 · scanKitLimiter=limiter · inline@1edcfc9c9f64
-POST /api/documents/upload · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@4e885cde1d91
+POST /api/documents/upload · requireRole("Super Admin", "Dispatcher", "Driver")=anon@12b84c4b0134 · driverWriteLimiter=limiter · inline@00223b07e129
 GET /api/driver-availability · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@af45a3fd793b
 PUT /api/driver-availability/:id · availabilityFlagGate@10695c42d6d5 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@6fa480145814
 POST /api/driver-availability/:id/approve · timeOffRequestsFlagGate@8e7690535088 · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@9376d4bb855b
