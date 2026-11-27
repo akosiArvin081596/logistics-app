@@ -41,7 +41,8 @@
  *      invoice's text as Chromium does, the shadow's stored digest of load
  *      123456789 equals the digest of the MIME real drafts handed Gmail for it (and
  *      the claim's own), the report's six conditions hold on that MIME, and the
- *      shadow paid for no number, Gmail call, record() or audit row
+ *      shadow paid for no number, Gmail call, record() or audit row; the job runs on a
+ *      fixed clock there, and Friday from 18:00 in the app's zone starts no render
  *  §10 sending through the block (AUTO_INVOICE_SEND_ENABLED), the engine as shipped
  *  §11 the settle window through the block: a POD a minute old holds the send for
  *      60 minutes after its own stamp, with no engine call; the block's
@@ -230,8 +231,9 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(r)));
 const openWorlds = [];
 // `readablePdf`: the stub renderer writes the invoice HTML's text into a PDF the
 // way Chromium writes text (lib/pdf-shown-text.js reads it); otherwise a
-// constant made-up PDF. `replica`: server.js's REPLICA for the block.
-async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, readablePdf = false, replica = null } = {}) {
+// constant made-up PDF. `replica`: server.js's REPLICA for the block. `now`: the
+// job's clock (its create() option), for a case whose verdict hangs on the hour.
+async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, readablePdf = false, replica = null, now = null } = {}) {
 	const w = {
 		env: { ...env },
 		sheet: [HEADERS.slice()],
@@ -389,6 +391,9 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 		return { found: count > 0, count };
 	};
 	const imapModule = { ...realImap, findDraftByMessageId };
+	// The block names no clock, so the job's create() is handed one here, over the block's own options.
+	const jobModule = serverRequire("./lib/auto-invoice-job");
+	const clockedJob = now ? { ...jobModule, create: (deps) => jobModule.create({ ...deps, now }) } : jobModule;
 	// Try again's look: the search's own contract, with no mailbox behind it.
 	const searchModule = {
 		searchMailboxForLoad: async (opts) => {
@@ -411,7 +416,7 @@ async function world({ env = {}, startsJobAnswer = true, blockText = BLOCK, read
 	}
 	const scope = {
 		brokerInvoice,
-		require: (p) => { w.required.push(p); return p === "./lib/imap-draft" ? imapModule : p === "./lib/invoice-mailbox-search" ? searchModule : serverRequire(p); },
+		require: (p) => { w.required.push(p); return p === "./lib/imap-draft" ? imapModule : p === "./lib/invoice-mailbox-search" ? searchModule : p === "./lib/auto-invoice-job" ? clockedJob : serverRequire(p); },
 		getSheets: async () => sheets,
 		SPREADSHEET_ID: "made-up-sheet",
 		jtCacheInvalidate: () => { w.invalidated++; },
@@ -982,9 +987,30 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		eq((await world({ env: { ...ON_ENV, [RENDERS]: "true" } })).job.shadowRenders, false, "§9 ...read only in shadow mode (real drafts ignore it)");
 		ok(BLOCK.split(`process.env.${RENDERS}`).length === 2, "§9 the block reads the setting once");
 
+		// The quiet window itself: Friday from 18:00 in the app's zone the shadow starts no
+		// render (the weekly batch keeps the renderer); any other evening it renders.
+		const ET = "America/New_York";
+		const FRI_18 = appTime.wallClockToMs(ET, 2026, 11, 20, 18, 0, 0);
+		eq([rules.shadowRenderQuiet(new Date(FRI_18), ET), rules.shadowRenderQuiet(new Date(FRI_18 - 60000), ET), rules.shadowRenderQuiet(new Date(FRI_18 - 86400000), ET)],
+			[true, false, false], "§9 the quiet rule: Friday 18:00 ET quiet; Friday 17:59 and Thursday 18:00 ET not");
+		for (const [label, [y, m, d], quietWant] of [["Friday 18:00", [2026, 11, 20], true], ["Thursday 18:00", [2026, 11, 19], false]]) {
+			const at = appTime.wallClockToMs(appTime.appTimeZone(), y, m, d, 18, 0, 0);
+			const x = await world({ env: { ...SHADOW_ENV, [RENDERS]: "true" }, readablePdf: true, now: () => new Date(at) });
+			await x.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED);
+			await x.job.tick();
+			x.deliver("123456789", rateCon(), { "Completion Date": `${m}/${d}/${y}` });
+			const r = await x.job.tick();
+			const renders = (r && r.sweep && r.sweep.renders) || {};
+			eq([renders.quiet === true, x.calls.prepare, x.calls.renderer], quietWant ? [true, 0, 0] : [false, 1, 1],
+				`§9 through the block, clocked ${label} in the app's zone: ${quietWant ? "quiet, no render started" : "the ready load rendered once"}`);
+		}
+
 		// Load 123456789: the render shadow builds it, real drafts draft it; the
-		// renderer writes the invoice's text as Chromium does.
-		const shadow = await world({ env: { ...SHADOW_ENV, [RENDERS]: "true" }, readablePdf: true });
+		// renderer writes the invoice's text as Chromium does. Both worlds run at noon
+		// of TODAY, so the verdicts never hang on the real clock's hour.
+		const NOON = appTime.wallClockToMs(appTime.appTimeZone(), Number(TY), Number(TM), Number(TD), 12, 0, 0);
+		const atNoon = () => new Date(NOON);
+		const shadow = await world({ env: { ...SHADOW_ENV, [RENDERS]: "true" }, readablePdf: true, now: atNoon });
 		eq((await shadow.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§9 shadow world: the broker domain confirmed");
 		await shadow.job.tick();
 		shadow.deliver("123456789", rateCon());
@@ -1000,7 +1026,7 @@ const NO_PAID = { engine: 0, drive: 0, gemini: 0, renderer: 0, numbers: 0, gmail
 		"§9 no invoice number, no Gmail append or search, no record(), no claim and no draft row: nothing reached the fake Gmail");
 		eq(shadow.db.prepare("SELECT action FROM audit_trail ORDER BY id").all().map((r) => r.action), ["update_auto_invoice_settings"], "§9 ...and no audit row of its own");
 
-		const real = await world({ env: ON_ENV, readablePdf: true });
+		const real = await world({ env: ON_ENV, readablePdf: true, now: atNoon });
 		eq((await real.call("PUT", "/api/auto-invoice/settings", SA, CONFIRMED)).status, 200, "§9 real-draft world: the broker domain confirmed");
 		await real.job.tick();
 		real.deliver("123456789", rateCon());
