@@ -2578,6 +2578,18 @@ try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''");
 // load panel and the investor portal name their columns and send neither.
 try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_user_id INTEGER DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_role TEXT DEFAULT NULL"); } catch {}
+// A POD or BOL photo upload shaped at upload (POD_UPLOAD_NORMALIZE_ENABLED, lib/pod-upload-shape.js):
+// its pages, the card's page sources ("unknown" when the client sent none), and what the page budget
+// did (the bytes: its photos' JPEG bytes as uploaded and as stored). NULL = not shaped: every other
+// row, and every row while the switch is off.
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_pages INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_page_sources TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_pages_scanned INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_pages_not_scanned INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_pages_recompressed INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_bytes_before INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_bytes_after INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN upload_pages_left_large INTEGER DEFAULT NULL"); } catch {}
 // The hot read is "live docs for this load" (POD gate, per-load list, invoice
 // attach) and the dashboard's load_id IN (...) POD-count fan-out.
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_load_live ON documents(load_id, deleted_at)"); } catch {}
@@ -34264,7 +34276,9 @@ app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
 		// features: what the signed-in client may offer. voiceNotes is the record
 		// button (MESSAGE_VOICE_NOTES_ENABLED); notes already sent play either way.
-		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
+		// podUploadNormalize and podUploadScanAll: the upload card's two POD and BOL
+		// switches (POD_UPLOAD_FEATURES).
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED, ...POD_UPLOAD_FEATURES } });
 	} else {
 		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE, ...APP_TIMEZONE_ERA });
 	}
@@ -57702,10 +57716,13 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 		// driver's documents, OCR text included, stay with the office, and so
 		// does a row filed under no one. Super Admin and Dispatcher get every row.
 		// The column list is explicit: who uploaded a row (uploaded_by_*) is
-		// office-only and never sent here.
+		// office-only and never sent here. The upload_* counts are a shaped POD or
+		// BOL upload's (null on every other row).
 		const rows = db
 			.prepare(
-				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
+				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text,
+				        upload_pages, upload_page_sources, upload_pages_scanned, upload_pages_not_scanned, upload_pages_recompressed,
+				        upload_bytes_before, upload_bytes_after, upload_pages_left_large
 				 FROM documents
 				 WHERE load_id = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}
 				 ORDER BY uploaded_at DESC`,
@@ -61109,6 +61126,30 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 	}
 });
 
+// POD and BOL photos shaped at upload (decision 59, lib/pod-upload-shape.js). Each switch is on only
+// when exactly "true", read once at start, and handed to the upload card in GET /api/auth/session:
+//   POD_UPLOAD_NORMALIZE_ENABLED: POST /api/documents/upload brings each photo of a POD or BOL image
+//     upload under the page budget and puts it on a Letter page; the card asks ScanKit for the
+//     photo's long edge (at most 1280) and gives such an upload the steps' time.
+//   POD_UPLOAD_SCAN_ALL_ENABLED: the card sends POD and BOL pictures added by Upload File, "+" and
+//     drag-and-drop through the scan as well, each such page with "Use the original photo".
+// Off, the route stores what imageToPdf() writes and the card asks ScanKit what it always asked.
+const podUploadShape = require("./lib/pod-upload-shape");
+const POD_UPLOAD_NORMALIZE_ENABLED = podUploadShape.normalizeEnabled(process.env);
+const POD_UPLOAD_SCAN_ALL_ENABLED = podUploadShape.scanAllEnabled(process.env);
+const POD_UPLOAD_FEATURES = Object.freeze({ podUploadNormalize: POD_UPLOAD_NORMALIZE_ENABLED, podUploadScanAll: POD_UPLOAD_SCAN_ALL_ENABLED });
+// The upload lane's image children (lib/image-child-slots.js): the receipt lane's slot is always
+// held for it, and way 1's while the Triumph job can run it.
+const podUploadShaper = podUploadShape.createShaper({
+	encode: podUploadShape.createEncoder({
+		slots: require("./lib/image-child-slots").createUploadSlots({
+			reserved: 1 + (triumph.mode !== "off" && require("./lib/triumph-rules").batchRecompressEnabled(process.env) ? 1 : 0),
+		}),
+	}),
+});
+if (POD_UPLOAD_NORMALIZE_ENABLED) console.log(`[pod-upload] POD and BOL photos are shaped at upload: at most ${podUploadShape.PAGE_BUDGET_BYTES} bytes a page where a step gets there (quality ${podUploadShape.STEPS.join(", ")}), each on a Letter page`);
+if (POD_UPLOAD_SCAN_ALL_ENABLED) console.log("[pod-upload] POD and BOL pictures added by Upload File, \"+\" and drag-and-drop go through the scan too");
+
 // The document type POST /api/documents/upload stores, or null when this role may
 // not upload it. A Dispatcher or a Driver picks from the four types its only
 // client offers — DocumentUpload.vue's type selector, which is the driver app's
@@ -61168,6 +61209,7 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 		let fileBuffer;
 		let fileName;
 		let driveUrl = "";
+		let shaped = null;
 
 		// SECURITY — path traversal. `loadId` and `docType` are both request-body
 		// strings that get interpolated straight into a filename and then
@@ -61220,7 +61262,14 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 				if (!verdict.ok) return res.status(verdict.status).json(imageLimits.refusalBody(verdict, "photo"));
 			}
 			try {
-				fileBuffer = await imageToPdf(imageBuffers);
+				// A POD or BOL with POD_UPLOAD_NORMALIZE_ENABLED on: each photo under the page budget,
+				// on a Letter page. Off, and every other type, as before.
+				if (POD_UPLOAD_NORMALIZE_ENABLED && podUploadShape.shapedType(docType)) {
+					shaped = await podUploadShaper.shape(imageBuffers, { sources: req.body.pageSources });
+					fileBuffer = shaped.pdf;
+				} else {
+					fileBuffer = await imageToPdf(imageBuffers);
+				}
 			} catch (pdfErr) {
 				// pdfkit throws plain strings for some malformed files, so log either shape.
 				console.error("Image-to-PDF error:", (pdfErr && pdfErr.message) || String(pdfErr));
@@ -61291,6 +61340,21 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 		} catch (dbErr) {
 			console.error("SQLite insert error:", dbErr.message);
 			return res.status(500).json({ error: "Document was uploaded but could not be saved. Please try again." });
+		}
+
+		// A shaped upload's counts on its row, and one audit row: counts and fixed words only. The
+		// file and the row are saved already, so a failure here is logged and the upload stands.
+		if (shaped && documentId != null) {
+			try {
+				const c = shaped.counts;
+				db.prepare(
+					`UPDATE documents SET upload_pages = ?, upload_page_sources = ?, upload_pages_scanned = ?, upload_pages_not_scanned = ?,
+					 upload_pages_recompressed = ?, upload_bytes_before = ?, upload_bytes_after = ?, upload_pages_left_large = ? WHERE id = ?`,
+				).run(c.pages, c.sources, c.scanned, c.notScanned, c.recompressed, c.bytesBefore, c.bytesAfter, c.leftLarge, documentId);
+			} catch (countErr) {
+				console.error("Document upload counts not stored:", countErr.message);
+			}
+			logAudit(req, "document_upload_shaped", "documents", documentId, podUploadShape.auditText(docType, shaped.counts));
 		}
 
 		// Notify dispatch. The dispatch room holds Dispatchers, so a rate con's link

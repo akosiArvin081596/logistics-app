@@ -13,6 +13,9 @@
  *       comments stripped (a comment naming the guard must not be mistaken for
  *       the guard).
  *   §3  mutants — weaken a guard and a check above flips.
+ *   §4  POD and BOL photos shaped at upload (lib/pod-upload-shape.js): its
+ *       Letter-page builder checks before it decodes, the route's shaped path
+ *       sits behind the route's own check, and a mutant of each flips.
  *
  * Fails on origin/main: lib/image-size.js does not exist there, and the §2
  * guards are not in server.js. No network, no DB, no server — safe anywhere.
@@ -379,6 +382,33 @@ console.log("\n§3  mutants — weaken a guard and a check above flips");
 	const real = IL.checkImage(big, IL.LIMITS.TRUCK_PHOTO);
 	ok("M6 (no truck photo byte ceiling) caught: real refuses 413 on bytes, the mutant limit would pass",
 		!real.ok && real.status === 413 && real.reason === "bytes" && IL.checkImage(big, noBytes).ok);
+}
+
+// ===========================================================================
+console.log("\n§4  POD and BOL photos shaped at upload: the same guard before the same decode");
+// ===========================================================================
+// lib/pod-upload-shape.js letterPdf() puts each photo on a Letter page with pdfkit, as imageToPdf()
+// does, so it carries the same check; and the route's shaped path is behind the route's own checks.
+{
+	const libFile = path.join(REPO, "lib", "pod-upload-shape.js");
+	const letterBody = fnBody("letterPdf", fs.existsSync(libFile) ? fs.readFileSync(libFile, "utf8") : "");
+	const GUARD = "imageLimits.checkImage(buf, imageLimits.LIMITS.DOCUMENT_PHOTO)";
+	ok("FAILS ON THE OLD CODE: lib/pod-upload-shape.js letterPdf(): checkImage before openImage / doc.image",
+		letterBody.includes("doc.openImage(") && guardsBefore(letterBody, GUARD, ["openImage(", "doc.image("]));
+	ok("FAILS ON THE OLD CODE: POST /api/documents/upload: checkImage before podUploadShaper.shape()",
+		stripComments(uploadBody).includes("podUploadShaper.shape(") && guardsBefore(uploadBody, GUARD, ["podUploadShaper.shape("]));
+	// M7: the type/size guard stripped out of letterPdf(): the check above flips.
+	const m7 = letterBody.replace(
+		/\s*const verdict = imageLimits\.checkImage\(buf, imageLimits\.LIMITS\.DOCUMENT_PHOTO\);\n\s*if \(!verdict\.ok\) return reject\(imageLimits\.refusalError\(verdict, "photo"\)\);/,
+		"");
+	ok("FAILS ON THE OLD CODE: M7 (letterPdf guard removed) caught: the check flips to false",
+		letterBody !== "" && m7 !== letterBody && guardsBefore(letterBody, GUARD, ["openImage(", "doc.image("]) && !guardsBefore(m7, GUARD, ["openImage(", "doc.image("]));
+	// M8: the route's own photo check stripped out: the shaped path's check flips.
+	const m8 = uploadBody.replace(
+		/\s*const verdict = imageLimits\.checkImage\(buf, imageLimits\.LIMITS\.DOCUMENT_PHOTO\);\n\s*if \(!verdict\.ok\) return res\.status\(verdict\.status\)\.json\(imageLimits\.refusalBody\(verdict, "photo"\)\);/,
+		"");
+	ok("FAILS ON THE OLD CODE: M8 (the route's photo check removed) caught: the shaped path's check flips to false",
+		uploadBody.includes("podUploadShaper.shape(") && m8 !== uploadBody && guardsBefore(uploadBody, GUARD, ["podUploadShaper.shape("]) && !guardsBefore(m8, GUARD, ["podUploadShaper.shape("]));
 }
 
 console.log(failed ? `\n${failed} test(s) failed` : "\nall passed");

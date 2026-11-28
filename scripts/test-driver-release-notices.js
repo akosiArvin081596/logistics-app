@@ -242,7 +242,7 @@ async function startWorld({ db = makeDb(), enabled = true, list = releases.RELEA
 	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "signIn", LOGIN_SRC)(
 		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, "America/New_York", {}, signIn);
 	new Function("app", "disconnectSessionSockets", "signIn", LOGOUT_SRC)(app, noSockets, signIn);
-	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", "POD_UPLOAD_FEATURES", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false, {});
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets",
 		"notifyPasswordChanged", "passwordRules", CHANGE_SRC)(
 		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, () => {}, liveSessionIds, noSockets,

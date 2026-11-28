@@ -33,6 +33,9 @@
 //      deadline leaves its image; the 25 MP bound; the skip rule, the 40-photo cap and the
 //      5-minute budget stop it as today; off, or under the limit, the batch is byte for byte the
 //      base's (221ff323)
+//   §12 way 1 stays as it is (N1 of the POD upload-normalize plan): five photos of about 175 KB, each
+//      within the upload's 200 KB budget, in a batch over the limit fit at 60 or 50; with a skip of
+//      such photos (the mutant) the batch stops at UNREACHABLE
 //
 // The invoice page goes through a stand-in renderer that writes a PDF of the page's
 // words the way Chromium writes one (scripts/lib/made-up-pdf.js): no browser here. Made-up
@@ -1212,8 +1215,62 @@ async function s11() {
 	eq(capped.recompressSkipped, "TOO_MANY", "§11 FAILS ON THE OLD CODE: ...and the stop says why no step ran");
 }
 
+// N1 of the POD upload-normalize plan: way 1 stays as it is, with no skip for a photo already within the
+// upload's 200 KB budget. Five such photos in a batch over the limit still fit at a later step. A guard: it
+// passes on the base by design; its mutant adds the skip, and the same batch then stops.
+async function s12() {
+	section("§12 way 1 keeps a page within the upload budget in its steps (N1 of the POD upload-normalize plan)");
+	const W = 820;
+	const H = 620;
+	const photos = [5, 6, 7, 13, 17].map((seed) => jpegs.jpeg({ width: W, height: H, quality: 76, seed }));
+	ok(photos.every((b) => b.length > 160 * 1024 && b.length <= 200 * 1024), "§12 (fixture) five made-up photos of about 175 KB, each within the upload's 200 KB budget");
+	const pod = [{ id: 1, type: "POD", uploaded_at: "2026-11-02 10:00:00", file_name: "made-up-1.pdf",
+		buffer: await jpegs.imagePdf([{ text: ["PROOF OF DELIVERY (MADE UP)"], images: photos.map((bytes) => ({ bytes, width: W, height: H })) }]) }];
+	const plainArgs = { invoicePdf: textPdf(INVOICE_TEXT, { compress: false }), rateCon: { buffer: textPdf(RATECON_TEXT, { compress: false }), source: "documents" } };
+	const build = (over) => batchLib.buildBatch(args({ ...plainArgs, ...over })).catch((e) => ({ ok: false, code: "THREW", error: String(e && e.message) }));
+	const base = await build({ documents: pod });
+	// What way 1's own child saves on the five at 70 and at 60, so the limit sits between those two steps.
+	const encode = recompressLib.createEncoder();
+	const saved = async (q) => {
+		let n = 0;
+		for (const b of photos) {
+			const r = await encode(b, q);
+			if (r && r.jpeg && r.jpeg.length < b.length) n += b.length - r.jpeg.length;
+		}
+		return n;
+	};
+	const s70 = await saved(70);
+	const s60 = await saved(60);
+	ok(base.ok && s60 > s70 + 2000, "§12 (fixture) the batch builds today, and step 60 saves clearly more than step 70");
+	const limit = base.batchBytes - Math.round((s70 + s60) / 2);
+	const fit = await build({ recompress: true, documents: pod, maxBytes: limit });
+	const rec = fit.ok ? ((fit.parts || []).find((p) => p.kind === "pod") || {}).recompressed : null;
+	eq([fit.ok, rec && rec.images, rec && (rec.quality === 60 || rec.quality === 50)], [true, 5, true],
+		"§12 (guard) five ~175 KB pages in a batch over the limit fit at 60 or 50: way 1 re-compresses pages already within the upload's budget too");
+	// The mutant: way 1 with the planned skip of a photo at or under 200 KB.
+	let skipping = null;
+	try {
+		const Module = require("module");
+		const file = path.join(ROOT, "lib", "triumph-batch-recompress.js");
+		const src = fs.readFileSync(file, "utf8");
+		const from = "if (v.take) photos.push({ key: im.ref.toString(), ...v });";
+		if (src.split(from).length - 1 === 1) {
+			const m = new Module(file, module);
+			m.filename = file;
+			m.paths = Module._nodeModulePaths(path.dirname(file));
+			m._compile(src.replace(from, "if (v.take && v.raw.length > 200 * 1024) photos.push({ key: im.ref.toString(), ...v });"), file);
+			skipping = m.exports;
+		}
+	} catch {
+		skipping = null;
+	}
+	const stopped = skipping ? await build({ recompress: true, documents: pod, maxBytes: limit, recompressor: skipping.create() }) : null;
+	eq([fit.ok, Boolean(stopped), stopped && stopped.code, stopped && stopped.recompressSkipped], [true, true, "BATCH_TOO_LARGE", "UNREACHABLE"],
+		"§12 MUTANT (way 1 skips a page within 200 KB) caught: the same batch then stops with nothing to re-compress (UNREACHABLE)");
+}
+
 (async () => {
-	for (const s of [s3, s4, s5, s6, s7, s8, s9, s10, s11]) await s();
+	for (const s of [s3, s4, s5, s6, s7, s8, s9, s10, s11, s12]) await s();
 })().catch((e) => failures.push(`the run threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${pass} passed, ${failures.length} failed`);
 	for (const f of failures) console.log(`FAIL  ${f}`);

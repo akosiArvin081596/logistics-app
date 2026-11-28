@@ -414,8 +414,9 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "findDriverNameClash", sources.setup)(
 		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", {}, () => null);
 	new Function("app", "disconnectSessionSockets", "signIn", sources.logout)(app, helpers.disconnectSessionSockets, signIn);
-	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
-	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false);
+	// The route also hands the browser APP_TIMEZONE (lib/app-time.js), and the
+	// upload card's switches (POD_UPLOAD_FEATURES; none named here).
+	new Function("app", "APP_TIMEZONE", "APP_TIMEZONE_ERA", "MESSAGE_VOICE_NOTES_ENABLED", "POD_UPLOAD_FEATURES", SESSION_ROUTE_SRC)(app, "America/New_York", {}, false, {});
 	// Both password routes email the account afterwards (notifyPasswordChanged(),
 	// B21); that email is scripts/test-password-change-notice.js's subject, so here
 	// it is a no-op that sends nothing.

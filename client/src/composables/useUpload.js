@@ -11,7 +11,9 @@ export function useUpload() {
   const uploading = ref(false)
   const progress = ref({ done: 0, total: 0, label: '' })
 
-  // tasks: Array<{ label: string, body: object }>  (body POSTed to /api/documents/upload)
+  // tasks: Array<{ label: string, body: object, timeoutMs?: number }>  (body POSTed to /api/documents/upload;
+  //   timeoutMs: one attempt's wait when the server needs longer than the usual 90 s, as a POD or BOL
+  //   image upload it shapes does, lib/podScanRouting.js uploadTimeoutFor())
   // returns { ok: number, failed: Array<{ index, label, error }> }  (index = task position)
   async function uploadDocuments(tasks) {
     uploading.value = true
@@ -20,7 +22,7 @@ export function useUpload() {
     for (let i = 0; i < tasks.length; i++) {
       const t = tasks[i]
       progress.value = { ...progress.value, label: t.label }
-      try { await postWithRetry('/api/documents/upload', t.body); ok++ }
+      try { await postWithRetry('/api/documents/upload', t.body, t.timeoutMs); ok++ }
       catch (e) { failed.push({ index: i, label: t.label, error: e }) }
       progress.value = { ...progress.value, done: progress.value.done + 1 }
     }
@@ -28,10 +30,10 @@ export function useUpload() {
     return { ok, failed }
   }
 
-  async function postWithRetry(url, body) {
+  async function postWithRetry(url, body, timeoutMs) {
     let lastErr
     for (let attempt = 0; attempt <= 2; attempt++) {       // 3 attempts
-      try { return await api.post(url, body, { timeout: 90000 }) }   // generous; >= nginx body timeout
+      try { return await api.post(url, body, { timeout: timeoutMs > 0 ? timeoutMs : 90000 }) }   // generous; >= nginx body timeout
       catch (e) {
         lastErr = e
         if (e.code === 'ABORT') throw e                      // caller cancelled — never retry

@@ -404,7 +404,8 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		APP_TIMEZONE: TZ, APP_TIMEZONE_ERA: {}, disabledSignInRefusal, signIn,
 	});
 	mount(SRCS.logout, { app, disconnectSessionSockets: helpers.disconnectSessionSockets, signIn });
-	mount(SRCS.session, { app, APP_TIMEZONE: TZ, APP_TIMEZONE_ERA: {}, MESSAGE_VOICE_NOTES_ENABLED: false });
+	// POD_UPLOAD_FEATURES: the upload card's switches, none named here.
+	mount(SRCS.session, { app, APP_TIMEZONE: TZ, APP_TIMEZONE_ERA: {}, MESSAGE_VOICE_NOTES_ENABLED: false, POD_UPLOAD_FEATURES: {} });
 	mount(SRCS.change, {
 		app, requireAuth, changePasswordLimiter: passThrough, db, bcrypt: hookedBcrypt, purgeUserSessions, logAudit: audit.logAudit,
 		liveSessionIds: helpers.liveSessionIds, disconnectSessionSockets: helpers.disconnectSessionSockets,

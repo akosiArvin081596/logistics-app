@@ -18,6 +18,10 @@
 //   C  The save gave up after 20 s on cellular while the server was still
 //      saving, and the scan quietly upscaled every receipt before its upload.
 //
+// The last section, P, is the upload card's POD and BOL pages under its two
+// switches (lib/podScanRouting.js): what ScanKit is asked, which pictures go
+// through the scan, "Use the original photo", the page sources and the wait.
+//
 // Each section below pins one of them. Where a check guards a regression, the
 // OLD code runs against the same fixture first and must reproduce the bug —
 // a fixture that would not have caught the original defect proves nothing.
@@ -35,6 +39,7 @@
 //   node scripts/test-driver-receipt-flow.mjs      # exits 1 on any failure
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -255,12 +260,25 @@ const tagsOf = (html, name) =>
   })
   const { scanDocument } = new Function('useApi', `${scanSrc}\nreturn useDocumentScan`)(stubApi)()
 
-  // POD/BOL: DocumentUpload's call, exactly. The body must be what it always was.
-  await scanDocument('data:image/jpeg;base64,QUJD', { filter: 'white' })
+  // POD/BOL: DocumentUpload's call, through the routing lib (lib/podScanRouting.js scanOptions()), as a
+  // pair. POD_UPLOAD_NORMALIZE_ENABLED off: the body is what it always was (the server's 1536 default).
+  // On: the photo's long edge, at most 1280 (N4 of the POD upload-normalize plan).
+  const podLib = await import('../client/src/lib/podScanRouting.js').catch(() => null)
+  const offOptions = podLib ? podLib.scanOptions({ normalize: false, longEdge: 1000 }) : { filter: 'white' }
+  await scanDocument('data:image/jpeg;base64,QUJD', offOptions)
   const pod = calls.pop()
-  check('C: a POD scan sends the same three keys as before (no outputWidth)', Object.keys(pod.body).sort(), ['filter', 'photoData', 'returnPdf'])
-  check('C: a POD scan keeps its 30 s timeout and no signal', [pod.opts.timeout, pod.opts.signal], [30000, undefined])
-  check('C: DocumentUpload still asks for no width (server default)', /outputWidth/.test(read('client/src/components/driver/DocumentUpload.vue')), false)
+  check('C: switch off, a POD scan sends the same three keys as before (no outputWidth)', Object.keys(pod.body).sort(), ['filter', 'photoData', 'returnPdf'])
+  check('C: switch off, a POD scan keeps its 30 s timeout and no signal', [pod.opts.timeout, pod.opts.signal], [30000, undefined])
+  check('C: switch off, the routing lib asks exactly what DocumentUpload asked before', offOptions, { filter: 'white' })
+  check('C: FAILS ON THE OLD CODE: switch on, ScanKit is asked for the photo long edge, at most 1280 (unknown: 1280)',
+    podLib ? [1000, 1280, 2000, null].map((e) => podLib.scanOptions({ normalize: true, longEdge: e }).outputWidth) : null, [1000, 1280, 1280, 1280])
+  if (podLib) await scanDocument('data:image/jpeg;base64,QUJD', podLib.scanOptions({ normalize: true, longEdge: 1000 }))
+  const podOn = podLib ? calls.pop() : { body: {}, opts: {} }
+  check('C: FAILS ON THE OLD CODE: switch on, the POD scan body adds outputWidth to the same keys, with the same 30 s timeout',
+    [Object.keys(podOn.body).sort(), podOn.body.outputWidth, podOn.opts.timeout], [['filter', 'outputWidth', 'photoData', 'returnPdf'], 1000, 30000])
+  const duSrc = read('client/src/components/driver/DocumentUpload.vue')
+  check('C: FAILS ON THE OLD CODE: DocumentUpload asks ScanKit through the routing lib, with the switch and the photo long edge, and names no width itself',
+    [/scanDocument\(raw, scanOptions\(\{ normalize: podSwitches\.normalize\.value, longEdge: jpegLongEdge\(raw\) \}\)\)/.test(duSrc), /outputWidth/.test(duSrc)], [true, false])
 
   // Receipt: the ExpenseForm call.
   const ctrl = new AbortController()
@@ -686,6 +704,194 @@ const tagsOf = (html, name) =>
     release({ id: 1 }); await sending; await settle()
     m.unmount()
   }
+}
+
+// ══ P — the upload card's POD and BOL pages under its two switches ═══════════
+// lib/podScanRouting.js (pure), the card's wiring in DocumentUpload.vue, and the two composables it
+// reads (usePodUploadFeatures, useUpload), lifted as scanDocument is above. Every new rule is labelled
+// FAILS ON THE OLD CODE; each "(guard)" passes on the base by design; each rule's mutant (an edited copy
+// of the lib, compiled in a temporary folder, or an edited copy of the card's text) must flip it.
+{
+  const LIB = 'client/src/lib/podScanRouting.js'
+  const lib = await import('../client/src/lib/podScanRouting.js').catch(() => null)
+  const du = read('client/src/components/driver/DocumentUpload.vue')
+  const tmpDirs = []
+  async function libWith(from, to) {
+    try {
+      const src = read(LIB)
+      if (src.split(from).length - 1 !== 1) return null
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pod-routing-'))
+      tmpDirs.push(dir)
+      fs.writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}')
+      fs.writeFileSync(path.join(dir, 'imageUtils.js'), read('client/src/lib/imageUtils.js'))
+      fs.writeFileSync(path.join(dir, 'podScanRouting.js'), src.replace(from, to))
+      return await import(pathToFileURL(path.join(dir, 'podScanRouting.js')).href)
+    } catch {
+      return null
+    }
+  }
+  const holds = async (fn, arg) => { try { return (await fn(arg)) === true } catch { return false } }
+  const libRules = []
+  // Each rule: its check against the real lib (the control) and against one mutant.
+  async function rule(label, fn, from, to) {
+    const control = lib ? await holds(fn, lib) : false
+    check(label, control, true)
+    libRules.push({ label, fn, from, to, control })
+  }
+  const textRules = []
+  function textRule(label, fn, from, to) {
+    const control = fn(du) === true
+    check(label, control, true)
+    textRules.push({ label, fn, from, to, control })
+  }
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const { jpeg } = require('./lib/made-up-jpeg.js')
+  const uri = (b) => `data:image/jpeg;base64,${b.toString('base64')}`
+
+  // Section C's switch-on checks and the card's call, each with its own mutant here.
+  const onWidths = (L) => same([1000, 1280, 2000, null].map((e) => L.scanOptions({ normalize: true, longEdge: e }).outputWidth), [1000, 1280, 1280, 1280])
+  libRules.push({ label: 'switch on, ScanKit is asked for the photo long edge, at most 1280', fn: onWidths,
+    from: "return { filter: 'white', outputWidth: edge }", to: "return { filter: 'white' }", control: lib ? onWidths(lib) : false })
+  const asksThroughLib = (t) => /scanDocument\(raw, scanOptions\(\{ normalize: podSwitches\.normalize\.value, longEdge: jpegLongEdge\(raw\) \}\)\)/.test(t) && !/outputWidth/.test(t)
+  textRules.push({ label: 'P: FAILS ON THE OLD CODE: DocumentUpload asks ScanKit through the routing lib', fn: asksThroughLib,
+    from: 'scanDocument(raw, scanOptions({ normalize: podSwitches.normalize.value, longEdge: jpegLongEdge(raw) }))', to: "scanDocument(raw, { filter: 'white', outputWidth: 1280 })", control: asksThroughLib(du) })
+
+  // The card's copies of the server's words and numbers (a client can't import lib/), pinned equal.
+  const server = (() => { try { return require('../lib/pod-upload-shape.js') } catch { return null } })()
+  await rule('P: FAILS ON THE OLD CODE: the card\'s page sources and the steps\' time are the server\'s (lib/pod-upload-shape.js PAGE_SOURCES, UPLOAD_BUDGET_MS)',
+    (L) => same(L.PAGE_SOURCES, server.PAGE_SOURCES) && L.SHAPE_BUDGET_MS === server.UPLOAD_BUDGET_MS,
+    'export const SHAPE_BUDGET_MS = 20000', 'export const SHAPE_BUDGET_MS = 15000')
+
+  await rule('P: FAILS ON THE OLD CODE: the two switches come from the session features, each on only when exactly true',
+    (L) => same([L.podFeatures({ features: { podUploadNormalize: true, podUploadScanAll: 'true' } }), L.podFeatures({ authenticated: true }), L.podFeatures(null)],
+      [{ normalize: true, scanAll: false }, { normalize: false, scanAll: false }, { normalize: false, scanAll: false }]),
+    'scanAll: f.podUploadScanAll === true', 'scanAll: Boolean(f.podUploadScanAll)')
+  await rule('P: FAILS ON THE OLD CODE: with scan-all on, an Upload File, "+" or drop picture for a POD or a BOL goes through the scan',
+    (L) => same([L.routesToScan({ scanAll: true, docType: 'POD', isImage: true }), L.routesToScan({ scanAll: true, docType: 'BOL', isImage: true })], [true, true]),
+    "export const POD_SCAN_TYPES = Object.freeze(['POD', 'BOL'])", "export const POD_SCAN_TYPES = Object.freeze(['POD'])")
+  const notRouted = (L) => same([L.routesToScan({ scanAll: false, docType: 'POD', isImage: true }), L.routesToScan({ scanAll: true, docType: 'Receipt', isImage: true }),
+    L.routesToScan({ scanAll: true, docType: 'Other', isImage: true }), L.routesToScan({ scanAll: true, docType: 'POD', isImage: false })], [false, false, false, false])
+  check('P: (guard) with scan-all off an Upload File POD picture is not scanned, and a Receipt, an Other or a file never is', lib ? notRouted(lib) : true, true)
+  libRules.push({ label: 'the routing guard', fn: notRouted, from: 'return scanAll === true && isImage === true && isPodScanType(docType)', to: 'return isImage === true', control: lib ? notRouted(lib) : false })
+  await rule('P: FAILS ON THE OLD CODE: "Use the original photo" sends the photo as it was, its source then "original"; and back to the scan',
+    (L) => {
+      const page = { routed: true, original: 'data:image/jpeg;base64,T1JJRw==', scanned: 'data:image/jpeg;base64,U0NBTg==', data: 'data:image/jpeg;base64,U0NBTg==', source: 'scanned' }
+      const o = L.chooseOriginal(page, true)
+      const back = L.chooseOriginal({ ...page, ...o }, false)
+      return same([o, L.pageSourcesFor([{ ...page, ...o }]), back], [{ data: page.original, source: 'original' }, ['original'], { data: page.scanned, source: 'scanned' }])
+    },
+    "useOriginal ? { data: entry.original, source: 'original' }", "useOriginal ? { data: entry.scanned, source: 'original' }")
+  await rule('P: FAILS ON THE OLD CODE: the choice is offered on a page the scan routed only: never on a camera scan, a fallback or a file',
+    (L) => {
+      const page = { routed: true, original: 'a', scanned: 'b', source: 'scanned' }
+      return same([L.originalChoiceWords(page), L.originalChoiceWords({ ...page, source: 'original' }), L.originalChoiceWords({ ...page, routed: false }),
+        L.originalChoiceWords({ routed: true, original: 'a', scanned: '', source: 'fallback' }), L.originalChoiceWords(null)],
+      ['Use the original photo', 'Use the scanned page', '', '', ''])
+    },
+    "if (!entry || entry.routed !== true || !entry.original || !entry.scanned) return null", "if (!entry || !entry.original || !entry.scanned) return null")
+  await rule('P: FAILS ON THE OLD CODE: each page carries its source: scanned, fallback, original, or not routed (anything else)',
+    (L) => same(L.pageSourcesFor([{ source: 'scanned' }, { source: 'fallback' }, { source: 'original' }, { source: '' }, {}, { source: 'made-up' }]),
+      ['scanned', 'fallback', 'original', 'not_routed', 'not_routed', 'not_routed']),
+    "return PAGE_SOURCES.includes(s) && s !== 'not_routed' ? s : 'not_routed'", "return s || 'not_routed'")
+  await rule('P: FAILS ON THE OLD CODE: the long edge is read from the photo frame header (landscape, portrait, after an EXIF block; not a JPEG: null)',
+    (L) => same([jpeg({ width: 300, height: 200, quality: 50 }), jpeg({ width: 200, height: 320, quality: 50 }), jpeg({ width: 260, height: 180, quality: 50, orientation: 6 })]
+      .map((b) => L.jpegLongEdge(uri(b))).concat([L.jpegLongEdge('data:image/png;base64,iVBORw0KGgo='), L.jpegLongEdge('')]), [300, 320, 260, null, null]),
+    'return w > 0 && h > 0 ? Math.max(w, h) : null', 'return w > 0 && h > 0 ? w : null')
+  await rule('P: FAILS ON THE OLD CODE (N4): the scan width never passes the photo it is sent (1280 at most)',
+    (L) => same([2000, 1280, 900].map((e) => L.scanOptions({ normalize: true, longEdge: e }).outputWidth), [1280, 1280, 900]),
+    'Math.min(longEdge, SCAN_MAX_EDGE)', 'longEdge')
+  const offAsked = (L) => same([L.scanOptions({ normalize: false, longEdge: 900 }), L.scanOptions({})], [{ filter: 'white' }, { filter: 'white' }])
+  check('P: (guard) switch off, the card asks ScanKit exactly what it asked before', lib ? offAsked(lib) : true, true)
+  libRules.push({ label: 'the switch-off scan guard', fn: offAsked, from: "if (normalize !== true) return { filter: 'white' }", to: "if (normalize !== true) return { filter: 'white', outputWidth: SCAN_MAX_EDGE }", control: lib ? offAsked(lib) : false })
+  await rule('P: FAILS ON THE OLD CODE (N7): switch on, a POD or BOL photo upload waits 90 s plus the server steps 20 s, so the phone does not send it again meanwhile',
+    (L) => same([L.uploadTimeoutFor({ normalize: true, docType: 'POD' }), L.uploadTimeoutFor({ normalize: true, docType: 'BOL' })], [110000, 110000]),
+    'UPLOAD_ATTEMPT_MS + SHAPE_BUDGET_MS', 'UPLOAD_ATTEMPT_MS')
+  const ownWait = (L) => same([L.uploadTimeoutFor({ normalize: false, docType: 'POD' }), L.uploadTimeoutFor({ normalize: true, docType: 'Receipt' })], [undefined, undefined])
+  check('P: (guard) switch off, and any other type, the upload keeps its own 90 s wait', lib ? ownWait(lib) : true, true)
+  libRules.push({ label: 'the own-wait guard', fn: ownWait, from: 'return normalize === true && isPodScanType(docType) ?', to: 'return isPodScanType(docType) ?', control: lib ? ownWait(lib) : false })
+  const big = (over = {}) => ({ isImage: false, type: 'application/pdf', name: 'made-up.pdf', size: 700 * 1024, ...over })
+  await rule('P: FAILS ON THE OLD CODE (L8): an office user sees the note on a POD or BOL PDF over 600 KB (the PDF still goes as it is)',
+    (L) => same([L.largePdfWarning({ normalize: true, role: 'Super Admin', docType: 'POD', files: [big()] }), L.largePdfWarning({ normalize: true, role: 'Dispatcher', docType: 'BOL', files: [big({ type: '', name: 'm.PDF' })] })],
+      [L.LARGE_PDF_WORDS, L.LARGE_PDF_WORDS]) && L.LARGE_PDF_WORDS === 'This file is large: Triumph takes at most 921,600 bytes per load, all documents together.',
+    'Number(f.size) > LARGE_PDF_BYTES', 'Number(f.size) > 10 * LARGE_PDF_BYTES')
+  const noNote = (L) => same([L.largePdfWarning({ normalize: true, role: 'Driver', docType: 'POD', files: [big()] }), L.largePdfWarning({ normalize: false, role: 'Super Admin', docType: 'POD', files: [big()] }),
+    L.largePdfWarning({ normalize: true, role: 'Super Admin', docType: 'POD', files: [big({ size: 500 * 1024 })] }), L.largePdfWarning({ normalize: true, role: 'Super Admin', docType: 'POD', files: [big({ isImage: true })] }),
+    L.largePdfWarning({ normalize: true, role: 'Super Admin', docType: 'Receipt', files: [big()] })], ['', '', '', '', ''])
+  check('P: (guard) a driver never sees the note; nor anyone with the switch off, or on a small PDF, a photo or a Receipt', lib ? noNote(lib) : true, true)
+  libRules.push({ label: 'the no-note guard', fn: noNote, from: "if (normalize !== true || !OFFICE_ROLES.includes(role) || !isPodScanType(docType)) return ''", to: "if (normalize !== true || !isPodScanType(docType)) return ''", control: lib ? noNote(lib) : false })
+
+  // N5: one decode in flight; only the scans side by side.
+  const tick = (ms) => new Promise((r) => setTimeout(r, ms))
+  async function decodeProbe(run) {
+    let decoding = 0; let maxDecoding = 0; let scanning = 0; let maxScanning = 0
+    const done = []
+    await run([1, 2, 3, 4, 5, 6], {
+      decode: async (n) => { decoding++; maxDecoding = Math.max(maxDecoding, decoding); await tick(4); decoding--; return `d${n}` },
+      scan: async (n, d) => { scanning++; maxScanning = Math.max(maxScanning, scanning); await tick(25); scanning--; done.push([n, d]) },
+      concurrency: 3,
+    })
+    return { maxDecoding, maxScanning, all: done.length === 6 && done.every(([n, d]) => d === `d${n}`) }
+  }
+  const n5 = lib ? await decodeProbe(lib.decodeThenScan) : null
+  check('P: FAILS ON THE OLD CODE (N5): one decode in flight at a time; only the scans run side by side, 3 at most; each page scanned with its own decode', n5, { maxDecoding: 1, maxScanning: 3, all: true })
+  const { runPool } = await import('../client/src/lib/asyncPool.js')
+  const pooled = await decodeProbe((items, o) => runPool(items, async (it) => o.scan(it, await o.decode(it)), o.concurrency))
+  check('P: MUTANT (each decode inside the pool, as the camera path runs) caught: decodes in flight reach 3', [n5 && n5.maxDecoding === 1, pooled.maxDecoding], [true, 3])
+
+  // The composables, lifted with their imports injected.
+  const box = (v) => ({ value: v })
+  async function featuresRead(srcFix = (s) => s) {
+    try {
+      const src = srcFix(read('client/src/composables/usePodUploadFeatures.js').replace(/^import .*$/gm, '').replace('export function usePodUploadFeatures', 'function usePodUploadFeatures'))
+      const use = new Function('ref', 'podFeatures', `${src}\nreturn usePodUploadFeatures`)(box, lib.podFeatures)
+      let gets = 0
+      const f = use({ get: async (url) => { gets++; return url === '/api/auth/session' ? { authenticated: true, features: { voiceNotes: false, podUploadNormalize: false, podUploadScanAll: true } } : null } })
+      await tick(5)
+      use({ get: async () => { gets++; return {} } })
+      return [f.normalize.value, f.scanAll.value, gets]
+    } catch { return null }
+  }
+  check('P: FAILS ON THE OLD CODE: the card reads both switches from GET /api/auth/session once a page', await featuresRead(), [false, true, 1])
+  check('P: MUTANT (scan-all read from the other switch) caught', [same(await featuresRead(), [false, true, 1]), await featuresRead((s) => s.replace('scanAll.value = f.scanAll', 'scanAll.value = f.normalize'))], [true, [false, false, 1]])
+  async function uploadWaits(srcFix = (s) => s) {
+    try {
+      const timeouts = []
+      const src = srcFix(read('client/src/composables/useUpload.js').replace(/^import .*$/gm, '').replace('export function useUpload', 'function useUpload'))
+      const useUpload = new Function('ref', 'useApi', `${src}\nreturn useUpload`)(box, () => ({ post: async (url, body, opts) => { timeouts.push(opts.timeout); return { success: true } } }))
+      const { uploadDocuments } = useUpload()
+      await uploadDocuments([{ label: 'POD (2 pages)', body: {}, timeoutMs: 110000 }, { label: 'made-up.pdf', body: {} }])
+      return timeouts
+    } catch { return null }
+  }
+  check('P: FAILS ON THE OLD CODE (N7): useUpload gives a task its own wait when it names one, and 90 s otherwise', await uploadWaits(), [110000, 90000])
+  check('P: MUTANT (the task wait ignored) caught', [same(await uploadWaits(), [110000, 90000]), await uploadWaits((s) => s.replace('timeout: timeoutMs > 0 ? timeoutMs : 90000', 'timeout: 90000'))], [true, [90000, 90000]])
+
+  // The card's wiring, read from its source (each rule's mutant: the line edited out of a copy).
+  textRule('P: FAILS ON THE OLD CODE: the card routes Upload File, "+" and drop pictures with the scan-all switch, and decodes them one at a time',
+    (t) => /routesToScan\(\{ scanAll: podSwitches\.scanAll\.value, docType: selectedType\.value, isImage: file\.type\.startsWith\('image\/'\) \}\)/.test(t)
+      && /await decodeThenScan\(routed, \{ decode: decodeForScan, scan: finishScan, concurrency: SCAN_CONCURRENCY \}\)/.test(t),
+    'await decodeThenScan(routed, { decode: decodeForScan, scan: finishScan, concurrency: SCAN_CONCURRENCY })', 'await runPool(routed, scanOne, SCAN_CONCURRENCY)')
+  textRule('P: FAILS ON THE OLD CODE: the card offers the choice in the page preview, and applies it to that page',
+    (t) => /<button v-if="originalChoice" type="button" class="dup-preview-choice" @click\.stop="toggleOriginal">/.test(t)
+      && /const originalChoice = computed\(\(\) => originalChoiceWords\(previewEntry\.value\)\)/.test(t) && /const next = chooseOriginal\(f, f && f\.source !== 'original'\)/.test(t),
+    '<button v-if="originalChoice"', '<button v-if="false"')
+  textRule('P: FAILS ON THE OLD CODE: the card sends each page source and the longer wait only with the normalize switch on, and tags each scan step',
+    (t) => /\.\.\.\(normalize \? \{ pageSources: pageSourcesFor\(images\) \} : \{\}\)/.test(t) && /timeoutMs: uploadTimeoutFor\(\{ normalize, docType: selectedType\.value \}\)/.test(t)
+      && /entry\.source = 'scanned'/.test(t) && /entry\.source = 'fallback'/.test(t),
+    '...(normalize ? { pageSources: pageSourcesFor(images) } : {}),', 'pageSources: pageSourcesFor(images),')
+  textRule('P: FAILS ON THE OLD CODE: the card shows the office note with the user role and the switch',
+    (t) => /<p v-if="largePdfNote" class="doc-warn">\{\{ largePdfNote \}\}<\/p>/.test(t) && /role: auth\.user\?\.role,/.test(t) && /normalize: podSwitches\.normalize\.value,\n\s*role:/.test(t),
+    'role: auth.user?.role,', "role: 'Super Admin',")
+
+  for (const r of libRules) {
+    const m = await libWith(r.from, r.to)
+    check(`P: MUTANT for "${r.label.replace(/^P: (FAILS ON THE OLD CODE(?: \([A-Z0-9]+\))?: |\(guard\) )/, '').slice(0, 70)}…" caught`, [r.control, m !== null, m ? await holds(r.fn, m) : null], [true, true, false])
+  }
+  for (const r of textRules) {
+    const edited = du.split(r.from).length - 1 === 1 ? du.replace(r.from, r.to) : null
+    check(`P: MUTANT for "${r.label.replace(/^P: FAILS ON THE OLD CODE: /, '').slice(0, 70)}…" caught`, [r.control, edited !== null, edited ? r.fn(edited) === true : null], [true, true, false])
+  }
+  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true })
 }
 
 console.log(`\ndriver-receipt-flow: ${pass} passed, ${fail} failed`)
