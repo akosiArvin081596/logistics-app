@@ -87,7 +87,7 @@ for (const c of ["RFC_MONTHS"]) {
   }
 }
 harness += `
-return { ELD_LINK_TRUCK_COL_RE, eldLinkUnitKey, eldLinkRowMonths, eldLinkPreflight, loadRowAccountingMonths, truckEditLockBlockers${hasForward ? ", " + FORWARD_FNS.join(", ") : ""} };`;
+return { ELD_LINK_TRUCK_COL_RE, eldLinkUnitKey, eldLinkRowMonths, eldLinkPreflight, sheetCellMonths, loadRowAccountingMonths, truckEditLockBlockers${hasForward ? ", " + FORWARD_FNS.join(", ") : ""} };`;
 
 // Stubs — each is a DB or sheet read. Mutable so each case sets its own state.
 const S = {
@@ -123,7 +123,7 @@ const stubs = {
     await Promise.resolve();
     if (S.onSheetRead) S.onSheetRead();
     if (S.sheetThrows) throw new Error("sheets down");
-    return opts && opts.reach ? { months: S.sheetMonths, reach: S.sheetReach } : S.sheetMonths;
+    return opts && opts.reach ? { months: S.sheetMonths, reach: S.sheetReach, ...(S.sheetCell !== undefined ? { cell: S.sheetCell } : {}) } : S.sheetMonths;
   },
   eldLinkForwardRule: () => ({ inForce: S.forward }),
   eldLinkForward: fs.existsSync(path.join(__dirname, "..", "lib", "eld-link-forward.js")) ? require("../lib/eld-link-forward") : null,
@@ -368,10 +368,12 @@ console.log("Part 3 — preflight");
   ];
   // The move's functions over the same stubs, with a sheet that counts its reads and a clock that can tick.
   const M = { reads: 0, values: null, throws: false, onRead: null, tick: 0 };
+  // The stop's view of the rows and one unit's reading of them (Part 7), where the build has them.
+  const VIEW_FNS = ["eldLinkStopRows", "eldLinkUnitReach"].filter((n) => new RegExp(`^function ${n}\\s*\\(`, "m").test(src));
   const moveHarness = () => {
-    const pieces = ["eldLinkRowWhere", "eldLinkBadCell"].map((n) => extractFunction(n))
+    const pieces = ["eldLinkRowWhere", "eldLinkBadCell", ...VIEW_FNS].map((n) => extractFunction(n))
       .concat(["eldLinkLoadReaches", "eldMovePreflight"].map((n) => extractFunction(n, "async function")));
-    const src = harness.replace(/\nreturn \{[^}]*\};\s*$/, "\n") + pieces.join("\n") + "\nreturn { eldLinkLoadReaches, eldMovePreflight, eldLinkBadCell, eldLinkRowReach };";
+    const src = harness.replace(/\nreturn \{[^}]*\};\s*$/, "\n") + pieces.join("\n") + `\nreturn { eldLinkLoadReaches, eldMovePreflight, eldLinkBadCell, eldLinkRowReach${VIEW_FNS.map((n) => `, ${n}`).join("")} };`;
     const extra = {
       getSheets: async () => ({ spreadsheets: { values: { get: async () => {
         M.reads++;
@@ -431,13 +433,93 @@ console.log("Part 3 — preflight");
 
   await moveCase("Part 6.4", async () => {
     const MV = moveHarness();
-    const bad = ["L-1001", "Lee", "T-150", "10/26/2026", "14:00", "10/28/2026", "10/28/2026", "Delivered"];
+    const bad = ["L-1001", "Lee", "T-150", "10/26/2026", "TBD", "10/28/2026", "10/28/2026", "Delivered"];
     M.values = [MH, ...MROWS, bad];
     const [, , c] = await MV.eldLinkLoadReaches(["T-101", "T-202", "T-150"]);
-    eq([c.months, c.reach, c.cell], [null, null, { loadId: "L-1001", sheetRow: 5, pickupDay: "", header: "Pickup Appointment", value: "14:00" }],
+    eq([c.months, c.reach, c.cell], [null, null, { loadId: "L-1001", sheetRow: 5, pickupDay: "", header: "Pickup Appointment", value: "TBD" }],
       "6.4 a cell the server can't read is named as sheetRowUpdateBlocker names it, with the row's Load ID and sheet row (FAILS ON THE OLD CODE)");
     eq(MV.eldLinkBadCell(MH, [["", "Lee", "T-150", "", "", "", "", "Delivered"]], "T-150", 2), { loadId: "", sheetRow: 2, pickupDay: "", header: "", value: "" },
       "6.4a a row of the unit with no date at all: no header (FAILS ON THE OLD CODE)");
+  });
+
+  // -------------------------------------------------------------------------
+  // Part 7 — a date cell holding only a time of day reads as blank at the narrowed stop (made-up T-101)
+  // -------------------------------------------------------------------------
+  // Each case FAILS ON THE OLD CODE (eldLinkStopRows() and eldLinkUnitReach() do not exist there, nor the preflight's
+  // cell) unless it says pin.
+  console.log("Part 7 — time-only date cells at the narrowed stop");
+  const H7 = ["Load ID", "Driver", "Truck", "Pickup Info", "Assigned Date", "Pickup Appointment", "Drop-off Appointment", "Status Update Date", "Status"];
+  const ROWS7 = [
+    ["L-OCT1", "Pat", "T-101", "07:30", "10/26/2026", "07:30", "4:15 PM", "10/28/2026", "Delivered"],
+    ["L-OCT2", "Pat", "T-101", "", "10/26/2026", "10/26/2026 7:30", "16:45:00", "10/28/2026", "Delivered"],
+    ["L-OCT3", "Sam", "T-202", "", "10/26/2026", "TBD", "10/28/2026", "10/28/2026", "Delivered"],
+  ];
+  await moveCase("Part 7.1", async () => {
+    const MV = moveHarness();
+    if (typeof MV.eldLinkStopRows !== "function") throw new Error("eldLinkStopRows() does not exist on this build");
+    const view = MV.eldLinkStopRows(H7, ROWS7);
+    eq(view[0], ["L-OCT1", "Pat", "T-101", "07:30", "10/26/2026", "", "", "10/28/2026", "Delivered"],
+      "7.1 a time alone under Pickup and Drop-off Appointment reads as blank; one under Pickup Info, no date column, stays (FAILS ON THE OLD CODE)");
+    eq(view[1], ["L-OCT2", "Pat", "T-101", "", "10/26/2026", "10/26/2026 7:30", "", "10/28/2026", "Delivered"],
+      "7.1a a date with a time stays; a time with seconds reads as blank (FAILS ON THE OLD CODE)");
+    ok(view[2] === ROWS7[2], "7.1b a row with no time-only cell is the row as read, \"TBD\" and all (FAILS ON THE OLD CODE)");
+    eq([ROWS7[0][5], ROWS7[1][6]], ["07:30", "16:45:00"], "7.1c the rows as read are left as they are (FAILS ON THE OLD CODE)");
+  });
+  await moveCase("Part 7.2", async () => {
+    const MV = moveHarness();
+    if (typeof MV.eldLinkUnitReach !== "function") throw new Error("eldLinkUnitReach() does not exist on this build");
+    eq(MV.eldLinkUnitReach(H7, MV.eldLinkStopRows(H7, ROWS7), "T-101"), {
+      months: OCT,
+      reach: [{ months: OCT, lastDay: "2026-10-28", loadId: "L-OCT1", sheetRow: 2, pickupDay: "" }, { months: OCT, lastDay: "2026-10-28", loadId: "L-OCT2", sheetRow: 3, pickupDay: "2026-10-26" }],
+      cell: null,
+    }, "7.2 T-101's rows through the view: October, both ended Oct 28, no cell (FAILS ON THE OLD CODE)");
+    eq(MV.eldLinkUnitReach(H7, ROWS7, "T-101"), { months: null, reach: null, cell: { loadId: "L-OCT1", sheetRow: 2, pickupDay: "", header: "Pickup Appointment", value: "07:30" } },
+      "7.2a the same rows as written: the time is a cell the stop can't read, as before (FAILS ON THE OLD CODE)");
+    eq(MV.eldLinkUnitReach(H7, MV.eldLinkStopRows(H7, ROWS7), "T-202").cell, { loadId: "L-OCT3", sheetRow: 4, pickupDay: "", header: "Pickup Appointment", value: "TBD" },
+      "7.2b other text still names its cell through the view (FAILS ON THE OLD CODE)");
+  });
+  await moveCase("Part 7.3", async () => {
+    const MV = moveHarness();
+    M.values = [H7, ...ROWS7]; M.throws = false; M.onRead = null;
+    const [a] = await MV.eldLinkLoadReaches(["T-101"]);
+    eq([a.months, a.reach && a.reach.map((r) => r.lastDay), a.cell], [OCT, ["2026-10-28", "2026-10-28"], null], "7.3 Move device's one read reads through the view (FAILS ON THE OLD CODE)");
+  });
+  await moveCase("Part 7.4", async () => {
+    S.trucks = { 1: { ...T101 } }; S.forward = true; S.sheetMonths = null; S.sheetReach = null; S.sheetThrows = false; S.onSheetRead = null; S.locked = OCT;
+    S.sheetCell = { loadId: "L-OCT3", sheetRow: 4, pickupDay: "", header: "Pickup Appointment", value: "TBD" };
+    const p = await G.eldLinkPreflight(1, S.trucks[1]);
+    eq(p.eldLinkForward && p.eldLinkForward.cell, S.sheetCell, "7.4 under the rule, the preflight hands the guard the cell that keeps the rows unknown (FAILS ON THE OLD CODE)");
+    S.onSheetRead = () => { S.trucks[1].unit_number = "T-101B"; };
+    const q = await G.eldLinkPreflight(1, { ...T101 });
+    eq(q.eldLinkForward && q.eldLinkForward.cell, null, "7.4a a rename during the read drops the cell with the rows (FAILS ON THE OLD CODE)");
+    S.onSheetRead = null; S.trucks[1] = { ...T101 }; S.sheetCell = undefined;
+    S.sheetMonths = OCT; S.sheetReach = [ended];
+    const r = await G.eldLinkPreflight(1, S.trucks[1]);
+    eq(r.eldLinkForward && r.eldLinkForward.cell, null, "7.4b every row read: no cell (FAILS ON THE OLD CODE)");
+    S.forward = false;
+  });
+  eq(G.eldLinkRowMonths(H, [row("T-101", "10/26/2026", "07:30", "4:15 PM")], "T-101"), null,
+    "7.5 pin (mutant: the view applied inside eldLinkRowMonths(), which check (5b) reads too): it reads the rows as given, a time alone unreadable");
+  eq([G.sheetCellMonths("14:00"), G.loadRowAccountingMonths(H, row("T-101", "10/26/2026", "14:00", "10/28/2026"))], [null, null],
+    "7.5a pin (mutant: sheetCellMonths() or loadRowAccountingMonths() changed for every caller): each still reads a time alone as unreadable");
+  await moveCase("Part 7.6", async () => {
+    const lib = stubs.eldLinkForward;
+    if (!lib || typeof lib.isTimeOnlyCell !== "function") throw new Error("lib/eld-link-forward.js has no isTimeOnlyCell() on this build");
+    const ACCEPTED = ["14:00", "9:00", "0:00", "14:00:00", "2:30 PM", "2:30PM", "12:00 a.m.", "09:00", "00:00", "01:30 PM", "4:15\tpm", "4:15\xa0P.M.", " 7:30 "];
+    const REJECTED = ["24:00", "14:60", "13:00 PM", "1400", "0800", "07:00 Appt.", "TBD", "ASAP", "08:00-14:00", "08:00 CST", "Appt 14:00", "10/28 14:00", "2:30   PM", ""];
+    eq([ACCEPTED.filter((s) => !lib.isTimeOnlyCell(s)), REJECTED.filter((s) => lib.isTimeOnlyCell(s))], [[], []],
+      "7.6 the pattern's table: each time alone accepted, the rest rejected (FAILS ON THE OLD CODE)");
+  });
+  await moveCase("Part 7.7", async () => {
+    const MV = moveHarness();
+    M.values = [MH, ...MROWS, ["L-1001", "Lee", "T-150", "10/26/2026", "14:00", "10/28/2026", "10/28/2026", "Delivered"]];
+    const [, , c] = await MV.eldLinkLoadReaches(["T-101", "T-202", "T-150"]);
+    eq([c.months, c.reach, c.cell], [OCT, [{ months: OCT, lastDay: "2026-10-28", loadId: "L-1001", sheetRow: 5, pickupDay: "" }], null],
+      "7.7 Part 6.4's row with \"14:00\" under Pickup Appointment: October, one reach row ended Oct 28, no cell (FAILS ON THE OLD CODE)");
+    M.values = [MH, ["L-1002", "Lee", "T-150", "", "06:45", "3:30 PM", "", "Delivered"]];
+    const [d] = await MV.eldLinkLoadReaches(["T-150"]);
+    eq([d.months, d.reach, d.cell], [null, null, { loadId: "L-1002", sheetRow: 2, pickupDay: "", header: "", value: "" }],
+      "7.7a a row whose only date cells hold times has no date: still null, named with no column (FAILS ON THE OLD CODE)");
   });
 
   console.log(`\n${pass} passed, ${failures.length} failed`);

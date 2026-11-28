@@ -18,6 +18,9 @@
  *      after an unlink refused while the truck has device history, in check (5)'s words) and its switch-off pin; the
  *      recheck's L1 (a delete after an unlink refused the same way) and its switch-off pin; and, with no month locked,
  *      the open-month ELD hold counting the history (recheck 2's L2) and its switch-off pin
+ *   §6 a date cell holding only a time of day reads as blank at the narrowed stop (the link, unlink, re-point and move
+ *      pass on it; other text still refuses, now in Move device's words), with pins on the other refusals' words and
+ *      guards on the readers that must not change; §7 Part A, scripts/eld-time-only-cells-report.js
  *
  * Pure: no server, no app.db, no network. Run: node scripts/test-eld-link-forward.js   # exits 1 on failure
  */
@@ -768,7 +771,8 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 	// T-200's October load, delivered (tapped) Fri Nov 20 04:10 Eastern after a Nov 19 drop-off.
 	const TAPPED = W.loadRow({ id: "L-2002", driver: SAM, pickup: "2026-10-29", dropoff: "2026-11-19", assigned: "2026-10-29", done: "2026-11-19", truck: "T-200" });
 	const TAP = [["L-2002", "Delivered", "manual", "2026-11-20 09:10:00"]];
-	const badCell = (truck, driver) => ({ ...W.loadRow({ id: "L-1001", driver, pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck }), "Pickup Appointment": "14:00" });
+	// Text the server can't read as a date ("TBD"); a time of day alone reads as blank at the stop (§6).
+	const badCell = (truck, driver) => ({ ...W.loadRow({ id: "L-1001", driver, pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck }), "Pickup Appointment": "TBD" });
 	function moveWorld({ env = MOVE_ON(), now = MOVE_NOW, rows = [OCT_ENDED], t200 = "", status = [], recorded = FROM, pings = null, locks = ["2026-10"] } = {}) {
 		needMove();
 		return world({
@@ -863,18 +867,18 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 	});
 
 	await test("N1, a date cell the server can't read: named as sheetRowUpdateBlocker names one, then the data-fix line; nothing written; the audit row holds every finalized month (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
-		// The reviewer's case: D-9 off T-150, whose October load has "14:00" under Pickup Appointment, onto T-300.
+		// The reviewer's case: D-9 off T-150, whose October load has "TBD" under Pickup Appointment, onto T-300.
 		const w = moveWorld({ rows: [OCT_ENDED, badCell("T-150", LEE)], locks: ["2026-09", "2026-10"] });
 		const before = snapshot(w);
 		const r = await move(w, 4, "D-9");
 		eq("409, the words in two paragraphs", [r.status, r.body && r.body.code, r.body && r.body.paragraphs], [409, "ELD_MOVE_BLOCKED", [
-			"Cannot move D-9. Load L-1001 on T-150 has \"14:00\" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-150.", DATA_FIX]]);
+			"Cannot move D-9. Load L-1001 on T-150 has \"TBD\" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-150.", DATA_FIX]]);
 		eq("nothing written", snapshot(w), before);
 		const a = auditsOf(w, "routemate_move_blocked")[0] || { details: "" };
-		ok("the audit row holds every finalized month and names the cell", a.details.includes("periods=2026-09,2026-10") && a.details.includes("Pickup Appointment = \"14:00\"") && a.details.includes("every finalized month held"), a.details);
+		ok("the audit row holds every finalized month and names the cell", a.details.includes("periods=2026-09,2026-10") && a.details.includes("Pickup Appointment = \"TBD\"") && a.details.includes("every finalized month held"), a.details);
 		const v = moveWorld({ rows: [OCT_ENDED, badCell("T-200", SAM)] });
 		eq("the same cell on the truck the device goes to", (await move(v, 2, "D-7")).body.paragraphs[0],
-			"Cannot move D-7. Load L-1001 on T-200 has \"14:00\" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved onto T-200.");
+			"Cannot move D-7. Load L-1001 on T-200 has \"TBD\" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved onto T-200.");
 	});
 
 	await test("N1, the other side of the split: a Job Tracking read that fails, or a Delivered-tap read that fails, keeps the try-again line, with no lead and nothing written (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
@@ -1085,6 +1089,291 @@ const WEEK_47 = days("2026-11-14", "2026-11-20");
 		eq("a tap with seconds: the time named is the first whole minute after it passes",
 			lib.moveRefusal({ device: "D-7", sides: [{ dir: "onto", unit: "T-200", stop: tapped, locked: ["2026-10"], why: null, cell: null }] }).text,
 			"Cannot move D-7. Load L-2 on T-200 was delivered Fri Nov 20 04:10 (Eastern). This device can be moved onto T-200 from Sat Nov 21 16:11 (Eastern). Nothing was changed.");
+	});
+
+	// ---- Time-only date cells: the narrowed stop reads one as blank, as the pay paths read it ----------------------------
+	console.log("\n§6 time-only date cells at the stop: each case FAILS ON THE OLD CODE unless it says pin or guard");
+	const eldLib = require("../lib/eld-link-forward");
+	// An October load with only times under Pickup and Drop-off Appointment, ended Oct 28 (its Assigned Date Oct 26, its
+	// Status Update and Completion Dates Oct 28).
+	const timeRow = (truck, driver, patch = {}) => ({
+		...W.loadRow({ id: "L-1001", driver, assigned: "2026-10-26", done: "2026-10-28", truck }), "Pickup Appointment": "07:30", "Drop-off Appointment": "4:15 PM", ...patch,
+	});
+	// Today's words for a link change held over every finalized month (October alone here).
+	const EVERY_MONTH = (unit) => `Cannot unlink the ELD device on ${unit}: unlinking the ELD device changes which days count as travelled for ${unit}, re-deriving driver pay across 1 finalized month. October 2026 is finalized. Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.`;
+	const RUNNING = "Cannot unlink the ELD device on T-100: its load assigned in October 2026 runs on or after Fri Nov 20, so this would change pay in a finalized month. October 2026 is finalized. Nothing was changed.";
+
+	await test("a time under Pickup and Drop-off Appointment on T-100's October row, ended Oct 28: the unlink passes, with the line saying from when (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-100", PAT)] });
+		const r = await unlink(w, 1);
+		eq("200 and the line", [r.status, r.body && r.body.message], [200, "Unlinked. From Fri Nov 20 09:41 (Eastern), T-100 has no ELD device. Before that keeps what it had."]);
+		eq("T-100 has no device", linkOf(w, 1), "");
+	});
+
+	await test("the same row: a link of a free device onto the truck carrying it passes, and so does a re-point (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-200", SAM)] });
+		const a = await link(w, 2, "D-4");
+		eq("the link: 200 and its line", [a.status, a.body && a.body.message], [200, "Linked. From Fri Nov 20 09:41 (Eastern), T-200's ELD readings come from D-4. Before that keeps what it had."]);
+		const v = moveWorld({ rows: [timeRow("T-100", PAT)] });
+		const b = await link(v, 1, "D-11");
+		eq("the re-point: 200, T-100 on D-11", [b.status, linkOf(v, 1)], [200, "D-11"]);
+	});
+
+	await test("a move off a truck carrying such a row, onto a truck carrying another, passes (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-100", PAT), timeRow("T-200", SAM, { "Load ID": "L-2002" })] });
+		const r = await move(w, 2, "D-7");
+		eq("200, D-7 off T-100 and on T-200", [r.status, linkOf(w, 1), linkOf(w, 2)], [200, "", "D-7"]);
+	});
+
+	await test("other text a date cell can't hold (\"TBD\") still refuses the unlink, the re-point and the link, in Move device's words: the load, the column and the cell, then the data-fix line, 'Nothing was changed.' once; only the error changes: the code, the periods, the body's keys and the audit row are today's; nothing written (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
+		const w = moveWorld({ rows: [badCell("T-100", PAT)] });
+		const before = snapshot(w);
+		const r = await unlink(w, 1);
+		eq("409 PERIOD_FINALIZED over every finalized month", [r.status, r.body && r.body.code, r.body && r.body.periods], [409, "PERIOD_FINALIZED", ["2026-10"]]);
+		eq("the unlink's words", r.body && r.body.error,
+			`Cannot unlink the ELD device on T-100. Load L-1001 on T-100 has "TBD" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-100. ${DATA_FIX}`);
+		eq("'Nothing was changed.' once", ((r.body && r.body.error) || "").match(/Nothing was changed\./g).length, 1);
+		eq("the body's keys, as today's", Object.keys(r.body || {}), ["error", "code", "periods", "unresolved", "blockers"]);
+		const p = await link(w, 1, "D-11");
+		eq("the re-point's words", [p.status, p.body && p.body.error], [409,
+			`Cannot re-point the ELD device on T-100. Load L-1001 on T-100 has "TBD" under Pickup Appointment, where the app needs a date. Until that is fixed, the device on T-100 can't be changed. ${DATA_FIX}`]);
+		eq("nothing written", snapshot(w), before);
+		const a = auditsOf(w, "routemate_unlink_blocked")[0] || { details: "" };
+		ok("the unlink's audit row is today's: October held, nothing written, no cell named", a.details.includes("[PERIOD_FINALIZED] periods=2026-10")
+			&& / — nothing was written$/.test(a.details) && !a.details.includes("TBD"), a.details);
+		const v = moveWorld({ rows: [badCell("T-200", SAM)] });
+		eq("the link's words", (await link(v, 2, "D-4")).body.error,
+			`Cannot link the ELD device on T-200. Load L-1001 on T-200 has "TBD" under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be linked to T-200. ${DATA_FIX}`);
+	});
+
+	await test("a row whose date cells hold only times has no date: the unlink is refused, the row named so, then the data-fix line (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-100", PAT, { "Load ID": "L-1003", "Assigned Date": "", "Status Update Date": "", "Completion Date": "" })] });
+		eq("the words", (await unlink(w, 1)).body.error,
+			`Cannot unlink the ELD device on T-100. Load L-1003 on T-100 has no date in any of its date columns. Until that is fixed, this device can't be moved off T-100. ${DATA_FIX}`);
+	});
+
+	await test("the reviewer's N1 row with \"14:00\" under Pickup Appointment, its other cells dated: D-9 off T-150 now passes, and so does an unlink of T-150 (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const row14 = () => ({ ...badCell("T-150", LEE), "Pickup Appointment": "14:00" });
+		const w = moveWorld({ rows: [OCT_ENDED, row14()] });
+		eq("the move: 200, D-9 off T-150 and on T-300", [(await move(w, 4, "D-9")).status, linkOf(w, 3), linkOf(w, 4)], [200, "", "D-9"]);
+		const v = moveWorld({ rows: [OCT_ENDED, row14()] });
+		eq("the unlink: 200", [(await unlink(v, 3)).status, linkOf(v, 3)], [200, ""]);
+	});
+
+	await test("a time under Pickup Appointment and \"TBD\" under Drop-off Appointment: the Drop-off cell is the one named (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-100", PAT, { "Drop-off Appointment": "TBD" })] });
+		eq("the words", (await unlink(w, 1)).body.error,
+			`Cannot unlink the ELD device on T-100. Load L-1001 on T-100 has "TBD" under Drop-off Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-100. ${DATA_FIX}`);
+	});
+
+	await test("a row with no Load ID is named as Move device names one, by its sheet row and pickup day (FAILS ON THE OLD CODE: the words are new)", async ({ eq }) => {
+		const noId = { ...W.loadRow({ id: "", driver: PAT, pickup: "2026-10-26", assigned: "2026-10-26", done: "2026-10-28", truck: "T-100" }), "Drop-off Appointment": "TBD" };
+		const w = moveWorld({ rows: [noId] });
+		eq("the words", (await unlink(w, 1)).body.error,
+			`Cannot unlink the ELD device on T-100. The load in Job Tracking row 2 (pickup Mon Oct 26) on T-100 has "TBD" under Drop-off Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-100. ${DATA_FIX}`);
+	});
+
+	await test("a time with \"Appt.\" after it is not a time alone: still refused and named (FAILS ON THE OLD CODE: the words are new)", async ({ eq }) => {
+		const w = moveWorld({ rows: [timeRow("T-100", PAT, { "Pickup Appointment": "08:15 Appt." })] });
+		eq("the words", (await unlink(w, 1)).body.error,
+			`Cannot unlink the ELD device on T-100. Load L-1001 on T-100 has "08:15 Appt." under Pickup Appointment, where the app needs a date. Until that is fixed, this device can't be moved off T-100. ${DATA_FIX}`);
+	});
+
+	await test("a finalized-month load still running on or after the day is refused as today with a time on it: through Sat Nov 21, and with only a time under Drop-off Appointment and no Status Update or Completion Date, no end date (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const through = timeRow("T-100", PAT, { "Assigned Date": "10/30/2026", "Drop-off Appointment": "11/21/2026", "Status Update Date": "", "Completion Date": "", "Job Status": "In Transit" });
+		const w = moveWorld({ rows: [through] });
+		eq("through Sat Nov 21: the unlink in today's narrowed words", (await unlink(w, 1)).body.error, RUNNING);
+		eq("and the move in its own", (await move(w, 2, "D-7")).body.error,
+			"Cannot move D-7. Load L-1001 on T-100 runs through Sat Nov 21. This device can be moved off T-100 from Sun Nov 22 03:00 (Eastern). Nothing was changed.");
+		const open = timeRow("T-100", PAT, { "Assigned Date": "10/30/2026", "Status Update Date": "", "Completion Date": "", "Job Status": "In Transit" });
+		const v = moveWorld({ rows: [open] });
+		eq("no end date: the unlink in today's narrowed words", (await unlink(v, 1)).body.error, RUNNING);
+		eq("and the move's, with the data-fix line", (await move(v, 2, "D-7")).body.paragraphs, [
+			"Cannot move D-7. Load L-1001 on T-100 has no end date. Until that is fixed, this device can't be moved off T-100.", DATA_FIX]);
+	});
+
+	await test("pin (mutant: the cell's words where Job Tracking can't be read): a read that fails keeps today's words for every finalized month", async ({ eq }) => {
+		const w = moveWorld({ rows: [badCell("T-100", PAT)] });
+		w.rows = null; // the sheet stub's read throws
+		const r = await unlink(w, 1);
+		eq("today's words", [r.status, r.body && r.body.error], [409, EVERY_MONTH("T-100")]);
+	});
+
+	await test("pin (mutant: the cell's words where the Delivered taps can't be read): with the trip rule on and the tap read failing, today's words", async ({ eq }) => {
+		const w = moveWorld({ env: MOVE_ON(TRIP), rows: [timeRow("T-100", PAT)] });
+		w.db.exec("DROP TABLE load_status_history");
+		eq("today's words", (await unlink(w, 1)).body.error, EVERY_MONTH("T-100"));
+	});
+
+	await test("pin (mutant: the cell kept after a rename during the read): T-100 renamed while Job Tracking is read keeps today's words for every finalized month, under its new unit", async ({ eq }) => {
+		const w = moveWorld({ rows: [badCell("T-100", PAT)] });
+		const rows = w.rows;
+		let once = true;
+		Object.defineProperty(w, "rows", { configurable: true, get: () => {
+			if (once) { once = false; w.db.prepare("UPDATE trucks SET unit_number = 'T-100A' WHERE id = 1").run(); }
+			return rows;
+		} });
+		eq("today's words, for T-100A", (await unlink(w, 1)).body.error, EVERY_MONTH("T-100A"));
+	});
+
+	await test("pin (mutant: the time-only reading leaking into check (5b)): with the rule not in force, a time under an appointment holds every finalized month in (5b)'s words, as today", async ({ eq }) => {
+		const w = moveWorld({ env: MOVE_ON({ ELD_LINK_FORWARD_ONLY_FROM: "2026-11-25T15:00:00Z" }), recorded: null, rows: [timeRow("T-100", PAT)] });
+		eq("(5b)'s words", (await unlink(w, 1)).body.error, EVERY_MONTH("T-100"));
+	});
+
+	await test("pin: the narrowed stop's words for a load delivered less than 36 hours before the change (trip rule), as today", async ({ eq }) => {
+		const tapped = W.loadRow({ id: "L-2002", driver: PAT, pickup: "2026-10-29", dropoff: "2026-11-19", assigned: "2026-10-29", done: "2026-11-19", truck: "T-100" });
+		const w = moveWorld({ env: MOVE_ON(TRIP), rows: [tapped], status: TAP });
+		eq("the words", (await unlink(w, 1)).body.error,
+			"Cannot unlink the ELD device on T-100: its load assigned in October 2026 was delivered less than 36 hours before this change, so this would change pay in a finalized month. October 2026 is finalized. Nothing was changed.");
+	});
+
+	await test("guard: the three pay paths pay a row with times under its appointments as the same row with them blank, as today", async ({ eq }) => {
+		const pay = (row) => threePaths(moveWorld({ rows: [row], locks: [] }), PAT, "2026-10-30", days("2026-10-24", "2026-10-30"));
+		const timed = await pay(timeRow("T-100", PAT));
+		const blank = await pay(timeRow("T-100", PAT, { "Pickup Appointment": "", "Drop-off Appointment": "" }));
+		eq("the same days on the weekly invoice, GET /api/investor and the payout ledger", timed, blank);
+		eq("the ledger and the investor view start at the Assigned Date; the weekly invoice, its blank-pickup fallback off, pays none",
+			[timed.ledger, timed.investor, timed.invoice], [["2026-10-26"], ["2026-10-26"], []]);
+	});
+
+	await test("guard: sheetRowUpdateBlocker(), loadRowAccountingMonths() and sheetCellMonths() read a time-only cell as today: unresolved, and named", async ({ eq }) => {
+		const w = world({ env: ON(), recorded: FROM, trucks: [{ unit: "T-100", driver: PAT, vid: "D-7" }], history: [seed(1, "D-7")], locks: ["2026-10"],
+			expose: ["sheetRowUpdateBlocker", "loadRowAccountingMonths", "sheetCellMonths"], now: Date.parse(MOVE_NOW) });
+		const before = W.HEADERS.map((h) => timeRow("T-100", PAT)[h] ?? "");
+		const after = before.map((v, i) => (W.HEADERS[i] === "  Payment  " ? "$2,100.00" : v));
+		eq("sheetCellMonths()", [w.api.sheetCellMonths("07:30"), w.api.sheetCellMonths("4:15 PM")], [null, null]);
+		eq("loadRowAccountingMonths()", w.api.loadRowAccountingMonths(W.HEADERS, before), null);
+		const b = w.api.sheetRowUpdateBlocker(true, W.HEADERS, before, after, ["  Payment  "]);
+		eq("sheetRowUpdateBlocker() refuses as unresolved, naming both cells", [b && b.code, b && b.unreadable],
+			["PERIOD_UNRESOLVED", ["Pickup Appointment = \"07:30\"", "Drop-off Appointment = \"4:15 PM\""]]);
+	});
+
+	await test("guard: the KPI appointment reader reads a time-only cell as today (no date)", async ({ eq }) => {
+		const kpi = require("../lib/kpi-appointments");
+		eq("unparseable", [kpi.parseAppointment("07:30").status, kpi.parseAppointment("4:15 PM").status], ["unparseable", "unparseable"]);
+	});
+
+	await test("guard: every cell the time-only pattern matches is no date to the pay readers (moneySheetDate() null, parseInvoiceDate() null, sheetDayKey() \"\") and was unreadable to the stop (sheetCellMonths() null, sheetCellDate() null); text near it is not time-only, some of it a date to V8 (FAILS ON THE OLD CODE: the pattern is new)", async ({ eq }) => {
+		if (typeof eldLib.isTimeOnlyCell !== "function") throw new Error("lib/eld-link-forward.js has no isTimeOnlyCell() on this build");
+		const w = world({ env: ON(), recorded: FROM, trucks: [{ unit: "T-100", driver: PAT, vid: "" }], now: Date.parse(MOVE_NOW),
+			expose: ["moneySheetDate", "parseInvoiceDate", "sheetDayKey", "sheetCellMonths", "sheetCellDate"] });
+		const pad = (n) => String(n).padStart(2, "0");
+		// Up to two of space, tab and no-break space, then am or pm in either case, each letter with or without a dot.
+		const seps = ["", " ", "\t", "\xa0"];
+		const gaps = [...new Set(seps.flatMap((a) => seps.map((b) => a + b)))];
+		const marks = ["a", "A", "p", "P"].flatMap((x) => ["m", "M"].flatMap((y) => ["", "."].flatMap((d1) => ["", "."].map((d2) => `${x}${d1}${y}${d2}`))));
+		const twelve = [...gaps.flatMap((g) => marks.map((m) => g + m)), "   PM", " EST", "Z", " Appt."];
+		let matched = 0;
+		const dated = [];
+		const check = (s) => {
+			if (!eldLib.isTimeOnlyCell(s)) return;
+			matched++;
+			const got = [w.api.moneySheetDate(s), w.api.parseInvoiceDate(s), w.api.sheetDayKey(s), w.api.sheetCellMonths(s), w.api.sheetCellDate(s)];
+			if (JSON.stringify(got) !== JSON.stringify([null, null, "", null, null])) dated.push(s);
+		};
+		for (let h = 0; h < 100; h++) {
+			for (const H of h < 10 ? [String(h), pad(h)] : [String(h)]) {
+				for (let m = 0; m < 100; m++) for (const S of ["", ":00", ":07", ":30", ":59", ":60", ":99"]) check(`${H}:${pad(m)}${S}`);
+				for (const m of ["00", "07", "30", "59", "60", "99"]) for (const S of ["", ":00", ":59", ":60"]) for (const x of twelve) check(`${H}:${m}${S}${x}`);
+			}
+		}
+		eq("no match is a date to any reader", dated.slice(0, 5).map((s) => JSON.stringify(s)), []);
+		// 24-hour: 34 hour spellings (0-23, and 00-09) x 60 minutes x 5 seconds; 12-hour: 21 (1-12, and 01-09) x 4 minutes
+		// x 3 seconds x 13 gaps x 32 marks.
+		eq("the matches: H:MM and H:MM:SS, 24-hour, or 12-hour with am or pm", [gaps.length, marks.length, matched], [13, 32, 34 * 60 * 5 + 21 * 4 * 3 * 13 * 32]);
+		const near = ["24:00", "14:60", "13:00 PM", "1400", "0800", "07:00 Appt.", "TBD", "ASAP", "08:00-14:00", "08:00 CST", "Appt 14:00", "10/28 14:00",
+			"9:5", "009:00", "0:30 AM", "9 AM", "9am", "7.30", "T07:30", "2:30   PM", "Mon 07:30", "noon"];
+		eq("text near a time is not time-only", near.filter((s) => eldLib.isTimeOnlyCell(s)), []);
+		eq("some of it is a date to V8, so the pattern stays narrow", ["12:60", "1/5 7:30"].map((s) => w.api.moneySheetDate(s) !== null), [true, true]);
+	});
+
+	// ---- Part A: scripts/eld-time-only-cells-report.js on a made-up database and sheet ------------------------------------
+	console.log("\n§7 Part A, scripts/eld-time-only-cells-report.js: each case FAILS ON THE OLD CODE (the script does not exist there)");
+	const fs = require("fs");
+	const path = require("path");
+	const REPORT = "scripts/eld-time-only-cells-report.js";
+	const AT = "2026-11-20T14:41:00Z";
+	// October finalized. T-100 (D-7): times under both appointments, ended Oct 28. T-200 (D-11): a time under Pickup, running
+	// to Nov 21. T-150 (D-9): "TBD" under Pickup. T-300 (D-4): a time under Drop-off and no end date. T-400 (no device): a
+	// time under Pickup. T-500 (D-12): dates only, ended Oct 28.
+	const partAWorld = () => world({
+		env: ON(), recorded: FROM, locks: ["2026-10"], vehicles: ["D-4", "D-7", "D-9", "D-11", "D-12"], now: Date.parse(AT),
+		trucks: [{ unit: "T-100", driver: PAT, vid: "D-7" }, { unit: "T-200", driver: SAM, vid: "D-11" }, { unit: "T-150", driver: LEE, vid: "D-9" },
+			{ unit: "T-300", driver: "", vid: "D-4" }, { unit: "T-400", driver: "", vid: "" }, { unit: "T-500", driver: "", vid: "D-12" }],
+		history: [seed(1, "D-7"), seed(2, "D-11"), seed(3, "D-9"), seed(4, "D-4"), seed(6, "D-12")],
+		rows: [
+			timeRow("T-100", PAT),
+			timeRow("T-200", SAM, { "Load ID": "L-2002", "Assigned Date": "10/30/2026", "Drop-off Appointment": "11/21/2026", "Status Update Date": "", "Completion Date": "", "Job Status": "In Transit" }),
+			{ ...badCell("T-150", LEE), "Load ID": "L-1500" },
+			timeRow("T-300", "", { "Load ID": "L-3003", "Assigned Date": "10/30/2026", "Pickup Appointment": "10/30/2026", "Status Update Date": "", "Completion Date": "", "Job Status": "In Transit" }),
+			timeRow("T-400", "", { "Load ID": "L-4004", "Drop-off Appointment": "10/28/2026" }),
+			W.loadRow({ id: "L-5005", driver: "", pickup: "2026-10-26", dropoff: "2026-10-28", assigned: "2026-10-26", done: "2026-10-28", truck: "T-500" }),
+		],
+	});
+	// The copy in WAL mode, as the app's database is (the script refuses one that is not).
+	const toWal = (file) => { const d = new W.Database(file); d.pragma("journal_mode = WAL"); d.close(); };
+	const report = (files, extra = []) => W.runScript(REPORT, [`--db=${files.db}`, `--values-json=${files.values}`, `--env-file=${files.envFile}`, `--at=${AT}`, ...extra]);
+
+	await test("Part A's copy of the fix's rule is pinned to the lib's own texts: the time-only pattern, the date-column rule, isTimeOnlyCell() and blankTimeOnlyCells() (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const crypto = require("crypto");
+		const sha = (v) => crypto.createHash("sha256").update(String(v)).digest("hex");
+		const lib = { TIME_ONLY_CELL_RE: eldLib.TIME_ONLY_CELL_RE, STOP_DATE_COLUMN_RE: eldLib.STOP_DATE_COLUMN_RE, isTimeOnlyCell: eldLib.isTimeOnlyCell, blankTimeOnlyCells: eldLib.blankTimeOnlyCells };
+		const r = W.runScript(REPORT, ["--print-pins"]);
+		eq("the pins Part A runs with are the lib's", [r.code, r.json], [0, Object.fromEntries(Object.entries(lib).map(([k, v]) => [k, sha(v)]))]);
+	});
+
+	await test("Part A: the counts on a made-up database and sheet, on the served readers; the database's bytes as before; the text names no truck, device, load or driver (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
+		const files = W.saveCopy(partAWorld(), ON());
+		toWal(files.db);
+		const bytes = W.fileHash(files.db);
+		const list = fs.readdirSync(files.dir).sort();
+		const r = report(files, ["--json"]);
+		eq("exit 0, nothing on stderr", [r.code, r.stderr.trim()], [0, ""]);
+		const j = r.json || {};
+		eq("the instant, the day, the closed months, the rule", [j.at, j.day, j.locked, j.latest, j.ruleInForce, j.trip], ["2026-11-20T14:41:00.000Z", "2026-11-20", 1, "2026-10", true, false]);
+		eq("Job Tracking read once, never by the lifted readers", [j.rows, j.liftedSheetAsks], [6, 0]);
+		const k = (o) => [o.pickup, o.dropoff, o.assigned, o.statusUpdate, o.completion, o.other, o.all];
+		eq("the date cells by column: a time only, a time and \"Appt.\", other text", [k(j.cells.timeOnly), k(j.cells.appt), k(j.cells.unreadable), j.timeRows],
+			[[3, 2, 0, 0, 0, 0, 5], [0, 0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 1], 4]);
+		eq("the trucks with a unit, with a device, with a time-only cell", [j.trucks, j.trucksWithDevice, j.trucksWithTimeCells], [6, 5, 4]);
+		eq("how each verdict moves", j.moves, { toPass: 2, cellToNoEnd: 1, cellToRunning: 1, cellToCell: 0, cellToNoDate: 0, cellToNoLoadId: 0, cellToTaps: 0, unchanged: 2, toRefused: 0, other: 0, toPassWithDevice: 1 });
+		eq("still refused, by branch", j.stillRefused, { all: 3, cell: 1, nodate: 0, noend: 1, running: 1, noloadid: 0, delivered: 0, taps: 0, locks: 0, other: 0 });
+		eq("the stop rule holds", j.stop, { notCompleted: 0, noTimeCellMoved: 0, toRefused: 0, fired: false });
+		eq("the lift is a sha256; no write tried", [/^[0-9a-f]{64}$/.test(j.lift || ""), j.writesTried], [true, 0]);
+		eq("the database's bytes as before", W.fileHash(files.db), bytes);
+		const wal = path.join(files.dir, "app.db-wal");
+		ok("no frame in its write-ahead log", !fs.existsSync(wal) || fs.statSync(wal).size === 0);
+		eq("no other file", fs.readdirSync(files.dir).filter((f) => !/^app\.db-(wal|shm)$/.test(f)).sort(), list);
+		const t = report(files, [`--lift-sha=${j.lift}`]);
+		ok("the text, with the lift pinned, names no truck, device, load or driver", t.code === 0 && !/T-[1-5]00|T-150|D-\d|L-\d|Pat|Sam|Lee/.test(t.stdout), t.stdout + t.stderr);
+		ok("the text's lines for the trucks that pass now and the result", t.stdout.includes("  refused, now passing: 2 (holding a device: 1)") && t.stdout.includes("RESULT: no stop"), t.stdout);
+	});
+
+	await test("Part A's stop rule: a truck that comes to pass while its finalized-month row is not completed (In Transit, no Completion Date) is a STOP, exit 3 (FAILS ON THE OLD CODE)", async ({ eq, ok }) => {
+		const w = world({
+			env: ON(), recorded: FROM, locks: ["2026-10"], vehicles: ["D-7"], now: Date.parse(AT),
+			trucks: [{ unit: "T-100", driver: PAT, vid: "D-7" }], history: [seed(1, "D-7")],
+			rows: [timeRow("T-100", PAT, { "Job Status": "In Transit", "Completion Date": "" })],
+		});
+		const files = W.saveCopy(w, ON());
+		toWal(files.db);
+		const r = report(files, ["--json"]);
+		eq("exit 3, the truck counted", [r.code, r.json && r.json.moves.toPass, r.json && r.json.stop], [3, 1, { notCompleted: 1, noTimeCellMoved: 0, toRefused: 0, fired: true }]);
+		const t = report(files);
+		ok("the text says STOP", t.code === 3 && t.stdout.includes("RESULT: STOP: ask before the merge"), t.stdout);
+	});
+
+	await test("Part A refuses, exit 2: a database not in WAL mode, no --db, no sheet, an --at that is no instant in UTC, a --lift-sha that is not the readers' (FAILS ON THE OLD CODE)", async ({ eq }) => {
+		const files = W.saveCopy(partAWorld(), ON());
+		const notWal = report(files, ["--json"]);
+		eq("not in WAL mode", [notWal.code, /^refused: the database is not in WAL mode/.test(notWal.stderr)], [2, true]);
+		toWal(files.db);
+		eq("no --db", W.runScript(REPORT, [`--values-json=${files.values}`]).code, 2);
+		eq("no sheet", W.runScript(REPORT, [`--db=${files.db}`, `--env-file=${files.envFile}`]).code, 2);
+		eq("--at a day, not an instant", report(files, ["--at=2026-11-20"]).code, 2);
+		const pinned = report(files, [`--lift-sha=${"0".repeat(64)}`]);
+		eq("another lift", [pinned.code, /^refused: the served readers are not the pinned ones/.test(pinned.stderr)], [2, true]);
 	});
 
 	runner.finish();
