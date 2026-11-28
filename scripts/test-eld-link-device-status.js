@@ -252,6 +252,8 @@ function routeWorld(db, verb, route, deps = {}) {
 			eldLinkPreflight: async (id) => ({ truck: db.prepare("SELECT * FROM trucks WHERE id = ?").get(id), eldLinkMonths: [] }),
 			truckEditLockBlockers: () => { guardCalls++; return { blockers, unreadable: false }; },
 			periodBlockedResponse: (req, res, msg) => res.status(409).json({ code: "PERIOD_LOCKED", error: msg }),
+			// The route's refusal goes through eldLinkBlockedResponse(): the same stand-in.
+			eldLinkBlockedResponse: (req, res, { kind, unit }) => res.status(409).json({ code: "PERIOD_LOCKED", error: `Cannot ${kind} the ELD device on ${unit}` }),
 			periodLockUnreadableResponse: (req, res) => res.status(503).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 			auditText: (s) => String(s || ""),
 			logAudit: (req, action, entity, id, subject) => audits.push({ action, subject }),
